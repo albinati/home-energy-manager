@@ -1,0 +1,1065 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Home Energy Manager</title>
+    <style>
+        :root {
+            --bg-primary: #0f172a;
+            --bg-secondary: #1e293b;
+            --bg-card: #334155;
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            --accent-blue: #3b82f6;
+            --accent-green: #22c55e;
+            --accent-yellow: #eab308;
+            --accent-red: #ef4444;
+            --accent-orange: #f97316;
+            --accent-cyan: #06b6d4;
+            --border-color: #475569;
+            --border-subtle: #334155;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+        }
+
+        .page { max-width: 1400px; margin: 0 auto; padding: 1.5rem 2rem; }
+
+        header {
+            display: flex; align-items: center; justify-content: space-between;
+            padding-bottom: 1.5rem; margin-bottom: 2rem;
+            border-bottom: 1px solid var(--border-subtle);
+        }
+        .header-left h1 { font-size: 1.5rem; font-weight: 600; }
+        .header-left p { color: var(--text-secondary); font-size: 0.8125rem; margin-top: 0.125rem; }
+        .header-right { display: flex; align-items: center; gap: 1rem; }
+        .auto-refresh-toggle { display: flex; align-items: center; gap: 0.5rem; font-size: 0.8125rem; color: var(--text-secondary); }
+        .auto-refresh-toggle select { background: var(--bg-card); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 4px; padding: 0.25rem 0.5rem; font-size: 0.8125rem; }
+        .refresh-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent-green); display: inline-block; }
+        .refresh-dot.paused { background: var(--text-muted); }
+        .btn-icon { background: var(--bg-card); border: 1px solid var(--border-color); color: var(--text-primary); padding: 0.5rem; border-radius: 6px; cursor: pointer; display: flex; align-items: center; }
+        .btn-icon:hover { background: var(--border-color); }
+        .last-updated { font-size: 0.75rem; color: var(--text-muted); }
+
+        .dashboard { display: flex; flex-direction: column; gap: 1.5rem; }
+
+        .card { background: var(--bg-secondary); border-radius: 12px; border: 1px solid var(--border-color); }
+        .card-header { display: flex; align-items: center; justify-content: space-between; padding: 1.25rem 1.5rem; border-bottom: 1px solid var(--border-color); }
+        .card-title { font-size: 1rem; font-weight: 600; display: flex; align-items: center; gap: 0.5rem; }
+        .card-body { padding: 1.5rem; }
+
+        .badge { padding: 0.25rem 0.75rem; border-radius: 9999px; font-size: 0.6875rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
+        .badge-on  { background: rgba(34,197,94,0.15); color: var(--accent-green); }
+        .badge-off { background: rgba(239,68,68,0.15); color: var(--accent-red); }
+        .badge-err { background: rgba(239,68,68,0.15); color: var(--accent-red); }
+        .badge-na  { background: rgba(100,116,139,0.2); color: var(--text-muted); }
+
+        .stat-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 1rem; }
+        .stat { background: var(--bg-card); padding: 1rem 1.25rem; border-radius: 8px; }
+        .stat-label { font-size: 0.6875rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 0.375rem; }
+        .stat-value { font-size: 1.625rem; font-weight: 700; line-height: 1.2; }
+        .stat-sub { font-size: 0.8125rem; color: var(--text-secondary); margin-top: 0.125rem; }
+        .stat-unit { font-size: 0.875rem; color: var(--text-secondary); font-weight: 400; }
+        .positive { color: var(--accent-green); }
+        .negative { color: var(--accent-red); }
+        .neutral  { color: var(--accent-yellow); }
+
+        /* Toggle switch */
+        .toggle-group { display: flex; align-items: center; gap: 1rem; }
+        .toggle-label { font-size: 0.875rem; color: var(--text-secondary); min-width: 2.5rem; text-align: right; }
+        .toggle-label.active { color: var(--text-primary); font-weight: 600; }
+        .toggle { position: relative; width: 52px; height: 28px; cursor: pointer; }
+        .toggle input { display: none; }
+        .toggle-track {
+            position: absolute; inset: 0; border-radius: 14px;
+            background: var(--accent-red); transition: background 0.25s;
+        }
+        .toggle input:checked + .toggle-track { background: var(--accent-green); }
+        .toggle-thumb {
+            position: absolute; top: 3px; left: 3px; width: 22px; height: 22px;
+            border-radius: 50%; background: white; transition: transform 0.25s;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+        }
+        .toggle input:checked ~ .toggle-thumb { transform: translateX(24px); }
+
+        /* Status section */
+        .status-section { margin-bottom: 0; }
+        .section-title { font-size: 0.6875rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem; }
+        .section-title::after { content: ''; flex: 1; height: 1px; background: var(--border-subtle); }
+        
+        /* Controls section */
+        .controls-section { margin-top: 1.5rem; padding-top: 1.25rem; border-top: 1px solid var(--border-color); }
+        .controls-title { font-size: 0.6875rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 1.25rem; display: flex; align-items: center; gap: 0.5rem; }
+        .controls-title::after { content: ''; flex: 1; height: 1px; background: var(--border-subtle); }
+        .controls-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 1.5rem; }
+
+        /* Gauge / Range slider control */
+        .gauge { background: var(--bg-card); border-radius: 10px; padding: 1.25rem 1.5rem; }
+        .gauge.disabled { opacity: 0.55; pointer-events: none; }
+        .controls-syncing { position: relative; pointer-events: none; }
+        .controls-syncing::after {
+            content: ''; position: absolute; inset: 0; border-radius: 10px;
+            background: rgba(15,23,42,0.45); z-index: 5;
+        }
+        .sync-banner {
+            display: none; align-items: center; gap: 0.5rem;
+            padding: 0.625rem 1rem; border-radius: 8px; font-size: 0.8125rem;
+            background: rgba(59,130,246,0.12); border: 1px solid rgba(59,130,246,0.3);
+            color: var(--accent-blue); margin-bottom: 1rem;
+        }
+        .sync-banner.active { display: flex; }
+        .sync-spinner {
+            width: 14px; height: 14px; border: 2px solid rgba(59,130,246,0.3);
+            border-top-color: var(--accent-blue); border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .gauge-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 0.75rem; }
+        .gauge-name { font-size: 0.875rem; font-weight: 600; }
+        .gauge-value { font-size: 1.25rem; font-weight: 700; }
+        .gauge-value .unit { font-size: 0.8125rem; color: var(--text-secondary); font-weight: 400; }
+        .gauge-slider-wrap { position: relative; margin: 0.5rem 0; }
+        .gauge-slider {
+            -webkit-appearance: none; appearance: none;
+            width: 100%; height: 6px; border-radius: 3px;
+            background: var(--border-color); outline: none;
+        }
+        .gauge-slider::-webkit-slider-thumb {
+            -webkit-appearance: none; appearance: none;
+            width: 22px; height: 22px; border-radius: 50%;
+            background: var(--accent-blue); cursor: pointer;
+            border: 2px solid var(--bg-secondary);
+            box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+        }
+        .gauge-slider::-moz-range-thumb {
+            width: 22px; height: 22px; border-radius: 50%;
+            background: var(--accent-blue); cursor: pointer;
+            border: 2px solid var(--bg-secondary);
+        }
+        .gauge-slider.orange::-webkit-slider-thumb { background: var(--accent-orange); }
+        .gauge-slider.orange::-moz-range-thumb { background: var(--accent-orange); }
+        .gauge-slider.cyan::-webkit-slider-thumb { background: var(--accent-cyan); }
+        .gauge-slider.cyan::-moz-range-thumb { background: var(--accent-cyan); }
+        .gauge-limits { display: flex; justify-content: space-between; font-size: 0.75rem; color: var(--text-muted); margin-top: 0.25rem; }
+        .gauge-actions { display: flex; justify-content: flex-end; margin-top: 0.75rem; }
+        .gauge-note { font-size: 0.75rem; color: var(--accent-yellow); margin-top: 0.5rem; font-style: italic; display: flex; align-items: center; gap: 0.375rem; }
+        .gauge-note svg { flex-shrink: 0; }
+
+        .btn { padding: 0.5rem 1rem; border-radius: 6px; border: none; font-size: 0.8125rem; font-weight: 500; cursor: pointer; transition: all 0.15s; display: inline-flex; align-items: center; gap: 0.375rem; white-space: nowrap; }
+        .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+        .btn-primary { background: var(--accent-blue); color: white; }
+        .btn-primary:hover:not(:disabled) { background: #2563eb; }
+        .btn-sm { padding: 0.375rem 0.75rem; font-size: 0.75rem; }
+        .btn-secondary { background: var(--bg-card); color: var(--text-primary); border: 1px solid var(--border-color); }
+        .btn-secondary:hover:not(:disabled) { background: var(--border-color); }
+
+        .error-message { background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.3); color: var(--accent-red); padding: 1rem 1.25rem; border-radius: 8px; font-size: 0.875rem; }
+        
+        /* Error state styling */
+        .error-state { position: relative; }
+        .error-state .card-body { opacity: 0.7; }
+        .error-state .controls-section { pointer-events: none; opacity: 0.4; }
+        .stale-badge { 
+            display: inline-flex; align-items: center; gap: 0.375rem;
+            background: rgba(234,179,8,0.15); color: var(--accent-yellow); 
+            padding: 0.25rem 0.625rem; border-radius: 4px; font-size: 0.6875rem; 
+            font-weight: 500; margin-left: 0.75rem;
+        }
+        .stale-badge svg { width: 12px; height: 12px; }
+        .error-banner {
+            display: flex; align-items: center; gap: 0.5rem;
+            padding: 0.75rem 1rem; border-radius: 8px; font-size: 0.8125rem;
+            background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3);
+            color: var(--accent-red); margin-bottom: 1rem;
+        }
+        .error-banner svg { flex-shrink: 0; width: 16px; height: 16px; }
+        .pending-setup { text-align: center; padding: 2rem; color: var(--text-muted); }
+        .pending-setup p { margin-bottom: 0.5rem; }
+        .pending-setup code { background: var(--bg-card); padding: 0.125rem 0.5rem; border-radius: 4px; font-size: 0.8125rem; }
+
+        /* Modal */
+        .modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.65); z-index: 1000; align-items: center; justify-content: center; }
+        .modal.active { display: flex; }
+        .modal-box { background: var(--bg-secondary); padding: 1.5rem; border-radius: 12px; max-width: 420px; width: 90%; border: 1px solid var(--border-color); }
+        .modal-title { font-size: 1.0625rem; font-weight: 600; margin-bottom: 0.75rem; }
+        .modal-body { color: var(--text-secondary); font-size: 0.875rem; margin-bottom: 1.5rem; line-height: 1.5; }
+        .modal-actions { display: flex; gap: 0.75rem; justify-content: flex-end; }
+        .modal-warning { background: rgba(234,179,8,0.1); border: 1px solid rgba(234,179,8,0.3); color: var(--accent-yellow); padding: 0.75rem 1rem; border-radius: 8px; font-size: 0.8125rem; margin-bottom: 1rem; display: flex; align-items: flex-start; gap: 0.5rem; }
+        .modal-warning svg { flex-shrink: 0; margin-top: 0.125rem; }
+        .btn-confirm-danger { background: var(--accent-red); color: white; }
+        .btn-confirm-danger:hover { background: #dc2626; }
+        .btn-confirm-ok { background: var(--accent-green); color: white; }
+        .btn-confirm-ok:hover { background: #16a34a; }
+
+        /* Toast */
+        .toast { position: fixed; bottom: 1.5rem; right: 1.5rem; padding: 0.875rem 1.25rem; border-radius: 8px; background: var(--bg-secondary); border: 1px solid var(--border-color); display: none; z-index: 1001; max-width: 380px; font-size: 0.875rem; box-shadow: 0 8px 24px rgba(0,0,0,0.3); }
+        .toast.success { border-color: var(--accent-green); }
+        .toast.error { border-color: var(--accent-red); }
+        .toast.show { display: block; animation: slideIn 0.3s ease; }
+        @keyframes slideIn { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+
+        /* Tabs */
+        .tabs-nav {
+            display: flex;
+            gap: 0.25rem;
+            margin-bottom: 1.5rem;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 0;
+        }
+        .tab-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            font-size: 0.875rem;
+            font-weight: 500;
+            padding: 0.75rem 1.25rem;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -1px;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            transition: all 0.15s;
+        }
+        .tab-btn:hover {
+            color: var(--text-secondary);
+        }
+        .tab-btn.active {
+            color: var(--text-primary);
+            border-bottom-color: var(--accent-blue);
+        }
+        .tab-btn svg {
+            width: 16px;
+            height: 16px;
+        }
+        .tab-panel {
+            display: none;
+        }
+        .tab-panel.active {
+            display: block;
+        }
+
+        /* Coming soon placeholder */
+        .coming-soon {
+            text-align: center;
+            padding: 3rem 2rem;
+        }
+        .coming-soon-icon {
+            width: 64px;
+            height: 64px;
+            margin: 0 auto 1.5rem;
+            background: var(--bg-card);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .coming-soon-icon svg {
+            width: 32px;
+            height: 32px;
+            color: var(--accent-yellow);
+        }
+        .coming-soon h3 {
+            font-size: 1.125rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+        }
+        .coming-soon p {
+            color: var(--text-secondary);
+            font-size: 0.875rem;
+            max-width: 400px;
+            margin: 0 auto 1.5rem;
+            line-height: 1.6;
+        }
+        .provider-logos {
+            display: flex;
+            justify-content: center;
+            gap: 2rem;
+            margin-top: 1.5rem;
+        }
+        .provider-logo {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 0.5rem;
+            color: var(--text-muted);
+            font-size: 0.75rem;
+        }
+        .provider-logo-icon {
+            width: 48px;
+            height: 48px;
+            background: var(--bg-card);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border: 1px solid var(--border-color);
+        }
+        .feature-list {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 1rem;
+            margin-top: 1.5rem;
+        }
+        .feature-item {
+            display: flex;
+            align-items: center;
+            gap: 0.375rem;
+            font-size: 0.8125rem;
+            color: var(--text-secondary);
+        }
+        .feature-item svg {
+            width: 14px;
+            height: 14px;
+            color: var(--accent-green);
+        }
+
+        @media (max-width: 640px) {
+            .page { padding: 1rem; }
+            header { flex-direction: column; gap: 1rem; align-items: flex-start; }
+            .stat-row { grid-template-columns: repeat(2, 1fr); }
+            .controls-grid { grid-template-columns: 1fr; }
+            .tabs-nav { overflow-x: auto; }
+            .tab-btn { padding: 0.625rem 1rem; font-size: 0.8125rem; white-space: nowrap; }
+        }
+    </style>
+</head>
+<body>
+<div class="page">
+    <header>
+        <div class="header-left">
+            <h1>Home Energy Manager</h1>
+            <p>Daikin Altherma + Fox ESS Control Panel</p>
+        </div>
+        <div class="header-right">
+            <span class="last-updated" id="lastUpdated"></span>
+            <div class="auto-refresh-toggle" title="Daikin API: 200 requests/day limit. 10-15 min refresh recommended.">
+                <span class="refresh-dot" id="refreshDot"></span>
+                <select id="refreshInterval" onchange="setRefreshInterval(this.value)">
+                    <option value="0">Off</option>
+                    <option value="600">10 min</option>
+                    <option value="900" selected>15 min</option>
+                    <option value="1800">30 min</option>
+                    <option value="3600">1 hour</option>
+                </select>
+            </div>
+            <button class="btn-icon" onclick="manualRefresh()" title="Refresh now">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
+            </button>
+        </div>
+    </header>
+
+    <div class="dashboard">
+        <!-- Tab Navigation -->
+        <nav class="tabs-nav" role="tablist">
+            <button class="tab-btn active" role="tab" aria-selected="true" data-tab="heatpump" onclick="switchTab('heatpump')">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h4l3 9 4-18 3 9h4"/></svg>
+                Heat Pump
+            </button>
+            <button class="tab-btn" role="tab" aria-selected="false" data-tab="battery" onclick="switchTab('battery')">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="6" width="18" height="12" rx="2"/><line x1="23" y1="10" x2="23" y2="14"/></svg>
+                Battery
+            </button>
+            <button class="tab-btn" role="tab" aria-selected="false" data-tab="energy" onclick="switchTab('energy')">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+                Energy
+            </button>
+        </nav>
+
+        <!-- ===== HEAT PUMP TAB ===== -->
+        <div class="tab-panel active" id="tab-heatpump" role="tabpanel">
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h4l3 9 4-18 3 9h4"/></svg>
+                    Daikin Heat Pump
+                </span>
+                {% if daikin %}
+                <span class="badge {% if daikin.is_on %}badge-on{% else %}badge-off{% endif %}">{{ "ON" if daikin.is_on else "OFF" }}</span>
+                {% elif daikin_error %}
+                <span class="badge badge-err">Error</span>
+                {% endif %}
+            </div>
+            <div class="card-body">
+                {% if daikin_error %}
+                <div class="error-message">{{ daikin_error }}</div>
+                {% elif daikin %}
+
+                <!-- Status section -->
+                <div class="status-section">
+                    <div class="section-title">Status</div>
+                    <div class="stat-row" id="daikin-stats">
+                    {% if daikin.outdoor_temp is not none %}
+                    <div class="stat">
+                        <div class="stat-label">Outdoor</div>
+                        <div class="stat-value" id="stat-outdoor">{{ "%.1f"|format(daikin.outdoor_temp) }}<span class="stat-unit">°C</span></div>
+                    </div>
+                    {% endif %}
+                    {% if daikin.lwt is not none %}
+                    <div class="stat">
+                        <div class="stat-label">Radiator Temp</div>
+                        <div class="stat-value" id="stat-lwt">{{ "%.1f"|format(daikin.lwt) }}<span class="stat-unit">°C</span></div>
+                    </div>
+                    {% endif %}
+                    {% if daikin.tank_temp is not none %}
+                    <div class="stat">
+                        <div class="stat-label">Hot Water Tank</div>
+                        <div class="stat-value" id="stat-tank">{{ "%.0f"|format(daikin.tank_temp) }}<span class="stat-unit">°C</span></div>
+                    </div>
+                    {% endif %}
+                    {% if daikin.room_temp is not none %}
+                    <div class="stat">
+                        <div class="stat-label">Room</div>
+                        <div class="stat-value" id="stat-room">{{ "%.1f"|format(daikin.room_temp) }}<span class="stat-unit">°C</span></div>
+                    </div>
+                    {% endif %}
+                    </div>
+                </div>
+
+                <div class="controls-section">
+                    <div class="controls-title">Controls</div>
+                    <div class="sync-banner" id="syncBanner">
+                        <div class="sync-spinner"></div>
+                        <span id="syncText">Syncing with device...</span>
+                    </div>
+                    <div class="controls-grid" id="daikin-controls">
+
+                        <!-- Power toggle -->
+                        <div class="gauge">
+                            <div class="gauge-header">
+                                <span class="gauge-name">Power</span>
+                            </div>
+                            <div class="toggle-group">
+                                <span class="toggle-label {% if not daikin.is_on %}active{% endif %}">OFF</span>
+                                <label class="toggle">
+                                    <input type="checkbox" id="power-toggle" {% if daikin.is_on %}checked{% endif %} onchange="togglePower(this.checked)">
+                                    <div class="toggle-track"></div>
+                                    <div class="toggle-thumb"></div>
+                                </label>
+                                <span class="toggle-label {% if daikin.is_on %}active{% endif %}">ON</span>
+                            </div>
+                        </div>
+
+                        <!-- Room Temperature (weather regulated = disabled gauge) -->
+                        {% if daikin.weather_regulation %}
+                        <div class="gauge disabled">
+                            <div class="gauge-header">
+                                <span class="gauge-name">Room Temperature</span>
+                                <span class="gauge-value">--<span class="unit"> °C</span></span>
+                            </div>
+                            <div class="gauge-slider-wrap">
+                                <input type="range" class="gauge-slider" min="15" max="30" step="0.5" value="21" disabled>
+                            </div>
+                            <div class="gauge-limits">
+                                <span>15°C</span>
+                                <span>30°C</span>
+                            </div>
+                            <div class="gauge-note">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                                Weather regulated — temperature is managed automatically. Adjust the heating curve offset below.
+                            </div>
+                        </div>
+                        {% elif daikin.target_temp is not none %}
+                        <div class="gauge">
+                            <div class="gauge-header">
+                                <span class="gauge-name">Room Temperature</span>
+                                <span class="gauge-value" id="temp-display">{{ "%.1f"|format(daikin.target_temp) }}<span class="unit"> °C</span></span>
+                            </div>
+                            <div class="gauge-slider-wrap">
+                                <input type="range" class="gauge-slider" id="temp-slider"
+                                    min="{{ daikin.room_temp_range.min|default(15) }}"
+                                    max="{{ daikin.room_temp_range.max|default(30) }}"
+                                    step="{{ daikin.room_temp_range.step|default(0.5) }}"
+                                    value="{{ daikin.target_temp }}"
+                                    oninput="document.getElementById('temp-display').innerHTML=parseFloat(this.value).toFixed(1)+'<span class=unit> °C</span>'">
+                            </div>
+                            <div class="gauge-limits">
+                                <span>{{ daikin.room_temp_range.min|default(15) }}°C</span>
+                                <span>{{ daikin.room_temp_range.max|default(30) }}°C</span>
+                            </div>
+                            <div class="gauge-actions">
+                                <button class="btn btn-primary btn-sm" onclick="setDaikinTemp()">Apply</button>
+                            </div>
+                        </div>
+                        {% endif %}
+
+                        <!-- LWT Offset / Heating Curve Adjustment -->
+                        {% if daikin.lwt_offset is not none %}
+                        <div class="gauge">
+                            <div class="gauge-header">
+                                <span class="gauge-name">Heating Curve Adjustment</span>
+                                <span class="gauge-value" id="lwt-display">{{ "%+g"|format(daikin.lwt_offset) }}</span>
+                            </div>
+                            <div class="gauge-slider-wrap">
+                                <input type="range" class="gauge-slider cyan" id="lwt-slider"
+                                    min="{{ daikin.lwt_offset_range.min|default(-10) }}"
+                                    max="{{ daikin.lwt_offset_range.max|default(10) }}"
+                                    step="{{ daikin.lwt_offset_range.step|default(1) }}"
+                                    value="{{ daikin.lwt_offset }}"
+                                    oninput="updateLWTDisplay(this.value)">
+                            </div>
+                            <div class="gauge-limits">
+                                <span>{{ daikin.lwt_offset_range.min|default(-10) }} (cooler)</span>
+                                <span>{{ daikin.lwt_offset_range.max|default(10) }} (warmer)</span>
+                            </div>
+                            <div class="gauge-note" style="color: var(--text-secondary); font-style: normal;">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+                                Shifts the weather curve up or down. Negative = lower water temp = less heating.
+                            </div>
+                            <div class="gauge-actions">
+                                <button class="btn btn-primary btn-sm" onclick="setDaikinLWT()">Apply</button>
+                            </div>
+                        </div>
+                        {% endif %}
+
+                        <!-- DHW Tank Target -->
+                        {% if daikin.tank_temp is not none %}
+                        <div class="gauge">
+                            <div class="gauge-header">
+                                <span class="gauge-name">Hot Water Tank</span>
+                                <span class="gauge-value" id="tank-display">{{ "%.0f"|format(daikin.tank_target|default(45)) }}<span class="unit"> °C</span></span>
+                            </div>
+                            <div class="stat-sub" id="tank-current" style="margin-bottom:0.75rem;">
+                                Currently {{ "%.0f"|format(daikin.tank_temp) }}°C
+                            </div>
+                            <div class="gauge-slider-wrap">
+                                <input type="range" class="gauge-slider orange" id="tank-slider"
+                                    min="{{ daikin.tank_temp_range.min|default(30) }}"
+                                    max="{{ daikin.tank_temp_range.max|default(60) }}"
+                                    step="{{ daikin.tank_temp_range.step|default(1) }}"
+                                    value="{{ daikin.tank_target|default(45) }}"
+                                    oninput="document.getElementById('tank-display').innerHTML=parseInt(this.value)+'<span class=unit> °C</span>'">
+                            </div>
+                            <div class="gauge-limits">
+                                <span>{{ daikin.tank_temp_range.min|default(30) }}°C min</span>
+                                <span>{{ daikin.tank_temp_range.max|default(60) }}°C max</span>
+                            </div>
+                            <div class="gauge-actions">
+                                <button class="btn btn-primary btn-sm" onclick="setDaikinTank()">Apply</button>
+                            </div>
+                        </div>
+                        {% endif %}
+
+                    </div>
+                </div>
+                {% else %}
+                <div class="error-message">Daikin not configured</div>
+                {% endif %}
+            </div>
+        </div>
+        </div><!-- end tab-heatpump -->
+
+        <!-- ===== BATTERY TAB ===== -->
+        <div class="tab-panel" id="tab-battery" role="tabpanel">
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="6" width="18" height="12" rx="2"/><line x1="23" y1="10" x2="23" y2="14"/></svg>
+                    Fox ESS Battery
+                </span>
+                {% if foxess %}
+                <span class="badge badge-on">Online</span>
+                {% elif foxess_error %}
+                <span class="badge badge-err">Error</span>
+                {% else %}
+                <span class="badge badge-na">Pending Setup</span>
+                {% endif %}
+            </div>
+            <div class="card-body">
+                {% if foxess_error %}
+                <div class="error-message">{{ foxess_error }}</div>
+                {% elif foxess %}
+                <div class="status-section">
+                    <div class="section-title">Status</div>
+                    <div class="stat-row">
+                        <div class="stat">
+                            <div class="stat-label">Battery SoC</div>
+                            <div class="stat-value">{{ "%.0f"|format(foxess.soc) }}<span class="stat-unit">%</span></div>
+                            <div class="stat-sub {% if foxess.battery_power > 0 %}positive{% elif foxess.battery_power < 0 %}negative{% else %}neutral{% endif %}">
+                                {% if foxess.battery_power > 0 %}charging {{ "%.2f"|format(foxess.battery_power) }} kW
+                                {% elif foxess.battery_power < 0 %}discharging {{ "%.2f"|format(foxess.battery_power|abs) }} kW
+                                {% else %}idle{% endif %}
+                            </div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Solar</div>
+                            <div class="stat-value positive">{{ "%.2f"|format(foxess.solar_power) }}<span class="stat-unit">kW</span></div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Load</div>
+                            <div class="stat-value">{{ "%.2f"|format(foxess.load_power) }}<span class="stat-unit">kW</span></div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Grid</div>
+                            <div class="stat-value {% if foxess.grid_power > 0 %}negative{% else %}positive{% endif %}">
+                                {{ "%.2f"|format(foxess.grid_power|abs) }}<span class="stat-unit">kW</span>
+                            </div>
+                            <div class="stat-sub">{% if foxess.grid_power > 0 %}importing{% else %}exporting{% endif %}</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Work Mode</div>
+                            <div class="stat-value" style="font-size:1.125rem;">{{ foxess.work_mode }}</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="controls-section">
+                    <div class="controls-title">Controls</div>
+                    <div class="controls-grid">
+                        <div class="gauge">
+                            <div class="gauge-header"><span class="gauge-name">Inverter Mode</span></div>
+                            <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
+                                <button class="btn btn-secondary btn-sm" onclick="setFoxESSMode('Self Use')">Self Use</button>
+                                <button class="btn btn-secondary btn-sm" onclick="setFoxESSMode('Feed-in Priority')">Feed-in</button>
+                                <button class="btn btn-secondary btn-sm" onclick="setFoxESSMode('Back Up')">Back Up</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                {% else %}
+                <div class="pending-setup">
+                    <p>Fox ESS credentials not configured yet.</p>
+                    <p>Set <code>FOXESS_API_KEY</code> in <code>.env</code> when ready.</p>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+        </div><!-- end tab-battery -->
+
+        <!-- ===== ENERGY TAB ===== -->
+        <div class="tab-panel" id="tab-energy" role="tabpanel">
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+                    Energy Dashboard
+                </span>
+                <span class="badge badge-na">Coming Soon</span>
+            </div>
+            <div class="card-body">
+                <div class="coming-soon">
+                    <div class="coming-soon-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+                    </div>
+                    <h3>Energy Spending Dashboard</h3>
+                    <p>Track your energy costs, tariff rates, and export earnings. Connect your energy provider account to see real-time spending data.</p>
+                    
+                    <div class="feature-list">
+                        <div class="feature-item">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+                            Tariff tracking
+                        </div>
+                        <div class="feature-item">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+                            Cost breakdown
+                        </div>
+                        <div class="feature-item">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+                            Export earnings
+                        </div>
+                        <div class="feature-item">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+                            Usage history
+                        </div>
+                    </div>
+
+                    <div class="provider-logos">
+                        <div class="provider-logo">
+                            <div class="provider-logo-icon">
+                                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+                            </div>
+                            Octopus Energy
+                        </div>
+                        <div class="provider-logo">
+                            <div class="provider-logo-icon">
+                                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+                            </div>
+                            British Gas
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        </div><!-- end tab-energy -->
+    </div>
+</div>
+
+<!-- Confirmation Modal -->
+<div class="modal" id="confirmModal">
+    <div class="modal-box">
+        <div class="modal-title" id="confirmTitle">Confirm Action</div>
+        <div class="modal-warning" id="confirmWarning" style="display:none;">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            <span id="confirmWarningText"></span>
+        </div>
+        <div class="modal-body" id="confirmMessage"></div>
+        <div class="modal-actions" id="confirmActions"></div>
+    </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+let pendingActionId = null;
+let pendingCallback = null;
+let refreshTimer = null;
+let refreshSeconds = 900;
+let syncing = false;
+let errorStates = { heatpump: false, battery: false };
+
+function updateTimestamp() { document.getElementById('lastUpdated').textContent = 'Updated ' + new Date().toLocaleTimeString(); }
+updateTimestamp();
+
+function setRefreshInterval(s) {
+    refreshSeconds = parseInt(s);
+    localStorage.setItem('refreshInterval', s);
+    if (refreshTimer) clearInterval(refreshTimer);
+    const dot = document.getElementById('refreshDot');
+    if (refreshSeconds > 0 && !syncing) { 
+        refreshTimer = setInterval(() => refreshDashboard(), refreshSeconds * 1000); 
+        dot.classList.remove('paused'); 
+    } else { 
+        dot.classList.add('paused'); 
+    }
+}
+
+(function restoreRefreshInterval() {
+    const saved = localStorage.getItem('refreshInterval');
+    if (saved !== null) {
+        refreshSeconds = parseInt(saved);
+        const select = document.getElementById('refreshInterval');
+        if (select) select.value = saved;
+    }
+})();
+setRefreshInterval(refreshSeconds);
+
+function pauseAutoRefresh() { if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; } }
+function resumeAutoRefresh() { if (refreshSeconds > 0) setRefreshInterval(refreshSeconds); }
+
+function manualRefresh() { refreshDashboard(); }
+
+async function refreshDashboard() {
+    try {
+        const daikinData = await apiCall('/daikin/status');
+        if (daikinData && daikinData.length > 0) {
+            saveLastKnownState('daikin', daikinData[0]);
+            updateDaikinDOM(daikinData[0]);
+            exitErrorState('heatpump');
+        }
+        updateTimestamp();
+    } catch (e) {
+        enterErrorState('heatpump', e.message);
+    }
+    
+    try {
+        const foxessData = await apiCall('/foxess/status');
+        if (foxessData) {
+            saveLastKnownState('foxess', foxessData);
+            exitErrorState('battery');
+        }
+    } catch (e) {
+        if (!e.message.includes('not configured')) {
+            enterErrorState('battery', e.message);
+        }
+    }
+}
+
+function saveLastKnownState(key, data) {
+    try {
+        localStorage.setItem('lastState_' + key, JSON.stringify({ data, timestamp: Date.now() }));
+    } catch (e) { /* localStorage full or unavailable */ }
+}
+
+function getLastKnownState(key) {
+    try {
+        const stored = localStorage.getItem('lastState_' + key);
+        if (stored) return JSON.parse(stored);
+    } catch (e) { }
+    return null;
+}
+
+function enterErrorState(section, errorMsg) {
+    if (errorStates[section]) return;
+    errorStates[section] = true;
+    
+    const panel = document.getElementById('tab-' + section);
+    if (!panel) return;
+    
+    const card = panel.querySelector('.card');
+    if (card) card.classList.add('error-state');
+    
+    const header = card?.querySelector('.card-header');
+    if (header && !header.querySelector('.stale-badge')) {
+        const badge = document.createElement('span');
+        badge.className = 'stale-badge';
+        badge.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg> Last known';
+        header.appendChild(badge);
+    }
+    
+    const cardBody = card?.querySelector('.card-body');
+    if (cardBody && !cardBody.querySelector('.error-banner')) {
+        const banner = document.createElement('div');
+        banner.className = 'error-banner';
+        banner.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><span>' + errorMsg + '</span>';
+        cardBody.insertBefore(banner, cardBody.firstChild);
+    }
+    
+    showToast(errorMsg, 'error');
+}
+
+function exitErrorState(section) {
+    if (!errorStates[section]) return;
+    errorStates[section] = false;
+    
+    const panel = document.getElementById('tab-' + section);
+    if (!panel) return;
+    
+    const card = panel.querySelector('.card');
+    if (card) card.classList.remove('error-state');
+    
+    const staleBadge = card?.querySelector('.stale-badge');
+    if (staleBadge) staleBadge.remove();
+    
+    const errorBanner = card?.querySelector('.error-banner');
+    if (errorBanner) errorBanner.remove();
+}
+
+function showToast(msg, type) {
+    const t = document.getElementById('toast');
+    t.textContent = msg; t.className = 'toast ' + (type||'success') + ' show';
+    setTimeout(() => t.classList.remove('show'), 4000);
+}
+
+async function apiCall(endpoint, method, body) {
+    method = method || 'GET';
+    const opts = { method, headers: { 'Content-Type': 'application/json' } };
+    if (body) opts.body = JSON.stringify(body);
+    const res = await fetch('/api/v1' + endpoint, opts);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Request failed');
+    return data;
+}
+
+/* ── Sync-after-action: disable controls, wait for API propagation, refresh ── */
+
+function enterSyncState(text) {
+    syncing = true;
+    pauseAutoRefresh();
+    const ctrls = document.getElementById('daikin-controls');
+    if (ctrls) ctrls.classList.add('controls-syncing');
+    const banner = document.getElementById('syncBanner');
+    if (banner) { banner.classList.add('active'); document.getElementById('syncText').textContent = text || 'Syncing with device...'; }
+}
+
+function exitSyncState() {
+    syncing = false;
+    const ctrls = document.getElementById('daikin-controls');
+    if (ctrls) ctrls.classList.remove('controls-syncing');
+    const banner = document.getElementById('syncBanner');
+    if (banner) banner.classList.remove('active');
+    updateTimestamp();
+    resumeAutoRefresh();
+}
+
+function updateDaikinDOM(d) {
+    const el = (id) => document.getElementById(id);
+    if (d.outdoor_temp != null && el('stat-outdoor')) el('stat-outdoor').innerHTML = d.outdoor_temp.toFixed(1) + '<span class="stat-unit">°C</span>';
+    if (d.lwt != null && el('stat-lwt')) el('stat-lwt').innerHTML = d.lwt.toFixed(1) + '<span class="stat-unit">°C</span>';
+    if (d.tank_temp != null && el('stat-tank')) el('stat-tank').innerHTML = Math.round(d.tank_temp) + '<span class="stat-unit">°C</span>';
+    if (d.room_temp != null && el('stat-room')) el('stat-room').innerHTML = d.room_temp.toFixed(1) + '<span class="stat-unit">°C</span>';
+
+    const toggle = el('power-toggle');
+    if (toggle) {
+        toggle.checked = d.is_on;
+        const labels = toggle.closest('.toggle-group').querySelectorAll('.toggle-label');
+        labels[0].classList.toggle('active', !d.is_on);
+        labels[1].classList.toggle('active', d.is_on);
+    }
+    const badge = document.querySelector('.card-header .badge');
+    if (badge) {
+        badge.textContent = d.is_on ? 'ON' : 'OFF';
+        badge.className = 'badge ' + (d.is_on ? 'badge-on' : 'badge-off');
+    }
+    if (d.lwt_offset != null) {
+        if (el('lwt-slider')) el('lwt-slider').value = d.lwt_offset;
+        if (el('lwt-display')) el('lwt-display').textContent = (d.lwt_offset >= 0 ? '+' : '') + d.lwt_offset;
+    }
+    if (d.tank_target != null && el('tank-slider')) {
+        el('tank-slider').value = d.tank_target;
+        if (el('tank-display')) el('tank-display').innerHTML = Math.round(d.tank_target) + '<span class="unit"> °C</span>';
+    }
+    if (d.tank_temp != null && el('tank-current')) el('tank-current').textContent = 'Currently ' + Math.round(d.tank_temp) + '°C';
+    if (d.target_temp != null && el('temp-slider')) {
+        el('temp-slider').value = d.target_temp;
+        if (el('temp-display')) el('temp-display').innerHTML = d.target_temp.toFixed(1) + '<span class="unit"> °C</span>';
+    }
+}
+
+const API_PROPAGATION_DELAY = 3000;
+const SYNC_MAX_RETRIES = 3;
+const SYNC_RETRY_INTERVAL = 2000;
+
+async function syncAfterAction() {
+    enterSyncState('Waiting for device to update...');
+
+    await new Promise(r => setTimeout(r, API_PROPAGATION_DELAY));
+
+    for (let attempt = 0; attempt < SYNC_MAX_RETRIES; attempt++) {
+        try {
+            document.getElementById('syncText').textContent = 'Fetching updated status...';
+            const devices = await apiCall('/daikin/status');
+            if (devices && devices.length > 0) {
+                updateDaikinDOM(devices[0]);
+                exitSyncState();
+                return;
+            }
+        } catch (e) { /* retry */ }
+        if (attempt < SYNC_MAX_RETRIES - 1) {
+            document.getElementById('syncText').textContent = 'Retrying...';
+            await new Promise(r => setTimeout(r, SYNC_RETRY_INTERVAL));
+        }
+    }
+    exitSyncState();
+}
+
+/* ── Action wrappers ── */
+
+async function daikinAction(actionFn, toastMsg) {
+    try {
+        const r = await actionFn();
+        showToast(toastMsg || r.message);
+        syncAfterAction();
+    } catch (e) {
+        showToast(e.message, 'error');
+    }
+}
+
+/* ── Confirmation modal ── */
+
+function showConfirm(opts) {
+    pendingActionId = opts.actionId || null;
+    pendingCallback = opts.onConfirm || null;
+    document.getElementById('confirmTitle').textContent = opts.title || 'Confirm Action';
+    document.getElementById('confirmMessage').textContent = opts.message || '';
+    const warn = document.getElementById('confirmWarning');
+    if (opts.warning) { warn.style.display = 'flex'; document.getElementById('confirmWarningText').textContent = opts.warning; }
+    else { warn.style.display = 'none'; }
+    const acts = document.getElementById('confirmActions');
+    acts.innerHTML = '';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'btn btn-secondary'; cancelBtn.textContent = 'Cancel'; cancelBtn.onclick = dismissConfirm;
+    acts.appendChild(cancelBtn);
+    const okBtn = document.createElement('button');
+    okBtn.className = 'btn ' + (opts.danger ? 'btn-confirm-danger' : 'btn-confirm-ok');
+    okBtn.textContent = opts.confirmLabel || 'Confirm';
+    okBtn.onclick = executeConfirm;
+    acts.appendChild(okBtn);
+    document.getElementById('confirmModal').classList.add('active');
+}
+
+async function executeConfirm() {
+    if (pendingActionId) {
+        try {
+            const r = await apiCall('/confirm/' + pendingActionId, 'POST', { confirmed: true });
+            dismissConfirm(); showToast(r.message);
+            syncAfterAction();
+        } catch (e) { showToast(e.message, 'error'); }
+    } else if (pendingCallback) {
+        pendingCallback();
+        dismissConfirm();
+    }
+}
+
+function dismissConfirm() {
+    if (pendingActionId) { try { apiCall('/confirm/' + pendingActionId, 'POST', { confirmed: false }); } catch(e){} }
+    document.getElementById('confirmModal').classList.remove('active');
+    pendingActionId = null; pendingCallback = null;
+}
+
+/* ── Control handlers ── */
+
+function updateLWTDisplay(val) {
+    const v = parseInt(val);
+    document.getElementById('lwt-display').textContent = (v >= 0 ? '+' : '') + v;
+}
+
+async function togglePower(wantOn) {
+    const checkbox = document.getElementById('power-toggle');
+    checkbox.checked = !wantOn;
+    showConfirm({
+        title: wantOn ? 'Turn Heat Pump ON?' : 'Turn Heat Pump OFF?',
+        message: wantOn
+            ? 'The heat pump will start operating in the current mode.'
+            : 'The heat pump will stop all climate control. Hot water tank operation may also be affected.',
+        warning: wantOn ? null : 'Turning off the heat pump may cause the house to cool down significantly.',
+        danger: !wantOn,
+        confirmLabel: wantOn ? 'Turn ON' : 'Turn OFF',
+        onConfirm: () => daikinAction(
+            () => apiCall('/daikin/power', 'POST', { on: wantOn, skip_confirmation: true }),
+            'Power ' + (wantOn ? 'ON' : 'OFF') + ' — syncing...'
+        )
+    });
+}
+
+async function setDaikinTemp() {
+    const val = parseFloat(document.getElementById('temp-slider').value);
+    daikinAction(() => apiCall('/daikin/temperature', 'POST', { temperature: val }));
+}
+
+async function setDaikinLWT() {
+    const val = parseFloat(document.getElementById('lwt-slider').value);
+    daikinAction(() => apiCall('/daikin/lwt-offset', 'POST', { offset: val }));
+}
+
+async function setDaikinTank() {
+    const val = parseFloat(document.getElementById('tank-slider').value);
+    daikinAction(() => apiCall('/daikin/tank-temperature', 'POST', { temperature: val }));
+}
+
+async function setFoxESSMode(mode) {
+    try {
+        const r = await apiCall('/foxess/mode', 'POST', { mode, skip_confirmation: false });
+        if (r.requires_confirmation) {
+            showConfirm({
+                title: 'Change Inverter Mode?',
+                message: r.message,
+                warning: 'Changing the inverter mode affects how your battery charges and discharges.',
+                confirmLabel: 'Change Mode',
+                actionId: r.action.action_id
+            });
+        } else { showToast(r.message); }
+    } catch (e) { showToast(e.message, 'error'); }
+}
+
+document.getElementById('confirmModal').addEventListener('click', function(e) { if (e.target === this) dismissConfirm(); });
+
+/* ── Tab switching ── */
+
+function switchTab(tabId) {
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.tab === tabId);
+        btn.setAttribute('aria-selected', btn.dataset.tab === tabId);
+    });
+    document.querySelectorAll('.tab-panel').forEach(panel => {
+        panel.classList.toggle('active', panel.id === 'tab-' + tabId);
+    });
+    localStorage.setItem('activeTab', tabId);
+}
+
+(function restoreTab() {
+    const saved = localStorage.getItem('activeTab');
+    if (saved && document.getElementById('tab-' + saved)) {
+        switchTab(saved);
+    }
+})();
+</script>
+</body>
+</html>

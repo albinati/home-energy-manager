@@ -12,22 +12,105 @@ Usage:
     python -m src.cli daikin tank-temp 45
     python -m src.cli daikin mode heating|cooling|auto
     python -m src.cli monitor              # Continuous loop (30s intervals)
+    python -m src.cli serve                # Start API server
+    
+Options:
+    --json                                 # Output in JSON format (for OpenClaw)
+    --api                                  # Route commands through API server
 """
 import sys
 import time
+import json as json_module
+import urllib.request
+import urllib.error
 from ..config import config
 from ..foxess.client import FoxESSClient, FoxESSError
 from ..foxess.models import ChargePeriod
 from ..daikin.client import DaikinClient, DaikinError
 from ..notifier import notify
 
+API_BASE_URL = f"http://{config.API_HOST}:{config.API_PORT}/api/v1"
+
+OUTPUT_JSON = False
+USE_API = False
+
+
+def output(data: dict | str, success: bool = True):
+    """Output data in the appropriate format."""
+    if OUTPUT_JSON:
+        if isinstance(data, str):
+            data = {"message": data, "success": success}
+        print(json_module.dumps(data, indent=2, default=str))
+    else:
+        if isinstance(data, dict):
+            if "message" in data:
+                print(data["message"])
+            else:
+                for k, v in data.items():
+                    print(f"{k}: {v}")
+        else:
+            print(data)
+
+
+def api_call(endpoint: str, method: str = "GET", body: dict = None) -> dict:
+    """Make an API call to the local server."""
+    url = f"{API_BASE_URL}{endpoint}"
+    headers = {"Content-Type": "application/json"}
+    
+    data = None
+    if body:
+        data = json_module.dumps(body).encode()
+    
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        resp = urllib.request.urlopen(req, timeout=15)
+        return json_module.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode()
+        try:
+            error_data = json_module.loads(error_body)
+            raise RuntimeError(error_data.get("detail", f"HTTP {e.code}"))
+        except json_module.JSONDecodeError:
+            raise RuntimeError(f"HTTP {e.code}: {error_body[:200]}")
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Cannot connect to API server: {e.reason}")
+
 
 def foxess_status():
+    if USE_API:
+        data = api_call("/foxess/status")
+        if OUTPUT_JSON:
+            output(data)
+        else:
+            d = data
+            bat_arrow = "⬆ charging" if d["battery_power"] > 0 else ("⬇ discharging" if d["battery_power"] < 0 else "idle")
+            grid_label = "importing" if d["grid_power"] > 0 else "exporting"
+            print(f"""
+┌─ Fox ESS ────────────────────────────
+│ Battery  : {d['soc']:.0f}%  ({abs(d['battery_power']):.2f} kW {bat_arrow})
+│ Solar    : {d['solar_power']:.2f} kW
+│ Grid     : {abs(d['grid_power']):.2f} kW ({grid_label})
+│ Load     : {d['load_power']:.2f} kW
+│ Mode     : {d['work_mode']}
+└──────────────────────────────────────""")
+        return
+    
     client = FoxESSClient(**config.foxess_client_kwargs())
     d = client.get_realtime()
-    bat_arrow = "⬆ charging" if d.battery_power > 0 else ("⬇ discharging" if d.battery_power < 0 else "idle")
-    grid_label = "importing" if d.grid_power > 0 else "exporting"
-    print(f"""
+    
+    if OUTPUT_JSON:
+        output({
+            "soc": d.soc,
+            "solar_power": d.solar_power,
+            "grid_power": d.grid_power,
+            "battery_power": d.battery_power,
+            "load_power": d.load_power,
+            "work_mode": d.work_mode,
+        })
+    else:
+        bat_arrow = "⬆ charging" if d.battery_power > 0 else ("⬇ discharging" if d.battery_power < 0 else "idle")
+        grid_label = "importing" if d.grid_power > 0 else "exporting"
+        print(f"""
 ┌─ Fox ESS ────────────────────────────
 │ Battery  : {d.soc:.0f}%  ({abs(d.battery_power):.2f} kW {bat_arrow})
 │ Solar    : {d.solar_power:.2f} kW
@@ -38,16 +121,31 @@ def foxess_status():
 
 
 def foxess_charge(start: str, end: str, soc: int, period: int = 0):
+    if USE_API:
+        data = api_call("/foxess/charge-period", "POST", {
+            "start_time": start,
+            "end_time": end,
+            "target_soc": soc,
+            "period_index": period,
+        })
+        output(data)
+        return
+    
     client = FoxESSClient(**config.foxess_client_kwargs())
     cp = ChargePeriod(start_time=start, end_time=end, target_soc=soc, enable=True)
     client.set_charge_period(period, cp)
-    print(f"✅ Charge period {period + 1} set: {start}–{end}, target SoC {soc}%")
+    output(f"✅ Charge period {period + 1} set: {start}–{end}, target SoC {soc}%")
 
 
 def foxess_mode(mode: str):
+    if USE_API:
+        data = api_call("/foxess/mode", "POST", {"mode": mode, "skip_confirmation": True})
+        output(data)
+        return
+    
     client = FoxESSClient(**config.foxess_client_kwargs())
     client.set_work_mode(mode)
-    print(f"✅ Work mode set to: {mode}")
+    output(f"✅ Work mode set to: {mode}")
 
 
 def _fmt(value, unit="°C"):
@@ -55,72 +153,141 @@ def _fmt(value, unit="°C"):
 
 
 def daikin_status():
+    if USE_API:
+        data = api_call("/daikin/status")
+        if OUTPUT_JSON:
+            output(data)
+        else:
+            for dev in data:
+                state = "ON" if dev["is_on"] else "OFF"
+                lines = [
+                    f"┌─ Daikin: {dev['model'] or dev['device_name'] or dev['device_id']} ────────────────────",
+                    f"│ Power       : {state}",
+                    f"│ Mode        : {dev['mode']}",
+                ]
+                if dev.get("room_temp") is not None:
+                    lines.append(f"│ Room        : {_fmt(dev['room_temp'])}")
+                if dev.get("target_temp") is not None:
+                    lines.append(f"│ Target      : {_fmt(dev['target_temp'])}")
+                lines.append(f"│ Outdoor     : {_fmt(dev.get('outdoor_temp'))}")
+                lines.append(f"│ Radiator    : {_fmt(dev.get('lwt'))}")
+                if dev.get("lwt_offset") is not None:
+                    lines.append(f"│ Curve adj.  : {dev['lwt_offset']:+g}")
+                if dev.get("tank_temp") is not None or dev.get("tank_target") is not None:
+                    lines.append(f"│ DHW tank    : {_fmt(dev.get('tank_temp'))} (target {_fmt(dev.get('tank_target'))})")
+                lines.append(f"│ Weather reg : {'on' if dev.get('weather_regulation') else 'off'}")
+                lines.append("└──────────────────────────────────────")
+                print("\n" + "\n".join(lines))
+        return
+    
     client = DaikinClient()
     devices = client.get_devices()
     if not devices:
-        print("No Daikin devices found.")
+        output("No Daikin devices found.", success=False)
         return
-    for dev in devices:
-        s = client.get_status(dev)
-        state = "ON" if s.is_on else "OFF"
-        lines = [
-            f"┌─ Daikin: {dev.model or s.device_name or dev.id} ────────────────────",
-            f"│ Power       : {state}",
-            f"│ Mode        : {s.mode}",
-        ]
-        if s.room_temp is not None:
-            lines.append(f"│ Room        : {_fmt(s.room_temp)}")
-        if s.target_temp is not None:
-            lines.append(f"│ Target      : {_fmt(s.target_temp)}")
-        lines.append(f"│ Outdoor     : {_fmt(s.outdoor_temp)}")
-        lines.append(f"│ LWT         : {_fmt(s.lwt)}")
-        if s.lwt_offset is not None:
-            lines.append(f"│ LWT offset  : {s.lwt_offset:+g}")
-        if s.tank_temp is not None or s.tank_target is not None:
-            lines.append(f"│ DHW tank    : {_fmt(s.tank_temp)} (target {_fmt(s.tank_target)})")
-        lines.append(f"│ Weather reg : {'on' if s.weather_regulation else 'off'}")
-        lines.append("└──────────────────────────────────────")
-        print("\n" + "\n".join(lines))
+    
+    if OUTPUT_JSON:
+        result = []
+        for dev in devices:
+            s = client.get_status(dev)
+            result.append({
+                "device_id": dev.id,
+                "device_name": s.device_name,
+                "model": dev.model,
+                "is_on": s.is_on,
+                "mode": s.mode,
+                "room_temp": s.room_temp,
+                "target_temp": s.target_temp,
+                "outdoor_temp": s.outdoor_temp,
+                "lwt": s.lwt,
+                "lwt_offset": s.lwt_offset,
+                "tank_temp": s.tank_temp,
+                "tank_target": s.tank_target,
+                "weather_regulation": s.weather_regulation,
+            })
+        output(result)
+    else:
+        for dev in devices:
+            s = client.get_status(dev)
+            state = "ON" if s.is_on else "OFF"
+            lines = [
+                f"┌─ Daikin: {dev.model or s.device_name or dev.id} ────────────────────",
+                f"│ Power       : {state}",
+                f"│ Mode        : {s.mode}",
+            ]
+            if s.room_temp is not None:
+                lines.append(f"│ Room        : {_fmt(s.room_temp)}")
+            if s.target_temp is not None:
+                lines.append(f"│ Target      : {_fmt(s.target_temp)}")
+            lines.append(f"│ Outdoor     : {_fmt(s.outdoor_temp)}")
+            lines.append(f"│ Radiator    : {_fmt(s.lwt)}")
+            if s.lwt_offset is not None:
+                lines.append(f"│ Curve adj.  : {s.lwt_offset:+g}")
+            if s.tank_temp is not None or s.tank_target is not None:
+                lines.append(f"│ DHW tank    : {_fmt(s.tank_temp)} (target {_fmt(s.tank_target)})")
+            lines.append(f"│ Weather reg : {'on' if s.weather_regulation else 'off'}")
+            lines.append("└──────────────────────────────────────")
+            print("\n" + "\n".join(lines))
 
 
 def daikin_power(on: bool):
+    if USE_API:
+        data = api_call("/daikin/power", "POST", {"on": on, "skip_confirmation": True})
+        output(data)
+        return
+    
     client = DaikinClient()
     devices = client.get_devices()
     if not devices:
-        print("No Daikin devices found.")
+        output("No Daikin devices found.", success=False)
         return
     for dev in devices:
         client.set_power(dev, on)
-    print(f"✅ Daikin turned {'ON' if on else 'OFF'}")
+    output(f"✅ Daikin turned {'ON' if on else 'OFF'}")
 
 
 def daikin_temp(temperature: float):
+    if USE_API:
+        data = api_call("/daikin/temperature", "POST", {"temperature": temperature})
+        output(data)
+        return
+    
     client = DaikinClient()
     devices = client.get_devices()
     if not devices:
-        print("No Daikin devices found.")
+        output("No Daikin devices found.", success=False)
         return
     for dev in devices:
         client.set_temperature(dev, temperature, dev.operation_mode)
-    print(f"✅ Temperature set to {temperature}°C")
+    output(f"✅ Temperature set to {temperature}°C")
 
 
 def daikin_lwt_offset(offset: float):
+    if USE_API:
+        data = api_call("/daikin/lwt-offset", "POST", {"offset": offset})
+        output(data)
+        return
+    
     client = DaikinClient()
     devices = client.get_devices()
     if not devices:
-        print("No Daikin devices found.")
+        output("No Daikin devices found.", success=False)
         return
     for dev in devices:
         client.set_lwt_offset(dev, offset, dev.operation_mode)
-    print(f"✅ LWT offset set to {offset:+g}")
+    output(f"✅ LWT offset set to {offset:+g}")
 
 
 def daikin_tank_temp(temperature: float):
+    if USE_API:
+        data = api_call("/daikin/tank-temperature", "POST", {"temperature": temperature})
+        output(data)
+        return
+    
     client = DaikinClient()
     devices = client.get_devices()
     if not devices:
-        print("No Daikin devices found.")
+        output("No Daikin devices found.", success=False)
         return
     for dev in devices:
         if dev.tank_target is not None:
@@ -128,20 +295,25 @@ def daikin_tank_temp(temperature: float):
             rng = ""
             if dev.tank_target_min is not None:
                 rng = f" (range: {dev.tank_target_min}–{dev.tank_target_max}°C)"
-            print(f"✅ DHW tank target set to {temperature}°C{rng}")
+            output(f"✅ DHW tank target set to {temperature}°C{rng}")
         else:
-            print(f"Device {dev.model or dev.id} has no DHW tank.")
+            output(f"Device {dev.model or dev.id} has no DHW tank.", success=False)
 
 
 def daikin_mode(mode: str):
+    if USE_API:
+        data = api_call("/daikin/mode", "POST", {"mode": mode})
+        output(data)
+        return
+    
     client = DaikinClient()
     devices = client.get_devices()
     if not devices:
-        print("No Daikin devices found.")
+        output("No Daikin devices found.", success=False)
         return
     for dev in devices:
         client.set_operation_mode(dev, mode)
-    print(f"✅ Mode set to: {mode}")
+    output(f"✅ Mode set to: {mode}")
 
 
 def full_status():
@@ -198,10 +370,46 @@ def monitor_loop(interval: int = 60):
         time.sleep(interval)
 
 
+def serve(host: str = None, port: int = None):
+    """Start the API server."""
+    from ..api.main import run_server
+    h = host or config.API_HOST
+    p = port or config.API_PORT
+    print(f"Starting API server at http://{h}:{p}")
+    print(f"Web dashboard: http://{h}:{p}/")
+    print(f"API docs: http://{h}:{p}/docs")
+    run_server(h, p)
+
+
 def main():
+    global OUTPUT_JSON, USE_API
+    
     args = sys.argv[1:]
+    
+    if "--json" in args:
+        OUTPUT_JSON = True
+        args.remove("--json")
+    
+    if "--api" in args:
+        USE_API = True
+        args.remove("--api")
+    
     if not args or args[0] == "status":
         full_status()
+    elif args[0] == "serve":
+        host = None
+        port = None
+        i = 1
+        while i < len(args):
+            if args[i] == "--host":
+                host = args[i + 1]
+                i += 2
+            elif args[i] == "--port":
+                port = int(args[i + 1])
+                i += 2
+            else:
+                i += 1
+        serve(host, port)
     elif args[0] == "foxess":
         sub = args[1] if len(args) > 1 else "status"
         if sub == "status":

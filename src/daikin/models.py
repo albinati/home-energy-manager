@@ -4,6 +4,15 @@ from typing import Optional
 
 
 @dataclass
+class SetpointRange:
+    """Min/max/step for a settable value."""
+    min_value: Optional[float] = None
+    max_value: Optional[float] = None
+    step_value: Optional[float] = None
+    settable: bool = True
+
+
+@dataclass
 class TemperatureControlSettings:
     set_point: Optional[float] = None
     room_temperature: Optional[float] = None
@@ -26,6 +35,10 @@ class DaikinDevice:
     tank_target_min: Optional[float] = None
     tank_target_max: Optional[float] = None
     weather_regulation_enabled: bool = False
+    weather_regulation_settable: bool = True
+    lwt_offset_range: SetpointRange = field(default_factory=SetpointRange)
+    room_temp_range: SetpointRange = field(default_factory=SetpointRange)
+    tank_temp_range: SetpointRange = field(default_factory=SetpointRange)
     climate_mp_id: str = "climateControlMainZone"
     dhw_mp_id: str = "domesticHotWaterTank"
     raw: dict = field(default_factory=dict)
