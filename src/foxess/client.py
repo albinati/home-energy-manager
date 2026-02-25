@@ -1,12 +1,18 @@
 """Fox ESS Cloud API client.
 
-Authentication: API key + MD5 signature per request.
-Docs: https://www.foxesscloud.com/public/i18n/en/OpenApiInfomation.html
+Supports two auth modes:
+  1. API Key (Official Open API) — requires API Management in foxesscloud.com User Profile
+     Some end-user accounts may not see this option; contact Fox ESS support to enable.
+  2. Username/Password (Unofficial) — works with any account type
+     Uses the same endpoints as the foxesscloud.com web app.
 
-Usage:
+Usage (API key):
     client = FoxESSClient(api_key="...", device_sn="...")
-    data = await client.get_realtime()
-    await client.set_work_mode("Self Use")
+
+Usage (username/password):
+    client = FoxESSClient(username="email@example.com", password="...", device_sn="...")
+
+Docs: https://www.foxesscloud.com/public/i18n/en/OpenApiDocument.html
 """
 import hashlib
 import json
@@ -24,17 +30,30 @@ class FoxESSError(Exception):
 
 
 class FoxESSClient:
-    BASE_URL = "https://www.foxesscloud.com/op/v0"
+    OPEN_API_BASE = "https://www.foxesscloud.com/op/v0"
+    CLOUD_API_BASE = "https://www.foxesscloud.com"
 
-    def __init__(self, api_key: str, device_sn: str):
-        self.api_key = api_key
+    def __init__(
+        self,
+        device_sn: str,
+        api_key: str = "",
+        username: str = "",
+        password: str = "",
+    ):
         self.device_sn = device_sn
+        self.api_key = api_key
+        self.username = username
+        self.password = password
+        self._session_token: Optional[str] = None
 
-    def _headers(self) -> dict:
-        """Generate signed request headers."""
+        if not api_key and not (username and password):
+            raise ValueError("Provide either api_key OR username+password.")
+
+    # ── Official Open API (API key auth) ────────────────────────────────────
+
+    def _open_headers(self) -> dict:
         timestamp = str(int(time.time() * 1000))
-        signature_raw = f"{self.api_key}{timestamp}"
-        token = hashlib.md5(signature_raw.encode()).hexdigest()
+        token = hashlib.md5(f"{self.api_key}{timestamp}".encode()).hexdigest()
         return {
             "token": token,
             "timestamp": timestamp,
@@ -42,157 +61,226 @@ class FoxESSClient:
             "Content-Type": "application/json",
         }
 
-    def _get(self, path: str, params: dict = None) -> dict:
-        url = f"{self.BASE_URL}{path}"
+    def _open_post(self, path: str, body: dict) -> dict:
+        url = f"{self.OPEN_API_BASE}{path}"
+        payload = json.dumps(body).encode()
+        req = urllib.request.Request(url, data=payload, headers=self._open_headers())
+        try:
+            resp = urllib.request.urlopen(req, timeout=15)
+            data = json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            raise FoxESSError(f"HTTP {e.code}: {e.read().decode()[:200]}")
+        errno = data.get("errno", 0)
+        if errno not in (0, None):
+            raise FoxESSError(f"API error {errno}: {data.get('msg')}")
+        return data.get("result", {}) or {}
+
+    def _open_get(self, path: str, params: dict = None) -> dict:
+        url = f"{self.OPEN_API_BASE}{path}"
         if params:
             url += "?" + urllib.parse.urlencode(params)
-        req = urllib.request.Request(url, headers=self._headers())
+        req = urllib.request.Request(url, headers=self._open_headers())
         try:
             resp = urllib.request.urlopen(req, timeout=15)
             data = json.loads(resp.read())
         except urllib.error.HTTPError as e:
-            raise FoxESSError(f"HTTP {e.code}: {e.read().decode()}")
+            raise FoxESSError(f"HTTP {e.code}: {e.read().decode()[:200]}")
+        errno = data.get("errno", 0)
+        if errno not in (0, None):
+            raise FoxESSError(f"API error {errno}: {data.get('msg')}")
+        return data.get("result", {}) or {}
+
+    # ── Unofficial Cloud API (username/password auth) ────────────────────────
+
+    def _login(self) -> str:
+        """Authenticate with username/password, return session token."""
+        hashed_pw = hashlib.md5(self.password.encode()).hexdigest()
+        payload = json.dumps({
+            "user": self.username,
+            "password": hashed_pw,
+        }).encode()
+        req = urllib.request.Request(
+            f"{self.CLOUD_API_BASE}/c/v0/user/login",
+            data=payload,
+            headers={"Content-Type": "application/json", "lang": "en"},
+        )
+        try:
+            resp = urllib.request.urlopen(req, timeout=15)
+            data = json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            raise FoxESSError(f"Login HTTP {e.code}: {e.read().decode()[:200]}")
         if data.get("errno") not in (0, None):
-            raise FoxESSError(f"API error {data.get('errno')}: {data.get('msg')}")
-        return data.get("result", {})
+            raise FoxESSError(f"Login failed: {data.get('msg')}")
+        token = data.get("result", {}).get("token")
+        if not token:
+            raise FoxESSError("No token in login response")
+        self._session_token = token
+        return token
+
+    def _cloud_headers(self) -> dict:
+        if not self._session_token:
+            self._login()
+        return {
+            "token": self._session_token,
+            "lang": "en",
+            "Content-Type": "application/json",
+        }
+
+    def _cloud_post(self, path: str, body: dict) -> dict:
+        url = f"{self.CLOUD_API_BASE}{path}"
+        payload = json.dumps(body).encode()
+        req = urllib.request.Request(url, data=payload, headers=self._cloud_headers())
+        try:
+            resp = urllib.request.urlopen(req, timeout=15)
+            data = json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            raise FoxESSError(f"HTTP {e.code}: {e.read().decode()[:200]}")
+        errno = data.get("errno", 0)
+        if errno == 41808:  # Token expired
+            self._session_token = None
+            return self._cloud_post(path, body)  # retry once
+        if errno not in (0, None):
+            raise FoxESSError(f"API error {errno}: {data.get('msg')}")
+        return data.get("result", {}) or {}
+
+    # ── Unified interface ────────────────────────────────────────────────────
 
     def _post(self, path: str, body: dict) -> dict:
-        url = f"{self.BASE_URL}{path}"
-        payload = json.dumps(body).encode()
-        req = urllib.request.Request(url, data=payload, headers=self._headers())
-        try:
-            resp = urllib.request.urlopen(req, timeout=15)
-            data = json.loads(resp.read())
-        except urllib.error.HTTPError as e:
-            raise FoxESSError(f"HTTP {e.code}: {e.read().decode()}")
-        if data.get("errno") not in (0, None):
-            raise FoxESSError(f"API error {data.get('errno')}: {data.get('msg')}")
-        return data.get("result", {})
+        """Route to appropriate API based on configured auth."""
+        if self.api_key:
+            return self._open_post(path, body)
+        # Unofficial: map Open API paths to cloud paths where needed
+        cloud_path = path.replace("/op/v0", "/c/v0")
+        return self._cloud_post(cloud_path, body)
+
+    # ── Public methods ───────────────────────────────────────────────────────
 
     def get_realtime(self) -> RealTimeData:
-        """Fetch real-time device data."""
+        """Fetch real-time device data (SoC, solar, grid, battery)."""
         variables = [
             "SoC", "pvPower", "gridConsumptionPower", "feedinPower",
             "batChargePower", "batDischargePower", "loadsPower",
             "generationPower", "workMode",
         ]
-        result = self._post("/device/real/query", {
-            "sn": self.device_sn,
-            "variables": variables,
-        })
+        if self.api_key:
+            result = self._open_post("/device/real/query", {
+                "sn": self.device_sn, "variables": variables,
+            })
+        else:
+            result = self._cloud_post("/c/v0/device/real/query", {
+                "sn": self.device_sn, "variables": variables,
+            })
+        items = result if isinstance(result, list) else result.get("datas", [])
 
         def val(key: str) -> float:
-            for item in result if isinstance(result, list) else []:
+            for item in items:
                 if item.get("variable") == key:
-                    return float(item.get("value", 0))
+                    return float(item.get("value", 0) or 0)
             return 0.0
 
         def strval(key: str) -> str:
-            for item in result if isinstance(result, list) else []:
+            for item in items:
                 if item.get("variable") == key:
-                    return str(item.get("value", ""))
+                    return str(item.get("value", "") or "")
             return ""
 
         bat_charge = val("batChargePower")
         bat_discharge = val("batDischargePower")
-        battery_power = bat_charge - bat_discharge  # positive = charging
-        grid_consumption = val("gridConsumptionPower")
         feedin = val("feedinPower")
-        grid_power = grid_consumption - feedin  # positive = importing
+        grid_consumption = val("gridConsumptionPower")
 
         return RealTimeData(
             soc=val("SoC"),
             solar_power=val("pvPower"),
-            grid_power=grid_power,
-            battery_power=battery_power,
+            grid_power=grid_consumption - feedin,   # positive = importing
+            battery_power=bat_charge - bat_discharge,  # positive = charging
             load_power=val("loadsPower"),
             generation_power=val("generationPower"),
             feed_in_power=feedin,
             work_mode=strval("workMode"),
         )
 
-    def get_device_info(self) -> DeviceInfo:
-        """Fetch device info."""
-        result = self._get("/device/detail", {"sn": self.device_sn})
-        return DeviceInfo(
-            device_sn=self.device_sn,
-            device_type=result.get("deviceType", ""),
-            station_name=result.get("stationName", ""),
-            status="online" if result.get("online") else "offline",
-        )
+    def get_device_list(self) -> list[DeviceInfo]:
+        """List all devices on the account."""
+        if self.api_key:
+            result = self._open_get("/device/list", {"currentPage": 1, "pageSize": 20})
+            devices_raw = result.get("devices", [])
+        else:
+            result = self._cloud_post("/c/v0/device/list", {
+                "pageSize": 20, "currentPage": 1,
+            })
+            devices_raw = result.get("devices", [])
+        return [
+            DeviceInfo(
+                device_sn=d.get("deviceSN", d.get("sn", "")),
+                device_type=d.get("deviceType", ""),
+                station_name=d.get("stationName", ""),
+                status="online" if d.get("status") == 1 else "offline",
+            )
+            for d in devices_raw
+        ]
 
     def set_work_mode(self, mode: str) -> None:
-        """Set inverter work mode.
-
-        Args:
-            mode: One of "Self Use", "Feed-in Priority", "Back Up", "Force charge", "Force discharge"
-        """
-        valid_modes = ["Self Use", "Feed-in Priority", "Back Up", "Force charge", "Force discharge"]
-        if mode not in valid_modes:
-            raise ValueError(f"Invalid mode '{mode}'. Choose from: {valid_modes}")
-        self._post("/device/setting/set", {
-            "sn": self.device_sn,
-            "key": "workMode",
-            "value": mode,
-        })
+        """Set inverter work mode."""
+        valid = ["Self Use", "Feed-in Priority", "Back Up", "Force charge", "Force discharge"]
+        if mode not in valid:
+            raise ValueError(f"Invalid mode '{mode}'. Choose from: {valid}")
+        if self.api_key:
+            self._open_post("/device/setting/set", {
+                "sn": self.device_sn, "key": "workMode", "value": mode,
+            })
+        else:
+            self._cloud_post("/c/v0/device/setting/set", {
+                "sn": self.device_sn, "key": "workMode", "value": mode,
+            })
 
     def set_charge_period(self, period_index: int, period: ChargePeriod) -> None:
-        """Set a timed charge period (0 or 1).
-
-        Args:
-            period_index: 0 or 1 (Fox ESS supports 2 charge periods)
-            period: ChargePeriod with start_time, end_time, target_soc, enable
-        """
+        """Set a timed charge period (index 0 or 1)."""
         if period_index not in (0, 1):
             raise ValueError("period_index must be 0 or 1")
         key = f"times{period_index + 1}"
-        self._post("/device/setting/set", {
-            "sn": self.device_sn,
-            "key": key,
-            "value": {
-                "enable": period.enable,
-                "startTime": {"hour": int(period.start_time.split(":")[0]),
-                               "minute": int(period.start_time.split(":")[1])},
-                "endTime": {"hour": int(period.end_time.split(":")[0]),
-                             "minute": int(period.end_time.split(":")[1])},
-                "minSocOnGrid": period.target_soc,
+        value = {
+            "enable": period.enable,
+            "startTime": {
+                "hour": int(period.start_time.split(":")[0]),
+                "minute": int(period.start_time.split(":")[1]),
             },
-        })
-
-    def get_charge_periods(self) -> list[ChargePeriod]:
-        """Read current charge period settings."""
-        result = self._post("/device/setting/query", {
-            "sn": self.device_sn,
-            "keys": ["times1", "times2"],
-        })
-        periods = []
-        for item in result if isinstance(result, list) else []:
-            v = item.get("value", {})
-            start = v.get("startTime", {})
-            end = v.get("endTime", {})
-            periods.append(ChargePeriod(
-                start_time=f"{start.get('hour', 0):02d}:{start.get('minute', 0):02d}",
-                end_time=f"{end.get('hour', 0):02d}:{end.get('minute', 0):02d}",
-                target_soc=v.get("minSocOnGrid", 10),
-                enable=v.get("enable", False),
-            ))
-        return periods
+            "endTime": {
+                "hour": int(period.end_time.split(":")[0]),
+                "minute": int(period.end_time.split(":")[1]),
+            },
+            "minSocOnGrid": period.target_soc,
+        }
+        path = "/device/setting/set" if self.api_key else "/c/v0/device/setting/set"
+        base = self.OPEN_API_BASE if self.api_key else self.CLOUD_API_BASE
+        headers = self._open_headers() if self.api_key else self._cloud_headers()
+        payload = json.dumps({"sn": self.device_sn, "key": key, "value": value}).encode()
+        req = urllib.request.Request(
+            f"{base}{path}", data=payload, headers=headers,
+        )
+        urllib.request.urlopen(req, timeout=15)
 
     def get_energy_today(self) -> dict:
         """Get today's energy summary (kWh)."""
         today = time.strftime("%Y-%m-%d")
-        result = self._post("/device/history/query", {
-            "sn": self.device_sn,
-            "variables": ["pvEnergyToday", "feedinEnergyToday",
-                          "gridConsumptionEnergyToday", "chargeEnergyToday",
-                          "dischargeEnergyToday", "loadEnergyToday"],
-            "begin": int(time.mktime(time.strptime(today, "%Y-%m-%d"))) * 1000,
-            "end": int(time.time()) * 1000,
-        })
+        begin = int(time.mktime(time.strptime(today, "%Y-%m-%d"))) * 1000
+        end = int(time.time()) * 1000
+        variables = [
+            "pvEnergyToday", "feedinEnergyToday", "gridConsumptionEnergyToday",
+            "chargeEnergyToday", "dischargeEnergyToday", "loadEnergyToday",
+        ]
+        if self.api_key:
+            result = self._open_post("/device/history/query", {
+                "sn": self.device_sn, "variables": variables, "begin": begin, "end": end,
+            })
+        else:
+            result = self._cloud_post("/c/v0/device/history/query", {
+                "sn": self.device_sn, "variables": variables, "begin": begin, "end": end,
+            })
         summary = {}
-        for item in result if isinstance(result, list) else []:
+        items = result if isinstance(result, list) else []
+        for item in items:
             key = item.get("variable", "")
             values = item.get("data", [])
-            if values:
-                summary[key] = sum(v.get("value", 0) for v in values)
+            summary[key] = round(sum(v.get("value", 0) or 0 for v in values), 2)
         return summary
