@@ -5,9 +5,9 @@ from typing import Optional
 
 @dataclass
 class TemperatureControlSettings:
-    set_point: Optional[float] = None    # Target temperature (°C)
-    room_temperature: Optional[float] = None  # Current indoor temp
-    outdoor_temperature: Optional[float] = None  # Outdoor temp (if available)
+    set_point: Optional[float] = None
+    room_temperature: Optional[float] = None
+    outdoor_temperature: Optional[float] = None
 
 
 @dataclass
@@ -17,10 +17,17 @@ class DaikinDevice:
     name: str
     model: str = ""
     is_on: bool = False
-    operation_mode: str = "heating"   # heating / cooling / auto / fan_only / dry
+    operation_mode: str = "heating"
     temperature: TemperatureControlSettings = field(default_factory=TemperatureControlSettings)
-    leaving_water_temperature: Optional[float] = None   # Altherma LWT (°C)
+    leaving_water_temperature: Optional[float] = None
+    lwt_offset: Optional[float] = None
+    tank_temperature: Optional[float] = None
+    tank_target: Optional[float] = None
+    tank_target_min: Optional[float] = None
+    tank_target_max: Optional[float] = None
     weather_regulation_enabled: bool = False
+    climate_mp_id: str = "climateControlMainZone"
+    dhw_mp_id: str = "domesticHotWaterTank"
     raw: dict = field(default_factory=dict)
 
 
@@ -33,5 +40,8 @@ class DaikinStatus:
     room_temp: Optional[float]
     target_temp: Optional[float]
     outdoor_temp: Optional[float]
-    lwt: Optional[float]          # Leaving water temperature (Altherma)
+    lwt: Optional[float]
+    lwt_offset: Optional[float]
+    tank_temp: Optional[float]
+    tank_target: Optional[float]
     weather_regulation: bool

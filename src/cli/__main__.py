@@ -1,15 +1,17 @@
 """CLI entrypoint.
 
 Usage:
-    python -m src.cli status           # Full dashboard
-    python -m src.cli foxess status    # Fox ESS only
+    python -m src.cli status               # Full dashboard
+    python -m src.cli foxess status        # Fox ESS only
     python -m src.cli foxess charge --from 00:30 --to 05:00 --soc 90
     python -m src.cli foxess mode "Self Use"
-    python -m src.cli daikin status    # Daikin only
+    python -m src.cli daikin status        # Daikin only
     python -m src.cli daikin on|off
     python -m src.cli daikin temp 21
+    python -m src.cli daikin lwt-offset -3
+    python -m src.cli daikin tank-temp 45
     python -m src.cli daikin mode heating|cooling|auto
-    python -m src.cli monitor          # Continuous loop (30s intervals)
+    python -m src.cli monitor              # Continuous loop (30s intervals)
 """
 import sys
 import time
@@ -48,6 +50,10 @@ def foxess_mode(mode: str):
     print(f"✅ Work mode set to: {mode}")
 
 
+def _fmt(value, unit="°C"):
+    return f"{value}{unit}" if value is not None else "--"
+
+
 def daikin_status():
     client = DaikinClient()
     devices = client.get_devices()
@@ -57,16 +63,24 @@ def daikin_status():
     for dev in devices:
         s = client.get_status(dev)
         state = "ON" if s.is_on else "OFF"
-        print(f"""
-┌─ Daikin: {s.device_name} ────────────────────
-│ Power    : {state}
-│ Mode     : {s.mode}
-│ Target   : {s.target_temp}°C
-│ Room     : {s.room_temp}°C
-│ Outdoor  : {s.outdoor_temp}°C
-│ LWT      : {s.lwt}°C
-│ Weather reg: {"on" if s.weather_regulation else "off"}
-└──────────────────────────────────────""")
+        lines = [
+            f"┌─ Daikin: {dev.model or s.device_name or dev.id} ────────────────────",
+            f"│ Power       : {state}",
+            f"│ Mode        : {s.mode}",
+        ]
+        if s.room_temp is not None:
+            lines.append(f"│ Room        : {_fmt(s.room_temp)}")
+        if s.target_temp is not None:
+            lines.append(f"│ Target      : {_fmt(s.target_temp)}")
+        lines.append(f"│ Outdoor     : {_fmt(s.outdoor_temp)}")
+        lines.append(f"│ LWT         : {_fmt(s.lwt)}")
+        if s.lwt_offset is not None:
+            lines.append(f"│ LWT offset  : {s.lwt_offset:+g}")
+        if s.tank_temp is not None or s.tank_target is not None:
+            lines.append(f"│ DHW tank    : {_fmt(s.tank_temp)} (target {_fmt(s.tank_target)})")
+        lines.append(f"│ Weather reg : {'on' if s.weather_regulation else 'off'}")
+        lines.append("└──────────────────────────────────────")
+        print("\n" + "\n".join(lines))
 
 
 def daikin_power(on: bool):
@@ -76,9 +90,8 @@ def daikin_power(on: bool):
         print("No Daikin devices found.")
         return
     for dev in devices:
-        client.set_power(dev.id, on)
-    state = "ON" if on else "OFF"
-    print(f"✅ Daikin turned {state}")
+        client.set_power(dev, on)
+    print(f"✅ Daikin turned {'ON' if on else 'OFF'}")
 
 
 def daikin_temp(temperature: float):
@@ -88,27 +101,59 @@ def daikin_temp(temperature: float):
         print("No Daikin devices found.")
         return
     for dev in devices:
-        client.set_temperature(dev.id, temperature, dev.operation_mode)
+        client.set_temperature(dev, temperature, dev.operation_mode)
     print(f"✅ Temperature set to {temperature}°C")
+
+
+def daikin_lwt_offset(offset: float):
+    client = DaikinClient()
+    devices = client.get_devices()
+    if not devices:
+        print("No Daikin devices found.")
+        return
+    for dev in devices:
+        client.set_lwt_offset(dev, offset, dev.operation_mode)
+    print(f"✅ LWT offset set to {offset:+g}")
+
+
+def daikin_tank_temp(temperature: float):
+    client = DaikinClient()
+    devices = client.get_devices()
+    if not devices:
+        print("No Daikin devices found.")
+        return
+    for dev in devices:
+        if dev.tank_target is not None:
+            client.set_tank_temperature(dev, temperature)
+            rng = ""
+            if dev.tank_target_min is not None:
+                rng = f" (range: {dev.tank_target_min}–{dev.tank_target_max}°C)"
+            print(f"✅ DHW tank target set to {temperature}°C{rng}")
+        else:
+            print(f"Device {dev.model or dev.id} has no DHW tank.")
 
 
 def daikin_mode(mode: str):
     client = DaikinClient()
     devices = client.get_devices()
+    if not devices:
+        print("No Daikin devices found.")
+        return
     for dev in devices:
-        client.set_operation_mode(dev.id, mode)
+        client.set_operation_mode(dev, mode)
     print(f"✅ Mode set to: {mode}")
 
 
 def full_status():
     print("\n=== Energy Dashboard ===\n")
-    if config.FOXESS_API_KEY:
+    if config.FOXESS_API_KEY or (config.FOXESS_USERNAME and config.FOXESS_PASSWORD):
         try:
             foxess_status()
         except FoxESSError as e:
             print(f"Fox ESS error: {e}")
     else:
         print("⚠️  Fox ESS not configured (set FOXESS_API_KEY in .env)")
+        print("    Generate one at foxesscloud.com → User Profile → API Management")
 
     try:
         daikin_status()
@@ -196,6 +241,16 @@ def main():
                 print("Usage: daikin temp <degrees>")
                 sys.exit(1)
             daikin_temp(float(args[2]))
+        elif sub == "lwt-offset":
+            if len(args) < 3:
+                print("Usage: daikin lwt-offset <offset>  (e.g. -3 or +2)")
+                sys.exit(1)
+            daikin_lwt_offset(float(args[2]))
+        elif sub == "tank-temp":
+            if len(args) < 3:
+                print("Usage: daikin tank-temp <degrees>  (e.g. 45)")
+                sys.exit(1)
+            daikin_tank_temp(float(args[2]))
         elif sub == "mode":
             if len(args) < 3:
                 print("Usage: daikin mode <mode>")

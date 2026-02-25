@@ -11,3 +11,6 @@ venv/
 .coverage
 dist/
 build/
+.lvh-cert.pem
+.lvh-key.pem
+*.pem

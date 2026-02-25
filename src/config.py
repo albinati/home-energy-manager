@@ -22,8 +22,14 @@ class Config:
     DAIKIN_REDIRECT_URI: str = os.getenv("DAIKIN_REDIRECT_URI", "http://localhost:8080/callback")
     DAIKIN_TOKEN_FILE: Path = Path(os.getenv("DAIKIN_TOKEN_FILE", ".daikin-tokens.json"))
     DAIKIN_BASE_URL: str = "https://api.onecta.daikineurope.com/v1"
-    DAIKIN_AUTH_URL: str = "https://idp.onecta.daikineurope.com/v1/oidc/authorize"
-    DAIKIN_TOKEN_URL: str = "https://idp.onecta.daikineurope.com/v1/oidc/token"
+    # OIDC endpoints (docs: https://developer.cloud.daikineurope.com/docs/84e709f1-9d33-47e1-a93c-7f5cb8b8f12b)
+    # Override via env if Daikin documents different URLs (e.g. via developer portal).
+    DAIKIN_AUTH_URL: str = os.getenv(
+        "DAIKIN_AUTH_URL", "https://idp.onecta.daikineurope.com/v1/oidc/authorize"
+    )
+    DAIKIN_TOKEN_URL: str = os.getenv(
+        "DAIKIN_TOKEN_URL", "https://idp.onecta.daikineurope.com/v1/oidc/token"
+    )
     DAIKIN_ALERT_TEMP_DEVIATION: float = float(os.getenv("DAIKIN_ALERT_TEMP_DEVIATION", "2"))
 
     # Alerts
