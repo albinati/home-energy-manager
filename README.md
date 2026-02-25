@@ -1,15 +1,16 @@
 # home-energy-manager
 
-Unified controller for Fox ESS battery + Daikin Altherma heat pump (Onecta).
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Built for: 12 Whellock Rd — Daikin Altherma ASHP + Fox ESS battery + solar panels (SEG via British Gas).
+Unified controller for Fox ESS battery + Daikin Altherma heat pump (Onecta).
 
 ## What it does
 
 - **Fox ESS**: Read real-time battery SoC, solar production, grid import/export, inverter stats. Control charge/discharge mode and time-of-use schedules.
-- **Daikin Onecta**: Read heat pump status, leaving water temperature, outdoor temperature, DHW tank temperature. Control power, temperature targets, LWT offset, operation mode, and weather regulation.
-- **Smart scheduling**: Time-of-use optimisation — charge battery on cheap-rate periods, pre-heat/cool with solar surplus.
-- **OverBot integration**: Notifies via WhatsApp when action is needed (e.g. grid export curtailed, battery full, temperature drifting).
+- **Daikin Onecta**: Read heat pump status, radiator temperature, outdoor temperature, DHW tank temperature. Control power, temperature targets, heating curve offset, and weather regulation.
+- **Smart scheduling**: Time-of-use optimisation — charge battery on cheap-rate periods, pre-heat with solar surplus.
+- **Energy Dashboard** (coming soon): Track energy costs with Octopus Energy, British Gas, and other providers.
+- **OpenClaw integration**: Notifies via WhatsApp when action is needed (e.g. grid export curtailed, battery full, temperature drifting). Exposes REST API for AI agent control.
 
 ## Quick start
 
@@ -89,7 +90,77 @@ See `.env.example` for all options. Key variables:
 | `DAIKIN_CLIENT_ID` | Yes | From Daikin developer portal |
 | `DAIKIN_CLIENT_SECRET` | Yes | From Daikin developer portal |
 | `DAIKIN_REDIRECT_URI` | No | Defaults to `http://localhost:8080/callback` |
-| `ALERT_WHATSAPP_NUMBER` | No | For WhatsApp alerts via OverBot |
+| `OCTOPUS_API_KEY` | No | Octopus Energy API key (for tariff tracking) |
+| `OCTOPUS_ACCOUNT_NUMBER` | No | Octopus Energy account number |
+| `BRITISH_GAS_API_KEY` | No | British Gas API key (if available) |
+| `ALERT_WHATSAPP_NUMBER` | No | For WhatsApp alerts via OpenClaw |
+
+## Web UI & API Server
+
+Start the web server for browser-based control and REST API access:
+
+```bash
+python -m src.cli serve                    # Start on default port 8000
+python -m src.cli serve --port 3000        # Custom port
+```
+
+- **Web Dashboard**: `http://localhost:8000/` — visual status + control buttons
+- **API Docs**: `http://localhost:8000/docs` — interactive Swagger UI
+- **OpenClaw API**: `http://localhost:8000/api/v1/openclaw/capabilities`
+
+### API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/daikin/status` | GET | Get Daikin device status |
+| `/api/v1/daikin/power` | POST | Turn on/off (requires confirmation) |
+| `/api/v1/daikin/temperature` | POST | Set target temperature (15-30°C) |
+| `/api/v1/daikin/lwt-offset` | POST | Set LWT offset (-10 to +10) |
+| `/api/v1/daikin/mode` | POST | Set operation mode |
+| `/api/v1/daikin/tank-temperature` | POST | Set DHW tank target (30-60°C) |
+| `/api/v1/foxess/status` | GET | Get battery/solar status |
+| `/api/v1/foxess/mode` | POST | Set work mode (requires confirmation) |
+| `/api/v1/foxess/charge-period` | POST | Set charge schedule |
+| `/api/v1/energy/providers` | GET | List energy providers and config status |
+| `/api/v1/energy/tariff` | GET | Get current tariff info (coming soon) |
+| `/api/v1/energy/usage` | GET | Get energy usage summary (coming soon) |
+| `/api/v1/openclaw/capabilities` | GET | List all actions for AI agents |
+| `/api/v1/openclaw/execute` | POST | Execute action with confirmation flow |
+
+### Safeguards
+
+- **Confirmation flow**: Destructive actions (power off, mode changes) require a 2-step confirmation
+- **Weather regulation guard**: Room temperature changes are blocked when weather regulation is active (use LWT offset instead)
+- **Range validation**: Temperature setpoints validated against safe limits
+- **Rate limiting**: 5-second cooldown between commands
+- **Audit logging**: All control actions logged with timestamp
+
+### OpenClaw Skill
+
+This project ships an [AgentSkills](https://agentskills.io/)-compatible skill in `skills/home-energy-manager/`. To use it with OpenClaw:
+
+1. Copy or symlink the skill into your OpenClaw workspace:
+   ```bash
+   cp -r skills/home-energy-manager ~/.openclaw/skills/
+   ```
+
+2. Set the API URL in your OpenClaw config (`~/.openclaw/openclaw.json`):
+   ```json
+   {
+     "skills": {
+       "entries": {
+         "home-energy-manager": {
+           "enabled": true,
+           "env": { "HOME_ENERGY_API_URL": "http://192.168.1.100:8000" }
+         }
+       }
+     }
+   }
+   ```
+
+3. The agent can now discover and execute home energy actions via the REST API with built-in safeguards.
+
+See `skills/home-energy-manager/SKILL.md` for the full instruction set the agent receives.
 
 ## CLI usage
 
@@ -113,6 +184,10 @@ python -m src.cli daikin mode heating      # heating / cooling / auto
 
 # --- Monitor ---
 python -m src.cli monitor                  # Continuous loop with alerts
+
+# --- Options ---
+python -m src.cli status --json            # JSON output for OpenClaw
+python -m src.cli daikin status --api      # Route through API server
 ```
 
 ### Example output
@@ -122,8 +197,8 @@ python -m src.cli monitor                  # Continuous loop with alerts
 │ Power       : ON
 │ Mode        : heating
 │ Outdoor     : 15°C
-│ LWT         : 22°C
-│ LWT offset  : -5
+│ Radiator    : 22°C
+│ Curve adj.  : -5
 │ DHW tank    : 44°C (target 45°C)
 │ Weather reg : on
 └──────────────────────────────────────
@@ -133,6 +208,11 @@ python -m src.cli monitor                  # Continuous loop with alerts
 
 ```
 src/
+  api/
+    main.py         # FastAPI app + REST endpoints
+    models.py       # Pydantic request/response schemas
+    safeguards.py   # Confirmation tokens, rate limiting, audit
+    templates/      # Jinja2 web UI templates (tabbed dashboard)
   foxess/
     client.py       # Fox ESS Open API client (signature auth)
     models.py       # Data models for device telemetry
@@ -140,10 +220,16 @@ src/
     client.py       # Daikin Onecta API client (OAuth2)
     auth.py         # OAuth2 flow + tunnel-based setup
     models.py       # Data models for devices and status
+  energy/
+    models.py       # Energy provider data models
+    provider.py     # Abstract base class for provider clients
   cli/
     __main__.py     # CLI entrypoint
   config.py         # Config + .env loader
-  notifier.py       # WhatsApp/webhook alerts
+  notifier.py       # WhatsApp/webhook alerts (via OpenClaw)
+skills/
+  home-energy-manager/
+    SKILL.md        # OpenClaw / AgentSkills skill definition
 tests/
   test_foxess.py    # Fox ESS client unit tests
   test_daikin.py    # Daikin client unit tests (14 tests)
@@ -155,6 +241,27 @@ tests/
 - Token files (`*.json`) are gitignored
 - SSL certificates (`*.pem`) for the local callback server are gitignored
 - The `--setup` tunnel is ephemeral — the URL expires when the SSH session ends
+
+## Energy Dashboard (Coming Soon)
+
+The Energy tab in the web dashboard is a placeholder for upcoming energy provider integrations. When complete, it will support:
+
+- **Octopus Energy**: Agile, Go, Tracker, and fixed tariffs with half-hourly pricing data
+- **British Gas**: Fixed and variable tariffs, SEG export payments
+- **Manual entry**: Enter your own rates for cost tracking
+
+Features planned:
+- Real-time tariff display
+- Daily/weekly/monthly cost breakdown
+- Export earnings tracking
+- Time-of-use rate visualization
+- Cost optimization suggestions
+
+The API endpoints (`/api/v1/energy/*`) are stubbed and ready for implementation.
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## Known issues & workarounds
 

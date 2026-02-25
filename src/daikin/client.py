@@ -14,7 +14,7 @@ import urllib.request
 import urllib.error
 
 from .auth import get_valid_access_token
-from .models import DaikinDevice, DaikinStatus, TemperatureControlSettings
+from .models import DaikinDevice, DaikinStatus, TemperatureControlSettings, SetpointRange
 from ..config import config
 
 
@@ -89,9 +89,23 @@ class DaikinClient:
                 mode_data = active_ops.get(device.operation_mode, active_ops.get("auto", {}))
                 setpoints = mode_data.get("setpoints", {})
                 if "roomTemperature" in setpoints:
-                    device.temperature.set_point = setpoints["roomTemperature"].get("value")
+                    rt = setpoints["roomTemperature"]
+                    device.temperature.set_point = rt.get("value")
+                    device.room_temp_range = SetpointRange(
+                        min_value=rt.get("minValue"),
+                        max_value=rt.get("maxValue"),
+                        step_value=rt.get("stepValue"),
+                        settable=rt.get("settable", True),
+                    )
                 if "leavingWaterOffset" in setpoints:
-                    device.lwt_offset = setpoints["leavingWaterOffset"].get("value")
+                    lwo = setpoints["leavingWaterOffset"]
+                    device.lwt_offset = lwo.get("value")
+                    device.lwt_offset_range = SetpointRange(
+                        min_value=lwo.get("minValue"),
+                        max_value=lwo.get("maxValue"),
+                        step_value=lwo.get("stepValue"),
+                        settable=lwo.get("settable", True),
+                    )
 
                 sensor = mp.get("sensoryData", {}).get("value", {})
                 room = sensor.get("roomTemperature", {}).get("value")
@@ -104,9 +118,11 @@ class DaikinClient:
                 if lwt is not None:
                     device.leaving_water_temperature = lwt
 
-                sp_mode = mp.get("setpointMode", {}).get("value", "")
+                sp_mode_data = mp.get("setpointMode", {})
+                sp_mode = sp_mode_data.get("value", "")
                 if sp_mode == "weatherDependent":
                     device.weather_regulation_enabled = True
+                device.weather_regulation_settable = sp_mode_data.get("settable", True)
 
             elif "domestichotwater" in mp_type:
                 device.dhw_mp_id = mp.get("embeddedId", device.dhw_mp_id)
@@ -128,6 +144,12 @@ class DaikinClient:
                         device.tank_target = dhw_setpoint["value"]
                     device.tank_target_min = dhw_setpoint.get("minValue")
                     device.tank_target_max = dhw_setpoint.get("maxValue")
+                    device.tank_temp_range = SetpointRange(
+                        min_value=dhw_setpoint.get("minValue"),
+                        max_value=dhw_setpoint.get("maxValue"),
+                        step_value=dhw_setpoint.get("stepValue"),
+                        settable=dhw_setpoint.get("settable", True),
+                    )
 
         return device
 

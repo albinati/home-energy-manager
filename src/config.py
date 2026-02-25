@@ -35,6 +35,15 @@ class Config:
     # Alerts
     ALERT_WHATSAPP_NUMBER: str = os.getenv("ALERT_WHATSAPP_NUMBER", "")
 
+    # Energy providers (for tariff tracking and cost analysis)
+    OCTOPUS_API_KEY: str = os.getenv("OCTOPUS_API_KEY", "")
+    OCTOPUS_ACCOUNT_NUMBER: str = os.getenv("OCTOPUS_ACCOUNT_NUMBER", "")
+    BRITISH_GAS_API_KEY: str = os.getenv("BRITISH_GAS_API_KEY", "")
+
+    # API server
+    API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
+    API_PORT: int = int(os.getenv("API_PORT", "8000"))
+
     def foxess_client_kwargs(self) -> dict:
         """Return the right kwargs for FoxESSClient based on what's configured."""
         if not self.FOXESS_DEVICE_SN:
