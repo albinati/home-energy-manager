@@ -10,7 +10,7 @@ class TestFoxESSClient(unittest.TestCase):
     def setUp(self):
         self.client = FoxESSClient(api_key="test_key", device_sn="TEST_SN")
 
-    @patch.object(FoxESSClient, "_post")
+    @patch.object(FoxESSClient, "_open_post")
     def test_get_realtime(self, mock_post):
         mock_post.return_value = [
             {"variable": "SoC", "value": 75.0},
@@ -30,7 +30,7 @@ class TestFoxESSClient(unittest.TestCase):
         self.assertAlmostEqual(data.battery_power, 1.7)
         self.assertAlmostEqual(data.grid_power, -1.5)
 
-    @patch.object(FoxESSClient, "_post")
+    @patch.object(FoxESSClient, "_open_post")
     def test_set_work_mode(self, mock_post):
         mock_post.return_value = {}
         self.client.set_work_mode("Self Use")
@@ -40,7 +40,7 @@ class TestFoxESSClient(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.client.set_work_mode("Invalid Mode")
 
-    @patch.object(FoxESSClient, "_post")
+    @patch.object(FoxESSClient, "_open_post")
     def test_set_charge_period(self, mock_post):
         mock_post.return_value = {}
         period = ChargePeriod(start_time="00:30", end_time="05:00", target_soc=90)

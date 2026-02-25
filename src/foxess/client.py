@@ -32,6 +32,12 @@ class FoxESSError(Exception):
 class FoxESSClient:
     OPEN_API_BASE = "https://www.foxesscloud.com/op/v0"
     CLOUD_API_BASE = "https://www.foxesscloud.com"
+    _BROWSER_HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.foxesscloud.com/",
+    }
 
     def __init__(
         self,
@@ -51,12 +57,15 @@ class FoxESSClient:
 
     # ── Official Open API (API key auth) ────────────────────────────────────
 
-    def _open_headers(self) -> dict:
+    def _open_headers(self, path: str) -> dict:
         timestamp = str(int(time.time() * 1000))
-        token = hashlib.md5(f"{self.api_key}{timestamp}".encode()).hexdigest()
+        signature_text = fr'{path}\r\n{self.api_key}\r\n{timestamp}'
+        signature = hashlib.md5(signature_text.encode()).hexdigest()
         return {
-            "token": token,
+            **self._BROWSER_HEADERS,
+            "token": self.api_key,
             "timestamp": timestamp,
+            "signature": signature,
             "lang": "en",
             "Content-Type": "application/json",
         }
@@ -64,7 +73,7 @@ class FoxESSClient:
     def _open_post(self, path: str, body: dict) -> dict:
         url = f"{self.OPEN_API_BASE}{path}"
         payload = json.dumps(body).encode()
-        req = urllib.request.Request(url, data=payload, headers=self._open_headers())
+        req = urllib.request.Request(url, data=payload, headers=self._open_headers(f"/op/v0{path}"))
         try:
             resp = urllib.request.urlopen(req, timeout=15)
             data = json.loads(resp.read())
@@ -79,7 +88,7 @@ class FoxESSClient:
         url = f"{self.OPEN_API_BASE}{path}"
         if params:
             url += "?" + urllib.parse.urlencode(params)
-        req = urllib.request.Request(url, headers=self._open_headers())
+        req = urllib.request.Request(url, headers=self._open_headers(f"/op/v0{path}"))
         try:
             resp = urllib.request.urlopen(req, timeout=15)
             data = json.loads(resp.read())
@@ -102,7 +111,7 @@ class FoxESSClient:
         req = urllib.request.Request(
             f"{self.CLOUD_API_BASE}/c/v0/user/login",
             data=payload,
-            headers={"Content-Type": "application/json", "lang": "en"},
+            headers={**self._BROWSER_HEADERS, "Content-Type": "application/json", "lang": "en"},
         )
         try:
             resp = urllib.request.urlopen(req, timeout=15)
@@ -121,6 +130,7 @@ class FoxESSClient:
         if not self._session_token:
             self._login()
         return {
+            **self._BROWSER_HEADERS,
             "token": self._session_token,
             "lang": "en",
             "Content-Type": "application/json",
@@ -251,14 +261,11 @@ class FoxESSClient:
             },
             "minSocOnGrid": period.target_soc,
         }
-        path = "/device/setting/set" if self.api_key else "/c/v0/device/setting/set"
-        base = self.OPEN_API_BASE if self.api_key else self.CLOUD_API_BASE
-        headers = self._open_headers() if self.api_key else self._cloud_headers()
-        payload = json.dumps({"sn": self.device_sn, "key": key, "value": value}).encode()
-        req = urllib.request.Request(
-            f"{base}{path}", data=payload, headers=headers,
-        )
-        urllib.request.urlopen(req, timeout=15)
+        body = {"sn": self.device_sn, "key": key, "value": value}
+        if self.api_key:
+            self._open_post("/device/setting/set", body)
+        else:
+            self._cloud_post("/c/v0/device/setting/set", body)
 
     def get_energy_today(self) -> dict:
         """Get today's energy summary (kWh)."""

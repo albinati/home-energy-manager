@@ -49,7 +49,8 @@ class DaikinClient:
         )
         try:
             resp = urllib.request.urlopen(req, timeout=15)
-            return json.loads(resp.read()) if resp.read() else {}
+            body = resp.read()
+            return json.loads(body) if body else {}
         except urllib.error.HTTPError as e:
             raise DaikinError(f"HTTP {e.code}: {e.read().decode()}")
 
@@ -67,50 +68,66 @@ class DaikinClient:
     def _parse_device(self, gw_id: str, name: str, mgmt_points: list, raw: dict) -> DaikinDevice | None:
         """Extract readable state from management points."""
         device = DaikinDevice(id=gw_id, name=name, raw=raw)
-        device.model = raw.get("modelInfo", "")
+        device.model = raw.get("deviceModel", "")
 
         for mp in mgmt_points:
-            mp_type = mp.get("managementPointType", "")
-            # climateControl or climateControlMainZone
-            if "climateControl" in mp_type.lower():
-                data_points = mp.get("characteristics", {})
-                # on/off
-                on_off = data_points.get("onOffMode", {}).get("value")
+            mp_type = mp.get("managementPointType", "").lower()
+
+            if "climatecontrol" in mp_type:
+                device.climate_mp_id = mp.get("embeddedId", device.climate_mp_id)
+
+                on_off = mp.get("onOffMode", {}).get("value")
                 if on_off is not None:
                     device.is_on = (on_off == "on")
-                # operation mode
-                op_mode = data_points.get("operationMode", {}).get("value")
+
+                op_mode = mp.get("operationMode", {}).get("value")
                 if op_mode:
                     device.operation_mode = op_mode
-                # temperatures
-                temp_ctrl = data_points.get("temperatureControl", {}).get("value", {})
-                if temp_ctrl:
-                    ops = temp_ctrl.get("operationModes", {})
-                    for mode_name, mode_data in ops.items():
-                        if mode_name == device.operation_mode:
-                            device.temperature.set_point = (
-                                mode_data.get("setpoints", {})
-                                .get("roomTemperature", {})
-                                .get("value")
-                            )
-                # room temp
-                room_temp = data_points.get("sensoryData", {}).get("value", {}).get("roomTemperature", {}).get("value")
-                if room_temp is not None:
-                    device.temperature.room_temperature = room_temp
-                # outdoor temp
-                outdoor_temp = data_points.get("sensoryData", {}).get("value", {}).get("outdoorTemperature", {}).get("value")
-                if outdoor_temp is not None:
-                    device.temperature.outdoor_temperature = outdoor_temp
-                # weather regulation
-                wr = data_points.get("weatherRegulatedControl", {}).get("value")
-                if wr is not None:
-                    device.weather_regulation_enabled = (wr == "on")
-            # Altherma leaving water temperature
-            if "domesticHotWater" in mp_type.lower() or "heatPump" in mp_type.lower():
-                chars = mp.get("characteristics", {})
-                lwt = chars.get("leavingWaterTemperature", {}).get("value")
+
+                temp_ctrl = mp.get("temperatureControl", {}).get("value", {})
+                active_ops = temp_ctrl.get("operationModes", {})
+                mode_data = active_ops.get(device.operation_mode, active_ops.get("auto", {}))
+                setpoints = mode_data.get("setpoints", {})
+                if "roomTemperature" in setpoints:
+                    device.temperature.set_point = setpoints["roomTemperature"].get("value")
+                if "leavingWaterOffset" in setpoints:
+                    device.lwt_offset = setpoints["leavingWaterOffset"].get("value")
+
+                sensor = mp.get("sensoryData", {}).get("value", {})
+                room = sensor.get("roomTemperature", {}).get("value")
+                if room is not None:
+                    device.temperature.room_temperature = room
+                outdoor = sensor.get("outdoorTemperature", {}).get("value")
+                if outdoor is not None:
+                    device.temperature.outdoor_temperature = outdoor
+                lwt = sensor.get("leavingWaterTemperature", {}).get("value")
                 if lwt is not None:
                     device.leaving_water_temperature = lwt
+
+                sp_mode = mp.get("setpointMode", {}).get("value", "")
+                if sp_mode == "weatherDependent":
+                    device.weather_regulation_enabled = True
+
+            elif "domestichotwater" in mp_type:
+                device.dhw_mp_id = mp.get("embeddedId", device.dhw_mp_id)
+
+                sensor = mp.get("sensoryData", {}).get("value", {})
+                tank = sensor.get("tankTemperature", {}).get("value")
+                if tank is not None:
+                    device.tank_temperature = tank
+
+                temp_ctrl = mp.get("temperatureControl", {}).get("value", {})
+                dhw_setpoint = (
+                    temp_ctrl.get("operationModes", {})
+                    .get("heating", {})
+                    .get("setpoints", {})
+                    .get("domesticHotWaterTemperature", {})
+                )
+                if isinstance(dhw_setpoint, dict):
+                    if dhw_setpoint.get("value") is not None:
+                        device.tank_target = dhw_setpoint["value"]
+                    device.tank_target_min = dhw_setpoint.get("minValue")
+                    device.tank_target_max = dhw_setpoint.get("maxValue")
 
         return device
 
@@ -123,69 +140,65 @@ class DaikinClient:
             target_temp=device.temperature.set_point,
             outdoor_temp=device.temperature.outdoor_temperature,
             lwt=device.leaving_water_temperature,
+            lwt_offset=device.lwt_offset,
+            tank_temp=device.tank_temperature,
+            tank_target=device.tank_target,
             weather_regulation=device.weather_regulation_enabled,
         )
 
-    def set_power(self, device_id: str, on: bool) -> None:
-        """Turn heat pump on or off."""
+    def _climate_path(self, device: DaikinDevice, characteristic: str) -> str:
+        return f"/gateway-devices/{device.id}/management-points/{device.climate_mp_id}/characteristics/{characteristic}"
+
+    def _dhw_path(self, device: DaikinDevice, characteristic: str) -> str:
+        return f"/gateway-devices/{device.id}/management-points/{device.dhw_mp_id}/characteristics/{characteristic}"
+
+    def set_power(self, device: DaikinDevice, on: bool) -> None:
+        """Turn climate control on or off."""
+        self._patch(self._climate_path(device, "onOffMode"), {"value": "on" if on else "off"})
+
+    def set_temperature(self, device: DaikinDevice, temperature: float, mode: str = "heating") -> None:
+        """Set target room temperature."""
         self._patch(
-            f"/gateway-devices/{device_id}/management-points/climateControl/characteristics/onOffMode",
-            {"value": "on" if on else "off"},
+            self._climate_path(device, "temperatureControl"),
+            {"value": {"operationModes": {mode: {"setpoints": {"roomTemperature": {"value": temperature}}}}}},
         )
 
-    def set_temperature(self, device_id: str, temperature: float, mode: str = "heating") -> None:
-        """Set target room temperature.
-
-        Args:
-            device_id: Device UUID from get_devices()
-            temperature: Target temperature in °C
-            mode: "heating" or "cooling" or "auto"
-        """
+    def set_lwt_offset(self, device: DaikinDevice, offset: float, mode: str = "heating") -> None:
+        """Set leaving-water-temperature offset from weather curve (Altherma)."""
         self._patch(
-            f"/gateway-devices/{device_id}/management-points/climateControl/characteristics/temperatureControl",
-            {
-                "value": {
-                    "operationModes": {
-                        mode: {
-                            "setpoints": {
-                                "roomTemperature": {"value": temperature}
-                            }
-                        }
-                    }
-                }
-            },
+            self._climate_path(device, "temperatureControl"),
+            {"value": {"operationModes": {mode: {"setpoints": {"leavingWaterOffset": {"value": offset}}}}}},
         )
 
-    def set_operation_mode(self, device_id: str, mode: str) -> None:
+    def set_operation_mode(self, device: DaikinDevice, mode: str) -> None:
         """Set operation mode: heating / cooling / auto / fan_only / dry."""
         valid = ["heating", "cooling", "auto", "fan_only", "dry"]
         if mode not in valid:
             raise ValueError(f"Invalid mode '{mode}'. Choose from: {valid}")
-        self._patch(
-            f"/gateway-devices/{device_id}/management-points/climateControl/characteristics/operationMode",
-            {"value": mode},
-        )
+        self._patch(self._climate_path(device, "operationMode"), {"value": mode})
 
-    def set_weather_regulation(self, device_id: str, enabled: bool) -> None:
+    def set_weather_regulation(self, device: DaikinDevice, enabled: bool) -> None:
         """Enable/disable weather compensation (Altherma feature)."""
         self._patch(
-            f"/gateway-devices/{device_id}/management-points/climateControl/characteristics/weatherRegulatedControl",
-            {"value": "on" if enabled else "off"},
+            self._climate_path(device, "setpointMode"),
+            {"value": "weatherDependent" if enabled else "fixed"},
         )
 
-    def set_leaving_water_temperature(self, device_id: str, temperature: float) -> None:
-        """Set leaving water temperature target (Altherma only)."""
+    def set_tank_temperature(self, device: DaikinDevice, temperature: float) -> None:
+        """Set domestic hot water tank target temperature."""
+        if device.tank_target_min is not None and temperature < device.tank_target_min:
+            raise ValueError(f"Min tank temperature is {device.tank_target_min}°C")
+        if device.tank_target_max is not None and temperature > device.tank_target_max:
+            raise ValueError(f"Max tank temperature is {device.tank_target_max}°C")
         self._patch(
-            f"/gateway-devices/{device_id}/management-points/climateControl/characteristics/temperatureControl",
-            {
-                "value": {
-                    "operationModes": {
-                        "heating": {
-                            "setpoints": {
-                                "leavingWaterOffset": {"value": temperature}
-                            }
-                        }
-                    }
-                }
-            },
+            self._dhw_path(device, "temperatureControl"),
+            {"value": {"operationModes": {"heating": {"setpoints": {"domesticHotWaterTemperature": {"value": temperature}}}}}},
         )
+
+    def set_tank_power(self, device: DaikinDevice, on: bool) -> None:
+        """Turn domestic hot water tank on or off."""
+        self._patch(self._dhw_path(device, "onOffMode"), {"value": "on" if on else "off"})
+
+    def set_tank_powerful(self, device: DaikinDevice, on: bool) -> None:
+        """Enable/disable powerful mode on DHW tank (fast heat-up)."""
+        self._patch(self._dhw_path(device, "powerfulMode"), {"value": "on" if on else "off"})
