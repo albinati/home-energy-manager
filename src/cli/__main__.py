@@ -21,7 +21,7 @@ from ..notifier import notify
 
 
 def foxess_status():
-    client = FoxESSClient(config.FOXESS_API_KEY, config.FOXESS_DEVICE_SN)
+    client = FoxESSClient(**config.foxess_client_kwargs())
     d = client.get_realtime()
     bat_arrow = "⬆ charging" if d.battery_power > 0 else ("⬇ discharging" if d.battery_power < 0 else "idle")
     grid_label = "importing" if d.grid_power > 0 else "exporting"
@@ -36,14 +36,14 @@ def foxess_status():
 
 
 def foxess_charge(start: str, end: str, soc: int, period: int = 0):
-    client = FoxESSClient(config.FOXESS_API_KEY, config.FOXESS_DEVICE_SN)
+    client = FoxESSClient(**config.foxess_client_kwargs())
     cp = ChargePeriod(start_time=start, end_time=end, target_soc=soc, enable=True)
     client.set_charge_period(period, cp)
     print(f"✅ Charge period {period + 1} set: {start}–{end}, target SoC {soc}%")
 
 
 def foxess_mode(mode: str):
-    client = FoxESSClient(config.FOXESS_API_KEY, config.FOXESS_DEVICE_SN)
+    client = FoxESSClient(**config.foxess_client_kwargs())
     client.set_work_mode(mode)
     print(f"✅ Work mode set to: {mode}")
 
@@ -121,7 +121,7 @@ def full_status():
 def monitor_loop(interval: int = 60):
     """Continuous monitoring loop with alerts."""
     print(f"Starting monitor (interval: {interval}s) — Ctrl+C to stop\n")
-    foxess_client = FoxESSClient(config.FOXESS_API_KEY, config.FOXESS_DEVICE_SN)
+    foxess_client = FoxESSClient(**config.foxess_client_kwargs())
     daikin_client = DaikinClient()
 
     while True:

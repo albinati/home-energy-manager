@@ -7,10 +7,13 @@ load_dotenv()
 
 
 class Config:
-    # Fox ESS
+    # Fox ESS — Option A: Open API key
     FOXESS_API_KEY: str = os.getenv("FOXESS_API_KEY", "")
+    # Fox ESS — Option B: username/password (unofficial, works for endUser accounts)
+    FOXESS_USERNAME: str = os.getenv("FOXESS_USERNAME", "")
+    FOXESS_PASSWORD: str = os.getenv("FOXESS_PASSWORD", "")
+    # Fox ESS — device serial (always required)
     FOXESS_DEVICE_SN: str = os.getenv("FOXESS_DEVICE_SN", "")
-    FOXESS_BASE_URL: str = "https://www.foxesscloud.com/op/v0"
     FOXESS_ALERT_LOW_SOC: int = int(os.getenv("FOXESS_ALERT_LOW_SOC", "10"))
 
     # Daikin
@@ -25,6 +28,23 @@ class Config:
 
     # Alerts
     ALERT_WHATSAPP_NUMBER: str = os.getenv("ALERT_WHATSAPP_NUMBER", "")
+
+    def foxess_client_kwargs(self) -> dict:
+        """Return the right kwargs for FoxESSClient based on what's configured."""
+        if not self.FOXESS_DEVICE_SN:
+            raise ValueError("FOXESS_DEVICE_SN is required. Find it in foxesscloud.com → Devices.")
+        kwargs = {"device_sn": self.FOXESS_DEVICE_SN}
+        if self.FOXESS_API_KEY:
+            kwargs["api_key"] = self.FOXESS_API_KEY
+        elif self.FOXESS_USERNAME and self.FOXESS_PASSWORD:
+            kwargs["username"] = self.FOXESS_USERNAME
+            kwargs["password"] = self.FOXESS_PASSWORD
+        else:
+            raise ValueError(
+                "Fox ESS auth not configured.\n"
+                "Set either FOXESS_API_KEY or FOXESS_USERNAME + FOXESS_PASSWORD in .env"
+            )
+        return kwargs
 
 
 config = Config()
