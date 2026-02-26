@@ -15,15 +15,20 @@ class TestFoxESSClient(unittest.TestCase):
     @patch.object(FoxESSClient, "_open_post")
     def test_get_realtime(self, mock_post):
         mock_post.return_value = [
-            {"variable": "SoC", "value": 75.0},
-            {"variable": "pvPower", "value": 3.2},
-            {"variable": "gridConsumptionPower", "value": 0.0},
-            {"variable": "feedinPower", "value": 1.5},
-            {"variable": "batChargePower", "value": 1.7},
-            {"variable": "batDischargePower", "value": 0.0},
-            {"variable": "loadsPower", "value": 1.9},
-            {"variable": "generationPower", "value": 3.2},
-            {"variable": "workMode", "value": "Self Use"},
+            {
+                "deviceSN": "TEST_SN",
+                "datas": [
+                    {"variable": "SoC", "value": 75.0},
+                    {"variable": "pvPower", "value": 3.2},
+                    {"variable": "gridConsumptionPower", "value": 0.0},
+                    {"variable": "feedinPower", "value": 1.5},
+                    {"variable": "batChargePower", "value": 1.7},
+                    {"variable": "batDischargePower", "value": 0.0},
+                    {"variable": "loadsPower", "value": 1.9},
+                    {"variable": "generationPower", "value": 3.2},
+                    {"variable": "workMode", "value": "Self Use"},
+                ],
+            }
         ]
         data = self.client.get_realtime()
         self.assertEqual(data.soc, 75.0)
@@ -43,6 +48,49 @@ class TestFoxESSClient(unittest.TestCase):
             self.client.set_work_mode("Invalid Mode")
 
     @patch.object(FoxESSClient, "_open_post")
+    def test_get_realtime_work_mode_numeric(self, mock_post):
+        """API may return workMode as numeric code (e.g. 0 = Self Use)."""
+        mock_post.return_value = [
+            {
+                "deviceSN": "TEST_SN",
+                "datas": [
+                    {"variable": "SoC", "value": 50.0},
+                    {"variable": "pvPower", "value": 0.0},
+                    {"variable": "gridConsumptionPower", "value": 0.0},
+                    {"variable": "feedinPower", "value": 0.0},
+                    {"variable": "batChargePower", "value": 0.0},
+                    {"variable": "batDischargePower", "value": 0.0},
+                    {"variable": "loadsPower", "value": 0.0},
+                    {"variable": "generationPower", "value": 0.0},
+                    {"variable": "workMode", "value": 0},
+                ],
+            }
+        ]
+        data = self.client.get_realtime()
+        self.assertEqual(data.work_mode, "Self Use")
+
+    @patch.object(FoxESSClient, "_open_post")
+    def test_get_realtime_work_mode_empty(self, mock_post):
+        """When workMode is missing or empty, return 'unknown' not empty string."""
+        mock_post.return_value = [
+            {
+                "deviceSN": "TEST_SN",
+                "datas": [
+                    {"variable": "SoC", "value": 50.0},
+                    {"variable": "pvPower", "value": 0.0},
+                    {"variable": "gridConsumptionPower", "value": 0.0},
+                    {"variable": "feedinPower", "value": 0.0},
+                    {"variable": "batChargePower", "value": 0.0},
+                    {"variable": "batDischargePower", "value": 0.0},
+                    {"variable": "loadsPower", "value": 0.0},
+                    {"variable": "generationPower", "value": 0.0},
+                ],
+            }
+        ]
+        data = self.client.get_realtime()
+        self.assertEqual(data.work_mode, "unknown")
+
+    @patch.object(FoxESSClient, "_open_post")
     def test_set_charge_period(self, mock_post):
         mock_post.return_value = {}
         period = ChargePeriod(start_time="00:30", end_time="05:00", target_soc=90)
@@ -58,7 +106,9 @@ class TestFoxESSCache(unittest.TestCase):
     def setUp(self):
         # Cold cache so each test starts with no cached data
         foxess_service._last_realtime = None
-        foxess_service._last_realtime_updated = None
+        foxess_service._last_realtime_updated_monotonic = None
+        foxess_service._last_realtime_wallclock = None
+        foxess_service._refresh_timestamps = []
 
     @patch("src.foxess.service._get_client")
     def test_first_call_fetches_and_caches(self, mock_get_client):
@@ -68,6 +118,7 @@ class TestFoxESSCache(unittest.TestCase):
 
         with patch("src.foxess.service.time") as mock_time:
             mock_time.monotonic.return_value = 0
+            mock_time.time.return_value = 1000.0  # floats so _record_realtime_refresh() comparisons work
             data = foxess_service.get_cached_realtime(max_age_seconds=30)
 
         self.assertEqual(data.soc, 50.0)
@@ -82,6 +133,7 @@ class TestFoxESSCache(unittest.TestCase):
 
         with patch("src.foxess.service.time") as mock_time:
             mock_time.monotonic.side_effect = [0, 10]  # first call 0, second call 10 (< 30)
+            mock_time.time.side_effect = [1000.0, 1010.0]  # one per get_cached_realtime -> _record_realtime_refresh
             first = foxess_service.get_cached_realtime(max_age_seconds=30)
             second = foxess_service.get_cached_realtime(max_age_seconds=30)
 
@@ -99,6 +151,7 @@ class TestFoxESSCache(unittest.TestCase):
 
         with patch("src.foxess.service.time") as mock_time:
             mock_time.monotonic.side_effect = [0, 100]  # second call sees 100 > 30
+            mock_time.time.side_effect = [1000.0, 1100.0]  # two refreshes
             first = foxess_service.get_cached_realtime(max_age_seconds=30)
             second = foxess_service.get_cached_realtime(max_age_seconds=30)
 
@@ -109,6 +162,11 @@ class TestFoxESSCache(unittest.TestCase):
 
 class TestFoxESSStatusEndpoint(unittest.TestCase):
     """Integration-style test for GET /api/v1/foxess/status using cached realtime."""
+
+    def setUp(self):
+        # Avoid get_refresh_stats() seeing MagicMocks from cache tests (it uses _refresh_timestamps / _last_realtime_wallclock)
+        foxess_service._refresh_timestamps = []
+        foxess_service._last_realtime_wallclock = None
 
     @patch("src.api.main.get_cached_realtime")
     def test_foxess_status_returns_cached_data(self, mock_get_cached):

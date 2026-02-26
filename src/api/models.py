@@ -257,3 +257,14 @@ class AssistantApplyResultItem(BaseModel):
 
 class AssistantApplyResponse(BaseModel):
     results: list[AssistantApplyResultItem] = Field(description="Per-action results")
+
+
+class SchedulerStatusResponse(BaseModel):
+    """Agile scheduler status: current price, next cheap window, planned LWT adjustment."""
+    enabled: bool
+    paused: bool
+    current_price_pence: Optional[float] = None
+    next_cheap_from: Optional[str] = None
+    next_cheap_to: Optional[str] = None
+    planned_lwt_adjustment: float = 0.0
+    tariff_code: Optional[str] = None

@@ -1,5 +1,6 @@
 """FastAPI application for home-energy-manager REST API."""
 import logging
+import os
 from pathlib import Path
 from typing import Optional
 from contextlib import asynccontextmanager
@@ -41,6 +42,7 @@ from .models import (
     EnergyProviderInfo,
     EnergyProvidersResponse,
     TariffResponse,
+    TariffTypeEnum,
     EnergyUsageResponse,
     AssistantRecommendRequest,
     AssistantRecommendResponse,
@@ -48,14 +50,24 @@ from .models import (
     AssistantApplyRequest,
     AssistantApplyResponse,
     AssistantApplyResultItem,
+    SchedulerStatusResponse,
 )
 from . import safeguards
 from ..assistant import build_context, get_suggestions, validate_suggested_actions, SuggestedAction
+from ..scheduler.runner import (
+    get_scheduler_status,
+    pause_scheduler,
+    resume_scheduler,
+    start_background_scheduler,
+    stop_background_scheduler,
+)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    start_background_scheduler()
     yield
+    stop_background_scheduler()
     safeguards.cleanup_expired_actions()
 
 
@@ -174,6 +186,12 @@ async def web_dashboard(request: Request):
             "foxess_error": foxess_error,
         },
     )
+
+
+@app.get("/api/v1/health")
+async def health():
+    """Lightweight health check for gateways and process managers."""
+    return {"status": "ok"}
 
 
 @app.get("/api/v1/daikin/status", response_model=list[DaikinStatusResponse])
@@ -1028,6 +1046,10 @@ async def assistant_apply(req: AssistantApplyRequest):
 
 # ── Energy Provider Endpoints (Stubs) ────────────────────────────────────────
 
+def _is_manual_tariff_configured() -> bool:
+    return config.MANUAL_TARIFF_IMPORT_PENCE > 0 or config.MANUAL_TARIFF_EXPORT_PENCE > 0
+
+
 ENERGY_PROVIDERS = [
     EnergyProviderInfo(
         provider=EnergyProviderEnum.OCTOPUS,
@@ -1044,7 +1066,7 @@ ENERGY_PROVIDERS = [
     EnergyProviderInfo(
         provider=EnergyProviderEnum.MANUAL,
         name="Manual Entry",
-        is_configured=False,
+        is_configured=_is_manual_tariff_configured(),
         description="Manually enter your tariff rates for cost tracking",
     ),
 ]
@@ -1064,13 +1086,22 @@ async def energy_providers():
 async def energy_tariff():
     """Get current tariff information from configured energy provider.
     
-    Returns 503 if no energy provider is configured.
+    Uses manual tariff (MANUAL_TARIFF_IMPORT_PENCE / MANUAL_TARIFF_EXPORT_PENCE) when set.
+    Returns 503 if no provider and no manual tariff configured.
     """
+    if _is_manual_tariff_configured():
+        return TariffResponse(
+            provider=EnergyProviderEnum.MANUAL,
+            tariff_name="Manual",
+            tariff_type=TariffTypeEnum.FIXED,
+            import_rate=config.MANUAL_TARIFF_IMPORT_PENCE,
+            export_rate=config.MANUAL_TARIFF_EXPORT_PENCE if config.MANUAL_TARIFF_EXPORT_PENCE > 0 else None,
+        )
     configured = [p for p in ENERGY_PROVIDERS if p.is_configured]
     if not configured:
         raise HTTPException(
             status_code=503,
-            detail="No energy provider configured. Set OCTOPUS_API_KEY or BRITISH_GAS_API_KEY in .env"
+            detail="No energy provider configured. Set OCTOPUS_API_KEY, BRITISH_GAS_API_KEY, or MANUAL_TARIFF_IMPORT_PENCE in .env"
         )
     raise HTTPException(
         status_code=501,
@@ -1094,6 +1125,37 @@ async def energy_usage():
         status_code=501,
         detail="Energy provider integration not yet implemented. Coming soon!"
     )
+
+
+# ── Agile Scheduler (Daikin LWT by Octopus price) ─────────────────────────────
+
+@app.get("/api/v1/scheduler/status", response_model=SchedulerStatusResponse)
+async def scheduler_status():
+    """Current Agile price, next cheap window, planned ASHP LWT adjustment, paused state."""
+    raw = get_scheduler_status()
+    return SchedulerStatusResponse(
+        enabled=raw["enabled"],
+        paused=raw["paused"],
+        current_price_pence=raw.get("current_price_pence"),
+        next_cheap_from=raw.get("next_cheap_from"),
+        next_cheap_to=raw.get("next_cheap_to"),
+        planned_lwt_adjustment=raw.get("planned_lwt_adjustment", 0.0),
+        tariff_code=raw.get("tariff_code"),
+    )
+
+
+@app.post("/api/v1/scheduler/pause")
+async def scheduler_pause():
+    """Pause the Agile-based Daikin scheduler (no more automatic LWT changes)."""
+    pause_scheduler()
+    return {"status": "paused"}
+
+
+@app.post("/api/v1/scheduler/resume")
+async def scheduler_resume():
+    """Resume the Agile-based Daikin scheduler."""
+    resume_scheduler()
+    return {"status": "resumed"}
 
 
 def run_server(host: str = "0.0.0.0", port: int = 8000):

@@ -37,8 +37,9 @@ class Config:
     )
     DAIKIN_ALERT_TEMP_DEVIATION: float = float(os.getenv("DAIKIN_ALERT_TEMP_DEVIATION", "2"))
 
-    # Alerts
-    ALERT_WHATSAPP_NUMBER: str = os.getenv("ALERT_WHATSAPP_NUMBER", "")
+    # Alerts — OpenClaw webhook (leave ALERT_CHANNEL blank for stdout-only)
+    ALERT_OPENCLAW_URL: str = os.getenv("ALERT_OPENCLAW_URL", "http://127.0.0.1:18789/api/send")
+    ALERT_CHANNEL: str = (os.getenv("ALERT_CHANNEL") or "").strip()
 
     # Energy providers (for tariff tracking and cost analysis)
     OCTOPUS_API_KEY: str = os.getenv("OCTOPUS_API_KEY", "")
@@ -57,6 +58,14 @@ class Config:
     # Manual tariff for cost-aware suggestions (p/kWh) when no energy provider is connected
     MANUAL_TARIFF_IMPORT_PENCE: float = float(os.getenv("MANUAL_TARIFF_IMPORT_PENCE", "0"))
     MANUAL_TARIFF_EXPORT_PENCE: float = float(os.getenv("MANUAL_TARIFF_EXPORT_PENCE", "0"))
+
+    # Agile scheduler (Daikin ASHP by price)
+    SCHEDULER_ENABLED: bool = os.getenv("SCHEDULER_ENABLED", "false").lower() in ("true", "1", "yes")
+    OCTOPUS_TARIFF_CODE: str = (os.getenv("OCTOPUS_TARIFF_CODE") or "").strip()
+    SCHEDULER_CHEAP_THRESHOLD_PENCE: float = float(os.getenv("SCHEDULER_CHEAP_THRESHOLD_PENCE", "12"))
+    SCHEDULER_PEAK_START: str = os.getenv("SCHEDULER_PEAK_START", "16:00")
+    SCHEDULER_PEAK_END: str = os.getenv("SCHEDULER_PEAK_END", "19:00")
+    SCHEDULER_PREHEAT_LWT_BOOST: float = float(os.getenv("SCHEDULER_PREHEAT_LWT_BOOST", "2"))
 
     def foxess_client_kwargs(self) -> dict:
         """Return the right kwargs for FoxESSClient based on what's configured."""
