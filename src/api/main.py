@@ -1,5 +1,5 @@
 """FastAPI application for home-energy-manager REST API."""
-import os
+import logging
 from pathlib import Path
 from typing import Optional
 from contextlib import asynccontextmanager
@@ -13,6 +13,9 @@ from ..config import config
 from ..daikin.client import DaikinClient, DaikinError
 from ..foxess.client import FoxESSClient, FoxESSError
 from ..foxess.models import ChargePeriod
+from ..foxess.service import get_cached_realtime, get_refresh_stats
+
+logger = logging.getLogger(__name__)
 
 from .models import (
     DaikinStatusResponse,
@@ -39,8 +42,15 @@ from .models import (
     EnergyProvidersResponse,
     TariffResponse,
     EnergyUsageResponse,
+    AssistantRecommendRequest,
+    AssistantRecommendResponse,
+    SuggestedActionSchema,
+    AssistantApplyRequest,
+    AssistantApplyResponse,
+    AssistantApplyResultItem,
 )
 from . import safeguards
+from ..assistant import build_context, get_suggestions, validate_suggested_actions, SuggestedAction
 
 
 @asynccontextmanager
@@ -115,11 +125,16 @@ async def web_dashboard(request: Request):
             }
     except Exception as e:
         daikin_error = str(e)
+        logger.warning("Dashboard: Daikin status failed: %s", e, exc_info=True)
 
     if config.FOXESS_API_KEY or (config.FOXESS_USERNAME and config.FOXESS_PASSWORD):
         try:
-            client = get_foxess_client()
-            d = client.get_realtime()
+            d = get_cached_realtime()
+            last_ts, refresh_count = get_refresh_stats()
+            updated_at_str = None
+            if last_ts is not None:
+                from datetime import datetime, timezone
+                updated_at_str = datetime.fromtimestamp(last_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
             foxess_status = {
                 "soc": d.soc,
                 "solar_power": d.solar_power,
@@ -127,10 +142,28 @@ async def web_dashboard(request: Request):
                 "battery_power": d.battery_power,
                 "load_power": d.load_power,
                 "work_mode": d.work_mode,
+                "updated_at": updated_at_str,
+                "refresh_count_24h": refresh_count,
+                "refresh_limit_24h": 1440,
             }
+            logger.debug("Dashboard: Fox ESS data loaded soc=%.1f solar=%.2f", d.soc, d.solar_power)
+        except TimeoutError as e:
+            foxess_error = "Fox ESS cloud request timed out."
+            logger.warning("Dashboard: Fox ESS timeout: %s", e)
+        except OSError as e:
+            foxess_error = f"Fox ESS cloud unreachable: {e}"
+            logger.warning("Dashboard: Fox ESS connection error: %s", e)
         except Exception as e:
             foxess_error = str(e)
+            logger.warning("Dashboard: Fox ESS status failed: %s", e, exc_info=True)
 
+    logger.info(
+        "Dashboard: daikin=%s foxess=%s daikin_error=%s foxess_error=%s",
+        "ok" if daikin_status else "none",
+        "ok" if foxess_status else "none",
+        bool(daikin_error),
+        bool(foxess_error),
+    )
     return templates.TemplateResponse(
         "dashboard.html",
         {
@@ -146,6 +179,7 @@ async def web_dashboard(request: Request):
 @app.get("/api/v1/daikin/status", response_model=list[DaikinStatusResponse])
 async def daikin_status():
     """Get status of all Daikin devices."""
+    logger.debug("GET /api/v1/daikin/status requested")
     try:
         client = get_daikin_client()
         devices = client.get_devices()
@@ -167,10 +201,13 @@ async def daikin_status():
                 tank_target=s.tank_target,
                 weather_regulation=s.weather_regulation,
             ))
+        logger.info("Daikin status: %d device(s)", len(result))
         return result
     except FileNotFoundError as e:
+        logger.warning("Daikin not configured: %s", e)
         raise HTTPException(status_code=503, detail=f"Daikin not configured: {e}")
     except DaikinError as e:
+        logger.warning("Daikin API error: %s", e)
         raise HTTPException(status_code=502, detail=str(e))
 
 
@@ -406,21 +443,43 @@ async def daikin_tank_power(req: TankPowerRequest):
 @app.get("/api/v1/foxess/status", response_model=FoxESSStatusResponse)
 async def foxess_status():
     """Get Fox ESS battery/solar status."""
+    logger.debug("GET /api/v1/foxess/status requested")
     try:
-        client = get_foxess_client()
-        d = client.get_realtime()
-        return FoxESSStatusResponse(
+        d = get_cached_realtime()
+        last_ts, refresh_count = get_refresh_stats()
+        updated_at_str = None
+        if last_ts is not None:
+            from datetime import datetime, timezone
+            updated_at_str = datetime.fromtimestamp(last_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        out = FoxESSStatusResponse(
             soc=d.soc,
             solar_power=d.solar_power,
             grid_power=d.grid_power,
             battery_power=d.battery_power,
             load_power=d.load_power,
             work_mode=d.work_mode,
+            updated_at=updated_at_str,
+            refresh_count_24h=refresh_count,
+            refresh_limit_24h=1440,
         )
+        logger.info(
+            "Fox ESS status: soc=%.1f solar=%.2f grid=%.2f battery=%.2f load=%.2f work_mode=%s refresh_24h=%s",
+            out.soc, out.solar_power, out.grid_power, out.battery_power, out.load_power,
+            out.work_mode, (out.refresh_count_24h or 0),
+        )
+        return out
     except ValueError as e:
+        logger.warning("Fox ESS not configured: %s", e)
         raise HTTPException(status_code=503, detail=f"Fox ESS not configured: {e}")
     except FoxESSError as e:
+        logger.warning("Fox ESS API error: %s", e)
         raise HTTPException(status_code=502, detail=str(e))
+    except TimeoutError as e:
+        logger.warning("Fox ESS API timeout: %s", e)
+        raise HTTPException(status_code=504, detail="Fox ESS cloud request timed out. Try again shortly.")
+    except OSError as e:
+        logger.warning("Fox ESS API connection error: %s", e)
+        raise HTTPException(status_code=502, detail=f"Fox ESS cloud unreachable: {e}")
 
 
 @app.post("/api/v1/foxess/mode", response_model=PendingActionResponse | ActionResult)
@@ -831,6 +890,140 @@ async def _execute_action(action_type: str, params: dict) -> ActionResult:
         raise HTTPException(status_code=502, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# ── Assistant Endpoints ─────────────────────────────────────────────────────
+
+def _get_assistant_context() -> tuple[list[dict], Optional[dict], Optional[dict]]:
+    """Return (daikin_status_list, foxess_status_dict, tariff_dict) for assistant context."""
+    daikin_list: list[dict] = []
+    foxess_status: Optional[dict] = None
+    tariff: Optional[dict] = None
+    if config.MANUAL_TARIFF_IMPORT_PENCE > 0 or config.MANUAL_TARIFF_EXPORT_PENCE > 0:
+        tariff = {
+            "import_rate": config.MANUAL_TARIFF_IMPORT_PENCE,
+            "export_rate": config.MANUAL_TARIFF_EXPORT_PENCE,
+            "tariff_name": "Manual",
+        }
+    try:
+        client = get_daikin_client()
+        devices = client.get_devices()
+        for dev in devices or []:
+            s = client.get_status(dev)
+            daikin_list.append({
+                "device_id": dev.id,
+                "device_name": dev.model or s.device_name or dev.id,
+                "is_on": s.is_on,
+                "mode": s.mode,
+                "room_temp": s.room_temp,
+                "target_temp": s.target_temp,
+                "outdoor_temp": s.outdoor_temp,
+                "lwt": s.lwt,
+                "lwt_offset": s.lwt_offset,
+                "tank_temp": s.tank_temp,
+                "tank_target": s.tank_target,
+                "weather_regulation": s.weather_regulation,
+            })
+    except Exception:
+        pass
+    if config.FOXESS_API_KEY or (config.FOXESS_USERNAME and config.FOXESS_PASSWORD):
+        try:
+            d = get_cached_realtime()
+            foxess_status = {
+                "soc": d.soc,
+                "solar_power": d.solar_power,
+                "grid_power": d.grid_power,
+                "battery_power": d.battery_power,
+                "load_power": d.load_power,
+                "work_mode": d.work_mode,
+            }
+        except Exception as e:
+            logging.getLogger(__name__).warning("Fox ESS unavailable for assistant context: %s", e)
+    return daikin_list, foxess_status, tariff
+
+
+@app.post("/api/v1/assistant/recommend", response_model=AssistantRecommendResponse)
+async def assistant_recommend(req: AssistantRecommendRequest):
+    """Get optimization suggestions from the AI assistant (comfort vs cost)."""
+    daikin_list, foxess_status, tariff = _get_assistant_context()
+    context = build_context(daikin_list, foxess_status, tariff)
+    reply, actions = get_suggestions(
+        context,
+        req.preference.value,
+        req.message,
+    )
+    return AssistantRecommendResponse(
+        reply=reply,
+        suggested_actions=[
+            SuggestedActionSchema(action=a.action, parameters=a.parameters, reason=a.reason)
+            for a in actions
+        ],
+    )
+
+
+@app.post("/api/v1/assistant/apply", response_model=AssistantApplyResponse)
+async def assistant_apply(req: AssistantApplyRequest):
+    """Apply suggested actions; returns confirmation tokens for actions that require confirm."""
+    validated = validate_suggested_actions([
+        SuggestedAction(a.action, a.parameters, None) for a in req.actions
+    ])
+    results: list[AssistantApplyResultItem] = []
+    for action in validated:
+        action_type = action.action
+        params = action.parameters
+        if safeguards.requires_confirmation(action_type):
+            allowed, wait_time = safeguards.check_rate_limit(action_type)
+            if not allowed:
+                results.append(AssistantApplyResultItem(
+                    action_type=action_type,
+                    success=False,
+                    message=f"Rate limited. Try again in {wait_time:.1f}s.",
+                ))
+                continue
+            pending = safeguards.create_pending_action(
+                action_type=action_type,
+                description=_get_action_description(action_type, params),
+                parameters=params,
+            )
+            results.append(AssistantApplyResultItem(
+                action_type=action_type,
+                success=False,
+                message=pending.description,
+                requires_confirmation=True,
+                confirmation_token=pending.action_id,
+                action_id=pending.action_id,
+            ))
+        else:
+            try:
+                allowed, wait_time = safeguards.check_rate_limit(action_type)
+                if not allowed:
+                    results.append(AssistantApplyResultItem(
+                        action_type=action_type,
+                        success=False,
+                        message=f"Rate limited. Try again in {wait_time:.1f}s.",
+                    ))
+                    continue
+                result = await _execute_action(action_type, params)
+                safeguards.record_action_time(action_type)
+                safeguards.audit_log(action_type, params, "assistant", True, result.message)
+                results.append(AssistantApplyResultItem(
+                    action_type=action_type,
+                    success=result.success,
+                    message=result.message,
+                ))
+            except HTTPException as e:
+                results.append(AssistantApplyResultItem(
+                    action_type=action_type,
+                    success=False,
+                    message=e.detail if isinstance(e.detail, str) else str(e.detail),
+                ))
+            except Exception as e:
+                results.append(AssistantApplyResultItem(
+                    action_type=action_type,
+                    success=False,
+                    message=str(e),
+                ))
+    return AssistantApplyResponse(results=results)
 
 
 # ── Energy Provider Endpoints (Stubs) ────────────────────────────────────────

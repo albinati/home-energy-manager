@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Start the Home Energy Manager API server in the foreground (for debugging or one-off use).
+# Dashboard: http://localhost:8000/  OpenClaw API: http://localhost:8000/api/v1/openclaw/
+#
+# Usage: ./bin/serve [--port PORT]
+# For background operation, use ./bin/start instead.
+#
+set -e
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+export PYTHONPATH="$ROOT"
+exec "$ROOT/.venv/bin/python" -m src.cli serve "$@"

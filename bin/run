@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Home Energy Manager — main entrypoint for running the API and daemon.
+#
+# Usage:
+#   ./bin/run [command] [options]
+#
+# Commands:
+#   start         Start the API server in the background (daemon). Data updates
+#                 and OpenClaw API available without keeping a terminal open.
+#   stop          Stop the daemon.
+#   status        Show daemon status (running or not, PID, API URL).
+#   serve         Start the API server in the foreground (for debugging).
+#   test-foxess   Run Fox ESS Open API test (curl). Verifies .env credentials.
+#   help          Show this help.
+#
+# Examples:
+#   ./bin/run start
+#   ./bin/run status
+#   ./bin/run serve --port 3000
+#
+set -e
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+export PYTHONPATH="$ROOT"
+PY="${PYTHONPATH}/.venv/bin/python"
+[ -x "$PY" ] || PY="$(command -v python3)"
+
+cmd="${1:-help}"
+case "$cmd" in
+  -h|--help|help)
+    sed -n '2,22p' "$0" | sed 's/^# \?//'
+    echo ""
+    echo "Environment: .env in $ROOT (see .env.example). No secrets in this script."
+    exit 0
+    ;;
+  start)
+    exec "$PY" -m src.cli daemon start "$@"
+    ;;
+  stop)
+    exec "$PY" -m src.cli daemon stop "$@"
+    ;;
+  status)
+    exec "$PY" -m src.cli daemon status "$@"
+    ;;
+  serve)
+    shift
+    exec "$PY" -m src.cli serve "$@"
+    ;;
+  test-foxess)
+    exec "$ROOT/scripts/test_foxess_curl.sh"
+    ;;
+  *)
+    echo "Unknown command: $cmd"
+    echo "Run: $0 help"
+    exit 1
+    ;;
+esac

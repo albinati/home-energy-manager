@@ -52,6 +52,9 @@ class FoxESSStatusResponse(BaseModel):
     battery_power: float = Field(description="Battery power - positive=charging, negative=discharging (kW)")
     load_power: float = Field(description="Current load consumption (kW)")
     work_mode: str
+    updated_at: Optional[str] = Field(default=None, description="Last cloud API update time (UTC)")
+    refresh_count_24h: Optional[int] = Field(default=None, description="Realtime API calls in last 24h")
+    refresh_limit_24h: Optional[int] = Field(default=None, description="Daily API call limit (e.g. 1440)")
 
 
 class PowerRequest(BaseModel):
@@ -208,3 +211,49 @@ class EnergyUsageResponse(BaseModel):
     standing_charge_pence: float = Field(description="Standing charge total in pence")
     net_cost_pence: float = Field(description="Net cost in pence")
     net_cost_pounds: float = Field(description="Net cost in pounds")
+
+
+# AI Assistant models
+
+class AssistantPreference(str, Enum):
+    COMFORT = "comfort"
+    BALANCED = "balanced"
+    SAVINGS = "savings"
+
+
+class AssistantRecommendRequest(BaseModel):
+    message: Optional[str] = Field(default=None, description="Optional user message or request")
+    preference: AssistantPreference = Field(description="Comfort vs cost balance")
+
+
+class SuggestedActionSchema(BaseModel):
+    action: str = Field(description="Action type (e.g. daikin.temperature)")
+    parameters: dict[str, Any] = Field(description="Action parameters")
+    reason: Optional[str] = Field(default=None, description="Short reason for the suggestion")
+
+
+class AssistantRecommendResponse(BaseModel):
+    reply: str = Field(description="Assistant reply text")
+    suggested_actions: list[SuggestedActionSchema] = Field(description="List of suggested actions")
+
+
+class AssistantApplyActionRequest(BaseModel):
+    action: str = Field(description="Action type")
+    parameters: dict[str, Any] = Field(description="Action parameters")
+
+
+class AssistantApplyRequest(BaseModel):
+    actions: list[AssistantApplyActionRequest] = Field(description="Actions to apply (from recommend response)")
+
+
+class AssistantApplyResultItem(BaseModel):
+    action_type: str
+    success: bool
+    message: str
+    requires_confirmation: bool = False
+    confirmation_token: Optional[str] = None
+    action_id: Optional[str] = None
+
+
+class AssistantApplyResponse(BaseModel):
+    results: list[AssistantApplyResultItem] = Field(description="Per-action results")

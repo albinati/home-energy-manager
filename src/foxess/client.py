@@ -59,7 +59,8 @@ class FoxESSClient:
 
     def _open_headers(self, path: str) -> dict:
         timestamp = str(int(time.time() * 1000))
-        signature_text = fr'{path}\r\n{self.api_key}\r\n{timestamp}'
+        # Doc example uses fr'{path}\r\n{token}\r\n{timestamp}'; in raw f-string \r\n are literal \ r \ n (4 chars).
+        signature_text = path + r"\r\n" + self.api_key + r"\r\n" + timestamp
         signature = hashlib.md5(signature_text.encode()).hexdigest()
         return {
             **self._BROWSER_HEADERS,
@@ -166,7 +167,11 @@ class FoxESSClient:
     # ── Public methods ───────────────────────────────────────────────────────
 
     def get_realtime(self) -> RealTimeData:
-        """Fetch real-time device data (SoC, solar, grid, battery)."""
+        """Fetch real-time device data (SoC, solar, grid, battery).
+
+        Open API returns result as list of devices; each has deviceSN and datas (list of variable/value).
+        See: https://www.foxesscloud.com/public/i18n/en/OpenApiDocument.html
+        """
         variables = [
             "SoC", "pvPower", "gridConsumptionPower", "feedinPower",
             "batChargePower", "batDischargePower", "loadsPower",
@@ -180,7 +185,14 @@ class FoxESSClient:
             result = self._cloud_post("/c/v0/device/real/query", {
                 "sn": self.device_sn, "variables": variables,
             })
-        items = result if isinstance(result, list) else result.get("datas", [])
+        # API returns result as list of { deviceSN, datas: [ {variable, value, ...} ] } or single { deviceSN, datas }
+        if isinstance(result, list) and result:
+            device = next((d for d in result if d.get("deviceSN") == self.device_sn), result[0])
+            items = device.get("datas") if isinstance(device, dict) else []
+        elif isinstance(result, dict):
+            items = result.get("datas", [])
+        else:
+            items = []
 
         def val(key: str) -> float:
             for item in items:

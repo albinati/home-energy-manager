@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Test the Fox ESS Open API (real-time query). Reads credentials from .env.
+# Use this to verify FOXESS_API_KEY and device SN before relying on the dashboard.
+#
+# Usage: ./bin/test-foxess
+# Requires: .env with FOXESS_API_KEY and FOXESS_DEVICE_SN (or INVERTER_SERIAL_NUMBER).
+#
+set -e
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+exec "$ROOT/scripts/test_foxess_curl.sh"

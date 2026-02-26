@@ -7,13 +7,18 @@ load_dotenv()
 
 
 class Config:
-    # Fox ESS — Option A: Open API key
-    FOXESS_API_KEY: str = os.getenv("FOXESS_API_KEY", "")
+    # Fox ESS — Option A: Open API key (API Management on foxesscloud.com)
+    # FOX_API_KEY and FOXESS_API_KEY are both accepted per docs
+    FOXESS_API_KEY: str = (
+        (os.getenv("FOX_API_KEY") or os.getenv("FOXESS_API_KEY") or os.getenv("FOXESS_PRIVATE_TOKEN") or "").strip()
+    )
     # Fox ESS — Option B: username/password (unofficial, works for endUser accounts)
-    FOXESS_USERNAME: str = os.getenv("FOXESS_USERNAME", "")
-    FOXESS_PASSWORD: str = os.getenv("FOXESS_PASSWORD", "")
-    # Fox ESS — device serial (always required)
-    FOXESS_DEVICE_SN: str = os.getenv("FOXESS_DEVICE_SN", "")
+    FOXESS_USERNAME: str = (os.getenv("FOXESS_USERNAME") or "").strip()
+    FOXESS_PASSWORD: str = (os.getenv("FOXESS_PASSWORD") or "").strip()
+    # Fox ESS — device serial (always required); INVERTER_SERIAL_NUMBER accepted as fallback
+    FOXESS_DEVICE_SN: str = (
+        (os.getenv("FOXESS_DEVICE_SN") or os.getenv("INVERTER_SERIAL_NUMBER") or "").strip()
+    )
     FOXESS_ALERT_LOW_SOC: int = int(os.getenv("FOXESS_ALERT_LOW_SOC", "10"))
 
     # Daikin
@@ -44,6 +49,15 @@ class Config:
     API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
     API_PORT: int = int(os.getenv("API_PORT", "8000"))
 
+    # AI Assistant (optional; if not set, rule-based suggestions only)
+    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
+    AI_ASSISTANT_PROVIDER: str = os.getenv("AI_ASSISTANT_PROVIDER", "openai")
+    AI_ASSISTANT_MODEL: str = os.getenv("AI_ASSISTANT_MODEL", "gpt-4o-mini")
+
+    # Manual tariff for cost-aware suggestions (p/kWh) when no energy provider is connected
+    MANUAL_TARIFF_IMPORT_PENCE: float = float(os.getenv("MANUAL_TARIFF_IMPORT_PENCE", "0"))
+    MANUAL_TARIFF_EXPORT_PENCE: float = float(os.getenv("MANUAL_TARIFF_EXPORT_PENCE", "0"))
+
     def foxess_client_kwargs(self) -> dict:
         """Return the right kwargs for FoxESSClient based on what's configured."""
         if not self.FOXESS_DEVICE_SN:
@@ -57,7 +71,7 @@ class Config:
         else:
             raise ValueError(
                 "Fox ESS auth not configured.\n"
-                "Set either FOXESS_API_KEY or FOXESS_USERNAME + FOXESS_PASSWORD in .env"
+                "Set either FOXESS_API_KEY (or FOXESS_PRIVATE_TOKEN) or FOXESS_USERNAME + FOXESS_PASSWORD in .env"
             )
         return kwargs
 
