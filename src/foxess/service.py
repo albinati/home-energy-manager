@@ -23,6 +23,10 @@ _last_realtime_wallclock: Optional[float] = None  # epoch seconds
 _last_energy_today: Optional[dict] = None
 _last_energy_today_updated_monotonic: Optional[float] = None
 
+# Cached monthly energy: (year, month) -> (data, updated_monotonic)
+_energy_month_cache: dict[tuple[int, int], tuple[dict, float]] = {}
+_ENERGY_MONTH_CACHE_TTL_SECONDS = 3600  # 1 hour
+
 # Sliding window of realtime refresh timestamps (wall-clock, epoch seconds)
 _refresh_timestamps: list[float] = []
 
@@ -107,4 +111,26 @@ def get_cached_energy_today(max_age_seconds: int = 300) -> dict:
     data = client.get_energy_today()
     _last_energy_today = data
     _last_energy_today_updated_monotonic = now
+    return data
+
+
+def get_cached_energy_month(
+    year: int, month: int, max_age_seconds: int = _ENERGY_MONTH_CACHE_TTL_SECONDS
+) -> dict:
+    """Return monthly energy summary from cache if fresh, else fetch and update.
+
+    Raises ValueError if Fox ESS is not configured.
+    Raises FoxESSError on API errors.
+    """
+    global _energy_month_cache
+    now = time.monotonic()
+    key = (year, month)
+    if key in _energy_month_cache:
+        data, updated = _energy_month_cache[key]
+        if (now - updated) < max_age_seconds:
+            logger.debug("Fox ESS energy month %04d-%02d: cache hit", year, month)
+            return data
+    client = _get_client()
+    data = client.get_energy_month(year, month)
+    _energy_month_cache[key] = (data, now)
     return data

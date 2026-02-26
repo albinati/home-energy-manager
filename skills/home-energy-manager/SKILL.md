@@ -36,6 +36,24 @@ GET {HOME_ENERGY_API_URL}/api/v1/foxess/status
 
 Returns: `soc` (battery %), `solar_power`, `grid_power`, `battery_power`, `load_power`, `work_mode`.
 
+## Monthly energy and cost insights
+
+Use these read-only endpoints to report spending, consumption, and solar + heat pump vs gas comparison to the user.
+
+**Monthly breakdown (energy, cost, heating estimate, gas comparison):**
+```
+GET {HOME_ENERGY_API_URL}/api/v1/energy/monthly?month=YYYY-MM
+```
+
+Returns: `energy` (import_kwh, export_kwh, solar_kwh, load_kwh, charge_kwh, discharge_kwh), `cost` (import_cost_pence, export_earnings_pence, net_cost_pence, net_cost_pounds, etc.), `heating_estimate_kwh`, `heating_estimate_cost_pence`, `equivalent_gas_cost_pence` / `equivalent_gas_cost_pounds`, `gas_comparison_ahead_pounds` (positive = ahead with solar + heat pump). Returns 503 if Fox ESS is not configured; 400 if `month` is not YYYY-MM; 502 if Fox ESS request failed.
+
+**Short narrative for voice/chat (current month):**
+```
+GET {HOME_ENERGY_API_URL}/api/v1/energy/insights
+```
+
+Returns: `summary` — a short text such as "This month (2025-02): imported 120.5 kWh, exported 45.2 kWh. Net cost: £32.40 (import £38.20, export earnings £5.80). Equivalent gas cost this month would be about £48.00. You are £15.60 ahead with solar + heat pump." Use this to answer questions like "How much am I spending this month?" or "Am I beating gas?" without parsing the full monthly JSON.
+
 ## How to execute actions
 
 Use the unified execute endpoint:

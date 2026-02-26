@@ -17,6 +17,7 @@ Docs: https://www.foxesscloud.com/public/i18n/en/OpenApiDocument.html
 import hashlib
 import json
 import time
+from datetime import date, datetime
 from typing import Optional
 import urllib.request
 import urllib.error
@@ -334,3 +335,241 @@ class FoxESSClient:
             values = item.get("data", [])
             summary[key] = round(sum(v.get("value", 0) or 0 for v in values), 2)
         return summary
+
+    def get_energy_range(self, begin_date: date, end_date: date) -> dict:
+        """Get energy summary (kWh) for a date range via history/query.
+
+        Doc: variables can be empty to obtain all variable data. For range queries,
+        "Today" variables may be invalid so we pass [] and map common keys from response.
+        Returns dict with keys: pvEnergyToday, feedinEnergyToday, gridConsumptionEnergyToday,
+        chargeEnergyToday, dischargeEnergyToday, loadEnergyToday (same as get_energy_today).
+        """
+        begin_ts = int(datetime.combine(begin_date, datetime.min.time()).timestamp()) * 1000
+        end_ts = int(datetime.combine(end_date, datetime.max.time()).timestamp()) * 1000
+        # Empty variables per doc: "can obtain all variable data by default without passing variables"
+        body = {"sn": self.device_sn, "variables": [], "begin": begin_ts, "end": end_ts}
+        if self.api_key:
+            result = self._open_post("/device/history/query", body)
+        else:
+            result = self._cloud_post("/c/v0/device/history/query", body)
+        summary = {}
+        items = result if isinstance(result, list) else []
+        for item in items:
+            key = item.get("variable", "")
+            values = item.get("data", [])
+            summary[key] = round(sum(v.get("value", 0) or 0 for v in values), 2)
+        # Map possible response keys to get_energy_today-style keys (support various namings)
+        return {
+            "pvEnergyToday": summary.get("pvEnergyToday") or summary.get("generation") or summary.get("todayYield") or 0,
+            "feedinEnergyToday": summary.get("feedinEnergyToday") or summary.get("feedin") or 0,
+            "gridConsumptionEnergyToday": summary.get("gridConsumptionEnergyToday") or summary.get("gridConsumption") or 0,
+            "chargeEnergyToday": summary.get("chargeEnergyToday") or summary.get("chargeEnergyToTal") or summary.get("chargeEnergyTotal") or 0,
+            "dischargeEnergyToday": summary.get("dischargeEnergyToday") or summary.get("dischargeEnergyToTal") or summary.get("dischargeEnergyTotal") or 0,
+            "loadEnergyToday": summary.get("loadEnergyToday") or summary.get("loads") or 0,
+        }
+
+    def get_energy_month(self, year: int, month: int) -> dict:
+        """Get energy summary (kWh) for a calendar month.
+
+        Tries report/query first (recommended for monthly). Falls back to history/query
+        range if report is not available. Returned dict uses same keys as get_energy_today
+        for compatibility: pvEnergyToday, feedinEnergyToday, gridConsumptionEnergyToday,
+        chargeEnergyToday, dischargeEnergyToday, loadEnergyToday.
+        """
+        try:
+            return self._get_energy_month_report(year, month)
+        except FoxESSError:
+            from calendar import monthrange
+            start = date(year, month, 1)
+            _, last_day = monthrange(year, month)
+            end = date(year, month, last_day)
+            return self.get_energy_range(start, end)
+
+    def _get_energy_month_report(self, year: int, month: int) -> dict:
+        """Monthly totals via report/query. Uses exact parameter names from Open API doc."""
+        # Doc example: dimension "day" with day; for "month" use year+month only (no day).
+        # Variable names per doc: chargeEnergyToTal, dischargeEnergyToTal (capital T).
+        # Only variables accepted by report/query per Open API doc (40257 if unknown vars sent)
+        variables = [
+            "generation", "feedin", "gridConsumption",
+            "chargeEnergyToTal", "dischargeEnergyToTal",
+        ]
+        body = {
+            "sn": self.device_sn,
+            "year": year,
+            "month": month,
+            "dimension": "month",
+            "variables": variables,
+        }
+        if self.api_key:
+            result = self._open_post("/device/report/query", body)
+        else:
+            result = self._cloud_post("/c/v0/device/report/query", body)
+        # Report API returns result: [ { variable, unit, values: [num, num, ...] } ]; sum per variable
+        summary_raw = {}
+        if isinstance(result, list):
+            items = result
+        elif isinstance(result, dict):
+            items = result.get("report") or result.get("list") or result.get("data") or result.get("result") or []
+            if not isinstance(items, list):
+                items = []
+        else:
+            items = []
+        for item in items:
+            key = item.get("variable", "")
+            total = 0
+            vals = item.get("values", [])
+            if isinstance(vals, list):
+                for v in vals:
+                    if isinstance(v, (int, float)) and v is not None:
+                        total += float(v)
+                    elif isinstance(v, dict):
+                        total += float(v.get("value", 0) or 0)
+            if total == 0 and item.get("data"):
+                for v in item.get("data", []) if isinstance(item.get("data"), list) else []:
+                    total += float(v.get("value", 0) or 0) if isinstance(v, dict) else 0
+            summary_raw[key] = round(total, 2)
+        # Map to same keys as get_energy_today (support alternate names if API returns them)
+        charge = summary_raw.get("chargeEnergyToTal") or summary_raw.get("chargeEnergyTotal") or 0
+        discharge = summary_raw.get("dischargeEnergyToTal") or summary_raw.get("dischargeEnergyTotal") or 0
+        pv_val = summary_raw.get("generation") or summary_raw.get("generationPower") or 0
+        loads_val = summary_raw.get("loads") or summary_raw.get("load") or 0
+        feedin_val = summary_raw.get("feedin", 0)
+        grid_val = summary_raw.get("gridConsumption", 0)
+        if not loads_val and (pv_val or grid_val or discharge or feedin_val or charge):
+            # Estimate load from balance: consumption = import + solar + discharge - export - charge
+            loads_val = max(0.0, float(grid_val) + float(pv_val) + float(discharge) - float(feedin_val) - float(charge))
+        return {
+            "pvEnergyToday": pv_val,
+            "feedinEnergyToday": feedin_val,
+            "gridConsumptionEnergyToday": grid_val,
+            "chargeEnergyToday": charge,
+            "dischargeEnergyToday": discharge,
+            "loadEnergyToday": round(loads_val, 2) if loads_val else loads_val,
+        }
+
+    def get_energy_day(self, year: int, month: int, day: int) -> dict:
+        """Get energy summary (kWh) for a single day via report/query dimension=day."""
+        variables = [
+            "generation", "feedin", "gridConsumption",
+            "chargeEnergyToTal", "dischargeEnergyToTal",
+        ]
+        body = {
+            "sn": self.device_sn,
+            "year": year,
+            "month": month,
+            "day": day,
+            "dimension": "day",
+            "variables": variables,
+        }
+        if self.api_key:
+            result = self._open_post("/device/report/query", body)
+        else:
+            result = self._cloud_post("/c/v0/device/report/query", body)
+        summary_raw = {}
+        if isinstance(result, list):
+            items = result
+        elif isinstance(result, dict):
+            items = result.get("report") or result.get("list") or result.get("data") or result.get("result") or []
+            if not isinstance(items, list):
+                items = []
+        else:
+            items = []
+        for item in items:
+            key = item.get("variable", "")
+            vals = item.get("values", [])
+            total = 0
+            if isinstance(vals, list) and len(vals) > 0:
+                v = vals[0]
+                total = float(v) if isinstance(v, (int, float)) else float(v.get("value", 0) or 0) if isinstance(v, dict) else 0
+            summary_raw[key] = round(total, 2)
+        charge = summary_raw.get("chargeEnergyToTal") or summary_raw.get("chargeEnergyTotal") or 0
+        discharge = summary_raw.get("dischargeEnergyToTal") or summary_raw.get("dischargeEnergyTotal") or 0
+        pv_val = summary_raw.get("generation") or summary_raw.get("generationPower") or 0
+        loads_val = summary_raw.get("loads") or summary_raw.get("load") or 0
+        feedin_val = summary_raw.get("feedin", 0)
+        grid_val = summary_raw.get("gridConsumption", 0)
+        if not loads_val and (pv_val or grid_val or discharge or feedin_val or charge):
+            loads_val = max(0.0, float(grid_val) + float(pv_val) + float(discharge) - float(feedin_val) - float(charge))
+        return {
+            "pvEnergyToday": pv_val,
+            "feedinEnergyToday": feedin_val,
+            "gridConsumptionEnergyToday": grid_val,
+            "chargeEnergyToday": charge,
+            "dischargeEnergyToday": discharge,
+            "loadEnergyToday": round(loads_val, 2) if loads_val else loads_val,
+        }
+
+    def get_energy_month_daily_breakdown(self, year: int, month: int) -> tuple[dict, list[dict]]:
+        """Get monthly totals and per-day breakdown for charts. Returns (totals_dict, daily_list).
+        daily_list items: { date: YYYY-MM-DD, import_kwh, export_kwh, solar_kwh, load_kwh, charge_kwh, discharge_kwh }.
+        """
+        from calendar import monthrange
+        _, ndays = monthrange(year, month)
+        variables = [
+            "generation", "feedin", "gridConsumption",
+            "chargeEnergyToTal", "dischargeEnergyToTal",
+        ]
+        body = {
+            "sn": self.device_sn,
+            "year": year,
+            "month": month,
+            "dimension": "month",
+            "variables": variables,
+        }
+        if self.api_key:
+            result = self._open_post("/device/report/query", body)
+        else:
+            result = self._cloud_post("/c/v0/device/report/query", body)
+        if isinstance(result, list):
+            items = result
+        elif isinstance(result, dict):
+            items = result.get("report") or result.get("list") or result.get("data") or result.get("result") or []
+            if not isinstance(items, list):
+                items = []
+        else:
+            items = []
+        by_var = {}
+        for item in items:
+            key = item.get("variable", "")
+            vals = item.get("values", [])
+            if isinstance(vals, list):
+                by_var[key] = [float(v) if isinstance(v, (int, float)) else float(v.get("value", 0) or 0) if isinstance(v, dict) else 0 for v in vals]
+            else:
+                by_var[key] = []
+        gen_arr = by_var.get("generation", [])
+        feedin_arr = by_var.get("feedin", [])
+        grid_arr = by_var.get("gridConsumption", [])
+        loads_arr = by_var.get("loads", []) or by_var.get("load", [])
+        charge_arr = by_var.get("chargeEnergyToTal", []) or by_var.get("chargeEnergyTotal", [])
+        discharge_arr = by_var.get("dischargeEnergyToTal", []) or by_var.get("dischargeEnergyTotal", [])
+        max_len = max(len(gen_arr), len(feedin_arr), len(grid_arr), len(loads_arr), len(charge_arr), len(discharge_arr), ndays)
+        daily = []
+        for idx in range(min(ndays, max_len)):
+            d = idx + 1
+            imp = round(grid_arr[idx], 2) if idx < len(grid_arr) else 0
+            exp = round(feedin_arr[idx], 2) if idx < len(feedin_arr) else 0
+            sol = round(gen_arr[idx], 2) if idx < len(gen_arr) else 0
+            ch = round(charge_arr[idx], 2) if idx < len(charge_arr) else 0
+            dis = round(discharge_arr[idx], 2) if idx < len(discharge_arr) else 0
+            load_val = round(loads_arr[idx], 2) if idx < len(loads_arr) else 0
+            if not load_val and (imp or sol or dis or exp or ch):
+                load_val = round(max(0.0, imp + sol + dis - exp - ch), 2)
+            daily.append({
+                "date": f"{year:04d}-{month:02d}-{d:02d}",
+                "import_kwh": imp,
+                "export_kwh": exp,
+                "solar_kwh": sol,
+                "load_kwh": load_val,
+                "charge_kwh": ch,
+                "discharge_kwh": dis,
+            })
+        totals = {
+            "pvEnergyToday": sum(r["solar_kwh"] for r in daily),
+            "feedinEnergyToday": sum(r["export_kwh"] for r in daily),
+            "gridConsumptionEnergyToday": sum(r["import_kwh"] for r in daily),
+            "chargeEnergyToday": sum(r["charge_kwh"] for r in daily),
+            "dischargeEnergyToday": sum(r["discharge_kwh"] for r in daily),
+            "loadEnergyToday": sum(r["load_kwh"] for r in daily),
+        }
+        return totals, daily

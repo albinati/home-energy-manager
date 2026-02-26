@@ -224,3 +224,129 @@ class DaikinClient:
     def set_tank_powerful(self, device: DaikinDevice, on: bool) -> None:
         """Enable/disable powerful mode on DHW tank (fast heat-up)."""
         self._patch(self._dhw_path(device, "powerfulMode"), {"value": "on" if on else "off"})
+
+    def get_heating_consumption_kwh(
+        self, year: int, month: int
+    ) -> float | None:
+        """
+        Get heating electrical consumption (kWh) for a given month from Daikin when available.
+        Onecta exposes this for some devices (e.g. Altherma) via electricalConsumption.
+        Returns None if not available or on error.
+        """
+        try:
+            devices = self.get_devices()
+            total = 0.0
+            for device in devices:
+                val = self._device_heating_kwh_for_month(device, year, month)
+                if val is not None:
+                    total += val
+            return round(total, 2) if total else None
+        except Exception:
+            return None
+
+    def _device_heating_kwh_for_month(
+        self, device: DaikinDevice, year: int, month: int
+    ) -> float | None:
+        """Extract heating consumption (kWh) for the given month from one device.
+        Aligned with daikin_onecta: consumptionData.value.electrical.heating with period 'd'/'w'/'m'.
+        """
+        for mp in device.raw.get("managementPoints", []):
+            if "climatecontrol" not in mp.get("managementPointType", "").lower():
+                continue
+            val = self._parse_consumption_data_mp(mp, year, month, "heating")
+            if val is not None:
+                return val
+        return None
+
+    def _parse_consumption_data_mp(
+        self, mp: dict, year: int, month: int, mode: str
+    ) -> float | None:
+        """Parse consumption from management point consumptionData (Daikin Onecta shape).
+        See: https://github.com/jwillemsen/daikin_onecta
+        consumptionData.value.electrical.{heating|cooling} -> period key 'd'|'w'|'m' (array).
+        For 'm' (monthly), array index 11+month is current month; we use month index (0-based)."""
+        cd = mp.get("consumptionData")
+        if not isinstance(cd, dict):
+            return None
+        cdv = cd.get("value")
+        if not isinstance(cdv, dict):
+            return None
+        electrical = cdv.get("electrical")
+        if not isinstance(electrical, dict):
+            return None
+        mode_data = electrical.get(mode, electrical.get("heating"))
+        if not isinstance(mode_data, dict):
+            return None
+        # Period key 'm' = monthly (daikin_onecta uses SENSOR_PERIODS_ARRAY["m"] for monthly)
+        period_arr = mode_data.get("m")
+        if isinstance(period_arr, list) and len(period_arr) > 0:
+            # daikin_onecta: start_index = 11 + date.today().month → indices 12..23 = Jan..Dec
+            idx = 11 + month
+            if idx < len(period_arr):
+                v = period_arr[idx]
+                if isinstance(v, (int, float)) and v is not None:
+                    return round(float(v), 2)
+            # Fallback: 0-based month index (0=Jan, 11=Dec)
+            idx0 = month - 1
+            if idx0 < len(period_arr):
+                v = period_arr[idx0]
+                if isinstance(v, (int, float)) and v is not None:
+                    return round(float(v), 2)
+        return None
+
+    def get_heating_daily_kwh(self, year: int, month: int) -> list[float] | None:
+        """
+        Get daily heating consumption (kWh) for the month when available.
+        Returns list of 28–31 values (index 0 = day 1). None if not available.
+        """
+        try:
+            devices = self.get_devices()
+            # Sum daily from all devices (usually one)
+            result: list[float] = []
+            for device in devices:
+                daily = self._device_heating_daily_kwh(device, year, month)
+                if daily:
+                    if not result:
+                        result = [0.0] * len(daily)
+                    for i, v in enumerate(daily):
+                        if i < len(result):
+                            result[i] = round(result[i] + v, 2)
+            return result if result else None
+        except Exception:
+            return None
+
+    def _device_heating_daily_kwh(
+        self, device: DaikinDevice, year: int, month: int
+    ) -> list[float] | None:
+        """Daily heating (kWh) for one device from consumptionData.value.electrical.heating.d."""
+        from calendar import monthrange
+        _, ndays = monthrange(year, month)
+        for mp in device.raw.get("managementPoints", []):
+            if "climatecontrol" not in mp.get("managementPointType", "").lower():
+                continue
+            cd = mp.get("consumptionData")
+            if not isinstance(cd, dict):
+                continue
+            cdv = cd.get("value")
+            if not isinstance(cdv, dict):
+                continue
+            electrical = cdv.get("electrical")
+            if not isinstance(electrical, dict):
+                continue
+            mode_data = electrical.get("heating")
+            if not isinstance(mode_data, dict):
+                continue
+            arr = mode_data.get("d")  # daily period
+            if not isinstance(arr, list) or len(arr) == 0:
+                continue
+            out = []
+            for i in range(ndays):
+                if i < len(arr) and arr[i] is not None:
+                    try:
+                        out.append(round(float(arr[i]), 2))
+                    except (TypeError, ValueError):
+                        out.append(0.0)
+                else:
+                    out.append(0.0)
+            return out
+        return None

@@ -15,6 +15,7 @@ from ..daikin.client import DaikinClient, DaikinError
 from ..foxess.client import FoxESSClient, FoxESSError
 from ..foxess.models import ChargePeriod
 from ..foxess.service import get_cached_realtime, get_refresh_stats
+from ..energy.monthly import get_monthly_insights, get_period_insights
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,14 @@ from .models import (
     TariffResponse,
     TariffTypeEnum,
     EnergyUsageResponse,
+    MonthlyInsightsResponse,
+    MonthlyEnergySummaryResponse,
+    MonthlyCostSummaryResponse,
+    PeriodInsightsResponse,
+    HeatingAnalyticsResponse,
+    TempBandSummaryResponse,
+    ChartDataPoint,
+    EnergyInsightsTextResponse,
     AssistantRecommendRequest,
     AssistantRecommendResponse,
     SuggestedActionSchema,
@@ -1133,6 +1142,193 @@ async def energy_usage():
         status_code=501,
         detail="Energy provider integration not yet implemented. Coming soon!"
     )
+
+
+def _foxess_configured() -> bool:
+    return bool(config.FOXESS_API_KEY or (config.FOXESS_USERNAME and config.FOXESS_PASSWORD))
+
+
+@app.get("/api/v1/energy/monthly", response_model=MonthlyInsightsResponse)
+async def energy_monthly(month: str):
+    """Get monthly energy, cost, heating estimate and gas comparison.
+    
+    Query: month=YYYY-MM. Returns 503 if Fox ESS not configured; 400 if month format invalid.
+    """
+    if not _foxess_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Fox ESS not configured. Set FOXESS_API_KEY or FOXESS_USERNAME+FOXESS_PASSWORD and FOXESS_DEVICE_SN.",
+        )
+    if len(month) != 7 or month[4] != "-":
+        raise HTTPException(status_code=400, detail="Use month=YYYY-MM (e.g. 2025-02)")
+    try:
+        year = int(month[:4])
+        month_num = int(month[5:7])
+        if not (1 <= month_num <= 12):
+            raise ValueError("month out of range")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    try:
+        insights = get_monthly_insights(year, month_num)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.warning("Monthly insights Fox ESS error: %s", e, exc_info=True)
+        raise HTTPException(
+            status_code=502,
+            detail="Fox ESS error: " + str(e),
+        )
+    if insights is None:
+        raise HTTPException(
+            status_code=502,
+            detail="Failed to fetch monthly data from Fox ESS. Try again later.",
+        )
+    cost = insights.cost
+    return MonthlyInsightsResponse(
+        energy=MonthlyEnergySummaryResponse(
+            year=insights.energy.year,
+            month=insights.energy.month,
+            month_str=insights.energy.month_str,
+            import_kwh=insights.energy.import_kwh,
+            export_kwh=insights.energy.export_kwh,
+            solar_kwh=insights.energy.solar_kwh,
+            load_kwh=insights.energy.load_kwh,
+            charge_kwh=insights.energy.charge_kwh,
+            discharge_kwh=insights.energy.discharge_kwh,
+        ),
+        cost=MonthlyCostSummaryResponse(
+            import_cost_pence=cost.import_cost_pence,
+            export_earnings_pence=cost.export_earnings_pence,
+            standing_charge_pence=cost.standing_charge_pence,
+            net_cost_pence=cost.net_cost_pence,
+            net_cost_pounds=cost.net_cost_pounds,
+            import_cost_pounds=cost.import_cost_pounds,
+            export_earnings_pounds=cost.export_earnings_pounds,
+        ),
+        heating_estimate_kwh=insights.heating_estimate_kwh,
+        heating_estimate_cost_pence=insights.heating_estimate_cost_pence,
+        equivalent_gas_cost_pence=insights.equivalent_gas_cost_pence,
+        equivalent_gas_cost_pounds=insights.equivalent_gas_cost_pounds,
+        gas_comparison_ahead_pounds=insights.gas_comparison_ahead_pounds,
+    )
+
+
+@app.get("/api/v1/energy/period", response_model=PeriodInsightsResponse)
+async def energy_period(
+    period: str,
+    date: Optional[str] = None,
+    month: Optional[str] = None,
+    year: Optional[int] = None,
+):
+    """Get energy insights + chart_data for day, week, month, or year.
+    period=day|week|month|year. For day/week use date=YYYY-MM-DD; for month use month=YYYY-MM; for year use year=YYYY.
+    """
+    if not _foxess_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Fox ESS not configured. Set FOXESS_API_KEY or FOXESS_USERNAME+FOXESS_PASSWORD and FOXESS_DEVICE_SN.",
+        )
+    if period not in ("day", "week", "month", "year"):
+        raise HTTPException(status_code=400, detail="period must be day, week, month, or year")
+    if period == "month" and not month:
+        raise HTTPException(status_code=400, detail="Use month=YYYY-MM for period=month")
+    if period == "year" and year is None:
+        raise HTTPException(status_code=400, detail="Use year=YYYY for period=year")
+    if period in ("day", "week") and not date:
+        raise HTTPException(status_code=400, detail="Use date=YYYY-MM-DD for period=day or period=week")
+    if period == "month" and (len(month) != 7 or month[4] != "-"):
+        raise HTTPException(status_code=400, detail="Use month=YYYY-MM")
+    if period in ("day", "week") and (len(date) != 10 or date[4] != "-" or date[7] != "-"):
+        raise HTTPException(status_code=400, detail="Use date=YYYY-MM-DD")
+    try:
+        out = get_period_insights(period, date_str=date, month_str=month, year=year)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.warning("Period insights Fox ESS error: %s", e, exc_info=True)
+        raise HTTPException(status_code=502, detail="Fox ESS error: " + str(e))
+    if out is None:
+        raise HTTPException(status_code=502, detail="Failed to fetch data from Fox ESS.")
+    ins = out.insights
+    cost = ins.cost
+    return PeriodInsightsResponse(
+        period=out.period,
+        period_label=out.period_label,
+        energy=MonthlyEnergySummaryResponse(
+            year=ins.energy.year,
+            month=ins.energy.month,
+            month_str=ins.energy.month_str,
+            import_kwh=ins.energy.import_kwh,
+            export_kwh=ins.energy.export_kwh,
+            solar_kwh=ins.energy.solar_kwh,
+            load_kwh=ins.energy.load_kwh,
+            charge_kwh=ins.energy.charge_kwh,
+            discharge_kwh=ins.energy.discharge_kwh,
+        ),
+        cost=MonthlyCostSummaryResponse(
+            import_cost_pence=cost.import_cost_pence,
+            export_earnings_pence=cost.export_earnings_pence,
+            standing_charge_pence=cost.standing_charge_pence,
+            net_cost_pence=cost.net_cost_pence,
+            net_cost_pounds=cost.net_cost_pounds,
+            import_cost_pounds=cost.import_cost_pounds,
+            export_earnings_pounds=cost.export_earnings_pounds,
+        ),
+        heating_estimate_kwh=ins.heating_estimate_kwh,
+        heating_estimate_cost_pence=ins.heating_estimate_cost_pence,
+        equivalent_gas_cost_pence=ins.equivalent_gas_cost_pence,
+        equivalent_gas_cost_pounds=ins.equivalent_gas_cost_pounds,
+        gas_comparison_ahead_pounds=ins.gas_comparison_ahead_pounds,
+        chart_data=[ChartDataPoint(**p) for p in out.chart_data],
+        heating_analytics=(
+            HeatingAnalyticsResponse(
+                heating_percent_of_cost=out.heating_analytics.heating_percent_of_cost,
+                heating_percent_of_consumption=out.heating_analytics.heating_percent_of_consumption,
+                avg_outdoor_temp_c=out.heating_analytics.avg_outdoor_temp_c,
+                degree_days=out.heating_analytics.degree_days,
+                cost_per_degree_day_pounds=out.heating_analytics.cost_per_degree_day_pounds,
+                heating_kwh_per_degree_day=out.heating_analytics.heating_kwh_per_degree_day,
+                temp_bands=[TempBandSummaryResponse(**b) for b in out.heating_analytics.temp_bands],
+            )
+            if out.heating_analytics else None
+        ),
+    )
+
+
+@app.get("/api/v1/energy/insights", response_model=EnergyInsightsTextResponse)
+async def energy_insights():
+    """Short narrative summary for OpenClaw: this month cost and equivalent gas.
+    
+    Returns 503 if Fox ESS not configured.
+    """
+    if not _foxess_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Fox ESS not configured. Set FOXESS_API_KEY or FOXESS_USERNAME+FOXESS_PASSWORD and FOXESS_DEVICE_SN.",
+        )
+    from datetime import date
+    today = date.today()
+    insights = get_monthly_insights(today.year, today.month)
+    if insights is None:
+        return EnergyInsightsTextResponse(
+            summary="Monthly data is temporarily unavailable. Try again later."
+        )
+    cost = insights.cost
+    parts = [
+        f"This month ({insights.energy.month_str}): imported {insights.energy.import_kwh:.1f} kWh, "
+        f"exported {insights.energy.export_kwh:.1f} kWh. "
+        f"Net cost: £{cost.net_cost_pounds:.2f} (import £{cost.import_cost_pounds:.2f}, export earnings £{cost.export_earnings_pounds:.2f})."
+    ]
+    if insights.equivalent_gas_cost_pounds is not None:
+        parts.append(
+            f" Equivalent gas cost this month would be about £{insights.equivalent_gas_cost_pounds:.2f}."
+        )
+        if insights.gas_comparison_ahead_pounds is not None:
+            if insights.gas_comparison_ahead_pounds >= 0:
+                parts.append(f" You are £{insights.gas_comparison_ahead_pounds:.2f} ahead with solar + heat pump.")
+            else:
+                parts.append(f" Gas would have been £{abs(insights.gas_comparison_ahead_pounds):.2f} cheaper this month.")
+    return EnergyInsightsTextResponse(summary="".join(parts))
 
 
 # ── Agile Scheduler (Daikin LWT by Octopus price) ─────────────────────────────

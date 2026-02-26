@@ -470,6 +470,60 @@
         .assistant-action-item.requires-confirm .confirm-pending { font-size: 0.75rem; color: var(--accent-yellow); margin-top: 0.25rem; }
         .assistant-apply-row { margin-top: 0.75rem; }
 
+        /* Insights tab */
+        .insights-period-row { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem; }
+        .insights-period-label { font-size: 0.875rem; color: var(--text-secondary); }
+        .insights-period-btns { display: flex; gap: 0.5rem; }
+        .insights-period-btn.active { background: var(--accent-blue); color: white; border-color: var(--accent-blue); }
+        .insights-nav-row { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem; }
+        .insights-nav-label { font-weight: 600; font-size: 1rem; min-width: 10rem; text-align: center; }
+        .insights-nav-row button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .insights-loading { color: var(--text-secondary); margin-bottom: 1rem; }
+        .insights-hero-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-bottom: 1.5rem; }
+        .insights-hero-card { background: var(--bg-card); border-radius: 10px; border: 1px solid var(--border-color); padding: 1.25rem; text-align: center; }
+        .insights-hero-label { display: block; font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.35rem; }
+        .insights-hero-value { font-size: 1.5rem; font-weight: 700; display: block; }
+        .insights-hero-sublabel { font-size: 0.6875rem; color: var(--text-muted); }
+        .insights-flow-wrap { margin-bottom: 1.5rem; }
+        .insights-flow-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+        .insights-flow-col { background: var(--bg-card); border-radius: 8px; border: 1px solid var(--border-color); padding: 1rem; }
+        .insights-flow-label { font-size: 0.75rem; font-weight: 600; color: var(--text-muted); margin-bottom: 0.75rem; text-transform: uppercase; }
+        .insights-flow-item { font-size: 0.875rem; margin-bottom: 0.5rem; }
+        .insights-flow-item .insights-flow-icon { margin-right: 0.35rem; opacity: 0.8; }
+        .insights-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 0.75rem; margin-bottom: 1.5rem; }
+        .insights-card { background: var(--bg-card); border-radius: 8px; border: 1px solid var(--border-color); padding: 0.75rem 1rem; text-align: center; }
+        .insights-card-label { display: block; font-size: 0.6875rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.25rem; }
+        .insights-card-value { font-size: 1.125rem; font-weight: 600; }
+        .insights-breakdown-wrap { margin-bottom: 1.5rem; }
+        .insights-breakdown { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+        .insights-breakdown th, .insights-breakdown td { padding: 0.5rem 0.75rem; text-align: left; border-bottom: 1px solid var(--border-color); }
+        .insights-breakdown th { color: var(--text-muted); font-weight: 500; }
+        .insights-heating-note { font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.5rem; }
+        .insights-gas-card { background: var(--bg-card); border-radius: 8px; border: 1px solid var(--border-color); padding: 1rem; margin-bottom: 1.5rem; }
+        .insights-gas-text { margin: 0; font-size: 0.9375rem; color: var(--text-primary); }
+        .insights-heating-analytics-wrap { background: var(--bg-card); border-radius: 8px; border: 1px solid var(--border-color); padding: 1rem; margin-bottom: 1.5rem; }
+        .insights-heating-summary { font-size: 0.9375rem; color: var(--text-primary); margin-bottom: 0.75rem; }
+        .insights-heating-weather { font-size: 0.875rem; color: var(--text-secondary); margin-bottom: 0.75rem; }
+        .insights-heating-temp-bands-wrap { margin-top: 0.75rem; }
+        .insights-heating-temp-bands-label { font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.5rem; text-transform: uppercase; }
+        .insights-chart-wrap { margin-bottom: 1.5rem; }
+        .insights-chart { display: flex; align-items: flex-end; gap: 4px; min-height: 160px; padding: 0.5rem 0; }
+        .insights-chart-bar-group { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 0; }
+        .insights-chart-bars { display: flex; align-items: flex-end; justify-content: center; gap: 2px; width: 100%; height: 120px; }
+        .insights-chart-bar { width: 100%; max-width: 24px; border-radius: 3px 3px 0 0; transition: height 0.2s ease; }
+        .insights-chart-bar.import { background: var(--accent-red); }
+        .insights-chart-bar.solar { background: #3b82f6; }
+        .insights-chart-bar.load { background: #ef4444; }
+        .insights-chart-bar.export { background: var(--accent-green); }
+        .insights-chart-bar.battery { background: #f97316; }
+        .insights-chart-bar-stack { display: flex; flex-direction: column-reverse; width: 100%; max-width: 32px; height: 120px; border-radius: 3px; overflow: hidden; }
+        .insights-chart-bar-stack .insights-chart-bar { min-height: 2px; border-radius: 0; max-width: none; }
+        .insights-chart-label { font-size: 0.625rem; color: var(--text-muted); text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+        .insights-chart-legend { display: flex; gap: 1rem; margin-top: 0.5rem; font-size: 0.75rem; color: var(--text-secondary); flex-wrap: wrap; }
+        .insights-chart-legend span { display: flex; align-items: center; gap: 0.35rem; }
+        .insights-chart-legend i { width: 10px; height: 10px; border-radius: 2px; }
+        .insights-assistant-section { margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid var(--border-color); }
+
         @media (max-width: 640px) {
             .page { padding: 1rem; }
             header { flex-direction: column; gap: 1rem; align-items: flex-start; }
@@ -478,6 +532,8 @@
             .tabs-nav { overflow-x: auto; }
             .tab-btn { padding: 0.625rem 1rem; font-size: 0.8125rem; white-space: nowrap; }
             .energy-flow { grid-template-columns: 1fr 1fr; }
+            .insights-hero-cards { grid-template-columns: 1fr; }
+            .insights-flow-grid { grid-template-columns: 1fr; }
         }
     </style>
 </head>
@@ -501,13 +557,9 @@
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="6" width="18" height="12" rx="2"/><line x1="23" y1="10" x2="23" y2="14"/></svg>
                 Battery
             </button>
-            <button class="tab-btn" role="tab" aria-selected="false" data-tab="assistant" onclick="switchTab('assistant')">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a2 2 0 012 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 017 7h1a1 1 0 010 2h-1a7 7 0 01-7 7h-1v1a2 2 0 01-2 2 2 2 0 01-2-2v-1H7a7 7 0 01-7-7H4a1 1 0 010-2h1a7 7 0 017-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 012-2z"/></svg>
-                AI Assistant
-            </button>
-            <button class="tab-btn" role="tab" aria-selected="false" data-tab="energy" onclick="switchTab('energy')">
+            <button class="tab-btn" role="tab" aria-selected="false" data-tab="insights" onclick="switchTab('insights')">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
-                Energy
+                Insights
             </button>
         </nav>
 
@@ -893,96 +945,137 @@
         </div>
         </div><!-- end tab-battery -->
 
-        <!-- ===== AI ASSISTANT TAB ===== -->
-        <div class="tab-panel" id="tab-assistant" role="tabpanel">
-        <div class="card">
-            <div class="card-header">
-                <span class="card-title">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a2 2 0 012 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 017 7h1a1 1 0 010 2h-1a7 7 0 01-7 7h-1v1a2 2 0 01-2 2 2 2 0 01-2-2v-1H7a7 7 0 01-7-7H4a1 1 0 010-2h1a7 7 0 017-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 012-2z"/></svg>
-                    AI Assistant
-                </span>
-            </div>
-            <div class="card-body">
-                <p class="assistant-intro">Get optimization suggestions for your heat pump and battery. Choose how to balance comfort and cost, then apply changes with one click.</p>
-                <div class="assistant-preference">
-                    <span class="assistant-preference-label">Balance:</span>
-                    <div class="assistant-preference-btns">
-                        <button type="button" class="btn btn-secondary assistant-pref-btn active" data-pref="comfort">Comfort</button>
-                        <button type="button" class="btn btn-secondary assistant-pref-btn" data-pref="balanced">Balanced</button>
-                        <button type="button" class="btn btn-secondary assistant-pref-btn" data-pref="savings">Cost savings</button>
-                    </div>
-                </div>
-                <div class="assistant-input-row">
-                    <input type="text" id="assistantMessage" class="assistant-input" placeholder="e.g. Lower heating at night, charge on cheap rate..." maxlength="500">
-                    <button type="button" class="btn btn-primary" id="assistantRecommendBtn">Get recommendations</button>
-                </div>
-                <div class="assistant-conversation" id="assistantConversation"></div>
-                <div class="assistant-suggestions" id="assistantSuggestions" style="display:none;">
-                    <div class="section-title">Suggested actions</div>
-                    <div class="assistant-actions-list" id="assistantActionsList"></div>
-                    <div class="assistant-apply-row">
-                        <button type="button" class="btn btn-primary" id="assistantApplyBtn">Apply selected</button>
-                    </div>
-                </div>
-            </div>
-        </div>
-        </div><!-- end tab-assistant -->
-
-        <!-- ===== ENERGY TAB ===== -->
-        <div class="tab-panel" id="tab-energy" role="tabpanel">
+        <!-- ===== INSIGHTS TAB (Energy + AI Assistant) ===== -->
+        <div class="tab-panel" id="tab-insights" role="tabpanel">
         <div class="card">
             <div class="card-header">
                 <span class="card-title">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
-                    Energy Dashboard
+                    Insights
                 </span>
-                <span class="badge badge-na">Coming Soon</span>
             </div>
             <div class="card-body">
-                <div class="coming-soon">
-                    <div class="coming-soon-icon">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+                <!-- Period selector: Day | Week | Month -->
+                <div class="insights-period-row">
+                    <span class="insights-period-label">View:</span>
+                    <div class="insights-period-btns">
+                        <button type="button" class="btn btn-secondary btn-sm insights-period-btn" data-period="day" id="insightsPeriodDay">Day</button>
+                        <button type="button" class="btn btn-secondary btn-sm insights-period-btn" data-period="week" id="insightsPeriodWeek">Week</button>
+                        <button type="button" class="btn btn-secondary btn-sm insights-period-btn active" data-period="month" id="insightsPeriodMonth">Month</button>
+                        <button type="button" class="btn btn-secondary btn-sm insights-period-btn" data-period="year" id="insightsPeriodYear">Year</button>
                     </div>
-                    <h3>Energy Spending Dashboard</h3>
-                    <p>Track your energy costs, tariff rates, and export earnings. Connect your energy provider account to see real-time spending data.</p>
-                    
-                    <div class="feature-list">
-                        <div class="feature-item">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
-                            Tariff tracking
+                </div>
+                <!-- Date / Week / Month navigator -->
+                <div class="insights-nav-row">
+                    <button type="button" class="btn btn-secondary btn-sm" id="insightsPrev" title="Previous">&larr;</button>
+                    <span class="insights-nav-label" id="insightsNavLabel">—</span>
+                    <button type="button" class="btn btn-secondary btn-sm" id="insightsNext" title="Next">&rarr;</button>
+                </div>
+                <div id="insightsError" class="error-message" style="display:none;"></div>
+                <div id="insightsLoading" class="insights-loading" style="display:none;">Loading…</div>
+                <!-- Summary: Energy balance, Production, Consumption -->
+                <div class="insights-hero-cards">
+                    <div class="insights-hero-card insights-balance-card">
+                        <span class="insights-hero-label">Energy balance</span>
+                        <span class="insights-hero-value" id="insightsEnergyBalance">—</span>
+                        <span class="insights-hero-sublabel">Export − Import (kWh)</span>
+                    </div>
+                    <div class="insights-hero-card">
+                        <span class="insights-hero-label">Production</span>
+                        <span class="insights-hero-value" id="insightsProductionKwh">—</span>
+                        <span class="insights-hero-sublabel">Solar (kWh)</span>
+                    </div>
+                    <div class="insights-hero-card">
+                        <span class="insights-hero-label">Consumption</span>
+                        <span class="insights-hero-value" id="insightsConsumptionKwh">—</span>
+                        <span class="insights-hero-sublabel">Load (kWh)</span>
+                    </div>
+                </div>
+                <!-- Cost and detail cards -->
+                <div class="insights-cards" id="insightsCards">
+                    <div class="insights-card">
+                        <span class="insights-card-label">Net cost</span>
+                        <span class="insights-card-value" id="insightsNetCost">—</span>
+                    </div>
+                    <div class="insights-card">
+                        <span class="insights-card-label">Import kWh</span>
+                        <span class="insights-card-value" id="insightsImportKwh">—</span>
+                    </div>
+                    <div class="insights-card">
+                        <span class="insights-card-label">Export kWh</span>
+                        <span class="insights-card-value" id="insightsExportKwh">—</span>
+                    </div>
+                    <div class="insights-card">
+                        <span class="insights-card-label">Solar kWh</span>
+                        <span class="insights-card-value" id="insightsSolarKwh">—</span>
+                    </div>
+                    <div class="insights-card">
+                        <span class="insights-card-label">Load kWh</span>
+                        <span class="insights-card-value" id="insightsLoadKwh">—</span>
+                    </div>
+                    <div class="insights-card">
+                        <span class="insights-card-label">Charged</span>
+                        <span class="insights-card-value" id="insightsChargeKwh">—</span>
+                    </div>
+                    <div class="insights-card">
+                        <span class="insights-card-label">Discharged</span>
+                        <span class="insights-card-value" id="insightsDischargeKwh">—</span>
+                    </div>
+                </div>
+                <!-- Supply & Usage flow -->
+                <div class="insights-flow-wrap" id="insightsFlowWrap">
+                    <div class="section-title">Supply &amp; usage</div>
+                    <div class="insights-flow-grid">
+                        <div class="insights-flow-col">
+                            <div class="insights-flow-label">Supply</div>
+                            <div class="insights-flow-item"><span class="insights-flow-icon">&#9881;</span> Imported <strong id="insightsFlowImported">—</strong></div>
+                            <div class="insights-flow-item"><span class="insights-flow-icon">&#9728;</span> PV produced <strong id="insightsFlowSolar">—</strong></div>
+                            <div class="insights-flow-item"><span class="insights-flow-icon">&#128267;</span> Discharged <strong id="insightsFlowDischarged">—</strong></div>
                         </div>
-                        <div class="feature-item">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
-                            Cost breakdown
-                        </div>
-                        <div class="feature-item">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
-                            Export earnings
-                        </div>
-                        <div class="feature-item">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
-                            Usage history
+                        <div class="insights-flow-col">
+                            <div class="insights-flow-label">Usage</div>
+                            <div class="insights-flow-item"><span class="insights-flow-icon">&#9881;</span> Exported <strong id="insightsFlowExported">—</strong></div>
+                            <div class="insights-flow-item"><span class="insights-flow-icon">&#127968;</span> Consumed <strong id="insightsFlowConsumed">—</strong></div>
+                            <div class="insights-flow-item"><span class="insights-flow-icon">&#128267;</span> Charged <strong id="insightsFlowCharged">—</strong></div>
                         </div>
                     </div>
-
-                    <div class="provider-logos">
-                        <div class="provider-logo">
-                            <div class="provider-logo-icon">
-                                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
-                            </div>
-                            Octopus Energy
-                        </div>
-                        <div class="provider-logo">
-                            <div class="provider-logo-icon">
-                                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
-                            </div>
-                            British Gas
-                        </div>
+                </div>
+                <!-- Chart -->
+                <div class="insights-chart-wrap" id="insightsChartWrap">
+                    <div class="section-title">Energy over time</div>
+                    <div class="insights-chart" id="insightsChart"></div>
+                    <div class="insights-chart-legend" id="insightsChartLegend"></div>
+                </div>
+                <!-- Breakdown table -->
+                <div class="section-title">Energy breakdown</div>
+                <div class="insights-breakdown-wrap">
+                    <table class="insights-breakdown" id="insightsBreakdown">
+                        <thead><tr><th>Category</th><th>kWh</th></tr></thead>
+                        <tbody></tbody>
+                    </table>
+                    <p class="insights-heating-note" id="insightsHeatingNote" style="display:none;">Heating from Daikin when available; otherwise estimated from load (HEATING_LOAD_SHARE).</p>
+                </div>
+                <!-- Gas comparison -->
+                <div class="insights-gas-card" id="insightsGasCard" style="display:none;">
+                    <div class="section-title">Solar + heat pump vs gas</div>
+                    <p class="insights-gas-text" id="insightsGasText"></p>
+                </div>
+                <!-- Heating insights -->
+                <div class="insights-heating-analytics-wrap" id="insightsHeatingAnalyticsWrap" style="display:none;">
+                    <div class="section-title">Heating insights</div>
+                    <div class="insights-heating-summary" id="insightsHeatingSummary"></div>
+                    <div class="insights-heating-weather" id="insightsHeatingWeather" style="display:none;"></div>
+                    <div class="insights-heating-temp-bands-wrap" id="insightsHeatingTempBandsWrap" style="display:none;">
+                        <div class="insights-heating-temp-bands-label">Spend by outdoor temperature band</div>
+                        <table class="insights-breakdown" id="insightsTempBandsTable">
+                            <thead><tr><th>Temperature</th><th>Days</th><th>Heating kWh</th><th>Cost</th></tr></thead>
+                            <tbody id="insightsTempBandsBody"></tbody>
+                        </table>
                     </div>
                 </div>
             </div>
         </div>
-        </div><!-- end tab-energy -->
+        </div><!-- end tab-insights -->
     </div>
 </div>
 
@@ -1511,7 +1604,8 @@ function describeAction(action, params) {
     return action;
 }
 
-document.getElementById('assistantRecommendBtn').addEventListener('click', async function() {
+var assistantRecommendBtnEl = document.getElementById('assistantRecommendBtn');
+if (assistantRecommendBtnEl) assistantRecommendBtnEl.addEventListener('click', async function() {
     const msgInput = document.getElementById('assistantMessage');
     const message = (msgInput && msgInput.value) ? msgInput.value.trim() : null;
     if (message) addAssistantMessage('user', message);
@@ -1551,7 +1645,8 @@ document.getElementById('assistantRecommendBtn').addEventListener('click', async
     btn.textContent = 'Get recommendations';
 });
 
-document.getElementById('assistantApplyBtn').addEventListener('click', async function() {
+var assistantApplyBtnEl = document.getElementById('assistantApplyBtn');
+if (assistantApplyBtnEl) assistantApplyBtnEl.addEventListener('click', async function() {
     const checked = document.querySelectorAll('.assistant-action-cb:checked');
     const toApply = [];
     checked.forEach(cb => {
@@ -1600,6 +1695,313 @@ document.getElementById('assistantApplyBtn').addEventListener('click', async fun
     btn.disabled = false;
 });
 
+/* ── Insights tab (day / week / month + chart) ── */
+
+let insightsPeriod = 'month';
+let insightsCurrentDate = null;
+
+function insightsTodayStr() {
+    const t = new Date();
+    return t.getFullYear() + '-' + String(t.getMonth() + 1).padStart(2, '0') + '-' + String(t.getDate()).padStart(2, '0');
+}
+
+function insightsMonthStr() {
+    const d = insightsCurrentDate ? new Date(insightsCurrentDate + 'T12:00:00') : new Date();
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+}
+
+function initInsightsDate() {
+    if (!insightsCurrentDate) insightsCurrentDate = insightsTodayStr();
+}
+
+function isAtCurrentPeriod() {
+    initInsightsDate();
+    const today = insightsTodayStr();
+    if (insightsPeriod === 'day') return insightsCurrentDate >= today;
+    if (insightsPeriod === 'week') {
+        var d = new Date(insightsCurrentDate + 'T12:00:00');
+        var day = d.getDay();
+        var mon = new Date(d);
+        mon.setDate(d.getDate() - (day === 0 ? 6 : day - 1));
+        var sun = new Date(mon);
+        sun.setDate(mon.getDate() + 6);
+        var todayDate = new Date(today + 'T12:00:00');
+        return todayDate >= mon && todayDate <= sun;
+    }
+    if (insightsPeriod === 'month') {
+        var parts = insightsCurrentDate.split('-').map(Number);
+        var y = parts[0], m = parts[1];
+        var t = new Date();
+        return y === t.getFullYear() && m === (t.getMonth() + 1);
+    }
+    if (insightsPeriod === 'year') {
+        var y = insightsCurrentDate ? parseInt(insightsCurrentDate.slice(0, 4), 10) : new Date().getFullYear();
+        return y >= new Date().getFullYear();
+    }
+    return false;
+}
+
+function showInsightsError(msg) {
+    const el = document.getElementById('insightsError');
+    const loading = document.getElementById('insightsLoading');
+    if (el) { el.textContent = msg || ''; el.style.display = msg ? 'block' : 'none'; }
+    if (loading) loading.style.display = 'none';
+}
+
+function formatKwh(val) {
+    if (val == null) return '—';
+    if (val >= 1000) return (val / 1000).toFixed(2) + ' MWh';
+    return val.toFixed(2) + ' kWh';
+}
+
+function renderInsights(data) {
+    showInsightsError('');
+    const c = data.cost;
+    const e = data.energy;
+    var balance = (e.export_kwh != null && e.import_kwh != null) ? (e.export_kwh - e.import_kwh) : null;
+    var balanceEl = document.getElementById('insightsEnergyBalance');
+    if (balanceEl) balanceEl.textContent = balance != null ? (balance >= 0 ? '' : '') + balance.toFixed(1) + ' kWh' : '—';
+    var prodEl = document.getElementById('insightsProductionKwh');
+    if (prodEl) prodEl.textContent = e.solar_kwh != null ? formatKwh(e.solar_kwh) : '—';
+    var consEl = document.getElementById('insightsConsumptionKwh');
+    if (consEl) consEl.textContent = e.load_kwh != null ? formatKwh(e.load_kwh) : '—';
+    document.getElementById('insightsNetCost').textContent = '£' + (c.net_cost_pounds != null ? c.net_cost_pounds.toFixed(2) : '—');
+    document.getElementById('insightsImportKwh').textContent = (e.import_kwh != null ? e.import_kwh.toFixed(1) : '—');
+    document.getElementById('insightsExportKwh').textContent = (e.export_kwh != null ? e.export_kwh.toFixed(1) : '—');
+    document.getElementById('insightsSolarKwh').textContent = (e.solar_kwh != null ? e.solar_kwh.toFixed(1) : '—');
+    document.getElementById('insightsLoadKwh').textContent = (e.load_kwh != null ? e.load_kwh.toFixed(1) : '—');
+    var chargeEl = document.getElementById('insightsChargeKwh');
+    if (chargeEl) chargeEl.textContent = (e.charge_kwh != null ? e.charge_kwh.toFixed(1) : '—');
+    var dischargeEl = document.getElementById('insightsDischargeKwh');
+    if (dischargeEl) dischargeEl.textContent = (e.discharge_kwh != null ? e.discharge_kwh.toFixed(1) : '—');
+    var fi = document.getElementById('insightsFlowImported');
+    if (fi) fi.textContent = formatKwh(e.import_kwh);
+    var fs = document.getElementById('insightsFlowSolar');
+    if (fs) fs.textContent = formatKwh(e.solar_kwh);
+    var fd = document.getElementById('insightsFlowDischarged');
+    if (fd) fd.textContent = formatKwh(e.discharge_kwh);
+    var fe = document.getElementById('insightsFlowExported');
+    if (fe) fe.textContent = formatKwh(e.export_kwh);
+    var fc = document.getElementById('insightsFlowConsumed');
+    if (fc) fc.textContent = formatKwh(e.load_kwh);
+    var fch = document.getElementById('insightsFlowCharged');
+    if (fch) fch.textContent = formatKwh(e.charge_kwh);
+
+    const tbody = document.querySelector('#insightsBreakdown tbody');
+    if (tbody) {
+        tbody.innerHTML = '';
+        const rows = [
+            ['Grid import', e.import_kwh],
+            ['Grid export', e.export_kwh],
+            ['Solar', e.solar_kwh],
+            ['Load', e.load_kwh],
+            ['Battery charge', e.charge_kwh],
+            ['Battery discharge', e.discharge_kwh],
+        ];
+        rows.forEach(function (r) {
+            const tr = document.createElement('tr');
+            tr.innerHTML = '<td>' + r[0] + '</td><td>' + (r[1] != null ? r[1].toFixed(1) : '—') + '</td>';
+            tbody.appendChild(tr);
+        });
+        if (data.heating_estimate_kwh != null) {
+            const tr = document.createElement('tr');
+            tr.innerHTML = '<td>Heating</td><td>' + data.heating_estimate_kwh.toFixed(1) + '</td>';
+            tbody.appendChild(tr);
+        }
+    }
+    const heatingNote = document.getElementById('insightsHeatingNote');
+    if (heatingNote) heatingNote.style.display = (data.heating_estimate_kwh != null ? 'block' : 'none');
+
+    const gasCard = document.getElementById('insightsGasCard');
+    const gasText = document.getElementById('insightsGasText');
+    if (data.equivalent_gas_cost_pounds != null && gasCard && gasText) {
+        gasCard.style.display = 'block';
+        let s = 'Equivalent gas cost this month: £' + data.equivalent_gas_cost_pounds.toFixed(2) + '.';
+        if (data.gas_comparison_ahead_pounds != null) {
+            if (data.gas_comparison_ahead_pounds >= 0) {
+                s += ' You are £' + data.gas_comparison_ahead_pounds.toFixed(2) + ' ahead with solar + heat pump.';
+            } else {
+                s += ' Gas would have been £' + Math.abs(data.gas_comparison_ahead_pounds).toFixed(2) + ' cheaper this month.';
+            }
+        }
+        gasText.textContent = s;
+    } else if (gasCard) {
+        gasCard.style.display = 'none';
+    }
+    var haWrap = document.getElementById('insightsHeatingAnalyticsWrap');
+    var ha = data.heating_analytics;
+    if (haWrap) {
+        if (!ha || (ha.heating_percent_of_cost == null && ha.heating_percent_of_consumption == null)) {
+            haWrap.style.display = 'none';
+        } else {
+            haWrap.style.display = 'block';
+            var parts = [];
+            if (ha.heating_percent_of_cost != null) parts.push('Heating: ' + ha.heating_percent_of_cost.toFixed(0) + '% of cost');
+            if (ha.heating_percent_of_consumption != null) parts.push(ha.heating_percent_of_consumption.toFixed(0) + '% of consumption');
+            var sumEl = document.getElementById('insightsHeatingSummary');
+            if (sumEl) sumEl.textContent = parts.join(' · ');
+            var weatherEl = document.getElementById('insightsHeatingWeather');
+            if (weatherEl) {
+                if (ha.avg_outdoor_temp_c != null || ha.degree_days != null || ha.cost_per_degree_day_pounds != null || ha.heating_kwh_per_degree_day != null) {
+                    weatherEl.style.display = 'block';
+                    var wParts = [];
+                    if (ha.avg_outdoor_temp_c != null) wParts.push('Avg outdoor: ' + ha.avg_outdoor_temp_c.toFixed(1) + '°C');
+                    if (ha.degree_days != null) wParts.push(ha.degree_days.toFixed(1) + ' degree-days');
+                    if (ha.cost_per_degree_day_pounds != null) wParts.push('£' + ha.cost_per_degree_day_pounds.toFixed(2) + '/degree-day');
+                    if (ha.heating_kwh_per_degree_day != null) wParts.push(ha.heating_kwh_per_degree_day.toFixed(1) + ' kWh/degree-day');
+                    weatherEl.textContent = wParts.join(' · ');
+                } else {
+                    weatherEl.style.display = 'none';
+                }
+            }
+            var bandsWrap = document.getElementById('insightsHeatingTempBandsWrap');
+            var bandsBody = document.getElementById('insightsTempBandsBody');
+            if (bandsWrap && bandsBody && ha.temp_bands && ha.temp_bands.length > 0) {
+                bandsWrap.style.display = 'block';
+                bandsBody.innerHTML = '';
+                ha.temp_bands.forEach(function (b) {
+                    var tr = document.createElement('tr');
+                    tr.innerHTML = '<td>' + (b.band || '—') + '</td><td>' + (b.days != null ? b.days : '—') + '</td><td>' + (b.heating_kwh != null ? b.heating_kwh.toFixed(1) : '—') + '</td><td>£' + (b.cost_pounds != null ? b.cost_pounds.toFixed(2) : '—') + '</td>';
+                    bandsBody.appendChild(tr);
+                });
+            } else if (bandsWrap) {
+                bandsWrap.style.display = 'none';
+            }
+        }
+    }
+    renderChart(data.chart_data || []);
+    var navLabel = document.getElementById('insightsNavLabel');
+    if (navLabel) navLabel.textContent = data.period_label || '—';
+    var nextBtn = document.getElementById('insightsNext');
+    if (nextBtn) nextBtn.disabled = isAtCurrentPeriod();
+}
+
+function renderChart(chartData) {
+    const wrap = document.getElementById('insightsChart');
+    const legend = document.getElementById('insightsChartLegend');
+    if (!wrap) return;
+    wrap.innerHTML = '';
+    if (!chartData || chartData.length === 0) {
+        wrap.innerHTML = '<p class="insights-chart-empty" style="color:var(--text-muted);font-size:0.875rem;margin:1rem 0;">No data to display</p>';
+        if (legend) legend.innerHTML = '';
+        return;
+    }
+    var maxVal = 0;
+    chartData.forEach(function (p) {
+        var sol = p.solar_kwh || 0, load = p.load_kwh || 0, imp = p.import_kwh || 0, dis = p.discharge_kwh || 0;
+        var total = sol + load + imp + dis;
+        if (total > maxVal) maxVal = total;
+    });
+    if (maxVal < 0.1) maxVal = 1;
+    var isYearView = chartData.length <= 12 && chartData.every(function (p) { return p.date.length >= 10 && p.date.slice(8, 10) === '01'; });
+    var monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    chartData.forEach(function (p) {
+        var sol = p.solar_kwh || 0, load = p.load_kwh || 0, imp = p.import_kwh || 0, dis = p.discharge_kwh || 0;
+        var total = sol + load + imp + dis;
+        var label;
+        if (isYearView && p.date.length >= 7) {
+            var mo = parseInt(p.date.slice(5, 7), 10);
+            label = monthNames[mo - 1] || p.date.slice(5, 7);
+        } else {
+            label = p.date.length >= 10 ? p.date.slice(8, 10) + '/' + p.date.slice(5, 7) : p.date;
+        }
+        var g = document.createElement('div');
+        g.className = 'insights-chart-bar-group';
+        var barStack = document.createElement('div');
+        barStack.className = 'insights-chart-bar-stack';
+        var segs = [
+            { v: sol, c: 'solar' },
+            { v: load, c: 'load' },
+            { v: imp, c: 'import' },
+            { v: dis, c: 'battery' }
+        ];
+        segs.forEach(function (s) {
+            var bar = document.createElement('div');
+            bar.className = 'insights-chart-bar ' + s.c;
+            bar.style.flex = (s.v > 0 ? s.v : 0) + ' 1 0%';
+            bar.title = s.c + ': ' + (s.v != null ? s.v.toFixed(1) : 0) + ' kWh';
+            barStack.appendChild(bar);
+        });
+        var lbl = document.createElement('div');
+        lbl.className = 'insights-chart-label';
+        lbl.textContent = label;
+        g.appendChild(barStack);
+        g.appendChild(lbl);
+        wrap.appendChild(g);
+    });
+    if (legend) {
+        legend.innerHTML = '<span><i style="background:#3b82f6;width:10px;height:10px;border-radius:2px;display:inline-block"></i> Solar</span><span><i style="background:#ef4444;width:10px;height:10px;border-radius:2px;display:inline-block"></i> Load</span><span><i style="background:var(--accent-red);width:10px;height:10px;border-radius:2px;display:inline-block"></i> Grid</span><span><i style="background:#f97316;width:10px;height:10px;border-radius:2px;display:inline-block"></i> Battery</span>';
+    }
+}
+
+function loadInsightsPeriod() {
+    initInsightsDate();
+    const loading = document.getElementById('insightsLoading');
+    const errEl = document.getElementById('insightsError');
+    if (loading) loading.style.display = 'block';
+    if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+    var url = '/energy/period?period=' + encodeURIComponent(insightsPeriod);
+    if (insightsPeriod === 'month') url += '&month=' + encodeURIComponent(insightsMonthStr());
+    else if (insightsPeriod === 'year') url += '&year=' + (insightsCurrentDate ? insightsCurrentDate.slice(0, 4) : new Date().getFullYear());
+    else url += '&date=' + encodeURIComponent(insightsCurrentDate);
+    apiCall(url)
+        .then(function (data) {
+            if (loading) loading.style.display = 'none';
+            renderInsights(data);
+        })
+        .catch(function (e) {
+            if (loading) loading.style.display = 'none';
+            showInsightsError(e.message || 'Failed to load data.');
+        });
+}
+
+function insightsPrev() {
+    initInsightsDate();
+    var d = new Date(insightsCurrentDate + 'T12:00:00');
+    if (insightsPeriod === 'day') {
+        d.setDate(d.getDate() - 1);
+    } else if (insightsPeriod === 'week') {
+        d.setDate(d.getDate() - 7);
+    } else if (insightsPeriod === 'year') {
+        d.setFullYear(d.getFullYear() - 1);
+    } else {
+        d.setMonth(d.getMonth() - 1);
+    }
+    insightsCurrentDate = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    loadInsightsPeriod();
+}
+
+function insightsNext() {
+    if (isAtCurrentPeriod()) return;
+    initInsightsDate();
+    var d = new Date(insightsCurrentDate + 'T12:00:00');
+    if (insightsPeriod === 'day') {
+        d.setDate(d.getDate() + 1);
+    } else if (insightsPeriod === 'week') {
+        d.setDate(d.getDate() + 7);
+    } else if (insightsPeriod === 'year') {
+        d.setFullYear(d.getFullYear() + 1);
+    } else {
+        d.setMonth(d.getMonth() + 1);
+    }
+    insightsCurrentDate = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    loadInsightsPeriod();
+}
+
+document.querySelectorAll('.insights-period-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+        document.querySelectorAll('.insights-period-btn').forEach(function (b) { b.classList.remove('active'); });
+        this.classList.add('active');
+        insightsPeriod = this.dataset.period;
+        initInsightsDate();
+        if (insightsPeriod === 'month') insightsCurrentDate = insightsMonthStr() + '-01';
+        else if (insightsPeriod === 'year') insightsCurrentDate = (insightsCurrentDate ? insightsCurrentDate.slice(0, 4) : new Date().getFullYear()) + '-01-01';
+        loadInsightsPeriod();
+    });
+});
+document.getElementById('insightsPrev').addEventListener('click', insightsPrev);
+document.getElementById('insightsNext').addEventListener('click', insightsNext);
+
 /* ── Tab switching ── */
 
 function switchTab(tabId) {
@@ -1611,10 +2013,18 @@ function switchTab(tabId) {
         panel.classList.toggle('active', panel.id === 'tab-' + tabId);
     });
     localStorage.setItem('activeTab', tabId);
+    if (tabId === 'insights') {
+        initInsightsDate();
+        loadInsightsPeriod();
+    }
 }
 
 (function restoreTab() {
-    const saved = localStorage.getItem('activeTab');
+    initInsightsDate();
+    var navLabel = document.getElementById('insightsNavLabel');
+    if (navLabel) navLabel.textContent = '—';
+    let saved = localStorage.getItem('activeTab');
+    if (saved === 'assistant' || saved === 'energy') saved = 'insights';
     if (saved && document.getElementById('tab-' + saved)) {
         switchTab(saved);
     }
