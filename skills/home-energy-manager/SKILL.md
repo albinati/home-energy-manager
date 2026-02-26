@@ -96,9 +96,18 @@ Confirmation tokens expire after 5 minutes.
 6. **Temperature ranges**: Room temp 15-30°C, tank temp 30-60°C, LWT offset -10 to +10. The API will reject out-of-range values.
 7. **Fox ESS may be unavailable**: If Fox ESS returns a 503, it means credentials are not yet configured. Only Daikin operations will work.
 
+## Recommendation-only mode (403)
+
+If the API returns **403** on `POST /api/v1/openclaw/execute` with a message like "recommendation-only mode", the server is configured so OpenClaw must **not** execute changes. In that case:
+
+- **Only recommend** actions to the user (e.g. "I suggest setting the temperature to 21°C" or "Consider switching to Feed-in Priority").
+- Tell the user to apply changes themselves via the **dashboard** (web UI) or **CLI**.
+- Do **not** retry execute or attempt to bypass; respect the safeguard.
+
 ## Error handling
 
 - `400` — Invalid parameters (bad mode, out-of-range value)
+- `403` — Recommendation-only mode: do not execute; suggest actions and tell the user to apply via dashboard/CLI.
 - `404` — No devices found
 - `409` — Action blocked (e.g. setting temperature during weather regulation)
 - `410` — Confirmation token expired

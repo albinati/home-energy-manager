@@ -50,6 +50,9 @@ class Config:
     API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
     API_PORT: int = int(os.getenv("API_PORT", "8000"))
 
+    # OpenClaw: when True, POST /api/v1/openclaw/execute returns 403 (recommendation-only; apply via dashboard/CLI)
+    OPENCLAW_READ_ONLY: bool = os.getenv("OPENCLAW_READ_ONLY", "true").lower() in ("true", "1", "yes")
+
     # AI Assistant (optional; if not set, rule-based suggestions only)
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     AI_ASSISTANT_PROVIDER: str = os.getenv("AI_ASSISTANT_PROVIDER", "openai")
