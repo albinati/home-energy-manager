@@ -95,6 +95,7 @@ See `.env.example` for all options. Key variables:
 | `BRITISH_GAS_API_KEY` | No | British Gas API key (if available) |
 | `ALERT_OPENCLAW_URL` | No | OpenClaw send endpoint (default `http://127.0.0.1:18789/api/send`) |
 | `ALERT_CHANNEL` | No | Channel to send alerts (e.g. `webchat`); leave blank for stdout only |
+| `OPENCLAW_READ_ONLY` | No | If `true` (default), OpenClaw cannot execute; only recommend. Apply via dashboard/CLI. |
 | `OPENAI_API_KEY` | No | For AI Assistant (recommendations). If unset, rule-based suggestions only |
 | `AI_ASSISTANT_PROVIDER` | No | Default `openai` |
 | `AI_ASSISTANT_MODEL` | No | Default `gpt-4o-mini` |
@@ -221,6 +222,8 @@ To use the **home-energy-manager** skill from OverBot/OpenClaw chat:
 3. **Endpoints** the agent uses (all unauthenticated REST; auth is handled by the server’s `.env`):
    - `GET {HOME_ENERGY_API_URL}/api/v1/openclaw/capabilities` — list actions
    - `POST {HOME_ENERGY_API_URL}/api/v1/openclaw/execute` — run an action (with confirmation flow when required)
+
+4. **Recommendation-only safeguard**: By default `OPENCLAW_READ_ONLY=true`. The agent can read status and capabilities but **cannot execute** changes; `POST .../execute` returns 403. The agent should only recommend; you apply changes via the dashboard or CLI. Set `OPENCLAW_READ_ONLY=false` in `.env` if you want the agent to execute actions (after confirmation where required).
 
 See `skills/home-energy-manager/SKILL.md` for the full instruction set and action list.
 

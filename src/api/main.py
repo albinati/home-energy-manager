@@ -732,13 +732,21 @@ async def openclaw_execute(req: OpenClawExecuteRequest):
     """
     Execute an action via OpenClaw.
     
+    When OPENCLAW_READ_ONLY=true (default), returns 403 so the agent can only recommend;
+    apply changes via the dashboard or CLI.
+    
     For actions requiring confirmation:
     1. First call returns a pending action with confirmation_token
     2. Second call with confirmation_token executes the action
     """
+    if config.OPENCLAW_READ_ONLY:
+        raise HTTPException(
+            status_code=403,
+            detail="OpenClaw is in recommendation-only mode. Apply changes via the dashboard or CLI. Set OPENCLAW_READ_ONLY=false to allow execution.",
+        )
     action_type = req.action.value
     params = req.parameters
-    
+
     if req.confirmation_token:
         action = safeguards.get_pending_action(req.confirmation_token)
         if action is None:
