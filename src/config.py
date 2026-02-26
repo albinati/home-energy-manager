@@ -61,6 +61,22 @@ class Config:
     # Manual tariff for cost-aware suggestions (p/kWh) when no energy provider is connected
     MANUAL_TARIFF_IMPORT_PENCE: float = float(os.getenv("MANUAL_TARIFF_IMPORT_PENCE", "0"))
     MANUAL_TARIFF_EXPORT_PENCE: float = float(os.getenv("MANUAL_TARIFF_EXPORT_PENCE", "0"))
+    MANUAL_STANDING_CHARGE_PENCE_PER_DAY: float = float(
+        os.getenv("MANUAL_STANDING_CHARGE_PENCE_PER_DAY", "0")
+    )
+
+    # Gas comparison (solar + heat pump vs gas): gas price p/kWh, boiler efficiency (e.g. 0.9)
+    GAS_PRICE_PENCE_PER_KWH: float = float(os.getenv("GAS_PRICE_PENCE_PER_KWH", "0"))
+    GAS_BOILER_EFFICIENCY: float = float(os.getenv("GAS_BOILER_EFFICIENCY", "0.9"))
+    HEAT_PUMP_COP_ESTIMATE: float = float(os.getenv("HEAT_PUMP_COP_ESTIMATE", "2.8"))
+    # Heating estimate: share of total load assumed to be heating (e.g. 0.4 = 40%) in heating season
+    HEATING_LOAD_SHARE: float = float(os.getenv("HEATING_LOAD_SHARE", "0.4"))
+
+    # Weather (optional): for heating analytics — degree-days, cost per °C (Open-Meteo Historical, no key)
+    WEATHER_LAT: str = (os.getenv("WEATHER_LAT") or "").strip()
+    WEATHER_LON: str = (os.getenv("WEATHER_LON") or "").strip()
+    # Degree-day base temp (°C): heating demand assumed proportional to (base - outdoor_mean)
+    WEATHER_DEGREE_DAY_BASE_C: float = float(os.getenv("WEATHER_DEGREE_DAY_BASE_C", "18"))
 
     # Agile scheduler (Daikin ASHP by price)
     SCHEDULER_ENABLED: bool = os.getenv("SCHEDULER_ENABLED", "false").lower() in ("true", "1", "yes")

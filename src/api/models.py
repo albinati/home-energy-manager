@@ -213,6 +213,84 @@ class EnergyUsageResponse(BaseModel):
     net_cost_pounds: float = Field(description="Net cost in pounds")
 
 
+class MonthlyEnergySummaryResponse(BaseModel):
+    year: int
+    month: int
+    month_str: str
+    import_kwh: float = 0.0
+    export_kwh: float = 0.0
+    solar_kwh: float = 0.0
+    load_kwh: float = 0.0
+    charge_kwh: float = 0.0
+    discharge_kwh: float = 0.0
+
+
+class MonthlyCostSummaryResponse(BaseModel):
+    import_cost_pence: float = 0.0
+    export_earnings_pence: float = 0.0
+    standing_charge_pence: float = 0.0
+    net_cost_pence: float = 0.0
+    net_cost_pounds: float = 0.0
+    import_cost_pounds: float = 0.0
+    export_earnings_pounds: float = 0.0
+
+
+class MonthlyInsightsResponse(BaseModel):
+    energy: MonthlyEnergySummaryResponse
+    cost: MonthlyCostSummaryResponse
+    heating_estimate_kwh: Optional[float] = None
+    heating_estimate_cost_pence: Optional[float] = None
+    equivalent_gas_cost_pence: Optional[float] = None
+    equivalent_gas_cost_pounds: Optional[float] = None
+    gas_comparison_ahead_pounds: Optional[float] = None
+
+
+class ChartDataPoint(BaseModel):
+    date: str
+    import_kwh: float = 0.0
+    export_kwh: float = 0.0
+    solar_kwh: float = 0.0
+    load_kwh: float = 0.0
+    charge_kwh: float = 0.0
+    discharge_kwh: float = 0.0
+
+
+class TempBandSummaryResponse(BaseModel):
+    band: str
+    days: int
+    heating_kwh: float
+    cost_pounds: float
+    avg_temp_c: Optional[float] = None
+
+
+class HeatingAnalyticsResponse(BaseModel):
+    heating_percent_of_cost: Optional[float] = None
+    heating_percent_of_consumption: Optional[float] = None
+    avg_outdoor_temp_c: Optional[float] = None
+    degree_days: Optional[float] = None
+    cost_per_degree_day_pounds: Optional[float] = None
+    heating_kwh_per_degree_day: Optional[float] = None
+    temp_bands: list[TempBandSummaryResponse] = []
+
+
+class PeriodInsightsResponse(BaseModel):
+    period: str  # day | week | month
+    period_label: str
+    energy: MonthlyEnergySummaryResponse
+    cost: MonthlyCostSummaryResponse
+    heating_estimate_kwh: Optional[float] = None
+    heating_estimate_cost_pence: Optional[float] = None
+    equivalent_gas_cost_pence: Optional[float] = None
+    equivalent_gas_cost_pounds: Optional[float] = None
+    gas_comparison_ahead_pounds: Optional[float] = None
+    chart_data: list[ChartDataPoint] = []
+    heating_analytics: Optional[HeatingAnalyticsResponse] = None
+
+
+class EnergyInsightsTextResponse(BaseModel):
+    summary: str = Field(description="Short narrative for OpenClaw (this month cost, equivalent gas)")
+
+
 # AI Assistant models
 
 class AssistantPreference(str, Enum):
