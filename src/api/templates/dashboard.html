@@ -45,8 +45,9 @@
         .auto-refresh-toggle select { background: var(--bg-card); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 4px; padding: 0.25rem 0.5rem; font-size: 0.8125rem; }
         .refresh-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent-green); display: inline-block; }
         .refresh-dot.paused { background: var(--text-muted); }
-        .btn-icon { background: var(--bg-card); border: 1px solid var(--border-color); color: var(--text-primary); padding: 0.5rem; border-radius: 6px; cursor: pointer; display: flex; align-items: center; }
+        .btn-icon { background: var(--bg-card); border: 1px solid var(--border-color); color: var(--text-primary); padding: 0.5rem; border-radius: 6px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; min-width: 2rem; min-height: 2rem; }
         .btn-icon:hover { background: var(--border-color); }
+        .btn-icon svg { width: 1.25rem; height: 1.25rem; flex-shrink: 0; }
         .last-updated { font-size: 0.75rem; color: var(--text-muted); }
 
         .dashboard { display: flex; flex-direction: column; gap: 1.5rem; }
@@ -323,6 +324,152 @@
             color: var(--accent-green);
         }
 
+        /* Energy flow visualization */
+        .energy-flow {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+        }
+        .energy-node {
+            background: var(--bg-card);
+            border-radius: 12px;
+            padding: 1.25rem;
+            text-align: center;
+            position: relative;
+        }
+        .energy-node-icon {
+            width: 48px;
+            height: 48px;
+            margin: 0 auto 0.75rem;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .energy-node-icon svg {
+            width: 24px;
+            height: 24px;
+        }
+        .energy-node-icon.solar { background: rgba(234,179,8,0.15); color: var(--accent-yellow); }
+        .energy-node-icon.battery { background: rgba(34,197,94,0.15); color: var(--accent-green); }
+        .energy-node-icon.grid { background: rgba(59,130,246,0.15); color: var(--accent-blue); }
+        .energy-node-icon.home { background: rgba(249,115,22,0.15); color: var(--accent-orange); }
+        .energy-node-label {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 0.25rem;
+        }
+        .energy-node-value {
+            font-size: 1.5rem;
+            font-weight: 700;
+        }
+        .energy-node-value .unit {
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+            font-weight: 400;
+        }
+        .energy-node-status {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            margin-top: 0.25rem;
+        }
+        .energy-node-status.importing { color: var(--accent-red); }
+        .energy-node-status.exporting { color: var(--accent-green); }
+        .energy-node-status.charging { color: var(--accent-green); }
+        .energy-node-status.discharging { color: var(--accent-orange); }
+        
+        /* Per-section refresh bar */
+        .section-refresh-bar {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+            padding: 0.5rem 0;
+            margin-bottom: 0.75rem;
+            font-size: 0.8125rem;
+            color: var(--text-secondary);
+        }
+        .section-refresh-bar .refresh-label { color: var(--text-muted); }
+        .section-refresh-bar .refresh-value { font-weight: 500; color: var(--text-primary); }
+        .section-refresh-bar .refresh-sep { color: var(--border-color); margin: 0 0.25rem; }
+        .section-refresh-bar .refresh-select {
+            padding: 0.25rem 0.5rem;
+            border-radius: 6px;
+            border: 1px solid var(--border-color);
+            background: var(--bg-card);
+            color: var(--text-primary);
+            font-size: 0.8125rem;
+        }
+        .section-refresh-bar .next-label { margin-left: 0.5rem; }
+        
+        /* Battery gauge */
+        .battery-gauge {
+            width: 100%;
+            height: 8px;
+            background: var(--border-color);
+            border-radius: 4px;
+            margin-top: 0.75rem;
+            overflow: hidden;
+        }
+        .battery-gauge-fill {
+            height: 100%;
+            border-radius: 4px;
+            transition: width 0.3s ease;
+        }
+        .battery-gauge-fill.high { background: var(--accent-green); }
+        .battery-gauge-fill.medium { background: var(--accent-yellow); }
+        .battery-gauge-fill.low { background: var(--accent-red); }
+        
+        /* Energy summary row */
+        .energy-summary {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 0.75rem;
+            padding: 1rem;
+            background: var(--bg-card);
+            border-radius: 8px;
+        }
+        .energy-summary-item {
+            text-align: center;
+        }
+        .energy-summary-label {
+            font-size: 0.6875rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .energy-summary-value {
+            font-size: 1.125rem;
+            font-weight: 600;
+            margin-top: 0.125rem;
+        }
+
+        /* AI Assistant */
+        .assistant-intro { color: var(--text-secondary); font-size: 0.875rem; margin-bottom: 1.25rem; line-height: 1.5; }
+        .assistant-preference { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1.25rem; flex-wrap: wrap; }
+        .assistant-preference-label { font-size: 0.875rem; color: var(--text-secondary); }
+        .assistant-preference-btns { display: flex; gap: 0.5rem; }
+        .assistant-pref-btn.active { background: var(--accent-blue); color: white; border-color: var(--accent-blue); }
+        .assistant-input-row { display: flex; gap: 0.75rem; margin-bottom: 1.25rem; flex-wrap: wrap; }
+        .assistant-input { flex: 1; min-width: 200px; padding: 0.625rem 1rem; border-radius: 8px; border: 1px solid var(--border-color); background: var(--bg-card); color: var(--text-primary); font-size: 0.875rem; }
+        .assistant-input:focus { outline: none; border-color: var(--accent-blue); }
+        .assistant-conversation { min-height: 120px; max-height: 280px; overflow-y: auto; background: var(--bg-card); border-radius: 8px; border: 1px solid var(--border-color); padding: 1rem; margin-bottom: 1.25rem; }
+        .assistant-msg { margin-bottom: 0.75rem; font-size: 0.875rem; }
+        .assistant-msg.user { color: var(--text-secondary); }
+        .assistant-msg.assistant { color: var(--text-primary); line-height: 1.5; white-space: pre-wrap; }
+        .assistant-msg .role { font-size: 0.6875rem; color: var(--text-muted); text-transform: uppercase; margin-bottom: 0.25rem; }
+        .assistant-suggestions { margin-top: 1rem; }
+        .assistant-actions-list { display: flex; flex-direction: column; gap: 0.5rem; margin: 0.75rem 0 1rem; }
+        .assistant-action-item { display: flex; align-items: flex-start; gap: 0.75rem; padding: 0.75rem 1rem; background: var(--bg-card); border-radius: 8px; border: 1px solid var(--border-color); }
+        .assistant-action-item input[type="checkbox"] { margin-top: 0.25rem; }
+        .assistant-action-desc { flex: 1; font-size: 0.8125rem; color: var(--text-primary); }
+        .assistant-action-desc .reason { color: var(--text-secondary); margin-top: 0.25rem; }
+        .assistant-action-item.requires-confirm .confirm-pending { font-size: 0.75rem; color: var(--accent-yellow); margin-top: 0.25rem; }
+        .assistant-apply-row { margin-top: 0.75rem; }
+
         @media (max-width: 640px) {
             .page { padding: 1rem; }
             header { flex-direction: column; gap: 1rem; align-items: flex-start; }
@@ -330,6 +477,7 @@
             .controls-grid { grid-template-columns: 1fr; }
             .tabs-nav { overflow-x: auto; }
             .tab-btn { padding: 0.625rem 1rem; font-size: 0.8125rem; white-space: nowrap; }
+            .energy-flow { grid-template-columns: 1fr 1fr; }
         }
     </style>
 </head>
@@ -339,22 +487,6 @@
         <div class="header-left">
             <h1>Home Energy Manager</h1>
             <p>Daikin Altherma + Fox ESS Control Panel</p>
-        </div>
-        <div class="header-right">
-            <span class="last-updated" id="lastUpdated"></span>
-            <div class="auto-refresh-toggle" title="Daikin API: 200 requests/day limit. 10-15 min refresh recommended.">
-                <span class="refresh-dot" id="refreshDot"></span>
-                <select id="refreshInterval" onchange="setRefreshInterval(this.value)">
-                    <option value="0">Off</option>
-                    <option value="600">10 min</option>
-                    <option value="900" selected>15 min</option>
-                    <option value="1800">30 min</option>
-                    <option value="3600">1 hour</option>
-                </select>
-            </div>
-            <button class="btn-icon" onclick="manualRefresh()" title="Refresh now">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
-            </button>
         </div>
     </header>
 
@@ -368,6 +500,10 @@
             <button class="tab-btn" role="tab" aria-selected="false" data-tab="battery" onclick="switchTab('battery')">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="6" width="18" height="12" rx="2"/><line x1="23" y1="10" x2="23" y2="14"/></svg>
                 Battery
+            </button>
+            <button class="tab-btn" role="tab" aria-selected="false" data-tab="assistant" onclick="switchTab('assistant')">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a2 2 0 012 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 017 7h1a1 1 0 010 2h-1a7 7 0 01-7 7h-1v1a2 2 0 01-2 2 2 2 0 01-2-2v-1H7a7 7 0 01-7-7H4a1 1 0 010-2h1a7 7 0 017-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 012-2z"/></svg>
+                AI Assistant
             </button>
             <button class="tab-btn" role="tab" aria-selected="false" data-tab="energy" onclick="switchTab('energy')">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
@@ -393,7 +529,24 @@
                 {% if daikin_error %}
                 <div class="error-message">{{ daikin_error }}</div>
                 {% elif daikin %}
-
+                <div class="section-refresh-bar">
+                    <span class="refresh-label">Last updated:</span>
+                    <span class="refresh-value" id="daikinLastUpdated">—</span>
+                    <span class="refresh-sep">|</span>
+                    <span class="refresh-label">Refresh:</span>
+                    <select id="daikinRefreshInterval" class="refresh-select" title="Daikin API: 200 requests/day limit.">
+                        <option value="0">Off</option>
+                        <option value="600">10 min</option>
+                        <option value="900" selected>15 min</option>
+                        <option value="1800">30 min</option>
+                        <option value="3600">1 h</option>
+                    </select>
+                    <span class="refresh-label next-label">Next in:</span>
+                    <span class="refresh-value" id="daikinNextRefresh">—</span>
+                    <button type="button" class="btn-icon" onclick="confirmRefreshDaikin()" title="Refresh heat pump now">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/><path d="M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                    </button>
+                </div>
                 <!-- Status section -->
                 <div class="status-section">
                     <div class="section-title">Status</div>
@@ -563,8 +716,8 @@
         <div class="card">
             <div class="card-header">
                 <span class="card-title">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="6" width="18" height="12" rx="2"/><line x1="23" y1="10" x2="23" y2="14"/></svg>
-                    Fox ESS Battery
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+                    Fox ESS Solar & Battery
                 </span>
                 {% if foxess %}
                 <span class="badge badge-on">Online</span>
@@ -578,48 +731,154 @@
                 {% if foxess_error %}
                 <div class="error-message">{{ foxess_error }}</div>
                 {% elif foxess %}
+                <div class="section-refresh-bar">
+                    <span class="refresh-label">Last updated:</span>
+                    <span class="refresh-value" id="foxessLastUpdated">—</span>
+                    <span class="refresh-sep">|</span>
+                    <span class="refresh-label">Refresh:</span>
+                    <select id="foxessRefreshInterval" class="refresh-select" title="Fox ESS API: 1440 calls/day limit.">
+                        <option value="0">Off</option>
+                        <option value="30">30 s</option>
+                        <option value="60" selected>1 min</option>
+                        <option value="120">2 min</option>
+                        <option value="300">5 min</option>
+                    </select>
+                    <span class="refresh-label next-label">Next in:</span>
+                    <span class="refresh-value" id="foxessNextRefresh">—</span>
+                    <button type="button" class="btn-icon" onclick="confirmRefreshFoxess()" title="Refresh battery/solar now">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/><path d="M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                    </button>
+                </div>
+                <!-- Energy Flow Visualization -->
                 <div class="status-section">
-                    <div class="section-title">Status</div>
-                    <div class="stat-row">
-                        <div class="stat">
-                            <div class="stat-label">Battery SoC</div>
-                            <div class="stat-value">{{ "%.0f"|format(foxess.soc) }}<span class="stat-unit">%</span></div>
-                            <div class="stat-sub {% if foxess.battery_power > 0 %}positive{% elif foxess.battery_power < 0 %}negative{% else %}neutral{% endif %}">
-                                {% if foxess.battery_power > 0 %}charging {{ "%.2f"|format(foxess.battery_power) }} kW
-                                {% elif foxess.battery_power < 0 %}discharging {{ "%.2f"|format(foxess.battery_power|abs) }} kW
-                                {% else %}idle{% endif %}
+                    <div class="section-title">Energy Flow</div>
+                    <div class="energy-flow">
+                        <!-- Solar -->
+                        <div class="energy-node">
+                            <div class="energy-node-icon solar">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+                            </div>
+                            <div class="energy-node-label">Solar</div>
+                            <div class="energy-node-value {% if foxess.solar_power > 0 %}positive{% endif %}" id="foxessSolarValue">
+                                {{ "%.2f"|format(foxess.solar_power) }}<span class="unit"> kW</span>
+                            </div>
+                            <div class="energy-node-status" id="foxessSolarStatus">
+                                {% if foxess.solar_power > 0 %}generating{% else %}no sunlight{% endif %}
                             </div>
                         </div>
-                        <div class="stat">
-                            <div class="stat-label">Solar</div>
-                            <div class="stat-value positive">{{ "%.2f"|format(foxess.solar_power) }}<span class="stat-unit">kW</span></div>
-                        </div>
-                        <div class="stat">
-                            <div class="stat-label">Load</div>
-                            <div class="stat-value">{{ "%.2f"|format(foxess.load_power) }}<span class="stat-unit">kW</span></div>
-                        </div>
-                        <div class="stat">
-                            <div class="stat-label">Grid</div>
-                            <div class="stat-value {% if foxess.grid_power > 0 %}negative{% else %}positive{% endif %}">
-                                {{ "%.2f"|format(foxess.grid_power|abs) }}<span class="stat-unit">kW</span>
+                        
+                        <!-- Battery -->
+                        <div class="energy-node">
+                            <div class="energy-node-icon battery">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="6" width="18" height="12" rx="2"/><line x1="23" y1="10" x2="23" y2="14"/></svg>
                             </div>
-                            <div class="stat-sub">{% if foxess.grid_power > 0 %}importing{% else %}exporting{% endif %}</div>
+                            <div class="energy-node-label">Battery</div>
+                            <div class="energy-node-value" id="foxessSocValue">
+                                {{ "%.0f"|format(foxess.soc) }}<span class="unit"> %</span>
+                            </div>
+                            <div class="energy-node-status {% if foxess.battery_power > 0 %}charging{% elif foxess.battery_power < 0 %}discharging{% endif %}" id="foxessBatteryStatus">
+                                {% if foxess.battery_power > 0 %}
+                                    charging {{ "%.2f"|format(foxess.battery_power) }} kW
+                                {% elif foxess.battery_power < 0 %}
+                                    discharging {{ "%.2f"|format(foxess.battery_power|abs) }} kW
+                                {% else %}
+                                    idle
+                                {% endif %}
+                            </div>
+                            <div class="battery-gauge">
+                                <div class="battery-gauge-fill {% if foxess.soc >= 50 %}high{% elif foxess.soc >= 20 %}medium{% else %}low{% endif %}" id="foxessGaugeFill" style="width: {{ foxess.soc }}%"></div>
+                            </div>
                         </div>
-                        <div class="stat">
-                            <div class="stat-label">Work Mode</div>
-                            <div class="stat-value" style="font-size:1.125rem;">{{ foxess.work_mode }}</div>
+                        
+                        <!-- Grid -->
+                        <div class="energy-node">
+                            <div class="energy-node-icon grid">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 10h-4V4a2 2 0 00-4 0v6H6a2 2 0 000 4h4v6a2 2 0 004 0v-6h4a2 2 0 000-4z"/></svg>
+                            </div>
+                            <div class="energy-node-label">Grid</div>
+                            <div class="energy-node-value {% if foxess.grid_power > 0 %}negative{% else %}positive{% endif %}" id="foxessGridValue">
+                                {{ "%.2f"|format(foxess.grid_power|abs) }}<span class="unit"> kW</span>
+                            </div>
+                            <div class="energy-node-status" id="foxessGridStatus">
+                                {% if foxess.grid_power > 0 %}importing{% else %}exporting{% endif %}
+                            </div>
+                        </div>
+                        
+                        <!-- Home Load -->
+                        <div class="energy-node" style="grid-column: 2;">
+                            <div class="energy-node-icon home">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+                            </div>
+                            <div class="energy-node-label">Home Load</div>
+                            <div class="energy-node-value" id="foxessLoadValue">
+                                {{ "%.2f"|format(foxess.load_power) }}<span class="unit"> kW</span>
+                            </div>
+                            <div class="energy-node-status">consuming</div>
+                        </div>
+                    </div>
+                    
+                    <!-- Summary row -->
+                    <div class="energy-summary">
+                        <div class="energy-summary-item">
+                            <div class="energy-summary-label">Work Mode</div>
+                            <div class="energy-summary-value" id="foxessWorkMode">{{ foxess.work_mode }}</div>
+                        </div>
+                        <div class="energy-summary-item">
+                            <div class="energy-summary-label">Self-Sufficiency</div>
+                            <div class="energy-summary-value {% if foxess.grid_power <= 0 %}positive{% endif %}" id="foxessSelfSuff">
+                                {% if foxess.load_power > 0 %}
+                                    {{ "%.0f"|format(((foxess.load_power - (foxess.grid_power if foxess.grid_power > 0 else 0)) / foxess.load_power * 100)|round) }}%
+                                {% else %}
+                                    100%
+                                {% endif %}
+                            </div>
+                        </div>
+                        <div class="energy-summary-item">
+                            <div class="energy-summary-label">Net Flow</div>
+                            <div class="energy-summary-value {% if foxess.grid_power <= 0 %}positive{% else %}negative{% endif %}" id="foxessNetFlow">
+                                {% if foxess.grid_power > 0 %}
+                                    -{{ "%.2f"|format(foxess.grid_power) }} kW
+                                {% else %}
+                                    +{{ "%.2f"|format(foxess.grid_power|abs) }} kW
+                                {% endif %}
+                            </div>
+                        </div>
+                        <div class="energy-summary-item">
+                            <div class="energy-summary-label">Cloud Updated</div>
+                            <div class="energy-summary-value" id="foxessCloudUpdated">
+                                {% if foxess.updated_at %}
+                                    {{ foxess.updated_at }}
+                                {% else %}
+                                    n/a
+                                {% endif %}
+                            </div>
+                        </div>
+                        <div class="energy-summary-item">
+                            <div class="energy-summary-label">API Calls (24h)</div>
+                            <div class="energy-summary-value" id="foxessApi24h">
+                                {% if foxess.refresh_count_24h is defined and foxess.refresh_limit_24h is defined %}
+                                    {{ foxess.refresh_count_24h }}/{{ foxess.refresh_limit_24h }}
+                                {% else %}
+                                    n/a
+                                {% endif %}
+                            </div>
                         </div>
                     </div>
                 </div>
+                
                 <div class="controls-section">
                     <div class="controls-title">Controls</div>
                     <div class="controls-grid">
                         <div class="gauge">
                             <div class="gauge-header"><span class="gauge-name">Inverter Mode</span></div>
-                            <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
-                                <button class="btn btn-secondary btn-sm" onclick="setFoxESSMode('Self Use')">Self Use</button>
-                                <button class="btn btn-secondary btn-sm" onclick="setFoxESSMode('Feed-in Priority')">Feed-in</button>
-                                <button class="btn btn-secondary btn-sm" onclick="setFoxESSMode('Back Up')">Back Up</button>
+                            <div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-top:0.5rem;">
+                                <button class="btn btn-secondary btn-sm {% if foxess.work_mode == 'Self Use' %}btn-primary{% endif %}" onclick="setFoxESSMode('Self Use')">Self Use</button>
+                                <button class="btn btn-secondary btn-sm {% if foxess.work_mode == 'Feed-in Priority' %}btn-primary{% endif %}" onclick="setFoxESSMode('Feed-in Priority')">Feed-in</button>
+                                <button class="btn btn-secondary btn-sm {% if foxess.work_mode == 'Back Up' %}btn-primary{% endif %}" onclick="setFoxESSMode('Back Up')">Back Up</button>
+                            </div>
+                            <div class="gauge-note" style="color: var(--text-secondary); font-style: normal; margin-top: 0.75rem;">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+                                Self Use: prioritize home consumption. Feed-in: export excess to grid. Back Up: reserve battery for outages.
                             </div>
                         </div>
                     </div>
@@ -627,12 +886,47 @@
                 {% else %}
                 <div class="pending-setup">
                     <p>Fox ESS credentials not configured yet.</p>
-                    <p>Set <code>FOXESS_API_KEY</code> in <code>.env</code> when ready.</p>
+                    <p>Set <code>FOX_API_KEY</code> (or <code>FOXESS_API_KEY</code>) in <code>.env</code> when ready.</p>
                 </div>
                 {% endif %}
             </div>
         </div>
         </div><!-- end tab-battery -->
+
+        <!-- ===== AI ASSISTANT TAB ===== -->
+        <div class="tab-panel" id="tab-assistant" role="tabpanel">
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a2 2 0 012 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 017 7h1a1 1 0 010 2h-1a7 7 0 01-7 7h-1v1a2 2 0 01-2 2 2 2 0 01-2-2v-1H7a7 7 0 01-7-7H4a1 1 0 010-2h1a7 7 0 017-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 012-2z"/></svg>
+                    AI Assistant
+                </span>
+            </div>
+            <div class="card-body">
+                <p class="assistant-intro">Get optimization suggestions for your heat pump and battery. Choose how to balance comfort and cost, then apply changes with one click.</p>
+                <div class="assistant-preference">
+                    <span class="assistant-preference-label">Balance:</span>
+                    <div class="assistant-preference-btns">
+                        <button type="button" class="btn btn-secondary assistant-pref-btn active" data-pref="comfort">Comfort</button>
+                        <button type="button" class="btn btn-secondary assistant-pref-btn" data-pref="balanced">Balanced</button>
+                        <button type="button" class="btn btn-secondary assistant-pref-btn" data-pref="savings">Cost savings</button>
+                    </div>
+                </div>
+                <div class="assistant-input-row">
+                    <input type="text" id="assistantMessage" class="assistant-input" placeholder="e.g. Lower heating at night, charge on cheap rate..." maxlength="500">
+                    <button type="button" class="btn btn-primary" id="assistantRecommendBtn">Get recommendations</button>
+                </div>
+                <div class="assistant-conversation" id="assistantConversation"></div>
+                <div class="assistant-suggestions" id="assistantSuggestions" style="display:none;">
+                    <div class="section-title">Suggested actions</div>
+                    <div class="assistant-actions-list" id="assistantActionsList"></div>
+                    <div class="assistant-apply-row">
+                        <button type="button" class="btn btn-primary" id="assistantApplyBtn">Apply selected</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        </div><!-- end tab-assistant -->
 
         <!-- ===== ENERGY TAB ===== -->
         <div class="tab-panel" id="tab-energy" role="tabpanel">
@@ -710,43 +1004,26 @@
 <script>
 let pendingActionId = null;
 let pendingCallback = null;
-let refreshTimer = null;
-let refreshSeconds = 900;
 let syncing = false;
 let errorStates = { heatpump: false, battery: false };
 
-function updateTimestamp() { document.getElementById('lastUpdated').textContent = 'Updated ' + new Date().toLocaleTimeString(); }
-updateTimestamp();
+/* ── Daikin refresh (Heat Pump) ── */
+let daikinRefreshTimer = null;
+let daikinRefreshSeconds = 900;
+let daikinNextRefreshAt = null;
 
-function setRefreshInterval(s) {
-    refreshSeconds = parseInt(s);
-    localStorage.setItem('refreshInterval', s);
-    if (refreshTimer) clearInterval(refreshTimer);
-    const dot = document.getElementById('refreshDot');
-    if (refreshSeconds > 0 && !syncing) { 
-        refreshTimer = setInterval(() => refreshDashboard(), refreshSeconds * 1000); 
-        dot.classList.remove('paused'); 
-    } else { 
-        dot.classList.add('paused'); 
+function setDaikinRefreshInterval(s) {
+    daikinRefreshSeconds = parseInt(s) || 0;
+    try { localStorage.setItem('daikinRefreshInterval', String(daikinRefreshSeconds)); } catch (e) { }
+    if (daikinRefreshTimer) { clearInterval(daikinRefreshTimer); daikinRefreshTimer = null; }
+    if (daikinRefreshSeconds > 0 && !syncing) {
+        daikinRefreshTimer = setInterval(refreshDaikin, daikinRefreshSeconds * 1000);
     }
+    daikinNextRefreshAt = daikinRefreshSeconds > 0 ? Date.now() + daikinRefreshSeconds * 1000 : null;
 }
 
-(function restoreRefreshInterval() {
-    const saved = localStorage.getItem('refreshInterval');
-    if (saved !== null) {
-        refreshSeconds = parseInt(saved);
-        const select = document.getElementById('refreshInterval');
-        if (select) select.value = saved;
-    }
-})();
-setRefreshInterval(refreshSeconds);
-
-function pauseAutoRefresh() { if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; } }
-function resumeAutoRefresh() { if (refreshSeconds > 0) setRefreshInterval(refreshSeconds); }
-
-function manualRefresh() { refreshDashboard(); }
-
-async function refreshDashboard() {
+async function refreshDaikin() {
+    const el = document.getElementById('daikinLastUpdated');
     try {
         const daikinData = await apiCall('/daikin/status');
         if (daikinData && daikinData.length > 0) {
@@ -754,22 +1031,155 @@ async function refreshDashboard() {
             updateDaikinDOM(daikinData[0]);
             exitErrorState('heatpump');
         }
-        updateTimestamp();
+        if (el) el.textContent = new Date().toLocaleTimeString();
+        daikinNextRefreshAt = daikinRefreshSeconds > 0 ? Date.now() + daikinRefreshSeconds * 1000 : null;
     } catch (e) {
         enterErrorState('heatpump', e.message);
     }
-    
+}
+
+function confirmRefreshDaikin() {
+    showConfirm({
+        title: 'Refresh heat pump status?',
+        message: 'This will immediately fetch the latest status from the Daikin cloud API.',
+        confirmLabel: 'Refresh',
+        onConfirm: () => refreshDaikin(),
+    });
+}
+
+/* ── Fox ESS refresh (Battery) ── */
+let foxessRefreshTimer = null;
+let foxessRefreshSeconds = 60;
+let foxessNextRefreshAt = null;
+
+function setFoxessRefreshInterval(s) {
+    foxessRefreshSeconds = parseInt(s) || 0;
+    try { localStorage.setItem('foxessRefreshInterval', String(foxessRefreshSeconds)); } catch (e) { }
+    if (foxessRefreshTimer) { clearInterval(foxessRefreshTimer); foxessRefreshTimer = null; }
+    if (foxessRefreshSeconds > 0 && !syncing) {
+        foxessRefreshTimer = setInterval(refreshFoxess, foxessRefreshSeconds * 1000);
+    }
+    foxessNextRefreshAt = foxessRefreshSeconds > 0 ? Date.now() + foxessRefreshSeconds * 1000 : null;
+}
+
+function updateFoxessDOM(data) {
+    if (!data) return;
+    const fmt = (n) => (n != null && !Number.isNaN(n)) ? Number(n).toFixed(2) : '—';
+    const el = (id) => document.getElementById(id);
+    if (el('foxessSolarValue')) {
+        el('foxessSolarValue').innerHTML = fmt(data.solar_power) + '<span class="unit"> kW</span>';
+        el('foxessSolarValue').className = 'energy-node-value' + (data.solar_power > 0 ? ' positive' : '');
+    }
+    if (el('foxessSolarStatus')) el('foxessSolarStatus').textContent = data.solar_power > 0 ? 'generating' : 'no sunlight';
+    if (el('foxessSocValue')) el('foxessSocValue').innerHTML = (data.soc != null ? Math.round(Number(data.soc)) : '—') + '<span class="unit"> %</span>';
+    let batStatus = 'idle';
+    if (data.battery_power > 0) batStatus = 'charging ' + fmt(data.battery_power) + ' kW';
+    else if (data.battery_power < 0) batStatus = 'discharging ' + fmt(-data.battery_power) + ' kW';
+    if (el('foxessBatteryStatus')) {
+        el('foxessBatteryStatus').textContent = batStatus;
+        el('foxessBatteryStatus').className = 'energy-node-status' + (data.battery_power > 0 ? ' charging' : data.battery_power < 0 ? ' discharging' : '');
+    }
+    if (el('foxessGaugeFill')) {
+        const pct = data.soc != null ? Math.min(100, Math.max(0, Number(data.soc))) : 0;
+        el('foxessGaugeFill').style.width = pct + '%';
+        el('foxessGaugeFill').className = 'battery-gauge-fill' + (pct >= 50 ? ' high' : pct >= 20 ? ' medium' : ' low');
+    }
+    if (el('foxessGridValue')) {
+        const g = Number(data.grid_power);
+        const abs = Math.abs(g);
+        el('foxessGridValue').innerHTML = fmt(abs) + '<span class="unit"> kW</span>';
+        el('foxessGridValue').className = 'energy-node-value' + (g > 0 ? ' negative' : ' positive');
+    }
+    if (el('foxessGridStatus')) el('foxessGridStatus').textContent = data.grid_power > 0 ? 'importing' : 'exporting';
+    if (el('foxessLoadValue')) el('foxessLoadValue').innerHTML = fmt(data.load_power) + '<span class="unit"> kW</span>';
+    if (el('foxessWorkMode')) el('foxessWorkMode').textContent = data.work_mode || '—';
+    const load = Number(data.load_power) || 0;
+    const grid = Number(data.grid_power) || 0;
+    const selfSuff = load > 0 ? Math.round((load - (grid > 0 ? grid : 0)) / load * 100) : 100;
+    if (el('foxessSelfSuff')) {
+        el('foxessSelfSuff').textContent = selfSuff + '%';
+        el('foxessSelfSuff').className = 'energy-summary-value' + (grid <= 0 ? ' positive' : '');
+    }
+    if (el('foxessNetFlow')) {
+        el('foxessNetFlow').textContent = grid > 0 ? '-' + fmt(grid) + ' kW' : '+' + fmt(-grid) + ' kW';
+        el('foxessNetFlow').className = 'energy-summary-value' + (grid <= 0 ? ' positive' : ' negative');
+    }
+    if (el('foxessCloudUpdated')) el('foxessCloudUpdated').textContent = data.updated_at || 'n/a';
+    if (el('foxessApi24h')) el('foxessApi24h').textContent = (data.refresh_count_24h != null && data.refresh_limit_24h != null) ? (data.refresh_count_24h + '/' + data.refresh_limit_24h) : 'n/a';
+    document.querySelectorAll('#tab-battery .controls-grid .btn').forEach(btn => {
+        btn.classList.remove('btn-primary');
+        if (btn.textContent.trim() === (data.work_mode || '')) btn.classList.add('btn-primary');
+    });
+}
+
+async function refreshFoxess() {
+    const el = document.getElementById('foxessLastUpdated');
     try {
         const foxessData = await apiCall('/foxess/status');
         if (foxessData) {
+            console.debug('[Fox] updateFoxessDOM with', foxessData);
             saveLastKnownState('foxess', foxessData);
+            updateFoxessDOM(foxessData);
             exitErrorState('battery');
+        } else {
+            console.warn('[Fox] empty response from /foxess/status');
         }
+        if (el) el.textContent = new Date().toLocaleTimeString();
+        foxessNextRefreshAt = foxessRefreshSeconds > 0 ? Date.now() + foxessRefreshSeconds * 1000 : null;
     } catch (e) {
-        if (!e.message.includes('not configured')) {
-            enterErrorState('battery', e.message);
-        }
+        console.warn('[Fox] refresh failed', e.message);
+        if (!e.message.includes('not configured')) enterErrorState('battery', e.message);
     }
+}
+
+function confirmRefreshFoxess() {
+    showConfirm({
+        title: 'Refresh battery & solar status?',
+        message: 'This will immediately call the Fox ESS cloud API to update solar, battery, and grid values.',
+        confirmLabel: 'Refresh',
+        onConfirm: () => refreshFoxess(),
+    });
+}
+
+function refreshAll() {
+    refreshDaikin();
+    refreshFoxess();
+}
+
+/* Countdown tick for "Next in" ── */
+function tickCountdowns() {
+    const now = Date.now();
+    const daikinEl = document.getElementById('daikinNextRefresh');
+    const foxessEl = document.getElementById('foxessNextRefresh');
+    if (daikinEl) daikinEl.textContent = daikinNextRefreshAt != null && daikinNextRefreshAt > now ? Math.ceil((daikinNextRefreshAt - now) / 1000) + ' s' : '—';
+    if (foxessEl) foxessEl.textContent = foxessNextRefreshAt != null && foxessNextRefreshAt > now ? Math.ceil((foxessNextRefreshAt - now) / 1000) + ' s' : '—';
+}
+
+(function initRefresh() {
+    const dSaved = localStorage.getItem('daikinRefreshInterval');
+    if (dSaved !== null) { daikinRefreshSeconds = parseInt(dSaved) || 0; }
+    const selDaikin = document.getElementById('daikinRefreshInterval');
+    if (selDaikin) { selDaikin.value = String(daikinRefreshSeconds); selDaikin.addEventListener('change', function() { setDaikinRefreshInterval(this.value); }); }
+    setDaikinRefreshInterval(daikinRefreshSeconds);
+
+    const fSaved = localStorage.getItem('foxessRefreshInterval');
+    if (fSaved !== null) { foxessRefreshSeconds = parseInt(fSaved) || 0; }
+    const selFoxess = document.getElementById('foxessRefreshInterval');
+    if (selFoxess) { selFoxess.value = String(foxessRefreshSeconds); selFoxess.addEventListener('change', function() { setFoxessRefreshInterval(this.value); }); }
+    setFoxessRefreshInterval(foxessRefreshSeconds);
+
+    setInterval(tickCountdowns, 1000);
+    refreshDaikin();
+    refreshFoxess();
+})();
+
+function pauseAutoRefresh() {
+    if (daikinRefreshTimer) { clearInterval(daikinRefreshTimer); daikinRefreshTimer = null; }
+    if (foxessRefreshTimer) { clearInterval(foxessRefreshTimer); foxessRefreshTimer = null; }
+}
+function resumeAutoRefresh() {
+    if (daikinRefreshSeconds > 0) setDaikinRefreshInterval(daikinRefreshSeconds);
+    if (foxessRefreshSeconds > 0) setFoxessRefreshInterval(foxessRefreshSeconds);
 }
 
 function saveLastKnownState(key, data) {
@@ -842,9 +1252,26 @@ async function apiCall(endpoint, method, body) {
     method = method || 'GET';
     const opts = { method, headers: { 'Content-Type': 'application/json' } };
     if (body) opts.body = JSON.stringify(body);
-    const res = await fetch('/api/v1' + endpoint, opts);
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || 'Request failed');
+    const url = '/api/v1' + endpoint;
+    const res = await fetch(url, opts);
+    const text = await res.text();
+    let data;
+    try {
+        data = text ? JSON.parse(text) : null;
+    } catch (_) {
+        if (!res.ok) {
+            console.warn('[api]', method, url, 'failed', res.status, 'non-JSON:', text.slice(0, 80));
+            throw new Error(res.status === 500 ? 'Server error. Check server logs.' : 'Request failed');
+        }
+        throw new Error('Invalid response from server');
+    }
+    if (!res.ok) {
+        console.warn('[api]', method, url, 'failed', res.status, data);
+        throw new Error(data && data.detail ? data.detail : 'Request failed');
+    }
+    if (endpoint === '/foxess/status' || endpoint === '/daikin/status') {
+        console.debug('[api]', endpoint, 'ok', endpoint === '/foxess/status' ? (data && { soc: data.soc, solar_power: data.solar_power, work_mode: data.work_mode }) : (data && (data.length || data)));
+    }
     return data;
 }
 
@@ -865,7 +1292,9 @@ function exitSyncState() {
     if (ctrls) ctrls.classList.remove('controls-syncing');
     const banner = document.getElementById('syncBanner');
     if (banner) banner.classList.remove('active');
-    updateTimestamp();
+    const du = document.getElementById('daikinLastUpdated');
+    if (du) du.textContent = new Date().toLocaleTimeString();
+    if (daikinRefreshSeconds > 0) daikinNextRefreshAt = Date.now() + daikinRefreshSeconds * 1000;
     resumeAutoRefresh();
 }
 
@@ -1040,6 +1469,136 @@ async function setFoxESSMode(mode) {
 }
 
 document.getElementById('confirmModal').addEventListener('click', function(e) { if (e.target === this) dismissConfirm(); });
+
+/* ── AI Assistant ── */
+
+let assistantPreference = 'comfort';
+let lastSuggestedActions = [];
+
+document.querySelectorAll('.assistant-pref-btn').forEach(btn => {
+    btn.addEventListener('click', function() {
+        document.querySelectorAll('.assistant-pref-btn').forEach(b => b.classList.remove('active'));
+        this.classList.add('active');
+        assistantPreference = this.dataset.pref;
+    });
+});
+
+function addAssistantMessage(role, text) {
+    const conv = document.getElementById('assistantConversation');
+    const div = document.createElement('div');
+    div.className = 'assistant-msg ' + role;
+    div.innerHTML = '<div class="role">' + (role === 'user' ? 'You' : 'Assistant') + '</div>' + escapeHtml(text);
+    conv.appendChild(div);
+    conv.scrollTop = conv.scrollHeight;
+}
+
+function escapeHtml(s) {
+    const div = document.createElement('div');
+    div.textContent = s;
+    return div.innerHTML;
+}
+
+function describeAction(action, params) {
+    const p = params || {};
+    if (action === 'daikin.power') return 'Turn heat pump ' + (p.on ? 'ON' : 'OFF');
+    if (action === 'daikin.temperature') return 'Set temperature to ' + (p.temperature != null ? p.temperature + '°C' : '—');
+    if (action === 'daikin.lwt_offset') return 'Set LWT offset to ' + (p.offset != null ? (p.offset >= 0 ? '+' : '') + p.offset : '—');
+    if (action === 'daikin.mode') return 'Set mode to ' + (p.mode || '—');
+    if (action === 'daikin.tank_temperature') return 'Set tank temperature to ' + (p.temperature != null ? p.temperature + '°C' : '—');
+    if (action === 'daikin.tank_power') return 'Turn DHW tank ' + (p.on ? 'ON' : 'OFF');
+    if (action === 'foxess.mode') return 'Set inverter mode to ' + (p.mode || '—');
+    if (action === 'foxess.charge_period') return 'Charge period ' + (p.start_time || '') + '–' + (p.end_time || '') + ', target ' + (p.target_soc != null ? p.target_soc + '%' : '—');
+    return action;
+}
+
+document.getElementById('assistantRecommendBtn').addEventListener('click', async function() {
+    const msgInput = document.getElementById('assistantMessage');
+    const message = (msgInput && msgInput.value) ? msgInput.value.trim() : null;
+    if (message) addAssistantMessage('user', message);
+    if (msgInput) msgInput.value = '';
+    const btn = document.getElementById('assistantRecommendBtn');
+    btn.disabled = true;
+    btn.textContent = 'Thinking…';
+    try {
+        const r = await apiCall('/assistant/recommend', 'POST', { message: message || undefined, preference: assistantPreference });
+        addAssistantMessage('assistant', r.reply);
+        lastSuggestedActions = r.suggested_actions || [];
+        const listEl = document.getElementById('assistantActionsList');
+        const blockEl = document.getElementById('assistantSuggestions');
+        listEl.innerHTML = '';
+        if (lastSuggestedActions.length === 0) {
+            blockEl.style.display = 'none';
+        } else {
+            blockEl.style.display = 'block';
+            lastSuggestedActions.forEach((a, i) => {
+                const item = document.createElement('div');
+                item.className = 'assistant-action-item';
+                item.dataset.index = i;
+                item.innerHTML =
+                    '<input type="checkbox" class="assistant-action-cb" checked data-index="' + i + '">' +
+                    '<div class="assistant-action-desc">' +
+                    escapeHtml(describeAction(a.action, a.parameters)) +
+                    (a.reason ? '<div class="reason">' + escapeHtml(a.reason) + '</div>' : '') +
+                    '</div>';
+                listEl.appendChild(item);
+            });
+        }
+    } catch (e) {
+        addAssistantMessage('assistant', 'Error: ' + e.message);
+        document.getElementById('assistantSuggestions').style.display = 'none';
+    }
+    btn.disabled = false;
+    btn.textContent = 'Get recommendations';
+});
+
+document.getElementById('assistantApplyBtn').addEventListener('click', async function() {
+    const checked = document.querySelectorAll('.assistant-action-cb:checked');
+    const toApply = [];
+    checked.forEach(cb => {
+        const i = parseInt(cb.dataset.index, 10);
+        if (i >= 0 && i < lastSuggestedActions.length) toApply.push(lastSuggestedActions[i]);
+    });
+    if (toApply.length === 0) { showToast('Select at least one action to apply.', 'error'); return; }
+    const btn = document.getElementById('assistantApplyBtn');
+    btn.disabled = true;
+    try {
+        const r = await apiCall('/assistant/apply', 'POST', {
+            actions: toApply.map(a => ({ action: a.action, parameters: a.parameters }))
+        });
+        const checkedCbs = document.querySelectorAll('.assistant-action-cb:checked');
+        r.results.forEach((res, idx) => {
+            const item = checkedCbs[idx] ? checkedCbs[idx].closest('.assistant-action-item') : null;
+            if (!item) return;
+            if (res.requires_confirmation && res.confirmation_token) {
+                item.classList.add('requires-confirm');
+                const existing = item.querySelector('.assistant-confirm-btn-wrap');
+                if (existing) existing.remove();
+                const wrap = document.createElement('div');
+                wrap.className = 'assistant-confirm-btn-wrap';
+                wrap.innerHTML = '<span class="confirm-pending">' + escapeHtml(res.message) + '</span> ' +
+                    '<button type="button" class="btn btn-sm btn-primary" data-token="' + escapeHtml(res.confirmation_token) + '">Confirm</button>';
+                wrap.querySelector('button').onclick = async function() {
+                    try {
+                        const cr = await apiCall('/confirm/' + this.dataset.token, 'POST', { confirmed: true });
+                        showToast(cr.message);
+                        item.classList.remove('requires-confirm');
+                        wrap.remove();
+                        syncAfterAction();
+                    } catch (e) { showToast(e.message, 'error'); }
+                };
+                item.appendChild(wrap);
+            } else if (res.success) {
+                showToast(res.message);
+                syncAfterAction();
+            } else {
+                showToast(res.message || 'Failed', 'error');
+            }
+        });
+    } catch (e) {
+        showToast(e.message, 'error');
+    }
+    btn.disabled = false;
+});
 
 /* ── Tab switching ── */
 

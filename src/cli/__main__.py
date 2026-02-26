@@ -11,18 +11,25 @@ Usage:
     python -m src.cli daikin lwt-offset -3
     python -m src.cli daikin tank-temp 45
     python -m src.cli daikin mode heating|cooling|auto
-    python -m src.cli monitor              # Continuous loop (30s intervals)
-    python -m src.cli serve                # Start API server
-    
+    python -m src.cli monitor               # Continuous loop (30s intervals)
+    python -m src.cli serve                 # Start API server (foreground)
+    python -m src.cli daemon start          # Start API server as daemon (background)
+    python -m src.cli daemon stop           # Stop daemon
+    python -m src.cli daemon status         # Show daemon status
+
 Options:
     --json                                 # Output in JSON format (for OpenClaw)
     --api                                  # Route commands through API server
 """
+import os
 import sys
 import time
+import signal
 import json as json_module
 import urllib.request
 import urllib.error
+from pathlib import Path
+
 from ..config import config
 from ..foxess.client import FoxESSClient, FoxESSError
 from ..foxess.models import ChargePeriod
@@ -381,6 +388,96 @@ def serve(host: str = None, port: int = None):
     run_server(h, p)
 
 
+def _daemon_pidfile() -> Path:
+    """Path to daemon PID file (project root or cwd)."""
+    base = Path(__file__).resolve().parents[2]
+    if not (base / ".env").exists() and not (base / "requirements.txt").exists():
+        base = Path.cwd()
+    return base / ".home-energy-manager.pid"
+
+
+def _daemon_logfile() -> Path:
+    """Path to daemon log file."""
+    return _daemon_pidfile().parent / "daemon.log"
+
+
+def daemon_start(host: str = None, port: int = None):
+    """Start the API server as a background daemon (data updates + OpenClaw API)."""
+    import subprocess
+    pidfile = _daemon_pidfile()
+    logfile = _daemon_logfile()
+    if pidfile.exists():
+        try:
+            pid = int(pidfile.read_text().strip())
+            os.kill(pid, 0)
+            print(f"Daemon already running (PID {pid}). Stop with: python -m src.cli daemon stop")
+            return
+        except (ProcessLookupError, ValueError):
+            pidfile.unlink(missing_ok=True)
+    h = host or config.API_HOST
+    p = port or config.API_PORT
+    env = os.environ.copy()
+    env["API_HOST"] = str(h)
+    env["API_PORT"] = str(p)
+    env["PYTHONPATH"] = str(pidfile.parent)  # so "python -m src.cli serve" finds src
+    cmd = [sys.executable, "-m", "src.cli", "serve"]
+    with open(logfile, "a") as f:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=f,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            env=env,
+            cwd=str(pidfile.parent),
+            start_new_session=True,
+        )
+    pidfile.write_text(str(proc.pid))
+    print(f"Daemon started (PID {proc.pid})")
+    print(f"  API: http://{h}:{p}/  Dashboard: http://{h}:{p}/  OpenClaw: http://{h}:{p}/api/v1/openclaw/")
+    print(f"  Log: {logfile}")
+    print("  Stop: python -m src.cli daemon stop")
+
+
+def daemon_stop():
+    """Stop the daemon if running."""
+    pidfile = _daemon_pidfile()
+    if not pidfile.exists():
+        print("Daemon not running (no PID file).")
+        return
+    try:
+        pid = int(pidfile.read_text().strip())
+        os.kill(pid, signal.SIGTERM)
+        pidfile.unlink(missing_ok=True)
+        print(f"Daemon stopped (was PID {pid}).")
+    except ProcessLookupError:
+        pidfile.unlink(missing_ok=True)
+        print("Daemon was not running (stale PID file removed).")
+    except ValueError:
+        pidfile.unlink(missing_ok=True)
+        print("Invalid PID file removed.")
+
+
+def daemon_status():
+    """Print daemon status (running or not, PID, URL)."""
+    pidfile = _daemon_pidfile()
+    if not pidfile.exists():
+        print("Daemon not running.")
+        return
+    try:
+        pid = int(pidfile.read_text().strip())
+        os.kill(pid, 0)
+        host = getattr(config, "API_HOST", "0.0.0.0")
+        port = getattr(config, "API_PORT", 8000)
+        print(f"Daemon running (PID {pid})")
+        print(f"  API: http://{host}:{port}/  OpenClaw: http://{host}:{port}/api/v1/openclaw/")
+    except ProcessLookupError:
+        pidfile.unlink(missing_ok=True)
+        print("Daemon not running (stale PID file removed).")
+    except ValueError:
+        pidfile.unlink(missing_ok=True)
+        print("Daemon not running (invalid PID file removed).")
+
+
 def main():
     global OUTPUT_JSON, USE_API
     
@@ -410,6 +507,28 @@ def main():
             else:
                 i += 1
         serve(host, port)
+    elif args[0] == "daemon":
+        sub = args[1] if len(args) > 1 else "status"
+        host = None
+        port = None
+        i = 2
+        while i < len(args):
+            if args[i] == "--host":
+                host = args[i + 1]
+                i += 2
+            elif args[i] == "--port":
+                port = int(args[i + 1])
+                i += 2
+            else:
+                i += 1
+        if sub == "start":
+            daemon_start(host, port)
+        elif sub == "stop":
+            daemon_stop()
+        elif sub == "status":
+            daemon_status()
+        else:
+            print(f"Usage: daemon start|stop|status  [--host H] [--port P]")
     elif args[0] == "foxess":
         sub = args[1] if len(args) > 1 else "status"
         if sub == "status":

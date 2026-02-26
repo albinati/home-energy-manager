@@ -94,19 +94,58 @@ See `.env.example` for all options. Key variables:
 | `OCTOPUS_ACCOUNT_NUMBER` | No | Octopus Energy account number |
 | `BRITISH_GAS_API_KEY` | No | British Gas API key (if available) |
 | `ALERT_WHATSAPP_NUMBER` | No | For WhatsApp alerts via OpenClaw |
+| `OPENAI_API_KEY` | No | For AI Assistant (recommendations). If unset, rule-based suggestions only |
+| `AI_ASSISTANT_PROVIDER` | No | Default `openai` |
+| `AI_ASSISTANT_MODEL` | No | Default `gpt-4o-mini` |
+| `MANUAL_TARIFF_IMPORT_PENCE` | No | Import rate (p/kWh) for cost-aware suggestions when no provider is connected |
+| `MANUAL_TARIFF_EXPORT_PENCE` | No | Export rate (p/kWh) for cost-aware suggestions |
 
 ## Web UI & API Server
 
 Start the web server for browser-based control and REST API access:
 
 ```bash
-python -m src.cli serve                    # Start on default port 8000
+python -m src.cli serve                    # Start on default port 8000 (foreground)
 python -m src.cli serve --port 3000        # Custom port
 ```
 
-- **Web Dashboard**: `http://localhost:8000/` — visual status + control buttons
+**Daemon mode** (background server for data updates and OpenClaw API):
+
+```bash
+python -m src.cli daemon start             # Start API server in background
+python -m src.cli daemon status             # Show PID and URLs
+python -m src.cli daemon stop               # Stop the daemon
+```
+
+The daemon writes a PID file (`.home-energy-manager.pid`) and log (`daemon.log`) in the project root. Use `daemon start` when you want the dashboard and OpenClaw API available without keeping a terminal open.
+
+**Shell scripts** (from project root):
+
+| Command | Description |
+|---------|-------------|
+| `./bin/run help` | Show all commands |
+| `./bin/start` | Start daemon (same as `daemon start`) |
+| `./bin/stop` | Stop daemon |
+| `./bin/status` | Daemon status and API URL |
+| `./bin/serve` | Run server in foreground |
+| `./bin/test-foxess` | Test Fox ESS API (reads `.env`) |
+
+See `bin/README.md` for details. Scripts do not contain any secrets; credentials are read from `.env` only.
+
+- **Web Dashboard**: `http://localhost:8000/` — visual status + control buttons, **AI Assistant** tab for optimization
 - **API Docs**: `http://localhost:8000/docs` — interactive Swagger UI
 - **OpenClaw API**: `http://localhost:8000/api/v1/openclaw/capabilities`
+
+### AI Assistant
+
+The dashboard includes an **AI Assistant** tab that suggests optimizations for the heat pump and battery based on a **comfort vs cost** balance:
+
+1. Open the **AI Assistant** tab and choose **Comfort**, **Balanced**, or **Cost savings**.
+2. Optionally enter a message (e.g. “Lower heating at night”, “Charge on cheap rate”).
+3. Click **Get recommendations** — the assistant returns a short explanation and a list of suggested actions (temperature, LWT offset, tank, battery mode, charge periods).
+4. Select the actions you want and click **Apply selected**. Actions that require confirmation (e.g. power off, mode change) show a **Confirm** button; use it to complete the change.
+
+Without `OPENAI_API_KEY`, the assistant uses built-in rule-based suggestions. With a key, it uses the configured model for richer, context-aware recommendations. Set `MANUAL_TARIFF_IMPORT_PENCE` (and optionally `MANUAL_TARIFF_EXPORT_PENCE`) in `.env` for cost-aware suggestions when no energy provider is connected.
 
 ### API Endpoints
 
@@ -121,6 +160,8 @@ python -m src.cli serve --port 3000        # Custom port
 | `/api/v1/foxess/status` | GET | Get battery/solar status |
 | `/api/v1/foxess/mode` | POST | Set work mode (requires confirmation) |
 | `/api/v1/foxess/charge-period` | POST | Set charge schedule |
+| `/api/v1/assistant/recommend` | POST | Get optimization suggestions (preference + optional message) |
+| `/api/v1/assistant/apply` | POST | Apply suggested actions (returns confirmation tokens where needed) |
 | `/api/v1/energy/providers` | GET | List energy providers and config status |
 | `/api/v1/energy/tariff` | GET | Get current tariff info (coming soon) |
 | `/api/v1/energy/usage` | GET | Get energy usage summary (coming soon) |
@@ -135,32 +176,40 @@ python -m src.cli serve --port 3000        # Custom port
 - **Rate limiting**: 5-second cooldown between commands
 - **Audit logging**: All control actions logged with timestamp
 
-### OpenClaw Skill
+### OpenClaw integration
 
-This project ships an [AgentSkills](https://agentskills.io/)-compatible skill in `skills/home-energy-manager/`. To use it with OpenClaw:
+**No API keys or secrets go in OpenClaw.** Credentials (Fox ESS, Daikin, etc.) stay in `.env` on the machine where the Home Energy Manager API runs. OpenClaw only needs the **base URL** of that API.
 
-1. Copy or symlink the skill into your OpenClaw workspace:
+1. **Start the API** on the host that has `.env` configured:
+   ```bash
+   ./bin/start
+   # or: python -m src.cli daemon start
+   ```
+
+2. **From OpenClaw**, point the skill at that host and port. Copy the skill and set the URL (use your server’s IP or hostname and port; no credentials):
    ```bash
    cp -r skills/home-energy-manager ~/.openclaw/skills/
    ```
-
-2. Set the API URL in your OpenClaw config (`~/.openclaw/openclaw.json`):
+   In `~/.openclaw/openclaw.json` (or your OpenClaw config):
    ```json
    {
      "skills": {
        "entries": {
          "home-energy-manager": {
            "enabled": true,
-           "env": { "HOME_ENERGY_API_URL": "http://192.168.1.100:8000" }
+           "env": { "HOME_ENERGY_API_URL": "http://YOUR_SERVER_IP:8000" }
          }
        }
      }
    }
    ```
+   Replace `YOUR_SERVER_IP` with the host where the API runs (e.g. `192.168.1.100` or `localhost` if OpenClaw runs on the same machine).
 
-3. The agent can now discover and execute home energy actions via the REST API with built-in safeguards.
+3. **Endpoints** the agent uses (all unauthenticated REST; auth is handled by the server’s `.env`):
+   - `GET {HOME_ENERGY_API_URL}/api/v1/openclaw/capabilities` — list actions
+   - `POST {HOME_ENERGY_API_URL}/api/v1/openclaw/execute` — run an action (with confirmation flow when required)
 
-See `skills/home-energy-manager/SKILL.md` for the full instruction set the agent receives.
+See `skills/home-energy-manager/SKILL.md` for the full instruction set and action list.
 
 ## CLI usage
 
