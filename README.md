@@ -10,7 +10,7 @@ Unified controller for Fox ESS battery + Daikin Altherma heat pump (Onecta).
 - **Daikin Onecta**: Read heat pump status, radiator temperature, outdoor temperature, DHW tank temperature. Control power, temperature targets, heating curve offset, and weather regulation.
 - **Smart scheduling**: Time-of-use optimisation — charge battery on cheap-rate periods, pre-heat with solar surplus.
 - **Energy Dashboard** (coming soon): Track energy costs with Octopus Energy, British Gas, and other providers.
-- **OpenClaw integration**: Notifies via WhatsApp when action is needed (e.g. grid export curtailed, battery full, temperature drifting). Exposes REST API for AI agent control.
+- **OpenClaw integration**: Notifies via configurable channel (webchat, Telegram, etc.) when action is needed. Exposes REST API for AI agent control.
 
 ## Quick start
 
@@ -93,7 +93,8 @@ See `.env.example` for all options. Key variables:
 | `OCTOPUS_API_KEY` | No | Octopus Energy API key (for tariff tracking) |
 | `OCTOPUS_ACCOUNT_NUMBER` | No | Octopus Energy account number |
 | `BRITISH_GAS_API_KEY` | No | British Gas API key (if available) |
-| `ALERT_WHATSAPP_NUMBER` | No | For WhatsApp alerts via OpenClaw |
+| `ALERT_OPENCLAW_URL` | No | OpenClaw send endpoint (default `http://127.0.0.1:18789/api/send`) |
+| `ALERT_CHANNEL` | No | Channel to send alerts (e.g. `webchat`); leave blank for stdout only |
 | `OPENAI_API_KEY` | No | For AI Assistant (recommendations). If unset, rule-based suggestions only |
 | `AI_ASSISTANT_PROVIDER` | No | Default `openai` |
 | `AI_ASSISTANT_MODEL` | No | Default `gpt-4o-mini` |
@@ -167,6 +168,10 @@ Without `OPENAI_API_KEY`, the assistant uses built-in rule-based suggestions. Wi
 | `/api/v1/energy/usage` | GET | Get energy usage summary (coming soon) |
 | `/api/v1/openclaw/capabilities` | GET | List all actions for AI agents |
 | `/api/v1/openclaw/execute` | POST | Execute action with confirmation flow |
+| `/api/v1/scheduler/status` | GET | Agile scheduler: current price, next cheap window, planned LWT adjustment |
+| `/api/v1/scheduler/pause` | POST | Pause Agile-based Daikin LWT adjustments |
+| `/api/v1/scheduler/resume` | POST | Resume Agile scheduler |
+| `/api/v1/health` | GET | Lightweight health check |
 
 ### Safeguards
 
@@ -175,6 +180,14 @@ Without `OPENAI_API_KEY`, the assistant uses built-in rule-based suggestions. Wi
 - **Range validation**: Temperature setpoints validated against safe limits
 - **Rate limiting**: 5-second cooldown between commands
 - **Audit logging**: All control actions logged with timestamp
+
+### OpenClaw skill
+
+To use the **home-energy-manager** skill from OverBot/OpenClaw chat:
+
+1. **Install the skill**: `cp -r skills/home-energy-manager ~/.openclaw/skills/`
+2. **Configure** `~/.openclaw/openclaw.json` with the skill and `HOME_ENERGY_API_URL` (e.g. `http://localhost:8000`). See `AGENTS.md` for the exact JSON snippet.
+3. **Health check**: On gateway boot, call `GET {HOME_ENERGY_API_URL}/api/v1/health` and start the API daemon if needed. See `BOOT.md`.
 
 ### OpenClaw integration
 
@@ -210,6 +223,16 @@ Without `OPENAI_API_KEY`, the assistant uses built-in rule-based suggestions. Wi
    - `POST {HOME_ENERGY_API_URL}/api/v1/openclaw/execute` — run an action (with confirmation flow when required)
 
 See `skills/home-energy-manager/SKILL.md` for the full instruction set and action list.
+
+### Agile scheduler (Daikin LWT by price)
+
+When on **Octopus Agile**, you can automatically shift heat pump load to cheap slots:
+
+- **Cheap slots** (e.g. &lt; 12p/kWh, often 01:00–06:00): LWT offset is raised slightly to pre-heat (thermal mass stores cheap energy).
+- **Peak window** (e.g. 16:00–19:00): LWT offset is lowered to coast on stored heat.
+- **Normal**: Hold at 0.
+
+Set `SCHEDULER_ENABLED=true` and `OCTOPUS_TARIFF_CODE` (e.g. `E-1R-AGILE-24-10-01-C`) in `.env`. The API runs a background job every 30 minutes and adjusts Daikin LWT via the first device. Use `GET /api/v1/scheduler/status` to see current price and planned adjustment; `POST /api/v1/scheduler/pause` and `resume` to turn the scheduler off or on without changing `.env`. See `.env.example` for `SCHEDULER_CHEAP_THRESHOLD_PENCE`, `SCHEDULER_PEAK_START`/`SCHEDULER_PEAK_END`, and `SCHEDULER_PREHEAT_LWT_BOOST`.
 
 ## CLI usage
 

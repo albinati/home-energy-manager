@@ -24,6 +24,27 @@ import urllib.parse
 
 from .models import RealTimeData, ChargePeriod, DeviceInfo
 
+# Known work mode strings (set_work_mode accepts these)
+WORK_MODE_VALID = frozenset({"Self Use", "Feed-in Priority", "Back Up", "Force charge", "Force discharge"})
+# Numeric code → label (Fox API may return code instead of string)
+WORK_MODE_BY_CODE = {
+    "0": "Self Use",
+    "1": "Feed-in Priority",
+    "2": "Back Up",
+    "3": "Force charge",
+    "4": "Force discharge",
+}
+
+
+def _parse_work_mode(raw: str) -> str:
+    """Return display work mode string; handle empty or numeric API response."""
+    if not raw:
+        return "unknown"
+    s = raw.strip()
+    if s in WORK_MODE_VALID:
+        return s
+    return WORK_MODE_BY_CODE.get(s, s or "unknown")
+
 
 class FoxESSError(Exception):
     pass
@@ -187,10 +208,10 @@ class FoxESSClient:
             })
         # API returns result as list of { deviceSN, datas: [ {variable, value, ...} ] } or single { deviceSN, datas }
         if isinstance(result, list) and result:
-            device = next((d for d in result if d.get("deviceSN") == self.device_sn), result[0])
-            items = device.get("datas") if isinstance(device, dict) else []
+            device = next((d for d in result if isinstance(d, dict) and d.get("deviceSN") == self.device_sn), result[0])
+            items = (device.get("datas") if isinstance(device, dict) else None) or []
         elif isinstance(result, dict):
-            items = result.get("datas", [])
+            items = result.get("datas") or []
         else:
             items = []
 
@@ -203,8 +224,18 @@ class FoxESSClient:
         def strval(key: str) -> str:
             for item in items:
                 if item.get("variable") == key:
-                    return str(item.get("value", "") or "")
+                    v = item.get("value")
+                    if v is None:
+                        return ""
+                    s = str(v).strip()
+                    return s if s else ""
             return ""
+
+        # workMode: API may return numeric code (0=Self Use, 1=Feed-in Priority, etc.) or string
+        _work_mode_raw = strval("workMode")
+        if not _work_mode_raw:
+            _work_mode_raw = strval("work_mode")  # fallback key
+        work_mode_str = _parse_work_mode(_work_mode_raw)
 
         bat_charge = val("batChargePower")
         bat_discharge = val("batDischargePower")
@@ -219,7 +250,7 @@ class FoxESSClient:
             load_power=val("loadsPower"),
             generation_power=val("generationPower"),
             feed_in_power=feedin,
-            work_mode=strval("workMode"),
+            work_mode=work_mode_str,
         )
 
     def get_device_list(self) -> list[DeviceInfo]:
