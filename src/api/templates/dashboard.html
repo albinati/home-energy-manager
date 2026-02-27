@@ -4,12 +4,16 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Home Energy Manager</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&display=swap" rel="stylesheet">
     <style>
         :root {
-            --bg-primary: #0f172a;
-            --bg-secondary: #1e293b;
-            --bg-card: #334155;
-            --text-primary: #f8fafc;
+            --bg-primary: #0c1222;
+            --bg-secondary: #151d2e;
+            --bg-card: #1e293b;
+            --bg-elevated: #243044;
+            --text-primary: #f1f5f9;
             --text-secondary: #94a3b8;
             --text-muted: #64748b;
             --accent-blue: #3b82f6;
@@ -18,28 +22,34 @@
             --accent-red: #ef4444;
             --accent-orange: #f97316;
             --accent-cyan: #06b6d4;
-            --border-color: #475569;
-            --border-subtle: #334155;
+            --border-color: #334155;
+            --border-subtle: #1e293b;
+            --radius-sm: 8px;
+            --radius-md: 12px;
+            --radius-lg: 16px;
+            --shadow-card: 0 4px 24px rgba(0,0,0,0.2);
+            --section-gap: 1.75rem;
         }
 
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
             background: var(--bg-primary);
             color: var(--text-primary);
             min-height: 100vh;
+            line-height: 1.5;
         }
 
-        .page { max-width: 1400px; margin: 0 auto; padding: 1.5rem 2rem; }
+        .page { max-width: 1440px; margin: 0 auto; padding: 1.5rem 2rem; }
 
         header {
             display: flex; align-items: center; justify-content: space-between;
-            padding-bottom: 1.5rem; margin-bottom: 2rem;
+            padding-bottom: 1.5rem; margin-bottom: 1.5rem;
             border-bottom: 1px solid var(--border-subtle);
         }
-        .header-left h1 { font-size: 1.5rem; font-weight: 600; }
-        .header-left p { color: var(--text-secondary); font-size: 0.8125rem; margin-top: 0.125rem; }
+        .header-left h1 { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.02em; }
+        .header-left p { color: var(--text-secondary); font-size: 0.8125rem; margin-top: 0.25rem; }
         .header-right { display: flex; align-items: center; gap: 1rem; }
         .auto-refresh-toggle { display: flex; align-items: center; gap: 0.5rem; font-size: 0.8125rem; color: var(--text-secondary); }
         .auto-refresh-toggle select { background: var(--bg-card); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 4px; padding: 0.25rem 0.5rem; font-size: 0.8125rem; }
@@ -52,10 +62,22 @@
 
         .dashboard { display: flex; flex-direction: column; gap: 1.5rem; }
 
-        .card { background: var(--bg-secondary); border-radius: 12px; border: 1px solid var(--border-color); }
+        .card { background: var(--bg-secondary); border-radius: var(--radius-lg); border: 1px solid var(--border-color); box-shadow: var(--shadow-card); }
         .card-header { display: flex; align-items: center; justify-content: space-between; padding: 1.25rem 1.5rem; border-bottom: 1px solid var(--border-color); }
         .card-title { font-size: 1rem; font-weight: 600; display: flex; align-items: center; gap: 0.5rem; }
         .card-body { padding: 1.5rem; }
+        /* Status vs Controls: read-only block vs actionable block */
+        .status-block { margin-bottom: var(--section-gap); }
+        .controls-block {
+            margin-top: var(--section-gap);
+            padding-top: var(--section-gap);
+            border-top: 1px solid var(--border-color);
+            background: linear-gradient(180deg, rgba(30,41,59,0.5) 0%, transparent 100%);
+            border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+            margin-left: -1.5rem; margin-right: -1.5rem; margin-bottom: -1.5rem;
+            padding: 1.5rem 1.5rem 1.5rem;
+        }
+        .controls-block .controls-title { margin-bottom: 1rem; }
 
         .badge { padding: 0.25rem 0.75rem; border-radius: 9999px; font-size: 0.6875rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
         .badge-on  { background: rgba(34,197,94,0.15); color: var(--accent-green); }
@@ -328,19 +350,25 @@
         .energy-flow {
             display: grid;
             grid-template-columns: 1fr 1fr 1fr;
-            gap: 1rem;
-            margin-bottom: 1.5rem;
+            gap: 1.25rem;
+            margin-bottom: 1.25rem;
         }
         .energy-node {
             background: var(--bg-card);
-            border-radius: 12px;
+            border-radius: var(--radius-md);
             padding: 1.25rem;
             text-align: center;
             position: relative;
+            border: 1px solid var(--border-color);
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+        .energy-node:hover {
+            border-color: var(--border-subtle);
+            box-shadow: 0 2px 12px rgba(0,0,0,0.15);
         }
         .energy-node-icon {
-            width: 48px;
-            height: 48px;
+            width: 52px;
+            height: 52px;
             margin: 0 auto 0.75rem;
             border-radius: 50%;
             display: flex;
@@ -348,13 +376,13 @@
             justify-content: center;
         }
         .energy-node-icon svg {
-            width: 24px;
-            height: 24px;
+            width: 26px;
+            height: 26px;
         }
-        .energy-node-icon.solar { background: rgba(234,179,8,0.15); color: var(--accent-yellow); }
-        .energy-node-icon.battery { background: rgba(34,197,94,0.15); color: var(--accent-green); }
-        .energy-node-icon.grid { background: rgba(59,130,246,0.15); color: var(--accent-blue); }
-        .energy-node-icon.home { background: rgba(249,115,22,0.15); color: var(--accent-orange); }
+        .energy-node-icon.solar { background: rgba(234,179,8,0.2); color: var(--accent-yellow); }
+        .energy-node-icon.battery { background: rgba(34,197,94,0.2); color: var(--accent-green); }
+        .energy-node-icon.grid { background: rgba(59,130,246,0.2); color: var(--accent-blue); }
+        .energy-node-icon.home { background: rgba(249,115,22,0.2); color: var(--accent-orange); }
         .energy-node-label {
             font-size: 0.75rem;
             color: var(--text-muted);
@@ -427,10 +455,11 @@
         .energy-summary {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-            gap: 0.75rem;
-            padding: 1rem;
+            gap: 1rem;
+            padding: 1.25rem;
             background: var(--bg-card);
-            border-radius: 8px;
+            border-radius: var(--radius-sm);
+            border: 1px solid var(--border-color);
         }
         .energy-summary-item {
             text-align: center;
@@ -439,12 +468,12 @@
             font-size: 0.6875rem;
             color: var(--text-muted);
             text-transform: uppercase;
-            letter-spacing: 0.05em;
+            letter-spacing: 0.06em;
         }
         .energy-summary-value {
-            font-size: 1.125rem;
-            font-weight: 600;
-            margin-top: 0.125rem;
+            font-size: 1.25rem;
+            font-weight: 700;
+            margin-top: 0.25rem;
         }
 
         /* AI Assistant */
@@ -471,21 +500,27 @@
         .assistant-apply-row { margin-top: 0.75rem; }
 
         /* Insights tab */
-        .insights-period-row { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem; }
+        .insights-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem; margin-bottom: 1.25rem; }
+        .insights-period-row { display: flex; align-items: center; gap: 0.75rem; }
         .insights-period-label { font-size: 0.875rem; color: var(--text-secondary); }
-        .insights-period-btns { display: flex; gap: 0.5rem; }
+        .insights-period-btns { display: flex; gap: 0.35rem; }
         .insights-period-btn.active { background: var(--accent-blue); color: white; border-color: var(--accent-blue); }
-        .insights-nav-row { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem; }
-        .insights-nav-label { font-weight: 600; font-size: 1rem; min-width: 10rem; text-align: center; }
+        .insights-nav-row { display: flex; align-items: center; gap: 0.75rem; margin-left: auto; }
+        .insights-nav-label { font-weight: 600; font-size: 0.9375rem; min-width: 9rem; text-align: center; color: var(--text-primary); }
         .insights-nav-row button:disabled { opacity: 0.5; cursor: not-allowed; }
         .insights-loading { color: var(--text-secondary); margin-bottom: 1rem; }
-        .insights-hero-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-bottom: 1.5rem; }
-        .insights-hero-card { background: var(--bg-card); border-radius: 10px; border: 1px solid var(--border-color); padding: 1.25rem; text-align: center; }
-        .insights-hero-label { display: block; font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.35rem; }
-        .insights-hero-value { font-size: 1.5rem; font-weight: 700; display: block; }
-        .insights-hero-sublabel { font-size: 0.6875rem; color: var(--text-muted); }
-        .insights-flow-wrap { margin-bottom: 1.5rem; }
-        .insights-flow-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+        .insights-quick-actions { display: flex; gap: 0.5rem; margin-left: auto; flex-wrap: wrap; }
+        .insights-quick-actions .btn { font-size: 0.75rem; padding: 0.375rem 0.75rem; }
+        .insights-hero-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.25rem; margin-bottom: 1.75rem; }
+        .insights-hero-card { background: var(--bg-card); border-radius: var(--radius-md); border: 1px solid var(--border-color); padding: 1.5rem; text-align: center; transition: border-color 0.2s, box-shadow 0.2s; }
+        .insights-hero-card:hover { border-color: var(--accent-blue); box-shadow: 0 0 0 1px rgba(59,130,246,0.15); }
+        .insights-hero-card.insights-balance-card { border-left: 3px solid var(--accent-cyan); }
+        .insights-hero-label { display: block; font-size: 0.6875rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.5rem; }
+        .insights-hero-value { font-size: 1.75rem; font-weight: 700; display: block; letter-spacing: -0.02em; }
+        .insights-hero-sublabel { font-size: 0.75rem; color: var(--text-muted); margin-top: 0.25rem; }
+        .insights-detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-bottom: 1.5rem; }
+        .insights-flow-wrap { margin-bottom: 0; }
+        .insights-flow-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
         .insights-flow-col { background: var(--bg-card); border-radius: 8px; border: 1px solid var(--border-color); padding: 1rem; }
         .insights-flow-label { font-size: 0.75rem; font-weight: 600; color: var(--text-muted); margin-bottom: 0.75rem; text-transform: uppercase; }
         .insights-flow-item { font-size: 0.875rem; margin-bottom: 0.5rem; }
@@ -506,8 +541,9 @@
         .insights-heating-weather { font-size: 0.875rem; color: var(--text-secondary); margin-bottom: 0.75rem; }
         .insights-heating-temp-bands-wrap { margin-top: 0.75rem; }
         .insights-heating-temp-bands-label { font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.5rem; text-transform: uppercase; }
-        .insights-chart-wrap { margin-bottom: 1.5rem; }
-        .insights-chart { display: flex; align-items: flex-end; gap: 4px; min-height: 160px; padding: 0.5rem 0; }
+        .insights-chart-wrap { margin-bottom: 1.75rem; background: var(--bg-card); border-radius: var(--radius-md); border: 1px solid var(--border-color); padding: 1.25rem; }
+        .insights-chart-wrap .section-title { margin-bottom: 1rem; }
+        .insights-chart { display: flex; align-items: flex-end; gap: 4px; min-height: 180px; padding: 0.5rem 0; }
         .insights-chart-bar-group { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 0; }
         .insights-chart-bars { display: flex; align-items: flex-end; justify-content: center; gap: 2px; width: 100%; height: 120px; }
         .insights-chart-bar { width: 100%; max-width: 24px; border-radius: 3px 3px 0 0; transition: height 0.2s ease; }
@@ -519,21 +555,36 @@
         .insights-chart-bar-stack { display: flex; flex-direction: column-reverse; width: 100%; max-width: 32px; height: 120px; border-radius: 3px; overflow: hidden; }
         .insights-chart-bar-stack .insights-chart-bar { min-height: 2px; border-radius: 0; max-width: none; }
         .insights-chart-label { font-size: 0.625rem; color: var(--text-muted); text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
-        .insights-chart-legend { display: flex; gap: 1rem; margin-top: 0.5rem; font-size: 0.75rem; color: var(--text-secondary); flex-wrap: wrap; }
+        .insights-chart-legend { display: flex; gap: 1rem; margin-top: 0.75rem; font-size: 0.75rem; color: var(--text-secondary); flex-wrap: wrap; }
         .insights-chart-legend span { display: flex; align-items: center; gap: 0.35rem; }
         .insights-chart-legend i { width: 10px; height: 10px; border-radius: 2px; }
+        /* SVG chart (new) */
+        .insights-chart-svg-wrap { width: 100%; min-height: 240px; position: relative; }
+        .insights-chart-svg-wrap svg { display: block; width: 100%; height: 100%; }
+        .insights-chart-tooltip { position: fixed; background: var(--bg-elevated); border: 1px solid var(--border-color); border-radius: var(--radius-sm); padding: 0.5rem 0.75rem; font-size: 0.75rem; pointer-events: none; z-index: 100; box-shadow: 0 4px 12px rgba(0,0,0,0.3); max-width: 200px; }
+        .insights-chart-tooltip .tt-date { font-weight: 600; color: var(--text-primary); margin-bottom: 0.25rem; }
+        .insights-chart-tooltip .tt-row { display: flex; justify-content: space-between; gap: 0.75rem; color: var(--text-secondary); }
+        .insights-chart-tooltip .tt-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; margin-right: 0.35rem; }
         .insights-assistant-section { margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid var(--border-color); }
 
+        @media (max-width: 768px) {
+            .insights-detail-grid { grid-template-columns: 1fr; }
+            .insights-toolbar { flex-direction: column; align-items: stretch; }
+            .insights-nav-row { margin-left: 0; justify-content: center; }
+            .insights-quick-actions { margin-left: 0; justify-content: center; }
+        }
         @media (max-width: 640px) {
             .page { padding: 1rem; }
             header { flex-direction: column; gap: 1rem; align-items: flex-start; }
             .stat-row { grid-template-columns: repeat(2, 1fr); }
             .controls-grid { grid-template-columns: 1fr; }
+            .controls-block { margin-left: -1rem; margin-right: -1rem; padding: 1rem; }
             .tabs-nav { overflow-x: auto; }
             .tab-btn { padding: 0.625rem 1rem; font-size: 0.8125rem; white-space: nowrap; }
             .energy-flow { grid-template-columns: 1fr 1fr; }
             .insights-hero-cards { grid-template-columns: 1fr; }
             .insights-flow-grid { grid-template-columns: 1fr; }
+            .insights-hero-value { font-size: 1.5rem; }
         }
     </style>
 </head>
@@ -599,8 +650,8 @@
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/><path d="M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
                     </button>
                 </div>
-                <!-- Status section -->
-                <div class="status-section">
+                <!-- Status (read-only) -->
+                <div class="status-block">
                     <div class="section-title">Status</div>
                     <div class="stat-row" id="daikin-stats">
                     {% if daikin.outdoor_temp is not none %}
@@ -630,7 +681,7 @@
                     </div>
                 </div>
 
-                <div class="controls-section">
+                <div class="controls-block">
                     <div class="controls-title">Controls</div>
                     <div class="sync-banner" id="syncBanner">
                         <div class="sync-spinner"></div>
@@ -801,9 +852,9 @@
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/><path d="M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
                     </button>
                 </div>
-                <!-- Energy Flow Visualization -->
-                <div class="status-section">
-                    <div class="section-title">Energy Flow</div>
+                <!-- Energy flow (read-only) -->
+                <div class="status-block">
+                    <div class="section-title">Live energy flow</div>
                     <div class="energy-flow">
                         <!-- Solar -->
                         <div class="energy-node">
@@ -918,7 +969,7 @@
                     </div>
                 </div>
                 
-                <div class="controls-section">
+                <div class="controls-block">
                     <div class="controls-title">Controls</div>
                     <div class="controls-grid">
                         <div class="gauge">
@@ -955,21 +1006,25 @@
                 </span>
             </div>
             <div class="card-body">
-                <!-- Period selector: Day | Week | Month -->
-                <div class="insights-period-row">
-                    <span class="insights-period-label">View:</span>
-                    <div class="insights-period-btns">
-                        <button type="button" class="btn btn-secondary btn-sm insights-period-btn" data-period="day" id="insightsPeriodDay">Day</button>
-                        <button type="button" class="btn btn-secondary btn-sm insights-period-btn" data-period="week" id="insightsPeriodWeek">Week</button>
-                        <button type="button" class="btn btn-secondary btn-sm insights-period-btn active" data-period="month" id="insightsPeriodMonth">Month</button>
-                        <button type="button" class="btn btn-secondary btn-sm insights-period-btn" data-period="year" id="insightsPeriodYear">Year</button>
+                <div class="insights-toolbar">
+                    <div class="insights-period-row">
+                        <span class="insights-period-label">View</span>
+                        <div class="insights-period-btns">
+                            <button type="button" class="btn btn-secondary btn-sm insights-period-btn" data-period="day" id="insightsPeriodDay">Day</button>
+                            <button type="button" class="btn btn-secondary btn-sm insights-period-btn" data-period="week" id="insightsPeriodWeek">Week</button>
+                            <button type="button" class="btn btn-secondary btn-sm insights-period-btn active" data-period="month" id="insightsPeriodMonth">Month</button>
+                            <button type="button" class="btn btn-secondary btn-sm insights-period-btn" data-period="year" id="insightsPeriodYear">Year</button>
+                        </div>
                     </div>
-                </div>
-                <!-- Date / Week / Month navigator -->
-                <div class="insights-nav-row">
-                    <button type="button" class="btn btn-secondary btn-sm" id="insightsPrev" title="Previous">&larr;</button>
-                    <span class="insights-nav-label" id="insightsNavLabel">—</span>
-                    <button type="button" class="btn btn-secondary btn-sm" id="insightsNext" title="Next">&rarr;</button>
+                    <div class="insights-nav-row">
+                        <button type="button" class="btn btn-secondary btn-sm" id="insightsPrev" title="Previous">&larr;</button>
+                        <span class="insights-nav-label" id="insightsNavLabel">—</span>
+                        <button type="button" class="btn btn-secondary btn-sm" id="insightsNext" title="Next">&rarr;</button>
+                    </div>
+                    <div class="insights-quick-actions">
+                        <button type="button" class="btn btn-secondary btn-sm" onclick="switchTab('heatpump')">Heat pump</button>
+                        <button type="button" class="btn btn-secondary btn-sm" onclick="switchTab('battery')">Battery</button>
+                    </div>
                 </div>
                 <div id="insightsError" class="error-message" style="display:none;"></div>
                 <div id="insightsLoading" class="insights-loading" style="display:none;">Loading…</div>
@@ -1022,38 +1077,41 @@
                         <span class="insights-card-value" id="insightsDischargeKwh">—</span>
                     </div>
                 </div>
-                <!-- Supply & Usage flow -->
-                <div class="insights-flow-wrap" id="insightsFlowWrap">
-                    <div class="section-title">Supply &amp; usage</div>
-                    <div class="insights-flow-grid">
-                        <div class="insights-flow-col">
-                            <div class="insights-flow-label">Supply</div>
-                            <div class="insights-flow-item"><span class="insights-flow-icon">&#9881;</span> Imported <strong id="insightsFlowImported">—</strong></div>
-                            <div class="insights-flow-item"><span class="insights-flow-icon">&#9728;</span> PV produced <strong id="insightsFlowSolar">—</strong></div>
-                            <div class="insights-flow-item"><span class="insights-flow-icon">&#128267;</span> Discharged <strong id="insightsFlowDischarged">—</strong></div>
-                        </div>
-                        <div class="insights-flow-col">
-                            <div class="insights-flow-label">Usage</div>
-                            <div class="insights-flow-item"><span class="insights-flow-icon">&#9881;</span> Exported <strong id="insightsFlowExported">—</strong></div>
-                            <div class="insights-flow-item"><span class="insights-flow-icon">&#127968;</span> Consumed <strong id="insightsFlowConsumed">—</strong></div>
-                            <div class="insights-flow-item"><span class="insights-flow-icon">&#128267;</span> Charged <strong id="insightsFlowCharged">—</strong></div>
-                        </div>
-                    </div>
-                </div>
-                <!-- Chart -->
+                <!-- Chart: main focus -->
                 <div class="insights-chart-wrap" id="insightsChartWrap">
                     <div class="section-title">Energy over time</div>
-                    <div class="insights-chart" id="insightsChart"></div>
+                    <div class="insights-chart-svg-wrap" id="insightsChartSvgWrap"></div>
+                    <div class="insights-chart" id="insightsChart" style="display:none;"></div>
                     <div class="insights-chart-legend" id="insightsChartLegend"></div>
                 </div>
-                <!-- Breakdown table -->
-                <div class="section-title">Energy breakdown</div>
-                <div class="insights-breakdown-wrap">
-                    <table class="insights-breakdown" id="insightsBreakdown">
-                        <thead><tr><th>Category</th><th>kWh</th></tr></thead>
-                        <tbody></tbody>
-                    </table>
-                    <p class="insights-heating-note" id="insightsHeatingNote" style="display:none;">Heating from Daikin when available; otherwise estimated from load (HEATING_LOAD_SHARE).</p>
+                <div id="insightsChartTooltip" class="insights-chart-tooltip" style="display:none;"></div>
+                <!-- Two-column: Supply/usage + Breakdown -->
+                <div class="insights-detail-grid">
+                    <div class="insights-flow-wrap" id="insightsFlowWrap">
+                        <div class="section-title">Supply &amp; usage</div>
+                        <div class="insights-flow-grid">
+                            <div class="insights-flow-col">
+                                <div class="insights-flow-label">Supply</div>
+                                <div class="insights-flow-item"><span class="insights-flow-icon">&#9881;</span> Imported <strong id="insightsFlowImported">—</strong></div>
+                                <div class="insights-flow-item"><span class="insights-flow-icon">&#9728;</span> PV produced <strong id="insightsFlowSolar">—</strong></div>
+                                <div class="insights-flow-item"><span class="insights-flow-icon">&#128267;</span> Discharged <strong id="insightsFlowDischarged">—</strong></div>
+                            </div>
+                            <div class="insights-flow-col">
+                                <div class="insights-flow-label">Usage</div>
+                                <div class="insights-flow-item"><span class="insights-flow-icon">&#9881;</span> Exported <strong id="insightsFlowExported">—</strong></div>
+                                <div class="insights-flow-item"><span class="insights-flow-icon">&#127968;</span> Consumed <strong id="insightsFlowConsumed">—</strong></div>
+                                <div class="insights-flow-item"><span class="insights-flow-icon">&#128267;</span> Charged <strong id="insightsFlowCharged">—</strong></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="insights-breakdown-wrap">
+                        <div class="section-title">Energy breakdown</div>
+                        <table class="insights-breakdown" id="insightsBreakdown">
+                            <thead><tr><th>Category</th><th>kWh</th></tr></thead>
+                            <tbody></tbody>
+                        </table>
+                        <p class="insights-heating-note" id="insightsHeatingNote" style="display:none;">Heating from Daikin when available; otherwise estimated from load (HEATING_LOAD_SHARE).</p>
+                    </div>
                 </div>
                 <!-- Gas comparison -->
                 <div class="insights-gas-card" id="insightsGasCard" style="display:none;">
@@ -1876,13 +1934,18 @@ function renderInsights(data) {
     if (nextBtn) nextBtn.disabled = isAtCurrentPeriod();
 }
 
+var chartColors = { solar: '#3b82f6', load: '#ef4444', import: '#dc2626', battery: '#f97316' };
+
 function renderChart(chartData) {
-    const wrap = document.getElementById('insightsChart');
+    const svgWrap = document.getElementById('insightsChartSvgWrap');
+    const fallbackWrap = document.getElementById('insightsChart');
     const legend = document.getElementById('insightsChartLegend');
-    if (!wrap) return;
-    wrap.innerHTML = '';
+    const tooltipEl = document.getElementById('insightsChartTooltip');
+    if (!svgWrap) return;
+    svgWrap.innerHTML = '';
+    if (fallbackWrap) fallbackWrap.style.display = 'none';
     if (!chartData || chartData.length === 0) {
-        wrap.innerHTML = '<p class="insights-chart-empty" style="color:var(--text-muted);font-size:0.875rem;margin:1rem 0;">No data to display</p>';
+        svgWrap.innerHTML = '<p class="insights-chart-empty" style="color:var(--text-muted);font-size:0.875rem;margin:2rem 0;text-align:center;">No data to display</p>';
         if (legend) legend.innerHTML = '';
         return;
     }
@@ -1893,44 +1956,120 @@ function renderChart(chartData) {
         if (total > maxVal) maxVal = total;
     });
     if (maxVal < 0.1) maxVal = 1;
+    var yMax = Math.ceil(maxVal * 1.15);
+    if (yMax < 5 && maxVal > 0) yMax = 5;
+    var yStep = yMax <= 5 ? 1 : yMax <= 20 ? 5 : yMax <= 60 ? 10 : 20;
     var isYearView = chartData.length <= 12 && chartData.every(function (p) { return p.date.length >= 10 && p.date.slice(8, 10) === '01'; });
     var monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-    chartData.forEach(function (p) {
+
+    var w = svgWrap.getBoundingClientRect().width || 600;
+    var h = 220;
+    var pad = { left: 44, right: 12, top: 12, bottom: 28 };
+    var chartW = w - pad.left - pad.right;
+    var chartH = h - pad.top - pad.bottom;
+    var n = chartData.length;
+    var barGap = Math.min(4, chartW / (n * 8));
+    var barTotalW = chartW - (n - 1) * barGap;
+    var barW = Math.min(24, (barTotalW / n));
+
+    var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
+    svg.setAttribute('width', '100%');
+    svg.setAttribute('height', String(h));
+    svg.style.maxHeight = h + 'px';
+
+    var g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    g.setAttribute('transform', 'translate(' + pad.left + ',' + pad.top + ')');
+
+    for (var yTick = 0; yTick <= yMax; yTick += yStep) {
+        var y = chartH - (yTick / yMax) * chartH;
+        var line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('x1', 0);
+        line.setAttribute('y1', y);
+        line.setAttribute('x2', chartW);
+        line.setAttribute('y2', y);
+        line.setAttribute('stroke', 'var(--border-subtle)');
+        line.setAttribute('stroke-dasharray', '4,4');
+        line.setAttribute('stroke-width', '1');
+        g.appendChild(line);
+    }
+    for (var yTick = 0; yTick <= yMax; yTick += yStep) {
+        var y = chartH - (yTick / yMax) * chartH;
+        var t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        t.setAttribute('x', -6);
+        t.setAttribute('y', y + 4);
+        t.setAttribute('text-anchor', 'end');
+        t.setAttribute('fill', 'var(--text-muted)');
+        t.setAttribute('font-size', '10');
+        t.textContent = yTick;
+        g.appendChild(t);
+    }
+
+    chartData.forEach(function (p, i) {
         var sol = p.solar_kwh || 0, load = p.load_kwh || 0, imp = p.import_kwh || 0, dis = p.discharge_kwh || 0;
         var total = sol + load + imp + dis;
-        var label;
-        if (isYearView && p.date.length >= 7) {
-            var mo = parseInt(p.date.slice(5, 7), 10);
-            label = monthNames[mo - 1] || p.date.slice(5, 7);
-        } else {
-            label = p.date.length >= 10 ? p.date.slice(8, 10) + '/' + p.date.slice(5, 7) : p.date;
-        }
-        var g = document.createElement('div');
-        g.className = 'insights-chart-bar-group';
-        var barStack = document.createElement('div');
-        barStack.className = 'insights-chart-bar-stack';
+        var label = isYearView && p.date.length >= 7
+            ? (monthNames[parseInt(p.date.slice(5, 7), 10) - 1] || p.date.slice(5, 7))
+            : (p.date.length >= 10 ? p.date.slice(8, 10) + '/' + p.date.slice(5, 7) : p.date);
         var segs = [
-            { v: sol, c: 'solar' },
-            { v: load, c: 'load' },
-            { v: imp, c: 'import' },
-            { v: dis, c: 'battery' }
+            { v: sol, c: chartColors.solar, name: 'Solar' },
+            { v: load, c: chartColors.load, name: 'Load' },
+            { v: imp, c: chartColors.import, name: 'Import' },
+            { v: dis, c: chartColors.battery, name: 'Battery' }
         ];
+        var x0 = i * (barW + barGap);
+        var yAcc = chartH;
         segs.forEach(function (s) {
-            var bar = document.createElement('div');
-            bar.className = 'insights-chart-bar ' + s.c;
-            bar.style.flex = (s.v > 0 ? s.v : 0) + ' 1 0%';
-            bar.title = s.c + ': ' + (s.v != null ? s.v.toFixed(1) : 0) + ' kWh';
-            barStack.appendChild(bar);
+            if (s.v <= 0) return;
+            var segH = (s.v / yMax) * chartH;
+            yAcc -= segH;
+            var rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+            rect.setAttribute('x', x0);
+            rect.setAttribute('y', yAcc);
+            rect.setAttribute('width', barW);
+            rect.setAttribute('height', Math.max(1, segH));
+            rect.setAttribute('fill', s.c);
+            rect.setAttribute('rx', 2);
+            rect.setAttribute('data-date', p.date);
+            rect.setAttribute('data-label', label);
+            rect.setAttribute('data-solar', sol.toFixed(1));
+            rect.setAttribute('data-load', load.toFixed(1));
+            rect.setAttribute('data-import', imp.toFixed(1));
+            rect.setAttribute('data-battery', dis.toFixed(1));
+            rect.style.cursor = 'pointer';
+            rect.addEventListener('mouseenter', function (e) {
+                var r = this;
+                tooltipEl.innerHTML = '<div class="tt-date">' + r.getAttribute('data-label') + '</div>' +
+                    '<div class="tt-row"><span><i class="tt-dot" style="background:' + chartColors.solar + '"></i>Solar</span><span>' + r.getAttribute('data-solar') + ' kWh</span></div>' +
+                    '<div class="tt-row"><span><i class="tt-dot" style="background:' + chartColors.load + '"></i>Load</span><span>' + r.getAttribute('data-load') + ' kWh</span></div>' +
+                    '<div class="tt-row"><span><i class="tt-dot" style="background:' + chartColors.import + '"></i>Import</span><span>' + r.getAttribute('data-import') + ' kWh</span></div>' +
+                    '<div class="tt-row"><span><i class="tt-dot" style="background:' + chartColors.battery + '"></i>Battery</span><span>' + r.getAttribute('data-battery') + ' kWh</span></div>';
+                tooltipEl.style.display = 'block';
+            });
+            rect.addEventListener('mousemove', function (e) {
+                tooltipEl.style.left = (e.clientX + 12) + 'px';
+                tooltipEl.style.top = (e.clientY + 8) + 'px';
+            });
+            rect.addEventListener('mouseleave', function () {
+                tooltipEl.style.display = 'none';
+            });
+            g.appendChild(rect);
         });
-        var lbl = document.createElement('div');
-        lbl.className = 'insights-chart-label';
-        lbl.textContent = label;
-        g.appendChild(barStack);
-        g.appendChild(lbl);
-        wrap.appendChild(g);
+        var t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        t.setAttribute('x', x0 + barW / 2);
+        t.setAttribute('y', chartH + 18);
+        t.setAttribute('text-anchor', 'middle');
+        t.setAttribute('fill', 'var(--text-muted)');
+        t.setAttribute('font-size', '10');
+        t.textContent = label;
+        g.appendChild(t);
     });
+
+    svg.appendChild(g);
+    svgWrap.appendChild(svg);
+
     if (legend) {
-        legend.innerHTML = '<span><i style="background:#3b82f6;width:10px;height:10px;border-radius:2px;display:inline-block"></i> Solar</span><span><i style="background:#ef4444;width:10px;height:10px;border-radius:2px;display:inline-block"></i> Load</span><span><i style="background:var(--accent-red);width:10px;height:10px;border-radius:2px;display:inline-block"></i> Grid</span><span><i style="background:#f97316;width:10px;height:10px;border-radius:2px;display:inline-block"></i> Battery</span>';
+        legend.innerHTML = '<span><i style="background:' + chartColors.solar + '"></i> Solar</span><span><i style="background:' + chartColors.load + '"></i> Load</span><span><i style="background:' + chartColors.import + '"></i> Import</span><span><i style="background:' + chartColors.battery + '"></i> Battery</span>';
     }
 }
 
