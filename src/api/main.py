@@ -49,6 +49,7 @@ from .models import (
     MonthlyEnergySummaryResponse,
     MonthlyCostSummaryResponse,
     PeriodInsightsResponse,
+    EnergyReportResponse,
     HeatingAnalyticsResponse,
     TempBandSummaryResponse,
     ChartDataPoint,
@@ -1293,6 +1294,133 @@ async def energy_period(
             if out.heating_analytics else None
         ),
     )
+
+
+def _build_report_summary(
+    period_label: str,
+    energy: MonthlyEnergySummaryResponse,
+    cost: MonthlyCostSummaryResponse,
+    equivalent_gas_cost_pounds: Optional[float],
+    gas_comparison_ahead_pounds: Optional[float],
+) -> str:
+    """Build short narrative for OpenClaw from report data."""
+    parts = [
+        f"{period_label}: imported {energy.import_kwh:.1f} kWh, exported {energy.export_kwh:.1f} kWh. "
+        f"Net cost: £{cost.net_cost_pounds:.2f} (import £{cost.import_cost_pounds:.2f}, export earnings £{cost.export_earnings_pounds:.2f}). "
+        f"Production {energy.solar_kwh:.1f} kWh solar, consumption {energy.load_kwh:.1f} kWh."
+    ]
+    if equivalent_gas_cost_pounds is not None:
+        parts.append(f" Equivalent gas cost would be about £{equivalent_gas_cost_pounds:.2f}.")
+        if gas_comparison_ahead_pounds is not None:
+            if gas_comparison_ahead_pounds >= 0:
+                parts.append(f" You are £{gas_comparison_ahead_pounds:.2f} ahead with solar + heat pump.")
+            else:
+                parts.append(f" Gas would have been £{abs(gas_comparison_ahead_pounds):.2f} cheaper.")
+    return "".join(parts)
+
+
+@app.get("/api/v1/energy/report", response_model=EnergyReportResponse)
+async def energy_report(
+    period: Optional[str] = None,
+    date: Optional[str] = None,
+    month: Optional[str] = None,
+    year: Optional[int] = None,
+):
+    """Full data report for OpenClaw and dashboards: energy, cost, chart_data, heating/gas, plus a spoken summary.
+
+    Returns the same structure as GET /energy/period plus a 'summary' field for TTS/chat.
+    Default: current month (no query params). Optional: period=day|week|month|year with date=YYYY-MM-DD,
+    month=YYYY-MM, or year=YYYY as for /energy/period.
+    """
+    if not _foxess_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Fox ESS not configured. Set FOXESS_API_KEY or FOXESS_USERNAME+FOXESS_PASSWORD and FOXESS_DEVICE_SN.",
+        )
+    from datetime import date as date_type
+    today = date_type.today()
+    if period is None and date is None and month is None and year is None:
+        period = "month"
+        month = f"{today.year:04d}-{today.month:02d}"
+    if period is None:
+        period = "month"
+        if month is None and year is not None:
+            month = f"{year:04d}-01"
+        elif month is None:
+            month = f"{today.year:04d}-{today.month:02d}"
+    if period not in ("day", "week", "month", "year"):
+        raise HTTPException(status_code=400, detail="period must be day, week, month, or year")
+    if period == "month" and not month:
+        raise HTTPException(status_code=400, detail="Use month=YYYY-MM for period=month")
+    if period == "year" and year is None:
+        raise HTTPException(status_code=400, detail="Use year=YYYY for period=year")
+    if period in ("day", "week") and not date:
+        raise HTTPException(status_code=400, detail="Use date=YYYY-MM-DD for period=day or period=week")
+    if period == "month" and month and (len(month) != 7 or month[4] != "-"):
+        raise HTTPException(status_code=400, detail="Use month=YYYY-MM")
+    if period in ("day", "week") and date and (len(date) != 10 or date[4] != "-" or date[7] != "-"):
+        raise HTTPException(status_code=400, detail="Use date=YYYY-MM-DD")
+    try:
+        out = get_period_insights(period, date_str=date, month_str=month, year=year)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.warning("Period insights Fox ESS error: %s", e, exc_info=True)
+        raise HTTPException(status_code=502, detail="Fox ESS error: " + str(e))
+    if out is None:
+        raise HTTPException(status_code=502, detail="Failed to fetch data from Fox ESS.")
+    ins = out.insights
+    cost = ins.cost
+    resp = PeriodInsightsResponse(
+        period=out.period,
+        period_label=out.period_label,
+        energy=MonthlyEnergySummaryResponse(
+            year=ins.energy.year,
+            month=ins.energy.month,
+            month_str=ins.energy.month_str,
+            import_kwh=ins.energy.import_kwh,
+            export_kwh=ins.energy.export_kwh,
+            solar_kwh=ins.energy.solar_kwh,
+            load_kwh=ins.energy.load_kwh,
+            charge_kwh=ins.energy.charge_kwh,
+            discharge_kwh=ins.energy.discharge_kwh,
+        ),
+        cost=MonthlyCostSummaryResponse(
+            import_cost_pence=cost.import_cost_pence,
+            export_earnings_pence=cost.export_earnings_pence,
+            standing_charge_pence=cost.standing_charge_pence,
+            net_cost_pence=cost.net_cost_pence,
+            net_cost_pounds=cost.net_cost_pounds,
+            import_cost_pounds=cost.import_cost_pounds,
+            export_earnings_pounds=cost.export_earnings_pounds,
+        ),
+        heating_estimate_kwh=ins.heating_estimate_kwh,
+        heating_estimate_cost_pence=ins.heating_estimate_cost_pence,
+        equivalent_gas_cost_pence=ins.equivalent_gas_cost_pence,
+        equivalent_gas_cost_pounds=ins.equivalent_gas_cost_pounds,
+        gas_comparison_ahead_pounds=ins.gas_comparison_ahead_pounds,
+        chart_data=[ChartDataPoint(**p) for p in out.chart_data],
+        heating_analytics=(
+            HeatingAnalyticsResponse(
+                heating_percent_of_cost=out.heating_analytics.heating_percent_of_cost,
+                heating_percent_of_consumption=out.heating_analytics.heating_percent_of_consumption,
+                avg_outdoor_temp_c=out.heating_analytics.avg_outdoor_temp_c,
+                degree_days=out.heating_analytics.degree_days,
+                cost_per_degree_day_pounds=out.heating_analytics.cost_per_degree_day_pounds,
+                heating_kwh_per_degree_day=out.heating_analytics.heating_kwh_per_degree_day,
+                temp_bands=[TempBandSummaryResponse(**b) for b in out.heating_analytics.temp_bands],
+            )
+            if out.heating_analytics else None
+        ),
+    )
+    summary = _build_report_summary(
+        resp.period_label,
+        resp.energy,
+        resp.cost,
+        resp.equivalent_gas_cost_pounds,
+        resp.gas_comparison_ahead_pounds,
+    )
+    return EnergyReportResponse(**resp.model_dump(), summary=summary)
 
 
 @app.get("/api/v1/energy/insights", response_model=EnergyInsightsTextResponse)

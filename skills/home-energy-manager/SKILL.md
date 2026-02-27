@@ -36,23 +36,48 @@ GET {HOME_ENERGY_API_URL}/api/v1/foxess/status
 
 Returns: `soc` (battery %), `solar_power`, `grid_power`, `battery_power`, `load_power`, `work_mode`.
 
-## Monthly energy and cost insights
+## Data report (energy, cost, charts — for OpenClaw)
 
-Use these read-only endpoints to report spending, consumption, and solar + heat pump vs gas comparison to the user.
+All insight data is provided by the API as a **data report**. Use the report endpoint for a single response that includes every metric and a spoken summary.
 
-**Monthly breakdown (energy, cost, heating estimate, gas comparison):**
+**Full data report (recommended for OpenClaw):**
 ```
-GET {HOME_ENERGY_API_URL}/api/v1/energy/monthly?month=YYYY-MM
-```
-
-Returns: `energy` (import_kwh, export_kwh, solar_kwh, load_kwh, charge_kwh, discharge_kwh), `cost` (import_cost_pence, export_earnings_pence, net_cost_pence, net_cost_pounds, etc.), `heating_estimate_kwh`, `heating_estimate_cost_pence`, `equivalent_gas_cost_pence` / `equivalent_gas_cost_pounds`, `gas_comparison_ahead_pounds` (positive = ahead with solar + heat pump). Returns 503 if Fox ESS is not configured; 400 if `month` is not YYYY-MM; 502 if Fox ESS request failed.
-
-**Short narrative for voice/chat (current month):**
-```
-GET {HOME_ENERGY_API_URL}/api/v1/energy/insights
+GET {HOME_ENERGY_API_URL}/api/v1/energy/report
+GET {HOME_ENERGY_API_URL}/api/v1/energy/report?period=month&month=YYYY-MM
+GET {HOME_ENERGY_API_URL}/api/v1/energy/report?period=year&year=YYYY
+GET {HOME_ENERGY_API_URL}/api/v1/energy/report?period=day&date=YYYY-MM-DD
+GET {HOME_ENERGY_API_URL}/api/v1/energy/report?period=week&date=YYYY-MM-DD
 ```
 
-Returns: `summary` — a short text such as "This month (2025-02): imported 120.5 kWh, exported 45.2 kWh. Net cost: £32.40 (import £38.20, export earnings £5.80). Equivalent gas cost this month would be about £48.00. You are £15.60 ahead with solar + heat pump." Use this to answer questions like "How much am I spending this month?" or "Am I beating gas?" without parsing the full monthly JSON.
+- **No query params**: current month’s report (same as `period=month&month=YYYY-MM` for this month).
+- **period** = `day` | `week` | `month` | `year`. For **day/week** use `date=YYYY-MM-DD`. For **month** use `month=YYYY-MM`. For **year** use `year=YYYY`.
+
+**Response (full data report):**
+
+| Field | Description |
+|-------|-------------|
+| `period` | `"day"` \| `"week"` \| `"month"` \| `"year"` |
+| `period_label` | Human label, e.g. `"Feb 2026"`, `"4–10 Feb 2026"` |
+| `energy` | `import_kwh`, `export_kwh`, `solar_kwh`, `load_kwh`, `charge_kwh`, `discharge_kwh` |
+| `cost` | `net_cost_pounds`, `import_cost_pounds`, `export_earnings_pounds`, `net_cost_pence`, etc. |
+| `heating_estimate_kwh` | Estimated heating consumption (when available) |
+| `equivalent_gas_cost_pounds` | What the same period would cost on gas |
+| `gas_comparison_ahead_pounds` | Positive = ahead with solar + heat pump; negative = gas would be cheaper |
+| `chart_data` | Array of `{ date, import_kwh, export_kwh, solar_kwh, load_kwh, charge_kwh, discharge_kwh }` for charts |
+| `heating_analytics` | When available: `heating_percent_of_cost`, `heating_percent_of_consumption`, `degree_days`, `temp_bands`, etc. |
+| `summary` | Short narrative for TTS/chat: cost, balance, gas comparison. Use this to speak the report. |
+
+Use `summary` for voice answers; use the structured fields for exact numbers, charts, or follow-up questions. Returns 503 if Fox ESS is not configured; 400 for invalid params; 502 on Fox ESS errors.
+
+**Legacy endpoints (still supported):**
+
+- **Monthly only (no chart_data, no day/week/year):**  
+  `GET {HOME_ENERGY_API_URL}/api/v1/energy/monthly?month=YYYY-MM`  
+  Returns: same `energy`, `cost`, heating/gas fields as above.
+
+- **Narrative only (no structured data):**  
+  `GET {HOME_ENERGY_API_URL}/api/v1/energy/insights`  
+  Returns: `{ "summary": "..." }` for current month. Prefer `/energy/report` to get data + summary in one call.
 
 ## How to execute actions
 

@@ -274,7 +274,7 @@ class HeatingAnalyticsResponse(BaseModel):
 
 
 class PeriodInsightsResponse(BaseModel):
-    period: str  # day | week | month
+    period: str  # day | week | month | year
     period_label: str
     energy: MonthlyEnergySummaryResponse
     cost: MonthlyCostSummaryResponse
@@ -285,6 +285,15 @@ class PeriodInsightsResponse(BaseModel):
     gas_comparison_ahead_pounds: Optional[float] = None
     chart_data: list[ChartDataPoint] = []
     heating_analytics: Optional[HeatingAnalyticsResponse] = None
+
+
+class EnergyReportResponse(PeriodInsightsResponse):
+    """Full data report: same as period insights plus a short narrative for OpenClaw/voice."""
+
+    summary: str = Field(
+        default="",
+        description="Short narrative summary for OpenClaw (cost, balance, gas comparison). Use for TTS or chat.",
+    )
 
 
 class EnergyInsightsTextResponse(BaseModel):
