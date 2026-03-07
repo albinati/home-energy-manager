@@ -1,33 +1,32 @@
-# Available skills (OverBot / OpenClaw)
+# AGENTS.md — Home Energy Manager
 
-When the OpenClaw gateway is running, the following skills can be enabled and used from chat.
+Production system controlling real hardware. Read before making changes.
 
-## home-energy-manager
+## Hardware
+- **Fox ESS inverter**: S/N 609H5020541M055 | Battery: EP11 ~10kWh | Logger: 609WWE1F541A727
+- **Solar**: 4.5kWp (near-zero export — battery absorbs it all)
+- **ASHP**: Daikin Altherma (Onecta cloud API) | ClientID: Ye0E9y4DyWMTk8_LebF8kiz2
+- **Location**: London W4, UK
 
-**Skill ID**: `home-energy-manager`  
-**Description**: Control Daikin Altherma heat pump and Fox ESS battery via the Home Energy Manager REST API.
+## Critical Rules
+- `OPENCLAW_READ_ONLY=true` by default — recommendations only, no writes
+- Fox ESS API: **200 req/day max** — no polling loops
+- Daikin: check `weather_regulation_active` before changing LWT; use `lwt_offset`, not room temp
+- Never remove safety guards or auth checks
+- No credentials in code — use env vars from `src/config.py`
 
-**Requires**: `HOME_ENERGY_API_URL` (e.g. `http://localhost:8000`) pointing at a running instance of this project's API server.
+## Stack
+- Python 3.11+, FastAPI, APScheduler
+- AI assistant: Anthropic Claude Haiku (default), OpenAI as fallback
+- REST API on port 8000 (default)
 
-**Install** (from this repo):
+## Code Style
+- Type hints required
+- Follow existing patterns in `src/`
+- Conventional commits: `feat/fix/refactor/docs/chore`
+- Tests in `tests/` for new features
+- Never force push `main`
 
-```bash
-cp -r skills/home-energy-manager ~/.openclaw/skills/
-```
-
-**Enable** in `~/.openclaw/openclaw.json`:
-
-```json
-{
-  "skills": {
-    "entries": {
-      "home-energy-manager": {
-        "enabled": true,
-        "env": { "HOME_ENERGY_API_URL": "http://localhost:8000" }
-      }
-    }
-  }
-}
-```
-
-**Capabilities**: Control heating temperature, DHW tank, LWT offset, inverter modes, charge schedules; get AI-powered optimization suggestions. All without exposing Daikin/Fox ESS credentials to OpenClaw (the API handles auth).
+## Who Runs This
+OverBot (OpenClaw AI assistant) triggers Cursor Agent for coding tasks.
+Git commits are handled by OverBot after Cursor edits — don't commit from here.
