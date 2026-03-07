@@ -382,9 +382,11 @@ def serve(host: str = None, port: int = None):
     from ..api.main import run_server
     h = host or config.API_HOST
     p = port or config.API_PORT
-    print(f"Starting API server at http://{h}:{p}")
-    print(f"Web dashboard: http://{h}:{p}/")
-    print(f"API docs: http://{h}:{p}/docs")
+    display_host = "localhost" if h in ("0.0.0.0", "::") else h
+    print(f"Starting API server — bound to {h}:{p}")
+    print(f"  Dashboard : http://{display_host}:{p}/")
+    print(f"  API docs  : http://{display_host}:{p}/docs")
+    print(f"  (WSL2)    : http://172.28.1.21:{p}/  ← use this if localhost doesn't work in Windows Chrome")
     run_server(h, p)
 
 
@@ -433,7 +435,11 @@ def daemon_start(host: str = None, port: int = None):
         )
     pidfile.write_text(str(proc.pid))
     print(f"Daemon started (PID {proc.pid})")
-    print(f"  API: http://{h}:{p}/  Dashboard: http://{h}:{p}/  OpenClaw: http://{h}:{p}/api/v1/openclaw/")
+    display_host = "localhost" if h in ("0.0.0.0", "::") else h
+    print(f"  Dashboard : http://{display_host}:{p}/")
+    print(f"  API docs  : http://{display_host}:{p}/docs")
+    print(f"  OpenClaw  : http://{display_host}:{p}/api/v1/openclaw/")
+    print(f"  (WSL2 IP) : http://172.28.1.21:{p}/  ← fallback if localhost blocked in Windows Chrome")
     print(f"  Log: {logfile}")
     print("  Stop: python -m src.cli daemon stop")
 

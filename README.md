@@ -96,9 +96,10 @@ See `.env.example` for all options. Key variables:
 | `ALERT_OPENCLAW_URL` | No | OpenClaw send endpoint (default `http://127.0.0.1:18789/api/send`) |
 | `ALERT_CHANNEL` | No | Channel to send alerts (e.g. `webchat`); leave blank for stdout only |
 | `OPENCLAW_READ_ONLY` | No | If `true` (default), OpenClaw cannot execute; only recommend. Apply via dashboard/CLI. |
-| `OPENAI_API_KEY` | No | For AI Assistant (recommendations). If unset, rule-based suggestions only |
-| `AI_ASSISTANT_PROVIDER` | No | Default `openai` |
-| `AI_ASSISTANT_MODEL` | No | Default `gpt-4o-mini` |
+| `ANTHROPIC_API_KEY` | No | Primary API key for AI Assistant (Anthropic Claude). If unset, falls back to `OPENAI_API_KEY` when provider is `openai`. |
+| `OPENAI_API_KEY` | No | Fallback for AI Assistant when using OpenAI provider; also used if `ANTHROPIC_API_KEY` is unset and provider is `openai`. |
+| `AI_ASSISTANT_PROVIDER` | No | Default `anthropic` |
+| `AI_ASSISTANT_MODEL` | No | Default `claude-haiku-4-5` |
 | `MANUAL_TARIFF_IMPORT_PENCE` | No | Import rate (p/kWh) for cost-aware suggestions when no provider is connected |
 | `MANUAL_TARIFF_EXPORT_PENCE` | No | Export rate (p/kWh) for cost-aware suggestions |
 
@@ -147,7 +148,7 @@ The dashboard includes an **AI Assistant** tab that suggests optimizations for t
 3. Click **Get recommendations** — the assistant returns a short explanation and a list of suggested actions (temperature, LWT offset, tank, battery mode, charge periods).
 4. Select the actions you want and click **Apply selected**. Actions that require confirmation (e.g. power off, mode change) show a **Confirm** button; use it to complete the change.
 
-Without `OPENAI_API_KEY`, the assistant uses built-in rule-based suggestions. With a key, it uses the configured model for richer, context-aware recommendations. Set `MANUAL_TARIFF_IMPORT_PENCE` (and optionally `MANUAL_TARIFF_EXPORT_PENCE`) in `.env` for cost-aware suggestions when no energy provider is connected.
+Without an API key (no `ANTHROPIC_API_KEY` and no `OPENAI_API_KEY` when using OpenAI), the assistant uses built-in rule-based suggestions. With a key, it uses the configured model for richer, context-aware recommendations. `ANTHROPIC_API_KEY` is the primary key (default provider is Anthropic); `OPENAI_API_KEY` still works as fallback when using the OpenAI provider. Set `MANUAL_TARIFF_IMPORT_PENCE` (and optionally `MANUAL_TARIFF_EXPORT_PENCE`) in `.env` for cost-aware suggestions when no energy provider is connected.
 
 ### API Endpoints
 

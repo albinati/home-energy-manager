@@ -54,9 +54,11 @@ class Config:
     OPENCLAW_READ_ONLY: bool = os.getenv("OPENCLAW_READ_ONLY", "true").lower() in ("true", "1", "yes")
 
     # AI Assistant (optional; if not set, rule-based suggestions only)
+    ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
+    # Legacy OpenAI — kept for backward compat; not used by default
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
-    AI_ASSISTANT_PROVIDER: str = os.getenv("AI_ASSISTANT_PROVIDER", "openai")
-    AI_ASSISTANT_MODEL: str = os.getenv("AI_ASSISTANT_MODEL", "gpt-4o-mini")
+    AI_ASSISTANT_PROVIDER: str = os.getenv("AI_ASSISTANT_PROVIDER", "anthropic")
+    AI_ASSISTANT_MODEL: str = os.getenv("AI_ASSISTANT_MODEL", "claude-haiku-4-5")
 
     # Manual tariff for cost-aware suggestions (p/kWh) when no energy provider is connected
     MANUAL_TARIFF_IMPORT_PENCE: float = float(os.getenv("MANUAL_TARIFF_IMPORT_PENCE", "0"))
