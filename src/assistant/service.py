@@ -103,6 +103,8 @@ def get_suggestions(
     Get assistant reply and suggested actions.
     preference: "comfort" | "balanced" | "savings"
     """
+    if config.ANTHROPIC_API_KEY and config.AI_ASSISTANT_PROVIDER == "anthropic":
+        return _get_suggestions_anthropic(context, preference, user_message or "")
     if config.OPENAI_API_KEY and config.AI_ASSISTANT_PROVIDER == "openai":
         return _get_suggestions_llm(context, preference, user_message or "")
     return _get_suggestions_rule_based(context, preference, user_message or "")
@@ -190,6 +192,67 @@ def _get_suggestions_rule_based(
             ))
         reply = "I've suggested balanced settings: 20°C heating and Self Use for the battery. Review and apply below."
     return reply, actions
+
+
+
+def _get_suggestions_anthropic(
+    context: dict,
+    preference: str,
+    user_message: str,
+) -> tuple[str, list[SuggestedAction]]:
+    """Call Anthropic Claude and parse reply + JSON actions."""
+    try:
+        import anthropic as anthropic_sdk
+    except ImportError:
+        return _get_suggestions_rule_based(context, preference, user_message)
+
+    client = anthropic_sdk.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    preference_instruction = {
+        "comfort": "Prioritise comfort: higher or maintained temperatures, avoid aggressive setbacks.",
+        "balanced": "Balance comfort and cost: moderate setpoints, one charge window on cheap rate if applicable.",
+        "savings": "Prioritise cost savings: lower setpoints, setbacks, charge only in cheap/solar windows, suggest Feed-in when battery full and solar high.",
+    }.get(preference, preference)
+
+    system = """You are an expert home energy assistant. The user has a Daikin Altherma heat pump and a Fox ESS battery/inverter.
+
+Your task: given the current system state (JSON), suggest a short list of concrete actions to optimize for the user's preference (comfort vs cost). Only suggest actions that change something (e.g. if target_temp is already 21, do not suggest setting it to 21).
+
+Allowed actions and parameters (use exactly these keys):
+- daikin.power: {"on": true|false}
+- daikin.temperature: {"temperature": 15-30} (only if weather_regulation is false)
+- daikin.lwt_offset: {"offset": -10 to 10} (when weather regulation is active)
+- daikin.mode: {"mode": "heating"|"cooling"|"auto"|"fan_only"|"dry"}
+- daikin.tank_temperature: {"temperature": 30-60}
+- daikin.tank_power: {"on": true|false}
+- foxess.mode: {"mode": "Self Use"|"Feed-in Priority"|"Back Up"|"Force charge"|"Force discharge"}
+- foxess.charge_period: {"start_time": "HH:MM", "end_time": "HH:MM", "target_soc": 10-100, "period_index": 0|1}
+
+Respond with:
+1. A short friendly explanation (1-3 sentences) for the user.
+2. A JSON array of suggested actions, each of the form: {"action": "<action_type>", "parameters": {...}, "reason": "<short reason>"}.
+
+Put the JSON array in a fenced code block with language "json". If no changes are needed, return an empty array [] in the JSON block. Suggest at most 4 actions."""
+
+    user_content = f"Preference: {preference_instruction}\n\nCurrent state:\n{json.dumps(context, indent=2)}\n\n"
+    if user_message.strip():
+        user_content += f"User message: {user_message}\n\n"
+    user_content += "Reply with your explanation and a json code block of suggested actions."
+
+    try:
+        response = client.messages.create(
+            model=config.AI_ASSISTANT_MODEL,
+            max_tokens=1024,
+            system=system,
+            messages=[{"role": "user", "content": user_content}],
+        )
+        text = (response.content[0].text if response.content else "").strip()
+    except Exception as e:
+        return f"I couldn't reach the AI service ({e}). Here are rule-based suggestions instead.", _get_suggestions_rule_based(context, preference, user_message)[1]
+
+    actions = _parse_actions_from_response(text)
+    reply = _strip_json_block_from_reply(text)
+    validated = validate_suggested_actions(actions)
+    return reply, [SuggestedAction(a.action, a.parameters, a.reason) for a in validated]
 
 
 def _get_suggestions_llm(
