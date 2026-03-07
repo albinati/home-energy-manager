@@ -1,0 +1,29 @@
+# Home Energy Manager — Cursor Rules
+
+## Project
+Python service controlling Daikin Altherma ASHP + Fox ESS battery + solar.
+Owner: Luis Albinati, London. Production system — changes affect real hardware.
+
+## Stack
+- Python 3.11+, FastAPI, APScheduler
+- Fox ESS cloud API (200 req/day limit — no frequent polling)
+- Daikin Onecta cloud API (weather compensation active — use lwt_offset, not room temp)
+- Anthropic Claude Haiku as AI assistant (default provider)
+
+## Critical Rules
+- NEVER remove safety guards or read-only protections
+- OPENCLAW_READ_ONLY=true by default — respect it
+- Daikin: always check weather_regulation_active before changing LWT
+- Fox ESS: S/N 609H5020541M055, Battery EP11 ~10kWh
+- No secrets or credentials in committed code — use env vars from config.py
+
+## Code Style
+- Follow existing patterns in src/
+- Type hints required
+- Keep API endpoints RESTful
+- Tests in tests/ when adding new features
+
+## Git
+- Conventional commits: feat/fix/refactor/docs/chore
+- Never force push main
+- I (OverBot) handle git commits after Cursor edits
