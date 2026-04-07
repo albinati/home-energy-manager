@@ -1,4 +1,9 @@
-"""FastAPI application for home-energy-manager REST API."""
+"""FastAPI application for home-energy-manager REST API.
+
+The long-running FastAPI + APScheduler daemon remains available for dashboards and
+legacy integrations, but new automation should prefer the MCP server
+(``python -m src.mcp_server``) so assistants connect over stdio without hosting HTTP.
+"""
 import logging
 import os
 from pathlib import Path
