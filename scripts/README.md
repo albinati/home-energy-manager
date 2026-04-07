@@ -31,3 +31,14 @@ PYTHONPATH=. .venv/bin/python scripts/test_foxess_api.py
 ```
 
 This prints the raw API `result` and the parsed `RealTimeData` (soc, solar_power, etc.). If the API is unreachable (e.g. SSL timeout), run the curl test instead.
+
+## Weekly energy report (CLI)
+
+Plain-text report for the last 7 days (uses the same logic as the API insights):
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/weekly_report.py
+PYTHONPATH=. .venv/bin/python scripts/weekly_report.py --date 2026-03-07
+```
+
+Requires Fox ESS configured in `.env` (same as the app).
