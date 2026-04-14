@@ -21,20 +21,17 @@ def _preset_from_config() -> OperationPreset:
 
 
 class OptimizationEngine:
-    """V7 structural orchestration (read-mostly; writes belong to a future executor)."""
+    """V7 structural orchestration — simulation-first, consent-gated dispatch."""
 
     def __init__(self) -> None:
         self._last_plan: Optional[SolverPlan] = None
-        # V7 Architecture Constants
-        self.TARGET_ROOM_TEMP_MIN = 20.0
-        self.TARGET_ROOM_TEMP_MAX = 23.0
-        self.TARGET_DHW_TEMP_MIN_NORMAL = 45.0
-        self.TARGET_DHW_TEMP_MIN_GUESTS = 48.0
-        self.TARGET_DHW_TEMP_MAX = 65.0
-        self.MIN_SOC_RESERVE = 15.0
 
     def is_enabled(self) -> bool:
         return bool(config.OPTIMIZATION_ENGINE_ENABLED and config.OCTOPUS_TARIFF_CODE)
+
+    def is_operational(self) -> bool:
+        """True only when OPERATION_MODE=operational (writes to hardware enabled)."""
+        return config.OPERATION_MODE == "operational"
 
     def watchdog_tick(self) -> None:
         """Refresh Agile rates (scheduled ~16:00 local)."""
@@ -45,16 +42,20 @@ class OptimizationEngine:
     def solve_from_cache(
         self,
         preset: Optional[OperationPreset] = None,
+        target_price_pence: Optional[float] = None,
     ) -> Optional[SolverPlan]:
-        """Run solver on cached rates."""
+        """Run solver on cached rates, respecting TARGET_PRICE_PENCE and export rates."""
         cache = get_agile_cache()
         if not cache.rates:
             return None
         pr = preset or _preset_from_config()
+        tgt = target_price_pence if target_price_pence is not None else config.TARGET_PRICE_PENCE
         self._last_plan = solve_plan(
             cache.rates,
             preset=pr,
             tariff_code=cache.tariff_code or None,
+            target_price_pence=tgt if tgt > 0 else None,
+            export_rates=cache.export_rates or None,
         )
         return self._last_plan
 
@@ -62,19 +63,20 @@ class OptimizationEngine:
         return self._last_plan
 
     def apply_v7_safeties(self, pr: OperationPreset) -> dict:
-        """Return safeties mapped to current preset."""
-        dhw_min = self.TARGET_DHW_TEMP_MIN_NORMAL
+        """Return safeties mapped to current preset (from config)."""
+        away_like = pr in (OperationPreset.AWAY, OperationPreset.TRAVEL)
+        dhw_min = config.TARGET_DHW_TEMP_MIN_NORMAL_C
         if pr == OperationPreset.GUESTS:
-            dhw_min = self.TARGET_DHW_TEMP_MIN_GUESTS
-        elif pr == OperationPreset.AWAY:
-            dhw_min = 10.0 # hibernating
+            dhw_min = config.TARGET_DHW_TEMP_MIN_GUESTS_C
+        elif away_like:
+            dhw_min = 10.0  # hibernating — Legionella cycle only
 
         return {
-            "room_temp_min": self.TARGET_ROOM_TEMP_MIN if pr != OperationPreset.AWAY else 12.0,
-            "room_temp_max": self.TARGET_ROOM_TEMP_MAX,
+            "room_temp_min": 12.0 if away_like else config.TARGET_ROOM_TEMP_MIN_C,
+            "room_temp_max": config.TARGET_ROOM_TEMP_MAX_C,
             "dhw_temp_min": dhw_min,
-            "dhw_temp_max": self.TARGET_DHW_TEMP_MAX,
-            "min_soc_reserve": self.MIN_SOC_RESERVE
+            "dhw_temp_max": config.TARGET_DHW_TEMP_MAX_C,
+            "min_soc_reserve": config.MIN_SOC_RESERVE_PERCENT,
         }
 
     def dispatch_hints(
@@ -91,33 +93,35 @@ class OptimizationEngine:
         if plan is None:
             return None
         pr = preset or _preset_from_config()
-        
-        # Inject V7 safeties into hint computation context
+
         safeties = self.apply_v7_safeties(pr)
-        logger.debug(f"Applied V7 safeties for preset {pr.value}: {safeties}")
-        
+        logger.debug("Applied V7 safeties for preset %s: %s", pr.value, safeties)
+
         return compute_dispatch_hints(plan, macro, preset=pr, base_lwt_offset=base_lwt_offset)
 
     def status_dict(self) -> dict:
         """Lightweight JSON-friendly status for GET /optimization/status."""
+        from .consent import consent_status_dict
         cache = get_agile_cache()
         fetched = cache.fetched_at_utc
+        pr = _preset_from_config()
         return {
             "enabled": self.is_enabled(),
+            "operation_mode": config.OPERATION_MODE,
             "preset": config.OPTIMIZATION_PRESET,
+            "target_price_pence": config.TARGET_PRICE_PENCE,
             "tariff_code": config.OCTOPUS_TARIFF_CODE or None,
             "cache_slots": len(cache.rates or []),
             "cache_fetched_at_utc": fetched.isoformat() if fetched else None,
             "cache_error": cache.error,
             "last_plan_at_utc": (
-                self._last_plan.computed_at.isoformat()
-                if self._last_plan
-                else None
+                self._last_plan.computed_at.isoformat() if self._last_plan else None
             ),
             "target_mean_price_pence": (
                 self._last_plan.target_mean_price_pence if self._last_plan else None
             ),
-            "v7_safeties": self.apply_v7_safeties(_preset_from_config())
+            "v7_safeties": self.apply_v7_safeties(pr),
+            "consent": consent_status_dict(),
         }
 
 

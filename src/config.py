@@ -44,6 +44,17 @@ class Config:
     # Energy providers (for tariff tracking and cost analysis)
     OCTOPUS_API_KEY: str = os.getenv("OCTOPUS_API_KEY", "")
     OCTOPUS_ACCOUNT_NUMBER: str = os.getenv("OCTOPUS_ACCOUNT_NUMBER", "")
+    # MPANs and meter serials — MPAN_1/MPAN_2 kept for backward compat.
+    # MPAN_IMPORT / MPAN_EXPORT are set either explicitly or auto-detected from account endpoint.
+    OCTOPUS_MPAN_1: str = (os.getenv("OCTOPUS_MPAN_1") or "").strip()
+    OCTOPUS_MPAN_2: str = (os.getenv("OCTOPUS_MPAN_2") or "").strip()
+    OCTOPUS_METER_SN_1: str = (os.getenv("OCTOPUS_METER_SN_1") or "").strip()
+    OCTOPUS_METER_SN_2: str = (os.getenv("OCTOPUS_METER_SN_2") or "").strip()
+    # Resolved import/export MPAN and serial — set explicitly or populated by auto_detect_mpan_roles()
+    OCTOPUS_MPAN_IMPORT: str = (os.getenv("OCTOPUS_MPAN_IMPORT") or os.getenv("OCTOPUS_MPAN_1") or "").strip()
+    OCTOPUS_MPAN_EXPORT: str = (os.getenv("OCTOPUS_MPAN_EXPORT") or os.getenv("OCTOPUS_MPAN_2") or "").strip()
+    OCTOPUS_METER_SERIAL_IMPORT: str = (os.getenv("OCTOPUS_METER_SERIAL_IMPORT") or os.getenv("OCTOPUS_METER_SN_1") or "").strip()
+    OCTOPUS_METER_SERIAL_EXPORT: str = (os.getenv("OCTOPUS_METER_SERIAL_EXPORT") or os.getenv("OCTOPUS_METER_SN_2") or "").strip()
     BRITISH_GAS_API_KEY: str = os.getenv("BRITISH_GAS_API_KEY", "")
 
     # API server
@@ -83,6 +94,15 @@ class Config:
     # Agile scheduler (Daikin ASHP by price)
     SCHEDULER_ENABLED: bool = os.getenv("SCHEDULER_ENABLED", "false").lower() in ("true", "1", "yes")
     OCTOPUS_TARIFF_CODE: str = (os.getenv("OCTOPUS_TARIFF_CODE") or "").strip()
+    # Optional: Octopus Agile Export tariff code for SEG export rate fetch.
+    # E.g. E-1R-AGILE-OUTGOING-24-10-01-C. Leave blank if not on export tariff.
+    OCTOPUS_EXPORT_TARIFF_CODE: str = (os.getenv("OCTOPUS_EXPORT_TARIFF_CODE") or "").strip()
+    # Grid Supply Point (GSP) letter A-P for regional tariff lookup.
+    # Default H = South East England (London W4). Auto-detected from account if not set.
+    OCTOPUS_GSP: str = (os.getenv("OCTOPUS_GSP") or "H").strip().upper()
+    # Current tariff product code for baseline comparison. Default: auto-detect from OCTOPUS_TARIFF_CODE
+    # or fall back to latest Flexible Octopus. Set explicitly if you know your product code.
+    CURRENT_TARIFF_PRODUCT: str = (os.getenv("CURRENT_TARIFF_PRODUCT") or "").strip()
     SCHEDULER_CHEAP_THRESHOLD_PENCE: float = float(os.getenv("SCHEDULER_CHEAP_THRESHOLD_PENCE", "12"))
     SCHEDULER_PEAK_START: str = os.getenv("SCHEDULER_PEAK_START", "16:00")
     SCHEDULER_PEAK_END: str = os.getenv("SCHEDULER_PEAK_END", "19:00")
@@ -115,6 +135,26 @@ class Config:
     OPTIMIZATION_DISABLE_WEATHER_REGULATION: bool = os.getenv(
         "OPTIMIZATION_DISABLE_WEATHER_REGULATION", "false"
     ).lower() in ("true", "1", "yes")
+
+    # Operation mode: simulation (default) or operational.
+    # In simulation, the engine computes and logs what it would do but never writes to hardware.
+    # Switch to operational only after reviewing simulation output and explicitly activating.
+    OPERATION_MODE: str = (os.getenv("OPERATION_MODE") or "simulation").strip().lower()
+
+    # User's target average cost (p/kWh). The solver ranks 48 slots and exploits cheap windows
+    # aggressively enough to bring the weighted average below this target.
+    TARGET_PRICE_PENCE: float = float(os.getenv("TARGET_PRICE_PENCE", "0"))
+
+    # Directory for config snapshots (JSON). Snapshots are saved before any mode transition.
+    CONFIG_SNAPSHOT_DIR: str = (os.getenv("CONFIG_SNAPSHOT_DIR") or "data/config_snapshots").strip()
+
+    # Plan consent expiry in seconds (default 60 min). Proposed plans expire if not approved.
+    PLAN_CONSENT_EXPIRY_SECONDS: int = int(os.getenv("PLAN_CONSENT_EXPIRY_SECONDS", "3600"))
+
+    # When True, every freshly proposed plan is immediately auto-approved.
+    # Only meaningful when OPERATION_MODE=operational; in simulation mode the effect is
+    # the same but harmless. Disable this to return to explicit per-plan consent.
+    PLAN_AUTO_APPROVE: bool = os.getenv("PLAN_AUTO_APPROVE", "false").lower() in ("true", "1", "yes")
 
     def foxess_client_kwargs(self) -> dict:
         """Return the right kwargs for FoxESSClient based on what's configured."""
