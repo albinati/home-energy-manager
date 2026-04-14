@@ -1,4 +1,9 @@
-"""Fetch Octopus Agile half-hourly rates (public API, no auth)."""
+"""Fetch Octopus Agile half-hourly rates (public API, no auth).
+
+Supports both import and export tariff codes. Export rates are used by the
+solver to decide when to force-discharge the battery to grid during peak windows.
+"""
+import json
 import logging
 import re
 import urllib.request
@@ -22,45 +27,24 @@ def _tariff_to_product(tariff_code: str) -> str:
         return "AGILE-24-10-01"
 
 
-def fetch_agile_rates(
-    tariff_code: Optional[str] = None,
-    period_from: Optional[datetime] = None,
-    period_to: Optional[datetime] = None,
-) -> list[dict]:
-    """Fetch standard unit rates for the given Agile tariff. No API key required.
-
-    Returns list of dicts with keys: value_inc_vat (p/kWh), valid_from, valid_to (ISO strings).
-    """
-    code = (tariff_code or config.OCTOPUS_TARIFF_CODE).strip()
-    if not code:
-        return []
-
-    product = _tariff_to_product(code)
-    now = datetime.now(timezone.utc)
-    if period_from is None:
-        period_from = now.replace(minute=0, second=0, microsecond=0)
-    if period_to is None:
-        period_to = period_from + timedelta(hours=48)
-
+def _fetch_rates(tariff_code: str, period_from: datetime, period_to: datetime) -> list[dict]:
+    """Core HTTP fetch: get standard-unit-rates for any tariff code."""
+    product = _tariff_to_product(tariff_code)
     url = (
-        f"{OCTOPUS_BASE}/products/{product}/electricity-tariffs/{code}/standard-unit-rates/"
+        f"{OCTOPUS_BASE}/products/{product}/electricity-tariffs/{tariff_code}/standard-unit-rates/"
         f"?period_from={period_from.isoformat().replace('+00:00', 'Z')}"
         f"&period_to={period_to.isoformat().replace('+00:00', 'Z')}"
+        "&page_size=96"
     )
     try:
         req = urllib.request.Request(url, headers={"Accept": "application/json"})
         with urllib.request.urlopen(req, timeout=10) as resp:
-            data = resp.read().decode()
-    except Exception as e:
-        logger.warning("Octopus Agile fetch failed: %s", e)
+            data = json.loads(resp.read().decode())
+    except Exception as exc:
+        logger.warning("Octopus rates fetch failed (%s): %s", tariff_code, exc)
         return []
 
-    try:
-        out = __import__("json").loads(data)
-    except Exception:
-        return []
-
-    results = out.get("results") or []
+    results = data.get("results") or []
     return [
         {
             "value_inc_vat": r.get("value_inc_vat"),
@@ -70,6 +54,53 @@ def fetch_agile_rates(
         for r in results
         if r.get("value_inc_vat") is not None
     ]
+
+
+def fetch_agile_rates(
+    tariff_code: Optional[str] = None,
+    period_from: Optional[datetime] = None,
+    period_to: Optional[datetime] = None,
+) -> list[dict]:
+    """Fetch standard unit rates for the given Agile import tariff. No API key required.
+
+    Returns list of dicts with keys: value_inc_vat (p/kWh), valid_from, valid_to (ISO strings).
+    """
+    code = (tariff_code or config.OCTOPUS_TARIFF_CODE).strip()
+    if not code:
+        return []
+
+    now = datetime.now(timezone.utc)
+    if period_from is None:
+        period_from = now.replace(minute=0, second=0, microsecond=0)
+    if period_to is None:
+        period_to = period_from + timedelta(hours=48)
+
+    return _fetch_rates(code, period_from, period_to)
+
+
+def fetch_agile_export_rates(
+    export_tariff_code: Optional[str] = None,
+    period_from: Optional[datetime] = None,
+    period_to: Optional[datetime] = None,
+) -> list[dict]:
+    """Fetch Agile export (outgoing) rates. No API key required.
+
+    The export tariff code is typically the AGILE-EXPORT equivalent of the import tariff.
+    Set OCTOPUS_EXPORT_TARIFF_CODE in .env (e.g. E-1R-AGILE-OUTGOING-24-10-01-C).
+
+    Returns [] if no export tariff code is configured.
+    """
+    code = (export_tariff_code or config.OCTOPUS_EXPORT_TARIFF_CODE or "").strip()
+    if not code:
+        return []
+
+    now = datetime.now(timezone.utc)
+    if period_from is None:
+        period_from = now.replace(minute=0, second=0, microsecond=0)
+    if period_to is None:
+        period_to = period_from + timedelta(hours=48)
+
+    return _fetch_rates(code, period_from, period_to)
 
 
 def get_current_and_next_slots(

@@ -1,18 +1,25 @@
 """Monthly energy summary, cost, heating estimate and gas comparison.
 
-Uses Fox ESS monthly data + manual tariff + config for heating share and gas comparison.
-When available, heating kWh is taken from Daikin (Onecta) instead of load-share estimate.
+Cost calculation priority:
+  1. Octopus half-hourly consumption x half-hourly rates (most accurate)
+  2. Manual flat rate from config (MANUAL_TARIFF_IMPORT_PENCE)
+
+Energy data from Fox ESS; heating from Daikin when available, otherwise
+estimated from HEATING_LOAD_SHARE fraction of total load.
 Supports day, week, and month periods with chart_data for the UI.
 Optional weather (WEATHER_LAT/LON) enables degree-days and spend-by-temperature analytics.
 """
+import logging
 from calendar import monthrange
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from ..config import config
 from ..foxess import get_cached_energy_month
 from ..foxess.client import FoxESSClient
+
+logger = logging.getLogger(__name__)
 
 
 # Temperature bands for "spend by outdoor temp" (°C)
@@ -130,6 +137,110 @@ def _compute_cost(energy: MonthlyEnergySummary) -> MonthlyCostSummary:
         standing_charge_pence=round(standing_charge_pence, 2),
         net_cost_pence=round(net_cost_pence, 2),
     )
+
+
+def _compute_cost_octopus(
+    energy: MonthlyEnergySummary,
+    period_from: Optional[datetime] = None,
+    period_to: Optional[datetime] = None,
+) -> Optional[MonthlyCostSummary]:
+    """Compute monthly cost using Octopus half-hourly consumption x half-hourly rates.
+
+    Returns None if Octopus data is unavailable — caller falls back to _compute_cost().
+    Uses the import MPAN for consumption and Agile rates from the Octopus API.
+    For non-Agile tariffs, Octopus day-aggregated consumption x tariff rate is used.
+    """
+    if not config.OCTOPUS_API_KEY:
+        return None
+
+    year = energy.year
+    month = energy.month
+    if period_from is None:
+        period_from = datetime(year, month, 1, tzinfo=timezone.utc)
+    if period_to is None:
+        _, ndays = monthrange(year, month)
+        period_to = datetime(year, month, ndays, 23, 59, 59, tzinfo=timezone.utc)
+
+    try:
+        from .octopus_client import fetch_consumption, get_mpan_roles
+        from ..scheduler.agile import fetch_agile_rates
+
+        roles = get_mpan_roles()
+        if not (roles.import_mpan and roles.import_serial):
+            return None
+
+        # Fetch half-hourly import consumption
+        import_slots = fetch_consumption(
+            roles.import_mpan,
+            roles.import_serial,
+            period_from,
+            period_to,
+        )
+        if not import_slots:
+            return None
+
+        # Fetch half-hourly rates for the period
+        agile_rates_raw = fetch_agile_rates(period_from, period_to)
+
+        import_cost_pence = 0.0
+        if agile_rates_raw:
+            # Build a rate lookup: slot start (truncated to minute) -> rate_pence
+            rate_by_start: dict[str, float] = {}
+            for r in agile_rates_raw:
+                ts = r.get("valid_from") or r.get("interval_start") or ""
+                if ts:
+                    rate_by_start[ts[:16]] = float(r.get("value_inc_vat") or 0)
+
+            for slot in import_slots:
+                key = slot.interval_start.isoformat()[:16]
+                rate = rate_by_start.get(key)
+                if rate is not None:
+                    import_cost_pence += slot.consumption_kwh * rate
+                else:
+                    # fallback: use manual rate for unmatched slots
+                    import_cost_pence += slot.consumption_kwh * (config.MANUAL_TARIFF_IMPORT_PENCE or 0)
+        else:
+            # No Agile rates — use manual rate with Octopus consumption quantities
+            import_rate = config.MANUAL_TARIFF_IMPORT_PENCE or 0.0
+            import_cost_pence = sum(s.consumption_kwh for s in import_slots) * import_rate
+
+        # Export: use Octopus export consumption if available
+        export_earnings_pence = 0.0
+        if roles.export_mpan and roles.export_serial:
+            export_slots = fetch_consumption(
+                roles.export_mpan,
+                roles.export_serial,
+                period_from,
+                period_to,
+            )
+            export_rate = config.MANUAL_TARIFF_EXPORT_PENCE or 0.0
+            export_earnings_pence = sum(s.consumption_kwh for s in export_slots) * export_rate
+
+        _, ndays = monthrange(year, month)
+        standing_pence = (config.MANUAL_STANDING_CHARGE_PENCE_PER_DAY or 0.0) * ndays
+        net_pence = import_cost_pence + standing_pence - export_earnings_pence
+
+        logger.info(
+            "Monthly cost (Octopus %d-%02d): import=%.2fp export=%.2fp net=%.2fp",
+            year, month, import_cost_pence, export_earnings_pence, net_pence,
+        )
+        return MonthlyCostSummary(
+            import_cost_pence=round(import_cost_pence, 2),
+            export_earnings_pence=round(export_earnings_pence, 2),
+            standing_charge_pence=round(standing_pence, 2),
+            net_cost_pence=round(net_pence, 2),
+        )
+    except Exception as exc:
+        logger.info("Octopus cost calculation unavailable for %d-%02d: %s", year, month, exc)
+        return None
+
+
+def _best_cost(energy: MonthlyEnergySummary) -> MonthlyCostSummary:
+    """Return Octopus-sourced cost if available, else manual flat rate."""
+    octopus_cost = _compute_cost_octopus(energy)
+    if octopus_cost is not None:
+        return octopus_cost
+    return _compute_cost(energy)
 
 
 def _get_daikin_heating_kwh(year: int, month: int) -> Optional[float]:
@@ -320,7 +431,7 @@ def get_monthly_insights(year: int, month: int) -> Optional[MonthlyInsights]:
     except Exception:
         raise  # Let API layer return 502 with the actual error
     energy = _foxess_to_energy_summary(year, month, raw)
-    cost = _compute_cost(energy)
+    cost = _best_cost(energy)
     daikin_heating = _get_daikin_heating_kwh(year, month)
     heating_kwh, heating_cost_pence, equiv_gas_pence, ahead_pounds = _compute_heating_and_gas(
         energy, cost, daikin_heating_kwh=daikin_heating
@@ -380,7 +491,7 @@ def get_period_insights(
             except Exception:
                 continue
             e = _foxess_to_energy_summary(year, m, totals)
-            c = _compute_cost(e)
+            c = _best_cost(e)
             daikin_h = _get_daikin_heating_kwh(year, m)
             h_kwh, h_cost, equiv, ahead = _compute_heating_and_gas(e, c, daikin_heating_kwh=daikin_h)
             import_kwh += e.import_kwh
@@ -456,7 +567,7 @@ def get_period_insights(
         except Exception:
             raise
         energy = _foxess_to_energy_summary(y, m, totals)
-        cost = _compute_cost(energy)
+        cost = _best_cost(energy)
         daikin_heating = _get_daikin_heating_kwh(y, m)
         heating_kwh, heating_cost_pence, equiv_gas_pence, ahead_pounds = _compute_heating_and_gas(
             energy, cost, daikin_heating_kwh=daikin_heating

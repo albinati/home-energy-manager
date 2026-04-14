@@ -13,6 +13,8 @@ class OperationPreset(str, Enum):
     NORMAL = "normal"
     GUESTS = "guests"
     TRAVEL = "travel"
+    AWAY = "away"   # frost protection only, max battery export; alias for TRAVEL in solver
+    BOOST = "boost"  # temporary full-comfort override, ignores price for N hours
 
 
 class SlotKind(str, Enum):
@@ -80,3 +82,26 @@ class DispatchHints:
     fox_work_mode: Optional[str] = None
     disable_weather_regulation: bool = False
     reason: str = ""
+
+
+class PlanConsentStatus(str, Enum):
+    """Lifecycle state of a proposed optimization plan awaiting user consent."""
+
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
+
+
+@dataclass
+class PendingPlan:
+    """A solver plan proposed for user consent before dispatch."""
+
+    plan_id: str
+    plan: "SolverPlan"
+    proposed_at: datetime
+    expires_at: datetime
+    status: PlanConsentStatus = PlanConsentStatus.PENDING
+    summary: str = ""
+    approved_at: Optional[datetime] = None
+    rejected_at: Optional[datetime] = None

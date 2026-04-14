@@ -45,16 +45,16 @@ def compute_dispatch_hints(
     lwt = clamp_lwt_offset(base_lwt_offset + lwt_delta)
 
     # DHW target from preset (architecture §3); dispatcher only suggests; comfort logic expands later.
-    if preset == OperationPreset.TRAVEL:
+    if preset in (OperationPreset.TRAVEL, OperationPreset.AWAY):
         tank_target: Optional[float] = None
-        reason = "travel: DHW off except Legionella Sunday (not automated in baseline)"
+        reason = f"{preset.value}: DHW off except Legionella Sunday (not automated in baseline)"
     else:
         base_tank = (
             limits.target_dhw_temp_min_guests_c
             if preset == OperationPreset.GUESTS
             else limits.target_dhw_temp_min_normal_c
         )
-        if row and row.slot_kind.value == "cheap" and preset != OperationPreset.TRAVEL:
+        if row and row.slot_kind.value == "cheap" and preset not in (OperationPreset.TRAVEL, OperationPreset.AWAY):
             tank_target = clamp_dhw_target_c(
                 min(limits.target_dhw_temp_max_c, base_tank + 5.0),
                 limits,

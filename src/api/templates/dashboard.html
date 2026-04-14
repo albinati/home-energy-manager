@@ -608,6 +608,10 @@
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="6" width="18" height="12" rx="2"/><line x1="23" y1="10" x2="23" y2="14"/></svg>
                 Battery
             </button>
+            <button class="tab-btn" role="tab" aria-selected="false" data-tab="optimize" onclick="switchTab('optimize')">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+                Optimize
+            </button>
             <button class="tab-btn" role="tab" aria-selected="false" data-tab="insights" onclick="switchTab('insights')">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
                 Insights
@@ -996,6 +1000,202 @@
         </div>
         </div><!-- end tab-battery -->
 
+        <!-- ===== OPTIMIZE TAB ===== -->
+        <div class="tab-panel" id="tab-optimize" role="tabpanel">
+
+        <!-- Operation Mode + Controls -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93A10 10 0 0 0 4.93 19.07M4.93 4.93A10 10 0 0 1 19.07 19.07"/></svg>
+                    Optimization Engine
+                </span>
+                <button onclick="loadOptimizationStatus()" class="btn btn-secondary btn-sm">Refresh</button>
+            </div>
+            <div class="card-body">
+                <div id="optimizationStatusBanner" style="margin-bottom:1rem;padding:0.75rem 1rem;border-radius:8px;background:var(--bg-tertiary);font-size:0.875rem;">Loading…</div>
+
+                <!-- Operation mode toggle -->
+                <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap;margin-bottom:1rem;">
+                    <strong style="min-width:120px;">Operation Mode:</strong>
+                    <span id="optimizeModeLabel" style="font-size:0.9rem;padding:0.25rem 0.75rem;border-radius:20px;background:var(--bg-tertiary);">—</span>
+                    <button onclick="optimizeSwitchMode('simulation')" class="btn btn-secondary btn-sm" id="btnSimMode">Simulation</button>
+                    <button onclick="optimizeSwitchMode('operational')" class="btn btn-sm" id="btnOpMode" style="background:#2563eb;color:#fff;">Operational</button>
+                    <button onclick="optimizeRollback()" class="btn btn-sm" style="background:#dc2626;color:#fff;">⟲ Rollback</button>
+                </div>
+
+                <!-- Preset + Target price -->
+                <div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:flex-end;margin-bottom:1rem;">
+                    <div>
+                        <label style="display:block;font-size:0.8rem;margin-bottom:0.25rem;">Household Preset</label>
+                        <select id="optimizePreset" onchange="optimizeSetPreset(this.value)" style="padding:0.4rem 0.75rem;border-radius:6px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);font-size:0.875rem;">
+                            <option value="normal">Normal</option>
+                            <option value="guests">Guests</option>
+                            <option value="travel">Travel / Away</option>
+                            <option value="away">Away</option>
+                            <option value="boost">Boost (full comfort)</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label style="display:block;font-size:0.8rem;margin-bottom:0.25rem;">Target Price (p/kWh)</label>
+                        <div style="display:flex;gap:0.5rem;">
+                            <input type="number" id="optimizeTargetPrice" min="0" max="100" step="0.5" placeholder="e.g. 15" style="width:90px;padding:0.4rem 0.5rem;border-radius:6px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);font-size:0.875rem;">
+                            <button onclick="optimizeSetTargetPrice()" class="btn btn-secondary btn-sm">Set</button>
+                        </div>
+                    </div>
+                    <button onclick="optimizeProposePlan()" class="btn btn-sm" style="background:#059669;color:#fff;align-self:flex-end;">Propose Plan</button>
+                    <div style="align-self:flex-end;">
+                        <label style="display:flex;align-items:center;gap:0.4rem;font-size:0.8rem;cursor:pointer;" title="When on, new plans are approved automatically. You can still reject at any time.">
+                            <input type="checkbox" id="autoApproveToggle" onchange="optimizeSetAutoApprove(this.checked)" style="width:16px;height:16px;cursor:pointer;">
+                            Auto-approve plans
+                        </label>
+                    </div>
+                </div>
+
+                <!-- Consent section -->
+                <div id="optimizeConsentBox" style="display:none;padding:0.875rem 1rem;border:1px solid #f59e0b;border-radius:8px;background:rgba(245,158,11,0.08);margin-bottom:1rem;">
+                    <div style="font-weight:600;margin-bottom:0.5rem;">Plan awaiting your approval</div>
+                    <pre id="optimizeConsentSummary" style="white-space:pre-wrap;font-size:0.8rem;margin:0 0 0.75rem;font-family:inherit;line-height:1.5;"></pre>
+                    <div style="display:flex;gap:0.75rem;">
+                        <button onclick="optimizeApprovePlan()" class="btn btn-sm" style="background:#059669;color:#fff;">✓ Approve</button>
+                        <button onclick="optimizeRejectPlan()" class="btn btn-sm" style="background:#dc2626;color:#fff;">✗ Reject</button>
+                    </div>
+                </div>
+                <div id="optimizeMsg" style="font-size:0.85rem;color:var(--text-secondary);min-height:1.2rem;"></div>
+            </div>
+        </div>
+
+        <!-- 48-block plan chart -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">48-Block Agile Plan</span>
+                <button onclick="loadOptimizationPlan()" class="btn btn-secondary btn-sm">Refresh Plan</button>
+            </div>
+            <div class="card-body">
+                <div id="planChartWrap" style="overflow-x:auto;">
+                    <canvas id="planChart" height="220" style="min-width:700px;max-width:100%;"></canvas>
+                </div>
+                <div id="planLegend" style="display:flex;gap:1rem;flex-wrap:wrap;font-size:0.78rem;margin-top:0.75rem;">
+                    <span><span style="display:inline-block;width:12px;height:12px;border-radius:2px;background:#22c55e;margin-right:4px;"></span>Cheap</span>
+                    <span><span style="display:inline-block;width:12px;height:12px;border-radius:2px;background:#f97316;margin-right:4px;"></span>Peak</span>
+                    <span><span style="display:inline-block;width:12px;height:12px;border-radius:2px;background:#64748b;margin-right:4px;"></span>Standard</span>
+                    <span><span style="display:inline-block;width:12px;height:12px;border-radius:2px;background:#6366f1;margin-right:4px;"></span>Force Charge</span>
+                    <span><span style="display:inline-block;width:12px;height:12px;border-radius:2px;background:#ef4444;margin-right:4px;"></span>Force Discharge</span>
+                </div>
+                <div id="planNextAction" style="margin-top:0.75rem;font-size:0.85rem;color:var(--text-secondary);"></div>
+                <div id="planLoadMsg" style="font-size:0.85rem;color:var(--text-secondary);margin-top:0.5rem;"></div>
+            </div>
+        </div>
+
+        <!-- Octopus Account Status Card -->
+        <div class="card" id="octopusAccountCard">
+            <div class="card-header">
+                <span class="card-title">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>
+                    Octopus Account
+                </span>
+                <div style="display:flex;gap:0.5rem;align-items:center;">
+                    <button class="btn btn-sm" onclick="runOctopusAutoDetect()" id="autoDetectBtn" title="Detect MPAN roles and current tariff from Octopus API">
+                        Auto-detect
+                    </button>
+                    <button class="btn btn-sm btn-secondary" onclick="loadOctopusAccount()" title="Refresh account status">
+                        Refresh
+                    </button>
+                </div>
+            </div>
+            <div id="octopusAccountBody" style="padding:1rem;">
+                <div style="color:var(--text-secondary);font-size:0.9rem;">Loading account status…</div>
+            </div>
+        </div>
+
+        <!-- Tariff Comparison Dashboard -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+                    Tariff Comparison
+                </span>
+                <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
+                    <div class="tariff-toggle-group" style="display:inline-flex;border-radius:6px;overflow:hidden;border:1px solid var(--border-color);">
+                        <button class="tariff-gran-btn active" data-gran="daily" onclick="setTariffGranularity('daily')" style="padding:0.3rem 0.7rem;font-size:0.78rem;border:none;cursor:pointer;background:var(--bg-tertiary);color:var(--text-primary);">Daily</button>
+                        <button class="tariff-gran-btn" data-gran="weekly" onclick="setTariffGranularity('weekly')" style="padding:0.3rem 0.7rem;font-size:0.78rem;border:none;border-left:1px solid var(--border-color);cursor:pointer;background:var(--bg-secondary);color:var(--text-secondary);">Weekly</button>
+                        <button class="tariff-gran-btn" data-gran="monthly" onclick="setTariffGranularity('monthly')" style="padding:0.3rem 0.7rem;font-size:0.78rem;border:none;border-left:1px solid var(--border-color);cursor:pointer;background:var(--bg-secondary);color:var(--text-secondary);">Monthly</button>
+                    </div>
+                    <select id="tariffMonthsBack" onchange="runTariffDashboard()" style="padding:0.3rem 0.5rem;border-radius:6px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);font-size:0.82rem;">
+                        <option value="1" selected>1 month</option>
+                        <option value="3">3 months</option>
+                        <option value="6">6 months</option>
+                        <option value="12">12 months</option>
+                    </select>
+                    <button onclick="runTariffDashboard()" class="btn btn-secondary btn-sm" id="btnTariffCompare">Compare</button>
+                </div>
+            </div>
+            <div class="card-body">
+
+                <!-- Hero savings banner -->
+                <div id="tariffHero" style="display:none;margin-bottom:1.25rem;">
+                    <div style="display:flex;gap:1rem;flex-wrap:wrap;">
+                        <div id="tariffHeroBest" style="flex:1;min-width:200px;padding:1rem 1.25rem;border-radius:10px;background:linear-gradient(135deg,rgba(34,197,94,0.12),rgba(34,197,94,0.04));border:1px solid rgba(34,197,94,0.25);">
+                        </div>
+                        <div id="tariffHeroCurrent" style="flex:1;min-width:200px;padding:1rem 1.25rem;border-radius:10px;background:var(--bg-tertiary);border:1px solid var(--border-color);">
+                        </div>
+                        <div id="tariffHeroSavings" style="flex:1;min-width:160px;padding:1rem 1.25rem;border-radius:10px;background:linear-gradient(135deg,rgba(37,99,235,0.12),rgba(37,99,235,0.04));border:1px solid rgba(37,99,235,0.25);text-align:center;">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Win count bar -->
+                <div id="tariffWinBar" style="display:none;margin-bottom:1.25rem;">
+                    <div style="font-size:0.78rem;font-weight:600;margin-bottom:0.5rem;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.03em;">Who wins each period?</div>
+                    <div id="tariffWinBarInner" style="display:flex;border-radius:8px;overflow:hidden;height:28px;"></div>
+                    <div id="tariffWinLegend" style="display:flex;gap:1rem;flex-wrap:wrap;margin-top:0.5rem;font-size:0.75rem;color:var(--text-secondary);"></div>
+                </div>
+
+                <!-- Period chart -->
+                <div id="tariffChartWrap" style="display:none;overflow-x:auto;margin-bottom:1.25rem;">
+                    <canvas id="tariffChart" height="200" style="min-width:600px;max-width:100%;"></canvas>
+                </div>
+
+                <!-- Ranking table -->
+                <div id="tariffTableWrap" style="overflow-x:auto;display:none;">
+                    <table style="width:100%;border-collapse:collapse;font-size:0.82rem;">
+                        <thead>
+                            <tr style="border-bottom:2px solid var(--border-color);text-align:left;">
+                                <th style="padding:0.5rem 0.6rem;">#</th>
+                                <th style="padding:0.5rem 0.6rem;">Tariff</th>
+                                <th style="padding:0.5rem 0.6rem;">Type</th>
+                                <th style="padding:0.5rem 0.6rem;text-align:right;">Rate</th>
+                                <th style="padding:0.5rem 0.6rem;text-align:right;">Standing</th>
+                                <th style="padding:0.5rem 0.6rem;text-align:right;">Annual</th>
+                                <th style="padding:0.5rem 0.6rem;text-align:right;">vs Current</th>
+                                <th style="padding:0.5rem 0.6rem;">Wins</th>
+                                <th style="padding:0.5rem 0.6rem;">Contract</th>
+                                <th style="padding:0.5rem 0.6rem;text-align:center;">Green</th>
+                            </tr>
+                        </thead>
+                        <tbody id="tariffTableBody"></tbody>
+                    </table>
+                </div>
+
+                <!-- Usage + info footer -->
+                <div id="tariffUsageInfo" style="font-size:0.78rem;color:var(--text-secondary);margin-top:0.75rem;display:none;"></div>
+                <div id="tariffMsg" style="font-size:0.85rem;color:var(--text-secondary);min-height:1.2rem;">Click "Compare" to analyse available tariffs against your actual usage. Your current tariff (Octopus Flexible) is the baseline.</div>
+            </div>
+        </div>
+
+        <!-- Snapshots -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">Config Snapshots</span>
+                <button onclick="loadSnapshots()" class="btn btn-secondary btn-sm">Refresh</button>
+            </div>
+            <div class="card-body">
+                <div id="snapshotList" style="font-size:0.85rem;color:var(--text-secondary);">—</div>
+            </div>
+        </div>
+
+        </div><!-- end tab-optimize -->
+
         <!-- ===== INSIGHTS TAB (Energy + AI Assistant) ===== -->
         <div class="tab-panel" id="tab-insights" role="tabpanel">
         <div class="card">
@@ -1322,6 +1522,8 @@ function tickCountdowns() {
     setInterval(tickCountdowns, 1000);
     refreshDaikin();
     refreshFoxess();
+    // Load Octopus account status on page init
+    loadOctopusAccount();
 })();
 
 function pauseAutoRefresh() {
@@ -2141,6 +2343,576 @@ document.querySelectorAll('.insights-period-btn').forEach(function (btn) {
 document.getElementById('insightsPrev').addEventListener('click', insightsPrev);
 document.getElementById('insightsNext').addEventListener('click', insightsNext);
 
+/* ── Optimization Panel ── */
+
+var _optimizePendingPlanId = null;
+
+function loadOptimizationStatus() {
+    fetch('/api/v1/optimization/status')
+        .then(r => r.json())
+        .then(data => {
+            var mode = data.operation_mode || 'simulation';
+            var preset = data.preset || 'normal';
+            var target = data.target_price_pence || 0;
+            var banner = document.getElementById('optimizationStatusBanner');
+            var modeLabel = document.getElementById('optimizeModeLabel');
+            if (banner) {
+                var meanPrice = data.target_mean_price_pence != null ? data.target_mean_price_pence.toFixed(2) + 'p' : '—';
+                var cacheAge = data.cache_fetched_at_utc ? 'cached ' + new Date(data.cache_fetched_at_utc).toLocaleTimeString() : 'no cache';
+                banner.innerHTML = '<b>Mode:</b> ' + mode.toUpperCase() +
+                    ' &nbsp;|&nbsp; <b>Preset:</b> ' + preset +
+                    (target > 0 ? ' &nbsp;|&nbsp; <b>Target:</b> ' + target + 'p/kWh' : '') +
+                    ' &nbsp;|&nbsp; <b>Plan mean:</b> ' + meanPrice +
+                    ' &nbsp;|&nbsp; <b>Agile:</b> ' + cacheAge +
+                    (data.cache_error ? ' <span style="color:#ef4444">(' + data.cache_error + ')</span>' : '');
+                banner.style.background = mode === 'operational' ? 'rgba(37,99,235,0.12)' : 'var(--bg-tertiary)';
+            }
+            if (modeLabel) {
+                modeLabel.textContent = mode.toUpperCase();
+                modeLabel.style.background = mode === 'operational' ? 'rgba(37,99,235,0.18)' : 'var(--bg-tertiary)';
+                modeLabel.style.color = mode === 'operational' ? '#2563eb' : 'var(--text-secondary)';
+            }
+            // Update preset select
+            var sel = document.getElementById('optimizePreset');
+            if (sel) sel.value = preset;
+            // Update target price input
+            var tpInput = document.getElementById('optimizeTargetPrice');
+            if (tpInput && target > 0) tpInput.value = target;
+            // Sync auto-approve checkbox
+            var aaToggle = document.getElementById('autoApproveToggle');
+            var consent = data.consent || {};
+            if (aaToggle) aaToggle.checked = !!consent.auto_approve;
+            // Show consent box if pending plan
+            if (consent.pending_plan_id && consent.pending_plan_status === 'pending') {
+                _optimizePendingPlanId = consent.pending_plan_id;
+                var box = document.getElementById('optimizeConsentBox');
+                var summary = document.getElementById('optimizeConsentSummary');
+                if (box) box.style.display = '';
+                if (summary) summary.textContent = consent.pending_plan_summary || '(no summary)';
+            } else {
+                var box = document.getElementById('optimizeConsentBox');
+                if (box) box.style.display = 'none';
+            }
+        })
+        .catch(function(e) {
+            var banner = document.getElementById('optimizationStatusBanner');
+            if (banner) banner.textContent = 'Failed to load optimization status: ' + e;
+        });
+}
+
+function loadOptimizationPlan() {
+    var msg = document.getElementById('planLoadMsg');
+    if (msg) msg.textContent = 'Loading plan…';
+    fetch('/api/v1/optimization/plan')
+        .then(r => r.json())
+        .then(data => {
+            if (msg) msg.textContent = 'Plan loaded — ' + data.cheap_slot_count + ' cheap, ' + data.peak_slot_count + ' peak slots. Mean: ' + data.target_mean_price_pence.toFixed(2) + 'p/kWh';
+            renderPlanChart(data.slots || []);
+            renderNextAction(data.slots || []);
+        })
+        .catch(function(e) {
+            if (msg) msg.textContent = 'Failed to load plan: ' + e;
+        });
+}
+
+function renderPlanChart(slots) {
+    var canvas = document.getElementById('planChart');
+    if (!canvas || !slots.length) return;
+    var ctx = canvas.getContext('2d');
+    var W = canvas.offsetWidth || 700;
+    canvas.width = W;
+    canvas.height = 220;
+    ctx.clearRect(0, 0, W, 220);
+
+    var prices = slots.map(function(s) { return s.import_price_pence; });
+    var minP = Math.min.apply(null, prices);
+    var maxP = Math.max.apply(null, prices);
+    var range = maxP - minP || 1;
+    var barW = W / slots.length;
+    var chartH = 170;
+    var nowMs = Date.now();
+
+    slots.forEach(function(slot, i) {
+        var h = ((slot.import_price_pence - minP) / range) * chartH;
+        var y = 190 - h;
+        var color = slot.slot_kind === 'cheap' ? '#22c55e'
+            : slot.slot_kind === 'peak' ? '#f97316' : '#64748b';
+        // Override colour for Fox hints
+        if (slot.fox_mode === 'Force charge') color = '#6366f1';
+        else if (slot.fox_mode === 'Force discharge') color = '#ef4444';
+
+        var x = i * barW;
+        var isNow = false;
+        try {
+            var vf = new Date(slot.time ? slot.time : slot.valid_from).getTime();
+            var vt = vf + 1800000;
+            isNow = nowMs >= vf && nowMs < vt;
+        } catch(e) {}
+
+        ctx.fillStyle = isNow ? '#fff' : color;
+        ctx.globalAlpha = isNow ? 1 : 0.75;
+        ctx.fillRect(x + 1, y, barW - 2, h);
+        ctx.globalAlpha = 1;
+
+        // Current slot marker
+        if (isNow) {
+            ctx.fillStyle = '#fff';
+            ctx.fillRect(x, 0, barW, 4);
+        }
+    });
+
+    // Price labels
+    ctx.fillStyle = 'var(--text-secondary, #888)';
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText(maxP.toFixed(0) + 'p', 2, 14);
+    ctx.fillText(minP.toFixed(0) + 'p', 2, 190);
+
+    // Time labels every 6 slots (3h)
+    ctx.fillStyle = 'var(--text-secondary, #888)';
+    ctx.font = '9px sans-serif';
+    ctx.textAlign = 'center';
+    slots.forEach(function(slot, i) {
+        if (i % 6 === 0) {
+            var label = slot.time ? slot.time : (slot.valid_from ? new Date(slot.valid_from).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '');
+            ctx.fillText(label, i * barW + barW * 3, 205);
+        }
+    });
+}
+
+function renderNextAction(slots) {
+    var el = document.getElementById('planNextAction');
+    if (!el) return;
+    var nowMs = Date.now();
+    var next = null;
+    for (var i = 0; i < slots.length; i++) {
+        try {
+            var vf = new Date(slots[i].time ? slots[i].time : slots[i].valid_from).getTime();
+            if (vf > nowMs && (slots[i].fox_mode === 'Force charge' || slots[i].fox_mode === 'Force discharge' || slots[i].slot_kind === 'cheap')) {
+                next = slots[i];
+                break;
+            }
+        } catch(e) {}
+    }
+    if (next) {
+        var t = next.time || (next.valid_from ? new Date(next.valid_from).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '?');
+        el.textContent = 'Next action: ' + next.notes + ' at ' + t + ' (' + (next.import_price_pence || '?') + 'p/kWh)';
+    } else {
+        el.textContent = '';
+    }
+}
+
+function optimizeSwitchMode(newMode) {
+    var confirmed = confirm('Switch to ' + newMode.toUpperCase() + ' mode?\n\n' +
+        (newMode === 'operational'
+            ? 'OPERATIONAL mode will write to Fox ESS and Daikin hardware. Make sure a plan is approved.'
+            : 'SIMULATION mode will stop all hardware writes and clear the approved plan.'));
+    if (!confirmed) return;
+    fetch('/api/v1/optimization/mode', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({mode: newMode})
+    }).then(r => r.json()).then(function(d) {
+        var msg = document.getElementById('optimizeMsg');
+        if (msg) msg.textContent = d.message || (d.ok ? 'Mode changed.' : 'Failed: ' + (d.detail || 'unknown'));
+        loadOptimizationStatus();
+    });
+}
+
+function optimizeSetPreset(preset) {
+    fetch('/api/v1/optimization/preset', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({preset: preset})
+    }).then(r => r.json()).then(function(d) {
+        var msg = document.getElementById('optimizeMsg');
+        if (msg) msg.textContent = d.message || 'Preset updated.';
+    });
+}
+
+function optimizeSetTargetPrice() {
+    var val = parseFloat(document.getElementById('optimizeTargetPrice').value);
+    if (isNaN(val) || val < 0) { alert('Enter a valid price in p/kWh'); return; }
+    fetch('/api/v1/optimization/target-price', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({target_price_pence: val})
+    }).then(r => r.json()).then(function(d) {
+        var msg = document.getElementById('optimizeMsg');
+        if (msg) msg.textContent = d.message || 'Target price updated.';
+    });
+}
+
+function optimizeProposePlan() {
+    var msg = document.getElementById('optimizeMsg');
+    if (msg) msg.textContent = 'Computing plan…';
+    fetch('/api/v1/optimization/propose?include_plan=true', {method: 'POST'})
+        .then(r => r.json())
+        .then(function(d) {
+            if (d.plan_id) {
+                _optimizePendingPlanId = d.plan_id;
+                var box = document.getElementById('optimizeConsentBox');
+                var summary = document.getElementById('optimizeConsentSummary');
+                if (box) box.style.display = '';
+                if (summary) summary.textContent = d.summary || '(no summary)';
+                if (msg) msg.textContent = 'Plan proposed. Review and approve below.';
+                if (d.plan) loadOptimizationPlan();
+            } else {
+                if (msg) msg.textContent = 'Failed: ' + (d.detail || d.error || 'unknown error');
+            }
+        })
+        .catch(function(e) { if (msg) msg.textContent = 'Error: ' + e; });
+}
+
+function optimizeApprovePlan() {
+    if (!_optimizePendingPlanId) { alert('No pending plan to approve.'); return; }
+    fetch('/api/v1/optimization/approve', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({plan_id: _optimizePendingPlanId})
+    }).then(r => r.json()).then(function(d) {
+        var msg = document.getElementById('optimizeMsg');
+        var box = document.getElementById('optimizeConsentBox');
+        if (box) box.style.display = 'none';
+        if (msg) msg.textContent = d.message || (d.ok ? 'Plan approved.' : 'Failed: ' + (d.detail || 'unknown'));
+        _optimizePendingPlanId = null;
+        loadOptimizationStatus();
+    });
+}
+
+function optimizeRejectPlan() {
+    if (!_optimizePendingPlanId) return;
+    fetch('/api/v1/optimization/reject', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({plan_id: _optimizePendingPlanId})
+    }).then(r => r.json()).then(function(d) {
+        var box = document.getElementById('optimizeConsentBox');
+        var msg = document.getElementById('optimizeMsg');
+        if (box) box.style.display = 'none';
+        if (msg) msg.textContent = 'Plan rejected.';
+        _optimizePendingPlanId = null;
+    });
+}
+
+function optimizeSetAutoApprove(enabled) {
+    fetch('/api/v1/optimization/auto-approve', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({enabled: enabled})
+    }).then(r => r.json()).then(function(d) {
+        var msg = document.getElementById('optimizeMsg');
+        if (msg) msg.textContent = d.message || (d.ok ? 'Auto-approve updated.' : 'Failed.');
+    });
+}
+
+function optimizeRollback() {
+    if (!confirm('Roll back to the latest config snapshot?\nThis will force simulation mode and clear the approved plan.')) return;
+    fetch('/api/v1/optimization/rollback', {method: 'POST'})
+        .then(r => r.json())
+        .then(function(d) {
+            var msg = document.getElementById('optimizeMsg');
+            if (msg) msg.textContent = d.message || (d.ok ? 'Rolled back.' : 'Failed: ' + (d.detail || 'unknown'));
+            loadOptimizationStatus();
+        });
+}
+
+/* ── Tariff Dashboard ── */
+var _tariffGranularity = 'daily';
+var _tariffChartInstance = null;
+var _TARIFF_COLORS = ['#22c55e','#3b82f6','#f59e0b','#ef4444','#8b5cf6','#ec4899','#14b8a6','#f97316','#6366f1','#84cc16'];
+
+function setTariffGranularity(g) {
+    _tariffGranularity = g;
+    document.querySelectorAll('.tariff-gran-btn').forEach(function(btn) {
+        var isActive = btn.dataset.gran === g;
+        btn.style.background = isActive ? 'var(--bg-tertiary)' : 'var(--bg-secondary)';
+        btn.style.color = isActive ? 'var(--text-primary)' : 'var(--text-secondary)';
+        btn.style.fontWeight = isActive ? '600' : '400';
+        btn.classList.toggle('active', isActive);
+    });
+    runTariffDashboard();
+}
+
+// ── Octopus Account Status ───────────────────────────────────────────────────
+
+function loadOctopusAccount() {
+    var body = document.getElementById('octopusAccountBody');
+    if (!body) return;
+    body.innerHTML = '<div style="color:var(--text-secondary);font-size:0.9rem;">Loading…</div>';
+    fetch('/api/v1/octopus/account')
+        .then(r => r.json())
+        .then(data => {
+            if (!data.ok && !data.account_number) {
+                body.innerHTML = '<div style="color:var(--danger);font-size:0.9rem;">⚠ ' + (data.error || 'Not configured') + '</div>';
+                return;
+            }
+            var html = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;">';
+            html += _octopusInfoBox('Account', data.account_number || '—');
+            html += _octopusInfoBox('GSP', data.gsp || '—', 'Grid Supply Point (region)');
+            html += _octopusInfoBox('Import MPAN', data.mpan_import || '—');
+            html += _octopusInfoBox('Export MPAN', data.mpan_export || '—');
+            var tc = data.current_tariff;
+            if (tc) {
+                html += _octopusInfoBox('Current Tariff', tc.product_code || tc.tariff_code || '—');
+                html += _octopusInfoBox('Tariff Code', tc.tariff_code || '—');
+                if (tc.valid_from) {
+                    html += _octopusInfoBox('Active From', tc.valid_from.slice(0,10));
+                }
+            }
+            html += _octopusInfoBox('Detection', data.detection_source || '—');
+            html += '</div>';
+            if (data.error) {
+                html += '<div style="margin-top:0.75rem;color:var(--warning);font-size:0.85rem;">⚠ ' + data.error + '</div>';
+            } else {
+                html += '<div style="margin-top:0.75rem;color:var(--success);font-size:0.85rem;">✓ Account connected via Octopus API</div>';
+            }
+            body.innerHTML = html;
+        })
+        .catch(e => {
+            body.innerHTML = '<div style="color:var(--danger);font-size:0.9rem;">Error: ' + e.message + '</div>';
+        });
+}
+
+function _octopusInfoBox(label, value, title) {
+    var t = title ? ' title="' + title + '"' : '';
+    return '<div style="background:var(--bg-secondary);border-radius:6px;padding:0.6rem 0.8rem;"' + t + '>'
+         + '<div style="font-size:0.72rem;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:2px;">' + label + '</div>'
+         + '<div style="font-size:0.92rem;font-weight:500;font-family:monospace;">' + value + '</div>'
+         + '</div>';
+}
+
+function runOctopusAutoDetect() {
+    var btn = document.getElementById('autoDetectBtn');
+    var body = document.getElementById('octopusAccountBody');
+    if (btn) { btn.disabled = true; btn.textContent = 'Detecting…'; }
+    fetch('/api/v1/octopus/auto-detect', { method: 'POST' })
+        .then(r => r.json())
+        .then(data => {
+            if (btn) { btn.disabled = false; btn.textContent = 'Auto-detect'; }
+            if (data.ok) {
+                loadOctopusAccount();
+            } else {
+                if (body) body.innerHTML = '<div style="color:var(--danger);font-size:0.9rem;">⚠ Auto-detect failed: ' + (data.error || 'Unknown error') + '</div>';
+            }
+        })
+        .catch(e => {
+            if (btn) { btn.disabled = false; btn.textContent = 'Auto-detect'; }
+            if (body) body.innerHTML = '<div style="color:var(--danger);font-size:0.9rem;">Error: ' + e.message + '</div>';
+        });
+}
+
+function runTariffDashboard() {
+    var btn = document.getElementById('btnTariffCompare');
+    var msgEl = document.getElementById('tariffMsg');
+    var months = parseInt(document.getElementById('tariffMonthsBack').value) || 1;
+    if (btn) btn.disabled = true;
+    if (msgEl) msgEl.textContent = 'Fetching tariffs and simulating costs...';
+    ['tariffHero','tariffWinBar','tariffChartWrap','tariffTableWrap','tariffUsageInfo'].forEach(function(id) {
+        var el = document.getElementById(id); if (el) el.style.display = 'none';
+    });
+    fetch('/api/v1/tariffs/dashboard', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({months_back: months, granularity: _tariffGranularity, max_tariffs: 10})
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+        if (btn) btn.disabled = false;
+        if (!d.ok) { if (msgEl) msgEl.textContent = d.error || 'Comparison failed.'; return; }
+        if (msgEl) msgEl.textContent = '';
+        _renderTariffHero(d);
+        _renderTariffWinBar(d);
+        _renderTariffChart(d);
+        _renderTariffTable(d);
+        _renderTariffUsage(d);
+    })
+    .catch(function(err) {
+        if (btn) btn.disabled = false;
+        if (msgEl) msgEl.textContent = 'Error: ' + err.message;
+    });
+}
+
+function _renderTariffHero(d) {
+    var hero = document.getElementById('tariffHero');
+    if (!hero || !d.totals || !d.totals.length) return;
+    var best = d.totals[0];
+    var current = d.totals.find(function(t) { return t.is_current; });
+    var savingsVal = current ? (current.annual_pounds - best.annual_pounds) : null;
+    document.getElementById('tariffHeroBest').innerHTML =
+        '<div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:0.04em;color:#16a34a;font-weight:600;margin-bottom:0.3rem;">Best Tariff</div>' +
+        '<div style="font-size:1.3rem;font-weight:700;color:var(--text-primary);">' + best.display_name + '</div>' +
+        '<div style="font-size:1.1rem;font-weight:600;color:#16a34a;margin-top:0.15rem;">£' + best.annual_pounds.toFixed(0) + '<span style="font-size:0.78rem;font-weight:400;color:var(--text-secondary);">/yr projected</span></div>' +
+        '<div style="font-size:0.75rem;color:var(--text-secondary);margin-top:0.25rem;">' +
+            (best.unit_rate_pence != null ? best.unit_rate_pence.toFixed(2) + 'p/kWh' : best.pricing) +
+            ' · ' + best.standing_per_day.toFixed(2) + 'p/day standing' +
+            (best.contract_months ? ' · ' + best.contract_months + 'mo lock-in' : '') +
+        '</div>';
+    if (current) {
+        document.getElementById('tariffHeroCurrent').innerHTML =
+            '<div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:0.04em;color:var(--text-secondary);font-weight:600;margin-bottom:0.3rem;">Your Current Tariff</div>' +
+            '<div style="font-size:1.3rem;font-weight:700;color:var(--text-primary);">' + current.display_name + '</div>' +
+            '<div style="font-size:1.1rem;font-weight:600;color:var(--text-primary);margin-top:0.15rem;">£' + current.annual_pounds.toFixed(0) + '<span style="font-size:0.78rem;font-weight:400;color:var(--text-secondary);">/yr projected</span></div>' +
+            '<div style="font-size:0.75rem;color:var(--text-secondary);margin-top:0.25rem;">' +
+                (current.unit_rate_pence != null ? current.unit_rate_pence.toFixed(2) + 'p/kWh' : current.pricing) +
+                ' · ' + current.standing_per_day.toFixed(2) + 'p/day standing' +
+            '</div>';
+    } else {
+        document.getElementById('tariffHeroCurrent').innerHTML = '<div style="font-size:0.85rem;color:var(--text-secondary);">No current tariff detected. Set CURRENT_TARIFF_PRODUCT in .env</div>';
+    }
+    if (savingsVal != null && savingsVal > 0) {
+        document.getElementById('tariffHeroSavings').innerHTML =
+            '<div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:0.04em;color:#2563eb;font-weight:600;margin-bottom:0.3rem;">Potential Saving</div>' +
+            '<div style="font-size:2rem;font-weight:800;color:#2563eb;">£' + savingsVal.toFixed(0) + '</div>' +
+            '<div style="font-size:0.78rem;color:var(--text-secondary);">per year</div>';
+    } else if (current && best.product_code === current.product_code) {
+        document.getElementById('tariffHeroSavings').innerHTML =
+            '<div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:0.04em;color:#16a34a;font-weight:600;margin-bottom:0.3rem;">Already Best</div>' +
+            '<div style="font-size:1.6rem;font-weight:700;color:#16a34a;">✓</div>' +
+            '<div style="font-size:0.78rem;color:var(--text-secondary);">You\'re on the cheapest tariff</div>';
+    } else {
+        document.getElementById('tariffHeroSavings').innerHTML =
+            '<div style="font-size:0.85rem;color:var(--text-secondary);">Compare to see potential savings</div>';
+    }
+    hero.style.display = 'block';
+}
+
+function _renderTariffWinBar(d) {
+    var wrap = document.getElementById('tariffWinBar');
+    var inner = document.getElementById('tariffWinBarInner');
+    var legend = document.getElementById('tariffWinLegend');
+    if (!wrap || !inner || !d.totals || !d.periods) return;
+    var totalPeriods = d.periods.length;
+    if (!totalPeriods) return;
+    // Build color map for top tariffs with wins
+    var withWins = d.totals.filter(function(t) { return t.wins > 0; });
+    var colorMap = {};
+    withWins.forEach(function(t, i) { colorMap[t.product_code] = _TARIFF_COLORS[i % _TARIFF_COLORS.length]; });
+    inner.innerHTML = withWins.map(function(t) {
+        var pct = (t.wins / totalPeriods * 100);
+        return '<div style="width:' + pct + '%;background:' + colorMap[t.product_code] + ';display:flex;align-items:center;justify-content:center;color:#fff;font-size:0.7rem;font-weight:600;min-width:' + (pct > 5 ? '0' : '2px') + ';" title="' + t.display_name + ': ' + t.wins + ' wins">' +
+            (pct > 8 ? t.wins : '') + '</div>';
+    }).join('');
+    legend.innerHTML = withWins.map(function(t) {
+        return '<span><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:' + colorMap[t.product_code] + ';margin-right:3px;"></span>' + t.display_name + ' (' + t.wins + ')</span>';
+    }).join('');
+    wrap.style.display = 'block';
+}
+
+function _renderTariffChart(d) {
+    var wrap = document.getElementById('tariffChartWrap');
+    var canvas = document.getElementById('tariffChart');
+    if (!wrap || !canvas || !d.periods || !d.periods.length || !d.totals || !d.totals.length) return;
+    if (_tariffChartInstance) { _tariffChartInstance.destroy(); _tariffChartInstance = null; }
+    // Show top 5 tariffs only to keep chart readable
+    var topCodes = d.totals.slice(0, 5).map(function(t) { return t.product_code; });
+    var topNames = {};
+    d.totals.forEach(function(t) { topNames[t.product_code] = t.display_name; });
+    var labels = d.periods.map(function(p) {
+        if (d.granularity === 'daily') { var parts = p.label.split('-'); return parts[2] + '/' + parts[1]; }
+        return p.label;
+    });
+    var datasets = topCodes.map(function(code, i) {
+        var isCurrent = d.totals.find(function(t) { return t.product_code === code; });
+        return {
+            label: topNames[code] || code,
+            data: d.periods.map(function(p) { return p.costs[code] != null ? Math.round(p.costs[code] * 100) / 100 : null; }),
+            borderColor: _TARIFF_COLORS[i % _TARIFF_COLORS.length],
+            backgroundColor: _TARIFF_COLORS[i % _TARIFF_COLORS.length] + '18',
+            borderWidth: (isCurrent && isCurrent.is_current) ? 3 : 1.5,
+            borderDash: (isCurrent && isCurrent.is_current) ? [] : [4, 2],
+            pointRadius: d.periods.length > 40 ? 0 : 2,
+            tension: 0.3,
+            fill: false,
+        };
+    });
+    if (typeof Chart !== 'undefined') {
+        _tariffChartInstance = new Chart(canvas.getContext('2d'), {
+            type: 'line',
+            data: { labels: labels, datasets: datasets },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { position: 'bottom', labels: { boxWidth: 12, font: { size: 11 } } }, tooltip: { mode: 'index', intersect: false, callbacks: { label: function(ctx) { return ctx.dataset.label + ': ' + (ctx.parsed.y != null ? ctx.parsed.y.toFixed(1) + 'p' : '—'); } } } },
+                scales: { y: { title: { display: true, text: 'Cost (pence)' }, beginAtZero: false }, x: { ticks: { maxTicksLimit: d.granularity === 'daily' ? 15 : 12, font: { size: 10 } } } },
+                interaction: { mode: 'nearest', axis: 'x', intersect: false },
+            }
+        });
+    }
+    wrap.style.display = 'block';
+}
+
+function _renderTariffTable(d) {
+    var wrap = document.getElementById('tariffTableWrap');
+    var tbody = document.getElementById('tariffTableBody');
+    if (!wrap || !tbody || !d.totals || !d.totals.length) return;
+    var totalPeriods = d.periods ? d.periods.length : 0;
+    tbody.innerHTML = d.totals.map(function(t, i) {
+        var isBest = i === 0;
+        var isCurrent = t.is_current;
+        var bg = isCurrent ? 'background:rgba(37,99,235,0.06);' : (isBest ? 'background:rgba(34,197,94,0.06);' : (i % 2 ? 'background:var(--bg-secondary);' : ''));
+        var pricingLabel = {'flat':'Flat','time_of_use':'TOU','half_hourly':'Agile','tracker':'Tracker','capped_variable':'Variable'}[t.pricing] || t.pricing;
+        var rateStr = t.unit_rate_pence != null ? t.unit_rate_pence.toFixed(2) + 'p' : '—';
+        var savStr = '';
+        if (t.savings_vs_current_pounds != null) {
+            if (t.savings_vs_current_pounds > 0) savStr = '<span style="color:#16a34a;font-weight:600;">+£' + t.savings_vs_current_pounds.toFixed(0) + '</span>';
+            else if (t.savings_vs_current_pounds < 0) savStr = '<span style="color:#dc2626;">-£' + Math.abs(t.savings_vs_current_pounds).toFixed(0) + '</span>';
+            else savStr = '<span style="color:var(--text-secondary);">—</span>';
+        } else savStr = '—';
+        var winPct = totalPeriods > 0 ? Math.round(t.wins / totalPeriods * 100) : 0;
+        var winBar = '<div style="display:flex;align-items:center;gap:4px;"><div style="width:40px;height:6px;border-radius:3px;background:var(--bg-tertiary);overflow:hidden;"><div style="width:' + winPct + '%;height:100%;background:' + _TARIFF_COLORS[i % _TARIFF_COLORS.length] + ';border-radius:3px;"></div></div><span>' + t.wins + '</span></div>';
+        var lockStr = t.contract_months ? t.contract_months + 'mo' : t.contract_type;
+        if (t.exit_fee_pounds > 0) lockStr += ' · £' + t.exit_fee_pounds.toFixed(0) + ' exit';
+        var badge = isCurrent ? ' <span style="font-size:0.68rem;padding:1px 6px;border-radius:10px;background:#2563eb;color:#fff;">CURRENT</span>' : '';
+        if (isBest && !isCurrent) badge += ' <span style="font-size:0.68rem;padding:1px 6px;border-radius:10px;background:#16a34a;color:#fff;">BEST</span>';
+        return '<tr style="border-bottom:1px solid var(--border-color);' + bg + '">' +
+            '<td style="padding:0.4rem 0.6rem;font-weight:600;">' + (i + 1) + '</td>' +
+            '<td style="padding:0.4rem 0.6rem;">' + t.display_name + badge + '</td>' +
+            '<td style="padding:0.4rem 0.6rem;">' + pricingLabel + '</td>' +
+            '<td style="padding:0.4rem 0.6rem;text-align:right;">' + rateStr + '</td>' +
+            '<td style="padding:0.4rem 0.6rem;text-align:right;">' + t.standing_per_day.toFixed(2) + 'p</td>' +
+            '<td style="padding:0.4rem 0.6rem;text-align:right;font-weight:700;">£' + t.annual_pounds.toFixed(0) + '</td>' +
+            '<td style="padding:0.4rem 0.6rem;text-align:right;">' + savStr + '</td>' +
+            '<td style="padding:0.4rem 0.6rem;">' + winBar + '</td>' +
+            '<td style="padding:0.4rem 0.6rem;font-size:0.78rem;">' + lockStr + '</td>' +
+            '<td style="padding:0.4rem 0.6rem;text-align:center;">' + (t.is_green ? '<span style="color:#16a34a;">●</span>' : '') + '</td>' +
+            '</tr>';
+    }).join('');
+    wrap.style.display = 'block';
+}
+
+function _renderTariffUsage(d) {
+    var el = document.getElementById('tariffUsageInfo');
+    if (!el || !d.usage) return;
+    el.textContent = 'Based on ' + d.usage.total_days + ' days: ' +
+        d.usage.total_import_kwh.toFixed(1) + ' kWh imported, ' +
+        d.usage.total_export_kwh.toFixed(1) + ' kWh exported · ' +
+        d.granularity + ' view · ' + (d.periods ? d.periods.length : 0) + ' periods compared';
+    el.style.display = 'block';
+}
+
+function loadSnapshots() {
+    fetch('/api/v1/optimization/snapshots')
+        .then(r => r.json())
+        .then(function(d) {
+            var el = document.getElementById('snapshotList');
+            if (!el) return;
+            var snaps = d.snapshots || [];
+            if (!snaps.length) { el.textContent = 'No snapshots yet.'; return; }
+            el.innerHTML = snaps.slice(0, 5).map(function(s) {
+                return '<div style="padding:0.3rem 0;border-bottom:1px solid var(--border-color);">' +
+                    '<b>' + (s.snapshot_id || '—') + '</b> &nbsp; ' +
+                    (s.snapshot_at ? new Date(s.snapshot_at).toLocaleString() : '') + ' &nbsp; ' +
+                    '<span style="color:var(--text-secondary)">' + (s.trigger || '') + '</span> &nbsp; ' +
+                    '<span style="font-size:0.8rem;color:#2563eb">' + (s.operation_mode || '') + ' / ' + (s.preset || '') + '</span>' +
+                    '</div>';
+            }).join('');
+        });
+}
+
+/* Auto-load optimize tab data when tab is opened */
+var _origSwitchTab = null;
+
 /* ── Tab switching ── */
 
 function switchTab(tabId) {
@@ -2155,6 +2927,11 @@ function switchTab(tabId) {
     if (tabId === 'insights') {
         initInsightsDate();
         loadInsightsPeriod();
+    }
+    if (tabId === 'optimize') {
+        loadOptimizationStatus();
+        loadOptimizationPlan();
+        loadSnapshots();
     }
 }
 

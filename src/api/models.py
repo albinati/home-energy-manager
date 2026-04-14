@@ -402,3 +402,283 @@ class OptimizationDispatchPreviewResponse(BaseModel):
     fox_work_mode: Optional[str] = None
     disable_weather_regulation: bool = False
     reason: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Optimization — consent, snapshots, operation mode
+# ---------------------------------------------------------------------------
+
+class OptimizationStatusExtendedResponse(OptimizationStatusResponse):
+    """Extended optimization status including operation mode and consent state."""
+
+    operation_mode: str = "simulation"
+    target_price_pence: float = 0.0
+    consent: Optional[dict] = None
+    v7_safeties: Optional[dict] = None
+
+
+class ProposePlanResponse(BaseModel):
+    """Response when a plan is proposed for user consent."""
+
+    plan_id: str
+    proposed_at: str
+    expires_at: str
+    status: str
+    summary: str
+    plan: Optional[dict] = None  # full plan JSON when include_plan=True
+
+
+class ApprovePlanRequest(BaseModel):
+    plan_id: str
+
+
+class ApprovePlanResponse(BaseModel):
+    ok: bool
+    plan_id: str
+    status: str
+    message: str
+
+
+class RejectPlanRequest(BaseModel):
+    plan_id: str
+
+
+class SetPresetRequest(BaseModel):
+    preset: str = Field(
+        description="Preset: normal | guests | travel | away | boost",
+        pattern=r"^(normal|guests|travel|away|boost)$",
+    )
+
+
+class SetPresetResponse(BaseModel):
+    ok: bool
+    preset: str
+    message: str
+
+
+class SetTargetPriceRequest(BaseModel):
+    target_price_pence: float = Field(ge=0, le=100, description="Target average cost in p/kWh (0 = disabled)")
+
+
+class SetTargetPriceResponse(BaseModel):
+    ok: bool
+    target_price_pence: float
+    message: str
+
+
+class SetOperationModeRequest(BaseModel):
+    mode: str = Field(
+        description="Operation mode: simulation | operational",
+        pattern=r"^(simulation|operational)$",
+    )
+
+
+class SetOperationModeResponse(BaseModel):
+    ok: bool
+    mode: str
+    snapshot_id: Optional[str] = None
+    message: str
+
+
+class SnapshotSummary(BaseModel):
+    snapshot_id: str
+    snapshot_at: Optional[str] = None
+    trigger: Optional[str] = None
+    operation_mode: Optional[str] = None
+    preset: Optional[str] = None
+
+
+class ListSnapshotsResponse(BaseModel):
+    snapshots: list[SnapshotSummary]
+
+
+class RollbackResponse(BaseModel):
+    ok: bool
+    snapshot_id: Optional[str] = None
+    message: str
+
+
+class SetAutoApproveRequest(BaseModel):
+    enabled: bool = Field(description="True to auto-approve new plans; False to require explicit approval")
+
+
+class SetAutoApproveResponse(BaseModel):
+    ok: bool
+    auto_approve: bool
+    message: str
+
+
+# ── Tariff comparison models ─────────────────────────────────────────────────
+
+class TariffRatesResponse(BaseModel):
+    unit_rate_pence: Optional[float] = None
+    day_rate_pence: Optional[float] = None
+    night_rate_pence: Optional[float] = None
+    off_peak_start: Optional[str] = None
+    off_peak_end: Optional[str] = None
+    standing_charge_pence_per_day: float = 0.0
+    export_rate_pence: Optional[float] = None
+
+
+class TariffPolicyResponse(BaseModel):
+    contract_type: str
+    contract_months: Optional[int] = None
+    exit_fee_pence: float = 0.0
+    is_green: bool = False
+    is_prepay: bool = False
+
+
+class TariffProductResponse(BaseModel):
+    product_code: str
+    tariff_code: str
+    display_name: str
+    full_name: str
+    provider: str = "octopus"
+    pricing: str
+    rates: TariffRatesResponse
+    policy: TariffPolicyResponse
+    description: str = ""
+    summary_line: str = ""
+
+
+class TariffSimulationResultResponse(BaseModel):
+    product_code: str
+    display_name: str
+    pricing: str
+    period_days: int
+    import_kwh: float
+    export_kwh: float
+    import_cost_pence: float
+    export_earnings_pence: float
+    standing_charge_pence: float
+    net_cost_pence: float
+    annual_net_cost_pounds: float
+    annual_import_cost_pounds: float
+    annual_standing_charge_pounds: float
+    annual_export_earnings_pounds: float
+    exit_fee_pounds: float = 0.0
+    lock_in_months: Optional[int] = None
+    first_year_effective_cost_pounds: float = 0.0
+    standing_charge_per_day: float = 0.0
+    unit_rate_pence: Optional[float] = None
+    contract_type: str = ""
+    is_green: bool = False
+
+
+class TariffCompareRequest(BaseModel):
+    months_back: int = Field(default=1, ge=1, le=12, description="How many months of historical usage to base the comparison on")
+    max_tariffs: int = Field(default=15, ge=1, le=30, description="Max products to compare")
+
+
+class TariffRecommendationResponse(BaseModel):
+    ok: bool
+    summary: str
+    best_product_code: Optional[str] = None
+    best_display_name: Optional[str] = None
+    savings_vs_current_pounds: Optional[float] = None
+    current_product_code: Optional[str] = None
+    results: list[TariffSimulationResultResponse] = []
+    usage_import_kwh: Optional[float] = None
+    usage_export_kwh: Optional[float] = None
+    usage_period_days: Optional[int] = None
+    generated_at: Optional[str] = None
+
+
+class ListAvailableTariffsResponse(BaseModel):
+    ok: bool
+    tariffs: list[TariffProductResponse] = []
+    gsp: str = ""
+
+
+class TariffDashboardRequest(BaseModel):
+    months_back: int = Field(default=1, ge=1, le=12, description="Months of usage data")
+    granularity: str = Field(default="daily", pattern=r"^(daily|weekly|monthly)$")
+    max_tariffs: int = Field(default=10, ge=1, le=20)
+
+
+class TariffPeriodCosts(BaseModel):
+    label: str
+    import_kwh: float
+    export_kwh: float
+    days: int
+    costs: dict[str, float]
+    winner: Optional[str] = None
+
+
+class TariffTotalRow(BaseModel):
+    product_code: str
+    display_name: str
+    pricing: str
+    total_pence: float
+    daily_avg_pence: float
+    annual_pounds: float
+    standing_per_day: float
+    unit_rate_pence: Optional[float] = None
+    contract_type: str
+    contract_months: Optional[int] = None
+    exit_fee_pounds: float = 0.0
+    is_green: bool = False
+    wins: int = 0
+    is_current: bool = False
+    savings_vs_current_pounds: Optional[float] = None
+
+
+class TariffDashboardResponse(BaseModel):
+    ok: bool
+    error: Optional[str] = None
+    granularity: Optional[str] = None
+    periods: list[TariffPeriodCosts] = []
+    totals: list[TariffTotalRow] = []
+    current_product_code: Optional[str] = None
+    current_annual_pounds: Optional[float] = None
+    usage: Optional[dict] = None
+    data_source: Optional[str] = None
+
+
+# ── Octopus account + consumption models ─────────────────────────────────────
+
+class OctopusCurrentTariffResponse(BaseModel):
+    product_code: str
+    tariff_code: str
+    gsp: str
+    valid_from: Optional[str] = None
+    valid_to: Optional[str] = None
+
+
+class OctopusAccountResponse(BaseModel):
+    ok: bool
+    error: Optional[str] = None
+    account_number: str = ""
+    api_key_configured: bool = False
+    current_tariff: Optional[OctopusCurrentTariffResponse] = None
+    mpan_import: Optional[str] = None
+    mpan_export: Optional[str] = None
+    gsp: str = ""
+    detection_source: str = "not_run"
+
+
+class OctopusConsumptionSlotResponse(BaseModel):
+    interval_start: str
+    interval_end: str
+    consumption_kwh: float
+
+
+class OctopusConsumptionResponse(BaseModel):
+    ok: bool
+    error: Optional[str] = None
+    mpan: str = ""
+    serial: str = ""
+    group_by: Optional[str] = None
+    slots: list[OctopusConsumptionSlotResponse] = []
+    total_kwh: float = 0.0
+
+
+class OctopusAutoDetectResponse(BaseModel):
+    ok: bool
+    error: Optional[str] = None
+    import_mpan: str = ""
+    export_mpan: str = ""
+    gsp: str = ""
+    current_tariff_product: Optional[str] = None
+    current_tariff_code: Optional[str] = None
+    detection_source: str = ""

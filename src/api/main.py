@@ -25,6 +25,11 @@ from ..energy.monthly import get_monthly_insights, get_period_insights
 logger = logging.getLogger(__name__)
 
 from .models import (
+    OctopusAccountResponse,
+    OctopusCurrentTariffResponse,
+    OctopusConsumptionResponse,
+    OctopusConsumptionSlotResponse,
+    OctopusAutoDetectResponse,
     DaikinStatusResponse,
     FoxESSStatusResponse,
     PowerRequest,
@@ -67,9 +72,36 @@ from .models import (
     AssistantApplyResultItem,
     SchedulerStatusResponse,
     OptimizationStatusResponse,
+    OptimizationStatusExtendedResponse,
     OptimizationPlanResponse,
     OptimizationPlanSlotResponse,
     OptimizationDispatchPreviewResponse,
+    ProposePlanResponse,
+    ApprovePlanRequest,
+    ApprovePlanResponse,
+    RejectPlanRequest,
+    SetPresetRequest,
+    SetPresetResponse,
+    SetTargetPriceRequest,
+    SetTargetPriceResponse,
+    SetOperationModeRequest,
+    SetOperationModeResponse,
+    SnapshotSummary,
+    ListSnapshotsResponse,
+    RollbackResponse,
+    SetAutoApproveRequest,
+    SetAutoApproveResponse,
+    TariffProductResponse,
+    TariffRatesResponse,
+    TariffPolicyResponse,
+    TariffSimulationResultResponse,
+    TariffCompareRequest,
+    TariffRecommendationResponse,
+    ListAvailableTariffsResponse,
+    TariffDashboardRequest,
+    TariffPeriodCosts,
+    TariffTotalRow,
+    TariffDashboardResponse,
 )
 from . import safeguards
 from ..assistant import build_context, get_suggestions, validate_suggested_actions, SuggestedAction
@@ -1526,20 +1558,24 @@ def _solver_plan_to_response(plan: SolverPlan) -> OptimizationPlanResponse:
     )
 
 
-@app.get("/api/v1/optimization/status", response_model=OptimizationStatusResponse)
+@app.get("/api/v1/optimization/status", response_model=OptimizationStatusExtendedResponse)
 async def optimization_status():
-    """V7 optimization engine: cache, last solver run, preset (read-only)."""
+    """V7 optimization engine: mode, preset, target price, cache, consent state."""
     eng = get_optimization_engine()
     raw = eng.status_dict()
-    return OptimizationStatusResponse(
+    return OptimizationStatusExtendedResponse(
         enabled=raw["enabled"],
+        operation_mode=raw.get("operation_mode", "simulation"),
         preset=raw["preset"],
+        target_price_pence=raw.get("target_price_pence", 0.0),
         tariff_code=raw.get("tariff_code"),
         cache_slots=raw.get("cache_slots", 0),
         cache_fetched_at_utc=raw.get("cache_fetched_at_utc"),
         cache_error=raw.get("cache_error"),
         last_plan_at_utc=raw.get("last_plan_at_utc"),
         target_mean_price_pence=raw.get("target_mean_price_pence"),
+        consent=raw.get("consent"),
+        v7_safeties=raw.get("v7_safeties"),
     )
 
 
@@ -1636,6 +1672,538 @@ async def optimization_refresh():
         "slots": len(cache.rates or []),
         "fetched_at_utc": cache.fetched_at_utc.isoformat() if cache.fetched_at_utc else None,
     }
+
+
+# ── Optimization: consent, preset, target price, mode, snapshots ─────────────
+
+@app.post("/api/v1/optimization/propose", response_model=ProposePlanResponse)
+async def optimization_propose(include_plan: bool = False):
+    """Compute an optimization plan and propose it for user consent.
+
+    The plan is stored with a token. Use POST /approve or the OpenClaw tool to
+    activate it. In simulation mode the approved plan runs in shadow mode only.
+    """
+    if not config.OCTOPUS_TARIFF_CODE:
+        raise HTTPException(status_code=503, detail="OCTOPUS_TARIFF_CODE not set")
+    eng = get_optimization_engine()
+    plan = eng.solve_from_cache()
+    if plan is None:
+        raise HTTPException(
+            status_code=503,
+            detail="No Agile rate cache. Call POST /api/v1/optimization/refresh first.",
+        )
+    from ..optimization.consent import propose_plan
+    pending = propose_plan(plan)
+    resp = ProposePlanResponse(
+        plan_id=pending.plan_id,
+        proposed_at=pending.proposed_at.isoformat(),
+        expires_at=pending.expires_at.isoformat(),
+        status=pending.status.value,
+        summary=pending.summary,
+        plan=_solver_plan_to_response(plan).model_dump() if include_plan else None,
+    )
+    return resp
+
+
+@app.post("/api/v1/optimization/approve", response_model=ApprovePlanResponse)
+async def optimization_approve(req: ApprovePlanRequest):
+    """Approve a pending optimization plan by its ID."""
+    from ..optimization.consent import approve_plan
+    result = approve_plan(req.plan_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Plan not found or already expired")
+    from ..optimization.models import PlanConsentStatus
+    if result.status == PlanConsentStatus.EXPIRED:
+        raise HTTPException(status_code=410, detail="Plan has expired. Propose a new one.")
+    mode_note = (
+        " System is in simulation mode — no hardware writes will occur."
+        if config.OPERATION_MODE != "operational"
+        else " System is in operational mode — plan will be dispatched to hardware."
+    )
+    return ApprovePlanResponse(
+        ok=True,
+        plan_id=result.plan_id,
+        status=result.status.value,
+        message=f"Plan {result.plan_id} approved.{mode_note}",
+    )
+
+
+@app.post("/api/v1/optimization/reject", response_model=ApprovePlanResponse)
+async def optimization_reject(req: RejectPlanRequest):
+    """Reject a pending or approved plan."""
+    from ..optimization.consent import reject_plan
+    result = reject_plan(req.plan_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    return ApprovePlanResponse(
+        ok=True,
+        plan_id=result.plan_id,
+        status=result.status.value,
+        message=f"Plan {result.plan_id} rejected.",
+    )
+
+
+@app.get("/api/v1/optimization/pending")
+async def optimization_pending():
+    """Get the current pending plan awaiting consent (if any)."""
+    from ..optimization.consent import consent_status_dict
+    return consent_status_dict()
+
+
+@app.post("/api/v1/optimization/preset", response_model=SetPresetResponse)
+async def optimization_set_preset(req: SetPresetRequest):
+    """Switch the household preset at runtime (normal/guests/travel/away/boost).
+
+    Immediately re-solves the plan and proposes it for consent.
+    """
+    config.OPTIMIZATION_PRESET = req.preset
+    logger.info("Optimization preset changed to %s", req.preset)
+    return SetPresetResponse(
+        ok=True,
+        preset=req.preset,
+        message=(
+            f"Preset set to '{req.preset}'. "
+            "Call POST /api/v1/optimization/propose to generate a new plan."
+        ),
+    )
+
+
+@app.post("/api/v1/optimization/target-price", response_model=SetTargetPriceResponse)
+async def optimization_set_target_price(req: SetTargetPriceRequest):
+    """Set the target average import price (p/kWh). Use 0 to disable."""
+    config.TARGET_PRICE_PENCE = req.target_price_pence
+    logger.info("Target price set to %s p/kWh", req.target_price_pence)
+    msg = (
+        f"Target price set to {req.target_price_pence}p/kWh. "
+        "Call POST /api/v1/optimization/propose to regenerate the plan."
+        if req.target_price_pence > 0
+        else "Target price disabled (0p). Solver will use fixed cheap threshold."
+    )
+    return SetTargetPriceResponse(
+        ok=True,
+        target_price_pence=req.target_price_pence,
+        message=msg,
+    )
+
+
+@app.post("/api/v1/optimization/mode", response_model=SetOperationModeResponse)
+async def optimization_set_mode(req: SetOperationModeRequest):
+    """Switch between simulation and operational modes.
+
+    A config snapshot is saved before any transition.
+    Switching to operational requires an approved plan to be present.
+    """
+    from ..optimization.snapshots import save_snapshot
+    from ..optimization.consent import get_approved_plan, clear_approved_plan
+
+    current_mode = config.OPERATION_MODE
+    new_mode = req.mode
+
+    if current_mode == new_mode:
+        return SetOperationModeResponse(
+            ok=True,
+            mode=new_mode,
+            message=f"Already in {new_mode} mode. No change.",
+        )
+
+    # Save snapshot before transitioning
+    snap = save_snapshot(trigger=f"mode_change: {current_mode} -> {new_mode}")
+    snapshot_id = snap.get("snapshot_id")
+
+    if new_mode == "operational":
+        approved = get_approved_plan()
+        if approved is None:
+            return SetOperationModeResponse(
+                ok=False,
+                mode=current_mode,
+                snapshot_id=snapshot_id,
+                message=(
+                    "Cannot switch to operational: no approved plan. "
+                    "Propose a plan with POST /api/v1/optimization/propose, "
+                    "review it, and approve it first."
+                ),
+            )
+
+    config.OPERATION_MODE = new_mode
+
+    if new_mode == "simulation":
+        clear_approved_plan()
+        msg = (
+            f"Switched to simulation mode (snapshot {snapshot_id} saved). "
+            "No hardware writes will occur. Approved plan cleared."
+        )
+    else:
+        msg = (
+            f"Switched to operational mode (snapshot {snapshot_id} saved). "
+            "The approved plan will now control Fox ESS and Daikin on each 30-min tick."
+        )
+
+    logger.info("Operation mode changed: %s -> %s (snapshot=%s)", current_mode, new_mode, snapshot_id)
+    return SetOperationModeResponse(ok=True, mode=new_mode, snapshot_id=snapshot_id, message=msg)
+
+
+@app.post("/api/v1/optimization/rollback", response_model=RollbackResponse)
+async def optimization_rollback(snapshot_id: Optional[str] = None):
+    """Restore a config snapshot (latest by default). Forces simulation mode on restore."""
+    from ..optimization.snapshots import rollback_latest, restore_snapshot, list_snapshots
+
+    try:
+        if snapshot_id:
+            snap = restore_snapshot(snapshot_id)
+        else:
+            snap = rollback_latest()
+            if snap is None:
+                raise HTTPException(status_code=404, detail="No snapshots found to roll back to.")
+        sid = snap.get("snapshot_id", "unknown")
+        logger.info("Config rolled back to snapshot %s", sid)
+        return RollbackResponse(
+            ok=True,
+            snapshot_id=sid,
+            message=(
+                f"Config restored from snapshot {sid}. "
+                "System is now in simulation mode. Review and re-approve a plan before going operational."
+            ),
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        logger.error("Rollback failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Rollback failed: {exc}")
+
+
+@app.post("/api/v1/optimization/auto-approve", response_model=SetAutoApproveResponse)
+async def optimization_set_auto_approve(req: SetAutoApproveRequest):
+    """Enable or disable automatic plan approval.
+
+    When enabled, every new plan proposed via POST /propose (or the watchdog)
+    is immediately approved without waiting for explicit user consent.
+    A notification is still sent to OpenClaw / stdout so the user is informed.
+
+    Disable to return to the explicit consent workflow (recommended for operational mode).
+    """
+    from ..optimization.consent import set_auto_approve
+    set_auto_approve(req.enabled)
+    if req.enabled:
+        msg = (
+            "Auto-approve ENABLED. New plans will be approved automatically. "
+            "You will still receive notifications — call reject_optimization_plan "
+            "at any time to cancel the active plan."
+        )
+    else:
+        msg = (
+            "Auto-approve DISABLED. Plans now require explicit approval via "
+            "POST /api/v1/optimization/approve before they take effect."
+        )
+    return SetAutoApproveResponse(ok=True, auto_approve=req.enabled, message=msg)
+
+
+@app.get("/api/v1/optimization/snapshots", response_model=ListSnapshotsResponse)
+async def optimization_snapshots():
+    """List all available config snapshots (newest first)."""
+    from ..optimization.snapshots import list_snapshots
+    snaps = list_snapshots()
+    return ListSnapshotsResponse(
+        snapshots=[
+            SnapshotSummary(
+                snapshot_id=s.get("snapshot_id", ""),
+                snapshot_at=s.get("snapshot_at"),
+                trigger=s.get("trigger"),
+                operation_mode=s.get("operation_mode"),
+                preset=s.get("preset"),
+            )
+            for s in snaps
+        ]
+    )
+
+
+# ── Tariff comparison endpoints ──────────────────────────────────────────────
+
+@app.get("/api/v1/tariffs/available", response_model=ListAvailableTariffsResponse)
+async def tariffs_available(max_tariffs: int = 15):
+    """List currently available Octopus tariff products with rates and policies."""
+    from ..energy.octopus_products import get_available_tariffs
+    tariffs = get_available_tariffs(max_products=max_tariffs)
+    return ListAvailableTariffsResponse(
+        ok=True,
+        gsp=config.OCTOPUS_GSP if hasattr(config, "OCTOPUS_GSP") else "C",
+        tariffs=[
+            TariffProductResponse(
+                product_code=t.product_code,
+                tariff_code=t.tariff_code,
+                display_name=t.display_name,
+                full_name=t.full_name,
+                provider=t.provider,
+                pricing=t.pricing.value,
+                rates=TariffRatesResponse(
+                    unit_rate_pence=t.rates.unit_rate_pence,
+                    day_rate_pence=t.rates.day_rate_pence,
+                    night_rate_pence=t.rates.night_rate_pence,
+                    off_peak_start=t.rates.off_peak_start,
+                    off_peak_end=t.rates.off_peak_end,
+                    standing_charge_pence_per_day=t.rates.standing_charge_pence_per_day,
+                    export_rate_pence=t.rates.export_rate_pence,
+                ),
+                policy=TariffPolicyResponse(
+                    contract_type=t.policy.contract_type.value,
+                    contract_months=t.policy.contract_months,
+                    exit_fee_pence=t.policy.exit_fee_pence,
+                    is_green=t.policy.is_green,
+                    is_prepay=t.policy.is_prepay,
+                ),
+                description=t.description,
+                summary_line=t.summary_line(),
+            )
+            for t in tariffs
+        ],
+    )
+
+
+@app.post("/api/v1/tariffs/compare", response_model=TariffRecommendationResponse)
+async def tariffs_compare(req: TariffCompareRequest):
+    """Compare available tariffs against your actual usage and recommend the best.
+
+    Uses Fox ESS import/export data for the specified period (months_back).
+    Factors in standing charges, unit rates, export payments, lock-in periods, and exit fees.
+    """
+    from ..energy.tariff_engine import get_tariff_recommendation
+    rec = get_tariff_recommendation(
+        months_back=req.months_back,
+        max_tariffs=req.max_tariffs,
+    )
+    results_out = []
+    for r in rec.candidates:
+        results_out.append(TariffSimulationResultResponse(
+            product_code=r.tariff.product_code,
+            display_name=r.tariff.display_name,
+            pricing=r.tariff.pricing.value,
+            period_days=r.period_days,
+            import_kwh=r.import_kwh,
+            export_kwh=r.export_kwh,
+            import_cost_pence=r.import_cost_pence,
+            export_earnings_pence=r.export_earnings_pence,
+            standing_charge_pence=r.standing_charge_pence,
+            net_cost_pence=r.net_cost_pence,
+            annual_net_cost_pounds=r.annual_net_cost_pounds,
+            annual_import_cost_pounds=r.annual_import_cost_pounds,
+            annual_standing_charge_pounds=r.annual_standing_charge_pounds,
+            annual_export_earnings_pounds=r.annual_export_earnings_pounds,
+            exit_fee_pounds=r.exit_fee_pounds,
+            lock_in_months=r.lock_in_months,
+            first_year_effective_cost_pounds=r.first_year_effective_cost_pounds,
+            standing_charge_per_day=r.tariff.rates.standing_charge_pence_per_day,
+            unit_rate_pence=r.tariff.rates.unit_rate_pence,
+            contract_type=r.tariff.policy.contract_type.value,
+            is_green=r.tariff.policy.is_green,
+        ))
+    usage_kwh = rec.candidates[0].import_kwh if rec.candidates else None
+    usage_exp = rec.candidates[0].export_kwh if rec.candidates else None
+    usage_days = rec.candidates[0].period_days if rec.candidates else None
+    return TariffRecommendationResponse(
+        ok=True,
+        summary=rec.summary,
+        best_product_code=rec.best.tariff.product_code if rec.best else None,
+        best_display_name=rec.best.tariff.display_name if rec.best else None,
+        savings_vs_current_pounds=rec.savings_vs_current_pounds,
+        current_product_code=config.OCTOPUS_TARIFF_CODE or None,
+        results=results_out,
+        usage_import_kwh=usage_kwh,
+        usage_export_kwh=usage_exp,
+        usage_period_days=usage_days,
+        generated_at=rec.generated_at.isoformat() if rec.generated_at else None,
+    )
+
+
+@app.post("/api/v1/tariffs/dashboard", response_model=TariffDashboardResponse)
+async def tariffs_dashboard(req: TariffDashboardRequest):
+    """Granular tariff comparison dashboard data.
+
+    Returns per-period (daily/weekly/monthly) cost breakdown across all available
+    tariffs, identifying the winner for each period. The current tariff (Octopus
+    Flexible by default) is flagged as baseline.
+    """
+    from ..energy.tariff_engine import get_tariff_comparison_dashboard
+    data = get_tariff_comparison_dashboard(
+        months_back=req.months_back,
+        granularity=req.granularity,
+        max_tariffs=req.max_tariffs,
+    )
+    if not data.get("ok"):
+        return TariffDashboardResponse(ok=False, error=data.get("error", "Unknown error"))
+    return TariffDashboardResponse(
+        ok=True,
+        granularity=data.get("granularity"),
+        periods=[TariffPeriodCosts(**p) for p in data.get("periods", [])],
+        totals=[TariffTotalRow(**t) for t in data.get("totals", [])],
+        current_product_code=data.get("current_product_code"),
+        current_annual_pounds=data.get("current_annual_pounds"),
+        usage=data.get("usage"),
+        data_source=data.get("data_source"),
+    )
+
+
+# ── Octopus account + consumption endpoints ───────────────────────────────────
+
+@app.get("/api/v1/octopus/account", response_model=OctopusAccountResponse)
+async def octopus_account():
+    """Return Octopus account summary: current tariff, MPAN roles, GSP, detection status.
+
+    Calls the authenticated Octopus account endpoint — uses OCTOPUS_API_KEY from .env.
+    Returns 503 if API key not configured.
+    """
+    if not config.OCTOPUS_API_KEY:
+        return OctopusAccountResponse(
+            ok=False,
+            error="OCTOPUS_API_KEY not configured in .env",
+            account_number=config.OCTOPUS_ACCOUNT_NUMBER,
+            api_key_configured=False,
+        )
+    from ..energy.octopus_client import get_account_summary
+    summary = get_account_summary()
+    current = summary.get("current_tariff")
+    return OctopusAccountResponse(
+        ok=summary.get("error") is None,
+        error=summary.get("error"),
+        account_number=summary.get("account_number", ""),
+        api_key_configured=summary.get("api_key_configured", False),
+        current_tariff=(
+            OctopusCurrentTariffResponse(**current) if current else None
+        ),
+        mpan_import=summary.get("mpan_import"),
+        mpan_export=summary.get("mpan_export"),
+        gsp=summary.get("gsp", ""),
+        detection_source=summary.get("detection_source", "not_run"),
+    )
+
+
+@app.get("/api/v1/octopus/consumption", response_model=OctopusConsumptionResponse)
+async def octopus_consumption(
+    mpan: Optional[str] = None,
+    serial: Optional[str] = None,
+    period_from: Optional[str] = None,
+    period_to: Optional[str] = None,
+    group_by: Optional[str] = None,
+):
+    """Proxy to Octopus consumption endpoint for a specific MPAN/serial.
+
+    Defaults to the import MPAN from config if mpan/serial not specified.
+    period_from/period_to: ISO datetime strings (defaults to last 30 days).
+    group_by: half-hourly (default), day, week, month.
+    """
+    if not config.OCTOPUS_API_KEY:
+        raise HTTPException(status_code=503, detail="OCTOPUS_API_KEY not configured")
+
+    from ..energy.octopus_client import fetch_consumption, get_mpan_roles
+    from datetime import datetime, timezone, timedelta
+
+    roles = get_mpan_roles()
+    use_mpan = mpan or roles.import_mpan or config.OCTOPUS_MPAN_1
+    use_serial = serial or roles.import_serial or config.OCTOPUS_METER_SN_1
+
+    if not use_mpan or not use_serial:
+        raise HTTPException(status_code=400, detail="MPAN and meter serial required. Configure OCTOPUS_MPAN_1/OCTOPUS_METER_SN_1 in .env or pass mpan/serial query params.")
+
+    pf = None
+    pt = None
+    if period_from:
+        try:
+            pf = datetime.fromisoformat(period_from.replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid period_from format. Use ISO datetime.")
+    if period_to:
+        try:
+            pt = datetime.fromisoformat(period_to.replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid period_to format. Use ISO datetime.")
+
+    if group_by and group_by not in ("day", "week", "month"):
+        raise HTTPException(status_code=400, detail="group_by must be day, week, or month")
+
+    try:
+        slots = fetch_consumption(use_mpan, use_serial, pf, pt, group_by=group_by)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    except Exception as exc:
+        logger.warning("Octopus consumption fetch failed: %s", exc)
+        raise HTTPException(status_code=502, detail=f"Octopus API error: {exc}")
+
+    return OctopusConsumptionResponse(
+        ok=True,
+        mpan=use_mpan,
+        serial=use_serial,
+        group_by=group_by,
+        slots=[
+            OctopusConsumptionSlotResponse(
+                interval_start=s.interval_start.isoformat(),
+                interval_end=s.interval_end.isoformat(),
+                consumption_kwh=s.consumption_kwh,
+            )
+            for s in slots
+        ],
+        total_kwh=round(sum(s.consumption_kwh for s in slots), 3),
+    )
+
+
+@app.post("/api/v1/octopus/auto-detect", response_model=OctopusAutoDetectResponse)
+async def octopus_auto_detect():
+    """Detect MPAN roles (import/export) and current tariff from the Octopus account API.
+
+    Updates the runtime config with detected values.
+    Use this once after setup to confirm your MPANs and current tariff.
+    """
+    if not config.OCTOPUS_API_KEY:
+        return OctopusAutoDetectResponse(
+            ok=False,
+            error="OCTOPUS_API_KEY not configured in .env",
+        )
+    if not config.OCTOPUS_ACCOUNT_NUMBER:
+        return OctopusAutoDetectResponse(
+            ok=False,
+            error="OCTOPUS_ACCOUNT_NUMBER not configured in .env",
+        )
+
+    from ..energy.octopus_client import auto_detect_mpan_roles, discover_current_tariff
+    error = None
+    roles = None
+    tariff = None
+
+    try:
+        roles = auto_detect_mpan_roles()
+        # Update runtime config with detected values
+        config.OCTOPUS_MPAN_IMPORT = roles.import_mpan
+        config.OCTOPUS_MPAN_EXPORT = roles.export_mpan
+        config.OCTOPUS_METER_SERIAL_IMPORT = roles.import_serial
+        config.OCTOPUS_METER_SERIAL_EXPORT = roles.export_serial
+        config.OCTOPUS_GSP = roles.gsp
+        logger.info(
+            "Auto-detect: import=%s export=%s GSP=%s",
+            roles.import_mpan, roles.export_mpan, roles.gsp,
+        )
+    except Exception as exc:
+        error = f"MPAN detection failed: {exc}"
+        logger.warning("Auto-detect MPAN roles failed: %s", exc)
+
+    try:
+        tariff = discover_current_tariff()
+        if tariff and tariff.product_code:
+            config.CURRENT_TARIFF_PRODUCT = tariff.product_code
+            logger.info("Auto-detect: current tariff = %s", tariff.product_code)
+    except Exception as exc:
+        if error:
+            error += f"; tariff detection failed: {exc}"
+        else:
+            error = f"Tariff detection failed: {exc}"
+        logger.warning("Auto-detect tariff failed: %s", exc)
+
+    return OctopusAutoDetectResponse(
+        ok=error is None,
+        error=error,
+        import_mpan=roles.import_mpan if roles else "",
+        export_mpan=roles.export_mpan if roles else "",
+        gsp=roles.gsp if roles else config.OCTOPUS_GSP,
+        current_tariff_product=tariff.product_code if tariff else None,
+        current_tariff_code=tariff.tariff_code if tariff else None,
+        detection_source=roles.source if roles else "failed",
+    )
 
 
 def run_server(host: str = "0.0.0.0", port: int = 8000):
