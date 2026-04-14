@@ -53,31 +53,30 @@ def execute_dispatch() -> None:
     if not hints:
         return
         
-    logger.info("Dispatch hints: %s", hints)
+    logger.info("Dispatch hints (DRY-RUN MODE): %s", hints)
     
-    # Apply Daikin hints
+    # DRY-RUN / SIMULATION MODE
+    logger.info("CRITICAL: Executing in simulation/read-only mode. No commands will be sent to hardware.")
+    
+    # Simulate Daikin hints
     try:
         if hints.disable_weather_regulation and daikin_status.weather_regulation:
-            daikin_client.set_weather_regulation(dev, False)
-            logger.info("Disabled weather regulation (V7 requirement)")
+            logger.info("[DRY-RUN] Would disable weather regulation on Daikin")
             
         current_lwt = daikin_status.lwt_offset or 0.0
         if hints.lwt_offset != current_lwt:
-            daikin_client.set_lwt_offset(dev, hints.lwt_offset, daikin_status.mode or "heating")
-            logger.info("Set LWT offset to %s", hints.lwt_offset)
+            logger.info("[DRY-RUN] Would set Daikin LWT offset to %s", hints.lwt_offset)
             
         if hints.daikin_tank_target_c is not None:
             if daikin_status.tank_target != hints.daikin_tank_target_c:
-                daikin_client.set_tank_temperature(dev, hints.daikin_tank_target_c)
-                logger.info("Set DHW tank target to %s", hints.daikin_tank_target_c)
+                logger.info("[DRY-RUN] Would set Daikin DHW tank target to %s", hints.daikin_tank_target_c)
     except Exception as e:
-        logger.exception("Failed to apply Daikin hints: %s", e)
+        logger.exception("Failed during Daikin simulation: %s", e)
         
-    # Apply FoxESS hints
+    # Simulate FoxESS hints
     try:
         if hints.fox_work_mode:
-            fox_client.set_work_mode(hints.fox_work_mode)
-            logger.info("Set FoxESS mode to %s", hints.fox_work_mode)
+            logger.info("[DRY-RUN] Would set FoxESS mode to %s", hints.fox_work_mode)
     except Exception as e:
-        logger.exception("Failed to apply FoxESS hints: %s", e)
+        logger.exception("Failed during FoxESS simulation: %s", e)
 
