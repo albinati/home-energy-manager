@@ -66,6 +66,10 @@ from .models import (
     AssistantApplyResponse,
     AssistantApplyResultItem,
     SchedulerStatusResponse,
+    OptimizationStatusResponse,
+    OptimizationPlanResponse,
+    OptimizationPlanSlotResponse,
+    OptimizationDispatchPreviewResponse,
 )
 from . import safeguards
 from ..assistant import build_context, get_suggestions, validate_suggested_actions, SuggestedAction
@@ -76,6 +80,10 @@ from ..scheduler.runner import (
     start_background_scheduler,
     stop_background_scheduler,
 )
+from ..optimization.dispatcher import build_macro_from_clients
+from ..optimization.engine import get_optimization_engine
+from ..optimization.models import SolverPlan
+from ..optimization.watchdog import refresh_agile_rates
 
 
 @asynccontextmanager
@@ -703,7 +711,7 @@ OPENCLAW_CAPABILITIES = [
     OpenClawCapability(
         action="daikin.tank_temperature",
         description="Set DHW tank target temperature",
-        parameters={"temperature": {"type": "number", "min": 30, "max": 60, "description": "Tank target in Celsius"}},
+        parameters={"temperature": {"type": "number", "min": 30, "max": 65, "description": "Tank target in Celsius"}},
         requires_confirmation=False,
         safeguards=["range_validation", "rate_limited"],
     ),
@@ -887,8 +895,8 @@ async def _execute_action(action_type: str, params: dict) -> ActionResult:
             if not devices:
                 raise HTTPException(status_code=404, detail="No Daikin devices found")
             temp = params["temperature"]
-            if temp < 30 or temp > 60:
-                raise HTTPException(status_code=400, detail="Tank temperature must be between 30 and 60°C")
+            if temp < 30 or temp > 65:
+                raise HTTPException(status_code=400, detail="Tank temperature must be between 30 and 65°C")
             for dev in devices:
                 if dev.tank_target is not None:
                     client.set_tank_temperature(dev, temp)
@@ -1493,6 +1501,141 @@ async def scheduler_resume():
     """Resume the Agile-based Daikin scheduler."""
     resume_scheduler()
     return {"status": "resumed"}
+
+
+def _solver_plan_to_response(plan: SolverPlan) -> OptimizationPlanResponse:
+    return OptimizationPlanResponse(
+        computed_at=plan.computed_at.isoformat(),
+        preset=plan.preset.value,
+        tariff_code=plan.tariff_code,
+        target_mean_price_pence=plan.target_mean_price_pence,
+        cheap_slot_count=plan.cheap_slot_count,
+        peak_slot_count=plan.peak_slot_count,
+        slots=[
+            OptimizationPlanSlotResponse(
+                valid_from=s.valid_from.isoformat(),
+                valid_to=s.valid_to.isoformat(),
+                import_price_pence=s.import_price_pence,
+                slot_kind=s.slot_kind.value,
+                lwt_offset_delta=s.lwt_offset_delta,
+                fox_mode_hint=s.fox_mode_hint.value,
+                notes=s.notes,
+            )
+            for s in plan.slots
+        ],
+    )
+
+
+@app.get("/api/v1/optimization/status", response_model=OptimizationStatusResponse)
+async def optimization_status():
+    """V7 optimization engine: cache, last solver run, preset (read-only)."""
+    eng = get_optimization_engine()
+    raw = eng.status_dict()
+    return OptimizationStatusResponse(
+        enabled=raw["enabled"],
+        preset=raw["preset"],
+        tariff_code=raw.get("tariff_code"),
+        cache_slots=raw.get("cache_slots", 0),
+        cache_fetched_at_utc=raw.get("cache_fetched_at_utc"),
+        cache_error=raw.get("cache_error"),
+        last_plan_at_utc=raw.get("last_plan_at_utc"),
+        target_mean_price_pence=raw.get("target_mean_price_pence"),
+    )
+
+
+@app.get("/api/v1/optimization/plan", response_model=OptimizationPlanResponse)
+async def optimization_plan():
+    """Return the latest 48 half-hour solver output (recomputes from cache if needed)."""
+    if not config.OCTOPUS_TARIFF_CODE:
+        raise HTTPException(status_code=503, detail="OCTOPUS_TARIFF_CODE not set")
+    eng = get_optimization_engine()
+    plan = eng.solve_from_cache()
+    if plan is None:
+        raise HTTPException(
+            status_code=503,
+            detail="No Agile rate cache. Call POST /api/v1/optimization/refresh or wait for the watchdog.",
+        )
+    return _solver_plan_to_response(plan)
+
+
+@app.get("/api/v1/optimization/dispatch-preview", response_model=OptimizationDispatchPreviewResponse)
+async def optimization_dispatch_preview():
+    """Dispatch hints for the current slot from live macro sensors (read-only)."""
+    if not config.OCTOPUS_TARIFF_CODE:
+        raise HTTPException(status_code=503, detail="OCTOPUS_TARIFF_CODE not set")
+    eng = get_optimization_engine()
+    if eng.solve_from_cache() is None:
+        raise HTTPException(status_code=503, detail="No rate cache; refresh the watchdog first.")
+
+    room_temp = tank_temp = tank_target = outdoor_temp = None
+    weather_reg = False
+    mode = "heating"
+    try:
+        dclient = get_daikin_client()
+        devices = dclient.get_devices()
+        if devices:
+            dev = devices[0]
+            st = dclient.get_status(dev)
+            room_temp = st.room_temp
+            tank_temp = st.tank_temp
+            tank_target = st.tank_target
+            outdoor_temp = st.outdoor_temp
+            weather_reg = st.weather_regulation
+            mode = st.mode or "heating"
+    except Exception as e:
+        logger.warning("dispatch-preview: Daikin read failed: %s", e)
+
+    soc = None
+    try:
+        if config.FOXESS_API_KEY or (config.FOXESS_USERNAME and config.FOXESS_PASSWORD):
+            rt = get_cached_realtime()
+            soc = rt.soc
+    except Exception as e:
+        logger.warning("dispatch-preview: Fox ESS read failed: %s", e)
+
+    macro = build_macro_from_clients(
+        room_temp=room_temp,
+        tank_temp=tank_temp,
+        tank_target=tank_target,
+        outdoor_temp=outdoor_temp,
+        battery_soc=soc,
+        weather_regulation=weather_reg,
+        operation_mode=mode,
+    )
+    hints = eng.dispatch_hints(macro)
+    if hints is None:
+        raise HTTPException(status_code=503, detail="Could not compute dispatch hints")
+    return OptimizationDispatchPreviewResponse(
+        lwt_offset=hints.lwt_offset,
+        daikin_tank_target_c=hints.daikin_tank_target_c,
+        fox_work_mode=hints.fox_work_mode,
+        disable_weather_regulation=hints.disable_weather_regulation,
+        reason=hints.reason,
+    )
+
+
+@app.post("/api/v1/optimization/refresh")
+async def optimization_refresh():
+    """Fetch Agile rates from Octopus (rate-limited); fills cache for the solver."""
+    allowed, wait_time = safeguards.check_rate_limit("optimization.refresh")
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limited. Try again in {wait_time:.1f} seconds.",
+        )
+    if not config.OCTOPUS_TARIFF_CODE:
+        raise HTTPException(status_code=503, detail="OCTOPUS_TARIFF_CODE not set")
+    cache = refresh_agile_rates()
+    safeguards.record_action_time("optimization.refresh")
+    if cache.error and not cache.rates:
+        raise HTTPException(status_code=502, detail=cache.error or "Agile fetch failed")
+    eng = get_optimization_engine()
+    eng.solve_from_cache()
+    return {
+        "status": "ok",
+        "slots": len(cache.rates or []),
+        "fetched_at_utc": cache.fetched_at_utc.isoformat() if cache.fetched_at_utc else None,
+    }
 
 
 def run_server(host: str = "0.0.0.0", port: int = 8000):

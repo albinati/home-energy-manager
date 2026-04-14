@@ -318,15 +318,15 @@ def build_mcp() -> FastMCP:
 
     @mcp.tool(
         name="set_daikin_tank_temperature",
-        description="Set DHW tank target temperature (30–60°C) where supported.",
+        description="Set DHW tank target temperature (30–65°C) where supported.",
     )
     def set_daikin_tank_temperature(temperature: float) -> dict[str, Any]:
         params = {"temperature": temperature}
         blocked = _daikin_write_preamble(DAIKIN_TANK_TEMP_ACTION, params)
         if blocked is not None:
             return blocked
-        if temperature < 30 or temperature > 60:
-            return {"ok": False, "error": "Tank temperature must be between 30 and 60°C"}
+        if temperature < 30 or temperature > 65:
+            return {"ok": False, "error": "Tank temperature must be between 30 and 65°C"}
         try:
             client = _daikin_client()
             devices = client.get_devices()
