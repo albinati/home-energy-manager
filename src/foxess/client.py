@@ -288,6 +288,34 @@ class FoxESSClient:
                 "sn": self.device_sn, "key": "workMode", "value": mode,
             })
 
+    def get_device_settings(self) -> dict:
+        """Return raw device settings from Fox (keys vary by firmware).
+
+        Open API: POST ``/device/setting/get`` with ``sn`` only.
+        """
+        body = {"sn": self.device_sn}
+        if self.api_key:
+            return self._open_post("/device/setting/get", body)
+        return self._cloud_post("/c/v0/device/setting/get", body)
+
+    def set_device_setting(self, key: str, value: str | int | float | dict) -> None:
+        """Set a single device setting by key (same endpoint as work mode / charge times).
+
+        Examples (device-dependent): ``minSoc``, ``workMode``. Prefer typed helpers when they exist.
+        """
+        body = {"sn": self.device_sn, "key": key, "value": value}
+        if self.api_key:
+            self._open_post("/device/setting/set", body)
+        else:
+            self._cloud_post("/c/v0/device/setting/set", body)
+
+    def get_battery_schedule(self) -> dict:
+        """Return battery schedule payload (charge windows) if supported by the account/device."""
+        body = {"sn": self.device_sn}
+        if self.api_key:
+            return self._open_post("/device/battery/schedule/get", body)
+        return self._cloud_post("/c/v0/device/battery/schedule/get", body)
+
     def set_charge_period(self, period_index: int, period: ChargePeriod) -> None:
         """Set a timed charge period (index 0 or 1)."""
         if period_index not in (0, 1):
@@ -310,6 +338,12 @@ class FoxESSClient:
             self._open_post("/device/setting/set", body)
         else:
             self._cloud_post("/c/v0/device/setting/set", body)
+
+    def set_min_soc(self, min_soc: int) -> None:
+        """Set Min SoC (on grid) limit (V7 Safeties)."""
+        if not (10 <= min_soc <= 100):
+            raise ValueError("Min SoC must be between 10 and 100")
+        self.set_device_setting("minSocOnGrid", min_soc)
 
     def get_energy_today(self) -> dict:
         """Get today's energy summary (kWh)."""
