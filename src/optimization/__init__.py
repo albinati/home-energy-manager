@@ -3,7 +3,6 @@
 Architecture reference: home_energy_architecture V7 — feedback loop with Octopus Agile,
 Fox ESS work modes / charge windows, and Daikin LWT offset + DHW targets under hard safeties.
 """
-from .engine import OptimizationEngine
 from .models import (
     DispatchHints,
     FoxESSWorkModeHint,
@@ -13,6 +12,14 @@ from .models import (
     SlotKind,
     SolverPlan,
 )
+
+def __getattr__(name: str):
+    """Lazy attribute loading to avoid circular imports during module execution."""
+    if name == "OptimizationEngine":
+        from .engine import OptimizationEngine
+        return OptimizationEngine
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "OptimizationEngine",
