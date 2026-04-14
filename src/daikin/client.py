@@ -206,6 +206,10 @@ class DaikinClient:
             {"value": "weatherDependent" if enabled else "fixed"},
         )
 
+    def set_fixed_setpoint_mode(self, device: DaikinDevice) -> None:
+        """Disable weather-dependent curve so LWT offset / fixed logic drives the plant (V7 full API path)."""
+        self.set_weather_regulation(device, False)
+
     def set_tank_temperature(self, device: DaikinDevice, temperature: float) -> None:
         """Set domestic hot water tank target temperature."""
         if device.tank_target_min is not None and temperature < device.tank_target_min:

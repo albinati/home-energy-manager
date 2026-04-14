@@ -1,8 +1,10 @@
 """Scheduler runner: status, pause/resume, and periodic tick (APScheduler)."""
 import logging
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 from ..config import config
+from ..optimization.engine import optimization_dispatch_job, optimization_watchdog_job
 from .agile import fetch_agile_rates, get_current_and_next_slots
 from .daikin import compute_lwt_adjustment, run_daikin_scheduler_tick
 
@@ -72,14 +74,50 @@ def start_background_scheduler() -> None:
     global _background_scheduler
     if _background_scheduler is not None:
         return
-    if not config.SCHEDULER_ENABLED or not config.OCTOPUS_TARIFF_CODE:
+    if not config.OCTOPUS_TARIFF_CODE:
+        return
+    if not config.SCHEDULER_ENABLED and not config.OPTIMIZATION_ENGINE_ENABLED:
         return
     try:
         from apscheduler.schedulers.background import BackgroundScheduler
+        from apscheduler.triggers.cron import CronTrigger
+
         _background_scheduler = BackgroundScheduler()
-        _background_scheduler.add_job(run_scheduler_tick, "interval", minutes=30, id="agile_daikin")
+        if config.SCHEDULER_ENABLED and config.OCTOPUS_TARIFF_CODE:
+            _background_scheduler.add_job(
+                run_scheduler_tick, "interval", minutes=30, id="agile_daikin"
+            )
+            logger.info("Agile Daikin scheduler started (every 30 min)")
+        if config.OPTIMIZATION_ENGINE_ENABLED and config.OCTOPUS_TARIFF_CODE:
+            tz = ZoneInfo(config.OPTIMIZATION_TIMEZONE)
+            _background_scheduler.add_job(
+                optimization_watchdog_job,
+                CronTrigger(
+                    hour=config.OPTIMIZATION_WATCHDOG_HOUR_LOCAL,
+                    minute=config.OPTIMIZATION_WATCHDOG_MINUTE_LOCAL,
+                    timezone=tz,
+                ),
+                id="optimization_agile_watchdog",
+            )
+            _background_scheduler.add_job(
+                optimization_dispatch_job,
+                "interval",
+                minutes=30,
+                id="optimization_solver_refresh",
+            )
+            logger.info(
+                "Optimization engine jobs started (watchdog %02d:%02d %s, solver every 30 min)",
+                config.OPTIMIZATION_WATCHDOG_HOUR_LOCAL,
+                config.OPTIMIZATION_WATCHDOG_MINUTE_LOCAL,
+                config.OPTIMIZATION_TIMEZONE,
+            )
         _background_scheduler.start()
-        logger.info("Agile Daikin scheduler started (every 30 min)")
+        if config.OPTIMIZATION_ENGINE_ENABLED and config.OCTOPUS_TARIFF_CODE:
+            try:
+                optimization_watchdog_job()
+                optimization_dispatch_job()
+            except Exception as e:
+                logger.warning("Optimization engine bootstrap failed: %s", e)
     except Exception as e:
         logger.warning("Could not start background scheduler: %s", e)
 

@@ -77,7 +77,7 @@ class ModeRequest(BaseModel):
 
 
 class TankTemperatureRequest(BaseModel):
-    temperature: float = Field(ge=30, le=60, description="DHW tank target temperature (30-60°C)")
+    temperature: float = Field(ge=30, le=65, description="DHW tank target temperature (30-65°C, V7 Legionella / thermal store)")
 
 
 class TankPowerRequest(BaseModel):
@@ -355,3 +355,50 @@ class SchedulerStatusResponse(BaseModel):
     next_cheap_to: Optional[str] = None
     planned_lwt_adjustment: float = 0.0
     tariff_code: Optional[str] = None
+
+
+class OptimizationPlanSlotResponse(BaseModel):
+    """One half-hour row from the V7 solver."""
+
+    valid_from: str
+    valid_to: str
+    import_price_pence: float
+    slot_kind: str
+    lwt_offset_delta: float
+    fox_mode_hint: str
+    notes: str = ""
+
+
+class OptimizationPlanResponse(BaseModel):
+    """48-block plan + headline target price."""
+
+    computed_at: str
+    preset: str
+    tariff_code: str
+    target_mean_price_pence: float
+    cheap_slot_count: int
+    peak_slot_count: int
+    slots: list[OptimizationPlanSlotResponse]
+
+
+class OptimizationStatusResponse(BaseModel):
+    """Engine / cache health for dashboards and OpenClaw."""
+
+    enabled: bool
+    preset: str
+    tariff_code: Optional[str] = None
+    cache_slots: int = 0
+    cache_fetched_at_utc: Optional[str] = None
+    cache_error: Optional[str] = None
+    last_plan_at_utc: Optional[str] = None
+    target_mean_price_pence: Optional[float] = None
+
+
+class OptimizationDispatchPreviewResponse(BaseModel):
+    """Read-only dispatch hints for the current half-hour."""
+
+    lwt_offset: float
+    daikin_tank_target_c: Optional[float] = None
+    fox_work_mode: Optional[str] = None
+    disable_weather_regulation: bool = False
+    reason: str = ""

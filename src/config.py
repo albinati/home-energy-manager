@@ -88,6 +88,34 @@ class Config:
     SCHEDULER_PEAK_END: str = os.getenv("SCHEDULER_PEAK_END", "19:00")
     SCHEDULER_PREHEAT_LWT_BOOST: float = float(os.getenv("SCHEDULER_PREHEAT_LWT_BOOST", "2"))
 
+    # V7 Optimization engine (Agile watchdog + 48-block solver + dispatch hints)
+    OPTIMIZATION_ENGINE_ENABLED: bool = os.getenv(
+        "OPTIMIZATION_ENGINE_ENABLED", "false"
+    ).lower() in ("true", "1", "yes")
+    OPTIMIZATION_PRESET: str = (os.getenv("OPTIMIZATION_PRESET") or "normal").strip().lower()
+    TARGET_ROOM_TEMP_MIN_C: float = float(os.getenv("TARGET_ROOM_TEMP_MIN_C", "20.0"))
+    TARGET_ROOM_TEMP_MAX_C: float = float(os.getenv("TARGET_ROOM_TEMP_MAX_C", "23.0"))
+    TARGET_DHW_TEMP_MIN_NORMAL_C: float = float(os.getenv("TARGET_DHW_TEMP_MIN_NORMAL_C", "45.0"))
+    TARGET_DHW_TEMP_MIN_GUESTS_C: float = float(os.getenv("TARGET_DHW_TEMP_MIN_GUESTS_C", "48.0"))
+    TARGET_DHW_TEMP_MAX_C: float = float(os.getenv("TARGET_DHW_TEMP_MAX_C", "65.0"))
+    MIN_SOC_RESERVE_PERCENT: float = float(os.getenv("MIN_SOC_RESERVE_PERCENT", "15"))
+    OPTIMIZATION_WATCHDOG_HOUR_LOCAL: int = int(os.getenv("OPTIMIZATION_WATCHDOG_HOUR_LOCAL", "16"))
+    OPTIMIZATION_WATCHDOG_MINUTE_LOCAL: int = int(os.getenv("OPTIMIZATION_WATCHDOG_MINUTE_LOCAL", "0"))
+    OPTIMIZATION_TIMEZONE: str = (os.getenv("OPTIMIZATION_TIMEZONE") or "Europe/London").strip()
+    OPTIMIZATION_CHEAP_THRESHOLD_PENCE: float = float(
+        os.getenv("OPTIMIZATION_CHEAP_THRESHOLD_PENCE", os.getenv("SCHEDULER_CHEAP_THRESHOLD_PENCE", "12"))
+    )
+    OPTIMIZATION_PEAK_START: str = os.getenv("OPTIMIZATION_PEAK_START", os.getenv("SCHEDULER_PEAK_START", "16:00"))
+    OPTIMIZATION_PEAK_END: str = os.getenv("OPTIMIZATION_PEAK_END", os.getenv("SCHEDULER_PEAK_END", "19:00"))
+    OPTIMIZATION_PREHEAT_LWT_BOOST: float = float(
+        os.getenv("OPTIMIZATION_PREHEAT_LWT_BOOST", os.getenv("SCHEDULER_PREHEAT_LWT_BOOST", "2"))
+    )
+    OPTIMIZATION_LWT_OFFSET_MIN: float = float(os.getenv("OPTIMIZATION_LWT_OFFSET_MIN", "-10"))
+    OPTIMIZATION_LWT_OFFSET_MAX: float = float(os.getenv("OPTIMIZATION_LWT_OFFSET_MAX", "10"))
+    OPTIMIZATION_DISABLE_WEATHER_REGULATION: bool = os.getenv(
+        "OPTIMIZATION_DISABLE_WEATHER_REGULATION", "false"
+    ).lower() in ("true", "1", "yes")
+
     def foxess_client_kwargs(self) -> dict:
         """Return the right kwargs for FoxESSClient based on what's configured."""
         if not self.FOXESS_DEVICE_SN:

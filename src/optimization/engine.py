@@ -136,8 +136,13 @@ def optimization_watchdog_job() -> None:
 
 
 def optimization_dispatch_job() -> None:
-    """Scheduler hook: refresh plan from cache (no extra Octopus call if watchdog filled cache)."""
+    """Scheduler hook: execute dispatch (evaluate plan and apply to devices)."""
     eng = get_optimization_engine()
     if not eng.is_enabled():
         return
-    eng.solve_from_cache()
+    try:
+        from .executor import execute_dispatch
+        execute_dispatch()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).exception("Optimization dispatch failed: %s", e)

@@ -26,7 +26,7 @@ ACTION_PARAMS = {
     "daikin.temperature": {"temperature": ("number", 15, 30), "mode": ("string", None, None)},
     "daikin.lwt_offset": {"offset": ("number", -10, 10), "mode": ("string", None, None)},
     "daikin.mode": {"mode": ("string", None, None)},  # enum: heating, cooling, auto, etc.
-    "daikin.tank_temperature": {"temperature": ("number", 30, 60)},
+    "daikin.tank_temperature": {"temperature": ("number", 30, 65)},
     "daikin.tank_power": {"on": ("bool", None, None)},
     "foxess.mode": {"mode": ("string", None, None)},  # enum
     "foxess.charge_period": {
@@ -222,7 +222,7 @@ Allowed actions and parameters (use exactly these keys):
 - daikin.temperature: {"temperature": 15-30} (only if weather_regulation is false)
 - daikin.lwt_offset: {"offset": -10 to 10} (when weather regulation is active)
 - daikin.mode: {"mode": "heating"|"cooling"|"auto"|"fan_only"|"dry"}
-- daikin.tank_temperature: {"temperature": 30-60}
+- daikin.tank_temperature: {"temperature": 30-65}
 - daikin.tank_power: {"on": true|false}
 - foxess.mode: {"mode": "Self Use"|"Feed-in Priority"|"Back Up"|"Force charge"|"Force discharge"}
 - foxess.charge_period: {"start_time": "HH:MM", "end_time": "HH:MM", "target_soc": 10-100, "period_index": 0|1}
@@ -282,7 +282,7 @@ Allowed actions and parameters (use exactly these keys):
 - daikin.temperature: {"temperature": 15-30} (only if weather_regulation is false)
 - daikin.lwt_offset: {"offset": -10 to 10} (when weather regulation is active)
 - daikin.mode: {"mode": "heating"|"cooling"|"auto"|"fan_only"|"dry"}
-- daikin.tank_temperature: {"temperature": 30-60}
+- daikin.tank_temperature: {"temperature": 30-65}
 - daikin.tank_power: {"on": true|false}
 - foxess.mode: {"mode": "Self Use"|"Feed-in Priority"|"Back Up"|"Force charge"|"Force discharge"}
 - foxess.charge_period: {"start_time": "HH:MM", "end_time": "HH:MM", "target_soc": 10-100, "period_index": 0|1}
