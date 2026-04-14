@@ -4,7 +4,6 @@ from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 from ..config import config
-from ..optimization.engine import optimization_dispatch_job, optimization_watchdog_job
 from .agile import fetch_agile_rates, get_current_and_next_slots
 from .daikin import compute_lwt_adjustment, run_daikin_scheduler_tick
 
@@ -71,6 +70,7 @@ def run_scheduler_tick() -> Optional[str]:
 
 def start_background_scheduler() -> None:
     """Start APScheduler job that runs every 30 minutes."""
+    from ..optimization.engine import optimization_dispatch_job, optimization_watchdog_job
     global _background_scheduler
     if _background_scheduler is not None:
         return
