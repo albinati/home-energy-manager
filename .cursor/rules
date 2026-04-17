@@ -1,29 +1,22 @@
 # Home Energy Manager — Cursor Rules
 
 ## Project
-Python service controlling Daikin Altherma ASHP + Fox ESS battery + solar.
-Owner: Luis Albinati, London. Production system — changes affect real hardware.
+Standalone Python service: Daikin Altherma ASHP + Fox ESS + Octopus Agile. The **planning brain** ingests tariffs (SQLite), fuses weather + rolling load estimates, runs `run_optimizer`, and drives Fox V3 + Daikin schedules; heartbeat executes the plan. See `docs/ARCHITECTURE.md`. Production — changes affect real hardware.
 
 ## Stack
-- Python 3.11+, FastAPI, APScheduler
-- Fox ESS cloud API (200 req/day limit — no frequent polling)
-- Daikin Onecta cloud API (weather compensation active — use lwt_offset, not room temp)
-- Anthropic Claude Haiku as AI assistant (default provider)
+- Python 3.11+, FastAPI, APScheduler, optional MCP stdio server for clients (e.g. OpenClaw)
+- **Bulletproof** (default `USE_BULLETPROOF_ENGINE`): SQLite `DB_PATH`, Fox Scheduler V3 (sparse API use), 2‑min heartbeat
+- Fox ESS cloud API: **~200 req/day** — no polling loops; cached realtime ~30s TTL; scheduler flag check ~30 min
+- Daikin Onecta: respect `weather_regulation_active`; use **`lwt_offset`**, not room setpoint rewrites
+- Optional: Anthropic/OpenAI for in-app assistant — not required for core automation
 
 ## Critical Rules
-- NEVER remove safety guards or read-only protections
-- OPENCLAW_READ_ONLY=true by default — respect it
-- Daikin: always check weather_regulation_active before changing LWT
-- Fox ESS: S/N 609H5020541M055, Battery EP11 ~10kWh
-- No secrets or credentials in committed code — use env vars from config.py
+- Do not remove safety guards, auth, or read-only protections
+- `OPENCLAW_READ_ONLY=true` by default — honour it for remote execution paths
+- No secrets in committed code — `src/config.py` + `.env` only
+- Hardware reference: Fox S/N 609H5020541M055, EP11 ~10 kWh, 4.5 kWp — verify against your deploy if forked
 
-## Code Style
-- Follow existing patterns in src/
-- Type hints required
-- Keep API endpoints RESTful
-- Tests in tests/ when adding new features
-
-## Git
-- Conventional commits: feat/fix/refactor/docs/chore
-- Never force push main
-- I (OverBot) handle git commits after Cursor edits
+## Code style
+- Type hints, follow patterns in `src/`, conventional commits (`feat/fix/refactor/docs/chore`)
+- Tests in `tests/` for new behaviour
+- Do not force-push `main`

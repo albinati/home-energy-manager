@@ -73,6 +73,7 @@ def solve_plan(
     preheat_boost: Optional[float] = None,
     target_price_pence: Optional[float] = None,
     export_rates: Optional[list[dict]] = None,
+    battery_soc_percent: Optional[float] = None,
 ) -> SolverPlan:
     """Build a :class:`SolverPlan` from Agile rates (structural / rule-based baseline).
 
@@ -86,9 +87,9 @@ def solve_plan(
     BOOST preset ignores price classification and always uses max LWT / comfort settings.
     AWAY/TRAVEL are treated identically: hibernate mode.
 
-    When export_rates are provided, peak slots with a high export price will use
-    FORCE_DISCHARGE to sell battery energy to grid (only for travel/away or when export
-    price significantly exceeds the import standing value).
+    Peak FORCE_DISCHARGE uses export rates only when ``ENERGY_STRATEGY_MODE`` is not
+    ``strict_savings``, preset is travel/away, export price > 0, and
+    ``battery_soc_percent`` >= ``EXPORT_DISCHARGE_MIN_SOC_PERCENT``.
     """
     code = (tariff_code or config.OCTOPUS_TARIFF_CODE or "").strip()
     thr = cheap_threshold_pence if cheap_threshold_pence is not None else config.OPTIMIZATION_CHEAP_THRESHOLD_PENCE
@@ -180,13 +181,19 @@ def solve_plan(
             kind = SlotKind.PEAK
             peak_n += 1
             lwt_d = -min(2.0, float(boost))
-            # Determine if we should force-discharge to export during this peak slot.
-            # Use Agile export rate if available, else fall back to manual export pence.
+            # Peak export: only travel/away + high battery (see ENERGY_STRATEGY_MODE).
             vf_str = vf.isoformat()
             export_price = export_rate_map.get(vf_str) or config.MANUAL_TARIFF_EXPORT_PENCE
-            should_export = export_price > 0 and (
-                _is_away_like(preset)
-                or export_price >= price * 0.7  # export is at least 70% of import price
+            mode = (config.ENERGY_STRATEGY_MODE or "savings_first").strip().lower()
+            soc_ok = (
+                battery_soc_percent is not None
+                and battery_soc_percent >= float(config.EXPORT_DISCHARGE_MIN_SOC_PERCENT)
+            )
+            should_export = (
+                mode != "strict_savings"
+                and export_price > 0
+                and _is_away_like(preset)
+                and soc_ok
             )
             if should_export:
                 fox = FoxESSWorkModeHint.FORCE_DISCHARGE

@@ -156,6 +156,16 @@ class Config:
         "OPTIMIZATION_ENGINE_ENABLED", "false"
     ).lower() in ("true", "1", "yes")
     OPTIMIZATION_PRESET: str = (os.getenv("OPTIMIZATION_PRESET") or "normal").strip().lower()
+    # savings_first (default): import/savings focus; peak grid export (force discharge) only when
+    # OPTIMIZATION_PRESET is travel/away AND cached SoC >= EXPORT_DISCHARGE_MIN_SOC_PERCENT.
+    # strict_savings — never schedule peak export discharge (max self-use).
+    ENERGY_STRATEGY_MODE: str = (os.getenv("ENERGY_STRATEGY_MODE") or "savings_first").strip().lower()
+    EXPORT_DISCHARGE_MIN_SOC_PERCENT: float = float(
+        os.getenv("EXPORT_DISCHARGE_MIN_SOC_PERCENT", "95")
+    )
+    EXPORT_DISCHARGE_FLOOR_SOC_PERCENT: int = int(
+        os.getenv("EXPORT_DISCHARGE_FLOOR_SOC_PERCENT", "15")
+    )
     TARGET_ROOM_TEMP_MIN_C: float = float(os.getenv("TARGET_ROOM_TEMP_MIN_C", "18.0"))
     TARGET_ROOM_TEMP_MAX_C: float = float(os.getenv("TARGET_ROOM_TEMP_MAX_C", "23.0"))
     TARGET_DHW_TEMP_MIN_NORMAL_C: float = float(os.getenv("TARGET_DHW_TEMP_MIN_NORMAL_C", "45.0"))

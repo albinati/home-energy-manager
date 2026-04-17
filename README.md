@@ -2,15 +2,19 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Unified controller for Fox ESS battery + Daikin Altherma heat pump (Onecta).
+**Standalone home energy controller** for Fox ESS battery + Daikin Altherma heat pump (Onecta). It runs the automation (schedules, SQLite state, bulletproof heartbeat) on your hardware; the FastAPI server is the **machine interface** your tools use—including **OpenClaw** (REST + optional MCP), not the other way around.
+
+### The planning brain
+
+This app is the **brain** for the installation: it **captures half-hourly Agile tariffs** into SQLite, **pulls weather forecasts** (PV and heating demand), **learns typical half-hourly load** from `execution_log`, **classifies tomorrow’s slots** (cheap / peak / negative + battery margin), and **writes** Fox Scheduler V3 plus Daikin `action_schedule`. A **heartbeat** reconciles live hardware with that plan. Details and data-flow: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
 
 ## What it does
 
 - **Fox ESS**: Read real-time battery SoC, solar production, grid import/export, inverter stats. Control charge/discharge mode and time-of-use schedules.
 - **Daikin Onecta**: Read heat pump status, radiator temperature, outdoor temperature, DHW tank temperature. Control power, temperature targets, heating curve offset, and weather regulation.
 - **Smart scheduling**: Time-of-use optimisation — charge battery on cheap-rate periods, pre-heat with solar surplus.
-- **Energy Dashboard** (coming soon): Track energy costs with Octopus Energy, British Gas, and other providers.
-- **OpenClaw integration**: Notifies via configurable channel (webchat, Telegram, etc.) when action is needed. Exposes REST API for AI agent control.
+- **Energy / tariffs**: Octopus Agile rates ingested and stored; shadow pricing, PnL, VWAP, and reports use the same state the planner uses.
+- **OpenClaw**: Optional channel for alerts (`ALERT_*`) and remote visibility/control via the same HTTP API (`HOME_ENERGY_API_URL`) or MCP; default `OPENCLAW_READ_ONLY=true` keeps writes gated.
 
 ## Quick start
 
@@ -40,7 +44,7 @@ When `USE_BULLETPROOF_ENGINE=true` (default):
 - **Fox Scheduler V3** (requires `FOXESS_API_KEY`): one schedule upload after the daily Octopus fetch (not per-tick mode changes).
 - **Heartbeat** (every `HEARTBEAT_INTERVAL_SECONDS`, default 120s): Daikin actions from SQLite, cached Fox realtime, scheduler flag check every 30 min, half-hourly `execution_log` samples.
 - **REST**: `GET /api/v1/metrics`, `GET /api/v1/schedule`, `GET /api/v1/schedule/history`, `GET /api/v1/weather`.
-- **MCP** (preferred for OpenClaw): `get_energy_metrics`, `get_schedule`, `get_daily_brief`, `get_battery_forecast`, `get_weather_context`, `get_action_log`, `get_optimizer_log`, `override_schedule`, `acknowledge_warning`.
+- **MCP** (optional sidecar for OpenClaw or other clients): `get_energy_metrics`, `get_schedule`, `get_daily_brief`, `get_battery_forecast`, `get_weather_context`, `get_action_log`, `get_optimizer_log`, `override_schedule`, `acknowledge_warning`.
 
 See `.env.example` for `OCTOPUS_FETCH_*`, `DAILY_BRIEF_*`, `SVT_RATE_PENCE`, and weather thresholds.
 
@@ -208,10 +212,10 @@ Without an API key (no `ANTHROPIC_API_KEY` and no `OPENAI_API_KEY` when using Op
 
 ### OpenClaw skill
 
-To use the **home-energy-manager** skill from OverBot/OpenClaw chat:
+To use the **home-energy-manager** skill from OpenClaw chat:
 
 1. **Install the skill**: `cp -r skills/home-energy-manager ~/.openclaw/skills/`
-2. **Configure** `~/.openclaw/openclaw.json` with the skill and `HOME_ENERGY_API_URL` (e.g. `http://localhost:8000`). See `AGENTS.md` for the exact JSON snippet.
+2. **Configure** `~/.openclaw/openclaw.json` with the skill and `HOME_ENERGY_API_URL` (e.g. `http://localhost:8000`). Use the JSON example under **OpenClaw integration** below.
 3. **Health check**: On gateway boot, call `GET {HOME_ENERGY_API_URL}/api/v1/health` and start the API daemon if needed. See `BOOT.md`.
 
 ### OpenClaw integration

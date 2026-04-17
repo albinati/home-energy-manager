@@ -50,12 +50,20 @@ class OptimizationEngine:
             return None
         pr = preset or _preset_from_config()
         tgt = target_price_pence if target_price_pence is not None else config.TARGET_PRICE_PENCE
+        soc: Optional[float] = None
+        try:
+            from ..foxess.service import get_cached_realtime
+
+            soc = float(get_cached_realtime().soc)
+        except Exception:
+            pass
         self._last_plan = solve_plan(
             cache.rates,
             preset=pr,
             tariff_code=cache.tariff_code or None,
             target_price_pence=tgt if tgt > 0 else None,
             export_rates=cache.export_rates or None,
+            battery_soc_percent=soc,
         )
         return self._last_plan
 
@@ -109,6 +117,8 @@ class OptimizationEngine:
             "enabled": self.is_enabled(),
             "operation_mode": config.OPERATION_MODE,
             "preset": config.OPTIMIZATION_PRESET,
+            "energy_strategy_mode": config.ENERGY_STRATEGY_MODE,
+            "export_discharge_min_soc_percent": config.EXPORT_DISCHARGE_MIN_SOC_PERCENT,
             "target_price_pence": config.TARGET_PRICE_PENCE,
             "tariff_code": config.OCTOPUS_TARIFF_CODE or None,
             "cache_slots": len(cache.rates or []),

@@ -1,4 +1,4 @@
-# Boot / health-check (OverBot gateway)
+# Boot / health-check (OpenClaw gateway)
 
 To ensure the Home Energy Manager API is running when the OpenClaw gateway starts (so the `home-energy-manager` skill works), add a daemon health-check step.
 

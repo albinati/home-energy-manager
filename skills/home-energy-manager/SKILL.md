@@ -1,14 +1,14 @@
 ---
 name: home-energy-manager
-description: Control Daikin Altherma heat pump and Fox ESS battery via the Home Energy Manager REST API. Manage heating temperature, DHW tank, inverter modes, and charge schedules with built-in safety confirmations.
+description: OpenClaw skill — talk to the Home Energy Manager standalone app (REST API). The app owns schedules and hardware; this skill is only a remote interface for status, reports, and confirmed actions.
 metadata: {"openclaw": {"requires": {"env": ["HOME_ENERGY_API_URL"]}, "primaryEnv": "HOME_ENERGY_API_URL", "emoji": "🏠"}}
 ---
 
-# Home Energy Manager
+# Home Energy Manager (OpenClaw ↔ app interface)
 
-You can control a home energy system (Daikin Altherma heat pump + Fox ESS battery) through a REST API.
+**Home Energy Manager** is a **standalone service** and the **planning brain** for the site: it stores Agile tariffs, uses weather and load history, optimises Fox + heat-pump schedules, and runs a heartbeat to apply them. OpenClaw does not replace that service: it connects to it over HTTP using this skill.
 
-**Base URL**: Use the environment variable `HOME_ENERGY_API_URL` (e.g. `http://192.168.1.100:8000`).
+**Base URL**: Set `HOME_ENERGY_API_URL` to the running app (e.g. `http://192.168.1.100:8000`).
 
 ## How to discover available actions
 

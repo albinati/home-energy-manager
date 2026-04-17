@@ -589,7 +589,8 @@ def build_mcp() -> FastMCP:
         description=(
             "Switch the household preset. "
             "Options: normal (standard comfort), guests (higher DHW, warmer, less cost-cutting), "
-            "travel/away (frost protection only, max battery export), "
+            "travel/away (frost protection; peak grid export only if ENERGY_STRATEGY_MODE=savings_first "
+            "and battery SoC >= EXPORT_DISCHARGE_MIN_SOC_PERCENT at plan time), "
             "boost (temporary full-comfort override, ignores price). "
             "After switching, call propose_optimization_plan to re-solve with the new preset."
         ),
