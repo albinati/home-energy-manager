@@ -4,6 +4,7 @@ The long-running FastAPI + APScheduler daemon remains available for dashboards a
 legacy integrations, but new automation should prefer the MCP server
 (``python -m src.mcp_server``) so assistants connect over stdio without hosting HTTP.
 """
+import asyncio
 import logging
 import os
 from pathlib import Path
@@ -16,6 +17,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from ..config import config
+from .. import db
+from ..state_machine import apply_safe_defaults, recover_on_boot
 from ..daikin.client import DaikinClient, DaikinError
 from ..foxess.client import FoxESSClient, FoxESSError
 from ..foxess.models import ChargePeriod
@@ -120,8 +123,25 @@ from ..optimization.watchdog import refresh_agile_rates
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    await asyncio.to_thread(db.init_db)
+    fox = None
+    daikin = None
+    try:
+        fox = get_foxess_client()
+    except Exception:
+        pass
+    try:
+        daikin = get_daikin_client()
+    except Exception:
+        pass
+    await asyncio.to_thread(recover_on_boot, fox, daikin)
     start_background_scheduler()
     yield
+    try:
+        if fox is not None and daikin is not None:
+            await asyncio.to_thread(apply_safe_defaults, fox, daikin)
+    except Exception:
+        logger.warning("Safe defaults on shutdown failed", exc_info=True)
     stop_background_scheduler()
     safeguards.cleanup_expired_actions()
 
@@ -241,6 +261,100 @@ async def web_dashboard(request: Request):
             "foxess_error": foxess_error,
         },
     )
+
+
+@app.get("/api/v1/metrics")
+async def api_v1_metrics():
+    """Bulletproof: PnL, VWAP, SLA, battery SoC (JSON)."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from ..analytics import pnl, sla
+    from ..foxess.service import get_cached_realtime
+
+    tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+    today = datetime.now(tz).date()
+    daily = pnl.compute_daily_pnl(today)
+    weekly = pnl.compute_weekly_pnl(today)
+    monthly = pnl.compute_monthly_pnl(today)
+    tgt = db.get_daily_target(today)
+    soc = None
+    try:
+        soc = get_cached_realtime().soc
+    except Exception:
+        pass
+    peak_pct = pnl.compute_peak_ratio(today)
+    ofs = db.get_octopus_fetch_state()
+    return {
+        "pnl": {
+            "daily": {
+                "delta_vs_svt_pounds": daily.get("delta_vs_svt_gbp"),
+                "delta_vs_fixed_pounds": daily.get("delta_vs_fixed_gbp"),
+            },
+            "weekly": {"delta_vs_svt_pounds": weekly.get("delta_vs_svt_gbp")},
+            "monthly": {"delta_vs_svt_pounds": monthly.get("delta_vs_svt_gbp")},
+        },
+        "target_vwap_pence": (tgt or {}).get("target_vwap"),
+        "realised_vwap_pence": pnl.compute_vwap(today),
+        "slippage_pence": pnl.compute_slippage(today),
+        "arbitrage_efficiency_pct": pnl.compute_arbitrage_efficiency(today),
+        "peak_import_pct": peak_pct,
+        "off_peak_import_pct": round(100.0 - peak_pct, 2) if peak_pct is not None else None,
+        "battery_soc_percent": soc,
+        "battery_capacity_kwh": config.BATTERY_CAPACITY_KWH,
+        "octopus_fetch": {
+            "last_success_at": ofs.last_success_at,
+            "consecutive_failures": ofs.consecutive_failures,
+            "survival_mode_since": ofs.survival_mode_since,
+            "failure_streak_started_at": ofs.failure_streak_started_at,
+        },
+        "sla": sla.compute_sla_metrics(),
+        "today_strategy": (tgt or {}).get("strategy_summary"),
+        "cheap_threshold_pence": (tgt or {}).get("cheap_threshold"),
+        "peak_threshold_pence": (tgt or {}).get("peak_threshold"),
+    }
+
+
+@app.get("/api/v1/schedule")
+async def api_v1_schedule():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+    plan_date = datetime.now(tz).date().isoformat()
+    return {
+        "plan_date": plan_date,
+        "actions": db.schedule_for_date(plan_date),
+        "fox": db.get_latest_fox_schedule_state(),
+    }
+
+
+@app.get("/api/v1/schedule/history")
+async def api_v1_schedule_history(limit: int = 200):
+    return {"action_log": db.get_action_logs(limit=limit)}
+
+
+@app.get("/api/v1/weather")
+async def api_v1_weather():
+    from ..weather import fetch_forecast
+
+    fc = fetch_forecast(hours=48)
+    out = [{"time": f.time_utc.isoformat(), "temp_c": f.temperature_c, "pv_kw": f.estimated_pv_kw} for f in fc]
+    daikin = None
+    try:
+        c = get_daikin_client()
+        devs = c.get_devices()
+        if devs:
+            s = c.get_status(devs[0])
+            daikin = {
+                "room_temp": s.room_temp,
+                "outdoor_temp": s.outdoor_temp,
+                "lwt": s.lwt,
+                "tank_temp": s.tank_temp,
+            }
+    except Exception as e:
+        daikin = {"error": str(e)}
+    return {"forecast": out[:48], "daikin": daikin}
 
 
 @app.get("/api/v1/health")

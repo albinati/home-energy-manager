@@ -381,7 +381,20 @@ def build_mcp() -> FastMCP:
         ),
     )
     def get_optimization_status() -> dict[str, Any]:
+        if config.USE_BULLETPROOF_ENGINE:
+            from dataclasses import asdict
+
+            from . import db
+            from .scheduler.runner import get_scheduler_status
+
+            return {
+                "ok": True,
+                "bulletproof": True,
+                "scheduler": get_scheduler_status(),
+                "octopus_fetch": asdict(db.get_octopus_fetch_state()),
+            }
         from .optimization.engine import get_optimization_engine
+
         eng = get_optimization_engine()
         return {"ok": True, "status": eng.status_dict()}
 
@@ -394,7 +407,25 @@ def build_mcp() -> FastMCP:
         ),
     )
     def get_optimization_plan() -> dict[str, Any]:
+        if config.USE_BULLETPROOF_ENGINE:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+
+            from . import db
+
+            if not config.OCTOPUS_TARIFF_CODE:
+                return {"ok": False, "error": "OCTOPUS_TARIFF_CODE not set"}
+            tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+            plan_date = datetime.now(tz).date().isoformat()
+            return {
+                "ok": True,
+                "bulletproof": True,
+                "plan_date": plan_date,
+                "daikin_actions": db.schedule_for_date(plan_date),
+                "fox_schedule_state": db.get_latest_fox_schedule_state(),
+            }
         from .optimization.engine import get_optimization_engine
+
         eng = get_optimization_engine()
         if not config.OCTOPUS_TARIFF_CODE:
             return {"ok": False, "error": "OCTOPUS_TARIFF_CODE not set"}
@@ -441,6 +472,37 @@ def build_mcp() -> FastMCP:
         from .optimization.consent import propose_plan
         if not config.OCTOPUS_TARIFF_CODE:
             return {"ok": False, "error": "OCTOPUS_TARIFF_CODE not set"}
+        if config.USE_BULLETPROOF_ENGINE:
+            from .foxess.client import FoxESSClient
+            from .scheduler.optimizer import run_optimizer
+
+            fox = None
+            try:
+                fox = FoxESSClient(**config.foxess_client_kwargs())
+            except Exception:
+                pass
+            result = run_optimizer(fox, None)
+            if not result.get("ok"):
+                return {"ok": False, **result}
+            mode_note = (
+                "Simulation / read-only: Fox upload and hardware may be skipped per config."
+                if config.OPERATION_MODE != "operational" or config.OPENCLAW_READ_ONLY
+                else "Operational: SQLite schedule updated; Fox V3 uploaded when API key present."
+            )
+            return {
+                "ok": True,
+                "bulletproof": True,
+                "summary": result.get("strategy", ""),
+                "plan_date": result.get("plan_date"),
+                "fox_uploaded": result.get("fox_uploaded"),
+                "daikin_actions": result.get("daikin_actions"),
+                "battery_warning": result.get("battery_warning"),
+                "mode_note": mode_note,
+                "instruction": (
+                    "Bulletproof engine: this run already persisted tomorrow's plan. "
+                    "approve_optimization_plan is for the legacy solver only."
+                ),
+            }
         eng = get_optimization_engine()
         plan = eng.solve_from_cache()
         if plan is None:
@@ -1003,6 +1065,207 @@ def build_mcp() -> FastMCP:
                 "Restart the server or update .env to persist."
             ) if not errors else "Detection partially failed — check errors above.",
         }
+
+    @mcp.tool(
+        name="get_energy_metrics",
+        description=(
+            "Bulletproof: daily/weekly PnL vs SVT/fixed shadow, VWAP, arbitrage efficiency, "
+            "peak ratio, SLA snapshot, battery SoC."
+        ),
+    )
+    def get_energy_metrics() -> dict[str, Any]:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        from . import db
+        from .analytics import pnl, sla
+        from .foxess.service import get_cached_realtime
+
+        tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+        today = datetime.now(tz).date()
+        daily = pnl.compute_daily_pnl(today)
+        weekly = pnl.compute_weekly_pnl(today)
+        monthly = pnl.compute_monthly_pnl(today)
+        tgt = db.get_daily_target(today)
+        soc = None
+        try:
+            soc = get_cached_realtime().soc
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "pnl": {
+                "daily": {
+                    "delta_vs_svt_pounds": daily.get("delta_vs_svt_gbp"),
+                    "delta_vs_fixed_pounds": daily.get("delta_vs_fixed_gbp"),
+                },
+                "weekly": {"delta_vs_svt_pounds": weekly.get("delta_vs_svt_gbp")},
+                "monthly": {"delta_vs_svt_pounds": monthly.get("delta_vs_svt_gbp")},
+            },
+            "target_vwap_pence": (tgt or {}).get("target_vwap") if tgt else None,
+            "realised_vwap_pence": pnl.compute_vwap(today),
+            "slippage_pence": pnl.compute_slippage(today),
+            "arbitrage_efficiency_pct": pnl.compute_arbitrage_efficiency(today),
+            "peak_import_pct": pnl.compute_peak_ratio(today),
+            "battery_soc_percent": soc,
+            "sla": sla.compute_sla_metrics(),
+        }
+
+    @mcp.tool(
+        name="get_schedule",
+        description="Bulletproof: today's Daikin action_schedule rows and last Fox V3 state from SQLite.",
+    )
+    def get_schedule() -> dict[str, Any]:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        from . import db
+
+        tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+        plan_date = datetime.now(tz).date().isoformat()
+        return {
+            "ok": True,
+            "plan_date": plan_date,
+            "actions": db.schedule_for_date(plan_date),
+            "fox": db.get_latest_fox_schedule_state(),
+        }
+
+    @mcp.tool(
+        name="get_daily_brief",
+        description="Bulletproof: on-demand morning-style brief (yesterday PnL + today strategy).",
+    )
+    def get_daily_brief() -> dict[str, Any]:
+        from .analytics.daily_brief import build_daily_brief_text
+
+        return {"ok": True, "markdown": build_daily_brief_text()}
+
+    @mcp.tool(
+        name="get_battery_forecast",
+        description="Bulletproof: current SoC and daily_targets snapshot.",
+    )
+    def get_battery_forecast() -> dict[str, Any]:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        from . import db
+        from .foxess.service import get_cached_realtime
+
+        tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+        today = datetime.now(tz).date()
+        tgt = db.get_daily_target(today)
+        soc = None
+        try:
+            soc = get_cached_realtime().soc
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "soc_percent": soc,
+            "usable_capacity_kwh": config.BATTERY_CAPACITY_KWH,
+            "daily_target": tgt,
+        }
+
+    @mcp.tool(
+        name="get_weather_context",
+        description="Bulletproof: Open-Meteo forecast plus live Daikin temps when available.",
+    )
+    def get_weather_context() -> dict[str, Any]:
+        from .weather import fetch_forecast
+
+        fc = [{"time": f.time_utc.isoformat(), "temp_c": f.temperature_c} for f in fetch_forecast(hours=48)]
+        daikin = None
+        try:
+            c = _daikin_client()
+            devs = c.get_devices()
+            if devs:
+                daikin = _device_status_dict(c, devs[0])
+        except Exception as e:
+            daikin = {"error": str(e)}
+        return {"ok": True, "forecast_hourly": fc[:48], "daikin": daikin}
+
+    @mcp.tool(
+        name="get_action_log",
+        description="Bulletproof: recent device commands from SQLite.",
+    )
+    def get_action_log(device: str | None = None, trigger: str | None = None, limit: int = 100) -> dict[str, Any]:
+        from . import db
+
+        return {"ok": True, "entries": db.get_action_logs(device=device, trigger=trigger, limit=limit)}
+
+    @mcp.tool(
+        name="get_optimizer_log",
+        description="Bulletproof: recent optimizer runs.",
+    )
+    def get_optimizer_log(limit: int = 20) -> dict[str, Any]:
+        from . import db
+
+        return {"ok": True, "entries": db.get_optimizer_logs(limit=limit)}
+
+    @mcp.tool(
+        name="override_schedule",
+        description=(
+            "Bulletproof: temporary Daikin boost window. Requires OPENCLAW_READ_ONLY=false."
+        ),
+    )
+    def override_schedule(
+        hours: float = 2.0,
+        lwt_offset: float = 3.0,
+        tank_temp: float | None = None,
+    ) -> dict[str, Any]:
+        blocked = _daikin_write_preamble("bulletproof.override", {})
+        if blocked:
+            return blocked
+        from datetime import datetime, timedelta, timezone
+        from zoneinfo import ZoneInfo
+
+        from . import db
+
+        tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+        now = datetime.now(timezone.utc)
+        end = now + timedelta(hours=hours)
+        plan_date = datetime.now(tz).date().isoformat()
+        params: dict[str, Any] = {"lwt_offset": lwt_offset, "tank_powerful": True, "climate_on": True}
+        if tank_temp is not None:
+            params["tank_temp"] = tank_temp
+        restore_params = {
+            "lwt_offset": 0,
+            "tank_powerful": False,
+            "tank_temp": config.DHW_TEMP_NORMAL_C,
+            "tank_power": True,
+            "climate_on": True,
+        }
+        rid = db.upsert_action(
+            plan_date=plan_date,
+            start_time=end.isoformat().replace("+00:00", "Z"),
+            end_time=(end + timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
+            device="daikin",
+            action_type="restore",
+            params=restore_params,
+            status="pending",
+        )
+        aid = db.upsert_action(
+            plan_date=plan_date,
+            start_time=now.isoformat().replace("+00:00", "Z"),
+            end_time=end.isoformat().replace("+00:00", "Z"),
+            device="daikin",
+            action_type="pre_heat",
+            params=params,
+            status="pending",
+            restore_action_id=rid,
+        )
+        db.update_action_restore_link(aid, rid)
+        safeguards.audit_log("bulletproof.override", params, "mcp", True, "override inserted")
+        return {"ok": True, "action_id": aid, "restore_id": rid}
+
+    @mcp.tool(
+        name="acknowledge_warning",
+        description="Bulletproof: acknowledge a warning_key to reduce repeat alerts.",
+    )
+    def acknowledge_warning(warning_key: str) -> dict[str, Any]:
+        from . import db
+
+        db.acknowledge_warning(warning_key)
+        return {"ok": True, "warning_key": warning_key}
 
     return mcp
 

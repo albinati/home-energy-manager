@@ -1,4 +1,8 @@
 """Tests for MCP server Fox ESS and Daikin tools (no stdio)."""
+import pytest
+
+pytest.importorskip("mcp", reason="Install the `mcp` package to run MCP server tests.")
+
 import unittest
 from unittest.mock import MagicMock, patch
 

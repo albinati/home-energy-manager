@@ -394,3 +394,26 @@ The system fetches, simulates, and recommends the best electricity tariff from O
 4. Rollback is always safe — it forces simulation mode automatically.
 5. The `boost` preset ignores price entirely — use sparingly (cold snaps, full house).
 6. Fox ESS API limit is **200 req/day**. Optimization reads use the cached realtime path.
+
+## Bulletproof mode (MCP-first)
+
+When the stack runs with **`USE_BULLETPROOF_ENGINE=true`** (default), automation is **autonomous**: Octopus fetch → SQLite → optimizer → Fox **Scheduler V3** upload (one call/day) + Daikin rows in **`action_schedule`**. A **2-minute heartbeat** executes Daikin changes and logs telemetry; it does **not** spam Fox mode APIs.
+
+**Prefer MCP** (`python -m src.mcp_server`) over raw REST for OpenClaw:
+
+| Tool | Use |
+|------|-----|
+| `get_energy_metrics` | Daily/weekly/monthly PnL vs SVT/fixed shadow, VWAP, slippage, SLA, SoC |
+| `get_schedule` | Today’s SQLite actions + last Fox V3 snapshot |
+| `get_daily_brief` | Same content as the 08:00 webhook, on demand |
+| `get_battery_forecast` | SoC + `daily_targets` snapshot |
+| `get_weather_context` | 48h forecast + live Daikin temps |
+| `get_action_log` / `get_optimizer_log` | Audit trail |
+| `override_schedule` | Manual heating boost window (**requires `OPENCLAW_READ_ONLY=false`**) |
+| `acknowledge_warning` | Dismiss repeating risk alerts (e.g. low SoC + peak price) |
+
+**REST mirrors:** `GET /api/v1/metrics`, `GET /api/v1/schedule`, `GET /api/v1/weather`.
+
+**Notifications** (OpenClaw webhook): morning report, strategy update after fetch, risk alerts, action confirmations, critical errors — see `src/notifier.py` (`AlertType`).
+
+**Workflow:** Report performance with `get_energy_metrics` / `get_daily_brief`. Explain live behaviour with `get_schedule`. Use `override_schedule` only for explicit user-requested interventions.

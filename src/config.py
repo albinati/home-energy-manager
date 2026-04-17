@@ -86,10 +86,53 @@ class Config:
     HEATING_LOAD_SHARE: float = float(os.getenv("HEATING_LOAD_SHARE", "0.4"))
 
     # Weather (optional): for heating analytics — degree-days, cost per °C (Open-Meteo Historical, no key)
-    WEATHER_LAT: str = (os.getenv("WEATHER_LAT") or "").strip()
-    WEATHER_LON: str = (os.getenv("WEATHER_LON") or "").strip()
+    # Defaults: Chiswick W4 approximate (London)
+    WEATHER_LAT: str = (os.getenv("WEATHER_LAT") or "51.4927").strip()
+    WEATHER_LON: str = (os.getenv("WEATHER_LON") or "-0.2628").strip()
     # Degree-day base temp (°C): heating demand assumed proportional to (base - outdoor_mean)
     WEATHER_DEGREE_DAY_BASE_C: float = float(os.getenv("WEATHER_DEGREE_DAY_BASE_C", "18"))
+    WEATHER_COLD_THRESHOLD_C: float = float(os.getenv("WEATHER_COLD_THRESHOLD_C", "5"))
+    WEATHER_MILD_THRESHOLD_C: float = float(os.getenv("WEATHER_MILD_THRESHOLD_C", "15"))
+    WEATHER_FROST_THRESHOLD_C: float = float(os.getenv("WEATHER_FROST_THRESHOLD_C", "2"))
+
+    # Bulletproof engine (SQLite + Scheduler V3 + 2-min heartbeat)
+    USE_BULLETPROOF_ENGINE: bool = os.getenv("USE_BULLETPROOF_ENGINE", "true").lower() in (
+        "true",
+        "1",
+        "yes",
+    )
+    DB_PATH: str = (os.getenv("DB_PATH") or "energy_state.db").strip()
+    HEARTBEAT_INTERVAL_SECONDS: int = int(os.getenv("HEARTBEAT_INTERVAL_SECONDS", "120"))
+    SVT_RATE_PENCE: float = float(os.getenv("SVT_RATE_PENCE", "24.50"))
+    OPTIMIZATION_PEAK_THRESHOLD_PENCE: float = float(
+        os.getenv("OPTIMIZATION_PEAK_THRESHOLD_PENCE", "25")
+    )
+    OCTOPUS_FETCH_HOUR: int = int(os.getenv("OCTOPUS_FETCH_HOUR", "16"))
+    OCTOPUS_FETCH_MINUTE: int = int(os.getenv("OCTOPUS_FETCH_MINUTE", "5"))
+    DAILY_BRIEF_HOUR: int = int(os.getenv("DAILY_BRIEF_HOUR", "8"))
+    DAILY_BRIEF_MINUTE: int = int(os.getenv("DAILY_BRIEF_MINUTE", "0"))
+    BULLETPROOF_TIMEZONE: str = (os.getenv("BULLETPROOF_TIMEZONE") or "Europe/London").strip()
+
+    DHW_TEMP_MAX_C: float = float(os.getenv("DHW_TEMP_MAX_C", "65"))
+    DHW_TEMP_CHEAP_C: float = float(os.getenv("DHW_TEMP_CHEAP_C", "60"))
+    DHW_TEMP_NORMAL_C: float = float(os.getenv("DHW_TEMP_NORMAL_C", "50"))
+    DHW_LEGIONELLA_TEMP_C: float = float(os.getenv("DHW_LEGIONELLA_TEMP_C", "60"))
+    DHW_LEGIONELLA_DAY: int = int(os.getenv("DHW_LEGIONELLA_DAY", "6"))  # Sunday
+    DHW_LEGIONELLA_HOUR_START: int = int(os.getenv("DHW_LEGIONELLA_HOUR_START", "11"))
+    DHW_LEGIONELLA_HOUR_END: int = int(os.getenv("DHW_LEGIONELLA_HOUR_END", "13"))
+
+    BATTERY_CAPACITY_KWH: float = float(os.getenv("BATTERY_CAPACITY_KWH", "10"))
+    FOX_FORCE_CHARGE_MAX_PWR: int = int(os.getenv("FOX_FORCE_CHARGE_MAX_PWR", "6000"))
+    FOX_FORCE_CHARGE_NORMAL_PWR: int = int(os.getenv("FOX_FORCE_CHARGE_NORMAL_PWR", "3000"))
+
+    LWT_OFFSET_MAX: float = float(os.getenv("LWT_OFFSET_MAX", "10"))
+    LWT_OFFSET_MIN: float = float(os.getenv("LWT_OFFSET_MIN", "-5"))
+    LWT_OFFSET_PREHEAT_BOOST: float = float(
+        os.getenv("LWT_OFFSET_PREHEAT_BOOST", os.getenv("SCHEDULER_PREHEAT_LWT_BOOST", "5"))
+    )
+
+    PV_CAPACITY_KWP: float = float(os.getenv("PV_CAPACITY_KWP", "4.5"))
+    PV_SYSTEM_EFFICIENCY: float = float(os.getenv("PV_SYSTEM_EFFICIENCY", "0.85"))
 
     # Agile scheduler (Daikin ASHP by price)
     SCHEDULER_ENABLED: bool = os.getenv("SCHEDULER_ENABLED", "false").lower() in ("true", "1", "yes")
@@ -113,7 +156,7 @@ class Config:
         "OPTIMIZATION_ENGINE_ENABLED", "false"
     ).lower() in ("true", "1", "yes")
     OPTIMIZATION_PRESET: str = (os.getenv("OPTIMIZATION_PRESET") or "normal").strip().lower()
-    TARGET_ROOM_TEMP_MIN_C: float = float(os.getenv("TARGET_ROOM_TEMP_MIN_C", "20.0"))
+    TARGET_ROOM_TEMP_MIN_C: float = float(os.getenv("TARGET_ROOM_TEMP_MIN_C", "18.0"))
     TARGET_ROOM_TEMP_MAX_C: float = float(os.getenv("TARGET_ROOM_TEMP_MAX_C", "23.0"))
     TARGET_DHW_TEMP_MIN_NORMAL_C: float = float(os.getenv("TARGET_DHW_TEMP_MIN_NORMAL_C", "45.0"))
     TARGET_DHW_TEMP_MIN_GUESTS_C: float = float(os.getenv("TARGET_DHW_TEMP_MIN_GUESTS_C", "48.0"))
