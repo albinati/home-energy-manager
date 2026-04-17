@@ -2,14 +2,22 @@ services:
   energy-manager:
     build: .
     restart: unless-stopped
-    ports:
-      - "8000:8000"
+    network_mode: host
     env_file:
       - .env
     environment:
       DB_PATH: /app/data/energy_state.db
+      TZ: Europe/London
     volumes:
       - energy_state_data:/app/data
+      # Optional: Onecta tokens from host (file must exist before first start)
+      # - ./.daikin-tokens.json:/app/.daikin-tokens.json:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/v1/health"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 25s
 
 volumes:
   energy_state_data:

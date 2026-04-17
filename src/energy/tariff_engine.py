@@ -639,7 +639,7 @@ def get_tariff_recommendation(
     when available; falls back to mean rate x daily totals.
     """
     from .octopus_products import get_available_tariffs
-    from ..optimization.watchdog import get_agile_cache
+    from ..agile_cache import get_agile_cache
 
     tariffs = get_available_tariffs(max_products=max_tariffs)
     if not tariffs:

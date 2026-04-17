@@ -13,7 +13,7 @@ from .. import db
 from ..foxess.client import FoxESSClient, FoxESSError
 from ..foxess.models import SchedulerGroup
 from ..foxess.service import get_cached_realtime
-from ..optimization.models import OperationPreset
+from ..presets import OperationPreset
 from ..weather import HourlyForecast, estimate_pv_kw, fetch_forecast, get_forecast_for_slot
 
 logger = logging.getLogger(__name__)
@@ -68,6 +68,29 @@ def _build_half_hour_slots(
     return slots
 
 
+def _dynamic_cheap_threshold_from_target(slots: list[HalfHourSlot], base_thr: float) -> float:
+    """Widen cheap band when TARGET_PRICE_PENCE demands a lower mean import (ported from V7)."""
+    target = float(config.TARGET_PRICE_PENCE or 0)
+    if target <= 0 or not slots:
+        return base_thr
+    sorted_prices = sorted(s.price_pence for s in slots)
+    total = len(sorted_prices)
+    mean_all = sum(sorted_prices) / total
+    thr = base_thr
+    if mean_all > target:
+        for i in range(total):
+            candidate_thr = sorted_prices[i]
+            cheap_count = sum(1 for p in sorted_prices if p <= candidate_thr)
+            if cheap_count > 0:
+                cheap_mean = sum(p for p in sorted_prices if p <= candidate_thr) / cheap_count
+                effective_mean = (
+                    cheap_mean * cheap_count + sum(p for p in sorted_prices if p > candidate_thr)
+                ) / total
+                if effective_mean <= target:
+                    return max(thr, candidate_thr)
+    return thr
+
+
 def _classify_slots(slots: list[HalfHourSlot], forecast: list[HourlyForecast]) -> None:
     if not slots:
         return
@@ -78,6 +101,7 @@ def _classify_slots(slots: list[HalfHourSlot], forecast: list[HourlyForecast]) -
     q75 = prices_sorted[min(n - 1, (3 * n) // 4)]
     bottom10 = prices_sorted[max(0, n // 10 - 1)]
     cheap_thr = min(mean(prices) * 0.85, q25) if n else 0
+    cheap_thr = _dynamic_cheap_threshold_from_target(slots, cheap_thr)
     peak_thr = max(q75, config.OPTIMIZATION_PEAK_THRESHOLD_PENCE)
 
     for s in slots:

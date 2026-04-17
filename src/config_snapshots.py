@@ -1,22 +1,14 @@
-"""Config snapshot and rollback manager.
+"""Config snapshot and rollback (runtime only; does not rewrite .env)."""
 
-Before any operation mode transition (simulation -> operational or back),
-the system saves a JSON snapshot of the current configuration and live
-device state. Rollback reads the latest snapshot and re-applies config
-values at runtime (does NOT rewrite .env).
-
-Snapshots are stored in CONFIG_SNAPSHOT_DIR (default: data/config_snapshots/).
-"""
 from __future__ import annotations
 
 import json
 import logging
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from ..config import config
+from .config import config
 
 logger = logging.getLogger(__name__)
 
@@ -32,11 +24,11 @@ def _snapshot_path(snapshot_id: str) -> Path:
 
 
 def _gather_device_states() -> dict[str, Any]:
-    """Best-effort read of live device states for the snapshot."""
     states: dict[str, Any] = {}
 
     try:
-        from ..foxess.service import get_cached_realtime
+        from .foxess.service import get_cached_realtime
+
         rt = get_cached_realtime()
         states["fox_work_mode"] = rt.work_mode
         states["fox_soc_percent"] = rt.soc
@@ -44,7 +36,8 @@ def _gather_device_states() -> dict[str, Any]:
         states["fox_state_error"] = str(exc)
 
     try:
-        from ..daikin.client import DaikinClient
+        from .daikin.client import DaikinClient
+
         client = DaikinClient()
         devices = client.get_devices()
         if devices:
@@ -60,10 +53,6 @@ def _gather_device_states() -> dict[str, Any]:
 
 
 def save_snapshot(trigger: str, *, include_device_states: bool = True) -> dict[str, Any]:
-    """Save a timestamped JSON snapshot of current config + device states.
-
-    Returns the snapshot dict (also written to disk).
-    """
     now = datetime.now(timezone.utc)
     snapshot_id = now.strftime("%Y%m%dT%H%M%SZ")
 
@@ -71,7 +60,6 @@ def save_snapshot(trigger: str, *, include_device_states: bool = True) -> dict[s
         "snapshot_id": snapshot_id,
         "snapshot_at": now.isoformat(),
         "trigger": trigger,
-        # Operation / optimization settings
         "operation_mode": config.OPERATION_MODE,
         "preset": config.OPTIMIZATION_PRESET,
         "target_price_pence": config.TARGET_PRICE_PENCE,
@@ -105,26 +93,26 @@ def save_snapshot(trigger: str, *, include_device_states: bool = True) -> dict[s
 
 
 def list_snapshots() -> list[dict[str, Any]]:
-    """Return a list of available snapshots (newest first), with id and trigger."""
     d = _snapshot_dir()
     results = []
     for p in sorted(d.glob("*.json"), reverse=True):
         try:
             data = json.loads(p.read_text())
-            results.append({
-                "snapshot_id": data.get("snapshot_id", p.stem),
-                "snapshot_at": data.get("snapshot_at"),
-                "trigger": data.get("trigger"),
-                "operation_mode": data.get("operation_mode"),
-                "preset": data.get("preset"),
-            })
+            results.append(
+                {
+                    "snapshot_id": data.get("snapshot_id", p.stem),
+                    "snapshot_at": data.get("snapshot_at"),
+                    "trigger": data.get("trigger"),
+                    "operation_mode": data.get("operation_mode"),
+                    "preset": data.get("preset"),
+                }
+            )
         except Exception:
             results.append({"snapshot_id": p.stem, "error": "unreadable"})
     return results
 
 
 def get_latest_snapshot() -> Optional[dict[str, Any]]:
-    """Return the most recent snapshot dict, or None."""
     d = _snapshot_dir()
     files = sorted(d.glob("*.json"), reverse=True)
     for p in files:
@@ -136,22 +124,13 @@ def get_latest_snapshot() -> Optional[dict[str, Any]]:
 
 
 def restore_snapshot(snapshot_id: str) -> dict[str, Any]:
-    """Apply a snapshot's config values to the running process.
-
-    This updates the in-memory config object only — it does NOT rewrite .env.
-    The system is also automatically switched to simulation mode on restore
-    to prevent unintended hardware writes from a stale plan.
-
-    Returns the applied snapshot dict, or raises FileNotFoundError.
-    """
     path = _snapshot_path(snapshot_id)
     if not path.exists():
         raise FileNotFoundError(f"Snapshot not found: {snapshot_id}")
 
     snap = json.loads(path.read_text())
 
-    # Apply config values at runtime
-    config.OPERATION_MODE = "simulation"  # always safe after restore
+    config.OPERATION_MODE = "simulation"
     config.OPTIMIZATION_PRESET = snap.get("preset", "normal")
     config.TARGET_PRICE_PENCE = float(snap.get("target_price_pence", 0))
     config.OPTIMIZATION_CHEAP_THRESHOLD_PENCE = float(snap.get("cheap_threshold_pence", 12))
@@ -167,10 +146,6 @@ def restore_snapshot(snapshot_id: str) -> dict[str, Any]:
     config.TARGET_ROOM_TEMP_MIN_C = float(snap.get("room_temp_min", 20))
     config.TARGET_ROOM_TEMP_MAX_C = float(snap.get("room_temp_max", 23))
 
-    # Clear any approved plan so no stale dispatch happens
-    from .consent import clear_approved_plan
-    clear_approved_plan()
-
     logger.info(
         "Config restored from snapshot %s; OPERATION_MODE forced to simulation", snapshot_id
     )
@@ -178,7 +153,6 @@ def restore_snapshot(snapshot_id: str) -> dict[str, Any]:
 
 
 def rollback_latest() -> Optional[dict[str, Any]]:
-    """Restore the most recent snapshot. Returns the snapshot or None if none exist."""
     snap = get_latest_snapshot()
     if snap is None:
         return None

@@ -8,6 +8,8 @@
 
 This app is the **brain** for the installation: it **captures half-hourly Agile tariffs** into SQLite, **pulls weather forecasts** (PV and heating demand), **learns typical half-hourly load** from `execution_log`, **classifies tomorrow’s slots** (cheap / peak / negative + battery margin), and **writes** Fox Scheduler V3 plus Daikin `action_schedule`. A **heartbeat** reconciles live hardware with that plan. Details and data-flow: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
 
+**V7 removal:** The legacy `src/optimization/` solver/consent stack is gone (single Bulletproof brain). Rollback source: git tag **`pre-v7-removal`** — see **[CHANGELOG.md](CHANGELOG.md)**.
+
 ## What it does
 
 - **Fox ESS**: Read real-time battery SoC, solar production, grid import/export, inverter stats. Control charge/discharge mode and time-of-use schedules.

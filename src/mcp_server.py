@@ -370,218 +370,118 @@ def build_mcp() -> FastMCP:
         safeguards.audit_log(DAIKIN_TANK_POWER_ACTION, params, "mcp", True, "Tank power set")
         return {"ok": True, "message": f"DHW tank turned {'ON' if on else 'OFF'}"}
 
-    # ── Optimization: simulation/operational mode, consent, presets, target price, snapshots ──
+    # ── Bulletproof planner: presets, mode, snapshots (V7 consent stack removed) ──
 
     @mcp.tool(
         name="get_optimization_status",
         description=(
-            "Return the full optimization engine status: operation mode (simulation/operational), "
-            "preset, target price, Agile cache state, last plan, and consent state (pending/approved plan). "
-            "Always call this first before proposing or approving plans."
+            "Bulletproof brain status: scheduler, Octopus fetch health, operation mode, preset. "
+            "Call before running propose_optimization_plan."
         ),
     )
     def get_optimization_status() -> dict[str, Any]:
-        if config.USE_BULLETPROOF_ENGINE:
-            from dataclasses import asdict
+        from dataclasses import asdict
 
-            from . import db
-            from .scheduler.runner import get_scheduler_status
+        from . import db
+        from .agile_cache import get_agile_cache
+        from .scheduler.runner import get_scheduler_status
 
-            return {
-                "ok": True,
-                "bulletproof": True,
-                "scheduler": get_scheduler_status(),
-                "octopus_fetch": asdict(db.get_octopus_fetch_state()),
-            }
-        from .optimization.engine import get_optimization_engine
-
-        eng = get_optimization_engine()
-        return {"ok": True, "status": eng.status_dict()}
+        cache = get_agile_cache()
+        return {
+            "ok": True,
+            "bulletproof": True,
+            "operation_mode": config.OPERATION_MODE,
+            "preset": config.OPTIMIZATION_PRESET,
+            "target_price_pence": config.TARGET_PRICE_PENCE,
+            "scheduler": get_scheduler_status(),
+            "octopus_fetch": asdict(db.get_octopus_fetch_state()),
+            "agile_cache_slots": len(cache.rates or []),
+            "agile_cache_error": cache.error,
+        }
 
     @mcp.tool(
         name="get_optimization_plan",
         description=(
-            "Return the current 48-slot optimization plan (recomputes from Agile cache if needed). "
-            "Shows per-slot import price, classification (cheap/peak/standard), LWT delta, "
-            "and Fox mode hints. Use this to review what the system intends to do."
+            "Today's SQLite action_schedule rows and last Fox Scheduler V3 snapshot "
+            "(replaces the retired 48-slot V7 solver table)."
         ),
     )
     def get_optimization_plan() -> dict[str, Any]:
-        if config.USE_BULLETPROOF_ENGINE:
-            from datetime import datetime
-            from zoneinfo import ZoneInfo
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
 
-            from . import db
+        from . import db
 
-            if not config.OCTOPUS_TARIFF_CODE:
-                return {"ok": False, "error": "OCTOPUS_TARIFF_CODE not set"}
-            tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
-            plan_date = datetime.now(tz).date().isoformat()
-            return {
-                "ok": True,
-                "bulletproof": True,
-                "plan_date": plan_date,
-                "daikin_actions": db.schedule_for_date(plan_date),
-                "fox_schedule_state": db.get_latest_fox_schedule_state(),
-            }
-        from .optimization.engine import get_optimization_engine
-
-        eng = get_optimization_engine()
         if not config.OCTOPUS_TARIFF_CODE:
             return {"ok": False, "error": "OCTOPUS_TARIFF_CODE not set"}
-        plan = eng.solve_from_cache()
-        if plan is None:
-            return {
-                "ok": False,
-                "error": "No Agile rate cache. Refresh with POST /api/v1/optimization/refresh first.",
-            }
-        from .optimization.consent import _make_plan_summary
+        tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+        plan_date = datetime.now(tz).date().isoformat()
         return {
             "ok": True,
-            "summary": _make_plan_summary(plan),
-            "computed_at": plan.computed_at.isoformat(),
-            "preset": plan.preset.value,
-            "target_mean_price_pence": plan.target_mean_price_pence,
-            "cheap_slot_count": plan.cheap_slot_count,
-            "peak_slot_count": plan.peak_slot_count,
-            "tariff_code": plan.tariff_code,
-            "slots": [
-                {
-                    "time": s.valid_from.strftime("%H:%M"),
-                    "price_pence": s.import_price_pence,
-                    "kind": s.slot_kind.value,
-                    "lwt_delta": s.lwt_offset_delta,
-                    "fox_mode": s.fox_mode_hint.value,
-                    "notes": s.notes,
-                }
-                for s in plan.slots
-            ],
+            "bulletproof": True,
+            "plan_date": plan_date,
+            "daikin_actions": db.schedule_for_date(plan_date),
+            "fox_schedule_state": db.get_latest_fox_schedule_state(),
         }
 
     @mcp.tool(
         name="propose_optimization_plan",
         description=(
-            "Compute an optimization plan and propose it for user consent. "
-            "Returns a summary and plan_id. Present the summary to the user and ask for approval. "
-            "The plan expires after 60 minutes if not acted on. "
-            "Use approve_optimization_plan(plan_id) to activate it."
+            "Run the Bulletproof daily planner (SQLite + optional Fox V3 upload). "
+            "No separate approval step — hardware writes follow OPERATION_MODE and OPENCLAW_READ_ONLY."
         ),
     )
     def propose_optimization_plan() -> dict[str, Any]:
-        from .optimization.engine import get_optimization_engine
-        from .optimization.consent import propose_plan
+        from .scheduler.optimizer import run_optimizer
+
         if not config.OCTOPUS_TARIFF_CODE:
             return {"ok": False, "error": "OCTOPUS_TARIFF_CODE not set"}
-        if config.USE_BULLETPROOF_ENGINE:
-            from .foxess.client import FoxESSClient
-            from .scheduler.optimizer import run_optimizer
-
-            fox = None
-            try:
-                fox = FoxESSClient(**config.foxess_client_kwargs())
-            except Exception:
-                pass
-            result = run_optimizer(fox, None)
-            if not result.get("ok"):
-                return {"ok": False, **result}
-            mode_note = (
-                "Simulation / read-only: Fox upload and hardware may be skipped per config."
-                if config.OPERATION_MODE != "operational" or config.OPENCLAW_READ_ONLY
-                else "Operational: SQLite schedule updated; Fox V3 uploaded when API key present."
-            )
-            return {
-                "ok": True,
-                "bulletproof": True,
-                "summary": result.get("strategy", ""),
-                "plan_date": result.get("plan_date"),
-                "fox_uploaded": result.get("fox_uploaded"),
-                "daikin_actions": result.get("daikin_actions"),
-                "battery_warning": result.get("battery_warning"),
-                "mode_note": mode_note,
-                "instruction": (
-                    "Bulletproof engine: this run already persisted tomorrow's plan. "
-                    "approve_optimization_plan is for the legacy solver only."
-                ),
-            }
-        eng = get_optimization_engine()
-        plan = eng.solve_from_cache()
-        if plan is None:
-            return {
-                "ok": False,
-                "error": "No Agile rate cache. Refresh with POST /api/v1/optimization/refresh first.",
-            }
-        pending = propose_plan(plan)
-        auto = config.PLAN_AUTO_APPROVE
+        fox = None
+        try:
+            fox = FoxESSClient(**config.foxess_client_kwargs())
+        except Exception:
+            pass
+        result = run_optimizer(fox, None)
+        if not result.get("ok"):
+            return {"ok": False, **result}
         mode_note = (
-            "System is in SIMULATION mode — no hardware writes will occur. Shadow-run only."
-            if config.OPERATION_MODE != "operational"
-            else "System is in OPERATIONAL mode — plan controls Fox ESS and Daikin."
-        )
-        instruction = (
-            "Plan was AUTO-APPROVED and is now active. "
-            f"Call reject_optimization_plan('{pending.plan_id}') to cancel it."
-            if auto
-            else (
-                f"Show the user the summary above. If they approve, call "
-                f"approve_optimization_plan with plan_id='{pending.plan_id}'."
-            )
+            "Simulation / read-only: Fox upload and hardware may be skipped per config."
+            if config.OPERATION_MODE != "operational" or config.OPENCLAW_READ_ONLY
+            else "Operational: SQLite schedule updated; Fox V3 uploaded when API key present."
         )
         return {
             "ok": True,
-            "plan_id": pending.plan_id,
-            "expires_at": pending.expires_at.isoformat(),
-            "status": pending.status.value,
-            "auto_approved": auto,
-            "summary": pending.summary,
-            "operation_mode": config.OPERATION_MODE,
+            "bulletproof": True,
+            "summary": result.get("strategy", ""),
+            "plan_date": result.get("plan_date"),
+            "fox_uploaded": result.get("fox_uploaded"),
+            "daikin_actions": result.get("daikin_actions"),
+            "battery_warning": result.get("battery_warning"),
             "mode_note": mode_note,
-            "instruction": instruction,
         }
 
     @mcp.tool(
         name="approve_optimization_plan",
-        description=(
-            "Approve a pending optimization plan by its plan_id. "
-            "Only call this after presenting the plan summary to the user and receiving their explicit approval. "
-            "In simulation mode, the plan runs in shadow mode (logs only). "
-            "In operational mode, the plan controls Fox ESS and Daikin hardware."
-        ),
+        description="Legacy no-op: Bulletproof applies plans on propose_optimization_plan.",
     )
     def approve_optimization_plan(plan_id: str) -> dict[str, Any]:
-        from .optimization.consent import approve_plan
-        from .optimization.models import PlanConsentStatus
-        result = approve_plan(plan_id)
-        if result is None:
-            return {"ok": False, "error": f"Plan '{plan_id}' not found or already expired."}
-        if result.status == PlanConsentStatus.EXPIRED:
-            return {"ok": False, "error": "Plan has expired. Propose a new one."}
-        mode_note = (
-            "Running in SIMULATION mode — shadow logging only, no hardware writes."
-            if config.OPERATION_MODE != "operational"
-            else "OPERATIONAL mode active — plan is now controlling Fox ESS and Daikin."
-        )
         return {
             "ok": True,
             "plan_id": plan_id,
-            "status": result.status.value,
-            "approved_at": result.approved_at.isoformat() if result.approved_at else None,
-            "message": f"Plan approved. {mode_note}",
+            "status": "not_applicable",
+            "message": "Bulletproof does not use consent; the plan is already persisted.",
         }
 
     @mcp.tool(
         name="reject_optimization_plan",
-        description="Reject a pending or approved optimization plan. The system returns to baseline.",
+        description="Legacy no-op under Bulletproof.",
     )
     def reject_optimization_plan(plan_id: str) -> dict[str, Any]:
-        from .optimization.consent import reject_plan
-        result = reject_plan(plan_id)
-        if result is None:
-            return {"ok": False, "error": f"Plan '{plan_id}' not found."}
         return {
             "ok": True,
             "plan_id": plan_id,
-            "status": result.status.value,
-            "message": "Plan rejected. System will use baseline settings.",
+            "status": "not_applicable",
+            "message": "Use propose_optimization_plan after changing presets.",
         }
 
     @mcp.tool(
@@ -625,7 +525,7 @@ def build_mcp() -> FastMCP:
             f"Target price set to {target_price_pence}p/kWh. "
             "Call propose_optimization_plan to regenerate the plan."
             if target_price_pence > 0
-            else "Target price disabled. Solver uses fixed cheap threshold."
+            else "Target price disabled. Planner uses statistical cheap band only."
         )
         return {"ok": True, "target_price_pence": target_price_pence, "message": msg}
 
@@ -634,15 +534,13 @@ def build_mcp() -> FastMCP:
         description=(
             "Switch between simulation (safe, shadow-run only) and operational (writes to hardware). "
             "IMPORTANT: Always present the implications to the user and get explicit confirmation before "
-            "switching to operational. A config snapshot is saved automatically before any transition. "
-            "Switching to operational requires an approved plan to be present."
+            "switching to operational. A config snapshot is saved automatically before any transition."
         ),
     )
     def set_operation_mode(mode: str) -> dict[str, Any]:
         if mode not in ("simulation", "operational"):
             return {"ok": False, "error": "Mode must be 'simulation' or 'operational'"}
-        from .optimization.snapshots import save_snapshot
-        from .optimization.consent import get_approved_plan, clear_approved_plan
+        from .config_snapshots import save_snapshot
 
         current_mode = config.OPERATION_MODE
         if current_mode == mode:
@@ -651,31 +549,16 @@ def build_mcp() -> FastMCP:
         snap = save_snapshot(trigger=f"mode_change: {current_mode} -> {mode}")
         snapshot_id = snap.get("snapshot_id")
 
-        if mode == "operational":
-            approved = get_approved_plan()
-            if approved is None:
-                return {
-                    "ok": False,
-                    "mode": current_mode,
-                    "snapshot_id": snapshot_id,
-                    "message": (
-                        "Cannot switch to operational: no approved plan. "
-                        "Call propose_optimization_plan, review the summary, "
-                        "and call approve_optimization_plan first."
-                    ),
-                }
-
         config.OPERATION_MODE = mode
         if mode == "simulation":
-            clear_approved_plan()
             msg = (
                 f"Switched to simulation mode (snapshot {snapshot_id} saved). "
-                "Approved plan cleared. No hardware writes will occur."
+                "Hardware writes follow OPENCLAW_READ_ONLY and operational rules."
             )
         else:
             msg = (
                 f"Switched to OPERATIONAL mode (snapshot {snapshot_id} saved). "
-                "Fox ESS and Daikin will now be controlled by the approved plan on each 30-min tick."
+                "Fox V3 and Daikin actions run when credentials allow."
             )
         return {"ok": True, "mode": mode, "snapshot_id": snapshot_id, "message": msg}
 
@@ -688,7 +571,7 @@ def build_mcp() -> FastMCP:
         ),
     )
     def rollback_config(snapshot_id: str | None = None) -> dict[str, Any]:
-        from .optimization.snapshots import rollback_latest, restore_snapshot
+        from .config_snapshots import restore_snapshot, rollback_latest
         try:
             if snapshot_id:
                 snap = restore_snapshot(snapshot_id)
@@ -717,36 +600,25 @@ def build_mcp() -> FastMCP:
         description="List all available config snapshots (newest first) with their trigger and mode.",
     )
     def get_config_snapshots() -> dict[str, Any]:
-        from .optimization.snapshots import list_snapshots
+        from .config_snapshots import list_snapshots
         snaps = list_snapshots()
         return {"ok": True, "snapshots": snaps, "count": len(snaps)}
 
     @mcp.tool(
         name="set_auto_approve",
         description=(
-            "Enable or disable automatic plan approval. "
-            "When enabled, every new plan is immediately approved without waiting for user consent — "
-            "useful for hands-off operation once the user trusts the system. "
-            "A notification is always sent even in auto-approve mode. "
-            "The user can still call reject_optimization_plan at any time to cancel an active plan. "
-            "IMPORTANT: Only suggest enabling this if the user explicitly asks for it, "
-            "or has already expressed trust in fully automated operation."
+            "Legacy flag PLAN_AUTO_APPROVE (Bulletproof has no consent gate). "
+            "Optional bookkeeping for prompts that still read this env."
         ),
     )
     def set_auto_approve(enabled: bool) -> dict[str, Any]:
-        from .optimization.consent import set_auto_approve as _set
-        _set(enabled)
-        if enabled:
-            msg = (
-                "Auto-approve ENABLED. New plans will be approved automatically. "
-                "Notifications will still be sent. "
-                "Use reject_optimization_plan to cancel the active plan at any time."
-            )
-        else:
-            msg = (
-                "Auto-approve DISABLED. Plans now require explicit approval "
-                "before they take effect."
-            )
+        config.PLAN_AUTO_APPROVE = enabled
+        logger.info("PLAN_AUTO_APPROVE set to %s", enabled)
+        msg = (
+            "PLAN_AUTO_APPROVE enabled (legacy flag; Bulletproof has no consent gate)."
+            if enabled
+            else "PLAN_AUTO_APPROVE disabled."
+        )
         return {"ok": True, "auto_approve": enabled, "message": msg}
 
     # ── Tariff comparison tools ────────────────────────────────────────────
