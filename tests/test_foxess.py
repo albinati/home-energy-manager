@@ -14,6 +14,12 @@ class TestFoxESSClient(unittest.TestCase):
     def setUp(self):
         self.client = FoxESSClient(api_key="test_key", device_sn="TEST_SN")
 
+    def test_sn_scheduler_prefers_datalogger_serial(self):
+        c = FoxESSClient(api_key="k", device_sn="INV_SN", scheduler_sn="DL_SN")
+        self.assertEqual(c._sn_scheduler(), "DL_SN")
+        c2 = FoxESSClient(api_key="k", device_sn="ONLY")
+        self.assertEqual(c2._sn_scheduler(), "ONLY")
+
     @patch.object(FoxESSClient, "_open_post")
     def test_get_realtime(self, mock_post):
         mock_post.return_value = [
