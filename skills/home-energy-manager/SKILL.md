@@ -399,7 +399,7 @@ The system fetches, simulates, and recommends the best electricity tariff from O
 
 When the stack runs with **`USE_BULLETPROOF_ENGINE=true`** (default), automation is **autonomous**: Octopus fetch → SQLite → optimizer → Fox **Scheduler V3** upload (one call/day) + Daikin rows in **`action_schedule`**. A **2-minute heartbeat** executes Daikin changes and logs telemetry; it does **not** spam Fox mode APIs.
 
-**Prefer MCP** (`python -m src.mcp_server`) over raw REST for OpenClaw:
+**Prefer MCP** (`./bin/mcp` or `python -m src.mcp_server`) over raw REST for OpenClaw:
 
 | Tool | Use |
 |------|-----|

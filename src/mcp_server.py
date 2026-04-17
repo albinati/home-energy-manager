@@ -3,7 +3,8 @@
 Fox ESS tools delegate to ``FoxESSClient`` and the ``foxess.service`` cache layer.
 Daikin tools delegate to ``DaikinClient`` (Onecta OAuth tokens from env / token file).
 
-Run: ``python -m src.mcp_server`` (from project root, with ``PYTHONPATH`` including the root).
+Run: ``./bin/mcp`` from project root (picks Python 3.11 in Docker, ``.venv`` on the host), or
+``python -m src.mcp_server`` with ``PYTHONPATH`` including the project root.
 
 Writes honour ``OPENCLAW_READ_ONLY`` (default true) and the same rate limits as the REST API.
 """
