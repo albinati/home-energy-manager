@@ -17,8 +17,13 @@ Production system controlling real hardware. Read before making changes.
 
 ## Stack
 - Python 3.11+, FastAPI, APScheduler
+- **Bulletproof mode** (`USE_BULLETPROOF_ENGINE=true`, default): SQLite (`DB_PATH`), Fox **Scheduler V3** (one upload/day when API key present), 2-min **heartbeat** thread for Daikin + telemetry, Octopus fetch cron + retries, analytics PnL in `src/analytics/`
 - AI assistant: Anthropic Claude Haiku (default), OpenAI as fallback
-- REST API on port 8000 (default)
+- REST API on port 8000 (default); **primary automation**: MCP (`python -m src.mcp_server`) — Bulletproof tools: `get_energy_metrics`, `get_schedule`, `get_daily_brief`, `get_battery_forecast`, `get_weather_context`, `get_action_log`, `get_optimizer_log`, `override_schedule`, `acknowledge_warning`
+- Docker: `docker compose up` (volume `energy_state_data`, port 8000)
+
+## Fox API usage
+- Scheduler V3 upload is **one call per optimizer run** (not a poll loop). Heartbeat uses **cached** realtime (`get_cached_realtime`, ~30s TTL) and verifies scheduler flag **every 30 minutes** — stay within **200 req/day**.
 
 ## Code Style
 - Type hints required

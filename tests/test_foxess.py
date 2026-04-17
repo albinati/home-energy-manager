@@ -1,6 +1,8 @@
 """Unit tests for Fox ESS client and cache service (mocked)."""
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from src.foxess.client import FoxESSClient
 from src.foxess.models import RealTimeData, ChargePeriod
@@ -168,21 +170,22 @@ class TestFoxESSStatusEndpoint(unittest.TestCase):
         foxess_service._refresh_timestamps = []
         foxess_service._last_realtime_wallclock = None
 
-    @patch("src.api.main.get_cached_realtime")
-    def test_foxess_status_returns_cached_data(self, mock_get_cached):
-        mock_get_cached.return_value = RealTimeData(
-            soc=72.0,
-            solar_power=2.5,
-            grid_power=-0.3,
-            battery_power=0.5,
-            load_power=2.2,
-            work_mode="Self Use",
-        )
+    def test_foxess_status_returns_cached_data(self) -> None:
+        pytest.importorskip("fastapi")
+        import src.api.main as api_main
         from fastapi.testclient import TestClient
-        from src.api.main import app
 
-        client = TestClient(app)
-        resp = client.get("/api/v1/foxess/status")
+        with patch.object(api_main, "get_cached_realtime") as mock_get_cached:
+            mock_get_cached.return_value = RealTimeData(
+                soc=72.0,
+                solar_power=2.5,
+                grid_power=-0.3,
+                battery_power=0.5,
+                load_power=2.2,
+                work_mode="Self Use",
+            )
+            client = TestClient(api_main.app)
+            resp = client.get("/api/v1/foxess/status")
 
         self.assertEqual(resp.status_code, 200)
         body = resp.json()

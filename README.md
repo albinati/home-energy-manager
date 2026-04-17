@@ -19,7 +19,30 @@ python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
 # Edit .env — see setup sections below
+python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000
 ```
+
+### Docker (Bulletproof + SQLite persistence)
+
+```bash
+cp .env.example .env   # configure first
+docker compose up --build -d
+```
+
+- SQLite file: stored in the `energy_state_data` Docker volume (path inside container: `/app/data/energy_state.db`).
+- Same REST port **8000**. Mount or back up the named volume for backups.
+
+### Bulletproof engine (default)
+
+When `USE_BULLETPROOF_ENGINE=true` (default):
+
+- **SQLite** (`DB_PATH`) stores Agile rates, `action_schedule`, `execution_log`, optimizer logs, Fox schedule snapshots.
+- **Fox Scheduler V3** (requires `FOXESS_API_KEY`): one schedule upload after the daily Octopus fetch (not per-tick mode changes).
+- **Heartbeat** (every `HEARTBEAT_INTERVAL_SECONDS`, default 120s): Daikin actions from SQLite, cached Fox realtime, scheduler flag check every 30 min, half-hourly `execution_log` samples.
+- **REST**: `GET /api/v1/metrics`, `GET /api/v1/schedule`, `GET /api/v1/schedule/history`, `GET /api/v1/weather`.
+- **MCP** (preferred for OpenClaw): `get_energy_metrics`, `get_schedule`, `get_daily_brief`, `get_battery_forecast`, `get_weather_context`, `get_action_log`, `get_optimizer_log`, `override_schedule`, `acknowledge_warning`.
+
+See `.env.example` for `OCTOPUS_FETCH_*`, `DAILY_BRIEF_*`, `SVT_RATE_PENCE`, and weather thresholds.
 
 ## Setup
 

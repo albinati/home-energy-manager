@@ -23,7 +23,7 @@ import urllib.request
 import urllib.error
 import urllib.parse
 
-from .models import RealTimeData, ChargePeriod, DeviceInfo
+from .models import RealTimeData, ChargePeriod, DeviceInfo, SchedulerGroup, SchedulerState
 
 # Known work mode strings (set_work_mode accepts these)
 WORK_MODE_VALID = frozenset({"Self Use", "Feed-in Priority", "Back Up", "Force charge", "Force discharge"})
@@ -114,6 +114,24 @@ class FoxESSClient:
         req = urllib.request.Request(url, headers=self._open_headers(f"/op/v0{path}"))
         try:
             resp = urllib.request.urlopen(req, timeout=15)
+            data = json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            raise FoxESSError(f"HTTP {e.code}: {e.read().decode()[:200]}")
+        errno = data.get("errno", 0)
+        if errno not in (0, None):
+            raise FoxESSError(f"API error {errno}: {data.get('msg')}")
+        return data.get("result", {}) or {}
+
+    def _open_post_v3(self, path: str, body: dict) -> dict:
+        """Open API v3 (API key only). path e.g. '/device/scheduler/get'."""
+        if not self.api_key:
+            raise FoxESSError("Open API v3 endpoints require FOXESS_API_KEY (Scheduler V3).")
+        url = f"https://www.foxesscloud.com/op/v3{path}"
+        payload = json.dumps(body).encode()
+        sig_path = f"/op/v3{path}"
+        req = urllib.request.Request(url, data=payload, headers=self._open_headers(sig_path))
+        try:
+            resp = urllib.request.urlopen(req, timeout=20)
             data = json.loads(resp.read())
         except urllib.error.HTTPError as e:
             raise FoxESSError(f"HTTP {e.code}: {e.read().decode()[:200]}")
@@ -607,3 +625,102 @@ class FoxESSClient:
             "loadEnergyToday": sum(r["load_kwh"] for r in daily),
         }
         return totals, daily
+
+    # ── Scheduler V3 + extras (Open API key only where noted) ─────────────────
+
+    def get_scheduler_v3(self) -> SchedulerState:
+        """Fetch hardware schedule (v3)."""
+        raw = self._open_post_v3("/device/scheduler/get", {"sn": self.device_sn})
+        return _parse_scheduler_v3_result(raw)
+
+    def set_scheduler_v3(self, groups: list[SchedulerGroup], is_default: bool = False) -> None:
+        """Upload full day schedule (one API call)."""
+        payload = {
+            "sn": self.device_sn,
+            "isDefault": bool(is_default),
+            "groups": [g.to_api_dict() for g in groups],
+        }
+        self._open_post_v3("/device/scheduler/enable", payload)
+
+    def get_scheduler_flag(self) -> bool:
+        """Return True if inverter time scheduler master switch is enabled."""
+        body = {"sn": self.device_sn}
+        raw = self._open_post("/device/scheduler/get/flag", body) if self.api_key else self._cloud_post(
+            "/c/v0/device/scheduler/get/flag", body
+        )
+        if isinstance(raw, dict):
+            v = raw.get("enable")
+            if v is None:
+                v = raw.get("flag")
+            return bool(v)
+        return bool(raw)
+
+    def set_scheduler_flag(self, enable: bool) -> None:
+        body = {"sn": self.device_sn, "enable": enable}
+        if self.api_key:
+            self._open_post("/device/scheduler/set", body)
+        else:
+            self._cloud_post("/c/v0/device/scheduler/set", body)
+
+    def get_eco_mode(self) -> bool:
+        raw = self.get_device_settings()
+        if isinstance(raw, dict):
+            for item in raw.get("data", []) or raw.get("result", []) or []:
+                if isinstance(item, dict) and str(item.get("key", "")).upper() == "ECOMODE":
+                    return str(item.get("value", "")).lower() in ("1", "true", "on", "yes")
+        return False
+
+    def set_eco_mode(self, enabled: bool) -> None:
+        self.set_device_setting("ECOMode", "1" if enabled else "0")
+
+    def get_peak_shaving(self) -> dict:
+        body = {"sn": self.device_sn}
+        if self.api_key:
+            return self._open_post("/device/peakShaving/get", body)
+        return self._cloud_post("/c/v0/device/peakShaving/get", body)
+
+    def set_peak_shaving(self, import_limit_w: int, soc: int) -> None:
+        body = {"sn": self.device_sn, "importLimit": import_limit_w, "soc": soc}
+        if self.api_key:
+            self._open_post("/device/peakShaving/set", body)
+        else:
+            self._cloud_post("/c/v0/device/peakShaving/set", body)
+
+
+def _groups_from_api_dicts(groups: list) -> list[SchedulerGroup]:
+    groups_out: list[SchedulerGroup] = []
+    for g in groups or []:
+        if not isinstance(g, dict):
+            continue
+        ep = g.get("extraParam") or g.get("extra_param") or {}
+        if not isinstance(ep, dict):
+            ep = {}
+        groups_out.append(
+            SchedulerGroup(
+                start_hour=int(g.get("startHour", g.get("start_hour", 0))),
+                start_minute=int(g.get("startMinute", g.get("start_minute", 0))),
+                end_hour=int(g.get("endHour", g.get("end_hour", 0))),
+                end_minute=int(g.get("endMinute", g.get("end_minute", 0))),
+                work_mode=str(g.get("workMode", g.get("work_mode", "SelfUse"))),
+                min_soc_on_grid=int(ep.get("minSocOnGrid", ep.get("min_soc_on_grid", 10))),
+                fd_soc=ep.get("fdSoc") if ep.get("fdSoc") is not None else ep.get("fd_soc"),
+                fd_pwr=ep.get("fdPwr") if ep.get("fdPwr") is not None else ep.get("fd_pwr"),
+                max_soc=ep.get("maxSoc") if ep.get("maxSoc") is not None else ep.get("max_soc"),
+                import_limit=ep.get("importLimit") if ep.get("importLimit") is not None else ep.get("import_limit"),
+                export_limit=ep.get("exportLimit") if ep.get("exportLimit") is not None else ep.get("export_limit"),
+            )
+        )
+    return groups_out
+
+
+def scheduler_groups_from_stored_json(groups: list) -> list[SchedulerGroup]:
+    """Rebuild `SchedulerGroup` list from DB `groups_json` / API-shaped dicts."""
+    return _groups_from_api_dicts(groups)
+
+
+def _parse_scheduler_v3_result(raw: dict) -> SchedulerState:
+    enabled = bool(raw.get("enable", raw.get("enabled", True)))
+    max_gc = int(raw.get("maxGroupCount", raw.get("max_group_count", 8)) or 8)
+    props = raw.get("properties") if isinstance(raw.get("properties"), dict) else {}
+    groups_out = _groups_from_api_dicts(raw.get("groups", []) or [])
+    return SchedulerState(enabled=enabled, groups=groups_out, max_group_count=max_gc, properties=props)

@@ -1,0 +1,15 @@
+services:
+  energy-manager:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      DB_PATH: /app/data/energy_state.db
+    volumes:
+      - energy_state_data:/app/data
+
+volumes:
+  energy_state_data:
