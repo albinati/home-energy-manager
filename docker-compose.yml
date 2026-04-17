@@ -7,11 +7,12 @@ services:
       - .env
     environment:
       DB_PATH: /app/data/energy_state.db
+      # Keep OAuth tokens on the same volume as SQLite so refresh_token survives restarts.
+      DAIKIN_TOKEN_FILE: /app/data/.daikin-tokens.json
       TZ: Europe/London
     volumes:
       - energy_state_data:/app/data
-      # Optional: Onecta tokens from host (file must exist before first start)
-      # - ./.daikin-tokens.json:/app/.daikin-tokens.json:ro
+      # Tokens live at /app/data/.daikin-tokens.json (see DAIKIN_TOKEN_FILE). Copy once after auth or run auth in-container.
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/v1/health"]
       interval: 60s

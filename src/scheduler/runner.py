@@ -126,6 +126,16 @@ def bulletproof_heartbeat_tick() -> None:
     if get_scheduler_paused():
         return
 
+    if config.DAIKIN_CLIENT_ID and config.DAIKIN_CLIENT_SECRET and config.DAIKIN_TOKEN_FILE.exists():
+        try:
+            from ..daikin.auth import prefetch_daikin_access_token
+
+            prefetch_daikin_access_token()
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            logger.debug("Daikin OAuth prefetch (before device calls): %s", e)
+
     tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
     now_local = datetime.now(tz)
     now_utc = datetime.now(timezone.utc)

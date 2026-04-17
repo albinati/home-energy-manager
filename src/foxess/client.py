@@ -308,7 +308,7 @@ class FoxESSClient:
     def get_device_settings(self) -> dict:
         """Deprecated: Open API does not support listing all settings in one call.
 
-        Use :meth:`get_device_setting` with a specific key (e.g. ``ECOMode``).
+        Use :meth:`get_device_setting` with a specific key (e.g. ``WorkMode``).
         """
         raise FoxESSError(
             "get_device_settings() is not supported; use get_device_setting(key) per Fox Open API."
@@ -667,16 +667,6 @@ class FoxESSClient:
             )
         else:
             self._cloud_post("/c/v0/device/scheduler/set", {"sn": sn, "enable": enable})
-
-    def get_eco_mode(self) -> bool:
-        raw = self.get_device_setting("ECOMode")
-        if not isinstance(raw, dict):
-            return False
-        val = raw.get("value")
-        return str(val).lower() in ("1", "true", "on", "yes")
-
-    def set_eco_mode(self, enabled: bool) -> None:
-        self.set_device_setting("ECOMode", "1" if enabled else "0")
 
     def get_peak_shaving(self) -> dict:
         body = {"sn": self.device_sn}

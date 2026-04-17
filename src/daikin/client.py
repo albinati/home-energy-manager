@@ -10,8 +10,9 @@ Usage:
     client.set_power(devices[0].id, on=True)
 """
 import json
-import urllib.request
+import time
 import urllib.error
+import urllib.request
 
 from .auth import get_valid_access_token
 from .models import DaikinDevice, DaikinStatus, TemperatureControlSettings, SetpointRange
@@ -25,34 +26,77 @@ class DaikinError(Exception):
 class DaikinClient:
     BASE_URL = config.DAIKIN_BASE_URL
 
-    def _headers(self) -> dict:
+    @staticmethod
+    def _retry_after_seconds(err: urllib.error.HTTPError, default: float = 2.0) -> float:
+        hdrs = getattr(err, "headers", None) or getattr(err, "hdrs", None)
+        if hdrs is None:
+            return default
+        ra = hdrs.get("Retry-After") if hasattr(hdrs, "get") else None
+        if ra is None:
+            return default
+        try:
+            return min(120.0, max(1.0, float(ra)))
+        except (TypeError, ValueError):
+            return default
+
+    def _headers(self, *, force_refresh: bool = False) -> dict:
         return {
-            "Authorization": f"Bearer {get_valid_access_token()}",
+            "Authorization": f"Bearer {get_valid_access_token(force_refresh=force_refresh)}",
             "Content-Type": "application/json",
         }
 
     def _get(self, path: str) -> dict | list:
-        req = urllib.request.Request(f"{self.BASE_URL}{path}", headers=self._headers())
-        try:
-            resp = urllib.request.urlopen(req, timeout=15)
-            return json.loads(resp.read())
-        except urllib.error.HTTPError as e:
-            raise DaikinError(f"HTTP {e.code}: {e.read().decode()}")
+        url = f"{self.BASE_URL}{path}"
+        max_429 = max(0, int(config.DAIKIN_HTTP_429_MAX_RETRIES))
+        for auth_try in range(2):
+            req = urllib.request.Request(url, headers=self._headers(force_refresh=auth_try > 0))
+            retry_auth = False
+            for r429 in range(max_429 + 1):
+                try:
+                    resp = urllib.request.urlopen(req, timeout=15)
+                    return json.loads(resp.read())
+                except urllib.error.HTTPError as e:
+                    body = e.read().decode()
+                    if e.code == 401 and auth_try == 0:
+                        retry_auth = True
+                        break
+                    if e.code == 429 and r429 < max_429:
+                        time.sleep(self._retry_after_seconds(e))
+                        continue
+                    raise DaikinError(f"HTTP {e.code}: {body}")
+            if retry_auth:
+                continue
+        raise DaikinError("HTTP 401: authorization failed after retry")
 
     def _patch(self, path: str, body: dict) -> dict:
+        url = f"{self.BASE_URL}{path}"
         payload = json.dumps(body).encode()
-        req = urllib.request.Request(
-            f"{self.BASE_URL}{path}",
-            data=payload,
-            headers=self._headers(),
-            method="PATCH",
-        )
-        try:
-            resp = urllib.request.urlopen(req, timeout=15)
-            body = resp.read()
-            return json.loads(body) if body else {}
-        except urllib.error.HTTPError as e:
-            raise DaikinError(f"HTTP {e.code}: {e.read().decode()}")
+        max_429 = max(0, int(config.DAIKIN_HTTP_429_MAX_RETRIES))
+        for auth_try in range(2):
+            req = urllib.request.Request(
+                url,
+                data=payload,
+                headers=self._headers(force_refresh=auth_try > 0),
+                method="PATCH",
+            )
+            retry_auth = False
+            for r429 in range(max_429 + 1):
+                try:
+                    resp = urllib.request.urlopen(req, timeout=15)
+                    rb = resp.read()
+                    return json.loads(rb) if rb else {}
+                except urllib.error.HTTPError as e:
+                    err_body = e.read().decode()
+                    if e.code == 401 and auth_try == 0:
+                        retry_auth = True
+                        break
+                    if e.code == 429 and r429 < max_429:
+                        time.sleep(self._retry_after_seconds(e))
+                        continue
+                    raise DaikinError(f"HTTP {e.code}: {err_body}")
+            if retry_auth:
+                continue
+        raise DaikinError("HTTP 401: authorization failed after retry")
 
     def get_devices(self) -> list[DaikinDevice]:
         """List all gateway devices."""
