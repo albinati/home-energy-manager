@@ -21,7 +21,6 @@ from datetime import date, datetime
 from typing import Optional
 import urllib.request
 import urllib.error
-import urllib.parse
 
 from .models import RealTimeData, ChargePeriod, DeviceInfo, SchedulerGroup, SchedulerState
 
@@ -81,7 +80,7 @@ class FoxESSClient:
             raise ValueError("Provide either api_key OR username+password.")
 
     def _sn_scheduler(self) -> str:
-        """Serial for scheduler V3 / scheduler master switch (`sn` in API body)."""
+        """Value for Open API scheduler JSON field ``deviceSN`` (inverter SN by default)."""
         return self.scheduler_sn if self.scheduler_sn else self.device_sn
 
     # ── Official Open API (API key auth) ────────────────────────────────────
@@ -104,21 +103,6 @@ class FoxESSClient:
         url = f"{self.OPEN_API_BASE}{path}"
         payload = json.dumps(body).encode()
         req = urllib.request.Request(url, data=payload, headers=self._open_headers(f"/op/v0{path}"))
-        try:
-            resp = urllib.request.urlopen(req, timeout=15)
-            data = json.loads(resp.read())
-        except urllib.error.HTTPError as e:
-            raise FoxESSError(f"HTTP {e.code}: {e.read().decode()[:200]}")
-        errno = data.get("errno", 0)
-        if errno not in (0, None):
-            raise FoxESSError(f"API error {errno}: {data.get('msg')}")
-        return data.get("result", {}) or {}
-
-    def _open_get(self, path: str, params: dict = None) -> dict:
-        url = f"{self.OPEN_API_BASE}{path}"
-        if params:
-            url += "?" + urllib.parse.urlencode(params)
-        req = urllib.request.Request(url, headers=self._open_headers(f"/op/v0{path}"))
         try:
             resp = urllib.request.urlopen(req, timeout=15)
             data = json.loads(resp.read())
@@ -282,8 +266,9 @@ class FoxESSClient:
     def get_device_list(self) -> list[DeviceInfo]:
         """List all devices on the account."""
         if self.api_key:
-            result = self._open_get("/device/list", {"currentPage": 1, "pageSize": 20})
-            devices_raw = result.get("devices", [])
+            # Open API: POST /op/v0/device/list with JSON body (GET + query returns 40257).
+            result = self._open_post("/device/list", {"currentPage": 1, "pageSize": 20})
+            devices_raw = result.get("data", []) or result.get("devices", [])
         else:
             result = self._cloud_post("/c/v0/device/list", {
                 "pageSize": 20, "currentPage": 1,
@@ -637,13 +622,15 @@ class FoxESSClient:
 
     def get_scheduler_v3(self) -> SchedulerState:
         """Fetch hardware schedule (v3)."""
-        raw = self._open_post_v3("/device/scheduler/get", {"sn": self._sn_scheduler()})
+        raw = self._open_post_v3(
+            "/device/scheduler/get", {"deviceSN": self._sn_scheduler()}
+        )
         return _parse_scheduler_v3_result(raw)
 
     def set_scheduler_v3(self, groups: list[SchedulerGroup], is_default: bool = False) -> None:
         """Upload full day schedule (one API call)."""
         payload = {
-            "sn": self._sn_scheduler(),
+            "deviceSN": self._sn_scheduler(),
             "isDefault": bool(is_default),
             "groups": [g.to_api_dict() for g in groups],
         }
@@ -651,23 +638,29 @@ class FoxESSClient:
 
     def get_scheduler_flag(self) -> bool:
         """Return True if inverter time scheduler master switch is enabled."""
-        body = {"sn": self._sn_scheduler()}
-        raw = self._open_post("/device/scheduler/get/flag", body) if self.api_key else self._cloud_post(
-            "/c/v0/device/scheduler/get/flag", body
-        )
+        sn = self._sn_scheduler()
+        if self.api_key:
+            raw = self._open_post("/device/scheduler/get/flag", {"deviceSN": sn})
+        else:
+            raw = self._cloud_post("/c/v0/device/scheduler/get/flag", {"sn": sn})
         if isinstance(raw, dict):
             v = raw.get("enable")
             if v is None:
                 v = raw.get("flag")
+            if isinstance(v, str) and v.strip() in ("0", "1"):
+                return v.strip() == "1"
             return bool(v)
         return bool(raw)
 
     def set_scheduler_flag(self, enable: bool) -> None:
-        body = {"sn": self._sn_scheduler(), "enable": enable}
+        sn = self._sn_scheduler()
+        en = 1 if enable else 0
         if self.api_key:
-            self._open_post("/device/scheduler/set", body)
+            self._open_post(
+                "/device/scheduler/set/flag", {"deviceSN": sn, "enable": en}
+            )
         else:
-            self._cloud_post("/c/v0/device/scheduler/set", body)
+            self._cloud_post("/c/v0/device/scheduler/set", {"sn": sn, "enable": enable})
 
     def get_eco_mode(self) -> bool:
         raw = self.get_device_settings()
@@ -726,7 +719,11 @@ def scheduler_groups_from_stored_json(groups: list) -> list[SchedulerGroup]:
 
 
 def _parse_scheduler_v3_result(raw: dict) -> SchedulerState:
-    enabled = bool(raw.get("enable", raw.get("enabled", True)))
+    en = raw.get("enable", raw.get("enabled", True))
+    if isinstance(en, str) and en.strip() in ("0", "1"):
+        enabled = en.strip() == "1"
+    else:
+        enabled = bool(en)
     max_gc = int(raw.get("maxGroupCount", raw.get("max_group_count", 8)) or 8)
     props = raw.get("properties") if isinstance(raw.get("properties"), dict) else {}
     groups_out = _groups_from_api_dicts(raw.get("groups", []) or [])
