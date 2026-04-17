@@ -218,9 +218,9 @@ class Config:
         if not self.FOXESS_DEVICE_SN:
             raise ValueError("FOXESS_DEVICE_SN is required. Find it in foxesscloud.com → Devices.")
         kwargs = {"device_sn": self.FOXESS_DEVICE_SN}
-        sched_sn = self.FOXESS_SCHEDULER_SN or self.DATALOGGER_SERIAL_NUMBER
-        if sched_sn:
-            kwargs["scheduler_sn"] = sched_sn
+        # Optional: only if your plant requires module SN in scheduler `deviceSN` (rare).
+        if self.FOXESS_SCHEDULER_SN:
+            kwargs["scheduler_sn"] = self.FOXESS_SCHEDULER_SN
         if self.FOXESS_API_KEY:
             kwargs["api_key"] = self.FOXESS_API_KEY
         elif self.FOXESS_USERNAME and self.FOXESS_PASSWORD:
