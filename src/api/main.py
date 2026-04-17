@@ -8,9 +8,11 @@ Optional MCP (``python -m src.mcp_server``) is another client interface to the s
 import asyncio
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 from contextlib import asynccontextmanager
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
@@ -75,10 +77,7 @@ from .models import (
     AssistantApplyResponse,
     AssistantApplyResultItem,
     SchedulerStatusResponse,
-    OptimizationStatusResponse,
     OptimizationStatusExtendedResponse,
-    OptimizationPlanResponse,
-    OptimizationPlanSlotResponse,
     OptimizationDispatchPreviewResponse,
     ProposePlanResponse,
     ApprovePlanRequest,
@@ -116,10 +115,9 @@ from ..scheduler.runner import (
     start_background_scheduler,
     stop_background_scheduler,
 )
-from ..optimization.dispatcher import build_macro_from_clients
-from ..optimization.engine import get_optimization_engine
-from ..optimization.models import SolverPlan
-from ..optimization.watchdog import refresh_agile_rates
+from ..agile_cache import get_agile_cache, refresh_agile_rates
+from ..config_snapshots import list_snapshots, restore_snapshot, rollback_latest, save_snapshot
+from ..scheduler.optimizer import run_optimizer
 
 
 @asynccontextmanager
@@ -1650,124 +1648,65 @@ async def scheduler_resume():
     return {"status": "resumed"}
 
 
-def _solver_plan_to_response(plan: SolverPlan) -> OptimizationPlanResponse:
-    return OptimizationPlanResponse(
-        computed_at=plan.computed_at.isoformat(),
-        preset=plan.preset.value,
-        tariff_code=plan.tariff_code,
-        target_mean_price_pence=plan.target_mean_price_pence,
-        cheap_slot_count=plan.cheap_slot_count,
-        peak_slot_count=plan.peak_slot_count,
-        slots=[
-            OptimizationPlanSlotResponse(
-                valid_from=s.valid_from.isoformat(),
-                valid_to=s.valid_to.isoformat(),
-                import_price_pence=s.import_price_pence,
-                slot_kind=s.slot_kind.value,
-                lwt_offset_delta=s.lwt_offset_delta,
-                fox_mode_hint=s.fox_mode_hint.value,
-                notes=s.notes,
-            )
-            for s in plan.slots
-        ],
-    )
-
-
 @app.get("/api/v1/optimization/status", response_model=OptimizationStatusExtendedResponse)
 async def optimization_status():
-    """V7 optimization engine: mode, preset, target price, cache, consent state."""
-    eng = get_optimization_engine()
-    raw = eng.status_dict()
+    """Bulletproof brain: mode, preset, Agile cache (legacy path kept for dashboards)."""
+    cache = get_agile_cache()
+    ofs = db.get_octopus_fetch_state()
+    sch = get_scheduler_status()
     return OptimizationStatusExtendedResponse(
-        enabled=raw["enabled"],
-        operation_mode=raw.get("operation_mode", "simulation"),
-        preset=raw["preset"],
-        target_price_pence=raw.get("target_price_pence", 0.0),
-        tariff_code=raw.get("tariff_code"),
-        cache_slots=raw.get("cache_slots", 0),
-        cache_fetched_at_utc=raw.get("cache_fetched_at_utc"),
-        cache_error=raw.get("cache_error"),
-        last_plan_at_utc=raw.get("last_plan_at_utc"),
-        target_mean_price_pence=raw.get("target_mean_price_pence"),
-        consent=raw.get("consent"),
-        v7_safeties=raw.get("v7_safeties"),
+        enabled=config.USE_BULLETPROOF_ENGINE,
+        operation_mode=config.OPERATION_MODE,
+        preset=config.OPTIMIZATION_PRESET,
+        target_price_pence=float(config.TARGET_PRICE_PENCE or 0),
+        tariff_code=config.OCTOPUS_TARIFF_CODE,
+        cache_slots=len(cache.rates or []),
+        cache_fetched_at_utc=cache.fetched_at_utc.isoformat() if cache.fetched_at_utc else None,
+        cache_error=cache.error,
+        last_plan_at_utc=ofs.last_success_at,
+        target_mean_price_pence=sch.get("current_price_pence"),
+        consent={
+            "bulletproof": True,
+            "detail": "V7 consent flow removed. Run POST /api/v1/optimization/propose to refresh SQLite + Fox V3.",
+        },
+        v7_safeties=None,
     )
 
 
-@app.get("/api/v1/optimization/plan", response_model=OptimizationPlanResponse)
+@app.get("/api/v1/optimization/plan")
 async def optimization_plan():
-    """Return the latest 48 half-hour solver output (recomputes from cache if needed)."""
+    """Bulletproof plan: today's SQLite action_schedule + last Fox V3 snapshot."""
+    from zoneinfo import ZoneInfo
+
     if not config.OCTOPUS_TARIFF_CODE:
         raise HTTPException(status_code=503, detail="OCTOPUS_TARIFF_CODE not set")
-    eng = get_optimization_engine()
-    plan = eng.solve_from_cache()
-    if plan is None:
-        raise HTTPException(
-            status_code=503,
-            detail="No Agile rate cache. Call POST /api/v1/optimization/refresh or wait for the watchdog.",
-        )
-    return _solver_plan_to_response(plan)
+    tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+    plan_date = datetime.now(tz).date().isoformat()
+    return {
+        "ok": True,
+        "bulletproof": True,
+        "plan_date": plan_date,
+        "actions": db.schedule_for_date(plan_date),
+        "fox": db.get_latest_fox_schedule_state(),
+        "note": "48-slot V7 solver removed; use /api/v1/metrics for thresholds and PnL context.",
+    }
 
 
 @app.get("/api/v1/optimization/dispatch-preview", response_model=OptimizationDispatchPreviewResponse)
 async def optimization_dispatch_preview():
-    """Dispatch hints for the current slot from live macro sensors (read-only)."""
-    if not config.OCTOPUS_TARIFF_CODE:
-        raise HTTPException(status_code=503, detail="OCTOPUS_TARIFF_CODE not set")
-    eng = get_optimization_engine()
-    if eng.solve_from_cache() is None:
-        raise HTTPException(status_code=503, detail="No rate cache; refresh the watchdog first.")
-
-    room_temp = tank_temp = tank_target = outdoor_temp = None
-    weather_reg = False
-    mode = "heating"
-    try:
-        dclient = get_daikin_client()
-        devices = dclient.get_devices()
-        if devices:
-            dev = devices[0]
-            st = dclient.get_status(dev)
-            room_temp = st.room_temp
-            tank_temp = st.tank_temp
-            tank_target = st.tank_target
-            outdoor_temp = st.outdoor_temp
-            weather_reg = st.weather_regulation
-            mode = st.mode or "heating"
-    except Exception as e:
-        logger.warning("dispatch-preview: Daikin read failed: %s", e)
-
-    soc = None
-    try:
-        if config.FOXESS_API_KEY or (config.FOXESS_USERNAME and config.FOXESS_PASSWORD):
-            rt = get_cached_realtime()
-            soc = rt.soc
-    except Exception as e:
-        logger.warning("dispatch-preview: Fox ESS read failed: %s", e)
-
-    macro = build_macro_from_clients(
-        room_temp=room_temp,
-        tank_temp=tank_temp,
-        tank_target=tank_target,
-        outdoor_temp=outdoor_temp,
-        battery_soc=soc,
-        weather_regulation=weather_reg,
-        operation_mode=mode,
-    )
-    hints = eng.dispatch_hints(macro)
-    if hints is None:
-        raise HTTPException(status_code=503, detail="Could not compute dispatch hints")
+    """V7 macro-based hints removed; use /api/v1/schedule and live device status."""
     return OptimizationDispatchPreviewResponse(
-        lwt_offset=hints.lwt_offset,
-        daikin_tank_target_c=hints.daikin_tank_target_c,
-        fox_work_mode=hints.fox_work_mode,
-        disable_weather_regulation=hints.disable_weather_regulation,
-        reason=hints.reason,
+        lwt_offset=0.0,
+        daikin_tank_target_c=None,
+        fox_work_mode=None,
+        disable_weather_regulation=False,
+        reason="V7 dispatch-preview retired. Use GET /api/v1/schedule and GET /api/v1/metrics.",
     )
 
 
 @app.post("/api/v1/optimization/refresh")
 async def optimization_refresh():
-    """Fetch Agile rates from Octopus (rate-limited); fills cache for the solver."""
+    """Fetch Agile rates from Octopus (rate-limited); fills in-memory cache for tariff tools."""
     allowed, wait_time = safeguards.check_rate_limit("optimization.refresh")
     if not allowed:
         raise HTTPException(
@@ -1780,8 +1719,6 @@ async def optimization_refresh():
     safeguards.record_action_time("optimization.refresh")
     if cache.error and not cache.rates:
         raise HTTPException(status_code=502, detail=cache.error or "Agile fetch failed")
-    eng = get_optimization_engine()
-    eng.solve_from_cache()
     return {
         "status": "ok",
         "slots": len(cache.rates or []),
@@ -1789,88 +1726,64 @@ async def optimization_refresh():
     }
 
 
-# ── Optimization: consent, preset, target price, mode, snapshots ─────────────
+# ── Optimization-compatible controls (Bulletproof; no V7 consent) ──────────────
 
 @app.post("/api/v1/optimization/propose", response_model=ProposePlanResponse)
 async def optimization_propose(include_plan: bool = False):
-    """Compute an optimization plan and propose it for user consent.
-
-    The plan is stored with a token. Use POST /approve or the OpenClaw tool to
-    activate it. In simulation mode the approved plan runs in shadow mode only.
-    """
+    """Run the Bulletproof daily planner (SQLite + optional Fox V3 upload)."""
     if not config.OCTOPUS_TARIFF_CODE:
         raise HTTPException(status_code=503, detail="OCTOPUS_TARIFF_CODE not set")
-    eng = get_optimization_engine()
-    plan = eng.solve_from_cache()
-    if plan is None:
-        raise HTTPException(
-            status_code=503,
-            detail="No Agile rate cache. Call POST /api/v1/optimization/refresh first.",
-        )
-    from ..optimization.consent import propose_plan
-    pending = propose_plan(plan)
+    fox = None
+    try:
+        fox = FoxESSClient(**config.foxess_client_kwargs())
+    except Exception:
+        pass
+    result = run_optimizer(fox, None)
+    if not result.get("ok"):
+        raise HTTPException(status_code=500, detail=result.get("error", "optimizer failed"))
+    now = datetime.now(timezone.utc)
+    plan_id = f"bp-{uuid4().hex[:12]}"
     resp = ProposePlanResponse(
-        plan_id=pending.plan_id,
-        proposed_at=pending.proposed_at.isoformat(),
-        expires_at=pending.expires_at.isoformat(),
-        status=pending.status.value,
-        summary=pending.summary,
-        plan=_solver_plan_to_response(plan).model_dump() if include_plan else None,
+        plan_id=plan_id,
+        proposed_at=now.isoformat(),
+        expires_at=(now + timedelta(hours=24)).isoformat(),
+        status="applied",
+        summary=result.get("strategy") or "",
+        plan=result if include_plan else None,
     )
     return resp
 
 
 @app.post("/api/v1/optimization/approve", response_model=ApprovePlanResponse)
 async def optimization_approve(req: ApprovePlanRequest):
-    """Approve a pending optimization plan by its ID."""
-    from ..optimization.consent import approve_plan
-    result = approve_plan(req.plan_id)
-    if result is None:
-        raise HTTPException(status_code=404, detail="Plan not found or already expired")
-    from ..optimization.models import PlanConsentStatus
-    if result.status == PlanConsentStatus.EXPIRED:
-        raise HTTPException(status_code=410, detail="Plan has expired. Propose a new one.")
-    mode_note = (
-        " System is in simulation mode — no hardware writes will occur."
-        if config.OPERATION_MODE != "operational"
-        else " System is in operational mode — plan will be dispatched to hardware."
-    )
+    """No-op under Bulletproof (plans apply on propose)."""
     return ApprovePlanResponse(
         ok=True,
-        plan_id=result.plan_id,
-        status=result.status.value,
-        message=f"Plan {result.plan_id} approved.{mode_note}",
+        plan_id=req.plan_id,
+        status="not_applicable",
+        message="Bulletproof does not use plan consent; POST /api/v1/optimization/propose already persisted the plan.",
     )
 
 
 @app.post("/api/v1/optimization/reject", response_model=ApprovePlanResponse)
 async def optimization_reject(req: RejectPlanRequest):
-    """Reject a pending or approved plan."""
-    from ..optimization.consent import reject_plan
-    result = reject_plan(req.plan_id)
-    if result is None:
-        raise HTTPException(status_code=404, detail="Plan not found")
+    """No-op under Bulletproof."""
     return ApprovePlanResponse(
         ok=True,
-        plan_id=result.plan_id,
-        status=result.status.value,
-        message=f"Plan {result.plan_id} rejected.",
+        plan_id=req.plan_id,
+        status="not_applicable",
+        message="Bulletproof does not use plan consent. Adjust presets and re-run POST /api/v1/optimization/propose.",
     )
 
 
 @app.get("/api/v1/optimization/pending")
 async def optimization_pending():
-    """Get the current pending plan awaiting consent (if any)."""
-    from ..optimization.consent import consent_status_dict
-    return consent_status_dict()
+    return {"pending": None, "bulletproof": True, "detail": "No consent queue; see GET /api/v1/optimization/plan."}
 
 
 @app.post("/api/v1/optimization/preset", response_model=SetPresetResponse)
 async def optimization_set_preset(req: SetPresetRequest):
-    """Switch the household preset at runtime (normal/guests/travel/away/boost).
-
-    Immediately re-solves the plan and proposes it for consent.
-    """
+    """Switch the household preset at runtime (normal/guests/travel/away/boost)."""
     config.OPTIMIZATION_PRESET = req.preset
     logger.info("Optimization preset changed to %s", req.preset)
     return SetPresetResponse(
@@ -1878,21 +1791,21 @@ async def optimization_set_preset(req: SetPresetRequest):
         preset=req.preset,
         message=(
             f"Preset set to '{req.preset}'. "
-            "Call POST /api/v1/optimization/propose to generate a new plan."
+            "Call POST /api/v1/optimization/propose to regenerate the plan."
         ),
     )
 
 
 @app.post("/api/v1/optimization/target-price", response_model=SetTargetPriceResponse)
 async def optimization_set_target_price(req: SetTargetPriceRequest):
-    """Set the target average import price (p/kWh). Use 0 to disable."""
+    """Set the target average import price (p/kWh). Use 0 to disable dynamic widening."""
     config.TARGET_PRICE_PENCE = req.target_price_pence
     logger.info("Target price set to %s p/kWh", req.target_price_pence)
     msg = (
         f"Target price set to {req.target_price_pence}p/kWh. "
         "Call POST /api/v1/optimization/propose to regenerate the plan."
         if req.target_price_pence > 0
-        else "Target price disabled (0p). Solver will use fixed cheap threshold."
+        else "Target price disabled (0p). Planner uses statistical cheap band only."
     )
     return SetTargetPriceResponse(
         ok=True,
@@ -1903,14 +1816,7 @@ async def optimization_set_target_price(req: SetTargetPriceRequest):
 
 @app.post("/api/v1/optimization/mode", response_model=SetOperationModeResponse)
 async def optimization_set_mode(req: SetOperationModeRequest):
-    """Switch between simulation and operational modes.
-
-    A config snapshot is saved before any transition.
-    Switching to operational requires an approved plan to be present.
-    """
-    from ..optimization.snapshots import save_snapshot
-    from ..optimization.consent import get_approved_plan, clear_approved_plan
-
+    """Switch simulation vs operational. Snapshot saved before each transition."""
     current_mode = config.OPERATION_MODE
     new_mode = req.mode
 
@@ -1921,36 +1827,20 @@ async def optimization_set_mode(req: SetOperationModeRequest):
             message=f"Already in {new_mode} mode. No change.",
         )
 
-    # Save snapshot before transitioning
     snap = save_snapshot(trigger=f"mode_change: {current_mode} -> {new_mode}")
     snapshot_id = snap.get("snapshot_id")
-
-    if new_mode == "operational":
-        approved = get_approved_plan()
-        if approved is None:
-            return SetOperationModeResponse(
-                ok=False,
-                mode=current_mode,
-                snapshot_id=snapshot_id,
-                message=(
-                    "Cannot switch to operational: no approved plan. "
-                    "Propose a plan with POST /api/v1/optimization/propose, "
-                    "review it, and approve it first."
-                ),
-            )
 
     config.OPERATION_MODE = new_mode
 
     if new_mode == "simulation":
-        clear_approved_plan()
         msg = (
             f"Switched to simulation mode (snapshot {snapshot_id} saved). "
-            "No hardware writes will occur. Approved plan cleared."
+            "Hardware writes are skipped per OPENCLAW_READ_ONLY / operational rules."
         )
     else:
         msg = (
             f"Switched to operational mode (snapshot {snapshot_id} saved). "
-            "The approved plan will now control Fox ESS and Daikin on each 30-min tick."
+            "Fox V3 and Daikin actions run when keys are present and reads are allowed."
         )
 
     logger.info("Operation mode changed: %s -> %s (snapshot=%s)", current_mode, new_mode, snapshot_id)
@@ -1960,8 +1850,6 @@ async def optimization_set_mode(req: SetOperationModeRequest):
 @app.post("/api/v1/optimization/rollback", response_model=RollbackResponse)
 async def optimization_rollback(snapshot_id: Optional[str] = None):
     """Restore a config snapshot (latest by default). Forces simulation mode on restore."""
-    from ..optimization.snapshots import rollback_latest, restore_snapshot, list_snapshots
-
     try:
         if snapshot_id:
             snap = restore_snapshot(snapshot_id)
@@ -1976,7 +1864,7 @@ async def optimization_rollback(snapshot_id: Optional[str] = None):
             snapshot_id=sid,
             message=(
                 f"Config restored from snapshot {sid}. "
-                "System is now in simulation mode. Review and re-approve a plan before going operational."
+                "System is in simulation mode. Re-run POST /api/v1/optimization/propose before operational."
             ),
         )
     except FileNotFoundError as exc:
@@ -1988,34 +1876,20 @@ async def optimization_rollback(snapshot_id: Optional[str] = None):
 
 @app.post("/api/v1/optimization/auto-approve", response_model=SetAutoApproveResponse)
 async def optimization_set_auto_approve(req: SetAutoApproveRequest):
-    """Enable or disable automatic plan approval.
-
-    When enabled, every new plan proposed via POST /propose (or the watchdog)
-    is immediately approved without waiting for explicit user consent.
-    A notification is still sent to OpenClaw / stdout so the user is informed.
-
-    Disable to return to the explicit consent workflow (recommended for operational mode).
-    """
-    from ..optimization.consent import set_auto_approve
-    set_auto_approve(req.enabled)
-    if req.enabled:
-        msg = (
-            "Auto-approve ENABLED. New plans will be approved automatically. "
-            "You will still receive notifications — call reject_optimization_plan "
-            "at any time to cancel the active plan."
-        )
-    else:
-        msg = (
-            "Auto-approve DISABLED. Plans now require explicit approval via "
-            "POST /api/v1/optimization/approve before they take effect."
-        )
+    """Legacy toggle; Bulletproof does not gate on consent."""
+    config.PLAN_AUTO_APPROVE = req.enabled
+    logger.info("PLAN_AUTO_APPROVE set to %s", req.enabled)
+    msg = (
+        "Stored PLAN_AUTO_APPROVE=true (no consent gate under Bulletproof)."
+        if req.enabled
+        else "Stored PLAN_AUTO_APPROVE=false."
+    )
     return SetAutoApproveResponse(ok=True, auto_approve=req.enabled, message=msg)
 
 
 @app.get("/api/v1/optimization/snapshots", response_model=ListSnapshotsResponse)
 async def optimization_snapshots():
     """List all available config snapshots (newest first)."""
-    from ..optimization.snapshots import list_snapshots
     snaps = list_snapshots()
     return ListSnapshotsResponse(
         snapshots=[

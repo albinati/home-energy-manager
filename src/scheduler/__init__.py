@@ -1,7 +1,7 @@
 """Agile-aware Daikin ASHP scheduler — adjusts LWT by Octopus Agile price.
 
-Important: avoid importing `runner` at module import time to prevent a circular
-import with `src.optimization.engine` when modules import `src.scheduler.agile`.
+Important: avoid importing `runner` at module import time to prevent circular imports
+when other packages import `src.scheduler.agile`.
 """
 
 from .agile import fetch_agile_rates, get_current_and_next_slots

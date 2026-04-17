@@ -13,7 +13,6 @@ from ..daikin.client import DaikinClient
 from ..foxess.client import FoxESSClient
 from ..foxess.service import get_cached_realtime
 from ..notifier import notify_risk
-from ..optimization.engine import optimization_dispatch_job, optimization_watchdog_job
 from ..state_machine import heartbeat_repair_fox_scheduler, reconcile_daikin_schedule_for_date
 from .agile import fetch_agile_rates, get_current_and_next_slots
 from .daikin import compute_lwt_adjustment, run_daikin_scheduler_tick
@@ -265,6 +264,20 @@ def bulletproof_heartbeat_tick() -> None:
         if not db.is_warning_acknowledged(key):
             notify_risk(f"Low SOC {soc}% during high price {price}p/kWh", extra={"warning_key": key})
 
+    if (
+        soc is not None
+        and soc < float(config.MIN_SOC_RESERVE_PERCENT)
+        and price is not None
+        and float(price) > float(config.OPTIMIZATION_PEAK_THRESHOLD_PENCE)
+    ):
+        key = f"soc_reserve_floor_peak_{plan_date}"
+        if not db.is_warning_acknowledged(key):
+            notify_risk(
+                f"Battery at {soc}% (below MIN_SOC_RESERVE_PERCENT {config.MIN_SOC_RESERVE_PERCENT}) "
+                f"during high price {price}p/kWh",
+                extra={"warning_key": key},
+            )
+
 
 def _heartbeat_loop() -> None:
     while not _heartbeat_stop.wait(timeout=config.HEARTBEAT_INTERVAL_SECONDS):
@@ -304,7 +317,7 @@ def start_background_scheduler() -> None:
         if config.USE_BULLETPROOF_ENGINE:
             start_heartbeat_background()
         return
-    if not config.SCHEDULER_ENABLED and not config.OPTIMIZATION_ENGINE_ENABLED and not config.USE_BULLETPROOF_ENGINE:
+    if not config.SCHEDULER_ENABLED and not config.USE_BULLETPROOF_ENGINE:
         return
     try:
         from apscheduler.schedulers.background import BackgroundScheduler
@@ -353,38 +366,7 @@ def start_background_scheduler() -> None:
                 tz,
             )
 
-        if config.OPTIMIZATION_ENGINE_ENABLED and config.OCTOPUS_TARIFF_CODE and not config.USE_BULLETPROOF_ENGINE:
-            opt_tz = ZoneInfo(config.OPTIMIZATION_TIMEZONE)
-            _background_scheduler.add_job(
-                optimization_watchdog_job,
-                CronTrigger(
-                    hour=config.OPTIMIZATION_WATCHDOG_HOUR_LOCAL,
-                    minute=config.OPTIMIZATION_WATCHDOG_MINUTE_LOCAL,
-                    timezone=opt_tz,
-                ),
-                id="optimization_agile_watchdog",
-            )
-            _background_scheduler.add_job(
-                optimization_dispatch_job,
-                "interval",
-                minutes=30,
-                id="optimization_solver_refresh",
-            )
-            logger.info(
-                "Optimization engine jobs started (watchdog %02d:%02d %s, solver every 30 min)",
-                config.OPTIMIZATION_WATCHDOG_HOUR_LOCAL,
-                config.OPTIMIZATION_WATCHDOG_MINUTE_LOCAL,
-                config.OPTIMIZATION_TIMEZONE,
-            )
-
         _background_scheduler.start()
-
-        if config.OPTIMIZATION_ENGINE_ENABLED and config.OCTOPUS_TARIFF_CODE and not config.USE_BULLETPROOF_ENGINE:
-            try:
-                optimization_watchdog_job()
-                optimization_dispatch_job()
-            except Exception as e:
-                logger.warning("Optimization engine bootstrap failed: %s", e)
 
         if config.USE_BULLETPROOF_ENGINE:
             start_heartbeat_background()

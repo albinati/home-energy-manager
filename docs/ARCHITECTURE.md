@@ -20,9 +20,10 @@ Home Energy Manager is designed as the **single planning brain** for the site: i
 3. **Actuate (plan)** — Same run: merge Fox windows → **Scheduler V3** upload + snapshot in DB; write **Daikin** `action_schedule` rows (pre-heat, peak shutdown, restore, etc.).
 4. **Execute (runtime)** — `src/scheduler/runner.py` heartbeat: **reconcile** today’s Daikin rows, log **execution_log** on each local half-hour boundary, **repair** Fox scheduler flag / V3 vs SQLite ~30 min, low-SoC / price alerts.
 
-## Legacy optimisation path
+## Retired V7 stack
 
-When `USE_BULLETPROOF_ENGINE=false`, the older **solver + dispatcher** (`src/optimization/`) still uses the same **weather-enriched** slot building for consent-based plans. Bulletproof is the default integrated path for “brain + SQLite + V3 + heartbeat”.
+The older consent-driven **solver + dispatcher** (`src/optimization/`) was removed so only the Bulletproof path can schedule hardware. To restore that code for archaeology or experiments, use git tag **`pre-v7-removal`**:  
+`git checkout pre-v7-removal -- src/optimization`
 
 ## API touchpoints
 

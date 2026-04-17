@@ -1,21 +1,18 @@
-"""Watchdog: refresh Agile rate cache (V7 — daily fetch around 16:00 local).
+"""In-memory Agile import/export rate cache (shared by tariff tools and legacy refresh API)."""
 
-Caches both import and export rates in memory. Export rates are used by the
-solver when OCTOPUS_EXPORT_TARIFF_CODE is configured.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
-from ..config import config
-from ..scheduler.agile import fetch_agile_rates, fetch_agile_export_rates
+from .config import config
+from .scheduler.agile import fetch_agile_rates, fetch_agile_export_rates
 
 
 @dataclass
 class AgileRateCache:
-    """In-memory cache populated by the watchdog."""
+    """In-memory cache populated by :func:`refresh_agile_rates`."""
 
     rates: list[dict] = field(default_factory=list)
     export_rates: list[dict] = field(default_factory=list)
@@ -54,6 +51,7 @@ def refresh_agile_rates(*, tariff_code: Optional[str] = None) -> AgileRateCache:
                 export_rates = fetch_agile_export_rates(export_tariff_code=export_code) or []
             except Exception as exp_exc:
                 import logging
+
                 logging.getLogger(__name__).warning("Export rates fetch failed: %s", exp_exc)
         _CACHE = AgileRateCache(
             rates=rates or [],
