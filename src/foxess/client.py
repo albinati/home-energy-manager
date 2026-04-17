@@ -7,7 +7,7 @@ Supports two auth modes:
      Uses the same endpoints as the foxesscloud.com web app.
 
 Usage (API key):
-    client = FoxESSClient(api_key="...", device_sn="...")
+    client = FoxESSClient(api_key="...", device_sn="...", scheduler_sn="...")  # scheduler_sn optional: datalogger SN for V3
 
 Usage (username/password):
     client = FoxESSClient(username="email@example.com", password="...", device_sn="...")
@@ -67,8 +67,11 @@ class FoxESSClient:
         api_key: str = "",
         username: str = "",
         password: str = "",
+        scheduler_sn: Optional[str] = None,
     ):
         self.device_sn = device_sn
+        s = (scheduler_sn or "").strip()
+        self.scheduler_sn: Optional[str] = s or None
         self.api_key = api_key
         self.username = username
         self.password = password
@@ -76,6 +79,10 @@ class FoxESSClient:
 
         if not api_key and not (username and password):
             raise ValueError("Provide either api_key OR username+password.")
+
+    def _sn_scheduler(self) -> str:
+        """Serial for scheduler V3 / scheduler master switch (`sn` in API body)."""
+        return self.scheduler_sn if self.scheduler_sn else self.device_sn
 
     # ── Official Open API (API key auth) ────────────────────────────────────
 
@@ -630,13 +637,13 @@ class FoxESSClient:
 
     def get_scheduler_v3(self) -> SchedulerState:
         """Fetch hardware schedule (v3)."""
-        raw = self._open_post_v3("/device/scheduler/get", {"sn": self.device_sn})
+        raw = self._open_post_v3("/device/scheduler/get", {"sn": self._sn_scheduler()})
         return _parse_scheduler_v3_result(raw)
 
     def set_scheduler_v3(self, groups: list[SchedulerGroup], is_default: bool = False) -> None:
         """Upload full day schedule (one API call)."""
         payload = {
-            "sn": self.device_sn,
+            "sn": self._sn_scheduler(),
             "isDefault": bool(is_default),
             "groups": [g.to_api_dict() for g in groups],
         }
@@ -644,7 +651,7 @@ class FoxESSClient:
 
     def get_scheduler_flag(self) -> bool:
         """Return True if inverter time scheduler master switch is enabled."""
-        body = {"sn": self.device_sn}
+        body = {"sn": self._sn_scheduler()}
         raw = self._open_post("/device/scheduler/get/flag", body) if self.api_key else self._cloud_post(
             "/c/v0/device/scheduler/get/flag", body
         )
@@ -656,7 +663,7 @@ class FoxESSClient:
         return bool(raw)
 
     def set_scheduler_flag(self, enable: bool) -> None:
-        body = {"sn": self.device_sn, "enable": enable}
+        body = {"sn": self._sn_scheduler(), "enable": enable}
         if self.api_key:
             self._open_post("/device/scheduler/set", body)
         else:
