@@ -1,8 +1,9 @@
-"""FastAPI application for home-energy-manager REST API.
+"""FastAPI application: HTTP interface for the Home Energy Manager **planning brain**.
 
-The long-running FastAPI + APScheduler daemon remains available for dashboards and
-legacy integrations, but new automation should prefer the MCP server
-(``python -m src.mcp_server``) so assistants connect over stdio without hosting HTTP.
+The service ingests tariffs, fuses weather and execution history, runs the bulletproof
+optimizer (`run_optimizer`), and keeps schedules aligned via the heartbeat. This module
+exposes REST for dashboards, scripts, and **OpenClaw** (``HOME_ENERGY_API_URL``).
+Optional MCP (``python -m src.mcp_server``) is another client interface to the same backend.
 """
 import asyncio
 import logging

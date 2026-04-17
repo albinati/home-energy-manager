@@ -12,6 +12,8 @@ from ..config import config
 from .. import db
 from ..foxess.client import FoxESSClient, FoxESSError
 from ..foxess.models import SchedulerGroup
+from ..foxess.service import get_cached_realtime
+from ..optimization.models import OperationPreset
 from ..weather import HourlyForecast, estimate_pv_kw, fetch_forecast, get_forecast_for_slot
 
 logger = logging.getLogger(__name__)
@@ -107,25 +109,62 @@ def _extend_standard_to_cheap_before_peak(slots: list[HalfHourSlot], slots_to_co
     return changed
 
 
-def _slot_fox_tuple(s: HalfHourSlot) -> tuple[str, Optional[int], Optional[int]]:
-    """work_mode, fd_soc, fd_pwr for merging."""
+def _slot_fox_tuple(
+    s: HalfHourSlot,
+    *,
+    peak_export_discharge: bool = False,
+) -> tuple[str, Optional[int], Optional[int]]:
+    """work_mode, fd_soc, fd_pwr for Scheduler V3 (API uses SelfUse, ForceCharge, ForceDischarge)."""
     if s.kind == "negative":
         return ("ForceCharge", 100, config.FOX_FORCE_CHARGE_MAX_PWR)
     if s.kind == "cheap":
         return ("ForceCharge", 95, config.FOX_FORCE_CHARGE_NORMAL_PWR)
+    if s.kind == "peak" and peak_export_discharge:
+        return (
+            "ForceDischarge",
+            int(config.EXPORT_DISCHARGE_FLOOR_SOC_PERCENT),
+            config.FOX_FORCE_CHARGE_MAX_PWR,
+        )
     return ("SelfUse", None, None)
 
 
-def _merge_fox_groups(slots: list[HalfHourSlot], max_groups: int = 8) -> list[SchedulerGroup]:
+def _optimization_preset_away_like() -> bool:
+    """True when household preset is travel or away (hibernate / export-friendly)."""
+    try:
+        p = OperationPreset((config.OPTIMIZATION_PRESET or "normal").strip().lower())
+        return p in (OperationPreset.TRAVEL, OperationPreset.AWAY)
+    except ValueError:
+        return False
+
+
+def _bulletproof_allow_peak_export_discharge() -> bool:
+    """True only when not strict_savings, preset travel/away, and cached SoC high enough."""
+    if (config.ENERGY_STRATEGY_MODE or "savings_first").strip().lower() == "strict_savings":
+        return False
+    if not _optimization_preset_away_like():
+        return False
+    try:
+        soc = float(get_cached_realtime().soc)
+    except Exception:
+        return False
+    return soc >= float(config.EXPORT_DISCHARGE_MIN_SOC_PERCENT)
+
+
+def _merge_fox_groups(
+    slots: list[HalfHourSlot],
+    max_groups: int = 8,
+    *,
+    peak_export_discharge: bool = False,
+) -> list[SchedulerGroup]:
     if not slots:
         return []
     tz = TZ()
     merged: list[tuple[datetime, datetime, tuple]] = []
     cur_start = slots[0].start_utc
     cur_end = slots[0].end_utc
-    cur_key = _slot_fox_tuple(slots[0])
+    cur_key = _slot_fox_tuple(slots[0], peak_export_discharge=peak_export_discharge)
     for s in slots[1:]:
-        k = _slot_fox_tuple(s)
+        k = _slot_fox_tuple(s, peak_export_discharge=peak_export_discharge)
         if k == cur_key and s.start_utc == cur_end:
             cur_end = s.end_utc
         else:
@@ -250,6 +289,7 @@ def _write_daikin_schedule(plan_date: str, slots: list[HalfHourSlot], forecast: 
     db.clear_actions_for_date(plan_date, device="daikin")
     tz = TZ()
     count = 0
+    away_like = _optimization_preset_away_like()
     merged: list[tuple[datetime, datetime, str]] = []
     if not slots:
         return 0
@@ -265,12 +305,15 @@ def _write_daikin_schedule(plan_date: str, slots: list[HalfHourSlot], forecast: 
     for start_utc, end_utc, kind in merged:
         if kind in ("standard",):
             continue
+        loc_mid = (start_utc + timedelta(minutes=15)).astimezone(tz)
+        # Travel/away: skip cheap/negative preheat unless Legionella window still needs DHW
+        if away_like and kind in ("cheap", "negative") and not _legionella_active_local(loc_mid):
+            continue
         action_type = {
             "negative": "max_heat",
             "cheap": "pre_heat",
             "peak": "shutdown",
         }.get(kind, "normal")
-        loc_mid = (start_utc + timedelta(minutes=15)).astimezone(tz)
         fc = get_forecast_for_slot(start_utc + timedelta(minutes=15), forecast)
         outdoor = fc.temperature_c if fc else 0.0
         peak_frost = kind == "peak" and outdoor < config.WEATHER_FROST_THRESHOLD_C
@@ -278,7 +321,7 @@ def _write_daikin_schedule(plan_date: str, slots: list[HalfHourSlot], forecast: 
             "negative" if kind == "negative" else ("cheap" if kind == "cheap" else ("peak" if kind == "peak" else "standard")),
             peak_frost,
         )
-        if kind == "peak" and _legionella_active_local(loc_mid):
+        if _legionella_active_local(loc_mid):
             params["tank_power"] = True
             params["tank_temp"] = config.DHW_LEGIONELLA_TEMP_C
             params["legionella_override"] = True
@@ -366,8 +409,15 @@ def run_optimizer(fox: Optional[FoxESSClient], daikin: Optional[Any] = None) -> 
         f"{plan_date}: neg={counts['negative']} cheap={counts['cheap']} "
         f"std={counts['standard']} peak={counts['peak']} slots; mean {actual_mean:.1f}p"
     )
+    if _optimization_preset_away_like():
+        strategy += "; Daikin: travel/away — scheduled setbacks on peak only (no cheap/negative preheat)"
     if extended:
         strategy += f"; pre-peak charge extended +{extended} half-hours (battery margin)"
+    peak_export = _bulletproof_allow_peak_export_discharge()
+    if peak_export:
+        strategy += (
+            f"; peak export discharge allowed (travel/away, SoC≥{config.EXPORT_DISCHARGE_MIN_SOC_PERCENT:g}%)"
+        )
     if battery_warn:
         strategy += (
             f"; battery warn: est peak load ~{est_peak_kwh:.1f}kWh vs "
@@ -395,7 +445,7 @@ def run_optimizer(fox: Optional[FoxESSClient], daikin: Optional[Any] = None) -> 
     )
 
     fox_ok = False
-    groups = _merge_fox_groups(slots, max_groups=8)
+    groups = _merge_fox_groups(slots, max_groups=8, peak_export_discharge=peak_export)
     if fox and fox.api_key and config.OPERATION_MODE == "operational" and not config.OPENCLAW_READ_ONLY:
         try:
             fox.set_scheduler_v3(groups, is_default=False)
@@ -434,6 +484,7 @@ def run_optimizer(fox: Optional[FoxESSClient], daikin: Optional[Any] = None) -> 
         "fox_uploaded": fox_ok,
         "daikin_actions": daikin_n,
         "battery_warning": battery_warn,
+        "peak_export_discharge": peak_export,
         "strategy": strategy,
     }
 
