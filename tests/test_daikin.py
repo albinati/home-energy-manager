@@ -1,6 +1,8 @@
 """Unit tests for Daikin Onecta client (mocked)."""
 import unittest
-from unittest.mock import patch, MagicMock
+import urllib.error
+from io import BytesIO
+from unittest.mock import patch, MagicMock, call
 from src.daikin.client import DaikinClient
 from src.daikin.models import DaikinDevice, TemperatureControlSettings
 
@@ -206,6 +208,42 @@ class TestDaikinClient(unittest.TestCase):
         client = DaikinClient()
         devices = client.get_devices()
         self.assertEqual(devices, [])
+
+    @patch("src.daikin.client.get_valid_access_token")
+    @patch("urllib.request.urlopen")
+    def test_get_retries_once_on_401(self, mock_urlopen, mock_token):
+        mock_token.side_effect = ["first", "second"]
+        err401 = urllib.error.HTTPError(
+            "http://example", 401, "Unauthorized", None, BytesIO(b"{}")
+        )
+        ok = MagicMock()
+        ok.read.return_value = b"[]"
+        mock_urlopen.side_effect = [err401, ok]
+        client = DaikinClient()
+        result = client._get("/gateway-devices")
+        self.assertEqual(result, [])
+        self.assertEqual(mock_urlopen.call_count, 2)
+        self.assertEqual(
+            mock_token.call_args_list,
+            [call(force_refresh=False), call(force_refresh=True)],
+        )
+
+    @patch("src.daikin.client.time.sleep", autospec=True)
+    @patch("src.daikin.client.get_valid_access_token", return_value="t")
+    @patch("urllib.request.urlopen")
+    def test_get_retries_on_429_then_ok(self, mock_urlopen, _mock_token, mock_sleep):
+        err429 = urllib.error.HTTPError(
+            "http://example", 429, "Too Many", None, BytesIO(b"{}")
+        )
+        err429.headers = {"Retry-After": "1"}
+        ok = MagicMock()
+        ok.read.return_value = b"[]"
+        mock_urlopen.side_effect = [err429, ok]
+        client = DaikinClient()
+        result = client._get("/gateway-devices")
+        self.assertEqual(result, [])
+        self.assertEqual(mock_urlopen.call_count, 2)
+        mock_sleep.assert_called_once()
 
 
 if __name__ == "__main__":

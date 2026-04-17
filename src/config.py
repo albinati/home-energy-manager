@@ -30,6 +30,16 @@ class Config:
     DAIKIN_CLIENT_SECRET: str = os.getenv("DAIKIN_CLIENT_SECRET", "")
     DAIKIN_REDIRECT_URI: str = os.getenv("DAIKIN_REDIRECT_URI", "http://localhost:8080/callback")
     DAIKIN_TOKEN_FILE: Path = Path(os.getenv("DAIKIN_TOKEN_FILE", ".daikin-tokens.json"))
+    # Proactively refresh the access token this many seconds before OAuth expiry (token endpoint only).
+    DAIKIN_ACCESS_REFRESH_LEEWAY_SECONDS: int = int(
+        os.getenv("DAIKIN_ACCESS_REFRESH_LEEWAY_SECONDS", "600")
+    )
+    # Minimum wall time between refresh_token HTTP calls (avoids bursts if many workers wake at once).
+    DAIKIN_TOKEN_REFRESH_MIN_INTERVAL_SECONDS: int = int(
+        os.getenv("DAIKIN_TOKEN_REFRESH_MIN_INTERVAL_SECONDS", "120")
+    )
+    # Retries for HTTP 429 from Onecta (respects Retry-After when present).
+    DAIKIN_HTTP_429_MAX_RETRIES: int = int(os.getenv("DAIKIN_HTTP_429_MAX_RETRIES", "3"))
     DAIKIN_BASE_URL: str = "https://api.onecta.daikineurope.com/v1"
     # OIDC endpoints (docs: https://developer.cloud.daikineurope.com/docs/84e709f1-9d33-47e1-a93c-7f5cb8b8f12b)
     # Override via env if Daikin documents different URLs (e.g. via developer portal).

@@ -23,12 +23,16 @@ import html
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
-from threading import Event
+from threading import Event, RLock
 
 from ..config import config
 
 
 TOKEN_FILE = config.DAIKIN_TOKEN_FILE
+
+# Serialize token file I/O + refresh when API and heartbeat overlap.
+_token_io_lock = RLock()
+_last_token_refresh_monotonic: float = 0.0
 
 _auth_result = {}
 _done_event = Event()
@@ -349,16 +353,23 @@ def run_auth_flow() -> dict:
 
 
 def save_tokens(tokens: dict) -> None:
-    TOKEN_FILE.write_text(json.dumps(tokens, indent=2))
+    """Persist tokens; uses temp file + replace to avoid torn writes."""
+    with _token_io_lock:
+        TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(tokens, indent=2)
+        tmp = TOKEN_FILE.with_suffix(TOKEN_FILE.suffix + ".tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        tmp.replace(TOKEN_FILE)
 
 
 def load_tokens() -> dict:
-    if not TOKEN_FILE.exists():
-        raise FileNotFoundError(
-            f"Token file not found: {TOKEN_FILE}\n"
-            "Run: python -m src.daikin.auth"
-        )
-    return json.loads(TOKEN_FILE.read_text())
+    with _token_io_lock:
+        if not TOKEN_FILE.exists():
+            raise FileNotFoundError(
+                f"Token file not found: {TOKEN_FILE}\n"
+                "Run: python -m src.daikin.auth"
+            )
+        return json.loads(TOKEN_FILE.read_text(encoding="utf-8"))
 
 
 def refresh_tokens(tokens: dict) -> dict:
@@ -388,14 +399,50 @@ def refresh_tokens(tokens: dict) -> dict:
     return new_tokens
 
 
-def get_valid_access_token() -> str:
-    """Return a valid access token, refreshing if needed."""
-    tokens = load_tokens()
-    expires_in = tokens.get("expires_in", 3600)
-    obtained_at = tokens.get("obtained_at", 0)
-    if time.time() > obtained_at + expires_in - 60:
-        tokens = refresh_tokens(tokens)
-    return tokens["access_token"]
+def get_valid_access_token(*, force_refresh: bool = False) -> str:
+    """Return a valid access token, refreshing via refresh_token when needed.
+
+    Called on every Daikin HTTP request. Tokens are written back to
+    ``DAIKIN_TOKEN_FILE`` after refresh — use a persistent path in Docker (see
+    ``docker-compose.yml``) so new refresh/access pairs survive restarts.
+
+    If the API returns 401 (e.g. clock skew or revoked access token), callers
+    should retry once with ``force_refresh=True``.
+    """
+    global _last_token_refresh_monotonic
+    with _token_io_lock:
+        tokens = load_tokens()
+        exp = max(30.0, float(tokens.get("expires_in", 3600)))
+        obtained_at = float(tokens.get("obtained_at", 0))
+        leeway_cfg = max(60, int(config.DAIKIN_ACCESS_REFRESH_LEEWAY_SECONDS))
+        # Cap leeway so we never treat "refresh early" as "always stale" on short-lived tokens.
+        leeway = min(leeway_cfg, max(60, int(exp) - 30))
+        stale = time.time() > obtained_at + exp - leeway
+        hard_expired = time.time() > obtained_at + exp
+        if force_refresh or stale:
+            min_gap = max(0, int(config.DAIKIN_TOKEN_REFRESH_MIN_INTERVAL_SECONDS))
+            now_m = time.monotonic()
+            if (
+                not force_refresh
+                and not hard_expired
+                and min_gap > 0
+                and (now_m - _last_token_refresh_monotonic) < min_gap
+            ):
+                return tokens["access_token"]
+            tokens = refresh_tokens(tokens)
+            _last_token_refresh_monotonic = time.monotonic()
+        return tokens["access_token"]
+
+
+def prefetch_daikin_access_token() -> None:
+    """Refresh the access token if it is within the configured leeway of expiry.
+
+    Hits only the OIDC token endpoint (not the device API). Safe to call on a
+    timer or at the start of the bulletproof heartbeat.
+    """
+    if not config.DAIKIN_CLIENT_ID or not config.DAIKIN_CLIENT_SECRET:
+        return
+    get_valid_access_token(force_refresh=False)
 
 
 def run_auth_flow_with_code(code: str) -> dict:
