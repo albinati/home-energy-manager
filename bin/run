@@ -22,8 +22,9 @@ set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 export PYTHONPATH="$ROOT"
-PY="${PYTHONPATH}/.venv/bin/python"
-[ -x "$PY" ] || PY="$(command -v python3)"
+# shellcheck source=bin/lib.sh
+. "$(dirname "$0")/lib.sh"
+PY="$(hem_python "$ROOT")"
 
 cmd="${1:-help}"
 case "$cmd" in
