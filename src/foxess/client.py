@@ -298,15 +298,21 @@ class FoxESSClient:
                 "sn": self.device_sn, "key": "workMode", "value": mode,
             })
 
-    def get_device_settings(self) -> dict:
-        """Return raw device settings from Fox (keys vary by firmware).
-
-        Open API: POST ``/device/setting/get`` with ``sn`` only.
-        """
-        body = {"sn": self.device_sn}
+    def get_device_setting(self, key: str) -> dict:
+        """Fetch one setting by key (Open API requires both ``sn`` and ``key``)."""
+        body = {"sn": self.device_sn, "key": key}
         if self.api_key:
             return self._open_post("/device/setting/get", body)
         return self._cloud_post("/c/v0/device/setting/get", body)
+
+    def get_device_settings(self) -> dict:
+        """Deprecated: Open API does not support listing all settings in one call.
+
+        Use :meth:`get_device_setting` with a specific key (e.g. ``ECOMode``).
+        """
+        raise FoxESSError(
+            "get_device_settings() is not supported; use get_device_setting(key) per Fox Open API."
+        )
 
     def set_device_setting(self, key: str, value: str | int | float | dict) -> None:
         """Set a single device setting by key (same endpoint as work mode / charge times).
@@ -663,12 +669,11 @@ class FoxESSClient:
             self._cloud_post("/c/v0/device/scheduler/set", {"sn": sn, "enable": enable})
 
     def get_eco_mode(self) -> bool:
-        raw = self.get_device_settings()
-        if isinstance(raw, dict):
-            for item in raw.get("data", []) or raw.get("result", []) or []:
-                if isinstance(item, dict) and str(item.get("key", "")).upper() == "ECOMODE":
-                    return str(item.get("value", "")).lower() in ("1", "true", "on", "yes")
-        return False
+        raw = self.get_device_setting("ECOMode")
+        if not isinstance(raw, dict):
+            return False
+        val = raw.get("value")
+        return str(val).lower() in ("1", "true", "on", "yes")
 
     def set_eco_mode(self, enabled: bool) -> None:
         self.set_device_setting("ECOMode", "1" if enabled else "0")
