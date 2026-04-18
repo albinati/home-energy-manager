@@ -13,6 +13,8 @@ from .. import db
 from ..foxess.client import FoxESSClient, FoxESSError
 from ..foxess.models import SchedulerGroup
 from ..foxess.service import get_cached_realtime
+from ..physics import calculate_dhw_setpoint, find_dhw_heat_end_utc, build_shower_target_iso
+from ..notifier import push_cheap_window_start, push_peak_window_start
 from ..presets import OperationPreset
 from ..weather import HourlyForecast, estimate_pv_kw, fetch_forecast, get_forecast_for_slot
 
@@ -265,6 +267,119 @@ def _coarse_merge_fox(
     return out
 
 
+def _consolidate_fox_charge_block(
+    slots: list[HalfHourSlot],
+    tz: ZoneInfo,
+    overnight_start_h: int = 23,
+    overnight_end_h: int = 7,
+) -> None:
+    """Promote isolated SelfUse slots sandwiched inside a ForceCharge run to 'cheap'
+    so that the Fox scheduler sees a single solid overnight charging block.
+
+    The overnight window wraps midnight: ``overnight_start_h`` (e.g. 23) through
+    ``overnight_end_h`` (e.g. 7) the next morning.
+
+    Only fills gaps of ≤ 3 consecutive SelfUse slots to avoid charging during expensive
+    standard hours outside the overnight window.
+    """
+    _MAX_GAP_SLOTS = 3
+
+    in_overnight = []
+    for s in slots:
+        local_h = s.start_utc.astimezone(tz).hour
+        if local_h >= overnight_start_h or local_h < overnight_end_h:
+            in_overnight.append(s)
+
+    if not in_overnight:
+        return
+
+    # Find first and last ForceCharge slot within window
+    charge_indices = [
+        i for i, s in enumerate(in_overnight) if s.kind in ("cheap", "negative")
+    ]
+    if len(charge_indices) < 2:
+        return
+
+    first_ci = charge_indices[0]
+    last_ci = charge_indices[-1]
+
+    # Fill isolated standard/SelfUse gaps between first and last charge slot
+    gap_run = 0
+    for i in range(first_ci, last_ci + 1):
+        s = in_overnight[i]
+        if s.kind in ("cheap", "negative"):
+            gap_run = 0
+        else:
+            gap_run += 1
+            if gap_run <= _MAX_GAP_SLOTS:
+                s.kind = "cheap"
+            else:
+                # Gap too large — stop filling (leave expensive island alone)
+                break
+
+
+def _schedule_dhw_thermal_decay(
+    plan_date: str,
+    slots: list[HalfHourSlot],
+    tz: ZoneInfo,
+    *,
+    target_temp_c: float = 45.0,
+    shower_hour: int = 9,
+    shower_minute: int = 30,
+) -> Optional[dict[str, Any]]:
+    """Calculate the physics-optimal Daikin DHW setpoint for the morning shower target.
+
+    Finds the latest cheap/negative slot in the 02:00–07:00 local window,
+    computes thermal decay from heat-end to shower time, and writes a
+    dedicated Daikin ``dhw_thermal_target`` action to the schedule.
+
+    Returns a summary dict (or None if no overnight cheap slots found).
+    """
+    heat_end_utc = find_dhw_heat_end_utc(slots, overnight_start_h=2, overnight_end_h=7, tz=tz)
+    if heat_end_utc is None:
+        return None
+
+    shower_iso = build_shower_target_iso(plan_date, hour=shower_hour, minute=shower_minute, tz=tz)
+    setpoint = calculate_dhw_setpoint(
+        target_temp_c=target_temp_c,
+        target_time_iso=shower_iso,
+        heat_end_time_iso=heat_end_utc.isoformat().replace("+00:00", "Z"),
+    )
+
+    # Write a dedicated Daikin action that overrides tank_temp with the computed setpoint.
+    # The action covers the last cheap heating slot only (fine-grained override).
+    heat_start_utc = heat_end_utc - timedelta(minutes=30)
+    start_iso = heat_start_utc.isoformat().replace("+00:00", "Z")
+    end_iso = heat_end_utc.isoformat().replace("+00:00", "Z")
+
+    params: dict[str, Any] = {
+        "lwt_offset": min(config.LWT_OFFSET_PREHEAT_BOOST, config.LWT_OFFSET_MAX),
+        "tank_powerful": False,
+        "tank_temp": setpoint,
+        "tank_power": True,
+        "climate_on": True,
+        "dhw_thermal_decay_setpoint": setpoint,
+        "shower_target_temp_c": target_temp_c,
+        "shower_target_time": shower_iso,
+        "heat_end_time": end_iso,
+    }
+    db.upsert_action(
+        plan_date=plan_date,
+        start_time=start_iso,
+        end_time=end_iso,
+        device="daikin",
+        action_type="dhw_thermal_target",
+        params=params,
+        status="pending",
+    )
+    return {
+        "setpoint_c": setpoint,
+        "heat_end_utc": end_iso,
+        "shower_target_utc": shower_iso,
+        "target_temp_c": target_temp_c,
+    }
+
+
 def _legionella_active_local(dt_local: datetime) -> bool:
     if dt_local.weekday() != config.DHW_LEGIONELLA_DAY:
         return False
@@ -283,7 +398,7 @@ def _daikin_params_for_kind(kind: str, peak_frost: bool) -> dict[str, Any]:
     if kind == "cheap":
         return {
             "lwt_offset": min(config.LWT_OFFSET_PREHEAT_BOOST, config.LWT_OFFSET_MAX),
-            "tank_powerful": True,
+            "tank_powerful": False,  # V2: disable tank_powerful on cheap slots (save demand)
             "tank_temp": config.DHW_TEMP_CHEAP_C,
             "tank_power": True,
             "climate_on": True,
@@ -384,8 +499,10 @@ def run_optimizer(fox: Optional[FoxESSClient], daikin: Optional[Any] = None) -> 
         return {"ok": False, "error": "OCTOPUS_TARIFF_CODE not set"}
 
     tz = TZ()
+    # Use Europe/London (or configured timezone) for plan_date so BST/GMT is correct.
     tomorrow = (datetime.now(tz) + timedelta(days=1)).date()
     plan_date = tomorrow.isoformat()
+    # Build day window anchored to local midnight (ZoneInfo handles DST transparently).
     day_start = datetime.combine(tomorrow, datetime.min.time()).replace(tzinfo=tz)
     day_end = day_start + timedelta(days=1)
 
@@ -400,6 +517,9 @@ def run_optimizer(fox: Optional[FoxESSClient], daikin: Optional[Any] = None) -> 
     forecast = fetch_forecast(hours=48)
     slots = _build_half_hour_slots(rates, day_start, day_end)
     _classify_slots(slots, forecast)
+
+    # V2: consolidate overnight ForceCharge slots into one solid block before group building.
+    _consolidate_fox_charge_block(slots, tz)
 
     mu_load = db.mean_consumption_kwh_from_execution_logs()
     peak_hours_pre = sum(1 for s in slots if s.kind == "peak") * 0.5
@@ -483,6 +603,33 @@ def run_optimizer(fox: Optional[FoxESSClient], daikin: Optional[Any] = None) -> 
 
     daikin_n = _write_daikin_schedule(plan_date, slots, forecast)
 
+    # V2: physics-based DHW thermal decay setpoint for 09:30 shower target.
+    thermal_info = _schedule_dhw_thermal_decay(plan_date, slots, tz)
+    if thermal_info:
+        strategy += (
+            f"; DHW thermal target: {thermal_info['setpoint_c']}°C "
+            f"(decay-compensated for 09:30 shower)"
+        )
+        daikin_n += 1
+
+    # V2: push webhook notifications for cheap / peak window transitions.
+    try:
+        cheap_slots_local = [
+            s for s in slots if s.kind in ("cheap", "negative")
+        ]
+        if cheap_slots_local:
+            first_cheap = min(cheap_slots_local, key=lambda s: s.start_utc)
+            push_cheap_window_start(fox_mode=None)
+            logger.info(
+                "Push: CHEAP_WINDOW_START first slot %s",
+                first_cheap.start_utc.astimezone(tz).strftime("%H:%M"),
+            )
+        peak_slots_local = [s for s in slots if s.kind == "peak"]
+        if peak_slots_local:
+            push_peak_window_start(soc=None)
+    except Exception as exc:
+        logger.debug("Push webhook error (non-fatal): %s", exc)
+
     db.log_optimizer_run(
         {
             "run_at": datetime.now(timezone.utc).isoformat(),
@@ -510,5 +657,6 @@ def run_optimizer(fox: Optional[FoxESSClient], daikin: Optional[Any] = None) -> 
         "battery_warning": battery_warn,
         "peak_export_discharge": peak_export,
         "strategy": strategy,
+        "dhw_thermal_decay": thermal_info,
     }
 
