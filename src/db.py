@@ -144,6 +144,26 @@ CREATE TABLE IF NOT EXISTS octopus_fetch_state (
     survival_mode_since TEXT
 );
 INSERT OR IGNORE INTO octopus_fetch_state (id) VALUES (1);
+
+CREATE TABLE IF NOT EXISTS meteo_forecast (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    forecast_date TEXT NOT NULL,
+    slot_time TEXT NOT NULL,
+    temp_c REAL,
+    solar_w_m2 REAL,
+    UNIQUE(slot_time)
+);
+
+CREATE TABLE IF NOT EXISTS pnl_execution_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    slot_time TEXT NOT NULL,
+    kwh_consumed REAL,
+    agile_price_pence REAL,
+    svt_price_pence REAL,
+    delta_pence REAL
+);
+
+CREATE INDEX IF NOT EXISTS idx_pnl_execution_log_slot ON pnl_execution_log(slot_time);
 """
 
 
@@ -166,6 +186,31 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE octopus_fetch_state ADD COLUMN failure_streak_started_at TEXT"
         )
+
+    # V2: meteo_forecast and pnl_execution_log tables (may already exist via SCHEMA)
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS meteo_forecast (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            forecast_date TEXT NOT NULL,
+            slot_time TEXT NOT NULL,
+            temp_c REAL,
+            solar_w_m2 REAL,
+            UNIQUE(slot_time)
+        )"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS pnl_execution_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            slot_time TEXT NOT NULL,
+            kwh_consumed REAL,
+            agile_price_pence REAL,
+            svt_price_pence REAL,
+            delta_pence REAL
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pnl_execution_log_slot ON pnl_execution_log(slot_time)"
+    )
 
 
 def init_db() -> None:
@@ -824,3 +869,144 @@ def schedule_for_date(plan_date: str) -> list[dict[str, Any]]:
             return [_row_action(r) for r in cur.fetchall()]
         finally:
             conn.close()
+
+
+# ---------------------------------------------------------------------------
+# V2: meteo_forecast
+# ---------------------------------------------------------------------------
+
+def save_meteo_forecast(rows: list[dict[str, Any]], forecast_date: str) -> int:
+    """Upsert hourly Open-Meteo forecast rows for *forecast_date*.
+
+    Each dict must have: slot_time (ISO), temp_c (float), solar_w_m2 (float).
+    """
+    if not rows:
+        return 0
+    n = 0
+    with _lock:
+        conn = get_connection()
+        try:
+            for r in rows:
+                slot = r.get("slot_time")
+                if not slot:
+                    continue
+                conn.execute(
+                    """INSERT INTO meteo_forecast (forecast_date, slot_time, temp_c, solar_w_m2)
+                       VALUES (?, ?, ?, ?)
+                       ON CONFLICT(slot_time) DO UPDATE SET
+                         forecast_date=excluded.forecast_date,
+                         temp_c=excluded.temp_c,
+                         solar_w_m2=excluded.solar_w_m2""",
+                    (
+                        forecast_date,
+                        str(slot),
+                        r.get("temp_c"),
+                        r.get("solar_w_m2"),
+                    ),
+                )
+                n += 1
+            conn.commit()
+        finally:
+            conn.close()
+    return n
+
+
+def get_meteo_forecast(forecast_date: str) -> list[dict[str, Any]]:
+    """Return all meteo_forecast rows for *forecast_date* ordered by slot_time."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM meteo_forecast WHERE forecast_date = ? ORDER BY slot_time",
+                (forecast_date,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
+# ---------------------------------------------------------------------------
+# V2: pnl_execution_log
+# ---------------------------------------------------------------------------
+
+def log_pnl_execution(row: dict[str, Any]) -> int:
+    """Insert one row into pnl_execution_log. Returns new row id."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """INSERT INTO pnl_execution_log
+                   (slot_time, kwh_consumed, agile_price_pence, svt_price_pence, delta_pence)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (
+                    row.get("slot_time"),
+                    row.get("kwh_consumed"),
+                    row.get("agile_price_pence"),
+                    row.get("svt_price_pence"),
+                    row.get("delta_pence"),
+                ),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+        finally:
+            conn.close()
+
+
+def get_pnl_execution_logs(
+    from_slot: Optional[str] = None,
+    to_slot: Optional[str] = None,
+    limit: int = 500,
+) -> list[dict[str, Any]]:
+    """Return pnl_execution_log rows in descending slot_time order."""
+    with _lock:
+        conn = get_connection()
+        try:
+            q = "SELECT * FROM pnl_execution_log WHERE 1=1"
+            args: list[Any] = []
+            if from_slot:
+                q += " AND slot_time >= ?"
+                args.append(from_slot)
+            if to_slot:
+                q += " AND slot_time <= ?"
+                args.append(to_slot)
+            q += " ORDER BY slot_time DESC LIMIT ?"
+            args.append(limit)
+            cur = conn.execute(q, args)
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
+def get_pnl_summary_for_date(date_str: str) -> dict[str, Any]:
+    """Return PnL summary metrics (VWAP, total kWh, total saving) for one day."""
+    rows = get_pnl_execution_logs(
+        from_slot=f"{date_str}T00:00:00Z",
+        to_slot=f"{date_str}T23:59:59Z",
+        limit=10000,
+    )
+    if not rows:
+        return {"date": date_str, "slots": 0, "total_kwh": 0.0, "total_cost_pence": 0.0,
+                "total_saving_pence": 0.0, "vwap_pence": 0.0, "slippage_pence": 0.0}
+
+    total_kwh = sum(float(r.get("kwh_consumed") or 0) for r in rows)
+    total_cost = sum(
+        float(r.get("kwh_consumed") or 0) * float(r.get("agile_price_pence") or 0) for r in rows
+    )
+    total_svt = sum(
+        float(r.get("kwh_consumed") or 0) * float(r.get("svt_price_pence") or 0) for r in rows
+    )
+    total_saving = sum(float(r.get("delta_pence") or 0) for r in rows)
+    vwap = total_cost / total_kwh if total_kwh else 0.0
+    svt_vwap = total_svt / total_kwh if total_kwh else 0.0
+    slippage = svt_vwap - vwap
+
+    return {
+        "date": date_str,
+        "slots": len(rows),
+        "total_kwh": round(total_kwh, 3),
+        "total_cost_pence": round(total_cost, 2),
+        "total_saving_pence": round(total_saving, 2),
+        "vwap_pence": round(vwap, 3),
+        "svt_vwap_pence": round(svt_vwap, 3),
+        "slippage_pence": round(slippage, 3),
+    }
