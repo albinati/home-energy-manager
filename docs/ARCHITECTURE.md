@@ -62,3 +62,10 @@ flowchart LR
   H --> D
   H --> F
 ```
+
+## V8 Optimizer (PuLP Linear Programming)
+As of April 2026, the heuristic "If/Else" rule-based optimizer is being replaced by a Mathematical Solver using `PuLP`.
+- **Objective:** Minimize total cost (Import * Price - Export * 15p).
+- **Thermal Battery:** The Daikin DHW tank is modeled as a thermal battery with 0.33°C/h thermal decay and a strict rule to hit 48°C at 07:00 and 20:00.
+- **Electrical Battery:** FoxESS is modeled with its real SoC, Max Inverter limits (3kW), and Open-Meteo PV forecasting to handle precise grid import/export arbitrage.
+The solver completely replaces manual peak avoidance by mathematically proving the cheapest route for 24h/48h horizons.
