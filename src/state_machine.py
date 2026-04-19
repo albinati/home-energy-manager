@@ -228,7 +228,42 @@ def reconcile_daikin_schedule_for_date(
     trigger: str,
     outdoor_c: Optional[float] = None,
 ) -> None:
-    """Full-day Daikin reconciliation (status transitions + live apply)."""
+    """Full-day Daikin reconciliation (status transitions + live apply).
+
+    Blocked when a plan_consent row for *plan_date* is in ``pending_approval``
+    status and the expiry has not yet elapsed.  On expiry, the plan is
+    auto-approved and execution proceeds (or self-use if PLAN_AUTO_APPROVE=false
+    and no approval within the window).
+    """
+    import time as _time
+    consent = db.get_plan_consent(plan_date)
+    if consent and consent["status"] == "pending_approval":
+        if _time.time() > float(consent["expires_at"]):
+            # Expired without user response → auto-approve so the system doesn't stall
+            db.approve_plan(consent["plan_id"])
+            elapsed = int(_time.time() - float(consent["proposed_at"]))
+            logger.info(
+                "Plan %s auto-approved on expiry (%ds elapsed)",
+                consent["plan_id"],
+                elapsed,
+            )
+            # Notify user that expiry auto-approval occurred
+            try:
+                from .notifier import notify_action_confirmation
+                notify_action_confirmation(
+                    f"Plan {consent['plan_id']} auto-approved after {elapsed//60}m timeout "
+                    f"— Daikin is now executing the scheduled actions."
+                )
+            except Exception as _exc:
+                logger.debug("notify expiry auto-approve failed (non-fatal): %s", _exc)
+        else:
+            logger.debug(
+                "Plan %s pending user approval — Daikin execution held (expires in %ds)",
+                consent["plan_id"],
+                int(float(consent["expires_at"]) - _time.time()),
+            )
+            return  # hard gate: no Daikin actions until approved
+
     actions = db.get_actions_for_plan_date(plan_date, device="daikin")
     _reconcile_daikin_actions(
         actions, client, dev, now_utc, trigger=trigger, outdoor_c=outdoor_c

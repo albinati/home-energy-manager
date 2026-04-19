@@ -31,6 +31,8 @@ class AlertType(str, Enum):
     CHEAP_WINDOW_START = "cheap_window_start"
     PEAK_WINDOW_START = "peak_window_start"
     DAILY_PNL = "daily_pnl"
+    # V7 plan consent
+    PLAN_PROPOSED = "plan_proposed"
 
 
 # ---------------------------------------------------------------------------
@@ -260,3 +262,61 @@ def push_peak_window_start(soc: Optional[float] = None) -> None:
 def push_daily_pnl(metrics: dict[str, Any]) -> None:
     """Emit DAILY_PNL report: hedge-fund format with PnL, VWAP, slippage."""
     push_alert(AlertType.DAILY_PNL.value, metrics)
+
+
+# ---------------------------------------------------------------------------
+# V7: plan consent notification
+# ---------------------------------------------------------------------------
+
+def _format_plan_actions(actions: list[dict[str, Any]], tz_name: str = "Europe/London") -> str:
+    """Render action_schedule rows as a compact human-readable table."""
+    from zoneinfo import ZoneInfo
+    from datetime import datetime, timezone as _tz
+
+    tz = ZoneInfo(tz_name)
+    lines: list[str] = []
+    for a in sorted(actions, key=lambda x: x.get("start_time", "")):
+        atype = a.get("action_type", "")
+        if atype == "restore":
+            continue
+        try:
+            st = datetime.fromisoformat(
+                str(a["start_time"]).replace("Z", "+00:00")
+            ).astimezone(tz).strftime("%H:%M")
+            en = datetime.fromisoformat(
+                str(a["end_time"]).replace("Z", "+00:00")
+            ).astimezone(tz).strftime("%H:%M")
+        except (ValueError, KeyError):
+            continue
+        p = a.get("params") or {}
+        lwt = p.get("lwt_offset", 0)
+        tank = p.get("tank_temp", "")
+        tank_on = p.get("tank_power", True)
+        details = f"LWT{lwt:+g}"
+        if tank:
+            details += f" tank={tank:.0f}C"
+        if not tank_on:
+            details += " DHW-off"
+        lines.append(f"  {st}-{en}  {atype:<12s}  {details}")
+    return "\n".join(lines) if lines else "  (no actions)"
+
+
+def notify_plan_proposed(
+    plan_id: str,
+    plan_date: str,
+    summary: str,
+    actions: list[dict[str, Any]],
+) -> None:
+    """Send a PLAN_PROPOSED notification with the full schedule and approval instructions."""
+    from .config import config as _cfg
+    tz_name = getattr(_cfg, "BULLETPROOF_TIMEZONE", "Europe/London")
+    table = _format_plan_actions(actions, tz_name)
+    msg = (
+        f"New energy plan for {plan_date} — ID: {plan_id}\n"
+        f"\n{table}\n"
+        f"\n{summary}\n"
+        f"\nTo activate: confirm_plan(\"{plan_id}\")\n"
+        f"To reject:   reject_plan(\"{plan_id}\")\n"
+        f"(Auto-activates in {_cfg.PLAN_CONSENT_EXPIRY_SECONDS // 60} min if no response)"
+    )
+    _dispatch(AlertType.PLAN_PROPOSED, msg, urgent=True)

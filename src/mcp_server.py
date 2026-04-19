@@ -10,9 +10,14 @@ Writes honour ``OPENCLAW_READ_ONLY`` (default true) and the same rate limits as 
 """
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import sys
 from typing import Any
+
+# Single-worker executor for non-blocking optimizer calls from the MCP transport.
+# max_workers=1 ensures only one plan runs at a time (no concurrent LP solves).
+_optimizer_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="mcp-optimizer")
 
 from mcp.server.fastmcp import FastMCP
 
@@ -74,6 +79,28 @@ def _daikin_write_api_error(
         msg = f"Daikin unreachable: {exc}"
     safeguards.audit_log(action_type, params, "mcp", False, msg)
     return {"ok": False, "error": msg}
+
+
+def _check_plan_consent_conflict(plan_date: str) -> str | None:
+    """Return a warning string if a plan is pending approval for *plan_date*, else None."""
+    from . import db
+    try:
+        consent = db.get_plan_consent(plan_date)
+    except Exception:
+        return None
+    if consent and consent.get("status") == "pending_approval":
+        return (
+            f"WARNING: plan {consent['plan_id']} is pending your approval. "
+            "Manual Daikin changes may be overwritten when the plan is approved. "
+            "Pass confirmed=True to proceed anyway, or use confirm_plan/reject_plan first."
+        )
+    return None
+
+
+def _plan_date_today(tz_name: str) -> str:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo(tz_name)).date().isoformat()
 
 
 def _device_status_dict(client: DaikinClient, dev: DaikinDevice) -> dict[str, Any]:
@@ -198,49 +225,57 @@ def build_mcp() -> FastMCP:
 
     @mcp.tool(
         name="set_daikin_power",
-        description="Turn Daikin climate control on or off for all gateway devices.",
+        description=(
+            "Turn Daikin climate control on or off for all gateway devices. "
+            "When a plan is pending approval, pass confirmed=True to override it."
+        ),
     )
-    def set_daikin_power(on: bool) -> dict[str, Any]:
+    def set_daikin_power(on: bool, confirmed: bool = False) -> dict[str, Any]:
         params = {"on": on}
         blocked = _daikin_write_preamble(DAIKIN_POWER_ACTION, params)
         if blocked is not None:
             return blocked
+        plan_date = _plan_date_today(config.BULLETPROOF_TIMEZONE)
+        conflict_warn = _check_plan_consent_conflict(plan_date)
+        if conflict_warn and not confirmed:
+            return {"ok": False, "requires_confirmation": True, "warning": conflict_warn}
         try:
-            client = _daikin_client()
-            devices = client.get_devices()
-            if not devices:
-                return {"ok": False, "error": "No Daikin devices found"}
-            for dev in devices:
-                client.set_power(dev, on)
+            from .daikin import service as _daikin_svc
+            _daikin_svc.set_power(on, actor="mcp")
         except FileNotFoundError as e:
             return {"ok": False, "error": f"Daikin not configured: {e}"}
         except (DaikinError, TimeoutError, OSError) as e:
             return _daikin_write_api_error(DAIKIN_POWER_ACTION, params, e)
         safeguards.record_action_time(DAIKIN_POWER_ACTION)
         safeguards.audit_log(DAIKIN_POWER_ACTION, params, "mcp", True, "Power set")
-        return {"ok": True, "message": f"Daikin climate turned {'ON' if on else 'OFF'}"}
+        result: dict[str, Any] = {"ok": True, "message": f"Daikin climate turned {'ON' if on else 'OFF'}"}
+        if conflict_warn:
+            result["warning"] = conflict_warn
+        return result
 
     @mcp.tool(
         name="set_daikin_temperature",
         description=(
             "Set target room temperature (°C) for all devices. Blocked when weather "
             "regulation is active — use set_daikin_lwt_offset. Optional mode overrides "
-            "operation mode (e.g. heating)."
+            "operation mode (e.g. heating). Pass confirmed=True to override a pending plan."
         ),
     )
-    def set_daikin_temperature(temperature: float, mode: str | None = None) -> dict[str, Any]:
+    def set_daikin_temperature(temperature: float, mode: str | None = None, confirmed: bool = False) -> dict[str, Any]:
         params = {"temperature": temperature, "mode": mode}
         blocked = _daikin_write_preamble(DAIKIN_TEMPERATURE_ACTION, params)
         if blocked is not None:
             return blocked
         if temperature < 15 or temperature > 30:
             return {"ok": False, "error": "Temperature must be between 15 and 30°C"}
+        plan_date = _plan_date_today(config.BULLETPROOF_TIMEZONE)
+        conflict_warn = _check_plan_consent_conflict(plan_date)
+        if conflict_warn and not confirmed:
+            return {"ok": False, "requires_confirmation": True, "warning": conflict_warn}
         try:
-            client = _daikin_client()
-            devices = client.get_devices()
-            if not devices:
-                return {"ok": False, "error": "No Daikin devices found"}
-            for dev in devices:
+            from .daikin import service as _daikin_svc
+            cached = _daikin_svc.get_cached_devices(allow_refresh=False, actor="mcp")
+            for dev in (cached.devices or []):
                 if dev.weather_regulation_enabled:
                     msg = (
                         "Cannot set room temperature while weather regulation is active. "
@@ -248,64 +283,69 @@ def build_mcp() -> FastMCP:
                     )
                     safeguards.audit_log(DAIKIN_TEMPERATURE_ACTION, params, "mcp", False, msg)
                     return {"ok": False, "error": msg}
-                op_mode = mode or dev.operation_mode
-                client.set_temperature(dev, temperature, op_mode)
+            _daikin_svc.set_temperature(temperature, mode or "heating", actor="mcp")
         except FileNotFoundError as e:
             return {"ok": False, "error": f"Daikin not configured: {e}"}
         except (DaikinError, TimeoutError, OSError) as e:
             return _daikin_write_api_error(DAIKIN_TEMPERATURE_ACTION, params, e)
         safeguards.record_action_time(DAIKIN_TEMPERATURE_ACTION)
         safeguards.audit_log(DAIKIN_TEMPERATURE_ACTION, params, "mcp", True, "Temperature set")
-        return {"ok": True, "message": f"Temperature set to {temperature}°C"}
+        result: dict[str, Any] = {"ok": True, "message": f"Temperature set to {temperature}°C"}
+        if conflict_warn:
+            result["warning"] = conflict_warn
+        return result
 
     @mcp.tool(
         name="set_daikin_lwt_offset",
         description=(
             "Set leaving-water temperature offset (-10 to +10) for all devices. "
-            "Preferred when weather regulation is active."
+            "Preferred when weather regulation is active. Pass confirmed=True to override a pending plan."
         ),
     )
-    def set_daikin_lwt_offset(offset: float, mode: str | None = None) -> dict[str, Any]:
+    def set_daikin_lwt_offset(offset: float, mode: str | None = None, confirmed: bool = False) -> dict[str, Any]:
         params = {"offset": offset, "mode": mode}
         blocked = _daikin_write_preamble(DAIKIN_LWT_OFFSET_ACTION, params)
         if blocked is not None:
             return blocked
         if offset < -10 or offset > 10:
             return {"ok": False, "error": "LWT offset must be between -10 and +10"}
+        plan_date = _plan_date_today(config.BULLETPROOF_TIMEZONE)
+        conflict_warn = _check_plan_consent_conflict(plan_date)
+        if conflict_warn and not confirmed:
+            return {"ok": False, "requires_confirmation": True, "warning": conflict_warn}
         try:
-            client = _daikin_client()
-            devices = client.get_devices()
-            if not devices:
-                return {"ok": False, "error": "No Daikin devices found"}
-            for dev in devices:
-                op_mode = mode or dev.operation_mode
-                client.set_lwt_offset(dev, offset, op_mode)
+            from .daikin import service as _daikin_svc
+            _daikin_svc.set_lwt_offset(offset, mode or "heating", actor="mcp")
         except FileNotFoundError as e:
             return {"ok": False, "error": f"Daikin not configured: {e}"}
         except (DaikinError, TimeoutError, OSError) as e:
             return _daikin_write_api_error(DAIKIN_LWT_OFFSET_ACTION, params, e)
         safeguards.record_action_time(DAIKIN_LWT_OFFSET_ACTION)
         safeguards.audit_log(DAIKIN_LWT_OFFSET_ACTION, params, "mcp", True, "LWT offset set")
-        return {"ok": True, "message": f"LWT offset set to {offset:+g}"}
+        result: dict[str, Any] = {"ok": True, "message": f"LWT offset set to {offset:+g}"}
+        if conflict_warn:
+            result["warning"] = conflict_warn
+        return result
 
     @mcp.tool(
         name="set_daikin_mode",
         description=(
-            "Set Daikin operation mode: heating, cooling, auto, fan_only, or dry."
+            "Set Daikin operation mode: heating, cooling, auto, fan_only, or dry. "
+            "Pass confirmed=True to override a pending plan."
         ),
     )
-    def set_daikin_mode(mode: str) -> dict[str, Any]:
+    def set_daikin_mode(mode: str, confirmed: bool = False) -> dict[str, Any]:
         params = {"mode": mode}
         blocked = _daikin_write_preamble(DAIKIN_MODE_ACTION, params)
         if blocked is not None:
             return blocked
+        plan_date = _plan_date_today(config.BULLETPROOF_TIMEZONE)
+        conflict_warn = _check_plan_consent_conflict(plan_date)
+        if conflict_warn and not confirmed:
+            return {"ok": False, "requires_confirmation": True, "warning": conflict_warn}
         try:
-            client = _daikin_client()
-            devices = client.get_devices()
-            if not devices:
-                return {"ok": False, "error": "No Daikin devices found"}
-            for dev in devices:
-                client.set_operation_mode(dev, mode)
+            from .daikin import service as _daikin_svc
+            _daikin_svc.set_operation_mode(mode, actor="mcp")
         except FileNotFoundError as e:
             return {"ok": False, "error": f"Daikin not configured: {e}"}
         except ValueError as e:
@@ -315,27 +355,29 @@ def build_mcp() -> FastMCP:
             return _daikin_write_api_error(DAIKIN_MODE_ACTION, params, e)
         safeguards.record_action_time(DAIKIN_MODE_ACTION)
         safeguards.audit_log(DAIKIN_MODE_ACTION, params, "mcp", True, "Mode set")
-        return {"ok": True, "message": f"Mode set to {mode}"}
+        result: dict[str, Any] = {"ok": True, "message": f"Mode set to {mode}"}
+        if conflict_warn:
+            result["warning"] = conflict_warn
+        return result
 
     @mcp.tool(
         name="set_daikin_tank_temperature",
-        description="Set DHW tank target temperature (30–65°C) where supported.",
+        description="Set DHW tank target temperature (30–65°C) where supported. Pass confirmed=True to override a pending plan.",
     )
-    def set_daikin_tank_temperature(temperature: float) -> dict[str, Any]:
+    def set_daikin_tank_temperature(temperature: float, confirmed: bool = False) -> dict[str, Any]:
         params = {"temperature": temperature}
         blocked = _daikin_write_preamble(DAIKIN_TANK_TEMP_ACTION, params)
         if blocked is not None:
             return blocked
         if temperature < 30 or temperature > 65:
             return {"ok": False, "error": "Tank temperature must be between 30 and 65°C"}
+        plan_date = _plan_date_today(config.BULLETPROOF_TIMEZONE)
+        conflict_warn = _check_plan_consent_conflict(plan_date)
+        if conflict_warn and not confirmed:
+            return {"ok": False, "requires_confirmation": True, "warning": conflict_warn}
         try:
-            client = _daikin_client()
-            devices = client.get_devices()
-            if not devices:
-                return {"ok": False, "error": "No Daikin devices found"}
-            for dev in devices:
-                if dev.tank_target is not None:
-                    client.set_tank_temperature(dev, temperature)
+            from .daikin import service as _daikin_svc
+            _daikin_svc.set_tank_temperature(temperature, actor="mcp")
         except FileNotFoundError as e:
             return {"ok": False, "error": f"Daikin not configured: {e}"}
         except ValueError as e:
@@ -345,31 +387,37 @@ def build_mcp() -> FastMCP:
             return _daikin_write_api_error(DAIKIN_TANK_TEMP_ACTION, params, e)
         safeguards.record_action_time(DAIKIN_TANK_TEMP_ACTION)
         safeguards.audit_log(DAIKIN_TANK_TEMP_ACTION, params, "mcp", True, "Tank temp set")
-        return {"ok": True, "message": f"DHW tank target set to {temperature}°C"}
+        result: dict[str, Any] = {"ok": True, "message": f"DHW tank target set to {temperature}°C"}
+        if conflict_warn:
+            result["warning"] = conflict_warn
+        return result
 
     @mcp.tool(
         name="set_daikin_tank_power",
-        description="Turn domestic hot water (tank) on or off for all devices.",
+        description="Turn domestic hot water (tank) on or off for all devices. Pass confirmed=True to override a pending plan.",
     )
-    def set_daikin_tank_power(on: bool) -> dict[str, Any]:
+    def set_daikin_tank_power(on: bool, confirmed: bool = False) -> dict[str, Any]:
         params = {"on": on}
         blocked = _daikin_write_preamble(DAIKIN_TANK_POWER_ACTION, params)
         if blocked is not None:
             return blocked
+        plan_date = _plan_date_today(config.BULLETPROOF_TIMEZONE)
+        conflict_warn = _check_plan_consent_conflict(plan_date)
+        if conflict_warn and not confirmed:
+            return {"ok": False, "requires_confirmation": True, "warning": conflict_warn}
         try:
-            client = _daikin_client()
-            devices = client.get_devices()
-            if not devices:
-                return {"ok": False, "error": "No Daikin devices found"}
-            for dev in devices:
-                client.set_tank_power(dev, on)
+            from .daikin import service as _daikin_svc
+            _daikin_svc.set_tank_power(on, actor="mcp")
         except FileNotFoundError as e:
             return {"ok": False, "error": f"Daikin not configured: {e}"}
         except (DaikinError, TimeoutError, OSError) as e:
             return _daikin_write_api_error(DAIKIN_TANK_POWER_ACTION, params, e)
         safeguards.record_action_time(DAIKIN_TANK_POWER_ACTION)
         safeguards.audit_log(DAIKIN_TANK_POWER_ACTION, params, "mcp", True, "Tank power set")
-        return {"ok": True, "message": f"DHW tank turned {'ON' if on else 'OFF'}"}
+        result: dict[str, Any] = {"ok": True, "message": f"DHW tank turned {'ON' if on else 'OFF'}"}
+        if conflict_warn:
+            result["warning"] = conflict_warn
+        return result
 
     # ── Bulletproof planner: presets, mode, snapshots (V7 consent stack removed) ──
 
@@ -429,22 +477,67 @@ def build_mcp() -> FastMCP:
         name="propose_optimization_plan",
         description=(
             "Run the Bulletproof daily planner (SQLite + optional Fox V3 upload). "
-            "No separate approval step — hardware writes follow OPERATION_MODE and OPENCLAW_READ_ONLY."
+            "Returns immediately with status='planning'. You will receive a PLAN_PROPOSED "
+            "notification via OpenClaw when the plan is ready — then call confirm_plan to "
+            "activate Daikin, or reject_plan to discard. "
+            "Use get_pending_approval to poll for the result. "
+            "Set PLAN_AUTO_APPROVE=true to skip the consent step."
         ),
     )
     def propose_optimization_plan() -> dict[str, Any]:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
         from .scheduler.optimizer import run_optimizer
 
         if not config.OCTOPUS_TARIFF_CODE:
             return {"ok": False, "error": "OCTOPUS_TARIFF_CODE not set"}
+
+        tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+        plan_date = datetime.now(tz).date().isoformat()
+        plan_id = f"lp-{plan_date}"
+
+        # Check cooldown — prevent rapid re-plan spam
+        from . import db
+        existing = db.get_plan_consent(plan_date)
+        cooldown_s = int(getattr(config, "PLAN_REGEN_COOLDOWN_SECONDS", 300))
+        if existing and existing.get("status") in ("approved", "pending_approval"):
+            import time
+            age_s = time.time() - float(existing.get("proposed_at", 0))
+            if age_s < cooldown_s:
+                remaining = int(cooldown_s - age_s)
+                return {
+                    "ok": True,
+                    "status": existing["status"],
+                    "plan_id": plan_id,
+                    "plan_date": plan_date,
+                    "cooldown_active": True,
+                    "retry_in_seconds": remaining,
+                    "message": (
+                        f"Plan {plan_id} already exists ({existing['status']}). "
+                        f"Re-planning is throttled for {remaining}s. "
+                        "Use get_pending_approval to see the current plan, "
+                        "or call reject_plan first to force a re-plan now."
+                    ),
+                }
+
+        # Submit optimizer to background thread — returns immediately
         fox = None
         try:
             fox = FoxESSClient(**config.foxess_client_kwargs())
         except Exception:
             pass
-        result = run_optimizer(fox, None)
-        if not result.get("ok"):
-            return {"ok": False, **result}
+
+        def _run_bg() -> None:
+            try:
+                run_optimizer(fox, None)
+            except Exception as exc:
+                logger.warning("Background optimizer error: %s", exc)
+
+        try:
+            _optimizer_executor.submit(_run_bg)
+        except RuntimeError as exc:
+            return {"ok": False, "error": f"Optimizer executor unavailable: {exc}"}
+
         mode_note = (
             "Simulation / read-only: Fox upload and hardware may be skipped per config."
             if config.OPERATION_MODE != "operational" or config.OPENCLAW_READ_ONLY
@@ -453,36 +546,214 @@ def build_mcp() -> FastMCP:
         return {
             "ok": True,
             "bulletproof": True,
-            "summary": result.get("strategy", ""),
-            "plan_date": result.get("plan_date"),
-            "fox_uploaded": result.get("fox_uploaded"),
-            "daikin_actions": result.get("daikin_actions"),
-            "battery_warning": result.get("battery_warning"),
+            "status": "planning",
+            "plan_id": plan_id,
+            "plan_date": plan_date,
             "mode_note": mode_note,
+            "message": (
+                f"Optimizer is running in the background for {plan_date}. "
+                "You will receive a PLAN_PROPOSED notification when ready. "
+                "Use get_pending_approval to poll for status."
+            ),
         }
 
     @mcp.tool(
         name="approve_optimization_plan",
-        description="Legacy no-op: Bulletproof applies plans on propose_optimization_plan.",
+        description=(
+            "Approve a pending plan by plan_id to activate Daikin hardware execution. "
+            "Alias for confirm_plan — use confirm_plan for new code."
+        ),
     )
     def approve_optimization_plan(plan_id: str) -> dict[str, Any]:
+        from . import db
+        ok = db.approve_plan(plan_id)
+        if not ok:
+            row = db.get_plan_consent(plan_id.replace("lp-", ""))
+            if row and row.get("status") != "pending_approval":
+                return {
+                    "ok": False,
+                    "plan_id": plan_id,
+                    "status": row.get("status"),
+                    "message": f"Plan is already {row.get('status')} — cannot approve again.",
+                }
+            return {
+                "ok": False,
+                "plan_id": plan_id,
+                "message": "Plan not found or not in pending_approval state.",
+            }
         return {
             "ok": True,
             "plan_id": plan_id,
-            "status": "not_applicable",
-            "message": "Bulletproof does not use consent; the plan is already persisted.",
+            "status": "approved",
+            "message": "Plan approved. Daikin execution will proceed on next heartbeat.",
         }
 
     @mcp.tool(
         name="reject_optimization_plan",
-        description="Legacy no-op under Bulletproof.",
+        description=(
+            "Reject a pending plan — clears its action_schedule rows. "
+            "Alias for reject_plan — use reject_plan for new code."
+        ),
     )
-    def reject_optimization_plan(plan_id: str) -> dict[str, Any]:
+    def reject_optimization_plan(plan_id: str, reason: str | None = None) -> dict[str, Any]:
+        from . import db
+        ok = db.reject_plan(plan_id)
+        if not ok:
+            return {
+                "ok": False,
+                "plan_id": plan_id,
+                "message": "Plan not found or not in pending_approval state.",
+            }
         return {
             "ok": True,
             "plan_id": plan_id,
-            "status": "not_applicable",
-            "message": "Use propose_optimization_plan after changing presets.",
+            "status": "rejected",
+            "reason": reason,
+            "message": "Plan rejected and schedule cleared. Call propose_optimization_plan to rebuild.",
+        }
+
+    @mcp.tool(
+        name="confirm_plan",
+        description=(
+            "Confirm (approve) an energy plan that is waiting for consent. "
+            "Pass the plan_id from the PLAN_PROPOSED notification (e.g. 'lp-2026-04-19'). "
+            "Once confirmed, Daikin hardware execution resumes on the next heartbeat tick."
+        ),
+    )
+    def confirm_plan(plan_id: str) -> dict[str, Any]:
+        from . import db
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from .notifier import notify_action_confirmation
+
+        ok = db.approve_plan(plan_id)
+        if not ok:
+            plan_date = plan_id.replace("lp-", "")
+            row = db.get_plan_consent(plan_date)
+            if row and row["status"] != "pending_approval":
+                return {
+                    "ok": False,
+                    "plan_id": plan_id,
+                    "status": row["status"],
+                    "message": f"Cannot confirm: plan is already '{row['status']}'.",
+                }
+            return {
+                "ok": False,
+                "plan_id": plan_id,
+                "message": "Plan not found or not awaiting approval. Use get_pending_approval to check.",
+            }
+        plan_date = plan_id.replace("lp-", "")
+        actions = db.schedule_for_date(plan_date)
+        daikin_actions = [a for a in actions if a.get("device") == "daikin"]
+        try:
+            notify_action_confirmation(f"Plan {plan_id} confirmed — Daikin execution active.")
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "plan_id": plan_id,
+            "status": "approved",
+            "daikin_pending_actions": len(daikin_actions),
+            "message": (
+                f"Plan {plan_id} approved. Daikin will execute {len(daikin_actions)} action(s) "
+                "on schedule from the next heartbeat. Fox ESS schedule was already uploaded."
+            ),
+        }
+
+    @mcp.tool(
+        name="reject_plan",
+        description=(
+            "Reject an energy plan that is waiting for consent — clears the Daikin action schedule. "
+            "Pass the plan_id (e.g. 'lp-2026-04-19') and an optional reason string. "
+            "After rejecting, call propose_optimization_plan to build a new plan."
+        ),
+    )
+    def reject_plan(plan_id: str, reason: str | None = None) -> dict[str, Any]:
+        from . import db
+        from .notifier import notify_action_confirmation
+
+        ok = db.reject_plan(plan_id)
+        if not ok:
+            plan_date = plan_id.replace("lp-", "")
+            row = db.get_plan_consent(plan_date)
+            if row and row["status"] != "pending_approval":
+                return {
+                    "ok": False,
+                    "plan_id": plan_id,
+                    "status": row["status"],
+                    "message": f"Cannot reject: plan is already '{row['status']}'.",
+                }
+            return {
+                "ok": False,
+                "plan_id": plan_id,
+                "message": "Plan not found or not awaiting approval.",
+            }
+        try:
+            notify_action_confirmation(
+                f"Plan {plan_id} rejected{f' — {reason}' if reason else ''}. Schedule cleared."
+            )
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "plan_id": plan_id,
+            "status": "rejected",
+            "reason": reason,
+            "message": (
+                "Plan rejected and pending Daikin actions cleared. "
+                "Call propose_optimization_plan to rebuild."
+            ),
+        }
+
+    @mcp.tool(
+        name="get_pending_approval",
+        description=(
+            "Return the latest plan awaiting user approval (plan_consent status = pending_approval). "
+            "Shows plan_id, expiry time, strategy summary, and the Daikin action schedule. "
+            "Use this to check what's waiting for confirmation before calling confirm_plan or reject_plan."
+        ),
+    )
+    def get_pending_approval() -> dict[str, Any]:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        import time
+        from . import db
+
+        tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+        plan_date = datetime.now(tz).date().isoformat()
+        consent = db.get_plan_consent(plan_date)
+        if not consent:
+            return {
+                "ok": True,
+                "pending": False,
+                "message": "No plan awaiting approval today.",
+            }
+        if consent["status"] != "pending_approval":
+            return {
+                "ok": True,
+                "pending": False,
+                "plan_id": consent["plan_id"],
+                "status": consent["status"],
+                "message": f"Plan {consent['plan_id']} is already {consent['status']}.",
+            }
+        remaining_s = max(0.0, float(consent["expires_at"]) - time.time())
+        remaining_min = int(remaining_s / 60)
+        actions = db.schedule_for_date(plan_date)
+        daikin_actions = [a for a in actions if a.get("device") == "daikin"]
+        return {
+            "ok": True,
+            "pending": True,
+            "plan_id": consent["plan_id"],
+            "plan_date": plan_date,
+            "status": "pending_approval",
+            "expires_in_minutes": remaining_min,
+            "summary": consent.get("summary", ""),
+            "daikin_actions": daikin_actions,
+            "message": (
+                f"Plan {consent['plan_id']} is waiting for your approval. "
+                f"Auto-approves in ~{remaining_min} min. "
+                "Use confirm_plan or reject_plan to respond."
+            ),
         }
 
     @mcp.tool(
@@ -606,18 +877,18 @@ def build_mcp() -> FastMCP:
     @mcp.tool(
         name="set_auto_approve",
         description=(
-            "Legacy flag PLAN_AUTO_APPROVE (Bulletproof has no consent gate). "
-            "Optional bookkeeping for prompts that still read this env."
+            "Toggle PLAN_AUTO_APPROVE: when true, plans are auto-approved immediately "
+            "on propose (no consent gate, Daikin fires on next heartbeat). "
+            "When false (default), plans wait for confirm_plan before Daikin executes."
         ),
     )
     def set_auto_approve(enabled: bool) -> dict[str, Any]:
         config.PLAN_AUTO_APPROVE = enabled
         logger.info("PLAN_AUTO_APPROVE set to %s", enabled)
-        msg = (
-            "PLAN_AUTO_APPROVE enabled (legacy flag; Bulletproof has no consent gate)."
-            if enabled
-            else "PLAN_AUTO_APPROVE disabled."
-        )
+        if enabled:
+            msg = "PLAN_AUTO_APPROVE enabled — new plans will be auto-approved immediately on propose."
+        else:
+            msg = "PLAN_AUTO_APPROVE disabled — new plans will wait for confirm_plan before Daikin executes."
         return {"ok": True, "auto_approve": enabled, "message": msg}
 
     # ── Tariff comparison tools ────────────────────────────────────────────
