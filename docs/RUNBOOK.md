@@ -71,6 +71,10 @@ The script: backs up DB → git pull → pip install → DB migration → restar
 | `OPENCLAW_CLI_TIMEOUT_SECONDS` | `180` | openclaw Telegram delivery takes ~50–120 s |
 | `DAIKIN_DAILY_BUDGET` | `180` | Hard cap below Daikin's 200/day limit |
 | `FOX_DAILY_BUDGET` | `1200` | Conservative cap below Fox's 1440/day |
+| `OPENCLAW_PLAN_NOTIFY_MODE` | `direct` | Set `webhook` to POST plan events to OpenClaw Gateway `/hooks/agent` (agent summarizes before Telegram) |
+| `OPENCLAW_HOOKS_URL` | (empty) | Full URL, e.g. `http://127.0.0.1:18789/hooks/agent` |
+| `OPENCLAW_HOOKS_TOKEN` | (empty) | Same secret as Gateway `hooks.token` |
+| `OPENCLAW_INTERNAL_API_BASE_URL` | `http://127.0.0.1:8000` | Inserted into hook payload so the agent can `GET /api/v1/optimization/plan` |
 
 **The `.env` file is at `/root/home-energy-manager/.env`. Update it, then restart the service.**
 
@@ -174,6 +178,33 @@ Notifications go via `openclaw message send` subprocess. The Telegram round-trip
 | `critical_error` | Service error |
 
 Configure routing via MCP: `set_notification_route(alert_type, enabled, severity, target_override)`.
+
+### OpenClaw Gateway webhook (optional) — agent “mastiga” o plano
+
+When `OPENCLAW_PLAN_NOTIFY_MODE=webhook` and `OPENCLAW_HOOKS_URL` + `OPENCLAW_HOOKS_TOKEN` are set, **`plan_proposed` notifications** are sent with `POST` to the Gateway (default path `/hooks/agent` per [OpenClaw Webhooks](https://openclaws.io/docs/automation/webhook)) instead of piping the long body through `openclaw message send`. The payload asks your agent (e.g. Nikola) to summarize in human language; **if the hook fails (non-2xx or network error), the service falls back to the direct CLI** so you still get a message.
+
+**Gateway prerequisites:** enable `hooks` in OpenClaw config with a dedicated `hooks.token`, bind to loopback or Tailscale, and restrict `allowedAgentIds` if you use `OPENCLAW_HOOKS_AGENT_ID`.
+
+**Manual test (after hooks are enabled):**
+
+```bash
+curl -fsS -X POST http://127.0.0.1:18789/hooks/agent \
+  -H "Authorization: Bearer YOUR_HOOKS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"message":"Ping from curl — reply with one line.","name":"Test","wakeMode":"now","deliver":true,"channel":"telegram","timeoutSeconds":60}'
+```
+
+**Agent prompt template:** see [docs/openclaw-nikola-plan-prompt.md](openclaw-nikola-plan-prompt.md).
+
+---
+
+## Cursor IDE (local checklist)
+
+Seeing multiple entries such as “Cursor” and “Cursor-agent” can be normal (Composer vs Agent, or different profiles). To verify the setup:
+
+- Open **Cursor Settings → Agent / MCP** and confirm the **home-energy-manager** MCP is listed and connects.
+- Run a small **Agent** task that edits one file and confirm the diff applies.
+- If two entries duplicate behaviour, disable the unused profile or extension.
 
 ---
 
