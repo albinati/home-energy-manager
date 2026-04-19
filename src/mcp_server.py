@@ -1463,12 +1463,12 @@ def build_mcp() -> FastMCP:
             "Update notification routing for a specific alert type at runtime "
             "(no service restart required). "
             "alert_type: one of risk_alert, critical_error, peak_window_start, "
-            "cheap_window_start, morning_report, daily_pnl, strategy_update, action_confirmation. "
+            "cheap_window_start, morning_report, daily_pnl, strategy_update, action_confirmation, plan_proposed. "
             "enabled: true/false to mute or unmute. "
             "severity: 'critical' or 'reports' (determines which env target is used as fallback). "
             "target: override destination (e.g. a Telegram chat ID). "
             "channel: override channel (e.g. 'telegram', 'discord'). "
-            "silent: true = send without notification sound (Telegram --silent). "
+            "silent: true = prefer silent delivery (passed to the hook agent for channels that support it). "
             "Omit a parameter to leave it unchanged."
         ),
     )
@@ -1518,17 +1518,18 @@ def build_mcp() -> FastMCP:
         name="test_notification",
         description=(
             "Fire a test notification for a specific alert type to verify "
-            "the OpenClaw CLI delivery is working. "
+            "OpenClaw Gateway hook delivery (POST /hooks/agent). "
+            "Requires OPENCLAW_HOOKS_URL and OPENCLAW_HOOKS_TOKEN. "
             "alert_type: the AlertType to test (e.g. 'risk_alert'). "
             "message: optional custom text (defaults to a test string). "
-            "Returns the resolved route and whether the send succeeded."
+            "Returns the resolved route; delivery is queued asynchronously."
         ),
     )
     def test_notification(
         alert_type: str = "risk_alert",
         message: str | None = None,
     ) -> dict[str, Any]:
-        from .notifier import AlertType, _resolve_route, _send_via_openclaw_cli
+        from .notifier import AlertType, _dispatch, _hooks_credentials_configured, _resolve_route
 
         valid_types = {at.value for at in AlertType}
         if alert_type not in valid_types:
@@ -1549,17 +1550,30 @@ def build_mcp() -> FastMCP:
                 ),
             }
 
+        if not _hooks_credentials_configured():
+            return {
+                "ok": False,
+                "alert_type": alert_type,
+                "will_send": False,
+                "message": (
+                    "Set OPENCLAW_HOOKS_URL and OPENCLAW_HOOKS_TOKEN to match the Gateway hooks.token."
+                ),
+            }
+
         test_msg = message or f"[TEST] energy-manager notification check — alert_type={alert_type}"
-        sent = _send_via_openclaw_cli(alert_type, test_msg)
+        urgent = alert_type in ("risk_alert", "critical_error")
+        _dispatch(AlertType(alert_type), test_msg, urgent=urgent)
         return {
-            "ok": sent,
+            "ok": True,
             "alert_type": alert_type,
             "will_send": True,
-            "sent": sent,
+            "queued": True,
             "channel": resolved["channel"],
             "target": resolved["target"],
             "silent": resolved["silent"],
-            "message": "Notification sent successfully." if sent else "Send failed — check service logs for [openclaw send failed].",
+            "message": (
+                "Hook delivery queued. Check logs for [openclaw hooks] if delivery fails."
+            ),
         }
 
     return mcp

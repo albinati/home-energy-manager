@@ -10,6 +10,8 @@ The app is the **single planning brain** for the site. It fetches Octopus Agile 
 
 **OpenClaw is a read/propose/request interface only.** All hardware writes are enforced server-side through plan consent, daily API quota, rate-limit, and read-only gates. You cannot bypass them.
 
+Automated user notifications (plans, alerts, briefs) are sent only through the **OpenClaw Gateway** `POST /hooks/agent` path — not via a separate `openclaw` CLI on the app host. Configure `OPENCLAW_HOOKS_URL` and `OPENCLAW_HOOKS_TOKEN` on the server (see `docs/RUNBOOK.md`).
+
 **Base URL**: `HOME_ENERGY_API_URL` (e.g. `http://192.168.1.100:8000`)
 
 ---
@@ -52,7 +54,7 @@ To check what's happening:
 
 To re-plan manually:
   propose_optimization_plan → optimizer runs in background, returns plan_id immediately
-                              (notification arrives ~10 seconds later via Telegram)
+                              (notification arrives shortly via OpenClaw Gateway hook → your channel)
   confirm_plan(plan_id)     → activate it
 ```
 
@@ -67,7 +69,7 @@ propose_optimization_plan()
     ↓ returns {plan_id, status: "applied"} immediately
 optimizer runs in background thread
     ↓
-plan stored → Telegram notification sent with full schedule
+plan stored → notification sent via OpenClaw Gateway hook with full schedule
     ↓
 confirm_plan(plan_id)     → Fox V3 uploaded + Daikin rows activated
 reject_plan(plan_id)      → plan discarded, system holds last state
@@ -151,7 +153,7 @@ Never pass `confirmed=True` silently — only after the user has explicitly ackn
 |------|-----|
 | `list_notification_routes` | See current alert routing config |
 | `set_notification_route(alert_type, ...)` | Mute, reroute, or change severity of an alert type |
-| `test_notification(alert_type)` | Send a test message for a given alert type |
+| `test_notification(alert_type)` | Queue a test hook delivery (`OPENCLAW_HOOKS_*` must be set) |
 
 Alert types: `morning_report`, `strategy_update`, `risk_alert`, `action_confirmation`, `critical_error`, `plan_proposed`, `cheap_window_start`, `peak_window_start`, `daily_pnl`.
 

@@ -88,14 +88,10 @@ class Config:
     ALERT_OPENCLAW_URL: str = os.getenv("ALERT_OPENCLAW_URL", "http://127.0.0.1:18789/api/send")
     ALERT_CHANNEL: str = (os.getenv("ALERT_CHANNEL") or "").strip()
 
-    # ── OpenClaw CLI notifier ────────────────────────────────────────────────
-    # Delivers alerts via `openclaw message send` subprocess (no HTTP, no API keys needed).
-    # Set OPENCLAW_NOTIFY_ENABLED=false to disable all outbound notifications.
+    # ── OpenClaw Gateway hooks (user-facing notifications) ───────────────────
+    # All outbound notifications POST to OPENCLAW_HOOKS_URL (e.g. /hooks/agent).
+    # Set OPENCLAW_NOTIFY_ENABLED=false to disable delivery (stdout + action_log still run).
     OPENCLAW_NOTIFY_ENABLED: bool = os.getenv("OPENCLAW_NOTIFY_ENABLED", "true").lower() in ("true", "1", "yes")
-    # Path to the openclaw binary (installed on the host alongside the service).
-    OPENCLAW_CLI_PATH: str = os.getenv("OPENCLAW_CLI_PATH", "/usr/local/bin/openclaw")
-    # Timeout for each subprocess call (seconds). Increase if openclaw startup is slow.
-    OPENCLAW_CLI_TIMEOUT_SECONDS: int = int(os.getenv("OPENCLAW_CLI_TIMEOUT_SECONDS", "60"))
 
     # Default channel + target (fallback when severity-specific not set).
     # target: Telegram chat ID, @username, Discord channel/user, etc.
@@ -109,10 +105,6 @@ class Config:
     OPENCLAW_NOTIFY_TARGET_REPORTS: str = (os.getenv("OPENCLAW_NOTIFY_TARGET_REPORTS") or "").strip()
     OPENCLAW_NOTIFY_CHANNEL_REPORTS: str = (os.getenv("OPENCLAW_NOTIFY_CHANNEL_REPORTS") or "").strip()
 
-    # PLAN_PROPOSED delivery: ``direct`` = `openclaw message send` (default).
-    # ``webhook`` = POST to OpenClaw Gateway ``/hooks/agent`` so an agent can rewrite
-    # the message before Telegram; falls back to direct CLI if the hook fails.
-    OPENCLAW_PLAN_NOTIFY_MODE: str = (os.getenv("OPENCLAW_PLAN_NOTIFY_MODE") or "direct").strip().lower()
     # Full URL e.g. http://127.0.0.1:18789/hooks/agent — see OpenClaw Webhooks docs.
     OPENCLAW_HOOKS_URL: str = (os.getenv("OPENCLAW_HOOKS_URL") or "").strip()
     OPENCLAW_HOOKS_TOKEN: str = (os.getenv("OPENCLAW_HOOKS_TOKEN") or "").strip()
