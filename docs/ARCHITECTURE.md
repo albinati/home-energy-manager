@@ -32,7 +32,8 @@ The older consent-driven **solver + dispatcher** (`src/optimization/`) was remov
 
 ## Design constraints
 
-- **Fox Open API ~200 calls/day** — no tight polling; one V3 upload per optimizer run, cached realtime, ~30 min scheduler verification.
+- **Fox Open API ~1440 calls/day soft budget (hard ~1440)** — realtime cache TTL 300 s; one V3 upload per optimizer run; all Fox HTTP calls tracked in `api_call_log` (see ADR-001).
+- **Daikin Onecta ~200 calls/day** — device cache TTL 1800 s; live refresh only in the 5-min Octopus pre-slot window (HH:25–30, HH:55–00); quota tracked persistently in SQLite (see ADR-001).
 - **`OPENCLAW_READ_ONLY`** — remote execute path respects read-only for safety.
 - **Grid export (force discharge)** — default **`ENERGY_STRATEGY_MODE=savings_first`**: prioritise self-use and import savings; Scheduler V3 may use **ForceDischarge** on **peak** slots only when **`OPTIMIZATION_PRESET`** is **travel** or **away** *and* cached battery SoC ≥ **`EXPORT_DISCHARGE_MIN_SOC_PERCENT`** (default 95). Set **`strict_savings`** to disable peak export discharge entirely.
 - **Daikin (travel/away)** — SQLite actions skip **cheap** and **negative** preheat windows; only **peak** setback (+ short **restore**) is written so the heat pump does not add load while Fox may export. At **normal** preset, Daikin still follows full cheap/peak/negative schedule. The API does **not** switch Onecta **operationMode** (heating/auto); adaptation is via **LWT offset, DHW tank, climate/tank power** on the heartbeat.
