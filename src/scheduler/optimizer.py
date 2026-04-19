@@ -58,11 +58,16 @@ def _resolve_plan_window(tariff: str) -> Optional[PlanWindow]:
     tmr_start = datetime.combine(tomorrow, datetime.min.time()).replace(tzinfo=tz)
     tmr_end = tmr_start + timedelta(hours=int(config.LP_HORIZON_HOURS))
 
-    tmr_rates = db.get_rates_for_period(
-        tariff,
-        tmr_start.astimezone(timezone.utc) - timedelta(hours=1),
-        tmr_end.astimezone(timezone.utc) + timedelta(hours=2),
+    tmr_q_from = tmr_start.astimezone(timezone.utc) - timedelta(hours=1)
+    tmr_q_to = tmr_end.astimezone(timezone.utc) + timedelta(hours=2)
+    logger.info(
+        "TZ-AUDIT: tomorrow DB query | local midnight %s (%s) | UTC query %s → %s",
+        tmr_start.strftime("%a %d %b %H:%M %Z"),
+        tmr_start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
+        tmr_q_from.strftime("%Y-%m-%dT%H:%MZ"),
+        tmr_q_to.strftime("%Y-%m-%dT%H:%MZ"),
     )
+    tmr_rates = db.get_rates_for_period(tariff, tmr_q_from, tmr_q_to)
     tmr_slots_preview = _build_half_hour_slots(tmr_rates or [], tmr_start, tmr_end)
     if len(tmr_slots_preview) >= _MIN_FULL_DAY_SLOTS:
         logger.info(
@@ -93,11 +98,18 @@ def _resolve_plan_window(tariff: str) -> Optional[PlanWindow]:
         logger.warning("Plan window: no usable rates (past midnight, tomorrow not published yet)")
         return None
 
-    today_rates = db.get_rates_for_period(
-        tariff,
-        today_start.astimezone(timezone.utc) - timedelta(minutes=30),
-        today_end.astimezone(timezone.utc) + timedelta(hours=1),
+    today_q_from = today_start.astimezone(timezone.utc) - timedelta(minutes=30)
+    today_q_to = today_end.astimezone(timezone.utc) + timedelta(hours=1)
+    logger.info(
+        "TZ-AUDIT: today-remainder DB query | local start %s (%s) end %s (%s) | UTC query %s → %s",
+        today_start.strftime("%H:%M %Z"),
+        today_start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
+        today_end.strftime("%H:%M %Z"),
+        today_end.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
+        today_q_from.strftime("%Y-%m-%dT%H:%MZ"),
+        today_q_to.strftime("%Y-%m-%dT%H:%MZ"),
     )
+    today_rates = db.get_rates_for_period(tariff, today_q_from, today_q_to)
     today_slots_preview = _build_half_hour_slots(today_rates or [], today_start, today_end)
     if today_slots_preview:
         logger.info(
@@ -131,9 +143,13 @@ class HalfHourSlot:
 
 
 def _parse_ts(s: str) -> datetime:
+    """Parse an ISO timestamp from agile_rates. All DB values should be UTC Z-normalized.
+    If a naive timestamp is encountered, it is assumed UTC and a warning is logged.
+    """
     x = s.replace("Z", "+00:00")
     dt = datetime.fromisoformat(x)
     if dt.tzinfo is None:
+        logger.warning("TZ-AUDIT: naive slot timestamp treated as UTC: %s", s)
         return dt.replace(tzinfo=timezone.utc)
     return dt
 
@@ -148,6 +164,13 @@ def _build_half_hour_slots(
     slots: list[HalfHourSlot] = []
     ws = window_start_local.astimezone(timezone.utc)
     we = window_end_local.astimezone(timezone.utc)
+    logger.info(
+        "TZ-AUDIT: slot window | local %s → %s | UTC %s → %s",
+        window_start_local.strftime("%a %d %b %H:%M %Z"),
+        window_end_local.strftime("%a %d %b %H:%M %Z"),
+        ws.strftime("%Y-%m-%dT%H:%MZ"),
+        we.strftime("%Y-%m-%dT%H:%MZ"),
+    )
     for r in rates:
         vf = _parse_ts(str(r["valid_from"]))
         vt = _parse_ts(str(r["valid_to"]))
@@ -166,6 +189,16 @@ def _build_half_hour_slots(
             )
             t += timedelta(minutes=30)
     slots.sort(key=lambda s: s.start_utc)
+    if slots:
+        first, last = slots[0], slots[-1]
+        logger.info(
+            "TZ-AUDIT: %d slots built | first %s UTC (%s local) | last %s UTC (%s local)",
+            len(slots),
+            first.start_utc.strftime("%Y-%m-%dT%H:%MZ"),
+            first.start_utc.astimezone(tz).strftime("%H:%M %Z"),
+            last.start_utc.strftime("%Y-%m-%dT%H:%MZ"),
+            last.start_utc.astimezone(tz).strftime("%H:%M %Z"),
+        )
     return slots
 
 

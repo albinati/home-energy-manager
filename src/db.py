@@ -5,6 +5,7 @@ Uses stdlib sqlite3 for compatibility with APScheduler and sync device clients.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 from dataclasses import dataclass
@@ -12,6 +13,8 @@ from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 from .config import config
 
@@ -364,12 +367,35 @@ def init_db() -> None:
             conn.close()
 
 
+def _normalize_utc_iso(ts: str) -> str:
+    """Normalize any ISO timestamp to canonical UTC Z format for consistent DB storage and string-sort.
+
+    Parses the timestamp, converts to UTC, and returns 'YYYY-MM-DDTHH:MM:SSZ'.
+    Raises ValueError if the string cannot be parsed.
+    """
+    s = ts.replace("Z", "+00:00")
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        logger.warning("TZ-AUDIT: naive timestamp received (assumed UTC): %s", ts)
+        dt = dt.replace(tzinfo=timezone.utc)
+    elif dt.utcoffset().total_seconds() != 0:
+        logger.warning("TZ-AUDIT: non-UTC offset in Octopus timestamp (converting): %s", ts)
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def save_agile_rates(rates: list[dict[str, Any]], tariff_code: str) -> int:
-    """Upsert Agile rate rows. Each rate dict: value_inc_vat, valid_from, valid_to (ISO)."""
+    """Upsert Agile rate rows. Each rate dict: value_inc_vat, valid_from, valid_to (ISO).
+
+    Timestamps are normalized to UTC Z format before storage so that SQLite string-sort
+    and period comparisons are always timezone-consistent.
+    """
     if not rates or not tariff_code:
         return 0
     now = datetime.now(timezone.utc).isoformat()
+    tz_local = ZoneInfo(config.BULLETPROOF_TIMEZONE)
     n = 0
+    first_ts: str | None = None
+    last_ts: str | None = None
     with _lock:
         conn = get_connection()
         try:
@@ -379,6 +405,12 @@ def save_agile_rates(rates: list[dict[str, Any]], tariff_code: str) -> int:
                 v = r.get("value_inc_vat")
                 if vf is None or vt is None or v is None:
                     continue
+                try:
+                    vf_norm = _normalize_utc_iso(str(vf))
+                    vt_norm = _normalize_utc_iso(str(vt))
+                except ValueError:
+                    logger.error("TZ-AUDIT: unparseable timestamp skipped: vf=%s vt=%s", vf, vt)
+                    continue
                 conn.execute(
                     """INSERT INTO agile_rates (valid_from, valid_to, value_inc_vat, tariff_code, fetched_at)
                        VALUES (?, ?, ?, ?, ?)
@@ -386,12 +418,27 @@ def save_agile_rates(rates: list[dict[str, Any]], tariff_code: str) -> int:
                          valid_to=excluded.valid_to,
                          value_inc_vat=excluded.value_inc_vat,
                          fetched_at=excluded.fetched_at""",
-                    (str(vf), str(vt), float(v), tariff_code, now),
+                    (vf_norm, vt_norm, float(v), tariff_code, now),
                 )
+                if first_ts is None:
+                    first_ts = vf_norm
+                last_ts = vt_norm
                 n += 1
             conn.commit()
         finally:
             conn.close()
+    if n and first_ts and last_ts:
+        dt_first = datetime.fromisoformat(first_ts.replace("Z", "+00:00"))
+        dt_last = datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
+        logger.info(
+            "TZ-AUDIT: saved %d rates for %s | UTC %s → %s | local %s → %s",
+            n,
+            tariff_code,
+            first_ts,
+            last_ts,
+            dt_first.astimezone(tz_local).strftime("%a %d %b %H:%M %Z"),
+            dt_last.astimezone(tz_local).strftime("%a %d %b %H:%M %Z"),
+        )
     return n
 
 
