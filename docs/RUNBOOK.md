@@ -70,6 +70,9 @@ The script: backs up DB → git pull → pip install → DB migration → restar
 | `OPENCLAW_READ_ONLY` | `false` | Must be `false` for hardware writes via MCP |
 | `DAIKIN_DAILY_BUDGET` | `180` | Hard cap below Daikin's 200/day limit |
 | `FOX_DAILY_BUDGET` | `1200` | Conservative cap below Fox's 1440/day |
+| `LP_MPC_HOURS` | `6,9,12,15` | Intra-day MPC re-plan hours (BST/local). See MPC schedule below. |
+| `LP_MPC_WRITE_DEVICES` | `true` | MPC and Octopus-fetch re-plans push updated Fox/Daikin schedule to hardware |
+| `FOX_SOLAR_CHARGE_MIN_SOC_PERCENT` | `100` | `minSocOnGrid` for `solar_charge` SelfUse windows (blocks discharge, lets PV fill) |
 | `OPENCLAW_HOOKS_URL` | required if notifications on | Full URL, e.g. `http://127.0.0.1:18789/hooks/agent` |
 | `OPENCLAW_HOOKS_TOKEN` | required if notifications on | Same secret as Gateway `hooks.token` |
 | `OPENCLAW_INTERNAL_API_BASE_URL` | `http://127.0.0.1:8000` | Inserted into hook payload so the agent can `GET /api/v1/optimization/plan` |
@@ -267,18 +270,41 @@ The Fox V3 `fdPwr` parameter tells the inverter how many Watts to draw from the 
 - `MAX_INVERTER_KW` — LP model constraint (kW). Must match your inverter nameplate. The LP will never plan more than `MAX_INVERTER_KW × 0.5 kWh` per slot regardless.
 
 
-### Fox V3 schedule structure (example from 2026-04-19)
+### MPC re-plan schedule
+
+| Time (BST) | Trigger | Purpose |
+|---|---|---|
+| 06:00 | `LP_MPC_HOURS` cron | Morning anchor: live SoC after overnight ForceCharge |
+| 09:00 | `LP_MPC_HOURS` cron | Solar window start: correct overnight discharge shortfall |
+| 12:00 | `LP_MPC_HOURS` cron | Mid-day: add ForceCharge if solar underdelivered |
+| 15:00 | `LP_MPC_HOURS` cron | Pre-peak: last cheap window before 16:00–19:00 peak |
+| ~16:05 | Octopus fetch job | **Critical**: tomorrow's rates arrive → LP replans full 36h horizon, adjusting tonight's discharge and overnight cheap strategy |
+| 23:00 | Nightly push | Full next-day plan with final Agile rates |
+
+Each MPC checkpoint pushes the revised Fox V3 schedule to hardware (`LP_MPC_WRITE_DEVICES=true`).
+
+### Fox V3 schedule structure (example from 2026-04-20)
 
 ```json
 [
-  {"startHour": 12, "startMinute": 30, "endHour": 14, "endMinute": 59,
-   "workMode": "ForceCharge", "extraParam": {"minSocOnGrid": 10, "fdSoc": 95}},
-  {"startHour": 15, "startMinute": 0, "endHour": 22, "endMinute": 59,
-   "workMode": "SelfUse", "extraParam": {"minSocOnGrid": 10}}
+  {"startHour": 0,  "startMinute": 0,  "endHour": 8,  "endMinute": 59,
+   "workMode": "SelfUse",    "extraParam": {"minSocOnGrid": 10}},
+  {"startHour": 9,  "startMinute": 0,  "endHour": 10, "endMinute": 30,
+   "workMode": "SelfUse",    "extraParam": {"minSocOnGrid": 100}},
+  {"startHour": 10, "startMinute": 30, "endHour": 10, "endMinute": 59,
+   "workMode": "ForceCharge","extraParam": {"minSocOnGrid": 10, "fdSoc": 95, "fdPwr": 1150}},
+  {"startHour": 11, "startMinute": 0,  "endHour": 12, "endMinute": 59,
+   "workMode": "SelfUse",    "extraParam": {"minSocOnGrid": 100}},
+  {"startHour": 13, "startMinute": 0,  "endHour": 14, "endMinute": 59,
+   "workMode": "ForceCharge","extraParam": {"minSocOnGrid": 10, "fdSoc": 95, "fdPwr": 4700}},
+  {"startHour": 15, "startMinute": 0,  "endHour": 21, "endMinute": 30,
+   "workMode": "SelfUse",    "extraParam": {"minSocOnGrid": 10}},
+  {"startHour": 21, "startMinute": 30, "endHour": 22, "endMinute": 59,
+   "workMode": "ForceCharge","extraParam": {"minSocOnGrid": 10, "fdSoc": 95, "fdPwr": 5600}}
 ]
 ```
 
-This means: charge to 95% SoC before peak (15:00–18:30), then self-use through peak.
+`SelfUse minSocOnGrid=100%` = solar_charge window: battery holds charge, PV fills it, no grid import.
 
 ---
 

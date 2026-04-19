@@ -64,7 +64,7 @@ flowchart LR
   H --> F
 ```
 
-## V8 Optimizer (PuLP MILP)
+## V8/V9 Optimizer (PuLP MILP)
 
 Production path when `OPTIMIZER_BACKEND=lp` (default). Implementation: `src/scheduler/lp_optimizer.py` (pure model), `src/scheduler/lp_dispatch.py` (Fox + Daikin writers), `src/weather.forecast_to_lp_inputs` (half-hour PV + COP series).
 
@@ -72,3 +72,33 @@ Production path when `OPTIMIZER_BACKEND=lp` (default). Implementation: `src/sche
 - **Constraints:** Half-hour energy balance; battery SoC with round-trip efficiency; mutex grid import vs export and charge vs discharge binaries; SEG-style **export ≤ PV use + discharge**; discrete heat-pump power buckets; DHW tank dynamics (UA loss to room); single-zone building / radiators (UA to outdoor, solar gain fraction, radiator thermal cap); shower windows and Legionella; terminal SoC/tank/indoor stitches.
 - **Inputs:** Octopus rates for the horizon, Open-Meteo → `WeatherLpSeries`, initial SoC (Fox cache), tank + room temps (Daikin / execution log fallbacks).
 - **Rollback:** Set `OPTIMIZER_BACKEND=heuristic` or POST `/api/v1/optimization/backend` with `{"backend":"heuristic"}` to use the legacy classifier in the same `run_optimizer()` entrypoint.
+
+### Slot classification (`lp_dispatch.py`)
+
+After solving, each half-hour slot is classified by `lp_plan_to_slots()`:
+
+| Kind | Condition | Fox action |
+|---|---|---|
+| `negative` | charge > 0 **and** grid_import > 0 **and** price ≤ 0 | `ForceCharge` fdSoc=100% |
+| `cheap` | charge > 0 **and** grid_import > 0 | `ForceCharge` fdSoc=95% with LP-derived `fdPwr` |
+| `solar_charge` | charge > 0 **and** grid_import ≈ 0 | `SelfUse` **minSocOnGrid=100%** — holds battery, PV fills it |
+| `peak` | no HP, price ≥ peak threshold | `SelfUse` minSocOnGrid=10% |
+| `peak_export` | discharge + export, travel/away preset | `ForceDischarge` |
+| `standard` | all other | `SelfUse` minSocOnGrid=10% |
+
+`solar_charge` is the key distinction from V8: the LP saying "charge from PV, no grid import" now maps to `SelfUse` instead of `ForceCharge`. FoxESS `SelfUse` mode never actively imports from grid — `minSocOnGrid=100%` only blocks battery discharge, allowing excess PV to accumulate freely.
+
+### MPC loop (Model Predictive Control)
+
+The plan is re-computed at four intra-day checkpoints and after the Octopus rate publish:
+
+| Time (BST) | Trigger | Purpose |
+|---|---|---|
+| 06:00 | `LP_MPC_HOURS` cron | Morning anchor: live SoC after overnight ForceCharge |
+| 09:00 | `LP_MPC_HOURS` cron | Solar window start: correct overnight discharge shortfall |
+| 12:00 | `LP_MPC_HOURS` cron | Mid-day: add ForceCharge if solar underdelivered |
+| 15:00 | `LP_MPC_HOURS` cron | Pre-peak: last cheap window before 16:00–19:00 peak |
+| ~16:05 | `bulletproof_octopus_fetch_job` | **Critical**: tomorrow's rates published → LP replans full 36h horizon, adjusting tonight's discharge and overnight cheap strategy |
+| 23:00 | `LP_PLAN_PUSH_HOUR` | Nightly full-day dispatch |
+
+`LP_MPC_WRITE_DEVICES=true` makes each checkpoint push the updated Fox schedule to hardware. API budget impact: Fox ~384/day (27% of 1440 hard limit), Daikin ~99/day (50% of 200 limit) — Daikin PATCH calls only happen at slot transitions in the heartbeat, not on every MPC compute.

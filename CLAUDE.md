@@ -1,0 +1,157 @@
+# home-energy-manager — Claude context
+
+## Deployment (native, no Docker)
+
+As of 2026-04-18 the service runs **natively on the host as root** — Docker has been removed.
+
+| Thing | Path / value |
+|---|---|
+| Python | `/root/home-energy-manager/.venv/bin/python` (3.12.3) |
+| SQLite DB | `/root/home-energy-manager/data/energy_state.db` |
+| Daikin token | `/root/home-energy-manager/data/.daikin-tokens.json` |
+| API server | `http://127.0.0.1:8000` |
+| Systemd unit | `home-energy-manager.service` |
+| Config | `/root/home-energy-manager/.env` |
+| Run command | `.venv/bin/python -m src.cli serve` |
+
+### Service management
+
+```bash
+systemctl status home-energy-manager
+systemctl restart home-energy-manager
+journalctl -u home-energy-manager -f          # live logs
+curl http://127.0.0.1:8000/api/v1/health      # quick health check
+```
+
+### BOOT.md is outdated — ignore it
+The old BOOT.md refers to a `venv/` and `daemon start`. The active venv is `.venv/`, the service is systemd-managed, and `src.cli serve` is the entrypoint (not `daemon start`).
+
+---
+
+## Daikin Onecta — token management
+
+Tokens live at `data/.daikin-tokens.json`. The access token expires every **3 hours**; the service auto-refreshes it via the refresh_token as long as the refresh_token is valid (~30 days).
+
+### Refresh access token (refresh_token still valid)
+
+```bash
+cd /root/home-energy-manager
+.venv/bin/python - <<'EOF'
+import json, time
+from src.daikin.auth import refresh_tokens
+
+tokens = json.load(open("data/.daikin-tokens.json"))
+new = refresh_tokens(tokens)
+new["obtained_at"] = int(time.time())
+json.dump(new, open("data/.daikin-tokens.json", "w"), indent=2)
+print("Done. Expires in", new["expires_in"], "s")
+EOF
+```
+
+Then `systemctl restart home-energy-manager` so the service picks it up.
+
+### Full re-auth (refresh_token expired or 401 after refresh)
+
+The auth flow starts a local HTTP server on port 18080 and opens a browser to the Daikin login page. On this headless VPS you need to either:
+
+**Option A — SSH port-forward (recommended):**
+```bash
+# On your local machine:
+ssh -L 18080:localhost:18080 root@116.203.242.63
+# Then on the server:
+cd /root/home-energy-manager
+DAIKIN_REDIRECT_URI=http://localhost:18080/callback .venv/bin/python -m src.daikin.auth
+# Open the printed URL in your local browser, log in, approve
+```
+
+**Option B — run auth, copy the code manually:**
+```bash
+cd /root/home-energy-manager
+.venv/bin/python -m src.daikin.auth --code CODE
+# where CODE is the `code=` param from the redirect URL
+```
+
+After successful auth, new tokens are written to `DAIKIN_TOKEN_FILE` (i.e. `data/.daikin-tokens.json` when run from the project root with the env loaded). Restart the service.
+
+### Check current token state
+
+```bash
+python3 - <<'EOF'
+import json, datetime, time
+d = json.load(open("/root/home-energy-manager/data/.daikin-tokens.json"))
+print("obtained:", datetime.datetime.fromtimestamp(d["obtained_at"]))
+print("expires :", datetime.datetime.fromtimestamp(d["obtained_at"] + d["expires_in"]))
+print("expired :", time.time() > d["obtained_at"] + d["expires_in"])
+print("has refresh_token:", bool(d.get("refresh_token")))
+EOF
+```
+
+### Daikin API daily rate limit
+
+- **Limit:** 200 requests/day, resets ~midnight UTC.
+- On 2026-04-18 the limit was exhausted during migration testing.
+- **`DAIKIN_HTTP_429_MAX_RETRIES=0`** is set in `.env` so the client fails fast on 429 instead of sleeping for `Retry-After` seconds (which Daikin sets to ~86400 on daily-limit exhaustion). Without this the server would hang for hours on startup.
+- When rate-limited, Daikin MCP tools return errors immediately. The service still starts and everything else (Fox ESS, Octopus, SQLite) works normally.
+
+---
+
+## Key `.env` settings to know
+
+```
+DAIKIN_TOKEN_FILE=.daikin-tokens.json          # relative to cwd → data/ path set in systemd service
+DAIKIN_HTTP_429_MAX_RETRIES=0                   # fail fast on rate limit — do not remove
+OPENCLAW_READ_ONLY=false                        # allows hardware writes via MCP
+OPERATION_MODE=operational                      # operational = live hardware writes; simulation = dry-run
+DB_PATH=/root/home-energy-manager/data/energy_state.db   # set in systemd service env
+```
+
+---
+
+## OpenClaw MCP integration
+
+OpenClaw (running at `http://127.0.0.1:18789`) connects to this project via two channels:
+
+1. **nikola MCP server** — started by openclaw via `/root/.openclaw/bin/nikola-mcp`:
+   ```bash
+   cd /root/home-energy-manager
+   exec /root/home-energy-manager/.venv/bin/python -m src.mcp_server
+   ```
+   This exposes 35 tools (Fox ESS, Daikin, Octopus tariffs, optimization) to the LLM.
+
+2. **Skills** — `/root/home-energy-manager/skills/` is loaded as an extra skill dir in openclaw.
+
+The MCP server is stateless (per-call); the API server (`home-energy-manager.service`) holds all state in SQLite.
+
+---
+
+## Project structure (key files)
+
+```
+src/
+  cli/__main__.py        # entrypoint: `python -m src.cli serve`
+  api/main.py            # FastAPI app + lifespan (DB init, recover_on_boot, scheduler)
+  daikin/
+    auth.py              # OAuth2 flow + token refresh
+    client.py            # DaikinClient (wraps Onecta API)
+  state_machine.py       # recover_on_boot, apply_safe_defaults
+  config.py              # all env-var config (Config dataclass)
+  physics.py             # DHW setpoint calculations (restored from git HEAD 2026-04-18)
+  mcp_server.py          # MCP server entrypoint (used by openclaw)
+data/
+  energy_state.db        # SQLite (migrated from Docker volume 2026-04-18)
+  .daikin-tokens.json    # OAuth2 tokens (active)
+.env                     # secrets + config
+.venv/                   # Python 3.12.3 venv (use this, not venv/)
+```
+
+---
+
+## What changed on 2026-04-18 (migration from Docker)
+
+- Docker container (`home-energy-manager-energy-manager-1`) removed
+- Docker volume data (`energy_state.db`, `.daikin-tokens.json`) migrated to `data/`
+- `home-energy-manager.service` rewritten: native `.venv/bin/python -m src.cli serve`, no Docker
+- `home-energy-manager` directory chowned to root (was uid 1000)
+- `physics.py` restored from git HEAD (working copy had `calculate_dhw_setpoint` etc. stripped)
+- `DAIKIN_HTTP_429_MAX_RETRIES=0` added to `.env`
+- Daikin access token refreshed (valid ~3h; refresh_token intact)
