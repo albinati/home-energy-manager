@@ -75,6 +75,15 @@ def fetch_agile_rates(
     if period_to is None:
         period_to = period_from + timedelta(hours=48)
 
+    from zoneinfo import ZoneInfo
+    tz_local = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+    logger.info(
+        "TZ-AUDIT: Octopus import fetch | UTC %s → %s | local %s → %s",
+        period_from.strftime("%Y-%m-%dT%H:%MZ"),
+        period_to.strftime("%Y-%m-%dT%H:%MZ"),
+        period_from.astimezone(tz_local).strftime("%a %d %b %H:%M %Z"),
+        period_to.astimezone(tz_local).strftime("%a %d %b %H:%M %Z"),
+    )
     return _fetch_rates(code, period_from, period_to)
 
 
