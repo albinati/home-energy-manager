@@ -11,8 +11,11 @@
 #   ./scripts/deploy_hetzner.sh --backup --no-restart  # pull + deps only, skip restart
 #
 # Backup (off-server via Tailscale — saves Hetzner disk space):
+#   Server: openclaw-overbot.tail0dbf20.ts.net  (100.104.115.85)
+#   SSH:    ssh root@openclaw-overbot.tail0dbf20.ts.net  (no keys needed)
+#
 #   Set LOCAL_BACKUP_DEST once in ~/.bashrc on Hetzner:
-#     export LOCAL_BACKUP_DEST="lucas@lucas-laptop.tail1234ab.ts.net:/mnt/c/Users/Lucas/OneDrive/Escritorio/em-backups"
+#     export LOCAL_BACKUP_DEST="lucas@<your-laptop>.tail0dbf20.ts.net:/mnt/c/Users/Lucas/OneDrive/Escritorio/em-backups"
 #   Run ./scripts/setup_tailscale_backup.sh for one-time Tailscale setup.
 #   If not set, backup stays locally (./backups/) — only 3 copies kept to protect disk.
 #
