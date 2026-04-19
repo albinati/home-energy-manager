@@ -395,6 +395,20 @@ The system fetches, simulates, and recommends the best electricity tariff from O
 5. The `boost` preset ignores price entirely — use sparingly (cold snaps, full house).
 6. Fox ESS API limit is **200 req/day**. Optimization reads use the cached realtime path.
 
+### Deploy invariants
+
+Every deployment via `scripts/deploy_hetzner.sh` automatically runs a **safety reset** after the service passes its health check:
+
+- Fox ESS work mode is set to **`Self Use`** via `POST /api/v1/foxess/mode` (`{"mode":"Self Use","skip_confirmation":true}`)
+
+This ensures the inverter is never stranded in Agile/Force-charge/Force-discharge mode after a code update. The reset is idempotent and safe to run manually at any time.
+
+**Daikin refresh schedule (quota protection):**
+- Heartbeat reads Daikin device state from cache only (no API call).
+- A live `get_devices()` call is only made in the **5-minute pre-slot window** before each Octopus half-hour boundary (`:55-:00` and `:25-:30`) — this gives the LP replanner fresh data with time to act.
+- Manual/UI refreshes are throttled to 30 minutes per actor to stay within the **200 calls/day** Daikin limit.
+- Quota is tracked in the `api_call_log` SQLite table (persists across restarts). When exhausted, the last cached value is returned with `stale=true`.
+
 ## Bulletproof mode (MCP-first)
 
 When the stack runs with **`USE_BULLETPROOF_ENGINE=true`** (default), automation is **autonomous**: Octopus fetch → SQLite → optimizer → Fox **Scheduler V3** upload (one call/day) + Daikin rows in **`action_schedule`**. A **2-minute heartbeat** executes Daikin changes and logs telemetry; it does **not** spam Fox mode APIs.

@@ -55,6 +55,12 @@ class FoxESSStatusResponse(BaseModel):
     updated_at: Optional[str] = Field(default=None, description="Last cloud API update time (UTC)")
     refresh_count_24h: Optional[int] = Field(default=None, description="Realtime API calls in last 24h")
     refresh_limit_24h: Optional[int] = Field(default=None, description="Daily API call limit (e.g. 1440)")
+    quota_used_24h: Optional[int] = Field(default=None, description="API calls used in the last 24h (all Fox types)")
+    quota_remaining_24h: Optional[int] = Field(default=None, description="API calls remaining in daily budget")
+    daily_budget: Optional[int] = Field(default=None, description="Soft daily quota cap (e.g. 1200)")
+    quota_blocked: Optional[bool] = Field(default=None, description="True when quota is exhausted and reads return stale data")
+    cache_age_seconds: Optional[float] = Field(default=None, description="Age of cached realtime data in seconds")
+    cache_stale: Optional[bool] = Field(default=None, description="True when the returned data is from a stale cache")
 
 
 class PowerRequest(BaseModel):
