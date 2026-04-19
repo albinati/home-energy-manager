@@ -306,7 +306,11 @@ class Config:
     LP_PRICE_QUANTIZE_PENCE: float = float(os.getenv("LP_PRICE_QUANTIZE_PENCE", "0"))
     # LP dispatch → Fox/Daikin: promote short ``standard`` runs sandwiched between cheap/negative charge
     # slots to ``cheap`` so Scheduler V3 stays in ForceCharge (fewer SelfUse islands). 0 = disabled.
-    FOX_LP_BRIDGE_GAP_SLOTS: int = int(os.getenv("FOX_LP_BRIDGE_GAP_SLOTS", "0"))
+    FOX_LP_BRIDGE_GAP_SLOTS: int = int(os.getenv("FOX_LP_BRIDGE_GAP_SLOTS", "2"))
+    # Daikin: minimum consecutive slots (half-hours) for a non-standard window to be scheduled.
+    # Cheap/negative windows shorter than this are merged forward or dropped to avoid rapid heat-pump
+    # cycling.  2 = 1 hour minimum (recommended).  0 = disabled (legacy behaviour, any length).
+    DAIKIN_MIN_WINDOW_SLOTS: int = int(os.getenv("DAIKIN_MIN_WINDOW_SLOTS", "2"))
     # Only bridge when every standard slot’s Agile price is ≤ this (p/kWh). 0 = use LP plan peak_threshold.
     FOX_LP_BRIDGE_MAX_PRICE_PENCE: float = float(os.getenv("FOX_LP_BRIDGE_MAX_PRICE_PENCE", "0"))
     SOLAR_GAIN_FRACTION: float = float(os.getenv("SOLAR_GAIN_FRACTION", "0.15"))

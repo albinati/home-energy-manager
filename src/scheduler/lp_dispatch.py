@@ -110,7 +110,17 @@ def _lwt_offset_from_plan(i: int, plan: LpPlan) -> float:
 
 
 def _merge_half_hour_slots_for_daikin(plan: LpPlan) -> list[tuple[datetime, datetime, str, int]]:
-    """Contiguous same-kind slots → merged windows (start, end, kind, first_slot_index)."""
+    """Contiguous same-kind slots → merged windows (start, end, kind, first_slot_index).
+
+    After merging adjacent same-kind slots, any non-standard window that is shorter than
+    ``DAIKIN_MIN_WINDOW_SLOTS`` is either:
+    * **merged** into the immediately following window of the same kind (if adjacent after
+      any interleaving standard gap ≤ 1 slot), or
+    * **dropped** — converted back to ``standard`` so no Daikin action is scheduled.
+
+    This mirrors the Fox ``FOX_LP_BRIDGE_GAP_SLOTS`` consolidation and prevents the heat-pump
+    from being toggled on/off every 30 minutes.
+    """
     slots = lp_dispatch_slots_for_hardware(plan)
     if not slots:
         return []
@@ -126,7 +136,36 @@ def _merge_half_hour_slots_for_daikin(plan: LpPlan) -> list[tuple[datetime, date
             start_i = i
             cs, ce, ck = s.start_utc, s.end_utc, s.kind
     merged2.append((cs, ce, ck, start_i))
-    return merged2
+
+    min_slots = int(getattr(config, "DAIKIN_MIN_WINDOW_SLOTS", 2))
+    if min_slots <= 0:
+        return merged2
+
+    # Apply minimum-window filter: windows (non-standard) shorter than min_slots are dropped.
+    # After dropping, adjacent same-kind windows that are now consecutive get merged.
+    filtered: list[tuple[datetime, datetime, str, int]] = []
+    for ws, we, wk, wi in merged2:
+        n_slots = round((we - ws).total_seconds() / 1800)
+        if wk == "standard" or n_slots >= min_slots:
+            filtered.append((ws, we, wk, wi))
+        else:
+            # Convert too-short non-standard window back to standard (drop action)
+            logger.debug(
+                "daikin_dispatch: dropping %s window %s–%s (%d slots < min %d)",
+                wk, ws.isoformat(), we.isoformat(), n_slots, min_slots,
+            )
+            filtered.append((ws, we, "standard", wi))
+
+    # Re-merge adjacent same-kind runs that the filter may have made contiguous
+    remerged: list[tuple[datetime, datetime, str, int]] = []
+    for ws, we, wk, wi in filtered:
+        if remerged and remerged[-1][2] == wk and remerged[-1][1] == ws:
+            prev_s, prev_e, prev_k, prev_i = remerged.pop()
+            remerged.append((prev_s, we, wk, prev_i))
+        else:
+            remerged.append((ws, we, wk, wi))
+
+    return remerged
 
 
 def daikin_dispatch_preview(
