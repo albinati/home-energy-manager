@@ -155,11 +155,37 @@ print(json.dumps(json.loads(row[1]), indent=2))
 
 ## Notifications (OpenClaw Gateway hooks)
 
-When `OPENCLAW_NOTIFY_ENABLED=true` and a notify **target** is resolved (env or `notification_routes`), all user-facing alerts are sent with **`POST` to `OPENCLAW_HOOKS_URL`** (default path `/hooks/agent` per [OpenClaw Webhooks](https://openclaws.io/docs/automation/webhook)). **`OPENCLAW_HOOKS_URL` and `OPENCLAW_HOOKS_TOKEN` are required** for delivery; there is no `openclaw message send` subprocess. Delivery runs in a background thread; the service does not block the request path.
+Official reference: **[Webhooks](https://docs.openclaw.ai/automation/cron-jobs#webhooks)** (same page also documents Gateway cron jobs—Home Energy Manager only uses the **HTTP hooks**, not `openclaw cron`).
+
+When `OPENCLAW_NOTIFY_ENABLED=true` and a notify **target** is resolved (env or `notification_routes`), the service **`POST`s to `OPENCLAW_HOOKS_URL`** using the same contract as **`POST /hooks/agent`** in the docs: JSON body with `message`, `name`, `wakeMode`, `deliver`, `channel`, `to` (from your route), optional `agentId`, `timeoutSeconds`, and header **`Authorization: Bearer <token>`** (the docs also allow `x-openclaw-token`; we use Bearer only). There is no `openclaw message send` subprocess. Delivery runs in a background thread.
 
 If the hook returns non-2xx or the request errors, the service logs **`[openclaw hooks] delivery failed`** — fix Gateway config or network; stdout + `action_log` still contain the notification text.
 
 **Removed (breaking):** `OPENCLAW_CLI_PATH`, `OPENCLAW_CLI_TIMEOUT_SECONDS`, and `OPENCLAW_PLAN_NOTIFY_MODE`. Migrate: set hooks URL + token to match your Gateway.
+
+### Gateway `hooks.token` and Home Energy `OPENCLAW_HOOKS_TOKEN`
+
+There is no separate “password from OpenClaw”—you **define one shared secret** and configure it in two places:
+
+1. **OpenClaw Gateway** (`~/.openclaw/openclaw.json` or your config path): enable hooks and set `token` to a long random string (example shape from the docs):
+
+   ```json5
+   {
+     hooks: {
+       enabled: true,
+       token: "your-shared-secret-here",
+       path: "/hooks",
+     },
+   }
+   ```
+
+   Generate a secret locally, e.g. `openssl rand -hex 32`.
+
+2. **Home Energy Manager `.env`:** set `OPENCLAW_HOOKS_TOKEN` to the **same** value as `hooks.token`.
+
+3. **`OPENCLAW_HOOKS_URL`:** full URL to the agent hook, usually `http://127.0.0.1:18789/hooks/agent` if the Gateway listens on `18789` and uses the default `path` of `/hooks` (adjust host/port if the Gateway runs elsewhere).
+
+Until both are set and the Gateway is running, notifications are only logged to stdout / `action_log`.
 
 ### Alert types and what triggers them
 
@@ -181,13 +207,13 @@ Configure routing via MCP: `set_notification_route(alert_type, enabled, severity
 
 **Gateway prerequisites:** enable `hooks` in OpenClaw config with a dedicated `hooks.token`, bind to loopback or Tailscale, and restrict `allowedAgentIds` if you use `OPENCLAW_HOOKS_AGENT_ID`.
 
-**Manual test (after hooks are enabled):**
+**Manual test (after hooks are enabled):** replace `YOUR_HOOKS_TOKEN` and add your Telegram chat id as `to` if your Gateway requires a destination (same as production payloads):
 
 ```bash
 curl -fsS -X POST http://127.0.0.1:18789/hooks/agent \
   -H "Authorization: Bearer YOUR_HOOKS_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"message":"Ping from curl — reply with one line.","name":"Test","wakeMode":"now","deliver":true,"channel":"telegram","timeoutSeconds":60}'
+  -d '{"message":"Ping from curl — reply with one line.","name":"Test","wakeMode":"now","deliver":true,"channel":"telegram","to":"YOUR_TELEGRAM_CHAT_ID","timeoutSeconds":60}'
 ```
 
 **Agent prompt template:** see [docs/openclaw-nikola-plan-prompt.md](openclaw-nikola-plan-prompt.md).
