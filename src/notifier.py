@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
 from datetime import datetime
 from enum import Enum
 from typing import Any, Optional
@@ -94,10 +95,10 @@ def _resolve_route(alert_type: str) -> Optional[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 def _send_via_openclaw_cli(alert_type: str, message: str) -> bool:
-    """Send *message* via `openclaw message send`.
+    """Enqueue *message* for delivery via `openclaw message send` in a daemon thread.
 
-    Returns True on success, False on any failure (never raises).
-    Errors are printed to stdout so they appear in the service journal.
+    Returns True immediately (fire-and-forget) so the caller is never blocked by
+    the ~40 s Telegram round-trip.  The background thread logs failures to stdout.
     """
     route = _resolve_route(alert_type)
     if not route:
@@ -112,27 +113,27 @@ def _send_via_openclaw_cli(alert_type: str, message: str) -> bool:
     if route["silent"]:
         cmd.append("--silent")
 
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=config.OPENCLAW_CLI_TIMEOUT_SECONDS,
-        )
-        if result.returncode != 0:
-            stderr_snippet = (result.stderr or "").strip()[:200]
-            print(f"[openclaw send failed] {alert_type}: {stderr_snippet}")
-            return False
-        return True
-    except subprocess.TimeoutExpired:
-        print(f"[openclaw timeout] {alert_type} (>{config.OPENCLAW_CLI_TIMEOUT_SECONDS}s)")
-        return False
-    except FileNotFoundError:
-        print(f"[openclaw cli missing] {config.OPENCLAW_CLI_PATH}")
-        return False
-    except Exception as exc:
-        print(f"[openclaw error] {alert_type}: {exc}")
-        return False
+    def _run() -> None:
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=config.OPENCLAW_CLI_TIMEOUT_SECONDS,
+            )
+            if result.returncode != 0:
+                stderr_snippet = (result.stderr or "").strip()[:200]
+                print(f"[openclaw send failed] {alert_type}: {stderr_snippet}")
+        except subprocess.TimeoutExpired:
+            print(f"[openclaw timeout] {alert_type} (>{config.OPENCLAW_CLI_TIMEOUT_SECONDS}s)")
+        except FileNotFoundError:
+            print(f"[openclaw cli missing] {config.OPENCLAW_CLI_PATH}")
+        except Exception as exc:
+            print(f"[openclaw error] {alert_type}: {exc}")
+
+    t = threading.Thread(target=_run, daemon=True, name=f"openclaw-{alert_type}")
+    t.start()
+    return True
 
 
 # ---------------------------------------------------------------------------
