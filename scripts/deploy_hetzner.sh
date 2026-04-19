@@ -5,18 +5,22 @@
 # Managed by systemd unit: home-energy-manager.service
 #
 # Usage (run on the Hetzner server):
-#   ./scripts/deploy_hetzner.sh                      # git pull + reinstall deps + restart
-#   ./scripts/deploy_hetzner.sh --backup             # backup DB first, then deploy
-#   ./scripts/deploy_hetzner.sh --backup-only        # backup only, no deploy
+#   ./scripts/deploy_hetzner.sh                        # git pull + reinstall deps + restart
+#   ./scripts/deploy_hetzner.sh --backup               # backup DB first, then deploy
+#   ./scripts/deploy_hetzner.sh --backup-only          # backup only, no deploy
 #   ./scripts/deploy_hetzner.sh --backup --no-restart  # pull + deps only, skip restart
 #
-# Backup (off-server via Tailscale — saves Hetzner disk space):
-#   Server: <hem-host>.your-tailnet.ts.net  (100.x.y.z)
-#   SSH:    ssh root@<hem-host>.your-tailnet.ts.net  (no keys needed)
+# Tailscale topology:
+#   Hetzner server : <hem-host>.your-tailnet.ts.net  (100.x.y.z)
+#   Local machine  : <workstation>.your-tailnet.ts.net      (100.x.y.z, WSL/Linux)
+#   SSH to Hetzner : ssh root@<hem-host>.your-tailnet.ts.net  (no keys needed)
 #
-#   Set LOCAL_BACKUP_DEST once in ~/.bashrc on Hetzner:
-#     export LOCAL_BACKUP_DEST="lucas@<your-laptop>.your-tailnet.ts.net:/mnt/c/Users/Lucas/OneDrive/Escritorio/em-backups"
-#   Run ./scripts/setup_tailscale_backup.sh for one-time Tailscale setup.
+# Backup (off-server via Tailscale — saves Hetzner disk space):
+#   Already set in Hetzner ~/.bashrc:
+#     LOCAL_BACKUP_DEST=root@<workstation>.your-tailnet.ts.net:/root/em-backups
+#   To activate: enable SSH on <workstation> once (choose one):
+#     Option A — Tailscale SSH:  sudo tailscale set --ssh
+#     Option B — OpenSSH:        sudo apt install openssh-server && sudo service ssh start
 #   If not set, backup stays locally (./backups/) — only 3 copies kept to protect disk.
 #
 # Requirements:
@@ -68,7 +72,7 @@ for p in d.get('Peer', {}).values():
   if [ -n "$TS_PEERS" ]; then
     note "Tailscale peers found — set LOCAL_BACKUP_DEST to one of:"
     while IFS= read -r peer; do
-      note "  export LOCAL_BACKUP_DEST='lucas@${peer}:/mnt/c/Users/Lucas/OneDrive/Escritorio/em-backups'"
+      note "  export LOCAL_BACKUP_DEST='root@${peer}:/root/em-backups'"
     done <<< "$TS_PEERS"
     echo ""
   fi
