@@ -190,6 +190,14 @@ class Config:
     DHW_LEGIONELLA_HOUR_END: int = int(os.getenv("DHW_LEGIONELLA_HOUR_END", "13"))
 
     BATTERY_CAPACITY_KWH: float = float(os.getenv("BATTERY_CAPACITY_KWH", "10"))
+
+    # Fox Scheduler V3 ForceCharge power limits (Watts).
+    # FOX_FORCE_CHARGE_MAX_PWR: hard ceiling sent with negative-price slots and as the
+    #   per-group fdPwr ceiling when merging windows.  Set to your inverter's AC charge
+    #   rating (e.g. 6000 for H1-6.0).  Do NOT set above the inverter nameplate limit.
+    # FOX_FORCE_CHARGE_NORMAL_PWR: fallback for the HEURISTIC backend only (LP path
+    #   derives per-slot fdPwr from the MILP grid-import solution — this constant is
+    #   only used when OPTIMIZER_BACKEND=heuristic or as a last-resort floor).
     FOX_FORCE_CHARGE_MAX_PWR: int = int(os.getenv("FOX_FORCE_CHARGE_MAX_PWR", "6000"))
     FOX_FORCE_CHARGE_NORMAL_PWR: int = int(os.getenv("FOX_FORCE_CHARGE_NORMAL_PWR", "3000"))
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
@@ -67,11 +68,24 @@ def lp_dispatch_slots_for_hardware(plan: LpPlan) -> list[HalfHourSlot]:
 
 
 def lp_plan_to_slots(plan: LpPlan) -> list[HalfHourSlot]:
-    """Map per-slot LP flows + prices to ``HalfHourSlot`` kinds for Fox/Daikin dispatch."""
+    """Map per-slot LP flows + prices to ``HalfHourSlot`` kinds for Fox/Daikin dispatch.
+
+    For ForceCharge slots (``cheap`` / ``negative``) we also populate
+    ``lp_grid_import_w``: the LP-planned grid import converted to Watts and
+    rounded up to the nearest 50 W.  This lets the Fox Scheduler V3 pull only
+    as much from the grid as the MILP decided — PV generation and home load are
+    already factored in, so we don't request more than needed.
+
+    The value is capped at ``FOX_FORCE_CHARGE_MAX_PWR`` (inverter ceiling) and
+    floored at a minimum of 200 W so the inverter doesn't stall.
+    """
     out: list[HalfHourSlot] = []
     n = len(plan.slot_starts_utc)
     peak_thr = plan.peak_threshold_pence
     allow_exp = _bulletproof_allow_peak_export_discharge()
+
+    max_pwr_w = int(config.FOX_FORCE_CHARGE_MAX_PWR)
+    min_pwr_w = 200  # floor: prevents inverter from interpreting "0 W" as unlimited
 
     for i in range(n):
         st = plan.slot_starts_utc[i]
@@ -84,6 +98,8 @@ def lp_plan_to_slots(plan: LpPlan) -> list[HalfHourSlot]:
         es = plan.space_electric_kwh[i]
 
         kind: str = "standard"
+        lp_grid_import_w: Optional[int] = None
+
         if chg > EPS and price <= 0:
             kind = "negative"
         elif chg > EPS:
@@ -92,8 +108,21 @@ def lp_plan_to_slots(plan: LpPlan) -> list[HalfHourSlot]:
             kind = "peak_export"
         elif ed < EPS and es < EPS and price >= peak_thr:
             kind = "peak"
+
+        if kind in ("cheap", "negative") and plan.import_kwh:
+            # LP import for this slot (kWh over 30 min) → kW → W, rounded up to 50 W
+            raw_w = plan.import_kwh[i] * 2 * 1000  # kWh/slot × 2 slots/hr × 1000 W/kW
+            rounded_w = int(math.ceil(raw_w / 50.0) * 50)
+            lp_grid_import_w = max(min_pwr_w, min(max_pwr_w, rounded_w))
+
         out.append(
-            HalfHourSlot(start_utc=st, end_utc=en, price_pence=price, kind=kind)
+            HalfHourSlot(
+                start_utc=st,
+                end_utc=en,
+                price_pence=price,
+                kind=kind,
+                lp_grid_import_w=lp_grid_import_w,
+            )
         )
     return out
 
