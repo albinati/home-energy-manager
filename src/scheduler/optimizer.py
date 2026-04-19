@@ -873,6 +873,7 @@ def _run_optimizer_lp(fox: Optional[FoxESSClient], daikin: Optional[Any] = None)
     strategy = (
         f"{plan_date}: PuLP MILP objective ~{plan.objective_pence:.0f}p; "
         f"neg={counts.get('negative', 0)} cheap={counts.get('cheap', 0)} "
+        f"solar={counts.get('solar_charge', 0)} "
         f"std={counts.get('standard', 0)} peak={counts.get('peak', 0)} "
         f"peak_export={counts.get('peak_export', 0)}; mean Agile {actual_mean:.1f}p"
     )
