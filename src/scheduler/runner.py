@@ -116,6 +116,83 @@ def bulletproof_daily_brief_job() -> None:
         logger.warning("Daily brief failed: %s", e)
 
 
+def bulletproof_mpc_job() -> None:
+    """Intra-day MPC re-optimise: refresh forecast + live SoC + live PV, re-upload Fox/Daikin.
+
+    Reads Fox realtime (SoC%, solar_power_kw, load_power_kw) and passes them into the LP
+    initial state so the re-optimisation reflects the actual current energy state rather than
+    yesterday's estimate.  Only runs when USE_BULLETPROOF_ENGINE=true and OPTIMIZER_BACKEND=lp.
+    Skips if scheduler is paused or if OPERATION_MODE is not operational/simulation.
+    """
+    if not config.USE_BULLETPROOF_ENGINE:
+        return
+    if get_scheduler_paused():
+        return
+    backend = (config.OPTIMIZER_BACKEND or "lp").strip().lower()
+    if backend != "lp":
+        logger.debug("MPC skipped: OPTIMIZER_BACKEND=%s", backend)
+        return
+    try:
+        from .optimizer import run_optimizer
+
+        fox = _try_fox()
+        daikin = None
+        if config.DAIKIN_CLIENT_ID and config.DAIKIN_CLIENT_SECRET:
+            try:
+                from ..daikin.client import DaikinClient
+
+                daikin = DaikinClient()
+            except Exception as e:
+                logger.debug("MPC: Daikin client unavailable: %s", e)
+
+        # --- Read live Fox realtime: SoC, solar_power_kw, load_power_kw ---
+        rt_soc_pct: float | None = None
+        rt_solar_kw: float | None = None
+        rt_load_kw: float | None = None
+        try:
+            rt = get_cached_realtime()
+            rt_soc_pct = float(rt.soc) if rt.soc is not None else None
+            rt_solar_kw = float(rt.solar_power) if rt.solar_power is not None else None
+            rt_load_kw = float(rt.load_power) if rt.load_power is not None else None
+            logger.info(
+                "MPC live snapshot: SoC=%.1f%% solar=%.2fkW load=%.2fkW",
+                rt_soc_pct or 0,
+                rt_solar_kw or 0,
+                rt_load_kw or 0,
+            )
+        except Exception as e:
+            logger.debug("MPC: Fox realtime unavailable (will use DB state): %s", e)
+
+        # Store live snapshot in DB so the LP initial state reader picks it up
+        if rt_soc_pct is not None:
+            try:
+                from .. import db as _db
+                from datetime import datetime, timezone as _tz
+
+                _db.upsert_fox_realtime_snapshot(
+                    {
+                        "captured_at": datetime.now(_tz.utc).isoformat(),
+                        "soc_pct": rt_soc_pct,
+                        "solar_power_kw": rt_solar_kw,
+                        "load_power_kw": rt_load_kw,
+                    }
+                )
+            except Exception as e:
+                logger.debug("MPC: snapshot upsert failed (non-fatal): %s", e)
+
+        result = run_optimizer(fox, daikin)
+        logger.info(
+            "MPC re-optimise: ok=%s lp_status=%s objective=%.0fp soc=%.1f%% solar=%.2fkW",
+            result.get("ok"),
+            result.get("lp_status"),
+            result.get("lp_objective_pence", 0),
+            rt_soc_pct or 0,
+            rt_solar_kw or 0,
+        )
+    except Exception as e:
+        logger.warning("MPC job failed: %s", e)
+
+
 def bulletproof_heartbeat_tick() -> None:
     """2-minute monitor: Daikin schedule execution, telemetry, Fox flag check."""
     global _last_exec_halfhour_key, _last_fox_verify_monotonic, _last_room_temp, _last_room_wall_utc
@@ -367,6 +444,19 @@ def start_background_scheduler() -> None:
                 ),
                 id="bulletproof_daily_brief",
             )
+            # MPC intra-day re-runs (LP only): scheduled at each hour in LP_MPC_HOURS
+            for mpc_hour in config.LP_MPC_HOURS_LIST:
+                _background_scheduler.add_job(
+                    bulletproof_mpc_job,
+                    CronTrigger(hour=mpc_hour, minute=0, timezone=tz),
+                    id=f"bulletproof_mpc_{mpc_hour:02d}",
+                )
+            if config.LP_MPC_HOURS_LIST:
+                logger.info(
+                    "MPC re-optimise cron scheduled at hours %s (%s)",
+                    config.LP_MPC_HOURS_LIST,
+                    tz,
+                )
             logger.info(
                 "Bulletproof cron: Octopus %02d:%02d, brief %02d:%02d (%s)",
                 config.OCTOPUS_FETCH_HOUR,

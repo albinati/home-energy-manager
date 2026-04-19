@@ -212,6 +212,30 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_pnl_execution_log_slot ON pnl_execution_log(slot_time)"
     )
 
+    # V3: fox_energy_daily — actual daily PV, load, import, export from Fox ESS
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS fox_energy_daily (
+            date TEXT PRIMARY KEY,
+            solar_kwh REAL,
+            load_kwh REAL,
+            import_kwh REAL,
+            export_kwh REAL,
+            charge_kwh REAL,
+            discharge_kwh REAL,
+            fetched_at TEXT NOT NULL
+        )"""
+    )
+
+    # V4: fox_realtime_snapshot — single-row live telemetry for MPC seeding
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS fox_realtime_snapshot (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            captured_at TEXT NOT NULL,
+            soc_pct REAL,
+            solar_power_kw REAL,
+            load_power_kw REAL
+        )"""
+    )
 
 def init_db() -> None:
     """Create tables if missing and apply lightweight migrations."""
@@ -448,6 +472,38 @@ def mean_consumption_kwh_from_execution_logs(limit: int = 2000) -> float:
     if not kwhs:
         return 0.4
     return sum(kwhs) / len(kwhs)
+
+
+def hourly_load_profile_kwh(limit: int = 2016) -> dict[int, float]:
+    """
+    Return per-hour-of-day (0–23) mean consumption kWh from execution_log.
+
+    Uses the last ``limit`` rows (default ~6 weeks of half-hour slots).
+    Falls back to the flat mean for hours with no data.
+    Returns a dict mapping hour-of-day → expected kWh per half-hour slot.
+    """
+    rows = get_execution_logs(limit=limit)
+    buckets: dict[int, list[float]] = {h: [] for h in range(24)}
+    for r in rows:
+        if r.get("consumption_kwh") is None:
+            continue
+        ts_str = r.get("timestamp") or ""
+        try:
+            from datetime import datetime as _dt
+            ts = _dt.fromisoformat(ts_str.replace("Z", "+00:00"))
+            hour = ts.hour
+        except (ValueError, TypeError):
+            continue
+        buckets[hour].append(float(r["consumption_kwh"]))
+
+    flat_mean = mean_consumption_kwh_from_execution_logs(limit=limit)
+    profile: dict[int, float] = {}
+    for h in range(24):
+        if buckets[h]:
+            profile[h] = sum(buckets[h]) / len(buckets[h])
+        else:
+            profile[h] = flat_mean
+    return profile
 
 
 def actions_for_device_at(
@@ -1010,3 +1066,140 @@ def get_pnl_summary_for_date(date_str: str) -> dict[str, Any]:
         "svt_vwap_pence": round(svt_vwap, 3),
         "slippage_pence": round(slippage, 3),
     }
+
+
+# ---------------------------------------------------------------------------
+# V3: Fox ESS daily energy cache
+# ---------------------------------------------------------------------------
+
+def upsert_fox_energy_daily(rows: list[dict[str, Any]]) -> int:
+    """Upsert Fox daily energy rows (dicts with date, solar_kwh, load_kwh, …).
+
+    Returns number of rows inserted/updated.
+    """
+    if not rows:
+        return 0
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        conn = get_connection()
+        try:
+            n = 0
+            for r in rows:
+                conn.execute(
+                    """INSERT INTO fox_energy_daily
+                       (date, solar_kwh, load_kwh, import_kwh, export_kwh,
+                        charge_kwh, discharge_kwh, fetched_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(date) DO UPDATE SET
+                         solar_kwh=excluded.solar_kwh,
+                         load_kwh=excluded.load_kwh,
+                         import_kwh=excluded.import_kwh,
+                         export_kwh=excluded.export_kwh,
+                         charge_kwh=excluded.charge_kwh,
+                         discharge_kwh=excluded.discharge_kwh,
+                         fetched_at=excluded.fetched_at""",
+                    (
+                        r.get("date"),
+                        r.get("solar_kwh"),
+                        r.get("load_kwh"),
+                        r.get("import_kwh"),
+                        r.get("export_kwh"),
+                        r.get("charge_kwh"),
+                        r.get("discharge_kwh"),
+                        now,
+                    ),
+                )
+                n += 1
+            conn.commit()
+            return n
+        finally:
+            conn.close()
+
+
+def get_fox_energy_daily(limit: int = 90) -> list[dict[str, Any]]:
+    """Return recent fox_energy_daily rows (newest first)."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM fox_energy_daily ORDER BY date DESC LIMIT ?", (limit,)
+            )
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
+def mean_fox_load_kwh_per_slot(limit: int = 60) -> Optional[float]:
+    """Mean half-hourly load kWh from Fox daily data (load_kwh / 48).
+
+    Returns None when no Fox data is available.
+    """
+    rows = get_fox_energy_daily(limit=limit)
+    vals = [float(r["load_kwh"]) / 48.0 for r in rows if r.get("load_kwh") and r["load_kwh"] > 0]
+    if not vals:
+        return None
+    return sum(vals) / len(vals)
+
+
+# ---------------------------------------------------------------------------
+# V4: Fox ESS realtime snapshot (SoC, solar_power_kw, load_power_kw)
+# Used by MPC intra-day re-optimisation to seed the LP initial state.
+# ---------------------------------------------------------------------------
+
+def upsert_fox_realtime_snapshot(snap: dict[str, Any]) -> None:
+    """Insert or replace the single realtime snapshot row (id=1).
+
+    Expected keys: captured_at (ISO str), soc_pct (float), solar_power_kw (float|None),
+    load_power_kw (float|None).
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            conn.execute(
+                """INSERT INTO fox_realtime_snapshot
+                   (id, captured_at, soc_pct, solar_power_kw, load_power_kw)
+                   VALUES (1, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET
+                     captured_at=excluded.captured_at,
+                     soc_pct=excluded.soc_pct,
+                     solar_power_kw=excluded.solar_power_kw,
+                     load_power_kw=excluded.load_power_kw""",
+                (
+                    snap.get("captured_at"),
+                    snap.get("soc_pct"),
+                    snap.get("solar_power_kw"),
+                    snap.get("load_power_kw"),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def get_fox_realtime_snapshot() -> Optional[dict[str, Any]]:
+    """Return the most recent Fox realtime snapshot, or None if not available.
+
+    The snapshot is considered stale if captured more than 15 minutes ago.
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute("SELECT * FROM fox_realtime_snapshot WHERE id = 1")
+            r = cur.fetchone()
+            if not r:
+                return None
+            snap = dict(r)
+            # Staleness check: reject if older than 15 min
+            try:
+                captured = datetime.fromisoformat(str(snap["captured_at"]).replace("Z", "+00:00"))
+                if captured.tzinfo is None:
+                    captured = captured.replace(tzinfo=timezone.utc)
+                age_s = (datetime.now(timezone.utc) - captured).total_seconds()
+                if age_s > 900:
+                    return None
+            except Exception:
+                return None
+            return snap
+        finally:
+            conn.close()
+

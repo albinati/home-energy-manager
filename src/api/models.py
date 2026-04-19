@@ -412,7 +412,7 @@ class OptimizationStatusExtendedResponse(OptimizationStatusResponse):
     """Extended optimization status including operation mode and consent state."""
 
     operation_mode: str = "simulation"
-    target_price_pence: float = 0.0
+    optimizer_backend: str = "lp"
     consent: Optional[dict] = None
     v7_safeties: Optional[dict] = None
 
@@ -456,13 +456,16 @@ class SetPresetResponse(BaseModel):
     message: str
 
 
-class SetTargetPriceRequest(BaseModel):
-    target_price_pence: float = Field(ge=0, le=100, description="Target average cost in p/kWh (0 = disabled)")
+class SetOptimizerBackendRequest(BaseModel):
+    backend: str = Field(
+        description="Planner backend: lp (PuLP MILP) or heuristic (legacy classifier)",
+        pattern=r"^(lp|heuristic)$",
+    )
 
 
-class SetTargetPriceResponse(BaseModel):
+class SetOptimizerBackendResponse(BaseModel):
     ok: bool
-    target_price_pence: float
+    optimizer_backend: str
     message: str
 
 

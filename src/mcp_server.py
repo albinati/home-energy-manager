@@ -393,7 +393,7 @@ def build_mcp() -> FastMCP:
             "bulletproof": True,
             "operation_mode": config.OPERATION_MODE,
             "preset": config.OPTIMIZATION_PRESET,
-            "target_price_pence": config.TARGET_PRICE_PENCE,
+            "optimizer_backend": config.OPTIMIZER_BACKEND,
             "scheduler": get_scheduler_status(),
             "octopus_fetch": asdict(db.get_octopus_fetch_state()),
             "agile_cache_slots": len(cache.rates or []),
@@ -511,24 +511,22 @@ def build_mcp() -> FastMCP:
         }
 
     @mcp.tool(
-        name="set_target_price",
+        name="set_optimizer_backend",
         description=(
-            "Set the target average import price (p/kWh). "
-            "The solver will exploit cheap windows aggressively enough to achieve this average. "
-            "Lower target = more load shifting; higher target = more comfort. Use 0 to disable."
+            "Set the daily planner backend: 'lp' (PuLP MILP, default) or 'heuristic' (legacy price-quantile). "
+            "Then call propose_optimization_plan."
         ),
     )
-    def set_target_price(target_price_pence: float) -> dict[str, Any]:
-        if target_price_pence < 0 or target_price_pence > 100:
-            return {"ok": False, "error": "Target price must be between 0 and 100 p/kWh"}
-        config.TARGET_PRICE_PENCE = target_price_pence
-        msg = (
-            f"Target price set to {target_price_pence}p/kWh. "
-            "Call propose_optimization_plan to regenerate the plan."
-            if target_price_pence > 0
-            else "Target price disabled. Planner uses statistical cheap band only."
-        )
-        return {"ok": True, "target_price_pence": target_price_pence, "message": msg}
+    def set_optimizer_backend(backend: str) -> dict[str, Any]:
+        b = (backend or "").strip().lower()
+        if b not in ("lp", "heuristic"):
+            return {"ok": False, "error": "backend must be 'lp' or 'heuristic'"}
+        config.OPTIMIZER_BACKEND = b
+        return {
+            "ok": True,
+            "optimizer_backend": b,
+            "message": f"Backend set to '{b}'. Call propose_optimization_plan to regenerate.",
+        }
 
     @mcp.tool(
         name="set_operation_mode",

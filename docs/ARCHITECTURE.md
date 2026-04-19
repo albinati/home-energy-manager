@@ -16,7 +16,7 @@ Home Energy Manager is designed as the **single planning brain** for the site: i
 ## Planning pipeline (bulletproof)
 
 1. **Ingest** — `src/scheduler/octopus_fetch.py`: fetch Agile → `save_agile_rates`, update fetch state, optional survival mode after prolonged failure.
-2. **Optimize** — `src/scheduler/optimizer.py` (`run_optimizer`): read rates from DB for **tomorrow**, `fetch_forecast`, build half-hour slots, `_classify_slots` (price quantiles **+ forecast**: e.g. strong solar can downgrade “cheap” to “standard”), optional **pre-peak extension** if battery vs estimated peak demand is tight, compute VWAP / strategy text, `save_daily_target`.
+2. **Optimize** — `src/scheduler/optimizer.py` (`run_optimizer`): read rates from SQLite, `fetch_forecast`. **Default (`OPTIMIZER_BACKEND=lp`):** `src/scheduler/lp_optimizer.solve_lp` — PuLP MILP over `LP_HORIZON_HOURS` (battery + grid + PV + DHW tank + building/radiators, COP vs outdoor temp, comfort slack). **Fallback (`OPTIMIZER_BACKEND=heuristic`):** price-quantile `_classify_slots`, overnight charge consolidation, pre-peak extension. Then compute VWAP / strategy text, `save_daily_target`.
 3. **Actuate (plan)** — Same run: merge Fox windows → **Scheduler V3** upload + snapshot in DB; write **Daikin** `action_schedule` rows (pre-heat, peak shutdown, restore, etc.).
 4. **Execute (runtime)** — `src/scheduler/runner.py` heartbeat: **reconcile** today’s Daikin rows, log **execution_log** on each local half-hour boundary, **repair** Fox scheduler flag / V3 vs SQLite ~30 min, low-SoC / price alerts.
 
@@ -63,9 +63,11 @@ flowchart LR
   H --> F
 ```
 
-## V8 Optimizer (PuLP Linear Programming)
-As of April 2026, the heuristic "If/Else" rule-based optimizer is being replaced by a Mathematical Solver using `PuLP`.
-- **Objective:** Minimize total cost (Import * Price - Export * 15p).
-- **Thermal Battery:** The Daikin DHW tank is modeled as a thermal battery with 0.33°C/h thermal decay and a strict rule to hit 48°C at 07:00 and 20:00.
-- **Electrical Battery:** FoxESS is modeled with its real SoC, Max Inverter limits (3kW), and Open-Meteo PV forecasting to handle precise grid import/export arbitrage.
-The solver completely replaces manual peak avoidance by mathematically proving the cheapest route for 24h/48h horizons.
+## V8 Optimizer (PuLP MILP)
+
+Production path when `OPTIMIZER_BACKEND=lp` (default). Implementation: `src/scheduler/lp_optimizer.py` (pure model), `src/scheduler/lp_dispatch.py` (Fox + Daikin writers), `src/weather.forecast_to_lp_inputs` (half-hour PV + COP series).
+
+- **Objective:** Minimize \(\sum_i (\text{import}_i \cdot \text{price}_i - \text{export}_i \cdot \text{EXPORT_RATE_PENCE})\) plus tiny battery-cycle penalty and comfort-band slack penalty.
+- **Constraints:** Half-hour energy balance; battery SoC with round-trip efficiency; mutex grid import vs export and charge vs discharge binaries; SEG-style **export ≤ PV use + discharge**; discrete heat-pump power buckets; DHW tank dynamics (UA loss to room); single-zone building / radiators (UA to outdoor, solar gain fraction, radiator thermal cap); shower windows and Legionella; terminal SoC/tank/indoor stitches.
+- **Inputs:** Octopus rates for the horizon, Open-Meteo → `WeatherLpSeries`, initial SoC (Fox cache), tank + room temps (Daikin / execution log fallbacks).
+- **Rollback:** Set `OPTIMIZER_BACKEND=heuristic` or POST `/api/v1/optimization/backend` with `{"backend":"heuristic"}` to use the legacy classifier in the same `run_optimizer()` entrypoint.

@@ -42,3 +42,15 @@ PYTHONPATH=. .venv/bin/python scripts/weekly_report.py --date 2026-03-07
 ```
 
 Requires Fox ESS configured in `.env` (same as the app).
+
+## PuLP MILP simulation (real rates + weather, no writes)
+
+Runs the same data path as the live LP optimizer (SQLite Agile half-hours, Open-Meteo, Fox SoC cache, optional Daikin tank/room) but **does not** upload Fox schedules, write Daikin actions, or persist daily targets.
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/simulate_lp.py
+PYTHONPATH=. .venv/bin/python scripts/simulate_lp.py --json
+PYTHONPATH=. .venv/bin/python scripts/simulate_lp.py --no-daikin
+```
+
+**Prerequisites:** `OCTOPUS_TARIFF_CODE`, `DB_PATH` (default `energy_state.db`), `WEATHER_LAT` / `WEATHER_LON` in `.env`; tomorrow’s rates must already be in SQLite (Octopus fetch). Use `--no-daikin` if you only want defaults + execution logs for tank/room.

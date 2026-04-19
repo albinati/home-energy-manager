@@ -23,6 +23,13 @@ def fetch_and_store_rates(fox: Optional[FoxESSClient] = None) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     db.update_octopus_fetch_state(last_attempt_at=now.isoformat())
 
+    # Opportunistically sync Fox ESS daily energy history for PV calibration
+    if fox:
+        try:
+            _sync_fox_energy_history(fox)
+        except Exception as e:
+            logger.debug("Fox energy history sync (non-fatal): %s", e)
+
     if not tariff:
         return {"ok": False, "error": "OCTOPUS_TARIFF_CODE not set"}
 
@@ -112,6 +119,63 @@ def next_retry_seconds(failures: int) -> int:
 
 def should_run_retry_fetch() -> bool:
     """True if we are in a failure streak and backoff elapsed since last attempt."""
+    st = db.get_octopus_fetch_state()
+    if st.consecutive_failures == 0 or not st.failure_streak_started_at:
+        return False
+    try:
+        last = datetime.fromisoformat((st.last_attempt_at or "").replace("Z", "+00:00"))
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+    except ValueError:
+        last = datetime.now(timezone.utc) - timedelta(days=1)
+    delay = next_retry_seconds(st.consecutive_failures)
+    return (datetime.now(timezone.utc) - last).total_seconds() >= delay
+
+
+def _sync_fox_energy_history(fox: FoxESSClient, months_back: int = 3) -> int:
+    """Pull Fox ESS monthly daily energy breakdown and upsert into fox_energy_daily.
+
+    Fetches the current month plus ``months_back`` prior months.
+    Returns total rows upserted.
+    """
+    from datetime import date
+    import calendar
+
+    now = datetime.now(timezone.utc)
+    total = 0
+    seen_months: set[tuple[int, int]] = set()
+
+    for delta in range(months_back + 1):
+        yr = now.year
+        mo = now.month - delta
+        while mo <= 0:
+            mo += 12
+            yr -= 1
+        if (yr, mo) in seen_months:
+            continue
+        seen_months.add((yr, mo))
+        try:
+            _, days = fox.get_energy_month_daily_breakdown(yr, mo)
+            rows = [
+                {
+                    "date": d["date"],
+                    "solar_kwh": d.get("solar_kwh") or 0.0,
+                    "load_kwh": d.get("load_kwh") or 0.0,
+                    "import_kwh": d.get("import_kwh") or 0.0,
+                    "export_kwh": d.get("export_kwh") or 0.0,
+                    "charge_kwh": d.get("charge_kwh") or 0.0,
+                    "discharge_kwh": d.get("discharge_kwh") or 0.0,
+                }
+                for d in days
+                if d.get("date")
+            ]
+            n = db.upsert_fox_energy_daily(rows)
+            total += n
+            logger.debug("Fox energy sync %d-%02d: %d rows", yr, mo, n)
+        except Exception as e:
+            logger.debug("Fox energy sync %d-%02d failed: %s", yr, mo, e)
+
+    return total
     st = db.get_octopus_fetch_state()
     if st.consecutive_failures == 0 or not st.failure_streak_started_at:
         return False

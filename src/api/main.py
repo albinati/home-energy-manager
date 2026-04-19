@@ -85,8 +85,8 @@ from .models import (
     RejectPlanRequest,
     SetPresetRequest,
     SetPresetResponse,
-    SetTargetPriceRequest,
-    SetTargetPriceResponse,
+    SetOptimizerBackendRequest,
+    SetOptimizerBackendResponse,
     SetOperationModeRequest,
     SetOperationModeResponse,
     SnapshotSummary,
@@ -1658,7 +1658,7 @@ async def optimization_status():
         enabled=config.USE_BULLETPROOF_ENGINE,
         operation_mode=config.OPERATION_MODE,
         preset=config.OPTIMIZATION_PRESET,
-        target_price_pence=float(config.TARGET_PRICE_PENCE or 0),
+        optimizer_backend=(config.OPTIMIZER_BACKEND or "lp"),
         tariff_code=config.OCTOPUS_TARIFF_CODE,
         cache_slots=len(cache.rates or []),
         cache_fetched_at_utc=cache.fetched_at_utc.isoformat() if cache.fetched_at_utc else None,
@@ -1796,21 +1796,18 @@ async def optimization_set_preset(req: SetPresetRequest):
     )
 
 
-@app.post("/api/v1/optimization/target-price", response_model=SetTargetPriceResponse)
-async def optimization_set_target_price(req: SetTargetPriceRequest):
-    """Set the target average import price (p/kWh). Use 0 to disable dynamic widening."""
-    config.TARGET_PRICE_PENCE = req.target_price_pence
-    logger.info("Target price set to %s p/kWh", req.target_price_pence)
-    msg = (
-        f"Target price set to {req.target_price_pence}p/kWh. "
-        "Call POST /api/v1/optimization/propose to regenerate the plan."
-        if req.target_price_pence > 0
-        else "Target price disabled (0p). Planner uses statistical cheap band only."
-    )
-    return SetTargetPriceResponse(
+@app.post("/api/v1/optimization/backend", response_model=SetOptimizerBackendResponse)
+async def optimization_set_backend(req: SetOptimizerBackendRequest):
+    """Switch planner: ``lp`` (PuLP MILP) or ``heuristic`` (legacy price-quantile classifier)."""
+    config.OPTIMIZER_BACKEND = req.backend
+    logger.info("Optimizer backend set to %s", req.backend)
+    return SetOptimizerBackendResponse(
         ok=True,
-        target_price_pence=req.target_price_pence,
-        message=msg,
+        optimizer_backend=config.OPTIMIZER_BACKEND,
+        message=(
+            f"Backend set to '{req.backend}'. "
+            "Call POST /api/v1/optimization/propose to regenerate the plan."
+        ),
     )
 
 

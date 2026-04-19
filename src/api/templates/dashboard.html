@@ -1024,7 +1024,7 @@
                     <button onclick="optimizeRollback()" class="btn btn-sm" style="background:#dc2626;color:#fff;">⟲ Rollback</button>
                 </div>
 
-                <!-- Preset + Target price -->
+                <!-- Preset + Planner backend -->
                 <div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:flex-end;margin-bottom:1rem;">
                     <div>
                         <label style="display:block;font-size:0.8rem;margin-bottom:0.25rem;">Household Preset</label>
@@ -1037,10 +1037,12 @@
                         </select>
                     </div>
                     <div>
-                        <label style="display:block;font-size:0.8rem;margin-bottom:0.25rem;">Target Price (p/kWh)</label>
+                        <label style="display:block;font-size:0.8rem;margin-bottom:0.25rem;">Planner backend</label>
                         <div style="display:flex;gap:0.5rem;">
-                            <input type="number" id="optimizeTargetPrice" min="0" max="100" step="0.5" placeholder="e.g. 15" style="width:90px;padding:0.4rem 0.5rem;border-radius:6px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);font-size:0.875rem;">
-                            <button onclick="optimizeSetTargetPrice()" class="btn btn-secondary btn-sm">Set</button>
+                            <select id="optimizeBackend" onchange="optimizeSetBackend(this.value)" style="padding:0.4rem 0.75rem;border-radius:6px;border:1px solid var(--border-color);background:var(--bg-secondary);color:var(--text-primary);font-size:0.875rem;">
+                                <option value="lp">PuLP (MILP)</option>
+                                <option value="heuristic">Heuristic (legacy)</option>
+                            </select>
                         </div>
                     </div>
                     <button onclick="optimizeProposePlan()" class="btn btn-sm" style="background:#059669;color:#fff;align-self:flex-end;">Propose Plan</button>
@@ -2353,7 +2355,7 @@ function loadOptimizationStatus() {
         .then(data => {
             var mode = data.operation_mode || 'simulation';
             var preset = data.preset || 'normal';
-            var target = data.target_price_pence || 0;
+            var backend = data.optimizer_backend || 'lp';
             var banner = document.getElementById('optimizationStatusBanner');
             var modeLabel = document.getElementById('optimizeModeLabel');
             if (banner) {
@@ -2361,7 +2363,7 @@ function loadOptimizationStatus() {
                 var cacheAge = data.cache_fetched_at_utc ? 'cached ' + new Date(data.cache_fetched_at_utc).toLocaleTimeString() : 'no cache';
                 banner.innerHTML = '<b>Mode:</b> ' + mode.toUpperCase() +
                     ' &nbsp;|&nbsp; <b>Preset:</b> ' + preset +
-                    (target > 0 ? ' &nbsp;|&nbsp; <b>Target:</b> ' + target + 'p/kWh' : '') +
+                    ' &nbsp;|&nbsp; <b>Backend:</b> ' + backend +
                     ' &nbsp;|&nbsp; <b>Plan mean:</b> ' + meanPrice +
                     ' &nbsp;|&nbsp; <b>Agile:</b> ' + cacheAge +
                     (data.cache_error ? ' <span style="color:#ef4444">(' + data.cache_error + ')</span>' : '');
@@ -2375,9 +2377,8 @@ function loadOptimizationStatus() {
             // Update preset select
             var sel = document.getElementById('optimizePreset');
             if (sel) sel.value = preset;
-            // Update target price input
-            var tpInput = document.getElementById('optimizeTargetPrice');
-            if (tpInput && target > 0) tpInput.value = target;
+            var beSel = document.getElementById('optimizeBackend');
+            if (beSel) beSel.value = backend === 'heuristic' ? 'heuristic' : 'lp';
             // Sync auto-approve checkbox
             var aaToggle = document.getElementById('autoApproveToggle');
             var consent = data.consent || {};
@@ -2530,16 +2531,15 @@ function optimizeSetPreset(preset) {
     });
 }
 
-function optimizeSetTargetPrice() {
-    var val = parseFloat(document.getElementById('optimizeTargetPrice').value);
-    if (isNaN(val) || val < 0) { alert('Enter a valid price in p/kWh'); return; }
-    fetch('/api/v1/optimization/target-price', {
+function optimizeSetBackend(backend) {
+    fetch('/api/v1/optimization/backend', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({target_price_pence: val})
+        body: JSON.stringify({backend: backend})
     }).then(r => r.json()).then(function(d) {
         var msg = document.getElementById('optimizeMsg');
-        if (msg) msg.textContent = d.message || 'Target price updated.';
+        if (msg) msg.textContent = d.message || 'Backend updated.';
+        loadOptimizationStatus();
     });
 }
 

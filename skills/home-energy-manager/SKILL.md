@@ -185,9 +185,9 @@ The system runs a **simulation-first, consent-driven** optimization engine that 
 | `travel` / `away` | Frost protection only, max battery export during peak, DHW off except Legionella |
 | `boost` | Temporary full-comfort override, ignores price for full-comfort heating |
 
-### Target Price
+### Planner backend (V8)
 
-`TARGET_PRICE_PENCE` is the user's desired average import cost (p/kWh). The solver ranks all 48 slots and exploits cheap windows aggressively enough to bring the weighted mean below this target. Lower target = more load shifting; higher = more comfort.
+`OPTIMIZER_BACKEND` is `lp` (default, PuLP MILP in `src/scheduler/lp_optimizer.py`) or `heuristic` (legacy price-quantile classifier). Switch via env, `POST /api/v1/optimization/backend`, or MCP `set_optimizer_backend(backend)`.
 
 ### Weather-Aware Optimization
 
@@ -202,7 +202,7 @@ When `WEATHER_LAT`/`WEATHER_LON` are set, the solver:
 **Standard flow:**
 
 ```
-1. get_optimization_status          → check mode, preset, target price, consent state
+1. get_optimization_status          → check mode, preset, optimizer backend, consent state
 2. propose_optimization_plan        → compute plan, returns summary + plan_id
 3. [show summary to user, ask for approval]
 4. approve_optimization_plan(plan_id) → activate plan
@@ -212,7 +212,7 @@ When `WEATHER_LAT`/`WEATHER_LON` are set, the solver:
 **Changing settings:**
 ```
 set_optimization_preset(preset)     → normal / guests / travel / away / boost
-set_target_price(target_price_pence) → e.g. 15.0
+set_optimizer_backend(backend)      → lp | heuristic
 set_operation_mode(mode)            → simulation / operational (requires approved plan for operational)
 ```
 
@@ -226,13 +226,13 @@ get_config_snapshots()              → list available snapshots
 
 | Tool | Description |
 |------|-------------|
-| `get_optimization_status` | Full status: mode, preset, target price, cache, consent state |
+| `get_optimization_status` | Full status: mode, preset, optimizer backend, cache, consent state |
 | `get_optimization_plan` | 48-slot plan with per-slot prices, actions, weather notes |
 | `propose_optimization_plan` | Compute plan and propose for consent (returns summary + plan_id) |
 | `approve_optimization_plan(plan_id)` | Approve pending plan — only call after user confirms |
 | `reject_optimization_plan(plan_id)` | Reject a pending plan |
 | `set_optimization_preset(preset)` | Switch household preset |
-| `set_target_price(target_price_pence)` | Set target average cost |
+| `set_optimizer_backend(backend)` | `lp` (PuLP) or `heuristic` (legacy) |
 | `set_operation_mode(mode)` | Switch simulation / operational |
 | `rollback_config(snapshot_id?)` | Restore config snapshot |
 | `get_config_snapshots` | List available snapshots |
@@ -250,7 +250,7 @@ get_config_snapshots()              → list available snapshots
 | `/api/v1/optimization/reject` | POST | Reject plan `{"plan_id": "..."}` |
 | `/api/v1/optimization/pending` | GET | Current consent state |
 | `/api/v1/optimization/preset` | POST | Set preset `{"preset": "guests"}` |
-| `/api/v1/optimization/target-price` | POST | Set target `{"target_price_pence": 15}` |
+| `/api/v1/optimization/backend` | POST | Set backend `{"backend": "lp"}` or `"heuristic"` |
 | `/api/v1/optimization/mode` | POST | Set mode `{"mode": "operational"}` |
 | `/api/v1/optimization/rollback` | POST | Restore latest snapshot |
 | `/api/v1/optimization/snapshots` | GET | List snapshots |

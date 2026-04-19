@@ -16,7 +16,7 @@ from ..foxess.service import get_cached_realtime
 from ..physics import calculate_dhw_setpoint, find_dhw_heat_end_utc, build_shower_target_iso
 from ..notifier import push_cheap_window_start, push_peak_window_start
 from ..presets import OperationPreset
-from ..weather import HourlyForecast, estimate_pv_kw, fetch_forecast, get_forecast_for_slot
+from ..weather import HourlyForecast, estimate_pv_kw, fetch_forecast, forecast_to_lp_inputs, get_forecast_for_slot
 
 logger = logging.getLogger(__name__)
 
@@ -70,29 +70,6 @@ def _build_half_hour_slots(
     return slots
 
 
-def _dynamic_cheap_threshold_from_target(slots: list[HalfHourSlot], base_thr: float) -> float:
-    """Widen cheap band when TARGET_PRICE_PENCE demands a lower mean import (ported from V7)."""
-    target = float(config.TARGET_PRICE_PENCE or 0)
-    if target <= 0 or not slots:
-        return base_thr
-    sorted_prices = sorted(s.price_pence for s in slots)
-    total = len(sorted_prices)
-    mean_all = sum(sorted_prices) / total
-    thr = base_thr
-    if mean_all > target:
-        for i in range(total):
-            candidate_thr = sorted_prices[i]
-            cheap_count = sum(1 for p in sorted_prices if p <= candidate_thr)
-            if cheap_count > 0:
-                cheap_mean = sum(p for p in sorted_prices if p <= candidate_thr) / cheap_count
-                effective_mean = (
-                    cheap_mean * cheap_count + sum(p for p in sorted_prices if p > candidate_thr)
-                ) / total
-                if effective_mean <= target:
-                    return max(thr, candidate_thr)
-    return thr
-
-
 def _classify_slots(slots: list[HalfHourSlot], forecast: list[HourlyForecast]) -> None:
     if not slots:
         return
@@ -103,7 +80,6 @@ def _classify_slots(slots: list[HalfHourSlot], forecast: list[HourlyForecast]) -
     q75 = prices_sorted[min(n - 1, (3 * n) // 4)]
     bottom10 = prices_sorted[max(0, n // 10 - 1)]
     cheap_thr = min(mean(prices) * 0.85, q25) if n else 0
-    cheap_thr = _dynamic_cheap_threshold_from_target(slots, cheap_thr)
     peak_thr = max(q75, config.OPTIMIZATION_PEAK_THRESHOLD_PENCE)
 
     for s in slots:
@@ -145,6 +121,12 @@ def _slot_fox_tuple(
         return ("ForceCharge", 100, config.FOX_FORCE_CHARGE_MAX_PWR)
     if s.kind == "cheap":
         return ("ForceCharge", 95, config.FOX_FORCE_CHARGE_NORMAL_PWR)
+    if s.kind == "peak_export":
+        return (
+            "ForceDischarge",
+            int(config.EXPORT_DISCHARGE_FLOOR_SOC_PERCENT),
+            config.FOX_FORCE_CHARGE_MAX_PWR,
+        )
     if s.kind == "peak" and peak_export_discharge:
         return (
             "ForceDischarge",
@@ -200,6 +182,8 @@ def _merge_fox_groups(
             cur_key = k
     merged.append((cur_start, cur_end, cur_key))
 
+    merged = _merge_adjacent_force_charge_rows(merged)
+
     guard = 0
     while len(merged) > max_groups and len(merged) >= 2 and guard < 64:
         guard += 1
@@ -251,6 +235,29 @@ def _merge_fox_groups(
             )
         )
     return groups
+
+
+def _merge_adjacent_force_charge_rows(
+    merged: list[tuple[datetime, datetime, tuple]],
+) -> list[tuple[datetime, datetime, tuple]]:
+    """Join consecutive ForceCharge segments even when fdSoc/fdPwr differ (e.g. negative vs cheap slot)."""
+    out: list[tuple[datetime, datetime, tuple]] = []
+    for a, b, k in merged:
+        if (
+            out
+            and out[-1][2][0] == "ForceCharge"
+            and k[0] == "ForceCharge"
+        ):
+            a0, _, k0 = out[-1]
+            nk: tuple[str, Optional[int], Optional[int]] = (
+                "ForceCharge",
+                max(k0[1] or 0, k[1] or 0),
+                max(k0[2] or 0, k[2] or 0),
+            )
+            out[-1] = (a0, b, nk)
+        else:
+            out.append((a, b, k))
+    return out
 
 
 def _coarse_merge_fox(
@@ -492,17 +499,15 @@ def _write_daikin_schedule(plan_date: str, slots: list[HalfHourSlot], forecast: 
     return count
 
 
-def run_optimizer(fox: Optional[FoxESSClient], daikin: Optional[Any] = None) -> dict[str, Any]:
-    """Fetch rates from DB, classify, upload Fox V3, write Daikin actions. Returns summary dict."""
+def _run_optimizer_heuristic(fox: Optional[FoxESSClient], daikin: Optional[Any] = None) -> dict[str, Any]:
+    """Legacy price-quantile classifier + Fox/Daikin writers."""
     tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
     if not tariff:
         return {"ok": False, "error": "OCTOPUS_TARIFF_CODE not set"}
 
     tz = TZ()
-    # Use Europe/London (or configured timezone) for plan_date so BST/GMT is correct.
     tomorrow = (datetime.now(tz) + timedelta(days=1)).date()
     plan_date = tomorrow.isoformat()
-    # Build day window anchored to local midnight (ZoneInfo handles DST transparently).
     day_start = datetime.combine(tomorrow, datetime.min.time()).replace(tzinfo=tz)
     day_end = day_start + timedelta(days=1)
 
@@ -517,8 +522,6 @@ def run_optimizer(fox: Optional[FoxESSClient], daikin: Optional[Any] = None) -> 
     forecast = fetch_forecast(hours=48)
     slots = _build_half_hour_slots(rates, day_start, day_end)
     _classify_slots(slots, forecast)
-
-    # V2: consolidate overnight ForceCharge slots into one solid block before group building.
     _consolidate_fox_charge_block(slots, tz)
 
     mu_load = db.mean_consumption_kwh_from_execution_logs()
@@ -603,7 +606,6 @@ def run_optimizer(fox: Optional[FoxESSClient], daikin: Optional[Any] = None) -> 
 
     daikin_n = _write_daikin_schedule(plan_date, slots, forecast)
 
-    # V2: physics-based DHW thermal decay setpoint for 09:30 shower target.
     thermal_info = _schedule_dhw_thermal_decay(plan_date, slots, tz)
     if thermal_info:
         strategy += (
@@ -612,11 +614,8 @@ def run_optimizer(fox: Optional[FoxESSClient], daikin: Optional[Any] = None) -> 
         )
         daikin_n += 1
 
-    # V2: push webhook notifications for cheap / peak window transitions.
     try:
-        cheap_slots_local = [
-            s for s in slots if s.kind in ("cheap", "negative")
-        ]
+        cheap_slots_local = [s for s in slots if s.kind in ("cheap", "negative")]
         if cheap_slots_local:
             first_cheap = min(cheap_slots_local, key=lambda s: s.start_utc)
             push_cheap_window_start(fox_mode=None)
@@ -658,5 +657,180 @@ def run_optimizer(fox: Optional[FoxESSClient], daikin: Optional[Any] = None) -> 
         "peak_export_discharge": peak_export,
         "strategy": strategy,
         "dhw_thermal_decay": thermal_info,
+        "optimizer_backend": "heuristic",
     }
+
+
+def _run_optimizer_lp(fox: Optional[FoxESSClient], daikin: Optional[Any] = None) -> dict[str, Any]:
+    """PuLP MILP horizon planner (V8). Falls back to heuristic if solve is not optimal."""
+    from .lp_dispatch import (
+        build_fox_groups_from_lp,
+        lp_plan_to_slots,
+        upload_fox_if_operational,
+        write_daikin_from_lp_plan,
+    )
+    from .lp_initial_state import read_lp_initial_state
+    from .lp_optimizer import solve_lp
+
+    tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
+    if not tariff:
+        return {"ok": False, "error": "OCTOPUS_TARIFF_CODE not set"}
+
+    tz = TZ()
+    tomorrow = (datetime.now(tz) + timedelta(days=1)).date()
+    plan_date = tomorrow.isoformat()
+    day_start = datetime.combine(tomorrow, datetime.min.time()).replace(tzinfo=tz)
+    horizon_end = day_start + timedelta(hours=int(config.LP_HORIZON_HOURS))
+
+    rates = db.get_rates_for_period(
+        tariff,
+        day_start.astimezone(timezone.utc) - timedelta(hours=1),
+        horizon_end.astimezone(timezone.utc) + timedelta(hours=2),
+    )
+    if not rates:
+        return {"ok": False, "error": "No rates in SQLite for tomorrow — run Octopus fetch first"}
+
+    slots = _build_half_hour_slots(rates, day_start, horizon_end)
+    if not slots:
+        return {"ok": False, "error": "No half-hour slots in LP horizon — check Agile rates coverage"}
+
+    # Per-slot load profile (hour-of-day bins from execution_log)
+    _profile_limit = int(getattr(config, "LP_LOAD_PROFILE_SLOTS", 2016))
+    _load_profile = db.hourly_load_profile_kwh(limit=_profile_limit)
+    # Fall back to Fox daily mean when execution_log is cold
+    _fox_mean = db.mean_fox_load_kwh_per_slot(limit=60)
+    _flat = _fox_mean if _fox_mean is not None else db.mean_consumption_kwh_from_execution_logs(limit=_profile_limit)
+    base_load = [_load_profile.get(s.start_utc.astimezone(tz).hour, _flat) for s in slots]
+    mu_load = sum(base_load) / len(base_load) if base_load else 0.4
+    prices = [s.price_pence for s in slots]
+    starts = [s.start_utc for s in slots]
+
+    forecast = fetch_forecast(hours=max(48, int(config.LP_HORIZON_HOURS) + 24))
+    # PV calibration: Fox actual vs Open-Meteo archive to correct systematic bias
+    from ..weather import compute_pv_calibration_factor
+    pv_scale = compute_pv_calibration_factor()
+    weather = forecast_to_lp_inputs(forecast, starts, pv_scale=pv_scale)
+    initial = read_lp_initial_state(daikin)
+
+    plan = solve_lp(
+        slot_starts_utc=starts,
+        price_pence=prices,
+        base_load_kwh=base_load,
+        weather=weather,
+        initial=initial,
+        tz=tz,
+    )
+    if not plan.ok:
+        logger.warning("PuLP status %s — falling back to heuristic classifier", plan.status)
+        return _run_optimizer_heuristic(fox, daikin)
+
+    lp_slots = lp_plan_to_slots(plan)
+    counts = {"negative": 0, "cheap": 0, "standard": 0, "peak": 0, "peak_export": 0}
+    for s in lp_slots:
+        counts[s.kind] = counts.get(s.kind, 0) + 1
+
+    actual_mean = mean(prices) if prices else 0.0
+    total_kwh = sum(base_load)
+    target_vwap = float(plan.objective_pence) / total_kwh if total_kwh > 0 else actual_mean
+
+    temps = [f.temperature_c for f in forecast] if forecast else []
+    solar_kwh = sum(weather.pv_kwh_per_slot) if weather.pv_kwh_per_slot else 0.0
+
+    peak_hours_pre = sum(1 for s in lp_slots if s.kind == "peak") * 0.5
+    est_peak_kwh = peak_hours_pre * mu_load * 1.2
+    battery_warn = est_peak_kwh > config.BATTERY_CAPACITY_KWH * 0.85
+
+    strategy = (
+        f"{plan_date}: PuLP MILP objective ~{plan.objective_pence:.0f}p; "
+        f"neg={counts.get('negative', 0)} cheap={counts.get('cheap', 0)} "
+        f"std={counts.get('standard', 0)} peak={counts.get('peak', 0)} "
+        f"peak_export={counts.get('peak_export', 0)}; mean Agile {actual_mean:.1f}p"
+    )
+    if _optimization_preset_away_like():
+        strategy += "; Daikin: travel/away — setbacks predominate when LP chooses peak slots"
+    peak_export = _bulletproof_allow_peak_export_discharge()
+    if peak_export:
+        strategy += (
+            f"; peak export discharge allowed (travel/away, SoC≥{config.EXPORT_DISCHARGE_MIN_SOC_PERCENT:g}%)"
+        )
+    if battery_warn:
+        strategy += (
+            f"; battery warn: est peak load ~{est_peak_kwh:.1f}kWh vs "
+            f"~{config.BATTERY_CAPACITY_KWH * 0.85:.1f}kWh usable"
+        )
+    svt = float(config.SVT_RATE_PENCE)
+    naive_svt_cost = total_kwh * svt
+    naive_agile_cost = total_kwh * actual_mean
+    savings_vs_svt_pence = max(0.0, naive_svt_cost - naive_agile_cost)
+    strategy += f"; indicative vs SVT ~{savings_vs_svt_pence / 100:.2f} GBP/day at mean Agile"
+
+    db.save_daily_target(
+        {
+            "date": plan_date,
+            "target_vwap": target_vwap,
+            "estimated_total_kwh": total_kwh,
+            "estimated_cost_pence": plan.objective_pence,
+            "cheap_threshold": plan.cheap_threshold_pence,
+            "peak_threshold": plan.peak_threshold_pence,
+            "forecast_min_temp_c": min(temps) if temps else None,
+            "forecast_max_temp_c": max(temps) if temps else None,
+            "forecast_total_solar_kwh": solar_kwh,
+            "strategy_summary": strategy,
+        }
+    )
+
+    groups = build_fox_groups_from_lp(plan)
+    fox_ok = upload_fox_if_operational(fox, groups)
+    daikin_n = write_daikin_from_lp_plan(plan_date, plan, forecast)
+
+    try:
+        cheap_slots_local = [s for s in lp_slots if s.kind in ("cheap", "negative")]
+        if cheap_slots_local:
+            push_cheap_window_start(fox_mode=None)
+        peak_slots_local = [s for s in lp_slots if s.kind in ("peak", "peak_export")]
+        if peak_slots_local:
+            push_peak_window_start(soc=None)
+    except Exception as exc:
+        logger.debug("Push webhook error (non-fatal): %s", exc)
+
+    db.log_optimizer_run(
+        {
+            "run_at": datetime.now(timezone.utc).isoformat(),
+            "rates_count": len(slots),
+            "cheap_slots": counts.get("cheap", 0),
+            "peak_slots": counts.get("peak", 0) + counts.get("peak_export", 0),
+            "standard_slots": counts.get("standard", 0),
+            "negative_slots": counts.get("negative", 0),
+            "target_vwap": target_vwap,
+            "actual_agile_mean": actual_mean,
+            "battery_warning": battery_warn,
+            "strategy_summary": strategy,
+            "fox_schedule_uploaded": fox_ok,
+            "daikin_actions_count": daikin_n,
+        }
+    )
+
+    return {
+        "ok": True,
+        "plan_date": plan_date,
+        "target_vwap": target_vwap,
+        "counts": counts,
+        "fox_uploaded": fox_ok,
+        "daikin_actions": daikin_n,
+        "battery_warning": battery_warn,
+        "peak_export_discharge": peak_export,
+        "strategy": strategy,
+        "dhw_thermal_decay": None,
+        "optimizer_backend": "lp",
+        "lp_objective_pence": plan.objective_pence,
+        "lp_status": plan.status,
+    }
+
+
+def run_optimizer(fox: Optional[FoxESSClient], daikin: Optional[Any] = None) -> dict[str, Any]:
+    """Fetch rates from DB, plan (PuLP or heuristic), upload Fox V3, write Daikin actions."""
+    backend = (config.OPTIMIZER_BACKEND or "lp").strip().lower()
+    if backend == "heuristic":
+        return _run_optimizer_heuristic(fox, daikin)
+    return _run_optimizer_lp(fox, daikin)
 
