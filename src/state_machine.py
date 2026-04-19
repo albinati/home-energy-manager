@@ -3,13 +3,12 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
-
+from datetime import UTC, datetime, timedelta
+from typing import Any
 from zoneinfo import ZoneInfo
 
-from .config import config
 from . import db
+from .config import config
 from .daikin.client import DaikinClient, DaikinError
 from .daikin_bulletproof import apply_comfort_restore, apply_scheduled_daikin_params
 from .foxess.client import FoxESSClient, FoxESSError, scheduler_groups_from_stored_json
@@ -22,7 +21,7 @@ def _parse_utc(s: str) -> datetime:
     x = str(s).replace("Z", "+00:00")
     dt = datetime.fromisoformat(x)
     if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
+        return dt.replace(tzinfo=UTC)
     return dt
 
 
@@ -59,8 +58,8 @@ def _schedule_signature(groups: list[Any]) -> str:
 
 
 def apply_safe_defaults(
-    fox: Optional[FoxESSClient],
-    daikin: Optional[DaikinClient],
+    fox: FoxESSClient | None,
+    daikin: DaikinClient | None,
     *,
     trigger: str = "recovery",
 ) -> None:
@@ -145,9 +144,9 @@ def apply_safe_defaults(
 def should_act(
     action: dict[str, Any],
     *,
-    current_soc: Optional[float],
-    room_temp_c: Optional[float],
-    now_local: Optional[datetime] = None,
+    current_soc: float | None,
+    room_temp_c: float | None,
+    now_local: datetime | None = None,
 ) -> tuple[bool, str]:
     """Return (allowed, reason)."""
     atype = action.get("action_type", "")
@@ -177,7 +176,7 @@ def _reconcile_daikin_actions(
     now_utc: datetime,
     *,
     trigger: str,
-    outdoor_c: Optional[float] = None,
+    outdoor_c: float | None = None,
 ) -> None:
     """Transition statuses and apply params for today's Daikin rows."""
     for act in sorted(actions, key=lambda a: (a["start_time"], int(a["id"]))):
@@ -226,7 +225,7 @@ def reconcile_daikin_schedule_for_date(
     now_utc: datetime,
     *,
     trigger: str,
-    outdoor_c: Optional[float] = None,
+    outdoor_c: float | None = None,
 ) -> None:
     """Full-day Daikin reconciliation (status transitions + live apply).
 
@@ -337,12 +336,12 @@ def _recover_missed_restores(
 
 
 def recover_on_boot(
-    fox: Optional[FoxESSClient],
-    daikin: Optional[DaikinClient],
+    fox: FoxESSClient | None,
+    daikin: DaikinClient | None,
 ) -> None:
     """Reconcile SQLite, Daikin windows, Fox V3 vs stored plan; survival / empty fallbacks."""
     tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
-    now_utc = datetime.now(timezone.utc)
+    now_utc = datetime.now(UTC)
     plan_date = datetime.now(tz).date().isoformat()
 
     dev = None

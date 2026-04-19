@@ -1,11 +1,11 @@
 """Safeguards for API actions: confirmation tokens, rate limiting, audit logging."""
-import secrets
 import logging
+import secrets
 from datetime import datetime, timedelta
-from typing import Any, Optional
 from threading import Lock
+from typing import Any
 
-from .models import PendingAction, ActionStatus
+from .models import ActionStatus, PendingAction
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ def create_pending_action(
     return action
 
 
-def get_pending_action(action_id: str) -> Optional[PendingAction]:
+def get_pending_action(action_id: str) -> PendingAction | None:
     """Get a pending action by ID."""
     with _lock:
         action = _pending_actions.get(action_id)
@@ -58,7 +58,7 @@ def get_pending_action(action_id: str) -> Optional[PendingAction]:
         return action
 
 
-def confirm_action(action_id: str) -> Optional[PendingAction]:
+def confirm_action(action_id: str) -> PendingAction | None:
     """Confirm a pending action, returning it if valid."""
     with _lock:
         action = _pending_actions.get(action_id)
@@ -77,7 +77,7 @@ def confirm_action(action_id: str) -> Optional[PendingAction]:
         return action
 
 
-def cancel_action(action_id: str) -> Optional[PendingAction]:
+def cancel_action(action_id: str) -> PendingAction | None:
     """Cancel a pending action."""
     with _lock:
         action = _pending_actions.get(action_id)
@@ -98,7 +98,7 @@ def mark_executed(action_id: str) -> None:
             logger.info(f"Executed action {action_id}: {action.action_type}")
 
 
-def check_rate_limit(action_type: str) -> tuple[bool, Optional[float]]:
+def check_rate_limit(action_type: str) -> tuple[bool, float | None]:
     """
     Check if an action is rate limited.
     Returns (allowed, seconds_until_allowed).

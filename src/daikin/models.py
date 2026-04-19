@@ -1,22 +1,21 @@
 """Pydantic-style models for Daikin Onecta API."""
 from dataclasses import dataclass, field
-from typing import Optional
 
 
 @dataclass
 class SetpointRange:
     """Min/max/step for a settable value."""
-    min_value: Optional[float] = None
-    max_value: Optional[float] = None
-    step_value: Optional[float] = None
+    min_value: float | None = None
+    max_value: float | None = None
+    step_value: float | None = None
     settable: bool = True
 
 
 @dataclass
 class TemperatureControlSettings:
-    set_point: Optional[float] = None
-    room_temperature: Optional[float] = None
-    outdoor_temperature: Optional[float] = None
+    set_point: float | None = None
+    room_temperature: float | None = None
+    outdoor_temperature: float | None = None
 
 
 @dataclass
@@ -28,12 +27,12 @@ class DaikinDevice:
     is_on: bool = False
     operation_mode: str = "heating"
     temperature: TemperatureControlSettings = field(default_factory=TemperatureControlSettings)
-    leaving_water_temperature: Optional[float] = None
-    lwt_offset: Optional[float] = None
-    tank_temperature: Optional[float] = None
-    tank_target: Optional[float] = None
-    tank_target_min: Optional[float] = None
-    tank_target_max: Optional[float] = None
+    leaving_water_temperature: float | None = None
+    lwt_offset: float | None = None
+    tank_temperature: float | None = None
+    tank_target: float | None = None
+    tank_target_min: float | None = None
+    tank_target_max: float | None = None
     weather_regulation_enabled: bool = False
     weather_regulation_settable: bool = True
     lwt_offset_range: SetpointRange = field(default_factory=SetpointRange)
@@ -50,11 +49,11 @@ class DaikinStatus:
     device_name: str
     is_on: bool
     mode: str
-    room_temp: Optional[float]
-    target_temp: Optional[float]
-    outdoor_temp: Optional[float]
-    lwt: Optional[float]
-    lwt_offset: Optional[float]
-    tank_temp: Optional[float]
-    tank_target: Optional[float]
+    room_temp: float | None
+    target_temp: float | None
+    outdoor_temp: float | None
+    lwt: float | None
+    lwt_offset: float | None
+    tank_temp: float | None
+    tank_target: float | None
     weather_regulation: bool

@@ -19,13 +19,15 @@ from typing import Any
 # max_workers=1 ensures only one plan runs at a time (no concurrent LP solves).
 _optimizer_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="mcp-optimizer")
 
+from datetime import UTC
+
 from mcp.server.fastmcp import FastMCP
 
 from .api import safeguards
 from .config import config
 from .daikin.client import DaikinClient, DaikinError
 from .daikin.models import DaikinDevice
-from .foxess.client import FoxESSClient, FoxESSError, WORK_MODE_VALID
+from .foxess.client import WORK_MODE_VALID, FoxESSClient, FoxESSError
 from .foxess.service import get_cached_realtime, get_refresh_stats
 
 logger = logging.getLogger(__name__)
@@ -487,6 +489,7 @@ def build_mcp() -> FastMCP:
     def propose_optimization_plan() -> dict[str, Any]:
         from datetime import datetime
         from zoneinfo import ZoneInfo
+
         from .scheduler.optimizer import run_optimizer
 
         if not config.OCTOPUS_TARIFF_CODE:
@@ -621,9 +624,8 @@ def build_mcp() -> FastMCP:
         ),
     )
     def confirm_plan(plan_id: str) -> dict[str, Any]:
+
         from . import db
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
         from .notifier import notify_action_confirmation
 
         ok = db.approve_plan(plan_id)
@@ -714,9 +716,10 @@ def build_mcp() -> FastMCP:
         ),
     )
     def get_pending_approval() -> dict[str, Any]:
+        import time
         from datetime import datetime
         from zoneinfo import ZoneInfo
-        import time
+
         from . import db
 
         tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
@@ -1105,8 +1108,9 @@ def build_mcp() -> FastMCP:
         if not config.OCTOPUS_API_KEY:
             return {"ok": False, "error": "OCTOPUS_API_KEY not configured in .env"}
 
+        from datetime import datetime
+
         from .energy.octopus_client import fetch_consumption, get_mpan_roles
-        from datetime import datetime, timezone, timedelta
 
         roles = get_mpan_roles()
         use_mpan = mpan or roles.import_mpan or config.OCTOPUS_MPAN_1
@@ -1358,13 +1362,13 @@ def build_mcp() -> FastMCP:
         blocked = _daikin_write_preamble("bulletproof.override", {})
         if blocked:
             return blocked
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
         from zoneinfo import ZoneInfo
 
         from . import db
 
         tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         end = now + timedelta(hours=hours)
         plan_date = datetime.now(tz).date().isoformat()
         params: dict[str, Any] = {"lwt_offset": lwt_offset, "tank_powerful": True, "climate_on": True}

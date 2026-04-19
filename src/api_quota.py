@@ -15,7 +15,6 @@ import logging
 import sqlite3
 import threading
 import time
-from typing import Optional
 
 from .config import config
 
@@ -133,7 +132,7 @@ def should_block(vendor: str) -> bool:
     return quota_remaining(vendor) <= 0
 
 
-def get_quota_status(vendor: Optional[str] = None) -> dict:
+def get_quota_status(vendor: str | None = None) -> dict:
     """Return a dict suitable for status endpoints."""
     vendors = [vendor] if vendor else ["daikin", "fox"]
     out: dict = {}

@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 from ..config import config
 
@@ -46,13 +46,13 @@ class SuggestedAction:
     """A single suggested action with optional reason."""
     action: str
     parameters: dict[str, Any]
-    reason: Optional[str] = None
+    reason: str | None = None
 
 
 def build_context(
     daikin_status_list: list[dict],
-    foxess_status: Optional[dict],
-    tariff: Optional[dict],
+    foxess_status: dict | None,
+    tariff: dict | None,
 ) -> dict:
     """Build a JSON-serializable context for the assistant."""
     ctx = {
@@ -97,7 +97,7 @@ def build_context(
 def get_suggestions(
     context: dict,
     preference: str,
-    user_message: Optional[str] = None,
+    user_message: str | None = None,
 ) -> tuple[str, list[SuggestedAction]]:
     """
     Get assistant reply and suggested actions.

@@ -13,15 +13,19 @@ service.  See src/db.py: get_notification_route / upsert_notification_route.
 from __future__ import annotations
 
 import json
+import logging
+import sqlite3
 import threading
 from datetime import datetime
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 import requests
 
 from . import db
 from .config import config
+
+logger = logging.getLogger(__name__)
 
 
 class AlertType(str, Enum):
@@ -60,7 +64,7 @@ def _payload_name_for_key(alert_key: str) -> str:
 # Route resolution (SQLite → env fallback)
 # ---------------------------------------------------------------------------
 
-def _resolve_route(alert_type: str) -> Optional[dict[str, Any]]:
+def _resolve_route(alert_type: str) -> dict[str, Any] | None:
     """Return {channel, target, silent} for *alert_type* or None if disabled/unconfigured.
 
     Resolution order:
@@ -73,11 +77,11 @@ def _resolve_route(alert_type: str) -> Optional[dict[str, Any]]:
     if not config.OPENCLAW_NOTIFY_ENABLED:
         return None
 
-    row: Optional[dict[str, Any]] = None
+    row: dict[str, Any] | None = None
     try:
         row = db.get_notification_route(alert_type)
-    except Exception:
-        pass
+    except sqlite3.Error as exc:
+        logger.warning("notification route lookup failed for %s: %s", alert_type, exc)
 
     if row is not None and not row.get("enabled", 1):
         return None
@@ -192,7 +196,7 @@ def _build_generic_agent_message(
     *,
     urgent: bool = False,
     silent: bool = False,
-    extra: Optional[dict[str, Any]] = None,
+    extra: dict[str, Any] | None = None,
 ) -> str:
     lines = [
         "Home Energy Manager notification — summarize clearly for the user in natural language.",
@@ -246,7 +250,7 @@ def _compose_delivery_body(
     message: str,
     *,
     urgent: bool = False,
-    extra: Optional[dict[str, Any]] = None,
+    extra: dict[str, Any] | None = None,
 ) -> str:
     prefix = "[URGENT]" if urgent else "[info]"
     ts = datetime.now().strftime("%H:%M")
@@ -262,8 +266,8 @@ def _record_notification(
     message: str,
     *,
     urgent: bool = False,
-    extra: Optional[dict[str, Any]] = None,
-    full_msg: Optional[str] = None,
+    extra: dict[str, Any] | None = None,
+    full_msg: str | None = None,
 ) -> str:
     """Print, log to action_log; return *full_msg* for hook delivery."""
     body = full_msg if full_msg is not None else _compose_delivery_body(
@@ -279,8 +283,8 @@ def _record_notification(
             result="success",
             trigger="notification",
         )
-    except Exception:
-        pass
+    except sqlite3.Error as exc:
+        logger.warning("action_log failed for notification %s: %s", kind.value, exc)
 
     return body
 
@@ -290,7 +294,7 @@ def _dispatch(
     message: str,
     *,
     urgent: bool = False,
-    extra: Optional[dict[str, Any]] = None,
+    extra: dict[str, Any] | None = None,
 ) -> None:
     full_msg = _compose_delivery_body(kind, message, urgent=urgent, extra=extra)
     _record_notification(kind, message, urgent=urgent, extra=extra, full_msg=full_msg)
@@ -334,7 +338,7 @@ def notify_strategy_update(summary: str, warnings: Any = None) -> None:
     _dispatch(AlertType.STRATEGY_UPDATE, msg, extra={"warnings": warnings} if warnings else None)
 
 
-def notify_risk(message: str, extra: Optional[dict[str, Any]] = None) -> None:
+def notify_risk(message: str, extra: dict[str, Any] | None = None) -> None:
     _dispatch(AlertType.RISK_ALERT, message, urgent=True, extra=extra)
 
 
@@ -373,8 +377,8 @@ def push_alert(event_type: str, payload: dict[str, Any]) -> bool:
             result="success",
             trigger="notification",
         )
-    except Exception:
-        pass
+    except sqlite3.Error as exc:
+        logger.warning("action_log failed for push_alert %s: %s", event_type, exc)
 
     route = _resolve_route(event_type)
     if not route:
@@ -397,7 +401,7 @@ def push_alert(event_type: str, payload: dict[str, Any]) -> bool:
     return True
 
 
-def push_cheap_window_start(soc: Optional[float] = None, fox_mode: Optional[str] = None) -> None:
+def push_cheap_window_start(soc: float | None = None, fox_mode: str | None = None) -> None:
     """Emit CHEAP_WINDOW_START event: battery charging and DHW heating active."""
     push_alert(
         AlertType.CHEAP_WINDOW_START.value,
@@ -409,7 +413,7 @@ def push_cheap_window_start(soc: Optional[float] = None, fox_mode: Optional[str]
     )
 
 
-def push_peak_window_start(soc: Optional[float] = None) -> None:
+def push_peak_window_start(soc: float | None = None) -> None:
     """Emit PEAK_WINDOW_START event: house shielded, Daikin suspended."""
     push_alert(
         AlertType.PEAK_WINDOW_START.value,
@@ -432,8 +436,8 @@ def push_daily_pnl(metrics: dict[str, Any]) -> None:
 
 def _format_plan_actions(actions: list[dict[str, Any]], tz_name: str = "Europe/London") -> str:
     """Render action_schedule rows as a compact human-readable table."""
-    from zoneinfo import ZoneInfo
     from datetime import datetime
+    from zoneinfo import ZoneInfo
 
     tz = ZoneInfo(tz_name)
     lines: list[str] = []

@@ -17,12 +17,11 @@ Docs: https://www.foxesscloud.com/public/i18n/en/OpenApiDocument.html
 import hashlib
 import json
 import time
-from datetime import date, datetime
-from typing import Optional
-import urllib.request
 import urllib.error
+import urllib.request
+from datetime import date, datetime
 
-from .models import RealTimeData, ChargePeriod, DeviceInfo, SchedulerGroup, SchedulerState
+from .models import ChargePeriod, DeviceInfo, RealTimeData, SchedulerGroup, SchedulerState
 
 # Known work mode strings (set_work_mode accepts these)
 WORK_MODE_VALID = frozenset({"Self Use", "Feed-in Priority", "Back Up", "Force charge", "Force discharge"})
@@ -66,15 +65,15 @@ class FoxESSClient:
         api_key: str = "",
         username: str = "",
         password: str = "",
-        scheduler_sn: Optional[str] = None,
+        scheduler_sn: str | None = None,
     ):
         self.device_sn = device_sn
         s = (scheduler_sn or "").strip()
-        self.scheduler_sn: Optional[str] = s or None
+        self.scheduler_sn: str | None = s or None
         self.api_key = api_key
         self.username = username
         self.password = password
-        self._session_token: Optional[str] = None
+        self._session_token: str | None = None
 
         if not api_key and not (username and password):
             raise ValueError("Provide either api_key OR username+password.")
@@ -304,15 +303,6 @@ class FoxESSClient:
         if self.api_key:
             return self._open_post("/device/setting/get", body)
         return self._cloud_post("/c/v0/device/setting/get", body)
-
-    def get_device_settings(self) -> dict:
-        """Deprecated: Open API does not support listing all settings in one call.
-
-        Use :meth:`get_device_setting` with a specific key (e.g. ``WorkMode``).
-        """
-        raise FoxESSError(
-            "get_device_settings() is not supported; use get_device_setting(key) per Fox Open API."
-        )
 
     def set_device_setting(self, key: str, value: str | int | float | dict) -> None:
         """Set a single device setting by key (same endpoint as work mode / charge times).

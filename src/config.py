@@ -2,6 +2,7 @@
 import os
 import re
 from pathlib import Path
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -83,10 +84,6 @@ class Config:
         "DAIKIN_TOKEN_URL", "https://idp.onecta.daikineurope.com/v1/oidc/token"
     )
     DAIKIN_ALERT_TEMP_DEVIATION: float = float(os.getenv("DAIKIN_ALERT_TEMP_DEVIATION", "2"))
-
-    # Alerts — OpenClaw webhook (DEPRECATED: use OPENCLAW_NOTIFY_* instead; kept for one release)
-    ALERT_OPENCLAW_URL: str = os.getenv("ALERT_OPENCLAW_URL", "http://127.0.0.1:18789/api/send")
-    ALERT_CHANNEL: str = (os.getenv("ALERT_CHANNEL") or "").strip()
 
     # ── OpenClaw Gateway hooks (user-facing notifications) ───────────────────
     # All outbound notifications POST to OPENCLAW_HOOKS_URL (e.g. /hooks/agent).

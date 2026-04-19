@@ -12,8 +12,7 @@ Optional weather (WEATHER_LAT/LON) enables degree-days and spend-by-temperature 
 import logging
 from calendar import monthrange
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
-from typing import Optional
+from datetime import UTC, date, datetime, timedelta
 
 from ..config import config
 from ..foxess import get_cached_energy_month
@@ -39,18 +38,18 @@ class TempBandSummary:
     days: int
     heating_kwh: float
     cost_pounds: float
-    avg_temp_c: Optional[float] = None
+    avg_temp_c: float | None = None
 
 
 @dataclass
 class HeatingAnalytics:
     """Heating share and weather-based analytics for the period."""
-    heating_percent_of_cost: Optional[float] = None  # heating cost / net cost * 100
-    heating_percent_of_consumption: Optional[float] = None  # heating_kwh / load_kwh * 100
-    avg_outdoor_temp_c: Optional[float] = None
-    degree_days: Optional[float] = None  # sum max(0, base - daily_temp)
-    cost_per_degree_day_pounds: Optional[float] = None  # heating_cost / degree_days
-    heating_kwh_per_degree_day: Optional[float] = None
+    heating_percent_of_cost: float | None = None  # heating cost / net cost * 100
+    heating_percent_of_consumption: float | None = None  # heating_kwh / load_kwh * 100
+    avg_outdoor_temp_c: float | None = None
+    degree_days: float | None = None  # sum max(0, base - daily_temp)
+    cost_per_degree_day_pounds: float | None = None  # heating_cost / degree_days
+    heating_kwh_per_degree_day: float | None = None
     temp_bands: list[dict] = field(default_factory=list)  # [{ band, days, heating_kwh, cost_pounds }]
 
 
@@ -94,13 +93,13 @@ class MonthlyInsights:
     """Full monthly view: energy, cost, heating estimate, gas comparison."""
     energy: MonthlyEnergySummary
     cost: MonthlyCostSummary
-    heating_estimate_kwh: Optional[float] = None
-    heating_estimate_cost_pence: Optional[float] = None
-    equivalent_gas_cost_pence: Optional[float] = None
-    gas_comparison_ahead_pounds: Optional[float] = None  # positive = ahead with solar+ASHP
+    heating_estimate_kwh: float | None = None
+    heating_estimate_cost_pence: float | None = None
+    equivalent_gas_cost_pence: float | None = None
+    gas_comparison_ahead_pounds: float | None = None  # positive = ahead with solar+ASHP
 
     @property
-    def equivalent_gas_cost_pounds(self) -> Optional[float]:
+    def equivalent_gas_cost_pounds(self) -> float | None:
         if self.equivalent_gas_cost_pence is None:
             return None
         return self.equivalent_gas_cost_pence / 100
@@ -141,9 +140,9 @@ def _compute_cost(energy: MonthlyEnergySummary) -> MonthlyCostSummary:
 
 def _compute_cost_octopus(
     energy: MonthlyEnergySummary,
-    period_from: Optional[datetime] = None,
-    period_to: Optional[datetime] = None,
-) -> Optional[MonthlyCostSummary]:
+    period_from: datetime | None = None,
+    period_to: datetime | None = None,
+) -> MonthlyCostSummary | None:
     """Compute monthly cost using Octopus half-hourly consumption x half-hourly rates.
 
     Returns None if Octopus data is unavailable — caller falls back to _compute_cost().
@@ -156,14 +155,14 @@ def _compute_cost_octopus(
     year = energy.year
     month = energy.month
     if period_from is None:
-        period_from = datetime(year, month, 1, tzinfo=timezone.utc)
+        period_from = datetime(year, month, 1, tzinfo=UTC)
     if period_to is None:
         _, ndays = monthrange(year, month)
-        period_to = datetime(year, month, ndays, 23, 59, 59, tzinfo=timezone.utc)
+        period_to = datetime(year, month, ndays, 23, 59, 59, tzinfo=UTC)
 
     try:
-        from .octopus_client import fetch_consumption, get_mpan_roles
         from ..scheduler.agile import fetch_agile_rates
+        from .octopus_client import fetch_consumption, get_mpan_roles
 
         roles = get_mpan_roles()
         if not (roles.import_mpan and roles.import_serial):
@@ -243,7 +242,7 @@ def _best_cost(energy: MonthlyEnergySummary) -> MonthlyCostSummary:
     return _compute_cost(energy)
 
 
-def _get_daikin_heating_kwh(year: int, month: int) -> Optional[float]:
+def _get_daikin_heating_kwh(year: int, month: int) -> float | None:
     """Get heating electrical consumption (kWh) for the month from Daikin when available. Returns None if not configured or not exposed."""
     try:
         from ..daikin.client import DaikinClient
@@ -253,7 +252,7 @@ def _get_daikin_heating_kwh(year: int, month: int) -> Optional[float]:
         return None
 
 
-def _get_daikin_heating_daily_kwh(year: int, month: int) -> Optional[list[float]]:
+def _get_daikin_heating_daily_kwh(year: int, month: int) -> list[float] | None:
     """Get daily heating (kWh) for the month from Daikin when available. List length = days in month."""
     try:
         from ..daikin.client import DaikinClient
@@ -359,7 +358,7 @@ def _build_heating_analytics(
     )
 
 
-def _heating_analytics_percent_only(insights: "MonthlyInsights") -> Optional[HeatingAnalytics]:
+def _heating_analytics_percent_only(insights: "MonthlyInsights") -> HeatingAnalytics | None:
     """Heating share only (no weather/temp_bands). Used for year view."""
     cost = insights.cost
     energy = insights.energy
@@ -382,8 +381,8 @@ def _heating_analytics_percent_only(insights: "MonthlyInsights") -> Optional[Hea
 def _compute_heating_and_gas(
     energy: MonthlyEnergySummary,
     cost: MonthlyCostSummary,
-    daikin_heating_kwh: Optional[float] = None,
-) -> tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
+    daikin_heating_kwh: float | None = None,
+) -> tuple[float | None, float | None, float | None, float | None]:
     """Heating (kWh and cost) and equivalent gas cost + ahead amount.
     When daikin_heating_kwh is provided, use it; otherwise fall back to load * HEATING_LOAD_SHARE."""
     heating_kwh = daikin_heating_kwh
@@ -416,7 +415,7 @@ def _compute_heating_and_gas(
     )
 
 
-def get_monthly_insights(year: int, month: int) -> Optional[MonthlyInsights]:
+def get_monthly_insights(year: int, month: int) -> MonthlyInsights | None:
     """Build full monthly insights (energy, cost, heating estimate, gas comparison).
 
     Returns None if Fox ESS is not configured or the request fails.
@@ -453,7 +452,7 @@ class PeriodInsights:
     period_label: str  # e.g. "2026-02-10", "4–10 Feb 2026", "Feb 2026", "2026"
     insights: MonthlyInsights
     chart_data: list[dict] = field(default_factory=list)  # [{ date, import_kwh, ... }]
-    heating_analytics: Optional[HeatingAnalytics] = None
+    heating_analytics: HeatingAnalytics | None = None
 
 
 def _client():
@@ -462,10 +461,10 @@ def _client():
 
 def get_period_insights(
     period: str,
-    date_str: Optional[str] = None,
-    month_str: Optional[str] = None,
-    year: Optional[int] = None,
-) -> Optional[PeriodInsights]:
+    date_str: str | None = None,
+    month_str: str | None = None,
+    year: int | None = None,
+) -> PeriodInsights | None:
     """Build insights + chart_data for day, week, month, or year.
     period=day|week|month|year. For day/week pass date_str=YYYY-MM-DD; for month pass month_str=YYYY-MM; for year pass year=YYYY.
     """

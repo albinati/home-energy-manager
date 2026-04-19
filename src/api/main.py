@@ -8,107 +8,31 @@ Optional MCP (``python -m src.mcp_server``) is another client interface to the s
 import asyncio
 import logging
 import os
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from typing import Optional
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
-from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from ..config import config
 from .. import db
-from ..state_machine import apply_safe_defaults, recover_on_boot
-from ..daikin.client import DaikinClient, DaikinError
+from ..config import config
 from ..daikin import service as daikin_service
+from ..daikin.client import DaikinClient, DaikinError
+from ..energy.monthly import get_monthly_insights, get_period_insights
 from ..foxess.client import FoxESSClient, FoxESSError
 from ..foxess.models import ChargePeriod
 from ..foxess.service import get_cached_realtime, get_refresh_stats, get_refresh_stats_extended
-from ..energy.monthly import get_monthly_insights, get_period_insights
+from ..state_machine import apply_safe_defaults, recover_on_boot
 
 logger = logging.getLogger(__name__)
 
-from .models import (
-    OctopusAccountResponse,
-    OctopusCurrentTariffResponse,
-    OctopusConsumptionResponse,
-    OctopusConsumptionSlotResponse,
-    OctopusAutoDetectResponse,
-    DaikinStatusResponse,
-    FoxESSStatusResponse,
-    PowerRequest,
-    TemperatureRequest,
-    LWTOffsetRequest,
-    ModeRequest,
-    TankTemperatureRequest,
-    TankPowerRequest,
-    FoxESSModeRequest,
-    ChargePeriodRequest,
-    PendingActionResponse,
-    ConfirmRequest,
-    ActionResult,
-    ActionStatus,
-    ErrorResponse,
-    OpenClawAction,
-    OpenClawExecuteRequest,
-    OpenClawCapability,
-    OpenClawCapabilitiesResponse,
-    EnergyProviderEnum,
-    EnergyProviderInfo,
-    EnergyProvidersResponse,
-    TariffResponse,
-    TariffTypeEnum,
-    EnergyUsageResponse,
-    MonthlyInsightsResponse,
-    MonthlyEnergySummaryResponse,
-    MonthlyCostSummaryResponse,
-    PeriodInsightsResponse,
-    EnergyReportResponse,
-    HeatingAnalyticsResponse,
-    TempBandSummaryResponse,
-    ChartDataPoint,
-    EnergyInsightsTextResponse,
-    AssistantRecommendRequest,
-    AssistantRecommendResponse,
-    SuggestedActionSchema,
-    AssistantApplyRequest,
-    AssistantApplyResponse,
-    AssistantApplyResultItem,
-    SchedulerStatusResponse,
-    OptimizationStatusExtendedResponse,
-    OptimizationDispatchPreviewResponse,
-    ProposePlanResponse,
-    ApprovePlanRequest,
-    ApprovePlanResponse,
-    RejectPlanRequest,
-    SetPresetRequest,
-    SetPresetResponse,
-    SetOptimizerBackendRequest,
-    SetOptimizerBackendResponse,
-    SetOperationModeRequest,
-    SetOperationModeResponse,
-    SnapshotSummary,
-    ListSnapshotsResponse,
-    RollbackResponse,
-    SetAutoApproveRequest,
-    SetAutoApproveResponse,
-    TariffProductResponse,
-    TariffRatesResponse,
-    TariffPolicyResponse,
-    TariffSimulationResultResponse,
-    TariffCompareRequest,
-    TariffRecommendationResponse,
-    ListAvailableTariffsResponse,
-    TariffDashboardRequest,
-    TariffPeriodCosts,
-    TariffTotalRow,
-    TariffDashboardResponse,
-)
-from . import safeguards
-from ..assistant import build_context, get_suggestions, validate_suggested_actions, SuggestedAction
+from ..agile_cache import get_agile_cache, refresh_agile_rates
+from ..assistant import SuggestedAction, build_context, get_suggestions, validate_suggested_actions
+from ..config_snapshots import list_snapshots, restore_snapshot, rollback_latest, save_snapshot
+from ..scheduler.optimizer import run_optimizer
 from ..scheduler.runner import (
     get_scheduler_status,
     pause_scheduler,
@@ -116,9 +40,76 @@ from ..scheduler.runner import (
     start_background_scheduler,
     stop_background_scheduler,
 )
-from ..agile_cache import get_agile_cache, refresh_agile_rates
-from ..config_snapshots import list_snapshots, restore_snapshot, rollback_latest, save_snapshot
-from ..scheduler.optimizer import run_optimizer
+from . import safeguards
+from .models import (
+    ActionResult,
+    ActionStatus,
+    ApprovePlanRequest,
+    ApprovePlanResponse,
+    AssistantApplyRequest,
+    AssistantApplyResponse,
+    AssistantApplyResultItem,
+    AssistantRecommendRequest,
+    AssistantRecommendResponse,
+    ChargePeriodRequest,
+    ChartDataPoint,
+    ConfirmRequest,
+    DaikinStatusResponse,
+    EnergyInsightsTextResponse,
+    EnergyReportResponse,
+    FoxESSModeRequest,
+    FoxESSStatusResponse,
+    HeatingAnalyticsResponse,
+    ListAvailableTariffsResponse,
+    ListSnapshotsResponse,
+    LWTOffsetRequest,
+    ModeRequest,
+    MonthlyCostSummaryResponse,
+    MonthlyEnergySummaryResponse,
+    MonthlyInsightsResponse,
+    OctopusAccountResponse,
+    OctopusAutoDetectResponse,
+    OctopusConsumptionResponse,
+    OctopusConsumptionSlotResponse,
+    OctopusCurrentTariffResponse,
+    OpenClawCapabilitiesResponse,
+    OpenClawCapability,
+    OpenClawExecuteRequest,
+    OptimizationDispatchPreviewResponse,
+    OptimizationStatusExtendedResponse,
+    PendingActionResponse,
+    PeriodInsightsResponse,
+    PowerRequest,
+    ProposePlanResponse,
+    RejectPlanRequest,
+    RollbackResponse,
+    SchedulerStatusResponse,
+    SetAutoApproveRequest,
+    SetAutoApproveResponse,
+    SetOperationModeRequest,
+    SetOperationModeResponse,
+    SetOptimizerBackendRequest,
+    SetOptimizerBackendResponse,
+    SetPresetRequest,
+    SetPresetResponse,
+    SnapshotSummary,
+    SuggestedActionSchema,
+    TankPowerRequest,
+    TankTemperatureRequest,
+    TariffCompareRequest,
+    TariffDashboardRequest,
+    TariffDashboardResponse,
+    TariffPeriodCosts,
+    TariffPolicyResponse,
+    TariffProductResponse,
+    TariffRatesResponse,
+    TariffRecommendationResponse,
+    TariffSimulationResultResponse,
+    TariffTotalRow,
+    TempBandSummaryResponse,
+    TemperatureRequest,
+)
+from .routers import energy_providers as energy_providers_router
 
 
 @asynccontextmanager
@@ -152,6 +143,7 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+app.include_router(energy_providers_router.router)
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
@@ -223,8 +215,8 @@ async def web_dashboard(request: Request):
             last_ts, refresh_count = get_refresh_stats()
             updated_at_str = None
             if last_ts is not None:
-                from datetime import datetime, timezone
-                updated_at_str = datetime.fromtimestamp(last_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+                from datetime import datetime
+                updated_at_str = datetime.fromtimestamp(last_ts, tz=UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
             foxess_status = {
                 "soc": d.soc,
                 "solar_power": d.solar_power,
@@ -627,7 +619,7 @@ async def foxess_status():
         last_ts = stats.get("last_updated_epoch")
         updated_at_str = None
         if last_ts is not None:
-            updated_at_str = datetime.fromtimestamp(last_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            updated_at_str = datetime.fromtimestamp(last_ts, tz=UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
         out = FoxESSStatusResponse(
             soc=d.soc,
             solar_power=d.solar_power,
@@ -1053,11 +1045,11 @@ async def _execute_action(action_type: str, params: dict) -> ActionResult:
 
 # ── Assistant Endpoints ─────────────────────────────────────────────────────
 
-def _get_assistant_context() -> tuple[list[dict], Optional[dict], Optional[dict]]:
+def _get_assistant_context() -> tuple[list[dict], dict | None, dict | None]:
     """Return (daikin_status_list, foxess_status_dict, tariff_dict) for assistant context."""
     daikin_list: list[dict] = []
-    foxess_status: Optional[dict] = None
-    tariff: Optional[dict] = None
+    foxess_status: dict | None = None
+    tariff: dict | None = None
     if config.MANUAL_TARIFF_IMPORT_PENCE > 0 or config.MANUAL_TARIFF_EXPORT_PENCE > 0:
         tariff = {
             "import_rate": config.MANUAL_TARIFF_IMPORT_PENCE,
@@ -1185,89 +1177,6 @@ async def assistant_apply(req: AssistantApplyRequest):
     return AssistantApplyResponse(results=results)
 
 
-# ── Energy Provider Endpoints (Stubs) ────────────────────────────────────────
-
-def _is_manual_tariff_configured() -> bool:
-    return config.MANUAL_TARIFF_IMPORT_PENCE > 0 or config.MANUAL_TARIFF_EXPORT_PENCE > 0
-
-
-ENERGY_PROVIDERS = [
-    EnergyProviderInfo(
-        provider=EnergyProviderEnum.OCTOPUS,
-        name="Octopus Energy",
-        is_configured=bool(config.OCTOPUS_API_KEY),
-        description="Agile, Go, Tracker, and fixed tariffs with half-hourly pricing data",
-    ),
-    EnergyProviderInfo(
-        provider=EnergyProviderEnum.BRITISH_GAS,
-        name="British Gas",
-        is_configured=bool(config.BRITISH_GAS_API_KEY),
-        description="Fixed and variable tariffs, SEG export payments",
-    ),
-    EnergyProviderInfo(
-        provider=EnergyProviderEnum.MANUAL,
-        name="Manual Entry",
-        is_configured=_is_manual_tariff_configured(),
-        description="Manually enter your tariff rates for cost tracking",
-    ),
-]
-
-
-@app.get("/api/v1/energy/providers", response_model=EnergyProvidersResponse)
-async def energy_providers():
-    """List available energy providers and their configuration status."""
-    configured = sum(1 for p in ENERGY_PROVIDERS if p.is_configured)
-    return EnergyProvidersResponse(
-        providers=ENERGY_PROVIDERS,
-        configured_count=configured,
-    )
-
-
-@app.get("/api/v1/energy/tariff", response_model=TariffResponse)
-async def energy_tariff():
-    """Get current tariff information from configured energy provider.
-    
-    Uses manual tariff (MANUAL_TARIFF_IMPORT_PENCE / MANUAL_TARIFF_EXPORT_PENCE) when set.
-    Returns 503 if no provider and no manual tariff configured.
-    """
-    if _is_manual_tariff_configured():
-        return TariffResponse(
-            provider=EnergyProviderEnum.MANUAL,
-            tariff_name="Manual",
-            tariff_type=TariffTypeEnum.FIXED,
-            import_rate=config.MANUAL_TARIFF_IMPORT_PENCE,
-            export_rate=config.MANUAL_TARIFF_EXPORT_PENCE if config.MANUAL_TARIFF_EXPORT_PENCE > 0 else None,
-        )
-    configured = [p for p in ENERGY_PROVIDERS if p.is_configured]
-    if not configured:
-        raise HTTPException(
-            status_code=503,
-            detail="No energy provider configured. Set OCTOPUS_API_KEY, BRITISH_GAS_API_KEY, or MANUAL_TARIFF_IMPORT_PENCE in .env"
-        )
-    raise HTTPException(
-        status_code=501,
-        detail="Energy provider integration not yet implemented. Coming soon!"
-    )
-
-
-@app.get("/api/v1/energy/usage", response_model=EnergyUsageResponse)
-async def energy_usage():
-    """Get energy usage and cost summary.
-    
-    Returns 503 if no energy provider is configured.
-    """
-    configured = [p for p in ENERGY_PROVIDERS if p.is_configured]
-    if not configured:
-        raise HTTPException(
-            status_code=503,
-            detail="No energy provider configured. Set OCTOPUS_API_KEY or BRITISH_GAS_API_KEY in .env"
-        )
-    raise HTTPException(
-        status_code=501,
-        detail="Energy provider integration not yet implemented. Coming soon!"
-    )
-
-
 def _foxess_configured() -> bool:
     return bool(config.FOXESS_API_KEY or (config.FOXESS_USERNAME and config.FOXESS_PASSWORD))
 
@@ -1340,9 +1249,9 @@ async def energy_monthly(month: str):
 @app.get("/api/v1/energy/period", response_model=PeriodInsightsResponse)
 async def energy_period(
     period: str,
-    date: Optional[str] = None,
-    month: Optional[str] = None,
-    year: Optional[int] = None,
+    date: str | None = None,
+    month: str | None = None,
+    year: int | None = None,
 ):
     """Get energy insights + chart_data for day, week, month, or year.
     period=day|week|month|year. For day/week use date=YYYY-MM-DD; for month use month=YYYY-MM; for year use year=YYYY.
@@ -1423,8 +1332,8 @@ def _build_report_summary(
     period_label: str,
     energy: MonthlyEnergySummaryResponse,
     cost: MonthlyCostSummaryResponse,
-    equivalent_gas_cost_pounds: Optional[float],
-    gas_comparison_ahead_pounds: Optional[float],
+    equivalent_gas_cost_pounds: float | None,
+    gas_comparison_ahead_pounds: float | None,
 ) -> str:
     """Build short narrative for OpenClaw from report data."""
     parts = [
@@ -1444,10 +1353,10 @@ def _build_report_summary(
 
 @app.get("/api/v1/energy/report", response_model=EnergyReportResponse)
 async def energy_report(
-    period: Optional[str] = None,
-    date: Optional[str] = None,
-    month: Optional[str] = None,
-    year: Optional[int] = None,
+    period: str | None = None,
+    date: str | None = None,
+    month: str | None = None,
+    year: int | None = None,
 ):
     """Full data report for OpenClaw and dashboards: energy, cost, chart_data, heating/gas, plus a spoken summary.
 
@@ -1686,8 +1595,8 @@ async def optimization_refresh():
         raise HTTPException(status_code=503, detail="OCTOPUS_TARIFF_CODE not set")
 
     # Persist to SQLite (the LP optimizer reads from DB, not the in-memory cache)
-    from ..scheduler.agile import fetch_agile_rates
     from .. import db as _db
+    from ..scheduler.agile import fetch_agile_rates
     rates = await asyncio.to_thread(fetch_agile_rates, config.OCTOPUS_TARIFF_CODE)
     saved = 0
     if rates:
@@ -1730,12 +1639,11 @@ async def optimization_fetch_and_plan():
         raise HTTPException(status_code=503, detail="OCTOPUS_TARIFF_CODE not set")
 
     # 1. Fetch + persist rates
-    from ..scheduler.agile import fetch_agile_rates
     from .. import db as _db
+    from ..scheduler.agile import fetch_agile_rates
     rates = await asyncio.to_thread(fetch_agile_rates, config.OCTOPUS_TARIFF_CODE)
-    saved = 0
     if rates:
-        saved = await asyncio.to_thread(_db.save_agile_rates, rates, config.OCTOPUS_TARIFF_CODE)
+        await asyncio.to_thread(_db.save_agile_rates, rates, config.OCTOPUS_TARIFF_CODE)
     refresh_agile_rates()  # update in-memory cache too
 
     slot_count = len(rates) if rates else 0
@@ -1749,7 +1657,7 @@ async def optimization_fetch_and_plan():
         pass
     result = await asyncio.to_thread(run_optimizer, fox, None)
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     plan_id = f"bp-{uuid4().hex[:12]}"
     return {
         "plan_id": plan_id,
@@ -1781,7 +1689,7 @@ async def optimization_propose(include_plan: bool = False):
     result = await asyncio.to_thread(run_optimizer, fox, None)
     if not result.get("ok"):
         raise HTTPException(status_code=500, detail=result.get("error", "optimizer failed"))
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     plan_id = f"bp-{uuid4().hex[:12]}"
     resp = ProposePlanResponse(
         plan_id=plan_id,
@@ -1885,7 +1793,7 @@ async def optimization_set_mode(req: SetOperationModeRequest):
 
 
 @app.post("/api/v1/optimization/rollback", response_model=RollbackResponse)
-async def optimization_rollback(snapshot_id: Optional[str] = None):
+async def optimization_rollback(snapshot_id: str | None = None):
     """Restore a config snapshot (latest by default). Forces simulation mode on restore."""
     try:
         if snapshot_id:
@@ -2103,11 +2011,11 @@ async def octopus_account():
 
 @app.get("/api/v1/octopus/consumption", response_model=OctopusConsumptionResponse)
 async def octopus_consumption(
-    mpan: Optional[str] = None,
-    serial: Optional[str] = None,
-    period_from: Optional[str] = None,
-    period_to: Optional[str] = None,
-    group_by: Optional[str] = None,
+    mpan: str | None = None,
+    serial: str | None = None,
+    period_from: str | None = None,
+    period_to: str | None = None,
+    group_by: str | None = None,
 ):
     """Proxy to Octopus consumption endpoint for a specific MPAN/serial.
 
@@ -2118,8 +2026,9 @@ async def octopus_consumption(
     if not config.OCTOPUS_API_KEY:
         raise HTTPException(status_code=503, detail="OCTOPUS_API_KEY not configured")
 
+    from datetime import datetime
+
     from ..energy.octopus_client import fetch_consumption, get_mpan_roles
-    from datetime import datetime, timezone, timedelta
 
     roles = get_mpan_roles()
     use_mpan = mpan or roles.import_mpan or config.OCTOPUS_MPAN_1

@@ -13,11 +13,10 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import urllib.error
 import urllib.request
-from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from datetime import UTC, datetime
+from typing import Any
 
 from ..config import config
 from .tariff_models import (
@@ -73,7 +72,7 @@ def _classify_pricing(product_code: str, is_variable: bool, is_tracker: bool) ->
 
 
 def _classify_contract(
-    product_code: str, term: Optional[int], is_variable: bool,
+    product_code: str, term: int | None, is_variable: bool,
 ) -> ContractType:
     if term and term > 0:
         return ContractType.FIXED
@@ -86,7 +85,7 @@ def _extract_tariff_from_product(
     product_data: dict,
     gsp: str,
     product_code: str,
-) -> Optional[dict]:
+) -> dict | None:
     """Extract the single-register electricity tariff dict for our GSP from product detail."""
     tariffs = product_data.get("single_register_electricity_tariffs") or {}
     gsp_key = f"_{gsp}"
@@ -96,7 +95,7 @@ def _extract_tariff_from_product(
     return dd if dd else None
 
 
-def _fetch_standing_charge(product_code: str, tariff_code: str) -> Optional[float]:
+def _fetch_standing_charge(product_code: str, tariff_code: str) -> float | None:
     """Fetch current standing charge for a tariff (p/day inc VAT)."""
     try:
         url = f"{OCTOPUS_BASE}/products/{product_code}/electricity-tariffs/{tariff_code}/standing-charges/"
@@ -109,7 +108,7 @@ def _fetch_standing_charge(product_code: str, tariff_code: str) -> Optional[floa
     return None
 
 
-def _fetch_unit_rate(product_code: str, tariff_code: str) -> Optional[float]:
+def _fetch_unit_rate(product_code: str, tariff_code: str) -> float | None:
     """Fetch current flat unit rate (p/kWh inc VAT) — for fixed/variable tariffs."""
     try:
         url = f"{OCTOPUS_BASE}/products/{product_code}/electricity-tariffs/{tariff_code}/standard-unit-rates/"
@@ -124,7 +123,7 @@ def _fetch_unit_rate(product_code: str, tariff_code: str) -> Optional[float]:
 
 def _fetch_day_night_rates(
     product_code: str, tariff_code: str,
-) -> tuple[Optional[float], Optional[float]]:
+) -> tuple[float | None, float | None]:
     """Fetch day and night rates for dual-register / TOU tariffs."""
     day = night = None
     try:
@@ -167,7 +166,7 @@ def list_octopus_products(
 
     products = data.get("results") or []
     # Filter to those with an available_from and not yet expired
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     out = []
     for p in products:
         available_to = p.get("available_to")
@@ -184,7 +183,7 @@ def list_octopus_products(
     return out
 
 
-def get_tariff_product(product_code: str) -> Optional[TariffProduct]:
+def get_tariff_product(product_code: str) -> TariffProduct | None:
     """Fetch full tariff detail for a single Octopus product.
 
     Resolves the regional tariff code, standing charges, unit rates,

@@ -4,10 +4,10 @@ from __future__ import annotations
 import logging
 import math
 from datetime import datetime, timedelta
-from typing import Any, Optional
+from typing import Any
 
-from ..config import config
 from .. import db
+from ..config import config
 from ..foxess.client import FoxESSClient, FoxESSError
 from ..foxess.models import SchedulerGroup
 from ..weather import HourlyForecast, get_forecast_for_slot
@@ -19,7 +19,6 @@ from .optimizer import (
     _legionella_active_local,
     _merge_fox_groups,
     _optimization_preset_away_like,
-    _slot_fox_tuple,
 )
 
 logger = logging.getLogger(__name__)
@@ -98,7 +97,7 @@ def lp_plan_to_slots(plan: LpPlan) -> list[HalfHourSlot]:
         es = plan.space_electric_kwh[i]
 
         kind: str = "standard"
-        lp_grid_import_w: Optional[int] = None
+        lp_grid_import_w: int | None = None
 
         if chg > EPS:
             grid_import = plan.import_kwh[i] if plan.import_kwh else 0.0
@@ -334,7 +333,7 @@ def build_fox_groups_from_lp(plan: LpPlan) -> list[SchedulerGroup]:
     return _merge_fox_groups(slots, max_groups=8, peak_export_discharge=peak_export)
 
 
-def upload_fox_if_operational(fox: Optional[FoxESSClient], groups: list[SchedulerGroup]) -> bool:
+def upload_fox_if_operational(fox: FoxESSClient | None, groups: list[SchedulerGroup]) -> bool:
     fox_ok = False
     if fox and fox.api_key and config.OPERATION_MODE == "operational" and not config.OPENCLAW_READ_ONLY:
         try:

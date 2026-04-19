@@ -4,8 +4,8 @@ from __future__ import annotations
 from datetime import date, timedelta
 from zoneinfo import ZoneInfo
 
-from ..config import config
 from .. import db
+from ..config import config
 from ..notifier import notify_morning_report
 from .pnl import (
     compute_arbitrage_efficiency,
@@ -38,7 +38,7 @@ def build_daily_brief_text() -> str:
         f"- Arbitrage efficiency (cheap quartile): {arb}%" if arb is not None else "",
         f"- SLA sample: {sla.get('sample_size', 0)} actions",
         "",
-        f"**Today**",
+        "**Today**",
         strategy,
     ]
     return "\n".join(x for x in lines if x is not None)

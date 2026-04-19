@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
-from ..config import config
 from .. import db
-from ..notifier import notify_critical, notify_strategy_update
+from ..config import config
 from ..foxess.client import FoxESSClient, FoxESSError
+from ..notifier import notify_critical, notify_strategy_update
 from .agile import fetch_agile_rates
 from .optimizer import run_optimizer
 
@@ -17,10 +17,10 @@ logger = logging.getLogger(__name__)
 _RETRY_DELAYS_SEC = [600, 1800, 3600]
 
 
-def fetch_and_store_rates(fox: Optional[FoxESSClient] = None) -> dict[str, Any]:
+def fetch_and_store_rates(fox: FoxESSClient | None = None) -> dict[str, Any]:
     """Fetch Agile rates, store in DB, run optimizer. Updates octopus_fetch_state."""
     tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     db.update_octopus_fetch_state(last_attempt_at=now.isoformat())
 
     # Opportunistically sync Fox ESS daily energy history for PV calibration
@@ -69,7 +69,7 @@ def fetch_and_store_rates(fox: Optional[FoxESSClient] = None) -> dict[str, Any]:
 
 
 def _maybe_survival_mode(
-    fox: Optional[FoxESSClient],
+    fox: FoxESSClient | None,
     consecutive_failures: int,
     streak_started_iso: str,
     now: datetime,
@@ -83,7 +83,7 @@ def _maybe_survival_mode(
     try:
         t0 = datetime.fromisoformat(streak_started_iso.replace("Z", "+00:00"))
         if t0.tzinfo is None:
-            t0 = t0.replace(tzinfo=timezone.utc)
+            t0 = t0.replace(tzinfo=UTC)
     except ValueError:
         return
     if now - t0 < timedelta(hours=24):
@@ -126,11 +126,11 @@ def should_run_retry_fetch() -> bool:
     try:
         last = datetime.fromisoformat((st.last_attempt_at or "").replace("Z", "+00:00"))
         if last.tzinfo is None:
-            last = last.replace(tzinfo=timezone.utc)
+            last = last.replace(tzinfo=UTC)
     except ValueError:
-        last = datetime.now(timezone.utc) - timedelta(days=1)
+        last = datetime.now(UTC) - timedelta(days=1)
     delay = next_retry_seconds(st.consecutive_failures)
-    return (datetime.now(timezone.utc) - last).total_seconds() >= delay
+    return (datetime.now(UTC) - last).total_seconds() >= delay
 
 
 def _sync_fox_energy_history(fox: FoxESSClient, months_back: int = 3) -> int:
@@ -139,10 +139,8 @@ def _sync_fox_energy_history(fox: FoxESSClient, months_back: int = 3) -> int:
     Fetches the current month plus ``months_back`` prior months.
     Returns total rows upserted.
     """
-    from datetime import date
-    import calendar
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     total = 0
     seen_months: set[tuple[int, int]] = set()
 
@@ -183,8 +181,8 @@ def _sync_fox_energy_history(fox: FoxESSClient, months_back: int = 3) -> int:
     try:
         last = datetime.fromisoformat((st.last_attempt_at or "").replace("Z", "+00:00"))
         if last.tzinfo is None:
-            last = last.replace(tzinfo=timezone.utc)
+            last = last.replace(tzinfo=UTC)
     except ValueError:
-        last = datetime.now(timezone.utc) - timedelta(days=1)
+        last = datetime.now(UTC) - timedelta(days=1)
     delay = next_retry_seconds(st.consecutive_failures)
-    return (datetime.now(timezone.utc) - last).total_seconds() >= delay
+    return (datetime.now(UTC) - last).total_seconds() >= delay

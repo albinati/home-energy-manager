@@ -5,7 +5,7 @@ when other packages import `src.scheduler.agile`.
 """
 
 from .agile import fetch_agile_rates, get_current_and_next_slots
-from .daikin import compute_lwt_adjustment, apply_scheduler_offset, run_daikin_scheduler_tick
+from .daikin import apply_scheduler_offset, compute_lwt_adjustment, run_daikin_scheduler_tick
 
 
 def get_scheduler_status():
@@ -33,6 +33,7 @@ __all__ = [
     "get_current_and_next_slots",
     "compute_lwt_adjustment",
     "apply_scheduler_offset",
+    "run_daikin_scheduler_tick",
     "get_scheduler_status",
     "pause_scheduler",
     "resume_scheduler",

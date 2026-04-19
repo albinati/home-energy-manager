@@ -4,9 +4,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.foxess.client import FoxESSClient
-from src.foxess.models import RealTimeData, ChargePeriod
 from src.foxess import service as foxess_service
+from src.foxess.client import FoxESSClient
+from src.foxess.models import ChargePeriod, RealTimeData
 
 
 class TestFoxESSClient(unittest.TestCase):
@@ -178,8 +178,9 @@ class TestFoxESSStatusEndpoint(unittest.TestCase):
 
     def test_foxess_status_returns_cached_data(self) -> None:
         pytest.importorskip("fastapi")
-        import src.api.main as api_main
         from fastapi.testclient import TestClient
+
+        import src.api.main as api_main
 
         with patch.object(api_main, "get_cached_realtime") as mock_get_cached:
             mock_get_cached.return_value = RealTimeData(

@@ -5,8 +5,7 @@ preventing LLM hallucination and ensuring physics-based setpoints.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 HEAT_LOSS_C_PER_HOUR: float = 0.3  # Daikin Altherma typical standing loss °C/h
@@ -49,8 +48,8 @@ def find_dhw_heat_end_utc(
     cheap_slots: list,
     overnight_start_h: int = 2,
     overnight_end_h: int = 7,
-    tz: Optional[ZoneInfo] = None,
-) -> Optional[datetime]:
+    tz: ZoneInfo | None = None,
+) -> datetime | None:
     """Return the end-UTC of the latest cheap/negative ForceCharge slot in the early-morning
     cheap window (``overnight_start_h``..``overnight_end_h`` local time).
 
@@ -63,7 +62,7 @@ def find_dhw_heat_end_utc(
     if tz is None:
         tz = ZoneInfo("Europe/London")
 
-    best_end: Optional[datetime] = None
+    best_end: datetime | None = None
     for s in cheap_slots:
         if s.kind not in ("cheap", "negative"):
             continue
@@ -74,17 +73,19 @@ def find_dhw_heat_end_utc(
     return best_end
 
 
-def build_shower_target_iso(plan_date_iso: str, hour: int = 9, minute: int = 30, tz: Optional[ZoneInfo] = None) -> str:
+def build_shower_target_iso(plan_date_iso: str, hour: int = 9, minute: int = 30, tz: ZoneInfo | None = None) -> str:
     """Build an ISO timestamp for the shower target time on *plan_date_iso* in local time.
 
     Returns a UTC ISO-8601 string ending in ``Z``.
     """
     if tz is None:
         tz = ZoneInfo("Europe/London")
-    from datetime import date, time as dtime, datetime as dt
+    from datetime import date
+    from datetime import datetime as dt
+    from datetime import time as dtime
     d = date.fromisoformat(plan_date_iso)
     local_dt = dt.combine(d, dtime(hour, minute)).replace(tzinfo=tz)
-    utc_dt = local_dt.astimezone(timezone.utc)
+    utc_dt = local_dt.astimezone(UTC)
     return utc_dt.isoformat().replace("+00:00", "Z")
 
 
@@ -96,5 +97,5 @@ def _parse_iso(s: str) -> datetime:
     x = s.replace("Z", "+00:00")
     dt = datetime.fromisoformat(x)
     if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
+        return dt.replace(tzinfo=UTC)
     return dt

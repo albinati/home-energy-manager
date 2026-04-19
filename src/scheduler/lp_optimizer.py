@@ -18,11 +18,11 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pulp
-from zoneinfo import ZoneInfo
 
 from ..config import config
 from ..weather import WeatherLpSeries
@@ -375,7 +375,7 @@ def solve_lp(
             # Simplified: if hp_on[i]=1 and hp_on[i-1]=0 (startup), force sum >= min_on
             # Since (hp_on[i] - prev) can be negative (shutdown), use max(0,.) → auxiliary
             startup_i = pulp.LpVariable(f"hp_startup_{i}", cat="Binary")
-            prev = hp_on[i - 1] if i > 0 else pulp.LpVariable(f"hp_on_neg1_dummy", lowBound=0, upBound=0)
+            prev = hp_on[i - 1] if i > 0 else pulp.LpVariable("hp_on_neg1_dummy", lowBound=0, upBound=0)
             prob += startup_i >= hp_on[i] - prev
             prob += (
                 pulp.lpSum(hp_on[j] for j in range(i, min(i + hp_min_on, n)))

@@ -1,15 +1,15 @@
 """Volume-weighted cost and shadow PnL from execution_log."""
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
-from typing import Any, Optional
+from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
 from .. import db
 from .shadow_pricing import fixed_shadow_rate_pence, svt_rate_pence
 
 
 def _day_bounds(d: date) -> tuple[str, str]:
-    start = datetime.combine(d, datetime.min.time()).replace(tzinfo=timezone.utc)
+    start = datetime.combine(d, datetime.min.time()).replace(tzinfo=UTC)
     end = start + timedelta(days=1)
     return start.isoformat(), end.isoformat()
 
@@ -58,7 +58,7 @@ def compute_daily_pnl(day: date) -> dict[str, Any]:
     }
 
 
-def compute_vwap(day: date) -> Optional[float]:
+def compute_vwap(day: date) -> float | None:
     a, b = _day_bounds(day)
     rows = db.get_execution_logs(from_ts=a, to_ts=b, limit=5000)
     num = 0.0
@@ -73,7 +73,7 @@ def compute_vwap(day: date) -> Optional[float]:
     return round(num / den, 4) if den > 0 else None
 
 
-def compute_slippage(day: date) -> Optional[float]:
+def compute_slippage(day: date) -> float | None:
     vwap = compute_vwap(day)
     if vwap is None:
         return None
@@ -83,7 +83,7 @@ def compute_slippage(day: date) -> Optional[float]:
     return round(vwap - float(tgt["target_vwap"]), 4)
 
 
-def compute_arbitrage_efficiency(day: date) -> Optional[float]:
+def compute_arbitrage_efficiency(day: date) -> float | None:
     a, b = _day_bounds(day)
     rows = db.get_execution_logs(from_ts=a, to_ts=b, limit=5000)
     prices = [float(r["agile_price_pence"]) for r in rows if r.get("agile_price_pence") is not None]
@@ -103,7 +103,7 @@ def compute_arbitrage_efficiency(day: date) -> Optional[float]:
     return round(100.0 * cheap / imp, 2) if imp > 0 else None
 
 
-def compute_peak_ratio(day: date) -> Optional[float]:
+def compute_peak_ratio(day: date) -> float | None:
     a, b = _day_bounds(day)
     rows = db.get_execution_logs(from_ts=a, to_ts=b, limit=5000)
     tot = 0.0

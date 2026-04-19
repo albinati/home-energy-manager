@@ -5,13 +5,17 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 from statistics import mean
-from typing import Any, Optional
-
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from .. import db
 from ..config import config
-from ..weather import HourlyForecast, fetch_forecast, forecast_to_lp_inputs, compute_pv_calibration_factor
+from ..weather import (
+    HourlyForecast,
+    compute_pv_calibration_factor,
+    fetch_forecast,
+    forecast_to_lp_inputs,
+)
 from .lp_initial_state import read_lp_initial_state
 from .lp_optimizer import LpInitialState, LpPlan, solve_lp
 from .optimizer import TZ, _build_half_hour_slots, _resolve_plan_window
@@ -24,16 +28,16 @@ class LpSimulationResult:
     """Outcome of :func:`run_lp_simulation` (read-only)."""
 
     ok: bool
-    error: Optional[str] = None
+    error: str | None = None
     plan_date: str = ""
     plan_window: str = ""        # "full_day" | "today_remainder"
-    plan: Optional[LpPlan] = None
-    initial: Optional[LpInitialState] = None
+    plan: LpPlan | None = None
+    initial: LpInitialState | None = None
     mu_load_kwh: float = 0.0
     slot_count: int = 0
     actual_mean_agile_pence: float = 0.0
     forecast_solar_kwh_horizon: float = 0.0
-    forecast: Optional[list[HourlyForecast]] = None
+    forecast: list[HourlyForecast] | None = None
     pv_scale_factor: float = 1.0
     # kept for compat — mirrors plan.slot_starts_utc
     slot_starts_utc: list = None  # type: ignore[assignment]
@@ -59,7 +63,7 @@ def _build_load_profile(slot_starts_utc: list[datetime]) -> list[float]:
     return out
 
 
-def run_lp_simulation(*, daikin: Optional[Any] = None) -> LpSimulationResult:
+def run_lp_simulation(*, daikin: Any | None = None) -> LpSimulationResult:
     """Build the same inputs as ``_run_optimizer_lp``, solve, return plan — **no DB/Fox/Daikin writes**.
 
     Automatically selects the best available planning window:
