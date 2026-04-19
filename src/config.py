@@ -343,6 +343,29 @@ class Config:
     # the same but harmless. Disable this to return to explicit per-plan consent.
     PLAN_AUTO_APPROVE: bool = os.getenv("PLAN_AUTO_APPROVE", "false").lower() in ("true", "1", "yes")
 
+    # ── API Quota & Cache ────────────────────────────────────────────────────
+    # Daikin Onecta: soft daily budget (real limit ≈200; we stop at 180 to preserve 10% headroom)
+    DAIKIN_DAILY_BUDGET: int = int(os.getenv("DAIKIN_DAILY_BUDGET", "180"))
+    # How long to serve device data from cache without refreshing (1800 s = 30 min)
+    DAIKIN_DEVICES_CACHE_TTL_SECONDS: int = int(os.getenv("DAIKIN_DEVICES_CACHE_TTL_SECONDS", "1800"))
+    # Minimum interval between explicit "force refresh" calls (UI refresh button, CLI --force-refresh)
+    DAIKIN_FORCE_REFRESH_MIN_INTERVAL_SECONDS: int = int(
+        os.getenv("DAIKIN_FORCE_REFRESH_MIN_INTERVAL_SECONDS", "1800")
+    )
+    # Width of the Octopus pre-slot window that allows automatic device refresh (seconds before HH:30/HH:00)
+    DAIKIN_SLOT_TRANSITION_WINDOW_SECONDS: int = int(
+        os.getenv("DAIKIN_SLOT_TRANSITION_WINDOW_SECONDS", "300")
+    )
+
+    # Fox ESS: soft daily budget (real limit ≈1440; we stop at 1200 for 15% headroom)
+    FOX_DAILY_BUDGET: int = int(os.getenv("FOX_DAILY_BUDGET", "1200"))
+    # Default realtime data TTL — raised from 30 s to 300 s (5 min) to match heartbeat
+    FOX_REALTIME_CACHE_TTL_SECONDS: int = int(os.getenv("FOX_REALTIME_CACHE_TTL_SECONDS", "300"))
+    # Minimum interval between user-initiated "force refresh" calls
+    FOX_FORCE_REFRESH_MIN_INTERVAL_SECONDS: int = int(
+        os.getenv("FOX_FORCE_REFRESH_MIN_INTERVAL_SECONDS", "60")
+    )
+
     def foxess_client_kwargs(self) -> dict:
         """Return the right kwargs for FoxESSClient based on what's configured."""
         if not self.FOXESS_DEVICE_SN:

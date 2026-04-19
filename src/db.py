@@ -164,6 +164,16 @@ CREATE TABLE IF NOT EXISTS pnl_execution_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_pnl_execution_log_slot ON pnl_execution_log(slot_time);
+
+CREATE TABLE IF NOT EXISTS api_call_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    vendor TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    ts_utc REAL NOT NULL,
+    ok INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE INDEX IF NOT EXISTS idx_api_call_log_vendor_ts ON api_call_log(vendor, ts_utc);
 """
 
 
@@ -235,6 +245,20 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             solar_power_kw REAL,
             load_power_kw REAL
         )"""
+    )
+
+    # V5: api_call_log — per-vendor HTTP call counter for quota management
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS api_call_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            vendor TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            ts_utc REAL NOT NULL,
+            ok INTEGER NOT NULL DEFAULT 1
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_api_call_log_vendor_ts ON api_call_log(vendor, ts_utc)"
     )
 
 def init_db() -> None:

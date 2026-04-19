@@ -182,11 +182,13 @@ if ! $NO_RESTART; then
 
   # Health check — wait up to 30s for the API to respond
   info "Waiting for health check (up to 30s)..."
+  HEALTHY=false
   for i in $(seq 1 6); do
     sleep 5
     HTTP=$(curl -fsS --max-time 3 http://127.0.0.1:8000/api/v1/health 2>/dev/null && echo ok || echo fail)
     if [[ "$HTTP" == "ok" ]]; then
       info "Service healthy after $((i*5))s ✓"
+      HEALTHY=true
       break
     fi
     if [[ $i -eq 6 ]]; then
@@ -194,6 +196,26 @@ if ! $NO_RESTART; then
       warn "  journalctl -u $SYSTEMD_UNIT -n 50 --no-pager"
     fi
   done
+
+  # ---------------------------------------------------------------------------
+  # 7. Post-deploy safety reset — put Fox ESS into Self Use mode so the
+  #    inverter is never stranded in Agile/Force-charge after a release.
+  #    This is idempotent and safe to re-run manually at any time.
+  # ---------------------------------------------------------------------------
+  if $HEALTHY; then
+    info "Safety reset: setting Fox ESS work mode → Self Use ..."
+    RESET_RESP=$(curl -fsS --max-time 10 -X POST \
+      http://127.0.0.1:8000/api/v1/foxess/mode \
+      -H 'Content-Type: application/json' \
+      -d '{"mode":"Self Use","skip_confirmation":true}' 2>/dev/null || echo '{"success":false}')
+    if echo "$RESET_RESP" | grep -q '"success":true'; then
+      info "Fox ESS reset to Self Use ✓"
+    else
+      warn "Fox ESS mode reset failed (non-fatal — check manually): $RESET_RESP"
+    fi
+  else
+    warn "Skipping Fox ESS safety reset (service not healthy)"
+  fi
 else
   info "Skipping restart (--no-restart)"
 fi

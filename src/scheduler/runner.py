@@ -9,7 +9,8 @@ from zoneinfo import ZoneInfo
 
 from ..config import config
 from .. import db
-from ..daikin.client import DaikinClient
+from ..daikin.client import DaikinError
+from ..daikin import service as daikin_service
 from ..foxess.client import FoxESSClient
 from ..foxess.service import get_cached_realtime
 from ..notifier import notify_risk
@@ -93,6 +94,39 @@ def _try_fox() -> FoxESSClient | None:
         return None
 
 
+def _in_octopus_pre_slot_window(
+    now: Optional[datetime] = None,
+    lead_seconds: Optional[int] = None,
+) -> bool:
+    """Return True when *now* is in the 5-minute window before an Octopus half-hour boundary.
+
+    Octopus slots start at HH:00 and HH:30 (UTC / wall-clock).  We want to refresh
+    Daikin device state in the [HH:25, HH:30) and [HH:55, HH:00) windows so the LP
+    has fresh data before the new rate slot begins.
+
+    lead_seconds defaults to DAIKIN_SLOT_TRANSITION_WINDOW_SECONDS (300 = 5 min).
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if lead_seconds is None:
+        lead_seconds = config.DAIKIN_SLOT_TRANSITION_WINDOW_SECONDS
+
+    minute = now.minute
+    second = now.second
+    total_seconds_in_minute = minute * 60 + second
+    # Boundary at :00 (0 s) and :30 (1800 s)
+    # Lead window is [boundary - lead_seconds, boundary)
+    # i.e. [:30 - 300s, :30) → [25:00, 30:00) and [:00 - 300s, :60 end of prev) → [55:00, 60:00)
+    lead_start_1 = 1800 - lead_seconds   # seconds from hour start to start of first window
+    lead_start_2 = 3600 - lead_seconds   # seconds from hour start to start of second window
+
+    in_window = (
+        (lead_start_1 <= total_seconds_in_minute < 1800)
+        or (lead_start_2 <= total_seconds_in_minute < 3600)
+    )
+    return in_window
+
+
 def bulletproof_octopus_fetch_job() -> None:
     from .octopus_fetch import fetch_and_store_rates
 
@@ -143,9 +177,7 @@ def bulletproof_mpc_job() -> None:
 
                 daikin = DaikinClient()
             except Exception as e:
-                logger.debug("MPC: Daikin client unavailable: %s", e)
-
-        # --- Read live Fox realtime: SoC, solar_power_kw, load_power_kw ---
+                logger.debug("MPC: Daikin client unavailable: %s", e)        # --- Read live Fox realtime: SoC, solar_power_kw, load_power_kw ---
         rt_soc_pct: float | None = None
         rt_solar_kw: float | None = None
         rt_load_kw: float | None = None
@@ -221,13 +253,26 @@ def bulletproof_heartbeat_tick() -> None:
     mon = time.monotonic()
 
     fox = _try_fox()
-    daikin: DaikinClient | None = None
-    try:
-        daikin = DaikinClient()
-        devices = daikin.get_devices()
-    except Exception as e:
-        logger.debug("Daikin heartbeat skip: %s", e)
-        devices = []
+    daikin_result = None
+    devices = []
+    if config.DAIKIN_CLIENT_ID and config.DAIKIN_CLIENT_SECRET and config.DAIKIN_TOKEN_FILE.exists():
+        try:
+            # Heartbeat reads from cache only — no auto-refresh to protect 200/day quota.
+            # allow_refresh=True fires only when we are in the Octopus pre-slot window.
+            in_pre_slot = _in_octopus_pre_slot_window(now_utc)
+            daikin_result = daikin_service.get_cached_devices(
+                allow_refresh=in_pre_slot,
+                actor="heartbeat",
+            )
+            devices = daikin_result.devices
+            if in_pre_slot and daikin_result.source == "fresh":
+                logger.info(
+                    "Daikin pre-slot refresh: fetched %d device(s) (next Octopus slot in <5 min)",
+                    len(devices),
+                )
+        except Exception as e:
+            logger.debug("Daikin heartbeat skip: %s", e)
+            devices = []
 
     soc = None
     fox_mode = None
@@ -276,10 +321,13 @@ def bulletproof_heartbeat_tick() -> None:
         except Exception:
             price = None
 
-    if dev0 and daikin:
+    if dev0:
+        # Build a lightweight DaikinClient handle for reconcile (it won't call get_devices again).
+        from ..daikin.client import DaikinClient as _DC
+        _dc = _DC()
         reconcile_daikin_schedule_for_date(
             plan_date,
-            daikin,
+            _dc,
             dev0,
             now_utc,
             trigger="heartbeat",

@@ -23,9 +23,10 @@ from ..config import config
 from .. import db
 from ..state_machine import apply_safe_defaults, recover_on_boot
 from ..daikin.client import DaikinClient, DaikinError
+from ..daikin import service as daikin_service
 from ..foxess.client import FoxESSClient, FoxESSError
 from ..foxess.models import ChargePeriod
-from ..foxess.service import get_cached_realtime, get_refresh_stats
+from ..foxess.service import get_cached_realtime, get_refresh_stats, get_refresh_stats_extended
 from ..energy.monthly import get_monthly_insights, get_period_insights
 
 logger = logging.getLogger(__name__)
@@ -157,6 +158,7 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 
 def get_daikin_client() -> DaikinClient:
+    """Return a DaikinClient for write operations only. For reads, use daikin_service."""
     return DaikinClient()
 
 
@@ -173,10 +175,11 @@ async def web_dashboard(request: Request):
     foxess_error = None
 
     try:
-        client = get_daikin_client()
-        devices = client.get_devices()
+        cached = daikin_service.get_cached_devices(allow_refresh=False, actor="dashboard")
+        devices = cached.devices
         if devices:
             dev = devices[0]
+            client = get_daikin_client()
             s = client.get_status(dev)
             daikin_status = {
                 "device_id": dev.id,
@@ -208,6 +211,7 @@ async def web_dashboard(request: Request):
                     "max": dev.tank_temp_range.max_value,
                     "step": dev.tank_temp_range.step_value,
                 },
+                "cache_stale": cached.stale,
             }
     except Exception as e:
         daikin_error = str(e)
@@ -341,10 +345,11 @@ async def api_v1_weather():
     out = [{"time": f.time_utc.isoformat(), "temp_c": f.temperature_c, "pv_kw": f.estimated_pv_kw} for f in fc]
     daikin = None
     try:
-        c = get_daikin_client()
-        devs = c.get_devices()
-        if devs:
-            s = c.get_status(devs[0])
+        cached = daikin_service.get_cached_devices(allow_refresh=False, actor="weather")
+        if cached.devices:
+            dev = cached.devices[0]
+            c = get_daikin_client()
+            s = c.get_status(dev)
             daikin = {
                 "room_temp": s.room_temp,
                 "outdoor_temp": s.outdoor_temp,
@@ -362,13 +367,37 @@ async def health():
     return {"status": "ok"}
 
 
+@app.get("/api/v1/daikin/quota")
+async def daikin_quota():
+    """Return Daikin API quota usage, cache age, and stale status.
+
+    Useful for dashboards and debugging to verify the quota-management layer is working.
+    Does NOT make any API calls — reads from the in-memory service and SQLite quota log.
+    """
+    return daikin_service.get_quota_status_daikin()
+
+
+@app.get("/api/v1/foxess/quota")
+async def foxess_quota():
+    """Return Fox ESS API quota usage, cache age, and stale status."""
+    return get_refresh_stats_extended()
+
+
 @app.get("/api/v1/daikin/status", response_model=list[DaikinStatusResponse])
-async def daikin_status():
-    """Get status of all Daikin devices."""
-    logger.debug("GET /api/v1/daikin/status requested")
+async def daikin_status(refresh: bool = False):
+    """Get status of all Daikin devices.
+
+    Set ?refresh=true to force a live fetch (subject to rate limiting and the daily
+    quota). Without the flag the cached value is returned immediately.
+    """
+    logger.debug("GET /api/v1/daikin/status refresh=%s", refresh)
     try:
+        if refresh:
+            cached = daikin_service.force_refresh_devices(actor="api")
+        else:
+            cached = daikin_service.get_cached_devices(allow_refresh=False, actor="api")
+        devices = cached.devices
         client = get_daikin_client()
-        devices = client.get_devices()
         result = []
         for dev in devices:
             s = client.get_status(dev)
@@ -387,7 +416,10 @@ async def daikin_status():
                 tank_target=s.tank_target,
                 weather_regulation=s.weather_regulation,
             ))
-        logger.info("Daikin status: %d device(s)", len(result))
+        logger.info(
+            "Daikin status: %d device(s) source=%s stale=%s",
+            len(result), cached.source, cached.stale,
+        )
         return result
     except FileNotFoundError as e:
         logger.warning("Daikin not configured: %s", e)
@@ -421,14 +453,7 @@ async def daikin_power(req: PowerRequest):
         )
     
     try:
-        client = get_daikin_client()
-        devices = client.get_devices()
-        if not devices:
-            raise HTTPException(status_code=404, detail="No Daikin devices found")
-        
-        for dev in devices:
-            client.set_power(dev, req.on)
-        
+        daikin_service.set_power(req.on, actor="api")
         safeguards.record_action_time(action_type)
         safeguards.audit_log(action_type, {"on": req.on}, "api", True, "Power set successfully")
         
@@ -454,21 +479,17 @@ async def daikin_temperature(req: TemperatureRequest):
         )
     
     try:
-        client = get_daikin_client()
-        devices = client.get_devices()
-        if not devices:
-            raise HTTPException(status_code=404, detail="No Daikin devices found")
-        
-        for dev in devices:
+        # Check weather regulation before setting temperature
+        cached = daikin_service.get_cached_devices(allow_refresh=False, actor="api")
+        for dev in cached.devices:
             if dev.weather_regulation_enabled:
                 raise HTTPException(
                     status_code=409,
                     detail="Cannot set room temperature while weather regulation is active. "
                            "Use LWT offset instead, or disable weather regulation first.",
                 )
-            mode = req.mode or dev.operation_mode
-            client.set_temperature(dev, req.temperature, mode)
-        
+        mode = req.mode
+        daikin_service.set_temperature(req.temperature, mode or "heating", actor="api")
         safeguards.record_action_time(action_type)
         safeguards.audit_log(action_type, {"temperature": req.temperature}, "api", True, "Temperature set")
         
@@ -494,15 +515,7 @@ async def daikin_lwt_offset(req: LWTOffsetRequest):
         )
     
     try:
-        client = get_daikin_client()
-        devices = client.get_devices()
-        if not devices:
-            raise HTTPException(status_code=404, detail="No Daikin devices found")
-        
-        for dev in devices:
-            mode = req.mode or dev.operation_mode
-            client.set_lwt_offset(dev, req.offset, mode)
-        
+        daikin_service.set_lwt_offset(req.offset, req.mode or "heating", actor="api")
         safeguards.record_action_time(action_type)
         safeguards.audit_log(action_type, {"offset": req.offset}, "api", True, "LWT offset set")
         
@@ -528,14 +541,7 @@ async def daikin_mode(req: ModeRequest):
         )
     
     try:
-        client = get_daikin_client()
-        devices = client.get_devices()
-        if not devices:
-            raise HTTPException(status_code=404, detail="No Daikin devices found")
-        
-        for dev in devices:
-            client.set_operation_mode(dev, req.mode.value)
-        
+        daikin_service.set_operation_mode(req.mode.value, actor="api")
         safeguards.record_action_time(action_type)
         safeguards.audit_log(action_type, {"mode": req.mode.value}, "api", True, "Mode set")
         
@@ -561,15 +567,7 @@ async def daikin_tank_temperature(req: TankTemperatureRequest):
         )
     
     try:
-        client = get_daikin_client()
-        devices = client.get_devices()
-        if not devices:
-            raise HTTPException(status_code=404, detail="No Daikin devices found")
-        
-        for dev in devices:
-            if dev.tank_target is not None:
-                client.set_tank_temperature(dev, req.temperature)
-        
+        daikin_service.set_tank_temperature(req.temperature, actor="api")
         safeguards.record_action_time(action_type)
         safeguards.audit_log(action_type, {"temperature": req.temperature}, "api", True, "Tank temp set")
         
@@ -606,14 +604,7 @@ async def daikin_tank_power(req: TankPowerRequest):
         )
     
     try:
-        client = get_daikin_client()
-        devices = client.get_devices()
-        if not devices:
-            raise HTTPException(status_code=404, detail="No Daikin devices found")
-        
-        for dev in devices:
-            client.set_tank_power(dev, req.on)
-        
+        daikin_service.set_tank_power(req.on, actor="api")
         safeguards.record_action_time(action_type)
         safeguards.audit_log(action_type, {"on": req.on}, "api", True, "Tank power set")
         
@@ -632,10 +623,10 @@ async def foxess_status():
     logger.debug("GET /api/v1/foxess/status requested")
     try:
         d = get_cached_realtime()
-        last_ts, refresh_count = get_refresh_stats()
+        stats = get_refresh_stats_extended()
+        last_ts = stats.get("last_updated_epoch")
         updated_at_str = None
         if last_ts is not None:
-            from datetime import datetime, timezone
             updated_at_str = datetime.fromtimestamp(last_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         out = FoxESSStatusResponse(
             soc=d.soc,
@@ -645,13 +636,21 @@ async def foxess_status():
             load_power=d.load_power,
             work_mode=d.work_mode,
             updated_at=updated_at_str,
-            refresh_count_24h=refresh_count,
-            refresh_limit_24h=1440,
+            refresh_count_24h=stats.get("refresh_count_24h"),
+            refresh_limit_24h=stats.get("daily_budget", 1440),
+            quota_used_24h=stats.get("quota_used_24h"),
+            quota_remaining_24h=stats.get("quota_remaining_24h"),
+            daily_budget=stats.get("daily_budget"),
+            quota_blocked=stats.get("blocked"),
+            cache_age_seconds=stats.get("cache_age_seconds"),
+            cache_stale=stats.get("stale"),
         )
         logger.info(
-            "Fox ESS status: soc=%.1f solar=%.2f grid=%.2f battery=%.2f load=%.2f work_mode=%s refresh_24h=%s",
+            "Fox ESS status: soc=%.1f solar=%.2f grid=%.2f battery=%.2f load=%.2f "
+            "work_mode=%s refresh_24h=%s quota_used=%s stale=%s",
             out.soc, out.solar_power, out.grid_power, out.battery_power, out.load_power,
             out.work_mode, (out.refresh_count_24h or 0),
+            stats.get("quota_used_24h"), stats.get("stale"),
         )
         return out
     except ValueError as e:
@@ -773,17 +772,11 @@ async def confirm_action(action_id: str, req: ConfirmRequest):
     
     try:
         if action.action_type == "daikin.power":
-            client = get_daikin_client()
-            devices = client.get_devices()
-            for dev in devices:
-                client.set_power(dev, action.parameters["on"])
+            daikin_service.set_power(action.parameters["on"], actor="api_confirm")
             msg = f"Daikin turned {'ON' if action.parameters['on'] else 'OFF'}"
         
         elif action.action_type == "daikin.tank_power":
-            client = get_daikin_client()
-            devices = client.get_devices()
-            for dev in devices:
-                client.set_tank_power(dev, action.parameters["on"])
+            daikin_service.set_tank_power(action.parameters["on"], actor="api_confirm")
             msg = f"DHW tank turned {'ON' if action.parameters['on'] else 'OFF'}"
         
         elif action.action_type == "foxess.mode":
@@ -984,76 +977,48 @@ async def _execute_action(action_type: str, params: dict) -> ActionResult:
     """Execute an action and return the result."""
     try:
         if action_type == "daikin.power":
-            client = get_daikin_client()
-            devices = client.get_devices()
-            if not devices:
-                raise HTTPException(status_code=404, detail="No Daikin devices found")
-            for dev in devices:
-                client.set_power(dev, params["on"])
+            daikin_service.set_power(params["on"], actor="openclaw")
             return ActionResult(success=True, message=f"Daikin turned {'ON' if params['on'] else 'OFF'}")
         
         elif action_type == "daikin.temperature":
-            client = get_daikin_client()
-            devices = client.get_devices()
-            if not devices:
-                raise HTTPException(status_code=404, detail="No Daikin devices found")
             temp = params["temperature"]
             if temp < 15 or temp > 30:
                 raise HTTPException(status_code=400, detail="Temperature must be between 15 and 30°C")
-            for dev in devices:
+            # Check weather regulation via cache
+            cached = daikin_service.get_cached_devices(allow_refresh=False, actor="openclaw")
+            for dev in cached.devices:
                 if dev.weather_regulation_enabled:
                     raise HTTPException(
                         status_code=409,
                         detail="Cannot set room temperature while weather regulation is active. "
                                "Use LWT offset instead, or disable weather regulation first.",
                     )
-                mode = params.get("mode") or dev.operation_mode
-                client.set_temperature(dev, temp, mode)
+            mode = params.get("mode") or "heating"
+            daikin_service.set_temperature(temp, mode, actor="openclaw")
             return ActionResult(success=True, message=f"Temperature set to {temp}°C")
         
         elif action_type == "daikin.lwt_offset":
-            client = get_daikin_client()
-            devices = client.get_devices()
-            if not devices:
-                raise HTTPException(status_code=404, detail="No Daikin devices found")
             offset = params["offset"]
             if offset < -10 or offset > 10:
                 raise HTTPException(status_code=400, detail="LWT offset must be between -10 and +10")
-            for dev in devices:
-                mode = params.get("mode") or dev.operation_mode
-                client.set_lwt_offset(dev, offset, mode)
+            mode = params.get("mode") or "heating"
+            daikin_service.set_lwt_offset(offset, mode, actor="openclaw")
             return ActionResult(success=True, message=f"LWT offset set to {offset:+g}")
         
         elif action_type == "daikin.mode":
-            client = get_daikin_client()
-            devices = client.get_devices()
-            if not devices:
-                raise HTTPException(status_code=404, detail="No Daikin devices found")
             mode = params["mode"]
-            for dev in devices:
-                client.set_operation_mode(dev, mode)
+            daikin_service.set_operation_mode(mode, actor="openclaw")
             return ActionResult(success=True, message=f"Mode set to {mode}")
         
         elif action_type == "daikin.tank_temperature":
-            client = get_daikin_client()
-            devices = client.get_devices()
-            if not devices:
-                raise HTTPException(status_code=404, detail="No Daikin devices found")
             temp = params["temperature"]
             if temp < 30 or temp > 65:
                 raise HTTPException(status_code=400, detail="Tank temperature must be between 30 and 65°C")
-            for dev in devices:
-                if dev.tank_target is not None:
-                    client.set_tank_temperature(dev, temp)
+            daikin_service.set_tank_temperature(temp, actor="openclaw")
             return ActionResult(success=True, message=f"Tank temperature set to {temp}°C")
         
         elif action_type == "daikin.tank_power":
-            client = get_daikin_client()
-            devices = client.get_devices()
-            if not devices:
-                raise HTTPException(status_code=404, detail="No Daikin devices found")
-            for dev in devices:
-                client.set_tank_power(dev, params["on"])
+            daikin_service.set_tank_power(params["on"], actor="openclaw")
             return ActionResult(success=True, message=f"DHW tank turned {'ON' if params['on'] else 'OFF'}")
         
         elif action_type == "foxess.mode":
@@ -1100,9 +1065,9 @@ def _get_assistant_context() -> tuple[list[dict], Optional[dict], Optional[dict]
             "tariff_name": "Manual",
         }
     try:
-        client = get_daikin_client()
-        devices = client.get_devices()
-        for dev in devices or []:
+        cached = daikin_service.get_cached_devices(allow_refresh=False, actor="assistant")
+        for dev in cached.devices or []:
+            client = get_daikin_client()
             s = client.get_status(dev)
             daikin_list.append({
                 "device_id": dev.id,
