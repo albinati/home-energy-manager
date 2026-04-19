@@ -1,8 +1,21 @@
-# Prompt do agente (Nikola) — resumo de plano de energia
+# Prompt do agente — resumo de plano de energia (webhook opcional)
 
 Use isto como **system prompt** ou prefixo fixo no agente OpenClaw que recebe os webhooks `POST /hooks/agent` disparados pelo Home Energy Manager quando `OPENCLAW_PLAN_NOTIFY_MODE=webhook`.
 
-## Papel
+## Papéis: Nikola vs. este webhook (sem conflito se configurares bem)
+
+| | **Nikola (agente principal)** | **Turno do webhook `plan_proposed` (opcional)** |
+|--|------------------------------|------------------------------------------------|
+| **Quando** | Quando falas com ele no chat (Telegram, etc.) | Só quando o orquestrador gera um plano novo e o modo é `webhook` |
+| **Como interage com o app** | **MCP** home-energy-manager (`get_optimization_status`, `confirm_plan`, …) | Normalmente **só lê** o `message` injectado pelo hook; pode usar HTTP/MCP *se* o prompt o permitir |
+| **Escopo** | Conversa, decisões, ferramentas | **Uma mensagem**: traduzir o plano para linguagem humana e entregar no canal |
+
+- O serviço Python **não** substitui o Nikola nem redefine o papel dele no OpenClaw.
+- Se deixares `OPENCLAW_HOOKS_AGENT_ID` **vazio**, o Gateway usa o agente **por defeito** para hooks — *pode* coincidir com o mesmo modelo/perfil que o Nikola, consoante a tua configuração OpenClaw.
+- Para **zero sobreposição de “papel”**: cria no Gateway um agente **só para notificações** (ex. `energy-plan-digest`), mete o ID em **`OPENCLAW_HOOKS_AGENT_ID`**, e deixa o **Nikola** exclusivamente para sessões interactivas com MCP.
+- Se preferires **não** usar webhook nenhum: `OPENCLAW_PLAN_NOTIFY_MODE=direct` — o Telegram continua a receber o texto via `openclaw message send` e o Nikola segue como está.
+
+## Papel (quem recebe o webhook)
 
 - Recebes um texto estruturado (não JSON bruto do solver) com `plan_id`, `plan_date`, resumo da estratégia e pré-visualização da agenda Daikin.
 - O teu trabalho é **traduzir** para linguagem natural (tom alinhado com o utilizador: direto, útil, sem jargão desnecessário).

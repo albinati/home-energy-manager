@@ -181,7 +181,9 @@ Configure routing via MCP: `set_notification_route(alert_type, enabled, severity
 
 ### OpenClaw Gateway webhook (optional) — agent “mastiga” o plano
 
-When `OPENCLAW_PLAN_NOTIFY_MODE=webhook` and `OPENCLAW_HOOKS_URL` + `OPENCLAW_HOOKS_TOKEN` are set, **`plan_proposed` notifications** are sent with `POST` to the Gateway (default path `/hooks/agent` per [OpenClaw Webhooks](https://openclaws.io/docs/automation/webhook)) instead of piping the long body through `openclaw message send`. The payload asks your agent (e.g. Nikola) to summarize in human language; **if the hook fails (non-2xx or network error), the service falls back to the direct CLI** so you still get a message.
+When `OPENCLAW_PLAN_NOTIFY_MODE=webhook` and `OPENCLAW_HOOKS_URL` + `OPENCLAW_HOOKS_TOKEN` are set, **`plan_proposed` notifications** are sent with `POST` to the Gateway (default path `/hooks/agent` per [OpenClaw Webhooks](https://openclaws.io/docs/automation/webhook)) instead of piping the long body through `openclaw message send`. The payload asks an agent to summarize in human language; **if the hook fails (non-2xx or network error), the service falls back to the direct CLI** so you still get a message.
+
+**Nikola / main agent vs. this hook:** Your interactive agent (e.g. Nikola) that uses the **home-energy-manager MCP** in chat is unchanged. The webhook is a **separate isolated `/hooks/agent` turn** for notification copy only. To avoid mixing personas, set **`OPENCLAW_HOOKS_AGENT_ID`** to a **dedicated** digest-only agent in the Gateway and keep Nikola for MCP sessions; if `OPENCLAW_HOOKS_AGENT_ID` is empty, the Gateway default hook agent applies (see your `hooks.allowedAgentIds`). See [docs/openclaw-nikola-plan-prompt.md](openclaw-nikola-plan-prompt.md).
 
 **Gateway prerequisites:** enable `hooks` in OpenClaw config with a dedicated `hooks.token`, bind to loopback or Tailscale, and restrict `allowedAgentIds` if you use `OPENCLAW_HOOKS_AGENT_ID`.
 
