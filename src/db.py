@@ -9,6 +9,7 @@ import sqlite3
 import threading
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Optional
 
@@ -605,7 +606,7 @@ def hourly_load_profile_kwh(limit: int = 2016) -> dict[int, float]:
         try:
             from datetime import datetime as _dt
             ts = _dt.fromisoformat(ts_str.replace("Z", "+00:00"))
-            hour = ts.hour
+            hour = ts.astimezone(ZoneInfo(config.BULLETPROOF_TIMEZONE)).hour
         except (ValueError, TypeError):
             continue
         buckets[hour].append(float(r["consumption_kwh"]))
