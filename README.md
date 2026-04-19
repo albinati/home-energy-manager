@@ -2,7 +2,9 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**Standalone home energy controller** for Fox ESS battery + Daikin Altherma heat pump (Onecta). It runs the automation (schedules, SQLite state, bulletproof heartbeat) on your hardware; the FastAPI server is the **machine interface** your tools use—including **OpenClaw** (REST + optional MCP), not the other way around.
+**Standalone home energy controller** for Fox ESS battery + Daikin Altherma heat pump (Onecta). It runs the automation (schedules, SQLite state, bulletproof heartbeat) on your hardware; the FastAPI server is the **machine interface** for dashboards, scripts, and optional tools (**OpenClaw** REST + MCP). **Core scheduling and hardware writes do not depend on OpenClaw**—OpenClaw is for visibility, reports, and optional remote control when you enable it.
+
+**Notifications:** this service does **not** call Telegram or any chat API directly. When enabled, it sends a single **`POST` to the OpenClaw Gateway** (`OPENCLAW_HOOKS_URL`, e.g. `/hooks/agent`) with optional `channel` / `to` fields so the Gateway can deliver downstream. See [CHANGELOG.md](CHANGELOG.md) and [GitHub Releases](https://github.com/albinati/home-energy-manager/releases) for version history (e.g. **v9.1.0** hardening).
 
 ### The planning brain
 
@@ -16,7 +18,7 @@ This app is the **brain** for the installation: it **captures half-hourly Agile 
 - **Daikin Onecta**: Read heat pump status, radiator temperature, outdoor temperature, DHW tank temperature. Control power, temperature targets, heating curve offset, and weather regulation.
 - **Smart scheduling**: Time-of-use optimisation — charge battery on cheap-rate periods, pre-heat with solar surplus.
 - **Energy / tariffs**: Octopus Agile rates ingested and stored; shadow pricing, PnL, VWAP, and reports use the same state the planner uses.
-- **OpenClaw**: Remote visibility/control via HTTP API (`HOME_ENERGY_API_URL`) or MCP; user notifications go through the **Gateway hook** (`OPENCLAW_HOOKS_URL` / `OPENCLAW_HOOKS_TOKEN`), not a local `openclaw` subprocess. Default `OPENCLAW_READ_ONLY=true` keeps writes gated.
+- **OpenClaw**: Optional remote visibility/control via HTTP API (`HOME_ENERGY_API_URL`) or MCP; **user notifications** use **Gateway hooks only** (`OPENCLAW_HOOKS_URL` + `OPENCLAW_HOOKS_TOKEN`). There is no `openclaw message send` subprocess and no direct channel API from this repo. Default `OPENCLAW_READ_ONLY=true` keeps agent executes gated unless you opt in.
 
 ## Quick start
 
@@ -50,6 +52,17 @@ When `USE_BULLETPROOF_ENGINE=true` (default):
 - **MCP** (optional sidecar for OpenClaw or other clients): `get_energy_metrics`, `get_schedule`, `get_daily_brief`, `get_battery_forecast`, `get_weather_context`, `get_action_log`, `get_optimizer_log`, `override_schedule`, `acknowledge_warning`.
 
 See `.env.example` for `OCTOPUS_FETCH_*`, `DAILY_BRIEF_*`, `SVT_RATE_PENCE`, and weather thresholds.
+
+### Production (recommended)
+
+On a VPS or home server, run the API **as a service** (e.g. **systemd**), not via ad-hoc shells:
+
+```bash
+# After venv + pip install -r requirements.txt and a configured .env:
+python -m src.cli serve    # foreground; point unit ExecStart at this
+```
+
+Use `python -m src.cli serve` as the long-running process; optional `daemon` / `./bin/start` are for workstations. See [CLAUDE.md](CLAUDE.md) for paths and `systemctl` examples on a typical deployment.
 
 ## Setup
 
@@ -123,10 +136,15 @@ See `.env.example` for all options. Key variables:
 | `OCTOPUS_API_KEY` | No | Octopus Energy API key (for tariff tracking) |
 | `OCTOPUS_ACCOUNT_NUMBER` | No | Octopus Energy account number |
 | `BRITISH_GAS_API_KEY` | No | Reserved for future British Gas integration (unused until implemented) |
-| `OPENCLAW_HOOKS_URL` | Yes† | Gateway `POST /hooks/agent` URL |
+| `OPENCLAW_HOOKS_URL` | Yes† | **Only** outbound URL for notifications — Gateway `POST /hooks/agent` |
 | `OPENCLAW_HOOKS_TOKEN` | Yes† | Bearer token matching Gateway `hooks.token` |
-| `OPENCLAW_NOTIFY_ENABLED` | No | Default `true`; set `false` to skip hook delivery |
-| `OPENCLAW_READ_ONLY` | No | If `true` (default), OpenClaw cannot execute; only recommend. Apply via dashboard/CLI. |
+| `OPENCLAW_NOTIFY_ENABLED` | No | Default `true`; set `false` to skip hook POSTs (stdout / `action_log` still run) |
+| `OPENCLAW_NOTIFY_CHANNEL` | No | Sent **in the hook JSON** as `channel` (e.g. `telegram`) — hint for the Gateway, not a direct send from this app |
+| `OPENCLAW_NOTIFY_TARGET` | No | Sent as `to` (e.g. chat id) — destination hint for the Gateway |
+| `OPENCLAW_INTERNAL_API_BASE_URL` | No | Base URL embedded in some messages so OpenClaw can call back into this API (default `http://127.0.0.1:8000`) |
+| `OPENCLAW_READ_ONLY` | No | If `true` (default), OpenClaw `execute` is blocked; use dashboard/CLI or set `false` to allow executes |
+
+Legacy `ALERT_OPENCLAW_URL` / `ALERT_CHANNEL` are **removed** — use the `OPENCLAW_*` variables above.
 | `ANTHROPIC_API_KEY` | No | Primary API key for AI Assistant (Anthropic Claude). If unset, falls back to `OPENAI_API_KEY` when provider is `openai`. |
 | `OPENAI_API_KEY` | No | Fallback for AI Assistant when using OpenAI provider; also used if `ANTHROPIC_API_KEY` is unset and provider is `openai`. |
 | `AI_ASSISTANT_PROVIDER` | No | Default `anthropic` |
@@ -141,19 +159,19 @@ See `.env.example` for all options. Key variables:
 Start the web server for browser-based control and REST API access:
 
 ```bash
-python -m src.cli serve                    # Start on default port 8000 (foreground)
+python -m src.cli serve                    # Default port 8000 (foreground — use with systemd in production)
 python -m src.cli serve --port 3000        # Custom port
 ```
 
-**Daemon mode** (background server for data updates and OpenClaw API):
+**Optional — daemon mode** (background process on a dev machine; production usually uses systemd + `serve`):
 
 ```bash
-python -m src.cli daemon start             # Start API server in background
-python -m src.cli daemon status             # Show PID and URLs
-python -m src.cli daemon stop               # Stop the daemon
+python -m src.cli daemon start             # Background API
+python -m src.cli daemon status             # PID and URLs
+python -m src.cli daemon stop               # Stop
 ```
 
-The daemon writes a PID file (`.home-energy-manager.pid`) and log (`daemon.log`) in the project root. Use `daemon start` when you want the dashboard and OpenClaw API available without keeping a terminal open.
+The daemon writes `.home-energy-manager.pid` and `daemon.log` in the project root.
 
 **Shell scripts** (from project root):
 
@@ -222,16 +240,16 @@ To use the **home-energy-manager** skill from OpenClaw chat:
 
 1. **Install the skill**: `cp -r skills/home-energy-manager ~/.openclaw/skills/`
 2. **Configure** `~/.openclaw/openclaw.json` with the skill and `HOME_ENERGY_API_URL` (e.g. `http://localhost:8000`). Use the JSON example under **OpenClaw integration** below.
-3. **Health check**: On gateway boot, call `GET {HOME_ENERGY_API_URL}/api/v1/health` and start the API daemon if needed. See `BOOT.md`.
+3. **Health check**: On gateway boot, call `GET {HOME_ENERGY_API_URL}/api/v1/health` and ensure the API service is running (see **Production** above).
 
 ### OpenClaw integration
 
 **No API keys or secrets go in OpenClaw.** Credentials (Fox ESS, Daikin, etc.) stay in `.env` on the machine where the Home Energy Manager API runs. OpenClaw only needs the **base URL** of that API.
 
-1. **Start the API** on the host that has `.env` configured:
+1. **Start the API** on the host that has `.env` configured (systemd unit or foreground):
    ```bash
-   ./bin/start
-   # or: python -m src.cli daemon start
+   python -m src.cli serve
+   # optional dev: ./bin/start  OR  python -m src.cli daemon start
    ```
 
 2. **From OpenClaw**, point the skill at that host and port. Copy the skill and set the URL (use your server’s IP or hostname and port; no credentials):
@@ -319,6 +337,7 @@ python -m src.cli daikin status --api      # Route through API server
 src/
   api/
     main.py         # FastAPI app + REST endpoints
+    routers/        # Included routers (e.g. energy provider stubs)
     models.py       # Pydantic request/response schemas
     safeguards.py   # Confirmation tokens, rate limiting, audit
     templates/      # Jinja2 web UI templates (tabbed dashboard)
@@ -335,14 +354,18 @@ src/
   cli/
     __main__.py     # CLI entrypoint
   config.py         # Config + .env loader
-  notifier.py       # WhatsApp/webhook alerts (via OpenClaw)
+  notifier.py       # OpenClaw Gateway hook delivery (no direct chat APIs)
 skills/
   home-energy-manager/
     SKILL.md        # OpenClaw / AgentSkills skill definition
 tests/
   test_foxess.py    # Fox ESS client unit tests
   test_daikin.py    # Daikin client unit tests (14 tests)
+pyproject.toml      # Ruff config; package metadata
+requirements-dev.txt # pytest, ruff (optional dev install)
 ```
+
+**Lint / tests (optional):** after `pip install -r requirements-dev.txt`, run `ruff check src tests` and `pytest`.
 
 ## Credentials & security
 
@@ -351,22 +374,14 @@ tests/
 - SSL certificates (`*.pem`) for the local callback server are gitignored
 - The `--setup` tunnel is ephemeral — the URL expires when the SSH session ends
 
-## Energy Dashboard (Coming Soon)
+## Energy provider API (partial)
 
-The Energy tab in the web dashboard is a placeholder for upcoming energy provider integrations. When complete, it will support:
+Octopus Agile rates are ingested by the bulletproof planner from public/product APIs; **live Octopus/British Gas account tariff and usage REST** integrations are still **stubbed** (`501` / manual tariff path). The provider list includes **British Gas** as *reserved* until a client exists.
 
-- **Octopus Energy**: Agile, Go, Tracker, and fixed tariffs with half-hourly pricing data
-- **British Gas**: Fixed and variable tariffs, SEG export payments
-- **Manual entry**: Enter your own rates for cost tracking
+- **`/api/v1/energy/monthly`** and related insights use Fox ESS + stored state where configured.
+- **`/api/v1/energy/tariff`** / **`usage`**: not fully implemented for API-key providers yet — see [CHANGELOG.md](CHANGELOG.md).
 
-Features planned:
-- Real-time tariff display
-- Daily/weekly/monthly cost breakdown
-- Export earnings tracking
-- Time-of-use rate visualization
-- Cost optimization suggestions
-
-The API endpoints (`/api/v1/energy/*`) are stubbed and ready for implementation.
+The web **Energy** tab may still show placeholders for some provider UI features.
 
 ## License
 
