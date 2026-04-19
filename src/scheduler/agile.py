@@ -121,10 +121,15 @@ def get_current_and_next_slots(
     """Return (current_slot, next_cheap_slot, current_price_pence).
 
     current_slot / next_cheap_slot are rate dicts with value_inc_vat, valid_from, valid_to.
-    peak_start/peak_end are "HH:MM" strings (24h); slots in that window are treated as peak.
+    peak_start/peak_end are "HH:MM" strings (24h, local time); slots in that window are peak.
+    Octopus timestamps are UTC — we convert to local time for peak-window comparison so that
+    BST/GMT transitions don't shift the peak window by an hour.
     """
     if not rates:
         return None, None, None
+
+    from zoneinfo import ZoneInfo
+    tz_local = ZoneInfo(config.BULLETPROOF_TIMEZONE)
 
     now = datetime.now(timezone.utc)
     peak_s = _parse_time(peak_start)
@@ -144,7 +149,7 @@ def get_current_and_next_slots(
             current = r
             current_price = price
         is_cheap = price <= cheap_threshold_pence
-        slot_start = valid_from.time()
+        slot_start = valid_from.astimezone(tz_local).time()
         is_peak = peak_s <= slot_start <= peak_e if peak_s and peak_e else False
         if is_cheap and not is_peak and valid_from > now and next_cheap is None:
             next_cheap = r

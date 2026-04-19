@@ -100,10 +100,14 @@ def lp_plan_to_slots(plan: LpPlan) -> list[HalfHourSlot]:
         kind: str = "standard"
         lp_grid_import_w: Optional[int] = None
 
-        if chg > EPS and price <= 0:
-            kind = "negative"
-        elif chg > EPS:
-            kind = "cheap"
+        if chg > EPS:
+            grid_import = plan.import_kwh[i] if plan.import_kwh else 0.0
+            if grid_import < EPS:
+                kind = "solar_charge"  # PV-only charging — use SelfUse, not ForceCharge
+            elif price <= 0:
+                kind = "negative"
+            else:
+                kind = "cheap"
         elif allow_exp and dis > EPS and exp > EPS:
             kind = "peak_export"
         elif ed < EPS and es < EPS and price >= peak_thr:

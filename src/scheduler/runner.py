@@ -13,7 +13,7 @@ from ..daikin.client import DaikinError
 from ..daikin import service as daikin_service
 from ..foxess.client import FoxESSClient
 from ..foxess.service import get_cached_realtime
-from ..notifier import notify_risk
+from ..notifier import notify_risk, push_cheap_window_start, push_peak_window_start
 from ..state_machine import heartbeat_repair_fox_scheduler, reconcile_daikin_schedule_for_date
 from .agile import fetch_agile_rates, get_current_and_next_slots
 from .daikin import compute_lwt_adjustment, run_daikin_scheduler_tick
@@ -434,6 +434,17 @@ def bulletproof_heartbeat_tick() -> None:
                 "source": "estimated",
             }
         )
+
+        if slot_kind in ("cheap", "negative"):
+            try:
+                push_cheap_window_start(soc=soc, fox_mode=fox_mode)
+            except Exception as exc:
+                logger.debug("Push cheap window notification error: %s", exc)
+        elif slot_kind == "peak":
+            try:
+                push_peak_window_start(soc=soc)
+            except Exception as exc:
+                logger.debug("Push peak window notification error: %s", exc)
 
     if (
         soc is not None
