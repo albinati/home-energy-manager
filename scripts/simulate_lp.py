@@ -128,7 +128,8 @@ def main() -> int:
         return 0 if r.ok else 2
 
     print("=== LP simulation (no hardware writes) ===")
-    print(f"Plan date (tomorrow local): {r.plan_date}")
+    window_label = getattr(r, "plan_window", "unknown")
+    print(f"Plan date: {r.plan_date}  [{window_label}]")
     print(
         f"Solver: {p.status}  |  Objective ≈ {p.objective_pence:.1f} pence  |  slots={r.slot_count}"
     )

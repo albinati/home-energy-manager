@@ -1706,7 +1706,11 @@ async def optimization_dispatch_preview():
 
 @app.post("/api/v1/optimization/refresh")
 async def optimization_refresh():
-    """Fetch Agile rates from Octopus (rate-limited); fills in-memory cache for tariff tools."""
+    """Fetch Agile rates from Octopus, persist to SQLite, and update in-memory cache.
+
+    Safe to call at any time — if tomorrow's rates are now available they will be
+    stored and the next planner run will pick them up automatically.
+    """
     allowed, wait_time = safeguards.check_rate_limit("optimization.refresh")
     if not allowed:
         raise HTTPException(
@@ -1715,14 +1719,85 @@ async def optimization_refresh():
         )
     if not config.OCTOPUS_TARIFF_CODE:
         raise HTTPException(status_code=503, detail="OCTOPUS_TARIFF_CODE not set")
+
+    # Persist to SQLite (the LP optimizer reads from DB, not the in-memory cache)
+    from ..scheduler.agile import fetch_agile_rates
+    from .. import db as _db
+    rates = await asyncio.to_thread(fetch_agile_rates, config.OCTOPUS_TARIFF_CODE)
+    saved = 0
+    if rates:
+        saved = await asyncio.to_thread(_db.save_agile_rates, rates, config.OCTOPUS_TARIFF_CODE)
+
+    # Also refresh in-memory cache for tariff tools / status display
     cache = refresh_agile_rates()
     safeguards.record_action_time("optimization.refresh")
-    if cache.error and not cache.rates:
-        raise HTTPException(status_code=502, detail=cache.error or "Agile fetch failed")
+
+    slot_count = len(rates) if rates else 0
+    has_tomorrow = slot_count >= 40  # Octopus publishes ~48 slots for tomorrow after 16:00 UK
     return {
         "status": "ok",
-        "slots": len(cache.rates or []),
+        "slots_fetched": slot_count,
+        "slots_saved_to_db": saved,
+        "has_tomorrow_rates": has_tomorrow,
         "fetched_at_utc": cache.fetched_at_utc.isoformat() if cache.fetched_at_utc else None,
+        "hint": (
+            "Tomorrow's rates are available — POST /api/v1/optimization/propose to replan."
+            if has_tomorrow
+            else "Only today's remaining rates available (Octopus publishes tomorrow ~16:00 UK). "
+                 "Optimizer will plan for today-remainder."
+        ),
+    }
+
+
+@app.post("/api/v1/optimization/fetch-and-plan")
+async def optimization_fetch_and_plan():
+    """Fetch latest Agile rates and immediately run the full optimizer.
+
+    Combines /optimization/refresh + /optimization/propose in one call.
+    Use for on-demand re-planning after an Octopus rates update, a config change,
+    or whenever you want to force a fresh plan at any time of day.
+
+    The planner automatically targets tomorrow (full day) if tomorrow's rates are
+    available, or today-remainder if not, and falls back to Self Use if there are
+    no usable rates.
+    """
+    if not config.OCTOPUS_TARIFF_CODE:
+        raise HTTPException(status_code=503, detail="OCTOPUS_TARIFF_CODE not set")
+
+    # 1. Fetch + persist rates
+    from ..scheduler.agile import fetch_agile_rates
+    from .. import db as _db
+    rates = await asyncio.to_thread(fetch_agile_rates, config.OCTOPUS_TARIFF_CODE)
+    saved = 0
+    if rates:
+        saved = await asyncio.to_thread(_db.save_agile_rates, rates, config.OCTOPUS_TARIFF_CODE)
+    refresh_agile_rates()  # update in-memory cache too
+
+    slot_count = len(rates) if rates else 0
+    has_tomorrow = slot_count >= 40
+
+    # 2. Run optimizer
+    fox = None
+    try:
+        fox = FoxESSClient(**config.foxess_client_kwargs())
+    except Exception:
+        pass
+    result = await asyncio.to_thread(run_optimizer, fox, None)
+
+    now = datetime.now(timezone.utc)
+    plan_id = f"bp-{uuid4().hex[:12]}"
+    return {
+        "plan_id": plan_id,
+        "proposed_at": now.isoformat(),
+        "status": "applied" if result.get("ok") else "fallback",
+        "slots_fetched": slot_count,
+        "has_tomorrow_rates": has_tomorrow,
+        "plan_date": result.get("plan_date"),
+        "optimizer_backend": result.get("optimizer_backend"),
+        "strategy": result.get("strategy") or result.get("error"),
+        "fox_uploaded": result.get("fox_uploaded", False),
+        "daikin_actions": result.get("daikin_actions", 0),
+        "fallback": result.get("fallback"),
     }
 
 
