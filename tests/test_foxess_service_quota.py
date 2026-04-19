@@ -1,11 +1,10 @@
 """Tests for src/foxess/service.py — quota-aware caching, stale fallback, force refresh."""
-import time
 from unittest.mock import MagicMock, patch
-import pytest
 
 
 def _reset_fox_service():
     import importlib
+
     import src.foxess.service as svc
     importlib.reload(svc)
     return svc

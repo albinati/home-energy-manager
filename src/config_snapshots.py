@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from .config import config
 
@@ -53,7 +53,7 @@ def _gather_device_states() -> dict[str, Any]:
 
 
 def save_snapshot(trigger: str, *, include_device_states: bool = True) -> dict[str, Any]:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     snapshot_id = now.strftime("%Y%m%dT%H%M%SZ")
 
     snapshot: dict[str, Any] = {
@@ -112,7 +112,7 @@ def list_snapshots() -> list[dict[str, Any]]:
     return results
 
 
-def get_latest_snapshot() -> Optional[dict[str, Any]]:
+def get_latest_snapshot() -> dict[str, Any] | None:
     d = _snapshot_dir()
     files = sorted(d.glob("*.json"), reverse=True)
     for p in files:
@@ -157,7 +157,7 @@ def restore_snapshot(snapshot_id: str) -> dict[str, Any]:
     return snap
 
 
-def rollback_latest() -> Optional[dict[str, Any]]:
+def rollback_latest() -> dict[str, Any] | None:
     snap = get_latest_snapshot()
     if snap is None:
         return None

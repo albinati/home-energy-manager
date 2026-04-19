@@ -1,5 +1,13 @@
 # Changelog
 
+## v9.1.0 — 2026-04-19 — Hardening: peak sync, env cleanup, providers, tooling
+
+- **Scheduler peak sync:** `scheduler_peak_contains_wall_time` / `utc_instant_in_scheduler_peak` in `agile.py`; `compute_lwt_adjustment` uses the same local-wall-clock rule as Agile slot peak detection (fixes BST skew for Daikin LWT).
+- **Removed:** legacy `ALERT_OPENCLAW_URL` / `ALERT_CHANNEL` from `config` (use `OPENCLAW_*` only).
+- **API:** British Gas provider entry stays in the enum but `is_configured=false` until integration exists; 503 messages no longer suggest `BRITISH_GAS_API_KEY`.
+- **API:** energy provider stub routes moved to [`src/api/routers/energy_providers.py`](src/api/routers/energy_providers.py) and mounted from `main` (paths unchanged).
+- **FoxESS:** removed `FoxESSClient.get_device_settings()` (unsupported by Open API; use `get_device_setting(key)`).
+
 ## 2026-04-19 — V9: solar_charge, MPC cadence, BST fix, preset DHW
 
 ### Solar-only charging (Fox ESS)

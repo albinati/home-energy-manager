@@ -1,7 +1,8 @@
 """Pydantic models for API request/response schemas."""
 from datetime import datetime
 from enum import Enum
-from typing import Optional, Any
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -35,13 +36,13 @@ class DaikinStatusResponse(BaseModel):
     model: str
     is_on: bool
     mode: str
-    room_temp: Optional[float] = None
-    target_temp: Optional[float] = None
-    outdoor_temp: Optional[float] = None
-    lwt: Optional[float] = None
-    lwt_offset: Optional[float] = None
-    tank_temp: Optional[float] = None
-    tank_target: Optional[float] = None
+    room_temp: float | None = None
+    target_temp: float | None = None
+    outdoor_temp: float | None = None
+    lwt: float | None = None
+    lwt_offset: float | None = None
+    tank_temp: float | None = None
+    tank_target: float | None = None
     weather_regulation: bool
 
 
@@ -52,15 +53,15 @@ class FoxESSStatusResponse(BaseModel):
     battery_power: float = Field(description="Battery power - positive=charging, negative=discharging (kW)")
     load_power: float = Field(description="Current load consumption (kW)")
     work_mode: str
-    updated_at: Optional[str] = Field(default=None, description="Last cloud API update time (UTC)")
-    refresh_count_24h: Optional[int] = Field(default=None, description="Realtime API calls in last 24h")
-    refresh_limit_24h: Optional[int] = Field(default=None, description="Daily API call limit (e.g. 1440)")
-    quota_used_24h: Optional[int] = Field(default=None, description="API calls used in the last 24h (all Fox types)")
-    quota_remaining_24h: Optional[int] = Field(default=None, description="API calls remaining in daily budget")
-    daily_budget: Optional[int] = Field(default=None, description="Soft daily quota cap (e.g. 1200)")
-    quota_blocked: Optional[bool] = Field(default=None, description="True when quota is exhausted and reads return stale data")
-    cache_age_seconds: Optional[float] = Field(default=None, description="Age of cached realtime data in seconds")
-    cache_stale: Optional[bool] = Field(default=None, description="True when the returned data is from a stale cache")
+    updated_at: str | None = Field(default=None, description="Last cloud API update time (UTC)")
+    refresh_count_24h: int | None = Field(default=None, description="Realtime API calls in last 24h")
+    refresh_limit_24h: int | None = Field(default=None, description="Daily API call limit (e.g. 1440)")
+    quota_used_24h: int | None = Field(default=None, description="API calls used in the last 24h (all Fox types)")
+    quota_remaining_24h: int | None = Field(default=None, description="API calls remaining in daily budget")
+    daily_budget: int | None = Field(default=None, description="Soft daily quota cap (e.g. 1200)")
+    quota_blocked: bool | None = Field(default=None, description="True when quota is exhausted and reads return stale data")
+    cache_age_seconds: float | None = Field(default=None, description="Age of cached realtime data in seconds")
+    cache_stale: bool | None = Field(default=None, description="True when the returned data is from a stale cache")
 
 
 class PowerRequest(BaseModel):
@@ -70,12 +71,12 @@ class PowerRequest(BaseModel):
 
 class TemperatureRequest(BaseModel):
     temperature: float = Field(ge=15, le=30, description="Target temperature in Celsius (15-30)")
-    mode: Optional[str] = Field(default=None, description="Operation mode (uses current if not specified)")
+    mode: str | None = Field(default=None, description="Operation mode (uses current if not specified)")
 
 
 class LWTOffsetRequest(BaseModel):
     offset: float = Field(ge=-10, le=10, description="Leaving water temperature offset (-10 to +10)")
-    mode: Optional[str] = Field(default=None, description="Operation mode (uses current if not specified)")
+    mode: str | None = Field(default=None, description="Operation mode (uses current if not specified)")
 
 
 class ModeRequest(BaseModel):
@@ -125,8 +126,8 @@ class ConfirmRequest(BaseModel):
 class ActionResult(BaseModel):
     success: bool
     message: str
-    action_id: Optional[str] = None
-    data: Optional[dict[str, Any]] = None
+    action_id: str | None = None
+    data: dict[str, Any] | None = None
 
 
 class OpenClawAction(str, Enum):
@@ -143,7 +144,7 @@ class OpenClawAction(str, Enum):
 class OpenClawExecuteRequest(BaseModel):
     action: OpenClawAction
     parameters: dict[str, Any]
-    confirmation_token: Optional[str] = Field(default=None, description="Token from previous pending action")
+    confirmation_token: str | None = Field(default=None, description="Token from previous pending action")
 
 
 class OpenClawCapability(BaseModel):
@@ -160,7 +161,7 @@ class OpenClawCapabilitiesResponse(BaseModel):
 
 class ErrorResponse(BaseModel):
     error: str
-    detail: Optional[str] = None
+    detail: str | None = None
 
 
 # Energy provider models
@@ -198,13 +199,13 @@ class TariffResponse(BaseModel):
     tariff_name: str
     tariff_type: TariffTypeEnum
     import_rate: float = Field(description="Import rate in p/kWh")
-    export_rate: Optional[float] = Field(default=None, description="Export rate in p/kWh")
-    standing_charge: Optional[float] = Field(default=None, description="Standing charge in p/day")
-    valid_from: Optional[datetime] = None
-    valid_to: Optional[datetime] = None
+    export_rate: float | None = Field(default=None, description="Export rate in p/kWh")
+    standing_charge: float | None = Field(default=None, description="Standing charge in p/day")
+    valid_from: datetime | None = None
+    valid_to: datetime | None = None
     is_peak: bool = False
-    next_rate: Optional[float] = Field(default=None, description="Next rate in p/kWh (for agile tariffs)")
-    next_rate_from: Optional[datetime] = None
+    next_rate: float | None = Field(default=None, description="Next rate in p/kWh (for agile tariffs)")
+    next_rate_from: datetime | None = None
 
 
 class EnergyUsageResponse(BaseModel):
@@ -244,11 +245,11 @@ class MonthlyCostSummaryResponse(BaseModel):
 class MonthlyInsightsResponse(BaseModel):
     energy: MonthlyEnergySummaryResponse
     cost: MonthlyCostSummaryResponse
-    heating_estimate_kwh: Optional[float] = None
-    heating_estimate_cost_pence: Optional[float] = None
-    equivalent_gas_cost_pence: Optional[float] = None
-    equivalent_gas_cost_pounds: Optional[float] = None
-    gas_comparison_ahead_pounds: Optional[float] = None
+    heating_estimate_kwh: float | None = None
+    heating_estimate_cost_pence: float | None = None
+    equivalent_gas_cost_pence: float | None = None
+    equivalent_gas_cost_pounds: float | None = None
+    gas_comparison_ahead_pounds: float | None = None
 
 
 class ChartDataPoint(BaseModel):
@@ -266,16 +267,16 @@ class TempBandSummaryResponse(BaseModel):
     days: int
     heating_kwh: float
     cost_pounds: float
-    avg_temp_c: Optional[float] = None
+    avg_temp_c: float | None = None
 
 
 class HeatingAnalyticsResponse(BaseModel):
-    heating_percent_of_cost: Optional[float] = None
-    heating_percent_of_consumption: Optional[float] = None
-    avg_outdoor_temp_c: Optional[float] = None
-    degree_days: Optional[float] = None
-    cost_per_degree_day_pounds: Optional[float] = None
-    heating_kwh_per_degree_day: Optional[float] = None
+    heating_percent_of_cost: float | None = None
+    heating_percent_of_consumption: float | None = None
+    avg_outdoor_temp_c: float | None = None
+    degree_days: float | None = None
+    cost_per_degree_day_pounds: float | None = None
+    heating_kwh_per_degree_day: float | None = None
     temp_bands: list[TempBandSummaryResponse] = []
 
 
@@ -284,13 +285,13 @@ class PeriodInsightsResponse(BaseModel):
     period_label: str
     energy: MonthlyEnergySummaryResponse
     cost: MonthlyCostSummaryResponse
-    heating_estimate_kwh: Optional[float] = None
-    heating_estimate_cost_pence: Optional[float] = None
-    equivalent_gas_cost_pence: Optional[float] = None
-    equivalent_gas_cost_pounds: Optional[float] = None
-    gas_comparison_ahead_pounds: Optional[float] = None
+    heating_estimate_kwh: float | None = None
+    heating_estimate_cost_pence: float | None = None
+    equivalent_gas_cost_pence: float | None = None
+    equivalent_gas_cost_pounds: float | None = None
+    gas_comparison_ahead_pounds: float | None = None
     chart_data: list[ChartDataPoint] = []
-    heating_analytics: Optional[HeatingAnalyticsResponse] = None
+    heating_analytics: HeatingAnalyticsResponse | None = None
 
 
 class EnergyReportResponse(PeriodInsightsResponse):
@@ -315,14 +316,14 @@ class AssistantPreference(str, Enum):
 
 
 class AssistantRecommendRequest(BaseModel):
-    message: Optional[str] = Field(default=None, description="Optional user message or request")
+    message: str | None = Field(default=None, description="Optional user message or request")
     preference: AssistantPreference = Field(description="Comfort vs cost balance")
 
 
 class SuggestedActionSchema(BaseModel):
     action: str = Field(description="Action type (e.g. daikin.temperature)")
     parameters: dict[str, Any] = Field(description="Action parameters")
-    reason: Optional[str] = Field(default=None, description="Short reason for the suggestion")
+    reason: str | None = Field(default=None, description="Short reason for the suggestion")
 
 
 class AssistantRecommendResponse(BaseModel):
@@ -344,8 +345,8 @@ class AssistantApplyResultItem(BaseModel):
     success: bool
     message: str
     requires_confirmation: bool = False
-    confirmation_token: Optional[str] = None
-    action_id: Optional[str] = None
+    confirmation_token: str | None = None
+    action_id: str | None = None
 
 
 class AssistantApplyResponse(BaseModel):
@@ -356,11 +357,11 @@ class SchedulerStatusResponse(BaseModel):
     """Agile scheduler status: current price, next cheap window, planned LWT adjustment."""
     enabled: bool
     paused: bool
-    current_price_pence: Optional[float] = None
-    next_cheap_from: Optional[str] = None
-    next_cheap_to: Optional[str] = None
+    current_price_pence: float | None = None
+    next_cheap_from: str | None = None
+    next_cheap_to: str | None = None
     planned_lwt_adjustment: float = 0.0
-    tariff_code: Optional[str] = None
+    tariff_code: str | None = None
 
 
 class OptimizationPlanSlotResponse(BaseModel):
@@ -392,20 +393,20 @@ class OptimizationStatusResponse(BaseModel):
 
     enabled: bool
     preset: str
-    tariff_code: Optional[str] = None
+    tariff_code: str | None = None
     cache_slots: int = 0
-    cache_fetched_at_utc: Optional[str] = None
-    cache_error: Optional[str] = None
-    last_plan_at_utc: Optional[str] = None
-    target_mean_price_pence: Optional[float] = None
+    cache_fetched_at_utc: str | None = None
+    cache_error: str | None = None
+    last_plan_at_utc: str | None = None
+    target_mean_price_pence: float | None = None
 
 
 class OptimizationDispatchPreviewResponse(BaseModel):
     """Read-only dispatch hints for the current half-hour."""
 
     lwt_offset: float
-    daikin_tank_target_c: Optional[float] = None
-    fox_work_mode: Optional[str] = None
+    daikin_tank_target_c: float | None = None
+    fox_work_mode: str | None = None
     disable_weather_regulation: bool = False
     reason: str = ""
 
@@ -419,8 +420,8 @@ class OptimizationStatusExtendedResponse(OptimizationStatusResponse):
 
     operation_mode: str = "simulation"
     optimizer_backend: str = "lp"
-    consent: Optional[dict] = None
-    v7_safeties: Optional[dict] = None
+    consent: dict | None = None
+    v7_safeties: dict | None = None
 
 
 class ProposePlanResponse(BaseModel):
@@ -431,7 +432,7 @@ class ProposePlanResponse(BaseModel):
     expires_at: str
     status: str
     summary: str
-    plan: Optional[dict] = None  # full plan JSON when include_plan=True
+    plan: dict | None = None  # full plan JSON when include_plan=True
 
 
 class ApprovePlanRequest(BaseModel):
@@ -485,16 +486,16 @@ class SetOperationModeRequest(BaseModel):
 class SetOperationModeResponse(BaseModel):
     ok: bool
     mode: str
-    snapshot_id: Optional[str] = None
+    snapshot_id: str | None = None
     message: str
 
 
 class SnapshotSummary(BaseModel):
     snapshot_id: str
-    snapshot_at: Optional[str] = None
-    trigger: Optional[str] = None
-    operation_mode: Optional[str] = None
-    preset: Optional[str] = None
+    snapshot_at: str | None = None
+    trigger: str | None = None
+    operation_mode: str | None = None
+    preset: str | None = None
 
 
 class ListSnapshotsResponse(BaseModel):
@@ -503,7 +504,7 @@ class ListSnapshotsResponse(BaseModel):
 
 class RollbackResponse(BaseModel):
     ok: bool
-    snapshot_id: Optional[str] = None
+    snapshot_id: str | None = None
     message: str
 
 
@@ -520,18 +521,18 @@ class SetAutoApproveResponse(BaseModel):
 # ── Tariff comparison models ─────────────────────────────────────────────────
 
 class TariffRatesResponse(BaseModel):
-    unit_rate_pence: Optional[float] = None
-    day_rate_pence: Optional[float] = None
-    night_rate_pence: Optional[float] = None
-    off_peak_start: Optional[str] = None
-    off_peak_end: Optional[str] = None
+    unit_rate_pence: float | None = None
+    day_rate_pence: float | None = None
+    night_rate_pence: float | None = None
+    off_peak_start: str | None = None
+    off_peak_end: str | None = None
     standing_charge_pence_per_day: float = 0.0
-    export_rate_pence: Optional[float] = None
+    export_rate_pence: float | None = None
 
 
 class TariffPolicyResponse(BaseModel):
     contract_type: str
-    contract_months: Optional[int] = None
+    contract_months: int | None = None
     exit_fee_pence: float = 0.0
     is_green: bool = False
     is_prepay: bool = False
@@ -566,10 +567,10 @@ class TariffSimulationResultResponse(BaseModel):
     annual_standing_charge_pounds: float
     annual_export_earnings_pounds: float
     exit_fee_pounds: float = 0.0
-    lock_in_months: Optional[int] = None
+    lock_in_months: int | None = None
     first_year_effective_cost_pounds: float = 0.0
     standing_charge_per_day: float = 0.0
-    unit_rate_pence: Optional[float] = None
+    unit_rate_pence: float | None = None
     contract_type: str = ""
     is_green: bool = False
 
@@ -582,15 +583,15 @@ class TariffCompareRequest(BaseModel):
 class TariffRecommendationResponse(BaseModel):
     ok: bool
     summary: str
-    best_product_code: Optional[str] = None
-    best_display_name: Optional[str] = None
-    savings_vs_current_pounds: Optional[float] = None
-    current_product_code: Optional[str] = None
+    best_product_code: str | None = None
+    best_display_name: str | None = None
+    savings_vs_current_pounds: float | None = None
+    current_product_code: str | None = None
     results: list[TariffSimulationResultResponse] = []
-    usage_import_kwh: Optional[float] = None
-    usage_export_kwh: Optional[float] = None
-    usage_period_days: Optional[int] = None
-    generated_at: Optional[str] = None
+    usage_import_kwh: float | None = None
+    usage_export_kwh: float | None = None
+    usage_period_days: int | None = None
+    generated_at: str | None = None
 
 
 class ListAvailableTariffsResponse(BaseModel):
@@ -611,7 +612,7 @@ class TariffPeriodCosts(BaseModel):
     export_kwh: float
     days: int
     costs: dict[str, float]
-    winner: Optional[str] = None
+    winner: str | None = None
 
 
 class TariffTotalRow(BaseModel):
@@ -622,26 +623,26 @@ class TariffTotalRow(BaseModel):
     daily_avg_pence: float
     annual_pounds: float
     standing_per_day: float
-    unit_rate_pence: Optional[float] = None
+    unit_rate_pence: float | None = None
     contract_type: str
-    contract_months: Optional[int] = None
+    contract_months: int | None = None
     exit_fee_pounds: float = 0.0
     is_green: bool = False
     wins: int = 0
     is_current: bool = False
-    savings_vs_current_pounds: Optional[float] = None
+    savings_vs_current_pounds: float | None = None
 
 
 class TariffDashboardResponse(BaseModel):
     ok: bool
-    error: Optional[str] = None
-    granularity: Optional[str] = None
+    error: str | None = None
+    granularity: str | None = None
     periods: list[TariffPeriodCosts] = []
     totals: list[TariffTotalRow] = []
-    current_product_code: Optional[str] = None
-    current_annual_pounds: Optional[float] = None
-    usage: Optional[dict] = None
-    data_source: Optional[str] = None
+    current_product_code: str | None = None
+    current_annual_pounds: float | None = None
+    usage: dict | None = None
+    data_source: str | None = None
 
 
 # ── Octopus account + consumption models ─────────────────────────────────────
@@ -650,18 +651,18 @@ class OctopusCurrentTariffResponse(BaseModel):
     product_code: str
     tariff_code: str
     gsp: str
-    valid_from: Optional[str] = None
-    valid_to: Optional[str] = None
+    valid_from: str | None = None
+    valid_to: str | None = None
 
 
 class OctopusAccountResponse(BaseModel):
     ok: bool
-    error: Optional[str] = None
+    error: str | None = None
     account_number: str = ""
     api_key_configured: bool = False
-    current_tariff: Optional[OctopusCurrentTariffResponse] = None
-    mpan_import: Optional[str] = None
-    mpan_export: Optional[str] = None
+    current_tariff: OctopusCurrentTariffResponse | None = None
+    mpan_import: str | None = None
+    mpan_export: str | None = None
     gsp: str = ""
     detection_source: str = "not_run"
 
@@ -674,20 +675,20 @@ class OctopusConsumptionSlotResponse(BaseModel):
 
 class OctopusConsumptionResponse(BaseModel):
     ok: bool
-    error: Optional[str] = None
+    error: str | None = None
     mpan: str = ""
     serial: str = ""
-    group_by: Optional[str] = None
+    group_by: str | None = None
     slots: list[OctopusConsumptionSlotResponse] = []
     total_kwh: float = 0.0
 
 
 class OctopusAutoDetectResponse(BaseModel):
     ok: bool
-    error: Optional[str] = None
+    error: str | None = None
     import_mpan: str = ""
     export_mpan: str = ""
     gsp: str = ""
-    current_tariff_product: Optional[str] = None
-    current_tariff_code: Optional[str] = None
+    current_tariff_product: str | None = None
+    current_tariff_code: str | None = None
     detection_source: str = ""

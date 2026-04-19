@@ -9,12 +9,11 @@ Forecast is used by the optimization solver to:
   - Pre-heat before cold spells in cheap windows
   - Skip grid battery charging when solar is expected to fill the battery
 """
-import urllib.request
-import urllib.error
 import json
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
-from typing import Optional
+from datetime import UTC, date, datetime
 
 from .config import config, cop_at_temperature
 
@@ -25,8 +24,8 @@ from .config import config, cop_at_temperature
 def fetch_daily_temps(
     start_date: date,
     end_date: date,
-    lat: Optional[str] = None,
-    lon: Optional[str] = None,
+    lat: str | None = None,
+    lon: str | None = None,
 ) -> list[tuple[str, float]]:
     """
     Fetch daily mean temperature (°C) for date range. Returns list of (date_str, temp_c).
@@ -62,10 +61,10 @@ def fetch_daily_temps(
 def fetch_daily_solar_kwh(
     start_date: date,
     end_date: date,
-    lat: Optional[str] = None,
-    lon: Optional[str] = None,
-    capacity_kwp: Optional[float] = None,
-    efficiency: Optional[float] = None,
+    lat: str | None = None,
+    lon: str | None = None,
+    capacity_kwp: float | None = None,
+    efficiency: float | None = None,
 ) -> dict[str, float]:
     """Fetch Open-Meteo **archive** daily shortwave radiation and convert to kWh for the system.
 
@@ -243,7 +242,7 @@ def estimate_pv_kw(
 
 def compute_heating_demand_factor(
     temperature_c: float,
-    base_temp_c: Optional[float] = None,
+    base_temp_c: float | None = None,
 ) -> float:
     """Return a 0-1 heating demand factor: 0 = no heating needed, 1 = maximum.
 
@@ -258,8 +257,8 @@ def compute_heating_demand_factor(
 
 
 def fetch_forecast(
-    lat: Optional[str] = None,
-    lon: Optional[str] = None,
+    lat: str | None = None,
+    lon: str | None = None,
     hours: int = 48,
 ) -> list[HourlyForecast]:
     """Fetch hourly forecast for the next `hours` hours.
@@ -294,7 +293,7 @@ def fetch_forecast(
     clouds = hourly.get("cloud_cover") or []
     radiation = hourly.get("shortwave_radiation_instant") or []
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     result: list[HourlyForecast] = []
     for i, t in enumerate(times):
         if len(result) >= hours:
@@ -302,8 +301,7 @@ def fetch_forecast(
         try:
             dt = datetime.fromisoformat(t.replace("Z", "+00:00"))
             if dt.tzinfo is None:
-                from datetime import timezone as _tz
-                dt = dt.replace(tzinfo=_tz.utc)
+                dt = dt.replace(tzinfo=UTC)
             if dt < now:
                 continue
             temp_c = float(temps[i]) if i < len(temps) and temps[i] is not None else 10.0
@@ -328,9 +326,9 @@ def fetch_forecast(
 def get_forecast_for_slot(
     slot_start_utc: datetime,
     forecast: list[HourlyForecast],
-) -> Optional[HourlyForecast]:
+) -> HourlyForecast | None:
     """Return the forecast entry closest to (but not after) slot_start_utc."""
-    best: Optional[HourlyForecast] = None
+    best: HourlyForecast | None = None
     for f in forecast:
         if f.time_utc <= slot_start_utc:
             best = f
@@ -369,8 +367,8 @@ def _interp_hourly_scalar(
     if len(forecast) == 1:
         return float(getattr(forecast[0], attr, default) or default)
     # Find segment [a, b] with a.time <= slot_start < b.time (or extrapolate flat)
-    before: Optional[HourlyForecast] = None
-    after: Optional[HourlyForecast] = None
+    before: HourlyForecast | None = None
+    after: HourlyForecast | None = None
     for f in forecast:
         if f.time_utc <= slot_start:
             before = f
@@ -399,7 +397,7 @@ def _interp_hourly_scalar(
 def forecast_to_lp_inputs(
     forecast: list[HourlyForecast],
     slot_starts_utc: list[datetime],
-    pv_scale: Optional[float] = None,
+    pv_scale: float | None = None,
 ) -> WeatherLpSeries:
     """Build per-slot outdoor temperature, irradiance, PV kWh/slot, and COP arrays for the MILP.
 

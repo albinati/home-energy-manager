@@ -12,21 +12,20 @@ credentials, and completing the OAuth flow — all in one go.
 
 Developer portal: https://developer.cloud.daikineurope.com
 """
+import html
 import json
 import re
 import subprocess
 import time
-import urllib.request
 import urllib.parse
+import urllib.request
 import webbrowser
-import html
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
 from threading import Event, RLock
+from urllib.parse import parse_qs, urlparse
 
 from ..config import config
-
 
 TOKEN_FILE = config.DAIKIN_TOKEN_FILE
 
@@ -540,7 +539,7 @@ def run_setup() -> dict | None:
 
     if public_url:
         callback_url = f"{public_url}/callback"
-        print(f"\n✅ Public tunnel ready!")
+        print("\n✅ Public tunnel ready!")
         print(f"   Redirect URI: {callback_url}\n")
     else:
         print("\n⚠️  SSH tunnel failed. Alternatives:")
@@ -555,13 +554,13 @@ def run_setup() -> dict | None:
     print("-" * 60)
     print("STEP 1  Register a new Daikin app")
     print("-" * 60)
-    print(f"\n1. Open  https://developer.cloud.daikineurope.com")
-    print(f"2. Delete any old app (e.g. 'OpenClaw') if it exists.")
-    print(f"3. Create a NEW app.  Set the redirect URI to:\n")
+    print("\n1. Open  https://developer.cloud.daikineurope.com")
+    print("2. Delete any old app (e.g. 'OpenClaw') if it exists.")
+    print("3. Create a NEW app.  Set the redirect URI to:\n")
     print(f"       {callback_url}\n")
-    print(f"4. Copy the Client ID and Client Secret (shown only once!).")
+    print("4. Copy the Client ID and Client Secret (shown only once!).")
     print(f"\nThe server is running — Daikin will ping {callback_url}")
-    print(f"and get a 200 OK (registration hook).\n")
+    print("and get a 200 OK (registration hook).\n")
 
     # Keep serving while the user registers the app
     print("Waiting for registration hook and your credentials…")
@@ -587,7 +586,7 @@ def run_setup() -> dict | None:
     config.DAIKIN_CLIENT_SECRET = client_secret
     config.DAIKIN_REDIRECT_URI = callback_url
 
-    print(f"\n✅ Credentials saved to .env")
+    print("\n✅ Credentials saved to .env")
 
     # 5. Start OAuth flow
     print("\n" + "-" * 60)
@@ -604,7 +603,7 @@ def run_setup() -> dict | None:
     })
     auth_url = f"{config.DAIKIN_AUTH_URL}?{params}"
 
-    print(f"\nOpening browser — log in with your Daikin/Onecta account.")
+    print("\nOpening browser — log in with your Daikin/Onecta account.")
     print(f"If the browser doesn't open, visit:\n{auth_url}\n")
     print("Waiting for callback… (Ctrl+C to cancel)\n")
     webbrowser.open(auth_url)

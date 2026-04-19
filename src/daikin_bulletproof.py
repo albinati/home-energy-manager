@@ -1,15 +1,15 @@
 """Compare and apply scheduled Daikin params (Bulletproof heartbeat / recovery)."""
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
-from .config import config
 from . import db
+from .config import config
 from .daikin.client import DaikinClient, DaikinError
 from .daikin.models import DaikinDevice
 
 
-def _fclose(a: Optional[float], b: float, *, eps: float = 0.35) -> bool:
+def _fclose(a: float | None, b: float, *, eps: float = 0.35) -> bool:
     if a is None:
         return False
     return abs(float(a) - float(b)) < eps

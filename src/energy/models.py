@@ -1,8 +1,7 @@
 """Data models for energy provider integrations."""
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Optional
 
 
 class EnergyProvider(str, Enum):
@@ -30,13 +29,13 @@ class TariffInfo:
     tariff_name: str
     tariff_type: TariffType
     import_rate: float  # p/kWh
-    export_rate: Optional[float] = None  # p/kWh (SEG/export tariff)
-    standing_charge: Optional[float] = None  # p/day
-    valid_from: Optional[datetime] = None
-    valid_to: Optional[datetime] = None
+    export_rate: float | None = None  # p/kWh (SEG/export tariff)
+    standing_charge: float | None = None  # p/day
+    valid_from: datetime | None = None
+    valid_to: datetime | None = None
     is_peak: bool = False
-    next_rate: Optional[float] = None
-    next_rate_from: Optional[datetime] = None
+    next_rate: float | None = None
+    next_rate_from: datetime | None = None
 
 
 @dataclass
@@ -71,8 +70,8 @@ class EnergyUsageSummary:
 class ProviderConfig:
     """Configuration for an energy provider connection."""
     provider: EnergyProvider
-    api_key: Optional[str] = None
-    account_number: Optional[str] = None
-    mpan: Optional[str] = None  # Meter Point Administration Number
-    mprn: Optional[str] = None  # Meter Point Reference Number (gas)
+    api_key: str | None = None
+    account_number: str | None = None
+    mpan: str | None = None  # Meter Point Administration Number
+    mprn: str | None = None  # Meter Point Reference Number (gas)
     is_configured: bool = False

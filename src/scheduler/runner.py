@@ -3,13 +3,12 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from datetime import UTC, datetime, timedelta
+from typing import Any
 from zoneinfo import ZoneInfo
 
-from ..config import config
 from .. import db
-from ..daikin.client import DaikinError
+from ..config import config
 from ..daikin import service as daikin_service
 from ..foxess.client import FoxESSClient
 from ..foxess.service import get_cached_realtime
@@ -22,12 +21,12 @@ logger = logging.getLogger(__name__)
 
 _scheduler_paused: bool = False
 _background_scheduler: Any = None
-_heartbeat_thread: Optional[threading.Thread] = None
+_heartbeat_thread: threading.Thread | None = None
 _heartbeat_stop = threading.Event()
 _last_fox_verify_monotonic: float = 0.0
-_last_exec_halfhour_key: Optional[str] = None
-_last_room_temp: Optional[float] = None
-_last_room_wall_utc: Optional[datetime] = None
+_last_exec_halfhour_key: str | None = None
+_last_room_temp: float | None = None
+_last_room_wall_utc: datetime | None = None
 
 
 def get_scheduler_paused() -> bool:
@@ -81,7 +80,7 @@ def get_scheduler_status() -> dict:
     return out
 
 
-def run_scheduler_tick() -> Optional[str]:
+def run_scheduler_tick() -> str | None:
     """Run one legacy scheduler tick (Daikin LWT only)."""
     return run_daikin_scheduler_tick(get_scheduler_paused())
 
@@ -95,8 +94,8 @@ def _try_fox() -> FoxESSClient | None:
 
 
 def _in_octopus_pre_slot_window(
-    now: Optional[datetime] = None,
-    lead_seconds: Optional[int] = None,
+    now: datetime | None = None,
+    lead_seconds: int | None = None,
 ) -> bool:
     """Return True when *now* is in the 5-minute window before an Octopus half-hour boundary.
 
@@ -107,7 +106,7 @@ def _in_octopus_pre_slot_window(
     lead_seconds defaults to DAIKIN_SLOT_TRANSITION_WINDOW_SECONDS (300 = 5 min).
     """
     if now is None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
     if lead_seconds is None:
         lead_seconds = config.DAIKIN_SLOT_TRANSITION_WINDOW_SECONDS
 
@@ -198,12 +197,13 @@ def bulletproof_mpc_job() -> None:
         # Store live snapshot in DB so the LP initial state reader picks it up
         if rt_soc_pct is not None:
             try:
+                from datetime import datetime
+
                 from .. import db as _db
-                from datetime import datetime, timezone as _tz
 
                 _db.upsert_fox_realtime_snapshot(
                     {
-                        "captured_at": datetime.now(_tz.utc).isoformat(),
+                        "captured_at": datetime.now(UTC).isoformat(),
                         "soc_pct": rt_soc_pct,
                         "solar_power_kw": rt_solar_kw,
                         "load_power_kw": rt_load_kw,
@@ -293,7 +293,7 @@ def bulletproof_heartbeat_tick() -> None:
 
     tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
     now_local = datetime.now(tz)
-    now_utc = datetime.now(timezone.utc)
+    now_utc = datetime.now(UTC)
     _last_room_wall_utc = now_utc
     plan_date = now_local.date().isoformat()
     mon = time.monotonic()
@@ -329,11 +329,11 @@ def bulletproof_heartbeat_tick() -> None:
     except Exception:
         pass
 
-    room_t: Optional[float] = None
-    outdoor_t: Optional[float] = None
-    lwt_off: Optional[float] = None
-    tank_t: Optional[float] = None
-    tank_tgt: Optional[float] = None
+    room_t: float | None = None
+    outdoor_t: float | None = None
+    lwt_off: float | None = None
+    tank_t: float | None = None
+    tank_tgt: float | None = None
     tank_on = True
     dev0 = devices[0] if devices else None
     if dev0:
@@ -344,7 +344,7 @@ def bulletproof_heartbeat_tick() -> None:
         tank_t = dev0.tank_temperature
         tank_tgt = dev0.tank_target
 
-    price: Optional[float] = None
+    price: float | None = None
     tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
     if tariff:
         try:

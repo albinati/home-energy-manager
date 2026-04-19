@@ -16,13 +16,12 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from dataclasses import dataclass, field
-from typing import List, Optional
+from dataclasses import dataclass
 
+from ..api_quota import quota_remaining, record_call, should_block
 from ..config import config
 from .client import DaikinClient, DaikinError
 from .models import DaikinDevice
-from ..api_quota import record_call, should_block, quota_remaining, get_quota_status
 
 logger = logging.getLogger(__name__)
 
@@ -30,11 +29,11 @@ logger = logging.getLogger(__name__)
 # Module-level state (singleton)
 # ---------------------------------------------------------------------------
 _lock = threading.RLock()
-_client: Optional[DaikinClient] = None
+_client: DaikinClient | None = None
 
-_devices_cache: Optional[List[DaikinDevice]] = None
-_devices_fetched_monotonic: Optional[float] = None
-_devices_fetched_wall: Optional[float] = None   # epoch seconds
+_devices_cache: list[DaikinDevice] | None = None
+_devices_fetched_monotonic: float | None = None
+_devices_fetched_wall: float | None = None   # epoch seconds
 _devices_stale: bool = False                    # True after write until next refresh
 
 # Per-actor cooldown map for force-refresh: actor_key -> last epoch seconds
@@ -46,8 +45,8 @@ _force_refresh_timestamps: dict[str, float] = {}
 # ---------------------------------------------------------------------------
 @dataclass
 class CachedDevices:
-    devices: List[DaikinDevice]
-    fetched_at_wall: Optional[float]  # epoch seconds, or None if cold-start
+    devices: list[DaikinDevice]
+    fetched_at_wall: float | None  # epoch seconds, or None if cold-start
     age_seconds: float
     stale: bool
     source: str  # "fresh" | "cache" | "cache_stale" | "cold_start"
@@ -77,15 +76,13 @@ def _cache_is_warm() -> bool:
     )
 
 
-def _do_refresh(actor: str) -> List[DaikinDevice]:
+def _do_refresh(actor: str) -> list[DaikinDevice]:
     """Actually call get_devices(), update cache, and record quota usage."""
     global _devices_cache, _devices_fetched_monotonic, _devices_fetched_wall, _devices_stale
     client = _get_or_create_client()
     try:
         devices = client.get_devices()
-        ok = True
     except Exception:
-        ok = False
         record_call("daikin", "read", ok=False)
         raise
 
@@ -105,7 +102,7 @@ def _do_refresh(actor: str) -> List[DaikinDevice]:
 def get_cached_devices(
     *,
     allow_refresh: bool = False,
-    max_age_seconds: Optional[int] = None,
+    max_age_seconds: int | None = None,
     actor: str = "unknown",
 ) -> CachedDevices:
     """Return Daikin devices, preferring the cache.
@@ -212,7 +209,7 @@ def get_cached_devices(
 
 def force_refresh_devices(
     actor: str,
-    min_interval_seconds: Optional[int] = None,
+    min_interval_seconds: int | None = None,
 ) -> CachedDevices:
     """Explicitly refresh device data (e.g. from a user-facing "Refresh" button).
 

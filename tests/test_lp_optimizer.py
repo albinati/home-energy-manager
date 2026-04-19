@@ -1,10 +1,10 @@
 """PuLP MILP optimizer (V9) unit tests."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
-from zoneinfo import ZoneInfo
 
 from src.config import config as app_config
 from src.scheduler.lp_optimizer import LpInitialState, solve_lp
@@ -36,7 +36,7 @@ def _series(n: int, base: datetime) -> tuple[list[datetime], WeatherLpSeries]:
 
 
 def test_lp_solves_optimal_small_horizon():
-    base = datetime(2026, 7, 1, 0, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 7, 1, 0, 0, tzinfo=UTC)
     n = 12
     slots, w = _series(n, base)
     prices = [12.0] * n
@@ -58,7 +58,7 @@ def test_lp_solves_optimal_small_horizon():
 
 def test_seg_export_bounded_by_pv_and_discharge():
     """Grid export cannot exceed PV use + battery discharge (SEG-style constraint)."""
-    base = datetime(2026, 7, 1, 0, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 7, 1, 0, 0, tzinfo=UTC)
     n = 24
     slots, w = _series(n, base)
     prices = [30.0] * n
@@ -80,7 +80,7 @@ def test_seg_export_bounded_by_pv_and_discharge():
 def test_terminal_soc_at_least_initial(monkeypatch):
     """Without a hard floor, terminal SoC should be at least the initial value."""
     monkeypatch.setattr(app_config, "LP_SOC_FINAL_KWH", 0.0)  # disable hard floor
-    base = datetime(2026, 1, 15, 0, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 1, 15, 0, 0, tzinfo=UTC)
     n = 16
     slots, w = _series(n, base)
     prices = [8.0] * n
@@ -102,7 +102,7 @@ def test_terminal_soc_hard_floor(monkeypatch):
     """LP_SOC_FINAL_KWH hard constraint: terminal SoC must be >= configured value."""
     target_soc = 4.0
     monkeypatch.setattr(app_config, "LP_SOC_FINAL_KWH", target_soc)
-    base = datetime(2026, 1, 15, 0, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 1, 15, 0, 0, tzinfo=UTC)
     n = 20
     slots, w = _series(n, base)
     prices = [8.0] * n
@@ -131,7 +131,7 @@ def test_cop_curve_interpolation_monotonic():
 
 def test_pv_curtailment_slack_prevents_infeasible():
     """Huge PV vs capped export should still be feasible via curtailment."""
-    base = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
     n = 6
     slots = [base + timedelta(minutes=30 * i) for i in range(n)]
     w = WeatherLpSeries(
@@ -163,7 +163,7 @@ def test_smoothing_penalties_and_price_quantize_still_optimal(monkeypatch):
     monkeypatch.setattr(app_config, "LP_HP_POWER_TV_PENALTY_PENCE_PER_KWH_DELTA", 0.3)
     monkeypatch.setattr(app_config, "LP_IMPORT_TV_PENALTY_PENCE_PER_KWH_DELTA", 0.1)
     monkeypatch.setattr(app_config, "LP_PRICE_QUANTIZE_PENCE", 2.0)
-    base = datetime(2026, 7, 1, 0, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 7, 1, 0, 0, tzinfo=UTC)
     n = 10
     slots, w = _series(n, base)
     prices = [10.2, 11.7, 10.1, 12.3, 9.8, 10.0, 11.1, 10.9, 12.0, 10.5]
@@ -185,7 +185,7 @@ def test_smoothing_penalties_and_price_quantize_still_optimal(monkeypatch):
 
 def test_inverter_stress_reduces_peak_battery_power(monkeypatch):
     """Inverter stress penalty should discourage bang-bang max charge/discharge."""
-    base = datetime(2026, 7, 1, 0, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 7, 1, 0, 0, tzinfo=UTC)
     n = 12
     slots, w = _series(n, base)
     # Flat price: without stress, solver is free to charge at max every slot
@@ -231,7 +231,7 @@ def test_simplified_hp_model_continuous_power(monkeypatch):
     """New HP model: e_dhw[i] should be continuous, not forced to discrete bucket values."""
     monkeypatch.setattr(app_config, "LP_HP_MIN_ON_SLOTS", 1)  # no min-on for this test
     monkeypatch.setattr(app_config, "LP_SOC_FINAL_KWH", 0.0)  # no hard soc floor
-    base = datetime(2026, 1, 15, 4, 0, tzinfo=timezone.utc)  # 04:00 UTC = outside occupied
+    base = datetime(2026, 1, 15, 4, 0, tzinfo=UTC)  # 04:00 UTC = outside occupied
     n = 16  # 8 hours — enough to heat and maintain
     slots, w = _series(n, base)
     prices = [6.0] * n  # cheap — heat pump should run

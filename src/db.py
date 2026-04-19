@@ -9,10 +9,10 @@ import logging
 import sqlite3
 import threading
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
-from zoneinfo import ZoneInfo
+from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
@@ -377,10 +377,10 @@ def _normalize_utc_iso(ts: str) -> str:
     dt = datetime.fromisoformat(s)
     if dt.tzinfo is None:
         logger.warning("TZ-AUDIT: naive timestamp received (assumed UTC): %s", ts)
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     elif dt.utcoffset().total_seconds() != 0:
         logger.warning("TZ-AUDIT: non-UTC offset in Octopus timestamp (converting): %s", ts)
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def save_agile_rates(rates: list[dict[str, Any]], tariff_code: str) -> int:
@@ -391,7 +391,7 @@ def save_agile_rates(rates: list[dict[str, Any]], tariff_code: str) -> int:
     """
     if not rates or not tariff_code:
         return 0
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     tz_local = ZoneInfo(config.BULLETPROOF_TIMEZONE)
     n = 0
     first_ts: str | None = None
@@ -475,11 +475,11 @@ def upsert_action(
     end_time: str,
     device: str,
     action_type: str,
-    params: Optional[dict[str, Any]] = None,
+    params: dict[str, Any] | None = None,
     status: str = "pending",
-    restore_action_id: Optional[int] = None,
+    restore_action_id: int | None = None,
 ) -> int:
-    created = datetime.now(timezone.utc).isoformat()
+    created = datetime.now(UTC).isoformat()
     params_json = json.dumps(params or {})
     with _lock:
         conn = get_connection()
@@ -520,7 +520,7 @@ def update_action_restore_link(action_id: int, restore_id: int) -> None:
             conn.close()
 
 
-def get_pending_actions(plan_date: Optional[str] = None) -> list[dict[str, Any]]:
+def get_pending_actions(plan_date: str | None = None) -> list[dict[str, Any]]:
     with _lock:
         conn = get_connection()
         try:
@@ -542,7 +542,7 @@ def get_pending_actions(plan_date: Optional[str] = None) -> list[dict[str, Any]]
     return rows
 
 
-def get_active_actions(plan_date: Optional[str] = None) -> list[dict[str, Any]]:
+def get_active_actions(plan_date: str | None = None) -> list[dict[str, Any]]:
     with _lock:
         conn = get_connection()
         try:
@@ -578,10 +578,10 @@ def _row_action(r: sqlite3.Row) -> dict[str, Any]:
 def mark_action(
     action_id: int,
     status: str,
-    error_msg: Optional[str] = None,
-    executed_at: Optional[str] = None,
+    error_msg: str | None = None,
+    executed_at: str | None = None,
 ) -> None:
-    ex = executed_at or datetime.now(timezone.utc).isoformat()
+    ex = executed_at or datetime.now(UTC).isoformat()
     with _lock:
         conn = get_connection()
         try:
@@ -595,7 +595,7 @@ def mark_action(
             conn.close()
 
 
-def get_action_by_id(action_id: int) -> Optional[dict[str, Any]]:
+def get_action_by_id(action_id: int) -> dict[str, Any] | None:
     with _lock:
         conn = get_connection()
         try:
@@ -606,7 +606,7 @@ def get_action_by_id(action_id: int) -> Optional[dict[str, Any]]:
             conn.close()
 
 
-def get_actions_for_plan_date(plan_date: str, device: Optional[str] = None) -> list[dict[str, Any]]:
+def get_actions_for_plan_date(plan_date: str, device: str | None = None) -> list[dict[str, Any]]:
     with _lock:
         conn = get_connection()
         try:
@@ -737,14 +737,14 @@ def log_action(
     *,
     device: str,
     action: str,
-    params: Optional[dict[str, Any]],
+    params: dict[str, Any] | None,
     result: str,
     trigger: str,
-    error_msg: Optional[str] = None,
-    slot_kind: Optional[str] = None,
-    agile_price_at_time: Optional[float] = None,
+    error_msg: str | None = None,
+    slot_kind: str | None = None,
+    agile_price_at_time: float | None = None,
 ) -> None:
-    ts = datetime.now(timezone.utc).isoformat()
+    ts = datetime.now(UTC).isoformat()
     with _lock:
         conn = get_connection()
         try:
@@ -837,7 +837,7 @@ def save_daily_target(row: dict[str, Any]) -> None:
             conn.close()
 
 
-def get_daily_target(d: date | str) -> Optional[dict[str, Any]]:
+def get_daily_target(d: date | str) -> dict[str, Any] | None:
     key = d.isoformat() if isinstance(d, date) else str(d)
     with _lock:
         conn = get_connection()
@@ -850,8 +850,8 @@ def get_daily_target(d: date | str) -> Optional[dict[str, Any]]:
 
 
 def get_execution_logs(
-    from_ts: Optional[str] = None,
-    to_ts: Optional[str] = None,
+    from_ts: str | None = None,
+    to_ts: str | None = None,
     limit: int = 500,
 ) -> list[dict[str, Any]]:
     with _lock:
@@ -874,8 +874,8 @@ def get_execution_logs(
 
 
 def get_action_logs(
-    device: Optional[str] = None,
-    trigger: Optional[str] = None,
+    device: str | None = None,
+    trigger: str | None = None,
     limit: int = 200,
 ) -> list[dict[str, Any]]:
     with _lock:
@@ -918,7 +918,7 @@ def get_optimizer_logs(limit: int = 50) -> list[dict[str, Any]]:
 
 
 def save_fox_schedule_state(groups: list[dict[str, Any]], enabled: bool = True) -> None:
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     with _lock:
         conn = get_connection()
         try:
@@ -932,7 +932,7 @@ def save_fox_schedule_state(groups: list[dict[str, Any]], enabled: bool = True) 
             conn.close()
 
 
-def get_latest_fox_schedule_state() -> Optional[dict[str, Any]]:
+def get_latest_fox_schedule_state() -> dict[str, Any] | None:
     with _lock:
         conn = get_connection()
         try:
@@ -953,7 +953,7 @@ def get_latest_fox_schedule_state() -> Optional[dict[str, Any]]:
 
 
 def acknowledge_warning(warning_key: str) -> None:
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     with _lock:
         conn = get_connection()
         try:
@@ -983,11 +983,11 @@ def is_warning_acknowledged(warning_key: str) -> bool:
 
 @dataclass
 class OctopusFetchState:
-    last_success_at: Optional[str]
-    last_attempt_at: Optional[str]
+    last_success_at: str | None
+    last_attempt_at: str | None
     consecutive_failures: int
-    survival_mode_since: Optional[str]
-    failure_streak_started_at: Optional[str] = None
+    survival_mode_since: str | None
+    failure_streak_started_at: str | None = None
 
 
 def get_octopus_fetch_state() -> OctopusFetchState:
@@ -1016,11 +1016,11 @@ def get_octopus_fetch_state() -> OctopusFetchState:
 
 def update_octopus_fetch_state(
     *,
-    last_success_at: Optional[str] = None,
-    last_attempt_at: Optional[str] = None,
-    consecutive_failures: Optional[int] = None,
-    survival_mode_since: Optional[str] = None,
-    failure_streak_started_at: Optional[str] = None,
+    last_success_at: str | None = None,
+    last_attempt_at: str | None = None,
+    consecutive_failures: int | None = None,
+    survival_mode_since: str | None = None,
+    failure_streak_started_at: str | None = None,
     clear_failure_streak: bool = False,
 ) -> None:
     with _lock:
@@ -1053,7 +1053,7 @@ def update_octopus_fetch_state(
             conn.close()
 
 
-def clear_actions_for_date(plan_date: str, device: Optional[str] = None) -> None:
+def clear_actions_for_date(plan_date: str, device: str | None = None) -> None:
     """Remove pending actions for a plan date (before re-optimizing)."""
     with _lock:
         conn = get_connection()
@@ -1171,8 +1171,8 @@ def log_pnl_execution(row: dict[str, Any]) -> int:
 
 
 def get_pnl_execution_logs(
-    from_slot: Optional[str] = None,
-    to_slot: Optional[str] = None,
+    from_slot: str | None = None,
+    to_slot: str | None = None,
     limit: int = 500,
 ) -> list[dict[str, Any]]:
     """Return pnl_execution_log rows in descending slot_time order."""
@@ -1241,7 +1241,7 @@ def upsert_fox_energy_daily(rows: list[dict[str, Any]]) -> int:
     """
     if not rows:
         return 0
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     with _lock:
         conn = get_connection()
         try:
@@ -1291,7 +1291,7 @@ def get_fox_energy_daily(limit: int = 90) -> list[dict[str, Any]]:
             conn.close()
 
 
-def mean_fox_load_kwh_per_slot(limit: int = 60) -> Optional[float]:
+def mean_fox_load_kwh_per_slot(limit: int = 60) -> float | None:
     """Mean half-hourly load kWh from Fox daily data (load_kwh / 48).
 
     Returns None when no Fox data is available.
@@ -1338,7 +1338,7 @@ def upsert_fox_realtime_snapshot(snap: dict[str, Any]) -> None:
             conn.close()
 
 
-def get_fox_realtime_snapshot() -> Optional[dict[str, Any]]:
+def get_fox_realtime_snapshot() -> dict[str, Any] | None:
     """Return the most recent Fox realtime snapshot, or None if not available.
 
     The snapshot is considered stale if captured more than 15 minutes ago.
@@ -1355,11 +1355,12 @@ def get_fox_realtime_snapshot() -> Optional[dict[str, Any]]:
             try:
                 captured = datetime.fromisoformat(str(snap["captured_at"]).replace("Z", "+00:00"))
                 if captured.tzinfo is None:
-                    captured = captured.replace(tzinfo=timezone.utc)
-                age_s = (datetime.now(timezone.utc) - captured).total_seconds()
+                    captured = captured.replace(tzinfo=UTC)
+                age_s = (datetime.now(UTC) - captured).total_seconds()
                 if age_s > 900:
                     return None
-            except Exception:
+            except (ValueError, TypeError, OSError) as exc:
+                logger.debug("fox_realtime_snapshot staleness check skipped: %s", exc)
                 return None
             return snap
         finally:
@@ -1370,7 +1371,7 @@ def get_fox_realtime_snapshot() -> Optional[dict[str, Any]]:
 # V6: notification_routes — per-AlertType routing, runtime-editable via MCP
 # ---------------------------------------------------------------------------
 
-def get_notification_route(alert_type: str) -> Optional[dict[str, Any]]:
+def get_notification_route(alert_type: str) -> dict[str, Any] | None:
     """Return the notification_routes row for *alert_type*, or None if not found."""
     with _lock:
         conn = get_connection()
@@ -1400,11 +1401,11 @@ def list_notification_routes() -> list[dict[str, Any]]:
 def upsert_notification_route(
     alert_type: str,
     *,
-    enabled: Optional[bool] = None,
-    severity: Optional[str] = None,
-    target_override: Optional[str] = None,
-    channel_override: Optional[str] = None,
-    silent: Optional[bool] = None,
+    enabled: bool | None = None,
+    severity: str | None = None,
+    target_override: str | None = None,
+    channel_override: str | None = None,
+    silent: bool | None = None,
     clear_target_override: bool = False,
     clear_channel_override: bool = False,
 ) -> None:
@@ -1477,7 +1478,7 @@ def upsert_plan_consent(
     plan_date: str,
     summary: str,
     expires_at: float,
-    plan_hash: Optional[str] = None,
+    plan_hash: str | None = None,
 ) -> None:
     """Insert or replace a plan_consent row with status=pending_approval."""
     import time
@@ -1505,7 +1506,7 @@ def upsert_plan_consent(
             conn.close()
 
 
-def get_plan_consent(plan_date: str) -> Optional[dict[str, Any]]:
+def get_plan_consent(plan_date: str) -> dict[str, Any] | None:
     """Return the most recent plan_consent row for *plan_date*, or None."""
     with _lock:
         conn = get_connection()

@@ -1,9 +1,8 @@
 """Abstract base class for energy provider clients."""
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Optional
 
-from .models import TariffInfo, EnergyUsageSummary, EnergyProvider
+from .models import EnergyProvider, EnergyUsageSummary, TariffInfo
 
 
 class EnergyProviderError(Exception):
@@ -105,8 +104,8 @@ class ManualTariffClient(EnergyProviderClient):
     def __init__(
         self,
         import_rate: float,
-        export_rate: Optional[float] = None,
-        standing_charge: Optional[float] = None,
+        export_rate: float | None = None,
+        standing_charge: float | None = None,
         tariff_name: str = "Manual Tariff",
     ):
         self._import_rate = import_rate

@@ -1,19 +1,19 @@
 """Translate Agile rate forecast into Daikin LWT offset adjustments."""
 import logging
-from typing import Optional
+from datetime import UTC, datetime
 
 from ..config import config
 from ..daikin.client import DaikinClient
-from ..daikin.models import DaikinDevice
 from .agile import (
     fetch_agile_rates,
     get_current_and_next_slots,
+    utc_instant_in_scheduler_peak,
 )
 
 logger = logging.getLogger(__name__)
 
 def compute_lwt_adjustment(
-    current_price_pence: Optional[float],
+    current_price_pence: float | None,
     cheap_threshold_pence: float,
     peak_start: str,
     peak_end: str,
@@ -24,23 +24,13 @@ def compute_lwt_adjustment(
         return 0.0
     if current_price_pence <= cheap_threshold_pence:
         return preheat_boost
-    from datetime import datetime, timezone
 
-    now = datetime.now(timezone.utc).time()
-    peak_s = _parse_time(peak_start)
-    peak_e = _parse_time(peak_end)
-    if peak_s and peak_e and peak_s <= now <= peak_e:
+    now_utc = datetime.now(UTC)
+    if utc_instant_in_scheduler_peak(
+        now_utc, peak_start, peak_end, config.BULLETPROOF_TIMEZONE
+    ):
         return -min(2.0, preheat_boost)
     return 0.0
-
-
-def _parse_time(s: str):
-    import re
-    m = re.match(r"(\d{1,2}):(\d{2})", str(s).strip())
-    if not m:
-        return None
-    from datetime import time
-    return time(int(m.group(1)), int(m.group(2)))
 
 
 def apply_scheduler_offset(
@@ -53,7 +43,7 @@ def apply_scheduler_offset(
     return max(min_offset, min(max_offset, base_offset + adjustment))
 
 
-def run_daikin_scheduler_tick(is_paused: bool) -> Optional[str]:
+def run_daikin_scheduler_tick(is_paused: bool) -> str | None:
     """Fetch rates, compute LWT delta, get first Daikin device, set LWT offset. Returns error message or None."""
     if is_paused:
         return None

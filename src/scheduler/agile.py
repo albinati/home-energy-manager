@@ -7,14 +7,45 @@ import json
 import logging
 import re
 import urllib.request
-from datetime import datetime, timezone, timedelta
-from typing import Optional
+from datetime import UTC, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 from ..config import config
 
 logger = logging.getLogger(__name__)
 
 OCTOPUS_BASE = "https://api.octopus.energy/v1"
+
+
+def scheduler_peak_contains_wall_time(
+    local_wall_time: time,
+    peak_start: str,
+    peak_end: str,
+) -> bool:
+    """True if *local_wall_time* falls in [peak_start, peak_end] (HH:MM, inclusive).
+
+    Used for Agile slot peak labelling and for Daikin LWT peak detection so both
+    paths share one definition. *local_wall_time* must be in the same timezone as
+    peak_start/peak_end (typically ``BULLETPROOF_TIMEZONE`` wall clock).
+    """
+    peak_s = _parse_time(peak_start)
+    peak_e = _parse_time(peak_end)
+    if peak_s is None or peak_e is None:
+        return False
+    return peak_s <= local_wall_time <= peak_e
+
+
+def utc_instant_in_scheduler_peak(
+    now_utc: datetime,
+    peak_start: str,
+    peak_end: str,
+    tz_name: str,
+) -> bool:
+    """Whether *now_utc* falls in the scheduler peak window in *tz_name* local time."""
+    if now_utc.tzinfo is None:
+        raise ValueError("now_utc must be timezone-aware (UTC)")
+    wall = now_utc.astimezone(ZoneInfo(tz_name)).time()
+    return scheduler_peak_contains_wall_time(wall, peak_start, peak_end)
 
 
 def _tariff_to_product(tariff_code: str) -> str:
@@ -57,9 +88,9 @@ def _fetch_rates(tariff_code: str, period_from: datetime, period_to: datetime) -
 
 
 def fetch_agile_rates(
-    tariff_code: Optional[str] = None,
-    period_from: Optional[datetime] = None,
-    period_to: Optional[datetime] = None,
+    tariff_code: str | None = None,
+    period_from: datetime | None = None,
+    period_to: datetime | None = None,
 ) -> list[dict]:
     """Fetch standard unit rates for the given Agile import tariff. No API key required.
 
@@ -69,13 +100,12 @@ def fetch_agile_rates(
     if not code:
         return []
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     if period_from is None:
         period_from = now.replace(minute=0, second=0, microsecond=0)
     if period_to is None:
         period_to = period_from + timedelta(hours=48)
 
-    from zoneinfo import ZoneInfo
     tz_local = ZoneInfo(config.BULLETPROOF_TIMEZONE)
     logger.info(
         "TZ-AUDIT: Octopus import fetch | UTC %s → %s | local %s → %s",
@@ -88,9 +118,9 @@ def fetch_agile_rates(
 
 
 def fetch_agile_export_rates(
-    export_tariff_code: Optional[str] = None,
-    period_from: Optional[datetime] = None,
-    period_to: Optional[datetime] = None,
+    export_tariff_code: str | None = None,
+    period_from: datetime | None = None,
+    period_to: datetime | None = None,
 ) -> list[dict]:
     """Fetch Agile export (outgoing) rates. No API key required.
 
@@ -103,7 +133,7 @@ def fetch_agile_export_rates(
     if not code:
         return []
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     if period_from is None:
         period_from = now.replace(minute=0, second=0, microsecond=0)
     if period_to is None:
@@ -117,7 +147,7 @@ def get_current_and_next_slots(
     cheap_threshold_pence: float,
     peak_start: str,
     peak_end: str,
-) -> tuple[Optional[dict], Optional[dict], Optional[float]]:
+) -> tuple[dict | None, dict | None, float | None]:
     """Return (current_slot, next_cheap_slot, current_price_pence).
 
     current_slot / next_cheap_slot are rate dicts with value_inc_vat, valid_from, valid_to.
@@ -128,16 +158,13 @@ def get_current_and_next_slots(
     if not rates:
         return None, None, None
 
-    from zoneinfo import ZoneInfo
     tz_local = ZoneInfo(config.BULLETPROOF_TIMEZONE)
 
-    now = datetime.now(timezone.utc)
-    peak_s = _parse_time(peak_start)
-    peak_e = _parse_time(peak_end)
+    now = datetime.now(UTC)
 
-    current: Optional[dict] = None
-    current_price: Optional[float] = None
-    next_cheap: Optional[dict] = None
+    current: dict | None = None
+    current_price: float | None = None
+    next_cheap: dict | None = None
 
     for r in rates:
         valid_from = _parse_iso(r.get("valid_from"))
@@ -150,14 +177,14 @@ def get_current_and_next_slots(
             current_price = price
         is_cheap = price <= cheap_threshold_pence
         slot_start = valid_from.astimezone(tz_local).time()
-        is_peak = peak_s <= slot_start <= peak_e if peak_s and peak_e else False
+        is_peak = scheduler_peak_contains_wall_time(slot_start, peak_start, peak_end)
         if is_cheap and not is_peak and valid_from > now and next_cheap is None:
             next_cheap = r
 
     return current, next_cheap, current_price
 
 
-def _parse_time(s: str) -> Optional[object]:
+def _parse_time(s: str) -> object | None:
     """Parse HH:MM to a time (for comparison)."""
     m = re.match(r"(\d{1,2}):(\d{2})", str(s).strip())
     if not m:
@@ -167,7 +194,7 @@ def _parse_time(s: str) -> Optional[object]:
     return time(int(m.group(1)), int(m.group(2)))
 
 
-def _parse_iso(s: Optional[str]):
+def _parse_iso(s: str | None):
     if not s:
         return None
     try:

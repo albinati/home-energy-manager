@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 from .config import config
-from .scheduler.agile import fetch_agile_rates, fetch_agile_export_rates
+from .scheduler.agile import fetch_agile_export_rates, fetch_agile_rates
 
 
 @dataclass
@@ -16,10 +15,10 @@ class AgileRateCache:
 
     rates: list[dict] = field(default_factory=list)
     export_rates: list[dict] = field(default_factory=list)
-    fetched_at_utc: Optional[datetime] = None
+    fetched_at_utc: datetime | None = None
     tariff_code: str = ""
     export_tariff_code: str = ""
-    error: Optional[str] = None
+    error: str | None = None
 
 
 _CACHE = AgileRateCache()
@@ -29,7 +28,7 @@ def get_agile_cache() -> AgileRateCache:
     return _CACHE
 
 
-def refresh_agile_rates(*, tariff_code: Optional[str] = None) -> AgileRateCache:
+def refresh_agile_rates(*, tariff_code: str | None = None) -> AgileRateCache:
     """Fetch the next 48h of Agile import (and export if configured) rates."""
     global _CACHE
     code = (tariff_code or config.OCTOPUS_TARIFF_CODE or "").strip()
@@ -38,7 +37,7 @@ def refresh_agile_rates(*, tariff_code: Optional[str] = None) -> AgileRateCache:
         _CACHE = AgileRateCache(
             rates=[],
             export_rates=[],
-            fetched_at_utc=datetime.now(timezone.utc),
+            fetched_at_utc=datetime.now(UTC),
             tariff_code="",
             error="OCTOPUS_TARIFF_CODE not set",
         )
@@ -56,7 +55,7 @@ def refresh_agile_rates(*, tariff_code: Optional[str] = None) -> AgileRateCache:
         _CACHE = AgileRateCache(
             rates=rates or [],
             export_rates=export_rates,
-            fetched_at_utc=datetime.now(timezone.utc),
+            fetched_at_utc=datetime.now(UTC),
             tariff_code=code,
             export_tariff_code=export_code,
             error=None if rates else "empty rates response",
@@ -65,7 +64,7 @@ def refresh_agile_rates(*, tariff_code: Optional[str] = None) -> AgileRateCache:
         _CACHE = AgileRateCache(
             rates=[],
             export_rates=[],
-            fetched_at_utc=datetime.now(timezone.utc),
+            fetched_at_utc=datetime.now(UTC),
             tariff_code=code,
             error=str(e),
         )

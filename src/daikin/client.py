@@ -14,9 +14,9 @@ import time
 import urllib.error
 import urllib.request
 
-from .auth import get_valid_access_token
-from .models import DaikinDevice, DaikinStatus, TemperatureControlSettings, SetpointRange
 from ..config import config
+from .auth import get_valid_access_token
+from .models import DaikinDevice, DaikinStatus, SetpointRange
 
 
 class DaikinError(Exception):

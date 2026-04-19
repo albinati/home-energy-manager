@@ -1,6 +1,6 @@
 """Dataclasses for Fox ESS API responses."""
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 
 @dataclass
@@ -44,11 +44,11 @@ class SchedulerGroup:
     end_minute: int
     work_mode: str  # SelfUse, ForceCharge, ForceDischarge, Feedin, Backup
     min_soc_on_grid: int = 10
-    fd_soc: Optional[int] = None
-    fd_pwr: Optional[int] = None
-    max_soc: Optional[int] = None
-    import_limit: Optional[int] = None
-    export_limit: Optional[int] = None
+    fd_soc: int | None = None
+    fd_pwr: int | None = None
+    max_soc: int | None = None
+    import_limit: int | None = None
+    export_limit: int | None = None
 
     def to_api_dict(self) -> dict[str, Any]:
         """Build group payload for /op/v3/device/scheduler/enable."""

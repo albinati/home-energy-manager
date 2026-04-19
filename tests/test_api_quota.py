@@ -1,7 +1,6 @@
 """Tests for src/api_quota.py — persistent quota tracking and enforcement."""
 import time
-import tempfile
-import os
+
 import pytest
 
 
@@ -12,6 +11,7 @@ def isolated_db(tmp_path, monkeypatch):
     monkeypatch.setenv("DB_PATH", db_file)
     # Force config to reload DB_PATH
     import importlib
+
     import src.config as cfg_mod
     importlib.reload(cfg_mod)
     import src.api_quota as aq

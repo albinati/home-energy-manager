@@ -2,17 +2,17 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
-from ..config import config
 from .. import db
+from ..config import config
 from ..foxess.service import get_cached_realtime
 from .lp_optimizer import LpInitialState
 
 logger = logging.getLogger(__name__)
 
 
-def read_lp_initial_state(daikin: Optional[Any] = None) -> LpInitialState:
+def read_lp_initial_state(daikin: Any | None = None) -> LpInitialState:
     """SoC from FoxESS cache (or DB realtime snapshot); tank and room from Daikin if available; else execution_log / defaults.
 
     Priority order for SoC:

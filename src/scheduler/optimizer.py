@@ -4,19 +4,25 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from statistics import mean
-from typing import Any, Optional
+from typing import Any
 from zoneinfo import ZoneInfo
 
-from ..config import config
 from .. import db
+from ..config import config
 from ..foxess.client import FoxESSClient, FoxESSError
 from ..foxess.models import SchedulerGroup
 from ..foxess.service import get_cached_realtime
-from ..physics import calculate_dhw_setpoint, find_dhw_heat_end_utc, build_shower_target_iso
+from ..physics import build_shower_target_iso, calculate_dhw_setpoint, find_dhw_heat_end_utc
 from ..presets import OperationPreset
-from ..weather import HourlyForecast, estimate_pv_kw, fetch_forecast, forecast_to_lp_inputs, get_forecast_for_slot
+from ..weather import (
+    HourlyForecast,
+    estimate_pv_kw,
+    fetch_forecast,
+    forecast_to_lp_inputs,
+    get_forecast_for_slot,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +44,7 @@ class PlanWindow:
     rates: list              # raw rate rows covering the window
 
 
-def _resolve_plan_window(tariff: str) -> Optional[PlanWindow]:
+def _resolve_plan_window(tariff: str) -> PlanWindow | None:
     """Determine the best available planning window given what rates are in the DB.
 
     Resolution order:
@@ -57,12 +63,12 @@ def _resolve_plan_window(tariff: str) -> Optional[PlanWindow]:
     tmr_start = datetime.combine(tomorrow, datetime.min.time()).replace(tzinfo=tz)
     tmr_end = tmr_start + timedelta(hours=int(config.LP_HORIZON_HOURS))
 
-    tmr_q_from = tmr_start.astimezone(timezone.utc) - timedelta(hours=1)
-    tmr_q_to = tmr_end.astimezone(timezone.utc) + timedelta(hours=2)
+    tmr_q_from = tmr_start.astimezone(UTC) - timedelta(hours=1)
+    tmr_q_to = tmr_end.astimezone(UTC) + timedelta(hours=2)
     logger.info(
         "TZ-AUDIT: tomorrow DB query | local midnight %s (%s) | UTC query %s → %s",
         tmr_start.strftime("%a %d %b %H:%M %Z"),
-        tmr_start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
+        tmr_start.astimezone(UTC).strftime("%Y-%m-%dT%H:%MZ"),
         tmr_q_from.strftime("%Y-%m-%dT%H:%MZ"),
         tmr_q_to.strftime("%Y-%m-%dT%H:%MZ"),
     )
@@ -97,14 +103,14 @@ def _resolve_plan_window(tariff: str) -> Optional[PlanWindow]:
         logger.warning("Plan window: no usable rates (past midnight, tomorrow not published yet)")
         return None
 
-    today_q_from = today_start.astimezone(timezone.utc) - timedelta(minutes=30)
-    today_q_to = today_end.astimezone(timezone.utc) + timedelta(hours=1)
+    today_q_from = today_start.astimezone(UTC) - timedelta(minutes=30)
+    today_q_to = today_end.astimezone(UTC) + timedelta(hours=1)
     logger.info(
         "TZ-AUDIT: today-remainder DB query | local start %s (%s) end %s (%s) | UTC query %s → %s",
         today_start.strftime("%H:%M %Z"),
-        today_start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
+        today_start.astimezone(UTC).strftime("%Y-%m-%dT%H:%MZ"),
         today_end.strftime("%H:%M %Z"),
-        today_end.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
+        today_end.astimezone(UTC).strftime("%Y-%m-%dT%H:%MZ"),
         today_q_from.strftime("%Y-%m-%dT%H:%MZ"),
         today_q_to.strftime("%Y-%m-%dT%H:%MZ"),
     )
@@ -138,7 +144,7 @@ class HalfHourSlot:
     # LP-derived grid import power (W) for this slot — set by the LP path so that
     # ForceCharge windows use the exact amount the MILP planned to pull from the grid
     # rather than a static constant.  None means use the configured fallback constant.
-    lp_grid_import_w: Optional[int] = None
+    lp_grid_import_w: int | None = None
 
 
 def _parse_ts(s: str) -> datetime:
@@ -149,7 +155,7 @@ def _parse_ts(s: str) -> datetime:
     dt = datetime.fromisoformat(x)
     if dt.tzinfo is None:
         logger.warning("TZ-AUDIT: naive slot timestamp treated as UTC: %s", s)
-        return dt.replace(tzinfo=timezone.utc)
+        return dt.replace(tzinfo=UTC)
     return dt
 
 
@@ -161,8 +167,8 @@ def _build_half_hour_slots(
     """Expand DB rate rows into half-hour slots overlapping the local window."""
     tz = TZ()
     slots: list[HalfHourSlot] = []
-    ws = window_start_local.astimezone(timezone.utc)
-    we = window_end_local.astimezone(timezone.utc)
+    ws = window_start_local.astimezone(UTC)
+    we = window_end_local.astimezone(UTC)
     logger.info(
         "TZ-AUDIT: slot window | local %s → %s | UTC %s → %s",
         window_start_local.strftime("%a %d %b %H:%M %Z"),
@@ -246,7 +252,7 @@ def _slot_fox_tuple(
     s: HalfHourSlot,
     *,
     peak_export_discharge: bool = False,
-) -> tuple[str, Optional[int], Optional[int], int]:
+) -> tuple[str, int | None, int | None, int]:
     """work_mode, fd_soc, fd_pwr, min_soc_on_grid for Scheduler V3.
 
     For ForceCharge slots the ``fdPwr`` (W) is taken from ``s.lp_grid_import_w`` when set
@@ -353,7 +359,7 @@ def _merge_fox_groups(
         a, _, ka = merged[0]
         _, d, kb = merged[1]
         if ka[0] == "ForceCharge" and kb[0] == "ForceCharge":
-            nk: tuple[str, Optional[int], Optional[int], int] = (
+            nk: tuple[str, int | None, int | None, int] = (
                 "ForceCharge",
                 max(ka[1] or 0, kb[1] or 0),
                 max(ka[2] or 0, kb[2] or 0),
@@ -399,7 +405,7 @@ def _merge_adjacent_force_charge_rows(
             and k[0] == "ForceCharge"
         ):
             a0, _, k0 = out[-1]
-            nk: tuple[str, Optional[int], Optional[int], int] = (
+            nk: tuple[str, int | None, int | None, int] = (
                 "ForceCharge",
                 max(k0[1] or 0, k[1] or 0),
                 max(k0[2] or 0, k[2] or 0),
@@ -488,7 +494,7 @@ def _schedule_dhw_thermal_decay(
     target_temp_c: float = 45.0,
     shower_hour: int = 9,
     shower_minute: int = 30,
-) -> Optional[dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Calculate the physics-optimal Daikin DHW setpoint for the morning shower target.
 
     Finds the latest cheap/negative slot in the 02:00–07:00 local window,
@@ -654,7 +660,7 @@ def _write_daikin_schedule(plan_date: str, slots: list[HalfHourSlot], forecast: 
     return count
 
 
-def _run_optimizer_heuristic(fox: Optional[FoxESSClient], daikin: Optional[Any] = None) -> dict[str, Any]:
+def _run_optimizer_heuristic(fox: FoxESSClient | None, daikin: Any | None = None) -> dict[str, Any]:
     """Legacy price-quantile classifier + Fox/Daikin writers."""
     tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
     if not tariff:
@@ -767,7 +773,7 @@ def _run_optimizer_heuristic(fox: Optional[FoxESSClient], daikin: Optional[Any] 
 
     db.log_optimizer_run(
         {
-            "run_at": datetime.now(timezone.utc).isoformat(),
+            "run_at": datetime.now(UTC).isoformat(),
             "rates_count": len(slots),
             "cheap_slots": counts["cheap"],
             "peak_slots": counts["peak"],
@@ -799,7 +805,7 @@ def _run_optimizer_heuristic(fox: Optional[FoxESSClient], daikin: Optional[Any] 
     }
 
 
-def _run_optimizer_lp(fox: Optional[FoxESSClient], daikin: Optional[Any] = None) -> dict[str, Any]:
+def _run_optimizer_lp(fox: FoxESSClient | None, daikin: Any | None = None) -> dict[str, Any]:
     """PuLP MILP horizon planner (V8). Falls back to heuristic if solve is not optimal."""
     from .lp_dispatch import (
         build_fox_groups_from_lp,
@@ -920,7 +926,7 @@ def _run_optimizer_lp(fox: Optional[FoxESSClient], daikin: Optional[Any] = None)
 
     db.log_optimizer_run(
         {
-            "run_at": datetime.now(timezone.utc).isoformat(),
+            "run_at": datetime.now(UTC).isoformat(),
             "rates_count": len(slots),
             "cheap_slots": counts.get("cheap", 0),
             "peak_slots": counts.get("peak", 0) + counts.get("peak_export", 0),
@@ -954,7 +960,7 @@ def _run_optimizer_lp(fox: Optional[FoxESSClient], daikin: Optional[Any] = None)
     }
 
 
-def _self_use_fallback(fox: Optional[FoxESSClient], reason: str = "No rates") -> dict[str, Any]:
+def _self_use_fallback(fox: FoxESSClient | None, reason: str = "No rates") -> dict[str, Any]:
     """Last-resort: set Fox to Self Use and log.  Called when no rates are available."""
     logger.warning("Self-Use fallback triggered: %s", reason)
     if fox and fox.api_key and config.OPERATION_MODE == "operational" and not config.OPENCLAW_READ_ONLY:
@@ -985,6 +991,7 @@ def _write_plan_consent(plan_date: str, strategy: str) -> None:
       "auto-applied" prefix instead of asking for approval.
     """
     import hashlib
+
     from ..notifier import notify_plan_proposed
     plan_id = f"lp-{plan_date}"
 
@@ -1075,7 +1082,7 @@ def _write_plan_consent(plan_date: str, strategy: str) -> None:
         logger.warning("notify_plan_proposed failed (non-fatal): %s", exc)
 
 
-def run_optimizer(fox: Optional[FoxESSClient], daikin: Optional[Any] = None) -> dict[str, Any]:
+def run_optimizer(fox: FoxESSClient | None, daikin: Any | None = None) -> dict[str, Any]:
     """Fetch rates from DB, plan (PuLP or heuristic), upload Fox V3, write Daikin actions."""
     backend = (config.OPTIMIZER_BACKEND or "lp").strip().lower()
     if backend == "heuristic":

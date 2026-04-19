@@ -1,8 +1,6 @@
 """Tests for src/daikin/service.py — singleton cache, quota-aware refresh, slot window gate."""
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
-import pytest
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -15,6 +13,7 @@ def _make_device(dev_id: str = "dev-1") -> MagicMock:
 def _reset_service():
     """Reset module-level state between tests."""
     import importlib
+
     import src.daikin.service as svc
     importlib.reload(svc)
     return svc
@@ -125,7 +124,6 @@ def test_force_refresh_throttled(tmp_path, monkeypatch):
                 svc.get_cached_devices(allow_refresh=False, actor="test")
 
                 # First force refresh — allowed (no throttle yet)
-                import time
                 svc._force_refresh_timestamps = {}
                 svc.force_refresh_devices("ui")
 
@@ -141,25 +139,25 @@ def test_pre_slot_window_at_boundaries():
     from src.scheduler.runner import _in_octopus_pre_slot_window
 
     # 25:00 into hour (= minute 25, second 0) → in window
-    t_in_1 = datetime(2026, 4, 18, 12, 25, 0, tzinfo=timezone.utc)
+    t_in_1 = datetime(2026, 4, 18, 12, 25, 0, tzinfo=UTC)
     assert _in_octopus_pre_slot_window(t_in_1, lead_seconds=300)
 
     # 29:59 into hour → in window
-    t_in_2 = datetime(2026, 4, 18, 12, 29, 59, tzinfo=timezone.utc)
+    t_in_2 = datetime(2026, 4, 18, 12, 29, 59, tzinfo=UTC)
     assert _in_octopus_pre_slot_window(t_in_2, lead_seconds=300)
 
     # 30:00 into hour → NOT in window (boundary itself)
-    t_out_1 = datetime(2026, 4, 18, 12, 30, 0, tzinfo=timezone.utc)
+    t_out_1 = datetime(2026, 4, 18, 12, 30, 0, tzinfo=UTC)
     assert not _in_octopus_pre_slot_window(t_out_1, lead_seconds=300)
 
     # 55:00 into hour → in window
-    t_in_3 = datetime(2026, 4, 18, 12, 55, 0, tzinfo=timezone.utc)
+    t_in_3 = datetime(2026, 4, 18, 12, 55, 0, tzinfo=UTC)
     assert _in_octopus_pre_slot_window(t_in_3, lead_seconds=300)
 
     # 00:00 exactly (next hour boundary) → NOT in window
-    t_out_2 = datetime(2026, 4, 18, 13, 0, 0, tzinfo=timezone.utc)
+    t_out_2 = datetime(2026, 4, 18, 13, 0, 0, tzinfo=UTC)
     assert not _in_octopus_pre_slot_window(t_out_2, lead_seconds=300)
 
     # 10:00 mid-slot → NOT in window
-    t_out_3 = datetime(2026, 4, 18, 12, 10, 0, tzinfo=timezone.utc)
+    t_out_3 = datetime(2026, 4, 18, 12, 10, 0, tzinfo=UTC)
     assert not _in_octopus_pre_slot_window(t_out_3, lead_seconds=300)

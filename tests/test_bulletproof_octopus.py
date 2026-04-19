@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -31,7 +31,7 @@ def test_should_run_retry_true_after_backoff(monkeypatch: pytest.MonkeyPatch) ->
         path = Path(td) / "t.db"
         monkeypatch.setattr("src.config.config.DB_PATH", str(path))
         db.init_db()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         db.update_octopus_fetch_state(
             consecutive_failures=2,
             failure_streak_started_at=(now - timedelta(hours=2)).isoformat(),

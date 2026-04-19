@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +33,7 @@ def test_reconcile_shutdown_softens_lwt_when_cold_outdoor(
         db.init_db()
 
         plan_date = "2030-06-01"
-        now_utc = datetime(2030, 6, 1, 12, 0, tzinfo=timezone.utc)
+        now_utc = datetime(2030, 6, 1, 12, 0, tzinfo=UTC)
         st = (now_utc - timedelta(minutes=30)).isoformat().replace("+00:00", "Z")
         en = (now_utc + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
         db.upsert_action(
@@ -85,7 +85,7 @@ def test_reconcile_shutdown_keeps_scheduled_lwt_when_mild(
         db.init_db()
 
         plan_date = "2030-06-01"
-        now_utc = datetime(2030, 6, 1, 12, 0, tzinfo=timezone.utc)
+        now_utc = datetime(2030, 6, 1, 12, 0, tzinfo=UTC)
         st = (now_utc - timedelta(minutes=30)).isoformat().replace("+00:00", "Z")
         en = (now_utc + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
         db.upsert_action(

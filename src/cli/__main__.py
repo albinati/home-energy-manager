@@ -1,5 +1,9 @@
 """CLI entrypoint.
 
+Production deployments run the API under systemd: ``python -m src.cli serve`` (see CLAUDE.md).
+The ``daemon`` subcommands remain for optional background use on a workstation; they are not
+the supported server model on the VPS.
+
 Usage:
     python -m src.cli status               # Full dashboard
     python -m src.cli foxess status        # Fox ESS only
@@ -12,28 +16,28 @@ Usage:
     python -m src.cli daikin tank-temp 45
     python -m src.cli daikin mode heating|cooling|auto
     python -m src.cli monitor               # Continuous loop (30s intervals)
-    python -m src.cli serve                 # Start API server (foreground)
-    python -m src.cli daemon start          # Start API server as daemon (background)
-    python -m src.cli daemon stop           # Stop daemon
-    python -m src.cli daemon status         # Show daemon status
+    python -m src.cli serve                 # Start API server (foreground; use with systemd in prod)
+    python -m src.cli daemon start          # Optional: background API (non-systemd)
+    python -m src.cli daemon stop           # Stop background daemon
+    python -m src.cli daemon status         # Daemon status
 
 Options:
     --json                                 # Output in JSON format (for OpenClaw)
     --api                                  # Route commands through API server
 """
+import json as json_module
 import os
+import signal
 import sys
 import time
-import signal
-import json as json_module
-import urllib.request
 import urllib.error
+import urllib.request
 from pathlib import Path
 
 from ..config import config
+from ..daikin.client import DaikinClient, DaikinError
 from ..foxess.client import FoxESSClient, FoxESSError
 from ..foxess.models import ChargePeriod
-from ..daikin.client import DaikinClient, DaikinError
 from ..notifier import notify
 
 API_BASE_URL = f"http://{config.API_HOST}:{config.API_PORT}/api/v1"
@@ -534,7 +538,7 @@ def main():
         elif sub == "status":
             daemon_status()
         else:
-            print(f"Usage: daemon start|stop|status  [--host H] [--port P]")
+            print("Usage: daemon start|stop|status  [--host H] [--port P]")
     elif args[0] == "foxess":
         sub = args[1] if len(args) > 1 else "status"
         if sub == "status":

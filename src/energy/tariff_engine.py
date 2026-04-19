@@ -14,8 +14,7 @@ from __future__ import annotations
 
 import logging
 from calendar import monthrange
-from datetime import date, datetime, timedelta, timezone
-from typing import Optional
+from datetime import UTC, date, datetime, timedelta
 
 from ..config import config
 from .tariff_models import (
@@ -37,8 +36,8 @@ def simulate_tariff_cost(
     export_kwh: float,
     period_days: int,
     *,
-    agile_rates: Optional[list[dict]] = None,
-    half_hourly_import_kwh: Optional[list[float]] = None,
+    agile_rates: list[dict] | None = None,
+    half_hourly_import_kwh: list[float] | None = None,
 ) -> TariffSimulationResult:
     """Simulate the cost of a tariff over a historical period."""
     rates = tariff.rates
@@ -153,7 +152,7 @@ def _get_daily_usage(months_back: int = 1) -> list[dict]:
     3. Synthetic defaults
     """
     today = date.today()
-    period_to = datetime.now(timezone.utc)
+    period_to = datetime.now(UTC)
     period_from = period_to - timedelta(days=months_back * 31)
 
     # --- Source 1: Octopus day-aggregated consumption ---
@@ -269,9 +268,9 @@ def _get_daily_usage(months_back: int = 1) -> list[dict]:
 
 
 def _get_half_hourly_usage(
-    period_from: Optional[datetime] = None,
-    period_to: Optional[datetime] = None,
-) -> Optional[object]:
+    period_from: datetime | None = None,
+    period_to: datetime | None = None,
+) -> object | None:
     """Fetch half-hourly import and export from Octopus smart meter.
 
     Returns a HalfHourlyData object or None if unavailable.
@@ -492,12 +491,12 @@ def _get_usage_data(months_back: int = 1) -> tuple[float, float, int]:
 def compare_tariffs(
     tariffs: list[TariffProduct],
     *,
-    import_kwh: Optional[float] = None,
-    export_kwh: Optional[float] = None,
-    period_days: Optional[int] = None,
+    import_kwh: float | None = None,
+    export_kwh: float | None = None,
+    period_days: int | None = None,
     months_back: int = 1,
-    agile_rates: Optional[list[dict]] = None,
-    half_hourly_import_kwh: Optional[list[float]] = None,
+    agile_rates: list[dict] | None = None,
+    half_hourly_import_kwh: list[float] | None = None,
 ) -> list[TariffSimulationResult]:
     """Simulate all candidate tariffs against actual usage. Returns sorted by annual net cost.
 
@@ -526,7 +525,7 @@ def compare_tariffs(
     return results
 
 
-def _resolve_current_product_code() -> Optional[str]:
+def _resolve_current_product_code() -> str | None:
     """Determine the current tariff product code.
 
     Priority:
@@ -563,10 +562,10 @@ def _resolve_current_product_code() -> Optional[str]:
 
 def build_recommendation(
     results: list[TariffSimulationResult],
-    current_tariff_code: Optional[str] = None,
+    current_tariff_code: str | None = None,
 ) -> TariffRecommendation:
     """Build a ranked recommendation from simulation results."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     current = None
     if current_tariff_code:
         for r in results:
@@ -631,28 +630,28 @@ def get_tariff_recommendation(
     *,
     months_back: int = 1,
     max_tariffs: int = 15,
-    current_tariff_code: Optional[str] = None,
+    current_tariff_code: str | None = None,
 ) -> TariffRecommendation:
     """End-to-end: fetch products, simulate costs, build recommendation.
 
     Uses Octopus half-hourly consumption for exact Agile cost simulation
     when available; falls back to mean rate x daily totals.
     """
-    from .octopus_products import get_available_tariffs
     from ..agile_cache import get_agile_cache
+    from .octopus_products import get_available_tariffs
 
     tariffs = get_available_tariffs(max_products=max_tariffs)
     if not tariffs:
         return TariffRecommendation(
             summary="Could not fetch tariff catalogue from Octopus. Try again later.",
-            generated_at=datetime.now(timezone.utc),
+            generated_at=datetime.now(UTC),
         )
 
     # Prefer Octopus half-hourly consumption for exact Agile simulation
     hhd = _get_half_hourly_usage(
-        period_from=datetime.now(timezone.utc) - timedelta(days=months_back * 31),
+        period_from=datetime.now(UTC) - timedelta(days=months_back * 31),
     )
-    half_hourly_import_kwh: Optional[list[float]] = None
+    half_hourly_import_kwh: list[float] | None = None
     if hhd and hhd.import_slots:
         half_hourly_import_kwh = [s.consumption_kwh for s in hhd.import_slots]
 

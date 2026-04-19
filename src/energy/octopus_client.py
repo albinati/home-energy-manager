@@ -20,8 +20,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from ..config import config
 
@@ -50,8 +50,8 @@ class CurrentTariff:
     product_code: str
     tariff_code: str
     gsp: str
-    valid_from: Optional[datetime]
-    valid_to: Optional[datetime]
+    valid_from: datetime | None
+    valid_to: datetime | None
 
 
 @dataclass
@@ -102,7 +102,7 @@ def _paginate(
 ) -> list[dict]:
     """Fetch all pages from a paginated Octopus endpoint."""
     results: list[dict] = []
-    next_url: Optional[str] = f"{url}{'&' if '?' in url else '?'}page_size={page_size}"
+    next_url: str | None = f"{url}{'&' if '?' in url else '?'}page_size={page_size}"
     while next_url and len(results) < max_results:
         data = _get_json(next_url)
         batch = data.get("results") or []
@@ -111,7 +111,7 @@ def _paginate(
     return results
 
 
-def _parse_dt(s: Optional[str]) -> Optional[datetime]:
+def _parse_dt(s: str | None) -> datetime | None:
     if not s:
         return None
     try:
@@ -120,7 +120,7 @@ def _parse_dt(s: Optional[str]) -> Optional[datetime]:
         return None
 
 
-def _extract_gsp_from_tariff_code(tariff_code: str) -> Optional[str]:
+def _extract_gsp_from_tariff_code(tariff_code: str) -> str | None:
     """E-1R-AGILE-24-10-01-H -> 'H'"""
     parts = tariff_code.upper().split("-")
     if parts and len(parts[-1]) == 1 and parts[-1].isalpha():
@@ -128,7 +128,7 @@ def _extract_gsp_from_tariff_code(tariff_code: str) -> Optional[str]:
     return None
 
 
-def _extract_product_from_tariff_code(tariff_code: str) -> Optional[str]:
+def _extract_product_from_tariff_code(tariff_code: str) -> str | None:
     """E-1R-AGILE-24-10-01-H -> 'AGILE-24-10-01'"""
     # Format: E-{1R|2R}-<PRODUCT-CODE>-<GSP>
     # Strip leading E-1R- or E-2R- and trailing -<GSP>
@@ -141,7 +141,7 @@ def _extract_product_from_tariff_code(tariff_code: str) -> Optional[str]:
 
 # ── Public interface ──────────────────────────────────────────────────────────
 
-def fetch_account(account_number: Optional[str] = None) -> dict:
+def fetch_account(account_number: str | None = None) -> dict:
     """Fetch account details from Octopus API.
 
     Returns the full account response including:
@@ -163,10 +163,10 @@ def fetch_account(account_number: Optional[str] = None) -> dict:
 def fetch_consumption(
     mpan: str,
     serial: str,
-    period_from: Optional[datetime] = None,
-    period_to: Optional[datetime] = None,
+    period_from: datetime | None = None,
+    period_to: datetime | None = None,
     *,
-    group_by: Optional[str] = None,
+    group_by: str | None = None,
     order: str = "asc",
 ) -> list[ConsumptionSlot]:
     """Fetch electricity consumption for a meter point.
@@ -183,9 +183,9 @@ def fetch_consumption(
         List of ConsumptionSlot ordered by interval_start.
     """
     if period_from is None:
-        period_from = datetime.now(timezone.utc) - timedelta(days=30)
+        period_from = datetime.now(UTC) - timedelta(days=30)
     if period_to is None:
-        period_to = datetime.now(timezone.utc)
+        period_to = datetime.now(UTC)
 
     url = (
         f"{OCTOPUS_BASE}/electricity-meter-points/{mpan}"
@@ -217,8 +217,8 @@ def fetch_consumption(
 
 
 def fetch_half_hourly_consumption(
-    period_from: Optional[datetime] = None,
-    period_to: Optional[datetime] = None,
+    period_from: datetime | None = None,
+    period_to: datetime | None = None,
 ) -> HalfHourlyData:
     """Fetch aligned half-hourly import and export consumption.
 
@@ -373,7 +373,7 @@ def auto_detect_mpan_roles() -> MpanRoles:
     return roles
 
 
-def discover_current_tariff() -> Optional[CurrentTariff]:
+def discover_current_tariff() -> CurrentTariff | None:
     """Find the currently active electricity import tariff from account agreements.
 
     Returns None if account data unavailable or no active agreement found.
@@ -384,7 +384,7 @@ def discover_current_tariff() -> Optional[CurrentTariff]:
         logger.warning("Cannot discover tariff: %s", exc)
         return None
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     properties = account_data.get("properties") or []
 
     for prop in properties:

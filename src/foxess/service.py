@@ -10,27 +10,26 @@ restarts and counts *all* Fox HTTP types, not just realtime reads.
 """
 import logging
 import time
-from typing import Optional, Tuple
 
+from ..api_quota import get_quota_status, record_call, should_block
 from ..config import config
 from .client import FoxESSClient, FoxESSError
 from .models import RealTimeData
-from ..api_quota import record_call, should_block, get_quota_status
 
 logger = logging.getLogger(__name__)
 
 # Cached realtime snapshot and timestamps
-_last_realtime: Optional[RealTimeData] = None
-_last_realtime_updated_monotonic: Optional[float] = None
-_last_realtime_wallclock: Optional[float] = None  # epoch seconds
+_last_realtime: RealTimeData | None = None
+_last_realtime_updated_monotonic: float | None = None
+_last_realtime_wallclock: float | None = None  # epoch seconds
 
 # Legacy: in-memory 24h window kept for backward-compat with get_refresh_stats()
 # (api_quota now persists to DB, but we keep this so callers don't break)
 _refresh_timestamps: list[float] = []
 
 # Cached daily energy summary
-_last_energy_today: Optional[dict] = None
-_last_energy_today_updated_monotonic: Optional[float] = None
+_last_energy_today: dict | None = None
+_last_energy_today_updated_monotonic: float | None = None
 
 # Cached monthly energy: (year, month) -> (data, updated_monotonic)
 _energy_month_cache: dict[tuple[int, int], tuple[dict, float]] = {}
@@ -40,7 +39,7 @@ _ENERGY_MONTH_CACHE_TTL_SECONDS = 3600  # 1 hour
 _force_refresh_timestamps: dict[str, float] = {}
 
 # Track when we last blocked (for dashboard)
-_last_blocked_at: Optional[float] = None
+_last_blocked_at: float | None = None
 
 
 def _get_client() -> FoxESSClient:
@@ -59,7 +58,7 @@ def _record_realtime_refresh() -> None:
     record_call("fox", "read", ok=True)
 
 
-def get_refresh_stats() -> Tuple[Optional[float], int]:
+def get_refresh_stats() -> tuple[float | None, int]:
     """Return (last_updated_epoch, refresh_count_in_last_24h).
 
     last_updated_epoch is wall-clock seconds since epoch (UTC-neutral).
@@ -100,7 +99,7 @@ def get_refresh_stats_extended() -> dict:
     }
 
 
-def get_cached_realtime(max_age_seconds: Optional[int] = None) -> RealTimeData:
+def get_cached_realtime(max_age_seconds: int | None = None) -> RealTimeData:
     """Return realtime data from cache if fresh, else fetch from Fox ESS.
 
     Default TTL is now FOX_REALTIME_CACHE_TTL_SECONDS (default 300 s, was 30 s).

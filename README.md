@@ -23,6 +23,7 @@ This app is the **brain** for the installation: it **captures half-hourly Agile 
 ```bash
 python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
+pip install -r requirements-dev.txt   # optional: pytest + Ruff for tests/lint
 cp .env.example .env
 # Edit .env — see setup sections below
 python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000
@@ -121,9 +122,7 @@ See `.env.example` for all options. Key variables:
 | `DAIKIN_REDIRECT_URI` | No | Defaults to `http://localhost:8080/callback` |
 | `OCTOPUS_API_KEY` | No | Octopus Energy API key (for tariff tracking) |
 | `OCTOPUS_ACCOUNT_NUMBER` | No | Octopus Energy account number |
-| `BRITISH_GAS_API_KEY` | No | British Gas API key (if available) |
-| `ALERT_OPENCLAW_URL` | No | Legacy; notifications use hooks below |
-| `ALERT_CHANNEL` | No | Legacy companion to `ALERT_OPENCLAW_URL` |
+| `BRITISH_GAS_API_KEY` | No | Reserved for future British Gas integration (unused until implemented) |
 | `OPENCLAW_HOOKS_URL` | Yes† | Gateway `POST /hooks/agent` URL |
 | `OPENCLAW_HOOKS_TOKEN` | Yes† | Bearer token matching Gateway `hooks.token` |
 | `OPENCLAW_NOTIFY_ENABLED` | No | Default `true`; set `false` to skip hook delivery |

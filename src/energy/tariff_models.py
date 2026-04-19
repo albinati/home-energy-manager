@@ -11,7 +11,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Optional
 
 
 class PricingStructure(str, Enum):
@@ -33,11 +32,11 @@ class ContractType(str, Enum):
 class TariffPolicy:
     """Contract terms and conditions that affect the true cost of switching."""
     contract_type: ContractType = ContractType.VARIABLE
-    contract_months: Optional[int] = None      # e.g. 12 for a 12-month fix
+    contract_months: int | None = None      # e.g. 12 for a 12-month fix
     exit_fee_pence: float = 0.0                # early termination fee (pence per fuel)
     exit_fee_per_fuel: bool = True             # True = fee applies per fuel (gas+elec)
-    available_from: Optional[datetime] = None
-    available_to: Optional[datetime] = None    # None = currently available
+    available_from: datetime | None = None
+    available_to: datetime | None = None    # None = currently available
     is_green: bool = False
     is_prepay: bool = False
     payment_method: str = "direct_debit_monthly"
@@ -49,13 +48,13 @@ class RateSchedule:
     For time-of-use, day/night rates + off-peak windows are provided.
     For half-hourly (Agile), rates come from the separate rates API per slot.
     """
-    unit_rate_pence: Optional[float] = None          # flat rate (p/kWh inc VAT)
-    day_rate_pence: Optional[float] = None            # day/peak rate for TOU
-    night_rate_pence: Optional[float] = None          # night/off-peak rate for TOU
-    off_peak_start: Optional[str] = None              # e.g. "00:30" for Go/Eco7
-    off_peak_end: Optional[str] = None                # e.g. "05:30"
+    unit_rate_pence: float | None = None          # flat rate (p/kWh inc VAT)
+    day_rate_pence: float | None = None            # day/peak rate for TOU
+    night_rate_pence: float | None = None          # night/off-peak rate for TOU
+    off_peak_start: str | None = None              # e.g. "00:30" for Go/Eco7
+    off_peak_end: str | None = None                # e.g. "05:30"
     standing_charge_pence_per_day: float = 0.0        # inc VAT
-    export_rate_pence: Optional[float] = None         # SEG / export payment (p/kWh)
+    export_rate_pence: float | None = None         # SEG / export payment (p/kWh)
 
 
 @dataclass
@@ -123,7 +122,7 @@ class TariffSimulationResult:
 
     # Policy impact
     exit_fee_pounds: float = 0.0
-    lock_in_months: Optional[int] = None
+    lock_in_months: int | None = None
     first_year_effective_cost_pounds: float = 0.0  # annual net + exit fee if leaving early
 
     notes: str = ""
@@ -140,9 +139,9 @@ class TariffSimulationResult:
 @dataclass
 class TariffRecommendation:
     """Ranked tariff recommendation output."""
-    current_tariff: Optional[TariffSimulationResult] = None
+    current_tariff: TariffSimulationResult | None = None
     candidates: list[TariffSimulationResult] = field(default_factory=list)
-    best: Optional[TariffSimulationResult] = None
-    savings_vs_current_pounds: Optional[float] = None
+    best: TariffSimulationResult | None = None
+    savings_vs_current_pounds: float | None = None
     summary: str = ""
-    generated_at: Optional[datetime] = None
+    generated_at: datetime | None = None

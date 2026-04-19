@@ -2,10 +2,9 @@
 import unittest
 import urllib.error
 from io import BytesIO
-from unittest.mock import patch, MagicMock, call
-from src.daikin.client import DaikinClient
-from src.daikin.models import DaikinDevice, TemperatureControlSettings
+from unittest.mock import MagicMock, call, patch
 
+from src.daikin.client import DaikinClient
 
 MOCK_DEVICE_PAYLOAD = [{
     "id": "abc-123",
