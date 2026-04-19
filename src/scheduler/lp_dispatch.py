@@ -1,0 +1,277 @@
+"""Translate MILP :class:`~src.scheduler.lp_optimizer.LpPlan` into Fox V3 groups and Daikin actions."""
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timedelta
+from typing import Any, Optional
+
+from ..config import config
+from .. import db
+from ..foxess.client import FoxESSClient, FoxESSError
+from ..foxess.models import SchedulerGroup
+from ..weather import HourlyForecast, get_forecast_for_slot
+from .lp_optimizer import LpPlan
+from .optimizer import (
+    TZ,
+    HalfHourSlot,
+    _bulletproof_allow_peak_export_discharge,
+    _legionella_active_local,
+    _merge_fox_groups,
+    _optimization_preset_away_like,
+    _slot_fox_tuple,
+)
+
+logger = logging.getLogger(__name__)
+
+EPS = 0.05
+
+
+def apply_lp_dispatch_gap_bridge(slots: list[HalfHourSlot], plan: LpPlan) -> None:
+    """Promote short ``standard`` runs between cheap/negative blocks to ``cheap`` (mutates ``slots``).
+
+    When the MILP skips charging for a few half-hours but prices are still below peak, dispatch
+    would otherwise flip Fox between ForceCharge and SelfUse — this fills those gaps (up to
+    ``FOX_LP_BRIDGE_GAP_SLOTS``) so hardware schedules stay consolidated.
+    """
+    max_gap = int(config.FOX_LP_BRIDGE_GAP_SLOTS)
+    if max_gap <= 0 or len(slots) < 3:
+        return
+    cap = float(config.FOX_LP_BRIDGE_MAX_PRICE_PENCE)
+    if cap <= 0:
+        cap = float(plan.peak_threshold_pence)
+    cheapish = frozenset({"cheap", "negative"})
+    n = len(slots)
+    i = 0
+    while i < n:
+        if slots[i].kind != "standard":
+            i += 1
+            continue
+        j = i
+        while j < n and slots[j].kind == "standard":
+            j += 1
+        length = j - i
+        prev_ok = i > 0 and slots[i - 1].kind in cheapish
+        next_ok = j < n and slots[j].kind in cheapish
+        if prev_ok and next_ok and length <= max_gap:
+            if all(slots[k].price_pence <= cap for k in range(i, j)):
+                for k in range(i, j):
+                    slots[k].kind = "cheap"
+        i = j
+
+
+def lp_dispatch_slots_for_hardware(plan: LpPlan) -> list[HalfHourSlot]:
+    """Half-hour kinds for Fox/Daikin after optional gap-bridging (see :func:`apply_lp_dispatch_gap_bridge`)."""
+    slots = lp_plan_to_slots(plan)
+    apply_lp_dispatch_gap_bridge(slots, plan)
+    return slots
+
+
+def lp_plan_to_slots(plan: LpPlan) -> list[HalfHourSlot]:
+    """Map per-slot LP flows + prices to ``HalfHourSlot`` kinds for Fox/Daikin dispatch."""
+    out: list[HalfHourSlot] = []
+    n = len(plan.slot_starts_utc)
+    peak_thr = plan.peak_threshold_pence
+    allow_exp = _bulletproof_allow_peak_export_discharge()
+
+    for i in range(n):
+        st = plan.slot_starts_utc[i]
+        en = st + timedelta(minutes=30)
+        price = plan.price_pence[i]
+        chg = plan.battery_charge_kwh[i]
+        dis = plan.battery_discharge_kwh[i]
+        exp = plan.export_kwh[i]
+        ed = plan.dhw_electric_kwh[i]
+        es = plan.space_electric_kwh[i]
+
+        kind: str = "standard"
+        if chg > EPS and price <= 0:
+            kind = "negative"
+        elif chg > EPS:
+            kind = "cheap"
+        elif allow_exp and dis > EPS and exp > EPS:
+            kind = "peak_export"
+        elif ed < EPS and es < EPS and price >= peak_thr:
+            kind = "peak"
+        out.append(
+            HalfHourSlot(start_utc=st, end_utc=en, price_pence=price, kind=kind)
+        )
+    return out
+
+
+def _lwt_offset_from_plan(i: int, plan: LpPlan) -> float:
+    """Map indoor error to LWT offset (radiators)."""
+    if i + 1 >= len(plan.indoor_temp_c):
+        return 0.0
+    err = float(config.INDOOR_SETPOINT_C) - plan.indoor_temp_c[i + 1]
+    raw = max(-1.0, min(1.0, err * 0.6))
+    lo = float(config.LWT_OFFSET_MIN)
+    hi = float(config.LWT_OFFSET_MAX)
+    return max(lo, min(hi, raw * (config.LWT_OFFSET_MAX - config.LWT_OFFSET_MIN) / 10.0))
+
+
+def _merge_half_hour_slots_for_daikin(plan: LpPlan) -> list[tuple[datetime, datetime, str, int]]:
+    """Contiguous same-kind slots → merged windows (start, end, kind, first_slot_index)."""
+    slots = lp_dispatch_slots_for_hardware(plan)
+    if not slots:
+        return []
+    merged2: list[tuple[datetime, datetime, str, int]] = []
+    start_i = 0
+    cs, ce, ck = slots[0].start_utc, slots[0].end_utc, slots[0].kind
+    for i in range(1, len(slots)):
+        s = slots[i]
+        if s.kind == ck and s.start_utc == ce:
+            ce = s.end_utc
+        else:
+            merged2.append((cs, ce, ck, start_i))
+            start_i = i
+            cs, ce, ck = s.start_utc, s.end_utc, s.kind
+    merged2.append((cs, ce, ck, start_i))
+    return merged2
+
+
+def daikin_dispatch_preview(
+    plan: LpPlan,
+    forecast: list[HourlyForecast],
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """Same restore+action pairs as :func:`write_daikin_from_lp_plan`, without SQLite.
+
+    Each tuple is ``(restore_row, action_row)`` for one merged window — matches DB write order.
+    """
+    tz = TZ()
+    away_like = _optimization_preset_away_like()
+    merged2 = _merge_half_hour_slots_for_daikin(plan)
+    buckets = [float(x.strip()) for x in config.DAIKIN_POWER_BUCKETS_KW.split(",") if x.strip()]
+    max_b = max(buckets) if buckets else 1.5
+
+    out: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for start_utc, end_utc, kind, i0 in merged2:
+        if kind == "standard":
+            continue
+        loc_mid = (start_utc + timedelta(minutes=15)).astimezone(tz)
+        if away_like and kind in ("cheap", "negative") and not _legionella_active_local(loc_mid):
+            continue
+        action_type = {
+            "negative": "max_heat",
+            "cheap": "pre_heat",
+            "peak": "shutdown",
+            "peak_export": "shutdown",
+        }.get(kind, "normal")
+
+        mid = start_utc + timedelta(minutes=15)
+        fc = get_forecast_for_slot(mid, forecast)
+        outdoor = fc.temperature_c if fc else (plan.temp_outdoor_c[i0] if i0 < len(plan.temp_outdoor_c) else 0.0)
+        peak_frost = kind == "peak" and outdoor < float(config.WEATHER_FROST_THRESHOLD_C)
+
+        j = min(i0, len(plan.dhw_electric_kwh) - 1)
+        ed = plan.dhw_electric_kwh[j] if plan.dhw_electric_kwh else 0.0
+        es = plan.space_electric_kwh[j] if plan.space_electric_kwh else 0.0
+        tt = plan.tank_temp_c[min(j + 1, len(plan.tank_temp_c) - 1)] if plan.tank_temp_c else float(config.DHW_TEMP_NORMAL_C)
+        lwt = _lwt_offset_from_plan(j, plan)
+        if peak_frost:
+            lwt = -2.0
+        tank_pow = ed > EPS
+        tank_powful = ed >= max_b - 1e-3
+        params: dict[str, Any] = {
+            "lwt_offset": float(config.LWT_OFFSET_MAX) if kind == "negative" else lwt,
+            "tank_powerful": tank_powful if kind == "negative" else False,
+            "tank_temp": min(float(config.DHW_TEMP_MAX_C), max(float(config.DHW_TEMP_NORMAL_C), tt)),
+            "tank_power": tank_pow,
+            "climate_on": es > EPS or kind in ("negative", "cheap"),
+            "lp_optimizer": True,
+        }
+        if kind == "cheap":
+            params["lwt_offset"] = min(float(config.LWT_OFFSET_PREHEAT_BOOST), float(config.LWT_OFFSET_MAX))
+            params["tank_temp"] = float(config.DHW_TEMP_CHEAP_C)
+        if kind == "peak" or kind == "peak_export":
+            params["lwt_offset"] = -2.0 if peak_frost else float(config.LWT_OFFSET_MIN)
+            params["tank_temp"] = float(config.DHW_TEMP_NORMAL_C)
+            params["tank_power"] = False
+        if _legionella_active_local(loc_mid):
+            params["tank_power"] = True
+            params["tank_temp"] = float(config.DHW_LEGIONELLA_TEMP_C)
+            params["legionella_override"] = True
+
+        st = start_utc.isoformat().replace("+00:00", "Z")
+        en = end_utc.isoformat().replace("+00:00", "Z")
+        restore_end = (end_utc + timedelta(minutes=1)).isoformat().replace("+00:00", "Z")
+        restore_params = {
+            "lwt_offset": 0.0,
+            "tank_powerful": False,
+            "tank_temp": float(config.DHW_TEMP_NORMAL_C),
+            "tank_power": True,
+            "climate_on": True,
+        }
+        restore_row = {
+            "device": "daikin",
+            "action_type": "restore",
+            "start_time": en,
+            "end_time": restore_end,
+            "params": restore_params,
+        }
+        action_row = {
+            "device": "daikin",
+            "action_type": action_type,
+            "start_time": st,
+            "end_time": en,
+            "params": params,
+            "lp_slot_kind": kind,
+        }
+        out.append((restore_row, action_row))
+
+    return out
+
+
+def write_daikin_from_lp_plan(
+    plan_date: str,
+    plan: LpPlan,
+    forecast: list[HourlyForecast],
+) -> int:
+    """Write merged Daikin ``action_schedule`` rows from LP solution."""
+    db.clear_actions_for_date(plan_date, device="daikin")
+    pairs = daikin_dispatch_preview(plan, forecast)
+    count = 0
+    for restore_row, action_row in pairs:
+        rid = db.upsert_action(
+            plan_date=plan_date,
+            start_time=restore_row["start_time"],
+            end_time=restore_row["end_time"],
+            device="daikin",
+            action_type="restore",
+            params=restore_row["params"],
+            status="pending",
+        )
+        aid = db.upsert_action(
+            plan_date=plan_date,
+            start_time=action_row["start_time"],
+            end_time=action_row["end_time"],
+            device="daikin",
+            action_type=action_row["action_type"],
+            params=action_row["params"],
+            status="pending",
+            restore_action_id=rid,
+        )
+        db.update_action_restore_link(aid, rid)
+        count += 2
+
+    return count
+
+
+def build_fox_groups_from_lp(plan: LpPlan) -> list[SchedulerGroup]:
+    slots = lp_dispatch_slots_for_hardware(plan)
+    peak_export = _bulletproof_allow_peak_export_discharge()
+    return _merge_fox_groups(slots, max_groups=8, peak_export_discharge=peak_export)
+
+
+def upload_fox_if_operational(fox: Optional[FoxESSClient], groups: list[SchedulerGroup]) -> bool:
+    fox_ok = False
+    if fox and fox.api_key and config.OPERATION_MODE == "operational" and not config.OPENCLAW_READ_ONLY:
+        try:
+            fox.set_scheduler_v3(groups, is_default=False)
+            fox.set_scheduler_flag(True)
+            fox_ok = True
+            db.save_fox_schedule_state([g.to_api_dict() for g in groups], enabled=True)
+        except FoxESSError as e:
+            logger.warning("Fox Scheduler V3 upload failed: %s", e)
+    elif fox and fox.api_key:
+        logger.info("Skipping Fox Scheduler V3 upload (read-only or simulation)")
+    return fox_ok

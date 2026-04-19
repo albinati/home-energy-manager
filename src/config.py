@@ -1,9 +1,42 @@
 """Config loader — reads from .env or environment variables."""
 import os
+import re
 from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+def parse_cop_curve_csv(s: str) -> list[tuple[float, float]]:
+    """Parse ``"-7:1.8,2:2.6,7:3.1"`` into sorted ``[(T_C, COP), ...]``."""
+    out: list[tuple[float, float]] = []
+    for part in (s or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        m = re.match(r"^\s*(-?\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)\s*$", part)
+        if m:
+            out.append((float(m.group(1)), float(m.group(2))))
+    out.sort(key=lambda x: x[0])
+    return out
+
+
+def cop_at_temperature(curve: list[tuple[float, float]], t_c: float) -> float:
+    """Linear interpolation of COP vs outdoor temperature (°C)."""
+    if not curve:
+        return 3.0
+    if t_c <= curve[0][0]:
+        return curve[0][1]
+    if t_c >= curve[-1][0]:
+        return curve[-1][1]
+    for i in range(len(curve) - 1):
+        t0, c0 = curve[i]
+        t1, c1 = curve[i + 1]
+        if t0 <= t_c <= t1:
+            if t1 == t0:
+                return c0
+            return c0 + (c1 - c0) * (t_c - t0) / (t1 - t0)
+    return curve[-1][1]
 
 
 class Config:
@@ -147,6 +180,10 @@ class Config:
 
     PV_CAPACITY_KWP: float = float(os.getenv("PV_CAPACITY_KWP", "4.5"))
     PV_SYSTEM_EFFICIENCY: float = float(os.getenv("PV_SYSTEM_EFFICIENCY", "0.85"))
+    # Manual override for PV forecast scale (0 = auto-calibrate from Fox history).
+    # Set e.g. 0.65 to permanently cap the forecast to 65% of Open-Meteo modelled output.
+    # When 0 or unset, compute_pv_calibration_factor() derives it automatically from Fox history.
+    PV_FORECAST_SCALE_FACTOR: float = float(os.getenv("PV_FORECAST_SCALE_FACTOR", "0"))
 
     # Agile scheduler (Daikin ASHP by price)
     SCHEDULER_ENABLED: bool = os.getenv("SCHEDULER_ENABLED", "false").lower() in ("true", "1", "yes")
@@ -208,9 +245,92 @@ class Config:
     # Switch to operational only after reviewing simulation output and explicitly activating.
     OPERATION_MODE: str = (os.getenv("OPERATION_MODE") or "simulation").strip().lower()
 
-    # User's target average cost (p/kWh). The solver ranks 48 slots and exploits cheap windows
-    # aggressively enough to bring the weighted average below this target.
-    TARGET_PRICE_PENCE: float = float(os.getenv("TARGET_PRICE_PENCE", "0"))
+    # PuLP MILP optimizer (V8)
+    OPTIMIZER_BACKEND: str = (os.getenv("OPTIMIZER_BACKEND") or "lp").strip().lower()
+    BATTERY_RT_EFFICIENCY: float = float(os.getenv("BATTERY_RT_EFFICIENCY", "0.92"))
+    MAX_INVERTER_KW: float = float(os.getenv("MAX_INVERTER_KW", "3.0"))
+    EXPORT_RATE_PENCE: float = float(os.getenv("EXPORT_RATE_PENCE", "15.0"))
+    LP_HORIZON_HOURS: int = int(os.getenv("LP_HORIZON_HOURS", "36"))
+    DAIKIN_POWER_BUCKETS_KW: str = (os.getenv("DAIKIN_POWER_BUCKETS_KW") or "0,0.5,1.0,1.5").strip()
+    LP_SHOWER_WINDOW_MINUTES: int = int(os.getenv("LP_SHOWER_WINDOW_MINUTES", "60"))
+    # V8 LP — solver
+    LP_SOLVER: str = (os.getenv("LP_SOLVER") or "highs").strip().lower()  # highs | cbc
+    LP_CBC_TIME_LIMIT_SECONDS: int = int(os.getenv("LP_CBC_TIME_LIMIT_SECONDS", "30"))
+    LP_HIGHS_TIME_LIMIT_SECONDS: int = int(os.getenv("LP_HIGHS_TIME_LIMIT_SECONDS", "30"))
+    LP_COMFORT_SLACK_PENCE_PER_DEGC_SLOT: float = float(
+        os.getenv("LP_COMFORT_SLACK_PENCE_PER_DEGC_SLOT", "100")
+    )
+    LP_CYCLE_PENALTY_PENCE_PER_KWH: float = float(os.getenv("LP_CYCLE_PENALTY_PENCE_PER_KWH", "0.0001"))
+    # Inverter stress cost: piecewise-linear quadratic approximation on battery power per slot.
+    # At nominal inverter power (MAX_INVERTER_KW), the penalty equals this value (p/kWh).
+    # 0 = disabled. Recommended: 0.05–0.20. Works alongside or instead of TV penalties.
+    LP_INVERTER_STRESS_COST_PENCE: float = float(os.getenv("LP_INVERTER_STRESS_COST_PENCE", "0.10"))
+    # Segments for piecewise-linear stress approximation (higher = more accurate, slower; 6–10 is good)
+    LP_INVERTER_STRESS_SEGMENTS: int = int(os.getenv("LP_INVERTER_STRESS_SEGMENTS", "8"))
+    # HP on/off minimum ON time: minimum slots the heat-pump must run once started (anti-cycling)
+    LP_HP_MIN_ON_SLOTS: int = int(os.getenv("LP_HP_MIN_ON_SLOTS", "2"))
+    # Total-variation penalties (pence per 1 kWh step between adjacent half-hours): discourage rapid
+    # battery / HP / import changes — trade a little money for fewer hardware mode switches. 0 = off.
+    LP_BATTERY_TV_PENALTY_PENCE_PER_KWH_DELTA: float = float(
+        os.getenv("LP_BATTERY_TV_PENALTY_PENCE_PER_KWH_DELTA", "0")
+    )
+    LP_HP_POWER_TV_PENALTY_PENCE_PER_KWH_DELTA: float = float(
+        os.getenv("LP_HP_POWER_TV_PENALTY_PENCE_PER_KWH_DELTA", "0")
+    )
+    LP_IMPORT_TV_PENALTY_PENCE_PER_KWH_DELTA: float = float(
+        os.getenv("LP_IMPORT_TV_PENALTY_PENCE_PER_KWH_DELTA", "0")
+    )
+    # Round each slot price to this grid (pence) before the MILP objective — ignores sub‑grid price noise.
+    # 0 = use exact Agile prices. Try 1–3 for less “fidgety” schedules.
+    LP_PRICE_QUANTIZE_PENCE: float = float(os.getenv("LP_PRICE_QUANTIZE_PENCE", "0"))
+    # LP dispatch → Fox/Daikin: promote short ``standard`` runs sandwiched between cheap/negative charge
+    # slots to ``cheap`` so Scheduler V3 stays in ForceCharge (fewer SelfUse islands). 0 = disabled.
+    FOX_LP_BRIDGE_GAP_SLOTS: int = int(os.getenv("FOX_LP_BRIDGE_GAP_SLOTS", "0"))
+    # Only bridge when every standard slot’s Agile price is ≤ this (p/kWh). 0 = use LP plan peak_threshold.
+    FOX_LP_BRIDGE_MAX_PRICE_PENCE: float = float(os.getenv("FOX_LP_BRIDGE_MAX_PRICE_PENCE", "0"))
+    SOLAR_GAIN_FRACTION: float = float(os.getenv("SOLAR_GAIN_FRACTION", "0.15"))
+    COP_DHW_PENALTY: float = float(os.getenv("COP_DHW_PENALTY", "0.5"))
+    DHW_TANK_LITRES: float = float(os.getenv("DHW_TANK_LITRES", "200"))
+    DHW_WATER_CP: float = float(os.getenv("DHW_WATER_CP", "4186"))  # J/(kg·K)
+    BUILDING_UA_W_PER_K: float = float(os.getenv("BUILDING_UA_W_PER_K", "180"))
+    BUILDING_THERMAL_MASS_KWH_PER_K: float = float(os.getenv("BUILDING_THERMAL_MASS_KWH_PER_K", "8.0"))
+    INDOOR_SETPOINT_C: float = float(os.getenv("INDOOR_SETPOINT_C", "21"))
+    INDOOR_COMFORT_BAND_C: float = float(os.getenv("INDOOR_COMFORT_BAND_C", "1.5"))
+    RADIATOR_MAX_KW: float = float(os.getenv("RADIATOR_MAX_KW", "6.0"))
+    DHW_TANK_UA_W_PER_K: float = float(os.getenv("DHW_TANK_UA_W_PER_K", "2.5"))
+    DAIKIN_COP_CURVE_STR: str = os.getenv(
+        "DAIKIN_COP_CURVE",
+        "-7:1.8,2:2.6,7:3.1,12:3.6,20:4.2",
+    )
+    LP_OCCUPIED_MORNING_START: str = (os.getenv("LP_OCCUPIED_MORNING_START") or "06:30").strip()
+    LP_OCCUPIED_MORNING_END: str = (os.getenv("LP_OCCUPIED_MORNING_END") or "08:30").strip()
+    LP_OCCUPIED_EVENING_START: str = (os.getenv("LP_OCCUPIED_EVENING_START") or "17:30").strip()
+    LP_OCCUPIED_EVENING_END: str = (os.getenv("LP_OCCUPIED_EVENING_END") or "22:30").strip()
+    LP_SHOWER_MORNING_LOCAL: str = (os.getenv("LP_SHOWER_MORNING_LOCAL") or "07:00").strip()
+    LP_SHOWER_EVENING_LOCAL: str = (os.getenv("LP_SHOWER_EVENING_LOCAL") or "20:00").strip()
+
+    # Terminal SoC constraint: if > 0 the LP enforces SoC ≥ this value at the end of the horizon.
+    # 0 = soft terminal cost only (legacy behaviour). Typical: 20–30% of BATTERY_CAPACITY_KWH.
+    LP_SOC_FINAL_KWH: float = float(os.getenv("LP_SOC_FINAL_KWH", "0"))
+
+    # Model Predictive Control: re-run the LP intra-day with refreshed SoC / tank / forecasts.
+    # Comma-separated local hours (24-h). E.g. "6,12,18" fires at 06:00, 12:00, and 18:00.
+    LP_MPC_HOURS: str = (os.getenv("LP_MPC_HOURS") or "6,12").strip()
+
+    # Load-profile: rolling-window of execution_log slots used for per-hour-of-day load estimation.
+    # The flat mean is used when fewer rows are available or when this is 0 (legacy).
+    LP_LOAD_PROFILE_SLOTS: int = int(os.getenv("LP_LOAD_PROFILE_SLOTS", "2016"))  # 6 weeks × 48
+
+    @property
+    def DAIKIN_COP_CURVE(self) -> list[tuple[float, float]]:
+        return parse_cop_curve_csv(self.DAIKIN_COP_CURVE_STR)
+
+    @property
+    def LP_MPC_HOURS_LIST(self) -> list[int]:
+        """Parsed LP_MPC_HOURS as sorted ints."""
+        if not self.LP_MPC_HOURS:
+            return []
+        return sorted({int(h.strip()) for h in self.LP_MPC_HOURS.split(",") if h.strip()})
 
     # Directory for config snapshots (JSON). Snapshots are saved before any mode transition.
     CONFIG_SNAPSHOT_DIR: str = (os.getenv("CONFIG_SNAPSHOT_DIR") or "data/config_snapshots").strip()

@@ -62,7 +62,7 @@ def save_snapshot(trigger: str, *, include_device_states: bool = True) -> dict[s
         "trigger": trigger,
         "operation_mode": config.OPERATION_MODE,
         "preset": config.OPTIMIZATION_PRESET,
-        "target_price_pence": config.TARGET_PRICE_PENCE,
+        "optimizer_backend": config.OPTIMIZER_BACKEND,
         "cheap_threshold_pence": config.OPTIMIZATION_CHEAP_THRESHOLD_PENCE,
         "peak_start": config.OPTIMIZATION_PEAK_START,
         "peak_end": config.OPTIMIZATION_PEAK_END,
@@ -132,7 +132,12 @@ def restore_snapshot(snapshot_id: str) -> dict[str, Any]:
 
     config.OPERATION_MODE = "simulation"
     config.OPTIMIZATION_PRESET = snap.get("preset", "normal")
-    config.TARGET_PRICE_PENCE = float(snap.get("target_price_pence", 0))
+    ob = snap.get("optimizer_backend")
+    if ob is not None:
+        config.OPTIMIZER_BACKEND = str(ob).strip().lower()
+    else:
+        # Legacy snapshots had target_price_pence; V8 uses PuLP/heuristic only.
+        config.OPTIMIZER_BACKEND = "lp"
     config.OPTIMIZATION_CHEAP_THRESHOLD_PENCE = float(snap.get("cheap_threshold_pence", 12))
     config.OPTIMIZATION_PEAK_START = snap.get("peak_start", "16:00")
     config.OPTIMIZATION_PEAK_END = snap.get("peak_end", "19:00")

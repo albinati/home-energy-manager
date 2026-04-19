@@ -16,3 +16,6 @@ build/
 *.pem
 .home-energy-manager.pid
 daemon.log
+energy_state.db
+agent_apply_v2.log
+backups/
