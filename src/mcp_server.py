@@ -1139,6 +1139,158 @@ def build_mcp() -> FastMCP:
         db.acknowledge_warning(warning_key)
         return {"ok": True, "warning_key": warning_key}
 
+    # ── Notification routing tools ──────────────────────────────────────────
+
+    @mcp.tool(
+        name="list_notification_routes",
+        description=(
+            "List all alert notification routes with their current settings "
+            "(enabled, severity, target, channel, silent flag) and the resolved "
+            "final destination for each alert type. "
+            "Use this to see what notifications will be sent and where."
+        ),
+    )
+    def list_notification_routes() -> dict[str, Any]:
+        from . import db
+        from .notifier import AlertType, _resolve_route
+
+        rows = db.list_notification_routes()
+        result = []
+        for row in rows:
+            resolved = _resolve_route(row["alert_type"])
+            result.append({
+                **row,
+                "enabled": bool(row.get("enabled", 1)),
+                "silent": bool(row.get("silent", 0)),
+                "resolved_channel": resolved.get("channel") if resolved else None,
+                "resolved_target": resolved.get("target") if resolved else None,
+                "will_send": resolved is not None,
+            })
+        # Include any AlertType not yet in DB (uses env defaults)
+        existing_types = {r["alert_type"] for r in rows}
+        for at in AlertType:
+            if at.value not in existing_types:
+                resolved = _resolve_route(at.value)
+                result.append({
+                    "alert_type": at.value,
+                    "enabled": True,
+                    "severity": "critical" if at.value in ("risk_alert", "critical_error", "peak_window_start", "cheap_window_start") else "reports",
+                    "target_override": None,
+                    "channel_override": None,
+                    "silent": at.value in ("strategy_update", "action_confirmation"),
+                    "updated_at": None,
+                    "resolved_channel": resolved.get("channel") if resolved else None,
+                    "resolved_target": resolved.get("target") if resolved else None,
+                    "will_send": resolved is not None,
+                    "note": "using env defaults (no DB row yet)",
+                })
+        return {"ok": True, "routes": result, "count": len(result)}
+
+    @mcp.tool(
+        name="set_notification_route",
+        description=(
+            "Update notification routing for a specific alert type at runtime "
+            "(no service restart required). "
+            "alert_type: one of risk_alert, critical_error, peak_window_start, "
+            "cheap_window_start, morning_report, daily_pnl, strategy_update, action_confirmation. "
+            "enabled: true/false to mute or unmute. "
+            "severity: 'critical' or 'reports' (determines which env target is used as fallback). "
+            "target: override destination (e.g. a Telegram chat ID). "
+            "channel: override channel (e.g. 'telegram', 'discord'). "
+            "silent: true = send without notification sound (Telegram --silent). "
+            "Omit a parameter to leave it unchanged."
+        ),
+    )
+    def set_notification_route(
+        alert_type: str,
+        enabled: bool | None = None,
+        severity: str | None = None,
+        target: str | None = None,
+        channel: str | None = None,
+        silent: bool | None = None,
+        clear_target_override: bool = False,
+        clear_channel_override: bool = False,
+    ) -> dict[str, Any]:
+        from . import db
+        from .notifier import AlertType, _resolve_route
+
+        valid_types = {at.value for at in AlertType}
+        if alert_type not in valid_types:
+            return {
+                "ok": False,
+                "error": f"Invalid alert_type '{alert_type}'. Valid: {sorted(valid_types)}",
+            }
+        if severity is not None and severity not in ("critical", "reports"):
+            return {"ok": False, "error": "severity must be 'critical' or 'reports'"}
+
+        db.upsert_notification_route(
+            alert_type,
+            enabled=enabled,
+            severity=severity,
+            target_override=target,
+            channel_override=channel,
+            silent=silent,
+            clear_target_override=clear_target_override,
+            clear_channel_override=clear_channel_override,
+        )
+        resolved = _resolve_route(alert_type)
+        return {
+            "ok": True,
+            "alert_type": alert_type,
+            "will_send": resolved is not None,
+            "resolved_channel": resolved.get("channel") if resolved else None,
+            "resolved_target": resolved.get("target") if resolved else None,
+            "message": f"Route updated for '{alert_type}'. Changes take effect immediately.",
+        }
+
+    @mcp.tool(
+        name="test_notification",
+        description=(
+            "Fire a test notification for a specific alert type to verify "
+            "the OpenClaw CLI delivery is working. "
+            "alert_type: the AlertType to test (e.g. 'risk_alert'). "
+            "message: optional custom text (defaults to a test string). "
+            "Returns the resolved route and whether the send succeeded."
+        ),
+    )
+    def test_notification(
+        alert_type: str = "risk_alert",
+        message: str | None = None,
+    ) -> dict[str, Any]:
+        from .notifier import AlertType, _resolve_route, _send_via_openclaw_cli
+
+        valid_types = {at.value for at in AlertType}
+        if alert_type not in valid_types:
+            return {
+                "ok": False,
+                "error": f"Invalid alert_type '{alert_type}'. Valid: {sorted(valid_types)}",
+            }
+
+        resolved = _resolve_route(alert_type)
+        if not resolved:
+            return {
+                "ok": False,
+                "alert_type": alert_type,
+                "will_send": False,
+                "message": (
+                    "Route is disabled or no target configured. "
+                    "Set OPENCLAW_NOTIFY_TARGET in .env or use set_notification_route."
+                ),
+            }
+
+        test_msg = message or f"[TEST] energy-manager notification check — alert_type={alert_type}"
+        sent = _send_via_openclaw_cli(alert_type, test_msg)
+        return {
+            "ok": sent,
+            "alert_type": alert_type,
+            "will_send": True,
+            "sent": sent,
+            "channel": resolved["channel"],
+            "target": resolved["target"],
+            "silent": resolved["silent"],
+            "message": "Notification sent successfully." if sent else "Send failed — check service logs for [openclaw send failed].",
+        }
+
     return mcp
 
 

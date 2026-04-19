@@ -84,9 +84,30 @@ class Config:
     )
     DAIKIN_ALERT_TEMP_DEVIATION: float = float(os.getenv("DAIKIN_ALERT_TEMP_DEVIATION", "2"))
 
-    # Alerts — OpenClaw webhook (leave ALERT_CHANNEL blank for stdout-only)
+    # Alerts — OpenClaw webhook (DEPRECATED: use OPENCLAW_NOTIFY_* instead; kept for one release)
     ALERT_OPENCLAW_URL: str = os.getenv("ALERT_OPENCLAW_URL", "http://127.0.0.1:18789/api/send")
     ALERT_CHANNEL: str = (os.getenv("ALERT_CHANNEL") or "").strip()
+
+    # ── OpenClaw CLI notifier ────────────────────────────────────────────────
+    # Delivers alerts via `openclaw message send` subprocess (no HTTP, no API keys needed).
+    # Set OPENCLAW_NOTIFY_ENABLED=false to disable all outbound notifications.
+    OPENCLAW_NOTIFY_ENABLED: bool = os.getenv("OPENCLAW_NOTIFY_ENABLED", "true").lower() in ("true", "1", "yes")
+    # Path to the openclaw binary (installed on the host alongside the service).
+    OPENCLAW_CLI_PATH: str = os.getenv("OPENCLAW_CLI_PATH", "/usr/local/bin/openclaw")
+    # Timeout for each subprocess call (seconds). Increase if openclaw startup is slow.
+    OPENCLAW_CLI_TIMEOUT_SECONDS: int = int(os.getenv("OPENCLAW_CLI_TIMEOUT_SECONDS", "8"))
+
+    # Default channel + target (fallback when severity-specific not set).
+    # target: Telegram chat ID, @username, Discord channel/user, etc.
+    OPENCLAW_NOTIFY_CHANNEL: str = os.getenv("OPENCLAW_NOTIFY_CHANNEL", "telegram")
+    OPENCLAW_NOTIFY_TARGET: str = (os.getenv("OPENCLAW_NOTIFY_TARGET") or "").strip()
+
+    # Optional severity-specific overrides — set these to route critical alerts and
+    # daily reports to different destinations. Falls back to OPENCLAW_NOTIFY_TARGET.
+    OPENCLAW_NOTIFY_TARGET_CRITICAL: str = (os.getenv("OPENCLAW_NOTIFY_TARGET_CRITICAL") or "").strip()
+    OPENCLAW_NOTIFY_CHANNEL_CRITICAL: str = (os.getenv("OPENCLAW_NOTIFY_CHANNEL_CRITICAL") or "").strip()
+    OPENCLAW_NOTIFY_TARGET_REPORTS: str = (os.getenv("OPENCLAW_NOTIFY_TARGET_REPORTS") or "").strip()
+    OPENCLAW_NOTIFY_CHANNEL_REPORTS: str = (os.getenv("OPENCLAW_NOTIFY_CHANNEL_REPORTS") or "").strip()
 
     # Energy providers (for tariff tracking and cost analysis)
     OCTOPUS_API_KEY: str = os.getenv("OCTOPUS_API_KEY", "")

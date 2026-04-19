@@ -174,6 +174,16 @@ CREATE TABLE IF NOT EXISTS api_call_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_api_call_log_vendor_ts ON api_call_log(vendor, ts_utc);
+
+CREATE TABLE IF NOT EXISTS notification_routes (
+    alert_type TEXT PRIMARY KEY,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    severity TEXT NOT NULL DEFAULT 'reports',
+    target_override TEXT,
+    channel_override TEXT,
+    silent INTEGER NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL DEFAULT (strftime('%s','now'))
+);
 """
 
 
@@ -260,6 +270,39 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_api_call_log_vendor_ts ON api_call_log(vendor, ts_utc)"
     )
+
+    # V6: notification_routes — per-AlertType routing config, settable via MCP at runtime
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS notification_routes (
+            alert_type TEXT PRIMARY KEY,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            severity TEXT NOT NULL DEFAULT 'reports',
+            target_override TEXT,
+            channel_override TEXT,
+            silent INTEGER NOT NULL DEFAULT 0,
+            updated_at REAL NOT NULL DEFAULT (strftime('%s','now'))
+        )"""
+    )
+    # Seed default routes (INSERT OR IGNORE so user overrides survive migrations)
+    _NOTIFICATION_DEFAULTS = [
+        # (alert_type,          severity,   silent)
+        ("risk_alert",          "critical", 0),
+        ("critical_error",      "critical", 0),
+        ("peak_window_start",   "critical", 0),
+        ("cheap_window_start",  "critical", 0),
+        ("morning_report",      "reports",  0),
+        ("daily_pnl",           "reports",  0),
+        ("strategy_update",     "reports",  1),
+        ("action_confirmation", "reports",  1),
+    ]
+    for _at, _sev, _sil in _NOTIFICATION_DEFAULTS:
+        conn.execute(
+            """INSERT OR IGNORE INTO notification_routes
+               (alert_type, enabled, severity, silent)
+               VALUES (?, 1, ?, ?)""",
+            (_at, _sev, _sil),
+        )
+
 
 def init_db() -> None:
     """Create tables if missing and apply lightweight migrations."""
@@ -1224,6 +1267,108 @@ def get_fox_realtime_snapshot() -> Optional[dict[str, Any]]:
             except Exception:
                 return None
             return snap
+        finally:
+            conn.close()
+
+
+# ---------------------------------------------------------------------------
+# V6: notification_routes — per-AlertType routing, runtime-editable via MCP
+# ---------------------------------------------------------------------------
+
+def get_notification_route(alert_type: str) -> Optional[dict[str, Any]]:
+    """Return the notification_routes row for *alert_type*, or None if not found."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM notification_routes WHERE alert_type = ?", (alert_type,)
+            )
+            r = cur.fetchone()
+            return dict(r) if r else None
+        finally:
+            conn.close()
+
+
+def list_notification_routes() -> list[dict[str, Any]]:
+    """Return all notification_routes rows ordered by severity then alert_type."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM notification_routes ORDER BY severity, alert_type"
+            )
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
+def upsert_notification_route(
+    alert_type: str,
+    *,
+    enabled: Optional[bool] = None,
+    severity: Optional[str] = None,
+    target_override: Optional[str] = None,
+    channel_override: Optional[str] = None,
+    silent: Optional[bool] = None,
+    clear_target_override: bool = False,
+    clear_channel_override: bool = False,
+) -> None:
+    """Create or update a notification_routes row.
+
+    Only the supplied keyword arguments are written; others are left as-is on
+    an existing row, or default-seeded on a new row.
+    """
+    import time
+    now = time.time()
+    with _lock:
+        conn = get_connection()
+        try:
+            existing = conn.execute(
+                "SELECT * FROM notification_routes WHERE alert_type = ?", (alert_type,)
+            ).fetchone()
+            if existing:
+                parts = ["updated_at = ?"]
+                args: list[Any] = [now]
+                if enabled is not None:
+                    parts.append("enabled = ?")
+                    args.append(1 if enabled else 0)
+                if severity is not None:
+                    parts.append("severity = ?")
+                    args.append(severity)
+                if target_override is not None:
+                    parts.append("target_override = ?")
+                    args.append(target_override)
+                if clear_target_override:
+                    parts.append("target_override = NULL")
+                if channel_override is not None:
+                    parts.append("channel_override = ?")
+                    args.append(channel_override)
+                if clear_channel_override:
+                    parts.append("channel_override = NULL")
+                if silent is not None:
+                    parts.append("silent = ?")
+                    args.append(1 if silent else 0)
+                args.append(alert_type)
+                conn.execute(
+                    f"UPDATE notification_routes SET {', '.join(parts)} WHERE alert_type = ?",
+                    args,
+                )
+            else:
+                conn.execute(
+                    """INSERT INTO notification_routes
+                       (alert_type, enabled, severity, target_override, channel_override, silent, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        alert_type,
+                        1 if (enabled is not False) else 0,
+                        severity or "reports",
+                        target_override,
+                        channel_override,
+                        1 if silent else 0,
+                        now,
+                    ),
+                )
+            conn.commit()
         finally:
             conn.close()
 
