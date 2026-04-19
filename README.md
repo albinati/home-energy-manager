@@ -16,7 +16,7 @@ This app is the **brain** for the installation: it **captures half-hourly Agile 
 - **Daikin Onecta**: Read heat pump status, radiator temperature, outdoor temperature, DHW tank temperature. Control power, temperature targets, heating curve offset, and weather regulation.
 - **Smart scheduling**: Time-of-use optimisation — charge battery on cheap-rate periods, pre-heat with solar surplus.
 - **Energy / tariffs**: Octopus Agile rates ingested and stored; shadow pricing, PnL, VWAP, and reports use the same state the planner uses.
-- **OpenClaw**: Optional channel for alerts (`ALERT_*`) and remote visibility/control via the same HTTP API (`HOME_ENERGY_API_URL`) or MCP; default `OPENCLAW_READ_ONLY=true` keeps writes gated.
+- **OpenClaw**: Remote visibility/control via HTTP API (`HOME_ENERGY_API_URL`) or MCP; user notifications go through the **Gateway hook** (`OPENCLAW_HOOKS_URL` / `OPENCLAW_HOOKS_TOKEN`), not a local `openclaw` subprocess. Default `OPENCLAW_READ_ONLY=true` keeps writes gated.
 
 ## Quick start
 
@@ -122,8 +122,11 @@ See `.env.example` for all options. Key variables:
 | `OCTOPUS_API_KEY` | No | Octopus Energy API key (for tariff tracking) |
 | `OCTOPUS_ACCOUNT_NUMBER` | No | Octopus Energy account number |
 | `BRITISH_GAS_API_KEY` | No | British Gas API key (if available) |
-| `ALERT_OPENCLAW_URL` | No | OpenClaw send endpoint (default `http://127.0.0.1:18789/api/send`) |
-| `ALERT_CHANNEL` | No | Channel to send alerts (e.g. `webchat`); leave blank for stdout only |
+| `ALERT_OPENCLAW_URL` | No | Legacy; notifications use hooks below |
+| `ALERT_CHANNEL` | No | Legacy companion to `ALERT_OPENCLAW_URL` |
+| `OPENCLAW_HOOKS_URL` | Yes† | Gateway `POST /hooks/agent` URL |
+| `OPENCLAW_HOOKS_TOKEN` | Yes† | Bearer token matching Gateway `hooks.token` |
+| `OPENCLAW_NOTIFY_ENABLED` | No | Default `true`; set `false` to skip hook delivery |
 | `OPENCLAW_READ_ONLY` | No | If `true` (default), OpenClaw cannot execute; only recommend. Apply via dashboard/CLI. |
 | `ANTHROPIC_API_KEY` | No | Primary API key for AI Assistant (Anthropic Claude). If unset, falls back to `OPENAI_API_KEY` when provider is `openai`. |
 | `OPENAI_API_KEY` | No | Fallback for AI Assistant when using OpenAI provider; also used if `ANTHROPIC_API_KEY` is unset and provider is `openai`. |
@@ -131,6 +134,8 @@ See `.env.example` for all options. Key variables:
 | `AI_ASSISTANT_MODEL` | No | Default `claude-haiku-4-5` |
 | `MANUAL_TARIFF_IMPORT_PENCE` | No | Import rate (p/kWh) for cost-aware suggestions when no provider is connected |
 | `MANUAL_TARIFF_EXPORT_PENCE` | No | Export rate (p/kWh) for cost-aware suggestions |
+
+† Required (with a notify target / route) when `OPENCLAW_NOTIFY_ENABLED=true` for user-visible deliveries.
 
 ## Web UI & API Server
 

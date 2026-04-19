@@ -68,12 +68,10 @@ The script: backs up DB → git pull → pip install → DB migration → restar
 | `PLAN_AUTO_APPROVE` | `false` | Set `true` only after several stable days |
 | `PLAN_REGEN_COOLDOWN_SECONDS` | `300` | Prevents spam re-planning |
 | `OPENCLAW_READ_ONLY` | `false` | Must be `false` for hardware writes via MCP |
-| `OPENCLAW_CLI_TIMEOUT_SECONDS` | `180` | openclaw Telegram delivery takes ~50–120 s |
 | `DAIKIN_DAILY_BUDGET` | `180` | Hard cap below Daikin's 200/day limit |
 | `FOX_DAILY_BUDGET` | `1200` | Conservative cap below Fox's 1440/day |
-| `OPENCLAW_PLAN_NOTIFY_MODE` | `direct` | Set `webhook` to POST plan events to OpenClaw Gateway `/hooks/agent` (agent summarizes before Telegram) |
-| `OPENCLAW_HOOKS_URL` | (empty) | Full URL, e.g. `http://127.0.0.1:18789/hooks/agent` |
-| `OPENCLAW_HOOKS_TOKEN` | (empty) | Same secret as Gateway `hooks.token` |
+| `OPENCLAW_HOOKS_URL` | required if notifications on | Full URL, e.g. `http://127.0.0.1:18789/hooks/agent` |
+| `OPENCLAW_HOOKS_TOKEN` | required if notifications on | Same secret as Gateway `hooks.token` |
 | `OPENCLAW_INTERNAL_API_BASE_URL` | `http://127.0.0.1:8000` | Inserted into hook payload so the agent can `GET /api/v1/optimization/plan` |
 
 **The `.env` file is at `/root/home-energy-manager/.env`. Update it, then restart the service.**
@@ -142,7 +140,7 @@ print(json.dumps(json.loads(row[1]), indent=2))
 4. **Uploads Fox Scheduler V3 immediately** (one call, `fox_schedule_uploaded=1` in optimizer_log)
 5. Writes Daikin `action_schedule` rows for today
 6. Stores plan in `plan_consent` with `status: pending_approval`
-7. Sends Telegram notification with the full schedule
+7. Sends a user notification (OpenClaw Gateway hook → your channel, e.g. Telegram) with the full schedule
 
 **The Fox V3 schedule is already uploaded at propose time.** `confirm_plan` is user acknowledgement — it does not re-upload anything. This was confirmed live on 2026-04-19.
 
@@ -155,13 +153,13 @@ print(json.dumps(json.loads(row[1]), indent=2))
 
 ---
 
-## Notifications (OpenClaw / Telegram)
+## Notifications (OpenClaw Gateway hooks)
 
-Notifications go via `openclaw message send` subprocess. The Telegram round-trip takes **50–120 seconds** — this is normal. Daemon threads handle delivery; the app never blocks.
+When `OPENCLAW_NOTIFY_ENABLED=true` and a notify **target** is resolved (env or `notification_routes`), all user-facing alerts are sent with **`POST` to `OPENCLAW_HOOKS_URL`** (default path `/hooks/agent` per [OpenClaw Webhooks](https://openclaws.io/docs/automation/webhook)). **`OPENCLAW_HOOKS_URL` and `OPENCLAW_HOOKS_TOKEN` are required** for delivery; there is no `openclaw message send` subprocess. Delivery runs in a background thread; the service does not block the request path.
 
-**Known issue (2026-04-19):** `[openclaw timeout]` log lines appear when the delivery thread hits `OPENCLAW_CLI_TIMEOUT_SECONDS`. Bumped to `180` in production. The messages **do** arrive on Telegram despite the log warning.
+If the hook returns non-2xx or the request errors, the service logs **`[openclaw hooks] delivery failed`** — fix Gateway config or network; stdout + `action_log` still contain the notification text.
 
-**If `openclaw` fails with "Channel is required":** The server has multiple channels configured (discord + telegram). Always pass `--channel telegram` explicitly. The notifier code already does this via `OPENCLAW_NOTIFY_CHANNEL=telegram`.
+**Removed (breaking):** `OPENCLAW_CLI_PATH`, `OPENCLAW_CLI_TIMEOUT_SECONDS`, and `OPENCLAW_PLAN_NOTIFY_MODE`. Migrate: set hooks URL + token to match your Gateway.
 
 ### Alert types and what triggers them
 
@@ -179,11 +177,7 @@ Notifications go via `openclaw message send` subprocess. The Telegram round-trip
 
 Configure routing via MCP: `set_notification_route(alert_type, enabled, severity, target_override)`.
 
-### OpenClaw Gateway webhook (optional) — agent “mastiga” o plano
-
-When `OPENCLAW_PLAN_NOTIFY_MODE=webhook` and `OPENCLAW_HOOKS_URL` + `OPENCLAW_HOOKS_TOKEN` are set, **`plan_proposed` notifications** are sent with `POST` to the Gateway (default path `/hooks/agent` per [OpenClaw Webhooks](https://openclaws.io/docs/automation/webhook)) instead of piping the long body through `openclaw message send`. The payload asks an agent to summarize in human language; **if the hook fails (non-2xx or network error), the service falls back to the direct CLI** so you still get a message.
-
-**Nikola / main agent vs. this hook:** Your interactive agent (e.g. Nikola) that uses the **home-energy-manager MCP** in chat is unchanged. The webhook is a **separate isolated `/hooks/agent` turn** for notification copy only. To avoid mixing personas, set **`OPENCLAW_HOOKS_AGENT_ID`** to a **dedicated** digest-only agent in the Gateway and keep Nikola for MCP sessions; if `OPENCLAW_HOOKS_AGENT_ID` is empty, the Gateway default hook agent applies (see your `hooks.allowedAgentIds`). See [docs/openclaw-nikola-plan-prompt.md](openclaw-nikola-plan-prompt.md).
+**Nikola / main agent vs. hook deliveries:** Your interactive agent (e.g. Nikola) that uses the **home-energy-manager MCP** in chat is unchanged. Automated notifications are **separate `/hooks/agent` turns** for digest/delivery. To avoid mixing personas, set **`OPENCLAW_HOOKS_AGENT_ID`** to a **dedicated** digest-only agent in the Gateway; if empty, the Gateway default hook agent applies (see `hooks.allowedAgentIds`). See [docs/openclaw-nikola-plan-prompt.md](openclaw-nikola-plan-prompt.md).
 
 **Gateway prerequisites:** enable `hooks` in OpenClaw config with a dedicated `hooks.token`, bind to loopback or Tailscale, and restrict `allowedAgentIds` if you use `OPENCLAW_HOOKS_AGENT_ID`.
 

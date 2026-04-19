@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-04-19 — OpenClaw hook-only notifications
+
+- **Breaking:** User-facing notifications no longer use `openclaw message send` (subprocess). All deliveries use **`POST` to `OPENCLAW_HOOKS_URL`** (Gateway `/hooks/agent`). Set **`OPENCLAW_HOOKS_URL`** and **`OPENCLAW_HOOKS_TOKEN`** when `OPENCLAW_NOTIFY_ENABLED=true`.
+- **Removed env:** `OPENCLAW_CLI_PATH`, `OPENCLAW_CLI_TIMEOUT_SECONDS`, `OPENCLAW_PLAN_NOTIFY_MODE`.
+- **Behaviour:** On hook failure, only stdout logs — no CLI fallback. See `docs/RUNBOOK.md` and `docs/openclaw-nikola-plan-prompt.md`.
+
 ## 2026-04-18 — V8 PuLP MILP planner
 
 - **Default planner:** `OPTIMIZER_BACKEND=lp` runs `src/scheduler/lp_optimizer.solve_lp` (PuLP + CBC): battery, grid, PV curtailment, DHW tank + building thermal, COP vs outdoor temperature, discrete HP buckets. Dispatch: `src/scheduler/lp_dispatch.py`. Weather: `forecast_to_lp_inputs()` in `src/weather.py`.

@@ -1,15 +1,12 @@
-"""Tests for the OpenClaw CLI notifier (src/notifier.py).
+"""Tests for OpenClaw Gateway hook notifier (src/notifier.py).
 
-Covers: route resolution, subprocess invocation, error handling,
-stale-data fallback, and the three MCP notification tools.
+Covers: route resolution, POST /hooks/agent delivery, and MCP notification tools.
 """
 from __future__ import annotations
 
 import importlib.util
-import subprocess
-import threading
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -22,17 +19,14 @@ def _make_config(**overrides):
     """Return a minimal config-like namespace for testing."""
     defaults = dict(
         OPENCLAW_NOTIFY_ENABLED=True,
-        OPENCLAW_CLI_PATH="/usr/local/bin/openclaw",
-        OPENCLAW_CLI_TIMEOUT_SECONDS=8,
         OPENCLAW_NOTIFY_CHANNEL="telegram",
         OPENCLAW_NOTIFY_TARGET="7964600619",
         OPENCLAW_NOTIFY_TARGET_CRITICAL="",
         OPENCLAW_NOTIFY_CHANNEL_CRITICAL="",
         OPENCLAW_NOTIFY_TARGET_REPORTS="",
         OPENCLAW_NOTIFY_CHANNEL_REPORTS="",
-        OPENCLAW_PLAN_NOTIFY_MODE="direct",
-        OPENCLAW_HOOKS_URL="",
-        OPENCLAW_HOOKS_TOKEN="",
+        OPENCLAW_HOOKS_URL="http://127.0.0.1:18789/hooks/agent",
+        OPENCLAW_HOOKS_TOKEN="test-token",
         OPENCLAW_HOOKS_TIMEOUT_SECONDS=30,
         OPENCLAW_HOOKS_AGENT_ID="",
         OPENCLAW_INTERNAL_API_BASE_URL="http://127.0.0.1:8000",
@@ -146,147 +140,116 @@ class TestResolveRoute:
 
 
 # ---------------------------------------------------------------------------
-# _send_via_openclaw_cli tests
+# Hook delivery
 # ---------------------------------------------------------------------------
 
-class TestSendViaOpenclawCli:
-    def _default_route_patch(self):
-        return {"channel": "telegram", "target": "7964600619", "silent": False}
+class TestHooksDelivery:
+    def _immediate_thread(self, monkeypatch, notifier_mod):
+        class ImmediateThread:
+            def __init__(self, target, daemon=True, name=""):
+                self._target = target
 
-    def test_invokes_subprocess_with_correct_args(self, monkeypatch):
+            def start(self):
+                self._target()
+
+        monkeypatch.setattr(notifier_mod.threading, "Thread", ImmediateThread)
+
+    def test_dispatch_posts_hook(self, monkeypatch):
         from src import notifier
-        cfg = _make_config()
+
+        posted: list[dict[str, Any]] = []
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            posted.append({"url": url, "json": json})
+            r = MagicMock()
+            r.status_code = 200
+            return r
+
+        self._immediate_thread(monkeypatch, notifier)
+        monkeypatch.setattr(notifier.requests, "post", fake_post)
+        monkeypatch.setattr(notifier, "config", _make_config())
+        monkeypatch.setattr(notifier.db, "get_notification_route", lambda _: {
+            "enabled": 1, "severity": "critical",
+            "target_override": None, "channel_override": None, "silent": 0,
+        })
+        monkeypatch.setattr(notifier.db, "log_action", lambda **kw: None)
+
+        notifier._dispatch(notifier.AlertType.RISK_ALERT, "low battery", urgent=True)
+
+        assert len(posted) == 1
+        assert posted[0]["url"] == "http://127.0.0.1:18789/hooks/agent"
+        assert posted[0]["json"]["name"] == "EnergyRisk"
+        assert "low battery" in posted[0]["json"]["message"]
+
+    def test_dispatch_skips_when_no_hooks_url(self, monkeypatch):
+        from src import notifier
+
+        posted: list[Any] = []
+
+        def fake_post(*a, **k):
+            posted.append(1)
+            return MagicMock(status_code=200)
+
+        self._immediate_thread(monkeypatch, notifier)
+        monkeypatch.setattr(notifier.requests, "post", fake_post)
+        cfg = _make_config(OPENCLAW_HOOKS_URL="", OPENCLAW_HOOKS_TOKEN="")
         monkeypatch.setattr(notifier, "config", cfg)
-        monkeypatch.setattr(notifier, "_resolve_route", lambda _: self._default_route_patch())
+        monkeypatch.setattr(notifier.db, "get_notification_route", lambda _: {
+            "enabled": 1, "severity": "reports",
+            "target_override": None, "channel_override": None, "silent": 0,
+        })
+        monkeypatch.setattr(notifier.db, "log_action", lambda **kw: None)
 
-        captured = {}
-        started = threading.Event()
+        notifier._dispatch(notifier.AlertType.MORNING_REPORT, "brief", urgent=False)
+        assert posted == []
 
-        def fake_run(cmd, **kwargs):
-            captured["cmd"] = cmd
-            started.set()
-            result = MagicMock()
-            result.returncode = 0
-            return result
-
-        monkeypatch.setattr(subprocess, "run", fake_run)
-        assert notifier._send_via_openclaw_cli("risk_alert", "hello") is True
-        started.wait(timeout=2)
-        assert captured.get("cmd") == [
-            "/usr/local/bin/openclaw", "message", "send",
-            "--channel", "telegram",
-            "--target", "7964600619",
-            "--message", "hello",
-        ]
-
-    def test_silent_flag_appended_when_true(self, monkeypatch):
+    def test_dispatch_logs_on_http_error(self, monkeypatch, capsys):
         from src import notifier
-        cfg = _make_config()
-        monkeypatch.setattr(notifier, "config", cfg)
-        monkeypatch.setattr(notifier, "_resolve_route", lambda _: {"channel": "telegram", "target": "123", "silent": True})
 
-        captured = {}
-        started = threading.Event()
+        def fake_post(*a, **k):
+            r = MagicMock()
+            r.status_code = 500
+            return r
 
-        def fake_run(cmd, **kwargs):
-            captured["cmd"] = cmd
-            started.set()
-            result = MagicMock()
-            result.returncode = 0
-            return result
-
-        monkeypatch.setattr(subprocess, "run", fake_run)
-        notifier._send_via_openclaw_cli("strategy_update", "msg")
-        started.wait(timeout=2)
-        assert "--silent" in captured.get("cmd", [])
-
-    def test_returns_false_on_nonzero_returncode(self, monkeypatch):
-        """Non-zero exit is logged but send still returns True (fire-and-forget)."""
-        from src import notifier
-        monkeypatch.setattr(notifier, "_resolve_route", lambda _: {"channel": "telegram", "target": "123", "silent": False})
+        self._immediate_thread(monkeypatch, notifier)
+        monkeypatch.setattr(notifier.requests, "post", fake_post)
         monkeypatch.setattr(notifier, "config", _make_config())
+        monkeypatch.setattr(notifier.db, "get_notification_route", lambda _: {
+            "enabled": 1, "severity": "reports",
+            "target_override": None, "channel_override": None, "silent": 0,
+        })
+        monkeypatch.setattr(notifier.db, "log_action", lambda **kw: None)
 
-        done = threading.Event()
-
-        def fake_run(cmd, **kwargs):
-            done.set()
-            result = MagicMock()
-            result.returncode = 1
-            result.stderr = "error"
-            return result
-
-        monkeypatch.setattr(subprocess, "run", fake_run)
-        # fire-and-forget: returns True immediately regardless of subprocess outcome
-        assert notifier._send_via_openclaw_cli("risk_alert", "msg") is True
-        done.wait(timeout=2)
-
-    def test_handles_timeout(self, monkeypatch):
-        from src import notifier
-        monkeypatch.setattr(notifier, "_resolve_route", lambda _: {"channel": "telegram", "target": "123", "silent": False})
-        monkeypatch.setattr(notifier, "config", _make_config())
-        done = threading.Event()
-
-        def fake_run(*a, **k):
-            done.set()
-            raise subprocess.TimeoutExpired([], 8)
-
-        monkeypatch.setattr(subprocess, "run", fake_run)
-        # fire-and-forget: always returns True; timeout is handled in background thread
-        assert notifier._send_via_openclaw_cli("risk_alert", "msg") is True
-        done.wait(timeout=2)
-
-    def test_handles_missing_binary(self, monkeypatch):
-        from src import notifier
-        monkeypatch.setattr(notifier, "_resolve_route", lambda _: {"channel": "telegram", "target": "123", "silent": False})
-        monkeypatch.setattr(notifier, "config", _make_config())
-        done = threading.Event()
-
-        def fake_run(*a, **k):
-            done.set()
-            raise FileNotFoundError()
-
-        monkeypatch.setattr(subprocess, "run", fake_run)
-        assert notifier._send_via_openclaw_cli("risk_alert", "msg") is True
-        done.wait(timeout=2)
-
-    def test_returns_false_when_no_route(self, monkeypatch):
-        from src import notifier
-        monkeypatch.setattr(notifier, "_resolve_route", lambda _: None)
-        monkeypatch.setattr(notifier, "config", _make_config())
-        assert notifier._send_via_openclaw_cli("risk_alert", "msg") is False
+        notifier._dispatch(notifier.AlertType.STRATEGY_UPDATE, "x", urgent=False)
+        err = capsys.readouterr().out
+        assert "[openclaw hooks] delivery failed" in err
 
 
-# ---------------------------------------------------------------------------
-# _dispatch still logs to action_log when send fails
-# ---------------------------------------------------------------------------
-
-class TestDispatchLogsOnFailure:
-    def test_logs_to_action_log_even_when_cli_fails(self, monkeypatch):
+class TestDispatchLogsToActionLog:
+    def test_logs_to_action_log(self, monkeypatch):
         from src import notifier
 
         logged = []
         monkeypatch.setattr(notifier.db, "log_action", lambda **kw: logged.append(kw))
-        monkeypatch.setattr(notifier, "_send_via_openclaw_cli", lambda *a: False)
+        monkeypatch.setattr(notifier, "config", _make_config(OPENCLAW_HOOKS_URL=""))
+        monkeypatch.setattr(notifier.db, "get_notification_route", lambda _: {
+            "enabled": 1, "severity": "critical",
+            "target_override": None, "channel_override": None, "silent": 0,
+        })
 
         notifier._dispatch(notifier.AlertType.RISK_ALERT, "test message", urgent=True)
         assert len(logged) == 1
         assert logged[0]["action"] == "risk_alert"
 
 
-# ---------------------------------------------------------------------------
-# push_alert uses CLI (not urllib)
-# ---------------------------------------------------------------------------
-
-class TestNotifyPlanProposedWebhook:
-    """OPENCLAW_PLAN_NOTIFY_MODE=webhook posts to Gateway /hooks/agent."""
-
-    def test_webhook_posts_and_skips_cli_on_success(self, monkeypatch):
+class TestNotifyPlanProposed:
+    def test_posts_energy_plan(self, monkeypatch):
         from src import notifier
 
         posted: list[dict[str, Any]] = []
 
         def fake_post(url, json=None, headers=None, timeout=None):
-            posted.append({"url": url, "json": json, "headers": headers})
+            posted.append({"json": json})
             r = MagicMock()
             r.status_code = 200
             return r
@@ -298,20 +261,13 @@ class TestNotifyPlanProposedWebhook:
             def start(self):
                 self._target()
 
-        monkeypatch.setattr(notifier.requests, "post", fake_post)
         monkeypatch.setattr(notifier.threading, "Thread", ImmediateThread)
-
-        cfg = _make_config(
-            OPENCLAW_PLAN_NOTIFY_MODE="webhook",
-            OPENCLAW_HOOKS_URL="http://127.0.0.1:18789/hooks/agent",
-            OPENCLAW_HOOKS_TOKEN="test-token",
-        )
-        monkeypatch.setattr(notifier, "config", cfg)
+        monkeypatch.setattr(notifier.requests, "post", fake_post)
+        monkeypatch.setattr(notifier, "config", _make_config())
         monkeypatch.setattr(notifier.db, "log_action", lambda **kw: None)
-        cli_calls: list[tuple[Any, ...]] = []
-        monkeypatch.setattr(notifier, "_send_via_openclaw_cli", lambda *a: cli_calls.append(a) or True)
-        monkeypatch.setattr(notifier, "_resolve_route", lambda _: {
-            "channel": "telegram", "target": "123456", "silent": False,
+        monkeypatch.setattr(notifier.db, "get_notification_route", lambda _: {
+            "enabled": 1, "severity": "reports",
+            "target_override": None, "channel_override": None, "silent": 0,
         })
 
         notifier.notify_plan_proposed(
@@ -323,21 +279,20 @@ class TestNotifyPlanProposedWebhook:
         )
 
         assert len(posted) == 1
-        assert posted[0]["url"] == "http://127.0.0.1:18789/hooks/agent"
-        assert posted[0]["headers"].get("Authorization") == "Bearer test-token"
-        body = posted[0]["json"]
-        assert body.get("name") == "EnergyPlan"
-        assert body.get("deliver") is True
-        assert body.get("to") == "123456"
-        assert "PuLP ok" in body.get("message", "")
-        assert cli_calls == []
+        assert posted[0]["json"]["name"] == "EnergyPlan"
+        assert "PuLP ok" in posted[0]["json"]["message"]
 
-    def test_webhook_falls_back_to_cli_on_http_error(self, monkeypatch):
+
+class TestPushAlert:
+    def test_push_cheap_window_posts_hook(self, monkeypatch):
         from src import notifier
 
-        def fake_post(*a, **k):
+        posted: list[Any] = []
+
+        def fake_post(url, json=None, **kwargs):
+            posted.append({"url": url, "json": json})
             r = MagicMock()
-            r.status_code = 500
+            r.status_code = 200
             return r
 
         class ImmediateThread:
@@ -347,74 +302,19 @@ class TestNotifyPlanProposedWebhook:
             def start(self):
                 self._target()
 
-        monkeypatch.setattr(notifier.requests, "post", fake_post)
         monkeypatch.setattr(notifier.threading, "Thread", ImmediateThread)
-
-        cfg = _make_config(
-            OPENCLAW_PLAN_NOTIFY_MODE="webhook",
-            OPENCLAW_HOOKS_URL="http://127.0.0.1:18789/hooks/agent",
-            OPENCLAW_HOOKS_TOKEN="test-token",
-        )
-        monkeypatch.setattr(notifier, "config", cfg)
-        monkeypatch.setattr(notifier.db, "log_action", lambda **kw: None)
-        cli_calls: list[tuple[Any, ...]] = []
-        monkeypatch.setattr(notifier, "_send_via_openclaw_cli", lambda *a: cli_calls.append(a) or True)
-        monkeypatch.setattr(notifier, "_resolve_route", lambda _: {
-            "channel": "telegram", "target": "123456", "silent": False,
-        })
-
-        notifier.notify_plan_proposed("lp-x", "2026-06-01", "s", [])
-
-        assert len(cli_calls) == 1
-        assert cli_calls[0][0] == "plan_proposed"
-
-    def test_direct_mode_uses_cli_only(self, monkeypatch):
-        from src import notifier
-
-        posted: list[Any] = []
-
-        def fake_post(*a, **k):
-            posted.append(1)
-            return MagicMock(status_code=200)
-
         monkeypatch.setattr(notifier.requests, "post", fake_post)
-        cfg = _make_config(OPENCLAW_PLAN_NOTIFY_MODE="direct")
-        monkeypatch.setattr(notifier, "config", cfg)
+        monkeypatch.setattr(notifier, "config", _make_config())
         monkeypatch.setattr(notifier.db, "log_action", lambda **kw: None)
-        cli_calls: list[tuple[Any, ...]] = []
-        monkeypatch.setattr(notifier, "_send_via_openclaw_cli", lambda *a: cli_calls.append(a) or True)
-        monkeypatch.setattr(notifier, "_resolve_route", lambda _: {
-            "channel": "telegram", "target": "1", "silent": False,
+        monkeypatch.setattr(notifier.db, "get_notification_route", lambda _: {
+            "enabled": 1, "severity": "reports",
+            "target_override": None, "channel_override": None, "silent": 0,
         })
-
-        notifier.notify_plan_proposed("lp-x", "2026-06-01", "s", [])
-
-        assert posted == []
-        assert len(cli_calls) == 1
-
-
-class TestPushAlertUsesCli:
-    def test_push_cheap_window_start_calls_cli(self, monkeypatch):
-        from src import notifier
-
-        calls = []
-        monkeypatch.setattr(notifier, "_send_via_openclaw_cli", lambda at, msg: calls.append((at, msg)) or True)
-        monkeypatch.setattr(notifier.db, "log_action", lambda **kw: None)
 
         notifier.push_cheap_window_start(soc=85.0, fox_mode="Self Use")
-        assert len(calls) == 1
-        assert calls[0][0] == "cheap_window_start"
-
-    def test_push_peak_window_start_calls_cli(self, monkeypatch):
-        from src import notifier
-
-        calls = []
-        monkeypatch.setattr(notifier, "_send_via_openclaw_cli", lambda at, msg: calls.append((at, msg)) or True)
-        monkeypatch.setattr(notifier.db, "log_action", lambda **kw: None)
-
-        notifier.push_peak_window_start(soc=92.0)
-        assert len(calls) == 1
-        assert calls[0][0] == "peak_window_start"
+        assert len(posted) == 1
+        body = posted[0]["json"]
+        assert body["name"] == "EnergyCheapWindow"
 
 
 # ---------------------------------------------------------------------------
@@ -431,8 +331,6 @@ class TestMcpSetNotificationRoute:
         from src.mcp_server import build_mcp
 
         mcp = build_mcp()
-        # Find the set_notification_route function directly on the mcp object
-        # by calling it through the registered tools dict
         tool_fn = None
         for t in mcp._tool_manager._tools.values():
             if t.name == "set_notification_route":
