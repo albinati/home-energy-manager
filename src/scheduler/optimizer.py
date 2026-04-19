@@ -256,7 +256,11 @@ def _slot_fox_tuple(
     any grid import — PV handles the charging naturally.
     """
     if s.kind == "solar_charge":
-        min_soc = int(getattr(config, "FOX_SOLAR_CHARGE_MIN_SOC_PERCENT", 95))
+        # 100%: hold battery fully so PV fills it without the inverter pulling any grid.
+        # SelfUse mode forbids active grid import regardless of minSocOnGrid — this only
+        # blocks discharge, letting excess PV accumulate. MPC at 06:00/12:00 corrects
+        # for cloud shortfalls by switching to ForceCharge if SoC lags the target.
+        min_soc = int(getattr(config, "FOX_SOLAR_CHARGE_MIN_SOC_PERCENT", 100))
         return ("SelfUse", None, None, min_soc)
     if s.kind == "negative":
         pwr = s.lp_grid_import_w if s.lp_grid_import_w is not None else config.FOX_FORCE_CHARGE_MAX_PWR
