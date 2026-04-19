@@ -7,6 +7,8 @@ from datetime import datetime
 from statistics import mean
 from typing import Any, Optional
 
+from zoneinfo import ZoneInfo
+
 from .. import db
 from ..config import config
 from ..weather import HourlyForecast, fetch_forecast, forecast_to_lp_inputs, compute_pv_calibration_factor
@@ -52,7 +54,7 @@ def _build_load_profile(slot_starts_utc: list[datetime]) -> list[float]:
     flat = fox_mean if fox_mean is not None else flat_from_log
     out: list[float] = []
     for s in slot_starts_utc:
-        h = s.astimezone().hour
+        h = s.astimezone(ZoneInfo(config.BULLETPROOF_TIMEZONE)).hour
         out.append(profile.get(h, flat))
     return out
 
