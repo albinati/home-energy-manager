@@ -95,7 +95,7 @@ class Config:
     # Path to the openclaw binary (installed on the host alongside the service).
     OPENCLAW_CLI_PATH: str = os.getenv("OPENCLAW_CLI_PATH", "/usr/local/bin/openclaw")
     # Timeout for each subprocess call (seconds). Increase if openclaw startup is slow.
-    OPENCLAW_CLI_TIMEOUT_SECONDS: int = int(os.getenv("OPENCLAW_CLI_TIMEOUT_SECONDS", "8"))
+    OPENCLAW_CLI_TIMEOUT_SECONDS: int = int(os.getenv("OPENCLAW_CLI_TIMEOUT_SECONDS", "60"))
 
     # Default channel + target (fallback when severity-specific not set).
     # target: Telegram chat ID, @username, Discord channel/user, etc.
