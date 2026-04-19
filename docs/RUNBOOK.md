@@ -200,6 +200,20 @@ Configure routing via MCP: `set_notification_route(alert_type, enabled, severity
 - **`heartbeat_reupload_scheduler_v3`** in the action log means the heartbeat detected a mismatch between the DB schedule and the inverter and re-uploaded. This is normal and expected.
 - Budget: `FOX_DAILY_BUDGET=1200` (hard cap: ~1440/day)
 
+### ForceCharge `fdPwr` (grid import power) — LP vs heuristic
+
+The Fox V3 `fdPwr` parameter tells the inverter how many Watts to draw from the grid during a ForceCharge window.
+
+**LP backend (default):** `fdPwr` is derived from the MILP solution — specifically `grid_import_kwh[slot] × 2000 W` rounded up to the nearest 50 W. The LP already accounts for PV generation and home load when it decides how much to import, so `fdPwr` ends up being only what the grid actually needs to contribute. During a sunny morning cheap window this may be quite low (PV covers most of the charge); overnight with no PV it will be higher.
+
+**Heuristic backend:** Uses static constants — `FOX_FORCE_CHARGE_MAX_PWR` (6000 W default) for negative-price slots, `FOX_FORCE_CHARGE_NORMAL_PWR` (3000 W default) for cheap slots. These are upper bounds and may request more grid import than necessary when PV is present.
+
+**Configuration:**
+- `FOX_FORCE_CHARGE_MAX_PWR` — hard ceiling (W). Set to your inverter's AC charge rating. Used by both backends as the per-slot cap.
+- `FOX_FORCE_CHARGE_NORMAL_PWR` — heuristic-only fallback. Irrelevant when `OPTIMIZER_BACKEND=lp` (the default).
+- `MAX_INVERTER_KW` — LP model constraint (kW). Must match your inverter nameplate. The LP will never plan more than `MAX_INVERTER_KW × 0.5 kWh` per slot regardless.
+
+
 ### Fox V3 schedule structure (example from 2026-04-19)
 
 ```json

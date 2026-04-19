@@ -124,6 +124,10 @@ class HalfHourSlot:
     end_utc: datetime
     price_pence: float
     kind: str  # negative, cheap, standard, peak
+    # LP-derived grid import power (W) for this slot — set by the LP path so that
+    # ForceCharge windows use the exact amount the MILP planned to pull from the grid
+    # rather than a static constant.  None means use the configured fallback constant.
+    lp_grid_import_w: Optional[int] = None
 
 
 def _parse_ts(s: str) -> datetime:
@@ -211,11 +215,19 @@ def _slot_fox_tuple(
     *,
     peak_export_discharge: bool = False,
 ) -> tuple[str, Optional[int], Optional[int]]:
-    """work_mode, fd_soc, fd_pwr for Scheduler V3 (API uses SelfUse, ForceCharge, ForceDischarge)."""
+    """work_mode, fd_soc, fd_pwr for Scheduler V3 (API uses SelfUse, ForceCharge, ForceDischarge).
+
+    For ForceCharge slots the ``fdPwr`` (W) is taken from ``s.lp_grid_import_w`` when set
+    (LP path), or falls back to the configured ``FOX_FORCE_CHARGE_*_PWR`` constants.
+    Using the LP-derived grid import power avoids telling Fox to pull more from the grid than
+    the MILP actually planned — especially important during PV-rich morning windows.
+    """
     if s.kind == "negative":
-        return ("ForceCharge", 100, config.FOX_FORCE_CHARGE_MAX_PWR)
+        pwr = s.lp_grid_import_w if s.lp_grid_import_w is not None else config.FOX_FORCE_CHARGE_MAX_PWR
+        return ("ForceCharge", 100, pwr)
     if s.kind == "cheap":
-        return ("ForceCharge", 95, config.FOX_FORCE_CHARGE_NORMAL_PWR)
+        pwr = s.lp_grid_import_w if s.lp_grid_import_w is not None else config.FOX_FORCE_CHARGE_NORMAL_PWR
+        return ("ForceCharge", 95, pwr)
     if s.kind == "peak_export":
         return (
             "ForceDischarge",
