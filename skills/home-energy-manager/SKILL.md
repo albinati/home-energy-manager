@@ -6,6 +6,76 @@ metadata: {"openclaw": {"requires": {"env": ["HOME_ENERGY_API_URL"]}, "primaryEn
 
 # Home Energy Manager (OpenClaw ↔ app interface)
 
+## Infrastructure — how to connect / deploy
+
+**Hetzner server (production):**
+- Tailscale hostname: `openclaw-overbot.tail0dbf20.ts.net` (IP: 100.104.115.85)
+- SSH (no keys needed — Tailscale SSH): `ssh root@openclaw-overbot.tail0dbf20.ts.net`
+- App location: `/root/home-energy-manager/`
+- Service: `systemctl status home-energy-manager`
+- Logs: `journalctl -u home-energy-manager -f`
+- DB: `/root/home-energy-manager/energy_state.db`
+- Tokens: `/root/home-energy-manager/.daikin-tokens.json`
+
+**Local machine (WSL):**
+- Tailscale hostname: `over-surface.tail0dbf20.ts.net` (IP: 100.88.209.127)
+- Windows host: `over-surface-1.tail0dbf20.ts.net` (IP: 100.70.167.7)
+- Project path: `/home/stkoverflow/home-energy-manager/`
+
+**Deploy (from Hetzner):**
+```bash
+cd /root/home-energy-manager
+./scripts/deploy_hetzner.sh           # git pull + pip install + migrate + restart
+./scripts/deploy_hetzner.sh --backup  # backup DB first (needs SSH on over-surface)
+```
+
+**Deploy (from agent/local — SSH through Tailscale):**
+```bash
+ssh root@openclaw-overbot.tail0dbf20.ts.net "cd /root/home-energy-manager && ./scripts/deploy_hetzner.sh"
+```
+
+---
+
+## Daikin re-authentication (when refresh token expires / invalid_grant)
+
+The `DAIKIN_REDIRECT_URI` must be a **live public HTTPS URL** — Daikin's portal pings it during app registration.
+The `--setup` mode creates a fresh `localhost.run` SSH tunnel automatically (no ngrok install needed).
+**Never use a hardcoded `localhost:8080` in the portal** — it won't work.
+
+### Full re-auth flow (run on the Hetzner server):
+
+```bash
+ssh root@openclaw-overbot.tail0dbf20.ts.net
+cd /root/home-energy-manager
+```
+
+**Step 1 — Delete old app on the Daikin developer portal:**
+→ https://developer.cloud.daikineurope.com
+→ Sign in → My Apps → delete existing app
+
+**Step 2 — Run guided setup (opens tunnel + walks through portal registration + OAuth):**
+```bash
+python3 -m src.daikin.auth --setup
+```
+This will:
+1. Start a local HTTP server on port 8080
+2. Open a `localhost.run` SSH tunnel → give you a public `https://xxxxx.lhr.life/callback` URL
+3. Ask you to create a new app in the portal with that redirect URI
+4. Ask you to paste the new Client ID and Client Secret
+5. Update `.env` automatically with the new credentials
+6. Open a browser to Daikin's login page for OAuth consent
+7. Save fresh tokens to `.daikin-tokens.json`
+
+**Step 3 — Restart the service:**
+```bash
+systemctl restart home-energy-manager
+journalctl -u home-energy-manager -n 20 --no-pager
+```
+
+**Note:** The tunnel URL (e.g. `https://729586f71bd936.lhr.life`) is ephemeral — it changes every time you run `--setup`. The script updates `.env` automatically. If you need to run from the local machine instead (browser access), run `python3 -m src.daikin.auth --setup` locally and then `scp .daikin-tokens.json` to the server.
+
+---
+
 **Home Energy Manager** is a **standalone service** and the **planning brain** for the site: it stores Agile tariffs, uses weather and load history, optimises Fox + heat-pump schedules, and runs a heartbeat to apply them. OpenClaw does not replace that service: it connects to it over HTTP using this skill.
 
 **Base URL**: Set `HOME_ENERGY_API_URL` to the running app (e.g. `http://192.168.1.100:8000`).
