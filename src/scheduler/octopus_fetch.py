@@ -56,7 +56,8 @@ def fetch_and_store_rates(fox: Optional[FoxESSClient] = None) -> dict[str, Any]:
     summary: dict[str, Any] = {"ok": True, "rows": n}
     if config.USE_BULLETPROOF_ENGINE:
         try:
-            opt = run_optimizer(fox)
+            # Compute plan and log to DB; device dispatch is handled by the nightly push job.
+            opt = run_optimizer(fox if config.LP_MPC_WRITE_DEVICES else None)
             summary["optimizer"] = opt
             if opt.get("ok") and opt.get("strategy"):
                 notify_strategy_update(str(opt.get("strategy")), warnings=opt.get("battery_warning"))

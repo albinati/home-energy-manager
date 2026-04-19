@@ -212,17 +212,63 @@ def bulletproof_mpc_job() -> None:
             except Exception as e:
                 logger.debug("MPC: snapshot upsert failed (non-fatal): %s", e)
 
-        result = run_optimizer(fox, daikin)
+        # Only dispatch to hardware if explicitly enabled; default is compute-only.
+        result = run_optimizer(
+            fox if config.LP_MPC_WRITE_DEVICES else None,
+            daikin if config.LP_MPC_WRITE_DEVICES else None,
+        )
         logger.info(
-            "MPC re-optimise: ok=%s lp_status=%s objective=%.0fp soc=%.1f%% solar=%.2fkW",
+            "MPC re-optimise: ok=%s lp_status=%s objective=%.0fp soc=%.1f%% solar=%.2fkW write_devices=%s",
             result.get("ok"),
             result.get("lp_status"),
             result.get("lp_objective_pence", 0),
             rt_soc_pct or 0,
             rt_solar_kw or 0,
+            config.LP_MPC_WRITE_DEVICES,
         )
     except Exception as e:
         logger.warning("MPC job failed: %s", e)
+
+
+def bulletproof_plan_push_job() -> None:
+    """Nightly plan dispatch: push tomorrow's LP plan to Fox ESS + Daikin at LP_PLAN_PUSH_HOUR:MINUTE.
+
+    Re-solves the LP using rates already in DB (fast — no Octopus API call), then uploads
+    Fox Scheduler V3 groups and writes Daikin action_schedule entries.  Runs just before
+    midnight so devices are programmed before the first slot starts at 00:00.
+    """
+    if not config.USE_BULLETPROOF_ENGINE:
+        return
+    if get_scheduler_paused():
+        logger.info("Plan push skipped: scheduler paused")
+        return
+    backend = (config.OPTIMIZER_BACKEND or "lp").strip().lower()
+    if backend != "lp":
+        logger.info("Plan push skipped: OPTIMIZER_BACKEND=%s (LP only)", backend)
+        return
+    try:
+        from .optimizer import run_optimizer
+
+        fox = _try_fox()
+        daikin = None
+        if config.DAIKIN_CLIENT_ID and config.DAIKIN_CLIENT_SECRET:
+            try:
+                from ..daikin.client import DaikinClient
+                daikin = DaikinClient()
+            except Exception as e:
+                logger.debug("Plan push: Daikin client unavailable: %s", e)
+
+        result = run_optimizer(fox, daikin)
+        logger.info(
+            "Plan push: ok=%s lp_status=%s objective=%.0fp fox_uploaded=%s daikin_actions=%s",
+            result.get("ok"),
+            result.get("lp_status"),
+            result.get("lp_objective_pence", 0),
+            result.get("fox_uploaded"),
+            result.get("daikin_actions"),
+        )
+    except Exception as e:
+        logger.warning("Plan push job failed: %s", e)
 
 
 def bulletproof_heartbeat_tick() -> None:
@@ -505,12 +551,24 @@ def start_background_scheduler() -> None:
                     config.LP_MPC_HOURS_LIST,
                     tz,
                 )
+            # Nightly plan push: dispatch Fox + Daikin just before midnight
+            _background_scheduler.add_job(
+                bulletproof_plan_push_job,
+                CronTrigger(
+                    hour=config.LP_PLAN_PUSH_HOUR,
+                    minute=config.LP_PLAN_PUSH_MINUTE,
+                    timezone=tz,
+                ),
+                id="bulletproof_plan_push",
+            )
             logger.info(
-                "Bulletproof cron: Octopus %02d:%02d, brief %02d:%02d (%s)",
+                "Bulletproof cron: Octopus %02d:%02d, brief %02d:%02d, plan push %02d:%02d (%s)",
                 config.OCTOPUS_FETCH_HOUR,
                 config.OCTOPUS_FETCH_MINUTE,
                 config.DAILY_BRIEF_HOUR,
                 config.DAILY_BRIEF_MINUTE,
+                config.LP_PLAN_PUSH_HOUR,
+                config.LP_PLAN_PUSH_MINUTE,
                 tz,
             )
 

@@ -365,6 +365,15 @@ class Config:
     # Comma-separated local hours (24-h). E.g. "6,12,18" fires at 06:00, 12:00, and 18:00.
     LP_MPC_HOURS: str = (os.getenv("LP_MPC_HOURS") or "6,12").strip()
 
+    # Whether intra-day MPC re-runs (and the evening fetch) push the updated plan to Fox/Daikin.
+    # Default false: compute + log only; the nightly push job dispatches at LP_PLAN_PUSH_HOUR:MINUTE.
+    LP_MPC_WRITE_DEVICES: bool = os.getenv("LP_MPC_WRITE_DEVICES", "false").lower() in ("1", "true", "yes")
+
+    # Nightly plan push: local wall-clock time to upload tomorrow's LP plan to Fox ESS + Daikin.
+    # Fires slightly before midnight so devices are programmed before the first slot starts.
+    LP_PLAN_PUSH_HOUR: int = int(os.getenv("LP_PLAN_PUSH_HOUR", "23"))
+    LP_PLAN_PUSH_MINUTE: int = int(os.getenv("LP_PLAN_PUSH_MINUTE", "55"))
+
     # Load-profile: rolling-window of execution_log slots used for per-hour-of-day load estimation.
     # The flat mean is used when fewer rows are available or when this is 0 (legacy).
     LP_LOAD_PROFILE_SLOTS: int = int(os.getenv("LP_LOAD_PROFILE_SLOTS", "2016"))  # 6 weeks × 48
