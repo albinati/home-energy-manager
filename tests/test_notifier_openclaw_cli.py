@@ -6,6 +6,7 @@ stale-data fallback, and the three MCP notification tools.
 from __future__ import annotations
 
 import subprocess
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -149,16 +150,19 @@ class TestSendViaOpenclawCli:
         monkeypatch.setattr(notifier, "_resolve_route", lambda _: self._default_route_patch())
 
         captured = {}
+        started = threading.Event()
 
         def fake_run(cmd, **kwargs):
             captured["cmd"] = cmd
+            started.set()
             result = MagicMock()
             result.returncode = 0
             return result
 
         monkeypatch.setattr(subprocess, "run", fake_run)
         assert notifier._send_via_openclaw_cli("risk_alert", "hello") is True
-        assert captured["cmd"] == [
+        started.wait(timeout=2)
+        assert captured.get("cmd") == [
             "/usr/local/bin/openclaw", "message", "send",
             "--channel", "telegram",
             "--target", "7964600619",
@@ -172,44 +176,68 @@ class TestSendViaOpenclawCli:
         monkeypatch.setattr(notifier, "_resolve_route", lambda _: {"channel": "telegram", "target": "123", "silent": True})
 
         captured = {}
+        started = threading.Event()
 
         def fake_run(cmd, **kwargs):
             captured["cmd"] = cmd
+            started.set()
             result = MagicMock()
             result.returncode = 0
             return result
 
         monkeypatch.setattr(subprocess, "run", fake_run)
         notifier._send_via_openclaw_cli("strategy_update", "msg")
-        assert "--silent" in captured["cmd"]
+        started.wait(timeout=2)
+        assert "--silent" in captured.get("cmd", [])
 
     def test_returns_false_on_nonzero_returncode(self, monkeypatch):
+        """Non-zero exit is logged but send still returns True (fire-and-forget)."""
         from src import notifier
         monkeypatch.setattr(notifier, "_resolve_route", lambda _: {"channel": "telegram", "target": "123", "silent": False})
         monkeypatch.setattr(notifier, "config", _make_config())
 
+        done = threading.Event()
+
         def fake_run(cmd, **kwargs):
+            done.set()
             result = MagicMock()
             result.returncode = 1
             result.stderr = "error"
             return result
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        assert notifier._send_via_openclaw_cli("risk_alert", "msg") is False
+        # fire-and-forget: returns True immediately regardless of subprocess outcome
+        assert notifier._send_via_openclaw_cli("risk_alert", "msg") is True
+        done.wait(timeout=2)
 
     def test_handles_timeout(self, monkeypatch):
         from src import notifier
         monkeypatch.setattr(notifier, "_resolve_route", lambda _: {"channel": "telegram", "target": "123", "silent": False})
         monkeypatch.setattr(notifier, "config", _make_config())
-        monkeypatch.setattr(subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(subprocess.TimeoutExpired([], 8)))
-        assert notifier._send_via_openclaw_cli("risk_alert", "msg") is False
+        done = threading.Event()
+
+        def fake_run(*a, **k):
+            done.set()
+            raise subprocess.TimeoutExpired([], 8)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        # fire-and-forget: always returns True; timeout is handled in background thread
+        assert notifier._send_via_openclaw_cli("risk_alert", "msg") is True
+        done.wait(timeout=2)
 
     def test_handles_missing_binary(self, monkeypatch):
         from src import notifier
         monkeypatch.setattr(notifier, "_resolve_route", lambda _: {"channel": "telegram", "target": "123", "silent": False})
         monkeypatch.setattr(notifier, "config", _make_config())
-        monkeypatch.setattr(subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError()))
-        assert notifier._send_via_openclaw_cli("risk_alert", "msg") is False
+        done = threading.Event()
+
+        def fake_run(*a, **k):
+            done.set()
+            raise FileNotFoundError()
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert notifier._send_via_openclaw_cli("risk_alert", "msg") is True
+        done.wait(timeout=2)
 
     def test_returns_false_when_no_route(self, monkeypatch):
         from src import notifier
