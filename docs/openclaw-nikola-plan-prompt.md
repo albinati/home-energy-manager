@@ -54,4 +54,4 @@ No motor **Bulletproof**, o otimizador pode **já ter aplicado** Fox Scheduler V
 | `OPENCLAW_HOOKS_AGENT_ID` | Opcional: agente dedicado a digest |
 | `OPENCLAW_INTERNAL_API_BASE_URL` | Base URL para GET do plano (texto do hook) |
 
-Documentação OpenClaw: [Webhooks](https://openclaws.io/docs/automation/webhook).
+Documentação OpenClaw: [Webhooks](https://docs.openclaw.ai/automation/cron-jobs#webhooks).
