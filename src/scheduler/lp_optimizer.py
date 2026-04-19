@@ -219,7 +219,16 @@ def solve_lp(
     soc_max = float(config.BATTERY_CAPACITY_KWH)
     tank_lo = 20.0
     tank_hi = float(config.DHW_TEMP_MAX_C)
-    t_min_dhw = float(config.TARGET_DHW_TEMP_MIN_NORMAL_C)
+    try:
+        from ..presets import OperationPreset
+        _preset = OperationPreset(config.OPTIMIZATION_PRESET)
+        t_min_dhw = float(
+            config.TARGET_DHW_TEMP_MIN_GUESTS_C
+            if _preset == OperationPreset.GUESTS
+            else config.TARGET_DHW_TEMP_MIN_NORMAL_C
+        )
+    except (ValueError, AttributeError):
+        t_min_dhw = float(config.TARGET_DHW_TEMP_MIN_NORMAL_C)
     t_leg = float(config.DHW_LEGIONELLA_TEMP_C)
 
     # Simplified HP model: max power from config, continuous between [0, max_hp_kwh]

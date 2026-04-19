@@ -15,7 +15,6 @@ from ..foxess.client import FoxESSClient, FoxESSError
 from ..foxess.models import SchedulerGroup
 from ..foxess.service import get_cached_realtime
 from ..physics import calculate_dhw_setpoint, find_dhw_heat_end_utc, build_shower_target_iso
-from ..notifier import push_cheap_window_start, push_peak_window_start
 from ..presets import OperationPreset
 from ..weather import HourlyForecast, estimate_pv_kw, fetch_forecast, forecast_to_lp_inputs, get_forecast_for_slot
 
@@ -247,33 +246,39 @@ def _slot_fox_tuple(
     s: HalfHourSlot,
     *,
     peak_export_discharge: bool = False,
-) -> tuple[str, Optional[int], Optional[int]]:
-    """work_mode, fd_soc, fd_pwr for Scheduler V3 (API uses SelfUse, ForceCharge, ForceDischarge).
+) -> tuple[str, Optional[int], Optional[int], int]:
+    """work_mode, fd_soc, fd_pwr, min_soc_on_grid for Scheduler V3.
 
     For ForceCharge slots the ``fdPwr`` (W) is taken from ``s.lp_grid_import_w`` when set
     (LP path), or falls back to the configured ``FOX_FORCE_CHARGE_*_PWR`` constants.
-    Using the LP-derived grid import power avoids telling Fox to pull more from the grid than
-    the MILP actually planned — especially important during PV-rich morning windows.
+    For solar_charge slots (LP import≈0, battery charges from PV) we use SelfUse with an
+    elevated minSocOnGrid so the battery is held at the LP's target level without forcing
+    any grid import — PV handles the charging naturally.
     """
+    if s.kind == "solar_charge":
+        min_soc = int(getattr(config, "FOX_SOLAR_CHARGE_MIN_SOC_PERCENT", 95))
+        return ("SelfUse", None, None, min_soc)
     if s.kind == "negative":
         pwr = s.lp_grid_import_w if s.lp_grid_import_w is not None else config.FOX_FORCE_CHARGE_MAX_PWR
-        return ("ForceCharge", 100, pwr)
+        return ("ForceCharge", 100, pwr, 10)
     if s.kind == "cheap":
         pwr = s.lp_grid_import_w if s.lp_grid_import_w is not None else config.FOX_FORCE_CHARGE_NORMAL_PWR
-        return ("ForceCharge", 95, pwr)
+        return ("ForceCharge", 95, pwr, 10)
     if s.kind == "peak_export":
         return (
             "ForceDischarge",
             int(config.EXPORT_DISCHARGE_FLOOR_SOC_PERCENT),
             config.FOX_FORCE_CHARGE_MAX_PWR,
+            10,
         )
     if s.kind == "peak" and peak_export_discharge:
         return (
             "ForceDischarge",
             int(config.EXPORT_DISCHARGE_FLOOR_SOC_PERCENT),
             config.FOX_FORCE_CHARGE_MAX_PWR,
+            10,
         )
-    return ("SelfUse", None, None)
+    return ("SelfUse", None, None, 10)
 
 
 def _optimization_preset_away_like() -> bool:
@@ -344,18 +349,19 @@ def _merge_fox_groups(
         a, _, ka = merged[0]
         _, d, kb = merged[1]
         if ka[0] == "ForceCharge" and kb[0] == "ForceCharge":
-            nk: tuple[str, Optional[int], Optional[int]] = (
+            nk: tuple[str, Optional[int], Optional[int], int] = (
                 "ForceCharge",
                 max(ka[1] or 0, kb[1] or 0),
                 max(ka[2] or 0, kb[2] or 0),
+                10,
             )
         else:
-            nk = ("SelfUse", None, None)
+            nk = ("SelfUse", None, None, 10)
         merged[0] = (a, d, nk)
         del merged[1]
 
     groups: list[SchedulerGroup] = []
-    for start_utc, end_utc, (wm, fds, fdp) in merged:
+    for start_utc, end_utc, (wm, fds, fdp, msg) in merged:
         ls = start_utc.astimezone(tz)
         le = end_utc.astimezone(tz)
         eh, em = le.hour, le.minute
@@ -369,7 +375,7 @@ def _merge_fox_groups(
                 end_hour=eh,
                 end_minute=em,
                 work_mode=wm,
-                min_soc_on_grid=10,
+                min_soc_on_grid=msg,
                 fd_soc=fds,
                 fd_pwr=fdp,
             )
@@ -389,10 +395,11 @@ def _merge_adjacent_force_charge_rows(
             and k[0] == "ForceCharge"
         ):
             a0, _, k0 = out[-1]
-            nk: tuple[str, Optional[int], Optional[int]] = (
+            nk: tuple[str, Optional[int], Optional[int], int] = (
                 "ForceCharge",
                 max(k0[1] or 0, k[1] or 0),
                 max(k0[2] or 0, k[2] or 0),
+                10,
             )
             out[-1] = (a0, b, nk)
         else:
@@ -403,11 +410,15 @@ def _merge_adjacent_force_charge_rows(
 def _coarse_merge_fox(
     merged: list[tuple[datetime, datetime, tuple]],
 ) -> list[tuple[datetime, datetime, tuple]]:
-    """Collapse SelfUse variants."""
+    """Collapse SelfUse variants; preserve highest minSocOnGrid when merging solar_charge windows."""
     out: list[tuple[datetime, datetime, tuple]] = []
     for a, b, k in merged:
-        nk = ("SelfUse", None, None) if k[0] == "SelfUse" else k
-        if out and out[-1][2] == nk and out[-1][1] == a:
+        nk = ("SelfUse", None, None, k[3]) if k[0] == "SelfUse" else k
+        if out and out[-1][2][0] == "SelfUse" and nk[0] == "SelfUse" and out[-1][1] == a:
+            prev_msg = out[-1][2][3]
+            merged_msg = max(prev_msg, nk[3])
+            out[-1] = (out[-1][0], b, ("SelfUse", None, None, merged_msg))
+        elif out and out[-1][2] == nk and out[-1][1] == a:
             out[-1] = (out[-1][0], b, nk)
         else:
             out.append((a, b, nk))
@@ -750,21 +761,6 @@ def _run_optimizer_heuristic(fox: Optional[FoxESSClient], daikin: Optional[Any] 
         )
         daikin_n += 1
 
-    try:
-        cheap_slots_local = [s for s in slots if s.kind in ("cheap", "negative")]
-        if cheap_slots_local:
-            first_cheap = min(cheap_slots_local, key=lambda s: s.start_utc)
-            push_cheap_window_start(fox_mode=None)
-            logger.info(
-                "Push: CHEAP_WINDOW_START first slot %s",
-                first_cheap.start_utc.astimezone(tz).strftime("%H:%M"),
-            )
-        peak_slots_local = [s for s in slots if s.kind == "peak"]
-        if peak_slots_local:
-            push_peak_window_start(soc=None)
-    except Exception as exc:
-        logger.debug("Push webhook error (non-fatal): %s", exc)
-
     db.log_optimizer_run(
         {
             "run_at": datetime.now(timezone.utc).isoformat(),
@@ -859,7 +855,7 @@ def _run_optimizer_lp(fox: Optional[FoxESSClient], daikin: Optional[Any] = None)
         return _run_optimizer_heuristic(fox, daikin)
 
     lp_slots = lp_plan_to_slots(plan)
-    counts = {"negative": 0, "cheap": 0, "standard": 0, "peak": 0, "peak_export": 0}
+    counts = {"negative": 0, "cheap": 0, "solar_charge": 0, "standard": 0, "peak": 0, "peak_export": 0}
     for s in lp_slots:
         counts[s.kind] = counts.get(s.kind, 0) + 1
 
@@ -916,16 +912,6 @@ def _run_optimizer_lp(fox: Optional[FoxESSClient], daikin: Optional[Any] = None)
     groups = build_fox_groups_from_lp(plan)
     fox_ok = upload_fox_if_operational(fox, groups)
     daikin_n = write_daikin_from_lp_plan(plan_date, plan, forecast)
-
-    try:
-        cheap_slots_local = [s for s in lp_slots if s.kind in ("cheap", "negative")]
-        if cheap_slots_local:
-            push_cheap_window_start(fox_mode=None)
-        peak_slots_local = [s for s in lp_slots if s.kind in ("peak", "peak_export")]
-        if peak_slots_local:
-            push_peak_window_start(soc=None)
-    except Exception as exc:
-        logger.debug("Push webhook error (non-fatal): %s", exc)
 
     db.log_optimizer_run(
         {
