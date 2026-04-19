@@ -22,6 +22,100 @@ logger = logging.getLogger(__name__)
 
 TZ = lambda: ZoneInfo(config.BULLETPROOF_TIMEZONE)
 
+# Octopus publishes tomorrow's rates ~16:00 UK time.  We call the plan "full-day" when
+# we have at least this many half-hour slots for the target day.
+_MIN_FULL_DAY_SLOTS = 40
+
+
+@dataclass
+class PlanWindow:
+    """Describes the time window the optimizer will plan for."""
+
+    plan_date: str           # ISO date string (YYYY-MM-DD)
+    day_start: datetime      # local-tz midnight (or now rounded to next HH slot)
+    horizon_end: datetime    # end of planning horizon
+    is_full_day: bool        # True = tomorrow's full day, False = today-remainder
+    rates: list              # raw rate rows covering the window
+
+
+def _resolve_plan_window(tariff: str) -> Optional[PlanWindow]:
+    """Determine the best available planning window given what rates are in the DB.
+
+    Resolution order:
+    1. Tomorrow's full-day rates present (≥ _MIN_FULL_DAY_SLOTS) → plan tomorrow midnight to LP_HORIZON_HOURS.
+    2. Today's partial/full rates present → plan from *now* (next half-hour boundary) to local midnight.
+    3. No usable rates → return None (caller should activate Self-Use fallback).
+
+    This makes the optimizer work correctly whether called at 09:00 (today's rates only),
+    16:30 (just after Octopus published tomorrow), or on-demand at any time.
+    """
+    tz = TZ()
+    now_local = datetime.now(tz)
+
+    # ── Try TOMORROW first ────────────────────────────────────────────────────
+    tomorrow = (now_local + timedelta(days=1)).date()
+    tmr_start = datetime.combine(tomorrow, datetime.min.time()).replace(tzinfo=tz)
+    tmr_end = tmr_start + timedelta(hours=int(config.LP_HORIZON_HOURS))
+
+    tmr_rates = db.get_rates_for_period(
+        tariff,
+        tmr_start.astimezone(timezone.utc) - timedelta(hours=1),
+        tmr_end.astimezone(timezone.utc) + timedelta(hours=2),
+    )
+    tmr_slots_preview = _build_half_hour_slots(tmr_rates or [], tmr_start, tmr_end)
+    if len(tmr_slots_preview) >= _MIN_FULL_DAY_SLOTS:
+        logger.info(
+            "Plan window: tomorrow %s (%d slots, full-day)",
+            tomorrow.isoformat(),
+            len(tmr_slots_preview),
+        )
+        return PlanWindow(
+            plan_date=tomorrow.isoformat(),
+            day_start=tmr_start,
+            horizon_end=tmr_end,
+            is_full_day=True,
+            rates=tmr_rates,
+        )
+
+    # ── Fall back to TODAY-REMAINDER ─────────────────────────────────────────
+    today = now_local.date()
+    # Round up to the next half-hour boundary
+    mins = now_local.minute
+    if mins < 30:
+        today_start = now_local.replace(minute=30, second=0, microsecond=0)
+    else:
+        today_start = (now_local + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+    today_end = datetime.combine(today + timedelta(days=1), datetime.min.time()).replace(tzinfo=tz)
+
+    if today_start >= today_end:
+        # Past midnight — nothing left to plan today
+        logger.warning("Plan window: no usable rates (past midnight, tomorrow not published yet)")
+        return None
+
+    today_rates = db.get_rates_for_period(
+        tariff,
+        today_start.astimezone(timezone.utc) - timedelta(minutes=30),
+        today_end.astimezone(timezone.utc) + timedelta(hours=1),
+    )
+    today_slots_preview = _build_half_hour_slots(today_rates or [], today_start, today_end)
+    if today_slots_preview:
+        logger.info(
+            "Plan window: today-remainder %s from %s (%d slots, partial-day)",
+            today.isoformat(),
+            today_start.strftime("%H:%M"),
+            len(today_slots_preview),
+        )
+        return PlanWindow(
+            plan_date=today.isoformat(),
+            day_start=today_start,
+            horizon_end=today_end,
+            is_full_day=False,
+            rates=today_rates,
+        )
+
+    logger.warning("Plan window: no usable rates in DB for today or tomorrow — Self-Use fallback")
+    return None
+
 
 @dataclass
 class HalfHourSlot:
@@ -506,19 +600,15 @@ def _run_optimizer_heuristic(fox: Optional[FoxESSClient], daikin: Optional[Any] 
         return {"ok": False, "error": "OCTOPUS_TARIFF_CODE not set"}
 
     tz = TZ()
-    tomorrow = (datetime.now(tz) + timedelta(days=1)).date()
-    plan_date = tomorrow.isoformat()
-    day_start = datetime.combine(tomorrow, datetime.min.time()).replace(tzinfo=tz)
-    day_end = day_start + timedelta(days=1)
+    window = _resolve_plan_window(tariff)
+    if window is None:
+        return _self_use_fallback(fox, reason="No Agile rates available for today or tomorrow")
 
-    rates = db.get_rates_for_period(
-        tariff,
-        day_start.astimezone(timezone.utc) - timedelta(hours=1),
-        day_end.astimezone(timezone.utc) + timedelta(hours=1),
-    )
-    if not rates:
-        return {"ok": False, "error": "No rates in SQLite for tomorrow — run Octopus fetch first"}
+    plan_date = window.plan_date
+    day_start = window.day_start
+    day_end = window.horizon_end
 
+    rates = window.rates
     forecast = fetch_forecast(hours=48)
     slots = _build_half_hour_slots(rates, day_start, day_end)
     _classify_slots(slots, forecast)
@@ -677,22 +767,18 @@ def _run_optimizer_lp(fox: Optional[FoxESSClient], daikin: Optional[Any] = None)
         return {"ok": False, "error": "OCTOPUS_TARIFF_CODE not set"}
 
     tz = TZ()
-    tomorrow = (datetime.now(tz) + timedelta(days=1)).date()
-    plan_date = tomorrow.isoformat()
-    day_start = datetime.combine(tomorrow, datetime.min.time()).replace(tzinfo=tz)
-    horizon_end = day_start + timedelta(hours=int(config.LP_HORIZON_HOURS))
+    window = _resolve_plan_window(tariff)
+    if window is None:
+        return _self_use_fallback(fox, reason="No Agile rates available for today or tomorrow")
 
-    rates = db.get_rates_for_period(
-        tariff,
-        day_start.astimezone(timezone.utc) - timedelta(hours=1),
-        horizon_end.astimezone(timezone.utc) + timedelta(hours=2),
-    )
-    if not rates:
-        return {"ok": False, "error": "No rates in SQLite for tomorrow — run Octopus fetch first"}
+    plan_date = window.plan_date
+    day_start = window.day_start
+    horizon_end = window.horizon_end
 
+    rates = window.rates
     slots = _build_half_hour_slots(rates, day_start, horizon_end)
     if not slots:
-        return {"ok": False, "error": "No half-hour slots in LP horizon — check Agile rates coverage"}
+        return _self_use_fallback(fox, reason="No half-hour slots in LP horizon — check Agile rates coverage")
 
     # Per-slot load profile (hour-of-day bins from execution_log)
     _profile_limit = int(getattr(config, "LP_LOAD_PROFILE_SLOTS", 2016))
@@ -827,10 +913,28 @@ def _run_optimizer_lp(fox: Optional[FoxESSClient], daikin: Optional[Any] = None)
     }
 
 
+def _self_use_fallback(fox: Optional[FoxESSClient], reason: str = "No rates") -> dict[str, Any]:
+    """Last-resort: set Fox to Self Use and log.  Called when no rates are available."""
+    logger.warning("Self-Use fallback triggered: %s", reason)
+    if fox and fox.api_key and config.OPERATION_MODE == "operational" and not config.OPENCLAW_READ_ONLY:
+        try:
+            fox.set_work_mode("Self Use")
+            fox.set_min_soc(10)
+            db.log_action(
+                device="foxess",
+                action="self_use_fallback",
+                params={"reason": reason},
+                result="success",
+                trigger="optimizer",
+            )
+        except Exception as e:
+            logger.warning("Self-Use fallback Fox call failed: %s", e)
+    return {"ok": False, "error": reason, "fallback": "self_use"}
+
+
 def run_optimizer(fox: Optional[FoxESSClient], daikin: Optional[Any] = None) -> dict[str, Any]:
     """Fetch rates from DB, plan (PuLP or heuristic), upload Fox V3, write Daikin actions."""
     backend = (config.OPTIMIZER_BACKEND or "lp").strip().lower()
     if backend == "heuristic":
         return _run_optimizer_heuristic(fox, daikin)
     return _run_optimizer_lp(fox, daikin)
-

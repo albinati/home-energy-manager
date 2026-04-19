@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from statistics import mean
 from typing import Any, Optional
 
@@ -12,7 +12,7 @@ from ..config import config
 from ..weather import HourlyForecast, fetch_forecast, forecast_to_lp_inputs, compute_pv_calibration_factor
 from .lp_initial_state import read_lp_initial_state
 from .lp_optimizer import LpInitialState, LpPlan, solve_lp
-from .optimizer import TZ, _build_half_hour_slots
+from .optimizer import TZ, _build_half_hour_slots, _resolve_plan_window
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +24,7 @@ class LpSimulationResult:
     ok: bool
     error: Optional[str] = None
     plan_date: str = ""
+    plan_window: str = ""        # "full_day" | "today_remainder"
     plan: Optional[LpPlan] = None
     initial: Optional[LpInitialState] = None
     mu_load_kwh: float = 0.0
@@ -32,6 +33,10 @@ class LpSimulationResult:
     forecast_solar_kwh_horizon: float = 0.0
     forecast: Optional[list[HourlyForecast]] = None
     pv_scale_factor: float = 1.0
+    # kept for compat — mirrors plan.slot_starts_utc
+    slot_starts_utc: list = None  # type: ignore[assignment]
+    objective_pence: float = 0.0
+    status: str = ""
 
 
 def _build_load_profile(slot_starts_utc: list[datetime]) -> list[float]:
@@ -55,34 +60,35 @@ def _build_load_profile(slot_starts_utc: list[datetime]) -> list[float]:
 def run_lp_simulation(*, daikin: Optional[Any] = None) -> LpSimulationResult:
     """Build the same inputs as ``_run_optimizer_lp``, solve, return plan — **no DB/Fox/Daikin writes**.
 
-    Requires ``OCTOPUS_TARIFF_CODE``, rates in SQLite for tomorrow's horizon (run Octopus fetch if empty).
+    Automatically selects the best available planning window:
+    - Tomorrow (full day) if tomorrow's rates are published (≥40 slots).
+    - Today-remainder if only today's rates are present.
+    - Returns an error result if no rates exist at all.
     """
     tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
     if not tariff:
         return LpSimulationResult(ok=False, error="OCTOPUS_TARIFF_CODE not set in environment")
 
     tz = TZ()
-    tomorrow = (datetime.now(tz) + timedelta(days=1)).date()
-    plan_date = tomorrow.isoformat()
-    day_start = datetime.combine(tomorrow, datetime.min.time()).replace(tzinfo=tz)
-    horizon_end = day_start + timedelta(hours=int(config.LP_HORIZON_HOURS))
-
-    rates = db.get_rates_for_period(
-        tariff,
-        day_start.astimezone(timezone.utc) - timedelta(hours=1),
-        horizon_end.astimezone(timezone.utc) + timedelta(hours=2),
-    )
-    if not rates:
+    window = _resolve_plan_window(tariff)
+    if window is None:
         return LpSimulationResult(
             ok=False,
-            error="No Agile rates in SQLite for the LP horizon — run the Octopus fetch job or `octopus_fetch` first.",
+            error="No Agile rates in SQLite for today or tomorrow — run the Octopus fetch job or `octopus_fetch` first.",
         )
 
-    slots = _build_half_hour_slots(rates, day_start, horizon_end)
+    plan_date = window.plan_date
+    plan_window_label = "full_day" if window.is_full_day else "today_remainder"
+    day_start = window.day_start
+    horizon_end = window.horizon_end
+
+    slots = _build_half_hour_slots(window.rates, day_start, horizon_end)
     if not slots:
         return LpSimulationResult(
             ok=False,
             error="No half-hour slots in horizon — check rate coverage for the product window.",
+            plan_date=plan_date,
+            plan_window=plan_window_label,
         )
 
     prices = [s.price_pence for s in slots]
@@ -117,6 +123,7 @@ def run_lp_simulation(*, daikin: Optional[Any] = None) -> LpSimulationResult:
             ok=False,
             error=f"LP solver status: {plan.status} (infeasible or timed out — try raising LP_HIGHS_TIME_LIMIT_SECONDS)",
             plan_date=plan_date,
+            plan_window=plan_window_label,
             plan=plan,
             initial=initial,
             mu_load_kwh=mu_load,
@@ -125,11 +132,15 @@ def run_lp_simulation(*, daikin: Optional[Any] = None) -> LpSimulationResult:
             forecast_solar_kwh_horizon=solar_kwh,
             forecast=forecast,
             pv_scale_factor=pv_scale,
+            slot_starts_utc=starts,
+            objective_pence=plan.objective_pence,
+            status=plan.status,
         )
 
     return LpSimulationResult(
         ok=True,
         plan_date=plan_date,
+        plan_window=plan_window_label,
         plan=plan,
         initial=initial,
         mu_load_kwh=mu_load,
@@ -138,4 +149,7 @@ def run_lp_simulation(*, daikin: Optional[Any] = None) -> LpSimulationResult:
         forecast_solar_kwh_horizon=solar_kwh,
         forecast=forecast,
         pv_scale_factor=pv_scale,
+        slot_starts_utc=starts,
+        objective_pence=plan.objective_pence,
+        status=plan.status,
     )
