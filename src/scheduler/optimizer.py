@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from statistics import mean
@@ -736,6 +737,8 @@ def _run_optimizer_heuristic(fox: Optional[FoxESSClient], daikin: Optional[Any] 
         }
     )
 
+    _write_plan_consent(plan_date, strategy)
+
     return {
         "ok": True,
         "plan_date": plan_date,
@@ -896,6 +899,8 @@ def _run_optimizer_lp(fox: Optional[FoxESSClient], daikin: Optional[Any] = None)
         }
     )
 
+    _write_plan_consent(plan_date, strategy)
+
     return {
         "ok": True,
         "plan_date": plan_date,
@@ -930,6 +935,108 @@ def _self_use_fallback(fox: Optional[FoxESSClient], reason: str = "No rates") ->
         except Exception as e:
             logger.warning("Self-Use fallback Fox call failed: %s", e)
     return {"ok": False, "error": reason, "fallback": "self_use"}
+
+
+def _write_plan_consent(plan_date: str, strategy: str) -> None:
+    """Write a plan_consent row and send the PLAN_PROPOSED notification.
+
+    Idempotency rules:
+    - If the plan is already approved/rejected, skip re-notifying and re-upsert only if
+      the plan content changed (new hash).
+    - If the plan is pending with the same hash, skip (no-op — avoid duplicate notifications).
+    - A cooldown (PLAN_REGEN_COOLDOWN_SECONDS) prevents rapid successive re-planning.
+    - When PLAN_AUTO_APPROVE=true, plans are immediately approved and notification uses
+      "auto-applied" prefix instead of asking for approval.
+    """
+    import hashlib
+    from ..notifier import notify_plan_proposed
+    plan_id = f"lp-{plan_date}"
+
+    # Compute a short content hash from the strategy string
+    plan_hash = hashlib.sha1(strategy.encode("utf-8")).hexdigest()[:12]
+
+    # Check for an existing consent row
+    existing = db.get_plan_consent(plan_date)
+    if existing:
+        existing_status = existing.get("status", "")
+        existing_hash = existing.get("plan_hash")
+
+        # Hard idempotency: don't clobber an already-approved or rejected plan
+        # unless the plan content changed meaningfully.
+        if existing_status in ("approved", "rejected"):
+            if existing_hash == plan_hash:
+                logger.info(
+                    "Plan %s already %s with same content — skipping re-consent",
+                    plan_id, existing_status,
+                )
+                return
+            # Content changed (new rates / re-plan after reject) — proceed normally
+            logger.info(
+                "Plan %s was %s but content changed (hash %s→%s) — re-proposing",
+                plan_id, existing_status, existing_hash, plan_hash,
+            )
+
+        # Duplicate suppression: pending + same hash = no-op
+        elif existing_status == "pending_approval" and existing_hash == plan_hash:
+            logger.info(
+                "Plan %s already pending with same content — skipping duplicate notification",
+                plan_id,
+            )
+            return
+
+    # Cooldown guard (in-process, keyed by plan_date)
+    cooldown_s = int(getattr(config, "PLAN_REGEN_COOLDOWN_SECONDS", 300))
+    if existing and cooldown_s > 0:
+        age_s = time.time() - float(existing.get("proposed_at", 0))
+        if age_s < cooldown_s and existing.get("plan_hash") == plan_hash:
+            logger.info(
+                "Plan %s cooldown active (%.0fs remaining) — skipping re-notify",
+                plan_id, cooldown_s - age_s,
+            )
+            return
+
+    expires_at = time.time() + config.PLAN_CONSENT_EXPIRY_SECONDS
+
+    if config.PLAN_AUTO_APPROVE:
+        db.upsert_plan_consent(
+            plan_id=plan_id,
+            plan_date=plan_date,
+            summary=strategy,
+            expires_at=expires_at,
+            plan_hash=plan_hash,
+        )
+        db.approve_plan(plan_id)
+        logger.info("Plan %s auto-approved (PLAN_AUTO_APPROVE=true)", plan_id)
+        # Notify with auto-applied prefix so the user knows the plan went live
+        try:
+            actions = db.get_actions_for_plan_date(plan_date)
+            notify_plan_proposed(
+                plan_id=plan_id,
+                plan_date=plan_date,
+                summary=f"[AUTO-APPLIED] {strategy}",
+                actions=actions,
+            )
+        except Exception as exc:
+            logger.warning("notify_plan_proposed (auto-applied) failed (non-fatal): %s", exc)
+        return
+
+    db.upsert_plan_consent(
+        plan_id=plan_id,
+        plan_date=plan_date,
+        summary=strategy,
+        expires_at=expires_at,
+        plan_hash=plan_hash,
+    )
+    try:
+        actions = db.get_actions_for_plan_date(plan_date)
+        notify_plan_proposed(
+            plan_id=plan_id,
+            plan_date=plan_date,
+            summary=strategy,
+            actions=actions,
+        )
+    except Exception as exc:
+        logger.warning("notify_plan_proposed failed (non-fatal): %s", exc)
 
 
 def run_optimizer(fox: Optional[FoxESSClient], daikin: Optional[Any] = None) -> dict[str, Any]:

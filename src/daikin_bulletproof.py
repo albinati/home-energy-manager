@@ -16,7 +16,13 @@ def _fclose(a: Optional[float], b: float, *, eps: float = 0.35) -> bool:
 
 
 def daikin_device_matches_params(dev: DaikinDevice, params: dict[str, Any]) -> bool:
-    """Return True if live readings match scheduled params (skips redundant PATCHes)."""
+    """Return True if live readings match scheduled params (skips redundant PATCHes).
+
+    For ``tank_power`` and ``tank_powerful`` the device model does not expose live
+    values in this snapshot, so we cannot confirm a match. Those fields always trigger
+    a write to ensure correct state (conservative but safe).
+    All other fields (lwt_offset, tank_temp, climate_on) use tolerance-based comparison.
+    """
     if "lwt_offset" in params and dev.lwt_offset is not None:
         if not _fclose(dev.lwt_offset, float(params["lwt_offset"])):
             return False

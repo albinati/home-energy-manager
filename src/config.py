@@ -363,6 +363,10 @@ class Config:
     # Plan consent expiry in seconds (default 60 min). Proposed plans expire if not approved.
     PLAN_CONSENT_EXPIRY_SECONDS: int = int(os.getenv("PLAN_CONSENT_EXPIRY_SECONDS", "3600"))
 
+    # Minimum cooldown between re-plan requests (seconds). Prevents rapid re-planning spam.
+    # Set to 0 to disable. Default 300 s (5 min).
+    PLAN_REGEN_COOLDOWN_SECONDS: int = int(os.getenv("PLAN_REGEN_COOLDOWN_SECONDS", "300"))
+
     # When True, every freshly proposed plan is immediately auto-approved.
     # Only meaningful when OPERATION_MODE=operational; in simulation mode the effect is
     # the same but harmless. Disable this to return to explicit per-plan consent.

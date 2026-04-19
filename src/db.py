@@ -184,6 +184,22 @@ CREATE TABLE IF NOT EXISTS notification_routes (
     silent INTEGER NOT NULL DEFAULT 0,
     updated_at REAL NOT NULL DEFAULT (strftime('%s','now'))
 );
+
+CREATE TABLE IF NOT EXISTS plan_consent (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    plan_id     TEXT NOT NULL UNIQUE,
+    plan_date   TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'pending_approval',
+    proposed_at REAL NOT NULL,
+    approved_at REAL,
+    rejected_at REAL,
+    expires_at  REAL NOT NULL,
+    summary     TEXT,
+    plan_hash   TEXT,
+    created_at  REAL NOT NULL DEFAULT (strftime('%s','now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_plan_consent_date ON plan_consent(plan_date, status);
 """
 
 
@@ -302,6 +318,37 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
                VALUES (?, 1, ?, ?)""",
             (_at, _sev, _sil),
         )
+
+    # V7: plan_consent — holds proposed plans until the user approves/rejects via MCP
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS plan_consent (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_id     TEXT NOT NULL UNIQUE,
+            plan_date   TEXT NOT NULL,
+            status      TEXT NOT NULL DEFAULT 'pending_approval',
+            proposed_at REAL NOT NULL,
+            approved_at REAL,
+            rejected_at REAL,
+            expires_at  REAL NOT NULL,
+            summary     TEXT,
+            plan_hash   TEXT,
+            created_at  REAL NOT NULL DEFAULT (strftime('%s','now'))
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_plan_consent_date ON plan_consent(plan_date, status)"
+    )
+    # V8: add plan_hash column if missing (existing DBs from V7)
+    cur = conn.execute("PRAGMA table_info(plan_consent)")
+    pc_cols = {str(r[1]) for r in cur.fetchall()}
+    if "plan_hash" not in pc_cols:
+        conn.execute("ALTER TABLE plan_consent ADD COLUMN plan_hash TEXT")
+    # Seed plan_proposed notification route (critical, audible)
+    conn.execute(
+        """INSERT OR IGNORE INTO notification_routes
+           (alert_type, enabled, severity, silent)
+           VALUES ('plan_proposed', 1, 'critical', 0)"""
+    )
 
 
 def init_db() -> None:
@@ -1369,6 +1416,124 @@ def upsert_notification_route(
                     ),
                 )
             conn.commit()
+        finally:
+            conn.close()
+
+
+# ---------------------------------------------------------------------------
+# V7: plan_consent — user-approval gate for proposed plans
+# ---------------------------------------------------------------------------
+
+def upsert_plan_consent(
+    plan_id: str,
+    plan_date: str,
+    summary: str,
+    expires_at: float,
+    plan_hash: Optional[str] = None,
+) -> None:
+    """Insert or replace a plan_consent row with status=pending_approval."""
+    import time
+    now = time.time()
+    with _lock:
+        conn = get_connection()
+        try:
+            conn.execute(
+                """INSERT INTO plan_consent
+                   (plan_id, plan_date, status, proposed_at, expires_at, summary, plan_hash, created_at)
+                   VALUES (?, ?, 'pending_approval', ?, ?, ?, ?, ?)
+                   ON CONFLICT(plan_id) DO UPDATE SET
+                     plan_date=excluded.plan_date,
+                     status='pending_approval',
+                     proposed_at=excluded.proposed_at,
+                     approved_at=NULL,
+                     rejected_at=NULL,
+                     expires_at=excluded.expires_at,
+                     summary=excluded.summary,
+                     plan_hash=excluded.plan_hash""",
+                (plan_id, plan_date, now, expires_at, summary, plan_hash, now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def get_plan_consent(plan_date: str) -> Optional[dict[str, Any]]:
+    """Return the most recent plan_consent row for *plan_date*, or None."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT * FROM plan_consent WHERE plan_date = ?
+                   ORDER BY proposed_at DESC LIMIT 1""",
+                (plan_date,),
+            )
+            r = cur.fetchone()
+            return dict(r) if r else None
+        finally:
+            conn.close()
+
+
+def approve_plan(plan_id: str) -> bool:
+    """Set plan_consent status to approved. Returns True if a row was updated."""
+    import time
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """UPDATE plan_consent
+                   SET status='approved', approved_at=?
+                   WHERE plan_id=? AND status='pending_approval'""",
+                (time.time(), plan_id),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+
+def reject_plan(plan_id: str) -> bool:
+    """Set plan_consent status to rejected and delete pending action_schedule rows.
+
+    Returns True if a row was updated.
+    """
+    import time
+    with _lock:
+        conn = get_connection()
+        try:
+            row = conn.execute(
+                "SELECT plan_date FROM plan_consent WHERE plan_id=?", (plan_id,)
+            ).fetchone()
+            if row:
+                plan_date = row["plan_date"]
+                conn.execute(
+                    "DELETE FROM action_schedule WHERE date=? AND status='pending'",
+                    (plan_date,),
+                )
+            cur = conn.execute(
+                """UPDATE plan_consent
+                   SET status='rejected', rejected_at=?
+                   WHERE plan_id=? AND status='pending_approval'""",
+                (time.time(), plan_id),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+
+def expire_plan(plan_id: str) -> bool:
+    """Set plan_consent status to expired. Returns True if a row was updated."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """UPDATE plan_consent
+                   SET status='expired'
+                   WHERE plan_id=? AND status='pending_approval'""",
+                (plan_id,),
+            )
+            conn.commit()
+            return cur.rowcount > 0
         finally:
             conn.close()
 

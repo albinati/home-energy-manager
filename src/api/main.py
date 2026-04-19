@@ -1778,7 +1778,7 @@ async def optimization_propose(include_plan: bool = False):
         fox = FoxESSClient(**config.foxess_client_kwargs())
     except Exception:
         pass
-    result = run_optimizer(fox, None)
+    result = await asyncio.to_thread(run_optimizer, fox, None)
     if not result.get("ok"):
         raise HTTPException(status_code=500, detail=result.get("error", "optimizer failed"))
     now = datetime.now(timezone.utc)
