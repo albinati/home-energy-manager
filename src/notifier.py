@@ -1,17 +1,23 @@
-"""Alert notifier — stdout always; optional OpenClaw webhook (webchat, Telegram, etc.)."""
+"""Alert notifier — stdout always; optional OpenClaw CLI delivery.
+
+Every alert is printed to stdout unconditionally and logged to action_log.
+If OPENCLAW_NOTIFY_ENABLED=true and a target is configured, it is also sent
+via `openclaw message send` (subprocess — no HTTP API keys required).
+
+Routing is controlled per-AlertType via the `notification_routes` SQLite table
+which can be updated at runtime through the MCP tools without restarting the
+service.  See src/db.py: get_notification_route / upsert_notification_route.
+"""
 from __future__ import annotations
 
 import json
-import urllib.request
+import subprocess
 from datetime import datetime
 from enum import Enum
 from typing import Any, Optional
 
 from . import db
 from .config import config
-
-# V2: dedicated push-webhook endpoint for energy state events
-_ENERGY_WEBHOOK_URL = "http://127.0.0.1:18789/api/webhook/energy_alert"
 
 
 class AlertType(str, Enum):
@@ -26,10 +32,112 @@ class AlertType(str, Enum):
     DAILY_PNL = "daily_pnl"
 
 
-def notify(message: str, urgent: bool = False) -> None:
-    """Send a notification. Always prints to stdout; if ALERT_CHANNEL is set, sends to OpenClaw webhook."""
-    _dispatch(AlertType.RISK_ALERT if urgent else AlertType.ACTION_CONFIRMATION, message, urgent=urgent)
+# ---------------------------------------------------------------------------
+# Route resolution (SQLite → env fallback)
+# ---------------------------------------------------------------------------
 
+def _resolve_route(alert_type: str) -> Optional[dict[str, Any]]:
+    """Return {channel, target, silent} for *alert_type* or None if disabled/unconfigured.
+
+    Resolution order:
+    1. notification_routes row: if enabled=0, return None (muted).
+    2. target_override / channel_override from the row, if set.
+    3. Severity-specific env vars (OPENCLAW_NOTIFY_TARGET_CRITICAL, etc.).
+    4. Default env vars (OPENCLAW_NOTIFY_TARGET, OPENCLAW_NOTIFY_CHANNEL).
+    5. If no target, return None (silently skip delivery).
+    """
+    if not config.OPENCLAW_NOTIFY_ENABLED:
+        return None
+
+    row: Optional[dict[str, Any]] = None
+    try:
+        row = db.get_notification_route(alert_type)
+    except Exception:
+        pass
+
+    if row is not None and not row.get("enabled", 1):
+        return None
+
+    severity: str = (row or {}).get("severity") or "reports"
+
+    # Resolve target
+    target: str = (
+        (row or {}).get("target_override") or ""
+        or (
+            config.OPENCLAW_NOTIFY_TARGET_CRITICAL
+            if severity == "critical"
+            else config.OPENCLAW_NOTIFY_TARGET_REPORTS
+        )
+        or config.OPENCLAW_NOTIFY_TARGET
+    ).strip()
+
+    # Resolve channel
+    channel: str = (
+        (row or {}).get("channel_override") or ""
+        or (
+            config.OPENCLAW_NOTIFY_CHANNEL_CRITICAL
+            if severity == "critical"
+            else config.OPENCLAW_NOTIFY_CHANNEL_REPORTS
+        )
+        or config.OPENCLAW_NOTIFY_CHANNEL
+    ).strip()
+
+    if not target:
+        return None
+
+    silent: bool = bool((row or {}).get("silent", 0))
+    return {"channel": channel, "target": target, "silent": silent}
+
+
+# ---------------------------------------------------------------------------
+# Subprocess sender
+# ---------------------------------------------------------------------------
+
+def _send_via_openclaw_cli(alert_type: str, message: str) -> bool:
+    """Send *message* via `openclaw message send`.
+
+    Returns True on success, False on any failure (never raises).
+    Errors are printed to stdout so they appear in the service journal.
+    """
+    route = _resolve_route(alert_type)
+    if not route:
+        return False
+
+    cmd = [
+        config.OPENCLAW_CLI_PATH, "message", "send",
+        "--channel", route["channel"],
+        "--target", route["target"],
+        "--message", message,
+    ]
+    if route["silent"]:
+        cmd.append("--silent")
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=config.OPENCLAW_CLI_TIMEOUT_SECONDS,
+        )
+        if result.returncode != 0:
+            stderr_snippet = (result.stderr or "").strip()[:200]
+            print(f"[openclaw send failed] {alert_type}: {stderr_snippet}")
+            return False
+        return True
+    except subprocess.TimeoutExpired:
+        print(f"[openclaw timeout] {alert_type} (>{config.OPENCLAW_CLI_TIMEOUT_SECONDS}s)")
+        return False
+    except FileNotFoundError:
+        print(f"[openclaw cli missing] {config.OPENCLAW_CLI_PATH}")
+        return False
+    except Exception as exc:
+        print(f"[openclaw error] {alert_type}: {exc}")
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Internal dispatcher (shared by all public helpers)
+# ---------------------------------------------------------------------------
 
 def _dispatch(
     kind: AlertType,
@@ -57,8 +165,16 @@ def _dispatch(
     except Exception:
         pass
 
-    if config.ALERT_CHANNEL:
-        _send_via_openclaw(message=full_msg)
+    _send_via_openclaw_cli(kind.value, full_msg)
+
+
+# ---------------------------------------------------------------------------
+# Public API (identical signatures to the old notifier — callers unchanged)
+# ---------------------------------------------------------------------------
+
+def notify(message: str, urgent: bool = False) -> None:
+    """Send a notification. Always prints to stdout; delivers via OpenClaw CLI if configured."""
+    _dispatch(AlertType.RISK_ALERT if urgent else AlertType.ACTION_CONFIRMATION, message, urgent=urgent)
 
 
 def notify_morning_report(body: str) -> None:
@@ -84,29 +200,12 @@ def notify_critical(message: str) -> None:
     _dispatch(AlertType.CRITICAL_ERROR, message, urgent=True)
 
 
-def _send_via_openclaw(message: str) -> bool:
-    """Send via OpenClaw gateway (ALERT_OPENCLAW_URL). Uses ALERT_CHANNEL (e.g. webchat, telegram)."""
-    try:
-        payload: dict = {"message": message}
-        if config.ALERT_CHANNEL:
-            payload["channel"] = config.ALERT_CHANNEL
-        req = urllib.request.Request(
-            config.ALERT_OPENCLAW_URL,
-            data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json"},
-        )
-        urllib.request.urlopen(req, timeout=3)
-        return True
-    except Exception:
-        return False
-
-
 # ---------------------------------------------------------------------------
-# V2: structured push-webhook helpers
+# V2: structured push-webhook helpers (now delivered via CLI instead of HTTP)
 # ---------------------------------------------------------------------------
 
 def push_alert(event_type: str, payload: dict[str, Any]) -> bool:
-    """Push a structured event to the energy alert webhook endpoint.
+    """Push a structured event notification.
 
     event_type values:
     - ``CHEAP_WINDOW_START``  — battery charging / DHW heating active
@@ -115,20 +214,23 @@ def push_alert(event_type: str, payload: dict[str, Any]) -> bool:
 
     Failures are caught and logged; never raises.
     """
-    ts = datetime.now().isoformat(timespec="seconds")
-    body = {"type": event_type, "ts": ts, "data": payload}
-    print(f"[push_alert] {event_type}: {json.dumps(payload, default=str)[:200]}")
+    ts = datetime.now().strftime("%H:%M")
+    payload_snippet = json.dumps(payload, default=str)[:500]
+    full_msg = f"[{ts}] [info] energy-manager [{event_type}]\n{payload_snippet}"
+    print(f"[push_alert] {event_type}: {payload_snippet[:200]}")
+
     try:
-        req = urllib.request.Request(
-            _ENERGY_WEBHOOK_URL,
-            data=json.dumps(body, default=str).encode(),
-            headers={"Content-Type": "application/json"},
+        db.log_action(
+            device="system",
+            action=event_type,
+            params=payload,
+            result="success",
+            trigger="notification",
         )
-        urllib.request.urlopen(req, timeout=5)
-        return True
-    except Exception as exc:
-        print(f"Webhook push failed ({event_type}): {exc}. State logged locally.")
-        return False
+    except Exception:
+        pass
+
+    return _send_via_openclaw_cli(event_type, full_msg)
 
 
 def push_cheap_window_start(soc: Optional[float] = None, fox_mode: Optional[str] = None) -> None:
@@ -155,9 +257,5 @@ def push_peak_window_start(soc: Optional[float] = None) -> None:
 
 
 def push_daily_pnl(metrics: dict[str, Any]) -> None:
-    """Emit DAILY_PNL report: hedge-fund format with PnL, VWAP, slippage.
-
-    *metrics* should include: date, total_kwh, total_cost_pence, total_saving_pence,
-    vwap_pence, svt_vwap_pence, slippage_pence.
-    """
+    """Emit DAILY_PNL report: hedge-fund format with PnL, VWAP, slippage."""
     push_alert(AlertType.DAILY_PNL.value, metrics)
