@@ -109,6 +109,21 @@ class Config:
     OPENCLAW_NOTIFY_TARGET_REPORTS: str = (os.getenv("OPENCLAW_NOTIFY_TARGET_REPORTS") or "").strip()
     OPENCLAW_NOTIFY_CHANNEL_REPORTS: str = (os.getenv("OPENCLAW_NOTIFY_CHANNEL_REPORTS") or "").strip()
 
+    # PLAN_PROPOSED delivery: ``direct`` = `openclaw message send` (default).
+    # ``webhook`` = POST to OpenClaw Gateway ``/hooks/agent`` so an agent can rewrite
+    # the message before Telegram; falls back to direct CLI if the hook fails.
+    OPENCLAW_PLAN_NOTIFY_MODE: str = (os.getenv("OPENCLAW_PLAN_NOTIFY_MODE") or "direct").strip().lower()
+    # Full URL e.g. http://127.0.0.1:18789/hooks/agent — see OpenClaw Webhooks docs.
+    OPENCLAW_HOOKS_URL: str = (os.getenv("OPENCLAW_HOOKS_URL") or "").strip()
+    OPENCLAW_HOOKS_TOKEN: str = (os.getenv("OPENCLAW_HOOKS_TOKEN") or "").strip()
+    OPENCLAW_HOOKS_TIMEOUT_SECONDS: int = int(os.getenv("OPENCLAW_HOOKS_TIMEOUT_SECONDS", "30"))
+    # Optional: route hook to a named agent (Gateway hooks.allowedAgentIds must allow it).
+    OPENCLAW_HOOKS_AGENT_ID: str = (os.getenv("OPENCLAW_HOOKS_AGENT_ID") or "").strip()
+    # Shown inside the hook ``message`` so the agent can fetch the full plan (avoid huge payloads).
+    OPENCLAW_INTERNAL_API_BASE_URL: str = (
+        os.getenv("OPENCLAW_INTERNAL_API_BASE_URL") or "http://127.0.0.1:8000"
+    ).strip().rstrip("/")
+
     # Energy providers (for tariff tracking and cost analysis)
     OCTOPUS_API_KEY: str = os.getenv("OCTOPUS_API_KEY", "")
     OCTOPUS_ACCOUNT_NUMBER: str = os.getenv("OCTOPUS_ACCOUNT_NUMBER", "")

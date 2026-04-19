@@ -4,6 +4,10 @@ Every alert is printed to stdout unconditionally and logged to action_log.
 If OPENCLAW_NOTIFY_ENABLED=true and a target is configured, it is also sent
 via `openclaw message send` (subprocess — no HTTP API keys required).
 
+For PLAN_PROPOSED only, set OPENCLAW_PLAN_NOTIFY_MODE=webhook plus OPENCLAW_HOOKS_URL
+and OPENCLAW_HOOKS_TOKEN to POST to the OpenClaw Gateway ``/hooks/agent`` endpoint
+so an agent can summarize before Telegram (see docs/openclaw-nikola-plan-prompt.md).
+
 Routing is controlled per-AlertType via the `notification_routes` SQLite table
 which can be updated at runtime through the MCP tools without restarting the
 service.  See src/db.py: get_notification_route / upsert_notification_route.
@@ -16,6 +20,8 @@ import threading
 from datetime import datetime
 from enum import Enum
 from typing import Any, Optional
+
+import requests
 
 from . import db
 from .config import config
@@ -142,20 +148,35 @@ def _send_via_openclaw_cli(alert_type: str, message: str) -> bool:
 # Internal dispatcher (shared by all public helpers)
 # ---------------------------------------------------------------------------
 
-def _dispatch(
+def _compose_delivery_body(
     kind: AlertType,
     message: str,
     *,
     urgent: bool = False,
     extra: Optional[dict[str, Any]] = None,
-) -> None:
+) -> str:
     prefix = "[URGENT]" if urgent else "[info]"
     ts = datetime.now().strftime("%H:%M")
     meta = f" [{kind.value}]" if kind else ""
     full_msg = f"[{ts}] {prefix} energy-manager{meta}\n{message}"
     if extra:
         full_msg += "\n" + json.dumps(extra, default=str)[:500]
-    print(full_msg)
+    return full_msg
+
+
+def _record_notification(
+    kind: AlertType,
+    message: str,
+    *,
+    urgent: bool = False,
+    extra: Optional[dict[str, Any]] = None,
+    full_msg: Optional[str] = None,
+) -> str:
+    """Print, log to action_log; return *full_msg* for CLI delivery."""
+    body = full_msg if full_msg is not None else _compose_delivery_body(
+        kind, message, urgent=urgent, extra=extra
+    )
+    print(body)
 
     try:
         db.log_action(
@@ -168,6 +189,18 @@ def _dispatch(
     except Exception:
         pass
 
+    return body
+
+
+def _dispatch(
+    kind: AlertType,
+    message: str,
+    *,
+    urgent: bool = False,
+    extra: Optional[dict[str, Any]] = None,
+) -> None:
+    full_msg = _compose_delivery_body(kind, message, urgent=urgent, extra=extra)
+    _record_notification(kind, message, urgent=urgent, extra=extra, full_msg=full_msg)
     _send_via_openclaw_cli(kind.value, full_msg)
 
 
@@ -268,6 +301,89 @@ def push_daily_pnl(metrics: dict[str, Any]) -> None:
 # V7: plan consent notification
 # ---------------------------------------------------------------------------
 
+def _truncate_for_webhook(s: str, max_chars: int = 6000) -> str:
+    if len(s) <= max_chars:
+        return s
+    return s[: max_chars - 20] + "\n… [truncated]"
+
+
+def _build_hooks_agent_message(
+    plan_id: str,
+    plan_date: str,
+    summary: str,
+    table: str,
+    *,
+    api_base: str,
+) -> str:
+    """Compact instructions + data for OpenClaw ``/hooks/agent`` (avoid 413)."""
+    bulletproof_note = (
+        "IMPORTANT: In Bulletproof mode the optimizer may have ALREADY applied Fox V3 and "
+        "Daikin actions at propose time. Tools confirm_plan / reject_plan are for "
+        "acknowledgement and MCP gating — do NOT tell the user they must approve to "
+        "'apply' hardware unless the deployment explicitly uses a consent gate."
+    )
+    return (
+        f"{bulletproof_note}\n\n"
+        f"New energy plan — summarize for the user in natural language (no raw JSON dump).\n"
+        f"- plan_id: {plan_id}\n"
+        f"- plan_date: {plan_date}\n"
+        f"- Fetch full JSON if needed: GET {api_base}/api/v1/optimization/plan\n"
+        f"- MCP: same host exposes home-energy-manager tools.\n\n"
+        f"Strategy summary:\n{summary}\n\n"
+        f"Schedule preview (Daikin rows, local times):\n{_truncate_for_webhook(table)}\n"
+    )
+
+
+def _send_hooks_agent_post(payload: dict[str, Any]) -> bool:
+    """Synchronous POST; returns True if HTTP 2xx."""
+    url = config.OPENCLAW_HOOKS_URL.strip()
+    token = config.OPENCLAW_HOOKS_TOKEN.strip()
+    if not url or not token:
+        return False
+    try:
+        r = requests.post(
+            url,
+            json=payload,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            timeout=float(config.OPENCLAW_HOOKS_TIMEOUT_SECONDS),
+        )
+        return 200 <= r.status_code < 300
+    except requests.RequestException as exc:
+        print(f"[openclaw hooks] request failed: {exc}")
+        return False
+
+
+def _enqueue_plan_webhook(
+    full_msg_for_fallback: str,
+    agent_message: str,
+    route: dict[str, Any],
+) -> None:
+    """Fire-and-forget: try Gateway hook; on failure send the preformatted CLI message."""
+
+    def _run() -> None:
+        payload: dict[str, Any] = {
+            "message": agent_message,
+            "name": "EnergyPlan",
+            "wakeMode": "now",
+            "deliver": True,
+            "channel": route.get("channel") or config.OPENCLAW_NOTIFY_CHANNEL,
+            "timeoutSeconds": min(300, max(30, int(config.OPENCLAW_HOOKS_TIMEOUT_SECONDS) * 4)),
+        }
+        to = (route.get("target") or "").strip()
+        if to:
+            payload["to"] = to
+        aid = getattr(config, "OPENCLAW_HOOKS_AGENT_ID", "") or ""
+        if aid.strip():
+            payload["agentId"] = aid.strip()
+        if _send_hooks_agent_post(payload):
+            return
+        print("[openclaw hooks] webhook failed or non-2xx — falling back to CLI plan_proposed")
+        _send_via_openclaw_cli(AlertType.PLAN_PROPOSED.value, full_msg_for_fallback)
+
+    t = threading.Thread(target=_run, daemon=True, name="openclaw-hooks-plan")
+    t.start()
+
+
 def _format_plan_actions(actions: list[dict[str, Any]], tz_name: str = "Europe/London") -> str:
     """Render action_schedule rows as a compact human-readable table."""
     from zoneinfo import ZoneInfo
@@ -308,8 +424,7 @@ def notify_plan_proposed(
     actions: list[dict[str, Any]],
 ) -> None:
     """Send a PLAN_PROPOSED notification with the full schedule and approval instructions."""
-    from .config import config as _cfg
-    tz_name = getattr(_cfg, "BULLETPROOF_TIMEZONE", "Europe/London")
+    tz_name = getattr(config, "BULLETPROOF_TIMEZONE", "Europe/London")
     table = _format_plan_actions(actions, tz_name)
     msg = (
         f"New energy plan for {plan_date} — ID: {plan_id}\n"
@@ -317,6 +432,33 @@ def notify_plan_proposed(
         f"\n{summary}\n"
         f"\nTo activate: confirm_plan(\"{plan_id}\")\n"
         f"To reject:   reject_plan(\"{plan_id}\")\n"
-        f"(Auto-activates in {_cfg.PLAN_CONSENT_EXPIRY_SECONDS // 60} min if no response)"
+        f"(Auto-activates in {config.PLAN_CONSENT_EXPIRY_SECONDS // 60} min if no response)"
     )
-    _dispatch(AlertType.PLAN_PROPOSED, msg, urgent=True)
+    full_msg = _compose_delivery_body(AlertType.PLAN_PROPOSED, msg, urgent=True, extra=None)
+    _record_notification(AlertType.PLAN_PROPOSED, msg, urgent=True, extra=None, full_msg=full_msg)
+
+    mode = getattr(config, "OPENCLAW_PLAN_NOTIFY_MODE", "direct") or "direct"
+    hooks_url = getattr(config, "OPENCLAW_HOOKS_URL", "") or ""
+    hooks_token = getattr(config, "OPENCLAW_HOOKS_TOKEN", "") or ""
+
+    if (
+        mode == "webhook"
+        and hooks_url
+        and hooks_token
+        and config.OPENCLAW_NOTIFY_ENABLED
+    ):
+        route = _resolve_route(AlertType.PLAN_PROPOSED.value)
+        if route:
+            api_base = getattr(config, "OPENCLAW_INTERNAL_API_BASE_URL", "http://127.0.0.1:8000")
+            agent_msg = _build_hooks_agent_message(
+                plan_id,
+                plan_date,
+                summary,
+                table,
+                api_base=api_base,
+            )
+            _enqueue_plan_webhook(full_msg, agent_msg, route)
+            return
+        print("[openclaw hooks] plan_proposed: no notify route — falling back to direct CLI")
+
+    _send_via_openclaw_cli(AlertType.PLAN_PROPOSED.value, full_msg)

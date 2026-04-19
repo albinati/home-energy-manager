@@ -5,8 +5,10 @@ stale-data fallback, and the three MCP notification tools.
 """
 from __future__ import annotations
 
+import importlib.util
 import subprocess
 import threading
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -28,6 +30,14 @@ def _make_config(**overrides):
         OPENCLAW_NOTIFY_CHANNEL_CRITICAL="",
         OPENCLAW_NOTIFY_TARGET_REPORTS="",
         OPENCLAW_NOTIFY_CHANNEL_REPORTS="",
+        OPENCLAW_PLAN_NOTIFY_MODE="direct",
+        OPENCLAW_HOOKS_URL="",
+        OPENCLAW_HOOKS_TOKEN="",
+        OPENCLAW_HOOKS_TIMEOUT_SECONDS=30,
+        OPENCLAW_HOOKS_AGENT_ID="",
+        OPENCLAW_INTERNAL_API_BASE_URL="http://127.0.0.1:8000",
+        PLAN_CONSENT_EXPIRY_SECONDS=3600,
+        BULLETPROOF_TIMEZONE="Europe/London",
     )
     defaults.update(overrides)
     ns = MagicMock()
@@ -267,6 +277,122 @@ class TestDispatchLogsOnFailure:
 # push_alert uses CLI (not urllib)
 # ---------------------------------------------------------------------------
 
+class TestNotifyPlanProposedWebhook:
+    """OPENCLAW_PLAN_NOTIFY_MODE=webhook posts to Gateway /hooks/agent."""
+
+    def test_webhook_posts_and_skips_cli_on_success(self, monkeypatch):
+        from src import notifier
+
+        posted: list[dict[str, Any]] = []
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            posted.append({"url": url, "json": json, "headers": headers})
+            r = MagicMock()
+            r.status_code = 200
+            return r
+
+        class ImmediateThread:
+            def __init__(self, target, daemon=True, name=""):
+                self._target = target
+
+            def start(self):
+                self._target()
+
+        monkeypatch.setattr(notifier.requests, "post", fake_post)
+        monkeypatch.setattr(notifier.threading, "Thread", ImmediateThread)
+
+        cfg = _make_config(
+            OPENCLAW_PLAN_NOTIFY_MODE="webhook",
+            OPENCLAW_HOOKS_URL="http://127.0.0.1:18789/hooks/agent",
+            OPENCLAW_HOOKS_TOKEN="test-token",
+        )
+        monkeypatch.setattr(notifier, "config", cfg)
+        monkeypatch.setattr(notifier.db, "log_action", lambda **kw: None)
+        cli_calls: list[tuple[Any, ...]] = []
+        monkeypatch.setattr(notifier, "_send_via_openclaw_cli", lambda *a: cli_calls.append(a) or True)
+        monkeypatch.setattr(notifier, "_resolve_route", lambda _: {
+            "channel": "telegram", "target": "123456", "silent": False,
+        })
+
+        notifier.notify_plan_proposed(
+            "lp-2026-06-01",
+            "2026-06-01",
+            "PuLP ok",
+            [{"start_time": "2026-06-01T12:00:00Z", "end_time": "2026-06-01T12:30:00Z",
+              "action_type": "pre_heat", "params": {"lwt_offset": 2, "tank_temp": 55}}],
+        )
+
+        assert len(posted) == 1
+        assert posted[0]["url"] == "http://127.0.0.1:18789/hooks/agent"
+        assert posted[0]["headers"].get("Authorization") == "Bearer test-token"
+        body = posted[0]["json"]
+        assert body.get("name") == "EnergyPlan"
+        assert body.get("deliver") is True
+        assert body.get("to") == "123456"
+        assert "PuLP ok" in body.get("message", "")
+        assert cli_calls == []
+
+    def test_webhook_falls_back_to_cli_on_http_error(self, monkeypatch):
+        from src import notifier
+
+        def fake_post(*a, **k):
+            r = MagicMock()
+            r.status_code = 500
+            return r
+
+        class ImmediateThread:
+            def __init__(self, target, daemon=True, name=""):
+                self._target = target
+
+            def start(self):
+                self._target()
+
+        monkeypatch.setattr(notifier.requests, "post", fake_post)
+        monkeypatch.setattr(notifier.threading, "Thread", ImmediateThread)
+
+        cfg = _make_config(
+            OPENCLAW_PLAN_NOTIFY_MODE="webhook",
+            OPENCLAW_HOOKS_URL="http://127.0.0.1:18789/hooks/agent",
+            OPENCLAW_HOOKS_TOKEN="test-token",
+        )
+        monkeypatch.setattr(notifier, "config", cfg)
+        monkeypatch.setattr(notifier.db, "log_action", lambda **kw: None)
+        cli_calls: list[tuple[Any, ...]] = []
+        monkeypatch.setattr(notifier, "_send_via_openclaw_cli", lambda *a: cli_calls.append(a) or True)
+        monkeypatch.setattr(notifier, "_resolve_route", lambda _: {
+            "channel": "telegram", "target": "123456", "silent": False,
+        })
+
+        notifier.notify_plan_proposed("lp-x", "2026-06-01", "s", [])
+
+        assert len(cli_calls) == 1
+        assert cli_calls[0][0] == "plan_proposed"
+
+    def test_direct_mode_uses_cli_only(self, monkeypatch):
+        from src import notifier
+
+        posted: list[Any] = []
+
+        def fake_post(*a, **k):
+            posted.append(1)
+            return MagicMock(status_code=200)
+
+        monkeypatch.setattr(notifier.requests, "post", fake_post)
+        cfg = _make_config(OPENCLAW_PLAN_NOTIFY_MODE="direct")
+        monkeypatch.setattr(notifier, "config", cfg)
+        monkeypatch.setattr(notifier.db, "log_action", lambda **kw: None)
+        cli_calls: list[tuple[Any, ...]] = []
+        monkeypatch.setattr(notifier, "_send_via_openclaw_cli", lambda *a: cli_calls.append(a) or True)
+        monkeypatch.setattr(notifier, "_resolve_route", lambda _: {
+            "channel": "telegram", "target": "1", "silent": False,
+        })
+
+        notifier.notify_plan_proposed("lp-x", "2026-06-01", "s", [])
+
+        assert posted == []
+        assert len(cli_calls) == 1
+
+
 class TestPushAlertUsesCli:
     def test_push_cheap_window_start_calls_cli(self, monkeypatch):
         from src import notifier
@@ -295,6 +421,10 @@ class TestPushAlertUsesCli:
 # MCP tool: set_notification_route validates alert_type
 # ---------------------------------------------------------------------------
 
+@pytest.mark.skipif(
+    importlib.util.find_spec("mcp") is None,
+    reason="optional mcp package not installed",
+)
 class TestMcpSetNotificationRoute:
     def test_rejects_invalid_alert_type(self):
         """set_notification_route must reject unknown alert_type values."""
