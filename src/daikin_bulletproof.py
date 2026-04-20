@@ -1,12 +1,16 @@
 """Compare and apply scheduled Daikin params (Bulletproof heartbeat / recovery)."""
 from __future__ import annotations
 
+import logging
+import time
 from typing import Any
 
 from . import db
 from .config import config
 from .daikin.client import DaikinClient, DaikinError
 from .daikin.models import DaikinDevice
+
+logger = logging.getLogger(__name__)
 
 
 def _fclose(a: float | None, b: float, *, eps: float = 0.35) -> bool:
@@ -59,10 +63,33 @@ def apply_scheduled_daikin_params(
         )
         return False
     try:
+        climate_going_off = "climate_on" in params and not bool(params["climate_on"])
+        climate_going_on = "climate_on" in params and bool(params["climate_on"])
+        device_is_on = bool(dev.is_on)
+        has_dhw_cmds = "tank_power" in params or "tank_powerful" in params
+
+        # leavingWaterOffset is read-only when the climate zone is physically OFF.
+        # Zone will be ON after this call only if it's currently ON (and not turning off)
+        # OR if we're explicitly turning it on.
+        zone_will_be_on = (device_is_on and not climate_going_off) or climate_going_on
+
+        # If turning ON: send power first so lwt_offset is writable on the next call.
+        # The 3-way valve takes 10-15 s to settle; sleep before DHW commands to prevent
+        # silent command drops from the Daikin mainboard.
+        if climate_going_on:
+            client.set_power(dev, True)
+            if has_dhw_cmds:
+                time.sleep(10)
+
         if "lwt_offset" in params:
-            client.set_lwt_offset(dev, float(params["lwt_offset"]))
-        if "climate_on" in params:
-            client.set_power(dev, bool(params["climate_on"]))
+            if zone_will_be_on:
+                client.set_lwt_offset(dev, float(params["lwt_offset"]))
+            else:
+                logger.debug("Skipping lwt_offset: zone is OFF or turning OFF (read-only characteristic)")
+
+        if climate_going_off:
+            client.set_power(dev, False)
+
         if "tank_temp" in params:
             client.set_tank_temperature(dev, float(params["tank_temp"]))
         if "tank_power" in params:
