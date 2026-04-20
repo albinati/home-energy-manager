@@ -29,6 +29,31 @@ _last_room_temp: float | None = None
 _last_room_wall_utc: datetime | None = None
 
 
+def _get_forecast_temp_c(now_utc: datetime) -> float | None:
+    """Look up the Open-Meteo forecast temperature for *now_utc* from the cached meteo_forecast DB.
+
+    The optimizer saves the forecast after each LP run; this avoids a live HTTP call in the
+    heartbeat. Returns None if no cached forecast is available (bootstrapping period).
+    """
+    today_iso = now_utc.date().isoformat()
+    rows = db.get_meteo_forecast(today_iso)
+    if not rows:
+        return None
+    # Find the nearest slot by absolute time difference
+    best: float | None = None
+    best_delta: float = float("inf")
+    for row in rows:
+        try:
+            slot_dt = datetime.fromisoformat(row["slot_time"].replace("Z", "+00:00"))
+            delta = abs((slot_dt - now_utc).total_seconds())
+            if delta < best_delta:
+                best_delta = delta
+                best = row["temp_c"]
+        except (KeyError, ValueError):
+            continue
+    return best
+
+
 def get_scheduler_paused() -> bool:
     return _scheduler_paused
 
@@ -427,7 +452,7 @@ def bulletproof_heartbeat_tick() -> None:
                 "daikin_room_temp": room_t,
                 "daikin_outdoor_temp": outdoor_t,
                 "daikin_lwt": dev0.leaving_water_temperature if dev0 else None,
-                "forecast_temp_c": outdoor_t,
+                "forecast_temp_c": _get_forecast_temp_c(now_utc) or outdoor_t,
                 "forecast_solar_kw": None,
                 "forecast_heating_demand": None,
                 "slot_kind": slot_kind,

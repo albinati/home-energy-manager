@@ -334,6 +334,17 @@ class Config:
     INDOOR_SETPOINT_C: float = float(os.getenv("INDOOR_SETPOINT_C", "21"))
     INDOOR_COMFORT_BAND_C: float = float(os.getenv("INDOOR_COMFORT_BAND_C", "1.5"))
     RADIATOR_MAX_KW: float = float(os.getenv("RADIATOR_MAX_KW", "6.0"))
+    # Physical climate (weather-compensation) curve from the Daikin panel.
+    # Maps outdoor temperature to leaving-water temperature (LWT) via a straight line through
+    # two configured points. The API does not expose these; set them from the physical display.
+    DAIKIN_WEATHER_CURVE_HIGH_C: float = float(os.getenv("DAIKIN_WEATHER_CURVE_HIGH_C", "18.0"))
+    DAIKIN_WEATHER_CURVE_HIGH_LWT_C: float = float(os.getenv("DAIKIN_WEATHER_CURVE_HIGH_LWT_C", "22.0"))
+    DAIKIN_WEATHER_CURVE_LOW_C: float = float(os.getenv("DAIKIN_WEATHER_CURVE_LOW_C", "-5.0"))
+    DAIKIN_WEATHER_CURVE_LOW_LWT_C: float = float(os.getenv("DAIKIN_WEATHER_CURVE_LOW_LWT_C", "45.0"))
+    DAIKIN_WEATHER_CURVE_OFFSET_C: float = float(os.getenv("DAIKIN_WEATHER_CURVE_OFFSET_C", "0.0"))
+    # Number of recent execution_log rows used to compute the micro-climate offset
+    # (mean difference between Daikin outdoor sensor and Open-Meteo forecast).
+    DAIKIN_MICRO_CLIMATE_LOOKBACK: int = int(os.getenv("DAIKIN_MICRO_CLIMATE_LOOKBACK", "96"))
     DHW_TANK_UA_W_PER_K: float = float(os.getenv("DHW_TANK_UA_W_PER_K", "2.5"))
     DAIKIN_COP_CURVE_STR: str = os.getenv(
         "DAIKIN_COP_CURVE",

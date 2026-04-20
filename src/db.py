@@ -1143,6 +1143,38 @@ def get_meteo_forecast(forecast_date: str) -> list[dict[str, Any]]:
             conn.close()
 
 
+def get_micro_climate_offset_c(lookback: int = 96) -> float:
+    """Return mean(daikin_outdoor_temp - forecast_temp_c) from the most recent *lookback* rows.
+
+    A positive result means the local microclimate runs warmer than the Open-Meteo forecast;
+    negative means colder (e.g. -1.5 means the garden is ~1.5 °C colder than forecast).
+    Returns 0.0 during the bootstrapping period when values are identical or missing.
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """
+                SELECT AVG(daikin_outdoor_temp - forecast_temp_c)
+                FROM (
+                    SELECT daikin_outdoor_temp, forecast_temp_c
+                    FROM execution_log
+                    WHERE daikin_outdoor_temp IS NOT NULL
+                      AND forecast_temp_c IS NOT NULL
+                      AND daikin_outdoor_temp != forecast_temp_c
+                    ORDER BY id DESC
+                    LIMIT ?
+                )
+                """,
+                (lookback,),
+            )
+            row = cur.fetchone()
+            val = row[0] if row and row[0] is not None else 0.0
+            return float(val)
+        finally:
+            conn.close()
+
+
 # ---------------------------------------------------------------------------
 # V2: pnl_execution_log
 # ---------------------------------------------------------------------------

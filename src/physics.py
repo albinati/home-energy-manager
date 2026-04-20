@@ -9,6 +9,9 @@ from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 HEAT_LOSS_C_PER_HOUR: float = 0.3  # Daikin Altherma typical standing loss °C/h
+# kW drawn per °C of LWT above the 18 °C compressor-off threshold.
+# Calibrated empirically: LWT 36 °C at 4 °C outdoor → 0.60 kW → (36-18)*k = 0.60 → k = 0.0333
+_KW_PER_DEGC_LWT: float = 0.0333
 MARGIN_OF_SAFETY_C: float = 0.5    # Pipe-loss / measurement margin
 DHW_SETPOINT_MAX_C: float = 65.0   # Absolute safe ceiling (no boiling stress)
 DHW_SETPOINT_MIN_C: float = 35.0   # Never go below legionella risk floor
@@ -87,6 +90,37 @@ def build_shower_target_iso(plan_date_iso: str, hour: int = 9, minute: int = 30,
     local_dt = dt.combine(d, dtime(hour, minute)).replace(tzinfo=tz)
     utc_dt = local_dt.astimezone(UTC)
     return utc_dt.isoformat().replace("+00:00", "Z")
+
+
+def get_daikin_heating_kw(temp_outdoor_c: float) -> float:
+    """Estimate continuous space-heating electrical draw from outdoor temperature.
+
+    Uses the physical climate (weather-compensation) curve configured on the Daikin panel
+    to derive the leaving-water temperature (LWT), then converts LWT to compressor draw
+    via the empirically calibrated factor.  Returns 0.0 when the compressor is off
+    (outdoor temp above the curve's warm cutoff point).
+
+    Config-driven via DAIKIN_WEATHER_CURVE_* env vars; call site must import config.
+    """
+    from .config import config  # local import avoids circular deps at module load
+
+    high_c = config.DAIKIN_WEATHER_CURVE_HIGH_C
+    high_lwt = config.DAIKIN_WEATHER_CURVE_HIGH_LWT_C
+    low_c = config.DAIKIN_WEATHER_CURVE_LOW_C
+    low_lwt = config.DAIKIN_WEATHER_CURVE_LOW_LWT_C
+    user_offset = config.DAIKIN_WEATHER_CURVE_OFFSET_C
+
+    if temp_outdoor_c >= high_c:
+        return 0.0
+
+    # Linear interpolation between the two panel-configured points
+    span_temp = high_c - low_c  # e.g. 18 - (-5) = 23
+    span_lwt = low_lwt - high_lwt  # e.g. 45 - 22 = 23
+    slope = span_lwt / span_temp if span_temp != 0 else 0.0  # e.g. -1.0 °C LWT / °C outdoor
+    lwt = high_lwt + slope * (high_c - temp_outdoor_c) + user_offset
+    lwt = min(50.0, max(18.0, lwt))
+
+    return (lwt - 18.0) * _KW_PER_DEGC_LWT
 
 
 # ---------------------------------------------------------------------------
