@@ -82,10 +82,20 @@ def apply_scheduled_daikin_params(
                 time.sleep(10)
 
         if "lwt_offset" in params:
-            if zone_will_be_on:
-                client.set_lwt_offset(dev, float(params["lwt_offset"]))
-            else:
+            if not zone_will_be_on:
                 logger.debug("Skipping lwt_offset: zone is OFF or turning OFF (read-only characteristic)")
+            elif dev.lwt_offset_range is not None and not getattr(dev.lwt_offset_range, "settable", True):
+                logger.debug("Skipping lwt_offset: device reports characteristic as non-settable (weatherDependent mode)")
+            else:
+                try:
+                    client.set_lwt_offset(dev, float(params["lwt_offset"]))
+                except DaikinError as exc:
+                    if "[read_only]" in str(exc):
+                        # Non-fatal: lwt_offset read-only (e.g. weatherDependent setpoint mode).
+                        # Continue applying remaining commands (tank_temp, tank_power, etc.)
+                        logger.debug("lwt_offset rejected as read-only, continuing: %s", exc)
+                    else:
+                        raise
 
         if climate_going_off:
             client.set_power(dev, False)

@@ -846,11 +846,26 @@ def _run_optimizer_lp(fox: FoxESSClient | None, daikin: Any | None = None) -> di
     starts = [s.start_utc for s in slots]
 
     forecast = fetch_forecast(hours=max(48, int(config.LP_HORIZON_HOURS) + 24))
+    # Persist forecast to DB so heartbeat can read real Open-Meteo temp (vs Daikin sensor)
+    if forecast:
+        _today = datetime.now(UTC).date().isoformat()
+        db.save_meteo_forecast(
+            [
+                {
+                    "slot_time": f.time_utc.isoformat(),
+                    "temp_c": f.temperature_c,
+                    "solar_w_m2": f.shortwave_radiation_wm2,
+                }
+                for f in forecast
+            ],
+            _today,
+        )
     # PV calibration: Fox actual vs Open-Meteo archive to correct systematic bias
     from ..weather import compute_pv_calibration_factor
     pv_scale = compute_pv_calibration_factor()
     weather = forecast_to_lp_inputs(forecast, starts, pv_scale=pv_scale)
     initial = read_lp_initial_state(daikin)
+    micro_climate_offset = db.get_micro_climate_offset_c(config.DAIKIN_MICRO_CLIMATE_LOOKBACK)
 
     plan = solve_lp(
         slot_starts_utc=starts,
@@ -859,6 +874,7 @@ def _run_optimizer_lp(fox: FoxESSClient | None, daikin: Any | None = None) -> di
         weather=weather,
         initial=initial,
         tz=tz,
+        micro_climate_offset_c=micro_climate_offset,
     )
     if not plan.ok:
         logger.warning("PuLP status %s — falling back to heuristic classifier", plan.status)

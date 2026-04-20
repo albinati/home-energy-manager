@@ -25,6 +25,7 @@ from zoneinfo import ZoneInfo
 import pulp
 
 from ..config import config
+from ..physics import get_daikin_heating_kw
 from ..weather import WeatherLpSeries
 
 logger = logging.getLogger(__name__)
@@ -174,6 +175,7 @@ def solve_lp(
     weather: WeatherLpSeries,
     initial: LpInitialState,
     tz: ZoneInfo,
+    micro_climate_offset_c: float = 0.0,
 ) -> LpPlan:
     """Build and solve the MILP. Raises ``ValueError`` on dimension mismatch."""
     n = len(slot_starts_utc)
@@ -185,9 +187,21 @@ def solve_lp(
         raise ValueError("LP: weather horizon mismatch")
 
     pv_avail = list(weather.pv_kwh_per_slot)
-    t_out = list(weather.temperature_outdoor_c)
+    # Apply micro-climate offset: positive = local warmer than forecast, negative = colder.
+    # Subtract so that a negative offset (colder microclimate) lowers the effective t_out,
+    # increasing modelled building heat-loss and forcing higher e_space allocation.
+    t_out = [t - micro_climate_offset_c for t in weather.temperature_outdoor_c]
     cop_dhw = list(weather.cop_dhw)
     cop_space = list(weather.cop_space)
+
+    slot_h = 0.5  # 30-minute slots
+    max_hp_kwh_per_slot = float(getattr(config, "DAIKIN_MAX_HP_KW", 2.0)) * slot_h
+    # Minimum e_space floor from the physical climate curve; ensures the LP budgets for
+    # continuous background compressor draw even during unoccupied overnight slots.
+    space_floor_kwh = [
+        min(get_daikin_heating_kw(t) * slot_h, max_hp_kwh_per_slot)
+        for t in t_out
+    ]
 
     # Price quantization (reduces solver sensitivity to tiny rate differences)
     qp = float(config.LP_PRICE_QUANTIZE_PENCE)
@@ -344,6 +358,12 @@ def solve_lp(
 
         # Radiator output cap
         prob += e_space[i] * cop_space[i] <= float(config.RADIATOR_MAX_KW) * slot_h
+
+        # Climate-curve floor: the Daikin compressor draws at least this much when
+        # climate control is running. Prevents the LP from scheduling zero space heating
+        # on cold overnight slots (which the heuristic can't fix after the fact).
+        if space_floor_kwh[i] > 0:
+            prob += e_space[i] + e_dhw[i] >= space_floor_kwh[i]
 
         # Comfort soft constraints
         t_end_lo, t_end_hi = _slot_occupancy_bounds(slot_starts_utc[i], tz)
