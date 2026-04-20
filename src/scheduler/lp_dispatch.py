@@ -118,6 +118,16 @@ def lp_plan_to_slots(plan: LpPlan) -> list[HalfHourSlot]:
             rounded_w = int(math.ceil(raw_w / 50.0) * 50)
             lp_grid_import_w = max(min_pwr_w, min(max_pwr_w, rounded_w))
 
+        target_soc_pct: int | None = None
+        if plan.soc_kwh and i + 1 < len(plan.soc_kwh):
+            cap = float(config.BATTERY_CAPACITY_KWH)
+            if cap > 0:
+                raw_pct = round(plan.soc_kwh[i + 1] / cap * 100.0)
+                target_soc_pct = max(
+                    int(config.MIN_SOC_RESERVE_PERCENT),
+                    min(100, int(raw_pct)),
+                )
+
         out.append(
             HalfHourSlot(
                 start_utc=st,
@@ -125,6 +135,7 @@ def lp_plan_to_slots(plan: LpPlan) -> list[HalfHourSlot]:
                 price_pence=price,
                 kind=kind,
                 lp_grid_import_w=lp_grid_import_w,
+                target_soc_pct=target_soc_pct,
             )
         )
     return out
