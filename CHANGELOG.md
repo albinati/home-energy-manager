@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-04-20 — Daikin reliability, notification deduplication, DHW tuning
+
+### Daikin write fixes
+
+- **`daikin_bulletproof.py` — tank power ordering:** `set_tank_power(True)` is now called *before* `set_tank_temperature`. Daikin Onecta returns `READ_ONLY_CHARACTERISTIC` on the `temperatureControl` endpoint when the tank is powered off. A 10 s settle sleep follows (Daikin cloud propagation lag; consistent with the existing 3-way valve settle). If temperature still fails after power-on (cloud lag race), the error is non-fatal and the heartbeat retries on the next tick.
+- **`lp_dispatch.py` — LP float precision:** `lwt_offset` and `tank_temp` values from the PuLP solver are now `round(x, 1)` before being written to `action_schedule`. Raw LP floats like `-3.55e-15` (float epsilon) and `53.403446` caused `INVALID_CHARACTERISTIC_VALUE` / `READ_ONLY_CHARACTERISTIC` rejections from the Daikin API.
+- **`lp_dispatch.py` — no `tank_temp` when tank off:** `tank_temp` is only included in action params when `tank_power=True`. Setting a target temperature on a powered-off tank is always rejected; the target is meaningless until the tank turns on.
+
+### Notification deduplication
+
+- **`runner.py` — slot-kind debounce:** `push_cheap_window_start` / `push_peak_window_start` now fire only when `slot_kind` *changes* (cheap→standard, standard→peak, etc.). Previously every heartbeat tick during a cheap window sent a fresh alert — up to 24 messages over a 2-hour window.
+- **`octopus_fetch.py` — removed duplicate plan notification:** `notify_strategy_update` was firing immediately after the optimizer completed, alongside `notify_plan_proposed` from `_write_plan_consent`. Two hook POSTs per plan → two OpenClaw agent wake-ups → two Telegram messages. `notify_strategy_update` removed from the fetch path; `notify_plan_proposed` is the single source of truth.
+- **`notifier.py` — suppress `unknown` fox_mode:** `CHEAP_WINDOW_START` hook payload omits `fox_mode` when the FoxESS V3 API returns `"unknown"` (which it always does — work mode is not exposed in the realtime endpoint). Removes confusing "FoxESS reported mode: unknown" noise from every cheap-window alert.
+
+### Plan consent & config
+
+- **`PLAN_AUTO_APPROVE=true`** — plans are applied immediately on generation. The `[AUTO-APPLIED]` notification confirms execution. Use `reject_plan(plan_id)` within the expiry window to roll back. This eliminates the `pending_approval` gate that caused repeated plan notifications across restarts.
+- **`DHW_TEMP_NORMAL_C=45.0`** — restore and safe-default tank target reduced from 50 °C to 45 °C. 45 °C is sufficient for one sequential shower session plus one 5-min morning shower (confirmed usage profile). Saves ~5 °C of unnecessary thermal cycling on every restore action.
+- **`TARGET_DHW_TEMP_MIN_GUESTS_C=55.0`** — raised from 48 °C to 55 °C. 48 °C was insufficient for multiple showers in the 20:30–22:00 window. Guest-mode plans now target 55 °C. `DHW_TEMP_CHEAP_C=60` and `DHW_TEMP_MAX_C=65` unchanged.
+
 ## v9.1.0 — 2026-04-19 — Hardening: peak sync, env cleanup, providers, tooling
 
 - **Scheduler peak sync:** `scheduler_peak_contains_wall_time` / `utc_instant_in_scheduler_peak` in `agile.py`; `compute_lwt_adjustment` uses the same local-wall-clock rule as Agile slot peak detection (fixes BST skew for Daikin LWT).

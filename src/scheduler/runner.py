@@ -27,6 +27,7 @@ _last_fox_verify_monotonic: float = 0.0
 _last_exec_halfhour_key: str | None = None
 _last_room_temp: float | None = None
 _last_room_wall_utc: datetime | None = None
+_last_notified_slot_kind: str | None = None
 
 
 def _get_forecast_temp_c(now_utc: datetime) -> float | None:
@@ -298,7 +299,7 @@ def bulletproof_plan_push_job() -> None:
 
 def bulletproof_heartbeat_tick() -> None:
     """2-minute monitor: Daikin schedule execution, telemetry, Fox flag check."""
-    global _last_exec_halfhour_key, _last_fox_verify_monotonic, _last_room_temp, _last_room_wall_utc
+    global _last_exec_halfhour_key, _last_fox_verify_monotonic, _last_room_temp, _last_room_wall_utc, _last_notified_slot_kind
     import time
 
     if not config.USE_BULLETPROOF_ENGINE:
@@ -460,16 +461,18 @@ def bulletproof_heartbeat_tick() -> None:
             }
         )
 
-        if slot_kind in ("cheap", "negative"):
-            try:
-                push_cheap_window_start(soc=soc, fox_mode=fox_mode)
-            except Exception as exc:
-                logger.debug("Push cheap window notification error: %s", exc)
-        elif slot_kind == "peak":
-            try:
-                push_peak_window_start(soc=soc)
-            except Exception as exc:
-                logger.debug("Push peak window notification error: %s", exc)
+        if slot_kind != _last_notified_slot_kind:
+            _last_notified_slot_kind = slot_kind
+            if slot_kind in ("cheap", "negative"):
+                try:
+                    push_cheap_window_start(soc=soc, fox_mode=fox_mode)
+                except Exception as exc:
+                    logger.debug("Push cheap window notification error: %s", exc)
+            elif slot_kind == "peak":
+                try:
+                    push_peak_window_start(soc=soc)
+                except Exception as exc:
+                    logger.debug("Push peak window notification error: %s", exc)
 
     if (
         soc is not None

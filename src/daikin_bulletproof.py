@@ -100,9 +100,24 @@ def apply_scheduled_daikin_params(
         if climate_going_off:
             client.set_power(dev, False)
 
+        # tank_power must be set before tank_temp: Daikin returns READ_ONLY_CHARACTERISTIC
+        # for the target temperature when the tank is powered off.
+        tank_turning_on = "tank_power" in params and bool(params["tank_power"])
+        if tank_turning_on:
+            client.set_tank_power(dev, True)
+            if "tank_temp" in params:
+                time.sleep(10)  # Daikin cloud propagation: onOffMode must settle before temperatureControl is writable
+
         if "tank_temp" in params:
-            client.set_tank_temperature(dev, float(params["tank_temp"]))
-        if "tank_power" in params:
+            try:
+                client.set_tank_temperature(dev, float(params["tank_temp"]))
+            except DaikinError as exc:
+                if "[read_only]" in str(exc) and tank_turning_on:
+                    # Cloud hasn't propagated tank-on yet; heartbeat will retry next tick
+                    logger.warning("tank_temp read-only after tank_power=on (cloud lag) — will retry: %s", exc)
+                else:
+                    raise
+        if not tank_turning_on and "tank_power" in params:
             client.set_tank_power(dev, bool(params["tank_power"]))
         if "tank_powerful" in params:
             client.set_tank_powerful(dev, bool(params["tank_powerful"]))
