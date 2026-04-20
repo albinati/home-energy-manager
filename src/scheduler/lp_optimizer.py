@@ -25,7 +25,7 @@ from zoneinfo import ZoneInfo
 import pulp
 
 from ..config import config
-from ..physics import get_daikin_heating_kw
+from ..physics import get_daikin_heating_kw, lwt_offset_from_space_kw
 from ..weather import WeatherLpSeries
 
 logger = logging.getLogger(__name__)
@@ -57,6 +57,7 @@ class LpPlan:
     pv_curtail_kwh: list[float] = field(default_factory=list)
     dhw_electric_kwh: list[float] = field(default_factory=list)
     space_electric_kwh: list[float] = field(default_factory=list)
+    lwt_offset_c: list[float] = field(default_factory=list)  # back-computed per slot
     tank_temp_c: list[float] = field(default_factory=list)   # len N+1
     indoor_temp_c: list[float] = field(default_factory=list)  # len N+1
     soc_kwh: list[float] = field(default_factory=list)       # len N+1
@@ -91,7 +92,8 @@ def _slot_occupancy_bounds(
     band = float(config.INDOOR_COMFORT_BAND_C)
     if ms <= minutes < me or es <= minutes < ee:
         return sp - band, sp + band
-    return 16.0, 24.0
+    floor = float(config.LP_OVERNIGHT_COMFORT_FLOOR_C)
+    return floor, 24.0
 
 
 def _shower_slot_mask(
@@ -196,10 +198,19 @@ def solve_lp(
 
     slot_h = 0.5  # 30-minute slots
     max_hp_kwh_per_slot = float(getattr(config, "DAIKIN_MAX_HP_KW", 2.0)) * slot_h
-    # Minimum e_space floor from the physical climate curve; ensures the LP budgets for
-    # continuous background compressor draw even during unoccupied overnight slots.
+    lwt_offset_max = float(getattr(config, "OPTIMIZATION_LWT_OFFSET_MAX", 10.0))
+    lwt_offset_min = float(getattr(config, "OPTIMIZATION_LWT_OFFSET_MIN", -10.0))
+
+    # Per-slot physics-consistent bounds for e_space from the climate curve.
+    # floor: compressor draw at zero offset (natural curve point).
+    # ceiling: maximum achievable draw with LWT_OFFSET_MAX applied, capped at 50 °C LWT.
+    # These replace the fictional fixed max_hp_kwh upper bound on e_space.
     space_floor_kwh = [
         min(get_daikin_heating_kw(t) * slot_h, max_hp_kwh_per_slot)
+        for t in t_out
+    ]
+    space_ceil_kwh = [
+        min(get_daikin_heating_kw(t, lwt_offset_delta=lwt_offset_max) * slot_h, max_hp_kwh_per_slot)
         for t in t_out
     ]
 
@@ -337,9 +348,11 @@ def solve_lp(
         prob += e_dhw[i] + e_space[i] >= 0  # (implicit from lower bounds)
         prob += m_dhw[i] + m_space[i] <= 1
         prob += m_dhw[i] + m_space[i] >= hp_on[i]  # must pick a mode when on
-        # Each mode bounds its share
+        # Each mode bounds its share.
+        # e_dhw: generic HP cap (DHW draw is controlled by tank temp setpoint, not climate curve)
+        # e_space: physics ceiling from climate curve + LWT_OFFSET_MAX (not the HP nameplate)
         prob += e_dhw[i] <= max_hp_kwh * m_dhw[i]
-        prob += e_space[i] <= max_hp_kwh * m_space[i]
+        prob += e_space[i] <= space_ceil_kwh[i] * m_space[i]
         # When HP is off, both e_dhw and e_space are 0 (via hp_on bound above +
         # mode bounds below; hp_on=0 → m_dhw+m_space≤1 and ≥0 still allows a
         # mode flag=1 with zero power, so add explicit binding)
@@ -522,7 +535,10 @@ def solve_lp(
         plan.pv_use_kwh.append(_v(pv_use[i]))
         plan.pv_curtail_kwh.append(_v(pv_curt[i]))
         plan.dhw_electric_kwh.append(_v(e_dhw[i]))
-        plan.space_electric_kwh.append(_v(e_space[i]))
+        es_val = _v(e_space[i])
+        plan.space_electric_kwh.append(es_val)
+        # Back-compute the LWT offset the Daikin must apply to deliver this energy draw.
+        plan.lwt_offset_c.append(lwt_offset_from_space_kw(es_val / slot_h, t_out[i]))
     for i in range(n + 1):
         plan.soc_kwh.append(_v(soc[i]))
         plan.tank_temp_c.append(_v(tank[i]))

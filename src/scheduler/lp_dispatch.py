@@ -142,7 +142,19 @@ def lp_plan_to_slots(plan: LpPlan) -> list[HalfHourSlot]:
 
 
 def _lwt_offset_from_plan(i: int, plan: LpPlan) -> float:
-    """Map indoor error to LWT offset (radiators)."""
+    """Return the LP-derived LWT offset for slot *i*.
+
+    Uses the back-computed ``plan.lwt_offset_c`` list (filled by ``solve_lp`` via
+    ``lwt_offset_from_space_kw``).  This translates the solver's continuous ``e_space[i]``
+    decision — bounded by the physical climate curve — into the exact Daikin offset command
+    needed to deliver that energy draw.
+
+    Falls back to an indoor-error proportional estimate when the LP output is unavailable
+    (e.g. heuristic plan that never filled ``lwt_offset_c``).
+    """
+    if plan.lwt_offset_c and i < len(plan.lwt_offset_c):
+        return float(plan.lwt_offset_c[i])
+    # Fallback: proportional to indoor temperature error (heuristic / legacy path)
     if i + 1 >= len(plan.indoor_temp_c):
         return 0.0
     err = float(config.INDOOR_SETPOINT_C) - plan.indoor_temp_c[i + 1]
@@ -248,24 +260,25 @@ def daikin_dispatch_preview(
         ed = plan.dhw_electric_kwh[j] if plan.dhw_electric_kwh else 0.0
         es = plan.space_electric_kwh[j] if plan.space_electric_kwh else 0.0
         tt = plan.tank_temp_c[min(j + 1, len(plan.tank_temp_c) - 1)] if plan.tank_temp_c else float(config.DHW_TEMP_NORMAL_C)
+        # LP-derived LWT offset: continuous value back-computed from e_space[j] via the
+        # inverse climate curve.  This replaces the old fixed-tier overrides so the solver's
+        # energy decision directly controls the radiator temperature rather than a lookup table.
         lwt = _lwt_offset_from_plan(j, plan)
         if peak_frost:
-            lwt = -2.0
+            lwt = max(-2.0, float(config.OPTIMIZATION_LWT_OFFSET_MIN))
         tank_pow = ed > EPS
         tank_powful = ed >= max_b - 1e-3
         params: dict[str, Any] = {
-            "lwt_offset": float(config.LWT_OFFSET_MAX) if kind == "negative" else lwt,
+            "lwt_offset": lwt,
             "tank_powerful": tank_powful if kind == "negative" else False,
             "tank_temp": min(float(config.DHW_TEMP_MAX_C), max(float(config.DHW_TEMP_NORMAL_C), tt)),
             "tank_power": tank_pow,
-            "climate_on": es > EPS or kind in ("negative", "cheap"),
+            "climate_on": es > EPS or ed > EPS or kind in ("negative", "cheap"),
             "lp_optimizer": True,
         }
         if kind == "cheap":
-            params["lwt_offset"] = min(float(config.LWT_OFFSET_PREHEAT_BOOST), float(config.LWT_OFFSET_MAX))
             params["tank_temp"] = float(config.DHW_TEMP_CHEAP_C)
         if kind == "peak" or kind == "peak_export":
-            params["lwt_offset"] = -2.0 if peak_frost else float(config.LWT_OFFSET_MIN)
             params["tank_temp"] = float(config.DHW_TEMP_NORMAL_C)
             params["tank_power"] = False
         if _legionella_active_local(loc_mid):
