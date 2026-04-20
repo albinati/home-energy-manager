@@ -103,6 +103,9 @@ DAIKIN_HTTP_429_MAX_RETRIES=0                   # fail fast on rate limit — do
 OPENCLAW_READ_ONLY=false                        # allows hardware writes via MCP
 OPERATION_MODE=operational                      # operational = live hardware writes; simulation = dry-run
 DB_PATH=/root/home-energy-manager/data/energy_state.db   # set in systemd service env
+PLAN_AUTO_APPROVE=true                          # plans applied immediately; use reject_plan() to roll back
+DHW_TEMP_NORMAL_C=45.0                          # restore/safe-default tank target (45 °C = sufficient for normal use)
+TARGET_DHW_TEMP_MIN_GUESTS_C=55.0              # guest-mode LP floor (multiple showers at 20:30–22:00)
 ```
 
 ---
@@ -128,20 +131,27 @@ The MCP server is stateless (per-call); the API server (`home-energy-manager.ser
 
 ```
 src/
-  cli/__main__.py        # entrypoint: `python -m src.cli serve`
-  api/main.py            # FastAPI app + lifespan (DB init, recover_on_boot, scheduler)
+  cli/__main__.py          # entrypoint: `python -m src.cli serve`
+  api/main.py              # FastAPI app + lifespan (DB init, recover_on_boot, scheduler)
   daikin/
-    auth.py              # OAuth2 flow + token refresh
-    client.py            # DaikinClient (wraps Onecta API)
-  state_machine.py       # recover_on_boot, apply_safe_defaults
-  config.py              # all env-var config (Config dataclass)
-  physics.py             # DHW setpoint calculations (restored from git HEAD 2026-04-18)
-  mcp_server.py          # MCP server entrypoint (used by openclaw)
+    auth.py                # OAuth2 flow + token refresh
+    client.py              # DaikinClient (wraps Onecta API)
+  daikin_bulletproof.py    # apply_scheduled_daikin_params — ordered writes, float rounding, READ_ONLY guards
+  scheduler/
+    lp_dispatch.py         # LP plan → Fox V3 groups + Daikin action_schedule rows
+    octopus_fetch.py       # Octopus Agile fetch → SQLite; triggers LP re-plan
+    runner.py              # heartbeat tick, slot-kind notification debounce
+    optimizer.py           # run_optimizer, _write_plan_consent (hash-gated notifications)
+  state_machine.py         # recover_on_boot, apply_safe_defaults
+  notifier.py              # OpenClaw hooks delivery — all notifications via POST /hooks/agent
+  config.py                # all env-var config (Config dataclass)
+  physics.py               # DHW setpoint calculations
+  mcp_server.py            # MCP server entrypoint (used by openclaw)
 data/
-  energy_state.db        # SQLite (migrated from Docker volume 2026-04-18)
-  .daikin-tokens.json    # OAuth2 tokens (active)
-.env                     # secrets + config
-.venv/                   # Python 3.12.3 venv (use this, not venv/)
+  energy_state.db          # SQLite (migrated from Docker volume 2026-04-18)
+  .daikin-tokens.json      # OAuth2 tokens (active)
+.env                       # secrets + config
+.venv/                     # Python 3.12.3 venv (use this, not venv/)
 ```
 
 ---

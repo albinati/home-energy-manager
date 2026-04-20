@@ -33,6 +33,8 @@ python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000
 
 ### Docker (Bulletproof + SQLite persistence)
 
+> **Note:** Docker is not used in the current production deployment (removed 2026-04-18 in favour of systemd). These instructions are kept for local dev convenience.
+
 ```bash
 cp .env.example .env   # configure first
 docker compose up --build -d

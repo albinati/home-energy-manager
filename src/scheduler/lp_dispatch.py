@@ -269,18 +269,21 @@ def daikin_dispatch_preview(
         tank_pow = ed > EPS
         tank_powful = ed >= max_b - 1e-3
         params: dict[str, Any] = {
-            "lwt_offset": lwt,
+            "lwt_offset": round(lwt, 1),  # Daikin rejects sub-0.1 precision; rounds float epsilon to 0.0
             "tank_powerful": tank_powful if kind == "negative" else False,
-            "tank_temp": min(float(config.DHW_TEMP_MAX_C), max(float(config.DHW_TEMP_NORMAL_C), tt)),
             "tank_power": tank_pow,
             "climate_on": es > EPS or ed > EPS or kind in ("negative", "cheap"),
             "lp_optimizer": True,
         }
+        # Only set tank_temp when the tank will be on — Daikin rejects temperatureControl on a powered-off tank
+        if tank_pow:
+            params["tank_temp"] = round(min(float(config.DHW_TEMP_MAX_C), max(float(config.DHW_TEMP_NORMAL_C), tt)), 1)
         if kind == "cheap":
+            params["tank_power"] = True
             params["tank_temp"] = float(config.DHW_TEMP_CHEAP_C)
         if kind == "peak" or kind == "peak_export":
-            params["tank_temp"] = float(config.DHW_TEMP_NORMAL_C)
             params["tank_power"] = False
+            params.pop("tank_temp", None)  # tank off — no point setting target temp
         if _legionella_active_local(loc_mid):
             params["tank_power"] = True
             params["tank_temp"] = float(config.DHW_LEGIONELLA_TEMP_C)

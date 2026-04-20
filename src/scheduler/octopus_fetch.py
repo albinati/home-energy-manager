@@ -8,7 +8,7 @@ from typing import Any
 from .. import db
 from ..config import config
 from ..foxess.client import FoxESSClient, FoxESSError
-from ..notifier import notify_critical, notify_strategy_update
+from ..notifier import notify_critical
 from .agile import fetch_agile_rates
 from .optimizer import run_optimizer
 
@@ -59,8 +59,7 @@ def fetch_and_store_rates(fox: FoxESSClient | None = None) -> dict[str, Any]:
             # Compute plan and log to DB; device dispatch is handled by the nightly push job.
             opt = run_optimizer(fox if config.LP_MPC_WRITE_DEVICES else None)
             summary["optimizer"] = opt
-            if opt.get("ok") and opt.get("strategy"):
-                notify_strategy_update(str(opt.get("strategy")), warnings=opt.get("battery_warning"))
+            # notify_strategy_update removed — notify_plan_proposed in _write_plan_consent covers this
         except Exception as e:
             logger.exception("Optimizer after fetch failed: %s", e)
             summary["optimizer_error"] = str(e)

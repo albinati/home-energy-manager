@@ -403,14 +403,13 @@ def push_alert(event_type: str, payload: dict[str, Any]) -> bool:
 
 def push_cheap_window_start(soc: float | None = None, fox_mode: str | None = None) -> None:
     """Emit CHEAP_WINDOW_START event: battery charging and DHW heating active."""
-    push_alert(
-        AlertType.CHEAP_WINDOW_START.value,
-        {
-            "message": "Cheap window active. Forcing FoxESS charge, heating DHW.",
-            "soc_percent": soc,
-            "fox_mode": fox_mode,
-        },
-    )
+    payload: dict[str, Any] = {
+        "message": "Cheap window active. Forcing FoxESS charge, heating DHW.",
+        "soc_percent": soc,
+    }
+    if fox_mode and fox_mode != "unknown":
+        payload["fox_mode"] = fox_mode
+    push_alert(AlertType.CHEAP_WINDOW_START.value, payload)
 
 
 def push_peak_window_start(soc: float | None = None) -> None:
