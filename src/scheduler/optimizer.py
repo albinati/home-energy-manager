@@ -215,7 +215,6 @@ def _classify_slots(slots: list[HalfHourSlot], forecast: list[HourlyForecast]) -
     n = len(prices_sorted)
     q25 = prices_sorted[max(0, n // 4 - 1)]
     q75 = prices_sorted[min(n - 1, (3 * n) // 4)]
-    bottom10 = prices_sorted[max(0, n // 10 - 1)]
     cheap_thr = min(mean(prices) * 0.85, q25) if n else 0
     peak_thr = max(q75, config.OPTIMIZATION_PEAK_THRESHOLD_PENCE)
 
@@ -223,7 +222,10 @@ def _classify_slots(slots: list[HalfHourSlot], forecast: list[HourlyForecast]) -
         fc = get_forecast_for_slot(s.start_utc, forecast)
         solar_boost_skip = fc and fc.estimated_pv_kw > 2.0
 
-        if s.price_pence <= 0 or s.price_pence <= bottom10:
+        # "negative" = price is genuinely ≤ 0p (matches the LP path definition).
+        # Previously this also caught the bottom-10th-percentile of positive prices,
+        # which triggered max_heat and sent false "negative window" alerts to Nikola.
+        if s.price_pence <= 0:
             s.kind = "negative"
         elif s.price_pence < cheap_thr:
             s.kind = "cheap" if not solar_boost_skip else "standard"
