@@ -145,6 +145,9 @@ class HalfHourSlot:
     # ForceCharge windows use the exact amount the MILP planned to pull from the grid
     # rather than a static constant.  None means use the configured fallback constant.
     lp_grid_import_w: int | None = None
+    # LP planned battery SoC (%) at end of this slot — used as fd_soc for ForceCharge.
+    # None: heuristic plans / missing soc_kwh — fall back to legacy 95 (cheap) / 100 (negative).
+    target_soc_pct: int | None = None
 
 
 def _parse_ts(s: str) -> datetime:
@@ -263,6 +266,7 @@ def _slot_fox_tuple(
     elevated minSocOnGrid so the battery is held at the LP's target level without forcing
     any grid import — PV handles the charging naturally.
     """
+    min_r = int(config.MIN_SOC_RESERVE_PERCENT)
     if s.kind == "solar_charge":
         # 100%: hold battery fully so PV fills it without the inverter pulling any grid.
         # SelfUse mode forbids active grid import regardless of minSocOnGrid — this only
@@ -272,25 +276,27 @@ def _slot_fox_tuple(
         return ("SelfUse", None, None, min_soc)
     if s.kind == "negative":
         pwr = s.lp_grid_import_w if s.lp_grid_import_w is not None else config.FOX_FORCE_CHARGE_MAX_PWR
-        return ("ForceCharge", 100, pwr, 10)
+        fds = s.target_soc_pct if s.target_soc_pct is not None else 100
+        return ("ForceCharge", fds, pwr, min_r)
     if s.kind == "cheap":
         pwr = s.lp_grid_import_w if s.lp_grid_import_w is not None else config.FOX_FORCE_CHARGE_NORMAL_PWR
-        return ("ForceCharge", 95, pwr, 10)
+        fds = s.target_soc_pct if s.target_soc_pct is not None else 95
+        return ("ForceCharge", fds, pwr, min_r)
     if s.kind == "peak_export":
         return (
             "ForceDischarge",
             int(config.EXPORT_DISCHARGE_FLOOR_SOC_PERCENT),
             config.FOX_FORCE_CHARGE_MAX_PWR,
-            10,
+            min_r,
         )
     if s.kind == "peak" and peak_export_discharge:
         return (
             "ForceDischarge",
             int(config.EXPORT_DISCHARGE_FLOOR_SOC_PERCENT),
             config.FOX_FORCE_CHARGE_MAX_PWR,
-            10,
+            min_r,
         )
-    return ("SelfUse", None, None, 10)
+    return ("SelfUse", None, None, min_r)
 
 
 def _optimization_preset_away_like() -> bool:
@@ -361,14 +367,14 @@ def _merge_fox_groups(
         a, _, ka = merged[0]
         _, d, kb = merged[1]
         if ka[0] == "ForceCharge" and kb[0] == "ForceCharge":
-            nk: tuple[str, int | None, int | None, int] = (
+            nk = (
                 "ForceCharge",
                 max(ka[1] or 0, kb[1] or 0),
                 max(ka[2] or 0, kb[2] or 0),
-                10,
+                max(ka[3], kb[3]),
             )
         else:
-            nk = ("SelfUse", None, None, 10)
+            nk = ("SelfUse", None, None, int(config.MIN_SOC_RESERVE_PERCENT))
         merged[0] = (a, d, nk)
         del merged[1]
 
@@ -407,11 +413,11 @@ def _merge_adjacent_force_charge_rows(
             and k[0] == "ForceCharge"
         ):
             a0, _, k0 = out[-1]
-            nk: tuple[str, int | None, int | None, int] = (
+            nk = (
                 "ForceCharge",
                 max(k0[1] or 0, k[1] or 0),
                 max(k0[2] or 0, k[2] or 0),
-                10,
+                max(k0[3], k[3]),
             )
             out[-1] = (a0, b, nk)
         else:
