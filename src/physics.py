@@ -92,15 +92,11 @@ def build_shower_target_iso(plan_date_iso: str, hour: int = 9, minute: int = 30,
     return utc_dt.isoformat().replace("+00:00", "Z")
 
 
-def get_daikin_heating_kw(temp_outdoor_c: float) -> float:
-    """Estimate continuous space-heating electrical draw from outdoor temperature.
+def get_lwt_base_c(temp_outdoor_c: float) -> float:
+    """Return the base LWT (°C) the Daikin targets at this outdoor temp with lwt_offset=0.
 
-    Uses the physical climate (weather-compensation) curve configured on the Daikin panel
-    to derive the leaving-water temperature (LWT), then converts LWT to compressor draw
-    via the empirically calibrated factor.  Returns 0.0 when the compressor is off
-    (outdoor temp above the curve's warm cutoff point).
-
-    Config-driven via DAIKIN_WEATHER_CURVE_* env vars; call site must import config.
+    Derived from the physical climate curve configured on the panel.  This is the
+    'natural' LWT before any user or LP-applied offset.
     """
     from .config import config  # local import avoids circular deps at module load
 
@@ -110,17 +106,59 @@ def get_daikin_heating_kw(temp_outdoor_c: float) -> float:
     low_lwt = config.DAIKIN_WEATHER_CURVE_LOW_LWT_C
     user_offset = config.DAIKIN_WEATHER_CURVE_OFFSET_C
 
-    if temp_outdoor_c >= high_c:
+    span_temp = high_c - low_c
+    span_lwt = low_lwt - high_lwt
+    slope = span_lwt / span_temp if span_temp != 0 else 0.0
+    lwt = high_lwt + slope * (high_c - temp_outdoor_c) + user_offset
+    return min(50.0, max(18.0, lwt))
+
+
+def get_daikin_heating_kw(temp_outdoor_c: float, lwt_offset_delta: float = 0.0) -> float:
+    """Estimate continuous space-heating electrical draw from outdoor temperature.
+
+    Uses the physical climate (weather-compensation) curve configured on the Daikin panel
+    to derive the leaving-water temperature (LWT), then converts LWT to compressor draw
+    via the empirically calibrated factor.  Returns 0.0 when the compressor is off
+    (outdoor temp above the curve's warm cutoff point).
+
+    ``lwt_offset_delta`` shifts the LWT above or below the curve's natural value —
+    use ``config.OPTIMIZATION_LWT_OFFSET_MAX`` to compute the physics ceiling, or
+    ``config.OPTIMIZATION_LWT_OFFSET_MIN`` for the floor at minimum boost.
+
+    Config-driven via DAIKIN_WEATHER_CURVE_* env vars; call site must import config.
+    """
+    from .config import config  # local import avoids circular deps at module load
+
+    if temp_outdoor_c >= config.DAIKIN_WEATHER_CURVE_HIGH_C:
         return 0.0
 
-    # Linear interpolation between the two panel-configured points
-    span_temp = high_c - low_c  # e.g. 18 - (-5) = 23
-    span_lwt = low_lwt - high_lwt  # e.g. 45 - 22 = 23
-    slope = span_lwt / span_temp if span_temp != 0 else 0.0  # e.g. -1.0 °C LWT / °C outdoor
-    lwt = high_lwt + slope * (high_c - temp_outdoor_c) + user_offset
+    lwt = get_lwt_base_c(temp_outdoor_c) + lwt_offset_delta
     lwt = min(50.0, max(18.0, lwt))
 
     return (lwt - 18.0) * _KW_PER_DEGC_LWT
+
+
+def lwt_offset_from_space_kw(space_kw: float, temp_outdoor_c: float) -> float:
+    """Back-compute the LWT offset that would produce ``space_kw`` electrical draw.
+
+    This is the inverse of ``get_daikin_heating_kw``.  Used by the LP dispatch layer
+    to translate the solver's ``e_space[i]`` decision into a concrete Daikin command.
+
+    Returns a value clamped to ``[OPTIMIZATION_LWT_OFFSET_MIN, OPTIMIZATION_LWT_OFFSET_MAX]``.
+    """
+    from .config import config
+
+    if space_kw <= 0.0:
+        return float(config.OPTIMIZATION_LWT_OFFSET_MIN)
+
+    # kW = (lwt_actual - 18.0) * _KW_PER_DEGC_LWT  →  lwt_actual = kW / k + 18
+    lwt_actual = space_kw / _KW_PER_DEGC_LWT + 18.0
+    lwt_base = get_lwt_base_c(temp_outdoor_c)
+    offset = lwt_actual - lwt_base
+
+    lo = float(config.OPTIMIZATION_LWT_OFFSET_MIN)
+    hi = float(config.OPTIMIZATION_LWT_OFFSET_MAX)
+    return max(lo, min(hi, offset))
 
 
 # ---------------------------------------------------------------------------

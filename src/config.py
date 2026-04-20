@@ -342,6 +342,10 @@ class Config:
     DAIKIN_WEATHER_CURVE_LOW_C: float = float(os.getenv("DAIKIN_WEATHER_CURVE_LOW_C", "-5.0"))
     DAIKIN_WEATHER_CURVE_LOW_LWT_C: float = float(os.getenv("DAIKIN_WEATHER_CURVE_LOW_LWT_C", "45.0"))
     DAIKIN_WEATHER_CURVE_OFFSET_C: float = float(os.getenv("DAIKIN_WEATHER_CURVE_OFFSET_C", "0.0"))
+    # Overnight (unoccupied) indoor temperature floor for the LP building model.
+    # Raising this above the default 16 °C creates pre-heat pressure during cheap overnight
+    # slots so the LP warms the thermal mass before morning occupancy begins.
+    LP_OVERNIGHT_COMFORT_FLOOR_C: float = float(os.getenv("LP_OVERNIGHT_COMFORT_FLOOR_C", "18.0"))
     # Number of recent execution_log rows used to compute the micro-climate offset
     # (mean difference between Daikin outdoor sensor and Open-Meteo forecast).
     DAIKIN_MICRO_CLIMATE_LOOKBACK: int = int(os.getenv("DAIKIN_MICRO_CLIMATE_LOOKBACK", "96"))
