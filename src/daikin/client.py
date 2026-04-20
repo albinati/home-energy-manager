@@ -93,6 +93,8 @@ class DaikinClient:
                     if e.code == 429 and r429 < max_429:
                         time.sleep(self._retry_after_seconds(e))
                         continue
+                    if e.code == 400 and "READ_ONLY_CHARACTERISTIC" in err_body:
+                        raise DaikinError(f"[read_only] HTTP 400: {err_body}")
                     raise DaikinError(f"HTTP {e.code}: {err_body}")
             if retry_auth:
                 continue
