@@ -14,6 +14,7 @@ import time
 import urllib.error
 import urllib.request
 
+from ..api_quota import record_call
 from ..config import config
 from .auth import get_valid_access_token
 from .models import DaikinDevice, DaikinStatus, SetpointRange
@@ -45,6 +46,14 @@ class DaikinClient:
             "Content-Type": "application/json",
         }
 
+    @staticmethod
+    def _safe_record(kind: str, ok: bool) -> None:
+        """Quota accounting must never shadow the HTTP outcome — swallow SQLite errors."""
+        try:
+            record_call("daikin", kind, ok=ok)
+        except Exception:
+            pass
+
     def _get(self, path: str) -> dict | list:
         url = f"{self.BASE_URL}{path}"
         max_429 = max(0, int(config.DAIKIN_HTTP_429_MAX_RETRIES))
@@ -54,8 +63,8 @@ class DaikinClient:
             for r429 in range(max_429 + 1):
                 try:
                     resp = urllib.request.urlopen(req, timeout=15)
-                    return json.loads(resp.read())
                 except urllib.error.HTTPError as e:
+                    self._safe_record("read", ok=False)
                     body = e.read().decode()
                     if e.code == 401 and auth_try == 0:
                         retry_auth = True
@@ -64,6 +73,11 @@ class DaikinClient:
                         time.sleep(self._retry_after_seconds(e))
                         continue
                     raise DaikinError(f"HTTP {e.code}: {body}")
+                except Exception:
+                    self._safe_record("read", ok=False)
+                    raise
+                self._safe_record("read", ok=True)
+                return json.loads(resp.read())
             if retry_auth:
                 continue
         raise DaikinError("HTTP 401: authorization failed after retry")
@@ -83,9 +97,8 @@ class DaikinClient:
             for r429 in range(max_429 + 1):
                 try:
                     resp = urllib.request.urlopen(req, timeout=15)
-                    rb = resp.read()
-                    return json.loads(rb) if rb else {}
                 except urllib.error.HTTPError as e:
+                    self._safe_record("write", ok=False)
                     err_body = e.read().decode()
                     if e.code == 401 and auth_try == 0:
                         retry_auth = True
@@ -96,6 +109,12 @@ class DaikinClient:
                     if e.code == 400 and "READ_ONLY_CHARACTERISTIC" in err_body:
                         raise DaikinError(f"[read_only] HTTP 400: {err_body}")
                     raise DaikinError(f"HTTP {e.code}: {err_body}")
+                except Exception:
+                    self._safe_record("write", ok=False)
+                    raise
+                self._safe_record("write", ok=True)
+                rb = resp.read()
+                return json.loads(rb) if rb else {}
             if retry_auth:
                 continue
         raise DaikinError("HTTP 401: authorization failed after retry")
@@ -173,6 +192,13 @@ class DaikinClient:
             elif "domestichotwater" in mp_type:
                 device.dhw_mp_id = mp.get("embeddedId", device.dhw_mp_id)
 
+                tank_on_off = mp.get("onOffMode", {}).get("value")
+                if tank_on_off is not None:
+                    device.tank_on = (tank_on_off == "on")
+                tank_powerful = mp.get("powerfulMode", {}).get("value")
+                if tank_powerful is not None:
+                    device.tank_powerful = (tank_powerful == "on")
+
                 sensor = mp.get("sensoryData", {}).get("value", {})
                 tank = sensor.get("tankTemperature", {}).get("value")
                 if tank is not None:
@@ -202,7 +228,9 @@ class DaikinClient:
     def get_status(self, device: DaikinDevice) -> DaikinStatus:
         return DaikinStatus(
             device_name=device.name,
-            is_on=device.is_on,
+            # Coerce Optional[bool] to bool for the external-facing status model;
+            # unknown treated as off for display/API consumers.
+            is_on=bool(device.is_on),
             mode=device.operation_mode,
             room_temp=device.temperature.room_temperature,
             target_temp=device.temperature.set_point,

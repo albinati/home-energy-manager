@@ -10,11 +10,22 @@ from zoneinfo import ZoneInfo
 from . import db
 from .config import config
 from .daikin.client import DaikinClient, DaikinError
-from .daikin_bulletproof import apply_comfort_restore, apply_scheduled_daikin_params
+from .daikin_bulletproof import (
+    apply_comfort_restore,
+    apply_scheduled_daikin_params,
+    detect_user_override,
+)
 from .foxess.client import FoxESSClient, FoxESSError, scheduler_groups_from_stored_json
-from .notifier import notify_risk
+from .notifier import notify_risk, notify_user_override
 
 logger = logging.getLogger(__name__)
+
+# Phase 4 review C6 — process-local map of action_schedule row id → earliest
+# wall-clock time we successfully ran apply_scheduled_daikin_params for that row
+# in THIS process. Used as the grace-period anchor for override detection so a
+# systemd restart mid-plan cannot cause a false override on the first reconcile
+# tick (row.start_time would be ancient, but we haven't actually applied yet).
+_FIRST_APPLIED_SESSION: dict[int, datetime] = {}
 
 
 def _parse_utc(s: str) -> datetime:
@@ -187,6 +198,14 @@ def _reconcile_daikin_actions(
             continue
         aid = int(act["id"])
         status = act["status"]
+
+        # Phase 4.3 — user-override rows skip re-apply but still transition to
+        # terminal status when their window ends; otherwise they'd stay 'active'
+        # forever and pollute every "latest active row" query.
+        if act.get("overridden_by_user_at"):
+            if now_utc >= end and status in ("pending", "active"):
+                db.mark_action(aid, "completed")
+            continue
         atype = act.get("action_type", "")
         params = act.get("params") or {}
 
@@ -211,8 +230,40 @@ def _reconcile_daikin_actions(
                 lo = float(apply_params.get("lwt_offset", 0.0))
                 if lo < -2.0:
                     apply_params["lwt_offset"] = -2.0
+
+            # Phase 4.3 — check for user override before re-applying.
+            # Phase 4 review C6: only run override detection after we've had at
+            # least one successful apply of this row IN THIS PROCESS, using that
+            # first-apply timestamp as the grace anchor. Before that first apply,
+            # any divergence is "boot-state, not user intent" and must be
+            # reconciled by writing our desired value, not by flagging override.
+            first_applied = _FIRST_APPLIED_SESSION.get(aid)
+            if first_applied is not None:
+                is_override, reason = detect_user_override(
+                    dev, apply_params, row_started_utc=first_applied, now_utc=now_utc,
+                )
+            else:
+                is_override, reason = False, None
+            if is_override:
+                db.mark_action_user_overridden(aid)
+                db.log_action(
+                    device="daikin",
+                    action="user_override_detected",
+                    params={"row_id": aid, "reason": reason},
+                    result="skipped",
+                    trigger=trigger,
+                )
+                try:
+                    notify_user_override(reason or "unknown divergence")
+                except Exception as _exc:
+                    logger.debug("notify_user_override failed (non-fatal): %s", _exc)
+                continue
+
             try:
                 apply_scheduled_daikin_params(dev, client, apply_params, trigger=trigger)
+                # Mark the row as applied-in-session on the first successful call
+                # (skip_if_matches=True path also counts — match confirms alignment).
+                _FIRST_APPLIED_SESSION.setdefault(aid, now_utc)
             except (DaikinError, ValueError) as e:
                 logger.warning("Boot Daikin apply %s: %s", aid, e)
                 db.mark_action(aid, "failed", error_msg=str(e))

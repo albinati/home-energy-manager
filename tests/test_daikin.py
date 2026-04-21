@@ -227,10 +227,14 @@ class TestDaikinClient(unittest.TestCase):
             [call(force_refresh=False), call(force_refresh=True)],
         )
 
+    @patch("src.daikin.client.config")
     @patch("src.daikin.client.time.sleep", autospec=True)
     @patch("src.daikin.client.get_valid_access_token", return_value="t")
     @patch("urllib.request.urlopen")
-    def test_get_retries_on_429_then_ok(self, mock_urlopen, _mock_token, mock_sleep):
+    def test_get_retries_on_429_then_ok(self, mock_urlopen, _mock_token, mock_sleep, mock_cfg):
+        # Override .env DAIKIN_HTTP_429_MAX_RETRIES=0 so the retry path is exercised.
+        mock_cfg.DAIKIN_HTTP_429_MAX_RETRIES = 3
+        mock_cfg.BASE_URL = "https://api.onecta.daikineurope.com/v1"
         err429 = urllib.error.HTTPError(
             "http://example", 429, "Too Many", None, BytesIO(b"{}")
         )

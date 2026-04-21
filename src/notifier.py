@@ -342,6 +342,11 @@ def notify_risk(message: str, extra: dict[str, Any] | None = None) -> None:
     _dispatch(AlertType.RISK_ALERT, message, urgent=True, extra=extra)
 
 
+def notify_user_override(message: str) -> None:
+    """Phase 4.3: one-shot notification when a Daikin user override is detected."""
+    notify_action_confirmation(f"User override detected — {message}. Schedule will re-converge at next MPC replan.")
+
+
 def notify_action_confirmation(message: str) -> None:
     _dispatch(AlertType.ACTION_CONFIRMATION, message, urgent=False)
 
