@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime
 from typing import Any
 
 from . import db
@@ -22,9 +23,9 @@ def _fclose(a: float | None, b: float, *, eps: float = 0.35) -> bool:
 def daikin_device_matches_params(dev: DaikinDevice, params: dict[str, Any]) -> bool:
     """Return True if live readings match scheduled params (skips redundant PATCHes).
 
-    For ``tank_power`` and ``tank_powerful`` the device model does not expose live
-    values in this snapshot, so we cannot confirm a match. Those fields always trigger
-    a write to ensure correct state (conservative but safe).
+    ``tank_power`` and ``tank_powerful`` compare against ``dev.tank_on`` /
+    ``dev.tank_powerful`` when the live value is known. If the live value is ``None``
+    (not populated from the Onecta snapshot), fall back to writing — conservative.
     All other fields (lwt_offset, tank_temp, climate_on) use tolerance-based comparison.
     """
     if "lwt_offset" in params and dev.lwt_offset is not None:
@@ -38,9 +39,59 @@ def daikin_device_matches_params(dev: DaikinDevice, params: dict[str, Any]) -> b
     if "climate_on" in params:
         if dev.is_on != bool(params["climate_on"]):
             return False
-    if "tank_power" in params or "tank_powerful" in params:
-        return False
+    if "tank_power" in params:
+        if dev.tank_on is None or dev.tank_on != bool(params["tank_power"]):
+            return False
+    if "tank_powerful" in params:
+        if dev.tank_powerful is None or dev.tank_powerful != bool(params["tank_powerful"]):
+            return False
     return True
+
+
+def detect_user_override(
+    dev: DaikinDevice,
+    params: dict[str, Any],
+    *,
+    row_started_utc: datetime,
+    now_utc: datetime,
+) -> tuple[bool, str | None]:
+    """Phase 4.3 — return (is_override, human-readable-reason).
+
+    An override is declared when the action_schedule row has been active for at least
+    DAIKIN_OVERRIDE_GRACE_SECONDS AND the live device value diverges from the scheduled
+    param by more than the configured tolerance. The grace period avoids false positives
+    from cloud-echo lag right after our own write.
+    """
+    elapsed = (now_utc - row_started_utc).total_seconds()
+    if elapsed < float(config.DAIKIN_OVERRIDE_GRACE_SECONDS):
+        return False, None
+
+    tank_tol = float(config.DAIKIN_OVERRIDE_TOLERANCE_TANK_C)
+    lwt_tol = float(config.DAIKIN_OVERRIDE_TOLERANCE_LWT_C)
+
+    tank_target = getattr(dev, "tank_target", None)
+    if "tank_temp" in params and tank_target is not None:
+        delta = abs(float(tank_target) - float(params["tank_temp"]))
+        if delta > tank_tol:
+            return True, f"tank_temp {params['tank_temp']}→{tank_target} °C"
+
+    lwt_offset = getattr(dev, "lwt_offset", None)
+    if "lwt_offset" in params and lwt_offset is not None:
+        delta = abs(float(lwt_offset) - float(params["lwt_offset"]))
+        if delta > lwt_tol:
+            return True, f"lwt_offset {params['lwt_offset']}→{lwt_offset}"
+
+    tank_on = getattr(dev, "tank_on", None)
+    if "tank_power" in params and tank_on is not None:
+        if tank_on != bool(params["tank_power"]):
+            return True, f"tank_power {params['tank_power']}→{tank_on}"
+
+    if "climate_on" in params:
+        is_on = getattr(dev, "is_on", None)
+        if is_on is not None and is_on != bool(params["climate_on"]):
+            return True, f"climate_on {params['climate_on']}→{is_on}"
+
+    return False, None
 
 
 def apply_scheduled_daikin_params(

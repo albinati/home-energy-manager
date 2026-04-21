@@ -1,5 +1,37 @@
 # Changelog
 
+## v9.1.1 — 2026-04-21 — Phase 4: quota hardening, user-override acceptance, OpenClaw MCP boundary
+
+Closes epic #39. Closes sub-issues #40 #41 #42 #43 #44.
+
+### Added
+
+- **`simulate_plan` MCP tool** — OpenClaw can dry-run a plan with whitelisted config overrides (occupancy, DHW temps, preset) without touching hardware or Daikin quota. Response includes `applied_overrides` + `ignored_overrides` so the caller can tell when keys are accepted but not yet wired.
+- **User-override acceptance loop** — when you change the tank temp or climate on the Daikin Onecta app, the next heartbeat marks the action row as overridden, notifies once, and replans on top of the new reality. No more fighting the app. Unblocks the "Daikin as passive load" direction in #30.
+- **`action_schedule.overridden_by_user_at`** column (nullable TEXT, added via idempotent ALTER TABLE migration).
+- **OpenClaw MCP-only boundary** — `docs/OPENCLAW_BOUNDARY.md` enumerates the sanctioned MCP tool surface and explicit out-of-bounds list (no filesystem, no shell, no direct cloud HTTP). Boot-time `audit_mcp_tool_surface` warns loudly if any hardware-write tool lacks a `confirmed` parameter, and errors loudly if the FastMCP private tool registry is empty (catches silent API drift).
+- **Transport-layer Daikin quota accounting** — every outbound HTTP call from `DaikinClient._get`/`_patch` is counted, success or failure, so ad-hoc callers (boot recovery, direct client usage) can no longer burn quota silently.
+- **DHW dedup** — `DaikinDevice.tank_on` and `tank_powerful` are now parsed from Onecta; `daikin_device_matches_params` skips redundant `tank_power`/`tank_powerful` PATCHes per slot.
+
+### Changed
+
+- `DaikinClient._get`/`_patch` route `record_call` through a `_safe_record` helper that swallows SQLite errors — accounting problems never shadow a successful HTTP response. [Review fix: PR #45]
+- `DaikinDevice.is_on` is now `Optional[bool]`, defaulting to `None`. A parse glitch no longer false-flags `climate_on=True` rows as user-overridden. [Review fix]
+- Boot-recovery hardening: `_reconcile_daikin_actions` uses a process-local `_FIRST_APPLIED_SESSION` map as the grace-period anchor. After a systemd restart mid-plan, the first reconcile tick pushes our value rather than treating the ancient `start_time` as evidence of a user override. [Review fix]
+- `simulate_plan` serializes through `_optimizer_executor` (max_workers=1 queue shared with `propose_optimization_plan`) so concurrent simulates cannot race each other or a live optimizer run on `config.*` globals. [Review fix]
+- `simulate_plan` validates override values per-key (type + range) before any config mutation; invalid values are rejected with a clear error. [Review fix]
+- `simulate_plan` response shape normalized across success and error paths — same top-level keys every call. [Review fix]
+- `run_lp_simulation(allow_daikin_refresh=False)` plumbs down to `read_lp_initial_state` so a cold MCP-process cache cannot burn Daikin quota during "read-only" simulation. [Review fix]
+- Override rows past `end_time` now transition to `completed` instead of staying `active` forever. [Review fix]
+- Config helper `env_int_at_least(name, default, minimum)` clamps `DAIKIN_OVERRIDE_GRACE_SECONDS` to ≥ 60 s so setting `0` in `.env` cannot self-DoS the system. [Review fix]
+- Canonical `CREATE TABLE action_schedule` in `src/db.py` now declares `overridden_by_user_at` alongside the migration. [Review fix]
+- `tests/test_api_quota.py` fixture uses `monkeypatch.setattr` on the live config instance instead of `importlib.reload`. Removes cross-test pollution that had been breaking `test_db_dhw_standing_loss`, `test_db_micro_climate`, and `test_bulletproof_db` when run in full-suite order. [Review fix]
+
+### Known issues (to address in a follow-up)
+
+- **Duplicate / overlapping `action_schedule` rows at a single slot** — observed in production (~30 rows converging on 21:00, including multiple "tank_power=True" for the same slot). Not caused by this PR; appears to be an LP-dispatch or replan-amnesia regression. Needs separate investigation — quota accounting + dedup in this PR will mask the symptom but not the root cause.
+- **Daikin 200-call/day budget exhaustion** observed on 2026-04-21 in production. The fixes in this PR should substantially reduce call volume once deployed, but the dispatch-dup bug above is likely the primary cause — fixing it is the durable remedy.
+
 ## 2026-04-20 — Daikin reliability, notification deduplication, DHW tuning
 
 ### Daikin write fixes

@@ -3,7 +3,7 @@ import logging
 from datetime import UTC, datetime
 
 from ..config import config
-from ..daikin.client import DaikinClient
+from ..daikin import service as daikin_service
 from .agile import (
     fetch_agile_rates,
     get_current_and_next_slots,
@@ -44,7 +44,7 @@ def apply_scheduler_offset(
 
 
 def run_daikin_scheduler_tick(is_paused: bool) -> str | None:
-    """Fetch rates, compute LWT delta, get first Daikin device, set LWT offset. Returns error message or None."""
+    """Fetch rates, compute LWT delta, set LWT offset via the cached service. Returns error message or None."""
     if is_paused:
         return None
 
@@ -74,19 +74,20 @@ def run_daikin_scheduler_tick(is_paused: bool) -> str | None:
         config.SCHEDULER_PREHEAT_LWT_BOOST,
     )
     try:
-        client = DaikinClient()
-        devices = client.get_devices()
-        if not devices:
+        result = daikin_service.get_cached_devices(
+            allow_refresh=True,
+            max_age_seconds=config.DAIKIN_LEGACY_TICK_CACHE_MAX_AGE_SECONDS,
+            actor="legacy_lwt_tick",
+        )
+        if not result.devices:
             return "No Daikin devices"
-        dev = devices[0]
-        status = client.get_status(dev)
+        dev = result.devices[0]
         # Use absolute target offset (no compounding with previous value)
         new_offset = apply_scheduler_offset(adjustment, 0.0, -10, 10)
-        client.set_lwt_offset(dev, new_offset, status.operation_mode or "heating")
+        mode = dev.operation_mode or "heating"
+        daikin_service.set_lwt_offset(new_offset, mode=mode, actor="legacy_lwt_tick")
         logger.info("Scheduler LWT offset set to %s (adjustment %s)", new_offset, adjustment)
         return None
     except Exception as e:
         logger.exception("Scheduler Daikin tick failed")
         return str(e)
-
-

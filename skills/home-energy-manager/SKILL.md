@@ -10,6 +10,10 @@ The app is the **single planning brain** for the site. It fetches Octopus Agile 
 
 **OpenClaw is a read/propose/request interface only.** All hardware writes are enforced server-side through plan consent, daily API quota, rate-limit, and read-only gates. You cannot bypass them.
 
+**MCP is the only sanctioned channel.** Do not edit `.env`, `src/`, or any file on the app host; do not run shell commands against it; do not make direct HTTP calls to Daikin Onecta or Fox ESS cloud. If a new capability is needed, request a new MCP tool. See `docs/OPENCLAW_BOUNDARY.md` for the full sanctioned surface and out-of-bounds list.
+
+For safe what-if exploration (e.g. "what would tomorrow's plan look like with guests over?"), use `simulate_plan` — read-only, quota-free, zero hardware impact.
+
 Automated user notifications (plans, alerts, briefs) are sent only through the **OpenClaw Gateway** `POST /hooks/agent` path — not via a separate `openclaw` CLI on the app host. Configure `OPENCLAW_HOOKS_URL` and `OPENCLAW_HOOKS_TOKEN` on the server (see `docs/RUNBOOK.md`).
 
 **Base URL**: `HOME_ENERGY_API_URL` (e.g. `http://192.168.1.100:8000`)

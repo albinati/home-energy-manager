@@ -18,7 +18,7 @@ import threading
 import time
 from dataclasses import dataclass
 
-from ..api_quota import quota_remaining, record_call, should_block
+from ..api_quota import quota_remaining, should_block
 from ..config import config
 from .client import DaikinClient, DaikinError
 from .models import DaikinDevice
@@ -77,16 +77,10 @@ def _cache_is_warm() -> bool:
 
 
 def _do_refresh(actor: str) -> list[DaikinDevice]:
-    """Actually call get_devices(), update cache, and record quota usage."""
+    """Call get_devices() and update cache. Quota accounting is at the transport layer (DaikinClient._get)."""
     global _devices_cache, _devices_fetched_monotonic, _devices_fetched_wall, _devices_stale
     client = _get_or_create_client()
-    try:
-        devices = client.get_devices()
-    except Exception:
-        record_call("daikin", "read", ok=False)
-        raise
-
-    record_call("daikin", "read", ok=True)
+    devices = client.get_devices()
     _devices_cache = devices
     _devices_fetched_monotonic = time.monotonic()
     _devices_fetched_wall = time.time()
@@ -318,7 +312,6 @@ def set_power(on: bool, actor: str = "api") -> None:
     client, devices = _require_client_and_devices(actor)
     for dev in devices:
         client.set_power(dev, on)
-    record_call("daikin", "write", ok=True)
     invalidate_after_write()
 
 
@@ -328,7 +321,6 @@ def set_temperature(temperature: float, mode: str = "heating", actor: str = "api
     client, devices = _require_client_and_devices(actor)
     for dev in devices:
         client.set_temperature(dev, temperature, mode)
-    record_call("daikin", "write", ok=True)
     invalidate_after_write()
 
 
@@ -338,7 +330,6 @@ def set_lwt_offset(offset: float, mode: str = "heating", actor: str = "api") -> 
     client, devices = _require_client_and_devices(actor)
     for dev in devices:
         client.set_lwt_offset(dev, offset, mode)
-    record_call("daikin", "write", ok=True)
     invalidate_after_write()
 
 
@@ -348,7 +339,6 @@ def set_operation_mode(mode_str: str, actor: str = "api") -> None:
     client, devices = _require_client_and_devices(actor)
     for dev in devices:
         client.set_operation_mode(dev, mode_str)
-    record_call("daikin", "write", ok=True)
     invalidate_after_write()
 
 
@@ -358,7 +348,6 @@ def set_tank_temperature(temperature: float, actor: str = "api") -> None:
     client, devices = _require_client_and_devices(actor)
     for dev in devices:
         client.set_tank_temperature(dev, temperature)
-    record_call("daikin", "write", ok=True)
     invalidate_after_write()
 
 
@@ -368,7 +357,6 @@ def set_tank_power(on: bool, actor: str = "api") -> None:
     client, devices = _require_client_and_devices(actor)
     for dev in devices:
         client.set_tank_power(dev, on)
-    record_call("daikin", "write", ok=True)
     invalidate_after_write()
 
 
@@ -378,7 +366,6 @@ def set_tank_powerful(on: bool, actor: str = "api") -> None:
     client, devices = _require_client_and_devices(actor)
     for dev in devices:
         client.set_tank_powerful(dev, on)
-    record_call("daikin", "write", ok=True)
     invalidate_after_write()
 
 
@@ -388,5 +375,4 @@ def set_weather_regulation(enabled: bool, actor: str = "api") -> None:
     client, devices = _require_client_and_devices(actor)
     for dev in devices:
         client.set_weather_regulation(dev, enabled)
-    record_call("daikin", "write", ok=True)
     invalidate_after_write()

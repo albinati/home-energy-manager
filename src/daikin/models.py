@@ -24,7 +24,10 @@ class DaikinDevice:
     id: str
     name: str
     model: str = ""
-    is_on: bool = False
+    # Optional so ``detect_user_override``'s ``is_on is not None`` guard can distinguish
+    # "device reports off" from "unknown / parse did not populate". Without this, a parse
+    # glitch would leave is_on=False and false-flag climate_on=True rows as overridden.
+    is_on: bool | None = None
     operation_mode: str = "heating"
     temperature: TemperatureControlSettings = field(default_factory=TemperatureControlSettings)
     leaving_water_temperature: float | None = None
@@ -33,6 +36,8 @@ class DaikinDevice:
     tank_target: float | None = None
     tank_target_min: float | None = None
     tank_target_max: float | None = None
+    tank_on: bool | None = None
+    tank_powerful: bool | None = None
     weather_regulation_enabled: bool = False
     weather_regulation_settable: bool = True
     lwt_offset_range: SetpointRange = field(default_factory=SetpointRange)
