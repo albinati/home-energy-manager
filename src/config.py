@@ -323,6 +323,9 @@ class Config:
     # Cheap/negative windows shorter than this are merged forward or dropped to avoid rapid heat-pump
     # cycling.  2 = 1 hour minimum (recommended).  0 = disabled (legacy behaviour, any length).
     DAIKIN_MIN_WINDOW_SLOTS: int = int(os.getenv("DAIKIN_MIN_WINDOW_SLOTS", "2"))
+    # Delay between critical Onecta writes (climate power, DHW) so the 3-way valve can settle (#18).
+    # 0 = skip sleeps (tests).
+    DAIKIN_VALVE_SETTLE_SECONDS: int = int(os.getenv("DAIKIN_VALVE_SETTLE_SECONDS", "10"))
     FOX_LP_BRIDGE_MAX_PRICE_PENCE: float = float(os.getenv("FOX_LP_BRIDGE_MAX_PRICE_PENCE", "0"))
     SOLAR_GAIN_FRACTION: float = float(os.getenv("SOLAR_GAIN_FRACTION", "0.15"))
     COP_DHW_PENALTY: float = float(os.getenv("COP_DHW_PENALTY", "0.5"))
