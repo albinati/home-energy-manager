@@ -285,6 +285,8 @@ class Config:
     EXPORT_RATE_PENCE: float = float(os.getenv("EXPORT_RATE_PENCE", "15.0"))
     LP_HORIZON_HOURS: int = int(os.getenv("LP_HORIZON_HOURS", "36"))
     DAIKIN_POWER_BUCKETS_KW: str = (os.getenv("DAIKIN_POWER_BUCKETS_KW") or "0,0.5,1.0,1.5").strip()
+    # Heat pump nameplate cap (kW) used in LP HP power bounds.
+    DAIKIN_MAX_HP_KW: float = float(os.getenv("DAIKIN_MAX_HP_KW", "2.0"))
     LP_SHOWER_WINDOW_MINUTES: int = int(os.getenv("LP_SHOWER_WINDOW_MINUTES", "60"))
     # V8 LP — solver
     LP_SOLVER: str = (os.getenv("LP_SOLVER") or "highs").strip().lower()  # highs | cbc
@@ -329,6 +331,13 @@ class Config:
     FOX_LP_BRIDGE_MAX_PRICE_PENCE: float = float(os.getenv("FOX_LP_BRIDGE_MAX_PRICE_PENCE", "0"))
     SOLAR_GAIN_FRACTION: float = float(os.getenv("SOLAR_GAIN_FRACTION", "0.15"))
     COP_DHW_PENALTY: float = float(os.getenv("COP_DHW_PENALTY", "0.5"))
+    # Pre-PuLP COP lift (#29): scale COP_curve(T_out) by mult(LWT_supply − T_out). 0 = disabled.
+    LP_COP_LIFT_PENALTY_PER_KELVIN: float = float(os.getenv("LP_COP_LIFT_PENALTY_PER_KELVIN", "0"))
+    LP_COP_LIFT_REFERENCE_DELTA_K: float = float(os.getenv("LP_COP_LIFT_REFERENCE_DELTA_K", "25.0"))
+    LP_COP_LIFT_MIN_MULTIPLIER: float = float(os.getenv("LP_COP_LIFT_MIN_MULTIPLIER", "0.5"))
+    LP_COP_DHW_LIFT_SUPPLY_C: float = float(os.getenv("LP_COP_DHW_LIFT_SUPPLY_C", "45.0"))
+    # Max leaving-water temp used when estimating space COP lift (aligns with physics LWT cap).
+    LP_COP_SPACE_LWT_CEILING_C: float = float(os.getenv("LP_COP_SPACE_LWT_CEILING_C", "50.0"))
     DHW_TANK_LITRES: float = float(os.getenv("DHW_TANK_LITRES", "200"))
     DHW_WATER_CP: float = float(os.getenv("DHW_WATER_CP", "4186"))  # J/(kg·K)
     BUILDING_UA_W_PER_K: float = float(os.getenv("BUILDING_UA_W_PER_K", "180"))

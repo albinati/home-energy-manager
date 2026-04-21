@@ -138,6 +138,28 @@ def get_daikin_heating_kw(temp_outdoor_c: float, lwt_offset_delta: float = 0.0) 
     return (lwt - 18.0) * _KW_PER_DEGC_LWT
 
 
+def apply_cop_lift_multiplier(
+    cop_base: float,
+    temp_outdoor_c: float,
+    lwt_supply_c: float,
+    *,
+    penalty_per_k: float,
+    reference_delta_k: float,
+    min_mult: float,
+) -> float:
+    """Scale COP down when supply LWT is far above outdoor temp (Python pre-processing only; #29).
+
+    ``COP_eff = COP_base * mult`` with ``mult`` linear in ``max(0, lift − ref)`` where
+    ``lift = max(0, LWT_supply − T_out)``. ``penalty_per_k <= 0`` ⇒ returns ``max(1, cop_base)``.
+    """
+    if penalty_per_k <= 0.0:
+        return max(1.0, float(cop_base))
+    lift = max(0.0, float(lwt_supply_c) - float(temp_outdoor_c))
+    excess = max(0.0, lift - float(reference_delta_k))
+    mult = max(float(min_mult), 1.0 - float(penalty_per_k) * excess)
+    return max(1.0, float(cop_base) * mult)
+
+
 def lwt_offset_from_space_kw(space_kw: float, temp_outdoor_c: float) -> float:
     """Back-compute the LWT offset that would produce ``space_kw`` electrical draw.
 
