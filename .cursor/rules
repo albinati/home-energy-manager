@@ -6,8 +6,8 @@ Standalone Python service: Daikin Altherma ASHP + Fox ESS + Octopus Agile. The *
 ## Stack
 - Python 3.11+, FastAPI, APScheduler, optional MCP stdio server for clients (e.g. OpenClaw)
 - **Bulletproof** (default `USE_BULLETPROOF_ENGINE`): SQLite `DB_PATH`, Fox Scheduler V3 (sparse API use), 2‑min heartbeat
-- Fox ESS cloud API: **~200 req/day** — no polling loops; cached realtime ~30s TTL; scheduler flag check ~30 min
-- Daikin Onecta: respect `weather_regulation_active`; use **`lwt_offset`**, not room setpoint rewrites
+- Fox ESS cloud API: **~1440 req/day** hard limit (config caps at `FOX_DAILY_BUDGET` e.g. 1200) — no polling loops; cached realtime ~30s TTL; scheduler flag check ~30 min
+- Daikin Onecta: **~200 calls/day** — respect `weather_regulation_active`; use **`lwt_offset`**, not room setpoint rewrites
 - Optional: Anthropic/OpenAI for in-app assistant — not required for core automation
 
 ## Critical Rules
