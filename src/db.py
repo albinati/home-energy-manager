@@ -668,6 +668,62 @@ def hourly_load_profile_kwh(limit: int = 2016) -> dict[int, float]:
     return profile
 
 
+def estimate_dhw_standing_loss_c_per_hour_p50(
+    *,
+    limit: int = 2016,
+    max_gap_hours: float = 8.0,
+) -> float | None:
+    """Median tank cooldown °C/h when DHW heating is off, from execution_log (#24).
+
+    Uses consecutive log rows (time-ordered) where ``daikin_tank_power_on == 0`` and both
+    rows have ``daikin_tank_temp``. Skips gaps longer than *max_gap_hours* and samples where
+    the tank is warming. Returns None if there are fewer than three usable cooldown rates.
+
+    Requires accurate ``daikin_tank_power_on`` in logs (not a constant).
+    """
+    from statistics import median
+
+    rows = get_execution_logs(limit=limit)
+    if len(rows) < 2:
+        return None
+    chrono = list(reversed(rows))
+
+    def _parse_ts(ts: str) -> datetime | None:
+        try:
+            return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return None
+
+    rates: list[float] = []
+    for i in range(len(chrono) - 1):
+        a, b = chrono[i], chrono[i + 1]
+        if a.get("daikin_tank_power_on") != 0:
+            continue
+        if b.get("daikin_tank_power_on") != 0:
+            continue
+        ta = a.get("daikin_tank_temp")
+        tb = b.get("daikin_tank_temp")
+        if ta is None or tb is None:
+            continue
+        tsa = _parse_ts(a.get("timestamp") or "")
+        tsb = _parse_ts(b.get("timestamp") or "")
+        if tsa is None or tsb is None:
+            continue
+        dt_h = (tsb - tsa).total_seconds() / 3600.0
+        if dt_h <= 0 or dt_h > max_gap_hours:
+            continue
+        dtemp = float(tb) - float(ta)
+        if dtemp > 0.05:
+            continue
+        rate = -dtemp / dt_h
+        if 0 < rate < 5.0:
+            rates.append(rate)
+
+    if len(rates) < 3:
+        return None
+    return float(median(rates))
+
+
 def actions_for_device_at(
     device: str,
     when_utc: datetime,

@@ -16,12 +16,15 @@ Docs: https://www.foxesscloud.com/public/i18n/en/OpenApiDocument.html
 """
 import hashlib
 import json
+import logging
 import time
 import urllib.error
 import urllib.request
 from datetime import date, datetime
 
 from .models import ChargePeriod, DeviceInfo, RealTimeData, SchedulerGroup, SchedulerState
+
+logger = logging.getLogger(__name__)
 
 # Known work mode strings (set_work_mode accepts these)
 WORK_MODE_VALID = frozenset({"Self Use", "Feed-in Priority", "Back Up", "Force charge", "Force discharge"})
@@ -631,6 +634,22 @@ class FoxESSClient:
             "groups": [g.to_api_dict() for g in groups],
         }
         self._open_post_v3("/device/scheduler/enable", payload)
+
+    def warn_if_scheduler_v3_mismatch(self, expected_groups: list[SchedulerGroup]) -> None:
+        """After set_scheduler_v3, read hardware state and warn if group counts differ (#23)."""
+        n_exp = len(expected_groups)
+        try:
+            st = self.get_scheduler_v3()
+        except Exception as e:
+            logger.warning("Fox scheduler read-back after set failed: %s", e)
+            return
+        n_hw = len(st.groups or [])
+        if n_hw != n_exp:
+            logger.warning(
+                "Fox scheduler V3 read-back mismatch after set: uploaded %d groups, device reports %d",
+                n_exp,
+                n_hw,
+            )
 
     def get_scheduler_flag(self) -> bool:
         """Return True if inverter time scheduler master switch is enabled."""
