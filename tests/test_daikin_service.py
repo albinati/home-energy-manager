@@ -29,8 +29,7 @@ def test_cold_start_calls_api(tmp_path, monkeypatch):
     mock_client.get_devices.return_value = [_make_device()]
 
     with patch("src.daikin.service.DaikinClient", return_value=mock_client):
-        with patch("src.daikin.service.record_call"):
-            result = svc.get_cached_devices(allow_refresh=False, actor="test")
+        result = svc.get_cached_devices(allow_refresh=False, actor="test")
 
     assert result.source == "cold_start"
     assert len(result.devices) == 1
@@ -48,11 +47,10 @@ def test_cache_hit_does_not_call_api(tmp_path, monkeypatch):
     mock_client.get_devices.return_value = devices
 
     with patch("src.daikin.service.DaikinClient", return_value=mock_client):
-        with patch("src.daikin.service.record_call"):
-            # First call: cold start
-            svc.get_cached_devices(allow_refresh=False, actor="test")
-            # Second call: should hit cache
-            result = svc.get_cached_devices(allow_refresh=False, actor="test")
+        # First call: cold start
+        svc.get_cached_devices(allow_refresh=False, actor="test")
+        # Second call: should hit cache
+        result = svc.get_cached_devices(allow_refresh=False, actor="test")
 
     assert result.source == "cache"
     assert not result.stale
@@ -70,13 +68,12 @@ def test_stale_cache_no_refresh(tmp_path, monkeypatch):
     mock_client.get_devices.return_value = [_make_device()]
 
     with patch("src.daikin.service.DaikinClient", return_value=mock_client):
-        with patch("src.daikin.service.record_call"):
-            # Seed cache
-            svc.get_cached_devices(allow_refresh=False, actor="test")
-            # Force cache to appear expired
-            svc._devices_fetched_monotonic = 0.0  # age = inf
+        # Seed cache
+        svc.get_cached_devices(allow_refresh=False, actor="test")
+        # Force cache to appear expired
+        svc._devices_fetched_monotonic = 0.0  # age = inf
 
-            result = svc.get_cached_devices(allow_refresh=False, actor="test")
+        result = svc.get_cached_devices(allow_refresh=False, actor="test")
 
     assert result.source == "cache_stale"
     assert result.stale
@@ -93,15 +90,14 @@ def test_quota_blocked_returns_stale(tmp_path, monkeypatch):
     mock_client.get_devices.return_value = [_make_device()]
 
     with patch("src.daikin.service.DaikinClient", return_value=mock_client):
-        with patch("src.daikin.service.record_call"):
-            # Seed cache
-            svc.get_cached_devices(allow_refresh=False, actor="test")
-            # Expire it
-            svc._devices_fetched_monotonic = 0.0
+        # Seed cache
+        svc.get_cached_devices(allow_refresh=False, actor="test")
+        # Expire it
+        svc._devices_fetched_monotonic = 0.0
 
-            # Block quota
-            with patch("src.daikin.service.should_block", return_value=True):
-                result = svc.get_cached_devices(allow_refresh=True, actor="test")
+        # Block quota
+        with patch("src.daikin.service.should_block", return_value=True):
+            result = svc.get_cached_devices(allow_refresh=True, actor="test")
 
     assert result.stale
     assert result.source == "cache_stale"
@@ -118,17 +114,16 @@ def test_force_refresh_throttled(tmp_path, monkeypatch):
     mock_client.get_devices.return_value = [_make_device()]
 
     with patch("src.daikin.service.DaikinClient", return_value=mock_client):
-        with patch("src.daikin.service.record_call"):
-            with patch("src.daikin.service.should_block", return_value=False):
-                # Seed the cache
-                svc.get_cached_devices(allow_refresh=False, actor="test")
+        with patch("src.daikin.service.should_block", return_value=False):
+            # Seed the cache
+            svc.get_cached_devices(allow_refresh=False, actor="test")
 
-                # First force refresh — allowed (no throttle yet)
-                svc._force_refresh_timestamps = {}
-                svc.force_refresh_devices("ui")
+            # First force refresh — allowed (no throttle yet)
+            svc._force_refresh_timestamps = {}
+            svc.force_refresh_devices("ui")
 
-                # Second force refresh immediately — throttled
-                result = svc.force_refresh_devices("ui")
+            # Second force refresh immediately — throttled
+            result = svc.force_refresh_devices("ui")
 
     assert result.stale
 

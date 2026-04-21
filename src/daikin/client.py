@@ -14,6 +14,7 @@ import time
 import urllib.error
 import urllib.request
 
+from ..api_quota import record_call
 from ..config import config
 from .auth import get_valid_access_token
 from .models import DaikinDevice, DaikinStatus, SetpointRange
@@ -54,8 +55,8 @@ class DaikinClient:
             for r429 in range(max_429 + 1):
                 try:
                     resp = urllib.request.urlopen(req, timeout=15)
-                    return json.loads(resp.read())
                 except urllib.error.HTTPError as e:
+                    record_call("daikin", "read", ok=False)
                     body = e.read().decode()
                     if e.code == 401 and auth_try == 0:
                         retry_auth = True
@@ -64,6 +65,11 @@ class DaikinClient:
                         time.sleep(self._retry_after_seconds(e))
                         continue
                     raise DaikinError(f"HTTP {e.code}: {body}")
+                except Exception:
+                    record_call("daikin", "read", ok=False)
+                    raise
+                record_call("daikin", "read", ok=True)
+                return json.loads(resp.read())
             if retry_auth:
                 continue
         raise DaikinError("HTTP 401: authorization failed after retry")
@@ -83,9 +89,8 @@ class DaikinClient:
             for r429 in range(max_429 + 1):
                 try:
                     resp = urllib.request.urlopen(req, timeout=15)
-                    rb = resp.read()
-                    return json.loads(rb) if rb else {}
                 except urllib.error.HTTPError as e:
+                    record_call("daikin", "write", ok=False)
                     err_body = e.read().decode()
                     if e.code == 401 and auth_try == 0:
                         retry_auth = True
@@ -96,6 +101,12 @@ class DaikinClient:
                     if e.code == 400 and "READ_ONLY_CHARACTERISTIC" in err_body:
                         raise DaikinError(f"[read_only] HTTP 400: {err_body}")
                     raise DaikinError(f"HTTP {e.code}: {err_body}")
+                except Exception:
+                    record_call("daikin", "write", ok=False)
+                    raise
+                record_call("daikin", "write", ok=True)
+                rb = resp.read()
+                return json.loads(rb) if rb else {}
             if retry_auth:
                 continue
         raise DaikinError("HTTP 401: authorization failed after retry")

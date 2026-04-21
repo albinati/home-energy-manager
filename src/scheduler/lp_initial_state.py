@@ -6,6 +6,7 @@ from typing import Any
 
 from .. import db
 from ..config import config
+from ..daikin import service as daikin_service
 from ..foxess.service import get_cached_realtime
 from .lp_optimizer import LpInitialState
 
@@ -13,12 +14,15 @@ logger = logging.getLogger(__name__)
 
 
 def read_lp_initial_state(daikin: Any | None = None) -> LpInitialState:
-    """SoC from FoxESS cache (or DB realtime snapshot); tank and room from Daikin if available; else execution_log / defaults.
+    """SoC from FoxESS cache (or DB realtime snapshot); tank and room from Daikin cache if available; else execution_log / defaults.
 
     Priority order for SoC:
     1. Live Fox realtime cache (get_cached_realtime) — fresh within seconds
     2. DB fox_realtime_snapshot — fresh within 15 min (set by MPC job)
     3. Config default (50% capacity)
+
+    Daikin telemetry is sourced from the cached service (get_cached_devices) — the ``daikin``
+    parameter is kept for backwards-compat but no longer issues HTTP calls. Quota is preserved.
     """
     soc_kwh = float(config.BATTERY_CAPACITY_KWH) * 0.5
     soc_source = "default"
@@ -42,18 +46,21 @@ def read_lp_initial_state(daikin: Any | None = None) -> LpInitialState:
     tank = float(config.DHW_TEMP_NORMAL_C)
     indoor = float(config.INDOOR_SETPOINT_C)
 
-    if daikin is not None:
-        try:
-            devices = daikin.get_devices()
-            if devices:
-                d0 = devices[0]
-                if d0.tank_temperature is not None:
-                    tank = float(d0.tank_temperature)
-                rt_room = getattr(d0.temperature, "room_temperature", None)
-                if rt_room is not None:
-                    indoor = float(rt_room)
-        except Exception as e:
-            logger.debug("LP Daikin telemetry fallback: %s", e)
+    try:
+        result = daikin_service.get_cached_devices(
+            allow_refresh=True,
+            max_age_seconds=config.DAIKIN_LP_INIT_CACHE_MAX_AGE_SECONDS,
+            actor="lp_init",
+        )
+        if result.devices:
+            d0 = result.devices[0]
+            if d0.tank_temperature is not None:
+                tank = float(d0.tank_temperature)
+            rt_room = getattr(d0.temperature, "room_temperature", None)
+            if rt_room is not None:
+                indoor = float(rt_room)
+    except Exception as e:
+        logger.debug("LP Daikin telemetry fallback: %s", e)
 
     # Last known room from execution logs if still default-shaped
     try:

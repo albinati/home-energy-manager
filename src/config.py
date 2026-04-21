@@ -435,6 +435,13 @@ class Config:
     DAIKIN_SLOT_TRANSITION_WINDOW_SECONDS: int = int(
         os.getenv("DAIKIN_SLOT_TRANSITION_WINDOW_SECONDS", "300")
     )
+    # Phase 4.1 — per-caller cache staleness ceilings (seconds) so non-heartbeat paths reuse the cache.
+    DAIKIN_LP_INIT_CACHE_MAX_AGE_SECONDS: int = int(
+        os.getenv("DAIKIN_LP_INIT_CACHE_MAX_AGE_SECONDS", "600")
+    )
+    DAIKIN_LEGACY_TICK_CACHE_MAX_AGE_SECONDS: int = int(
+        os.getenv("DAIKIN_LEGACY_TICK_CACHE_MAX_AGE_SECONDS", "1200")
+    )
 
     # Fox ESS: soft daily budget (real limit ≈1440; we stop at 1200 for 15% headroom)
     FOX_DAILY_BUDGET: int = int(os.getenv("FOX_DAILY_BUDGET", "1200"))
