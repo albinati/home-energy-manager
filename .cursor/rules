@@ -20,3 +20,6 @@ Standalone Python service: Daikin Altherma ASHP + Fox ESS + Octopus Agile. The *
 - Type hints, follow patterns in `src/`, conventional commits (`feat/fix/refactor/docs/chore`)
 - Tests in `tests/` for new behaviour
 - Do not force-push `main`
+
+## Git / multi-issue branches
+- Prefer **one commit per issue** (or per logical issue slice) on a feature branch, not a single large commit that closes several issues at once — easier review, bisect, and revert.
