@@ -26,44 +26,13 @@ logger = logging.getLogger(__name__)
 EPS = 0.05
 
 
-def apply_lp_dispatch_gap_bridge(slots: list[HalfHourSlot], plan: LpPlan) -> None:
-    """Promote short ``standard`` runs between cheap/negative blocks to ``cheap`` (mutates ``slots``).
-
-    When the MILP skips charging for a few half-hours but prices are still below peak, dispatch
-    would otherwise flip Fox between ForceCharge and SelfUse — this fills those gaps (up to
-    ``FOX_LP_BRIDGE_GAP_SLOTS``) so hardware schedules stay consolidated.
-    """
-    max_gap = int(config.FOX_LP_BRIDGE_GAP_SLOTS)
-    if max_gap <= 0 or len(slots) < 3:
-        return
-    cap = float(config.FOX_LP_BRIDGE_MAX_PRICE_PENCE)
-    if cap <= 0:
-        cap = float(plan.peak_threshold_pence)
-    cheapish = frozenset({"cheap", "negative"})
-    n = len(slots)
-    i = 0
-    while i < n:
-        if slots[i].kind != "standard":
-            i += 1
-            continue
-        j = i
-        while j < n and slots[j].kind == "standard":
-            j += 1
-        length = j - i
-        prev_ok = i > 0 and slots[i - 1].kind in cheapish
-        next_ok = j < n and slots[j].kind in cheapish
-        if prev_ok and next_ok and length <= max_gap:
-            if all(slots[k].price_pence <= cap for k in range(i, j)):
-                for k in range(i, j):
-                    slots[k].kind = "cheap"
-        i = j
-
-
 def lp_dispatch_slots_for_hardware(plan: LpPlan) -> list[HalfHourSlot]:
-    """Half-hour kinds for Fox/Daikin after optional gap-bridging (see :func:`apply_lp_dispatch_gap_bridge`)."""
-    slots = lp_plan_to_slots(plan)
-    apply_lp_dispatch_gap_bridge(slots, plan)
-    return slots
+    """Half-hour kinds for Fox/Daikin — identical to :func:`lp_plan_to_slots` (pure MILP mapping).
+
+    V7-era "gap bridge" heuristics that promoted ``standard`` slots between charge blocks to
+    ``cheap`` are removed: they overrode the solver and extended ForceCharge windows.
+    """
+    return lp_plan_to_slots(plan)
 
 
 def lp_plan_to_slots(plan: LpPlan) -> list[HalfHourSlot]:
@@ -173,8 +142,7 @@ def _merge_half_hour_slots_for_daikin(plan: LpPlan) -> list[tuple[datetime, date
       any interleaving standard gap ≤ 1 slot), or
     * **dropped** — converted back to ``standard`` so no Daikin action is scheduled.
 
-    This mirrors the Fox ``FOX_LP_BRIDGE_GAP_SLOTS`` consolidation and prevents the heat-pump
-    from being toggled on/off every 30 minutes.
+    This filters ultra-short Daikin windows so the heat-pump is not toggled every 30 minutes.
     """
     slots = lp_dispatch_slots_for_hardware(plan)
     if not slots:
