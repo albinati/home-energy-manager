@@ -22,9 +22,9 @@ def _fclose(a: float | None, b: float, *, eps: float = 0.35) -> bool:
 def daikin_device_matches_params(dev: DaikinDevice, params: dict[str, Any]) -> bool:
     """Return True if live readings match scheduled params (skips redundant PATCHes).
 
-    For ``tank_power`` and ``tank_powerful`` the device model does not expose live
-    values in this snapshot, so we cannot confirm a match. Those fields always trigger
-    a write to ensure correct state (conservative but safe).
+    ``tank_power`` and ``tank_powerful`` compare against ``dev.tank_on`` /
+    ``dev.tank_powerful`` when the live value is known. If the live value is ``None``
+    (not populated from the Onecta snapshot), fall back to writing — conservative.
     All other fields (lwt_offset, tank_temp, climate_on) use tolerance-based comparison.
     """
     if "lwt_offset" in params and dev.lwt_offset is not None:
@@ -38,8 +38,12 @@ def daikin_device_matches_params(dev: DaikinDevice, params: dict[str, Any]) -> b
     if "climate_on" in params:
         if dev.is_on != bool(params["climate_on"]):
             return False
-    if "tank_power" in params or "tank_powerful" in params:
-        return False
+    if "tank_power" in params:
+        if dev.tank_on is None or dev.tank_on != bool(params["tank_power"]):
+            return False
+    if "tank_powerful" in params:
+        if dev.tank_powerful is None or dev.tank_powerful != bool(params["tank_powerful"]):
+            return False
     return True
 
 

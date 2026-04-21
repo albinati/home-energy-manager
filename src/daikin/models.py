@@ -33,6 +33,8 @@ class DaikinDevice:
     tank_target: float | None = None
     tank_target_min: float | None = None
     tank_target_max: float | None = None
+    tank_on: bool | None = None
+    tank_powerful: bool | None = None
     weather_regulation_enabled: bool = False
     weather_regulation_settable: bool = True
     lwt_offset_range: SetpointRange = field(default_factory=SetpointRange)

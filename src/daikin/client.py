@@ -184,6 +184,13 @@ class DaikinClient:
             elif "domestichotwater" in mp_type:
                 device.dhw_mp_id = mp.get("embeddedId", device.dhw_mp_id)
 
+                tank_on_off = mp.get("onOffMode", {}).get("value")
+                if tank_on_off is not None:
+                    device.tank_on = (tank_on_off == "on")
+                tank_powerful = mp.get("powerfulMode", {}).get("value")
+                if tank_powerful is not None:
+                    device.tank_powerful = (tank_powerful == "on")
+
                 sensor = mp.get("sensoryData", {}).get("value", {})
                 tank = sensor.get("tankTemperature", {}).get("value")
                 if tank is not None:
