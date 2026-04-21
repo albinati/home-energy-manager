@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime
 from typing import Any
 
 from . import db
@@ -45,6 +46,52 @@ def daikin_device_matches_params(dev: DaikinDevice, params: dict[str, Any]) -> b
         if dev.tank_powerful is None or dev.tank_powerful != bool(params["tank_powerful"]):
             return False
     return True
+
+
+def detect_user_override(
+    dev: DaikinDevice,
+    params: dict[str, Any],
+    *,
+    row_started_utc: datetime,
+    now_utc: datetime,
+) -> tuple[bool, str | None]:
+    """Phase 4.3 — return (is_override, human-readable-reason).
+
+    An override is declared when the action_schedule row has been active for at least
+    DAIKIN_OVERRIDE_GRACE_SECONDS AND the live device value diverges from the scheduled
+    param by more than the configured tolerance. The grace period avoids false positives
+    from cloud-echo lag right after our own write.
+    """
+    elapsed = (now_utc - row_started_utc).total_seconds()
+    if elapsed < float(config.DAIKIN_OVERRIDE_GRACE_SECONDS):
+        return False, None
+
+    tank_tol = float(config.DAIKIN_OVERRIDE_TOLERANCE_TANK_C)
+    lwt_tol = float(config.DAIKIN_OVERRIDE_TOLERANCE_LWT_C)
+
+    tank_target = getattr(dev, "tank_target", None)
+    if "tank_temp" in params and tank_target is not None:
+        delta = abs(float(tank_target) - float(params["tank_temp"]))
+        if delta > tank_tol:
+            return True, f"tank_temp {params['tank_temp']}→{tank_target} °C"
+
+    lwt_offset = getattr(dev, "lwt_offset", None)
+    if "lwt_offset" in params and lwt_offset is not None:
+        delta = abs(float(lwt_offset) - float(params["lwt_offset"]))
+        if delta > lwt_tol:
+            return True, f"lwt_offset {params['lwt_offset']}→{lwt_offset}"
+
+    tank_on = getattr(dev, "tank_on", None)
+    if "tank_power" in params and tank_on is not None:
+        if tank_on != bool(params["tank_power"]):
+            return True, f"tank_power {params['tank_power']}→{tank_on}"
+
+    if "climate_on" in params:
+        is_on = getattr(dev, "is_on", None)
+        if is_on is not None and is_on != bool(params["climate_on"]):
+            return True, f"climate_on {params['climate_on']}→{is_on}"
+
+    return False, None
 
 
 def apply_scheduled_daikin_params(

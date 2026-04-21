@@ -227,6 +227,12 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             "ALTER TABLE octopus_fetch_state ADD COLUMN failure_streak_started_at TEXT"
         )
 
+    # Phase 4.3: user-override marker on action_schedule rows.
+    cur = conn.execute("PRAGMA table_info(action_schedule)")
+    as_cols = {str(r[1]) for r in cur.fetchall()}
+    if "overridden_by_user_at" not in as_cols:
+        conn.execute("ALTER TABLE action_schedule ADD COLUMN overridden_by_user_at TEXT")
+
     # V2: meteo_forecast and pnl_execution_log tables (may already exist via SCHEMA)
     conn.execute(
         """CREATE TABLE IF NOT EXISTS meteo_forecast (
@@ -589,6 +595,24 @@ def mark_action(
                 """UPDATE action_schedule SET status = ?, error_msg = ?, executed_at = ?
                    WHERE id = ?""",
                 (status, error_msg, ex, action_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def mark_action_user_overridden(
+    action_id: int,
+    overridden_at: str | None = None,
+) -> None:
+    """Phase 4.3: flag an action_schedule row as overridden by the user so the reconciler skips it."""
+    ts = overridden_at or datetime.now(UTC).isoformat()
+    with _lock:
+        conn = get_connection()
+        try:
+            conn.execute(
+                "UPDATE action_schedule SET overridden_by_user_at = ? WHERE id = ?",
+                (ts, action_id),
             )
             conn.commit()
         finally:

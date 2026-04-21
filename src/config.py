@@ -442,6 +442,15 @@ class Config:
     DAIKIN_LEGACY_TICK_CACHE_MAX_AGE_SECONDS: int = int(
         os.getenv("DAIKIN_LEGACY_TICK_CACHE_MAX_AGE_SECONDS", "1200")
     )
+    # Phase 4.3 — user-override acceptance: how long after an action row becomes active
+    # before divergence from live state counts as a user override (vs our own write echo).
+    DAIKIN_OVERRIDE_GRACE_SECONDS: int = int(os.getenv("DAIKIN_OVERRIDE_GRACE_SECONDS", "600"))
+    DAIKIN_OVERRIDE_TOLERANCE_TANK_C: float = float(
+        os.getenv("DAIKIN_OVERRIDE_TOLERANCE_TANK_C", "0.6")
+    )
+    DAIKIN_OVERRIDE_TOLERANCE_LWT_C: float = float(
+        os.getenv("DAIKIN_OVERRIDE_TOLERANCE_LWT_C", "0.35")
+    )
 
     # Fox ESS: soft daily budget (real limit ≈1440; we stop at 1200 for 15% headroom)
     FOX_DAILY_BUDGET: int = int(os.getenv("FOX_DAILY_BUDGET", "1200"))

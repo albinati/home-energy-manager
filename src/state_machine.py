@@ -10,9 +10,13 @@ from zoneinfo import ZoneInfo
 from . import db
 from .config import config
 from .daikin.client import DaikinClient, DaikinError
-from .daikin_bulletproof import apply_comfort_restore, apply_scheduled_daikin_params
+from .daikin_bulletproof import (
+    apply_comfort_restore,
+    apply_scheduled_daikin_params,
+    detect_user_override,
+)
 from .foxess.client import FoxESSClient, FoxESSError, scheduler_groups_from_stored_json
-from .notifier import notify_risk
+from .notifier import notify_risk, notify_user_override
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +184,11 @@ def _reconcile_daikin_actions(
 ) -> None:
     """Transition statuses and apply params for today's Daikin rows."""
     for act in sorted(actions, key=lambda a: (a["start_time"], int(a["id"]))):
+        # Phase 4.3 — user-override rows are skipped entirely; the next MPC replan
+        # will see the live divergence as the new initial state and plan on top of it.
+        if act.get("overridden_by_user_at"):
+            continue
+
         try:
             start = _parse_utc(act["start_time"])
             end = _parse_utc(act["end_time"])
@@ -211,6 +220,26 @@ def _reconcile_daikin_actions(
                 lo = float(apply_params.get("lwt_offset", 0.0))
                 if lo < -2.0:
                     apply_params["lwt_offset"] = -2.0
+
+            # Phase 4.3 — check for user override before re-applying.
+            is_override, reason = detect_user_override(
+                dev, apply_params, row_started_utc=start, now_utc=now_utc
+            )
+            if is_override:
+                db.mark_action_user_overridden(aid)
+                db.log_action(
+                    device="daikin",
+                    action="user_override_detected",
+                    params={"row_id": aid, "reason": reason},
+                    result="skipped",
+                    trigger=trigger,
+                )
+                try:
+                    notify_user_override(reason or "unknown divergence")
+                except Exception as _exc:
+                    logger.debug("notify_user_override failed (non-fatal): %s", _exc)
+                continue
+
             try:
                 apply_scheduled_daikin_params(dev, client, apply_params, trigger=trigger)
             except (DaikinError, ValueError) as e:
