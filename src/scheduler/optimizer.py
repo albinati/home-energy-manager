@@ -761,6 +761,7 @@ def _run_optimizer_heuristic(fox: FoxESSClient | None, daikin: Any | None = None
     if fox and fox.api_key and config.OPERATION_MODE == "operational" and not config.OPENCLAW_READ_ONLY:
         try:
             fox.set_scheduler_v3(groups, is_default=False)
+            fox.warn_if_scheduler_v3_mismatch(groups)
             fox.set_scheduler_flag(True)
             fox_ok = True
             db.save_fox_schedule_state([g.to_api_dict() for g in groups], enabled=True)
