@@ -29,6 +29,27 @@ from .daikin.client import DaikinClient, DaikinError
 from .daikin.models import DaikinDevice
 from .foxess.client import WORK_MODE_VALID, FoxESSClient, FoxESSError
 from .foxess.service import get_cached_realtime, get_refresh_stats
+from .scheduler.lp_simulation import run_lp_simulation
+
+# Phase 4.4: whitelist of safe override keys accepted by simulate_plan.
+# Additions must be deliberate — overrides shadow config values during the solve.
+_SIMULATE_PLAN_OVERRIDE_WHITELIST = frozenset({
+    "occupancy_mode",
+    "residents",
+    "extra_visitors",
+    "dhw_temp_normal_c",
+    "target_dhw_min_guests_c",
+    "optimization_preset",
+})
+
+# Maps override key → config attribute on ``src.config.config``. Keys not in this map
+# (e.g. ``residents``, ``extra_visitors`` which live in DB not config) are silently
+# accepted but have no effect until the occupancy layer lands on this branch.
+_SIMULATE_PLAN_CONFIG_MAP = {
+    "dhw_temp_normal_c": "DHW_TEMP_NORMAL_C",
+    "target_dhw_min_guests_c": "TARGET_DHW_TEMP_MIN_GUESTS_C",
+    "optimization_preset": "OPTIMIZATION_PRESET",
+}
 
 logger = logging.getLogger(__name__)
 
@@ -473,6 +494,71 @@ def build_mcp() -> FastMCP:
             "plan_date": plan_date,
             "daikin_actions": db.schedule_for_date(plan_date),
             "fox_schedule_state": db.get_latest_fox_schedule_state(),
+        }
+
+    @mcp.tool(
+        name="simulate_plan",
+        description=(
+            "Phase 4.4 — run the LP optimizer READ-ONLY (no DB, no Fox, no Daikin writes, "
+            "no quota burn) with optional whitelisted config overrides. Use this to preview "
+            "'what would the plan look like if residents=4 tomorrow?' without touching hardware. "
+            "Whitelist: occupancy_mode, residents, extra_visitors, dhw_temp_normal_c, "
+            "target_dhw_min_guests_c, optimization_preset. Any other key is rejected."
+        ),
+    )
+    def simulate_plan(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+        overrides = overrides or {}
+        bad = [k for k in overrides if k not in _SIMULATE_PLAN_OVERRIDE_WHITELIST]
+        if bad:
+            return {
+                "ok": False,
+                "error": f"unsupported override key(s): {', '.join(sorted(bad))}. "
+                         f"Whitelist: {sorted(_SIMULATE_PLAN_OVERRIDE_WHITELIST)}",
+            }
+
+        # Apply overrides as temporary config attributes; restore after the solve.
+        saved: dict[str, Any] = {}
+        try:
+            for k, v in overrides.items():
+                attr = _SIMULATE_PLAN_CONFIG_MAP.get(k)
+                if attr is None:
+                    continue  # accepted-but-unused (forward-compat)
+                if hasattr(config, attr):
+                    saved[attr] = getattr(config, attr)
+                    setattr(config, attr, v)
+
+            result = run_lp_simulation()
+        finally:
+            for attr, val in saved.items():
+                setattr(config, attr, val)
+
+        if not result.ok:
+            return {
+                "ok": False,
+                "error": result.error or "simulation failed",
+                "plan_date": getattr(result, "plan_date", ""),
+                "plan_window": getattr(result, "plan_window", ""),
+                "status": getattr(result, "status", ""),
+            }
+
+        initial = getattr(result, "initial", None)
+        return {
+            "ok": True,
+            "plan_date": result.plan_date,
+            "plan_window": result.plan_window,
+            "slot_count": result.slot_count,
+            "objective_pence": result.objective_pence,
+            "status": result.status,
+            "actual_mean_agile_pence": result.actual_mean_agile_pence,
+            "forecast_solar_kwh_horizon": result.forecast_solar_kwh_horizon,
+            "pv_scale_factor": result.pv_scale_factor,
+            "mu_load_kwh_per_slot": result.mu_load_kwh,
+            "initial_state": {
+                "soc_kwh": getattr(initial, "soc_kwh", None),
+                "tank_temp_c": getattr(initial, "tank_temp_c", None),
+                "indoor_temp_c": getattr(initial, "indoor_temp_c", None),
+            },
+            "applied_overrides": dict(overrides),
         }
 
     @mcp.tool(
