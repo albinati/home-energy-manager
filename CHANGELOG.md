@@ -1,5 +1,21 @@
 # Changelog
 
+## v9.1.2 — 2026-04-21 — DST-boundary regression coverage + MCP timestamp labels (#47)
+
+Verifies and hardens UTC→BST handling after OpenClaw incorrectly flagged the scheduler as misaligned. Two independent forensic audits confirmed the scheduler IS timezone-correct (every peak comparison converts via `.astimezone(Europe/London)` first; LP slot classification is price-based, DST-immune). What actually tripped up OpenClaw was reading raw UTC `Z`-suffixed timestamps out of MCP responses and mentally mis-mapping them to local wall-clock.
+
+### Added
+
+- **10 DST-boundary regression tests** (`tests/test_scheduler_dst_boundary.py`) pinning correct behaviour across the UK spring-forward (2026-03-29 01:00 UTC) and fall-back (2026-10-25 01:00 UTC) transitions. Cover `utc_instant_in_scheduler_peak`, `scheduler_peak_contains_wall_time`, and end-to-end `compute_lwt_adjustment` flips from GMT→BST on consecutive days — the exact scenario #47 worried about.
+- **`_local` sibling fields on MCP planning responses.** `get_schedule` and `get_optimization_plan` now augment each action row with `start_time_local` / `end_time_local` formatted as `YYYY-MM-DDTHH:MM:SS BST|GMT`. The canonical UTC `start_time` / `end_time` are unchanged (DB and internal contracts preserve UTC). New helper `src/mcp_server.py::_augment_actions_with_local_time` is the single source for the rendering, covered by 3 unit tests.
+- Both responses also gain a top-level `"timezone"` field naming the zone used for the local rendering.
+
+### Not changed (intentionally)
+
+- `src/scheduler/*`, `src/db.py`, `src/notifier.py` — the forensic trace found zero bugs. "Fixing" correct code would introduce a real 1-hour financial regression, which is exactly what #47 was trying to prevent.
+
+### Closes #47.
+
 ## v9.1.1 — 2026-04-21 — Phase 4: quota hardening, user-override acceptance, OpenClaw MCP boundary
 
 Closes epic #39. Closes sub-issues #40 #41 #42 #43 #44.
