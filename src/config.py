@@ -316,14 +316,16 @@ class Config:
     # Round each slot price to this grid (pence) before the MILP objective — ignores sub‑grid price noise.
     # 0 = use exact Agile prices. Try 1–3 for less “fidgety” schedules.
     LP_PRICE_QUANTIZE_PENCE: float = float(os.getenv("LP_PRICE_QUANTIZE_PENCE", "0"))
-    # LP dispatch → Fox/Daikin: promote short ``standard`` runs sandwiched between cheap/negative charge
-    # slots to ``cheap`` so Scheduler V3 stays in ForceCharge (fewer SelfUse islands). 0 = disabled.
+    # Legacy (unused): was “gap bridge” in lp_dispatch; removed in Phase 1 — keep keys so .env
+    # does not break. Values are ignored.
     FOX_LP_BRIDGE_GAP_SLOTS: int = int(os.getenv("FOX_LP_BRIDGE_GAP_SLOTS", "2"))
     # Daikin: minimum consecutive slots (half-hours) for a non-standard window to be scheduled.
     # Cheap/negative windows shorter than this are merged forward or dropped to avoid rapid heat-pump
     # cycling.  2 = 1 hour minimum (recommended).  0 = disabled (legacy behaviour, any length).
     DAIKIN_MIN_WINDOW_SLOTS: int = int(os.getenv("DAIKIN_MIN_WINDOW_SLOTS", "2"))
-    # Only bridge when every standard slot’s Agile price is ≤ this (p/kWh). 0 = use LP plan peak_threshold.
+    # Delay between critical Onecta writes (climate power, DHW) so the 3-way valve can settle (#18).
+    # 0 = skip sleeps (tests).
+    DAIKIN_VALVE_SETTLE_SECONDS: int = int(os.getenv("DAIKIN_VALVE_SETTLE_SECONDS", "10"))
     FOX_LP_BRIDGE_MAX_PRICE_PENCE: float = float(os.getenv("FOX_LP_BRIDGE_MAX_PRICE_PENCE", "0"))
     SOLAR_GAIN_FRACTION: float = float(os.getenv("SOLAR_GAIN_FRACTION", "0.15"))
     COP_DHW_PENALTY: float = float(os.getenv("COP_DHW_PENALTY", "0.5"))
