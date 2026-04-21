@@ -37,6 +37,43 @@ from .scheduler.lp_simulation import run_lp_simulation
 _HARDWARE_WRITE_TOOL_PREFIXES = ("set_daikin_", "set_inverter_")
 
 
+def _augment_actions_with_local_time(
+    actions: list[dict[str, Any]], tz_name: str = "Europe/London"
+) -> list[dict[str, Any]]:
+    """Add ``start_time_local`` / ``end_time_local`` siblings to each action row.
+
+    The DB stores timestamps in canonical UTC (Z-suffix). External consumers
+    (OpenClaw, other agents, dashboards) that read raw UTC strings tend to
+    mis-read the local hour during BST months — #47 was filed because an agent
+    saw a ``"start_time": "2026-04-21T15:00:00Z"`` row and concluded the peak
+    window was firing an hour early, when in fact 15:00 UTC is 16:00 BST and
+    the scheduler was correctly targeting the 16:00–19:00 local peak.
+
+    Adding a human-readable local rendering alongside the canonical UTC makes
+    the ambiguity disappear without changing the underlying storage contract.
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo(tz_name)
+    out: list[dict[str, Any]] = []
+    for a in actions:
+        copy = dict(a)
+        for key in ("start_time", "end_time"):
+            raw = copy.get(key)
+            if not raw:
+                continue
+            try:
+                dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00")).astimezone(tz)
+            except (TypeError, ValueError):
+                continue
+            # e.g. "2026-04-21T16:00:00 BST" — same digits a UK dashboard shows,
+            # plus the abbreviation so no agent can confuse it with UTC.
+            copy[f"{key}_local"] = dt.strftime(f"%Y-%m-%dT%H:%M:%S {dt.tzname()}")
+        out.append(copy)
+    return out
+
+
 def audit_mcp_tool_surface(mcp_app) -> list[str]:
     """Emit WARN for any hardware-write tool that lacks a ``confirmed`` parameter.
 
@@ -657,7 +694,10 @@ def build_mcp() -> FastMCP:
             "ok": True,
             "bulletproof": True,
             "plan_date": plan_date,
-            "daikin_actions": db.schedule_for_date(plan_date),
+            "timezone": config.BULLETPROOF_TIMEZONE,
+            "daikin_actions": _augment_actions_with_local_time(
+                db.schedule_for_date(plan_date), config.BULLETPROOF_TIMEZONE
+            ),
             "fox_schedule_state": db.get_latest_fox_schedule_state(),
         }
 
@@ -1495,7 +1535,10 @@ def build_mcp() -> FastMCP:
         return {
             "ok": True,
             "plan_date": plan_date,
-            "actions": db.schedule_for_date(plan_date),
+            "timezone": config.BULLETPROOF_TIMEZONE,
+            "actions": _augment_actions_with_local_time(
+                db.schedule_for_date(plan_date), config.BULLETPROOF_TIMEZONE
+            ),
             "fox": db.get_latest_fox_schedule_state(),
         }
 
