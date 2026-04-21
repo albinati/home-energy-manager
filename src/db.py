@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS action_schedule (
     created_at TEXT NOT NULL,
     executed_at TEXT,
     error_msg TEXT,
+    overridden_by_user_at TEXT,
     FOREIGN KEY (restore_action_id) REFERENCES action_schedule(id)
 );
 
