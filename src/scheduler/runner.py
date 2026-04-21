@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -28,6 +28,7 @@ _last_exec_halfhour_key: str | None = None
 _last_room_temp: float | None = None
 _last_room_wall_utc: datetime | None = None
 _last_notified_slot_kind: str | None = None
+_comfort_morning_logged: set[str] = set()
 
 
 def _get_forecast_temp_c(now_utc: datetime) -> float | None:
@@ -274,6 +275,90 @@ def bulletproof_mpc_job() -> None:
         logger.warning("MPC job failed: %s", e)
 
 
+def _hhmm_to_minutes(s: str) -> int:
+    parts = (s or "00:00").strip().split(":")
+    h = int(parts[0]) if parts else 0
+    m = int(parts[1]) if len(parts) > 1 else 0
+    return h * 60 + m
+
+
+def _prune_comfort_morning_keys() -> None:
+    global _comfort_morning_logged
+    if len(_comfort_morning_logged) <= 120:
+        return
+    cutoff = (date.today() - timedelta(days=14)).isoformat()
+    _comfort_morning_logged = {k for k in _comfort_morning_logged if k[:10] >= cutoff}
+
+
+def _maybe_log_comfort_morning_check(
+    *,
+    now_local: datetime,
+    now_utc: datetime,
+    plan_date: str,
+    room_t: float | None,
+    soc: float | None,
+    fox_mode: str | None,
+    outdoor_t: float | None,
+    lwt_off: float | None,
+    tank_t: float | None,
+    tank_tgt: float | None,
+    tank_on: bool,
+    dev0: Any,
+) -> None:
+    global _comfort_morning_logged
+    if room_t is None or not dev0:
+        return
+    cur = now_local.hour * 60 + now_local.minute
+    sp = float(config.INDOOR_SETPOINT_C)
+    for slot_kind, hhmm in (
+        ("occupied_morning_start", config.LP_OCCUPIED_MORNING_START),
+        ("occupied_morning_end", config.LP_OCCUPIED_MORNING_END),
+    ):
+        m0 = _hhmm_to_minutes(hhmm)
+        if m0 - 2 <= cur < m0 + 8:
+            key = f"{plan_date}_{slot_kind}"
+            if key in _comfort_morning_logged:
+                continue
+            _comfort_morning_logged.add(key)
+            _prune_comfort_morning_keys()
+            fc = _get_forecast_temp_c(now_utc)
+            db.log_execution(
+                {
+                    "timestamp": now_utc.isoformat(),
+                    "consumption_kwh": None,
+                    "agile_price_pence": None,
+                    "svt_shadow_price_pence": None,
+                    "fixed_shadow_price_pence": None,
+                    "cost_realised_pence": None,
+                    "cost_svt_shadow_pence": None,
+                    "cost_fixed_shadow_pence": None,
+                    "delta_vs_svt_pence": None,
+                    "delta_vs_fixed_pence": None,
+                    "soc_percent": soc,
+                    "fox_mode": fox_mode,
+                    "daikin_lwt_offset": lwt_off,
+                    "daikin_tank_temp": tank_t,
+                    "daikin_tank_target": tank_tgt,
+                    "daikin_tank_power_on": 1 if tank_on else 0,
+                    "daikin_powerful_mode": None,
+                    "daikin_room_temp": room_t,
+                    "daikin_outdoor_temp": outdoor_t,
+                    "daikin_lwt": dev0.leaving_water_temperature,
+                    "forecast_temp_c": fc or outdoor_t,
+                    "forecast_solar_kw": None,
+                    "forecast_heating_demand": None,
+                    "slot_kind": slot_kind,
+                    "source": "comfort_check",
+                }
+            )
+            logger.info(
+                "Comfort check (%s): room=%.2f°C setpoint=%.2f°C",
+                slot_kind,
+                room_t,
+                sp,
+            )
+
+
 def bulletproof_plan_push_job() -> None:
     """Nightly plan dispatch: push tomorrow's LP plan to Fox ESS + Daikin at LP_PLAN_PUSH_HOUR:MINUTE.
 
@@ -422,6 +507,22 @@ def bulletproof_heartbeat_tick() -> None:
             now_utc,
             trigger="heartbeat",
             outdoor_c=outdoor_t,
+        )
+
+    if dev0:
+        _maybe_log_comfort_morning_check(
+            now_local=now_local,
+            now_utc=now_utc,
+            plan_date=plan_date,
+            room_t=room_t,
+            soc=soc,
+            fox_mode=fox_mode,
+            outdoor_t=outdoor_t,
+            lwt_off=lwt_off,
+            tank_t=tank_t,
+            tank_tgt=tank_tgt,
+            tank_on=tank_on,
+            dev0=dev0,
         )
 
     if mon - _last_fox_verify_monotonic >= 1800 and fox and fox.api_key:
