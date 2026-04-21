@@ -4,6 +4,8 @@ Epic: [#32 — Phase 2: The Thermodynamic Brain (Physics and COP in PuLP)](https
 
 Working branch: `feat/phase2-thermodynamic-brain`
 
+**Git preference:** implement and commit **one issue at a time** on the branch (separate commits per issue), not one large commit for several issues — easier review and history.
+
 Scope (from epic): **thermodynamics and COP in PuLP** — do **not** change dispatcher hardware paths or calendar integrations in this epic unless a fix is unavoidable.
 
 ---
