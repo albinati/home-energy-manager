@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 
 from .config import config, cop_at_temperature
+from .physics import apply_cop_lift_multiplier, get_lwt_base_c
 
 # --------------------------------------------------------------------------
 # Historical (analytics only)
@@ -437,8 +438,37 @@ def forecast_to_lp_inputs(
         # Apply calibration scale and enforce per-hour physical ceiling
         slot_ceil = hourly_ceil.get(st.hour, cap * eff * 0.5)
         pv_kwh = min(slot_ceil, max(0.0, kw_ac * 0.5 * pv_scale))
-        cop_s = max(1.0, cop_at_temperature(curve, temp_c))
-        cop_d = max(1.0, cop_s - dhw_pen)
+        base_cop = max(1.0, cop_at_temperature(curve, temp_c))
+        cop_s = base_cop
+        lift_pen = float(getattr(config, "LP_COP_LIFT_PENALTY_PER_KELVIN", 0.0))
+        if lift_pen > 0.0:
+            lwt_off_max = float(getattr(config, "OPTIMIZATION_LWT_OFFSET_MAX", 10.0))
+            lwt_ceiling = float(getattr(config, "LP_COP_SPACE_LWT_CEILING_C", 50.0))
+            lwt_space = min(lwt_ceiling, get_lwt_base_c(temp_c) + lwt_off_max)
+            lwt_dhw = float(getattr(config, "LP_COP_DHW_LIFT_SUPPLY_C", 45.0))
+            ref_k = float(getattr(config, "LP_COP_LIFT_REFERENCE_DELTA_K", 25.0))
+            min_m = float(getattr(config, "LP_COP_LIFT_MIN_MULTIPLIER", 0.5))
+            cop_s = apply_cop_lift_multiplier(
+                cop_s,
+                temp_c,
+                lwt_space,
+                penalty_per_k=lift_pen,
+                reference_delta_k=ref_k,
+                min_mult=min_m,
+            )
+            cop_d = max(
+                1.0,
+                apply_cop_lift_multiplier(
+                    max(1.0, base_cop - dhw_pen),
+                    temp_c,
+                    lwt_dhw,
+                    penalty_per_k=lift_pen,
+                    reference_delta_k=ref_k,
+                    min_mult=min_m,
+                ),
+            )
+        else:
+            cop_d = max(1.0, cop_s - dhw_pen)
         t_out.append(temp_c)
         rad.append(rad_eff)
         cloud.append(cloud_pct)
