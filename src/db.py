@@ -1053,17 +1053,78 @@ def update_octopus_fetch_state(
             conn.close()
 
 
+def _parse_action_time_utc(s: str) -> datetime:
+    x = str(s).replace("Z", "+00:00")
+    dt = datetime.fromisoformat(x)
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+def _now_utc() -> datetime:
+    """Wall clock for replan preservation tests (monkeypatch target)."""
+    return datetime.now(UTC)
+
+
+def _preserve_daikin_pending_ids_for_replan(plan_date: str) -> set[int]:
+    """Row ids that must survive clear_actions before a replan (issue #27).
+
+    * Pending **restore** rows referenced by an **active** main action (otherwise the
+      post-shutdown restore disappears while the commanded state is still active).
+    * Pending main actions in ``[start, end)`` (MPC can run before heartbeat marks them
+      ``active``) plus their paired restore row, if any.
+    """
+    now_utc = _now_utc()
+    preserve: set[int] = set()
+    for r in get_actions_for_plan_date(plan_date, device="daikin"):
+        st = r.get("status") or ""
+        if st == "active" and r.get("restore_action_id"):
+            preserve.add(int(r["restore_action_id"]))
+        if st != "pending":
+            continue
+        try:
+            start = _parse_action_time_utc(str(r["start_time"]))
+            end = _parse_action_time_utc(str(r["end_time"]))
+        except (ValueError, KeyError, TypeError):
+            continue
+        if start <= now_utc < end:
+            preserve.add(int(r["id"]))
+            rid = r.get("restore_action_id")
+            if rid is not None:
+                preserve.add(int(rid))
+    return preserve
+
+
 def clear_actions_for_date(plan_date: str, device: str | None = None) -> None:
-    """Remove pending actions for a plan date (before re-optimizing)."""
+    """Remove pending actions for a plan date (before re-optimizing).
+
+    Daikin: does **not** delete pending rows still needed for in-flight execution — see
+    :func:`_preserve_daikin_pending_ids_for_replan`.
+    """
+    preserve_ids: set[int] = set()
+    if device == "daikin":
+        preserve_ids = _preserve_daikin_pending_ids_for_replan(plan_date)
     with _lock:
         conn = get_connection()
         try:
             if device:
-                conn.execute(
-                    """DELETE FROM action_schedule
-                       WHERE date = ? AND device = ? AND status = 'pending'""",
-                    (plan_date, device),
-                )
+                if preserve_ids:
+                    placeholders = ",".join("?" * len(preserve_ids))
+                    q = (
+                        f"""DELETE FROM action_schedule
+                            WHERE date = ? AND device = ? AND status = 'pending'
+                            AND id NOT IN ({placeholders})"""
+                    )
+                    conn.execute(
+                        q,
+                        (plan_date, device, *sorted(preserve_ids)),
+                    )
+                else:
+                    conn.execute(
+                        """DELETE FROM action_schedule
+                           WHERE date = ? AND device = ? AND status = 'pending'""",
+                        (plan_date, device),
+                    )
             else:
                 conn.execute(
                     """DELETE FROM action_schedule
