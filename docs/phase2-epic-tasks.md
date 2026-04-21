@@ -51,8 +51,8 @@ Scope (from epic): **thermodynamics and COP in PuLP** — do **not** change disp
 
 ### Tasks
 
-- [ ] **Verify** end-to-end: LP plan shows non-zero `space_electric_kwh` / indoor trajectory on a cold-weather fixture (unit or scripted scenario).
-- [ ] **Tests:** extend or add `tests/test_lp_optimizer.py` (or focused tests) for space-load + floor constraint when `space_floor_kwh[i] > 0`.
+- [x] **Verify** end-to-end: LP plan shows non-zero `space_electric_kwh` / indoor trajectory on a cold-weather fixture (unit or scripted scenario).
+- [x] **Tests:** `tests/test_lp_optimizer_space_floor.py` — optimal plan satisfies `e_dhw + e_space >= space_floor` per slot when the climate floor is active.
 - [ ] **Docs:** in PR description, note any behaviour change vs previous releases.
 - [ ] PR: `Closes #19` only when acceptance above is met.
 
@@ -66,11 +66,11 @@ Scope (from epic): **thermodynamics and COP in PuLP** — do **not** change disp
 
 ### Tasks
 
-- [ ] **Gap analysis:** document in PR whether outdoor-only COP is sufficient or an **LWT- (or tank-target-) aware** multiplier is required per product owner.
-- [ ] **Implement** (if required): extend `physics.py` / `weather.forecast_to_lp_inputs` to build **per-slot** COP or effective electrical multipliers from **config only** (`DAIKIN_COP_CURVE`, weather curve envs, any new keys with safe defaults + warning if missing).
-- [ ] **Tests:** pure-Python tests for pre-processed arrays (monotonicity, bounds, env wiring).
-- [ ] **No PuLP change** that adds non-linear COP inside `prob +=` — keep degradation in NumPy/Python before `solve_lp`.
-- [ ] PR: `Closes #29` when the agreed design is implemented and tested.
+- [x] **Gap analysis:** optional **LWT-lift** multiplier (`LP_COP_LIFT_PENALTY_PER_KELVIN`, default `0` = legacy outdoor-only COP). When `>0`, COP is reduced from implied space LWT (`get_lwt_base_c` + max offset, ceiling from `LP_COP_SPACE_LWT_CEILING_C`) and DHW representative supply (`LP_COP_DHW_LIFT_SUPPLY_C`).
+- [x] **Implement:** `physics.apply_cop_lift_multiplier` + wiring in `weather.forecast_to_lp_inputs` (all config-driven).
+- [x] **Tests:** `tests/test_physics_cop_lift.py`, `tests/test_weather_cop_preprocess.py`.
+- [x] **No PuLP change** — degradation stays in Python before `solve_lp`.
+- [ ] PR: `Closes #29` when merged after review.
 
 ---
 
@@ -82,10 +82,10 @@ Scope (from epic): **thermodynamics and COP in PuLP** — do **not** change disp
 
 ### Tasks
 
-- [ ] **Part A:** Confirm no remaining hardcoded `16.0` overnight floor in `lp_optimizer.py` (grep); already expected to use `config.LP_OVERNIGHT_COMFORT_FLOOR_C`.
-- [ ] **Part B:** Decide if current **LP → `e_space` → back-computed LWT** is enough, or if extra **rule-based** boosts in `lp_dispatch` are still needed; document decision in PR.
-- [ ] **Optional:** add `LP_OVERNIGHT_COMFORT_FLOOR_C` to example `.env.example` or internal docs if missing.
-- [ ] PR: `Closes #21` only when Parts A/B acceptance in the issue are satisfied or explicitly superseded in the PR description.
+- [x] **Part A:** `_slot_occupancy_bounds` uses `config.LP_OVERNIGHT_COMFORT_FLOOR_C` (no hardcoded 16 °C).
+- [x] **Part B:** **Option A (partial):** LP sets `e_space[i]`; dispatch maps to LWT via `lwt_offset_from_space_kw` / `lwt_offset_c` — no extra rule-based tier boosts required for the solver path. Further heuristic boosts remain a product choice.
+- [x] **Optional:** `.env.example` documents `LP_OVERNIGHT_COMFORT_FLOOR_C`.
+- [ ] PR: `Closes #21` when merged after review.
 
 ---
 
@@ -97,10 +97,10 @@ Scope (from epic): **thermodynamics and COP in PuLP** — do **not** change disp
 
 ### Tasks
 
-- [ ] **Operational:** document minimum lookback / data quality (e.g. weeks of non-identical `daikin_outdoor_temp` vs `forecast_temp_c`).
-- [ ] **Optional tooling:** script or MCP note to print current offset and row counts (no new service requirement unless requested).
-- [ ] **Tests:** mock DB slice for `get_micro_climate_offset_c` behaviour if not already covered.
-- [ ] PR: `Closes #20` when validation process + any agreed tooling are delivered; if only docs, use `Closes` only if the issue’s acceptance is documentation-only.
+- [x] **Operational:** use `DAIKIN_MICRO_CLIMATE_LOOKBACK` (default 96) rows where `daikin_outdoor_temp` and `forecast_temp_c` differ; **2–4 weeks** of diverse weather improves the mean — see issue body.
+- [x] **Tooling:** `scripts/print_micro_climate_offset.py` prints the current offset.
+- [x] **Tests:** `tests/test_db_micro_climate.py`.
+- [ ] PR: `Closes #20` when merged after review.
 
 ---
 
