@@ -8,6 +8,17 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def env_int_at_least(name: str, default: int, minimum: int) -> int:
+    """Read an int env var, falling back to ``default``, then clamp to ``minimum``.
+    Use this for values where going below the minimum creates a footgun (e.g. a
+    0-second grace window that causes a self-DoS). Kept as a free function so
+    tests can exercise the clamp without reloading the config module."""
+    try:
+        return max(minimum, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return max(minimum, default)
+
+
 def parse_cop_curve_csv(s: str) -> list[tuple[float, float]]:
     """Parse ``"-7:1.8,2:2.6,7:3.1"`` into sorted ``[(T_C, COP), ...]``."""
     out: list[tuple[float, float]] = []
@@ -444,7 +455,12 @@ class Config:
     )
     # Phase 4.3 — user-override acceptance: how long after an action row becomes active
     # before divergence from live state counts as a user override (vs our own write echo).
-    DAIKIN_OVERRIDE_GRACE_SECONDS: int = int(os.getenv("DAIKIN_OVERRIDE_GRACE_SECONDS", "600"))
+    # Clamped to a 60 s minimum: values lower than a typical Onecta cloud-echo lag cause
+    # every freshly-active row to be false-flagged as user-overridden on the first tick,
+    # producing a self-DoS where no plan ever executes.
+    DAIKIN_OVERRIDE_GRACE_SECONDS: int = env_int_at_least(
+        "DAIKIN_OVERRIDE_GRACE_SECONDS", 600, 60
+    )
     DAIKIN_OVERRIDE_TOLERANCE_TANK_C: float = float(
         os.getenv("DAIKIN_OVERRIDE_TOLERANCE_TANK_C", "0.6")
     )
