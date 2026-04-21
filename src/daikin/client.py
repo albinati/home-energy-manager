@@ -46,6 +46,14 @@ class DaikinClient:
             "Content-Type": "application/json",
         }
 
+    @staticmethod
+    def _safe_record(kind: str, ok: bool) -> None:
+        """Quota accounting must never shadow the HTTP outcome — swallow SQLite errors."""
+        try:
+            record_call("daikin", kind, ok=ok)
+        except Exception:
+            pass
+
     def _get(self, path: str) -> dict | list:
         url = f"{self.BASE_URL}{path}"
         max_429 = max(0, int(config.DAIKIN_HTTP_429_MAX_RETRIES))
@@ -56,7 +64,7 @@ class DaikinClient:
                 try:
                     resp = urllib.request.urlopen(req, timeout=15)
                 except urllib.error.HTTPError as e:
-                    record_call("daikin", "read", ok=False)
+                    self._safe_record("read", ok=False)
                     body = e.read().decode()
                     if e.code == 401 and auth_try == 0:
                         retry_auth = True
@@ -66,9 +74,9 @@ class DaikinClient:
                         continue
                     raise DaikinError(f"HTTP {e.code}: {body}")
                 except Exception:
-                    record_call("daikin", "read", ok=False)
+                    self._safe_record("read", ok=False)
                     raise
-                record_call("daikin", "read", ok=True)
+                self._safe_record("read", ok=True)
                 return json.loads(resp.read())
             if retry_auth:
                 continue
@@ -90,7 +98,7 @@ class DaikinClient:
                 try:
                     resp = urllib.request.urlopen(req, timeout=15)
                 except urllib.error.HTTPError as e:
-                    record_call("daikin", "write", ok=False)
+                    self._safe_record("write", ok=False)
                     err_body = e.read().decode()
                     if e.code == 401 and auth_try == 0:
                         retry_auth = True
@@ -102,9 +110,9 @@ class DaikinClient:
                         raise DaikinError(f"[read_only] HTTP 400: {err_body}")
                     raise DaikinError(f"HTTP {e.code}: {err_body}")
                 except Exception:
-                    record_call("daikin", "write", ok=False)
+                    self._safe_record("write", ok=False)
                     raise
-                record_call("daikin", "write", ok=True)
+                self._safe_record("write", ok=True)
                 rb = resp.read()
                 return json.loads(rb) if rb else {}
             if retry_auth:
@@ -220,7 +228,9 @@ class DaikinClient:
     def get_status(self, device: DaikinDevice) -> DaikinStatus:
         return DaikinStatus(
             device_name=device.name,
-            is_on=device.is_on,
+            # Coerce Optional[bool] to bool for the external-facing status model;
+            # unknown treated as off for display/API consumers.
+            is_on=bool(device.is_on),
             mode=device.operation_mode,
             room_temp=device.temperature.room_temperature,
             target_temp=device.temperature.set_point,
