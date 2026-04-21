@@ -63,13 +63,21 @@ def _build_load_profile(slot_starts_utc: list[datetime]) -> list[float]:
     return out
 
 
-def run_lp_simulation(*, daikin: Any | None = None) -> LpSimulationResult:
+def run_lp_simulation(
+    *,
+    daikin: Any | None = None,
+    allow_daikin_refresh: bool = True,
+) -> LpSimulationResult:
     """Build the same inputs as ``_run_optimizer_lp``, solve, return plan — **no DB/Fox/Daikin writes**.
 
     Automatically selects the best available planning window:
     - Tomorrow (full day) if tomorrow's rates are published (≥40 slots).
     - Today-remainder if only today's rates are present.
     - Returns an error result if no rates exist at all.
+
+    Phase 4 review: ``allow_daikin_refresh=False`` forbids any cache refresh that
+    would burn Daikin quota. The ``simulate_plan`` MCP tool relies on this to
+    keep the "no quota burn" guarantee even when the process cache is cold.
     """
     tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
     if not tariff:
@@ -110,7 +118,7 @@ def run_lp_simulation(*, daikin: Any | None = None) -> LpSimulationResult:
     pv_scale = compute_pv_calibration_factor()
 
     weather = forecast_to_lp_inputs(forecast, starts, pv_scale=pv_scale)
-    initial = read_lp_initial_state(daikin)
+    initial = read_lp_initial_state(daikin, allow_daikin_refresh=allow_daikin_refresh)
 
     plan = solve_lp(
         slot_starts_utc=starts,

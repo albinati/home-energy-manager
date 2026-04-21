@@ -13,7 +13,11 @@ from .lp_optimizer import LpInitialState
 logger = logging.getLogger(__name__)
 
 
-def read_lp_initial_state(daikin: Any | None = None) -> LpInitialState:
+def read_lp_initial_state(
+    daikin: Any | None = None,
+    *,
+    allow_daikin_refresh: bool = True,
+) -> LpInitialState:
     """SoC from FoxESS cache (or DB realtime snapshot); tank and room from Daikin cache if available; else execution_log / defaults.
 
     Priority order for SoC:
@@ -23,6 +27,10 @@ def read_lp_initial_state(daikin: Any | None = None) -> LpInitialState:
 
     Daikin telemetry is sourced from the cached service (get_cached_devices) — the ``daikin``
     parameter is kept for backwards-compat but no longer issues HTTP calls. Quota is preserved.
+
+    Phase 4 review: ``allow_daikin_refresh=False`` forbids any cache-miss refresh
+    that would burn Daikin quota. Simulation paths pass this to honor the
+    "no quota burn" guarantee even when the MCP-process cache is cold.
     """
     soc_kwh = float(config.BATTERY_CAPACITY_KWH) * 0.5
     soc_source = "default"
@@ -48,7 +56,7 @@ def read_lp_initial_state(daikin: Any | None = None) -> LpInitialState:
 
     try:
         result = daikin_service.get_cached_devices(
-            allow_refresh=True,
+            allow_refresh=allow_daikin_refresh,
             max_age_seconds=config.DAIKIN_LP_INIT_CACHE_MAX_AGE_SECONDS,
             actor="lp_init",
         )

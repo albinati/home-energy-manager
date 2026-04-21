@@ -41,9 +41,23 @@ def audit_mcp_tool_surface(mcp_app) -> list[str]:
     """Emit WARN for any hardware-write tool that lacks a ``confirmed`` parameter.
 
     Returns the list of warning strings so tests can assert on regressions.
+
+    The audit reaches into FastMCP private internals; if a future release renames or
+    restructures them, we would get an empty tools dict and the boundary check would
+    silently become a no-op — exactly the worst failure mode. Detect empty-registry
+    as a distinct *error* so it stays loud.
     """
     warnings: list[str] = []
     tools = getattr(getattr(mcp_app, "_tool_manager", None), "_tools", {}) or {}
+    if not tools:
+        msg = (
+            "[OpenClaw boundary] audit_mcp_tool_surface observed ZERO registered tools — "
+            "likely a FastMCP private-API break. The boundary check is a no-op until fixed. "
+            "See docs/OPENCLAW_BOUNDARY.md."
+        )
+        logger.error(msg)
+        warnings.append(msg)
+        return warnings
     for name, tool in tools.items():
         if not any(name.startswith(p) for p in _HARDWARE_WRITE_TOOL_PREFIXES):
             continue
@@ -70,14 +84,137 @@ _SIMULATE_PLAN_OVERRIDE_WHITELIST = frozenset({
     "optimization_preset",
 })
 
-# Maps override key → config attribute on ``src.config.config``. Keys not in this map
-# (e.g. ``residents``, ``extra_visitors`` which live in DB not config) are silently
-# accepted but have no effect until the occupancy layer lands on this branch.
+# Maps override key → config attribute on ``src.config.config``. Keys in the
+# whitelist but not in this map are validated and returned under
+# ``ignored_overrides`` (the occupancy layer that consumes them is on other
+# branches; applying them here would be a silent no-op that misleads callers).
 _SIMULATE_PLAN_CONFIG_MAP = {
     "dhw_temp_normal_c": "DHW_TEMP_NORMAL_C",
     "target_dhw_min_guests_c": "TARGET_DHW_TEMP_MIN_GUESTS_C",
     "optimization_preset": "OPTIMIZATION_PRESET",
 }
+
+# Phase 4 review — per-key value validators for simulate_plan.
+_VALID_OPTIMIZATION_PRESETS = frozenset({"normal", "guests", "travel", "away", "boost"})
+_VALID_OCCUPANCY_MODES = frozenset({"normal", "guests", "travel", "away"})
+
+
+def _validate_simulate_override(key: str, value: Any) -> tuple[Any, str | None]:
+    """Return (coerced_value, error). error is None if valid. Attacker-supplied
+    override VALUES are validated before any config mutation happens."""
+    if key in ("dhw_temp_normal_c", "target_dhw_min_guests_c"):
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return None, f"{key} must be a number, got {type(value).__name__}"
+        if not 30.0 <= v <= 70.0:
+            return None, f"{key} out of range (30..70 °C): {v}"
+        return v, None
+    if key == "optimization_preset":
+        if not isinstance(value, str) or value not in _VALID_OPTIMIZATION_PRESETS:
+            return None, f"{key} must be one of {sorted(_VALID_OPTIMIZATION_PRESETS)}"
+        return value, None
+    if key == "occupancy_mode":
+        if not isinstance(value, str) or value not in _VALID_OCCUPANCY_MODES:
+            return None, f"{key} must be one of {sorted(_VALID_OCCUPANCY_MODES)}"
+        return value, None
+    if key in ("residents", "extra_visitors"):
+        try:
+            v = int(value)
+        except (TypeError, ValueError):
+            return None, f"{key} must be an integer, got {type(value).__name__}"
+        if not 0 <= v <= 20:
+            return None, f"{key} out of range (0..20): {v}"
+        return v, None
+    return None, f"{key}: no validator"
+
+
+def _simulate_plan_empty_response(ok: bool, error: str | None, received: dict) -> dict[str, Any]:
+    """Base response shape — same top-level keys on success and error paths.
+
+    Phase 4 review: consumers (OpenClaw) couldn't previously rely on any key being
+    present without branching on ``ok``. Now every field exists on every path;
+    ``applied_overrides``/``ignored_overrides`` tell the caller what took effect.
+    """
+    return {
+        "ok": ok,
+        "error": error,
+        "plan_date": "",
+        "plan_window": "",
+        "slot_count": 0,
+        "objective_pence": 0.0,
+        "status": "",
+        "actual_mean_agile_pence": 0.0,
+        "forecast_solar_kwh_horizon": 0.0,
+        "pv_scale_factor": 0.0,
+        "mu_load_kwh_per_slot": 0.0,
+        "initial_state": {"soc_kwh": None, "tank_temp_c": None, "indoor_temp_c": None},
+        "received_overrides": dict(received),
+        "applied_overrides": {},
+        "ignored_overrides": {},
+    }
+
+
+def _run_simulate_plan_body(overrides: dict[str, Any]) -> dict[str, Any]:
+    """Config-mutating core of simulate_plan. Runs inside _optimizer_executor
+    so it serializes against propose_optimization_plan's background thread
+    (shared max_workers=1 queue — no config-mutation race)."""
+    validated: dict[str, Any] = {}
+    for k, v in overrides.items():
+        coerced, err = _validate_simulate_override(k, v)
+        if err is not None:
+            return _simulate_plan_empty_response(False, f"invalid override: {err}", overrides)
+        validated[k] = coerced
+
+    applied: dict[str, Any] = {}
+    ignored: dict[str, Any] = {}
+    saved: dict[str, Any] = {}
+    try:
+        for k, v in validated.items():
+            attr = _SIMULATE_PLAN_CONFIG_MAP.get(k)
+            if attr is None:
+                ignored[k] = v
+                continue
+            if hasattr(config, attr):
+                saved[attr] = getattr(config, attr)
+                setattr(config, attr, v)
+                applied[k] = v
+
+        # Phase 4 review C10: explicitly forbid cache refresh so a cold MCP-process
+        # cache cannot burn Daikin quota during a "no quota" simulation.
+        result = run_lp_simulation(allow_daikin_refresh=False)
+    finally:
+        for attr, val in saved.items():
+            setattr(config, attr, val)
+
+    if not result.ok:
+        resp = _simulate_plan_empty_response(False, result.error or "simulation failed", overrides)
+        resp["plan_date"] = getattr(result, "plan_date", "") or ""
+        resp["plan_window"] = getattr(result, "plan_window", "") or ""
+        resp["status"] = getattr(result, "status", "") or ""
+        resp["applied_overrides"] = applied
+        resp["ignored_overrides"] = ignored
+        return resp
+
+    initial = getattr(result, "initial", None)
+    resp = _simulate_plan_empty_response(True, None, overrides)
+    resp["plan_date"] = result.plan_date
+    resp["plan_window"] = result.plan_window
+    resp["slot_count"] = result.slot_count
+    resp["objective_pence"] = result.objective_pence
+    resp["status"] = result.status
+    resp["actual_mean_agile_pence"] = result.actual_mean_agile_pence
+    resp["forecast_solar_kwh_horizon"] = result.forecast_solar_kwh_horizon
+    resp["pv_scale_factor"] = result.pv_scale_factor
+    resp["mu_load_kwh_per_slot"] = result.mu_load_kwh
+    resp["initial_state"] = {
+        "soc_kwh": getattr(initial, "soc_kwh", None),
+        "tank_temp_c": getattr(initial, "tank_temp_c", None),
+        "indoor_temp_c": getattr(initial, "indoor_temp_c", None),
+    }
+    resp["applied_overrides"] = applied
+    resp["ignored_overrides"] = ignored
+    return resp
 
 logger = logging.getLogger(__name__)
 
@@ -538,56 +675,27 @@ def build_mcp() -> FastMCP:
         overrides = overrides or {}
         bad = [k for k in overrides if k not in _SIMULATE_PLAN_OVERRIDE_WHITELIST]
         if bad:
-            return {
-                "ok": False,
-                "error": f"unsupported override key(s): {', '.join(sorted(bad))}. "
-                         f"Whitelist: {sorted(_SIMULATE_PLAN_OVERRIDE_WHITELIST)}",
-            }
+            return _simulate_plan_empty_response(
+                False,
+                f"unsupported override key(s): {', '.join(sorted(bad))}. "
+                f"Whitelist: {sorted(_SIMULATE_PLAN_OVERRIDE_WHITELIST)}",
+                overrides,
+            )
 
-        # Apply overrides as temporary config attributes; restore after the solve.
-        saved: dict[str, Any] = {}
+        # Phase 4 review C1: serialize config mutation through the optimizer
+        # executor (max_workers=1, shared with propose_optimization_plan) so a
+        # simulate_plan cannot race a concurrent live optimizer run.
         try:
-            for k, v in overrides.items():
-                attr = _SIMULATE_PLAN_CONFIG_MAP.get(k)
-                if attr is None:
-                    continue  # accepted-but-unused (forward-compat)
-                if hasattr(config, attr):
-                    saved[attr] = getattr(config, attr)
-                    setattr(config, attr, v)
-
-            result = run_lp_simulation()
-        finally:
-            for attr, val in saved.items():
-                setattr(config, attr, val)
-
-        if not result.ok:
-            return {
-                "ok": False,
-                "error": result.error or "simulation failed",
-                "plan_date": getattr(result, "plan_date", ""),
-                "plan_window": getattr(result, "plan_window", ""),
-                "status": getattr(result, "status", ""),
-            }
-
-        initial = getattr(result, "initial", None)
-        return {
-            "ok": True,
-            "plan_date": result.plan_date,
-            "plan_window": result.plan_window,
-            "slot_count": result.slot_count,
-            "objective_pence": result.objective_pence,
-            "status": result.status,
-            "actual_mean_agile_pence": result.actual_mean_agile_pence,
-            "forecast_solar_kwh_horizon": result.forecast_solar_kwh_horizon,
-            "pv_scale_factor": result.pv_scale_factor,
-            "mu_load_kwh_per_slot": result.mu_load_kwh,
-            "initial_state": {
-                "soc_kwh": getattr(initial, "soc_kwh", None),
-                "tank_temp_c": getattr(initial, "tank_temp_c", None),
-                "indoor_temp_c": getattr(initial, "indoor_temp_c", None),
-            },
-            "applied_overrides": dict(overrides),
-        }
+            future = _optimizer_executor.submit(_run_simulate_plan_body, overrides)
+            return future.result(timeout=120)
+        except concurrent.futures.TimeoutError:
+            return _simulate_plan_empty_response(
+                False, "simulate_plan timed out after 120s", overrides
+            )
+        except Exception as e:
+            return _simulate_plan_empty_response(
+                False, f"simulate_plan failed: {e}", overrides
+            )
 
     @mcp.tool(
         name="propose_optimization_plan",
