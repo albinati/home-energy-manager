@@ -31,6 +31,34 @@ from .foxess.client import WORK_MODE_VALID, FoxESSClient, FoxESSError
 from .foxess.service import get_cached_realtime, get_refresh_stats
 from .scheduler.lp_simulation import run_lp_simulation
 
+# Phase 4.5: hardware-write tool name prefixes. The boot-time surface audit warns
+# when any tool matching these prefixes lacks a ``confirmed`` parameter — that's
+# the only enforceable gate between OpenClaw and live hardware.
+_HARDWARE_WRITE_TOOL_PREFIXES = ("set_daikin_", "set_inverter_")
+
+
+def audit_mcp_tool_surface(mcp_app) -> list[str]:
+    """Emit WARN for any hardware-write tool that lacks a ``confirmed`` parameter.
+
+    Returns the list of warning strings so tests can assert on regressions.
+    """
+    warnings: list[str] = []
+    tools = getattr(getattr(mcp_app, "_tool_manager", None), "_tools", {}) or {}
+    for name, tool in tools.items():
+        if not any(name.startswith(p) for p in _HARDWARE_WRITE_TOOL_PREFIXES):
+            continue
+        params = (tool.parameters or {}).get("properties", {}) or {}
+        if "confirmed" not in params:
+            msg = (
+                f"[OpenClaw boundary] hardware-write tool '{name}' lacks 'confirmed' "
+                "parameter — OpenClaw can invoke it without explicit user approval. "
+                "See docs/OPENCLAW_BOUNDARY.md."
+            )
+            logger.warning(msg)
+            warnings.append(msg)
+    return warnings
+
+
 # Phase 4.4: whitelist of safe override keys accepted by simulate_plan.
 # Additions must be deliberate — overrides shadow config values during the solve.
 _SIMULATE_PLAN_OVERRIDE_WHITELIST = frozenset({
@@ -1665,6 +1693,10 @@ def build_mcp() -> FastMCP:
                 "Hook delivery queued. Check logs for [openclaw hooks] if delivery fails."
             ),
         }
+
+    # Phase 4.5 — boundary audit. Emits WARN per hardware-write tool that lacks
+    # a `confirmed` parameter. Clean surface = silent; regressions are loud.
+    audit_mcp_tool_surface(mcp)
 
     return mcp
 

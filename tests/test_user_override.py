@@ -13,12 +13,9 @@ import json
 import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import MagicMock
 
 from src.daikin.models import DaikinDevice
-
 
 # ── Pure helper: detect_user_override ──────────────────────────────────────────
 
