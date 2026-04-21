@@ -289,6 +289,7 @@ def heartbeat_repair_fox_scheduler(fox: FoxESSClient) -> None:
                 ):
                     logger.info("Fox V3 differs from SQLite plan — re-uploading (heartbeat)")
                     fox.set_scheduler_v3(stored_groups, is_default=False)
+                    fox.warn_if_scheduler_v3_mismatch(stored_groups)
                     fox.set_scheduler_flag(True)
                     db.log_action(
                         device="foxess",
@@ -387,6 +388,7 @@ def recover_on_boot(
                 if stored_groups and _schedule_signature(hw.groups) != _schedule_signature(stored_groups):
                     logger.info("Fox V3 differs from SQLite plan — re-uploading")
                     fox.set_scheduler_v3(stored_groups, is_default=False)
+                    fox.warn_if_scheduler_v3_mismatch(stored_groups)
                     fox.set_scheduler_flag(True)
                     db.log_action(
                         device="foxess",

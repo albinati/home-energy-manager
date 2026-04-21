@@ -340,7 +340,10 @@ class Config:
     LP_COP_SPACE_LWT_CEILING_C: float = float(os.getenv("LP_COP_SPACE_LWT_CEILING_C", "50.0"))
     DHW_TANK_LITRES: float = float(os.getenv("DHW_TANK_LITRES", "200"))
     DHW_WATER_CP: float = float(os.getenv("DHW_WATER_CP", "4186"))  # J/(kg·K)
+    # CALIBRATION REQUIRED — building envelope + thermal mass for the LP single-zone model.
+    # Tune from bills / heat-loss survey / co-heating test; defaults are placeholders.
     BUILDING_UA_W_PER_K: float = float(os.getenv("BUILDING_UA_W_PER_K", "180"))
+    # CALIBRATION REQUIRED — effective thermal inertia (kWh/K) driving indoor temperature dynamics.
     BUILDING_THERMAL_MASS_KWH_PER_K: float = float(os.getenv("BUILDING_THERMAL_MASS_KWH_PER_K", "8.0"))
     INDOOR_SETPOINT_C: float = float(os.getenv("INDOOR_SETPOINT_C", "21"))
     INDOOR_COMFORT_BAND_C: float = float(os.getenv("INDOOR_COMFORT_BAND_C", "1.5"))
