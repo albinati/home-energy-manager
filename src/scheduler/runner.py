@@ -175,6 +175,14 @@ def bulletproof_daily_brief_job() -> None:
         logger.warning("Daily brief failed: %s", e)
 
 
+def mpc_should_skip_hour_for_octopus_fetch(local_hour: int) -> bool:
+    """When True, skip MPC at this local hour — the Octopus fetch cron runs later the same hour.
+
+    Avoids two full PuLP runs within minutes (MPC at :00 vs fetch at :05 with fresh rates). #34
+    """
+    return int(local_hour) == int(config.OCTOPUS_FETCH_HOUR)
+
+
 def bulletproof_mpc_job() -> None:
     """Intra-day MPC re-optimise: refresh forecast + live SoC + live PV, re-upload Fox/Daikin.
 
@@ -190,6 +198,16 @@ def bulletproof_mpc_job() -> None:
     backend = (config.OPTIMIZER_BACKEND or "lp").strip().lower()
     if backend != "lp":
         logger.debug("MPC skipped: OPTIMIZER_BACKEND=%s", backend)
+        return
+    tz = ZoneInfo(config.BULLETPROOF_TIMEZONE if config.USE_BULLETPROOF_ENGINE else config.OPTIMIZATION_TIMEZONE)
+    now_local = datetime.now(tz)
+    if mpc_should_skip_hour_for_octopus_fetch(now_local.hour):
+        logger.info(
+            "MPC skipped: local hour %02d matches OCTOPUS_FETCH_HOUR — fetch at %02d:%02d will run optimizer",
+            now_local.hour,
+            int(config.OCTOPUS_FETCH_HOUR),
+            int(config.OCTOPUS_FETCH_MINUTE),
+        )
         return
     try:
         from .optimizer import run_optimizer

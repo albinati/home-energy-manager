@@ -174,14 +174,3 @@ def _sync_fox_energy_history(fox: FoxESSClient, months_back: int = 3) -> int:
             logger.debug("Fox energy sync %d-%02d failed: %s", yr, mo, e)
 
     return total
-    st = db.get_octopus_fetch_state()
-    if st.consecutive_failures == 0 or not st.failure_streak_started_at:
-        return False
-    try:
-        last = datetime.fromisoformat((st.last_attempt_at or "").replace("Z", "+00:00"))
-        if last.tzinfo is None:
-            last = last.replace(tzinfo=UTC)
-    except ValueError:
-        last = datetime.now(UTC) - timedelta(days=1)
-    delay = next_retry_seconds(st.consecutive_failures)
-    return (datetime.now(UTC) - last).total_seconds() >= delay
