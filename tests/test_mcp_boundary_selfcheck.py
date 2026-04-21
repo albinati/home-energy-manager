@@ -28,6 +28,18 @@ def test_audit_clean_on_current_surface() -> None:
     assert regressions == [], f"set_daikin_* tools must retain `confirmed`: {regressions}"
 
 
+def test_audit_errors_when_tool_registry_is_empty() -> None:
+    """Phase 4 review C5: FastMCP private-API drift that hides all tools must be loud."""
+    class _FakeApp:
+        _tool_manager = type("TM", (), {"_tools": {}})()
+
+    from src.mcp_server import audit_mcp_tool_surface
+
+    warnings = audit_mcp_tool_surface(_FakeApp())
+    assert len(warnings) == 1
+    assert "ZERO registered tools" in warnings[0]
+
+
 def test_audit_warns_when_confirmed_stripped(caplog) -> None:
     """Removing `confirmed` from a set_daikin_* tool triggers a WARN log."""
     mcp = build_mcp()

@@ -6,20 +6,15 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def isolated_db(tmp_path, monkeypatch):
-    """Each test gets its own SQLite file so quota counts don't bleed across tests."""
+    """Each test gets its own SQLite file. Uses monkeypatch.setattr on the live
+    config instance rather than reload() — reloading leaks module-level bindings
+    in other modules (``from .config import config``) and causes cross-test pollution
+    in test_user_override, test_db_dhw_standing_loss, and test_db_micro_climate."""
     db_file = str(tmp_path / "test_quota.db")
-    monkeypatch.setenv("DB_PATH", db_file)
-    # Force config to reload DB_PATH
-    import importlib
-
-    import src.config as cfg_mod
-    importlib.reload(cfg_mod)
+    monkeypatch.setattr("src.config.config.DB_PATH", db_file)
     import src.api_quota as aq
-    importlib.reload(aq)
     aq.ensure_table()
     yield aq
-    importlib.reload(cfg_mod)
-    importlib.reload(aq)
 
 
 def test_record_and_count(isolated_db):
