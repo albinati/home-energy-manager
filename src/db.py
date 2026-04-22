@@ -361,6 +361,25 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
            VALUES ('plan_proposed', 1, 'critical', 0)"""
     )
 
+    # V9: daikin_telemetry — physics-estimator seed + live-fetch audit trail (#55)
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS daikin_telemetry (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fetched_at REAL NOT NULL,
+            source TEXT NOT NULL,
+            tank_temp_c REAL,
+            indoor_temp_c REAL,
+            outdoor_temp_c REAL,
+            tank_target_c REAL,
+            lwt_actual_c REAL,
+            mode TEXT,
+            weather_regulation INTEGER
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_daikin_telemetry_source_ts ON daikin_telemetry(source, fetched_at DESC)"
+    )
+
 
 def init_db() -> None:
     """Create tables if missing and apply lightweight migrations."""
@@ -1757,6 +1776,73 @@ def expire_plan(plan_id: str) -> bool:
             )
             conn.commit()
             return cur.rowcount > 0
+        finally:
+            conn.close()
+
+
+# ---------------------------------------------------------------------------
+# V9: daikin_telemetry — physics-estimator seed + live-fetch audit trail (#55)
+# ---------------------------------------------------------------------------
+
+
+def insert_daikin_telemetry(row: dict[str, Any]) -> None:
+    """Insert a Daikin telemetry row (``source='live'`` or ``'estimate'``).
+
+    Defaults ``fetched_at`` to "now" when not supplied. Missing numeric fields
+    become NULL — the table's seed row for the estimator walk is the most
+    recent ``source='live'`` entry, so only the tank/indoor/outdoor temps need
+    to be populated for physics to work.
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            conn.execute(
+                """INSERT INTO daikin_telemetry
+                   (fetched_at, source, tank_temp_c, indoor_temp_c, outdoor_temp_c,
+                    tank_target_c, lwt_actual_c, mode, weather_regulation)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    float(row.get("fetched_at") or datetime.now(UTC).timestamp()),
+                    str(row.get("source", "live")),
+                    row.get("tank_temp_c"),
+                    row.get("indoor_temp_c"),
+                    row.get("outdoor_temp_c"),
+                    row.get("tank_target_c"),
+                    row.get("lwt_actual_c"),
+                    row.get("mode"),
+                    int(row["weather_regulation"])
+                    if row.get("weather_regulation") is not None
+                    else None,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def get_latest_daikin_telemetry(
+    *, source: str | None = None
+) -> dict[str, Any] | None:
+    """Return the most recent daikin_telemetry row, optionally filtered by source.
+
+    ``source='live'`` gives the seed the estimator walks forward from.
+    ``source=None`` returns whichever row is newest (live or estimate).
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            if source:
+                cur = conn.execute(
+                    "SELECT * FROM daikin_telemetry WHERE source = ? "
+                    "ORDER BY fetched_at DESC LIMIT 1",
+                    (source,),
+                )
+            else:
+                cur = conn.execute(
+                    "SELECT * FROM daikin_telemetry ORDER BY fetched_at DESC LIMIT 1"
+                )
+            r = cur.fetchone()
+            return dict(r) if r else None
         finally:
             conn.close()
 

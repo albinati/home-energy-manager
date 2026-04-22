@@ -55,18 +55,44 @@ def read_lp_initial_state(
     indoor = float(config.INDOOR_SETPOINT_C)
 
     try:
-        result = daikin_service.get_cached_devices(
-            allow_refresh=allow_daikin_refresh,
-            max_age_seconds=config.DAIKIN_LP_INIT_CACHE_MAX_AGE_SECONDS,
-            actor="lp_init",
+        # #55 — use the cached/estimator wrapper so LP still seeds sensibly
+        # when the Daikin daily quota (200/day) is exhausted. When
+        # ``allow_daikin_refresh=False`` (simulation paths that must not burn
+        # quota), we still read cached live telemetry + estimator — both are
+        # local SQLite and don't touch the Onecta API.
+        if allow_daikin_refresh:
+            state = daikin_service.get_lp_state_cached_or_estimated(actor="lp_init")
+        else:
+            # Simulation: skip the live-fetch branch by not letting the wrapper
+            # call get_cached_devices(allow_refresh=True). A lightweight reread
+            # via the cached-devices path is still safe (it never burns quota
+            # when allow_refresh=False).
+            result = daikin_service.get_cached_devices(
+                allow_refresh=False,
+                max_age_seconds=config.DAIKIN_LP_INIT_CACHE_MAX_AGE_SECONDS,
+                actor="lp_init",
+            )
+            state = {
+                "tank_temp_c": result.devices[0].tank_temperature
+                if result.devices
+                else None,
+                "indoor_temp_c": (
+                    getattr(result.devices[0].temperature, "room_temperature", None)
+                    if result.devices
+                    else None
+                ),
+                "source": result.source,
+            }
+        if state.get("tank_temp_c") is not None:
+            tank = float(state["tank_temp_c"])
+        if state.get("indoor_temp_c") is not None:
+            indoor = float(state["indoor_temp_c"])
+        logger.debug(
+            "LP Daikin seed: tank=%.1f°C indoor=%.1f°C source=%s",
+            tank,
+            indoor,
+            state.get("source"),
         )
-        if result.devices:
-            d0 = result.devices[0]
-            if d0.tank_temperature is not None:
-                tank = float(d0.tank_temperature)
-            rt_room = getattr(d0.temperature, "room_temperature", None)
-            if rt_room is not None:
-                indoor = float(rt_room)
     except Exception as e:
         logger.debug("LP Daikin telemetry fallback: %s", e)
 
