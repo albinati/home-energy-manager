@@ -461,6 +461,11 @@ class Config:
     DAIKIN_LEGACY_TICK_CACHE_MAX_AGE_SECONDS: int = int(
         os.getenv("DAIKIN_LEGACY_TICK_CACHE_MAX_AGE_SECONDS", "1200")
     )
+    # #55 — how old a live telemetry row can be before the LP wrapper falls back
+    # to the physics estimator instead of returning the stale value.
+    DAIKIN_TELEMETRY_MAX_STALENESS_SECONDS: int = int(
+        os.getenv("DAIKIN_TELEMETRY_MAX_STALENESS_SECONDS", "1800")
+    )
     # Phase 4.3 — user-override acceptance: how long after an action row becomes active
     # before divergence from live state counts as a user override (vs our own write echo).
     # Clamped to a 60 s minimum: values lower than a typical Onecta cloud-echo lag cause
