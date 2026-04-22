@@ -1851,6 +1851,87 @@ def build_mcp() -> FastMCP:
             ),
         }
 
+    # -----------------------------------------------------------------------
+    # Runtime-tunable settings (#52)
+    # -----------------------------------------------------------------------
+
+    @mcp.tool(
+        name="list_settings",
+        description=(
+            "List every runtime-tunable setting with current value, env default, "
+            "range, and `overridden` flag. Pairs with set_setting for live tuning."
+        ),
+    )
+    def list_settings() -> dict[str, Any]:
+        from . import runtime_settings as rts
+        try:
+            return {"ok": True, "settings": rts.list_settings()}
+        except Exception as e:
+            logger.warning("list_settings failed: %s", e)
+            return {"ok": False, "error": str(e)}
+
+    @mcp.tool(
+        name="get_setting",
+        description="Return the current value of a single runtime-tunable setting.",
+    )
+    def get_setting(key: str) -> dict[str, Any]:
+        from . import runtime_settings as rts
+        if key not in rts.SCHEMA:
+            return {"ok": False, "error": f"unknown setting {key!r}"}
+        try:
+            return {"ok": True, "key": key, "value": rts.get_setting(key)}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    @mcp.tool(
+        name="set_setting",
+        description=(
+            "Update a runtime-tunable setting. Takes effect within the 30 s cache "
+            "TTL; schedule-class keys (LP_PLAN_PUSH_HOUR/MINUTE, LP_MPC_HOURS) "
+            "also trigger an APScheduler cron re-register. Pass confirmed=True "
+            "to actually apply — the default is a dry-run that returns the "
+            "canonical (post-validation) value without persisting, so an agent "
+            "can show the user what would change before committing."
+        ),
+    )
+    def set_setting(
+        key: str, value: Any, confirmed: bool = False
+    ) -> dict[str, Any]:
+        from . import runtime_settings as rts
+        from .scheduler.runner import reregister_cron_jobs
+        if key not in rts.SCHEMA:
+            return {"ok": False, "error": f"unknown setting {key!r}"}
+        spec = rts.SCHEMA[key]
+        try:
+            # Always validate first — dry-runs exercise the schema.
+            canonical = rts._validate(spec, value)
+        except rts.SettingValidationError as e:
+            return {"ok": False, "error": str(e)}
+        if not confirmed:
+            return {
+                "ok": True,
+                "confirmed": False,
+                "key": key,
+                "would_set": canonical,
+                "current": rts.get_setting(key),
+                "cron_reload": spec.cron_reload,
+                "message": "dry-run; pass confirmed=True to apply",
+            }
+        try:
+            canonical = rts.set_setting(key, value, actor="mcp")
+        except rts.SettingValidationError as e:
+            return {"ok": False, "error": str(e)}
+        cron_status = None
+        if spec.cron_reload:
+            cron_status = reregister_cron_jobs(reason=f"mcp:{key}")
+        return {
+            "ok": True,
+            "confirmed": True,
+            "key": key,
+            "value": canonical,
+            "cron_status": cron_status,
+        }
+
     # Phase 4.5 — boundary audit. Emits WARN per hardware-write tool that lacks
     # a `confirmed` parameter. Clean surface = silent; regressions are loud.
     audit_mcp_tool_surface(mcp)
