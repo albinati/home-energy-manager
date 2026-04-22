@@ -566,10 +566,13 @@ def _daikin_params_for_kind(kind: str, peak_frost: bool) -> dict[str, Any]:
             "climate_on": True,
         }
     if kind == "cheap":
+        # Heuristic fallback mirrors the LP policy from issue #50: tank only goes above
+        # DHW_TEMP_COMFORT_C when price < 0 (the "negative" kind). For "cheap" (positive
+        # price) we stay at the comfort ceiling.
         return {
             "lwt_offset": min(config.LWT_OFFSET_PREHEAT_BOOST, config.LWT_OFFSET_MAX),
-            "tank_powerful": False,  # V2: disable tank_powerful on cheap slots (save demand)
-            "tank_temp": config.DHW_TEMP_CHEAP_C,
+            "tank_powerful": False,
+            "tank_temp": config.DHW_TEMP_COMFORT_C,
             "tank_power": True,
             "climate_on": True,
         }
