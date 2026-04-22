@@ -422,12 +422,16 @@ def solve_lp(
             prob += tank[i + 1] >= t_min_dhw
 
     # Per-slot DHW ceiling: 48 °C unless price < 0 (then 65 °C).
+    # Soft constraint — heavy penalty on breach — so an initial tank already above 48 °C
+    # (inherited from a prior negative window) stays feasible and is allowed to cool
+    # naturally instead of forcing an infeasible instantaneous drop.
     tank_hi_slot = [
         float(config.DHW_TEMP_MAX_C) if price_line[i] < 0 else float(config.DHW_TEMP_COMFORT_C)
         for i in range(n)
     ]
+    s_tank_hi = pulp.LpVariable.dicts("tank_hi_slack", range(n), lowBound=0)
     for i in range(n):
-        prob += tank[i + 1] <= tank_hi_slot[i]
+        prob += tank[i + 1] <= tank_hi_slot[i] + s_tank_hi[i]
 
     # Pre-plunge discipline: if a negative slot is still ahead in the horizon,
     # disallow grid→battery flow during positive-priced slots. PV→battery
@@ -489,7 +493,10 @@ def solve_lp(
     obj_grid = pulp.lpSum(imp[i] * price_line[i] - exp[i] * export_rate for i in range(n))
     obj_cycle = cycle_pen * pulp.lpSum(chg[i] + dis[i] for i in range(n))
     obj_comfort = comfort_pen * pulp.lpSum(s_lo[i] + s_hi[i] for i in range(n))
-    objective = obj_grid + obj_cycle + obj_comfort
+    # Heavy penalty on per-slot DHW ceiling breach — same weight as indoor comfort slack
+    # so a single °C-slot overshoot costs the same as a 1 °C indoor comfort miss.
+    obj_tank_hi = comfort_pen * pulp.lpSum(s_tank_hi[i] for i in range(n))
+    objective = obj_grid + obj_cycle + obj_comfort + obj_tank_hi
 
     if use_stress and stress_aux:
         objective += pulp.lpSum(stress_aux[i] * slot_h for i in range(n))
