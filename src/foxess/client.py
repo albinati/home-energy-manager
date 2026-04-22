@@ -626,8 +626,44 @@ class FoxESSClient:
         )
         return _parse_scheduler_v3_result(raw)
 
-    def set_scheduler_v3(self, groups: list[SchedulerGroup], is_default: bool = False) -> None:
-        """Upload full day schedule (one API call)."""
+    def set_scheduler_v3(
+        self,
+        groups: list[SchedulerGroup],
+        is_default: bool = False,
+        *,
+        skip_if_equal: bool = True,
+    ) -> None:
+        """Upload full day schedule (one API call).
+
+        With ``skip_if_equal=True`` (default) read current hardware state first
+        and short-circuit when the new fingerprint list equals what's already
+        on the inverter — avoids Fox v3 leaving the old groups *disabled*
+        instead of replacing them on an identical re-upload (#38). The pre-read
+        costs one call, so we skip it when the Fox daily budget has fewer than
+        two calls left (fail-open: the safety invariant "push the latest plan"
+        beats saving one redundant call when the quota is already tight).
+        """
+        if skip_if_equal:
+            try:
+                from ..api_quota import quota_remaining
+                remaining = quota_remaining("fox")
+            except Exception:
+                remaining = 2  # treat as headroom when the quota module is down
+            if remaining >= 2:
+                try:
+                    current = self.get_scheduler_v3()
+                    new_fp = [g.fingerprint() for g in groups]
+                    cur_fp = [g.fingerprint() for g in (current.groups or [])]
+                    if new_fp == cur_fp:
+                        logger.info(
+                            "Fox scheduler unchanged (%d groups) — skipping upload",
+                            len(groups),
+                        )
+                        return
+                except Exception as e:
+                    logger.debug(
+                        "Fox scheduler pre-read failed, uploading anyway: %s", e
+                    )
         payload = {
             "deviceSN": self._sn_scheduler(),
             "isDefault": bool(is_default),

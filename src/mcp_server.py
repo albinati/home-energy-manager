@@ -10,9 +10,15 @@ Writes honour ``OPENCLAW_READ_ONLY`` (default true) and the same rate limits as 
 """
 from __future__ import annotations
 
+import atexit
 import concurrent.futures
+import fcntl
 import logging
+import os
+import signal
 import sys
+import time
+from pathlib import Path
 from typing import Any
 
 # Single-worker executor for non-blocking optimizer calls from the MCP transport.
@@ -1852,14 +1858,108 @@ def build_mcp() -> FastMCP:
     return mcp
 
 
+def _lock_path() -> Path:
+    """Lock file path — /run if writable (systemd tmpfs on prod), else /tmp."""
+    for base in ("/run", "/tmp"):
+        d = Path(base)
+        if d.is_dir() and os.access(d, os.W_OK):
+            return d / "hem-mcp.lock"
+    return Path("/tmp/hem-mcp.lock")
+
+
+def _acquire_singleton_lock(log: logging.Logger) -> int | None:
+    """Acquire exclusive lock or kill-and-retry; return fd on success, None to exit."""
+    path = _lock_path()
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        prior_pid: int | None = None
+        try:
+            raw = os.read(fd, 32).decode().strip()
+            prior_pid = int(raw) if raw else None
+        except (OSError, ValueError):
+            prior_pid = None
+        if prior_pid and prior_pid != os.getpid():
+            log.warning(
+                "MCP lock held by pid=%s — sending SIGTERM and retrying", prior_pid
+            )
+            try:
+                os.kill(prior_pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            # Wait up to 2s for the holder to release. flock auto-releases on exit.
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    time.sleep(0.1)
+            else:
+                log.error(
+                    "MCP singleton: lock still held by pid=%s after SIGTERM — exiting",
+                    prior_pid,
+                )
+                os.close(fd)
+                return None
+        else:
+            log.error("MCP singleton: lock held with unreadable pid — exiting")
+            os.close(fd)
+            return None
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.ftruncate(fd, 0)
+    os.write(fd, f"{os.getpid()}\n".encode())
+    os.fsync(fd)
+    return fd
+
+
 def main() -> None:
-    """Entry point: MCP over stdio (do not write logs to stdout)."""
+    """Entry point: MCP over stdio (do not write logs to stdout).
+
+    Enforces single-instance via fcntl.flock on a PID file (#60). OpenClaw
+    respawns this process without killing the prior one, which previously
+    led to multiple parallel MCP servers accumulating RAM. On startup we:
+      1. flock a PID file; on conflict, SIGTERM the prior PID and retry once.
+      2. Install SIGTERM/SIGHUP handlers for clean exit.
+      3. Wrap the FastMCP stdio loop in try/finally so the lock always releases.
+    """
     logging.basicConfig(
         level=logging.INFO,
         stream=sys.stderr,
         format="%(levelname)s %(name)s: %(message)s",
     )
-    build_mcp().run(transport="stdio")
+    log = logging.getLogger("mcp_server")
+
+    lock_fd = _acquire_singleton_lock(log)
+    if lock_fd is None:
+        sys.exit(0)
+
+    def _release_lock() -> None:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            os.close(lock_fd)
+        except OSError:
+            pass
+
+    atexit.register(_release_lock)
+
+    def _on_signal(signum: int, _frame: Any) -> None:
+        log.info("MCP received signal %d — shutting down", signum)
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _on_signal)
+    signal.signal(signal.SIGHUP, _on_signal)
+
+    try:
+        build_mcp().run(transport="stdio")
+    except KeyboardInterrupt:
+        pass
+    finally:
+        _release_lock()
 
 
 if __name__ == "__main__":
