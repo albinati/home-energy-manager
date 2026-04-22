@@ -2,6 +2,7 @@
 import os
 import re
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 
@@ -198,9 +199,9 @@ class Config:
 
     DHW_TEMP_MAX_C: float = float(os.getenv("DHW_TEMP_MAX_C", "65"))
     # Plunge-only ceiling (≥ DHW_TEMP_COMFORT_C and ≤ DHW_TEMP_MAX_C is allowed only when price < 0).
-    DHW_TEMP_COMFORT_C: float = float(os.getenv("DHW_TEMP_COMFORT_C", "48"))
+    # DHW_TEMP_COMFORT_C + DHW_TEMP_NORMAL_C are runtime-tunable via
+    # /api/v1/settings (#52) — see the @property definitions below.
     DHW_TEMP_CHEAP_C: float = float(os.getenv("DHW_TEMP_CHEAP_C", "60"))
-    DHW_TEMP_NORMAL_C: float = float(os.getenv("DHW_TEMP_NORMAL_C", "50"))
     # DEPRECATED: Daikin Onecta firmware runs the weekly thermal-shock cycle autonomously
     # (Sunday ~11:00 local). The LP / dispatch layer no longer enforces these bounds.
     # Kept only so stale .env files don't break on load; remove in a follow-up.
@@ -255,11 +256,11 @@ class Config:
     OPTIMIZATION_ENGINE_ENABLED: bool = os.getenv(
         "OPTIMIZATION_ENGINE_ENABLED", "false"
     ).lower() in ("true", "1", "yes")
-    OPTIMIZATION_PRESET: str = (os.getenv("OPTIMIZATION_PRESET") or "normal").strip().lower()
+    # OPTIMIZATION_PRESET + ENERGY_STRATEGY_MODE are runtime-tunable via
+    # /api/v1/settings (#52) — see the @property definitions below.
     # savings_first (default): import/savings focus; peak grid export (force discharge) only when
     # OPTIMIZATION_PRESET is travel/away AND cached SoC >= EXPORT_DISCHARGE_MIN_SOC_PERCENT.
     # strict_savings — never schedule peak export discharge (max self-use).
-    ENERGY_STRATEGY_MODE: str = (os.getenv("ENERGY_STRATEGY_MODE") or "savings_first").strip().lower()
     EXPORT_DISCHARGE_MIN_SOC_PERCENT: float = float(
         os.getenv("EXPORT_DISCHARGE_MIN_SOC_PERCENT", "95")
     )
@@ -361,7 +362,7 @@ class Config:
     BUILDING_UA_W_PER_K: float = float(os.getenv("BUILDING_UA_W_PER_K", "180"))
     # CALIBRATION REQUIRED — effective thermal inertia (kWh/K) driving indoor temperature dynamics.
     BUILDING_THERMAL_MASS_KWH_PER_K: float = float(os.getenv("BUILDING_THERMAL_MASS_KWH_PER_K", "8.0"))
-    INDOOR_SETPOINT_C: float = float(os.getenv("INDOOR_SETPOINT_C", "21"))
+    # INDOOR_SETPOINT_C is runtime-tunable via /api/v1/settings (#52) — see @property below.
     INDOOR_COMFORT_BAND_C: float = float(os.getenv("INDOOR_COMFORT_BAND_C", "1.5"))
     RADIATOR_MAX_KW: float = float(os.getenv("RADIATOR_MAX_KW", "6.0"))
     # Physical climate (weather-compensation) curve from the Daikin panel.
@@ -398,8 +399,8 @@ class Config:
     LP_SOC_FINAL_KWH: float = float(os.getenv("LP_SOC_FINAL_KWH", "0"))
 
     # Model Predictive Control: re-run the LP intra-day with refreshed SoC / tank / forecasts.
-    # Comma-separated local hours (24-h). E.g. "6,12,18" fires at 06:00, 12:00, and 18:00.
-    LP_MPC_HOURS: str = (os.getenv("LP_MPC_HOURS") or "6,12,21").strip()
+    # LP_MPC_HOURS is runtime-tunable via /api/v1/settings (#52); cron jobs are
+    # re-registered without a process restart when it changes. See @property below.
 
     # Whether intra-day MPC re-runs (and the evening fetch) push the updated plan to Fox/Daikin.
     # Default false: compute + log only; the nightly push job dispatches at LP_PLAN_PUSH_HOUR:MINUTE.
@@ -408,8 +409,7 @@ class Config:
     # Nightly plan push: UTC wall-clock time to upload tomorrow's LP plan to Fox ESS + Daikin.
     # Anchored to UTC so it lands just after Daikin's daily 200-req quota rollover (midnight UTC).
     # The scheduler forces UTC for this cron regardless of BULLETPROOF_TIMEZONE.
-    LP_PLAN_PUSH_HOUR: int = int(os.getenv("LP_PLAN_PUSH_HOUR", "0"))
-    LP_PLAN_PUSH_MINUTE: int = int(os.getenv("LP_PLAN_PUSH_MINUTE", "5"))
+    # LP_PLAN_PUSH_HOUR/MINUTE are runtime-tunable (#52) — see @property below.
 
     # Load-profile: rolling-window of execution_log slots used for per-hour-of-day load estimation.
     # The flat mean is used when fewer rows are available or when this is 0 (legacy).
@@ -419,12 +419,107 @@ class Config:
     def DAIKIN_COP_CURVE(self) -> list[tuple[float, float]]:
         return parse_cop_curve_csv(self.DAIKIN_COP_CURVE_STR)
 
+    # -- Runtime-tunable knobs (#52). -----------------------------------------
+    # Read through ``runtime_settings.get_setting`` so ``config.KNOB`` returns
+    # the DB-backed override (or env default) without per-call-site churn.
+    # Setters write to an in-memory override dict ``_overrides`` so legacy
+    # call-sites that do ``setattr(config, name, value)`` (notably
+    # ``simulate_plan`` and existing pytest ``monkeypatch.setattr`` calls)
+    # keep working without polluting the DB. To *persist* a new value across
+    # restarts, use ``runtime_settings.set_setting`` or ``PUT /api/v1/settings``.
+    # Local import in each getter prevents a cycle at module load —
+    # runtime_settings imports db which imports config during init.
+
+    _overrides: dict[str, Any] = {}  # class-level: one dict for the singleton
+
+    def _rt_get(self, key: str) -> Any:
+        if key in self._overrides:
+            return self._overrides[key]
+        from .runtime_settings import get_setting
+        return get_setting(key)
+
+    def _rt_set(self, key: str, value: Any) -> None:
+        self._overrides[key] = value
+
+    @property
+    def DHW_TEMP_COMFORT_C(self) -> float:
+        return float(self._rt_get("DHW_TEMP_COMFORT_C"))
+
+    @DHW_TEMP_COMFORT_C.setter
+    def DHW_TEMP_COMFORT_C(self, value: float) -> None:
+        self._rt_set("DHW_TEMP_COMFORT_C", float(value))
+
+    @property
+    def DHW_TEMP_NORMAL_C(self) -> float:
+        return float(self._rt_get("DHW_TEMP_NORMAL_C"))
+
+    @DHW_TEMP_NORMAL_C.setter
+    def DHW_TEMP_NORMAL_C(self, value: float) -> None:
+        self._rt_set("DHW_TEMP_NORMAL_C", float(value))
+
+    @property
+    def INDOOR_SETPOINT_C(self) -> float:
+        return float(self._rt_get("INDOOR_SETPOINT_C"))
+
+    @INDOOR_SETPOINT_C.setter
+    def INDOOR_SETPOINT_C(self, value: float) -> None:
+        self._rt_set("INDOOR_SETPOINT_C", float(value))
+
+    @property
+    def OPTIMIZATION_PRESET(self) -> str:
+        return str(self._rt_get("OPTIMIZATION_PRESET"))
+
+    @OPTIMIZATION_PRESET.setter
+    def OPTIMIZATION_PRESET(self, value: str) -> None:
+        self._rt_set("OPTIMIZATION_PRESET", str(value).strip().lower())
+
+    @property
+    def ENERGY_STRATEGY_MODE(self) -> str:
+        return str(self._rt_get("ENERGY_STRATEGY_MODE"))
+
+    @ENERGY_STRATEGY_MODE.setter
+    def ENERGY_STRATEGY_MODE(self, value: str) -> None:
+        self._rt_set("ENERGY_STRATEGY_MODE", str(value).strip().lower())
+
+    @property
+    def LP_PLAN_PUSH_HOUR(self) -> int:
+        return int(self._rt_get("LP_PLAN_PUSH_HOUR"))
+
+    @LP_PLAN_PUSH_HOUR.setter
+    def LP_PLAN_PUSH_HOUR(self, value: int) -> None:
+        self._rt_set("LP_PLAN_PUSH_HOUR", int(value))
+
+    @property
+    def LP_PLAN_PUSH_MINUTE(self) -> int:
+        return int(self._rt_get("LP_PLAN_PUSH_MINUTE"))
+
+    @LP_PLAN_PUSH_MINUTE.setter
+    def LP_PLAN_PUSH_MINUTE(self, value: int) -> None:
+        self._rt_set("LP_PLAN_PUSH_MINUTE", int(value))
+
+    @property
+    def LP_MPC_HOURS(self) -> str:
+        """Comma-separated string form — legacy callers (incl. pytest
+        ``monkeypatch.setattr(config, 'LP_MPC_HOURS', '6,12,18')``) expect
+        this setter shape. The canonical value is ``LP_MPC_HOURS_LIST``."""
+        val = self._rt_get("LP_MPC_HOURS")
+        if isinstance(val, str):
+            return val
+        if isinstance(val, (list, tuple)):
+            return ",".join(str(int(h)) for h in val)
+        return str(val or "")
+
+    @LP_MPC_HOURS.setter
+    def LP_MPC_HOURS(self, value: str) -> None:
+        self._rt_set("LP_MPC_HOURS", str(value))
+
     @property
     def LP_MPC_HOURS_LIST(self) -> list[int]:
-        """Parsed LP_MPC_HOURS as sorted ints."""
-        if not self.LP_MPC_HOURS:
+        """Parsed MPC re-solve hours (local). Runtime-tunable via settings PUT."""
+        raw = self.LP_MPC_HOURS
+        if not raw:
             return []
-        return sorted({int(h.strip()) for h in self.LP_MPC_HOURS.split(",") if h.strip()})
+        return sorted({int(h.strip()) for h in raw.split(",") if h.strip()})
 
     # Directory for config snapshots (JSON). Snapshots are saved before any mode transition.
     CONFIG_SNAPSHOT_DIR: str = (os.getenv("CONFIG_SNAPSHOT_DIR") or "data/config_snapshots").strip()

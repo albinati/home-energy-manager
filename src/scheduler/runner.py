@@ -756,3 +756,79 @@ def stop_background_scheduler() -> None:
         pass
     _background_scheduler = None
     logger.info("Background scheduler stopped")
+
+
+def reregister_cron_jobs(reason: str = "runtime_settings_change") -> dict[str, Any]:
+    """Tear down and re-create the cadence-tunable cron jobs (#52).
+
+    Invoked by the settings PUT handler after ``LP_PLAN_PUSH_HOUR``,
+    ``LP_PLAN_PUSH_MINUTE``, or ``LP_MPC_HOURS`` change. Jobs handled:
+
+    - ``bulletproof_plan_push``: single UTC-anchored push.
+    - ``bulletproof_mpc_*``: one per hour in ``LP_MPC_HOURS_LIST``.
+
+    The heartbeat thread and other jobs are untouched. When the background
+    scheduler is not yet started (e.g. tests, non-bulletproof mode), this is
+    a no-op that returns ``{"status": "inactive"}``.
+    """
+    if _background_scheduler is None or not config.USE_BULLETPROOF_ENGINE:
+        return {"status": "inactive", "reason": reason}
+
+    try:
+        from apscheduler.triggers.cron import CronTrigger
+    except Exception as e:  # pragma: no cover - only when apscheduler missing
+        logger.warning("reregister_cron_jobs: apscheduler import failed: %s", e)
+        return {"status": "error", "reason": reason, "error": str(e)}
+
+    tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+
+    removed: list[str] = []
+    for job in list(_background_scheduler.get_jobs()):
+        jid = job.id
+        if jid == "bulletproof_plan_push" or jid.startswith("bulletproof_mpc_"):
+            try:
+                _background_scheduler.remove_job(jid)
+                removed.append(jid)
+            except Exception as e:
+                logger.warning("remove_job(%s) failed: %s", jid, e)
+
+    added: list[str] = []
+    for mpc_hour in config.LP_MPC_HOURS_LIST:
+        jid = f"bulletproof_mpc_{mpc_hour:02d}"
+        _background_scheduler.add_job(
+            bulletproof_mpc_job,
+            CronTrigger(hour=mpc_hour, minute=0, timezone=tz),
+            id=jid,
+        )
+        added.append(jid)
+
+    push_jid = "bulletproof_plan_push"
+    _background_scheduler.add_job(
+        bulletproof_plan_push_job,
+        CronTrigger(
+            hour=config.LP_PLAN_PUSH_HOUR,
+            minute=config.LP_PLAN_PUSH_MINUTE,
+            timezone=ZoneInfo("UTC"),
+        ),
+        id=push_jid,
+    )
+    added.append(push_jid)
+
+    logger.info(
+        "Cron jobs re-registered (reason=%s): removed=%s added=%s "
+        "plan_push=%02d:%02d UTC mpc_hours=%s",
+        reason,
+        removed,
+        added,
+        config.LP_PLAN_PUSH_HOUR,
+        config.LP_PLAN_PUSH_MINUTE,
+        config.LP_MPC_HOURS_LIST,
+    )
+    return {
+        "status": "ok",
+        "reason": reason,
+        "removed": removed,
+        "added": added,
+        "plan_push_utc": f"{config.LP_PLAN_PUSH_HOUR:02d}:{config.LP_PLAN_PUSH_MINUTE:02d}",
+        "mpc_hours": config.LP_MPC_HOURS_LIST,
+    }
