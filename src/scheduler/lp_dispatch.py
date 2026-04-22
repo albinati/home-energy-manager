@@ -16,7 +16,6 @@ from .optimizer import (
     TZ,
     HalfHourSlot,
     _bulletproof_allow_peak_export_discharge,
-    _legionella_active_local,
     _merge_fox_groups,
     _optimization_preset_away_like,
 )
@@ -209,8 +208,7 @@ def daikin_dispatch_preview(
     for start_utc, end_utc, kind, i0 in merged2:
         if kind == "standard":
             continue
-        loc_mid = (start_utc + timedelta(minutes=15)).astimezone(tz)
-        if away_like and kind in ("cheap", "negative") and not _legionella_active_local(loc_mid):
+        if away_like and kind in ("cheap", "negative"):
             continue
         action_type = {
             "negative": "max_heat",
@@ -243,19 +241,17 @@ def daikin_dispatch_preview(
             "climate_on": es > EPS or ed > EPS or kind in ("negative", "cheap"),
             "lp_optimizer": True,
         }
-        # Only set tank_temp when the tank will be on — Daikin rejects temperatureControl on a powered-off tank
+        # Only set tank_temp when the tank will be on — Daikin rejects temperatureControl on a powered-off tank.
+        # Floor at DHW_TEMP_COMFORT_C (48 °C); ceiling DHW_TEMP_MAX_C (65 °C).
+        # The LP already clamps tt ≤ 48 for positive-price slots and ≤ 65 for negative.
         if tank_pow:
-            params["tank_temp"] = round(min(float(config.DHW_TEMP_MAX_C), max(float(config.DHW_TEMP_NORMAL_C), tt)), 1)
-        if kind == "cheap":
-            params["tank_power"] = True
-            params["tank_temp"] = float(config.DHW_TEMP_CHEAP_C)
+            params["tank_temp"] = round(
+                min(float(config.DHW_TEMP_MAX_C), max(float(config.DHW_TEMP_COMFORT_C), tt)),
+                1,
+            )
         if kind == "peak" or kind == "peak_export":
             params["tank_power"] = False
             params.pop("tank_temp", None)  # tank off — no point setting target temp
-        if _legionella_active_local(loc_mid):
-            params["tank_power"] = True
-            params["tank_temp"] = float(config.DHW_LEGIONELLA_TEMP_C)
-            params["legionella_override"] = True
 
         st = start_utc.isoformat().replace("+00:00", "Z")
         en = end_utc.isoformat().replace("+00:00", "Z")

@@ -556,12 +556,6 @@ def _schedule_dhw_thermal_decay(
     }
 
 
-def _legionella_active_local(dt_local: datetime) -> bool:
-    if dt_local.weekday() != config.DHW_LEGIONELLA_DAY:
-        return False
-    return config.DHW_LEGIONELLA_HOUR_START <= dt_local.hour < config.DHW_LEGIONELLA_HOUR_END
-
-
 def _daikin_params_for_kind(kind: str, peak_frost: bool) -> dict[str, Any]:
     if kind == "negative":
         return {
@@ -620,9 +614,8 @@ def _write_daikin_schedule(plan_date: str, slots: list[HalfHourSlot], forecast: 
     for start_utc, end_utc, kind in merged:
         if kind in ("standard",):
             continue
-        loc_mid = (start_utc + timedelta(minutes=15)).astimezone(tz)
-        # Travel/away: skip cheap/negative preheat unless Legionella window still needs DHW
-        if away_like and kind in ("cheap", "negative") and not _legionella_active_local(loc_mid):
+        # Travel/away: skip cheap/negative preheat entirely (Daikin owns legionella).
+        if away_like and kind in ("cheap", "negative"):
             continue
         action_type = {
             "negative": "max_heat",
@@ -636,10 +629,6 @@ def _write_daikin_schedule(plan_date: str, slots: list[HalfHourSlot], forecast: 
             "negative" if kind == "negative" else ("cheap" if kind == "cheap" else ("peak" if kind == "peak" else "standard")),
             peak_frost,
         )
-        if _legionella_active_local(loc_mid):
-            params["tank_power"] = True
-            params["tank_temp"] = config.DHW_LEGIONELLA_TEMP_C
-            params["legionella_override"] = True
         st = start_utc.isoformat().replace("+00:00", "Z")
         en = end_utc.isoformat().replace("+00:00", "Z")
         restore_end = (end_utc + timedelta(minutes=1)).isoformat().replace("+00:00", "Z")

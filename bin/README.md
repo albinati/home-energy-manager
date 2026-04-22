@@ -12,7 +12,7 @@ Run the API server and tests from the project root. **No secrets** — credentia
 | `./bin/mcp` | Start MCP server (`python -m src.mcp_server`) with the same Python selection as `serve`. |
 | `./bin/test-foxess` | Test Fox ESS Open API (curl). Verifies `.env` credentials. |
 
-**Python selection** (`bin/lib.sh`): On the host, a `.venv` is preferred when present. In Docker (`/.dockerenv`) or when `HEM_IN_CONTAINER=1`, **system `python3.11` then `python3`** is used so a bind-mounted host venv (e.g. Python 3.12) does not break with glibc mismatches. Override with `HEM_PYTHON=/path/to/python` if needed.
+**Python selection** (`bin/lib.sh`): `$HEM_PYTHON` if set, else `<project>/.venv/bin/python`, else system `python3`.
 
-**Requirements:** From project root, with `.env` configured (see main README). A `.venv` is optional on the host if you use system Python 3.11+ with dependencies installed.  
+**Requirements:** From project root, with `.env` configured (see main README). Project uses a `.venv` (Python 3.12+) — see the repo README for setup.  
 **OpenClaw:** Point agents at `http://<this-host>:8000`; credentials stay in `.env` on the server.

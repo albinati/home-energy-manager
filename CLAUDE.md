@@ -92,6 +92,11 @@ EOF
 - On 2026-04-18 the limit was exhausted during migration testing.
 - **`DAIKIN_HTTP_429_MAX_RETRIES=0`** is set in `.env` so the client fails fast on 429 instead of sleeping for `Retry-After` seconds (which Daikin sets to ~86400 on daily-limit exhaustion). Without this the server would hang for hours on startup.
 - When rate-limited, Daikin MCP tools return errors immediately. The service still starts and everything else (Fox ESS, Octopus, SQLite) works normally.
+- **Nightly plan push is UTC-anchored:** `bulletproof_plan_push_job` fires at `LP_PLAN_PUSH_HOUR:LP_PLAN_PUSH_MINUTE` in **UTC** (default `00:05 UTC`) so the first dispatches of each new plan land on a fresh quota day. Other cron jobs (Octopus fetch, daily brief, MPC re-solves) still run in `BULLETPROOF_TIMEZONE`.
+
+### Legionella thermal-shock cycle
+
+Daikin Onecta firmware runs the weekly thermal-shock cycle autonomously (Sunday ~11:00 local). **The LP and dispatch layer do not schedule or override this cycle** — the `DHW_LEGIONELLA_*` env vars are deprecated (kept only so stale `.env` files don't error on load) and will be removed in a follow-up. If a `shutdown` or `max_heat` action happens to overlap the cycle window, Onecta firmware arbitrates.
 
 ---
 

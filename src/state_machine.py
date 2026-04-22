@@ -169,14 +169,6 @@ def should_act(
     if atype == "shutdown" and room_temp_c is not None:
         if room_temp_c < 5.0:
             return False, "frost risk — room very cold"
-    if atype == "shutdown" and params.get("tank_power") is False:
-        tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
-        nl = now_local or datetime.now(tz)
-        if nl.weekday() == config.DHW_LEGIONELLA_DAY:
-            if config.DHW_LEGIONELLA_HOUR_START <= nl.hour < config.DHW_LEGIONELLA_HOUR_END:
-                if params.get("legionella_override"):
-                    return True, "legionella override active"
-                return False, "Legionella window — do not turn off DHW"
     return True, "ok"
 
 
