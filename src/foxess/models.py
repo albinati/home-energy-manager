@@ -72,6 +72,23 @@ class SchedulerGroup:
             "extraParam": extra,
         }
 
+    def fingerprint(self) -> tuple:
+        """Stable hashable representation for skip-when-unchanged guard (#38).
+
+        Built from ``to_api_dict()`` so it tracks exactly the fields we write.
+        Sorted tuple of ``extraParam`` items keeps dict-order out of equality.
+        """
+        d = self.to_api_dict()
+        ep = tuple(sorted(d["extraParam"].items()))
+        return (
+            d["startHour"],
+            d["startMinute"],
+            d["endHour"],
+            d["endMinute"],
+            d["workMode"],
+            ep,
+        )
+
 
 @dataclass
 class SchedulerState:
