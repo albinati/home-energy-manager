@@ -75,6 +75,11 @@ def lp_plan_to_slots(plan: LpPlan) -> list[HalfHourSlot]:
                 kind = "negative"
             else:
                 kind = "cheap"
+        elif price <= 0:
+            # Negative price + LP chose chg ≈ 0 (battery saturated or PV alone
+            # suffices). LP hard-forbids dis during negatives — encode that on
+            # hardware via Fox's native "Backup" mode (see _slot_fox_tuple).
+            kind = "negative_hold"
         elif allow_exp and dis > EPS and exp > EPS:
             kind = "peak_export"
         elif ed < EPS and es < EPS and price >= peak_thr:

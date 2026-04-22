@@ -296,6 +296,11 @@ def _slot_fox_tuple(
             config.FOX_FORCE_CHARGE_MAX_PWR,
             min_r,
         )
+    if s.kind == "negative_hold":
+        # Fox "Backup" work mode = native "hold battery": no discharge, no grid
+        # charge. Directly enforces the LP's dis = 0 constraint during negative
+        # slots when chg is also zero (battery saturated or PV alone suffices).
+        return ("Backup", None, None, min_r)
     return ("SelfUse", None, None, min_r)
 
 
