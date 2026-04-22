@@ -1,4 +1,5 @@
 .env
+.env.*-backup
 *.json
 !.env.example
 __pycache__/

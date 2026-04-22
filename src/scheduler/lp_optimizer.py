@@ -117,19 +117,6 @@ def _shower_slot_mask(
     return out
 
 
-def _legionella_slot_mask(slot_starts_utc: list[datetime], tz: ZoneInfo) -> list[bool]:
-    out: list[bool] = []
-    for st in slot_starts_utc:
-        loc = (st + timedelta(minutes=15)).astimezone(tz)
-        if loc.weekday() != int(config.DHW_LEGIONELLA_DAY):
-            out.append(False)
-            continue
-        out.append(
-            int(config.DHW_LEGIONELLA_HOUR_START) <= loc.hour < int(config.DHW_LEGIONELLA_HOUR_END)
-        )
-    return out
-
-
 def _make_solver() -> pulp.LpSolver:
     """Return HiGHS (Python API) if available, else CBC. Configured via LP_SOLVER env var."""
     solver_pref = (getattr(config, "LP_SOLVER", "highs") or "highs").lower()
@@ -254,7 +241,6 @@ def solve_lp(
         )
     except (ValueError, AttributeError):
         t_min_dhw = float(config.TARGET_DHW_TEMP_MIN_NORMAL_C)
-    t_leg = float(config.DHW_LEGIONELLA_TEMP_C)
 
     # Simplified HP model: max power from config, continuous between [0, max_hp_kwh]
     hp_max_kw = float(getattr(config, "DAIKIN_MAX_HP_KW", 2.0))
@@ -416,24 +402,44 @@ def solve_lp(
             )
 
     # -----------------------------------------------------------------------
-    # DHW hard constraints (showers + legionella)
+    # DHW hard constraints (showers — legionella is owned by Daikin firmware)
     # -----------------------------------------------------------------------
-    wm = _shower_slot_mask(
-        slot_starts_utc, tz,
-        shower_hhmm=config.LP_SHOWER_MORNING_LOCAL,
-        window_minutes=int(config.LP_SHOWER_WINDOW_MINUTES),
+    morning_hhmm = (config.LP_SHOWER_MORNING_LOCAL or "").strip()
+    evening_hhmm = (config.LP_SHOWER_EVENING_LOCAL or "").strip()
+    window_mins = int(config.LP_SHOWER_WINDOW_MINUTES)
+    wm = (
+        _shower_slot_mask(slot_starts_utc, tz, shower_hhmm=morning_hhmm, window_minutes=window_mins)
+        if morning_hhmm
+        else [False] * n
     )
-    we = _shower_slot_mask(
-        slot_starts_utc, tz,
-        shower_hhmm=config.LP_SHOWER_EVENING_LOCAL,
-        window_minutes=int(config.LP_SHOWER_WINDOW_MINUTES),
+    we = (
+        _shower_slot_mask(slot_starts_utc, tz, shower_hhmm=evening_hhmm, window_minutes=window_mins)
+        if evening_hhmm
+        else [False] * n
     )
-    leg_m = _legionella_slot_mask(slot_starts_utc, tz)
     for i in range(n):
         if wm[i] or we[i]:
             prob += tank[i + 1] >= t_min_dhw
-        if leg_m[i]:
-            prob += tank[i + 1] >= t_leg
+
+    # Per-slot DHW ceiling: 48 °C unless price < 0 (then 65 °C).
+    tank_hi_slot = [
+        float(config.DHW_TEMP_MAX_C) if price_line[i] < 0 else float(config.DHW_TEMP_COMFORT_C)
+        for i in range(n)
+    ]
+    for i in range(n):
+        prob += tank[i + 1] <= tank_hi_slot[i]
+
+    # Pre-plunge discipline: if a negative slot is still ahead in the horizon,
+    # disallow grid→battery flow during positive-priced slots. PV→battery
+    # ("solar_charge") stays allowed. Degenerate when any_neg_ahead is False.
+    has_future_neg: list[bool] = [False] * n
+    any_neg_ahead = False
+    for i in range(n - 1, -1, -1):
+        any_neg_ahead = any_neg_ahead or (price_line[i] < 0)
+        has_future_neg[i] = any_neg_ahead
+    for i in range(n):
+        if has_future_neg[i] and price_line[i] >= 0:
+            prob += chg[i] <= pv_use[i]
 
     # -----------------------------------------------------------------------
     # Terminal constraints

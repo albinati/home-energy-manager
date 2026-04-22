@@ -2,17 +2,27 @@
 redirects every DB write to a tmp path.
 
 Without this conftest, tests historically leaked rows into the production
-SQLite database (/root/home-energy-manager/data/energy_state.db) because a
-pre-Phase 4 test_api_quota.py fixture used importlib.reload, which produced
-two separate Config instances — tests monkeypatched one, src.db read from
-the other.
+SQLite database (default prod path: /root/home-energy-manager/data/energy_state.db)
+because a pre-Phase 4 test_api_quota.py fixture used importlib.reload, which
+produced two separate Config instances — tests monkeypatched one, src.db read
+from the other.
+
+Override the prod-path check via the ``HEM_PROD_DB_PATH`` env var for dev
+hosts where the prod DB lives elsewhere (or not at all).
 
 If this test ever fails, a change to conftest.py or the Config class has
 broken the invariant. Fix before merging.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
+
+_DEFAULT_PROD_DB_PATH = "/root/home-energy-manager/data/energy_state.db"
+
+
+def _prod_db_path() -> Path:
+    return Path(os.environ.get("HEM_PROD_DB_PATH", _DEFAULT_PROD_DB_PATH))
 
 
 def test_autouse_fixture_redirects_config_db_path_to_tmp():
@@ -25,7 +35,8 @@ def test_autouse_fixture_redirects_config_db_path_to_tmp():
         f"tests/conftest.py's autouse isolation is broken."
     )
     # Not anywhere obviously shared
-    assert db_path.parent != Path("/root/home-energy-manager/data"), (
+    prod_dir = _prod_db_path().parent
+    assert db_path.parent != prod_dir, (
         f"config.DB_PATH parent is the prod data dir: {db_path}"
     )
 
@@ -56,16 +67,23 @@ def test_upsert_action_writes_to_tmp_not_prod():
     tmp_conn.close()
     assert tmp_count >= 1, "row did not land in the tmp DB that config.DB_PATH points to"
 
-    # The row MUST NOT exist in the prod DB
-    prod_path = Path("/root/home-energy-manager/data/energy_state.db")
-    if prod_path.exists():
-        prod_conn = sqlite3.connect(str(prod_path))
-        prod_count = prod_conn.execute(
-            "SELECT COUNT(*) FROM action_schedule "
-            "WHERE date='2099-01-01' AND json_extract(params, '$.conftest_isolation_test')=1"
-        ).fetchone()[0]
-        prod_conn.close()
-        assert prod_count == 0, (
-            f"LEAK: test wrote {prod_count} conftest-isolation marker row(s) "
-            f"to the production DB at {prod_path}. Tests are NOT isolated."
-        )
+    # The row MUST NOT exist in the prod DB (only meaningful when the prod DB
+    # is actually present and readable from this host — dev boxes skip this
+    # half of the check).
+    prod_path = _prod_db_path()
+    try:
+        prod_exists = prod_path.exists()
+    except (PermissionError, OSError):
+        return
+    if not prod_exists:
+        return
+    prod_conn = sqlite3.connect(str(prod_path))
+    prod_count = prod_conn.execute(
+        "SELECT COUNT(*) FROM action_schedule "
+        "WHERE date='2099-01-01' AND json_extract(params, '$.conftest_isolation_test')=1"
+    ).fetchone()[0]
+    prod_conn.close()
+    assert prod_count == 0, (
+        f"LEAK: test wrote {prod_count} conftest-isolation marker row(s) "
+        f"to the production DB at {prod_path}. Tests are NOT isolated."
+    )
