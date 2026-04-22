@@ -197,8 +197,13 @@ class Config:
     BULLETPROOF_TIMEZONE: str = (os.getenv("BULLETPROOF_TIMEZONE") or "Europe/London").strip()
 
     DHW_TEMP_MAX_C: float = float(os.getenv("DHW_TEMP_MAX_C", "65"))
+    # Plunge-only ceiling (≥ DHW_TEMP_COMFORT_C and ≤ DHW_TEMP_MAX_C is allowed only when price < 0).
+    DHW_TEMP_COMFORT_C: float = float(os.getenv("DHW_TEMP_COMFORT_C", "48"))
     DHW_TEMP_CHEAP_C: float = float(os.getenv("DHW_TEMP_CHEAP_C", "60"))
     DHW_TEMP_NORMAL_C: float = float(os.getenv("DHW_TEMP_NORMAL_C", "50"))
+    # DEPRECATED: Daikin Onecta firmware runs the weekly thermal-shock cycle autonomously
+    # (Sunday ~11:00 local). The LP / dispatch layer no longer enforces these bounds.
+    # Kept only so stale .env files don't break on load; remove in a follow-up.
     DHW_LEGIONELLA_TEMP_C: float = float(os.getenv("DHW_LEGIONELLA_TEMP_C", "60"))
     DHW_LEGIONELLA_DAY: int = int(os.getenv("DHW_LEGIONELLA_DAY", "6"))  # Sunday
     DHW_LEGIONELLA_HOUR_START: int = int(os.getenv("DHW_LEGIONELLA_HOUR_START", "11"))
@@ -216,7 +221,7 @@ class Config:
     FOX_FORCE_CHARGE_MAX_PWR: int = int(os.getenv("FOX_FORCE_CHARGE_MAX_PWR", "6000"))
     FOX_FORCE_CHARGE_NORMAL_PWR: int = int(os.getenv("FOX_FORCE_CHARGE_NORMAL_PWR", "3000"))
 
-    LWT_OFFSET_MAX: float = float(os.getenv("LWT_OFFSET_MAX", "10"))
+    LWT_OFFSET_MAX: float = float(os.getenv("LWT_OFFSET_MAX", "5"))
     LWT_OFFSET_MIN: float = float(os.getenv("LWT_OFFSET_MIN", "-5"))
     LWT_OFFSET_PREHEAT_BOOST: float = float(
         os.getenv("LWT_OFFSET_PREHEAT_BOOST", os.getenv("SCHEDULER_PREHEAT_LWT_BOOST", "5"))
@@ -279,7 +284,7 @@ class Config:
         os.getenv("OPTIMIZATION_PREHEAT_LWT_BOOST", os.getenv("SCHEDULER_PREHEAT_LWT_BOOST", "2"))
     )
     OPTIMIZATION_LWT_OFFSET_MIN: float = float(os.getenv("OPTIMIZATION_LWT_OFFSET_MIN", "-10"))
-    OPTIMIZATION_LWT_OFFSET_MAX: float = float(os.getenv("OPTIMIZATION_LWT_OFFSET_MAX", "10"))
+    OPTIMIZATION_LWT_OFFSET_MAX: float = float(os.getenv("OPTIMIZATION_LWT_OFFSET_MAX", "5"))
     OPTIMIZATION_DISABLE_WEATHER_REGULATION: bool = os.getenv(
         "OPTIMIZATION_DISABLE_WEATHER_REGULATION", "false"
     ).lower() in ("true", "1", "yes")
@@ -292,7 +297,7 @@ class Config:
     # PuLP MILP optimizer (V8)
     OPTIMIZER_BACKEND: str = (os.getenv("OPTIMIZER_BACKEND") or "lp").strip().lower()
     BATTERY_RT_EFFICIENCY: float = float(os.getenv("BATTERY_RT_EFFICIENCY", "0.92"))
-    MAX_INVERTER_KW: float = float(os.getenv("MAX_INVERTER_KW", "3.0"))
+    MAX_INVERTER_KW: float = float(os.getenv("MAX_INVERTER_KW", "6.0"))
     EXPORT_RATE_PENCE: float = float(os.getenv("EXPORT_RATE_PENCE", "15.0"))
     LP_HORIZON_HOURS: int = int(os.getenv("LP_HORIZON_HOURS", "36"))
     DAIKIN_POWER_BUCKETS_KW: str = (os.getenv("DAIKIN_POWER_BUCKETS_KW") or "0,0.5,1.0,1.5").strip()
@@ -383,7 +388,9 @@ class Config:
     LP_OCCUPIED_MORNING_END: str = (os.getenv("LP_OCCUPIED_MORNING_END") or "08:30").strip()
     LP_OCCUPIED_EVENING_START: str = (os.getenv("LP_OCCUPIED_EVENING_START") or "17:30").strip()
     LP_OCCUPIED_EVENING_END: str = (os.getenv("LP_OCCUPIED_EVENING_END") or "22:30").strip()
-    LP_SHOWER_MORNING_LOCAL: str = (os.getenv("LP_SHOWER_MORNING_LOCAL") or "07:00").strip()
+    # Empty string disables the morning-shower DHW floor entirely (family defaults to
+     # evening showers — forcing a 43 °C floor at 07:00 triggers expensive morning heating).
+    LP_SHOWER_MORNING_LOCAL: str = (os.getenv("LP_SHOWER_MORNING_LOCAL") or "").strip()
     LP_SHOWER_EVENING_LOCAL: str = (os.getenv("LP_SHOWER_EVENING_LOCAL") or "20:00").strip()
 
     # Terminal SoC constraint: if > 0 the LP enforces SoC ≥ this value at the end of the horizon.
@@ -392,16 +399,17 @@ class Config:
 
     # Model Predictive Control: re-run the LP intra-day with refreshed SoC / tank / forecasts.
     # Comma-separated local hours (24-h). E.g. "6,12,18" fires at 06:00, 12:00, and 18:00.
-    LP_MPC_HOURS: str = (os.getenv("LP_MPC_HOURS") or "6,12").strip()
+    LP_MPC_HOURS: str = (os.getenv("LP_MPC_HOURS") or "6,12,21").strip()
 
     # Whether intra-day MPC re-runs (and the evening fetch) push the updated plan to Fox/Daikin.
     # Default false: compute + log only; the nightly push job dispatches at LP_PLAN_PUSH_HOUR:MINUTE.
     LP_MPC_WRITE_DEVICES: bool = os.getenv("LP_MPC_WRITE_DEVICES", "false").lower() in ("1", "true", "yes")
 
-    # Nightly plan push: local wall-clock time to upload tomorrow's LP plan to Fox ESS + Daikin.
-    # Fires slightly before midnight so devices are programmed before the first slot starts.
-    LP_PLAN_PUSH_HOUR: int = int(os.getenv("LP_PLAN_PUSH_HOUR", "23"))
-    LP_PLAN_PUSH_MINUTE: int = int(os.getenv("LP_PLAN_PUSH_MINUTE", "55"))
+    # Nightly plan push: UTC wall-clock time to upload tomorrow's LP plan to Fox ESS + Daikin.
+    # Anchored to UTC so it lands just after Daikin's daily 200-req quota rollover (midnight UTC).
+    # The scheduler forces UTC for this cron regardless of BULLETPROOF_TIMEZONE.
+    LP_PLAN_PUSH_HOUR: int = int(os.getenv("LP_PLAN_PUSH_HOUR", "0"))
+    LP_PLAN_PUSH_MINUTE: int = int(os.getenv("LP_PLAN_PUSH_MINUTE", "5"))
 
     # Load-profile: rolling-window of execution_log slots used for per-hour-of-day load estimation.
     # The flat mean is used when fewer rows are available or when this is 0 (legacy).

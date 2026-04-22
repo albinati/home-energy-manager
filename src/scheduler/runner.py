@@ -709,25 +709,27 @@ def start_background_scheduler() -> None:
                     config.LP_MPC_HOURS_LIST,
                     tz,
                 )
-            # Nightly plan push: dispatch Fox + Daikin just before midnight
+            # Nightly plan push: dispatch Fox + Daikin just after the Daikin daily quota
+            # rollover (midnight UTC). Anchored to UTC regardless of BULLETPROOF_TIMEZONE
+            # so the push always lands on a fresh quota day.
             _background_scheduler.add_job(
                 bulletproof_plan_push_job,
                 CronTrigger(
                     hour=config.LP_PLAN_PUSH_HOUR,
                     minute=config.LP_PLAN_PUSH_MINUTE,
-                    timezone=tz,
+                    timezone=ZoneInfo("UTC"),
                 ),
                 id="bulletproof_plan_push",
             )
             logger.info(
-                "Bulletproof cron: Octopus %02d:%02d, brief %02d:%02d, plan push %02d:%02d (%s)",
+                "Bulletproof cron: Octopus %02d:%02d, brief %02d:%02d (%s); plan push %02d:%02d UTC",
                 config.OCTOPUS_FETCH_HOUR,
                 config.OCTOPUS_FETCH_MINUTE,
                 config.DAILY_BRIEF_HOUR,
                 config.DAILY_BRIEF_MINUTE,
+                tz,
                 config.LP_PLAN_PUSH_HOUR,
                 config.LP_PLAN_PUSH_MINUTE,
-                tz,
             )
 
         _background_scheduler.start()

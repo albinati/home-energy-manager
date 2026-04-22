@@ -41,7 +41,9 @@ def test_lp_solves_optimal_small_horizon():
     slots, w = _series(n, base)
     prices = [12.0] * n
     base_load = [0.4] * n
-    st = LpInitialState(soc_kwh=4.0, tank_temp_c=44.0, indoor_temp_c=20.0)
+    # indoor_temp_c at 20.5 (= INDOOR_SETPOINT_C − 0.5) matches the solver's terminal floor
+    # so short horizons remain feasible under the tighter LWT offset cap.
+    st = LpInitialState(soc_kwh=4.0, tank_temp_c=44.0, indoor_temp_c=20.5)
     plan = solve_lp(
         slot_starts_utc=slots,
         price_pence=prices,
@@ -63,7 +65,8 @@ def test_seg_export_bounded_by_pv_and_discharge():
     slots, w = _series(n, base)
     prices = [30.0] * n
     base_load = [0.3] * n
-    st = LpInitialState(soc_kwh=8.0, tank_temp_c=50.0, indoor_temp_c=21.0)
+    # Tank starts at the new DHW_TEMP_COMFORT_C ceiling (48°C) for positive-price slots.
+    st = LpInitialState(soc_kwh=8.0, tank_temp_c=48.0, indoor_temp_c=21.0)
     plan = solve_lp(
         slot_starts_utc=slots,
         price_pence=prices,
@@ -85,7 +88,9 @@ def test_terminal_soc_at_least_initial(monkeypatch):
     slots, w = _series(n, base)
     prices = [8.0] * n
     base_load = [0.45] * n
-    st = LpInitialState(soc_kwh=3.0, tank_temp_c=42.0, indoor_temp_c=19.0)
+    # indoor_temp_c must be close to INDOOR_SETPOINT_C (21°C) — the solver has a
+    # hard terminal floor of INDOOR_SETPOINT_C-0.5 that short horizons can't recover from.
+    st = LpInitialState(soc_kwh=3.0, tank_temp_c=42.0, indoor_temp_c=20.5)
     plan = solve_lp(
         slot_starts_utc=slots,
         price_pence=prices,
@@ -107,7 +112,8 @@ def test_terminal_soc_hard_floor(monkeypatch):
     slots, w = _series(n, base)
     prices = [8.0] * n
     base_load = [0.3] * n
-    st = LpInitialState(soc_kwh=5.0, tank_temp_c=45.0, indoor_temp_c=20.0)
+    # indoor_temp_c at 20.5 = terminal floor; otherwise short horizons can't recover.
+    st = LpInitialState(soc_kwh=5.0, tank_temp_c=45.0, indoor_temp_c=20.5)
     plan = solve_lp(
         slot_starts_utc=slots,
         price_pence=prices,
@@ -145,7 +151,8 @@ def test_pv_curtailment_slack_prevents_infeasible():
     )
     prices = [5.0] * n
     base_load = [0.2] * n
-    st = LpInitialState(soc_kwh=9.0, tank_temp_c=55.0, indoor_temp_c=22.0)
+    # Tank capped at DHW_TEMP_COMFORT_C=48 °C for positive-price slots.
+    st = LpInitialState(soc_kwh=9.0, tank_temp_c=48.0, indoor_temp_c=22.0)
     plan = solve_lp(
         slot_starts_utc=slots,
         price_pence=prices,
@@ -191,7 +198,7 @@ def test_inverter_stress_reduces_peak_battery_power(monkeypatch):
     # Flat price: without stress, solver is free to charge at max every slot
     prices = [10.0] * n
     base_load = [0.3] * n
-    st = LpInitialState(soc_kwh=2.0, tank_temp_c=45.0, indoor_temp_c=20.0)
+    st = LpInitialState(soc_kwh=2.0, tank_temp_c=45.0, indoor_temp_c=20.5)
 
     monkeypatch.setattr(app_config, "LP_INVERTER_STRESS_COST_PENCE", 0.0)
     plan_no_stress = solve_lp(
@@ -236,7 +243,8 @@ def test_simplified_hp_model_continuous_power(monkeypatch):
     slots, w = _series(n, base)
     prices = [6.0] * n  # cheap — heat pump should run
     base_load = [0.3] * n
-    st = LpInitialState(soc_kwh=5.0, tank_temp_c=40.0, indoor_temp_c=18.0)
+    # indoor_temp_c must be close to INDOOR_SETPOINT_C (21°C) — see terminal-floor note in earlier test.
+    st = LpInitialState(soc_kwh=5.0, tank_temp_c=40.0, indoor_temp_c=20.5)
     plan = solve_lp(
         slot_starts_utc=slots,
         price_pence=prices,
@@ -282,3 +290,128 @@ def test_mpc_hours_list_parsed_correctly(monkeypatch):
 
     monkeypatch.setattr(app_config, "LP_MPC_HOURS", "0,23,12,6")
     assert app_config.LP_MPC_HOURS_LIST == [0, 6, 12, 23]
+
+
+def test_negative_price_max_charges_battery(monkeypatch):
+    """All-negative prices: LP should charge the battery to ~full within one horizon.
+
+    Export rate is zeroed so grid-arbitrage (charge + discharge-to-export) isn't preferred
+    over simply absorbing the negative-price energy into the battery.
+    """
+    monkeypatch.setattr(app_config, "EXPORT_RATE_PENCE", 0.0)
+    base = datetime(2026, 4, 23, 12, 0, tzinfo=UTC)
+    n = 8  # 4 hours × negative
+    slots = [base + timedelta(minutes=30 * i) for i in range(n)]
+    w = WeatherLpSeries(
+        slot_starts_utc=slots,
+        temperature_outdoor_c=[12.0] * n,
+        shortwave_radiation_wm2=[0.0] * n,
+        cloud_cover_pct=[100.0] * n,
+        pv_kwh_per_slot=[0.0] * n,  # no PV — all charge must come from grid
+        cop_space=[3.2] * n,
+        cop_dhw=[2.7] * n,
+    )
+    prices = [-5.0] * n
+    base_load = [0.3] * n
+    initial_soc = 2.0
+    st = LpInitialState(soc_kwh=initial_soc, tank_temp_c=45.0, indoor_temp_c=20.5)
+    plan = solve_lp(
+        slot_starts_utc=slots,
+        price_pence=prices,
+        base_load_kwh=base_load,
+        weather=w,
+        initial=st,
+        tz=ZoneInfo("Europe/London"),
+    )
+    assert plan.ok
+    # With no export reward, the LP's only profit is absorbing import at negative price —
+    # so the battery should end the horizon at or near soc_max.
+    assert plan.soc_kwh[-1] >= float(app_config.BATTERY_CAPACITY_KWH) - 0.5, (
+        f"battery should be ~full after all-negative horizon, got SoC={plan.soc_kwh[-1]:.2f}"
+    )
+
+
+def test_dhw_ceiling_48_when_positive_price():
+    """Tank must stay ≤ DHW_TEMP_COMFORT_C (48°C) during positive-price slots."""
+    base = datetime(2026, 4, 23, 6, 0, tzinfo=UTC)
+    n = 24  # 12 hours
+    slots, w = _series(n, base)
+    # First half positive, second half negative
+    prices = [10.0] * 12 + [-3.0] * 12
+    base_load = [0.3] * n
+    st = LpInitialState(soc_kwh=5.0, tank_temp_c=45.0, indoor_temp_c=20.5)
+    plan = solve_lp(
+        slot_starts_utc=slots,
+        price_pence=prices,
+        base_load_kwh=base_load,
+        weather=w,
+        initial=st,
+        tz=ZoneInfo("Europe/London"),
+    )
+    assert plan.ok
+    comfort_c = float(app_config.DHW_TEMP_COMFORT_C)
+    for i in range(n):
+        if prices[i] >= 0:
+            assert plan.tank_temp_c[i + 1] <= comfort_c + 0.1, (
+                f"slot {i} (price={prices[i]}p): tank={plan.tank_temp_c[i+1]:.2f}°C > {comfort_c}"
+            )
+
+
+def test_no_grid_to_battery_before_plunge():
+    """Morning positive + afternoon negative: morning grid→battery flow must be 0."""
+    base = datetime(2026, 4, 23, 6, 0, tzinfo=UTC)
+    n = 16  # 8 hours
+    slots = [base + timedelta(minutes=30 * i) for i in range(n)]
+    w = WeatherLpSeries(
+        slot_starts_utc=slots,
+        temperature_outdoor_c=[12.0] * n,
+        shortwave_radiation_wm2=[0.0] * n,
+        cloud_cover_pct=[100.0] * n,
+        pv_kwh_per_slot=[0.0] * n,  # no PV — grid is the only import source
+        cop_space=[3.2] * n,
+        cop_dhw=[2.7] * n,
+    )
+    prices = [12.0] * 8 + [-2.0] * 8  # positive morning, negative afternoon
+    base_load = [0.3] * n
+    st = LpInitialState(soc_kwh=5.0, tank_temp_c=45.0, indoor_temp_c=20.5)
+    plan = solve_lp(
+        slot_starts_utc=slots,
+        price_pence=prices,
+        base_load_kwh=base_load,
+        weather=w,
+        initial=st,
+        tz=ZoneInfo("Europe/London"),
+    )
+    assert plan.ok
+    # Morning positive slots: battery charge must be ≤ pv_use (=0), so ≈0.
+    for i in range(8):
+        assert plan.battery_charge_kwh[i] <= plan.pv_use_kwh[i] + 1e-3, (
+            f"morning slot {i}: chg={plan.battery_charge_kwh[i]:.3f} > pv={plan.pv_use_kwh[i]:.3f}"
+        )
+
+
+def test_lwt_offset_capped_at_5():
+    """LP lwt_offset_c must never exceed OPTIMIZATION_LWT_OFFSET_MAX (5 °C)."""
+    base = datetime(2026, 1, 15, 0, 0, tzinfo=UTC)
+    n = 12
+    # Outdoor=10 °C from the default _series helper is below the DAIKIN_WEATHER_CURVE_HIGH_C
+    # threshold, so space_floor_kwh > 0 and the LP schedules space heating in every slot —
+    # exercising the LWT cap.
+    slots, w = _series(n, base)
+    prices = [8.0] * n
+    base_load = [0.3] * n
+    st = LpInitialState(soc_kwh=5.0, tank_temp_c=45.0, indoor_temp_c=20.5)
+    plan = solve_lp(
+        slot_starts_utc=slots,
+        price_pence=prices,
+        base_load_kwh=base_load,
+        weather=w,
+        initial=st,
+        tz=ZoneInfo("Europe/London"),
+    )
+    assert plan.ok
+    lwt_max_cfg = float(app_config.OPTIMIZATION_LWT_OFFSET_MAX)
+    assert plan.lwt_offset_c, "expected lwt_offset_c populated when heating runs"
+    assert max(plan.lwt_offset_c) <= lwt_max_cfg + 0.1, (
+        f"lwt_offset_c.max={max(plan.lwt_offset_c):.2f} > cap {lwt_max_cfg}"
+    )
