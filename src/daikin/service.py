@@ -17,6 +17,8 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any
 
 from ..api_quota import quota_remaining, should_block
 from ..config import config
@@ -38,6 +40,10 @@ _devices_stale: bool = False                    # True after write until next re
 
 # Per-actor cooldown map for force-refresh: actor_key -> last epoch seconds
 _force_refresh_timestamps: dict[str, float] = {}
+
+# #55 — one-shot cold-start 429 log: prevents the 2-minute log-spam loop when
+# Daikin quota is already exhausted at boot. Reset on first successful refresh.
+_cold_start_quota_logged: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -79,14 +85,41 @@ def _cache_is_warm() -> bool:
 def _do_refresh(actor: str) -> list[DaikinDevice]:
     """Call get_devices() and update cache. Quota accounting is at the transport layer (DaikinClient._get)."""
     global _devices_cache, _devices_fetched_monotonic, _devices_fetched_wall, _devices_stale
+    global _cold_start_quota_logged
     client = _get_or_create_client()
     devices = client.get_devices()
     _devices_cache = devices
     _devices_fetched_monotonic = time.monotonic()
     _devices_fetched_wall = time.time()
     _devices_stale = False
+    _cold_start_quota_logged = False  # clear once — next 429 can log afresh
+    _persist_daikin_telemetry_live(devices)
     logger.info("Daikin devices refreshed by %s (%d device(s))", actor, len(devices))
     return devices
+
+
+def _persist_daikin_telemetry_live(devices: list[DaikinDevice]) -> None:
+    """Write a ``source='live'`` row to daikin_telemetry (#55) — seed for the
+    physics estimator when the quota subsequently runs out. Best-effort; a
+    failure here must never break the refresh path."""
+    if not devices:
+        return
+    d0 = devices[0]
+    try:
+        from .. import db
+        db.insert_daikin_telemetry({
+            "fetched_at": time.time(),
+            "source": "live",
+            "tank_temp_c": d0.tank_temperature,
+            "indoor_temp_c": getattr(d0.temperature, "room_temperature", None),
+            "outdoor_temp_c": getattr(d0.temperature, "outdoor_temperature", None),
+            "tank_target_c": d0.tank_target,
+            "lwt_actual_c": d0.leaving_water_temperature,
+            "mode": d0.operation_mode,
+            "weather_regulation": 1 if d0.weather_regulation_enabled else 0,
+        })
+    except Exception as e:
+        logger.debug("daikin_telemetry live persistence failed: %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +164,18 @@ def get_cached_devices(
                     source="cold_start",
                 )
             except Exception as e:
-                logger.warning("Daikin cold-start fetch failed: %s", e)
+                # #55 — log the cold-start failure exactly once per boot instead
+                # of every 2 minutes (the old heartbeat-loop behavior).
+                global _cold_start_quota_logged
+                if not _cold_start_quota_logged:
+                    logger.warning(
+                        "Daikin cold-start fetch failed: %s — service will use "
+                        "the physics estimator until the quota window rolls over",
+                        e,
+                    )
+                    _cold_start_quota_logged = True
+                else:
+                    logger.debug("Daikin cold-start fetch failed (suppressed): %s", e)
                 return CachedDevices(
                     devices=[],
                     fetched_at_wall=None,
@@ -292,6 +336,124 @@ def get_quota_status_daikin() -> dict:
         ),
         **qst,
     }
+
+
+# ---------------------------------------------------------------------------
+# LP-initial-state wrapper (cache → live → physics estimator). #55
+# ---------------------------------------------------------------------------
+
+
+def get_lp_state_cached_or_estimated(
+    *,
+    actor: str = "lp_init",
+    now_utc: datetime | None = None,
+) -> dict[str, Any]:
+    """Return tank/indoor state preferring live, falling back to the physics
+    estimator when Daikin quota is exhausted (#55).
+
+    Flow:
+      1. Fresh row in ``daikin_telemetry`` (within
+         ``DAIKIN_TELEMETRY_MAX_STALENESS_SECONDS``) → return as ``source='live'``.
+      2. Quota has headroom → live fetch via ``get_cached_devices`` (which also
+         writes a fresh ``source='live'`` row via ``_do_refresh``), return.
+      3. Quota exhausted → walk the physics estimator forward from the last
+         ``source='live'`` row, persist as ``source='estimate'``, return.
+
+    Never raises. When nothing at all is available, returns ``source='degraded'``
+    with ``None`` temps so the LP falls back to config defaults without crashing.
+    The return shape is deliberately narrower than ``CachedDevices`` — this
+    wrapper is LP-focused, not a general device-state accessor.
+    """
+    from .. import db
+    from .estimator import estimate_state
+
+    if now_utc is None:
+        now_utc = datetime.now(UTC)
+
+    max_staleness = int(config.DAIKIN_TELEMETRY_MAX_STALENESS_SECONDS)
+
+    latest_live = db.get_latest_daikin_telemetry(source="live")
+    if latest_live is not None:
+        age = now_utc.timestamp() - float(latest_live["fetched_at"])
+        if 0 <= age <= max_staleness:
+            logger.debug(
+                "Daikin LP state: live cache hit (age=%.0fs, actor=%s)", age, actor
+            )
+            return {
+                "tank_temp_c": latest_live.get("tank_temp_c"),
+                "indoor_temp_c": latest_live.get("indoor_temp_c"),
+                "outdoor_temp_c": latest_live.get("outdoor_temp_c"),
+                "source": "live",
+                "age_seconds": round(age, 1),
+            }
+
+    if not should_block("daikin"):
+        try:
+            result = get_cached_devices(allow_refresh=True, actor=actor)
+            if result.devices:
+                d0 = result.devices[0]
+                return {
+                    "tank_temp_c": d0.tank_temperature,
+                    "indoor_temp_c": getattr(d0.temperature, "room_temperature", None),
+                    "outdoor_temp_c": getattr(d0.temperature, "outdoor_temperature", None),
+                    "source": "live",
+                    "age_seconds": round(result.age_seconds, 1),
+                }
+        except Exception as e:
+            logger.warning("Daikin live fetch failed in LP wrapper: %s", e)
+
+    if latest_live is None:
+        logger.warning(
+            "Daikin LP state: no seed row and quota exhausted — "
+            "LP will fall back to config defaults"
+        )
+        return {
+            "tank_temp_c": None,
+            "indoor_temp_c": None,
+            "outdoor_temp_c": None,
+            "source": "degraded",
+            "age_seconds": None,
+        }
+
+    try:
+        try:
+            meteo_rows = db.get_meteo_forecast(now_utc.date().isoformat())
+        except Exception:
+            meteo_rows = None
+        est = estimate_state(latest_live, now_utc, meteo_rows=meteo_rows)
+        db.insert_daikin_telemetry({
+            "fetched_at": now_utc.timestamp(),
+            "source": "estimate",
+            "tank_temp_c": est.tank_temp_c,
+            "indoor_temp_c": est.indoor_temp_c,
+            "outdoor_temp_c": est.outdoor_temp_c,
+        })
+        logger.info(
+            "Daikin LP state: estimator fallback "
+            "(seed age=%.0fs, tank≈%.1f°C, indoor≈%.1f°C, actor=%s)",
+            est.seed_age_seconds,
+            est.tank_temp_c,
+            est.indoor_temp_c,
+            actor,
+        )
+        return {
+            "tank_temp_c": est.tank_temp_c,
+            "indoor_temp_c": est.indoor_temp_c,
+            "outdoor_temp_c": est.outdoor_temp_c,
+            "source": "estimate",
+            "age_seconds": round(est.seed_age_seconds, 1),
+        }
+    except Exception as e:
+        logger.warning("Daikin estimator failed (%s) — returning stale live row", e)
+        return {
+            "tank_temp_c": latest_live.get("tank_temp_c"),
+            "indoor_temp_c": latest_live.get("indoor_temp_c"),
+            "outdoor_temp_c": latest_live.get("outdoor_temp_c"),
+            "source": "stale",
+            "age_seconds": round(
+                now_utc.timestamp() - float(latest_live["fetched_at"]), 1
+            ),
+        }
 
 
 # ---------------------------------------------------------------------------
