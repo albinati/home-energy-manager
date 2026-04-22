@@ -415,3 +415,155 @@ def test_lwt_offset_capped_at_5():
     assert max(plan.lwt_offset_c) <= lwt_max_cfg + 0.1, (
         f"lwt_offset_c.max={max(plan.lwt_offset_c):.2f} > cap {lwt_max_cfg}"
     )
+
+
+def test_dis_zero_during_negative_slots():
+    """Fix B: LP must plan dis=0 for every slot where price < 0, even when a
+    subsequent high-price slot would make discharge nominally profitable.
+    """
+    base = datetime(2026, 4, 23, 12, 0, tzinfo=UTC)
+    n = 8
+    slots = [base + timedelta(minutes=30 * i) for i in range(n)]
+    w = WeatherLpSeries(
+        slot_starts_utc=slots,
+        temperature_outdoor_c=[12.0] * n,
+        shortwave_radiation_wm2=[0.0] * n,
+        cloud_cover_pct=[100.0] * n,
+        pv_kwh_per_slot=[0.0] * n,
+        cop_space=[3.2] * n,
+        cop_dhw=[2.7] * n,
+    )
+    # 4 negative slots followed by 4 peak slots (tempting discharge during negatives
+    # if the LP were allowed to swing battery both ways within the horizon).
+    prices = [-3.0] * 4 + [35.0] * 4
+    base_load = [0.3] * n
+    st = LpInitialState(soc_kwh=9.0, tank_temp_c=45.0, indoor_temp_c=20.5)
+    plan = solve_lp(
+        slot_starts_utc=slots,
+        price_pence=prices,
+        base_load_kwh=base_load,
+        weather=w,
+        initial=st,
+        tz=ZoneInfo("Europe/London"),
+    )
+    assert plan.ok
+    for i in range(4):
+        assert plan.battery_discharge_kwh[i] < 1e-3, (
+            f"negative slot {i} (price={prices[i]}p): dis={plan.battery_discharge_kwh[i]:.4f} must be 0"
+        )
+
+
+def test_stress_cost_inactive_during_negative_prices(monkeypatch):
+    """Fix A: the inverter-stress penalty must be suppressed during negative slots,
+    so solving with or without stress yields the same battery trajectory when all
+    slots are negative-priced.
+    """
+    base = datetime(2026, 4, 23, 12, 0, tzinfo=UTC)
+    n = 8
+    slots = [base + timedelta(minutes=30 * i) for i in range(n)]
+    w = WeatherLpSeries(
+        slot_starts_utc=slots,
+        temperature_outdoor_c=[12.0] * n,
+        shortwave_radiation_wm2=[0.0] * n,
+        cloud_cover_pct=[100.0] * n,
+        pv_kwh_per_slot=[0.0] * n,
+        cop_space=[3.2] * n,
+        cop_dhw=[2.7] * n,
+    )
+    prices = [-2.0] * n
+    base_load = [0.3] * n
+    st = LpInitialState(soc_kwh=2.0, tank_temp_c=45.0, indoor_temp_c=20.5)
+
+    monkeypatch.setattr(app_config, "LP_INVERTER_STRESS_COST_PENCE", 0.0)
+    plan_no = solve_lp(
+        slot_starts_utc=slots,
+        price_pence=prices,
+        base_load_kwh=base_load,
+        weather=w,
+        initial=st,
+        tz=ZoneInfo("Europe/London"),
+    )
+    monkeypatch.setattr(app_config, "LP_INVERTER_STRESS_COST_PENCE", 1.0)
+    plan_yes = solve_lp(
+        slot_starts_utc=slots,
+        price_pence=prices,
+        base_load_kwh=base_load,
+        weather=w,
+        initial=st,
+        tz=ZoneInfo("Europe/London"),
+    )
+    assert plan_no.ok and plan_yes.ok
+    # Objective must match: if the stress gate works, the stress-cost term
+    # contributes 0 during all-negative horizons, so the optimum is identical
+    # to the no-stress baseline. (Per-slot chg distribution may differ because
+    # any ordering that saturates the battery is an equivalent optimum.)
+    assert abs(plan_no.objective_pence - plan_yes.objective_pence) < 0.05, (
+        f"objective differs — no_stress={plan_no.objective_pence:.3f} "
+        f"vs stress={plan_yes.objective_pence:.3f} — stress gate not fully suppressing"
+    )
+    # Total energy absorbed into the battery should also match.
+    tot_no = sum(plan_no.battery_charge_kwh)
+    tot_yes = sum(plan_yes.battery_charge_kwh)
+    assert abs(tot_no - tot_yes) < 0.05, (
+        f"total chg differs — no_stress={tot_no:.3f} vs stress={tot_yes:.3f}"
+    )
+
+
+def test_negative_run_has_no_charge_gaps(monkeypatch):
+    """Fix A + B in concert: a contiguous negative-price run should produce
+    battery_charge_kwh > EPS in every slot until SoC saturates — no alternating
+    zero-charge gaps caused by stress-cost smoothing.
+    """
+    # Keep stress cost at production default (0.10); if Fix A is correctly gating
+    # it during negatives, this test passes. Without Fix A it fails.
+    monkeypatch.setattr(app_config, "LP_INVERTER_STRESS_COST_PENCE", 0.10)
+    monkeypatch.setattr(app_config, "EXPORT_RATE_PENCE", 0.0)
+    base = datetime(2026, 4, 23, 11, 30, tzinfo=UTC)
+    n = 6
+    slots = [base + timedelta(minutes=30 * i) for i in range(n)]
+    w = WeatherLpSeries(
+        slot_starts_utc=slots,
+        temperature_outdoor_c=[12.0] * n,
+        shortwave_radiation_wm2=[0.0] * n,
+        cloud_cover_pct=[100.0] * n,
+        pv_kwh_per_slot=[0.0] * n,
+        cop_space=[3.2] * n,
+        cop_dhw=[2.7] * n,
+    )
+    # Mimic real Agile plunge: most-negative slot at index 2, shallower at 1, 4.
+    prices = [-1.24, -0.90, -1.30, -1.30, -1.10, -0.95]
+    base_load = [0.3] * n
+    # SoC=5 kWh (50%): battery has ~5 kWh of headroom — ~2 slots of full-power charging.
+    st = LpInitialState(soc_kwh=5.0, tank_temp_c=45.0, indoor_temp_c=20.5)
+    plan = solve_lp(
+        slot_starts_utc=slots,
+        price_pence=prices,
+        base_load_kwh=base_load,
+        weather=w,
+        initial=st,
+        tz=ZoneInfo("Europe/London"),
+    )
+    assert plan.ok
+    # The bug this guards: alternating chg>0 / chg=0 pattern within a negative run
+    # ("SelfUse gaps"). Characterise the chg sequence as binary (EPS-threshold)
+    # and count transitions from "charging" back to "idle". A correct plan has
+    # at most ONE such transition (saturation point); an alternation pattern has
+    # two or more.
+    is_charging = [c > 0.05 for c in plan.battery_charge_kwh]
+    transitions_charging_to_idle = sum(
+        1 for i in range(1, n) if is_charging[i - 1] and not is_charging[i]
+    )
+    assert transitions_charging_to_idle <= 1, (
+        f"LP produced alternating chg/idle gaps during negative run: "
+        f"chg={[round(c, 2) for c in plan.battery_charge_kwh]}, "
+        f"transitions={transitions_charging_to_idle}"
+    )
+    # Battery must actually saturate (if it doesn't, the LP didn't absorb enough
+    # negative-price energy).
+    cap = float(app_config.BATTERY_CAPACITY_KWH)
+    assert plan.soc_kwh[-1] >= cap - 0.5, (
+        f"terminal SoC {plan.soc_kwh[-1]:.2f} < {cap - 0.5} — battery didn't saturate"
+    )
+    # And no dis in any negative slot (Fix B).
+    for i in range(n):
+        assert plan.battery_discharge_kwh[i] < 1e-3

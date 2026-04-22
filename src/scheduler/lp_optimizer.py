@@ -445,6 +445,14 @@ def solve_lp(
         if has_future_neg[i] and price_line[i] >= 0:
             prob += chg[i] <= pv_use[i]
 
+    # Negative-price discharge lock: dis = 0 when price < 0. Discharging while
+    # the grid is paying us to import is strictly dominated — surplus import
+    # capacity must flow into chg, e_hp, or exp. Also guarantees the dispatcher
+    # can trust plan.battery_discharge_kwh[i] < EPS for every negative slot.
+    for i in range(n):
+        if price_line[i] < 0:
+            prob += dis[i] == 0
+
     # -----------------------------------------------------------------------
     # Terminal constraints
     # -----------------------------------------------------------------------
@@ -503,7 +511,13 @@ def solve_lp(
     objective = obj_grid + obj_cycle + obj_comfort + obj_tank_hi
 
     if use_stress and stress_aux:
-        objective += pulp.lpSum(stress_aux[i] * slot_h for i in range(n))
+        # Stress cost is suppressed during negative-price slots: every kWh of
+        # chg earns revenue, so imaginary inverter-wear penalty must not bias
+        # the LP toward under-charging. Positive-price slots keep the smoothing.
+        stress_gate = [1.0 if price_line[i] >= 0 else 0.0 for i in range(n)]
+        objective += pulp.lpSum(
+            stress_aux[i] * slot_h * stress_gate[i] for i in range(n)
+        )
 
     if w_bat_tv > 0 and tv_chg:
         objective += w_bat_tv * (

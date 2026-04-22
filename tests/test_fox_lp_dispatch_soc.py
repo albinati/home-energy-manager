@@ -122,3 +122,59 @@ def test_slot_fox_tuple_standard_selfuse_uses_reserve_min_soc() -> None:
     wm, fds, pwr, msg = _slot_fox_tuple(s)
     assert wm == "SelfUse"
     assert msg == _min_r()
+
+
+def test_negative_hold_kind_when_battery_full_and_price_negative() -> None:
+    """When LP has chg≈0 during a negative-price slot (battery saturated), the
+    dispatcher must emit kind='negative_hold' — not 'standard'. This maps to
+    Fox Backup mode to prevent battery discharge while grid is paying us to
+    import (see #57).
+    """
+    t0 = datetime(2026, 4, 23, 12, 0, tzinfo=UTC)
+    cap = float(config.BATTERY_CAPACITY_KWH)
+    plan = LpPlan(
+        ok=True,
+        status="Optimal",
+        objective_pence=-5.0,
+        slot_starts_utc=[t0, t0 + timedelta(minutes=30)],
+        price_pence=[-1.3, -0.9],
+        import_kwh=[0.3, 0.3],  # grid covers base load
+        export_kwh=[0.0, 0.0],
+        battery_charge_kwh=[0.0, 0.0],  # battery already full
+        battery_discharge_kwh=[0.0, 0.0],  # Fix B
+        pv_use_kwh=[0.0, 0.0],
+        pv_curtail_kwh=[0.0, 0.0],
+        dhw_electric_kwh=[0.0, 0.0],
+        space_electric_kwh=[0.0, 0.0],
+        soc_kwh=[cap, cap, cap],  # fully saturated
+        peak_threshold_pence=30.0,
+    )
+    slots = lp_plan_to_slots(plan)
+    assert len(slots) == 2
+    for i, s in enumerate(slots):
+        assert s.kind == "negative_hold", (
+            f"slot {i} (price={plan.price_pence[i]}p, chg=0, full SoC): kind={s.kind!r}"
+        )
+    wm, fds, pwr, _ = _slot_fox_tuple(slots[0])
+    assert wm == "Backup", f"negative_hold must map to Fox Backup mode, got {wm!r}"
+    assert fds is None
+    assert pwr is None
+
+
+def test_negative_hold_merges_adjacent_with_same_params() -> None:
+    """Adjacent negative_hold slots must collapse into one Backup group so the
+    Fox schedule stays within the 8-group limit during long plunge windows.
+    """
+    t0 = datetime(2026, 4, 23, 12, 0, tzinfo=UTC)
+    slots = [
+        HalfHourSlot(
+            start_utc=t0 + timedelta(minutes=30 * i),
+            end_utc=t0 + timedelta(minutes=30 * (i + 1)),
+            price_pence=-1.0,
+            kind="negative_hold",
+        )
+        for i in range(4)
+    ]
+    groups = _merge_fox_groups(slots)
+    assert len(groups) == 1
+    assert groups[0].work_mode == "Backup"
