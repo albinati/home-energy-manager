@@ -2,6 +2,7 @@
 .env.*-backup
 *.json
 !.env.example
+!docs/**/*.json
 __pycache__/
 *.pyc
 *.pyo

@@ -2,6 +2,8 @@
 
 Home Energy Manager is designed as the **single planning brain** for the site: it **captures tariffs**, **fuses them with weather and observed energy behaviour**, **estimates needs**, and **emits concrete schedules** for Fox ESS and Daikin. OpenClaw, the REST API, and dashboards are **interfaces** to that brain; they do not replace it.
 
+**Runtime shape (as of 2026-04-22):** native Python 3.12 service under systemd (`home-energy-manager.service`, `/root/home-energy-manager/.venv`), SQLite at `data/energy_state.db`. Docker was removed on 2026-04-18 — see [RUNBOOK.md](RUNBOOK.md) for the live ops contract.
+
 ## Data the brain uses
 
 | Source | Role |
@@ -32,8 +34,9 @@ The older consent-driven **solver + dispatcher** (`src/optimization/`) was remov
 
 ## Design constraints
 
-- **Fox Open API ~1440 calls/day soft budget (hard ~1440)** — realtime cache TTL 300 s; one V3 upload per optimizer run; all Fox HTTP calls tracked in `api_call_log` (see ADR-001).
-- **Daikin Onecta ~200 calls/day** — device cache TTL 1800 s; live refresh only in the 5-min Octopus pre-slot window (HH:25–30, HH:55–00); quota tracked persistently in SQLite (see ADR-001).
+- **Fox Open API ~1440 calls/day soft budget (hard ~1440)** — realtime cache TTL 300 s; one V3 upload per optimizer run **and now skipped when the groups-list fingerprint is unchanged** (#38 / PR #61); all Fox HTTP calls tracked in `api_call_log` (see ADR-001).
+- **Daikin Onecta ~200 calls/day** — device cache TTL 1800 s; live refresh only in the 5-min Octopus pre-slot window (HH:25–30, HH:55–00); quota tracked persistently in SQLite (see ADR-001). **When exhausted**, `daikin_service.get_lp_state_cached_or_estimated` walks a physics estimator (`src/daikin/estimator.py`) forward from the last `source='live'` row in `daikin_telemetry` so the LP keeps planning (#55 / PR #62).
+- **Runtime-tunable knobs** (comfort / strategy / MPC cadence) — live via `PUT /api/v1/settings/{key}` → `runtime_settings` SQLite table → `config.*` property (30 s TTL + version counter). Schedule-class keys (`LP_MPC_HOURS`, `LP_PLAN_PUSH_HOUR/MINUTE`) hot-reload APScheduler cron jobs without a restart (#52 / PR #63). See `src/runtime_settings.py`.
 - **`OPENCLAW_READ_ONLY`** — remote execute path respects read-only for safety.
 - **Grid export (force discharge)** — default **`ENERGY_STRATEGY_MODE=savings_first`**: prioritise self-use and import savings; Scheduler V3 may use **ForceDischarge** on **peak** slots only when **`OPTIMIZATION_PRESET`** is **travel** or **away** *and* cached battery SoC ≥ **`EXPORT_DISCHARGE_MIN_SOC_PERCENT`** (default 95). Set **`strict_savings`** to disable peak export discharge entirely.
 - **Daikin (travel/away)** — SQLite actions skip **cheap** and **negative** preheat windows; only **peak** setback (+ short **restore**) is written so the heat pump does not add load while Fox may export. At **normal** preset, Daikin still follows full cheap/peak/negative schedule. The API does **not** switch Onecta **operationMode** (heating/auto); adaptation is via **LWT offset, DHW tank, climate/tank power** on the heartbeat.
@@ -95,10 +98,9 @@ The plan is re-computed at four intra-day checkpoints and after the Octopus rate
 | Time (BST) | Trigger | Purpose |
 |---|---|---|
 | 06:00 | `LP_MPC_HOURS` cron | Morning anchor: live SoC after overnight ForceCharge |
-| 09:00 | `LP_MPC_HOURS` cron | Solar window start: correct overnight discharge shortfall |
 | 12:00 | `LP_MPC_HOURS` cron | Mid-day: add ForceCharge if solar underdelivered |
-| 15:00 | `LP_MPC_HOURS` cron | Pre-peak: last cheap window before 16:00–19:00 peak |
-| ~16:05 | `bulletproof_octopus_fetch_job` | **Critical**: tomorrow's rates published → LP replans full 36h horizon, adjusting tonight's discharge and overnight cheap strategy |
-| 23:00 | `LP_PLAN_PUSH_HOUR` | Nightly full-day dispatch |
+| 21:00 | `LP_MPC_HOURS` cron | Late-evening: re-seed from full-day actuals |
+| ~16:05 | `bulletproof_octopus_fetch_job` | **Critical**: tomorrow's rates published → LP replans full 36h horizon |
+| 00:05 UTC | `LP_PLAN_PUSH_HOUR:MINUTE` (UTC-anchored) | Nightly full-day dispatch — lands on a fresh Daikin quota day |
 
-`LP_MPC_WRITE_DEVICES=true` makes each checkpoint push the updated Fox schedule to hardware. API budget impact: Fox ~384/day (27% of 1440 hard limit), Daikin ~99/day (50% of 200 limit) — Daikin PATCH calls only happen at slot transitions in the heartbeat, not on every MPC compute.
+`LP_MPC_HOURS` is runtime-tunable (PUT `/api/v1/settings/LP_MPC_HOURS`) and the cron jobs re-register live (PR #63). `LP_MPC_WRITE_DEVICES=true` makes each checkpoint push the updated Fox schedule to hardware; unchanged schedules are skipped at the `FoxESSClient.set_scheduler_v3` layer (PR #61). API budget impact: Fox ~100–400/day (well under 1440), Daikin ~50–100/day (well under 200) — Daikin PATCH calls only happen at slot transitions in the heartbeat, not on every MPC compute.

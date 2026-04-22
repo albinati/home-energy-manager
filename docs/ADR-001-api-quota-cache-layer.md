@@ -1,9 +1,16 @@
 # ADR-001 — API Quota & Cache Layer (Daikin / Fox ESS)
 
-**Date:** 2026-04-19  
-**Status:** Implemented & deployed  
-**Context:** Daikin Onecta hard limit ≈ 200 calls/day; Fox ESS Open API ≈ 1440/day.  
+**Date:** 2026-04-19
+**Status:** Implemented & deployed; extended by Phase 4 (2026-04-21) and PR #62 (2026-04-22).
+**Context:** Daikin Onecta hard limit ≈ 200 calls/day; Fox ESS Open API ≈ 1440/day.
 Prior to this change every heartbeat tick, dashboard load, assistant context call, and agent question triggered a live HTTP fetch, regularly exhausting the Daikin budget before noon.
+
+> **What landed after the original ADR**
+> - **Phase 4** (#45, 2026-04-21) closed the two transport-layer bypasses (`src/scheduler/daikin.py`, `src/scheduler/lp_initial_state.py`) and moved `record_call` into `DaikinClient._get` / `_patch`. Every Daikin HTTP call is now counted uniformly.
+> - **Phase 4.3** added `DAIKIN_OVERRIDE_GRACE_SECONDS` and the `overridden_by_user_at` column on `action_schedule` so mobile-app overrides aren't fought by the heartbeat.
+> - **Phase 4.5** added the MCP boundary audit (`src/mcp_server.audit_mcp_tool_surface`) and `simulate_plan` (zero quota / zero hardware dry-run).
+> - **PR #62** (#55) added the `daikin_telemetry` table and `src/daikin/estimator.py` — a closed-form physics estimator that lets the LP keep planning when the Daikin quota is exhausted. Cold-start 429 log collapsed from a 2-minute loop to one WARN per boot.
+> - **PR #61** (#38) added Fox-V3 schedule idempotency: read-before-write + `SchedulerGroup.fingerprint()` skip when unchanged, removing redundant writes.
 
 ---
 
@@ -97,23 +104,19 @@ Any caller receiving `CachedDevices(stale=True)` or a Fox status with `cache_sta
 
 ---
 
-## Future improvements
+## Open follow-ups
 
-### Short-term
-- [ ] **Dashboard quota widget**: add a small `#quota-status` card to `dashboard.html` showing Daikin and Fox used/remaining bars — currently only available via JSON endpoints.
-- [ ] **Health check integration**: include `quota_blocked` in `/api/v1/health` response so monitoring alerts fire before the inverter is stranded.
-- [ ] **Deploy script health check timing**: the script's 30 s poll loop fires before uvicorn is ready (startup takes ~5 s for PuLP). Add a `sleep 6` before the first health-check curl, or switch to a retry-with-backoff loop.
+Items below were in scope at the original ADR date and remain open. Items that
+landed are listed in the status block at the top.
 
-### Medium-term
-- [ ] **Per-slot Daikin telemetry snapshot**: log outdoor temp, LWT, tank temp, and room temp to `execution_log` at each reconcile tick so the LP can use actual Daikin state as initial conditions rather than API-fetched values (reduces cold-start dependency on live Daikin reads).
-- [ ] **Fox ESS work-mode echo in DB**: after every Fox V3 upload, read back the confirmed work mode and store it in SQLite. Currently `work_mode` in the status response shows "unknown" after a restart until the next realtime poll.
-- [ ] **Smarter MPC trigger**: today MPC re-runs at fixed `LP_MPC_HOURS`. Consider re-triggering when Fox SoC deviates > 10% from plan, or when a cloud event causes PV to drop > 50% vs forecast (already available in `src/weather.py`).
-
-### Longer-term
-- [ ] **Local Daikin polling (LAN)**: Daikin Altherma units expose a local Modbus/BACnet or P1 interface on some firmware versions. If reachable on the LAN, replace the cloud `get_devices()` call with a local read — zero quota cost, sub-second latency.
-- [ ] **Fox ESS local RS485**: the inverter exposes a Modbus-TCP interface on the local network. Real-time SoC and power readings without cloud quota would allow a tighter MPC loop (e.g. 60 s vs current 300 s).
-- [ ] **Octopus Intelligent / Flux tariff support**: the rate classifier and LP model assume flat half-hourly Agile. Adding Intelligent Go (overnight 7.5p window) or Flux (export premium) would require a tariff abstraction layer in `src/scheduler/agile.py`.
-- [ ] **Battery degradation model**: the LP cycle penalty (`LP_CYCLE_PENALTY_PENCE_PER_KWH`) is a flat pence value. Replace with a capacity-fade curve (DoD vs cycle count) so the optimizer naturally avoids deep cycling as the battery ages.
+- **Dashboard quota widget** — a small `#quota-status` card in `dashboard.html` showing Daikin and Fox used/remaining bars (today exposed only as JSON at `/api/v1/{daikin,foxess}/quota`).
+- **Health-check integration** — include `quota_blocked` in `/api/v1/health` so external monitors can alert before the inverter is stranded.
+- **Fox ESS work-mode echo in DB** — after every Fox V3 upload, read-back and persist the confirmed work mode. Currently `work_mode` in status shows `unknown` after a restart until the next realtime poll. Partially unblocked by PR #61's `warn_if_scheduler_v3_mismatch`.
+- **Smarter MPC trigger** — re-run when Fox SoC deviates > 10 % from plan, or when PV drops > 50 % vs forecast. `LP_MPC_HOURS` fixed-cron is today's only trigger (now hot-reloadable via #52).
+- **Local Daikin polling (LAN)** — some Altherma firmware exposes a local Modbus / BACnet interface. Zero quota, sub-second latency. Would complement (not replace) the estimator; unreliable across firmware revs.
+- **Fox ESS local RS485 / Modbus-TCP** — inverter exposes this on the LAN. Tight SoC / power reads without cloud quota → could tighten the MPC loop from 300 s to 60 s.
+- **Octopus Intelligent / Flux tariff support** — classifier + LP assume flat half-hourly Agile. Adding Intelligent Go (overnight 7.5 p window) or Flux (export premium) needs a tariff abstraction in `src/scheduler/agile.py`.
+- **Battery degradation model** — `LP_CYCLE_PENALTY_PENCE_PER_KWH` is a flat pence value. Replace with a capacity-fade curve (DoD vs cycle count) so the optimizer naturally avoids deep cycling as the battery ages.
 
 ---
 
@@ -121,15 +124,20 @@ Any caller receiving `CachedDevices(stale=True)` or a Fox status with `cache_sta
 
 | File | Role |
 |---|---|
-| `src/api_quota.py` | Quota tracker (new) |
-| `src/daikin/service.py` | Daikin cache/singleton (new) |
+| `src/api_quota.py` | Per-vendor 24-h sliding quota tracker |
+| `src/daikin/service.py` | Daikin cache singleton + `get_lp_state_cached_or_estimated` (#55) |
+| `src/daikin/estimator.py` | Closed-form physics estimator for quota-exhausted fallback (#55) |
+| `src/daikin/client.py` | Uniform `record_call` at transport layer (Phase 4.1) |
 | `src/foxess/service.py` | Fox ESS cache + quota extension |
+| `src/foxess/client.py` | `set_scheduler_v3` skip-when-unchanged guard (#38 / PR #61) |
 | `src/scheduler/runner.py` | Pre-slot window gate, heartbeat cache-only reads |
-| `src/config.py` | All quota/cache tuning constants |
-| `src/db.py` | `api_call_log` table schema + migration |
-| `src/api/main.py` | All Daikin reads → service; new quota endpoints |
-| `src/api/models.py` | `FoxESSStatusResponse` quota fields |
+| `src/config.py` | All quota / cache tuning constants |
+| `src/db.py` | `api_call_log` (V5), `daikin_telemetry` (V9) tables |
+| `src/api/main.py` | `/api/v1/{daikin,foxess}/quota` endpoints |
 | `scripts/deploy_hetzner.sh` | Post-deploy Fox ESS Self Use safety reset |
 | `tests/test_api_quota.py` | Quota tracker unit tests |
-| `tests/test_daikin_service.py` | Service cache / throttle / stale tests |
+| `tests/test_daikin_service.py` | Cache / throttle / stale tests |
+| `tests/test_daikin_estimator.py` | Estimator closed-form accuracy (#55) |
+| `tests/test_daikin_quota_fallback.py` | Quota-exhausted → estimator path (#55) |
 | `tests/test_foxess_service_quota.py` | Fox ESS quota + stale tests |
+| `tests/test_foxess_scheduler_readback.py` | Fox idempotency / fingerprint tests (#38) |
