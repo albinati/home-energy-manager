@@ -493,9 +493,13 @@ def solve_lp(
     obj_grid = pulp.lpSum(imp[i] * price_line[i] - exp[i] * export_rate for i in range(n))
     obj_cycle = cycle_pen * pulp.lpSum(chg[i] + dis[i] for i in range(n))
     obj_comfort = comfort_pen * pulp.lpSum(s_lo[i] + s_hi[i] for i in range(n))
-    # Heavy penalty on per-slot DHW ceiling breach — same weight as indoor comfort slack
-    # so a single °C-slot overshoot costs the same as a 1 °C indoor comfort miss.
-    obj_tank_hi = comfort_pen * pulp.lpSum(s_tank_hi[i] for i in range(n))
+    # DHW overshoot above the comfort ceiling is not a comfort issue — it's just stored
+    # hot water that will drift back naturally via tank losses. A *tiny* penalty
+    # (0.01 p/°C-slot) breaks ties toward the lower tank target without blocking the LP
+    # from filling the tank to 65 °C during negative-price windows (the whole point of
+    # #50). Positive-price DHW heating is already discouraged by obj_grid, so no extra
+    # penalty is needed to prevent gratuitous overshoot.
+    obj_tank_hi = 0.01 * pulp.lpSum(s_tank_hi[i] for i in range(n))
     objective = obj_grid + obj_cycle + obj_comfort + obj_tank_hi
 
     if use_stress and stress_aux:
