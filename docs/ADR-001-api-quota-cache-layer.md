@@ -1,16 +1,9 @@
 # ADR-001 — API Quota & Cache Layer (Daikin / Fox ESS)
 
 **Date:** 2026-04-19
-**Status:** Implemented & deployed; extended by Phase 4 (2026-04-21) and PR #62 (2026-04-22).
+**Status:** Implemented & deployed. Subsequent decisions build on this foundation — see [ADR-002 … ADR-006](#supersedes--extended-by).
 **Context:** Daikin Onecta hard limit ≈ 200 calls/day; Fox ESS Open API ≈ 1440/day.
 Prior to this change every heartbeat tick, dashboard load, assistant context call, and agent question triggered a live HTTP fetch, regularly exhausting the Daikin budget before noon.
-
-> **What landed after the original ADR**
-> - **Phase 4** (#45, 2026-04-21) closed the two transport-layer bypasses (`src/scheduler/daikin.py`, `src/scheduler/lp_initial_state.py`) and moved `record_call` into `DaikinClient._get` / `_patch`. Every Daikin HTTP call is now counted uniformly.
-> - **Phase 4.3** added `DAIKIN_OVERRIDE_GRACE_SECONDS` and the `overridden_by_user_at` column on `action_schedule` so mobile-app overrides aren't fought by the heartbeat.
-> - **Phase 4.5** added the MCP boundary audit (`src/mcp_server.audit_mcp_tool_surface`) and `simulate_plan` (zero quota / zero hardware dry-run).
-> - **PR #62** (#55) added the `daikin_telemetry` table and `src/daikin/estimator.py` — a closed-form physics estimator that lets the LP keep planning when the Daikin quota is exhausted. Cold-start 429 log collapsed from a 2-minute loop to one WARN per boot.
-> - **PR #61** (#38) added Fox-V3 schedule idempotency: read-before-write + `SchedulerGroup.fingerprint()` skip when unchanged, removing redundant writes.
 
 ---
 
@@ -97,10 +90,20 @@ Any caller receiving `CachedDevices(stale=True)` or a Fox status with `cache_sta
 - Quota state is observable via dedicated API endpoints and the dashboard.
 
 ### Trade-offs / watch points
-- **Cold cache at startup**: first heartbeat after a restart will have no cached data; the next pre-slot window will populate it. The gap is at most 30 min.
-- **Stale Daikin state during LP replan**: if the pre-slot refresh fails (quota exhausted or Daikin API down), the LP runs on the previous cache. This is acceptable — temperatures change slowly.
+- **Cold cache at startup**: first heartbeat after a restart will have no cached data; the next pre-slot window will populate it. The gap is at most 30 min. (Mitigated for the LP by ADR-004.)
+- **Stale Daikin state during LP replan**: if the pre-slot refresh fails (quota exhausted or Daikin API down), the LP runs on the previous cache. This is acceptable — temperatures change slowly. (Further hardened by the physics estimator in ADR-004.)
 - **`DaikinClient` still instantiated for write reconciliation**: `reconcile_daikin_schedule_for_date` receives a lightweight `DaikinClient` object but does not call `get_devices()` internally. Keep it this way — do not add device discovery inside reconcile.
 - **`force_refresh` throttle is per-actor, not global**: two different actors (e.g. "api" and "heartbeat") can each trigger a refresh within the same 30-min window. This is intentional (UI refresh should not be blocked by a heartbeat refresh and vice versa) but means the theoretical maximum is 2× the per-actor rate. Still safely under budget.
+
+---
+
+## Supersedes / extended by
+
+- **[ADR-002 — Phase 4 Daikin hardening](ADR-002-daikin-quota-integrity-hardening.md)** — moves `record_call` into `DaikinClient._get/_patch` so every HTTP call is counted uniformly (closes two bypasses), and adds user-override acceptance so mobile-app edits aren't fought by the heartbeat.
+- **[ADR-003 — MCP boundary enforcement](ADR-003-mcp-boundary-enforcement.md)** — boot-time tool-surface audit, `simulate_plan` dry-run, singleton lock so OpenClaw respawns don't accumulate processes.
+- **[ADR-004 — Daikin physics state estimator](ADR-004-daikin-physics-estimator.md)** — closed-form decay from the last live telemetry row so the LP keeps planning when the Onecta quota is exhausted.
+- **[ADR-005 — Fox V3 scheduler idempotency](ADR-005-fox-scheduler-idempotency.md)** — skip the upload when the fingerprinted groups list equals what's already on the inverter.
+- **[ADR-006 — Runtime-tunable settings](ADR-006-runtime-tunable-settings.md)** — comfort / strategy / MPC-cadence knobs live-editable via `/api/v1/settings`, no systemd restart.
 
 ---
 
