@@ -61,6 +61,8 @@ Grouped by side-effect class. "Hardware write" tools require `confirmed=True` **
 | `set_auto_approve` | Toggles `PLAN_AUTO_APPROVE` |
 | `set_occupancy_mcp` | Upserts occupancy settings in SQLite |
 | `set_notification_route` | Upserts notification_routes row |
+| `list_settings` / `get_setting` | Read-only (listed here because they pair with `set_setting`) |
+| `set_setting` | Writes a key in `runtime_settings` (#52 / PR #63); dry-run unless `confirmed=True`. Schedule-class keys also trigger APScheduler cron re-registration. |
 | `rollback_config` | Restores config snapshot + forces simulation mode |
 
 ### Hardware write (requires `OPENCLAW_READ_ONLY=false` and `confirmed=True`)
