@@ -389,7 +389,7 @@ class Config:
     LP_OCCUPIED_EVENING_START: str = (os.getenv("LP_OCCUPIED_EVENING_START") or "17:30").strip()
     LP_OCCUPIED_EVENING_END: str = (os.getenv("LP_OCCUPIED_EVENING_END") or "22:30").strip()
     # Empty string disables the morning-shower DHW floor entirely (family defaults to
-     # evening showers — forcing a 43 °C floor at 07:00 triggers expensive morning heating).
+    # evening showers — forcing a 43 °C floor at 07:00 triggers expensive morning heating).
     LP_SHOWER_MORNING_LOCAL: str = (os.getenv("LP_SHOWER_MORNING_LOCAL") or "").strip()
     LP_SHOWER_EVENING_LOCAL: str = (os.getenv("LP_SHOWER_EVENING_LOCAL") or "20:00").strip()
 
