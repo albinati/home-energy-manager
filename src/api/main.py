@@ -36,6 +36,7 @@ from ..scheduler.optimizer import run_optimizer
 from ..scheduler.runner import (
     get_scheduler_status,
     pause_scheduler,
+    reregister_cron_jobs,
     resume_scheduler,
     start_background_scheduler,
     stop_background_scheduler,
@@ -373,6 +374,70 @@ async def daikin_quota():
 async def foxess_quota():
     """Return Fox ESS API quota usage, cache age, and stale status."""
     return get_refresh_stats_extended()
+
+
+# ---------------------------------------------------------------------------
+# Runtime-tunable settings (#52). PUT takes effect within the 30-sec cache
+# TTL; settings that drive cron cadence trigger an APScheduler re-register.
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/v1/settings")
+async def settings_list():
+    """Return every runtime-tunable setting with its current value, env default,
+    range, and ``overridden`` flag (true when the DB row supplants the env)."""
+    from .. import runtime_settings as rts
+    return {"settings": rts.list_settings()}
+
+
+@app.get("/api/v1/settings/{key}")
+async def settings_get(key: str):
+    from .. import runtime_settings as rts
+    if key not in rts.SCHEMA:
+        raise HTTPException(status_code=404, detail=f"unknown setting {key!r}")
+    try:
+        value = rts.get_setting(key)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    return {"key": key, "value": value}
+
+
+@app.put("/api/v1/settings/{key}")
+async def settings_put(key: str, payload: dict):
+    """Validate + persist + (if cron) re-register APScheduler jobs.
+
+    Body: ``{"value": <new>}``. Type coercion follows the schema:
+    ``list[int]`` accepts ``"6,12,18"`` or ``[6, 12, 18]``.
+    """
+    from .. import runtime_settings as rts
+    if key not in rts.SCHEMA:
+        raise HTTPException(status_code=404, detail=f"unknown setting {key!r}")
+    if "value" not in payload:
+        raise HTTPException(status_code=400, detail="missing 'value' in body")
+    try:
+        canonical = rts.set_setting(key, payload["value"], actor="api")
+    except rts.SettingValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    cron_status = None
+    if rts.SCHEMA[key].cron_reload:
+        cron_status = reregister_cron_jobs(reason=f"settings_put:{key}")
+
+    return {"key": key, "value": canonical, "cron_status": cron_status}
+
+
+@app.delete("/api/v1/settings/{key}")
+async def settings_delete(key: str):
+    """Clear the override row — the next read returns the env default. Same
+    cron side effect as PUT when the key is cadence-related."""
+    from .. import runtime_settings as rts
+    if key not in rts.SCHEMA:
+        raise HTTPException(status_code=404, detail=f"unknown setting {key!r}")
+    removed = rts.delete_setting(key, actor="api")
+    cron_status = None
+    if rts.SCHEMA[key].cron_reload:
+        cron_status = reregister_cron_jobs(reason=f"settings_delete:{key}")
+    return {"key": key, "removed": removed, "cron_status": cron_status}
 
 
 @app.get("/api/v1/daikin/status", response_model=list[DaikinStatusResponse])

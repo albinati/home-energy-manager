@@ -380,6 +380,15 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_daikin_telemetry_source_ts ON daikin_telemetry(source, fetched_at DESC)"
     )
 
+    # V10: runtime_settings — user-editable tunables that take effect without restart (#52)
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS runtime_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )"""
+    )
+
 
 def init_db() -> None:
     """Create tables if missing and apply lightweight migrations."""
@@ -1843,6 +1852,81 @@ def get_latest_daikin_telemetry(
                 )
             r = cur.fetchone()
             return dict(r) if r else None
+        finally:
+            conn.close()
+
+
+# ---------------------------------------------------------------------------
+# V10: runtime_settings — user-editable tunables that take effect without restart.
+# Values are stored as TEXT (the service layer handles coercion). A ``None`` read
+# is the signal to fall back to the env-derived default in ``src/runtime_settings.py``.
+# ---------------------------------------------------------------------------
+
+
+def get_runtime_setting(key: str) -> str | None:
+    """Return the string value for *key*, or None if the row is absent.
+
+    Returns None (forcing the env-default fallback) when the table hasn't been
+    created yet — tests and early-boot code exercise config properties before
+    ``init_db`` has run, and a missing ``runtime_settings`` table must not
+    crash those paths.
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT value FROM runtime_settings WHERE key = ?", (key,)
+            )
+            r = cur.fetchone()
+            return str(r[0]) if r else None
+        except sqlite3.OperationalError:
+            return None
+        finally:
+            conn.close()
+
+
+def set_runtime_setting(key: str, value: str) -> None:
+    """Upsert *value* for *key* with an UTC timestamp. ``value`` must be pre-validated
+    by the caller — this layer is purely persistence."""
+    ts = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    with _lock:
+        conn = get_connection()
+        try:
+            conn.execute(
+                """INSERT INTO runtime_settings (key, value, updated_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(key) DO UPDATE SET
+                     value=excluded.value,
+                     updated_at=excluded.updated_at""",
+                (key, value, ts),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def delete_runtime_setting(key: str) -> bool:
+    """Remove the row for *key* so reads fall back to the env default. Returns
+    True when a row was deleted."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute("DELETE FROM runtime_settings WHERE key = ?", (key,))
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+
+def list_runtime_settings() -> list[dict[str, Any]]:
+    """Return all runtime_settings rows as ``{key, value, updated_at}`` dicts."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT key, value, updated_at FROM runtime_settings ORDER BY key"
+            )
+            return [dict(r) for r in cur.fetchall()]
         finally:
             conn.close()
 
