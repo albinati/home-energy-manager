@@ -124,6 +124,17 @@ SCHEMA: dict[str, SettingSpec] = {
             "treated as fixed thermal load by LP). active = legacy v9 control."
         ),
     ),
+    "REQUIRE_SIMULATION_ID": SettingSpec(
+        key="REQUIRE_SIMULATION_ID",
+        type_name="str",  # "true" / "false" — kept as str so PUT payloads stay simple
+        env_default=_str_env("REQUIRE_SIMULATION_ID", "false"),
+        enum=("true", "false"),
+        description=(
+            "v10.1 cockpit: when 'true', every state-changing API route requires a "
+            "valid X-Simulation-Id header from a paired /simulate call. Default 'false' "
+            "so legacy dashboard + scripts keep working until the new cockpit ships."
+        ),
+    ),
     # Schedule cadence — require cron hot-reload when changed.
     "LP_PLAN_PUSH_HOUR": SettingSpec(
         key="LP_PLAN_PUSH_HOUR",

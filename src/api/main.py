@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
@@ -419,12 +419,13 @@ async def settings_get(key: str):
 
 
 @app.put("/api/v1/settings/{key}")
-async def settings_put(key: str, payload: dict):
+async def settings_put(key: str, payload: dict, x_simulation_id: str | None = Header(None, alias="X-Simulation-Id")):
     """Validate + persist + (if cron) re-register APScheduler jobs.
 
     Body: ``{"value": <new>}``. Type coercion follows the schema:
     ``list[int]`` accepts ``"6,12,18"`` or ``[6, 12, 18]``.
     """
+    _enforce_simulation_id(f"setting.{key}", x_simulation_id)
     from .. import runtime_settings as rts
     if key not in rts.SCHEMA:
         raise HTTPException(status_code=404, detail=f"unknown setting {key!r}")
@@ -504,8 +505,9 @@ async def daikin_status(refresh: bool = False):
 
 
 @app.post("/api/v1/daikin/power", response_model=PendingActionResponse | ActionResult)
-async def daikin_power(req: PowerRequest):
+async def daikin_power(req: PowerRequest, x_simulation_id: str | None = Header(None, alias="X-Simulation-Id")):
     """Turn Daikin climate control on or off."""
+    _enforce_simulation_id("daikin.set_power", x_simulation_id)
     _require_active_daikin()
     action_type = "daikin.power"
     
@@ -542,8 +544,9 @@ async def daikin_power(req: PowerRequest):
 
 
 @app.post("/api/v1/daikin/temperature", response_model=ActionResult)
-async def daikin_temperature(req: TemperatureRequest):
+async def daikin_temperature(req: TemperatureRequest, x_simulation_id: str | None = Header(None, alias="X-Simulation-Id")):
     """Set Daikin target room temperature. Blocked when weather regulation is active."""
+    _enforce_simulation_id("daikin.set_temperature", x_simulation_id)
     _require_active_daikin()
     action_type = "daikin.temperature"
     
@@ -579,8 +582,9 @@ async def daikin_temperature(req: TemperatureRequest):
 
 
 @app.post("/api/v1/daikin/lwt-offset", response_model=ActionResult)
-async def daikin_lwt_offset(req: LWTOffsetRequest):
+async def daikin_lwt_offset(req: LWTOffsetRequest, x_simulation_id: str | None = Header(None, alias="X-Simulation-Id")):
     """Set Daikin leaving water temperature offset."""
+    _enforce_simulation_id("daikin.set_lwt_offset", x_simulation_id)
     _require_active_daikin()
     action_type = "daikin.lwt_offset"
     
@@ -606,8 +610,9 @@ async def daikin_lwt_offset(req: LWTOffsetRequest):
 
 
 @app.post("/api/v1/daikin/mode", response_model=ActionResult)
-async def daikin_mode(req: ModeRequest):
+async def daikin_mode(req: ModeRequest, x_simulation_id: str | None = Header(None, alias="X-Simulation-Id")):
     """Set Daikin operation mode."""
+    _enforce_simulation_id("daikin.set_operation_mode", x_simulation_id)
     _require_active_daikin()
     action_type = "daikin.mode"
     
@@ -633,8 +638,9 @@ async def daikin_mode(req: ModeRequest):
 
 
 @app.post("/api/v1/daikin/tank-temperature", response_model=ActionResult)
-async def daikin_tank_temperature(req: TankTemperatureRequest):
+async def daikin_tank_temperature(req: TankTemperatureRequest, x_simulation_id: str | None = Header(None, alias="X-Simulation-Id")):
     """Set Daikin DHW tank target temperature."""
+    _enforce_simulation_id("daikin.set_tank_temperature", x_simulation_id)
     _require_active_daikin()
     action_type = "daikin.tank_temperature"
     
@@ -660,8 +666,9 @@ async def daikin_tank_temperature(req: TankTemperatureRequest):
 
 
 @app.post("/api/v1/daikin/tank-power", response_model=PendingActionResponse | ActionResult)
-async def daikin_tank_power(req: TankPowerRequest):
+async def daikin_tank_power(req: TankPowerRequest, x_simulation_id: str | None = Header(None, alias="X-Simulation-Id")):
     """Turn Daikin DHW tank on or off."""
+    _enforce_simulation_id("daikin.set_tank_power", x_simulation_id)
     _require_active_daikin()
     action_type = "daikin.tank_power"
     
@@ -748,7 +755,8 @@ async def foxess_status():
 
 
 @app.post("/api/v1/foxess/mode", response_model=PendingActionResponse | ActionResult)
-async def foxess_mode(req: FoxESSModeRequest):
+async def foxess_mode(req: FoxESSModeRequest, x_simulation_id: str | None = Header(None, alias="X-Simulation-Id")):
+    _enforce_simulation_id("foxess.set_mode", x_simulation_id)
     """Set Fox ESS inverter work mode."""
     action_type = "foxess.mode"
     
@@ -787,7 +795,8 @@ async def foxess_mode(req: FoxESSModeRequest):
 
 
 @app.post("/api/v1/foxess/charge-period", response_model=ActionResult)
-async def foxess_charge_period(req: ChargePeriodRequest):
+async def foxess_charge_period(req: ChargePeriodRequest, x_simulation_id: str | None = Header(None, alias="X-Simulation-Id")):
+    _enforce_simulation_id("foxess.set_charge_period", x_simulation_id)
     """Set Fox ESS charge period."""
     action_type = "foxess.charge_period"
     
@@ -1597,15 +1606,17 @@ async def scheduler_status():
 
 
 @app.post("/api/v1/scheduler/pause")
-async def scheduler_pause():
+async def scheduler_pause(x_simulation_id: str | None = Header(None, alias="X-Simulation-Id")):
     """Pause the Agile-based Daikin scheduler (no more automatic LWT changes)."""
+    _enforce_simulation_id("scheduler.pause", x_simulation_id)
     pause_scheduler()
     return {"status": "paused"}
 
 
 @app.post("/api/v1/scheduler/resume")
-async def scheduler_resume():
+async def scheduler_resume(x_simulation_id: str | None = Header(None, alias="X-Simulation-Id")):
     """Resume the Agile-based Daikin scheduler."""
+    _enforce_simulation_id("scheduler.resume", x_simulation_id)
     resume_scheduler()
     return {"status": "resumed"}
 
@@ -1765,8 +1776,9 @@ async def optimization_fetch_and_plan():
 # ── Optimization-compatible controls (Bulletproof; no V7 consent) ──────────────
 
 @app.post("/api/v1/optimization/propose", response_model=ProposePlanResponse)
-async def optimization_propose(include_plan: bool = False):
+async def optimization_propose(include_plan: bool = False, x_simulation_id: str | None = Header(None, alias="X-Simulation-Id")):
     """Run the Bulletproof daily planner (SQLite + optional Fox V3 upload)."""
+    _enforce_simulation_id("optimization.propose", x_simulation_id)
     if not config.OCTOPUS_TARIFF_CODE:
         raise HTTPException(status_code=503, detail="OCTOPUS_TARIFF_CODE not set")
     fox = None
@@ -1791,8 +1803,9 @@ async def optimization_propose(include_plan: bool = False):
 
 
 @app.post("/api/v1/optimization/approve", response_model=ApprovePlanResponse)
-async def optimization_approve(req: ApprovePlanRequest):
+async def optimization_approve(req: ApprovePlanRequest, x_simulation_id: str | None = Header(None, alias="X-Simulation-Id")):
     """No-op under Bulletproof (plans apply on propose)."""
+    _enforce_simulation_id("optimization.approve", x_simulation_id)
     return ApprovePlanResponse(
         ok=True,
         plan_id=req.plan_id,
@@ -1802,8 +1815,9 @@ async def optimization_approve(req: ApprovePlanRequest):
 
 
 @app.post("/api/v1/optimization/reject", response_model=ApprovePlanResponse)
-async def optimization_reject(req: RejectPlanRequest):
+async def optimization_reject(req: RejectPlanRequest, x_simulation_id: str | None = Header(None, alias="X-Simulation-Id")):
     """No-op under Bulletproof."""
+    _enforce_simulation_id("optimization.reject", x_simulation_id)
     return ApprovePlanResponse(
         ok=True,
         plan_id=req.plan_id,
@@ -1818,8 +1832,9 @@ async def optimization_pending():
 
 
 @app.post("/api/v1/optimization/preset", response_model=SetPresetResponse)
-async def optimization_set_preset(req: SetPresetRequest):
+async def optimization_set_preset(req: SetPresetRequest, x_simulation_id: str | None = Header(None, alias="X-Simulation-Id")):
     """Switch the household preset at runtime (normal/guests/travel/away/boost)."""
+    _enforce_simulation_id("optimization.set_preset", x_simulation_id)
     config.OPTIMIZATION_PRESET = req.preset
     logger.info("Optimization preset changed to %s", req.preset)
     return SetPresetResponse(
@@ -1833,8 +1848,9 @@ async def optimization_set_preset(req: SetPresetRequest):
 
 
 @app.post("/api/v1/optimization/backend", response_model=SetOptimizerBackendResponse)
-async def optimization_set_backend(req: SetOptimizerBackendRequest):
+async def optimization_set_backend(req: SetOptimizerBackendRequest, x_simulation_id: str | None = Header(None, alias="X-Simulation-Id")):
     """Switch planner: ``lp`` (PuLP MILP) or ``heuristic`` (legacy price-quantile classifier)."""
+    _enforce_simulation_id("optimization.set_backend", x_simulation_id)
     config.OPTIMIZER_BACKEND = req.backend
     logger.info("Optimizer backend set to %s", req.backend)
     return SetOptimizerBackendResponse(
@@ -1848,8 +1864,9 @@ async def optimization_set_backend(req: SetOptimizerBackendRequest):
 
 
 @app.post("/api/v1/optimization/mode", response_model=SetOperationModeResponse)
-async def optimization_set_mode(req: SetOperationModeRequest):
+async def optimization_set_mode(req: SetOperationModeRequest, x_simulation_id: str | None = Header(None, alias="X-Simulation-Id")):
     """Switch simulation vs operational. Snapshot saved before each transition."""
+    _enforce_simulation_id("optimization.set_mode", x_simulation_id)
     current_mode = config.OPERATION_MODE
     new_mode = req.mode
 
@@ -1881,8 +1898,9 @@ async def optimization_set_mode(req: SetOperationModeRequest):
 
 
 @app.post("/api/v1/optimization/rollback", response_model=RollbackResponse)
-async def optimization_rollback(snapshot_id: str | None = None):
+async def optimization_rollback(snapshot_id: str | None = None, x_simulation_id: str | None = Header(None, alias="X-Simulation-Id")):
     """Restore a config snapshot (latest by default). Forces simulation mode on restore."""
+    _enforce_simulation_id("optimization.rollback", x_simulation_id)
     try:
         if snapshot_id:
             snap = restore_snapshot(snapshot_id)
@@ -1908,8 +1926,9 @@ async def optimization_rollback(snapshot_id: str | None = None):
 
 
 @app.post("/api/v1/optimization/auto-approve", response_model=SetAutoApproveResponse)
-async def optimization_set_auto_approve(req: SetAutoApproveRequest):
+async def optimization_set_auto_approve(req: SetAutoApproveRequest, x_simulation_id: str | None = Header(None, alias="X-Simulation-Id")):
     """Legacy toggle; Bulletproof does not gate on consent."""
+    _enforce_simulation_id("optimization.set_auto_approve", x_simulation_id)
     config.PLAN_AUTO_APPROVE = req.enabled
     logger.info("PLAN_AUTO_APPROVE set to %s", req.enabled)
     msg = (
@@ -2227,6 +2246,188 @@ async def octopus_auto_detect():
         current_tariff_code=tariff.tariff_code if tariff else None,
         detection_source=roles.source if roles else "failed",
     )
+
+
+# ============================================================================
+# v10.1 cockpit redesign — simulate-first action paradigm (PR-A)
+# ============================================================================
+# Every state-changing route above is paired with a /simulate route that
+# returns an ActionDiff. The frontend (PR-B) renders the diff in a modal and
+# only triggers the real-write route after operator confirms (passing
+# X-Simulation-Id). Simulate endpoints NEVER call cloud APIs — they read
+# cached state only, preserving Daikin/Fox quotas.
+
+from .simulation import ActionDiff, get_store as _get_simulation_store  # noqa: E402
+from . import simulate_diffs as _diffs  # noqa: E402
+
+
+def _register_diff(diff: ActionDiff) -> dict:
+    """Register an ActionDiff with the store and return the JSON response."""
+    sid = _get_simulation_store().register(diff)
+    return diff.to_response_dict()
+
+
+def _require_simulation_id_enabled() -> bool:
+    """Whether REQUIRE_SIMULATION_ID is on. Default off until cockpit UI (PR-B) ships."""
+    from ..runtime_settings import get_setting
+    val = (get_setting("REQUIRE_SIMULATION_ID") or "false").strip().lower()
+    return val == "true"
+
+
+def _enforce_simulation_id(expected_action: str, x_simulation_id: str | None) -> ActionDiff | None:
+    """Enforce the simulate-then-confirm flow when REQUIRE_SIMULATION_ID is on.
+
+    Behaviour:
+      * setting off → returns None (no-op; legacy callers continue to work).
+      * setting on + missing header → 409 PreconditionRequired.
+      * setting on + unknown/expired header → 410 Gone.
+      * setting on + header for a different action → 409 (anti-replay).
+      * setting on + valid header → consumes from store and returns the diff.
+    """
+    if not _require_simulation_id_enabled():
+        return None
+    if not x_simulation_id:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "SimulationIdRequired",
+                "message": (
+                    "X-Simulation-Id header required. "
+                    f"POST {expected_action.replace('.', '/').replace('set_', '')}/simulate first."
+                ),
+            },
+        )
+    diff = _get_simulation_store().consume(x_simulation_id)
+    if diff is None:
+        raise HTTPException(
+            status_code=410,
+            detail={"error": "SimulationExpired", "message": "simulation_id expired or already used"},
+        )
+    if diff.action != expected_action:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "SimulationIdMismatch",
+                "message": f"simulation_id was for {diff.action!r}, not {expected_action!r}",
+            },
+        )
+    return diff
+
+
+# --- Daikin simulate routes -------------------------------------------------
+
+@app.post("/api/v1/daikin/power/simulate")
+async def daikin_power_simulate(req: PowerRequest):
+    return _register_diff(_diffs.diff_daikin_power(req.on))
+
+
+@app.post("/api/v1/daikin/temperature/simulate")
+async def daikin_temperature_simulate(req: TemperatureRequest):
+    return _register_diff(_diffs.diff_daikin_temperature(req.temperature, req.mode))
+
+
+@app.post("/api/v1/daikin/lwt-offset/simulate")
+async def daikin_lwt_offset_simulate(req: LWTOffsetRequest):
+    return _register_diff(_diffs.diff_daikin_lwt_offset(req.offset, req.mode))
+
+
+@app.post("/api/v1/daikin/mode/simulate")
+async def daikin_mode_simulate(req: ModeRequest):
+    return _register_diff(_diffs.diff_daikin_mode(req.mode.value))
+
+
+@app.post("/api/v1/daikin/tank-temperature/simulate")
+async def daikin_tank_temperature_simulate(req: TankTemperatureRequest):
+    return _register_diff(_diffs.diff_daikin_tank_temperature(req.temperature))
+
+
+@app.post("/api/v1/daikin/tank-power/simulate")
+async def daikin_tank_power_simulate(req: TankPowerRequest):
+    return _register_diff(_diffs.diff_daikin_tank_power(req.on))
+
+
+# --- Fox ESS simulate routes ------------------------------------------------
+
+@app.post("/api/v1/foxess/mode/simulate")
+async def foxess_mode_simulate(req: FoxESSModeRequest):
+    return _register_diff(_diffs.diff_foxess_mode(req.mode.value))
+
+
+@app.post("/api/v1/foxess/charge-period/simulate")
+async def foxess_charge_period_simulate(periods: list[ChargePeriod]):
+    return _register_diff(_diffs.diff_foxess_charge_period([p.model_dump() for p in periods]))
+
+
+# --- Optimization simulate routes -------------------------------------------
+
+@app.post("/api/v1/optimization/propose/simulate")
+async def optimization_propose_simulate():
+    return _register_diff(_diffs.diff_optimization_propose())
+
+
+@app.post("/api/v1/optimization/approve/simulate")
+async def optimization_approve_simulate(req: ApprovePlanRequest | None = None):
+    plan_id = getattr(req, "plan_id", None) if req else None
+    return _register_diff(_diffs.diff_optimization_approve(plan_id))
+
+
+@app.post("/api/v1/optimization/reject/simulate")
+async def optimization_reject_simulate(req: ApprovePlanRequest | None = None):
+    plan_id = getattr(req, "plan_id", None) if req else None
+    return _register_diff(_diffs.diff_optimization_reject(plan_id))
+
+
+@app.post("/api/v1/optimization/rollback/simulate")
+async def optimization_rollback_simulate():
+    return _register_diff(_diffs.diff_optimization_rollback())
+
+
+@app.post("/api/v1/optimization/preset/simulate")
+async def optimization_preset_simulate(req: SetPresetRequest):
+    return _register_diff(_diffs.diff_optimization_preset(req.preset))
+
+
+@app.post("/api/v1/optimization/backend/simulate")
+async def optimization_backend_simulate(req: SetOptimizerBackendRequest):
+    return _register_diff(_diffs.diff_optimization_backend(req.backend))
+
+
+@app.post("/api/v1/optimization/mode/simulate")
+async def optimization_mode_simulate(req: SetOperationModeRequest):
+    return _register_diff(_diffs.diff_optimization_mode(req.mode))
+
+
+@app.post("/api/v1/optimization/auto-approve/simulate")
+async def optimization_auto_approve_simulate(req: SetAutoApproveRequest):
+    return _register_diff(_diffs.diff_optimization_auto_approve(req.enabled))
+
+
+# --- Settings + scheduler simulate routes -----------------------------------
+
+@app.put("/api/v1/settings/{key}/simulate")
+async def settings_simulate(key: str, body: dict):
+    return _register_diff(_diffs.diff_setting_change(key, body.get("value")))
+
+
+@app.post("/api/v1/scheduler/pause/simulate")
+async def scheduler_pause_simulate():
+    return _register_diff(_diffs.diff_scheduler_pause())
+
+
+@app.post("/api/v1/scheduler/resume/simulate")
+async def scheduler_resume_simulate():
+    return _register_diff(_diffs.diff_scheduler_resume())
+
+
+# --- Lookup helper ----------------------------------------------------------
+
+@app.get("/api/v1/simulate/{simulation_id}")
+async def simulate_get(simulation_id: str):
+    """Re-fetch a registered diff (non-consuming). Returns 404 if missing/expired."""
+    diff = _get_simulation_store().get(simulation_id)
+    if diff is None:
+        raise HTTPException(status_code=404, detail="simulation_id not found or expired")
+    return diff.to_response_dict()
 
 
 def run_server(host: str = "0.0.0.0", port: int = 8000):
