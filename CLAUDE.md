@@ -105,13 +105,34 @@ Daikin Onecta firmware runs the weekly thermal-shock cycle autonomously (Sunday 
 ```
 DAIKIN_TOKEN_FILE=.daikin-tokens.json          # relative to cwd → data/ path set in systemd service
 DAIKIN_HTTP_429_MAX_RETRIES=0                   # fail fast on rate limit — do not remove
-OPENCLAW_READ_ONLY=false                        # allows hardware writes via MCP
-OPERATION_MODE=operational                      # operational = live hardware writes; simulation = dry-run
+OPENCLAW_READ_ONLY=false                        # the ONLY hardware-write kill switch (true = safe/dev)
 DB_PATH=/root/home-energy-manager/data/energy_state.db   # set in systemd service env
-PLAN_AUTO_APPROVE=true                          # plans applied immediately; use reject_plan() to roll back
+PLAN_AUTO_APPROVE=true                          # default: simulate → auto-apply; set false for explicit consent
+PLAN_APPROVAL_TIMEOUT_SECONDS=300               # grace window advertised to OpenClaw for Telegram/Discord buttons
 DHW_TEMP_NORMAL_C=45.0                          # restore/safe-default tank target (45 °C = sufficient for normal use)
 TARGET_DHW_TEMP_MIN_GUESTS_C=55.0              # guest-mode LP floor (multiple showers at 20:30–22:00)
 ```
+
+### Plan lifecycle (simulate → approve → live)
+
+As of 2026-04-23 the `OPERATION_MODE=simulation|operational` distinction is **gone**. The
+system always targets live hardware; `OPENCLAW_READ_ONLY` is the only kill switch (kept
+`true` on the local sim box).
+
+Flow per optimizer run:
+
+1. **Simulate** — LP solver produces a plan (read-only, no dial-out). Always happens.
+2. **Approve** — if `PLAN_AUTO_APPROVE=true` (default), the plan is auto-approved and
+   applied immediately. Otherwise `_write_plan_consent` marks it `pending_approval`
+   and sends the `PLAN_PROPOSED` hook to OpenClaw with `autoAcceptOnTimeout: true` +
+   `approvalTimeoutSeconds`. OpenClaw renders Telegram/Discord accept/reject buttons;
+   no answer → auto-accept on timeout.
+3. **Live** — Fox V3 uploaded + Daikin `action_schedule` rows written. Gated only by
+   `OPENCLAW_READ_ONLY` and `DAIKIN_CONTROL_MODE`.
+
+To force a fresh simulate/apply cycle: `propose_optimization_plan` (MCP) or
+`POST /api/v1/optimization/propose` (web). Both honor `PLAN_AUTO_APPROVE`.
+To preview without any write: `simulate_plan` (MCP) — zero hardware, zero quota.
 
 ---
 

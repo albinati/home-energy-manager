@@ -182,7 +182,7 @@ def main() -> int:
         loc_tz = TZ()
         print("--- Fox ESS Scheduler V3 (preview — not uploaded) ---")
         print(
-            f"OPERATION_MODE={app_config.OPERATION_MODE} — upload only when operational + not read-only."
+            f"OPENCLAW_READ_ONLY={app_config.OPENCLAW_READ_ONLY} — upload only when not read-only."
         )
         groups = build_fox_groups_from_lp(p)
         if not groups:

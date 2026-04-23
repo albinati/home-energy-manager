@@ -775,7 +775,6 @@ def build_mcp() -> FastMCP:
         return {
             "ok": True,
             "bulletproof": True,
-            "operation_mode": config.OPERATION_MODE,
             "preset": config.OPTIMIZATION_PRESET,
             "optimizer_backend": config.OPTIMIZER_BACKEND,
             "scheduler": get_scheduler_status(),
@@ -915,9 +914,9 @@ def build_mcp() -> FastMCP:
             return {"ok": False, "error": f"Optimizer executor unavailable: {exc}"}
 
         mode_note = (
-            "Simulation / read-only: Fox upload and hardware may be skipped per config."
-            if config.OPERATION_MODE != "operational" or config.OPENCLAW_READ_ONLY
-            else "Operational: SQLite schedule updated; Fox V3 uploaded when API key present."
+            "Read-only: Fox upload and hardware writes are skipped (OPENCLAW_READ_ONLY=true)."
+            if config.OPENCLAW_READ_ONLY
+            else "Live: SQLite schedule updated; Fox V3 uploaded when API key present."
         )
         return {
             "ok": True,
@@ -1176,42 +1175,9 @@ def build_mcp() -> FastMCP:
         }
 
     @mcp.tool(
-        name="set_operation_mode",
-        description=(
-            "Switch between simulation (safe, shadow-run only) and operational (writes to hardware). "
-            "IMPORTANT: Always present the implications to the user and get explicit confirmation before "
-            "switching to operational. A config snapshot is saved automatically before any transition."
-        ),
-    )
-    def set_operation_mode(mode: str) -> dict[str, Any]:
-        if mode not in ("simulation", "operational"):
-            return {"ok": False, "error": "Mode must be 'simulation' or 'operational'"}
-        from .config_snapshots import save_snapshot
-
-        current_mode = config.OPERATION_MODE
-        if current_mode == mode:
-            return {"ok": True, "mode": mode, "message": f"Already in {mode} mode."}
-
-        snap = save_snapshot(trigger=f"mode_change: {current_mode} -> {mode}")
-        snapshot_id = snap.get("snapshot_id")
-
-        config.OPERATION_MODE = mode
-        if mode == "simulation":
-            msg = (
-                f"Switched to simulation mode (snapshot {snapshot_id} saved). "
-                "Hardware writes follow OPENCLAW_READ_ONLY and operational rules."
-            )
-        else:
-            msg = (
-                f"Switched to OPERATIONAL mode (snapshot {snapshot_id} saved). "
-                "Fox V3 and Daikin actions run when credentials allow."
-            )
-        return {"ok": True, "mode": mode, "snapshot_id": snapshot_id, "message": msg}
-
-    @mcp.tool(
         name="rollback_config",
         description=(
-            "Restore the latest config snapshot and force simulation mode. "
+            "Restore the latest config snapshot. "
             "Use this in emergencies or when something unexpected happens. "
             "After rollback, review the system state before re-approving any plan."
         ),
@@ -1229,11 +1195,9 @@ def build_mcp() -> FastMCP:
             return {
                 "ok": True,
                 "snapshot_id": sid,
-                "restored_mode": snap.get("operation_mode"),
                 "message": (
                     f"Config restored from snapshot {sid}. "
-                    "System is now in simulation mode. "
-                    "Review and re-approve a plan before going operational again."
+                    "Review state and re-approve a plan before resuming."
                 ),
             }
         except FileNotFoundError:

@@ -53,8 +53,8 @@ The script: backs up DB → git pull → pip install → DB migration → restar
 **After deploy, verify:**
 1. `curl http://127.0.0.1:8000/api/v1/health` → `{"status":"ok"}`
 2. `journalctl -u home-energy-manager -n 20` — no Python errors
-3. `curl http://127.0.0.1:8000/api/v1/optimization/status` → `operation_mode` is what you expect
-4. If going operational: `curl -X POST http://127.0.0.1:8000/api/v1/optimization/propose -H 'Content-Type: application/json' -d '{}'` → triggers Fox V3 upload
+3. `curl http://127.0.0.1:8000/api/v1/optimization/status` → backend + preset look right
+4. Trigger a fresh plan: `curl -X POST http://127.0.0.1:8000/api/v1/optimization/propose -H 'Content-Type: application/json' -d '{}'` → simulate + (auto-)apply → Fox V3 upload
 
 **Known deploy timing quirk:** The health check in the deploy script uses `TimeoutStopSec=150` for the systemd unit (set 2026-04-19). The service takes ~25–30 s to become healthy after restart. The script waits 30 s max — if it says "health check not passing", the service is usually fine; check with `curl` manually.
 
@@ -64,10 +64,10 @@ The script: backs up DB → git pull → pip install → DB migration → restar
 
 | Variable | Production value | Notes |
 |----------|-----------------|-------|
-| `OPERATION_MODE` | `operational` | `simulation` = no hardware writes |
-| `PLAN_AUTO_APPROVE` | `false` | Set `true` only after several stable days |
+| `OPENCLAW_READ_ONLY` | `false` | **The only hardware-write kill switch.** `true` blocks all Fox/Daikin writes. |
+| `PLAN_AUTO_APPROVE` | `true` (default) | Each plan is simulated, then auto-applied. Set `false` to require explicit `confirm_plan` / `reject_plan` per cycle. |
+| `PLAN_APPROVAL_TIMEOUT_SECONDS` | `300` | Grace window advertised to OpenClaw for Telegram/Discord accept/reject buttons (auto-accept on timeout). |
 | `PLAN_REGEN_COOLDOWN_SECONDS` | `300` | Prevents spam re-planning |
-| `OPENCLAW_READ_ONLY` | `false` | Must be `false` for hardware writes via MCP |
 | `DAIKIN_DAILY_BUDGET` | `180` | Hard cap below Daikin's 200/day limit |
 | `FOX_DAILY_BUDGET` | `1200` | Conservative cap below Fox's 1440/day |
 | `LP_MPC_HOURS` | `6,9,12,15` | Intra-day MPC re-plan hours (BST/local). See MPC schedule below. |
@@ -90,7 +90,7 @@ def set_key(text, key, value):
     p = rf"^{re.escape(key)}=.*$"
     r = f"{key}={value}"
     return re.sub(p, r, text, flags=re.MULTILINE) if re.search(p, text, re.MULTILINE) else text + f"\n{key}={value}\n"
-content = set_key(content, "OPERATION_MODE", "operational")
+content = set_key(content, "PLAN_AUTO_APPROVE", "true")
 open(f, "w").write(content)
 print("done")
 EOF
@@ -361,16 +361,27 @@ curl -X POST http://127.0.0.1:8000/api/v1/optimization/propose \
   -H 'Content-Type: application/json' -d '{}'
 ```
 
-### Going back to simulation mode
+### Temporarily freeze hardware writes (dry-run / panic stop)
+
+`OPERATION_MODE` is gone. The only kill switch is `OPENCLAW_READ_ONLY`. To stop all
+Fox/Daikin writes without restarting the service: nothing — it's an env-var gate
+read at call time, so changing `.env` + restart picks it up persistently. For an
+ad-hoc panic stop, prefer `POST /api/v1/scheduler/pause` (pauses the cron engine)
+and emergency-force Fox to Self Use (see scenario above).
 
 ```bash
-# Via API
-curl -X POST http://127.0.0.1:8000/api/v1/optimization/mode \
-  -H 'Content-Type: application/json' -d '{"mode":"simulation"}'
-
-# Or edit .env + restart (persistent across restarts)
-# python3 set_key script → OPERATION_MODE=simulation → systemctl restart home-energy-manager
+# Persistent dry-run: flip the kill switch in .env and restart
+python3 - <<'EOF'
+import re
+f = "/root/home-energy-manager/.env"
+t = open(f).read()
+t = re.sub(r"^OPENCLAW_READ_ONLY=.*$", "OPENCLAW_READ_ONLY=true", t, flags=re.MULTILINE)
+open(f, "w").write(t)
+EOF
+systemctl restart home-energy-manager
 ```
+
+To re-enable writes: flip back to `false` and restart.
 
 ---
 

@@ -31,7 +31,7 @@ Grouped by side-effect class. "Hardware write" tools require `confirmed=True` **
 | `get_soc` | Fox battery SoC, solar/grid/battery power, work mode |
 | `get_daikin_status` | Cached Daikin device snapshot |
 | `get_schedule` | Today's Daikin action_schedule + Fox V3 snapshot |
-| `get_optimization_status` | Mode, preset, backend, consent state, cooldown |
+| `get_optimization_status` | Preset, backend, consent state, cooldown |
 | `get_optimization_plan` | Current 48-slot plan |
 | `get_energy_metrics` | Daily/weekly/monthly PnL, VWAP, slippage |
 | `get_daily_brief` | Morning report on demand |
@@ -57,13 +57,12 @@ Grouped by side-effect class. "Hardware write" tools require `confirmed=True` **
 | `reject_optimization_plan` / `reject_plan` | Marks plan_consent as rejected |
 | `set_optimization_preset` | Writes `OPTIMIZATION_PRESET` at runtime |
 | `set_optimizer_backend` | Writes `OPTIMIZER_BACKEND` at runtime |
-| `set_operation_mode` | Switches operational/simulation (config snapshot saved first) |
 | `set_auto_approve` | Toggles `PLAN_AUTO_APPROVE` |
 | `set_occupancy_mcp` | Upserts occupancy settings in SQLite |
 | `set_notification_route` | Upserts notification_routes row |
 | `list_settings` / `get_setting` | Read-only (listed here because they pair with `set_setting`) |
 | `set_setting` | Writes a key in `runtime_settings` (#52 / PR #63); dry-run unless `confirmed=True`. Schedule-class keys also trigger APScheduler cron re-registration. |
-| `rollback_config` | Restores config snapshot + forces simulation mode |
+| `rollback_config` | Restores config snapshot (preset, thresholds, targets) |
 
 ### Hardware write (requires `OPENCLAW_READ_ONLY=false` and `confirmed=True`)
 
