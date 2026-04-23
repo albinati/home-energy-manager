@@ -73,8 +73,10 @@
 
   async function load() {
     try {
-      const all = await jsonFetch('/api/v1/settings');
-      const byKey = Object.fromEntries((all || []).map(s => [s.key, s]));
+      const resp = await jsonFetch('/api/v1/settings');
+      // API returns {settings: [...]}; tolerate a bare list for older versions.
+      const all = Array.isArray(resp) ? resp : (resp?.settings || []);
+      const byKey = Object.fromEntries(all.map(s => [s.key, s]));
       Object.entries(CATEGORIES).forEach(([containerId, keys]) => {
         const c = $('#' + containerId);
         if (!c) return;
@@ -86,7 +88,7 @@
       });
       // Operation mode card
       const opStatus = await jsonFetch('/api/v1/optimization/status').catch(() => null);
-      $('#currentOpMode').textContent = opStatus?.mode || '—';
+      $('#currentOpMode').textContent = opStatus?.operation_mode || opStatus?.mode || '—';
     } catch (e) {
       toast(`Settings: ${e.message}`, 'bad');
     }
