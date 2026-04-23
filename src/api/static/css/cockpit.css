@@ -56,7 +56,7 @@ a { color: inherit; text-decoration: none; }
 }
 .brand { grid-area: brand; font-weight: 600; font-size: 1rem; }
 
-/* Mode badge — clickable summary of OPERATION_MODE + DAIKIN_CONTROL_MODE + REQUIRE_SIMULATION_ID */
+/* Mode badge — clickable summary of DAIKIN_CONTROL_MODE + REQUIRE_SIMULATION_ID */
 .mode-badge {
     grid-area: badge;
     appearance: none;
