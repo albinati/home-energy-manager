@@ -112,7 +112,6 @@ SIMULATE_CASES = [
     ("POST", "/api/v1/optimization/rollback/simulate", None, "optimization.rollback"),
     ("POST", "/api/v1/optimization/preset/simulate", {"preset": "normal"}, "optimization.set_preset"),
     ("POST", "/api/v1/optimization/backend/simulate", {"backend": "lp"}, "optimization.set_backend"),
-    ("POST", "/api/v1/optimization/mode/simulate", {"mode": "simulation"}, "optimization.set_mode"),
     ("POST", "/api/v1/optimization/auto-approve/simulate", {"enabled": True}, "optimization.set_auto_approve"),
     ("PUT", "/api/v1/settings/DAIKIN_CONTROL_MODE/simulate", {"value": "active"}, "setting.DAIKIN_CONTROL_MODE"),
     ("POST", "/api/v1/scheduler/pause/simulate", None, "scheduler.pause"),

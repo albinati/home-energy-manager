@@ -88,8 +88,6 @@ from .models import (
     SchedulerStatusResponse,
     SetAutoApproveRequest,
     SetAutoApproveResponse,
-    SetOperationModeRequest,
-    SetOperationModeResponse,
     SetOptimizerBackendRequest,
     SetOptimizerBackendResponse,
     SetPresetRequest,
@@ -190,10 +188,6 @@ def _layout_context() -> dict:
     """
     from .. import runtime_settings as rts
     try:
-        op_mode = config.OPERATION_MODE
-    except Exception:
-        op_mode = "unknown"
-    try:
         daikin_mode = config.DAIKIN_CONTROL_MODE
     except Exception:
         daikin_mode = "unknown"
@@ -202,7 +196,6 @@ def _layout_context() -> dict:
     except Exception:
         require_sim = False
     return {
-        "operation_mode": op_mode,
         "daikin_control_mode": daikin_mode,
         "require_simulation_id": require_sim,
     }
@@ -1723,7 +1716,6 @@ async def optimization_status():
     sch = get_scheduler_status()
     return OptimizationStatusExtendedResponse(
         enabled=config.USE_BULLETPROOF_ENGINE,
-        operation_mode=config.OPERATION_MODE,
         preset=config.OPTIMIZATION_PRESET,
         optimizer_backend=(config.OPTIMIZER_BACKEND or "lp"),
         tariff_code=config.OCTOPUS_TARIFF_CODE,
@@ -1957,43 +1949,9 @@ async def optimization_set_backend(req: SetOptimizerBackendRequest, x_simulation
     )
 
 
-@app.post("/api/v1/optimization/mode", response_model=SetOperationModeResponse)
-async def optimization_set_mode(req: SetOperationModeRequest, x_simulation_id: str | None = Header(None, alias="X-Simulation-Id")):
-    """Switch simulation vs operational. Snapshot saved before each transition."""
-    _enforce_simulation_id("optimization.set_mode", x_simulation_id)
-    current_mode = config.OPERATION_MODE
-    new_mode = req.mode
-
-    if current_mode == new_mode:
-        return SetOperationModeResponse(
-            ok=True,
-            mode=new_mode,
-            message=f"Already in {new_mode} mode. No change.",
-        )
-
-    snap = save_snapshot(trigger=f"mode_change: {current_mode} -> {new_mode}")
-    snapshot_id = snap.get("snapshot_id")
-
-    config.OPERATION_MODE = new_mode
-
-    if new_mode == "simulation":
-        msg = (
-            f"Switched to simulation mode (snapshot {snapshot_id} saved). "
-            "Hardware writes are skipped per OPENCLAW_READ_ONLY / operational rules."
-        )
-    else:
-        msg = (
-            f"Switched to operational mode (snapshot {snapshot_id} saved). "
-            "Fox V3 and Daikin actions run when keys are present and reads are allowed."
-        )
-
-    logger.info("Operation mode changed: %s -> %s (snapshot=%s)", current_mode, new_mode, snapshot_id)
-    return SetOperationModeResponse(ok=True, mode=new_mode, snapshot_id=snapshot_id, message=msg)
-
-
 @app.post("/api/v1/optimization/rollback", response_model=RollbackResponse)
 async def optimization_rollback(snapshot_id: str | None = None, x_simulation_id: str | None = Header(None, alias="X-Simulation-Id")):
-    """Restore a config snapshot (latest by default). Forces simulation mode on restore."""
+    """Restore a config snapshot (latest by default)."""
     _enforce_simulation_id("optimization.rollback", x_simulation_id)
     try:
         if snapshot_id:
@@ -2009,7 +1967,7 @@ async def optimization_rollback(snapshot_id: str | None = None, x_simulation_id:
             snapshot_id=sid,
             message=(
                 f"Config restored from snapshot {sid}. "
-                "System is in simulation mode. Re-run POST /api/v1/optimization/propose before operational."
+                "Re-run POST /api/v1/optimization/propose to refresh the plan."
             ),
         )
     except FileNotFoundError as exc:
@@ -2043,7 +2001,6 @@ async def optimization_snapshots():
                 snapshot_id=s.get("snapshot_id", ""),
                 snapshot_at=s.get("snapshot_at"),
                 trigger=s.get("trigger"),
-                operation_mode=s.get("operation_mode"),
                 preset=s.get("preset"),
             )
             for s in snaps
@@ -2484,11 +2441,6 @@ async def optimization_preset_simulate(req: SetPresetRequest):
 @app.post("/api/v1/optimization/backend/simulate")
 async def optimization_backend_simulate(req: SetOptimizerBackendRequest):
     return _register_diff(_diffs.diff_optimization_backend(req.backend))
-
-
-@app.post("/api/v1/optimization/mode/simulate")
-async def optimization_mode_simulate(req: SetOperationModeRequest):
-    return _register_diff(_diffs.diff_optimization_mode(req.mode))
 
 
 @app.post("/api/v1/optimization/auto-approve/simulate")

@@ -318,23 +318,6 @@ def diff_optimization_backend(backend: str) -> ActionDiff:
     )
 
 
-def diff_optimization_mode(mode: str) -> ActionDiff:
-    """Switch OPERATION_MODE between simulation and operational."""
-    current = config.OPERATION_MODE
-    flags: list[str] = []
-    if mode == "operational" and current != "operational":
-        flags.append("enables_real_hardware_writes")
-    if mode == "simulation":
-        flags.append("disables_all_hardware_writes")
-    return ActionDiff(
-        action="optimization.set_mode",
-        before={"mode": current},
-        after={"mode": mode},
-        safety_flags=flags,
-        human_summary=f"Change operation mode: {current} → {mode}",
-    )
-
-
 def diff_optimization_auto_approve(enabled: bool) -> ActionDiff:
     current = config.PLAN_AUTO_APPROVE
     return ActionDiff(

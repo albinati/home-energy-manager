@@ -119,14 +119,14 @@ def apply_scheduled_daikin_params(
         return False
     if skip_if_matches and daikin_device_matches_params(dev, p):
         return False
-    if config.OPERATION_MODE != "operational" or config.OPENCLAW_READ_ONLY:
+    if config.OPENCLAW_READ_ONLY:
         db.log_action(
             device="daikin",
             action="scheduled_apply",
             params=p,
             result="skipped",
             trigger=trigger,
-            error_msg="read_only or simulation",
+            error_msg="read_only",
         )
         return False
     settle = max(0, int(getattr(config, "DAIKIN_VALVE_SETTLE_SECONDS", 10)))

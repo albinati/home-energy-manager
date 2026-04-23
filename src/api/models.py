@@ -420,9 +420,8 @@ class OptimizationDispatchPreviewResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 class OptimizationStatusExtendedResponse(OptimizationStatusResponse):
-    """Extended optimization status including operation mode and consent state."""
+    """Extended optimization status including backend and consent state."""
 
-    operation_mode: str = "simulation"
     optimizer_backend: str = "lp"
     consent: dict | None = None
     v7_safeties: dict | None = None
@@ -480,25 +479,10 @@ class SetOptimizerBackendResponse(BaseModel):
     message: str
 
 
-class SetOperationModeRequest(BaseModel):
-    mode: str = Field(
-        description="Operation mode: simulation | operational",
-        pattern=r"^(simulation|operational)$",
-    )
-
-
-class SetOperationModeResponse(BaseModel):
-    ok: bool
-    mode: str
-    snapshot_id: str | None = None
-    message: str
-
-
 class SnapshotSummary(BaseModel):
     snapshot_id: str
     snapshot_at: str | None = None
     trigger: str | None = None
-    operation_mode: str | None = None
     preset: str | None = None
 
 

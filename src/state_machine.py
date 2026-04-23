@@ -75,7 +75,7 @@ def apply_safe_defaults(
     trigger: str = "recovery",
 ) -> None:
     """Force safe house state after arbitrage windows or on fault."""
-    if fox and config.OPERATION_MODE == "operational" and not config.OPENCLAW_READ_ONLY:
+    if fox and not config.OPENCLAW_READ_ONLY:
         try:
             if fox.api_key:
                 try:
@@ -108,7 +108,7 @@ def apply_safe_defaults(
             params={"shadow": True},
             result="skipped",
             trigger=trigger,
-            error_msg="read_only or simulation",
+            error_msg="read_only",
         )
 
     if not daikin:
@@ -118,7 +118,7 @@ def apply_safe_defaults(
         if not devices:
             return
         dev = devices[0]
-        if config.OPERATION_MODE != "operational" or config.OPENCLAW_READ_ONLY:
+        if config.OPENCLAW_READ_ONLY:
             db.log_action(
                 device="daikin",
                 action="apply_safe_defaults",
@@ -313,8 +313,8 @@ def reconcile_daikin_schedule_for_date(
 
 
 def heartbeat_repair_fox_scheduler(fox: FoxESSClient) -> None:
-    """Re-enable Fox time-scheduler and re-upload V3 if SQLite plan differs (operational)."""
-    if not fox.api_key or config.OPERATION_MODE != "operational":
+    """Re-enable Fox time-scheduler and re-upload V3 if SQLite plan differs."""
+    if not fox.api_key:
         return
     try:
         flag_on = fox.get_scheduler_flag()
@@ -420,7 +420,7 @@ def recover_on_boot(
         except Exception as e:
             logger.warning("Boot survival safe defaults: %s", e)
 
-    if fox and fox.api_key and config.OPERATION_MODE == "operational":
+    if fox and fox.api_key:
         try:
             hw = fox.get_scheduler_v3()
             if not hw.enabled and not config.OPENCLAW_READ_ONLY:

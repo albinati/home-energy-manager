@@ -273,7 +273,6 @@ def test_reconcile_detects_override_marks_row_and_notifies(monkeypatch):
 
     monkeypatch.setattr("src.daikin_bulletproof.config.DAIKIN_OVERRIDE_GRACE_SECONDS", 60)
     monkeypatch.setattr("src.daikin_bulletproof.config.DAIKIN_OVERRIDE_TOLERANCE_TANK_C", 0.6)
-    monkeypatch.setattr("src.daikin_bulletproof.config.OPERATION_MODE", "operational")
     monkeypatch.setattr("src.daikin_bulletproof.config.OPENCLAW_READ_ONLY", False)
 
     # C6: clear process-local state between tests.
@@ -332,7 +331,6 @@ def test_boot_recovery_does_not_false_flag_override_on_first_tick(monkeypatch):
 
     monkeypatch.setattr("src.daikin_bulletproof.config.DAIKIN_OVERRIDE_GRACE_SECONDS", 60)
     monkeypatch.setattr("src.daikin_bulletproof.config.DAIKIN_OVERRIDE_TOLERANCE_TANK_C", 0.6)
-    monkeypatch.setattr("src.daikin_bulletproof.config.OPERATION_MODE", "operational")
     monkeypatch.setattr("src.daikin_bulletproof.config.OPENCLAW_READ_ONLY", False)
 
     sm._FIRST_APPLIED_SESSION.clear()

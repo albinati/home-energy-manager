@@ -820,7 +820,7 @@ def _run_optimizer_heuristic(fox: FoxESSClient | None, daikin: Any | None = None
 
     fox_ok = False
     groups = _merge_fox_groups(slots, max_groups=8, peak_export_discharge=peak_export)
-    if fox and fox.api_key and config.OPERATION_MODE == "operational" and not config.OPENCLAW_READ_ONLY:
+    if fox and fox.api_key and not config.OPENCLAW_READ_ONLY:
         try:
             fox.set_scheduler_v3(groups, is_default=False)
             fox.warn_if_scheduler_v3_mismatch(groups)
@@ -830,7 +830,7 @@ def _run_optimizer_heuristic(fox: FoxESSClient | None, daikin: Any | None = None
         except FoxESSError as e:
             logger.warning("Fox Scheduler V3 upload failed: %s", e)
     elif fox and fox.api_key:
-        logger.info("Skipping Fox Scheduler V3 upload (read-only or simulation)")
+        logger.info("Skipping Fox Scheduler V3 upload (read-only)")
 
     daikin_n = _write_daikin_schedule(plan_date, slots, forecast)
 
@@ -1050,7 +1050,7 @@ def _run_optimizer_lp(fox: FoxESSClient | None, daikin: Any | None = None) -> di
 def _self_use_fallback(fox: FoxESSClient | None, reason: str = "No rates") -> dict[str, Any]:
     """Last-resort: set Fox to Self Use and log.  Called when no rates are available."""
     logger.warning("Self-Use fallback triggered: %s", reason)
-    if fox and fox.api_key and config.OPERATION_MODE == "operational" and not config.OPENCLAW_READ_ONLY:
+    if fox and fox.api_key and not config.OPENCLAW_READ_ONLY:
         try:
             fox.set_work_mode("Self Use")
             fox.set_min_soc(10)

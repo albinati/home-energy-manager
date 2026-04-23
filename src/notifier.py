@@ -135,6 +135,8 @@ def _build_hook_payload(
     route: dict[str, Any],
     agent_message: str,
     payload_name: str,
+    *,
+    extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "message": agent_message,
@@ -150,6 +152,8 @@ def _build_hook_payload(
     aid = (config.OPENCLAW_HOOKS_AGENT_ID or "").strip()
     if aid:
         payload["agentId"] = aid
+    if extra:
+        payload.update(extra)
     return payload
 
 
@@ -177,11 +181,13 @@ def _enqueue_hooks_delivery(
     payload_name: str,
     agent_message: str,
     route: dict[str, Any],
+    *,
+    extra: dict[str, Any] | None = None,
 ) -> None:
     """Fire-and-forget POST; logs on non-2xx — no alternate transport."""
 
     def _run() -> None:
-        pl = _build_hook_payload(route, agent_message, payload_name)
+        pl = _build_hook_payload(route, agent_message, payload_name, extra=extra)
         if _send_hooks_agent_post(pl):
             return
         print(f"[openclaw hooks] delivery failed or non-2xx (alert_type={alert_type})")
@@ -477,16 +483,23 @@ def notify_plan_proposed(
     summary: str,
     actions: list[dict[str, Any]],
 ) -> None:
-    """Send a PLAN_PROPOSED notification with the full schedule and approval instructions."""
+    """Send a PLAN_PROPOSED notification with the full schedule and approval instructions.
+
+    Payload advertises ``autoAcceptOnTimeout: true`` and ``approvalTimeoutSeconds``
+    so interactive channels (Telegram/Discord) can surface accept/reject buttons
+    that default to *accept* on timeout — the plan goes live unless the user
+    rejects it in the grace window. OpenClaw implements the UI and the timeout.
+    """
     tz_name = getattr(config, "BULLETPROOF_TIMEZONE", "Europe/London")
     table = _format_plan_actions(actions, tz_name)
+    approval_timeout_s = int(getattr(config, "PLAN_APPROVAL_TIMEOUT_SECONDS", 300))
     msg = (
         f"New energy plan for {plan_date} — ID: {plan_id}\n"
         f"\n{table}\n"
         f"\n{summary}\n"
         f"\nTo activate: confirm_plan(\"{plan_id}\")\n"
         f"To reject:   reject_plan(\"{plan_id}\")\n"
-        f"(Auto-activates in {config.PLAN_CONSENT_EXPIRY_SECONDS // 60} min if no response)"
+        f"(Auto-activates in {approval_timeout_s // 60} min if no response)"
     )
     full_msg = _compose_delivery_body(AlertType.PLAN_PROPOSED, msg, urgent=True, extra=None)
     _record_notification(AlertType.PLAN_PROPOSED, msg, urgent=True, extra=None, full_msg=full_msg)
@@ -508,9 +521,18 @@ def notify_plan_proposed(
         table,
         api_base=api_base,
     )
+    extra = {
+        "approvalTimeoutSeconds": approval_timeout_s,
+        "autoAcceptOnTimeout": True,
+        "planId": plan_id,
+        "planDate": plan_date,
+        "confirmTool": "confirm_plan",
+        "rejectTool": "reject_plan",
+    }
     _enqueue_hooks_delivery(
         AlertType.PLAN_PROPOSED.value,
         _payload_name_for_key(AlertType.PLAN_PROPOSED.value),
         agent_msg,
         route,
+        extra=extra,
     )
