@@ -2458,6 +2458,53 @@ async def simulate_get(simulation_id: str):
 
 # --- v10.1 cockpit data endpoints -------------------------------------------
 
+@app.get("/api/v1/agile/today")
+async def agile_today():
+    """Today's Octopus Agile slot rates + the current half-hour's price.
+
+    Returns a list of 48 (or fewer if partial) slots with import prices, plus
+    the current import price. Export prices use the configured export tariff
+    when available, else the same import series as a placeholder.
+
+    Reads from SQLite ``agile_rates`` only — no cloud calls.
+    """
+    from datetime import UTC, datetime, timedelta
+    from .. import db as _db
+
+    tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
+    export_tariff = (config.OCTOPUS_EXPORT_TARIFF_CODE or "").strip()
+
+    now = datetime.now(UTC)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = day_start + timedelta(days=1)
+
+    import_rows = _db.get_rates_for_period(tariff, day_start, day_end) if tariff else []
+    export_rows = _db.get_rates_for_period(export_tariff, day_start, day_end) if export_tariff else []
+
+    def _slot_price_at(rows: list, t: datetime) -> float | None:
+        iso_t = t.isoformat().replace("+00:00", "Z")
+        for r in rows:
+            if r["valid_from"] <= iso_t < r["valid_to"]:
+                return float(r["value_inc_vat"])
+        return None
+
+    return {
+        "tariff_import_code": tariff or None,
+        "tariff_export_code": export_tariff or None,
+        "import_slots": [
+            {"valid_from": r["valid_from"], "valid_to": r["valid_to"], "p": float(r["value_inc_vat"])}
+            for r in import_rows
+        ],
+        "export_slots": [
+            {"valid_from": r["valid_from"], "valid_to": r["valid_to"], "p": float(r["value_inc_vat"])}
+            for r in export_rows
+        ],
+        "current_import_p": _slot_price_at(import_rows, now),
+        "current_export_p": _slot_price_at(export_rows, now),
+        "now_utc": now.isoformat().replace("+00:00", "Z"),
+    }
+
+
 @app.get("/api/v1/load/breakdown")
 async def load_breakdown():
     """House total load split into Daikin (heat-pump) and residual (everything else).
@@ -2478,10 +2525,22 @@ async def load_breakdown():
 
     house_total_kw = None
     fox_captured_at = None
-    snap = _db.get_fox_realtime_snapshot()
-    if snap:
-        house_total_kw = snap.get("load_power_kw")
-        fox_captured_at = snap.get("captured_at")
+    # Prefer Fox service cache (updated more frequently than the SQLite snapshot
+    # which is only written by the MPC seeding job).
+    try:
+        from ..foxess.service import get_cached_realtime as _fox_realtime
+        snap = _fox_realtime(allow_refresh=False)
+        if snap is not None:
+            house_total_kw = getattr(snap, "load_power", None) if not isinstance(snap, dict) else snap.get("load_power")
+            fox_captured_at = getattr(snap, "updated_at", None) if not isinstance(snap, dict) else snap.get("updated_at")
+    except Exception:
+        pass
+    if house_total_kw is None:
+        # Fallback to SQLite snapshot (legacy path)
+        snap = _db.get_fox_realtime_snapshot()
+        if snap:
+            house_total_kw = snap.get("load_power_kw")
+            fox_captured_at = snap.get("captured_at")
 
     daikin_estimate_kw = None
     daikin_outdoor_c = None

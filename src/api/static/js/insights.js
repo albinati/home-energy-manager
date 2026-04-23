@@ -10,6 +10,17 @@
 
   let currentPeriod = 'month';
 
+  function periodToParams(period) {
+    const now = new Date();
+    const yyyy = now.getUTCFullYear();
+    const mm = String(now.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(now.getUTCDate()).padStart(2, '0');
+    if (period === 'month') return { period: 'month', month: `${yyyy}-${mm}` };
+    if (period === 'year')  return { period: 'year',  year: String(yyyy) };
+    if (period === 'week')  return { period: 'week',  week_start: `${yyyy}-${mm}-${dd}` };
+    return { period: 'day', date: `${yyyy}-${mm}-${dd}` };
+  }
+
   async function loadPeriod(period) {
     currentPeriod = period;
     document.querySelectorAll('.insights-period-btn').forEach(b => {
@@ -17,9 +28,10 @@
       b.classList.toggle('btn-secondary', b.dataset.period !== period);
     });
     try {
-      const d = await jsonFetch(`/api/v1/energy/${period}`).catch(() => null);
-      if (!d) {
-        $('#insightPeriodLabel').textContent = `(no /api/v1/energy/${period} data yet)`;
+      const params = new URLSearchParams(periodToParams(period));
+      const d = await jsonFetch(`/api/v1/energy/period?${params}`).catch(() => null);
+      if (!d || d.detail) {
+        $('#insightPeriodLabel').textContent = d?.detail || `(no data for ${period})`;
         return;
       }
       $('#insightCost').textContent = fmtP(d.net_cost_pence);

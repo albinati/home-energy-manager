@@ -106,23 +106,66 @@
   async function loadOctopus() {
     const card = $('#cardOctopus');
     try {
-      // Use existing summary endpoint(s); fall back gracefully
-      const status = await jsonFetch('/api/v1/optimization/status').catch(() => null);
-      const importP = status?.current_price_pence ?? status?.now_price_pence ?? null;
-      $('[data-octopus-import]', card).textContent = fmtP(importP);
-      $('[data-octopus-export]', card).textContent = fmtP(status?.current_export_pence ?? null);
-      $('[data-octopus-slots]', card).textContent = status?.agile_slots_loaded ?? '—';
-      setStaleness(card, status?.last_octopus_fetch_at || null);
+      const [status, agile] = await Promise.all([
+        jsonFetch('/api/v1/optimization/status').catch(() => null),
+        jsonFetch('/api/v1/agile/today').catch(() => null),
+      ]);
+      $('[data-octopus-import]', card).textContent = fmtP(agile?.current_import_p);
+      $('[data-octopus-export]', card).textContent = fmtP(agile?.current_export_p);
+      $('[data-octopus-slots]', card).textContent = agile?.import_slots?.length ?? '—';
+      setStaleness(card, status?.cache_fetched_at_utc || status?.last_plan_at_utc || null);
+      renderTariffStripsFromAgile(agile);
     } catch (e) {
       toast(`Octopus: ${e.message}`, 'bad');
+    }
+  }
+
+  function priceColor(p) {
+    if (p == null) return 'var(--bg-card-2)';
+    if (p < 0) return 'var(--neg-price)';
+    if (p < 12) return 'var(--cheap)';
+    if (p < 25) return 'var(--standard)';
+    if (p < 35) return 'var(--peak)';
+    return 'var(--peak-export)';
+  }
+
+  function renderTariffStripsFromAgile(agile) {
+    const im = $('#tariffImportStrip');
+    const ex = $('#tariffExportStrip');
+    if (!im || !ex) return;
+    im.innerHTML = ex.innerHTML = '';
+    if (!agile) return;
+    const now = new Date();
+    const renderRow = (rowEl, slots) => {
+      slots.forEach(s => {
+        const cell = document.createElement('div');
+        cell.className = 'tariff-slot';
+        cell.style.background = priceColor(s.p);
+        cell.title = `${s.valid_from.slice(11,16)}–${s.valid_to.slice(11,16)} ${s.p.toFixed(1)}p`;
+        const start = new Date(s.valid_from);
+        const end = new Date(s.valid_to);
+        if (now >= start && now < end) cell.classList.add('is-current');
+        rowEl.appendChild(cell);
+      });
+    };
+    renderRow(im, agile.import_slots || []);
+    renderRow(ex, agile.export_slots || []);
+    const lbl = $('#tariffCurrentLabel');
+    if (lbl) {
+      const i = agile.current_import_p;
+      const e = agile.current_export_p;
+      lbl.textContent = `Current: import ${i == null ? '—' : i.toFixed(1) + 'p'} · export ${e == null ? '—' : e.toFixed(1) + 'p'}`;
     }
   }
 
   async function loadPlan() {
     const card = $('#cardPlan');
     try {
-      const p = await jsonFetch('/api/v1/optimization/plan');
-      $('[data-plan-backend]', card).textContent = p.optimizer_backend || '—';
+      const [p, status] = await Promise.all([
+        jsonFetch('/api/v1/optimization/plan'),
+        jsonFetch('/api/v1/optimization/status').catch(() => null),
+      ]);
+      $('[data-plan-backend]', card).textContent = status?.optimizer_backend || p?.optimizer_backend || '—';
       // Find current slot strategy from fox groups
       const fox = p.fox || {};
       let groups = [];
@@ -132,9 +175,8 @@
       const next = groups.find(g => slotStartUTC(g) > now);
       $('[data-plan-now]', card).textContent = cur ? `${pad2(cur.startHour)}:${pad2(cur.startMinute)}–${pad2(cur.endHour)}:${pad2(cur.endMinute)} ${cur.workMode}` : '—';
       $('[data-plan-next]', card).textContent = next ? `${pad2(next.startHour)}:${pad2(next.startMinute)} → ${next.workMode}` : '—';
-      setStaleness(card, fox.uploaded_at);
+      setStaleness(card, fox.uploaded_at || status?.last_plan_at_utc);
       renderPlanStrip(groups);
-      renderTariffStrips(p);
     } catch (e) {
       toast(`Plan: ${e.message}`, 'bad');
     }
@@ -196,24 +238,7 @@
     return 'standard';
   }
 
-  function renderTariffStrips(plan) {
-    // Without a dedicated tariff endpoint we render a flat empty band as a placeholder.
-    // Once /api/v1/tariffs/today (import + export per-slot) lands, fill these in.
-    const importStrip = $('#tariffImportStrip');
-    const exportStrip = $('#tariffExportStrip');
-    if (!importStrip || !exportStrip) return;
-    importStrip.innerHTML = exportStrip.innerHTML = '';
-    for (let i = 0; i < 48; i++) {
-      const im = document.createElement('div');
-      im.className = 'tariff-slot';
-      im.style.background = 'var(--bg-card-2)';
-      importStrip.appendChild(im);
-      const ex = document.createElement('div');
-      ex.className = 'tariff-slot';
-      ex.style.background = 'var(--bg-card-2)';
-      exportStrip.appendChild(ex);
-    }
-  }
+  // Tariff strips are rendered by renderTariffStripsFromAgile() (called from loadOctopus).
 
   async function loadBreakdown() {
     try {
