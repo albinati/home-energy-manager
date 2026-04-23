@@ -7,12 +7,24 @@
         <section class="modal-body" id="modalBody">
             <p class="modal-summary" id="modalSummary"></p>
 
-            <div class="modal-section">
+            <div class="modal-section" id="modalBatchSection" hidden>
+                <h3>Changes</h3>
+                <div class="modal-batch-table-wrap">
+                    <table class="modal-batch-table">
+                        <thead>
+                            <tr><th>Key</th><th>Before</th><th>After</th><th>Safety</th></tr>
+                        </thead>
+                        <tbody id="modalBatchBody"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="modal-section" id="modalBeforeSection">
                 <h3>Before</h3>
                 <pre class="kv-block" id="modalBefore"></pre>
             </div>
 
-            <div class="modal-section">
+            <div class="modal-section" id="modalAfterSection">
                 <h3>After</h3>
                 <pre class="kv-block" id="modalAfter"></pre>
             </div>

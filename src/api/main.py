@@ -2494,6 +2494,67 @@ async def settings_simulate(key: str, body: dict):
     return _register_diff(_diffs.diff_setting_change(key, body.get("value")))
 
 
+@app.post("/api/v1/settings/batch/simulate")
+async def settings_batch_simulate(body: dict):
+    """Simulate N settings changes in one diff. Body: ``{changes: {KEY: value, ...}}``."""
+    changes = body.get("changes") or {}
+    if not isinstance(changes, dict) or not changes:
+        raise HTTPException(status_code=400, detail="changes must be a non-empty object")
+    return _register_diff(_diffs.diff_settings_batch(changes))
+
+
+@app.post("/api/v1/settings/batch")
+async def settings_batch_apply(
+    body: dict,
+    x_simulation_id: str | None = Header(None, alias="X-Simulation-Id"),
+):
+    """Apply N settings changes atomically (best-effort rollback on failure).
+
+    Pair with ``/simulate`` above; pass ``X-Simulation-Id``. If any individual
+    ``set_setting`` fails mid-batch, we re-apply the previous values for the
+    keys that already succeeded, then surface a 409 with the per-key error.
+    """
+    _enforce_simulation_id("settings.batch", x_simulation_id)
+    changes = body.get("changes") or {}
+    if not isinstance(changes, dict) or not changes:
+        raise HTTPException(status_code=400, detail="changes must be a non-empty object")
+    from .. import runtime_settings as rts
+
+    applied: list[tuple[str, Any]] = []  # (key, prior_value) for rollback
+    results: list[dict] = []
+    for key, value in changes.items():
+        try:
+            prior = rts.get_setting(key)
+        except Exception:
+            prior = None
+        try:
+            canonical = rts.set_setting(key, value, actor="api_batch")
+            applied.append((key, prior))
+            results.append({"key": key, "ok": True, "value": canonical})
+        except Exception as exc:
+            # Rollback succeeded keys
+            rollback_errors: list[dict] = []
+            for ok_key, ok_prior in applied:
+                try:
+                    if ok_prior is not None:
+                        rts.set_setting(ok_key, ok_prior, actor="api_batch_rollback")
+                    else:
+                        rts.delete_setting(ok_key, actor="api_batch_rollback")
+                except Exception as rb_exc:
+                    rollback_errors.append({"key": ok_key, "error": str(rb_exc)})
+            results.append({"key": key, "ok": False, "error": str(exc)})
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "BatchPartialFailure",
+                    "failed_at_key": key,
+                    "results": results,
+                    "rollback_errors": rollback_errors,
+                },
+            )
+    return {"ok": True, "results": results}
+
+
 @app.post("/api/v1/scheduler/pause/simulate")
 async def scheduler_pause_simulate():
     return _register_diff(_diffs.diff_scheduler_pause())

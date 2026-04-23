@@ -26,9 +26,13 @@ class ActionDiff:
     The frontend renders ``human_summary`` in the modal; ``before``/``after``
     populate a structured before/after panel; ``safety_flags`` raise a banner
     that requires explicit confirmation.
+
+    v10.2: ``sub_actions`` carries per-item diffs for batch actions. When
+    present, the modal renders a table; the umbrella diff's before/after
+    are aggregated rollups.
     """
 
-    action: str  # e.g. "foxess.set_mode", "daikin.set_lwt_offset"
+    action: str  # e.g. "foxess.set_mode", "daikin.set_lwt_offset", "settings.batch"
     before: dict[str, Any]
     after: dict[str, Any]
     affected_slots: list[str] = field(default_factory=list)
@@ -38,6 +42,7 @@ class ActionDiff:
     human_summary: str = ""
     simulation_id: str = ""
     expires_at_epoch: float = 0.0
+    sub_actions: list[dict[str, Any]] = field(default_factory=list)
 
     def to_response_dict(self) -> dict[str, Any]:
         return asdict(self)
