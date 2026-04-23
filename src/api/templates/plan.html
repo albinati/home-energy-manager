@@ -16,10 +16,10 @@
     <p class="data-quality-note" id="dataQualityNote" hidden></p>
 
     <div class="insights-summary" id="planTotals">
-        <div class="insight-tile"><div class="label">Cost today</div><div class="value" id="totalCost">—</div></div>
-        <div class="insight-tile"><div class="label">vs SVT shadow</div><div class="value" id="totalDelta">—</div></div>
-        <div class="insight-tile"><div class="label">Daikin share</div><div class="value" id="totalDaikinShare">—</div></div>
-        <div class="insight-tile"><div class="label">Load total</div><div class="value" id="totalLoad">—</div></div>
+        <div class="insight-tile"><div class="label">Cost today</div><div class="value" data-tot="cost" id="totalCost">—</div></div>
+        <div class="insight-tile"><div class="label">vs SVT shadow</div><div class="value" data-tot="delta" id="totalDelta">—</div></div>
+        <div class="insight-tile"><div class="label">Daikin share</div><div class="value" data-tot="daikin_share" id="totalDaikinShare">—</div></div>
+        <div class="insight-tile"><div class="label">Load total</div><div class="value" data-tot="load" id="totalLoad">—</div></div>
     </div>
 
     <div style="overflow-x:auto;">
@@ -52,5 +52,6 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="/static/js/plan_render.js?v={{ static_v('js/plan_render.js') }}"></script>
 <script src="/static/js/plan.js?v={{ static_v('js/plan.js') }}"></script>
 {% endblock %}
