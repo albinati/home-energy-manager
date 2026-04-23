@@ -1,0 +1,61 @@
+{% extends "_layout.html" %}
+{% block title %}Insights · Home Energy{% endblock %}
+{% block content %}
+
+<section class="card">
+    <h2 class="card-title">
+        Period summary
+        <span class="insights-period">
+            <button class="btn btn-sm btn-secondary insights-period-btn" data-period="day">Day</button>
+            <button class="btn btn-sm btn-secondary insights-period-btn" data-period="week">Week</button>
+            <button class="btn btn-sm btn-primary insights-period-btn" data-period="month">Month</button>
+            <button class="btn btn-sm btn-secondary insights-period-btn" data-period="year">Year</button>
+        </span>
+    </h2>
+    <div class="insights-summary">
+        <div class="insight-tile">
+            <div class="label">Net cost</div>
+            <div class="value" id="insightCost">—</div>
+        </div>
+        <div class="insight-tile">
+            <div class="label">vs SVT</div>
+            <div class="value" id="insightSvt">—</div>
+        </div>
+        <div class="insight-tile">
+            <div class="label">PV self-use</div>
+            <div class="value" id="insightPvSelfUse">—</div>
+        </div>
+        <div class="insight-tile">
+            <div class="label">Cycles (battery)</div>
+            <div class="value" id="insightCycles">—</div>
+        </div>
+    </div>
+    <p class="text-mute" id="insightPeriodLabel" style="font-size:0.8rem;margin:0;">—</p>
+</section>
+
+<section class="card">
+    <h2 class="card-title">Tariff comparison</h2>
+    <p class="text-dim" style="font-size:0.85rem;margin:0 0 0.5rem 0;">
+        Estimated cost across alternative Octopus tariffs based on your last <span id="tariffMonths">3</span> months
+        of consumption. Click a row for breakdown.
+    </p>
+    <button class="btn btn-secondary btn-sm" id="btnRunCompare">Run comparison now</button>
+    <div id="tariffCompareTable" style="margin-top:0.85rem;"></div>
+</section>
+
+<section class="card">
+    <h2 class="card-title">Daikin vs Fox energy (history)</h2>
+    <p class="text-dim" style="font-size:0.85rem;margin:0 0 0.5rem 0;">
+        Daily energy split — how much of the house total Fox sees was the heat pump vs everything else.
+    </p>
+    <div id="loadHistoryChart" class="text-mute" style="font-size:0.85rem;">
+        (Chart loads when daikin_consumption_daily backfill is enabled — deferred Epic #70.
+        Once that ships, this panel will show a 30-day stacked bar of HP vs residual.)
+    </div>
+</section>
+
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/insights.js"></script>
+{% endblock %}

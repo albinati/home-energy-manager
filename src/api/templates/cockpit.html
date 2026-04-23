@@ -1,0 +1,174 @@
+{% extends "_layout.html" %}
+{% block title %}Cockpit · Home Energy{% endblock %}
+{% block content %}
+
+<section class="status-grid">
+    <div class="card status-card" id="cardOctopus">
+        <div class="header-row">
+            <span class="status-light is-warn"></span>
+            <span class="status-name">Octopus</span>
+            <span class="status-staleness" data-staleness>—</span>
+            <button class="btn-icon" title="Refresh now" data-refresh="octopus">⟳</button>
+        </div>
+        <div class="status-rows">
+            <span class="label">Import (now)</span><span class="value" data-octopus-import>—</span>
+            <span class="label">Export (now)</span><span class="value" data-octopus-export>—</span>
+            <span class="label">Slots loaded</span><span class="value" data-octopus-slots>—</span>
+        </div>
+    </div>
+
+    <div class="card status-card" id="cardFox">
+        <div class="header-row">
+            <span class="status-light is-warn"></span>
+            <span class="status-name">Fox ESS</span>
+            <span class="status-staleness" data-staleness>—</span>
+            <button class="btn-icon" title="Refresh now" data-refresh="fox">⟳</button>
+        </div>
+        <div class="status-rows">
+            <span class="label">SoC</span><span class="value" data-fox-soc>—</span>
+            <span class="label">Solar</span><span class="value" data-fox-solar>—</span>
+            <span class="label">Load</span><span class="value" data-fox-load>—</span>
+            <span class="label">Grid</span><span class="value" data-fox-grid>—</span>
+            <span class="label">Mode</span><span class="value" data-fox-mode>—</span>
+        </div>
+    </div>
+
+    <div class="card status-card" id="cardDaikin">
+        <div class="header-row">
+            <span class="status-light is-warn"></span>
+            <span class="status-name">Daikin</span>
+            <span class="status-staleness" data-staleness>—</span>
+            <button class="btn-icon" title="Refresh now (consumes Onecta quota)" data-refresh="daikin">⟳</button>
+        </div>
+        <div class="status-rows">
+            <span class="label">Tank</span><span class="value" data-daikin-tank>—</span>
+            <span class="label">Indoor</span><span class="value" data-daikin-indoor>—</span>
+            <span class="label">Outdoor</span><span class="value" data-daikin-outdoor>—</span>
+            <span class="label">LWT</span><span class="value" data-daikin-lwt>—</span>
+            <span class="label">Mode</span><span class="value"><span class="status-badge" data-daikin-mode>—</span></span>
+        </div>
+    </div>
+
+    <div class="card status-card" id="cardPlan">
+        <div class="header-row">
+            <span class="status-light is-warn"></span>
+            <span class="status-name">Plan</span>
+            <span class="status-staleness" data-staleness>—</span>
+            <button class="btn-icon" title="Reload" data-refresh="plan">⟳</button>
+        </div>
+        <div class="status-rows">
+            <span class="label">Now slot</span><span class="value" data-plan-now>—</span>
+            <span class="label">Next change</span><span class="value" data-plan-next>—</span>
+            <span class="label">Backend</span><span class="value" data-plan-backend>—</span>
+        </div>
+    </div>
+</section>
+
+<section class="card">
+    <h2 class="card-title">House load breakdown</h2>
+    <div class="load-breakdown">
+        <div class="load-row is-total">
+            <span>House total</span>
+            <span class="value" data-load-total>—</span>
+        </div>
+        <div class="load-row is-sub">
+            <span>Daikin (heat pump, est.)</span>
+            <span class="value" data-load-daikin>—</span>
+        </div>
+        <div class="load-row is-sub">
+            <span>Residual (everything else)</span>
+            <span class="value" data-load-residual>—</span>
+        </div>
+    </div>
+    <p class="text-mute" style="font-size:0.75rem;margin:0.5rem 0 0 0;" data-load-source>—</p>
+</section>
+
+<section class="card">
+    <h2 class="card-title">
+        Tariff · next 24h
+        <span class="text-mute" style="font-size:0.7rem;font-weight:400;">Import vs Export shown separately</span>
+    </h2>
+    <div class="tariff-bands">
+        <div class="tariff-row">
+            <span class="tariff-label">Import</span>
+            <div class="tariff-strip" id="tariffImportStrip"></div>
+        </div>
+        <div class="tariff-row">
+            <span class="tariff-label">Export</span>
+            <div class="tariff-strip" id="tariffExportStrip"></div>
+        </div>
+    </div>
+    <p class="tariff-current-label" id="tariffCurrentLabel">Current — / —</p>
+</section>
+
+<section class="card">
+    <h2 class="card-title">
+        Plan timeline
+        <a href="/plan" class="btn btn-sm btn-secondary">Detail →</a>
+    </h2>
+    <div class="plan-strip" id="planStrip" title="Click a slot for detail"></div>
+    <div class="plan-legend">
+        <span><span class="legend-swatch" style="background:var(--neg-price)"></span>negative</span>
+        <span><span class="legend-swatch" style="background:var(--cheap)"></span>cheap</span>
+        <span><span class="legend-swatch" style="background:var(--standard)"></span>standard</span>
+        <span><span class="legend-swatch" style="background:var(--peak)"></span>peak</span>
+        <span><span class="legend-swatch" style="background:var(--peak-export)"></span>peak-export</span>
+    </div>
+</section>
+
+<section class="override-section">
+    <button class="override-toggle" id="overrideToggle" aria-expanded="false">
+        Manual override · everything below requires preview &amp; confirm
+    </button>
+    <div class="override-body" id="overrideBody" hidden>
+        <div class="override-tabs" role="tablist">
+            <button class="override-tab is-active" data-tab-target="ovFox" role="tab">Fox mode</button>
+            <button class="override-tab" data-tab-target="ovPlan" role="tab">Plan</button>
+            <button class="override-tab" data-tab-target="ovDaikin" role="tab">Daikin</button>
+        </div>
+
+        <div class="override-tab-panel" id="ovFox">
+            <p class="text-dim" style="font-size:0.85rem;margin:0;">Switch the Fox ESS work mode now. The next optimizer run will overwrite this.</p>
+            <div class="control" style="display:flex;gap:0.4rem;flex-wrap:wrap;">
+                <button class="btn btn-sm btn-secondary" data-fox-mode="Self Use">Self Use</button>
+                <button class="btn btn-sm btn-secondary" data-fox-mode="Feed-in Priority">Feed-in</button>
+                <button class="btn btn-sm btn-secondary" data-fox-mode="Back Up">Back Up</button>
+                <button class="btn btn-sm btn-secondary" data-fox-mode="Force charge">Force charge</button>
+                <button class="btn btn-sm btn-secondary" data-fox-mode="Force discharge">Force discharge</button>
+            </div>
+        </div>
+
+        <div class="override-tab-panel" id="ovPlan" hidden>
+            <p class="text-dim" style="font-size:0.85rem;margin:0;">Re-solve the LP and propose a fresh plan now.</p>
+            <button class="btn btn-secondary" id="btnProposeNow">Propose new plan now</button>
+        </div>
+
+        <div class="override-tab-panel" id="ovDaikin" hidden>
+            <p class="text-dim" style="font-size:0.85rem;margin:0;" id="daikinOverrideHint">
+                Daikin is in <code data-daikin-mode-text>—</code> mode.
+            </p>
+            <div id="daikinOverridePassiveNote" class="text-warn" style="font-size:0.85rem;" hidden>
+                In passive mode the service never writes to Daikin. To control it, switch
+                <code>DAIKIN_CONTROL_MODE</code> to <code>active</code> on the Settings page.
+            </div>
+            <div id="daikinOverrideActive" hidden>
+                <div class="field">
+                    <label>Tank target (°C)</label>
+                    <input type="number" min="30" max="65" step="0.5" id="daikinTankInput" value="48">
+                    <button class="btn btn-secondary btn-sm" id="btnDaikinTank">Set tank target</button>
+                </div>
+                <div class="field">
+                    <label>LWT offset (-10 to +10)</label>
+                    <input type="number" min="-10" max="10" step="0.5" id="daikinLwtInput" value="0">
+                    <button class="btn btn-secondary btn-sm" id="btnDaikinLwt">Set LWT offset</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/cockpit.js"></script>
+{% endblock %}

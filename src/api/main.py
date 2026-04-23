@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .. import db
@@ -149,6 +150,10 @@ app.include_router(energy_providers_router.router)
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
+STATIC_DIR = Path(__file__).parent / "static"
+if STATIC_DIR.is_dir():
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
 
 def get_daikin_client() -> DaikinClient:
     """Return a DaikinClient for write operations only. For reads, use daikin_service."""
@@ -176,8 +181,29 @@ def _require_active_daikin() -> None:
 
 
 @app.get("/", response_class=HTMLResponse)
-async def web_dashboard(request: Request):
-    """Serve the web dashboard."""
+async def web_cockpit(request: Request):
+    """v10.1 cockpit (mobile-first; simulate-first action paradigm)."""
+    return templates.TemplateResponse(request, "cockpit.html", {"active_page": "cockpit"})
+
+
+@app.get("/insights", response_class=HTMLResponse)
+async def web_insights(request: Request):
+    return templates.TemplateResponse(request, "insights.html", {"active_page": "insights"})
+
+
+@app.get("/plan", response_class=HTMLResponse)
+async def web_plan(request: Request):
+    return templates.TemplateResponse(request, "plan.html", {"active_page": "plan"})
+
+
+@app.get("/settings", response_class=HTMLResponse)
+async def web_settings(request: Request):
+    return templates.TemplateResponse(request, "settings.html", {"active_page": "settings"})
+
+
+@app.get("/legacy", response_class=HTMLResponse)
+async def web_dashboard_legacy(request: Request):
+    """v9 dashboard, kept for one week as a fallback during the v10.1 cockpit rollout."""
     daikin_status = None
     foxess_status = None
     daikin_error = None
@@ -265,7 +291,7 @@ async def web_dashboard(request: Request):
     )
     return templates.TemplateResponse(
         request,
-        "dashboard.html",
+        "dashboard_legacy.html",
         {
             "daikin": daikin_status,
             "foxess": foxess_status,
@@ -2428,6 +2454,63 @@ async def simulate_get(simulation_id: str):
     if diff is None:
         raise HTTPException(status_code=404, detail="simulation_id not found or expired")
     return diff.to_response_dict()
+
+
+# --- v10.1 cockpit data endpoints -------------------------------------------
+
+@app.get("/api/v1/load/breakdown")
+async def load_breakdown():
+    """House total load split into Daikin (heat-pump) and residual (everything else).
+
+    Reads cached state ONLY — never triggers Daikin or Fox refresh:
+    - house_total_kw: from fox_realtime_snapshot.load_power_kw (cache, ~5-min TTL)
+    - daikin_estimate_kw: physics estimate from cached Daikin outdoor_temp + climate curve.
+      In v10 the Daikin runs autonomously; we predict its electrical draw rather
+      than measuring it directly (Onecta has no real-time power channel).
+    - residual_kw: house_total - daikin_estimate, floored at 0.
+
+    When ``daikin_consumption_daily`` lands (deferred Epic #70 — D-1 backfill),
+    this estimate will be calibrated against yesterday's daily total × today's
+    weather curve. Until then we use the instantaneous physics estimate.
+    """
+    from .. import db as _db
+    from ..physics import get_daikin_heating_kw
+
+    house_total_kw = None
+    fox_captured_at = None
+    snap = _db.get_fox_realtime_snapshot()
+    if snap:
+        house_total_kw = snap.get("load_power_kw")
+        fox_captured_at = snap.get("captured_at")
+
+    daikin_estimate_kw = None
+    daikin_outdoor_c = None
+    daikin_source = "unavailable"
+    try:
+        cached = daikin_service.get_cached_devices(allow_refresh=False, actor="dashboard")
+        if cached.devices:
+            dev = cached.devices[0]
+            outdoor = getattr(dev, "outdoor_temp", None)
+            if outdoor is not None:
+                daikin_outdoor_c = float(outdoor)
+                daikin_estimate_kw = float(get_daikin_heating_kw(daikin_outdoor_c))
+                daikin_source = "physics_instantaneous"
+    except Exception as exc:
+        logger.debug("load_breakdown: daikin estimate failed: %s", exc)
+
+    residual_kw = None
+    if house_total_kw is not None and daikin_estimate_kw is not None:
+        residual_kw = max(0.0, float(house_total_kw) - daikin_estimate_kw)
+
+    return {
+        "house_total_kw": house_total_kw,
+        "daikin_estimate_kw": daikin_estimate_kw,
+        "daikin_outdoor_c": daikin_outdoor_c,
+        "daikin_source": daikin_source,  # "physics_instantaneous" | "daily_anchor" (future)
+        "residual_kw": residual_kw,
+        "fox_captured_at": fox_captured_at,
+        "from_cache": True,  # always — this endpoint never refreshes
+    }
 
 
 def run_server(host: str = "0.0.0.0", port: int = 8000):
