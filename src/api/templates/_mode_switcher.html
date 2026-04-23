@@ -10,21 +10,6 @@
                 preview → modal → confirm — all applied as one batch.
             </p>
 
-            <div class="mode-row" data-key="OPERATION_MODE">
-                <div class="mode-row-head">
-                    <h3 class="mode-row-name">Operation mode</h3>
-                    <span class="status-badge" id="msOpModeBadge">—</span>
-                </div>
-                <p class="mode-row-desc">
-                    <code>simulation</code> blocks ALL hardware writes from this service.
-                    <code>operational</code> allows the LP/dispatcher to push to Fox V3 (and Daikin if active mode).
-                </p>
-                <div class="mode-row-toggle" data-pending-key="OPERATION_MODE">
-                    <button class="btn btn-secondary btn-sm" data-stage-key="OPERATION_MODE" data-stage-value="simulation">simulation</button>
-                    <button class="btn btn-secondary btn-sm" data-stage-key="OPERATION_MODE" data-stage-value="operational">operational</button>
-                </div>
-            </div>
-
             <div class="mode-row" data-key="DAIKIN_CONTROL_MODE">
                 <div class="mode-row-head">
                     <h3 class="mode-row-name">Daikin control</h3>

@@ -1,6 +1,6 @@
 /* v10.2 mode switcher — opened from the topbar mode badge.
  *
- * The dialog stages pending toggles for OPERATION_MODE / DAIKIN_CONTROL_MODE /
+ * The dialog stages pending toggles for DAIKIN_CONTROL_MODE /
  * REQUIRE_SIMULATION_ID; clicking "Review changes" sends them all through the
  * batch settings endpoint as ONE simulate → modal → confirm. Single-toggle
  * usage still works — the batch endpoint accepts a 1-key payload too.
@@ -116,13 +116,6 @@
     },
 
     async refresh() {
-      try {
-        const status = await jsonFetch('/api/v1/optimization/status');
-        const op = status?.operation_mode || status?.mode || '—';
-        this.current.OPERATION_MODE = op;
-        $('#msOpModeBadge').textContent = op;
-        $('#msOpModeBadge').className = 'status-badge ' + (op === 'operational' ? 'is-active' : 'is-passive');
-      } catch (_e) {}
       try {
         const r = await jsonFetch('/api/v1/settings/DAIKIN_CONTROL_MODE');
         const v = r?.value || '—';
