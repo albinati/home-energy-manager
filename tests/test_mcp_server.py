@@ -102,31 +102,46 @@ class TestMCPServerDaikinTools(unittest.IsolatedAsyncioTestCase):
     async def test_set_daikin_temperature_weather_regulation(self) -> None:
         mcp = build_mcp()
         dev = _fake_daikin_device(weather_regulation_enabled=True)
-        mock_client = MagicMock()
-        mock_client.get_devices.return_value = [dev]
+        # The MCP tool reads ``daikin.service.get_cached_devices`` to inspect
+        # weather regulation, then calls ``daikin.service.set_temperature``.
+        cached_result = MagicMock(devices=[dev], stale=False, source="cache")
         with patch("src.mcp_server.config") as cfg, patch(
-            "src.mcp_server._daikin_client", return_value=mock_client
-        ), patch("src.mcp_server.safeguards.audit_log"):
+            "src.daikin.service.get_cached_devices", return_value=cached_result
+        ), patch(
+            "src.daikin.service.set_temperature"
+        ) as svc_set_temp, patch(
+            "src.mcp_server.safeguards.audit_log"
+        ), patch(
+            "src.mcp_server.safeguards.check_rate_limit", return_value=(True, 0.0)
+        ):
             cfg.OPENCLAW_READ_ONLY = False
+            cfg.DAIKIN_CONTROL_MODE = "active"
+            cfg.BULLETPROOF_TIMEZONE = "Europe/London"
             _blocks, out = await mcp.call_tool(
                 "set_daikin_temperature", {"temperature": 21.0}
             )
         self.assertFalse(out["ok"])
         self.assertIn("weather regulation", out["error"].lower())
-        mock_client.set_temperature.assert_not_called()
+        svc_set_temp.assert_not_called()
 
     async def test_set_daikin_power_success(self) -> None:
         mcp = build_mcp()
-        dev = _fake_daikin_device()
-        mock_client = MagicMock()
-        mock_client.get_devices.return_value = [dev]
+        # The MCP tool calls ``daikin.service.set_power`` (not ``_daikin_client``).
         with patch("src.mcp_server.config") as cfg, patch(
-            "src.mcp_server._daikin_client", return_value=mock_client
+            "src.daikin.service.set_power"
+        ) as svc_set_power, patch(
+            "src.mcp_server.safeguards.audit_log"
+        ), patch(
+            "src.mcp_server.safeguards.record_action_time"
+        ), patch(
+            "src.mcp_server.safeguards.check_rate_limit", return_value=(True, 0.0)
         ):
             cfg.OPENCLAW_READ_ONLY = False
+            cfg.DAIKIN_CONTROL_MODE = "active"
+            cfg.BULLETPROOF_TIMEZONE = "Europe/London"
             _blocks, out = await mcp.call_tool("set_daikin_power", {"on": True})
-        self.assertTrue(out["ok"])
-        mock_client.set_power.assert_called_once_with(dev, True)
+        self.assertTrue(out["ok"], f"failed: {out}")
+        svc_set_power.assert_called_once_with(True, actor="mcp")
 
 
 if __name__ == "__main__":

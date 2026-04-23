@@ -160,6 +160,57 @@ def apply_cop_lift_multiplier(
     return max(1.0, float(cop_base) * mult)
 
 
+def predict_passive_daikin_load(
+    temp_outdoor_c: list[float],
+    cop_dhw: list[float],
+    cop_space: list[float],
+    *,
+    slot_h: float = 0.5,
+    max_kwh_per_slot: float | None = None,
+) -> tuple[list[float], list[float]]:
+    """Predict the Daikin's autonomous electrical draw per slot in passive mode.
+
+    Used by the LP to clamp e_space[t] and e_dhw[t] when the service does NOT
+    control the Daikin (DAIKIN_CONTROL_MODE=passive). The firmware runs its own
+    weather-compensation curve, so the LP must attribute that draw as fixed load.
+
+    - Space: natural climate-curve compressor draw at zero LWT offset, same as
+      the LP's existing ``space_floor_kwh`` floor (so equality is feasible by
+      construction in the LP's own physics).
+    - DHW: steady-state top-up to maintain ``DHW_TEMP_NORMAL_C`` against tank
+      standing loss, divided by the slot's COP.
+
+    Returns ``(e_space_kwh_per_slot, e_dhw_kwh_per_slot)`` — both clipped into
+    ``[0, max_kwh_per_slot]`` when ``max_kwh_per_slot`` is provided.
+    """
+    from .config import config  # local import avoids circular deps
+
+    n = len(temp_outdoor_c)
+    if not (len(cop_dhw) == len(cop_space) == n):
+        raise ValueError(
+            f"predict_passive_daikin_load: length mismatch "
+            f"(t_out={n}, cop_dhw={len(cop_dhw)}, cop_space={len(cop_space)})"
+        )
+
+    space_kwh = [max(0.0, get_daikin_heating_kw(t) * slot_h) for t in temp_outdoor_c]
+
+    ua_tank_w_per_k = float(config.DHW_TANK_UA_W_PER_K)
+    tank_target_c = float(config.DHW_TEMP_NORMAL_C)
+    indoor_c = float(config.INDOOR_SETPOINT_C)
+    tank_loss_kw = max(0.0, ua_tank_w_per_k * (tank_target_c - indoor_c) / 1000.0)
+    dhw_kwh = [
+        tank_loss_kw * slot_h / max(1.0, float(cop_dhw[i]))
+        for i in range(n)
+    ]
+
+    if max_kwh_per_slot is not None:
+        cap = float(max_kwh_per_slot)
+        space_kwh = [min(cap, v) for v in space_kwh]
+        dhw_kwh = [min(cap, v) for v in dhw_kwh]
+
+    return space_kwh, dhw_kwh
+
+
 def lwt_offset_from_space_kw(space_kw: float, temp_outdoor_c: float) -> float:
     """Back-compute the LWT offset that would produce ``space_kw`` electrical draw.
 

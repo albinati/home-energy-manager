@@ -44,6 +44,10 @@ class DaikinStatusResponse(BaseModel):
     tank_temp: float | None = None
     tank_target: float | None = None
     weather_regulation: bool
+    control_mode: str = Field(
+        default="passive",
+        description="DAIKIN_CONTROL_MODE: 'passive' (service never writes) or 'active' (legacy v9 control).",
+    )
 
 
 class FoxESSStatusResponse(BaseModel):

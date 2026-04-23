@@ -159,6 +159,22 @@ def get_foxess_client() -> FoxESSClient:
     return FoxESSClient(**config.foxess_client_kwargs())
 
 
+def _require_active_daikin() -> None:
+    """Raise 409 PassiveModeLocked when DAIKIN_CONTROL_MODE=passive.
+
+    Called at the top of every Daikin write route so manual API calls cannot
+    bypass the passive-mode guarantee. Flip DAIKIN_CONTROL_MODE=active first.
+    """
+    if config.DAIKIN_CONTROL_MODE == "passive":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "PassiveModeLocked",
+                "message": "DAIKIN_CONTROL_MODE=passive — set to 'active' to allow writes",
+            },
+        )
+
+
 @app.get("/", response_class=HTMLResponse)
 async def web_dashboard(request: Request):
     """Serve the web dashboard."""
@@ -472,6 +488,7 @@ async def daikin_status(refresh: bool = False):
                 tank_temp=s.tank_temp,
                 tank_target=s.tank_target,
                 weather_regulation=s.weather_regulation,
+                control_mode=config.DAIKIN_CONTROL_MODE,
             ))
         logger.info(
             "Daikin status: %d device(s) source=%s stale=%s",
@@ -489,6 +506,7 @@ async def daikin_status(refresh: bool = False):
 @app.post("/api/v1/daikin/power", response_model=PendingActionResponse | ActionResult)
 async def daikin_power(req: PowerRequest):
     """Turn Daikin climate control on or off."""
+    _require_active_daikin()
     action_type = "daikin.power"
     
     allowed, wait_time = safeguards.check_rate_limit(action_type)
@@ -526,6 +544,7 @@ async def daikin_power(req: PowerRequest):
 @app.post("/api/v1/daikin/temperature", response_model=ActionResult)
 async def daikin_temperature(req: TemperatureRequest):
     """Set Daikin target room temperature. Blocked when weather regulation is active."""
+    _require_active_daikin()
     action_type = "daikin.temperature"
     
     allowed, wait_time = safeguards.check_rate_limit(action_type)
@@ -562,6 +581,7 @@ async def daikin_temperature(req: TemperatureRequest):
 @app.post("/api/v1/daikin/lwt-offset", response_model=ActionResult)
 async def daikin_lwt_offset(req: LWTOffsetRequest):
     """Set Daikin leaving water temperature offset."""
+    _require_active_daikin()
     action_type = "daikin.lwt_offset"
     
     allowed, wait_time = safeguards.check_rate_limit(action_type)
@@ -588,6 +608,7 @@ async def daikin_lwt_offset(req: LWTOffsetRequest):
 @app.post("/api/v1/daikin/mode", response_model=ActionResult)
 async def daikin_mode(req: ModeRequest):
     """Set Daikin operation mode."""
+    _require_active_daikin()
     action_type = "daikin.mode"
     
     allowed, wait_time = safeguards.check_rate_limit(action_type)
@@ -614,6 +635,7 @@ async def daikin_mode(req: ModeRequest):
 @app.post("/api/v1/daikin/tank-temperature", response_model=ActionResult)
 async def daikin_tank_temperature(req: TankTemperatureRequest):
     """Set Daikin DHW tank target temperature."""
+    _require_active_daikin()
     action_type = "daikin.tank_temperature"
     
     allowed, wait_time = safeguards.check_rate_limit(action_type)
@@ -640,6 +662,7 @@ async def daikin_tank_temperature(req: TankTemperatureRequest):
 @app.post("/api/v1/daikin/tank-power", response_model=PendingActionResponse | ActionResult)
 async def daikin_tank_power(req: TankPowerRequest):
     """Turn Daikin DHW tank on or off."""
+    _require_active_daikin()
     action_type = "daikin.tank_power"
     
     allowed, wait_time = safeguards.check_rate_limit(action_type)

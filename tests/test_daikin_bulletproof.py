@@ -13,6 +13,11 @@ from src.daikin_bulletproof import apply_scheduled_daikin_params, daikin_device_
 def operational(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("src.daikin_bulletproof.config.OPERATION_MODE", "operational")
     monkeypatch.setattr("src.daikin_bulletproof.config.OPENCLAW_READ_ONLY", False)
+    # v10: passive mode short-circuits apply_scheduled_daikin_params. These tests
+    # exercise active-mode write behaviour, so flip the flag explicitly.
+    monkeypatch.setenv("DAIKIN_CONTROL_MODE", "active")
+    from src.runtime_settings import clear_cache
+    clear_cache()
 
 
 @pytest.fixture

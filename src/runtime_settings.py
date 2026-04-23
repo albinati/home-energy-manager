@@ -114,6 +114,16 @@ SCHEMA: dict[str, SettingSpec] = {
         enum=("savings_first", "strict_savings"),
         description="savings_first allows peak-export discharge; strict_savings never does.",
     ),
+    "DAIKIN_CONTROL_MODE": SettingSpec(
+        key="DAIKIN_CONTROL_MODE",
+        type_name="str",
+        env_default=_str_env("DAIKIN_CONTROL_MODE", "passive"),
+        enum=("passive", "active"),
+        description=(
+            "passive = service never writes to Daikin (firmware autonomous; "
+            "treated as fixed thermal load by LP). active = legacy v9 control."
+        ),
+    ),
     # Schedule cadence — require cron hot-reload when changed.
     "LP_PLAN_PUSH_HOUR": SettingSpec(
         key="LP_PLAN_PUSH_HOUR",
