@@ -242,8 +242,6 @@ def bulletproof_mpc_job() -> None:
         # Store live snapshot in DB so the LP initial state reader picks it up
         if rt_soc_pct is not None:
             try:
-                from datetime import datetime
-
                 from .. import db as _db
 
                 _db.upsert_fox_realtime_snapshot(
