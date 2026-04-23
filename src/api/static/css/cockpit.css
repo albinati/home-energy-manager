@@ -457,6 +457,16 @@ a { color: inherit; text-decoration: none; }
     padding: 0.65rem 0.6rem;
     border-bottom: none;
 }
+.data-quality-note {
+    background: rgba(245,158,11,0.08);
+    border: 1px solid rgba(245,158,11,0.35);
+    color: var(--warn);
+    padding: 0.55rem 0.75rem;
+    border-radius: 6px;
+    font-size: 0.78rem;
+    margin: 0 0 0.6rem 0;
+    line-height: 1.5;
+}
 .plan-table .col-actual.is-positive { color: var(--ok); }
 .plan-table .col-actual.is-negative { color: var(--bad); }
 .plan-table .col-actual.is-pending { color: var(--text-mute); font-style: italic; }
