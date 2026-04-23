@@ -448,11 +448,73 @@ a { color: inherit; text-decoration: none; }
 .plan-table tr.kind-peak_export { background: rgba(239,68,68,0.06); }
 .plan-table tr.kind-negative { background: rgba(37,99,235,0.06); }
 .plan-table tr:hover { background: rgba(255,255,255,0.03); }
+.plan-table tfoot tr.totals-row {
+    background: rgba(59,130,246,0.06);
+    font-variant-numeric: tabular-nums;
+    border-top: 2px solid var(--accent);
+}
+.plan-table tfoot tr.totals-row td {
+    padding: 0.65rem 0.6rem;
+    border-bottom: none;
+}
 .plan-table .col-actual.is-positive { color: var(--ok); }
 .plan-table .col-actual.is-negative { color: var(--bad); }
 .plan-table .col-actual.is-pending { color: var(--text-mute); font-style: italic; }
 
-/* Settings page */
+/* Settings page — v10.1 iteration 2 */
+.danger-zone {
+    border-color: rgba(239,68,68,0.4);
+    background: linear-gradient(180deg, rgba(239,68,68,0.04) 0%, var(--bg-card) 30%);
+}
+.setting-block {
+    padding: 0.85rem 0;
+    border-bottom: 1px solid var(--border);
+}
+.setting-block:last-child { border-bottom: none; }
+.setting-block.is-danger {
+    background: rgba(239,68,68,0.04);
+    border-radius: 6px;
+    padding: 0.85rem;
+    margin: 0.5rem 0;
+}
+.setting-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    margin-bottom: 0.3rem;
+}
+.setting-name { margin: 0; font-size: 0.95rem; font-weight: 600; }
+.setting-desc {
+    color: var(--text-dim);
+    font-size: 0.82rem;
+    margin: 0 0 0.55rem 0;
+    line-height: 1.45;
+}
+.setting-desc code {
+    background: var(--bg-card-2);
+    color: var(--text);
+    padding: 0.05rem 0.3rem;
+    border-radius: 3px;
+    font-size: 0.78rem;
+}
+.setting-actions {
+    display: flex;
+    gap: 0.45rem;
+    align-items: center;
+    flex-wrap: wrap;
+}
+.setting-actions input, .setting-actions select {
+    background: var(--bg-card-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 0.45rem 0.65rem;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    min-height: 38px;
+}
+
+/* Settings page (legacy block patterns kept for old dashboard) */
 .settings-group { display: grid; gap: 0.7rem; }
 .settings-row {
     display: grid;

@@ -148,11 +148,34 @@ app = FastAPI(
 app.include_router(energy_providers_router.router)
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
-templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+# auto_reload=True picks up template edits without a service restart — important
+# because cockpit iteration shouldn't require systemctl restart. Only Python
+# code changes (this file, simulate_diffs, etc.) still need a restart.
+templates = Jinja2Templates(directory=str(TEMPLATES_DIR), auto_reload=True)
 
 STATIC_DIR = Path(__file__).parent / "static"
 if STATIC_DIR.is_dir():
+    # StaticFiles reads from disk on each request — JS/CSS edits land instantly
+    # on `git pull`. To beat browser cache, templates can append the file mtime
+    # via the ``static_v`` Jinja global below.
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+def _static_v(rel_path: str) -> int:
+    """Cache-busting query-string version: file mtime as int.
+
+    Templates use it like ``<script src="/static/js/cockpit.js?v={{ static_v('js/cockpit.js') }}">``
+    so a `git pull` of just static/templates flips the URL → browser fetches
+    the new bytes immediately (no service restart, no hard-refresh needed).
+    """
+    fp = STATIC_DIR / rel_path
+    try:
+        return int(fp.stat().st_mtime)
+    except FileNotFoundError:
+        return 0
+
+
+templates.env.globals["static_v"] = _static_v
 
 
 def get_daikin_client() -> DaikinClient:

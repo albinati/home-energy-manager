@@ -60,16 +60,21 @@
       $('#totalLoad').textContent = `${fmtKwh(t.load_kwh)} kWh`;
 
       const tbody = $('#planTbody');
+      const tfoot = $('#planTfoot');
+      tfoot.innerHTML = '';
       if (!slots.length) {
         tbody.innerHTML = '<tr><td colspan="9" class="text-mute">No execution rows yet today (heartbeat will populate as the day progresses).</td></tr>';
         return;
       }
 
-      let cumDaikin = 0, cumRes = 0;
+      // Per-slot costs only — NOT cumulative. Each row sums Daikin+Residual = Cost.
       tbody.innerHTML = '';
+      let sumDaikin = 0, sumRes = 0, sumCost = 0, sumSvt = 0;
       slots.forEach(s => {
-        cumDaikin += s.cost_daikin_p || 0;
-        cumRes    += s.cost_residual_p || 0;
+        sumDaikin += s.cost_daikin_p || 0;
+        sumRes    += s.cost_residual_p || 0;
+        sumCost   += s.cost_realised_p || 0;
+        sumSvt    += s.cost_svt_p || 0;
         const t = new Date(s.slot_utc);
         const lbl = `${pad(t.getHours())}:${pad(t.getMinutes())}`;
         const strategy = strategyForSlot(groups, s.slot_utc) + (s.slot_kind ? ` · ${s.slot_kind}` : '');
@@ -83,14 +88,29 @@
           <td class="num">${fmtP(s.agile_p)}</td>
           <td class="num">${fmtKwh(s.consumption_kwh)}</td>
           <td class="num">${fmtP(s.cost_realised_p)}</td>
-          <td class="num text-dim">${cumDaikin.toFixed(1)}p</td>
-          <td class="num text-dim">${cumRes.toFixed(1)}p</td>
+          <td class="num text-dim">${fmtP(s.cost_daikin_p)}</td>
+          <td class="num text-dim">${fmtP(s.cost_residual_p)}</td>
           <td class="num text-mute">${fmtP(s.cost_svt_p)}</td>
           <td class="num ${dvsCls}">${dvs >= 0 ? '+' : ''}${dvs.toFixed(1)}p</td>`;
         tr.style.cursor = 'pointer';
         tr.addEventListener('click', () => showDetail(s));
         tbody.appendChild(tr);
       });
+
+      // Totals row in <tfoot>
+      const totalDelta = sumCost - sumSvt;
+      const totalDeltaCls = totalDelta > 0 ? 'text-bad' : (totalDelta < 0 ? 'text-ok' : '');
+      tfoot.innerHTML = `<tr class="totals-row">
+        <td><strong>Total</strong></td>
+        <td class="text-dim">${slots.length} slots</td>
+        <td class="num"></td>
+        <td class="num"><strong>${fmtKwh(t.load_kwh)}</strong></td>
+        <td class="num"><strong>${fmtP(sumCost)}</strong></td>
+        <td class="num"><strong>${fmtP(sumDaikin)}</strong></td>
+        <td class="num"><strong>${fmtP(sumRes)}</strong></td>
+        <td class="num text-mute"><strong>${fmtP(sumSvt)}</strong></td>
+        <td class="num ${totalDeltaCls}"><strong>${totalDelta >= 0 ? '+' : ''}${totalDelta.toFixed(1)}p</strong></td>
+      </tr>`;
     } catch (e) {
       toast(`Plan: ${e.message}`, 'bad');
     }
