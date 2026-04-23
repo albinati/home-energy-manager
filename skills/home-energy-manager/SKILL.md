@@ -6,9 +6,9 @@ metadata: {"openclaw": {"requires": {"env": ["HOME_ENERGY_API_URL"]}, "primaryEn
 
 # Home Energy Manager
 
-The app is the **single planning brain** for the site. It fetches Octopus Agile tariffs, runs a PuLP MILP optimizer, uploads a Fox ESS Scheduler V3, writes Daikin action rows, and executes them on a 2-minute heartbeat.
+The app is the **single planning brain** for the site. It fetches Octopus Agile tariffs, runs a PuLP MILP optimizer, uploads a Fox ESS Scheduler V3, and executes a 2-minute heartbeat. **In v10 (default) the Daikin runs autonomously on its own firmware curve** — the app no longer writes to it; instead it predicts the Daikin's electrical draw and treats it as a fixed thermal load when planning Fox/grid/PV.
 
-**OpenClaw is a read/propose/request interface only.** All hardware writes are enforced server-side through plan consent, daily API quota, rate-limit, and read-only gates. You cannot bypass them.
+**OpenClaw is a read/propose/request interface only.** All hardware writes are enforced server-side through plan consent, daily API quota, rate-limit, read-only, and `DAIKIN_CONTROL_MODE` gates. You cannot bypass them.
 
 **MCP is the only sanctioned channel.** Do not edit `.env`, `src/`, or any file on the app host; do not run shell commands against it; do not make direct HTTP calls to Daikin Onecta or Fox ESS cloud. If a new capability is needed, request a new MCP tool. See `docs/OPENCLAW_BOUNDARY.md` for the full sanctioned surface and out-of-bounds list.
 
@@ -26,7 +26,7 @@ Use MCP tools first — they serve from cache and never burn API quota unnecessa
 
 | Tool | What it returns |
 |------|----------------|
-| `get_daikin_status` | `is_on`, `mode`, `room_temp`, `outdoor_temp`, `lwt`, `lwt_offset`, `tank_temp`, `tank_target`, `weather_regulation` |
+| `get_daikin_status` | `is_on`, `mode`, `room_temp`, `outdoor_temp`, `lwt`, `lwt_offset`, `tank_temp`, `tank_target`, `weather_regulation`, `control_mode` (v10: `passive`/`active`) |
 | `get_soc` | Fox ESS battery `soc` %, solar power, grid power, work mode |
 | `get_schedule` | Today's action schedule (Daikin rows + Fox V3 snapshot) |
 | `get_optimization_status` | Operation mode, preset, optimizer backend, consent state, cooldown |
@@ -89,11 +89,28 @@ auto-approved with "[auto-approved after Xm]" notification
 
 ---
 
+## v10: Daikin control mode
+
+Read `get_daikin_status.control_mode` before any Daikin write attempt:
+
+| Mode | Behaviour |
+|------|-----------|
+| `passive` (default) | App **never** writes to Daikin. Firmware autonomous (its own weather-compensation curve, autonomous legionella cycle on Sundays ~11:00 local). All `set_daikin_*` MCP tools and `/api/v1/daikin/*` POSTs return an error. To make any Daikin change you must first flip the mode. |
+| `active` | Legacy v9 control: app schedules Daikin actions (lwt offsets, tank setpoints, powerful mode, max-heat windows) per the LP plan. |
+
+To flip modes: ask the user to confirm explicitly, then `PUT /api/v1/settings/DAIKIN_CONTROL_MODE {"value":"active"}` (or `"passive"`). **Never flip silently** — it changes who controls the heat pump.
+
+When passive: tell the user that Daikin will NOT respond to any heat-pump-related request; all you can do is observe + report. Suggest a settings flip if they really need control.
+
+---
+
 ## Manual hardware changes
 
 ### Before writing anything
 
-Always check `get_daikin_status` first. If `weather_regulation: true`, you **cannot** set room temperature — use `set_daikin_lwt_offset` instead.
+Always check `get_daikin_status` first.
+- If `control_mode: "passive"` → no `set_daikin_*` tool will work; report this and ask if the user wants to switch to `active`.
+- If `weather_regulation: true` → you **cannot** set room temperature; use `set_daikin_lwt_offset` instead.
 
 ### The consent gate
 
@@ -132,7 +149,7 @@ Never pass `confirmed=True` silently — only after the user has explicitly ackn
 
 | Tool | Use |
 |------|-----|
-| `set_optimization_preset(preset)` | `normal` / `guests` / `travel` / `away` / `boost` |
+| `set_optimization_preset(preset)` | `normal` / `guests` / `travel` / `away` (v10: `boost` retired — silently aliased to `normal`) |
 | `set_operation_mode(mode)` | `simulation` (no hardware writes) / `operational` |
 | `set_optimizer_backend(backend)` | `lp` (PuLP MILP, default) / `heuristic` (legacy) |
 | `set_auto_approve(enabled)` | `true` = plans auto-apply with `[AUTO-APPLIED]` notification |
@@ -145,7 +162,7 @@ Never pass `confirmed=True` silently — only after the user has explicitly ackn
 | `normal` | Standard comfort, optimise cost |
 | `guests` | Higher DHW (48°C+), warmer rooms |
 | `travel` / `away` | Frost protection only, max battery export during peak |
-| `boost` | Full comfort, ignores price — use sparingly |
+| ~~`boost`~~ | Retired in v10. Accepted with a deprecation log; silently aliased to `normal`. |
 
 **When to suggest `auto_approve`:** only after the user has been running in operational mode for several days and is happy with how plans look. Never suggest it on the first day or after a rollback.
 
@@ -178,21 +195,33 @@ Suggest a tariff comparison when: user asks "am I on the best tariff?", after ma
 ## Critical rules
 
 1. **Read before write.** Always call `get_daikin_status` or `get_soc` before making changes.
-2. **Never bypass plan consent.** On `requires_confirmation: true` → show `get_pending_approval()`, ask the user.
-3. **Weather regulation**: `weather_regulation: true` → use `set_daikin_lwt_offset`, not temperature.
-4. **Never switch to operational mode without explicit user consent.** Explain what hardware will change.
-5. **Do not poll status in loops.** The app caches Daikin (30 min) and Fox (5 min). One call is enough.
-6. **Fox V3 is uploaded once per optimizer run.** Do not spam `set_inverter_mode` — next plan run will overwrite it.
-7. **Daikin quota: 180 req/day** (hard cap enforced by the app). If you see `stale: true` in a status response, the quota is exhausted — do not retry until next day.
+2. **Check `control_mode` first.** If `passive`, do not attempt any `set_daikin_*` write — report and ask.
+3. **Never bypass plan consent.** On `requires_confirmation: true` → show `get_pending_approval()`, ask the user.
+4. **Weather regulation**: `weather_regulation: true` → use `set_daikin_lwt_offset`, not temperature.
+5. **Never switch to operational mode without explicit user consent.** Explain what hardware will change.
+6. **Never flip `DAIKIN_CONTROL_MODE` silently.** It changes whether the firmware or the app drives the heat pump.
+7. **Do not poll status in loops.** The app caches Daikin (30 min) and Fox (5 min). One call is enough.
+8. **Fox V3 is uploaded once per optimizer run.** Do not spam `set_inverter_mode` — next plan run will overwrite it.
+9. **Daikin quota: 180 req/day** (hard cap enforced by the app). If you see `stale: true` in a status response, the quota is exhausted — do not retry until next day.
 
 ## Error reference
 
 | Response | Meaning | Action |
 |----------|---------|--------|
 | `requires_confirmation: true` | Plan pending consent gate | Show `get_pending_approval()`, ask user |
+| `passive_mode: true, ok: false` | v10: `DAIKIN_CONTROL_MODE=passive`, all Daikin writes blocked | Report; ask user if they want to switch to `active` |
 | `ok: false, stale: true` | Daikin quota exhausted | Report to user; do not retry |
 | HTTP `403` | Read-only mode active | Only recommend; do not execute |
-| HTTP `409` | Blocked (weather regulation) | Use `set_daikin_lwt_offset` |
+| HTTP `409` `PassiveModeLocked` | v10: Daikin write blocked at API layer | Same as `passive_mode: true` — ask user to flip mode |
+| HTTP `409` (other) | Blocked (e.g. weather regulation) | Use `set_daikin_lwt_offset` |
 | HTTP `429` | Rate limited | Wait 5 s; if "daily limit" mentioned, wait until tomorrow |
 | HTTP `502` | Device cloud error | Log and retry later |
 | HTTP `503` | Service not configured | Check credentials |
+
+---
+
+## v10.1: cockpit + simulate-first (in flight)
+
+**Coming with PR-B**: a redesigned web cockpit at `/` (mobile-first) with `/insights`, `/plan`, `/settings` companion pages. Every API write goes through preview → modal → confirm. **MCP tools are unaffected** — they have their own `confirmed=true` mechanism. The new flag `REQUIRE_SIMULATION_ID` (default `false` in PR-A, flipped to `true` in PR-B) only enforces the modal flow on HTTP API callers.
+
+If `REQUIRE_SIMULATION_ID=true` is enabled and a third-party script hits a real-write endpoint without first calling its `/simulate` pair → HTTP 409 `SimulationIdRequired`. The fix is to use the simulate-then-confirm flow with the `X-Simulation-Id` header — or use the equivalent MCP tool, which is exempt.

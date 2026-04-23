@@ -1,0 +1,42 @@
+{% extends "_layout.html" %}
+{% block title %}Plan · Home Energy{% endblock %}
+{% block content %}
+
+<section class="card">
+    <h2 class="card-title">
+        Plan vs actual · today
+        <span class="card-actions">
+            <button class="btn btn-sm btn-secondary" id="btnReloadPlan">⟳ Reload</button>
+        </span>
+    </h2>
+    <p class="text-dim" style="font-size:0.85rem;margin:0 0 0.5rem 0;">
+        Each row is a 30-min slot. Plan = LP-decided strategy; Actual = what the Fox/Daikin actually did.
+        Rows are auto-detected as <span class="text-ok">on track</span>, <span class="text-warn">drifting</span>, or <span class="text-bad">divergent</span>.
+    </p>
+    <div style="overflow-x:auto;">
+        <table class="plan-table" id="planTable">
+            <thead><tr>
+                <th>Slot</th>
+                <th>Plan</th>
+                <th>Strategy</th>
+                <th>Actual</th>
+                <th>Δ SoC</th>
+            </tr></thead>
+            <tbody id="planTbody"><tr><td colspan="5" class="text-mute">Loading…</td></tr></tbody>
+        </table>
+    </div>
+</section>
+
+<section class="card" id="slotDetailCard" hidden>
+    <h2 class="card-title">
+        Slot detail
+        <button class="btn btn-sm btn-secondary" id="btnCloseSlot">Close</button>
+    </h2>
+    <pre class="kv-block" id="slotDetailBody"></pre>
+</section>
+
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/plan.js"></script>
+{% endblock %}
