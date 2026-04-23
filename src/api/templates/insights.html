@@ -3,20 +3,25 @@
 {% block content %}
 
 <section class="card">
-    <h2 class="card-title">
-        Period
-        <span class="insights-period">
+    <div class="period-bar">
+        <div class="period-nav">
+            <button class="btn btn-sm btn-secondary period-nav-btn" data-nav="prev" aria-label="Previous period">‹</button>
+            <span class="period-nav-label" id="insightPeriodLabel">Loading…</span>
+            <button class="btn btn-sm btn-secondary period-nav-btn" data-nav="next" aria-label="Next period">›</button>
+            <button class="btn btn-sm btn-secondary period-nav-btn" data-nav="today" id="insightTodayBtn" title="Jump to today">Today</button>
+        </div>
+        <div class="period-tabs">
             <button class="btn btn-sm btn-secondary insights-period-btn" data-period="day">Day</button>
             <button class="btn btn-sm btn-secondary insights-period-btn" data-period="week">Week</button>
             <button class="btn btn-sm btn-primary insights-period-btn" data-period="month">Month</button>
             <button class="btn btn-sm btn-secondary insights-period-btn" data-period="year">Year</button>
-        </span>
-    </h2>
-    <p class="text-mute" id="insightPeriodLabel" style="font-size:0.85rem;margin:0;">Loading…</p>
+        </div>
+    </div>
+    <p class="text-mute" id="insightFreshnessLine" style="font-size:0.75rem;margin:0.5rem 0 0 0;"></p>
 </section>
 
-<section class="card">
-    <h2 class="card-title">Economics</h2>
+<details class="card insights-section" open>
+    <summary class="card-title">Economics</summary>
     <div class="insights-summary">
         <div class="insight-tile"><div class="label">Net cost</div><div class="value" id="ecoNet">—</div></div>
         <div class="insight-tile"><div class="label">Imported</div><div class="value" id="ecoImport">—</div></div>
@@ -29,49 +34,87 @@
         <div class="insight-tile"><div class="label">Load kWh</div><div class="value" id="ecoLoadKwh">—</div></div>
         <div class="insight-tile"><div class="label">Export kWh</div><div class="value" id="ecoExpKwh">—</div></div>
     </div>
-</section>
+</details>
 
-<section class="card">
-    <h2 class="card-title">Daikin (heat pump)</h2>
-    <div class="insights-summary">
-        <div class="insight-tile">
-            <div class="label">Heating energy</div>
-            <div class="value" id="daikinKwh">—</div>
-        </div>
-        <div class="insight-tile">
-            <div class="label">Heating cost</div>
-            <div class="value" id="daikinCost">—</div>
-        </div>
-        <div class="insight-tile">
-            <div class="label">% of total cost</div>
-            <div class="value" id="daikinPctCost">—</div>
-        </div>
-        <div class="insight-tile">
-            <div class="label">% of consumption</div>
-            <div class="value" id="daikinPctKwh">—</div>
-        </div>
-    </div>
-    <p class="text-mute" style="font-size:0.78rem;margin:0.5rem 0 0 0;" id="daikinNote">
-        Heating estimate from physics (climate curve × outdoor temp). Refines as the D-1 backfill (deferred Epic) lands.
+<details class="card insights-section" id="dayViewSection" hidden>
+    <summary class="card-title">Tariff &amp; cost · slot-by-slot</summary>
+    <p class="text-dim" style="font-size:0.85rem;margin:0 0 0.5rem 0;">
+        One cell per 30-min Octopus slot, colour-coded cheap → peak. The table below maps each slot's actual consumption against the SVT shadow price.
     </p>
-</section>
+    <div class="tariff-day-strip" id="tariffStrip"></div>
+    <p class="data-quality-note" id="dayDataQualityNote" hidden></p>
+    <div class="insights-summary" id="dayTotals">
+        <div class="insight-tile"><div class="label">Cost</div><div class="value" data-tot="cost">—</div></div>
+        <div class="insight-tile"><div class="label">vs SVT</div><div class="value" data-tot="delta">—</div></div>
+        <div class="insight-tile"><div class="label">Daikin share</div><div class="value" data-tot="daikin_share">—</div></div>
+        <div class="insight-tile"><div class="label">Load</div><div class="value" data-tot="load">—</div></div>
+    </div>
+    <div style="overflow-x:auto;">
+        <table class="plan-table" id="daySlotTable">
+            <thead><tr>
+                <th>Slot</th>
+                <th>Strategy</th>
+                <th class="num">Tariff</th>
+                <th class="num">kWh</th>
+                <th class="num">Cost</th>
+                <th class="num">Daikin</th>
+                <th class="num">Residual</th>
+                <th class="num">SVT</th>
+                <th class="num">Δ</th>
+            </tr></thead>
+            <tbody><tr><td colspan="9" class="text-mute">Loading…</td></tr></tbody>
+        </table>
+    </div>
+</details>
 
-<section class="card" id="gasCompareCard" hidden>
-    <h2 class="card-title">vs gas boiler</h2>
+<details class="card insights-section">
+    <summary class="card-title">Daikin (heat pump)</summary>
     <div class="insights-summary">
-        <div class="insight-tile">
-            <div class="label">Equivalent gas cost</div>
-            <div class="value" id="gasCost">—</div>
+        <div class="insight-tile"><div class="label">Heating energy</div><div class="value" id="daikinKwh">—</div></div>
+        <div class="insight-tile"><div class="label">Heating cost</div><div class="value" id="daikinCost">—</div></div>
+        <div class="insight-tile"><div class="label">% of total cost</div><div class="value" id="daikinPctCost">—</div></div>
+        <div class="insight-tile"><div class="label">% of consumption</div><div class="value" id="daikinPctKwh">—</div></div>
+    </div>
+    <p class="text-mute" style="font-size:0.78rem;margin:0.5rem 0 0 0;">
+        Heating estimate from physics (climate curve × outdoor temp). Refined by the daily Daikin cache (E1) where available.
+    </p>
+</details>
+
+<details class="card insights-section" id="gasCompareCard" hidden>
+    <summary class="card-title">vs gas boiler</summary>
+    <div class="insights-summary">
+        <div class="insight-tile"><div class="label">Equivalent gas cost</div><div class="value" id="gasCost">—</div></div>
+        <div class="insight-tile"><div class="label">Heat pump advantage</div><div class="value text-ok" id="gasAdvantage">—</div></div>
+    </div>
+</details>
+
+<details class="card insights-section" id="patternsSection">
+    <summary class="card-title">Patterns &amp; averages</summary>
+    <p class="text-dim" style="font-size:0.78rem;margin:0 0 0.6rem 0;">
+        Aggregates across the selected period (or last 30 days if shorter than that).
+    </p>
+    <div class="patterns-grid">
+        <div class="pattern-card">
+            <h3 class="pattern-title">Hourly load profile (kWh / 30-min slot)</h3>
+            <div class="pattern-bars" id="patternHourly"></div>
         </div>
-        <div class="insight-tile">
-            <div class="label">Heat pump advantage</div>
-            <div class="value text-ok" id="gasAdvantage">—</div>
+        <div class="pattern-card">
+            <h3 class="pattern-title">Day-of-week shape (mean import kWh / day)</h3>
+            <div class="pattern-bars" id="patternDow"></div>
+        </div>
+        <div class="pattern-card">
+            <h3 class="pattern-title">Tariff slot kinds (% of slots)</h3>
+            <div class="pattern-distribution" id="patternPriceDist"></div>
+        </div>
+        <div class="pattern-card">
+            <h3 class="pattern-title">PV daily yield (kWh)</h3>
+            <div class="pattern-spark" id="patternPv"></div>
         </div>
     </div>
-</section>
+</details>
 
-<section class="card">
-    <h2 class="card-title">Daily breakdown</h2>
+<details class="card insights-section" id="dailyBreakdownSection">
+    <summary class="card-title">Daily breakdown</summary>
     <div style="overflow-x:auto;">
         <table class="plan-table" id="dailyTable">
             <thead><tr>
@@ -86,19 +129,20 @@
             <tbody id="dailyTbody"><tr><td colspan="7" class="text-mute">—</td></tr></tbody>
         </table>
     </div>
-</section>
+</details>
 
-<section class="card">
-    <h2 class="card-title">Tariff comparison</h2>
+<details class="card insights-section">
+    <summary class="card-title">Tariff comparison</summary>
     <p class="text-dim" style="font-size:0.85rem;margin:0 0 0.5rem 0;">
         Estimated cost across alternative Octopus tariffs based on your last 3 months of consumption.
     </p>
     <button class="btn btn-secondary btn-sm" id="btnRunCompare">Run comparison now</button>
     <div id="tariffCompareTable" style="margin-top:0.85rem;"></div>
-</section>
+</details>
 
 {% endblock %}
 
 {% block scripts %}
+<script src="/static/js/plan_render.js?v={{ static_v('js/plan_render.js') }}"></script>
 <script src="/static/js/insights.js?v={{ static_v('js/insights.js') }}"></script>
 {% endblock %}
