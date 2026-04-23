@@ -264,9 +264,9 @@ async def web_dashboard(request: Request):
         bool(foxess_error),
     )
     return templates.TemplateResponse(
+        request,
         "dashboard.html",
         {
-            "request": request,
             "daikin": daikin_status,
             "foxess": foxess_status,
             "daikin_error": daikin_error,
