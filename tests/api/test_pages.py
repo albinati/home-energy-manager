@@ -62,6 +62,37 @@ def test_modal_partial_included(client):
         assert 'id="modalBackdrop"' in body, f"{url}: modal not included"
 
 
+def test_mode_badge_rendered_on_every_v10_page(client):
+    """v10.2: every page renders the topbar mode badge with data-mode attr."""
+    for url in ("/", "/insights", "/plan", "/settings"):
+        body = client.get(url).text
+        assert 'class="mode-badge"' in body, f"{url}: mode badge missing"
+        assert 'data-mode=' in body, f"{url}: data-mode attribute missing"
+        assert 'id="modeBadge"' in body, f"{url}: badge id missing (click handler won't bind)"
+
+
+def test_mode_switcher_partial_included(client):
+    """v10.2: the mode-switcher dialog partial must be on every page."""
+    for url in ("/", "/insights", "/plan", "/settings"):
+        body = client.get(url).text
+        assert 'id="modeSwitcherBackdrop"' in body, f"{url}: mode switcher not included"
+
+
+def test_settings_no_longer_renders_legacy_mode_blocks(client):
+    """v10.2: mode controls moved to badge — settings page must not double up."""
+    body = client.get("/settings").text
+    for legacy_id in ('settingDaikinControlMode', 'settingRequireSim', 'settingOperationMode'):
+        assert legacy_id not in body, f"settings still has legacy {legacy_id} block"
+    assert 'mode badge' in body.lower(), "settings should redirect users to the mode badge"
+
+
+def test_mode_switcher_js_served(client):
+    r = client.get("/static/js/mode_switcher.js")
+    assert r.status_code == 200
+    assert 'wrapAction' in r.text
+    assert 'modeSwitcherBackdrop' in r.text
+
+
 # ---------------------------------------------------------------------------
 # Static assets
 # ---------------------------------------------------------------------------

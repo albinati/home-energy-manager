@@ -180,6 +180,32 @@ def _static_v(rel_path: str) -> int:
 templates.env.globals["static_v"] = _static_v
 
 
+def _layout_context() -> dict:
+    """Inject layout-wide context into every TemplateResponse — mode badge etc.
+
+    Read directly from runtime_settings/config so each page render shows the
+    truth at request time (no caching). Cheap (~3 dict lookups).
+    """
+    from .. import runtime_settings as rts
+    try:
+        op_mode = config.OPERATION_MODE
+    except Exception:
+        op_mode = "unknown"
+    try:
+        daikin_mode = config.DAIKIN_CONTROL_MODE
+    except Exception:
+        daikin_mode = "unknown"
+    try:
+        require_sim = (rts.get_setting("REQUIRE_SIMULATION_ID") or "false").strip().lower() == "true"
+    except Exception:
+        require_sim = False
+    return {
+        "operation_mode": op_mode,
+        "daikin_control_mode": daikin_mode,
+        "require_simulation_id": require_sim,
+    }
+
+
 def get_daikin_client() -> DaikinClient:
     """Return a DaikinClient for write operations only. For reads, use daikin_service."""
     return DaikinClient()
@@ -208,22 +234,30 @@ def _require_active_daikin() -> None:
 @app.get("/", response_class=HTMLResponse)
 async def web_cockpit(request: Request):
     """v10.1 cockpit (mobile-first; simulate-first action paradigm)."""
-    return templates.TemplateResponse(request, "cockpit.html", {"active_page": "cockpit"})
+    return templates.TemplateResponse(
+        request, "cockpit.html", {"active_page": "cockpit", **_layout_context()}
+    )
 
 
 @app.get("/insights", response_class=HTMLResponse)
 async def web_insights(request: Request):
-    return templates.TemplateResponse(request, "insights.html", {"active_page": "insights"})
+    return templates.TemplateResponse(
+        request, "insights.html", {"active_page": "insights", **_layout_context()}
+    )
 
 
 @app.get("/plan", response_class=HTMLResponse)
 async def web_plan(request: Request):
-    return templates.TemplateResponse(request, "plan.html", {"active_page": "plan"})
+    return templates.TemplateResponse(
+        request, "plan.html", {"active_page": "plan", **_layout_context()}
+    )
 
 
 @app.get("/settings", response_class=HTMLResponse)
 async def web_settings(request: Request):
-    return templates.TemplateResponse(request, "settings.html", {"active_page": "settings"})
+    return templates.TemplateResponse(
+        request, "settings.html", {"active_page": "settings", **_layout_context()}
+    )
 
 
 @app.get("/legacy", response_class=HTMLResponse)
