@@ -38,11 +38,23 @@ def _lock_path() -> Path:
 
 
 def _acquire_singleton_lock_early() -> int | None:
-    """Acquire the flock before heavy imports. Returns fd or None to exit.
+    """Acquire the flock before heavy imports. Returns fd or None to exit silently.
 
     Uses sys.stderr (no logging dep) and runs only if ``__name__ == "__main__"``
-    so plain imports (tests, audits) bypass it. On contention, SIGTERMs the
-    holder and retries once for up to 2s.
+    so plain imports (tests, audits) bypass it.
+
+    Behaviour on contention (v10.1 hotfix):
+      - If another live process holds the lock → exit silently with code 0.
+        Do NOT SIGTERM it — openclaw maintains a persistent stdio connection
+        to a single MCP child and would lose its pipe (observed in prod as
+        ``MCP error -32000: Connection closed`` followed by repeated
+        ``Not connected`` failures).
+      - POSIX flock auto-releases on process death, so true crashes recover
+        on the next spawn without needing SIGTERM.
+
+    Manual-recovery escape hatch: set ``HEM_MCP_FORCE_KILL_PRIOR=1`` in the
+    environment to restore the SIGTERM-and-retry behaviour. Use only when you
+    have manually verified the prior holder is unresponsive.
     """
     path = _lock_path()
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
@@ -55,10 +67,12 @@ def _acquire_singleton_lock_early() -> int | None:
             prior_pid = int(raw) if raw else None
         except (OSError, ValueError):
             prior_pid = None
-        if prior_pid and prior_pid != os.getpid():
+
+        force_kill = os.environ.get("HEM_MCP_FORCE_KILL_PRIOR", "").lower() in ("1", "true", "yes")
+        if force_kill and prior_pid and prior_pid != os.getpid():
             print(
-                f"WARNING mcp_server.bootstrap: lock held by pid={prior_pid} — "
-                f"sending SIGTERM and retrying",
+                f"WARNING mcp_server.bootstrap: HEM_MCP_FORCE_KILL_PRIOR set — "
+                f"sending SIGTERM to pid={prior_pid} and retrying",
                 file=sys.stderr,
             )
             try:
@@ -81,8 +95,11 @@ def _acquire_singleton_lock_early() -> int | None:
                 os.close(fd)
                 return None
         else:
+            # Default v10.1 path: yield to the existing instance. Do NOT kill it.
+            # Openclaw's stdio pipe to the prior MCP must remain intact.
             print(
-                "ERROR mcp_server.bootstrap: lock held with unreadable pid — exiting",
+                f"INFO mcp_server.bootstrap: another instance is live (pid={prior_pid}); "
+                f"exiting cleanly so the existing one keeps serving openclaw",
                 file=sys.stderr,
             )
             os.close(fd)
