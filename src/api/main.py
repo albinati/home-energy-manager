@@ -2550,15 +2550,15 @@ async def load_breakdown():
     daikin_estimate_kw = None
     daikin_outdoor_c = None
     daikin_source = "unavailable"
+    # Daikin's outdoor_temp is fetched fresh by client.get_status() each call,
+    # NOT cached on DaikinDevice. So we read from the SQLite daikin_telemetry
+    # table — populated by the heartbeat tick. Quota-safe (no cloud call).
     try:
-        cached = daikin_service.get_cached_devices(allow_refresh=False, actor="dashboard")
-        if cached.devices:
-            dev = cached.devices[0]
-            outdoor = getattr(dev, "outdoor_temp", None)
-            if outdoor is not None:
-                daikin_outdoor_c = float(outdoor)
-                daikin_estimate_kw = float(get_daikin_heating_kw(daikin_outdoor_c))
-                daikin_source = "physics_instantaneous"
+        tel = _db.get_latest_daikin_telemetry()
+        if tel and tel.get("outdoor_temp_c") is not None:
+            daikin_outdoor_c = float(tel["outdoor_temp_c"])
+            daikin_estimate_kw = float(get_daikin_heating_kw(daikin_outdoor_c))
+            daikin_source = "physics_instantaneous"
     except Exception as exc:
         logger.debug("load_breakdown: daikin estimate failed: %s", exc)
 
