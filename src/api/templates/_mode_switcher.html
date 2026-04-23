@@ -1,0 +1,63 @@
+<div class="mode-switcher-backdrop" id="modeSwitcherBackdrop" hidden>
+    <div class="mode-switcher" role="dialog" aria-modal="true" aria-labelledby="modeSwitcherTitle">
+        <header class="modal-header">
+            <h2 id="modeSwitcherTitle">System mode</h2>
+            <button class="modal-close" type="button" id="modeSwitcherCloseBtn" aria-label="Close">&times;</button>
+        </header>
+        <section class="modal-body">
+            <p class="text-dim" style="font-size:0.85rem;margin:0 0 0.85rem 0;">
+                Three independent toggles. Each change runs through the standard
+                preview → modal → confirm flow.
+            </p>
+
+            <div class="mode-row" data-key="OPERATION_MODE">
+                <div class="mode-row-head">
+                    <h3 class="mode-row-name">Operation mode</h3>
+                    <span class="status-badge" id="msOpModeBadge">—</span>
+                </div>
+                <p class="mode-row-desc">
+                    <code>simulation</code> blocks ALL hardware writes from this service.
+                    <code>operational</code> allows the LP/dispatcher to push to Fox V3 (and Daikin if active mode).
+                </p>
+                <div class="mode-row-toggle">
+                    <button class="btn btn-secondary btn-sm" data-set-op-mode="simulation">→ simulation</button>
+                    <button class="btn btn-secondary btn-sm" data-set-op-mode="operational">→ operational</button>
+                </div>
+            </div>
+
+            <div class="mode-row" data-key="DAIKIN_CONTROL_MODE">
+                <div class="mode-row-head">
+                    <h3 class="mode-row-name">Daikin control</h3>
+                    <span class="status-badge" id="msDaikinBadge">—</span>
+                </div>
+                <p class="mode-row-desc">
+                    <code>passive</code> = service NEVER writes to the heat pump (firmware autonomous).
+                    <code>active</code> = legacy v9 control (LP schedules tank temps, LWT offsets, etc.).
+                </p>
+                <div class="mode-row-toggle">
+                    <button class="btn btn-secondary btn-sm" data-set-daikin-mode="passive">→ passive</button>
+                    <button class="btn btn-secondary btn-sm" data-set-daikin-mode="active">→ active</button>
+                </div>
+            </div>
+
+            <div class="mode-row" data-key="REQUIRE_SIMULATION_ID">
+                <div class="mode-row-head">
+                    <h3 class="mode-row-name">Require simulation-id for writes</h3>
+                    <span class="status-badge" id="msRequireSimBadge">—</span>
+                </div>
+                <p class="mode-row-desc">
+                    When ON, every state-changing API call must first go through its <code>/simulate</code> endpoint
+                    and pass the <code>simulation_id</code> back as <code>X-Simulation-Id</code>. Protects against
+                    scripts and accidental writes — the cockpit always uses this flow regardless.
+                </p>
+                <div class="mode-row-toggle">
+                    <button class="btn btn-secondary btn-sm" data-set-require-sim="false">→ off</button>
+                    <button class="btn btn-secondary btn-sm" data-set-require-sim="true">→ on</button>
+                </div>
+            </div>
+        </section>
+        <footer class="modal-footer">
+            <button class="btn btn-secondary" type="button" id="modeSwitcherDismissBtn">Done</button>
+        </footer>
+    </div>
+</div>

@@ -3,39 +3,22 @@
 {% block content %}
 
 <p class="text-dim" style="margin:0 0 0.85rem 0;font-size:0.88rem;">
-    Every change goes through preview → confirm. The danger-zone toggles
-    (Daikin control + Operation mode + Rollback) are intentionally on this page,
-    out of accidental-click range from the main cockpit.
+    Every change goes through preview → confirm. Mode controls
+    (operation mode, Daikin control, simulate-id enforcement) live on the
+    <strong>mode badge</strong> in the topbar — click it from any page.
 </p>
 
-<!-- DANGER ZONE: Daikin + operation mode + rollback -->
-<section class="card danger-zone">
-    <h2 class="card-title">
-        <span style="display:inline-flex;align-items:center;gap:0.4rem;">⚠ Control mode</span>
-        <span class="text-mute" style="font-size:0.72rem;font-weight:400;">Changes here affect what hardware the service writes to</span>
-    </h2>
-    <div class="setting-block" id="settingDaikinControlMode"></div>
-    <div class="setting-block" id="settingOperationMode">
-        <div class="setting-head">
-            <h3 class="setting-name">Operation mode</h3>
-            <span class="status-badge" id="currentOpMode">—</span>
-        </div>
-        <p class="setting-desc"><code>simulation</code> blocks ALL hardware writes from this service. <code>operational</code> allows the LP/dispatcher to push to Fox V3 (and Daikin if active mode).</p>
-        <div class="setting-actions">
-            <button class="btn btn-secondary btn-sm" data-op-mode="simulation">→ simulation</button>
-            <button class="btn btn-secondary btn-sm" data-op-mode="operational">→ operational</button>
-        </div>
-    </div>
+<section class="card">
+    <h2 class="card-title">Snapshot rollback</h2>
     <div class="setting-block" id="settingRollback">
         <div class="setting-head">
-            <h3 class="setting-name">Rollback</h3>
+            <h3 class="setting-name">Rollback latest snapshot</h3>
         </div>
         <p class="setting-desc">Restore the most recent config snapshot and force simulation mode.</p>
         <div class="setting-actions">
             <button class="btn btn-danger btn-sm" id="btnRollback">⟲ Rollback latest snapshot</button>
         </div>
     </div>
-    <div class="setting-block" id="settingRequireSim"></div>
 </section>
 
 <!-- COMFORT -->
