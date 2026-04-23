@@ -6,24 +6,12 @@
   const $ = (s, r = document) => r.querySelector(s);
   const { jsonFetch, wrapAction, toast } = window.HEM || {};
 
-  /* Per-key human metadata. Anything not in here falls back to the raw key. */
+  /* Per-key human metadata. Anything not in here falls back to the raw key.
+   * v10.2: DAIKIN_CONTROL_MODE + REQUIRE_SIMULATION_ID moved to the topbar
+   * mode badge / mode-switcher dialog (see _mode_switcher.html). They no
+   * longer render here.
+   */
   const META = {
-    DAIKIN_CONTROL_MODE: {
-      label: 'Daikin control mode',
-      desc:
-        'Passive = service NEVER writes to the heat pump (Onecta firmware runs autonomously; LP treats Daikin as a fixed thermal load). ' +
-        'Active = legacy v9 control (LP schedules tank temps, LWT offsets, powerful mode, etc).',
-      danger: true,
-      target: 'settingDaikinControlMode',
-    },
-    REQUIRE_SIMULATION_ID: {
-      label: 'Require simulation-then-confirm for all writes',
-      desc:
-        'When ON, every state-changing API call must first go through its /simulate endpoint and pass the simulation_id back as X-Simulation-Id. ' +
-        'Protects against scripts and accidental writes — the cockpit always uses this flow regardless.',
-      danger: false,
-      target: 'settingRequireSim',
-    },
     DHW_TEMP_NORMAL_C: {
       label: 'Normal hot-water target',
       desc: 'Target tank temperature on a typical day (°C). Higher = more buffer for evening showers but more standing loss.',
@@ -143,16 +131,8 @@
       const all = Array.isArray(resp) ? resp : (resp?.settings || []);
       const byKey = Object.fromEntries(all.map(s => [s.key, s]));
 
-      // Danger-zone keys → render into specific named targets
-      ['DAIKIN_CONTROL_MODE', 'REQUIRE_SIMULATION_ID'].forEach(key => {
-        const item = byKey[key];
-        const meta = META[key] || {};
-        const target = $('#' + (meta.target || ''));
-        if (item && target) {
-          target.innerHTML = '';
-          renderInline(item, target);
-        }
-      });
+      // v10.2: DAIKIN_CONTROL_MODE + REQUIRE_SIMULATION_ID + OPERATION_MODE
+      // moved to the topbar mode-switcher dialog. They no longer render here.
 
       // Grouped sections
       const groups = {
@@ -169,27 +149,12 @@
           if (item) renderInline(item, c);
         });
       });
-
-      // Operation mode (separate path — POST /api/v1/optimization/mode)
-      const opStatus = await jsonFetch('/api/v1/optimization/status').catch(() => null);
-      const cur = opStatus?.operation_mode || opStatus?.mode || '—';
-      const opEl = $('#currentOpMode');
-      opEl.textContent = cur;
-      opEl.className = 'status-badge ' + (cur === 'simulation' ? 'is-passive' : 'is-active');
     } catch (e) {
       toast(`Settings: ${e.message}`, 'bad');
     }
   }
 
   document.addEventListener('DOMContentLoaded', () => {
-    document.querySelectorAll('[data-op-mode]').forEach(b => b.addEventListener('click', async () => {
-      const result = await wrapAction({
-        simulateUrl: '/api/v1/optimization/mode/simulate',
-        applyUrl: '/api/v1/optimization/mode',
-        body: { mode: b.dataset.opMode },
-      });
-      if (result.applied) load();
-    }));
     $('#btnRollback')?.addEventListener('click', async () => {
       const result = await wrapAction({
         simulateUrl: '/api/v1/optimization/rollback/simulate',
