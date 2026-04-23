@@ -334,14 +334,16 @@
 
   /* ----- Boot ----- */
 
-  document.addEventListener('DOMContentLoaded', () => {
+  document.addEventListener('DOMContentLoaded', async () => {
     bindOverride();
     bindRefreshButtons();
-    // Initial loads — all from cache, no cloud refresh
-    loadFox(false);
+    // Initial loads — all from cache, no cloud refresh.
+    // loadFox is awaited first because /api/v1/load/breakdown reads from the
+    // Fox service cache; calling loadFox warms it.
+    await loadFox(false);
+    loadBreakdown();
     loadDaikin(false);
     loadOctopus();
     loadPlan();
-    loadBreakdown();
   });
 })();
