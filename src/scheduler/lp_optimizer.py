@@ -419,7 +419,11 @@ def solve_lp(
 
     # HP minimum on-time (anti short-cycling)
     # When hp_on switches from 0→1, it must stay on for at least hp_min_on consecutive slots.
-    if hp_min_on > 1 and n >= hp_min_on:
+    # Skip in passive mode: hp_on[i] is forced by equality to the prediction, which can
+    # legitimately alternate 0/1 across slots when outdoor temp crosses the curve cutoff
+    # — enforcing min-on would make the LP infeasible. The Daikin firmware handles its
+    # own short-cycling; the LP doesn't need to constrain something it isn't deciding.
+    if hp_min_on > 1 and n >= hp_min_on and not passive_daikin:
         for i in range(n - hp_min_on + 1):
             # y_i - y_{i-1} = startup event; constrain sum of next min_on to >= min_on * startup
             # Simplified: if hp_on[i]=1 and hp_on[i-1]=0 (startup), force sum >= min_on
@@ -448,9 +452,13 @@ def solve_lp(
         if evening_hhmm
         else [False] * n
     )
-    for i in range(n):
-        if wm[i] or we[i]:
-            prob += tank[i + 1] >= t_min_dhw
+    # Skip shower hard constraint in passive mode — the LP can't decide e_dhw
+    # to make this happen (firmware controls the tank). Enforcing would make
+    # the solve infeasible whenever tank starts low.
+    if not passive_daikin:
+        for i in range(n):
+            if wm[i] or we[i]:
+                prob += tank[i + 1] >= t_min_dhw
 
     # Per-slot DHW ceiling: 48 °C unless price < 0 (then 65 °C).
     # Soft constraint — heavy penalty on breach — so an initial tank already above 48 °C
@@ -493,8 +501,12 @@ def solve_lp(
     else:
         prob += soc[n] >= initial.soc_kwh
 
-    prob += tank[n] >= t_min_dhw - 2.0
-    prob += t_in[n] >= float(config.INDOOR_SETPOINT_C) - 0.5
+    # Skip terminal tank/indoor floors in passive mode — same reason as shower
+    # hard constraint above. Firmware controls comfort; the LP only optimises
+    # battery/grid/PV around the predicted Daikin draw.
+    if not passive_daikin:
+        prob += tank[n] >= t_min_dhw - 2.0
+        prob += t_in[n] >= float(config.INDOOR_SETPOINT_C) - 0.5
 
     # -----------------------------------------------------------------------
     # Total Variation penalties
