@@ -104,7 +104,13 @@
 <section class="card">
     <h2 class="card-title">
         Plan timeline
-        <a href="/plan" class="btn btn-sm btn-secondary">Detail →</a>
+        <span class="card-actions">
+            <a href="/plan" class="btn btn-sm btn-secondary">Detail →</a>
+            <button class="btn btn-sm btn-primary" id="btnSimulateRePlanCockpit"
+                    title="Run a fresh LP simulation, review the diff in a modal, then choose to apply">
+                Re-plan (simulate)
+            </button>
+        </span>
     </h2>
     <div class="plan-strip" id="planStrip" title="Click a slot for detail"></div>
     <div class="plan-legend">
@@ -114,6 +120,9 @@
         <span><span class="legend-swatch" style="background:var(--peak)"></span>peak</span>
         <span><span class="legend-swatch" style="background:var(--peak-export)"></span>peak-export</span>
     </div>
+    <p class="text-mute" style="font-size:0.75rem;margin:0.5rem 0 0 0;">
+        Every action on this page runs as a simulation first; you confirm in a modal before anything writes.
+    </p>
 </section>
 
 <section class="override-section">
