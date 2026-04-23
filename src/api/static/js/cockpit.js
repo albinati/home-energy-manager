@@ -291,6 +291,15 @@
       loadPlan();
     });
 
+    // Promoted Re-plan button at the top of the Plan timeline card
+    $('#btnSimulateRePlanCockpit')?.addEventListener('click', async () => {
+      const result = await wrapAction({
+        simulateUrl: '/api/v1/optimization/propose/simulate',
+        applyUrl: '/api/v1/optimization/propose',
+      });
+      if (result.applied) setTimeout(loadPlan, 4000);
+    });
+
     $('#btnDaikinTank')?.addEventListener('click', async () => {
       const t = parseFloat($('#daikinTankInput').value);
       if (isNaN(t)) { toast('Enter a temperature', 'warn'); return; }

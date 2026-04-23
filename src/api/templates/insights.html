@@ -4,7 +4,7 @@
 
 <section class="card">
     <h2 class="card-title">
-        Period summary
+        Period
         <span class="insights-period">
             <button class="btn btn-sm btn-secondary insights-period-btn" data-period="day">Day</button>
             <button class="btn btn-sm btn-secondary insights-period-btn" data-period="week">Week</button>
@@ -12,46 +12,89 @@
             <button class="btn btn-sm btn-secondary insights-period-btn" data-period="year">Year</button>
         </span>
     </h2>
+    <p class="text-mute" id="insightPeriodLabel" style="font-size:0.85rem;margin:0;">Loading…</p>
+</section>
+
+<section class="card">
+    <h2 class="card-title">Economics</h2>
+    <div class="insights-summary">
+        <div class="insight-tile"><div class="label">Net cost</div><div class="value" id="ecoNet">—</div></div>
+        <div class="insight-tile"><div class="label">Imported</div><div class="value" id="ecoImport">—</div></div>
+        <div class="insight-tile"><div class="label">Export earnings</div><div class="value text-ok" id="ecoExport">—</div></div>
+        <div class="insight-tile"><div class="label">Standing charge</div><div class="value text-mute" id="ecoStanding">—</div></div>
+    </div>
+    <div class="insights-summary" style="margin-top:0.5rem;">
+        <div class="insight-tile"><div class="label">Import kWh</div><div class="value" id="ecoImpKwh">—</div></div>
+        <div class="insight-tile"><div class="label">Solar kWh</div><div class="value" id="ecoSolarKwh">—</div></div>
+        <div class="insight-tile"><div class="label">Load kWh</div><div class="value" id="ecoLoadKwh">—</div></div>
+        <div class="insight-tile"><div class="label">Export kWh</div><div class="value" id="ecoExpKwh">—</div></div>
+    </div>
+</section>
+
+<section class="card">
+    <h2 class="card-title">Daikin (heat pump)</h2>
     <div class="insights-summary">
         <div class="insight-tile">
-            <div class="label">Net cost</div>
-            <div class="value" id="insightCost">—</div>
+            <div class="label">Heating energy</div>
+            <div class="value" id="daikinKwh">—</div>
         </div>
         <div class="insight-tile">
-            <div class="label">vs SVT</div>
-            <div class="value" id="insightSvt">—</div>
+            <div class="label">Heating cost</div>
+            <div class="value" id="daikinCost">—</div>
         </div>
         <div class="insight-tile">
-            <div class="label">PV self-use</div>
-            <div class="value" id="insightPvSelfUse">—</div>
+            <div class="label">% of total cost</div>
+            <div class="value" id="daikinPctCost">—</div>
         </div>
         <div class="insight-tile">
-            <div class="label">Cycles (battery)</div>
-            <div class="value" id="insightCycles">—</div>
+            <div class="label">% of consumption</div>
+            <div class="value" id="daikinPctKwh">—</div>
         </div>
     </div>
-    <p class="text-mute" id="insightPeriodLabel" style="font-size:0.8rem;margin:0;">—</p>
+    <p class="text-mute" style="font-size:0.78rem;margin:0.5rem 0 0 0;" id="daikinNote">
+        Heating estimate from physics (climate curve × outdoor temp). Refines as the D-1 backfill (deferred Epic) lands.
+    </p>
+</section>
+
+<section class="card" id="gasCompareCard" hidden>
+    <h2 class="card-title">vs gas boiler</h2>
+    <div class="insights-summary">
+        <div class="insight-tile">
+            <div class="label">Equivalent gas cost</div>
+            <div class="value" id="gasCost">—</div>
+        </div>
+        <div class="insight-tile">
+            <div class="label">Heat pump advantage</div>
+            <div class="value text-ok" id="gasAdvantage">—</div>
+        </div>
+    </div>
+</section>
+
+<section class="card">
+    <h2 class="card-title">Daily breakdown</h2>
+    <div style="overflow-x:auto;">
+        <table class="plan-table" id="dailyTable">
+            <thead><tr>
+                <th>Date</th>
+                <th class="num">Import kWh</th>
+                <th class="num">Export kWh</th>
+                <th class="num">Solar kWh</th>
+                <th class="num">Load kWh</th>
+                <th class="num">Charge</th>
+                <th class="num">Discharge</th>
+            </tr></thead>
+            <tbody id="dailyTbody"><tr><td colspan="7" class="text-mute">—</td></tr></tbody>
+        </table>
+    </div>
 </section>
 
 <section class="card">
     <h2 class="card-title">Tariff comparison</h2>
     <p class="text-dim" style="font-size:0.85rem;margin:0 0 0.5rem 0;">
-        Estimated cost across alternative Octopus tariffs based on your last <span id="tariffMonths">3</span> months
-        of consumption. Click a row for breakdown.
+        Estimated cost across alternative Octopus tariffs based on your last 3 months of consumption.
     </p>
     <button class="btn btn-secondary btn-sm" id="btnRunCompare">Run comparison now</button>
     <div id="tariffCompareTable" style="margin-top:0.85rem;"></div>
-</section>
-
-<section class="card">
-    <h2 class="card-title">Daikin vs Fox energy (history)</h2>
-    <p class="text-dim" style="font-size:0.85rem;margin:0 0 0.5rem 0;">
-        Daily energy split — how much of the house total Fox sees was the heat pump vs everything else.
-    </p>
-    <div id="loadHistoryChart" class="text-mute" style="font-size:0.85rem;">
-        (Chart loads when daikin_consumption_daily backfill is enabled — deferred Epic #70.
-        Once that ships, this panel will show a 30-day stacked bar of HP vs residual.)
-    </div>
 </section>
 
 {% endblock %}

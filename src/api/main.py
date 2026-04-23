@@ -2505,6 +2505,105 @@ async def agile_today():
     }
 
 
+@app.get("/api/v1/execution/today")
+async def execution_today():
+    """Per-slot realised cost data for today's plan-vs-actual view.
+
+    Joins ``execution_log`` rows from today (cost_realised_pence, agile_price_pence,
+    slot_kind, daikin_lwt, etc.) with the LP plan's strategy classification.
+    No cloud calls — pure SQLite read.
+
+    Returns:
+      - slots: ordered list of {slot_iso, slot_local, slot_kind, agile_p,
+        consumption_kwh, cost_realised_p, daikin_kwh_est, residual_kwh_est,
+        cost_svt_p, delta_vs_svt_p}
+      - totals: cumulative totals + Daikin attribution
+    """
+    from datetime import UTC, datetime
+    from .. import db as _db
+
+    now = datetime.now(UTC)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = day_start.replace(hour=23, minute=59, second=59, microsecond=999999)
+
+    # Pull all execution_log rows for today
+    with _db._lock:
+        conn = _db.get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT timestamp, consumption_kwh, agile_price_pence,
+                          cost_realised_pence, cost_svt_shadow_pence, delta_vs_svt_pence,
+                          soc_percent, fox_mode, daikin_lwt, daikin_outdoor_temp,
+                          slot_kind
+                   FROM execution_log
+                   WHERE timestamp >= ? AND timestamp <= ?
+                   ORDER BY timestamp""",
+                (day_start.isoformat().replace("+00:00", "Z"),
+                 day_end.isoformat().replace("+00:00", "Z")),
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+    from ..physics import get_daikin_heating_kw
+    SLOT_HOURS = 0.5
+    slots = []
+    total_cost = 0.0
+    total_svt = 0.0
+    total_load = 0.0
+    total_daikin_kwh = 0.0
+    for r in rows:
+        outdoor = r.get("daikin_outdoor_temp")
+        # Estimate Daikin energy this slot from physics (no cloud call)
+        daikin_kw = float(get_daikin_heating_kw(outdoor)) if outdoor is not None else 0.0
+        daikin_kwh = daikin_kw * SLOT_HOURS
+        load_kwh = float(r.get("consumption_kwh") or 0.0)
+        residual_kwh = max(0.0, load_kwh - daikin_kwh)
+        agile_p = r.get("agile_price_pence")
+        cost = float(r.get("cost_realised_pence") or 0.0)
+        svt = float(r.get("cost_svt_shadow_pence") or 0.0)
+        # Attribute realised cost to Daikin proportionally
+        cost_daikin = cost * (daikin_kwh / load_kwh) if load_kwh > 0 else 0.0
+        cost_residual = cost - cost_daikin
+
+        ts = r["timestamp"]
+        slots.append({
+            "slot_utc": ts,
+            "slot_kind": r.get("slot_kind"),
+            "agile_p": agile_p,
+            "consumption_kwh": load_kwh,
+            "daikin_kwh_est": round(daikin_kwh, 3),
+            "residual_kwh": round(residual_kwh, 3),
+            "cost_realised_p": round(cost, 2),
+            "cost_daikin_p": round(cost_daikin, 2),
+            "cost_residual_p": round(cost_residual, 2),
+            "cost_svt_p": round(svt, 2),
+            "delta_vs_svt_p": float(r.get("delta_vs_svt_pence") or 0.0),
+            "soc_percent": r.get("soc_percent"),
+            "fox_mode": r.get("fox_mode"),
+            "daikin_outdoor_c": outdoor,
+            "daikin_lwt_c": r.get("daikin_lwt"),
+        })
+        total_cost += cost
+        total_svt += svt
+        total_load += load_kwh
+        total_daikin_kwh += daikin_kwh
+
+    return {
+        "date": day_start.date().isoformat(),
+        "slots": slots,
+        "totals": {
+            "load_kwh": round(total_load, 2),
+            "daikin_kwh_est": round(total_daikin_kwh, 2),
+            "residual_kwh_est": round(max(0.0, total_load - total_daikin_kwh), 2),
+            "cost_realised_p": round(total_cost, 2),
+            "cost_svt_p": round(total_svt, 2),
+            "delta_vs_svt_p": round(total_cost - total_svt, 2),
+            "daikin_share_pct": round(100 * total_daikin_kwh / total_load, 1) if total_load else 0.0,
+        },
+    }
+
+
 @app.get("/api/v1/load/breakdown")
 async def load_breakdown():
     """House total load split into Daikin (heat-pump) and residual (everything else).
