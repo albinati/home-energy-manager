@@ -549,10 +549,20 @@ def bulletproof_heartbeat_tick() -> None:
         # v10.1: real per-tick consumption from Fox load_power × heartbeat interval.
         # Pre-v10.1 used db.mean_consumption_kwh_from_execution_logs() — a self-
         # referential constant (mean of itself) that produced fake per-slot values
-        # in the cockpit. With Fox snapshot we get actual per-tick energy; the
-        # global mean stays as fallback when Fox is unavailable.
-        snap = db.get_fox_realtime_snapshot() or {}
-        load_kw = snap.get("load_power_kw")
+        # in the cockpit. We try foxess.service in-memory cache first (warm,
+        # populated by the MPC tick + dashboard refreshes), then the SQLite
+        # snapshot (rarely written), then the legacy mean.
+        load_kw = None
+        try:
+            from ..foxess import service as _fox_svc
+            snap = _fox_svc.get_cached_realtime(max_age_seconds=86_400)
+            if snap is not None:
+                load_kw = getattr(snap, "load_power", None)
+        except Exception:
+            pass
+        if load_kw is None:
+            sqlite_snap = db.get_fox_realtime_snapshot() or {}
+            load_kw = sqlite_snap.get("load_power_kw")
         if load_kw is not None:
             kwh_est = float(load_kw) * (config.HEARTBEAT_INTERVAL_SECONDS / 3600.0)
         else:
