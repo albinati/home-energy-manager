@@ -1,0 +1,66 @@
+{% extends "_layout.html" %}
+{% block title %}Workbench · Home Energy{% endblock %}
+{% block content %}
+
+<section class="card workbench-header">
+    <div class="workbench-header-row">
+        <h2 class="card-title" style="margin:0;">Workbench</h2>
+        <div class="workbench-actions">
+            <select id="profileSelect" class="btn btn-sm btn-secondary" aria-label="Load profile">
+                <option value="">Load profile…</option>
+            </select>
+            <button id="btnSaveProfile" class="btn btn-sm btn-secondary">Save as…</button>
+            <button id="btnDeleteProfile" class="btn btn-sm btn-secondary">Delete</button>
+            <button id="btnSimulate" class="btn btn-sm btn-primary">Run simulation</button>
+            <button id="btnPromote" class="btn btn-sm btn-primary" disabled>Promote to prod</button>
+        </div>
+    </div>
+    <p class="text-dim" style="font-size:0.78rem;margin:0.45rem 0 0 0;">
+        Edit LP knobs, run a simulation, then promote the promotable subset to prod through the standard simulate-confirm gate. Non-promotable knobs (penalties, solver flags) only affect the simulation.
+    </p>
+</section>
+
+<div class="workbench-grid">
+    <section class="card workbench-edit">
+        <div class="workbench-tabs" id="workbenchTabs">
+            <button class="workbench-tab is-active" data-tab="edit">Edit</button>
+            <button class="workbench-tab" data-tab="compare">Compare</button>
+        </div>
+
+        <div class="workbench-pane is-active" id="paneEdit">
+            <p class="text-dim" style="font-size:0.78rem;margin:0 0 0.55rem 0;">
+                Tweak any field then <strong>Run simulation</strong>. Promotable fields are marked
+                <span class="badge-promotable">●</span>.
+            </p>
+            <div id="editorBody" class="editor-body">Loading schema…</div>
+        </div>
+
+        <div class="workbench-pane" id="paneCompare">
+            <p class="text-dim" style="font-size:0.78rem;margin:0 0 0.55rem 0;">
+                Side-by-side: current production plan vs the simulated plan with your overrides.
+            </p>
+            <div class="compare-summary" id="compareSummary"></div>
+            <div style="overflow-x:auto;">
+                <table class="plan-table" id="compareTable">
+                    <thead><tr>
+                        <th>Slot</th>
+                        <th class="num">Tariff</th>
+                        <th class="num">Curr import</th>
+                        <th class="num">Sim import</th>
+                        <th class="num">Curr SOC</th>
+                        <th class="num">Sim SOC</th>
+                        <th class="num">Δ import</th>
+                    </tr></thead>
+                    <tbody><tr><td colspan="7" class="text-mute">Run a simulation to compare.</td></tr></tbody>
+                </table>
+            </div>
+        </div>
+    </section>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/plan_render.js?v={{ static_v('js/plan_render.js') }}"></script>
+<script src="/static/js/workbench.js?v={{ static_v('js/workbench.js') }}"></script>
+{% endblock %}

@@ -112,6 +112,7 @@ from .models import (
     TemperatureRequest,
 )
 from .routers import energy_providers as energy_providers_router
+from .routers import workbench as workbench_router
 
 
 @asynccontextmanager
@@ -146,6 +147,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.include_router(energy_providers_router.router)
+app.include_router(workbench_router.router)
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
@@ -246,10 +248,17 @@ async def web_insights(request: Request):
     )
 
 
-@app.get("/plan", response_class=HTMLResponse)
-async def web_plan(request: Request):
+@app.get("/plan")
+async def web_plan_redirect():
+    """v10.2: Plan tab replaced by Workbench. Redirect old bookmarks."""
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/workbench", status_code=301)
+
+
+@app.get("/workbench", response_class=HTMLResponse)
+async def web_workbench(request: Request):
     return templates.TemplateResponse(
-        request, "plan.html", {"active_page": "plan", **_layout_context()}
+        request, "workbench.html", {"active_page": "workbench", **_layout_context()}
     )
 
 
