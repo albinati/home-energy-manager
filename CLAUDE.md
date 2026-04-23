@@ -96,7 +96,7 @@ EOF
 
 ### Legionella thermal-shock cycle
 
-Daikin Onecta firmware runs the weekly thermal-shock cycle autonomously (Sunday ~11:00 local). **The LP and dispatch layer do not schedule or override this cycle** — the `DHW_LEGIONELLA_*` env vars are deprecated (kept only so stale `.env` files don't error on load) and will be removed in a follow-up. If a `shutdown` or `max_heat` action happens to overlap the cycle window, Onecta firmware arbitrates.
+Daikin Onecta firmware runs the weekly thermal-shock cycle autonomously (Sunday ~11:00 local). **The LP and dispatch layer do not schedule or override this cycle** — the `DHW_LEGIONELLA_*` env vars are gone from the code. Python ignores unrecognised keys in `.env` so lingering entries are harmless; delete them on your next `.env` touch. If a `shutdown` or `max_heat` action happens to overlap the cycle window, Onecta firmware arbitrates.
 
 ---
 

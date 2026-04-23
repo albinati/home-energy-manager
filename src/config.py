@@ -249,10 +249,6 @@ class Config:
     SCHEDULER_PEAK_END: str = os.getenv("SCHEDULER_PEAK_END", "19:00")
     SCHEDULER_PREHEAT_LWT_BOOST: float = float(os.getenv("SCHEDULER_PREHEAT_LWT_BOOST", "2"))
 
-    # V7 Optimization engine (Agile watchdog + 48-block solver + dispatch hints)
-    OPTIMIZATION_ENGINE_ENABLED: bool = os.getenv(
-        "OPTIMIZATION_ENGINE_ENABLED", "false"
-    ).lower() in ("true", "1", "yes")
     # OPTIMIZATION_PRESET + ENERGY_STRATEGY_MODE are runtime-tunable via
     # /api/v1/settings (#52) — see the @property definitions below.
     # savings_first (default): import/savings focus; peak grid export (force discharge) only when

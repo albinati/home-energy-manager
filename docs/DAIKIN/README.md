@@ -127,7 +127,7 @@ Our LP respects this via `LP_HP_MIN_ON_SLOTS` (default 2 = 1 hour minimum run); 
 
 ## Legionella thermal-shock cycle
 
-Onecta firmware runs the weekly thermal-shock autonomously (Sunday ~11:00 local). **The LP / dispatch layer does not schedule or override this cycle.** The legacy `DHW_LEGIONELLA_*` env vars are deprecated and slated for removal (see CLAUDE.md). If a `shutdown` or `max_heat` action overlaps the cycle, Onecta arbitrates.
+Onecta firmware runs the weekly thermal-shock autonomously (Sunday ~11:00 local). **The LP / dispatch layer does not schedule or override this cycle.** The legacy `DHW_LEGIONELLA_*` env vars are gone from the code; Python ignores unknown `.env` keys so lingering entries are harmless and can be deleted on your next `.env` touch. If a `shutdown` or `max_heat` action overlaps the cycle, Onecta arbitrates.
 
 ---
 
