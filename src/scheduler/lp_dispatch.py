@@ -355,7 +355,7 @@ def build_fox_groups_from_lp(plan: LpPlan) -> list[SchedulerGroup]:
 
 def upload_fox_if_operational(fox: FoxESSClient | None, groups: list[SchedulerGroup]) -> bool:
     fox_ok = False
-    if fox and fox.api_key and config.OPERATION_MODE == "operational" and not config.OPENCLAW_READ_ONLY:
+    if fox and fox.api_key and not config.OPENCLAW_READ_ONLY:
         try:
             fox.set_scheduler_v3(groups, is_default=False)
             fox.warn_if_scheduler_v3_mismatch(groups)
@@ -365,5 +365,5 @@ def upload_fox_if_operational(fox: FoxESSClient | None, groups: list[SchedulerGr
         except FoxESSError as e:
             logger.warning("Fox Scheduler V3 upload failed: %s", e)
     elif fox and fox.api_key:
-        logger.info("Skipping Fox Scheduler V3 upload (read-only or simulation)")
+        logger.info("Skipping Fox Scheduler V3 upload (read-only)")
     return fox_ok

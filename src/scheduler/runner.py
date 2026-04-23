@@ -190,7 +190,7 @@ def bulletproof_mpc_job() -> None:
     Reads Fox realtime (SoC%, solar_power_kw, load_power_kw) and passes them into the LP
     initial state so the re-optimisation reflects the actual current energy state rather than
     yesterday's estimate.  Only runs when USE_BULLETPROOF_ENGINE=true and OPTIMIZER_BACKEND=lp.
-    Skips if scheduler is paused or if OPERATION_MODE is not operational/simulation.
+    Skips if the scheduler is paused.
     """
     if not config.USE_BULLETPROOF_ENGINE:
         return

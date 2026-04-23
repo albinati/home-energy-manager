@@ -60,7 +60,6 @@ def save_snapshot(trigger: str, *, include_device_states: bool = True) -> dict[s
         "snapshot_id": snapshot_id,
         "snapshot_at": now.isoformat(),
         "trigger": trigger,
-        "operation_mode": config.OPERATION_MODE,
         "preset": config.OPTIMIZATION_PRESET,
         "optimizer_backend": config.OPTIMIZER_BACKEND,
         "cheap_threshold_pence": config.OPTIMIZATION_CHEAP_THRESHOLD_PENCE,
@@ -103,7 +102,6 @@ def list_snapshots() -> list[dict[str, Any]]:
                     "snapshot_id": data.get("snapshot_id", p.stem),
                     "snapshot_at": data.get("snapshot_at"),
                     "trigger": data.get("trigger"),
-                    "operation_mode": data.get("operation_mode"),
                     "preset": data.get("preset"),
                 }
             )
@@ -130,7 +128,6 @@ def restore_snapshot(snapshot_id: str) -> dict[str, Any]:
 
     snap = json.loads(path.read_text())
 
-    config.OPERATION_MODE = "simulation"
     config.OPTIMIZATION_PRESET = snap.get("preset", "normal")
     ob = snap.get("optimizer_backend")
     if ob is not None:
@@ -151,9 +148,7 @@ def restore_snapshot(snapshot_id: str) -> dict[str, Any]:
     config.TARGET_ROOM_TEMP_MIN_C = float(snap.get("room_temp_min", 20))
     config.TARGET_ROOM_TEMP_MAX_C = float(snap.get("room_temp_max", 23))
 
-    logger.info(
-        "Config restored from snapshot %s; OPERATION_MODE forced to simulation", snapshot_id
-    )
+    logger.info("Config restored from snapshot %s", snapshot_id)
     return snap
 
 

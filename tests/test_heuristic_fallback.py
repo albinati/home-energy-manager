@@ -28,7 +28,7 @@ def _heuristic_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(app_config, "BULLETPROOF_TIMEZONE", "Europe/London")
     monkeypatch.setattr(app_config, "OCTOPUS_TARIFF_CODE", TARIFF)
     monkeypatch.setattr(app_config, "OPTIMIZER_BACKEND", "heuristic")
-    monkeypatch.setattr(app_config, "OPERATION_MODE", "simulation")
+    monkeypatch.setattr(app_config, "OPENCLAW_READ_ONLY", True)
 
 
 def _iso(dt: datetime) -> str:

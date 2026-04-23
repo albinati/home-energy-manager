@@ -29,7 +29,7 @@ Use MCP tools first — they serve from cache and never burn API quota unnecessa
 | `get_daikin_status` | `is_on`, `mode`, `room_temp`, `outdoor_temp`, `lwt`, `lwt_offset`, `tank_temp`, `tank_target`, `weather_regulation`, `control_mode` (v10: `passive`/`active`) |
 | `get_soc` | Fox ESS battery `soc` %, solar power, grid power, work mode |
 | `get_schedule` | Today's action schedule (Daikin rows + Fox V3 snapshot) |
-| `get_optimization_status` | Operation mode, preset, optimizer backend, consent state, cooldown |
+| `get_optimization_status` | Preset, optimizer backend, consent state, cooldown |
 | `get_optimization_plan` | Full 48-slot plan with Fox + Daikin actions |
 | `get_energy_metrics` | Daily/weekly/monthly PnL, VWAP, slippage, SoC |
 | `get_daily_brief` | Morning report on demand |
@@ -45,47 +45,69 @@ Use MCP tools first — they serve from cache and never burn API quota unnecessa
 The system runs autonomously — you mostly observe and occasionally intervene.
 
 ```
-Daily (automatic, ~16:05):
-  Octopus fetch → optimizer runs → Fox V3 uploaded → Daikin rows written
-  → notification sent to user with plan summary
-  → user calls confirm_plan(plan_id) to approve
-  → heartbeat executes Daikin actions; Fox follows V3 schedule
+Daily (automatic, ~16:05 local; nightly push at LP_PLAN_PUSH_HOUR UTC):
+  Octopus fetch → simulate (LP solve) → auto-approve (if PLAN_AUTO_APPROVE=true, default)
+                                    → Fox V3 uploaded → Daikin rows written
+                                    → notification: "[AUTO-APPLIED] …"
+
+  If PLAN_AUTO_APPROVE=false:
+  Octopus fetch → simulate → PLAN_PROPOSED hook (Telegram/Discord accept/reject buttons,
+                                                  auto-accepts on timeout → applied)
 
 To check what's happening:
-  get_optimization_status   → mode, preset, last plan time
+  get_optimization_status   → preset, backend, last plan time, consent state
   get_schedule              → today's Daikin + Fox actions and their status
   get_soc                   → live battery and solar
 
-To re-plan manually:
-  propose_optimization_plan → optimizer runs in background, returns plan_id immediately
-                              (notification arrives shortly via OpenClaw Gateway hook → your channel)
-  confirm_plan(plan_id)     → activate it
+To force a fresh simulate → apply cycle:
+  propose_optimization_plan → optimizer runs in background, returns plan_id immediately.
+                              Honors PLAN_AUTO_APPROVE.
+  confirm_plan(plan_id)     → approve a pending plan (no-op if already auto-approved)
+  reject_plan(plan_id)      → reject and clear the pending plan
+
+For pure what-if (no DB write, no hardware, no quota):
+  simulate_plan             → solves the LP with optional overrides, returns the plan
 ```
 
 ---
 
-## Plan consent
+## Plan lifecycle: simulate → approve → live
 
-Every plan goes through a consent lifecycle:
+`OPERATION_MODE` is retired. Every plan is simulated (the LP solve is itself the
+pre-check), then approved, then applied. `PLAN_AUTO_APPROVE` decides whether
+approval is implicit or explicit.
 
 ```
 propose_optimization_plan()
-    ↓ returns {plan_id, status: "applied"} immediately
-optimizer runs in background thread
     ↓
-plan stored → notification sent via OpenClaw Gateway hook with full schedule
+LP simulate (read-only solve)
     ↓
-confirm_plan(plan_id)     → Fox V3 uploaded + Daikin rows activated
-reject_plan(plan_id)      → plan discarded, system holds last state
-    ↓ (if no response before expires_at)
-auto-approved with "[auto-approved after Xm]" notification
+PLAN_AUTO_APPROVE=true (default)        PLAN_AUTO_APPROVE=false
+    ↓                                   ↓
+auto-approve + write                    PLAN_PROPOSED hook → user
+    ↓                                   (Telegram/Discord accept/reject)
+Fox V3 uploaded                         ↓
+Daikin action_schedule written          confirm_plan()  → write + apply
+    ↓                                   reject_plan()   → discard
+"[AUTO-APPLIED] …" notification         timeout         → auto-accept + apply
 ```
 
-**Key facts learned from going live:**
-- `propose` returns `status: "applied"` immediately — the plan **is already written to the DB** and Fox V3 is uploaded on the same call. `confirm_plan` is for user acknowledgement, not for triggering hardware.
-- Daikin actions in `action_schedule` start executing as soon as they are written, regardless of consent status. The consent gate only blocks **new** MCP hardware writes from OpenClaw.
-- If you manually change Daikin (e.g. tank to 60°C), the next scheduled `restore` action will revert it automatically — no manual cleanup needed.
-- Cooldown: `PLAN_REGEN_COOLDOWN_SECONDS` (default 300 s) — re-proposing within 5 minutes is silently rejected if the plan content hasn't changed.
+The `PLAN_PROPOSED` hook payload carries `autoAcceptOnTimeout: true` and
+`approvalTimeoutSeconds` (default 300 s). Clients rendering interactive buttons
+**must** treat the button timeout as "approve" — silence should never veto.
+
+**Things to remember:**
+- When `PLAN_AUTO_APPROVE=true`, `propose_optimization_plan` already wrote the plan
+  by the time the hook arrives. `confirm_plan` in that case is a no-op acknowledgement.
+- When `PLAN_AUTO_APPROVE=false`, hardware is **not** touched until the user (or the
+  timeout) approves. `reject_plan` cleanly discards the pending plan.
+- Daikin `action_schedule` rows execute as soon as they are written. If you manually
+  override Daikin mid-slot, the next scheduled `restore` action reverts it.
+- Cooldown: `PLAN_REGEN_COOLDOWN_SECONDS` (default 300 s) — re-proposing within
+  5 minutes with identical plan content is silently suppressed.
+- Kill switch: `OPENCLAW_READ_ONLY=true` blocks every Fox/Daikin write at the gate,
+  regardless of approval status. Use it for dev boxes and panic stops; never for
+  "I want manual control" — use `reject_plan` + manual MCP writes for that.
 
 ---
 
@@ -150,10 +172,9 @@ Never pass `confirmed=True` silently — only after the user has explicitly ackn
 | Tool | Use |
 |------|-----|
 | `set_optimization_preset(preset)` | `normal` / `guests` / `travel` / `away` (v10: `boost` retired — silently aliased to `normal`) |
-| `set_operation_mode(mode)` | `simulation` (no hardware writes) / `operational` |
 | `set_optimizer_backend(backend)` | `lp` (PuLP MILP, default) / `heuristic` (legacy) |
-| `set_auto_approve(enabled)` | `true` = plans auto-apply with `[AUTO-APPLIED]` notification |
-| `rollback_config(snapshot_id?)` | Restore last snapshot + force simulation mode |
+| `set_auto_approve(enabled)` | `true` (default) = plans simulate then auto-apply; `false` = wait for explicit consent |
+| `rollback_config(snapshot_id?)` | Restore a saved config snapshot (preset, thresholds, targets) |
 
 **Presets:**
 
@@ -164,7 +185,7 @@ Never pass `confirmed=True` silently — only after the user has explicitly ackn
 | `travel` / `away` | Frost protection only, max battery export during peak |
 | ~~`boost`~~ | Retired in v10. Accepted with a deprecation log; silently aliased to `normal`. |
 
-**When to suggest `auto_approve`:** only after the user has been running in operational mode for several days and is happy with how plans look. Never suggest it on the first day or after a rollback.
+**When to suggest turning `auto_approve` OFF:** if the user wants to review every plan before it goes live (e.g. after a system change, during tariff experiments, or on the first few days of a new hardware setup). The default is ON.
 
 ---
 
@@ -198,11 +219,11 @@ Suggest a tariff comparison when: user asks "am I on the best tariff?", after ma
 2. **Check `control_mode` first.** If `passive`, do not attempt any `set_daikin_*` write — report and ask.
 3. **Never bypass plan consent.** On `requires_confirmation: true` → show `get_pending_approval()`, ask the user.
 4. **Weather regulation**: `weather_regulation: true` → use `set_daikin_lwt_offset`, not temperature.
-5. **Never switch to operational mode without explicit user consent.** Explain what hardware will change.
-6. **Never flip `DAIKIN_CONTROL_MODE` silently.** It changes whether the firmware or the app drives the heat pump.
-7. **Do not poll status in loops.** The app caches Daikin (30 min) and Fox (5 min). One call is enough.
-8. **Fox V3 is uploaded once per optimizer run.** Do not spam `set_inverter_mode` — next plan run will overwrite it.
-9. **Daikin quota: 180 req/day** (hard cap enforced by the app). If you see `stale: true` in a status response, the quota is exhausted — do not retry until next day.
+5. **Never flip `DAIKIN_CONTROL_MODE` silently.** It changes whether the firmware or the app drives the heat pump.
+6. **Do not poll status in loops.** The app caches Daikin (30 min) and Fox (5 min). One call is enough.
+7. **Fox V3 is uploaded once per optimizer run.** Do not spam `set_inverter_mode` — next plan run will overwrite it.
+8. **Daikin quota: 180 req/day** (hard cap enforced by the app). If you see `stale: true` in a status response, the quota is exhausted — do not retry until next day.
+9. **`OPENCLAW_READ_ONLY=true` blocks every hardware write.** If writes are silently skipped, check this first. Do not try to "bypass" it — it's the intended kill switch.
 
 ## Error reference
 
@@ -211,8 +232,9 @@ Suggest a tariff comparison when: user asks "am I on the best tariff?", after ma
 | `requires_confirmation: true` | Plan pending consent gate | Show `get_pending_approval()`, ask user |
 | `passive_mode: true, ok: false` | v10: `DAIKIN_CONTROL_MODE=passive`, all Daikin writes blocked | Report; ask user if they want to switch to `active` |
 | `ok: false, stale: true` | Daikin quota exhausted | Report to user; do not retry |
-| HTTP `403` | Read-only mode active | Only recommend; do not execute |
+| HTTP `403` | `OPENCLAW_READ_ONLY=true` — writes disabled at the gate | Only recommend; report the gate, do not attempt to bypass |
 | HTTP `409` `PassiveModeLocked` | v10: Daikin write blocked at API layer | Same as `passive_mode: true` — ask user to flip mode |
+| HTTP `409` `SimulationIdRequired` | Only fires when `REQUIRE_SIMULATION_ID=true` is set (HTTP callers). Call the paired `/simulate` endpoint first, then send the returned `X-Simulation-Id`. MCP tools are exempt — use the MCP equivalent if you hit this. |
 | HTTP `409` (other) | Blocked (e.g. weather regulation) | Use `set_daikin_lwt_offset` |
 | HTTP `429` | Rate limited | Wait 5 s; if "daily limit" mentioned, wait until tomorrow |
 | HTTP `502` | Device cloud error | Log and retry later |
@@ -220,8 +242,16 @@ Suggest a tariff comparison when: user asks "am I on the best tariff?", after ma
 
 ---
 
-## v10.1: cockpit + simulate-first (in flight)
+## Web cockpit (simulate-before-apply on the HTTP side)
 
-**Coming with PR-B**: a redesigned web cockpit at `/` (mobile-first) with `/insights`, `/plan`, `/settings` companion pages. Every API write goes through preview → modal → confirm. **MCP tools are unaffected** — they have their own `confirmed=true` mechanism. The new flag `REQUIRE_SIMULATION_ID` (default `false` in PR-A, flipped to `true` in PR-B) only enforces the modal flow on HTTP API callers.
+The web cockpit at `/` funnels every settings/plan write through a preview → modal
+→ confirm flow. Each endpoint has a paired `/simulate` route that returns an
+`ActionDiff`; the modal shows it; confirmation applies. The `REQUIRE_SIMULATION_ID`
+flag (default `false`) can be flipped to enforce this on all HTTP callers, third-
+party scripts included.
 
-If `REQUIRE_SIMULATION_ID=true` is enabled and a third-party script hits a real-write endpoint without first calling its `/simulate` pair → HTTP 409 `SimulationIdRequired`. The fix is to use the simulate-then-confirm flow with the `X-Simulation-Id` header — or use the equivalent MCP tool, which is exempt.
+**MCP tools are exempt** from `REQUIRE_SIMULATION_ID`. Hardware-write MCP tools
+still require their own `confirmed=True` flag, and the plan pipeline still runs
+the simulate-approve-apply lifecycle described above. The simulate step there is
+the LP solve itself; the approve step is `PLAN_AUTO_APPROVE` or an explicit
+`confirm_plan` / timeout-accepted hook response.

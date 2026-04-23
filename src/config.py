@@ -287,11 +287,6 @@ class Config:
         "OPTIMIZATION_DISABLE_WEATHER_REGULATION", "false"
     ).lower() in ("true", "1", "yes")
 
-    # Operation mode: simulation (default) or operational.
-    # In simulation, the engine computes and logs what it would do but never writes to hardware.
-    # Switch to operational only after reviewing simulation output and explicitly activating.
-    OPERATION_MODE: str = (os.getenv("OPERATION_MODE") or "simulation").strip().lower()
-
     # PuLP MILP optimizer (V8)
     OPTIMIZER_BACKEND: str = (os.getenv("OPTIMIZER_BACKEND") or "lp").strip().lower()
     BATTERY_RT_EFFICIENCY: float = float(os.getenv("BATTERY_RT_EFFICIENCY", "0.92"))
@@ -539,10 +534,13 @@ class Config:
     # Set to 0 to disable. Default 300 s (5 min).
     PLAN_REGEN_COOLDOWN_SECONDS: int = int(os.getenv("PLAN_REGEN_COOLDOWN_SECONDS", "300"))
 
-    # When True, every freshly proposed plan is immediately auto-approved.
-    # Only meaningful when OPERATION_MODE=operational; in simulation mode the effect is
-    # the same but harmless. Disable this to return to explicit per-plan consent.
-    PLAN_AUTO_APPROVE: bool = os.getenv("PLAN_AUTO_APPROVE", "false").lower() in ("true", "1", "yes")
+    # When True (default), every freshly proposed plan is auto-approved and applied.
+    # Disable to require explicit per-plan consent via confirm_plan / reject_plan (MCP)
+    # or the dashboard — in that case the PLAN_PROPOSED hook drives approval, and
+    # PLAN_APPROVAL_TIMEOUT_SECONDS is the "no-answer → auto-accept" grace window
+    # advertised to OpenClaw (Telegram/Discord interactive buttons).
+    PLAN_AUTO_APPROVE: bool = os.getenv("PLAN_AUTO_APPROVE", "true").lower() in ("true", "1", "yes")
+    PLAN_APPROVAL_TIMEOUT_SECONDS: int = int(os.getenv("PLAN_APPROVAL_TIMEOUT_SECONDS", "300"))
 
     # ── API Quota & Cache ────────────────────────────────────────────────────
     # Daikin Onecta: soft daily budget (real limit ≈200; we stop at 180 to preserve 10% headroom)

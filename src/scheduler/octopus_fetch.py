@@ -93,7 +93,7 @@ def _maybe_survival_mode(
         "Survival mode: no Octopus Agile rates for 24h in this failure streak. "
         "Fox ESS Scheduler V3 disabled; inverter set to Self Use until the next successful fetch."
     )
-    if not fox or config.OPENCLAW_READ_ONLY or config.OPERATION_MODE != "operational":
+    if not fox or config.OPENCLAW_READ_ONLY:
         return
     try:
         if fox.api_key:
