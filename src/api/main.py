@@ -148,10 +148,12 @@ app = FastAPI(
 app.include_router(energy_providers_router.router)
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
-# auto_reload=True picks up template edits without a service restart — important
-# because cockpit iteration shouldn't require systemctl restart. Only Python
-# code changes (this file, simulate_diffs, etc.) still need a restart.
-templates = Jinja2Templates(directory=str(TEMPLATES_DIR), auto_reload=True)
+templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+# auto_reload picks up template edits without a service restart — important
+# because cockpit iteration shouldn't require systemctl restart. Set on the
+# Jinja env directly (Starlette's Jinja2Templates ctor doesn't expose it).
+templates.env.auto_reload = True
+templates.env.cache = {}
 
 STATIC_DIR = Path(__file__).parent / "static"
 if STATIC_DIR.is_dir():
