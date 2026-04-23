@@ -135,9 +135,16 @@ def should_run_retry_fetch() -> bool:
 def _sync_fox_energy_history(fox: FoxESSClient, months_back: int = 3) -> int:
     """Pull Fox ESS monthly daily energy breakdown and upsert into fox_energy_daily.
 
+    v10.2: delegates to ``foxess.service.ensure_fox_month_cached`` which is
+    SQLite-first — already-cached months are no-ops, only missing days fire
+    a cloud call. The ``fox`` argument is kept for backward compat but unused
+    (the service uses its own client singleton).
+
     Fetches the current month plus ``months_back`` prior months.
-    Returns total rows upserted.
+    Returns total rows present after sync (close to the historical 'rows
+    upserted' figure for new installs).
     """
+    from ..foxess import service as _fox_svc
 
     now = datetime.now(UTC)
     total = 0
@@ -153,23 +160,9 @@ def _sync_fox_energy_history(fox: FoxESSClient, months_back: int = 3) -> int:
             continue
         seen_months.add((yr, mo))
         try:
-            _, days = fox.get_energy_month_daily_breakdown(yr, mo)
-            rows = [
-                {
-                    "date": d["date"],
-                    "solar_kwh": d.get("solar_kwh") or 0.0,
-                    "load_kwh": d.get("load_kwh") or 0.0,
-                    "import_kwh": d.get("import_kwh") or 0.0,
-                    "export_kwh": d.get("export_kwh") or 0.0,
-                    "charge_kwh": d.get("charge_kwh") or 0.0,
-                    "discharge_kwh": d.get("discharge_kwh") or 0.0,
-                }
-                for d in days
-                if d.get("date")
-            ]
-            n = db.upsert_fox_energy_daily(rows)
-            total += n
-            logger.debug("Fox energy sync %d-%02d: %d rows", yr, mo, n)
+            rows = _fox_svc.ensure_fox_month_cached(yr, mo)
+            total += len(rows)
+            logger.debug("Fox energy sync %d-%02d via cache: %d rows", yr, mo, len(rows))
         except Exception as e:
             logger.debug("Fox energy sync %d-%02d failed: %s", yr, mo, e)
 
