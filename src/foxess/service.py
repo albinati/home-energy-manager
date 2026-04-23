@@ -241,3 +241,97 @@ def get_cached_energy_month(
         raise
     _energy_month_cache[key] = (data, now)
     return data
+
+
+# ---------------------------------------------------------------------------
+# v10.2 — read-through Fox daily cache (any month, never re-query for cached)
+# ---------------------------------------------------------------------------
+
+def ensure_fox_month_cached(year: int, month: int, *, force: bool = False) -> list[dict]:
+    """SQLite-first daily breakdown for the given calendar month.
+
+    For each calendar day, return the row in ``fox_energy_daily``. If any
+    days are missing (or ``force=True``), fetch the month's daily breakdown
+    from Fox once and upsert; subsequent calls hit SQLite only.
+
+    The future-day rule: today is fetched only when ``force=True`` (otherwise
+    the in-progress day's totals would be stale within minutes). Past days
+    are fetched once and trusted thereafter.
+
+    Returns the list of cached rows (sorted by date ASC). Empty list if the
+    month is entirely in the future or no data is available.
+    """
+    from datetime import date as _date
+
+    from .. import db as _db
+
+    today_iso = _date.today().isoformat()
+    last_day = _date(year, month, 28)
+    while True:
+        try:
+            next_day = _date(year, month, last_day.day + 1)
+            last_day = next_day
+        except ValueError:
+            break
+
+    cached_dates = _db.get_fox_energy_dates_for_month(year, month)
+    needed_dates: list[str] = []
+    for d in range(1, last_day.day + 1):
+        iso = f"{year:04d}-{month:02d}-{d:02d}"
+        if iso > today_iso:
+            continue  # future days don't exist yet
+        if iso == today_iso and not force:
+            continue  # today is volatile — only refresh on explicit force
+        if iso not in cached_dates:
+            needed_dates.append(iso)
+
+    if force:
+        # Refresh ALL days in the month that aren't future
+        needed_dates = [
+            f"{year:04d}-{month:02d}-{d:02d}"
+            for d in range(1, last_day.day + 1)
+            if f"{year:04d}-{month:02d}-{d:02d}" <= today_iso
+        ]
+
+    if needed_dates:
+        client = _get_client()
+        try:
+            _, daily = client.get_energy_month_daily_breakdown(year, month)
+            record_call("fox", "read", ok=True)
+        except Exception:
+            record_call("fox", "read", ok=False)
+            logger.warning(
+                "Fox ESS energy %04d-%02d backfill failed (will return cached partial data)",
+                year, month,
+            )
+            daily = None
+        if daily:
+            # Upsert only the needed dates so we don't churn fetched_at on rows
+            # we already trust.
+            wanted = set(needed_dates) if not force else None
+            rows = [r for r in daily if wanted is None or r.get("date") in wanted]
+            if rows:
+                _db.upsert_fox_energy_daily(rows)
+
+    start = f"{year:04d}-{month:02d}-01"
+    end = f"{year:04d}-{month:02d}-{last_day.day:02d}"
+    return _db.get_fox_energy_daily_range(start, end)
+
+
+def get_fox_daily_cached(date_obj, *, force: bool = False) -> dict | None:
+    """Single-day Fox energy row, going through the month cache helper.
+
+    ``date_obj`` is a ``datetime.date``. Returns the dict from
+    ``fox_energy_daily`` (with ``fetched_at`` metadata) or None if the day
+    is in the future or Fox returned nothing.
+    """
+    from .. import db as _db
+
+    iso = date_obj.isoformat()
+    row = _db.get_fox_energy_daily_by_date(iso)
+    if row is not None and not force:
+        return row
+    # Need to fetch — go through the month cache so we don't burn quota
+    # repeatedly for nearby dates the user might browse next.
+    ensure_fox_month_cached(date_obj.year, date_obj.month, force=force)
+    return _db.get_fox_energy_daily_by_date(iso)

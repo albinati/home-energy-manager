@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from ..api_quota import quota_remaining, should_block
+from ..api_quota import quota_remaining, record_call, should_block
 from ..config import config
 from .client import DaikinClient, DaikinError
 from .models import DaikinDevice
@@ -556,3 +556,107 @@ def set_weather_regulation(enabled: bool, actor: str = "api") -> None:
     for dev in devices:
         client.set_weather_regulation(dev, enabled)
     invalidate_after_write()
+
+
+# ---------------------------------------------------------------------------
+# v10.2 — daikin_consumption_daily sync (deferred Epic #70 minimal first cut)
+# ---------------------------------------------------------------------------
+
+def sync_daikin_daily(date_obj) -> dict | None:
+    """Populate ``daikin_consumption_daily`` for the given date.
+
+    Strategy (in order):
+      1. **Onecta** ``get_heating_daily_kwh(year, month)`` returns 28-31 daily
+         values; pick the date's value if present and > 0.
+      2. **Telemetry integral**: integrate ``daikin_telemetry`` rows for the
+         date through ``physics.get_daikin_heating_kw(outdoor_c)`` over each
+         ~2-min sample's interval. Honest fallback when Onecta unhelpful.
+
+    Records ``source`` so the UI can show "from cloud" vs "estimated".
+    Returns the upserted row dict, or None if both paths fail.
+    Quota-aware: Onecta path counted via ``api_quota.record_call``.
+    """
+    from datetime import date as _date
+
+    from .. import db as _db
+
+    if not isinstance(date_obj, _date):
+        raise ValueError("date_obj must be a datetime.date")
+    iso = date_obj.isoformat()
+
+    # Path 1: Onecta daily breakdown
+    kwh = None
+    source = "unknown"
+    try:
+        if not should_block("daikin"):
+            client = _get_or_create_client()
+            daily = client.get_heating_daily_kwh(date_obj.year, date_obj.month)
+            record_call("daikin", "read", ok=True)
+            if daily:
+                idx = date_obj.day - 1
+                if 0 <= idx < len(daily):
+                    val = float(daily[idx] or 0.0)
+                    if val > 0:
+                        kwh = val
+                        source = "onecta"
+    except Exception as exc:
+        logger.debug("sync_daikin_daily Onecta path failed for %s: %s", iso, exc)
+        record_call("daikin", "read", ok=False)
+
+    # Path 2: telemetry integral fallback. daikin_telemetry.fetched_at is
+    # stored as epoch seconds (float), so bound the range in epoch.
+    if kwh is None:
+        try:
+            from datetime import datetime as _dt, time as _time
+            from ..physics import get_daikin_heating_kw
+
+            day_start_epoch = _dt.combine(date_obj, _time(0, 0)).replace(
+                tzinfo=UTC
+            ).timestamp()
+            day_end_epoch = day_start_epoch + 86400
+
+            with _db._lock:
+                conn = _db.get_connection()
+                try:
+                    cur = conn.execute(
+                        "SELECT fetched_at, outdoor_temp_c FROM daikin_telemetry "
+                        "WHERE fetched_at >= ? AND fetched_at < ? "
+                        "ORDER BY fetched_at ASC",
+                        (day_start_epoch, day_end_epoch),
+                    )
+                    rows = [dict(r) for r in cur.fetchall()]
+                finally:
+                    conn.close()
+            if rows:
+                # Trapezoidal-ish integral: weight each tick's load_kw by half
+                # the gap to its neighbours. Cheap and good enough for an
+                # historic estimate.
+                total_kwh = 0.0
+                for i, r in enumerate(rows):
+                    out = r.get("outdoor_temp_c")
+                    if out is None:
+                        continue
+                    load_kw = float(get_daikin_heating_kw(out))
+                    # Time slice in hours: half the gap to prev + half to next
+                    if i == 0 and len(rows) > 1:
+                        slice_h = max(0.0, (float(rows[1]["fetched_at"]) - float(rows[0]["fetched_at"])) / 3600.0 / 2.0)
+                    elif i == len(rows) - 1:
+                        slice_h = max(0.0, (float(rows[-1]["fetched_at"]) - float(rows[-2]["fetched_at"])) / 3600.0 / 2.0)
+                    else:
+                        slice_h = max(0.0, (float(rows[i + 1]["fetched_at"]) - float(rows[i - 1]["fetched_at"])) / 3600.0 / 2.0)
+                    total_kwh += load_kw * slice_h
+                if total_kwh > 0:
+                    kwh = round(total_kwh, 3)
+                    source = "telemetry_integral"
+        except Exception as exc:
+            logger.debug("sync_daikin_daily telemetry-integral path failed for %s: %s", iso, exc)
+
+    if kwh is None:
+        return None
+
+    _db.upsert_daikin_consumption_daily(
+        date=iso, kwh_total=kwh, kwh_heating=kwh, kwh_dhw=None, cop_daily=None, source=source,
+    )
+    return _db.get_daikin_consumption_daily_by_date(iso)
+
+

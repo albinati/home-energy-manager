@@ -392,3 +392,31 @@ def diff_scheduler_resume() -> ActionDiff:
         safety_flags=[],
         human_summary="Resume scheduler",
     )
+
+
+# ---------------------------------------------------------------------------
+# v10.2 — historic-cache refresh (Fox quota-burning action)
+# ---------------------------------------------------------------------------
+
+def diff_energy_refresh(dates: list[str]) -> ActionDiff:
+    """Simulate diff for ``POST /api/v1/energy/refresh``.
+
+    This action burns Fox ESS API quota — grouping by month means one cloud
+    call per distinct month the user touches, regardless of how many dates
+    they picked. Cached rows are overwritten with fresh data.
+    """
+    months = sorted({d[:7] for d in dates if isinstance(d, str) and len(d) >= 7})
+    return ActionDiff(
+        action="energy.refresh",
+        before={"note": "cached values as-is"},
+        after={
+            "dates_requested": list(dates),
+            "months_affected": months,
+            "cloud_calls_estimate": len(months),
+        },
+        safety_flags=["burns_fox_api_quota"],
+        human_summary=(
+            f"Force-refresh {len(dates)} date(s) across {len(months)} month(s) "
+            f"from Fox ESS cloud (burns quota, ~{len(months)} call(s))."
+        ),
+    )
