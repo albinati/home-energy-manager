@@ -293,8 +293,20 @@ def write_daikin_from_lp_plan(
     plan: LpPlan,
     forecast: list[HourlyForecast],
 ) -> int:
-    """Write merged Daikin ``action_schedule`` rows from LP solution."""
-    db.clear_actions_for_date(plan_date, device="daikin")
+    """Write merged Daikin ``action_schedule`` rows from LP solution.
+
+    Clearing is range-keyed on the LP's UTC slot window so a rolling 24 h plan
+    written at, e.g., 18:00 local (``plan_date`` = today, slots spanning into
+    tomorrow) correctly removes stale rows from *both* dates while the shared
+    in-flight preservation keeps any Daikin action currently executing.
+    """
+    if plan.slot_starts_utc:
+        window_start_iso = plan.slot_starts_utc[0].isoformat().replace("+00:00", "Z")
+        window_end = plan.slot_starts_utc[-1] + timedelta(minutes=30)
+        window_end_iso = window_end.isoformat().replace("+00:00", "Z")
+        db.clear_actions_in_range(window_start_iso, window_end_iso, device="daikin")
+    else:
+        db.clear_actions_for_date(plan_date, device="daikin")
     pairs = daikin_dispatch_preview(plan, forecast)
     count = 0
     for restore_row, action_row in pairs:
