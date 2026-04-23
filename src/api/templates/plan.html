@@ -26,15 +26,16 @@
             <thead><tr>
                 <th>Slot</th>
                 <th>Strategy</th>
-                <th class="num">Tariff</th>
-                <th class="num">kWh</th>
-                <th class="num">Cost</th>
-                <th class="num">Daikin Σ</th>
-                <th class="num">Resid. Σ</th>
-                <th class="num">SVT</th>
-                <th class="num">Δ</th>
+                <th class="num" title="Octopus Agile import price (p/kWh)">Tariff</th>
+                <th class="num" title="kWh consumed in this 30-min slot">kWh</th>
+                <th class="num" title="Total cost paid in this slot (p)">Cost</th>
+                <th class="num" title="Cost attributed to Daikin heat pump in this slot (p)">Daikin</th>
+                <th class="num" title="Cost attributed to everything-but-Daikin in this slot (p)">Residual</th>
+                <th class="num" title="What an SVT customer would have paid for the same kWh">SVT</th>
+                <th class="num" title="Saving vs SVT (negative = saved)">Δ</th>
             </tr></thead>
             <tbody id="planTbody"><tr><td colspan="9" class="text-mute">Loading…</td></tr></tbody>
+            <tfoot id="planTfoot"></tfoot>
         </table>
     </div>
 </section>
@@ -50,5 +51,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="/static/js/plan.js"></script>
+<script src="/static/js/plan.js?v={{ static_v('js/plan.js') }}"></script>
 {% endblock %}
