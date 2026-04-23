@@ -2517,6 +2517,94 @@ async def simulate_get(simulation_id: str):
 
 # --- v10.1 cockpit data endpoints -------------------------------------------
 
+@app.get("/api/v1/energy/freshness")
+async def energy_freshness(start: str, end: str):
+    """Per-date ``fetched_at`` metadata for cached Fox daily rows in the given range.
+
+    The Insights UI reads this alongside ``/api/v1/energy/period`` to render the
+    "data from X min ago · ⟳" badge and decide whether to offer a refresh button
+    per date. Pure SQLite read; never hits Fox.
+
+    Args:
+        start: ISO date, e.g. ``2025-07-01``.
+        end: ISO date, e.g. ``2025-07-31``.
+    """
+    from datetime import datetime as _dt
+    from .. import db as _db
+
+    rows = _db.get_fox_energy_daily_range(start, end)
+    now = _dt.now(UTC)
+
+    def _age_seconds(fetched_at: str | None) -> int | None:
+        if not fetched_at:
+            return None
+        try:
+            t = _dt.fromisoformat(fetched_at.replace("Z", "+00:00"))
+            return int((now - t).total_seconds())
+        except Exception:
+            return None
+
+    return {
+        "start": start,
+        "end": end,
+        "now_utc": now.isoformat().replace("+00:00", "Z"),
+        "rows": [
+            {
+                "date": r["date"],
+                "fetched_at": r.get("fetched_at"),
+                "age_seconds": _age_seconds(r.get("fetched_at")),
+            }
+            for r in rows
+        ],
+    }
+
+
+@app.post("/api/v1/energy/refresh/simulate")
+async def energy_refresh_simulate(body: dict):
+    dates = body.get("dates") or []
+    if not isinstance(dates, list):
+        raise HTTPException(status_code=400, detail="dates must be a list")
+    return _register_diff(_diffs.diff_energy_refresh(dates))
+
+
+@app.post("/api/v1/energy/refresh")
+async def energy_refresh(body: dict, x_simulation_id: str | None = Header(None, alias="X-Simulation-Id")):
+    """Force a Fox cloud refetch for the listed dates. Burns Fox quota.
+
+    Body: ``{"dates": ["YYYY-MM-DD", ...]}``. Gated by the simulate-confirm
+    flow (``/simulate`` pair above). Groups requested dates by month to
+    minimise cloud calls (one call per month regardless of how many dates).
+    """
+    _enforce_simulation_id("energy.refresh", x_simulation_id)
+    dates = body.get("dates") or []
+    if not isinstance(dates, list) or not dates:
+        raise HTTPException(status_code=400, detail="dates must be a non-empty list")
+    from datetime import date as _date
+    from ..foxess import service as _fox_svc
+
+    months: set[tuple[int, int]] = set()
+    for d in dates:
+        try:
+            dt = _date.fromisoformat(d)
+            months.add((dt.year, dt.month))
+        except Exception:
+            raise HTTPException(status_code=400, detail=f"invalid date: {d!r}")
+
+    refreshed = []
+    errors = []
+    for (yr, mo) in sorted(months):
+        try:
+            _fox_svc.ensure_fox_month_cached(yr, mo, force=True)
+            refreshed.append({"year": yr, "month": mo})
+        except Exception as exc:
+            errors.append({"year": yr, "month": mo, "error": str(exc)})
+    return {
+        "requested_dates": dates,
+        "months_refreshed": refreshed,
+        "errors": errors,
+    }
+
+
 @app.get("/api/v1/agile/today")
 async def agile_today():
     """Today's Octopus Agile slot rates + the current half-hour's price.

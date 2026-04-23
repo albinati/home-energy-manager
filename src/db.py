@@ -273,6 +273,23 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         )"""
     )
 
+    # V10.2: daikin_consumption_daily — per-day heat-pump energy attribution.
+    # Source: 'onecta' (preferred) when Onecta consumption endpoint returns
+    # the day, 'telemetry_integral' when computed from daikin_telemetry rows
+    # via physics, 'unknown' for legacy rows. Never used for today's row
+    # (today is computed live from physics + Fox load).
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS daikin_consumption_daily (
+            date TEXT PRIMARY KEY,
+            kwh_total REAL,
+            kwh_heating REAL,
+            kwh_dhw REAL,
+            cop_daily REAL,
+            source TEXT NOT NULL DEFAULT 'unknown',
+            fetched_at TEXT NOT NULL
+        )"""
+    )
+
     # V4: fox_realtime_snapshot — single-row live telemetry for MPC seeding
     conn.execute(
         """CREATE TABLE IF NOT EXISTS fox_realtime_snapshot (
@@ -475,6 +492,70 @@ def save_agile_rates(rates: list[dict[str, Any]], tariff_code: str) -> int:
             dt_last.astimezone(tz_local).strftime("%a %d %b %H:%M %Z"),
         )
     return n
+
+
+def get_agile_rates_daily_summary(
+    tariff_code: str,
+    start_date: str,
+    end_date: str,
+) -> list[dict[str, Any]]:
+    """Per-day aggregate stats for the given tariff and date range (UTC).
+
+    One SQL pass over ``agile_rates``. Returns a list ordered by date with:
+      ``date``, ``slot_count``, ``min_p``, ``max_p``, ``mean_p``,
+      ``vwap_p`` (volume-weighted equals mean here since slots are uniform
+      30 min — kept as a separate column so the front-end can show both).
+
+    Use ``YYYY-MM-DD`` strings for ``start_date`` / ``end_date``. Bounds are
+    UTC-local (we group by ``DATE(valid_from)`` which is the UTC component
+    of the ISO timestamp). Good enough for year-scale audit views.
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT
+                       SUBSTR(valid_from, 1, 10) AS date,
+                       COUNT(*) AS slot_count,
+                       MIN(value_inc_vat) AS min_p,
+                       MAX(value_inc_vat) AS max_p,
+                       AVG(value_inc_vat) AS mean_p,
+                       AVG(value_inc_vat) AS vwap_p
+                   FROM agile_rates
+                   WHERE tariff_code = ?
+                     AND SUBSTR(valid_from, 1, 10) >= ?
+                     AND SUBSTR(valid_from, 1, 10) <= ?
+                   GROUP BY SUBSTR(valid_from, 1, 10)
+                   ORDER BY SUBSTR(valid_from, 1, 10) ASC""",
+                (tariff_code, start_date, end_date),
+            )
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
+def get_agile_rates_slots_for_local_day(
+    tariff_code: str,
+    local_date,  # datetime.date
+    tz_name: str = "Europe/London",
+) -> list[dict[str, Any]]:
+    """All Agile slots that overlap the given local-day (handles DST).
+
+    Returns 46 (spring-forward), 48 (normal), or 50 (fall-back) rows ordered
+    by ``valid_from`` ASC. Each carries ``valid_from``, ``valid_to``,
+    ``value_inc_vat``. Caller can colour-code by percentile etc.
+    """
+    from datetime import datetime as _dt
+    from datetime import time as _time
+    from datetime import timedelta as _td
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo(tz_name)
+    local_start = _dt.combine(local_date, _time(0, 0), tzinfo=tz)
+    local_end = local_start + _td(days=1)
+    utc_start = local_start.astimezone(UTC)
+    utc_end = local_end.astimezone(UTC)
+    return get_rates_for_period(tariff_code, utc_start, utc_end)
 
 
 def get_rates_for_period(
@@ -1588,6 +1669,127 @@ def get_fox_energy_daily(limit: int = 90) -> list[dict[str, Any]]:
                 "SELECT * FROM fox_energy_daily ORDER BY date DESC LIMIT ?", (limit,)
             )
             return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
+def upsert_daikin_consumption_daily(
+    *,
+    date: str,
+    kwh_total: float | None,
+    kwh_heating: float | None = None,
+    kwh_dhw: float | None = None,
+    cop_daily: float | None = None,
+    source: str = "unknown",
+) -> None:
+    """Upsert one ``daikin_consumption_daily`` row. Idempotent.
+
+    ``source`` is the provenance flag: ``onecta`` | ``telemetry_integral`` |
+    ``unknown``. Lets the cockpit show "from cloud" vs "estimated locally".
+    """
+    now = datetime.now(UTC).isoformat()
+    with _lock:
+        conn = get_connection()
+        try:
+            conn.execute(
+                """INSERT INTO daikin_consumption_daily
+                   (date, kwh_total, kwh_heating, kwh_dhw, cop_daily, source, fetched_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(date) DO UPDATE SET
+                     kwh_total=excluded.kwh_total,
+                     kwh_heating=excluded.kwh_heating,
+                     kwh_dhw=excluded.kwh_dhw,
+                     cop_daily=excluded.cop_daily,
+                     source=excluded.source,
+                     fetched_at=excluded.fetched_at""",
+                (date, kwh_total, kwh_heating, kwh_dhw, cop_daily, source, now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def get_daikin_consumption_daily_by_date(date_str: str) -> dict[str, Any] | None:
+    """Single-day Daikin consumption row, or None if not cached."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM daikin_consumption_daily WHERE date = ?", (date_str,)
+            )
+            r = cur.fetchone()
+            return dict(r) if r else None
+        finally:
+            conn.close()
+
+
+def get_daikin_consumption_daily_range(start_date: str, end_date: str) -> list[dict[str, Any]]:
+    """All Daikin consumption rows in ``[start_date, end_date]`` inclusive, ASC."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM daikin_consumption_daily "
+                "WHERE date >= ? AND date <= ? ORDER BY date ASC",
+                (start_date, end_date),
+            )
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
+def get_fox_energy_daily_by_date(date_str: str) -> dict[str, Any] | None:
+    """Single-day Fox energy row, or None when not cached.
+
+    ``date_str`` is ISO ``YYYY-MM-DD``. Returned dict carries ``fetched_at``
+    so callers can decide if a refresh is warranted.
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM fox_energy_daily WHERE date = ?", (date_str,)
+            )
+            r = cur.fetchone()
+            return dict(r) if r else None
+        finally:
+            conn.close()
+
+
+def get_fox_energy_daily_range(start_date: str, end_date: str) -> list[dict[str, Any]]:
+    """All Fox energy rows within ``[start_date, end_date]`` inclusive, ordered ASC.
+
+    Both bounds are ISO ``YYYY-MM-DD`` strings; SQLite compares them as text
+    which works because the column is normalised that way.
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM fox_energy_daily WHERE date >= ? AND date <= ? "
+                "ORDER BY date ASC",
+                (start_date, end_date),
+            )
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
+def get_fox_energy_dates_for_month(year: int, month: int) -> set[str]:
+    """Set of ``YYYY-MM-DD`` already cached for the given calendar month.
+
+    Used by the read-through Fox cache to compute the missing days that
+    actually need a cloud fetch.
+    """
+    prefix = f"{year:04d}-{month:02d}-"
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT date FROM fox_energy_daily WHERE date LIKE ?",
+                (f"{prefix}%",),
+            )
+            return {r["date"] for r in cur.fetchall()}
         finally:
             conn.close()
 
