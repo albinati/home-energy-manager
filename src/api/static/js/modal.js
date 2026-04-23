@@ -28,6 +28,22 @@
     }
   }
 
+  function fmtScalar(v) {
+    // Pull a single scalar out of a {key: value} dict (per-row before/after
+    // entries from diff_settings_batch); fall back to JSON for nested shapes.
+    if (v == null) return '—';
+    if (typeof v === 'object') {
+      const keys = Object.keys(v);
+      if (keys.length === 1) return fmtScalar(v[keys[0]]);
+      if (keys.length === 0) return '—';
+      try { return JSON.stringify(v); } catch (_e) { return String(v); }
+    }
+    if (typeof v === 'number') {
+      return Math.abs(v) < 0.01 || Math.abs(v) >= 1000 ? String(v) : (Math.round(v * 1000) / 1000).toString();
+    }
+    return String(v);
+  }
+
   function classifyFlag(flag) {
     // Flags that require typed-confirmation are the most dangerous ones.
     const HARD = new Set([
@@ -46,6 +62,10 @@
     summaryEl: null,
     beforeEl: null,
     afterEl: null,
+    beforeSection: null,
+    afterSection: null,
+    batchSection: null,
+    batchBody: null,
     flagsSection: null,
     flagsList: null,
     flagsConfirmLabel: null,
@@ -65,6 +85,10 @@
       this.summaryEl = $('#modalSummary');
       this.beforeEl = $('#modalBefore');
       this.afterEl = $('#modalAfter');
+      this.beforeSection = $('#modalBeforeSection');
+      this.afterSection = $('#modalAfterSection');
+      this.batchSection = $('#modalBatchSection');
+      this.batchBody = $('#modalBatchBody');
       this.flagsSection = $('#modalFlagsSection');
       this.flagsList = $('#modalFlags');
       this.flagsConfirmLabel = $('#modalFlagsConfirmLabel');
@@ -94,8 +118,29 @@
       this._diff = diff;
       this.titleEl.textContent = diff.action || 'Confirm';
       this.summaryEl.textContent = diff.human_summary || '';
-      this.beforeEl.textContent = fmtJson(diff.before);
-      this.afterEl.textContent = fmtJson(diff.after);
+
+      const subs = Array.isArray(diff.sub_actions) ? diff.sub_actions : [];
+      if (subs.length) {
+        // Batch mode: render table, hide raw before/after blocks.
+        this.batchBody.innerHTML = subs.map(s => {
+          const safety = (s.safety_flags || []).map(f => `<code class="batch-flag batch-flag-${classifyFlag(f)}">${escapeHtml(f)}</code>`).join(' ') || '<span class="text-dim">—</span>';
+          return `<tr>
+              <td class="bcell-key"><code>${escapeHtml(s.key || s.action || '?')}</code></td>
+              <td class="bcell-before">${escapeHtml(fmtScalar(s.before))}</td>
+              <td class="bcell-after">${escapeHtml(fmtScalar(s.after))}</td>
+              <td class="bcell-safety">${safety}</td>
+          </tr>`;
+        }).join('');
+        this.batchSection.hidden = false;
+        this.beforeSection.hidden = true;
+        this.afterSection.hidden = true;
+      } else {
+        this.batchSection.hidden = true;
+        this.beforeSection.hidden = false;
+        this.afterSection.hidden = false;
+        this.beforeEl.textContent = fmtJson(diff.before);
+        this.afterEl.textContent = fmtJson(diff.after);
+      }
 
       const cost = diff.cost_delta_pence;
       const slots = diff.affected_slots || [];

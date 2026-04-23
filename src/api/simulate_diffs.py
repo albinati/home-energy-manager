@@ -398,6 +398,52 @@ def diff_scheduler_resume() -> ActionDiff:
 # v10.2 — historic-cache refresh (Fox quota-burning action)
 # ---------------------------------------------------------------------------
 
+def diff_settings_batch(changes: dict[str, Any]) -> ActionDiff:
+    """Roll N settings changes into one ``ActionDiff`` with ``sub_actions``.
+
+    Each key gets its own per-key diff via :func:`diff_setting_change`. Safety
+    flags are unioned. The umbrella diff's ``before``/``after`` are tabular
+    summaries — modal renders ``sub_actions`` as a proper table.
+
+    Use ``POST /api/v1/settings/batch/simulate`` to obtain a ``simulation_id``
+    for ``POST /api/v1/settings/batch``.
+    """
+    sub: list[dict[str, Any]] = []
+    flags: set[str] = set()
+    summaries: list[str] = []
+    before_table: dict[str, Any] = {}
+    after_table: dict[str, Any] = {}
+    for key, value in (changes or {}).items():
+        d = diff_setting_change(key, value)
+        sub.append({
+            "key": key,
+            "action": d.action,
+            "before": d.before,
+            "after": d.after,
+            "safety_flags": list(d.safety_flags),
+            "human_summary": d.human_summary,
+        })
+        flags.update(d.safety_flags)
+        summaries.append(d.human_summary)
+        # Flatten before/after into per-key tables for the rollup view.
+        for k, v in (d.before or {}).items():
+            before_table[k] = v
+        for k, v in (d.after or {}).items():
+            after_table[k] = v
+
+    return ActionDiff(
+        action="settings.batch",
+        before=before_table,
+        after=after_table,
+        safety_flags=sorted(flags),
+        sub_actions=sub,
+        human_summary=(
+            f"Apply {len(sub)} setting change(s) in one batch."
+            if sub else "No changes (empty batch)."
+        ),
+    )
+
+
 def diff_energy_refresh(dates: list[str]) -> ActionDiff:
     """Simulate diff for ``POST /api/v1/energy/refresh``.
 
