@@ -2525,14 +2525,19 @@ async def load_breakdown():
 
     house_total_kw = None
     fox_captured_at = None
-    # Prefer Fox service cache (updated more frequently than the SQLite snapshot
-    # which is only written by the MPC seeding job).
+    # Prefer Fox service cache (RealTimeData with .load_power). Pass a huge TTL
+    # so the call NEVER triggers a cloud refresh — quota-safe by construction.
     try:
-        from ..foxess.service import get_cached_realtime as _fox_realtime
-        snap = _fox_realtime(allow_refresh=False)
+        from ..foxess import service as _fox_svc
+        snap = _fox_svc.get_cached_realtime(max_age_seconds=86_400)
         if snap is not None:
-            house_total_kw = getattr(snap, "load_power", None) if not isinstance(snap, dict) else snap.get("load_power")
-            fox_captured_at = getattr(snap, "updated_at", None) if not isinstance(snap, dict) else snap.get("updated_at")
+            house_total_kw = float(getattr(snap, "load_power", None)) if getattr(snap, "load_power", None) is not None else None
+        # Pull timestamp from refresh-stats (RealTimeData itself has no updated_at).
+        try:
+            stats = _fox_svc.get_refresh_stats()
+            fox_captured_at = stats.get("last_updated_iso") or stats.get("last_updated_epoch")
+        except Exception:
+            pass
     except Exception:
         pass
     if house_total_kw is None:
