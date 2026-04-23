@@ -30,7 +30,7 @@ class LpSimulationResult:
     ok: bool
     error: str | None = None
     plan_date: str = ""
-    plan_window: str = ""        # "full_day" | "today_remainder"
+    plan_window: str = ""        # "rolling_24h" | "rolling_partial"
     plan: LpPlan | None = None
     initial: LpInitialState | None = None
     mu_load_kwh: float = 0.0
@@ -70,10 +70,9 @@ def run_lp_simulation(
 ) -> LpSimulationResult:
     """Build the same inputs as ``_run_optimizer_lp``, solve, return plan — **no DB/Fox/Daikin writes**.
 
-    Automatically selects the best available planning window:
-    - Tomorrow (full day) if tomorrow's rates are published (≥40 slots).
-    - Today-remainder if only today's rates are present.
-    - Returns an error result if no rates exist at all.
+    Uses the rolling ``now → now + LP_HORIZON_HOURS`` window (truncated to the
+    last published Agile slot). Returns an error result if no rates exist or
+    fewer than the minimum usable slot count remain.
 
     Phase 4 review: ``allow_daikin_refresh=False`` forbids any cache refresh that
     would burn Daikin quota. The ``simulate_plan`` MCP tool relies on this to
@@ -92,7 +91,7 @@ def run_lp_simulation(
         )
 
     plan_date = window.plan_date
-    plan_window_label = "full_day" if window.is_full_day else "today_remainder"
+    plan_window_label = "rolling_24h" if window.horizon_hours >= 23.5 else "rolling_partial"
     day_start = window.day_start
     horizon_end = window.horizon_end
 

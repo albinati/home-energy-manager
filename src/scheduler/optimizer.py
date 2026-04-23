@@ -28,111 +28,118 @@ logger = logging.getLogger(__name__)
 
 TZ = lambda: ZoneInfo(config.BULLETPROOF_TIMEZONE)
 
-# Octopus publishes tomorrow's rates ~16:00 UK time.  We call the plan "full-day" when
-# we have at least this many half-hour slots for the target day.
-_MIN_FULL_DAY_SLOTS = 40
+# Rolling-window floor. Fewer than this many half-hour slots of Agile data ahead
+# of *now* means the LP has nothing meaningful to optimize — Self-Use fallback.
+_MIN_USABLE_SLOTS = 4  # 2 hours
 
 
 @dataclass
 class PlanWindow:
-    """Describes the time window the optimizer will plan for."""
+    """Describes the rolling time window the optimizer will plan for.
 
-    plan_date: str           # ISO date string (YYYY-MM-DD)
-    day_start: datetime      # local-tz midnight (or now rounded to next HH slot)
-    horizon_end: datetime    # end of planning horizon
-    is_full_day: bool        # True = tomorrow's full day, False = today-remainder
+    All datetimes are UTC. The window is computed as
+    ``[day_start, horizon_end)`` where ``day_start = now`` rounded up to the
+    next half-hour boundary and ``horizon_end = min(day_start + LP_HORIZON_HOURS,
+    last known Agile slot end)``. The field name ``day_start`` is preserved for
+    historical reasons — it is the *window* start, not a local-midnight anchor.
+    """
+
+    plan_date: str           # ISO date of local(day_start) — tag for logs/consent, not a clear key
+    day_start: datetime      # UTC — start of rolling window (next HH:30 boundary)
+    horizon_end: datetime    # UTC — end of rolling window, truncated to data availability
     rates: list              # raw rate rows covering the window
+
+    @property
+    def horizon_hours(self) -> float:
+        return (self.horizon_end - self.day_start).total_seconds() / 3600.0
+
+
+def _now_utc() -> datetime:
+    """Wall clock for the rolling-window resolver (monkeypatch target in tests)."""
+    return datetime.now(UTC)
+
+
+def _ceil_to_half_hour_utc(dt: datetime) -> datetime:
+    """Round *dt* up to the next :00 or :30 boundary in UTC."""
+    dt = dt.astimezone(UTC).replace(second=0, microsecond=0)
+    if dt.minute == 0 or dt.minute == 30:
+        # Already on a half-hour boundary — advance to the NEXT one so the
+        # currently-live slot isn't re-dispatched (Daikin quota integrity).
+        return dt + timedelta(minutes=30)
+    if dt.minute < 30:
+        return dt.replace(minute=30)
+    return (dt + timedelta(hours=1)).replace(minute=0)
 
 
 def _resolve_plan_window(tariff: str) -> PlanWindow | None:
-    """Determine the best available planning window given what rates are in the DB.
+    """Compute a rolling ``now → now + LP_HORIZON_HOURS`` window.
 
-    Resolution order:
-    1. Tomorrow's full-day rates present (≥ _MIN_FULL_DAY_SLOTS) → plan tomorrow midnight to LP_HORIZON_HOURS.
-    2. Today's partial/full rates present → plan from *now* (next half-hour boundary) to local midnight.
-    3. No usable rates → return None (caller should activate Self-Use fallback).
+    The window always starts at the *next* half-hour boundary after ``now`` so
+    the currently-running slot is never re-dispatched (quota integrity, see
+    ADR-002). The end is capped by the last known Agile ``valid_to`` so a 09:00
+    call before Octopus publishes tomorrow cleanly produces a shorter window
+    ending at today's last slot.
 
-    This makes the optimizer work correctly whether called at 09:00 (today's rates only),
-    16:30 (just after Octopus published tomorrow), or on-demand at any time.
+    Returns ``None`` when fewer than ``_MIN_USABLE_SLOTS`` of Agile data remain
+    — caller should fall back to Self-Use.
     """
     tz = TZ()
-    now_local = datetime.now(tz)
+    now_utc = _now_utc()
+    start_utc = _ceil_to_half_hour_utc(now_utc)
+    target_end_utc = start_utc + timedelta(hours=int(config.LP_HORIZON_HOURS))
 
-    # ── Try TOMORROW first ────────────────────────────────────────────────────
-    tomorrow = (now_local + timedelta(days=1)).date()
-    tmr_start = datetime.combine(tomorrow, datetime.min.time()).replace(tzinfo=tz)
-    tmr_end = tmr_start + timedelta(hours=int(config.LP_HORIZON_HOURS))
+    # Query with small overlap so overlapping rate rows at the boundary are included.
+    q_from = start_utc - timedelta(minutes=30)
+    q_to = target_end_utc + timedelta(hours=1)
+    rates = db.get_rates_for_period(tariff, q_from, q_to) or []
 
-    tmr_q_from = tmr_start.astimezone(UTC) - timedelta(hours=1)
-    tmr_q_to = tmr_end.astimezone(UTC) + timedelta(hours=2)
-    logger.info(
-        "TZ-AUDIT: tomorrow DB query | local midnight %s (%s) | UTC query %s → %s",
-        tmr_start.strftime("%a %d %b %H:%M %Z"),
-        tmr_start.astimezone(UTC).strftime("%Y-%m-%dT%H:%MZ"),
-        tmr_q_from.strftime("%Y-%m-%dT%H:%MZ"),
-        tmr_q_to.strftime("%Y-%m-%dT%H:%MZ"),
-    )
-    tmr_rates = db.get_rates_for_period(tariff, tmr_q_from, tmr_q_to)
-    tmr_slots_preview = _build_half_hour_slots(tmr_rates or [], tmr_start, tmr_end)
-    if len(tmr_slots_preview) >= _MIN_FULL_DAY_SLOTS:
-        logger.info(
-            "Plan window: tomorrow %s (%d slots, full-day)",
-            tomorrow.isoformat(),
-            len(tmr_slots_preview),
+    last_valid_to: datetime | None = None
+    for r in rates:
+        try:
+            vt = _parse_ts(str(r["valid_to"]))
+        except (ValueError, KeyError, TypeError):
+            continue
+        if last_valid_to is None or vt > last_valid_to:
+            last_valid_to = vt
+
+    if last_valid_to is None or last_valid_to <= start_utc:
+        logger.warning(
+            "Plan window: no future Agile rates available "
+            "(start=%s, last_valid_to=%s) — Self-Use fallback",
+            start_utc.strftime("%Y-%m-%dT%H:%MZ"),
+            last_valid_to.strftime("%Y-%m-%dT%H:%MZ") if last_valid_to else "None",
         )
-        return PlanWindow(
-            plan_date=tomorrow.isoformat(),
-            day_start=tmr_start,
-            horizon_end=tmr_end,
-            is_full_day=True,
-            rates=tmr_rates,
-        )
-
-    # ── Fall back to TODAY-REMAINDER ─────────────────────────────────────────
-    today = now_local.date()
-    # Round up to the next half-hour boundary
-    mins = now_local.minute
-    if mins < 30:
-        today_start = now_local.replace(minute=30, second=0, microsecond=0)
-    else:
-        today_start = (now_local + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
-    today_end = datetime.combine(today + timedelta(days=1), datetime.min.time()).replace(tzinfo=tz)
-
-    if today_start >= today_end:
-        # Past midnight — nothing left to plan today
-        logger.warning("Plan window: no usable rates (past midnight, tomorrow not published yet)")
         return None
 
-    today_q_from = today_start.astimezone(UTC) - timedelta(minutes=30)
-    today_q_to = today_end.astimezone(UTC) + timedelta(hours=1)
-    logger.info(
-        "TZ-AUDIT: today-remainder DB query | local start %s (%s) end %s (%s) | UTC query %s → %s",
-        today_start.strftime("%H:%M %Z"),
-        today_start.astimezone(UTC).strftime("%Y-%m-%dT%H:%MZ"),
-        today_end.strftime("%H:%M %Z"),
-        today_end.astimezone(UTC).strftime("%Y-%m-%dT%H:%MZ"),
-        today_q_from.strftime("%Y-%m-%dT%H:%MZ"),
-        today_q_to.strftime("%Y-%m-%dT%H:%MZ"),
-    )
-    today_rates = db.get_rates_for_period(tariff, today_q_from, today_q_to)
-    today_slots_preview = _build_half_hour_slots(today_rates or [], today_start, today_end)
-    if today_slots_preview:
-        logger.info(
-            "Plan window: today-remainder %s from %s (%d slots, partial-day)",
-            today.isoformat(),
-            today_start.strftime("%H:%M"),
-            len(today_slots_preview),
+    horizon_end_utc = min(target_end_utc, last_valid_to)
+    slots_preview = _build_half_hour_slots(rates, start_utc, horizon_end_utc)
+    if len(slots_preview) < _MIN_USABLE_SLOTS:
+        logger.warning(
+            "Plan window: only %d slots usable (< %d minimum) — Self-Use fallback",
+            len(slots_preview),
+            _MIN_USABLE_SLOTS,
         )
-        return PlanWindow(
-            plan_date=today.isoformat(),
-            day_start=today_start,
-            horizon_end=today_end,
-            is_full_day=False,
-            rates=today_rates,
-        )
+        return None
 
-    logger.warning("Plan window: no usable rates in DB for today or tomorrow — Self-Use fallback")
-    return None
+    start_local = start_utc.astimezone(tz)
+    end_local = horizon_end_utc.astimezone(tz)
+    horizon_h = (horizon_end_utc - start_utc).total_seconds() / 3600.0
+    logger.info(
+        "TZ-AUDIT: rolling plan window | %.1fh | UTC %s → %s | local %s → %s | %d slots",
+        horizon_h,
+        start_utc.strftime("%Y-%m-%dT%H:%MZ"),
+        horizon_end_utc.strftime("%Y-%m-%dT%H:%MZ"),
+        start_local.strftime("%a %d %b %H:%M %Z"),
+        end_local.strftime("%a %d %b %H:%M %Z"),
+        len(slots_preview),
+    )
+
+    return PlanWindow(
+        plan_date=start_local.date().isoformat(),
+        day_start=start_utc,
+        horizon_end=horizon_end_utc,
+        rates=rates,
+    )
 
 
 @dataclass
@@ -326,6 +333,50 @@ def _bulletproof_allow_peak_export_discharge() -> bool:
     return soc >= float(config.EXPORT_DISCHARGE_MIN_SOC_PERCENT)
 
 
+def _count_midnight_crossings(
+    merged: list[tuple[datetime, datetime, tuple]],
+    tz: ZoneInfo,
+) -> int:
+    """Count merged windows whose local ``[ls, le)`` strictly crosses a local
+    midnight boundary — each will become two Fox V3 groups after the split.
+    """
+    n = 0
+    for start_utc, end_utc, _ in merged:
+        ls = start_utc.astimezone(tz)
+        le = end_utc.astimezone(tz)
+        next_midnight = datetime.combine(
+            ls.date() + timedelta(days=1), datetime.min.time()
+        ).replace(tzinfo=ls.tzinfo)
+        if le > next_midnight:
+            n += 1
+    return n
+
+
+def _split_at_local_midnight(
+    merged: list[tuple[datetime, datetime, tuple]],
+    tz: ZoneInfo,
+) -> list[tuple[datetime, datetime, tuple]]:
+    """Split any merged window that crosses local midnight into two
+    same-key halves. Fox V3 groups are ``HH:MM`` within a single 24 h
+    cycle (no date), so a range like 22:00 → 02:00 is undefined; emitting
+    two groups 22:00 → 23:59 and 00:00 → 02:00 preserves the intent.
+    """
+    out: list[tuple[datetime, datetime, tuple]] = []
+    for start_utc, end_utc, key in merged:
+        ls = start_utc.astimezone(tz)
+        le = end_utc.astimezone(tz)
+        next_midnight = datetime.combine(
+            ls.date() + timedelta(days=1), datetime.min.time()
+        ).replace(tzinfo=ls.tzinfo)
+        if le > next_midnight:
+            mid_utc = next_midnight.astimezone(UTC)
+            out.append((start_utc, mid_utc, key))
+            out.append((mid_utc, end_utc, key))
+        else:
+            out.append((start_utc, end_utc, key))
+    return out
+
+
 def _merge_fox_groups(
     slots: list[HalfHourSlot],
     max_groups: int = 8,
@@ -352,11 +403,18 @@ def _merge_fox_groups(
 
     merged = _merge_adjacent_force_charge_rows(merged)
 
+    # Reserve a slot for each window that will be split at local midnight
+    # (Fox V3 groups are dateless HH:MM within a 24 h cycle, so cross-midnight
+    # windows get split into two same-key groups before dispatch).
     guard = 0
-    while len(merged) > max_groups and len(merged) >= 2 and guard < 64:
+    while (
+        len(merged) + _count_midnight_crossings(merged, tz) > max_groups
+        and len(merged) >= 2
+        and guard < 64
+    ):
         guard += 1
         merged = _coarse_merge_fox(merged)
-        if len(merged) <= max_groups:
+        if len(merged) + _count_midnight_crossings(merged, tz) <= max_groups:
             break
         merged_pair = False
         for j in range(len(merged) - 1):
@@ -382,6 +440,8 @@ def _merge_fox_groups(
             nk = ("SelfUse", None, None, int(config.MIN_SOC_RESERVE_PERCENT))
         merged[0] = (a, d, nk)
         del merged[1]
+
+    merged = _split_at_local_midnight(merged, tz)
 
     groups: list[SchedulerGroup] = []
     for start_utc, end_utc, (wm, fds, fdp, msg) in merged:
@@ -603,7 +663,12 @@ def _normal_params() -> dict[str, Any]:
 
 
 def _write_daikin_schedule(plan_date: str, slots: list[HalfHourSlot], forecast: list[HourlyForecast]) -> int:
-    db.clear_actions_for_date(plan_date, device="daikin")
+    if slots:
+        window_start_iso = slots[0].start_utc.isoformat().replace("+00:00", "Z")
+        window_end_iso = slots[-1].end_utc.isoformat().replace("+00:00", "Z")
+        db.clear_actions_in_range(window_start_iso, window_end_iso, device="daikin")
+    else:
+        db.clear_actions_for_date(plan_date, device="daikin")
     tz = TZ()
     count = 0
     away_like = _optimization_preset_away_like()
