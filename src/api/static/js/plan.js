@@ -1,108 +1,104 @@
-/* v10.1 plan page — predicted vs actual overlay.
+/* v10.1 plan page — cost slot-by-slot, planned strategy vs realised cost.
  *
  * Reads:
- *   - /api/v1/optimization/plan  → today's planned Fox groups + Daikin actions
- *   - /api/v1/schedule           → action_schedule status + execution timestamps
+ *   /api/v1/execution/today  → per-slot realised cost + Daikin attribution
+ *   /api/v1/optimization/plan → today's planned Fox groups (for strategy column)
  *
- * V12 migration adds optimizer_logs.predicted_soc_path; once that lands the
- * Δ SoC column will render real numbers. Until then it shows "—" placeholders.
+ * Action: "Re-plan (simulate)" runs the simulate-then-confirm flow via the
+ * shared wrapAction helper. No direct writes anywhere on this page.
  */
 (function () {
   'use strict';
   const $ = (s, r = document) => r.querySelector(s);
-  const { jsonFetch, toast } = window.HEM || {};
+  const { jsonFetch, wrapAction, toast } = window.HEM || {};
 
   function pad(n) { return String(n).padStart(2, '0'); }
+  function fmtP(v) { return v == null ? '—' : `${Number(v).toFixed(1)}p`; }
+  function fmtKwh(v) { return v == null ? '—' : `${Number(v).toFixed(2)}`; }
 
-  function buildSlots(now) {
-    const slots = [];
-    const start = new Date(now);
-    start.setHours(0, 0, 0, 0);
-    for (let i = 0; i < 48; i++) {
-      const s = new Date(start);
-      s.setMinutes(s.getMinutes() + i * 30);
-      const e = new Date(s);
-      e.setMinutes(e.getMinutes() + 30);
-      slots.push({ start: s, end: e, label: `${pad(s.getHours())}:${pad(s.getMinutes())}` });
-    }
-    return slots;
-  }
-
-  function findGroupForSlot(groups, slot) {
-    return groups.find(g => {
-      const gs = new Date(slot.start);
-      gs.setHours(g.startHour, g.startMinute || 0, 0, 0);
-      const ge = new Date(slot.start);
-      ge.setHours(g.endHour, g.endMinute || 0, 0, 0);
-      return slot.start >= gs && slot.start < ge;
+  function strategyForSlot(groups, slotUtc) {
+    const t = new Date(slotUtc);
+    const h = t.getHours();
+    const m = t.getMinutes();
+    const cur = groups.find(g => {
+      const inAfterStart = (h > g.startHour) || (h === g.startHour && m >= (g.startMinute || 0));
+      const inBeforeEnd  = (h < g.endHour)   || (h === g.endHour   && m <  (g.endMinute   || 0));
+      return inAfterStart && inBeforeEnd;
     });
+    if (!cur) return '—';
+    const wm = (cur.workMode || '').toLowerCase();
+    if (wm.includes('forcecharge')) return `cheap → charge ${cur.extraParam?.fdSoc ?? '?'}%`;
+    if (wm.includes('forcedischarge')) return 'peak → discharge';
+    if (wm.includes('feed-in')) return 'export';
+    if (wm.includes('backup')) return 'backup';
+    return wm || '—';
   }
 
-  function workModeStrategy(g) {
-    if (!g) return '—';
-    const m = (g.workMode || '').toLowerCase();
-    if (m.includes('forcecharge')) return `cheap (charge → ${g.extraParam?.fdSoc ?? '?'}%)`;
-    if (m.includes('forcedischarge')) return 'peak (discharge)';
-    if (m.includes('feed-in')) return 'export';
-    if (m.includes('backup')) return 'backup';
-    return 'standard';
-  }
-
-  function classifyDelta(plan, actual) {
-    if (!actual) return 'is-pending';
-    return 'is-positive';  // placeholder — needs real SoC comparison
+  function kindClass(k) {
+    if (!k) return '';
+    return ' kind-' + k.replace(/[^a-z0-9_]/g, '-').toLowerCase();
   }
 
   async function load() {
     try {
-      const [plan, sched] = await Promise.all([
-        jsonFetch('/api/v1/optimization/plan'),
-        jsonFetch('/api/v1/schedule'),
+      const [exec, plan] = await Promise.all([
+        jsonFetch('/api/v1/execution/today'),
+        jsonFetch('/api/v1/optimization/plan').catch(() => ({})),
       ]);
-      const fox = plan?.fox || {};
       let groups = [];
-      try { groups = JSON.parse(fox.groups_json || '[]'); } catch (_e) {}
-      const now = new Date();
-      const slots = buildSlots(now);
+      try { groups = JSON.parse(plan?.fox?.groups_json || '[]'); } catch (_e) {}
+
+      const slots = exec?.slots || [];
+      const t = exec?.totals || {};
+
+      $('#totalCost').textContent = fmtP(t.cost_realised_p);
+      const dlt = t.delta_vs_svt_p;
+      const dEl = $('#totalDelta');
+      dEl.textContent = dlt == null ? '—' : `${dlt >= 0 ? '+' : ''}${dlt.toFixed(1)}p`;
+      dEl.className = 'value ' + (dlt > 0 ? 'text-bad' : (dlt < 0 ? 'text-ok' : ''));
+      $('#totalDaikinShare').textContent = t.daikin_share_pct == null ? '—' : `${t.daikin_share_pct.toFixed(0)}%`;
+      $('#totalLoad').textContent = `${fmtKwh(t.load_kwh)} kWh`;
+
       const tbody = $('#planTbody');
+      if (!slots.length) {
+        tbody.innerHTML = '<tr><td colspan="9" class="text-mute">No execution rows yet today (heartbeat will populate as the day progresses).</td></tr>';
+        return;
+      }
+
+      let cumDaikin = 0, cumRes = 0;
       tbody.innerHTML = '';
-      slots.forEach(slot => {
-        const g = findGroupForSlot(groups, slot);
-        const isNow = now >= slot.start && now < slot.end;
-        const isPast = slot.end <= now;
+      slots.forEach(s => {
+        cumDaikin += s.cost_daikin_p || 0;
+        cumRes    += s.cost_residual_p || 0;
+        const t = new Date(s.slot_utc);
+        const lbl = `${pad(t.getHours())}:${pad(t.getMinutes())}`;
+        const strategy = strategyForSlot(groups, s.slot_utc) + (s.slot_kind ? ` · ${s.slot_kind}` : '');
         const tr = document.createElement('tr');
-        if (isNow) tr.classList.add('is-now');
-        const plannedText = g ? `${g.workMode}` : '—';
-        const strategyText = workModeStrategy(g);
-        const actualText = isPast ? 'executed' : (isNow ? 'in progress' : '—');
-        const deltaClass = classifyDelta(g, isPast ? 'executed' : null);
+        const dvs = s.delta_vs_svt_p || 0;
+        const dvsCls = dvs > 0 ? 'text-bad' : (dvs < 0 ? 'text-ok' : '');
+        tr.className = kindClass(s.slot_kind);
         tr.innerHTML = `
-          <td>${slot.label}</td>
-          <td>${plannedText}</td>
-          <td>${strategyText}</td>
-          <td class="col-actual ${deltaClass}">${actualText}</td>
-          <td class="col-actual ${deltaClass}">—</td>`;
-        tr.addEventListener('click', () => showSlotDetail(slot, g, sched));
+          <td>${lbl}</td>
+          <td>${strategy}</td>
+          <td class="num">${fmtP(s.agile_p)}</td>
+          <td class="num">${fmtKwh(s.consumption_kwh)}</td>
+          <td class="num">${fmtP(s.cost_realised_p)}</td>
+          <td class="num text-dim">${cumDaikin.toFixed(1)}p</td>
+          <td class="num text-dim">${cumRes.toFixed(1)}p</td>
+          <td class="num text-mute">${fmtP(s.cost_svt_p)}</td>
+          <td class="num ${dvsCls}">${dvs >= 0 ? '+' : ''}${dvs.toFixed(1)}p</td>`;
+        tr.style.cursor = 'pointer';
+        tr.addEventListener('click', () => showDetail(s));
         tbody.appendChild(tr);
       });
-      if (slots.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="5" class="text-mute">No plan loaded.</td></tr>';
-      }
     } catch (e) {
       toast(`Plan: ${e.message}`, 'bad');
     }
   }
 
-  function showSlotDetail(slot, group, sched) {
+  function showDetail(slot) {
     const card = $('#slotDetailCard');
-    const daikin = (sched?.actions || []).filter(a => a.device === 'daikin' && a.start_time && new Date(a.start_time) >= slot.start && new Date(a.start_time) < slot.end);
-    const detail = {
-      slot: `${slot.label} → ${slot.end.toTimeString().slice(0,5)}`,
-      planned_fox_group: group || null,
-      daikin_actions_in_slot: daikin.length ? daikin : '(none — passive mode)',
-      note: 'Δ SoC actual will populate once optimizer_logs.predicted_soc_path migration ships.',
-    };
-    $('#slotDetailBody').textContent = JSON.stringify(detail, null, 2);
+    $('#slotDetailBody').textContent = JSON.stringify(slot, null, 2);
     card.hidden = false;
     card.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
@@ -110,6 +106,16 @@
   document.addEventListener('DOMContentLoaded', () => {
     $('#btnReloadPlan')?.addEventListener('click', load);
     $('#btnCloseSlot')?.addEventListener('click', () => { $('#slotDetailCard').hidden = true; });
+    $('#btnSimulateRePlan')?.addEventListener('click', async () => {
+      const result = await wrapAction({
+        simulateUrl: '/api/v1/optimization/propose/simulate',
+        applyUrl:    '/api/v1/optimization/propose',
+      });
+      if (result.applied) {
+        toast('Plan re-solve triggered', 'ok');
+        setTimeout(load, 4000);
+      }
+    });
     load();
   });
 })();

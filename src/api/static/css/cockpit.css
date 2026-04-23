@@ -441,7 +441,13 @@ a { color: inherit; text-decoration: none; }
     text-align: left;
 }
 .plan-table th { color: var(--text-mute); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
+.plan-table th.num, .plan-table td.num { text-align: right; }
 .plan-table tr.is-now { background: rgba(59,130,246,0.08); }
+.plan-table tr.kind-cheap { background: rgba(16,185,129,0.04); }
+.plan-table tr.kind-peak { background: rgba(245,158,11,0.06); }
+.plan-table tr.kind-peak_export { background: rgba(239,68,68,0.06); }
+.plan-table tr.kind-negative { background: rgba(37,99,235,0.06); }
+.plan-table tr:hover { background: rgba(255,255,255,0.03); }
 .plan-table .col-actual.is-positive { color: var(--ok); }
 .plan-table .col-actual.is-negative { color: var(--bad); }
 .plan-table .col-actual.is-pending { color: var(--text-mute); font-style: italic; }
