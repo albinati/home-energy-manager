@@ -1,0 +1,39 @@
+<div class="modal-backdrop" id="modalBackdrop" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+        <header class="modal-header">
+            <h2 id="modalTitle">Confirm action</h2>
+            <button class="modal-close" type="button" id="modalCloseBtn" aria-label="Close">&times;</button>
+        </header>
+        <section class="modal-body" id="modalBody">
+            <p class="modal-summary" id="modalSummary"></p>
+
+            <div class="modal-section">
+                <h3>Before</h3>
+                <pre class="kv-block" id="modalBefore"></pre>
+            </div>
+
+            <div class="modal-section">
+                <h3>After</h3>
+                <pre class="kv-block" id="modalAfter"></pre>
+            </div>
+
+            <div class="modal-section" id="modalImpact" hidden>
+                <h3>Impact</h3>
+                <p id="modalImpactBody"></p>
+            </div>
+
+            <div class="modal-section flags-section" id="modalFlagsSection" hidden>
+                <h3 class="flags-heading">⚠ Safety flags</h3>
+                <ul class="flags-list" id="modalFlags"></ul>
+                <label class="flags-confirm" id="modalFlagsConfirmLabel" hidden>
+                    Type <code id="modalFlagsConfirmWord"></code> to confirm:
+                    <input type="text" id="modalFlagsConfirmInput" autocomplete="off">
+                </label>
+            </div>
+        </section>
+        <footer class="modal-footer">
+            <button class="btn btn-secondary" type="button" id="modalCancelBtn">Cancel</button>
+            <button class="btn btn-primary" type="button" id="modalApplyBtn">Confirm &amp; apply</button>
+        </footer>
+    </div>
+</div>

@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0b0f17">
+    <title>{% block title %}Home Energy Manager{% endblock %}</title>
+    <link rel="stylesheet" href="/static/css/cockpit.css">
+    {% block head_extra %}{% endblock %}
+</head>
+<body>
+    <header class="topbar">
+        <div class="topbar-inner">
+            <div class="brand">⚡ Home Energy</div>
+            <nav class="tabs" aria-label="Pages">
+                <a href="/" class="tab {% if active_page == 'cockpit' %}is-active{% endif %}">Cockpit</a>
+                <a href="/insights" class="tab {% if active_page == 'insights' %}is-active{% endif %}">Insights</a>
+                <a href="/plan" class="tab {% if active_page == 'plan' %}is-active{% endif %}">Plan</a>
+                <a href="/settings" class="tab {% if active_page == 'settings' %}is-active{% endif %}">Settings</a>
+            </nav>
+            <div class="quota-pills" id="quotaPills">
+                <span class="pill" id="quotaDaikin" title="Daikin Onecta API requests today">D —/180</span>
+                <span class="pill" id="quotaFox" title="Fox ESS API requests today">F —/1200</span>
+            </div>
+        </div>
+    </header>
+
+    <main class="page">
+        {% block content %}{% endblock %}
+    </main>
+
+    {% include "_modal.html" %}
+
+    <div class="toast-stack" id="toastStack" aria-live="polite"></div>
+
+    <script src="/static/js/modal.js"></script>
+    <script src="/static/js/quota.js"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>
