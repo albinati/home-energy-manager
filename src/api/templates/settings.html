@@ -3,58 +3,64 @@
 {% block content %}
 
 <p class="text-dim" style="margin:0 0 0.85rem 0;font-size:0.88rem;">
-    Every change goes through preview → confirm. The mode switch (simulation vs operational) and snapshot rollback live here on purpose — out of accidental-click range.
+    Every change goes through preview → confirm. The danger-zone toggles
+    (Daikin control + Operation mode + Rollback) are intentionally on this page,
+    out of accidental-click range from the main cockpit.
 </p>
 
-<section class="card">
-    <h2 class="card-title">Daikin control</h2>
-    <div class="settings-group" id="settingsDaikin"></div>
-</section>
-
-<section class="card">
-    <h2 class="card-title">Strategy</h2>
-    <div class="settings-group" id="settingsStrategy"></div>
-</section>
-
-<section class="card">
-    <h2 class="card-title">Schedule cadence</h2>
-    <div class="settings-group" id="settingsSchedule"></div>
-</section>
-
-<section class="card">
-    <h2 class="card-title">Comfort</h2>
-    <div class="settings-group" id="settingsComfort"></div>
-</section>
-
-<section class="card">
-    <h2 class="card-title">Operation mode &amp; rollback</h2>
-    <p class="text-dim" style="font-size:0.85rem;margin:0 0 0.5rem 0;">
-        The system holds snapshots before any operational/simulation transition. Rollback restores the most recent and forces simulation mode.
-    </p>
-    <div class="settings-row">
-        <div>
-            <div class="label">Operation mode</div>
-            <div class="description">simulation = no hardware writes; operational = live</div>
+<!-- DANGER ZONE: Daikin + operation mode + rollback -->
+<section class="card danger-zone">
+    <h2 class="card-title">
+        <span style="display:inline-flex;align-items:center;gap:0.4rem;">⚠ Control mode</span>
+        <span class="text-mute" style="font-size:0.72rem;font-weight:400;">Changes here affect what hardware the service writes to</span>
+    </h2>
+    <div class="setting-block" id="settingDaikinControlMode"></div>
+    <div class="setting-block" id="settingOperationMode">
+        <div class="setting-head">
+            <h3 class="setting-name">Operation mode</h3>
+            <span class="status-badge" id="currentOpMode">—</span>
         </div>
-        <div class="control">
-            <span class="current" id="currentOpMode">—</span>
+        <p class="setting-desc"><code>simulation</code> blocks ALL hardware writes from this service. <code>operational</code> allows the LP/dispatcher to push to Fox V3 (and Daikin if active mode).</p>
+        <div class="setting-actions">
             <button class="btn btn-secondary btn-sm" data-op-mode="simulation">→ simulation</button>
             <button class="btn btn-secondary btn-sm" data-op-mode="operational">→ operational</button>
         </div>
     </div>
-    <div class="settings-row">
-        <div>
-            <div class="label">Rollback</div>
-            <div class="description">Restore last snapshot &amp; force simulation</div>
+    <div class="setting-block" id="settingRollback">
+        <div class="setting-head">
+            <h3 class="setting-name">Rollback</h3>
         </div>
-        <div class="control">
-            <button class="btn btn-danger btn-sm" id="btnRollback">⟲ Rollback latest</button>
+        <p class="setting-desc">Restore the most recent config snapshot and force simulation mode.</p>
+        <div class="setting-actions">
+            <button class="btn btn-danger btn-sm" id="btnRollback">⟲ Rollback latest snapshot</button>
         </div>
     </div>
+    <div class="setting-block" id="settingRequireSim"></div>
+</section>
+
+<!-- COMFORT -->
+<section class="card">
+    <h2 class="card-title">Comfort targets</h2>
+    <div id="settingsComfort"></div>
+</section>
+
+<!-- STRATEGY -->
+<section class="card">
+    <h2 class="card-title">Optimization strategy</h2>
+    <div id="settingsStrategy"></div>
+</section>
+
+<!-- SCHEDULE -->
+<section class="card">
+    <h2 class="card-title">Schedule cadence</h2>
+    <p class="text-dim" style="font-size:0.85rem;margin:0 0 0.5rem 0;">
+        When the LP re-solves the plan. Cron jobs are re-registered automatically when these change.
+    </p>
+    <div id="settingsSchedule"></div>
 </section>
 
 {% endblock %}
 
 {% block scripts %}
-<script src="/static/js/settings.js"></script>
+<script src="/static/js/settings.js?v={{ static_v('js/settings.js') }}"></script>
 {% endblock %}

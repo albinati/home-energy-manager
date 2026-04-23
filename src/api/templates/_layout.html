@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <meta name="theme-color" content="#0b0f17">
     <title>{% block title %}Home Energy Manager{% endblock %}</title>
-    <link rel="stylesheet" href="/static/css/cockpit.css">
+    <link rel="stylesheet" href="/static/css/cockpit.css?v={{ static_v('css/cockpit.css') }}">
     {% block head_extra %}{% endblock %}
 </head>
 <body>
@@ -33,8 +33,8 @@
 
     <div class="toast-stack" id="toastStack" aria-live="polite"></div>
 
-    <script src="/static/js/modal.js"></script>
-    <script src="/static/js/quota.js"></script>
+    <script src="/static/js/modal.js?v={{ static_v('js/modal.js') }}"></script>
+    <script src="/static/js/quota.js?v={{ static_v('js/quota.js') }}"></script>
     {% block scripts %}{% endblock %}
 </body>
 </html>
