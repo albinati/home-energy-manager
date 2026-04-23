@@ -235,6 +235,14 @@ WHITELIST: dict[str, OverrideSpec] = {
         description="Allow peak-export discharge or never.",
         group="mode", promotable=True,
     ),
+    "DAIKIN_CONTROL_MODE": OverrideSpec(
+        key="DAIKIN_CONTROL_MODE",
+        config_attr="DAIKIN_CONTROL_MODE",
+        type_name="str",
+        enum=("passive", "active"),
+        description="passive = firmware autonomous (LP load-follows HP); active = LP schedules tank + LWT.",
+        group="mode", promotable=True,
+    ),
 }
 
 

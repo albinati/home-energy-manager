@@ -131,8 +131,8 @@
       const all = Array.isArray(resp) ? resp : (resp?.settings || []);
       const byKey = Object.fromEntries(all.map(s => [s.key, s]));
 
-      // v10.2: DAIKIN_CONTROL_MODE + REQUIRE_SIMULATION_ID + OPERATION_MODE
-      // moved to the topbar mode-switcher dialog. They no longer render here.
+      // v10.2: DAIKIN_CONTROL_MODE + REQUIRE_SIMULATION_ID moved to the
+      // topbar mode-switcher dialog. They no longer render here.
 
       // Grouped sections
       const groups = {
