@@ -297,6 +297,136 @@ a { color: inherit; text-decoration: none; }
     margin-top: 0.2rem;
 }
 
+/* v10.2 Insights — per-slot tariff strip (Day view) */
+.tariff-day-strip {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(36px, 1fr));
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+    margin: 0 0 0.85rem 0;
+}
+.tariff-day-cell {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 0.3rem 0.1rem;
+    background: var(--bg-card-2);
+    font-size: 0.6rem;
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+    line-height: 1.1;
+    min-height: 38px;
+    cursor: help;
+}
+.tariff-day-cell-time { font-size: 0.55rem; color: var(--text-mute); }
+.tariff-day-cell-price { font-size: 0.7rem; color: var(--text); font-weight: 600; }
+.tariff-day-cell.kind-cheap    { background: rgba(16,185,129,0.18); }
+.tariff-day-cell.kind-cheap .tariff-day-cell-price { color: var(--ok); }
+.tariff-day-cell.kind-peak     { background: rgba(245,158,11,0.22); }
+.tariff-day-cell.kind-peak .tariff-day-cell-price { color: var(--warn); }
+.tariff-day-cell.kind-negative { background: rgba(37,99,235,0.25); }
+.tariff-day-cell.kind-negative .tariff-day-cell-price { color: #93c5fd; }
+.tariff-day-cell.kind-standard { background: var(--bg-card-2); }
+
+/* Period browser bar */
+.period-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+.period-nav { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
+.period-nav-label {
+    font-size: 0.95rem;
+    font-weight: 600;
+    min-width: 12ch;
+    text-align: center;
+    color: var(--text);
+}
+.period-tabs { display: flex; gap: 0.3rem; flex-wrap: wrap; }
+
+/* Collapsible <details> insights cards */
+.insights-section { padding: 0.85rem 1rem; }
+.insights-section > summary.card-title {
+    cursor: pointer;
+    list-style: none;
+    user-select: none;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+.insights-section > summary.card-title::before {
+    content: "▸";
+    font-size: 0.7rem;
+    color: var(--text-mute);
+    transition: transform 0.12s ease-out;
+    display: inline-block;
+}
+.insights-section[open] > summary.card-title::before { transform: rotate(90deg); }
+.insights-section > summary.card-title::-webkit-details-marker { display: none; }
+
+/* Pattern panels */
+.patterns-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0.85rem;
+}
+@media (min-width: 720px) {
+    .patterns-grid { grid-template-columns: 1fr 1fr; }
+}
+.pattern-card {
+    background: var(--bg-card-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.65rem 0.85rem;
+}
+.pattern-title {
+    margin: 0 0 0.5rem 0;
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--text-mute);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+.pattern-bar-row {
+    display: grid;
+    grid-template-columns: 3.5rem 1fr auto;
+    gap: 0.5rem;
+    align-items: center;
+    font-size: 0.78rem;
+    margin: 0.15rem 0;
+    font-variant-numeric: tabular-nums;
+}
+.pattern-bar-label { color: var(--text-dim); }
+.pattern-bar-track { background: var(--bg); border-radius: 3px; height: 10px; overflow: hidden; }
+.pattern-bar-fill { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+.pattern-bar-fill.kind-cheap    { background: var(--ok); }
+.pattern-bar-fill.kind-peak     { background: var(--warn); }
+.pattern-bar-fill.kind-negative { background: #60a5fa; }
+.pattern-bar-fill.kind-standard { background: var(--text-mute); }
+.pattern-bar-label.kind-cheap   { color: var(--ok); }
+.pattern-bar-label.kind-peak    { color: var(--warn); }
+.pattern-bar-label.kind-negative{ color: #93c5fd; }
+.pattern-bar-val { color: var(--text); }
+.pv-spark {
+    display: flex;
+    align-items: flex-end;
+    gap: 1px;
+    height: 44px;
+    padding-top: 4px;
+}
+.pv-spark-bar {
+    flex: 1 1 auto;
+    background: rgba(245,158,11,0.55);
+    border-radius: 1px 1px 0 0;
+    min-width: 2px;
+}
+
 /* Plan timeline strip */
 .plan-strip {
     display: flex;

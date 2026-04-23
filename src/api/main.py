@@ -2713,9 +2713,212 @@ async def agile_today():
     }
 
 
+def _classify_tariff_kinds(slots: list[dict]) -> None:
+    """Mutate slots in-place adding a ``kind`` ∈ {negative, cheap, standard,
+    peak, peak_export}. Pure percentile classification — no PV consideration —
+    so it works for arbitrary historic days without solar context.
+    """
+    if not slots:
+        return
+    prices = sorted(float(s["p"]) for s in slots)
+    n = len(prices)
+    q25 = prices[max(0, n // 4 - 1)]
+    q75 = prices[min(n - 1, (3 * n) // 4)]
+    mean_p = sum(prices) / n
+    cheap_thr = min(mean_p * 0.85, q25)
+    peak_thr = max(q75, float(config.OPTIMIZATION_PEAK_THRESHOLD_PENCE))
+    for s in slots:
+        p = float(s["p"])
+        if p <= 0:
+            s["kind"] = "negative"
+        elif p < cheap_thr:
+            s["kind"] = "cheap"
+        elif p > peak_thr:
+            s["kind"] = "peak"
+        else:
+            s["kind"] = "standard"
+
+
+@app.get("/api/v1/agile/day")
+async def agile_day(date: str):
+    """Tariff slots for an arbitrary local day (Europe/London) with kind labels.
+
+    Powers the Insights Day view's tariff strip. Uses
+    :func:`db.get_agile_rates_slots_for_local_day` which handles DST
+    (returns 46/48/50 slots). Each slot gets a percentile-based ``kind``
+    suitable for colour-coding.
+    """
+    try:
+        from datetime import date as _date
+        d = _date.fromisoformat(date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+    from .. import db as _db
+    tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
+    if not tariff:
+        return {"date": date, "tariff_code": None, "slots": []}
+    tz = config.BULLETPROOF_TIMEZONE or "Europe/London"
+    rows = _db.get_agile_rates_slots_for_local_day(tariff, d, tz_name=tz)
+    slots = [
+        {
+            "valid_from": r["valid_from"],
+            "valid_to": r["valid_to"],
+            "p": float(r["value_inc_vat"]),
+        }
+        for r in rows
+    ]
+    _classify_tariff_kinds(slots)
+    return {
+        "date": date,
+        "tariff_code": tariff,
+        "tz": tz,
+        "slots": slots,
+    }
+
+
+# --- v10.2 — pattern panels & ML-ready time-series (Insights browser) ---
+
+def _validate_range(start: str, end: str) -> None:
+    """Common range validator for /patterns/* and /timeseries endpoints."""
+    from datetime import date as _date
+    try:
+        s = _date.fromisoformat(start)
+        e = _date.fromisoformat(end)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="start and end must be YYYY-MM-DD")
+    if e < s:
+        raise HTTPException(status_code=400, detail="end must be >= start")
+    if (e - s).days > 366 * 3:
+        raise HTTPException(status_code=400, detail="range too large (max ~3 years)")
+
+
+@app.get("/api/v1/patterns/hourly")
+async def patterns_hourly(start: str, end: str):
+    _validate_range(start, end)
+    from ..analytics import patterns as _pat
+    return _pat.hourly_load_profile_for_range(start, end)
+
+
+@app.get("/api/v1/patterns/dow")
+async def patterns_dow(start: str, end: str):
+    _validate_range(start, end)
+    from ..analytics import patterns as _pat
+    return _pat.dow_load_shape(start, end)
+
+
+@app.get("/api/v1/patterns/price-distribution")
+async def patterns_price_distribution(start: str, end: str):
+    _validate_range(start, end)
+    from ..analytics import patterns as _pat
+    tariff = (config.OCTOPUS_TARIFF_CODE or "").strip() or None
+    return _pat.cheap_peak_slot_frequency(tariff, start, end)
+
+
+@app.get("/api/v1/patterns/pv-calibration")
+async def patterns_pv_calibration(start: str, end: str):
+    _validate_range(start, end)
+    from ..analytics import patterns as _pat
+    return _pat.pv_forecast_vs_actual(start, end)
+
+
+_TIMESERIES_METRICS = {"load_kwh", "import_p", "solar_kwh", "daikin_kwh"}
+
+
+@app.get("/api/v1/timeseries")
+async def timeseries(
+    metric: str,
+    start: str,
+    end: str,
+    granularity: str = "hour",
+):
+    """Flat ``[{t, v}]`` for one metric. SQLite-only — never cloud.
+
+    metric ∈ {load_kwh, import_p, solar_kwh, daikin_kwh}.
+    granularity ∈ {slot, hour, day} — for daily metrics (solar_kwh, daikin_kwh)
+    only ``day`` is supported; load_kwh and import_p support all three.
+    """
+    if metric not in _TIMESERIES_METRICS:
+        raise HTTPException(status_code=400, detail=f"metric must be one of {sorted(_TIMESERIES_METRICS)}")
+    if granularity not in ("slot", "hour", "day"):
+        raise HTTPException(status_code=400, detail="granularity must be slot|hour|day")
+    _validate_range(start, end)
+
+    from datetime import UTC, date as _date, datetime as _dt, timedelta as _td
+    from .. import db as _db
+
+    s = _date.fromisoformat(start)
+    e = _date.fromisoformat(end)
+    s_iso = _dt(s.year, s.month, s.day, tzinfo=UTC).isoformat().replace("+00:00", "Z")
+    e_iso = (_dt(e.year, e.month, e.day, tzinfo=UTC) + _td(days=1)).isoformat().replace("+00:00", "Z")
+
+    points: list[dict] = []
+
+    if metric in ("load_kwh", "import_p"):
+        # execution_log is the per-tick source for both load and import price
+        with _db._lock:
+            conn = _db.get_connection()
+            try:
+                col = "consumption_kwh" if metric == "load_kwh" else "agile_price_pence"
+                cur = conn.execute(
+                    f"""SELECT timestamp, {col} AS v
+                        FROM execution_log
+                        WHERE timestamp >= ? AND timestamp < ? AND {col} IS NOT NULL
+                        ORDER BY timestamp""",
+                    (s_iso, e_iso),
+                )
+                rows = cur.fetchall()
+            finally:
+                conn.close()
+
+        if granularity == "slot":
+            for r in rows:
+                points.append({"t": r["timestamp"], "v": float(r["v"])})
+        else:
+            # Bucket into hour or day
+            buckets: dict[str, list[float]] = {}
+            for r in rows:
+                ts = r["timestamp"]
+                key = ts[:13] if granularity == "hour" else ts[:10]  # YYYY-MM-DDTHH or YYYY-MM-DD
+                buckets.setdefault(key, []).append(float(r["v"]))
+            for key in sorted(buckets):
+                vals = buckets[key]
+                if metric == "load_kwh":
+                    v = sum(vals)  # kWh aggregates by sum
+                else:
+                    v = sum(vals) / len(vals)  # price aggregates by mean
+                points.append({"t": key, "v": round(v, 4)})
+
+    elif metric == "solar_kwh":
+        if granularity != "day":
+            raise HTTPException(status_code=400, detail="solar_kwh supports granularity=day only")
+        for r in _db.get_fox_energy_daily_range(s.isoformat(), e.isoformat()):
+            v = r.get("solar_kwh")
+            if v is None:
+                continue
+            points.append({"t": r["date"], "v": round(float(v), 3)})
+
+    elif metric == "daikin_kwh":
+        if granularity != "day":
+            raise HTTPException(status_code=400, detail="daikin_kwh supports granularity=day only")
+        for r in _db.get_daikin_consumption_daily_range(s.isoformat(), e.isoformat()):
+            v = r.get("kwh_total")
+            if v is None:
+                continue
+            points.append({"t": r["date"], "v": round(float(v), 3)})
+
+    return {
+        "metric": metric,
+        "granularity": granularity,
+        "start": start,
+        "end": end,
+        "count": len(points),
+        "points": points,
+    }
+
+
 @app.get("/api/v1/execution/today")
-async def execution_today():
-    """Per-30-min-slot realised cost data for today's plan-vs-actual view.
+async def execution_today(date: str | None = None):
+    """Per-30-min-slot realised cost data for plan-vs-actual view.
 
     The execution_log table is written by the heartbeat tick (~every 2 min),
     so we aggregate ticks within each 30-min slot boundary:
@@ -2727,6 +2930,10 @@ async def execution_today():
 
     Quota-safe: SQLite reads only.
 
+    Pass ``date=YYYY-MM-DD`` to view a past UTC day; default is today.
+    Used by both the legacy Plan tab (today) and the v10.2 Insights Day view
+    (arbitrary historic days).
+
     NOTE: pre-v10.1 historical rows used a self-referential constant for
     consumption_kwh — those slots will show flat values. New ticks (after
     the heartbeat fix shipped) record real Fox load × interval.
@@ -2734,8 +2941,16 @@ async def execution_today():
     from datetime import UTC, datetime, timedelta
     from .. import db as _db
 
-    now = datetime.now(UTC)
-    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if date:
+        try:
+            from datetime import date as _date
+            d = _date.fromisoformat(date)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+        day_start = datetime(d.year, d.month, d.day, tzinfo=UTC)
+    else:
+        now = datetime.now(UTC)
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     day_end = day_start.replace(hour=23, minute=59, second=59, microsecond=999999)
 
     with _db._lock:
