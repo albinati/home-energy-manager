@@ -48,3 +48,16 @@ def _isolate_db_path(tmp_path_factory, monkeypatch):
     # the env var, so callers that already read config.DB_PATH in-place still
     # see the isolated path.
     monkeypatch.setattr("src.config.config.DB_PATH", tmp_db_str)
+
+
+@pytest.fixture(autouse=True)
+def _default_daikin_active_for_tests(monkeypatch):
+    """v10: production default for DAIKIN_CONTROL_MODE is 'passive'. Most tests
+    were written before passive mode existed and assume the LP/dispatch can
+    freely choose Daikin variables — i.e. active mode. Default tests to active
+    so legacy assertions hold; tests covering passive behaviour explicitly
+    override via ``monkeypatch.setenv("DAIKIN_CONTROL_MODE", "passive")``.
+    """
+    monkeypatch.setenv("DAIKIN_CONTROL_MODE", "active")
+    from src.runtime_settings import clear_cache
+    clear_cache()

@@ -25,7 +25,11 @@ from zoneinfo import ZoneInfo
 import pulp
 
 from ..config import config
-from ..physics import get_daikin_heating_kw, lwt_offset_from_space_kw
+from ..physics import (
+    get_daikin_heating_kw,
+    lwt_offset_from_space_kw,
+    predict_passive_daikin_load,
+)
 from ..weather import WeatherLpSeries
 
 logger = logging.getLogger(__name__)
@@ -246,6 +250,18 @@ def solve_lp(
     hp_max_kw = float(getattr(config, "DAIKIN_MAX_HP_KW", 2.0))
     max_hp_kwh = hp_max_kw * slot_h  # max kWh per slot
 
+    # Passive mode (def1): the LP no longer *decides* Daikin energy — the firmware
+    # is autonomous. We predict the per-slot autonomous draw and clamp e_dhw and
+    # e_space to that vector below, so the LP correctly attributes the thermal
+    # load when allocating PV/battery/grid. Active mode keeps v9 free variables.
+    passive_daikin = config.DAIKIN_CONTROL_MODE == "passive"
+    if passive_daikin:
+        passive_e_space, passive_e_dhw = predict_passive_daikin_load(
+            t_out, cop_dhw, cop_space, slot_h=slot_h, max_kwh_per_slot=max_hp_kwh,
+        )
+    else:
+        passive_e_space = passive_e_dhw = []
+
     # Minimum HP ON duration (anti short-cycling)
     hp_min_on = int(getattr(config, "LP_HP_MIN_ON_SLOTS", 2))
 
@@ -329,20 +345,33 @@ def solve_lp(
         prob += chg[i] <= max_batt_kwh * b_bat[i]
         prob += dis[i] <= max_batt_kwh * (1 - b_bat[i])
 
-        # HP: continuous power bounded by on/off binary
-        prob += e_dhw[i] + e_space[i] <= max_hp_kwh * hp_on[i]
-        prob += e_dhw[i] + e_space[i] >= 0  # (implicit from lower bounds)
-        prob += m_dhw[i] + m_space[i] <= 1
-        prob += m_dhw[i] + m_space[i] >= hp_on[i]  # must pick a mode when on
-        # Each mode bounds its share.
-        # e_dhw: generic HP cap (DHW draw is controlled by tank temp setpoint, not climate curve)
-        # e_space: physics ceiling from climate curve + LWT_OFFSET_MAX (not the HP nameplate)
-        prob += e_dhw[i] <= max_hp_kwh * m_dhw[i]
-        prob += e_space[i] <= space_ceil_kwh[i] * m_space[i]
-        # When HP is off, both e_dhw and e_space are 0 (via hp_on bound above +
-        # mode bounds below; hp_on=0 → m_dhw+m_space≤1 and ≥0 still allows a
-        # mode flag=1 with zero power, so add explicit binding)
-        prob += e_dhw[i] + e_space[i] >= 0  # already set; kept for clarity
+        if passive_daikin:
+            # Passive: clamp Daikin draw to firmware-predicted values; bind binaries
+            # to consistent values so other slot constraints stay feasible. The mode
+            # mutex (m_dhw + m_space <= 1) does NOT apply — the firmware can run
+            # both DHW and space in the same 30-min slot.
+            prob += e_dhw[i] == passive_e_dhw[i]
+            prob += e_space[i] == passive_e_space[i]
+            on_val = 1 if (passive_e_dhw[i] + passive_e_space[i]) > 1e-6 else 0
+            prob += hp_on[i] == on_val
+            prob += m_dhw[i] == (1 if passive_e_dhw[i] > 1e-6 else 0)
+            prob += m_space[i] == (1 if passive_e_space[i] > 1e-6 else 0)
+        else:
+            # Active (legacy v9): HP continuous power bounded by on/off binary,
+            # with single-mode-per-slot mutex.
+            prob += e_dhw[i] + e_space[i] <= max_hp_kwh * hp_on[i]
+            prob += e_dhw[i] + e_space[i] >= 0  # (implicit from lower bounds)
+            prob += m_dhw[i] + m_space[i] <= 1
+            prob += m_dhw[i] + m_space[i] >= hp_on[i]  # must pick a mode when on
+            # Each mode bounds its share.
+            # e_dhw: generic HP cap (DHW draw is controlled by tank temp setpoint, not climate curve)
+            # e_space: physics ceiling from climate curve + LWT_OFFSET_MAX (not the HP nameplate)
+            prob += e_dhw[i] <= max_hp_kwh * m_dhw[i]
+            prob += e_space[i] <= space_ceil_kwh[i] * m_space[i]
+            # When HP is off, both e_dhw and e_space are 0 (via hp_on bound above +
+            # mode bounds below; hp_on=0 → m_dhw+m_space≤1 and ≥0 still allows a
+            # mode flag=1 with zero power, so add explicit binding)
+            prob += e_dhw[i] + e_space[i] >= 0  # already set; kept for clarity
 
         # DHW tank thermodynamics
         q_heat_dhw = e_dhw[i] * cop_dhw[i] * j_per_kwh
@@ -355,14 +384,16 @@ def solve_lp(
         q_sol_j = sg * pv_avail[i] * j_per_kwh
         prob += t_in[i + 1] == t_in[i] + (q_heat_space - loss_bld_j + q_sol_j + q_int_j) / c_bld
 
-        # Radiator output cap
-        prob += e_space[i] * cop_space[i] <= float(config.RADIATOR_MAX_KW) * slot_h
+        # Radiator output cap (skip in passive — the firmware respects this physically
+        # and prediction-based equality may otherwise sit at the boundary).
+        if not passive_daikin:
+            prob += e_space[i] * cop_space[i] <= float(config.RADIATOR_MAX_KW) * slot_h
 
-        # Climate-curve floor: the Daikin compressor draws at least this much when
-        # climate control is running. Prevents the LP from scheduling zero space heating
-        # on cold overnight slots (which the heuristic can't fix after the fact).
-        if space_floor_kwh[i] > 0:
-            prob += e_space[i] + e_dhw[i] >= space_floor_kwh[i]
+            # Climate-curve floor: the Daikin compressor draws at least this much when
+            # climate control is running. Prevents the LP from scheduling zero space heating
+            # on cold overnight slots (which the heuristic can't fix after the fact).
+            if space_floor_kwh[i] > 0:
+                prob += e_space[i] + e_dhw[i] >= space_floor_kwh[i]
 
         # Comfort soft constraints
         t_end_lo, t_end_hi = _slot_occupancy_bounds(slot_starts_utc[i], tz)
