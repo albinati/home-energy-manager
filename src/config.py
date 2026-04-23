@@ -300,7 +300,10 @@ class Config:
     BATTERY_RT_EFFICIENCY: float = float(os.getenv("BATTERY_RT_EFFICIENCY", "0.92"))
     MAX_INVERTER_KW: float = float(os.getenv("MAX_INVERTER_KW", "6.0"))
     EXPORT_RATE_PENCE: float = float(os.getenv("EXPORT_RATE_PENCE", "15.0"))
-    LP_HORIZON_HOURS: int = int(os.getenv("LP_HORIZON_HOURS", "36"))
+    # Rolling-window length for the LP/Fox V3 dispatch. Default 24 h so every
+    # replan produces a "now → now + 24 h" schedule; truncated if Agile data
+    # ends sooner (Octopus publishes tomorrow ~16:00 UTC).
+    LP_HORIZON_HOURS: int = int(os.getenv("LP_HORIZON_HOURS", "24"))
     DAIKIN_POWER_BUCKETS_KW: str = (os.getenv("DAIKIN_POWER_BUCKETS_KW") or "0,0.5,1.0,1.5").strip()
     # Heat pump nameplate cap (kW) used in LP HP power bounds.
     DAIKIN_MAX_HP_KW: float = float(os.getenv("DAIKIN_MAX_HP_KW", "2.0"))

@@ -1204,6 +1204,55 @@ def _preserve_daikin_pending_ids_for_replan(plan_date: str) -> set[int]:
     return preserve
 
 
+def _preserve_daikin_pending_ids_in_range(
+    start_utc_iso: str, end_utc_iso: str
+) -> set[int]:
+    """Range variant of :func:`_preserve_daikin_pending_ids_for_replan`.
+
+    Active-row restore pointers are scanned globally (not range-filtered) because
+    an in-flight action's *restore* row typically falls ahead of ``now`` and is
+    therefore inside the rolling clear window even when the active row itself is
+    not. In-flight pending preservation scans only the pending rows whose
+    ``start_time`` falls in ``[start_utc_iso, end_utc_iso)``.
+    """
+    now_utc = _now_utc()
+    preserve: set[int] = set()
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT restore_action_id FROM action_schedule
+                   WHERE device = 'daikin' AND status = 'active'
+                         AND restore_action_id IS NOT NULL"""
+            )
+            for row in cur.fetchall():
+                rid = row["restore_action_id"] if hasattr(row, "keys") else row[0]
+                if rid is not None:
+                    preserve.add(int(rid))
+
+            cur = conn.execute(
+                """SELECT id, start_time, end_time, restore_action_id
+                   FROM action_schedule
+                   WHERE device = 'daikin' AND status = 'pending'
+                         AND start_time >= ? AND start_time < ?""",
+                (start_utc_iso, end_utc_iso),
+            )
+            for row in cur.fetchall():
+                try:
+                    start = _parse_action_time_utc(str(row["start_time"]))
+                    end = _parse_action_time_utc(str(row["end_time"]))
+                except (ValueError, KeyError, TypeError):
+                    continue
+                if start <= now_utc < end:
+                    preserve.add(int(row["id"]))
+                    rid = row["restore_action_id"]
+                    if rid is not None:
+                        preserve.add(int(rid))
+        finally:
+            conn.close()
+    return preserve
+
+
 def clear_actions_for_date(plan_date: str, device: str | None = None) -> None:
     """Remove pending actions for a plan date (before re-optimizing).
 
@@ -1239,6 +1288,56 @@ def clear_actions_for_date(plan_date: str, device: str | None = None) -> None:
                     """DELETE FROM action_schedule
                        WHERE date = ? AND status = 'pending'""",
                     (plan_date,),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def clear_actions_in_range(
+    start_utc_iso: str,
+    end_utc_iso: str,
+    device: str | None = None,
+) -> None:
+    """Remove pending actions whose ``start_time`` falls in ``[start, end)``.
+
+    Used by the rolling 24 h planner: a plan written at, e.g., 18:00 today
+    straddles today and tomorrow, so clearing by a single ``plan_date`` leaves
+    the other date's stale rows in place. Daikin rows inherit the same
+    in-flight preservation semantics as :func:`clear_actions_for_date`.
+    """
+    preserve_ids: set[int] = set()
+    if device == "daikin":
+        preserve_ids = _preserve_daikin_pending_ids_in_range(start_utc_iso, end_utc_iso)
+    with _lock:
+        conn = get_connection()
+        try:
+            if device:
+                if preserve_ids:
+                    placeholders = ",".join("?" * len(preserve_ids))
+                    q = (
+                        f"""DELETE FROM action_schedule
+                            WHERE device = ? AND status = 'pending'
+                            AND start_time >= ? AND start_time < ?
+                            AND id NOT IN ({placeholders})"""
+                    )
+                    conn.execute(
+                        q,
+                        (device, start_utc_iso, end_utc_iso, *sorted(preserve_ids)),
+                    )
+                else:
+                    conn.execute(
+                        """DELETE FROM action_schedule
+                           WHERE device = ? AND status = 'pending'
+                           AND start_time >= ? AND start_time < ?""",
+                        (device, start_utc_iso, end_utc_iso),
+                    )
+            else:
+                conn.execute(
+                    """DELETE FROM action_schedule
+                       WHERE status = 'pending'
+                       AND start_time >= ? AND start_time < ?""",
+                    (start_utc_iso, end_utc_iso),
                 )
             conn.commit()
         finally:
