@@ -46,11 +46,16 @@ def test_first_acquire_writes_own_pid(tmp_lock):
         _release(fd)
 
 
-def test_second_acquire_sigterms_prior_and_succeeds(tmp_lock):
-    """When another process holds the lock, _acquire_singleton_lock_early must
-    SIGTERM it and retake the lock (the root cause of the MCP zombie pile-up
-    in #60 was that nothing ever killed the prior instance).
+def test_second_acquire_yields_silently_to_prior(tmp_lock):
+    """v10.1 hotfix: when another process holds the lock, the new spawn must
+    exit silently with code 0 — NOT SIGTERM the holder.
+
+    The previous (PR-A) behaviour killed the prior holder, which broke
+    openclaw's persistent stdio MCP connection in prod (observed as
+    ``MCP error -32000: Connection closed``). POSIX flock auto-releases on
+    process death, so true crashes recover without needing SIGTERM.
     """
+    kill_called: list[tuple[int, int]] = []
     holder_src = (
         "import fcntl, os, sys, time\n"
         f"fd = os.open(r'{tmp_lock}', os.O_RDWR | os.O_CREAT)\n"
@@ -66,43 +71,62 @@ def test_second_acquire_sigterms_prior_and_succeeds(tmp_lock):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    acquired_fd: int | None = None
+    try:
+        line = proc.stdout.readline().decode().strip()
+        assert line == "LOCKED", f"holder did not lock: stderr={proc.stderr.read()!r}"
+        # Spy on os.kill to confirm we do NOT call it
+        import src.mcp_server as m
+        original_kill = m.os.kill
+        m.os.kill = lambda pid, sig: kill_called.append((pid, sig))
+        try:
+            fd = _acquire_singleton_lock_early()
+        finally:
+            m.os.kill = original_kill
+        assert fd is None, "second acquire should yield (return None), not take the lock"
+        assert kill_called == [], f"must not SIGTERM the holder; called {kill_called}"
+        # Holder should still be alive
+        assert proc.poll() is None, "holder must still be running"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=2)
+
+
+def test_force_kill_env_var_restores_old_behaviour(tmp_lock, monkeypatch):
+    """Manual recovery escape hatch: HEM_MCP_FORCE_KILL_PRIOR=1 re-enables
+    the SIGTERM-and-retry path for emergency unstuck scenarios.
+    """
+    monkeypatch.setenv("HEM_MCP_FORCE_KILL_PRIOR", "1")
+    holder_src = (
+        "import fcntl, os, sys, time\n"
+        f"fd = os.open(r'{tmp_lock}', os.O_RDWR | os.O_CREAT)\n"
+        "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+        "os.ftruncate(fd, 0)\n"
+        "os.write(fd, f'{os.getpid()}\\n'.encode())\n"
+        "os.fsync(fd)\n"
+        "sys.stdout.write('LOCKED\\n'); sys.stdout.flush()\n"
+        "time.sleep(30)\n"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", holder_src],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    acquired_fd = None
     try:
         line = proc.stdout.readline().decode().strip()
         assert line == "LOCKED", f"holder did not lock: stderr={proc.stderr.read()!r}"
         acquired_fd = _acquire_singleton_lock_early()
-        assert acquired_fd is not None, "failed to acquire after SIGTERM retry"
-        assert int(tmp_lock.read_text().strip()) == os.getpid()
+        assert acquired_fd is not None, "force-kill path failed to acquire"
         rc = proc.wait(timeout=5)
         assert rc in (-signal.SIGTERM, 128 + signal.SIGTERM, 0), (
-            f"holder exit code {rc} unexpected"
+            f"holder exit code {rc} unexpected (force-kill expected)"
         )
     finally:
         if proc.poll() is None:
             proc.kill()
         if acquired_fd is not None:
             _release(acquired_fd)
-
-
-def test_acquire_gives_up_when_prior_pid_unkillable(tmp_lock, monkeypatch):
-    """If SIGTERM has no effect within the 2s window, we must exit cleanly
-    (return None) instead of looping — OpenClaw would otherwise respawn us
-    in a tight loop."""
-    fd_holder = os.open(tmp_lock, os.O_RDWR | os.O_CREAT)
-    fcntl.flock(fd_holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    os.ftruncate(fd_holder, 0)
-    os.write(fd_holder, f"{os.getpid() + 999999}\n".encode())  # fake PID in file
-    os.fsync(fd_holder)
-
-    monkeypatch.setattr("src.mcp_server.os.kill", lambda pid, sig: None)
-    start = time.monotonic()
-    fd = _acquire_singleton_lock_early()
-    elapsed = time.monotonic() - start
-    try:
-        assert fd is None, "should have given up after retry window"
-        assert 1.5 <= elapsed <= 3.5, f"retry window ~2s, got {elapsed:.2f}s"
-    finally:
-        _release(fd_holder)
 
 
 # ---------------------------------------------------------------------------
@@ -117,13 +141,9 @@ def test_module_import_does_not_acquire_lock():
     assert m._EARLY_LOCK_FD is None
 
 
-def test_concurrent_launch_serialises_through_lock():
-    """5 concurrent launches must NOT all complete heavy imports in parallel.
-
-    Pre-fix, all 5 would print the OpenClaw boundary surface-audit warning
-    (emitted during build_mcp() AFTER heavy imports) before any singleton
-    check. Post-fix, losers exit at the bootstrap warning before importing
-    FastMCP/config/clients.
+def test_concurrent_launch_yields_to_winner():
+    """5 concurrent launches: exactly one wins the lock; the other 4 yield
+    silently. None of the 4 losers should kill the winner.
     """
     lock_file = Path("/tmp/hem-mcp.lock")
     lock_file.unlink(missing_ok=True)
@@ -154,14 +174,16 @@ def test_concurrent_launch_serialises_through_lock():
                 p.kill()
         lock_file.unlink(missing_ok=True)
 
-    losers = [i for i, err in enumerate(outputs) if "lock held by pid=" in err]
-    # With stdin closed, each process exits quickly on EOF, so the next can
-    # grab the lock — ending up sequential. The point of this test is to prove
-    # lock contention IS visible (i.e. the bootstrap warning DOES fire), not
-    # to count specific losers. >= 1 is enough proof the early-acquisition
-    # check is wired and surfaces contention.
-    assert len(losers) >= 1, (
-        f"expected at least one process to hit bootstrap lock-contention "
-        f"(proving early-acquisition is in effect); got {len(losers)}. "
+    # Yield messages from the post-hotfix path
+    yielders = [i for i, err in enumerate(outputs) if "another instance is live" in err]
+    # And nobody should have force-killed (we never set HEM_MCP_FORCE_KILL_PRIOR)
+    sigterm_msgs = [i for i, err in enumerate(outputs) if "sending SIGTERM" in err]
+    assert sigterm_msgs == [], (
+        f"hotfix forbids SIGTERM in default path; got {len(sigterm_msgs)} messages"
+    )
+    # With stdin closed, the winner exits quickly on EOF, so subsequent launches
+    # serialize through the lock too — but each loser must yield, not kill.
+    assert len(yielders) >= 1, (
+        f"expected at least one process to log yield-to-prior; got {len(yielders)}. "
         f"stderr summaries: {[err[:200] for err in outputs]}"
     )
