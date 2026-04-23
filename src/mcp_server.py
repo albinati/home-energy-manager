@@ -7,11 +7,17 @@ Run: ``./bin/mcp`` from project root (picks Python 3.11 in Docker, ``.venv`` on 
 ``python -m src.mcp_server`` with ``PYTHONPATH`` including the project root.
 
 Writes honour ``OPENCLAW_READ_ONLY`` (default true) and the same rate limits as the REST API.
+
+v10 (S5a): the singleton flock is acquired BEFORE heavy imports when run as the
+main module. This prevents the zombie accumulation observed in production, where
+20+ processes spawned by openclaw all completed config/FastMCP/client init before
+any single one reached the lock check inside ``main()``. With early acquisition,
+losers exit within ~10ms (stdlib imports only), never holding heavy resources.
 """
 from __future__ import annotations
 
+# --- Stdlib-only zone (must stay cheap; runs in every spawned process) -------
 import atexit
-import concurrent.futures
 import fcntl
 import logging
 import os
@@ -21,10 +27,84 @@ import time
 from pathlib import Path
 from typing import Any
 
-# Single-worker executor for non-blocking optimizer calls from the MCP transport.
-# max_workers=1 ensures only one plan runs at a time (no concurrent LP solves).
-_optimizer_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="mcp-optimizer")
 
+def _lock_path() -> Path:
+    """Lock file path — /run if writable (systemd tmpfs on prod), else /tmp."""
+    for base in ("/run", "/tmp"):
+        d = Path(base)
+        if d.is_dir() and os.access(d, os.W_OK):
+            return d / "hem-mcp.lock"
+    return Path("/tmp/hem-mcp.lock")
+
+
+def _acquire_singleton_lock_early() -> int | None:
+    """Acquire the flock before heavy imports. Returns fd or None to exit.
+
+    Uses sys.stderr (no logging dep) and runs only if ``__name__ == "__main__"``
+    so plain imports (tests, audits) bypass it. On contention, SIGTERMs the
+    holder and retries once for up to 2s.
+    """
+    path = _lock_path()
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        prior_pid: int | None = None
+        try:
+            raw = os.read(fd, 32).decode().strip()
+            prior_pid = int(raw) if raw else None
+        except (OSError, ValueError):
+            prior_pid = None
+        if prior_pid and prior_pid != os.getpid():
+            print(
+                f"WARNING mcp_server.bootstrap: lock held by pid={prior_pid} — "
+                f"sending SIGTERM and retrying",
+                file=sys.stderr,
+            )
+            try:
+                os.kill(prior_pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    time.sleep(0.1)
+            else:
+                print(
+                    f"ERROR mcp_server.bootstrap: lock still held by pid={prior_pid} "
+                    f"after SIGTERM — exiting",
+                    file=sys.stderr,
+                )
+                os.close(fd)
+                return None
+        else:
+            print(
+                "ERROR mcp_server.bootstrap: lock held with unreadable pid — exiting",
+                file=sys.stderr,
+            )
+            os.close(fd)
+            return None
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.ftruncate(fd, 0)
+    os.write(fd, f"{os.getpid()}\n".encode())
+    os.fsync(fd)
+    return fd
+
+
+# Critical: acquire the lock BEFORE the heavy imports below. Losers exit here
+# without ever touching FastMCP/config/DaikinClient init. _EARLY_LOCK_FD is None
+# when this module is imported (not run), so tests/audits skip the lock entirely.
+_EARLY_LOCK_FD: int | None = None
+if __name__ == "__main__":
+    _EARLY_LOCK_FD = _acquire_singleton_lock_early()
+    if _EARLY_LOCK_FD is None:
+        sys.exit(0)
+
+# --- Heavy imports (only reached by the singleton winner or by `import`-ers) -
+import concurrent.futures
 from datetime import UTC
 
 from mcp.server.fastmcp import FastMCP
@@ -36,6 +116,10 @@ from .daikin.models import DaikinDevice
 from .foxess.client import WORK_MODE_VALID, FoxESSClient, FoxESSError
 from .foxess.service import get_cached_realtime, get_refresh_stats
 from .scheduler.lp_simulation import run_lp_simulation
+
+# Single-worker executor for non-blocking optimizer calls from the MCP transport.
+# max_workers=1 ensures only one plan runs at a time (no concurrent LP solves).
+_optimizer_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="mcp-optimizer")
 
 # Phase 4.5: hardware-write tool name prefixes. The boot-time surface audit warns
 # when any tool matching these prefixes lacks a ``confirmed`` parameter — that's
@@ -138,7 +222,7 @@ _SIMULATE_PLAN_CONFIG_MAP = {
 }
 
 # Phase 4 review — per-key value validators for simulate_plan.
-_VALID_OPTIMIZATION_PRESETS = frozenset({"normal", "guests", "travel", "away", "boost"})
+_VALID_OPTIMIZATION_PRESETS = frozenset({"normal", "guests", "travel", "away"})
 _VALID_OCCUPANCY_MODES = frozenset({"normal", "guests", "travel", "away"})
 
 
@@ -288,6 +372,10 @@ def _write_blocked_message() -> str:
 
 def _daikin_write_preamble(action_type: str, params: dict[str, Any]) -> dict[str, Any] | None:
     """Return an error result dict if the write must not proceed, else None."""
+    if config.DAIKIN_CONTROL_MODE == "passive":
+        msg = "DAIKIN_CONTROL_MODE=passive — set to 'active' to allow writes"
+        safeguards.audit_log(action_type, params, "mcp", False, msg)
+        return {"ok": False, "error": msg, "passive_mode": True}
     if config.OPENCLAW_READ_ONLY:
         safeguards.audit_log(action_type, params, "mcp", False, _write_blocked_message())
         return {"ok": False, "error": _write_blocked_message()}
@@ -1039,7 +1127,7 @@ def build_mcp() -> FastMCP:
         ),
     )
     def set_optimization_preset(preset: str) -> dict[str, Any]:
-        valid = {"normal", "guests", "travel", "away", "boost"}
+        valid = {"normal", "guests", "travel", "away"}
         if preset not in valid:
             return {"ok": False, "error": f"Invalid preset '{preset}'. Valid: {sorted(valid)}"}
         config.OPTIMIZATION_PRESET = preset
@@ -1939,71 +2027,12 @@ def build_mcp() -> FastMCP:
     return mcp
 
 
-def _lock_path() -> Path:
-    """Lock file path — /run if writable (systemd tmpfs on prod), else /tmp."""
-    for base in ("/run", "/tmp"):
-        d = Path(base)
-        if d.is_dir() and os.access(d, os.W_OK):
-            return d / "hem-mcp.lock"
-    return Path("/tmp/hem-mcp.lock")
-
-
-def _acquire_singleton_lock(log: logging.Logger) -> int | None:
-    """Acquire exclusive lock or kill-and-retry; return fd on success, None to exit."""
-    path = _lock_path()
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        prior_pid: int | None = None
-        try:
-            raw = os.read(fd, 32).decode().strip()
-            prior_pid = int(raw) if raw else None
-        except (OSError, ValueError):
-            prior_pid = None
-        if prior_pid and prior_pid != os.getpid():
-            log.warning(
-                "MCP lock held by pid=%s — sending SIGTERM and retrying", prior_pid
-            )
-            try:
-                os.kill(prior_pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            # Wait up to 2s for the holder to release. flock auto-releases on exit.
-            deadline = time.monotonic() + 2.0
-            while time.monotonic() < deadline:
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except BlockingIOError:
-                    time.sleep(0.1)
-            else:
-                log.error(
-                    "MCP singleton: lock still held by pid=%s after SIGTERM — exiting",
-                    prior_pid,
-                )
-                os.close(fd)
-                return None
-        else:
-            log.error("MCP singleton: lock held with unreadable pid — exiting")
-            os.close(fd)
-            return None
-    os.lseek(fd, 0, os.SEEK_SET)
-    os.ftruncate(fd, 0)
-    os.write(fd, f"{os.getpid()}\n".encode())
-    os.fsync(fd)
-    return fd
-
-
 def main() -> None:
     """Entry point: MCP over stdio (do not write logs to stdout).
 
-    Enforces single-instance via fcntl.flock on a PID file (#60). OpenClaw
-    respawns this process without killing the prior one, which previously
-    led to multiple parallel MCP servers accumulating RAM. On startup we:
-      1. flock a PID file; on conflict, SIGTERM the prior PID and retry once.
-      2. Install SIGTERM/SIGHUP handlers for clean exit.
-      3. Wrap the FastMCP stdio loop in try/finally so the lock always releases.
+    Singleton enforcement happens at module top — see ``_acquire_singleton_lock_early``.
+    By the time we reach here we already own the lock (or the call site is a unit
+    test importing ``main`` programmatically — fall back to acquiring late).
     """
     logging.basicConfig(
         level=logging.INFO,
@@ -2012,11 +2041,22 @@ def main() -> None:
     )
     log = logging.getLogger("mcp_server")
 
-    lock_fd = _acquire_singleton_lock(log)
-    if lock_fd is None:
-        sys.exit(0)
+    # Reuse the early-acquired fd from the module bootstrap. If absent (programmatic
+    # call, e.g. from tests), acquire late — heavy imports already ran in this case
+    # so the protection is moot, but the lock still serializes runs.
+    global _EARLY_LOCK_FD
+    if _EARLY_LOCK_FD is None:
+        _EARLY_LOCK_FD = _acquire_singleton_lock_early()
+        if _EARLY_LOCK_FD is None:
+            sys.exit(0)
+    lock_fd = _EARLY_LOCK_FD
 
     def _release_lock() -> None:
+        # S5b: shut down the optimizer executor before releasing — clean hygiene.
+        try:
+            _optimizer_executor.shutdown(wait=False)
+        except Exception:
+            pass
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
         except OSError:

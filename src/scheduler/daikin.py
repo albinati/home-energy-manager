@@ -48,6 +48,10 @@ def run_daikin_scheduler_tick(is_paused: bool) -> str | None:
     if is_paused:
         return None
 
+    if config.DAIKIN_CONTROL_MODE == "passive":
+        # Skip the rate fetch entirely — service.set_lwt_offset would raise anyway.
+        return None
+
     if not config.OCTOPUS_TARIFF_CODE:
         return "OCTOPUS_TARIFF_CODE not set"
     if not config.SCHEDULER_ENABLED:

@@ -468,7 +468,18 @@ def _require_client_and_devices(actor: str):
     return _get_or_create_client(), result.devices
 
 
+def _passive_guard(action: str) -> None:
+    """Raise DaikinError when DAIKIN_CONTROL_MODE=passive — blocks every writer.
+
+    See plan: passive mode means zero outbound writes from this service.
+    Telemetry (read paths) is unaffected. Flip DAIKIN_CONTROL_MODE=active to allow.
+    """
+    if config.DAIKIN_CONTROL_MODE == "passive":
+        raise DaikinError(f"DAIKIN_CONTROL_MODE=passive — cannot {action}")
+
+
 def set_power(on: bool, actor: str = "api") -> None:
+    _passive_guard("set power")
     if should_block("daikin"):
         raise DaikinError("Daikin daily quota exhausted — cannot set power")
     client, devices = _require_client_and_devices(actor)
@@ -478,6 +489,7 @@ def set_power(on: bool, actor: str = "api") -> None:
 
 
 def set_temperature(temperature: float, mode: str = "heating", actor: str = "api") -> None:
+    _passive_guard("set temperature")
     if should_block("daikin"):
         raise DaikinError("Daikin daily quota exhausted — cannot set temperature")
     client, devices = _require_client_and_devices(actor)
@@ -487,6 +499,7 @@ def set_temperature(temperature: float, mode: str = "heating", actor: str = "api
 
 
 def set_lwt_offset(offset: float, mode: str = "heating", actor: str = "api") -> None:
+    _passive_guard("set LWT offset")
     if should_block("daikin"):
         raise DaikinError("Daikin daily quota exhausted — cannot set LWT offset")
     client, devices = _require_client_and_devices(actor)
@@ -496,6 +509,7 @@ def set_lwt_offset(offset: float, mode: str = "heating", actor: str = "api") -> 
 
 
 def set_operation_mode(mode_str: str, actor: str = "api") -> None:
+    _passive_guard("set mode")
     if should_block("daikin"):
         raise DaikinError("Daikin daily quota exhausted — cannot set mode")
     client, devices = _require_client_and_devices(actor)
@@ -505,6 +519,7 @@ def set_operation_mode(mode_str: str, actor: str = "api") -> None:
 
 
 def set_tank_temperature(temperature: float, actor: str = "api") -> None:
+    _passive_guard("set tank temperature")
     if should_block("daikin"):
         raise DaikinError("Daikin daily quota exhausted — cannot set tank temperature")
     client, devices = _require_client_and_devices(actor)
@@ -514,6 +529,7 @@ def set_tank_temperature(temperature: float, actor: str = "api") -> None:
 
 
 def set_tank_power(on: bool, actor: str = "api") -> None:
+    _passive_guard("set tank power")
     if should_block("daikin"):
         raise DaikinError("Daikin daily quota exhausted — cannot set tank power")
     client, devices = _require_client_and_devices(actor)
@@ -523,6 +539,7 @@ def set_tank_power(on: bool, actor: str = "api") -> None:
 
 
 def set_tank_powerful(on: bool, actor: str = "api") -> None:
+    _passive_guard("set tank powerful mode")
     if should_block("daikin"):
         raise DaikinError("Daikin daily quota exhausted — cannot set tank powerful mode")
     client, devices = _require_client_and_devices(actor)
@@ -532,6 +549,7 @@ def set_tank_powerful(on: bool, actor: str = "api") -> None:
 
 
 def set_weather_regulation(enabled: bool, actor: str = "api") -> None:
+    _passive_guard("set weather regulation")
     if should_block("daikin"):
         raise DaikinError("Daikin daily quota exhausted — cannot set weather regulation")
     client, devices = _require_client_and_devices(actor)

@@ -202,13 +202,10 @@ class Config:
     # DHW_TEMP_COMFORT_C + DHW_TEMP_NORMAL_C are runtime-tunable via
     # /api/v1/settings (#52) — see the @property definitions below.
     DHW_TEMP_CHEAP_C: float = float(os.getenv("DHW_TEMP_CHEAP_C", "60"))
-    # DEPRECATED: Daikin Onecta firmware runs the weekly thermal-shock cycle autonomously
-    # (Sunday ~11:00 local). The LP / dispatch layer no longer enforces these bounds.
-    # Kept only so stale .env files don't break on load; remove in a follow-up.
-    DHW_LEGIONELLA_TEMP_C: float = float(os.getenv("DHW_LEGIONELLA_TEMP_C", "60"))
-    DHW_LEGIONELLA_DAY: int = int(os.getenv("DHW_LEGIONELLA_DAY", "6"))  # Sunday
-    DHW_LEGIONELLA_HOUR_START: int = int(os.getenv("DHW_LEGIONELLA_HOUR_START", "11"))
-    DHW_LEGIONELLA_HOUR_END: int = int(os.getenv("DHW_LEGIONELLA_HOUR_END", "13"))
+    # NOTE: DHW_LEGIONELLA_* env vars removed in v10. The Daikin Onecta firmware
+    # runs the weekly thermal-shock cycle autonomously (Sunday ~11:00 local) and
+    # the LP/dispatch never enforced these bounds. Stale .env entries are silently
+    # ignored — Python's os.getenv won't fail on unrecognised variables.
 
     BATTERY_CAPACITY_KWH: float = float(os.getenv("BATTERY_CAPACITY_KWH", "10"))
 
@@ -483,6 +480,14 @@ class Config:
     @ENERGY_STRATEGY_MODE.setter
     def ENERGY_STRATEGY_MODE(self, value: str) -> None:
         self._rt_set("ENERGY_STRATEGY_MODE", str(value).strip().lower())
+
+    @property
+    def DAIKIN_CONTROL_MODE(self) -> str:
+        return str(self._rt_get("DAIKIN_CONTROL_MODE"))
+
+    @DAIKIN_CONTROL_MODE.setter
+    def DAIKIN_CONTROL_MODE(self, value: str) -> None:
+        self._rt_set("DAIKIN_CONTROL_MODE", str(value).strip().lower())
 
     @property
     def LP_PLAN_PUSH_HOUR(self) -> int:

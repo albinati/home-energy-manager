@@ -107,6 +107,16 @@ def apply_scheduled_daikin_params(
     if "climate_on" in p and not bool(p["climate_on"]):
         p.pop("lwt_offset", None)
 
+    if config.DAIKIN_CONTROL_MODE == "passive":
+        db.log_action(
+            device="daikin",
+            action="scheduled_apply",
+            params=p,
+            result="passive_skip",
+            trigger=trigger,
+            error_msg="DAIKIN_CONTROL_MODE=passive",
+        )
+        return False
     if skip_if_matches and daikin_device_matches_params(dev, p):
         return False
     if config.OPERATION_MODE != "operational" or config.OPENCLAW_READ_ONLY:

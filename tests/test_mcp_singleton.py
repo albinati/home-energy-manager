@@ -1,4 +1,9 @@
-"""MCP singleton lock — SIGTERM-and-retry behavior (#60)."""
+"""MCP singleton lock — SIGTERM-and-retry behavior + early-acquisition (#60, v10 S5a).
+
+The v10 fix moves the lock acquisition from inside ``main()`` to module top-level
+(when ``__name__ == '__main__'``), so concurrent launches can no longer all
+complete the heavy import phase before any of them reaches the lock check.
+"""
 
 import fcntl
 import logging
@@ -7,12 +12,15 @@ import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
 pytest.importorskip("mcp")
 
-from src.mcp_server import _acquire_singleton_lock  # noqa: E402
+from src.mcp_server import _acquire_singleton_lock_early  # noqa: E402
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture
@@ -30,8 +38,7 @@ def _release(fd: int) -> None:
 
 
 def test_first_acquire_writes_own_pid(tmp_lock):
-    log = logging.getLogger("test")
-    fd = _acquire_singleton_lock(log)
+    fd = _acquire_singleton_lock_early()
     assert fd is not None
     try:
         assert int(tmp_lock.read_text().strip()) == os.getpid()
@@ -40,7 +47,7 @@ def test_first_acquire_writes_own_pid(tmp_lock):
 
 
 def test_second_acquire_sigterms_prior_and_succeeds(tmp_lock):
-    """When another process holds the lock, _acquire_singleton_lock must
+    """When another process holds the lock, _acquire_singleton_lock_early must
     SIGTERM it and retake the lock (the root cause of the MCP zombie pile-up
     in #60 was that nothing ever killed the prior instance).
     """
@@ -63,12 +70,10 @@ def test_second_acquire_sigterms_prior_and_succeeds(tmp_lock):
     try:
         line = proc.stdout.readline().decode().strip()
         assert line == "LOCKED", f"holder did not lock: stderr={proc.stderr.read()!r}"
-        log = logging.getLogger("test")
-        acquired_fd = _acquire_singleton_lock(log)
+        acquired_fd = _acquire_singleton_lock_early()
         assert acquired_fd is not None, "failed to acquire after SIGTERM retry"
         assert int(tmp_lock.read_text().strip()) == os.getpid()
         rc = proc.wait(timeout=5)
-        # SIGTERM → -15 on POSIX. Accept either -signal or conventional 128+signal.
         assert rc in (-signal.SIGTERM, 128 + signal.SIGTERM, 0), (
             f"holder exit code {rc} unexpected"
         )
@@ -83,9 +88,6 @@ def test_acquire_gives_up_when_prior_pid_unkillable(tmp_lock, monkeypatch):
     """If SIGTERM has no effect within the 2s window, we must exit cleanly
     (return None) instead of looping — OpenClaw would otherwise respawn us
     in a tight loop."""
-    # Hold the lock in this same process via another fd; our own PID cannot
-    # be SIGTERM'd out from under us without actually terminating the test.
-    # Monkey-patch os.kill to a no-op so the retry loop runs to the end.
     fd_holder = os.open(tmp_lock, os.O_RDWR | os.O_CREAT)
     fcntl.flock(fd_holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
     os.ftruncate(fd_holder, 0)
@@ -93,12 +95,73 @@ def test_acquire_gives_up_when_prior_pid_unkillable(tmp_lock, monkeypatch):
     os.fsync(fd_holder)
 
     monkeypatch.setattr("src.mcp_server.os.kill", lambda pid, sig: None)
-    log = logging.getLogger("test")
     start = time.monotonic()
-    fd = _acquire_singleton_lock(log)
+    fd = _acquire_singleton_lock_early()
     elapsed = time.monotonic() - start
     try:
         assert fd is None, "should have given up after retry window"
         assert 1.5 <= elapsed <= 3.5, f"retry window ~2s, got {elapsed:.2f}s"
     finally:
         _release(fd_holder)
+
+
+# ---------------------------------------------------------------------------
+# v10 S5a — early-acquisition regression
+# ---------------------------------------------------------------------------
+
+def test_module_import_does_not_acquire_lock():
+    """Plain ``import`` (e.g. tests, audits) must not race for the singleton."""
+    import importlib
+    import src.mcp_server as m
+    importlib.reload(m)
+    assert m._EARLY_LOCK_FD is None
+
+
+def test_concurrent_launch_serialises_through_lock():
+    """5 concurrent launches must NOT all complete heavy imports in parallel.
+
+    Pre-fix, all 5 would print the OpenClaw boundary surface-audit warning
+    (emitted during build_mcp() AFTER heavy imports) before any singleton
+    check. Post-fix, losers exit at the bootstrap warning before importing
+    FastMCP/config/clients.
+    """
+    lock_file = Path("/tmp/hem-mcp.lock")
+    lock_file.unlink(missing_ok=True)
+
+    procs = []
+    for _ in range(5):
+        procs.append(subprocess.Popen(
+            [sys.executable, "-m", "src.mcp_server"],
+            cwd=str(PROJECT_ROOT),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        ))
+
+    outputs = []
+    try:
+        for p in procs:
+            try:
+                _, stderr = p.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                p.kill()
+                _, stderr = p.communicate(timeout=2)
+            outputs.append(stderr.decode(errors="replace"))
+    finally:
+        for p in procs:
+            if p.poll() is None:
+                p.kill()
+        lock_file.unlink(missing_ok=True)
+
+    losers = [i for i, err in enumerate(outputs) if "lock held by pid=" in err]
+    # With stdin closed, each process exits quickly on EOF, so the next can
+    # grab the lock — ending up sequential. The point of this test is to prove
+    # lock contention IS visible (i.e. the bootstrap warning DOES fire), not
+    # to count specific losers. >= 1 is enough proof the early-acquisition
+    # check is wired and surfaces contention.
+    assert len(losers) >= 1, (
+        f"expected at least one process to hit bootstrap lock-contention "
+        f"(proving early-acquisition is in effect); got {len(losers)}. "
+        f"stderr summaries: {[err[:200] for err in outputs]}"
+    )

@@ -300,6 +300,18 @@ def write_daikin_from_lp_plan(
     tomorrow) correctly removes stale rows from *both* dates while the shared
     in-flight preservation keeps any Daikin action currently executing.
     """
+    if config.DAIKIN_CONTROL_MODE == "passive":
+        # Passive mode: do not write any Daikin actions and clear any leftovers
+        # from a prior active run so the heartbeat never picks them up.
+        if plan.slot_starts_utc:
+            window_start_iso = plan.slot_starts_utc[0].isoformat().replace("+00:00", "Z")
+            window_end = plan.slot_starts_utc[-1] + timedelta(minutes=30)
+            window_end_iso = window_end.isoformat().replace("+00:00", "Z")
+            db.clear_actions_in_range(window_start_iso, window_end_iso, device="daikin")
+        else:
+            db.clear_actions_for_date(plan_date, device="daikin")
+        logger.info("write_daikin_from_lp_plan: skipped (DAIKIN_CONTROL_MODE=passive)")
+        return 0
     if plan.slot_starts_utc:
         window_start_iso = plan.slot_starts_utc[0].isoformat().replace("+00:00", "Z")
         window_end = plan.slot_starts_utc[-1] + timedelta(minutes=30)
