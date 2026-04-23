@@ -51,6 +51,15 @@
       const slots = exec?.slots || [];
       const t = exec?.totals || {};
 
+      // Show the data-quality note + flag rows that look smoothed (all kWh equal)
+      const note = $('#dataQualityNote');
+      if (exec?.data_quality_note) {
+        note.textContent = '⚠ ' + exec.data_quality_note;
+        note.hidden = false;
+      } else {
+        note.hidden = true;
+      }
+
       $('#totalCost').textContent = fmtP(t.cost_realised_p);
       const dlt = t.delta_vs_svt_p;
       const dEl = $('#totalDelta');

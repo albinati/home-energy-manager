@@ -546,7 +546,17 @@ def bulletproof_heartbeat_tick() -> None:
 
         svt = svt_rate_pence()
         fix = fixed_shadow_rate_pence()
-        kwh_est = db.mean_consumption_kwh_from_execution_logs()
+        # v10.1: real per-tick consumption from Fox load_power × heartbeat interval.
+        # Pre-v10.1 used db.mean_consumption_kwh_from_execution_logs() — a self-
+        # referential constant (mean of itself) that produced fake per-slot values
+        # in the cockpit. With Fox snapshot we get actual per-tick energy; the
+        # global mean stays as fallback when Fox is unavailable.
+        snap = db.get_fox_realtime_snapshot() or {}
+        load_kw = snap.get("load_power_kw")
+        if load_kw is not None:
+            kwh_est = float(load_kw) * (config.HEARTBEAT_INTERVAL_SECONDS / 3600.0)
+        else:
+            kwh_est = db.mean_consumption_kwh_from_execution_logs()
         p = float(price) if price is not None else 0.0
         db.log_execution(
             {

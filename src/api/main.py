@@ -2532,32 +2532,35 @@ async def agile_today():
 
 @app.get("/api/v1/execution/today")
 async def execution_today():
-    """Per-slot realised cost data for today's plan-vs-actual view.
+    """Per-30-min-slot realised cost data for today's plan-vs-actual view.
 
-    Joins ``execution_log`` rows from today (cost_realised_pence, agile_price_pence,
-    slot_kind, daikin_lwt, etc.) with the LP plan's strategy classification.
-    No cloud calls — pure SQLite read.
+    The execution_log table is written by the heartbeat tick (~every 2 min),
+    so we aggregate ticks within each 30-min slot boundary:
+      - consumption_kwh: SUM of per-tick energy (real Fox load × interval)
+      - agile_price_pence: same across the slot, take any
+      - daikin_outdoor_temp: median across ticks
+    Then derive cost = sum_kwh × price; Daikin share from physics
+    (get_daikin_heating_kw at slot's outdoor temp).
 
-    Returns:
-      - slots: ordered list of {slot_iso, slot_local, slot_kind, agile_p,
-        consumption_kwh, cost_realised_p, daikin_kwh_est, residual_kwh_est,
-        cost_svt_p, delta_vs_svt_p}
-      - totals: cumulative totals + Daikin attribution
+    Quota-safe: SQLite reads only.
+
+    NOTE: pre-v10.1 historical rows used a self-referential constant for
+    consumption_kwh — those slots will show flat values. New ticks (after
+    the heartbeat fix shipped) record real Fox load × interval.
     """
-    from datetime import UTC, datetime
+    from datetime import UTC, datetime, timedelta
     from .. import db as _db
 
     now = datetime.now(UTC)
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     day_end = day_start.replace(hour=23, minute=59, second=59, microsecond=999999)
 
-    # Pull all execution_log rows for today
     with _db._lock:
         conn = _db.get_connection()
         try:
             cur = conn.execute(
                 """SELECT timestamp, consumption_kwh, agile_price_pence,
-                          cost_realised_pence, cost_svt_shadow_pence, delta_vs_svt_pence,
+                          svt_shadow_price_pence,
                           soc_percent, fox_mode, daikin_lwt, daikin_outdoor_temp,
                           slot_kind
                    FROM execution_log
@@ -2570,6 +2573,21 @@ async def execution_today():
         finally:
             conn.close()
 
+    # Bucket rows into 30-min slots
+    def _slot_floor(iso: str) -> datetime:
+        # Tolerate both Z and +00:00
+        s = iso.replace("Z", "+00:00")
+        d = datetime.fromisoformat(s)
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=UTC)
+        d = d.astimezone(UTC)
+        return d.replace(minute=(d.minute // 30) * 30, second=0, microsecond=0)
+
+    buckets: dict[str, list[dict]] = {}
+    for r in rows:
+        slot = _slot_floor(r["timestamp"]).isoformat().replace("+00:00", "Z")
+        buckets.setdefault(slot, []).append(r)
+
     from ..physics import get_daikin_heating_kw
     SLOT_HOURS = 0.5
     slots = []
@@ -2577,45 +2595,63 @@ async def execution_today():
     total_svt = 0.0
     total_load = 0.0
     total_daikin_kwh = 0.0
-    for r in rows:
-        outdoor = r.get("daikin_outdoor_temp")
-        # Estimate Daikin energy this slot from physics (no cloud call)
+
+    for slot_iso in sorted(buckets.keys()):
+        ticks = buckets[slot_iso]
+        # Sum consumption across ticks in the slot (real per-tick from heartbeat)
+        load_kwh = sum(float(t.get("consumption_kwh") or 0.0) for t in ticks)
+        # Tariff is constant across the slot; take from any tick (prefer non-null)
+        agile_p = next((float(t["agile_price_pence"]) for t in ticks
+                        if t.get("agile_price_pence") is not None), None)
+        svt_rate = next((float(t["svt_shadow_price_pence"]) for t in ticks
+                         if t.get("svt_shadow_price_pence") is not None), None)
+        # Median outdoor temp across the slot
+        out_vals = [float(t["daikin_outdoor_temp"]) for t in ticks
+                    if t.get("daikin_outdoor_temp") is not None]
+        outdoor = sorted(out_vals)[len(out_vals) // 2] if out_vals else None
+        # Daikin physics estimate for this slot
         daikin_kw = float(get_daikin_heating_kw(outdoor)) if outdoor is not None else 0.0
-        daikin_kwh = daikin_kw * SLOT_HOURS
-        load_kwh = float(r.get("consumption_kwh") or 0.0)
+        daikin_kwh = min(daikin_kw * SLOT_HOURS, load_kwh)  # can't exceed total load
         residual_kwh = max(0.0, load_kwh - daikin_kwh)
-        agile_p = r.get("agile_price_pence")
-        cost = float(r.get("cost_realised_pence") or 0.0)
-        svt = float(r.get("cost_svt_shadow_pence") or 0.0)
-        # Attribute realised cost to Daikin proportionally
+        # Costs: re-derive from the slot's totals (don't trust per-tick fakes)
+        cost = load_kwh * agile_p if agile_p is not None else 0.0
+        svt_cost = load_kwh * svt_rate if svt_rate is not None else 0.0
         cost_daikin = cost * (daikin_kwh / load_kwh) if load_kwh > 0 else 0.0
         cost_residual = cost - cost_daikin
-
-        ts = r["timestamp"]
+        # slot_kind: take whatever the heartbeat decided last for this slot
+        slot_kind = next((t["slot_kind"] for t in reversed(ticks) if t.get("slot_kind")), None)
+        last = ticks[-1]
         slots.append({
-            "slot_utc": ts,
-            "slot_kind": r.get("slot_kind"),
+            "slot_utc": slot_iso,
+            "slot_kind": slot_kind,
             "agile_p": agile_p,
-            "consumption_kwh": load_kwh,
+            "consumption_kwh": round(load_kwh, 3),
             "daikin_kwh_est": round(daikin_kwh, 3),
             "residual_kwh": round(residual_kwh, 3),
             "cost_realised_p": round(cost, 2),
             "cost_daikin_p": round(cost_daikin, 2),
             "cost_residual_p": round(cost_residual, 2),
-            "cost_svt_p": round(svt, 2),
-            "delta_vs_svt_p": float(r.get("delta_vs_svt_pence") or 0.0),
-            "soc_percent": r.get("soc_percent"),
-            "fox_mode": r.get("fox_mode"),
+            "cost_svt_p": round(svt_cost, 2),
+            "delta_vs_svt_p": round(cost - svt_cost, 2),
+            "soc_percent": last.get("soc_percent"),
+            "fox_mode": last.get("fox_mode"),
             "daikin_outdoor_c": outdoor,
-            "daikin_lwt_c": r.get("daikin_lwt"),
+            "daikin_lwt_c": last.get("daikin_lwt"),
+            "_tick_count": len(ticks),
         })
         total_cost += cost
-        total_svt += svt
+        total_svt += svt_cost
         total_load += load_kwh
         total_daikin_kwh += daikin_kwh
 
     return {
         "date": day_start.date().isoformat(),
+        "data_quality_note": (
+            "Per-slot consumption is the sum of heartbeat-tick energy from real Fox "
+            "load_power readings (v10.1+). Slots from before the v10.1 heartbeat fix "
+            "show a self-referential constant — totals are still ~correct but per-slot "
+            "values from the morning may look unnaturally smooth."
+        ),
         "slots": slots,
         "totals": {
             "load_kwh": round(total_load, 2),
