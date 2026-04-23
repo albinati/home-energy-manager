@@ -30,7 +30,7 @@ def client():
 PAGES = [
     ("/", "cockpit", "Cockpit"),
     ("/insights", "insights", "Insights"),
-    ("/plan", "plan", "Plan"),
+    ("/workbench", "workbench", "Workbench"),
     ("/settings", "settings", "Settings"),
     ("/legacy", "legacy", "Home Energy Manager"),
 ]
@@ -45,26 +45,33 @@ def test_page_renders(client, url, active_tab, expected_in_html):
     assert expected_in_html in body, f"{url}: missing {expected_in_html!r}"
 
 
+def test_plan_redirects_to_workbench(client):
+    """v10.2: /plan is a 301 redirect to /workbench (old bookmarks)."""
+    r = client.get("/plan", follow_redirects=False)
+    assert r.status_code == 301
+    assert r.headers.get("location") == "/workbench"
+
+
 def test_nav_links_present_on_v10_pages(client):
     """All new pages share the _layout.html nav. Confirm every link is present."""
-    for url in ("/", "/insights", "/plan", "/settings"):
+    for url in ("/", "/insights", "/workbench", "/settings"):
         body = client.get(url).text
         for tab_url, tab_label in [("/", "Cockpit"), ("/insights", "Insights"),
-                                    ("/plan", "Plan"), ("/settings", "Settings")]:
+                                    ("/workbench", "Workbench"), ("/settings", "Settings")]:
             assert f'href="{tab_url}"' in body, f"{url}: missing nav link to {tab_url}"
             assert tab_label in body, f"{url}: missing nav label {tab_label}"
 
 
 def test_modal_partial_included(client):
     """Every v10 page must include the modal partial (the simulate-confirm UI)."""
-    for url in ("/", "/insights", "/plan", "/settings"):
+    for url in ("/", "/insights", "/workbench", "/settings"):
         body = client.get(url).text
         assert 'id="modalBackdrop"' in body, f"{url}: modal not included"
 
 
 def test_mode_badge_rendered_on_every_v10_page(client):
     """v10.2: every page renders the topbar mode badge with data-mode attr."""
-    for url in ("/", "/insights", "/plan", "/settings"):
+    for url in ("/", "/insights", "/workbench", "/settings"):
         body = client.get(url).text
         assert 'class="mode-badge"' in body, f"{url}: mode badge missing"
         assert 'data-mode=' in body, f"{url}: data-mode attribute missing"
@@ -73,7 +80,7 @@ def test_mode_badge_rendered_on_every_v10_page(client):
 
 def test_mode_switcher_partial_included(client):
     """v10.2: the mode-switcher dialog partial must be on every page."""
-    for url in ("/", "/insights", "/plan", "/settings"):
+    for url in ("/", "/insights", "/workbench", "/settings"):
         body = client.get(url).text
         assert 'id="modeSwitcherBackdrop"' in body, f"{url}: mode switcher not included"
 
@@ -103,7 +110,8 @@ STATIC_ASSETS = [
     "/static/js/quota.js",
     "/static/js/cockpit.js",
     "/static/js/insights.js",
-    "/static/js/plan.js",
+    "/static/js/plan_render.js",
+    "/static/js/workbench.js",
     "/static/js/settings.js",
 ]
 
