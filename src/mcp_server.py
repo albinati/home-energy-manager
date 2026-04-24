@@ -2001,6 +2001,240 @@ def build_mcp() -> FastMCP:
             "cron_status": cron_status,
         }
 
+    # -------------------------------------------------------------------
+    # Cockpit parity — read-only tools wrapping the PR #133–137 endpoints
+    # and the Phase-0 snapshot tables so MCP clients see the same data
+    # the web cockpit does. All additive + cache-only; no cloud calls.
+    # -------------------------------------------------------------------
+
+    @mcp.tool(
+        name="get_system_timezone",
+        description=(
+            "Return the planner's timezone + UTC-anchored plan-push tz. "
+            "Use this to interpret every ISO-UTC slot timestamp in later "
+            "tool replies (LP runs in UTC; comfort windows + MPC cron "
+            "fire in BULLETPROOF_TIMEZONE)."
+        ),
+    )
+    def get_system_timezone() -> dict[str, Any]:
+        from datetime import UTC as _UTC
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo
+
+        tz_name = config.BULLETPROOF_TIMEZONE or "Europe/London"
+        now_utc = _dt.now(_UTC)
+        try:
+            now_local = now_utc.astimezone(ZoneInfo(tz_name))
+        except Exception:
+            now_local = now_utc
+            tz_name = "UTC"
+        return {
+            "ok": True,
+            "planner_tz": tz_name,
+            "plan_push_tz": "UTC",
+            "now_utc": now_utc.isoformat().replace("+00:00", "Z"),
+            "now_local": now_local.isoformat(),
+        }
+
+    @mcp.tool(
+        name="get_cockpit_now",
+        description=(
+            "One-call aggregator for 'where are we right now' — current "
+            "Agile slot + price kind, Fox SoC/solar/load/grid, Daikin "
+            "temps + mode, next Fox-mode transition, per-source "
+            "freshness. Same data the web cockpit's NOW hero panel uses. "
+            "Never triggers cloud calls; pure cache + SQLite."
+        ),
+    )
+    async def get_cockpit_now() -> dict[str, Any]:
+        # Delegate to the same aggregator the web endpoint calls so the
+        # two views can't drift apart. Async so we can await the FastAPI
+        # coroutine directly without nesting asyncio.run().
+        from .api.main import cockpit_now as _cockpit_now  # lazy import
+        try:
+            payload = await _cockpit_now()
+            return {"ok": True, **payload}
+        except Exception as e:
+            logger.warning("get_cockpit_now failed: %s", e)
+            return {"ok": False, "error": str(e)}
+
+    @mcp.tool(
+        name="get_cockpit_at",
+        description=(
+            "Historical replay of the cockpit at a past moment. Returns the "
+            "LP run that was active at ``when`` (joining lp_solution_snapshot "
+            "+ lp_inputs_snapshot + execution_log + agile_rates). Accepts "
+            "ISO-UTC timestamps like 2026-04-24T10:30:00Z. Use this to "
+            "compare what the LP decided vs what actually happened."
+        ),
+    )
+    async def get_cockpit_at(when: str) -> dict[str, Any]:
+        from .api.main import cockpit_at as _cockpit_at
+        try:
+            payload = await _cockpit_at(when)
+            return {"ok": True, **payload}
+        except Exception as e:
+            return {"ok": False, "error": str(e), "when": when}
+
+    @mcp.tool(
+        name="get_optimization_inputs",
+        description=(
+            "Everything the next LP solve will see: Agile prices + weather "
+            "(with half-hour linear interpolation — same as the LP uses), "
+            "base-load profile, initial SoC/tank/indoor with per-field "
+            "source provenance, cheap/peak thresholds, config snapshot, "
+            "tomorrow-rates-available flag. Horizon clamps to [4, 48] hours. "
+            "Pure cache-only; never triggers cloud fetches."
+        ),
+    )
+    async def get_optimization_inputs(horizon_hours: int | None = None) -> dict[str, Any]:
+        from .api.main import optimization_inputs as _opt_inputs
+        try:
+            payload = await _opt_inputs(horizon_hours=horizon_hours)
+            return {"ok": True, **payload}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    @mcp.tool(
+        name="get_attribution_day",
+        description=(
+            "Solar attribution for a past day: where today's solar went "
+            "(self-use %, battery %, grid export %) plus the raw kWh "
+            "totals. Defaults to yesterday. Data comes from fox_energy_daily "
+            "which is populated by the nightly Fox rollup job — today's "
+            "row is only available after rollover."
+        ),
+    )
+    async def get_attribution_day(date: str | None = None) -> dict[str, Any]:
+        from .api.main import attribution_day as _attr
+        try:
+            payload = await _attr(date=date)
+            return {"ok": True, **payload}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    @mcp.tool(
+        name="get_lp_solution",
+        description=(
+            "Per-slot LP decision vector for a specific run_id. Returns "
+            "what the solver decided for each half-hour slot: import/"
+            "export/charge/discharge kWh, PV use/curtail, DHW + space "
+            "energy, SoC trajectory, tank/indoor/outdoor temps, LWT "
+            "offset. Pair with get_optimizer_log to find the run_id for "
+            "a given date/time."
+        ),
+    )
+    def get_lp_solution(run_id: int) -> dict[str, Any]:
+        from . import db
+        try:
+            slots = db.get_lp_solution_slots(int(run_id))
+            inputs = db.get_lp_inputs(int(run_id))
+            return {"ok": True, "run_id": int(run_id), "slots": slots, "inputs": inputs}
+        except Exception as e:
+            return {"ok": False, "error": str(e), "run_id": run_id}
+
+    @mcp.tool(
+        name="find_lp_run_for_time",
+        description=(
+            "Look up which LP run was active at a given moment (ISO-UTC). "
+            "Returns the most recent optimizer_log row with run_at <= when. "
+            "Use this then call get_lp_solution(run_id) to drill into the "
+            "decision vector."
+        ),
+    )
+    def find_lp_run_for_time(when_utc: str) -> dict[str, Any]:
+        from . import db
+        try:
+            run_id = db.find_run_for_time(when_utc)
+            if run_id is None:
+                return {"ok": True, "when_utc": when_utc, "run_id": None,
+                        "note": "no LP runs persisted before this moment"}
+            inputs = db.get_lp_inputs(run_id)
+            return {"ok": True, "when_utc": when_utc, "run_id": run_id,
+                    "run_at_utc": (inputs or {}).get("run_at_utc")}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    @mcp.tool(
+        name="get_meteo_forecast_history",
+        description=(
+            "Append-only audit of Open-Meteo forecast fetches. Every LP run "
+            "writes its forecast to this table keyed by "
+            "(forecast_fetch_at_utc, slot_time) so you can see how the "
+            "forecast for a given slot evolved across multiple solves. "
+            "Pass fetch_at_utc to pull one specific fetch's rows."
+        ),
+    )
+    def get_meteo_forecast_history(fetch_at_utc: str) -> dict[str, Any]:
+        from . import db
+        try:
+            rows = db.get_meteo_forecast_at(fetch_at_utc)
+            return {"ok": True, "fetch_at_utc": fetch_at_utc, "rows": rows}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    @mcp.tool(
+        name="get_config_audit",
+        description=(
+            "Append-only audit of runtime_settings changes (set + delete "
+            "ops, each tagged with the actor that made the change). "
+            "Filter by key. Useful to explain why a past plan looked the "
+            "way it did when a tunable has since changed."
+        ),
+    )
+    def get_config_audit_tool(key: str | None = None, limit: int = 50) -> dict[str, Any]:
+        from . import db
+        try:
+            rows = db.get_config_audit(key=key, limit=int(limit))
+            return {"ok": True, "key": key, "rows": rows}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    @mcp.tool(
+        name="get_daikin_telemetry_history",
+        description=(
+            "Recent daikin_telemetry rows (tank/indoor/outdoor temps, "
+            "tank target, LWT actual, mode, weather regulation). Each row "
+            "has a ``source`` field — 'live' means fetched from Onecta, "
+            "'estimate' means the physics estimator synthesised it when "
+            "quota was exhausted. Useful for calibration + sanity "
+            "checking the estimator."
+        ),
+    )
+    def get_daikin_telemetry_history(limit: int = 100) -> dict[str, Any]:
+        from . import db
+        try:
+            conn = db.get_connection()
+            try:
+                cur = conn.execute(
+                    "SELECT * FROM daikin_telemetry ORDER BY fetched_at DESC LIMIT ?",
+                    (int(limit),),
+                )
+                rows = [dict(r) for r in cur.fetchall()]
+            finally:
+                conn.close()
+            return {"ok": True, "rows": rows}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    @mcp.tool(
+        name="get_fox_energy_range",
+        description=(
+            "Fox ESS daily energy totals (solar, load, import, export, "
+            "charge, discharge) across a date range. Reads from "
+            "fox_energy_daily which the nightly rollup job populates. "
+            "Dates are inclusive, YYYY-MM-DD. Use this to compare week-"
+            "to-week solar yield, charge/discharge balance, etc."
+        ),
+    )
+    def get_fox_energy_range(start_date: str, end_date: str) -> dict[str, Any]:
+        from . import db
+        try:
+            rows = db.get_fox_energy_daily_range(start_date, end_date)
+            return {"ok": True, "start_date": start_date, "end_date": end_date, "rows": rows}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
     # Phase 4.5 — boundary audit. Emits WARN per hardware-write tool that lacks
     # a `confirmed` parameter. Clean surface = silent; regressions are loud.
     audit_mcp_tool_surface(mcp)
