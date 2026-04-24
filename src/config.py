@@ -598,6 +598,17 @@ class Config:
     # "Parameters do not meet expectations" surprise on quick-succession writes.
     FOX_WRITE_INTER_DELAY_SECONDS: float = float(os.getenv("FOX_WRITE_INTER_DELAY_SECONDS", "2.0"))
 
+    # Retention (days) for append-only history tables so the DB doesn't grow
+    # unbounded. ADR-004 flagged daikin_telemetry specifically; the Phase 0
+    # snapshot tables share the same concern. Pruning runs at startup plus
+    # once per day via the scheduler.
+    DAIKIN_TELEMETRY_RETENTION_DAYS: int = int(os.getenv("DAIKIN_TELEMETRY_RETENTION_DAYS", "30"))
+    METEO_FORECAST_HISTORY_RETENTION_DAYS: int = int(
+        os.getenv("METEO_FORECAST_HISTORY_RETENTION_DAYS", "30")
+    )
+    LP_SNAPSHOT_RETENTION_DAYS: int = int(os.getenv("LP_SNAPSHOT_RETENTION_DAYS", "90"))
+    CONFIG_AUDIT_RETENTION_DAYS: int = int(os.getenv("CONFIG_AUDIT_RETENTION_DAYS", "365"))
+
     def foxess_client_kwargs(self) -> dict:
         """Return the right kwargs for FoxESSClient based on what's configured."""
         if not self.FOXESS_DEVICE_SN:

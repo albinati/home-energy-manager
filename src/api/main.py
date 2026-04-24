@@ -116,6 +116,15 @@ from .routers import workbench as workbench_router
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await asyncio.to_thread(db.init_db)
+    # Prune append-only history tables so the DB doesn't grow unbounded.
+    # Non-fatal — deletion failures are logged internally and the service
+    # starts regardless.
+    try:
+        pruned = await asyncio.to_thread(db.prune_history_tables)
+        if any(v > 0 for v in pruned.values()):
+            logger.info("retention prune: %s", pruned)
+    except Exception:
+        logger.warning("history-table prune on startup failed", exc_info=True)
     fox = None
     daikin = None
     try:
