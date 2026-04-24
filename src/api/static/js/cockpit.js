@@ -375,9 +375,29 @@
 
   // --- Boot ---------------------------------------------------------------
 
+  // --- Settings drawer ---------------------------------------------------
+  // The drawer reuses settings.js — the container IDs on the cockpit page
+  // (#settingsComfort / #settingsStrategy / #settingsSchedule) match the
+  // full /settings page, so settings.js's own load() populates both.
+  function bindSettingsDrawer() {
+    const open = $('#btnSettingsDrawer');
+    const backdrop = $('#settingsDrawerBackdrop');
+    const closeBtn = $('#btnSettingsDrawerClose');
+    if (!backdrop) return;
+    const show = () => { backdrop.hidden = false; document.body.classList.add('drawer-open'); };
+    const hide = () => { backdrop.hidden = true; document.body.classList.remove('drawer-open'); };
+    open?.addEventListener('click', show);
+    closeBtn?.addEventListener('click', hide);
+    backdrop.addEventListener('click', e => { if (e.target === backdrop) hide(); });
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape' && !backdrop.hidden) hide();
+    });
+  }
+
   document.addEventListener('DOMContentLoaded', async () => {
     bindOverride();
     bindFreshnessChips();
+    bindSettingsDrawer();
     // Load the hero first so thresholds are available when strips render.
     await loadNow();
     loadTariff();

@@ -56,27 +56,34 @@ a { color: inherit; text-decoration: none; }
 }
 .brand { grid-area: brand; font-weight: 600; font-size: 1rem; }
 
-/* Mode badge — clickable summary of DAIKIN_CONTROL_MODE + REQUIRE_SIMULATION_ID */
+/* Mode badge — compact clickable Daikin-control indicator.
+ *
+ * Passive is the default + *desired* state (firmware runs the heat pump
+ * on its own curve); the old pill used a warning-orange "simulation"
+ * style which read as "something is wrong". Now: neutral chip always,
+ * subtle dot colour to hint at the mode, and a terse "Daikin: passive"
+ * label so first-time viewers understand what they're looking at.
+ */
 .mode-badge {
     grid-area: badge;
     appearance: none;
     background: var(--bg-card);
     border: 1px solid var(--border);
-    color: var(--text);
-    padding: 0.35rem 0.7rem;
+    color: var(--text-dim);
+    padding: 0.3rem 0.65rem;
     border-radius: 999px;
-    font-size: 0.78rem;
-    font-weight: 600;
-    letter-spacing: 0.04em;
+    font-size: 0.74rem;
+    font-weight: 500;
+    letter-spacing: 0.01em;
     cursor: pointer;
     display: inline-flex;
     align-items: center;
     gap: 0.4rem;
-    min-height: 32px;
+    min-height: 30px;
     justify-self: center;
     line-height: 1;
 }
-.mode-badge:hover { border-color: var(--text-dim); }
+.mode-badge:hover { border-color: var(--text-dim); color: var(--text); }
 .mode-badge:active { transform: scale(0.97); }
 .mode-badge .mode-dot {
     display: inline-block;
@@ -84,32 +91,31 @@ a { color: inherit; text-decoration: none; }
     height: 8px;
     border-radius: 50%;
     flex-shrink: 0;
+    background: var(--text-dim);
 }
-.mode-badge .mode-sub {
-    color: var(--text-dim);
-    font-weight: 400;
-    font-size: 0.7rem;
-}
-.mode-badge[data-mode="operational"] {
-    background: rgba(16,185,129,0.12);
-    border-color: rgba(16,185,129,0.5);
-}
-.mode-badge[data-mode="operational"] .mode-dot {
-    background: var(--ok);
-    box-shadow: 0 0 6px var(--ok);
-}
-.mode-badge[data-mode="simulation"] {
-    background: rgba(245,158,11,0.12);
+.mode-badge .mode-label { color: var(--text-dim); font-weight: 500; }
+.mode-badge .mode-value { color: var(--text); font-weight: 600; font-variant: small-caps; }
+
+/* Passive = firmware autonomous (normal). Neutral blue dot to say "this is
+ * the default; nothing is wrong." Active = LP controls the HP: warmer tone
+ * to flag that the service is writing to the device. */
+.mode-badge[data-daikin="passive"] .mode-dot { background: #5b9bd5; }
+.mode-badge[data-daikin="active"] {
     border-color: rgba(245,158,11,0.5);
-    background-image: repeating-linear-gradient(45deg,
-        transparent 0, transparent 6px,
-        rgba(245,158,11,0.08) 6px, rgba(245,158,11,0.08) 12px);
 }
-.mode-badge[data-mode="simulation"] .mode-dot { background: var(--warn); }
-.mode-badge[data-mode="unknown"] { opacity: 0.6; }
+.mode-badge[data-daikin="active"] .mode-dot {
+    background: var(--warn);
+    box-shadow: 0 0 6px var(--warn);
+}
+/* Simulate-id enforcement on: show a tiny 🔒 after the label. */
+.mode-badge[data-require-sim="true"]::after {
+    content: "🔒";
+    font-size: 0.72rem;
+    opacity: 0.75;
+}
 @media (max-width: 480px) {
-    .mode-badge .mode-sub { display: none; }
-    .mode-badge .mode-label { font-size: 0.72rem; }
+    .mode-badge .mode-label { display: none; }
+    .mode-badge { padding: 0.3rem 0.55rem; }
 }
 .tabs { grid-area: tabs; display: flex; gap: 0.25rem; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
 .tabs::-webkit-scrollbar { display: none; }
@@ -512,6 +518,148 @@ body.is-optimizing .fresh-chip[data-source="plan"] {
 .daikin-controls.is-disabled input,
 .daikin-controls.is-disabled button {
     pointer-events: none;
+}
+
+/* MPC hours 24-cell toggle grid (replaces the CSV text input). */
+.mpc-grid {
+    display: grid;
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    gap: 3px;
+    margin: 0.55rem 0;
+}
+@media (max-width: 480px) {
+    .mpc-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+}
+.mpc-cell {
+    appearance: none;
+    border: 1px solid var(--border);
+    background: var(--bg-card-2);
+    color: var(--text-dim);
+    font-size: 0.7rem;
+    font-variant-numeric: tabular-nums;
+    padding: 0.35rem 0;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 80ms ease, color 80ms ease, border-color 80ms ease;
+}
+.mpc-cell:hover { border-color: var(--text-dim); color: var(--text); }
+.mpc-cell.is-on {
+    background: var(--cheap);
+    border-color: var(--cheap);
+    color: #08180a;
+    font-weight: 600;
+}
+
+/* Controls section header — was a plain-text button that didn't read as
+ * clickable. Now a proper row with an expand arrow + subtitle. */
+.override-toggle {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.55rem 0.85rem;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-size: 0.85rem;
+    cursor: pointer;
+    text-align: left;
+    transition: border-color 120ms ease, background 120ms ease;
+}
+.override-toggle:hover { border-color: var(--text-dim); }
+.override-toggle-left {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    font-weight: 600;
+}
+.override-toggle-icon {
+    display: inline-block;
+    transition: transform 160ms ease;
+    color: var(--text-dim);
+}
+.override-toggle[aria-expanded="true"] .override-toggle-icon { transform: rotate(90deg); }
+.override-toggle-right {
+    font-size: 0.74rem;
+    font-weight: 400;
+}
+@media (max-width: 480px) {
+    .override-toggle-right { display: none; }
+}
+
+/* Settings drawer — opens from the ⚙ chip in the hero ribbon. Right-side
+ * slide-in so the underlying cockpit stays visible (users can flip a knob
+ * and immediately see the effect on the live view). */
+.fresh-chip-settings {
+    margin-left: auto;
+}
+body.drawer-open { overflow: hidden; }
+.drawer-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 80;
+    display: flex;
+    justify-content: flex-end;
+}
+.drawer-backdrop[hidden] { display: none; }
+.drawer {
+    width: min(100%, 480px);
+    max-width: 100%;
+    height: 100%;
+    background: var(--bg);
+    border-left: 1px solid var(--border);
+    box-shadow: -8px 0 24px rgba(0, 0, 0, 0.3);
+    display: flex;
+    flex-direction: column;
+    animation: drawer-slide-in 180ms ease;
+}
+@keyframes drawer-slide-in {
+    from { transform: translateX(100%); }
+    to   { transform: translateX(0); }
+}
+.drawer-header {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.7rem 0.95rem;
+    border-bottom: 1px solid var(--border);
+}
+.drawer-header h2 {
+    flex: 1;
+    margin: 0;
+    font-size: 1rem;
+}
+.drawer-close {
+    appearance: none;
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    font-size: 1.5rem;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 0.3rem;
+}
+.drawer-close:hover { color: var(--text); }
+.drawer-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0.85rem;
+}
+.drawer-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.7rem 0.85rem;
+    margin-bottom: 0.75rem;
+}
+.drawer-card-title {
+    margin: 0 0 0.45rem 0;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-dim);
 }
 
 /* Layout */

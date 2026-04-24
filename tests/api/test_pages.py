@@ -70,11 +70,14 @@ def test_modal_partial_included(client):
 
 
 def test_mode_badge_rendered_on_every_v10_page(client):
-    """v10.2: every page renders the topbar mode badge with data-mode attr."""
+    """v10.2: every page renders the topbar mode badge. OPERATION_MODE was
+    retired (#130); the badge now reflects DAIKIN_CONTROL_MODE via
+    data-daikin plus a require-sim lock hint via data-require-sim."""
     for url in ("/", "/insights", "/workbench", "/settings"):
         body = client.get(url).text
         assert 'class="mode-badge"' in body, f"{url}: mode badge missing"
-        assert 'data-mode=' in body, f"{url}: data-mode attribute missing"
+        assert 'data-daikin=' in body, f"{url}: data-daikin attribute missing"
+        assert 'data-require-sim=' in body, f"{url}: data-require-sim attribute missing"
         assert 'id="modeBadge"' in body, f"{url}: badge id missing (click handler won't bind)"
 
 
