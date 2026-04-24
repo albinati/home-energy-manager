@@ -586,6 +586,17 @@ class Config:
     FOX_FORCE_REFRESH_MIN_INTERVAL_SECONDS: int = int(
         os.getenv("FOX_FORCE_REFRESH_MIN_INTERVAL_SECONDS", "60")
     )
+    # 429 retry — mirrors the Daikin pattern (see DAIKIN_HTTP_429_MAX_RETRIES).
+    # Fox rate limits more than Daikin (1440/day soft vs Daikin 200/day) but
+    # transient 429s happen on bursts (MPC re-solve + heartbeat overlap).
+    # Default 2 = at most three attempts total. Cap sleep at
+    # FOX_HTTP_429_MAX_SLEEP_SECONDS to avoid hanging (like Daikin's 86400 trap).
+    FOX_HTTP_429_MAX_RETRIES: int = int(os.getenv("FOX_HTTP_429_MAX_RETRIES", "2"))
+    FOX_HTTP_429_MAX_SLEEP_SECONDS: int = int(os.getenv("FOX_HTTP_429_MAX_SLEEP_SECONDS", "60"))
+    # Inter-write delay between scheduler / charge-period / work-mode PATCHes
+    # (mirrors TonyM1958/FoxESS-Cloud's 2s pattern). Prevents the 40257
+    # "Parameters do not meet expectations" surprise on quick-succession writes.
+    FOX_WRITE_INTER_DELAY_SECONDS: float = float(os.getenv("FOX_WRITE_INTER_DELAY_SECONDS", "2.0"))
 
     def foxess_client_kwargs(self) -> dict:
         """Return the right kwargs for FoxESSClient based on what's configured."""
