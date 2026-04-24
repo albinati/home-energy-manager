@@ -463,6 +463,18 @@ body.is-simulating {
     box-shadow: inset 0 2px 0 0 var(--warn);
 }
 
+/* Phase 6: daikin-controls grey-out when passive (not hidden — we want
+ * the user to see what's there and why it's disabled). */
+.daikin-controls.is-disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    filter: grayscale(0.4);
+}
+.daikin-controls.is-disabled input,
+.daikin-controls.is-disabled button {
+    pointer-events: none;
+}
+
 /* Layout */
 .page {
     max-width: 960px;

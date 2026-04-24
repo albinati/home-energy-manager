@@ -107,6 +107,21 @@
     $('#heroFoxMode').textContent = state.fox_mode || cur.fox_mode || '—';
     $('#heroDaikinMode').textContent = state.daikin_mode || n.modes?.daikin_control_mode || '—';
 
+    // Phase 6 gating: grey-out (not hide) the Daikin tank/LWT controls when
+    // DAIKIN_CONTROL_MODE is passive. The user sees they exist and understands
+    // *why* they're inert — flipping hidden made the controls silently vanish.
+    const dkMode = n.modes?.daikin_control_mode || 'passive';
+    const isPassive = dkMode === 'passive';
+    const passiveNote = $('#daikinOverridePassiveNote');
+    const daikinBlock = $('#daikinOverrideActive');
+    const modeText = $('[data-daikin-mode-text]');
+    if (modeText) modeText.textContent = dkMode;
+    if (passiveNote) passiveNote.hidden = !isPassive;
+    if (daikinBlock) {
+      daikinBlock.classList.toggle('is-disabled', isPassive);
+      daikinBlock.querySelectorAll('input, button').forEach(el => { el.disabled = isPassive; });
+    }
+
     // Next transition — countdown + label.
     const countdown = $('#heroNextCountdown');
     const nextLabel = $('#heroNextLabel');

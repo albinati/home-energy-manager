@@ -118,7 +118,7 @@
 
 <section class="override-section">
     <button class="override-toggle" id="overrideToggle" aria-expanded="false">
-        Manual override · everything below requires preview &amp; confirm
+        Controls · everything below requires preview &amp; confirm
     </button>
     <div class="override-body" id="overrideBody" hidden>
         <div class="override-tabs" role="tablist">
@@ -147,11 +147,16 @@
             <p class="text-dim" style="font-size:0.85rem;margin:0;" id="daikinOverrideHint">
                 Daikin is in <code data-daikin-mode-text>—</code> mode.
             </p>
+            <!-- Phase 6: passive-mode gating grey-out (not hidden) + tooltip
+                 so the user sees *why* the controls are disabled rather than
+                 having them silently disappear. -->
             <div id="daikinOverridePassiveNote" class="text-warn" style="font-size:0.85rem;" hidden>
-                In passive mode the service never writes to Daikin. To control it, switch
-                <code>DAIKIN_CONTROL_MODE</code> to <code>active</code> on the Settings page.
+                In passive mode the service never writes to Daikin.
+                Flip <code>DAIKIN_CONTROL_MODE</code> to <code>active</code> via the top-bar mode badge to enable manual overrides.
             </div>
-            <div id="daikinOverrideActive" hidden>
+            <div id="daikinOverrideActive"
+                 class="daikin-controls"
+                 title="Daikin is in passive mode. Switch to active (topbar mode badge) to enable these controls.">
                 <div class="field">
                     <label>Tank target (°C)</label>
                     <input type="number" min="30" max="65" step="0.5" id="daikinTankInput" value="48">
