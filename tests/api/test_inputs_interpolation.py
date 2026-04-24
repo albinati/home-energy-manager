@@ -11,7 +11,7 @@ tab shows the same continuous series the solver consumes.
 """
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -41,9 +41,9 @@ def _seed_three_hours(start: datetime) -> None:
     """Seed temp+solar at start, start+1h, start+2h — spanning the first 3 hours
     of the rolling horizon. Half-hour slots between them should interpolate."""
     rows = [
-        {"slot_time": start.isoformat(),                                 "temp_c": 10.0, "solar_w_m2": 100.0},
-        {"slot_time": start.replace(hour=start.hour + 1).isoformat(),    "temp_c": 12.0, "solar_w_m2": 200.0},
-        {"slot_time": start.replace(hour=start.hour + 2).isoformat(),    "temp_c": 14.0, "solar_w_m2": 300.0},
+        {"slot_time": start.isoformat(),                          "temp_c": 10.0, "solar_w_m2": 100.0},
+        {"slot_time": (start + timedelta(hours=1)).isoformat(),   "temp_c": 12.0, "solar_w_m2": 200.0},
+        {"slot_time": (start + timedelta(hours=2)).isoformat(),   "temp_c": 14.0, "solar_w_m2": 300.0},
     ]
     db.save_meteo_forecast(rows, start.date().isoformat())
 
@@ -84,7 +84,7 @@ def test_slots_beyond_last_seed_carry_last_forward(client):
     slots = r.json()["slots"]
     # The last seeded row was anchor+2h; slots beyond that must carry that
     # value forward rather than flip to None (the LP's interp does the same).
-    tail = [s for s in slots if s["t_utc"] > anchor.replace(hour=anchor.hour + 2).isoformat().replace("+00:00", "Z")]
+    tail = [s for s in slots if s["t_utc"] > (anchor + timedelta(hours=2)).isoformat().replace("+00:00", "Z")]
     assert tail, "need at least one post-seed slot"
     for s in tail:
         assert s["temp_c"] == pytest.approx(14.0), f"slot {s['t_utc']} should carry 14.0 forward, got {s['temp_c']}"
