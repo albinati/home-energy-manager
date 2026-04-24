@@ -234,6 +234,18 @@ async def web_cockpit(request: Request):
     )
 
 
+@app.get("/forecast", response_class=HTMLResponse)
+async def web_forecast(request: Request):
+    """Phase 3: dedicated Forecast tab showing everything the next LP solve
+    will see — prices, weather forecast, initial state (with sources),
+    thresholds, config snapshot, and tomorrow's tariff preview when
+    Octopus has published it. Answers "what will the LP do next?".
+    """
+    return templates.TemplateResponse(
+        request, "forecast.html", {"active_page": "forecast", **_layout_context()}
+    )
+
+
 @app.get("/insights", response_class=HTMLResponse)
 async def web_insights(request: Request):
     return templates.TemplateResponse(
@@ -747,6 +759,183 @@ async def cockpit_now():
             "energy_strategy_mode": config.ENERGY_STRATEGY_MODE,
         },
         "plan_date": plan_block["plan_date"],
+    }
+
+
+@app.get("/api/v1/optimization/inputs")
+async def optimization_inputs(horizon_hours: int | None = None):
+    """Everything the next LP solve will see, merged from caches + SQLite.
+
+    The Forecast tab reads this in one call to answer "what will the LP do
+    next, and against which numbers?" without triggering cloud fetches.
+
+    Cache-only contract — mirror of the ``/cockpit/now`` discipline. Weather
+    rows come from ``meteo_forecast`` (latest-per-slot, written by the last
+    LP solve). Prices from ``agile_rates``. Initial state via
+    ``read_lp_initial_state(allow_daikin_refresh=False)`` so no Daikin quota
+    is burned on a page load.
+    """
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+    from zoneinfo import ZoneInfo
+    from ..scheduler.lp_initial_state import read_lp_initial_state
+    from ..scheduler import lp_overrides
+
+    hz = int(horizon_hours or config.LP_HORIZON_HOURS)
+    hz = max(4, min(48, hz))
+    now = _dt.now(_UTC)
+    day_start = now.replace(minute=0, second=0, microsecond=0)
+    window_end = day_start + _td(hours=hz)
+
+    # --- Tariff rates (import + export) -------------------------------------
+    tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
+    export_tariff = (config.OCTOPUS_EXPORT_TARIFF_CODE or "").strip()
+    import_rows = db.get_rates_for_period(tariff, day_start, window_end) if tariff else []
+    export_rows = db.get_rates_for_period(export_tariff, day_start, window_end) if export_tariff else []
+
+    # --- Meteo forecast (latest-per-slot, in the plan window) ---------------
+    conn = db.get_connection()
+    try:
+        cur = conn.execute(
+            """SELECT slot_time, temp_c, solar_w_m2 FROM meteo_forecast
+               WHERE slot_time >= ? AND slot_time < ?
+               ORDER BY slot_time""",
+            (day_start.isoformat(), window_end.isoformat()),
+        )
+        meteo_rows = [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+    # --- Base-load hour-of-day profile --------------------------------------
+    profile_limit = int(getattr(config, "LP_LOAD_PROFILE_SLOTS", 2016))
+    try:
+        load_profile = db.hourly_load_profile_kwh(limit=profile_limit)
+    except Exception:
+        load_profile = {}
+    try:
+        fox_mean = db.mean_fox_load_kwh_per_slot(limit=60)
+    except Exception:
+        fox_mean = None
+    try:
+        flat = fox_mean if fox_mean is not None else db.mean_consumption_kwh_from_execution_logs(limit=profile_limit)
+    except Exception:
+        flat = 0.4
+
+    # --- Initial state (quota-safe: no Daikin refresh) ----------------------
+    try:
+        initial = read_lp_initial_state(None, allow_daikin_refresh=False)
+        initial_block = {
+            "soc_kwh": round(float(initial.soc_kwh), 3),
+            "soc_pct": round(float(initial.soc_kwh) / float(config.BATTERY_CAPACITY_KWH) * 100.0, 1) if config.BATTERY_CAPACITY_KWH else None,
+            "tank_c": round(float(initial.tank_temp_c), 2),
+            "indoor_c": round(float(initial.indoor_temp_c), 2),
+            "soc_source": getattr(initial, "soc_source", "unknown"),
+            "tank_source": getattr(initial, "tank_source", "unknown"),
+            "indoor_source": getattr(initial, "indoor_source", "unknown"),
+        }
+    except Exception as e:
+        initial_block = {
+            "soc_kwh": None, "soc_pct": None, "tank_c": None, "indoor_c": None,
+            "soc_source": f"error:{e}", "tank_source": "unknown", "indoor_source": "unknown",
+        }
+
+    try:
+        micro_climate_offset = float(db.get_micro_climate_offset_c(config.DAIKIN_MICRO_CLIMATE_LOOKBACK))
+    except Exception:
+        micro_climate_offset = 0.0
+
+    # --- Thresholds from today's daily_targets (LP-derived) -----------------
+    tz_name = config.BULLETPROOF_TIMEZONE or "Europe/London"
+    try:
+        tz = ZoneInfo(tz_name)
+        plan_date_local = _dt.now(tz).date().isoformat()
+    except Exception:
+        plan_date_local = now.date().isoformat()
+    try:
+        tgt = db.get_daily_target(plan_date_local) or {}
+    except Exception:
+        tgt = {}
+
+    # --- Per-slot merged view (prices + weather + base_load, for the horizon)
+    slots_out: list[dict[str, Any]] = []
+    slot_len = _td(minutes=30)
+    weather_by_slot: dict[str, dict[str, Any]] = {}
+    for r in meteo_rows:
+        weather_by_slot[r["slot_time"]] = r
+    import_by_valid_from: dict[str, float] = {r["valid_from"]: float(r["value_inc_vat"]) for r in import_rows}
+    export_by_valid_from: dict[str, float] = {r["valid_from"]: float(r["value_inc_vat"]) for r in export_rows}
+    t = day_start
+    while t < window_end:
+        iso = t.isoformat().replace("+00:00", "+00:00")  # preserve offset
+        iso_norm = iso
+        # Agile rates land in SQLite with ±Z suffix; try both.
+        iso_candidates = {iso, iso.replace("+00:00", "Z")}
+        price_i = None
+        price_e = None
+        for k in iso_candidates:
+            if k in import_by_valid_from:
+                price_i = import_by_valid_from[k]; break
+        for k in iso_candidates:
+            if k in export_by_valid_from:
+                price_e = export_by_valid_from[k]; break
+        wx = weather_by_slot.get(iso_norm) or weather_by_slot.get(iso.replace("+00:00", ""))
+        try:
+            hr_local = t.astimezone(ZoneInfo(tz_name)).hour
+        except Exception:
+            hr_local = t.hour
+        bl = float(load_profile.get(hr_local, flat))
+        slots_out.append({
+            "t_utc": iso.replace("+00:00", "Z"),
+            "price_import_p": price_i,
+            "price_export_p": price_e,
+            "temp_c": float(wx["temp_c"]) if wx and wx.get("temp_c") is not None else None,
+            "solar_w_m2": float(wx["solar_w_m2"]) if wx and wx.get("solar_w_m2") is not None else None,
+            "base_load_kwh": round(bl, 4),
+        })
+        t = t + slot_len
+
+    # --- Config snapshot — the knobs the LP reads at solve time -------------
+    cfg_snap = {
+        "LP_HORIZON_HOURS": int(config.LP_HORIZON_HOURS),
+        "BATTERY_CAPACITY_KWH": float(config.BATTERY_CAPACITY_KWH),
+        "MIN_SOC_RESERVE_PERCENT": float(config.MIN_SOC_RESERVE_PERCENT),
+        "BATTERY_RT_EFFICIENCY": float(config.BATTERY_RT_EFFICIENCY),
+        "MAX_INVERTER_KW": float(config.MAX_INVERTER_KW),
+        "DAIKIN_CONTROL_MODE": str(config.DAIKIN_CONTROL_MODE),
+        "OPTIMIZATION_PRESET": str(config.OPTIMIZATION_PRESET),
+        "ENERGY_STRATEGY_MODE": str(config.ENERGY_STRATEGY_MODE),
+        "DHW_TEMP_COMFORT_C": float(config.DHW_TEMP_COMFORT_C),
+        "DHW_TEMP_NORMAL_C": float(config.DHW_TEMP_NORMAL_C),
+        "INDOOR_SETPOINT_C": float(config.INDOOR_SETPOINT_C),
+        "LP_PRICE_QUANTIZE_PENCE": float(getattr(config, "LP_PRICE_QUANTIZE_PENCE", 0.0)),
+        "LP_BATTERY_TV_PENALTY_PENCE_PER_KWH_DELTA": float(getattr(config, "LP_BATTERY_TV_PENALTY_PENCE_PER_KWH_DELTA", 0.0)),
+        "LP_IMPORT_TV_PENALTY_PENCE_PER_KWH_DELTA": float(getattr(config, "LP_IMPORT_TV_PENALTY_PENCE_PER_KWH_DELTA", 0.0)),
+    }
+
+    # --- Tomorrow's rates available? (Octopus publishes ~16:00 UTC) ---------
+    tomorrow_start = day_start + _td(days=1)
+    tomorrow_end = tomorrow_start + _td(days=1)
+    tomorrow_rows = db.get_rates_for_period(tariff, tomorrow_start, tomorrow_end) if tariff else []
+    tomorrow_available = len(tomorrow_rows) >= 4
+
+    return {
+        "now_utc": now.isoformat().replace("+00:00", "Z"),
+        "planner_tz": tz_name,
+        "horizon_hours": hz,
+        "slots": slots_out,
+        "initial": initial_block,
+        "micro_climate_offset_c": micro_climate_offset,
+        "thresholds": {
+            "cheap_p": (tgt or {}).get("cheap_threshold"),
+            "peak_p": (tgt or {}).get("peak_threshold"),
+        },
+        "config_snapshot": cfg_snap,
+        "target_vwap_pence": (tgt or {}).get("target_vwap"),
+        "estimated_cost_pence": (tgt or {}).get("estimated_cost_pence"),
+        "strategy_summary": (tgt or {}).get("strategy_summary"),
+        "tomorrow_rates_available": tomorrow_available,
+        "workbench_schema": lp_overrides.schema_for_response(),
     }
 
 
