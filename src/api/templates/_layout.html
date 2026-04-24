@@ -15,15 +15,12 @@
             <button id="modeBadge"
                     class="mode-badge"
                     type="button"
-                    data-mode="{{ operation_mode }}"
                     data-daikin="{{ daikin_control_mode }}"
                     data-require-sim="{{ 'true' if require_simulation_id else 'false' }}"
-                    title="Click to change operation mode, Daikin control, or simulate-id enforcement">
+                    title="Daikin control + simulate-id enforcement. Passive = heat pump runs on its own curve (normal). Active = the LP schedules tank + LWT.">
                 <span class="mode-dot"></span>
-                <span class="mode-label">{{ operation_mode|upper }}</span>
-                {% if daikin_control_mode == 'passive' %}
-                    <span class="mode-sub">· daikin passive</span>
-                {% endif %}
+                <span class="mode-label">Daikin:</span>
+                <span class="mode-value">{{ daikin_control_mode }}</span>
             </button>
             <nav class="tabs" aria-label="Pages">
                 <a href="/" class="tab {% if active_page == 'cockpit' %}is-active{% endif %}">Cockpit</a>
