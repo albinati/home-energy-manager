@@ -291,6 +291,12 @@ def set_setting(key: str, value: Any, *, actor: str = "api") -> Any:
     canonical = _validate(spec, value)
     serialized = _serialize(spec, canonical)
     db.set_runtime_setting(key, serialized)
+    # V11: append-only audit trail so a past LP run can be explained even
+    # after a knob is changed. Non-fatal — never block the setting write.
+    try:
+        db.log_config_change(key, serialized, op="set", actor=actor)
+    except Exception as e:
+        logger.debug("config_audit insert failed (non-fatal): %s", e)
     global _version
     with _lock:
         _version += 1
@@ -314,6 +320,11 @@ def delete_setting(key: str, *, actor: str = "api") -> bool:
     if spec is None:
         raise SettingValidationError(f"unknown runtime setting: {key!r}")
     removed = db.delete_runtime_setting(key)
+    if removed:
+        try:
+            db.log_config_change(key, None, op="delete", actor=actor)
+        except Exception as e:
+            logger.debug("config_audit delete insert failed (non-fatal): %s", e)
     global _version
     with _lock:
         _version += 1
