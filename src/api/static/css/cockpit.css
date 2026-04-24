@@ -550,6 +550,118 @@ body.is-optimizing .fresh-chip[data-source="plan"] {
     font-weight: 600;
 }
 
+/* Controls section header — was a plain-text button that didn't read as
+ * clickable. Now a proper row with an expand arrow + subtitle. */
+.override-toggle {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.55rem 0.85rem;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-size: 0.85rem;
+    cursor: pointer;
+    text-align: left;
+    transition: border-color 120ms ease, background 120ms ease;
+}
+.override-toggle:hover { border-color: var(--text-dim); }
+.override-toggle-left {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    font-weight: 600;
+}
+.override-toggle-icon {
+    display: inline-block;
+    transition: transform 160ms ease;
+    color: var(--text-dim);
+}
+.override-toggle[aria-expanded="true"] .override-toggle-icon { transform: rotate(90deg); }
+.override-toggle-right {
+    font-size: 0.74rem;
+    font-weight: 400;
+}
+@media (max-width: 480px) {
+    .override-toggle-right { display: none; }
+}
+
+/* Settings drawer — opens from the ⚙ chip in the hero ribbon. Right-side
+ * slide-in so the underlying cockpit stays visible (users can flip a knob
+ * and immediately see the effect on the live view). */
+.fresh-chip-settings {
+    margin-left: auto;
+}
+body.drawer-open { overflow: hidden; }
+.drawer-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 80;
+    display: flex;
+    justify-content: flex-end;
+}
+.drawer-backdrop[hidden] { display: none; }
+.drawer {
+    width: min(100%, 480px);
+    max-width: 100%;
+    height: 100%;
+    background: var(--bg);
+    border-left: 1px solid var(--border);
+    box-shadow: -8px 0 24px rgba(0, 0, 0, 0.3);
+    display: flex;
+    flex-direction: column;
+    animation: drawer-slide-in 180ms ease;
+}
+@keyframes drawer-slide-in {
+    from { transform: translateX(100%); }
+    to   { transform: translateX(0); }
+}
+.drawer-header {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.7rem 0.95rem;
+    border-bottom: 1px solid var(--border);
+}
+.drawer-header h2 {
+    flex: 1;
+    margin: 0;
+    font-size: 1rem;
+}
+.drawer-close {
+    appearance: none;
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    font-size: 1.5rem;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 0.3rem;
+}
+.drawer-close:hover { color: var(--text); }
+.drawer-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0.85rem;
+}
+.drawer-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.7rem 0.85rem;
+    margin-bottom: 0.75rem;
+}
+.drawer-card-title {
+    margin: 0 0 0.45rem 0;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-dim);
+}
+
 /* Layout */
 .page {
     max-width: 960px;
