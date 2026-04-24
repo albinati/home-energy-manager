@@ -161,106 +161,189 @@
     return 'var(--standard)';
   }
 
+  // ---------------------------------------------------------------------
+  // Merged 24-hour timeline (replaces the previous 3 separate strips).
+  // One row of 48 cells: background = price kind, bottom accent bar =
+  // Fox mode; vertical cursor overlays "now"; export shown as a thin
+  // secondary row below for reference. Click any cell for details.
+  // ---------------------------------------------------------------------
+
+  let _lastAgile = null;
+  let _lastGroups = [];
+
   async function loadTariff() {
-    const agile = await jsonFetch('/api/v1/agile/today').catch(() => null);
-    renderTariffStripsFromAgile(agile);
-    updateTariffLabel(agile);
-  }
-
-  function renderTariffStripsFromAgile(agile) {
-    const im = $('#tariffImportStrip');
-    const ex = $('#tariffExportStrip');
-    if (!im || !ex) return;
-    im.innerHTML = ex.innerHTML = '';
-    if (!agile) return;
-    const now = new Date();
-    const renderRow = (rowEl, slots) => {
-      slots.forEach(s => {
-        const cell = document.createElement('div');
-        cell.className = 'tariff-slot';
-        cell.style.background = priceColor(s.p);
-        const rangeLbl = (window.HEM && window.HEM.fmtSlotRange)
-          ? window.HEM.fmtSlotRange(s.valid_from, s.valid_to)
-          : `${s.valid_from.slice(11,16)}–${s.valid_to.slice(11,16)}`;
-        cell.title = `${rangeLbl} ${s.p.toFixed(1)}p`;
-        const start = new Date(s.valid_from);
-        const end = new Date(s.valid_to);
-        if (now >= start && now < end) cell.classList.add('is-current');
-        rowEl.appendChild(cell);
-      });
-    };
-    renderRow(im, agile.import_slots || []);
-    renderRow(ex, agile.export_slots || []);
-  }
-
-  function updateTariffLabel(agile) {
-    const lbl = $('#tariffCurrentLabel');
-    if (!lbl) return;
-    if (!agile) { lbl.textContent = '—'; return; }
-    const i = agile.current_import_p;
-    const e = agile.current_export_p;
-    const cheap = _thresholds.cheap_p != null ? `cheap<${_thresholds.cheap_p.toFixed(1)}p` : '';
-    const peak = _thresholds.peak_p != null ? `peak>${_thresholds.peak_p.toFixed(1)}p` : '';
-    const thr = [cheap, peak].filter(Boolean).join(' · ');
-    lbl.textContent = `Current: import ${fmtP(i)} · export ${fmtP(e)}${thr ? ' · ' + thr : ''}`;
+    _lastAgile = await jsonFetch('/api/v1/agile/today').catch(() => null);
+    renderMergedTimeline();
   }
 
   async function loadPlan() {
     const p = await jsonFetch('/api/v1/optimization/plan').catch(() => null);
-    if (!p) return;
-    const fox = p.fox || {};
-    let groups = [];
-    try { groups = JSON.parse(fox.groups_json || '[]'); } catch (_e) {}
-    renderPlanStrip(groups);
+    if (p) {
+      const fox = p.fox || {};
+      try { _lastGroups = JSON.parse(fox.groups_json || '[]'); } catch (_e) { _lastGroups = []; }
+    }
+    renderMergedTimeline();
   }
 
   function pad2(n) { return String(n).padStart(2, '0'); }
 
-  function renderPlanStrip(groups) {
-    const strip = $('#planStrip');
+  function priceKind(p) {
+    if (p == null) return 'standard';
+    if (p < 0) return 'negative';
+    if (_thresholds.cheap_p != null && p < _thresholds.cheap_p) return 'cheap';
+    if (_thresholds.peak_p != null && p > _thresholds.peak_p) return 'peak';
+    return 'standard';
+  }
+
+  function foxModeClass(workMode) {
+    if (!workMode) return 'mode-none';
+    const m = workMode.toLowerCase();
+    if (m.includes('forcecharge')) return 'mode-force-charge';
+    if (m.includes('forcedischarge')) return 'mode-force-discharge';
+    if (m.includes('feed-in') || m.includes('feedin')) return 'mode-feed-in';
+    if (m.includes('backup')) return 'mode-backup';
+    return 'mode-self-use';
+  }
+
+  function findGroupForSlot(groups, slotStart) {
+    // Fox groups are UTC-clock HH:MM windows. Anchor comparison on
+    // slotStart's UTC day so midnight-crossing windows still match.
+    const dayStart = new Date(slotStart);
+    dayStart.setUTCHours(0, 0, 0, 0);
+    return groups.find(g => {
+      const gs = new Date(dayStart); gs.setUTCHours(g.startHour, g.startMinute || 0, 0, 0);
+      let ge = new Date(dayStart); ge.setUTCHours(g.endHour, g.endMinute || 0, 0, 0);
+      // Handle end=00:00 which Fox treats as end of day.
+      if (ge <= gs) ge = new Date(ge.getTime() + 24 * 3600 * 1000);
+      return slotStart >= gs && slotStart < ge;
+    }) || null;
+  }
+
+  function renderMergedTimeline() {
+    const strip = $('#timelineStrip');
+    const exportStrip = $('#timelineExport');
     if (!strip) return;
     strip.innerHTML = '';
+    if (exportStrip) exportStrip.innerHTML = '';
+
     const now = new Date();
-    // Fox groups are UTC-clock (hardware); build 48 UTC slots for the next 24h.
-    const dayStart = new Date(now);
-    dayStart.setUTCHours(0, 0, 0, 0);
+    const dayStart = new Date(now); dayStart.setUTCHours(0, 0, 0, 0);
+    const importSlots = _lastAgile?.import_slots || [];
+    const exportSlots = _lastAgile?.export_slots || [];
+    const importByIso = Object.fromEntries(importSlots.map(s => [s.valid_from, s]));
+    const exportByIso = Object.fromEntries(exportSlots.map(s => [s.valid_from, s]));
+
+    let nowIndex = -1;
     for (let i = 0; i < 48; i++) {
-      const slot = document.createElement('div');
-      slot.className = 'plan-slot';
       const hour = Math.floor(i / 2);
       const min = (i % 2) * 30;
-      const slotStart = new Date(dayStart);
-      slotStart.setUTCHours(hour, min, 0, 0);
-      const slotEnd = new Date(slotStart);
-      slotEnd.setUTCMinutes(slotEnd.getUTCMinutes() + 30);
+      const slotStart = new Date(dayStart); slotStart.setUTCHours(hour, min, 0, 0);
+      const slotEnd = new Date(slotStart.getTime() + 30 * 60 * 1000);
+      const iso = slotStart.toISOString().replace('.000Z', 'Z');
+      const importP = importByIso[iso]?.p ?? null;
+      const exportP = exportByIso[iso]?.p ?? null;
+      const group = findGroupForSlot(_lastGroups, slotStart);
+      const kind = priceKind(importP);
+      const modeCls = foxModeClass(group?.workMode);
 
-      const g = groups.find(g => {
-        const gs = new Date(dayStart);
-        gs.setUTCHours(g.startHour, g.startMinute || 0, 0, 0);
-        const ge = new Date(dayStart);
-        ge.setUTCHours(g.endHour, g.endMinute || 0, 0, 0);
-        return slotStart >= gs && slotStart < ge;
-      });
-      const kind = workModeToKind(g);
-      slot.classList.add(`kind-${kind}`);
-      if (now >= slotStart && now < slotEnd) slot.classList.add('is-now');
+      const cell = document.createElement('button');
+      cell.className = `tl-cell kind-${kind}`;
+      cell.dataset.i = String(i);
       const lbl = (window.HEM && window.HEM.fmtSlotTime)
-        ? window.HEM.fmtSlotTime(slotStart.toISOString())
+        ? window.HEM.fmtSlotTime(iso)
         : `${pad2(hour)}:${pad2(min)}`;
-      slot.title = `${lbl} · ${kind}` + (g ? ` (${g.workMode})` : '');
-      slot.addEventListener('click', () => { window.location.href = '/plan'; });
-      strip.appendChild(slot);
+      cell.title = `${lbl} · ${kind}` + (importP != null ? ` · ${importP.toFixed(1)}p` : '')
+                 + (group ? ` · ${group.workMode}` : '');
+      // Accent bar at the bottom of the cell = Fox mode.
+      cell.innerHTML = `<span class="tl-mode ${modeCls}"></span>`;
+      if (now >= slotStart && now < slotEnd) {
+        cell.classList.add('is-now');
+        nowIndex = i;
+      }
+      cell.addEventListener('click', () => {
+        openSlotDetail({
+          label: lbl,
+          isoStart: iso,
+          isoEnd: slotEnd.toISOString(),
+          kind, importP, exportP,
+          workMode: group?.workMode || null,
+          fdSoc: group?.extraParam?.fdSoc,
+          fdPwr: group?.extraParam?.fdPwr,
+          minSocOnGrid: group?.extraParam?.minSocOnGrid,
+        });
+      });
+      strip.appendChild(cell);
+
+      if (exportStrip) {
+        const xc = document.createElement('div');
+        xc.className = `tl-export-cell kind-${priceKind(exportP)}`;
+        xc.title = `${lbl} export: ${exportP != null ? exportP.toFixed(1) + 'p' : '—'}`;
+        exportStrip.appendChild(xc);
+      }
+    }
+
+    // Position the vertical "now" cursor at the correct slot.
+    const cursor = $('#timelineCursor');
+    if (cursor && nowIndex >= 0) {
+      cursor.style.display = 'block';
+      cursor.style.left = `calc(${(nowIndex + 0.5) / 48 * 100}% - 1px)`;
+    } else if (cursor) {
+      cursor.style.display = 'none';
+    }
+
+    // Threshold markers — shown inline above the strip so the user reads
+    // "this band is cheap because the threshold is here".
+    const thrPeak = $('#thrPeak');
+    const thrCheap = $('#thrCheap');
+    if (thrPeak) thrPeak.textContent = _thresholds.peak_p != null ? `peak > ${_thresholds.peak_p.toFixed(1)}p` : 'peak —';
+    if (thrCheap) thrCheap.textContent = _thresholds.cheap_p != null ? `cheap < ${_thresholds.cheap_p.toFixed(1)}p` : 'cheap —';
+
+    // Summary line replaces the old "Current — / —" label.
+    const summary = $('#timelineSummary');
+    if (summary) {
+      const curSlot = nowIndex >= 0 ? strip.children[nowIndex] : null;
+      const curKind = curSlot ? curSlot.className.match(/kind-(\S+)/)?.[1] || '—' : '—';
+      const curImport = _lastAgile?.current_import_p;
+      const curExport = _lastAgile?.current_export_p;
+      const curGroup = nowIndex >= 0 ? findGroupForSlot(_lastGroups,
+        new Date(new Date(dayStart).setUTCHours(Math.floor(nowIndex / 2), (nowIndex % 2) * 30, 0, 0))) : null;
+      summary.innerHTML = `Now: <strong>${curKind}</strong> · import ${fmtP(curImport)} · export ${fmtP(curExport)}` +
+                        (curGroup ? ` · Fox <strong>${curGroup.workMode}</strong>` : '');
     }
   }
 
-  function workModeToKind(g) {
-    if (!g) return 'standard';
-    const m = (g.workMode || '').toLowerCase();
-    if (m.includes('forcecharge')) return 'cheap';
-    if (m.includes('feed-in')) return 'peak_export';
-    if (m.includes('forcedischarge')) return 'peak';
-    if (m.includes('backup')) return 'solar_charge';
-    return 'standard';
+  function openSlotDetail(s) {
+    const backdrop = $('#slotDetailBackdrop');
+    const body = $('#slotDetailBody');
+    const title = $('#slotDetailTitle');
+    if (!backdrop || !body || !title) return;
+    title.textContent = `${s.label} · ${s.kind}`;
+    body.innerHTML = `
+      <table class="slot-detail-table">
+        <tr><th>Time (local)</th><td>${s.label} — ${(window.HEM && window.HEM.fmtSlotTime) ? window.HEM.fmtSlotTime(s.isoEnd) : s.isoEnd.slice(11, 16)}</td></tr>
+        <tr><th>Kind</th><td class="kind-${s.kind}"><span class="legend-swatch" style="vertical-align:middle;margin-right:0.35rem;"></span>${s.kind}</td></tr>
+        <tr><th>Import price</th><td>${s.importP != null ? s.importP.toFixed(2) + ' p/kWh' : '—'}</td></tr>
+        <tr><th>Export price</th><td>${s.exportP != null ? s.exportP.toFixed(2) + ' p/kWh' : '—'}</td></tr>
+        <tr><th>Fox mode</th><td>${s.workMode || '—'}</td></tr>
+        <tr><th>fdSoc (target %)</th><td>${s.fdSoc != null ? s.fdSoc : '—'}</td></tr>
+        <tr><th>fdPwr (W)</th><td>${s.fdPwr != null ? s.fdPwr : '—'}</td></tr>
+        <tr><th>minSocOnGrid</th><td>${s.minSocOnGrid != null ? s.minSocOnGrid + '%' : '—'}</td></tr>
+      </table>
+    `;
+    backdrop.hidden = false;
+    document.body.classList.add('drawer-open');
+  }
+
+  function bindSlotDetail() {
+    const backdrop = $('#slotDetailBackdrop');
+    const closeBtn = $('#btnSlotDetailClose');
+    if (!backdrop) return;
+    const hide = () => { backdrop.hidden = true; document.body.classList.remove('drawer-open'); };
+    closeBtn?.addEventListener('click', hide);
+    backdrop.addEventListener('click', e => { if (e.target === backdrop) hide(); });
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape' && !backdrop.hidden) hide();
+    });
   }
 
   async function loadBreakdown() {
@@ -398,6 +481,7 @@
     bindOverride();
     bindFreshnessChips();
     bindSettingsDrawer();
+    bindSlotDetail();
     // Load the hero first so thresholds are available when strips render.
     await loadNow();
     loadTariff();

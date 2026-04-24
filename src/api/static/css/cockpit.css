@@ -662,6 +662,210 @@ body.drawer-open { overflow: hidden; }
     color: var(--text-dim);
 }
 
+/* ----------------------------------------------------------------------
+ * Merged 24-hour timeline — replaces the previous three stacked strips
+ * (tariff import / tariff export / plan). One row of 48 cells with:
+ *   • background = price kind (colored by cheap/std/peak/negative)
+ *   • bottom accent bar = Fox mode decided by the LP
+ *   • vertical "now" cursor overlaid at the current slot
+ *   • thin secondary export row below for reference
+ * Click any cell → slot detail modal with full info.
+ * ---------------------------------------------------------------------- */
+.timeline-summary {
+    margin: 0 0 0.5rem 0;
+    font-size: 0.82rem;
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+}
+.timeline-summary strong { color: var(--text); font-weight: 600; }
+.timeline-wrap {
+    position: relative;
+    padding-top: 1.1rem;
+}
+.timeline-axis-top {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.66rem;
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+}
+.threshold-marker { padding: 0 0.25rem; }
+.timeline-strip {
+    display: grid;
+    grid-template-columns: repeat(48, minmax(0, 1fr));
+    gap: 1px;
+    height: 40px;
+    background: var(--bg-card-2);
+}
+.tl-cell {
+    appearance: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    position: relative;
+    overflow: hidden;
+    transition: transform 80ms ease;
+    background: var(--bg-card-2);
+}
+.tl-cell:hover { transform: scaleY(1.08); z-index: 2; outline: 1px solid var(--text-dim); }
+.tl-cell.kind-negative  { background: var(--neg-price); }
+.tl-cell.kind-cheap     { background: var(--cheap); }
+.tl-cell.kind-standard  { background: var(--standard); }
+.tl-cell.kind-peak      { background: var(--peak); }
+.tl-cell.is-now {
+    outline: 2px solid var(--text);
+    z-index: 2;
+}
+.tl-mode {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 6px;
+    background: transparent;
+}
+/* Fox mode accents — darker variants of the base palette for differentiation */
+.tl-mode.mode-force-charge      { background: #059669; }  /* deep green — grid → battery */
+.tl-mode.mode-force-discharge   { background: #dc2626; }  /* deep red — battery → grid */
+.tl-mode.mode-feed-in           { background: #f59e0b; }  /* amber — solar → grid */
+.tl-mode.mode-backup            { background: #7c3aed; }  /* violet — reserve */
+.tl-mode.mode-self-use          { background: transparent; }  /* default, no accent */
+.tl-mode.mode-none              { background: transparent; }
+
+.timeline-cursor {
+    position: absolute;
+    top: 1.1rem;
+    bottom: 1.4rem;
+    width: 2px;
+    background: var(--text);
+    box-shadow: 0 0 6px rgba(255, 255, 255, 0.4);
+    pointer-events: none;
+    z-index: 3;
+}
+.timeline-axis {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.64rem;
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+    padding: 0.2rem 0 0 0;
+}
+.timeline-export-wrap {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.4rem;
+    align-items: center;
+    margin-top: 0.3rem;
+}
+.timeline-export-label {
+    font-size: 0.66rem;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+.timeline-export {
+    display: grid;
+    grid-template-columns: repeat(48, minmax(0, 1fr));
+    gap: 1px;
+    height: 10px;
+    background: var(--bg-card-2);
+    border-radius: 2px;
+    overflow: hidden;
+}
+.tl-export-cell { background: var(--bg-card-2); }
+.tl-export-cell.kind-negative  { background: var(--neg-price); opacity: 0.7; }
+.tl-export-cell.kind-cheap     { background: var(--cheap); opacity: 0.7; }
+.tl-export-cell.kind-standard  { background: var(--standard); opacity: 0.7; }
+.tl-export-cell.kind-peak      { background: var(--peak); opacity: 0.7; }
+
+.timeline-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1.2rem 0.6rem;
+    margin-top: 0.7rem;
+    font-size: 0.72rem;
+    color: var(--text-dim);
+}
+.timeline-legend .leg-group {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 0.55rem;
+    align-items: center;
+}
+.timeline-legend .leg-head {
+    font-weight: 600;
+    color: var(--text);
+    margin-right: 0.25rem;
+    font-variant: small-caps;
+}
+.timeline-legend .legend-swatch {
+    display: inline-block;
+    width: 10px; height: 10px;
+    border-radius: 2px;
+    vertical-align: middle;
+    margin-right: 0.25rem;
+}
+.timeline-legend .legend-mode {
+    display: inline-block;
+    width: 10px; height: 10px;
+    vertical-align: middle;
+    margin-right: 0.25rem;
+    border-radius: 2px;
+}
+.legend-mode.mode-force-charge    { background: #059669; }
+.legend-mode.mode-force-discharge { background: #dc2626; }
+.legend-mode.mode-feed-in         { background: #f59e0b; }
+.legend-mode.mode-backup          { background: #7c3aed; }
+.legend-mode.mode-self-use        { background: var(--border); }
+
+/* Slot detail modal (shared for timeline click). */
+.slot-detail {
+    margin: auto;
+    width: min(100%, 420px);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.6rem 0.85rem 0.85rem;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+.slot-detail-head {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding-bottom: 0.45rem;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 0.5rem;
+}
+.slot-detail-head h3 {
+    flex: 1;
+    margin: 0;
+    font-size: 0.92rem;
+}
+.slot-detail-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.78rem;
+}
+.slot-detail-table th, .slot-detail-table td {
+    padding: 0.28rem 0.35rem;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+    font-variant-numeric: tabular-nums;
+}
+.slot-detail-table th {
+    color: var(--text-dim);
+    font-weight: 500;
+    width: 42%;
+}
+.slot-detail-table .kind-negative .legend-swatch { background: var(--neg-price); }
+.slot-detail-table .kind-cheap .legend-swatch { background: var(--cheap); }
+.slot-detail-table .kind-standard .legend-swatch { background: var(--standard); }
+.slot-detail-table .kind-peak .legend-swatch { background: var(--peak); }
+
 /* Layout */
 .page {
     max-width: 960px;
