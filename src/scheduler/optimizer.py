@@ -383,9 +383,21 @@ def _merge_fox_groups(
     max_groups: int = 8,
     *,
     peak_export_discharge: bool = False,
-) -> list[SchedulerGroup]:
+    truncate_horizon: bool = False,
+) -> list[SchedulerGroup] | tuple[list[SchedulerGroup], datetime | None]:
+    """Build Fox V3 SchedulerGroup list from per-slot LP output, capped at ``max_groups``.
+
+    When ``truncate_horizon`` is False (default, back-compat): returns just the
+    list. Excess windows are compressed via the back-bias + peak-guard fallback.
+
+    When ``truncate_horizon`` is True: returns ``(groups, replan_at_utc)``. The
+    caller decides whether to dispatch the truncated set or fall back to compression.
+    ``replan_at_utc`` is the UTC end-time of the last surviving window (the caller
+    should schedule a one-shot MPC re-plan slightly before this); ``None`` if no
+    truncation was needed.
+    """
     if not slots:
-        return []
+        return ([], None) if truncate_horizon else []
     tz = TZ()
     merged: list[tuple[datetime, datetime, tuple]] = []
     cur_start = slots[0].start_utc
@@ -404,9 +416,37 @@ def _merge_fox_groups(
 
     merged = _merge_adjacent_force_charge_rows(merged)
 
-    # Reserve a slot for each window that will be split at local midnight
-    # (Fox V3 groups are dateless HH:MM within a 24 h cycle, so cross-midnight
-    # windows get split into two same-key groups before dispatch).
+    # Camada 1: eager SelfUse-variant merge — collapses adjacent SelfUse blocks
+    # whose only difference is minSocOnGrid (e.g. solar_charge=100 next to
+    # standard=10). Promotes from overflow-only to always-on so the window count
+    # is minimised before any compression decisions.
+    merged = _coarse_merge_fox(merged)
+
+    replan_at: datetime | None = None
+    if truncate_horizon and (
+        len(merged) + _count_midnight_crossings(merged, tz) > max_groups
+    ):
+        # Camada 2: dispatch only the first windows that fit (after reserving
+        # slots for midnight splits) and report the replan boundary. The caller
+        # schedules a one-shot MPC fire shortly before the last surviving window
+        # ends so the truncated tail is re-planned with full precision.
+        kept: list[tuple[datetime, datetime, tuple]] = []
+        crossings = 0
+        for window in merged:
+            tentative = kept + [window]
+            tentative_crossings = _count_midnight_crossings(tentative, tz)
+            if len(tentative) + tentative_crossings > max_groups:
+                break
+            kept = tentative
+            crossings = tentative_crossings
+        if kept:
+            merged = kept
+            replan_at = merged[-1][1]
+
+    # Camada 3: compression fallback (back-bias + peak guard). Only kicks in if
+    # truncation did not run (back-compat callers) or could not bring the count
+    # under cap. Squashes pairs from the *tail* in, never destroying the
+    # immediate future, and protects ForceDischarge (peak_export) windows.
     guard = 0
     while (
         len(merged) + _count_midnight_crossings(merged, tz) > max_groups
@@ -417,8 +457,9 @@ def _merge_fox_groups(
         merged = _coarse_merge_fox(merged)
         if len(merged) + _count_midnight_crossings(merged, tz) <= max_groups:
             break
+        # Same-key adjacent merge, scanning back-to-front so late-day pairs go first.
         merged_pair = False
-        for j in range(len(merged) - 1):
+        for j in range(len(merged) - 2, -1, -1):
             if merged[j][2] == merged[j + 1][2]:
                 a, _, k = merged[j]
                 _, d, _ = merged[j + 1]
@@ -428,8 +469,21 @@ def _merge_fox_groups(
                 break
         if merged_pair:
             continue
-        a, _, ka = merged[0]
-        _, d, kb = merged[1]
+        # Brutal squash: pick the latest pair where neither side is ForceDischarge.
+        # ForceDischarge = peak_export revenue; never sacrifice it to fit the cap.
+        # If every pair contains a ForceDischarge (degenerate), fall through to tail.
+        victim = None
+        for j in range(len(merged) - 2, -1, -1):
+            if (
+                merged[j][2][0] != "ForceDischarge"
+                and merged[j + 1][2][0] != "ForceDischarge"
+            ):
+                victim = j
+                break
+        if victim is None:
+            victim = len(merged) - 2
+        a, _, ka = merged[victim]
+        _, d, kb = merged[victim + 1]
         if ka[0] == "ForceCharge" and kb[0] == "ForceCharge":
             nk = (
                 "ForceCharge",
@@ -439,8 +493,8 @@ def _merge_fox_groups(
             )
         else:
             nk = ("SelfUse", None, None, int(config.MIN_SOC_RESERVE_PERCENT))
-        merged[0] = (a, d, nk)
-        del merged[1]
+        merged[victim] = (a, d, nk)
+        del merged[victim + 1]
 
     merged = _split_at_local_midnight(merged, tz)
 
@@ -464,6 +518,8 @@ def _merge_fox_groups(
                 fd_pwr=fdp,
             )
         )
+    if truncate_horizon:
+        return groups, replan_at
     return groups
 
 
@@ -1107,8 +1163,19 @@ def _run_optimizer_lp(fox: FoxESSClient | None, daikin: Any | None = None) -> di
         }
     )
 
-    groups = build_fox_groups_from_lp(plan)
+    groups, replan_at = build_fox_groups_from_lp(plan)
     fox_ok = upload_fox_if_operational(fox, groups)
+    if replan_at is not None:
+        try:
+            from .runner import schedule_dynamic_mpc_replan
+
+            replan_status = schedule_dynamic_mpc_replan(replan_at)
+            logger.info(
+                "Plan truncated to fit Fox V3 8-group cap; replan status=%s",
+                replan_status,
+            )
+        except Exception as e:
+            logger.warning("schedule_dynamic_mpc_replan failed (non-fatal): %s", e)
     daikin_n = write_daikin_from_lp_plan(plan_date, plan, forecast)
 
     run_at_iso = datetime.now(UTC).isoformat()

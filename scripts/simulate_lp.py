@@ -99,7 +99,10 @@ def main() -> int:
         if not args.no_dispatch and r.forecast is not None:
             from src.scheduler.lp_dispatch import build_fox_groups_from_lp, daikin_dispatch_preview
 
-            out["fox_scheduler_groups"] = [g.to_api_dict() for g in build_fox_groups_from_lp(p)]
+            _groups, _replan_at = build_fox_groups_from_lp(p)
+            out["fox_scheduler_groups"] = [g.to_api_dict() for g in _groups]
+            if _replan_at is not None:
+                out["fox_replan_at_utc"] = _replan_at.isoformat()
             pairs = daikin_dispatch_preview(p, r.forecast)
             out["daikin_dispatch"] = [
                 {"restore": rest, "action": act} for rest, act in pairs
@@ -184,9 +187,14 @@ def main() -> int:
         print(
             f"OPENCLAW_READ_ONLY={app_config.OPENCLAW_READ_ONLY} — upload only when not read-only."
         )
-        groups = build_fox_groups_from_lp(p)
+        groups, replan_at = build_fox_groups_from_lp(p)
         if not groups:
             print("  (no groups — check LP slot kinds / merge)")
+        if replan_at is not None:
+            print(
+                f"  ⚠  Plan exceeded 8-group cap; truncated. Replan due by "
+                f"{replan_at.isoformat()} (one-shot MPC scheduled at runtime)."
+            )
         for idx, g in enumerate(groups, 1):
             extra = g.to_api_dict().get("extraParam") or {}
             print(
