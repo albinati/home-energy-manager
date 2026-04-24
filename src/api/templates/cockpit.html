@@ -109,45 +109,71 @@
 
 <section class="card">
     <h2 class="card-title">
-        Tariff · next 24h
-        <span class="text-mute" style="font-size:0.7rem;font-weight:400;">Import vs Export shown separately</span>
-    </h2>
-    <div class="tariff-bands">
-        <div class="tariff-row">
-            <span class="tariff-label">Import</span>
-            <div class="tariff-strip" id="tariffImportStrip"></div>
-        </div>
-        <div class="tariff-row">
-            <span class="tariff-label">Export</span>
-            <div class="tariff-strip" id="tariffExportStrip"></div>
-        </div>
-    </div>
-    <p class="tariff-current-label" id="tariffCurrentLabel">Current — / —</p>
-</section>
-
-<section class="card">
-    <h2 class="card-title">
-        Plan timeline
+        24-hour timeline
         <span class="card-actions">
-            <a href="/plan" class="btn btn-sm btn-secondary">Detail →</a>
             <button class="btn btn-sm btn-primary" id="btnSimulateRePlanCockpit"
                     title="Run a fresh LP simulation, review the diff in a modal, then choose to apply">
-                Re-plan (simulate)
+                Re-plan
             </button>
         </span>
     </h2>
-    <div class="plan-strip" id="planStrip" title="Click a slot for detail"></div>
-    <div class="plan-legend">
-        <span><span class="legend-swatch" style="background:var(--neg-price)"></span>negative</span>
-        <span><span class="legend-swatch" style="background:var(--cheap)"></span>cheap</span>
-        <span><span class="legend-swatch" style="background:var(--standard)"></span>standard</span>
-        <span><span class="legend-swatch" style="background:var(--peak)"></span>peak</span>
-        <span><span class="legend-swatch" style="background:var(--peak-export)"></span>peak-export</span>
+    <p class="timeline-summary" id="timelineSummary">—</p>
+
+    <!-- Merged tariff+plan strip (replaces the old three stacked strips).
+         Each of the 48 cells has two layers:
+           • background = price kind (negative / cheap / standard / peak)
+           • accent bar at the bottom = Fox mode decided by the LP
+         A vertical "now" cursor overlays the whole strip. Click any cell
+         for the full slot detail (price, mode, LP import/charge/discharge). -->
+    <div class="timeline-wrap">
+        <div class="timeline-axis-top">
+            <span class="threshold-marker" id="thrPeak">peak —</span>
+            <span class="threshold-marker" id="thrCheap">cheap —</span>
+        </div>
+        <div class="timeline-strip" id="timelineStrip" title="Click a slot for detail"></div>
+        <div class="timeline-cursor" id="timelineCursor" style="display:none"></div>
+        <div class="timeline-axis">
+            <span>00</span><span>03</span><span>06</span><span>09</span>
+            <span>12</span><span>15</span><span>18</span><span>21</span><span>24</span>
+        </div>
+        <div class="timeline-export-wrap" id="timelineExportWrap">
+            <span class="timeline-export-label">export</span>
+            <div class="timeline-export" id="timelineExport"></div>
+        </div>
     </div>
-    <p class="text-mute" style="font-size:0.75rem;margin:0.5rem 0 0 0;">
+
+    <div class="timeline-legend">
+        <span class="leg-group">
+            <span class="leg-head">Price</span>
+            <span><span class="legend-swatch" style="background:var(--neg-price)"></span>negative</span>
+            <span><span class="legend-swatch" style="background:var(--cheap)"></span>cheap</span>
+            <span><span class="legend-swatch" style="background:var(--standard)"></span>standard</span>
+            <span><span class="legend-swatch" style="background:var(--peak)"></span>peak</span>
+        </span>
+        <span class="leg-group">
+            <span class="leg-head">Fox mode</span>
+            <span><span class="legend-mode mode-force-charge"></span>ForceCharge</span>
+            <span><span class="legend-mode mode-feed-in"></span>Feed-in</span>
+            <span><span class="legend-mode mode-force-discharge"></span>ForceDischarge</span>
+            <span><span class="legend-mode mode-backup"></span>Backup</span>
+            <span><span class="legend-mode mode-self-use"></span>SelfUse</span>
+        </span>
+    </div>
+    <p class="text-mute" style="font-size:0.72rem;margin:0.5rem 0 0 0;">
         Every action on this page runs as a simulation first; you confirm in a modal before anything writes.
     </p>
 </section>
+
+<!-- Slot-detail modal (shared element, populated on click). -->
+<div class="drawer-backdrop" id="slotDetailBackdrop" hidden>
+    <div class="slot-detail" role="dialog" aria-modal="true" aria-labelledby="slotDetailTitle">
+        <header class="slot-detail-head">
+            <h3 id="slotDetailTitle">Slot</h3>
+            <button class="drawer-close" id="btnSlotDetailClose" type="button" aria-label="Close">&times;</button>
+        </header>
+        <div class="slot-detail-body" id="slotDetailBody"></div>
+    </div>
+</div>
 
 <section class="override-section">
     <button class="override-toggle" id="overrideToggle" aria-expanded="false">
