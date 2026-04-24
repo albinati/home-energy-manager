@@ -97,7 +97,12 @@
 
     $('#fcHorizon').textContent = `${d.horizon_hours} h`;
     $('#fcTz').textContent = d.planner_tz || '—';
-    $('#fcTomorrow').textContent = d.tomorrow_rates_available ? 'published' : 'not yet';
+    // Octopus publishes next-day rates around 16:00 UTC. Until then, horizon
+    // slots landing in "tomorrow" will have null import/export prices — the
+    // LP solves a shorter effective window, which is expected, not broken.
+    $('#fcTomorrow').textContent = d.tomorrow_rates_available
+      ? 'published'
+      : 'not yet (Octopus publishes around 16:00 UTC)';
     $('#fcCheap').textContent = d.thresholds?.cheap_p != null ? fmtP(d.thresholds.cheap_p) : '—';
     $('#fcPeak').textContent = d.thresholds?.peak_p != null ? fmtP(d.thresholds.peak_p) : '—';
     $('#fcMicro').textContent = d.micro_climate_offset_c != null ? `${Number(d.micro_climate_offset_c).toFixed(2)} °C` : '—';

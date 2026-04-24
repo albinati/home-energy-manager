@@ -1059,18 +1059,73 @@ async def optimization_inputs(horizon_hours: int | None = None):
     except Exception:
         tgt = {}
 
+    # --- Weather interpolation helpers --------------------------------------
+    # meteo_forecast is stored hourly (Open-Meteo only returns hourly data);
+    # half-hour slots landed between two hours have no row. The LP itself
+    # interpolates via weather._interp_hourly_scalar so it solves with
+    # continuous temp/solar values, but this endpoint previously did exact
+    # ISO lookups and returned None for the HH:30 slots — confusing users who
+    # assumed the LP was blind on those slots (it isn't). Mirror the LP's
+    # linear interpolation so the Forecast tab shows the same continuous
+    # series the solver actually consumes.
+    parsed_meteo: list[tuple[_dt, float | None, float | None]] = []
+    for r in meteo_rows:
+        try:
+            ts = _dt.fromisoformat((r["slot_time"] or "").replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=_UTC)
+            parsed_meteo.append((
+                ts,
+                float(r["temp_c"]) if r.get("temp_c") is not None else None,
+                float(r["solar_w_m2"]) if r.get("solar_w_m2") is not None else None,
+            ))
+        except Exception:
+            continue
+    parsed_meteo.sort(key=lambda x: x[0])
+
+    def _interp(t: _dt, idx: int) -> float | None:
+        """Linear interpolate meteo value (idx=1 temp_c, idx=2 solar_w_m2) at *t*.
+
+        Falls back to carry-last / carry-first when *t* is outside the
+        available range — mirrors weather._interp_hourly_scalar but returns
+        None instead of a magic default so the caller can decide whether to
+        surface "—" or a derived value.
+        """
+        if not parsed_meteo:
+            return None
+        before = None
+        after = None
+        for row in parsed_meteo:
+            if row[0] <= t:
+                before = row
+            elif after is None and row[0] > t:
+                after = row
+                break
+        if before is None:
+            return parsed_meteo[0][idx]
+        if after is None:
+            return before[idx]
+        va, vb = before[idx], after[idx]
+        if va is None and vb is None:
+            return None
+        if va is None:
+            return vb
+        if vb is None:
+            return va
+        ta, tb = before[0].timestamp(), after[0].timestamp()
+        if tb <= ta:
+            return va
+        w = (t.timestamp() - ta) / (tb - ta)
+        return va + w * (vb - va)
+
     # --- Per-slot merged view (prices + weather + base_load, for the horizon)
     slots_out: list[dict[str, Any]] = []
     slot_len = _td(minutes=30)
-    weather_by_slot: dict[str, dict[str, Any]] = {}
-    for r in meteo_rows:
-        weather_by_slot[r["slot_time"]] = r
     import_by_valid_from: dict[str, float] = {r["valid_from"]: float(r["value_inc_vat"]) for r in import_rows}
     export_by_valid_from: dict[str, float] = {r["valid_from"]: float(r["value_inc_vat"]) for r in export_rows}
     t = day_start
     while t < window_end:
         iso = t.isoformat().replace("+00:00", "+00:00")  # preserve offset
-        iso_norm = iso
         # Agile rates land in SQLite with ±Z suffix; try both.
         iso_candidates = {iso, iso.replace("+00:00", "Z")}
         price_i = None
@@ -1081,7 +1136,9 @@ async def optimization_inputs(horizon_hours: int | None = None):
         for k in iso_candidates:
             if k in export_by_valid_from:
                 price_e = export_by_valid_from[k]; break
-        wx = weather_by_slot.get(iso_norm) or weather_by_slot.get(iso.replace("+00:00", ""))
+        # Interpolated temp + solar — matches what the LP actually sees.
+        temp_c = _interp(t, 1)
+        solar = _interp(t, 2)
         try:
             hr_local = t.astimezone(ZoneInfo(tz_name)).hour
         except Exception:
@@ -1091,8 +1148,8 @@ async def optimization_inputs(horizon_hours: int | None = None):
             "t_utc": iso.replace("+00:00", "Z"),
             "price_import_p": price_i,
             "price_export_p": price_e,
-            "temp_c": float(wx["temp_c"]) if wx and wx.get("temp_c") is not None else None,
-            "solar_w_m2": float(wx["solar_w_m2"]) if wx and wx.get("solar_w_m2") is not None else None,
+            "temp_c": float(temp_c) if temp_c is not None else None,
+            "solar_w_m2": float(solar) if solar is not None else None,
             "base_load_kwh": round(bl, 4),
         })
         t = t + slot_len
