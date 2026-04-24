@@ -414,6 +414,12 @@ class Config:
     # The flat mean is used when fewer rows are available or when this is 0 (legacy).
     LP_LOAD_PROFILE_SLOTS: int = int(os.getenv("LP_LOAD_PROFILE_SLOTS", "2016"))  # 6 weeks × 48
 
+    # Dynamic MPC replan: when the LP plan exceeds the Fox V3 8-group cap, dispatch
+    # only the first 8 windows and schedule a one-shot MPC re-run shortly before the
+    # 8th window ends, so the truncated tail is re-planned without precision loss.
+    REPLAN_SAFETY_MARGIN_MINUTES: int = int(os.getenv("REPLAN_SAFETY_MARGIN_MINUTES", "15"))
+    DYNAMIC_REPLAN_MIN_LEAD_MINUTES: int = int(os.getenv("DYNAMIC_REPLAN_MIN_LEAD_MINUTES", "120"))
+
     @property
     def DAIKIN_COP_CURVE(self) -> list[tuple[float, float]]:
         return parse_cop_curve_csv(self.DAIKIN_COP_CURVE_STR)

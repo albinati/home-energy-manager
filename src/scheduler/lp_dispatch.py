@@ -347,10 +347,25 @@ def write_daikin_from_lp_plan(
     return count
 
 
-def build_fox_groups_from_lp(plan: LpPlan) -> list[SchedulerGroup]:
+def build_fox_groups_from_lp(
+    plan: LpPlan,
+) -> tuple[list[SchedulerGroup], datetime | None]:
+    """Translate LP plan into Fox V3 groups.
+
+    Returns ``(groups, replan_at_utc)``. When the LP horizon yields more than 8
+    distinct windows, the dispatcher truncates to the first 8 (preserving the
+    near-future at full precision) and ``replan_at_utc`` reports the end-time of
+    the last surviving window — the caller schedules a one-shot MPC re-plan
+    shortly before it. ``replan_at_utc`` is ``None`` when no truncation occurred.
+    """
     slots = lp_dispatch_slots_for_hardware(plan)
     peak_export = _bulletproof_allow_peak_export_discharge()
-    return _merge_fox_groups(slots, max_groups=8, peak_export_discharge=peak_export)
+    return _merge_fox_groups(
+        slots,
+        max_groups=8,
+        peak_export_discharge=peak_export,
+        truncate_horizon=True,
+    )
 
 
 def upload_fox_if_operational(fox: FoxESSClient | None, groups: list[SchedulerGroup]) -> bool:
