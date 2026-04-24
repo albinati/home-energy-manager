@@ -110,6 +110,17 @@
       toast('No overrides to simulate', 'warn');
       return;
     }
+    // Phase 5: loading-state feedback. The solver is typically sub-second
+    // but LP_HORIZON_HOURS=48 + many overrides can push into the 2-3s range,
+    // and a disabled button with "Simulating…" copy tells the user why.
+    const btn = document.getElementById('btnSimulate');
+    const originalLabel = btn ? btn.textContent : '';
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Simulating…';
+      btn.classList.add('is-busy');
+    }
+    document.body.classList.add('is-simulating');
     try {
       const [sim, current] = await Promise.all([
         jsonFetch('/api/v1/workbench/simulate', { method: 'POST', body: { overrides: State.overrides } }),
@@ -126,6 +137,15 @@
       }
     } catch (e) {
       toast(`Simulate failed: ${e.message}`, 'bad');
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.classList.remove('is-busy');
+        // Restore the label via the main refresh so N-change counter updates.
+        btn.textContent = originalLabel;
+        renderEditor();
+      }
+      document.body.classList.remove('is-simulating');
     }
   }
 
@@ -160,8 +180,10 @@
       return;
     }
     tbody.innerHTML = slots.map((s, i) => {
-      const t = new Date(s.t);
-      const lbl = `${String(t.getHours()).padStart(2,'0')}:${String(t.getMinutes()).padStart(2,'0')}`;
+      // Slot labels in planner tz so Workbench matches Cockpit / Forecast / History.
+      const lbl = (window.HEM && window.HEM.fmtSlotTime)
+        ? window.HEM.fmtSlotTime(s.t)
+        : (() => { const t = new Date(s.t); return `${String(t.getHours()).padStart(2,'0')}:${String(t.getMinutes()).padStart(2,'0')}`; })();
       const simImp = s.import_kwh ?? 0;
       // We don't have current per-slot import in the same shape; show — for now.
       return `<tr>

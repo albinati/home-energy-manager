@@ -72,6 +72,15 @@
     $('#paPlanSoc').textContent = plan.soc_kwh != null ? `${Number(plan.soc_kwh).toFixed(2)} kWh` : '—';
     $('#paActSoc').textContent = state.soc_kwh != null ? `${Number(state.soc_kwh).toFixed(2)} kWh` : '—';
 
+    // Attribution donut — fetched separately for the date of replay.
+    try {
+      const whenDate = whenIso.slice(0, 10);  // "2026-04-24"
+      const a = await jsonFetch(`/api/v1/attribution/day?date=${whenDate}`);
+      renderAttribution(a);
+    } catch (_e) {
+      renderAttribution(null);
+    }
+
     // LP inputs at solve time.
     $('#liRunAt').textContent = li.run_at_utc || '—';
     $('#liPlanDate').textContent = li.plan_date || '—';
@@ -92,6 +101,36 @@
     $('#liPeak').textContent = fmtP(li.peak_threshold_p);
     $('#liDkMode').textContent = li.daikin_control_mode || '—';
     $('#liPreset').textContent = li.optimization_preset || '—';
+  }
+
+  /**
+   * Render a CSS conic-gradient donut showing how solar was split across
+   * self-use / battery / export for the replay date.
+   */
+  function renderAttribution(a) {
+    const donut = $('#attributionDonut');
+    const legend = $('#attributionLegend');
+    if (!donut || !legend) return;
+    if (!a || !a.available || !a.shares) {
+      donut.style.background = 'var(--bg-card-2)';
+      legend.textContent = a && !a.available
+        ? `No rollup yet for ${a.date} (Fox rollup runs overnight).`
+        : '—';
+      return;
+    }
+    const s = a.shares;
+    // conic-gradient sweep: self-use → battery → export.
+    const sCol = '#4caf50', bCol = '#2196f3', eCol = '#ff9800';
+    const end1 = s.self_use_pct;
+    const end2 = end1 + s.battery_pct;
+    donut.style.background =
+      `conic-gradient(${sCol} 0 ${end1}%, ${bCol} ${end1}% ${end2}%, ${eCol} ${end2}% 100%)`;
+    legend.innerHTML = `
+      <div class="attr-item"><span class="attr-swatch" style="background:${sCol}"></span> Self-use ${s.self_use_pct}%</div>
+      <div class="attr-item"><span class="attr-swatch" style="background:${bCol}"></span> Battery ${s.battery_pct}%</div>
+      <div class="attr-item"><span class="attr-swatch" style="background:${eCol}"></span> Export ${s.export_pct}%</div>
+      <div class="attr-totals">${Number(a.solar_kwh).toFixed(1)} kWh solar · ${Number(a.load_kwh).toFixed(1)} kWh load · ${Number(a.export_kwh).toFixed(1)} kWh export</div>
+    `;
   }
 
   function bind() {

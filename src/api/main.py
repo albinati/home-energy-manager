@@ -774,6 +774,70 @@ async def cockpit_now():
     }
 
 
+@app.get("/api/v1/attribution/day")
+async def attribution_day(date: str | None = None):
+    """Per-day energy attribution donut — Home Assistant Energy Dashboard idiom.
+
+    "Your solar went to: self-used X%, stored in battery Y%, exported Z%."
+    Reads from ``fox_energy_daily`` (populated daily by the Fox rollup job)
+    so it's historical-only — today's running totals are not included
+    until the rollup fires.
+    """
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+
+    if date is None:
+        date = (_dt.now(_UTC).date() - _td(days=1)).isoformat()
+    row = db.get_fox_energy_daily_by_date(date)
+    if not row:
+        return {
+            "date": date,
+            "available": False,
+            "solar_kwh": None,
+            "load_kwh": None,
+            "import_kwh": None,
+            "export_kwh": None,
+            "charge_kwh": None,
+            "discharge_kwh": None,
+            "shares": None,
+        }
+    solar = float(row.get("solar_kwh") or 0.0)
+    exp = float(row.get("export_kwh") or 0.0)
+    chg = float(row.get("charge_kwh") or 0.0)
+    imp = float(row.get("import_kwh") or 0.0)
+    load = float(row.get("load_kwh") or 0.0)
+    dis = float(row.get("discharge_kwh") or 0.0)
+
+    # Solar destinations: export is clear. Charge comes partly from solar +
+    # partly from imported cheap slots; approximate with max(0, chg - imp)
+    # since a slot can't charge from grid AND solar simultaneously in meaningful
+    # excess. Self-use = solar - export - solar_to_battery.
+    solar_to_battery = max(0.0, chg - imp)
+    solar_to_export = min(solar, exp)
+    solar_self_use = max(0.0, solar - solar_to_export - solar_to_battery)
+    share_total = solar_self_use + solar_to_battery + solar_to_export
+    shares = None
+    if share_total > 0:
+        shares = {
+            "self_use_pct": round(100.0 * solar_self_use / share_total, 1),
+            "battery_pct": round(100.0 * solar_to_battery / share_total, 1),
+            "export_pct": round(100.0 * solar_to_export / share_total, 1),
+        }
+
+    return {
+        "date": date,
+        "available": True,
+        "solar_kwh": solar,
+        "load_kwh": load,
+        "import_kwh": imp,
+        "export_kwh": exp,
+        "charge_kwh": chg,
+        "discharge_kwh": dis,
+        "shares": shares,
+    }
+
+
 @app.get("/api/v1/cockpit/at")
 async def cockpit_at(when: str):
     """Reconstruct the same-shape payload as ``/cockpit/now`` but frozen at a
