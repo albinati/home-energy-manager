@@ -458,6 +458,59 @@
 
   // --- Boot ---------------------------------------------------------------
 
+  // --- Recent triggers strip ---------------------------------------------
+  // Populated by /api/v1/recent-triggers on page load + after any write
+  // (the latter happens via the MutationObserver on body.is-busy — when
+  // wrapAction removes the busy class, a fresh trigger has just fired).
+  function fmtDurationMs(ms) {
+    if (ms == null) return '';
+    if (ms < 1000) return `${ms}ms`;
+    const s = ms / 1000;
+    if (s < 10) return `${s.toFixed(1)}s`;
+    if (s < 60) return `${Math.round(s)}s`;
+    return `${Math.floor(s / 60)}m${Math.round(s % 60)}s`;
+  }
+
+  function fmtSinceShort(iso) {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    if (isNaN(d)) return '—';
+    const sec = Math.floor((Date.now() - d.getTime()) / 1000);
+    if (sec < 60) return `${sec}s`;
+    if (sec < 3600) return `${Math.floor(sec / 60)}m`;
+    if (sec < 86400) return `${Math.floor(sec / 3600)}h`;
+    return `${Math.floor(sec / 86400)}d`;
+  }
+
+  async function loadRecentTriggers() {
+    const mount = $('#recentTriggersList');
+    if (!mount) return;
+    let data;
+    try {
+      data = await jsonFetch('/api/v1/recent-triggers?limit=6');
+    } catch (_e) {
+      mount.textContent = '—';
+      return;
+    }
+    const rows = (data && data.rows) || [];
+    if (!rows.length) { mount.textContent = 'no recent activity'; return; }
+    mount.innerHTML = '';
+    rows.forEach(r => {
+      const chip = document.createElement('span');
+      chip.className = 'trigger-chip' + (r.result === 'failure' ? ' is-failure' : '');
+      const when = r.started_at || r.timestamp;
+      const dur = fmtDurationMs(r.duration_ms);
+      const actorChip = r.actor ? ` · ${r.actor}` : '';
+      chip.innerHTML = `
+        <span class="trigger-action">${r.action}</span>
+        <span class="trigger-meta">${fmtSinceShort(when)} ago${dur ? ` · ${dur}` : ''}${actorChip}</span>
+      `;
+      if (r.error_msg) chip.title = `FAILED: ${r.error_msg}`;
+      else if (r.params) chip.title = `${r.action} · ${r.params}`;
+      mount.appendChild(chip);
+    });
+  }
+
   // --- Settings drawer ---------------------------------------------------
   // The drawer reuses settings.js — the container IDs on the cockpit page
   // (#settingsComfort / #settingsStrategy / #settingsSchedule) match the
@@ -477,15 +530,35 @@
     });
   }
 
+  // Hook the generic wrapAction busy-state: when body.is-busy flips off we
+  // know a user-fired write just finished, so pull the recent-triggers
+  // strip to show it landed. MutationObserver keeps the wiring loose — no
+  // coupling to individual button handlers.
+  function bindRecentTriggersAutoRefresh() {
+    const body = document.body;
+    let wasBusy = body.classList.contains('is-busy');
+    const obs = new MutationObserver(() => {
+      const busy = body.classList.contains('is-busy');
+      if (wasBusy && !busy) {
+        // Small delay so the INSERT has been committed before we re-fetch.
+        setTimeout(loadRecentTriggers, 400);
+      }
+      wasBusy = busy;
+    });
+    obs.observe(body, { attributes: true, attributeFilter: ['class'] });
+  }
+
   document.addEventListener('DOMContentLoaded', async () => {
     bindOverride();
     bindFreshnessChips();
     bindSettingsDrawer();
     bindSlotDetail();
+    bindRecentTriggersAutoRefresh();
     // Load the hero first so thresholds are available when strips render.
     await loadNow();
     loadTariff();
     loadPlan();
     loadBreakdown();
+    loadRecentTriggers();
   });
 })();

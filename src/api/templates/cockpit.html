@@ -57,6 +57,14 @@
             <span class="fresh-chip-name">⚙ Settings</span>
         </button>
     </div>
+    <!-- Recent manual/scheduler triggers with duration. Fed by
+         /api/v1/recent-triggers, reloaded after any wrapAction() apply so
+         a user-fired change (propose, Fox mode, tank temp) appears in the
+         strip within seconds. -->
+    <div class="recent-triggers" id="recentTriggers">
+        <span class="recent-triggers-head">Recent</span>
+        <span class="recent-triggers-list" id="recentTriggersList">—</span>
+    </div>
 </section>
 
 <!-- Settings drawer — opens from the ⚙ chip. Same form as the /settings page

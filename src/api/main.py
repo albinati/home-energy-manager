@@ -964,6 +964,26 @@ async def cockpit_at(when: str):
     }
 
 
+@app.get("/api/v1/recent-triggers")
+async def recent_triggers(limit: int = 20, include_heartbeat: bool = False):
+    """Recent manual/scheduler action_log rows for the cockpit's
+    'Recent triggers' strip.
+
+    Filters out ``heartbeat`` and ``notification`` triggers by default so
+    the user sees meaningful events (manual MCP writes, plan proposes,
+    scheduler crons). Rows written via :func:`db.log_action_timed` carry
+    ``started_at`` / ``completed_at`` / ``duration_ms`` / ``actor``; legacy
+    fast-path rows have nulls in those fields (still rendered, just
+    without the duration chip).
+    """
+    exclude = ["notification"] if include_heartbeat else ["heartbeat", "notification"]
+    try:
+        rows = db.get_recent_triggers(limit=int(limit), exclude_triggers=exclude)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"recent-triggers: {e}")
+    return {"rows": rows, "count": len(rows)}
+
+
 @app.get("/api/v1/optimization/inputs")
 async def optimization_inputs(horizon_hours: int | None = None):
     """Everything the next LP solve will see, merged from caches + SQLite.
