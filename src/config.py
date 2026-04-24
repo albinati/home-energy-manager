@@ -538,6 +538,13 @@ class Config:
     # Set to 0 to disable. Default 300 s (5 min).
     PLAN_REGEN_COOLDOWN_SECONDS: int = int(os.getenv("PLAN_REGEN_COOLDOWN_SECONDS", "300"))
 
+    # Minimum interval between plan_proposed notifications even when the plan hash changes.
+    # The plan still upserts and auto-applies; only the Telegram/Discord hook is suppressed
+    # inside the window. Default 3600 s (60 min) — cuts MPC re-plan noise. 0 disables.
+    PLAN_NOTIFY_MIN_INTERVAL_SECONDS: int = int(
+        os.getenv("PLAN_NOTIFY_MIN_INTERVAL_SECONDS", "3600")
+    )
+
     # When True (default), every freshly proposed plan is auto-approved and applied.
     # Disable to require explicit per-plan consent via confirm_plan / reject_plan (MCP)
     # or the dashboard — in that case the PLAN_PROPOSED hook drives approval, and

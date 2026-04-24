@@ -202,6 +202,7 @@ CREATE TABLE IF NOT EXISTS plan_consent (
     expires_at  REAL NOT NULL,
     summary     TEXT,
     plan_hash   TEXT,
+    last_notified_at REAL,
     created_at  REAL NOT NULL DEFAULT (strftime('%s','now'))
 );
 
@@ -361,6 +362,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             expires_at  REAL NOT NULL,
             summary     TEXT,
             plan_hash   TEXT,
+            last_notified_at REAL,
             created_at  REAL NOT NULL DEFAULT (strftime('%s','now'))
         )"""
     )
@@ -527,6 +529,15 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     ):
         if col not in al_cols:
             conn.execute(f"ALTER TABLE action_log ADD COLUMN {col} {typ}")
+
+    # V13: plan_consent.last_notified_at — time of last Telegram/Discord ping
+    # for this plan_date. Used by _write_plan_consent to debounce notifications
+    # so MPC re-plans don't spam the user when the plan hash changes frequently.
+    # Unrelated to proposed_at (which tracks when the optimizer last upserted).
+    cur = conn.execute("PRAGMA table_info(plan_consent)")
+    pc_cols_v13 = {str(r[1]) for r in cur.fetchall()}
+    if "last_notified_at" not in pc_cols_v13:
+        conn.execute("ALTER TABLE plan_consent ADD COLUMN last_notified_at REAL")
 
 
 def init_db() -> None:
@@ -2256,6 +2267,27 @@ def get_plan_consent(plan_date: str) -> dict[str, Any] | None:
             )
             r = cur.fetchone()
             return dict(r) if r else None
+        finally:
+            conn.close()
+
+
+def mark_plan_notified(plan_id: str, ts: float | None = None) -> bool:
+    """Record that a PLAN_PROPOSED hook was delivered for *plan_id*.
+
+    Updates `plan_consent.last_notified_at`, consulted by the debounce in
+    `_write_plan_consent`. Returns True if a row was updated.
+    """
+    import time
+    now = ts if ts is not None else time.time()
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "UPDATE plan_consent SET last_notified_at=? WHERE plan_id=?",
+                (now, plan_id),
+            )
+            conn.commit()
+            return cur.rowcount > 0
         finally:
             conn.close()
 

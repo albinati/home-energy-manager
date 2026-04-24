@@ -1244,6 +1244,17 @@ def _write_plan_consent(plan_date: str, strategy: str) -> None:
 
     expires_at = time.time() + config.PLAN_CONSENT_EXPIRY_SECONDS
 
+    # Debounce: even when the hash changes, suppress the Telegram/Discord ping
+    # if we already notified for this plan_date within the min-interval window.
+    # The plan still upserts and auto-applies — only the outbound hook is skipped.
+    notify_min_interval = int(getattr(config, "PLAN_NOTIFY_MIN_INTERVAL_SECONDS", 3600))
+    last_notified = float((existing or {}).get("last_notified_at") or 0)
+    within_debounce = (
+        notify_min_interval > 0
+        and last_notified > 0
+        and (time.time() - last_notified) < notify_min_interval
+    )
+
     if config.PLAN_AUTO_APPROVE:
         db.upsert_plan_consent(
             plan_id=plan_id,
@@ -1254,7 +1265,12 @@ def _write_plan_consent(plan_date: str, strategy: str) -> None:
         )
         db.approve_plan(plan_id)
         logger.info("Plan %s auto-approved (PLAN_AUTO_APPROVE=true)", plan_id)
-        # Notify with auto-applied prefix so the user knows the plan went live
+        if within_debounce:
+            logger.info(
+                "Plan %s notification debounced (last ping %.0fs ago < %ds) — hardware applied silently",
+                plan_id, time.time() - last_notified, notify_min_interval,
+            )
+            return
         try:
             actions = db.get_actions_for_plan_date(plan_date)
             notify_plan_proposed(
@@ -1263,6 +1279,7 @@ def _write_plan_consent(plan_date: str, strategy: str) -> None:
                 summary=f"[AUTO-APPLIED] {strategy}",
                 actions=actions,
             )
+            db.mark_plan_notified(plan_id)
         except Exception as exc:
             logger.warning("notify_plan_proposed (auto-applied) failed (non-fatal): %s", exc)
         return
@@ -1274,6 +1291,12 @@ def _write_plan_consent(plan_date: str, strategy: str) -> None:
         expires_at=expires_at,
         plan_hash=plan_hash,
     )
+    if within_debounce:
+        logger.info(
+            "Plan %s notification debounced (last ping %.0fs ago < %ds) — pending approval, no new ping",
+            plan_id, time.time() - last_notified, notify_min_interval,
+        )
+        return
     try:
         actions = db.get_actions_for_plan_date(plan_date)
         notify_plan_proposed(
@@ -1282,6 +1305,7 @@ def _write_plan_consent(plan_date: str, strategy: str) -> None:
             summary=strategy,
             actions=actions,
         )
+        db.mark_plan_notified(plan_id)
     except Exception as exc:
         logger.warning("notify_plan_proposed failed (non-fatal): %s", exc)
 
