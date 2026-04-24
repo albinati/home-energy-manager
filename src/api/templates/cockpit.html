@@ -2,65 +2,56 @@
 {% block title %}Cockpit · Home Energy{% endblock %}
 {% block content %}
 
-<section class="status-grid">
-    <div class="card status-card" id="cardOctopus">
-        <div class="header-row">
-            <span class="status-light is-warn"></span>
-            <span class="status-name">Octopus</span>
-            <span class="status-staleness" data-staleness>—</span>
-            <button class="btn-icon" title="Refresh now" data-refresh="octopus">⟳</button>
+<!-- Phase 2: "NOW" hero panel — one coherent snapshot from /api/v1/cockpit/now -->
+<section class="card cockpit-hero">
+    <div class="hero-main">
+        <div class="hero-now">
+            <span class="hero-kicker">Current slot</span>
+            <div class="hero-slot-line">
+                <span class="hero-slot-time" id="heroSlotTime">—</span>
+                <span class="hero-slot-kind" id="heroSlotKind">—</span>
+                <span class="hero-slot-price" id="heroSlotPrice">—</span>
+            </div>
+            <div class="hero-state-grid">
+                <div class="hero-kpi"><span class="hero-kpi-label">SoC</span><span class="hero-kpi-value" id="heroSoc">—</span></div>
+                <div class="hero-kpi"><span class="hero-kpi-label">Solar</span><span class="hero-kpi-value" id="heroSolar">—</span></div>
+                <div class="hero-kpi"><span class="hero-kpi-label">Load</span><span class="hero-kpi-value" id="heroLoad">—</span></div>
+                <div class="hero-kpi"><span class="hero-kpi-label">Grid</span><span class="hero-kpi-value" id="heroGrid">—</span></div>
+                <div class="hero-kpi"><span class="hero-kpi-label">Tank</span><span class="hero-kpi-value" id="heroTank">—</span></div>
+                <div class="hero-kpi"><span class="hero-kpi-label">Indoor</span><span class="hero-kpi-value" id="heroIndoor">—</span></div>
+                <div class="hero-kpi"><span class="hero-kpi-label">Outdoor</span><span class="hero-kpi-value" id="heroOutdoor">—</span></div>
+                <div class="hero-kpi"><span class="hero-kpi-label">LWT</span><span class="hero-kpi-value" id="heroLwt">—</span></div>
+                <div class="hero-kpi"><span class="hero-kpi-label">Fox mode</span><span class="hero-kpi-value" id="heroFoxMode">—</span></div>
+                <div class="hero-kpi"><span class="hero-kpi-label">Daikin</span><span class="hero-kpi-value" id="heroDaikinMode">—</span></div>
+            </div>
         </div>
-        <div class="status-rows">
-            <span class="label">Import (now)</span><span class="value" data-octopus-import>—</span>
-            <span class="label">Export (now)</span><span class="value" data-octopus-export>—</span>
-            <span class="label">Slots loaded</span><span class="value" data-octopus-slots>—</span>
-        </div>
+        <aside class="hero-next">
+            <span class="hero-kicker">Next transition</span>
+            <div class="hero-next-count" id="heroNextCountdown">—</div>
+            <div class="hero-next-label" id="heroNextLabel">—</div>
+        </aside>
     </div>
-
-    <div class="card status-card" id="cardFox">
-        <div class="header-row">
-            <span class="status-light is-warn"></span>
-            <span class="status-name">Fox ESS</span>
-            <span class="status-staleness" data-staleness>—</span>
-            <button class="btn-icon" title="Refresh now" data-refresh="fox">⟳</button>
-        </div>
-        <div class="status-rows">
-            <span class="label">SoC</span><span class="value" data-fox-soc>—</span>
-            <span class="label">Solar</span><span class="value" data-fox-solar>—</span>
-            <span class="label">Load</span><span class="value" data-fox-load>—</span>
-            <span class="label">Grid</span><span class="value" data-fox-grid>—</span>
-            <span class="label">Mode</span><span class="value" data-fox-mode>—</span>
-        </div>
-    </div>
-
-    <div class="card status-card" id="cardDaikin">
-        <div class="header-row">
-            <span class="status-light is-warn"></span>
-            <span class="status-name">Daikin</span>
-            <span class="status-staleness" data-staleness>—</span>
-            <button class="btn-icon" title="Refresh now (consumes Onecta quota)" data-refresh="daikin">⟳</button>
-        </div>
-        <div class="status-rows">
-            <span class="label">Tank</span><span class="value" data-daikin-tank>—</span>
-            <span class="label">Indoor</span><span class="value" data-daikin-indoor>—</span>
-            <span class="label">Outdoor</span><span class="value" data-daikin-outdoor>—</span>
-            <span class="label">LWT</span><span class="value" data-daikin-lwt>—</span>
-            <span class="label">Mode</span><span class="value"><span class="status-badge" data-daikin-mode>—</span></span>
-        </div>
-    </div>
-
-    <div class="card status-card" id="cardPlan">
-        <div class="header-row">
-            <span class="status-light is-warn"></span>
-            <span class="status-name">Plan</span>
-            <span class="status-staleness" data-staleness>—</span>
-            <button class="btn-icon" title="Reload" data-refresh="plan">⟳</button>
-        </div>
-        <div class="status-rows">
-            <span class="label">Now slot</span><span class="value" data-plan-now>—</span>
-            <span class="label">Next change</span><span class="value" data-plan-next>—</span>
-            <span class="label">Backend</span><span class="value" data-plan-backend>—</span>
-        </div>
+    <div class="freshness-ribbon" id="freshnessRibbon" title="Click a chip to refresh just that source">
+        <button class="fresh-chip" type="button" data-source="agile">
+            <span class="fresh-chip-name">Agile</span>
+            <span class="fresh-chip-age" data-age>—</span>
+            <span class="fresh-chip-refresh" aria-label="Refresh">⟳</span>
+        </button>
+        <button class="fresh-chip" type="button" data-source="fox">
+            <span class="fresh-chip-name">Fox</span>
+            <span class="fresh-chip-age" data-age>—</span>
+            <span class="fresh-chip-refresh" aria-label="Refresh">⟳</span>
+        </button>
+        <button class="fresh-chip" type="button" data-source="daikin">
+            <span class="fresh-chip-name">Daikin</span>
+            <span class="fresh-chip-age" data-age>—</span>
+            <span class="fresh-chip-refresh" aria-label="Refresh">⟳</span>
+        </button>
+        <button class="fresh-chip" type="button" data-source="plan">
+            <span class="fresh-chip-name">Plan</span>
+            <span class="fresh-chip-age" data-age>—</span>
+            <span class="fresh-chip-refresh" aria-label="Refresh">⟳</span>
+        </button>
     </div>
 </section>
 

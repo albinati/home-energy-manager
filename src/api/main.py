@@ -491,6 +491,265 @@ async def system_timezone():
     }
 
 
+@app.get("/api/v1/cockpit/now")
+async def cockpit_now():
+    """One-call aggregator for the cockpit's "where are we now?" hero panel.
+
+    Never issues cloud calls — reads from in-memory caches, SQLite, and
+    runtime_settings only. Replaces four parallel GETs previously fanned out by
+    cockpit.js (foxess/status + daikin/status + agile/today +
+    optimization/status) so the hero panel renders from a single coherent
+    snapshot instead of four independently-timed fetches.
+
+    Freshness per source (agile / fox / daikin / plan) is surfaced so the
+    cockpit can render per-source refresh chips with real ages.
+    """
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+    from zoneinfo import ZoneInfo
+
+    now = _dt.now(_UTC)
+
+    def _age(iso: str | None) -> float | None:
+        if not iso:
+            return None
+        try:
+            dt = _dt.fromisoformat(iso.replace("Z", "+00:00"))
+        except Exception:
+            return None
+        return round((now - dt).total_seconds(), 1)
+
+    # --- Agile tariff (SQLite only) ------------------------------------------
+    tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
+    export_tariff = (config.OCTOPUS_EXPORT_TARIFF_CODE or "").strip()
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = day_start + _td(days=1)
+    import_rows = db.get_rates_for_period(tariff, day_start, day_end) if tariff else []
+    export_rows = db.get_rates_for_period(export_tariff, day_start, day_end) if export_tariff else []
+
+    def _price_at(rows: list, t: _dt) -> tuple[float | None, str | None, str | None]:
+        iso_t = t.isoformat().replace("+00:00", "Z")
+        for r in rows:
+            if r["valid_from"] <= iso_t < r["valid_to"]:
+                return float(r["value_inc_vat"]), r["valid_from"], r["valid_to"]
+        return None, None, None
+
+    cur_import_p, slot_from, slot_to = _price_at(import_rows, now)
+    cur_export_p, _, _ = _price_at(export_rows, now)
+
+    # Fetch timestamp of the Agile cache — AgileRateCache.fetched_at_utc when
+    # available; fall back to the optimizer-snapshot's last successful Octopus
+    # fetch state.
+    agile_cache_fetched_at = None
+    try:
+        cache = get_agile_cache()
+        if cache and cache.fetched_at_utc:
+            agile_cache_fetched_at = cache.fetched_at_utc.isoformat().replace("+00:00", "Z")
+    except Exception:
+        pass
+    if not agile_cache_fetched_at:
+        try:
+            ofs = db.get_octopus_fetch_state()
+            agile_cache_fetched_at = ofs.last_success_at if ofs else None
+        except Exception:
+            pass
+
+    # --- Fox ESS realtime (in-memory cache, read-only) -----------------------
+    fox_block: dict[str, Any] = {
+        "soc_pct": None,
+        "soc_kwh": None,
+        "solar_kw": None,
+        "load_kw": None,
+        "grid_kw": None,
+        "battery_kw": None,
+        "fox_mode": None,
+    }
+    fox_fresh: dict[str, Any] = {"fetched_at_utc": None, "age_s": None, "stale": None}
+    try:
+        rt = get_cached_realtime()
+        fox_block.update({
+            "soc_pct": float(rt.soc),
+            "soc_kwh": round(float(config.BATTERY_CAPACITY_KWH) * float(rt.soc) / 100.0, 3),
+            "solar_kw": round(float(rt.solar_power), 3),
+            "load_kw": round(float(rt.load_power), 3),
+            "grid_kw": round(float(rt.grid_power), 3),
+            "battery_kw": round(float(rt.battery_power), 3),
+            "fox_mode": str(rt.work_mode),
+        })
+    except Exception:
+        pass
+    try:
+        s = get_refresh_stats_extended()
+        last_wall = s.get("last_updated_epoch")
+        if last_wall:
+            iso = _dt.fromtimestamp(last_wall, tz=_UTC).isoformat().replace("+00:00", "Z")
+            fox_fresh = {
+                "fetched_at_utc": iso,
+                "age_s": _age(iso),
+                "stale": bool(s.get("stale", False)),
+            }
+    except Exception:
+        pass
+
+    # --- Daikin (cached only; quota-aware) -----------------------------------
+    dk_block: dict[str, Any] = {
+        "tank_c": None,
+        "indoor_c": None,
+        "outdoor_c": None,
+        "lwt_c": None,
+        "control_mode": config.DAIKIN_CONTROL_MODE,
+        "mode": None,
+    }
+    dk_fresh: dict[str, Any] = {"fetched_at_utc": None, "age_s": None, "stale": None}
+    try:
+        cached = daikin_service.get_cached_devices(allow_refresh=False, actor="cockpit_now")
+        if cached.devices:
+            d = cached.devices[0]
+            tank = getattr(d, "tank_temperature", None)
+            room = getattr(getattr(d, "temperature", None), "room_temperature", None)
+            outdoor = getattr(d, "outdoor_temperature", None)
+            lwt = getattr(d, "leaving_water_temperature", None)
+            if tank is not None:
+                dk_block["tank_c"] = float(tank)
+            if room is not None:
+                dk_block["indoor_c"] = float(room)
+            if outdoor is not None:
+                dk_block["outdoor_c"] = float(outdoor)
+            if lwt is not None:
+                dk_block["lwt_c"] = float(lwt)
+            dk_block["mode"] = getattr(d, "operation_mode", None)
+        if cached.fetched_at_wall:
+            iso = _dt.fromtimestamp(cached.fetched_at_wall, tz=_UTC).isoformat().replace("+00:00", "Z")
+            dk_fresh = {
+                "fetched_at_utc": iso,
+                "age_s": _age(iso),
+                "stale": bool(cached.stale),
+            }
+    except Exception:
+        pass
+
+    # --- Plan (current fox group, last plan timestamp) -----------------------
+    plan_block: dict[str, Any] = {
+        "current_fox_mode": None,
+        "current_slot_utc": slot_from,
+        "current_slot_end_utc": slot_to,
+        "next_transition_utc": None,
+        "next_fox_mode": None,
+        "plan_date": None,
+    }
+    plan_fresh: dict[str, Any] = {"fetched_at_utc": None, "age_s": None, "stale": None}
+    try:
+        fox_state = db.get_latest_fox_schedule_state() or {}
+        groups_json = fox_state.get("groups_json") or "[]"
+        import json as _json
+        groups = _json.loads(groups_json) if groups_json else []
+        # Fox groups are HH:MM cycles in UTC (Fox hardware clock). Match "now".
+        now_hm = (now.hour, now.minute)
+        def _start(g: dict) -> tuple[int, int]:
+            return int(g.get("startHour", 0)), int(g.get("startMinute", 0))
+        def _end(g: dict) -> tuple[int, int]:
+            return int(g.get("endHour", 0)), int(g.get("endMinute", 0))
+        cur = next(
+            (g for g in groups
+             if _start(g) <= now_hm < _end(g)
+             or (_start(g) > _end(g) and (now_hm >= _start(g) or now_hm < _end(g)))),
+            None,
+        )
+        upcoming = sorted(
+            (g for g in groups if _start(g) > now_hm),
+            key=lambda g: _start(g),
+        )
+        if cur:
+            plan_block["current_fox_mode"] = cur.get("workMode")
+        if upcoming:
+            nxt = upcoming[0]
+            plan_block["next_fox_mode"] = nxt.get("workMode")
+            plan_block["next_transition_utc"] = now.replace(
+                hour=_start(nxt)[0], minute=_start(nxt)[1], second=0, microsecond=0
+            ).isoformat().replace("+00:00", "Z")
+        uploaded_at = fox_state.get("uploaded_at")
+        if uploaded_at:
+            plan_fresh = {
+                "fetched_at_utc": uploaded_at,
+                "age_s": _age(uploaded_at),
+                "stale": False,
+            }
+    except Exception:
+        pass
+    try:
+        ofs = db.get_octopus_fetch_state()
+        if ofs and ofs.last_success_at and not plan_fresh.get("fetched_at_utc"):
+            plan_fresh = {
+                "fetched_at_utc": ofs.last_success_at,
+                "age_s": _age(ofs.last_success_at),
+                "stale": False,
+            }
+    except Exception:
+        pass
+
+    # --- Thresholds from daily_targets (LP's classification for today) -------
+    tz_name = config.BULLETPROOF_TIMEZONE or "Europe/London"
+    try:
+        tz = ZoneInfo(tz_name)
+        plan_date_local = _dt.now(tz).date().isoformat()
+    except Exception:
+        plan_date_local = now.date().isoformat()
+    plan_block["plan_date"] = plan_date_local
+    try:
+        tgt = db.get_daily_target(plan_date_local)
+    except Exception:
+        tgt = None
+    thresholds = {
+        "cheap_p": (tgt or {}).get("cheap_threshold"),
+        "peak_p": (tgt or {}).get("peak_threshold"),
+    }
+
+    # --- Compose ------------------------------------------------------------
+    return {
+        "now_utc": now.isoformat().replace("+00:00", "Z"),
+        "planner_tz": tz_name,
+        "current_slot": {
+            "t_utc": slot_from,
+            "t_end_utc": slot_to,
+            "price_import_p": cur_import_p,
+            "price_export_p": cur_export_p,
+            "fox_mode": plan_block["current_fox_mode"],
+        },
+        "next_transition": {
+            "t_utc": plan_block["next_transition_utc"],
+            "new_fox_mode": plan_block["next_fox_mode"],
+        },
+        "state": {
+            **fox_block,
+            **{
+                "tank_c": dk_block["tank_c"],
+                "indoor_c": dk_block["indoor_c"],
+                "outdoor_c": dk_block["outdoor_c"],
+                "lwt_c": dk_block["lwt_c"],
+                "daikin_mode": dk_block["mode"],
+            },
+        },
+        "freshness": {
+            "agile": {
+                "fetched_at_utc": agile_cache_fetched_at,
+                "age_s": _age(agile_cache_fetched_at),
+                "stale": None,
+            },
+            "fox": fox_fresh,
+            "daikin": dk_fresh,
+            "plan": plan_fresh,
+        },
+        "thresholds": thresholds,
+        "modes": {
+            "daikin_control_mode": config.DAIKIN_CONTROL_MODE,
+            "optimization_preset": config.OPTIMIZATION_PRESET,
+            "energy_strategy_mode": config.ENERGY_STRATEGY_MODE,
+        },
+        "plan_date": plan_block["plan_date"],
+    }
+
+
 @app.get("/api/v1/daikin/quota")
 async def daikin_quota():
     """Return Daikin API quota usage, cache age, and stale status.

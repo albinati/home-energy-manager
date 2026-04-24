@@ -1,11 +1,10 @@
-/* v10.1 cockpit page logic.
+/* Cockpit page — Phase 2 rework.
  *
- * Reads from cached endpoints only — never triggers cloud refresh unless the
- * operator clicks the per-card ⟳ button (which routes through the same
- * endpoints; the backend decides whether to hit cloud APIs based on TTL +
- * quota).
- *
- * No auto-refresh. Operator triggers fresh data manually via per-card buttons.
+ * The old four-card layout (Octopus / Fox / Daikin / Plan) has been replaced
+ * by a single hero panel backed by /api/v1/cockpit/now — one coherent
+ * snapshot of where we are now, with a freshness ribbon per source. The
+ * tariff + plan strips and the house-load breakdown are still rendered below
+ * via their existing endpoints.
  */
 (function () {
   'use strict';
@@ -14,12 +13,12 @@
   const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
   const { jsonFetch, wrapAction, toast, refreshQuota } = window.HEM || {};
 
-  /* ----- Freshness rendering ----- */
+  // --- formatting helpers -------------------------------------------------
 
   function fmtAge(iso) {
-    if (!iso) return { text: 'never', class: 'is-very-stale' };
+    if (!iso) return { text: '—', class: 'is-very-stale' };
     const d = new Date(iso);
-    if (isNaN(d)) return { text: 'invalid', class: 'is-very-stale' };
+    if (isNaN(d)) return { text: '—', class: 'is-very-stale' };
     const sec = Math.floor((Date.now() - d.getTime()) / 1000);
     if (sec < 60) return { text: `${sec}s ago`, class: '' };
     if (sec < 3600) {
@@ -28,18 +27,6 @@
     }
     const h = Math.floor(sec / 3600);
     return { text: `${h}h ago`, class: 'is-very-stale' };
-  }
-
-  function setStaleness(card, iso) {
-    const el = card.querySelector('[data-staleness]');
-    const light = card.querySelector('.status-light');
-    if (!el || !light) return;
-    const a = fmtAge(iso);
-    el.textContent = a.text;
-    el.classList.remove('is-stale', 'is-very-stale');
-    if (a.class) el.classList.add(a.class);
-    light.classList.remove('is-ok', 'is-warn', 'is-bad');
-    light.classList.add(a.class === 'is-very-stale' ? 'is-bad' : (a.class === 'is-stale' ? 'is-warn' : 'is-ok'));
   }
 
   function fmtKwh(v, suffix) {
@@ -59,81 +46,110 @@
     return `${Number(v).toFixed(1)}p`;
   }
 
-  /* ----- Status cards ----- */
-
-  async function loadFox(forceRefresh) {
-    const card = $('#cardFox');
-    try {
-      const url = forceRefresh ? '/api/v1/foxess/status?refresh=true' : '/api/v1/foxess/status';
-      const d = await jsonFetch(url);
-      $('[data-fox-soc]', card).textContent = fmtPct(d.soc);
-      $('[data-fox-solar]', card).textContent = fmtKwh(d.solar_power);
-      $('[data-fox-load]', card).textContent = fmtKwh(d.load_power);
-      $('[data-fox-grid]', card).textContent = fmtKwh(d.grid_power);
-      $('[data-fox-mode]', card).textContent = d.work_mode || '—';
-      setStaleness(card, d.updated_at);
-    } catch (e) {
-      $('[data-fox-soc]', card).textContent = 'err';
-      toast(`Fox: ${e.message}`, 'bad');
-    }
+  function slotKindForPrice(p, thresholds) {
+    if (p == null) return 'standard';
+    if (p < 0) return 'negative';
+    const cheap = thresholds?.cheap_p;
+    const peak = thresholds?.peak_p;
+    if (cheap != null && p < cheap) return 'cheap';
+    if (peak != null && p > peak) return 'peak';
+    return 'standard';
   }
 
-  async function loadDaikin(forceRefresh) {
-    const card = $('#cardDaikin');
+  // --- Hero panel ---------------------------------------------------------
+
+  let _thresholds = { cheap_p: null, peak_p: null };
+
+  async function loadNow() {
+    let n;
     try {
-      const url = forceRefresh ? '/api/v1/daikin/status?refresh=true' : '/api/v1/daikin/status';
-      const arr = await jsonFetch(url);
-      const d = (arr && arr[0]) || {};
-      $('[data-daikin-tank]', card).textContent = fmtC(d.tank_temp);
-      $('[data-daikin-indoor]', card).textContent = fmtC(d.room_temp);
-      $('[data-daikin-outdoor]', card).textContent = fmtC(d.outdoor_temp);
-      $('[data-daikin-lwt]', card).textContent = fmtC(d.lwt);
-      const mode = d.control_mode || 'unknown';
-      const badge = $('[data-daikin-mode]', card);
-      badge.textContent = mode;
-      badge.className = 'status-badge ' + (mode === 'passive' ? 'is-passive' : 'is-active');
-      // Freshness comes from /api/v1/daikin/quota (cache_age_seconds, last_refresh_at_utc).
-      // Stamping "now" was misleading — the Daikin cache can be ≤30 min old.
-      try {
-        const q = await jsonFetch('/api/v1/daikin/quota');
-        setStaleness(card, q?.last_refresh_at_utc || null);
-      } catch (_e) {
-        setStaleness(card, null);
-      }
-      // Echo mode into the override panel
-      const tEl = $('[data-daikin-mode-text]');
-      if (tEl) tEl.textContent = mode;
-      $('#daikinOverridePassiveNote').hidden = (mode !== 'passive');
-      $('#daikinOverrideActive').hidden = (mode === 'passive');
+      n = await jsonFetch('/api/v1/cockpit/now');
     } catch (e) {
-      toast(`Daikin: ${e.message}`, 'bad');
+      toast(`Cockpit: ${e.message}`, 'bad');
+      return;
     }
+
+    _thresholds = n.thresholds || { cheap_p: null, peak_p: null };
+
+    const cur = n.current_slot || {};
+    const state = n.state || {};
+    const fresh = n.freshness || {};
+    const next = n.next_transition || {};
+
+    const kind = slotKindForPrice(cur.price_import_p, _thresholds);
+    const heroKind = $('#heroSlotKind');
+    if (heroKind) {
+      heroKind.textContent = kind;
+      heroKind.className = `hero-slot-kind kind-${kind}`;
+    }
+    const heroTime = $('#heroSlotTime');
+    if (heroTime) {
+      heroTime.textContent = (window.HEM && window.HEM.fmtSlotRange && cur.t_utc && cur.t_end_utc)
+        ? window.HEM.fmtSlotRange(cur.t_utc, cur.t_end_utc)
+        : '—';
+    }
+    const heroPrice = $('#heroSlotPrice');
+    if (heroPrice) {
+      const ip = cur.price_import_p != null ? `${cur.price_import_p.toFixed(1)}p` : '—';
+      const ep = cur.price_export_p != null ? `${cur.price_export_p.toFixed(1)}p` : '—';
+      heroPrice.textContent = `imp ${ip} · exp ${ep}`;
+    }
+
+    $('#heroSoc').textContent = state.soc_pct != null ? `${fmtPct(state.soc_pct)} · ${fmtKwh(state.soc_kwh, 'kWh')}` : '—';
+    $('#heroSolar').textContent = fmtKwh(state.solar_kw);
+    $('#heroLoad').textContent = fmtKwh(state.load_kw);
+    const grid = state.grid_kw;
+    $('#heroGrid').textContent = grid == null ? '—' : `${grid >= 0 ? '+' : ''}${Number(grid).toFixed(2)} kW`;
+    $('#heroTank').textContent = fmtC(state.tank_c);
+    $('#heroIndoor').textContent = fmtC(state.indoor_c);
+    $('#heroOutdoor').textContent = fmtC(state.outdoor_c);
+    $('#heroLwt').textContent = fmtC(state.lwt_c);
+    $('#heroFoxMode').textContent = state.fox_mode || cur.fox_mode || '—';
+    $('#heroDaikinMode').textContent = state.daikin_mode || n.modes?.daikin_control_mode || '—';
+
+    // Next transition — countdown + label.
+    const countdown = $('#heroNextCountdown');
+    const nextLabel = $('#heroNextLabel');
+    if (next.t_utc) {
+      const until = Math.max(0, Math.floor((new Date(next.t_utc).getTime() - Date.now()) / 1000));
+      const m = Math.floor(until / 60);
+      const h = Math.floor(m / 60);
+      countdown.textContent = h > 0 ? `in ${h}h ${m % 60}m` : `in ${m}m`;
+      const t = (window.HEM && window.HEM.fmtSlotTime) ? window.HEM.fmtSlotTime(next.t_utc) : '';
+      nextLabel.textContent = `${t} → ${next.new_fox_mode || '—'}`;
+    } else {
+      countdown.textContent = '—';
+      nextLabel.textContent = '—';
+    }
+
+    // Freshness ribbon — one chip per source.
+    ['agile', 'fox', 'daikin', 'plan'].forEach(k => {
+      const chip = $(`.fresh-chip[data-source="${k}"]`);
+      if (!chip) return;
+      const f = fresh[k] || {};
+      const a = fmtAge(f.fetched_at_utc);
+      const ageEl = chip.querySelector('[data-age]');
+      if (ageEl) ageEl.textContent = a.text;
+      chip.classList.remove('is-stale', 'is-very-stale');
+      if (a.class) chip.classList.add(a.class);
+    });
   }
 
-  async function loadOctopus() {
-    const card = $('#cardOctopus');
-    try {
-      const [status, agile] = await Promise.all([
-        jsonFetch('/api/v1/optimization/status').catch(() => null),
-        jsonFetch('/api/v1/agile/today').catch(() => null),
-      ]);
-      $('[data-octopus-import]', card).textContent = fmtP(agile?.current_import_p);
-      $('[data-octopus-export]', card).textContent = fmtP(agile?.current_export_p);
-      $('[data-octopus-slots]', card).textContent = agile?.import_slots?.length ?? '—';
-      setStaleness(card, status?.cache_fetched_at_utc || status?.last_plan_at_utc || null);
-      renderTariffStripsFromAgile(agile);
-    } catch (e) {
-      toast(`Octopus: ${e.message}`, 'bad');
-    }
-  }
+  // --- Tariff + Plan strips (reused; overlay now-cursor + thresholds) -----
 
   function priceColor(p) {
     if (p == null) return 'var(--bg-card-2)';
-    if (p < 0) return 'var(--neg-price)';
-    if (p < 12) return 'var(--cheap)';
-    if (p < 25) return 'var(--standard)';
-    if (p < 35) return 'var(--peak)';
-    return 'var(--peak-export)';
+    const kind = slotKindForPrice(p, _thresholds);
+    if (kind === 'negative') return 'var(--neg-price)';
+    if (kind === 'cheap') return 'var(--cheap)';
+    if (kind === 'peak') return 'var(--peak)';
+    return 'var(--standard)';
+  }
+
+  async function loadTariff() {
+    const agile = await jsonFetch('/api/v1/agile/today').catch(() => null);
+    renderTariffStripsFromAgile(agile);
+    updateTariffLabel(agile);
   }
 
   function renderTariffStripsFromAgile(agile) {
@@ -148,8 +164,6 @@
         const cell = document.createElement('div');
         cell.className = 'tariff-slot';
         cell.style.background = priceColor(s.p);
-        // Slot times formatted in the planner tz — not browser local — so a
-        // VPN/travel user sees the same labels as the LP planned against.
         const rangeLbl = (window.HEM && window.HEM.fmtSlotRange)
           ? window.HEM.fmtSlotRange(s.valid_from, s.valid_to)
           : `${s.valid_from.slice(11,16)}–${s.valid_to.slice(11,16)}`;
@@ -162,79 +176,63 @@
     };
     renderRow(im, agile.import_slots || []);
     renderRow(ex, agile.export_slots || []);
+  }
+
+  function updateTariffLabel(agile) {
     const lbl = $('#tariffCurrentLabel');
-    if (lbl) {
-      const i = agile.current_import_p;
-      const e = agile.current_export_p;
-      lbl.textContent = `Current: import ${i == null ? '—' : i.toFixed(1) + 'p'} · export ${e == null ? '—' : e.toFixed(1) + 'p'}`;
-    }
+    if (!lbl) return;
+    if (!agile) { lbl.textContent = '—'; return; }
+    const i = agile.current_import_p;
+    const e = agile.current_export_p;
+    const cheap = _thresholds.cheap_p != null ? `cheap<${_thresholds.cheap_p.toFixed(1)}p` : '';
+    const peak = _thresholds.peak_p != null ? `peak>${_thresholds.peak_p.toFixed(1)}p` : '';
+    const thr = [cheap, peak].filter(Boolean).join(' · ');
+    lbl.textContent = `Current: import ${fmtP(i)} · export ${fmtP(e)}${thr ? ' · ' + thr : ''}`;
   }
 
   async function loadPlan() {
-    const card = $('#cardPlan');
-    try {
-      const [p, status] = await Promise.all([
-        jsonFetch('/api/v1/optimization/plan'),
-        jsonFetch('/api/v1/optimization/status').catch(() => null),
-      ]);
-      $('[data-plan-backend]', card).textContent = status?.optimizer_backend || p?.optimizer_backend || '—';
-      // Find current slot strategy from fox groups
-      const fox = p.fox || {};
-      let groups = [];
-      try { groups = JSON.parse(fox.groups_json || '[]'); } catch (_e) {}
-      const now = new Date();
-      const cur = groups.find(g => slotContains(g, now));
-      const next = groups.find(g => slotStartUTC(g) > now);
-      $('[data-plan-now]', card).textContent = cur ? `${pad2(cur.startHour)}:${pad2(cur.startMinute)}–${pad2(cur.endHour)}:${pad2(cur.endMinute)} ${cur.workMode}` : '—';
-      $('[data-plan-next]', card).textContent = next ? `${pad2(next.startHour)}:${pad2(next.startMinute)} → ${next.workMode}` : '—';
-      setStaleness(card, fox.uploaded_at || status?.last_plan_at_utc);
-      renderPlanStrip(groups);
-    } catch (e) {
-      toast(`Plan: ${e.message}`, 'bad');
-    }
+    const p = await jsonFetch('/api/v1/optimization/plan').catch(() => null);
+    if (!p) return;
+    const fox = p.fox || {};
+    let groups = [];
+    try { groups = JSON.parse(fox.groups_json || '[]'); } catch (_e) {}
+    renderPlanStrip(groups);
   }
 
   function pad2(n) { return String(n).padStart(2, '0'); }
-  function slotStartUTC(g) {
-    const d = new Date();
-    d.setUTCHours(g.startHour || 0, g.startMinute || 0, 0, 0);
-    return d;
-  }
-  function slotContains(g, t) {
-    const s = slotStartUTC(g);
-    const e = new Date(s);
-    e.setUTCHours(g.endHour || 0, g.endMinute || 0, 0, 0);
-    return t >= s && t < e;
-  }
 
   function renderPlanStrip(groups) {
     const strip = $('#planStrip');
     if (!strip) return;
     strip.innerHTML = '';
     const now = new Date();
-    // Build 48 half-hour slots from local 00:00 today
+    // Fox groups are UTC-clock (hardware); build 48 UTC slots for the next 24h.
+    const dayStart = new Date(now);
+    dayStart.setUTCHours(0, 0, 0, 0);
     for (let i = 0; i < 48; i++) {
       const slot = document.createElement('div');
       slot.className = 'plan-slot';
       const hour = Math.floor(i / 2);
       const min = (i % 2) * 30;
-      const slotStart = new Date(now);
-      slotStart.setHours(hour, min, 0, 0);
+      const slotStart = new Date(dayStart);
+      slotStart.setUTCHours(hour, min, 0, 0);
       const slotEnd = new Date(slotStart);
-      slotEnd.setMinutes(slotEnd.getMinutes() + 30);
+      slotEnd.setUTCMinutes(slotEnd.getUTCMinutes() + 30);
 
-      // Find the group that covers this slot (using local time)
       const g = groups.find(g => {
-        const gs = new Date(now);
-        gs.setHours(g.startHour, g.startMinute || 0, 0, 0);
-        const ge = new Date(now);
-        ge.setHours(g.endHour, g.endMinute || 0, 0, 0);
+        const gs = new Date(dayStart);
+        gs.setUTCHours(g.startHour, g.startMinute || 0, 0, 0);
+        const ge = new Date(dayStart);
+        ge.setUTCHours(g.endHour, g.endMinute || 0, 0, 0);
         return slotStart >= gs && slotStart < ge;
       });
       const kind = workModeToKind(g);
       slot.classList.add(`kind-${kind}`);
       if (now >= slotStart && now < slotEnd) slot.classList.add('is-now');
-      slot.title = `${pad2(hour)}:${pad2(min)} · ${kind}` + (g ? ` (${g.workMode})` : '');
+      const lbl = (window.HEM && window.HEM.fmtSlotTime)
+        ? window.HEM.fmtSlotTime(slotStart.toISOString())
+        : `${pad2(hour)}:${pad2(min)}`;
+      slot.title = `${lbl} · ${kind}` + (g ? ` (${g.workMode})` : '');
       slot.addEventListener('click', () => { window.location.href = '/plan'; });
       strip.appendChild(slot);
     }
@@ -250,8 +248,6 @@
     return 'standard';
   }
 
-  // Tariff strips are rendered by renderTariffStripsFromAgile() (called from loadOctopus).
-
   async function loadBreakdown() {
     try {
       const b = await jsonFetch('/api/v1/load/breakdown');
@@ -266,7 +262,35 @@
     }
   }
 
-  /* ----- Override panel ----- */
+  // --- Freshness chip handlers -------------------------------------------
+
+  function bindFreshnessChips() {
+    $$('.fresh-chip').forEach(chip => chip.addEventListener('click', async () => {
+      const source = chip.dataset.source;
+      chip.disabled = true;
+      try {
+        if (source === 'agile') {
+          await jsonFetch('/api/v1/optimization/refresh', { method: 'POST' });
+        } else if (source === 'fox') {
+          await jsonFetch('/api/v1/foxess/status?refresh=true');
+        } else if (source === 'daikin') {
+          await jsonFetch('/api/v1/daikin/status?refresh=true');
+        } else if (source === 'plan') {
+          // No side-effect endpoint — just a reload of the current plan view.
+        }
+        await loadNow();
+        if (source === 'agile') await loadTariff();
+        if (source === 'plan') await loadPlan();
+        if (refreshQuota) refreshQuota();
+      } catch (e) {
+        toast(`${source} refresh failed: ${e.message}`, 'bad');
+      } finally {
+        chip.disabled = false;
+      }
+    }));
+  }
+
+  // --- Manual override panel (unchanged from v10.1) -----------------------
 
   function bindOverride() {
     const toggle = $('#overrideToggle');
@@ -276,7 +300,6 @@
       toggle.setAttribute('aria-expanded', String(!open));
       body.hidden = open;
     });
-
     $$('.override-tab').forEach(t => t.addEventListener('click', () => {
       $$('.override-tab').forEach(x => x.classList.remove('is-active'));
       t.classList.add('is-active');
@@ -291,7 +314,7 @@
         applyUrl: '/api/v1/foxess/mode',
         body: { mode },
       });
-      loadFox();
+      loadNow();
       loadPlan();
     }));
 
@@ -301,15 +324,15 @@
         applyUrl: '/api/v1/optimization/propose',
       });
       loadPlan();
+      loadNow();
     });
 
-    // Promoted Re-plan button at the top of the Plan timeline card
     $('#btnSimulateRePlanCockpit')?.addEventListener('click', async () => {
       const result = await wrapAction({
         simulateUrl: '/api/v1/optimization/propose/simulate',
         applyUrl: '/api/v1/optimization/propose',
       });
-      if (result.applied) setTimeout(loadPlan, 4000);
+      if (result.applied) setTimeout(() => { loadPlan(); loadNow(); }, 4000);
     });
 
     $('#btnDaikinTank')?.addEventListener('click', async () => {
@@ -320,7 +343,7 @@
         applyUrl: '/api/v1/daikin/tank-temperature',
         body: { temperature: t },
       });
-      loadDaikin();
+      loadNow();
     });
 
     $('#btnDaikinLwt')?.addEventListener('click', async () => {
@@ -331,40 +354,19 @@
         applyUrl: '/api/v1/daikin/lwt-offset',
         body: { offset: off },
       });
-      loadDaikin();
+      loadNow();
     });
   }
 
-  /* ----- Per-card refresh buttons ----- */
-
-  function bindRefreshButtons() {
-    $$('[data-refresh]').forEach(btn => btn.addEventListener('click', async () => {
-      const which = btn.dataset.refresh;
-      btn.disabled = true;
-      try {
-        if (which === 'fox') await loadFox(true);
-        else if (which === 'daikin') await loadDaikin(true);
-        else if (which === 'octopus') await loadOctopus();
-        else if (which === 'plan') await loadPlan();
-        if (refreshQuota) refreshQuota();
-      } finally {
-        btn.disabled = false;
-      }
-    }));
-  }
-
-  /* ----- Boot ----- */
+  // --- Boot ---------------------------------------------------------------
 
   document.addEventListener('DOMContentLoaded', async () => {
     bindOverride();
-    bindRefreshButtons();
-    // Initial loads — all from cache, no cloud refresh.
-    // loadFox is awaited first because /api/v1/load/breakdown reads from the
-    // Fox service cache; calling loadFox warms it.
-    await loadFox(false);
-    loadBreakdown();
-    loadDaikin(false);
-    loadOctopus();
+    bindFreshnessChips();
+    // Load the hero first so thresholds are available when strips render.
+    await loadNow();
+    loadTariff();
     loadPlan();
+    loadBreakdown();
   });
 })();
