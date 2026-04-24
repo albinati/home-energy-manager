@@ -67,6 +67,14 @@ class _CaptureClient:
     def _open_post_v3(self, path: str, payload: dict) -> None:
         self.post_calls.append((path, payload))
 
+    # Shims for the inter-write gate added alongside 429 retry — tests don't
+    # exercise pacing here, so no-op.
+    def _gate_inter_write(self) -> None:
+        pass
+
+    def _stamp_write(self) -> None:
+        pass
+
 
 def test_set_scheduler_v3_skips_when_equal(monkeypatch, caplog):
     monkeypatch.setattr("src.api_quota.quota_remaining", lambda vendor: 1000)

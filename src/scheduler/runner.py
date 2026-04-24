@@ -357,6 +357,22 @@ def _maybe_log_comfort_morning_check(
             )
 
 
+def _daily_history_prune_job() -> None:
+    """Run the retention policy for append-only history tables.
+
+    Scheduled by :func:`start_background_scheduler` at 03:15 UTC daily.
+    Also runs on every service startup via the FastAPI lifespan hook —
+    the cron is insurance for long-uptime deploys.
+    """
+    try:
+        results = db.prune_history_tables()
+        interesting = {k: v for k, v in results.items() if v != 0}
+        if interesting:
+            logger.info("daily history prune: %s", interesting)
+    except Exception:
+        logger.warning("daily history prune failed", exc_info=True)
+
+
 def bulletproof_plan_push_job() -> None:
     """Nightly plan dispatch: push tomorrow's LP plan to Fox ESS + Daikin at LP_PLAN_PUSH_HOUR:MINUTE.
 
@@ -742,8 +758,18 @@ def start_background_scheduler() -> None:
                 ),
                 id="bulletproof_plan_push",
             )
+            # Daily history-table retention sweep. Runs at 03:15 UTC — well
+            # clear of the midnight plan-push rollover and the MPC cadence,
+            # so the DB stays bounded over multi-month uptimes without
+            # contending with write-heavy windows. See
+            # db.prune_history_tables() for the per-table retention policies.
+            _background_scheduler.add_job(
+                _daily_history_prune_job,
+                CronTrigger(hour=3, minute=15, timezone=ZoneInfo("UTC")),
+                id="daily_history_prune",
+            )
             logger.info(
-                "Bulletproof cron: Octopus %02d:%02d, brief %02d:%02d (%s); plan push %02d:%02d UTC",
+                "Bulletproof cron: Octopus %02d:%02d, brief %02d:%02d (%s); plan push %02d:%02d UTC; history prune 03:15 UTC",
                 config.OCTOPUS_FETCH_HOUR,
                 config.OCTOPUS_FETCH_MINUTE,
                 config.DAILY_BRIEF_HOUR,

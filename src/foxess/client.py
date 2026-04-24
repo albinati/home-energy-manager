@@ -77,15 +77,101 @@ class FoxESSClient:
         self.username = username
         self.password = password
         self._session_token: str | None = None
+        # Monotonic-clock timestamp of the last write PATCH. Used by
+        # _gate_inter_write() to pace quick-succession writes so we don't trip
+        # the Fox 40257 "parameters do not meet expectations" error that hit
+        # us on shutdown (two Fox writes fired back-to-back — the second
+        # landed before the first's state had settled cloud-side). See
+        # FOX_WRITE_INTER_DELAY_SECONDS (mirrors TonyM1958/FoxESS-Cloud 2s gap).
+        self._last_write_monotonic: float = 0.0
 
         if not api_key and not (username and password):
             raise ValueError("Provide either api_key OR username+password.")
+
+    def _gate_inter_write(self) -> None:
+        """Sleep whatever time is left in the inter-write window.
+
+        Called at the top of every write method; reads the delay from config
+        so tests can override it and ops can tune via .env without a deploy.
+        """
+        from ..config import config as _config
+        delay = float(_config.FOX_WRITE_INTER_DELAY_SECONDS)
+        if delay <= 0.0:
+            return
+        wait = delay - (time.monotonic() - self._last_write_monotonic)
+        if wait > 0.0:
+            time.sleep(wait)
+
+    def _stamp_write(self) -> None:
+        """Record the completion time of the last write for _gate_inter_write."""
+        self._last_write_monotonic = time.monotonic()
 
     def _sn_scheduler(self) -> str:
         """Value for Open API scheduler JSON field ``deviceSN`` (inverter SN by default)."""
         return self.scheduler_sn if self.scheduler_sn else self.device_sn
 
     # ── Official Open API (API key auth) ────────────────────────────────────
+
+    def _retry_after_seconds(self, e: urllib.error.HTTPError) -> float:
+        """Parse Retry-After header (seconds or HTTP-date) with a safety cap.
+
+        Mirrors the Daikin client helper. Fox doesn't document this header
+        precisely but RFC 7231 says 429 responses should include it. Cap at
+        FOX_HTTP_429_MAX_SLEEP_SECONDS so a misbehaving server can't park
+        the process for hours.
+        """
+        from datetime import UTC as _UTC
+        from datetime import datetime as _dt
+        from email.utils import parsedate_to_datetime
+
+        from ..config import config as _config
+
+        cap = float(_config.FOX_HTTP_429_MAX_SLEEP_SECONDS)
+        default = 5.0
+        try:
+            raw = (e.headers.get("Retry-After") or "").strip() if e.headers else ""
+        except Exception:
+            raw = ""
+        if not raw:
+            return min(default, cap)
+        try:
+            return min(float(raw), cap)
+        except ValueError:
+            try:
+                when = parsedate_to_datetime(raw)
+                if when.tzinfo is None:
+                    when = when.replace(tzinfo=_UTC)
+                delta = (when - _dt.now(_UTC)).total_seconds()
+                return max(0.0, min(delta, cap))
+            except Exception:
+                return min(default, cap)
+
+    def _urlopen_with_429_retry(self, req, timeout: int, path_for_error: str):
+        """Issue a request, retrying on HTTP 429 with Retry-After backoff.
+
+        Raises FoxESSError on final failure. On other HTTP errors or network
+        issues, re-raises immediately (429 is the only class that benefits from
+        sleep-and-retry; 500s + network errors are raised so the caller can
+        decide if/how to back off at a higher layer).
+        """
+        from ..config import config as _config
+
+        max_retries = max(0, int(_config.FOX_HTTP_429_MAX_RETRIES))
+        attempt = 0
+        while True:
+            try:
+                return urllib.request.urlopen(req, timeout=timeout)
+            except urllib.error.HTTPError as e:
+                if e.code == 429 and attempt < max_retries:
+                    sleep_s = self._retry_after_seconds(e)
+                    logger.warning(
+                        "Fox %s: HTTP 429, sleeping %.1fs then retry (%d/%d)",
+                        path_for_error, sleep_s, attempt + 1, max_retries,
+                    )
+                    time.sleep(sleep_s)
+                    attempt += 1
+                    continue
+                raise
 
     def _open_headers(self, path: str) -> dict:
         timestamp = str(int(time.time() * 1000))
@@ -106,7 +192,7 @@ class FoxESSClient:
         payload = json.dumps(body).encode()
         req = urllib.request.Request(url, data=payload, headers=self._open_headers(f"/op/v0{path}"))
         try:
-            resp = urllib.request.urlopen(req, timeout=15)
+            resp = self._urlopen_with_429_retry(req, timeout=15, path_for_error=path)
             data = json.loads(resp.read())
         except urllib.error.HTTPError as e:
             raise FoxESSError(f"HTTP {e.code}: {e.read().decode()[:200]}")
@@ -124,7 +210,7 @@ class FoxESSClient:
         sig_path = f"/op/v3{path}"
         req = urllib.request.Request(url, data=payload, headers=self._open_headers(sig_path))
         try:
-            resp = urllib.request.urlopen(req, timeout=20)
+            resp = self._urlopen_with_429_retry(req, timeout=20, path_for_error=sig_path)
             data = json.loads(resp.read())
         except urllib.error.HTTPError as e:
             raise FoxESSError(f"HTTP {e.code}: {e.read().decode()[:200]}")
@@ -175,7 +261,7 @@ class FoxESSClient:
         payload = json.dumps(body).encode()
         req = urllib.request.Request(url, data=payload, headers=self._cloud_headers())
         try:
-            resp = urllib.request.urlopen(req, timeout=15)
+            resp = self._urlopen_with_429_retry(req, timeout=15, path_for_error=path)
             data = json.loads(resp.read())
         except urllib.error.HTTPError as e:
             raise FoxESSError(f"HTTP {e.code}: {e.read().decode()[:200]}")
@@ -291,6 +377,7 @@ class FoxESSClient:
         valid = ["Self Use", "Feed-in Priority", "Back Up", "Force charge", "Force discharge"]
         if mode not in valid:
             raise ValueError(f"Invalid mode '{mode}'. Choose from: {valid}")
+        self._gate_inter_write()
         if self.api_key:
             self._open_post("/device/setting/set", {
                 "sn": self.device_sn, "key": "workMode", "value": mode,
@@ -299,6 +386,7 @@ class FoxESSClient:
             self._cloud_post("/c/v0/device/setting/set", {
                 "sn": self.device_sn, "key": "workMode", "value": mode,
             })
+        self._stamp_write()
 
     def get_device_setting(self, key: str) -> dict:
         """Fetch one setting by key (Open API requires both ``sn`` and ``key``)."""
@@ -313,17 +401,12 @@ class FoxESSClient:
         Examples (device-dependent): ``minSoc``, ``workMode``. Prefer typed helpers when they exist.
         """
         body = {"sn": self.device_sn, "key": key, "value": value}
+        self._gate_inter_write()
         if self.api_key:
             self._open_post("/device/setting/set", body)
         else:
             self._cloud_post("/c/v0/device/setting/set", body)
-
-    def get_battery_schedule(self) -> dict:
-        """Return battery schedule payload (charge windows) if supported by the account/device."""
-        body = {"sn": self.device_sn}
-        if self.api_key:
-            return self._open_post("/device/battery/schedule/get", body)
-        return self._cloud_post("/c/v0/device/battery/schedule/get", body)
+        self._stamp_write()
 
     def set_charge_period(self, period_index: int, period: ChargePeriod) -> None:
         """Set a timed charge period (index 0 or 1)."""
@@ -343,10 +426,12 @@ class FoxESSClient:
             "minSocOnGrid": period.target_soc,
         }
         body = {"sn": self.device_sn, "key": key, "value": value}
+        self._gate_inter_write()
         if self.api_key:
             self._open_post("/device/setting/set", body)
         else:
             self._cloud_post("/c/v0/device/setting/set", body)
+        self._stamp_write()
 
     def set_min_soc(self, min_soc: int) -> None:
         """Set Min SoC (on grid) limit (V7 Safeties)."""
@@ -669,7 +754,9 @@ class FoxESSClient:
             "isDefault": bool(is_default),
             "groups": [g.to_api_dict() for g in groups],
         }
+        self._gate_inter_write()
         self._open_post_v3("/device/scheduler/enable", payload)
+        self._stamp_write()
 
     def warn_if_scheduler_v3_mismatch(self, expected_groups: list[SchedulerGroup]) -> None:
         """After set_scheduler_v3, read hardware state and warn if group counts differ (#23)."""
@@ -706,12 +793,14 @@ class FoxESSClient:
     def set_scheduler_flag(self, enable: bool) -> None:
         sn = self._sn_scheduler()
         en = 1 if enable else 0
+        self._gate_inter_write()
         if self.api_key:
             self._open_post(
                 "/device/scheduler/set/flag", {"deviceSN": sn, "enable": en}
             )
         else:
             self._cloud_post("/c/v0/device/scheduler/set", {"sn": sn, "enable": enable})
+        self._stamp_write()
 
     def get_peak_shaving(self) -> dict:
         body = {"sn": self.device_sn}
@@ -721,10 +810,12 @@ class FoxESSClient:
 
     def set_peak_shaving(self, import_limit_w: int, soc: int) -> None:
         body = {"sn": self.device_sn, "importLimit": import_limit_w, "soc": soc}
+        self._gate_inter_write()
         if self.api_key:
             self._open_post("/device/peakShaving/set", body)
         else:
             self._cloud_post("/c/v0/device/peakShaving/set", body)
+        self._stamp_write()
 
 
 def _groups_from_api_dicts(groups: list) -> list[SchedulerGroup]:

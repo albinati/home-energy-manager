@@ -153,14 +153,23 @@ def apply_scheduled_daikin_params(
             if not zone_will_be_on:
                 logger.debug("Skipping lwt_offset: zone is OFF or turning OFF (read-only characteristic)")
             elif dev.lwt_offset_range is not None and not getattr(dev.lwt_offset_range, "settable", True):
-                logger.debug("Skipping lwt_offset: device reports characteristic as non-settable (weatherDependent mode)")
+                # Onecta reports leavingWaterOffset.settable=False whenever
+                # the current setpointMode doesn't accept offset writes
+                # (typically "fixed" mode where the curve isn't active).
+                # Skip the PATCH entirely so we don't waste a 200/day quota
+                # slot on a guaranteed READ_ONLY_CHARACTERISTIC response.
+                logger.debug("Skipping lwt_offset: device reports settable=False (likely fixed setpoint mode — LWT offset is only writable when weatherDependent curve is active)")
             else:
                 try:
                     client.set_lwt_offset(dev, float(p["lwt_offset"]))
                 except DaikinError as exc:
                     if "[read_only]" in str(exc):
-                        # Non-fatal: lwt_offset read-only (e.g. weatherDependent setpoint mode).
-                        # Continue applying remaining commands (tank_temp, tank_power, etc.)
+                        # Non-fatal: caught only when our pre-check above
+                        # misses the condition (e.g. stale device cache
+                        # reports settable=True but the live device has
+                        # switched to fixed mode since the last refresh).
+                        # Continue applying remaining commands (tank_temp,
+                        # tank_power, etc.).
                         logger.debug("lwt_offset rejected as read-only, continuing: %s", exc)
                     else:
                         raise
