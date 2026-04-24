@@ -27,6 +27,8 @@
             </button>
             <nav class="tabs" aria-label="Pages">
                 <a href="/" class="tab {% if active_page == 'cockpit' %}is-active{% endif %}">Cockpit</a>
+                <a href="/forecast" class="tab {% if active_page == 'forecast' %}is-active{% endif %}">Forecast</a>
+                <a href="/history" class="tab {% if active_page == 'history' %}is-active{% endif %}">History</a>
                 <a href="/insights" class="tab {% if active_page == 'insights' %}is-active{% endif %}">Insights</a>
                 <a href="/workbench" class="tab {% if active_page == 'workbench' %}is-active{% endif %}">Workbench</a>
                 <a href="/settings" class="tab {% if active_page == 'settings' %}is-active{% endif %}">Settings</a>
@@ -35,6 +37,10 @@
                 <span class="pill" id="quotaDaikin" title="Daikin Onecta API requests today">D —/180</span>
                 <span class="pill" id="quotaFox" title="Fox ESS API requests today">F —/1200</span>
             </div>
+            <span class="pill tz-pill" id="tzBadge"
+                  title="Planning + cockpit use this timezone. The nightly plan-push cron is UTC-anchored so each new day&apos;s first dispatches land on a fresh Daikin quota day.">
+                🕒 —
+            </span>
         </div>
     </header>
 
@@ -48,6 +54,7 @@
     <div class="toast-stack" id="toastStack" aria-live="polite"></div>
 
     <script src="/static/js/modal.js?v={{ static_v('js/modal.js') }}"></script>
+    <script src="/static/js/tz.js?v={{ static_v('js/tz.js') }}"></script>
     <script src="/static/js/quota.js?v={{ static_v('js/quota.js') }}"></script>
     <script src="/static/js/mode_switcher.js?v={{ static_v('js/mode_switcher.js') }}"></script>
     {% block scripts %}{% endblock %}

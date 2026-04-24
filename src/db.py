@@ -406,6 +406,109 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         )"""
     )
 
+    # V11: durable LP snapshots (cockpit History replay).
+    #
+    # lp_solution_snapshot holds the per-slot decision vector of each solve so
+    # the History view can render "what the LP decided" for any past run.
+    # lp_inputs_snapshot holds the scalar inputs + JSON-encoded base_load and
+    # config snapshot that fed that solve.
+    # Both reference optimizer_log.id as run_id (optimizer_log is written after
+    # every successful _run_optimizer_lp with lastrowid returned).
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS lp_solution_snapshot (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id          INTEGER NOT NULL,
+            slot_index      INTEGER NOT NULL,
+            slot_time_utc   TEXT NOT NULL,
+            price_p         REAL,
+            import_kwh      REAL,
+            export_kwh      REAL,
+            charge_kwh      REAL,
+            discharge_kwh   REAL,
+            pv_use_kwh      REAL,
+            pv_curtail_kwh  REAL,
+            dhw_kwh         REAL,
+            space_kwh       REAL,
+            soc_kwh         REAL,
+            tank_temp_c     REAL,
+            indoor_temp_c   REAL,
+            outdoor_temp_c  REAL,
+            lwt_offset_c    REAL,
+            UNIQUE(run_id, slot_index)
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_lp_solution_snapshot_run ON lp_solution_snapshot(run_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_lp_solution_snapshot_slot ON lp_solution_snapshot(slot_time_utc)"
+    )
+
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS lp_inputs_snapshot (
+            run_id                   INTEGER PRIMARY KEY,
+            run_at_utc               TEXT NOT NULL,
+            plan_date                TEXT,
+            horizon_hours            INTEGER,
+            soc_initial_kwh          REAL,
+            tank_initial_c           REAL,
+            indoor_initial_c         REAL,
+            soc_source               TEXT,
+            tank_source              TEXT,
+            indoor_source            TEXT,
+            base_load_json           TEXT,
+            micro_climate_offset_c   REAL,
+            config_snapshot_json     TEXT,
+            price_quantize_p         REAL,
+            peak_threshold_p         REAL,
+            cheap_threshold_p        REAL,
+            daikin_control_mode      TEXT,
+            optimization_preset      TEXT,
+            energy_strategy_mode     TEXT
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_lp_inputs_snapshot_plan_date ON lp_inputs_snapshot(plan_date)"
+    )
+
+    # V11b: meteo_forecast_history — append-only audit log of every forecast
+    # fetch. The existing meteo_forecast table is latest-per-slot (overwrites on
+    # UNIQUE(slot_time)) so heartbeat + LP reads stay simple; this companion
+    # table preserves the full fetch history so the cockpit can show "what did
+    # the LP think the weather would be on date D when it ran at 10:00?".
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS meteo_forecast_history (
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            forecast_fetch_at_utc TEXT NOT NULL,
+            slot_time             TEXT NOT NULL,
+            temp_c                REAL,
+            solar_w_m2            REAL,
+            UNIQUE(forecast_fetch_at_utc, slot_time)
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_meteo_forecast_history_slot ON meteo_forecast_history(slot_time)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_meteo_forecast_history_fetch ON meteo_forecast_history(forecast_fetch_at_utc)"
+    )
+
+    # V11c: config_audit — append-only log of runtime_settings changes so a
+    # past plan can always be explained even if a tunable was changed later.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS config_audit (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            key            TEXT NOT NULL,
+            value          TEXT,
+            op             TEXT NOT NULL,
+            actor          TEXT,
+            changed_at_utc TEXT NOT NULL
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_config_audit_key_ts ON config_audit(key, changed_at_utc DESC)"
+    )
+
 
 def init_db() -> None:
     """Create tables if missing and apply lightweight migrations."""
@@ -2227,6 +2330,203 @@ def list_runtime_settings() -> list[dict[str, Any]]:
             cur = conn.execute(
                 "SELECT key, value, updated_at FROM runtime_settings ORDER BY key"
             )
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
+# ---------------------------------------------------------------------------
+# V11: LP snapshots + forecast history + config audit (cockpit History replay)
+# ---------------------------------------------------------------------------
+
+def save_lp_snapshots(
+    run_id: int,
+    inputs_row: dict[str, Any],
+    solution_rows: list[dict[str, Any]],
+) -> None:
+    """Persist one LP run's inputs + per-slot solution in a single transaction.
+
+    ``run_id`` is ``optimizer_log.id`` returned by :func:`log_optimizer_run`.
+    ``inputs_row`` keys map 1:1 onto ``lp_inputs_snapshot`` columns.
+    Each element of ``solution_rows`` maps 1:1 onto ``lp_solution_snapshot`` columns
+    (excluding ``id`` and ``run_id`` which are filled here).
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            conn.execute(
+                """INSERT OR REPLACE INTO lp_inputs_snapshot
+                   (run_id, run_at_utc, plan_date, horizon_hours,
+                    soc_initial_kwh, tank_initial_c, indoor_initial_c,
+                    soc_source, tank_source, indoor_source,
+                    base_load_json, micro_climate_offset_c, config_snapshot_json,
+                    price_quantize_p, peak_threshold_p, cheap_threshold_p,
+                    daikin_control_mode, optimization_preset, energy_strategy_mode)
+                   VALUES (:run_id, :run_at_utc, :plan_date, :horizon_hours,
+                           :soc_initial_kwh, :tank_initial_c, :indoor_initial_c,
+                           :soc_source, :tank_source, :indoor_source,
+                           :base_load_json, :micro_climate_offset_c, :config_snapshot_json,
+                           :price_quantize_p, :peak_threshold_p, :cheap_threshold_p,
+                           :daikin_control_mode, :optimization_preset, :energy_strategy_mode)""",
+                {"run_id": run_id, **inputs_row},
+            )
+            for row in solution_rows:
+                conn.execute(
+                    """INSERT OR REPLACE INTO lp_solution_snapshot
+                       (run_id, slot_index, slot_time_utc, price_p,
+                        import_kwh, export_kwh, charge_kwh, discharge_kwh,
+                        pv_use_kwh, pv_curtail_kwh, dhw_kwh, space_kwh,
+                        soc_kwh, tank_temp_c, indoor_temp_c, outdoor_temp_c, lwt_offset_c)
+                       VALUES (:run_id, :slot_index, :slot_time_utc, :price_p,
+                               :import_kwh, :export_kwh, :charge_kwh, :discharge_kwh,
+                               :pv_use_kwh, :pv_curtail_kwh, :dhw_kwh, :space_kwh,
+                               :soc_kwh, :tank_temp_c, :indoor_temp_c, :outdoor_temp_c, :lwt_offset_c)""",
+                    {"run_id": run_id, **row},
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def get_lp_solution_slots(run_id: int) -> list[dict[str, Any]]:
+    """Return all slot rows for a given run_id, ordered by slot_index."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM lp_solution_snapshot WHERE run_id = ? ORDER BY slot_index",
+                (run_id,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
+def get_lp_inputs(run_id: int) -> dict[str, Any] | None:
+    """Return the inputs row for a run_id, or None if absent."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM lp_inputs_snapshot WHERE run_id = ?", (run_id,)
+            )
+            r = cur.fetchone()
+            return dict(r) if r else None
+        finally:
+            conn.close()
+
+
+def find_run_for_time(when_utc: str) -> int | None:
+    """Return the most recent optimizer_log.id whose run_at <= when_utc.
+
+    Used by the History endpoint to pick which LP run's snapshot to display
+    for a given past moment.
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT id FROM optimizer_log
+                   WHERE run_at <= ?
+                   ORDER BY run_at DESC
+                   LIMIT 1""",
+                (when_utc,),
+            )
+            r = cur.fetchone()
+            return int(r[0]) if r else None
+        finally:
+            conn.close()
+
+
+def save_meteo_forecast_history(
+    forecast_fetch_at_utc: str,
+    rows: list[dict[str, Any]],
+) -> None:
+    """Append a forecast fetch's per-slot rows to the history table.
+
+    Companion to :func:`save_meteo_forecast` (which is latest-per-slot). This
+    table preserves every fetch so the History view can show forecasts as they
+    were at past LP runs.
+    """
+    if not rows:
+        return
+    with _lock:
+        conn = get_connection()
+        try:
+            for r in rows:
+                conn.execute(
+                    """INSERT OR IGNORE INTO meteo_forecast_history
+                       (forecast_fetch_at_utc, slot_time, temp_c, solar_w_m2)
+                       VALUES (?, ?, ?, ?)""",
+                    (
+                        forecast_fetch_at_utc,
+                        r.get("slot_time"),
+                        r.get("temp_c"),
+                        r.get("solar_w_m2"),
+                    ),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def get_meteo_forecast_at(fetch_at_utc: str) -> list[dict[str, Any]]:
+    """Return the forecast rows stored for a specific fetch timestamp."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT slot_time, temp_c, solar_w_m2
+                   FROM meteo_forecast_history
+                   WHERE forecast_fetch_at_utc = ?
+                   ORDER BY slot_time""",
+                (fetch_at_utc,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
+def log_config_change(
+    key: str,
+    value: str | None,
+    op: str,
+    actor: str | None = None,
+) -> None:
+    """Append one row to ``config_audit``.
+
+    ``op`` is ``"set"`` or ``"delete"``. Called from
+    ``runtime_settings.set_setting`` / ``delete_setting``.
+    """
+    ts = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    with _lock:
+        conn = get_connection()
+        try:
+            conn.execute(
+                """INSERT INTO config_audit (key, value, op, actor, changed_at_utc)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (key, value, op, actor, ts),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def get_config_audit(key: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    """Return recent config_audit rows, optionally filtered by key."""
+    with _lock:
+        conn = get_connection()
+        try:
+            if key is None:
+                cur = conn.execute(
+                    "SELECT * FROM config_audit ORDER BY changed_at_utc DESC LIMIT ?",
+                    (limit,),
+                )
+            else:
+                cur = conn.execute(
+                    "SELECT * FROM config_audit WHERE key = ? ORDER BY changed_at_utc DESC LIMIT ?",
+                    (key, limit),
+                )
             return [dict(r) for r in cur.fetchall()]
         finally:
             conn.close()
