@@ -35,6 +35,10 @@
                 <span class="pill" id="quotaDaikin" title="Daikin Onecta API requests today">D —/180</span>
                 <span class="pill" id="quotaFox" title="Fox ESS API requests today">F —/1200</span>
             </div>
+            <span class="pill tz-pill" id="tzBadge"
+                  title="Planning + cockpit use this timezone. The nightly plan-push cron is UTC-anchored so each new day&apos;s first dispatches land on a fresh Daikin quota day.">
+                🕒 —
+            </span>
         </div>
     </header>
 
@@ -48,6 +52,7 @@
     <div class="toast-stack" id="toastStack" aria-live="polite"></div>
 
     <script src="/static/js/modal.js?v={{ static_v('js/modal.js') }}"></script>
+    <script src="/static/js/tz.js?v={{ static_v('js/tz.js') }}"></script>
     <script src="/static/js/quota.js?v={{ static_v('js/quota.js') }}"></script>
     <script src="/static/js/mode_switcher.js?v={{ static_v('js/mode_switcher.js') }}"></script>
     {% block scripts %}{% endblock %}

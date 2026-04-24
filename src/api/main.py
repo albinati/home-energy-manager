@@ -463,6 +463,34 @@ async def health():
     return {"status": "ok"}
 
 
+@app.get("/api/v1/system/timezone")
+async def system_timezone():
+    """Return the timezone the planner + cockpit should display times in.
+
+    ``planner_tz`` is ``config.BULLETPROOF_TIMEZONE`` (used for comfort
+    windows, MPC cron firing, Octopus fetch cron, load-profile hour-of-day
+    binning). ``plan_push_tz`` is fixed to UTC because the nightly plan-push
+    cron is UTC-anchored so the first dispatches of each new plan land on a
+    fresh Daikin quota day — this is not configurable and must stay that way.
+    ``now_utc`` / ``now_local`` let the frontend cross-check its own clock.
+    """
+    from zoneinfo import ZoneInfo
+    tz_name = config.BULLETPROOF_TIMEZONE or "Europe/London"
+    now_utc = datetime.now(UTC)
+    try:
+        now_local = now_utc.astimezone(ZoneInfo(tz_name))
+    except Exception:
+        # Fall back to UTC if the config string doesn't resolve.
+        now_local = now_utc
+        tz_name = "UTC"
+    return {
+        "planner_tz": tz_name,
+        "plan_push_tz": "UTC",
+        "now_utc": now_utc.isoformat().replace("+00:00", "Z"),
+        "now_local": now_local.isoformat(),
+    }
+
+
 @app.get("/api/v1/daikin/quota")
 async def daikin_quota():
     """Return Daikin API quota usage, cache age, and stale status.

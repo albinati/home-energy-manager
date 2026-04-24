@@ -92,7 +92,14 @@
       const badge = $('[data-daikin-mode]', card);
       badge.textContent = mode;
       badge.className = 'status-badge ' + (mode === 'passive' ? 'is-passive' : 'is-active');
-      setStaleness(card, new Date().toISOString()); // Daikin status doesn't carry timestamp; stamp now
+      // Freshness comes from /api/v1/daikin/quota (cache_age_seconds, last_refresh_at_utc).
+      // Stamping "now" was misleading — the Daikin cache can be ≤30 min old.
+      try {
+        const q = await jsonFetch('/api/v1/daikin/quota');
+        setStaleness(card, q?.last_refresh_at_utc || null);
+      } catch (_e) {
+        setStaleness(card, null);
+      }
       // Echo mode into the override panel
       const tEl = $('[data-daikin-mode-text]');
       if (tEl) tEl.textContent = mode;
@@ -141,7 +148,12 @@
         const cell = document.createElement('div');
         cell.className = 'tariff-slot';
         cell.style.background = priceColor(s.p);
-        cell.title = `${s.valid_from.slice(11,16)}–${s.valid_to.slice(11,16)} ${s.p.toFixed(1)}p`;
+        // Slot times formatted in the planner tz — not browser local — so a
+        // VPN/travel user sees the same labels as the LP planned against.
+        const rangeLbl = (window.HEM && window.HEM.fmtSlotRange)
+          ? window.HEM.fmtSlotRange(s.valid_from, s.valid_to)
+          : `${s.valid_from.slice(11,16)}–${s.valid_to.slice(11,16)}`;
+        cell.title = `${rangeLbl} ${s.p.toFixed(1)}p`;
         const start = new Date(s.valid_from);
         const end = new Date(s.valid_to);
         if (now >= start && now < end) cell.classList.add('is-current');

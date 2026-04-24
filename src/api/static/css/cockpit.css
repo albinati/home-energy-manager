@@ -136,6 +136,12 @@ a { color: inherit; text-decoration: none; }
 }
 .pill.is-warn { color: var(--warn); }
 .pill.is-bad { color: var(--bad); }
+.pill.tz-pill {
+    /* Sits at the far right of the topbar next to the quota pills. */
+    margin-left: 0.35rem;
+    font-size: 0.7rem;
+    cursor: help;
+}
 
 /* Layout */
 .page {
