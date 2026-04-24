@@ -52,8 +52,41 @@
             <span class="fresh-chip-age" data-age>—</span>
             <span class="fresh-chip-refresh" aria-label="Refresh">⟳</span>
         </button>
+        <button class="fresh-chip fresh-chip-settings" type="button" id="btnSettingsDrawer"
+                title="Open settings drawer — comfort targets, strategy, schedule cadence">
+            <span class="fresh-chip-name">⚙ Settings</span>
+        </button>
     </div>
 </section>
+
+<!-- Settings drawer — opens from the ⚙ chip. Same form as the /settings page
+     (container IDs match so settings.js populates both automatically). -->
+<div class="drawer-backdrop" id="settingsDrawerBackdrop" hidden>
+    <aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="settingsDrawerTitle">
+        <header class="drawer-header">
+            <h2 id="settingsDrawerTitle">Settings</h2>
+            <a href="/settings" class="btn btn-sm btn-secondary" title="Open full settings page">Full page →</a>
+            <button class="drawer-close" id="btnSettingsDrawerClose" type="button" aria-label="Close">&times;</button>
+        </header>
+        <div class="drawer-body">
+            <p class="text-dim" style="font-size:0.78rem;margin:0 0 0.85rem 0;">
+                Quick tuning for comfort, strategy, and schedule. Every change simulates first.
+            </p>
+            <section class="drawer-card">
+                <h3 class="drawer-card-title">Comfort targets</h3>
+                <div id="settingsComfort"></div>
+            </section>
+            <section class="drawer-card">
+                <h3 class="drawer-card-title">Optimization strategy</h3>
+                <div id="settingsStrategy"></div>
+            </section>
+            <section class="drawer-card">
+                <h3 class="drawer-card-title">Schedule cadence</h3>
+                <div id="settingsSchedule"></div>
+            </section>
+        </div>
+    </aside>
+</div>
 
 <section class="card">
     <h2 class="card-title">House load breakdown</h2>
@@ -118,7 +151,11 @@
 
 <section class="override-section">
     <button class="override-toggle" id="overrideToggle" aria-expanded="false">
-        Controls · everything below requires preview &amp; confirm
+        <span class="override-toggle-left">
+            <span class="override-toggle-icon" aria-hidden="true">▸</span>
+            <span class="override-toggle-title">Controls</span>
+        </span>
+        <span class="override-toggle-right text-dim">Fox mode · Plan · Daikin — preview &amp; confirm</span>
     </button>
     <div class="override-body" id="overrideBody" hidden>
         <div class="override-tabs" role="tablist">
@@ -176,4 +213,5 @@
 
 {% block scripts %}
 <script src="/static/js/cockpit.js?v={{ static_v('js/cockpit.js') }}"></script>
+<script src="/static/js/settings.js?v={{ static_v('js/settings.js') }}"></script>
 {% endblock %}
