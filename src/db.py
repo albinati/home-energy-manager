@@ -2531,3 +2531,72 @@ def get_config_audit(key: str | None = None, limit: int = 100) -> list[dict[str,
         finally:
             conn.close()
 
+
+def prune_old_rows(
+    table: str,
+    timestamp_col: str,
+    max_age_days: int,
+    *,
+    epoch_seconds: bool = False,
+) -> int:
+    """Delete rows from *table* older than *max_age_days*.
+
+    Append-only tables (daikin_telemetry, meteo_forecast_history,
+    lp_solution_snapshot, lp_inputs_snapshot, config_audit) have no
+    built-in purge policy. Without it they grow unbounded. This helper is
+    called from :func:`prune_history_tables` on service startup + daily cron.
+
+    ``epoch_seconds=True`` for tables that store timestamps as a REAL
+    Unix epoch (daikin_telemetry.fetched_at). Everything else uses ISO
+    strings, which compare lexicographically.
+    Returns the number of rows deleted.
+    """
+    if max_age_days <= 0:
+        return 0
+    with _lock:
+        conn = get_connection()
+        try:
+            if epoch_seconds:
+                import time as _time
+                cutoff: Any = _time.time() - max_age_days * 86400
+            else:
+                from datetime import UTC as _UTC
+                from datetime import datetime as _dt
+                from datetime import timedelta as _td
+                cutoff = (_dt.now(_UTC) - _td(days=max_age_days)).isoformat()
+            cur = conn.execute(
+                f"DELETE FROM {table} WHERE {timestamp_col} < ?",
+                (cutoff,),
+            )
+            conn.commit()
+            return int(cur.rowcount or 0)
+        finally:
+            conn.close()
+
+
+def prune_history_tables() -> dict[str, int]:
+    """Run all configured retention policies in one pass.
+
+    Returns per-table deletion counts. Called at app startup (best-effort,
+    never fatal) and from a daily cron. Individual failures are logged at
+    DEBUG and surface as ``-1`` in the result so the caller can tell which
+    tables couldn't be pruned without breaking the rest.
+    """
+    from .config import config as _config
+
+    policies = [
+        ("daikin_telemetry", "fetched_at", _config.DAIKIN_TELEMETRY_RETENTION_DAYS, True),
+        ("meteo_forecast_history", "forecast_fetch_at_utc", _config.METEO_FORECAST_HISTORY_RETENTION_DAYS, False),
+        ("lp_solution_snapshot", "slot_time_utc", _config.LP_SNAPSHOT_RETENTION_DAYS, False),
+        ("lp_inputs_snapshot", "run_at_utc", _config.LP_SNAPSHOT_RETENTION_DAYS, False),
+        ("config_audit", "changed_at_utc", _config.CONFIG_AUDIT_RETENTION_DAYS, False),
+    ]
+    results: dict[str, int] = {}
+    for table, col, days, epoch in policies:
+        try:
+            results[table] = prune_old_rows(table, col, days, epoch_seconds=epoch)
+        except Exception as e:
+            logger.debug("prune %s failed: %s", table, e)
+            results[table] = -1
+    return results
+

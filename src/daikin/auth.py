@@ -14,6 +14,7 @@ Developer portal: https://developer.cloud.daikineurope.com
 """
 import html
 import json
+import logging
 import re
 import subprocess
 import time
@@ -27,11 +28,35 @@ from urllib.parse import parse_qs, urlparse
 
 from ..config import config
 
+logger = logging.getLogger(__name__)
+
 TOKEN_FILE = config.DAIKIN_TOKEN_FILE
 
 # Serialize token file I/O + refresh when API and heartbeat overlap.
 _token_io_lock = RLock()
 _last_token_refresh_monotonic: float = 0.0
+
+# Circuit breaker for dead refresh tokens. If refresh_tokens() fails with
+# an auth error repeatedly (refresh_token expired, client credentials
+# revoked, etc.) we'd otherwise hammer the Onecta token endpoint on every
+# heartbeat. The breaker tracks consecutive failures and, once a threshold
+# is crossed, refuses to retry until the cool-down window passes — freeing
+# the service to keep running on the physics estimator without a storm of
+# noisy 401/400 logs and without burning the 200/day quota on doomed auth
+# attempts.
+_consecutive_auth_failures: int = 0
+_circuit_tripped_at_monotonic: float = 0.0
+_circuit_notified: bool = False
+
+
+class DaikinAuthCircuitOpen(RuntimeError):
+    """Raised by refresh_tokens() when the circuit is tripped.
+
+    Callers (DaikinClient._get / _patch) should treat this like a 401
+    surfaced to the user — the service falls back to cached data / the
+    physics estimator. A critical notification is emitted once per trip
+    so the user knows a manual re-auth is needed.
+    """
 
 _auth_result = {}
 _done_event = Event()
@@ -371,8 +396,74 @@ def load_tokens() -> dict:
         return json.loads(TOKEN_FILE.read_text(encoding="utf-8"))
 
 
+def _auth_circuit_state() -> tuple[int, bool, float]:
+    """Snapshot of the auth circuit breaker (for tests / status endpoints)."""
+    cooldown = max(60, int(getattr(config, "DAIKIN_AUTH_CIRCUIT_COOLDOWN_SECONDS", 900)))
+    now = time.monotonic()
+    remaining = max(0.0, _circuit_tripped_at_monotonic + cooldown - now) if _circuit_tripped_at_monotonic else 0.0
+    return _consecutive_auth_failures, _circuit_tripped_at_monotonic > 0.0 and remaining > 0.0, remaining
+
+
+def _reset_auth_circuit() -> None:
+    """Called on a successful refresh — clears fault counter + cooldown."""
+    global _consecutive_auth_failures, _circuit_tripped_at_monotonic, _circuit_notified
+    if _consecutive_auth_failures or _circuit_tripped_at_monotonic:
+        logger.info("Daikin auth circuit: cleared after successful refresh")
+    _consecutive_auth_failures = 0
+    _circuit_tripped_at_monotonic = 0.0
+    _circuit_notified = False
+
+
+def _record_auth_failure(reason: str) -> None:
+    """Increment the fault counter and, on threshold, trip the circuit.
+
+    Emits a critical notification exactly once per trip so the user sees
+    the "refresh_token expired — re-auth required" alert without spam.
+    """
+    global _consecutive_auth_failures, _circuit_tripped_at_monotonic, _circuit_notified
+    _consecutive_auth_failures += 1
+    threshold = max(1, int(getattr(config, "DAIKIN_AUTH_CIRCUIT_THRESHOLD", 3)))
+    if _consecutive_auth_failures >= threshold and _circuit_tripped_at_monotonic == 0.0:
+        _circuit_tripped_at_monotonic = time.monotonic()
+        logger.error(
+            "Daikin auth circuit TRIPPED after %d consecutive failures (reason: %s) — "
+            "skipping token refresh attempts for DAIKIN_AUTH_CIRCUIT_COOLDOWN_SECONDS",
+            _consecutive_auth_failures,
+            reason,
+        )
+        if not _circuit_notified:
+            _circuit_notified = True
+            try:
+                # Import here to avoid a hard notifier dependency at module load.
+                from ..notifier import notify_risk
+                notify_risk(
+                    "Daikin auth failing repeatedly — refresh_token likely expired. "
+                    "Run `python -m src.daikin.auth` to re-authorise. Falling back "
+                    "to cached/estimated telemetry in the meantime.",
+                    extra={"consecutive_failures": _consecutive_auth_failures, "reason": reason},
+                )
+            except Exception:
+                logger.debug("notifier unavailable for circuit-trip alert", exc_info=True)
+
+
 def refresh_tokens(tokens: dict) -> dict:
-    """Refresh access token using refresh token via curl."""
+    """Refresh access token using refresh token via curl.
+
+    Wrapped by a circuit breaker: after
+    DAIKIN_AUTH_CIRCUIT_THRESHOLD (default 3) consecutive failures, we
+    refuse further refresh attempts for DAIKIN_AUTH_CIRCUIT_COOLDOWN_SECONDS
+    (default 900 = 15 min). This prevents a dead refresh_token from
+    hammering the Onecta token endpoint on every heartbeat and surfaces a
+    single user-visible alert via notify_risk. The circuit clears on any
+    successful refresh.
+    """
+    # Circuit gate: if already tripped and still within cooldown, fail fast.
+    _, tripped, remaining = _auth_circuit_state()
+    if tripped:
+        raise DaikinAuthCircuitOpen(
+            f"Daikin auth circuit open (cooldown {remaining:.0f}s remaining) — re-auth required"
+        )
+
     post_data = urllib.parse.urlencode({
         "grant_type": "refresh_token",
         "refresh_token": tokens["refresh_token"],
@@ -387,14 +478,22 @@ def refresh_tokens(tokens: dict) -> dict:
         capture_output=True, text=True, timeout=15,
     )
     if result.returncode != 0:
+        _record_auth_failure(f"curl rc={result.returncode}")
         raise RuntimeError(f"curl failed: {result.stderr}")
-    new_tokens = json.loads(result.stdout)
+    try:
+        new_tokens = json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        _record_auth_failure(f"json parse: {e}")
+        raise
     if "error" in new_tokens:
+        _record_auth_failure(f"{new_tokens['error']}")
         raise RuntimeError(f"{new_tokens['error']}: {new_tokens.get('error_description', '')}")
     new_tokens["obtained_at"] = int(time.time())
     if "refresh_token" not in new_tokens:
         new_tokens["refresh_token"] = tokens["refresh_token"]
     save_tokens(new_tokens)
+    # Success — clear any prior fault state.
+    _reset_auth_circuit()
     return new_tokens
 
 

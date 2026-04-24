@@ -86,6 +86,14 @@ class Config:
     )
     # Retries for HTTP 429 from Onecta (respects Retry-After when present).
     DAIKIN_HTTP_429_MAX_RETRIES: int = int(os.getenv("DAIKIN_HTTP_429_MAX_RETRIES", "3"))
+    # Circuit breaker for dead refresh tokens. After N consecutive failures
+    # of refresh_tokens() we stop hammering the Onecta token endpoint for
+    # the cooldown window; a single critical notification fires so the user
+    # knows to re-auth. Reset on any successful refresh.
+    DAIKIN_AUTH_CIRCUIT_THRESHOLD: int = int(os.getenv("DAIKIN_AUTH_CIRCUIT_THRESHOLD", "3"))
+    DAIKIN_AUTH_CIRCUIT_COOLDOWN_SECONDS: int = int(
+        os.getenv("DAIKIN_AUTH_CIRCUIT_COOLDOWN_SECONDS", "900")
+    )
     DAIKIN_BASE_URL: str = "https://api.onecta.daikineurope.com/v1"
     # OIDC endpoints (docs: https://developer.cloud.daikineurope.com/docs/84e709f1-9d33-47e1-a93c-7f5cb8b8f12b)
     # Override via env if Daikin documents different URLs (e.g. via developer portal).
@@ -586,6 +594,28 @@ class Config:
     FOX_FORCE_REFRESH_MIN_INTERVAL_SECONDS: int = int(
         os.getenv("FOX_FORCE_REFRESH_MIN_INTERVAL_SECONDS", "60")
     )
+    # 429 retry — mirrors the Daikin pattern (see DAIKIN_HTTP_429_MAX_RETRIES).
+    # Fox rate limits more than Daikin (1440/day soft vs Daikin 200/day) but
+    # transient 429s happen on bursts (MPC re-solve + heartbeat overlap).
+    # Default 2 = at most three attempts total. Cap sleep at
+    # FOX_HTTP_429_MAX_SLEEP_SECONDS to avoid hanging (like Daikin's 86400 trap).
+    FOX_HTTP_429_MAX_RETRIES: int = int(os.getenv("FOX_HTTP_429_MAX_RETRIES", "2"))
+    FOX_HTTP_429_MAX_SLEEP_SECONDS: int = int(os.getenv("FOX_HTTP_429_MAX_SLEEP_SECONDS", "60"))
+    # Inter-write delay between scheduler / charge-period / work-mode PATCHes
+    # (mirrors TonyM1958/FoxESS-Cloud's 2s pattern). Prevents the 40257
+    # "Parameters do not meet expectations" surprise on quick-succession writes.
+    FOX_WRITE_INTER_DELAY_SECONDS: float = float(os.getenv("FOX_WRITE_INTER_DELAY_SECONDS", "2.0"))
+
+    # Retention (days) for append-only history tables so the DB doesn't grow
+    # unbounded. ADR-004 flagged daikin_telemetry specifically; the Phase 0
+    # snapshot tables share the same concern. Pruning runs at startup plus
+    # once per day via the scheduler.
+    DAIKIN_TELEMETRY_RETENTION_DAYS: int = int(os.getenv("DAIKIN_TELEMETRY_RETENTION_DAYS", "30"))
+    METEO_FORECAST_HISTORY_RETENTION_DAYS: int = int(
+        os.getenv("METEO_FORECAST_HISTORY_RETENTION_DAYS", "30")
+    )
+    LP_SNAPSHOT_RETENTION_DAYS: int = int(os.getenv("LP_SNAPSHOT_RETENTION_DAYS", "90"))
+    CONFIG_AUDIT_RETENTION_DAYS: int = int(os.getenv("CONFIG_AUDIT_RETENTION_DAYS", "365"))
 
     def foxess_client_kwargs(self) -> dict:
         """Return the right kwargs for FoxESSClient based on what's configured."""
