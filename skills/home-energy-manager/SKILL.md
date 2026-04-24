@@ -24,19 +24,40 @@ Automated user notifications (plans, alerts, briefs) are sent only through the *
 
 Use MCP tools first — they serve from cache and never burn API quota unnecessarily.
 
+### Live state (realtime / today)
+
 | Tool | What it returns |
 |------|----------------|
 | `get_daikin_status` | `is_on`, `mode`, `room_temp`, `outdoor_temp`, `lwt`, `lwt_offset`, `tank_temp`, `tank_target`, `weather_regulation`, `control_mode` (v10: `passive`/`active`) |
 | `get_soc` | Fox ESS battery `soc` %, solar power, grid power, work mode |
+| `get_cockpit_now` | **One-call aggregator** — current slot + price, SoC/solar/load/grid, Daikin temps, Fox mode, next transition, per-source freshness. Prefer this for "where are we right now" questions. |
+| `get_system_timezone` | Planner tz (`Europe/London`) + UTC plan-push tz + current `now_utc`/`now_local`. Always use this to interpret the ISO timestamps coming back from every other tool. |
 | `get_schedule` | Today's action schedule (Daikin rows + Fox V3 snapshot) |
 | `get_optimization_status` | Preset, optimizer backend, consent state, cooldown |
 | `get_optimization_plan` | Full 48-slot plan with Fox + Daikin actions |
-| `get_energy_metrics` | Daily/weekly/monthly PnL, VWAP, slippage, SoC |
+| `get_optimization_inputs` | **What the next LP solve will see** — prices + weather (half-hour interpolated), base-load profile, initial state with per-field source, thresholds, config snapshot. Useful before calling `propose_optimization_plan` to predict the outcome. |
 | `get_daily_brief` | Morning report on demand |
 | `get_battery_forecast` | SoC + daily target snapshot |
 | `get_weather_context` | 48h forecast + live Daikin temps |
-| `get_action_log` | Audit trail of executed hardware actions |
-| `get_optimizer_log` | Optimizer run history |
+| `get_energy_metrics` | Daily/weekly/monthly PnL, VWAP, slippage, SoC |
+
+### Historical navigation (hours / days / weeks / months)
+
+Use these to compare periods, investigate a past decision, or build context before making a recommendation.
+
+| Tool | What it returns |
+|------|----------------|
+| `get_cockpit_at(when)` | **Historical replay** — the cockpit frozen at an ISO-UTC moment. Joins `lp_solution_snapshot` + `execution_log` + `agile_rates` so you see both what the LP decided AND what actually happened. E.g. `get_cockpit_at("2026-04-23T18:00:00Z")`. |
+| `find_lp_run_for_time(when_utc)` | Which LP run was active at a given moment. Returns `run_id` → pair with `get_lp_solution(run_id)`. |
+| `get_lp_solution(run_id)` | Per-slot decision vector (import/export/charge/discharge/dhw/space kWh, SoC trajectory, tank+indoor+outdoor temps) + inputs for a specific solve. |
+| `get_meteo_forecast_history(fetch_at_utc)` | How a forecast evolved across LP runs — every slot's value as it was when each fetch happened (not just the latest). |
+| `get_fox_energy_range(start, end)` | Daily Fox totals across a date range: solar / load / import / export / charge / discharge. Use for weekly/monthly trend comparisons. |
+| `get_attribution_day(date)` | Solar attribution donut: what % of solar went to self-use / battery / export on a given day (defaults to yesterday). |
+| `get_daikin_telemetry_history(limit)` | Recent Daikin readings tagged `live` (from Onecta) vs `estimate` (physics fallback). Useful for calibration + estimator sanity. |
+| `get_action_log` | Full audit trail of executed hardware actions. |
+| `get_optimizer_log` | Optimizer run history (per-run summary — pair with `get_lp_solution` for drill-down). |
+| `get_config_audit(key?)` | Runtime-settings change log — explains why a past plan looked the way it did if a knob has moved since. |
+| `get_recent_triggers(limit?)` | **What's just fired** — the cockpit's "Recent" strip as JSON. Includes `actor`, `started_at`, `duration_ms`, `result`. Filters out heartbeat + notification noise by default. |
 
 ---
 
@@ -128,6 +149,8 @@ When passive: tell the user that Daikin will NOT respond to any heat-pump-relate
 
 ## Manual hardware changes
 
+Manual MCP writes (`set_inverter_mode`, `set_daikin_tank_temperature`, `propose_optimization_plan`) are timed end-to-end and persisted to `action_log` with `started_at`, `completed_at`, `duration_ms`, `actor="mcp"`. The cockpit's "Recent" strip + `get_recent_triggers` surface them within ~1 s of completion, including failure pills with the error message in the tooltip — so after a write, you can confirm it landed by calling `get_recent_triggers(limit=3)`.
+
 ### Before writing anything
 
 Always check `get_daikin_status` first.
@@ -198,6 +221,17 @@ Never pass `confirmed=True` silently — only after the user has explicitly ackn
 | `test_notification(alert_type)` | Queue a test hook delivery (`OPENCLAW_HOOKS_*` must be set) |
 
 Alert types: `morning_report`, `strategy_update`, `risk_alert`, `action_confirmation`, `critical_error`, `plan_proposed`, `cheap_window_start`, `peak_window_start`, `daily_pnl`.
+
+### When each alert fires
+
+- `plan_proposed` — new LP plan produced (either auto-applied or awaiting approval). Includes `plan_id` for follow-up `confirm_plan` / `reject_plan`.
+- `action_confirmation` — **fires on plan approve + reject** (both the canonical `confirm_plan`/`reject_plan` and the aliased `approve_optimization_plan`/`reject_optimization_plan`). Use this to know a user decision landed.
+- `risk_alert` — safety issues: Daikin auth circuit tripped (refresh_token likely dead; run `python -m src.daikin.auth` to re-auth), low SoC warnings, quota exhaustion.
+- `cheap_window_start` / `peak_window_start` — LP classified the next slot as cheap or peak; fires once at slot start.
+- `morning_report` — nightly summary on the daily brief cron.
+- `daily_pnl` — end-of-day PnL once execution_log is complete.
+- `strategy_update` — optimizer changed its mind about a slot kind after a re-solve.
+- `critical_error` — unrecoverable: config corrupt, DB locked, migration failure.
 
 ---
 
