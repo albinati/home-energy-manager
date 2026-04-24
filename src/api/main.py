@@ -234,6 +234,18 @@ async def web_cockpit(request: Request):
     )
 
 
+@app.get("/history", response_class=HTMLResponse)
+async def web_history(request: Request):
+    """Phase 4: History replay — same hero-style layout as Cockpit but frozen
+    at a chosen past moment. Reads from the LP snapshot tables (Phase 0) so
+    every LP run's inputs, per-slot decision, and plan-vs-actual delta can be
+    replayed for any moment we have data for.
+    """
+    return templates.TemplateResponse(
+        request, "history.html", {"active_page": "history", **_layout_context()}
+    )
+
+
 @app.get("/forecast", response_class=HTMLResponse)
 async def web_forecast(request: Request):
     """Phase 3: dedicated Forecast tab showing everything the next LP solve
@@ -759,6 +771,123 @@ async def cockpit_now():
             "energy_strategy_mode": config.ENERGY_STRATEGY_MODE,
         },
         "plan_date": plan_block["plan_date"],
+    }
+
+
+@app.get("/api/v1/cockpit/at")
+async def cockpit_at(when: str):
+    """Reconstruct the same-shape payload as ``/cockpit/now`` but frozen at a
+    past moment. Reads exclusively from SQLite snapshots (Phase 0) —
+    ``execution_log`` for realised state, ``lp_solution_snapshot`` for the
+    LP's per-slot decision at the time, ``lp_inputs_snapshot`` for its
+    inputs, ``agile_rates`` for price-at-time, and ``meteo_forecast_history``
+    for the forecast version the LP run actually saw.
+    """
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo
+
+    try:
+        # Accept both 2026-04-24T14:00:00Z and 2026-04-24T14:00:00+00:00.
+        w = _dt.fromisoformat(when.replace("Z", "+00:00"))
+        if w.tzinfo is None:
+            w = w.replace(tzinfo=_UTC)
+    except Exception:
+        raise HTTPException(status_code=400, detail=f"invalid ISO datetime: {when!r}")
+    when_iso = w.isoformat()
+
+    tz_name = config.BULLETPROOF_TIMEZONE or "Europe/London"
+
+    # --- Pick the LP run that was active at `when` ---------------------------
+    run_id = db.find_run_for_time(when_iso)
+    lp_inputs = db.get_lp_inputs(run_id) if run_id is not None else None
+    lp_slots = db.get_lp_solution_slots(run_id) if run_id is not None else []
+
+    # --- Price at the moment, from agile_rates -------------------------------
+    tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
+    export_tariff = (config.OCTOPUS_EXPORT_TARIFF_CODE or "").strip()
+    import_rows = []
+    export_rows = []
+    if tariff:
+        from datetime import timedelta as _td
+        import_rows = db.get_rates_for_period(tariff, w - _td(hours=1), w + _td(hours=1))
+    if export_tariff:
+        from datetime import timedelta as _td
+        export_rows = db.get_rates_for_period(export_tariff, w - _td(hours=1), w + _td(hours=1))
+
+    def _price_at(rows: list) -> tuple[float | None, str | None, str | None]:
+        iso_w = when_iso.replace("+00:00", "Z")
+        for r in rows:
+            if r["valid_from"] <= iso_w < r["valid_to"]:
+                return float(r["value_inc_vat"]), r["valid_from"], r["valid_to"]
+        return None, None, None
+
+    price_i, slot_from, slot_to = _price_at(import_rows)
+    price_e, _, _ = _price_at(export_rows)
+
+    # --- Realised state from execution_log around `when` ---------------------
+    realised: dict[str, Any] = {}
+    try:
+        conn = db.get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT * FROM execution_log
+                   WHERE timestamp <= ?
+                   ORDER BY timestamp DESC LIMIT 1""",
+                (when_iso,),
+            )
+            row = cur.fetchone()
+            realised = dict(row) if row else {}
+        finally:
+            conn.close()
+    except Exception:
+        realised = {}
+
+    state_block = {
+        "soc_pct": realised.get("soc_percent"),
+        "soc_kwh": round(float(realised["soc_percent"]) / 100.0 * float(config.BATTERY_CAPACITY_KWH), 3)
+            if realised.get("soc_percent") is not None else None,
+        "solar_kw": None,       # Not tracked per-slot in execution_log
+        "load_kw": realised.get("consumption_kwh") is not None
+            and round(float(realised["consumption_kwh"]) / 0.5, 3) or None,
+        "grid_kw": None,
+        "battery_kw": None,
+        "fox_mode": realised.get("fox_mode"),
+        "tank_c": realised.get("daikin_tank_temp"),
+        "indoor_c": realised.get("daikin_room_temp"),
+        "outdoor_c": realised.get("daikin_outdoor_temp"),
+        "lwt_c": realised.get("daikin_lwt"),
+        "daikin_mode": None,
+    }
+
+    # --- LP plan for the slot containing `when` ------------------------------
+    planned_slot: dict[str, Any] | None = None
+    if lp_slots and slot_from:
+        iso_from = slot_from.replace("+00:00", "Z")
+        for s in lp_slots:
+            if s.get("slot_time_utc") in (iso_from, slot_from):
+                planned_slot = dict(s)
+                break
+
+    return {
+        "when_utc": when_iso.replace("+00:00", "Z"),
+        "planner_tz": tz_name,
+        "source": {
+            "run_id": run_id,
+            "lp_run_at_utc": (lp_inputs or {}).get("run_at_utc"),
+            "execution_log_timestamp": realised.get("timestamp"),
+        },
+        "current_slot": {
+            "t_utc": slot_from,
+            "t_end_utc": slot_to,
+            "price_import_p": price_i,
+            "price_export_p": price_e,
+            "fox_mode": realised.get("fox_mode"),
+        },
+        "state": state_block,
+        "planned_slot": planned_slot,  # LP's decision for that slot, or None
+        "lp_inputs": lp_inputs,        # Full inputs row at solve time, or None
+        "slot_kind": realised.get("slot_kind"),
     }
 
 

@@ -393,6 +393,25 @@ a { color: inherit; text-decoration: none; }
 }
 .fc-slot-table td.num, .fc-slot-table th.num { text-align: right; }
 
+/* -----------------------------------------------------------------------
+ * Phase 4: History page
+ * ----------------------------------------------------------------------- */
+.history-picker {
+    background: var(--bg-card-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.3rem 0.5rem;
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
+}
+.history-source {
+    font-size: 0.74rem;
+    color: var(--text-dim);
+    font-family: monospace;
+    word-break: break-all;
+}
+
 /* Layout */
 .page {
     max-width: 960px;
