@@ -258,32 +258,46 @@
   async function wrapAction(opts) {
     const method = opts.method || 'POST';
     const body = opts.body || {};
+    // Generalised busy state — `is-busy` fires on EVERY wrapAction flow so
+    // users always see "something is happening" during simulate + apply.
+    // CSS hooks on body.is-busy add a thin top progress bar + cursor: progress.
+    // Separately, `is-optimizing` fires only when the action is an LP propose
+    // (so the Plan freshness chip can pulse distinctively vs a generic write).
+    const isOptimise = (opts.simulateUrl || "").includes("optimization/propose")
+                    || (opts.simulateUrl || "").includes("workbench/simulate");
+    document.body.classList.add('is-busy');
+    if (isOptimise) document.body.classList.add('is-optimizing');
     let diff;
     try {
-      diff = await jsonFetch(opts.simulateUrl, { method, body });
-    } catch (e) {
-      toast(`Simulate failed: ${e.message}`, 'bad');
-      return { applied: false };
-    }
-    if (!diff || !diff.simulation_id) {
-      toast('Simulate returned no diff — refusing to apply', 'bad');
-      return { applied: false };
-    }
-    const confirmed = await Modal.show(diff);
-    if (!confirmed) return { applied: false };
+      try {
+        diff = await jsonFetch(opts.simulateUrl, { method, body });
+      } catch (e) {
+        toast(`Simulate failed: ${e.message}`, 'bad');
+        return { applied: false };
+      }
+      if (!diff || !diff.simulation_id) {
+        toast('Simulate returned no diff — refusing to apply', 'bad');
+        return { applied: false };
+      }
+      const confirmed = await Modal.show(diff);
+      if (!confirmed) return { applied: false };
 
-    try {
-      const response = await jsonFetch(opts.applyUrl, {
-        method,
-        body,
-        headers: { 'X-Simulation-Id': diff.simulation_id },
-      });
-      toast(`Applied: ${diff.action || 'change'}`, 'ok');
-      return { applied: true, response };
-    } catch (e) {
-      const status = e.status || '?';
-      toast(`Apply failed (${status}): ${e.message}`, 'bad');
-      return { applied: false };
+      try {
+        const response = await jsonFetch(opts.applyUrl, {
+          method,
+          body,
+          headers: { 'X-Simulation-Id': diff.simulation_id },
+        });
+        toast(`Applied: ${diff.action || 'change'}`, 'ok');
+        return { applied: true, response };
+      } catch (e) {
+        const status = e.status || '?';
+        toast(`Apply failed (${status}): ${e.message}`, 'bad');
+        return { applied: false };
+      }
+    } finally {
+      document.body.classList.remove('is-busy');
+      document.body.classList.remove('is-optimizing');
     }
   }
 
