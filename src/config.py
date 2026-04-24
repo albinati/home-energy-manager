@@ -420,6 +420,14 @@ class Config:
     REPLAN_SAFETY_MARGIN_MINUTES: int = int(os.getenv("REPLAN_SAFETY_MARGIN_MINUTES", "15"))
     DYNAMIC_REPLAN_MIN_LEAD_MINUTES: int = int(os.getenv("DYNAMIC_REPLAN_MIN_LEAD_MINUTES", "120"))
 
+    # Drop trivial SelfUse groups (work_mode=SelfUse AND min_soc_on_grid=MIN_SOC_RESERVE_PERCENT)
+    # before uploading to the Fox scheduler. The inverter's "Remaining Time Work Mode" is
+    # Self-use (confirmed in Fox app screen), so any time window with no scheduler group
+    # naturally falls back to that — sending an explicit SelfUse group with the global floor
+    # is wasted budget against the 8-group hardware cap. Setting this False reverts to the
+    # original behaviour (every LP window becomes a Fox group, including SelfUse gaps).
+    FOX_SKIP_TRIVIAL_SELFUSE_GROUPS: bool = os.getenv("FOX_SKIP_TRIVIAL_SELFUSE_GROUPS", "true").lower() in ("1", "true", "yes")
+
     @property
     def DAIKIN_COP_CURVE(self) -> list[tuple[float, float]]:
         return parse_cop_curve_csv(self.DAIKIN_COP_CURVE_STR)
