@@ -42,6 +42,14 @@ class LpInitialState:
     soc_kwh: float
     tank_temp_c: float
     indoor_temp_c: float
+    # Provenance strings ("fox_realtime_cache", "db_realtime_snapshot",
+    # "daikin_live", "daikin_cache", "daikin_estimate", "execution_log",
+    # "default"). Persisted to lp_inputs_snapshot so the History view can show
+    # "SoC came from Fox live cache (1m ago)" etc. Defaults preserve
+    # backwards-compat for callers that construct LpInitialState directly.
+    soc_source: str = "unknown"
+    tank_source: str = "unknown"
+    indoor_source: str = "unknown"
 
 
 @dataclass

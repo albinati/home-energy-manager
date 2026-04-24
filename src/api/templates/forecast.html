@@ -1,0 +1,96 @@
+{% extends "_layout.html" %}
+{% block title %}Forecast · Home Energy{% endblock %}
+{% block content %}
+
+<section class="card">
+    <h2 class="card-title">
+        LP inputs
+        <span class="card-actions">
+            <button class="btn btn-sm btn-secondary" id="btnForecastReload" title="Reload the cached inputs (no cloud calls)">Reload</button>
+            <button class="btn btn-sm btn-primary" id="btnForecastReplan" title="Fetch fresh Octopus + weather and re-solve">
+                Refresh data &amp; re-plan
+            </button>
+        </span>
+    </h2>
+    <p class="text-mute" style="font-size:0.78rem;margin:0 0 0.75rem 0;">
+        Everything the next LP solve will see, read from caches and the
+        <code>meteo_forecast</code> / <code>agile_rates</code> tables. No cloud calls are
+        triggered by opening this page.
+    </p>
+    <div class="forecast-summary" id="forecastSummary">
+        <div class="fcs-kpi"><span class="fcs-k">Horizon</span><span class="fcs-v" id="fcHorizon">—</span></div>
+        <div class="fcs-kpi"><span class="fcs-k">Planner tz</span><span class="fcs-v" id="fcTz">—</span></div>
+        <div class="fcs-kpi"><span class="fcs-k">Tomorrow rates</span><span class="fcs-v" id="fcTomorrow">—</span></div>
+        <div class="fcs-kpi"><span class="fcs-k">Cheap &lt;</span><span class="fcs-v" id="fcCheap">—</span></div>
+        <div class="fcs-kpi"><span class="fcs-k">Peak &gt;</span><span class="fcs-v" id="fcPeak">—</span></div>
+        <div class="fcs-kpi"><span class="fcs-k">Micro-climate Δ</span><span class="fcs-v" id="fcMicro">—</span></div>
+    </div>
+</section>
+
+<section class="card">
+    <h3 class="card-title">Initial state (what the LP reads at solve time)</h3>
+    <table class="fc-kv-table">
+        <tbody>
+            <tr><th>SoC</th><td id="fcInitSoc">—</td><td class="text-dim" id="fcInitSocSrc">—</td></tr>
+            <tr><th>Tank</th><td id="fcInitTank">—</td><td class="text-dim" id="fcInitTankSrc">—</td></tr>
+            <tr><th>Indoor</th><td id="fcInitIndoor">—</td><td class="text-dim" id="fcInitIndoorSrc">—</td></tr>
+        </tbody>
+    </table>
+    <p class="text-mute" style="font-size:0.72rem;margin:0.5rem 0 0 0;">
+        Source labels: <code>fox_realtime_cache</code> / <code>db_realtime_snapshot</code> (SoC);
+        <code>daikin_live</code> / <code>daikin_cache</code> / <code>daikin_estimate</code> (tank &amp; indoor);
+        <code>default</code> means config fallback.
+    </p>
+</section>
+
+<section class="card">
+    <h3 class="card-title">Config snapshot</h3>
+    <div class="fc-chip-row" id="fcConfigChips">—</div>
+    <p class="text-mute" style="font-size:0.72rem;margin:0.5rem 0 0 0;">
+        These are the knobs the LP will read on its next solve. Historical values live in the
+        <code>config_audit</code> table (tuning changes are logged there).
+    </p>
+</section>
+
+<section class="card">
+    <h3 class="card-title">Per-slot inputs (next horizon)</h3>
+    <div class="fc-spark-grid">
+        <div>
+            <div class="fc-spark-label">Import price (p/kWh)</div>
+            <div class="fc-spark" id="fcSparkPrice"></div>
+        </div>
+        <div>
+            <div class="fc-spark-label">Outdoor temp (°C)</div>
+            <div class="fc-spark" id="fcSparkTemp"></div>
+        </div>
+        <div>
+            <div class="fc-spark-label">Solar W/m²</div>
+            <div class="fc-spark" id="fcSparkSolar"></div>
+        </div>
+        <div>
+            <div class="fc-spark-label">Base load (kWh/slot)</div>
+            <div class="fc-spark" id="fcSparkLoad"></div>
+        </div>
+    </div>
+    <div class="fc-slot-table-wrap">
+        <table class="fc-slot-table" id="fcSlotTable">
+            <thead>
+                <tr>
+                    <th>Time</th>
+                    <th class="num">Import p</th>
+                    <th class="num">Export p</th>
+                    <th class="num">Temp °C</th>
+                    <th class="num">Solar W/m²</th>
+                    <th class="num">Base load kWh</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </div>
+</section>
+
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/forecast.js?v={{ static_v('js/forecast.js') }}"></script>
+{% endblock %}

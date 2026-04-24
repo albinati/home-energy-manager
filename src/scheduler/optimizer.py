@@ -1,6 +1,7 @@
 """Target VWAP engine, Fox Scheduler V3 builder, Daikin action_schedule writer."""
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -876,6 +877,99 @@ def _run_optimizer_heuristic(fox: FoxESSClient | None, daikin: Any | None = None
     }
 
 
+def _persist_lp_snapshots(
+    *,
+    run_id: int,
+    run_at_iso: str,
+    plan_date: str,
+    plan: Any,  # LpPlan — typed-as-Any to avoid an import cycle at module load
+    initial: Any,  # LpInitialState
+    base_load: list[float],
+    micro_climate_offset: float,
+) -> None:
+    """Build and persist the inputs + per-slot rows for this LP run.
+
+    The shape of ``lp_inputs_snapshot`` + ``lp_solution_snapshot`` is the
+    cockpit History replay source of truth. Config fields captured here are
+    the LP-relevant tunables; other knobs can be recovered from
+    ``config_audit`` joined by timestamp if needed.
+    """
+    # Config snapshot — everything the LP meaningfully conditioned on. Keep
+    # compact; dashboards read this directly from the JSON.
+    cfg_snap = {
+        "LP_HORIZON_HOURS": int(config.LP_HORIZON_HOURS),
+        "BATTERY_CAPACITY_KWH": float(config.BATTERY_CAPACITY_KWH),
+        "MIN_SOC_RESERVE_PERCENT": float(config.MIN_SOC_RESERVE_PERCENT),
+        "BATTERY_RT_EFFICIENCY": float(config.BATTERY_RT_EFFICIENCY),
+        "MAX_INVERTER_KW": float(config.MAX_INVERTER_KW),
+        "DAIKIN_MAX_HP_KW": float(config.DAIKIN_MAX_HP_KW),
+        "DHW_TANK_LITRES": float(config.DHW_TANK_LITRES),
+        "DHW_TANK_UA_W_PER_K": float(config.DHW_TANK_UA_W_PER_K),
+        "BUILDING_UA_W_PER_K": float(config.BUILDING_UA_W_PER_K),
+        "BUILDING_THERMAL_MASS_KWH_PER_K": float(config.BUILDING_THERMAL_MASS_KWH_PER_K),
+        "DHW_TEMP_COMFORT_C": float(config.DHW_TEMP_COMFORT_C),
+        "DHW_TEMP_MAX_C": float(config.DHW_TEMP_MAX_C),
+        "LP_CYCLE_PENALTY_PENCE_PER_KWH": float(config.LP_CYCLE_PENALTY_PENCE_PER_KWH),
+        "LP_COMFORT_SLACK_PENCE_PER_DEGC_SLOT": float(config.LP_COMFORT_SLACK_PENCE_PER_DEGC_SLOT),
+        "LP_INVERTER_STRESS_COST_PENCE": float(config.LP_INVERTER_STRESS_COST_PENCE),
+        "LP_PRICE_QUANTIZE_PENCE": float(getattr(config, "LP_PRICE_QUANTIZE_PENCE", 0.0)),
+        "LP_BATTERY_TV_PENALTY_PENCE_PER_KWH_DELTA": float(
+            getattr(config, "LP_BATTERY_TV_PENALTY_PENCE_PER_KWH_DELTA", 0.0)
+        ),
+        "LP_IMPORT_TV_PENALTY_PENCE_PER_KWH_DELTA": float(
+            getattr(config, "LP_IMPORT_TV_PENALTY_PENCE_PER_KWH_DELTA", 0.0)
+        ),
+    }
+
+    inputs_row = {
+        "run_at_utc": run_at_iso,
+        "plan_date": plan_date,
+        "horizon_hours": int(config.LP_HORIZON_HOURS),
+        "soc_initial_kwh": float(initial.soc_kwh),
+        "tank_initial_c": float(initial.tank_temp_c),
+        "indoor_initial_c": float(initial.indoor_temp_c),
+        "soc_source": getattr(initial, "soc_source", "unknown"),
+        "tank_source": getattr(initial, "tank_source", "unknown"),
+        "indoor_source": getattr(initial, "indoor_source", "unknown"),
+        "base_load_json": json.dumps([round(float(x), 4) for x in base_load]),
+        "micro_climate_offset_c": float(micro_climate_offset or 0.0),
+        "config_snapshot_json": json.dumps(cfg_snap),
+        "price_quantize_p": float(getattr(config, "LP_PRICE_QUANTIZE_PENCE", 0.0)),
+        "peak_threshold_p": float(plan.peak_threshold_pence),
+        "cheap_threshold_p": float(plan.cheap_threshold_pence),
+        "daikin_control_mode": str(config.DAIKIN_CONTROL_MODE),
+        "optimization_preset": str(config.OPTIMIZATION_PRESET),
+        "energy_strategy_mode": str(config.ENERGY_STRATEGY_MODE),
+    }
+
+    # tank_temp_c, indoor_temp_c, soc_kwh are length N+1 (include initial);
+    # we persist the end-of-slot state (index i+1) to match how slot results
+    # are naturally interpreted. lwt_offset_c / temp_outdoor_c are length N.
+    n = len(plan.slot_starts_utc)
+    solution_rows: list[dict[str, Any]] = []
+    for i in range(n):
+        solution_rows.append({
+            "slot_index": i,
+            "slot_time_utc": plan.slot_starts_utc[i].isoformat(),
+            "price_p": float(plan.price_pence[i]) if i < len(plan.price_pence) else None,
+            "import_kwh": float(plan.import_kwh[i]) if i < len(plan.import_kwh) else None,
+            "export_kwh": float(plan.export_kwh[i]) if i < len(plan.export_kwh) else None,
+            "charge_kwh": float(plan.battery_charge_kwh[i]) if i < len(plan.battery_charge_kwh) else None,
+            "discharge_kwh": float(plan.battery_discharge_kwh[i]) if i < len(plan.battery_discharge_kwh) else None,
+            "pv_use_kwh": float(plan.pv_use_kwh[i]) if i < len(plan.pv_use_kwh) else None,
+            "pv_curtail_kwh": float(plan.pv_curtail_kwh[i]) if i < len(plan.pv_curtail_kwh) else None,
+            "dhw_kwh": float(plan.dhw_electric_kwh[i]) if i < len(plan.dhw_electric_kwh) else None,
+            "space_kwh": float(plan.space_electric_kwh[i]) if i < len(plan.space_electric_kwh) else None,
+            "soc_kwh": float(plan.soc_kwh[i + 1]) if (i + 1) < len(plan.soc_kwh) else None,
+            "tank_temp_c": float(plan.tank_temp_c[i + 1]) if (i + 1) < len(plan.tank_temp_c) else None,
+            "indoor_temp_c": float(plan.indoor_temp_c[i + 1]) if (i + 1) < len(plan.indoor_temp_c) else None,
+            "outdoor_temp_c": float(plan.temp_outdoor_c[i]) if i < len(plan.temp_outdoor_c) else None,
+            "lwt_offset_c": float(plan.lwt_offset_c[i]) if i < len(plan.lwt_offset_c) else None,
+        })
+
+    db.save_lp_snapshots(run_id=int(run_id), inputs_row=inputs_row, solution_rows=solution_rows)
+
+
 def _run_optimizer_lp(fox: FoxESSClient | None, daikin: Any | None = None) -> dict[str, Any]:
     """PuLP MILP horizon planner (V8). Falls back to heuristic if solve is not optimal."""
     from .lp_dispatch import (
@@ -920,16 +1014,22 @@ def _run_optimizer_lp(fox: FoxESSClient | None, daikin: Any | None = None) -> di
     # Persist forecast to DB so heartbeat can read real Open-Meteo temp (vs Daikin sensor)
     if forecast:
         _today = datetime.now(UTC).date().isoformat()
-        db.save_meteo_forecast(
-            [
-                {
-                    "slot_time": f.time_utc.isoformat(),
-                    "temp_c": f.temperature_c,
-                    "solar_w_m2": f.shortwave_radiation_wm2,
-                }
-                for f in forecast
-            ],
-            _today,
+        forecast_rows = [
+            {
+                "slot_time": f.time_utc.isoformat(),
+                "temp_c": f.temperature_c,
+                "solar_w_m2": f.shortwave_radiation_wm2,
+            }
+            for f in forecast
+        ]
+        db.save_meteo_forecast(forecast_rows, _today)
+        # V11: append-only fetch history keyed by UTC fetch timestamp so a
+        # later LP run (or the History view) can see which forecast was active
+        # at any past moment, even after newer fetches have overwritten the
+        # latest-per-slot table.
+        db.save_meteo_forecast_history(
+            datetime.now(UTC).isoformat(),
+            forecast_rows,
         )
     # PV calibration: Fox actual vs Open-Meteo archive to correct systematic bias
     from ..weather import compute_pv_calibration_factor
@@ -1011,9 +1111,10 @@ def _run_optimizer_lp(fox: FoxESSClient | None, daikin: Any | None = None) -> di
     fox_ok = upload_fox_if_operational(fox, groups)
     daikin_n = write_daikin_from_lp_plan(plan_date, plan, forecast)
 
-    db.log_optimizer_run(
+    run_at_iso = datetime.now(UTC).isoformat()
+    run_id = db.log_optimizer_run(
         {
-            "run_at": datetime.now(UTC).isoformat(),
+            "run_at": run_at_iso,
             "rates_count": len(slots),
             "cheap_slots": counts.get("cheap", 0),
             "peak_slots": counts.get("peak", 0) + counts.get("peak_export", 0),
@@ -1027,6 +1128,22 @@ def _run_optimizer_lp(fox: FoxESSClient | None, daikin: Any | None = None) -> di
             "daikin_actions_count": daikin_n,
         }
     )
+
+    # V11: durable per-slot snapshot so the History view can replay "what the
+    # LP decided at this moment". Failures here must not bring down the solve
+    # — wrap defensively.
+    try:
+        _persist_lp_snapshots(
+            run_id=run_id,
+            run_at_iso=run_at_iso,
+            plan_date=plan_date,
+            plan=plan,
+            initial=initial,
+            base_load=base_load,
+            micro_climate_offset=micro_climate_offset,
+        )
+    except Exception as e:
+        logger.warning("LP snapshot persistence failed (non-fatal): %s", e)
 
     _write_plan_consent(plan_date, strategy)
 

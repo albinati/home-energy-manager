@@ -1,0 +1,96 @@
+{% extends "_layout.html" %}
+{% block title %}History · Home Energy{% endblock %}
+{% block content %}
+
+<section class="card">
+    <h2 class="card-title">
+        Replay a past moment
+        <span class="card-actions">
+            <input type="datetime-local" id="historyWhen" class="history-picker" />
+            <button class="btn btn-sm btn-secondary" id="btnHistoryJump" title="Replay the snapshot at the chosen moment">Replay</button>
+            <button class="btn btn-sm btn-secondary" id="btnHistoryNow" title="Jump to the latest run">Latest run</button>
+        </span>
+    </h2>
+    <p class="text-mute" style="font-size:0.78rem;margin:0 0 0.75rem 0;">
+        Reads from the LP snapshot tables — the same layout as the Cockpit NOW panel, frozen at the chosen moment.
+        Source labels below show exactly which <code>optimizer_log</code> run and which <code>execution_log</code>
+        row the data came from.
+    </p>
+    <div class="history-source" id="historySource">—</div>
+</section>
+
+<section class="card">
+    <h3 class="card-title">State at that moment</h3>
+    <div class="hero-state-grid">
+        <div class="hero-kpi"><span class="hero-kpi-label">SoC</span><span class="hero-kpi-value" id="hSoc">—</span></div>
+        <div class="hero-kpi"><span class="hero-kpi-label">Load</span><span class="hero-kpi-value" id="hLoad">—</span></div>
+        <div class="hero-kpi"><span class="hero-kpi-label">Fox mode</span><span class="hero-kpi-value" id="hFoxMode">—</span></div>
+        <div class="hero-kpi"><span class="hero-kpi-label">Tank</span><span class="hero-kpi-value" id="hTank">—</span></div>
+        <div class="hero-kpi"><span class="hero-kpi-label">Indoor</span><span class="hero-kpi-value" id="hIndoor">—</span></div>
+        <div class="hero-kpi"><span class="hero-kpi-label">Outdoor</span><span class="hero-kpi-value" id="hOutdoor">—</span></div>
+        <div class="hero-kpi"><span class="hero-kpi-label">LWT</span><span class="hero-kpi-value" id="hLwt">—</span></div>
+        <div class="hero-kpi"><span class="hero-kpi-label">Slot kind</span><span class="hero-kpi-value" id="hKind">—</span></div>
+        <div class="hero-kpi"><span class="hero-kpi-label">Import p</span><span class="hero-kpi-value" id="hPriceImp">—</span></div>
+        <div class="hero-kpi"><span class="hero-kpi-label">Export p</span><span class="hero-kpi-value" id="hPriceExp">—</span></div>
+    </div>
+</section>
+
+<section class="card">
+    <h3 class="card-title">Plan vs Actual (this slot)</h3>
+    <table class="fc-kv-table" id="histPlanActual">
+        <thead>
+            <tr><th>Metric</th><th>Plan</th><th>Actual</th></tr>
+        </thead>
+        <tbody>
+            <tr><th>Import kWh</th><td id="paPlanImport">—</td><td id="paActImport">—</td></tr>
+            <tr><th>Battery charge kWh</th><td id="paPlanChg">—</td><td class="text-dim">—</td></tr>
+            <tr><th>Battery discharge kWh</th><td id="paPlanDis">—</td><td class="text-dim">—</td></tr>
+            <tr><th>DHW kWh</th><td id="paPlanDhw">—</td><td class="text-dim">—</td></tr>
+            <tr><th>Space heat kWh</th><td id="paPlanSpace">—</td><td class="text-dim">—</td></tr>
+            <tr><th>Tank end °C</th><td id="paPlanTank">—</td><td id="paActTank">—</td></tr>
+            <tr><th>Indoor end °C</th><td id="paPlanIndoor">—</td><td id="paActIndoor">—</td></tr>
+            <tr><th>SoC end kWh</th><td id="paPlanSoc">—</td><td id="paActSoc">—</td></tr>
+        </tbody>
+    </table>
+    <p class="text-mute" style="font-size:0.72rem;margin:0.5rem 0 0 0;">
+        Plan columns come from <code>lp_solution_snapshot</code> (the LP's per-slot decision at solve time).
+        Actual comes from <code>execution_log</code>. A row of dashes means we have no actual telemetry
+        for that metric (e.g. per-slot battery charge isn't logged yet).
+    </p>
+</section>
+
+<section class="card">
+    <h3 class="card-title">Solar attribution (day of replay)</h3>
+    <div class="attribution-block" id="attributionBlock">
+        <div class="attribution-donut" id="attributionDonut" aria-hidden="true"></div>
+        <div class="attribution-legend" id="attributionLegend">—</div>
+    </div>
+    <p class="text-mute" style="font-size:0.72rem;margin:0.5rem 0 0 0;">
+        Where today's solar went: self-used, stored in battery, or exported. Historical-only — today's running totals appear once the nightly Fox rollup fires.
+    </p>
+</section>
+
+<section class="card">
+    <h3 class="card-title">LP inputs at solve time</h3>
+    <table class="fc-kv-table">
+        <tbody>
+            <tr><th>Run at</th><td id="liRunAt">—</td></tr>
+            <tr><th>Plan date</th><td id="liPlanDate">—</td></tr>
+            <tr><th>Horizon</th><td id="liHorizon">—</td></tr>
+            <tr><th>Initial SoC</th><td id="liSoc">—</td></tr>
+            <tr><th>Initial tank</th><td id="liTank">—</td></tr>
+            <tr><th>Initial indoor</th><td id="liIndoor">—</td></tr>
+            <tr><th>Micro-climate Δ</th><td id="liMicro">—</td></tr>
+            <tr><th>Cheap threshold</th><td id="liCheap">—</td></tr>
+            <tr><th>Peak threshold</th><td id="liPeak">—</td></tr>
+            <tr><th>Daikin mode</th><td id="liDkMode">—</td></tr>
+            <tr><th>Preset</th><td id="liPreset">—</td></tr>
+        </tbody>
+    </table>
+</section>
+
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/history.js?v={{ static_v('js/history.js') }}"></script>
+{% endblock %}

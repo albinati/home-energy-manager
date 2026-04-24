@@ -53,6 +53,8 @@ def read_lp_initial_state(
 
     tank = float(config.DHW_TEMP_NORMAL_C)
     indoor = float(config.INDOOR_SETPOINT_C)
+    tank_source = "default"
+    indoor_source = "default"
 
     try:
         # #55 — use the cached/estimator wrapper so LP still seeds sensibly
@@ -83,10 +85,13 @@ def read_lp_initial_state(
                 ),
                 "source": result.source,
             }
+        src = str(state.get("source") or "daikin_unknown")
         if state.get("tank_temp_c") is not None:
             tank = float(state["tank_temp_c"])
+            tank_source = src
         if state.get("indoor_temp_c") is not None:
             indoor = float(state["indoor_temp_c"])
+            indoor_source = src
         logger.debug(
             "LP Daikin seed: tank=%.1f°C indoor=%.1f°C source=%s",
             tank,
@@ -103,7 +108,15 @@ def read_lp_initial_state(
             r = rows[0].get("daikin_room_temp")
             if r is not None:
                 indoor = float(r)
+                indoor_source = "execution_log"
     except Exception:
         pass
 
-    return LpInitialState(soc_kwh=soc_kwh, tank_temp_c=tank, indoor_temp_c=indoor)
+    return LpInitialState(
+        soc_kwh=soc_kwh,
+        tank_temp_c=tank,
+        indoor_temp_c=indoor,
+        soc_source=soc_source,
+        tank_source=tank_source,
+        indoor_source=indoor_source,
+    )

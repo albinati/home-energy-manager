@@ -98,8 +98,11 @@
       sumRes    += s.cost_residual_p || 0;
       sumCost   += s.cost_realised_p || 0;
       sumSvt    += s.cost_svt_p || 0;
-      const d = new Date(s.slot_utc);
-      const lbl = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+      // Format in the planner timezone, not browser local — otherwise a
+      // VPN/travel user sees times shifted from what the LP actually planned.
+      const lbl = (window.HEM && window.HEM.fmtSlotTime)
+        ? window.HEM.fmtSlotTime(s.slot_utc)
+        : (() => { const d = new Date(s.slot_utc); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; })();
       const strategy = strategyForSlot(groups, s.slot_utc) + (s.slot_kind ? ` · ${s.slot_kind}` : '');
       const dvs = s.delta_vs_svt_p || 0;
       const dvsCls = dvs > 0 ? 'text-bad' : (dvs < 0 ? 'text-ok' : '');
@@ -150,8 +153,10 @@
       return;
     }
     const html = slots.map(s => {
-      const t = new Date(s.valid_from);
-      const lbl = `${pad(t.getHours())}:${pad(t.getMinutes())}`;
+      // Planner-tz formatting — see the equivalent comment in renderSlotTable.
+      const lbl = (window.HEM && window.HEM.fmtSlotTime)
+        ? window.HEM.fmtSlotTime(s.valid_from)
+        : (() => { const t = new Date(s.valid_from); return `${pad(t.getHours())}:${pad(t.getMinutes())}`; })();
       const tooltip = `${lbl} · ${Number(s.p).toFixed(2)}p · ${s.kind || ''}`;
       return `<div class="tariff-day-cell kind-${s.kind || 'standard'}" title="${tooltip}"><span class="tariff-day-cell-time">${lbl}</span><span class="tariff-day-cell-price">${Number(s.p).toFixed(0)}p</span></div>`;
     }).join('');

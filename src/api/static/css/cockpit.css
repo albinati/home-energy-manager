@@ -136,6 +136,344 @@ a { color: inherit; text-decoration: none; }
 }
 .pill.is-warn { color: var(--warn); }
 .pill.is-bad { color: var(--bad); }
+.pill.tz-pill {
+    /* Sits at the far right of the topbar next to the quota pills. */
+    margin-left: 0.35rem;
+    font-size: 0.7rem;
+    cursor: help;
+}
+
+/* -----------------------------------------------------------------------
+ * Phase 2: cockpit hero — replaces the old four-card status grid.
+ * ----------------------------------------------------------------------- */
+.cockpit-hero {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+.hero-main {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 0.6fr);
+    gap: 1rem;
+    align-items: start;
+}
+@media (max-width: 720px) {
+    .hero-main { grid-template-columns: 1fr; }
+}
+.hero-now, .hero-next {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+.hero-kicker {
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-dim);
+}
+.hero-slot-line {
+    display: flex;
+    align-items: baseline;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+}
+.hero-slot-time {
+    font-size: 1.35rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+.hero-slot-kind {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    padding: 0.15rem 0.55rem;
+    border-radius: 999px;
+    background: var(--bg-card-2);
+    color: var(--text-dim);
+}
+.hero-slot-kind.kind-cheap { background: var(--cheap); color: #08180a; }
+.hero-slot-kind.kind-peak { background: var(--peak); color: #180a08; }
+.hero-slot-kind.kind-negative { background: var(--neg-price); color: #fff; }
+.hero-slot-kind.kind-standard { background: var(--standard); color: #0b0f17; }
+.hero-slot-price {
+    font-size: 0.9rem;
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+}
+.hero-state-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+    gap: 0.35rem 0.75rem;
+    margin-top: 0.4rem;
+}
+.hero-kpi {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    padding: 0.3rem 0;
+    border-top: 1px solid var(--border);
+}
+.hero-kpi-label {
+    font-size: 0.62rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+}
+.hero-kpi-value {
+    font-size: 0.92rem;
+    font-variant-numeric: tabular-nums;
+}
+.hero-next {
+    background: var(--bg-card-2);
+    border-radius: 8px;
+    padding: 0.65rem 0.85rem;
+}
+.hero-next-count {
+    font-size: 1.1rem;
+    font-weight: 600;
+}
+.hero-next-label {
+    font-size: 0.8rem;
+    color: var(--text-dim);
+}
+
+/* --- Freshness ribbon --- */
+.freshness-ribbon {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    padding-top: 0.5rem;
+    border-top: 1px dashed var(--border);
+}
+.fresh-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.28rem 0.6rem;
+    background: var(--bg-card-2);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    font-size: 0.72rem;
+    color: var(--text-dim);
+    cursor: pointer;
+    transition: border-color 120ms ease;
+}
+.fresh-chip:hover:not(:disabled) { border-color: var(--text-dim); }
+.fresh-chip:disabled { opacity: 0.5; cursor: progress; }
+.fresh-chip .fresh-chip-name {
+    font-weight: 600;
+    color: var(--text);
+}
+.fresh-chip.is-stale { border-color: var(--warn); color: var(--warn); }
+.fresh-chip.is-very-stale { border-color: var(--bad); color: var(--bad); }
+.fresh-chip .fresh-chip-refresh {
+    margin-left: 0.15rem;
+    font-size: 0.8rem;
+    opacity: 0.7;
+}
+
+/* -----------------------------------------------------------------------
+ * Phase 3: Forecast tab
+ * ----------------------------------------------------------------------- */
+.forecast-summary {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 0.6rem;
+}
+.fcs-kpi {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    padding: 0.4rem 0.5rem;
+    background: var(--bg-card-2);
+    border-radius: 6px;
+}
+.fcs-k {
+    font-size: 0.62rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+}
+.fcs-v {
+    font-size: 0.95rem;
+    font-variant-numeric: tabular-nums;
+}
+.fc-kv-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+}
+.fc-kv-table th, .fc-kv-table td {
+    padding: 0.35rem 0.5rem;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+}
+.fc-kv-table th {
+    color: var(--text-dim);
+    font-weight: 500;
+    width: 20%;
+}
+.fc-chip-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+}
+.fc-chip {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.3rem;
+    padding: 0.22rem 0.55rem;
+    background: var(--bg-card-2);
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-variant-numeric: tabular-nums;
+}
+.fc-chip strong { color: var(--text-dim); font-weight: 500; }
+.fc-chip span { color: var(--text); }
+.fc-spark-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 0.75rem;
+    margin-bottom: 0.75rem;
+}
+.fc-spark-label {
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+    margin-bottom: 0.25rem;
+}
+.fc-spark {
+    display: flex;
+    align-items: flex-end;
+    gap: 2px;
+    height: 50px;
+    background: var(--bg-card-2);
+    padding: 2px;
+    border-radius: 4px;
+}
+.fc-bar {
+    flex: 1;
+    min-width: 2px;
+    background: var(--standard);
+    border-radius: 1px;
+}
+.fc-bar.is-missing {
+    background: repeating-linear-gradient(
+        45deg,
+        var(--border), var(--border) 2px,
+        transparent 2px, transparent 4px
+    );
+    opacity: 0.6;
+    height: 100%;
+}
+.fc-slot-table-wrap {
+    max-height: 360px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+}
+.fc-slot-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.78rem;
+    font-variant-numeric: tabular-nums;
+}
+.fc-slot-table th, .fc-slot-table td {
+    padding: 0.3rem 0.5rem;
+    border-bottom: 1px solid var(--border);
+}
+.fc-slot-table th {
+    background: var(--bg-card-2);
+    position: sticky;
+    top: 0;
+    text-align: left;
+    color: var(--text-dim);
+    font-weight: 500;
+}
+.fc-slot-table td.num, .fc-slot-table th.num { text-align: right; }
+
+/* -----------------------------------------------------------------------
+ * Phase 4: History page
+ * ----------------------------------------------------------------------- */
+.history-picker {
+    background: var(--bg-card-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.3rem 0.5rem;
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
+}
+.history-source {
+    font-size: 0.74rem;
+    color: var(--text-dim);
+    font-family: monospace;
+    word-break: break-all;
+}
+
+/* Attribution donut (Phase 5) */
+.attribution-block {
+    display: grid;
+    grid-template-columns: 120px 1fr;
+    gap: 1rem;
+    align-items: center;
+}
+@media (max-width: 480px) {
+    .attribution-block { grid-template-columns: 1fr; }
+}
+.attribution-donut {
+    width: 120px;
+    height: 120px;
+    border-radius: 50%;
+    background: var(--bg-card-2);
+    /* Center hole so it reads as a donut rather than a pie. */
+    mask: radial-gradient(circle, transparent 42%, #000 43%);
+    -webkit-mask: radial-gradient(circle, transparent 42%, #000 43%);
+}
+.attribution-legend {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    font-size: 0.85rem;
+}
+.attribution-legend .attr-item {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+.attribution-legend .attr-swatch {
+    width: 12px;
+    height: 12px;
+    border-radius: 2px;
+}
+.attribution-legend .attr-totals {
+    font-size: 0.72rem;
+    color: var(--text-dim);
+    margin-top: 0.25rem;
+}
+
+/* Simulating… busy state */
+.btn.is-busy {
+    opacity: 0.7;
+    cursor: progress;
+}
+body.is-simulating {
+    /* Subtle top progress hint while a simulate is running. */
+    box-shadow: inset 0 2px 0 0 var(--warn);
+}
+
+/* Phase 6: daikin-controls grey-out when passive (not hidden — we want
+ * the user to see what's there and why it's disabled). */
+.daikin-controls.is-disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    filter: grayscale(0.4);
+}
+.daikin-controls.is-disabled input,
+.daikin-controls.is-disabled button {
+    pointer-events: none;
+}
 
 /* Layout */
 .page {
