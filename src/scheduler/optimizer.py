@@ -422,6 +422,25 @@ def _merge_fox_groups(
     # is minimised before any compression decisions.
     merged = _coarse_merge_fox(merged)
 
+    # Camada 0: drop trivial SelfUse windows (work_mode=SelfUse AND
+    # min_soc_on_grid == MIN_SOC_RESERVE_PERCENT). The Fox V3 firmware falls
+    # back to the inverter's "Remaining Time Work Mode" (Self-use) outside
+    # any scheduler group, with the global minSocOnGrid floor — so an explicit
+    # group with the same parameters is wasted budget against the 8-group cap.
+    # Solar-charge holds (SelfUse minSoc=100) and any other elevated floor are
+    # preserved because they DO deviate from the global default.
+    if config.FOX_SKIP_TRIVIAL_SELFUSE_GROUPS:
+        reserve = int(config.MIN_SOC_RESERVE_PERCENT)
+        filtered = [
+            w for w in merged
+            if not (w[2][0] == "SelfUse" and w[2][3] == reserve)
+        ]
+        # Defensive: a fully-trivial plan (no FC/FD/Backup/elevated SelfUse) would
+        # produce an empty payload, which the Fox firmware may reject. Keep the
+        # first window so the upload stays well-formed; the loss is bounded at
+        # one wasted slot in that very rare degenerate case.
+        merged = filtered if filtered else merged[:1]
+
     replan_at: datetime | None = None
     if truncate_horizon and (
         len(merged) + _count_midnight_crossings(merged, tz) > max_groups
