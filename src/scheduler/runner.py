@@ -273,6 +273,85 @@ def bulletproof_mpc_job() -> None:
         logger.warning("MPC job failed: %s", e)
 
 
+def schedule_dynamic_mpc_replan(replan_at_utc: datetime) -> dict[str, Any]:
+    """Schedule a one-shot MPC re-plan to fire shortly before ``replan_at_utc``.
+
+    Used when the LP plan exceeded the Fox V3 8-group cap and was truncated:
+    the truncated tail must be re-planned before the last surviving window
+    runs out, otherwise the inverter would idle in SelfUse with no fresh plan.
+
+    Returns a status dict for callers/tests; never raises. The job uses a fixed
+    id (``dynamic_mpc_replan``) with ``replace_existing=True`` so back-to-back
+    overflow plans don't pile up multiple one-shots.
+
+    Skipped (no-op) when:
+    - The scheduler is not running (returns ``status="inactive"``).
+    - The scheduler is paused.
+    - Lead time is below ``DYNAMIC_REPLAN_MIN_LEAD_MINUTES`` (avoids hammering).
+    - A cron-scheduled MPC fire already falls inside ``[now, replan_at]``.
+    """
+    out: dict[str, Any] = {"replan_at_utc": replan_at_utc.isoformat()}
+    if _background_scheduler is None:
+        out["status"] = "inactive"
+        return out
+    if get_scheduler_paused():
+        out["status"] = "paused"
+        return out
+
+    now_utc = datetime.now(UTC)
+    margin = timedelta(minutes=int(config.REPLAN_SAFETY_MARGIN_MINUTES))
+    fire_at_utc = replan_at_utc - margin
+    lead = (fire_at_utc - now_utc).total_seconds() / 60.0
+    out["fire_at_utc"] = fire_at_utc.isoformat()
+    out["lead_minutes"] = round(lead, 1)
+
+    if lead < float(config.DYNAMIC_REPLAN_MIN_LEAD_MINUTES):
+        out["status"] = "skipped_lead_too_short"
+        return out
+
+    # Skip if a recurring MPC cron fires between now and replan_at — that cron
+    # will already produce a fresh plan inside the window we care about.
+    try:
+        tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+        for mpc_hour in config.LP_MPC_HOURS_LIST:
+            cur = now_utc.astimezone(tz).replace(minute=0, second=0, microsecond=0)
+            for _ in range(48):  # look ahead up to 48 hours
+                cur = cur + timedelta(hours=1)
+                if cur.hour != int(mpc_hour):
+                    continue
+                cur_utc = cur.astimezone(UTC)
+                if now_utc < cur_utc < replan_at_utc:
+                    out["status"] = "skipped_cron_covers"
+                    out["covered_by"] = f"bulletproof_mpc_{int(mpc_hour):02d}"
+                    return out
+                if cur_utc >= replan_at_utc:
+                    break
+    except Exception as e:
+        logger.debug("dynamic_mpc_replan cron-overlap check failed (non-fatal): %s", e)
+
+    try:
+        from apscheduler.triggers.date import DateTrigger
+
+        _background_scheduler.add_job(
+            bulletproof_mpc_job,
+            DateTrigger(run_date=fire_at_utc),
+            id="dynamic_mpc_replan",
+            replace_existing=True,
+        )
+        out["status"] = "scheduled"
+        logger.info(
+            "Dynamic MPC replan scheduled at %s (lead %.0fm before plan tail at %s)",
+            fire_at_utc.isoformat(),
+            lead,
+            replan_at_utc.isoformat(),
+        )
+    except Exception as e:
+        out["status"] = "error"
+        out["error"] = str(e)
+        logger.warning("Dynamic MPC replan scheduling failed: %s", e)
+    return out
+
+
 def _hhmm_to_minutes(s: str) -> int:
     parts = (s or "00:00").strip().split(":")
     h = int(parts[0]) if parts else 0
