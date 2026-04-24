@@ -52,6 +52,10 @@ class TestMCPServerFoxTools(unittest.IsolatedAsyncioTestCase):
         self.assertIn("OPENCLAW_READ_ONLY", out["error"])
 
     async def test_set_inverter_mode_success(self) -> None:
+        # Ensure action_log exists — PR B wrapped set_inverter_mode in
+        # log_action_timed() which writes a row on success/failure.
+        from src import db as _db
+        _db.init_db()
         mcp = build_mcp()
         mock_client = MagicMock()
         with patch("src.mcp_server.config") as cfg, patch(

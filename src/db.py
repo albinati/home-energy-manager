@@ -4,6 +4,7 @@ Uses stdlib sqlite3 for compatibility with APScheduler and sync device clients.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import sqlite3
@@ -508,6 +509,24 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_config_audit_key_ts ON config_audit(key, changed_at_utc DESC)"
     )
+
+    # V12: action_log duration tracking. Existing ``timestamp`` is still the
+    # "when this row was written" column; new ``started_at`` + ``completed_at``
+    # + ``duration_ms`` are populated only by the log_action_timed() path so
+    # the cockpit can show "propose_optimization_plan ran 1.23s ago, took
+    # 312ms". ``actor`` captures who fired the action (mcp / api / heartbeat
+    # / optimizer). Nullable so legacy rows + the fast-path log_action stay
+    # compatible.
+    cur = conn.execute("PRAGMA table_info(action_log)")
+    al_cols = {str(r[1]) for r in cur.fetchall()}
+    for col, typ in (
+        ("started_at", "TEXT"),
+        ("completed_at", "TEXT"),
+        ("duration_ms", "INTEGER"),
+        ("actor", "TEXT"),
+    ):
+        if col not in al_cols:
+            conn.execute(f"ALTER TABLE action_log ADD COLUMN {col} {typ}")
 
 
 def init_db() -> None:
@@ -1036,15 +1055,29 @@ def log_action(
     error_msg: str | None = None,
     slot_kind: str | None = None,
     agile_price_at_time: float | None = None,
+    started_at: str | None = None,
+    completed_at: str | None = None,
+    duration_ms: int | None = None,
+    actor: str | None = None,
 ) -> None:
+    """Append one row to action_log.
+
+    The canonical single-timestamp call shape is unchanged; the four
+    extended args (started_at, completed_at, duration_ms, actor) are
+    populated only by :func:`log_action_timed` when duration tracking
+    matters. Left nullable so legacy callers + the fast-path notification
+    emitter stay wire-compatible.
+    """
     ts = datetime.now(UTC).isoformat()
     with _lock:
         conn = get_connection()
         try:
             conn.execute(
                 """INSERT INTO action_log
-                   (timestamp, device, action, params, result, error_msg, trigger, slot_kind, agile_price_at_time)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (timestamp, device, action, params, result, error_msg, trigger,
+                    slot_kind, agile_price_at_time,
+                    started_at, completed_at, duration_ms, actor)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     ts,
                     device,
@@ -1055,9 +1088,108 @@ def log_action(
                     trigger,
                     slot_kind,
                     agile_price_at_time,
+                    started_at,
+                    completed_at,
+                    duration_ms,
+                    actor,
                 ),
             )
             conn.commit()
+        finally:
+            conn.close()
+
+
+@contextlib.contextmanager
+def log_action_timed(
+    *,
+    device: str,
+    action: str,
+    params: dict[str, Any] | None,
+    trigger: str,
+    actor: str | None = None,
+    slot_kind: str | None = None,
+    agile_price_at_time: float | None = None,
+) -> Any:
+    """Context manager that times an action block and writes a single
+    action_log row on exit with started_at / completed_at / duration_ms.
+
+    Usage:
+
+        with db.log_action_timed(
+            device="foxess", action="set_work_mode",
+            params={"mode": "Self Use"}, trigger="mcp", actor="mcp",
+        ):
+            fox.set_work_mode("Self Use")
+
+    On a raised exception the row is still written with ``result="failure"``
+    and ``error_msg`` set, then the exception re-propagates — so callers get
+    duration tracking for the failure path too.
+    """
+    import time as _time
+    started_mono = _time.monotonic()
+    started_iso = datetime.now(UTC).isoformat()
+    try:
+        yield
+    except Exception as e:
+        completed_iso = datetime.now(UTC).isoformat()
+        elapsed_ms = int((_time.monotonic() - started_mono) * 1000)
+        log_action(
+            device=device,
+            action=action,
+            params=params,
+            result="failure",
+            trigger=trigger,
+            error_msg=str(e)[:500],
+            slot_kind=slot_kind,
+            agile_price_at_time=agile_price_at_time,
+            started_at=started_iso,
+            completed_at=completed_iso,
+            duration_ms=elapsed_ms,
+            actor=actor,
+        )
+        raise
+    completed_iso = datetime.now(UTC).isoformat()
+    elapsed_ms = int((_time.monotonic() - started_mono) * 1000)
+    log_action(
+        device=device,
+        action=action,
+        params=params,
+        result="success",
+        trigger=trigger,
+        slot_kind=slot_kind,
+        agile_price_at_time=agile_price_at_time,
+        started_at=started_iso,
+        completed_at=completed_iso,
+        duration_ms=elapsed_ms,
+        actor=actor,
+    )
+
+
+def get_recent_triggers(limit: int = 20, exclude_triggers: list[str] | None = None) -> list[dict[str, Any]]:
+    """Recent action_log rows for the cockpit 'Recent triggers' strip.
+
+    Default filter excludes heartbeat + notification noise so the user
+    sees meaningful events: manual writes, plan proposes, scheduler cron
+    fires. Returns newest-first; ``duration_ms`` is null for rows written
+    via the fast-path log_action (e.g. notification dispatch).
+    """
+    if exclude_triggers is None:
+        exclude_triggers = ["heartbeat", "notification"]
+    with _lock:
+        conn = get_connection()
+        try:
+            placeholders = ",".join("?" for _ in exclude_triggers) if exclude_triggers else ""
+            where = f"WHERE trigger NOT IN ({placeholders})" if placeholders else ""
+            cur = conn.execute(
+                f"""SELECT id, timestamp, device, action, params, result, error_msg, trigger,
+                           slot_kind, agile_price_at_time, started_at, completed_at, duration_ms, actor
+                    FROM action_log
+                    {where}
+                    ORDER BY timestamp DESC
+                    LIMIT ?""",
+                (*exclude_triggers, int(limit)),
+            )
+            return [dict(r) for r in cur.fetchall()]
         finally:
             conn.close()
 

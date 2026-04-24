@@ -278,6 +278,57 @@ a { color: inherit; text-decoration: none; }
     opacity: 0.7;
 }
 
+/* Recent-triggers strip — lives at the bottom of the NOW hero. Fed by
+ * /api/v1/recent-triggers, auto-refreshes after any wrapAction() flow
+ * so user-fired writes appear within a second. Horizontal scroll when
+ * > screen-width of chips. */
+.recent-triggers {
+    display: flex;
+    align-items: baseline;
+    gap: 0.55rem;
+    margin-top: 0.55rem;
+    padding-top: 0.45rem;
+    border-top: 1px dashed var(--border);
+    font-size: 0.7rem;
+}
+.recent-triggers-head {
+    font-size: 0.64rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-dim);
+    flex-shrink: 0;
+}
+.recent-triggers-list {
+    display: flex;
+    gap: 0.35rem;
+    flex-wrap: wrap;
+    min-width: 0;
+    flex: 1;
+}
+.trigger-chip {
+    display: inline-flex;
+    gap: 0.35rem;
+    align-items: baseline;
+    padding: 0.2rem 0.5rem;
+    background: var(--bg-card-2);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+.trigger-chip.is-failure {
+    border-color: rgba(220, 38, 38, 0.5);
+    background: rgba(220, 38, 38, 0.08);
+}
+.trigger-chip .trigger-action {
+    font-weight: 600;
+    color: var(--text);
+}
+.trigger-chip .trigger-meta {
+    color: var(--text-dim);
+    font-size: 0.64rem;
+}
+
 /* -----------------------------------------------------------------------
  * Phase 3: Forecast tab
  * ----------------------------------------------------------------------- */
