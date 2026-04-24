@@ -86,6 +86,14 @@ class Config:
     )
     # Retries for HTTP 429 from Onecta (respects Retry-After when present).
     DAIKIN_HTTP_429_MAX_RETRIES: int = int(os.getenv("DAIKIN_HTTP_429_MAX_RETRIES", "3"))
+    # Circuit breaker for dead refresh tokens. After N consecutive failures
+    # of refresh_tokens() we stop hammering the Onecta token endpoint for
+    # the cooldown window; a single critical notification fires so the user
+    # knows to re-auth. Reset on any successful refresh.
+    DAIKIN_AUTH_CIRCUIT_THRESHOLD: int = int(os.getenv("DAIKIN_AUTH_CIRCUIT_THRESHOLD", "3"))
+    DAIKIN_AUTH_CIRCUIT_COOLDOWN_SECONDS: int = int(
+        os.getenv("DAIKIN_AUTH_CIRCUIT_COOLDOWN_SECONDS", "900")
+    )
     DAIKIN_BASE_URL: str = "https://api.onecta.daikineurope.com/v1"
     # OIDC endpoints (docs: https://developer.cloud.daikineurope.com/docs/84e709f1-9d33-47e1-a93c-7f5cb8b8f12b)
     # Override via env if Daikin documents different URLs (e.g. via developer portal).

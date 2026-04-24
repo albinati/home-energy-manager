@@ -19,8 +19,29 @@ from src.daikin_bulletproof import apply_scheduled_daikin_params
 
 
 @pytest.fixture(autouse=True)
-def _db_ready():
+def _db_ready(monkeypatch):
     db.init_db()
+    from src.config import config as _config
+    from src.runtime_settings import clear_cache
+
+    # DAIKIN_CONTROL_MODE is a property backed by a class-level _overrides
+    # dict; we set the override directly so the property getter returns
+    # "active" for this test. OPENCLAW_READ_ONLY is a plain dataclass field
+    # evaluated at class definition (os.getenv is captured once), so
+    # monkeypatch.setattr is the right tool for that one.
+    _config._overrides.pop("DAIKIN_CONTROL_MODE", None)
+    _config._overrides["DAIKIN_CONTROL_MODE"] = "active"
+    monkeypatch.setattr(_config, "OPENCLAW_READ_ONLY", False)
+    clear_cache()
+    yield
+    # Full cleanup so sibling tests (setenv("DAIKIN_CONTROL_MODE=passive")
+    # in test_daikin_passive_mode.py) aren't shadowed by a leftover override.
+    _config._overrides.pop("DAIKIN_CONTROL_MODE", None)
+    try:
+        db.delete_runtime_setting("DAIKIN_CONTROL_MODE")
+    except Exception:
+        pass
+    clear_cache()
 
 
 class _Recorder:
@@ -44,13 +65,9 @@ def _mk_device(**overrides) -> DaikinDevice:
 
 def _apply(dev, params, monkeypatch) -> _Recorder:
     client = _Recorder()
-    # Skip valve-settle sleeps to keep tests fast.
+    # Skip valve-settle sleeps to keep tests fast. OPENCLAW_READ_ONLY and
+    # DAIKIN_CONTROL_MODE are pinned via the fixture's setenv.
     monkeypatch.setattr("src.config.config.DAIKIN_VALVE_SETTLE_SECONDS", 0)
-    # Force the apply path to run end-to-end:
-    # - bypass match-short-circuit + override detection
-    # - open the passive + read-only guards (local test env defaults both to "safe")
-    monkeypatch.setattr("src.config.config.DAIKIN_CONTROL_MODE", "active")
-    monkeypatch.setattr("src.config.config.OPENCLAW_READ_ONLY", False)
     monkeypatch.setattr("src.daikin_bulletproof.daikin_device_matches_params", lambda d, p: False)
     monkeypatch.setattr("src.daikin_bulletproof.detect_user_override", lambda d, p: (False, None))
     # Signature is apply_scheduled_daikin_params(dev, client, params, *, trigger)
@@ -98,8 +115,6 @@ def test_lwt_read_only_error_is_still_caught_as_fallback(monkeypatch):
             raise DaikinError("[read_only] leavingWaterOffset")
     client = _ReadOnlyClient()
     monkeypatch.setattr("src.config.config.DAIKIN_VALVE_SETTLE_SECONDS", 0)
-    monkeypatch.setattr("src.config.config.DAIKIN_CONTROL_MODE", "active")
-    monkeypatch.setattr("src.config.config.OPENCLAW_READ_ONLY", False)
     monkeypatch.setattr("src.daikin_bulletproof.daikin_device_matches_params", lambda d, p: False)
     monkeypatch.setattr("src.daikin_bulletproof.detect_user_override", lambda d, p: (False, None))
     # Must not raise despite the [read_only] error.
