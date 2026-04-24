@@ -510,6 +510,7 @@ def build_mcp() -> FastMCP:
         ),
     )
     def set_inverter_mode(mode: str) -> dict[str, Any]:
+        from . import db as _db
         if config.OPENCLAW_READ_ONLY:
             safeguards.audit_log(FOXESS_MODE_ACTION, {"mode": mode}, "mcp", False, _write_blocked_message())
             return {"ok": False, "error": _write_blocked_message()}
@@ -524,9 +525,16 @@ def build_mcp() -> FastMCP:
                 "ok": False,
                 "error": f"Rate limited. Try again in {wait_time:.1f} seconds.",
             }
+        # log_action_timed captures started_at + completed_at + duration_ms
+        # regardless of success or failure, so the cockpit's recent-triggers
+        # strip can show "set_inverter_mode ran 1.2s ago, took 340ms, OK".
         try:
-            client = _foxess_client()
-            client.set_work_mode(mode)
+            with _db.log_action_timed(
+                device="foxess", action="set_work_mode",
+                params={"mode": mode}, trigger="mcp", actor="mcp",
+            ):
+                client = _foxess_client()
+                client.set_work_mode(mode)
         except ValueError as e:
             return {"ok": False, "error": str(e)}
         except FoxESSError as e:
@@ -701,6 +709,7 @@ def build_mcp() -> FastMCP:
         description="Set DHW tank target temperature (30–65°C) where supported. Pass confirmed=True to override a pending plan.",
     )
     def set_daikin_tank_temperature(temperature: float, confirmed: bool = False) -> dict[str, Any]:
+        from . import db as _db
         params = {"temperature": temperature}
         blocked = _daikin_write_preamble(DAIKIN_TANK_TEMP_ACTION, params)
         if blocked is not None:
@@ -712,8 +721,12 @@ def build_mcp() -> FastMCP:
         if conflict_warn and not confirmed:
             return {"ok": False, "requires_confirmation": True, "warning": conflict_warn}
         try:
-            from .daikin import service as _daikin_svc
-            _daikin_svc.set_tank_temperature(temperature, actor="mcp")
+            with _db.log_action_timed(
+                device="daikin", action="set_tank_temperature",
+                params=params, trigger="mcp", actor="mcp",
+            ):
+                from .daikin import service as _daikin_svc
+                _daikin_svc.set_tank_temperature(temperature, actor="mcp")
         except FileNotFoundError as e:
             return {"ok": False, "error": f"Daikin not configured: {e}"}
         except ValueError as e:
@@ -902,9 +915,20 @@ def build_mcp() -> FastMCP:
         except Exception:
             pass
 
+        # Wrap the background solve in log_action_timed so the cockpit's
+        # recent-triggers strip can show "propose_optimization_plan ran N
+        # seconds ago, took X ms, OK/failure" — the solve is async-ish
+        # (thread pool) but the context manager still captures start/end
+        # because it lives inside the worker thread.
         def _run_bg() -> None:
+            from . import db as _db
             try:
-                run_optimizer(fox, None)
+                with _db.log_action_timed(
+                    device="system", action="propose_optimization_plan",
+                    params={"plan_date": plan_date, "plan_id": plan_id},
+                    trigger="mcp", actor="mcp",
+                ):
+                    run_optimizer(fox, None)
             except Exception as exc:
                 logger.warning("Background optimizer error: %s", exc)
 
@@ -941,6 +965,7 @@ def build_mcp() -> FastMCP:
     )
     def approve_optimization_plan(plan_id: str) -> dict[str, Any]:
         from . import db
+        from .notifier import notify_action_confirmation
         ok = db.approve_plan(plan_id)
         if not ok:
             row = db.get_plan_consent(plan_id.replace("lp-", ""))
@@ -956,6 +981,12 @@ def build_mcp() -> FastMCP:
                 "plan_id": plan_id,
                 "message": "Plan not found or not in pending_approval state.",
             }
+        # Mirrors confirm_plan: user approvals should fire a hook so the
+        # cockpit/OpenClaw side sees a confirmation, not just silent state.
+        try:
+            notify_action_confirmation(f"Plan {plan_id} approved — Daikin execution active.")
+        except Exception:
+            pass
         return {
             "ok": True,
             "plan_id": plan_id,
@@ -972,6 +1003,7 @@ def build_mcp() -> FastMCP:
     )
     def reject_optimization_plan(plan_id: str, reason: str | None = None) -> dict[str, Any]:
         from . import db
+        from .notifier import notify_action_confirmation
         ok = db.reject_plan(plan_id)
         if not ok:
             return {
@@ -979,6 +1011,12 @@ def build_mcp() -> FastMCP:
                 "plan_id": plan_id,
                 "message": "Plan not found or not in pending_approval state.",
             }
+        try:
+            notify_action_confirmation(
+                f"Plan {plan_id} rejected{f' — {reason}' if reason else ''}. Schedule cleared."
+            )
+        except Exception:
+            pass
         return {
             "ok": True,
             "plan_id": plan_id,
@@ -2214,6 +2252,25 @@ def build_mcp() -> FastMCP:
             finally:
                 conn.close()
             return {"ok": True, "rows": rows}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    @mcp.tool(
+        name="get_recent_triggers",
+        description=(
+            "Recent manual/scheduler action_log rows (newest first) with "
+            "when-fired + duration-ms + actor + result. Same data the "
+            "cockpit's recent-triggers strip shows. Filters out heartbeat "
+            "+ notification noise by default; set include_heartbeat=true "
+            "to see everything."
+        ),
+    )
+    def get_recent_triggers(limit: int = 20, include_heartbeat: bool = False) -> dict[str, Any]:
+        from . import db
+        try:
+            exclude = ["notification"] if include_heartbeat else ["heartbeat", "notification"]
+            rows = db.get_recent_triggers(limit=int(limit), exclude_triggers=exclude)
+            return {"ok": True, "rows": rows, "count": len(rows)}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
