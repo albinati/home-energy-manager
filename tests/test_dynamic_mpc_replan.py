@@ -11,16 +11,17 @@ import pytest
 
 
 class _FakeJob:
-    def __init__(self, jid: str, trigger: Any, replace_existing: bool):
+    def __init__(self, jid: str, trigger: Any, replace_existing: bool, kwargs: dict[str, Any] | None = None):
         self.id = jid
         self.trigger = trigger
         self.replace_existing = replace_existing
+        self.kwargs = kwargs or {}
 
 
 class _FakeScheduler:
     def __init__(self) -> None:
         self.jobs: list[_FakeJob] = []
-        self.add_calls: list[tuple[str, Any, bool]] = []
+        self.add_calls: list[tuple[str, Any, bool, dict[str, Any]]] = []
 
     def add_job(
         self,
@@ -29,13 +30,14 @@ class _FakeScheduler:
         *,
         id: str,  # noqa: A002 — APScheduler API
         replace_existing: bool = False,
+        kwargs: dict[str, Any] | None = None,
     ) -> _FakeJob:
         # Mimic replace_existing semantics so the test can assert no piling up.
         if replace_existing:
             self.jobs = [j for j in self.jobs if j.id != id]
-        job = _FakeJob(id, trigger, replace_existing)
+        job = _FakeJob(id, trigger, replace_existing, kwargs)
         self.jobs.append(job)
-        self.add_calls.append((id, trigger, replace_existing))
+        self.add_calls.append((id, trigger, replace_existing, kwargs or {}))
         return job
 
 
@@ -134,3 +136,18 @@ def test_schedule_dynamic_mpc_replan_replace_existing_does_not_pile_up(
     schedule_dynamic_mpc_replan(when_2)
     assert len(fake_scheduler.jobs) == 1
     assert fake_scheduler.jobs[0].id == "dynamic_mpc_replan"
+
+
+def test_schedule_dynamic_mpc_replan_passes_event_kwargs_to_mpc_job(
+    fake_scheduler: _FakeScheduler,
+) -> None:
+    """The one-shot must invoke bulletproof_mpc_job with force_write_devices=True
+    and trigger_reason='dynamic_replan' so the cooldown gate + log shape are honoured."""
+    from src.scheduler.runner import schedule_dynamic_mpc_replan
+
+    schedule_dynamic_mpc_replan(datetime.now(UTC) + timedelta(hours=6))
+    assert len(fake_scheduler.jobs) == 1
+    assert fake_scheduler.jobs[0].kwargs == {
+        "force_write_devices": True,
+        "trigger_reason": "dynamic_replan",
+    }

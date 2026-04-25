@@ -30,6 +30,116 @@ _last_room_wall_utc: datetime | None = None
 _last_notified_slot_kind: str | None = None
 _comfort_morning_logged: set[str] = set()
 
+# Event-driven MPC ("Waze") — Epic #73.
+# Cooldown gate: any MPC run (cron / event / dynamic_replan) stamps this; the next
+# `bulletproof_mpc_job` call within MPC_COOLDOWN_SECONDS is short-circuited.
+_last_mpc_run_at: datetime | None = None
+# Hysteresis on the SoC drift trigger: count consecutive heartbeat ticks above
+# threshold; only fire when we cross MPC_DRIFT_HYSTERESIS_TICKS. Resets on recovery.
+_consecutive_drift_ticks: int = 0
+
+
+def _can_run_mpc_now() -> bool:
+    """True if the cooldown window has elapsed since the last MPC run."""
+    if _last_mpc_run_at is None:
+        return True
+    elapsed = (datetime.now(UTC) - _last_mpc_run_at).total_seconds()
+    return elapsed >= float(config.MPC_COOLDOWN_SECONDS)
+
+
+def _lp_predicted_soc_pct_at(when_utc: datetime) -> float | None:
+    """SoC % the most recent LP solution predicts for the slot containing ``when_utc``.
+
+    Returns None when no LP run is on file or the timestamp is outside the latest plan's
+    horizon. Used by the heartbeat drift trigger to compare reality vs the plan.
+    """
+    try:
+        run_id = db.find_run_for_time(when_utc.isoformat())
+        if not run_id:
+            return None
+        slots = db.get_lp_solution_slots(run_id)
+        if not slots:
+            return None
+        cap = float(config.BATTERY_CAPACITY_KWH)
+        if cap <= 0:
+            return None
+        target: dict[str, Any] | None = None
+        for s in slots:
+            st_raw = s.get("slot_time_utc")
+            if not st_raw:
+                continue
+            try:
+                st = datetime.fromisoformat(st_raw.replace("Z", "+00:00"))
+            except (ValueError, AttributeError):
+                continue
+            if st <= when_utc:
+                target = s
+            else:
+                break
+        if target is None or target.get("soc_kwh") is None:
+            return None
+        return float(target["soc_kwh"]) / cap * 100.0
+    except Exception as e:
+        logger.debug("_lp_predicted_soc_pct_at failed: %s", e)
+        return None
+
+
+def _log_plan_delta_after_trigger(prev_run_id: int | None, new_run_id: int | None, trigger_reason: str) -> None:
+    """Log how much the freshly-solved LP diverges from the previous one.
+
+    Compares the next ``MPC_PLAN_DELTA_LOOKAHEAD_HOURS`` of overlap. Surfaces the
+    "is this trigger actually changing anything?" signal so we can detect plan
+    thrashing in production without manual log archeology. Best-effort only —
+    failures here must never break the optimiser run.
+    """
+    if not prev_run_id or not new_run_id or trigger_reason == "cron":
+        return
+    try:
+        prev = {s["slot_time_utc"]: s for s in db.get_lp_solution_slots(prev_run_id)}
+        new = db.get_lp_solution_slots(new_run_id)
+        if not prev or not new:
+            return
+        cap = float(config.BATTERY_CAPACITY_KWH) or 1.0
+        horizon_end = datetime.now(UTC) + timedelta(hours=int(config.MPC_PLAN_DELTA_LOOKAHEAD_HOURS))
+        max_soc_delta_pct = 0.0
+        sum_grid_delta_kwh = 0.0
+        sum_charge_delta_kwh = 0.0
+        overlap_count = 0
+        for s in new:
+            st_raw = s.get("slot_time_utc")
+            if not st_raw or st_raw not in prev:
+                continue
+            try:
+                st = datetime.fromisoformat(st_raw.replace("Z", "+00:00"))
+            except (ValueError, AttributeError):
+                continue
+            if st > horizon_end:
+                break
+            p = prev[st_raw]
+            overlap_count += 1
+            new_soc = s.get("soc_kwh")
+            old_soc = p.get("soc_kwh")
+            if new_soc is not None and old_soc is not None:
+                d = abs(float(new_soc) - float(old_soc)) / cap * 100.0
+                if d > max_soc_delta_pct:
+                    max_soc_delta_pct = d
+            new_imp = s.get("import_kwh") or 0.0
+            old_imp = p.get("import_kwh") or 0.0
+            sum_grid_delta_kwh += abs(float(new_imp) - float(old_imp))
+            new_chg = s.get("charge_kwh") or 0.0
+            old_chg = p.get("charge_kwh") or 0.0
+            sum_charge_delta_kwh += abs(float(new_chg) - float(old_chg))
+        logger.info(
+            "MPC plan delta (trigger=%s, overlap=%d slots): SoC max-Δ=%.1f%% grid Δ=%.2f kWh charge Δ=%.2f kWh",
+            trigger_reason,
+            overlap_count,
+            max_soc_delta_pct,
+            sum_grid_delta_kwh,
+            sum_charge_delta_kwh,
+        )
+    except Exception as e:
+        logger.debug("plan-delta logging failed (non-fatal): %s", e)
+
 
 def _get_forecast_temp_c(now_utc: datetime) -> float | None:
     """Look up the Open-Meteo forecast temperature for *now_utc* from the cached meteo_forecast DB.
@@ -184,14 +294,26 @@ def mpc_should_skip_hour_for_octopus_fetch(local_hour: int) -> bool:
     return int(local_hour) == int(config.OCTOPUS_FETCH_HOUR)
 
 
-def bulletproof_mpc_job() -> None:
+def bulletproof_mpc_job(
+    *,
+    force_write_devices: bool = False,
+    trigger_reason: str = "cron",
+) -> None:
     """Intra-day MPC re-optimise: refresh forecast + live SoC + live PV, re-upload Fox/Daikin.
 
     Reads Fox realtime (SoC%, solar_power_kw, load_power_kw) and passes them into the LP
     initial state so the re-optimisation reflects the actual current energy state rather than
     yesterday's estimate.  Only runs when USE_BULLETPROOF_ENGINE=true and OPTIMIZER_BACKEND=lp.
     Skips if the scheduler is paused.
+
+    ``force_write_devices`` (default False): event-driven callers (drift, forecast revision,
+    Octopus fetch) set this True to override ``LP_MPC_WRITE_DEVICES`` and dispatch directly
+    to the hardware — coherent with "Waze recalculating route" semantics.
+
+    ``trigger_reason`` (default "cron"): tags the run for observability.
     """
+    global _last_mpc_run_at
+
     if not config.USE_BULLETPROOF_ENGINE:
         return
     if get_scheduler_paused():
@@ -200,9 +322,19 @@ def bulletproof_mpc_job() -> None:
     if backend != "lp":
         logger.debug("MPC skipped: OPTIMIZER_BACKEND=%s", backend)
         return
+    if not _can_run_mpc_now():
+        logger.info(
+            "MPC skipped (cooldown, trigger=%s): last run %.0fs ago < %ds",
+            trigger_reason,
+            (datetime.now(UTC) - _last_mpc_run_at).total_seconds() if _last_mpc_run_at else 0,
+            int(config.MPC_COOLDOWN_SECONDS),
+        )
+        return
     tz = ZoneInfo(config.BULLETPROOF_TIMEZONE if config.USE_BULLETPROOF_ENGINE else config.OPTIMIZATION_TIMEZONE)
     now_local = datetime.now(tz)
-    if mpc_should_skip_hour_for_octopus_fetch(now_local.hour):
+    # Cron-only skip: when an Octopus fetch is scheduled for this local hour, the fetch will
+    # run the optimiser anyway. Event-driven callers bypass this — they ARE the event.
+    if trigger_reason == "cron" and mpc_should_skip_hour_for_octopus_fetch(now_local.hour):
         logger.info(
             "MPC skipped: local hour %02d matches OCTOPUS_FETCH_HOUR — fetch at %02d:%02d will run optimizer",
             now_local.hour,
@@ -210,6 +342,16 @@ def bulletproof_mpc_job() -> None:
             int(config.OCTOPUS_FETCH_MINUTE),
         )
         return
+
+    write_devices = bool(config.LP_MPC_WRITE_DEVICES) or force_write_devices
+    # Snapshot the previous LP run id BEFORE the new solve so we can compute the plan delta.
+    prev_run_id: int | None = None
+    if trigger_reason != "cron":
+        try:
+            prev_run_id = db.find_run_for_time(datetime.now(UTC).isoformat())
+        except Exception as e:
+            logger.debug("plan-delta: prev_run_id lookup failed: %s", e)
+
     try:
         from .optimizer import run_optimizer
 
@@ -255,22 +397,31 @@ def bulletproof_mpc_job() -> None:
             except Exception as e:
                 logger.debug("MPC: snapshot upsert failed (non-fatal): %s", e)
 
-        # Only dispatch to hardware if explicitly enabled; default is compute-only.
         result = run_optimizer(
-            fox if config.LP_MPC_WRITE_DEVICES else None,
-            daikin if config.LP_MPC_WRITE_DEVICES else None,
+            fox if write_devices else None,
+            daikin if write_devices else None,
         )
         logger.info(
-            "MPC re-optimise: ok=%s lp_status=%s objective=%.0fp soc=%.1f%% solar=%.2fkW write_devices=%s",
+            "MPC re-optimise: trigger=%s ok=%s lp_status=%s objective=%.0fp soc=%.1f%% solar=%.2fkW write_devices=%s",
+            trigger_reason,
             result.get("ok"),
             result.get("lp_status"),
             result.get("lp_objective_pence", 0),
             rt_soc_pct or 0,
             rt_solar_kw or 0,
-            config.LP_MPC_WRITE_DEVICES,
+            write_devices,
         )
+        # Stamp the cooldown only on a successful solve so transient errors don't lock us out.
+        if result.get("ok"):
+            _last_mpc_run_at = datetime.now(UTC)
+            # Plan-delta observability for event-driven runs.
+            try:
+                new_run_id = db.find_run_for_time(_last_mpc_run_at.isoformat())
+                _log_plan_delta_after_trigger(prev_run_id, new_run_id, trigger_reason)
+            except Exception as e:
+                logger.debug("plan-delta post-run hook failed: %s", e)
     except Exception as e:
-        logger.warning("MPC job failed: %s", e)
+        logger.warning("MPC job failed (trigger=%s): %s", trigger_reason, e)
 
 
 def schedule_dynamic_mpc_replan(replan_at_utc: datetime) -> dict[str, Any]:
@@ -337,6 +488,7 @@ def schedule_dynamic_mpc_replan(replan_at_utc: datetime) -> dict[str, Any]:
             DateTrigger(run_date=fire_at_utc),
             id="dynamic_mpc_replan",
             replace_existing=True,
+            kwargs={"force_write_devices": True, "trigger_reason": "dynamic_replan"},
         )
         out["status"] = "scheduled"
         logger.info(
@@ -550,6 +702,53 @@ def bulletproof_heartbeat_tick() -> None:
         fox_mode = rt.work_mode
     except Exception:
         pass
+
+    # Event-driven MPC: SoC drift trigger (Epic #73 — story #106).
+    # Fire bulletproof_mpc_job when live SoC diverges from the LP-predicted trajectory
+    # by more than MPC_DRIFT_SOC_THRESHOLD_PERCENT, sustained for MPC_DRIFT_HYSTERESIS_TICKS
+    # consecutive heartbeats. Bypasses the cron OCTOPUS_FETCH_HOUR skip (it's an event,
+    # not a cron tick) but still gated by the global cooldown inside bulletproof_mpc_job.
+    if config.MPC_EVENT_DRIVEN_ENABLED and soc is not None:
+        try:
+            global _consecutive_drift_ticks
+            predicted_pct = _lp_predicted_soc_pct_at(now_utc)
+            if predicted_pct is not None:
+                drift_pct = abs(float(soc) - predicted_pct)
+                threshold = float(config.MPC_DRIFT_SOC_THRESHOLD_PERCENT)
+                if drift_pct >= threshold:
+                    _consecutive_drift_ticks += 1
+                    if _consecutive_drift_ticks >= int(config.MPC_DRIFT_HYSTERESIS_TICKS):
+                        logger.info(
+                            "MPC drift trigger: real=%.1f%% predicted=%.1f%% drift=%.1f%% (>=%.1f%% for %d ticks)",
+                            soc,
+                            predicted_pct,
+                            drift_pct,
+                            threshold,
+                            _consecutive_drift_ticks,
+                        )
+                        _consecutive_drift_ticks = 0
+                        bulletproof_mpc_job(
+                            force_write_devices=True,
+                            trigger_reason="soc_drift",
+                        )
+                    else:
+                        logger.debug(
+                            "MPC drift building: drift=%.1f%% (%d/%d ticks)",
+                            drift_pct,
+                            _consecutive_drift_ticks,
+                            int(config.MPC_DRIFT_HYSTERESIS_TICKS),
+                        )
+                else:
+                    if _consecutive_drift_ticks > 0:
+                        logger.debug(
+                            "MPC drift recovered: drift=%.1f%% < %.1f%% (resetting %d ticks)",
+                            drift_pct,
+                            threshold,
+                            _consecutive_drift_ticks,
+                        )
+                    _consecutive_drift_ticks = 0
+        except Exception as e:
+            logger.debug("drift-trigger check failed (non-fatal): %s", e)
 
     room_t: float | None = None
     outdoor_t: float | None = None
