@@ -73,6 +73,15 @@ def _int_list_env(name: str, default: str) -> Callable[[], list[int]]:
     return _load
 
 
+def _lp_soc_final_kwh_default() -> float:
+    """LP terminal SoC floor: explicit env override wins; otherwise 25 % of BATTERY_CAPACITY_KWH."""
+    env = os.getenv("LP_SOC_FINAL_KWH")
+    if env is not None and env.strip() != "":
+        return float(env)
+    cap = float(os.getenv("BATTERY_CAPACITY_KWH", "10"))
+    return round(cap * 0.25, 2)
+
+
 SCHEMA: dict[str, SettingSpec] = {
     # DHW comfort knobs — user-tunable per season / presence.
     "DHW_TEMP_COMFORT_C": SettingSpec(
@@ -160,6 +169,23 @@ SCHEMA: dict[str, SettingSpec] = {
         env_default=_int_list_env("LP_MPC_HOURS", "6,12,21"),
         cron_reload=True,
         description="Local hours at which the MPC re-solves the LP (e.g. [6,12,21]).",
+    ),
+    # Terminal SoC floor — anti-myopia. Each LP run must end its 24h horizon with
+    # SoC ≥ this value (kWh). Without it, individual runs may plan to drain the
+    # battery near the boundary before the next MPC corrects. Default = 25 % of
+    # BATTERY_CAPACITY_KWH so it scales with the installed battery.
+    "LP_SOC_FINAL_KWH": SettingSpec(
+        key="LP_SOC_FINAL_KWH",
+        type_name="float",
+        env_default=_lp_soc_final_kwh_default,
+        min_value=0.0,
+        max_value=50.0,  # generous upper bound (any battery 200 kWh stays safe)
+        description=(
+            "Hard SoC floor (kWh) the LP must hit at the end of its 24h horizon. "
+            "Anti-myopia constraint that prevents end-of-window battery drains. "
+            "0 = disabled (legacy soft-cost-only behaviour). Default = 25 % of "
+            "BATTERY_CAPACITY_KWH."
+        ),
     ),
 }
 
