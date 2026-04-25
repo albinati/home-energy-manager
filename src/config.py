@@ -551,6 +551,14 @@ class Config:
         self._rt_set("PV_TELEMETRY_INTERVAL_MINUTES", int(value))
 
     @property
+    def PV_CALIBRATION_WINDOW_DAYS(self) -> int:
+        return int(self._rt_get("PV_CALIBRATION_WINDOW_DAYS"))
+
+    @PV_CALIBRATION_WINDOW_DAYS.setter
+    def PV_CALIBRATION_WINDOW_DAYS(self, value: int) -> None:
+        self._rt_set("PV_CALIBRATION_WINDOW_DAYS", int(value))
+
+    @property
     def LP_PLAN_PUSH_HOUR(self) -> int:
         return int(self._rt_get("LP_PLAN_PUSH_HOUR"))
 
