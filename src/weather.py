@@ -467,15 +467,154 @@ def _interp_hourly_scalar(
     return va + w * (vb - va)
 
 
+def compute_pv_calibration_hourly_table(
+    window_days: int | None = None,
+    min_samples_per_hour: int = 7,
+) -> dict[str, Any]:
+    """Recompute the per-hour-of-day PV calibration table from ``pv_realtime_history``.
+
+    For each UTC hour-of-day, sums measured PV (5-min samples × 1/12 → kWh per
+    hour) and compares against Open-Meteo Archive ``shortwave_radiation_instant``
+    converted via :func:`estimate_pv_kw`. The median ratio per hour becomes the
+    factor stored in ``pv_calibration_hourly``.
+
+    Hours with fewer than ``min_samples_per_hour`` samples in the window are
+    skipped (low statistical confidence). Returns a status dict so the caller
+    can log how the recompute went.
+
+    Failure modes (no Fox data, Open-Meteo down, etc.) return a dict with
+    ``status='skipped'`` and never raise — the LP keeps the flat fallback.
+    """
+    from . import db as _db
+    from datetime import date as _date, timedelta as _td
+
+    if window_days is None:
+        window_days = int(getattr(config, "PV_CALIBRATION_WINDOW_DAYS", 30))
+    end = _date.today()
+    start = end - _td(days=window_days)
+
+    # Pull measured PV per UTC hour from pv_realtime_history.
+    measured_per_hour: dict[int, list[float]] = {h: [] for h in range(24)}
+    measured_per_day_hour: dict[tuple[str, int], float] = {}
+    with _db._lock:
+        conn = _db.get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT captured_at, solar_power_kw
+                   FROM pv_realtime_history
+                   WHERE substr(captured_at, 1, 10) BETWEEN ? AND ?
+                     AND solar_power_kw IS NOT NULL""",
+                (start.isoformat(), end.isoformat()),
+            )
+            for row in cur.fetchall():
+                ts_raw = row[0]
+                kw = float(row[1] or 0.0)
+                try:
+                    ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+                except (ValueError, TypeError):
+                    continue
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=UTC)
+                day = ts.date().isoformat()
+                hour = ts.hour
+                # 5-min sample × (5/60)h = kWh contribution to that hour
+                measured_per_day_hour[(day, hour)] = (
+                    measured_per_day_hour.get((day, hour), 0.0) + kw * (5.0 / 60.0)
+                )
+        finally:
+            conn.close()
+
+    if not measured_per_day_hour:
+        return {"status": "skipped", "reason": "no pv_realtime_history in window"}
+
+    # Pull modelled PV per hour from Open-Meteo Archive — same conversion the LP uses.
+    lat = (config.WEATHER_LAT or "").strip()
+    lon = (config.WEATHER_LON or "").strip()
+    if not lat or not lon:
+        return {"status": "skipped", "reason": "no lat/lon configured"}
+    try:
+        url = (
+            "https://archive-api.open-meteo.com/v1/archive?"
+            f"latitude={lat}&longitude={lon}"
+            f"&start_date={start.isoformat()}&end_date={end.isoformat()}"
+            "&hourly=shortwave_radiation_instant"
+            "&timezone=UTC"
+        )
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            api_data = json.loads(resp.read().decode())
+    except (urllib.error.URLError, json.JSONDecodeError, KeyError, TypeError) as e:
+        return {"status": "skipped", "reason": f"open-meteo fetch failed: {e}"}
+
+    times = api_data.get("hourly", {}).get("time", [])
+    rads = api_data.get("hourly", {}).get("shortwave_radiation_instant", [])
+    modelled_per_day_hour: dict[tuple[str, int], float] = {}
+    for t, r in zip(times, rads):
+        if r is None:
+            continue
+        try:
+            dt = datetime.fromisoformat(str(t).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=UTC)
+            day = dt.date().isoformat()
+            hour = dt.hour
+            modelled_per_day_hour[(day, hour)] = estimate_pv_kw(float(r))  # 1-hour slot → kWh
+        except (ValueError, TypeError):
+            continue
+
+    # Build per-hour ratio lists, skipping dawn/dusk noise (both < 0.05).
+    ratios_per_hour: dict[int, list[float]] = {h: [] for h in range(24)}
+    for (day, hour), measured_kwh in measured_per_day_hour.items():
+        modelled_kwh = modelled_per_day_hour.get((day, hour))
+        if modelled_kwh is None or modelled_kwh < 0.05:
+            continue
+        if measured_kwh < 0.05 and modelled_kwh < 0.05:
+            continue
+        ratio = measured_kwh / modelled_kwh
+        # Drop egregious outliers (sensor spike or archive anomaly)
+        if ratio > 5.0:
+            continue
+        ratios_per_hour[hour].append(ratio)
+
+    factors: dict[int, float] = {}
+    samples: dict[int, int] = {}
+    for hour, rs in ratios_per_hour.items():
+        if len(rs) < min_samples_per_hour:
+            continue
+        # Use median (robust to single bad day) and clamp to safe range
+        rs_sorted = sorted(rs)
+        median = rs_sorted[len(rs_sorted) // 2]
+        clamped = max(0.10, min(1.10, median))
+        factors[hour] = round(clamped, 4)
+        samples[hour] = len(rs)
+
+    if not factors:
+        return {"status": "skipped", "reason": "insufficient samples per hour"}
+
+    n = _db.upsert_pv_calibration_hourly(factors, samples, window_days)
+    return {
+        "status": "ok",
+        "rows": n,
+        "window_days": window_days,
+        "hours_calibrated": sorted(factors.keys()),
+    }
+
+
 def forecast_to_lp_inputs(
     forecast: list[HourlyForecast],
     slot_starts_utc: list[datetime],
-    pv_scale: float | None = None,
+    pv_scale: float | dict[int, float] | None = None,
 ) -> WeatherLpSeries:
     """Build per-slot outdoor temperature, irradiance, PV kWh/slot, and COP arrays for the MILP.
 
     PV uses :func:`estimate_pv_kw` with ``PV_CAPACITY_KWP`` and ``PV_SYSTEM_EFFICIENCY``,
-    scaled by ``pv_scale`` (default: ``PV_FORECAST_SCALE_FACTOR`` from config).
+    scaled by ``pv_scale``:
+      - ``float``: single multiplier applied to every slot (legacy behaviour).
+      - ``dict[int, float]``: per-hour-of-day UTC factor (richer calibration that
+        captures shading / sun-angle bias). Missing hours fall back to the median
+        of provided values.
+      - ``None``: defaults to ``PV_FORECAST_SCALE_FACTOR`` from config.
+
     Half-hour energy = kW × 0.5 h. When forecast is empty, PV and COP use safe defaults.
     A hard ceiling of ``PV_CAPACITY_KWP × PV_SYSTEM_EFFICIENCY × 0.5`` kWh/slot is enforced.
     """
@@ -491,9 +630,14 @@ def forecast_to_lp_inputs(
     cap = float(config.PV_CAPACITY_KWP)
     eff = float(config.PV_SYSTEM_EFFICIENCY)
 
-    # PV scale: explicit arg > config override > 1.0
+    # PV scale: explicit arg > config override > 1.0. Accept float OR per-hour dict.
     if pv_scale is None:
         pv_scale = float(getattr(config, "PV_FORECAST_SCALE_FACTOR", 1.0))
+    # When dict is supplied, pre-compute fallback for missing hours (median of provided).
+    pv_scale_fallback: float = 1.0
+    if isinstance(pv_scale, dict) and pv_scale:
+        sorted_vals = sorted(pv_scale.values())
+        pv_scale_fallback = sorted_vals[len(sorted_vals) // 2]
     # Hard ceiling: per-hour-of-day maximum actually observed from Fox history
     # (falls back to capacity × η × 0.5 kWh/slot if no history available)
     hourly_ceil = _build_pv_hourly_ceiling()
@@ -507,9 +651,14 @@ def forecast_to_lp_inputs(
         att = max(0.0, min(1.0, 1.0 - 0.25 * (cloud_pct / 100.0)))
         rad_eff = max(0.0, rad_wm2 * att)
         kw_ac = estimate_pv_kw(rad_eff, capacity_kwp=cap, efficiency=eff)
+        # Resolve the per-slot scale factor.
+        if isinstance(pv_scale, dict):
+            scale_for_slot = pv_scale.get(st.hour, pv_scale_fallback)
+        else:
+            scale_for_slot = float(pv_scale)
         # Apply calibration scale and enforce per-hour physical ceiling
         slot_ceil = hourly_ceil.get(st.hour, cap * eff * 0.5)
-        pv_kwh = min(slot_ceil, max(0.0, kw_ac * 0.5 * pv_scale))
+        pv_kwh = min(slot_ceil, max(0.0, kw_ac * 0.5 * scale_for_slot))
         base_cop = max(1.0, cop_at_temperature(curve, temp_c))
         cop_s = base_cop
         lift_pen = float(getattr(config, "LP_COP_LIFT_PENALTY_PER_KELVIN", 0.0))

@@ -1180,9 +1180,21 @@ def _run_optimizer_lp(fox: FoxESSClient | None, daikin: Any | None = None) -> di
             datetime.now(UTC).isoformat(),
             forecast_rows,
         )
-    # PV calibration: Fox actual vs Open-Meteo archive to correct systematic bias
+    # PV calibration: prefer the per-hour-of-day cached table (richer signal — captures
+    # shading + sun-angle bias). Falls back to the rolling flat factor when the table
+    # is empty (cold start, < 7 samples per hour, etc).
     from ..weather import compute_pv_calibration_factor
-    pv_scale = compute_pv_calibration_factor()
+    pv_scale_hourly = db.get_pv_calibration_hourly()
+    if pv_scale_hourly:
+        pv_scale: float | dict[int, float] = pv_scale_hourly
+        logger.info(
+            "PV calibration: using per-hour table (%d hours covered, mean factor=%.3f)",
+            len(pv_scale_hourly),
+            sum(pv_scale_hourly.values()) / len(pv_scale_hourly),
+        )
+    else:
+        pv_scale = compute_pv_calibration_factor()
+        logger.info("PV calibration: using flat factor=%.3f (per-hour table empty)", pv_scale)
     weather = forecast_to_lp_inputs(forecast, starts, pv_scale=pv_scale)
     initial = read_lp_initial_state(daikin)
     micro_climate_offset = db.get_micro_climate_offset_c(config.DAIKIN_MICRO_CLIMATE_LOOKBACK)
