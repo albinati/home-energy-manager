@@ -191,6 +191,38 @@ def test_cron_reload_reregisters_jobs_when_active(monkeypatch):
     assert any(j.id == "bulletproof_octopus_fetch" for j in fake.get_jobs())
 
 
+def test_lp_soc_final_kwh_default_scales_with_battery_capacity(monkeypatch):
+    """Default = 25 % of BATTERY_CAPACITY_KWH when no explicit override is set."""
+    import src.runtime_settings as rts
+    from src.config import config
+
+    # Clear any in-memory override and any DB row so we exercise the env_default path.
+    monkeypatch.setattr(config, "_overrides", {}, raising=False)
+    rts.delete_setting("LP_SOC_FINAL_KWH")
+    monkeypatch.delenv("LP_SOC_FINAL_KWH", raising=False)
+    monkeypatch.setenv("BATTERY_CAPACITY_KWH", "12")
+    rts._cache.pop("LP_SOC_FINAL_KWH", None)
+
+    assert rts.get_setting("LP_SOC_FINAL_KWH") == 3.0  # 25 % of 12 = 3.0
+
+    # Explicit env override beats the percentage default.
+    monkeypatch.setenv("LP_SOC_FINAL_KWH", "1.5")
+    rts._cache.pop("LP_SOC_FINAL_KWH", None)
+    assert rts.get_setting("LP_SOC_FINAL_KWH") == 1.5
+
+
+def test_lp_soc_final_kwh_runtime_tunable_round_trip(monkeypatch):
+    """PUT via runtime_settings persists; config.LP_SOC_FINAL_KWH reads it back."""
+    import src.runtime_settings as rts
+    from src.config import config
+
+    monkeypatch.setattr(config, "_overrides", {}, raising=False)
+    rts.set_setting("LP_SOC_FINAL_KWH", 4.2)
+    assert config.LP_SOC_FINAL_KWH == 4.2
+    # cleanup so other tests don't see the override
+    rts.delete_setting("LP_SOC_FINAL_KWH")
+
+
 def test_cron_reload_is_noop_when_scheduler_inactive(monkeypatch):
     from src.scheduler import runner
     monkeypatch.setattr(runner, "_background_scheduler", None)
