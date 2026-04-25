@@ -1,126 +1,30 @@
-"""MCP (Model Context Protocol) server over stdio for Home Energy Manager.
+"""MCP (Model Context Protocol) server for Home Energy Manager.
 
 Fox ESS tools delegate to ``FoxESSClient`` and the ``foxess.service`` cache layer.
 Daikin tools delegate to ``DaikinClient`` (Onecta OAuth tokens from env / token file).
 
-Run: ``./bin/mcp`` from project root (picks Python 3.11 in Docker, ``.venv`` on the host), or
-``python -m src.mcp_server`` with ``PYTHONPATH`` including the project root.
+Two transports:
 
-Writes honour ``OPENCLAW_READ_ONLY`` (default true) and the same rate limits as the REST API.
+* **stdio** (dev local) — ``python -m src.mcp_server``. Single-user; one child
+  per ``./bin/mcp`` invocation. No coordination needed.
+* **streamable-http** (prod) — the FastMCP server is built once by
+  :func:`build_mcp` and mounted by :mod:`src.api.main` under ``/mcp``, guarded
+  by ``BearerAuthMiddleware``. Singleton is guaranteed by the container itself.
 
-v10 (S5a): the singleton flock is acquired BEFORE heavy imports when run as the
-main module. This prevents the zombie accumulation observed in production, where
-20+ processes spawned by openclaw all completed config/FastMCP/client init before
-any single one reached the lock check inside ``main()``. With early acquisition,
-losers exit within ~10ms (stdlib imports only), never holding heavy resources.
+Writes honour ``OPENCLAW_READ_ONLY`` (default true) and the same rate limits as
+the REST API. The ``HEM_MCP_FORCE_KILL_PRIOR`` env var and the legacy flock
+bootstrap (``_acquire_singleton_lock_early``) were removed when the OpenClaw
+launch path moved from per-call subprocess stdio to long-lived HTTP — there is
+no longer a "20 zombie children" failure mode to defend against.
 """
 from __future__ import annotations
 
-# --- Stdlib-only zone (must stay cheap; runs in every spawned process) -------
-import atexit
-import fcntl
 import logging
 import os
 import signal
 import sys
-import time
-from pathlib import Path
 from typing import Any
 
-
-def _lock_path() -> Path:
-    """Lock file path — /run if writable (systemd tmpfs on prod), else /tmp."""
-    for base in ("/run", "/tmp"):
-        d = Path(base)
-        if d.is_dir() and os.access(d, os.W_OK):
-            return d / "hem-mcp.lock"
-    return Path("/tmp/hem-mcp.lock")
-
-
-def _acquire_singleton_lock_early() -> int | None:
-    """Acquire the flock before heavy imports. Returns fd or None to exit silently.
-
-    Uses sys.stderr (no logging dep) and runs only if ``__name__ == "__main__"``
-    so plain imports (tests, audits) bypass it.
-
-    Behaviour on contention (v10.1 hotfix):
-      - If another live process holds the lock → exit silently with code 0.
-        Do NOT SIGTERM it — openclaw maintains a persistent stdio connection
-        to a single MCP child and would lose its pipe (observed in prod as
-        ``MCP error -32000: Connection closed`` followed by repeated
-        ``Not connected`` failures).
-      - POSIX flock auto-releases on process death, so true crashes recover
-        on the next spawn without needing SIGTERM.
-
-    Manual-recovery escape hatch: set ``HEM_MCP_FORCE_KILL_PRIOR=1`` in the
-    environment to restore the SIGTERM-and-retry behaviour. Use only when you
-    have manually verified the prior holder is unresponsive.
-    """
-    path = _lock_path()
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        prior_pid: int | None = None
-        try:
-            raw = os.read(fd, 32).decode().strip()
-            prior_pid = int(raw) if raw else None
-        except (OSError, ValueError):
-            prior_pid = None
-
-        force_kill = os.environ.get("HEM_MCP_FORCE_KILL_PRIOR", "").lower() in ("1", "true", "yes")
-        if force_kill and prior_pid and prior_pid != os.getpid():
-            print(
-                f"WARNING mcp_server.bootstrap: HEM_MCP_FORCE_KILL_PRIOR set — "
-                f"sending SIGTERM to pid={prior_pid} and retrying",
-                file=sys.stderr,
-            )
-            try:
-                os.kill(prior_pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            deadline = time.monotonic() + 2.0
-            while time.monotonic() < deadline:
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except BlockingIOError:
-                    time.sleep(0.1)
-            else:
-                print(
-                    f"ERROR mcp_server.bootstrap: lock still held by pid={prior_pid} "
-                    f"after SIGTERM — exiting",
-                    file=sys.stderr,
-                )
-                os.close(fd)
-                return None
-        else:
-            # Default v10.1 path: yield to the existing instance. Do NOT kill it.
-            # Openclaw's stdio pipe to the prior MCP must remain intact.
-            print(
-                f"INFO mcp_server.bootstrap: another instance is live (pid={prior_pid}); "
-                f"exiting cleanly so the existing one keeps serving openclaw",
-                file=sys.stderr,
-            )
-            os.close(fd)
-            return None
-    os.lseek(fd, 0, os.SEEK_SET)
-    os.ftruncate(fd, 0)
-    os.write(fd, f"{os.getpid()}\n".encode())
-    os.fsync(fd)
-    return fd
-
-
-# Critical: acquire the lock BEFORE the heavy imports below. Losers exit here
-# without ever touching FastMCP/config/DaikinClient init. _EARLY_LOCK_FD is None
-# when this module is imported (not run), so tests/audits skip the lock entirely.
-_EARLY_LOCK_FD: int | None = None
-if __name__ == "__main__":
-    _EARLY_LOCK_FD = _acquire_singleton_lock_early()
-    if _EARLY_LOCK_FD is None:
-        sys.exit(0)
-
-# --- Heavy imports (only reached by the singleton winner or by `import`-ers) -
 import concurrent.futures
 from datetime import UTC
 
@@ -472,6 +376,11 @@ def build_mcp() -> FastMCP:
         name="home-energy-manager",
         instructions=instructions,
         log_level="WARNING",
+        # The HTTP transport's internal route is at this path. Mounting the
+        # resulting app at /mcp in src.api.main means we want the endpoint at
+        # exactly /mcp/ — so the inner path must be "/", not the default "/mcp"
+        # (which would compose to /mcp/mcp/).
+        streamable_http_path="/",
     )
 
     @mcp.tool(
@@ -2300,11 +2209,11 @@ def build_mcp() -> FastMCP:
 
 
 def main() -> None:
-    """Entry point: MCP over stdio (do not write logs to stdout).
+    """Entry point: MCP over stdio for dev local (do not write logs to stdout).
 
-    Singleton enforcement happens at module top — see ``_acquire_singleton_lock_early``.
-    By the time we reach here we already own the lock (or the call site is a unit
-    test importing ``main`` programmatically — fall back to acquiring late).
+    Production runs the streamable-HTTP transport via :mod:`src.api.main` —
+    this main() is only reached by ``python -m src.mcp_server`` / ``./bin/mcp``
+    on a developer workstation.
     """
     logging.basicConfig(
         level=logging.INFO,
@@ -2313,35 +2222,12 @@ def main() -> None:
     )
     log = logging.getLogger("mcp_server")
 
-    # Reuse the early-acquired fd from the module bootstrap. If absent (programmatic
-    # call, e.g. from tests), acquire late — heavy imports already ran in this case
-    # so the protection is moot, but the lock still serializes runs.
-    global _EARLY_LOCK_FD
-    if _EARLY_LOCK_FD is None:
-        _EARLY_LOCK_FD = _acquire_singleton_lock_early()
-        if _EARLY_LOCK_FD is None:
-            sys.exit(0)
-    lock_fd = _EARLY_LOCK_FD
-
-    def _release_lock() -> None:
-        # S5b: shut down the optimizer executor before releasing — clean hygiene.
+    def _on_signal(signum: int, _frame: Any) -> None:
+        log.info("MCP received signal %d — shutting down", signum)
         try:
             _optimizer_executor.shutdown(wait=False)
         except Exception:
             pass
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
-        try:
-            os.close(lock_fd)
-        except OSError:
-            pass
-
-    atexit.register(_release_lock)
-
-    def _on_signal(signum: int, _frame: Any) -> None:
-        log.info("MCP received signal %d — shutting down", signum)
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, _on_signal)
@@ -2352,7 +2238,10 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        _release_lock()
+        try:
+            _optimizer_executor.shutdown(wait=False)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
