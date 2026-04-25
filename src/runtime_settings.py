@@ -198,6 +198,21 @@ SCHEMA: dict[str, SettingSpec] = {
             "(reads heartbeat-cached values)."
         ),
     ),
+    "PV_CALIBRATION_WINDOW_DAYS": SettingSpec(
+        key="PV_CALIBRATION_WINDOW_DAYS",
+        type_name="int",
+        env_default=_int_env("PV_CALIBRATION_WINDOW_DAYS", "30"),
+        min_value=7,
+        max_value=365,
+        cron_reload=False,
+        description=(
+            "Rolling window (days) used by compute_pv_calibration_factor to learn the "
+            "Fox-actual / Open-Meteo-modelled PV ratio. Shorter = faster response to "
+            "seasonality (spring → summer transitions); longer = more stable but slow "
+            "to react. Default 30 d after analysis showed the legacy 250 d masked a "
+            "0.83 vs 0.67 (recent) overestimate bias."
+        ),
+    ),
     # Terminal SoC floor — anti-myopia. Each LP run must end its 24h horizon with
     # SoC ≥ this value (kWh). Without it, individual runs may plan to drain the
     # battery near the boundary before the next MPC corrects. Default = 25 % of
