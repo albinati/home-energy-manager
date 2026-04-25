@@ -256,6 +256,159 @@ def test_octopus_fetch_calls_bulletproof_mpc_job_with_force_write(monkeypatch):
     assert captured_kwargs == {"force_write_devices": True, "trigger_reason": "octopus_fetch"}
 
 
+# -------------------- Forecast revision trigger --------------------
+
+
+def _make_forecast_rows(base_utc: datetime, *, count: int, solar_w_m2: float, temp_c: float) -> list[dict]:
+    return [
+        {
+            "slot_time": (base_utc + timedelta(hours=i)).isoformat(),
+            "temp_c": temp_c,
+            "solar_w_m2": solar_w_m2,
+        }
+        for i in range(count)
+    ]
+
+
+def test_forecast_delta_empty_inputs_returns_zero():
+    from src.weather import _forecast_delta
+
+    assert _forecast_delta([], [], lookahead_hours=6) == (0.0, 0.0)
+    assert _forecast_delta([], [{"slot_time": datetime.now(UTC).isoformat(), "solar_w_m2": 100, "temp_c": 10}], lookahead_hours=6) == (0.0, 0.0)
+
+
+def test_forecast_delta_solar_difference_summed_over_lookahead():
+    from src.weather import _forecast_delta, estimate_pv_kw
+
+    base = datetime.now(UTC) + timedelta(minutes=15)
+    prev = _make_forecast_rows(base, count=4, solar_w_m2=200.0, temp_c=12.0)
+    new = _make_forecast_rows(base, count=4, solar_w_m2=400.0, temp_c=12.0)
+    delta_pv, delta_temp = _forecast_delta(prev, new, lookahead_hours=6, horizon_start_utc=base)
+    # Each hour, |estimate_pv_kw(400) - estimate_pv_kw(200)| × 1h, summed over 4 slots
+    expected = abs(estimate_pv_kw(400.0) - estimate_pv_kw(200.0)) * 4
+    assert delta_pv == pytest.approx(expected, abs=0.01)
+    assert delta_temp == 0.0
+
+
+def test_forecast_delta_temp_difference_averaged():
+    from src.weather import _forecast_delta
+
+    base = datetime.now(UTC) + timedelta(minutes=15)
+    prev = _make_forecast_rows(base, count=4, solar_w_m2=0.0, temp_c=10.0)
+    new = _make_forecast_rows(base, count=4, solar_w_m2=0.0, temp_c=14.0)
+    delta_pv, delta_temp = _forecast_delta(prev, new, lookahead_hours=6, horizon_start_utc=base)
+    assert delta_pv == 0.0
+    assert delta_temp == pytest.approx(4.0, abs=0.01)
+
+
+def test_forecast_delta_ignores_slots_outside_lookahead():
+    from src.weather import _forecast_delta
+
+    base = datetime.now(UTC) + timedelta(minutes=15)
+    # 8 hourly slots, lookahead=4 — only first 4 must be counted.
+    prev = _make_forecast_rows(base, count=8, solar_w_m2=100.0, temp_c=10.0)
+    new = _make_forecast_rows(base, count=8, solar_w_m2=300.0, temp_c=15.0)
+    delta_pv_4, delta_temp_4 = _forecast_delta(prev, new, lookahead_hours=4, horizon_start_utc=base)
+    delta_pv_8, delta_temp_8 = _forecast_delta(prev, new, lookahead_hours=8, horizon_start_utc=base)
+    assert delta_pv_4 < delta_pv_8
+    # Per-slot temp delta is 5°C constant; average is 5°C regardless of N.
+    assert delta_temp_4 == pytest.approx(5.0, abs=0.01)
+    assert delta_temp_8 == pytest.approx(5.0, abs=0.01)
+
+
+def test_forecast_refresh_job_persists_even_when_disabled(monkeypatch):
+    """Kill switch off: still saves to history (audit trail) but never triggers MPC."""
+    from src.scheduler import runner
+
+    monkeypatch.setattr(runner.config, "MPC_EVENT_DRIVEN_ENABLED", False)
+    base = datetime.now(UTC)
+    fake_fcst = [MagicMock(time_utc=base + timedelta(hours=i), temperature_c=10.0, shortwave_radiation_wm2=100.0) for i in range(6)]
+
+    saved_history: list[tuple[str, list]] = []
+    saved_latest: list[tuple[list, str]] = []
+
+    def _save_hist(fetch_at, rows):
+        saved_history.append((fetch_at, rows))
+
+    def _save_latest(rows, day):
+        saved_latest.append((rows, day))
+
+    triggered = MagicMock(side_effect=AssertionError("MPC must not be triggered when kill switch is off"))
+
+    with patch("src.weather.fetch_forecast", return_value=fake_fcst), \
+         patch("src.db.get_meteo_forecast_history_latest_before", return_value=[{"slot_time": (base + timedelta(hours=0)).isoformat(), "solar_w_m2": 50.0, "temp_c": 10.0}]), \
+         patch("src.db.save_meteo_forecast_history", side_effect=_save_hist), \
+         patch("src.db.save_meteo_forecast", side_effect=_save_latest), \
+         patch.object(runner, "bulletproof_mpc_job", triggered):
+        runner.bulletproof_forecast_refresh_job()
+
+    assert len(saved_history) == 1
+    assert len(saved_latest) == 1
+    triggered.assert_not_called()
+
+
+def test_forecast_refresh_job_no_trigger_without_previous_fetch(monkeypatch):
+    """First-ever invocation has no prev — must persist but never trigger."""
+    from src.scheduler import runner
+
+    base = datetime.now(UTC)
+    fake_fcst = [MagicMock(time_utc=base + timedelta(hours=i), temperature_c=10.0, shortwave_radiation_wm2=100.0) for i in range(6)]
+    triggered = MagicMock(side_effect=AssertionError("first-ever call must not trigger"))
+
+    with patch("src.weather.fetch_forecast", return_value=fake_fcst), \
+         patch("src.db.get_meteo_forecast_history_latest_before", return_value=[]), \
+         patch("src.db.save_meteo_forecast_history"), \
+         patch("src.db.save_meteo_forecast"), \
+         patch.object(runner, "bulletproof_mpc_job", triggered):
+        runner.bulletproof_forecast_refresh_job()
+
+    triggered.assert_not_called()
+
+
+def test_forecast_refresh_job_triggers_when_solar_delta_exceeds_threshold(monkeypatch):
+    from src.scheduler import runner
+
+    monkeypatch.setattr(runner.config, "MPC_FORECAST_DRIFT_SOLAR_KWH_THRESHOLD", 0.5)
+    monkeypatch.setattr(runner.config, "MPC_FORECAST_DRIFT_LOOKAHEAD_HOURS", 6)
+    base = datetime.now(UTC)
+    # New forecast: much sunnier than the previous fetch — should cross the 0.5 kWh threshold easily.
+    fake_fcst = [MagicMock(time_utc=base + timedelta(hours=i), temperature_c=10.0, shortwave_radiation_wm2=600.0) for i in range(6)]
+    prev_rows = [{"slot_time": (base + timedelta(hours=i)).isoformat(), "solar_w_m2": 50.0, "temp_c": 10.0} for i in range(6)]
+
+    captured: dict = {}
+
+    def _capture(**kwargs):
+        captured.update(kwargs)
+
+    with patch("src.weather.fetch_forecast", return_value=fake_fcst), \
+         patch("src.db.get_meteo_forecast_history_latest_before", return_value=prev_rows), \
+         patch("src.db.save_meteo_forecast_history"), \
+         patch("src.db.save_meteo_forecast"), \
+         patch.object(runner, "bulletproof_mpc_job", _capture):
+        runner.bulletproof_forecast_refresh_job()
+
+    assert captured == {"force_write_devices": True, "trigger_reason": "forecast_revision"}
+
+
+def test_forecast_refresh_job_no_trigger_when_within_thresholds(monkeypatch):
+    from src.scheduler import runner
+
+    monkeypatch.setattr(runner.config, "MPC_FORECAST_DRIFT_SOLAR_KWH_THRESHOLD", 100.0)  # huge threshold
+    monkeypatch.setattr(runner.config, "MPC_FORECAST_DRIFT_TEMP_C_THRESHOLD", 100.0)
+    base = datetime.now(UTC)
+    fake_fcst = [MagicMock(time_utc=base + timedelta(hours=i), temperature_c=10.5, shortwave_radiation_wm2=110.0) for i in range(6)]
+    prev_rows = [{"slot_time": (base + timedelta(hours=i)).isoformat(), "solar_w_m2": 100.0, "temp_c": 10.0} for i in range(6)]
+
+    triggered = MagicMock(side_effect=AssertionError("must not trigger when delta is within thresholds"))
+    with patch("src.weather.fetch_forecast", return_value=fake_fcst), \
+         patch("src.db.get_meteo_forecast_history_latest_before", return_value=prev_rows), \
+         patch("src.db.save_meteo_forecast_history"), \
+         patch("src.db.save_meteo_forecast"), \
+         patch.object(runner, "bulletproof_mpc_job", triggered):
+        runner.bulletproof_forecast_refresh_job()
+    triggered.assert_not_called()
+
+
 # -------------------- Plan-delta observability --------------------
 
 

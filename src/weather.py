@@ -13,7 +13,8 @@ import json
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
 from .config import config, cop_at_temperature
 from .physics import apply_cop_lift_multiplier, get_lwt_base_c
@@ -322,6 +323,72 @@ def fetch_forecast(
             continue
 
     return result
+
+
+def _forecast_delta(
+    prev_rows: list[dict[str, Any]],
+    new_rows: list[dict[str, Any]],
+    *,
+    lookahead_hours: int,
+    horizon_start_utc: datetime | None = None,
+) -> tuple[float, float]:
+    """Compare two forecast snapshots over the next ``lookahead_hours``.
+
+    Returns ``(delta_pv_kwh_total, delta_temp_c_avg)`` summed/averaged across
+    slots present in **both** snapshots within the lookahead window. Used by
+    the Waze MPC forecast-revision trigger (Epic #73 — story #144) to decide
+    whether a re-plan is justified.
+
+    Each ``slot_time`` row covers 1 hour (Open-Meteo hourly), so PV (W/m²)
+    converts to kWh via ``estimate_pv_kw(rad) * 1.0 h``. Temp is averaged
+    across overlap.
+    """
+    if not prev_rows or not new_rows:
+        return (0.0, 0.0)
+    horizon_start = horizon_start_utc or datetime.now(UTC)
+    horizon_end = horizon_start + timedelta(hours=lookahead_hours)
+
+    def _index(rows: list[dict[str, Any]]) -> dict[datetime, dict[str, Any]]:
+        out: dict[datetime, dict[str, Any]] = {}
+        for r in rows:
+            st_raw = r.get("slot_time")
+            if not st_raw:
+                continue
+            try:
+                st = datetime.fromisoformat(str(st_raw).replace("Z", "+00:00"))
+            except (ValueError, TypeError):
+                continue
+            if st.tzinfo is None:
+                st = st.replace(tzinfo=UTC)
+            if horizon_start <= st < horizon_end:
+                out[st] = r
+        return out
+
+    prev_idx = _index(prev_rows)
+    new_idx = _index(new_rows)
+    common = sorted(prev_idx.keys() & new_idx.keys())
+    if not common:
+        return (0.0, 0.0)
+
+    delta_pv_kwh_total = 0.0
+    temp_deltas: list[float] = []
+    for slot in common:
+        p = prev_idx[slot]
+        n = new_idx[slot]
+        try:
+            prev_pv = estimate_pv_kw(float(p.get("solar_w_m2") or 0.0))
+            new_pv = estimate_pv_kw(float(n.get("solar_w_m2") or 0.0))
+            delta_pv_kwh_total += abs(new_pv - prev_pv)  # 1h slot → kW * 1h = kWh
+        except (ValueError, TypeError):
+            pass
+        try:
+            prev_t = float(p.get("temp_c") or 0.0)
+            new_t = float(n.get("temp_c") or 0.0)
+            temp_deltas.append(abs(new_t - prev_t))
+        except (ValueError, TypeError):
+            pass
+    delta_temp_c_avg = sum(temp_deltas) / len(temp_deltas) if temp_deltas else 0.0
+    return (delta_pv_kwh_total, delta_temp_c_avg)
 
 
 def get_forecast_for_slot(

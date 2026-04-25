@@ -504,6 +504,72 @@ def schedule_dynamic_mpc_replan(replan_at_utc: datetime) -> dict[str, Any]:
     return out
 
 
+def bulletproof_forecast_refresh_job() -> None:
+    """Hourly Open-Meteo forecast refresh + revision-trigger detector (Epic #73 — story #144).
+
+    Pulls the latest forecast, persists in ``meteo_forecast_history`` (audit trail) and
+    ``meteo_forecast`` (latest-per-slot for the LP). Compares the next
+    ``MPC_FORECAST_DRIFT_LOOKAHEAD_HOURS`` against the previous fetch; if either solar
+    or temp delta exceeds threshold, fires ``bulletproof_mpc_job(force_write_devices=True,
+    trigger_reason='forecast_revision')`` to re-plan immediately.
+
+    Skipped (no-op) when the scheduler is paused or the kill switch is off. Always
+    persists the new fetch — even when the kill switch is off, the audit trail
+    (and the LP's source of forecast data) stays current.
+    """
+    if get_scheduler_paused():
+        return
+    try:
+        from .. import db as _db
+        from ..weather import _forecast_delta, fetch_forecast
+
+        lookahead_h = int(config.MPC_FORECAST_DRIFT_LOOKAHEAD_HOURS)
+        # Pull a forecast at least as long as the lookahead window we'll compare on,
+        # but cap reasonable: Open-Meteo gives 48h easily.
+        new_fcst = fetch_forecast(hours=max(lookahead_h, 24))
+        if not new_fcst:
+            logger.debug("forecast refresh: empty fetch, skipping")
+            return
+        now_utc = datetime.now(UTC)
+        new_rows = [
+            {
+                "slot_time": f.time_utc.isoformat(),
+                "temp_c": f.temperature_c,
+                "solar_w_m2": f.shortwave_radiation_wm2,
+            }
+            for f in new_fcst
+        ]
+        prev_rows = _db.get_meteo_forecast_history_latest_before(now_utc.isoformat())
+        # Persist new (always — keeps the LP's source of truth fresh + audit trail).
+        _db.save_meteo_forecast_history(now_utc.isoformat(), new_rows)
+        _db.save_meteo_forecast(new_rows, now_utc.date().isoformat())
+
+        if not config.MPC_EVENT_DRIVEN_ENABLED:
+            logger.debug("forecast refresh persisted; trigger disabled by kill switch")
+            return
+        if not prev_rows:
+            logger.debug("forecast refresh: no previous fetch in history, no comparison")
+            return
+        delta_pv_kwh, delta_temp_c = _forecast_delta(
+            prev_rows, new_rows, lookahead_hours=lookahead_h, horizon_start_utc=now_utc,
+        )
+        pv_thr = float(config.MPC_FORECAST_DRIFT_SOLAR_KWH_THRESHOLD)
+        t_thr = float(config.MPC_FORECAST_DRIFT_TEMP_C_THRESHOLD)
+        if delta_pv_kwh >= pv_thr or delta_temp_c >= t_thr:
+            logger.info(
+                "MPC forecast trigger: ΔPV=%.2f kWh (>=%.1f) ΔT=%.2f°C (>=%.1f) over next %dh",
+                delta_pv_kwh, pv_thr, delta_temp_c, t_thr, lookahead_h,
+            )
+            bulletproof_mpc_job(force_write_devices=True, trigger_reason="forecast_revision")
+        else:
+            logger.debug(
+                "forecast refresh delta below thresholds: ΔPV=%.2f kWh ΔT=%.2f°C",
+                delta_pv_kwh, delta_temp_c,
+            )
+    except Exception as e:
+        logger.warning("Forecast refresh job failed: %s", e)
+
+
 def _hhmm_to_minutes(s: str) -> int:
     parts = (s or "00:00").strip().split(":")
     h = int(parts[0]) if parts else 0
@@ -1024,6 +1090,19 @@ def start_background_scheduler() -> None:
                     config.LP_MPC_HOURS_LIST,
                     tz,
                 )
+            # Forecast revision trigger (Waze MPC story #144): hourly Open-Meteo refresh
+            # + delta detector. Persists every fetch (audit trail + LP source); fires MPC
+            # only when next-6h delta exceeds threshold. Skipped if kill switch off.
+            from apscheduler.triggers.interval import IntervalTrigger
+            _background_scheduler.add_job(
+                bulletproof_forecast_refresh_job,
+                IntervalTrigger(minutes=int(config.MPC_FORECAST_REFRESH_INTERVAL_MINUTES)),
+                id="bulletproof_forecast_refresh",
+            )
+            logger.info(
+                "Forecast refresh cron scheduled every %d min",
+                int(config.MPC_FORECAST_REFRESH_INTERVAL_MINUTES),
+            )
             # Nightly plan push: dispatch Fox + Daikin just after the Daikin daily quota
             # rollover (midnight UTC). Anchored to UTC regardless of BULLETPROOF_TIMEZONE
             # so the push always lands on a fresh quota day.
@@ -1110,7 +1189,11 @@ def reregister_cron_jobs(reason: str = "runtime_settings_change") -> dict[str, A
     removed: list[str] = []
     for job in list(_background_scheduler.get_jobs()):
         jid = job.id
-        if jid == "bulletproof_plan_push" or jid.startswith("bulletproof_mpc_"):
+        if (
+            jid == "bulletproof_plan_push"
+            or jid.startswith("bulletproof_mpc_")
+            or jid == "bulletproof_forecast_refresh"
+        ):
             try:
                 _background_scheduler.remove_job(jid)
                 removed.append(jid)
@@ -1139,15 +1222,26 @@ def reregister_cron_jobs(reason: str = "runtime_settings_change") -> dict[str, A
     )
     added.append(push_jid)
 
+    # Forecast refresh interval is hot-reloadable via runtime_settings.
+    from apscheduler.triggers.interval import IntervalTrigger
+    forecast_jid = "bulletproof_forecast_refresh"
+    _background_scheduler.add_job(
+        bulletproof_forecast_refresh_job,
+        IntervalTrigger(minutes=int(config.MPC_FORECAST_REFRESH_INTERVAL_MINUTES)),
+        id=forecast_jid,
+    )
+    added.append(forecast_jid)
+
     logger.info(
         "Cron jobs re-registered (reason=%s): removed=%s added=%s "
-        "plan_push=%02d:%02d UTC mpc_hours=%s",
+        "plan_push=%02d:%02d UTC mpc_hours=%s forecast_refresh=%dmin",
         reason,
         removed,
         added,
         config.LP_PLAN_PUSH_HOUR,
         config.LP_PLAN_PUSH_MINUTE,
         config.LP_MPC_HOURS_LIST,
+        int(config.MPC_FORECAST_REFRESH_INTERVAL_MINUTES),
     )
     return {
         "status": "ok",
@@ -1156,4 +1250,5 @@ def reregister_cron_jobs(reason: str = "runtime_settings_change") -> dict[str, A
         "added": added,
         "plan_push_utc": f"{config.LP_PLAN_PUSH_HOUR:02d}:{config.LP_PLAN_PUSH_MINUTE:02d}",
         "mpc_hours": config.LP_MPC_HOURS_LIST,
+        "forecast_refresh_minutes": int(config.MPC_FORECAST_REFRESH_INTERVAL_MINUTES),
     }
