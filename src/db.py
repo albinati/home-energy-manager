@@ -582,6 +582,21 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_pv_rt_hist_time ON pv_realtime_history(captured_at)"
     )
 
+    # V15: pv_calibration_hourly — cached per-hour-of-day PV calibration factors.
+    # Recomputed by ``compute_pv_calibration_hourly_table`` (daily cron + on-demand).
+    # The LP reads from this table on every solve; falls back to the flat
+    # ``compute_pv_calibration_factor`` when the table is empty (cold start, < 7 days
+    # of telemetry, etc).
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS pv_calibration_hourly (
+            hour_utc        INTEGER PRIMARY KEY CHECK(hour_utc >= 0 AND hour_utc < 24),
+            factor          REAL NOT NULL,
+            samples         INTEGER NOT NULL,
+            window_days     INTEGER NOT NULL,
+            computed_at     TEXT NOT NULL
+        )"""
+    )
+
     # V14: presence_periods — manually-flagged periods of household presence
     # (home / travel / guests) so future load-pattern analyses + LP calibration
     # can de-bias the rolling load profile by occupancy. Read by analytics
@@ -2861,6 +2876,58 @@ def get_meteo_forecast_at(fetch_at_utc: str) -> list[dict[str, Any]]:
                 (fetch_at_utc,),
             )
             return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
+def upsert_pv_calibration_hourly(
+    factors: dict[int, float],
+    samples: dict[int, int],
+    window_days: int,
+) -> int:
+    """Replace the ``pv_calibration_hourly`` table with the freshly-computed factors.
+
+    Returns the number of rows written. Idempotent ``INSERT OR REPLACE`` per hour;
+    hours not present in ``factors`` are left as-is (so a partial recompute doesn't
+    wipe valid data for other hours).
+    """
+    if not factors:
+        return 0
+    from datetime import UTC as _UTC, datetime as _dt
+    now = _dt.now(_UTC).isoformat()
+    n = 0
+    with _lock:
+        conn = get_connection()
+        try:
+            for hour, factor in factors.items():
+                conn.execute(
+                    """INSERT OR REPLACE INTO pv_calibration_hourly
+                       (hour_utc, factor, samples, window_days, computed_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (
+                        int(hour),
+                        float(factor),
+                        int(samples.get(hour, 0)),
+                        int(window_days),
+                        now,
+                    ),
+                )
+                n += 1
+            conn.commit()
+        finally:
+            conn.close()
+    return n
+
+
+def get_pv_calibration_hourly() -> dict[int, float]:
+    """Return cached per-hour-of-day calibration factors, or ``{}`` when empty."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT hour_utc, factor FROM pv_calibration_hourly"
+            )
+            return {int(r[0]): float(r[1]) for r in cur.fetchall()}
         finally:
             conn.close()
 
