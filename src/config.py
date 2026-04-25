@@ -393,9 +393,10 @@ class Config:
     LP_SHOWER_MORNING_LOCAL: str = (os.getenv("LP_SHOWER_MORNING_LOCAL") or "").strip()
     LP_SHOWER_EVENING_LOCAL: str = (os.getenv("LP_SHOWER_EVENING_LOCAL") or "20:00").strip()
 
-    # Terminal SoC constraint: if > 0 the LP enforces SoC ≥ this value at the end of the horizon.
-    # 0 = soft terminal cost only (legacy behaviour). Typical: 20–30% of BATTERY_CAPACITY_KWH.
-    LP_SOC_FINAL_KWH: float = float(os.getenv("LP_SOC_FINAL_KWH", "0"))
+    # Terminal SoC constraint: now runtime-tunable via /api/v1/settings — see @property below.
+    # Default = 25% of BATTERY_CAPACITY_KWH so each LP run honours an anti-myopia floor at
+    # the end of its 24h rolling horizon. Without this, individual LP runs may plan to drain
+    # the battery near the boundary, executing those decisions before the next MPC corrects.
 
     # Model Predictive Control: re-run the LP intra-day with refreshed SoC / tank / forecasts.
     # LP_MPC_HOURS is runtime-tunable via /api/v1/settings (#52); cron jobs are
@@ -501,6 +502,14 @@ class Config:
     @DAIKIN_CONTROL_MODE.setter
     def DAIKIN_CONTROL_MODE(self, value: str) -> None:
         self._rt_set("DAIKIN_CONTROL_MODE", str(value).strip().lower())
+
+    @property
+    def LP_SOC_FINAL_KWH(self) -> float:
+        return float(self._rt_get("LP_SOC_FINAL_KWH"))
+
+    @LP_SOC_FINAL_KWH.setter
+    def LP_SOC_FINAL_KWH(self, value: float) -> None:
+        self._rt_set("LP_SOC_FINAL_KWH", float(value))
 
     @property
     def LP_PLAN_PUSH_HOUR(self) -> int:
