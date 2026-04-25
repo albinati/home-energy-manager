@@ -539,6 +539,27 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     if "last_notified_at" not in pc_cols_v13:
         conn.execute("ALTER TABLE plan_consent ADD COLUMN last_notified_at REAL")
 
+    # V14: agile_export_rates — Octopus Outgoing Agile half-hourly tariff. Mirrors
+    # agile_rates schema 1:1 so the LP can treat export pricing as time-varying just
+    # like import. Without this, the LP previously used a flat EXPORT_RATE_PENCE
+    # constant and missed the ±20p/kWh swings in Outgoing Agile (peak hours pay much
+    # more than overnight, which inverts the optimal export-vs-store trade-off
+    # depending on the slot).
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS agile_export_rates (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            valid_from      TEXT NOT NULL,
+            valid_to        TEXT NOT NULL,
+            value_inc_vat   REAL NOT NULL,
+            tariff_code     TEXT NOT NULL,
+            fetched_at      TEXT NOT NULL,
+            UNIQUE(valid_from, tariff_code)
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agile_export_rates_valid_from ON agile_export_rates(valid_from)"
+    )
+
     # V14: pv_realtime_history — append-only per-sample telemetry for PV
     # calibration analysis. Backfilled from Fox CSV exports (5-min) and topped
     # up forward by bulletproof_pv_telemetry_job (30-min default). Columns
@@ -665,6 +686,73 @@ def save_agile_rates(rates: list[dict[str, Any]], tariff_code: str) -> int:
             dt_last.astimezone(tz_local).strftime("%a %d %b %H:%M %Z"),
         )
     return n
+
+
+def save_agile_export_rates(rates: list[dict[str, Any]], tariff_code: str) -> int:
+    """Upsert Agile **export** (Outgoing) rate rows into ``agile_export_rates``.
+
+    Mirror of :func:`save_agile_rates`: each rate dict has ``value_inc_vat``,
+    ``valid_from``, ``valid_to`` (ISO). Timestamps normalised to UTC Z.
+    """
+    if not rates or not tariff_code:
+        return 0
+    now = datetime.now(UTC).isoformat()
+    n = 0
+    with _lock:
+        conn = get_connection()
+        try:
+            for r in rates:
+                vf = r.get("valid_from")
+                vt = r.get("valid_to")
+                v = r.get("value_inc_vat")
+                if vf is None or vt is None or v is None:
+                    continue
+                try:
+                    vf_norm = _normalize_utc_iso(str(vf))
+                    vt_norm = _normalize_utc_iso(str(vt))
+                except ValueError:
+                    logger.error("TZ-AUDIT: unparseable export timestamp skipped: vf=%s vt=%s", vf, vt)
+                    continue
+                conn.execute(
+                    """INSERT INTO agile_export_rates (valid_from, valid_to, value_inc_vat, tariff_code, fetched_at)
+                       VALUES (?, ?, ?, ?, ?)
+                       ON CONFLICT(valid_from, tariff_code) DO UPDATE SET
+                         valid_to=excluded.valid_to,
+                         value_inc_vat=excluded.value_inc_vat,
+                         fetched_at=excluded.fetched_at""",
+                    (vf_norm, vt_norm, float(v), tariff_code, now),
+                )
+                n += 1
+            conn.commit()
+        finally:
+            conn.close()
+    if n:
+        logger.info("Octopus export rates saved: %d rows for %s", n, tariff_code)
+    return n
+
+
+def get_agile_export_rates_in_range(
+    period_from_iso: str,
+    period_to_iso: str,
+) -> list[dict[str, Any]]:
+    """Return export rate rows whose ``valid_from`` falls in ``[period_from, period_to)``.
+
+    Returns ``[]`` when the table is empty (no Outgoing tariff configured / not yet
+    fetched). Caller is responsible for the fallback to a flat constant.
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT valid_from, valid_to, value_inc_vat, tariff_code
+                   FROM agile_export_rates
+                   WHERE valid_from >= ? AND valid_from < ?
+                   ORDER BY valid_from""",
+                (period_from_iso, period_to_iso),
+            )
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
 
 
 def get_agile_rates_daily_summary(

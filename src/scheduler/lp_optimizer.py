@@ -177,13 +177,23 @@ def solve_lp(
     initial: LpInitialState,
     tz: ZoneInfo,
     micro_climate_offset_c: float = 0.0,
+    export_price_pence: list[float] | None = None,
 ) -> LpPlan:
-    """Build and solve the MILP. Raises ``ValueError`` on dimension mismatch."""
+    """Build and solve the MILP. Raises ``ValueError`` on dimension mismatch.
+
+    ``export_price_pence`` (optional): half-hourly Octopus Outgoing Agile rates.
+    When provided, the objective uses the per-slot value so the LP correctly
+    weighs export revenue at the actual time-of-use rate. When ``None`` (no
+    export tariff configured / not yet fetched) we fall back to the flat
+    ``EXPORT_RATE_PENCE`` constant.
+    """
     n = len(slot_starts_utc)
     if n == 0:
         raise ValueError("LP: empty horizon")
     if len(price_pence) != n or len(base_load_kwh) != n:
         raise ValueError("LP: price/base_load length mismatch")
+    if export_price_pence is not None and len(export_price_pence) != n:
+        raise ValueError("LP: export_price_pence length mismatch")
     if len(weather.pv_kwh_per_slot) != n:
         raise ValueError("LP: weather horizon mismatch")
 
@@ -328,7 +338,12 @@ def solve_lp(
     # -----------------------------------------------------------------------
     cycle_pen = float(config.LP_CYCLE_PENALTY_PENCE_PER_KWH)
     comfort_pen = float(config.LP_COMFORT_SLACK_PENCE_PER_DEGC_SLOT)
-    export_rate = float(config.EXPORT_RATE_PENCE)
+    flat_export_rate = float(config.EXPORT_RATE_PENCE)
+    # Per-slot export prices (Octopus Outgoing Agile) when supplied; flat fallback otherwise.
+    export_rate_line: list[float] = (
+        list(export_price_pence) if export_price_pence is not None
+        else [flat_export_rate] * n
+    )
 
     for i in range(n):
         e_hp_i = e_dhw[i] + e_space[i]
@@ -549,7 +564,10 @@ def solve_lp(
     # -----------------------------------------------------------------------
     # Objective
     # -----------------------------------------------------------------------
-    obj_grid = pulp.lpSum(imp[i] * price_line[i] - exp[i] * export_rate for i in range(n))
+    obj_grid = pulp.lpSum(
+        imp[i] * price_line[i] - exp[i] * export_rate_line[i]
+        for i in range(n)
+    )
     obj_cycle = cycle_pen * pulp.lpSum(chg[i] + dis[i] for i in range(n))
     obj_comfort = comfort_pen * pulp.lpSum(s_lo[i] + s_hi[i] for i in range(n))
     # DHW overshoot above the comfort ceiling is not a comfort issue — it's just stored

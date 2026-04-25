@@ -1075,6 +1075,50 @@ def _persist_lp_snapshots(
     db.save_lp_snapshots(run_id=int(run_id), inputs_row=inputs_row, solution_rows=solution_rows)
 
 
+def _build_export_price_line(slot_starts_utc: list[datetime]) -> list[float] | None:
+    """Map per-slot start timestamps to the matching ``agile_export_rates`` value.
+
+    Returns ``None`` when no Outgoing tariff is configured or the table has no
+    rows in the planning window — caller falls back to the flat constant.
+    Missing per-slot rows are filled with the flat constant so the returned
+    list always matches the slot count when non-None.
+    """
+    if not slot_starts_utc:
+        return None
+    if not (config.OCTOPUS_EXPORT_TARIFF_CODE or "").strip():
+        return None
+    period_from = slot_starts_utc[0].isoformat()
+    period_to = (slot_starts_utc[-1] + timedelta(minutes=30)).isoformat()
+    rows = db.get_agile_export_rates_in_range(period_from, period_to)
+    if not rows:
+        return None
+    by_start: dict[str, float] = {}
+    for r in rows:
+        try:
+            iso_norm = r["valid_from"].replace("+00:00", "Z")
+            by_start[iso_norm] = float(r["value_inc_vat"])
+        except (KeyError, TypeError, ValueError):
+            continue
+    flat = float(config.EXPORT_RATE_PENCE)
+    out: list[float] = []
+    n_matched = 0
+    for st in slot_starts_utc:
+        key = st.isoformat().replace("+00:00", "Z")
+        v = by_start.get(key)
+        if v is not None:
+            out.append(v)
+            n_matched += 1
+        else:
+            out.append(flat)
+    if n_matched == 0:
+        return None  # nothing matched — let caller use flat path entirely
+    logger.info(
+        "Export prices: matched %d/%d slots from agile_export_rates (rest use flat %.2fp)",
+        n_matched, len(slot_starts_utc), flat,
+    )
+    return out
+
+
 def _run_optimizer_lp(fox: FoxESSClient | None, daikin: Any | None = None) -> dict[str, Any]:
     """PuLP MILP horizon planner (V8). Falls back to heuristic if solve is not optimal."""
     from .lp_dispatch import (
@@ -1143,6 +1187,11 @@ def _run_optimizer_lp(fox: FoxESSClient | None, daikin: Any | None = None) -> di
     initial = read_lp_initial_state(daikin)
     micro_climate_offset = db.get_micro_climate_offset_c(config.DAIKIN_MICRO_CLIMATE_LOOKBACK)
 
+    # Per-slot Octopus Outgoing Agile (export) prices. When the table is empty (no
+    # tariff configured / not yet fetched), the LP falls back to the flat
+    # EXPORT_RATE_PENCE constant, preserving legacy behaviour.
+    export_prices = _build_export_price_line(starts)
+
     plan = solve_lp(
         slot_starts_utc=starts,
         price_pence=prices,
@@ -1151,6 +1200,7 @@ def _run_optimizer_lp(fox: FoxESSClient | None, daikin: Any | None = None) -> di
         initial=initial,
         tz=tz,
         micro_climate_offset_c=micro_climate_offset,
+        export_price_pence=export_prices,
     )
     if not plan.ok:
         logger.warning("PuLP status %s — falling back to heuristic classifier", plan.status)
