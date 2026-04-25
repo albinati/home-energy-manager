@@ -10,7 +10,6 @@ from ..config import config
 from ..foxess.client import FoxESSClient, FoxESSError
 from ..notifier import notify_critical
 from .agile import fetch_agile_rates
-from .optimizer import run_optimizer
 
 logger = logging.getLogger(__name__)
 
@@ -56,10 +55,14 @@ def fetch_and_store_rates(fox: FoxESSClient | None = None) -> dict[str, Any]:
     summary: dict[str, Any] = {"ok": True, "rows": n}
     if config.USE_BULLETPROOF_ENGINE:
         try:
-            # Compute plan and log to DB; device dispatch is handled by the nightly push job.
-            opt = run_optimizer(fox if config.LP_MPC_WRITE_DEVICES else None)
-            summary["optimizer"] = opt
-            # notify_strategy_update removed — notify_plan_proposed in _write_plan_consent covers this
+            # Route through bulletproof_mpc_job so the cooldown gate, plan-delta logging
+            # and trigger_reason tagging apply uniformly across all event-driven re-plans.
+            # Octopus rate publication is itself an event ("new prices known") so we ALWAYS
+            # write the hardware on this path, regardless of LP_MPC_WRITE_DEVICES.
+            from .runner import bulletproof_mpc_job
+
+            bulletproof_mpc_job(force_write_devices=True, trigger_reason="octopus_fetch")
+            summary["optimizer"] = {"ok": True, "trigger": "octopus_fetch"}
         except Exception as e:
             logger.exception("Optimizer after fetch failed: %s", e)
             summary["optimizer_error"] = str(e)
