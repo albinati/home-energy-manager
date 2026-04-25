@@ -445,6 +445,12 @@ class Config:
     # Plan-delta observability: how many hours of overlap between previous and new plan to
     # measure when logging the post-trigger delta. 6 h captures the immediate horizon.
     MPC_PLAN_DELTA_LOOKAHEAD_HOURS: int = int(os.getenv("MPC_PLAN_DELTA_LOOKAHEAD_HOURS", "6"))
+    # Forecast revision trigger (Open-Meteo updates ~hourly): how often to re-fetch and
+    # compare; how far ahead to compare; what delta is "material enough" to re-plan.
+    # MPC_FORECAST_REFRESH_INTERVAL_MINUTES is runtime-tunable (cron_reload=True) — see @property below.
+    MPC_FORECAST_DRIFT_LOOKAHEAD_HOURS: int = int(os.getenv("MPC_FORECAST_DRIFT_LOOKAHEAD_HOURS", "6"))
+    MPC_FORECAST_DRIFT_SOLAR_KWH_THRESHOLD: float = float(os.getenv("MPC_FORECAST_DRIFT_SOLAR_KWH_THRESHOLD", "2.0"))
+    MPC_FORECAST_DRIFT_TEMP_C_THRESHOLD: float = float(os.getenv("MPC_FORECAST_DRIFT_TEMP_C_THRESHOLD", "2.0"))
 
     @property
     def DAIKIN_COP_CURVE(self) -> list[tuple[float, float]]:
@@ -527,6 +533,14 @@ class Config:
     @LP_SOC_FINAL_KWH.setter
     def LP_SOC_FINAL_KWH(self, value: float) -> None:
         self._rt_set("LP_SOC_FINAL_KWH", float(value))
+
+    @property
+    def MPC_FORECAST_REFRESH_INTERVAL_MINUTES(self) -> int:
+        return int(self._rt_get("MPC_FORECAST_REFRESH_INTERVAL_MINUTES"))
+
+    @MPC_FORECAST_REFRESH_INTERVAL_MINUTES.setter
+    def MPC_FORECAST_REFRESH_INTERVAL_MINUTES(self, value: int) -> None:
+        self._rt_set("MPC_FORECAST_REFRESH_INTERVAL_MINUTES", int(value))
 
     @property
     def LP_PLAN_PUSH_HOUR(self) -> int:

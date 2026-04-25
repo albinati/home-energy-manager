@@ -2651,6 +2651,40 @@ def get_meteo_forecast_at(fetch_at_utc: str) -> list[dict[str, Any]]:
             conn.close()
 
 
+def get_meteo_forecast_history_latest_before(when_utc: str) -> list[dict[str, Any]]:
+    """Return all rows of the most recent forecast fetch strictly before ``when_utc``.
+
+    Used by the Waze MPC forecast-revision trigger (Epic #73 — story #144) to
+    compare a freshly-pulled forecast against the previous version. Returns
+    ``[]`` when no prior fetch exists.
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT forecast_fetch_at_utc
+                   FROM meteo_forecast_history
+                   WHERE forecast_fetch_at_utc < ?
+                   ORDER BY forecast_fetch_at_utc DESC
+                   LIMIT 1""",
+                (when_utc,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return []
+            prev_fetch_at = row[0]
+            cur = conn.execute(
+                """SELECT slot_time, temp_c, solar_w_m2
+                   FROM meteo_forecast_history
+                   WHERE forecast_fetch_at_utc = ?
+                   ORDER BY slot_time""",
+                (prev_fetch_at,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
 def log_config_change(
     key: str,
     value: str | None,

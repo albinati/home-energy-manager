@@ -170,6 +170,20 @@ SCHEMA: dict[str, SettingSpec] = {
         cron_reload=True,
         description="Local hours at which the MPC re-solves the LP (e.g. [6,12,21]).",
     ),
+    "MPC_FORECAST_REFRESH_INTERVAL_MINUTES": SettingSpec(
+        key="MPC_FORECAST_REFRESH_INTERVAL_MINUTES",
+        type_name="int",
+        env_default=_int_env("MPC_FORECAST_REFRESH_INTERVAL_MINUTES", "60"),
+        min_value=10,
+        max_value=720,
+        cron_reload=True,
+        description=(
+            "Interval (minutes) for the Open-Meteo refresh + revision-trigger detector. "
+            "Each tick re-fetches the forecast and fires an MPC re-plan if the next 6h of "
+            "solar/temp diverged materially from the previous fetch. Lower = quicker reaction "
+            "to weather changes; higher = less Open-Meteo traffic."
+        ),
+    ),
     # Terminal SoC floor — anti-myopia. Each LP run must end its 24h horizon with
     # SoC ≥ this value (kWh). Without it, individual runs may plan to drain the
     # battery near the boundary before the next MPC corrects. Default = 25 % of
