@@ -193,6 +193,29 @@ def test_cron_reload_reregisters_jobs_when_active(monkeypatch):
     assert any(j.id == "bulletproof_octopus_fetch" for j in fake.get_jobs())
 
 
+def test_pv_calibration_window_days_runtime_tunable(monkeypatch):
+    """PV_CALIBRATION_WINDOW_DAYS should be settable via runtime_settings + read by config."""
+    import src.runtime_settings as rts
+    from src.config import config
+
+    monkeypatch.setattr(config, "_overrides", {}, raising=False)
+    rts.set_setting("PV_CALIBRATION_WINDOW_DAYS", 60)
+    assert config.PV_CALIBRATION_WINDOW_DAYS == 60
+    rts.delete_setting("PV_CALIBRATION_WINDOW_DAYS")
+
+
+def test_pv_calibration_window_days_default_30(monkeypatch):
+    """Default window after the 2026-04-25 calibration analysis fix is 30 days."""
+    import src.runtime_settings as rts
+    from src.config import config
+
+    monkeypatch.setattr(config, "_overrides", {}, raising=False)
+    rts.delete_setting("PV_CALIBRATION_WINDOW_DAYS")
+    monkeypatch.delenv("PV_CALIBRATION_WINDOW_DAYS", raising=False)
+    rts._cache.pop("PV_CALIBRATION_WINDOW_DAYS", None)
+    assert config.PV_CALIBRATION_WINDOW_DAYS == 30
+
+
 def test_lp_soc_final_kwh_default_scales_with_battery_capacity(monkeypatch):
     """Default = 25 % of BATTERY_CAPACITY_KWH when no explicit override is set."""
     import src.runtime_settings as rts

@@ -151,7 +151,7 @@ def _build_pv_hourly_ceiling(limit_days: int = 250) -> dict[int, float]:
 
 
 def compute_pv_calibration_factor(
-    limit_days: int = 250,
+    limit_days: int | None = None,
     min_solar_kwh: float = 1.0,
 ) -> float:
     """Compute rolling PV calibration factor: mean(actual / modelled) from Fox history.
@@ -162,7 +162,12 @@ def compute_pv_calibration_factor(
     - If ``PV_FORECAST_SCALE_FACTOR`` in config is > 0, that manual value is used directly.
     - If no Fox history is in the DB, falls back to 1.0.
     - Outlier days (ratio > 1.5) are dropped as they indicate archive data anomalies.
+    - ``limit_days`` defaults to ``config.PV_CALIBRATION_WINDOW_DAYS`` (runtime-tunable).
+      Shorter windows track seasonality faster; longer windows are more stable but
+      slow to react to spring/autumn transitions.
     """
+    if limit_days is None:
+        limit_days = int(getattr(config, "PV_CALIBRATION_WINDOW_DAYS", 30))
     manual = float(getattr(config, "PV_FORECAST_SCALE_FACTOR", 0.0))
     if manual > 0:
         return manual
