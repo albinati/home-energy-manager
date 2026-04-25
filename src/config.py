@@ -429,6 +429,23 @@ class Config:
     # original behaviour (every LP window becomes a Fox group, including SelfUse gaps).
     FOX_SKIP_TRIVIAL_SELFUSE_GROUPS: bool = os.getenv("FOX_SKIP_TRIVIAL_SELFUSE_GROUPS", "true").lower() in ("1", "true", "yes")
 
+    # Event-driven MPC ("Waze recalculating") — see Epic #73.
+    # Kill switch: setting this False disables drift + forecast triggers (cron MPC continues).
+    MPC_EVENT_DRIVEN_ENABLED: bool = os.getenv("MPC_EVENT_DRIVEN_ENABLED", "true").lower() in ("1", "true", "yes")
+    # Cooldown applied at the entry of bulletproof_mpc_job — guards against rapid-fire
+    # back-to-back runs when correlated triggers (drift + forecast + Octopus) arrive together.
+    MPC_COOLDOWN_SECONDS: int = int(os.getenv("MPC_COOLDOWN_SECONDS", "300"))
+    # SoC drift trigger: real SoC (%) vs the LP-predicted trajectory at "now". Threshold
+    # calibrated against 7 d of execution_log: p95 of consecutive-snapshot delta = 14 %, so
+    # 15 % filters most noise while catching real divergence. Hysteresis requires the drift
+    # to persist across this many consecutive heartbeat ticks (heartbeat = 120 s, so 2 ticks
+    # ≈ 4 min sustained — filters single-tick spikes from DHW boost cycles or load surges).
+    MPC_DRIFT_SOC_THRESHOLD_PERCENT: float = float(os.getenv("MPC_DRIFT_SOC_THRESHOLD_PERCENT", "15"))
+    MPC_DRIFT_HYSTERESIS_TICKS: int = int(os.getenv("MPC_DRIFT_HYSTERESIS_TICKS", "2"))
+    # Plan-delta observability: how many hours of overlap between previous and new plan to
+    # measure when logging the post-trigger delta. 6 h captures the immediate horizon.
+    MPC_PLAN_DELTA_LOOKAHEAD_HOURS: int = int(os.getenv("MPC_PLAN_DELTA_LOOKAHEAD_HOURS", "6"))
+
     @property
     def DAIKIN_COP_CURVE(self) -> list[tuple[float, float]]:
         return parse_cop_curve_csv(self.DAIKIN_COP_CURVE_STR)
