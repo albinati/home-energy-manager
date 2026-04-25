@@ -51,7 +51,7 @@ def test_slot_fox_tuple_force_charge_uses_target_and_reserve() -> None:
         lp_grid_import_w=1500,
         target_soc_pct=62,
     )
-    wm, fds, pwr, msg = _slot_fox_tuple(s)
+    wm, fds, pwr, msg, max_soc = _slot_fox_tuple(s)
     assert wm == "ForceCharge"
     assert fds == 62
     assert pwr == 1500
@@ -67,7 +67,7 @@ def test_slot_fox_tuple_cheap_fallback_when_no_target() -> None:
         kind="cheap",
         target_soc_pct=None,
     )
-    wm, fds, pwr, msg = _slot_fox_tuple(s)
+    wm, fds, pwr, msg, max_soc = _slot_fox_tuple(s)
     assert fds == 95
     assert msg == _min_r()
 
@@ -106,7 +106,7 @@ def test_slot_fox_tuple_peak_export_uses_reserve_min_soc() -> None:
         price_pence=35.0,
         kind="peak_export",
     )
-    wm, fds, pwr, msg = _slot_fox_tuple(s)
+    wm, fds, pwr, msg, max_soc = _slot_fox_tuple(s)
     assert wm == "ForceDischarge"
     assert msg == _min_r()
 
@@ -119,9 +119,49 @@ def test_slot_fox_tuple_standard_selfuse_uses_reserve_min_soc() -> None:
         price_pence=12.0,
         kind="standard",
     )
-    wm, fds, pwr, msg = _slot_fox_tuple(s)
+    wm, fds, pwr, msg, max_soc = _slot_fox_tuple(s)
     assert wm == "SelfUse"
     assert msg == _min_r()
+
+
+def test_solar_charge_emits_solar_sponge_max_soc_100() -> None:
+    """A solar_charge slot must emit SelfUse + minSoc=100 + maxSoc=100 — the
+    canonical Fox V3 'Solar Sponge' shape so the firmware never tops via grid past 100 %."""
+    t0 = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    s = HalfHourSlot(
+        start_utc=t0,
+        end_utc=t0 + timedelta(minutes=30),
+        price_pence=10.0,
+        kind="solar_charge",
+    )
+    wm, fds, pwr, msg, max_soc = _slot_fox_tuple(s)
+    assert wm == "SelfUse"
+    assert fds is None
+    assert pwr is None
+    assert msg == 100
+    assert max_soc == 100
+    # Confirm propagation through the merge pipeline + into the API payload.
+    groups = _merge_fox_groups([s])
+    assert len(groups) == 1
+    assert groups[0].max_soc == 100
+    assert groups[0].to_api_dict()["extraParam"]["maxSoc"] == 100
+
+
+def test_non_solar_charge_kinds_have_no_max_soc() -> None:
+    """ForceCharge / ForceDischarge / Backup / standard SelfUse must NOT emit maxSoc —
+    only solar_charge does. Defensive against accidentally capping other modes."""
+    t0 = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    for kind in ("cheap", "negative", "standard", "negative_hold", "peak_export"):
+        s = HalfHourSlot(
+            start_utc=t0,
+            end_utc=t0 + timedelta(minutes=30),
+            price_pence=5.0,
+            kind=kind,
+            lp_grid_import_w=1000 if kind in ("cheap", "negative") else None,
+            target_soc_pct=80 if kind in ("cheap", "negative") else None,
+        )
+        _, _, _, _, max_soc = _slot_fox_tuple(s)
+        assert max_soc is None, f"{kind} must NOT set max_soc, got {max_soc}"
 
 
 def test_negative_hold_kind_when_battery_full_and_price_negative() -> None:
@@ -155,7 +195,7 @@ def test_negative_hold_kind_when_battery_full_and_price_negative() -> None:
         assert s.kind == "negative_hold", (
             f"slot {i} (price={plan.price_pence[i]}p, chg=0, full SoC): kind={s.kind!r}"
         )
-    wm, fds, pwr, _ = _slot_fox_tuple(slots[0])
+    wm, fds, pwr, _, _ = _slot_fox_tuple(slots[0])
     assert wm == "Backup", f"negative_hold must map to Fox Backup mode, got {wm!r}"
     assert fds is None
     assert pwr is None
