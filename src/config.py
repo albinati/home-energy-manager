@@ -543,6 +543,14 @@ class Config:
         self._rt_set("MPC_FORECAST_REFRESH_INTERVAL_MINUTES", int(value))
 
     @property
+    def PV_TELEMETRY_INTERVAL_MINUTES(self) -> int:
+        return int(self._rt_get("PV_TELEMETRY_INTERVAL_MINUTES"))
+
+    @PV_TELEMETRY_INTERVAL_MINUTES.setter
+    def PV_TELEMETRY_INTERVAL_MINUTES(self, value: int) -> None:
+        self._rt_set("PV_TELEMETRY_INTERVAL_MINUTES", int(value))
+
+    @property
     def LP_PLAN_PUSH_HOUR(self) -> int:
         return int(self._rt_get("LP_PLAN_PUSH_HOUR"))
 

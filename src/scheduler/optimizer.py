@@ -265,14 +265,15 @@ def _slot_fox_tuple(
     s: HalfHourSlot,
     *,
     peak_export_discharge: bool = False,
-) -> tuple[str, int | None, int | None, int]:
-    """work_mode, fd_soc, fd_pwr, min_soc_on_grid for Scheduler V3.
+) -> tuple[str, int | None, int | None, int, int | None]:
+    """``(work_mode, fd_soc, fd_pwr, min_soc_on_grid, max_soc)`` for Scheduler V3.
 
     For ForceCharge slots the ``fdPwr`` (W) is taken from ``s.lp_grid_import_w`` when set
     (LP path), or falls back to the configured ``FOX_FORCE_CHARGE_*_PWR`` constants.
     For solar_charge slots (LP import≈0, battery charges from PV) we use SelfUse with an
     elevated minSocOnGrid so the battery is held at the LP's target level without forcing
-    any grid import — PV handles the charging naturally.
+    any grid import — PV handles the charging naturally. We ALSO set ``maxSoc=100`` to
+    explicitly give the firmware the "Solar Sponge" cue: PV-only fill up to 100 % cap.
     """
     min_r = int(config.MIN_SOC_RESERVE_PERCENT)
     if s.kind == "solar_charge":
@@ -280,22 +281,25 @@ def _slot_fox_tuple(
         # SelfUse mode forbids active grid import regardless of minSocOnGrid — this only
         # blocks discharge, letting excess PV accumulate. MPC at 06:00/12:00 corrects
         # for cloud shortfalls by switching to ForceCharge if SoC lags the target.
+        # maxSoc=100 is the canonical Fox V3 "Solar Sponge" cue (per TonyM1958/FoxESS-Cloud
+        # wiki) — explicit cap so the firmware never tries to top via grid past 100 %.
         min_soc = int(getattr(config, "FOX_SOLAR_CHARGE_MIN_SOC_PERCENT", 100))
-        return ("SelfUse", None, None, min_soc)
+        return ("SelfUse", None, None, min_soc, 100)
     if s.kind == "negative":
         pwr = s.lp_grid_import_w if s.lp_grid_import_w is not None else config.FOX_FORCE_CHARGE_MAX_PWR
         fds = s.target_soc_pct if s.target_soc_pct is not None else 100
-        return ("ForceCharge", fds, pwr, min_r)
+        return ("ForceCharge", fds, pwr, min_r, None)
     if s.kind == "cheap":
         pwr = s.lp_grid_import_w if s.lp_grid_import_w is not None else config.FOX_FORCE_CHARGE_NORMAL_PWR
         fds = s.target_soc_pct if s.target_soc_pct is not None else 95
-        return ("ForceCharge", fds, pwr, min_r)
+        return ("ForceCharge", fds, pwr, min_r, None)
     if s.kind == "peak_export":
         return (
             "ForceDischarge",
             int(config.EXPORT_DISCHARGE_FLOOR_SOC_PERCENT),
             config.FOX_FORCE_CHARGE_MAX_PWR,
             min_r,
+            None,
         )
     if s.kind == "peak" and peak_export_discharge:
         return (
@@ -303,13 +307,14 @@ def _slot_fox_tuple(
             int(config.EXPORT_DISCHARGE_FLOOR_SOC_PERCENT),
             config.FOX_FORCE_CHARGE_MAX_PWR,
             min_r,
+            None,
         )
     if s.kind == "negative_hold":
         # Fox "Backup" work mode = native "hold battery": no discharge, no grid
         # charge. Directly enforces the LP's dis = 0 constraint during negative
         # slots when chg is also zero (battery saturated or PV alone suffices).
-        return ("Backup", None, None, min_r)
-    return ("SelfUse", None, None, min_r)
+        return ("Backup", None, None, min_r, None)
+    return ("SelfUse", None, None, min_r, None)
 
 
 def _optimization_preset_away_like() -> bool:
@@ -503,22 +508,28 @@ def _merge_fox_groups(
             victim = len(merged) - 2
         a, _, ka = merged[victim]
         _, d, kb = merged[victim + 1]
+        ka_max = ka[4] if len(ka) > 4 else None
+        kb_max = kb[4] if len(kb) > 4 else None
         if ka[0] == "ForceCharge" and kb[0] == "ForceCharge":
             nk = (
                 "ForceCharge",
                 max(ka[1] or 0, kb[1] or 0),
                 max(ka[2] or 0, kb[2] or 0),
                 max(ka[3], kb[3]),
+                _max_optional(ka_max, kb_max),
             )
         else:
-            nk = ("SelfUse", None, None, int(config.MIN_SOC_RESERVE_PERCENT))
+            nk = ("SelfUse", None, None, int(config.MIN_SOC_RESERVE_PERCENT), None)
         merged[victim] = (a, d, nk)
         del merged[victim + 1]
 
     merged = _split_at_local_midnight(merged, tz)
 
     groups: list[SchedulerGroup] = []
-    for start_utc, end_utc, (wm, fds, fdp, msg) in merged:
+    for start_utc, end_utc, key in merged:
+        # Tuple is now (wm, fds, fdp, msg, max_soc); accept legacy 4-tuples defensively.
+        wm, fds, fdp, msg = key[0], key[1], key[2], key[3]
+        max_soc = key[4] if len(key) > 4 else None
         ls = start_utc.astimezone(tz)
         le = end_utc.astimezone(tz)
         eh, em = le.hour, le.minute
@@ -535,6 +546,7 @@ def _merge_fox_groups(
                 min_soc_on_grid=msg,
                 fd_soc=fds,
                 fd_pwr=fdp,
+                max_soc=max_soc,
             )
         )
     if truncate_horizon:
@@ -545,7 +557,10 @@ def _merge_fox_groups(
 def _merge_adjacent_force_charge_rows(
     merged: list[tuple[datetime, datetime, tuple]],
 ) -> list[tuple[datetime, datetime, tuple]]:
-    """Join consecutive ForceCharge segments even when fdSoc/fdPwr differ (e.g. negative vs cheap slot)."""
+    """Join consecutive ForceCharge segments even when fdSoc/fdPwr differ (e.g. negative vs cheap slot).
+
+    Tuple convention: ``(work_mode, fd_soc, fd_pwr, min_soc_on_grid, max_soc)``.
+    """
     out: list[tuple[datetime, datetime, tuple]] = []
     for a, b, k in merged:
         if (
@@ -559,6 +574,7 @@ def _merge_adjacent_force_charge_rows(
                 max(k0[1] or 0, k[1] or 0),
                 max(k0[2] or 0, k[2] or 0),
                 max(k0[3], k[3]),
+                _max_optional(k0[4] if len(k0) > 4 else None, k[4] if len(k) > 4 else None),
             )
             out[-1] = (a0, b, nk)
         else:
@@ -566,17 +582,31 @@ def _merge_adjacent_force_charge_rows(
     return out
 
 
+def _max_optional(a: int | None, b: int | None) -> int | None:
+    """Return max of two optional ints; None if both None."""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return max(a, b)
+
+
 def _coarse_merge_fox(
     merged: list[tuple[datetime, datetime, tuple]],
 ) -> list[tuple[datetime, datetime, tuple]]:
-    """Collapse SelfUse variants; preserve highest minSocOnGrid when merging solar_charge windows."""
+    """Collapse SelfUse variants; preserve highest minSocOnGrid + maxSoc when merging solar_charge windows."""
     out: list[tuple[datetime, datetime, tuple]] = []
     for a, b, k in merged:
-        nk = ("SelfUse", None, None, k[3]) if k[0] == "SelfUse" else k
+        # Normalise SelfUse-shape entries; preserve the original max_soc (5th element).
+        if k[0] == "SelfUse":
+            nk = ("SelfUse", None, None, k[3], k[4] if len(k) > 4 else None)
+        else:
+            nk = k
         if out and out[-1][2][0] == "SelfUse" and nk[0] == "SelfUse" and out[-1][1] == a:
-            prev_msg = out[-1][2][3]
-            merged_msg = max(prev_msg, nk[3])
-            out[-1] = (out[-1][0], b, ("SelfUse", None, None, merged_msg))
+            prev = out[-1][2]
+            merged_msg = max(prev[3], nk[3])
+            merged_max = _max_optional(prev[4] if len(prev) > 4 else None, nk[4])
+            out[-1] = (out[-1][0], b, ("SelfUse", None, None, merged_msg, merged_max))
         elif out and out[-1][2] == nk and out[-1][1] == a:
             out[-1] = (out[-1][0], b, nk)
         else:

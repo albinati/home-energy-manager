@@ -180,13 +180,14 @@ def test_cron_reload_reregisters_jobs_when_active(monkeypatch):
         "bulletproof_mpc_12",
         "bulletproof_mpc_21",
     ])
-    # New MPC jobs match the freshly-written setting; push + forecast-refresh re-added too.
+    # New MPC jobs match the freshly-written setting; push + forecast-refresh + pv-telemetry re-added too.
     assert set(fake.added) == {
         "bulletproof_mpc_04",
         "bulletproof_mpc_10",
         "bulletproof_mpc_15",
         "bulletproof_plan_push",
         "bulletproof_forecast_refresh",
+        "bulletproof_pv_telemetry",
     }
     # Unrelated job is untouched.
     assert any(j.id == "bulletproof_octopus_fetch" for j in fake.get_jobs())

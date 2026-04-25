@@ -184,6 +184,20 @@ SCHEMA: dict[str, SettingSpec] = {
             "to weather changes; higher = less Open-Meteo traffic."
         ),
     ),
+    "PV_TELEMETRY_INTERVAL_MINUTES": SettingSpec(
+        key="PV_TELEMETRY_INTERVAL_MINUTES",
+        type_name="int",
+        env_default=_int_env("PV_TELEMETRY_INTERVAL_MINUTES", "30"),
+        min_value=5,
+        max_value=120,
+        cron_reload=True,
+        description=(
+            "Interval (minutes) for the PV-realtime telemetry job. Each tick reads the "
+            "Fox cached realtime (SoC%, solar/load/grid/battery kW) and persists in "
+            "pv_realtime_history for offline calibration analysis. Zero Fox quota cost "
+            "(reads heartbeat-cached values)."
+        ),
+    ),
     # Terminal SoC floor — anti-myopia. Each LP run must end its 24h horizon with
     # SoC ≥ this value (kWh). Without it, individual runs may plan to drain the
     # battery near the boundary before the next MPC corrects. Default = 25 % of

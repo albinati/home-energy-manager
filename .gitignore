@@ -19,6 +19,7 @@ build/
 .home-energy-manager.pid
 daemon.log
 energy_state.db
+data/fox-ess-daily-extracts/
 agent_apply_v2.log
 backups/
 .claude/

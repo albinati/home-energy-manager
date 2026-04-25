@@ -570,6 +570,38 @@ def bulletproof_forecast_refresh_job() -> None:
         logger.warning("Forecast refresh job failed: %s", e)
 
 
+def bulletproof_pv_telemetry_job() -> None:
+    """Per-N-min sample of Fox realtime → ``pv_realtime_history`` for PV calibration.
+
+    Reads the heartbeat-cached realtime (zero Fox quota cost) and appends one row.
+    Runs in parallel to the heartbeat to avoid coupling cadences. Idempotent:
+    duplicate ``captured_at`` is silently dropped by the table's PRIMARY KEY.
+    """
+    if get_scheduler_paused():
+        return
+    try:
+        rt = get_cached_realtime()
+    except Exception as e:
+        logger.debug("pv telemetry: realtime unavailable: %s", e)
+        return
+    if rt.soc is None and rt.solar_power is None:
+        return  # nothing meaningful to persist
+    try:
+        db.save_pv_realtime_sample(
+            datetime.now(UTC).isoformat(),
+            solar_power_kw=float(rt.solar_power) if rt.solar_power is not None else None,
+            soc_pct=float(rt.soc) if rt.soc is not None else None,
+            load_power_kw=float(rt.load_power) if rt.load_power is not None else None,
+            grid_import_kw=float(rt.grid_power) if rt.grid_power is not None and rt.grid_power > 0 else None,
+            grid_export_kw=float(-rt.grid_power) if rt.grid_power is not None and rt.grid_power < 0 else None,
+            battery_charge_kw=float(rt.battery_power) if rt.battery_power is not None and rt.battery_power > 0 else None,
+            battery_discharge_kw=float(-rt.battery_power) if rt.battery_power is not None and rt.battery_power < 0 else None,
+            source="heartbeat",
+        )
+    except Exception as e:
+        logger.debug("pv telemetry: save failed (non-fatal): %s", e)
+
+
 def _hhmm_to_minutes(s: str) -> int:
     parts = (s or "00:00").strip().split(":")
     h = int(parts[0]) if parts else 0
@@ -1103,6 +1135,18 @@ def start_background_scheduler() -> None:
                 "Forecast refresh cron scheduled every %d min",
                 int(config.MPC_FORECAST_REFRESH_INTERVAL_MINUTES),
             )
+            # PV realtime telemetry (Solar Sponge analysis): persist Fox cached realtime
+            # to pv_realtime_history. Zero Fox quota cost (heartbeat-cached). Used by
+            # offline PV calibration analysis.
+            _background_scheduler.add_job(
+                bulletproof_pv_telemetry_job,
+                IntervalTrigger(minutes=int(config.PV_TELEMETRY_INTERVAL_MINUTES)),
+                id="bulletproof_pv_telemetry",
+            )
+            logger.info(
+                "PV telemetry cron scheduled every %d min",
+                int(config.PV_TELEMETRY_INTERVAL_MINUTES),
+            )
             # Nightly plan push: dispatch Fox + Daikin just after the Daikin daily quota
             # rollover (midnight UTC). Anchored to UTC regardless of BULLETPROOF_TIMEZONE
             # so the push always lands on a fresh quota day.
@@ -1193,6 +1237,7 @@ def reregister_cron_jobs(reason: str = "runtime_settings_change") -> dict[str, A
             jid == "bulletproof_plan_push"
             or jid.startswith("bulletproof_mpc_")
             or jid == "bulletproof_forecast_refresh"
+            or jid == "bulletproof_pv_telemetry"
         ):
             try:
                 _background_scheduler.remove_job(jid)
@@ -1232,9 +1277,17 @@ def reregister_cron_jobs(reason: str = "runtime_settings_change") -> dict[str, A
     )
     added.append(forecast_jid)
 
+    pv_jid = "bulletproof_pv_telemetry"
+    _background_scheduler.add_job(
+        bulletproof_pv_telemetry_job,
+        IntervalTrigger(minutes=int(config.PV_TELEMETRY_INTERVAL_MINUTES)),
+        id=pv_jid,
+    )
+    added.append(pv_jid)
+
     logger.info(
         "Cron jobs re-registered (reason=%s): removed=%s added=%s "
-        "plan_push=%02d:%02d UTC mpc_hours=%s forecast_refresh=%dmin",
+        "plan_push=%02d:%02d UTC mpc_hours=%s forecast_refresh=%dmin pv_telemetry=%dmin",
         reason,
         removed,
         added,
@@ -1242,6 +1295,7 @@ def reregister_cron_jobs(reason: str = "runtime_settings_change") -> dict[str, A
         config.LP_PLAN_PUSH_MINUTE,
         config.LP_MPC_HOURS_LIST,
         int(config.MPC_FORECAST_REFRESH_INTERVAL_MINUTES),
+        int(config.PV_TELEMETRY_INTERVAL_MINUTES),
     )
     return {
         "status": "ok",
@@ -1251,4 +1305,5 @@ def reregister_cron_jobs(reason: str = "runtime_settings_change") -> dict[str, A
         "plan_push_utc": f"{config.LP_PLAN_PUSH_HOUR:02d}:{config.LP_PLAN_PUSH_MINUTE:02d}",
         "mpc_hours": config.LP_MPC_HOURS_LIST,
         "forecast_refresh_minutes": int(config.MPC_FORECAST_REFRESH_INTERVAL_MINUTES),
+        "pv_telemetry_minutes": int(config.PV_TELEMETRY_INTERVAL_MINUTES),
     }

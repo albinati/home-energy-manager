@@ -539,6 +539,46 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     if "last_notified_at" not in pc_cols_v13:
         conn.execute("ALTER TABLE plan_consent ADD COLUMN last_notified_at REAL")
 
+    # V14: pv_realtime_history — append-only per-sample telemetry for PV
+    # calibration analysis. Backfilled from Fox CSV exports (5-min) and topped
+    # up forward by bulletproof_pv_telemetry_job (30-min default). Columns
+    # mirror the Fox webapp exports + heartbeat realtime so both sources can
+    # populate the same table; ``source`` distinguishes them.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS pv_realtime_history (
+            captured_at            TEXT PRIMARY KEY,
+            solar_power_kw         REAL,
+            soc_pct                REAL,
+            load_power_kw          REAL,
+            grid_import_kw         REAL,
+            grid_export_kw         REAL,
+            battery_charge_kw      REAL,
+            battery_discharge_kw   REAL,
+            source                 TEXT NOT NULL
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pv_rt_hist_time ON pv_realtime_history(captured_at)"
+    )
+
+    # V14: presence_periods — manually-flagged periods of household presence
+    # (home / travel / guests) so future load-pattern analyses + LP calibration
+    # can de-bias the rolling load profile by occupancy. Read by analytics
+    # only at this stage — LP does not consume yet.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS presence_periods (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            start_utc   TEXT NOT NULL,
+            end_utc     TEXT NOT NULL,
+            kind        TEXT NOT NULL,    -- 'home' | 'travel' | 'guests'
+            note        TEXT,
+            created_at  TEXT NOT NULL
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_presence_periods_range ON presence_periods(start_utc, end_utc)"
+    )
+
 
 def init_db() -> None:
     """Create tables if missing and apply lightweight migrations."""
@@ -2056,6 +2096,92 @@ def mean_fox_load_kwh_per_slot(limit: int = 60) -> float | None:
 # V4: Fox ESS realtime snapshot (SoC, solar_power_kw, load_power_kw)
 # Used by MPC intra-day re-optimisation to seed the LP initial state.
 # ---------------------------------------------------------------------------
+
+def save_pv_realtime_sample(
+    captured_at: str,
+    *,
+    solar_power_kw: float | None = None,
+    soc_pct: float | None = None,
+    load_power_kw: float | None = None,
+    grid_import_kw: float | None = None,
+    grid_export_kw: float | None = None,
+    battery_charge_kw: float | None = None,
+    battery_discharge_kw: float | None = None,
+    source: str = "heartbeat",
+) -> bool:
+    """Append a PV/load/SoC sample to ``pv_realtime_history``.
+
+    Idempotent: ``INSERT OR IGNORE`` on the ``captured_at`` PRIMARY KEY so re-runs
+    of the CSV backfill or duplicate heartbeat ticks don't double-count.
+    Returns True if a row was inserted, False if it was a duplicate.
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """INSERT OR IGNORE INTO pv_realtime_history
+                   (captured_at, solar_power_kw, soc_pct, load_power_kw,
+                    grid_import_kw, grid_export_kw, battery_charge_kw,
+                    battery_discharge_kw, source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    captured_at,
+                    solar_power_kw,
+                    soc_pct,
+                    load_power_kw,
+                    grid_import_kw,
+                    grid_export_kw,
+                    battery_charge_kw,
+                    battery_discharge_kw,
+                    source,
+                ),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+
+def add_presence_period(
+    start_utc: str,
+    end_utc: str,
+    kind: str,
+    note: str | None = None,
+) -> int:
+    """Insert a manual presence flag (home / travel / guests). Returns the new id."""
+    if kind not in ("home", "travel", "guests"):
+        raise ValueError(f"invalid presence kind {kind!r}")
+    from datetime import UTC as _UTC, datetime as _dt
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """INSERT INTO presence_periods (start_utc, end_utc, kind, note, created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (start_utc, end_utc, kind, note, _dt.now(_UTC).isoformat()),
+            )
+            conn.commit()
+            return int(cur.lastrowid or 0)
+        finally:
+            conn.close()
+
+
+def get_presence_at(when_utc: str) -> str:
+    """Return the presence kind covering ``when_utc`` (most recent if overlapping). 'home' if none matches."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT kind FROM presence_periods
+                   WHERE start_utc <= ? AND end_utc >= ?
+                   ORDER BY id DESC LIMIT 1""",
+                (when_utc, when_utc),
+            )
+            row = cur.fetchone()
+            return str(row[0]) if row else "home"
+        finally:
+            conn.close()
+
 
 def upsert_fox_realtime_snapshot(snap: dict[str, Any]) -> None:
     """Insert or replace the single realtime snapshot row (id=1).
