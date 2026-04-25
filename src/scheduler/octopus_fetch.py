@@ -9,7 +9,7 @@ from .. import db
 from ..config import config
 from ..foxess.client import FoxESSClient, FoxESSError
 from ..notifier import notify_critical
-from .agile import fetch_agile_rates
+from .agile import fetch_agile_export_rates, fetch_agile_rates
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,21 @@ def fetch_and_store_rates(fox: FoxESSClient | None = None) -> dict[str, Any]:
         clear_failure_streak=True,
     )
 
-    summary: dict[str, Any] = {"ok": True, "rows": n}
+    # Fetch + persist Octopus Outgoing (export) rates when configured. Stored separately
+    # in agile_export_rates so the LP can use a per-slot export price (Outgoing Agile
+    # varies ±20p/kWh half-hourly, just like the import side). Failure here is non-fatal —
+    # the LP falls back to the flat EXPORT_RATE_PENCE constant when the table is empty.
+    export_n = 0
+    export_code = (config.OCTOPUS_EXPORT_TARIFF_CODE or "").strip()
+    if export_code:
+        try:
+            export_rates = fetch_agile_export_rates(export_tariff_code=export_code)
+            if export_rates:
+                export_n = db.save_agile_export_rates(export_rates, export_code)
+        except Exception as e:
+            logger.warning("Octopus export-rates fetch failed (non-fatal): %s", e)
+
+    summary: dict[str, Any] = {"ok": True, "rows": n, "export_rows": export_n}
     if config.USE_BULLETPROOF_ENGINE:
         try:
             # Route through bulletproof_mpc_job so the cooldown gate, plan-delta logging
