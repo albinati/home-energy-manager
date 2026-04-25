@@ -66,6 +66,17 @@ def fetch_and_store_rates(fox: FoxESSClient | None = None) -> dict[str, Any]:
         except Exception as e:
             logger.warning("Octopus export-rates fetch failed (non-fatal): %s", e)
 
+    # Refresh the per-hour-of-day PV calibration table (Fox actual vs Open-Meteo
+    # archive). Daily cadence is sufficient — bias drifts over weeks, not minutes.
+    # Failure is non-fatal; LP falls back to the flat factor.
+    try:
+        from ..weather import compute_pv_calibration_hourly_table
+
+        cal_status = compute_pv_calibration_hourly_table()
+        logger.info("PV per-hour calibration recompute: %s", cal_status)
+    except Exception as e:
+        logger.warning("PV per-hour calibration recompute failed (non-fatal): %s", e)
+
     summary: dict[str, Any] = {"ok": True, "rows": n, "export_rows": export_n}
     if config.USE_BULLETPROOF_ENGINE:
         try:
