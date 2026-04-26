@@ -1068,9 +1068,11 @@ async def optimization_inputs(horizon_hours: int | None = None):
 
     Cache-only contract — mirror of the ``/cockpit/now`` discipline. Weather
     rows come from ``meteo_forecast`` (latest-per-slot, written by the last
-    LP solve). Prices from ``agile_rates``. Initial state via
-    ``read_lp_initial_state(allow_daikin_refresh=False)`` so no Daikin quota
-    is burned on a page load.
+    LP solve). Import prices from ``agile_rates``; export prices from
+    ``agile_export_rates`` (Octopus Outgoing Agile, mirroring what the LP
+    itself reads in :func:`scheduler.optimizer._build_export_price_line`).
+    Initial state via ``read_lp_initial_state(allow_daikin_refresh=False)``
+    so no Daikin quota is burned on a page load.
     """
     from datetime import UTC as _UTC
     from datetime import datetime as _dt
@@ -1089,7 +1091,16 @@ async def optimization_inputs(horizon_hours: int | None = None):
     tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
     export_tariff = (config.OCTOPUS_EXPORT_TARIFF_CODE or "").strip()
     import_rows = db.get_rates_for_period(tariff, day_start, window_end) if tariff else []
-    export_rows = db.get_rates_for_period(export_tariff, day_start, window_end) if export_tariff else []
+    # Outgoing rates live in agile_export_rates, NOT agile_rates — the export
+    # tariff code is never written to agile_rates, so get_rates_for_period
+    # would return [] regardless of whether Octopus has the data. Use the
+    # export-specific helper so the dashboard sees the same per-slot prices
+    # the LP objective uses.
+    export_rows = (
+        db.get_agile_export_rates_in_range(day_start.isoformat(), window_end.isoformat())
+        if export_tariff
+        else []
+    )
 
     # --- Meteo forecast (latest-per-slot, in the plan window) ---------------
     conn = db.get_connection()

@@ -6,12 +6,14 @@ contract (response must be fast and never crash when sources are cold).
 from __future__ import annotations
 
 import time
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
 
 from src import db
 from src.api.main import app
+from src.config import config
 
 
 @pytest.fixture(autouse=True)
@@ -80,3 +82,38 @@ def test_forecast_page_renders(client):
     assert r.status_code == 200
     assert b"LP inputs" in r.content
     assert b"forecast.js" in r.content
+
+
+def test_export_prices_populated_from_agile_export_rates(client, monkeypatch):
+    """Regression: dashboard must read Outgoing prices from agile_export_rates,
+    not from agile_rates (which only stores import). Bug shipped with PR #154 —
+    LP itself read the right table; this view endpoint did not."""
+    monkeypatch.setattr(config, "OCTOPUS_EXPORT_TARIFF_CODE",
+                        "E-1R-AGILE-OUTGOING-19-05-13-H")
+
+    # Seed two export-price rows aligned with the next two half-hour slots
+    # the endpoint will build (it computes day_start = now.replace(minute=0)).
+    now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    rows = [
+        {
+            "valid_from": now.isoformat().replace("+00:00", "Z"),
+            "valid_to": (now + timedelta(minutes=30)).isoformat().replace("+00:00", "Z"),
+            "value_inc_vat": 19.55,
+        },
+        {
+            "valid_from": (now + timedelta(minutes=30)).isoformat().replace("+00:00", "Z"),
+            "valid_to": (now + timedelta(minutes=60)).isoformat().replace("+00:00", "Z"),
+            "value_inc_vat": 19.63,
+        },
+    ]
+    db.save_agile_export_rates(rows, "E-1R-AGILE-OUTGOING-19-05-13-H")
+
+    r = client.get("/api/v1/optimization/inputs")
+    assert r.status_code == 200
+    slots = r.json()["slots"]
+    by_t = {s["t_utc"]: s for s in slots}
+
+    k1 = now.isoformat().replace("+00:00", "Z")
+    k2 = (now + timedelta(minutes=30)).isoformat().replace("+00:00", "Z")
+    assert by_t[k1]["price_export_p"] == pytest.approx(19.55)
+    assert by_t[k2]["price_export_p"] == pytest.approx(19.63)
