@@ -518,6 +518,13 @@ def test_negative_run_has_no_charge_gaps(monkeypatch):
     # it during negatives, this test passes. Without Fix A it fails.
     monkeypatch.setattr(app_config, "LP_INVERTER_STRESS_COST_PENCE", 0.10)
     monkeypatch.setattr(app_config, "EXPORT_RATE_PENCE", 0.0)
+    # Pin battery DC + grid AC throughputs to the pre-H1-5.0 defaults so 5 kWh
+    # headroom (gross ~5.21 kWh charged after rt-eff) fits in 2 slots of
+    # full-power charging. Test asserts contiguous charging; capacity-driven
+    # fragmentation under the real H1-5.0 hardware (max_batt_kwh=2.5,
+    # fuse_kwh=2.5) is a separate (correct) LP behaviour, out of scope here.
+    monkeypatch.setattr(app_config, "MAX_INVERTER_KW", 6.0)
+    monkeypatch.setattr(app_config, "FOX_FORCE_CHARGE_MAX_PWR", 10000)
     base = datetime(2026, 4, 23, 11, 30, tzinfo=UTC)
     n = 6
     slots = [base + timedelta(minutes=30 * i) for i in range(n)]

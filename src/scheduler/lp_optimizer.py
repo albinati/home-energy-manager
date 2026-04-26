@@ -245,8 +245,12 @@ def solve_lp(
     q_int_j = 0.1 * j_per_kwh
     sg = float(config.SOLAR_GAIN_FRACTION)
 
-    fuse_kwh = 5.0            # max grid import per slot (10 kW)
-    export_cap_kwh = 3.0      # 6 kW export cap
+    # Grid import cap per slot, derived from the inverter's AC import rating
+    # (FoxESS app: "max charge from grid"). 10500 W → 5.25 kWh per 30 min slot.
+    fuse_kwh = float(config.FOX_FORCE_CHARGE_MAX_PWR) / 2_000.0
+    # G98 single-phase export cap = 16 A × 230 V ≈ 3.68 kW → 1.84 kWh per 30 min slot.
+    # Matches FOX_EXPORT_MAX_PWR; raise if on G99 or G98 multi-phase.
+    export_cap_kwh = float(config.FOX_EXPORT_MAX_PWR) / 2_000.0
     max_inv_kw = float(config.MAX_INVERTER_KW)
     max_batt_kwh = max_inv_kw * slot_h
     soc_min = float(config.BATTERY_CAPACITY_KWH) * float(config.MIN_SOC_RESERVE_PERCENT) / 100.0
