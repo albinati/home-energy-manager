@@ -114,7 +114,21 @@ WHITELIST: dict[str, OverrideSpec] = {
         key="MAX_INVERTER_KW",
         config_attr="MAX_INVERTER_KW",
         type_name="float", min_value=1.0, max_value=15.0,
-        description="Inverter cap used in LP charge/discharge bounds (kW).",
+        description="Battery-side inverter cap used in LP charge/discharge bounds (kW).",
+        group="hardware",
+    ),
+    "FOX_FORCE_CHARGE_MAX_PWR": OverrideSpec(
+        key="FOX_FORCE_CHARGE_MAX_PWR",
+        config_attr="FOX_FORCE_CHARGE_MAX_PWR",
+        type_name="int", min_value=1000, max_value=20000,
+        description="Grid → battery+house ceiling, also LP fuse_kwh source (W).",
+        group="hardware",
+    ),
+    "FOX_EXPORT_MAX_PWR": OverrideSpec(
+        key="FOX_EXPORT_MAX_PWR",
+        config_attr="FOX_EXPORT_MAX_PWR",
+        type_name="int", min_value=500, max_value=20000,
+        description="Battery → grid ceiling, sets LP export_cap_kwh and ForceDischarge fdPwr (W). G98 1φ ≈ 3680.",
         group="hardware",
     ),
     # --- Hardware

@@ -229,15 +229,24 @@ class Config:
 
     BATTERY_CAPACITY_KWH: float = float(os.getenv("BATTERY_CAPACITY_KWH", "10"))
 
-    # Fox Scheduler V3 ForceCharge power limits (Watts).
-    # FOX_FORCE_CHARGE_MAX_PWR: hard ceiling sent with negative-price slots and as the
-    #   per-group fdPwr ceiling when merging windows.  Set to your inverter's AC charge
-    #   rating (e.g. 6000 for H1-6.0).  Do NOT set above the inverter nameplate limit.
-    # FOX_FORCE_CHARGE_NORMAL_PWR: fallback for the HEURISTIC backend only (LP path
-    #   derives per-slot fdPwr from the MILP grid-import solution — this constant is
-    #   only used when OPTIMIZER_BACKEND=heuristic or as a last-resort floor).
-    FOX_FORCE_CHARGE_MAX_PWR: int = int(os.getenv("FOX_FORCE_CHARGE_MAX_PWR", "6000"))
+    # Fox Scheduler V3 power limits (Watts). Real values live in .env (immutable
+    # hardware constraints). Defaults below match the deployed Fox H1-5.0-E-G2 +
+    # G98 1φ install — see .env for the SNs and DNO ref.
+    # FOX_FORCE_CHARGE_MAX_PWR: AC import ceiling for ForceCharge slots. Used by
+    #   the LP as ``fuse_kwh`` source AND by the dispatcher as the per-group
+    #   fdPwr clamp. Set to the inverter's nameplate AC rating, NOT the FoxESS
+    #   app's configurable range (the app shows the H1 family's full range and
+    #   the inverter clamps silently to the model's spec).
+    # FOX_FORCE_CHARGE_NORMAL_PWR: fallback for the HEURISTIC backend only (LP
+    #   path derives per-slot fdPwr from the MILP grid-import solution).
+    # FOX_EXPORT_MAX_PWR: battery → grid ceiling for ForceDischarge slots. Bound
+    #   by the DNO connection standard, NOT the inverter nameplate. UK G98 1φ =
+    #   16 A × 230 V ≈ 3680 W; G98 3φ or G99 raise this. Decoupled from the
+    #   charge ceiling so a model with higher AC import does not breach export
+    #   compliance.
+    FOX_FORCE_CHARGE_MAX_PWR: int = int(os.getenv("FOX_FORCE_CHARGE_MAX_PWR", "5000"))
     FOX_FORCE_CHARGE_NORMAL_PWR: int = int(os.getenv("FOX_FORCE_CHARGE_NORMAL_PWR", "3000"))
+    FOX_EXPORT_MAX_PWR: int = int(os.getenv("FOX_EXPORT_MAX_PWR", "3680"))
 
     LWT_OFFSET_MAX: float = float(os.getenv("LWT_OFFSET_MAX", "5"))
     LWT_OFFSET_MIN: float = float(os.getenv("LWT_OFFSET_MIN", "-5"))
@@ -271,8 +280,10 @@ class Config:
 
     # OPTIMIZATION_PRESET + ENERGY_STRATEGY_MODE are runtime-tunable via
     # /api/v1/settings (#52) — see the @property definitions below.
-    # savings_first (default): import/savings focus; peak grid export (force discharge) only when
-    # OPTIMIZATION_PRESET is travel/away AND cached SoC >= EXPORT_DISCHARGE_MIN_SOC_PERCENT.
+    # savings_first (default): import/savings focus; peak grid export (force discharge)
+    # is allowed whenever cached SoC >= EXPORT_DISCHARGE_MIN_SOC_PERCENT (i.e. the
+    # battery is genuinely full from PV). The household-preset gate was removed in
+    # favour of trusting the LP's predicted base load + Daikin draw.
     # strict_savings — never schedule peak export discharge (max self-use).
     EXPORT_DISCHARGE_MIN_SOC_PERCENT: float = float(
         os.getenv("EXPORT_DISCHARGE_MIN_SOC_PERCENT", "95")
