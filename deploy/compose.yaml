@@ -1,0 +1,48 @@
+services:
+  hem:
+    image: ghcr.io/albinati/home-energy-manager:${HEM_IMAGE_TAG:-main}
+    container_name: hem
+    pull_policy: always
+    restart: unless-stopped
+
+    ports:
+      - "127.0.0.1:8000:8000"
+      # Tailscale interface — override HEM_TAILSCALE_IP per host (Hetzner prod = 100.104.115.85).
+      # When unset, the second binding collapses to loopback (harmless duplicate).
+      - "${HEM_TAILSCALE_IP:-127.0.0.1}:8000:8000"
+
+    volumes:
+      - /srv/hem/data:/app/data
+      - /srv/hem/.env:/app/.env:ro
+
+    environment:
+      DB_PATH: /app/data/energy_state.db
+      DAIKIN_TOKEN_FILE: /app/data/.daikin-tokens.json
+      HEM_OPENCLAW_TOKEN_FILE: /app/data/.openclaw-token
+      API_HOST: 0.0.0.0  # bind inside the namespace; the host port mapping above does the actual gating
+      TZ: Europe/London
+      PYTHONPATH: /app
+
+    read_only: true
+    tmpfs:
+      - /tmp:rw,size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 200
+
+    # Match the previous systemd-level memory ceilings (MemoryHigh=200M / MemoryMax=400M).
+    mem_limit: 400m
+    mem_reservation: 200m
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+    logging:
+      driver: journald
+      options:
+        tag: hem

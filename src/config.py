@@ -150,11 +150,23 @@ class Config:
     BRITISH_GAS_API_KEY: str = os.getenv("BRITISH_GAS_API_KEY", "")
 
     # API server
-    API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
+    # Default 127.0.0.1: in containerised deployments compose maps explicit interfaces
+    # (loopback + Tailscale) to the container, so the in-container listener can stay
+    # on loopback. Set API_HOST=0.0.0.0 only when running natively without a fronting
+    # network namespace.
+    API_HOST: str = os.getenv("API_HOST", "127.0.0.1")
     API_PORT: int = int(os.getenv("API_PORT", "8000"))
 
     # OpenClaw: when True, POST /api/v1/openclaw/execute returns 403 (recommendation-only; apply via dashboard/CLI)
     OPENCLAW_READ_ONLY: bool = os.getenv("OPENCLAW_READ_ONLY", "true").lower() in ("true", "1", "yes")
+
+    # OpenClaw MCP HTTP transport — bearer token guarding /mcp.
+    # Resolution: env wins; otherwise the lifespan in src.api.main reads
+    # HEM_OPENCLAW_TOKEN_FILE and writes it (urlsafe-32) on first boot.
+    HEM_OPENCLAW_TOKEN_FILE: str = os.getenv(
+        "HEM_OPENCLAW_TOKEN_FILE", "data/.openclaw-token"
+    )
+    HEM_OPENCLAW_TOKEN: str = os.getenv("HEM_OPENCLAW_TOKEN", "").strip()
 
     # AI Assistant (optional; if not set, rule-based suggestions only)
     ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")

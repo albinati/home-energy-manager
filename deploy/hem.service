@@ -1,0 +1,22 @@
+[Unit]
+Description=Home Energy Manager (containerised)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+Conflicts=home-energy-manager.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=/srv/hem
+EnvironmentFile=-/srv/hem/.compose.env
+ExecStartPre=-/usr/bin/docker compose -f /srv/hem/compose.yaml down
+ExecStart=/usr/bin/docker compose -f /srv/hem/compose.yaml up
+ExecStop=/usr/bin/docker compose -f /srv/hem/compose.yaml down
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=180
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target
