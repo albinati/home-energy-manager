@@ -15,6 +15,16 @@ services:
       - /srv/hem/data:/app/data
       - /srv/hem/.env:/app/.env:ro
 
+    # OpenClaw runs on the host with gateway.bind=lan (0.0.0.0). The container
+    # reaches it via the gateway of the pinned hem-net bridge (172.30.0.1).
+    # We map it as openclaw.host rather than using `host-gateway`, because
+    # `host-gateway` resolves to the default docker bridge (172.17.0.1), not
+    # our custom network's gateway. The host's public NIC (eth0) is sealed at
+    # netfilter by hem-firewall.service (DROP on eth0:18789) so bind=lan does
+    # not expose OpenClaw to the Internet.
+    extra_hosts:
+      - "openclaw.host:172.30.0.1"
+
     environment:
       DB_PATH: /app/data/energy_state.db
       DAIKIN_TOKEN_FILE: /app/data/.daikin-tokens.json
@@ -46,3 +56,18 @@ services:
       driver: journald
       options:
         tag: hem
+
+    networks:
+      - hem-net
+
+# Pin a known subnet so the bridge gateway IP (172.30.0.1) is stable. The
+# container resolves openclaw.host -> 172.30.0.1 (extra_hosts above) and
+# reaches OpenClaw on the host. Without this, compose picks the next free
+# 172.x.y.0/16 and the gateway IP moves on each `compose down`.
+networks:
+  hem-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+          gateway: 172.30.0.1
