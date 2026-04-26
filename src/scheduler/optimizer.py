@@ -297,7 +297,7 @@ def _slot_fox_tuple(
         return (
             "ForceDischarge",
             int(config.EXPORT_DISCHARGE_FLOOR_SOC_PERCENT),
-            config.FOX_FORCE_CHARGE_MAX_PWR,
+            config.FOX_EXPORT_MAX_PWR,
             min_r,
             None,
         )
@@ -305,7 +305,7 @@ def _slot_fox_tuple(
         return (
             "ForceDischarge",
             int(config.EXPORT_DISCHARGE_FLOOR_SOC_PERCENT),
-            config.FOX_FORCE_CHARGE_MAX_PWR,
+            config.FOX_EXPORT_MAX_PWR,
             min_r,
             None,
         )
@@ -327,10 +327,14 @@ def _optimization_preset_away_like() -> bool:
 
 
 def _bulletproof_allow_peak_export_discharge() -> bool:
-    """True only when not strict_savings, preset travel/away, and cached SoC high enough."""
+    """True when not strict_savings and cached SoC ≥ ``EXPORT_DISCHARGE_MIN_SOC_PERCENT``.
+
+    The household-preset gate (travel/away only) was removed: the LP already
+    accounts for predicted base load + Daikin draw in the energy balance, so
+    arbitrage is allowed when the battery is genuinely full from PV. The SoC
+    floor protects evening reserves; ``strict_savings`` remains the kill switch.
+    """
     if (config.ENERGY_STRATEGY_MODE or "savings_first").strip().lower() == "strict_savings":
-        return False
-    if not _optimization_preset_away_like():
         return False
     try:
         soc = float(get_cached_realtime().soc)
