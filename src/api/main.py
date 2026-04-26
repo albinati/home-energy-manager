@@ -42,7 +42,9 @@ from ..scheduler.runner import (
     start_background_scheduler,
     stop_background_scheduler,
 )
+from ..mcp_server import build_mcp
 from . import safeguards
+from .middleware import BearerAuthMiddleware
 from .models import (
     ActionResult,
     ActionStatus,
@@ -113,8 +115,59 @@ from .routers import energy_providers as energy_providers_router
 from .routers import workbench as workbench_router
 
 
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_GIT_SHA_PATH = _PROJECT_ROOT / ".git-sha"
+
+
+def _bootstrap_openclaw_token() -> str:
+    """Ensure ``config.HEM_OPENCLAW_TOKEN`` is set; persist a fresh token on first boot.
+
+    Resolution order: env var (set at construction → already in config), then
+    the file at ``HEM_OPENCLAW_TOKEN_FILE``, otherwise generate a new
+    ``secrets.token_urlsafe(32)`` and write it (mode 0640). The file lives
+    under ``data/`` so it survives container restarts via the bind-mounted
+    volume; root on the host can read it (mode 0640) and hand it to the
+    OpenClaw user.
+    """
+    if config.HEM_OPENCLAW_TOKEN:
+        return config.HEM_OPENCLAW_TOKEN
+
+    token_path = Path(config.HEM_OPENCLAW_TOKEN_FILE)
+    if not token_path.is_absolute():
+        token_path = Path.cwd() / token_path
+
+    if token_path.is_file():
+        existing = token_path.read_text(encoding="utf-8").strip()
+        if existing:
+            config.HEM_OPENCLAW_TOKEN = existing
+            return existing
+
+    import secrets
+    token = secrets.token_urlsafe(32)
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    token_path.write_text(token + "\n", encoding="utf-8")
+    try:
+        token_path.chmod(0o640)
+    except OSError:
+        logger.debug("Could not chmod %s to 0640 (continuing)", token_path)
+    config.HEM_OPENCLAW_TOKEN = token
+    logger.info("OpenClaw MCP token generated at %s", token_path)
+    return token
+
+
+# Build the FastMCP server once at import. ``streamable_http_app()`` lazily
+# creates the StreamableHTTPSessionManager; we then need to enter
+# ``session_manager.run()`` from the FastAPI lifespan below — Starlette does
+# NOT propagate sub-app lifespans through ``app.mount()``, so without this
+# the task group inside the session manager is never started and the first
+# request to /mcp/ fails with "Task group is not initialized".
+_mcp_instance = build_mcp()
+_mcp_http_app = _mcp_instance.streamable_http_app()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _bootstrap_openclaw_token()
     await asyncio.to_thread(db.init_db)
     # Prune append-only history tables so the DB doesn't grow unbounded.
     # Non-fatal — deletion failures are logged internally and the service
@@ -137,7 +190,8 @@ async def lifespan(app: FastAPI):
         pass
     await asyncio.to_thread(recover_on_boot, fox, daikin)
     start_background_scheduler()
-    yield
+    async with _mcp_instance.session_manager.run():
+        yield
     try:
         if fox is not None and daikin is not None:
             await asyncio.to_thread(apply_safe_defaults, fox, daikin)
@@ -155,6 +209,16 @@ app = FastAPI(
 )
 app.include_router(energy_providers_router.router)
 app.include_router(workbench_router.router)
+
+# Mount the FastMCP streamable-HTTP transport at /mcp, guarded by a bearer
+# token. Replaces the legacy stdio subprocess (`bin/mcp`) for OpenClaw in
+# production: OpenClaw connects via HTTP MCP transport using the token
+# bootstrapped by the lifespan and persisted under data/.openclaw-token.
+# The 57 tools registered by build_mcp() are unchanged.
+app.mount(
+    "/mcp",
+    BearerAuthMiddleware(_mcp_http_app, token=lambda: config.HEM_OPENCLAW_TOKEN),
+)
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
@@ -493,7 +557,18 @@ async def api_v1_weather():
 @app.get("/api/v1/health")
 async def health():
     """Lightweight health check for gateways and process managers."""
-    return {"status": "ok"}
+    sha = "unknown"
+    try:
+        if _GIT_SHA_PATH.is_file():
+            sha = _GIT_SHA_PATH.read_text(encoding="utf-8").strip() or "unknown"
+    except OSError:
+        pass
+    return {
+        "status": "ok",
+        "version": app.version,
+        "revision": sha,
+        "mcp_token_present": bool(config.HEM_OPENCLAW_TOKEN),
+    }
 
 
 @app.get("/api/v1/system/timezone")
