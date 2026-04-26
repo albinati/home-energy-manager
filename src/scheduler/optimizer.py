@@ -1011,6 +1011,8 @@ def _persist_lp_snapshots(
         "MIN_SOC_RESERVE_PERCENT": float(config.MIN_SOC_RESERVE_PERCENT),
         "BATTERY_RT_EFFICIENCY": float(config.BATTERY_RT_EFFICIENCY),
         "MAX_INVERTER_KW": float(config.MAX_INVERTER_KW),
+        "FOX_FORCE_CHARGE_MAX_PWR": int(config.FOX_FORCE_CHARGE_MAX_PWR),
+        "FOX_EXPORT_MAX_PWR": int(config.FOX_EXPORT_MAX_PWR),
         "DAIKIN_MAX_HP_KW": float(config.DAIKIN_MAX_HP_KW),
         "DHW_TANK_LITRES": float(config.DHW_TANK_LITRES),
         "DHW_TANK_UA_W_PER_K": float(config.DHW_TANK_UA_W_PER_K),
