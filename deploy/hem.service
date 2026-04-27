@@ -7,14 +7,34 @@ Conflicts=home-energy-manager.service
 StartLimitIntervalSec=0
 
 [Service]
-Type=simple
+# Type=oneshot + RemainAfterExit=yes — `docker compose up -d --wait` returns
+# once the container is healthy. The unit then stays "active" (running) for
+# as long as the compose project exists. Docker's `restart: unless-stopped`
+# policy in compose.yaml is the workload keepalive; systemd only owns the
+# project lifecycle (start / stop on boot / shutdown).
+#
+# This decouples systemd from the inner uvicorn process exit code, fixing
+# the 2026-04-26 drift case where the container exited 0 (clean lifespan
+# shutdown after a curl-missing crash), `compose up` returned 0 to systemd,
+# the unit went `inactive`, but Docker's restart policy kept the container
+# running — leaving systemctl is-active=inactive vs docker ps=running for
+# 21 hours. The new unit can never disagree with Docker about state.
+#
+# S10.4 (#171) under Epic #167.
+Type=oneshot
+RemainAfterExit=yes
+
 WorkingDirectory=/srv/hem
 EnvironmentFile=-/srv/hem/.compose.env
-ExecStartPre=-/usr/bin/docker compose -f /srv/hem/compose.yaml down
-ExecStart=/usr/bin/docker compose -f /srv/hem/compose.yaml up
+
+ExecStartPre=-/usr/bin/docker compose -f /srv/hem/compose.yaml down --remove-orphans
+ExecStart=/usr/bin/docker compose -f /srv/hem/compose.yaml up -d --wait --wait-timeout 120
 ExecStop=/usr/bin/docker compose -f /srv/hem/compose.yaml down
+
+# If `up -d --wait` exits non-zero (container failed healthcheck within the
+# timeout), the unit fails. RestartSec gives a small backoff before retrying.
 Restart=on-failure
-RestartSec=10
+RestartSec=20
 TimeoutStartSec=180
 TimeoutStopSec=60
 
