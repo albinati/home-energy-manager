@@ -10,7 +10,7 @@ import logging
 import sqlite3
 import threading
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -1044,6 +1044,51 @@ def mean_consumption_kwh_from_execution_logs(limit: int = 2000) -> float:
     if not kwhs:
         return 0.4
     return sum(kwhs) / len(kwhs)
+
+
+def get_hourly_agile_priors(
+    tariff_code: str,
+    *,
+    window_days: int = 28,
+    table: str = "agile_rates",
+) -> dict[int, float]:
+    """Median import (or export) price per UTC hour-of-day from the last *window_days*
+    of half-hour Agile rates.
+
+    Used by the LP horizon extender (S10.2 / #169) to fill D+1 slots when Octopus
+    hasn't published tomorrow's prices yet (typically before ~16:00 BST). Median
+    is robust to outlier days (e.g. negative-price plunges) so a single weird
+    Saturday doesn't skew the prior.
+
+    Returns a dict mapping ``hour_utc → pence/kWh``. Hours absent from the window
+    are absent from the dict; caller should fall back (e.g. mean of all hours).
+    """
+    cutoff_iso = (datetime.now(UTC) - timedelta(days=window_days)).isoformat().replace("+00:00", "Z")
+    by_hour: dict[int, list[float]] = {}
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                f"SELECT substr(valid_from, 12, 2) AS hh, value_inc_vat AS v "
+                f"FROM {table} "
+                f"WHERE tariff_code = ? AND valid_from > ?",
+                (tariff_code, cutoff_iso),
+            )
+            for r in cur.fetchall():
+                try:
+                    h = int(r["hh"])
+                    v = float(r["v"])
+                except (TypeError, ValueError, KeyError):
+                    continue
+                by_hour.setdefault(h, []).append(v)
+        finally:
+            conn.close()
+    out: dict[int, float] = {}
+    for h, vs in by_hour.items():
+        if vs:
+            vs.sort()
+            out[h] = vs[len(vs) // 2]
+    return out
 
 
 def hourly_load_profile_kwh(limit: int = 2016) -> dict[int, float]:

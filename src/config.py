@@ -322,7 +322,12 @@ class Config:
     # Rolling-window length for the LP/Fox V3 dispatch. Default 24 h so every
     # replan produces a "now → now + 24 h" schedule; truncated if Agile data
     # ends sooner (Octopus publishes tomorrow ~16:00 UTC).
-    LP_HORIZON_HOURS: int = int(os.getenv("LP_HORIZON_HOURS", "24"))
+    # S10.2 (#169): default 48 h. Octopus publishes D+1 prices ~16:00 BST; before
+    # that the LP horizon extender (src/scheduler/optimizer.py:_resolve_plan_window)
+    # fills the missing tail with median per-hour-of-day priors over the last 28 d.
+    # Once real D+1 prices land the next MPC re-solve picks them up. Old default
+    # was 24 — myopic to D+1 entirely until ~16:00.
+    LP_HORIZON_HOURS: int = int(os.getenv("LP_HORIZON_HOURS", "48"))
     DAIKIN_POWER_BUCKETS_KW: str = (os.getenv("DAIKIN_POWER_BUCKETS_KW") or "0,0.5,1.0,1.5").strip()
     # Heat pump nameplate cap (kW) used in LP HP power bounds.
     DAIKIN_MAX_HP_KW: float = float(os.getenv("DAIKIN_MAX_HP_KW", "2.0"))
