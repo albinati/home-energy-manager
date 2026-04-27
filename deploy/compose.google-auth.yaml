@@ -1,0 +1,35 @@
+services:
+  google-auth:
+    image: ghcr.io/albinati/home-energy-manager:${HEM_IMAGE_TAG:-main}
+    container_name: hem-google-auth
+    pull_policy: always
+
+    # OAuth callback listens on :8080 inside the container; published only
+    # to loopback. Operator opens an SSH tunnel from a workstation:
+    #   ssh -L 8080:localhost:8080 root@<host>
+    # then visits the URL the auth flow prints.
+    ports:
+      - "127.0.0.1:8080:8080"
+
+    volumes:
+      - /srv/hem/data:/app/data
+      - /srv/hem/.env:/app/.env:ro
+
+    environment:
+      DB_PATH: /app/data/energy_state.db
+      GOOGLE_CALENDAR_TOKEN_FILE: /app/data/.google-tokens.json
+      GOOGLE_CALENDAR_CLIENT_SECRET_FILE: /app/data/.google-client-secret.json
+      GOOGLE_CALENDAR_OAUTH_PORT: "8080"
+      TZ: Europe/London
+      PYTHONPATH: /app
+
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+
+    # Override the default service entrypoint — this is a one-shot OAuth flow.
+    entrypoint: ["/usr/bin/tini", "--"]
+    command: ["python", "-m", "src.google_calendar"]
+
+    stdin_open: true
+    tty: true

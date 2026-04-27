@@ -762,6 +762,26 @@ def _daily_history_prune_job() -> None:
         logger.warning("daily history prune failed", exc_info=True)
 
 
+def bulletproof_calendar_publish_job() -> None:
+    """Publish Octopus rate windows to the family Google Calendar.
+
+    Side feature, fully isolated from LP/dispatch: APScheduler runs each job
+    in its own context, so an exception here cannot affect Octopus fetch,
+    MPC, or hardware writes. Idempotent — re-runs are no-ops when prices
+    haven't changed (the publisher diffs against the ``calendar_events``
+    table before touching the API).
+    """
+    if not config.GOOGLE_CALENDAR_ENABLED:
+        return
+    try:
+        from ..google_calendar.publisher import publish_horizon
+
+        result = publish_horizon()
+        logger.info("Google Calendar publish: %s", result)
+    except Exception:
+        logger.warning("Google Calendar publish failed", exc_info=True)
+
+
 def bulletproof_plan_push_job() -> None:
     """Nightly plan dispatch: push tomorrow's LP plan to Fox ESS + Daikin at LP_PLAN_PUSH_HOUR:MINUTE.
 
@@ -1249,6 +1269,32 @@ def start_background_scheduler() -> None:
                 CronTrigger(hour=3, minute=15, timezone=ZoneInfo("UTC")),
                 id="daily_history_prune",
             )
+
+            # Google Calendar publisher — separate APScheduler job so a bug
+            # here cannot affect octopus_fetch, MPC, dispatch, or LP. Three
+            # firings 30 min apart (T+0, T+30, T+60) at GOOGLE_CALENDAR_
+            # PUBLISH_HOUR:MINUTE UTC: Octopus sometimes lags publishing
+            # tomorrow's rates past 16:00 UTC, so the first firing may find
+            # them missing. Each run is idempotent — the first to find full
+            # horizon data publishes; later runs match-and-no-op. A service-
+            # startup call below covers the "service was down at cron time"
+            # case so recovery is automatic.
+            if config.GOOGLE_CALENDAR_ENABLED:
+                base_h = config.GOOGLE_CALENDAR_PUBLISH_HOUR
+                base_m = config.GOOGLE_CALENDAR_PUBLISH_MINUTE
+                for offset_min in (0, 30, 60):
+                    total_min = base_m + offset_min
+                    h = (base_h + total_min // 60) % 24
+                    m = total_min % 60
+                    _background_scheduler.add_job(
+                        bulletproof_calendar_publish_job,
+                        CronTrigger(hour=h, minute=m, timezone=ZoneInfo("UTC")),
+                        id=f"google_calendar_publish_{h:02d}{m:02d}",
+                    )
+                logger.info(
+                    "Google Calendar publish cron scheduled at %02d:%02d UTC + 2 retries 30 min apart",
+                    base_h, base_m,
+                )
             logger.info(
                 "Bulletproof cron: Octopus %02d:%02d, brief %02d:%02d (%s); plan push %02d:%02d UTC; history prune 03:15 UTC",
                 config.OCTOPUS_FETCH_HOUR,
@@ -1268,6 +1314,13 @@ def start_background_scheduler() -> None:
                 bulletproof_octopus_fetch_job()
             except Exception as e:
                 logger.warning("Initial Octopus fetch failed: %s", e)
+            # Initial calendar publish so first-deploy / restart-after-cron-time
+            # don't leave the family calendar stale until the next 16:30 UTC.
+            if config.GOOGLE_CALENDAR_ENABLED:
+                try:
+                    bulletproof_calendar_publish_job()
+                except Exception as e:
+                    logger.warning("Initial calendar publish failed: %s", e)
 
     except Exception as e:
         logger.warning("Could not start background scheduler: %s", e)
