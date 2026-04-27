@@ -1118,9 +1118,10 @@ async def optimization_inputs(horizon_hours: int | None = None):
     # --- Base-load hour-of-day profile --------------------------------------
     profile_limit = int(getattr(config, "LP_LOAD_PROFILE_SLOTS", 2016))
     try:
-        # Half-hour granularity per S10.8 (#175): preserves intra-hour load
-        # variance (e.g. cooking spikes at :30 vs idle at :00).
-        load_profile = db.half_hourly_load_profile_kwh(limit=profile_limit)
+        # Half-hour granularity (#175) + Daikin physics subtracted (#179) so the LP
+        # energy balance doesn't double-count Daikin (base_load + e_dhw + e_space
+        # would otherwise sum twice the heat-pump draw).
+        load_profile = db.half_hourly_residual_load_profile_kwh()
     except Exception:
         load_profile = {}
     try:

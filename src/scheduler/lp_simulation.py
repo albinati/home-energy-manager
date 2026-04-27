@@ -53,7 +53,8 @@ def _build_load_profile(slot_starts_utc: list[datetime]) -> list[float]:
     then to a hardcoded default of 0.4 kWh/slot.
     """
     limit = int(getattr(config, "LP_LOAD_PROFILE_SLOTS", 2016))
-    profile = db.half_hourly_load_profile_kwh(limit=limit)
+    # Daikin-subtracted residual profile (S10.13 / #179) — avoids LP double-count
+    profile = db.half_hourly_residual_load_profile_kwh()
     flat_from_log = db.mean_consumption_kwh_from_execution_logs(limit=limit)
     fox_mean = db.mean_fox_load_kwh_per_slot(limit=60)
     flat = fox_mean if fox_mean is not None else flat_from_log
