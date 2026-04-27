@@ -77,3 +77,37 @@ def test_set_min_soc_clamps_to_valid_range(
         _setup_db(monkeypatch, td)
         apply_safe_defaults(fox, daikin=None, trigger="test")
     assert fox.set_min_soc_calls == [0]
+
+
+def test_partial_failure_isolates_step_in_action_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When one Fox endpoint rejects (e.g. 40257 on set_work_mode), the action_log
+    row must identify exactly which step failed — not bundle them all into a
+    single "failure" with no per-call attribution. This is the diagnostic
+    foundation for tracking down vendor-API drift.
+    """
+    from src.foxess.client import FoxESSError
+
+    class _PartialFox(_RecordingFox):
+        def set_work_mode(self, mode: str) -> None:
+            self.set_work_mode_calls.append(mode)
+            raise FoxESSError("API error 40257: simulated rejection")
+
+    monkeypatch.setattr("src.config.config.MIN_SOC_RESERVE_PERCENT", 15.0)
+    fox = _PartialFox()
+    with tempfile.TemporaryDirectory() as td:
+        _setup_db(monkeypatch, td)
+        apply_safe_defaults(fox, daikin=None, trigger="test")
+
+        rows = list(db.get_connection().execute(
+            "SELECT result, error_msg, params FROM action_log WHERE action='apply_safe_defaults'"
+        ))
+        assert len(rows) == 1
+        result, error_msg, params = rows[0]
+        assert result == "partial"  # other steps succeeded; only work_mode failed
+        assert "work_mode" in error_msg
+        assert "40257" in error_msg
+        # The successful steps must still have happened (not blocked by the failure)
+        assert fox.set_scheduler_flag_calls == [False]
+        assert fox.set_min_soc_calls == [15]
