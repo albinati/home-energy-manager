@@ -9,6 +9,7 @@ Usage:
     client.set_temperature(devices[0].id, 21.0)
     client.set_power(devices[0].id, on=True)
 """
+import datetime as _datetime  # noqa: F401 — used in type hint of get_daily_consumption_from_cache
 import json
 import time
 import urllib.error
@@ -371,6 +372,83 @@ class DaikinClient:
                 if isinstance(v, (int, float)) and v is not None:
                     return round(float(v), 2)
         return None
+
+    def get_daily_consumption_from_cache(
+        self, today_utc: "_datetime.date | None" = None
+    ) -> dict[str, dict[str, float]]:
+        """Parse the cached ``/gateway-devices`` payload's per-day consumption arrays.
+
+        S10.12 (#178). Daikin Onecta exposes ``consumptionData.value.electrical.<mode>.w``
+        as a 14-element list: the last 7 days of LAST week (indices 0–6, Mon→Sun)
+        plus the 7 days of THIS week (indices 7–13, Mon→Sun). Future days are
+        ``None``. We map array indices → calendar dates and accumulate per-day
+        kWh across all management points (climateControl + domesticHotWaterTank
+        usually live separately, contributing to ``heating_kwh`` vs ``dhw_kwh``).
+
+        Returns ``{date_iso: {"heating_kwh": x, "dhw_kwh": y, "total_kwh": z}}``.
+
+        ``today_utc`` is injectable for tests; defaults to ``date.today()`` (UTC).
+        Zero extra Daikin API quota — read-only over an already-cached payload.
+        """
+        from datetime import date as _date, timedelta as _td
+
+        if today_utc is None:
+            today_utc = _date.today()
+        # Anchor: this-week's Monday in the array layout. arr[7] = this Monday;
+        # arr[7+i] = this Monday + i days; arr[i] = last week's Monday + i days.
+        this_week_monday = today_utc - _td(days=today_utc.weekday())
+
+        out: dict[str, dict[str, float]] = {}
+        try:
+            devices = self.get_devices()
+        except Exception:
+            return out
+
+        for device in devices:
+            for mp in device.raw.get("managementPoints", []):
+                mp_type = mp.get("managementPointType", "")
+                cd = mp.get("consumptionData")
+                if not isinstance(cd, dict):
+                    continue
+                cdv = cd.get("value")
+                if not isinstance(cdv, dict):
+                    continue
+                electrical = cdv.get("electrical")
+                if not isinstance(electrical, dict):
+                    continue
+                # Decide which energy-bucket this management point contributes to.
+                # ``domesticHotWaterTank`` → DHW; everything else (climateControl,
+                # heatPump, etc.) → space heating.
+                is_dhw = "domesticHotWater" in mp_type or "dhw" in mp_type.lower()
+                bucket_key = "dhw_kwh" if is_dhw else "heating_kwh"
+
+                # Both ``heating`` and (rarely) ``cooling`` modes count as electrical
+                # consumption — sum them together, attributed to the same bucket.
+                for mode_name in ("heating", "cooling"):
+                    mode_data = electrical.get(mode_name)
+                    if not isinstance(mode_data, dict):
+                        continue
+                    arr = mode_data.get("w")
+                    if not isinstance(arr, list):
+                        continue
+                    for idx, val in enumerate(arr):
+                        if val is None:
+                            continue
+                        try:
+                            kwh = float(val)
+                        except (TypeError, ValueError):
+                            continue
+                        day = this_week_monday + _td(days=idx - 7)
+                        day_iso = day.isoformat()
+                        bucket = out.setdefault(day_iso, {"heating_kwh": 0.0, "dhw_kwh": 0.0})
+                        bucket[bucket_key] += kwh
+
+        # Add the total field for convenience
+        for day_iso, b in out.items():
+            b["total_kwh"] = round(b["heating_kwh"] + b["dhw_kwh"], 3)
+            b["heating_kwh"] = round(b["heating_kwh"], 3)
+            b["dhw_kwh"] = round(b["dhw_kwh"], 3)
+        return out
 
     def get_heating_daily_kwh(self, year: int, month: int) -> list[float] | None:
         """
