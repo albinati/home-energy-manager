@@ -207,6 +207,24 @@ CREATE TABLE IF NOT EXISTS plan_consent (
 );
 
 CREATE INDEX IF NOT EXISTS idx_plan_consent_date ON plan_consent(plan_date, status);
+
+CREATE TABLE IF NOT EXISTS calendar_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    calendar_id TEXT NOT NULL,
+    plan_date TEXT NOT NULL,
+    slot_start_utc TEXT NOT NULL,
+    slot_end_utc TEXT NOT NULL,
+    tier TEXT NOT NULL,
+    price_min REAL NOT NULL,
+    price_max REAL NOT NULL,
+    price_mean REAL NOT NULL,
+    google_event_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(calendar_id, slot_start_utc)
+);
+
+CREATE INDEX IF NOT EXISTS idx_calendar_events_date ON calendar_events(calendar_id, plan_date);
 """
 
 
@@ -3400,4 +3418,88 @@ def prune_history_tables() -> dict[str, int]:
             logger.debug("prune %s failed: %s", table, e)
             results[table] = -1
     return results
+
+
+# ── Google Calendar publisher: idempotency state ───────────────────────────
+
+
+def upsert_calendar_event(
+    *,
+    calendar_id: str,
+    plan_date: str,
+    slot_start_utc: str,
+    slot_end_utc: str,
+    tier: str,
+    price_min: float,
+    price_max: float,
+    price_mean: float,
+    google_event_id: str,
+) -> None:
+    """Idempotent upsert keyed on (calendar_id, slot_start_utc).
+
+    Used by the Google Calendar publisher to remember which Google event ID
+    corresponds to which Octopus slot, so subsequent re-publishes update the
+    existing event rather than creating duplicates.
+    """
+    now_iso = datetime.now(UTC).isoformat()
+    with _lock:
+        conn = get_connection()
+        try:
+            conn.execute(
+                """INSERT INTO calendar_events
+                   (calendar_id, plan_date, slot_start_utc, slot_end_utc,
+                    tier, price_min, price_max, price_mean, google_event_id,
+                    created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(calendar_id, slot_start_utc) DO UPDATE SET
+                     slot_end_utc=excluded.slot_end_utc,
+                     plan_date=excluded.plan_date,
+                     tier=excluded.tier,
+                     price_min=excluded.price_min,
+                     price_max=excluded.price_max,
+                     price_mean=excluded.price_mean,
+                     google_event_id=excluded.google_event_id,
+                     updated_at=excluded.updated_at""",
+                (
+                    calendar_id, plan_date, slot_start_utc, slot_end_utc,
+                    tier, price_min, price_max, price_mean, google_event_id,
+                    now_iso, now_iso,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def get_calendar_events_for_date(
+    calendar_id: str, plan_date: str
+) -> list[dict[str, Any]]:
+    """Return rows for one calendar+date, ordered by slot_start_utc."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT calendar_id, plan_date, slot_start_utc, slot_end_utc,
+                          tier, price_min, price_max, price_mean, google_event_id
+                   FROM calendar_events
+                   WHERE calendar_id = ? AND plan_date = ?
+                   ORDER BY slot_start_utc ASC""",
+                (calendar_id, plan_date),
+            )
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
+def delete_calendar_event(calendar_id: str, slot_start_utc: str) -> None:
+    with _lock:
+        conn = get_connection()
+        try:
+            conn.execute(
+                "DELETE FROM calendar_events WHERE calendar_id = ? AND slot_start_utc = ?",
+                (calendar_id, slot_start_utc),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 

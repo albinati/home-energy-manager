@@ -133,6 +133,40 @@ class Config:
         os.getenv("OPENCLAW_INTERNAL_API_BASE_URL") or "http://127.0.0.1:8000"
     ).strip().rstrip("/")
 
+    # ── Google Family Calendar publisher (Octopus rate windows) ─────────────
+    # Side feature: after every Octopus fetch, classify each 30-min slot into
+    # a 6-tier price bucket (day-relative + absolute floors) and publish merged
+    # windows as events on a shared Google Calendar so the family knows when
+    # to run laundry/dishwasher/etc. Idempotent: existing events for the same
+    # slot are updated in place; obsolete events are deleted.
+    GOOGLE_CALENDAR_ENABLED: bool = os.getenv("GOOGLE_CALENDAR_ENABLED", "false").lower() in ("true", "1", "yes")
+    GOOGLE_CALENDAR_ID: str = (os.getenv("GOOGLE_CALENDAR_ID") or "").strip()
+    # Service-account credentials (preferred path — no refresh tokens, no
+    # browser dance). When set, the publisher uses this and ignores the OAuth
+    # token/secret files below. Share the family calendar with the SA email
+    # ("Make changes to events") for write access.
+    GOOGLE_CALENDAR_SA_FILE: Path = Path(
+        os.getenv("GOOGLE_CALENDAR_SA_FILE", "data/.google-sa.json")
+    )
+    # Installed-app OAuth fallback files (only used when SA credentials are
+    # absent). Bootstrapped via `python -m src.google_calendar` (interactive).
+    GOOGLE_CALENDAR_TOKEN_FILE: Path = Path(
+        os.getenv("GOOGLE_CALENDAR_TOKEN_FILE", "data/.google-tokens.json")
+    )
+    GOOGLE_CALENDAR_CLIENT_SECRET_FILE: Path = Path(
+        os.getenv("GOOGLE_CALENDAR_CLIENT_SECRET_FILE", "data/.google-client-secret.json")
+    )
+    GOOGLE_CALENDAR_TIMEZONE: str = (os.getenv("GOOGLE_CALENDAR_TIMEZONE") or "Europe/London").strip()
+    # Local OAuth callback port for the one-shot bootstrap container (mirror of Daikin :8080).
+    GOOGLE_CALENDAR_OAUTH_PORT: int = int(os.getenv("GOOGLE_CALENDAR_OAUTH_PORT", "8080"))
+    # Daily publish cron in UTC. Octopus releases tomorrow's Agile rates around
+    # 16:00 UTC; 16:30 UTC catches the new prices with margin. The job is also
+    # called once on service startup so first-deploy / service-was-down-at-cron
+    # cases recover automatically. Idempotent — re-running with unchanged prices
+    # makes zero Google API calls.
+    GOOGLE_CALENDAR_PUBLISH_HOUR: int = int(os.getenv("GOOGLE_CALENDAR_PUBLISH_HOUR", "16"))
+    GOOGLE_CALENDAR_PUBLISH_MINUTE: int = int(os.getenv("GOOGLE_CALENDAR_PUBLISH_MINUTE", "30"))
+
     # Energy providers (for tariff tracking and cost analysis)
     OCTOPUS_API_KEY: str = os.getenv("OCTOPUS_API_KEY", "")
     OCTOPUS_ACCOUNT_NUMBER: str = os.getenv("OCTOPUS_ACCOUNT_NUMBER", "")
