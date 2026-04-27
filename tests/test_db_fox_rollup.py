@@ -43,16 +43,17 @@ def test_rollup_caps_long_gap_at_max_gap_seconds() -> None:
     across the gap — the cap limits each interval."""
     base = datetime(2026, 4, 26, 0, 0, tzinfo=UTC)
     _seed_sample(base, solar_power_kw=2.0)
-    # 6 hours later, still 2 kW solar — but cap at 600 s = 10 min
+    # 6 hours later, still 2 kW solar — but cap at 1800 s = 30 min (default)
     _seed_sample(base + timedelta(hours=6), solar_power_kw=2.0)
 
     rows = db.compute_fox_energy_daily_from_realtime(
-        start_date="2026-04-26", end_date="2026-04-26", max_gap_seconds=600,
+        start_date="2026-04-26", end_date="2026-04-26",
     )
-    # Without cap: 2 kW × 6 h = 12 kWh. With cap: 2 kW × (10/60) h = 0.333 kWh
+    # Without cap: 2 kW × 6 h = 12 kWh.
+    # With default cap 30 min: 2 kW × 0.5 h = 1.0 kWh
     assert len(rows) == 1
-    assert rows[0]["solar_kwh"] == pytest.approx(0.333, abs=0.01), (
-        f"expected gap-capped integration to limit total to ~0.333 kWh; got {rows[0]['solar_kwh']}"
+    assert rows[0]["solar_kwh"] == pytest.approx(1.0, abs=0.01), (
+        f"expected gap-capped integration to limit total to ~1.0 kWh; got {rows[0]['solar_kwh']}"
     )
 
 
