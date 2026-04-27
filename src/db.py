@@ -1046,49 +1046,92 @@ def mean_consumption_kwh_from_execution_logs(limit: int = 2000) -> float:
     return sum(kwhs) / len(kwhs)
 
 
-def get_hourly_agile_priors(
+def get_half_hourly_agile_priors(
     tariff_code: str,
     *,
     window_days: int = 28,
     table: str = "agile_rates",
-) -> dict[int, float]:
-    """Median import (or export) price per UTC hour-of-day from the last *window_days*
-    of half-hour Agile rates.
+) -> dict[tuple[int, int], float]:
+    """Median import (or export) price per UTC ``(hour, minute)`` half-hour bucket
+    from the last *window_days* of Agile rates.
 
     Used by the LP horizon extender (S10.2 / #169) to fill D+1 slots when Octopus
-    hasn't published tomorrow's prices yet (typically before ~16:00 BST). Median
+    hasn't published tomorrow's prices yet (typically before ~16:00 BST). Buckets
+    by (hour, minute) — 48 buckets — because Agile pricing varies meaningfully
+    between :00 and :30 within the same hour (S10.8 / #175). Median per bucket
     is robust to outlier days (e.g. negative-price plunges) so a single weird
     Saturday doesn't skew the prior.
 
-    Returns a dict mapping ``hour_utc → pence/kWh``. Hours absent from the window
-    are absent from the dict; caller should fall back (e.g. mean of all hours).
+    Returns a dict mapping ``(hour_utc, minute) → pence/kWh`` where minute ∈ {0, 30}.
+    Buckets absent from the window are absent from the dict; caller should fall back
+    (e.g. mean of all buckets).
     """
     cutoff_iso = (datetime.now(UTC) - timedelta(days=window_days)).isoformat().replace("+00:00", "Z")
-    by_hour: dict[int, list[float]] = {}
+    by_bucket: dict[tuple[int, int], list[float]] = {}
     with _lock:
         conn = get_connection()
         try:
+            # substr(valid_from, 12, 5) extracts "HH:MM" from "2026-04-27T14:30:00Z"
             cur = conn.execute(
-                f"SELECT substr(valid_from, 12, 2) AS hh, value_inc_vat AS v "
+                f"SELECT substr(valid_from, 12, 5) AS hhmm, value_inc_vat AS v "
                 f"FROM {table} "
                 f"WHERE tariff_code = ? AND valid_from > ?",
                 (tariff_code, cutoff_iso),
             )
             for r in cur.fetchall():
                 try:
-                    h = int(r["hh"])
+                    hh, mm = r["hhmm"].split(":")
+                    bucket = (int(hh), int(mm))
                     v = float(r["v"])
-                except (TypeError, ValueError, KeyError):
+                except (TypeError, ValueError, KeyError, AttributeError):
                     continue
-                by_hour.setdefault(h, []).append(v)
+                by_bucket.setdefault(bucket, []).append(v)
         finally:
             conn.close()
-    out: dict[int, float] = {}
-    for h, vs in by_hour.items():
+    out: dict[tuple[int, int], float] = {}
+    for bucket, vs in by_bucket.items():
         if vs:
             vs.sort()
-            out[h] = vs[len(vs) // 2]
+            out[bucket] = vs[len(vs) // 2]
     return out
+
+
+def half_hourly_load_profile_kwh(limit: int = 2016) -> dict[tuple[int, int], float]:
+    """Return per-(hour, minute) mean consumption kWh from execution_log.
+
+    Half-hour bucket granularity (S10.8 / #175): the LP solves at 30-min
+    resolution; bucketing load history at the same granularity preserves
+    intra-hour variance (e.g. cooking spikes at :30 vs idle at :00). Falls
+    back to the flat mean for buckets with no data. Returns
+    ``{(hour, minute): kWh_per_slot}`` where minute ∈ {0, 30}.
+    """
+    rows = get_execution_logs(limit=limit)
+    buckets: dict[tuple[int, int], list[float]] = {}
+    for r in rows:
+        if r.get("consumption_kwh") is None:
+            continue
+        ts_str = r.get("timestamp") or ""
+        try:
+            from datetime import datetime as _dt
+            ts = _dt.fromisoformat(ts_str.replace("Z", "+00:00"))
+            local = ts.astimezone(ZoneInfo(config.BULLETPROOF_TIMEZONE))
+            # Snap minute to nearest half-hour boundary (Octopus / our slots are :00 or :30)
+            minute_bucket = 30 if local.minute >= 30 else 0
+            key = (local.hour, minute_bucket)
+        except (ValueError, TypeError):
+            continue
+        buckets.setdefault(key, []).append(float(r["consumption_kwh"]))
+
+    flat_mean = mean_consumption_kwh_from_execution_logs(limit=limit)
+    profile: dict[tuple[int, int], float] = {}
+    for h in range(24):
+        for m in (0, 30):
+            key = (h, m)
+            if key in buckets and buckets[key]:
+                profile[key] = sum(buckets[key]) / len(buckets[key])
+            else:
+                profile[key] = flat_mean
+    return profile
 
 
 def hourly_load_profile_kwh(limit: int = 2016) -> dict[int, float]:
@@ -1098,6 +1141,9 @@ def hourly_load_profile_kwh(limit: int = 2016) -> dict[int, float]:
     Uses the last ``limit`` rows (default ~6 weeks of half-hour slots).
     Falls back to the flat mean for hours with no data.
     Returns a dict mapping hour-of-day → expected kWh per half-hour slot.
+
+    Kept for analytics / human-facing aggregates. The LP path uses
+    :func:`half_hourly_load_profile_kwh` for finer granularity (S10.8 / #175).
     """
     rows = get_execution_logs(limit=limit)
     buckets: dict[int, list[float]] = {h: [] for h in range(24)}
