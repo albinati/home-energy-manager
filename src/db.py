@@ -1096,6 +1096,95 @@ def get_half_hourly_agile_priors(
     return out
 
 
+def half_hourly_residual_load_profile_kwh(
+    *,
+    window_days: int = 30,
+) -> dict[tuple[int, int], float]:
+    """Per-(hour, minute) MEDIAN *residual* (non-Daikin) load from real Fox
+    telemetry. Subtracts physics-estimated Daikin draw per sample so the LP
+    energy balance no longer double-counts Daikin.
+
+    S10.13 (#179): the LP balance ``imp + pv + dis == base_load + exp + chg
+    + (e_dhw + e_space)`` adds physics-predicted Daikin (``e_dhw + e_space``)
+    on top of ``base_load`` from execution_log. After S10.9 switched
+    base_load source to real Fox load_power_kw — which IS house total
+    including Daikin's actual past draw — Daikin gets counted twice. This
+    function applies the *same* physics estimator the LP uses for prediction
+    (``predict_passive_daikin_load``) per past sample to back out the
+    residual (non-Daikin) load.
+
+    Outdoor temperature per sample comes from ``meteo_forecast_history``
+    (rich hourly coverage). Samples without a matching forecast use a
+    sentinel outdoor of 25 °C — well above the climate-curve cutoff
+    (DAIKIN_WEATHER_CURVE_HIGH_C, default 18) so the physics returns zero
+    Daikin draw, conservative (no phantom subtraction).
+    """
+    from .config import config, cop_at_temperature
+    from .physics import predict_passive_daikin_load
+
+    cutoff_iso = (datetime.now(UTC) - timedelta(days=window_days)).isoformat().replace("+00:00", "Z")
+    cop_curve = config.DAIKIN_COP_CURVE
+    high_cutoff_c = float(config.DAIKIN_WEATHER_CURVE_HIGH_C)
+
+    buckets: dict[tuple[int, int], list[float]] = {}
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT pv.captured_at, pv.load_power_kw,
+                          (SELECT temp_c FROM meteo_forecast_history mh
+                           WHERE substr(mh.slot_time, 1, 13) = substr(pv.captured_at, 1, 13)
+                           ORDER BY mh.id DESC LIMIT 1) AS outdoor_c
+                   FROM pv_realtime_history pv
+                   WHERE pv.captured_at > ? AND pv.load_power_kw IS NOT NULL""",
+                (cutoff_iso,),
+            )
+            rows = cur.fetchall()
+        finally:
+            conn.close()
+
+    from datetime import datetime as _dt
+    for row in rows:
+        ts_str = row["captured_at"]
+        load_kw = float(row["load_power_kw"])
+        outdoor = row["outdoor_c"]
+        # Use the real outdoor temp when available; fall back to 25 °C (above the
+        # climate-curve cutoff) so physics yields ZERO Daikin draw — conservative.
+        outdoor_c = float(outdoor) if outdoor is not None else max(25.0, high_cutoff_c + 5.0)
+        cop_at_t = cop_at_temperature(cop_curve, outdoor_c)
+        e_space, e_dhw = predict_passive_daikin_load(
+            [outdoor_c], [cop_at_t], [cop_at_t], slot_h=0.5
+        )
+        daikin_slot_kwh = e_space[0] + e_dhw[0]
+        sample_slot_kwh = load_kw * 0.5
+        residual = max(0.0, sample_slot_kwh - daikin_slot_kwh)
+        try:
+            ts = _dt.fromisoformat(str(ts_str).replace("Z", "+00:00"))
+            local = ts.astimezone(ZoneInfo(config.BULLETPROOF_TIMEZONE))
+        except (ValueError, TypeError):
+            continue
+        minute_bucket = 30 if local.minute >= 30 else 0
+        buckets.setdefault((local.hour, minute_bucket), []).append(residual)
+
+    all_vals = [v for vs in buckets.values() for v in vs]
+    if all_vals:
+        all_vals.sort()
+        global_fallback = all_vals[len(all_vals) // 2]
+    else:
+        global_fallback = mean_consumption_kwh_from_execution_logs(limit=2016)
+
+    profile: dict[tuple[int, int], float] = {}
+    for h in range(24):
+        for m in (0, 30):
+            vs = buckets.get((h, m), [])
+            if vs:
+                vs_sorted = sorted(vs)
+                profile[(h, m)] = vs_sorted[len(vs_sorted) // 2]
+            else:
+                profile[(h, m)] = global_fallback
+    return profile
+
+
 def half_hourly_load_profile_kwh(
     limit: int = 2016,
     *,

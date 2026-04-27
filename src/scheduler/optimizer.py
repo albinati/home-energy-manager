@@ -1222,9 +1222,9 @@ def _run_optimizer_lp(fox: FoxESSClient | None, daikin: Any | None = None) -> di
     if not slots:
         return _self_use_fallback(fox, reason="No half-hour slots in LP horizon — check Agile rates coverage")
 
-    # Per-slot load profile (half-hour bins from execution_log per S10.8 / #175)
+    # Per-slot residual load (Daikin physics subtracted per S10.13 / #179)
     _profile_limit = int(getattr(config, "LP_LOAD_PROFILE_SLOTS", 2016))
-    _load_profile = db.half_hourly_load_profile_kwh(limit=_profile_limit)
+    _load_profile = db.half_hourly_residual_load_profile_kwh()
     # Fall back to Fox daily mean when execution_log is cold
     _fox_mean = db.mean_fox_load_kwh_per_slot(limit=60)
     _flat = _fox_mean if _fox_mean is not None else db.mean_consumption_kwh_from_execution_logs(limit=_profile_limit)
