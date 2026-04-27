@@ -2133,16 +2133,16 @@ def compute_fox_energy_daily_from_realtime(
     *,
     start_date: str | None = None,
     end_date: str | None = None,
-    max_gap_seconds: int = 600,
+    max_gap_seconds: int = 1800,
 ) -> list[dict[str, Any]]:
     """Aggregate ``pv_realtime_history`` instantaneous-power samples into per-day
     kWh totals via trapezoidal integration.
 
     For each consecutive pair of samples ``(t_a, P_a)`` → ``(t_b, P_b)``, energy
     contribution is ``mean(P_a, P_b) × dt`` where ``dt`` is capped at
-    ``max_gap_seconds`` (default 10 min). Capping prevents multi-hour heartbeat
-    gaps (e.g. service down) from extrapolating a constant-power assumption
-    across a missing window.
+    ``max_gap_seconds`` (default 30 min — matches the PV telemetry job's default
+    cadence so a normal pair contributes its full interval, while a multi-hour
+    heartbeat outage doesn't extrapolate constant power across the gap).
 
     Daily bucket = UTC date of the *earlier* sample of each pair. Boundary error
     around midnight is bounded by ``max_gap_seconds`` (≤ 10 min × peak power ≈
