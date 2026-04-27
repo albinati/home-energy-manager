@@ -19,6 +19,10 @@ def _fast_solver(monkeypatch):
     # Disable inverter stress and MPC knobs that add constraint complexity
     monkeypatch.setattr(app_config, "LP_INVERTER_STRESS_COST_PENCE", 0.0)
     monkeypatch.setattr(app_config, "LP_HP_MIN_ON_SLOTS", 1)
+    # Disable terminal-SoC soft-cost by default so legacy tests evaluate against
+    # the same objective they were written for. Tests that exercise the soft-cost
+    # set this knob explicitly.
+    monkeypatch.setattr(app_config, "LP_SOC_TERMINAL_VALUE_PENCE_PER_KWH", 0.0)
 
 
 def _series(n: int, base: datetime) -> tuple[list[datetime], WeatherLpSeries]:
@@ -124,6 +128,47 @@ def test_terminal_soc_hard_floor(monkeypatch):
     )
     assert plan.ok
     assert plan.soc_kwh[-1] >= target_soc - 1e-2
+
+
+def test_terminal_soc_value_changes_terminal_soc(monkeypatch):
+    """S10.1 (#168): LP_SOC_TERMINAL_VALUE_PENCE_PER_KWH > 0 should produce a
+    higher terminal SoC than 0 when prices favour draining (early peak followed
+    by cheap window). Without the soft-cost, LP exports the peak and refills
+    cheap; with a high enough soft-cost, LP keeps the battery and skips the
+    marginal arbitrage.
+    """
+    base = datetime(2026, 1, 15, 0, 0, tzinfo=UTC)
+    n = 20
+    slots, w = _series(n, base)
+    # First 4 slots at 30p (peak), then 16 slots at 8p (cheap refill window).
+    # With terminal value=0, LP exports during peak and refills cheap → terminal SoC ≈ floor.
+    # With terminal value=20p/kWh, the 22p spread is < 20p → keep battery.
+    prices = [30.0] * 4 + [8.0] * (n - 4)
+    base_load = [0.3] * n
+    st = LpInitialState(soc_kwh=6.0, tank_temp_c=45.0, indoor_temp_c=20.5)
+
+    monkeypatch.setattr(app_config, "LP_SOC_FINAL_KWH", 1.0)
+
+    monkeypatch.setattr(app_config, "LP_SOC_TERMINAL_VALUE_PENCE_PER_KWH", 0.0)
+    plan_off = solve_lp(
+        slot_starts_utc=slots, price_pence=prices, base_load_kwh=base_load,
+        weather=w, initial=st, tz=ZoneInfo("Europe/London"),
+    )
+    assert plan_off.ok
+    soc_off = plan_off.soc_kwh[-1]
+
+    monkeypatch.setattr(app_config, "LP_SOC_TERMINAL_VALUE_PENCE_PER_KWH", 20.0)
+    plan_on = solve_lp(
+        slot_starts_utc=slots, price_pence=prices, base_load_kwh=base_load,
+        weather=w, initial=st, tz=ZoneInfo("Europe/London"),
+    )
+    assert plan_on.ok
+    soc_on = plan_on.soc_kwh[-1]
+
+    assert soc_on > soc_off, (
+        f"Soft-cost should keep more battery: terminal SoC value=0 → {soc_off:.2f}, "
+        f"value=20 → {soc_on:.2f}; expected value=20 to be higher."
+    )
 
 
 def test_cop_curve_interpolation_monotonic():

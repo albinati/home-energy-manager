@@ -204,8 +204,12 @@ def test_pv_calibration_window_days_runtime_tunable(monkeypatch):
     rts.delete_setting("PV_CALIBRATION_WINDOW_DAYS")
 
 
-def test_pv_calibration_window_days_default_30(monkeypatch):
-    """Default window after the 2026-04-25 calibration analysis fix is 30 days."""
+def test_pv_calibration_window_days_default_14(monkeypatch):
+    """Default changed 30→14 in S10.5 (#172). The 30d window severely lagged
+    the spring→summer transition: afternoon factors at BST 14-17 were under-
+    calibrated by 17-49% vs 14d on identical data. Median + Open-Meteo Archive
+    method (production code) handles outliers fine; the smaller window's faster
+    seasonal response wins."""
     import src.runtime_settings as rts
     from src.config import config
 
@@ -213,7 +217,7 @@ def test_pv_calibration_window_days_default_30(monkeypatch):
     rts.delete_setting("PV_CALIBRATION_WINDOW_DAYS")
     monkeypatch.delenv("PV_CALIBRATION_WINDOW_DAYS", raising=False)
     rts._cache.pop("PV_CALIBRATION_WINDOW_DAYS", None)
-    assert config.PV_CALIBRATION_WINDOW_DAYS == 30
+    assert config.PV_CALIBRATION_WINDOW_DAYS == 14
 
 
 def test_lp_soc_final_kwh_default_scales_with_battery_capacity(monkeypatch):

@@ -602,6 +602,17 @@ def solve_lp(
     if w_imp_tv > 0 and tv_imp:
         objective += w_imp_tv * pulp.lpSum(tv_imp[i] for i in tv_imp)
 
+    # Soft-cost on terminal SoC above the floor (S10.1, #168). Without this
+    # the LP only has the hard LP_SOC_FINAL_KWH constraint and treats any kWh
+    # above the floor as zero-value — biasing toward draining the battery for
+    # marginal arbitrage that a small overnight import then "fixes". Each kWh
+    # at horizon end is worth N pence (avoided next-horizon import cost), so
+    # marginal arbitrage with spread < N pence/kWh stops winning. The constant
+    # offset (-N × floor) is dropped — it doesn't change the optimum.
+    soc_terminal_value = float(getattr(config, "LP_SOC_TERMINAL_VALUE_PENCE_PER_KWH", 0.0))
+    if soc_terminal_value > 0:
+        objective -= soc_terminal_value * soc[n]
+
     prob += objective
 
     # -----------------------------------------------------------------------

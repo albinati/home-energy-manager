@@ -574,6 +574,14 @@ class Config:
         self._rt_set("LP_SOC_FINAL_KWH", float(value))
 
     @property
+    def LP_SOC_TERMINAL_VALUE_PENCE_PER_KWH(self) -> float:
+        return float(self._rt_get("LP_SOC_TERMINAL_VALUE_PENCE_PER_KWH"))
+
+    @LP_SOC_TERMINAL_VALUE_PENCE_PER_KWH.setter
+    def LP_SOC_TERMINAL_VALUE_PENCE_PER_KWH(self, value: float) -> None:
+        self._rt_set("LP_SOC_TERMINAL_VALUE_PENCE_PER_KWH", float(value))
+
+    @property
     def MPC_FORECAST_REFRESH_INTERVAL_MINUTES(self) -> int:
         return int(self._rt_get("MPC_FORECAST_REFRESH_INTERVAL_MINUTES"))
 

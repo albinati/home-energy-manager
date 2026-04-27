@@ -201,7 +201,12 @@ SCHEMA: dict[str, SettingSpec] = {
     "PV_CALIBRATION_WINDOW_DAYS": SettingSpec(
         key="PV_CALIBRATION_WINDOW_DAYS",
         type_name="int",
-        env_default=_int_env("PV_CALIBRATION_WINDOW_DAYS", "30"),
+        # Default 14d (was 30d). S10.5 (#172) A/B test against today's data showed
+        # 30d severely lags the spring→summer transition: afternoon factors at
+        # BST 14-17 were under-calibrated by 17-49% vs 14d. Median + Open-Meteo
+        # Archive method (production code) handles outliers fine; the smaller
+        # window's faster seasonal response wins.
+        env_default=_int_env("PV_CALIBRATION_WINDOW_DAYS", "14"),
         min_value=7,
         max_value=365,
         cron_reload=False,
@@ -233,6 +238,24 @@ SCHEMA: dict[str, SettingSpec] = {
     # SoC ≥ this value (kWh). Without it, individual runs may plan to drain the
     # battery near the boundary before the next MPC corrects. Default = 25 % of
     # BATTERY_CAPACITY_KWH so it scales with the installed battery.
+    # Terminal SoC valuation — addresses the "drain to floor + refill from grid"
+    # myopia by making each kWh above the floor worth N pence in the objective.
+    # Default 5 p/kWh: nudges away from MARGINAL arbitrage (where the
+    # export-vs-overnight-import spread is small) while still allowing STRONG
+    # arbitrage to cycle the battery. 0 = legacy hard-floor-only behaviour.
+    "LP_SOC_TERMINAL_VALUE_PENCE_PER_KWH": SettingSpec(
+        key="LP_SOC_TERMINAL_VALUE_PENCE_PER_KWH",
+        type_name="float",
+        env_default=_float_env("LP_SOC_TERMINAL_VALUE_PENCE_PER_KWH", "5.0"),
+        min_value=0.0,
+        max_value=30.0,
+        description=(
+            "Soft-cost per kWh of terminal SoC above LP_SOC_FINAL_KWH (pence). "
+            "Each kWh kept in the battery at horizon end is worth this much in "
+            "the LP objective — represents the avoided import cost of NOT having "
+            "to refill from grid in the next horizon. 0 disables (legacy)."
+        ),
+    ),
     "LP_SOC_FINAL_KWH": SettingSpec(
         key="LP_SOC_FINAL_KWH",
         type_name="float",
