@@ -76,35 +76,46 @@ def apply_safe_defaults(
 ) -> None:
     """Force safe house state after arbitrage windows or on fault."""
     if fox and not config.OPENCLAW_READ_ONLY:
-        try:
-            if fox.api_key:
-                try:
-                    fox.set_scheduler_flag(False)
-                except FoxESSError:
-                    pass
-            fox.set_work_mode("Self Use")
-            # Hardcoded 10 used to fail with API error 40257 when the inverter's
-            # configured reserve (MIN_SOC_RESERVE_PERCENT, default 15) was higher.
-            # Mirror the configured floor so safe-defaults can never set below it.
-            min_soc = max(0, min(100, int(config.MIN_SOC_RESERVE_PERCENT)))
-            fox.set_min_soc(min_soc)
+        # Isolate each set_* call so action_log + logs identify exactly which
+        # endpoint Fox rejects. Historically the bundled try/except masked this:
+        # when the API returned 40257, we knew "something" failed but had no
+        # signal to drive the fix. Each call is independent — failure of one
+        # does not block the others, and the success-row params reflect what
+        # actually applied.
+        min_soc = max(0, min(100, int(config.MIN_SOC_RESERVE_PERCENT)))
+        applied: dict[str, Any] = {}
+        failures: dict[str, str] = {}
+        steps: list[tuple[str, Any]] = [
+            ("scheduler_flag", lambda: fox.set_scheduler_flag(False) if fox.api_key else None),
+            ("work_mode", lambda: fox.set_work_mode("Self Use")),
+            ("min_soc_on_grid", lambda: fox.set_min_soc(min_soc)),
+        ]
+        step_value = {"scheduler_flag": False, "work_mode": "Self Use", "min_soc_on_grid": min_soc}
+        for name, call in steps:
+            try:
+                call()
+                applied[name] = step_value[name]
+            except (FoxESSError, ValueError) as e:
+                failures[name] = str(e)
+                logger.warning("Fox safe-default step %s failed: %s", name, e)
+
+        if failures:
             db.log_action(
                 device="foxess",
                 action="apply_safe_defaults",
-                params={"work_mode": "Self Use", "min_soc_on_grid": min_soc, "scheduler_flag": False},
+                params={"applied": applied, "failed": list(failures)},
+                result="partial" if applied else "failure",
+                trigger=trigger,
+                error_msg="; ".join(f"{k}: {v}" for k, v in failures.items()),
+            )
+        else:
+            db.log_action(
+                device="foxess",
+                action="apply_safe_defaults",
+                params=applied,
                 result="success",
                 trigger=trigger,
             )
-        except (FoxESSError, ValueError) as e:
-            db.log_action(
-                device="foxess",
-                action="apply_safe_defaults",
-                params={},
-                result="failure",
-                trigger=trigger,
-                error_msg=str(e),
-            )
-            logger.warning("Fox safe defaults failed: %s", e)
     elif fox:
         db.log_action(
             device="foxess",
