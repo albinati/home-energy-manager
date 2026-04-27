@@ -213,6 +213,22 @@ SCHEMA: dict[str, SettingSpec] = {
             "0.83 vs 0.67 (recent) overestimate bias."
         ),
     ),
+    # Site location — installation-specific, not a credential. Drives
+    # Open-Meteo forecast fetches (LP weather inputs) and degree-day analytics.
+    # Defaults: Chiswick W4 (London) — same as the legacy env defaults so the
+    # post-cutover env-empty case is unchanged.
+    "WEATHER_LAT": SettingSpec(
+        key="WEATHER_LAT",
+        type_name="str",
+        env_default=lambda: (os.getenv("WEATHER_LAT") or "51.4927").strip(),
+        description="Latitude (decimal degrees). Drives Open-Meteo forecast for LP weather inputs.",
+    ),
+    "WEATHER_LON": SettingSpec(
+        key="WEATHER_LON",
+        type_name="str",
+        env_default=lambda: (os.getenv("WEATHER_LON") or "-0.2628").strip(),
+        description="Longitude (decimal degrees). Drives Open-Meteo forecast for LP weather inputs.",
+    ),
     # Terminal SoC floor — anti-myopia. Each LP run must end its 24h horizon with
     # SoC ≥ this value (kWh). Without it, individual runs may plan to drain the
     # battery near the boundary before the next MPC corrects. Default = 25 % of
