@@ -83,11 +83,15 @@ def apply_safe_defaults(
                 except FoxESSError:
                     pass
             fox.set_work_mode("Self Use")
-            fox.set_min_soc(10)
+            # Hardcoded 10 used to fail with API error 40257 when the inverter's
+            # configured reserve (MIN_SOC_RESERVE_PERCENT, default 15) was higher.
+            # Mirror the configured floor so safe-defaults can never set below it.
+            min_soc = max(0, min(100, int(config.MIN_SOC_RESERVE_PERCENT)))
+            fox.set_min_soc(min_soc)
             db.log_action(
                 device="foxess",
                 action="apply_safe_defaults",
-                params={"work_mode": "Self Use", "min_soc_on_grid": 10, "scheduler_flag": False},
+                params={"work_mode": "Self Use", "min_soc_on_grid": min_soc, "scheduler_flag": False},
                 result="success",
                 trigger=trigger,
             )
