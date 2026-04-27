@@ -56,6 +56,42 @@ class TestFoxESSClient(unittest.TestCase):
             self.client.set_work_mode("Invalid Mode")
 
     @patch.object(FoxESSClient, "_open_post")
+    def test_set_work_mode_payload_is_pascalcase(self, mock_post):
+        """S10.6 (#173): Fox API expects key='WorkMode' (PascalCase) and value
+        without spaces ('SelfUse', not 'Self Use'). Lowercase or spaces return
+        API error 40257.
+        """
+        mock_post.return_value = {}
+        self.client.set_work_mode("Self Use")
+        path, body = mock_post.call_args.args
+        assert path == "/device/setting/set"
+        assert body["key"] == "WorkMode"
+        assert body["value"] == "SelfUse"
+
+    @patch.object(FoxESSClient, "_open_post")
+    def test_set_work_mode_translates_force_charge(self, mock_post):
+        mock_post.return_value = {}
+        self.client.set_work_mode("Force charge")
+        _, body = mock_post.call_args.args
+        assert body["value"] == "ForceCharge"
+
+    @patch.object(FoxESSClient, "_open_post")
+    def test_set_min_soc_payload_is_pascalcase(self, mock_post):
+        """S10.6 (#173): key='MinSocOnGrid' (PascalCase) + string-formatted value."""
+        mock_post.return_value = {}
+        self.client.set_min_soc(15)
+        path, body = mock_post.call_args.args
+        assert path == "/device/setting/set"
+        assert body["key"] == "MinSocOnGrid"
+        assert body["value"] == "15"  # string, not int
+
+    def test_set_min_soc_validates_range(self):
+        with self.assertRaises(ValueError):
+            self.client.set_min_soc(5)
+        with self.assertRaises(ValueError):
+            self.client.set_min_soc(101)
+
+    @patch.object(FoxESSClient, "_open_post")
     def test_get_realtime_work_mode_numeric(self, mock_post):
         """API may return workMode as numeric code (e.g. 0 = Self Use)."""
         mock_post.return_value = [
