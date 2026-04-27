@@ -372,20 +372,33 @@ class FoxESSClient:
             for d in devices_raw
         ]
 
+    # Fox Open API expects PascalCase setting key 'WorkMode' and value names
+    # *without spaces* — the older lowercase 'workMode' / "Self Use" combo
+    # returns API error 40257 ("Parameters do not meet expectations"). Callers
+    # may keep using the human-readable mode names; they're translated here.
+    # Verified against TonyM1958/foxesscloud (the active community Python
+    # wrapper) and the official Fox Open API docs (#173 / S10.6).
+    _WORK_MODE_API_NAMES: dict[str, str] = {
+        "Self Use": "SelfUse",
+        "Feed-in Priority": "Feedin",
+        "Back Up": "Backup",
+        "Force charge": "ForceCharge",
+        "Force discharge": "ForceDischarge",
+    }
+
     def set_work_mode(self, mode: str) -> None:
-        """Set inverter work mode."""
-        valid = ["Self Use", "Feed-in Priority", "Back Up", "Force charge", "Force discharge"]
-        if mode not in valid:
-            raise ValueError(f"Invalid mode '{mode}'. Choose from: {valid}")
+        """Set inverter work mode. Accepts human-readable names; sends Fox API value."""
+        if mode not in self._WORK_MODE_API_NAMES:
+            raise ValueError(
+                f"Invalid mode '{mode}'. Choose from: {list(self._WORK_MODE_API_NAMES.keys())}"
+            )
+        api_value = self._WORK_MODE_API_NAMES[mode]
         self._gate_inter_write()
+        body = {"sn": self.device_sn, "key": "WorkMode", "value": api_value}
         if self.api_key:
-            self._open_post("/device/setting/set", {
-                "sn": self.device_sn, "key": "workMode", "value": mode,
-            })
+            self._open_post("/device/setting/set", body)
         else:
-            self._cloud_post("/c/v0/device/setting/set", {
-                "sn": self.device_sn, "key": "workMode", "value": mode,
-            })
+            self._cloud_post("/c/v0/device/setting/set", body)
         self._stamp_write()
 
     def get_device_setting(self, key: str) -> dict:
@@ -437,7 +450,15 @@ class FoxESSClient:
         """Set Min SoC (on grid) limit (V7 Safeties)."""
         if not (10 <= min_soc <= 100):
             raise ValueError("Min SoC must be between 10 and 100")
-        self.set_device_setting("minSocOnGrid", min_soc)
+        # Fox API: PascalCase key 'MinSocOnGrid' + string-formatted value
+        # (lowercase 'minSocOnGrid' returns 40257). #173 / S10.6.
+        self._gate_inter_write()
+        body = {"sn": self.device_sn, "key": "MinSocOnGrid", "value": str(int(min_soc))}
+        if self.api_key:
+            self._open_post("/device/setting/set", body)
+        else:
+            self._cloud_post("/c/v0/device/setting/set", body)
+        self._stamp_write()
 
     def get_energy_today(self) -> dict:
         """Get today's energy summary (kWh)."""
