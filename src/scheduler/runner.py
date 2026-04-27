@@ -263,6 +263,43 @@ def _in_octopus_pre_slot_window(
     return in_window
 
 
+def bulletproof_daikin_consumption_rollup_job() -> None:
+    """Roll daily Daikin consumption from the cached gateway-devices payload (S10.12 / #178).
+
+    Daikin Onecta exposes ``consumptionData.value.electrical.<mode>.w`` — a 14-day
+    array (last week + this week per management point). We parse it from the
+    already-cached devices payload (zero extra API quota) and upsert per-day rows
+    into ``daikin_consumption_daily``.
+    """
+    from .. import db
+
+    try:
+        from ..api.main import get_daikin_client
+        client = get_daikin_client()
+    except Exception as e:
+        logger.warning("daikin rollup: client init failed: %s", e)
+        return
+
+    try:
+        per_day = client.get_daily_consumption_from_cache()
+        if not per_day:
+            logger.info("daikin rollup: no consumption data in cached payload — skipped")
+            return
+        n = 0
+        for day, b in per_day.items():
+            db.upsert_daikin_consumption_daily(
+                date=day,
+                kwh_total=b.get("total_kwh"),
+                kwh_heating=b.get("heating_kwh"),
+                kwh_dhw=b.get("dhw_kwh"),
+                source="onecta_cache",
+            )
+            n += 1
+        logger.info("daikin_consumption_daily rollup: %d days written from cache", n)
+    except Exception as e:
+        logger.warning("daikin rollup failed (non-fatal): %s", e)
+
+
 def bulletproof_fox_energy_rollup_job() -> None:
     """Aggregate ``pv_realtime_history`` into per-day kWh totals (S10.10 / #177).
 
@@ -1168,6 +1205,16 @@ def start_background_scheduler() -> None:
                 id="bulletproof_fox_energy_rollup",
             )
             logger.info("fox_energy_daily rollup cron scheduled (02:30 UTC daily)")
+
+            # S10.12 (#178): daily Daikin consumption rollup from cached payload.
+            # Runs 02:35 UTC, 5 min after Fox so we don't burst all rollups at once.
+            # Reads /gateway-devices cache — no extra Daikin quota.
+            _background_scheduler.add_job(
+                bulletproof_daikin_consumption_rollup_job,
+                CronTrigger(hour=2, minute=35, timezone=ZoneInfo("UTC")),
+                id="bulletproof_daikin_consumption_rollup",
+            )
+            logger.info("daikin_consumption_daily rollup cron scheduled (02:35 UTC daily)")
             # PV realtime telemetry (Solar Sponge analysis): persist Fox cached realtime
             # to pv_realtime_history. Zero Fox quota cost (heartbeat-cached). Used by
             # offline PV calibration analysis.
