@@ -1096,41 +1096,74 @@ def get_half_hourly_agile_priors(
     return out
 
 
-def half_hourly_load_profile_kwh(limit: int = 2016) -> dict[tuple[int, int], float]:
-    """Return per-(hour, minute) mean consumption kWh from execution_log.
+def half_hourly_load_profile_kwh(
+    limit: int = 2016,
+    *,
+    window_days: int = 30,
+) -> dict[tuple[int, int], float]:
+    """Return per-(hour, minute) MEDIAN load (kWh per 30-min slot) from
+    ``pv_realtime_history.load_power_kw`` measurements.
 
-    Half-hour bucket granularity (S10.8 / #175): the LP solves at 30-min
-    resolution; bucketing load history at the same granularity preserves
-    intra-hour variance (e.g. cooking spikes at :30 vs idle at :00). Falls
-    back to the flat mean for buckets with no data. Returns
-    ``{(hour, minute): kWh_per_slot}`` where minute ∈ {0, 30}.
+    S10.9 (#176): switched from ``execution_log.consumption_kwh`` (which is
+    100% ``source='estimated'`` and defaults to ~0.4 kWh/slot fallback) to the
+    real Fox telemetry sampled in ``pv_realtime_history``. Audit on prod
+    showed the estimated-source profile overestimating real load by ~80% on
+    average — the LP was over-provisioning import/charge based on noise.
+
+    Half-hour bucket granularity (S10.8 / #175). Median per bucket is robust
+    to occasional spikes (cooking, EV charge) so a couple of cold-snap days
+    don't bias the prior. Falls back to the flat mean for buckets with no
+    data. Returns ``{(hour, minute): kWh_per_slot}`` where minute ∈ {0, 30}.
+
+    The ``limit`` arg is kept for API compatibility; the window-days cap is
+    the actual filter (samples older than ``window_days`` are excluded).
     """
-    rows = get_execution_logs(limit=limit)
+    cutoff_iso = (datetime.now(UTC) - timedelta(days=window_days)).isoformat().replace("+00:00", "Z")
     buckets: dict[tuple[int, int], list[float]] = {}
-    for r in rows:
-        if r.get("consumption_kwh") is None:
-            continue
-        ts_str = r.get("timestamp") or ""
+    with _lock:
+        conn = get_connection()
         try:
+            cur = conn.execute(
+                """SELECT captured_at, load_power_kw
+                   FROM pv_realtime_history
+                   WHERE captured_at > ? AND load_power_kw IS NOT NULL""",
+                (cutoff_iso,),
+            )
             from datetime import datetime as _dt
-            ts = _dt.fromisoformat(ts_str.replace("Z", "+00:00"))
-            local = ts.astimezone(ZoneInfo(config.BULLETPROOF_TIMEZONE))
-            # Snap minute to nearest half-hour boundary (Octopus / our slots are :00 or :30)
-            minute_bucket = 30 if local.minute >= 30 else 0
-            key = (local.hour, minute_bucket)
-        except (ValueError, TypeError):
-            continue
-        buckets.setdefault(key, []).append(float(r["consumption_kwh"]))
+            for row in cur.fetchall():
+                ts_str = row["captured_at"]
+                kw = float(row["load_power_kw"])
+                try:
+                    ts = _dt.fromisoformat(str(ts_str).replace("Z", "+00:00"))
+                    local = ts.astimezone(ZoneInfo(config.BULLETPROOF_TIMEZONE))
+                except (ValueError, TypeError):
+                    continue
+                minute_bucket = 30 if local.minute >= 30 else 0
+                key = (local.hour, minute_bucket)
+                # Convert instantaneous kW to kWh per 30-min slot (each sample
+                # represents the instantaneous power; slot energy = mean kW * 0.5h).
+                buckets.setdefault(key, []).append(kw * 0.5)
+        finally:
+            conn.close()
 
-    flat_mean = mean_consumption_kwh_from_execution_logs(limit=limit)
+    # Robust per-bucket median; fall back to global median if a bucket is empty.
+    all_vals = [v for vs in buckets.values() for v in vs]
+    if all_vals:
+        all_vals.sort()
+        global_fallback = all_vals[len(all_vals) // 2]
+    else:
+        global_fallback = mean_consumption_kwh_from_execution_logs(limit=limit)
+
     profile: dict[tuple[int, int], float] = {}
     for h in range(24):
         for m in (0, 30):
             key = (h, m)
-            if key in buckets and buckets[key]:
-                profile[key] = sum(buckets[key]) / len(buckets[key])
+            vs = buckets.get(key, [])
+            if vs:
+                vs_sorted = sorted(vs)
+                profile[key] = vs_sorted[len(vs_sorted) // 2]
             else:
-                profile[key] = flat_mean
+                profile[key] = global_fallback
     return profile
 
 
