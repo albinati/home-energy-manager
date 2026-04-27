@@ -133,14 +133,15 @@ def _resolve_plan_window(tariff: str) -> PlanWindow | None:
     # D+1 prices the next MPC re-solve picks them up cleanly.
     horizon_end_utc = target_end_utc
     if last_valid_to < target_end_utc:
-        priors = db.get_hourly_agile_priors(tariff, window_days=28)
+        priors = db.get_half_hourly_agile_priors(tariff, window_days=28)
         if priors:
             fallback_p = sum(priors.values()) / len(priors)
             synth: list[dict[str, Any]] = []
             t = max(last_valid_to, start_utc)
             while t < target_end_utc:
                 t_end = t + timedelta(minutes=30)
-                p = priors.get(t.hour, fallback_p)
+                # Half-hour granularity: prior bucket is (hour, minute) per S10.8 (#175)
+                p = priors.get((t.hour, t.minute), fallback_p)
                 synth.append({
                     "valid_from": t.isoformat().replace("+00:00", "Z"),
                     "valid_to": t_end.isoformat().replace("+00:00", "Z"),
@@ -1163,7 +1164,7 @@ def _build_export_price_line(slot_starts_utc: list[datetime]) -> list[float] | N
     # at the same price).
     export_tariff = (config.OCTOPUS_EXPORT_TARIFF_CODE or "").strip()
     priors = (
-        db.get_hourly_agile_priors(export_tariff, window_days=28, table="agile_export_rates")
+        db.get_half_hourly_agile_priors(export_tariff, window_days=28, table="agile_export_rates")
         if export_tariff
         else {}
     )
@@ -1176,8 +1177,8 @@ def _build_export_price_line(slot_starts_utc: list[datetime]) -> list[float] | N
         if v is not None:
             out.append(v)
             n_matched += 1
-        elif st.hour in priors:
-            out.append(priors[st.hour])
+        elif (st.hour, st.minute) in priors:
+            out.append(priors[(st.hour, st.minute)])
             n_prior += 1
         else:
             out.append(flat)
@@ -1221,13 +1222,17 @@ def _run_optimizer_lp(fox: FoxESSClient | None, daikin: Any | None = None) -> di
     if not slots:
         return _self_use_fallback(fox, reason="No half-hour slots in LP horizon — check Agile rates coverage")
 
-    # Per-slot load profile (hour-of-day bins from execution_log)
+    # Per-slot load profile (half-hour bins from execution_log per S10.8 / #175)
     _profile_limit = int(getattr(config, "LP_LOAD_PROFILE_SLOTS", 2016))
-    _load_profile = db.hourly_load_profile_kwh(limit=_profile_limit)
+    _load_profile = db.half_hourly_load_profile_kwh(limit=_profile_limit)
     # Fall back to Fox daily mean when execution_log is cold
     _fox_mean = db.mean_fox_load_kwh_per_slot(limit=60)
     _flat = _fox_mean if _fox_mean is not None else db.mean_consumption_kwh_from_execution_logs(limit=_profile_limit)
-    base_load = [_load_profile.get(s.start_utc.astimezone(tz).hour, _flat) for s in slots]
+    base_load = []
+    for s in slots:
+        _local = s.start_utc.astimezone(tz)
+        _bucket = (_local.hour, 30 if _local.minute >= 30 else 0)
+        base_load.append(_load_profile.get(_bucket, _flat))
     mu_load = sum(base_load) / len(base_load) if base_load else 0.4
     prices = [s.price_pence for s in slots]
     starts = [s.start_utc for s in slots]

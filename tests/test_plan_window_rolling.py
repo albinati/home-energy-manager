@@ -89,7 +89,7 @@ def test_rolling_truncates_when_no_priors_available(
 
     # Force priors to be empty by querying with no historical data
     monkeypatch.setattr(
-        "src.scheduler.optimizer.db.get_hourly_agile_priors",
+        "src.scheduler.optimizer.db.get_half_hourly_agile_priors",
         lambda *a, **kw: {},
     )
 

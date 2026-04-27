@@ -1,7 +1,8 @@
-"""db.get_hourly_agile_priors — median per UTC hour-of-day from the last N days.
+"""db.get_half_hourly_agile_priors — median per UTC (hour, minute) from the last N days.
 
 S10.2 (#169) helper used by the LP horizon extender to fill D+1 slots when
-Octopus hasn't published tomorrow's prices yet.
+Octopus hasn't published tomorrow's prices yet. S10.8 (#175) refined to
+half-hour granularity.
 """
 from __future__ import annotations
 
@@ -28,45 +29,49 @@ def _seed_rate(t: datetime, price: float, tariff: str) -> None:
     )
 
 
-def test_priors_returns_median_per_hour() -> None:
-    """Each hour returns the median of all values seeded into that hour over the window."""
+def test_priors_returns_median_per_half_hour() -> None:
+    """Each (hour, minute) bucket returns the median of all values seeded into it."""
     tariff = "E-1R-AGILE-TEST-PRIORS"
     base = datetime.now(UTC) - timedelta(days=7)
-    # Seed three values for hour 12 across three different days:
-    #   day 1: 10p, day 2: 20p, day 3: 30p → median 20p
+    # Seed three values for slot 12:00 across three days → median 20p
     for day_offset, price in [(0, 10.0), (1, 20.0), (2, 30.0)]:
         t = base.replace(hour=12, minute=0, second=0, microsecond=0) + timedelta(days=day_offset)
         _seed_rate(t, price, tariff)
+    # And different prices for slot 12:30 → distinct median
+    for day_offset, price in [(0, 100.0), (1, 200.0), (2, 300.0)]:
+        t = base.replace(hour=12, minute=30, second=0, microsecond=0) + timedelta(days=day_offset)
+        _seed_rate(t, price, tariff)
 
-    priors = db.get_hourly_agile_priors(tariff, window_days=14)
-    assert 12 in priors, f"hour 12 missing from priors: {priors}"
-    assert priors[12] == pytest.approx(20.0)
+    priors = db.get_half_hourly_agile_priors(tariff, window_days=14)
+    assert (12, 0) in priors and (12, 30) in priors
+    assert priors[(12, 0)] == pytest.approx(20.0)
+    assert priors[(12, 30)] == pytest.approx(200.0)
+    assert priors[(12, 0)] != priors[(12, 30)], (
+        "S10.8 (#175): the two half-hours of the same hour must be separately bucketed"
+    )
 
 
 def test_priors_window_filters_old_data() -> None:
     """Only data within window_days is included."""
     tariff = "E-1R-AGILE-TEST-WINDOW"
-    # Old data (60 days ago) — should be excluded by window_days=14
     old = datetime.now(UTC) - timedelta(days=60)
     _seed_rate(old.replace(hour=10, minute=0), 999.0, tariff)
-    # Recent data (3 days ago) — included
     recent = datetime.now(UTC) - timedelta(days=3)
     _seed_rate(recent.replace(hour=10, minute=0), 5.0, tariff)
 
-    priors = db.get_hourly_agile_priors(tariff, window_days=14)
-    assert 10 in priors
-    # Window-filtered: only recent value (5.0) — old 999.0 should not appear
-    assert priors[10] == pytest.approx(5.0)
+    priors = db.get_half_hourly_agile_priors(tariff, window_days=14)
+    assert (10, 0) in priors
+    assert priors[(10, 0)] == pytest.approx(5.0)
 
 
 def test_priors_empty_when_no_history() -> None:
-    """No matching tariff rows → empty dict (caller falls back)."""
-    priors = db.get_hourly_agile_priors("NON-EXISTENT-TARIFF", window_days=28)
+    """No matching tariff rows → empty dict."""
+    priors = db.get_half_hourly_agile_priors("NON-EXISTENT-TARIFF", window_days=28)
     assert priors == {}
 
 
 def test_priors_works_for_export_table() -> None:
-    """Same helper covers agile_export_rates by passing table='agile_export_rates'."""
+    """Same helper covers agile_export_rates."""
     tariff = "E-1R-AGILE-OUTGOING-TEST"
     t = datetime.now(UTC) - timedelta(days=2)
     db.save_agile_export_rates(
@@ -79,5 +84,5 @@ def test_priors_works_for_export_table() -> None:
         ],
         tariff,
     )
-    priors = db.get_hourly_agile_priors(tariff, window_days=14, table="agile_export_rates")
-    assert priors.get(14) == pytest.approx(8.5)
+    priors = db.get_half_hourly_agile_priors(tariff, window_days=14, table="agile_export_rates")
+    assert priors.get((14, 0)) == pytest.approx(8.5)

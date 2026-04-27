@@ -1118,7 +1118,9 @@ async def optimization_inputs(horizon_hours: int | None = None):
     # --- Base-load hour-of-day profile --------------------------------------
     profile_limit = int(getattr(config, "LP_LOAD_PROFILE_SLOTS", 2016))
     try:
-        load_profile = db.hourly_load_profile_kwh(limit=profile_limit)
+        # Half-hour granularity per S10.8 (#175): preserves intra-hour load
+        # variance (e.g. cooking spikes at :30 vs idle at :00).
+        load_profile = db.half_hourly_load_profile_kwh(limit=profile_limit)
     except Exception:
         load_profile = {}
     try:
@@ -1246,10 +1248,14 @@ async def optimization_inputs(horizon_hours: int | None = None):
         temp_c = _interp(t, 1)
         solar = _interp(t, 2)
         try:
-            hr_local = t.astimezone(ZoneInfo(tz_name)).hour
+            local_dt = t.astimezone(ZoneInfo(tz_name))
+            hr_local = local_dt.hour
+            min_local = 30 if local_dt.minute >= 30 else 0
         except Exception:
             hr_local = t.hour
-        bl = float(load_profile.get(hr_local, flat))
+            min_local = 30 if t.minute >= 30 else 0
+        # S10.8 (#175): half-hour bucket lookup; falls back to flat mean.
+        bl = float(load_profile.get((hr_local, min_local), flat))
         slots_out.append({
             "t_utc": iso.replace("+00:00", "Z"),
             "price_import_p": price_i,

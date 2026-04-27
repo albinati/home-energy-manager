@@ -46,20 +46,22 @@ class LpSimulationResult:
 
 
 def _build_load_profile(slot_starts_utc: list[datetime]) -> list[float]:
-    """Per-slot base load using hourly profile from execution_log.
+    """Per-slot base load using half-hourly profile from execution_log.
 
+    Half-hour granularity (S10.8 / #175) preserves intra-hour variance.
     Falls back to Fox daily mean (load_kwh / 48) when execution_log is cold,
     then to a hardcoded default of 0.4 kWh/slot.
     """
     limit = int(getattr(config, "LP_LOAD_PROFILE_SLOTS", 2016))
-    profile = db.hourly_load_profile_kwh(limit=limit)
+    profile = db.half_hourly_load_profile_kwh(limit=limit)
     flat_from_log = db.mean_consumption_kwh_from_execution_logs(limit=limit)
     fox_mean = db.mean_fox_load_kwh_per_slot(limit=60)
     flat = fox_mean if fox_mean is not None else flat_from_log
     out: list[float] = []
     for s in slot_starts_utc:
-        h = s.astimezone(ZoneInfo(config.BULLETPROOF_TIMEZONE)).hour
-        out.append(profile.get(h, flat))
+        local = s.astimezone(ZoneInfo(config.BULLETPROOF_TIMEZONE))
+        bucket = (local.hour, 30 if local.minute >= 30 else 0)
+        out.append(profile.get(bucket, flat))
     return out
 
 
