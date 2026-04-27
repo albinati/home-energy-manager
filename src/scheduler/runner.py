@@ -263,6 +263,29 @@ def _in_octopus_pre_slot_window(
     return in_window
 
 
+def bulletproof_fox_energy_rollup_job() -> None:
+    """Aggregate ``pv_realtime_history`` into per-day kWh totals (S10.10 / #177).
+
+    Replaces the broken Fox Cloud per-day API rollup. Uses our own heartbeat-
+    captured telemetry (~3 min cadence) — zero Fox quota cost. Re-aggregates
+    last 35 days to cover any gaps (idempotent upsert).
+    """
+    from datetime import date as _date, timedelta as _td
+    from .. import db
+
+    try:
+        end = _date.today().isoformat()
+        start = (_date.today() - _td(days=35)).isoformat()
+        rows = db.compute_fox_energy_daily_from_realtime(start_date=start, end_date=end)
+        if rows:
+            n = db.upsert_fox_energy_daily(rows)
+            logger.info("fox_energy_daily rollup: %d days computed (%s → %s)", n, start, end)
+        else:
+            logger.info("fox_energy_daily rollup: no samples in window — skipped")
+    except Exception as e:
+        logger.warning("fox_energy_daily rollup failed (non-fatal): %s", e)
+
+
 def bulletproof_octopus_fetch_job() -> None:
     from .octopus_fetch import fetch_and_store_rates
 
@@ -1135,6 +1158,16 @@ def start_background_scheduler() -> None:
                 "Forecast refresh cron scheduled every %d min",
                 int(config.MPC_FORECAST_REFRESH_INTERVAL_MINUTES),
             )
+
+            # S10.10 (#177): daily Fox energy rollup from local pv_realtime_history.
+            # Runs at 02:30 UTC — yesterday's samples fully captured by then; well
+            # before the 03:05 host-level backup so the latest rollup is captured.
+            _background_scheduler.add_job(
+                bulletproof_fox_energy_rollup_job,
+                CronTrigger(hour=2, minute=30, timezone=ZoneInfo("UTC")),
+                id="bulletproof_fox_energy_rollup",
+            )
+            logger.info("fox_energy_daily rollup cron scheduled (02:30 UTC daily)")
             # PV realtime telemetry (Solar Sponge analysis): persist Fox cached realtime
             # to pv_realtime_history. Zero Fox quota cost (heartbeat-cached). Used by
             # offline PV calibration analysis.
