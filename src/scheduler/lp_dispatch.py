@@ -357,8 +357,19 @@ def build_fox_groups_from_lp(
     near-future at full precision) and ``replan_at_utc`` reports the end-time of
     the last surviving window — the caller schedules a one-shot MPC re-plan
     shortly before it. ``replan_at_utc`` is ``None`` when no truncation occurred.
+
+    Important: Fox V3 scheduler is daily-cyclic — each group stores only
+    hour/minute (no date) and repeats every day. We therefore only dispatch the
+    first 24 h of plan slots; D+1 actions that share an hour-of-day with D+0
+    actions would otherwise become indistinguishable, overlapping groups in the
+    inverter (visible as duplicates in the Fox app). The next MPC re-solve
+    handles D+1 dispatch once D+1 becomes "today". The LP itself still plans
+    over 48 h (S10.2 / #169) — only the dispatch surface is 24 h.
     """
     slots = lp_dispatch_slots_for_hardware(plan)
+    if slots:
+        cutoff = slots[0].start_utc + timedelta(hours=24)
+        slots = [s for s in slots if s.start_utc < cutoff]
     peak_export = _bulletproof_allow_peak_export_discharge()
     return _merge_fox_groups(
         slots,
