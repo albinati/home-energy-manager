@@ -190,9 +190,9 @@ class Config:
     HEATING_LOAD_SHARE: float = float(os.getenv("HEATING_LOAD_SHARE", "0.4"))
 
     # Weather (optional): for heating analytics — degree-days, cost per °C (Open-Meteo Historical, no key)
-    # Defaults: Chiswick W4 approximate (London)
-    WEATHER_LAT: str = (os.getenv("WEATHER_LAT") or "51.4927").strip()
-    WEATHER_LON: str = (os.getenv("WEATHER_LON") or "-0.2628").strip()
+    # WEATHER_LAT + WEATHER_LON moved to runtime_settings (#52) — see @property
+    # definitions below. Env vars still honored as the env_default fallback so
+    # nothing breaks when the DB row is absent.
     # Degree-day base temp (°C): heating demand assumed proportional to (base - outdoor_mean)
     WEATHER_DEGREE_DAY_BASE_C: float = float(os.getenv("WEATHER_DEGREE_DAY_BASE_C", "18"))
     WEATHER_COLD_THRESHOLD_C: float = float(os.getenv("WEATHER_COLD_THRESHOLD_C", "5"))
@@ -500,6 +500,22 @@ class Config:
 
     def _rt_set(self, key: str, value: Any) -> None:
         self._overrides[key] = value
+
+    @property
+    def WEATHER_LAT(self) -> str:
+        return str(self._rt_get("WEATHER_LAT"))
+
+    @WEATHER_LAT.setter
+    def WEATHER_LAT(self, value: str) -> None:
+        self._rt_set("WEATHER_LAT", str(value).strip())
+
+    @property
+    def WEATHER_LON(self) -> str:
+        return str(self._rt_get("WEATHER_LON"))
+
+    @WEATHER_LON.setter
+    def WEATHER_LON(self, value: str) -> None:
+        self._rt_set("WEATHER_LON", str(value).strip())
 
     @property
     def DHW_TEMP_COMFORT_C(self) -> float:
