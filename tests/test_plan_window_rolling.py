@@ -52,11 +52,46 @@ def test_rolling_24h_when_full_tomorrow_available(monkeypatch: pytest.MonkeyPatc
     assert w.horizon_hours == pytest.approx(24.0)
 
 
-def test_rolling_partial_when_tomorrow_not_published(monkeypatch: pytest.MonkeyPatch) -> None:
-    """At 09:00 UTC with only today's rates (ending 23:00 UTC), window truncates to last slot."""
+def test_rolling_extends_with_priors_when_tomorrow_not_published(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S10.2 (#169): when rates run out before LP_HORIZON_HOURS, synthesised
+    rows from historical median per-hour-of-day priors fill the tail. With a
+    24 h horizon and 23 h of seeded rates ending at 23:00 UTC, the window
+    should still cover 9:30 → 9:30 next day (24 h) using priors for the gap.
+    """
     now = datetime(2026, 4, 22, 9, 0, tzinfo=UTC)
     monkeypatch.setattr(optimizer, "_now_utc", lambda: now)
-    _seed_rates(datetime(2026, 4, 22, 0, 0, tzinfo=UTC), 46)  # 23 h, last valid_to = 23:00 UTC
+    # Seed enough historical rates that priors are non-empty (28 d before today)
+    _seed_rates(datetime(2026, 4, 1, 0, 0, tzinfo=UTC), 1000, price=12.0)
+    # Plus today's 23 h that the LP would normally use
+    _seed_rates(datetime(2026, 4, 22, 0, 0, tzinfo=UTC), 46, price=10.0)
+
+    w = _resolve_plan_window(TARIFF)
+    assert w is not None
+    assert w.day_start == datetime(2026, 4, 22, 9, 30, tzinfo=UTC)
+    # Horizon now extends to full 24h via priors instead of truncating at 23:00
+    assert w.horizon_end == datetime(2026, 4, 23, 9, 30, tzinfo=UTC)
+    assert w.horizon_hours == pytest.approx(24.0)
+    # Confirm at least one synthesised "prior" row is present in rates
+    prior_rows = [r for r in w.rates if r.get("fetched_at") == "prior"]
+    assert prior_rows, "expected synthesised prior rows in rates list"
+
+
+def test_rolling_truncates_when_no_priors_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No history → can't synthesise; legacy truncation behaviour applies."""
+    now = datetime(2026, 4, 22, 9, 0, tzinfo=UTC)
+    monkeypatch.setattr(optimizer, "_now_utc", lambda: now)
+    # Only today's data; no history older than 28 d ago for priors
+    _seed_rates(datetime(2026, 4, 22, 0, 0, tzinfo=UTC), 46)
+
+    # Force priors to be empty by querying with no historical data
+    monkeypatch.setattr(
+        "src.scheduler.optimizer.db.get_hourly_agile_priors",
+        lambda *a, **kw: {},
+    )
 
     w = _resolve_plan_window(TARIFF)
     assert w is not None

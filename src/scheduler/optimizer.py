@@ -112,15 +112,65 @@ def _resolve_plan_window(tariff: str) -> PlanWindow | None:
         )
         return None
 
-    horizon_end_utc = min(target_end_utc, last_valid_to)
-    slots_preview = _build_half_hour_slots(rates, start_utc, horizon_end_utc)
-    if len(slots_preview) < _MIN_USABLE_SLOTS:
+    # Min-usable check operates on REAL rates only — we don't commit to a
+    # 48 h plan when the real data is too thin (caller falls back to Self-Use
+    # and waits for more rates to arrive before the next MPC re-plan).
+    real_horizon_end = min(target_end_utc, last_valid_to)
+    real_slots_preview = _build_half_hour_slots(rates, start_utc, real_horizon_end)
+    if len(real_slots_preview) < _MIN_USABLE_SLOTS:
         logger.warning(
-            "Plan window: only %d slots usable (< %d minimum) — Self-Use fallback",
-            len(slots_preview),
+            "Plan window: only %d real slots usable (< %d minimum) — Self-Use fallback",
+            len(real_slots_preview),
             _MIN_USABLE_SLOTS,
         )
         return None
+
+    # S10.2 (#169) horizon extender: when LP_HORIZON_HOURS exceeds the available
+    # Octopus rates (typical case before ~16:00 BST when D+1 hasn't been
+    # published), fill the tail with synthesized rows from historical median
+    # per-hour-of-day. This lets a 48 h LP solve see a reasonable D+1 price
+    # curve with vale at midday and peak at 18 h. Once Octopus publishes real
+    # D+1 prices the next MPC re-solve picks them up cleanly.
+    horizon_end_utc = target_end_utc
+    if last_valid_to < target_end_utc:
+        priors = db.get_hourly_agile_priors(tariff, window_days=28)
+        if priors:
+            fallback_p = sum(priors.values()) / len(priors)
+            synth: list[dict[str, Any]] = []
+            t = max(last_valid_to, start_utc)
+            while t < target_end_utc:
+                t_end = t + timedelta(minutes=30)
+                p = priors.get(t.hour, fallback_p)
+                synth.append({
+                    "valid_from": t.isoformat().replace("+00:00", "Z"),
+                    "valid_to": t_end.isoformat().replace("+00:00", "Z"),
+                    "value_inc_vat": p,
+                    "tariff_code": tariff,
+                    "fetched_at": "prior",  # sentinel: distinguishes synthesised rows
+                })
+                t = t_end
+            rates = list(rates) + synth
+            logger.info(
+                "Plan window: extended horizon with %d prior slots (last_actual=%s, "
+                "target_end=%s) — D+1 priors median over 28 d, mean=%.2fp",
+                len(synth),
+                last_valid_to.strftime("%Y-%m-%dT%H:%MZ"),
+                target_end_utc.strftime("%Y-%m-%dT%H:%MZ"),
+                fallback_p,
+            )
+        else:
+            # No history → can't synthesise; truncate as before.
+            horizon_end_utc = min(target_end_utc, last_valid_to)
+            logger.info(
+                "Plan window: no priors available; truncating horizon to %s",
+                horizon_end_utc.strftime("%Y-%m-%dT%H:%MZ"),
+            )
+    else:
+        horizon_end_utc = min(target_end_utc, last_valid_to)
+
+    # Final slot list (possibly extended with priors). Min-usable was already
+    # enforced on real-rates only above (extension can never reduce slot count).
+    slots_preview = _build_half_hour_slots(rates, start_utc, horizon_end_utc)
 
     start_local = start_utc.astimezone(tz)
     end_local = horizon_end_utc.astimezone(tz)
@@ -1106,21 +1156,38 @@ def _build_export_price_line(slot_starts_utc: list[datetime]) -> list[float] | N
         except (KeyError, TypeError, ValueError):
             continue
     flat = float(config.EXPORT_RATE_PENCE)
+    # S10.2 (#169): for missing slots in an extended (48 h) horizon, prefer
+    # historical median per-hour-of-day priors over the flat fallback. This
+    # gives the LP a realistic export-price curve for D+1 (e.g. midday vale
+    # is recognisable so LP doesn't over-export at noon when refill will be
+    # at the same price).
+    export_tariff = (config.OCTOPUS_EXPORT_TARIFF_CODE or "").strip()
+    priors = (
+        db.get_hourly_agile_priors(export_tariff, window_days=28, table="agile_export_rates")
+        if export_tariff
+        else {}
+    )
     out: list[float] = []
     n_matched = 0
+    n_prior = 0
     for st in slot_starts_utc:
         key = st.isoformat().replace("+00:00", "Z")
         v = by_start.get(key)
         if v is not None:
             out.append(v)
             n_matched += 1
+        elif st.hour in priors:
+            out.append(priors[st.hour])
+            n_prior += 1
         else:
             out.append(flat)
-    if n_matched == 0:
+    if n_matched == 0 and n_prior == 0:
         return None  # nothing matched — let caller use flat path entirely
     logger.info(
-        "Export prices: matched %d/%d slots from agile_export_rates (rest use flat %.2fp)",
-        n_matched, len(slot_starts_utc), flat,
+        "Export prices: matched %d/%d slots from agile_export_rates "
+        "(+%d from prior, rest %d use flat %.2fp)",
+        n_matched, len(slot_starts_utc), n_prior,
+        len(slot_starts_utc) - n_matched - n_prior, flat,
     )
     return out
 
