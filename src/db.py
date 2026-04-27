@@ -2129,6 +2129,115 @@ def get_pnl_summary_for_date(date_str: str) -> dict[str, Any]:
 # V3: Fox ESS daily energy cache
 # ---------------------------------------------------------------------------
 
+def compute_fox_energy_daily_from_realtime(
+    *,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    max_gap_seconds: int = 600,
+) -> list[dict[str, Any]]:
+    """Aggregate ``pv_realtime_history`` instantaneous-power samples into per-day
+    kWh totals via trapezoidal integration.
+
+    For each consecutive pair of samples ``(t_a, P_a)`` → ``(t_b, P_b)``, energy
+    contribution is ``mean(P_a, P_b) × dt`` where ``dt`` is capped at
+    ``max_gap_seconds`` (default 10 min). Capping prevents multi-hour heartbeat
+    gaps (e.g. service down) from extrapolating a constant-power assumption
+    across a missing window.
+
+    Daily bucket = UTC date of the *earlier* sample of each pair. Boundary error
+    around midnight is bounded by ``max_gap_seconds`` (≤ 10 min × peak power ≈
+    < 1 kWh/day worst case at full PV).
+
+    S10.10 (#177) — replaces the broken Fox Cloud per-day API rollup with a
+    local computation from telemetry the heartbeat captures every ~3 min.
+    Zero Fox quota cost; uses our actual measurements (more accurate than
+    Fox Cloud's possibly-rounded summary).
+
+    Returns a list of dicts ready for :func:`upsert_fox_energy_daily`.
+    """
+    from collections import defaultdict
+    from datetime import datetime as _dt
+
+    if start_date is None:
+        start_date = (date.today() - timedelta(days=30)).isoformat()
+    if end_date is None:
+        end_date = date.today().isoformat()
+
+    # Pull samples in the window. Include one sample BEFORE start so the first
+    # interval inside the window is integrated correctly.
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT captured_at, solar_power_kw, load_power_kw,
+                          grid_import_kw, grid_export_kw,
+                          battery_charge_kw, battery_discharge_kw
+                   FROM pv_realtime_history
+                   WHERE substr(captured_at, 1, 10) BETWEEN ? AND ?
+                   ORDER BY captured_at""",
+                (start_date, end_date),
+            )
+            rows_raw = cur.fetchall()
+        finally:
+            conn.close()
+
+    if len(rows_raw) < 2:
+        return []
+
+    # Per-day accumulators, kWh
+    METRICS = ("solar", "load", "import", "export", "charge", "discharge")
+    COL_BY_METRIC = {
+        "solar": 1, "load": 2, "import": 3, "export": 4,
+        "charge": 5, "discharge": 6,
+    }
+    daily: dict[str, dict[str, float]] = defaultdict(lambda: {m: 0.0 for m in METRICS})
+
+    def _parse(ts_raw: str) -> _dt | None:
+        try:
+            ts = _dt.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+            return ts if ts.tzinfo else ts.replace(tzinfo=UTC)
+        except (ValueError, TypeError):
+            return None
+
+    prev_ts: _dt | None = None
+    prev_vals: list[float] = []
+    for row in rows_raw:
+        ts = _parse(row[0])
+        if ts is None:
+            continue
+        # Treat None as 0 (interpret missing telemetry as no flow at that instant)
+        cur_vals = [float(row[i]) if row[i] is not None else 0.0 for i in range(1, 7)]
+        if prev_ts is not None:
+            dt_s = min((ts - prev_ts).total_seconds(), max_gap_seconds)
+            if dt_s > 0:
+                day = prev_ts.date().isoformat()
+                bucket = daily[day]
+                hours = dt_s / 3600.0
+                for m in METRICS:
+                    idx = COL_BY_METRIC[m]
+                    avg_kw = (prev_vals[idx - 1] + cur_vals[idx - 1]) / 2.0
+                    bucket[m] += avg_kw * hours
+        prev_ts = ts
+        prev_vals = cur_vals
+
+    out: list[dict[str, Any]] = []
+    for day in sorted(daily.keys()):
+        # Only emit days strictly within the requested range
+        if not (start_date <= day <= end_date):
+            continue
+        b = daily[day]
+        out.append({
+            "date": day,
+            "solar_kwh": round(b["solar"], 3),
+            "load_kwh": round(b["load"], 3),
+            "import_kwh": round(b["import"], 3),
+            "export_kwh": round(b["export"], 3),
+            "charge_kwh": round(b["charge"], 3),
+            "discharge_kwh": round(b["discharge"], 3),
+        })
+    return out
+
+
 def upsert_fox_energy_daily(rows: list[dict[str, Any]]) -> int:
     """Upsert Fox daily energy rows (dicts with date, solar_kwh, load_kwh, …).
 
