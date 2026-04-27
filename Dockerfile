@@ -30,7 +30,7 @@ ENV PATH="/opt/venv/bin:${PATH}" \
     TZ=Europe/London
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends tini ca-certificates tzdata \
+ && apt-get install -y --no-install-recommends tini ca-certificates tzdata curl \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --system --gid 1001 hem \
  && useradd  --system --uid 1001 --gid 1001 --home /app --shell /usr/sbin/nologin hem
