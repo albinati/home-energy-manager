@@ -36,6 +36,15 @@ from .daikin.client import DaikinClient, DaikinError
 from .daikin.models import DaikinDevice
 from .foxess.client import WORK_MODE_VALID, FoxESSClient, FoxESSError
 from .foxess.service import get_cached_realtime, get_refresh_stats
+from .scheduler.lp_replay import (
+    LpCadenceSweepResult,
+    LpDayReplayResult,
+    LpReplayResult,
+    replay_day,
+    replay_run,
+    resolve_run_id_for_date,
+    sweep_cadences,
+)
 from .scheduler.lp_simulation import run_lp_simulation
 
 # Single-worker executor for non-blocking optimizer calls from the MCP transport.
@@ -201,6 +210,55 @@ def _simulate_plan_empty_response(ok: bool, error: str | None, received: dict) -
         "applied_overrides": {},
         "ignored_overrides": {},
     }
+
+
+def _replay_result_to_dict(r: LpReplayResult) -> dict[str, Any]:
+    """Serialise an LpReplayResult, stripping the internal _replayed_plan handle."""
+    import dataclasses
+    d = dataclasses.asdict(r)
+    d.pop("_replayed_plan", None)
+    return d
+
+
+def _day_result_to_dict(r: LpDayReplayResult) -> dict[str, Any]:
+    """Serialise LpDayReplayResult; nested run results have their plan handle stripped."""
+    import dataclasses
+    d = dataclasses.asdict(r)
+    # asdict recurses, so nested runs are already dicts. Strip the key from each.
+    for run in d.get("runs", []):
+        run.pop("_replayed_plan", None)
+    return d
+
+
+def _sweep_result_to_dict(r: LpCadenceSweepResult) -> dict[str, Any]:
+    import dataclasses
+    d = dataclasses.asdict(r)
+    for row in d.get("rows", []):
+        for run in row.get("runs", []):
+            run.pop("_replayed_plan", None)
+    return d
+
+
+_REPLAY_VALID_MODES = frozenset({"honest", "forward"})
+
+
+def _validate_replay_args(
+    *, run_id: int | None, date: str | None, mode: str,
+) -> str | None:
+    """Return error string when args are invalid, or None when ok."""
+    if mode not in _REPLAY_VALID_MODES:
+        return f"mode must be one of {sorted(_REPLAY_VALID_MODES)}, got {mode!r}"
+    if run_id is None and not date:
+        return "must provide run_id or date"
+    if run_id is not None and date:
+        return "provide either run_id or date, not both"
+    if date:
+        try:
+            from datetime import date as _d
+            _d.fromisoformat(date)
+        except ValueError:
+            return f"date must be YYYY-MM-DD, got {date!r}"
+    return None
 
 
 def _run_simulate_plan_body(overrides: dict[str, Any]) -> dict[str, Any]:
@@ -768,6 +826,105 @@ def build_mcp() -> FastMCP:
             return _simulate_plan_empty_response(
                 False, f"simulate_plan failed: {e}", overrides
             )
+
+    @mcp.tool(
+        name="replay_lp_plan",
+        description=(
+            "Replay one past LP run on its frozen snapshot inputs. Use this to "
+            "answer 'did today's solver code regress vs the code that ran on day D?'. "
+            "Provide either run_id (specific solve) or date (YYYY-MM-DD; picks first run "
+            "of that local day). Mode 'honest' (default) applies the snapshotted config "
+            "so we test today's solver code against that day's config; mode 'forward' "
+            "uses today's config to ask 'would the current setup do better on D's market?'. "
+            "Returns objective deltas plus £-cost of the replayed plan priced at actual "
+            "Agile rates vs the original plan, so negative delta_cost_at_actual_p means "
+            "today's code would have saved more money on that day. Read-only — no DB / "
+            "Fox / Daikin writes, no quota burn."
+        ),
+    )
+    def replay_lp_plan(
+        run_id: int | None = None,
+        date: str | None = None,
+        mode: str = "honest",
+    ) -> dict[str, Any]:
+        err = _validate_replay_args(run_id=run_id, date=date, mode=mode)
+        if err:
+            return {"ok": False, "error": err}
+
+        if run_id is None:
+            assert date is not None
+            resolved = resolve_run_id_for_date(date, which="first")
+            if resolved is None:
+                return {"ok": False, "error": f"no optimizer_log row for date={date}"}
+            run_id = resolved
+
+        try:
+            future = _optimizer_executor.submit(replay_run, run_id, mode=mode)  # type: ignore[arg-type]
+            result = future.result(timeout=120)
+        except concurrent.futures.TimeoutError:
+            return {"ok": False, "error": "replay_lp_plan timed out after 120s"}
+        except Exception as e:
+            return {"ok": False, "error": f"replay_lp_plan failed: {e}"}
+        return _replay_result_to_dict(result)
+
+    @mcp.tool(
+        name="replay_lp_day",
+        description=(
+            "Chain-replay the day's optimizer runs (subset by cadence) on frozen inputs, "
+            "scoring the whole day's policy under today's solver. Cadence DSL: 'original' "
+            "(all runs that fired that day), 'first' (only first run), 'first:N', 'stride:K' "
+            "(every K-th), 'subset:0,2,5' (specific positions). Returns total £-cost of the "
+            "chained replay vs the originals priced at actual Agile rates, plus per-slot "
+            "active dispatch and a savings-vs-SVT figure for both. Custom-clock cadences "
+            "('hourly', 'fixed:HH:MM') are deferred to v2 — they synthesise inputs the LP "
+            "never saw, which would taint the comparison."
+        ),
+    )
+    def replay_lp_day(
+        date: str,
+        cadence: str = "original",
+        mode: str = "honest",
+    ) -> dict[str, Any]:
+        err = _validate_replay_args(run_id=None, date=date, mode=mode)
+        if err:
+            return {"ok": False, "error": err}
+        try:
+            future = _optimizer_executor.submit(replay_day, date, cadence=cadence, mode=mode)  # type: ignore[arg-type]
+            result = future.result(timeout=600)
+        except concurrent.futures.TimeoutError:
+            return {"ok": False, "error": "replay_lp_day timed out after 600s"}
+        except Exception as e:
+            return {"ok": False, "error": f"replay_lp_day failed: {e}"}
+        return _day_result_to_dict(result)
+
+    @mcp.tool(
+        name="sweep_lp_cadences",
+        description=(
+            "Run replay_lp_day across multiple cadences for one local date and rank by "
+            "savings vs SVT. Default cadences cover ('original', 'first', 'first:2', "
+            "'stride:2'). Use this to answer 'would fewer / more recalcs have done better?'. "
+            "Returns the full per-cadence breakdown and the winning label."
+        ),
+    )
+    def sweep_lp_cadences(
+        date: str,
+        cadences: list[str] | None = None,
+        mode: str = "honest",
+    ) -> dict[str, Any]:
+        err = _validate_replay_args(run_id=None, date=date, mode=mode)
+        if err:
+            return {"ok": False, "error": err}
+        cadence_list = cadences if cadences else ["original", "first", "first:2", "stride:2"]
+        try:
+            future = _optimizer_executor.submit(  # type: ignore[arg-type]
+                sweep_cadences, date, cadences=cadence_list, mode=mode,
+            )
+            result = future.result(timeout=1200)
+        except concurrent.futures.TimeoutError:
+            return {"ok": False, "error": "sweep_lp_cadences timed out after 1200s"}
+        except Exception as e:
+            return {"ok": False, "error": f"sweep_lp_cadences failed: {e}"}
+        return _sweep_result_to_dict(result)
 
     @mcp.tool(
         name="propose_optimization_plan",
