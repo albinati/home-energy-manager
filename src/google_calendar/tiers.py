@@ -30,10 +30,20 @@ class Tier(NamedTuple):
 
 
 # Ordered cheapest → most expensive. Cost-order is implied by list position.
+# Negative is a distinct headline tier — being PAID to consume is rare enough
+# (typically a windy night or solar-glut afternoon with a negative Outgoing
+# rate) that it deserves its own colour and copy. We use Blueberry (9) for
+# unambiguous "blue blue" so the family can spot it across green near-zeros.
+TIER_NEGATIVE = Tier(
+    "negative", "🔵", "PAID to use", "9",
+    "NEGATIVE PRICE — you're being PAID to consume! Run laundry, dishwasher, "
+    "oven, charge the EV. Don't curtail PV either; the export rate is below "
+    "the import rate, so consuming is the cheapest disposal.",
+)
 TIER_VERY_CHEAP = Tier(
     "very_cheap", "🟢", "Very cheap", "10",
-    "Best window of the day — run heavy appliances now (laundry, dishwasher, "
-    "oven, EV charging if applicable).",
+    "Best (positive) window of the day — run heavy appliances now (laundry, "
+    "dishwasher, oven, EV charging if applicable).",
 )
 TIER_GREEN_LIGHT = Tier(
     "green_light", "🟩", "Green light", "2",
@@ -58,7 +68,7 @@ TIER_SEVERE_PEAK = Tier(
 )
 
 ALL_TIERS: list[Tier] = [
-    TIER_VERY_CHEAP, TIER_GREEN_LIGHT, TIER_MODERATE,
+    TIER_NEGATIVE, TIER_VERY_CHEAP, TIER_GREEN_LIGHT, TIER_MODERATE,
     TIER_ABOVE_AVG, TIER_EXPENSIVE, TIER_SEVERE_PEAK,
 ]
 _BY_KEY: dict[str, Tier] = {t.key: t for t in ALL_TIERS}
@@ -107,7 +117,14 @@ def classify_one(price: float, *, median: float, p10: float) -> Tier:
     headline signals. ``EXPENSIVE`` ranks above ``ABOVE_AVG`` so a price
     above the absolute floor goes orange/red even if it's only modestly
     above the median (e.g., a flat-cheap day where 25p is huge).
+
+    ``NEGATIVE`` short-circuits all other branches: any price strictly below
+    zero means we're being paid to consume — a fundamentally different
+    signal than "cheapest of today", so it deserves its own headline tier
+    even on a day where −5p happens to also be the bottom decile.
     """
+    if price < 0:
+        return TIER_NEGATIVE
     if price <= p10 and price < VERY_CHEAP_ABS_CEILING_P:
         return TIER_VERY_CHEAP
     if price >= SEVERE_PEAK_MEDIAN_RATIO * median and price > SEVERE_PEAK_ABS_FLOOR_P:
@@ -163,12 +180,19 @@ def _smooth_aba_noise(tiers: list[Tier]) -> list[Tier]:
     Catches sub-pence oscillation across a tier boundary (e.g., 24.4p →
     25.1p → 24.4p flipping Above-average / Expensive / Above-average).
     Multi-slot noise is handled by ``_fold_short_windows`` after merging.
+
+    The ``NEGATIVE`` tier is exempt from smoothing in either direction —
+    being paid to consume is a real qualitative signal that should never
+    be silently absorbed into a "very cheap" neighbour, even for a single
+    30-min slot.
     """
     if len(tiers) < 3:
         return tiers
     out = list(tiers)
     for i in range(1, len(out) - 1):
         prev_t, this_t, next_t = out[i - 1], out[i], out[i + 1]
+        if this_t.key == TIER_NEGATIVE.key or prev_t.key == TIER_NEGATIVE.key or next_t.key == TIER_NEGATIVE.key:
+            continue
         if prev_t.key == next_t.key and this_t.key != prev_t.key:
             if abs(_tier_index(this_t) - _tier_index(prev_t)) == 1:
                 out[i] = prev_t
@@ -192,6 +216,11 @@ def _fold_short_windows(windows: list[Window]) -> list[Window]:
     while True:
         target_idx = None
         for i, w in enumerate(windows):
+            # NEGATIVE windows are never folded — even a single 30-min
+            # "you're being paid" event is worth keeping on the calendar
+            # so the family doesn't miss it.
+            if w.tier.key == TIER_NEGATIVE.key:
+                continue
             if duration_min(w) < MIN_WINDOW_MINUTES:
                 target_idx = i
                 break
@@ -274,11 +303,19 @@ def classify_day(slots: list[Slot]) -> list[Window]:
 def format_event(window: Window) -> tuple[str, str]:
     """Return ``(summary, description)`` strings for a Google Calendar event.
 
-    Summary uses different bracket text on the extremes (``down to 9.8p`` /
-    ``up to 34.5p``) to keep the title visually distinctive at a glance.
+    Summary uses different bracket text on the extremes:
+      * ``NEGATIVE``  → ``down to -5.3p`` (negative price emphasised; calls out
+        that the family is being paid).
+      * ``VERY_CHEAP`` → ``down to 9.8p``
+      * ``SEVERE_PEAK`` → ``up to 34.5p``
+    Mid-tiers use a min–max range.
     """
     t = window.tier
-    if t.key == TIER_VERY_CHEAP.key:
+    if t.key == TIER_NEGATIVE.key:
+        # Negative window — emphasise the sign so the family sees a -5.3p
+        # number rather than mistaking it for a very-low positive price.
+        summary = f"{t.emoji} {t.title} (down to {window.price_min:.1f}p — paid!)"
+    elif t.key == TIER_VERY_CHEAP.key:
         summary = f"{t.emoji} {t.title} (down to {window.price_min:.1f}p)"
     elif t.key == TIER_SEVERE_PEAK.key:
         summary = f"{t.emoji} {t.title} (up to {window.price_max:.1f}p)"
