@@ -147,15 +147,38 @@ whether to relax the floor.
 ## Where the decision log lives
 
 * SQLite table: `dispatch_decisions` (one row per (run_id, slot_time_utc) —
-  schema in `src/db.py`).
-* HTTP API: `GET /api/v1/optimization/decisions/{run_id|latest}` returns full
-  per-slot rows + a summary block.
-* Plan timeline: `GET /api/v1/scheduler/timeline` joins decisions onto each
-  planned slot for "what's currently scheduled" answers.
-* Drift detector: `GET /api/v1/foxess/schedule_diff` compares live Fox V3
-  state against the last recorded HEM upload.
+  schema in `src/db.py`). Per-slot decision rationale + the three scenario
+  export values.
+* SQLite table: `scenario_solve_log` (one row per (batch_id, scenario_kind)).
+  Per-scenario solve summary: objective, lp_status, perturbation deltas
+  applied, peak-export slot count, wall-clock duration_ms. `batch_id` equals
+  the canonical (nominal) run's `optimizer_log.id`, so every successful
+  3-pass solve writes three rows that share `batch_id` and `nominal_run_id`.
+* HTTP API:
+  * `GET /api/v1/optimization/decisions/{run_id|latest}` — per-slot rows + summary.
+  * `GET /api/v1/optimization/scenarios/{batch_id|latest}` — per-scenario solve
+    summary for one batch (returns empty `scenarios[]` with a `note` when the
+    run didn't trigger scenarios).
+  * `GET /api/v1/scheduler/timeline` — executed/ongoing/planned partition with
+    decisions joined on.
+  * `GET /api/v1/foxess/schedule_diff` — live Fox V3 vs. last HEM upload.
 * MCP tools (one-to-one with the API endpoints): `explain_dispatch_decisions`,
-  `get_plan_timeline`, `get_fox_schedule_diff`, `simulate_peak_export_robustness`.
+  `get_scenario_batch`, `get_plan_timeline`, `get_fox_schedule_diff`,
+  `simulate_peak_export_robustness`.
+
+## Parallelism
+
+The two side scenarios (optimistic, pessimistic) run **in parallel** via a
+`ThreadPoolExecutor` with three workers. Each `solve_lp` invocation builds a
+fresh `LpProblem` and a fresh HiGHS solver instance, so the threads don't
+fight for shared solver state; the GIL releases during the C-extension solve,
+giving real wall-clock speedup. Total latency drops from ~3 × single-solve
+(sequential) to ~1 × single-solve (parallel) plus thread-pool overhead — typically
+3–4 s instead of 9–12 s.
+
+The `solve_scenarios_with_nominal` helper short-circuits the canonical solve:
+when `_run_optimizer_lp` already has the nominal plan, only the two side
+scenarios actually run, dropping latency further.
 
 ## Triggers that get the 3-pass scenario solve
 

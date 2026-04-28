@@ -398,9 +398,18 @@ def filter_robust_peak_export(
     )
     floor_kwh = float(config.LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH)
 
-    opt = scenarios.get("optimistic") if scenarios else None
-    nom = scenarios.get("nominal") if scenarios else None
-    pess = scenarios.get("pessimistic") if scenarios else None
+    def _unwrap(s):
+        """Accept either an ``LpPlan`` (legacy / test convenience) or a
+        ``ScenarioSolveResult`` (production path) and return the underlying
+        ``LpPlan``. Lets callers keep the simple shape in unit tests while
+        the optimizer pipes through richer metadata."""
+        if s is None:
+            return None
+        return s.plan if hasattr(s, "plan") else s
+
+    opt = _unwrap(scenarios.get("optimistic")) if scenarios else None
+    nom = _unwrap(scenarios.get("nominal")) if scenarios else None
+    pess = _unwrap(scenarios.get("pessimistic")) if scenarios else None
 
     def _exp(p: LpPlan | None, idx: int) -> float | None:
         if p is None or not p.ok or idx >= len(p.export_kwh):

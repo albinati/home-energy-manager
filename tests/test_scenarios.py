@@ -116,3 +116,109 @@ def test_trigger_runs_scenarios_empty_disables(monkeypatch):
     )
     assert not scenarios.trigger_runs_scenarios("cron")
     assert not scenarios.trigger_runs_scenarios("plan_push")
+
+
+# -----------------------------------------------------------------------
+# Parallel solve_scenarios — verifies wall-clock parallelism via mocked solve.
+# -----------------------------------------------------------------------
+def test_solve_scenarios_runs_three_in_parallel(monkeypatch):
+    """Each fake solve sleeps 0.3 s. Sequential = ≥ 0.9 s. Parallel ≤ ~0.5 s.
+
+    Uses time.monotonic() before/after to assert the executor actually
+    overlaps. We don't measure exact speedup (CI variability) — just
+    "did all three run inside one slowest-solve duration plus margin".
+    """
+    import time as _time
+    from src.scheduler.lp_optimizer import LpPlan
+
+    sleep_s = 0.3
+    call_times: list[float] = []
+
+    def _fake_solve_lp(**kwargs):
+        call_times.append(_time.monotonic())
+        _time.sleep(sleep_s)
+        return LpPlan(ok=True, status="Optimal", objective_pence=0.0)
+
+    monkeypatch.setattr(scenarios, "solve_lp", _fake_solve_lp)
+
+    t0 = _time.monotonic()
+    out = scenarios.solve_scenarios(
+        slot_starts_utc=[],
+        price_pence=[],
+        base_load_kwh=[],
+        weather=_weather_fixture(),
+        initial=None,
+        tz=None,
+    )
+    elapsed = _time.monotonic() - t0
+
+    # All three scenarios returned.
+    assert set(out.keys()) == {"optimistic", "nominal", "pessimistic"}
+    # Result wraps the plan.
+    assert all(r.plan.ok for r in out.values())
+
+    # Three calls were dispatched.
+    assert len(call_times) == 3
+    # The three calls all started within ~0.1 s of each other → parallel,
+    # not serial. (Sequential would have ≥ 0.3 s gaps between starts.)
+    span = max(call_times) - min(call_times)
+    assert span < 0.15, f"calls were serial-like (span={span:.3f}s)"
+
+    # Total wall-clock < 2 × single-solve. Generous bound to avoid flakes.
+    assert elapsed < 2 * sleep_s, f"wall-clock {elapsed:.3f}s suggests no parallelism"
+
+
+def test_solve_scenarios_individual_failure_does_not_break_batch(monkeypatch):
+    """When pessimistic raises but optimistic + nominal succeed, the batch
+    still returns three results; the failed one carries plan.ok=False
+    plus an ``error`` string for the audit log."""
+    from src.scheduler.lp_optimizer import LpPlan
+
+    def _solve(**kwargs):
+        # Detect pessimistic via the perturbed temperature in weather input.
+        w = kwargs["weather"]
+        if w.temperature_outdoor_c and w.temperature_outdoor_c[0] < 9.0:
+            raise RuntimeError("pessimistic LP infeasible")
+        return LpPlan(ok=True, status="Optimal", objective_pence=0.0)
+
+    monkeypatch.setattr(scenarios, "solve_lp", _solve)
+
+    out = scenarios.solve_scenarios(
+        slot_starts_utc=[],
+        price_pence=[],
+        base_load_kwh=[],
+        weather=_weather_fixture(),
+        initial=None,
+        tz=None,
+    )
+    assert out["optimistic"].plan.ok
+    assert out["nominal"].plan.ok
+    assert not out["pessimistic"].plan.ok
+    assert out["pessimistic"].error == "pessimistic LP infeasible"
+    assert out["pessimistic"].duration_ms >= 0
+
+
+def test_solve_scenarios_with_nominal_short_circuits():
+    """When the nominal plan is supplied, only the two side scenarios are
+    re-solved. Verify by counting how many times solve_lp gets called."""
+    import unittest.mock
+    from src.scheduler.lp_optimizer import LpPlan
+
+    nominal = LpPlan(ok=True, status="Optimal", objective_pence=42.0)
+    with unittest.mock.patch.object(scenarios, "solve_lp") as mock:
+        mock.return_value = LpPlan(ok=True, status="Optimal", objective_pence=0.0)
+        out = scenarios.solve_scenarios_with_nominal(
+            nominal=nominal,
+            slot_starts_utc=[],
+            price_pence=[],
+            base_load_kwh=[],
+            weather=_weather_fixture(),
+            initial=None,
+            tz=None,
+        )
+    # Only optimistic + pessimistic re-solved; nominal reused.
+    assert mock.call_count == 2
+    assert out["nominal"].plan is nominal
+    assert out["nominal"].duration_ms == 0  # not re-timed
+    assert out["optimistic"].plan.ok
+    assert out["pessimistic"].plan.ok

@@ -199,6 +199,51 @@ def _normalise_group(g: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+@router.get("/api/v1/optimization/scenarios/{batch_id}")
+async def get_scenario_batch(batch_id: str) -> dict[str, Any]:
+    """Per-scenario solve summary for one batch.
+
+    ``batch_id`` accepts an integer or the literal ``"latest"``. The batch
+    id equals the canonical (nominal) run's ``optimizer_log.id``. Each row
+    records the LP status, objective pence, perturbation deltas applied,
+    peak-export slot count, and wall-clock duration — useful for spotting
+    "scenario X took 4× as long as the others" or "pessimistic objective is
+    £1 worse than nominal so robustness is biting".
+    """
+    rid = _resolve_run_id(batch_id)
+    rows = db.get_scenario_solve_batch(rid)
+    if not rows:
+        # Run exists but no scenarios were logged for it (trigger reason
+        # not in allow-list, or plan had no peak_export slots).
+        return {
+            "ok": True,
+            "batch_id": rid,
+            "scenarios": [],
+            "note": "No scenario solves logged for this run (LP_SCENARIOS_ON_TRIGGER_REASONS or empty peak_export plan).",
+        }
+    by_kind = {r["scenario_kind"]: r for r in rows}
+    return {
+        "ok": True,
+        "batch_id": rid,
+        "nominal_run_id": rows[0]["nominal_run_id"],
+        "scenarios": rows,
+        "summary": {
+            "objectives_pence": {
+                k: by_kind[k]["objective_pence"]
+                for k in ("optimistic", "nominal", "pessimistic")
+                if k in by_kind
+            },
+            "peak_export_slot_counts": {
+                k: by_kind[k]["peak_export_slot_count"]
+                for k in ("optimistic", "nominal", "pessimistic")
+                if k in by_kind
+            },
+            "max_duration_ms": max((r["duration_ms"] or 0) for r in rows),
+            "any_failure": any(r.get("error") or r.get("lp_status", "").startswith("error") for r in rows),
+        },
+    }
+
+
 @router.get("/api/v1/foxess/schedule_diff")
 async def get_foxess_schedule_diff() -> dict[str, Any]:
     """Compare live Fox V3 scheduler state against the last recorded upload.

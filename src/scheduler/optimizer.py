@@ -1439,6 +1439,55 @@ def _run_optimizer_lp(
     except Exception as e:
         logger.warning("dispatch_decisions persistence failed (non-fatal): %s", e)
 
+    # Persist scenario solve summaries — one row per scenario, keyed by
+    # batch_id (= nominal_run_id) so the full 3-scenario batch is queryable
+    # via db.get_scenario_solve_batch(run_id). Writes nothing when scenarios
+    # weren't run (trigger_reason not in allow-list, or plan had no peak_export).
+    if scenarios_dict:
+        try:
+            for kind, result in scenarios_dict.items():
+                # ScenarioSolveResult shape; degrade gracefully if a caller
+                # ever passes a bare LpPlan (legacy / test path).
+                if hasattr(result, "plan"):
+                    plan_obj = result.plan
+                    temp_delta = float(result.temp_delta_c)
+                    load_factor = float(result.load_factor)
+                    duration_ms = int(result.duration_ms)
+                    error = result.error
+                else:  # pragma: no cover — production always uses ScenarioSolveResult
+                    plan_obj = result
+                    temp_delta = 0.0
+                    load_factor = 1.0
+                    duration_ms = None
+                    error = None
+                pe_count = sum(
+                    1 for ek in (plan_obj.export_kwh or [])
+                    if float(ek) >= float(config.LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH)
+                )
+                db.upsert_scenario_solve_log(
+                    batch_id=run_id,
+                    nominal_run_id=run_id,
+                    scenario_kind=kind,
+                    lp_status=str(plan_obj.status),
+                    objective_pence=float(plan_obj.objective_pence) if plan_obj.ok else None,
+                    perturbation_temp_delta_c=temp_delta,
+                    perturbation_load_factor=load_factor,
+                    peak_export_slot_count=pe_count,
+                    duration_ms=duration_ms,
+                    error=error,
+                )
+            logger.info(
+                "scenario_solve_log: batch_id=%d trigger=%s objs(opt/nom/pess)=%s",
+                run_id, trigger_reason,
+                "/".join(
+                    f"{(scenarios_dict[k].plan.objective_pence if hasattr(scenarios_dict[k], 'plan') else scenarios_dict[k].objective_pence):.0f}p"
+                    if scenarios_dict.get(k) else "-"
+                    for k in ("optimistic", "nominal", "pessimistic")
+                ),
+            )
+        except Exception as e:
+            logger.warning("scenario_solve_log persistence failed (non-fatal): %s", e)
+
     _write_plan_consent(plan_date, strategy)
 
     return {

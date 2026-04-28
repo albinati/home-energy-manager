@@ -2529,6 +2529,57 @@ def build_mcp() -> FastMCP:
             return {"ok": False, "error": str(e)}
 
     @mcp.tool(
+        name="get_scenario_batch",
+        description=(
+            "Per-scenario LP solve summary for a 3-pass robustness batch. "
+            "Each scenario row carries lp_status, objective_pence, "
+            "perturbation deltas (Δ°C + load factor), peak-export slot count, "
+            "and wall-clock duration_ms. Pass batch_id=None for the latest "
+            "run. Returns an empty 'scenarios' list when the run didn't "
+            "trigger scenarios (manual / drift / forecast_revision triggers, "
+            "or plan had no peak_export). Use this to inspect 'how much "
+            "did pessimistic differ from nominal?' or 'which scenario was "
+            "the slow one?' after the fact."
+        ),
+    )
+    def get_scenario_batch_tool(batch_id: int | None = None) -> dict[str, Any]:
+        from . import db
+        try:
+            bid = int(batch_id) if batch_id is not None else db.find_latest_optimizer_run_id()
+            if bid is None:
+                return {"ok": False, "error": "No optimizer runs on file"}
+            rows = db.get_scenario_solve_batch(bid)
+            if not rows:
+                return {
+                    "ok": True,
+                    "batch_id": bid,
+                    "scenarios": [],
+                    "note": "No scenario solves logged for this run.",
+                }
+            by_kind = {r["scenario_kind"]: r for r in rows}
+            return {
+                "ok": True,
+                "batch_id": bid,
+                "nominal_run_id": rows[0]["nominal_run_id"],
+                "scenarios": rows,
+                "summary": {
+                    "objectives_pence": {
+                        k: by_kind[k]["objective_pence"]
+                        for k in ("optimistic", "nominal", "pessimistic")
+                        if k in by_kind
+                    },
+                    "peak_export_slot_counts": {
+                        k: by_kind[k]["peak_export_slot_count"]
+                        for k in ("optimistic", "nominal", "pessimistic")
+                        if k in by_kind
+                    },
+                    "max_duration_ms": max((r["duration_ms"] or 0) for r in rows),
+                },
+            }
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    @mcp.tool(
         name="simulate_peak_export_robustness",
         description=(
             "What-if: re-run the 3 forecast scenarios (optimistic / nominal / "

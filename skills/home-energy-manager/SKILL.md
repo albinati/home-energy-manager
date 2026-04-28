@@ -327,6 +327,7 @@ and the Fox V3 cyclic schedule).
 **MCP tools that surface this:**
 - `get_plan_timeline()` — partitions the active plan into executed / ongoing / planned with the dispatch decision attached. Always start here for "what's the status?"
 - `explain_dispatch_decisions(run_id=None)` — full per-slot decision rows for the latest run (or any past run by id). Use this to answer "why did/didn't X happen?"
+- `get_scenario_batch(batch_id=None)` — per-scenario LP solve summary for the 3-pass robustness batch tied to a run. Carries objectives, peak-export slot counts, perturbation deltas applied, wall-clock durations. Use this when a user asks "how different was pessimistic from nominal today?" or "did all three scenarios converge?"
 - `get_fox_schedule_diff()` — live Fox V3 vs. last HEM upload. Use this to detect drift (manual Fox-app edit, failed upload, firmware quirk) before answering "what is the inverter doing right now?"
 
 **Common mistakes to avoid:**

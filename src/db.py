@@ -243,6 +243,25 @@ CREATE TABLE IF NOT EXISTS dispatch_decisions (
 
 CREATE INDEX IF NOT EXISTS idx_dispatch_decisions_run ON dispatch_decisions(run_id);
 CREATE INDEX IF NOT EXISTS idx_dispatch_decisions_slot ON dispatch_decisions(slot_time_utc);
+
+CREATE TABLE IF NOT EXISTS scenario_solve_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id INTEGER NOT NULL,
+    nominal_run_id INTEGER NOT NULL,
+    scenario_kind TEXT NOT NULL,         -- 'optimistic' | 'nominal' | 'pessimistic'
+    lp_status TEXT NOT NULL,
+    objective_pence REAL,
+    perturbation_temp_delta_c REAL NOT NULL,
+    perturbation_load_factor REAL NOT NULL,
+    peak_export_slot_count INTEGER,
+    duration_ms INTEGER,
+    error TEXT,
+    solved_at TEXT NOT NULL,
+    UNIQUE(batch_id, scenario_kind)
+);
+
+CREATE INDEX IF NOT EXISTS idx_scenario_solve_log_batch ON scenario_solve_log(batch_id);
+CREATE INDEX IF NOT EXISTS idx_scenario_solve_log_run ON scenario_solve_log(nominal_run_id);
 """
 
 
@@ -3427,6 +3446,11 @@ def prune_history_tables() -> dict[str, int]:
         ("lp_solution_snapshot", "slot_time_utc", _config.LP_SNAPSHOT_RETENTION_DAYS, False),
         ("lp_inputs_snapshot", "run_at_utc", _config.LP_SNAPSHOT_RETENTION_DAYS, False),
         ("config_audit", "changed_at_utc", _config.CONFIG_AUDIT_RETENTION_DAYS, False),
+        # Dispatch + scenario tables ride on the same retention horizon as the
+        # LP snapshots they reference (orphaned rows would have nothing useful
+        # to point at anyway — the snapshot is the source of truth).
+        ("dispatch_decisions", "created_at", _config.LP_SNAPSHOT_RETENTION_DAYS, False),
+        ("scenario_solve_log", "solved_at", _config.LP_SNAPSHOT_RETENTION_DAYS, False),
     ]
     results: dict[str, int] = {}
     for table, col, days, epoch in policies:
@@ -3602,6 +3626,104 @@ def find_latest_optimizer_run_id() -> int | None:
         try:
             cur = conn.execute(
                 "SELECT id FROM optimizer_log ORDER BY run_at DESC LIMIT 1"
+            )
+            r = cur.fetchone()
+            return int(r[0]) if r else None
+        finally:
+            conn.close()
+
+
+def upsert_scenario_solve_log(
+    *,
+    batch_id: int,
+    nominal_run_id: int,
+    scenario_kind: str,
+    lp_status: str,
+    objective_pence: float | None,
+    perturbation_temp_delta_c: float,
+    perturbation_load_factor: float,
+    peak_export_slot_count: int | None = None,
+    duration_ms: int | None = None,
+    error: str | None = None,
+) -> None:
+    """Persist one scenario's solve summary.
+
+    Idempotent on ``(batch_id, scenario_kind)``: re-runs of the same batch
+    overwrite. ``batch_id`` is conventionally equal to ``nominal_run_id`` —
+    every successful 3-pass solve logs three rows sharing those two ids.
+    Look up by ``batch_id`` to retrieve the full batch.
+    """
+    now_iso = datetime.now(UTC).isoformat()
+    with _lock:
+        conn = get_connection()
+        try:
+            conn.execute(
+                """INSERT INTO scenario_solve_log
+                   (batch_id, nominal_run_id, scenario_kind, lp_status,
+                    objective_pence, perturbation_temp_delta_c,
+                    perturbation_load_factor, peak_export_slot_count,
+                    duration_ms, error, solved_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(batch_id, scenario_kind) DO UPDATE SET
+                     nominal_run_id=excluded.nominal_run_id,
+                     lp_status=excluded.lp_status,
+                     objective_pence=excluded.objective_pence,
+                     perturbation_temp_delta_c=excluded.perturbation_temp_delta_c,
+                     perturbation_load_factor=excluded.perturbation_load_factor,
+                     peak_export_slot_count=excluded.peak_export_slot_count,
+                     duration_ms=excluded.duration_ms,
+                     error=excluded.error,
+                     solved_at=excluded.solved_at""",
+                (
+                    batch_id, nominal_run_id, scenario_kind, lp_status,
+                    objective_pence, perturbation_temp_delta_c,
+                    perturbation_load_factor, peak_export_slot_count,
+                    duration_ms, error, now_iso,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def get_scenario_solve_batch(batch_id: int) -> list[dict[str, Any]]:
+    """All scenarios in one batch, ordered optimistic → nominal → pessimistic."""
+    order = "CASE scenario_kind WHEN 'optimistic' THEN 0 WHEN 'nominal' THEN 1 WHEN 'pessimistic' THEN 2 ELSE 3 END"
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                f"""SELECT batch_id, nominal_run_id, scenario_kind, lp_status,
+                          objective_pence, perturbation_temp_delta_c,
+                          perturbation_load_factor, peak_export_slot_count,
+                          duration_ms, error, solved_at
+                   FROM scenario_solve_log
+                   WHERE batch_id = ?
+                   ORDER BY {order}""",
+                (batch_id,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
+def find_scenario_batch_for_run(run_id: int) -> int | None:
+    """Reverse lookup: given an optimizer_log run_id, return the batch_id it
+    belongs to (or None if no scenario solve was logged for that run).
+
+    Pattern: ``batch_id`` equals the canonical (nominal) run's id, so most
+    callers can just pass ``run_id``. This helper also catches the case
+    where the run_id was a non-canonical scenario solve — though we don't
+    currently emit those (only the canonical run reaches optimizer_log).
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT DISTINCT batch_id FROM scenario_solve_log
+                   WHERE nominal_run_id = ? OR batch_id = ?
+                   LIMIT 1""",
+                (run_id, run_id),
             )
             r = cur.fetchone()
             return int(r[0]) if r else None

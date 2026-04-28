@@ -6,13 +6,25 @@ a stressed forecast. The LP itself is invoked unchanged: each scenario only
 shifts outdoor temperature (which adjusts heating-energy bounds AND heat-pump
 COP) and scales the base-load profile.
 
+The two side scenarios (optimistic, pessimistic) run **in parallel** via a
+ThreadPoolExecutor — each LP solve is independent (separate ``LpProblem``
+built per call, separate HiGHS solver instance) so the GIL releases during
+solver execution and we get real wall-clock speedup. Total latency drops
+from ~3× single-solve to ~1× single-solve, which matters on the
+pre-peak ``octopus_fetch`` trigger that has a tight time budget before the
+17:00 BST peak window.
+
 Design rationale and the maximin / robust-optimisation framing live in
 ``docs/DISPATCH_DECISIONS.md``. This module is intentionally side-effect
-free; persistence happens in ``src.scheduler.lp_dispatch.filter_robust_peak_export``.
+free; persistence happens in ``src.scheduler.lp_dispatch.filter_robust_peak_export``
+(per-slot decisions) and ``src.scheduler.optimizer._run_optimizer_lp``
+(per-batch solve summaries via ``db.upsert_scenario_solve_log``).
 """
 from __future__ import annotations
 
 import logging
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Literal
 
@@ -24,6 +36,22 @@ logger = logging.getLogger(__name__)
 
 Scenario = Literal["optimistic", "nominal", "pessimistic"]
 SCENARIOS: tuple[Scenario, ...] = ("optimistic", "nominal", "pessimistic")
+
+
+@dataclass
+class ScenarioSolveResult:
+    """One scenario's solve outcome plus instrumentation for the audit log.
+
+    Carries the perturbation deltas applied + wall-clock duration so
+    ``scenario_solve_log`` rows can be written without re-deriving them.
+    """
+
+    scenario: Scenario
+    plan: LpPlan
+    temp_delta_c: float
+    load_factor: float
+    duration_ms: int
+    error: str | None = None
 
 
 @dataclass
@@ -85,6 +113,69 @@ def perturb_base_load(base_load_kwh: list[float], factor: float) -> list[float]:
     return [max(0.0, x * factor) for x in base_load_kwh]
 
 
+def _solve_one_scenario(
+    scenario: Scenario,
+    *,
+    slot_starts_utc,
+    price_pence: list[float],
+    base_load_kwh: list[float],
+    weather: WeatherLpSeries,
+    initial: LpInitialState,
+    tz,
+    micro_climate_offset_c: float,
+    export_price_pence: list[float] | None,
+) -> ScenarioSolveResult:
+    """Solve one perturbed scenario; capture wall-clock duration + error.
+
+    Designed to run in a worker thread — module-level ``logger`` is
+    thread-safe; ``solve_lp`` builds a fresh PuLP problem per call and
+    each HiGHS solver instance is independent, so two threads don't
+    collide on solver state.
+    """
+    p = _perturbation_for(scenario)
+    w = perturb_weather(weather, p.temp_delta_c)
+    bl = perturb_base_load(base_load_kwh, p.load_factor)
+    t0 = time.monotonic()
+    try:
+        plan = solve_lp(
+            slot_starts_utc=slot_starts_utc,
+            price_pence=price_pence,
+            base_load_kwh=bl,
+            weather=w,
+            initial=initial,
+            tz=tz,
+            micro_climate_offset_c=micro_climate_offset_c,
+            export_price_pence=export_price_pence,
+        )
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        logger.info(
+            "scenario %s: status=%s objective=%.0fp Δt=%+.1f load×%.2f duration=%dms",
+            scenario, plan.status, plan.objective_pence,
+            p.temp_delta_c, p.load_factor, duration_ms,
+        )
+        return ScenarioSolveResult(
+            scenario=scenario,
+            plan=plan,
+            temp_delta_c=p.temp_delta_c,
+            load_factor=p.load_factor,
+            duration_ms=duration_ms,
+        )
+    except Exception as e:
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        logger.warning(
+            "scenario %s solve failed (Δt=%+.1f load×%.2f, duration=%dms): %s",
+            scenario, p.temp_delta_c, p.load_factor, duration_ms, e,
+        )
+        return ScenarioSolveResult(
+            scenario=scenario,
+            plan=LpPlan(ok=False, status=f"error: {e}", objective_pence=0.0),
+            temp_delta_c=p.temp_delta_c,
+            load_factor=p.load_factor,
+            duration_ms=duration_ms,
+            error=str(e),
+        )
+
+
 def solve_scenarios(
     *,
     slot_starts_utc,
@@ -96,42 +187,58 @@ def solve_scenarios(
     micro_climate_offset_c: float = 0.0,
     export_price_pence: list[float] | None = None,
     scenarios: tuple[Scenario, ...] = SCENARIOS,
-) -> dict[Scenario, LpPlan]:
-    """Solve the LP under each scenario; return a mapping name → plan.
+) -> dict[Scenario, ScenarioSolveResult]:
+    """Solve the LP under each scenario in parallel; return scenario → result.
 
     ``nominal`` is the canonical solve; if the caller already has it computed,
     they can short-circuit by injecting it via ``solve_scenarios_with_nominal``.
-    Failures in any single scenario are logged and that scenario maps to an
-    ``LpPlan`` with ``ok=False`` so callers can detect partial results.
+    Failures in any single scenario are logged and the result maps to a
+    ``ScenarioSolveResult`` whose ``plan.ok`` is False — callers can detect
+    partial results without losing the perturbation metadata.
+
+    Parallelism: ``len(scenarios)`` worker threads (cap 3). Each LP solve is
+    independent, GIL releases during solver execution, total wall-clock drops
+    to ~max(individual durations) from ~sum(individual durations).
     """
-    out: dict[Scenario, LpPlan] = {}
-    for s in scenarios:
-        p = _perturbation_for(s)
-        w = perturb_weather(weather, p.temp_delta_c)
-        bl = perturb_base_load(base_load_kwh, p.load_factor)
-        try:
-            plan = solve_lp(
+    out: dict[Scenario, ScenarioSolveResult] = {}
+    if not scenarios:
+        return out
+
+    max_workers = min(3, len(scenarios))
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="scenario_lp") as ex:
+        futures = {
+            ex.submit(
+                _solve_one_scenario,
+                s,
                 slot_starts_utc=slot_starts_utc,
                 price_pence=price_pence,
-                base_load_kwh=bl,
-                weather=w,
+                base_load_kwh=base_load_kwh,
+                weather=weather,
                 initial=initial,
                 tz=tz,
                 micro_climate_offset_c=micro_climate_offset_c,
                 export_price_pence=export_price_pence,
-            )
-            out[s] = plan
-            logger.info(
-                "scenario %s: status=%s objective=%.0fp Δt=%+.1f load×%.2f",
-                s, plan.status, plan.objective_pence,
-                p.temp_delta_c, p.load_factor,
-            )
-        except Exception as e:
-            logger.warning(
-                "scenario %s solve failed (Δt=%+.1f load×%.2f): %s",
-                s, p.temp_delta_c, p.load_factor, e,
-            )
-            out[s] = LpPlan(ok=False, status=f"error: {e}", objective_pence=0.0)
+            ): s
+            for s in scenarios
+        }
+        for fut in as_completed(futures):
+            s = futures[fut]
+            try:
+                out[s] = fut.result()
+            except Exception as e:
+                # Defensive: _solve_one_scenario already catches its own errors,
+                # so this branch should be unreachable. Cover it anyway so a
+                # surprise (e.g. a thread-pool failure) doesn't crash the caller.
+                logger.exception("scenario %s worker crashed unexpectedly: %s", s, e)
+                p = _perturbation_for(s)
+                out[s] = ScenarioSolveResult(
+                    scenario=s,
+                    plan=LpPlan(ok=False, status=f"worker_error: {e}", objective_pence=0.0),
+                    temp_delta_c=p.temp_delta_c,
+                    load_factor=p.load_factor,
+                    duration_ms=0,
+                    error=str(e),
+                )
     return out
 
 
@@ -146,11 +253,12 @@ def solve_scenarios_with_nominal(
     tz,
     micro_climate_offset_c: float = 0.0,
     export_price_pence: list[float] | None = None,
-) -> dict[Scenario, LpPlan]:
+) -> dict[Scenario, ScenarioSolveResult]:
     """Same as ``solve_scenarios`` but reuses an already-computed nominal plan.
 
-    Saves one LP solve (~1-3 s) when the canonical run has already happened
-    upstream — the common path inside ``run_optimizer``.
+    Optimistic + pessimistic solves run in parallel; nominal is wrapped in
+    a ``ScenarioSolveResult`` with zero perturbation and zero duration so
+    downstream code can treat all three uniformly.
     """
     extras = solve_scenarios(
         slot_starts_utc=slot_starts_utc,
@@ -163,7 +271,13 @@ def solve_scenarios_with_nominal(
         export_price_pence=export_price_pence,
         scenarios=("optimistic", "pessimistic"),
     )
-    extras["nominal"] = nominal
+    extras["nominal"] = ScenarioSolveResult(
+        scenario="nominal",
+        plan=nominal,
+        temp_delta_c=0.0,
+        load_factor=1.0,
+        duration_ms=0,
+    )
     return extras
 
 

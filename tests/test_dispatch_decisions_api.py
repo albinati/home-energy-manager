@@ -126,3 +126,68 @@ def test_timeline_endpoint_returns_empty_when_no_runs():
     assert body["ok"] is False
     assert body["executed"] == []
     assert body["planned"] == []
+
+
+def _seed_scenario_batch(batch_id: int = 99) -> None:
+    """Insert 3 scenario rows for one batch."""
+    from src import db
+    db.upsert_scenario_solve_log(
+        batch_id=batch_id, nominal_run_id=batch_id, scenario_kind="optimistic",
+        lp_status="Optimal", objective_pence=-15.0,
+        perturbation_temp_delta_c=1.0, perturbation_load_factor=0.9,
+        peak_export_slot_count=2, duration_ms=2400,
+    )
+    db.upsert_scenario_solve_log(
+        batch_id=batch_id, nominal_run_id=batch_id, scenario_kind="nominal",
+        lp_status="Optimal", objective_pence=-12.5,
+        perturbation_temp_delta_c=0.0, perturbation_load_factor=1.0,
+        peak_export_slot_count=2, duration_ms=0,
+    )
+    db.upsert_scenario_solve_log(
+        batch_id=batch_id, nominal_run_id=batch_id, scenario_kind="pessimistic",
+        lp_status="Optimal", objective_pence=-9.0,
+        perturbation_temp_delta_c=-1.5, perturbation_load_factor=1.15,
+        peak_export_slot_count=1, duration_ms=2200,
+    )
+
+
+def test_scenarios_endpoint_returns_three_rows_with_summary():
+    _seed_run_with_decisions(run_id=99)
+    _seed_scenario_batch(batch_id=99)
+    from src.api.main import app
+    client = TestClient(app)
+    resp = client.get("/api/v1/optimization/scenarios/99")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["batch_id"] == 99
+    # Ordered optimistic → nominal → pessimistic regardless of insertion order.
+    kinds = [r["scenario_kind"] for r in body["scenarios"]]
+    assert kinds == ["optimistic", "nominal", "pessimistic"]
+    # Summary correctness.
+    assert body["summary"]["objectives_pence"]["pessimistic"] == -9.0
+    assert body["summary"]["peak_export_slot_counts"]["pessimistic"] == 1
+    assert body["summary"]["max_duration_ms"] == 2400
+    assert body["summary"]["any_failure"] is False
+
+
+def test_scenarios_endpoint_latest_alias():
+    _seed_run_with_decisions(run_id=99)
+    _seed_scenario_batch(batch_id=99)
+    from src.api.main import app
+    client = TestClient(app)
+    resp = client.get("/api/v1/optimization/scenarios/latest")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["batch_id"] == 99
+
+
+def test_scenarios_endpoint_returns_empty_when_no_scenarios_logged():
+    """A run can exist in optimizer_log without an associated scenario batch
+    (e.g. trigger reason was soc_drift). Endpoint should respond cleanly."""
+    _seed_run_with_decisions(run_id=42)
+    from src.api.main import app
+    client = TestClient(app)
+    resp = client.get("/api/v1/optimization/scenarios/42")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["scenarios"] == []
+    assert "note" in body
