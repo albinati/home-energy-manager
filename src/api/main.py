@@ -43,6 +43,12 @@ from ..scheduler.runner import (
     stop_background_scheduler,
 )
 from ..mcp_server import build_mcp
+from ..scheduler.lp_replay import (
+    replay_day as lp_replay_day,
+    replay_run as lp_replay_run,
+    resolve_run_id_for_date as lp_resolve_run_id_for_date,
+    sweep_cadences as lp_sweep_cadences,
+)
 from . import safeguards
 from .middleware import BearerAuthMiddleware
 from .models import (
@@ -2758,6 +2764,109 @@ async def optimization_reject(req: RejectPlanRequest, x_simulation_id: str | Non
         status="not_applicable",
         message="Bulletproof does not use plan consent. Adjust presets and re-run POST /api/v1/optimization/propose.",
     )
+
+
+# ---------------------------------------------------------------------------
+# LP replay / backtest harness
+# ---------------------------------------------------------------------------
+
+from pydantic import BaseModel, Field as _PField  # local import — keeps top-of-file lean
+
+
+class LpReplayRequest(BaseModel):
+    run_id: int | None = _PField(None, description="Specific optimizer_log id to replay")
+    date: str | None = _PField(None, description="YYYY-MM-DD; first run of the local day is used")
+    mode: str = _PField("honest", description="'honest' (snapshotted config) or 'forward' (current config)")
+
+
+class LpReplayDayRequest(BaseModel):
+    date: str = _PField(..., description="YYYY-MM-DD local date")
+    cadence: str = _PField("original", description="'original'|'first'|'first:N'|'stride:K'|'subset:0,2,5'")
+    mode: str = _PField("honest", description="'honest' or 'forward'")
+
+
+class LpSweepRequest(BaseModel):
+    date: str = _PField(..., description="YYYY-MM-DD local date")
+    cadences: list[str] | None = _PField(None, description="Defaults to ['original','first','first:2','stride:2']")
+    mode: str = _PField("honest", description="'honest' or 'forward'")
+
+
+def _replay_dict(r) -> dict:
+    """Strip the internal _replayed_plan handle from a result dataclass before serialising."""
+    import dataclasses
+    d = dataclasses.asdict(r)
+    if "runs" in d:
+        for run in d.get("runs", []):
+            run.pop("_replayed_plan", None)
+    if "rows" in d:
+        for row in d.get("rows", []):
+            for run in row.get("runs", []):
+                run.pop("_replayed_plan", None)
+    d.pop("_replayed_plan", None)
+    return d
+
+
+def _validate_replay_mode(mode: str) -> None:
+    if mode not in ("honest", "forward"):
+        raise HTTPException(status_code=400, detail=f"mode must be 'honest' or 'forward', got {mode!r}")
+
+
+@app.post("/api/v1/lp/replay")
+async def lp_replay_endpoint(req: LpReplayRequest):
+    """Replay a single past LP run on its frozen snapshot inputs.
+
+    Provide either ``run_id`` (specific solve) or ``date`` (first run of that
+    local day). See :func:`src.scheduler.lp_replay.replay_run` for the
+    honest/forward mode semantics. Read-only — no DB / Fox / Daikin writes.
+    """
+    _validate_replay_mode(req.mode)
+    if req.run_id is None and not req.date:
+        raise HTTPException(status_code=400, detail="must provide run_id or date")
+    if req.run_id is not None and req.date:
+        raise HTTPException(status_code=400, detail="provide either run_id or date, not both")
+
+    run_id = req.run_id
+    if run_id is None:
+        try:
+            from datetime import date as _d
+            _d.fromisoformat(req.date)  # type: ignore[arg-type]
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"date must be YYYY-MM-DD, got {req.date!r}")
+        resolved = await asyncio.to_thread(lp_resolve_run_id_for_date, req.date)  # type: ignore[arg-type]
+        if resolved is None:
+            raise HTTPException(status_code=404, detail=f"no optimizer_log row for date={req.date}")
+        run_id = resolved
+
+    result = await asyncio.to_thread(lp_replay_run, run_id, mode=req.mode)
+    return _replay_dict(result)
+
+
+@app.post("/api/v1/lp/replay-day")
+async def lp_replay_day_endpoint(req: LpReplayDayRequest):
+    """Chain-replay all (or a subset of) the day's optimizer runs."""
+    _validate_replay_mode(req.mode)
+    try:
+        from datetime import date as _d
+        _d.fromisoformat(req.date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"date must be YYYY-MM-DD, got {req.date!r}")
+
+    result = await asyncio.to_thread(lp_replay_day, req.date, cadence=req.cadence, mode=req.mode)
+    return _replay_dict(result)
+
+
+@app.post("/api/v1/lp/sweep-cadences")
+async def lp_sweep_cadences_endpoint(req: LpSweepRequest):
+    """Sweep multiple cadences across one local date and rank by savings vs SVT."""
+    _validate_replay_mode(req.mode)
+    try:
+        from datetime import date as _d
+        _d.fromisoformat(req.date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"date must be YYYY-MM-DD, got {req.date!r}")
+    cadences = req.cadences if req.cadences else ["original", "first", "first:2", "stride:2"]
+    result = await asyncio.to_thread(lp_sweep_cadences, req.date, cadences=cadences, mode=req.mode)
+    return _replay_dict(result)
 
 
 @app.get("/api/v1/optimization/pending")
