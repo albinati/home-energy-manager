@@ -225,6 +225,24 @@ CREATE TABLE IF NOT EXISTS calendar_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_calendar_events_date ON calendar_events(calendar_id, plan_date);
+
+CREATE TABLE IF NOT EXISTS dispatch_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL,
+    slot_time_utc TEXT NOT NULL,
+    lp_kind TEXT NOT NULL,
+    dispatched_kind TEXT NOT NULL,
+    committed INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    scen_optimistic_exp_kwh REAL,
+    scen_nominal_exp_kwh REAL,
+    scen_pessimistic_exp_kwh REAL,
+    created_at TEXT NOT NULL,
+    UNIQUE(run_id, slot_time_utc)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dispatch_decisions_run ON dispatch_decisions(run_id);
+CREATE INDEX IF NOT EXISTS idx_dispatch_decisions_slot ON dispatch_decisions(slot_time_utc);
 """
 
 
@@ -3500,6 +3518,93 @@ def delete_calendar_event(calendar_id: str, slot_start_utc: str) -> None:
                 (calendar_id, slot_start_utc),
             )
             conn.commit()
+        finally:
+            conn.close()
+
+
+def upsert_dispatch_decision(
+    *,
+    run_id: int,
+    slot_time_utc: str,
+    lp_kind: str,
+    dispatched_kind: str,
+    committed: bool,
+    reason: str,
+    scen_optimistic_exp_kwh: float | None = None,
+    scen_nominal_exp_kwh: float | None = None,
+    scen_pessimistic_exp_kwh: float | None = None,
+) -> None:
+    """Persist one slot's dispatch decision for the audit trail.
+
+    Idempotent on ``(run_id, slot_time_utc)``: re-runs of the same LP run for
+    the same slot overwrite the row. Per-scenario export values are nullable
+    so non-scenario triggers (drift, forecast_revision) can record decisions
+    with only ``scen_nominal_exp_kwh`` populated.
+    """
+    now_iso = datetime.now(UTC).isoformat()
+    with _lock:
+        conn = get_connection()
+        try:
+            conn.execute(
+                """INSERT INTO dispatch_decisions
+                   (run_id, slot_time_utc, lp_kind, dispatched_kind, committed,
+                    reason, scen_optimistic_exp_kwh, scen_nominal_exp_kwh,
+                    scen_pessimistic_exp_kwh, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(run_id, slot_time_utc) DO UPDATE SET
+                     lp_kind=excluded.lp_kind,
+                     dispatched_kind=excluded.dispatched_kind,
+                     committed=excluded.committed,
+                     reason=excluded.reason,
+                     scen_optimistic_exp_kwh=excluded.scen_optimistic_exp_kwh,
+                     scen_nominal_exp_kwh=excluded.scen_nominal_exp_kwh,
+                     scen_pessimistic_exp_kwh=excluded.scen_pessimistic_exp_kwh,
+                     created_at=excluded.created_at""",
+                (
+                    run_id, slot_time_utc, lp_kind, dispatched_kind,
+                    1 if committed else 0, reason,
+                    scen_optimistic_exp_kwh, scen_nominal_exp_kwh,
+                    scen_pessimistic_exp_kwh, now_iso,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def get_dispatch_decisions(run_id: int) -> list[dict[str, Any]]:
+    """All decision rows for one LP run, ordered by slot_time_utc."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT run_id, slot_time_utc, lp_kind, dispatched_kind, committed,
+                          reason, scen_optimistic_exp_kwh, scen_nominal_exp_kwh,
+                          scen_pessimistic_exp_kwh, created_at
+                   FROM dispatch_decisions
+                   WHERE run_id = ?
+                   ORDER BY slot_time_utc ASC""",
+                (run_id,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
+def find_latest_optimizer_run_id() -> int | None:
+    """Return the id of the most recent ``optimizer_log`` row, or None.
+
+    Helper used by the API/MCP layer when callers ask for the "latest" run
+    rather than naming a specific run_id.
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT id FROM optimizer_log ORDER BY run_at DESC LIMIT 1"
+            )
+            r = cur.fetchone()
+            return int(r[0]) if r else None
         finally:
             conn.close()
 

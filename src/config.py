@@ -314,16 +314,45 @@ class Config:
 
     # OPTIMIZATION_PRESET + ENERGY_STRATEGY_MODE are runtime-tunable via
     # /api/v1/settings (#52) — see the @property definitions below.
-    # savings_first (default): import/savings focus; peak grid export (force discharge)
-    # is allowed whenever cached SoC >= EXPORT_DISCHARGE_MIN_SOC_PERCENT (i.e. the
-    # battery is genuinely full from PV). The household-preset gate was removed in
-    # favour of trusting the LP's predicted base load + Daikin draw.
-    # strict_savings — never schedule peak export discharge (max self-use).
-    EXPORT_DISCHARGE_MIN_SOC_PERCENT: float = float(
-        os.getenv("EXPORT_DISCHARGE_MIN_SOC_PERCENT", "95")
-    )
+    # savings_first (default): trust the LP entirely. Peak grid export (force
+    # discharge) is decided by the MILP objective using per-slot Octopus
+    # Outgoing pricing and battery round-trip efficiency. Robustness against
+    # forecast error is enforced by scenario LP at dispatch time
+    # (src/scheduler/scenarios.py + filter_robust_peak_export).
+    # strict_savings — never schedule peak export discharge (max self-use);
+    # the dispatch filter drops every peak_export slot regardless of scenarios.
+    # ``EXPORT_DISCHARGE_FLOOR_SOC_PERCENT`` is the ``fdSoC`` parameter sent
+    # to Fox in the ForceDischarge group (separate from the removed live-SoC gate).
     EXPORT_DISCHARGE_FLOOR_SOC_PERCENT: int = int(
         os.getenv("EXPORT_DISCHARGE_FLOOR_SOC_PERCENT", "15")
+    )
+
+    # Scenario LP — three-pass robustness check on peak-export commits.
+    # See docs/DISPATCH_DECISIONS.md for the design rationale.
+    LP_SCENARIO_OPTIMISTIC_TEMP_DELTA_C: float = float(
+        os.getenv("LP_SCENARIO_OPTIMISTIC_TEMP_DELTA_C", "1.0")
+    )
+    LP_SCENARIO_OPTIMISTIC_LOAD_FACTOR: float = float(
+        os.getenv("LP_SCENARIO_OPTIMISTIC_LOAD_FACTOR", "0.90")
+    )
+    LP_SCENARIO_PESSIMISTIC_TEMP_DELTA_C: float = float(
+        os.getenv("LP_SCENARIO_PESSIMISTIC_TEMP_DELTA_C", "-1.5")
+    )
+    LP_SCENARIO_PESSIMISTIC_LOAD_FACTOR: float = float(
+        os.getenv("LP_SCENARIO_PESSIMISTIC_LOAD_FACTOR", "1.15")
+    )
+    LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH: float = float(
+        os.getenv("LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH", "0.30")
+    )
+    # Comma-separated trigger reasons for which scenario LP runs. Other
+    # triggers (drift, forecast_revision, hourly cron not in this list)
+    # use only the nominal solve to keep latency low.
+    # ``octopus_fetch`` is the natural pre-peak fire (default 16:05 local,
+    # right after Octopus publishes the next-day rates). Including it here
+    # means the run that sees fresh prices ALSO does the 3-pass scenario
+    # robustness check, ~55 min before the typical 17:00 BST peak window.
+    LP_SCENARIOS_ON_TRIGGER_REASONS: str = os.getenv(
+        "LP_SCENARIOS_ON_TRIGGER_REASONS", "cron,plan_push,octopus_fetch"
     )
     TARGET_ROOM_TEMP_MIN_C: float = float(os.getenv("TARGET_ROOM_TEMP_MIN_C", "18.0"))
     TARGET_ROOM_TEMP_MAX_C: float = float(os.getenv("TARGET_ROOM_TEMP_MAX_C", "23.0"))

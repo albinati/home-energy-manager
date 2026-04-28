@@ -377,23 +377,6 @@ def _optimization_preset_away_like() -> bool:
         return False
 
 
-def _bulletproof_allow_peak_export_discharge() -> bool:
-    """True when not strict_savings and cached SoC ≥ ``EXPORT_DISCHARGE_MIN_SOC_PERCENT``.
-
-    The household-preset gate (travel/away only) was removed: the LP already
-    accounts for predicted base load + Daikin draw in the energy balance, so
-    arbitrage is allowed when the battery is genuinely full from PV. The SoC
-    floor protects evening reserves; ``strict_savings`` remains the kill switch.
-    """
-    if (config.ENERGY_STRATEGY_MODE or "savings_first").strip().lower() == "strict_savings":
-        return False
-    try:
-        soc = float(get_cached_realtime().soc)
-    except Exception:
-        return False
-    return soc >= float(config.EXPORT_DISCHARGE_MIN_SOC_PERCENT)
-
-
 def _count_midnight_crossings(
     merged: list[tuple[datetime, datetime, tuple]],
     tz: ZoneInfo,
@@ -948,11 +931,6 @@ def _run_optimizer_heuristic(fox: FoxESSClient | None, daikin: Any | None = None
         strategy += "; Daikin: travel/away — scheduled setbacks on peak only (no cheap/negative preheat)"
     if extended:
         strategy += f"; pre-peak charge extended +{extended} half-hours (battery margin)"
-    peak_export = _bulletproof_allow_peak_export_discharge()
-    if peak_export:
-        strategy += (
-            f"; peak export discharge allowed (travel/away, SoC≥{config.EXPORT_DISCHARGE_MIN_SOC_PERCENT:g}%)"
-        )
     if battery_warn:
         strategy += (
             f"; battery warn: est peak load ~{est_peak_kwh:.1f}kWh vs "
@@ -980,7 +958,7 @@ def _run_optimizer_heuristic(fox: FoxESSClient | None, daikin: Any | None = None
     )
 
     fox_ok = False
-    groups = _merge_fox_groups(slots, max_groups=8, peak_export_discharge=peak_export)
+    groups = _merge_fox_groups(slots, max_groups=8, peak_export_discharge=False)
     if fox and fox.api_key and not config.OPENCLAW_READ_ONLY:
         try:
             fox.set_scheduler_v3(groups, is_default=False)
@@ -1030,7 +1008,6 @@ def _run_optimizer_heuristic(fox: FoxESSClient | None, daikin: Any | None = None
         "fox_uploaded": fox_ok,
         "daikin_actions": daikin_n,
         "battery_warning": battery_warn,
-        "peak_export_discharge": peak_export,
         "strategy": strategy,
         "dhw_thermal_decay": thermal_info,
         "optimizer_backend": "heuristic",
@@ -1193,16 +1170,29 @@ def _build_export_price_line(slot_starts_utc: list[datetime]) -> list[float] | N
     return out
 
 
-def _run_optimizer_lp(fox: FoxESSClient | None, daikin: Any | None = None) -> dict[str, Any]:
-    """PuLP MILP horizon planner (V8). Falls back to heuristic if solve is not optimal."""
+def _run_optimizer_lp(
+    fox: FoxESSClient | None,
+    daikin: Any | None = None,
+    *,
+    trigger_reason: str = "manual",
+) -> dict[str, Any]:
+    """PuLP MILP horizon planner (V8). Falls back to heuristic if solve is not optimal.
+
+    ``trigger_reason`` is plumbed in so the dispatcher knows whether to run
+    scenario LP for peak-export robustness (controlled by
+    ``LP_SCENARIOS_ON_TRIGGER_REASONS``). Defaults to ``manual`` for callers
+    that haven't been updated to pass a reason yet.
+    """
     from .lp_dispatch import (
         build_fox_groups_from_lp,
+        filter_robust_peak_export,
         lp_plan_to_slots,
         upload_fox_if_operational,
         write_daikin_from_lp_plan,
     )
     from .lp_initial_state import read_lp_initial_state
     from .lp_optimizer import solve_lp
+    from .scenarios import solve_scenarios_with_nominal, trigger_runs_scenarios
 
     tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
     if not tariff:
@@ -1321,11 +1311,6 @@ def _run_optimizer_lp(fox: FoxESSClient | None, daikin: Any | None = None) -> di
     )
     if _optimization_preset_away_like():
         strategy += "; Daikin: travel/away — setbacks predominate when LP chooses peak slots"
-    peak_export = _bulletproof_allow_peak_export_discharge()
-    if peak_export:
-        strategy += (
-            f"; peak export discharge allowed (travel/away, SoC≥{config.EXPORT_DISCHARGE_MIN_SOC_PERCENT:g}%)"
-        )
     if battery_warn:
         strategy += (
             f"; battery warn: est peak load ~{est_peak_kwh:.1f}kWh vs "
@@ -1352,7 +1337,41 @@ def _run_optimizer_lp(fox: FoxESSClient | None, daikin: Any | None = None) -> di
         }
     )
 
-    groups, replan_at = build_fox_groups_from_lp(plan)
+    # Scenario LP — run a 3-pass robustness check on peak-export commits when
+    # the trigger reason warrants it (cron, plan_push by default). Skipped on
+    # fast-path triggers (drift, forecast_revision, dynamic_replan, manual)
+    # to keep MPC re-plan latency low; those committed plans inherit "trust
+    # the LP" semantics. Decisions get persisted alongside the run_id below.
+    has_peak_export = any(s.kind == "peak_export" for s in lp_slots)
+    scenarios_dict: dict[str, Any] | None = None
+    if has_peak_export and trigger_runs_scenarios(trigger_reason):
+        try:
+            scenarios_dict = dict(
+                solve_scenarios_with_nominal(
+                    nominal=plan,
+                    slot_starts_utc=starts,
+                    price_pence=prices,
+                    base_load_kwh=base_load,
+                    weather=weather,
+                    initial=initial,
+                    tz=tz,
+                    micro_climate_offset_c=micro_climate_offset,
+                    export_price_pence=export_prices,
+                )
+            )
+        except Exception as e:
+            logger.warning(
+                "Scenario LP failed (trigger=%s): %s — committing nominal plan as-is",
+                trigger_reason, e,
+            )
+            scenarios_dict = None
+
+    # Run the filter once to capture decisions (they reference the new run_id
+    # written below). build_fox_groups_from_lp re-runs the filter internally,
+    # which is fine — both invocations are deterministic on the same scenarios.
+    _filtered_slots, dispatch_decisions = filter_robust_peak_export(plan, scenarios_dict)
+
+    groups, replan_at = build_fox_groups_from_lp(plan, scenarios=scenarios_dict)
     fox_ok = upload_fox_if_operational(fox, groups)
     if replan_at is not None:
         try:
@@ -1401,6 +1420,25 @@ def _run_optimizer_lp(fox: FoxESSClient | None, daikin: Any | None = None) -> di
     except Exception as e:
         logger.warning("LP snapshot persistence failed (non-fatal): %s", e)
 
+    # Persist dispatch decisions (per-slot LP-kind → committed kind, with the
+    # 3 scenario export values) so the API/MCP/skill can explain why each
+    # peak_export was committed or dropped. Only writes when there were
+    # decisions to record (no peak_export in plan → empty list, skipped).
+    try:
+        for d in dispatch_decisions:
+            db.upsert_dispatch_decision(run_id=run_id, **d)
+        if dispatch_decisions:
+            committed = sum(1 for d in dispatch_decisions if d["committed"] and d["lp_kind"] == "peak_export")
+            dropped = sum(1 for d in dispatch_decisions if (not d["committed"]) and d["lp_kind"] == "peak_export")
+            if committed or dropped:
+                logger.info(
+                    "dispatch_decisions: peak_export committed=%d dropped=%d (run_id=%d, trigger=%s, scenarios=%s)",
+                    committed, dropped, run_id, trigger_reason,
+                    "yes" if scenarios_dict else "no",
+                )
+    except Exception as e:
+        logger.warning("dispatch_decisions persistence failed (non-fatal): %s", e)
+
     _write_plan_consent(plan_date, strategy)
 
     return {
@@ -1411,7 +1449,8 @@ def _run_optimizer_lp(fox: FoxESSClient | None, daikin: Any | None = None) -> di
         "fox_uploaded": fox_ok,
         "daikin_actions": daikin_n,
         "battery_warning": battery_warn,
-        "peak_export_discharge": peak_export,
+        "scenarios_run": scenarios_dict is not None,
+        "trigger_reason": trigger_reason,
         "strategy": strategy,
         "dhw_thermal_decay": None,
         "optimizer_backend": "lp",
@@ -1566,9 +1605,20 @@ def _write_plan_consent(plan_date: str, strategy: str) -> None:
         logger.warning("notify_plan_proposed failed (non-fatal): %s", exc)
 
 
-def run_optimizer(fox: FoxESSClient | None, daikin: Any | None = None) -> dict[str, Any]:
-    """Fetch rates from DB, plan (PuLP or heuristic), upload Fox V3, write Daikin actions."""
+def run_optimizer(
+    fox: FoxESSClient | None,
+    daikin: Any | None = None,
+    *,
+    trigger_reason: str = "manual",
+) -> dict[str, Any]:
+    """Fetch rates from DB, plan (PuLP or heuristic), upload Fox V3, write Daikin actions.
+
+    ``trigger_reason`` controls whether the LP path runs scenario robustness
+    checks for peak_export commits (see ``LP_SCENARIOS_ON_TRIGGER_REASONS``).
+    Known reasons: ``cron``, ``plan_push``, ``soc_drift``, ``forecast_revision``,
+    ``dynamic_replan``, ``manual`` (the default for ad-hoc invocations).
+    """
     backend = (config.OPTIMIZER_BACKEND or "lp").strip().lower()
     if backend == "heuristic":
         return _run_optimizer_heuristic(fox, daikin)
-    return _run_optimizer_lp(fox, daikin)
+    return _run_optimizer_lp(fox, daikin, trigger_reason=trigger_reason)
