@@ -70,8 +70,13 @@ def test_stale_cache_no_refresh(tmp_path, monkeypatch):
     with patch("src.daikin.service.DaikinClient", return_value=mock_client):
         # Seed cache
         svc.get_cached_devices(allow_refresh=False, actor="test")
-        # Force cache to appear expired
-        svc._devices_fetched_monotonic = 0.0  # age = inf
+        # Force cache to appear expired. Setting to 0.0 only works when
+        # ``time.monotonic()`` is large enough to be > TTL (true in long-lived
+        # dev shells, false in short-lived CI runners). Subtract the TTL +
+        # margin from current monotonic so age > TTL deterministically.
+        import time as _time
+        from src.config import config as _cfg
+        svc._devices_fetched_monotonic = _time.monotonic() - (_cfg.DAIKIN_DEVICES_CACHE_TTL_SECONDS + 60)
 
         result = svc.get_cached_devices(allow_refresh=False, actor="test")
 
@@ -92,8 +97,11 @@ def test_quota_blocked_returns_stale(tmp_path, monkeypatch):
     with patch("src.daikin.service.DaikinClient", return_value=mock_client):
         # Seed cache
         svc.get_cached_devices(allow_refresh=False, actor="test")
-        # Expire it
-        svc._devices_fetched_monotonic = 0.0
+        # Expire it deterministically — see test_stale_cache_no_refresh for
+        # why ``= 0.0`` is not safe in short-lived CI runners.
+        import time as _time
+        from src.config import config as _cfg
+        svc._devices_fetched_monotonic = _time.monotonic() - (_cfg.DAIKIN_DEVICES_CACHE_TTL_SECONDS + 60)
 
         # Block quota
         with patch("src.daikin.service.should_block", return_value=True):

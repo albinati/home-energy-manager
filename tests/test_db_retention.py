@@ -128,6 +128,11 @@ def test_prune_history_tables_returns_per_table_counts():
         "lp_solution_snapshot",
         "lp_inputs_snapshot",
         "config_audit",
+        # Dispatch + scenario tables ride on LP_SNAPSHOT_RETENTION_DAYS — the
+        # rows would have nothing useful to point at after the snapshot is
+        # pruned, so they're swept on the same horizon.
+        "dispatch_decisions",
+        "scenario_solve_log",
     }
     assert results["daikin_telemetry"] >= 1
     assert results["config_audit"] >= 1
