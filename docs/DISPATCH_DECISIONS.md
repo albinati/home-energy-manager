@@ -233,6 +233,56 @@ The `dispatch_decisions` table this work ships supports all three transitions
 without further refactor: it persists per-scenario export values, so the data
 needed to fit/validate any of them is already captured.
 
+## Pre-merge regression validator
+
+`scripts/validate_scenario_filter.py` is the realised-data gate for any PR
+that touches the dispatch path. For each LP run in the last *N* days that
+planned `peak_export` slots, it:
+
+1. Replays the LP via `lp_replay.replay_run(mode="forward")` — current code
+   on past inputs.
+2. Solves the optimistic + pessimistic scenarios on the replayed plan.
+3. Applies `filter_robust_peak_export`.
+4. For each slot the filter would have **dropped**, computes a £ delta under
+   a conservative proxy:
+   ```
+   delta_p = planned_export_kwh × (terminal_soc_value_p − actual_export_price_p)
+   ```
+   Positive = the saved battery was worth more than the lost grid feed.
+   Negative = the filter would have cost us money.
+5. Aggregates per-run + total. **Exits non-zero** when the 30-day total goes
+   below `--fail-below-pence` (default −500 p / −£5).
+
+The terminal-SoC proxy underestimates the true value of saved battery during
+peak windows (the kWh would actually displace peak-rate imports), so this
+validator errs on the side of NOT blocking false-positively. Tighten the
+gate by raising `LP_SOC_TERMINAL_VALUE_PENCE_PER_KWH` or lowering
+`--fail-below-pence`.
+
+**Usage as a pre-merge gate:**
+
+```bash
+# Local — against a recent prod DB snapshot.
+DB_PATH=/path/to/prod-snapshot.db .venv/bin/python scripts/validate_scenario_filter.py
+echo "exit code: $?"   # 0 = filter neutral or favourable; 1 = filter regressed
+```
+
+```bash
+# Strict mode (refuse to merge if filter touches any losing slot historically).
+DB_PATH=/path/to/prod-snapshot.db .venv/bin/python scripts/validate_scenario_filter.py \
+    --fail-below-pence 0 --json /tmp/filter-validation.json
+```
+
+The `.github/pull_request_template.md` has a checklist row asking PR authors
+to paste the verdict line for any change to `src/scheduler/`. CI runs unit
+tests via `.github/workflows/tests.yml` but cannot run the realised-data
+validator (no prod DB in CI) — that's the manual step.
+
+**Operational use** (post-deploy regression watch, not implemented yet but
+the script is shaped for it): wrap in a weekly cron on the prod host and
+emit the verdict to OpenClaw. Sustained `VERDICT: FAIL` = the perturbation
+deltas need tuning.
+
 ## Out of scope
 
 * Forecast-skill measurement (S11.1 / S11.3, Epic #180).
