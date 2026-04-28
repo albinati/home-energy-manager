@@ -1240,8 +1240,8 @@ def build_mcp() -> FastMCP:
         description=(
             "Switch the household preset. "
             "Options: normal (standard comfort), guests (higher DHW, warmer, less cost-cutting), "
-            "travel/away (frost protection; peak grid export only if ENERGY_STRATEGY_MODE=savings_first "
-            "and battery SoC >= EXPORT_DISCHARGE_MIN_SOC_PERCENT at plan time), "
+            "travel/away (frost protection; LP optimises self-use + arbitrage; "
+            "ENERGY_STRATEGY_MODE=strict_savings disables peak export entirely), "
             "boost (temporary full-comfort override, ignores price). "
             "After switching, call propose_optimization_plan to re-solve with the new preset."
         ),
@@ -2355,6 +2355,272 @@ def build_mcp() -> FastMCP:
         try:
             rows = db.get_fox_energy_daily_range(start_date, end_date)
             return {"ok": True, "start_date": start_date, "end_date": end_date, "rows": rows}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    @mcp.tool(
+        name="explain_dispatch_decisions",
+        description=(
+            "Per-slot LP-vs-dispatched view for one optimizer run. For each slot: "
+            "what the LP planned (lp_kind), what made it onto Fox V3 "
+            "(dispatched_kind), whether it was committed, the textual reason, "
+            "and the three scenario export values (optimistic / nominal / "
+            "pessimistic). Use this to answer 'why isn't there a ForceDischarge "
+            "tomorrow at 18:00?' — the dropped slots will show "
+            "reason='pessimistic_disagrees' with the per-scenario kWh values that "
+            "explain the call. Pass run_id=None for the latest run."
+        ),
+    )
+    def explain_dispatch_decisions(run_id: int | None = None) -> dict[str, Any]:
+        from . import db
+        try:
+            rid = int(run_id) if run_id is not None else db.find_latest_optimizer_run_id()
+            if rid is None:
+                return {"ok": False, "error": "No optimizer runs on file"}
+            rows = db.get_dispatch_decisions(rid)
+            committed = sum(1 for r in rows if r["lp_kind"] == "peak_export" and r["committed"])
+            dropped = sum(1 for r in rows if r["lp_kind"] == "peak_export" and not r["committed"])
+            return {
+                "ok": True,
+                "run_id": rid,
+                "decisions": rows,
+                "summary": {
+                    "total_slots": len(rows),
+                    "peak_export_committed": committed,
+                    "peak_export_dropped": dropped,
+                    "drop_reasons": {
+                        reason: sum(1 for r in rows if not r["committed"] and r["reason"] == reason)
+                        for reason in {r["reason"] for r in rows if not r["committed"]}
+                    },
+                },
+            }
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    @mcp.tool(
+        name="get_plan_timeline",
+        description=(
+            "The active LP plan partitioned into executed (past), ongoing "
+            "(current half-hour), and planned (future) slots. Each slot "
+            "carries the LP-decided action and the dispatch decision (whether "
+            "Fox V3 actually got the group). Top-level fields: plan_date, "
+            "run_id, run_at, tariff_code, peak_threshold_pence. Use this to "
+            "answer 'what's the schedule for tonight?' or 'what's currently "
+            "running?' without raw Fox state."
+        ),
+    )
+    def get_plan_timeline_tool() -> dict[str, Any]:
+        from . import db
+        from datetime import UTC as _UTC
+        from datetime import datetime as _dt
+        from datetime import timedelta as _td
+
+        try:
+            rid = db.find_latest_optimizer_run_id()
+            if rid is None:
+                return {"ok": False, "error": "No optimizer runs on file"}
+            inputs = db.get_lp_inputs(rid) or {}
+            slots = db.get_lp_solution_slots(rid)
+            decisions = {d["slot_time_utc"]: d for d in db.get_dispatch_decisions(rid)}
+            now = _dt.now(_UTC)
+            executed: list[dict[str, Any]] = []
+            planned: list[dict[str, Any]] = []
+            ongoing: dict[str, Any] | None = None
+            for s in slots:
+                try:
+                    st = _dt.fromisoformat(s["slot_time_utc"].replace("Z", "+00:00"))
+                except (ValueError, KeyError):
+                    continue
+                slot_end = st + _td(minutes=30)
+                d = decisions.get(s["slot_time_utc"])
+                view = {
+                    "slot_time_utc": s["slot_time_utc"],
+                    "price_p": s.get("price_p"),
+                    "import_kwh": s.get("import_kwh"),
+                    "export_kwh": s.get("export_kwh"),
+                    "charge_kwh": s.get("charge_kwh"),
+                    "discharge_kwh": s.get("discharge_kwh"),
+                    "soc_kwh": s.get("soc_kwh"),
+                    "lp_kind": d["lp_kind"] if d else None,
+                    "dispatched_kind": d["dispatched_kind"] if d else None,
+                    "committed": bool(d["committed"]) if d else None,
+                    "decision_reason": d["reason"] if d else None,
+                }
+                if slot_end <= now:
+                    executed.append(view)
+                elif st <= now < slot_end:
+                    ongoing = view
+                else:
+                    planned.append(view)
+            return {
+                "ok": True,
+                "run_id": rid,
+                "run_at": inputs.get("run_at_utc"),
+                "plan_date": inputs.get("plan_date"),
+                "tariff_code": (config.OCTOPUS_TARIFF_CODE or "").strip() or None,
+                "peak_threshold_pence": inputs.get("peak_threshold_p"),
+                "now_utc": now.isoformat(),
+                "executed": executed,
+                "ongoing": ongoing,
+                "planned": planned,
+                "counts": {
+                    "executed": len(executed),
+                    "ongoing": 1 if ongoing else 0,
+                    "planned": len(planned),
+                },
+            }
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    @mcp.tool(
+        name="get_fox_schedule_diff",
+        description=(
+            "Live Fox V3 scheduler state vs. last recorded HEM upload. "
+            "Returns any_drift=True when the inverter shows groups HEM didn't "
+            "send (Fox-app manual edit, firmware quirk, failed upload). "
+            "Symmetric diff: only_live (groups present on Fox but not in our "
+            "fox_schedule_state record) and only_recorded (groups we tried to "
+            "send but Fox doesn't show). Read-only — no hardware writes."
+        ),
+    )
+    def get_fox_schedule_diff_tool() -> dict[str, Any]:
+        from .api.routers.dispatch import (
+            _normalise_group as _norm,
+        )
+        from . import db
+        from .foxess.client import FoxESSClient as _FoxESSClient
+
+        try:
+            state = db.get_latest_fox_schedule_state()
+            recorded = (state or {}).get("groups", []) or []
+            try:
+                fox = _FoxESSClient(**config.foxess_client_kwargs())
+                live = [_norm(g) for g in fox.get_scheduler_v3().groups]
+                live_error = None
+            except Exception as e:
+                live = []
+                live_error = str(e)
+
+            rec_norm = [_norm(g) for g in recorded]
+
+            def _fp(g: dict[str, Any]) -> tuple:
+                return (
+                    g.get("start"), g.get("end"), g.get("work_mode"),
+                    g.get("min_soc_on_grid"),
+                    None if g.get("fd_soc") is None else float(g["fd_soc"]),
+                    None if g.get("fd_pwr") is None else float(g["fd_pwr"]),
+                    None if g.get("max_soc") is None else float(g["max_soc"]),
+                )
+
+            live_fps = {_fp(g) for g in live}
+            rec_fps = {_fp(g) for g in rec_norm}
+            only_live = [g for g in live if _fp(g) not in rec_fps]
+            only_recorded = [g for g in rec_norm if _fp(g) not in live_fps]
+            return {
+                "ok": live_error is None,
+                "any_drift": bool(only_live or only_recorded),
+                "live_groups": live,
+                "recorded_groups": rec_norm,
+                "diffs": {"only_live": only_live, "only_recorded": only_recorded},
+                "recorded_uploaded_at": (state or {}).get("uploaded_at"),
+                "live_error": live_error,
+            }
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    @mcp.tool(
+        name="get_scenario_batch",
+        description=(
+            "Per-scenario LP solve summary for a 3-pass robustness batch. "
+            "Each scenario row carries lp_status, objective_pence, "
+            "perturbation deltas (Δ°C + load factor), peak-export slot count, "
+            "and wall-clock duration_ms. Pass batch_id=None for the latest "
+            "run. Returns an empty 'scenarios' list when the run didn't "
+            "trigger scenarios (manual / drift / forecast_revision triggers, "
+            "or plan had no peak_export). Use this to inspect 'how much "
+            "did pessimistic differ from nominal?' or 'which scenario was "
+            "the slow one?' after the fact."
+        ),
+    )
+    def get_scenario_batch_tool(batch_id: int | None = None) -> dict[str, Any]:
+        from . import db
+        try:
+            bid = int(batch_id) if batch_id is not None else db.find_latest_optimizer_run_id()
+            if bid is None:
+                return {"ok": False, "error": "No optimizer runs on file"}
+            rows = db.get_scenario_solve_batch(bid)
+            if not rows:
+                return {
+                    "ok": True,
+                    "batch_id": bid,
+                    "scenarios": [],
+                    "note": "No scenario solves logged for this run.",
+                }
+            by_kind = {r["scenario_kind"]: r for r in rows}
+            return {
+                "ok": True,
+                "batch_id": bid,
+                "nominal_run_id": rows[0]["nominal_run_id"],
+                "scenarios": rows,
+                "summary": {
+                    "objectives_pence": {
+                        k: by_kind[k]["objective_pence"]
+                        for k in ("optimistic", "nominal", "pessimistic")
+                        if k in by_kind
+                    },
+                    "peak_export_slot_counts": {
+                        k: by_kind[k]["peak_export_slot_count"]
+                        for k in ("optimistic", "nominal", "pessimistic")
+                        if k in by_kind
+                    },
+                    "max_duration_ms": max((r["duration_ms"] or 0) for r in rows),
+                },
+            }
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    @mcp.tool(
+        name="simulate_peak_export_robustness",
+        description=(
+            "What-if: re-run the 3 forecast scenarios (optimistic / nominal / "
+            "pessimistic) for the active plan and report whether the slot at "
+            "slot_time_utc is robust enough to commit a peak-export "
+            "ForceDischarge. Useful to debug 'would this discharge survive a "
+            "cold snap?' without waiting for the next scheduled re-plan. "
+            "slot_time_utc must be ISO 8601 (e.g. '2026-04-29T17:00:00+00:00') "
+            "and fall within the active LP horizon."
+        ),
+    )
+    def simulate_peak_export_robustness(slot_time_utc: str) -> dict[str, Any]:
+        from . import db
+        try:
+            rid = db.find_latest_optimizer_run_id()
+            if rid is None:
+                return {"ok": False, "error": "No optimizer runs on file"}
+            rows = db.get_dispatch_decisions(rid)
+            target = next((r for r in rows if r["slot_time_utc"] == slot_time_utc), None)
+            if target is None:
+                return {
+                    "ok": False,
+                    "error": f"No decision row for slot {slot_time_utc} in run {rid}",
+                    "available_slots": [r["slot_time_utc"] for r in rows[:5]],
+                }
+            floor = float(config.LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH)
+            return {
+                "ok": True,
+                "run_id": rid,
+                "slot_time_utc": slot_time_utc,
+                "lp_kind": target["lp_kind"],
+                "dispatched_kind": target["dispatched_kind"],
+                "committed": bool(target["committed"]),
+                "reason": target["reason"],
+                "floor_kwh": floor,
+                "scenarios": {
+                    "optimistic_exp_kwh": target["scen_optimistic_exp_kwh"],
+                    "nominal_exp_kwh": target["scen_nominal_exp_kwh"],
+                    "pessimistic_exp_kwh": target["scen_pessimistic_exp_kwh"],
+                },
+            }
         except Exception as e:
             return {"ok": False, "error": str(e)}
 

@@ -460,6 +460,7 @@ def bulletproof_mpc_job(
         result = run_optimizer(
             fox if write_devices else None,
             daikin if write_devices else None,
+            trigger_reason=trigger_reason,
         )
         logger.info(
             "MPC re-optimise: trigger=%s ok=%s lp_status=%s objective=%.0fp soc=%.1f%% solar=%.2fkW write_devices=%s",
@@ -810,7 +811,7 @@ def bulletproof_plan_push_job() -> None:
             except Exception as e:
                 logger.debug("Plan push: Daikin client unavailable: %s", e)
 
-        result = run_optimizer(fox, daikin)
+        result = run_optimizer(fox, daikin, trigger_reason="plan_push")
         logger.info(
             "Plan push: ok=%s lp_status=%s objective=%.0fp fox_uploaded=%s daikin_actions=%s",
             result.get("ok"),
