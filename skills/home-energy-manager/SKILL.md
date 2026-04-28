@@ -1,22 +1,24 @@
 ---
 name: home-energy-manager
-description: OpenClaw skill — interface to the Home Energy Manager. The app owns ALL hardware logic, schedules, quotas, and consent. OpenClaw reads status, proposes plans, and requests changes. It never writes directly to Daikin or Fox ESS.
-metadata: {"openclaw": {"requires": {"env": ["HOME_ENERGY_API_URL"]}, "primaryEnv": "HOME_ENERGY_API_URL", "emoji": "🏠"}}
+description: OpenClaw skill — natural interface to the Home Energy Manager (HEM). HEM owns ALL hardware logic, schedules, quotas, and consent; OpenClaw reads status, runs what-ifs, proposes plans, and requests changes via the `hem__*` MCP tool surface. Use whenever the user asks about the battery, solar, heat pump, Octopus tariffs, today's plan, yesterday's PnL, or anything energy-related.
+metadata: {"openclaw": {"requires": {"env": ["HEM_MCP_URL", "HEM_MCP_TOKEN_FILE"]}, "primaryEnv": "HEM_MCP_URL", "emoji": "🏠"}}
 ---
 
-# Home Energy Manager
+# Home Energy Manager (HEM)
 
-The app is the **single planning brain** for the site. It fetches Octopus Agile tariffs, runs a PuLP MILP optimizer, uploads a Fox ESS Scheduler V3, and executes a 2-minute heartbeat. **In v10 (default) the Daikin runs autonomously on its own firmware curve** — the app no longer writes to it; instead it predicts the Daikin's electrical draw and treats it as a fixed thermal load when planning Fox/grid/PV.
+HEM is the **single planning brain** for the site. It fetches Octopus Agile tariffs, runs a PuLP MILP optimizer over a 24–48h horizon, uploads a Fox ESS Scheduler V3, and writes a Daikin action_schedule that a 2-minute heartbeat applies. The app is the only thing that talks to Daikin Onecta or Fox ESS cloud — OpenClaw never bypasses it.
 
-**OpenClaw is a read/propose/request interface only.** All hardware writes are enforced server-side through plan consent, daily API quota, rate-limit, read-only, and `DAIKIN_CONTROL_MODE` gates. You cannot bypass them.
+You reach HEM through one MCP server, registered in `openclaw.json` as `hem` (long-lived streamable-http transport at `http://127.0.0.1:8000/mcp/`, bearer-guarded). Tool names appear to OpenClaw with the `hem__` prefix — `hem__get_soc`, `hem__propose_optimization_plan`, etc.
 
-**MCP is the only sanctioned channel.** Do not edit `.env`, `src/`, or any file on the app host; do not run shell commands against it; do not make direct HTTP calls to Daikin Onecta or Fox ESS cloud. If a new capability is needed, request a new MCP tool. See `docs/OPENCLAW_BOUNDARY.md` for the full sanctioned surface and out-of-bounds list.
+**Three rules, in order:**
 
-For safe what-if exploration (e.g. "what would tomorrow's plan look like with guests over?"), use `simulate_plan` — read-only, quota-free, zero hardware impact.
+1. **MCP is the only sanctioned channel.** Do not edit `.env`, `src/`, or any file on the app host; do not run shell commands against the container; do not make direct HTTP calls to Daikin Onecta or Fox ESS cloud. If a new capability is missing, request a new MCP tool. See `docs/OPENCLAW_BOUNDARY.md` for the full sanctioned surface.
+2. **Read before write.** Always pull current state (`hem__get_cockpit_now` or `hem__get_daikin_status` + `hem__get_soc`) before recommending or executing a hardware change. The cockpit aggregator is one call and serves from cache.
+3. **Respect the consent gate.** When a hardware-write tool returns `requires_confirmation: true`, a plan is pending. Show `hem__get_pending_approval()` to the user, ask, then either `hem__confirm_plan` / `hem__reject_plan` — or pass `confirmed=true` only after explicit user acknowledgement.
 
-Automated user notifications (plans, alerts, briefs) are sent only through the **OpenClaw Gateway** `POST /hooks/agent` path — not via a separate `openclaw` CLI on the app host. Configure `OPENCLAW_HOOKS_URL` and `OPENCLAW_HOOKS_TOKEN` on the server (see `docs/RUNBOOK.md`).
+For safe what-if exploration ("what would tomorrow's plan look like with guests over?"), use `hem__simulate_plan` — read-only, quota-free, zero hardware impact.
 
-**Base URL**: `HOME_ENERGY_API_URL` (e.g. `http://192.168.1.100:8000`)
+Automated user notifications (plans, alerts, briefs) flow out via the **OpenClaw Gateway** `POST /hooks/agent` path — HEM does not run its own Telegram/Discord; OpenClaw owns delivery. `OPENCLAW_HOOKS_URL` and `OPENCLAW_HOOKS_TOKEN` are set in HEM's `.env`.
 
 ---
 
@@ -40,6 +42,7 @@ Use MCP tools first — they serve from cache and never burn API quota unnecessa
 | `get_battery_forecast` | SoC + daily target snapshot |
 | `get_weather_context` | 48h forecast + live Daikin temps |
 | `get_energy_metrics` | Daily/weekly/monthly PnL, VWAP, slippage, SoC |
+| `get_pending_approval` | Plan currently waiting for user consent (plan_id, expiry, summary, Daikin actions). Use before recommending `confirm_plan` or `reject_plan`. |
 
 ### Historical navigation (hours / days / weeks / months)
 
@@ -89,6 +92,179 @@ To force a fresh simulate → apply cycle:
 For pure what-if (no DB write, no hardware, no quota):
   simulate_plan             → solves the LP with optional overrides, returns the plan
 ```
+
+---
+
+## Worked compositions — common questions, end-to-end
+
+Each recipe shows the tools to compose, in order, to answer a real user request. Pull data first, then reason; don't issue write calls until you've grounded the recommendation in current state.
+
+### "Where are we right now?" / "Status?"
+
+```
+hem__get_cockpit_now()
+  → SoC, current Agile slot kind (cheap/normal/peak), solar/load/grid power,
+    Daikin temps + mode, next Fox transition, freshness per source.
+  → Single call, cached, no quota burn. This is the right opener for almost
+    any energy conversation.
+```
+
+If the user wants more depth, follow with `hem__get_schedule()` for today's planned actions and `hem__get_battery_forecast()` for the daily SoC target.
+
+### "Should we charge tonight?" / "Will tomorrow be cheap?"
+
+```
+1. hem__get_optimization_inputs(horizon_hours=24)
+     → Agile prices (interpolated to half-hour), weather, base-load profile,
+       initial SoC/tank/indoor with provenance, cheap/peak thresholds,
+       tomorrow_rates_available flag.
+2. hem__simulate_plan()                  # current settings, no overrides
+     → status="optimal" / objective_pence / per-slot decisions in result.
+3. (optional) hem__simulate_plan(overrides={"residents": 4, "extra_visitors": 2})
+     → re-solve with guests over to compare.
+```
+
+Read-only, no hardware impact. Use the LP objective and slot kinds to advise: "yes, the LP is already pulling from the grid in slots X..Y at <Np".
+
+### "Approve / reject the plan I see in Telegram"
+
+```
+1. hem__get_pending_approval()
+     → plan_id, expires_in_minutes, summary, daikin_actions[].
+     → If pending=false, the plan was either auto-approved or never existed.
+2. Show the user the summary + key Daikin moves. Ask explicitly.
+3a. hem__confirm_plan(plan_id)           # user said yes
+3b. hem__reject_plan(plan_id, reason="…") # user said no — schedule cleared.
+                                            Then: hem__propose_optimization_plan()
+                                            to rebuild with any new context.
+```
+
+If `PLAN_AUTO_APPROVE=true` (default), `confirm_plan` is a no-op acknowledgement — the plan was already written when proposed. Tell the user it's already live.
+
+### "Force a fresh plan now"
+
+```
+1. hem__get_optimization_status()
+     → confirms scheduler healthy, no Octopus fetch error, current preset.
+2. hem__propose_optimization_plan()
+     → returns immediately with status="planning" + plan_id.
+     → Background optimizer runs; user gets a PLAN_PROPOSED hook when ready.
+3. (poll if needed) hem__get_pending_approval()
+     → once status flips, follow the approve/reject recipe above.
+```
+
+Cooldown: re-proposing within `PLAN_REGEN_COOLDOWN_SECONDS` (default 300 s) returns `cooldown_active: true`. Either wait or `reject_plan` first to bypass.
+
+### "Boost the heat pump for 2 hours" (manual override)
+
+```
+1. hem__get_daikin_status()
+     → check is_on, weather_regulation, control_mode.
+     → If control_mode="passive": stop, tell user the firmware owns the heat
+       pump in passive mode. Ask if they want to flip to "active" first.
+     → If weather_regulation=true: room-temp writes are blocked; use
+       hem__set_daikin_lwt_offset or hem__override_schedule instead.
+2. hem__override_schedule(hours=2.0, lwt_offset=3.0, tank_temp=55)
+     → inserts a pre_heat action + paired restore action in the schedule,
+       so the heat pump returns to plan baseline automatically when the
+       window expires. No silent leftover state.
+3. hem__get_recent_triggers(limit=3)
+     → confirm both actions landed (pre_heat + restore rows visible).
+```
+
+`override_schedule` requires `OPENCLAW_READ_ONLY=false`. If blocked, surface that fact rather than retrying.
+
+### "Am I on the best Octopus tariff?"
+
+```
+1. hem__get_octopus_account()
+     → confirm current product_code + import/export MPAN roles.
+2. hem__get_tariff_recommendation(months_back=1)
+     → quick verdict: best tariff + projected annual savings vs current.
+3. (if user wants detail)
+   hem__compare_tariffs(months_back=3, max_tariffs=15)
+     → ranked list with annual cost, lock-in, exit fee, green flag.
+4. (if user wants per-day breakdown)
+   hem__compare_tariffs_dashboard(months_back=1, granularity="daily")
+     → which tariff would have won each day this month.
+```
+
+Suggest a comparison after major usage shifts (new heat pump, EV, solar) or quarterly. The tool uses real Fox import/export kWh from the chosen window.
+
+### "Why did the LP do X yesterday at 18:00?"
+
+```
+1. hem__find_lp_run_for_time(when_utc="2026-04-27T17:00:00Z")
+     → returns run_id of the LP solve that was active.
+2. hem__get_lp_solution(run_id)
+     → per-slot decision vector (import/export/charge/discharge kWh, SoC
+       trajectory, tank/indoor/outdoor temps, LWT offset).
+3. hem__get_meteo_forecast_history(fetch_at_utc=...)
+     → what the forecast looked like at solve time (not just the latest).
+4. hem__get_cockpit_at(when="2026-04-27T18:00:00Z")
+     → the cockpit frozen at that moment — what the LP decided AND what
+       actually happened (joined with execution_log).
+```
+
+Use these to explain past decisions in the user's terms (price + temps + SoC), not just "the optimizer said so".
+
+### "How did yesterday go?" / "PnL?"
+
+```
+1. hem__get_energy_metrics()
+     → daily/weekly/monthly delta vs SVT shadow + fixed-tariff shadow,
+       VWAP, slippage, arbitrage efficiency, peak-import %, current SoC.
+2. hem__get_attribution_day()    # defaults to yesterday
+     → solar attribution: % of solar to self-use / battery / export.
+3. hem__get_fox_energy_range(start, end)
+     → daily totals across a date range for trend comparisons.
+```
+
+`get_attribution_day` reads `fox_energy_daily`, populated by the nightly rollup — today's row only appears after rollover.
+
+### "Mute the daily PnL alert until I'm back from holiday"
+
+```
+1. hem__list_notification_routes()
+     → see current routing for daily_pnl + other alert types.
+2. hem__set_notification_route(alert_type="daily_pnl", enabled=false)
+     → mutes immediately, no service restart.
+3. (optional) hem__test_notification(alert_type="risk_alert")
+     → verify other critical alerts still deliver via the hook agent.
+```
+
+Re-enable on return: `hem__set_notification_route(alert_type="daily_pnl", enabled=true)`.
+
+### "Switch to guest preset for the weekend"
+
+```
+1. hem__get_optimization_status()
+     → confirm current preset (likely "normal").
+2. hem__set_optimization_preset("guests")
+     → updates runtime config (DHW floor lifts to TARGET_DHW_TEMP_MIN_GUESTS_C,
+       comfort widens). NOT persisted to .env.
+3. hem__propose_optimization_plan()
+     → re-solve with the new preset; auto-applies if PLAN_AUTO_APPROVE=true.
+4. On Sunday evening, repeat with preset="normal" to revert.
+```
+
+Preset changes are runtime-only — they don't survive a service restart. For a permanent change, edit `.env` (sysadmin task, not OpenClaw's).
+
+### "Tune a runtime setting" (e.g. nudge the cheap-window threshold)
+
+```
+1. hem__list_settings()
+     → every tunable + current value + env default + range + overridden flag.
+2. hem__set_setting(key="LP_CHEAP_PRICE_PENCE", value=8.0)
+     → DRY RUN by default — returns canonical value + cron_reload flag,
+       does not persist.
+3. hem__set_setting(key="LP_CHEAP_PRICE_PENCE", value=8.0, confirmed=true)
+     → applies the change; for cron-class keys it also re-registers the cron.
+4. hem__get_config_audit(key="LP_CHEAP_PRICE_PENCE")
+     → confirm the change is logged with actor="mcp".
+```
+
+The dry-run is intentional — show the user the canonical value before committing, especially for schedule keys (LP_PLAN_PUSH_HOUR, LP_MPC_HOURS) that re-register cron jobs.
 
 ---
 
@@ -188,6 +364,13 @@ Never pass `confirmed=True` silently — only after the user has explicitly ackn
 |------|-----------|-------|
 | `set_inverter_mode(mode)` | `Self Use\|Feed-in Priority\|Back Up\|Force charge\|Force discharge` | Emergency override only — next optimizer run will overwrite |
 
+### Manual override window
+
+| Tool | Parameters | Notes |
+|------|-----------|-------|
+| `override_schedule(hours, lwt_offset, tank_temp?)` | `hours: float = 2.0`, `lwt_offset: float = 3.0`, `tank_temp: float \| None` | Inserts a `pre_heat` action with paired `restore` so the system reverts cleanly. Requires `OPENCLAW_READ_ONLY=false`. Use this rather than chaining several `set_daikin_*` calls — the restore guarantees no leftover boost. |
+| `acknowledge_warning(warning_key)` | `warning_key: str` | Suppresses repeat alerts for a known warning (e.g. low-SoC nag, quota-exhaustion banner). Use when the user has explicitly seen and decided to ignore. |
+
 ---
 
 ## Optimization settings
@@ -235,15 +418,50 @@ Alert types: `morning_report`, `strategy_update`, `risk_alert`, `action_confirma
 
 ---
 
-## Energy reports and tariff comparison
+## Octopus account, consumption, and tariff comparison
+
+HEM holds an authenticated Octopus session; use these tools when the user asks
+about meter data, tariff fit, or wants to confirm the import/export MPAN roles.
+
+| Tool | Use |
+|------|-----|
+| `get_octopus_account` | Current product code + import/export MPAN roles + GSP. Quick "what tariff am I on?" answer. |
+| `get_octopus_consumption(group_by="day")` | Smart-meter consumption for a window. `group_by`: `day` / `week` / `month` / `None` (half-hourly). Defaults to import MPAN. Returns slot intervals + kWh + total. |
+| `auto_detect_octopus_setup` | One-shot: re-detects which MPAN is import vs export and the active tariff product, updates runtime config. Run after first install or if MPAN roles look swapped. Runtime-only — does not persist to `.env`. |
+| `list_available_tariffs(max_tariffs=15)` | Currently available Octopus electricity products + rates + standing charges + lock-in / exit-fee policy. Use to scout the market before a comparison. |
+| `compare_tariffs(months_back, max_tariffs)` | Ranked simulation against the household's actual Fox ESS import/export kWh for the window. Returns annual cost, savings vs current, lock-in months, exit fees, green flag. Best for a "should I switch?" answer. |
+| `get_tariff_recommendation(months_back=1)` | One-paragraph verdict: best tariff + projected annual savings vs current. Use for quick answers. |
+| `compare_tariffs_dashboard(months_back, granularity)` | Per-period (`daily` / `weekly` / `monthly`) breakdown showing which tariff would have won each bucket + win counts. Best for "show me which tariff was cheapest each day this month". |
 
 ```
-get_energy_metrics              → daily PnL, VWAP, slippage vs SVT/fixed shadow
-compare_tariffs(months_back)    → ranked tariff simulation (best → worst)
-get_tariff_recommendation()     → one-line recommendation
+hem__get_energy_metrics              → daily PnL, VWAP, slippage vs SVT/fixed shadow
+hem__compare_tariffs(months_back=3)  → ranked tariff simulation (best → worst)
+hem__get_tariff_recommendation()     → one-line recommendation
 ```
 
 Suggest a tariff comparison when: user asks "am I on the best tariff?", after major usage changes (new heat pump, solar, EV), or quarterly.
+
+---
+
+## Runtime settings — `list_settings`, `get_setting`, `set_setting`
+
+A subset of HEM's `.env` knobs are exposed as runtime-tunable settings (cached
+30 s). Some are schedule-class — changing them re-registers APScheduler cron
+jobs in-process, no service restart needed.
+
+| Tool | Use |
+|------|-----|
+| `list_settings` | Every tunable: current value, env default, range, `overridden` flag. Start here. |
+| `get_setting(key)` | Read one value (e.g. `LP_PLAN_PUSH_HOUR`). |
+| `set_setting(key, value)` | **Dry-run by default** — returns the canonical (post-validation) value + `cron_reload` flag, persists nothing. Show this to the user first. |
+| `set_setting(key, value, confirmed=true)` | Persists the change; if `cron_reload` is true, re-registers the relevant cron job. |
+| `get_config_audit(key?)` | Append-only log of every `set_setting` (and delete) with actor — explains why a past plan looked the way it did. |
+
+Examples worth knowing: `LP_PLAN_PUSH_HOUR` / `LP_PLAN_PUSH_MINUTE` (UTC anchor for the nightly Daikin push), `LP_MPC_HOURS` (intra-day re-solve cadence), `LP_CHEAP_PRICE_PENCE` / `LP_PEAK_PRICE_PENCE` (slot-kind thresholds), `DHW_TEMP_NORMAL_C`, `TARGET_DHW_TEMP_MIN_GUESTS_C`. Always check `list_settings` for the live set — schema can drift.
+
+For permanent changes (surviving container restart), the user must edit
+`/srv/hem/.env` on the host and `systemctl restart hem`. That is a sysadmin
+task, not an OpenClaw task.
 
 ---
 
