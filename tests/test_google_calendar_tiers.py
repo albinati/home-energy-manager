@@ -12,10 +12,12 @@ from src.google_calendar.tiers import (
     TIER_EXPENSIVE,
     TIER_GREEN_LIGHT,
     TIER_MODERATE,
+    TIER_NEGATIVE,
     TIER_SEVERE_PEAK,
     TIER_VERY_CHEAP,
     VERY_CHEAP_ABS_CEILING_P,
     Slot,
+    Window,
     _quantile,
     classify_day,
     classify_one,
@@ -235,3 +237,81 @@ def test_smoothing_preserves_meaningful_long_windows():
     keys = [w.tier.key for w in windows]
     assert "above_avg" in keys
     assert len(windows) == 3
+
+
+# ── Negative price tier (Blue, "PAID to use") ──────────────────────────────
+
+
+def test_negative_short_circuits_very_cheap():
+    """A −5.3p slot is NEGATIVE, not VERY_CHEAP, even though the ratio + abs
+    floor of very_cheap would also fire on negatives."""
+    # median 10, p10 -5: a -5.3 price would otherwise hit very_cheap.
+    assert classify_one(-5.3, median=10.0, p10=-5.0).key == TIER_NEGATIVE.key
+
+
+def test_zero_is_not_negative():
+    """The threshold is strictly < 0; exactly 0p is not 'paid'."""
+    assert classify_one(0.0, median=10.0, p10=0.0).key != TIER_NEGATIVE.key
+
+
+def test_negative_color_is_blueberry():
+    """Blueberry (9) is the chosen blue. Don't drift to peacock (7) or
+    lavender (1) — the family knows blue means 'they're paying us'."""
+    assert TIER_NEGATIVE.color_id == "9"
+    assert TIER_NEGATIVE.emoji == "🔵"
+
+
+def test_negative_format_event_emphasises_paid_signal():
+    """The summary must call out the negative sign explicitly so a glance
+    at the calendar reads 'PAID' rather than 'cheap'."""
+    t0 = datetime(2026, 4, 29, 12, 0, tzinfo=UTC)
+    w = Window(
+        start_utc=t0,
+        end_utc=t0 + timedelta(minutes=120),
+        tier=TIER_NEGATIVE,
+        prices=[-1.7, -3.2, -5.3, -2.8],
+    )
+    summary, description = format_event(w)
+    assert "PAID" in summary
+    assert "-5.3p" in summary  # min price visible with sign
+    assert "🔵" in summary
+    assert "PAID" in description.upper()
+
+
+def test_classify_day_keeps_lone_negative_slot():
+    """A single 30-min negative slot surrounded by very_cheap must NOT be
+    smoothed or folded away — being paid is a real signal."""
+    # 14p baseline (no slot is very_cheap because >12p ceiling); single -1p
+    # slot in the middle. Expected: 14, 14, NEGATIVE, 14, 14 → 3 windows.
+    prices = [14.0, 14.0, -1.0, 14.0, 14.0]
+    slots = _make_slots(prices)
+    windows = classify_day(slots)
+    keys = [w.tier.key for w in windows]
+    assert TIER_NEGATIVE.key in keys, f"negative slot was absorbed: {keys}"
+    # And a 30-min window stays as one event (not folded into a neighbour
+    # despite duration < MIN_WINDOW_MINUTES).
+    neg = next(w for w in windows if w.tier.key == TIER_NEGATIVE.key)
+    assert (neg.end_utc - neg.start_utc) == timedelta(minutes=30)
+
+
+def test_classify_day_merges_consecutive_negatives_into_one_window():
+    """Consecutive negative slots collapse into a single merged window
+    (the ordinary windowing path; the no-fold rule doesn't break this)."""
+    # All same tier (NEGATIVE) → one merged window.
+    prices = [-2.0, -3.5, -5.0, -1.8]
+    windows = classify_day(_make_slots(prices))
+    assert len(windows) == 1
+    assert windows[0].tier.key == TIER_NEGATIVE.key
+    assert windows[0].price_min == -5.0
+    assert windows[0].price_max == -1.8
+
+
+def test_negative_window_survives_with_short_neighbours():
+    """A 30-min negative window between a 90-min positive block on each
+    side stays alive even though the negative duration < MIN_WINDOW_MINUTES.
+    """
+    prices = [14.0, 14.0, 14.0, -2.0, 14.0, 14.0, 14.0]  # 30 min negative
+    windows = classify_day(_make_slots(prices))
+    keys = [w.tier.key for w in windows]
+    assert keys.count(TIER_NEGATIVE.key) == 1
+    assert len(windows) == 3  # left positive | negative | right positive
