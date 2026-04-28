@@ -168,7 +168,13 @@ SCHEMA: dict[str, SettingSpec] = {
         type_name="list[int]",
         env_default=_int_list_env("LP_MPC_HOURS", "6,12,21"),
         cron_reload=True,
-        description="Local hours at which the MPC re-solves the LP (e.g. [6,12,21]).",
+        description=(
+            "Local hours at which the MPC re-solves the LP (e.g. [6,12,21]). "
+            "Pre-peak coverage is delivered by the existing octopus_fetch trigger "
+            "at OCTOPUS_FETCH_HOUR:MINUTE (default 16:05 local) which now opts "
+            "into scenario LP via LP_SCENARIOS_ON_TRIGGER_REASONS — that run "
+            "fires post-rate-arrival, ~55 min before the typical 17:00 BST peak."
+        ),
     ),
     "MPC_FORECAST_REFRESH_INTERVAL_MINUTES": SettingSpec(
         key="MPC_FORECAST_REFRESH_INTERVAL_MINUTES",

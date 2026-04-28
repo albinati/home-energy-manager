@@ -308,6 +308,115 @@ The `PLAN_PROPOSED` hook payload carries `autoAcceptOnTimeout: true` and
 
 ---
 
+## Plan lifecycle terminology — be precise when answering "what is happening"
+
+Use these terms exactly when answering questions about timing or status. Mixing
+them up confuses users (especially around the daily 16:00 BST tariff publication
+and the Fox V3 cyclic schedule).
+
+| Term | Definition |
+|---|---|
+| `run_at` | UTC timestamp when the LP solver finished the run (column on `optimizer_log`). |
+| `plan_date` | The local date the plan is anchored to (column on `lp_inputs_snapshot`). For runs after Octopus publishes ~16:00 local, this is usually *tomorrow*. |
+| `horizon` | The 48 h window the LP optimises over (S10.2 / #169) — typically `run_at` rounded down to the half-hour, plus 48 h. |
+| `executed` | Slots where `slot_time_utc < now`. Realised; further LP changes can't affect them. |
+| `ongoing` | The single slot containing the current wall-clock time. |
+| `planned` | Slots in the future that the most recent LP solve has decided actions for. |
+| `dispatch decision` | Per-slot record of `lp_kind` (what LP planned) → `dispatched_kind` (what got into Fox V3) → `committed` flag → textual `reason`. Audit trail for every solve. |
+
+**MCP tools that surface this:**
+- `get_plan_timeline()` — partitions the active plan into executed / ongoing / planned with the dispatch decision attached. Always start here for "what's the status?"
+- `explain_dispatch_decisions(run_id=None)` — full per-slot decision rows for the latest run (or any past run by id). Use this to answer "why did/didn't X happen?"
+- `get_scenario_batch(batch_id=None)` — per-scenario LP solve summary for the 3-pass robustness batch tied to a run. Carries objectives, peak-export slot counts, perturbation deltas applied, wall-clock durations. Use this when a user asks "how different was pessimistic from nominal today?" or "did all three scenarios converge?"
+- `get_fox_schedule_diff()` — live Fox V3 vs. last HEM upload. Use this to detect drift (manual Fox-app edit, failed upload, firmware quirk) before answering "what is the inverter doing right now?"
+
+**Common mistakes to avoid:**
+- *"The plan for today says…"* — ambiguous. Say "the plan run_id=N (run_at=…, plan_date=…) decided X for slot HH:MM."
+- Conflating `plan_date` with `run_at`'s date. After 16:00 local, the active plan's `plan_date` is tomorrow, not today.
+- Reading raw Fox V3 groups and concluding "tomorrow at 18:00 there's a ForceDischarge." Fox V3 is **cyclic** (no date — see below). The dispatch_decisions / plan_timeline tools are the source of truth for date-bound actions.
+
+---
+
+## Scenario-based peak-export robustness
+
+The LP can decide to discharge the battery to grid during an Agile peak when the
+arbitrage spread (Outgoing rate at peak − Incoming rate at the earlier charge
+slot) covers the round-trip efficiency loss (η = 0.92). Because that decision is
+rooted in the *forecast*, an unforecast cold night (Daikin radiator ramp) or
+appliance spike could force buy-back at peak rates and flip the profit into a
+loss.
+
+Rather than disabling arbitrage (overcautious) or trusting the forecast blindly
+(overconfident), HEM runs the LP **three times** at high-stakes triggers:
+
+| Scenario | Outdoor temp | Base load | Purpose |
+|---|---|---|---|
+| Optimistic | forecast + 1.0 °C | × 0.90 | Upper-bound view; informational only. |
+| Nominal | forecast as-is | × 1.00 | The canonical solve — what a single-pass LP would have done. |
+| Pessimistic | forecast − 1.5 °C | × 1.15 | Stressed forecast; gates the commit. |
+
+**Decision rule (V1 — maximin):** A `peak_export` slot is uploaded to Fox V3
+**only if the pessimistic scenario also exports ≥ `LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH`
+(default 0.30 kWh) at that slot.** Otherwise the slot is downgraded to standard
+SelfUse and the inverter discharges only to cover load (no grid feed).
+
+The kill switch is `ENERGY_STRATEGY_MODE=strict_savings`: every `peak_export`
+slot is dropped regardless of scenarios. Use it when a user explicitly says
+"never export to grid" — but warn them of the missed arbitrage £.
+
+**When OpenClaw is asked "why is there no ForceDischarge tomorrow at 18:00?":**
+1. Call `explain_dispatch_decisions()` for the latest run.
+2. Find the slot in question.
+3. Report the four numbers in plain English:
+   ```
+   Tomorrow 18:00 BST: LP wanted peak_export but the pessimistic scenario only
+   projects 0.05 kWh export (well under the 0.30 kWh safety floor) — meaning
+   if outdoor temp drops 1.5 °C below forecast and base load runs 15 % hot,
+   the LP wouldn't choose to export this slot. The dispatch dropped it; the
+   battery will still discharge to cover house load via SelfUse.
+   ```
+4. If the user wants to override, the answer is `set_setting("ENERGY_STRATEGY_MODE", "savings_first")` is already the default; the only knob to relax robustness is `LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH` (lower = less conservative). Don't recommend this casually.
+
+**Triggers that get the 3-pass scenario solve** (default `LP_SCENARIOS_ON_TRIGGER_REASONS=cron,plan_push,octopus_fetch`):
+- Nightly plan push (00:05 UTC)
+- Hourly cron MPC fires (`LP_MPC_HOURS_LIST`)
+- The Octopus fetch trigger (~16:05 local) — the natural pre-peak moment
+
+Other triggers (`soc_drift`, `forecast_revision`, `dynamic_replan`, `manual`) run
+the nominal solve only to keep MPC re-plan latency low. They commit
+`peak_export` slots verbatim with `reason=no_scenarios_run`.
+
+---
+
+## Fox V3 cyclic schedule reasoning
+
+The Fox V3 inverter's "Scheduler V3" stores wall-clock cyclic groups — each
+group has `startHour:startMinute` and `endHour:endMinute` but **no date**.
+A group "18:00–19:00 ForceDischarge" repeats every day at 18:00 local until
+HEM uploads a new schedule.
+
+This has two operational consequences OpenClaw must respect:
+
+1. **Don't read Fox V3 state and conclude "the schedule for tomorrow is X."**
+   The inverter doesn't have a notion of "tomorrow." The active LP plan
+   (queryable via `get_plan_timeline`) is what knows about specific dates.
+   Use `get_fox_schedule_diff()` only to verify "what HEM uploaded matches
+   what the inverter is running" — not to read the plan.
+
+2. **The 24 h dispatch cap (`src/scheduler/lp_dispatch.py:371`) is intentional.**
+   The LP horizon is 48 h but only the first 24 h is sent to Fox V3. Otherwise
+   a D+0 ForceCharge at 13:00 and a D+1 ForceCharge at 13:00 would collapse
+   into one cyclic group (they have the same hour-of-day). The next MPC
+   re-solve handles D+1 dispatch once D+1 becomes "today."
+
+When a user asks "is the schedule overlapping my settings?" — call
+`get_fox_schedule_diff()`. `any_drift=True` means HEM and Fox disagree;
+investigate `diffs.only_live` (groups on Fox that HEM didn't send — most
+likely a manual edit through the Fox app) and `diffs.only_recorded` (HEM
+sent but Fox doesn't show — possibly a failed upload).
+
+---
+
 ## v10: Daikin control mode
 
 Read `get_daikin_status.control_mode` before any Daikin write attempt:

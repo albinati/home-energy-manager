@@ -1,10 +1,11 @@
 """Translate MILP :class:`~src.scheduler.lp_optimizer.LpPlan` into Fox V3 groups and Daikin actions."""
 from __future__ import annotations
 
+import dataclasses
 import logging
 import math
 from datetime import datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .. import db
 from ..config import config
@@ -15,10 +16,12 @@ from .lp_optimizer import LpPlan
 from .optimizer import (
     TZ,
     HalfHourSlot,
-    _bulletproof_allow_peak_export_discharge,
     _merge_fox_groups,
     _optimization_preset_away_like,
 )
+
+if TYPE_CHECKING:
+    from .scenarios import Scenario
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +52,12 @@ def lp_plan_to_slots(plan: LpPlan) -> list[HalfHourSlot]:
     out: list[HalfHourSlot] = []
     n = len(plan.slot_starts_utc)
     peak_thr = plan.peak_threshold_pence
-    allow_exp = _bulletproof_allow_peak_export_discharge()
+    # No live-SoC gate. The LP itself decides exp[i] > 0 only when arbitrage is
+    # profitable under its forecast; dispatch trusts the solver. Robustness
+    # against forecast error is enforced separately by ``filter_robust_peak_export``
+    # (scenario LP, see src/scheduler/scenarios.py). ``ENERGY_STRATEGY_MODE``
+    # ``strict_savings`` is the kill switch and is honoured at filter time.
+    strict_savings = (config.ENERGY_STRATEGY_MODE or "savings_first").strip().lower() == "strict_savings"
 
     max_pwr_w = int(config.FOX_FORCE_CHARGE_MAX_PWR)
     min_pwr_w = 200  # floor: prevents inverter from interpreting "0 W" as unlimited
@@ -80,7 +88,7 @@ def lp_plan_to_slots(plan: LpPlan) -> list[HalfHourSlot]:
             # suffices). LP hard-forbids dis during negatives — encode that on
             # hardware via Fox's native "Backup" mode (see _slot_fox_tuple).
             kind = "negative_hold"
-        elif allow_exp and dis > EPS and exp > EPS:
+        elif (not strict_savings) and dis > EPS and exp > EPS:
             kind = "peak_export"
         elif ed < EPS and es < EPS and price >= peak_thr:
             kind = "peak"
@@ -347,8 +355,131 @@ def write_daikin_from_lp_plan(
     return count
 
 
+def filter_robust_peak_export(
+    plan: LpPlan,
+    scenarios: dict[str, LpPlan] | None,
+) -> tuple[list[HalfHourSlot], list[dict[str, Any]]]:
+    """Apply scenario-LP robustness filter to ``peak_export`` slots.
+
+    Returns ``(slots, decisions)``:
+
+    * ``slots`` — same as :func:`lp_dispatch_slots_for_hardware` but with any
+      ``peak_export`` slot that fails the pessimistic agreement check
+      downgraded to ``standard`` (no ForceDischarge group will be uploaded).
+      Other kinds pass through unchanged.
+    * ``decisions`` — one row per slot, ready to be persisted via
+      :func:`db.upsert_dispatch_decision` (the caller injects ``run_id``).
+      Includes the per-scenario export values for the audit trail.
+
+    Decision rules (in priority order):
+
+    1. ``ENERGY_STRATEGY_MODE=strict_savings`` → drop every ``peak_export``
+       slot. Reason: ``strict_savings``.
+    2. ``scenarios is None`` (trigger reason not in
+       ``LP_SCENARIOS_ON_TRIGGER_REASONS``) → commit every ``peak_export``
+       slot. Reason: ``no_scenarios_run``.
+    3. Pessimistic scenario solve failed → commit (degenerate degrade — better
+       to ship the LP's nominal plan than nothing). Reason: ``pessimistic_failed``.
+    4. ``pessimistic.export_kwh[i] >= LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH``
+       → commit. Reason: ``robust``.
+    5. Otherwise → drop. Reason: ``pessimistic_disagrees``.
+
+    Scenarios dict keys are the ``Scenario`` literal type ("optimistic",
+    "nominal", "pessimistic") but accepted as plain strings to keep this
+    module independent of the scenarios import path.
+    """
+    raw_slots = lp_dispatch_slots_for_hardware(plan)
+    decisions: list[dict[str, Any]] = []
+    out_slots: list[HalfHourSlot] = []
+
+    strict_savings = (
+        (config.ENERGY_STRATEGY_MODE or "savings_first").strip().lower()
+        == "strict_savings"
+    )
+    floor_kwh = float(config.LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH)
+
+    def _unwrap(s):
+        """Accept either an ``LpPlan`` (legacy / test convenience) or a
+        ``ScenarioSolveResult`` (production path) and return the underlying
+        ``LpPlan``. Lets callers keep the simple shape in unit tests while
+        the optimizer pipes through richer metadata."""
+        if s is None:
+            return None
+        return s.plan if hasattr(s, "plan") else s
+
+    opt = _unwrap(scenarios.get("optimistic")) if scenarios else None
+    nom = _unwrap(scenarios.get("nominal")) if scenarios else None
+    pess = _unwrap(scenarios.get("pessimistic")) if scenarios else None
+
+    def _exp(p: LpPlan | None, idx: int) -> float | None:
+        if p is None or not p.ok or idx >= len(p.export_kwh):
+            return None
+        return float(p.export_kwh[idx])
+
+    for i, s in enumerate(raw_slots):
+        slot_iso = s.start_utc.isoformat()
+        opt_exp = _exp(opt, i)
+        nom_exp = _exp(nom, i)
+        pess_exp = _exp(pess, i)
+
+        decision: dict[str, Any] = {
+            "slot_time_utc": slot_iso,
+            "lp_kind": s.kind,
+            "dispatched_kind": s.kind,
+            "committed": True,
+            "reason": "not_peak_export",
+            "scen_optimistic_exp_kwh": opt_exp,
+            "scen_nominal_exp_kwh": nom_exp,
+            "scen_pessimistic_exp_kwh": pess_exp,
+        }
+
+        if s.kind == "peak_export":
+            if strict_savings:
+                # Drop: strict_savings is the kill switch for arbitrage discharge.
+                s = dataclasses.replace(s, kind="standard", lp_grid_import_w=None)
+                decision["dispatched_kind"] = "standard"
+                decision["committed"] = False
+                decision["reason"] = "strict_savings"
+                logger.info(
+                    "filter_robust_peak_export: dropped slot=%s reason=strict_savings",
+                    slot_iso,
+                )
+            elif scenarios is None:
+                decision["reason"] = "no_scenarios_run"
+            elif pess is None or not pess.ok:
+                decision["reason"] = "pessimistic_failed"
+                logger.warning(
+                    "filter_robust_peak_export: committing slot=%s despite pessimistic solve failure (degraded mode)",
+                    slot_iso,
+                )
+            elif pess_exp is not None and pess_exp >= floor_kwh:
+                decision["reason"] = "robust"
+            else:
+                # Drop: pessimistic scenario does not export here at the required floor.
+                s = dataclasses.replace(s, kind="standard", lp_grid_import_w=None)
+                decision["dispatched_kind"] = "standard"
+                decision["committed"] = False
+                decision["reason"] = "pessimistic_disagrees"
+                logger.info(
+                    "filter_robust_peak_export: dropped slot=%s "
+                    "pessimistic_exp=%.2f < floor=%.2f kWh "
+                    "(nominal=%.2f, optimistic=%.2f)",
+                    slot_iso,
+                    pess_exp if pess_exp is not None else 0.0,
+                    floor_kwh,
+                    nom_exp if nom_exp is not None else 0.0,
+                    opt_exp if opt_exp is not None else 0.0,
+                )
+
+        decisions.append(decision)
+        out_slots.append(s)
+
+    return out_slots, decisions
+
+
 def build_fox_groups_from_lp(
     plan: LpPlan,
+    scenarios: dict[str, LpPlan] | None = None,
 ) -> tuple[list[SchedulerGroup], datetime | None]:
     """Translate LP plan into Fox V3 groups.
 
@@ -365,16 +496,27 @@ def build_fox_groups_from_lp(
     inverter (visible as duplicates in the Fox app). The next MPC re-solve
     handles D+1 dispatch once D+1 becomes "today". The LP itself still plans
     over 48 h (S10.2 / #169) — only the dispatch surface is 24 h.
+
+    ``scenarios``: optional dict of scenario name → LpPlan. When supplied,
+    ``filter_robust_peak_export`` runs before the 24h cap so unsafe
+    ``peak_export`` slots get downgraded to ``standard``. Decisions produced
+    by the filter are NOT persisted here — callers that want the audit trail
+    should call ``filter_robust_peak_export`` directly to capture decisions
+    alongside the run_id.
     """
-    slots = lp_dispatch_slots_for_hardware(plan)
+    slots, _decisions = filter_robust_peak_export(plan, scenarios)
     if slots:
         cutoff = slots[0].start_utc + timedelta(hours=24)
         slots = [s for s in slots if s.start_utc < cutoff]
-    peak_export = _bulletproof_allow_peak_export_discharge()
+    # peak_export_discharge=False: kind="peak_export" already maps to
+    # ForceDischarge inside _slot_fox_tuple unconditionally; the flag here only
+    # controls whether kind="peak" (no LP-planned export) is upgraded to
+    # ForceDischarge. We keep that off to honour the LP's discharge plan
+    # exactly — SelfUse covers load during peaks the LP didn't mark for export.
     return _merge_fox_groups(
         slots,
         max_groups=8,
-        peak_export_discharge=peak_export,
+        peak_export_discharge=False,
         truncate_horizon=True,
     )
 

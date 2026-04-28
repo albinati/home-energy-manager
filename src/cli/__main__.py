@@ -26,6 +26,7 @@ Options:
     --api                                  # Route commands through API server
 """
 import json as json_module
+import logging
 import os
 import signal
 import sys
@@ -33,6 +34,19 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+# Configure logging BEFORE importing modules that create loggers, so app-level
+# logger.info() reaches stdout/stderr (and via Docker journald → journalctl).
+# Previously every logger.info from src/scheduler/*, src/api/*, etc. was
+# silently swallowed because no root handler existed; only uvicorn access logs
+# surfaced. ``LOG_LEVEL`` env var defaults to INFO and can be lowered to DEBUG
+# for deep-dive diagnostics.
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    stream=sys.stdout,
+    force=True,
+)
 
 from ..config import config
 from ..daikin.client import DaikinClient, DaikinError

@@ -139,7 +139,22 @@ PLAN_AUTO_APPROVE=true                          # default: simulate → auto-app
 PLAN_APPROVAL_TIMEOUT_SECONDS=300               # grace window advertised to OpenClaw for Telegram/Discord buttons
 DHW_TEMP_NORMAL_C=45.0                          # restore/safe-default tank target (45 °C = sufficient for normal use)
 TARGET_DHW_TEMP_MIN_GUESTS_C=55.0              # guest-mode LP floor (multiple showers at 20:30–22:00)
+
+# --- Scenario LP for peak-export robustness (see docs/DISPATCH_DECISIONS.md) ---
+LP_SCENARIO_OPTIMISTIC_TEMP_DELTA_C=1.0          # +°C applied to outdoor forecast
+LP_SCENARIO_OPTIMISTIC_LOAD_FACTOR=0.90          # multiplier on base-load profile
+LP_SCENARIO_PESSIMISTIC_TEMP_DELTA_C=-1.5        # −°C; pessimistic case for cold-night protection
+LP_SCENARIO_PESSIMISTIC_LOAD_FACTOR=1.15         # 15 % uplift on base load
+LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH=0.30        # commit peak_export only when pessimistic exports ≥ this
+LP_SCENARIOS_ON_TRIGGER_REASONS=cron,plan_push,octopus_fetch  # which triggers run the 3-pass solve
+LOG_LEVEL=INFO                                   # raise to DEBUG for deep-dive diagnostics
 ```
+
+`EXPORT_DISCHARGE_MIN_SOC_PERCENT` was **removed** (was the live-SoC global gate that
+spuriously dropped tomorrow's peak-export when live SoC was below 95 %). The scenario
+LP filter (`src/scheduler/lp_dispatch.py:filter_robust_peak_export`) replaces it.
+`EXPORT_DISCHARGE_FLOOR_SOC_PERCENT` is unrelated and still in use — it's the `fdSoC`
+parameter sent to Fox in the ForceDischarge group.
 
 ### Plan lifecycle (simulate → approve → live)
 
@@ -161,6 +176,43 @@ Flow per optimizer run:
 To force a fresh simulate/apply cycle: `propose_optimization_plan` (MCP) or
 `POST /api/v1/optimization/propose` (web). Both honor `PLAN_AUTO_APPROVE`.
 To preview without any write: `simulate_plan` (MCP) — zero hardware, zero quota.
+
+### Plan lifecycle terminology — be precise across the day boundary
+
+Octopus publishes the next day's Agile rates around **16:00 local**. Confusing
+"today's plan" with "tomorrow's plan" across that boundary is the most common
+source of stale-status questions. Use these terms exactly:
+
+| Term | Definition |
+|---|---|
+| `run_at` | UTC timestamp the LP solver finished (column on `optimizer_log`). |
+| `plan_date` | Local date the plan is anchored to (column on `lp_inputs_snapshot`). After ~16:00 local, this is **tomorrow**, not today. |
+| `horizon` | The 48 h window the LP optimises over (S10.2 / #169). |
+| `executed` / `ongoing` / `planned` | Slots before/at/after now. The `/api/v1/scheduler/timeline` endpoint partitions for you. |
+| `dispatch decision` | Per-slot `lp_kind` → `dispatched_kind` → `committed` row written to `dispatch_decisions` after every LP solve. The audit trail. |
+
+**Discoverability surfaces:**
+- API: `GET /api/v1/scheduler/timeline`, `GET /api/v1/optimization/decisions/{run_id|latest}`, `GET /api/v1/foxess/schedule_diff`.
+- MCP: `get_plan_timeline`, `explain_dispatch_decisions`, `get_fox_schedule_diff`, `simulate_peak_export_robustness`.
+
+### Scenario LP for peak-export robustness
+
+When the LP plans `peak_export` (battery → grid arbitrage), three solves run
+under perturbed forecasts (optimistic / nominal / pessimistic). A
+`peak_export` slot only makes it onto Fox V3 when the **pessimistic** scenario
+also exports ≥ `LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH` (default 0.30 kWh) at
+that slot. Otherwise it's downgraded to standard SelfUse (battery still
+covers load, no grid feed). Decisions are persisted to `dispatch_decisions`
+with the per-scenario kWh values for full auditability.
+
+`ENERGY_STRATEGY_MODE=strict_savings` is the kill switch — drops every
+`peak_export` regardless of scenarios. Default is `savings_first` which
+trusts the LP + scenario filter. The legacy `EXPORT_DISCHARGE_MIN_SOC_PERCENT`
+live-SoC global gate is **gone** (caused the 2026-04-28 incident where
+tomorrow's profitable peak-export disappeared during a re-plan after today's
+discharge had drawn the battery below 95 %).
+
+See `docs/DISPATCH_DECISIONS.md` for the design rationale and decision rule.
 
 ---
 
