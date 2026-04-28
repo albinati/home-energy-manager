@@ -12,7 +12,12 @@ from ..config import config
 from ..daikin import service as daikin_service
 from ..foxess.client import FoxESSClient
 from ..foxess.service import get_cached_realtime
-from ..notifier import notify_risk, push_cheap_window_start, push_peak_window_start
+from ..notifier import (
+    notify_risk,
+    push_cheap_window_start,
+    push_negative_window_start,
+    push_peak_window_start,
+)
 from ..state_machine import heartbeat_repair_fox_scheduler, reconcile_daikin_schedule_for_date
 from .agile import fetch_agile_rates, get_current_and_next_slots
 from .daikin import compute_lwt_adjustment, run_daikin_scheduler_tick
@@ -84,21 +89,26 @@ def _lp_predicted_soc_pct_at(when_utc: datetime) -> float | None:
         return None
 
 
-def _log_plan_delta_after_trigger(prev_run_id: int | None, new_run_id: int | None, trigger_reason: str) -> None:
+def _log_plan_delta_after_trigger(prev_run_id: int | None, new_run_id: int | None, trigger_reason: str) -> dict[str, float] | None:
     """Log how much the freshly-solved LP diverges from the previous one.
 
     Compares the next ``MPC_PLAN_DELTA_LOOKAHEAD_HOURS`` of overlap. Surfaces the
     "is this trigger actually changing anything?" signal so we can detect plan
     thrashing in production without manual log archeology. Best-effort only —
     failures here must never break the optimiser run.
+
+    Returns a dict ``{max_soc_delta_pct, sum_grid_delta_kwh, sum_charge_delta_kwh,
+    overlap_count}`` so callers can decide whether to emit a ``PLAN_REVISION``
+    Telegram ping (gated by ``PLAN_REVISION_MIN_*`` thresholds, V12). Returns
+    ``None`` when there's nothing to compare.
     """
     if not prev_run_id or not new_run_id or trigger_reason == "cron":
-        return
+        return None
     try:
         prev = {s["slot_time_utc"]: s for s in db.get_lp_solution_slots(prev_run_id)}
         new = db.get_lp_solution_slots(new_run_id)
         if not prev or not new:
-            return
+            return None
         cap = float(config.BATTERY_CAPACITY_KWH) or 1.0
         horizon_end = datetime.now(UTC) + timedelta(hours=int(config.MPC_PLAN_DELTA_LOOKAHEAD_HOURS))
         max_soc_delta_pct = 0.0
@@ -137,8 +147,15 @@ def _log_plan_delta_after_trigger(prev_run_id: int | None, new_run_id: int | Non
             sum_grid_delta_kwh,
             sum_charge_delta_kwh,
         )
+        return {
+            "max_soc_delta_pct": max_soc_delta_pct,
+            "sum_grid_delta_kwh": sum_grid_delta_kwh,
+            "sum_charge_delta_kwh": sum_charge_delta_kwh,
+            "overlap_count": float(overlap_count),
+        }
     except Exception as e:
         logger.debug("plan-delta logging failed (non-fatal): %s", e)
+        return None
 
 
 def _get_forecast_temp_c(now_utc: datetime) -> float | None:
@@ -327,6 +344,13 @@ def bulletproof_octopus_fetch_job() -> None:
     from .octopus_fetch import fetch_and_store_rates
 
     fetch_and_store_rates(_try_fox())
+    # V12 — refresh tier-boundary one-shots whenever fresh rates land. The
+    # next-day boundaries can shift by hours between yesterday's plan and
+    # today's published rates, so re-register lets the new windows fire.
+    try:
+        _register_tier_boundary_triggers()
+    except Exception as e:  # pragma: no cover — best-effort, never break fetch
+        logger.debug("tier_boundary re-register after fetch failed: %s", e)
 
 
 def bulletproof_octopus_retry_job() -> None:
@@ -335,15 +359,35 @@ def bulletproof_octopus_retry_job() -> None:
     if not should_run_retry_fetch():
         return
     fetch_and_store_rates(_try_fox())
+    try:
+        _register_tier_boundary_triggers()
+    except Exception as e:  # pragma: no cover
+        logger.debug("tier_boundary re-register after retry failed: %s", e)
 
 
-def bulletproof_daily_brief_job() -> None:
-    from ..analytics.daily_brief import send_daily_brief_webhook
+def bulletproof_morning_brief_job() -> None:
+    """Daily morning digest — today's forecast (V12, was bulletproof_daily_brief_job)."""
+    from ..analytics.daily_brief import send_morning_brief_webhook
 
     try:
-        send_daily_brief_webhook()
+        send_morning_brief_webhook()
     except Exception as e:
-        logger.warning("Daily brief failed: %s", e)
+        logger.warning("Morning brief failed: %s", e)
+
+
+def bulletproof_night_brief_job() -> None:
+    """Daily night digest — today's actuals (V12). Companion to morning brief."""
+    from ..analytics.daily_brief import send_night_brief_webhook
+
+    try:
+        send_night_brief_webhook()
+    except Exception as e:
+        logger.warning("Night brief failed: %s", e)
+
+
+# Backward-compat alias for the original cron name; lets tests / scripts that
+# still reference the old name keep working until they migrate.
+bulletproof_daily_brief_job = bulletproof_morning_brief_job
 
 
 def mpc_should_skip_hour_for_octopus_fetch(local_hour: int) -> bool:
@@ -478,11 +522,152 @@ def bulletproof_mpc_job(
             # Plan-delta observability for event-driven runs.
             try:
                 new_run_id = db.find_run_for_time(_last_mpc_run_at.isoformat())
-                _log_plan_delta_after_trigger(prev_run_id, new_run_id, trigger_reason)
+                delta = _log_plan_delta_after_trigger(prev_run_id, new_run_id, trigger_reason)
+                _maybe_notify_plan_revision(delta, trigger_reason)
             except Exception as e:
                 logger.debug("plan-delta post-run hook failed: %s", e)
     except Exception as e:
         logger.warning("MPC job failed (trigger=%s): %s", trigger_reason, e)
+
+
+def _maybe_notify_plan_revision(delta: dict[str, float] | None, trigger_reason: str) -> None:
+    """Emit a ``PLAN_REVISION`` Telegram ping when the in-day re-solve moved
+    the plan beyond the configured "material change" thresholds.
+
+    Suppresses on ``cron`` (boring routine re-plan) and on ``plan_push`` (the
+    nightly push already sends its own notification path). Other triggers —
+    ``forecast_revision``, ``soc_drift``, ``tier_boundary``, ``dynamic_replan``,
+    ``octopus_fetch`` — fire a ping only when the delta is genuinely
+    actionable (above either ``PLAN_REVISION_MIN_SOC_DELTA_PERCENT`` or
+    ``PLAN_REVISION_MIN_GRID_DELTA_KWH``).
+    """
+    if not delta:
+        return
+    if trigger_reason in ("cron", "plan_push"):
+        return
+    soc_delta = float(delta.get("max_soc_delta_pct", 0.0))
+    grid_delta = float(delta.get("sum_grid_delta_kwh", 0.0))
+    soc_thr = float(config.PLAN_REVISION_MIN_SOC_DELTA_PERCENT)
+    grid_thr = float(config.PLAN_REVISION_MIN_GRID_DELTA_KWH)
+    if soc_delta < soc_thr and grid_delta < grid_thr:
+        return  # change too small to bother the user
+    try:
+        from ..notifier import notify_plan_revision
+
+        body = (
+            f"Plan revised ({trigger_reason}): next-{int(config.MPC_PLAN_DELTA_LOOKAHEAD_HOURS)}h "
+            f"SoC max-Δ={soc_delta:.1f}%, grid Δ={grid_delta:.2f} kWh."
+        )
+        notify_plan_revision(body, trigger_reason=trigger_reason)
+    except Exception as e:
+        logger.debug("notify_plan_revision failed (non-fatal): %s", e)
+
+
+def _register_tier_boundary_triggers() -> dict[str, Any]:
+    """Schedule one-shot MPC re-plans before every tariff tier transition
+    in today + tomorrow's Octopus rates.
+
+    Reuses :func:`src.google_calendar.tiers.classify_day` (the same tier
+    classifier the family-calendar publisher uses) so the boundaries match
+    word-for-word what the user sees on the calendar.
+
+    Each fire calls ``bulletproof_mpc_job(force_write_devices=True,
+    trigger_reason="tier_boundary")`` ``TIER_BOUNDARY_LEAD_MINUTES`` minutes
+    BEFORE the window starts, giving the LP fresh data with enough lead time
+    to upload a new Fox V3 plan before the tariff actually shifts.
+
+    Idempotent: each window gets a unique APScheduler job id derived from its
+    start_utc so re-registration after every Octopus fetch overwrites cleanly.
+
+    Returns a status dict for tests + observability. Never raises — failures
+    here must not break the caller (Octopus fetch + lifespan startup).
+    """
+    out: dict[str, Any] = {"scheduled": [], "skipped": []}
+    if _background_scheduler is None:
+        out["status"] = "inactive"
+        return out
+    if get_scheduler_paused():
+        out["status"] = "paused"
+        return out
+    tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
+    if not tariff:
+        out["status"] = "no_tariff"
+        return out
+
+    try:
+        from apscheduler.triggers.date import DateTrigger
+        from ..google_calendar.tiers import Slot, classify_day
+    except Exception as e:
+        out["status"] = "import_error"
+        out["error"] = str(e)
+        return out
+
+    tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+    today_local = datetime.now(tz).date()
+    lead = timedelta(minutes=int(config.TIER_BOUNDARY_LEAD_MINUTES))
+    now_utc = datetime.now(UTC)
+    min_lead = timedelta(minutes=int(config.DYNAMIC_REPLAN_MIN_LEAD_MINUTES))
+
+    # First sweep: drop any prior tier_boundary jobs so a re-registration
+    # after fresh Octopus fetch doesn't leave stale fires from yesterday.
+    for job in list(_background_scheduler.get_jobs()):
+        if job.id.startswith("tier_boundary_"):
+            try:
+                _background_scheduler.remove_job(job.id)
+            except Exception as e:  # pragma: no cover — best-effort
+                logger.debug("tier_boundary remove_job(%s) failed: %s", job.id, e)
+
+    # Re-register for today + tomorrow.
+    for day_offset in (0, 1):
+        local_date = today_local + timedelta(days=day_offset)
+        try:
+            rows = db.get_agile_rates_slots_for_local_day(tariff, local_date, tz_name=str(tz))
+        except Exception as e:
+            logger.debug("tier_boundary: get_agile_rates_slots_for_local_day(%s) failed: %s", local_date, e)
+            continue
+        if not rows:
+            out["skipped"].append({"date": local_date.isoformat(), "reason": "no_rates"})
+            continue
+        slots = [
+            Slot(
+                start_utc=datetime.fromisoformat(str(r["valid_from"]).replace("Z", "+00:00")),
+                end_utc=datetime.fromisoformat(str(r["valid_to"]).replace("Z", "+00:00")),
+                price_p=float(r["value_inc_vat"]),
+            )
+            for r in rows
+        ]
+        windows = classify_day(slots)
+        for w in windows:
+            fire_at = w.start_utc - lead
+            if fire_at - now_utc < min_lead:
+                # In the past or below the lead-time floor — skip silently.
+                continue
+            job_id = f"tier_boundary_{int(w.start_utc.timestamp())}"
+            try:
+                _background_scheduler.add_job(
+                    bulletproof_mpc_job,
+                    DateTrigger(run_date=fire_at),
+                    id=job_id,
+                    replace_existing=True,
+                    kwargs={"force_write_devices": True, "trigger_reason": "tier_boundary"},
+                )
+                out["scheduled"].append({
+                    "fire_at_utc": fire_at.isoformat(),
+                    "window_start_utc": w.start_utc.isoformat(),
+                    "tier": w.tier.key,
+                    "job_id": job_id,
+                })
+            except Exception as e:  # pragma: no cover — best-effort
+                logger.debug("tier_boundary add_job(%s) failed: %s", job_id, e)
+
+    if out["scheduled"]:
+        logger.info(
+            "Tier-boundary triggers registered: %d job(s); next fire %s",
+            len(out["scheduled"]),
+            out["scheduled"][0]["fire_at_utc"],
+        )
+    out["status"] = "ok"
+    return out
 
 
 def schedule_dynamic_mpc_replan(replan_at_utc: datetime) -> dict[str, Any]:
@@ -1009,7 +1194,12 @@ def bulletproof_heartbeat_tick() -> None:
         slot_kind = None
         tgt = db.get_daily_target(now_local.date())
         if tgt and price is not None:
-            if float(price) > float(tgt.get("peak_threshold") or 99):
+            # Negative is its own tier (V12) — Octopus paying us. Detected
+            # before the cheap/peak threshold check because a -5p price would
+            # otherwise tag as "cheap".
+            if float(price) < 0:
+                slot_kind = "negative"
+            elif float(price) > float(tgt.get("peak_threshold") or 99):
                 slot_kind = "peak"
             elif float(price) < float(tgt.get("cheap_threshold") or 0):
                 slot_kind = "cheap"
@@ -1076,16 +1266,27 @@ def bulletproof_heartbeat_tick() -> None:
 
         if slot_kind != _last_notified_slot_kind:
             _last_notified_slot_kind = slot_kind
-            if slot_kind in ("cheap", "negative"):
+            # V12 — twice-daily digest model. The morning brief lists today's
+            # tariff windows in full, so we no longer ping per crossing for
+            # cheap/peak/standard transitions by default. ``negative`` is
+            # the exception: rare (~1–2/week), immediately actionable, and
+            # always pings regardless of NOTIFY_TARIFF_TRANSITIONS.
+            if slot_kind == "negative":
                 try:
-                    push_cheap_window_start(soc=soc, fox_mode=fox_mode)
+                    push_negative_window_start(soc=soc, fox_mode=fox_mode, price_pence=price)
                 except Exception as exc:
-                    logger.debug("Push cheap window notification error: %s", exc)
-            elif slot_kind == "peak":
-                try:
-                    push_peak_window_start(soc=soc)
-                except Exception as exc:
-                    logger.debug("Push peak window notification error: %s", exc)
+                    logger.debug("Push negative window notification error: %s", exc)
+            elif config.NOTIFY_TARIFF_TRANSITIONS:
+                if slot_kind == "cheap":
+                    try:
+                        push_cheap_window_start(soc=soc, fox_mode=fox_mode)
+                    except Exception as exc:
+                        logger.debug("Push cheap window notification error: %s", exc)
+                elif slot_kind == "peak":
+                    try:
+                        push_peak_window_start(soc=soc)
+                    except Exception as exc:
+                        logger.debug("Push peak window notification error: %s", exc)
 
     if (
         soc is not None
@@ -1182,13 +1383,27 @@ def start_background_scheduler() -> None:
                 id="bulletproof_octopus_retry",
             )
             _background_scheduler.add_job(
-                bulletproof_daily_brief_job,
+                bulletproof_morning_brief_job,
                 CronTrigger(
-                    hour=config.DAILY_BRIEF_HOUR,
-                    minute=config.DAILY_BRIEF_MINUTE,
+                    hour=config.BRIEF_MORNING_HOUR,
+                    minute=config.BRIEF_MORNING_MINUTE,
                     timezone=tz,
                 ),
-                id="bulletproof_daily_brief",
+                id="bulletproof_morning_brief",
+            )
+            _background_scheduler.add_job(
+                bulletproof_night_brief_job,
+                CronTrigger(
+                    hour=config.BRIEF_NIGHT_HOUR,
+                    minute=config.BRIEF_NIGHT_MINUTE,
+                    timezone=tz,
+                ),
+                id="bulletproof_night_brief",
+            )
+            logger.info(
+                "Twice-daily digest cron: morning %02d:%02d, night %02d:%02d (%s)",
+                config.BRIEF_MORNING_HOUR, config.BRIEF_MORNING_MINUTE,
+                config.BRIEF_NIGHT_HOUR, config.BRIEF_NIGHT_MINUTE, tz,
             )
             # MPC intra-day re-runs (LP only): scheduled at each hour in LP_MPC_HOURS
             for mpc_hour in config.LP_MPC_HOURS_LIST:
@@ -1297,11 +1512,9 @@ def start_background_scheduler() -> None:
                     base_h, base_m,
                 )
             logger.info(
-                "Bulletproof cron: Octopus %02d:%02d, brief %02d:%02d (%s); plan push %02d:%02d UTC; history prune 03:15 UTC",
+                "Bulletproof cron: Octopus %02d:%02d (%s); plan push %02d:%02d UTC; history prune 03:15 UTC",
                 config.OCTOPUS_FETCH_HOUR,
                 config.OCTOPUS_FETCH_MINUTE,
-                config.DAILY_BRIEF_HOUR,
-                config.DAILY_BRIEF_MINUTE,
                 tz,
                 config.LP_PLAN_PUSH_HOUR,
                 config.LP_PLAN_PUSH_MINUTE,
@@ -1315,6 +1528,16 @@ def start_background_scheduler() -> None:
                 bulletproof_octopus_fetch_job()
             except Exception as e:
                 logger.warning("Initial Octopus fetch failed: %s", e)
+            # V12 — register tier-boundary one-shots from whatever rates are
+            # already in the DB. ``bulletproof_octopus_fetch_job`` also
+            # re-registers, but that path can fail on a network blip and
+            # we'd lose all tier-boundary fires until the next retry. This
+            # explicit call uses cached rates and is a no-op if fetch already
+            # registered the same windows (replace_existing on the same id).
+            try:
+                _register_tier_boundary_triggers()
+            except Exception as e:
+                logger.warning("Initial tier-boundary registration failed: %s", e)
             # Initial calendar publish so first-deploy / restart-after-cron-time
             # don't leave the family calendar stale until the next 16:30 UTC.
             if config.GOOGLE_CALENDAR_ENABLED:

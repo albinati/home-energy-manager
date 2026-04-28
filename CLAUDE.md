@@ -146,8 +146,21 @@ LP_SCENARIO_OPTIMISTIC_LOAD_FACTOR=0.90          # multiplier on base-load profi
 LP_SCENARIO_PESSIMISTIC_TEMP_DELTA_C=-1.5        # −°C; pessimistic case for cold-night protection
 LP_SCENARIO_PESSIMISTIC_LOAD_FACTOR=1.15         # 15 % uplift on base load
 LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH=0.30        # commit peak_export only when pessimistic exports ≥ this
-LP_SCENARIOS_ON_TRIGGER_REASONS=cron,plan_push,octopus_fetch  # which triggers run the 3-pass solve
+LP_SCENARIOS_ON_TRIGGER_REASONS=cron,plan_push,octopus_fetch,tier_boundary
+                                                 # which triggers run the 3-pass solve
 LOG_LEVEL=INFO                                   # raise to DEBUG for deep-dive diagnostics
+
+# --- V12 — twice-daily digest + tier-boundary MPC ---
+BRIEF_MORNING_HOUR=8                             # local TZ (default 08:00)
+BRIEF_MORNING_MINUTE=0
+BRIEF_NIGHT_HOUR=22                              # local TZ (default 22:00)
+BRIEF_NIGHT_MINUTE=0
+NOTIFY_TARIFF_TRANSITIONS=false                  # mute heartbeat cheap/peak pings
+                                                 # (negative-price 🔵 always pings regardless)
+TIER_BOUNDARY_LEAD_MINUTES=5                     # MPC fires this far before each tier transition
+PLAN_REVISION_MIN_SOC_DELTA_PERCENT=10.0         # PLAN_REVISION ping threshold (any one is enough)
+PLAN_REVISION_MIN_GRID_DELTA_KWH=1.0
+MPC_DRIFT_HYSTERESIS_TICKS=1                     # bumped down 2→1 (V12) — catches heating ramp faster
 ```
 
 `EXPORT_DISCHARGE_MIN_SOC_PERCENT` was **removed** (was the live-SoC global gate that
