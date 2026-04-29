@@ -49,11 +49,6 @@
       desc: 'UTC minute (paired with the hour above).',
       group: 'settingsSchedule',
     },
-    LP_MPC_HOURS: {
-      label: 'Re-solve hours (local)',
-      desc: 'Comma-separated local hours when the LP runs an intra-day re-solve (e.g. 6,12,21).',
-      group: 'settingsSchedule',
-    },
   };
 
   function fmtCurrent(item) {
@@ -126,12 +121,13 @@
   }
 
   /* ---------------------------------------------------------------------
-   * Composite controls — two pain points from user feedback:
-   *   1. Hour + minute as two separate spinbox fields was awful. Renders
-   *      as a single <input type="time"> and applies both keys in one
-   *      batch so simulate → confirm fires only once.
-   *   2. LP_MPC_HOURS was a CSV text input. Renders as a 24-cell
-   *      hour-of-day toggle grid; users click the hours they want.
+   * Composite controls — hour + minute as two separate spinbox fields was
+   * awful. Renders as a single <input type="time"> and applies both keys
+   * in one batch so simulate → confirm fires only once.
+   *
+   * V12 removed the LP_MPC_HOURS 24-cell grid — the MPC is now fully
+   * event-driven (tier_boundary + octopus_fetch + drift + forecast_revision
+   * + plan_push), no fixed-hour cron to configure.
    * ---------------------------------------------------------------------
    */
 
@@ -161,48 +157,6 @@
         simulateUrl: '/api/v1/settings/batch/simulate',
         applyUrl: '/api/v1/settings/batch',
         body: { changes: { LP_PLAN_PUSH_HOUR: h, LP_PLAN_PUSH_MINUTE: m } },
-      });
-      if (result.applied) load();
-    });
-  }
-
-  function renderMpcHours(item, container) {
-    const current = new Set((item.value || []).map(Number));
-    const block = document.createElement('div');
-    block.className = 'setting-block';
-    block.innerHTML = `
-      <div class="setting-head">
-        <h3 class="setting-name">Intra-day re-solve hours (local)</h3>
-        <span class="status-badge" id="mpcHoursBadge">${current.size} slot${current.size === 1 ? '' : 's'}</span>
-      </div>
-      <p class="setting-desc">Hours (local, ${item.description || 'planner tz'}) when the LP re-solves mid-day with fresh SoC + forecast. Click to toggle. Zero selected disables intra-day re-solves.</p>
-      <div class="mpc-grid" role="group" aria-label="Re-solve hours">
-        ${Array.from({length: 24}, (_, h) => `
-          <button type="button" class="mpc-cell ${current.has(h) ? 'is-on' : ''}" data-hour="${h}">
-            ${String(h).padStart(2, '0')}
-          </button>
-        `).join('')}
-      </div>
-      <div class="setting-actions">
-        <button class="btn btn-secondary btn-sm" id="btnApplyMpcHours">Change…</button>
-      </div>`;
-    container.appendChild(block);
-    const pending = new Set(current);
-    const badge = block.querySelector('#mpcHoursBadge');
-    block.querySelectorAll('.mpc-cell').forEach(b => b.addEventListener('click', () => {
-      const h = parseInt(b.dataset.hour, 10);
-      if (pending.has(h)) { pending.delete(h); b.classList.remove('is-on'); }
-      else { pending.add(h); b.classList.add('is-on'); }
-      const n = pending.size;
-      badge.textContent = `${n} slot${n === 1 ? '' : 's'}`;
-    }));
-    block.querySelector('#btnApplyMpcHours').addEventListener('click', async () => {
-      const hours = Array.from(pending).sort((a, b) => a - b);
-      const result = await wrapAction({
-        method: 'PUT',
-        simulateUrl: `/api/v1/settings/${item.key}/simulate`,
-        applyUrl: `/api/v1/settings/${item.key}`,
-        body: { value: hours },
       });
       if (result.applied) load();
     });
@@ -238,9 +192,6 @@
         sched.innerHTML = '';
         if (byKey.LP_PLAN_PUSH_HOUR && byKey.LP_PLAN_PUSH_MINUTE) {
           renderPlanPushTime(byKey.LP_PLAN_PUSH_HOUR, byKey.LP_PLAN_PUSH_MINUTE, sched);
-        }
-        if (byKey.LP_MPC_HOURS) {
-          renderMpcHours(byKey.LP_MPC_HOURS, sched);
         }
       }
     } catch (e) {

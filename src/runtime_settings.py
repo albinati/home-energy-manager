@@ -163,22 +163,6 @@ SCHEMA: dict[str, SettingSpec] = {
         cron_reload=True,
         description="UTC minute for the nightly plan-push cron.",
     ),
-    "LP_MPC_HOURS": SettingSpec(
-        key="LP_MPC_HOURS",
-        type_name="list[int]",
-        env_default=_int_list_env("LP_MPC_HOURS", ""),
-        cron_reload=True,
-        description=(
-            "DEPRECATED clock-hour MPC cron. Default empty (V12) — the system "
-            "is now entirely event-driven: tier_boundary fires before every "
-            "tariff transition, octopus_fetch fires when new rates arrive, "
-            "soc_drift / forecast_revision fire on unforecast events, "
-            "plan_push fires nightly. Set this to e.g. '6,12,21' only as "
-            "belt-and-braces if you want fixed-time fires AS WELL — they "
-            "won't change decisions vs the event-driven set, just produce "
-            "redundant solves."
-        ),
-    ),
     "MPC_FORECAST_REFRESH_INTERVAL_MINUTES": SettingSpec(
         key="MPC_FORECAST_REFRESH_INTERVAL_MINUTES",
         type_name="int",

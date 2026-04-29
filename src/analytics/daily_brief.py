@@ -168,6 +168,21 @@ def _today_tier_window_summary(today: date, tz: ZoneInfo) -> str | None:
     return "\n".join(parts)
 
 
+def _slot_local_date(slot_time_utc: str, tz: ZoneInfo) -> date | None:
+    """Convert a ``slot_time_utc`` string to its **local** date.
+
+    DST audit fix (V12): the previous prefix-match on the ISO string
+    ``startswith(today_iso)`` compared a UTC timestamp against a
+    local-date prefix, which inverts after 23:00 UTC on DST changeover
+    days (the local date has rolled but UTC hasn't, or vice versa).
+    Always go through proper TZ conversion."""
+    try:
+        st = datetime.fromisoformat(slot_time_utc.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+    return st.astimezone(tz).date()
+
+
 def _peak_export_commitments_for_today(today: date, tz: ZoneInfo) -> str | None:
     """Look up the latest LP run anchored to today's plan_date and report
     every committed ``peak_export`` slot the dispatcher kept after the
@@ -179,12 +194,11 @@ def _peak_export_commitments_for_today(today: date, tz: ZoneInfo) -> str | None:
         rows = db.get_dispatch_decisions(rid)
     except Exception:
         return None
-    today_iso = today.isoformat()
     commits = [
         r for r in rows
         if r["lp_kind"] == "peak_export"
         and r["committed"]
-        and str(r["slot_time_utc"]).startswith(today_iso)
+        and _slot_local_date(str(r["slot_time_utc"]), tz) == today
     ]
     if not commits:
         return None
@@ -208,8 +222,11 @@ def _peak_export_outcomes_for_today(today: date, tz: ZoneInfo) -> str | None:
         rows = db.get_dispatch_decisions(rid)
     except Exception:
         return None
-    today_iso = today.isoformat()
-    pe_rows = [r for r in rows if r["lp_kind"] == "peak_export" and str(r["slot_time_utc"]).startswith(today_iso)]
+    pe_rows = [
+        r for r in rows
+        if r["lp_kind"] == "peak_export"
+        and _slot_local_date(str(r["slot_time_utc"]), tz) == today
+    ]
     if not pe_rows:
         return None
     parts: list[str] = []

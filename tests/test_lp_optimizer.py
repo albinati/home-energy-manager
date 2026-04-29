@@ -325,18 +325,6 @@ def test_highs_solver_used_by_default():
     assert solver_name.startswith("HiGHS"), f"Expected HiGHS solver, got {solver_name}"
 
 
-def test_mpc_hours_list_parsed_correctly(monkeypatch):
-    """LP_MPC_HOURS_LIST property should parse the comma-separated string."""
-    monkeypatch.setattr(app_config, "LP_MPC_HOURS", "6,12,18")
-    assert app_config.LP_MPC_HOURS_LIST == [6, 12, 18]
-
-    monkeypatch.setattr(app_config, "LP_MPC_HOURS", "")
-    assert app_config.LP_MPC_HOURS_LIST == []
-
-    monkeypatch.setattr(app_config, "LP_MPC_HOURS", "0,23,12,6")
-    assert app_config.LP_MPC_HOURS_LIST == [0, 6, 12, 23]
-
-
 def test_negative_price_max_charges_battery(monkeypatch):
     """All-negative prices: LP should charge the battery to ~full within one horizon.
 

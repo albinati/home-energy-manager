@@ -16,18 +16,6 @@ def _emit(monkeypatch):
     return captured
 
 
-def test_no_emit_on_cron_trigger(monkeypatch):
-    """Routine cron re-plans don't ping — the morning brief covers them."""
-    from src.scheduler import runner
-
-    captured = _emit(monkeypatch)
-    runner._maybe_notify_plan_revision(
-        {"max_soc_delta_pct": 50.0, "sum_grid_delta_kwh": 5.0, "sum_charge_delta_kwh": 5.0, "overlap_count": 8},
-        trigger_reason="cron",
-    )
-    assert captured == []
-
-
 def test_no_emit_on_plan_push_trigger(monkeypatch):
     """Plan-push has its own notify path; suppress the duplicate."""
     from src.scheduler import runner

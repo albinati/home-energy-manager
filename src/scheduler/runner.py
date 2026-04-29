@@ -102,7 +102,7 @@ def _log_plan_delta_after_trigger(prev_run_id: int | None, new_run_id: int | Non
     Telegram ping (gated by ``PLAN_REVISION_MIN_*`` thresholds, V12). Returns
     ``None`` when there's nothing to compare.
     """
-    if not prev_run_id or not new_run_id or trigger_reason == "cron":
+    if not prev_run_id or not new_run_id:
         return None
     try:
         prev = {s["slot_time_utc"]: s for s in db.get_lp_solution_slots(prev_run_id)}
@@ -390,18 +390,10 @@ def bulletproof_night_brief_job() -> None:
 bulletproof_daily_brief_job = bulletproof_morning_brief_job
 
 
-def mpc_should_skip_hour_for_octopus_fetch(local_hour: int) -> bool:
-    """When True, skip MPC at this local hour — the Octopus fetch cron runs later the same hour.
-
-    Avoids two full PuLP runs within minutes (MPC at :00 vs fetch at :05 with fresh rates). #34
-    """
-    return int(local_hour) == int(config.OCTOPUS_FETCH_HOUR)
-
-
 def bulletproof_mpc_job(
     *,
     force_write_devices: bool = False,
-    trigger_reason: str = "cron",
+    trigger_reason: str = "manual",
 ) -> None:
     """Intra-day MPC re-optimise: refresh forecast + live SoC + live PV, re-upload Fox/Daikin.
 
@@ -411,10 +403,12 @@ def bulletproof_mpc_job(
     Skips if the scheduler is paused.
 
     ``force_write_devices`` (default False): event-driven callers (drift, forecast revision,
-    Octopus fetch) set this True to override ``LP_MPC_WRITE_DEVICES`` and dispatch directly
-    to the hardware — coherent with "Waze recalculating route" semantics.
+    Octopus fetch, tier_boundary) set this True to override ``LP_MPC_WRITE_DEVICES`` and
+    dispatch directly to the hardware — coherent with "Waze recalculating route" semantics.
 
-    ``trigger_reason`` (default "cron"): tags the run for observability.
+    ``trigger_reason`` (default "manual"): tags the run for observability. Known reasons:
+    ``octopus_fetch``, ``tier_boundary``, ``soc_drift``, ``forecast_revision``,
+    ``dynamic_replan``, ``plan_push``, ``manual``. The legacy ``cron`` value is gone (V12).
     """
     global _last_mpc_run_at
 
@@ -434,27 +428,14 @@ def bulletproof_mpc_job(
             int(config.MPC_COOLDOWN_SECONDS),
         )
         return
-    tz = ZoneInfo(config.BULLETPROOF_TIMEZONE if config.USE_BULLETPROOF_ENGINE else config.OPTIMIZATION_TIMEZONE)
-    now_local = datetime.now(tz)
-    # Cron-only skip: when an Octopus fetch is scheduled for this local hour, the fetch will
-    # run the optimiser anyway. Event-driven callers bypass this — they ARE the event.
-    if trigger_reason == "cron" and mpc_should_skip_hour_for_octopus_fetch(now_local.hour):
-        logger.info(
-            "MPC skipped: local hour %02d matches OCTOPUS_FETCH_HOUR — fetch at %02d:%02d will run optimizer",
-            now_local.hour,
-            int(config.OCTOPUS_FETCH_HOUR),
-            int(config.OCTOPUS_FETCH_MINUTE),
-        )
-        return
 
     write_devices = bool(config.LP_MPC_WRITE_DEVICES) or force_write_devices
     # Snapshot the previous LP run id BEFORE the new solve so we can compute the plan delta.
     prev_run_id: int | None = None
-    if trigger_reason != "cron":
-        try:
-            prev_run_id = db.find_run_for_time(datetime.now(UTC).isoformat())
-        except Exception as e:
-            logger.debug("plan-delta: prev_run_id lookup failed: %s", e)
+    try:
+        prev_run_id = db.find_run_for_time(datetime.now(UTC).isoformat())
+    except Exception as e:
+        logger.debug("plan-delta: prev_run_id lookup failed: %s", e)
 
     try:
         from .optimizer import run_optimizer
@@ -543,8 +524,8 @@ def _maybe_notify_plan_revision(delta: dict[str, float] | None, trigger_reason: 
     """
     if not delta:
         return
-    if trigger_reason in ("cron", "plan_push"):
-        return
+    if trigger_reason == "plan_push":
+        return  # nightly push has its own notification path
     soc_delta = float(delta.get("max_soc_delta_pct", 0.0))
     grid_delta = float(delta.get("sum_grid_delta_kwh", 0.0))
     soc_thr = float(config.PLAN_REVISION_MIN_SOC_DELTA_PERCENT)
@@ -606,7 +587,11 @@ def _register_tier_boundary_triggers() -> dict[str, Any]:
     today_local = datetime.now(tz).date()
     lead = timedelta(minutes=int(config.TIER_BOUNDARY_LEAD_MINUTES))
     now_utc = datetime.now(UTC)
-    min_lead = timedelta(minutes=int(config.DYNAMIC_REPLAN_MIN_LEAD_MINUTES))
+    # V12 audit: was reusing DYNAMIC_REPLAN_MIN_LEAD_MINUTES=120 which silently
+    # dropped any tier transition within 2 h of "now" — most of the day's
+    # transitions on a typical Octopus Agile profile. Tier-boundary fires
+    # only need enough lead to actually solve + upload (≤ 1 min covers it).
+    min_lead = timedelta(minutes=int(config.TIER_BOUNDARY_MIN_LEAD_MINUTES))
 
     # First sweep: drop any prior tier_boundary jobs so a re-registration
     # after fresh Octopus fetch doesn't leave stale fires from yesterday.
@@ -706,25 +691,10 @@ def schedule_dynamic_mpc_replan(replan_at_utc: datetime) -> dict[str, Any]:
         out["status"] = "skipped_lead_too_short"
         return out
 
-    # Skip if a recurring MPC cron fires between now and replan_at — that cron
-    # will already produce a fresh plan inside the window we care about.
-    try:
-        tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
-        for mpc_hour in config.LP_MPC_HOURS_LIST:
-            cur = now_utc.astimezone(tz).replace(minute=0, second=0, microsecond=0)
-            for _ in range(48):  # look ahead up to 48 hours
-                cur = cur + timedelta(hours=1)
-                if cur.hour != int(mpc_hour):
-                    continue
-                cur_utc = cur.astimezone(UTC)
-                if now_utc < cur_utc < replan_at_utc:
-                    out["status"] = "skipped_cron_covers"
-                    out["covered_by"] = f"bulletproof_mpc_{int(mpc_hour):02d}"
-                    return out
-                if cur_utc >= replan_at_utc:
-                    break
-    except Exception as e:
-        logger.debug("dynamic_mpc_replan cron-overlap check failed (non-fatal): %s", e)
+    # V12: the legacy cron-overlap dedup is gone with the fixed-hour cron.
+    # Tier-boundary fires use unique per-window job ids so they don't
+    # collide with this dynamic replan; if both happen to land within
+    # MPC_COOLDOWN_SECONDS the cooldown gate handles it.
 
     try:
         from apscheduler.triggers.date import DateTrigger
@@ -1405,29 +1375,16 @@ def start_background_scheduler() -> None:
                 config.BRIEF_MORNING_HOUR, config.BRIEF_MORNING_MINUTE,
                 config.BRIEF_NIGHT_HOUR, config.BRIEF_NIGHT_MINUTE, tz,
             )
-            # MPC intra-day re-runs (LP only): scheduled at each hour in LP_MPC_HOURS
-            for mpc_hour in config.LP_MPC_HOURS_LIST:
-                _background_scheduler.add_job(
-                    bulletproof_mpc_job,
-                    CronTrigger(hour=mpc_hour, minute=0, timezone=tz),
-                    id=f"bulletproof_mpc_{mpc_hour:02d}",
-                )
-            if config.LP_MPC_HOURS_LIST:
-                logger.info(
-                    "MPC re-optimise cron scheduled at hours %s (%s) — note: "
-                    "tier_boundary + octopus_fetch + soc_drift + forecast_revision "
-                    "already cover every signal change; fixed-hour cron is "
-                    "redundant unless you want belt-and-braces.",
-                    config.LP_MPC_HOURS_LIST,
-                    tz,
-                )
-            else:
-                logger.info(
-                    "MPC fixed-hour cron disabled (V12 default) — relying on "
-                    "event-driven triggers: tier_boundary (before every tariff "
-                    "transition), octopus_fetch (when new rates land), "
-                    "soc_drift, forecast_revision, plan_push (nightly)."
-                )
+            # V12: MPC is fully event-driven. The fixed-hour cron is GONE.
+            # Triggers: octopus_fetch (when new rates land), tier_boundary
+            # (before every tariff transition), soc_drift / forecast_revision
+            # (unforecast events), dynamic_replan (post-truncation tail),
+            # plan_push (nightly). Manual re-runs via MCP propose_optimization_plan.
+            logger.info(
+                "MPC scheduling: fully event-driven (V12) — "
+                "octopus_fetch + tier_boundary + soc_drift + forecast_revision + "
+                "dynamic_replan + plan_push. No fixed-hour cron."
+            )
             # Forecast revision trigger (Waze MPC story #144): hourly Open-Meteo refresh
             # + delta detector. Persists every fetch (audit trail + LP source); fires MPC
             # only when next-6h delta exceeds threshold. Skipped if kill switch off.
@@ -1577,10 +1534,17 @@ def reregister_cron_jobs(reason: str = "runtime_settings_change") -> dict[str, A
     """Tear down and re-create the cadence-tunable cron jobs (#52).
 
     Invoked by the settings PUT handler after ``LP_PLAN_PUSH_HOUR``,
-    ``LP_PLAN_PUSH_MINUTE``, or ``LP_MPC_HOURS`` change. Jobs handled:
+    ``LP_PLAN_PUSH_MINUTE``, ``MPC_FORECAST_REFRESH_INTERVAL_MINUTES``, or
+    ``PV_TELEMETRY_INTERVAL_MINUTES`` change. Jobs handled:
 
     - ``bulletproof_plan_push``: single UTC-anchored push.
-    - ``bulletproof_mpc_*``: one per hour in ``LP_MPC_HOURS_LIST``.
+    - ``bulletproof_forecast_refresh``: hot-reloadable interval.
+    - ``bulletproof_pv_telemetry``: hot-reloadable interval.
+
+    V12 removed the fixed-hour MPC cron — the MPC is fully event-driven
+    (octopus_fetch, tier_boundary, soc_drift, forecast_revision,
+    dynamic_replan, plan_push). Stale ``bulletproof_mpc_*`` jobs from a
+    prior process generation are still removed below for a clean handover.
 
     The heartbeat thread and other jobs are untouched. When the background
     scheduler is not yet started (e.g. tests, non-bulletproof mode), this is
@@ -1595,14 +1559,12 @@ def reregister_cron_jobs(reason: str = "runtime_settings_change") -> dict[str, A
         logger.warning("reregister_cron_jobs: apscheduler import failed: %s", e)
         return {"status": "error", "reason": reason, "error": str(e)}
 
-    tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
-
     removed: list[str] = []
     for job in list(_background_scheduler.get_jobs()):
         jid = job.id
         if (
             jid == "bulletproof_plan_push"
-            or jid.startswith("bulletproof_mpc_")
+            or jid.startswith("bulletproof_mpc_")  # legacy V11 fixed-hour cron, swept away
             or jid == "bulletproof_forecast_refresh"
             or jid == "bulletproof_pv_telemetry"
         ):
@@ -1613,14 +1575,6 @@ def reregister_cron_jobs(reason: str = "runtime_settings_change") -> dict[str, A
                 logger.warning("remove_job(%s) failed: %s", jid, e)
 
     added: list[str] = []
-    for mpc_hour in config.LP_MPC_HOURS_LIST:
-        jid = f"bulletproof_mpc_{mpc_hour:02d}"
-        _background_scheduler.add_job(
-            bulletproof_mpc_job,
-            CronTrigger(hour=mpc_hour, minute=0, timezone=tz),
-            id=jid,
-        )
-        added.append(jid)
 
     push_jid = "bulletproof_plan_push"
     _background_scheduler.add_job(
@@ -1654,13 +1608,12 @@ def reregister_cron_jobs(reason: str = "runtime_settings_change") -> dict[str, A
 
     logger.info(
         "Cron jobs re-registered (reason=%s): removed=%s added=%s "
-        "plan_push=%02d:%02d UTC mpc_hours=%s forecast_refresh=%dmin pv_telemetry=%dmin",
+        "plan_push=%02d:%02d UTC forecast_refresh=%dmin pv_telemetry=%dmin",
         reason,
         removed,
         added,
         config.LP_PLAN_PUSH_HOUR,
         config.LP_PLAN_PUSH_MINUTE,
-        config.LP_MPC_HOURS_LIST,
         int(config.MPC_FORECAST_REFRESH_INTERVAL_MINUTES),
         int(config.PV_TELEMETRY_INTERVAL_MINUTES),
     )
@@ -1670,7 +1623,6 @@ def reregister_cron_jobs(reason: str = "runtime_settings_change") -> dict[str, A
         "removed": removed,
         "added": added,
         "plan_push_utc": f"{config.LP_PLAN_PUSH_HOUR:02d}:{config.LP_PLAN_PUSH_MINUTE:02d}",
-        "mpc_hours": config.LP_MPC_HOURS_LIST,
         "forecast_refresh_minutes": int(config.MPC_FORECAST_REFRESH_INTERVAL_MINUTES),
         "pv_telemetry_minutes": int(config.PV_TELEMETRY_INTERVAL_MINUTES),
     }

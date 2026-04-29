@@ -269,9 +269,21 @@ class Config:
     ).lower() in ("1", "true", "yes")
 
     # Tier-boundary MPC trigger — fire this many minutes BEFORE a window's
-    # local start time. Reuses dynamic_replan one-shot scheduling.
+    # local start time. Reuses dynamic_replan one-shot scheduling. The 5-min
+    # default covers the worst-case LP-solve + Fox-V3 upload + retry budget
+    # AND aligns with MPC_COOLDOWN_SECONDS=300 so back-to-back triggers
+    # don't suppress each other.
     TIER_BOUNDARY_LEAD_MINUTES: int = int(
         os.getenv("TIER_BOUNDARY_LEAD_MINUTES", "5")
+    )
+    # Minimum lead time from "now" before we'll schedule a tier-boundary fire.
+    # Keeps us from scheduling a job whose fire-time is already in the past
+    # (or so close that solve+upload can't complete in time). DIFFERENT from
+    # ``DYNAMIC_REPLAN_MIN_LEAD_MINUTES=120`` which is the much larger floor
+    # for the LP-truncation-tail recovery path. Set to 1 min by default —
+    # 30 s solve + 30 s Fox cloud worst case fits comfortably.
+    TIER_BOUNDARY_MIN_LEAD_MINUTES: int = int(
+        os.getenv("TIER_BOUNDARY_MIN_LEAD_MINUTES", "1")
     )
 
     # PLAN_REVISION emit thresholds — the in-day MPC re-solve must move the
@@ -388,9 +400,11 @@ class Config:
     # ``tier_boundary`` (V12) fires N minutes before any tariff tier change
     # computed by tiers.classify_day — these are high-stakes pre-transition
     # decisions where the scenario robustness check earns its keep.
+    # The legacy ``cron`` trigger reason was removed in V12 (fixed-hour
+    # cron is gone); the system is fully event-driven.
     LP_SCENARIOS_ON_TRIGGER_REASONS: str = os.getenv(
         "LP_SCENARIOS_ON_TRIGGER_REASONS",
-        "cron,plan_push,octopus_fetch,tier_boundary",
+        "plan_push,octopus_fetch,tier_boundary",
     )
     TARGET_ROOM_TEMP_MIN_C: float = float(os.getenv("TARGET_ROOM_TEMP_MIN_C", "18.0"))
     TARGET_ROOM_TEMP_MAX_C: float = float(os.getenv("TARGET_ROOM_TEMP_MAX_C", "23.0"))
@@ -527,9 +541,11 @@ class Config:
     # the end of its 24h rolling horizon. Without this, individual LP runs may plan to drain
     # the battery near the boundary, executing those decisions before the next MPC corrects.
 
-    # Model Predictive Control: re-run the LP intra-day with refreshed SoC / tank / forecasts.
-    # LP_MPC_HOURS is runtime-tunable via /api/v1/settings (#52); cron jobs are
-    # re-registered without a process restart when it changes. See @property below.
+    # Model Predictive Control re-runs the LP intra-day. As of V12 the fixed-
+    # hour cron is GONE — the MPC is fully event-driven: tier_boundary (before
+    # every tariff transition), octopus_fetch (when new rates land), soc_drift,
+    # forecast_revision, dynamic_replan, plan_push (nightly). Manual re-runs
+    # via the MCP propose_optimization_plan tool always work.
 
     # Whether intra-day MPC re-runs (and the evening fetch) push the updated plan to Fox/Daikin.
     # Default false: compute + log only; the nightly push job dispatches at LP_PLAN_PUSH_HOUR:MINUTE.
@@ -731,30 +747,6 @@ class Config:
     @LP_PLAN_PUSH_MINUTE.setter
     def LP_PLAN_PUSH_MINUTE(self, value: int) -> None:
         self._rt_set("LP_PLAN_PUSH_MINUTE", int(value))
-
-    @property
-    def LP_MPC_HOURS(self) -> str:
-        """Comma-separated string form — legacy callers (incl. pytest
-        ``monkeypatch.setattr(config, 'LP_MPC_HOURS', '6,12,18')``) expect
-        this setter shape. The canonical value is ``LP_MPC_HOURS_LIST``."""
-        val = self._rt_get("LP_MPC_HOURS")
-        if isinstance(val, str):
-            return val
-        if isinstance(val, (list, tuple)):
-            return ",".join(str(int(h)) for h in val)
-        return str(val or "")
-
-    @LP_MPC_HOURS.setter
-    def LP_MPC_HOURS(self, value: str) -> None:
-        self._rt_set("LP_MPC_HOURS", str(value))
-
-    @property
-    def LP_MPC_HOURS_LIST(self) -> list[int]:
-        """Parsed MPC re-solve hours (local). Runtime-tunable via settings PUT."""
-        raw = self.LP_MPC_HOURS
-        if not raw:
-            return []
-        return sorted({int(h.strip()) for h in raw.split(",") if h.strip()})
 
     # Directory for config snapshots (JSON). Snapshots are saved before any mode transition.
     CONFIG_SNAPSHOT_DIR: str = (os.getenv("CONFIG_SNAPSHOT_DIR") or "data/config_snapshots").strip()

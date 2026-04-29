@@ -138,18 +138,17 @@ def test_register_skips_past_windows(monkeypatch, stub_scheduler):
     assert len(out["scheduled"]) == 0
 
 
-def test_lp_mpc_hours_default_is_empty(monkeypatch):
-    """V12 architectural shift: the fixed-hour MPC cron is empty by default;
-    the event-driven model (tier_boundary + octopus_fetch + drift +
-    forecast_revision + plan_push) covers every signal change."""
+def test_lp_mpc_hours_setting_removed():
+    """V12 architectural shift: the fixed-hour MPC cron is GONE entirely.
+    LP_MPC_HOURS is no longer in the runtime-settings SCHEMA, and the
+    config Config dataclass no longer exposes LP_MPC_HOURS / LP_MPC_HOURS_LIST.
+    """
     from src import runtime_settings
+    from src.config import config
 
-    # Re-evaluate the env_default to make sure we read the current code default,
-    # not whatever runtime_settings cache may hold.
-    spec = runtime_settings.SCHEMA["LP_MPC_HOURS"]
-    assert spec.env_default() == [], (
-        f"V12 expects empty LP_MPC_HOURS default; got {spec.env_default()!r}"
-    )
+    assert "LP_MPC_HOURS" not in runtime_settings.SCHEMA
+    assert not hasattr(config, "LP_MPC_HOURS")
+    assert not hasattr(config, "LP_MPC_HOURS_LIST")
 
 
 def test_register_clears_stale_jobs_on_rerun(monkeypatch, stub_scheduler):
