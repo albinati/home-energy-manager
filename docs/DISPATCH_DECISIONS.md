@@ -186,7 +186,9 @@ Configured by `LP_SCENARIOS_ON_TRIGGER_REASONS` (default
 `cron,plan_push,octopus_fetch,tier_boundary`):
 
 * `plan_push` — nightly at 00:05 UTC. The big one (tomorrow's plan committed).
-* `cron` — hourly MPC fires from `LP_MPC_HOURS_LIST`.
+* `cron` — fixed-hour MPC fires from `LP_MPC_HOURS_LIST`. **Empty by default**
+  in V12 — the system is now event-driven (see the canonical-triggers note
+  below). Set `LP_MPC_HOURS=6,12,21` only as belt-and-braces.
 * `octopus_fetch` — fires ~16:05 local right after Octopus publishes new
   rates. This is the natural pre-peak moment, ~55 min before the 17:00 BST
   peak; we deliberately did NOT add a separate 16:XX cron because the

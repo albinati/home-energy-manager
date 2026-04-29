@@ -166,14 +166,17 @@ SCHEMA: dict[str, SettingSpec] = {
     "LP_MPC_HOURS": SettingSpec(
         key="LP_MPC_HOURS",
         type_name="list[int]",
-        env_default=_int_list_env("LP_MPC_HOURS", "6,12,21"),
+        env_default=_int_list_env("LP_MPC_HOURS", ""),
         cron_reload=True,
         description=(
-            "Local hours at which the MPC re-solves the LP (e.g. [6,12,21]). "
-            "Pre-peak coverage is delivered by the existing octopus_fetch trigger "
-            "at OCTOPUS_FETCH_HOUR:MINUTE (default 16:05 local) which now opts "
-            "into scenario LP via LP_SCENARIOS_ON_TRIGGER_REASONS — that run "
-            "fires post-rate-arrival, ~55 min before the typical 17:00 BST peak."
+            "DEPRECATED clock-hour MPC cron. Default empty (V12) — the system "
+            "is now entirely event-driven: tier_boundary fires before every "
+            "tariff transition, octopus_fetch fires when new rates arrive, "
+            "soc_drift / forecast_revision fire on unforecast events, "
+            "plan_push fires nightly. Set this to e.g. '6,12,21' only as "
+            "belt-and-braces if you want fixed-time fires AS WELL — they "
+            "won't change decisions vs the event-driven set, just produce "
+            "redundant solves."
         ),
     ),
     "MPC_FORECAST_REFRESH_INTERVAL_MINUTES": SettingSpec(

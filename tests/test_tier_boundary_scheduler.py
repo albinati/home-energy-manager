@@ -138,6 +138,20 @@ def test_register_skips_past_windows(monkeypatch, stub_scheduler):
     assert len(out["scheduled"]) == 0
 
 
+def test_lp_mpc_hours_default_is_empty(monkeypatch):
+    """V12 architectural shift: the fixed-hour MPC cron is empty by default;
+    the event-driven model (tier_boundary + octopus_fetch + drift +
+    forecast_revision + plan_push) covers every signal change."""
+    from src import runtime_settings
+
+    # Re-evaluate the env_default to make sure we read the current code default,
+    # not whatever runtime_settings cache may hold.
+    spec = runtime_settings.SCHEMA["LP_MPC_HOURS"]
+    assert spec.env_default() == [], (
+        f"V12 expects empty LP_MPC_HOURS default; got {spec.env_default()!r}"
+    )
+
+
 def test_register_clears_stale_jobs_on_rerun(monkeypatch, stub_scheduler):
     """Re-running the registration must remove any previous tier_boundary jobs
     so a new tariff cycle doesn't leak yesterday's fires."""

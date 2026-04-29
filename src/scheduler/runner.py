@@ -1414,9 +1414,19 @@ def start_background_scheduler() -> None:
                 )
             if config.LP_MPC_HOURS_LIST:
                 logger.info(
-                    "MPC re-optimise cron scheduled at hours %s (%s)",
+                    "MPC re-optimise cron scheduled at hours %s (%s) — note: "
+                    "tier_boundary + octopus_fetch + soc_drift + forecast_revision "
+                    "already cover every signal change; fixed-hour cron is "
+                    "redundant unless you want belt-and-braces.",
                     config.LP_MPC_HOURS_LIST,
                     tz,
+                )
+            else:
+                logger.info(
+                    "MPC fixed-hour cron disabled (V12 default) — relying on "
+                    "event-driven triggers: tier_boundary (before every tariff "
+                    "transition), octopus_fetch (when new rates land), "
+                    "soc_drift, forecast_revision, plan_push (nightly)."
                 )
             # Forecast revision trigger (Waze MPC story #144): hourly Open-Meteo refresh
             # + delta detector. Persists every fetch (audit trail + LP source); fires MPC

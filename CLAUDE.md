@@ -161,6 +161,10 @@ TIER_BOUNDARY_LEAD_MINUTES=5                     # MPC fires this far before eac
 PLAN_REVISION_MIN_SOC_DELTA_PERCENT=10.0         # PLAN_REVISION ping threshold (any one is enough)
 PLAN_REVISION_MIN_GRID_DELTA_KWH=1.0
 MPC_DRIFT_HYSTERESIS_TICKS=1                     # bumped down 2→1 (V12) — catches heating ramp faster
+LP_MPC_HOURS=                                    # EMPTY by default (V12) — event-driven model:
+                                                 # tier_boundary + octopus_fetch + drift + forecast_revision
+                                                 # cover every signal change. Set "6,12,21" if you really
+                                                 # want belt-and-braces fixed-time fires too.
 ```
 
 `EXPORT_DISCHARGE_MIN_SOC_PERCENT` was **removed** (was the live-SoC global gate that

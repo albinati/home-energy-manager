@@ -441,13 +441,28 @@ Telegram pings follow a strict policy. **Anything outside this list is mute by d
 
 ---
 
-## Tier-boundary MPC triggers (V12)
+## Tier-boundary MPC triggers (V12) + the event-driven model
 
-The MPC re-plans automatically `TIER_BOUNDARY_LEAD_MINUTES` (default 5) before **every** tariff tier transition, not just at fixed clock hours. Reuses the same `classify_day` boundaries the family calendar shows, so what the user sees on the calendar is exactly when the LP re-thinks.
+**The architectural shift:** the MPC is now entirely event-driven by default. There are exactly two canonical triggers that re-plan the day:
 
-**Why it exists:** the previous fixed-hour MPC cron (`LP_MPC_HOURS_LIST`) left a 9 h gap (last cron at 20:00 local → next at 05:00) that allowed a real loss on 2026-04-28 23:00: heating ramped, battery dropped fast in a cheap window, no event triggered a re-plan, and we entered the next expensive window flat. Tier-boundary triggers close that gap.
+1. **Tariff tier transition** (`tier_boundary`) — the LP re-runs `TIER_BOUNDARY_LEAD_MINUTES` (default 5) before every transition computed by `tiers.classify_day`. The boundaries match what the family calendar shows. Captures the moment the optimization landscape actually changes (cheap → moderate, moderate → expensive, etc., in either direction).
+2. **New tariffs published** (`octopus_fetch`) — fires ~16:05 local when Octopus releases tomorrow's prices. Re-plans with the fresh data and re-registers tier-boundary triggers for tomorrow.
 
-**When it fires:**
+Plus three reactive triggers for unforecast events:
+
+3. **`soc_drift`** — heartbeat detects live SoC diverged from LP-predicted by ≥ `MPC_DRIFT_SOC_THRESHOLD_PERCENT` (default 15 %).
+4. **`forecast_revision`** — Open-Meteo refresh detects ΔPV ≥ `MPC_FORECAST_DRIFT_SOLAR_KWH_THRESHOLD` or ΔT ≥ `MPC_FORECAST_DRIFT_TEMP_C_THRESHOLD` over the next 6 h.
+5. **`dynamic_replan`** — one-shot fired by the dispatcher when the LP plan exceeded the Fox V3 8-group cap and the truncated tail needs a fresh solve.
+
+And the nightly canonical commitment:
+
+6. **`plan_push`** at 00:05 UTC — pushes the next day's full plan to Fox + Daikin.
+
+**The fixed-hour cron is intentionally empty by default** (`LP_MPC_HOURS=`). The clock hours `5,9,12,15,20` etc. were arbitrary — they didn't correspond to anything in the optimization problem. The six event-driven triggers above cover every moment when re-thinking the plan is actually warranted. Set `LP_MPC_HOURS=6,12,21` only as belt-and-braces — those fires won't change decisions, just produce redundant solves.
+
+**Why this matters operationally:** the previous fixed-hour cron left a 9 h overnight gap (20:00 → 05:00 local) that allowed a real loss on 2026-04-28 23:00: heating ramped, battery dropped fast in a cheap window, no event triggered a re-plan, the household entered the next expensive window flat. Tier-boundary triggers close that gap by re-planning when the price actually changes, not on an arbitrary clock.
+
+**When the tier-boundary registration runs:**
 - After every successful Octopus fetch (registers tomorrow's transitions when fresh rates land).
 - At service startup (uses cached rates if fetch fails).
 
