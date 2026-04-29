@@ -133,9 +133,36 @@ def test_prune_history_tables_returns_per_table_counts():
         # pruned, so they're swept on the same horizon.
         "dispatch_decisions",
         "scenario_solve_log",
+        # Per-day-keyed warning acks (issue #200) — without TTL the table
+        # grows linearly across days of stuck warnings.
+        "acknowledged_warnings",
     }
     assert results["daikin_telemetry"] >= 1
     assert results["config_audit"] >= 1
+
+
+def test_prune_history_tables_sweeps_acknowledged_warnings():
+    """Issue #200 — per-day-keyed acks accumulate; the prune sweep must
+    drop rows older than ACKNOWLEDGED_WARNINGS_RETENTION_DAYS (default 30 d)."""
+    conn = db.get_connection()
+    try:
+        old_ts = (datetime.now(UTC) - timedelta(days=45)).isoformat()
+        recent_ts = (datetime.now(UTC) - timedelta(days=5)).isoformat()
+        conn.execute(
+            "INSERT INTO acknowledged_warnings (warning_key, acknowledged_at) VALUES (?, ?)",
+            ("fox_scheduler_disabled_2026-03-15", old_ts),
+        )
+        conn.execute(
+            "INSERT INTO acknowledged_warnings (warning_key, acknowledged_at) VALUES (?, ?)",
+            ("fox_scheduler_disabled_2026-04-24", recent_ts),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    results = db.prune_history_tables()
+    assert results["acknowledged_warnings"] == 1
+    assert _count("acknowledged_warnings") == 1
 
 
 def test_prune_history_tables_tolerates_one_bad_policy(monkeypatch):

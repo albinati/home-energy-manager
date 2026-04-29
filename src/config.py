@@ -850,6 +850,11 @@ class Config:
     )
     LP_SNAPSHOT_RETENTION_DAYS: int = int(os.getenv("LP_SNAPSHOT_RETENTION_DAYS", "90"))
     CONFIG_AUDIT_RETENTION_DAYS: int = int(os.getenv("CONFIG_AUDIT_RETENTION_DAYS", "365"))
+    # Per-day-keyed warning ack rows accumulate forever otherwise (issue #200);
+    # the keys are useless once the date passes, so 30 d is plenty.
+    ACKNOWLEDGED_WARNINGS_RETENTION_DAYS: int = int(
+        os.getenv("ACKNOWLEDGED_WARNINGS_RETENTION_DAYS", "30")
+    )
 
     def foxess_client_kwargs(self) -> dict:
         """Return the right kwargs for FoxESSClient based on what's configured."""

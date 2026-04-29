@@ -3470,6 +3470,9 @@ def prune_history_tables() -> dict[str, int]:
         # to point at anyway — the snapshot is the source of truth).
         ("dispatch_decisions", "created_at", _config.LP_SNAPSHOT_RETENTION_DAYS, False),
         ("scenario_solve_log", "solved_at", _config.LP_SNAPSHOT_RETENTION_DAYS, False),
+        # Per-day-keyed warning acks (e.g. fox_scheduler_disabled_<date>) are
+        # useless once the date rolls over; without this they grow unbounded.
+        ("acknowledged_warnings", "acknowledged_at", _config.ACKNOWLEDGED_WARNINGS_RETENTION_DAYS, False),
     ]
     results: dict[str, int] = {}
     for table, col, days, epoch in policies:
@@ -3638,7 +3641,7 @@ def update_execution_log_metered(
     slot_start_utc: str,
     consumption_kwh: float,
 ) -> bool:
-    """Rewrite an ``execution_log`` row with metered (Octopus) consumption.
+    """Rewrite (or synthesise) an ``execution_log`` row with metered consumption.
 
     The heartbeat writes rows with ``source="estimated"`` based on a single
     ``Fox.load_power`` sample × 0.5 h — fast enough for the live cockpit but
@@ -3653,11 +3656,18 @@ def update_execution_log_metered(
     microsecond precision wherever the heartbeat happened to fire within the
     slot, so we match on the **half-hour bucket** rather than exact equality.
 
-    Returns True on a successful update (a heartbeat row existed in that
-    half-hour window and was rewritten), False if no matching row was found
-    (the heartbeat may have missed that slot, or the slot is in the past
-    before the service started). Idempotent — re-running with the same kWh
-    produces no further change.
+    **Missing-heartbeat fallback (issue #199):** if no heartbeat row exists
+    in the bucket (service was down, restart spanned the slot, etc.), this
+    inserts a synthetic row tagged ``source="metered_synthetic"`` provided
+    we can resolve an ``agile_rates`` row covering the slot. SVT and fixed
+    shadow prices come from the same helpers the heartbeat uses. Without
+    the synthetic insert the night-brief PnL silently under-reports cost
+    by exactly the missing slots' contribution.
+
+    Returns True on either an UPDATE of an existing heartbeat row or an
+    INSERT of a synthetic one. Returns False only when the slot has neither
+    a heartbeat row nor a published ``agile_rates`` price (truly no data).
+    Idempotent on re-run.
     """
     # Normalise the input to a half-hour boundary, then build a [start, end)
     # window the heartbeat row's microsecond-precision timestamp falls within.
@@ -3667,13 +3677,14 @@ def update_execution_log_metered(
         return False
     slot_start_iso = slot_dt.replace(microsecond=0).isoformat()
     slot_end_iso = (slot_dt + timedelta(minutes=30)).replace(microsecond=0).isoformat()
+    kwh = float(consumption_kwh)
 
     with _lock:
         conn = get_connection()
         try:
             cur = conn.execute(
                 """SELECT id, agile_price_pence, svt_shadow_price_pence,
-                          fixed_shadow_price_pence
+                          fixed_shadow_price_pence, source
                    FROM execution_log
                    WHERE timestamp >= ? AND timestamp < ?
                    ORDER BY timestamp ASC
@@ -3681,30 +3692,87 @@ def update_execution_log_metered(
                 (slot_start_iso, slot_end_iso),
             )
             row = cur.fetchone()
-            if not row:
+            if row:
+                agile = float(row["agile_price_pence"] or 0.0)
+                svt = float(row["svt_shadow_price_pence"] or 0.0)
+                fixed = float(row["fixed_shadow_price_pence"] or 0.0)
+                # Preserve 'metered_synthetic' lineage across idempotent re-runs;
+                # heartbeat-overlay rows otherwise become 'metered'.
+                next_source = (
+                    "metered_synthetic"
+                    if row["source"] == "metered_synthetic"
+                    else "metered"
+                )
+                conn.execute(
+                    """UPDATE execution_log SET
+                           consumption_kwh = ?,
+                           cost_realised_pence = ?,
+                           cost_svt_shadow_pence = ?,
+                           cost_fixed_shadow_pence = ?,
+                           delta_vs_svt_pence = ?,
+                           delta_vs_fixed_pence = ?,
+                           source = ?
+                       WHERE id = ?""",
+                    (
+                        kwh,
+                        kwh * agile,
+                        kwh * svt,
+                        kwh * fixed,
+                        kwh * (svt - agile),
+                        kwh * (fixed - agile),
+                        next_source,
+                        int(row["id"]),
+                    ),
+                )
+                conn.commit()
+                return True
+
+            # No heartbeat row in this bucket — synthesise one so the night
+            # brief's PnL is complete. Look up the Agile rate first; if no
+            # tariff slot covers this timestamp we genuinely have no price
+            # data and bail.
+            from .config import config as _config
+            tariff = (_config.OCTOPUS_TARIFF_CODE or "").strip()
+            if not tariff:
                 return False
-            agile = float(row["agile_price_pence"] or 0.0)
-            svt = float(row["svt_shadow_price_pence"] or 0.0)
-            fixed = float(row["fixed_shadow_price_pence"] or 0.0)
-            kwh = float(consumption_kwh)
+            # agile_rates stores timestamps with the 'Z' suffix (see
+            # get_rates_for_period); normalise our slot start to match so the
+            # lexicographic compare works.
+            slot_start_z = slot_dt.replace(microsecond=0).isoformat().replace(
+                "+00:00", "Z"
+            )
+            rate_cur = conn.execute(
+                """SELECT value_inc_vat
+                   FROM agile_rates
+                   WHERE tariff_code = ?
+                     AND valid_from <= ?
+                     AND valid_to > ?
+                   ORDER BY valid_from DESC
+                   LIMIT 1""",
+                (tariff, slot_start_z, slot_start_z),
+            )
+            rate_row = rate_cur.fetchone()
+            if not rate_row:
+                return False
+            agile = float(rate_row["value_inc_vat"])
+            from .analytics.shadow_pricing import (
+                fixed_shadow_rate_pence,
+                svt_rate_pence,
+            )
+            svt = svt_rate_pence()
+            fixed = fixed_shadow_rate_pence()
             conn.execute(
-                """UPDATE execution_log SET
-                       consumption_kwh = ?,
-                       cost_realised_pence = ?,
-                       cost_svt_shadow_pence = ?,
-                       cost_fixed_shadow_pence = ?,
-                       delta_vs_svt_pence = ?,
-                       delta_vs_fixed_pence = ?,
-                       source = 'metered'
-                   WHERE id = ?""",
+                """INSERT INTO execution_log
+                   (timestamp, consumption_kwh, agile_price_pence,
+                    svt_shadow_price_pence, fixed_shadow_price_pence,
+                    cost_realised_pence, cost_svt_shadow_pence,
+                    cost_fixed_shadow_pence, delta_vs_svt_pence,
+                    delta_vs_fixed_pence, source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'metered_synthetic')""",
                 (
-                    kwh,
-                    kwh * agile,
-                    kwh * svt,
-                    kwh * fixed,
-                    kwh * (svt - agile),
-                    kwh * (fixed - agile),
-                    int(row["id"]),
+                    slot_start_iso, kwh, agile, svt, fixed,
+                    kwh * agile, kwh * svt, kwh * fixed,
+                    kwh * (svt - agile), kwh * (fixed - agile),
                 ),
             )
             conn.commit()
