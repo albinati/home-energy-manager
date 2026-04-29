@@ -422,8 +422,8 @@ sent but Fox doesn't show — possibly a failed upload).
 Telegram pings follow a strict policy. **Anything outside this list is mute by default.**
 
 **Routine — exactly twice per day:**
-- **☀️ Morning brief** at `BRIEF_MORNING_HOUR:MINUTE` local (default 08:00) — today's forecast: tariff windows summary (reuses `classify_day` so it matches the family calendar word-for-word), planned peak-export commitments (read from `dispatch_decisions`), expected savings vs SVT shadow, weather outlook.
-- **🌙 Night brief** at `BRIEF_NIGHT_HOUR:MINUTE` local (default 22:00) — today's actuals: realised cost, savings vs SVT shadow, slot summary, peak-export verdicts (committed vs dropped).
+- **☀️ Morning brief** at `BRIEF_MORNING_HOUR:MINUTE` local (default 08:00) — today's forecast: tariff windows summary (reuses `classify_day` so it matches the family calendar word-for-word), planned peak-export commitments (read from `dispatch_decisions`), expected savings vs SVT shadow, weather outlook. Yesterday's PnL footer is **metered** (after V13's `CONSUMPTION_BACKFILL_HOUR=4` cron has rewritten the previous day's `execution_log` rows from estimated to true Octopus smart-meter readings).
+- **🌙 Night brief** at `BRIEF_NIGHT_HOUR:MINUTE` local (default 22:00) — today's actuals: realised cost, savings vs SVT shadow, slot summary, peak-export verdicts (committed vs dropped). **Note:** today's rows are still `source="estimated"` until tomorrow's 04:00 backfill — this brief reads the live heartbeat estimate. The morning brief 10 hours later sees the metered version of the same day.
 
 **Out-of-digest pings — only when actionable:**
 - **🔵 PAID-to-use window started.** Always pings, regardless of `NOTIFY_TARIFF_TRANSITIONS`. Rare (~1–2/week) and immediately actionable: run laundry / dishwasher / EV charge.
