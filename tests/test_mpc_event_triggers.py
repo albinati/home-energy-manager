@@ -72,21 +72,6 @@ def test_bulletproof_mpc_job_skipped_during_cooldown(monkeypatch, caplog):
 # -------------------- Cron skips when Octopus fetch will run --------------------
 
 
-def test_cron_trigger_skipped_when_octopus_fetch_hour_matches(monkeypatch, caplog):
-    from src.scheduler import runner
-
-    # Force the local hour to equal OCTOPUS_FETCH_HOUR.
-    fixed_now = datetime(2026, 6, 1, runner.config.OCTOPUS_FETCH_HOUR, 0, tzinfo=UTC)
-    sentinel = MagicMock(side_effect=AssertionError("optimiser must not run when Octopus fetch hour matches (cron path)"))
-    with patch("src.scheduler.runner.datetime") as mock_dt, \
-         patch.dict("sys.modules", {"src.scheduler.optimizer": MagicMock(run_optimizer=sentinel)}):
-        mock_dt.now = MagicMock(side_effect=lambda tz=None: fixed_now if tz else fixed_now)
-        mock_dt.fromisoformat = datetime.fromisoformat
-        with caplog.at_level("INFO"):
-            runner.bulletproof_mpc_job(trigger_reason="cron")
-    sentinel.assert_not_called()
-
-
 def test_event_driven_trigger_bypasses_octopus_fetch_skip(monkeypatch):
     """Event-driven triggers (drift, forecast, octopus_fetch itself) MUST run even
     if the local hour matches OCTOPUS_FETCH_HOUR — the event itself is the signal."""
@@ -410,14 +395,6 @@ def test_forecast_refresh_job_no_trigger_when_within_thresholds(monkeypatch):
 
 
 # -------------------- Plan-delta observability --------------------
-
-
-def test_plan_delta_skipped_for_cron_runs(monkeypatch, caplog):
-    from src.scheduler import runner
-
-    with caplog.at_level("INFO"):
-        runner._log_plan_delta_after_trigger(prev_run_id=1, new_run_id=2, trigger_reason="cron")
-    assert not any("plan delta" in r.message.lower() for r in caplog.records)
 
 
 def test_plan_delta_logged_for_event_driven_runs(monkeypatch, caplog):

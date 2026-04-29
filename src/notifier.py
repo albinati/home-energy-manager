@@ -40,6 +40,10 @@ class AlertType(str, Enum):
     DAILY_PNL = "daily_pnl"
     # V7 plan consent
     PLAN_PROPOSED = "plan_proposed"
+    # V12 — twice-daily digest split + tier-aware policy
+    NIGHT_BRIEF = "night_brief"
+    PLAN_REVISION = "plan_revision"
+    NEGATIVE_WINDOW_START = "negative_window_start"
 
 
 # OpenClaw hook payload ``name`` field (one stable label per alert key)
@@ -53,6 +57,9 @@ _HOOK_PAYLOAD_NAMES: dict[str, str] = {
     "peak_window_start": "EnergyPeakWindow",
     "daily_pnl": "EnergyDailyPnl",
     "plan_proposed": "EnergyPlan",
+    "night_brief": "EnergyNightBrief",
+    "plan_revision": "EnergyPlanRevision",
+    "negative_window_start": "EnergyNegativeWindow",
 }
 
 
@@ -335,6 +342,53 @@ def notify(message: str, urgent: bool = False) -> None:
 
 def notify_morning_report(body: str) -> None:
     _dispatch(AlertType.MORNING_REPORT, body, urgent=False)
+
+
+def notify_night_brief(body: str) -> None:
+    """Companion to ``notify_morning_report`` — fires once per evening with
+    today's actuals (realised cost, savings vs SVT, peak-export verdicts).
+
+    Routed via the same OpenClaw delivery path as the morning report; routes
+    can be configured per-AlertType in the ``notification_routes`` table.
+    """
+    _dispatch(AlertType.NIGHT_BRIEF, body, urgent=False)
+
+
+def notify_plan_revision(body: str, *, trigger_reason: str | None = None) -> None:
+    """Fires when an in-day MPC re-solve materially changed the plan.
+
+    ``trigger_reason`` is what surfaced the revision (e.g. ``forecast_revision``,
+    ``soc_drift``, ``tier_boundary``); recorded in the payload so OpenClaw can
+    explain *why* a revision happened. Non-urgent — these are FYI-grade pings,
+    not alerts.
+    """
+    extra = {"trigger_reason": trigger_reason} if trigger_reason else None
+    _dispatch(AlertType.PLAN_REVISION, body, urgent=False, extra=extra)
+
+
+def push_negative_window_start(
+    *,
+    soc: float | None = None,
+    fox_mode: str | None = None,
+    price_pence: float | None = None,
+) -> None:
+    """🔵 PAID-to-use window has just started. Always fires (rare, actionable).
+
+    Mirrors the family-calendar tier copy so the same word ("PAID") reaches
+    Telegram and the calendar — household members can run laundry / dishwasher /
+    EV charge during the window.
+    """
+    payload: dict[str, Any] = {
+        "title": "🔵 PAID to use — negative-price window started",
+        "body": "Octopus is paying us to consume right now. Run heavy appliances.",
+    }
+    if soc is not None:
+        payload["soc_pct"] = soc
+    if fox_mode is not None:
+        payload["fox_mode"] = fox_mode
+    if price_pence is not None:
+        payload["price_pence"] = price_pence
+    push_alert(AlertType.NEGATIVE_WINDOW_START.value, payload)
 
 
 def notify_strategy_update(summary: str, warnings: Any = None) -> None:

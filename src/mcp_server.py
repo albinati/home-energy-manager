@@ -2060,7 +2060,7 @@ def build_mcp() -> FastMCP:
         name="set_setting",
         description=(
             "Update a runtime-tunable setting. Takes effect within the 30 s cache "
-            "TTL; schedule-class keys (LP_PLAN_PUSH_HOUR/MINUTE, LP_MPC_HOURS) "
+            "TTL; schedule-class keys (LP_PLAN_PUSH_HOUR/MINUTE) "
             "also trigger an APScheduler cron re-register. Pass confirmed=True "
             "to actually apply — the default is a dry-run that returns the "
             "canonical (post-validation) value without persisting, so an agent "
