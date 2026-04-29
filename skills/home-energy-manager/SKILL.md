@@ -417,6 +417,63 @@ sent but Fox doesn't show — possibly a failed upload).
 
 ---
 
+## Notification model (V12 — twice-daily digest + tier-aware MPC)
+
+Telegram pings follow a strict policy. **Anything outside this list is mute by default.**
+
+**Routine — exactly twice per day:**
+- **☀️ Morning brief** at `BRIEF_MORNING_HOUR:MINUTE` local (default 08:00) — today's forecast: tariff windows summary (reuses `classify_day` so it matches the family calendar word-for-word), planned peak-export commitments (read from `dispatch_decisions`), expected savings vs SVT shadow, weather outlook.
+- **🌙 Night brief** at `BRIEF_NIGHT_HOUR:MINUTE` local (default 22:00) — today's actuals: realised cost, savings vs SVT shadow, slot summary, peak-export verdicts (committed vs dropped).
+
+**Out-of-digest pings — only when actionable:**
+- **🔵 PAID-to-use window started.** Always pings, regardless of `NOTIFY_TARIFF_TRANSITIONS`. Rare (~1–2/week) and immediately actionable: run laundry / dishwasher / EV charge.
+- **PLAN_REVISION** — when an in-day MPC re-solve materially changed the next-4 h plan (`max_soc_delta_pct ≥ PLAN_REVISION_MIN_SOC_DELTA_PERCENT` OR `sum_grid_delta_kwh ≥ PLAN_REVISION_MIN_GRID_DELTA_KWH`, default 10 % / 1.0 kWh). Suppressed on `cron` and `plan_push` triggers.
+- **Hardware faults** — `notify_risk` on low-SoC + peak (per-day acked), Fox scheduler flag disabled (per-day acked, V12 fix to its previous zero-debounce bug), Daikin auth circuit open (per-circuit cooldown), Octopus survival mode (per-incident).
+- **User-override episodes** — `notify_user_override` fires once when a manual change is detected on a Daikin action, once when it clears. Per-`action_id` dedup (V12 fix to per-heartbeat spam).
+
+**Muted by default:**
+- `push_cheap_window_start` / `push_peak_window_start` — these are tariff-transition pings the morning brief already covers. Set `NOTIFY_TARIFF_TRANSITIONS=true` to re-enable for debugging.
+
+**MCP tools that surface this:**
+- `get_daily_brief` — on-demand build of the morning payload (read-only).
+- `get_pending_approval` — the plan currently waiting for consent.
+- `get_notification_routes` / `set_notification_route` — per-AlertType routing knobs (target channel, enable/mute, silent flag).
+
+---
+
+## Tier-boundary MPC triggers (V12) + the event-driven model
+
+**The architectural shift:** the MPC is now entirely event-driven by default. There are exactly two canonical triggers that re-plan the day:
+
+1. **Tariff tier transition** (`tier_boundary`) — the LP re-runs `TIER_BOUNDARY_LEAD_MINUTES` (default 5) before every transition computed by `tiers.classify_day`. The boundaries match what the family calendar shows. Captures the moment the optimization landscape actually changes (cheap → moderate, moderate → expensive, etc., in either direction).
+2. **New tariffs published** (`octopus_fetch`) — fires ~16:05 local when Octopus releases tomorrow's prices. Re-plans with the fresh data and re-registers tier-boundary triggers for tomorrow.
+
+Plus three reactive triggers for unforecast events:
+
+3. **`soc_drift`** — heartbeat detects live SoC diverged from LP-predicted by ≥ `MPC_DRIFT_SOC_THRESHOLD_PERCENT` (default 15 %).
+4. **`forecast_revision`** — Open-Meteo refresh detects ΔPV ≥ `MPC_FORECAST_DRIFT_SOLAR_KWH_THRESHOLD` or ΔT ≥ `MPC_FORECAST_DRIFT_TEMP_C_THRESHOLD` over the next 6 h.
+5. **`dynamic_replan`** — one-shot fired by the dispatcher when the LP plan exceeded the Fox V3 8-group cap and the truncated tail needs a fresh solve.
+
+And the nightly canonical commitment:
+
+6. **`plan_push`** at 00:05 UTC — pushes the next day's full plan to Fox + Daikin.
+
+**The fixed-hour cron is intentionally empty by default** (`LP_MPC_HOURS=`). The clock hours `5,9,12,15,20` etc. were arbitrary — they didn't correspond to anything in the optimization problem. The six event-driven triggers above cover every moment when re-thinking the plan is actually warranted. Set `LP_MPC_HOURS=6,12,21` only as belt-and-braces — those fires won't change decisions, just produce redundant solves.
+
+**Why this matters operationally:** the previous fixed-hour cron left a 9 h overnight gap (20:00 → 05:00 local) that allowed a real loss on 2026-04-28 23:00: heating ramped, battery dropped fast in a cheap window, no event triggered a re-plan, the household entered the next expensive window flat. Tier-boundary triggers close that gap by re-planning when the price actually changes, not on an arbitrary clock.
+
+**When the tier-boundary registration runs:**
+- After every successful Octopus fetch (registers tomorrow's transitions when fresh rates land).
+- At service startup (uses cached rates if fetch fails).
+
+**Cooldown behaviour:**
+- `MPC_COOLDOWN_SECONDS` (default 300) gates back-to-back fires — same as cron / drift / forecast-revision.
+- Each tier-boundary fire runs the full 3-pass scenario robustness check (`tier_boundary` is in `LP_SCENARIOS_ON_TRIGGER_REASONS` by default), so dispatch decisions made at boundaries are forecast-robust.
+
+**When OpenClaw is asked "did the LP re-plan recently?":** call `explain_dispatch_decisions(latest)` and look at the `created_at` plus `optimizer_log.run_at`. Trigger reasons in production: `cron`, `octopus_fetch`, `plan_push`, `forecast_revision`, `soc_drift`, `dynamic_replan`, `tier_boundary`, `manual`.
+
+---
+
 ## v10: Daikin control mode
 
 Read `get_daikin_status.control_mode` before any Daikin write attempt:

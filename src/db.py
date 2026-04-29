@@ -1828,6 +1828,25 @@ def is_warning_acknowledged(warning_key: str) -> bool:
             conn.close()
 
 
+def clear_warning(warning_key: str) -> None:
+    """Remove a previously-acknowledged warning so it can re-fire.
+
+    Used when the underlying condition recovers — e.g. Fox scheduler flag
+    flips back to True after being False — so the next failure today gets
+    a fresh notification rather than silently inheriting the prior ack.
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            conn.execute(
+                "DELETE FROM acknowledged_warnings WHERE warning_key = ?",
+                (warning_key,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
 @dataclass
 class OctopusFetchState:
     last_success_at: str | None

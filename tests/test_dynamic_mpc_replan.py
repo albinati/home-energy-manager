@@ -48,12 +48,9 @@ def fake_scheduler(monkeypatch: pytest.MonkeyPatch) -> _FakeScheduler:
     fake = _FakeScheduler()
     monkeypatch.setattr(runner, "_background_scheduler", fake)
     monkeypatch.setattr(runner, "_scheduler_paused", False)
-    # Pin tz + cron so cron-overlap check is deterministic.
     monkeypatch.setattr(runner.config, "BULLETPROOF_TIMEZONE", "Europe/London")
     monkeypatch.setattr(runner.config, "REPLAN_SAFETY_MARGIN_MINUTES", 15)
     monkeypatch.setattr(runner.config, "DYNAMIC_REPLAN_MIN_LEAD_MINUTES", 120)
-    # No cron MPC by default in tests so the helper proceeds.
-    monkeypatch.setattr(runner.config, "LP_MPC_HOURS", "")
     return fake
 
 
@@ -106,22 +103,20 @@ def test_schedule_dynamic_mpc_replan_skipped_when_paused(
     assert fake_scheduler.jobs == []
 
 
-def test_schedule_dynamic_mpc_replan_skipped_when_cron_covers(
-    fake_scheduler: _FakeScheduler, monkeypatch: pytest.MonkeyPatch
+def test_schedule_dynamic_mpc_replan_no_longer_dedupes_against_fixed_cron(
+    fake_scheduler: _FakeScheduler,
 ) -> None:
-    """If a recurring MPC cron fires inside [now, replan_at_utc], skip the
-    one-shot — the cron will already produce a fresh plan in the window."""
-    from src.scheduler import runner
+    """V12 removed the fixed-hour MPC cron + its overlap dedup. With the
+    cron gone, ``schedule_dynamic_mpc_replan`` always schedules the
+    one-shot when lead is sufficient — there's nothing to coalesce with.
+    Cooldown via ``_can_run_mpc_now`` still gates back-to-back fires at
+    runtime if needed."""
     from src.scheduler.runner import schedule_dynamic_mpc_replan
 
-    # Replan ~5h out. Configure MPC to fire every hour — at least one falls
-    # inside [now, replan_at].
-    monkeypatch.setattr(runner.config, "LP_MPC_HOURS", "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23")
     when = datetime.now(UTC) + timedelta(hours=5)
     out = schedule_dynamic_mpc_replan(when)
-    assert out["status"] == "skipped_cron_covers"
-    assert "covered_by" in out
-    assert fake_scheduler.jobs == []
+    assert out["status"] == "scheduled"
+    assert len(fake_scheduler.jobs) == 1
 
 
 def test_schedule_dynamic_mpc_replan_replace_existing_does_not_pile_up(

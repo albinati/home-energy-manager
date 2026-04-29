@@ -247,8 +247,54 @@ class Config:
     )
     OCTOPUS_FETCH_HOUR: int = int(os.getenv("OCTOPUS_FETCH_HOUR", "16"))
     OCTOPUS_FETCH_MINUTE: int = int(os.getenv("OCTOPUS_FETCH_MINUTE", "5"))
+    # Twice-daily digest (V12). DAILY_BRIEF_* are kept as aliases so existing
+    # /srv/hem/.env files still work without an edit; BRIEF_MORNING_* take
+    # precedence when both are set.
     DAILY_BRIEF_HOUR: int = int(os.getenv("DAILY_BRIEF_HOUR", "8"))
     DAILY_BRIEF_MINUTE: int = int(os.getenv("DAILY_BRIEF_MINUTE", "0"))
+    BRIEF_MORNING_HOUR: int = int(
+        os.getenv("BRIEF_MORNING_HOUR", os.getenv("DAILY_BRIEF_HOUR", "8"))
+    )
+    BRIEF_MORNING_MINUTE: int = int(
+        os.getenv("BRIEF_MORNING_MINUTE", os.getenv("DAILY_BRIEF_MINUTE", "0"))
+    )
+    BRIEF_NIGHT_HOUR: int = int(os.getenv("BRIEF_NIGHT_HOUR", "22"))
+    BRIEF_NIGHT_MINUTE: int = int(os.getenv("BRIEF_NIGHT_MINUTE", "0"))
+
+    # Heartbeat tariff-transition pings — muted by default in V12; the
+    # morning brief lists today's windows. The ``negative`` (🔵 PAID) tier
+    # is a separate path (always pings, see push_negative_window_start).
+    NOTIFY_TARIFF_TRANSITIONS: bool = os.getenv(
+        "NOTIFY_TARIFF_TRANSITIONS", "false"
+    ).lower() in ("1", "true", "yes")
+
+    # Tier-boundary MPC trigger — fire this many minutes BEFORE a window's
+    # local start time. Reuses dynamic_replan one-shot scheduling. The 5-min
+    # default covers the worst-case LP-solve + Fox-V3 upload + retry budget
+    # AND aligns with MPC_COOLDOWN_SECONDS=300 so back-to-back triggers
+    # don't suppress each other.
+    TIER_BOUNDARY_LEAD_MINUTES: int = int(
+        os.getenv("TIER_BOUNDARY_LEAD_MINUTES", "5")
+    )
+    # Minimum lead time from "now" before we'll schedule a tier-boundary fire.
+    # Keeps us from scheduling a job whose fire-time is already in the past
+    # (or so close that solve+upload can't complete in time). DIFFERENT from
+    # ``DYNAMIC_REPLAN_MIN_LEAD_MINUTES=120`` which is the much larger floor
+    # for the LP-truncation-tail recovery path. Set to 1 min by default —
+    # 30 s solve + 30 s Fox cloud worst case fits comfortably.
+    TIER_BOUNDARY_MIN_LEAD_MINUTES: int = int(
+        os.getenv("TIER_BOUNDARY_MIN_LEAD_MINUTES", "1")
+    )
+
+    # PLAN_REVISION emit thresholds — the in-day MPC re-solve must move the
+    # plan by at least one of these amounts in the next-4h window before we
+    # send a Telegram ping. Tuned to "material" not "noise".
+    PLAN_REVISION_MIN_SOC_DELTA_PERCENT: float = float(
+        os.getenv("PLAN_REVISION_MIN_SOC_DELTA_PERCENT", "10.0")
+    )
+    PLAN_REVISION_MIN_GRID_DELTA_KWH: float = float(
+        os.getenv("PLAN_REVISION_MIN_GRID_DELTA_KWH", "1.0")
+    )
     BULLETPROOF_TIMEZONE: str = (os.getenv("BULLETPROOF_TIMEZONE") or "Europe/London").strip()
 
     DHW_TEMP_MAX_C: float = float(os.getenv("DHW_TEMP_MAX_C", "65"))
@@ -351,8 +397,14 @@ class Config:
     # right after Octopus publishes the next-day rates). Including it here
     # means the run that sees fresh prices ALSO does the 3-pass scenario
     # robustness check, ~55 min before the typical 17:00 BST peak window.
+    # ``tier_boundary`` (V12) fires N minutes before any tariff tier change
+    # computed by tiers.classify_day — these are high-stakes pre-transition
+    # decisions where the scenario robustness check earns its keep.
+    # The legacy ``cron`` trigger reason was removed in V12 (fixed-hour
+    # cron is gone); the system is fully event-driven.
     LP_SCENARIOS_ON_TRIGGER_REASONS: str = os.getenv(
-        "LP_SCENARIOS_ON_TRIGGER_REASONS", "cron,plan_push,octopus_fetch"
+        "LP_SCENARIOS_ON_TRIGGER_REASONS",
+        "plan_push,octopus_fetch,tier_boundary",
     )
     TARGET_ROOM_TEMP_MIN_C: float = float(os.getenv("TARGET_ROOM_TEMP_MIN_C", "18.0"))
     TARGET_ROOM_TEMP_MAX_C: float = float(os.getenv("TARGET_ROOM_TEMP_MAX_C", "23.0"))
@@ -489,9 +541,11 @@ class Config:
     # the end of its 24h rolling horizon. Without this, individual LP runs may plan to drain
     # the battery near the boundary, executing those decisions before the next MPC corrects.
 
-    # Model Predictive Control: re-run the LP intra-day with refreshed SoC / tank / forecasts.
-    # LP_MPC_HOURS is runtime-tunable via /api/v1/settings (#52); cron jobs are
-    # re-registered without a process restart when it changes. See @property below.
+    # Model Predictive Control re-runs the LP intra-day. As of V12 the fixed-
+    # hour cron is GONE — the MPC is fully event-driven: tier_boundary (before
+    # every tariff transition), octopus_fetch (when new rates land), soc_drift,
+    # forecast_revision, dynamic_replan, plan_push (nightly). Manual re-runs
+    # via the MCP propose_optimization_plan tool always work.
 
     # Whether intra-day MPC re-runs (and the evening fetch) push the updated plan to Fox/Daikin.
     # Default false: compute + log only; the nightly push job dispatches at LP_PLAN_PUSH_HOUR:MINUTE.
@@ -532,7 +586,12 @@ class Config:
     # to persist across this many consecutive heartbeat ticks (heartbeat = 120 s, so 2 ticks
     # ≈ 4 min sustained — filters single-tick spikes from DHW boost cycles or load surges).
     MPC_DRIFT_SOC_THRESHOLD_PERCENT: float = float(os.getenv("MPC_DRIFT_SOC_THRESHOLD_PERCENT", "15"))
-    MPC_DRIFT_HYSTERESIS_TICKS: int = int(os.getenv("MPC_DRIFT_HYSTERESIS_TICKS", "2"))
+    # V12: bumped down from 2 → 1 (i.e. fire on the first heartbeat with
+    # drift ≥ threshold). The 2026-04-28 23:00 incident showed a 2-tick
+    # window (4 min @ 2-min cadence) is too slow for a heating ramp; the
+    # tier-boundary trigger does most of the catching now, this is just the
+    # belt-and-braces for ramps that happen MID-window.
+    MPC_DRIFT_HYSTERESIS_TICKS: int = int(os.getenv("MPC_DRIFT_HYSTERESIS_TICKS", "1"))
     # Plan-delta observability: how many hours of overlap between previous and new plan to
     # measure when logging the post-trigger delta. 6 h captures the immediate horizon.
     MPC_PLAN_DELTA_LOOKAHEAD_HOURS: int = int(os.getenv("MPC_PLAN_DELTA_LOOKAHEAD_HOURS", "6"))
@@ -688,30 +747,6 @@ class Config:
     @LP_PLAN_PUSH_MINUTE.setter
     def LP_PLAN_PUSH_MINUTE(self, value: int) -> None:
         self._rt_set("LP_PLAN_PUSH_MINUTE", int(value))
-
-    @property
-    def LP_MPC_HOURS(self) -> str:
-        """Comma-separated string form — legacy callers (incl. pytest
-        ``monkeypatch.setattr(config, 'LP_MPC_HOURS', '6,12,18')``) expect
-        this setter shape. The canonical value is ``LP_MPC_HOURS_LIST``."""
-        val = self._rt_get("LP_MPC_HOURS")
-        if isinstance(val, str):
-            return val
-        if isinstance(val, (list, tuple)):
-            return ",".join(str(int(h)) for h in val)
-        return str(val or "")
-
-    @LP_MPC_HOURS.setter
-    def LP_MPC_HOURS(self, value: str) -> None:
-        self._rt_set("LP_MPC_HOURS", str(value))
-
-    @property
-    def LP_MPC_HOURS_LIST(self) -> list[int]:
-        """Parsed MPC re-solve hours (local). Runtime-tunable via settings PUT."""
-        raw = self.LP_MPC_HOURS
-        if not raw:
-            return []
-        return sorted({int(h.strip()) for h in raw.split(",") if h.strip()})
 
     # Directory for config snapshots (JSON). Snapshots are saved before any mode transition.
     CONFIG_SNAPSHOT_DIR: str = (os.getenv("CONFIG_SNAPSHOT_DIR") or "data/config_snapshots").strip()

@@ -87,11 +87,13 @@ def test_perturbation_for_unknown_raises():
         scenarios._perturbation_for("paranoid")  # type: ignore[arg-type]
 
 
-def test_trigger_runs_scenarios_default_includes_octopus_fetch():
-    # Default LP_SCENARIOS_ON_TRIGGER_REASONS = "cron,plan_push,octopus_fetch"
-    assert scenarios.trigger_runs_scenarios("cron")
+def test_trigger_runs_scenarios_default_includes_canonical_triggers():
+    # V12 default LP_SCENARIOS_ON_TRIGGER_REASONS = "plan_push,octopus_fetch,tier_boundary"
+    # (legacy "cron" removed when the fixed-hour MPC cron was deleted).
     assert scenarios.trigger_runs_scenarios("plan_push")
     assert scenarios.trigger_runs_scenarios("octopus_fetch")
+    assert scenarios.trigger_runs_scenarios("tier_boundary")
+    assert not scenarios.trigger_runs_scenarios("cron")  # legacy reason no longer in default
     assert not scenarios.trigger_runs_scenarios("soc_drift")
     assert not scenarios.trigger_runs_scenarios("forecast_revision")
     assert not scenarios.trigger_runs_scenarios("dynamic_replan")

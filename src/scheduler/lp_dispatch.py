@@ -307,7 +307,18 @@ def write_daikin_from_lp_plan(
     written at, e.g., 18:00 local (``plan_date`` = today, slots spanning into
     tomorrow) correctly removes stale rows from *both* dates while the shared
     in-flight preservation keeps any Daikin action currently executing.
+
+    V12 audit fix: clear ``_USER_OVERRIDE_NOTIFIED`` here. The set tracks
+    action_schedule row ids we've already pinged about; once the rows
+    are cleared/replaced by this function, those ids are dead and the set
+    would otherwise leak entries forever.
     """
+    try:
+        from .. import state_machine as _sm
+        _sm._USER_OVERRIDE_NOTIFIED.clear()
+    except Exception:  # pragma: no cover — defensive
+        pass
+
     if config.DAIKIN_CONTROL_MODE == "passive":
         # Passive mode: do not write any Daikin actions and clear any leftovers
         # from a prior active run so the heartbeat never picks them up.

@@ -46,16 +46,6 @@ def test_validate_enforces_enum():
         rts.set_setting("OPTIMIZATION_PRESET", "noprep")
 
 
-def test_validate_coerces_int_list_from_csv():
-    rts.set_setting("LP_MPC_HOURS", "12,6,21,6")
-    assert rts.get_setting("LP_MPC_HOURS") == [6, 12, 21]
-
-
-def test_validate_coerces_int_list_from_python_list():
-    rts.set_setting("LP_MPC_HOURS", [21, 6, 12])
-    assert rts.get_setting("LP_MPC_HOURS") == [6, 12, 21]
-
-
 # ---------------------------------------------------------------------------
 # DB persistence + cache invalidation
 # ---------------------------------------------------------------------------
@@ -104,13 +94,6 @@ def test_config_property_reads_runtime_value():
     assert config.DHW_TEMP_COMFORT_C == 52.5
 
 
-def test_config_property_reads_lp_mpc_hours_list():
-    rts.set_setting("LP_MPC_HOURS", "4,10,15")
-    assert config.LP_MPC_HOURS_LIST == [4, 10, 15]
-    # The legacy string form is derived from the canonical list.
-    assert config.LP_MPC_HOURS == "4,10,15"
-
-
 def test_config_enum_property_round_trip():
     rts.set_setting("OPTIMIZATION_PRESET", "guests")
     assert config.OPTIMIZATION_PRESET == "guests"
@@ -133,13 +116,15 @@ def test_list_settings_marks_overridden(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Cron hot-reload (LP_MPC_HOURS / LP_PLAN_PUSH_HOUR / LP_PLAN_PUSH_MINUTE)
+# Cron hot-reload (LP_PLAN_PUSH_HOUR / LP_PLAN_PUSH_MINUTE) — V12 removed
+# the LP_MPC_HOURS hot-reload because the fixed-hour MPC cron is gone.
 # ---------------------------------------------------------------------------
 
 
 def test_cron_reload_reregisters_jobs_when_active(monkeypatch):
     """Simulate an active background scheduler and assert the job set is rebuilt
-    with the new LP_MPC_HOURS without tearing down the rest."""
+    after a settings change. Stale ``bulletproof_mpc_*`` rows from a prior
+    process are still swept (clean handover from V11)."""
     from src.scheduler import runner
 
     # Build a minimal fake scheduler with the jobs the function tears down.
@@ -163,28 +148,26 @@ def test_cron_reload_reregisters_jobs_when_active(monkeypatch):
     fake = _Sched([
         "bulletproof_octopus_fetch",   # unrelated — must be preserved
         "bulletproof_plan_push",
-        "bulletproof_mpc_06",
+        "bulletproof_mpc_06",          # legacy V11 job — should be removed
         "bulletproof_mpc_12",
         "bulletproof_mpc_21",
     ])
     monkeypatch.setattr(runner, "_background_scheduler", fake)
     monkeypatch.setattr(runner.config, "USE_BULLETPROOF_ENGINE", True)
 
-    rts.set_setting("LP_MPC_HOURS", [4, 10, 15])
     result = runner.reregister_cron_jobs(reason="test")
 
     assert result["status"] == "ok"
+    # All legacy MPC fixed-hour rows are swept along with plan_push.
     assert sorted(fake.removed) == sorted([
         "bulletproof_plan_push",
         "bulletproof_mpc_06",
         "bulletproof_mpc_12",
         "bulletproof_mpc_21",
     ])
-    # New MPC jobs match the freshly-written setting; push + forecast-refresh + pv-telemetry re-added too.
+    # V12: only plan_push + forecast_refresh + pv_telemetry are re-added.
+    # No fixed-hour MPC cron is registered.
     assert set(fake.added) == {
-        "bulletproof_mpc_04",
-        "bulletproof_mpc_10",
-        "bulletproof_mpc_15",
         "bulletproof_plan_push",
         "bulletproof_forecast_refresh",
         "bulletproof_pv_telemetry",

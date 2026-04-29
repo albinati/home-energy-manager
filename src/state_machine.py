@@ -27,6 +27,13 @@ logger = logging.getLogger(__name__)
 # tick (row.start_time would be ancient, but we haven't actually applied yet).
 _FIRST_APPLIED_SESSION: dict[int, datetime] = {}
 
+# V12 — per-episode dedup for the user-override notification. Without this set
+# the heartbeat fires ``notify_user_override`` every 2-min reconcile while the
+# user keeps the manual change in place, drowning Telegram. Cleared when:
+#  * the action's override is reconciled (row no longer detected as override), or
+#  * the action ends (row drops out of the reconcile window naturally).
+_USER_OVERRIDE_NOTIFIED: set[int] = set()
+
 
 def _parse_utc(s: str) -> datetime:
     x = str(s).replace("Z", "+00:00")
@@ -260,11 +267,19 @@ def _reconcile_daikin_actions(
                     result="skipped",
                     trigger=trigger,
                 )
-                try:
-                    notify_user_override(reason or "unknown divergence")
-                except Exception as _exc:
-                    logger.debug("notify_user_override failed (non-fatal): %s", _exc)
+                # Per-episode dedup (V12) — fire once when the override is first
+                # detected; stay silent for the rest of the override window.
+                if aid not in _USER_OVERRIDE_NOTIFIED:
+                    _USER_OVERRIDE_NOTIFIED.add(aid)
+                    try:
+                        notify_user_override(reason or "unknown divergence")
+                    except Exception as _exc:
+                        logger.debug("notify_user_override failed (non-fatal): %s", _exc)
                 continue
+            else:
+                # Override cleared — drop the dedup token so a new override on
+                # this same row would fire a fresh notification.
+                _USER_OVERRIDE_NOTIFIED.discard(aid)
 
             try:
                 apply_scheduled_daikin_params(dev, client, apply_params, trigger=trigger)
@@ -328,14 +343,29 @@ def reconcile_daikin_schedule_for_date(
 
 
 def heartbeat_repair_fox_scheduler(fox: FoxESSClient) -> None:
-    """Re-enable Fox time-scheduler and re-upload V3 if SQLite plan differs."""
+    """Re-enable Fox time-scheduler and re-upload V3 if SQLite plan differs.
+
+    V12: gates the "Fox scheduler flag disabled" warning behind a per-day
+    ``acknowledged_warnings`` row so a stuck-False flag doesn't ping every
+    2-min heartbeat. The warning auto-clears when the flag recovers, so a
+    fresh failure on the same day re-pings exactly once.
+    """
     if not fox.api_key:
         return
     try:
+        from datetime import date as _date
         flag_on = fox.get_scheduler_flag()
         hw = fox.get_scheduler_v3()
+        plan_date = _date.today().isoformat()
+        warning_key = f"fox_scheduler_disabled_{plan_date}"
         if not flag_on or not hw.enabled:
-            notify_risk("Fox ESS scheduler flag disabled — check inverter app.")
+            if not db.is_warning_acknowledged(warning_key):
+                notify_risk("Fox ESS scheduler flag disabled — check inverter app.")
+                db.acknowledge_warning(warning_key)
+        else:
+            # Flag is healthy — drop any prior ack so a fresh failure today
+            # re-pings exactly once.
+            db.clear_warning(warning_key)
         if not config.OPENCLAW_READ_ONLY:
             if not flag_on or not hw.enabled:
                 fox.set_scheduler_flag(True)

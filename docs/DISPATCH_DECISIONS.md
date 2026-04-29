@@ -183,14 +183,23 @@ scenarios actually run, dropping latency further.
 ## Triggers that get the 3-pass scenario solve
 
 Configured by `LP_SCENARIOS_ON_TRIGGER_REASONS` (default
-`cron,plan_push,octopus_fetch`):
+`cron,plan_push,octopus_fetch,tier_boundary`):
 
 * `plan_push` — nightly at 00:05 UTC. The big one (tomorrow's plan committed).
-* `cron` — hourly MPC fires from `LP_MPC_HOURS_LIST`.
+* `cron` — fixed-hour MPC fires from `LP_MPC_HOURS_LIST`. **Empty by default**
+  in V12 — the system is now event-driven (see the canonical-triggers note
+  below). Set `LP_MPC_HOURS=6,12,21` only as belt-and-braces.
 * `octopus_fetch` — fires ~16:05 local right after Octopus publishes new
   rates. This is the natural pre-peak moment, ~55 min before the 17:00 BST
   peak; we deliberately did NOT add a separate 16:XX cron because the
   octopus_fetch trigger already covers it without top-of-hour collisions.
+* **`tier_boundary` (V12)** — fires `TIER_BOUNDARY_LEAD_MINUTES` (default 5)
+  before every tariff tier transition computed by `tiers.classify_day` —
+  the same boundaries the family calendar shows. Reuses
+  `schedule_dynamic_mpc_replan`'s one-shot DateTrigger pattern with unique
+  per-window job ids. Closes the previously-open MPC gap that allowed a
+  battery-flat-at-peak loss on 2026-04-28 (no fixed cron between 20:00 and
+  05:00 local; tier transitions in that window had no event-driven re-plan).
 
 Other triggers (`soc_drift`, `forecast_revision`, `dynamic_replan`, `manual`)
 run nominal-only to keep MPC re-plan latency low. Those committed plans
@@ -205,7 +214,8 @@ LP_SCENARIO_OPTIMISTIC_LOAD_FACTOR    = 0.90      # base-load × this for optimi
 LP_SCENARIO_PESSIMISTIC_TEMP_DELTA_C  = -1.5      # forecast Δ for pessimistic (cold-snap proxy)
 LP_SCENARIO_PESSIMISTIC_LOAD_FACTOR   = 1.15      # base-load × this for pessimistic
 LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH  = 0.30      # commit threshold on pessimistic export
-LP_SCENARIOS_ON_TRIGGER_REASONS       = cron,plan_push,octopus_fetch
+LP_SCENARIOS_ON_TRIGGER_REASONS       = cron,plan_push,octopus_fetch,tier_boundary
+TIER_BOUNDARY_LEAD_MINUTES            = 5         # MPC fires this far before each transition (V12)
 ENERGY_STRATEGY_MODE                  = savings_first    # set to strict_savings to disable arbitrage entirely
 LOG_LEVEL                             = INFO     # raise to DEBUG for deep-dive
 ```
