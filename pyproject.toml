@@ -1,6 +1,6 @@
 [project]
 name = "home-energy-manager"
-version = "10.0.0"
+version = "10.0.1"
 description = "Home energy orchestration (Fox ESS, Daikin, Octopus)"
 readme = "README.md"
 requires-python = ">=3.12"

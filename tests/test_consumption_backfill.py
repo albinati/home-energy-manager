@@ -112,11 +112,97 @@ def test_update_does_not_cross_slot_boundary():
     assert row["source"] == "estimated"
 
 
-def test_update_returns_false_when_no_matching_row():
+def test_update_returns_false_when_no_matching_row_and_no_agile_rate():
+    """Issue #199 — without a published Agile slot we have no price data;
+    nothing to insert, return False."""
     from src import db
 
     ok = db.update_execution_log_metered("2026-04-29T13:30:00+00:00", 1.0)
     assert ok is False
+
+
+def _seed_agile_rate(slot_start_iso: str, *, value_p=20.0, tariff="AGILE-FLEX-22-11-25"):
+    """Insert an agile_rates row covering the half-hour starting at *slot_start_iso*."""
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+    from src import db
+
+    start = _dt.fromisoformat(slot_start_iso.replace("Z", "+00:00"))
+    end = start + _td(minutes=30)
+    conn = db.get_connection()
+    try:
+        conn.execute(
+            """INSERT INTO agile_rates
+               (valid_from, valid_to, value_inc_vat, tariff_code, fetched_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (
+                start.isoformat().replace("+00:00", "Z"),
+                end.isoformat().replace("+00:00", "Z"),
+                value_p,
+                tariff,
+                _dt.now().isoformat(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_update_inserts_synthetic_row_when_no_heartbeat(monkeypatch):
+    """Issue #199 — a half-hour with no heartbeat row but a published Agile
+    rate should INSERT a synthetic row tagged ``source='metered_synthetic'``
+    so the night-brief PnL is complete."""
+    from src import config as _config
+    from src import db
+
+    tariff = "AGILE-FLEX-22-11-25"
+    monkeypatch.setattr(_config.config, "OCTOPUS_TARIFF_CODE", tariff, raising=False)
+    monkeypatch.setattr(_config.config, "SVT_RATE_PENCE", 24.0, raising=False)
+    monkeypatch.setattr(_config.config, "MANUAL_TARIFF_IMPORT_PENCE", 22.0, raising=False)
+
+    _seed_agile_rate("2026-04-29T03:00:00+00:00", value_p=15.0, tariff=tariff)
+
+    ok = db.update_execution_log_metered("2026-04-29T03:00:00+00:00", 0.6)
+    assert ok is True
+
+    row = _read_row("2026-04-29T03:00:00")
+    assert row is not None
+    assert row["source"] == "metered_synthetic"
+    assert row["consumption_kwh"] == 0.6
+    assert row["agile_price_pence"] == pytest.approx(15.0)
+    assert row["svt_shadow_price_pence"] == pytest.approx(24.0)
+    assert row["fixed_shadow_price_pence"] == pytest.approx(22.0)
+    assert row["cost_realised_pence"] == pytest.approx(0.6 * 15.0)
+    assert row["cost_svt_shadow_pence"] == pytest.approx(0.6 * 24.0)
+    assert row["cost_fixed_shadow_pence"] == pytest.approx(0.6 * 22.0)
+
+
+def test_update_synthetic_idempotent_preserves_lineage(monkeypatch):
+    """Re-running the backfill with the same kWh after a synthetic INSERT
+    should be a no-op AND keep ``source='metered_synthetic'`` (don't relabel
+    as 'metered')."""
+    from src import config as _config
+    from src import db
+
+    tariff = "AGILE-FLEX-22-11-25"
+    monkeypatch.setattr(_config.config, "OCTOPUS_TARIFF_CODE", tariff, raising=False)
+
+    _seed_agile_rate("2026-04-29T03:00:00+00:00", value_p=15.0, tariff=tariff)
+    db.update_execution_log_metered("2026-04-29T03:00:00+00:00", 0.6)
+    db.update_execution_log_metered("2026-04-29T03:00:00+00:00", 0.6)
+
+    conn = db.get_connection()
+    try:
+        cur = conn.execute(
+            "SELECT COUNT(*) AS n FROM execution_log WHERE timestamp LIKE '2026-04-29T03:00:00%'"
+        )
+        assert int(cur.fetchone()["n"]) == 1  # no duplicate insert
+    finally:
+        conn.close()
+
+    row = _read_row("2026-04-29T03:00:00")
+    assert row["source"] == "metered_synthetic"  # lineage preserved
+    assert row["consumption_kwh"] == 0.6
 
 
 def test_update_idempotent():
