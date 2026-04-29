@@ -1,1 +1,33 @@
-{}
+{
+  "days_back": 14,
+  "frozen_at_iso": "2026-04-29T08:05:02.222899+00:00",
+  "frozen_at_sha": "acf0979431f9f0c3b82304e41078387a1bb07f70",
+  "per_date": {
+    "2026-04-25": {
+      "recalc_count": 22,
+      "total_original_cost_p": 215.748700801675,
+      "total_replayed_cost_p": 127.18994501102003
+    },
+    "2026-04-26": {
+      "recalc_count": 21,
+      "total_original_cost_p": 414.448505686299,
+      "total_replayed_cost_p": 173.56733565423608
+    },
+    "2026-04-27": {
+      "recalc_count": 28,
+      "total_original_cost_p": -3.244397772360004,
+      "total_replayed_cost_p": 27.221857368390005
+    },
+    "2026-04-28": {
+      "recalc_count": 21,
+      "total_original_cost_p": 218.02443517591996,
+      "total_replayed_cost_p": 182.153517036365
+    },
+    "2026-04-29": {
+      "recalc_count": 3,
+      "total_original_cost_p": 60.96463003420202,
+      "total_replayed_cost_p": 56.380169138765396
+    }
+  },
+  "total_replayed_cost_p": 566.5128242087765
+}
