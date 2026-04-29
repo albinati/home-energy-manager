@@ -295,6 +295,13 @@ class Config:
     PLAN_REVISION_MIN_GRID_DELTA_KWH: float = float(
         os.getenv("PLAN_REVISION_MIN_GRID_DELTA_KWH", "1.0")
     )
+
+    # Consumption backfill — when the nightly post-hoc reconciliation pulls
+    # yesterday's actual half-hourly consumption from Octopus and rewrites
+    # ``execution_log`` rows. Fires in BULLETPROOF_TIMEZONE local. Octopus
+    # consumption data lands ~24 h after the slot; 04:00 local is safe.
+    CONSUMPTION_BACKFILL_HOUR: int = int(os.getenv("CONSUMPTION_BACKFILL_HOUR", "4"))
+    CONSUMPTION_BACKFILL_MINUTE: int = int(os.getenv("CONSUMPTION_BACKFILL_MINUTE", "0"))
     BULLETPROOF_TIMEZONE: str = (os.getenv("BULLETPROOF_TIMEZONE") or "Europe/London").strip()
 
     DHW_TEMP_MAX_C: float = float(os.getenv("DHW_TEMP_MAX_C", "65"))
