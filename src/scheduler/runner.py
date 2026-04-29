@@ -375,6 +375,32 @@ def bulletproof_morning_brief_job() -> None:
         logger.warning("Morning brief failed: %s", e)
 
 
+def bulletproof_consumption_backfill_job() -> None:
+    """Daily post-hoc reconciliation: pull yesterday's actual half-hourly
+    consumption from Octopus and rewrite the ``execution_log`` rows
+    (replacing ``source="estimated"`` heartbeat samples with metered kWh).
+
+    Affects the morning + night brief PnL accuracy from the next run on:
+    realised cost, SVT delta, fixed delta all become true measured values
+    instead of single-sample × 0.5 h extrapolations. See
+    ``src/scheduler/consumption_backfill.py`` for design details.
+
+    Fires at ``CONSUMPTION_BACKFILL_HOUR:MINUTE`` local (default 04:00) —
+    Octopus consumption data lands ~24 h after the slot, so 04:00 the
+    NEXT day reliably has yesterday's full set."""
+    from .consumption_backfill import backfill_yesterday
+
+    try:
+        result = backfill_yesterday()
+        logger.info(
+            "consumption_backfill cron: date=%s fetched=%d updated=%d missing=%d error=%s",
+            result.target_date, result.slots_fetched, result.slots_updated,
+            result.slots_missing, result.error or "none",
+        )
+    except Exception as e:
+        logger.warning("Consumption backfill failed (non-fatal): %s", e)
+
+
 def bulletproof_night_brief_job() -> None:
     """Daily night digest — today's actuals (V12). Companion to morning brief."""
     from ..analytics.daily_brief import send_night_brief_webhook
@@ -1374,6 +1400,27 @@ def start_background_scheduler() -> None:
                 "Twice-daily digest cron: morning %02d:%02d, night %02d:%02d (%s)",
                 config.BRIEF_MORNING_HOUR, config.BRIEF_MORNING_MINUTE,
                 config.BRIEF_NIGHT_HOUR, config.BRIEF_NIGHT_MINUTE, tz,
+            )
+            # V13 — nightly consumption backfill from Octopus's smart-meter
+            # endpoint. Rewrites yesterday's execution_log rows from estimated
+            # (heartbeat single-sample × 0.5 h) to metered (true kWh from the
+            # household's smart meter). Morning + night briefs read the
+            # rewritten rows so the family sees real PnL, not extrapolations.
+            _background_scheduler.add_job(
+                bulletproof_consumption_backfill_job,
+                CronTrigger(
+                    hour=config.CONSUMPTION_BACKFILL_HOUR,
+                    minute=config.CONSUMPTION_BACKFILL_MINUTE,
+                    timezone=tz,
+                ),
+                id="bulletproof_consumption_backfill",
+            )
+            logger.info(
+                "Consumption backfill cron: %02d:%02d (%s) — rewrites yesterday's "
+                "execution_log with metered kWh from Octopus.",
+                config.CONSUMPTION_BACKFILL_HOUR,
+                config.CONSUMPTION_BACKFILL_MINUTE,
+                tz,
             )
             # V12: MPC is fully event-driven. The fixed-hour cron is GONE.
             # Triggers: octopus_fetch (when new rates land), tier_boundary

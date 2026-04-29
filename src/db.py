@@ -3634,6 +3634,85 @@ def get_dispatch_decisions(run_id: int) -> list[dict[str, Any]]:
             conn.close()
 
 
+def update_execution_log_metered(
+    slot_start_utc: str,
+    consumption_kwh: float,
+) -> bool:
+    """Rewrite an ``execution_log`` row with metered (Octopus) consumption.
+
+    The heartbeat writes rows with ``source="estimated"`` based on a single
+    ``Fox.load_power`` sample × 0.5 h — fast enough for the live cockpit but
+    too noisy for the daily-brief PnL (one heavy appliance running mid-slot
+    skews the slot's apparent consumption by ~75 %). The nightly consumption
+    backfill job replaces those estimates with the actual half-hourly meter
+    reading from Octopus, recomputing all four cost columns from the prices
+    that were already locked in at write time.
+
+    ``slot_start_utc`` is the half-hour-aligned slot start as written by
+    Octopus (no microseconds). The heartbeat row's ``timestamp`` is at full
+    microsecond precision wherever the heartbeat happened to fire within the
+    slot, so we match on the **half-hour bucket** rather than exact equality.
+
+    Returns True on a successful update (a heartbeat row existed in that
+    half-hour window and was rewritten), False if no matching row was found
+    (the heartbeat may have missed that slot, or the slot is in the past
+    before the service started). Idempotent — re-running with the same kWh
+    produces no further change.
+    """
+    # Normalise the input to a half-hour boundary, then build a [start, end)
+    # window the heartbeat row's microsecond-precision timestamp falls within.
+    try:
+        slot_dt = datetime.fromisoformat(slot_start_utc.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return False
+    slot_start_iso = slot_dt.replace(microsecond=0).isoformat()
+    slot_end_iso = (slot_dt + timedelta(minutes=30)).replace(microsecond=0).isoformat()
+
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT id, agile_price_pence, svt_shadow_price_pence,
+                          fixed_shadow_price_pence
+                   FROM execution_log
+                   WHERE timestamp >= ? AND timestamp < ?
+                   ORDER BY timestamp ASC
+                   LIMIT 1""",
+                (slot_start_iso, slot_end_iso),
+            )
+            row = cur.fetchone()
+            if not row:
+                return False
+            agile = float(row["agile_price_pence"] or 0.0)
+            svt = float(row["svt_shadow_price_pence"] or 0.0)
+            fixed = float(row["fixed_shadow_price_pence"] or 0.0)
+            kwh = float(consumption_kwh)
+            conn.execute(
+                """UPDATE execution_log SET
+                       consumption_kwh = ?,
+                       cost_realised_pence = ?,
+                       cost_svt_shadow_pence = ?,
+                       cost_fixed_shadow_pence = ?,
+                       delta_vs_svt_pence = ?,
+                       delta_vs_fixed_pence = ?,
+                       source = 'metered'
+                   WHERE id = ?""",
+                (
+                    kwh,
+                    kwh * agile,
+                    kwh * svt,
+                    kwh * fixed,
+                    kwh * (svt - agile),
+                    kwh * (fixed - agile),
+                    int(row["id"]),
+                ),
+            )
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
+
 def find_latest_optimizer_run_id() -> int | None:
     """Return the id of the most recent ``optimizer_log`` row, or None.
 

@@ -165,6 +165,10 @@ LP_MPC_HOURS=                                    # EMPTY by default (V12) — ev
                                                  # tier_boundary + octopus_fetch + drift + forecast_revision
                                                  # cover every signal change. Set "6,12,21" if you really
                                                  # want belt-and-braces fixed-time fires too.
+
+# --- V13 — nightly post-hoc consumption backfill ---
+CONSUMPTION_BACKFILL_HOUR=4                      # local TZ (default 04:00) — Octopus consumption
+CONSUMPTION_BACKFILL_MINUTE=0                    # endpoint lags ~24h, 04:00 the next day is safe
 ```
 
 `EXPORT_DISCHARGE_MIN_SOC_PERCENT` was **removed** (was the live-SoC global gate that
