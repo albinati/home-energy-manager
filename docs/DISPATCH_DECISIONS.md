@@ -243,7 +243,39 @@ The `dispatch_decisions` table this work ships supports all three transitions
 without further refactor: it persists per-scenario export values, so the data
 needed to fit/validate any of them is already captured.
 
-## Pre-merge regression validator
+## Pre-merge regression gates (V13)
+
+Two complementary scripts gate every PR that touches the LP solver / dispatch
+path. Both run locally against a prod DB snapshot (CI doesn't have prod data).
+
+### Gate 1 — `scripts/check_lp_regression.py` (general LP cost gate)
+
+For each historical day in the last 14, replays the LP via
+`replay_day(mode="forward")` and sums `total_replayed_cost_p` (planned
+dispatch scored against actually-published Agile rates). Compares the
+**aggregate** against a frozen baseline pinned in
+`tests/fixtures/lp_regression_baseline.json`.
+
+```
+DB_PATH=/path/to/prod-snapshot.db python scripts/check_lp_regression.py
+```
+
+* Exit 0 = LP no worse than baseline + 50 p threshold across the 14-day
+  window. Solver float drift is typically << 1 p across 14 days, so 50 p
+  is generous.
+* Exit 1 = regression. Either fix the change or, if the regression is
+  intentional (new objective term / tuned weight), refresh the baseline:
+  ```
+  python scripts/check_lp_regression.py --refresh-baseline
+  git add tests/fixtures/lp_regression_baseline.json
+  ```
+  in the same PR. The baseline records the SHA it was frozen at, so a
+  reviewer can always see when the bar was last reset.
+
+This is the "LP must outperform every earlier version" guarantee — every
+commit either matches or beats the prior baseline.
+
+### Gate 2 — `scripts/validate_scenario_filter.py` (peak_export-specific)
 
 `scripts/validate_scenario_filter.py` is the realised-data gate for any PR
 that touches the dispatch path. For each LP run in the last *N* days that
