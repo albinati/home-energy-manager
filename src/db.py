@@ -1169,19 +1169,29 @@ def half_hourly_residual_load_profile_kwh(
     residual (non-Daikin) load.
 
     Outdoor temperature per sample comes from ``meteo_forecast_history``
-    (rich hourly coverage). Samples without a matching forecast use a
-    sentinel outdoor of 25 °C — well above the climate-curve cutoff
-    (DAIKIN_WEATHER_CURVE_HIGH_C, default 18) so the physics returns zero
-    Daikin draw, conservative (no phantom subtraction).
+    (append-only hourly forecasts). When no history match exists, fall through
+    to ``meteo_forecast`` (latest-per-slot table) for the same hour-of-year;
+    if both miss, the sample is dropped rather than emitting a polluted
+    residual. The previous behaviour used a 25 °C sentinel that pushed
+    physics above the climate-curve cutoff and silently included un-subtracted
+    Daikin in the residual — a phantom *inclusion*, not the "conservative
+    no-subtraction" the comment claimed. Early-morning hours (sparse history
+    coverage, biggest Daikin draw) suffered most.
+
+    Empty `(hour, minute)` buckets fall back hour-of-day-aware: same hour's
+    other half-bucket → median of `±2 h` neighbours → global median. Avoids
+    the previous global-median fill that inherited mid-day load values for
+    empty early-morning buckets.
     """
     from .config import config, cop_at_temperature
     from .physics import predict_passive_daikin_load
 
     cutoff_iso = (datetime.now(UTC) - timedelta(days=window_days)).isoformat().replace("+00:00", "Z")
     cop_curve = config.DAIKIN_COP_CURVE
-    high_cutoff_c = float(config.DAIKIN_WEATHER_CURVE_HIGH_C)
 
     buckets: dict[tuple[int, int], list[float]] = {}
+    samples_used = 0
+    samples_dropped_no_meteo = 0
     with _lock:
         conn = get_connection()
         try:
@@ -1189,7 +1199,10 @@ def half_hourly_residual_load_profile_kwh(
                 """SELECT pv.captured_at, pv.load_power_kw,
                           (SELECT temp_c FROM meteo_forecast_history mh
                            WHERE substr(mh.slot_time, 1, 13) = substr(pv.captured_at, 1, 13)
-                           ORDER BY mh.id DESC LIMIT 1) AS outdoor_c
+                           ORDER BY mh.id DESC LIMIT 1) AS outdoor_history_c,
+                          (SELECT temp_c FROM meteo_forecast mf
+                           WHERE substr(mf.slot_time, 1, 13) = substr(pv.captured_at, 1, 13)
+                           LIMIT 1) AS outdoor_latest_c
                    FROM pv_realtime_history pv
                    WHERE pv.captured_at > ? AND pv.load_power_kw IS NOT NULL""",
                 (cutoff_iso,),
@@ -1202,10 +1215,13 @@ def half_hourly_residual_load_profile_kwh(
     for row in rows:
         ts_str = row["captured_at"]
         load_kw = float(row["load_power_kw"])
-        outdoor = row["outdoor_c"]
-        # Use the real outdoor temp when available; fall back to 25 °C (above the
-        # climate-curve cutoff) so physics yields ZERO Daikin draw — conservative.
-        outdoor_c = float(outdoor) if outdoor is not None else max(25.0, high_cutoff_c + 5.0)
+        outdoor = row["outdoor_history_c"]
+        if outdoor is None:
+            outdoor = row["outdoor_latest_c"]
+        if outdoor is None:
+            samples_dropped_no_meteo += 1
+            continue
+        outdoor_c = float(outdoor)
         cop_at_t = cop_at_temperature(cop_curve, outdoor_c)
         e_space, e_dhw = predict_passive_daikin_load(
             [outdoor_c], [cop_at_t], [cop_at_t], slot_h=0.5
@@ -1220,6 +1236,7 @@ def half_hourly_residual_load_profile_kwh(
             continue
         minute_bucket = 30 if local.minute >= 30 else 0
         buckets.setdefault((local.hour, minute_bucket), []).append(residual)
+        samples_used += 1
 
     all_vals = [v for vs in buckets.values() for v in vs]
     if all_vals:
@@ -1228,15 +1245,49 @@ def half_hourly_residual_load_profile_kwh(
     else:
         global_fallback = mean_consumption_kwh_from_execution_logs(limit=2016)
 
+    bucket_medians: dict[tuple[int, int], float] = {}
+    for (h, m), vs in buckets.items():
+        if vs:
+            vs_sorted = sorted(vs)
+            bucket_medians[(h, m)] = vs_sorted[len(vs_sorted) // 2]
+
+    def _hour_aware_fallback(h: int, m: int) -> float:
+        # Tier 1 — same hour, other half-bucket
+        other = bucket_medians.get((h, 30 if m == 0 else 0))
+        if other is not None:
+            return other
+        # Tier 2 — median of ±2 h band (any minute), excluding self
+        neighbour_vals: list[float] = []
+        for dh in (-2, -1, 1, 2):
+            nh = (h + dh) % 24
+            for nm in (0, 30):
+                v = bucket_medians.get((nh, nm))
+                if v is not None:
+                    neighbour_vals.append(v)
+        if neighbour_vals:
+            neighbour_vals.sort()
+            return neighbour_vals[len(neighbour_vals) // 2]
+        # Tier 3 — global fallback (sparse-data degradation path)
+        return global_fallback
+
     profile: dict[tuple[int, int], float] = {}
+    empty_buckets = 0
     for h in range(24):
         for m in (0, 30):
-            vs = buckets.get((h, m), [])
-            if vs:
-                vs_sorted = sorted(vs)
-                profile[(h, m)] = vs_sorted[len(vs_sorted) // 2]
+            v = bucket_medians.get((h, m))
+            if v is None:
+                profile[(h, m)] = _hour_aware_fallback(h, m)
+                empty_buckets += 1
             else:
-                profile[(h, m)] = global_fallback
+                profile[(h, m)] = v
+
+    logger.info(
+        "residual_profile: %d samples used, %d dropped (no meteo match), "
+        "%d/48 buckets empty (hour-aware fallback applied)",
+        samples_used,
+        samples_dropped_no_meteo,
+        empty_buckets,
+    )
     return profile
 
 
