@@ -380,7 +380,16 @@ def push_negative_window_start(
     """
     payload: dict[str, Any] = {
         "title": "🔵 PAID to use — negative-price window started",
-        "body": "Octopus is paying us to consume right now. Run heavy appliances.",
+        # Body suggests boosting the DHW tank manually via the Daikin app —
+        # because we deliberately keep DAIKIN_CONTROL_MODE=passive (we only
+        # observe / forecast Daikin via the heating-curve function, not
+        # control it). Negative-price slots are the one moment a manual
+        # tank boost is high-value — the user gets paid to reheat.
+        "body": (
+            "Octopus is paying us to consume right now. Good moment to "
+            "boost the hot-water tank from the Daikin app and run heavy "
+            "appliances (laundry, dishwasher, EV charge)."
+        ),
     }
     if soc is not None:
         payload["soc_pct"] = soc

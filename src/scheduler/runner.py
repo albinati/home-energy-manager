@@ -33,6 +33,13 @@ _last_exec_halfhour_key: str | None = None
 _last_room_temp: float | None = None
 _last_room_wall_utc: datetime | None = None
 _last_notified_slot_kind: str | None = None
+# Lazy-init flag: True once we've read the persisted value from runtime_settings
+# at module load (or first heartbeat tick). Without persistence the dedupe state
+# is lost on every container restart, causing a fresh ping for the *same* slot
+# kind we already announced. The 2026-04-30 active-mode rollout fired three
+# duplicate "🔵 PAID to use" notifications across three restarts inside the
+# same negative-price window because of this gap.
+_last_notified_slot_kind_loaded: bool = False
 _comfort_morning_logged: set[str] = set()
 
 # Event-driven MPC ("Waze") — Epic #73.
@@ -1007,7 +1014,7 @@ def bulletproof_plan_push_job() -> None:
 
 def bulletproof_heartbeat_tick() -> None:
     """2-minute monitor: Daikin schedule execution, telemetry, Fox flag check."""
-    global _last_exec_halfhour_key, _last_fox_verify_monotonic, _last_room_temp, _last_room_wall_utc, _last_notified_slot_kind
+    global _last_exec_halfhour_key, _last_fox_verify_monotonic, _last_room_temp, _last_room_wall_utc, _last_notified_slot_kind, _last_notified_slot_kind_loaded
     import time
 
     if not config.USE_BULLETPROOF_ENGINE:
@@ -1260,8 +1267,23 @@ def bulletproof_heartbeat_tick() -> None:
             }
         )
 
+        # Lazy load on first tick after restart so dedupe state survives
+        # container restarts (otherwise we re-announce every active slot kind).
+        if not _last_notified_slot_kind_loaded:
+            try:
+                persisted = db.get_runtime_setting("last_notified_slot_kind")
+                if persisted:
+                    _last_notified_slot_kind = persisted
+            except Exception as exc:
+                logger.debug("last_notified_slot_kind load skipped: %s", exc)
+            _last_notified_slot_kind_loaded = True
+
         if slot_kind != _last_notified_slot_kind:
             _last_notified_slot_kind = slot_kind
+            try:
+                db.set_runtime_setting("last_notified_slot_kind", slot_kind or "")
+            except Exception as exc:
+                logger.debug("last_notified_slot_kind persist skipped: %s", exc)
             # V12 — twice-daily digest model. The morning brief lists today's
             # tariff windows in full, so we no longer ping per crossing for
             # cheap/peak/standard transitions by default. ``negative`` is
