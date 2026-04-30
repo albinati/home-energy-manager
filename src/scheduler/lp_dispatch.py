@@ -268,7 +268,13 @@ def daikin_dispatch_preview(
 
         st = start_utc.isoformat().replace("+00:00", "Z")
         en = end_utc.isoformat().replace("+00:00", "Z")
-        restore_end = (end_utc + timedelta(minutes=1)).isoformat().replace("+00:00", "Z")
+        # Wider than the heartbeat tick so restores can't be silently skipped
+        # by the state machine when a tick lands just past the window. See
+        # ``LP_RESTORE_WINDOW_MINUTES`` docstring for the 2026-04-30 incident.
+        restore_window = max(2, int(getattr(config, "LP_RESTORE_WINDOW_MINUTES", 5)))
+        restore_end = (
+            end_utc + timedelta(minutes=restore_window)
+        ).isoformat().replace("+00:00", "Z")
         restore_params = {
             "lwt_offset": 0.0,
             "tank_powerful": False,
