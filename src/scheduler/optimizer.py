@@ -1218,6 +1218,14 @@ def _run_optimizer_lp(
     # Fall back to Fox daily mean when execution_log is cold
     _fox_mean = db.mean_fox_load_kwh_per_slot(limit=60)
     _flat = _fox_mean if _fox_mean is not None else db.mean_consumption_kwh_from_execution_logs(limit=_profile_limit)
+    if _load_profile:
+        logger.info(
+            "LP base_load: 48 buckets built; min=%.3f max=%.3f early-morning(03-07)=%s",
+            min(_load_profile.values()),
+            max(_load_profile.values()),
+            {f"{h:02d}:{m:02d}": round(_load_profile[(h, m)], 3)
+             for h in range(3, 8) for m in (0, 30) if (h, m) in _load_profile},
+        )
     base_load = []
     for s in slots:
         _local = s.start_utc.astimezone(tz)
