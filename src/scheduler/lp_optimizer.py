@@ -581,7 +581,19 @@ def solve_lp(
     # #50). Positive-price DHW heating is already discouraged by obj_grid, so no extra
     # penalty is needed to prevent gratuitous overshoot.
     obj_tank_hi = 0.01 * pulp.lpSum(s_tank_hi[i] for i in range(n))
-    objective = obj_grid + obj_cycle + obj_comfort + obj_tank_hi
+    # PV curtailment penalty: prevents the LP from "happily curtailing" solar during
+    # ForceCharge slots when the chg cap binds. Without this, pv_curt has zero objective
+    # coefficient and the LP picks max-imp + curtail because grid imp at -7p ties or
+    # beats PV's zero direct value. Penalty = EXPORT_RATE_PENCE makes curtailment
+    # cost-equivalent to "would have exported", restoring the correct ranking: prefer
+    # pv_use → battery over grid → battery when both compete. See prod audit 2026-04-30:
+    # 74% of one day's PV (6.34 kWh, ~£0.95) curtailed under the legacy zero-penalty
+    # objective. Set ``LP_PV_CURTAIL_PENALTY_PENCE_PER_KWH=0`` to revert.
+    pv_curt_pen = float(getattr(config, "LP_PV_CURTAIL_PENALTY_PENCE_PER_KWH", 0.0))
+    obj_pv_curt = (
+        pv_curt_pen * pulp.lpSum(pv_curt[i] for i in range(n)) if pv_curt_pen > 0 else 0
+    )
+    objective = obj_grid + obj_cycle + obj_comfort + obj_tank_hi + obj_pv_curt
 
     if use_stress and stress_aux:
         # Stress cost is suppressed during negative-price slots: every kWh of
