@@ -227,6 +227,19 @@ def _reconcile_daikin_actions(
             continue
 
         if now_utc >= end:
+            if status == "pending":
+                # Pending past end-time = silently skipped (heartbeat missed
+                # the window). Visibly warn so this class of bug surfaces next
+                # time instead of being silent. The 2026-04-30 active-mode
+                # rollout hit this with a 1-min restore window vs 2-min
+                # heartbeat — see lp_dispatch.LP_RESTORE_WINDOW_MINUTES.
+                logger.warning(
+                    "action_schedule[%s] %s window missed (start=%s end=%s now=%s, "
+                    "marking completed without firing) — likely too-narrow window "
+                    "or heartbeat lag",
+                    aid, atype, act.get("start_time"), act.get("end_time"),
+                    now_utc.isoformat(),
+                )
             if status in ("pending", "active"):
                 db.mark_action(aid, "completed")
             continue
