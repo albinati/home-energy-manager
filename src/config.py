@@ -462,6 +462,15 @@ class Config:
         os.getenv("LP_COMFORT_SLACK_PENCE_PER_DEGC_SLOT", "100")
     )
     LP_CYCLE_PENALTY_PENCE_PER_KWH: float = float(os.getenv("LP_CYCLE_PENALTY_PENCE_PER_KWH", "0.0001"))
+    # PV curtailment penalty: pence per kWh of solar the LP throws away. Without this, ``pv_curt``
+    # has zero objective coefficient — the LP happily curtails PV during deep-negative ForceCharge
+    # slots because grid imp at -7p ties or beats PV's zero direct value (battery is fungible
+    # given the chg cap). Setting the penalty to ``EXPORT_RATE_PENCE`` makes curtailment
+    # cost-equivalent to "would have exported," which restores the right ranking: prefer PV→battery
+    # over grid→battery when both compete for the same chg cap. 0 = legacy behaviour (no penalty).
+    LP_PV_CURTAIL_PENALTY_PENCE_PER_KWH: float = float(
+        os.getenv("LP_PV_CURTAIL_PENALTY_PENCE_PER_KWH", os.getenv("EXPORT_RATE_PENCE", "15.0"))
+    )
     # Inverter stress cost: piecewise-linear quadratic approximation on battery power per slot.
     # At nominal inverter power (MAX_INVERTER_KW), the penalty equals this value (p/kWh).
     # 0 = disabled. Recommended: 0.05–0.20. Works alongside or instead of TV penalties.
@@ -783,6 +792,19 @@ class Config:
     # ── API Quota & Cache ────────────────────────────────────────────────────
     # Daikin Onecta: soft daily budget (real limit ≈200; we stop at 180 to preserve 10% headroom)
     DAIKIN_DAILY_BUDGET: int = int(os.getenv("DAIKIN_DAILY_BUDGET", "180"))
+    # When DAIKIN_CONTROL_MODE=active, cap daily writes to this value during the soak window
+    # (first DAIKIN_ACTIVE_SOAK_DAYS days after the toggle). 0 = no soak cap. Belt-and-braces
+    # against an active-mode misbehaviour burning the whole 200/day Onecta limit before we
+    # notice. Soak start is recorded in runtime_settings ``daikin_active_mode_started_at``
+    # the first time the api_quota module sees DAIKIN_CONTROL_MODE=active.
+    DAIKIN_ACTIVE_SOAK_DAILY_BUDGET: int = int(os.getenv("DAIKIN_ACTIVE_SOAK_DAILY_BUDGET", "100"))
+    DAIKIN_ACTIVE_SOAK_DAYS: int = int(os.getenv("DAIKIN_ACTIVE_SOAK_DAYS", "3"))
+    # Circuit breaker: pause Daikin writes after N consecutive failures within W minutes,
+    # cooldown for C minutes, reset on next successful write. Defends against an Onecta
+    # outage burning quota with retries. 0 fails = breaker disabled.
+    DAIKIN_CIRCUIT_BREAKER_FAILS: int = int(os.getenv("DAIKIN_CIRCUIT_BREAKER_FAILS", "3"))
+    DAIKIN_CIRCUIT_BREAKER_WINDOW_MINUTES: int = int(os.getenv("DAIKIN_CIRCUIT_BREAKER_WINDOW_MINUTES", "15"))
+    DAIKIN_CIRCUIT_BREAKER_COOLDOWN_MINUTES: int = int(os.getenv("DAIKIN_CIRCUIT_BREAKER_COOLDOWN_MINUTES", "30"))
     # How long to serve device data from cache without refreshing (1800 s = 30 min)
     DAIKIN_DEVICES_CACHE_TTL_SECONDS: int = int(os.getenv("DAIKIN_DEVICES_CACHE_TTL_SECONDS", "1800"))
     # Minimum interval between explicit "force refresh" calls (UI refresh button, CLI --force-refresh)
