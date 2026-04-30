@@ -789,6 +789,21 @@ class Config:
     PLAN_AUTO_APPROVE: bool = os.getenv("PLAN_AUTO_APPROVE", "true").lower() in ("true", "1", "yes")
     PLAN_APPROVAL_TIMEOUT_SECONDS: int = int(os.getenv("PLAN_APPROVAL_TIMEOUT_SECONDS", "300"))
 
+    # ── Daikin action_schedule windows ───────────────────────────────────────
+    # Width of the "restore" window written by lp_dispatch after each LP-driven
+    # window (shutdown / max_heat / pre_heat / normal). The state machine
+    # silently marks an action `completed` (no fire) when ``now > end_time`` and
+    # status is still pending — so a window narrower than the heartbeat tick is
+    # racy. Production heartbeat is 120 s; 5 min gives 2.5× safety margin so
+    # restores always fire even when ticks land slightly off-grid. 2026-04-30
+    # active-mode rollout hit this with the legacy 1-min window: action 607
+    # (off) succeeded, action 606 (restore) was silently skipped, device stayed
+    # off until manual rollback to passive.
+    LP_RESTORE_WINDOW_MINUTES: int = max(
+        2,
+        int(os.getenv("LP_RESTORE_WINDOW_MINUTES", "5")),
+    )
+
     # ── API Quota & Cache ────────────────────────────────────────────────────
     # Daikin Onecta: soft daily budget (real limit ≈200; we stop at 180 to preserve 10% headroom)
     DAIKIN_DAILY_BUDGET: int = int(os.getenv("DAIKIN_DAILY_BUDGET", "180"))
