@@ -14,6 +14,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from collections.abc import Callable
 from typing import Any
 
 from .config import config, cop_at_temperature
@@ -720,6 +721,198 @@ def compute_today_pv_correction_factor(
     }
 
 
+def cloud_bucket(cloud_cover_pct: float | None) -> int:
+    """Map a cloud-cover % (0-100) to the calibration bucket index.
+
+    Convention (matches db.upsert_pv_calibration_hourly_cloud + the schema):
+        0 = clear     (0-25%)
+        1 = partly    (25-50%)
+        2 = mostly    (50-75%)
+        3 = overcast  (75-100%)
+
+    None or out-of-range values default to bucket 1 (partly) — middle of
+    the distribution, neutral choice.
+    """
+    if cloud_cover_pct is None:
+        return 1
+    p = float(cloud_cover_pct)
+    if p < 25.0:
+        return 0
+    if p < 50.0:
+        return 1
+    if p < 75.0:
+        return 2
+    return 3
+
+
+def get_pv_calibration_factor_for(
+    hour_utc: int,
+    cloud_cover_pct: float | None,
+    *,
+    cloud_table: dict[tuple[int, int], float] | None = None,
+    hourly_table: dict[int, float] | None = None,
+    flat: float = 1.0,
+) -> float:
+    """Resolve the calibration factor with the cloud → hour → flat fallback chain.
+
+    Lookup priority:
+        1. ``pv_calibration_hourly_cloud[(hour, bucket(cloud))]`` — per-hour × per-cloud
+        2. ``pv_calibration_hourly[hour]``                       — per-hour only
+        3. ``flat`` (caller's flat fallback, typically from compute_pv_calibration_factor)
+
+    Pass pre-fetched tables to avoid hitting the DB inside per-slot loops.
+    """
+    from . import db as _db
+
+    if cloud_table is None:
+        cloud_table = _db.get_pv_calibration_hourly_cloud()
+    if hourly_table is None:
+        hourly_table = _db.get_pv_calibration_hourly()
+
+    bucket = cloud_bucket(cloud_cover_pct)
+    if cloud_table:
+        f = cloud_table.get((hour_utc, bucket))
+        if f is not None:
+            return float(f)
+    if hourly_table:
+        f = hourly_table.get(hour_utc)
+        if f is not None:
+            return float(f)
+    return float(flat)
+
+
+def compute_pv_calibration_hourly_cloud_table(
+    window_days: int | None = None,
+    min_samples_per_cell: int = 4,
+) -> dict[str, Any]:
+    """Recompute the per-(hour, cloud-bucket) calibration table.
+
+    For each historical (day, hour) we have:
+      * measured kWh/h = mean of pv_realtime_history.solar_power_kw samples (PR #230 fix)
+      * forecast kWh/h = estimate_pv_kw(meteo_forecast.solar_w_m2 at that hour)
+      * cloud_pct      = meteo_forecast.cloud_cover_pct at that hour
+      * ratio          = measured / forecast
+
+    Group by (hour_of_day, cloud_bucket); take the median ratio per cell.
+    Cells with < ``min_samples_per_cell`` samples are skipped (low confidence).
+
+    Buckets that don't appear in the result fall back to the per-hour table
+    via :func:`get_pv_calibration_factor_for` at apply time.
+    """
+    from . import db as _db
+    from collections import defaultdict
+    from datetime import UTC as _UTC, date as _date, datetime as _dt, timedelta as _td
+
+    if window_days is None:
+        window_days = int(getattr(config, "PV_CALIBRATION_WINDOW_DAYS", 30))
+    end = _date.today()
+    start = end - _td(days=window_days)
+
+    # 1. Pull measurements (mean kW per hour, sparse-fix from PR #230)
+    actual_kw_samples: dict[tuple[str, int], list[float]] = defaultdict(list)
+    with _db._lock:
+        conn = _db.get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT captured_at, solar_power_kw FROM pv_realtime_history
+                   WHERE substr(captured_at, 1, 10) BETWEEN ? AND ?
+                     AND solar_power_kw IS NOT NULL""",
+                (start.isoformat(), end.isoformat()),
+            )
+            for ts_raw, kw in cur.fetchall():
+                try:
+                    ts = _dt.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+                except (ValueError, TypeError):
+                    continue
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=_UTC)
+                actual_kw_samples[(ts.date().isoformat(), ts.hour)].append(float(kw or 0.0))
+        finally:
+            conn.close()
+
+    measured_per_day_hour: dict[tuple[str, int], float] = {
+        k: sum(s) / len(s) for k, s in actual_kw_samples.items() if s
+    }
+
+    # 2. Pull historical forecasts WITH cloud_cover via Open-Meteo Archive
+    lat = (config.WEATHER_LAT or "").strip()
+    lon = (config.WEATHER_LON or "").strip()
+    if not lat or not lon:
+        return {"status": "skipped", "reason": "no lat/lon configured"}
+    try:
+        url = (
+            "https://archive-api.open-meteo.com/v1/archive?"
+            f"latitude={lat}&longitude={lon}"
+            f"&start_date={start.isoformat()}&end_date={end.isoformat()}"
+            "&hourly=shortwave_radiation_instant,cloud_cover"
+            "&timezone=UTC"
+        )
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            api_data = json.loads(resp.read().decode())
+    except (urllib.error.URLError, json.JSONDecodeError, KeyError, TypeError) as e:
+        return {"status": "skipped", "reason": f"open-meteo archive fetch failed: {e}"}
+
+    times = api_data.get("hourly", {}).get("time", [])
+    rads = api_data.get("hourly", {}).get("shortwave_radiation_instant", [])
+    clouds = api_data.get("hourly", {}).get("cloud_cover", [])
+    archive: dict[tuple[str, int], tuple[float, float | None]] = {}
+    for i, t in enumerate(times):
+        try:
+            dt = _dt.fromisoformat(str(t).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=_UTC)
+            day = dt.date().isoformat()
+            hour = dt.hour
+            r = rads[i] if i < len(rads) else None
+            c = clouds[i] if i < len(clouds) else None
+            if r is None:
+                continue
+            archive[(day, hour)] = (float(r), float(c) if c is not None else None)
+        except (ValueError, TypeError, IndexError):
+            continue
+
+    # 3. Build per-(hour, bucket) ratio lists
+    ratios_per_cell: dict[tuple[int, int], list[float]] = defaultdict(list)
+    for (day, hour), measured_kw in measured_per_day_hour.items():
+        forecast = archive.get((day, hour))
+        if forecast is None:
+            continue
+        rad, cloud = forecast
+        modelled_kw = estimate_pv_kw(rad)
+        if modelled_kw < 0.05 or measured_kw < 0.05:
+            continue                          # dawn/dusk noise
+        ratio = measured_kw / modelled_kw
+        if ratio > 5.0:
+            continue                          # outlier
+        bucket = cloud_bucket(cloud)
+        ratios_per_cell[(hour, bucket)].append(ratio)
+
+    # 4. Median per cell, clamp to [0.05, 1.20] (slightly wider than per-hour
+    #    table because clear-sky bucket can legitimately reach 1.0+)
+    factors: dict[tuple[int, int], float] = {}
+    samples: dict[tuple[int, int], int] = {}
+    for cell, rs in ratios_per_cell.items():
+        if len(rs) < min_samples_per_cell:
+            continue
+        rs_sorted = sorted(rs)
+        median = rs_sorted[len(rs_sorted) // 2]
+        clamped = max(0.05, min(1.20, median))
+        factors[cell] = round(clamped, 4)
+        samples[cell] = len(rs)
+
+    if not factors:
+        return {"status": "skipped", "reason": "insufficient samples per (hour, bucket)"}
+
+    n = _db.upsert_pv_calibration_hourly_cloud(factors, samples, window_days)
+    return {
+        "status": "ok",
+        "rows": n,
+        "window_days": window_days,
+        "cells_calibrated": sorted(factors.keys()),
+    }
+
+
 def evaluate_pv_forecast_accuracy(
     window_days: int = 30,
     *,
@@ -771,11 +964,13 @@ def evaluate_pv_forecast_accuracy(
     start = end - _td(days=window_days)
 
     cal_hourly = _db.get_pv_calibration_hourly()
-    flat_cal = compute_pv_calibration_factor() if not cal_hourly else 1.0
+    cal_cloud = _db.get_pv_calibration_hourly_cloud()
+    flat_cal = compute_pv_calibration_factor() if not cal_hourly and not cal_cloud else 1.0
 
     # Pull all measurements + forecasts in window
     actual_kw_samples: dict[tuple[str, int], list[float]] = defaultdict(list)
     forecast_radiation: dict[tuple[str, int], float] = {}
+    forecast_cloud: dict[tuple[str, int], float | None] = {}
 
     with _db._lock:
         conn = _db.get_connection()
@@ -795,19 +990,24 @@ def evaluate_pv_forecast_accuracy(
                     ts = ts.replace(tzinfo=_UTC)
                 actual_kw_samples[(ts.date().isoformat(), ts.hour)].append(float(kw or 0.0))
 
+            # cloud_cover_pct may not exist on older meteo_forecast rows; coalesce.
             cur = conn.execute(
-                """SELECT slot_time, solar_w_m2 FROM meteo_forecast
-                   WHERE substr(slot_time, 1, 10) BETWEEN ? AND ?""",
+                """SELECT slot_time, solar_w_m2,
+                          COALESCE(cloud_cover_pct, NULL) AS cloud_pct
+                     FROM meteo_forecast
+                    WHERE substr(slot_time, 1, 10) BETWEEN ? AND ?""",
                 (start.isoformat(), end.isoformat()),
             )
-            for ts_raw, rad in cur.fetchall():
+            for ts_raw, rad, cpct in cur.fetchall():
                 try:
                     ts = _dt.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
                 except (ValueError, TypeError):
                     continue
                 if ts.tzinfo is None:
                     ts = ts.replace(tzinfo=_UTC)
-                forecast_radiation[(ts.date().isoformat(), ts.hour)] = float(rad or 0.0)
+                key = (ts.date().isoformat(), ts.hour)
+                forecast_radiation[key] = float(rad or 0.0)
+                forecast_cloud[key] = float(cpct) if cpct is not None else None
         finally:
             conn.close()
 
@@ -821,7 +1021,13 @@ def evaluate_pv_forecast_accuracy(
         rad = forecast_radiation.get(key)
         if rad is None:
             continue
-        cal = float(cal_hourly.get(key[1], flat_cal)) if cal_hourly else flat_cal
+        cal = get_pv_calibration_factor_for(
+            key[1],
+            forecast_cloud.get(key),
+            cloud_table=cal_cloud,
+            hourly_table=cal_hourly,
+            flat=flat_cal,
+        )
         predicted_kw = estimate_pv_kw(rad) * cal
         if predicted_kw < min_kw and actual_kw < min_kw:
             continue                      # both negligible — skip dawn/dusk
@@ -864,7 +1070,7 @@ def evaluate_pv_forecast_accuracy(
 def forecast_to_lp_inputs(
     forecast: list[HourlyForecast],
     slot_starts_utc: list[datetime],
-    pv_scale: float | dict[int, float] | None = None,
+    pv_scale: float | dict[int, float] | Callable[[int, float], float] | None = None,
 ) -> WeatherLpSeries:
     """Build per-slot outdoor temperature, irradiance, PV kWh/slot, and COP arrays for the MILP.
 
@@ -874,6 +1080,9 @@ def forecast_to_lp_inputs(
       - ``dict[int, float]``: per-hour-of-day UTC factor (richer calibration that
         captures shading / sun-angle bias). Missing hours fall back to the median
         of provided values.
+      - ``Callable[[hour_utc, cloud_pct], factor]``: cloud-aware calibration (PR #232).
+        Receives the slot's hour-of-day + interpolated cloud_cover_pct, returns the
+        per-slot factor. Best-of-class for capturing day-specific conditions.
       - ``None``: defaults to ``PV_FORECAST_SCALE_FACTOR`` from config.
 
     Half-hour energy = kW × 0.5 h. When forecast is empty, PV and COP use safe defaults.
@@ -913,7 +1122,12 @@ def forecast_to_lp_inputs(
         rad_eff = max(0.0, rad_wm2 * att)
         kw_ac = estimate_pv_kw(rad_eff, capacity_kwp=cap, efficiency=eff)
         # Resolve the per-slot scale factor.
-        if isinstance(pv_scale, dict):
+        if callable(pv_scale):
+            try:
+                scale_for_slot = float(pv_scale(st.hour, cloud_pct))
+            except Exception:
+                scale_for_slot = 1.0
+        elif isinstance(pv_scale, dict):
             scale_for_slot = pv_scale.get(st.hour, pv_scale_fallback)
         else:
             scale_for_slot = float(pv_scale)
