@@ -450,6 +450,89 @@ class DaikinClient:
             b["dhw_kwh"] = round(b["dhw_kwh"], 3)
         return out
 
+    def get_2hourly_consumption_from_cache(
+        self, today_local: "_datetime.date | None" = None
+    ) -> dict[str, dict[int, dict[str, float]]]:
+        """Parse 2-hourly consumption from the cached ``/gateway-devices`` payload (#238).
+
+        Onecta exposes ``consumptionData.value.electrical.<mode>.d`` as a
+        24-element array layout: indices 0–11 = yesterday's 2-hour buckets
+        (00:00–02:00 ... 22:00–24:00), indices 12–23 = today's 2-hour buckets,
+        with future buckets reported as ``None``. The Onecta app's "DAY"
+        view labels this resolution as **2-hourly average** — that's the
+        finest granularity the public API offers. Anchored to the user's
+        local TZ (matches the app's bar-chart x-axis).
+
+        Returns ``{date_iso: {bucket_idx: {"heating_kwh": x, "dhw_kwh": y, "total_kwh": z}}}``
+        with ``bucket_idx`` in ``[0, 11]`` (0 = 00:00–02:00, 11 = 22:00–24:00).
+        Buckets reported as ``None`` are silently skipped — the upsert's
+        ``ON CONFLICT DO UPDATE`` lets later polls overwrite once the value
+        materialises.
+
+        ``today_local`` is injectable for tests; defaults to ``date.today()``.
+        Zero extra Daikin API quota — read-only over an already-cached payload.
+        """
+        from datetime import date as _date, timedelta as _td
+
+        if today_local is None:
+            today_local = _date.today()
+        yesterday_local = today_local - _td(days=1)
+
+        out: dict[str, dict[int, dict[str, float]]] = {}
+        try:
+            devices = self.get_devices()
+        except Exception:
+            return out
+
+        def _bucket(date_iso: str, idx: int) -> dict[str, float]:
+            day_buckets = out.setdefault(date_iso, {})
+            return day_buckets.setdefault(idx, {"heating_kwh": 0.0, "dhw_kwh": 0.0})
+
+        for device in devices:
+            for mp in device.raw.get("managementPoints", []):
+                mp_type = mp.get("managementPointType", "")
+                cd = mp.get("consumptionData")
+                if not isinstance(cd, dict):
+                    continue
+                cdv = cd.get("value")
+                if not isinstance(cdv, dict):
+                    continue
+                electrical = cdv.get("electrical")
+                if not isinstance(electrical, dict):
+                    continue
+                is_dhw = "domesticHotWater" in mp_type or "dhw" in mp_type.lower()
+                bucket_key = "dhw_kwh" if is_dhw else "heating_kwh"
+
+                for mode_name in ("heating", "cooling"):
+                    mode_data = electrical.get(mode_name)
+                    if not isinstance(mode_data, dict):
+                        continue
+                    arr = mode_data.get("d")
+                    if not isinstance(arr, list) or len(arr) != 24:
+                        continue  # defensive — only proceed when the array is the expected shape
+                    for i, val in enumerate(arr):
+                        if val is None:
+                            continue
+                        try:
+                            kwh = float(val)
+                        except (TypeError, ValueError):
+                            continue
+                        if i < 12:
+                            date_iso = yesterday_local.isoformat()
+                            bucket_idx = i
+                        else:
+                            date_iso = today_local.isoformat()
+                            bucket_idx = i - 12
+                        b = _bucket(date_iso, bucket_idx)
+                        b[bucket_key] += kwh
+
+        for date_iso, day in out.items():
+            for bucket_idx, b in day.items():
+                b["total_kwh"] = round(b["heating_kwh"] + b["dhw_kwh"], 3)
+                b["heating_kwh"] = round(b["heating_kwh"], 3)
+                b["dhw_kwh"] = round(b["dhw_kwh"], 3)
+        return out
+
     def get_heating_daily_kwh(self, year: int, month: int) -> list[float] | None:
         """
         Get daily heating consumption (kWh) for the month when available.

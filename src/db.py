@@ -333,6 +333,24 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         )"""
     )
 
+    # 2-hourly Daikin consumption (#238). The Onecta API exposes
+    # ``consumptionData.value.electrical.<mode>.d`` as a 24-element array =
+    # 12 yesterday + 12 today (2-hour buckets). bucket_idx 0 = 00:00–02:00,
+    # bucket_idx 11 = 22:00–24:00, both anchored to the user's local TZ.
+    # Already in the cached /gateway-devices payload — zero extra Daikin quota.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS daikin_consumption_2hourly (
+            date TEXT NOT NULL,
+            bucket_idx INTEGER NOT NULL CHECK (bucket_idx BETWEEN 0 AND 11),
+            kwh_total REAL,
+            kwh_heating REAL,
+            kwh_dhw REAL,
+            source TEXT NOT NULL DEFAULT 'unknown',
+            fetched_at TEXT NOT NULL,
+            PRIMARY KEY (date, bucket_idx)
+        )"""
+    )
+
     # V4: fox_realtime_snapshot — single-row live telemetry for MPC seeding
     conn.execute(
         """CREATE TABLE IF NOT EXISTS fox_realtime_snapshot (
@@ -2609,6 +2627,64 @@ def upsert_daikin_consumption_daily(
                 (date, kwh_total, kwh_heating, kwh_dhw, cop_daily, source, now),
             )
             conn.commit()
+        finally:
+            conn.close()
+
+
+def upsert_daikin_consumption_2hourly(
+    *,
+    date: str,
+    bucket_idx: int,
+    kwh_total: float | None,
+    kwh_heating: float | None = None,
+    kwh_dhw: float | None = None,
+    source: str = "onecta",
+) -> None:
+    """Upsert one ``daikin_consumption_2hourly`` row (#238). Idempotent.
+
+    Re-polling the same day overwrites the previous row, which is the
+    correct semantics: future buckets arrive as later polls fetch the
+    payload, and earlier-bucket values can also revise as Onecta's
+    aggregator settles.
+    """
+    if not (0 <= int(bucket_idx) <= 11):
+        raise ValueError(f"bucket_idx must be in [0, 11], got {bucket_idx}")
+    now = datetime.now(UTC).isoformat()
+    with _lock:
+        conn = get_connection()
+        try:
+            conn.execute(
+                """INSERT INTO daikin_consumption_2hourly
+                   (date, bucket_idx, kwh_total, kwh_heating, kwh_dhw, source, fetched_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(date, bucket_idx) DO UPDATE SET
+                     kwh_total=excluded.kwh_total,
+                     kwh_heating=excluded.kwh_heating,
+                     kwh_dhw=excluded.kwh_dhw,
+                     source=excluded.source,
+                     fetched_at=excluded.fetched_at""",
+                (date, int(bucket_idx), kwh_total, kwh_heating, kwh_dhw, source, now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def get_daikin_consumption_2hourly_range(
+    start_date: str, end_date: str
+) -> list[dict[str, Any]]:
+    """All 2-hourly Daikin consumption rows in ``[start_date, end_date]`` inclusive,
+    ordered by (date ASC, bucket_idx ASC)."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM daikin_consumption_2hourly "
+                "WHERE date >= ? AND date <= ? "
+                "ORDER BY date ASC, bucket_idx ASC",
+                (start_date, end_date),
+            )
+            return [dict(r) for r in cur.fetchall()]
         finally:
             conn.close()
 

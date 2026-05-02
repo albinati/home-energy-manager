@@ -308,20 +308,44 @@ def bulletproof_daikin_consumption_rollup_job() -> None:
         per_day = client.get_daily_consumption_from_cache()
         if not per_day:
             logger.info("daikin rollup: no consumption data in cached payload — skipped")
-            return
-        n = 0
-        for day, b in per_day.items():
-            db.upsert_daikin_consumption_daily(
-                date=day,
-                kwh_total=b.get("total_kwh"),
-                kwh_heating=b.get("heating_kwh"),
-                kwh_dhw=b.get("dhw_kwh"),
-                source="onecta_cache",
-            )
-            n += 1
-        logger.info("daikin_consumption_daily rollup: %d days written from cache", n)
+        else:
+            n = 0
+            for day, b in per_day.items():
+                db.upsert_daikin_consumption_daily(
+                    date=day,
+                    kwh_total=b.get("total_kwh"),
+                    kwh_heating=b.get("heating_kwh"),
+                    kwh_dhw=b.get("dhw_kwh"),
+                    source="onecta_cache",
+                )
+                n += 1
+            logger.info("daikin_consumption_daily rollup: %d days written from cache", n)
     except Exception as e:
         logger.warning("daikin rollup failed (non-fatal): %s", e)
+
+    # 2-hourly rollup (#238) — feeds the future Daikin physics calibration.
+    # Same cached payload, different array (``d`` vs ``w``). Independent
+    # try/except so a parse failure here doesn't drop the daily rollup above.
+    try:
+        per_2h = client.get_2hourly_consumption_from_cache()
+        if not per_2h:
+            logger.info("daikin 2h rollup: no consumption data in cached payload — skipped")
+            return
+        n = 0
+        for day, day_buckets in per_2h.items():
+            for bucket_idx, b in day_buckets.items():
+                db.upsert_daikin_consumption_2hourly(
+                    date=day,
+                    bucket_idx=bucket_idx,
+                    kwh_total=b.get("total_kwh"),
+                    kwh_heating=b.get("heating_kwh"),
+                    kwh_dhw=b.get("dhw_kwh"),
+                    source="onecta_cache",
+                )
+                n += 1
+        logger.info("daikin_consumption_2hourly rollup: %d (date,bucket) rows written from cache", n)
+    except Exception as e:
+        logger.warning("daikin 2h rollup failed (non-fatal): %s", e)
 
 
 def bulletproof_fox_energy_rollup_job() -> None:
