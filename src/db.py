@@ -736,6 +736,14 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     aj_cols = {str(r[1]) for r in cur.fetchall()}
     if "completed_at_utc" not in aj_cols:
         conn.execute("ALTER TABLE appliance_jobs ADD COLUMN completed_at_utc TEXT")
+    # PR #235: capture actual energy via SmartThings powerConsumptionReport.
+    # energy_start_wh = lifetime Wh counter at cycle start; actual_kwh =
+    # (counter_at_complete − counter_at_start) / 1000. Both NULL when the
+    # device doesn't report the capability or the snapshot was missed.
+    if "energy_start_wh" not in aj_cols:
+        conn.execute("ALTER TABLE appliance_jobs ADD COLUMN energy_start_wh REAL")
+    if "actual_kwh" not in aj_cols:
+        conn.execute("ALTER TABLE appliance_jobs ADD COLUMN actual_kwh REAL")
 
 
 def init_db() -> None:
@@ -4108,6 +4116,8 @@ _APPLIANCE_JOB_UPDATABLE_FIELDS = {
     "avg_price_pence", "actual_start_utc", "error_msg",
     "last_replan_at_utc", "duration_minutes", "deadline_utc",
     "completed_at_utc",
+    "energy_start_wh",
+    "actual_kwh",
 }
 
 

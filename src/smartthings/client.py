@@ -112,13 +112,18 @@ class SmartThingsClient:
             return v.strip().lower() == "true"
         return False
 
-    def get_machine_state(self, device_id: str) -> str | None:
-        """Return ``washerOperatingState.machineState`` value (run/pause/stop/finish/...).
+    def get_machine_state(self, device_id: str) -> tuple[str | None, str | None]:
+        """Return ``(machineState_value, machineState_timestamp_iso)``.
 
-        Returns ``None`` when the capability isn't present in the response or
-        the value isn't parseable. Used by the cycle-completion poller
-        (PR #234) — caller treats anything that isn't ``run`` or ``pause`` as
-        "cycle has ended".
+        Samsung reports both the current value AND the ISO timestamp of the
+        last state transition. PR #235 — using that timestamp for the
+        ``ended_at`` field on the cycle-completion notification (instead of
+        ``now()``) eliminates the up-to-5-min skew from the reconcile cadence.
+
+        Both elements default to ``None`` when the capability isn't present
+        or the value isn't parseable. Used by the completion poller
+        (PR #234) — caller treats anything that isn't ``run`` or ``pause``
+        as "cycle has ended".
         """
         try:
             data = self._request(
@@ -126,13 +131,40 @@ class SmartThingsClient:
                 f"/devices/{device_id}/components/main/capabilities/washerOperatingState/status",
             )
         except SmartThingsError:
-            return None
+            return None, None
         attr = data.get("machineState") if isinstance(data, dict) else None
         if not isinstance(attr, dict):
-            return None
+            return None, None
         v = attr.get("value")
+        ts_raw = attr.get("timestamp")
+        ts: str | None = ts_raw.strip() if isinstance(ts_raw, str) and ts_raw.strip() else None
         if isinstance(v, str):
-            return v.strip().lower()
+            return v.strip().lower(), ts
+        return None, ts
+
+    def get_power_consumption_energy_wh(self, device_id: str) -> int | None:
+        """Return ``powerConsumptionReport.powerConsumption.energy`` in Wh.
+
+        This is a **cumulative lifetime counter** (monotonic; only resets on
+        firmware reset). Subtract two snapshots taken at cycle fire-time and
+        completion to get the actual energy consumed by the cycle (PR #235).
+        Returns ``None`` when the capability isn't reported by the device or
+        the value isn't an integer.
+        """
+        try:
+            data = self._request(
+                "GET",
+                f"/devices/{device_id}/components/main/capabilities/powerConsumptionReport/status",
+            )
+        except SmartThingsError:
+            return None
+        pc = data.get("powerConsumption") if isinstance(data, dict) else None
+        val = pc.get("value") if isinstance(pc, dict) else None
+        if not isinstance(val, dict):
+            return None
+        e = val.get("energy")
+        if isinstance(e, (int, float)):
+            return int(e)
         return None
 
     def start_cycle(self, device_id: str) -> dict:

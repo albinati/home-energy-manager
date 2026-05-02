@@ -56,6 +56,7 @@ def test_notify_appliance_starting_dispatches_with_correct_alert_type() -> None:
 
 
 def test_notify_appliance_finished_dispatches_with_correct_alert_type() -> None:
+    """Default path (kwh_is_measured=False) → uses ≈ prefix + estimated_* keys."""
     with patch("src.notifier._dispatch") as mock_dispatch:
         notify_appliance_finished(
             appliance_name="Washer",
@@ -74,9 +75,37 @@ def test_notify_appliance_finished_dispatches_with_correct_alert_type() -> None:
     assert "Washer" in body
     assert "04:30" in body and "05:47" in body
     assert "77 min" in body
-    assert "0.60 kWh" in body
+    assert "≈ 0.60 kWh" in body
     assert kwargs["extra"]["estimated_kwh"] == 0.6
     assert kwargs["extra"]["estimated_cost_pence"] == 2.22
+    assert kwargs["extra"]["kwh_is_measured"] is False
+
+
+def test_notify_appliance_finished_measured_path_drops_approx_prefix() -> None:
+    """PR #235: when Samsung powerConsumptionReport gave us a real delta,
+    body uses the value without the ≈ ambiguity marker, and the structured
+    extra carries actual_kwh + actual_cost_pence (not the estimated_* keys)."""
+    with patch("src.notifier._dispatch") as mock_dispatch:
+        notify_appliance_finished(
+            appliance_name="Washer",
+            started_local="16:16",
+            ended_local="18:00",
+            duration_minutes=104,
+            avg_price_pence=3.7,
+            estimated_kwh=0.87,
+            estimated_cost_p=3.22,
+            kwh_is_measured=True,
+        )
+    args, kwargs = mock_dispatch.call_args
+    body = args[1]
+    assert "0.87 kWh" in body
+    assert "≈" not in body                          # measured → no approximation marker
+    extra = kwargs["extra"]
+    assert extra["kwh_is_measured"] is True
+    assert extra["actual_kwh"] == 0.87
+    assert extra["actual_cost_pence"] == 3.22
+    assert "estimated_kwh" not in extra
+    assert "estimated_cost_pence" not in extra
 
 
 def test_notify_appliance_finished_handles_missing_cost_estimate() -> None:
@@ -107,9 +136,16 @@ def test_brief_48h_summary_returns_string_with_no_data() -> None:
 
 # ---------- Completion poll ----------
 
-def _seed_running_job(state_returns: list[str | None]) -> tuple[int, MagicMock]:
+def _seed_running_job(
+    state_returns: list[str | None],
+    state_timestamps: list[str | None] | None = None,
+) -> tuple[int, MagicMock]:
     """Insert one running job + a mock SmartThings client whose
-    `get_machine_state` returns each value in `state_returns` per call."""
+    ``get_machine_state`` returns each ``(state, timestamp)`` tuple per call.
+
+    ``state_timestamps`` defaults to ``[None] * len(state_returns)`` (no
+    Samsung timestamp returned → caller falls back to ``now()``).
+    """
     appliance_id = db.add_appliance(
         vendor="smartthings", vendor_device_id="dev-test",
         name="Washer", device_type="washer",
@@ -132,7 +168,11 @@ def _seed_running_job(state_returns: list[str | None]) -> tuple[int, MagicMock]:
         actual_start_utc=now.isoformat().replace("+00:00", "Z"),
     )
     mock_client = MagicMock()
-    mock_client.get_machine_state.side_effect = state_returns
+    if state_timestamps is None:
+        state_timestamps = [None] * len(state_returns)
+    mock_client.get_machine_state.side_effect = list(
+        zip(state_returns, state_timestamps, strict=True)
+    )
     return job_id, mock_client
 
 
@@ -191,3 +231,48 @@ def test_poll_treats_finish_state_as_completion() -> None:
         _poll_running_jobs()
     job = db.get_appliance_job(job_id)
     assert job["status"] == "completed"
+
+
+def test_poll_uses_samsung_timestamp_over_detection_time() -> None:
+    """PR #235: when Samsung returns the actual state-change timestamp, use that
+    as ``completed_at_utc`` instead of ``now()``. Eliminates the up-to-5-min
+    skew from the reconcile cadence."""
+    actual_end_iso = "2026-05-02T17:00:10Z"
+    job_id, mock_client = _seed_running_job(
+        state_returns=["stop"],
+        state_timestamps=[actual_end_iso],
+    )
+    with patch("src.scheduler.appliance_dispatch._get_st_client", return_value=mock_client), \
+         patch("src.notifier._dispatch") as mock_dispatch:
+        from src.scheduler.appliance_dispatch import _poll_running_jobs
+        _poll_running_jobs()
+    job = db.get_appliance_job(job_id)
+    assert job["status"] == "completed"
+    # Must persist Samsung's timestamp (normalised to canonical UTC Z), not now().
+    assert job["completed_at_utc"] == actual_end_iso
+    finish_call = next(
+        c for c in mock_dispatch.call_args_list
+        if c.args[0] == AlertType.APPLIANCE_FINISHED
+    )
+    extra = finish_call.kwargs["extra"]
+    # The dispatched ``ended_local`` field is rendered from Samsung's timestamp.
+    # Independent of the test runner's wall clock — locks in the fix.
+    assert "17:00" in extra["ended_local"] or "18:00" in extra["ended_local"]
+    # 18:00 BST during DST, 17:00 UTC otherwise — both acceptable.
+
+
+def test_poll_falls_back_to_now_when_samsung_timestamp_missing() -> None:
+    """No timestamp → must still mark complete; ended_at degrades to now()."""
+    job_id, mock_client = _seed_running_job(
+        state_returns=["stop"], state_timestamps=[None],
+    )
+    with patch("src.scheduler.appliance_dispatch._get_st_client", return_value=mock_client), \
+         patch("src.notifier._dispatch") as mock_dispatch:
+        from src.scheduler.appliance_dispatch import _poll_running_jobs
+        _poll_running_jobs()
+    job = db.get_appliance_job(job_id)
+    assert job["status"] == "completed"
+    assert job["completed_at_utc"] is not None       # populated, just from now()
+    assert any(
+        c.args[0] == AlertType.APPLIANCE_FINISHED for c in mock_dispatch.call_args_list
+    )

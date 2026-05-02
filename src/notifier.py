@@ -401,17 +401,31 @@ def notify_appliance_finished(
     estimated_kwh: float | None = None,
     estimated_cost_p: float | None = None,
     brief_md: str | None = None,
+    kwh_is_measured: bool = False,
 ) -> None:
     """✅ Cycle has finished (poll detected state transition out of ``run``).
 
     Includes a concise outcome line + same 4-line brief so the family closes
     the loop on cost and sees what's coming next.
+
+    ``kwh_is_measured`` distinguishes a real measurement (Samsung
+    ``powerConsumptionReport`` delta — PR #235) from a static
+    ``typical_kw × duration`` fallback. When measured, the message renders
+    without the ``≈`` ambiguity prefix and the structured extra carries
+    ``actual_kwh`` / ``actual_cost_pence`` instead of the ``estimated_*`` keys.
     """
-    cost_line = ""
     if estimated_kwh is not None and estimated_cost_p is not None:
-        cost_line = f"≈ {estimated_kwh:.2f} kWh ≈ {estimated_cost_p:.1f}p"
+        if kwh_is_measured:
+            cost_line = f"{estimated_kwh:.2f} kWh · {estimated_cost_p:.1f}p"
+        else:
+            cost_line = f"≈ {estimated_kwh:.2f} kWh ≈ {estimated_cost_p:.1f}p"
+    elif estimated_kwh is not None:
+        prefix = "" if kwh_is_measured else "≈ "
+        cost_line = f"{prefix}{estimated_kwh:.2f} kWh"
     elif avg_price_pence is not None:
         cost_line = f"avg {avg_price_pence:.1f}p/kWh"
+    else:
+        cost_line = ""
     body_lines = [
         f"✅ **{appliance_name}** cycle complete",
         f"{started_local} → {ended_local} ({duration_minutes} min)" + (f" · {cost_line}" if cost_line else ""),
@@ -424,11 +438,14 @@ def notify_appliance_finished(
         "started_local": started_local,
         "ended_local": ended_local,
         "duration_minutes": int(duration_minutes),
+        "kwh_is_measured": bool(kwh_is_measured),
     }
     if estimated_kwh is not None:
-        extra["estimated_kwh"] = round(float(estimated_kwh), 3)
+        key = "actual_kwh" if kwh_is_measured else "estimated_kwh"
+        extra[key] = round(float(estimated_kwh), 3)
     if estimated_cost_p is not None:
-        extra["estimated_cost_pence"] = round(float(estimated_cost_p), 2)
+        key = "actual_cost_pence" if kwh_is_measured else "estimated_cost_pence"
+        extra[key] = round(float(estimated_cost_p), 2)
     _dispatch(AlertType.APPLIANCE_FINISHED, body, urgent=False, extra=extra)
 
 
