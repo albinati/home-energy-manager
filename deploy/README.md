@@ -171,7 +171,7 @@ O `refresh_token` da Daikin expira a cada ~30 dias. Quando o heartbeat começar 
 
 ```bash
 # Do laptop, abre tunnel SSH pra publicar :8080 local.
-ssh -L 8080:localhost:8080 root@<hem-host>.your-tailnet.ts.net
+ssh -L 8080:localhost:8080 root@<hem-host>.ts.net
 # Então no host:
 docker compose -f /srv/hem/compose.daikin-auth.yaml run --rm daikin-auth
 # Abre a URL impressa no browser local; faz login Daikin; tokens caem em

@@ -39,7 +39,7 @@ Every solve is snapshotted to SQLite so any past day's plan can be re-run under 
 
 ## Status
 
-This is a working personal project running 24/7 on one site (UK, London). It is **public so the architecture and accuracy work are open**, not because it is a turn-key product. Hardware specs, integrations, and tariff defaults are tuned to one installation:
+This is a working personal project running 24/7 on one UK site. It is **public so the architecture and accuracy work are open**, not because it is a turn-key product. Hardware specs, integrations, and tariff defaults are tuned to one installation:
 
 - 4.5 kW PV array, Fox H1-5.0-E-G2 inverter, EP11 battery
 - Daikin Altherma 3 H HT (passive mode in summer, active LWT modulation in heating season)

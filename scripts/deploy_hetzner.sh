@@ -11,13 +11,13 @@
 #   ./scripts/deploy_hetzner.sh --backup --no-restart  # pull + deps only, skip restart
 #
 # Tailscale topology:
-#   Hetzner server : <hem-host>.your-tailnet.ts.net  (100.x.y.z)
-#   Local machine  : <workstation>.your-tailnet.ts.net      (100.x.y.z, WSL/Linux)
-#   SSH to Hetzner : ssh root@<hem-host>.your-tailnet.ts.net  (no keys needed)
+#   Hetzner server : <hem-host>.ts.net  (100.x.y.z)
+#   Local machine  : <workstation>.ts.net      (100.x.y.z, WSL/Linux)
+#   SSH to Hetzner : ssh root@<hem-host>.ts.net  (no keys needed)
 #
 # Backup (off-server via Tailscale — saves Hetzner disk space):
 #   Already set in Hetzner ~/.bashrc:
-#     LOCAL_BACKUP_DEST=root@<workstation>.your-tailnet.ts.net:/root/em-backups
+#     LOCAL_BACKUP_DEST=root@<workstation>.ts.net:/root/em-backups
 #   To activate: enable SSH on <workstation> once (choose one):
 #     Option A — Tailscale SSH:  sudo tailscale set --ssh
 #     Option B — OpenSSH:        sudo apt install openssh-server && sudo service ssh start

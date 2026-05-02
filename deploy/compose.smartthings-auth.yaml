@@ -2,7 +2,7 @@
 #
 # Usage:
 #   1. From your laptop, tunnel :8080 to the Hetzner host:
-#        ssh -L 8080:localhost:8080 root@<hem-host>.your-tailnet.ts.net
+#        ssh -L 8080:localhost:8080 root@<hem-host>.ts.net
 #   2. On the host, launch the auth-only container:
 #        docker compose -f /srv/hem/compose.smartthings-auth.yaml run --rm smartthings-auth
 #   3. The container prints an authorize URL — open it in your local browser.
