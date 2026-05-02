@@ -563,7 +563,7 @@ def _poll_running_jobs() -> None:
             appliance = db.get_appliance(int(job["appliance_id"]))
             if appliance is None:
                 continue
-            state = client.get_machine_state(appliance["vendor_device_id"])
+            state, state_changed_at = client.get_machine_state(appliance["vendor_device_id"])
         except SmartThingsError as e:
             logger.debug(
                 "poll_running: machine_state lookup failed for job %s (%s) — retry next pass",
@@ -576,18 +576,52 @@ def _poll_running_jobs() -> None:
             continue
 
         # Transitioned out → mark complete and notify.
+        # Prefer Samsung's machineState.timestamp (the actual moment the unit
+        # transitioned to stop/finish) over our detection time (PR #235).
+        # Without this, the message reads "ended at 18:34" when the cycle
+        # actually ended at 18:00 — up to one reconcile cycle (5 min) of
+        # skew, larger when the service was offline / just restarted.
         ended_at = _iso(_now_utc())
+        if state_changed_at:
+            try:
+                # Normalise to canonical UTC Z for storage/display
+                _dt = datetime.fromisoformat(state_changed_at.replace("Z", "+00:00"))
+                if _dt.tzinfo is None:
+                    _dt = _dt.replace(tzinfo=UTC)
+                ended_at = _iso(_dt.astimezone(UTC))
+            except (ValueError, TypeError):
+                logger.debug(
+                    "poll_running: ignoring unparseable state_changed_at=%s for job %s",
+                    state_changed_at, job.get("id"),
+                )
+        # PR #235: read the lifetime energy counter NOW and compute actual
+        # cycle kWh as a delta vs the snapshot taken at fire-time. Falls back
+        # to the static typical_kw × duration estimate when either snapshot
+        # is missing (capability absent / older job pre-#235 / fire-time
+        # snapshot failed).
+        actual_kwh: float | None = None
+        try:
+            energy_now_wh = client.get_power_consumption_energy_wh(appliance["vendor_device_id"])
+            energy_start_raw = job.get("energy_start_wh")
+            if energy_now_wh is not None and energy_start_raw is not None:
+                delta_wh = float(energy_now_wh) - float(energy_start_raw)
+                if delta_wh >= 0:                  # guard against counter reset
+                    actual_kwh = round(delta_wh / 1000.0, 3)
+        except SmartThingsError:
+            actual_kwh = None
+
         try:
             db.update_appliance_job(
                 int(job["id"]), status="completed", completed_at_utc=ended_at,
+                actual_kwh=actual_kwh,
             )
         except Exception:
             logger.exception("poll_running: DB update_appliance_job failed for %s", job.get("id"))
             continue
 
         logger.info(
-            "appliance complete: job %s state=%s, marking completed",
-            job.get("id"), state,
+            "appliance complete: job %s state=%s, marking completed (actual_kwh=%s)",
+            job.get("id"), state, actual_kwh,
         )
 
         # Build the finished notification (best-effort)
@@ -607,16 +641,22 @@ def _poll_running_jobs() -> None:
                 duration_min = max(1, int((end_dt - start_dt).total_seconds() // 60))
             ended_local_dt = datetime.fromisoformat(ended_at.replace("Z", "+00:00")).astimezone(tz)
             avg_p = job.get("avg_price_pence")
-            est_kwh = None
-            est_cost_p = None
-            try:
-                typical_kw = float(appliance.get("typical_kw") or 0.0)
-                if typical_kw > 0 and duration_min > 0:
-                    est_kwh = typical_kw * (duration_min / 60.0)
-                    if avg_p is not None:
-                        est_cost_p = est_kwh * float(avg_p)
-            except (TypeError, ValueError):
-                pass
+
+            # Prefer measured kWh (PR #235). Fall back to typical_kw × duration
+            # only when the energy delta couldn't be computed.
+            kwh: float | None = actual_kwh
+            cost_p: float | None = None
+            measured = actual_kwh is not None
+            if not measured:
+                try:
+                    typical_kw = float(appliance.get("typical_kw") or 0.0)
+                    if typical_kw > 0 and duration_min > 0:
+                        kwh = typical_kw * (duration_min / 60.0)
+                except (TypeError, ValueError):
+                    kwh = None
+            if kwh is not None and avg_p is not None:
+                cost_p = float(kwh) * float(avg_p)
+
             notify_appliance_finished(
                 appliance_name=str(
                     appliance.get("name") or appliance.get("device_type") or "Appliance"
@@ -625,9 +665,10 @@ def _poll_running_jobs() -> None:
                 ended_local=ended_local_dt.strftime("%H:%M"),
                 duration_minutes=duration_min,
                 avg_price_pence=float(avg_p) if avg_p is not None else None,
-                estimated_kwh=est_kwh,
-                estimated_cost_p=est_cost_p,
+                estimated_kwh=kwh,
+                estimated_cost_p=cost_p,
                 brief_md=build_brief_48h_summary(),
+                kwh_is_measured=measured,
             )
         except Exception:
             logger.exception(
@@ -936,10 +977,25 @@ def _fire_cron(job_id: int) -> None:
         )
         return
 
+    # PR #235: capture lifetime energy counter at cycle start, so the
+    # completion poller can compute actual cycle kWh as a delta. Best-effort:
+    # capability may be absent on some firmwares.
+    energy_start_wh: int | None = None
+    try:
+        raw = client.get_power_consumption_energy_wh(appliance["vendor_device_id"])
+        if isinstance(raw, (int, float)):
+            energy_start_wh = int(raw)
+    except SmartThingsError:
+        energy_start_wh = None
+
     db.update_appliance_job(
         int(job_id), status="running", actual_start_utc=actual_start,
+        energy_start_wh=energy_start_wh,
     )
-    logger.info("appliance fire: job %d → running", job_id)
+    logger.info(
+        "appliance fire: job %d → running (energy_start_wh=%s)",
+        job_id, energy_start_wh,
+    )
 
     # PR #234: notify the family that laundry is starting + inline forward brief.
     # Best-effort — never let a notification failure block the dispatch path.
