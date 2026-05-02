@@ -1707,6 +1707,12 @@ def build_mcp() -> FastMCP:
                 "delta_vs_svt_pounds": p.get("delta_vs_svt_gbp"),
                 "delta_vs_fixed_pounds": p.get("delta_vs_fixed_gbp"),
             }
+            # Surface clamp metadata so OpenClaw can render an honest qualifier
+            # ("YTD since 2026-04-01 — household joined Agile then").
+            if p.get("clamped"):
+                block["clamped"] = True
+                block["clamp_reason"] = p.get("clamp_reason")
+                block["requested_start"] = p.get("requested_start")
             if "delta_vs_fixed_tariff_gbp" in p:
                 block["fixed_tariff_label"] = p.get("fixed_tariff_label")
                 block["fixed_tariff_shadow_pounds"] = p.get("fixed_tariff_shadow_gbp")
@@ -2015,11 +2021,19 @@ def build_mcp() -> FastMCP:
                 }
             )
 
+        # Use the values FROM the period_pnl response — they reflect the actual
+        # window used after AGILE_TARIFF_START_DATE clamping (#214). Echoing
+        # `start`/`end`/`n_days` from local variables ignores the clamp and
+        # produces internally inconsistent output (Jan 1 → May 2 with n_days=32).
+        period_start_used = p.get("period_start", start.isoformat())
+        period_end_used = p.get("period_end", end.isoformat())
+        label_resolved = p.get("label", label_used)
+
         result = {
             "ok": True,
-            "label": label_used,
-            "period_start": start.isoformat(),
-            "period_end": end.isoformat(),
+            "label": label_resolved,
+            "period_start": period_start_used,
+            "period_end": period_end_used,
             "n_days": n_days,
             "energy_used_kwh": kwh,
             "energy_exported_kwh": float(p.get("export_kwh") or 0),
@@ -2031,9 +2045,13 @@ def build_mcp() -> FastMCP:
                 "All shadow costs include the standing charge × n_days."
             ),
         }
+        if p.get("clamped"):
+            result["clamped"] = True
+            result["clamp_reason"] = p.get("clamp_reason")
+            result["requested_start"] = p.get("requested_start")
         if is_single_day:
             # Back-compat: callers from before the period extension expect ``date``.
-            result["date"] = start.isoformat()
+            result["date"] = period_start_used
         return result
 
     @mcp.tool(
