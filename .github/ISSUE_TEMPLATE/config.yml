@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security report
+    url: https://github.com/albinati/home-energy-manager/blob/main/SECURITY.md
+    about: Don't file security issues publicly — see SECURITY.md for the disclosure process.
+  - name: V11 accuracy roadmap
+    url: https://github.com/albinati/home-energy-manager/issues/193
+    about: The active epic for past-data integration + uncertainty modelling.

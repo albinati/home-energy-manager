@@ -1,0 +1,54 @@
+name: Feature request
+description: Suggest a new capability or improvement.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Lead with the *goal*, not the *implementation*. "I want to know if guests are home so the LP plans extra DHW" is more useful than "add an `is_guests` boolean to config."
+
+        For accuracy / LP changes specifically, check the [V11 epic (#193)](https://github.com/albinati/home-energy-manager/issues/193) — your idea may already have a story.
+
+  - type: textarea
+    id: goal
+    attributes:
+      label: What are you trying to achieve?
+      description: The user-facing or financial outcome. One paragraph.
+    validations:
+      required: true
+
+  - type: textarea
+    id: status-quo
+    attributes:
+      label: How does it work today?
+      description: What's the current behaviour, and why is it insufficient?
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: Proposed approach (optional)
+      description: |
+        Implementation thoughts if you have them. It's fine to skip this — sometimes the right shape only emerges in discussion.
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds, related issues, or off-the-shelf tools you looked at first.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - Personal site (this installation only)
+        - Generalisable (could help others adopting the project)
+        - Unsure
+    validations:
+      required: false
