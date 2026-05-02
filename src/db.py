@@ -670,6 +670,58 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_presence_periods_range ON presence_periods(start_utc, end_utc)"
     )
 
+    # V16: smart appliance scheduling. The `appliances` table is the catalogue
+    # of managed devices (Samsung washer first, dishwasher/dryer later); the
+    # `appliance_jobs` table records each "armed by remote-mode → fired or
+    # cancelled" lifecycle. Trigger model: the LP solve queries SmartThings
+    # remoteControlEnabled per enabled appliance; when true, an appliance_jobs
+    # row is created/updated and an APScheduler one-shot DateTrigger cron is
+    # registered at planned_start_utc.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS appliances (
+            id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+            vendor                   TEXT NOT NULL,
+            vendor_device_id         TEXT NOT NULL,
+            name                     TEXT NOT NULL,
+            device_type              TEXT NOT NULL,
+            default_duration_minutes INTEGER NOT NULL DEFAULT 120,
+            deadline_local_time      TEXT NOT NULL DEFAULT '07:00',
+            typical_kw               REAL NOT NULL DEFAULT 0.5,
+            enabled                  INTEGER NOT NULL DEFAULT 1,
+            created_at               TEXT NOT NULL,
+            UNIQUE(vendor, vendor_device_id)
+        )"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS appliance_jobs (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            appliance_id        INTEGER NOT NULL,
+            status              TEXT NOT NULL DEFAULT 'scheduled',
+            armed_at_utc        TEXT NOT NULL,
+            deadline_utc        TEXT NOT NULL,
+            duration_minutes    INTEGER NOT NULL,
+            planned_start_utc   TEXT NOT NULL,
+            planned_end_utc     TEXT NOT NULL,
+            avg_price_pence     REAL,
+            actual_start_utc    TEXT,
+            error_msg           TEXT,
+            last_replan_at_utc  TEXT,
+            created_at          TEXT NOT NULL,
+            updated_at          TEXT NOT NULL,
+            FOREIGN KEY (appliance_id) REFERENCES appliances(id)
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_appliance_jobs_status_planned "
+        "ON appliance_jobs(status, planned_start_utc)"
+    )
+    # Partial unique index: one active session per appliance.
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_appliance_jobs_one_active "
+        "ON appliance_jobs(appliance_id) "
+        "WHERE status IN ('scheduled', 'running')"
+    )
+
 
 def init_db() -> None:
     """Create tables if missing and apply lightweight migrations."""
@@ -4055,6 +4107,298 @@ def find_scenario_batch_for_run(run_id: int) -> int | None:
             )
             r = cur.fetchone()
             return int(r[0]) if r else None
+        finally:
+            conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Smart appliance scheduling — DAL (V16)
+# ---------------------------------------------------------------------------
+
+_APPLIANCE_UPDATABLE_FIELDS = {
+    "name", "device_type", "default_duration_minutes",
+    "deadline_local_time", "typical_kw", "enabled",
+}
+
+_APPLIANCE_JOB_UPDATABLE_FIELDS = {
+    "status", "planned_start_utc", "planned_end_utc",
+    "avg_price_pence", "actual_start_utc", "error_msg",
+    "last_replan_at_utc", "duration_minutes", "deadline_utc",
+}
+
+
+def add_appliance(
+    *,
+    vendor: str,
+    vendor_device_id: str,
+    name: str,
+    device_type: str,
+    default_duration_minutes: int = 120,
+    deadline_local_time: str = "07:00",
+    typical_kw: float = 0.5,
+    enabled: bool = True,
+) -> int:
+    """Insert a managed appliance row. Returns the new id.
+
+    Idempotent on (vendor, vendor_device_id) — re-inserting the same device
+    raises sqlite3.IntegrityError so the caller can decide between update
+    or "already registered".
+    """
+    now = datetime.now(UTC).isoformat()
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """INSERT INTO appliances
+                   (vendor, vendor_device_id, name, device_type,
+                    default_duration_minutes, deadline_local_time, typical_kw,
+                    enabled, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (vendor, vendor_device_id, name, device_type,
+                 int(default_duration_minutes), deadline_local_time,
+                 float(typical_kw), 1 if enabled else 0, now),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+        finally:
+            conn.close()
+
+
+def list_appliances(*, enabled_only: bool = False) -> list[dict[str, Any]]:
+    """Return all appliances ordered by id ASC."""
+    with _lock:
+        conn = get_connection()
+        try:
+            sql = "SELECT * FROM appliances"
+            if enabled_only:
+                sql += " WHERE enabled = 1"
+            sql += " ORDER BY id ASC"
+            cur = conn.execute(sql)
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
+def get_appliance(appliance_id: int) -> dict[str, Any] | None:
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM appliances WHERE id = ?", (appliance_id,)
+            )
+            r = cur.fetchone()
+            return dict(r) if r else None
+        finally:
+            conn.close()
+
+
+def update_appliance(appliance_id: int, **fields: Any) -> bool:
+    """Update one or more fields on an appliance. Returns True if a row was
+    updated. Silently ignores keys not in :data:`_APPLIANCE_UPDATABLE_FIELDS`."""
+    sets = []
+    vals: list[Any] = []
+    for k, v in fields.items():
+        if k not in _APPLIANCE_UPDATABLE_FIELDS:
+            continue
+        sets.append(f"{k} = ?")
+        if k == "enabled":
+            vals.append(1 if v else 0)
+        elif k == "default_duration_minutes":
+            vals.append(int(v))
+        elif k == "typical_kw":
+            vals.append(float(v))
+        else:
+            vals.append(v)
+    if not sets:
+        return False
+    vals.append(appliance_id)
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                f"UPDATE appliances SET {', '.join(sets)} WHERE id = ?", vals
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+
+def delete_appliance(appliance_id: int) -> bool:
+    with _lock:
+        conn = get_connection()
+        try:
+            # Cascade: drop any existing jobs first so the FK doesn't bite.
+            conn.execute(
+                "DELETE FROM appliance_jobs WHERE appliance_id = ?",
+                (appliance_id,),
+            )
+            cur = conn.execute(
+                "DELETE FROM appliances WHERE id = ?", (appliance_id,)
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+
+def get_active_appliance_job(appliance_id: int) -> dict[str, Any] | None:
+    """Return the row in status ('scheduled', 'running') for this appliance,
+    or None. The partial unique index guarantees at most one such row."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT * FROM appliance_jobs
+                   WHERE appliance_id = ? AND status IN ('scheduled', 'running')
+                   LIMIT 1""",
+                (appliance_id,),
+            )
+            r = cur.fetchone()
+            return dict(r) if r else None
+        finally:
+            conn.close()
+
+
+def create_appliance_job(
+    *,
+    appliance_id: int,
+    armed_at_utc: str,
+    deadline_utc: str,
+    duration_minutes: int,
+    planned_start_utc: str,
+    planned_end_utc: str,
+    avg_price_pence: float | None = None,
+    last_replan_at_utc: str | None = None,
+    status: str = "scheduled",
+) -> int:
+    now = datetime.now(UTC).isoformat()
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """INSERT INTO appliance_jobs
+                   (appliance_id, status, armed_at_utc, deadline_utc,
+                    duration_minutes, planned_start_utc, planned_end_utc,
+                    avg_price_pence, last_replan_at_utc, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    appliance_id, status, armed_at_utc, deadline_utc,
+                    int(duration_minutes), planned_start_utc, planned_end_utc,
+                    avg_price_pence,
+                    last_replan_at_utc or armed_at_utc, now, now,
+                ),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+        finally:
+            conn.close()
+
+
+def get_appliance_job(job_id: int) -> dict[str, Any] | None:
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM appliance_jobs WHERE id = ?", (job_id,)
+            )
+            r = cur.fetchone()
+            return dict(r) if r else None
+        finally:
+            conn.close()
+
+
+def update_appliance_job(job_id: int, **fields: Any) -> bool:
+    """Update one or more mutable fields on an appliance job. ``updated_at``
+    is set automatically. Returns True if a row was updated."""
+    sets = ["updated_at = ?"]
+    vals: list[Any] = [datetime.now(UTC).isoformat()]
+    for k, v in fields.items():
+        if k not in _APPLIANCE_JOB_UPDATABLE_FIELDS:
+            continue
+        sets.append(f"{k} = ?")
+        if k in ("duration_minutes",):
+            vals.append(int(v) if v is not None else None)
+        elif k == "avg_price_pence":
+            vals.append(float(v) if v is not None else None)
+        else:
+            vals.append(v)
+    vals.append(job_id)
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                f"UPDATE appliance_jobs SET {', '.join(sets)} WHERE id = ?",
+                vals,
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+
+def get_appliance_jobs(
+    *,
+    from_utc: str | None = None,
+    to_utc: str | None = None,
+    status: str | None = None,
+    appliance_id: int | None = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    """Query appliance_jobs by status/window. ``from_utc`` and ``to_utc`` bound
+    ``planned_start_utc`` (inclusive lower, exclusive upper). Sorted descending
+    by planned_start_utc so the most recent / next-up are first."""
+    where: list[str] = []
+    vals: list[Any] = []
+    if status is not None:
+        where.append("status = ?")
+        vals.append(status)
+    if appliance_id is not None:
+        where.append("appliance_id = ?")
+        vals.append(int(appliance_id))
+    if from_utc is not None:
+        where.append("planned_start_utc >= ?")
+        vals.append(from_utc)
+    if to_utc is not None:
+        where.append("planned_start_utc < ?")
+        vals.append(to_utc)
+    sql = "SELECT * FROM appliance_jobs"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY planned_start_utc DESC LIMIT ?"
+    vals.append(int(limit))
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(sql, vals)
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
+def get_active_appliance_jobs_overlapping(
+    *, from_utc: str, to_utc: str
+) -> list[dict[str, Any]]:
+    """Return rows in status ('scheduled', 'running') whose
+    [planned_start_utc, planned_end_utc] overlaps [from_utc, to_utc).
+
+    Used by the LP residual-load profile to bump load on slots covered by
+    armed sessions.
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT j.*, a.typical_kw AS appliance_typical_kw
+                   FROM appliance_jobs j
+                   JOIN appliances a ON a.id = j.appliance_id
+                   WHERE j.status IN ('scheduled', 'running')
+                     AND j.planned_start_utc < ?
+                     AND j.planned_end_utc > ?
+                   ORDER BY j.planned_start_utc""",
+                (to_utc, from_utc),
+            )
+            return [dict(r) for r in cur.fetchall()]
         finally:
             conn.close()
 
