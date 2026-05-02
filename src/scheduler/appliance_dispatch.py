@@ -503,6 +503,10 @@ def reconcile() -> None:
     Reads the current SmartThings ``remoteControlEnabled`` for each appliance
     and arms / cancels / re-plans accordingly. Never raises — failures are
     logged + counted; callers see best-effort behaviour.
+
+    Also polls running jobs for cycle completion (PR #234) — single SmartThings
+    call per running job, fires ``notify_appliance_finished`` on transition
+    out of ``run``/``pause``.
     """
     if not config.APPLIANCE_DISPATCH_ENABLED:
         return
@@ -520,6 +524,115 @@ def reconcile() -> None:
             logger.exception(
                 "appliance reconcile: _reconcile_one failed for #%s",
                 appliance.get("id"),
+            )
+    # PR #234: cycle-completion poll. Runs after the arm/cancel pass so we
+    # don't re-fire a notification for a job that just got armed.
+    try:
+        _poll_running_jobs()
+    except Exception:
+        logger.exception("appliance reconcile: _poll_running_jobs failed (non-fatal)")
+
+
+def _poll_running_jobs() -> None:
+    """Detect cycle completion on every running job and fire the finished hook.
+
+    A job stays in ``status='running'`` until SmartThings reports the unit
+    has left ``run``/``pause``. On detection: mark ``status='completed'``,
+    stamp ``completed_at_utc``, and dispatch one ``APPLIANCE_FINISHED``
+    notification (idempotent — DB update is the dedup key).
+
+    Best-effort: any error short-circuits this single job, never blocks
+    the broader reconcile pass.
+    """
+    try:
+        running_jobs = db.get_appliance_jobs(status="running", limit=20)
+    except Exception:
+        logger.exception("poll_running: list jobs failed")
+        return
+    if not running_jobs:
+        return
+
+    try:
+        client = _get_st_client()
+    except SmartThingsError as e:
+        logger.debug("poll_running: SmartThings client unavailable (%s) — skipping pass", e.code)
+        return
+
+    for job in running_jobs:
+        try:
+            appliance = db.get_appliance(int(job["appliance_id"]))
+            if appliance is None:
+                continue
+            state = client.get_machine_state(appliance["vendor_device_id"])
+        except SmartThingsError as e:
+            logger.debug(
+                "poll_running: machine_state lookup failed for job %s (%s) — retry next pass",
+                job.get("id"), e.code,
+            )
+            continue
+
+        if state in (None, "run", "pause"):
+            # Still running (or capability unavailable — don't guess).
+            continue
+
+        # Transitioned out → mark complete and notify.
+        ended_at = _iso(_now_utc())
+        try:
+            db.update_appliance_job(
+                int(job["id"]), status="completed", completed_at_utc=ended_at,
+            )
+        except Exception:
+            logger.exception("poll_running: DB update_appliance_job failed for %s", job.get("id"))
+            continue
+
+        logger.info(
+            "appliance complete: job %s state=%s, marking completed",
+            job.get("id"), state,
+        )
+
+        # Build the finished notification (best-effort)
+        try:
+            from ..analytics.daily_brief import build_brief_48h_summary
+            from ..notifier import notify_appliance_finished
+            tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+            actual_start = job.get("actual_start_utc") or job.get("planned_start_utc")
+            started_local_str = "—"
+            duration_min = int(job.get("duration_minutes") or 0)
+            if actual_start:
+                start_dt = datetime.fromisoformat(
+                    str(actual_start).replace("Z", "+00:00")
+                ).astimezone(tz)
+                started_local_str = start_dt.strftime("%H:%M")
+                end_dt = datetime.fromisoformat(ended_at.replace("Z", "+00:00")).astimezone(tz)
+                duration_min = max(1, int((end_dt - start_dt).total_seconds() // 60))
+            ended_local_dt = datetime.fromisoformat(ended_at.replace("Z", "+00:00")).astimezone(tz)
+            avg_p = job.get("avg_price_pence")
+            est_kwh = None
+            est_cost_p = None
+            try:
+                typical_kw = float(appliance.get("typical_kw") or 0.0)
+                if typical_kw > 0 and duration_min > 0:
+                    est_kwh = typical_kw * (duration_min / 60.0)
+                    if avg_p is not None:
+                        est_cost_p = est_kwh * float(avg_p)
+            except (TypeError, ValueError):
+                pass
+            notify_appliance_finished(
+                appliance_name=str(
+                    appliance.get("name") or appliance.get("device_type") or "Appliance"
+                ),
+                started_local=started_local_str,
+                ended_local=ended_local_dt.strftime("%H:%M"),
+                duration_minutes=duration_min,
+                avg_price_pence=float(avg_p) if avg_p is not None else None,
+                estimated_kwh=est_kwh,
+                estimated_cost_p=est_cost_p,
+                brief_md=build_brief_48h_summary(),
+            )
+        except Exception:
+            logger.exception(
+                "poll_running: finished-notification failed for job %s (non-fatal)",
+                job.get("id"),
             )
 
 
@@ -827,6 +940,29 @@ def _fire_cron(job_id: int) -> None:
         int(job_id), status="running", actual_start_utc=actual_start,
     )
     logger.info("appliance fire: job %d → running", job_id)
+
+    # PR #234: notify the family that laundry is starting + inline forward brief.
+    # Best-effort — never let a notification failure block the dispatch path.
+    try:
+        from ..analytics.daily_brief import build_brief_48h_summary
+        from ..notifier import notify_appliance_starting
+        tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+        planned_start = datetime.fromisoformat(
+            str(job["planned_start_utc"]).replace("Z", "+00:00")
+        ).astimezone(tz)
+        deadline = datetime.fromisoformat(
+            str(job["deadline_utc"]).replace("Z", "+00:00")
+        ).astimezone(tz)
+        notify_appliance_starting(
+            appliance_name=str(appliance.get("name") or appliance.get("device_type") or "Appliance"),
+            planned_start_local=planned_start.strftime("%a %H:%M"),
+            deadline_local=deadline.strftime("%a %H:%M"),
+            avg_price_pence=float(job.get("avg_price_pence") or 0.0),
+            duration_minutes=int(job.get("duration_minutes") or 0),
+            brief_md=build_brief_48h_summary(),
+        )
+    except Exception:
+        logger.exception("appliance fire: starting-notification failed (non-fatal)")
 
 
 # ---------------------------------------------------------------------------

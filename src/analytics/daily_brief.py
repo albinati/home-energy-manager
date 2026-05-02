@@ -275,6 +275,97 @@ def _forecasted_export_for_day(day: date, tz: ZoneInfo) -> tuple[float, float, i
 # Helpers — tier windows + peak-export read-out
 # --------------------------------------------------------------------------
 
+def build_brief_48h_summary(now_utc: datetime | None = None) -> str:
+    """Compact 4-line forward-looking summary for inline notifications.
+
+    Designed for laundry-start / laundry-finish hooks (PR #234) — short
+    enough to read on a phone, structured enough to skim. Lines:
+
+      🔆 Today: <tier windows>
+      🔆 Tomorrow: <tier windows>
+      💰 Today net so far: <amount> (vs SVT shadow <amount>)
+      🔋 Battery <soc>% · slots scheduled: ...
+
+    Each line silently degrades to "n/a" rather than crashing when its
+    upstream data is missing (no PnL row yet, no rates loaded, snapshot
+    stale). Caller can string-append into a longer body.
+    """
+    tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+    today = datetime.now(tz).date() if now_utc is None else now_utc.astimezone(tz).date()
+    tomorrow = today + timedelta(days=1)
+
+    # Line 1 + 2 — today / tomorrow tier classification (compact form)
+    def _compact_tier(day: date) -> str:
+        try:
+            from ..google_calendar.tiers import Slot, classify_day
+        except Exception:
+            return "n/a"
+        tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
+        if not tariff:
+            return "n/a"
+        try:
+            rows = db.get_agile_rates_slots_for_local_day(tariff, day, tz_name=str(tz))
+        except Exception:
+            return "n/a"
+        if not rows:
+            return "n/a"
+        slots = [
+            Slot(
+                start_utc=datetime.fromisoformat(str(r["valid_from"]).replace("Z", "+00:00")),
+                end_utc=datetime.fromisoformat(str(r["valid_to"]).replace("Z", "+00:00")),
+                price_p=float(r["value_inc_vat"]),
+            )
+            for r in rows
+        ]
+        windows = classify_day(slots) or []
+        if not windows:
+            return "no tier classification"
+        # Compact: just the cheapest + most expensive blocks
+        parts: list[str] = []
+        for w in windows:
+            if w.tier.title.lower() in {"cheap", "negative", "peak"}:
+                local_start = w.start_utc.astimezone(tz).strftime("%H:%M")
+                local_end = w.end_utc.astimezone(tz).strftime("%H:%M")
+                parts.append(
+                    f"{w.tier.emoji} {local_start}–{local_end} "
+                    f"({w.price_min:.1f}–{w.price_max:.1f}p)"
+                )
+        return " · ".join(parts) if parts else "all standard"
+
+    today_line = _compact_tier(today)
+    tomorrow_line = _compact_tier(tomorrow)
+
+    # Line 3 — running PnL today (best-effort)
+    pnl_line = "n/a"
+    try:
+        pnl = compute_daily_pnl(today)
+        if pnl and "realised_cost_gbp" in pnl:
+            net = pnl["realised_cost_gbp"]
+            svt = pnl.get("svt_shadow_gbp")
+            if svt is not None:
+                pnl_line = f"net £{net:+.2f} (SVT shadow £{svt:+.2f})"
+            else:
+                pnl_line = f"net £{net:+.2f}"
+    except Exception:
+        pass
+
+    # Line 4 — battery SoC + small forward indicator
+    bat_line = "n/a"
+    try:
+        snap = db.get_fox_realtime_snapshot()
+        if snap and snap.get("soc_pct") is not None:
+            bat_line = f"SoC {float(snap['soc_pct']):.0f}%"
+    except Exception:
+        pass
+
+    return (
+        f"🔆 Today: {today_line}\n"
+        f"🔆 Tomorrow: {tomorrow_line}\n"
+        f"💰 Today PnL: {pnl_line}\n"
+        f"🔋 Battery {bat_line}"
+    )
+
+
 def _tariff_peak_windows_summary(day: date, tz: ZoneInfo) -> str | None:
     """Surface raw-tariff peak windows independent of LP slot classification.
 

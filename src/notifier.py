@@ -44,6 +44,9 @@ class AlertType(str, Enum):
     NIGHT_BRIEF = "night_brief"
     PLAN_REVISION = "plan_revision"
     NEGATIVE_WINDOW_START = "negative_window_start"
+    # PR #234 — appliance lifecycle (laundry start/finish)
+    APPLIANCE_STARTING = "appliance_starting"
+    APPLIANCE_FINISHED = "appliance_finished"
 
 
 # OpenClaw hook payload ``name`` field (one stable label per alert key)
@@ -60,6 +63,8 @@ _HOOK_PAYLOAD_NAMES: dict[str, str] = {
     "night_brief": "EnergyNightBrief",
     "plan_revision": "EnergyPlanRevision",
     "negative_window_start": "EnergyNegativeWindow",
+    "appliance_starting": "EnergyApplianceStart",
+    "appliance_finished": "EnergyApplianceFinish",
 }
 
 
@@ -352,6 +357,79 @@ def notify_night_brief(body: str) -> None:
     can be configured per-AlertType in the ``notification_routes`` table.
     """
     _dispatch(AlertType.NIGHT_BRIEF, body, urgent=False)
+
+
+def notify_appliance_starting(
+    *,
+    appliance_name: str,
+    planned_start_local: str,
+    deadline_local: str,
+    avg_price_pence: float,
+    duration_minutes: int,
+    brief_md: str | None = None,
+) -> None:
+    """🧺 Cycle is starting now (LP-armed cron just fired ``setMachineState run``).
+
+    Inlines a 4-line forward-looking brief so the family sees today + tomorrow
+    tariff windows and the running PnL alongside the start confirmation.
+    """
+    body_lines = [
+        f"🧺 **{appliance_name}** starting now",
+        f"Window: {planned_start_local} → end ≤ {deadline_local}",
+        f"Cycle: {duration_minutes} min · avg {avg_price_pence:.1f}p/kWh",
+    ]
+    if brief_md:
+        body_lines.extend(["", brief_md])
+    body = "\n".join(body_lines)
+    extra = {
+        "appliance": appliance_name,
+        "planned_start_local": planned_start_local,
+        "deadline_local": deadline_local,
+        "avg_price_pence": round(float(avg_price_pence), 2),
+        "duration_minutes": int(duration_minutes),
+    }
+    _dispatch(AlertType.APPLIANCE_STARTING, body, urgent=False, extra=extra)
+
+
+def notify_appliance_finished(
+    *,
+    appliance_name: str,
+    started_local: str,
+    ended_local: str,
+    duration_minutes: int,
+    avg_price_pence: float | None = None,
+    estimated_kwh: float | None = None,
+    estimated_cost_p: float | None = None,
+    brief_md: str | None = None,
+) -> None:
+    """✅ Cycle has finished (poll detected state transition out of ``run``).
+
+    Includes a concise outcome line + same 4-line brief so the family closes
+    the loop on cost and sees what's coming next.
+    """
+    cost_line = ""
+    if estimated_kwh is not None and estimated_cost_p is not None:
+        cost_line = f"≈ {estimated_kwh:.2f} kWh ≈ {estimated_cost_p:.1f}p"
+    elif avg_price_pence is not None:
+        cost_line = f"avg {avg_price_pence:.1f}p/kWh"
+    body_lines = [
+        f"✅ **{appliance_name}** cycle complete",
+        f"{started_local} → {ended_local} ({duration_minutes} min)" + (f" · {cost_line}" if cost_line else ""),
+    ]
+    if brief_md:
+        body_lines.extend(["", brief_md])
+    body = "\n".join(body_lines)
+    extra = {
+        "appliance": appliance_name,
+        "started_local": started_local,
+        "ended_local": ended_local,
+        "duration_minutes": int(duration_minutes),
+    }
+    if estimated_kwh is not None:
+        extra["estimated_kwh"] = round(float(estimated_kwh), 3)
+    if estimated_cost_p is not None:
+        extra["estimated_cost_pence"] = round(float(estimated_cost_p), 2)
+    _dispatch(AlertType.APPLIANCE_FINISHED, body, urgent=False, extra=extra)
 
 
 def notify_plan_revision(body: str, *, trigger_reason: str | None = None) -> None:
