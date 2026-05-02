@@ -2452,6 +2452,82 @@ def compute_fox_energy_daily_from_realtime(
     return out
 
 
+def half_hourly_grid_export_kwh_for_day(
+    day: date,
+    *,
+    max_gap_seconds: int = 1800,
+) -> dict[str, float]:
+    """Per-slot grid-export kWh for ``day``, keyed by ISO half-hour slot start (UTC).
+
+    Trapezoidal-integrates ``pv_realtime_history.grid_export_kw`` and assigns each
+    sample-pair's energy to the bucket containing the EARLIER sample (matching
+    :func:`compute_fox_energy_daily_from_realtime`). Slots with no telemetry get no
+    key — caller decides whether to treat missing as zero or fall back to a daily
+    total.
+
+    Used by :mod:`src.analytics.pnl` to value realised exports against per-slot
+    Octopus Outgoing rates (issue #207).
+    """
+    from collections import defaultdict
+    from datetime import datetime as _dt
+
+    day_iso = day.isoformat()
+    # Pull samples for the day plus one before/after for boundary integration.
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT captured_at, grid_export_kw
+                   FROM pv_realtime_history
+                   WHERE substr(captured_at, 1, 10) BETWEEN ? AND ?
+                   ORDER BY captured_at""",
+                (
+                    (day - timedelta(days=1)).isoformat(),
+                    (day + timedelta(days=1)).isoformat(),
+                ),
+            )
+            rows_raw = cur.fetchall()
+        finally:
+            conn.close()
+
+    if len(rows_raw) < 2:
+        return {}
+
+    def _parse(ts_raw: str) -> _dt | None:
+        try:
+            ts = _dt.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+            return ts if ts.tzinfo else ts.replace(tzinfo=UTC)
+        except (ValueError, TypeError):
+            return None
+
+    def _slot_key(ts: _dt) -> str:
+        # Floor to 30-min boundary (UTC).
+        floor_min = (ts.minute // 30) * 30
+        slot = ts.replace(minute=floor_min, second=0, microsecond=0)
+        return slot.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+    buckets: dict[str, float] = defaultdict(float)
+    prev_ts: _dt | None = None
+    prev_export: float = 0.0
+    for row in rows_raw:
+        ts = _parse(row[0])
+        if ts is None:
+            continue
+        cur_export = float(row[1]) if row[1] is not None else 0.0
+        if prev_ts is not None:
+            dt_s = min((ts - prev_ts).total_seconds(), max_gap_seconds)
+            if dt_s > 0:
+                hours = dt_s / 3600.0
+                avg_kw = (prev_export + cur_export) / 2.0
+                # Only count pairs whose earlier sample falls on `day`.
+                if prev_ts.date().isoformat() == day_iso:
+                    buckets[_slot_key(prev_ts)] += avg_kw * hours
+        prev_ts = ts
+        prev_export = cur_export
+
+    return dict(buckets)
+
+
 def upsert_fox_energy_daily(rows: list[dict[str, Any]]) -> int:
     """Upsert Fox daily energy rows (dicts with date, solar_kwh, load_kwh, …).
 
