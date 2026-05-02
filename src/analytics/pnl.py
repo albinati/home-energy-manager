@@ -206,6 +206,20 @@ def compute_peak_ratio(day: date) -> float | None:
     return round(100.0 * peak / tot, 2) if tot > 0 else None
 
 
+def _agile_start_date() -> date | None:
+    """Parse ``config.AGILE_TARIFF_START_DATE``; ``None`` when unset/invalid."""
+    raw = (config.AGILE_TARIFF_START_DATE or "").strip()
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(raw)
+    except ValueError:
+        logger.warning(
+            "AGILE_TARIFF_START_DATE=%r is not a valid ISO date — ignoring clamp", raw,
+        )
+        return None
+
+
 def compute_period_pnl(start_day: date, end_day: date, *, label: str = "") -> dict[str, Any]:
     """Aggregate daily PnL across a date range (both bounds inclusive).
 
@@ -214,6 +228,12 @@ def compute_period_pnl(start_day: date, end_day: date, *, label: str = "") -> di
     because each day's compute_daily_pnl already includes the daily standing fee
     (so summing N days gives N × standing automatically).
 
+    The start date is clamped upward to ``config.AGILE_TARIFF_START_DATE`` when
+    set — pre-switch days were on a different tariff and would pollute the
+    realised cost + shadow deltas. When clamping happens, the response carries
+    ``clamped=True`` + ``clamp_reason`` + ``requested_start`` so OpenClaw can
+    render an honest "since 2026-04-01" qualifier.
+
     Returns a dict with the same keys as ``compute_daily_pnl`` plus
     ``period_start``, ``period_end``, ``n_days``, ``label``. The optional legacy
     fixed tariff (``fixed_tariff_*``) is included only if at least one day
@@ -221,6 +241,45 @@ def compute_period_pnl(start_day: date, end_day: date, *, label: str = "") -> di
     """
     if end_day < start_day:
         start_day, end_day = end_day, start_day
+
+    requested_start = start_day
+    clamped = False
+    clamp_reason: str | None = None
+    agile_start = _agile_start_date()
+    if agile_start and start_day < agile_start:
+        if end_day < agile_start:
+            # Entire requested period predates Agile — return an empty shape
+            # so the caller can render "n/a (since YYYY-MM-DD)".
+            return {
+                "label": label or f"{requested_start.isoformat()}..{end_day.isoformat()}",
+                "period_start": agile_start.isoformat(),
+                "period_end": end_day.isoformat(),
+                "requested_start": requested_start.isoformat(),
+                "clamped": True,
+                "clamp_reason": (
+                    f"Entire range predates AGILE_TARIFF_START_DATE={agile_start.isoformat()}"
+                ),
+                "n_days": 0,
+                "kwh": 0.0,
+                "realised_cost_gbp": 0.0,
+                "realised_import_gbp": 0.0,
+                "export_revenue_gbp": 0.0,
+                "export_kwh": 0.0,
+                "standing_charge_gbp": 0.0,
+                "svt_shadow_gbp": 0.0,
+                "fixed_shadow_gbp": 0.0,
+                "delta_vs_svt_gbp": 0.0,
+                "delta_vs_fixed_gbp": 0.0,
+                "cheap_slot_kwh": 0.0,
+                "peak_kwh": 0.0,
+            }
+        start_day = agile_start
+        clamped = True
+        clamp_reason = (
+            f"Clamped to AGILE_TARIFF_START_DATE={agile_start.isoformat()} "
+            f"(before that the household was on a different tariff)"
+        )
+
     n = (end_day - start_day).days + 1
 
     totals = {
@@ -253,12 +312,20 @@ def compute_period_pnl(start_day: date, end_day: date, *, label: str = "") -> di
             bg_delta += float(p["delta_vs_fixed_tariff_gbp"])
             bg_label = bg_label or p.get("fixed_tariff_label")
 
+    base_label = label or f"{start_day.isoformat()}..{end_day.isoformat()}"
+    if clamped:
+        base_label = f"{base_label} (since {start_day.isoformat()})"
+
     out: dict[str, Any] = {
-        "label": label or f"{start_day.isoformat()}..{end_day.isoformat()}",
+        "label": base_label,
         "period_start": start_day.isoformat(),
         "period_end": end_day.isoformat(),
         "n_days": n,
     }
+    if clamped:
+        out["requested_start"] = requested_start.isoformat()
+        out["clamped"] = True
+        out["clamp_reason"] = clamp_reason
     out.update({k: round(v, 4 if not k.endswith("_kwh") else 3) for k, v in totals.items()})
     if bg_seen:
         out["fixed_tariff_label"] = bg_label or "fixed tariff"

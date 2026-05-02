@@ -273,6 +273,23 @@ should never suggest tactical Daikin actions ("preheat the tank now!") —
 the heat pump runs on its own weather curve and HEM does not change
 setpoints. Read `_mode_status_line()` in `src/analytics/daily_brief.py`.
 
+### Tariff start clamp (PR #214)
+
+```
+AGILE_TARIFF_START_DATE=2026-04-01    # household joined Octopus Agile on this date
+```
+
+Period aggregations (`compute_period_pnl` and everything that delegates to it
+— weekly/monthly/MTD/YTD) clamp their `start_day` upward to this value.
+Pre-Agile days were on a different tariff and would otherwise pollute the
+realised cost + shadow comparisons. When clamped:
+- Response carries `clamped: true`, `clamp_reason`, `requested_start`.
+- `label` gains a `(since YYYY-MM-DD)` suffix so OpenClaw renders an honest
+  qualifier on the YTD/monthly figure.
+- `n_days` reflects the *actual on-Agile* window, not the requested range.
+
+Leave empty to disable. Invalid ISO date logs a warning and disables clamp.
+
 ### Aggregation periods (PR #213)
 
 Five PnL scopes are exposed by the same shape:
