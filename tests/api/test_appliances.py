@@ -136,67 +136,55 @@ def test_cancel_nonexistent_job_404(client):
 # /api/v1/integrations/smartthings
 # ---------------------------------------------------------------------------
 
-def test_status_no_pat(client, monkeypatch, tmp_path):
+def test_status_no_tokens(client, monkeypatch, tmp_path):
     monkeypatch.setattr(
-        "src.config.config.SMARTTHINGS_TOKEN_FILE", tmp_path / ".st-token-missing"
+        "src.config.config.SMARTTHINGS_TOKEN_FILE", tmp_path / ".st-tokens-missing"
     )
     r = client.get("/api/v1/integrations/smartthings/status")
     assert r.status_code == 200
     body = r.json()
-    assert body["pat_present"] is False
+    assert body["tokens_present"] is False
     assert body["reachable"] is None
-    # Crucially: no PAT field at all.
-    assert "pat" not in body
+    # No secrets in the response (access_token, refresh_token, client_secret).
+    for forbidden in ("access_token", "refresh_token", "pat", "client_secret"):
+        assert forbidden not in body
 
 
-def test_set_credentials_validates_via_round_trip(client, monkeypatch, tmp_path):
-    token_path = tmp_path / ".st-token-set"
-    monkeypatch.setattr("src.config.config.SMARTTHINGS_TOKEN_FILE", token_path)
-
-    # Mock SmartThings list_devices to succeed.
-    def fake_list_devices(self):
-        return [{"deviceId": "x", "label": "Washer"}]
-
-    with patch("src.smartthings.client.SmartThingsClient.list_devices",
-               new=fake_list_devices):
-        r = client.post(
-            "/api/v1/integrations/smartthings/credentials",
-            json={"pat": "valid-pat-123"},
-        )
+def test_oauth_start_returns_authorize_url(client, monkeypatch):
+    monkeypatch.setattr("src.config.config.SMARTTHINGS_CLIENT_ID", "test-client-id")
+    monkeypatch.setattr(
+        "src.config.config.SMARTTHINGS_REDIRECT_URI",
+        "http://localhost:8080/oauth/smartthings/callback",
+    )
+    monkeypatch.setattr(
+        "src.config.config.SMARTTHINGS_OAUTH_SCOPES", "r:devices:* x:devices:*"
+    )
+    r = client.get("/api/v1/integrations/smartthings/oauth/start")
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["ok"] is True
-    assert body["device_count"] == 1
-    # Token persisted with correct contents and 0600 perms.
-    assert token_path.read_text().strip() == "valid-pat-123"
-    assert oct(token_path.stat().st_mode & 0o777) == "0o600"
-    # Crucially: the response never echoes the PAT.
-    assert "pat" not in body
+    assert "authorize_url" in body
+    assert "client_id=test-client-id" in body["authorize_url"]
+    assert "redirect_uri=http%3A%2F%2Flocalhost%3A8080" in body["authorize_url"]
+    assert "state=" in body["authorize_url"]
+    # state is also returned for clients that want to round-trip it.
+    assert body["state"]
+    # Critical: do not leak the client_secret.
+    assert "client_secret" not in body
+    assert "client_secret" not in body["authorize_url"]
 
 
-def test_set_credentials_rejects_invalid_pat(client, monkeypatch, tmp_path):
-    monkeypatch.setattr(
-        "src.config.config.SMARTTHINGS_TOKEN_FILE", tmp_path / ".st-token-rej"
-    )
-
-    def fake_list_devices_401(self):
-        raise SmartThingsError("pat_invalid", "401", http_status=401)
-
-    with patch("src.smartthings.client.SmartThingsClient.list_devices",
-               new=fake_list_devices_401):
-        r = client.post(
-            "/api/v1/integrations/smartthings/credentials",
-            json={"pat": "bad-pat"},
-        )
-    assert r.status_code == 401
-    # Token file must NOT have been written.
-    assert not (tmp_path / ".st-token-rej").exists()
+def test_oauth_start_412_when_client_id_missing(client, monkeypatch):
+    monkeypatch.setattr("src.config.config.SMARTTHINGS_CLIENT_ID", "")
+    r = client.get("/api/v1/integrations/smartthings/oauth/start")
+    assert r.status_code == 412
+    assert "SMARTTHINGS_CLIENT_ID" in r.text
 
 
-def test_delete_credentials(client, monkeypatch, tmp_path):
-    token_path = tmp_path / ".st-token-del"
+def test_delete_credentials_removes_token_file(client, monkeypatch, tmp_path):
+    token_path = tmp_path / ".st-tokens-del.json"
     monkeypatch.setattr("src.config.config.SMARTTHINGS_TOKEN_FILE", token_path)
-    token_path.write_text("some-pat\n")
+    token_path.write_text('{"access_token": "x", "refresh_token": "y"}')
     assert token_path.exists()
     r = client.delete("/api/v1/integrations/smartthings/credentials")
     assert r.status_code == 204
