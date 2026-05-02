@@ -193,6 +193,7 @@ def _persist_plan_as_run(
             "slot_time": f.time_utc.isoformat(),
             "temp_c": float(f.temperature_c),
             "solar_w_m2": float(f.shortwave_radiation_wm2),
+            "cloud_cover_pct": float(f.cloud_cover_pct),
         }
         for f in forecast
     ]
@@ -234,6 +235,73 @@ def test_replay_run_honest_round_trip_matches_original_within_tolerance():
     # dispatch on the same prices. (The snapshot's price_p IS the actual price
     # since Octopus publishes day-ahead and we replay against the same row.)
     assert abs(result.delta_cost_at_actual_p) < 0.5
+
+
+def test_replay_run_v11a_honest_fidelity_when_cloud_cover_persisted():
+    """V11-A (#194): when meteo_forecast_history rows carry cloud_cover_pct,
+    replay should report ``weather_fidelity == 'honest'`` rather than 'approx'.
+    Pre-V11-A snapshots (NULL cloud) keep the legacy 'approx' label.
+    """
+    base = datetime(2026, 7, 4, 0, 0, tzinfo=UTC)
+    # Build a forecast carrying real cloud cover (non-zero).
+    slots = [base + timedelta(minutes=30 * i) for i in range(8)]
+    forecast = []
+    seen: set[datetime] = set()
+    for st in slots:
+        anchor = st.replace(minute=0, second=0, microsecond=0)
+        if anchor in seen:
+            continue
+        seen.add(anchor)
+        forecast.append(HourlyForecast(
+            time_utc=anchor, temperature_c=12.0, cloud_cover_pct=45.0,
+            shortwave_radiation_wm2=420.0,
+            estimated_pv_kw=estimate_pv_kw(420.0),
+            heating_demand_factor=compute_heating_demand_factor(12.0),
+        ))
+    w = forecast_to_lp_inputs(forecast, slots, pv_scale=1.0)
+    initial = LpInitialState(soc_kwh=4.0, tank_temp_c=44.0, indoor_temp_c=20.5)
+    plan = solve_lp(
+        slot_starts_utc=slots, price_pence=[12.0] * 8, base_load_kwh=[0.4] * 8,
+        weather=w, initial=initial, tz=ZoneInfo("Europe/London"),
+    )
+    run_id = _persist_plan_as_run(
+        plan, slots, [12.0] * 8, [0.4] * 8, initial, forecast,
+        run_at_utc=base, plan_date="2026-07-04",
+    )
+
+    result = replay_run(run_id, mode="honest")
+    assert result.ok, result.error
+    assert result.weather_fidelity == "honest", (
+        f"expected 'honest' fidelity when cloud_cover_pct persisted, "
+        f"got {result.weather_fidelity}"
+    )
+
+
+def test_replay_run_falls_back_to_approx_when_cloud_cover_null():
+    """Pre-V11-A snapshots (cloud_cover_pct stored as NULL) → 'approx' fidelity,
+    and replay still succeeds. Backwards-compat for snapshots collected before
+    this PR landed."""
+    base = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
+    plan, slots, prices, base_load, initial, forecast = _solve_baseline(8, base)
+    run_id = _persist_plan_as_run(
+        plan, slots, prices, base_load, initial, forecast,
+        run_at_utc=base, plan_date="2026-07-04",
+    )
+    # Strip the cloud_cover_pct column to simulate a pre-V11-A row.
+    conn = db.get_connection()
+    try:
+        conn.execute(
+            "UPDATE meteo_forecast_history SET cloud_cover_pct = NULL "
+            "WHERE forecast_fetch_at_utc < ?",
+            (base.isoformat(),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = replay_run(run_id, mode="honest")
+    assert result.ok, result.error
+    assert result.weather_fidelity == "approx"
 
 
 def test_replay_run_missing_weather_returns_clean_error():

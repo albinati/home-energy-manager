@@ -53,7 +53,7 @@ from .lp_optimizer import LpInitialState, LpPlan, solve_lp
 logger = logging.getLogger(__name__)
 
 Mode = Literal["honest", "forward"]
-WeatherFidelity = Literal["approx", "missing"]
+WeatherFidelity = Literal["honest", "approx", "missing"]
 
 
 # ---------------------------------------------------------------------------
@@ -608,10 +608,12 @@ def _reconstruct_weather(
     forecast the LP saw when it solved). Returns ``("missing")`` fidelity when
     no fetch exists — caller surfaces an error.
 
-    Cloud cover is lost in the snapshot (only ``temp_c`` + ``solar_w_m2`` are
-    stored). We pass ``cloud_cover_pct=0.0`` to ``HourlyForecast``, which means
-    ``forecast_to_lp_inputs`` skips its cloud-attenuation step. Replay PV is
-    therefore marginally higher than the original solve saw — known fidelity gap.
+    V11-A (#194): cloud cover is now stored on ``meteo_forecast_history``
+    when present. When the snapshot row carries ``cloud_cover_pct``, replay
+    feeds it into the cloud-attenuation step in ``forecast_to_lp_inputs``,
+    closing the historical PV-fidelity gap. For pre-V11-A snapshots the
+    column is NULL and we fall back to the legacy 0% (no attenuation) path
+    — same behaviour as before, just confined to ageing rows.
     """
     rows: list[dict[str, Any]] = []
     if run_at_utc:
@@ -630,6 +632,7 @@ def _reconstruct_weather(
         return empty, "missing"
 
     forecast: list[HourlyForecast] = []
+    has_cloud_data = False
     for r in rows:
         try:
             t = _parse_iso(str(r["slot_time"]))
@@ -637,11 +640,20 @@ def _reconstruct_weather(
             continue
         temp_c = float(r.get("temp_c") or 10.0)
         rad = float(r.get("solar_w_m2") or 0.0)
+        cloud_raw = r.get("cloud_cover_pct")
+        if cloud_raw is None:
+            cloud = 0.0
+        else:
+            try:
+                cloud = float(cloud_raw)
+                has_cloud_data = True
+            except (TypeError, ValueError):
+                cloud = 0.0
         forecast.append(
             HourlyForecast(
                 time_utc=t,
                 temperature_c=temp_c,
-                cloud_cover_pct=0.0,  # lost in snapshot — see docstring
+                cloud_cover_pct=cloud,
                 shortwave_radiation_wm2=rad,
                 estimated_pv_kw=estimate_pv_kw(rad),
                 heating_demand_factor=compute_heating_demand_factor(temp_c),
@@ -649,7 +661,8 @@ def _reconstruct_weather(
         )
 
     weather = forecast_to_lp_inputs(forecast, slot_starts_utc, pv_scale=1.0)
-    return weather, "approx"
+    fidelity: WeatherFidelity = "honest" if has_cloud_data else "approx"
+    return weather, fidelity
 
 
 def _build_export_prices(slot_starts_utc: list[datetime]) -> list[float] | None:

@@ -12,22 +12,26 @@
 If this PR touches src/scheduler/ (LP solver, dispatch, scenarios, peak-export
 logic), BOTH of these gates must pass before merging.
 
-### Gate 1 — LP regression (general)
+### Gate 1 — LP regression (general) — BOTH modes must pass
 
-The LP must be no worse than the pinned baseline on the last 14 days of
-historical runs. Run against your locally-mounted prod DB snapshot:
+V11-A (#194). The LP must be no worse than the pinned baseline on the last
+14 days of historical runs in BOTH modes:
 
-    DB_PATH=/path/to/prod-snapshot.db .venv/bin/python scripts/check_lp_regression.py
+  - **forward** (snapshot weather + current config) — catches behaviour change.
+  - **honest**  (snapshot weather + snapshot config) — catches solver / framework
+    regressions, including PV-side regressions like cloud-aware calibration drift.
 
-  → NEW total replayed cost: +X.XX £
-  → BASELINE total replayed cost: +Y.YY £   (threshold +0.50 £)
-  → Δ vs baseline: +Z.ZZ £
-  → VERDICT: PASS / FAIL
+    DB_PATH=/path/to/prod-snapshot.db .venv/bin/python scripts/check_lp_regression.py --mode=both
 
-If VERDICT=FAIL, the LP got worse on past days — investigate before merging.
-If the regression is INTENTIONAL (new objective term, tuned weights), accept
-it as the new baseline by re-running with `--refresh-baseline` and committing
-`tests/fixtures/lp_regression_baseline.json` in the same PR.
+  → MODE = FORWARD: VERDICT PASS / FAIL
+  → MODE = HONEST:  VERDICT PASS / FAIL
+  → BOTH-MODE VERDICT: PASS / FAIL
+
+If VERDICT=FAIL on either, the LP got worse on past days — investigate before
+merging. If the regression is INTENTIONAL (new objective term, tuned weights),
+accept it as the new baseline by re-running with `--refresh-baseline` and
+committing both `tests/fixtures/lp_regression_baseline.forward.json` and
+`tests/fixtures/lp_regression_baseline.honest.json` in the same PR.
 
 ### Gate 2 — Scenario filter regression (peak_export specifically)
 
