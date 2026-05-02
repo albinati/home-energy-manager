@@ -1,0 +1,62 @@
+name: Bug report
+description: Something the LP, dispatch, or hardware integration is doing wrong.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing! Please include enough detail that I can reproduce or replay the bug — for LP / dispatch issues, the `run_id` of the optimizer run that misbehaved is the single most useful piece of information.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A short description of the bug. Lead with the observable symptom (e.g. "LP committed peak_export at 14:00 even though Daikin was running Powerful").
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+      description: One sentence is fine.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `docker exec hem cat /app/.git-sha`, or the tag you're running.
+      placeholder: e.g. v10.2.0 or commit 8304fb7
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: |
+        For LP issues: which `run_id` (from `optimizer_log`)? What was the SoC/tank/indoor state? Output of `replay_run(run_id)` if you have it.
+
+        For hardware issues: what did the heartbeat log show? Did `action_schedule` have the row?
+    validations:
+      required: false
+
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: Anything non-default in `.env` that's relevant — e.g. `LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH`, `DAIKIN_CONTROL_MODE`, `ENERGY_STRATEGY_MODE`. Don't paste secrets.
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: |
+        `journalctl -u hem --since "1 hour ago" | grep -i <subsystem>` is usually a good source.
+      render: shell
+    validations:
+      required: false
