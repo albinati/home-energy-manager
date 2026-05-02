@@ -1320,7 +1320,7 @@ def _run_optimizer_lp(
     # PV calibration: prefer the per-hour-of-day cached table (richer signal — captures
     # shading + sun-angle bias). Falls back to the rolling flat factor when the table
     # is empty (cold start, < 7 samples per hour, etc).
-    from ..weather import compute_pv_calibration_factor
+    from ..weather import compute_pv_calibration_factor, compute_today_pv_correction_factor
     pv_scale_hourly = db.get_pv_calibration_hourly()
     if pv_scale_hourly:
         pv_scale: float | dict[int, float] = pv_scale_hourly
@@ -1332,6 +1332,28 @@ def _run_optimizer_lp(
     else:
         pv_scale = compute_pv_calibration_factor()
         logger.info("PV calibration: using flat factor=%.3f (per-hour table empty)", pv_scale)
+
+    # Today-aware OCF-style adjuster: anchor today's correction to this morning's
+    # observed-vs-forecast ratio. Multiplied on top of the per-hour calibration to
+    # capture day-specific conditions (clouds rolled in, unexpectedly clear, etc)
+    # that the 14-day rolling table can't reflect. See compute_today_pv_correction_factor.
+    today_factor, today_diag = compute_today_pv_correction_factor()
+    if today_factor != 1.0:
+        if isinstance(pv_scale, dict):
+            pv_scale = {h: round(v * today_factor, 4) for h, v in pv_scale.items()}
+        else:
+            pv_scale = pv_scale * today_factor
+        logger.info(
+            "PV calibration: today-aware adjuster applied factor=%.3f (n_hours=%d, "
+            "median_ratio=%.3f, clamped=%s)",
+            today_factor, today_diag.get("n_hours", 0),
+            today_diag.get("median_ratio", 0.0), today_diag.get("clamped", False),
+        )
+    else:
+        logger.info(
+            "PV calibration: today-aware adjuster skipped (%s)",
+            today_diag.get("reason", "no diagnostic"),
+        )
     weather = forecast_to_lp_inputs(forecast, starts, pv_scale=pv_scale)
     initial = read_lp_initial_state(daikin)
     micro_climate_offset = db.get_micro_climate_offset_c(config.DAIKIN_MICRO_CLIMATE_LOOKBACK)

@@ -600,6 +600,116 @@ def compute_pv_calibration_hourly_table(
     }
 
 
+def compute_today_pv_correction_factor(
+    *,
+    min_hours: int = 2,
+    min_kwh: float = 0.05,
+    safety_clamp: tuple[float, float] = (0.30, 2.0),
+) -> tuple[float, dict[str, Any]]:
+    """OCF-style "today-aware" PV adjuster on top of the per-hour calibration table.
+
+    Compares **today's observed PV** against **today's forecast PV** for the
+    daylight hours where we already have data. Returns a multiplicative
+    correction factor + diagnostics.
+
+    Use case: cloudy morning vs forecast → factor < 1 → afternoon forecast
+    scaled down. Sunny morning → factor > 1 → afternoon scaled up. The
+    per-hour calibration table (``pv_calibration_hourly``) captures the
+    long-run shape, but is dominated by the rolling-window mix of conditions
+    — when today is unusually cloudy or sunny, the table over- or under-
+    corrects. This adjuster anchors corrections to TODAY's reality.
+
+    Inspired by Open Climate Fix's Quartz Solar Forecast adjuster pattern
+    (https://github.com/openclimatefix/open-source-quartz-solar-forecast).
+
+    Returns ``(1.0, {"reason": "..."})`` when not enough data is available.
+    Caller should multiply this factor on top of the per-hour calibration.
+    """
+    from . import db as _db
+
+    today = datetime.now(UTC).date().isoformat()
+
+    # 1. Pull today's measured PV per UTC hour from pv_realtime_history.
+    actual_per_hour: dict[int, float] = {}
+    with _db._lock:
+        conn = _db.get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT captured_at, solar_power_kw
+                   FROM pv_realtime_history
+                   WHERE substr(captured_at, 1, 10) = ?
+                     AND solar_power_kw IS NOT NULL""",
+                (today,),
+            )
+            for ts_raw, kw in cur.fetchall():
+                try:
+                    ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+                except (ValueError, TypeError):
+                    continue
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=UTC)
+                # 5-min sample → kWh contribution
+                actual_per_hour[ts.hour] = (
+                    actual_per_hour.get(ts.hour, 0.0) + float(kw or 0.0) * (5.0 / 60.0)
+                )
+        finally:
+            conn.close()
+
+    if not actual_per_hour:
+        return 1.0, {"reason": "no pv_realtime_history yet today"}
+
+    # 2. Pull today's forecast PV per UTC hour (use the latest meteo_forecast row
+    #    per slot — this is what the LP saw when it last solved).
+    try:
+        forecast_rows = _db.get_meteo_forecast(today)
+    except Exception:  # noqa: BLE001
+        forecast_rows = []
+    forecast_per_hour: dict[int, float] = {}
+    for r in forecast_rows:
+        try:
+            ts = datetime.fromisoformat(str(r["slot_time"]).replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            if ts.date().isoformat() != today:
+                continue
+            rad = float(r.get("solar_w_m2") or 0.0)
+            # Forecast row is hour-anchored; estimate_pv_kw × 1h = kWh per hour
+            forecast_per_hour[ts.hour] = forecast_per_hour.get(ts.hour, 0.0) + estimate_pv_kw(rad)
+        except (ValueError, TypeError, KeyError):
+            continue
+
+    if not forecast_per_hour:
+        return 1.0, {"reason": "no meteo_forecast saved for today"}
+
+    # 3. Per-hour ratio (only daylight + meaningful hours)
+    ratios: list[tuple[int, float]] = []
+    for h in sorted(set(actual_per_hour.keys()) & set(forecast_per_hour.keys())):
+        a = actual_per_hour[h]
+        f = forecast_per_hour[h]
+        if f >= min_kwh and a >= min_kwh:
+            ratios.append((h, a / f))
+
+    if len(ratios) < min_hours:
+        return 1.0, {
+            "reason": f"only {len(ratios)} daylight hour(s) with both actual+forecast data today",
+            "min_hours_required": min_hours,
+        }
+
+    # 4. Median ratio (robust to one bad hour) + safety clamp
+    sorted_r = sorted(r for _, r in ratios)
+    median = sorted_r[len(sorted_r) // 2]
+    lo, hi = safety_clamp
+    factor = max(lo, min(hi, median))
+
+    return round(factor, 4), {
+        "n_hours": len(ratios),
+        "median_ratio": round(median, 4),
+        "applied_factor": round(factor, 4),
+        "clamped": factor != median,
+        "ratios_per_hour": {h: round(r, 4) for h, r in ratios},
+    }
+
+
 def forecast_to_lp_inputs(
     forecast: list[HourlyForecast],
     slot_starts_utc: list[datetime],
