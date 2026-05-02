@@ -228,6 +228,55 @@ class TestMCPBriefData(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(out["ok"])
         self.assertIn("unknown period", out["error"])
 
+    async def test_get_energy_metrics_surfaces_clamped_metadata(self) -> None:
+        """When AGILE_TARIFF_START_DATE clamps a period, the MCP response must
+        carry ``clamped`` / ``clamp_reason`` / ``requested_start`` so OpenClaw
+        can render an honest "since YYYY-MM-DD" qualifier."""
+        from datetime import UTC, date as _date_t, datetime as _dt
+        # Switch a clamp date that's after Jan 1 (forces YTD to clamp)
+        app_config.AGILE_TARIFF_START_DATE = "2026-04-01"
+        # Seed at least one Apr+ day so YTD has data
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/London")
+        today = _dt.now(tz).date()
+        slot = _dt.combine(_date_t(today.year, 4, 5), _dt.min.time()).replace(hour=12, tzinfo=UTC)
+        db.log_execution({
+            "timestamp": slot.isoformat().replace("+00:00", "Z"),
+            "consumption_kwh": 1.0, "agile_price_pence": 20.0, "slot_kind": "standard",
+        })
+        try:
+            mcp = build_mcp()
+            _b, out = await mcp.call_tool("get_energy_metrics", {})
+            ytd = out["pnl"]["year_to_date"]
+            assert ytd.get("clamped") is True, f"YTD should be clamped: {ytd}"
+            assert "AGILE_TARIFF_START_DATE" in ytd["clamp_reason"]
+            assert ytd["requested_start"] == f"{today.year}-01-01"
+            assert ytd["period_start"] == "2026-04-01"
+            assert "(since 2026-04-01)" in ytd["label"]
+        finally:
+            app_config.AGILE_TARIFF_START_DATE = ""
+
+    async def test_get_tariff_comparison_uses_clamped_dates_not_requested(self) -> None:
+        """Pre-#215 bug: get_tariff_comparison echoed pre-clamp start in
+        ``period_start`` while ``n_days`` reflected post-clamp count, producing
+        internally inconsistent output (Jan 1 → today but n_days=32). Lock fix."""
+        app_config.AGILE_TARIFF_START_DATE = "2026-04-01"
+        try:
+            mcp = build_mcp()
+            _b, out = await mcp.call_tool(
+                "get_tariff_comparison", {"period": "ytd"}
+            )
+            assert out["ok"]
+            assert out["period_start"] == "2026-04-01", (
+                f"period_start should be the clamped (post-Apr-1) value, got {out['period_start']!r}"
+            )
+            assert out.get("clamped") is True
+            assert "(since 2026-04-01)" in out["label"]
+            # n_days from same clamped window
+            assert out["n_days"] >= 1
+        finally:
+            app_config.AGILE_TARIFF_START_DATE = ""
+
     async def test_get_energy_metrics_includes_mtd_and_ytd_blocks(self) -> None:
         self._seed_yesterday()
         mcp = build_mcp()
