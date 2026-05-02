@@ -499,17 +499,28 @@ def solve_lp(
     for i in range(n):
         prob += tank[i + 1] <= tank_hi_slot[i] + s_tank_hi[i]
 
-    # Pre-plunge discipline: if a negative slot is still ahead in the horizon,
-    # disallow grid→battery flow during positive-priced slots. PV→battery
-    # ("solar_charge") stays allowed. Degenerate when any_neg_ahead is False.
-    has_future_neg: list[bool] = [False] * n
-    any_neg_ahead = False
-    for i in range(n - 1, -1, -1):
-        any_neg_ahead = any_neg_ahead or (price_line[i] < 0)
-        has_future_neg[i] = any_neg_ahead
-    for i in range(n):
-        if has_future_neg[i] and price_line[i] >= 0:
-            prob += chg[i] <= pv_use[i]
+    # Pre-plunge discipline: when a negative slot is in the upcoming
+    # ``LP_PLUNGE_PREP_HOURS`` window, disallow grid→battery flow during
+    # positive-priced slots so import capacity is reserved for the negative
+    # window. PV→battery ("solar_charge") stays allowed.
+    #
+    # Bounded to N hours (default 12) instead of the entire horizon: with the
+    # 48 h horizon, an unbounded look-ahead can lock the first 24 h of cheap
+    # slots when negatives don't arrive until D+1 evening — discovered in the
+    # 2026-05-02 LP audit (only 33% of charge slots in the cheap quartile on
+    # a day where the negative slots were >24 h away).
+    plunge_prep_hours = max(0, int(getattr(config, "LP_PLUNGE_PREP_HOURS", 12)))
+    if plunge_prep_hours > 0:
+        plunge_window_slots = int(plunge_prep_hours * 2)  # 30-min slots
+        next_neg_within_window: list[bool] = [False] * n
+        for i in range(n):
+            j_end = min(n, i + plunge_window_slots)
+            next_neg_within_window[i] = any(
+                price_line[j] < 0 for j in range(i, j_end)
+            )
+        for i in range(n):
+            if next_neg_within_window[i] and price_line[i] >= 0:
+                prob += chg[i] <= pv_use[i]
 
     # Negative-price discharge lock: dis = 0 when price < 0. Discharging while
     # the grid is paying us to import is strictly dominated — surplus import

@@ -1197,11 +1197,22 @@ def _run_optimizer_lp(
 
     # Smart appliance scheduling: arm/cancel/replan SmartThings sessions BEFORE
     # the LP solve so the residual-load profile reflects current remote-mode
-    # state. Never fatal — failures here log + continue.
+    # state. Never fatal — failures here log + continue, but surface to the
+    # operator via notify_risk so silent regressions don't accumulate.
+    # (Per-appliance SmartThings/DB errors are caught inside reconcile() and
+    # don't reach here; anything that DOES propagate is unexpected.)
     try:
         appliance_dispatch.reconcile()
-    except Exception:
+    except Exception as _exc:  # noqa: BLE001 — defensive outer
         logger.exception("appliance_dispatch.reconcile failed (LP solve continuing)")
+        try:
+            from .. import notifier  # local import — avoid cycle
+
+            notifier.notify_risk(
+                f"appliance_dispatch.reconcile() raised unexpectedly: {type(_exc).__name__}: {_exc}"
+            )
+        except Exception:  # noqa: BLE001 — notifier failures must not abort the LP
+            logger.warning("notify_risk failed during reconcile error reporting")
 
     tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
     if not tariff:
@@ -1267,10 +1278,19 @@ def _run_optimizer_lp(
                         _added_slots,
                         sum(_kw * 0.5 for _kw in _appliance_kw.values()),
                     )
-    except Exception:
+    except Exception as _exc:  # noqa: BLE001 — defensive outer
         logger.exception(
             "LP base_load: appliance load contribution failed (continuing without it)"
         )
+        try:
+            from .. import notifier  # local import — avoid cycle
+
+            notifier.notify_risk(
+                f"appliance_load_profile_kw raised: {type(_exc).__name__}: {_exc} "
+                "— LP plan does NOT account for armed appliance loads"
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("notify_risk failed during base_load error reporting")
 
     mu_load = sum(base_load) / len(base_load) if base_load else 0.4
     prices = [s.price_pence for s in slots]

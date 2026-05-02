@@ -214,6 +214,13 @@ LP_SCENARIO_PESSIMISTIC_LOAD_FACTOR=1.15         # 15 % uplift on base load
 LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH=0.30        # commit peak_export only when pessimistic exports ≥ this
 LP_SCENARIOS_ON_TRIGGER_REASONS=cron,plan_push,octopus_fetch,tier_boundary
                                                  # which triggers run the 3-pass solve
+LP_PLUNGE_PREP_HOURS=12                          # PR #218 — bound the pre-plunge constraint
+                                                 # to N hours ahead. With the unbounded default
+                                                 # (whole 48 h horizon, pre-#218), days where the
+                                                 # next negative slot was >24 h away starved the
+                                                 # battery — only 33 % of charge slots in cheap
+                                                 # quartile. 12 h covers same-day pre-plunge
+                                                 # without blocking next-night arbitrage.
 LOG_LEVEL=INFO                                   # raise to DEBUG for deep-dive diagnostics
 
 # --- V12 — twice-daily digest + tier-boundary MPC ---
