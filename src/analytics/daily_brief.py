@@ -16,6 +16,7 @@ restricted to genuine errors + the 🔵 PAID-to-use crossing.
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from .. import db
@@ -64,16 +65,16 @@ def build_morning_payload() -> str:
         f"**Today ({today})**",
         strategy,
         "",
+        _mode_status_line(),
+        "",
     ]
     if tier_summary:
         lines.extend(["**Tariff windows today:**", tier_summary, ""])
     if pe_summary:
         lines.extend(["**Peak-export plan:**", pe_summary, ""])
 
-    lines.extend([
-        f"**Yesterday ({yesterday}):** realised £{pnl['realised_cost_gbp']:.2f}, "
-        f"vs SVT shadow £{pnl['delta_vs_svt_gbp']:+.2f}.",
-    ])
+    lines.append(f"**Yesterday ({yesterday}) — financial summary**")
+    lines.extend(_format_pnl_block(pnl, day=yesterday, tz=tz))
     return "\n".join(lines)
 
 
@@ -106,11 +107,12 @@ def build_night_payload() -> str:
     lines: list[str] = [
         "## 🌙 Night brief",
         f"**Today ({today})** — actuals",
-        f"- Realised cost: £{pnl['realised_cost_gbp']:.2f}",
-        f"- vs SVT shadow: £{pnl['delta_vs_svt_gbp']:+.2f}",
-        f"- vs fixed shadow: £{pnl['delta_vs_fixed_gbp']:+.2f}",
-        f"- VWAP: {vwap}p/kWh" if vwap else "- VWAP: n/a",
+        "",
+        _mode_status_line(),
+        "",
     ]
+    lines.extend(_format_pnl_block(pnl, day=today, tz=tz))
+    lines.append(f"- VWAP: {vwap}p/kWh" if vwap else "- VWAP: n/a")
     if slip is not None:
         lines.append(f"- Slippage vs target: {slip}p")
     if arb is not None:
@@ -119,6 +121,142 @@ def build_night_payload() -> str:
     if pe_today:
         lines.extend(["", "**Peak-export verdicts today:**", pe_today])
     return "\n".join(lines)
+
+
+def _mode_status_line() -> str:
+    """One-line mode status so OpenClaw stops inventing Daikin advice.
+
+    The user runs Daikin in passive mode (telemetry-only — Onecta firmware drives
+    the heat pump on its own weather curve, HEM doesn't touch setpoints). Without
+    this line, the LLM that paraphrases the brief tends to fill in tactical
+    Daikin advice ("preheat tank during cheap window!") that has no basis.
+    """
+    daikin_mode = (config.DAIKIN_CONTROL_MODE or "passive").strip().lower()
+    if daikin_mode == "active":
+        daikin_label = "active (HEM dispatches setpoints/LWT offset per LP plan)"
+    else:
+        daikin_label = (
+            "passive (telemetry-only; Onecta firmware drives autonomously on weather curve — "
+            "HEM does NOT alter setpoints)"
+        )
+    fox_label = (
+        "LP-dispatched (Scheduler V3 groups uploaded after each solve)"
+        if not config.OPENCLAW_READ_ONLY
+        else "READ_ONLY (no hardware writes)"
+    )
+    return f"**Mode:** Daikin={daikin_label}; Fox={fox_label}"
+
+
+def _format_pnl_block(pnl: dict[str, Any], *, day: date, tz: ZoneInfo) -> list[str]:
+    """Structured 4-pillar financial breakdown for both briefs.
+
+    Output lines:
+      - Net cost line breaking out import / standing / export
+      - Energy used + exported (kWh totals)
+      - One delta line per configured shadow tariff (SVT, Fixed, optional FIXED_TARIFF)
+      - Optional 🔮 forecasted-export line when telemetry export is 0 but the
+        LP planned committed peak_export slots for the day
+
+    Standing charges are baked into all shadows (apples-to-apples), so the
+    delta is genuine "money saved" not "energy-cost-only saved".
+    """
+    out: list[str] = []
+    net = pnl["realised_cost_gbp"]
+    imp = pnl["realised_import_gbp"]
+    std = pnl.get("standing_charge_gbp", 0.0)
+    exp_gbp = pnl["export_revenue_gbp"]
+    exp_kwh = pnl["export_kwh"]
+    used_kwh = pnl["kwh"]
+
+    out.append(
+        f"- Net cost: £{net:+.2f}  (import £{imp:.2f} + standing £{std:.2f} − export £{exp_gbp:.2f})"
+    )
+    out.append(f"- Energy used: {used_kwh:.1f} kWh  |  exported: {exp_kwh:.1f} kWh")
+
+    # Forecasted-export fallback: telemetry sometimes drops grid_export_kw
+    # samples, leaving export_kwh=0 even on days where the LP committed
+    # peak_export and the inverter genuinely discharged. Estimate from
+    # `dispatch_decisions × agile_export_rates` and flag with 🔮.
+    if exp_kwh == 0:
+        f_kwh, f_pence, f_slots = _forecasted_export_for_day(day, tz)
+        if f_slots > 0:
+            out.append(
+                f"- 🔮 Forecasted export (telemetry missing): "
+                f"~{f_kwh:.2f} kWh ≈ £{f_pence / 100.0:+.2f} "
+                f"(from {f_slots} committed peak_export slot{'s' if f_slots != 1 else ''})"
+            )
+
+    if "delta_vs_fixed_tariff_gbp" in pnl:
+        label = pnl.get("fixed_tariff_label") or "fixed tariff"
+        shadow = pnl["fixed_tariff_shadow_gbp"]
+        delta = pnl["delta_vs_fixed_tariff_gbp"]
+        out.append(
+            f"- vs {label} (would have cost £{shadow:.2f}): "
+            f"£{delta:+.2f} {'saved' if delta >= 0 else 'extra'}"
+        )
+    out.append(
+        f"- vs SVT (would have cost £{pnl['svt_shadow_gbp']:.2f}): "
+        f"£{pnl['delta_vs_svt_gbp']:+.2f} {'saved' if pnl['delta_vs_svt_gbp'] >= 0 else 'extra'}"
+    )
+    # "fixed shadow" is the legacy MANUAL_TARIFF_IMPORT_PENCE comparison —
+    # it falls back to SVT when not configured, so suppress the line in
+    # that case to avoid showing the same number twice.
+    if pnl["fixed_shadow_gbp"] != pnl["svt_shadow_gbp"]:
+        out.append(
+            f"- vs fixed shadow (£{pnl['fixed_shadow_gbp']:.2f}): "
+            f"£{pnl['delta_vs_fixed_gbp']:+.2f} {'saved' if pnl['delta_vs_fixed_gbp'] >= 0 else 'extra'}"
+        )
+    return out
+
+
+def _forecasted_export_for_day(day: date, tz: ZoneInfo) -> tuple[float, float, int]:
+    """Estimate exported kWh + pence from committed peak_export decisions.
+
+    Used as fallback when telemetry export is 0 on a day the LP committed
+    peak_export slots — most likely a missing-sample window in
+    ``pv_realtime_history``. Sums ``scen_pessimistic_exp_kwh`` (the safety-
+    floor amount the LP guaranteed) for every committed peak_export slot
+    whose local date matches ``day``, multiplied by per-slot
+    ``agile_export_rates`` (flat ``EXPORT_RATE_PENCE`` fallback).
+
+    Returns ``(kwh, pence, slot_count)`` or ``(0, 0, 0)``.
+    """
+    from datetime import UTC as _UTC
+
+    start_utc = datetime.combine(day, datetime.min.time()).replace(tzinfo=tz).astimezone(_UTC)
+    end_utc = start_utc + timedelta(days=1)
+    try:
+        commits = db.get_committed_peak_export_in_range(
+            start_utc.isoformat(), end_utc.isoformat()
+        )
+    except Exception:
+        return 0.0, 0.0, 0
+    if not commits:
+        return 0.0, 0.0, 0
+
+    flat = float(config.EXPORT_RATE_PENCE)
+    rate_by_start: dict[str, float] = {}
+    if (config.OCTOPUS_EXPORT_TARIFF_CODE or "").strip():
+        try:
+            for r in db.get_agile_export_rates_in_range(
+                start_utc.isoformat(), end_utc.isoformat()
+            ):
+                key = str(r["valid_from"]).replace("+00:00", "Z")
+                rate_by_start[key] = float(r["value_inc_vat"])
+        except Exception:
+            pass
+
+    total_kwh = 0.0
+    total_p = 0.0
+    for r in commits:
+        kwh = float(r.get("scen_pessimistic_exp_kwh") or 0.0)
+        if kwh <= 0:
+            continue
+        slot_iso = str(r["slot_time_utc"]).replace("+00:00", "Z")
+        rate = rate_by_start.get(slot_iso, flat)
+        total_kwh += kwh
+        total_p += kwh * rate
+    return total_kwh, total_p, len(commits)
 
 
 # --------------------------------------------------------------------------

@@ -169,6 +169,16 @@ LP_MPC_HOURS=                                    # EMPTY by default (V12) — ev
 # --- V13 — nightly post-hoc consumption backfill ---
 CONSUMPTION_BACKFILL_HOUR=4                      # local TZ (default 04:00) — Octopus consumption
 CONSUMPTION_BACKFILL_MINUTE=0                    # endpoint lags ~24h, 04:00 the next day is safe
+
+# --- Brief expansion (#207 follow-up) — net cost + tariff comparisons ---
+# Realised cost in compute_daily_pnl + brief markdown is NET and INCLUDES the
+# daily standing charge (apples-to-apples vs shadows). Set MANUAL_STANDING_CHARGE
+# above for the Agile standing fee. Set the FIXED_TARIFF_* trio to surface a
+# "vs <label>" comparison line in the brief + MCP (e.g. previous fixed tariff).
+# Leave any of the FIXED_TARIFF_* values at 0 / empty to suppress the line.
+FIXED_TARIFF_LABEL=British Gas Fixed v58         # display label (free text)
+FIXED_TARIFF_RATE_PENCE=20.70                    # flat unit rate
+FIXED_TARIFF_STANDING_PENCE_PER_DAY=41.14        # daily standing charge
 ```
 
 `EXPORT_DISCHARGE_MIN_SOC_PERCENT` was **removed** (was the live-SoC global gate that
@@ -234,6 +244,34 @@ tomorrow's profitable peak-export disappeared during a re-plan after today's
 discharge had drawn the battery below 95 %).
 
 See `docs/DISPATCH_DECISIONS.md` for the design rationale and decision rule.
+
+### Daily PnL semantics — read this before quoting any £ figure
+
+The MCP tools `get_energy_metrics`, `get_daily_brief`, `get_night_brief`, and
+`get_tariff_comparison` (plus the markdown brief itself) all use the same
+convention. **Don't paraphrase numbers from the markdown — pull the
+structured fields:**
+
+- `realised_cost_gbp` is **NET** and **INCLUDES** the daily standing charge.
+  Formula: `Σ(slot_kwh × agile_p) + standing_pence_per_day − Σ(export_kwh × export_p)`.
+- All shadow costs (`svt_shadow_gbp`, `fixed_shadow_gbp`,
+  `fixed_tariff_shadow_gbp`) **also include** the standing charge — so
+  `delta_vs_*_gbp` is real money saved, not energy-cost-only saved. Positive
+  = Agile beat the shadow.
+- `realised_import_gbp` is the energy-import side only (no standing, no
+  export). Useful for breaking down "where did the cost come from".
+- `export_revenue_gbp` and `export_kwh` are **measured** (from
+  `pv_realtime_history` half-hour rollup × per-slot `agile_export_rates`).
+- When `export_kwh == 0` but the LP committed `peak_export` slots, the brief
+  surfaces a **forecasted** estimate flagged with 🔮 — that's the LP's
+  `scen_pessimistic_exp_kwh × per-slot Outgoing Agile rate`. It is an
+  estimate, not measurement; do not double-count.
+
+`Mode:` line in the brief tells OpenClaw whether HEM is actively driving
+Daikin (`active`) or just observing (`passive`). When passive, OpenClaw
+should never suggest tactical Daikin actions ("preheat the tank now!") —
+the heat pump runs on its own weather curve and HEM does not change
+setpoints. Read `_mode_status_line()` in `src/analytics/daily_brief.py`.
 
 ---
 
