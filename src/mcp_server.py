@@ -3163,16 +3163,20 @@ def build_mcp() -> FastMCP:
     @mcp.tool(
         name="get_smartthings_status",
         description=(
-            "Health check for the SmartThings integration: is the PAT "
-            "configured? does a list_devices round-trip succeed? Never "
-            "returns the PAT itself."
+            "Health check for the SmartThings OAuth integration: are the "
+            "OAuth tokens present on disk? does a list_devices round-trip "
+            "succeed? Never returns the access_token / refresh_token. "
+            "When tokens_present=False, run the one-shot enrollment container "
+            "(``docker compose -f deploy/compose.smartthings-auth.yaml run --rm "
+            "smartthings-auth``)."
         ),
     )
     def get_smartthings_status_tool() -> dict[str, Any]:
-        present = _st_service.pat_present()
+        present = _st_service.tokens_present()
         out: dict[str, Any] = {
             "ok": True,
-            "pat_present": present,
+            "tokens_present": present,
+            "client_id_configured": bool(config.SMARTTHINGS_CLIENT_ID),
             "api_base": config.SMARTTHINGS_API_BASE,
             "dispatch_enabled": bool(config.APPLIANCE_DISPATCH_ENABLED),
             "read_only": bool(config.OPENCLAW_READ_ONLY),

@@ -125,6 +125,72 @@ Daikin Onecta firmware runs the weekly thermal-shock cycle autonomously (Sunday 
 
 ---
 
+## SmartThings (Samsung) — OAuth + appliance scheduling
+
+Mirror-of-Daikin OAuth Authorization Code flow. Tokens at
+`data/.smartthings-tokens.json` (JSON with access_token + refresh_token +
+expires_in + obtained_at + scope). Access token expires every 24h; auto-
+refreshed by `src/smartthings/auth.py:get_valid_access_token` on every
+device API call. Refresh circuit breaker after 3 consecutive failures
+(15-min cooldown).
+
+### One-time bootstrap (after `.env` has CLIENT_ID + CLIENT_SECRET set)
+
+```bash
+# 1. From your laptop, tunnel :8080:
+ssh -L 8080:localhost:8080 root@<hem-host>.your-tailnet.ts.net
+
+# 2. On the host, launch the auth-only container:
+docker compose -f /srv/hem/compose.smartthings-auth.yaml run --rm smartthings-auth
+
+# 3. Open the URL the container prints in your local browser. Samsung
+#    redirects to http://localhost:8080/oauth/smartthings/callback
+#    (= the container, via your SSH tunnel). Tokens land in
+#    /srv/hem/data/.smartthings-tokens.json. Container exits.
+
+# 4. Restart hem so the service picks up the new tokens.
+systemctl restart hem
+```
+
+### Refresh access token (refresh_token still valid)
+
+Automatic — `get_valid_access_token` refreshes if within
+`SMARTTHINGS_ACCESS_REFRESH_LEEWAY_SECONDS` (default 300) of expiry. On a
+401 from the device API the client retries once with `force_refresh=True`.
+No manual action needed unless the refresh circuit trips.
+
+### Full re-auth (refresh circuit tripped or refresh_token revoked)
+
+Same one-shot container as bootstrap (above) — overwrites the token file.
+
+### Required `.env` keys
+
+```
+SMARTTHINGS_CLIENT_ID=<from `smartthings apps:create`>
+SMARTTHINGS_CLIENT_SECRET=<from `smartthings apps:create` — sensitive>
+SMARTTHINGS_REDIRECT_URI=http://localhost:8080/oauth/smartthings/callback
+SMARTTHINGS_TOKEN_FILE=/app/data/.smartthings-tokens.json   # absolute inside container
+APPLIANCE_DISPATCH_ENABLED=true
+```
+
+### Appliance dispatch
+
+LP solver hooks `appliance_dispatch.reconcile()` at the start of each
+solve. Reads each registered appliance's `remoteControlEnabled` via
+SmartThings; when true, picks the cheapest contiguous window before the
+deadline, includes the planned kWh in the LP residual-load profile, and
+registers a one-shot APScheduler `DateTrigger` cron at the chosen time.
+Cron fires `setMachineState run` after pre-fire safety re-check.
+Cancelling on the unit before fire time → next LP solve drops the cron
+and re-plans without the load. Physical Smart Control button on the
+appliance IS the consent gate — no MCP confirm.
+
+`device_type` accepts `washer | dryer | dishwasher` — same SmartThings
+`setMachineState run` command for all three. Register multiple devices
+via the discover/register MCP tools or REST endpoints.
+
+---
+
 ## Key `.env` settings to know
 
 ```

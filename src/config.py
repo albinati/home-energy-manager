@@ -321,16 +321,39 @@ class Config:
     CONSUMPTION_BACKFILL_MINUTE: int = int(os.getenv("CONSUMPTION_BACKFILL_MINUTE", "0"))
     BULLETPROOF_TIMEZONE: str = (os.getenv("BULLETPROOF_TIMEZONE") or "Europe/London").strip()
 
-    # ── SmartThings smart-appliance scheduling (Phase 1: Samsung washer) ────
-    # PAT (Personal Access Token) lives at SMARTTHINGS_TOKEN_FILE — plaintext
-    # 0600, mirrors .daikin-tokens.json / .openclaw-token. Set via the
-    # POST /api/v1/integrations/smartthings/credentials endpoint.
+    # ── SmartThings smart-appliance scheduling — OAuth 2.0 (mirrors Daikin) ──
+    # Tokens live at SMARTTHINGS_TOKEN_FILE (JSON, 0600, mirrors .daikin-tokens.json
+    # shape: access_token + refresh_token + expires_in + obtained_at + scope).
+    # Bootstrap via the one-shot ``deploy/compose.smartthings-auth.yaml`` container.
+    SMARTTHINGS_CLIENT_ID: str = (os.getenv("SMARTTHINGS_CLIENT_ID") or "").strip()
+    SMARTTHINGS_CLIENT_SECRET: str = (os.getenv("SMARTTHINGS_CLIENT_SECRET") or "").strip()
+    SMARTTHINGS_REDIRECT_URI: str = (
+        os.getenv("SMARTTHINGS_REDIRECT_URI")
+        or "http://localhost:8080/oauth/smartthings/callback"
+    ).strip()
+    SMARTTHINGS_AUTHORIZE_URL: str = (
+        os.getenv("SMARTTHINGS_AUTHORIZE_URL") or "https://api.smartthings.com/oauth/authorize"
+    ).strip().rstrip("/")
+    SMARTTHINGS_TOKEN_URL: str = (
+        os.getenv("SMARTTHINGS_TOKEN_URL")
+        or "https://auth-global.api.smartthings.com/oauth/token"
+    ).strip().rstrip("/")
+    SMARTTHINGS_OAUTH_SCOPES: str = (
+        os.getenv("SMARTTHINGS_OAUTH_SCOPES") or "r:devices:* x:devices:*"
+    ).strip()
     SMARTTHINGS_TOKEN_FILE: Path = Path(
-        os.getenv("SMARTTHINGS_TOKEN_FILE", "data/.smartthings-token")
+        os.getenv("SMARTTHINGS_TOKEN_FILE", "data/.smartthings-tokens.json")
     )
     SMARTTHINGS_API_BASE: str = (
         os.getenv("SMARTTHINGS_API_BASE") or "https://api.smartthings.com/v1"
     ).strip().rstrip("/")
+    # Refresh leeway: get a new access token if it expires within this many seconds.
+    SMARTTHINGS_ACCESS_REFRESH_LEEWAY_SECONDS: int = int(
+        os.getenv("SMARTTHINGS_ACCESS_REFRESH_LEEWAY_SECONDS", "300")
+    )
+    SMARTTHINGS_TOKEN_REFRESH_MIN_INTERVAL_SECONDS: int = int(
+        os.getenv("SMARTTHINGS_TOKEN_REFRESH_MIN_INTERVAL_SECONDS", "60")
+    )
     APPLIANCE_DISPATCH_ENABLED: bool = os.getenv(
         "APPLIANCE_DISPATCH_ENABLED", "true"
     ).lower() in ("true", "1", "yes")

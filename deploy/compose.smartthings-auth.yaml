@@ -1,0 +1,48 @@
+# One-shot SmartThings OAuth enrollment.
+#
+# Usage:
+#   1. From your laptop, tunnel :8080 to the Hetzner host:
+#        ssh -L 8080:localhost:8080 root@<hem-host>.your-tailnet.ts.net
+#   2. On the host, launch the auth-only container:
+#        docker compose -f /srv/hem/compose.smartthings-auth.yaml run --rm smartthings-auth
+#   3. The container prints an authorize URL — open it in your local browser.
+#      Samsung redirects to http://localhost:8080/oauth/smartthings/callback
+#      (= the container, via your SSH tunnel). Tokens land in
+#      /srv/hem/data/.smartthings-tokens.json.
+#   4. After the container exits, restart the main service so it picks up
+#      the new tokens:
+#        systemctl restart hem
+#
+# Mirrors the shape of compose.daikin-auth.yaml — same SSH-tunnel pattern,
+# same token-file convention.
+services:
+  smartthings-auth:
+    image: ghcr.io/albinati/home-energy-manager:${HEM_IMAGE_TAG:-main}
+    container_name: hem-smartthings-auth
+    pull_policy: always
+
+    # OAuth callback listens on :8080 inside the container; published only to
+    # loopback. Operator opens an SSH tunnel from a workstation and visits the
+    # printed URL in their local browser.
+    ports:
+      - "127.0.0.1:8080:8080"
+
+    volumes:
+      - /srv/hem/data:/app/data
+      - /srv/hem/.env:/app/.env:ro
+
+    environment:
+      DB_PATH: /app/data/energy_state.db
+      SMARTTHINGS_TOKEN_FILE: /app/data/.smartthings-tokens.json
+      SMARTTHINGS_REDIRECT_URI: http://localhost:8080/oauth/smartthings/callback
+      TZ: Europe/London
+      PYTHONPATH: /app
+
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+
+    # Override the default service entrypoint — this is a one-shot OAuth flow,
+    # not the long-running API server.
+    entrypoint: ["/usr/bin/tini", "--"]
+    command: ["python", "-m", "src.smartthings"]
