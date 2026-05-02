@@ -76,3 +76,63 @@ def test_heuristic_fallback_returns_plan(monkeypatch: pytest.MonkeyPatch) -> Non
     assert isinstance(result.get("daikin_actions"), int), (
         f"missing daikin_actions count: {result}"
     )
+
+
+def test_heuristic_caps_fox_dispatch_at_24h(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue #208: when both today's and tomorrow's Agile rates are present, the
+    heuristic must NOT emit Fox V3 groups for D+1 slots that share an
+    hour-of-day with D+0 slots (Fox V3 is daily-cyclic — overlap = duplicates
+    on the inverter). Mirrors the LP-side cap from db8a59c."""
+    now = datetime(2026, 4, 22, 14, 0, tzinfo=UTC)
+    monkeypatch.setattr(optimizer, "_now_utc", lambda: now)
+    # Seed BOTH days so the plan window is the full 48 h horizon.
+    _seed_realistic_day(datetime(2026, 4, 22, 0, 0, tzinfo=UTC))
+    _seed_realistic_day(datetime(2026, 4, 23, 0, 0, tzinfo=UTC))
+
+    captured: dict[str, list] = {}
+
+    def _capture_merge(slots, **kwargs):
+        captured["slots"] = list(slots)
+        # call through to keep the rest of the code path sane
+        return _real_merge(slots, **kwargs)
+
+    _real_merge = optimizer._merge_fox_groups
+    monkeypatch.setattr(optimizer, "_merge_fox_groups", _capture_merge)
+
+    result = optimizer.run_optimizer(fox=None, daikin=None)
+    assert result.get("ok") is True
+
+    slots = captured["slots"]
+    assert slots, "heuristic produced no slots to merge"
+    # 24 h = 48 half-hour slots; cap must hold.
+    span_hours = (slots[-1].end_utc - slots[0].start_utc).total_seconds() / 3600
+    assert span_hours <= 24.0, (
+        f"heuristic dispatch span exceeded 24 h: {span_hours:.2f} h "
+        f"({slots[0].start_utc.isoformat()} -> {slots[-1].end_utc.isoformat()}) — "
+        f"would emit overlapping Fox V3 groups (#208)"
+    )
+
+
+def test_heuristic_uses_shared_upload_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The heuristic must route through ``upload_fox_if_operational`` — that's
+    where the overlap-detection backstop lives (#208). If a future refactor
+    inlines the upload again, the backstop won't fire."""
+    now = datetime(2026, 4, 22, 14, 0, tzinfo=UTC)
+    monkeypatch.setattr(optimizer, "_now_utc", lambda: now)
+    _seed_realistic_day(datetime(2026, 4, 22, 0, 0, tzinfo=UTC))
+
+    from src.scheduler import lp_dispatch
+
+    calls: list[Any] = []
+
+    def _capture_upload(fox, groups):  # type: ignore[no-untyped-def]
+        calls.append(groups)
+        return False
+
+    monkeypatch.setattr(lp_dispatch, "upload_fox_if_operational", _capture_upload)
+    monkeypatch.setattr(optimizer, "upload_fox_if_operational", _capture_upload, raising=False)
+
+    fox = type("FakeFox", (), {"api_key": "x"})()
+    result = optimizer.run_optimizer(fox=fox, daikin=None)
+    assert result.get("ok") is True
+    assert calls, "upload_fox_if_operational was never called by heuristic"
