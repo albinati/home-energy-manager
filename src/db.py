@@ -3764,6 +3764,41 @@ def get_dispatch_decisions(run_id: int) -> list[dict[str, Any]]:
             conn.close()
 
 
+def get_committed_peak_export_in_range(
+    period_from_iso: str,
+    period_to_iso: str,
+) -> list[dict[str, Any]]:
+    """Latest committed peak_export decision per slot in the UTC range.
+
+    Slots can be re-decided across multiple LP runs (each plan re-solve writes a
+    new row). For "what did we actually commit?" the most recent ``run_id`` per
+    slot is the source of truth.
+
+    Used by the daily-brief forecasted-export fallback: when telemetry export
+    is 0 on a day the LP committed peak_export, surface the planned amount so
+    the household sees an estimate flagged as forecasted instead of nothing.
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT slot_time_utc, lp_kind, committed,
+                          scen_pessimistic_exp_kwh, scen_nominal_exp_kwh, run_id
+                   FROM dispatch_decisions
+                   WHERE slot_time_utc >= ? AND slot_time_utc < ?
+                     AND lp_kind = 'peak_export' AND committed = 1
+                     AND run_id = (
+                         SELECT MAX(run_id) FROM dispatch_decisions d2
+                         WHERE d2.slot_time_utc = dispatch_decisions.slot_time_utc
+                     )
+                   ORDER BY slot_time_utc ASC""",
+                (period_from_iso, period_to_iso),
+            )
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
 def update_execution_log_metered(
     slot_start_utc: str,
     consumption_kwh: float,

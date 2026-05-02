@@ -68,13 +68,21 @@ def _realised_export_pence(day: date) -> tuple[float, float]:
 
 
 def compute_daily_pnl(day: date) -> dict[str, Any]:
+    """Daily PnL with apples-to-apples standing-charge accounting.
+
+    All shadow costs (SVT, Fixed, configured legacy fixed tariff) include the
+    standing charge so the deltas reflect what the household would actually
+    pay on each tariff. Realised cost on Agile likewise embeds the Agile
+    standing charge (``MANUAL_STANDING_CHARGE_PENCE_PER_DAY``) so the user-facing
+    "you saved £X vs SVT" figure isn't off by ~62p/day.
+    """
     a, b = _day_bounds(day)
     rows = db.get_execution_logs(from_ts=a, to_ts=b, limit=5000)
     svt = svt_rate_pence()
     fixed = fixed_shadow_rate_pence()
     realised_import = 0.0
-    svt_cost = 0.0
-    fixed_cost = 0.0
+    svt_energy_cost = 0.0
+    fixed_energy_cost = 0.0
     kwh_sum = 0.0
     import_kwh = 0.0
     cheap_kwh = 0.0
@@ -86,8 +94,8 @@ def compute_daily_pnl(day: date) -> dict[str, Any]:
             continue
         kwh_sum += kwh
         realised_import += kwh * float(p)
-        svt_cost += kwh * svt
-        fixed_cost += kwh * fixed
+        svt_energy_cost += kwh * svt
+        fixed_energy_cost += kwh * fixed
         sk = (r.get("slot_kind") or "").lower()
         if sk == "peak":
             peak_kwh += kwh
@@ -97,17 +105,26 @@ def compute_daily_pnl(day: date) -> dict[str, Any]:
             import_kwh += kwh
 
     export_revenue, export_kwh = _realised_export_pence(day)
-    realised = realised_import - export_revenue
+    standing_p = float(config.MANUAL_STANDING_CHARGE_PENCE_PER_DAY or 0)
+
+    # Net daily cost = (energy import + standing) − export earnings.
+    # Standing is a fixed daily fee on Agile too, so it MUST be in here for
+    # comparisons to be meaningful.
+    realised = realised_import + standing_p - export_revenue
+    svt_cost = svt_energy_cost + standing_p
+    fixed_cost = fixed_energy_cost + standing_p
 
     alpha_svt = (svt_cost - realised) / 100.0
     alpha_fixed = (fixed_cost - realised) / 100.0
-    return {
+
+    out: dict[str, Any] = {
         "date": day.isoformat(),
         "kwh": round(kwh_sum, 3),
         "realised_cost_gbp": round(realised / 100.0, 4),
         "realised_import_gbp": round(realised_import / 100.0, 4),
         "export_revenue_gbp": round(export_revenue / 100.0, 4),
         "export_kwh": round(export_kwh, 3),
+        "standing_charge_gbp": round(standing_p / 100.0, 4),
         "svt_shadow_gbp": round(svt_cost / 100.0, 4),
         "fixed_shadow_gbp": round(fixed_cost / 100.0, 4),
         "delta_vs_svt_gbp": round(alpha_svt, 4),
@@ -115,6 +132,18 @@ def compute_daily_pnl(day: date) -> dict[str, Any]:
         "cheap_slot_kwh": round(cheap_kwh, 3),
         "peak_kwh": round(peak_kwh, 3),
     }
+
+    # Optional: legacy fixed tariff comparison (e.g. previous British Gas plan).
+    # Skipped entirely when not configured so the brief stays clean.
+    bg_rate = float(config.FIXED_TARIFF_RATE_PENCE or 0)
+    bg_standing = float(config.FIXED_TARIFF_STANDING_PENCE_PER_DAY or 0)
+    if bg_rate > 0 and bg_standing > 0:
+        bg_cost = (kwh_sum * bg_rate) + bg_standing
+        out["fixed_tariff_label"] = config.FIXED_TARIFF_LABEL or "fixed tariff"
+        out["fixed_tariff_shadow_gbp"] = round(bg_cost / 100.0, 4)
+        out["delta_vs_fixed_tariff_gbp"] = round((bg_cost - realised) / 100.0, 4)
+
+    return out
 
 
 def compute_vwap(day: date) -> float | None:
