@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 from ..agile_cache import get_agile_cache, refresh_agile_rates
 from ..assistant import SuggestedAction, build_context, get_suggestions, validate_suggested_actions
-from ..config_snapshots import list_snapshots, restore_snapshot, rollback_latest, save_snapshot
+from ..config_snapshots import list_snapshots, restore_snapshot, rollback_latest
 from ..scheduler.optimizer import run_optimizer
 from ..scheduler.runner import (
     get_scheduler_status,

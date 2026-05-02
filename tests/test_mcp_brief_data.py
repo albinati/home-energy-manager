@@ -167,3 +167,81 @@ class TestMCPBriefData(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(out["ok"])
         self.assertIn("invalid date", out["error"])
+
+    async def test_get_tariff_comparison_period_week(self) -> None:
+        """``period='week'`` resolves to a 7-day trailing range with n_days=7."""
+        self._seed_yesterday()
+        mcp = build_mcp()
+        _blocks, out = await mcp.call_tool(
+            "get_tariff_comparison", {"period": "week"}
+        )
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["n_days"], 7)
+        self.assertEqual(out["label"], "trailing-7d")
+
+    async def test_get_tariff_comparison_period_mtd(self) -> None:
+        from datetime import date as _date_t
+        from zoneinfo import ZoneInfo
+        from datetime import datetime as _dt
+        self._seed_yesterday()
+        mcp = build_mcp()
+        _blocks, out = await mcp.call_tool(
+            "get_tariff_comparison", {"period": "mtd"}
+        )
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["label"], "month-to-date")
+        today = _dt.now(ZoneInfo("Europe/London")).date()
+        self.assertEqual(out["period_start"], _date_t(today.year, today.month, 1).isoformat())
+        self.assertEqual(out["period_end"], today.isoformat())
+
+    async def test_get_tariff_comparison_period_ytd(self) -> None:
+        from datetime import date as _date_t
+        from zoneinfo import ZoneInfo
+        from datetime import datetime as _dt
+        self._seed_yesterday()
+        mcp = build_mcp()
+        _blocks, out = await mcp.call_tool(
+            "get_tariff_comparison", {"period": "ytd"}
+        )
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["label"], "year-to-date")
+        today = _dt.now(ZoneInfo("Europe/London")).date()
+        self.assertEqual(out["period_start"], _date_t(today.year, 1, 1).isoformat())
+
+    async def test_get_tariff_comparison_custom_range(self) -> None:
+        self._seed_yesterday()
+        mcp = build_mcp()
+        _blocks, out = await mcp.call_tool(
+            "get_tariff_comparison",
+            {"start_date": "2026-04-25", "end_date": "2026-05-01"},
+        )
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["period_start"], "2026-04-25")
+        self.assertEqual(out["period_end"], "2026-05-01")
+        self.assertEqual(out["n_days"], 7)
+
+    async def test_get_tariff_comparison_rejects_bad_period(self) -> None:
+        mcp = build_mcp()
+        _blocks, out = await mcp.call_tool(
+            "get_tariff_comparison", {"period": "decade"}
+        )
+        self.assertFalse(out["ok"])
+        self.assertIn("unknown period", out["error"])
+
+    async def test_get_energy_metrics_includes_mtd_and_ytd_blocks(self) -> None:
+        self._seed_yesterday()
+        mcp = build_mcp()
+        _blocks, out = await mcp.call_tool("get_energy_metrics", {})
+
+        self.assertTrue(out["ok"])
+        # The pnl envelope must now expose all 5 period scopes
+        for scope in ("daily", "weekly", "monthly", "month_to_date", "year_to_date"):
+            self.assertIn(scope, out["pnl"], f"missing pnl.{scope}")
+        # And the period blocks must carry the breakdown, not just delta
+        for scope in ("weekly", "monthly", "month_to_date", "year_to_date"):
+            blk = out["pnl"][scope]
+            for k in (
+                "energy_used_kwh", "export_kwh", "realised_cost_pounds",
+                "standing_charge_pounds", "delta_vs_svt_pounds", "n_days",
+            ):
+                self.assertIn(k, blk, f"missing {k!r} in pnl.{scope}")
