@@ -538,6 +538,16 @@ class Config:
     LP_PV_CURTAIL_PENALTY_PENCE_PER_KWH: float = float(
         os.getenv("LP_PV_CURTAIL_PENALTY_PENCE_PER_KWH", os.getenv("EXPORT_RATE_PENCE", "15.0"))
     )
+    # Pre-plunge discipline lookahead (hours): when a negative-price slot is
+    # within this window AHEAD of a positive-price slot, forbid grid→battery
+    # charge on that positive slot (PV→battery still allowed). Reserves
+    # import capacity for the negative window so the LP can max out its 3680 W
+    # ForceCharge there. Capped to the LP horizon implicitly. 0 disables.
+    # Bounded to 12 h by default after the 2026-05-02 LP audit found that an
+    # unbounded look-ahead (the previous behaviour) starved the battery on
+    # days where the negative slot was >24 h ahead — only 33% of charge slots
+    # were in the cheap quartile on those days.
+    LP_PLUNGE_PREP_HOURS: int = int(os.getenv("LP_PLUNGE_PREP_HOURS", "12"))
     # Inverter stress cost: piecewise-linear quadratic approximation on battery power per slot.
     # At nominal inverter power (MAX_INVERTER_KW), the penalty equals this value (p/kWh).
     # 0 = disabled. Recommended: 0.05–0.20. Works alongside or instead of TV penalties.
