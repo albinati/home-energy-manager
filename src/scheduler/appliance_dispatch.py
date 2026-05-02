@@ -254,7 +254,11 @@ def _residual_pv_kwh_per_slot(
         ),
     )
     try:
-        from ..weather import compute_pv_calibration_factor, fetch_forecast
+        from ..weather import (
+            compute_pv_calibration_factor,
+            compute_today_pv_correction_factor,
+            fetch_forecast,
+        )
 
         forecast = fetch_forecast(hours=horizon_h)
     except Exception as e:
@@ -268,6 +272,14 @@ def _residual_pv_kwh_per_slot(
         cal_hourly = db.get_pv_calibration_hourly()
     except Exception:
         cal_hourly = {}
+    # Today-aware adjuster on top of per-hour table (or flat fallback).
+    # Same logic the LP uses (see optimizer.py) — keeps appliance dispatch's
+    # PV view consistent with the LP's PV view per solve.
+    today_factor = 1.0
+    try:
+        today_factor, _ = compute_today_pv_correction_factor()
+    except Exception:
+        pass
     flat_cal = 1.0
     if not cal_hourly:
         try:
@@ -283,8 +295,8 @@ def _residual_pv_kwh_per_slot(
         hour_anchor = slot_start.replace(minute=0, second=0, microsecond=0)
         pv_kw = by_hour.get(hour_anchor, 0.0)
         scale = float(cal_hourly.get(hour_anchor.hour, flat_cal)) if cal_hourly else flat_cal
-        # Half-hour kWh = kW × 0.5h × calibration factor
-        out[slot_start] = pv_kw * 0.5 * scale
+        # Half-hour kWh = kW × 0.5h × per-hour-table × today-aware factor
+        out[slot_start] = pv_kw * 0.5 * scale * today_factor
     return out
 
 
