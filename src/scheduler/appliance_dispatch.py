@@ -128,28 +128,203 @@ def _ceil_to_half_hour_utc(dt: datetime) -> datetime:
 # Cheapest-window picker
 # ---------------------------------------------------------------------------
 
+def build_marginal_cost_per_slot(
+    earliest_start_utc: datetime,
+    deadline_utc: datetime,
+    appliance_kw: float,
+) -> dict[datetime, float] | None:
+    """Build a per-slot marginal-cost map for running the appliance in that slot.
+
+    The dispatcher uses this to **price PV opportunity correctly**: running the
+    washer when PV is exporting costs us the *forgone export revenue*, not the
+    *Agile import price* (which we wouldn't pay anyway because PV covers the
+    load). Without this, ``find_cheapest_window`` picks the cheapest Agile slot
+    even when daytime PV is genuinely cheaper.
+
+    Per-slot marginal cost (pence) for ``washer_kwh = appliance_kw × 0.5``::
+
+        residual_pv = max(0, pv_forecast_kwh - base_load_kwh)
+        if residual_pv >= washer_kwh:
+            cost = washer_kwh × export_rate    # we forgo export revenue
+        else:
+            cost = (washer_kwh - residual_pv) × import_rate
+                 + residual_pv × export_rate
+
+    Returns ``None`` when forecasts are unavailable (caller falls back to the
+    legacy import-only path). Forecast inputs:
+
+      - PV: ``weather.fetch_forecast`` × hourly calibration table
+      - Base load: ``db.half_hourly_residual_load_profile_kwh()`` (post-Daikin)
+      - Import rate: ``agile_rates`` for the period
+      - Export rate: ``agile_export_rates`` (or flat ``EXPORT_RATE_PENCE`` fallback)
+    """
+    if not getattr(config, "APPLIANCE_PV_AWARE_DISPATCH", True):
+        return None
+    tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
+    if not tariff:
+        return None
+    earliest_start_utc = _ceil_to_half_hour_utc(earliest_start_utc)
+
+    # Import rates
+    try:
+        import_rows = db.get_rates_for_period(tariff, earliest_start_utc, deadline_utc)
+    except Exception as e:
+        logger.warning("appliance pv-aware: get_rates_for_period failed: %s", e)
+        return None
+    if not import_rows:
+        return None
+    import_by_start: dict[datetime, float] = {}
+    for r in import_rows:
+        try:
+            import_by_start[_parse_iso(r["valid_from"])] = float(r["value_inc_vat"])
+        except (KeyError, ValueError, TypeError):
+            continue
+    if not import_by_start:
+        return None
+
+    # Export rates (best-effort; fall back to flat EXPORT_RATE_PENCE per slot)
+    flat_export = float(config.EXPORT_RATE_PENCE)
+    export_by_start: dict[datetime, float] = {}
+    if (config.OCTOPUS_EXPORT_TARIFF_CODE or "").strip():
+        try:
+            export_rows = db.get_agile_export_rates_in_range(
+                earliest_start_utc.isoformat(), deadline_utc.isoformat(),
+            )
+            for r in export_rows:
+                export_by_start[_parse_iso(r["valid_from"])] = float(r["value_inc_vat"])
+        except Exception as e:
+            logger.warning("appliance pv-aware: export rates fetch failed: %s", e)
+
+    # PV forecast (kWh per slot)
+    pv_per_slot = _residual_pv_kwh_per_slot(
+        sorted(import_by_start.keys()),
+    )
+
+    # Base-load profile (kWh/half-hour by hour-of-day)
+    try:
+        base_load_profile = db.half_hourly_residual_load_profile_kwh()
+    except Exception as e:
+        logger.warning("appliance pv-aware: load profile fetch failed: %s", e)
+        base_load_profile = {}
+    base_load_flat = float(getattr(config, "APPLIANCE_DEFAULT_BASE_LOAD_KW", 0.4))
+
+    washer_kwh_per_slot = float(appliance_kw) * 0.5
+
+    out: dict[datetime, float] = {}
+    tz_name = config.BULLETPROOF_TIMEZONE
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo(tz_name)
+    for slot_start in sorted(import_by_start.keys()):
+        if slot_start < earliest_start_utc:
+            continue
+        if slot_start + timedelta(minutes=30) > deadline_utc:
+            break
+        local = slot_start.astimezone(tz)
+        bucket = (local.hour, 30 if local.minute >= 30 else 0)
+        base_load = base_load_profile.get(bucket, base_load_flat)
+        pv = pv_per_slot.get(slot_start, 0.0)
+        residual_pv = max(0.0, pv - base_load)
+        import_p = import_by_start[slot_start]
+        export_p = export_by_start.get(slot_start, flat_export)
+        if residual_pv >= washer_kwh_per_slot:
+            cost = washer_kwh_per_slot * export_p
+        else:
+            grid_share = washer_kwh_per_slot - residual_pv
+            cost = grid_share * import_p + residual_pv * export_p
+        out[slot_start] = cost
+
+    return out if out else None
+
+
+def _residual_pv_kwh_per_slot(
+    slot_starts_utc: list[datetime],
+) -> dict[datetime, float]:
+    """Return ``{slot_start_utc: pv_kwh}`` per half-hour using the Open-Meteo
+    forecast + per-hour-of-day calibration table the LP uses.
+
+    Empty dict when the forecast fetch fails — caller's marginal-cost path
+    treats missing slots as ``pv=0`` (purely-import cost = legacy behavior).
+    """
+    if not slot_starts_utc:
+        return {}
+    horizon_h = max(
+        4,
+        int(
+            (slot_starts_utc[-1] - slot_starts_utc[0]).total_seconds() // 3600 + 2,
+        ),
+    )
+    try:
+        from ..weather import compute_pv_calibration_factor, fetch_forecast
+
+        forecast = fetch_forecast(hours=horizon_h)
+    except Exception as e:
+        logger.warning("appliance pv-aware: fetch_forecast failed: %s", e)
+        return {}
+    if not forecast:
+        return {}
+
+    cal_hourly = {}
+    try:
+        cal_hourly = db.get_pv_calibration_hourly()
+    except Exception:
+        cal_hourly = {}
+    flat_cal = 1.0
+    if not cal_hourly:
+        try:
+            flat_cal = float(compute_pv_calibration_factor() or 1.0)
+        except Exception:
+            flat_cal = 1.0
+
+    # forecast is hourly; expand to half-hourly by halving the hourly kWh
+    # estimate (good enough for this dispatch decision).
+    by_hour: dict[datetime, float] = {f.time_utc: float(f.estimated_pv_kw) for f in forecast}
+    out: dict[datetime, float] = {}
+    for slot_start in slot_starts_utc:
+        hour_anchor = slot_start.replace(minute=0, second=0, microsecond=0)
+        pv_kw = by_hour.get(hour_anchor, 0.0)
+        scale = float(cal_hourly.get(hour_anchor.hour, flat_cal)) if cal_hourly else flat_cal
+        # Half-hour kWh = kW × 0.5h × calibration factor
+        out[slot_start] = pv_kw * 0.5 * scale
+    return out
+
+
 def find_cheapest_window(
     earliest_start_utc: datetime,
     deadline_utc: datetime,
     duration_minutes: int,
+    *,
+    marginal_cost_per_slot: dict[datetime, float] | None = None,
 ) -> tuple[datetime, datetime, float]:
     """Return ``(planned_start_utc, planned_end_utc, avg_price_pence)`` for the
     cheapest contiguous window of ``duration_minutes`` whose end ≤ ``deadline_utc``.
 
-    Sliding-window minimum over half-hourly Agile rates from the
-    ``agile_rates`` table. When the table is empty for the horizon, falls
-    back to ``config.APPLIANCE_FALLBACK_WINDOW_LOCAL`` interpreted in the
-    BULLETPROOF_TIMEZONE.
+    When ``marginal_cost_per_slot`` is supplied (PV-aware dispatch — see
+    :func:`build_marginal_cost_per_slot`), the chosen window minimises total
+    marginal cost (= forgone export + grid import for the appliance), not
+    raw Agile import price. The reported ``avg_price_pence`` then reflects
+    pence/kWh of *real opportunity cost* per slot.
+
+    When ``marginal_cost_per_slot`` is ``None`` (legacy / no forecasts), the
+    function falls back to sliding-window minimum on Agile import rates from
+    the ``agile_rates`` table. Cold-start fallback uses
+    ``APPLIANCE_FALLBACK_WINDOW_LOCAL``.
     """
     tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
     duration = max(30, int(duration_minutes))
-    # Slot grid: 30-minute slots starting at the next half-hour boundary.
     earliest_start_utc = _ceil_to_half_hour_utc(earliest_start_utc)
     if deadline_utc - earliest_start_utc < timedelta(minutes=duration):
         raise ValueError(
             f"deadline_utc {deadline_utc.isoformat()} is < {duration}min after "
             f"earliest_start_utc {earliest_start_utc.isoformat()}"
         )
+
+    if marginal_cost_per_slot:
+        result = _cheapest_from_marginal_cost(
+            marginal_cost_per_slot, earliest_start_utc, deadline_utc, duration,
+        )
+        if result is not None:
+            return result
+        # fall through to import-only when marginal-cost path can't fit a window
 
     rates: list[dict[str, Any]] = []
     if tariff:
@@ -163,6 +338,47 @@ def find_cheapest_window(
         return _cheapest_from_rates(rates, deadline_utc, duration)
 
     return _fallback_window(earliest_start_utc, deadline_utc, duration)
+
+
+def _cheapest_from_marginal_cost(
+    marginal_cost_per_slot: dict[datetime, float],
+    earliest_start_utc: datetime,
+    deadline_utc: datetime,
+    duration_minutes: int,
+) -> tuple[datetime, datetime, float] | None:
+    """Sliding-window minimum on the marginal-cost map. Returns ``None`` when
+    no contiguous window of ``duration_minutes`` fits before ``deadline_utc``."""
+    n_slots = max(1, duration_minutes // 30)
+    starts = sorted(s for s in marginal_cost_per_slot if s >= earliest_start_utc)
+    if len(starts) < n_slots:
+        return None
+
+    best_total: float | None = None
+    best_start: datetime | None = None
+    for i in range(len(starts) - n_slots + 1):
+        window = starts[i : i + n_slots]
+        # Contiguity check
+        contiguous = all(
+            window[j + 1] - window[j] == timedelta(minutes=30)
+            for j in range(n_slots - 1)
+        )
+        if not contiguous:
+            continue
+        end_utc = window[-1] + timedelta(minutes=30)
+        if end_utc > deadline_utc:
+            continue
+        total = sum(marginal_cost_per_slot[s] for s in window)
+        if best_total is None or total < best_total:
+            best_total = total
+            best_start = window[0]
+
+    if best_start is None or best_total is None:
+        return None
+    end_utc = best_start + timedelta(minutes=duration_minutes)
+    # Convert total pence → avg pence/kWh for back-compat (callers expect it)
+    # We don't know exact kWh here, so report total/n_slots as "p per slot avg".
+    avg_per_slot_p = best_total / float(n_slots)
+    return best_start, end_utc, avg_per_slot_p
 
 
 def _cheapest_from_rates(
@@ -324,10 +540,38 @@ def _arm_or_replan(
     existing_job: dict[str, Any] | None,
 ) -> None:
     appliance_id = int(appliance["id"])
-    duration = int(appliance.get("default_duration_minutes") or 120)
     deadline_local = appliance.get("deadline_local_time") or config.APPLIANCE_DEFAULT_DEADLINE_LOCAL
     deadline_utc = _next_deadline_utc(deadline_local)
     now = _now_utc()
+
+    # Cycle-aware duration: when the washer exposes
+    # ``samsungce.washerDelayEnd.minimumReservableTime``, prefer it over the
+    # static ``default_duration_minutes`` from registration. The live value
+    # reflects the user's actual cycle selection (eco vs cotton vs hot wash);
+    # the static default is a guess. Falls back gracefully when the capability
+    # is absent or the value is null/zero.
+    static_duration = int(appliance.get("default_duration_minutes") or 120)
+    duration = static_duration
+    try:
+        client = _get_st_client()
+        live_status = client.get_full_status(appliance["vendor_device_id"])
+        delay = live_status.get("components", {}).get("main", {}).get(
+            "samsungce.washerDelayEnd", {}
+        )
+        live_min_reservable = delay.get("minimumReservableTime", {}).get("value")
+        if isinstance(live_min_reservable, (int, float)) and live_min_reservable >= 30:
+            duration = int(live_min_reservable)
+            if duration != static_duration:
+                logger.info(
+                    "appliance #%d: cycle-aware duration %d min "
+                    "(static default was %d min)",
+                    appliance_id, duration, static_duration,
+                )
+    except Exception as e:  # noqa: BLE001 — fall back to static, never fatal
+        logger.debug(
+            "appliance #%d: cycle-aware duration read failed (%s) — using static %d min",
+            appliance_id, type(e).__name__, static_duration,
+        )
 
     # Reject if there isn't enough headroom before the deadline.
     if deadline_utc - now < timedelta(minutes=duration):
@@ -344,8 +588,21 @@ def _arm_or_replan(
             )
         return
 
+    appliance_kw = float(appliance.get("typical_kw") or 0.5)
+    marginal = build_marginal_cost_per_slot(now, deadline_utc, appliance_kw)
+    if marginal:
+        logger.info(
+            "appliance #%d: PV-aware dispatch (%d candidate slots, "
+            "marginal-cost range %.2f-%.2f pence)",
+            appliance_id, len(marginal),
+            min(marginal.values()), max(marginal.values()),
+        )
+
     try:
-        start_utc, end_utc, avg_price = find_cheapest_window(now, deadline_utc, duration)
+        start_utc, end_utc, avg_price = find_cheapest_window(
+            now, deadline_utc, duration,
+            marginal_cost_per_slot=marginal,
+        )
     except ValueError as e:
         logger.warning("appliance #%d: cheapest-window infeasible: %s", appliance_id, e)
         return

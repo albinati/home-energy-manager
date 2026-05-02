@@ -370,6 +370,19 @@ class Config:
     APPLIANCE_RECONCILE_ERROR_PING_THRESHOLD: int = int(
         os.getenv("APPLIANCE_RECONCILE_ERROR_PING_THRESHOLD", "3")
     )
+    # PV-aware appliance window dispatch (PR #219). When True (default), the
+    # cheapest-window picker scores candidate windows by marginal cost
+    # (= forgone export revenue + grid import for the appliance load) instead
+    # of raw Agile import price. Captures free-PV opportunities the legacy
+    # path misses on sunny days. Set False to revert to import-only picker.
+    APPLIANCE_PV_AWARE_DISPATCH: bool = os.getenv(
+        "APPLIANCE_PV_AWARE_DISPATCH", "true"
+    ).strip().lower() in ("true", "1", "yes")
+    # Static default for the household residual base load when the per-hour-of-day
+    # profile has no row for a given slot (cold start / sparse history).
+    APPLIANCE_DEFAULT_BASE_LOAD_KW: float = float(
+        os.getenv("APPLIANCE_DEFAULT_BASE_LOAD_KW", "0.4")
+    )
 
     DHW_TEMP_MAX_C: float = float(os.getenv("DHW_TEMP_MAX_C", "65"))
     # Plunge-only ceiling (≥ DHW_TEMP_COMFORT_C and ≤ DHW_TEMP_MAX_C is allowed only when price < 0).
