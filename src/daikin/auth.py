@@ -307,7 +307,9 @@ class CallbackHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
 
-    def log_message(self, fmt, *args):
+    def log_message(self, _fmt, *_args):
+        # Override BaseHTTPRequestHandler.log_message to suppress the
+        # default stderr access log; signature must match the interface.
         pass
 
 
