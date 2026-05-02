@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 from .. import db
 from ..config import config
-from ..foxess.client import FoxESSClient, FoxESSError
+from ..foxess.client import FoxESSClient
 from ..foxess.models import SchedulerGroup
 from ..foxess.service import get_cached_realtime
 from ..physics import build_shower_target_iso, calculate_dhw_setpoint, find_dhw_heat_end_utc
@@ -876,6 +876,8 @@ def _write_daikin_schedule(plan_date: str, slots: list[HalfHourSlot], forecast: 
 
 def _run_optimizer_heuristic(fox: FoxESSClient | None, daikin: Any | None = None) -> dict[str, Any]:
     """Legacy price-quantile classifier + Fox/Daikin writers."""
+    from .lp_dispatch import upload_fox_if_operational
+
     tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
     if not tariff:
         return {"ok": False, "error": "OCTOPUS_TARIFF_CODE not set"}
@@ -957,19 +959,17 @@ def _run_optimizer_heuristic(fox: FoxESSClient | None, daikin: Any | None = None
         }
     )
 
+    # Fox V3 dispatch is daily-cyclic — mirror the LP path's 24 h cap so D+1
+    # slots that share an hour-of-day with D+0 don't reach the inverter as
+    # overlapping groups (issue #208 / db8a59c). Without this the heuristic
+    # uploads all 96 slots from the 48 h plan window and Fox renders duplicates.
+    fox_slots = slots
+    if fox_slots:
+        cutoff = fox_slots[0].start_utc + timedelta(hours=24)
+        fox_slots = [s for s in fox_slots if s.start_utc < cutoff]
     fox_ok = False
-    groups = _merge_fox_groups(slots, max_groups=8, peak_export_discharge=False)
-    if fox and fox.api_key and not config.OPENCLAW_READ_ONLY:
-        try:
-            fox.set_scheduler_v3(groups, is_default=False)
-            fox.warn_if_scheduler_v3_mismatch(groups)
-            fox.set_scheduler_flag(True)
-            fox_ok = True
-            db.save_fox_schedule_state([g.to_api_dict() for g in groups], enabled=True)
-        except FoxESSError as e:
-            logger.warning("Fox Scheduler V3 upload failed: %s", e)
-    elif fox and fox.api_key:
-        logger.info("Skipping Fox Scheduler V3 upload (read-only)")
+    groups = _merge_fox_groups(fox_slots, max_groups=8, peak_export_discharge=False)
+    fox_ok = upload_fox_if_operational(fox, groups)
 
     daikin_n = _write_daikin_schedule(plan_date, slots, forecast)
 

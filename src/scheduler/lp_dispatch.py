@@ -538,9 +538,52 @@ def build_fox_groups_from_lp(
     )
 
 
+def _detect_overlapping_groups(
+    groups: list[SchedulerGroup],
+) -> list[tuple[int, int]]:
+    """Return index pairs whose minute-of-day ranges intersect.
+
+    Fox V3 stores each group as HH:MM start/end with no date — the inverter
+    repeats them daily. Two groups whose intervals overlap produce undefined
+    behaviour (firmware appears to honour the last-registered window per
+    minute bucket). Catching this at the upload boundary stops bad payloads
+    from any source — LP, heuristic fallback, or future regressions — from
+    reaching hardware.
+
+    Endpoints are treated as ``[start, end)`` (end exclusive) to match the
+    merge code's adjacency convention: a group ``00:00-00:30`` followed by
+    ``00:30-01:59`` is a clean back-to-back schedule, NOT an overlap.
+    """
+    spans: list[tuple[int, int]] = []
+    for g in groups:
+        start = g.start_hour * 60 + g.start_minute
+        end = g.end_hour * 60 + g.end_minute
+        spans.append((start, end))
+    overlaps: list[tuple[int, int]] = []
+    for i in range(len(spans)):
+        for j in range(i + 1, len(spans)):
+            a_start, a_end = spans[i]
+            b_start, b_end = spans[j]
+            if a_start < b_end and b_start < a_end:
+                overlaps.append((i, j))
+    return overlaps
+
+
 def upload_fox_if_operational(fox: FoxESSClient | None, groups: list[SchedulerGroup]) -> bool:
     fox_ok = False
     if fox and fox.api_key and not config.OPENCLAW_READ_ONLY:
+        overlaps = _detect_overlapping_groups(groups)
+        if overlaps:
+            for i, j in overlaps:
+                gi, gj = groups[i], groups[j]
+                logger.error(
+                    "Refusing Fox V3 upload: overlapping groups detected "
+                    "[%d] %s %02d:%02d-%02d:%02d  vs  [%d] %s %02d:%02d-%02d:%02d "
+                    "(daily-cyclic clock would render duplicates — see #208)",
+                    i, gi.work_mode, gi.start_hour, gi.start_minute, gi.end_hour, gi.end_minute,
+                    j, gj.work_mode, gj.start_hour, gj.start_minute, gj.end_hour, gj.end_minute,
+                )
+            return False
         try:
             fox.set_scheduler_v3(groups, is_default=False)
             fox.warn_if_scheduler_v3_mismatch(groups)
