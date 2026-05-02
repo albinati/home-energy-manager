@@ -8,8 +8,8 @@ Day-to-day operations, deployment, and debugging for the Home Energy Manager on 
 
 | Component | Detail |
 |-----------|--------|
-| Server | Hetzner (Tailscale: `openclaw-overbot.tail0dbf20.ts.net`, `100.104.115.85`) |
-| SSH | `ssh root@openclaw-overbot.tail0dbf20.ts.net` |
+| Server | Hetzner (Tailscale: `<hem-host>.ts.net`, `100.x.y.z`) |
+| SSH | `ssh root@<hem-host>.ts.net` |
 | Project dir | `/root/home-energy-manager` |
 | Active DB | `/root/home-energy-manager/data/energy_state.db` ← **not** the project root |
 | Venv | `/root/home-energy-manager/.venv` |
@@ -406,7 +406,7 @@ After editing the unit file: `systemctl daemon-reload`
 ./scripts/deploy_hetzner.sh --backup-only
 
 # To send backups off-server via Tailscale (saves Hetzner disk space):
-export LOCAL_BACKUP_DEST='root@over-surface.tail0dbf20.ts.net:/root/em-backups'
+export LOCAL_BACKUP_DEST='root@<workstation>.ts.net:/root/em-backups'
 ./scripts/deploy_hetzner.sh --backup-only
-# Requires SSH server running on over-surface (see deploy script comments)
+# Requires SSH server running on <workstation> (see deploy script comments)
 ```

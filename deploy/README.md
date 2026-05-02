@@ -47,7 +47,7 @@ systemctl daemon-reload
 ```bash
 cat > /srv/hem/.compose.env <<'EOF'
 HEM_IMAGE_TAG=main
-HEM_TAILSCALE_IP=100.104.115.85
+HEM_TAILSCALE_IP=100.x.y.z
 EOF
 chmod 640 /srv/hem/.compose.env
 ```
@@ -171,7 +171,7 @@ O `refresh_token` da Daikin expira a cada ~30 dias. Quando o heartbeat começar 
 
 ```bash
 # Do laptop, abre tunnel SSH pra publicar :8080 local.
-ssh -L 8080:localhost:8080 root@openclaw-overbot.tail0dbf20.ts.net
+ssh -L 8080:localhost:8080 root@<hem-host>.ts.net
 # Então no host:
 docker compose -f /srv/hem/compose.daikin-auth.yaml run --rm daikin-auth
 # Abre a URL impressa no browser local; faz login Daikin; tokens caem em
