@@ -750,6 +750,13 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         "ON appliance_jobs(appliance_id) "
         "WHERE status IN ('scheduled', 'running')"
     )
+    # PR #234: cycle-completion poll. Records when the post-fire poller
+    # detected the unit transition out of `run`/`pause` (used to time the
+    # finished-laundry notification + downstream metrics).
+    cur = conn.execute("PRAGMA table_info(appliance_jobs)")
+    aj_cols = {str(r[1]) for r in cur.fetchall()}
+    if "completed_at_utc" not in aj_cols:
+        conn.execute("ALTER TABLE appliance_jobs ADD COLUMN completed_at_utc TEXT")
 
 
 def init_db() -> None:
@@ -4208,6 +4215,7 @@ _APPLIANCE_JOB_UPDATABLE_FIELDS = {
     "status", "planned_start_utc", "planned_end_utc",
     "avg_price_pence", "actual_start_utc", "error_msg",
     "last_replan_at_utc", "duration_minutes", "deadline_utc",
+    "completed_at_utc",
 }
 
 

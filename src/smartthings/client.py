@@ -112,6 +112,29 @@ class SmartThingsClient:
             return v.strip().lower() == "true"
         return False
 
+    def get_machine_state(self, device_id: str) -> str | None:
+        """Return ``washerOperatingState.machineState`` value (run/pause/stop/finish/...).
+
+        Returns ``None`` when the capability isn't present in the response or
+        the value isn't parseable. Used by the cycle-completion poller
+        (PR #234) — caller treats anything that isn't ``run`` or ``pause`` as
+        "cycle has ended".
+        """
+        try:
+            data = self._request(
+                "GET",
+                f"/devices/{device_id}/components/main/capabilities/washerOperatingState/status",
+            )
+        except SmartThingsError:
+            return None
+        attr = data.get("machineState") if isinstance(data, dict) else None
+        if not isinstance(attr, dict):
+            return None
+        v = attr.get("value")
+        if isinstance(v, str):
+            return v.strip().lower()
+        return None
+
     def start_cycle(self, device_id: str) -> dict:
         """POST /devices/{id}/commands — washerOperatingState.setMachineState run.
 
