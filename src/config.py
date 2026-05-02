@@ -226,6 +226,13 @@ class Config:
         os.getenv("FIXED_TARIFF_STANDING_PENCE_PER_DAY", "0")
     )
 
+    # Effective start of the Octopus Agile tariff. Period aggregations
+    # (weekly/monthly/MTD/YTD) clamp their start date upward to this value
+    # so pre-switch days don't pollute the realised cost or shadow comparisons
+    # (the household was on a different tariff back then). ISO date string
+    # ``YYYY-MM-DD``; empty disables the clamp (= include all history).
+    AGILE_TARIFF_START_DATE: str = os.getenv("AGILE_TARIFF_START_DATE", "")
+
     # Gas comparison (solar + heat pump vs gas): gas price p/kWh, boiler efficiency (e.g. 0.9)
     GAS_PRICE_PENCE_PER_KWH: float = float(os.getenv("GAS_PRICE_PENCE_PER_KWH", "0"))
     GAS_BOILER_EFFICIENCY: float = float(os.getenv("GAS_BOILER_EFFICIENCY", "0.9"))
