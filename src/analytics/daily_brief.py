@@ -70,6 +70,12 @@ def build_morning_payload() -> str:
     ]
     if tier_summary:
         lines.extend(["**Tariff windows today:**", tier_summary, ""])
+    # Tomorrow's peak windows surfaced separately so a low-action day
+    # (no LP `peak` slots) doesn't read as "no peaks tomorrow" when
+    # Octopus actually has an expensive evening.
+    tomorrow_peaks = _tariff_peak_windows_summary(today + timedelta(days=1), tz)
+    if tomorrow_peaks:
+        lines.extend([f"**Tomorrow ({today + timedelta(days=1)}):**", tomorrow_peaks, ""])
     if pe_summary:
         lines.extend(["**Peak-export plan:**", pe_summary, ""])
 
@@ -120,6 +126,12 @@ def build_night_payload() -> str:
     lines.append(f"- SLA sample: {sla.get('sample_size', 0)} actions")
     if pe_today:
         lines.extend(["", "**Peak-export verdicts today:**", pe_today])
+    # Heads-up for tomorrow's expensive windows so the family knows when
+    # to expect the LP to draw the battery hardest. Independent of the
+    # LP `peak` classification (which counts shave actions, not raw price).
+    tomorrow_peaks = _tariff_peak_windows_summary(today + timedelta(days=1), tz)
+    if tomorrow_peaks:
+        lines.extend(["", f"**Heads-up for tomorrow:** {tomorrow_peaks}"])
     return "\n".join(lines)
 
 
@@ -351,6 +363,56 @@ def build_brief_48h_summary(now_utc: datetime | None = None) -> str:
         f"🔆 Tomorrow: {tomorrow_line}\n"
         f"💰 Today PnL: {pnl_line}\n"
         f"🔋 Battery {bat_line}"
+    )
+
+
+def _tariff_peak_windows_summary(day: date, tz: ZoneInfo) -> str | None:
+    """Surface raw-tariff peak windows independent of LP slot classification.
+
+    Originally the brief only quoted the LP's ``kind_counts`` summary
+    (``peak=N``). That count is **dispatch action**, not tariff signal: when
+    PV+battery cover load through expensive hours, slots stay ``standard`` and
+    ``peak=0`` even though Octopus has a 36p evening. The family reads
+    "peak=0" as "no expensive slots tomorrow", which is wrong.
+
+    This helper queries Octopus rates directly for ``day`` and returns a one-line
+    summary of consecutive slots ≥ ``BRIEF_TARIFF_PEAK_THRESHOLD_PENCE`` (default
+    25 p). Returns None when the day has no peak window or rates aren't loaded.
+    """
+    threshold = float(getattr(config, "BRIEF_TARIFF_PEAK_THRESHOLD_PENCE", 25.0))
+    tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
+    if not tariff:
+        return None
+    try:
+        rows = db.get_agile_rates_slots_for_local_day(tariff, day, tz_name=str(tz))
+    except Exception:
+        return None
+    if not rows:
+        return None
+    peaks = [r for r in rows if float(r["value_inc_vat"]) >= threshold]
+    if not peaks:
+        return None
+    # Find the longest contiguous block of peak slots (most useful summary)
+    peak_starts = sorted(
+        datetime.fromisoformat(str(r["valid_from"]).replace("Z", "+00:00"))
+        for r in peaks
+    )
+    if not peak_starts:
+        return None
+    blocks: list[list[datetime]] = [[peak_starts[0]]]
+    for ts in peak_starts[1:]:
+        prev = blocks[-1][-1]
+        if (ts - prev).total_seconds() <= 30 * 60 + 1:   # contiguous half-hours
+            blocks[-1].append(ts)
+        else:
+            blocks.append([ts])
+    longest = max(blocks, key=len)
+    block_start_local = longest[0].astimezone(tz)
+    block_end_local = (longest[-1] + timedelta(minutes=30)).astimezone(tz)
+    max_p = max(float(r["value_inc_vat"]) for r in peaks)
+    return (
+        f"⚠️ Tariff peak: **{block_start_local:%H:%M}–{block_end_local:%H:%M}** "
+        f"(max {max_p:.1f}p, {len(peaks)} slots ≥ {threshold:.0f}p)"
     )
 
 
