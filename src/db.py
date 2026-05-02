@@ -745,6 +745,27 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     if "actual_kwh" not in aj_cols:
         conn.execute("ALTER TABLE appliance_jobs ADD COLUMN actual_kwh REAL")
 
+    # V11-A (#194): closed-loop replay needs cloud cover at solve-time.
+    # Without this column, lp_replay._reconstruct_weather passes 0.0 to
+    # HourlyForecast and skips cloud attenuation, so replay PV is marginally
+    # higher than the original LP saw — an attribution-killing fidelity gap
+    # for any PV-side regression test (cloud-aware calibration #232 included).
+    cur = conn.execute("PRAGMA table_info(meteo_forecast_history)")
+    mfh_cols = {str(r[1]) for r in cur.fetchall()}
+    if "cloud_cover_pct" not in mfh_cols:
+        conn.execute("ALTER TABLE meteo_forecast_history ADD COLUMN cloud_cover_pct REAL")
+
+    # V11-A: nullable forensic / replay-aid fields on lp_inputs_snapshot.
+    # ``dhw_draw_prior_json`` populated by V11-C (#196), ``occupancy_prior_json``
+    # by V11-D (#197). Both stay NULL until those stories ship — this PR just
+    # reserves the columns so V11-C/D don't need their own migration.
+    cur = conn.execute("PRAGMA table_info(lp_inputs_snapshot)")
+    lp_cols = {str(r[1]) for r in cur.fetchall()}
+    if "dhw_draw_prior_json" not in lp_cols:
+        conn.execute("ALTER TABLE lp_inputs_snapshot ADD COLUMN dhw_draw_prior_json TEXT")
+    if "occupancy_prior_json" not in lp_cols:
+        conn.execute("ALTER TABLE lp_inputs_snapshot ADD COLUMN occupancy_prior_json TEXT")
+
 
 def init_db() -> None:
     """Create tables if missing and apply lightweight migrations."""
@@ -3364,13 +3385,14 @@ def save_meteo_forecast_history(
             for r in rows:
                 conn.execute(
                     """INSERT OR IGNORE INTO meteo_forecast_history
-                       (forecast_fetch_at_utc, slot_time, temp_c, solar_w_m2)
-                       VALUES (?, ?, ?, ?)""",
+                       (forecast_fetch_at_utc, slot_time, temp_c, solar_w_m2, cloud_cover_pct)
+                       VALUES (?, ?, ?, ?, ?)""",
                     (
                         forecast_fetch_at_utc,
                         r.get("slot_time"),
                         r.get("temp_c"),
                         r.get("solar_w_m2"),
+                        r.get("cloud_cover_pct"),
                     ),
                 )
             conn.commit()
@@ -3384,7 +3406,7 @@ def get_meteo_forecast_at(fetch_at_utc: str) -> list[dict[str, Any]]:
         conn = get_connection()
         try:
             cur = conn.execute(
-                """SELECT slot_time, temp_c, solar_w_m2
+                """SELECT slot_time, temp_c, solar_w_m2, cloud_cover_pct
                    FROM meteo_forecast_history
                    WHERE forecast_fetch_at_utc = ?
                    ORDER BY slot_time""",
@@ -3521,7 +3543,7 @@ def get_meteo_forecast_history_latest_before(when_utc: str) -> list[dict[str, An
                 return []
             prev_fetch_at = row[0]
             cur = conn.execute(
-                """SELECT slot_time, temp_c, solar_w_m2
+                """SELECT slot_time, temp_c, solar_w_m2, cloud_cover_pct
                    FROM meteo_forecast_history
                    WHERE forecast_fetch_at_utc = ?
                    ORDER BY slot_time""",

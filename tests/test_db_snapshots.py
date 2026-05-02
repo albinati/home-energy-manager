@@ -63,14 +63,56 @@ def test_lp_inputs_snapshot_has_expected_columns():
         "base_load_json", "micro_climate_offset_c", "config_snapshot_json",
         "price_quantize_p", "peak_threshold_p", "cheap_threshold_p",
         "daikin_control_mode", "optimization_preset", "energy_strategy_mode",
+        # V11-A (#194): nullable columns reserved for V11-C/D
+        "dhw_draw_prior_json", "occupancy_prior_json",
     ):
         assert expected in cols, f"missing column {expected}"
 
 
 def test_meteo_forecast_history_has_expected_columns():
     cols = _columns("meteo_forecast_history")
-    for expected in ("id", "forecast_fetch_at_utc", "slot_time", "temp_c", "solar_w_m2"):
-        assert expected in cols
+    for expected in (
+        "id", "forecast_fetch_at_utc", "slot_time", "temp_c", "solar_w_m2",
+        # V11-A (#194): cloud_cover_pct closes the closed-loop replay gap
+        "cloud_cover_pct",
+    ):
+        assert expected in cols, f"missing column {expected}"
+
+
+def test_meteo_forecast_history_round_trips_cloud_cover():
+    """V11-A: save_meteo_forecast_history persists cloud_cover_pct, and
+    get_meteo_forecast_history_latest_before reads it back."""
+    fetched_at = datetime.now(UTC).isoformat()
+    rows = [
+        {"slot_time": "2026-05-02T10:00:00+00:00", "temp_c": 14.2,
+         "solar_w_m2": 540.0, "cloud_cover_pct": 35.0},
+        {"slot_time": "2026-05-02T11:00:00+00:00", "temp_c": 15.1,
+         "solar_w_m2": 620.0, "cloud_cover_pct": 22.0},
+    ]
+    db.save_meteo_forecast_history(fetched_at, rows)
+
+    later = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
+    fetched = db.get_meteo_forecast_history_latest_before(later)
+    assert len(fetched) == 2
+    by_slot = {r["slot_time"]: r for r in fetched}
+    assert by_slot["2026-05-02T10:00:00+00:00"]["cloud_cover_pct"] == pytest.approx(35.0)
+    assert by_slot["2026-05-02T11:00:00+00:00"]["cloud_cover_pct"] == pytest.approx(22.0)
+
+
+def test_meteo_forecast_history_handles_missing_cloud_gracefully():
+    """Pre-V11-A snapshots have NULL cloud_cover_pct — the reader returns None
+    rather than crashing, and the replay layer falls back to the legacy 0%
+    attenuation path."""
+    fetched_at = datetime.now(UTC).isoformat()
+    rows = [
+        {"slot_time": "2026-05-02T10:00:00+00:00", "temp_c": 14.2, "solar_w_m2": 540.0},
+    ]
+    db.save_meteo_forecast_history(fetched_at, rows)
+
+    later = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
+    fetched = db.get_meteo_forecast_history_latest_before(later)
+    assert len(fetched) == 1
+    assert fetched[0].get("cloud_cover_pct") is None
 
 
 def test_config_audit_has_expected_columns():

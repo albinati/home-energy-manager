@@ -785,6 +785,7 @@ def bulletproof_forecast_refresh_job() -> None:
                 "slot_time": f.time_utc.isoformat(),
                 "temp_c": f.temperature_c,
                 "solar_w_m2": f.shortwave_radiation_wm2,
+                "cloud_cover_pct": f.cloud_cover_pct,
             }
             for f in new_fcst
         ]
