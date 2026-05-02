@@ -1680,12 +1680,38 @@ def build_mcp() -> FastMCP:
         daily = pnl.compute_daily_pnl(today)
         weekly = pnl.compute_weekly_pnl(today)
         monthly = pnl.compute_monthly_pnl(today)
+        mtd = pnl.compute_mtd_pnl(today)
+        ytd = pnl.compute_ytd_pnl(today)
         tgt = db.get_daily_target(today)
         soc = None
         try:
             soc = get_cached_realtime().soc
         except Exception:
             pass
+
+        def _period_block(p: dict[str, Any]) -> dict[str, Any]:
+            """Convert a period_pnl dict into a stable MCP block (Pounds suffix)."""
+            block: dict[str, Any] = {
+                "label": p.get("label"),
+                "period_start": p.get("period_start"),
+                "period_end": p.get("period_end"),
+                "n_days": p.get("n_days"),
+                "energy_used_kwh": p.get("kwh"),
+                "export_kwh": p.get("export_kwh"),
+                "realised_cost_pounds": p.get("realised_cost_gbp"),
+                "realised_import_pounds": p.get("realised_import_gbp"),
+                "export_revenue_pounds": p.get("export_revenue_gbp"),
+                "standing_charge_pounds": p.get("standing_charge_gbp"),
+                "svt_shadow_pounds": p.get("svt_shadow_gbp"),
+                "fixed_shadow_pounds": p.get("fixed_shadow_gbp"),
+                "delta_vs_svt_pounds": p.get("delta_vs_svt_gbp"),
+                "delta_vs_fixed_pounds": p.get("delta_vs_fixed_gbp"),
+            }
+            if "delta_vs_fixed_tariff_gbp" in p:
+                block["fixed_tariff_label"] = p.get("fixed_tariff_label")
+                block["fixed_tariff_shadow_pounds"] = p.get("fixed_tariff_shadow_gbp")
+                block["delta_vs_fixed_tariff_pounds"] = p.get("delta_vs_fixed_tariff_gbp")
+            return block
 
         daily_block: dict[str, Any] = {
             "date": daily.get("date"),
@@ -1701,7 +1727,6 @@ def build_mcp() -> FastMCP:
             "delta_vs_fixed_pounds": daily.get("delta_vs_fixed_gbp"),
             "_note": "All costs include the daily standing charge for apples-to-apples deltas.",
         }
-        # Optional legacy-tariff comparison (e.g. British Gas Fixed v58)
         if "delta_vs_fixed_tariff_gbp" in daily:
             daily_block["fixed_tariff_label"] = daily.get("fixed_tariff_label")
             daily_block["fixed_tariff_shadow_pounds"] = daily.get("fixed_tariff_shadow_gbp")
@@ -1713,8 +1738,16 @@ def build_mcp() -> FastMCP:
             "ok": True,
             "pnl": {
                 "daily": daily_block,
-                "weekly": {"delta_vs_svt_pounds": weekly.get("delta_vs_svt_gbp")},
-                "monthly": {"delta_vs_svt_pounds": monthly.get("delta_vs_svt_gbp")},
+                "weekly": _period_block(weekly),
+                "monthly": _period_block(monthly),
+                "month_to_date": _period_block(mtd),
+                "year_to_date": _period_block(ytd),
+                "_note": (
+                    "weekly = trailing 7 days; monthly = full calendar month containing today; "
+                    "month_to_date = 1st → today; year_to_date = Jan 1 → today. "
+                    "All shadow costs include the standing charge × n_days, so deltas are "
+                    "real money saved, not energy-cost-only."
+                ),
             },
             "target_vwap_pence": (tgt or {}).get("target_vwap") if tgt else None,
             "realised_vwap_pence": pnl.compute_vwap(today),
@@ -1861,18 +1894,28 @@ def build_mcp() -> FastMCP:
     @mcp.tool(
         name="get_tariff_comparison",
         description=(
-            "Apples-to-apples cost comparison for a given local date across every "
-            "configured tariff: realised cost on Octopus Agile + your current shadows "
-            "(SVT, Fixed, optional legacy fixed tariff via FIXED_TARIFF_*). All shadow "
-            "costs INCLUDE the standing charge so deltas are real money saved. Pass "
-            "date='YYYY-MM-DD' (defaults to yesterday). Each entry returns: shadow_cost_pounds, "
-            "delta_vs_realised_pounds (positive = saved on Agile vs that tariff), "
-            "rate_pence_per_kwh, standing_pence_per_day, source ('configured' / 'svt' "
-            "/ 'agile_realised'). Designed for OpenClaw to render the comparison "
-            "without inventing numbers."
+            "Apples-to-apples cost comparison across every configured tariff: realised "
+            "Octopus Agile + your current shadows (SVT, Fixed, optional legacy fixed "
+            "tariff via FIXED_TARIFF_*). All shadow costs INCLUDE the standing charge "
+            "× n_days so deltas are real money saved.\n\n"
+            "Three input modes (mutually exclusive):\n"
+            "  1. ``date='YYYY-MM-DD'`` — single day (default = yesterday).\n"
+            "  2. ``period='week'|'month'|'mtd'|'ytd'`` — preset trailing/calendar "
+            "     ranges anchored on today: trailing-7d, full calendar month, "
+            "     month-to-date (1st → today), year-to-date (Jan 1 → today).\n"
+            "  3. ``start_date='YYYY-MM-DD'`` + ``end_date='YYYY-MM-DD'`` — custom "
+            "     inclusive range.\n\n"
+            "Each comparison entry returns shadow_cost_pounds, delta_vs_realised_pounds "
+            "(positive = saved on Agile vs that tariff), rate_pence_per_kwh, "
+            "standing_pence_per_day, source ('configured' / 'svt' / 'agile_realised')."
         ),
     )
-    def get_tariff_comparison(date: str = "") -> dict[str, Any]:
+    def get_tariff_comparison(
+        date: str = "",
+        period: str = "",
+        start_date: str = "",
+        end_date: str = "",
+    ) -> dict[str, Any]:
         from datetime import datetime, timedelta
         from datetime import date as _date_t
         from zoneinfo import ZoneInfo
@@ -1880,18 +1923,64 @@ def build_mcp() -> FastMCP:
         from .analytics import pnl
 
         tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
-        if date.strip():
+        today = datetime.now(tz).date()
+
+        # ---- Resolve the date range from the input modes -------------------
+        period_clean = period.strip().lower()
+        if start_date.strip() or end_date.strip():
             try:
-                day = _date_t.fromisoformat(date.strip())
+                start = _date_t.fromisoformat(start_date.strip()) if start_date.strip() else today
+                end = _date_t.fromisoformat(end_date.strip()) if end_date.strip() else today
+            except ValueError as exc:
+                return {"ok": False, "error": f"invalid start/end date: {exc}"}
+            if end < start:
+                start, end = end, start
+            label_used = f"custom-range {start.isoformat()}..{end.isoformat()}"
+        elif period_clean:
+            if period_clean in ("week", "weekly", "trailing-7d"):
+                start, end = today - timedelta(days=6), today
+                label_used = "trailing-7d"
+            elif period_clean in ("month", "monthly", "calendar-month"):
+                from calendar import monthrange
+                last = monthrange(today.year, today.month)[1]
+                start = today.replace(day=1)
+                end = today.replace(day=last)
+                label_used = f"calendar-{today.year:04d}-{today.month:02d}"
+            elif period_clean in ("mtd", "month-to-date"):
+                start, end = today.replace(day=1), today
+                label_used = "month-to-date"
+            elif period_clean in ("ytd", "year-to-date"):
+                start, end = _date_t(today.year, 1, 1), today
+                label_used = "year-to-date"
+            else:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"unknown period {period!r}; expected week|month|mtd|ytd"
+                    ),
+                }
+        elif date.strip():
+            try:
+                start = end = _date_t.fromisoformat(date.strip())
             except ValueError:
                 return {"ok": False, "error": f"invalid date: {date!r} (expected YYYY-MM-DD)"}
+            label_used = start.isoformat()
         else:
-            day = datetime.now(tz).date() - timedelta(days=1)
+            start = end = today - timedelta(days=1)
+            label_used = start.isoformat()
 
-        p = pnl.compute_daily_pnl(day)
+        # ---- Aggregate -----------------------------------------------------
+        is_single_day = start == end
+        p = (
+            pnl.compute_daily_pnl(start)
+            if is_single_day
+            else pnl.compute_period_pnl(start, end, label=label_used)
+        )
+
         realised = float(p.get("realised_cost_gbp") or 0)
         kwh = float(p.get("kwh") or 0)
         standing_p_per_day = float(config.MANUAL_STANDING_CHARGE_PENCE_PER_DAY or 0)
+        n_days = int(p.get("n_days") or 1)
 
         comparisons: list[dict[str, Any]] = [
             {
@@ -1901,7 +1990,7 @@ def build_mcp() -> FastMCP:
                 "delta_vs_realised_pounds": 0.0,
                 "rate_pence_per_kwh": None,
                 "standing_pence_per_day": standing_p_per_day,
-                "_note": "Per-slot Agile import rates + standing − export earnings.",
+                "_note": "Per-slot Agile import rates + standing × n_days − export earnings.",
             },
             {
                 "label": "Octopus SVT (would-have)",
@@ -1926,9 +2015,12 @@ def build_mcp() -> FastMCP:
                 }
             )
 
-        return {
+        result = {
             "ok": True,
-            "date": day.isoformat(),
+            "label": label_used,
+            "period_start": start.isoformat(),
+            "period_end": end.isoformat(),
+            "n_days": n_days,
             "energy_used_kwh": kwh,
             "energy_exported_kwh": float(p.get("export_kwh") or 0),
             "import_pounds": float(p.get("realised_import_gbp") or 0),
@@ -1936,9 +2028,13 @@ def build_mcp() -> FastMCP:
             "comparisons": comparisons,
             "_note": (
                 "Positive delta_vs_realised_pounds = Agile saved money vs that shadow. "
-                "All shadow costs include the daily standing charge."
+                "All shadow costs include the standing charge × n_days."
             ),
         }
+        if is_single_day:
+            # Back-compat: callers from before the period extension expect ``date``.
+            result["date"] = start.isoformat()
+        return result
 
     @mcp.tool(
         name="get_battery_forecast",

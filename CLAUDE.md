@@ -273,6 +273,32 @@ should never suggest tactical Daikin actions ("preheat the tank now!") —
 the heat pump runs on its own weather curve and HEM does not change
 setpoints. Read `_mode_status_line()` in `src/analytics/daily_brief.py`.
 
+### Aggregation periods (PR #213)
+
+Five PnL scopes are exposed by the same shape:
+
+| Function | MCP path | Range |
+|---|---|---|
+| `compute_daily_pnl(day)` | `get_energy_metrics.pnl.daily` | a single local day |
+| `compute_weekly_pnl(end_day)` | `get_energy_metrics.pnl.weekly` | trailing 7 days ending on `end_day` |
+| `compute_monthly_pnl(end_day)` | `get_energy_metrics.pnl.monthly` | full calendar month containing `end_day` |
+| `compute_mtd_pnl(end_day)` | `get_energy_metrics.pnl.month_to_date` | 1st of month → `end_day` (partial) |
+| `compute_ytd_pnl(end_day)` | `get_energy_metrics.pnl.year_to_date` | Jan 1 of year → `end_day` |
+
+All five funnel through `compute_period_pnl(start_day, end_day)`. Each
+period dict carries the same breakdown as a daily dict — `kwh`,
+`realised_cost_gbp`, `realised_import_gbp`, `export_revenue_gbp`,
+`export_kwh`, `standing_charge_gbp`, `svt_shadow_gbp`, `fixed_shadow_gbp`,
+`delta_vs_*` — plus `period_start`, `period_end`, `n_days`, `label`.
+
+`mcp.get_tariff_comparison` accepts three input modes (mutually exclusive):
+
+```jsonc
+{ "date": "2026-05-01" }                              // single day (default = yesterday)
+{ "period": "week"|"month"|"mtd"|"ytd" }              // anchored on today
+{ "start_date": "...", "end_date": "..." }            // custom inclusive range
+```
+
 ---
 
 ## OpenClaw MCP integration

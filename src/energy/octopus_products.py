@@ -149,7 +149,6 @@ def _fetch_day_night_rates(
 
 def list_octopus_products(
     *,
-    electricity_only: bool = True,
     brand: str = "OCTOPUS_ENERGY",
     max_products: int = 30,
 ) -> list[dict]:

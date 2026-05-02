@@ -232,7 +232,7 @@ def publish_horizon() -> dict[str, Any]:
     return {"ok": True, "days": days}
 
 
-def cleanup_legacy_events(horizon_days: int = 14) -> dict[str, int]:
+def cleanup_legacy_events() -> dict[str, int]:
     """One-shot helper: delete HEM events created BEFORE this tag-and-sweep
     refactor (tracked in SQLite ``calendar_events`` but lacking the
     ``extendedProperties.private`` tag). Safe to run multiple times — only

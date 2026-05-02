@@ -206,35 +206,101 @@ def compute_peak_ratio(day: date) -> float | None:
     return round(100.0 * peak / tot, 2) if tot > 0 else None
 
 
-def compute_weekly_pnl(end_day: date) -> dict[str, Any]:
-    deltas_svt = []
-    deltas_fixed = []
-    for i in range(7):
-        d = end_day - timedelta(days=i)
-        p = compute_daily_pnl(d)
-        deltas_svt.append(p["delta_vs_svt_gbp"])
-        deltas_fixed.append(p["delta_vs_fixed_gbp"])
-    return {
-        "week_end": end_day.isoformat(),
-        "delta_vs_svt_gbp": round(sum(deltas_svt), 4),
-        "delta_vs_fixed_gbp": round(sum(deltas_fixed), 4),
+def compute_period_pnl(start_day: date, end_day: date, *, label: str = "") -> dict[str, Any]:
+    """Aggregate daily PnL across a date range (both bounds inclusive).
+
+    Sums every numeric component of ``compute_daily_pnl`` so callers get a full
+    breakdown — not just the deltas. Standing charge is implicitly accounted for
+    because each day's compute_daily_pnl already includes the daily standing fee
+    (so summing N days gives N × standing automatically).
+
+    Returns a dict with the same keys as ``compute_daily_pnl`` plus
+    ``period_start``, ``period_end``, ``n_days``, ``label``. The optional legacy
+    fixed tariff (``fixed_tariff_*``) is included only if at least one day
+    surfaced it (i.e. ``FIXED_TARIFF_*`` env vars were set during that solve).
+    """
+    if end_day < start_day:
+        start_day, end_day = end_day, start_day
+    n = (end_day - start_day).days + 1
+
+    totals = {
+        "kwh": 0.0,
+        "realised_cost_gbp": 0.0,
+        "realised_import_gbp": 0.0,
+        "export_revenue_gbp": 0.0,
+        "export_kwh": 0.0,
+        "standing_charge_gbp": 0.0,
+        "svt_shadow_gbp": 0.0,
+        "fixed_shadow_gbp": 0.0,
+        "delta_vs_svt_gbp": 0.0,
+        "delta_vs_fixed_gbp": 0.0,
+        "cheap_slot_kwh": 0.0,
+        "peak_kwh": 0.0,
     }
+    bg_shadow = 0.0
+    bg_delta = 0.0
+    bg_label: str | None = None
+    bg_seen = False
+
+    for i in range(n):
+        d = start_day + timedelta(days=i)
+        p = compute_daily_pnl(d)
+        for k in totals:
+            totals[k] += float(p.get(k) or 0.0)
+        if "fixed_tariff_shadow_gbp" in p:
+            bg_seen = True
+            bg_shadow += float(p["fixed_tariff_shadow_gbp"])
+            bg_delta += float(p["delta_vs_fixed_tariff_gbp"])
+            bg_label = bg_label or p.get("fixed_tariff_label")
+
+    out: dict[str, Any] = {
+        "label": label or f"{start_day.isoformat()}..{end_day.isoformat()}",
+        "period_start": start_day.isoformat(),
+        "period_end": end_day.isoformat(),
+        "n_days": n,
+    }
+    out.update({k: round(v, 4 if not k.endswith("_kwh") else 3) for k, v in totals.items()})
+    if bg_seen:
+        out["fixed_tariff_label"] = bg_label or "fixed tariff"
+        out["fixed_tariff_shadow_gbp"] = round(bg_shadow, 4)
+        out["delta_vs_fixed_tariff_gbp"] = round(bg_delta, 4)
+    return out
+
+
+def compute_weekly_pnl(end_day: date) -> dict[str, Any]:
+    """Trailing 7-day aggregate ending on ``end_day`` (inclusive)."""
+    out = compute_period_pnl(end_day - timedelta(days=6), end_day, label="trailing-7d")
+    # Back-compat: keep ``week_end`` alongside the new period_* fields.
+    out["week_end"] = end_day.isoformat()
+    return out
 
 
 def compute_monthly_pnl(end_day: date) -> dict[str, Any]:
+    """Calendar-month aggregate for the month containing ``end_day``.
+
+    NOTE: this iterates the FULL calendar month (1st → last day), not just up
+    to ``end_day``. For partial-month "month so far" use :func:`compute_mtd_pnl`.
+    """
+    from calendar import monthrange
+
     y, m = end_day.year, end_day.month
-    deltas_svt = 0.0
-    deltas_fixed = 0.0
-    for d in range(1, 32):
-        try:
-            day = date(y, m, d)
-        except ValueError:
-            break
-        p = compute_daily_pnl(day)
-        deltas_svt += p["delta_vs_svt_gbp"]
-        deltas_fixed += p["delta_vs_fixed_gbp"]
-    return {
-        "month": f"{y:04d}-{m:02d}",
-        "delta_vs_svt_gbp": round(deltas_svt, 4),
-        "delta_vs_fixed_gbp": round(deltas_fixed, 4),
-    }
+    last_day = monthrange(y, m)[1]
+    out = compute_period_pnl(date(y, m, 1), date(y, m, last_day), label=f"calendar-{y:04d}-{m:02d}")
+    out["month"] = f"{y:04d}-{m:02d}"
+    return out
+
+
+def compute_mtd_pnl(end_day: date) -> dict[str, Any]:
+    """Month-to-date: 1st of ``end_day``'s month → ``end_day`` (inclusive)."""
+    out = compute_period_pnl(end_day.replace(day=1), end_day, label="month-to-date")
+    out["month"] = f"{end_day.year:04d}-{end_day.month:02d}"
+    return out
+
+
+def compute_ytd_pnl(end_day: date) -> dict[str, Any]:
+    """Year-to-date: Jan 1 of ``end_day``'s year → ``end_day`` (inclusive)."""
+    out = compute_period_pnl(date(end_day.year, 1, 1), end_day, label="year-to-date")
+    out["year"] = f"{end_day.year:04d}"
+    return out
+
+
