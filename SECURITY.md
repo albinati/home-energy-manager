@@ -2,15 +2,15 @@
 
 ## Reporting a vulnerability
 
-If you find a security issue — **please don't file a public GitHub issue.**
+This repo has **GitHub Private Vulnerability Reporting** enabled. Please use that channel — don't file a public issue or post to discussions.
 
-Email **albinati@users.noreply.github.com** with:
+To report:
 
-- A description of the vulnerability and the affected component.
-- Steps to reproduce, or a proof-of-concept if relevant.
-- Any logs or commit hashes that help diagnose it.
+1. Go to the [Security tab](https://github.com/albinati/home-energy-manager/security) of the repo.
+2. Click **"Report a vulnerability"**.
+3. Describe the issue, attach proof-of-concept or logs as needed.
 
-I'll acknowledge within 5 working days and aim to ship a fix within 30 days for anything actionable. If you want disclosure credit in the release notes, say so in the report.
+GitHub creates a private draft advisory only the maintainer can see. I'll acknowledge within 5 working days and aim to ship a fix within 30 days for anything actionable. If you want disclosure credit in the published advisory + release notes, say so in the report.
 
 ## Threat model — what this project guards against
 
@@ -18,7 +18,7 @@ This is a self-hosted controller running on private infrastructure (Tailscale / 
 
 | Asset | Threat | Mitigation |
 |---|---|---|
-| Daikin / Fox ESS / SmartThings tokens | Theft via filesystem read | Tokens stored in `data/` mounted into the container with restrictive perms. Container runs as uid 1001 with read-only rootfs. |
+| Daikin / Fox ESS / SmartThings tokens | Theft via filesystem read | Tokens stored under `data/` mounted into the container with restrictive perms. Container runs as uid 1001 with read-only rootfs. |
 | OpenClaw MCP transport | Unauthenticated access | Bearer token at `data/.openclaw-token`, generated on first boot. `BearerAuthMiddleware` rejects all requests without it. |
 | Hardware-write actions | Misuse via MCP | `OPENCLAW_READ_ONLY=true` kill switch in `.env`. Plan-approval flow with consent gates for high-impact changes. |
 | Database | Tampering with state | SQLite at `data/energy_state.db` mounted with restrictive perms. Snapshot-based replay can detect plan tampering after the fact. |
@@ -32,4 +32,4 @@ This is a self-hosted controller running on private infrastructure (Tailscale / 
 
 ## Dependencies
 
-The dependency tree is intentionally small (see `requirements.txt`). If you spot a CVE in something we pull in, file via the email above; I'll either bump the dep or remove it.
+The dependency tree is intentionally small (see `requirements.txt`). If you spot a CVE in something we pull in, file via the Private Vulnerability Reporting channel above; I'll either bump the dep or remove it.
