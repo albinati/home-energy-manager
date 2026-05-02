@@ -494,8 +494,14 @@ def compute_pv_calibration_hourly_table(
     start = end - _td(days=window_days)
 
     # Pull measured PV per UTC hour from pv_realtime_history.
+    # NOTE: average kW × 1h, NOT sum × (5/60). The previous "kw × (5/60)" formula
+    # assumed 12 samples/hour (5-min cadence). In practice the heartbeat writes
+    # samples sparsely (often 1-3/hour), so the sum-based formula collapses
+    # by ~10× — the resulting "ratio" was artificially low and made the per-hour
+    # calibration table over-correct against forecast (audit 2026-05-02:
+    # factors at the 0.10 floor when reality should give 0.5-0.7).
     measured_per_hour: dict[int, list[float]] = {h: [] for h in range(24)}
-    measured_per_day_hour: dict[tuple[str, int], float] = {}
+    measured_kw_samples: dict[tuple[str, int], list[float]] = {}
     with _db._lock:
         conn = _db.get_connection()
         try:
@@ -517,12 +523,13 @@ def compute_pv_calibration_hourly_table(
                     ts = ts.replace(tzinfo=UTC)
                 day = ts.date().isoformat()
                 hour = ts.hour
-                # 5-min sample × (5/60)h = kWh contribution to that hour
-                measured_per_day_hour[(day, hour)] = (
-                    measured_per_day_hour.get((day, hour), 0.0) + kw * (5.0 / 60.0)
-                )
+                measured_kw_samples.setdefault((day, hour), []).append(kw)
         finally:
             conn.close()
+    # mean kW × 1h = kWh per hour (sample-density-independent)
+    measured_per_day_hour: dict[tuple[str, int], float] = {
+        k: (sum(samples) / len(samples)) for k, samples in measured_kw_samples.items() if samples
+    }
 
     if not measured_per_day_hour:
         return {"status": "skipped", "reason": "no pv_realtime_history in window"}
@@ -630,7 +637,10 @@ def compute_today_pv_correction_factor(
     today = datetime.now(UTC).date().isoformat()
 
     # 1. Pull today's measured PV per UTC hour from pv_realtime_history.
-    actual_per_hour: dict[int, float] = {}
+    # Use mean kW × 1h (sample-density-independent), not sum × (5/60).
+    # Sparse heartbeat (1-3 samples/hour, not 12) made the old formula collapse
+    # the ratio by ~10× — fixed in this commit alongside the per-hour table.
+    actual_kw_samples: dict[int, list[float]] = {}
     with _db._lock:
         conn = _db.get_connection()
         try:
@@ -648,12 +658,12 @@ def compute_today_pv_correction_factor(
                     continue
                 if ts.tzinfo is None:
                     ts = ts.replace(tzinfo=UTC)
-                # 5-min sample → kWh contribution
-                actual_per_hour[ts.hour] = (
-                    actual_per_hour.get(ts.hour, 0.0) + float(kw or 0.0) * (5.0 / 60.0)
-                )
+                actual_kw_samples.setdefault(ts.hour, []).append(float(kw or 0.0))
         finally:
             conn.close()
+    actual_per_hour: dict[int, float] = {
+        h: (sum(s) / len(s)) for h, s in actual_kw_samples.items() if s
+    }
 
     if not actual_per_hour:
         return 1.0, {"reason": "no pv_realtime_history yet today"}
