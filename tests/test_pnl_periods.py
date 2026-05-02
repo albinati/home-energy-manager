@@ -149,3 +149,81 @@ def test_compute_monthly_pnl_keeps_old_keys_for_backcompat() -> None:
     assert "month" in p
     assert "delta_vs_svt_gbp" in p
     assert "delta_vs_fixed_gbp" in p
+
+
+# ---------------------------------------------------------------------------
+# AGILE_TARIFF_START_DATE clamp
+# ---------------------------------------------------------------------------
+
+def test_period_clamps_start_to_agile_start_date(monkeypatch: pytest.MonkeyPatch) -> None:
+    """YTD asked from Jan 1 but Agile started Apr 1 → period_start = Apr 1,
+    n_days reflects the on-Agile window only, clamped=True with reason."""
+    monkeypatch.setattr(app_config, "AGILE_TARIFF_START_DATE", "2026-04-01")
+    _seed_day(date(2026, 4, 1), kwh=2.0, p_per_kwh=20.0)
+    _seed_day(date(2026, 5, 2), kwh=2.0, p_per_kwh=20.0)
+
+    p = pnl.compute_ytd_pnl(date(2026, 5, 2))
+
+    assert p["clamped"] is True
+    assert "AGILE_TARIFF_START_DATE" in p["clamp_reason"]
+    assert p["period_start"] == "2026-04-01"
+    assert p["period_end"] == "2026-05-02"
+    assert p["requested_start"] == "2026-01-01"
+    # 32 days from 2026-04-01 to 2026-05-02 inclusive
+    assert p["n_days"] == 32
+    # Pre-Apr days excluded — kWh sums only Apr 1 + May 2 = 4 kWh
+    assert p["kwh"] == pytest.approx(4.0, abs=1e-3)
+
+
+def test_period_unclamped_when_agile_start_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No AGILE_TARIFF_START_DATE → no clamp; period covers full requested range."""
+    monkeypatch.setattr(app_config, "AGILE_TARIFF_START_DATE", "")
+    _seed_day(date(2026, 1, 5), kwh=1.0, p_per_kwh=20.0)
+
+    p = pnl.compute_ytd_pnl(date(2026, 5, 2))
+
+    assert p.get("clamped") is None or p["clamped"] is False
+    assert p["period_start"] == "2026-01-01"
+    assert p["n_days"] == 122
+
+
+def test_period_invalid_agile_start_logged_and_ignored(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Garbage AGILE_TARIFF_START_DATE must not crash; warns and skips clamp."""
+    monkeypatch.setattr(app_config, "AGILE_TARIFF_START_DATE", "not-a-date")
+    _seed_day(date(2026, 1, 5), kwh=1.0, p_per_kwh=20.0)
+
+    with caplog.at_level("WARNING"):
+        p = pnl.compute_ytd_pnl(date(2026, 5, 2))
+
+    assert p.get("clamped") is None or p["clamped"] is False
+    assert any("AGILE_TARIFF_START_DATE" in r.getMessage() for r in caplog.records)
+
+
+def test_period_entirely_before_agile_returns_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Asking for a March-only range when Agile started Apr 1 → empty shape
+    with n_days=0 and clamped=True (so callers can render 'n/a since…')."""
+    monkeypatch.setattr(app_config, "AGILE_TARIFF_START_DATE", "2026-04-01")
+
+    p = pnl.compute_period_pnl(date(2026, 3, 1), date(2026, 3, 31))
+
+    assert p["clamped"] is True
+    assert p["n_days"] == 0
+    assert p["kwh"] == 0.0
+    assert p["realised_cost_gbp"] == 0.0
+
+
+def test_label_includes_since_qualifier_when_clamped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The human-friendly label must say 'since YYYY-MM-DD' when clamped so
+    OpenClaw can render an honest qualifier on the YTD/monthly figure."""
+    monkeypatch.setattr(app_config, "AGILE_TARIFF_START_DATE", "2026-04-01")
+    _seed_day(date(2026, 4, 15), kwh=1.0, p_per_kwh=20.0)
+
+    p = pnl.compute_ytd_pnl(date(2026, 5, 2))
+
+    assert "(since 2026-04-01)" in p["label"]
