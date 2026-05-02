@@ -2948,6 +2948,249 @@ def build_mcp() -> FastMCP:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    # ------------------------------------------------------------------
+    # Smart appliance scheduling (Phase 1 — Samsung washer via SmartThings)
+    # ------------------------------------------------------------------
+
+    import sqlite3
+    from . import db
+    from .scheduler import appliance_dispatch as _appliance_dispatch
+    from .smartthings import service as _st_service
+    from .smartthings.client import SmartThingsError as _STError
+
+    def _serialize_appliance(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "vendor": row["vendor"],
+            "vendor_device_id": row["vendor_device_id"],
+            "name": row["name"],
+            "device_type": row["device_type"],
+            "default_duration_minutes": row["default_duration_minutes"],
+            "deadline_local_time": row["deadline_local_time"],
+            "typical_kw": row["typical_kw"],
+            "enabled": bool(row["enabled"]),
+            "created_at": row["created_at"],
+        }
+
+    def _serialize_appliance_job(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "appliance_id": row["appliance_id"],
+            "status": row["status"],
+            "armed_at_utc": row["armed_at_utc"],
+            "deadline_utc": row["deadline_utc"],
+            "duration_minutes": row["duration_minutes"],
+            "planned_start_utc": row["planned_start_utc"],
+            "planned_end_utc": row["planned_end_utc"],
+            "avg_price_pence": row["avg_price_pence"],
+            "actual_start_utc": row["actual_start_utc"],
+            "error_msg": row["error_msg"],
+            "last_replan_at_utc": row["last_replan_at_utc"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    @mcp.tool(
+        name="discover_smartthings_devices",
+        description=(
+            "List devices visible to the configured SmartThings PAT. "
+            "Use `register_smartthings_device` to promote one of these into "
+            "the managed-appliances catalogue."
+        ),
+    )
+    def discover_smartthings_devices() -> dict[str, Any]:
+        try:
+            client = _st_service.get_client()
+            devices = client.list_devices()
+        except _STError as e:
+            return {"ok": False, "error": str(e), "code": e.code}
+        return {"ok": True, "devices": devices, "count": len(devices)}
+
+    @mcp.tool(
+        name="register_smartthings_device",
+        description=(
+            "Register a discovered SmartThings device for energy-aware scheduling. "
+            "`vendor_device_id` is the SmartThings deviceId UUID. `device_type` "
+            "is one of 'washer' | 'dryer' | 'dishwasher'. `default_duration_minutes` "
+            "is the cycle length (default 120). `deadline_local_time` is HH:MM in "
+            "BULLETPROOF_TIMEZONE for the default deadline (default 07:00). "
+            "`typical_kw` is the average draw used for the LP residual-load profile "
+            "(default 0.5 kW)."
+        ),
+    )
+    def register_smartthings_device(
+        vendor_device_id: str,
+        name: str,
+        device_type: str = "washer",
+        default_duration_minutes: int = 120,
+        deadline_local_time: str = "07:00",
+        typical_kw: float = 0.5,
+    ) -> dict[str, Any]:
+        try:
+            appliance_id = db.add_appliance(
+                vendor="smartthings",
+                vendor_device_id=vendor_device_id,
+                name=name,
+                device_type=device_type,
+                default_duration_minutes=int(default_duration_minutes),
+                deadline_local_time=deadline_local_time,
+                typical_kw=float(typical_kw),
+            )
+        except sqlite3.IntegrityError:
+            return {"ok": False, "error": "device already registered",
+                    "code": "duplicate"}
+        row = db.get_appliance(appliance_id)
+        return {"ok": True, "appliance": _serialize_appliance(row)}
+
+    @mcp.tool(
+        name="list_appliances",
+        description="List managed appliances and their per-device settings.",
+    )
+    def list_appliances_tool(enabled_only: bool = False) -> dict[str, Any]:
+        rows = db.list_appliances(enabled_only=bool(enabled_only))
+        return {
+            "ok": True,
+            "appliances": [_serialize_appliance(r) for r in rows],
+            "count": len(rows),
+        }
+
+    @mcp.tool(
+        name="update_appliance",
+        description=(
+            "Update one or more fields on a managed appliance: `name`, "
+            "`device_type`, `default_duration_minutes`, `deadline_local_time` "
+            "(HH:MM), `typical_kw`, `enabled`."
+        ),
+    )
+    def update_appliance_tool(
+        appliance_id: int,
+        name: str | None = None,
+        device_type: str | None = None,
+        default_duration_minutes: int | None = None,
+        deadline_local_time: str | None = None,
+        typical_kw: float | None = None,
+        enabled: bool | None = None,
+    ) -> dict[str, Any]:
+        if db.get_appliance(int(appliance_id)) is None:
+            return {"ok": False, "error": f"appliance {appliance_id} not found"}
+        fields: dict[str, Any] = {}
+        if name is not None:
+            fields["name"] = name
+        if device_type is not None:
+            fields["device_type"] = device_type
+        if default_duration_minutes is not None:
+            fields["default_duration_minutes"] = default_duration_minutes
+        if deadline_local_time is not None:
+            fields["deadline_local_time"] = deadline_local_time
+        if typical_kw is not None:
+            fields["typical_kw"] = typical_kw
+        if enabled is not None:
+            fields["enabled"] = enabled
+        if fields:
+            db.update_appliance(int(appliance_id), **fields)
+        row = db.get_appliance(int(appliance_id))
+        return {"ok": True, "appliance": _serialize_appliance(row)}
+
+    @mcp.tool(
+        name="delete_appliance",
+        description=(
+            "Delete a managed appliance and any pending APScheduler cron for it. "
+            "Job rows for this appliance are also dropped."
+        ),
+    )
+    def delete_appliance_tool(appliance_id: int) -> dict[str, Any]:
+        if not db.delete_appliance(int(appliance_id)):
+            return {"ok": False, "error": f"appliance {appliance_id} not found"}
+        _appliance_dispatch._remove_cron(int(appliance_id))
+        return {"ok": True, "deleted_id": int(appliance_id)}
+
+    @mcp.tool(
+        name="get_appliance_jobs",
+        description=(
+            "List appliance scheduling sessions. Filter by `status` "
+            "(scheduled|running|completed|cancelled|expired|failed|skipped_readonly), "
+            "`from_utc` / `to_utc` (ISO 8601 UTC bounding `planned_start_utc`), "
+            "or `appliance_id`."
+        ),
+    )
+    def get_appliance_jobs(
+        status: str | None = None,
+        from_utc: str | None = None,
+        to_utc: str | None = None,
+        appliance_id: int | None = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        rows = db.get_appliance_jobs(
+            status=status,
+            from_utc=from_utc,
+            to_utc=to_utc,
+            appliance_id=appliance_id,
+            limit=max(1, min(500, int(limit))),
+        )
+        return {
+            "ok": True,
+            "jobs": [_serialize_appliance_job(r) for r in rows],
+            "count": len(rows),
+        }
+
+    @mcp.tool(
+        name="cancel_appliance_job",
+        description=(
+            "Cancel a 'scheduled' appliance job — drops the APScheduler cron "
+            "and marks the row 'cancelled'. Equivalent to the user pressing "
+            "Cancel on the unit, but without firing a SmartThings stop."
+        ),
+    )
+    def cancel_appliance_job_tool(job_id: int) -> dict[str, Any]:
+        job = db.get_appliance_job(int(job_id))
+        if job is None:
+            return {"ok": False, "error": f"job {job_id} not found"}
+        if job["status"] != "scheduled":
+            return {
+                "ok": False,
+                "error": (
+                    f"job {job_id} is in status {job['status']}; "
+                    f"only 'scheduled' can be cancelled"
+                ),
+            }
+        db.update_appliance_job(
+            int(job_id), status="cancelled", error_msg="cancelled_via_mcp"
+        )
+        _appliance_dispatch._remove_cron(int(job["appliance_id"]))
+        row = db.get_appliance_job(int(job_id))
+        return {"ok": True, "job": _serialize_appliance_job(row)}
+
+    @mcp.tool(
+        name="get_smartthings_status",
+        description=(
+            "Health check for the SmartThings integration: is the PAT "
+            "configured? does a list_devices round-trip succeed? Never "
+            "returns the PAT itself."
+        ),
+    )
+    def get_smartthings_status_tool() -> dict[str, Any]:
+        present = _st_service.pat_present()
+        out: dict[str, Any] = {
+            "ok": True,
+            "pat_present": present,
+            "api_base": config.SMARTTHINGS_API_BASE,
+            "dispatch_enabled": bool(config.APPLIANCE_DISPATCH_ENABLED),
+            "read_only": bool(config.OPENCLAW_READ_ONLY),
+        }
+        if not present:
+            out["reachable"] = None
+            return out
+        try:
+            client = _st_service.get_client()
+            devices = client.list_devices()
+            out["reachable"] = True
+            out["device_count"] = len(devices)
+        except _STError as e:
+            out["reachable"] = False
+            out["error_code"] = e.code
+            out["error_http_status"] = e.http_status
+        return out
+
     # Phase 4.5 — boundary audit. Emits WARN per hardware-write tool that lacks
     # a `confirmed` parameter. Clean surface = silent; regressions are loud.
     audit_mcp_tool_surface(mcp)

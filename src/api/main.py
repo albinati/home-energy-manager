@@ -117,6 +117,7 @@ from .models import (
     TempBandSummaryResponse,
     TemperatureRequest,
 )
+from .routers import appliances as appliances_router
 from .routers import dispatch as dispatch_router
 from .routers import energy_providers as energy_providers_router
 from .routers import workbench as workbench_router
@@ -197,6 +198,14 @@ async def lifespan(app: FastAPI):
         pass
     await asyncio.to_thread(recover_on_boot, fox, daikin)
     start_background_scheduler()
+    # Re-register one-shot APScheduler crons for any in-flight appliance
+    # sessions that were 'scheduled' when the service stopped. Mark expired
+    # ones (planned_start_utc already passed) and ping if so.
+    try:
+        from ..scheduler import appliance_dispatch
+        await asyncio.to_thread(appliance_dispatch.rehydrate_crons)
+    except Exception:
+        logger.warning("appliance rehydrate_crons failed at startup", exc_info=True)
     async with _mcp_instance.session_manager.run():
         yield
     try:
@@ -217,6 +226,7 @@ app = FastAPI(
 app.include_router(energy_providers_router.router)
 app.include_router(workbench_router.router)
 app.include_router(dispatch_router.router)
+app.include_router(appliances_router.router)
 
 # Mount the FastMCP streamable-HTTP transport at /mcp, guarded by a bearer
 # token. Replaces the legacy stdio subprocess (`bin/mcp`) for OpenClaw in

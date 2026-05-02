@@ -1599,6 +1599,13 @@ def stop_background_scheduler() -> None:
     logger.info("Background scheduler stopped")
 
 
+def get_background_scheduler() -> Any:
+    """Return the running APScheduler instance, or ``None`` when scheduler
+    bootstrap has not run yet (e.g. tests, CLI scripts). Callers must
+    tolerate ``None`` rather than assuming the scheduler is up."""
+    return _background_scheduler
+
+
 def reregister_cron_jobs(reason: str = "runtime_settings_change") -> dict[str, Any]:
     """Tear down and re-create the cadence-tunable cron jobs (#52).
 

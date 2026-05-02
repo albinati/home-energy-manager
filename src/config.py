@@ -321,6 +321,33 @@ class Config:
     CONSUMPTION_BACKFILL_MINUTE: int = int(os.getenv("CONSUMPTION_BACKFILL_MINUTE", "0"))
     BULLETPROOF_TIMEZONE: str = (os.getenv("BULLETPROOF_TIMEZONE") or "Europe/London").strip()
 
+    # ── SmartThings smart-appliance scheduling (Phase 1: Samsung washer) ────
+    # PAT (Personal Access Token) lives at SMARTTHINGS_TOKEN_FILE — plaintext
+    # 0600, mirrors .daikin-tokens.json / .openclaw-token. Set via the
+    # POST /api/v1/integrations/smartthings/credentials endpoint.
+    SMARTTHINGS_TOKEN_FILE: Path = Path(
+        os.getenv("SMARTTHINGS_TOKEN_FILE", "data/.smartthings-token")
+    )
+    SMARTTHINGS_API_BASE: str = (
+        os.getenv("SMARTTHINGS_API_BASE") or "https://api.smartthings.com/v1"
+    ).strip().rstrip("/")
+    APPLIANCE_DISPATCH_ENABLED: bool = os.getenv(
+        "APPLIANCE_DISPATCH_ENABLED", "true"
+    ).lower() in ("true", "1", "yes")
+    # Fallback start window (HH:MM-HH:MM, local TZ) when agile_rates is empty
+    # for the planning horizon (cold start, fetch failure).
+    APPLIANCE_FALLBACK_WINDOW_LOCAL: str = (
+        os.getenv("APPLIANCE_FALLBACK_WINDOW_LOCAL") or "02:00-05:00"
+    ).strip()
+    # Default deadline when an appliance is registered without an explicit
+    # deadline_local_time. HH:MM in local TZ — the next occurrence is used.
+    APPLIANCE_DEFAULT_DEADLINE_LOCAL: str = (
+        os.getenv("APPLIANCE_DEFAULT_DEADLINE_LOCAL") or "07:00"
+    ).strip()
+    APPLIANCE_RECONCILE_ERROR_PING_THRESHOLD: int = int(
+        os.getenv("APPLIANCE_RECONCILE_ERROR_PING_THRESHOLD", "3")
+    )
+
     DHW_TEMP_MAX_C: float = float(os.getenv("DHW_TEMP_MAX_C", "65"))
     # Plunge-only ceiling (≥ DHW_TEMP_COMFORT_C and ≤ DHW_TEMP_MAX_C is allowed only when price < 0).
     # DHW_TEMP_COMFORT_C + DHW_TEMP_NORMAL_C are runtime-tunable via

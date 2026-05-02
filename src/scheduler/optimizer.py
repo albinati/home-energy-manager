@@ -1183,6 +1183,7 @@ def _run_optimizer_lp(
     ``LP_SCENARIOS_ON_TRIGGER_REASONS``). Defaults to ``manual`` for callers
     that haven't been updated to pass a reason yet.
     """
+    from . import appliance_dispatch
     from .lp_dispatch import (
         build_fox_groups_from_lp,
         filter_robust_peak_export,
@@ -1193,6 +1194,14 @@ def _run_optimizer_lp(
     from .lp_initial_state import read_lp_initial_state
     from .lp_optimizer import solve_lp
     from .scenarios import solve_scenarios_with_nominal, trigger_runs_scenarios
+
+    # Smart appliance scheduling: arm/cancel/replan SmartThings sessions BEFORE
+    # the LP solve so the residual-load profile reflects current remote-mode
+    # state. Never fatal — failures here log + continue.
+    try:
+        appliance_dispatch.reconcile()
+    except Exception:
+        logger.exception("appliance_dispatch.reconcile failed (LP solve continuing)")
 
     tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
     if not tariff:
@@ -1231,6 +1240,38 @@ def _run_optimizer_lp(
         _local = s.start_utc.astimezone(tz)
         _bucket = (_local.hour, 30 if _local.minute >= 30 else 0)
         base_load.append(_load_profile.get(_bucket, _flat))
+
+    # Smart appliance scheduling: bump residual load on slots covered by armed
+    # sessions so peak_export / charge / DHW plans route around the wash.
+    # Zero contribution when no jobs are scheduled — LP regression baseline
+    # stays bit-identical.
+    try:
+        if slots:
+            _horizon_start = slots[0].start_utc
+            _horizon_end = slots[-1].start_utc + timedelta(minutes=30)
+            _appliance_kw = appliance_dispatch.appliance_load_profile_kw(
+                _horizon_start, _horizon_end
+            )
+            if _appliance_kw:
+                _added_slots = 0
+                for _i, _s in enumerate(slots):
+                    _kw = _appliance_kw.get(_s.start_utc, 0.0)
+                    if _kw > 0:
+                        # Half-hour slot → kWh = kW × 0.5 h.
+                        base_load[_i] += _kw * 0.5
+                        _added_slots += 1
+                if _added_slots:
+                    logger.info(
+                        "LP base_load: appliance contribution applied to %d slot(s) "
+                        "(total +%.3f kWh)",
+                        _added_slots,
+                        sum(_kw * 0.5 for _kw in _appliance_kw.values()),
+                    )
+    except Exception:
+        logger.exception(
+            "LP base_load: appliance load contribution failed (continuing without it)"
+        )
+
     mu_load = sum(base_load) / len(base_load) if base_load else 0.4
     prices = [s.price_pence for s in slots]
     starts = [s.start_utc for s in slots]
