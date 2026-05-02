@@ -7,7 +7,7 @@ services:
 
     ports:
       - "127.0.0.1:8000:8000"
-      # Tailscale interface — override HEM_TAILSCALE_IP per host (Hetzner prod = 100.104.115.85).
+      # Tailscale interface — override HEM_TAILSCALE_IP per host (Hetzner prod = 100.x.y.z).
       # When unset, the second binding collapses to loopback (harmless duplicate).
       - "${HEM_TAILSCALE_IP:-127.0.0.1}:8000:8000"
 

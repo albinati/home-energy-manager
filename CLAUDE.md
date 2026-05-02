@@ -82,7 +82,7 @@ said 18080 — that was wrong; the code at `src/daikin/auth.py:328` always bound
 
 ```bash
 # 1. From your laptop, tunnel :8080:
-ssh -L 8080:localhost:8080 root@openclaw-overbot.tail0dbf20.ts.net
+ssh -L 8080:localhost:8080 root@<hem-host>.ts.net
 
 # 2. On the host, launch the auth-only container:
 docker compose -f /srv/hem/compose.daikin-auth.yaml run --rm daikin-auth
@@ -138,7 +138,7 @@ device API call. Refresh circuit breaker after 3 consecutive failures
 
 ```bash
 # 1. From your laptop, tunnel :8080:
-ssh -L 8080:localhost:8080 root@openclaw-overbot.tail0dbf20.ts.net
+ssh -L 8080:localhost:8080 root@<hem-host>.ts.net
 
 # 2. On the host, launch the auth-only container:
 docker compose -f /srv/hem/compose.smartthings-auth.yaml run --rm smartthings-auth
