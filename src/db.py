@@ -161,17 +161,6 @@ CREATE TABLE IF NOT EXISTS meteo_forecast (
     UNIQUE(slot_time)
 );
 
-CREATE TABLE IF NOT EXISTS pnl_execution_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    slot_time TEXT NOT NULL,
-    kwh_consumed REAL,
-    agile_price_pence REAL,
-    svt_price_pence REAL,
-    delta_pence REAL
-);
-
-CREATE INDEX IF NOT EXISTS idx_pnl_execution_log_slot ON pnl_execution_log(slot_time);
-
 CREATE TABLE IF NOT EXISTS api_call_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     vendor TEXT NOT NULL,
@@ -292,7 +281,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     if "overridden_by_user_at" not in as_cols:
         conn.execute("ALTER TABLE action_schedule ADD COLUMN overridden_by_user_at TEXT")
 
-    # V2: meteo_forecast and pnl_execution_log tables (may already exist via SCHEMA)
+    # V2: meteo_forecast (may already exist via SCHEMA constant)
     conn.execute(
         """CREATE TABLE IF NOT EXISTS meteo_forecast (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -309,19 +298,9 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     mf_cols = {str(r[1]) for r in cur.fetchall()}
     if "cloud_cover_pct" not in mf_cols:
         conn.execute("ALTER TABLE meteo_forecast ADD COLUMN cloud_cover_pct REAL")
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS pnl_execution_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            slot_time TEXT NOT NULL,
-            kwh_consumed REAL,
-            agile_price_pence REAL,
-            svt_price_pence REAL,
-            delta_pence REAL
-        )"""
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_pnl_execution_log_slot ON pnl_execution_log(slot_time)"
-    )
+    # V2 cleanup: pnl_execution_log was a never-populated stale schema (helper
+    # functions existed but had zero call sites). Drop it on existing prod DBs.
+    conn.execute("DROP TABLE IF EXISTS pnl_execution_log")
 
     # V3: fox_energy_daily — actual daily PV, load, import, export from Fox ESS
     conn.execute(
@@ -2335,93 +2314,6 @@ def get_micro_climate_offset_c(lookback: int = 96) -> float:
             return float(val)
         finally:
             conn.close()
-
-
-# ---------------------------------------------------------------------------
-# V2: pnl_execution_log
-# ---------------------------------------------------------------------------
-
-def log_pnl_execution(row: dict[str, Any]) -> int:
-    """Insert one row into pnl_execution_log. Returns new row id."""
-    with _lock:
-        conn = get_connection()
-        try:
-            cur = conn.execute(
-                """INSERT INTO pnl_execution_log
-                   (slot_time, kwh_consumed, agile_price_pence, svt_price_pence, delta_pence)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (
-                    row.get("slot_time"),
-                    row.get("kwh_consumed"),
-                    row.get("agile_price_pence"),
-                    row.get("svt_price_pence"),
-                    row.get("delta_pence"),
-                ),
-            )
-            conn.commit()
-            return int(cur.lastrowid)
-        finally:
-            conn.close()
-
-
-def get_pnl_execution_logs(
-    from_slot: str | None = None,
-    to_slot: str | None = None,
-    limit: int = 500,
-) -> list[dict[str, Any]]:
-    """Return pnl_execution_log rows in descending slot_time order."""
-    with _lock:
-        conn = get_connection()
-        try:
-            q = "SELECT * FROM pnl_execution_log WHERE 1=1"
-            args: list[Any] = []
-            if from_slot:
-                q += " AND slot_time >= ?"
-                args.append(from_slot)
-            if to_slot:
-                q += " AND slot_time <= ?"
-                args.append(to_slot)
-            q += " ORDER BY slot_time DESC LIMIT ?"
-            args.append(limit)
-            cur = conn.execute(q, args)
-            return [dict(r) for r in cur.fetchall()]
-        finally:
-            conn.close()
-
-
-def get_pnl_summary_for_date(date_str: str) -> dict[str, Any]:
-    """Return PnL summary metrics (VWAP, total kWh, total saving) for one day."""
-    rows = get_pnl_execution_logs(
-        from_slot=f"{date_str}T00:00:00Z",
-        to_slot=f"{date_str}T23:59:59Z",
-        limit=10000,
-    )
-    if not rows:
-        return {"date": date_str, "slots": 0, "total_kwh": 0.0, "total_cost_pence": 0.0,
-                "total_saving_pence": 0.0, "vwap_pence": 0.0, "slippage_pence": 0.0}
-
-    total_kwh = sum(float(r.get("kwh_consumed") or 0) for r in rows)
-    total_cost = sum(
-        float(r.get("kwh_consumed") or 0) * float(r.get("agile_price_pence") or 0) for r in rows
-    )
-    total_svt = sum(
-        float(r.get("kwh_consumed") or 0) * float(r.get("svt_price_pence") or 0) for r in rows
-    )
-    total_saving = sum(float(r.get("delta_pence") or 0) for r in rows)
-    vwap = total_cost / total_kwh if total_kwh else 0.0
-    svt_vwap = total_svt / total_kwh if total_kwh else 0.0
-    slippage = svt_vwap - vwap
-
-    return {
-        "date": date_str,
-        "slots": len(rows),
-        "total_kwh": round(total_kwh, 3),
-        "total_cost_pence": round(total_cost, 2),
-        "total_saving_pence": round(total_saving, 2),
-        "vwap_pence": round(vwap, 3),
-        "svt_vwap_pence": round(svt_vwap, 3),
-        "slippage_pence": round(slippage, 3),
-    }
 
 
 # ---------------------------------------------------------------------------
