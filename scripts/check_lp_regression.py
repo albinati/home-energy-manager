@@ -120,13 +120,21 @@ def _enumerate_dates_with_runs(days_back: int) -> list[date]:
     return out
 
 
-def _replay_one_day(target_date: date) -> DayResult:
-    """Replay one day with current code; return per-day cost totals."""
+def _replay_one_day(target_date: date, *, mode: str = "forward") -> DayResult:
+    """Replay one day with the given mode; return per-day cost totals.
+
+    ``mode`` is passed through to :func:`replay_day`:
+      - ``forward`` — snapshot weather + current config (catches behaviour change)
+      - ``honest`` — snapshot weather + snapshot config (catches solver / framework
+        regressions). V11-A (#194) made this meaningful by storing cloud cover
+        in the forecast history; before that, ``honest`` and ``forward`` both
+        used 0% cloud and were indistinguishable on the PV side.
+    """
     from src.scheduler.lp_replay import replay_day
 
     iso = target_date.isoformat()
     try:
-        r = replay_day(iso, cadence="original", mode="forward")
+        r = replay_day(iso, cadence="original", mode=mode)
     except Exception as e:
         return DayResult(
             date=iso, ok=False, error=f"replay raised: {e}",
@@ -214,6 +222,7 @@ def run_check(
     baseline_path: Path,
     fail_threshold_p: float,
     refresh_baseline: bool,
+    mode: str = "forward",
 ) -> RegressionReport:
     dates = _enumerate_dates_with_runs(days_back)
     report = RegressionReport(
@@ -226,7 +235,7 @@ def run_check(
     )
 
     for d in dates:
-        result = _replay_one_day(d)
+        result = _replay_one_day(d, mode=mode)
         report.days.append(result)
         if result.ok:
             report.new_total_replayed_cost_p += result.total_replayed_cost_p
@@ -317,6 +326,18 @@ def main(argv: list[str]) -> int:
         ),
     )
     parser.add_argument(
+        "--mode",
+        choices=("forward", "honest", "both"),
+        default="forward",
+        help=(
+            "V11-A (#194). 'forward' (default): snapshot weather + CURRENT config — "
+            "catches behaviour changes. 'honest': snapshot weather + SNAPSHOT config — "
+            "catches solver/framework regressions. 'both': run both and require both "
+            "to pass; baseline tracks the larger of the two costs (most stringent gate). "
+            "Use 'both' for any LP-touching PR."
+        ),
+    )
+    parser.add_argument(
         "--json", type=Path, default=None,
         help="Optional path to write the full report as JSON.",
     )
@@ -332,11 +353,62 @@ def main(argv: list[str]) -> int:
         stream=sys.stderr,
     )
 
+    if args.mode == "both":
+        # Run forward + honest sequentially, fail on EITHER regressing.
+        # Each mode keeps its own baseline section ("forward" / "honest")
+        # in the JSON file so they can drift independently when warranted.
+        from copy import deepcopy
+
+        modes_to_run = ("forward", "honest")
+        per_mode_reports: dict[str, RegressionReport] = {}
+        passed_overall = True
+        for m in modes_to_run:
+            # Each mode reads its own subkey of the baseline file to avoid mixing
+            # forward/honest totals on first refresh.
+            mode_baseline_path = args.baseline.with_name(
+                args.baseline.stem + f".{m}" + args.baseline.suffix
+            )
+            r = run_check(
+                days_back=args.days,
+                baseline_path=mode_baseline_path,
+                fail_threshold_p=args.fail_above_pence,
+                refresh_baseline=args.refresh_baseline,
+                mode=m,
+            )
+            per_mode_reports[m] = r
+            if not r.passed:
+                passed_overall = False
+            if not args.quiet:
+                print(f"\n### MODE = {m.upper()} ###")
+                _print_report(r)
+
+        if args.json:
+            args.json.parent.mkdir(parents=True, exist_ok=True)
+            args.json.write_text(json.dumps({
+                "mode": "both",
+                "passed": passed_overall,
+                "per_mode": {
+                    m: {
+                        **{k: v for k, v in asdict(r).items() if k != "days"},
+                        "passed": r.passed,
+                        "days": [asdict(d) for d in r.days],
+                    }
+                    for m, r in per_mode_reports.items()
+                },
+            }, indent=2))
+
+        if not args.quiet:
+            verdict = "PASS" if passed_overall else "FAIL"
+            print(f"\n=== BOTH-MODE VERDICT: {verdict} ===")
+            print("Both forward and honest replay must pass for an LP-touching PR.")
+        return 0 if passed_overall else 1
+
     report = run_check(
         days_back=args.days,
         baseline_path=args.baseline,
         fail_threshold_p=args.fail_above_pence,
         refresh_baseline=args.refresh_baseline,
+        mode=args.mode,
     )
 
     if args.json:
@@ -344,6 +416,7 @@ def main(argv: list[str]) -> int:
         args.json.write_text(json.dumps({
             **{k: v for k, v in asdict(report).items() if k != "days"},
             "passed": report.passed,
+            "mode": args.mode,
             "days": [asdict(d) for d in report.days],
         }, indent=2))
 

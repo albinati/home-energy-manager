@@ -43,8 +43,9 @@ def patched_replay(monkeypatch):
     }
     # Patch the date-enumerator to return our fixed list.
     monkeypatch.setattr(cs, "_enumerate_dates_with_runs", lambda days_back: list(by_date.keys()))
-    # Patch the per-day replay to return our stubs.
-    def _fake_replay(target_date):
+    # Patch the per-day replay to return our stubs. Accept mode kwarg
+    # (V11-A added it) but ignore it — the stubs are mode-agnostic.
+    def _fake_replay(target_date, *, mode: str = "forward"):
         r = by_date[target_date]
         return cs.DayResult(
             date=r.plan_date, ok=r.ok, error=r.error,
@@ -165,7 +166,7 @@ def test_failed_replay_skipped_from_total(tmp_path, monkeypatch):
 
     monkeypatch.setattr(cs, "_enumerate_dates_with_runs", lambda d: [date(2026, 4, 25), date(2026, 4, 26)])
 
-    def _fake(target):
+    def _fake(target, *, mode: str = "forward"):
         if target == date(2026, 4, 25):
             return cs.DayResult(date=str(target), ok=True, error=None, recalc_count=2,
                                total_original_cost_p=100.0, total_replayed_cost_p=80.0, total_delta_cost_p=-20.0)
@@ -182,3 +183,38 @@ def test_failed_replay_skipped_from_total(tmp_path, monkeypatch):
     assert report.new_total_replayed_cost_p == pytest.approx(80.0)
     assert any(not d.ok for d in report.days)
     assert any(d.ok for d in report.days)
+
+
+# ---------------------------------------------------------------------------
+# V11-A (#194) — --mode flag wiring
+# ---------------------------------------------------------------------------
+
+def test_run_check_threads_mode_through_to_replay(tmp_path, monkeypatch):
+    """V11-A: ``mode`` kwarg flows through ``run_check`` → ``_replay_one_day`` →
+    ``replay_day``. We verify by capturing what ``_replay_one_day`` is called with."""
+    from scripts import check_lp_regression as cs
+    from datetime import date
+
+    monkeypatch.setattr(cs, "_enumerate_dates_with_runs", lambda d: [date(2026, 4, 25)])
+    captured: list[str] = []
+
+    def _fake(target, *, mode: str = "forward"):
+        captured.append(mode)
+        return cs.DayResult(
+            date=str(target), ok=True, error=None, recalc_count=1,
+            total_original_cost_p=10.0, total_replayed_cost_p=10.0, total_delta_cost_p=0.0,
+        )
+    monkeypatch.setattr(cs, "_replay_one_day", _fake)
+
+    cs.run_check(
+        days_back=14, baseline_path=tmp_path / "x.json",
+        fail_threshold_p=50.0, refresh_baseline=False, mode="honest",
+    )
+    assert captured == ["honest"]
+
+    captured.clear()
+    cs.run_check(
+        days_back=14, baseline_path=tmp_path / "x2.json",
+        fail_threshold_p=50.0, refresh_baseline=False, mode="forward",
+    )
+    assert captured == ["forward"]
