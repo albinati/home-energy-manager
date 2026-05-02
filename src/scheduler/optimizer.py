@@ -1305,6 +1305,7 @@ def _run_optimizer_lp(
                 "slot_time": f.time_utc.isoformat(),
                 "temp_c": f.temperature_c,
                 "solar_w_m2": f.shortwave_radiation_wm2,
+                "cloud_cover_pct": f.cloud_cover_pct,
             }
             for f in forecast
         ]
@@ -1317,34 +1318,42 @@ def _run_optimizer_lp(
             datetime.now(UTC).isoformat(),
             forecast_rows,
         )
-    # PV calibration: prefer the per-hour-of-day cached table (richer signal — captures
-    # shading + sun-angle bias). Falls back to the rolling flat factor when the table
-    # is empty (cold start, < 7 samples per hour, etc).
-    from ..weather import compute_pv_calibration_factor, compute_today_pv_correction_factor
+    # PV calibration — fallback chain (best to worst):
+    #   1. cloud-aware (hour × cloud-bucket) table  — PR #232
+    #   2. per-hour-of-day table                    — PR #186
+    #   3. flat rolling factor                      — original
+    # Plus the today-aware OCF-style multiplier on top (PR #229).
+    from ..weather import (
+        compute_pv_calibration_factor,
+        compute_today_pv_correction_factor,
+        get_pv_calibration_factor_for,
+    )
+    pv_scale_cloud = db.get_pv_calibration_hourly_cloud()
     pv_scale_hourly = db.get_pv_calibration_hourly()
-    if pv_scale_hourly:
-        pv_scale: float | dict[int, float] = pv_scale_hourly
+    flat_scale = (
+        compute_pv_calibration_factor()
+        if not pv_scale_cloud and not pv_scale_hourly else 1.0
+    )
+    if pv_scale_cloud:
         logger.info(
-            "PV calibration: using per-hour table (%d hours covered, mean factor=%.3f)",
+            "PV calibration: cloud-aware table (%d cells, mean factor=%.3f) + per-hour fallback (%d hours)",
+            len(pv_scale_cloud),
+            sum(pv_scale_cloud.values()) / len(pv_scale_cloud),
+            len(pv_scale_hourly),
+        )
+    elif pv_scale_hourly:
+        logger.info(
+            "PV calibration: per-hour table only (%d hours, mean factor=%.3f) — cloud-aware empty",
             len(pv_scale_hourly),
             sum(pv_scale_hourly.values()) / len(pv_scale_hourly),
         )
     else:
-        pv_scale = compute_pv_calibration_factor()
-        logger.info("PV calibration: using flat factor=%.3f (per-hour table empty)", pv_scale)
+        logger.info("PV calibration: flat factor=%.3f (no per-hour or cloud-aware table)", flat_scale)
 
-    # Today-aware OCF-style adjuster: anchor today's correction to this morning's
-    # observed-vs-forecast ratio. Multiplied on top of the per-hour calibration to
-    # capture day-specific conditions (clouds rolled in, unexpectedly clear, etc)
-    # that the 14-day rolling table can't reflect. See compute_today_pv_correction_factor.
     today_factor, today_diag = compute_today_pv_correction_factor()
     if today_factor != 1.0:
-        if isinstance(pv_scale, dict):
-            pv_scale = {h: round(v * today_factor, 4) for h, v in pv_scale.items()}
-        else:
-            pv_scale = pv_scale * today_factor
         logger.info(
-            "PV calibration: today-aware adjuster applied factor=%.3f (n_hours=%d, "
+            "PV calibration: today-aware adjuster factor=%.3f (n_hours=%d, "
             "median_ratio=%.3f, clamped=%s)",
             today_factor, today_diag.get("n_hours", 0),
             today_diag.get("median_ratio", 0.0), today_diag.get("clamped", False),
@@ -1354,7 +1363,16 @@ def _run_optimizer_lp(
             "PV calibration: today-aware adjuster skipped (%s)",
             today_diag.get("reason", "no diagnostic"),
         )
-    weather = forecast_to_lp_inputs(forecast, starts, pv_scale=pv_scale)
+
+    def _pv_scale_callable(hour_utc: int, cloud_pct: float) -> float:
+        return get_pv_calibration_factor_for(
+            hour_utc, cloud_pct,
+            cloud_table=pv_scale_cloud,
+            hourly_table=pv_scale_hourly,
+            flat=flat_scale,
+        ) * today_factor
+
+    weather = forecast_to_lp_inputs(forecast, starts, pv_scale=_pv_scale_callable)
     initial = read_lp_initial_state(daikin)
     micro_climate_offset = db.get_micro_climate_offset_c(config.DAIKIN_MICRO_CLIMATE_LOOKBACK)
 

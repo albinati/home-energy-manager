@@ -77,6 +77,16 @@ def fetch_and_store_rates(fox: FoxESSClient | None = None) -> dict[str, Any]:
     except Exception as e:
         logger.warning("PV per-hour calibration recompute failed (non-fatal): %s", e)
 
+    # PR #232: cloud-aware (hour × cloud-bucket) recompute. Same daily cadence,
+    # same failure mode (non-fatal — falls back to per-hour table or flat).
+    try:
+        from ..weather import compute_pv_calibration_hourly_cloud_table
+
+        cloud_status = compute_pv_calibration_hourly_cloud_table()
+        logger.info("PV cloud-aware calibration recompute: %s", cloud_status)
+    except Exception as e:
+        logger.warning("PV cloud-aware calibration recompute failed (non-fatal): %s", e)
+
     summary: dict[str, Any] = {"ok": True, "rows": n, "export_rows": export_n}
     if config.USE_BULLETPROOF_ENGINE:
         try:

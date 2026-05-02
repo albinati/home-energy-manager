@@ -157,6 +157,7 @@ CREATE TABLE IF NOT EXISTS meteo_forecast (
     slot_time TEXT NOT NULL,
     temp_c REAL,
     solar_w_m2 REAL,
+    cloud_cover_pct REAL,
     UNIQUE(slot_time)
 );
 
@@ -302,6 +303,12 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             UNIQUE(slot_time)
         )"""
     )
+    # PR #232: cloud-aware PV calibration needs cloud_cover_pct on the live
+    # meteo_forecast rows. Older DBs predate this column.
+    cur = conn.execute("PRAGMA table_info(meteo_forecast)")
+    mf_cols = {str(r[1]) for r in cur.fetchall()}
+    if "cloud_cover_pct" not in mf_cols:
+        conn.execute("ALTER TABLE meteo_forecast ADD COLUMN cloud_cover_pct REAL")
     conn.execute(
         """CREATE TABLE IF NOT EXISTS pnl_execution_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -649,6 +656,28 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             samples         INTEGER NOT NULL,
             window_days     INTEGER NOT NULL,
             computed_at     TEXT NOT NULL
+        )"""
+    )
+
+    # V16 (PR #232): pv_calibration_hourly_cloud — sister table that splits
+    # the per-hour factor by cloud-cover bucket. Captures the "sunny day vs
+    # cloudy day" first-order signal that the per-hour table averages out.
+    # Buckets:
+    #   0 = clear     (cloud_cover_pct in [0, 25))
+    #   1 = partly    (cloud_cover_pct in [25, 50))
+    #   2 = mostly    (cloud_cover_pct in [50, 75))
+    #   3 = overcast  (cloud_cover_pct in [75, 100])
+    # When (hour, bucket) has too few samples, callers fall back to the
+    # per-hour table; when even that is empty, flat compute_pv_calibration_factor.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS pv_calibration_hourly_cloud (
+            hour_utc        INTEGER NOT NULL CHECK(hour_utc >= 0 AND hour_utc < 24),
+            cloud_bucket    INTEGER NOT NULL CHECK(cloud_bucket >= 0 AND cloud_bucket < 4),
+            factor          REAL NOT NULL,
+            samples         INTEGER NOT NULL,
+            window_days     INTEGER NOT NULL,
+            computed_at     TEXT NOT NULL,
+            PRIMARY KEY (hour_utc, cloud_bucket)
         )"""
     )
 
@@ -2226,6 +2255,8 @@ def save_meteo_forecast(rows: list[dict[str, Any]], forecast_date: str) -> int:
     """Upsert hourly Open-Meteo forecast rows for *forecast_date*.
 
     Each dict must have: slot_time (ISO), temp_c (float), solar_w_m2 (float).
+    Optional: cloud_cover_pct (float, 0-100) — used by the cloud-aware
+    PV calibration table (PR #232).
     """
     if not rows:
         return 0
@@ -2238,17 +2269,19 @@ def save_meteo_forecast(rows: list[dict[str, Any]], forecast_date: str) -> int:
                 if not slot:
                     continue
                 conn.execute(
-                    """INSERT INTO meteo_forecast (forecast_date, slot_time, temp_c, solar_w_m2)
-                       VALUES (?, ?, ?, ?)
+                    """INSERT INTO meteo_forecast (forecast_date, slot_time, temp_c, solar_w_m2, cloud_cover_pct)
+                       VALUES (?, ?, ?, ?, ?)
                        ON CONFLICT(slot_time) DO UPDATE SET
                          forecast_date=excluded.forecast_date,
                          temp_c=excluded.temp_c,
-                         solar_w_m2=excluded.solar_w_m2""",
+                         solar_w_m2=excluded.solar_w_m2,
+                         cloud_cover_pct=COALESCE(excluded.cloud_cover_pct, meteo_forecast.cloud_cover_pct)""",
                     (
                         forecast_date,
                         str(slot),
                         r.get("temp_c"),
                         r.get("solar_w_m2"),
+                        r.get("cloud_cover_pct"),
                     ),
                 )
                 n += 1
@@ -3503,6 +3536,57 @@ def get_pv_calibration_hourly() -> dict[int, float]:
                 "SELECT hour_utc, factor FROM pv_calibration_hourly"
             )
             return {int(r[0]): float(r[1]) for r in cur.fetchall()}
+        finally:
+            conn.close()
+
+
+def upsert_pv_calibration_hourly_cloud(
+    factors: dict[tuple[int, int], float],
+    samples: dict[tuple[int, int], int],
+    window_days: int,
+) -> int:
+    """Replace ``pv_calibration_hourly_cloud`` rows for the given (hour, bucket) pairs."""
+    if not factors:
+        return 0
+    from datetime import UTC as _UTC, datetime as _dt
+    now = _dt.now(_UTC).isoformat()
+    n = 0
+    with _lock:
+        conn = get_connection()
+        try:
+            for (hour, bucket), factor in factors.items():
+                conn.execute(
+                    """INSERT OR REPLACE INTO pv_calibration_hourly_cloud
+                       (hour_utc, cloud_bucket, factor, samples, window_days, computed_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (
+                        int(hour), int(bucket),
+                        float(factor),
+                        int(samples.get((hour, bucket), 0)),
+                        int(window_days),
+                        now,
+                    ),
+                )
+                n += 1
+            conn.commit()
+        finally:
+            conn.close()
+    return n
+
+
+def get_pv_calibration_hourly_cloud() -> dict[tuple[int, int], float]:
+    """Return cached per-(hour, cloud-bucket) factors, or ``{}`` when empty.
+
+    Bucket convention: 0=clear (0-25%), 1=partly (25-50%), 2=mostly (50-75%),
+    3=overcast (75-100%). See PR #232 / pv_calibration_hourly_cloud schema.
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT hour_utc, cloud_bucket, factor FROM pv_calibration_hourly_cloud"
+            )
+            return {(int(r[0]), int(r[1])): float(r[2]) for r in cur.fetchall()}
         finally:
             conn.close()
 
