@@ -1,0 +1,37 @@
+{
+  "_meta": {
+    "captured_at_utc": "2026-05-02T16:05:00Z",
+    "captured_after_pr": 230,
+    "calibration_method": "per_hour_table",
+    "rationale": "Post-PR-#230 baseline: per-hour calibration table now uses mean kW (sample-density-independent) instead of broken sum × (5/60) which assumed 12 samples/hour. Future calibration improvements (#A cloud-aware bias, #B MOS regression, #C quantile bands) MUST beat these MAE/RMSE numbers to justify shipping. Compare via scripts/check_pv_forecast_accuracy.py."
+  },
+  "window_days": 30,
+  "n_paired": 169,
+  "calibration_method": "per_hour_table",
+  "overall": {
+    "n": 169,
+    "mae_kw": 0.2081,
+    "rmse_kw": 0.3571,
+    "bias_kw": 0.0251,
+    "mean_actual_kw": 1.1681,
+    "mean_pred_kw": 1.1431,
+    "mape_pct": 30.04
+  },
+  "per_hour": {
+    "5":  {"n": 7,  "mae_kw": 0.0269, "rmse_kw": 0.0294, "bias_kw":  0.0100, "mean_actual_kw": 0.0607, "mean_pred_kw": 0.0508, "mape_pct":  0.00},
+    "6":  {"n": 12, "mae_kw": 0.0278, "rmse_kw": 0.0332, "bias_kw": -0.0110, "mean_actual_kw": 0.2253, "mean_pred_kw": 0.2364, "mape_pct": 13.89},
+    "7":  {"n": 12, "mae_kw": 0.0843, "rmse_kw": 0.1157, "bias_kw": -0.0304, "mean_actual_kw": 0.3947, "mean_pred_kw": 0.4251, "mape_pct": 27.17},
+    "8":  {"n": 11, "mae_kw": 0.1364, "rmse_kw": 0.1660, "bias_kw": -0.0011, "mean_actual_kw": 0.6035, "mean_pred_kw": 0.6046, "mape_pct": 26.00},
+    "9":  {"n": 12, "mae_kw": 0.3040, "rmse_kw": 0.4690, "bias_kw":  0.2379, "mean_actual_kw": 1.0340, "mean_pred_kw": 0.7961, "mape_pct": 23.91},
+    "10": {"n": 13, "mae_kw": 0.4222, "rmse_kw": 0.5478, "bias_kw":  0.1058, "mean_actual_kw": 1.4424, "mean_pred_kw": 1.3365, "mape_pct": 28.12},
+    "11": {"n": 13, "mae_kw": 0.3162, "rmse_kw": 0.5399, "bias_kw": -0.0701, "mean_actual_kw": 2.3634, "mean_pred_kw": 2.4335, "mape_pct": 18.48},
+    "12": {"n": 13, "mae_kw": 0.1750, "rmse_kw": 0.2592, "bias_kw": -0.0513, "mean_actual_kw": 2.5047, "mean_pred_kw": 2.5560, "mape_pct":  9.18},
+    "13": {"n": 13, "mae_kw": 0.2658, "rmse_kw": 0.3583, "bias_kw":  0.0275, "mean_actual_kw": 2.3807, "mean_pred_kw": 2.3532, "mape_pct": 12.76},
+    "14": {"n": 13, "mae_kw": 0.3437, "rmse_kw": 0.5983, "bias_kw":  0.1049, "mean_actual_kw": 2.0224, "mean_pred_kw": 1.9175, "mape_pct": 20.76},
+    "15": {"n": 12, "mae_kw": 0.2529, "rmse_kw": 0.3526, "bias_kw":  0.0547, "mean_actual_kw": 1.4139, "mean_pred_kw": 1.3592, "mape_pct": 55.51},
+    "16": {"n": 12, "mae_kw": 0.2450, "rmse_kw": 0.3442, "bias_kw": -0.0176, "mean_actual_kw": 0.7552, "mean_pred_kw": 0.7727, "mape_pct": 33.64},
+    "17": {"n": 12, "mae_kw": 0.1699, "rmse_kw": 0.2196, "bias_kw": -0.0166, "mean_actual_kw": 0.3398, "mean_pred_kw": 0.3565, "mape_pct": 89.39},
+    "18": {"n": 11, "mae_kw": 0.0474, "rmse_kw": 0.0604, "bias_kw":  0.0179, "mean_actual_kw": 0.0983, "mean_pred_kw": 0.0804, "mape_pct": 45.19},
+    "19": {"n": 3,  "mae_kw": 0.0483, "rmse_kw": 0.0486, "bias_kw": -0.0483, "mean_actual_kw": 0.0130, "mean_pred_kw": 0.0613, "mape_pct":  0.00}
+  }
+}

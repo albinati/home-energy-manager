@@ -720,6 +720,147 @@ def compute_today_pv_correction_factor(
     }
 
 
+def evaluate_pv_forecast_accuracy(
+    window_days: int = 30,
+    *,
+    min_kw: float = 0.05,
+) -> dict[str, Any]:
+    """Compare predicted vs realized PV across the last N days.
+
+    Used as a **regression baseline** for any forecast-accuracy work. Output
+    captures MAE / RMSE / bias / sample count, both per-hour-of-day and
+    overall. After shipping a calibration improvement, re-run and compare:
+    a real improvement reduces MAE/RMSE; "improvement" that doesn't
+    measurably move these metrics is noise.
+
+    Pipeline replicated for each (day, hour):
+        prediction = estimate_pv_kw(forecast_irradiance) × calibration[hour]
+        actual = mean(pv_realtime_history.solar_power_kw for that hour)
+        error = actual - prediction (positive = under-prediction)
+
+    Hours/days where prediction OR actual < ``min_kw`` are excluded as
+    dawn/dusk noise (default 0.05 kW).
+
+    The today-aware adjuster is NOT applied for historical days — we use the
+    current per-hour table only. This gives "what would today's calibration
+    have predicted historically" — apples-to-apples vs any future
+    calibration change.
+
+    Returns a dict with:
+
+        {
+            "window_days": 30,
+            "n_paired": 245,
+            "overall": {
+                "mae_kw": 0.42, "rmse_kw": 0.61,
+                "bias_kw": -0.08,    # negative = system over-predicts
+                "mean_actual_kw": 0.78, "mean_pred_kw": 0.86,
+                "mape_pct": 38.4,
+            },
+            "per_hour": {
+                7:  {"mae_kw": 0.21, "rmse_kw": 0.32, "bias_kw": +0.04, "n": 18},
+                ...
+            },
+        }
+    """
+    from . import db as _db
+    from collections import defaultdict
+    from datetime import UTC as _UTC, date as _date, datetime as _dt, timedelta as _td
+
+    end = _date.today()
+    start = end - _td(days=window_days)
+
+    cal_hourly = _db.get_pv_calibration_hourly()
+    flat_cal = compute_pv_calibration_factor() if not cal_hourly else 1.0
+
+    # Pull all measurements + forecasts in window
+    actual_kw_samples: dict[tuple[str, int], list[float]] = defaultdict(list)
+    forecast_radiation: dict[tuple[str, int], float] = {}
+
+    with _db._lock:
+        conn = _db.get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT captured_at, solar_power_kw FROM pv_realtime_history
+                   WHERE substr(captured_at, 1, 10) BETWEEN ? AND ?
+                     AND solar_power_kw IS NOT NULL""",
+                (start.isoformat(), end.isoformat()),
+            )
+            for ts_raw, kw in cur.fetchall():
+                try:
+                    ts = _dt.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+                except (ValueError, TypeError):
+                    continue
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=_UTC)
+                actual_kw_samples[(ts.date().isoformat(), ts.hour)].append(float(kw or 0.0))
+
+            cur = conn.execute(
+                """SELECT slot_time, solar_w_m2 FROM meteo_forecast
+                   WHERE substr(slot_time, 1, 10) BETWEEN ? AND ?""",
+                (start.isoformat(), end.isoformat()),
+            )
+            for ts_raw, rad in cur.fetchall():
+                try:
+                    ts = _dt.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+                except (ValueError, TypeError):
+                    continue
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=_UTC)
+                forecast_radiation[(ts.date().isoformat(), ts.hour)] = float(rad or 0.0)
+        finally:
+            conn.close()
+
+    # Build paired (predicted_kw, actual_kw) tuples
+    pairs_per_hour: dict[int, list[tuple[float, float]]] = defaultdict(list)
+    all_pairs: list[tuple[float, float]] = []
+    for key, samples in actual_kw_samples.items():
+        if not samples:
+            continue
+        actual_kw = sum(samples) / len(samples)
+        rad = forecast_radiation.get(key)
+        if rad is None:
+            continue
+        cal = float(cal_hourly.get(key[1], flat_cal)) if cal_hourly else flat_cal
+        predicted_kw = estimate_pv_kw(rad) * cal
+        if predicted_kw < min_kw and actual_kw < min_kw:
+            continue                      # both negligible — skip dawn/dusk
+        pairs_per_hour[key[1]].append((predicted_kw, actual_kw))
+        all_pairs.append((predicted_kw, actual_kw))
+
+    def _stats(pairs: list[tuple[float, float]]) -> dict[str, float]:
+        if not pairs:
+            return {"mae_kw": 0.0, "rmse_kw": 0.0, "bias_kw": 0.0,
+                    "mean_actual_kw": 0.0, "mean_pred_kw": 0.0, "mape_pct": 0.0, "n": 0}
+        n = len(pairs)
+        errs = [a - p for p, a in pairs]
+        mae = sum(abs(e) for e in errs) / n
+        rmse = (sum(e * e for e in errs) / n) ** 0.5
+        bias = sum(errs) / n
+        mean_actual = sum(a for _, a in pairs) / n
+        mean_pred = sum(p for p, _ in pairs) / n
+        # MAPE: skip points where actual ~ 0 to avoid div-by-zero
+        ape = [abs(a - p) / a * 100 for p, a in pairs if a > 0.1]
+        mape = sum(ape) / len(ape) if ape else 0.0
+        return {
+            "mae_kw": round(mae, 4),
+            "rmse_kw": round(rmse, 4),
+            "bias_kw": round(bias, 4),
+            "mean_actual_kw": round(mean_actual, 4),
+            "mean_pred_kw": round(mean_pred, 4),
+            "mape_pct": round(mape, 2),
+            "n": n,
+        }
+
+    return {
+        "window_days": window_days,
+        "n_paired": len(all_pairs),
+        "calibration_method": "per_hour_table" if cal_hourly else f"flat({flat_cal:.4f})",
+        "overall": _stats(all_pairs),
+        "per_hour": {h: _stats(p) for h, p in sorted(pairs_per_hour.items())},
+    }
+
+
 def forecast_to_lp_inputs(
     forecast: list[HourlyForecast],
     slot_starts_utc: list[datetime],
