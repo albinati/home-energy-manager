@@ -1,12 +1,20 @@
 """Smart appliance scheduling REST endpoints (Phase 1: SmartThings washer).
 
 Loopback-only — same as every other ``/api/v1/...`` route, no auth middleware.
-The PAT-write endpoint validates by round-tripping a SmartThings list_devices
-call before persisting; it never returns the PAT itself.
+
+OAuth bootstrap is **not** done via REST (writing tokens via web endpoint
+would defeat the user-consent property of the auth code flow). Use the
+one-shot enrollment container instead:
+
+    docker compose -f deploy/compose.smartthings-auth.yaml run --rm smartthings-auth
+
+The endpoints here surface read-only status and let the operator revoke
+local OAuth state from the API if needed.
 """
 from __future__ import annotations
 
 import logging
+import secrets
 import sqlite3
 from typing import Any
 
@@ -16,8 +24,9 @@ from pydantic import BaseModel, Field
 from ... import db
 from ...config import config
 from ...scheduler import appliance_dispatch
+from ...smartthings import auth as st_auth
 from ...smartthings import service as st_service
-from ...smartthings.client import SmartThingsClient, SmartThingsError
+from ...smartthings.client import SmartThingsError
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +55,10 @@ class UpdateApplianceRequest(BaseModel):
     enabled: bool | None = None
 
 
-class SetCredentialsRequest(BaseModel):
-    pat: str = Field(..., min_length=1, description="SmartThings Personal Access Token")
+# SetCredentialsRequest removed — OAuth tokens are written by the one-shot
+# enrollment container (deploy/compose.smartthings-auth.yaml). The /credentials
+# POST endpoint is gone for the same reason: the auth code flow needs a real
+# user-agent (browser) to present consent, not a JSON POST.
 
 
 # ---------------------------------------------------------------------------
@@ -212,42 +223,50 @@ async def cancel_job(job_id: int) -> dict[str, Any]:
 # /api/v1/integrations/smartthings — credentials + status
 # ---------------------------------------------------------------------------
 
-@router.post("/integrations/smartthings/credentials")
-async def set_smartthings_credentials(req: SetCredentialsRequest) -> dict[str, Any]:
-    """Validate the PAT via SmartThings ``list_devices`` round-trip then
-    persist it 0600 at ``config.SMARTTHINGS_TOKEN_FILE``.
+@router.get("/integrations/smartthings/oauth/start")
+async def smartthings_oauth_start() -> dict[str, Any]:
+    """Return the Samsung consent URL the operator opens in a browser.
 
-    Never echoes the PAT back. Returns the device count on success so the
-    caller knows it worked.
+    NOTE: this endpoint does NOT actually start the callback server — that
+    runs inside the one-shot ``smartthings-auth`` container. Use this when
+    you want to visit the URL manually after starting the container, or to
+    inspect what scopes will be requested. Generates a fresh ``state`` token
+    each call (no persistence — the container's own server validates it).
     """
-    pat = req.pat.strip()
-    if not pat:
-        raise HTTPException(400, "pat is empty")
-    try:
-        probe = SmartThingsClient(pat=pat, base_url=config.SMARTTHINGS_API_BASE)
-        devices = probe.list_devices()
-    except SmartThingsError as e:
-        raise HTTPException(401 if e.code == "pat_invalid" else 502,
-                            f"SmartThings rejected the PAT: {e}") from None
-    path = st_service.write_pat(pat)
+    if not config.SMARTTHINGS_CLIENT_ID:
+        raise HTTPException(412, "SMARTTHINGS_CLIENT_ID not configured")
+    state = secrets.token_urlsafe(16)
     return {
         "ok": True,
-        "token_file": str(path),
-        "device_count": len(devices),
+        "authorize_url": st_auth.authorize_url(state),
+        "state": state,
+        "scopes": config.SMARTTHINGS_OAUTH_SCOPES,
+        "redirect_uri": config.SMARTTHINGS_REDIRECT_URI,
+        "_note": (
+            "Run `docker compose -f deploy/compose.smartthings-auth.yaml run --rm "
+            "smartthings-auth` to start the local callback server, then open "
+            "this authorize_url in a browser through an SSH port-forward to :8080."
+        ),
     }
 
 
 @router.delete("/integrations/smartthings/credentials", status_code=204)
 async def delete_smartthings_credentials() -> None:
-    st_service.delete_pat()
+    """Revoke local OAuth state by deleting the token file.
+
+    Does NOT revoke the SmartThings-side authorization — to do that, the user
+    must visit Samsung's "Connected Services" UI in the SmartThings app.
+    """
+    st_service.delete_tokens()
 
 
 @router.get("/integrations/smartthings/status")
 async def smartthings_status() -> dict[str, Any]:
-    """Health check for the SmartThings integration. Never returns the PAT."""
-    present = st_service.pat_present()
+    """Health check for the SmartThings integration. Never returns secrets."""
+    present = st_service.tokens_present()
     out: dict[str, Any] = {
-        "pat_present": present,
+        "tokens_present": present,
+        "client_id_configured": bool(config.SMARTTHINGS_CLIENT_ID),
         "api_base": config.SMARTTHINGS_API_BASE,
         "dispatch_enabled": bool(config.APPLIANCE_DISPATCH_ENABLED),
         "read_only": bool(config.OPENCLAW_READ_ONLY),

@@ -1,4 +1,4 @@
-"""SmartThings public REST API client (Personal Access Token).
+"""SmartThings public REST API client (OAuth bearer token).
 
 API: https://developer.smartthings.com/docs/api/public
 
@@ -8,11 +8,16 @@ Phase 1 surface — only what the appliance scheduler needs:
 - read full status (cycle metadata, best-effort)
 - POST setMachineState run (the fire path)
 
+Bearer access token is sourced from :mod:`src.smartthings.auth` (OAuth flow
++ refresh-on-stale). On HTTP 401 the client refreshes once and retries —
+covers token revocation / clock skew / Samsung's silent rotation.
+
 Honours ``OPENCLAW_READ_ONLY``: when true, ``start_cycle`` returns
 ``{"skipped": "read_only"}`` without making an HTTP request.
 
 Errors are surfaced as :class:`SmartThingsError` with a short ``code`` so
-callers can match on ``"pat_invalid"`` (401), ``"not_found"`` (404), etc.
+callers can match on ``"auth_invalid"`` (401 even after refresh),
+``"not_found"`` (404), etc.
 """
 from __future__ import annotations
 
@@ -22,6 +27,7 @@ import urllib.error
 import urllib.request
 
 from ..config import config
+from . import auth as _auth
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +35,7 @@ logger = logging.getLogger(__name__)
 class SmartThingsError(Exception):
     """Raised on any SmartThings REST error.
 
-    ``code`` is a short machine-readable label (``pat_invalid``,
+    ``code`` is a short machine-readable label (``auth_invalid``,
     ``not_found``, ``http_error``, ``transport``); ``http_status`` is the
     HTTP status code when the error came from a server response.
     """
@@ -49,16 +55,24 @@ class SmartThingsError(Exception):
 class SmartThingsClient:
     """Thin sync wrapper around api.smartthings.com.
 
-    No retry on 4xx; one retry on 5xx. SmartThings is not Daikin-quota-
-    constrained — the appliance dispatcher reads remote_mode at most once
-    per LP solve (~50 reads/day total).
+    No retry on most 4xx; one retry on 5xx; one refresh+retry on 401.
+    SmartThings is not Daikin-quota-constrained — the appliance dispatcher
+    reads remote_mode at most once per LP solve (~50 reads/day total).
+
+    Pass ``access_token=None`` (default) to source from the OAuth file via
+    :func:`src.smartthings.auth.get_valid_access_token`. Pass an explicit
+    token only for tests.
     """
 
-    def __init__(self, pat: str, base_url: str | None = None) -> None:
-        if not pat:
-            raise SmartThingsError("pat_missing", "PAT is empty")
-        self._pat = pat.strip()
+    def __init__(self, access_token: str | None = None, base_url: str | None = None) -> None:
+        self._explicit_token = access_token.strip() if access_token else None
         self._base = (base_url or config.SMARTTHINGS_API_BASE).rstrip("/")
+
+    def _bearer(self, *, force_refresh: bool = False) -> str:
+        """Return a bearer token — explicit override or OAuth-managed."""
+        if self._explicit_token is not None:
+            return self._explicit_token
+        return _auth.get_valid_access_token(force_refresh=force_refresh)
 
     # ------------------------------------------------------------------
     # Public API
@@ -150,18 +164,28 @@ class SmartThingsClient:
     def _request(self, method: str, path: str, body: dict | None = None) -> dict:
         url = f"{self._base}{path}"
         payload = None
-        headers = {
-            "Authorization": f"Bearer {self._pat}",
-            "Accept": "application/json",
-        }
         if body is not None:
             payload = json.dumps(body).encode()
-            headers["Content-Type"] = "application/json"
 
-        req = urllib.request.Request(url, data=payload, headers=headers, method=method)
-
-        # No retry on 4xx; one retry on 5xx (transient).
-        for attempt in range(2):
+        # Up to 3 attempts: (1) initial, (2) 401-refresh, (3) 5xx-retry.
+        # ``forced_refresh`` ensures we only refresh once per call so a stale
+        # refresh_token can't push us into an infinite loop.
+        forced_refresh = False
+        last_5xx_retried = False
+        for attempt in range(3):
+            try:
+                token = self._bearer(force_refresh=(forced_refresh and attempt == 1))
+            except _auth.SmartThingsAuthError as e:
+                raise SmartThingsError("auth_missing", str(e)) from e
+            except _auth.SmartThingsAuthCircuitOpen as e:
+                raise SmartThingsError("auth_circuit_open", str(e)) from e
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/json",
+            }
+            if payload is not None:
+                headers["Content-Type"] = "application/json"
+            req = urllib.request.Request(url, data=payload, headers=headers, method=method)
             try:
                 with urllib.request.urlopen(req, timeout=15) as resp:
                     raw = resp.read()
@@ -180,9 +204,16 @@ class SmartThingsClient:
                     err_body = e.read().decode("utf-8", errors="replace")[:500]
                 except Exception:
                     pass
+                if e.code == 401 and not forced_refresh and self._explicit_token is None:
+                    logger.info(
+                        "smartthings %s %s → 401, refreshing access token + retry",
+                        method, path,
+                    )
+                    forced_refresh = True
+                    continue
                 if e.code == 401:
                     raise SmartThingsError(
-                        "pat_invalid", err_body or "PAT rejected",
+                        "auth_invalid", err_body or "access token rejected",
                         http_status=401,
                     ) from None
                 if e.code == 404:
@@ -190,26 +221,29 @@ class SmartThingsClient:
                         "not_found", err_body or "device or capability not found",
                         http_status=404,
                     ) from None
-                if 500 <= e.code < 600 and attempt == 0:
+                if 500 <= e.code < 600 and not last_5xx_retried:
                     logger.warning(
                         "smartthings %s %s → HTTP %d, retrying once",
                         method, path, e.code,
                     )
+                    last_5xx_retried = True
                     continue
                 raise SmartThingsError(
                     "http_error", f"HTTP {e.code}: {err_body}".rstrip(),
                     http_status=e.code,
                 ) from None
             except urllib.error.URLError as e:
-                if attempt == 0:
+                if not last_5xx_retried:
                     logger.warning(
                         "smartthings %s %s → transport error %s, retrying once",
                         method, path, e,
                     )
+                    last_5xx_retried = True
                     continue
                 raise SmartThingsError("transport", str(e)) from None
             except OSError as e:
-                if attempt == 0:
+                if not last_5xx_retried:
+                    last_5xx_retried = True
                     continue
                 raise SmartThingsError("transport", str(e)) from None
         raise SmartThingsError("transport", "unreachable code path")

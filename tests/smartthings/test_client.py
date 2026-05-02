@@ -40,7 +40,7 @@ def _http_error(status: int, body: bytes = b""):
 
 
 def test_request_sets_bearer_header():
-    client = SmartThingsClient(pat="test-pat", base_url="https://api.smartthings.com/v1")
+    client = SmartThingsClient(access_token="test-pat", base_url="https://api.smartthings.com/v1")
     captured: dict = {}
 
     def fake_urlopen(req, timeout=None):
@@ -59,45 +59,75 @@ def test_request_sets_bearer_header():
     assert auth == "Bearer test-pat"
 
 
-def test_401_raises_pat_invalid():
-    client = SmartThingsClient(pat="bad-pat")
+def test_401_raises_auth_invalid_with_explicit_token():
+    """Explicit-token clients (test fixtures) get auth_invalid on 401 — no
+    refresh attempt because there's no refresh_token in the test path."""
+    client = SmartThingsClient(access_token="bad-pat")
     with patch("urllib.request.urlopen", side_effect=_http_error(401, b"unauthorized")):
         with pytest.raises(SmartThingsError) as ex:
             client.list_devices()
-    assert ex.value.code == "pat_invalid"
+    assert ex.value.code == "auth_invalid"
     assert ex.value.http_status == 401
 
 
+def test_401_triggers_refresh_when_using_oauth_token_file():
+    """Production path: client without access_token sources via auth.get_valid_access_token.
+    On 401, must call get_valid_access_token(force_refresh=True) and retry."""
+    from unittest.mock import MagicMock
+
+    client = SmartThingsClient()  # no explicit token → uses auth module
+    calls = {"refresh_count": 0, "request_count": 0}
+
+    def fake_token(*, force_refresh=False):
+        calls["refresh_count"] += int(force_refresh)
+        return "fresh-token-after-refresh" if force_refresh else "stale-token"
+
+    def fake_urlopen(req, timeout=None):
+        calls["request_count"] += 1
+        auth_hdr = dict(req.header_items()).get("Authorization", "")
+        if "stale-token" in auth_hdr:
+            raise _http_error(401, b"expired")
+        # Refreshed token → success
+        return _resp(200, {"items": []})
+
+    with patch("src.smartthings.client._auth.get_valid_access_token", side_effect=fake_token):
+        with patch("urllib.request.urlopen", fake_urlopen):
+            client.list_devices()
+
+    assert calls["request_count"] == 2  # initial + retry-after-refresh
+    assert calls["refresh_count"] == 1  # exactly one forced refresh
+
+
 def test_get_remote_control_enabled_parses_string_true():
-    client = SmartThingsClient(pat="x")
+    client = SmartThingsClient(access_token="x")
     payload = {"remoteControlEnabled": {"value": "true"}}
     with patch("urllib.request.urlopen", return_value=_resp(200, payload)):
         assert client.get_remote_control_enabled("dev-1") is True
 
 
 def test_get_remote_control_enabled_parses_native_bool():
-    client = SmartThingsClient(pat="x")
+    client = SmartThingsClient(access_token="x")
     payload = {"remoteControlEnabled": {"value": True}}
     with patch("urllib.request.urlopen", return_value=_resp(200, payload)):
         assert client.get_remote_control_enabled("dev-1") is True
 
 
 def test_get_remote_control_enabled_false_when_string_false():
-    client = SmartThingsClient(pat="x")
+    client = SmartThingsClient(access_token="x")
     payload = {"remoteControlEnabled": {"value": "false"}}
     with patch("urllib.request.urlopen", return_value=_resp(200, payload)):
         assert client.get_remote_control_enabled("dev-1") is False
 
 
 def test_get_remote_control_enabled_false_on_unparseable():
-    client = SmartThingsClient(pat="x")
+    client = SmartThingsClient(access_token="x")
     payload = {"remoteControlEnabled": {"value": None}}
     with patch("urllib.request.urlopen", return_value=_resp(200, payload)):
         assert client.get_remote_control_enabled("dev-1") is False
 
 
 def test_start_cycle_body_shape():
-    client = SmartThingsClient(pat="x", base_url="https://api.smartthings.com/v1")
+    client = SmartThingsClient(access_token="x", base_url="https://api.smartthings.com/v1")
     captured: dict = {}
 
     def fake_urlopen(req, timeout=None):
@@ -129,7 +159,7 @@ def test_start_cycle_body_shape():
 
 def test_start_cycle_skipped_in_read_only(monkeypatch):
     """OPENCLAW_READ_ONLY=true → no HTTP call, response says skipped."""
-    client = SmartThingsClient(pat="x")
+    client = SmartThingsClient(access_token="x")
 
     def boom(*a, **kw):
         raise AssertionError("urlopen must NOT be called in read-only mode")
@@ -142,7 +172,7 @@ def test_start_cycle_skipped_in_read_only(monkeypatch):
 
 
 def test_5xx_retries_once_then_raises():
-    client = SmartThingsClient(pat="x")
+    client = SmartThingsClient(access_token="x")
     calls = {"n": 0}
 
     def fake_urlopen(req, timeout=None):
@@ -158,7 +188,7 @@ def test_5xx_retries_once_then_raises():
 
 
 def test_list_devices_returns_items():
-    client = SmartThingsClient(pat="x")
+    client = SmartThingsClient(access_token="x")
     payload = {
         "items": [
             {"deviceId": "dev-1", "label": "Washer"},
@@ -172,7 +202,7 @@ def test_list_devices_returns_items():
 
 
 def test_list_devices_empty_when_no_items_key():
-    client = SmartThingsClient(pat="x")
+    client = SmartThingsClient(access_token="x")
     with patch("urllib.request.urlopen", return_value=_resp(200, {})):
         devices = client.list_devices()
     assert devices == []
