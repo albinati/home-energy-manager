@@ -338,8 +338,15 @@ class Config:
         os.getenv("SMARTTHINGS_TOKEN_URL")
         or "https://auth-global.api.smartthings.com/oauth/token"
     ).strip().rstrip("/")
+    # OAuth scopes: r/x:devices:* are the runtime data path (read state, run cycles).
+    # ``r:installedapps`` + ``w:installedapps`` are REQUIRED for the OAuth authorize
+    # endpoint to proceed at all — without them Samsung returns 403 before login because
+    # the OAuth flow can't install the app into the user's location. Confirmed against
+    # Home Assistant's working SmartThings integration (`SCOPES` in
+    # https://github.com/home-assistant/core/blob/dev/homeassistant/components/smartthings/const.py).
     SMARTTHINGS_OAUTH_SCOPES: str = (
-        os.getenv("SMARTTHINGS_OAUTH_SCOPES") or "r:devices:* x:devices:*"
+        os.getenv("SMARTTHINGS_OAUTH_SCOPES")
+        or "r:devices:* x:devices:* r:installedapps w:installedapps"
     ).strip()
     SMARTTHINGS_TOKEN_FILE: Path = Path(
         os.getenv("SMARTTHINGS_TOKEN_FILE", "data/.smartthings-tokens.json")

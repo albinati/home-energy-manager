@@ -136,21 +136,43 @@ device API call. Refresh circuit breaker after 3 consecutive failures
 
 ### One-time bootstrap (after `.env` has CLIENT_ID + CLIENT_SECRET set)
 
+**Samsung's WAF rejects `http://localhost` redirect URIs** (silent 404 on
+consent — confirmed against AWS ELB at `api.smartthings.com`). Bootstrap
+flow uses **Tailscale Funnel** to expose the callback over public HTTPS:
+
 ```bash
-# 1. From your laptop, tunnel :8080:
-ssh -L 8080:localhost:8080 root@openclaw-overbot.tail0dbf20.ts.net
+# 1. On the host, expose the auth container's :8080 via Tailscale Funnel
+#    on port 8443 (separate from the existing :443 OpenClaw serve). This
+#    is PUBLICLY reachable for the duration of the bootstrap only.
+tailscale funnel --bg --https=8443 http://localhost:8080
 
-# 2. On the host, launch the auth-only container:
-docker compose -f /srv/hem/compose.smartthings-auth.yaml run --rm smartthings-auth
+# 2. (Once per app registration) Register the redirect URI with the SmartApp
+#    via `smartthings apps:oauth:update <appId>`:
+#      https://<host>.<tailnet>.ts.net:8443/oauth/smartthings/callback
+#    Also set the same value in /srv/hem/.env as SMARTTHINGS_REDIRECT_URI.
 
-# 3. Open the URL the container prints in your local browser. Samsung
-#    redirects to http://localhost:8080/oauth/smartthings/callback
-#    (= the container, via your SSH tunnel). Tokens land in
-#    /srv/hem/data/.smartthings-tokens.json. Container exits.
+# 3. Launch the auth container — MUST pass --service-ports because
+#    `docker compose run` drops the `ports:` section by default (without
+#    this, host :8080 doesn't bind and Funnel returns 502):
+docker compose -f /srv/hem/compose.smartthings-auth.yaml run --rm \
+  --service-ports smartthings-auth
 
-# 4. Restart hem so the service picks up the new tokens.
+# 4. Open the printed URL in your laptop browser (no SSH tunnel needed).
+#    Samsung redirects to the Funnel URL → forwards to localhost:8080
+#    → container handles → tokens land in /srv/hem/data/.smartthings-tokens.json.
+
+# 5. Tear down Funnel + restart hem.
+tailscale funnel --https=8443 off
 systemctl restart hem
 ```
+
+**Required OAuth scopes** (set on both the SmartApp and in `.env`):
+`r:devices:* x:devices:* r:installedapps w:installedapps`
+
+The two `installedapps` scopes are required by Samsung's OAuth flow to
+install the SmartApp into the user's location during consent. Without
+them the authorize endpoint 403s before login (matches Home Assistant's
+working integration `SCOPES`).
 
 ### Refresh access token (refresh_token still valid)
 

@@ -1,20 +1,25 @@
 # One-shot SmartThings OAuth enrollment.
 #
-# Usage:
-#   1. From your laptop, tunnel :8080 to the Hetzner host:
-#        ssh -L 8080:localhost:8080 root@openclaw-overbot.tail0dbf20.ts.net
-#   2. On the host, launch the auth-only container:
-#        docker compose -f /srv/hem/compose.smartthings-auth.yaml run --rm smartthings-auth
-#   3. The container prints an authorize URL — open it in your local browser.
-#      Samsung redirects to http://localhost:8080/oauth/smartthings/callback
-#      (= the container, via your SSH tunnel). Tokens land in
-#      /srv/hem/data/.smartthings-tokens.json.
-#   4. After the container exits, restart the main service so it picks up
-#      the new tokens:
-#        systemctl restart hem
+# Differs from compose.daikin-auth.yaml: Samsung's OAuth WAF rejects
+# ``http://localhost`` redirect URIs (silent 404 on consent). Workaround:
+# use Tailscale Funnel to expose the callback over public HTTPS on port 8443
+# during the bootstrap, then tear down.
 #
-# Mirrors the shape of compose.daikin-auth.yaml — same SSH-tunnel pattern,
-# same token-file convention.
+# Usage:
+#   1. (Once per Funnel) Enable Funnel for the callback path on the host:
+#        tailscale funnel --bg --https=8443 http://localhost:8080
+#   2. (Once per app registration) Set redirect_uri on the SmartApp + .env to:
+#        https://<host>.<tailnet>.ts.net:8443/oauth/smartthings/callback
+#   3. Launch the auth-only container WITH --service-ports (compose run drops
+#      ports: by default — without it the host's :8080 won't bind, Funnel 502s):
+#        docker compose -f /srv/hem/compose.smartthings-auth.yaml run --rm \
+#          --service-ports smartthings-auth
+#   4. The container prints an authorize URL. Open in your laptop browser.
+#      Samsung redirects to the Funnel URL → forwards to localhost:8080 →
+#      container handles → tokens land in /srv/hem/data/.smartthings-tokens.json.
+#   5. After container exits, tear down Funnel + restart hem:
+#        tailscale funnel --https=8443 off
+#        systemctl restart hem
 services:
   smartthings-auth:
     image: ghcr.io/albinati/home-energy-manager:${HEM_IMAGE_TAG:-main}
@@ -34,7 +39,10 @@ services:
     environment:
       DB_PATH: /app/data/energy_state.db
       SMARTTHINGS_TOKEN_FILE: /app/data/.smartthings-tokens.json
-      SMARTTHINGS_REDIRECT_URI: http://localhost:8080/oauth/smartthings/callback
+      # NOTE: leave SMARTTHINGS_REDIRECT_URI unset here so the value flows from
+      # ``/srv/hem/.env`` (the same source the runtime service uses). Samsung's
+      # WAF blocks ``http://localhost`` redirect URIs (404 on consent), so prod
+      # uses a Tailscale Funnel HTTPS URL instead — see CLAUDE.md.
       TZ: Europe/London
       PYTHONPATH: /app
 
