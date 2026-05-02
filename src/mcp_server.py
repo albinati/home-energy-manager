@@ -1657,8 +1657,14 @@ def build_mcp() -> FastMCP:
     @mcp.tool(
         name="get_energy_metrics",
         description=(
-            "Bulletproof: daily/weekly PnL vs SVT/fixed shadow, VWAP, arbitrage efficiency, "
-            "peak ratio, SLA snapshot, battery SoC."
+            "Today's net daily PnL with full transparency for OpenClaw. "
+            "ALL costs include the daily standing charge so deltas are real money saved "
+            "(not energy-cost-only). Returns: realised_cost (= import + standing − export "
+            "earnings), the import/standing/export components, SVT shadow, fixed shadow, "
+            "and — when FIXED_TARIFF_* env vars are set — a comparison vs the user's "
+            "previous fixed tariff (e.g. British Gas Fixed v58). Plus VWAP, slippage, "
+            "arbitrage efficiency, SLA snapshot, battery SoC. "
+            "Use this instead of parsing the daily-brief markdown."
         ),
     )
     def get_energy_metrics() -> dict[str, Any]:
@@ -1680,13 +1686,33 @@ def build_mcp() -> FastMCP:
             soc = get_cached_realtime().soc
         except Exception:
             pass
+
+        daily_block: dict[str, Any] = {
+            "date": daily.get("date"),
+            "realised_cost_pounds": daily.get("realised_cost_gbp"),
+            "realised_import_pounds": daily.get("realised_import_gbp"),
+            "standing_charge_pounds": daily.get("standing_charge_gbp"),
+            "export_revenue_pounds": daily.get("export_revenue_gbp"),
+            "export_kwh": daily.get("export_kwh"),
+            "energy_used_kwh": daily.get("kwh"),
+            "svt_shadow_pounds": daily.get("svt_shadow_gbp"),
+            "fixed_shadow_pounds": daily.get("fixed_shadow_gbp"),
+            "delta_vs_svt_pounds": daily.get("delta_vs_svt_gbp"),
+            "delta_vs_fixed_pounds": daily.get("delta_vs_fixed_gbp"),
+            "_note": "All costs include the daily standing charge for apples-to-apples deltas.",
+        }
+        # Optional legacy-tariff comparison (e.g. British Gas Fixed v58)
+        if "delta_vs_fixed_tariff_gbp" in daily:
+            daily_block["fixed_tariff_label"] = daily.get("fixed_tariff_label")
+            daily_block["fixed_tariff_shadow_pounds"] = daily.get("fixed_tariff_shadow_gbp")
+            daily_block["delta_vs_fixed_tariff_pounds"] = daily.get(
+                "delta_vs_fixed_tariff_gbp"
+            )
+
         return {
             "ok": True,
             "pnl": {
-                "daily": {
-                    "delta_vs_svt_pounds": daily.get("delta_vs_svt_gbp"),
-                    "delta_vs_fixed_pounds": daily.get("delta_vs_fixed_gbp"),
-                },
+                "daily": daily_block,
                 "weekly": {"delta_vs_svt_pounds": weekly.get("delta_vs_svt_gbp")},
                 "monthly": {"delta_vs_svt_pounds": monthly.get("delta_vs_svt_gbp")},
             },
@@ -1723,12 +1749,196 @@ def build_mcp() -> FastMCP:
 
     @mcp.tool(
         name="get_daily_brief",
-        description="Bulletproof: on-demand morning-style brief (yesterday PnL + today strategy).",
+        description=(
+            "On-demand morning brief — yesterday's net PnL + today's strategy + tier "
+            "windows + peak-export plan + control-mode status. Returns BOTH markdown "
+            "(for direct display) AND structured data (for OpenClaw to format prose "
+            "without parsing). The structured fields include net cost broken down "
+            "(import + standing − export), kWh used + exported, all configured shadow "
+            "comparisons (SVT, Fixed, optional FIXED_TARIFF_LABEL e.g. British Gas "
+            "Fixed v58), Daikin control mode (passive vs active), and a forecasted-"
+            "export estimate when telemetry was missing. Prefer the structured fields "
+            "over markdown parsing."
+        ),
     )
     def get_daily_brief() -> dict[str, Any]:
-        from .analytics.daily_brief import build_daily_brief_text
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
 
-        return {"ok": True, "markdown": build_daily_brief_text()}
+        from .analytics import pnl
+        from .analytics.daily_brief import (
+            _forecasted_export_for_day,
+            _mode_status_line,
+            build_morning_payload,
+        )
+
+        tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+        yesterday = datetime.now(tz).date() - timedelta(days=1)
+        ypnl = pnl.compute_daily_pnl(yesterday)
+
+        f_kwh, f_pence, f_slots = _forecasted_export_for_day(yesterday, tz)
+        forecasted = (
+            None
+            if ypnl.get("export_kwh") or f_slots == 0
+            else {
+                "export_kwh_estimated": round(f_kwh, 3),
+                "export_pence_estimated": round(f_pence, 2),
+                "committed_slot_count": f_slots,
+                "_note": (
+                    "Telemetry export was 0 for this day; estimate is the "
+                    "LP-committed peak_export amount × per-slot Outgoing Agile rates."
+                ),
+            }
+        )
+
+        return {
+            "ok": True,
+            "markdown": build_morning_payload(),
+            "data": {
+                "mode_status": _mode_status_line(),
+                "yesterday_pnl": ypnl,
+                "forecasted_export_yesterday": forecasted,
+                "_note": (
+                    "yesterday_pnl.realised_cost_gbp is NET and INCLUDES standing charge. "
+                    "All shadow costs include standing too — deltas are real money saved."
+                ),
+            },
+        }
+
+    @mcp.tool(
+        name="get_night_brief",
+        description=(
+            "On-demand night brief — today's actual net PnL + peak-export verdicts. "
+            "Returns BOTH markdown and structured data. Same semantics as "
+            "get_daily_brief: all costs include standing charge; deltas are real "
+            "money saved. Use this after ~22:00 local for end-of-day reporting."
+        ),
+    )
+    def get_night_brief() -> dict[str, Any]:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        from .analytics import pnl
+        from .analytics.daily_brief import (
+            _forecasted_export_for_day,
+            _mode_status_line,
+            build_night_payload,
+        )
+
+        tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+        today = datetime.now(tz).date()
+        tpnl = pnl.compute_daily_pnl(today)
+
+        f_kwh, f_pence, f_slots = _forecasted_export_for_day(today, tz)
+        forecasted = (
+            None
+            if tpnl.get("export_kwh") or f_slots == 0
+            else {
+                "export_kwh_estimated": round(f_kwh, 3),
+                "export_pence_estimated": round(f_pence, 2),
+                "committed_slot_count": f_slots,
+                "_note": (
+                    "Telemetry export is 0 so far today; estimate from LP-committed "
+                    "peak_export × per-slot Outgoing Agile rates."
+                ),
+            }
+        )
+
+        return {
+            "ok": True,
+            "markdown": build_night_payload(),
+            "data": {
+                "mode_status": _mode_status_line(),
+                "today_pnl": tpnl,
+                "forecasted_export_today": forecasted,
+                "_note": (
+                    "today_pnl.realised_cost_gbp is NET (import + standing − export). "
+                    "All shadow costs include standing. Deltas reflect real money saved."
+                ),
+            },
+        }
+
+    @mcp.tool(
+        name="get_tariff_comparison",
+        description=(
+            "Apples-to-apples cost comparison for a given local date across every "
+            "configured tariff: realised cost on Octopus Agile + your current shadows "
+            "(SVT, Fixed, optional legacy fixed tariff via FIXED_TARIFF_*). All shadow "
+            "costs INCLUDE the standing charge so deltas are real money saved. Pass "
+            "date='YYYY-MM-DD' (defaults to yesterday). Each entry returns: shadow_cost_pounds, "
+            "delta_vs_realised_pounds (positive = saved on Agile vs that tariff), "
+            "rate_pence_per_kwh, standing_pence_per_day, source ('configured' / 'svt' "
+            "/ 'agile_realised'). Designed for OpenClaw to render the comparison "
+            "without inventing numbers."
+        ),
+    )
+    def get_tariff_comparison(date: str = "") -> dict[str, Any]:
+        from datetime import datetime, timedelta
+        from datetime import date as _date_t
+        from zoneinfo import ZoneInfo
+
+        from .analytics import pnl
+
+        tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+        if date.strip():
+            try:
+                day = _date_t.fromisoformat(date.strip())
+            except ValueError:
+                return {"ok": False, "error": f"invalid date: {date!r} (expected YYYY-MM-DD)"}
+        else:
+            day = datetime.now(tz).date() - timedelta(days=1)
+
+        p = pnl.compute_daily_pnl(day)
+        realised = float(p.get("realised_cost_gbp") or 0)
+        kwh = float(p.get("kwh") or 0)
+        standing_p_per_day = float(config.MANUAL_STANDING_CHARGE_PENCE_PER_DAY or 0)
+
+        comparisons: list[dict[str, Any]] = [
+            {
+                "label": "Octopus Agile (realised)",
+                "source": "agile_realised",
+                "shadow_cost_pounds": realised,
+                "delta_vs_realised_pounds": 0.0,
+                "rate_pence_per_kwh": None,
+                "standing_pence_per_day": standing_p_per_day,
+                "_note": "Per-slot Agile import rates + standing − export earnings.",
+            },
+            {
+                "label": "Octopus SVT (would-have)",
+                "source": "svt",
+                "shadow_cost_pounds": float(p.get("svt_shadow_gbp") or 0),
+                "delta_vs_realised_pounds": float(p.get("delta_vs_svt_gbp") or 0),
+                "rate_pence_per_kwh": float(config.SVT_RATE_PENCE),
+                "standing_pence_per_day": standing_p_per_day,
+            },
+        ]
+        if "delta_vs_fixed_tariff_gbp" in p:
+            comparisons.append(
+                {
+                    "label": p.get("fixed_tariff_label") or "Configured fixed tariff",
+                    "source": "configured",
+                    "shadow_cost_pounds": float(p.get("fixed_tariff_shadow_gbp") or 0),
+                    "delta_vs_realised_pounds": float(p.get("delta_vs_fixed_tariff_gbp") or 0),
+                    "rate_pence_per_kwh": float(config.FIXED_TARIFF_RATE_PENCE),
+                    "standing_pence_per_day": float(
+                        config.FIXED_TARIFF_STANDING_PENCE_PER_DAY
+                    ),
+                }
+            )
+
+        return {
+            "ok": True,
+            "date": day.isoformat(),
+            "energy_used_kwh": kwh,
+            "energy_exported_kwh": float(p.get("export_kwh") or 0),
+            "import_pounds": float(p.get("realised_import_gbp") or 0),
+            "export_revenue_pounds": float(p.get("export_revenue_gbp") or 0),
+            "comparisons": comparisons,
+            "_note": (
+                "Positive delta_vs_realised_pounds = Agile saved money vs that shadow. "
+                "All shadow costs include the daily standing charge."
+            ),
+        }
 
     @mcp.tool(
         name="get_battery_forecast",
