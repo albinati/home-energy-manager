@@ -223,11 +223,20 @@ def solve_lp(
         for t in t_out
     ]
 
-    # Price quantization (reduces solver sensitivity to tiny rate differences)
+    # Price quantization (reduces solver sensitivity to tiny rate differences).
+    # Conservative rounding: negatives → floor (more negative, so the LP plans
+    # AS IF the slot is even cheaper than it actually is — won't import less
+    # than realised); positives → ceil (more expensive, won't pay more than
+    # planned). The previous symmetric ``round(...)`` could collapse small
+    # negatives like -0.2p to 0p, removing the import incentive (audit #5).
     qp = float(config.LP_PRICE_QUANTIZE_PENCE)
-    price_line = (
-        [round(float(p) / qp) * qp for p in price_pence] if qp > 0 else list(price_pence)
-    )
+    if qp > 0:
+        price_line = [
+            (math.floor(float(p) / qp) * qp) if float(p) < 0 else (math.ceil(float(p) / qp) * qp)
+            for p in price_pence
+        ]
+    else:
+        price_line = list(price_pence)
     sorted_p = sorted(price_line)
     cheap_thr = sorted_p[max(0, n // 4 - 1)] if n else 0.0
     peak_thr = sorted_p[min(n - 1, (3 * n) // 4)] if n else 0.0
