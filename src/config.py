@@ -216,6 +216,16 @@ class Config:
         os.getenv("MANUAL_STANDING_CHARGE_PENCE_PER_DAY", "0")
     )
 
+    # PnL comparison shadow: previous fixed tariff (e.g. British Gas PeakSave Fixed v58).
+    # Set both to surface a "vs <FIXED_TARIFF_LABEL>" line in the daily brief; leave
+    # either at 0 to suppress the line. Used by ``compute_daily_pnl`` to compute the
+    # alternative-cost shadow at apples-to-apples (kWh × rate + standing charge).
+    FIXED_TARIFF_LABEL: str = os.getenv("FIXED_TARIFF_LABEL", "")
+    FIXED_TARIFF_RATE_PENCE: float = float(os.getenv("FIXED_TARIFF_RATE_PENCE", "0"))
+    FIXED_TARIFF_STANDING_PENCE_PER_DAY: float = float(
+        os.getenv("FIXED_TARIFF_STANDING_PENCE_PER_DAY", "0")
+    )
+
     # Gas comparison (solar + heat pump vs gas): gas price p/kWh, boiler efficiency (e.g. 0.9)
     GAS_PRICE_PENCE_PER_KWH: float = float(os.getenv("GAS_PRICE_PENCE_PER_KWH", "0"))
     GAS_BOILER_EFFICIENCY: float = float(os.getenv("GAS_BOILER_EFFICIENCY", "0.9"))

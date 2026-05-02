@@ -34,7 +34,9 @@ def test_night_payload_renders_with_zero_data():
     body = build_night_payload()
     assert "Night brief" in body
     assert "actuals" in body
-    assert "Realised cost" in body
+    # The brief now uses the structured "Net cost" line (was "Realised cost") —
+    # see the daily-brief expansion for #207's follow-up. Either is acceptable.
+    assert "Net cost:" in body
 
 
 def test_morning_and_night_are_independent_calls():
