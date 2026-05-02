@@ -258,6 +258,7 @@ def _residual_pv_kwh_per_slot(
             compute_pv_calibration_factor,
             compute_today_pv_correction_factor,
             fetch_forecast,
+            get_pv_calibration_factor_for,
         )
 
         forecast = fetch_forecast(hours=horizon_h)
@@ -267,11 +268,13 @@ def _residual_pv_kwh_per_slot(
     if not forecast:
         return {}
 
-    cal_hourly = {}
+    cal_cloud: dict[tuple[int, int], float] = {}
+    cal_hourly: dict[int, float] = {}
     try:
+        cal_cloud = db.get_pv_calibration_hourly_cloud()
         cal_hourly = db.get_pv_calibration_hourly()
     except Exception:
-        cal_hourly = {}
+        cal_cloud, cal_hourly = {}, {}
     # Today-aware adjuster on top of per-hour table (or flat fallback).
     # Same logic the LP uses (see optimizer.py) — keeps appliance dispatch's
     # PV view consistent with the LP's PV view per solve.
@@ -281,7 +284,7 @@ def _residual_pv_kwh_per_slot(
     except Exception:
         pass
     flat_cal = 1.0
-    if not cal_hourly:
+    if not cal_hourly and not cal_cloud:
         try:
             flat_cal = float(compute_pv_calibration_factor() or 1.0)
         except Exception:
@@ -289,13 +292,19 @@ def _residual_pv_kwh_per_slot(
 
     # forecast is hourly; expand to half-hourly by halving the hourly kWh
     # estimate (good enough for this dispatch decision).
-    by_hour: dict[datetime, float] = {f.time_utc: float(f.estimated_pv_kw) for f in forecast}
+    by_hour: dict[datetime, tuple[float, float | None]] = {
+        f.time_utc: (float(f.estimated_pv_kw), float(f.cloud_cover_pct))
+        for f in forecast
+    }
     out: dict[datetime, float] = {}
     for slot_start in slot_starts_utc:
         hour_anchor = slot_start.replace(minute=0, second=0, microsecond=0)
-        pv_kw = by_hour.get(hour_anchor, 0.0)
-        scale = float(cal_hourly.get(hour_anchor.hour, flat_cal)) if cal_hourly else flat_cal
-        # Half-hour kWh = kW × 0.5h × per-hour-table × today-aware factor
+        pv_kw, cloud_pct = by_hour.get(hour_anchor, (0.0, None))
+        scale = get_pv_calibration_factor_for(
+            hour_anchor.hour, cloud_pct,
+            cloud_table=cal_cloud, hourly_table=cal_hourly, flat=flat_cal,
+        )
+        # Half-hour kWh = kW × 0.5h × calibration × today-aware factor
         out[slot_start] = pv_kw * 0.5 * scale * today_factor
     return out
 
