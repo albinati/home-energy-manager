@@ -24,6 +24,14 @@ def _fake_daikin_device(**kwargs: object) -> DaikinDevice:
 
 
 class TestMCPServerFoxTools(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        # safeguards holds module-level _last_action_time; the FOXESS_MODE rate
+        # limiter window is process-wide, so successive tests in this class can
+        # tickle each other if not cleared. Reset before each test.
+        from src.api import safeguards as _sg
+        with _sg._lock:
+            _sg._last_action_time.clear()
+
     async def test_get_soc_ok(self) -> None:
         mcp = build_mcp()
         with patch("src.mcp_server.get_cached_realtime") as gr, patch(
@@ -39,6 +47,9 @@ class TestMCPServerFoxTools(unittest.IsolatedAsyncioTestCase):
             )
             _blocks, out = await mcp.call_tool("get_soc", {})
         self.assertTrue(out["ok"])
+        # `soc_percent` is the canonical name; `soc` is the back-compat alias.
+        # Both must hold the same percent value (NOT a 0–1 fraction; NOT kWh).
+        self.assertEqual(out["soc_percent"], 62.0)
         self.assertEqual(out["soc"], 62.0)
         self.assertEqual(out["work_mode"], "Self Use")
         self.assertEqual(out["refresh_count_24h"], 5)
@@ -62,8 +73,61 @@ class TestMCPServerFoxTools(unittest.IsolatedAsyncioTestCase):
             "src.mcp_server._foxess_client", return_value=mock_client
         ):
             cfg.OPENCLAW_READ_ONLY = False
+            # Real tz string so _plan_date_today can construct a ZoneInfo;
+            # added 2026-05-03 when set_inverter_mode picked up the plan-
+            # conflict gate that all other write tools already had.
+            cfg.BULLETPROOF_TIMEZONE = "Europe/London"
             _blocks, out = await mcp.call_tool("set_inverter_mode", {"mode": "Force charge"})
         self.assertTrue(out["ok"])
+        mock_client.set_work_mode.assert_called_once_with("Force charge")
+
+    async def test_set_inverter_mode_blocked_by_pending_plan(self) -> None:
+        """`confirmed=False` (default) must refuse when a plan is pending approval.
+
+        Pinned 2026-05-03: previously set_inverter_mode lacked the `confirmed`
+        gate entirely, so OpenClaw could overwrite a pending LP plan's Fox
+        schedule without surfacing the conflict to the user.
+        """
+        from src import db as _db
+        _db.init_db()
+        mcp = build_mcp()
+        mock_client = MagicMock()
+        # Stub _check_plan_consent_conflict to simulate a pending plan.
+        with patch("src.mcp_server.config") as cfg, patch(
+            "src.mcp_server._foxess_client", return_value=mock_client
+        ), patch(
+            "src.mcp_server._check_plan_consent_conflict",
+            return_value="WARNING: plan lp-2026-05-03 is pending your approval.",
+        ):
+            cfg.OPENCLAW_READ_ONLY = False
+            cfg.BULLETPROOF_TIMEZONE = "Europe/London"
+            _blocks, out = await mcp.call_tool(
+                "set_inverter_mode", {"mode": "Force charge"}
+            )
+        self.assertFalse(out["ok"])
+        self.assertTrue(out.get("requires_confirmation"))
+        self.assertIn("pending", out.get("warning", "").lower())
+        mock_client.set_work_mode.assert_not_called()
+
+    async def test_set_inverter_mode_proceeds_with_confirmed(self) -> None:
+        """Same setup as above but `confirmed=True` proceeds + surfaces the warning."""
+        from src import db as _db
+        _db.init_db()
+        mcp = build_mcp()
+        mock_client = MagicMock()
+        with patch("src.mcp_server.config") as cfg, patch(
+            "src.mcp_server._foxess_client", return_value=mock_client
+        ), patch(
+            "src.mcp_server._check_plan_consent_conflict",
+            return_value="WARNING: plan lp-2026-05-03 is pending your approval.",
+        ):
+            cfg.OPENCLAW_READ_ONLY = False
+            cfg.BULLETPROOF_TIMEZONE = "Europe/London"
+            _blocks, out = await mcp.call_tool(
+                "set_inverter_mode", {"mode": "Force charge", "confirmed": True}
+            )
+        self.assertTrue(out["ok"])
+        self.assertIn("warning", out)
         mock_client.set_work_mode.assert_called_once_with("Force charge")
 
 

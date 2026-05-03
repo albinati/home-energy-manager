@@ -241,6 +241,8 @@ class DaikinClient:
             tank_temp=device.tank_temperature,
             tank_target=device.tank_target,
             weather_regulation=device.weather_regulation_enabled,
+            climate_on=device.is_on,
+            dhw_on=device.tank_on,
         )
 
     def _climate_path(self, device: DaikinDevice, characteristic: str) -> str:

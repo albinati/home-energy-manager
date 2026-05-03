@@ -50,9 +50,16 @@ class DaikinDevice:
 
 @dataclass
 class DaikinStatus:
-    """Summarised status for display."""
+    """Summarised status for display.
+
+    Naming caveat for downstream consumers (especially LLM agents): ``is_on``
+    is **only** the climate (room-heating) zone's onOffMode — it does NOT
+    mean "is the heat pump powered on" and it does NOT cover DHW. Use
+    ``climate_on`` / ``dhw_on`` for unambiguous semantics; ``is_on`` is kept
+    for backwards-compatibility with existing callers.
+    """
     device_name: str
-    is_on: bool
+    is_on: bool             # alias of climate_on (deprecated label kept for compat)
     mode: str
     room_temp: float | None
     target_temp: float | None
@@ -62,3 +69,5 @@ class DaikinStatus:
     tank_temp: float | None
     tank_target: float | None
     weather_regulation: bool
+    climate_on: bool | None = None  # climate (space-heating) zone onOffMode
+    dhw_on: bool | None = None      # DHW (tank) zone onOffMode

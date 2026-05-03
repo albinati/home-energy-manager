@@ -288,7 +288,11 @@ def solve_lp(
     passive_daikin = config.DAIKIN_CONTROL_MODE == "passive"
     if passive_daikin:
         passive_e_space, passive_e_dhw = predict_passive_daikin_load(
-            t_out, cop_dhw, cop_space, slot_h=slot_h, max_kwh_per_slot=max_hp_kwh,
+            t_out, cop_dhw, cop_space,
+            slot_h=slot_h,
+            max_kwh_per_slot=max_hp_kwh,
+            slot_starts_utc=slot_starts_utc,
+            tz=tz,
         )
     else:
         passive_e_space = passive_e_dhw = []

@@ -208,12 +208,32 @@ def test_boost_preset_alias_maps_to_normal(caplog) -> None:
 
 
 # ---------------------------------------------------------------------------
-# S4: legionella env vars are gone
+# S4: legacy hard-coded legionella env vars stay gone; new shape is runtime-mutable
 # ---------------------------------------------------------------------------
 
-def test_legionella_env_vars_removed() -> None:
+def test_legacy_legionella_attrs_still_removed() -> None:
+    """The old v9-shape attrs were the LP-commands-the-cycle design. Keep them
+    out of `config` — anyone still wiring code against them is using the wrong
+    abstraction. The replacement is runtime_settings (mutable, prediction-only).
+    """
     for attr in (
-        "DHW_LEGIONELLA_TEMP_C", "DHW_LEGIONELLA_DAY",
-        "DHW_LEGIONELLA_HOUR_START", "DHW_LEGIONELLA_HOUR_END",
+        "DHW_LEGIONELLA_TEMP_C",
+        "DHW_LEGIONELLA_HOUR_START",
+        "DHW_LEGIONELLA_HOUR_END",
     ):
-        assert not hasattr(config, attr), f"{attr} should have been removed in v10"
+        assert not hasattr(config, attr), f"{attr} should not be a static config attr"
+
+
+def test_legionella_runtime_settings_present() -> None:
+    """Re-introduced as runtime_settings (mutable via PUT /api/v1/settings + MCP).
+    Used by predict_passive_daikin_load to inject a one-shot DHW pulse.
+    """
+    from src import runtime_settings as rts
+    for key in (
+        "DHW_LEGIONELLA_DAY",
+        "DHW_LEGIONELLA_HOUR_LOCAL",
+        "DHW_LEGIONELLA_DURATION_MIN",
+        "DHW_LEGIONELLA_TANK_TARGET_C",
+    ):
+        assert key in rts.SCHEMA, f"{key} should be a runtime_setting"
+    assert rts.get_setting("DHW_LEGIONELLA_DAY") == -1, "default disabled"

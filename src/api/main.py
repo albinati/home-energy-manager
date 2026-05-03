@@ -873,6 +873,26 @@ async def cockpit_now():
             "energy_strategy_mode": config.ENERGY_STRATEGY_MODE,
         },
         "plan_date": plan_block["plan_date"],
+        # Sign conventions for state.grid_kw / state.battery_kw / current_slot
+        # prices. LLM consumers (notably OpenClaw) cannot see Pydantic Field
+        # descriptions in this raw dict, so we surface them inline so a sign
+        # cannot be misread as an unsigned magnitude.
+        "_legend": {
+            "soc_pct": "battery state of charge, percent 0–100",
+            "soc_kwh": "battery energy stored, kWh",
+            "solar_kw": "PV generation, kW (always ≥ 0)",
+            "load_kw": "house total consumption, kW (always ≥ 0)",
+            "grid_kw": "grid power: positive=IMPORTING from grid, negative=EXPORTING to grid",
+            "battery_kw": "battery power: positive=CHARGING, negative=DISCHARGING",
+            "price_import_p": "Octopus Agile import rate, p/kWh (incl VAT)",
+            "price_export_p": "Octopus Outgoing rate, p/kWh (incl VAT). Null when no export tariff configured.",
+            "tank_c": "DHW tank current temperature, °C. Null when DHW zone reports no telemetry.",
+            "indoor_c": "indoor (room) temperature, °C. Null when climate zone is idle / room sensor reports null.",
+            "outdoor_c": "outdoor air temperature, °C (from Daikin gateway sensor)",
+            "lwt_c": "leaving water temperature, °C",
+            "fox_mode": "Fox inverter work mode (e.g. SelfUse, ForceCharge, ForceDischarge)",
+            "daikin_mode": "Daikin operation mode (heating/cooling/auto/dry/fan_only)",
+        },
     }
 
 
@@ -1054,6 +1074,23 @@ async def cockpit_at(when: str):
         "planned_slot": planned_slot,  # LP's decision for that slot, or None
         "lp_inputs": lp_inputs,        # Full inputs row at solve time, or None
         "slot_kind": realised.get("slot_kind"),
+        # Same legend as /cockpit/now — keeps signs / units unambiguous for
+        # historical replays consumed by LLM agents.
+        "_legend": {
+            "soc_pct": "battery state of charge, percent 0–100",
+            "soc_kwh": "battery energy stored, kWh",
+            "load_kw": "house total consumption, kW (always ≥ 0)",
+            "grid_kw": "grid power: positive=IMPORTING, negative=EXPORTING (often null in replay because execution_log only logs SoC + consumption)",
+            "battery_kw": "battery power: positive=CHARGING, negative=DISCHARGING (often null in replay; see fox_mode + soc trajectory instead)",
+            "price_import_p": "Octopus Agile import rate at the slot, p/kWh (incl VAT)",
+            "price_export_p": "Octopus Outgoing rate at the slot, p/kWh (incl VAT). Null when no export tariff configured at that time.",
+            "tank_c": "DHW tank temperature at the slot, °C",
+            "indoor_c": "indoor room temperature at the slot, °C",
+            "outdoor_c": "outdoor temperature at the slot, °C",
+            "lwt_c": "leaving water temperature at the slot, °C",
+            "fox_mode": "Fox inverter work mode that was committed for the slot",
+            "slot_kind": "tariff classification: cheap / mid / peak / negative",
+        },
     }
 
 
@@ -1426,6 +1463,7 @@ async def daikin_status(refresh: bool = False):
         devices = cached.devices
         client = get_daikin_client()
         result = []
+        from .mcp_server import _daikin_state_summary
         for dev in devices:
             s = client.get_status(dev)
             result.append(DaikinStatusResponse(
@@ -1433,6 +1471,8 @@ async def daikin_status(refresh: bool = False):
                 device_name=s.device_name,
                 model=dev.model,
                 is_on=s.is_on,
+                climate_on=s.climate_on,
+                dhw_on=s.dhw_on,
                 mode=s.mode,
                 room_temp=s.room_temp,
                 target_temp=s.target_temp,
@@ -1443,6 +1483,7 @@ async def daikin_status(refresh: bool = False):
                 tank_target=s.tank_target,
                 weather_regulation=s.weather_regulation,
                 control_mode=config.DAIKIN_CONTROL_MODE,
+                state_summary=_daikin_state_summary(s, config.DAIKIN_CONTROL_MODE),
             ))
         logger.info(
             "Daikin status: %d device(s) source=%s stale=%s",

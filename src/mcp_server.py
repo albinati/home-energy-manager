@@ -33,7 +33,7 @@ from mcp.server.fastmcp import FastMCP
 from .api import safeguards
 from .config import config
 from .daikin.client import DaikinClient, DaikinError
-from .daikin.models import DaikinDevice
+from .daikin.models import DaikinDevice, DaikinStatus
 from .foxess.client import WORK_MODE_VALID, FoxESSClient, FoxESSError
 from .foxess.service import get_cached_realtime, get_refresh_stats
 from .scheduler.lp_replay import (
@@ -403,11 +403,17 @@ def _plan_date_today(tz_name: str) -> str:
 
 def _device_status_dict(client: DaikinClient, dev: DaikinDevice) -> dict[str, Any]:
     s = client.get_status(dev)
+    summary = _daikin_state_summary(s, config.DAIKIN_CONTROL_MODE)
     return {
         "device_id": dev.id,
         "device_name": s.device_name,
         "model": dev.model or "",
+        # `is_on` is the CLIMATE zone's onOffMode (kept for back-compat). Use
+        # climate_on / dhw_on for unambiguous semantics.
         "is_on": s.is_on,
+        "climate_on": s.climate_on,
+        "dhw_on": s.dhw_on,
+        "control_mode": config.DAIKIN_CONTROL_MODE,
         "mode": s.mode,
         "room_temp": s.room_temp,
         "target_temp": s.target_temp,
@@ -417,7 +423,43 @@ def _device_status_dict(client: DaikinClient, dev: DaikinDevice) -> dict[str, An
         "tank_temp": s.tank_temp,
         "tank_target": s.tank_target,
         "weather_regulation": s.weather_regulation,
+        # One-liner safe for LLM consumption — derived deterministically from
+        # the fields above so an agent never has to "interpret" null vs idle.
+        "state_summary": summary,
     }
+
+
+def _daikin_state_summary(s: DaikinStatus, control_mode: str) -> str:
+    """Deterministic, LLM-safe one-line description of the unit's current state.
+
+    Built from the ground truth fields so callers (OpenClaw, Telegram briefs)
+    don't have to guess from `room_temp=null` whether the unit is "off" or
+    just idle. Output is always non-empty, English, and stable across runs.
+    """
+    parts: list[str] = []
+    if s.dhw_on is False:
+        parts.append("DHW zone OFF")
+    elif s.tank_temp is not None and s.tank_target is not None:
+        if s.tank_temp + 0.5 < s.tank_target:
+            parts.append(f"DHW heating (tank {s.tank_temp:.0f}→{s.tank_target:.0f}°C)")
+        else:
+            parts.append(f"DHW maintaining (tank {s.tank_temp:.0f}/{s.tank_target:.0f}°C)")
+    else:
+        parts.append("DHW state unknown")
+
+    if s.climate_on is False:
+        parts.append("climate OFF")
+    elif s.weather_regulation:
+        lwt_str = f"LWT {s.lwt:.0f}°C" if s.lwt is not None else "LWT unknown"
+        parts.append(f"climate weather-regulated ({lwt_str})")
+    elif s.room_temp is not None and s.target_temp is not None:
+        verb = "heating" if s.room_temp + 0.3 < s.target_temp else "satisfied"
+        parts.append(f"climate {verb} (room {s.room_temp:.1f}/{s.target_temp:.1f}°C)")
+    else:
+        parts.append("climate idle")
+
+    parts.append(f"hem-control={control_mode}")
+    return "; ".join(parts)
 
 
 def build_mcp() -> FastMCP:
@@ -444,8 +486,11 @@ def build_mcp() -> FastMCP:
     @mcp.tool(
         name="get_soc",
         description=(
-            "Return battery state of charge (%) from Fox ESS. "
-            "Uses the same cached realtime path as the REST API (respects API call limits)."
+            "Return Fox ESS battery state of charge as a percentage 0–100. "
+            "The `soc_percent` field is canonical; `soc` is kept as a back-"
+            "compat alias holding the same percentage value (NOT a 0–1 "
+            "fraction and NOT kWh). Uses the cached realtime path — does "
+            "not consume Fox API quota."
         ),
     )
     def get_soc() -> dict[str, Any]:
@@ -462,7 +507,8 @@ def build_mcp() -> FastMCP:
         last_ts, refresh_count = get_refresh_stats()
         return {
             "ok": True,
-            "soc": d.soc,
+            "soc_percent": d.soc,
+            "soc": d.soc,  # back-compat alias — same value (percent 0–100)
             "work_mode": d.work_mode,
             "last_updated_epoch": last_ts,
             "refresh_count_24h": refresh_count,
@@ -473,10 +519,14 @@ def build_mcp() -> FastMCP:
         name="set_inverter_mode",
         description=(
             "Set Fox ESS inverter work mode. Valid modes: Self Use, Feed-in Priority, "
-            "Back Up, Force charge, Force discharge."
+            "Back Up, Force charge, Force discharge. Pass confirmed=True to override "
+            "an active LP plan for today (otherwise the call returns "
+            "requires_confirmation=True with the conflict warning, leaving the live "
+            "Fox V3 schedule untouched). Hardware-significant — agents should surface "
+            "the proposed mode to the user before invoking with confirmed=True."
         ),
     )
-    def set_inverter_mode(mode: str) -> dict[str, Any]:
+    def set_inverter_mode(mode: str, confirmed: bool = False) -> dict[str, Any]:
         from . import db as _db
         if config.OPENCLAW_READ_ONLY:
             safeguards.audit_log(FOXESS_MODE_ACTION, {"mode": mode}, "mcp", False, _write_blocked_message())
@@ -486,6 +536,12 @@ def build_mcp() -> FastMCP:
                 "ok": False,
                 "error": f"Invalid mode {mode!r}. Use one of: {sorted(WORK_MODE_VALID)}",
             }
+        # Plan-conflict gate matches the Daikin write tools — overriding a
+        # committed LP plan with a manual Fox mode is hardware-significant.
+        plan_date = _plan_date_today(config.BULLETPROOF_TIMEZONE)
+        conflict_warn = _check_plan_consent_conflict(plan_date)
+        if conflict_warn and not confirmed:
+            return {"ok": False, "requires_confirmation": True, "warning": conflict_warn}
         allowed, wait_time = safeguards.check_rate_limit(FOXESS_MODE_ACTION)
         if not allowed:
             return {
@@ -509,13 +565,25 @@ def build_mcp() -> FastMCP:
             return {"ok": False, "error": str(e)}
         safeguards.record_action_time(FOXESS_MODE_ACTION)
         safeguards.audit_log(FOXESS_MODE_ACTION, {"mode": mode}, "mcp", True, "Mode set")
-        return {"ok": True, "message": f"Work mode set to: {mode}"}
+        result: dict[str, Any] = {"ok": True, "message": f"Work mode set to: {mode}"}
+        if conflict_warn:
+            result["warning"] = conflict_warn
+        return result
 
     @mcp.tool(
         name="get_daikin_status",
         description=(
-            "Return status for all Daikin (Onecta) devices: temperatures, LWT offset, "
-            "tank, weather regulation flag, etc. Requires Daikin OAuth token file."
+            "Return status for all Daikin (Onecta) devices. Per device: "
+            "`climate_on` (room/space-heating zone onOffMode), `dhw_on` (tank "
+            "zone onOffMode), `control_mode` (passive=HEM never writes; "
+            "active=legacy v9 control), tank/room temps, LWT, outdoor temp, "
+            "weather regulation flag, plus a deterministic `state_summary` "
+            "one-liner safe to relay verbatim to a user. "
+            "IMPORTANT for downstream agents: do NOT use the legacy `is_on` "
+            "field as 'the unit is on' — it only reflects the climate zone. "
+            "A Daikin can have climate_on=false (e.g. summer / outdoor>20°C) "
+            "while DHW is actively heating the tank. Use `state_summary` or "
+            "the per-zone flags. Requires Daikin OAuth token file."
         ),
     )
     def get_daikin_status() -> dict[str, Any]:
@@ -537,8 +605,10 @@ def build_mcp() -> FastMCP:
     @mcp.tool(
         name="set_daikin_power",
         description=(
-            "Turn Daikin climate control on or off for all gateway devices. "
-            "When a plan is pending approval, pass confirmed=True to override it."
+            "Turn the Daikin CLIMATE (room/space-heating) zone on or off. "
+            "DOES NOT affect the DHW (hot water tank) zone — use "
+            "set_daikin_tank_power for that. Both zones run independently. "
+            "When a plan is pending approval, pass confirmed=True to override."
         ),
     )
     def set_daikin_power(on: bool, confirmed: bool = False) -> dict[str, Any]:
@@ -559,7 +629,13 @@ def build_mcp() -> FastMCP:
             return _daikin_write_api_error(DAIKIN_POWER_ACTION, params, e)
         safeguards.record_action_time(DAIKIN_POWER_ACTION)
         safeguards.audit_log(DAIKIN_POWER_ACTION, params, "mcp", True, "Power set")
-        result: dict[str, Any] = {"ok": True, "message": f"Daikin climate turned {'ON' if on else 'OFF'}"}
+        result: dict[str, Any] = {
+            "ok": True,
+            "message": (
+                f"Daikin CLIMATE zone turned {'ON' if on else 'OFF'} "
+                "(DHW tank zone unchanged)"
+            ),
+        }
         if conflict_warn:
             result["warning"] = conflict_warn
         return result
@@ -609,8 +685,12 @@ def build_mcp() -> FastMCP:
     @mcp.tool(
         name="set_daikin_lwt_offset",
         description=(
-            "Set leaving-water temperature offset (-10 to +10) for all devices. "
-            "Preferred when weather regulation is active. Pass confirmed=True to override a pending plan."
+            "Set the climate-zone leaving-water temperature offset in degrees "
+            "Celsius (range -10 to +10 °C). Adds to the firmware's weather-"
+            "compensation curve target — positive = warmer water, negative = "
+            "cooler. Preferred over set_daikin_temperature when weather "
+            "regulation is active. Affects climate zone only; DHW tank "
+            "unchanged. Pass confirmed=True to override a pending plan."
         ),
     )
     def set_daikin_lwt_offset(offset: float, mode: str | None = None, confirmed: bool = False) -> dict[str, Any]:
@@ -641,8 +721,11 @@ def build_mcp() -> FastMCP:
     @mcp.tool(
         name="set_daikin_mode",
         description=(
-            "Set Daikin operation mode: heating, cooling, auto, fan_only, or dry. "
-            "Pass confirmed=True to override a pending plan."
+            "Set the climate-zone operation mode: heating, cooling, auto, "
+            "fan_only, or dry. This is the room/space mode only — DHW tank "
+            "zone has its own independent on/off + setpoint controls (see "
+            "set_daikin_tank_power, set_daikin_tank_temperature). Pass "
+            "confirmed=True to override a pending plan."
         ),
     )
     def set_daikin_mode(mode: str, confirmed: bool = False) -> dict[str, Any]:
@@ -766,8 +849,14 @@ def build_mcp() -> FastMCP:
     @mcp.tool(
         name="get_optimization_plan",
         description=(
-            "Today's SQLite action_schedule rows and last Fox Scheduler V3 snapshot "
-            "(replaces the retired 48-slot V7 solver table)."
+            "Today's SQLite action_schedule rows and last Fox Scheduler V3 "
+            "snapshot. NOTE: 'today' here is the current local calendar date. "
+            "After ~16:00 local (when Octopus publishes tomorrow's Agile "
+            "rates), the LP optimises a 48 h horizon and the freshest plan "
+            "anchors to TOMORROW's date — use get_plan_timeline for the "
+            "explicit run_at + plan_date pair, and prefer that tool when "
+            "the user asks 'what's the plan for tomorrow' near the day "
+            "boundary."
         ),
     )
     def get_optimization_plan() -> dict[str, Any]:
@@ -2056,7 +2145,12 @@ def build_mcp() -> FastMCP:
 
     @mcp.tool(
         name="get_battery_forecast",
-        description="Bulletproof: current SoC and daily_targets snapshot.",
+        description=(
+            "Current Fox ESS battery SoC (% — same value as get_soc.soc_percent) "
+            "and the LP's daily_targets row for today (cheap/peak threshold "
+            "pence, planned end-of-day SoC, peak-export floor). Read-only — "
+            "no cloud calls."
+        ),
     )
     def get_battery_forecast() -> dict[str, Any]:
         from datetime import datetime
@@ -2082,7 +2176,13 @@ def build_mcp() -> FastMCP:
 
     @mcp.tool(
         name="get_weather_context",
-        description="Bulletproof: Open-Meteo forecast plus live Daikin temps when available.",
+        description=(
+            "Open-Meteo hourly outdoor temperature forecast for the next 48 h "
+            "(°C) plus the live Daikin device snapshot (same shape as "
+            "get_daikin_status — read its `state_summary` for an unambiguous "
+            "current-state line). Useful to answer 'will tomorrow be cold "
+            "enough that the heat pump runs hard'."
+        ),
     )
     def get_weather_context() -> dict[str, Any]:
         from .weather import fetch_forecast
@@ -2100,7 +2200,12 @@ def build_mcp() -> FastMCP:
 
     @mcp.tool(
         name="get_action_log",
-        description="Bulletproof: recent device commands from SQLite.",
+        description=(
+            "Recent device-command rows from action_log: who triggered what, "
+            "when, with what params, and whether it succeeded. Filter by "
+            "`device` (e.g. 'daikin', 'foxess') and/or `trigger` (e.g. 'mcp', "
+            "'cron', 'heartbeat'). Use to debug 'did my command actually fire'."
+        ),
     )
     def get_action_log(device: str | None = None, trigger: str | None = None, limit: int = 100) -> dict[str, Any]:
         from . import db
@@ -2109,7 +2214,12 @@ def build_mcp() -> FastMCP:
 
     @mcp.tool(
         name="get_optimizer_log",
-        description="Bulletproof: recent optimizer runs.",
+        description=(
+            "Recent LP solver runs from optimizer_log: run_id, run_at_utc, "
+            "trigger (cron/mpc/manual), solver status, objective value. "
+            "Pair with explain_dispatch_decisions(run_id) to see per-slot LP "
+            "decisions for one specific run."
+        ),
     )
     def get_optimizer_log(limit: int = 20) -> dict[str, Any]:
         from . import db
@@ -2119,7 +2229,16 @@ def build_mcp() -> FastMCP:
     @mcp.tool(
         name="override_schedule",
         description=(
-            "Bulletproof: temporary Daikin boost window. Requires OPENCLAW_READ_ONLY=false."
+            "Insert a one-shot Daikin pre-heat / boost window. Inserts a "
+            "pre_heat action now and a paired restore action `hours` later. "
+            "Args: `hours` (window length, default 2.0); `lwt_offset` "
+            "(climate-zone LWT delta in °C, default +3); `tank_temp` "
+            "(absolute DHW target °C — when set, the DHW tank also boosts "
+            "to this value alongside the climate offset; when null, only "
+            "climate boosts and DHW continues per its schedule). After the "
+            "window, both zones return to LWT offset 0 and tank target "
+            "DHW_TEMP_NORMAL_C. Requires OPENCLAW_READ_ONLY=false. Returns "
+            "`action_id` (boost) and `restore_id` (revert)."
         ),
     )
     def override_schedule(
@@ -2174,7 +2293,12 @@ def build_mcp() -> FastMCP:
 
     @mcp.tool(
         name="acknowledge_warning",
-        description="Bulletproof: acknowledge a warning_key to reduce repeat alerts.",
+        description=(
+            "Acknowledge a warning_key in acknowledged_warnings so subsequent "
+            "heartbeats stop re-emitting the same alert. Use when the user "
+            "has seen the warning and accepted it. Pass the exact warning_key "
+            "from the alert payload (e.g. 'daikin_low_quota_2026-05-03')."
+        ),
     )
     def acknowledge_warning(warning_key: str) -> dict[str, Any]:
         from . import db
@@ -2471,7 +2595,10 @@ def build_mcp() -> FastMCP:
             "Agile slot + price kind, Fox SoC/solar/load/grid, Daikin "
             "temps + mode, next Fox-mode transition, per-source "
             "freshness. Same data the web cockpit's NOW hero panel uses. "
-            "Never triggers cloud calls; pure cache + SQLite."
+            "Never triggers cloud calls; pure cache + SQLite. "
+            "Read `_legend` for sign conventions and units BEFORE "
+            "interpreting state.grid_kw, state.battery_kw, or any "
+            "*_p price field — signs are NOT magnitudes."
         ),
     )
     async def get_cockpit_now() -> dict[str, Any]:
@@ -2493,7 +2620,10 @@ def build_mcp() -> FastMCP:
             "LP run that was active at ``when`` (joining lp_solution_snapshot "
             "+ lp_inputs_snapshot + execution_log + agile_rates). Accepts "
             "ISO-UTC timestamps like 2026-04-24T10:30:00Z. Use this to "
-            "compare what the LP decided vs what actually happened."
+            "compare what the LP decided vs what actually happened. "
+            "Read `_legend` for field semantics — many fields (grid_kw, "
+            "battery_kw, solar_kw) are null in replay because execution_log "
+            "only logs SoC + consumption per slot."
         ),
     )
     async def get_cockpit_at(when: str) -> dict[str, Any]:

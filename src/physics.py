@@ -167,6 +167,8 @@ def predict_passive_daikin_load(
     *,
     slot_h: float = 0.5,
     max_kwh_per_slot: float | None = None,
+    slot_starts_utc: list[datetime] | None = None,
+    tz: ZoneInfo | None = None,
 ) -> tuple[list[float], list[float]]:
     """Predict the Daikin's autonomous electrical draw per slot in passive mode.
 
@@ -180,10 +182,19 @@ def predict_passive_daikin_load(
     - DHW: steady-state top-up to maintain ``DHW_TEMP_NORMAL_C`` against tank
       standing loss, divided by the slot's COP.
 
+    When ``slot_starts_utc`` and ``tz`` are both supplied AND the runtime
+    settings ``DHW_LEGIONELLA_DAY`` is in [0,6], slots whose local timestamp
+    matches the legionella window get a one-shot DHW uplift on top of the
+    steady-state baseline. Energy = ``DHW_TANK_LITRES × c_water × ΔT / COP``,
+    spread evenly across ``ceil(DHW_LEGIONELLA_DURATION_MIN / 30)`` consecutive
+    slots starting at ``DHW_LEGIONELLA_HOUR_LOCAL`` local. Callers without
+    those args (e.g. the calibration backtest in db.py) are unchanged.
+
     Returns ``(e_space_kwh_per_slot, e_dhw_kwh_per_slot)`` — both clipped into
     ``[0, max_kwh_per_slot]`` when ``max_kwh_per_slot`` is provided.
     """
     from .config import config  # local import avoids circular deps
+    from . import runtime_settings as rts
 
     n = len(temp_outdoor_c)
     if not (len(cop_dhw) == len(cop_space) == n):
@@ -202,6 +213,33 @@ def predict_passive_daikin_load(
         tank_loss_kw * slot_h / max(1.0, float(cop_dhw[i]))
         for i in range(n)
     ]
+
+    if slot_starts_utc is not None and tz is not None:
+        leg_day = int(rts.get_setting("DHW_LEGIONELLA_DAY"))
+        if 0 <= leg_day <= 6 and len(slot_starts_utc) == n:
+            leg_hour = int(rts.get_setting("DHW_LEGIONELLA_HOUR_LOCAL"))
+            leg_minutes = int(rts.get_setting("DHW_LEGIONELLA_DURATION_MIN"))
+            leg_target_c = float(rts.get_setting("DHW_LEGIONELLA_TANK_TARGET_C"))
+            slots_per_cycle = max(1, (leg_minutes + int(slot_h * 60) - 1) // int(slot_h * 60))
+            delta_c = max(0.0, leg_target_c - tank_target_c)
+            litres = float(config.DHW_TANK_LITRES)
+            cp_j_per_kg_k = float(config.DHW_WATER_CP)  # J/(kg·K) ≈ 4186
+            thermal_kwh = litres * cp_j_per_kg_k * delta_c / 3.6e6
+            # Match the cycle to consecutive slots starting at the configured
+            # local hour on the configured weekday. We mark each LP slot whose
+            # *start* falls inside [leg_hour, leg_hour + slots_per_cycle*slot_h)
+            # local on weekday == leg_day. Multiple LP horizons may straddle a
+            # cycle midnight; the per-slot test handles each independently.
+            cycle_window_h = slots_per_cycle * slot_h
+            for i, st in enumerate(slot_starts_utc):
+                local = st.astimezone(tz)
+                if local.weekday() != leg_day:
+                    continue
+                hour_frac = local.hour + local.minute / 60.0
+                if not (leg_hour <= hour_frac < leg_hour + cycle_window_h):
+                    continue
+                cop_i = max(1.0, float(cop_dhw[i]))
+                dhw_kwh[i] += thermal_kwh / slots_per_cycle / cop_i
 
     if max_kwh_per_slot is not None:
         cap = float(max_kwh_per_slot)
