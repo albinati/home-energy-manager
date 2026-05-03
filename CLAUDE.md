@@ -397,7 +397,7 @@ OpenClaw (running at `http://127.0.0.1:18789`) connects to this project via two 
 
 1. **MCP HTTP transport** — the FastMCP server is mounted by
    `src/api/main.py` under `/mcp`, guarded by a bearer token
-   (`src/api/middleware.py:BearerAuthMiddleware`). The 57 tools (Fox ESS,
+   (`src/api/middleware.py:BearerAuthMiddleware`). The 75 tools (Fox ESS,
    Daikin, Octopus tariffs, optimization) live in `src/mcp_server.py:build_mcp`
    and are unchanged by the transport switch.
 

@@ -6,7 +6,7 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 [![Container image](https://img.shields.io/badge/ghcr.io-home--energy--manager-blue?logo=docker)](https://github.com/albinati/home-energy-manager/pkgs/container/home-energy-manager)
 
-> A single planning brain for a UK home running **Octopus Agile** + **Fox ESS battery** + **Daikin Altherma heat pump**. Solves a 24–48 h MILP every few minutes, uploads a Fox ESS Scheduler V3, drives Daikin via Onecta, and exposes a 57-tool MCP surface for Claude / OpenClaw.
+> A single planning brain for a UK home running **Octopus Agile** + **Fox ESS battery** + **Daikin Altherma heat pump**. Solves a 24–48 h MILP every few minutes, uploads a Fox ESS Scheduler V3, drives Daikin via Onecta, and exposes a 75-tool MCP surface for Claude / OpenClaw.
 
 ## Why it exists
 
@@ -60,7 +60,7 @@ Everything is parameterised via `.env`. Adapting it to a different setup is feas
 - **Daikin Onecta** — `action_schedule` rows that the heartbeat applies; LWT offset, tank target, weather regulation toggles. OAuth2 with auto-refresh.
 - **SmartThings appliance dispatch** — washer/dryer/dishwasher start times picked by the LP given a deadline; physical Smart Control button is the consent gate.
 - **Notifications via OpenClaw hook** — twice-daily digest, plan-revision pings, negative-price alerts. No direct chat APIs from this repo.
-- **57-tool MCP surface** — Fox, Daikin, Octopus, optimization, replay, dispatch decisions. Bearer-guarded HTTP transport.
+- **75-tool MCP surface** — Fox, Daikin, Octopus, optimization, replay, dispatch decisions. Bearer-guarded HTTP transport.
 - **Closed-loop replay + regression gate** — every LP solve is a frozen, replayable snapshot; `scripts/check_lp_regression.py --mode=both` blocks merges that make the planner worse.
 
 ## How it works

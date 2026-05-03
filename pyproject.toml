@@ -1,6 +1,6 @@
 [project]
 name = "home-energy-manager"
-version = "10.2.0"
+version = "10.3.0"
 description = "Home energy orchestration (Fox ESS, Daikin, Octopus)"
 readme = "README.md"
 license = "Apache-2.0"
