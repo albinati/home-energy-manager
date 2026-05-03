@@ -34,7 +34,21 @@ class DaikinStatusResponse(BaseModel):
     device_id: str
     device_name: str
     model: str
-    is_on: bool
+    is_on: bool = Field(
+        description=(
+            "Climate (room-heating) zone onOffMode. NOT 'is the heat pump on'. "
+            "Prefer climate_on / dhw_on for unambiguous semantics — kept here "
+            "for v9 dashboard back-compat."
+        ),
+    )
+    climate_on: bool | None = Field(
+        default=None,
+        description="Climate (space-heating) zone onOffMode. None = unknown.",
+    )
+    dhw_on: bool | None = Field(
+        default=None,
+        description="DHW (tank) zone onOffMode. None = unknown.",
+    )
     mode: str
     room_temp: float | None = None
     target_temp: float | None = None
@@ -47,6 +61,14 @@ class DaikinStatusResponse(BaseModel):
     control_mode: str = Field(
         default="passive",
         description="DAIKIN_CONTROL_MODE: 'passive' (service never writes) or 'active' (legacy v9 control).",
+    )
+    state_summary: str | None = Field(
+        default=None,
+        description=(
+            "Deterministic one-line description of current Daikin state, "
+            "safe to relay verbatim to a user. Built from the per-zone fields "
+            "above so consumers don't have to interpret null vs idle."
+        ),
     )
 
 

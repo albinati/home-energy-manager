@@ -301,6 +301,9 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     # V2 cleanup: pnl_execution_log was a never-populated stale schema (helper
     # functions existed but had zero call sites). Drop it on existing prod DBs.
     conn.execute("DROP TABLE IF EXISTS pnl_execution_log")
+    # occupancy_settings — superseded by runtime_settings + presence_periods.
+    # No call site since the runtime-settings refactor; drop on existing DBs.
+    conn.execute("DROP TABLE IF EXISTS occupancy_settings")
 
     # V3: fox_energy_daily — actual daily PV, load, import, export from Fox ESS
     conn.execute(

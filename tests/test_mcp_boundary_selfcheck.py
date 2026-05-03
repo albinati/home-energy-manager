@@ -19,13 +19,19 @@ from src.mcp_server import audit_mcp_tool_surface, build_mcp
 
 
 def test_audit_clean_on_current_surface() -> None:
-    """All set_daikin_* tools currently have a `confirmed` parameter — audit is clean for them."""
+    """Every set_daikin_* AND set_inverter_* tool now has a `confirmed` parameter.
+
+    Previously this test carved out set_inverter_mode (no `confirmed` — see git
+    log for the OpenClaw "Daikin off" misread audit). After the 2026-05-03 fix
+    `set_inverter_mode` matches the Daikin write-tools pattern, so the audit
+    must be completely clean.
+    """
     mcp = build_mcp()
     warnings = audit_mcp_tool_surface(mcp)
-    # We allow set_inverter_mode to show up (it doesn't have `confirmed`) but must not
-    # regress any `set_daikin_*` tool.
-    regressions = [w for w in warnings if "set_daikin_" in w]
-    assert regressions == [], f"set_daikin_* tools must retain `confirmed`: {regressions}"
+    assert warnings == [], (
+        "Hardware-write MCP tools must all expose a `confirmed` parameter. "
+        f"Audit emitted: {warnings}"
+    )
 
 
 def test_audit_errors_when_tool_registry_is_empty() -> None:

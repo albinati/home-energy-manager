@@ -34,8 +34,15 @@ def test_cockpit_now_shape(client):
     # Top-level keys.
     assert set(body.keys()) == {
         "now_utc", "planner_tz", "current_slot", "next_transition",
-        "state", "freshness", "thresholds", "modes", "plan_date",
+        "state", "freshness", "thresholds", "modes", "plan_date", "_legend",
     }
+    # _legend disambiguates sign conventions for LLM consumers (OpenClaw etc.).
+    # The signed fields MUST carry a description so a negative value cannot be
+    # misread as an unsigned magnitude — see the 2026-05-03 OpenClaw "Daikin
+    # off" misread audit for context.
+    legend = body["_legend"]
+    assert "IMPORTING" in legend["grid_kw"] and "EXPORTING" in legend["grid_kw"]
+    assert "CHARGING" in legend["battery_kw"] and "DISCHARGING" in legend["battery_kw"]
 
     # current_slot always has the 5-key shape.
     assert set(body["current_slot"].keys()) == {

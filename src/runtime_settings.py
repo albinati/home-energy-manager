@@ -262,6 +262,59 @@ SCHEMA: dict[str, SettingSpec] = {
             "BATTERY_CAPACITY_KWH."
         ),
     ),
+    # Legionella thermal-shock awareness. The Daikin Onecta firmware fires the
+    # cycle autonomously on a user-configured day/hour (set in the Onecta app);
+    # the LP cannot command it. These knobs let the LP *predict* the resulting
+    # DHW pulse so it allocates PV/battery/grid correctly that hour. Set
+    # DHW_LEGIONELLA_DAY=-1 to disable the prediction (no uplift; firmware still
+    # fires whenever it pleases — LP just won't see it coming).
+    "DHW_LEGIONELLA_DAY": SettingSpec(
+        key="DHW_LEGIONELLA_DAY",
+        type_name="int",
+        env_default=_int_env("DHW_LEGIONELLA_DAY", "-1"),
+        min_value=-1,
+        max_value=6,
+        description=(
+            "Local weekday for predicted legionella thermal-shock cycle. "
+            "-1 disabled, 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri, 5=Sat, 6=Sun. "
+            "Must match what is configured in the Daikin Onecta app — the LP "
+            "uses this only to inject a predicted DHW pulse into passive-mode "
+            "load forecast; it does not command the firmware."
+        ),
+    ),
+    "DHW_LEGIONELLA_HOUR_LOCAL": SettingSpec(
+        key="DHW_LEGIONELLA_HOUR_LOCAL",
+        type_name="int",
+        env_default=_int_env("DHW_LEGIONELLA_HOUR_LOCAL", "13"),
+        min_value=0,
+        max_value=23,
+        description=(
+            "Local hour at which the legionella cycle starts (0–23). Must match "
+            "the Daikin Onecta schedule. Used only with DHW_LEGIONELLA_DAY ≥ 0."
+        ),
+    ),
+    "DHW_LEGIONELLA_DURATION_MIN": SettingSpec(
+        key="DHW_LEGIONELLA_DURATION_MIN",
+        type_name="int",
+        env_default=_int_env("DHW_LEGIONELLA_DURATION_MIN", "60"),
+        min_value=30,
+        max_value=240,
+        description=(
+            "Estimated cycle duration in minutes (rounded up to whole 30-min slots). "
+            "60 min ≈ 200 L tank from 50 → 60 °C at typical Altherma DHW power."
+        ),
+    ),
+    "DHW_LEGIONELLA_TANK_TARGET_C": SettingSpec(
+        key="DHW_LEGIONELLA_TANK_TARGET_C",
+        type_name="float",
+        env_default=_float_env("DHW_LEGIONELLA_TANK_TARGET_C", "60"),
+        min_value=50.0,
+        max_value=70.0,
+        description=(
+            "Tank temperature reached during the cycle (°C). The LP uses "
+            "(target − DHW_TEMP_NORMAL_C) to size the predicted electric pulse."
+        ),
+    ),
 }
 
 
