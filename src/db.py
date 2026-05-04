@@ -3699,7 +3699,11 @@ def rebuild_forecast_skill_log_for_date(date_utc: str) -> int:
     ``pv_realtime_history`` mean solar kW × 1h for PV, and mean
     ``execution_log.daikin_outdoor_temp`` for temperature.
     """
-    from .weather import estimate_pv_kw
+    from .weather import (
+        compute_pv_calibration_factor,
+        estimate_pv_kw,
+        get_pv_calibration_factor_for,
+    )
 
     predicted_by_hour: dict[int, dict[str, float | None]] = {}
     actual_pv_by_hour: dict[int, float] = {}
@@ -3709,7 +3713,7 @@ def rebuild_forecast_skill_log_for_date(date_utc: str) -> int:
         conn = get_connection()
         try:
             cur = conn.execute(
-                """SELECT forecast_fetch_at_utc, slot_time, temp_c, solar_w_m2
+                """SELECT forecast_fetch_at_utc, slot_time, temp_c, solar_w_m2, cloud_cover_pct
                    FROM meteo_forecast_history
                    WHERE substr(slot_time, 1, 10) = ?
                    ORDER BY slot_time ASC, forecast_fetch_at_utc ASC""",
@@ -3743,6 +3747,10 @@ def rebuild_forecast_skill_log_for_date(date_utc: str) -> int:
         finally:
             conn.close()
 
+    cal_cloud = get_pv_calibration_hourly_cloud()
+    cal_hour = get_pv_calibration_hourly()
+    flat_cal = compute_pv_calibration_factor() if not cal_cloud and not cal_hour else 1.0
+
     for row in history_rows:
         slot_time = str(row.get("slot_time") or "")
         fetch_at = str(row.get("forecast_fetch_at_utc") or "")
@@ -3752,11 +3760,23 @@ def rebuild_forecast_skill_log_for_date(date_utc: str) -> int:
             hour_utc = int(slot_time[11:13])
         except ValueError:
             continue
+        cloud_raw = row.get("cloud_cover_pct")
+        cloud_pct = float(cloud_raw) if cloud_raw is not None else 50.0
+        rad_wm2 = float(row.get("solar_w_m2") or 0.0)
+        att = max(0.0, min(1.0, 1.0 - 0.25 * (cloud_pct / 100.0)))
+        rad_eff = max(0.0, rad_wm2 * att)
+        cal = get_pv_calibration_factor_for(
+            hour_utc,
+            cloud_pct,
+            cloud_table=cal_cloud,
+            hourly_table=cal_hour,
+            flat=flat_cal,
+        )
         predicted_by_hour[hour_utc] = {
             "predicted_temp_c": (
                 float(row["temp_c"]) if row.get("temp_c") is not None else None
             ),
-            "predicted_pv_kwh": estimate_pv_kw(float(row.get("solar_w_m2") or 0.0)),
+            "predicted_pv_kwh": estimate_pv_kw(rad_eff) * cal,
         }
 
     out_rows: list[dict[str, Any]] = []
