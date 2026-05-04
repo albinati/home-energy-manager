@@ -477,6 +477,20 @@ class Config:
     LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH: float = float(
         os.getenv("LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH", "0.30")
     )
+    # Additional dispatch-layer guard on ``peak_export``: even when the
+    # pessimistic scenario still exports, only commit the slot if the export
+    # price beats the best future refill / saved-energy shadow value by at
+    # least this much. Helps avoid marginal arbitrage that looks profitable
+    # in isolation but is not meaningfully better than simply keeping the kWh.
+    LP_PEAK_EXPORT_MIN_MARGIN_PENCE_PER_KWH: float = float(
+        os.getenv("LP_PEAK_EXPORT_MIN_MARGIN_PENCE_PER_KWH", "1.0")
+    )
+    # Battery-wear shadow cost (p/kWh throughput). This is applied in the
+    # dispatch-layer peak-export margin check so a marginal export must cover
+    # both the future refill cost and the extra cycle wear it causes.
+    LP_BATTERY_WEAR_COST_PENCE_PER_KWH: float = float(
+        os.getenv("LP_BATTERY_WEAR_COST_PENCE_PER_KWH", "0.0")
+    )
     # Comma-separated trigger reasons for which scenario LP runs. Other
     # triggers (drift, forecast_revision, hourly cron not in this list)
     # use only the nominal solve to keep latency low.

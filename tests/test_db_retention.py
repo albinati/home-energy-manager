@@ -125,6 +125,7 @@ def test_prune_history_tables_returns_per_table_counts():
     assert set(results.keys()) == {
         "daikin_telemetry",
         "meteo_forecast_history",
+        "forecast_skill_log",
         "lp_solution_snapshot",
         "lp_inputs_snapshot",
         "config_audit",

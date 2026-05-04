@@ -227,6 +227,9 @@ CREATE TABLE IF NOT EXISTS dispatch_decisions (
     scen_optimistic_exp_kwh REAL,
     scen_nominal_exp_kwh REAL,
     scen_pessimistic_exp_kwh REAL,
+    export_price_p_kwh REAL,
+    refill_price_p_kwh REAL,
+    economic_margin_p_kwh REAL,
     created_at TEXT NOT NULL,
     UNIQUE(run_id, slot_time_utc)
 );
@@ -252,6 +255,19 @@ CREATE TABLE IF NOT EXISTS scenario_solve_log (
 
 CREATE INDEX IF NOT EXISTS idx_scenario_solve_log_batch ON scenario_solve_log(batch_id);
 CREATE INDEX IF NOT EXISTS idx_scenario_solve_log_run ON scenario_solve_log(nominal_run_id);
+
+CREATE TABLE IF NOT EXISTS forecast_skill_log (
+    date_utc TEXT NOT NULL,
+    hour_of_day INTEGER NOT NULL CHECK(hour_of_day >= 0 AND hour_of_day < 24),
+    predicted_temp_c REAL,
+    actual_temp_c REAL,
+    predicted_pv_kwh REAL,
+    actual_pv_kwh REAL,
+    built_at_utc TEXT NOT NULL,
+    PRIMARY KEY (date_utc, hour_of_day)
+);
+
+CREATE INDEX IF NOT EXISTS idx_forecast_skill_log_date ON forecast_skill_log(date_utc);
 """
 
 
@@ -786,6 +802,42 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE lp_inputs_snapshot ADD COLUMN dhw_draw_prior_json TEXT")
     if "occupancy_prior_json" not in lp_cols:
         conn.execute("ALTER TABLE lp_inputs_snapshot ADD COLUMN occupancy_prior_json TEXT")
+    # Older DBs predate the cloud-aware PV table and the richer dispatch decision
+    # audit columns added for economic peak-export filtering.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS pv_calibration_hourly_cloud (
+            hour_utc        INTEGER NOT NULL CHECK(hour_utc >= 0 AND hour_utc < 24),
+            cloud_bucket    INTEGER NOT NULL CHECK(cloud_bucket >= 0 AND cloud_bucket < 4),
+            factor          REAL NOT NULL,
+            samples         INTEGER NOT NULL,
+            window_days     INTEGER NOT NULL,
+            computed_at     TEXT NOT NULL,
+            PRIMARY KEY (hour_utc, cloud_bucket)
+        )"""
+    )
+    cur = conn.execute("PRAGMA table_info(dispatch_decisions)")
+    dd_cols = {str(r[1]) for r in cur.fetchall()}
+    if "export_price_p_kwh" not in dd_cols:
+        conn.execute("ALTER TABLE dispatch_decisions ADD COLUMN export_price_p_kwh REAL")
+    if "refill_price_p_kwh" not in dd_cols:
+        conn.execute("ALTER TABLE dispatch_decisions ADD COLUMN refill_price_p_kwh REAL")
+    if "economic_margin_p_kwh" not in dd_cols:
+        conn.execute("ALTER TABLE dispatch_decisions ADD COLUMN economic_margin_p_kwh REAL")
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS forecast_skill_log (
+            date_utc TEXT NOT NULL,
+            hour_of_day INTEGER NOT NULL CHECK(hour_of_day >= 0 AND hour_of_day < 24),
+            predicted_temp_c REAL,
+            actual_temp_c REAL,
+            predicted_pv_kwh REAL,
+            actual_pv_kwh REAL,
+            built_at_utc TEXT NOT NULL,
+            PRIMARY KEY (date_utc, hour_of_day)
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_forecast_skill_log_date ON forecast_skill_log(date_utc)"
+    )
 
 
 def init_db() -> None:
@@ -3599,6 +3651,154 @@ def get_pv_calibration_hourly_cloud() -> dict[tuple[int, int], float]:
             conn.close()
 
 
+def upsert_forecast_skill_rows(rows: list[dict[str, Any]]) -> int:
+    """Upsert daily per-hour forecast-skill rows.
+
+    ``rows`` elements should contain:
+    ``date_utc``, ``hour_of_day``, ``predicted_temp_c``, ``actual_temp_c``,
+    ``predicted_pv_kwh``, ``actual_pv_kwh``.
+    """
+    if not rows:
+        return 0
+    built_at_utc = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    n = 0
+    with _lock:
+        conn = get_connection()
+        try:
+            for row in rows:
+                conn.execute(
+                    """INSERT OR REPLACE INTO forecast_skill_log
+                       (date_utc, hour_of_day, predicted_temp_c, actual_temp_c,
+                        predicted_pv_kwh, actual_pv_kwh, built_at_utc)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        str(row["date_utc"]),
+                        int(row["hour_of_day"]),
+                        row.get("predicted_temp_c"),
+                        row.get("actual_temp_c"),
+                        row.get("predicted_pv_kwh"),
+                        row.get("actual_pv_kwh"),
+                        built_at_utc,
+                    ),
+                )
+                n += 1
+            conn.commit()
+        finally:
+            conn.close()
+    return n
+
+
+def rebuild_forecast_skill_log_for_date(date_utc: str) -> int:
+    """Rebuild forecast-vs-actual skill rows for one UTC date.
+
+    Prediction source:
+    the most recent ``meteo_forecast_history`` fetch strictly before each
+    target hour, so the row reflects what the planner actually knew at the time.
+
+    Actuals:
+    ``pv_realtime_history`` mean solar kW × 1h for PV, and mean
+    ``execution_log.daikin_outdoor_temp`` for temperature.
+    """
+    from .weather import estimate_pv_kw
+
+    predicted_by_hour: dict[int, dict[str, float | None]] = {}
+    actual_pv_by_hour: dict[int, float] = {}
+    actual_temp_by_hour: dict[int, float] = {}
+
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT forecast_fetch_at_utc, slot_time, temp_c, solar_w_m2
+                   FROM meteo_forecast_history
+                   WHERE substr(slot_time, 1, 10) = ?
+                   ORDER BY slot_time ASC, forecast_fetch_at_utc ASC""",
+                (date_utc,),
+            )
+            history_rows = [dict(r) for r in cur.fetchall()]
+
+            cur = conn.execute(
+                """SELECT substr(captured_at, 12, 2) AS hour_utc,
+                          AVG(solar_power_kw) AS avg_kw
+                   FROM pv_realtime_history
+                   WHERE substr(captured_at, 1, 10) = ?
+                     AND solar_power_kw IS NOT NULL
+                   GROUP BY hour_utc""",
+                (date_utc,),
+            )
+            for row in cur.fetchall():
+                actual_pv_by_hour[int(row["hour_utc"])] = float(row["avg_kw"] or 0.0)
+
+            cur = conn.execute(
+                """SELECT substr(timestamp, 12, 2) AS hour_utc,
+                          AVG(daikin_outdoor_temp) AS avg_temp_c
+                   FROM execution_log
+                   WHERE substr(timestamp, 1, 10) = ?
+                     AND daikin_outdoor_temp IS NOT NULL
+                   GROUP BY hour_utc""",
+                (date_utc,),
+            )
+            for row in cur.fetchall():
+                actual_temp_by_hour[int(row["hour_utc"])] = float(row["avg_temp_c"])
+        finally:
+            conn.close()
+
+    for row in history_rows:
+        slot_time = str(row.get("slot_time") or "")
+        fetch_at = str(row.get("forecast_fetch_at_utc") or "")
+        if not slot_time or not fetch_at or fetch_at >= slot_time:
+            continue
+        try:
+            hour_utc = int(slot_time[11:13])
+        except ValueError:
+            continue
+        predicted_by_hour[hour_utc] = {
+            "predicted_temp_c": (
+                float(row["temp_c"]) if row.get("temp_c") is not None else None
+            ),
+            "predicted_pv_kwh": estimate_pv_kw(float(row.get("solar_w_m2") or 0.0)),
+        }
+
+    out_rows: list[dict[str, Any]] = []
+    for hour_utc, predicted in sorted(predicted_by_hour.items()):
+        actual_pv = actual_pv_by_hour.get(hour_utc)
+        actual_temp = actual_temp_by_hour.get(hour_utc)
+        if actual_pv is None and actual_temp is None:
+            continue
+        out_rows.append(
+            {
+                "date_utc": date_utc,
+                "hour_of_day": hour_utc,
+                "predicted_temp_c": predicted.get("predicted_temp_c"),
+                "actual_temp_c": actual_temp,
+                "predicted_pv_kwh": predicted.get("predicted_pv_kwh"),
+                "actual_pv_kwh": actual_pv,
+            }
+        )
+    return upsert_forecast_skill_rows(out_rows)
+
+
+def get_forecast_skill_rows(
+    start_date_utc: str,
+    end_date_utc: str,
+) -> list[dict[str, Any]]:
+    """Return forecast-skill rows in the inclusive UTC date range."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT date_utc, hour_of_day, predicted_temp_c, actual_temp_c,
+                          predicted_pv_kwh, actual_pv_kwh, built_at_utc
+                   FROM forecast_skill_log
+                   WHERE date_utc >= ? AND date_utc <= ?
+                   ORDER BY date_utc ASC, hour_of_day ASC""",
+                (start_date_utc, end_date_utc),
+            )
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
 def get_meteo_forecast_history_latest_before(when_utc: str) -> list[dict[str, Any]]:
     """Return all rows of the most recent forecast fetch strictly before ``when_utc``.
 
@@ -3733,6 +3933,7 @@ def prune_history_tables() -> dict[str, int]:
     policies = [
         ("daikin_telemetry", "fetched_at", _config.DAIKIN_TELEMETRY_RETENTION_DAYS, True),
         ("meteo_forecast_history", "forecast_fetch_at_utc", _config.METEO_FORECAST_HISTORY_RETENTION_DAYS, False),
+        ("forecast_skill_log", "built_at_utc", _config.METEO_FORECAST_HISTORY_RETENTION_DAYS, False),
         ("lp_solution_snapshot", "slot_time_utc", _config.LP_SNAPSHOT_RETENTION_DAYS, False),
         ("lp_inputs_snapshot", "run_at_utc", _config.LP_SNAPSHOT_RETENTION_DAYS, False),
         ("config_audit", "changed_at_utc", _config.CONFIG_AUDIT_RETENTION_DAYS, False),
@@ -3850,6 +4051,9 @@ def upsert_dispatch_decision(
     scen_optimistic_exp_kwh: float | None = None,
     scen_nominal_exp_kwh: float | None = None,
     scen_pessimistic_exp_kwh: float | None = None,
+    export_price_p_kwh: float | None = None,
+    refill_price_p_kwh: float | None = None,
+    economic_margin_p_kwh: float | None = None,
 ) -> None:
     """Persist one slot's dispatch decision for the audit trail.
 
@@ -3866,8 +4070,9 @@ def upsert_dispatch_decision(
                 """INSERT INTO dispatch_decisions
                    (run_id, slot_time_utc, lp_kind, dispatched_kind, committed,
                     reason, scen_optimistic_exp_kwh, scen_nominal_exp_kwh,
-                    scen_pessimistic_exp_kwh, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    scen_pessimistic_exp_kwh, export_price_p_kwh,
+                    refill_price_p_kwh, economic_margin_p_kwh, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(run_id, slot_time_utc) DO UPDATE SET
                      lp_kind=excluded.lp_kind,
                      dispatched_kind=excluded.dispatched_kind,
@@ -3876,12 +4081,16 @@ def upsert_dispatch_decision(
                      scen_optimistic_exp_kwh=excluded.scen_optimistic_exp_kwh,
                      scen_nominal_exp_kwh=excluded.scen_nominal_exp_kwh,
                      scen_pessimistic_exp_kwh=excluded.scen_pessimistic_exp_kwh,
+                     export_price_p_kwh=excluded.export_price_p_kwh,
+                     refill_price_p_kwh=excluded.refill_price_p_kwh,
+                     economic_margin_p_kwh=excluded.economic_margin_p_kwh,
                      created_at=excluded.created_at""",
                 (
                     run_id, slot_time_utc, lp_kind, dispatched_kind,
                     1 if committed else 0, reason,
                     scen_optimistic_exp_kwh, scen_nominal_exp_kwh,
-                    scen_pessimistic_exp_kwh, now_iso,
+                    scen_pessimistic_exp_kwh, export_price_p_kwh,
+                    refill_price_p_kwh, economic_margin_p_kwh, now_iso,
                 ),
             )
             conn.commit()
@@ -3897,7 +4106,8 @@ def get_dispatch_decisions(run_id: int) -> list[dict[str, Any]]:
             cur = conn.execute(
                 """SELECT run_id, slot_time_utc, lp_kind, dispatched_kind, committed,
                           reason, scen_optimistic_exp_kwh, scen_nominal_exp_kwh,
-                          scen_pessimistic_exp_kwh, created_at
+                          scen_pessimistic_exp_kwh, export_price_p_kwh,
+                          refill_price_p_kwh, economic_margin_p_kwh, created_at
                    FROM dispatch_decisions
                    WHERE run_id = ?
                    ORDER BY slot_time_utc ASC""",
@@ -4496,4 +4706,3 @@ def get_active_appliance_jobs_overlapping(
             return [dict(r) for r in cur.fetchall()]
         finally:
             conn.close()
-

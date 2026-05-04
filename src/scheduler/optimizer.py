@@ -1478,9 +1478,17 @@ def _run_optimizer_lp(
     # Run the filter once to capture decisions (they reference the new run_id
     # written below). build_fox_groups_from_lp re-runs the filter internally,
     # which is fine — both invocations are deterministic on the same scenarios.
-    _filtered_slots, dispatch_decisions = filter_robust_peak_export(plan, scenarios_dict)
+    _filtered_slots, dispatch_decisions = filter_robust_peak_export(
+        plan,
+        scenarios_dict,
+        export_price_pence=export_prices,
+    )
 
-    groups, replan_at = build_fox_groups_from_lp(plan, scenarios=scenarios_dict)
+    groups, replan_at = build_fox_groups_from_lp(
+        plan,
+        scenarios=scenarios_dict,
+        export_price_pence=export_prices,
+    )
     fox_ok = upload_fox_if_operational(fox, groups)
     if replan_at is not None:
         try:

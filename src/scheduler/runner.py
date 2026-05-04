@@ -432,6 +432,25 @@ def bulletproof_consumption_backfill_job() -> None:
         logger.warning("Consumption backfill failed (non-fatal): %s", e)
 
 
+def bulletproof_forecast_skill_log_job() -> None:
+    """Rebuild yesterday's UTC forecast-vs-actual skill rows.
+
+    Runs after the nightly consumption backfill so the prior UTC day has the
+    fullest available PV + outdoor-temperature actuals. Best-effort only: a
+    failure here must not interfere with the rest of the scheduler.
+    """
+    target_date_utc = (datetime.now(UTC).date() - timedelta(days=1)).isoformat()
+    try:
+        rows_written = db.rebuild_forecast_skill_log_for_date(target_date_utc)
+        logger.info(
+            "forecast_skill_log rebuild: date_utc=%s rows=%d",
+            target_date_utc,
+            rows_written,
+        )
+    except Exception as e:
+        logger.warning("forecast_skill_log rebuild failed (non-fatal): %s", e)
+
+
 def bulletproof_night_brief_job() -> None:
     """Daily night digest — today's actuals (V12). Companion to morning brief."""
     from ..analytics.daily_brief import send_night_brief_webhook
@@ -1469,6 +1488,12 @@ def start_background_scheduler() -> None:
                 config.CONSUMPTION_BACKFILL_MINUTE,
                 tz,
             )
+            _background_scheduler.add_job(
+                bulletproof_forecast_skill_log_job,
+                CronTrigger(hour=4, minute=15, timezone=ZoneInfo("UTC")),
+                id="bulletproof_forecast_skill_log",
+            )
+            logger.info("Forecast skill rebuild cron scheduled (04:15 UTC daily)")
             # V12: MPC is fully event-driven. The fixed-hour cron is GONE.
             # Triggers: octopus_fetch (when new rates land), tier_boundary
             # (before every tariff transition), soc_drift / forecast_revision

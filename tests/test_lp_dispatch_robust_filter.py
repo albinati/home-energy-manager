@@ -108,6 +108,82 @@ def test_pessimistic_agrees_commits_robust():
     assert slots[2].kind == "peak_export"
 
 
+def test_pessimistic_agrees_but_economic_margin_fails_drops_slot(monkeypatch):
+    monkeypatch.setattr(
+        "src.scheduler.lp_dispatch.config.LP_PEAK_EXPORT_MIN_MARGIN_PENCE_PER_KWH",
+        1.0,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "src.scheduler.lp_dispatch.config.LP_BATTERY_WEAR_COST_PENCE_PER_KWH",
+        0.0,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "src.scheduler.lp_dispatch.config.LP_SOC_TERMINAL_VALUE_PENCE_PER_KWH",
+        0.0,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "src.scheduler.lp_dispatch.config.BATTERY_RT_EFFICIENCY",
+        1.0,
+        raising=False,
+    )
+    plan = _make_plan(export_kwh=1.84)
+    pess = _make_plan(export_kwh=1.40)
+    slots, decisions = filter_robust_peak_export(
+        plan,
+        scenarios={"optimistic": plan, "nominal": plan, "pessimistic": pess},
+        export_price_pence=[10.0, 10.0, 10.5, 10.0],
+    )
+    pe = [d for d in decisions if d["lp_kind"] == "peak_export"]
+    assert len(pe) == 1
+    assert pe[0]["committed"] is False
+    assert pe[0]["reason"] == "economic_margin"
+    assert pe[0]["export_price_p_kwh"] == pytest.approx(10.5)
+    assert pe[0]["refill_price_p_kwh"] == pytest.approx(10.0)
+    assert pe[0]["economic_margin_p_kwh"] == pytest.approx(0.5)
+    assert slots[2].kind == "standard"
+
+
+def test_pessimistic_agrees_and_economic_margin_clears_commits_slot(monkeypatch):
+    monkeypatch.setattr(
+        "src.scheduler.lp_dispatch.config.LP_PEAK_EXPORT_MIN_MARGIN_PENCE_PER_KWH",
+        1.0,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "src.scheduler.lp_dispatch.config.LP_BATTERY_WEAR_COST_PENCE_PER_KWH",
+        0.5,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "src.scheduler.lp_dispatch.config.LP_SOC_TERMINAL_VALUE_PENCE_PER_KWH",
+        0.0,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "src.scheduler.lp_dispatch.config.BATTERY_RT_EFFICIENCY",
+        1.0,
+        raising=False,
+    )
+    plan = _make_plan(export_kwh=1.84)
+    pess = _make_plan(export_kwh=1.40)
+    slots, decisions = filter_robust_peak_export(
+        plan,
+        scenarios={"optimistic": plan, "nominal": plan, "pessimistic": pess},
+        export_price_pence=[10.0, 10.0, 13.0, 10.0],
+    )
+    pe = [d for d in decisions if d["lp_kind"] == "peak_export"]
+    assert len(pe) == 1
+    assert pe[0]["committed"] is True
+    assert pe[0]["reason"] == "robust"
+    assert pe[0]["export_price_p_kwh"] == pytest.approx(13.0)
+    assert pe[0]["refill_price_p_kwh"] == pytest.approx(10.0)
+    assert pe[0]["economic_margin_p_kwh"] == pytest.approx(2.0)
+    assert slots[2].kind == "peak_export"
+
+
 def test_strict_savings_drops_all_peak_export(monkeypatch):
     monkeypatch.setattr("src.scheduler.lp_dispatch.config.ENERGY_STRATEGY_MODE", "strict_savings", raising=False)
     plan = _make_plan(export_kwh=1.84)
