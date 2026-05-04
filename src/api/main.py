@@ -971,6 +971,7 @@ async def cockpit_at(when: str):
     """
     from datetime import UTC as _UTC
     from datetime import datetime as _dt
+    import json as _json
     from zoneinfo import ZoneInfo
 
     try:
@@ -988,6 +989,13 @@ async def cockpit_at(when: str):
     run_id = db.find_run_for_time(when_iso)
     lp_inputs = db.get_lp_inputs(run_id) if run_id is not None else None
     lp_slots = db.get_lp_solution_slots(run_id) if run_id is not None else []
+    lp_exogenous: dict[str, Any] | None = None
+    if lp_inputs and lp_inputs.get("exogenous_snapshot_json"):
+        try:
+            raw = _json.loads(lp_inputs["exogenous_snapshot_json"] or "{}")
+            lp_exogenous = raw if isinstance(raw, dict) else None
+        except Exception:
+            lp_exogenous = None
 
     # --- Price at the moment, from agile_rates -------------------------------
     tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
@@ -1073,6 +1081,7 @@ async def cockpit_at(when: str):
         "state": state_block,
         "planned_slot": planned_slot,  # LP's decision for that slot, or None
         "lp_inputs": lp_inputs,        # Full inputs row at solve time, or None
+        "lp_exogenous": lp_exogenous,  # Parsed LP-only derived inputs, or None
         "slot_kind": realised.get("slot_kind"),
         # Same legend as /cockpit/now — keeps signs / units unambiguous for
         # historical replays consumed by LLM agents.

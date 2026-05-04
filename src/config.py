@@ -551,8 +551,6 @@ class Config:
     # V8 LP — solver
     LP_SOLVER: str = (os.getenv("LP_SOLVER") or "cbc").strip().lower()  # cbc
     LP_CBC_TIME_LIMIT_SECONDS: int = int(os.getenv("LP_CBC_TIME_LIMIT_SECONDS", "30"))
-    # Deprecated compatibility knob kept so old env files do not break startup.
-    LP_HIGHS_TIME_LIMIT_SECONDS: int = int(os.getenv("LP_HIGHS_TIME_LIMIT_SECONDS", "30"))
     LP_COMFORT_SLACK_PENCE_PER_DEGC_SLOT: float = float(
         os.getenv("LP_COMFORT_SLACK_PENCE_PER_DEGC_SLOT", "100")
     )

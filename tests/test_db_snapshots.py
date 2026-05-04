@@ -13,10 +13,14 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import sqlite3
 
 import pytest
 
 from src import db
+from src.config import config as app_config
 
 
 @pytest.fixture(autouse=True)
@@ -191,6 +195,46 @@ def test_init_db_is_idempotent():
     # Second init must not raise — migrations use CREATE TABLE IF NOT EXISTS.
     db.init_db()
     db.init_db()
+
+
+def test_init_db_migrates_old_lp_inputs_snapshot_before_creating_forecast_index(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    db_path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """CREATE TABLE lp_inputs_snapshot (
+                run_id INTEGER PRIMARY KEY,
+                run_at_utc TEXT NOT NULL,
+                plan_date TEXT,
+                horizon_hours INTEGER,
+                soc_initial_kwh REAL,
+                tank_initial_c REAL,
+                indoor_initial_c REAL,
+                soc_source TEXT,
+                tank_source TEXT,
+                indoor_source TEXT,
+                base_load_json TEXT,
+                micro_climate_offset_c REAL,
+                config_snapshot_json TEXT,
+                price_quantize_p REAL,
+                peak_threshold_p REAL,
+                cheap_threshold_p REAL,
+                daikin_control_mode TEXT,
+                optimization_preset TEXT,
+                energy_strategy_mode TEXT
+            )"""
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(app_config, "DB_PATH", str(db_path), raising=False)
+    db.init_db()
+    cols = _columns("lp_inputs_snapshot")
+    assert "forecast_fetch_at_utc" in cols
 
 
 # ---------------------------------------------------------------------------
