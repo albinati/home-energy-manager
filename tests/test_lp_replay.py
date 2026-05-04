@@ -124,7 +124,7 @@ def _persist_plan_as_run(
     plan_date: str,
     config_snapshot: dict | None = None,
 ) -> int:
-    """Insert optimizer_log + lp_inputs_snapshot + lp_solution_snapshot + meteo_forecast_history rows."""
+    """Insert optimizer_log + LP snapshots + canonical forecast rows."""
     run_id = db.log_optimizer_run({
         "run_at": run_at_utc.isoformat(),
         "rates_count": len(slots),
@@ -140,6 +140,7 @@ def _persist_plan_as_run(
         "daikin_actions_count": 0,
     })
 
+    fetch_at = (run_at_utc - timedelta(seconds=1)).isoformat()
     inputs_row = {
         "run_at_utc": run_at_utc.isoformat(),
         "plan_date": plan_date,
@@ -152,6 +153,7 @@ def _persist_plan_as_run(
         "indoor_source": initial.indoor_source,
         "base_load_json": json.dumps(base_load),
         "micro_climate_offset_c": 0.0,
+        "forecast_fetch_at_utc": fetch_at,
         "config_snapshot_json": json.dumps(config_snapshot or {}),
         "price_quantize_p": 1.0,
         "peak_threshold_p": float(plan.peak_threshold_pence),
@@ -184,10 +186,9 @@ def _persist_plan_as_run(
 
     db.save_lp_snapshots(run_id, inputs_row, solution_rows)
 
-    # Weather snapshot — fetched a second BEFORE run_at_utc so
-    # get_meteo_forecast_history_latest_before(run_at_utc) finds it. Round-trip
-    # the test's hourly forecast list so replay reconstructs an identical series.
-    fetch_at = (run_at_utc - timedelta(seconds=1)).isoformat()
+    # Weather snapshot — fetched a second BEFORE run_at_utc so the legacy
+    # fallback lookup still finds it. Snapshot reference is persisted on the
+    # LP inputs row for exact replay-by-reference.
     forecast_rows = [
         {
             "slot_time": f.time_utc.isoformat(),
@@ -291,7 +292,7 @@ def test_replay_run_falls_back_to_approx_when_cloud_cover_null():
     conn = db.get_connection()
     try:
         conn.execute(
-            "UPDATE meteo_forecast_history SET cloud_cover_pct = NULL "
+            "UPDATE meteo_forecast_value SET cloud_cover_pct = NULL "
             "WHERE forecast_fetch_at_utc < ?",
             (base.isoformat(),),
         )
@@ -305,7 +306,7 @@ def test_replay_run_falls_back_to_approx_when_cloud_cover_null():
 
 
 def test_replay_run_missing_weather_returns_clean_error():
-    """A run with no meteo_forecast_history snapshot should fail-fast cleanly."""
+    """A run with no persisted forecast snapshot should fail-fast cleanly."""
     base = datetime(2026, 7, 1, 0, 0, tzinfo=UTC)
     plan, slots, prices, base_load, initial, _forecast = _solve_baseline(8, base)
 

@@ -372,26 +372,21 @@ def test_forecast_refresh_job_persists_even_when_disabled(monkeypatch):
     base = datetime.now(UTC)
     fake_fcst = [MagicMock(time_utc=base + timedelta(hours=i), temperature_c=10.0, shortwave_radiation_wm2=100.0) for i in range(6)]
 
-    saved_history: list[tuple[str, list]] = []
-    saved_latest: list[tuple[list, str]] = []
+    saved_snapshots: list[tuple[str, list, bool]] = []
 
-    def _save_hist(fetch_at, rows):
-        saved_history.append((fetch_at, rows))
-
-    def _save_latest(rows, day):
-        saved_latest.append((rows, day))
+    def _save_snapshot(fetch_at, rows, mark_latest=True, **_kwargs):
+        saved_snapshots.append((fetch_at, rows, bool(mark_latest)))
 
     triggered = MagicMock(side_effect=AssertionError("MPC must not be triggered when kill switch is off"))
 
     with patch("src.weather.fetch_forecast", return_value=fake_fcst), \
          patch("src.db.get_meteo_forecast_history_latest_before", return_value=[{"slot_time": (base + timedelta(hours=0)).isoformat(), "solar_w_m2": 50.0, "temp_c": 10.0}]), \
-         patch("src.db.save_meteo_forecast_history", side_effect=_save_hist), \
-         patch("src.db.save_meteo_forecast", side_effect=_save_latest), \
+         patch("src.db.save_meteo_forecast_snapshot", side_effect=_save_snapshot), \
          patch.object(runner, "bulletproof_mpc_job", triggered):
         runner.bulletproof_forecast_refresh_job()
 
-    assert len(saved_history) == 1
-    assert len(saved_latest) == 1
+    assert len(saved_snapshots) == 1
+    assert saved_snapshots[0][2] is True
     triggered.assert_not_called()
 
 
@@ -405,8 +400,7 @@ def test_forecast_refresh_job_no_trigger_without_previous_fetch(monkeypatch):
 
     with patch("src.weather.fetch_forecast", return_value=fake_fcst), \
          patch("src.db.get_meteo_forecast_history_latest_before", return_value=[]), \
-         patch("src.db.save_meteo_forecast_history"), \
-         patch("src.db.save_meteo_forecast"), \
+         patch("src.db.save_meteo_forecast_snapshot"), \
          patch.object(runner, "bulletproof_mpc_job", triggered):
         runner.bulletproof_forecast_refresh_job()
 
@@ -430,8 +424,7 @@ def test_forecast_refresh_job_triggers_when_solar_delta_exceeds_threshold(monkey
 
     with patch("src.weather.fetch_forecast", return_value=fake_fcst), \
          patch("src.db.get_meteo_forecast_history_latest_before", return_value=prev_rows), \
-         patch("src.db.save_meteo_forecast_history"), \
-         patch("src.db.save_meteo_forecast"), \
+         patch("src.db.save_meteo_forecast_snapshot"), \
          patch.object(runner, "bulletproof_mpc_job", _capture):
         runner.bulletproof_forecast_refresh_job()
 
@@ -450,8 +443,7 @@ def test_forecast_refresh_job_no_trigger_when_within_thresholds(monkeypatch):
     triggered = MagicMock(side_effect=AssertionError("must not trigger when delta is within thresholds"))
     with patch("src.weather.fetch_forecast", return_value=fake_fcst), \
          patch("src.db.get_meteo_forecast_history_latest_before", return_value=prev_rows), \
-         patch("src.db.save_meteo_forecast_history"), \
-         patch("src.db.save_meteo_forecast"), \
+         patch("src.db.save_meteo_forecast_snapshot"), \
          patch.object(runner, "bulletproof_mpc_job", triggered):
         runner.bulletproof_forecast_refresh_job()
     triggered.assert_not_called()

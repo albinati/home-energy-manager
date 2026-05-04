@@ -63,8 +63,25 @@ def test_lp_inputs_snapshot_has_expected_columns():
         "base_load_json", "micro_climate_offset_c", "config_snapshot_json",
         "price_quantize_p", "peak_threshold_p", "cheap_threshold_p",
         "daikin_control_mode", "optimization_preset", "energy_strategy_mode",
+        "forecast_fetch_at_utc",
         # V11-A (#194): nullable columns reserved for V11-C/D
         "dhw_draw_prior_json", "occupancy_prior_json",
+    ):
+        assert expected in cols, f"missing column {expected}"
+
+
+def test_meteo_forecast_snapshot_has_expected_columns():
+    cols = _columns("meteo_forecast_snapshot")
+    for expected in (
+        "forecast_fetch_at_utc", "source", "model_name", "model_version", "raw_payload_json",
+    ):
+        assert expected in cols, f"missing column {expected}"
+
+
+def test_meteo_forecast_value_has_expected_columns():
+    cols = _columns("meteo_forecast_value")
+    for expected in (
+        "id", "forecast_fetch_at_utc", "slot_time", "temp_c", "solar_w_m2", "cloud_cover_pct",
     ):
         assert expected in cols, f"missing column {expected}"
 
@@ -147,7 +164,7 @@ def test_meteo_forecast_slot_date_lookup_uses_slot_time_not_forecast_date():
     fetched = db.get_meteo_forecast_for_slot_date("2026-05-02")
     assert len(fetched) == 1
     assert fetched[0]["slot_time"] == "2026-05-02T00:00:00+00:00"
-    assert fetched[0]["forecast_date"] == "2026-05-01"
+    assert fetched[0]["forecast_date"] == "2026-05-02"
 
 
 def test_meteo_forecast_active_at_time_prefers_latest_past_slot():

@@ -100,6 +100,19 @@ def test_prune_old_rows_iso_timestamps():
     assert _count("meteo_forecast_history") == 1
 
 
+def test_prune_meteo_forecast_snapshots_deletes_fetches_and_slot_rows():
+    old = (datetime.now(UTC) - timedelta(days=40)).isoformat()
+    fresh = (datetime.now(UTC) - timedelta(days=1)).isoformat()
+    db.save_meteo_forecast_snapshot(old, [{"slot_time": "2026-03-15T00:00:00+00:00", "temp_c": 10.0, "solar_w_m2": 200.0}], mark_latest=False)
+    db.save_meteo_forecast_snapshot(fresh, [{"slot_time": "2026-04-23T00:00:00+00:00", "temp_c": 12.0, "solar_w_m2": 250.0}], mark_latest=True)
+
+    deleted_snapshots, deleted_values = db.prune_meteo_forecast_snapshots(max_age_days=30)
+    assert deleted_snapshots == 1
+    assert deleted_values == 1
+    assert _count("meteo_forecast_snapshot") == 1
+    assert _count("meteo_forecast_value") == 1
+
+
 # ---------------------------------------------------------------------------
 # prune_history_tables: sweep
 # ---------------------------------------------------------------------------
@@ -124,6 +137,8 @@ def test_prune_history_tables_returns_per_table_counts():
     results = db.prune_history_tables()
     assert set(results.keys()) == {
         "daikin_telemetry",
+        "meteo_forecast_snapshot",
+        "meteo_forecast_value",
         "meteo_forecast_history",
         "forecast_skill_log",
         "lp_solution_snapshot",
@@ -177,4 +192,6 @@ def test_prune_history_tables_tolerates_one_bad_policy(monkeypatch):
 
     results = db.prune_history_tables()
     assert results["daikin_telemetry"] == -1  # failure sentinel
+    assert results["meteo_forecast_snapshot"] >= 0  # normal completion
+    assert results["meteo_forecast_value"] >= 0  # normal completion
     assert results["meteo_forecast_history"] >= 0  # normal completion

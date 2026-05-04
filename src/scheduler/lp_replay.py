@@ -276,8 +276,13 @@ def replay_run(
             indoor_source=str(inputs.get("indoor_source") or "snapshot"),
         )
 
-    # Weather: prefer the forecast snapshot at-or-before run_at_utc (closest fetch).
-    weather, weather_fidelity = _reconstruct_weather(run_at_utc, slot_starts_utc)
+    # Weather: prefer the exact forecast fetch referenced by the LP snapshot;
+    # otherwise fall back to the latest fetch before the run timestamp.
+    weather, weather_fidelity = _reconstruct_weather(
+        run_at_utc,
+        slot_starts_utc,
+        forecast_fetch_at_utc=str(inputs.get("forecast_fetch_at_utc") or ""),
+    )
     if weather_fidelity == "missing":
         return LpReplayResult(
             ok=False, error="weather snapshot missing for this run",
@@ -601,6 +606,8 @@ def _config_overrides(
 def _reconstruct_weather(
     run_at_utc: str,
     slot_starts_utc: list[datetime],
+    *,
+    forecast_fetch_at_utc: str = "",
 ) -> tuple[WeatherLpSeries, WeatherFidelity]:
     """Rebuild WeatherLpSeries from meteo_forecast_history.
 
@@ -616,7 +623,9 @@ def _reconstruct_weather(
     — same behaviour as before, just confined to ageing rows.
     """
     rows: list[dict[str, Any]] = []
-    if run_at_utc:
+    if forecast_fetch_at_utc:
+        rows = db.get_meteo_forecast_at(forecast_fetch_at_utc)
+    if not rows and run_at_utc:
         rows = db.get_meteo_forecast_history_latest_before(run_at_utc)
     # Empty array → no prior fetch existed.
     if not rows:
