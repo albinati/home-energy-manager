@@ -13,6 +13,11 @@
   function fmtP(v) { return (v == null || isNaN(v)) ? '—' : `${Number(v).toFixed(1)}p`; }
   function fmtKwh(v) { return (v == null || isNaN(v)) ? '—' : `${Number(v).toFixed(3)} kWh`; }
   function fmtPct(v) { return (v == null || isNaN(v)) ? '—' : `${Number(v).toFixed(0)}%`; }
+  function sumList(v) {
+    if (!Array.isArray(v)) return null;
+    const nums = v.map(Number).filter(n => !Number.isNaN(n));
+    return nums.length ? nums.reduce((a, b) => a + b, 0) : null;
+  }
 
   function inputToIso(val) {
     // datetime-local gives "2026-04-24T10:00"; treat as UTC — the picker
@@ -34,6 +39,7 @@
     const state = data.state || {};
     const plan = data.planned_slot || {};
     const li = data.lp_inputs || {};
+    const lx = data.lp_exogenous || {};
     const src = data.source || {};
 
     // Source readout: which run + which log row fed this payload.
@@ -101,6 +107,31 @@
     $('#liPeak').textContent = fmtP(li.peak_threshold_p);
     $('#liDkMode').textContent = li.daikin_control_mode || '—';
     $('#liPreset').textContent = li.optimization_preset || '—';
+
+    const loadBits = lx.base_load_components || {};
+    const weatherBits = lx.weather_adjustment || {};
+    const tariffBits = lx.tariffs || {};
+    const residualTotal = sumList(loadBits.residual_profile_kwh);
+    const applianceTotal = sumList(loadBits.appliance_profile_kwh);
+    $('#lxResidual').textContent = fmtKwh(residualTotal);
+    $('#lxAppliance').textContent = fmtKwh(applianceTotal);
+    $('#lxFlat').textContent = fmtKwh(loadBits.flat_fallback_kwh);
+    $('#lxFoxMean').textContent = fmtKwh(loadBits.fox_mean_kwh_per_slot);
+    $('#lxBuckets').textContent = loadBits.profile_bucket_count != null
+      ? `${loadBits.profile_bucket_count} buckets`
+      : '—';
+    $('#lxFetch').textContent = weatherBits.forecast_fetch_at_utc || '—';
+    $('#lxPvAdjust').textContent = weatherBits.today_factor != null
+      ? `today=${Number(weatherBits.today_factor).toFixed(3)} flat=${Number(weatherBits.flat_scale ?? 1).toFixed(3)} cloud=${weatherBits.cloud_table_cells ?? 0} hourly=${weatherBits.hourly_table_cells ?? 0}`
+      : '—';
+    if (Array.isArray(tariffBits.export_price_pence) && tariffBits.export_price_pence.length) {
+      const xs = tariffBits.export_price_pence.map(Number).filter(n => !Number.isNaN(n));
+      const min = Math.min(...xs);
+      const max = Math.max(...xs);
+      $('#lxExport').textContent = `${xs.length} slots · ${fmtP(min)} to ${fmtP(max)}`;
+    } else {
+      $('#lxExport').textContent = tariffBits.uses_flat_export_rate ? 'flat export rate' : '—';
+    }
   }
 
   /**

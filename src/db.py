@@ -567,9 +567,6 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_lp_inputs_snapshot_plan_date ON lp_inputs_snapshot(plan_date)"
     )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_lp_inputs_snapshot_forecast_fetch ON lp_inputs_snapshot(forecast_fetch_at_utc)"
-    )
 
     # V11b: meteo_forecast_history — append-only audit log of every forecast
     # fetch. The existing meteo_forecast table is latest-per-slot (overwrites on
@@ -860,6 +857,9 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE lp_inputs_snapshot ADD COLUMN dhw_draw_prior_json TEXT")
     if "occupancy_prior_json" not in lp_cols:
         conn.execute("ALTER TABLE lp_inputs_snapshot ADD COLUMN occupancy_prior_json TEXT")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_lp_inputs_snapshot_forecast_fetch ON lp_inputs_snapshot(forecast_fetch_at_utc)"
+    )
     # Older DBs predate the cloud-aware PV table (PR #232). Idempotent — when
     # the table is already created at SCHEMA-load time this block is a no-op.
     conn.execute(
