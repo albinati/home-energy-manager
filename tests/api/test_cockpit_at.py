@@ -119,6 +119,9 @@ def test_at_rehydrates_from_snapshot(client):
     lx = body.get("lp_exogenous") or {}
     assert lx["base_load_components"]["profile_bucket_count"] == 48
     assert lx["weather_adjustment"]["today_factor"] == pytest.approx(0.95)
+    why = body.get("lp_why") or []
+    assert why
+    assert any("forecast fetch" in line for line in why)
 
 
 def test_history_page_renders(client):
