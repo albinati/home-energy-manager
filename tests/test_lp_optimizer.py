@@ -13,8 +13,7 @@ from src.weather import WeatherLpSeries
 
 @pytest.fixture(autouse=True)
 def _fast_solver(monkeypatch):
-    """Keep CI fast — use HiGHS with a short time limit (falls back to CBC if unavailable)."""
-    monkeypatch.setattr(app_config, "LP_HIGHS_TIME_LIMIT_SECONDS", 15)
+    """Keep CI fast and deterministic."""
     monkeypatch.setattr(app_config, "LP_CBC_TIME_LIMIT_SECONDS", 15)
     # Disable inverter stress and MPC knobs that add constraint complexity
     monkeypatch.setattr(app_config, "LP_INVERTER_STRESS_COST_PENCE", 0.0)
@@ -309,20 +308,12 @@ def test_simplified_hp_model_continuous_power(monkeypatch):
     ), "DHW kWh per slot exceeded max_hp_kw × 0.5"
 
 
-def test_highs_solver_used_by_default():
-    """HiGHS Python API should be the default solver when available."""
-    import pulp
-
-    available = pulp.listSolvers(onlyAvailable=True)
-    if "HiGHS" not in available:
-        pytest.skip("HiGHS not installed in this environment")
-
+def test_cbc_solver_used_by_default():
+    """CBC should be the default solver backend."""
     from src.scheduler.lp_optimizer import _make_solver
 
     solver = _make_solver()
-    # Both HiGHS and HiGHS_CMD are acceptable; check name starts with HiGHS
-    solver_name = type(solver).__name__
-    assert solver_name.startswith("HiGHS"), f"Expected HiGHS solver, got {solver_name}"
+    assert type(solver).__name__ == "PULP_CBC_CMD"
 
 
 def test_negative_price_max_charges_battery(monkeypatch):

@@ -21,7 +21,6 @@ from src.weather import WeatherLpSeries
 @pytest.fixture(autouse=True)
 def _fast_solver(monkeypatch: pytest.MonkeyPatch) -> None:
     """Mirror the test_lp_optimizer.py setup so the LP solves quickly + feasibly."""
-    monkeypatch.setattr(app_config, "LP_HIGHS_TIME_LIMIT_SECONDS", 15)
     monkeypatch.setattr(app_config, "LP_CBC_TIME_LIMIT_SECONDS", 15)
     monkeypatch.setattr(app_config, "LP_INVERTER_STRESS_COST_PENCE", 0.0)
     monkeypatch.setattr(app_config, "LP_HP_MIN_ON_SLOTS", 1)

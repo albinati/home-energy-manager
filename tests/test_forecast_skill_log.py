@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from src import db
@@ -67,6 +69,84 @@ def test_rebuild_forecast_skill_log_for_date_uses_latest_prior_fetch_and_actuals
     finally:
         conn.close()
 
+    run_id = db.log_optimizer_run({
+        "run_at": "2026-05-02T09:45:00+00:00",
+        "rates_count": 2,
+        "cheap_slots": 0,
+        "peak_slots": 0,
+        "standard_slots": 2,
+        "negative_slots": 0,
+        "target_vwap": 0.0,
+        "actual_agile_mean": 0.0,
+        "battery_warning": False,
+        "strategy_summary": "test",
+        "fox_schedule_uploaded": False,
+        "daikin_actions_count": 0,
+    })
+    db.save_lp_snapshots(
+        run_id,
+        {
+            "run_at_utc": "2026-05-02T09:45:00+00:00",
+            "plan_date": "2026-05-02",
+            "horizon_hours": 1,
+            "soc_initial_kwh": 5.0,
+            "tank_initial_c": 45.0,
+            "indoor_initial_c": 21.0,
+            "soc_source": "test",
+            "tank_source": "test",
+            "indoor_source": "test",
+            "base_load_json": json.dumps([0.20, 0.30]),
+            "micro_climate_offset_c": 0.0,
+            "forecast_fetch_at_utc": forecast_fetch_late,
+            "exogenous_snapshot_json": "{}",
+            "config_snapshot_json": "{}",
+            "price_quantize_p": 0.0,
+            "peak_threshold_p": 30.0,
+            "cheap_threshold_p": 10.0,
+            "daikin_control_mode": "passive",
+            "optimization_preset": "test",
+            "energy_strategy_mode": "savings_first",
+        },
+        [
+            {
+                "slot_index": 0,
+                "slot_time_utc": "2026-05-02T10:00:00+00:00",
+                "price_p": 20.0,
+                "import_kwh": 0.0,
+                "export_kwh": 0.0,
+                "charge_kwh": 0.0,
+                "discharge_kwh": 0.0,
+                "pv_use_kwh": 0.0,
+                "pv_curtail_kwh": 0.0,
+                "dhw_kwh": 0.05,
+                "space_kwh": 0.10,
+                "soc_kwh": 5.0,
+                "tank_temp_c": 45.0,
+                "indoor_temp_c": 21.0,
+                "outdoor_temp_c": 14.0,
+                "lwt_offset_c": 0.0,
+            },
+            {
+                "slot_index": 1,
+                "slot_time_utc": "2026-05-02T10:30:00+00:00",
+                "price_p": 20.0,
+                "import_kwh": 0.0,
+                "export_kwh": 0.0,
+                "charge_kwh": 0.0,
+                "discharge_kwh": 0.0,
+                "pv_use_kwh": 0.0,
+                "pv_curtail_kwh": 0.0,
+                "dhw_kwh": 0.05,
+                "space_kwh": 0.15,
+                "soc_kwh": 5.0,
+                "tank_temp_c": 45.0,
+                "indoor_temp_c": 21.0,
+                "outdoor_temp_c": 14.0,
+                "lwt_offset_c": 0.0,
+            },
+        ],
+    )
+
     rows_written = db.rebuild_forecast_skill_log_for_date("2026-05-02")
     assert rows_written == 1
 
@@ -79,6 +159,8 @@ def test_rebuild_forecast_skill_log_for_date_uses_latest_prior_fetch_and_actuals
     assert row["actual_temp_c"] == pytest.approx(16.0)
     assert row["actual_pv_kwh"] == pytest.approx(3.0)
     assert row["predicted_pv_kwh"] is not None
+    assert row["actual_load_kwh"] == pytest.approx(0.65)
+    assert row["predicted_load_kwh"] == pytest.approx(0.85)
     assert row["built_at_utc"]
 
 

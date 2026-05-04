@@ -1023,6 +1023,8 @@ def _persist_lp_snapshots(
     initial: Any,  # LpInitialState
     base_load: list[float],
     micro_climate_offset: float,
+    forecast_fetch_at_utc: str | None = None,
+    exogenous_snapshot: dict[str, Any] | None = None,
 ) -> None:
     """Build and persist the inputs + per-slot rows for this LP run.
 
@@ -1072,7 +1074,8 @@ def _persist_lp_snapshots(
         "indoor_source": getattr(initial, "indoor_source", "unknown"),
         "base_load_json": json.dumps([round(float(x), 4) for x in base_load]),
         "micro_climate_offset_c": float(micro_climate_offset or 0.0),
-        "forecast_fetch_at_utc": None,
+        "forecast_fetch_at_utc": forecast_fetch_at_utc,
+        "exogenous_snapshot_json": json.dumps(exogenous_snapshot or {}),
         "config_snapshot_json": json.dumps(cfg_snap),
         "price_quantize_p": float(getattr(config, "LP_PRICE_QUANTIZE_PENCE", 0.0)),
         "peak_threshold_p": float(plan.peak_threshold_pence),
@@ -1252,6 +1255,8 @@ def _run_optimizer_lp(
         _local = s.start_utc.astimezone(tz)
         _bucket = (_local.hour, 30 if _local.minute >= 30 else 0)
         base_load.append(_load_profile.get(_bucket, _flat))
+    residual_base_load = list(base_load)
+    appliance_profile_kwh = [0.0] * len(base_load)
 
     # Smart appliance scheduling: bump residual load on slots covered by armed
     # sessions so peak_export / charge / DHW plans route around the wash.
@@ -1270,7 +1275,9 @@ def _run_optimizer_lp(
                     _kw = _appliance_kw.get(_s.start_utc, 0.0)
                     if _kw > 0:
                         # Half-hour slot → kWh = kW × 0.5 h.
-                        base_load[_i] += _kw * 0.5
+                        appliance_kwh = _kw * 0.5
+                        base_load[_i] += appliance_kwh
+                        appliance_profile_kwh[_i] += appliance_kwh
                         _added_slots += 1
                 if _added_slots:
                     logger.info(
@@ -1316,7 +1323,6 @@ def _run_optimizer_lp(
             forecast_rows,
             mark_latest=True,
         )
-        inputs_row["forecast_fetch_at_utc"] = forecast_fetch_at_utc
     # PV calibration — fallback chain (best to worst):
     #   1. cloud-aware (hour × cloud-bucket) table  — PR #232
     #   2. per-hour-of-day table                    — PR #186
@@ -1379,6 +1385,31 @@ def _run_optimizer_lp(
     # tariff configured / not yet fetched), the LP falls back to the flat
     # EXPORT_RATE_PENCE constant, preserving legacy behaviour.
     export_prices = _build_export_price_line(starts)
+    exogenous_snapshot = {
+        "base_load_components": {
+            "residual_profile_kwh": [round(float(x), 4) for x in residual_base_load],
+            "appliance_profile_kwh": [round(float(x), 4) for x in appliance_profile_kwh],
+            "flat_fallback_kwh": round(float(_flat), 4),
+            "fox_mean_kwh_per_slot": round(float(_fox_mean), 4) if _fox_mean is not None else None,
+            "profile_bucket_count": len(_load_profile),
+            "profile_limit_slots": int(_profile_limit),
+        },
+        "weather_adjustment": {
+            "forecast_fetch_at_utc": forecast_fetch_at_utc if forecast else None,
+            "cloud_table_cells": len(pv_scale_cloud),
+            "hourly_table_cells": len(pv_scale_hourly),
+            "flat_scale": round(float(flat_scale), 6),
+            "today_factor": round(float(today_factor), 6),
+            "today_diag": today_diag,
+        },
+        "tariffs": {
+            "export_price_pence": (
+                [round(float(x), 4) for x in export_prices]
+                if export_prices is not None else None
+            ),
+            "uses_flat_export_rate": export_prices is None,
+        },
+    }
 
     plan = solve_lp(
         slot_starts_utc=starts,
@@ -1532,6 +1563,8 @@ def _run_optimizer_lp(
             initial=initial,
             base_load=base_load,
             micro_climate_offset=micro_climate_offset,
+            forecast_fetch_at_utc=(forecast_fetch_at_utc if forecast else None),
+            exogenous_snapshot=exogenous_snapshot,
         )
     except Exception as e:
         logger.warning("LP snapshot persistence failed (non-fatal): %s", e)

@@ -61,6 +61,7 @@ def test_lp_inputs_snapshot_has_expected_columns():
         "soc_initial_kwh", "tank_initial_c", "indoor_initial_c",
         "soc_source", "tank_source", "indoor_source",
         "base_load_json", "micro_climate_offset_c", "config_snapshot_json",
+        "exogenous_snapshot_json",
         "price_quantize_p", "peak_threshold_p", "cheap_threshold_p",
         "daikin_control_mode", "optimization_preset", "energy_strategy_mode",
         "forecast_fetch_at_utc",
@@ -105,6 +106,8 @@ def test_forecast_skill_log_has_expected_columns():
         "actual_temp_c",
         "predicted_pv_kwh",
         "actual_pv_kwh",
+        "predicted_load_kwh",
+        "actual_load_kwh",
         "built_at_utc",
     ):
         assert expected in cols, f"missing column {expected}"
@@ -225,6 +228,7 @@ def _mk_inputs_row() -> dict:
         "indoor_source": "daikin_cache",
         "base_load_json": json.dumps([0.4] * 48),
         "micro_climate_offset_c": 0.3,
+        "exogenous_snapshot_json": json.dumps({"base_load_components": {"appliance_profile_kwh": [0.0] * 48}}),
         "config_snapshot_json": json.dumps({"LP_HORIZON_HOURS": 24, "BATTERY_CAPACITY_KWH": 10.0}),
         "price_quantize_p": 1.0,
         "peak_threshold_p": 25.0,
@@ -272,6 +276,7 @@ def test_save_lp_snapshots_round_trip():
     # JSON fields survive the round-trip intact
     assert json.loads(inputs["config_snapshot_json"])["LP_HORIZON_HOURS"] == 24
     assert len(json.loads(inputs["base_load_json"])) == 48
+    assert json.loads(inputs["exogenous_snapshot_json"])["base_load_components"]["appliance_profile_kwh"][0] == 0.0
 
     slots = db.get_lp_solution_slots(run_id)
     assert len(slots) == 4

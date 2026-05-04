@@ -1,6 +1,6 @@
 """Smoke test for OPTIMIZER_BACKEND=heuristic — catches silent rot in the fallback path.
 
-The heuristic backend is the safety net when PuLP/HiGHS fails to solve. No prod
+The heuristic backend is the safety net when PuLP/CBC fails to solve. No prod
 config sets it, so it can rot without anyone noticing — until the day PuLP fails
 and the rot bites. This test seeds a realistic 48-slot day, runs the heuristic,
 and asserts a non-empty plan comes back.

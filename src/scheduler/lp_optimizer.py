@@ -1,7 +1,6 @@
 """PuLP MILP home energy optimizer (V9): battery, grid, PV, DHW tank, space heating.
 
 State-of-the-art features vs V8:
-  - HiGHS solver (≫ CBC in speed and solution quality; falls back to CBC if unavailable)
   - Simplified HP model: 1 binary hp_on[i] + continuous e_hp[i] in [0, max_hp_kw×0.5]
     instead of 4-bucket SOS1 → fewer binaries, tighter LP relaxation, faster solve
   - Minimum ON-time constraint for HP (anti short-cycling)
@@ -130,21 +129,16 @@ def _shower_slot_mask(
 
 
 def _make_solver() -> pulp.LpSolver:
-    """Return HiGHS (Python API) if available, else CBC. Configured via LP_SOLVER env var."""
-    solver_pref = (getattr(config, "LP_SOLVER", "highs") or "highs").lower()
-    time_limit = getattr(config, "LP_HIGHS_TIME_LIMIT_SECONDS", 30)
+    """Return the configured PuLP solver backend.
+
+    We currently standardize on CBC. HiGHS support was removed because it did
+    not materially improve this system's solve quality and caused native aborts
+    in the test/runtime environments.
+    """
+    solver_pref = (getattr(config, "LP_SOLVER", "cbc") or "cbc").lower()
     cbc_limit = getattr(config, "LP_CBC_TIME_LIMIT_SECONDS", 30)
-
-    available = pulp.listSolvers(onlyAvailable=True)
-
-    if solver_pref != "cbc" and "HiGHS" in available:
-        logger.debug("LP solver: HiGHS Python API (time_limit=%ds)", time_limit)
-        return pulp.HiGHS(
-            msg=False,
-            timeLimit=int(time_limit),
-            threads=0,  # 0 = auto (use all available cores)
-        )
-
+    if solver_pref != "cbc":
+        logger.info("LP_SOLVER=%s requested, but only CBC is supported; falling back to CBC", solver_pref)
     logger.debug("LP solver: CBC (time_limit=%ds)", cbc_limit)
     return pulp.PULP_CBC_CMD(msg=False, timeLimit=int(cbc_limit))
 

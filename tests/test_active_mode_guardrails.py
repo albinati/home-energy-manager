@@ -170,7 +170,6 @@ def test_lp_respects_tank_floor_under_extreme_prices(monkeypatch):
     This protects against a future config bug or pricing combination silently
     relaxing the comfort floor — should be impossible by construction (LP
     variable bounds), but a regression test pins it."""
-    monkeypatch.setattr(app_config, "LP_HIGHS_TIME_LIMIT_SECONDS", 15)
     monkeypatch.setattr(app_config, "LP_CBC_TIME_LIMIT_SECONDS", 15)
     monkeypatch.setattr(app_config, "LP_INVERTER_STRESS_COST_PENCE", 0.0)
     monkeypatch.setattr(app_config, "LP_HP_MIN_ON_SLOTS", 1)
