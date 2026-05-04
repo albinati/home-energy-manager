@@ -101,6 +101,20 @@ def test_meteo_forecast_history_has_expected_columns():
         assert expected in cols, f"missing column {expected}"
 
 
+def test_forecast_skill_log_has_expected_columns():
+    cols = _columns("forecast_skill_log")
+    for expected in (
+        "date_utc",
+        "hour_of_day",
+        "predicted_temp_c",
+        "actual_temp_c",
+        "predicted_pv_kwh",
+        "actual_pv_kwh",
+        "built_at_utc",
+    ):
+        assert expected in cols, f"missing column {expected}"
+
+
 def test_meteo_forecast_history_round_trips_cloud_cover():
     """V11-A: save_meteo_forecast_history persists cloud_cover_pct, and
     get_meteo_forecast_history_latest_before reads it back."""
