@@ -814,9 +814,12 @@ def bulletproof_forecast_refresh_job() -> None:
             for f in new_fcst
         ]
         prev_rows = _db.get_meteo_forecast_history_latest_before(now_utc.isoformat())
-        # Persist new (always — keeps the LP's source of truth fresh + audit trail).
-        _db.save_meteo_forecast_history(now_utc.isoformat(), new_rows)
-        _db.save_meteo_forecast(new_rows, now_utc.date().isoformat())
+        # Persist once into the canonical forecast snapshot store and mark it latest.
+        _db.save_meteo_forecast_snapshot(
+            now_utc.isoformat(),
+            new_rows,
+            mark_latest=True,
+        )
 
         if not config.MPC_EVENT_DRIVEN_ENABLED:
             logger.debug("forecast refresh persisted; trigger disabled by kill switch")
