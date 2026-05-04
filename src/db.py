@@ -2393,6 +2393,58 @@ def get_meteo_forecast(forecast_date: str) -> list[dict[str, Any]]:
             conn.close()
 
 
+def get_meteo_forecast_for_slot_date(slot_date: str) -> list[dict[str, Any]]:
+    """Return meteo_forecast rows whose slot_time falls on *slot_date*.
+
+    This is distinct from ``forecast_date``: the latter is the solve date used
+    when rows were last upserted, while slot_time identifies the actual target
+    day the LP/heartbeat needs to reason about.
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT * FROM meteo_forecast
+                   WHERE substr(slot_time, 1, 10) = ?
+                   ORDER BY slot_time""",
+                (slot_date,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
+def get_meteo_forecast_at_time(when_utc: str) -> dict[str, Any] | None:
+    """Return the forecast row active at *when_utc*.
+
+    Prefers the latest slot at or before ``when_utc``. If the request lands
+    before the first available slot, falls back to the earliest future slot so
+    bootstrapping still has something to work with.
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT * FROM meteo_forecast
+                   WHERE slot_time <= ?
+                   ORDER BY slot_time DESC
+                   LIMIT 1""",
+                (when_utc,),
+            )
+            row = cur.fetchone()
+            if row is not None:
+                return dict(row)
+            cur = conn.execute(
+                """SELECT * FROM meteo_forecast
+                   ORDER BY slot_time ASC
+                   LIMIT 1""",
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+
 def get_micro_climate_offset_c(lookback: int = 96) -> float:
     """Return mean(daikin_outdoor_temp - forecast_temp_c) from the most recent *lookback* rows.
 

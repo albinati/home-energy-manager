@@ -8,10 +8,21 @@ Forecast revision trigger lives in its own suite once that PR ships (#144).
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+from src import db
+from src.config import config as app_config
+
+
+@pytest.fixture(autouse=True)
+def _init_db(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(app_config, "DB_PATH", str(tmp_path / "t.db"), raising=False)
+    db.init_db()
+    yield
 
 
 @pytest.fixture(autouse=True)
@@ -245,6 +256,28 @@ def test_lp_predicted_load_kw_at_derives_expected_load_from_solution_slot(monkey
     assert kw == pytest.approx(2.4)
 
 
+def test_forecast_helpers_use_slot_time_after_midnight(monkeypatch):
+    from src.scheduler import runner
+    from src import db
+
+    db.save_meteo_forecast(
+        [
+            {
+                "slot_time": "2026-05-02T00:00:00+00:00",
+                "temp_c": 11.5,
+                "solar_w_m2": 600.0,
+                "cloud_cover_pct": 25.0,
+            }
+        ],
+        "2026-05-01",
+    )
+    now = datetime(2026, 5, 2, 0, 15, tzinfo=UTC)
+    assert runner._get_forecast_temp_c(now) == pytest.approx(11.5)
+    pv_kw = runner._get_forecast_pv_kw(now)
+    assert pv_kw is not None
+    assert pv_kw > 0
+
+
 # -------------------- Octopus rebadge --------------------
 
 
@@ -279,6 +312,7 @@ def _make_forecast_rows(base_utc: datetime, *, count: int, solar_w_m2: float, te
             "slot_time": (base_utc + timedelta(hours=i)).isoformat(),
             "temp_c": temp_c,
             "solar_w_m2": solar_w_m2,
+            "cloud_cover_pct": 0.0,
         }
         for i in range(count)
     ]

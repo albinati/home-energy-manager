@@ -248,6 +248,34 @@ def estimate_pv_kw(
     return capacity_kwp * (shortwave_radiation_wm2 / _IRRADIANCE_AT_STC_WM2) * efficiency
 
 
+def forecast_pv_kw_from_row(
+    hour_utc: int,
+    shortwave_radiation_wm2: float,
+    cloud_cover_pct: float | None,
+    *,
+    cloud_table: dict[tuple[int, int], float] | None = None,
+    hourly_table: dict[int, float] | None = None,
+    flat: float = 1.0,
+) -> float:
+    """Apply the same PV forecast transform used by the LP and live triggers.
+
+    Cloud attenuation is applied before the irradiance-to-kW conversion and the
+    calibration lookup follows the same cloud → hour → flat fallback chain as
+    ``forecast_to_lp_inputs``.
+    """
+    cloud_pct_f = float(cloud_cover_pct) if cloud_cover_pct is not None else 50.0
+    att = max(0.0, min(1.0, 1.0 - 0.25 * (cloud_pct_f / 100.0)))
+    rad_eff = max(0.0, float(shortwave_radiation_wm2) * att)
+    cal = get_pv_calibration_factor_for(
+        int(hour_utc),
+        cloud_pct_f,
+        cloud_table=cloud_table,
+        hourly_table=hourly_table,
+        flat=flat,
+    )
+    return estimate_pv_kw(rad_eff) * cal
+
+
 def compute_heating_demand_factor(
     temperature_c: float,
     base_temp_c: float | None = None,
@@ -382,8 +410,16 @@ def _forecast_delta(
         p = prev_idx[slot]
         n = new_idx[slot]
         try:
-            prev_pv = estimate_pv_kw(float(p.get("solar_w_m2") or 0.0))
-            new_pv = estimate_pv_kw(float(n.get("solar_w_m2") or 0.0))
+            prev_pv = forecast_pv_kw_from_row(
+                slot.hour,
+                float(p.get("solar_w_m2") or 0.0),
+                p.get("cloud_cover_pct"),
+            )
+            new_pv = forecast_pv_kw_from_row(
+                slot.hour,
+                float(n.get("solar_w_m2") or 0.0),
+                n.get("cloud_cover_pct"),
+            )
             delta_pv_kwh_total += abs(new_pv - prev_pv)  # 1h slot → kW * 1h = kWh
         except (ValueError, TypeError):
             pass
@@ -669,12 +705,16 @@ def compute_today_pv_correction_factor(
     if not actual_per_hour:
         return 1.0, {"reason": "no pv_realtime_history yet today"}
 
-    # 2. Pull today's forecast PV per UTC hour (use the latest meteo_forecast row
-    #    per slot — this is what the LP saw when it last solved).
+    # 2. Pull today's forecast PV per UTC hour from slot-time keyed rows. This
+    # is what the LP/heartbeat should reason about, regardless of when the rows
+    # were last upserted.
     try:
-        forecast_rows = _db.get_meteo_forecast(today)
+        forecast_rows = _db.get_meteo_forecast_for_slot_date(today)
     except Exception:  # noqa: BLE001
         forecast_rows = []
+    cal_cloud = _db.get_pv_calibration_hourly_cloud()
+    cal_hour = _db.get_pv_calibration_hourly()
+    flat_cal = compute_pv_calibration_factor() if not cal_cloud and not cal_hour else 1.0
     forecast_per_hour: dict[int, float] = {}
     for r in forecast_rows:
         try:
@@ -683,9 +723,14 @@ def compute_today_pv_correction_factor(
                 ts = ts.replace(tzinfo=UTC)
             if ts.date().isoformat() != today:
                 continue
-            rad = float(r.get("solar_w_m2") or 0.0)
-            # Forecast row is hour-anchored; estimate_pv_kw × 1h = kWh per hour
-            forecast_per_hour[ts.hour] = forecast_per_hour.get(ts.hour, 0.0) + estimate_pv_kw(rad)
+            forecast_per_hour[ts.hour] = forecast_per_hour.get(ts.hour, 0.0) + forecast_pv_kw_from_row(
+                ts.hour,
+                float(r.get("solar_w_m2") or 0.0),
+                r.get("cloud_cover_pct"),
+                cloud_table=cal_cloud,
+                hourly_table=cal_hour,
+                flat=flat_cal,
+            )
         except (ValueError, TypeError, KeyError):
             continue
 
@@ -879,7 +924,14 @@ def compute_pv_calibration_hourly_cloud_table(
         if forecast is None:
             continue
         rad, cloud = forecast
-        modelled_kw = estimate_pv_kw(rad)
+        modelled_kw = forecast_pv_kw_from_row(
+            hour,
+            rad,
+            cloud,
+            cloud_table=cal_cloud,
+            hourly_table=cal_hourly,
+            flat=flat_cal,
+        )
         if modelled_kw < 0.05 or measured_kw < 0.05:
             continue                          # dawn/dusk noise
         ratio = measured_kw / modelled_kw
@@ -1021,14 +1073,14 @@ def evaluate_pv_forecast_accuracy(
         rad = forecast_radiation.get(key)
         if rad is None:
             continue
-        cal = get_pv_calibration_factor_for(
+        predicted_kw = forecast_pv_kw_from_row(
             key[1],
+            rad,
             forecast_cloud.get(key),
             cloud_table=cal_cloud,
             hourly_table=cal_hourly,
             flat=flat_cal,
         )
-        predicted_kw = estimate_pv_kw(rad) * cal
         if predicted_kw < min_kw and actual_kw < min_kw:
             continue                      # both negligible — skip dawn/dusk
         pairs_per_hour[key[1]].append((predicted_kw, actual_kw))

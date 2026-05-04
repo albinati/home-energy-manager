@@ -45,14 +45,14 @@ def _seed_realtime(hour_utc: int, kw: float, n_samples: int = 12) -> None:
         )
 
 
-def _seed_forecast(hour_utc: int, irradiance_wm2: float) -> None:
+def _seed_forecast(hour_utc: int, irradiance_wm2: float, cloud_cover_pct: float | None = 0.0) -> None:
     """Seed a meteo_forecast row at the given hour UTC for today."""
     today = datetime.now(UTC).date()
     ts = datetime.combine(today, datetime.min.time()).replace(
         hour=hour_utc, tzinfo=UTC,
     )
     db.save_meteo_forecast(
-        [{"slot_time": ts.isoformat(), "temp_c": 15.0, "solar_w_m2": irradiance_wm2}],
+        [{"slot_time": ts.isoformat(), "temp_c": 15.0, "solar_w_m2": irradiance_wm2, "cloud_cover_pct": cloud_cover_pct}],
         today.isoformat(),
     )
 
@@ -132,3 +132,14 @@ def test_dawn_dusk_hours_excluded() -> None:
     _seed_forecast(hour_utc=20, irradiance_wm2=2.0)
     f, diag = compute_today_pv_correction_factor()
     assert diag["n_hours"] == 2, f"Dusk hour should be excluded: {diag}"
+
+
+def test_cloud_cover_is_reflected_in_today_adjuster() -> None:
+    """The today-aware factor should use the same cloud-aware PV transform as the LP."""
+    from src.weather import compute_today_pv_correction_factor
+
+    for h in (10, 11):
+        _seed_realtime(hour_utc=h, kw=1.5)
+        _seed_forecast(hour_utc=h, irradiance_wm2=800.0, cloud_cover_pct=100.0)
+    f, diag = compute_today_pv_correction_factor()
+    assert 0.6 <= f <= 0.7, f"Expected cloud-aware factor around 0.65, got {f}; diag={diag}"

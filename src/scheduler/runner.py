@@ -174,72 +174,43 @@ def _get_forecast_temp_c(now_utc: datetime) -> float | None:
     The optimizer saves the forecast after each LP run; this avoids a live HTTP call in the
     heartbeat. Returns None if no cached forecast is available (bootstrapping period).
     """
-    today_iso = now_utc.date().isoformat()
-    rows = db.get_meteo_forecast(today_iso)
-    if not rows:
+    row = db.get_meteo_forecast_at_time(now_utc.isoformat())
+    if not row:
         return None
-    # Find the nearest slot by absolute time difference
-    best: float | None = None
-    best_delta: float = float("inf")
-    for row in rows:
-        try:
-            slot_dt = datetime.fromisoformat(row["slot_time"].replace("Z", "+00:00"))
-            delta = abs((slot_dt - now_utc).total_seconds())
-            if delta < best_delta:
-                best_delta = delta
-                best = row["temp_c"]
-        except (KeyError, ValueError):
-            continue
-    return best
+    try:
+        return float(row["temp_c"]) if row.get("temp_c") is not None else None
+    except (TypeError, ValueError, KeyError):
+        return None
 
 
 def _get_forecast_pv_kw(now_utc: datetime) -> float | None:
     """Forecast PV kW at *now_utc* from cached meteo rows, mapped through LP transform."""
     try:
         from ..weather import (
-            compute_pv_calibration_factor,
             compute_today_pv_correction_factor,
-            estimate_pv_kw,
-            get_pv_calibration_factor_for,
+            forecast_pv_kw_from_row,
+            compute_pv_calibration_factor,
         )
 
-        today_iso = now_utc.date().isoformat()
-        rows = db.get_meteo_forecast(today_iso)
-        if not rows:
+        row = db.get_meteo_forecast_at_time(now_utc.isoformat())
+        if not row:
             return None
-        nearest: dict[str, Any] | None = None
-        best_delta = float("inf")
-        for row in rows:
-            st_raw = row.get("slot_time")
-            if not st_raw:
-                continue
-            try:
-                slot_dt = datetime.fromisoformat(str(st_raw).replace("Z", "+00:00"))
-            except (ValueError, TypeError):
-                continue
-            delta = abs((slot_dt - now_utc).total_seconds())
-            if delta < best_delta:
-                best_delta = delta
-                nearest = row
-        if nearest is None:
-            return None
-        rad_wm2 = float(nearest.get("solar_w_m2") or 0.0)
-        cloud_pct = nearest.get("cloud_cover_pct")
-        cloud_pct_f = float(cloud_pct) if cloud_pct is not None else 50.0
-        att = max(0.0, min(1.0, 1.0 - 0.25 * (cloud_pct_f / 100.0)))
-        rad_eff = max(0.0, rad_wm2 * att)
         cal_cloud = db.get_pv_calibration_hourly_cloud()
         cal_hour = db.get_pv_calibration_hourly()
         flat = compute_pv_calibration_factor() if not cal_cloud and not cal_hour else 1.0
-        cal = get_pv_calibration_factor_for(
-            now_utc.hour,
-            cloud_pct_f,
+        today_factor, _diag = compute_today_pv_correction_factor()
+        try:
+            slot_dt = datetime.fromisoformat(str(row["slot_time"]).replace("Z", "+00:00"))
+        except (KeyError, ValueError, TypeError):
+            slot_dt = now_utc
+        return forecast_pv_kw_from_row(
+            slot_dt.hour,
+            float(row.get("solar_w_m2") or 0.0),
+            row.get("cloud_cover_pct"),
             cloud_table=cal_cloud,
             hourly_table=cal_hour,
             flat=flat,
-        )
-        today_factor, _diag = compute_today_pv_correction_factor()
-        return estimate_pv_kw(rad_eff) * cal * today_factor
+        ) * today_factor
     except Exception as e:
         logger.debug("_get_forecast_pv_kw failed: %s", e)
         return None
