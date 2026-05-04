@@ -6,6 +6,7 @@ lp_inputs_snapshot, agile_rates, and execution_log.
 """
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -43,6 +44,26 @@ def _seed_run_with_slot(run_at: datetime, slot_time: datetime) -> int:
             "soc_source": "fox_realtime_cache", "tank_source": "daikin_cache",
             "indoor_source": "daikin_cache",
             "base_load_json": "[]", "micro_climate_offset_c": 0.0,
+            "exogenous_snapshot_json": json.dumps({
+                "base_load_components": {
+                    "residual_profile_kwh": [0.2, 0.3],
+                    "appliance_profile_kwh": [0.0, 0.1],
+                    "flat_fallback_kwh": 0.25,
+                    "fox_mean_kwh_per_slot": 0.22,
+                    "profile_bucket_count": 48,
+                },
+                "weather_adjustment": {
+                    "forecast_fetch_at_utc": "2026-04-24T05:00:00+00:00",
+                    "today_factor": 0.95,
+                    "flat_scale": 1.0,
+                    "cloud_table_cells": 12,
+                    "hourly_table_cells": 24,
+                },
+                "tariffs": {
+                    "export_price_pence": [5.0, 7.5],
+                    "uses_flat_export_rate": False,
+                },
+            }),
             "config_snapshot_json": "{}",
             "price_quantize_p": 0.0, "peak_threshold_p": 25.0, "cheap_threshold_p": 12.0,
             "daikin_control_mode": "passive", "optimization_preset": "normal",
@@ -95,6 +116,9 @@ def test_at_rehydrates_from_snapshot(client):
     li = body.get("lp_inputs") or {}
     assert li.get("soc_source") == "fox_realtime_cache"
     assert li.get("tank_source") == "daikin_cache"
+    lx = body.get("lp_exogenous") or {}
+    assert lx["base_load_components"]["profile_bucket_count"] == 48
+    assert lx["weather_adjustment"]["today_factor"] == pytest.approx(0.95)
 
 
 def test_history_page_renders(client):
