@@ -49,6 +49,9 @@ _last_mpc_run_at: datetime | None = None
 # Hysteresis on the SoC drift trigger: count consecutive heartbeat ticks above
 # threshold; only fire when we cross MPC_DRIFT_HYSTERESIS_TICKS. Resets on recovery.
 _consecutive_drift_ticks: int = 0
+_consecutive_pv_up_ticks: int = 0
+_consecutive_pv_down_ticks: int = 0
+_consecutive_load_up_ticks: int = 0
 
 
 def _can_run_mpc_now() -> bool:
@@ -188,6 +191,96 @@ def _get_forecast_temp_c(now_utc: datetime) -> float | None:
         except (KeyError, ValueError):
             continue
     return best
+
+
+def _get_forecast_pv_kw(now_utc: datetime) -> float | None:
+    """Forecast PV kW at *now_utc* from cached meteo rows, mapped through LP transform."""
+    try:
+        from ..weather import (
+            compute_pv_calibration_factor,
+            compute_today_pv_correction_factor,
+            estimate_pv_kw,
+            get_pv_calibration_factor_for,
+        )
+
+        today_iso = now_utc.date().isoformat()
+        rows = db.get_meteo_forecast(today_iso)
+        if not rows:
+            return None
+        nearest: dict[str, Any] | None = None
+        best_delta = float("inf")
+        for row in rows:
+            st_raw = row.get("slot_time")
+            if not st_raw:
+                continue
+            try:
+                slot_dt = datetime.fromisoformat(str(st_raw).replace("Z", "+00:00"))
+            except (ValueError, TypeError):
+                continue
+            delta = abs((slot_dt - now_utc).total_seconds())
+            if delta < best_delta:
+                best_delta = delta
+                nearest = row
+        if nearest is None:
+            return None
+        rad_wm2 = float(nearest.get("solar_w_m2") or 0.0)
+        cloud_pct = nearest.get("cloud_cover_pct")
+        cloud_pct_f = float(cloud_pct) if cloud_pct is not None else 50.0
+        att = max(0.0, min(1.0, 1.0 - 0.25 * (cloud_pct_f / 100.0)))
+        rad_eff = max(0.0, rad_wm2 * att)
+        cal_cloud = db.get_pv_calibration_hourly_cloud()
+        cal_hour = db.get_pv_calibration_hourly()
+        flat = compute_pv_calibration_factor() if not cal_cloud and not cal_hour else 1.0
+        cal = get_pv_calibration_factor_for(
+            now_utc.hour,
+            cloud_pct_f,
+            cloud_table=cal_cloud,
+            hourly_table=cal_hour,
+            flat=flat,
+        )
+        today_factor, _diag = compute_today_pv_correction_factor()
+        return estimate_pv_kw(rad_eff) * cal * today_factor
+    except Exception as e:
+        logger.debug("_get_forecast_pv_kw failed: %s", e)
+        return None
+
+
+def _lp_predicted_load_kw_at(when_utc: datetime) -> float | None:
+    """Expected house load kW from the latest LP solution at the slot containing ``when_utc``."""
+    try:
+        run_id = db.find_run_for_time(when_utc.isoformat())
+        if not run_id:
+            return None
+        slots = db.get_lp_solution_slots(run_id)
+        if not slots:
+            return None
+        target: dict[str, Any] | None = None
+        for s in slots:
+            st_raw = s.get("slot_time_utc")
+            if not st_raw:
+                continue
+            try:
+                st = datetime.fromisoformat(str(st_raw).replace("Z", "+00:00"))
+            except (ValueError, TypeError):
+                continue
+            if st <= when_utc:
+                target = s
+            else:
+                break
+        if target is None:
+            return None
+        imp = float(target.get("import_kwh") or 0.0)
+        pv_use = float(target.get("pv_use_kwh") or 0.0)
+        dis = float(target.get("discharge_kwh") or 0.0)
+        exp = float(target.get("export_kwh") or 0.0)
+        chg = float(target.get("charge_kwh") or 0.0)
+        dhw = float(target.get("dhw_kwh") or 0.0)
+        space = float(target.get("space_kwh") or 0.0)
+        load_kwh = imp + pv_use + dis - exp - chg - dhw - space
+        return max(0.0, load_kwh / 0.5)
+    except Exception as e:
+        logger.debug("_lp_predicted_load_kw_at failed: %s", e)
+        return None
 
 
 def get_scheduler_paused() -> bool:
@@ -523,7 +616,8 @@ def bulletproof_mpc_job(
 
     ``trigger_reason`` (default "manual"): tags the run for observability. Known reasons:
     ``octopus_fetch``, ``tier_boundary``, ``soc_drift``, ``forecast_revision``,
-    ``dynamic_replan``, ``plan_push``, ``manual``. The legacy ``cron`` value is gone (V12).
+    ``pv_upside``, ``pv_downside``, ``load_upside``, ``dynamic_replan``,
+    ``plan_push``, ``manual``. The legacy ``cron`` value is gone (V12).
     """
     global _last_mpc_run_at
 
@@ -1160,10 +1254,14 @@ def bulletproof_heartbeat_tick() -> None:
 
     soc = None
     fox_mode = None
+    rt_solar_kw: float | None = None
+    rt_load_kw: float | None = None
     try:
         rt = get_cached_realtime()
         soc = rt.soc
         fox_mode = rt.work_mode
+        rt_solar_kw = float(rt.solar_power) if rt.solar_power is not None else None
+        rt_load_kw = float(rt.load_power) if rt.load_power is not None else None
     except Exception:
         pass
 
@@ -1213,6 +1311,56 @@ def bulletproof_heartbeat_tick() -> None:
                     _consecutive_drift_ticks = 0
         except Exception as e:
             logger.debug("drift-trigger check failed (non-fatal): %s", e)
+
+    # Event-driven MPC: live PV/load deviation trigger.
+    # Complements forecast_revision (forecast-vs-forecast) with real-vs-expected checks.
+    if config.MPC_EVENT_DRIVEN_ENABLED and (rt_solar_kw is not None or rt_load_kw is not None):
+        try:
+            global _consecutive_pv_up_ticks, _consecutive_pv_down_ticks, _consecutive_load_up_ticks
+            hyst_ticks = max(1, int(config.MPC_LIVE_DEVIATION_HYSTERESIS_TICKS))
+            pv_thr = float(config.MPC_LIVE_PV_KW_THRESHOLD)
+            load_thr = float(config.MPC_LIVE_LOAD_KW_THRESHOLD)
+
+            if rt_solar_kw is not None:
+                expected_pv_kw = _get_forecast_pv_kw(now_utc)
+                if expected_pv_kw is not None:
+                    delta_pv_kw = rt_solar_kw - expected_pv_kw
+                    if delta_pv_kw >= pv_thr:
+                        _consecutive_pv_up_ticks += 1
+                        _consecutive_pv_down_ticks = 0
+                    elif delta_pv_kw <= -pv_thr:
+                        _consecutive_pv_down_ticks += 1
+                        _consecutive_pv_up_ticks = 0
+                    else:
+                        _consecutive_pv_up_ticks = 0
+                        _consecutive_pv_down_ticks = 0
+                else:
+                    _consecutive_pv_up_ticks = 0
+                    _consecutive_pv_down_ticks = 0
+
+            if rt_load_kw is not None:
+                expected_load_kw = _lp_predicted_load_kw_at(now_utc)
+                if expected_load_kw is not None and (rt_load_kw - expected_load_kw) >= load_thr:
+                    _consecutive_load_up_ticks += 1
+                else:
+                    _consecutive_load_up_ticks = 0
+
+            if _consecutive_pv_up_ticks >= hyst_ticks:
+                _consecutive_pv_up_ticks = 0
+                _consecutive_pv_down_ticks = 0
+                logger.info("MPC live trigger: pv_upside sustained for %d tick(s)", hyst_ticks)
+                bulletproof_mpc_job(force_write_devices=True, trigger_reason="pv_upside")
+            elif _consecutive_pv_down_ticks >= hyst_ticks:
+                _consecutive_pv_up_ticks = 0
+                _consecutive_pv_down_ticks = 0
+                logger.info("MPC live trigger: pv_downside sustained for %d tick(s)", hyst_ticks)
+                bulletproof_mpc_job(force_write_devices=True, trigger_reason="pv_downside")
+            elif _consecutive_load_up_ticks >= hyst_ticks:
+                _consecutive_load_up_ticks = 0
+                logger.info("MPC live trigger: load_upside sustained for %d tick(s)", hyst_ticks)
+                bulletproof_mpc_job(force_write_devices=True, trigger_reason="load_upside")
+        except Exception as e:
+            logger.debug("live-deviation trigger check failed (non-fatal): %s", e)
 
     room_t: float | None = None
     outdoor_t: float | None = None
