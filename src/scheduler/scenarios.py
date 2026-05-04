@@ -8,7 +8,7 @@ COP) and scales the base-load profile.
 
 The two side scenarios (optimistic, pessimistic) run **in parallel** via a
 ThreadPoolExecutor — each LP solve is independent (separate ``LpProblem``
-built per call, separate HiGHS solver instance) so the GIL releases during
+built per call, separate solver instance) so the GIL releases during
 solver execution and we get real wall-clock speedup. Total latency drops
 from ~3× single-solve to ~1× single-solve, which matters on the
 pre-peak ``octopus_fetch`` trigger that has a tight time budget before the
@@ -129,7 +129,7 @@ def _solve_one_scenario(
 
     Designed to run in a worker thread — module-level ``logger`` is
     thread-safe; ``solve_lp`` builds a fresh PuLP problem per call and
-    each HiGHS solver instance is independent, so two threads don't
+    each solver instance is independent, so two threads don't
     collide on solver state.
     """
     p = _perturbation_for(scenario)

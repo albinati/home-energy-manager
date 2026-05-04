@@ -554,6 +554,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             base_load_json           TEXT,
             micro_climate_offset_c   REAL,
             forecast_fetch_at_utc    TEXT,
+            exogenous_snapshot_json  TEXT,
             config_snapshot_json     TEXT,
             price_quantize_p         REAL,
             peak_threshold_p         REAL,
@@ -853,10 +854,25 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     lp_cols = {str(r[1]) for r in cur.fetchall()}
     if "forecast_fetch_at_utc" not in lp_cols:
         conn.execute("ALTER TABLE lp_inputs_snapshot ADD COLUMN forecast_fetch_at_utc TEXT")
+    if "exogenous_snapshot_json" not in lp_cols:
+        conn.execute("ALTER TABLE lp_inputs_snapshot ADD COLUMN exogenous_snapshot_json TEXT")
     if "dhw_draw_prior_json" not in lp_cols:
         conn.execute("ALTER TABLE lp_inputs_snapshot ADD COLUMN dhw_draw_prior_json TEXT")
     if "occupancy_prior_json" not in lp_cols:
         conn.execute("ALTER TABLE lp_inputs_snapshot ADD COLUMN occupancy_prior_json TEXT")
+    # Older DBs predate the cloud-aware PV table (PR #232). Idempotent — when
+    # the table is already created at SCHEMA-load time this block is a no-op.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS pv_calibration_hourly_cloud (
+            hour_utc        INTEGER NOT NULL CHECK(hour_utc >= 0 AND hour_utc < 24),
+            cloud_bucket    INTEGER NOT NULL CHECK(cloud_bucket >= 0 AND cloud_bucket < 4),
+            factor          REAL NOT NULL,
+            samples         INTEGER NOT NULL,
+            window_days     INTEGER NOT NULL,
+            computed_at     TEXT NOT NULL,
+            PRIMARY KEY (hour_utc, cloud_bucket)
+        )"""
+    )
 
 
 def init_db() -> None:
@@ -3606,18 +3622,19 @@ def save_lp_snapshots(
                    (run_id, run_at_utc, plan_date, horizon_hours,
                     soc_initial_kwh, tank_initial_c, indoor_initial_c,
                     soc_source, tank_source, indoor_source,
-                    base_load_json, micro_climate_offset_c, forecast_fetch_at_utc, config_snapshot_json,
+                    base_load_json, micro_climate_offset_c, forecast_fetch_at_utc, exogenous_snapshot_json, config_snapshot_json,
                     price_quantize_p, peak_threshold_p, cheap_threshold_p,
                     daikin_control_mode, optimization_preset, energy_strategy_mode)
                    VALUES (:run_id, :run_at_utc, :plan_date, :horizon_hours,
                            :soc_initial_kwh, :tank_initial_c, :indoor_initial_c,
                            :soc_source, :tank_source, :indoor_source,
-                           :base_load_json, :micro_climate_offset_c, :forecast_fetch_at_utc, :config_snapshot_json,
+                           :base_load_json, :micro_climate_offset_c, :forecast_fetch_at_utc, :exogenous_snapshot_json, :config_snapshot_json,
                            :price_quantize_p, :peak_threshold_p, :cheap_threshold_p,
                            :daikin_control_mode, :optimization_preset, :energy_strategy_mode)""",
                 {
                     "run_id": run_id,
                     "forecast_fetch_at_utc": inputs_row.get("forecast_fetch_at_utc"),
+                    "exogenous_snapshot_json": inputs_row.get("exogenous_snapshot_json"),
                     **inputs_row,
                 },
             )

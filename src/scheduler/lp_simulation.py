@@ -137,7 +137,7 @@ def run_lp_simulation(
     if not plan.ok:
         return LpSimulationResult(
             ok=False,
-            error=f"LP solver status: {plan.status} (infeasible or timed out — try raising LP_HIGHS_TIME_LIMIT_SECONDS)",
+            error=f"LP solver status: {plan.status} (infeasible or timed out — try raising LP_CBC_TIME_LIMIT_SECONDS)",
             plan_date=plan_date,
             plan_window=plan_window_label,
             plan=plan,
