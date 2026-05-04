@@ -40,6 +40,7 @@
     const plan = data.planned_slot || {};
     const li = data.lp_inputs || {};
     const lx = data.lp_exogenous || {};
+    const why = Array.isArray(data.lp_why) ? data.lp_why : [];
     const src = data.source || {};
 
     // Source readout: which run + which log row fed this payload.
@@ -131,6 +132,15 @@
       $('#lxExport').textContent = `${xs.length} slots · ${fmtP(min)} to ${fmtP(max)}`;
     } else {
       $('#lxExport').textContent = tariffBits.uses_flat_export_rate ? 'flat export rate' : '—';
+    }
+
+    const whyEl = $('#historyWhy');
+    if (whyEl) {
+      if (!why.length) {
+        whyEl.textContent = 'No slot-specific explanation available for that moment.';
+      } else {
+        whyEl.innerHTML = `<ul>${why.map(line => `<li>${line}</li>`).join('')}</ul>`;
+      }
     }
   }
 
