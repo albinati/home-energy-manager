@@ -1072,6 +1072,7 @@ def _persist_lp_snapshots(
         "indoor_source": getattr(initial, "indoor_source", "unknown"),
         "base_load_json": json.dumps([round(float(x), 4) for x in base_load]),
         "micro_climate_offset_c": float(micro_climate_offset or 0.0),
+        "forecast_fetch_at_utc": None,
         "config_snapshot_json": json.dumps(cfg_snap),
         "price_quantize_p": float(getattr(config, "LP_PRICE_QUANTIZE_PENCE", 0.0)),
         "peak_threshold_p": float(plan.peak_threshold_pence),
@@ -1297,9 +1298,10 @@ def _run_optimizer_lp(
     starts = [s.start_utc for s in slots]
 
     forecast = fetch_forecast(hours=max(48, int(config.LP_HORIZON_HOURS) + 24))
-    # Persist forecast to DB so heartbeat can read real Open-Meteo temp (vs Daikin sensor)
+    forecast_fetch_at_utc = datetime.now(UTC).isoformat()
+    # Persist the canonical forecast snapshot once so heartbeat + replay can
+    # both reference the same fetch instead of duplicating latest/history rows.
     if forecast:
-        _today = datetime.now(UTC).date().isoformat()
         forecast_rows = [
             {
                 "slot_time": f.time_utc.isoformat(),
@@ -1309,15 +1311,12 @@ def _run_optimizer_lp(
             }
             for f in forecast
         ]
-        db.save_meteo_forecast(forecast_rows, _today)
-        # V11: append-only fetch history keyed by UTC fetch timestamp so a
-        # later LP run (or the History view) can see which forecast was active
-        # at any past moment, even after newer fetches have overwritten the
-        # latest-per-slot table.
-        db.save_meteo_forecast_history(
-            datetime.now(UTC).isoformat(),
+        db.save_meteo_forecast_snapshot(
+            forecast_fetch_at_utc,
             forecast_rows,
+            mark_latest=True,
         )
+        inputs_row["forecast_fetch_at_utc"] = forecast_fetch_at_utc
     # PV calibration — fallback chain (best to worst):
     #   1. cloud-aware (hour × cloud-bucket) table  — PR #232
     #   2. per-hour-of-day table                    — PR #186
