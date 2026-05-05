@@ -253,18 +253,19 @@ path. Both run locally against a prod DB snapshot (CI doesn't have prod data).
 For each historical day in the last 14, replays the LP via
 `replay_day(mode="forward")` and sums `total_replayed_cost_p` (planned
 dispatch scored against actually-published Agile rates). Compares the
-**aggregate** against a frozen baseline pinned in
-`tests/fixtures/lp_regression_baseline.json`.
+**aggregate over the same baseline dates** against a frozen baseline pinned in
+`tests/fixtures/lp_regression_baseline.json`. Missing baseline dates fail the
+gate because partial replay coverage can make the new total look falsely cheap.
 
 ```
 DB_PATH=/path/to/prod-snapshot.db python scripts/check_lp_regression.py
 ```
 
-* Exit 0 = LP no worse than baseline + 50 p threshold across the 14-day
-  window. Solver float drift is typically << 1 p across 14 days, so 50 p
-  is generous.
-* Exit 1 = regression. Either fix the change or, if the regression is
-  intentional (new objective term / tuned weight), refresh the baseline:
+* Exit 0 = aggregate LP cost is better than or equal to the comparable
+  baseline window. Individual moments may be worse; the total must not be.
+* Exit 1 = aggregate cost regressed or replay coverage is incomplete. Fix the
+  change, or refresh the baseline only after confirming the new strategy is
+  better or equal on an agreed replay set:
   ```
   python scripts/check_lp_regression.py --refresh-baseline
   git add tests/fixtures/lp_regression_baseline.json
@@ -272,8 +273,8 @@ DB_PATH=/path/to/prod-snapshot.db python scripts/check_lp_regression.py
   in the same PR. The baseline records the SHA it was frozen at, so a
   reviewer can always see when the bar was last reset.
 
-This is the "LP must outperform every earlier version" guarantee — every
-commit either matches or beats the prior baseline.
+This is the "LP must outperform every earlier version" guarantee: every
+commit either matches or beats the prior aggregate baseline.
 
 ### Gate 2 — `scripts/validate_scenario_filter.py` (peak_export-specific)
 

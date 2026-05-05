@@ -58,7 +58,7 @@ def patched_replay(monkeypatch):
     return cs, by_date
 
 
-def test_no_baseline_yet_passes_with_message(tmp_path, patched_replay):
+def test_no_baseline_yet_fails_approval_gate(tmp_path, patched_replay):
     cs, _ = patched_replay
     baseline_path = tmp_path / "missing.json"
 
@@ -68,7 +68,7 @@ def test_no_baseline_yet_passes_with_message(tmp_path, patched_replay):
         fail_threshold_p=50.0,
         refresh_baseline=False,
     )
-    assert report.passed
+    assert not report.passed
     assert report.no_baseline_yet
     # Aggregate equals sum of replayed costs.
     assert report.new_total_replayed_cost_p == pytest.approx(95.0 + 200.0 + 140.0)
@@ -105,29 +105,80 @@ def test_pass_when_under_baseline(tmp_path, patched_replay):
     assert report.delta_vs_baseline_p == pytest.approx(-165.0)
 
 
-def test_fail_when_total_exceeds_baseline_plus_threshold(tmp_path, patched_replay):
+def test_fail_when_total_exceeds_baseline_with_zero_default_policy(tmp_path, patched_replay):
     cs, _ = patched_replay
     baseline_path = tmp_path / "baseline.json"
-    # Baseline 100 p, new = 435 p. Δ = +335 p, threshold 50 → FAIL.
-    baseline_path.write_text(json.dumps({"total_replayed_cost_p": 100.0}))
+    # Baseline 400 p, new = 435 p. Any aggregate cost increase fails.
+    baseline_path.write_text(json.dumps({"total_replayed_cost_p": 400.0}))
     report = cs.run_check(
         days_back=14, baseline_path=baseline_path,
-        fail_threshold_p=50.0, refresh_baseline=False,
+        fail_threshold_p=0.0, refresh_baseline=False,
     )
     assert not report.passed
-    assert report.delta_vs_baseline_p == pytest.approx(335.0)
+    assert report.delta_vs_baseline_p == pytest.approx(35.0)
 
 
-def test_within_threshold_still_passes(tmp_path, patched_replay):
+def test_explicit_positive_threshold_can_be_used_for_non_approval_experiments(tmp_path, patched_replay):
     cs, _ = patched_replay
     baseline_path = tmp_path / "baseline.json"
-    # Baseline 400 p, new 435 p. Δ = +35 p. Threshold 50 p → still pass.
+    # Baseline 400 p, new 435 p. Δ = +35 p. The approval path should not use
+    # this override, but the helper still supports local exploratory runs.
     baseline_path.write_text(json.dumps({"total_replayed_cost_p": 400.0}))
     report = cs.run_check(
         days_back=14, baseline_path=baseline_path,
         fail_threshold_p=50.0, refresh_baseline=False,
     )
     assert report.passed
+
+
+def test_baseline_per_date_compares_same_dates_only(tmp_path, patched_replay):
+    cs, _ = patched_replay
+    baseline_path = tmp_path / "baseline.json"
+    baseline_path.write_text(json.dumps({
+        "total_replayed_cost_p": 9999.0,
+        "per_date": {
+            "2026-04-25": {"total_replayed_cost_p": 100.0},
+            "2026-04-26": {"total_replayed_cost_p": 210.0},
+        },
+    }))
+    report = cs.run_check(
+        days_back=14, baseline_path=baseline_path,
+        fail_threshold_p=0.0, refresh_baseline=False,
+    )
+    assert report.compared_dates == ["2026-04-25", "2026-04-26"]
+    assert report.baseline_total_replayed_cost_p == pytest.approx(310.0)
+    assert report.new_total_replayed_cost_p == pytest.approx(295.0)
+    assert report.passed
+
+
+def test_missing_baseline_date_fails_even_when_current_total_looks_cheaper(tmp_path, monkeypatch):
+    from scripts import check_lp_regression as cs
+    from datetime import date
+
+    monkeypatch.setattr(cs, "_enumerate_dates_with_runs", lambda d: [date(2026, 4, 25)])
+    monkeypatch.setattr(
+        cs,
+        "_replay_one_day",
+        lambda target, *, mode="forward": cs.DayResult(
+            date=str(target), ok=True, error=None, recalc_count=1,
+            total_original_cost_p=100.0, total_replayed_cost_p=50.0,
+            total_delta_cost_p=-50.0,
+        ),
+    )
+    baseline_path = tmp_path / "baseline.json"
+    baseline_path.write_text(json.dumps({
+        "total_replayed_cost_p": 1000.0,
+        "per_date": {
+            "2026-04-25": {"total_replayed_cost_p": 100.0},
+            "2026-04-26": {"total_replayed_cost_p": 900.0},
+        },
+    }))
+    report = cs.run_check(
+        days_back=14, baseline_path=baseline_path,
+        fail_threshold_p=0.0, refresh_baseline=False,
+    )
+    assert not report.passed
+    assert report.baseline_missing_dates == ["2026-04-26"]
 
 
 def test_refresh_baseline_writes_file_and_returns_pass(tmp_path, patched_replay):
@@ -154,7 +205,7 @@ def test_malformed_baseline_treated_as_no_baseline(tmp_path, patched_replay):
         days_back=14, baseline_path=baseline_path,
         fail_threshold_p=50.0, refresh_baseline=False,
     )
-    assert report.passed  # vacuously
+    assert not report.passed
     assert report.no_baseline_yet
 
 
