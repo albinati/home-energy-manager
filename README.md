@@ -61,7 +61,7 @@ Everything is parameterised via `.env`. Adapting it to a different setup is feas
 - **SmartThings appliance dispatch** — washer/dryer/dishwasher start times picked by the LP given a deadline; physical Smart Control button is the consent gate.
 - **Notifications via OpenClaw hook** — twice-daily digest, plan-revision pings, negative-price alerts. No direct chat APIs from this repo.
 - **75-tool MCP surface** — Fox, Daikin, Octopus, optimization, replay, dispatch decisions. Bearer-guarded HTTP transport.
-- **Closed-loop replay + regression gate** — every LP solve is a frozen, replayable snapshot; `scripts/check_lp_regression.py --mode=both` blocks merges that make the planner worse.
+- **Closed-loop replay + regression gate** — every LP solve is a frozen, replayable snapshot; `scripts/check_lp_regression.py --mode=both` blocks merges when aggregate cost is worse on comparable baseline dates.
 
 ## How it works
 
@@ -147,7 +147,7 @@ The full backlog is on the [issues board](https://github.com/albinati/home-energ
 
 Adding a feature, reproducing a bug, or porting to a different installation? See [CONTRIBUTING.md](CONTRIBUTING.md). Security issues — see [SECURITY.md](SECURITY.md).
 
-The PR template requires the LP regression gate (`scripts/check_lp_regression.py --mode=both`) to pass for any change under `src/scheduler/` — that's how we keep "the LP must outperform every earlier version always" honest.
+The PR template requires the LP regression gate (`scripts/check_lp_regression.py --mode=both`) to pass for any change under `src/scheduler/`: individual moments can be worse, but comparable aggregate cost must be better than or equal to the baseline.
 
 ## License
 

@@ -11,11 +11,11 @@ against a frozen baseline pinned in
 **Exit code semantics:**
 
 * 0 — total replayed cost ≤ baseline + ``--fail-above-pence`` threshold (default
-  50 p over the window). The new code is at least as good as the baseline.
-* 1 — the new code is materially worse than the baseline. **Do not merge** until
-  either (a) the regression is fixed, or (b) you intentionally accept it as the
-  new baseline by re-running with ``--refresh-baseline`` and committing the
-  updated JSON in the same PR.
+  0 p over the comparable window). The new code is at least as good as the
+  baseline overall. Individual moments may be worse; aggregate cost must not be.
+* 1 — the new code is worse than the comparable baseline, the baseline is
+  missing, or baseline replay coverage is incomplete. **Do not merge** until
+  the regression or replay data is fixed.
 
 **Usage:**
 
@@ -23,7 +23,7 @@ against a frozen baseline pinned in
 # Pre-merge gate (against your locally-mounted prod DB snapshot):
 DB_PATH=/path/to/prod-snapshot.db .venv/bin/python scripts/check_lp_regression.py
 
-# After an INTENTIONAL LP behaviour change (new objective term, tuned weights):
+# After proving a new LP strategy is better or equal on an agreed replay set:
 DB_PATH=/path/to/prod-snapshot.db .venv/bin/python scripts/check_lp_regression.py \
     --refresh-baseline
 git add tests/fixtures/lp_regression_baseline.json && git commit
@@ -77,13 +77,17 @@ class RegressionReport:
     days: list[DayResult] = field(default_factory=list)
     refreshed_baseline: bool = False
     no_baseline_yet: bool = False  # first run, baseline file empty/missing
+    baseline_missing_dates: list[str] = field(default_factory=list)
+    compared_dates: list[str] = field(default_factory=list)
 
     @property
     def passed(self) -> bool:
         if self.refreshed_baseline:
             return True
         if self.no_baseline_yet:
-            return True
+            return False
+        if self.baseline_missing_dates:
+            return False
         return self.delta_vs_baseline_p <= self.fail_threshold_p
 
 
@@ -234,20 +238,52 @@ def run_check(
         delta_vs_baseline_p=0.0,
     )
 
+    ok_by_date: dict[str, DayResult] = {}
     for d in dates:
         result = _replay_one_day(d, mode=mode)
         report.days.append(result)
         if result.ok:
-            report.new_total_replayed_cost_p += result.total_replayed_cost_p
+            ok_by_date[result.date] = result
 
     baseline = _load_baseline(baseline_path)
     if baseline is None:
         report.no_baseline_yet = True
-    else:
-        report.baseline_total_replayed_cost_p = float(baseline.get("total_replayed_cost_p", 0.0))
-        report.delta_vs_baseline_p = (
-            report.new_total_replayed_cost_p - report.baseline_total_replayed_cost_p
+        report.new_total_replayed_cost_p = sum(
+            d.total_replayed_cost_p for d in report.days if d.ok
         )
+    else:
+        per_date = baseline.get("per_date") if isinstance(baseline, dict) else None
+        if isinstance(per_date, dict) and per_date:
+            baseline_total = 0.0
+            current_total = 0.0
+            missing: list[str] = []
+            compared: list[str] = []
+            for day in sorted(str(k) for k in per_date.keys()):
+                row = per_date.get(day) or {}
+                try:
+                    baseline_day_cost = float(row.get("total_replayed_cost_p", 0.0))
+                except (AttributeError, TypeError, ValueError):
+                    baseline_day_cost = 0.0
+                current = ok_by_date.get(day)
+                if current is None:
+                    missing.append(day)
+                    continue
+                baseline_total += baseline_day_cost
+                current_total += current.total_replayed_cost_p
+                compared.append(day)
+            report.baseline_missing_dates = missing
+            report.compared_dates = compared
+            report.baseline_total_replayed_cost_p = baseline_total
+            report.new_total_replayed_cost_p = current_total
+            report.delta_vs_baseline_p = current_total - baseline_total
+        else:
+            report.new_total_replayed_cost_p = sum(
+                d.total_replayed_cost_p for d in report.days if d.ok
+            )
+            report.baseline_total_replayed_cost_p = float(baseline.get("total_replayed_cost_p", 0.0))
+            report.delta_vs_baseline_p = (
+                report.new_total_replayed_cost_p - report.baseline_total_replayed_cost_p
+            )
 
     if refresh_baseline:
         _write_baseline(baseline_path, report, _detect_git_sha())
@@ -277,24 +313,29 @@ def _print_report(report: RegressionReport) -> None:
         )
     print("-" * 80)
     print(f"NEW total replayed cost      : {report.new_total_replayed_cost_p / 100:>+9.2f} £")
+    if report.compared_dates:
+        print(f"Compared baseline dates      : {len(report.compared_dates)}")
+    if report.baseline_missing_dates:
+        print("Missing baseline dates       : " + ", ".join(report.baseline_missing_dates))
     if report.baseline_total_replayed_cost_p is None:
         if report.refreshed_baseline:
             print("Baseline                     : refreshed and written to "
                   f"{report.baseline_path}")
         else:
             print(f"Baseline                     : NOT FOUND at {report.baseline_path}")
-            print("                               Re-run with --refresh-baseline to "
-                  "freeze the current totals as the baseline.")
+            print("                               Approval requires a comparable baseline. "
+                  "Refresh only after proving the strategy is better or equal.")
     else:
         print(f"BASELINE total replayed cost : "
               f"{report.baseline_total_replayed_cost_p / 100:>+9.2f} £   "
-              f"(threshold +{report.fail_threshold_p / 100:.2f} £)")
+              f"(allowed worse +{report.fail_threshold_p / 100:.2f} £)")
         print(f"Δ vs baseline                : "
               f"{report.delta_vs_baseline_p / 100:>+9.2f} £")
     if report.passed:
-        print("VERDICT: PASS — LP is no worse than baseline.")
+        print("VERDICT: PASS — aggregate cost is no worse than baseline.")
     else:
-        print("VERDICT: FAIL — LP regressed beyond the threshold; "
+        print("VERDICT: FAIL — aggregate cost regressed, baseline is missing, "
+              "or baseline coverage is incomplete; "
               "investigate before merging.")
     print()
 
@@ -310,19 +351,19 @@ def main(argv: list[str]) -> int:
         help="Path to the JSON baseline file (default: tests/fixtures/lp_regression_baseline.json).",
     )
     parser.add_argument(
-        "--fail-above-pence", type=float, default=50.0,
+        "--fail-above-pence", type=float, default=0.0,
         help=(
             "Fail if (new total replayed cost − baseline) exceeds this many pence. "
-            "Default 50 (= £0.50 over the whole window). Solver float-precision drift "
-            "is typically << 1 p across 14 days, so 50 p is a generous tolerance."
+            "Default 0: individual moments may worsen, but aggregate replayed cost "
+            "must be better than or equal to the comparable baseline window."
         ),
     )
     parser.add_argument(
         "--refresh-baseline", action="store_true",
         help=(
-            "Overwrite the baseline file with the current totals. Use this AFTER "
-            "intentionally changing LP behaviour (new objective term, tuned weights, "
-            "rebased default config) — commit the updated JSON in the same PR."
+            "Overwrite the baseline file with the current totals. Use this only after "
+            "proving the new strategy is better or equal on an agreed replay set; "
+            "commit the updated JSON in the same PR."
         ),
     )
     parser.add_argument(
