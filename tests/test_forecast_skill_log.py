@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 import pytest
 
@@ -54,16 +55,16 @@ def test_rebuild_forecast_skill_log_for_date_uses_latest_prior_fetch_and_actuals
             ("2026-05-02T10:35:00+00:00", 4.0, 0.8, 56.0, "test"),
         )
         conn.execute(
-            """INSERT INTO execution_log
-               (timestamp, daikin_outdoor_temp)
-               VALUES (?, ?)""",
-            ("2026-05-02T10:10:00+00:00", 15.0),
+            """INSERT INTO daikin_telemetry
+               (fetched_at, source, outdoor_temp_c)
+               VALUES (?, ?, ?)""",
+            (datetime(2026, 5, 2, 10, 10, tzinfo=UTC).timestamp(), "live", 15.0),
         )
         conn.execute(
-            """INSERT INTO execution_log
-               (timestamp, daikin_outdoor_temp)
-               VALUES (?, ?)""",
-            ("2026-05-02T10:40:00+00:00", 17.0),
+            """INSERT INTO daikin_telemetry
+               (fetched_at, source, outdoor_temp_c)
+               VALUES (?, ?, ?)""",
+            (datetime(2026, 5, 2, 10, 40, tzinfo=UTC).timestamp(), "live", 17.0),
         )
         conn.commit()
     finally:
@@ -157,6 +158,8 @@ def test_rebuild_forecast_skill_log_for_date_uses_latest_prior_fetch_and_actuals
     assert row["hour_of_day"] == 10
     assert row["predicted_temp_c"] == pytest.approx(14.0)
     assert row["actual_temp_c"] == pytest.approx(16.0)
+    assert db.get_micro_climate_offset_c(lookback=1) == pytest.approx(2.0)
+    assert db.get_micro_climate_offset_by_hour_c(lookback=1)[10] == pytest.approx(2.0)
     assert row["actual_pv_kwh"] == pytest.approx(3.0)
     assert row["predicted_pv_kwh"] is not None
     assert row["actual_load_kwh"] == pytest.approx(0.65)

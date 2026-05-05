@@ -69,6 +69,7 @@ The script: backs up DB → git pull → pip install → DB migration → restar
 | `PLAN_APPROVAL_TIMEOUT_SECONDS` | `300` | Grace window advertised to OpenClaw for Telegram/Discord accept/reject buttons (auto-accept on timeout). |
 | `PLAN_REGEN_COOLDOWN_SECONDS` | `300` | Prevents spam re-planning |
 | `DAIKIN_DAILY_BUDGET` | `180` | Hard cap below Daikin's 200/day limit |
+| `DAIKIN_CALIBRATION_WINDOWS_LOCAL` | `06:00-08:00,14:30-16:30` | Local windows where stale Daikin cache may refresh for temperature calibration |
 | `FOX_DAILY_BUDGET` | `1200` | Conservative cap below Fox's 1440/day |
 | `LP_MPC_HOURS` | `6,9,12,15` | Intra-day MPC re-plan hours (BST/local). See MPC schedule below. |
 | `LP_MPC_WRITE_DEVICES` | `true` | MPC and Octopus-fetch re-plans push updated Fox/Daikin schedule to hardware |

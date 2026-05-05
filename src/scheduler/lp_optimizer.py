@@ -23,9 +23,11 @@ from zoneinfo import ZoneInfo
 
 import pulp
 
-from ..config import config
+from ..config import config, cop_at_temperature
 from ..physics import (
+    apply_cop_lift_multiplier,
     get_daikin_heating_kw,
+    get_lwt_base_c,
     lwt_offset_from_space_kw,
     predict_passive_daikin_load,
 )
@@ -171,6 +173,7 @@ def solve_lp(
     initial: LpInitialState,
     tz: ZoneInfo,
     micro_climate_offset_c: float = 0.0,
+    micro_climate_offset_by_hour_c: dict[int, float] | None = None,
     export_price_pence: list[float] | None = None,
 ) -> LpPlan:
     """Build and solve the MILP. Raises ``ValueError`` on dimension mismatch.
@@ -192,17 +195,59 @@ def solve_lp(
         raise ValueError("LP: weather horizon mismatch")
 
     pv_avail = list(weather.pv_kwh_per_slot)
-    # Apply micro-climate offset: positive = local warmer than forecast, negative = colder.
-    # Subtract so that a negative offset (colder microclimate) lowers the effective t_out,
-    # increasing modelled building heat-loss and forcing higher e_space allocation.
-    t_out = [t - micro_climate_offset_c for t in weather.temperature_outdoor_c]
-    cop_dhw = list(weather.cop_dhw)
-    cop_space = list(weather.cop_space)
+    # Apply micro-climate offset: offsets are actual - forecast, so the
+    # calibrated temperature is forecast + offset. Hour-specific offsets let
+    # the LP react differently in early-morning vs afternoon heating windows.
+    t_out: list[float] = []
+    cop_dhw: list[float] = []
+    cop_space: list[float] = []
+    offset_by_hour = micro_climate_offset_by_hour_c or {}
+    offset_default = float(micro_climate_offset_c or 0.0)
+    curve = config.DAIKIN_COP_CURVE
+    dhw_pen = float(config.COP_DHW_PENALTY)
+    lift_pen = float(getattr(config, "LP_COP_LIFT_PENALTY_PER_KELVIN", 0.0))
+    lwt_off_max = float(getattr(config, "OPTIMIZATION_LWT_OFFSET_MAX", 10.0))
+    lwt_ceiling = float(getattr(config, "LP_COP_SPACE_LWT_CEILING_C", 50.0))
+    lwt_dhw = float(getattr(config, "LP_COP_DHW_LIFT_SUPPLY_C", 45.0))
+    ref_k = float(getattr(config, "LP_COP_LIFT_REFERENCE_DELTA_K", 25.0))
+    min_m = float(getattr(config, "LP_COP_LIFT_MIN_MULTIPLIER", 0.5))
+    for i, raw_temp in enumerate(weather.temperature_outdoor_c):
+        slot_hour = slot_starts_utc[i].hour if i < len(slot_starts_utc) else i % 24
+        offset = float(offset_by_hour.get(slot_hour, offset_default))
+        offset = max(-5.0, min(5.0, offset))
+        temp_c = raw_temp + offset
+        t_out.append(temp_c)
+        base_cop = max(1.0, cop_at_temperature(curve, temp_c))
+        if lift_pen > 0.0:
+            lwt_space = min(lwt_ceiling, get_lwt_base_c(temp_c) + lwt_off_max)
+            cop_s = apply_cop_lift_multiplier(
+                base_cop,
+                temp_c,
+                lwt_space,
+                penalty_per_k=lift_pen,
+                reference_delta_k=ref_k,
+                min_mult=min_m,
+            )
+            cop_d = max(
+                1.0,
+                apply_cop_lift_multiplier(
+                    max(1.0, base_cop - dhw_pen),
+                    temp_c,
+                    lwt_dhw,
+                    penalty_per_k=lift_pen,
+                    reference_delta_k=ref_k,
+                    min_mult=min_m,
+                ),
+            )
+        else:
+            cop_s = base_cop
+            cop_d = max(1.0, cop_s - dhw_pen)
+        cop_space.append(cop_s)
+        cop_dhw.append(cop_d)
 
     slot_h = 0.5  # 30-minute slots
     max_hp_kwh_per_slot = float(getattr(config, "DAIKIN_MAX_HP_KW", 2.0)) * slot_h
     lwt_offset_max = float(getattr(config, "OPTIMIZATION_LWT_OFFSET_MAX", 10.0))
-    lwt_offset_min = float(getattr(config, "OPTIMIZATION_LWT_OFFSET_MIN", -10.0))
 
     # Per-slot physics-consistent bounds for e_space from the climate curve.
     # floor: compressor draw at zero offset (natural curve point).

@@ -960,6 +960,11 @@ class Config:
     DAIKIN_SLOT_TRANSITION_WINDOW_SECONDS: int = int(
         os.getenv("DAIKIN_SLOT_TRANSITION_WINDOW_SECONDS", "300")
     )
+    # Local-time calibration windows where Daikin refreshes are allowed if the cache is stale.
+    # Format: comma-separated HH:MM-HH:MM ranges in BULLETPROOF_TIMEZONE.
+    DAIKIN_CALIBRATION_WINDOWS_LOCAL: str = (
+        os.getenv("DAIKIN_CALIBRATION_WINDOWS_LOCAL", "06:00-08:00,14:30-16:30")
+    )
     # Phase 4.1 — per-caller cache staleness ceilings (seconds) so non-heartbeat paths reuse the cache.
     DAIKIN_LP_INIT_CACHE_MAX_AGE_SECONDS: int = int(
         os.getenv("DAIKIN_LP_INIT_CACHE_MAX_AGE_SECONDS", "600")

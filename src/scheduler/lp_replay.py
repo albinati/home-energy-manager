@@ -294,13 +294,32 @@ def replay_run(
     export_price_pence = _build_export_prices(slot_starts_utc)
 
     # Micro-climate offset: snapshot value in honest mode, current config in forward.
+    micro_climate_offset_by_hour: dict[int, float] = {}
     if mode == "honest":
         mco = float(inputs.get("micro_climate_offset_c") or 0.0)
+        try:
+            temp_adj = json.loads(inputs.get("exogenous_snapshot_json") or "{}").get(
+                "temperature_adjustment", {}
+            )
+            mco_by_hour_raw = temp_adj.get("by_hour_c") or {}
+            micro_climate_offset_by_hour = {
+                int(k): float(v)
+                for k, v in mco_by_hour_raw.items()
+                if v is not None
+            }
+        except (TypeError, ValueError, json.JSONDecodeError, AttributeError):
+            micro_climate_offset_by_hour = {}
     else:
         try:
             mco = float(db.get_micro_climate_offset_c(getattr(config, "DAIKIN_MICRO_CLIMATE_LOOKBACK", 96)))
         except Exception:
             mco = 0.0
+        try:
+            micro_climate_offset_by_hour = db.get_micro_climate_offset_by_hour_c(
+                getattr(config, "DAIKIN_MICRO_CLIMATE_LOOKBACK", 96)
+            )
+        except Exception:
+            micro_climate_offset_by_hour = {}
 
     tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
 
@@ -323,6 +342,7 @@ def replay_run(
                 initial=initial,
                 tz=tz,
                 micro_climate_offset_c=mco,
+                micro_climate_offset_by_hour_c=micro_climate_offset_by_hour,
                 export_price_pence=export_price_pence,
             )
         except Exception as e:  # solver failure — surface, don't crash

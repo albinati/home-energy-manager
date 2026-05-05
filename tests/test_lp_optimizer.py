@@ -38,6 +38,26 @@ def _series(n: int, base: datetime) -> tuple[list[datetime], WeatherLpSeries]:
     return slots, w
 
 
+def test_micro_climate_offset_is_applied_as_forecast_plus_offset():
+    base = datetime(2026, 7, 1, 0, 0, tzinfo=UTC)
+    slots, w = _series(1, base)
+    st = LpInitialState(soc_kwh=4.0, tank_temp_c=44.0, indoor_temp_c=20.5)
+
+    plan = solve_lp(
+        slot_starts_utc=slots,
+        price_pence=[12.0],
+        base_load_kwh=[0.4],
+        weather=w,
+        initial=st,
+        tz=ZoneInfo("Europe/London"),
+        micro_climate_offset_c=-2.0,
+        micro_climate_offset_by_hour_c={0: -2.0},
+    )
+
+    assert plan.ok
+    assert plan.temp_outdoor_c[0] == pytest.approx(8.0)
+
+
 def test_lp_solves_optimal_small_horizon():
     base = datetime(2026, 7, 1, 0, 0, tzinfo=UTC)
     n = 12
