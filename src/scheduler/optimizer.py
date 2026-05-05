@@ -1380,6 +1380,9 @@ def _run_optimizer_lp(
     weather = forecast_to_lp_inputs(forecast, starts, pv_scale=_pv_scale_callable)
     initial = read_lp_initial_state(daikin)
     micro_climate_offset = db.get_micro_climate_offset_c(config.DAIKIN_MICRO_CLIMATE_LOOKBACK)
+    micro_climate_offset_by_hour = db.get_micro_climate_offset_by_hour_c(
+        config.DAIKIN_MICRO_CLIMATE_LOOKBACK
+    )
 
     # Per-slot Octopus Outgoing Agile (export) prices. When the table is empty (no
     # tariff configured / not yet fetched), the LP falls back to the flat
@@ -1402,6 +1405,11 @@ def _run_optimizer_lp(
             "today_factor": round(float(today_factor), 6),
             "today_diag": today_diag,
         },
+        "temperature_adjustment": {
+            "source": "forecast_skill_log",
+            "micro_climate_offset_c": round(float(micro_climate_offset), 6),
+            "by_hour_c": {str(k): round(float(v), 6) for k, v in micro_climate_offset_by_hour.items()},
+        },
         "tariffs": {
             "export_price_pence": (
                 [round(float(x), 4) for x in export_prices]
@@ -1419,6 +1427,7 @@ def _run_optimizer_lp(
         initial=initial,
         tz=tz,
         micro_climate_offset_c=micro_climate_offset,
+        micro_climate_offset_by_hour_c=micro_climate_offset_by_hour,
         export_price_pence=export_prices,
     )
     if not plan.ok:

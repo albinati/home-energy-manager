@@ -2628,15 +2628,39 @@ def get_meteo_forecast_at_time(when_utc: str) -> dict[str, Any] | None:
 
 
 def get_micro_climate_offset_c(lookback: int = 96) -> float:
-    """Return mean(daikin_outdoor_temp - forecast_temp_c) from the most recent *lookback* rows.
+    """Return mean(actual - forecast) outdoor-temp offset from recent skill rows.
 
-    A positive result means the local microclimate runs warmer than the Open-Meteo forecast;
-    negative means colder (e.g. -1.5 means the garden is ~1.5 °C colder than forecast).
-    Returns 0.0 during the bootstrapping period when values are identical or missing.
+    Preference order:
+      1. ``forecast_skill_log`` derived rows, rebuilt from canonical forecast +
+         Daikin telemetry.
+      2. Legacy ``execution_log`` rows, for bootstrap / backwards compatibility.
+
+    A positive result means the local microclimate runs warmer than forecast;
+    negative means colder. Returns 0.0 when no usable rows exist.
     """
     with _lock:
         conn = get_connection()
         try:
+            cur = conn.execute(
+                """
+                SELECT AVG(actual_temp_c - predicted_temp_c)
+                FROM (
+                    SELECT actual_temp_c, predicted_temp_c
+                    FROM forecast_skill_log
+                    WHERE actual_temp_c IS NOT NULL
+                      AND predicted_temp_c IS NOT NULL
+                      AND actual_temp_c != predicted_temp_c
+                    ORDER BY built_at_utc DESC, date_utc DESC, hour_of_day DESC
+                    LIMIT ?
+                )
+                """,
+                (lookback,),
+            )
+            row = cur.fetchone()
+            val = row[0] if row and row[0] is not None else None
+            if val is not None:
+                return float(val)
+
             cur = conn.execute(
                 """
                 SELECT AVG(daikin_outdoor_temp - forecast_temp_c)
@@ -2655,6 +2679,46 @@ def get_micro_climate_offset_c(lookback: int = 96) -> float:
             row = cur.fetchone()
             val = row[0] if row and row[0] is not None else 0.0
             return float(val)
+        finally:
+            conn.close()
+
+
+def get_micro_climate_offset_by_hour_c(lookback: int = 96) -> dict[int, float]:
+    """Return mean(actual - forecast) offsets grouped by UTC hour-of-day.
+
+    The rows are drawn from ``forecast_skill_log`` because that table already
+    represents the canonical forecast-vs-actual comparison. Legacy execution
+    logs are intentionally not mixed into the hourly map to avoid duplicating
+    the raw source of truth.
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """
+                SELECT hour_of_day, AVG(actual_temp_c - predicted_temp_c) AS offset_c
+                FROM (
+                    SELECT hour_of_day, actual_temp_c, predicted_temp_c
+                    FROM forecast_skill_log
+                    WHERE actual_temp_c IS NOT NULL
+                      AND predicted_temp_c IS NOT NULL
+                      AND actual_temp_c != predicted_temp_c
+                    ORDER BY built_at_utc DESC, date_utc DESC, hour_of_day DESC
+                    LIMIT ?
+                )
+                GROUP BY hour_of_day
+                ORDER BY hour_of_day ASC
+                """,
+                (lookback,),
+            )
+            out: dict[int, float] = {}
+            for row in cur.fetchall():
+                hour = row[0]
+                offset = row[1]
+                if hour is None or offset is None:
+                    continue
+                out[int(hour)] = float(offset)
+            return out
         finally:
             conn.close()
 

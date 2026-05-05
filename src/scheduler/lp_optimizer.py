@@ -268,7 +268,6 @@ def solve_lp(
     slot_h = 0.5  # 30-minute slots
     max_hp_kwh_per_slot = float(getattr(config, "DAIKIN_MAX_HP_KW", 2.0)) * slot_h
     lwt_offset_max = float(getattr(config, "OPTIMIZATION_LWT_OFFSET_MAX", 10.0))
-    lwt_offset_min = float(getattr(config, "OPTIMIZATION_LWT_OFFSET_MIN", -10.0))
 
     # Per-slot physics-consistent bounds for e_space from the climate curve.
     # floor: compressor draw at zero offset (natural curve point).
