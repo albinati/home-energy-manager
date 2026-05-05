@@ -427,6 +427,32 @@ class Config:
     # Set e.g. 0.65 to permanently cap the forecast to 65% of Open-Meteo modelled output.
     # When 0 or unset, compute_pv_calibration_factor() derives it automatically from Fox history.
     PV_FORECAST_SCALE_FACTOR: float = float(os.getenv("PV_FORECAST_SCALE_FACTOR", "0"))
+    FORECAST_SOURCE: str = (os.getenv("FORECAST_SOURCE") or "open_meteo").strip().lower()
+    QUARTZ_AUTH_URL: str = (
+        os.getenv("QUARTZ_AUTH_URL") or "https://nowcasting-pro.eu.auth0.com/oauth/token"
+    ).strip()
+    QUARTZ_API_BASE_URL: str = (
+        os.getenv("QUARTZ_API_BASE_URL")
+        or "http://uk-production-uk-national-quartz-api.eu-west-1.elasticbeanstalk.com"
+    ).strip().rstrip("/")
+    QUARTZ_CLIENT_ID: str = (
+        os.getenv("QUARTZ_CLIENT_ID") or "tuJKOXmMGbN27iX4ZXzgZsNIoxDTPO88"
+    ).strip()
+    QUARTZ_AUDIENCE: str = (
+        os.getenv("QUARTZ_AUDIENCE") or "https://api.nowcasting.io/"
+    ).strip()
+    QUARTZ_USERNAME: str = (
+        os.getenv("QUARTZ_USERNAME") or os.getenv("QUARTZ_USER") or ""
+    ).strip()
+    QUARTZ_PASSWORD: str = os.getenv("QUARTZ_PASSWORD") or os.getenv("QUARTZ_PASS") or ""
+    QUARTZ_GSP_ID: str = (os.getenv("QUARTZ_GSP_ID") or "").strip()
+    QUARTZ_MODEL_NAME: str = (os.getenv("QUARTZ_MODEL_NAME") or "blend").strip()
+    QUARTZ_TREND_ADJUSTER_ON: bool = (
+        os.getenv("QUARTZ_TREND_ADJUSTER_ON", "true").lower() in ("1", "true", "yes")
+    )
+    QUARTZ_INSTALLED_CAPACITY_MW: float = float(
+        os.getenv("QUARTZ_INSTALLED_CAPACITY_MW", "0") or "0"
+    )
 
     # Agile scheduler (Daikin ASHP by price)
     SCHEDULER_ENABLED: bool = os.getenv("SCHEDULER_ENABLED", "false").lower() in ("true", "1", "yes")
