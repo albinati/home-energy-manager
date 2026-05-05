@@ -30,7 +30,7 @@ def _seed_meteo(t: datetime, temp_c: float) -> None:
     """Seed a meteo_forecast_history row at the hour boundary so SUBSTR matching works."""
     hour_iso = t.replace(minute=0, second=0, microsecond=0).isoformat().replace("+00:00", "+00:00")
     db.save_meteo_forecast_history(
-        t.isoformat().replace("+00:00", "Z"),
+        (t - timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
         [{"slot_time": hour_iso, "temp_c": temp_c, "solar_w_m2": 0.0}],
     )
 
