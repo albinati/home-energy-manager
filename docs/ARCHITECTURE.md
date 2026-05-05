@@ -9,7 +9,8 @@ Home Energy Manager is designed as the **single planning brain** for the site: i
 | Source | Role |
 |--------|------|
 | **Octopus Agile** (half-hourly unit rates) | Stored in SQLite (`agile_rates`); drives cheap / peak / negative classification and cost math. |
-| **Open-Meteo forecast** (`src/weather.py`) | Per-slot temperature, irradiance → **estimated PV (kW)** and **heating demand factor**; steers “skip forced cheap when solar will cover” and Daikin pre-heat / peak frost logic. |
+| **Quartz PV nowcast** (`src/weather.py`) | Preferred PV source for the site when configured; direct PV is calibrated to local shading/orientation before the LP consumes it. |
+| **Open-Meteo forecast** (`src/weather.py`) | Per-slot temperature, irradiance, cloud cover → weather fallback/context and derived PV / heating demand inputs. |
 | **Rolling load proxy** (`execution_log` → mean kWh per half-hour) | Estimates typical import power needs; **battery margin** logic can extend pre-peak charge windows when peak load might exceed usable battery. |
 | **Fox realtime (cached)** | Battery **SoC**, work mode — guards and heartbeat context (not a polling loop; ~30s cache, sparse scheduler checks). |
 | **Daikin live telemetry** | Room/outdoor temps, LWT offset, tank — **heartbeat** applies SQLite actions, **frost cap** on peak setback when outdoor is cold. |
@@ -45,7 +46,7 @@ The older consent-driven **solver + dispatcher** (`src/optimization/`) was remov
 flowchart LR
   subgraph ingest [Ingest]
     O[Octopus Agile]
-    W[Open-Meteo]
+  Q[Quartz / Open-Meteo]
   end
   subgraph store [State]
     DB[(SQLite)]
@@ -57,7 +58,7 @@ flowchart LR
     H[Heartbeat]
   end
   O --> DB
-  W --> R
+  Q --> R
   DB --> R
   R --> DB
   R --> F[Fox V3]
@@ -73,7 +74,7 @@ Production path when `OPTIMIZER_BACKEND=lp` (default). Implementation: `src/sche
 
 - **Objective:** Minimize \(\sum_i (\text{import}_i \cdot \text{price}_i - \text{export}_i \cdot \text{EXPORT_RATE_PENCE})\) plus tiny battery-cycle penalty and comfort-band slack penalty.
 - **Constraints:** Half-hour energy balance; battery SoC with round-trip efficiency; mutex grid import vs export and charge vs discharge binaries; SEG-style **export ≤ PV use + discharge**; discrete heat-pump power buckets; DHW tank dynamics (UA loss to room); single-zone building / radiators (UA to outdoor, solar gain fraction, radiator thermal cap); shower windows and Legionella; terminal SoC/tank/indoor stitches.
-- **Inputs:** Octopus rates for the horizon, Open-Meteo → `WeatherLpSeries`, initial SoC (Fox cache), tank + room temps (Daikin / execution log fallbacks).
+- **Inputs:** Octopus rates for the horizon, Quartz/Open-Meteo → `WeatherLpSeries`, initial SoC (Fox cache), tank + room temps (Daikin / execution log fallbacks).
 - **Rollback:** Set `OPTIMIZER_BACKEND=heuristic` or POST `/api/v1/optimization/backend` with `{"backend":"heuristic"}` to use the legacy classifier in the same `run_optimizer()` entrypoint.
 
 ### Slot classification (`lp_dispatch.py`)
