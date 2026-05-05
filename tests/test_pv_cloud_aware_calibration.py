@@ -121,6 +121,24 @@ def test_forecast_to_lp_inputs_callable_zero_factor_zeros_pv() -> None:
     assert out.pv_kwh_per_slot[0] == 0.0
 
 
+def test_direct_pv_path_still_uses_calibration_tables() -> None:
+    """Quartz direct PV should still be corrected by the site calibration tables."""
+    from src.weather import forecast_pv_kw_from_row
+
+    cloud = {(12, 1): 0.50}
+    hourly = {12: 0.75}
+    pv = forecast_pv_kw_from_row(
+        12,
+        0.0,
+        40.0,
+        direct_pv_kw=2.0,
+        cloud_table=cloud,
+        hourly_table=hourly,
+        flat=1.0,
+    )
+    assert pv == pytest.approx(1.0)
+
+
 def test_forecast_to_lp_inputs_callable_exception_falls_back_safely() -> None:
     """If callable raises, slot scale falls back to 1.0 (no crash)."""
     base = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
