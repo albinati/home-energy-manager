@@ -21,6 +21,7 @@ from ..weather import (
     HourlyForecast,
     estimate_pv_kw,
     fetch_forecast,
+    fetch_forecast_snapshot,
     forecast_to_lp_inputs,
     get_forecast_for_slot,
 )
@@ -1304,7 +1305,8 @@ def _run_optimizer_lp(
     prices = [s.price_pence for s in slots]
     starts = [s.start_utc for s in slots]
 
-    forecast = fetch_forecast(hours=max(48, int(config.LP_HORIZON_HOURS) + 24))
+    forecast_fetch = fetch_forecast_snapshot(hours=max(48, int(config.LP_HORIZON_HOURS) + 24))
+    forecast = forecast_fetch.forecast
     forecast_fetch_at_utc = datetime.now(UTC).isoformat()
     # Persist the canonical forecast snapshot once so heartbeat + replay can
     # both reference the same fetch instead of duplicating latest/history rows.
@@ -1315,12 +1317,17 @@ def _run_optimizer_lp(
                 "temp_c": f.temperature_c,
                 "solar_w_m2": f.shortwave_radiation_wm2,
                 "cloud_cover_pct": f.cloud_cover_pct,
+                "direct_pv_kw": f.estimated_pv_kw if getattr(f, "pv_direct", False) else None,
             }
             for f in forecast
         ]
         db.save_meteo_forecast_snapshot(
             forecast_fetch_at_utc,
             forecast_rows,
+            source=forecast_fetch.source,
+            model_name=forecast_fetch.model_name,
+            model_version=forecast_fetch.model_version,
+            raw_payload_json=forecast_fetch.raw_payload_json,
             mark_latest=True,
         )
     # PV calibration — fallback chain (best to worst):

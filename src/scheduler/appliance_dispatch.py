@@ -292,18 +292,21 @@ def _residual_pv_kwh_per_slot(
 
     # forecast is hourly; expand to half-hourly by halving the hourly kWh
     # estimate (good enough for this dispatch decision).
-    by_hour: dict[datetime, tuple[float, float | None]] = {
-        f.time_utc: (float(f.estimated_pv_kw), float(f.cloud_cover_pct))
+    by_hour: dict[datetime, tuple[float, float | None, bool]] = {
+        f.time_utc: (float(f.estimated_pv_kw), float(f.cloud_cover_pct), bool(getattr(f, "pv_direct", False)))
         for f in forecast
     }
     out: dict[datetime, float] = {}
     for slot_start in slot_starts_utc:
         hour_anchor = slot_start.replace(minute=0, second=0, microsecond=0)
-        pv_kw, cloud_pct = by_hour.get(hour_anchor, (0.0, None))
+        pv_kw, cloud_pct, pv_direct = by_hour.get(hour_anchor, (0.0, None, False))
         scale = get_pv_calibration_factor_for(
             hour_anchor.hour, cloud_pct,
             cloud_table=cal_cloud, hourly_table=cal_hourly, flat=flat_cal,
         )
+        if pv_direct:
+            scale = 1.0
+            today_factor = 1.0
         # Half-hour kWh = kW × 0.5h × calibration × today-aware factor
         out[slot_start] = pv_kw * 0.5 * scale * today_factor
     return out

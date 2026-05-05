@@ -664,8 +664,13 @@ def _reconstruct_weather(
                 temperature_c=temp_c,
                 cloud_cover_pct=cloud,
                 shortwave_radiation_wm2=rad,
-                estimated_pv_kw=estimate_pv_kw(rad),
+                estimated_pv_kw=(
+                    float(r["direct_pv_kw"])
+                    if r.get("direct_pv_kw") is not None
+                    else estimate_pv_kw(rad)
+                ),
                 heating_demand_factor=compute_heating_demand_factor(temp_c),
+                pv_direct=r.get("direct_pv_kw") is not None,
             )
         )
 
