@@ -14,8 +14,9 @@ logic), BOTH of these gates must pass before merging.
 
 ### Gate 1 — LP regression (general) — BOTH modes must pass
 
-V11-A (#194). The LP must be no worse than the pinned baseline on the last
-14 days of historical runs in BOTH modes:
+V11-A (#194). The LP must be no worse than the pinned baseline on the same
+historical replay dates in BOTH modes. Individual moments may be worse, but
+aggregate cost must be better than or equal to the comparable baseline window:
 
   - **forward** (snapshot weather + current config) — catches behaviour change.
   - **honest**  (snapshot weather + snapshot config) — catches solver / framework
@@ -27,10 +28,10 @@ V11-A (#194). The LP must be no worse than the pinned baseline on the last
   → MODE = HONEST:  VERDICT PASS / FAIL
   → BOTH-MODE VERDICT: PASS / FAIL
 
-If VERDICT=FAIL on either, the LP got worse on past days — investigate before
-merging. If the regression is INTENTIONAL (new objective term, tuned weights),
-accept it as the new baseline by re-running with `--refresh-baseline` and
-committing both `tests/fixtures/lp_regression_baseline.forward.json` and
+If VERDICT=FAIL on either, aggregate cost got worse or the baseline dates could
+not all be replayed — investigate before merging. Only refresh the baseline
+after confirming the new strategy is better or equal on an agreed replay set,
+then commit both `tests/fixtures/lp_regression_baseline.forward.json` and
 `tests/fixtures/lp_regression_baseline.honest.json` in the same PR.
 
 ### Gate 2 — Scenario filter regression (peak_export specifically)
