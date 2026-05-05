@@ -2504,6 +2504,36 @@ def _get_latest_meteo_forecast_fetch_at(conn: sqlite3.Connection) -> str | None:
     row = cur.fetchone()
     return str(row[0]) if row and row[0] else None
 
+
+def _get_latest_meteo_forecast_rows_for_slot_date(
+    conn: sqlite3.Connection,
+    slot_date: str,
+) -> list[dict[str, Any]]:
+    """Return the latest canonical forecast row for each slot on *slot_date*.
+
+    Canonical forecast storage keeps one snapshot per fetch plus normalized slot
+    rows. For replay and live diagnostics we want the most recent row for each
+    slot_time, not just the most recent fetch as a whole.
+    """
+    cur = conn.execute(
+        """SELECT substr(mv.slot_time, 1, 10) AS forecast_date,
+                  mv.slot_time, mv.temp_c, mv.solar_w_m2, mv.cloud_cover_pct
+             FROM meteo_forecast_value mv
+             JOIN (
+                 SELECT slot_time, MAX(forecast_fetch_at_utc) AS forecast_fetch_at_utc
+                   FROM meteo_forecast_value
+                  WHERE substr(slot_time, 1, 10) = ?
+                  GROUP BY slot_time
+             ) latest
+               ON latest.slot_time = mv.slot_time
+              AND latest.forecast_fetch_at_utc = mv.forecast_fetch_at_utc
+            WHERE substr(mv.slot_time, 1, 10) = ?
+            ORDER BY mv.slot_time""",
+        (slot_date, slot_date),
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
 def save_meteo_forecast(rows: list[dict[str, Any]], forecast_date: str) -> int:
     """Legacy helper that writes a latest forecast snapshot.
 
@@ -2520,19 +2550,9 @@ def get_meteo_forecast(forecast_date: str) -> list[dict[str, Any]]:
     with _lock:
         conn = get_connection()
         try:
-            latest_fetch_at = _get_latest_meteo_forecast_fetch_at(conn)
-            if latest_fetch_at:
-                cur = conn.execute(
-                    """SELECT ? AS forecast_date, slot_time, temp_c, solar_w_m2, cloud_cover_pct
-                       FROM meteo_forecast_value
-                       WHERE forecast_fetch_at_utc = ?
-                         AND substr(slot_time, 1, 10) = ?
-                       ORDER BY slot_time""",
-                    (forecast_date, latest_fetch_at, forecast_date),
-                )
-                rows = [dict(r) for r in cur.fetchall()]
-                if rows:
-                    return rows
+            rows = _get_latest_meteo_forecast_rows_for_slot_date(conn, forecast_date)
+            if rows:
+                return rows
             cur = conn.execute(
                 "SELECT * FROM meteo_forecast WHERE forecast_date = ? ORDER BY slot_time",
                 (forecast_date,),
@@ -2552,20 +2572,9 @@ def get_meteo_forecast_for_slot_date(slot_date: str) -> list[dict[str, Any]]:
     with _lock:
         conn = get_connection()
         try:
-            latest_fetch_at = _get_latest_meteo_forecast_fetch_at(conn)
-            if latest_fetch_at:
-                cur = conn.execute(
-                    """SELECT substr(slot_time, 1, 10) AS forecast_date,
-                              slot_time, temp_c, solar_w_m2, cloud_cover_pct
-                       FROM meteo_forecast_value
-                       WHERE forecast_fetch_at_utc = ?
-                         AND substr(slot_time, 1, 10) = ?
-                       ORDER BY slot_time""",
-                    (latest_fetch_at, slot_date),
-                )
-                rows = [dict(r) for r in cur.fetchall()]
-                if rows:
-                    return rows
+            rows = _get_latest_meteo_forecast_rows_for_slot_date(conn, slot_date)
+            if rows:
+                return rows
             cur = conn.execute(
                 """SELECT * FROM meteo_forecast
                    WHERE substr(slot_time, 1, 10) = ?

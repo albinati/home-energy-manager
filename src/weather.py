@@ -1019,7 +1019,7 @@ def evaluate_pv_forecast_accuracy(
     cal_cloud = _db.get_pv_calibration_hourly_cloud()
     flat_cal = compute_pv_calibration_factor() if not cal_hourly and not cal_cloud else 1.0
 
-    # Pull all measurements + forecasts in window
+    # Pull all measurements in window.
     actual_kw_samples: dict[tuple[str, int], list[float]] = defaultdict(list)
     forecast_radiation: dict[tuple[str, int], float] = {}
     forecast_cloud: dict[tuple[str, int], float | None] = {}
@@ -1041,27 +1041,26 @@ def evaluate_pv_forecast_accuracy(
                 if ts.tzinfo is None:
                     ts = ts.replace(tzinfo=_UTC)
                 actual_kw_samples[(ts.date().isoformat(), ts.hour)].append(float(kw or 0.0))
-
-            # cloud_cover_pct may not exist on older meteo_forecast rows; coalesce.
-            cur = conn.execute(
-                """SELECT slot_time, solar_w_m2,
-                          COALESCE(cloud_cover_pct, NULL) AS cloud_pct
-                     FROM meteo_forecast
-                    WHERE substr(slot_time, 1, 10) BETWEEN ? AND ?""",
-                (start.isoformat(), end.isoformat()),
-            )
-            for ts_raw, rad, cpct in cur.fetchall():
-                try:
-                    ts = _dt.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
-                except (ValueError, TypeError):
-                    continue
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=_UTC)
-                key = (ts.date().isoformat(), ts.hour)
-                forecast_radiation[key] = float(rad or 0.0)
-                forecast_cloud[key] = float(cpct) if cpct is not None else None
         finally:
             conn.close()
+
+    current_day = start
+    while current_day <= end:
+        try:
+            forecast_rows = _db.get_meteo_forecast_for_slot_date(current_day.isoformat())
+        except Exception:  # noqa: BLE001
+            forecast_rows = []
+        for r in forecast_rows:
+            try:
+                ts = _dt.fromisoformat(str(r["slot_time"]).replace("Z", "+00:00"))
+            except (ValueError, TypeError, KeyError):
+                continue
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=_UTC)
+            key = (ts.date().isoformat(), ts.hour)
+            forecast_radiation[key] = float(r.get("solar_w_m2") or 0.0)
+            forecast_cloud[key] = float(r.get("cloud_cover_pct")) if r.get("cloud_cover_pct") is not None else None
+        current_day += _td(days=1)
 
     # Build paired (predicted_kw, actual_kw) tuples
     pairs_per_hour: dict[int, list[tuple[float, float]]] = defaultdict(list)
