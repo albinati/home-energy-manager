@@ -82,8 +82,10 @@ def test_quartz_fetch_merges_direct_pv_with_open_meteo_weather(monkeypatch: pyte
     assert result.raw_payload_json
 
 
-def test_direct_pv_skips_open_meteo_calibration_scale() -> None:
+def test_direct_pv_uses_site_calibration_scale() -> None:
     from src.weather import HourlyForecast, forecast_to_lp_inputs
+
+    db.upsert_pv_calibration_hourly({12: 0.5}, {12: 8}, window_days=30)
 
     slot = datetime(2026, 5, 5, 12, 0, tzinfo=UTC)
     forecast = [
@@ -98,9 +100,9 @@ def test_direct_pv_skips_open_meteo_calibration_scale() -> None:
         )
     ]
 
-    series = forecast_to_lp_inputs(forecast, [slot], pv_scale=0.0)
+    series = forecast_to_lp_inputs(forecast, [slot], pv_scale=1.0)
 
-    assert series.pv_kwh_per_slot == pytest.approx([1.0])
+    assert series.pv_kwh_per_slot == pytest.approx([0.5])
 
 
 def test_quartz_national_metadata_capacity_can_downscale_site_kw(monkeypatch: pytest.MonkeyPatch) -> None:

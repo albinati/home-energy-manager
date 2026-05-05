@@ -273,17 +273,29 @@ def forecast_pv_kw_from_row(
     cloud_table: dict[tuple[int, int], float] | None = None,
     hourly_table: dict[int, float] | None = None,
     flat: float = 1.0,
+    scale: float = 1.0,
 ) -> float:
     """Apply the same PV forecast transform used by the LP and live triggers.
 
-    When the provider supplies direct PV (Quartz), return that value unchanged.
-    Otherwise cloud attenuation is applied before the irradiance-to-kW conversion
-    and the calibration lookup follows the same cloud → hour → flat fallback
-    chain as ``forecast_to_lp_inputs``.
+    When the provider supplies direct PV (Quartz), use that as the base signal
+    but still apply the same site calibration chain so Quartz can be corrected
+    for local shading / orientation bias. Otherwise cloud attenuation is
+    applied before the irradiance-to-kW conversion and the calibration lookup
+    follows the same cloud → hour → flat fallback chain as
+    ``forecast_to_lp_inputs``.
     """
+    scale_f = max(0.0, float(scale))
     if direct_pv_kw is not None:
         try:
-            return max(0.0, float(direct_pv_kw))
+            base_kw = max(0.0, float(direct_pv_kw))
+            cal = get_pv_calibration_factor_for(
+                int(hour_utc),
+                cloud_cover_pct,
+                cloud_table=cloud_table,
+                hourly_table=hourly_table,
+                flat=flat,
+            )
+            return base_kw * cal * scale_f
         except (TypeError, ValueError):
             pass
     cloud_pct_f = float(cloud_cover_pct) if cloud_cover_pct is not None else 50.0
@@ -296,7 +308,7 @@ def forecast_pv_kw_from_row(
         hourly_table=hourly_table,
         flat=flat,
     )
-    return estimate_pv_kw(rad_eff) * cal
+    return estimate_pv_kw(rad_eff) * cal * scale_f
 
 
 def compute_heating_demand_factor(
@@ -1374,7 +1386,10 @@ def forecast_to_lp_inputs(
     """Build per-slot outdoor temperature, irradiance, PV kWh/slot, and COP arrays for the MILP.
 
     PV uses :func:`estimate_pv_kw` with ``PV_CAPACITY_KWP`` and ``PV_SYSTEM_EFFICIENCY``,
-    scaled by ``pv_scale``:
+    scaled by ``pv_scale`` and corrected through the site calibration tables.
+    Quartz direct PV follows the same calibration chain so the solver still
+    sees local shading/orientation bias instead of raw vendor output.
+    ``pv_scale`` can be:
       - ``float``: single multiplier applied to every slot (legacy behaviour).
       - ``dict[int, float]``: per-hour-of-day UTC factor (richer calibration that
         captures shading / sun-angle bias). Missing hours fall back to the median
@@ -1398,6 +1413,11 @@ def forecast_to_lp_inputs(
     dhw_pen = float(config.COP_DHW_PENALTY)
     cap = float(config.PV_CAPACITY_KWP)
     eff = float(config.PV_SYSTEM_EFFICIENCY)
+    from . import db as _db
+
+    cal_cloud = _db.get_pv_calibration_hourly_cloud()
+    cal_hourly = _db.get_pv_calibration_hourly()
+    flat_cal = compute_pv_calibration_factor() if not cal_cloud and not cal_hourly else 1.0
 
     # PV scale: explicit arg > config override > 1.0. Accept float OR per-hour dict.
     if pv_scale is None:
@@ -1420,26 +1440,35 @@ def forecast_to_lp_inputs(
         direct_pv = bool(nearest and nearest.pv_direct)
         if direct_pv:
             rad_eff = max(0.0, rad_wm2)
-            kw_ac = max(0.0, _interp_hourly_scalar(forecast, st, "estimated_pv_kw", 0.0))
-            scale_for_slot = 1.0
         else:
             # Cloud attenuation on top of API irradiance.
             att = max(0.0, min(1.0, 1.0 - 0.25 * (cloud_pct / 100.0)))
             rad_eff = max(0.0, rad_wm2 * att)
-            kw_ac = estimate_pv_kw(rad_eff, capacity_kwp=cap, efficiency=eff)
-            # Resolve the per-slot scale factor.
-            if callable(pv_scale):
-                try:
-                    scale_for_slot = float(pv_scale(st.hour, cloud_pct))
-                except Exception:
-                    scale_for_slot = 1.0
-            elif isinstance(pv_scale, dict):
-                scale_for_slot = pv_scale.get(st.hour, pv_scale_fallback)
-            else:
-                scale_for_slot = float(pv_scale)
+        if callable(pv_scale):
+            try:
+                scale_for_slot = float(pv_scale(st.hour, cloud_pct))
+            except Exception:
+                scale_for_slot = 1.0
+        elif isinstance(pv_scale, dict):
+            scale_for_slot = pv_scale.get(st.hour, pv_scale_fallback)
+        else:
+            scale_for_slot = float(pv_scale)
+        # The provider-specific PV signal can still be locally corrected: Quartz
+        # direct PV is site-level, but it still benefits from the same calibration
+        # chain that the irradiance-based path uses.
+        kw_ac = forecast_pv_kw_from_row(
+            st.hour,
+            rad_wm2,
+            cloud_pct,
+            direct_pv_kw=_interp_hourly_scalar(forecast, st, "estimated_pv_kw", 0.0) if direct_pv else None,
+            cloud_table=cal_cloud,
+            hourly_table=cal_hourly,
+            flat=flat_cal,
+            scale=scale_for_slot,
+        )
         # Apply calibration scale and enforce per-hour physical ceiling
         slot_ceil = hourly_ceil.get(st.hour, cap * eff * 0.5)
-        pv_kwh = min(slot_ceil, max(0.0, kw_ac * 0.5 * scale_for_slot))
+        pv_kwh = min(slot_ceil, max(0.0, kw_ac * 0.5))
         base_cop = max(1.0, cop_at_temperature(curve, temp_c))
         cop_s = base_cop
         lift_pen = float(getattr(config, "LP_COP_LIFT_PENALTY_PER_KELVIN", 0.0))
