@@ -246,7 +246,29 @@ def _get_forecast_pv_kw(now_utc: datetime) -> float | None:
 
 
 def _lp_predicted_load_kw_at(when_utc: datetime) -> float | None:
-    """Expected house load kW from the latest LP solution at the slot containing ``when_utc``."""
+    """Expected gross AC load kW (incl. heat pump) from the latest LP solution
+    at the slot containing ``when_utc``.
+
+    The Fox H1's ``loadsPower`` reading is gross household AC consumption —
+    everything passing through the inverter's load CT, including the Daikin
+    heat pump on this install (Daikin sits downstream of the load CT). The
+    apples-to-apples comparison with ``rt.load_power`` is therefore:
+
+        gross_load = imp + pv_use + dis - exp - chg
+
+    which equals ``base_load + dhw + space`` (the LP's split between
+    household base load and heat-pump consumption). Subtracting ``dhw +
+    space`` from this would over-estimate the live deviation whenever the
+    heat pump is running.
+
+    NOTE: this assumes the inverter's CT placement matches the typical
+    retrofit (Daikin downstream). If your install has Daikin upstream of
+    the load CT, ``loadsPower`` excludes the heat pump and you'd want to
+    subtract ``dhw + space`` here. The live deviation trigger is
+    intentionally OFF by default (``MPC_LIVE_DEVIATION_HYSTERESIS_TICKS``
+    high enough that triggers won't fire in practice) until this is
+    validated against measured data — see PR description.
+    """
     try:
         run_id = db.find_run_for_time(when_utc.isoformat())
         if not run_id:
@@ -274,9 +296,9 @@ def _lp_predicted_load_kw_at(when_utc: datetime) -> float | None:
         dis = float(target.get("discharge_kwh") or 0.0)
         exp = float(target.get("export_kwh") or 0.0)
         chg = float(target.get("charge_kwh") or 0.0)
-        dhw = float(target.get("dhw_kwh") or 0.0)
-        space = float(target.get("space_kwh") or 0.0)
-        load_kwh = imp + pv_use + dis - exp - chg - dhw - space
+        # Gross AC load (matches ``loadsPower`` semantics). Per-slot kWh →
+        # average kW: divide by slot duration (0.5 h).
+        load_kwh = imp + pv_use + dis - exp - chg
         return max(0.0, load_kwh / 0.5)
     except Exception as e:
         logger.debug("_lp_predicted_load_kw_at failed: %s", e)

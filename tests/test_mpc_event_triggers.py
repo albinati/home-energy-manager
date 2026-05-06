@@ -239,10 +239,13 @@ def test_lp_predicted_load_kw_at_derives_expected_load_from_solution_slot(monkey
             }
         ],
     )
-    # load_kwh = imp + pv + dis - exp - chg - dhw - space = 1.2
-    # load_kw  = 1.2 / 0.5 = 2.4 kW
+    # gross_load_kwh = imp + pv + dis - exp - chg = 1.5  (includes Daikin
+    # dhw + space because Fox ``loadsPower`` is gross AC including the heat
+    # pump on the typical retrofit CT placement). gross_load_kw = 3.0 kW.
+    # See docstring on ``_lp_predicted_load_kw_at`` for the CT-placement
+    # assumption that drives this formula.
     kw = runner._lp_predicted_load_kw_at(base + timedelta(minutes=10))
-    assert kw == pytest.approx(2.4)
+    assert kw == pytest.approx(3.0)
 
 
 # -------------------- Octopus rebadge --------------------

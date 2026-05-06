@@ -20,7 +20,9 @@ build/
 .home-energy-manager.pid
 daemon.log
 energy_state.db
-data/fox-ess-daily-extracts/
+# Local dev state — SQLite DB, OAuth tokens, config snapshots, Fox extracts.
+# Never commit this directory; prod has its own /srv/hem/data.
+data/
 agent_apply_v2.log
 backups/
 .claude/
