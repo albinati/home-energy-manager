@@ -1050,9 +1050,14 @@ def compute_today_pv_correction_factor(
             "min_hours_required": min_hours,
         }
 
-    # 4. Median ratio (robust to one bad hour) + safety clamp
+    # 4. Statistical median (mean of two middle values for even-length lists,
+    # not ``sorted[len//2]`` which is the *upper* of the two middles).
     sorted_r = sorted(r for _, r in ratios)
-    median = sorted_r[len(sorted_r) // 2]
+    n_r = len(sorted_r)
+    if n_r % 2 == 1:
+        median = sorted_r[n_r // 2]
+    else:
+        median = (sorted_r[n_r // 2 - 1] + sorted_r[n_r // 2]) / 2.0
     lo, hi = safety_clamp
     factor = max(lo, min(hi, median))
 
@@ -1190,8 +1195,28 @@ def compute_today_pv_correction_factor_by_hour(
             "min_hours_required": min_hours,
         }
 
-    sorted_obs = sorted(observed.values())
-    median = sorted_obs[len(sorted_obs) // 2]
+    # Compute median for the unobserved-hour fallback. Two corrections vs the
+    # original implementation:
+    #   1. Exclude hours that were *clamped* — by construction they're at the
+    #      ``[lo, hi]`` boundary because either actual or forecast was tiny;
+    #      the ratio is unreliable as a representative value for the rest of
+    #      the day. Including them pulls the median toward the clamp bounds
+    #      and biases the projection wrongly. Concrete repro on 2026-05-06:
+    #      observed = {5: 2.0(clamp), 6: 0.67, 7: 1.10, 9: 0.30(clamp)} →
+    #      old median = 1.10, true unclamped median = 0.89. The 1.10 made
+    #      the LP scale UP an already-too-optimistic forecast on a heavy-
+    #      cloud day.
+    #   2. ``sorted[len//2]`` is the *upper* of two middle values for even-
+    #      length lists, not the statistical median. Use the mean of the
+    #      two middle values for proper even-length median.
+    unclamped = [r for h, r in observed.items() if h not in clamped_hours]
+    median_source = unclamped if len(unclamped) >= max(2, min_hours) else list(observed.values())
+    sorted_obs = sorted(median_source)
+    n_obs = len(sorted_obs)
+    if n_obs % 2 == 1:
+        median = sorted_obs[n_obs // 2]
+    else:
+        median = (sorted_obs[n_obs // 2 - 1] + sorted_obs[n_obs // 2]) / 2.0
 
     factor_by_hour: dict[int, float] = {h: 1.0 for h in range(24)}
     imputed_hours: list[int] = []
@@ -1206,6 +1231,7 @@ def compute_today_pv_correction_factor_by_hour(
         "n_observed": len(observed),
         "n_imputed": len(imputed_hours),
         "median_ratio": round(median, 4),
+        "median_source": "unclamped_only" if median_source is unclamped else "all_observed",
         "ratios_per_hour": {h: round(v, 4) for h, v in observed.items()},
         "imputed_hours": imputed_hours,
         "clamped_hours": clamped_hours,
