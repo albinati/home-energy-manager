@@ -66,6 +66,7 @@ def test_quartz_fetch_merges_direct_pv_with_open_meteo_weather(monkeypatch: pyte
     monkeypatch.setattr(app_config, "FORECAST_SOURCE", "quartz", raising=False)
     monkeypatch.setattr(app_config, "QUARTZ_USERNAME", "user", raising=False)
     monkeypatch.setattr(app_config, "QUARTZ_PASSWORD", "pass", raising=False)
+    monkeypatch.setattr(app_config, "QUARTZ_CLIENT_ID", "test-client-id", raising=False)
     monkeypatch.setattr(app_config, "QUARTZ_GSP_ID", "42", raising=False)
     monkeypatch.setattr(weather, "_QUARTZ_TOKEN", None)
     monkeypatch.setattr(weather.urllib.request, "urlopen", fake_urlopen)
@@ -141,6 +142,7 @@ def test_quartz_national_metadata_capacity_can_downscale_site_kw(monkeypatch: py
     monkeypatch.setattr(app_config, "FORECAST_SOURCE", "quartz", raising=False)
     monkeypatch.setattr(app_config, "QUARTZ_USERNAME", "user", raising=False)
     monkeypatch.setattr(app_config, "QUARTZ_PASSWORD", "pass", raising=False)
+    monkeypatch.setattr(app_config, "QUARTZ_CLIENT_ID", "test-client-id", raising=False)
     monkeypatch.setattr(app_config, "QUARTZ_GSP_ID", "", raising=False)
     monkeypatch.setattr(weather, "_QUARTZ_TOKEN", None)
     monkeypatch.setattr(weather.urllib.request, "urlopen", fake_urlopen)
@@ -173,3 +175,53 @@ def test_direct_pv_round_trips_through_canonical_snapshot() -> None:
     rows = db.get_meteo_forecast_at(fetched_at)
 
     assert rows[0]["direct_pv_kw"] == pytest.approx(1.7)
+
+
+def test_quartz_token_skips_when_client_id_empty(monkeypatch):
+    """Empty ``QUARTZ_CLIENT_ID`` ⇒ no auth attempt; falls back gracefully.
+
+    The vendor-issued client_id is sensitive and must not be hardcoded into
+    the repo, so the default is empty. Without it, the adapter must not
+    attempt the Auth0 round-trip — it should log and return ``None``.
+    """
+    from src import weather
+
+    monkeypatch.setattr(app_config, "QUARTZ_USERNAME", "user", raising=False)
+    monkeypatch.setattr(app_config, "QUARTZ_PASSWORD", "pass", raising=False)
+    monkeypatch.setattr(app_config, "QUARTZ_CLIENT_ID", "", raising=False)
+    monkeypatch.setattr(weather, "_QUARTZ_TOKEN", None)
+    monkeypatch.setattr(weather, "_QUARTZ_TOKEN_EXPIRES_AT", 0.0)
+
+    def _should_not_be_called(*args, **kwargs):
+        raise AssertionError("urlopen called even though QUARTZ_CLIENT_ID is empty")
+
+    monkeypatch.setattr(weather.urllib.request, "urlopen", _should_not_be_called)
+    assert weather._quartz_token() is None
+
+
+def test_quartz_token_refreshes_after_expiry(monkeypatch):
+    """An expired cached token forces a fresh Auth0 round-trip on next call."""
+    from src import weather
+
+    monkeypatch.setattr(app_config, "QUARTZ_USERNAME", "user", raising=False)
+    monkeypatch.setattr(app_config, "QUARTZ_PASSWORD", "pass", raising=False)
+    monkeypatch.setattr(app_config, "QUARTZ_CLIENT_ID", "test-client-id", raising=False)
+    monkeypatch.setattr(weather, "_QUARTZ_TOKEN", "stale-token")
+    monkeypatch.setattr(weather, "_QUARTZ_TOKEN_EXPIRES_AT", 0.0)
+
+    calls = {"n": 0}
+
+    class _Resp:
+        def __init__(self, payload): self._payload = json.dumps(payload).encode()
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return self._payload
+
+    def _fake_urlopen(req, *_a, **_kw):
+        calls["n"] += 1
+        return _Resp({"access_token": "fresh-token", "expires_in": 3600})
+
+    monkeypatch.setattr(weather.urllib.request, "urlopen", _fake_urlopen)
+    token = weather._quartz_token()
+    assert token == "fresh-token"
+    assert calls["n"] == 1, "expected one auth round-trip when cache is stale"

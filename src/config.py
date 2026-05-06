@@ -431,13 +431,17 @@ class Config:
     QUARTZ_AUTH_URL: str = (
         os.getenv("QUARTZ_AUTH_URL") or "https://nowcasting-pro.eu.auth0.com/oauth/token"
     ).strip()
+    # Default to the documented HTTPS endpoint at api.quartz.solar. Some
+    # development networks see a Cloudflare 1010 from that hostname; in that
+    # case set ``QUARTZ_API_BASE_URL`` explicitly in your local ``.env`` to
+    # the upstream Elastic Beanstalk URL. Production must use HTTPS so the
+    # Authorization bearer token is not sent over plaintext.
     QUARTZ_API_BASE_URL: str = (
-        os.getenv("QUARTZ_API_BASE_URL")
-        or "http://uk-production-uk-national-quartz-api.eu-west-1.elasticbeanstalk.com"
+        os.getenv("QUARTZ_API_BASE_URL") or "https://api.quartz.solar"
     ).strip().rstrip("/")
-    QUARTZ_CLIENT_ID: str = (
-        os.getenv("QUARTZ_CLIENT_ID") or "tuJKOXmMGbN27iX4ZXzgZsNIoxDTPO88"
-    ).strip()
+    # Vendor-issued OAuth client_id. Empty default — operators must supply it
+    # via ``.env`` so the value is not committed to OSS.
+    QUARTZ_CLIENT_ID: str = (os.getenv("QUARTZ_CLIENT_ID") or "").strip()
     QUARTZ_AUDIENCE: str = (
         os.getenv("QUARTZ_AUDIENCE") or "https://api.nowcasting.io/"
     ).strip()

@@ -423,21 +423,44 @@ def _fetch_open_meteo_forecast(
     return result
 
 
+# Cached Auth0 access token + epoch second when it expires. We fetch a fresh
+# token slightly before the upstream ``expires_in`` mark so the next forecast
+# request never races a 401 from the API.
 _QUARTZ_TOKEN: str | None = None
+_QUARTZ_TOKEN_EXPIRES_AT: float = 0.0
+_QUARTZ_TOKEN_REFRESH_LEEWAY_SECONDS = 60
 
 
-def _quartz_token() -> str | None:
-    """Return a Quartz bearer token using configured Auth0 credentials."""
-    global _QUARTZ_TOKEN
-    if _QUARTZ_TOKEN:
+def _quartz_token(*, force_refresh: bool = False) -> str | None:
+    """Return a cached Quartz bearer token, refreshing when expired or forced.
+
+    Auth0 access tokens issued for the password grant typically expire after
+    24 h. The original implementation cached the token for the lifetime of
+    the process and silently 401'd thereafter. This version tracks
+    ``expires_in`` and re-authenticates when the token is within the leeway
+    window or explicitly forced (e.g. on a 401 from the forecast endpoint).
+    """
+    global _QUARTZ_TOKEN, _QUARTZ_TOKEN_EXPIRES_AT
+    import time as _time
+
+    if (
+        not force_refresh
+        and _QUARTZ_TOKEN
+        and (_QUARTZ_TOKEN_EXPIRES_AT - _QUARTZ_TOKEN_REFRESH_LEEWAY_SECONDS) > _time.time()
+    ):
         return _QUARTZ_TOKEN
+
     username = (getattr(config, "QUARTZ_USERNAME", "") or "").strip()
     password = getattr(config, "QUARTZ_PASSWORD", "") or ""
-    if not username or not password:
-        logger.warning("Quartz credentials are not configured")
+    client_id = (getattr(config, "QUARTZ_CLIENT_ID", "") or "").strip()
+    if not username or not password or not client_id:
+        logger.warning(
+            "Quartz credentials are not configured (need QUARTZ_USERNAME, "
+            "QUARTZ_PASSWORD, QUARTZ_CLIENT_ID)"
+        )
         return None
     body = {
-        "client_id": getattr(config, "QUARTZ_CLIENT_ID", ""),
+        "client_id": client_id,
         "audience": getattr(config, "QUARTZ_AUDIENCE", "https://api.nowcasting.io/"),
         "grant_type": "password",
         "username": username,
@@ -456,7 +479,14 @@ def _quartz_token() -> str | None:
         if not token:
             logger.warning("Quartz auth response did not include access_token")
             return None
+        try:
+            expires_in = float(payload.get("expires_in") or 0.0)
+        except (TypeError, ValueError):
+            expires_in = 0.0
         _QUARTZ_TOKEN = token
+        # Default to a one-hour TTL when the upstream omits ``expires_in`` so
+        # we still re-authenticate periodically rather than caching forever.
+        _QUARTZ_TOKEN_EXPIRES_AT = _time.time() + (expires_in if expires_in > 0 else 3600.0)
         return token
     except (urllib.error.URLError, json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
         logger.warning("Quartz auth failed: %s", e)
@@ -529,13 +559,28 @@ def _fetch_quartz_forecast(
         }
         model_name = getattr(config, "QUARTZ_MODEL_NAME", "blend")
     url = f"{base_url}{path}?{urllib.parse.urlencode(params)}"
-    try:
+
+    def _do_fetch(bearer: str) -> dict[str, Any] | list[Any]:
         req = urllib.request.Request(
             url,
-            headers={"Accept": "application/json", "Authorization": f"Bearer {token}"},
+            headers={"Accept": "application/json", "Authorization": f"Bearer {bearer}"},
         )
         with urllib.request.urlopen(req, timeout=20) as resp:
-            payload = json.loads(resp.read().decode())
+            return json.loads(resp.read().decode())
+
+    try:
+        try:
+            payload = _do_fetch(token)
+        except urllib.error.HTTPError as http_err:
+            # 401 → cached token expired; force a fresh auth and retry once.
+            if http_err.code == 401:
+                logger.info("Quartz forecast 401; refreshing access token")
+                token = _quartz_token(force_refresh=True)
+                if not token:
+                    return ForecastFetchResult(forecast=[], source="quartz")
+                payload = _do_fetch(token)
+            else:
+                raise
     except (urllib.error.URLError, json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
         logger.warning("Quartz forecast fetch failed: %s", e)
         return ForecastFetchResult(forecast=[], source="quartz")
