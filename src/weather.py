@@ -1065,6 +1065,153 @@ def compute_today_pv_correction_factor(
     }
 
 
+def compute_today_pv_correction_factor_by_hour(
+    *,
+    min_hours: int = 2,
+    min_kwh: float = 0.05,
+    safety_clamp: tuple[float, float] = (0.30, 2.0),
+) -> tuple[dict[int, float], dict[str, Any]]:
+    """Per-hour today-aware PV adjuster (the per-hour cousin of the scalar version).
+
+    Same data sources as :func:`compute_today_pv_correction_factor` —
+    today's measured PV per UTC hour (``pv_realtime_history``) vs today's
+    calibrated forecast PV per UTC hour (``meteo_forecast`` x calibration
+    chain). The difference: instead of returning **one** scalar applied
+    uniformly to every hour of the day, this returns a **dict** mapping
+    each future hour to its own correction factor.
+
+    Why we need this:
+      - The afternoon-bias diagnosis on 2026-05-06 (14-day window) showed
+        Open-Meteo + the per-hour calibration table systematically
+        under-forecasts by ~17 % in the afternoon (12-18 UTC) but only
+        by ~7 % in the morning (06-12 UTC). The scalar adjuster averages
+        these and applies the same correction at every hour, so
+        afternoons stay under-forecast even after the adjuster runs.
+      - With per-hour ratios, an observation at hour 9 (e.g. actual/cal
+        = 1.20) lifts the prediction at hour 9 specifically. Hours we
+        haven't observed yet inherit the median of observed hours so
+        the LP still sees today's general "weather vibe" applied to
+        unobserved future hours.
+
+    Returns ``(factor_by_hour, diag)``:
+      - ``factor_by_hour`` covers all 24 UTC hours, populated for hours
+        that had both forecast + actual today (clamped per-hour) and
+        with the observed median for the rest. Returns ``{}`` when not
+        enough data exists.
+      - ``diag`` includes ``observed_hours``, ``imputed_hours``,
+        ``median_ratio``, ``ratios_per_hour``, ``n_observed``,
+        ``clamped_hours``.
+    """
+    from . import db as _db
+
+    today = datetime.now(UTC).date().isoformat()
+
+    # Reuse the same data-pull path as the scalar function so behaviour
+    # stays consistent.
+    actual_kw_samples: dict[int, list[float]] = {}
+    with _db._lock:
+        conn = _db.get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT captured_at, solar_power_kw
+                   FROM pv_realtime_history
+                   WHERE substr(captured_at, 1, 10) = ?
+                     AND solar_power_kw IS NOT NULL""",
+                (today,),
+            )
+            for ts_raw, kw in cur.fetchall():
+                try:
+                    ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+                except (ValueError, TypeError):
+                    continue
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=UTC)
+                actual_kw_samples.setdefault(ts.hour, []).append(float(kw or 0.0))
+        finally:
+            conn.close()
+    actual_per_hour: dict[int, float] = {
+        h: (sum(s) / len(s)) for h, s in actual_kw_samples.items() if s
+    }
+    if not actual_per_hour:
+        return {}, {"reason": "no pv_realtime_history yet today"}
+
+    try:
+        forecast_rows = _db.get_meteo_forecast(today)
+    except Exception:  # noqa: BLE001
+        forecast_rows = []
+    cal_cloud = _db.get_pv_calibration_hourly_cloud()
+    cal_hour = _db.get_pv_calibration_hourly()
+    flat_cal = compute_pv_calibration_factor() if not cal_cloud and not cal_hour else 1.0
+    forecast_per_hour: dict[int, float] = {}
+    for r in forecast_rows:
+        try:
+            ts = datetime.fromisoformat(str(r["slot_time"]).replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            if ts.date().isoformat() != today:
+                continue
+            forecast_per_hour[ts.hour] = forecast_per_hour.get(ts.hour, 0.0) + forecast_pv_kw_from_row(
+                ts.hour,
+                float(r.get("solar_w_m2") or 0.0),
+                r.get("cloud_cover_pct"),
+                direct_pv_kw=r.get("direct_pv_kw"),
+                cloud_table=cal_cloud,
+                hourly_table=cal_hour,
+                flat=flat_cal,
+            )
+        except (ValueError, TypeError, KeyError):
+            continue
+    if not forecast_per_hour:
+        return {}, {"reason": "no meteo_forecast saved for today"}
+
+    lo, hi = safety_clamp
+    observed: dict[int, float] = {}
+    clamped_hours: list[int] = []
+    for h in sorted(set(actual_per_hour) & set(forecast_per_hour)):
+        a = actual_per_hour[h]
+        f = forecast_per_hour[h]
+        if f < min_kwh and a < min_kwh:
+            continue
+        if f < min_kwh:
+            # Forecast was effectively zero but actual was non-trivial:
+            # the ratio explodes, so cap to the upper clamp directly.
+            observed[h] = hi
+            clamped_hours.append(h)
+            continue
+        ratio = a / f
+        clamped = max(lo, min(hi, ratio))
+        observed[h] = clamped
+        if clamped != ratio:
+            clamped_hours.append(h)
+
+    if len(observed) < min_hours:
+        return {}, {
+            "reason": f"only {len(observed)} hour(s) with both actual+forecast data today",
+            "min_hours_required": min_hours,
+        }
+
+    sorted_obs = sorted(observed.values())
+    median = sorted_obs[len(sorted_obs) // 2]
+
+    factor_by_hour: dict[int, float] = {h: 1.0 for h in range(24)}
+    imputed_hours: list[int] = []
+    for h in range(24):
+        if h in observed:
+            factor_by_hour[h] = observed[h]
+        else:
+            factor_by_hour[h] = median
+            imputed_hours.append(h)
+
+    return factor_by_hour, {
+        "n_observed": len(observed),
+        "n_imputed": len(imputed_hours),
+        "median_ratio": round(median, 4),
+        "ratios_per_hour": {h: round(v, 4) for h, v in observed.items()},
+        "imputed_hours": imputed_hours,
+        "clamped_hours": clamped_hours,
+    }
+
+
 def cloud_bucket(cloud_cover_pct: float | None) -> int:
     """Map a cloud-cover % (0-100) to the calibration bucket index.
 

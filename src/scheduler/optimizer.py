@@ -1338,6 +1338,7 @@ def _run_optimizer_lp(
     from ..weather import (
         compute_pv_calibration_factor,
         compute_today_pv_correction_factor,
+        compute_today_pv_correction_factor_by_hour,
         get_pv_calibration_factor_for,
     )
     pv_scale_cloud = db.get_pv_calibration_hourly_cloud()
@@ -1362,11 +1363,27 @@ def _run_optimizer_lp(
     else:
         logger.info("PV calibration: flat factor=%.3f (no per-hour or cloud-aware table)", flat_scale)
 
+    # Today-aware adjuster: prefer the per-hour version when there's enough
+    # observed-vs-forecast data; the scalar version is the fallback. The
+    # per-hour map fixes the asymmetric morning/afternoon bias the scalar
+    # adjuster averaged away (afternoons systematically under-forecast more
+    # than mornings; the median-of-observed scalar split the difference and
+    # under-corrected afternoons).
+    today_factor_by_hour, today_diag_by_hour = compute_today_pv_correction_factor_by_hour()
     today_factor, today_diag = compute_today_pv_correction_factor()
-    if today_factor != 1.0:
+    if today_factor_by_hour:
         logger.info(
-            "PV calibration: today-aware adjuster factor=%.3f (n_hours=%d, "
-            "median_ratio=%.3f, clamped=%s)",
+            "PV calibration: per-hour today-aware adjuster active "
+            "(n_observed=%d, n_imputed=%d, median_ratio=%.3f, clamped_hours=%s)",
+            today_diag_by_hour.get("n_observed", 0),
+            today_diag_by_hour.get("n_imputed", 0),
+            today_diag_by_hour.get("median_ratio", 0.0),
+            today_diag_by_hour.get("clamped_hours", []),
+        )
+    elif today_factor != 1.0:
+        logger.info(
+            "PV calibration: scalar today-aware adjuster factor=%.3f (n_hours=%d, "
+            "median_ratio=%.3f, clamped=%s) — per-hour adjuster needed more data",
             today_factor, today_diag.get("n_hours", 0),
             today_diag.get("median_ratio", 0.0), today_diag.get("clamped", False),
         )
@@ -1377,12 +1394,17 @@ def _run_optimizer_lp(
         )
 
     def _pv_scale_callable(hour_utc: int, cloud_pct: float) -> float:
-        return get_pv_calibration_factor_for(
+        cal = get_pv_calibration_factor_for(
             hour_utc, cloud_pct,
             cloud_table=pv_scale_cloud,
             hourly_table=pv_scale_hourly,
             flat=flat_scale,
-        ) * today_factor
+        )
+        # Per-hour today factor wins; scalar fallback when the per-hour map
+        # is empty (not enough observed-vs-forecast data yet today).
+        if today_factor_by_hour:
+            return cal * today_factor_by_hour.get(int(hour_utc), 1.0)
+        return cal * today_factor
 
     weather = forecast_to_lp_inputs(forecast, starts, pv_scale=_pv_scale_callable)
     initial = read_lp_initial_state(daikin)
@@ -1411,6 +1433,11 @@ def _run_optimizer_lp(
             "flat_scale": round(float(flat_scale), 6),
             "today_factor": round(float(today_factor), 6),
             "today_diag": today_diag,
+            "today_factor_by_hour": (
+                {str(h): round(float(v), 6) for h, v in today_factor_by_hour.items()}
+                if today_factor_by_hour else None
+            ),
+            "today_diag_by_hour": today_diag_by_hour,
         },
         "temperature_adjustment": {
             "source": "forecast_skill_log",
