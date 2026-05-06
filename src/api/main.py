@@ -1261,15 +1261,32 @@ async def optimization_inputs(horizon_hours: int | None = None):
     )
 
     # --- Meteo forecast (latest-per-slot, in the plan window) ---------------
+    # Use the canonical store (meteo_forecast_value, keyed by the latest
+    # ``meteo_forecast_latest_state`` fetch). Falls back to the legacy
+    # ``meteo_forecast`` table for rows predating the V11 canonical migration.
     conn = db.get_connection()
     try:
-        cur = conn.execute(
-            """SELECT slot_time, temp_c, solar_w_m2 FROM meteo_forecast
-               WHERE slot_time >= ? AND slot_time < ?
-               ORDER BY slot_time""",
-            (day_start.isoformat(), window_end.isoformat()),
-        )
-        meteo_rows = [dict(r) for r in cur.fetchall()]
+        latest_fetch_at = db._get_latest_meteo_forecast_fetch_at(conn)
+        if latest_fetch_at:
+            cur = conn.execute(
+                """SELECT slot_time, temp_c, solar_w_m2
+                   FROM meteo_forecast_value
+                   WHERE forecast_fetch_at_utc = ?
+                     AND slot_time >= ? AND slot_time < ?
+                   ORDER BY slot_time""",
+                (latest_fetch_at, day_start.isoformat(), window_end.isoformat()),
+            )
+            meteo_rows = [dict(r) for r in cur.fetchall()]
+        else:
+            meteo_rows = []
+        if not meteo_rows:
+            cur = conn.execute(
+                """SELECT slot_time, temp_c, solar_w_m2 FROM meteo_forecast
+                   WHERE slot_time >= ? AND slot_time < ?
+                   ORDER BY slot_time""",
+                (day_start.isoformat(), window_end.isoformat()),
+            )
+            meteo_rows = [dict(r) for r in cur.fetchall()]
     finally:
         conn.close()
 
