@@ -141,3 +141,65 @@ def test_dawn_dusk_hours_excluded() -> None:
     _seed_forecast(hour_utc=20, irradiance_wm2=2.0)
     f, diag = compute_today_pv_correction_factor()
     assert diag["n_hours"] == 2, f"Dusk hour should be excluded: {diag}"
+
+
+# ---------------------------------------------------------------------------
+# Per-hour today-aware adjuster — addresses asymmetric morning/afternoon bias
+# the scalar adjuster averages away.
+# ---------------------------------------------------------------------------
+
+
+def test_per_hour_returns_observed_ratios_and_imputes_unobserved():
+    """Two observed hours produce per-hour factors; the rest get the median."""
+    from src.weather import compute_today_pv_correction_factor_by_hour
+
+    # Morning ratio = 1.5 (sunny morning beats forecast); midday spot-on.
+    _seed_realtime(hour_utc=9, kw=2.0)   # forecast → 1.33; ratio = 1.5
+    _seed_forecast(hour_utc=9, irradiance_wm2=350.0)
+    _seed_realtime(hour_utc=11, kw=2.0)
+    _seed_forecast(hour_utc=11, irradiance_wm2=525.0)  # forecast → 2.0; ratio = 1.0
+
+    by_hour, diag = compute_today_pv_correction_factor_by_hour()
+    assert by_hour, f"expected non-empty map; diag={diag}"
+    assert diag["n_observed"] == 2
+    # Observed hours get their own ratios.
+    assert 9 in diag["ratios_per_hour"]
+    assert 11 in diag["ratios_per_hour"]
+    # Unobserved hours get the median (between 1.0 and 1.5 → median 1.5
+    # because there are only 2 values; sorted_obs[1] = 1.5). ``median_ratio``
+    # in diag is rounded to 4 places; ``by_hour`` values carry full precision.
+    median = diag["median_ratio"]
+    assert by_hour[3] == pytest.approx(median, abs=1e-3)
+    assert by_hour[14] == pytest.approx(median, abs=1e-3)
+    # Observed hour ratios are NOT the median (asymmetry preserved).
+    assert by_hour[9] != by_hour[11], f"observed hours should keep their own factor: {by_hour}"
+
+
+def test_per_hour_zero_forecast_clamps_to_upper_bound():
+    """A 'forecast said nothing, reality produced PV' hour clamps to the
+    upper safety bound rather than returning NaN/inf."""
+    from src.weather import compute_today_pv_correction_factor_by_hour
+
+    # Two observed hours so we cross min_hours.
+    _seed_realtime(hour_utc=9, kw=1.0)
+    _seed_forecast(hour_utc=9, irradiance_wm2=300.0)
+    _seed_realtime(hour_utc=10, kw=1.0)
+    _seed_forecast(hour_utc=10, irradiance_wm2=0.5)  # near-zero forecast
+
+    by_hour, diag = compute_today_pv_correction_factor_by_hour()
+    assert by_hour
+    # Hour 10's forecast was effectively zero → clamped to upper bound 2.0.
+    assert by_hour[10] == 2.0
+    assert 10 in diag["clamped_hours"]
+
+
+def test_per_hour_returns_empty_when_only_one_hour_observed():
+    """Falls back to scalar adjuster when fewer than min_hours observed."""
+    from src.weather import compute_today_pv_correction_factor_by_hour
+
+    _seed_realtime(hour_utc=9, kw=1.0)
+    _seed_forecast(hour_utc=9, irradiance_wm2=300.0)
+
+    by_hour, diag = compute_today_pv_correction_factor_by_hour()
+    assert by_hour == {}, "single observation should not produce a per-hour map"
+    assert "min_hours_required" in diag
