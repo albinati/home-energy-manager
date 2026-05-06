@@ -188,7 +188,13 @@ SCHEMA: dict[str, SettingSpec] = {
     "PV_TELEMETRY_INTERVAL_MINUTES": SettingSpec(
         key="PV_TELEMETRY_INTERVAL_MINUTES",
         type_name="int",
-        env_default=_int_env("PV_TELEMETRY_INTERVAL_MINUTES", "30"),
+        # 5 min default — gives 6 samples per LP slot (30 min) so the
+        # half-hour aggregations used by ``forecast_skill_log`` rebuild,
+        # the today-aware adjuster, and the bias diagnostics are based on
+        # a proper slot mean rather than a single point. Zero Fox quota
+        # cost since this reads the heartbeat-cached realtime, not the
+        # paid /raw API.
+        env_default=_int_env("PV_TELEMETRY_INTERVAL_MINUTES", "5"),
         min_value=5,
         max_value=120,
         cron_reload=True,
@@ -196,7 +202,8 @@ SCHEMA: dict[str, SettingSpec] = {
             "Interval (minutes) for the PV-realtime telemetry job. Each tick reads the "
             "Fox cached realtime (SoC%, solar/load/grid/battery kW) and persists in "
             "pv_realtime_history for offline calibration analysis. Zero Fox quota cost "
-            "(reads heartbeat-cached values)."
+            "(reads heartbeat-cached values). 5 min = 6 samples/slot for proper "
+            "slot-mean aggregations."
         ),
     ),
     "PV_CALIBRATION_WINDOW_DAYS": SettingSpec(
