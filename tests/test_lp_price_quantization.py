@@ -80,7 +80,6 @@ def test_lp_solve_uses_conservative_quantization(
     from src.scheduler.lp_optimizer import LpInitialState, solve_lp
     from src.weather import WeatherLpSeries
 
-    monkeypatch.setattr(app_config, "LP_HIGHS_TIME_LIMIT_SECONDS", 15)
     monkeypatch.setattr(app_config, "LP_INVERTER_STRESS_COST_PENCE", 0.0)
     monkeypatch.setattr(app_config, "LP_HP_MIN_ON_SLOTS", 1)
     monkeypatch.setattr(app_config, "LP_SOC_TERMINAL_VALUE_PENCE_PER_KWH", 0.0)

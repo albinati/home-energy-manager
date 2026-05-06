@@ -13,8 +13,7 @@ from src.weather import WeatherLpSeries
 
 @pytest.fixture(autouse=True)
 def _fast_solver(monkeypatch):
-    """Keep CI fast — use HiGHS with a short time limit (falls back to CBC if unavailable)."""
-    monkeypatch.setattr(app_config, "LP_HIGHS_TIME_LIMIT_SECONDS", 15)
+    """Keep CI fast and deterministic."""
     monkeypatch.setattr(app_config, "LP_CBC_TIME_LIMIT_SECONDS", 15)
     # Disable inverter stress and MPC knobs that add constraint complexity
     monkeypatch.setattr(app_config, "LP_INVERTER_STRESS_COST_PENCE", 0.0)
@@ -37,6 +36,78 @@ def _series(n: int, base: datetime) -> tuple[list[datetime], WeatherLpSeries]:
         cop_dhw=[2.7] * n,
     )
     return slots, w
+
+
+def test_micro_climate_offset_is_applied_as_forecast_plus_offset():
+    """Calibrated outdoor temp = forecast + offset (offset = actual − forecast).
+
+    Pre-fix the optimizer subtracted the offset, which inverted the sign and
+    biased every winter solve away from heating allocation. This regression
+    test pins the corrected convention to ``db.get_micro_climate_offset_c``.
+    """
+    base = datetime(2026, 7, 1, 0, 0, tzinfo=UTC)
+    slots, w = _series(1, base)
+    st = LpInitialState(soc_kwh=4.0, tank_temp_c=44.0, indoor_temp_c=20.5)
+
+    plan = solve_lp(
+        slot_starts_utc=slots,
+        price_pence=[12.0],
+        base_load_kwh=[0.4],
+        weather=w,
+        initial=st,
+        tz=ZoneInfo("Europe/London"),
+        micro_climate_offset_c=-2.0,
+    )
+
+    assert plan.ok
+    # Forecast was 10.0 °C; a -2.0 °C offset means actuals run 2 °C colder
+    # than forecast → calibrated t_out is 8.0 °C, not 12.0 °C.
+    assert plan.temp_outdoor_c[0] == pytest.approx(8.0)
+
+
+def test_micro_climate_offset_by_hour_overrides_flat_default():
+    """Per-hour offsets win over the flat default for matching UTC hours."""
+    base = datetime(2026, 7, 1, 0, 0, tzinfo=UTC)
+    slots, w = _series(2, base)
+    st = LpInitialState(soc_kwh=4.0, tank_temp_c=44.0, indoor_temp_c=20.5)
+
+    plan = solve_lp(
+        slot_starts_utc=slots,
+        price_pence=[12.0, 12.0],
+        base_load_kwh=[0.4, 0.4],
+        weather=w,
+        initial=st,
+        tz=ZoneInfo("Europe/London"),
+        micro_climate_offset_c=-2.0,
+        # The first slot is at hour 0; second slot is also hour 0 (00:30).
+        # Override hour 0 to +3.0 ⇒ both slots see 13.0, not 8.0.
+        micro_climate_offset_by_hour_c={0: 3.0},
+    )
+
+    assert plan.ok
+    assert plan.temp_outdoor_c[0] == pytest.approx(13.0)
+    assert plan.temp_outdoor_c[1] == pytest.approx(13.0)
+
+
+def test_micro_climate_offset_clamped_to_five_degrees():
+    """Anomalous offsets must not move t_out by more than ±5 °C."""
+    base = datetime(2026, 7, 1, 0, 0, tzinfo=UTC)
+    slots, w = _series(1, base)
+    st = LpInitialState(soc_kwh=4.0, tank_temp_c=44.0, indoor_temp_c=20.5)
+
+    plan = solve_lp(
+        slot_starts_utc=slots,
+        price_pence=[12.0],
+        base_load_kwh=[0.4],
+        weather=w,
+        initial=st,
+        tz=ZoneInfo("Europe/London"),
+        micro_climate_offset_c=50.0,
+    )
+
+    assert plan.ok
+    # +50 °C clamped to +5 °C; calibrated t_out is forecast (10) + (+5) = 15.
+    assert plan.temp_outdoor_c[0] == pytest.approx(15.0)
 
 
 def test_lp_solves_optimal_small_horizon():
@@ -309,20 +380,21 @@ def test_simplified_hp_model_continuous_power(monkeypatch):
     ), "DHW kWh per slot exceeded max_hp_kw × 0.5"
 
 
-def test_highs_solver_used_by_default():
-    """HiGHS Python API should be the default solver when available."""
-    import pulp
-
-    available = pulp.listSolvers(onlyAvailable=True)
-    if "HiGHS" not in available:
-        pytest.skip("HiGHS not installed in this environment")
-
+def test_cbc_solver_used_by_default():
+    """CBC is the only supported solver backend."""
     from src.scheduler.lp_optimizer import _make_solver
 
     solver = _make_solver()
-    # Both HiGHS and HiGHS_CMD are acceptable; check name starts with HiGHS
-    solver_name = type(solver).__name__
-    assert solver_name.startswith("HiGHS"), f"Expected HiGHS solver, got {solver_name}"
+    assert type(solver).__name__ == "PULP_CBC_CMD"
+
+
+def test_legacy_lp_solver_value_falls_back_to_cbc(monkeypatch):
+    """A leftover ``LP_SOLVER=highs`` in someone's .env still solves; CBC takes over."""
+    from src.scheduler.lp_optimizer import _make_solver
+
+    monkeypatch.setattr(app_config, "LP_SOLVER", "highs")
+    solver = _make_solver()
+    assert type(solver).__name__ == "PULP_CBC_CMD"
 
 
 def test_negative_price_max_charges_battery(monkeypatch):
