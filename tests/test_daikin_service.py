@@ -181,3 +181,48 @@ def test_daikin_calibration_window_at_boundaries():
     assert _in_daikin_calibration_window(datetime(2026, 4, 18, 14, 30, 0, tzinfo=tz))
     # Afternoon window end boundary is excluded.
     assert not _in_daikin_calibration_window(datetime(2026, 4, 18, 16, 30, 0, tzinfo=tz))
+
+
+def test_daikin_2h_refresh_window_fires_on_even_hour_first_minutes():
+    """The 2h-aligned window fires for [02, 07) min past each even UTC hour.
+
+    Onecta caches in 2-hour buckets; firing right after the rotation gives us
+    the freshest data. 12 fires/day = 12 calls/day, well under 200/day quota.
+    See #267 (S1).
+    """
+    from src.scheduler.runner import _in_daikin_2h_refresh_window
+
+    # 00:02 UTC — start of window after 00:00 rotation → True.
+    assert _in_daikin_2h_refresh_window(datetime(2026, 5, 6, 0, 2, 0, tzinfo=UTC))
+    # 00:06 UTC — still in [02, 07) → True.
+    assert _in_daikin_2h_refresh_window(datetime(2026, 5, 6, 0, 6, 59, tzinfo=UTC))
+    # 00:07 UTC — exclusive end → False.
+    assert not _in_daikin_2h_refresh_window(datetime(2026, 5, 6, 0, 7, 0, tzinfo=UTC))
+    # 00:01 UTC — before window start → False.
+    assert not _in_daikin_2h_refresh_window(datetime(2026, 5, 6, 0, 1, 59, tzinfo=UTC))
+
+
+def test_daikin_2h_refresh_window_skips_odd_hours():
+    """Odd-hour UTC ticks never fire — Onecta rotates on even hours only."""
+    from src.scheduler.runner import _in_daikin_2h_refresh_window
+
+    # 01:02, 03:04, 05:06 — all odd-hour, all False even within minute window.
+    assert not _in_daikin_2h_refresh_window(datetime(2026, 5, 6, 1, 2, 0, tzinfo=UTC))
+    assert not _in_daikin_2h_refresh_window(datetime(2026, 5, 6, 3, 4, 0, tzinfo=UTC))
+    assert not _in_daikin_2h_refresh_window(datetime(2026, 5, 6, 5, 6, 0, tzinfo=UTC))
+
+
+def test_daikin_2h_refresh_window_fires_12x_per_day():
+    """Sanity: enumerating every minute of a day, the window fires for exactly
+    12 distinct 5-minute blocks (one per even UTC hour)."""
+    from src.scheduler.runner import _in_daikin_2h_refresh_window
+
+    fires_per_hour: dict[int, int] = {}
+    for hour in range(24):
+        for minute in range(60):
+            t = datetime(2026, 5, 6, hour, minute, 0, tzinfo=UTC)
+            if _in_daikin_2h_refresh_window(t):
+                fires_per_hour[hour] = fires_per_hour.get(hour, 0) + 1
+
+    assert sorted(fires_per_hour.keys()) == list(range(0, 24, 2))  # 12 even hours
+    assert all(n == 5 for n in fires_per_hour.values())  # 5 minutes each
