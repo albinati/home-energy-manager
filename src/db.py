@@ -878,6 +878,20 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_lp_inputs_snapshot_forecast_fetch ON lp_inputs_snapshot(forecast_fetch_at_utc)"
     )
+
+    # Older DBs predate the dispatch_decisions audit columns. The CREATE TABLE
+    # at SCHEMA-load time declares them for fresh installs, but a long-lived
+    # prod DB needs explicit ALTER TABLE migrations. ``persist_dispatch_decisions``
+    # writes None into these columns until the margin-guard slice ships, so the
+    # migration is a pure compatibility fix — no behavior change.
+    cur = conn.execute("PRAGMA table_info(dispatch_decisions)")
+    dd_cols = {str(r[1]) for r in cur.fetchall()}
+    if "export_price_p_kwh" not in dd_cols:
+        conn.execute("ALTER TABLE dispatch_decisions ADD COLUMN export_price_p_kwh REAL")
+    if "refill_price_p_kwh" not in dd_cols:
+        conn.execute("ALTER TABLE dispatch_decisions ADD COLUMN refill_price_p_kwh REAL")
+    if "economic_margin_p_kwh" not in dd_cols:
+        conn.execute("ALTER TABLE dispatch_decisions ADD COLUMN economic_margin_p_kwh REAL")
     # Older DBs predate the cloud-aware PV table (PR #232). Idempotent — when
     # the table is already created at SCHEMA-load time this block is a no-op.
     conn.execute(
