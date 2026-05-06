@@ -2,6 +2,8 @@
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
+from zoneinfo import ZoneInfo
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _make_device(dev_id: str = "dev-1") -> MagicMock:
@@ -164,3 +166,18 @@ def test_pre_slot_window_at_boundaries():
     # 10:00 mid-slot → NOT in window
     t_out_3 = datetime(2026, 4, 18, 12, 10, 0, tzinfo=UTC)
     assert not _in_octopus_pre_slot_window(t_out_3, lead_seconds=300)
+
+
+def test_daikin_calibration_window_at_boundaries():
+    from src.scheduler.runner import _in_daikin_calibration_window
+
+    tz = ZoneInfo("Europe/London")
+
+    # Morning window start.
+    assert _in_daikin_calibration_window(datetime(2026, 4, 18, 6, 0, 0, tzinfo=tz))
+    # Morning window end boundary is excluded.
+    assert not _in_daikin_calibration_window(datetime(2026, 4, 18, 8, 0, 0, tzinfo=tz))
+    # Afternoon window start.
+    assert _in_daikin_calibration_window(datetime(2026, 4, 18, 14, 30, 0, tzinfo=tz))
+    # Afternoon window end boundary is excluded.
+    assert not _in_daikin_calibration_window(datetime(2026, 4, 18, 16, 30, 0, tzinfo=tz))

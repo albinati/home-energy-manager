@@ -287,6 +287,45 @@ def _in_octopus_pre_slot_window(
     return in_window
 
 
+def _parse_hhmm_to_seconds(value: str) -> int:
+    parts = (value or "00:00").strip().split(":")
+    hour = int(parts[0]) if parts and parts[0] else 0
+    minute = int(parts[1]) if len(parts) > 1 and parts[1] else 0
+    return hour * 3600 + minute * 60
+
+
+def _in_daikin_calibration_window(
+    now_local: datetime | None = None,
+    windows: str | None = None,
+) -> bool:
+    """Return True in the local morning/afternoon Daikin calibration windows.
+
+    The default windows are tuned for the user-visible pain points:
+    early morning heating/tank decisions and afternoon re-plan opportunities
+    when the outdoor temperature trend starts to diverge from the forecast.
+    """
+    if now_local is None:
+        now_local = datetime.now(ZoneInfo(config.BULLETPROOF_TIMEZONE))
+    if windows is None:
+        windows = getattr(config, "DAIKIN_CALIBRATION_WINDOWS_LOCAL", "06:00-08:00,14:30-16:30")
+
+    current_s = now_local.hour * 3600 + now_local.minute * 60 + now_local.second
+    for item in str(windows).split(","):
+        item = item.strip()
+        if not item or "-" not in item:
+            continue
+        start_s, end_s = [part.strip() for part in item.split("-", 1)]
+        start = _parse_hhmm_to_seconds(start_s)
+        end = _parse_hhmm_to_seconds(end_s)
+        if start <= end:
+            if start <= current_s < end:
+                return True
+        else:
+            if current_s >= start or current_s < end:
+                return True
+    return False
+
+
 def bulletproof_daikin_consumption_rollup_job() -> None:
     """Roll daily Daikin consumption from the cached gateway-devices payload (S10.12 / #178).
 
@@ -430,6 +469,25 @@ def bulletproof_consumption_backfill_job() -> None:
         )
     except Exception as e:
         logger.warning("Consumption backfill failed (non-fatal): %s", e)
+
+
+def bulletproof_forecast_skill_log_job() -> None:
+    """Rebuild yesterday's UTC forecast-vs-actual skill rows.
+
+    Runs after the nightly consumption backfill so the prior UTC day has the
+    fullest available PV + outdoor-temperature actuals. Best-effort only: a
+    failure here must not interfere with the rest of the scheduler.
+    """
+    target_date_utc = (datetime.now(UTC).date() - timedelta(days=1)).isoformat()
+    try:
+        rows_written = db.rebuild_forecast_skill_log_for_date(target_date_utc)
+        logger.info(
+            "forecast_skill_log rebuild: date_utc=%s rows=%d",
+            target_date_utc,
+            rows_written,
+        )
+    except Exception as e:
+        logger.warning("forecast_skill_log rebuild failed (non-fatal): %s", e)
 
 
 def bulletproof_night_brief_job() -> None:
@@ -1073,17 +1131,22 @@ def bulletproof_heartbeat_tick() -> None:
     if config.DAIKIN_CLIENT_ID and config.DAIKIN_CLIENT_SECRET and config.DAIKIN_TOKEN_FILE.exists():
         try:
             # Heartbeat reads from cache only — no auto-refresh to protect 200/day quota.
-            # allow_refresh=True fires only when we are in the Octopus pre-slot window.
+            # allow_refresh=True fires only when we are in a high-value window:
+            # either the Octopus pre-slot boundary or a local Daikin calibration slot.
             in_pre_slot = _in_octopus_pre_slot_window(now_utc)
+            in_calibration = _in_daikin_calibration_window(now_local)
+            allow_refresh = in_pre_slot or in_calibration
             daikin_result = daikin_service.get_cached_devices(
-                allow_refresh=in_pre_slot,
+                allow_refresh=allow_refresh,
                 actor="heartbeat",
             )
             devices = daikin_result.devices
-            if in_pre_slot and daikin_result.source == "fresh":
+            if allow_refresh and daikin_result.source == "fresh":
                 logger.info(
-                    "Daikin pre-slot refresh: fetched %d device(s) (next Octopus slot in <5 min)",
+                    "Daikin refresh: fetched %d device(s) (pre-slot=%s calibration=%s)",
                     len(devices),
+                    in_pre_slot,
+                    in_calibration,
                 )
         except Exception as e:
             logger.debug("Daikin heartbeat skip: %s", e)
@@ -1472,6 +1535,12 @@ def start_background_scheduler() -> None:
                 config.CONSUMPTION_BACKFILL_MINUTE,
                 tz,
             )
+            _background_scheduler.add_job(
+                bulletproof_forecast_skill_log_job,
+                CronTrigger(hour=4, minute=15, timezone=ZoneInfo("UTC")),
+                id="bulletproof_forecast_skill_log",
+            )
+            logger.info("Forecast skill rebuild cron scheduled (04:15 UTC daily)")
             # V12: MPC is fully event-driven. The fixed-hour cron is GONE.
             # Triggers: octopus_fetch (when new rates land), tier_boundary
             # (before every tariff transition), soc_drift / forecast_revision

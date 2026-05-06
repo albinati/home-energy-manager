@@ -248,6 +248,35 @@ def estimate_pv_kw(
     return capacity_kwp * (shortwave_radiation_wm2 / _IRRADIANCE_AT_STC_WM2) * efficiency
 
 
+def forecast_pv_kw_from_row(
+    hour_utc: int,
+    shortwave_radiation_wm2: float,
+    cloud_cover_pct: float | None,
+    *,
+    cloud_table: dict[tuple[int, int], float] | None = None,
+    hourly_table: dict[int, float] | None = None,
+    flat: float = 1.0,
+    scale: float = 1.0,
+) -> float:
+    """Apply the same PV forecast transform used by the LP and skill logger.
+
+    Cloud attenuation is applied to the irradiance, the result is converted
+    to kW via :func:`estimate_pv_kw`, and the calibration lookup follows the
+    same cloud → hour → flat fallback chain as ``forecast_to_lp_inputs``.
+    """
+    cloud_pct_f = float(cloud_cover_pct) if cloud_cover_pct is not None else 50.0
+    att = max(0.0, min(1.0, 1.0 - 0.25 * (cloud_pct_f / 100.0)))
+    rad_eff = max(0.0, float(shortwave_radiation_wm2) * att)
+    cal = get_pv_calibration_factor_for(
+        int(hour_utc),
+        cloud_pct_f,
+        cloud_table=cloud_table,
+        hourly_table=hourly_table,
+        flat=flat,
+    )
+    return estimate_pv_kw(rad_eff) * cal * max(0.0, float(scale))
+
+
 def compute_heating_demand_factor(
     temperature_c: float,
     base_temp_c: float | None = None,

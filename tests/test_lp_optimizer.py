@@ -110,6 +110,7 @@ def test_micro_climate_offset_clamped_to_five_degrees():
     assert plan.temp_outdoor_c[0] == pytest.approx(15.0)
 
 
+
 def test_lp_solves_optimal_small_horizon():
     base = datetime(2026, 7, 1, 0, 0, tzinfo=UTC)
     n = 12
