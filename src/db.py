@@ -293,6 +293,8 @@ CREATE TABLE IF NOT EXISTS forecast_skill_log (
     actual_temp_c REAL,
     predicted_pv_kwh REAL,
     actual_pv_kwh REAL,
+    predicted_load_kwh REAL,
+    actual_load_kwh REAL,
     built_at_utc TEXT NOT NULL,
     PRIMARY KEY (date_utc, hour_of_day)
 );
@@ -897,10 +899,18 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             actual_temp_c REAL,
             predicted_pv_kwh REAL,
             actual_pv_kwh REAL,
+            predicted_load_kwh REAL,
+            actual_load_kwh REAL,
             built_at_utc TEXT NOT NULL,
             PRIMARY KEY (date_utc, hour_of_day)
         )"""
     )
+    cur = conn.execute("PRAGMA table_info(forecast_skill_log)")
+    fsl_cols = {str(r[1]) for r in cur.fetchall()}
+    if "predicted_load_kwh" not in fsl_cols:
+        conn.execute("ALTER TABLE forecast_skill_log ADD COLUMN predicted_load_kwh REAL")
+    if "actual_load_kwh" not in fsl_cols:
+        conn.execute("ALTER TABLE forecast_skill_log ADD COLUMN actual_load_kwh REAL")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_forecast_skill_log_date ON forecast_skill_log(date_utc)"
     )
@@ -3948,7 +3958,8 @@ def upsert_forecast_skill_rows(rows: list[dict[str, Any]]) -> int:
 
     ``rows`` elements should contain:
     ``date_utc``, ``hour_of_day``, ``predicted_temp_c``, ``actual_temp_c``,
-    ``predicted_pv_kwh``, ``actual_pv_kwh``.
+    ``predicted_pv_kwh``, ``actual_pv_kwh``, plus optional
+    ``predicted_load_kwh`` / ``actual_load_kwh``.
     """
     if not rows:
         return 0
@@ -3961,8 +3972,9 @@ def upsert_forecast_skill_rows(rows: list[dict[str, Any]]) -> int:
                 conn.execute(
                     """INSERT OR REPLACE INTO forecast_skill_log
                        (date_utc, hour_of_day, predicted_temp_c, actual_temp_c,
-                        predicted_pv_kwh, actual_pv_kwh, built_at_utc)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        predicted_pv_kwh, actual_pv_kwh,
+                        predicted_load_kwh, actual_load_kwh, built_at_utc)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         str(row["date_utc"]),
                         int(row["hour_of_day"]),
@@ -3970,6 +3982,8 @@ def upsert_forecast_skill_rows(rows: list[dict[str, Any]]) -> int:
                         row.get("actual_temp_c"),
                         row.get("predicted_pv_kwh"),
                         row.get("actual_pv_kwh"),
+                        row.get("predicted_load_kwh"),
+                        row.get("actual_load_kwh"),
                         built_at_utc,
                     ),
                 )
@@ -3989,20 +4003,25 @@ def rebuild_forecast_skill_log_for_date(date_utc: str) -> int:
     the *latest* prior fetch wins.
 
     Actuals:
-    ``pv_realtime_history`` mean solar kW × 1h for PV, and mean
-    ``execution_log.daikin_outdoor_temp`` for temperature.
+    ``pv_realtime_history`` mean solar/load kW × 1h for PV/load, and mean
+    ``daikin_telemetry.outdoor_temp_c`` (live source) for temperature.
+    Predicted load is the latest LP run's per-slot expectation
+    ``base_load + dhw + space`` summed across the hour.
     """
-    from .weather import estimate_pv_kw
+    from .weather import compute_pv_calibration_factor, forecast_pv_kw_from_row
 
     predicted_by_hour: dict[int, dict[str, float | None]] = {}
     actual_pv_by_hour: dict[int, float] = {}
+    actual_load_by_hour: dict[int, float] = {}
     actual_temp_by_hour: dict[int, float] = {}
+    predicted_load_by_hour: dict[int, float] = {}
 
     with _lock:
         conn = get_connection()
         try:
             cur = conn.execute(
-                """SELECT mv.forecast_fetch_at_utc, mv.slot_time, mv.temp_c, mv.solar_w_m2
+                """SELECT mv.forecast_fetch_at_utc, mv.slot_time, mv.temp_c, mv.solar_w_m2,
+                          mv.cloud_cover_pct
                    FROM meteo_forecast_value mv
                    JOIN meteo_forecast_snapshot ms
                      ON ms.forecast_fetch_at_utc = mv.forecast_fetch_at_utc
@@ -4025,18 +4044,54 @@ def rebuild_forecast_skill_log_for_date(date_utc: str) -> int:
                 actual_pv_by_hour[int(row["hour_utc"])] = float(row["avg_kw"] or 0.0)
 
             cur = conn.execute(
-                """SELECT substr(timestamp, 12, 2) AS hour_utc,
-                          AVG(daikin_outdoor_temp) AS avg_temp_c
-                   FROM execution_log
-                   WHERE substr(timestamp, 1, 10) = ?
-                     AND daikin_outdoor_temp IS NOT NULL
+                """SELECT substr(captured_at, 12, 2) AS hour_utc,
+                          AVG(load_power_kw) AS avg_kw
+                   FROM pv_realtime_history
+                   WHERE substr(captured_at, 1, 10) = ?
+                     AND load_power_kw IS NOT NULL
+                   GROUP BY hour_utc""",
+                (date_utc,),
+            )
+            for row in cur.fetchall():
+                actual_load_by_hour[int(row["hour_utc"])] = float(row["avg_kw"] or 0.0)
+
+            cur = conn.execute(
+                """SELECT CAST(strftime('%H', datetime(fetched_at, 'unixepoch')) AS INTEGER) AS hour_utc,
+                          AVG(outdoor_temp_c) AS avg_temp_c
+                   FROM daikin_telemetry
+                   WHERE date(datetime(fetched_at, 'unixepoch')) = ?
+                     AND source = 'live'
+                     AND outdoor_temp_c IS NOT NULL
                    GROUP BY hour_utc""",
                 (date_utc,),
             )
             for row in cur.fetchall():
                 actual_temp_by_hour[int(row["hour_utc"])] = float(row["avg_temp_c"])
+
+            cur = conn.execute(
+                """
+                SELECT s.slot_time_utc, s.slot_index, s.dhw_kwh, s.space_kwh, i.base_load_json
+                  FROM lp_solution_snapshot s
+                  JOIN lp_inputs_snapshot i ON i.run_id = s.run_id
+                  JOIN (
+                        SELECT slot_time_utc, MAX(run_id) AS max_run
+                          FROM lp_solution_snapshot
+                         WHERE substr(slot_time_utc, 1, 10) = ?
+                         GROUP BY slot_time_utc
+                       ) latest
+                    ON latest.slot_time_utc = s.slot_time_utc
+                   AND latest.max_run = s.run_id
+                 ORDER BY s.slot_time_utc ASC
+                """,
+                (date_utc,),
+            )
+            load_rows = [dict(r) for r in cur.fetchall()]
         finally:
             conn.close()
+
+    cal_cloud = get_pv_calibration_hourly_cloud()
+    cal_hour = get_pv_calibration_hourly()
+    flat_cal = compute_pv_calibration_factor() if not cal_cloud and not cal_hour else 1.0
 
     for row in history_rows:
         slot_time = str(row.get("slot_time") or "")
@@ -4047,18 +4102,47 @@ def rebuild_forecast_skill_log_for_date(date_utc: str) -> int:
             hour_utc = int(slot_time[11:13])
         except ValueError:
             continue
+        cloud_raw = row.get("cloud_cover_pct")
+        cloud_pct = float(cloud_raw) if cloud_raw is not None else 50.0
+        rad_wm2 = float(row.get("solar_w_m2") or 0.0)
         predicted_by_hour[hour_utc] = {
             "predicted_temp_c": (
                 float(row["temp_c"]) if row.get("temp_c") is not None else None
             ),
-            "predicted_pv_kwh": estimate_pv_kw(float(row.get("solar_w_m2") or 0.0)),
+            "predicted_pv_kwh": forecast_pv_kw_from_row(
+                hour_utc,
+                rad_wm2,
+                cloud_pct,
+                cloud_table=cal_cloud,
+                hourly_table=cal_hour,
+                flat=flat_cal,
+            ),
         }
 
+    for row in load_rows:
+        try:
+            base_loads = json.loads(row.get("base_load_json") or "[]")
+            slot_index = int(row.get("slot_index") or 0)
+            slot_time = str(row.get("slot_time_utc") or "")
+            hour_utc = int(slot_time[11:13])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if slot_index < 0 or slot_index >= len(base_loads):
+            continue
+        predicted_load_by_hour[hour_utc] = predicted_load_by_hour.get(hour_utc, 0.0) + (
+            float(base_loads[slot_index])
+            + float(row.get("dhw_kwh") or 0.0)
+            + float(row.get("space_kwh") or 0.0)
+        )
+
     out_rows: list[dict[str, Any]] = []
-    for hour_utc, predicted in sorted(predicted_by_hour.items()):
+    for hour_utc in sorted(set(predicted_by_hour) | set(predicted_load_by_hour)):
+        predicted = predicted_by_hour.get(hour_utc, {})
         actual_pv = actual_pv_by_hour.get(hour_utc)
+        actual_load = actual_load_by_hour.get(hour_utc)
         actual_temp = actual_temp_by_hour.get(hour_utc)
-        if actual_pv is None and actual_temp is None:
+        predicted_load = predicted_load_by_hour.get(hour_utc)
+        if actual_pv is None and actual_temp is None and actual_load is None:
             continue
         out_rows.append(
             {
@@ -4068,6 +4152,8 @@ def rebuild_forecast_skill_log_for_date(date_utc: str) -> int:
                 "actual_temp_c": actual_temp,
                 "predicted_pv_kwh": predicted.get("predicted_pv_kwh"),
                 "actual_pv_kwh": actual_pv,
+                "predicted_load_kwh": predicted_load,
+                "actual_load_kwh": actual_load,
             }
         )
     return upsert_forecast_skill_rows(out_rows)
@@ -4083,7 +4169,8 @@ def get_forecast_skill_rows(
         try:
             cur = conn.execute(
                 """SELECT date_utc, hour_of_day, predicted_temp_c, actual_temp_c,
-                          predicted_pv_kwh, actual_pv_kwh, built_at_utc
+                          predicted_pv_kwh, actual_pv_kwh,
+                          predicted_load_kwh, actual_load_kwh, built_at_utc
                    FROM forecast_skill_log
                    WHERE date_utc >= ? AND date_utc <= ?
                    ORDER BY date_utc ASC, hour_of_day ASC""",
