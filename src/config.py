@@ -427,6 +427,36 @@ class Config:
     # Set e.g. 0.65 to permanently cap the forecast to 65% of Open-Meteo modelled output.
     # When 0 or unset, compute_pv_calibration_factor() derives it automatically from Fox history.
     PV_FORECAST_SCALE_FACTOR: float = float(os.getenv("PV_FORECAST_SCALE_FACTOR", "0"))
+    FORECAST_SOURCE: str = (os.getenv("FORECAST_SOURCE") or "open_meteo").strip().lower()
+    QUARTZ_AUTH_URL: str = (
+        os.getenv("QUARTZ_AUTH_URL") or "https://nowcasting-pro.eu.auth0.com/oauth/token"
+    ).strip()
+    # Default to the documented HTTPS endpoint at api.quartz.solar. Some
+    # development networks see a Cloudflare 1010 from that hostname; in that
+    # case set ``QUARTZ_API_BASE_URL`` explicitly in your local ``.env`` to
+    # the upstream Elastic Beanstalk URL. Production must use HTTPS so the
+    # Authorization bearer token is not sent over plaintext.
+    QUARTZ_API_BASE_URL: str = (
+        os.getenv("QUARTZ_API_BASE_URL") or "https://api.quartz.solar"
+    ).strip().rstrip("/")
+    # Vendor-issued OAuth client_id. Empty default — operators must supply it
+    # via ``.env`` so the value is not committed to OSS.
+    QUARTZ_CLIENT_ID: str = (os.getenv("QUARTZ_CLIENT_ID") or "").strip()
+    QUARTZ_AUDIENCE: str = (
+        os.getenv("QUARTZ_AUDIENCE") or "https://api.nowcasting.io/"
+    ).strip()
+    QUARTZ_USERNAME: str = (
+        os.getenv("QUARTZ_USERNAME") or os.getenv("QUARTZ_USER") or ""
+    ).strip()
+    QUARTZ_PASSWORD: str = os.getenv("QUARTZ_PASSWORD") or os.getenv("QUARTZ_PASS") or ""
+    QUARTZ_GSP_ID: str = (os.getenv("QUARTZ_GSP_ID") or "").strip()
+    QUARTZ_MODEL_NAME: str = (os.getenv("QUARTZ_MODEL_NAME") or "blend").strip()
+    QUARTZ_TREND_ADJUSTER_ON: bool = (
+        os.getenv("QUARTZ_TREND_ADJUSTER_ON", "true").lower() in ("1", "true", "yes")
+    )
+    QUARTZ_INSTALLED_CAPACITY_MW: float = float(
+        os.getenv("QUARTZ_INSTALLED_CAPACITY_MW", "0") or "0"
+    )
 
     # Agile scheduler (Daikin ASHP by price)
     SCHEDULER_ENABLED: bool = os.getenv("SCHEDULER_ENABLED", "false").lower() in ("true", "1", "yes")

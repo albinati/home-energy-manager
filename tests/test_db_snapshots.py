@@ -86,7 +86,8 @@ def test_meteo_forecast_snapshot_has_expected_columns():
 def test_meteo_forecast_value_has_expected_columns():
     cols = _columns("meteo_forecast_value")
     for expected in (
-        "id", "forecast_fetch_at_utc", "slot_time", "temp_c", "solar_w_m2", "cloud_cover_pct",
+        "id", "forecast_fetch_at_utc", "slot_time", "temp_c", "solar_w_m2",
+        "cloud_cover_pct", "direct_pv_kw",
     ):
         assert expected in cols, f"missing column {expected}"
 

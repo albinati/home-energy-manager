@@ -52,7 +52,16 @@ def _seed_forecast(hour_utc: int, irradiance_wm2: float) -> None:
         hour=hour_utc, tzinfo=UTC,
     )
     db.save_meteo_forecast(
-        [{"slot_time": ts.isoformat(), "temp_c": 15.0, "solar_w_m2": irradiance_wm2}],
+        [{
+            "slot_time": ts.isoformat(),
+            "temp_c": 15.0,
+            "solar_w_m2": irradiance_wm2,
+            # Pin cloud cover so ``forecast_pv_kw_from_row`` does not apply
+            # the default 50% attenuation the new transform uses when
+            # cloud_cover_pct is absent — these tests reason about the raw
+            # irradiance → kW conversion.
+            "cloud_cover_pct": 0.0,
+        }],
         today.isoformat(),
     )
 

@@ -176,6 +176,7 @@ CREATE TABLE IF NOT EXISTS meteo_forecast_value (
     temp_c REAL,
     solar_w_m2 REAL,
     cloud_cover_pct REAL,
+    direct_pv_kw REAL,
     UNIQUE(forecast_fetch_at_utc, slot_time)
 );
 
@@ -624,9 +625,14 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             temp_c REAL,
             solar_w_m2 REAL,
             cloud_cover_pct REAL,
+            direct_pv_kw REAL,
             UNIQUE(forecast_fetch_at_utc, slot_time)
         )"""
     )
+    cur = conn.execute("PRAGMA table_info(meteo_forecast_value)")
+    mfv_cols = {str(r[1]) for r in cur.fetchall()}
+    if "direct_pv_kw" not in mfv_cols:
+        conn.execute("ALTER TABLE meteo_forecast_value ADD COLUMN direct_pv_kw REAL")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_meteo_forecast_value_slot ON meteo_forecast_value(slot_time)"
     )
@@ -2473,14 +2479,15 @@ def save_meteo_forecast_snapshot(
                     continue
                 conn.execute(
                     """INSERT OR IGNORE INTO meteo_forecast_value
-                       (forecast_fetch_at_utc, slot_time, temp_c, solar_w_m2, cloud_cover_pct)
-                       VALUES (?, ?, ?, ?, ?)""",
+                       (forecast_fetch_at_utc, slot_time, temp_c, solar_w_m2, cloud_cover_pct, direct_pv_kw)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
                     (
                         str(forecast_fetch_at_utc),
                         str(slot),
                         r.get("temp_c"),
                         r.get("solar_w_m2"),
                         r.get("cloud_cover_pct"),
+                        r.get("direct_pv_kw"),
                     ),
                 )
                 n += 1
@@ -2523,7 +2530,8 @@ def _get_latest_meteo_forecast_rows_for_slot_date(
     """
     cur = conn.execute(
         """SELECT substr(mv.slot_time, 1, 10) AS forecast_date,
-                  mv.slot_time, mv.temp_c, mv.solar_w_m2, mv.cloud_cover_pct
+                  mv.slot_time, mv.temp_c, mv.solar_w_m2, mv.cloud_cover_pct,
+                  mv.direct_pv_kw
              FROM meteo_forecast_value mv
              JOIN (
                  SELECT slot_time, MAX(forecast_fetch_at_utc) AS forecast_fetch_at_utc
@@ -2606,7 +2614,8 @@ def get_meteo_forecast_at_time(when_utc: str) -> dict[str, Any] | None:
             if latest_fetch_at:
                 cur = conn.execute(
                     """SELECT substr(slot_time, 1, 10) AS forecast_date,
-                              slot_time, temp_c, solar_w_m2, cloud_cover_pct
+                              slot_time, temp_c, solar_w_m2, cloud_cover_pct,
+                              direct_pv_kw
                        FROM meteo_forecast_value
                        WHERE forecast_fetch_at_utc = ?
                          AND slot_time <= ?
@@ -2619,7 +2628,8 @@ def get_meteo_forecast_at_time(when_utc: str) -> dict[str, Any] | None:
                     return dict(row)
                 cur = conn.execute(
                     """SELECT substr(slot_time, 1, 10) AS forecast_date,
-                              slot_time, temp_c, solar_w_m2, cloud_cover_pct
+                              slot_time, temp_c, solar_w_m2, cloud_cover_pct,
+                              direct_pv_kw
                        FROM meteo_forecast_value
                        WHERE forecast_fetch_at_utc = ?
                        ORDER BY slot_time ASC
@@ -3843,7 +3853,7 @@ def get_meteo_forecast_at(fetch_at_utc: str) -> list[dict[str, Any]]:
         conn = get_connection()
         try:
             cur = conn.execute(
-                """SELECT slot_time, temp_c, solar_w_m2, cloud_cover_pct
+                """SELECT slot_time, temp_c, solar_w_m2, cloud_cover_pct, direct_pv_kw
                    FROM meteo_forecast_value
                    WHERE forecast_fetch_at_utc = ?
                    ORDER BY slot_time""",
@@ -4035,7 +4045,7 @@ def rebuild_forecast_skill_log_for_date(date_utc: str) -> int:
         try:
             cur = conn.execute(
                 """SELECT mv.forecast_fetch_at_utc, mv.slot_time, mv.temp_c, mv.solar_w_m2,
-                          mv.cloud_cover_pct
+                          mv.cloud_cover_pct, mv.direct_pv_kw
                    FROM meteo_forecast_value mv
                    JOIN meteo_forecast_snapshot ms
                      ON ms.forecast_fetch_at_utc = mv.forecast_fetch_at_utc
@@ -4127,6 +4137,7 @@ def rebuild_forecast_skill_log_for_date(date_utc: str) -> int:
                 hour_utc,
                 rad_wm2,
                 cloud_pct,
+                direct_pv_kw=row.get("direct_pv_kw"),
                 cloud_table=cal_cloud,
                 hourly_table=cal_hour,
                 flat=flat_cal,
@@ -4216,7 +4227,7 @@ def get_meteo_forecast_history_latest_before(when_utc: str) -> list[dict[str, An
             row = cur.fetchone()
             if row and row[0]:
                 cur = conn.execute(
-                    """SELECT slot_time, temp_c, solar_w_m2, cloud_cover_pct
+                    """SELECT slot_time, temp_c, solar_w_m2, cloud_cover_pct, direct_pv_kw
                        FROM meteo_forecast_value
                        WHERE forecast_fetch_at_utc = ?
                        ORDER BY slot_time""",

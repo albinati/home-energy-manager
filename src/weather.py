@@ -10,7 +10,9 @@ Forecast is used by the optimization solver to:
   - Skip grid battery charging when solar is expected to fill the battery
 """
 import json
+import logging
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -19,6 +21,8 @@ from typing import Any
 
 from .config import config, cop_at_temperature
 from .physics import apply_cop_lift_multiplier, get_lwt_base_c
+
+logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------
 # Historical (analytics only)
@@ -229,6 +233,18 @@ class HourlyForecast:
     shortwave_radiation_wm2: float  # W/m² surface global tilted irradiance
     estimated_pv_kw: float        # estimated PV generation for 4.5kWp system
     heating_demand_factor: float  # 0-1: how much heating is needed relative to base temp
+    pv_direct: bool = False       # True when provider supplies site PV directly.
+
+
+@dataclass
+class ForecastFetchResult:
+    """Forecast plus provider metadata for canonical snapshot persistence."""
+
+    forecast: list[HourlyForecast]
+    source: str
+    model_name: str | None = None
+    model_version: str | None = None
+    raw_payload_json: str | None = None
 
 
 # System constants for PV estimate (London W4 system)
@@ -253,6 +269,7 @@ def forecast_pv_kw_from_row(
     shortwave_radiation_wm2: float,
     cloud_cover_pct: float | None,
     *,
+    direct_pv_kw: float | None = None,
     cloud_table: dict[tuple[int, int], float] | None = None,
     hourly_table: dict[int, float] | None = None,
     flat: float = 1.0,
@@ -260,10 +277,27 @@ def forecast_pv_kw_from_row(
 ) -> float:
     """Apply the same PV forecast transform used by the LP and skill logger.
 
-    Cloud attenuation is applied to the irradiance, the result is converted
-    to kW via :func:`estimate_pv_kw`, and the calibration lookup follows the
-    same cloud → hour → flat fallback chain as ``forecast_to_lp_inputs``.
+    When the provider supplies direct PV (Quartz), use that as the base signal
+    but still apply the same site calibration chain so Quartz can be corrected
+    for local shading / orientation bias. Otherwise cloud attenuation is
+    applied before the irradiance-to-kW conversion and the calibration lookup
+    follows the same cloud → hour → flat fallback chain as
+    ``forecast_to_lp_inputs``.
     """
+    scale_f = max(0.0, float(scale))
+    if direct_pv_kw is not None:
+        try:
+            base_kw = max(0.0, float(direct_pv_kw))
+            cal = get_pv_calibration_factor_for(
+                int(hour_utc),
+                cloud_cover_pct,
+                cloud_table=cloud_table,
+                hourly_table=hourly_table,
+                flat=flat,
+            )
+            return base_kw * cal * scale_f
+        except (TypeError, ValueError):
+            pass
     cloud_pct_f = float(cloud_cover_pct) if cloud_cover_pct is not None else 50.0
     att = max(0.0, min(1.0, 1.0 - 0.25 * (cloud_pct_f / 100.0)))
     rad_eff = max(0.0, float(shortwave_radiation_wm2) * att)
@@ -274,7 +308,7 @@ def forecast_pv_kw_from_row(
         hourly_table=hourly_table,
         flat=flat,
     )
-    return estimate_pv_kw(rad_eff) * cal * max(0.0, float(scale))
+    return estimate_pv_kw(rad_eff) * cal * scale_f
 
 
 def compute_heating_demand_factor(
@@ -294,6 +328,35 @@ def compute_heating_demand_factor(
 
 
 def fetch_forecast(
+    lat: str | None = None,
+    lon: str | None = None,
+    hours: int = 48,
+) -> list[HourlyForecast]:
+    """Fetch forecast rows from the configured provider."""
+    return fetch_forecast_snapshot(lat=lat, lon=lon, hours=hours).forecast
+
+
+def fetch_forecast_snapshot(
+    lat: str | None = None,
+    lon: str | None = None,
+    hours: int = 48,
+) -> ForecastFetchResult:
+    """Fetch forecast rows plus source metadata for canonical persistence."""
+    source = (getattr(config, "FORECAST_SOURCE", "open_meteo") or "open_meteo").strip().lower()
+    if source in ("quartz", "quartz_solar"):
+        base = _fetch_open_meteo_forecast(lat=lat, lon=lon, hours=hours)
+        quartz = _fetch_quartz_forecast(hours=hours, base_weather=base)
+        if quartz.forecast:
+            return quartz
+        logger.warning("Quartz forecast unavailable; falling back to Open-Meteo")
+        return ForecastFetchResult(forecast=base, source="open-meteo")
+    return ForecastFetchResult(
+        forecast=_fetch_open_meteo_forecast(lat=lat, lon=lon, hours=hours),
+        source="open-meteo",
+    )
+
+
+def _fetch_open_meteo_forecast(
     lat: str | None = None,
     lon: str | None = None,
     hours: int = 48,
@@ -360,6 +423,239 @@ def fetch_forecast(
     return result
 
 
+# Cached Auth0 access token + epoch second when it expires. We fetch a fresh
+# token slightly before the upstream ``expires_in`` mark so the next forecast
+# request never races a 401 from the API.
+_QUARTZ_TOKEN: str | None = None
+_QUARTZ_TOKEN_EXPIRES_AT: float = 0.0
+_QUARTZ_TOKEN_REFRESH_LEEWAY_SECONDS = 60
+
+
+def _quartz_token(*, force_refresh: bool = False) -> str | None:
+    """Return a cached Quartz bearer token, refreshing when expired or forced.
+
+    Auth0 access tokens issued for the password grant typically expire after
+    24 h. The original implementation cached the token for the lifetime of
+    the process and silently 401'd thereafter. This version tracks
+    ``expires_in`` and re-authenticates when the token is within the leeway
+    window or explicitly forced (e.g. on a 401 from the forecast endpoint).
+    """
+    global _QUARTZ_TOKEN, _QUARTZ_TOKEN_EXPIRES_AT
+    import time as _time
+
+    if (
+        not force_refresh
+        and _QUARTZ_TOKEN
+        and (_QUARTZ_TOKEN_EXPIRES_AT - _QUARTZ_TOKEN_REFRESH_LEEWAY_SECONDS) > _time.time()
+    ):
+        return _QUARTZ_TOKEN
+
+    username = (getattr(config, "QUARTZ_USERNAME", "") or "").strip()
+    password = getattr(config, "QUARTZ_PASSWORD", "") or ""
+    client_id = (getattr(config, "QUARTZ_CLIENT_ID", "") or "").strip()
+    if not username or not password or not client_id:
+        logger.warning(
+            "Quartz credentials are not configured (need QUARTZ_USERNAME, "
+            "QUARTZ_PASSWORD, QUARTZ_CLIENT_ID)"
+        )
+        return None
+    body = {
+        "client_id": client_id,
+        "audience": getattr(config, "QUARTZ_AUDIENCE", "https://api.nowcasting.io/"),
+        "grant_type": "password",
+        "username": username,
+        "password": password,
+    }
+    try:
+        req = urllib.request.Request(
+            getattr(config, "QUARTZ_AUTH_URL", "https://nowcasting-pro.eu.auth0.com/oauth/token"),
+            data=json.dumps(body).encode(),
+            headers={"content-type": "application/json", "Accept": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            payload = json.loads(resp.read().decode())
+        token = str(payload.get("access_token") or "")
+        if not token:
+            logger.warning("Quartz auth response did not include access_token")
+            return None
+        try:
+            expires_in = float(payload.get("expires_in") or 0.0)
+        except (TypeError, ValueError):
+            expires_in = 0.0
+        _QUARTZ_TOKEN = token
+        # Default to a one-hour TTL when the upstream omits ``expires_in`` so
+        # we still re-authenticate periodically rather than caching forever.
+        _QUARTZ_TOKEN_EXPIRES_AT = _time.time() + (expires_in if expires_in > 0 else 3600.0)
+        return token
+    except (urllib.error.URLError, json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+        logger.warning("Quartz auth failed: %s", e)
+        return None
+
+
+def _quartz_site_kw(
+    row: dict[str, Any],
+    *,
+    installed_capacity_mw: float | None = None,
+) -> float | None:
+    normalized = row.get("expectedPowerGenerationNormalized")
+    if normalized is not None:
+        try:
+            frac = float(normalized)
+        except (TypeError, ValueError):
+            frac = 0.0
+        if frac > 1.0:
+            frac /= 100.0
+        return max(0.0, frac * float(config.PV_CAPACITY_KWP))
+
+    capacity_mw = (
+        float(installed_capacity_mw)
+        if installed_capacity_mw is not None and installed_capacity_mw > 0
+        else float(getattr(config, "QUARTZ_INSTALLED_CAPACITY_MW", 0.0) or 0.0)
+    )
+    if capacity_mw <= 0:
+        return None
+    try:
+        mw = float(row.get("expectedPowerGenerationMegawatts") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    frac = mw / capacity_mw
+    return max(0.0, frac * float(config.PV_CAPACITY_KWP))
+
+
+def _fetch_quartz_forecast(
+    *,
+    hours: int,
+    base_weather: list[HourlyForecast],
+) -> ForecastFetchResult:
+    """Fetch hosted Quartz PV nowcast and merge it with weather context.
+
+    Hosted Quartz supplies PV generation, not temperature. Until site-level
+    Quartz is available here, Open-Meteo remains the temperature/cloud source.
+    """
+    token = _quartz_token()
+    if not token:
+        return ForecastFetchResult(forecast=[], source="quartz")
+
+    start = datetime.now(UTC).replace(second=0, microsecond=0)
+    end = start + timedelta(hours=max(1, hours))
+    gsp_id = (getattr(config, "QUARTZ_GSP_ID", "") or "").strip()
+    base_url = getattr(config, "QUARTZ_API_BASE_URL", "https://api.quartz.solar").rstrip("/")
+    if gsp_id:
+        path = f"/v0/solar/GB/gsp/{urllib.parse.quote(gsp_id)}/forecast"
+        params = {
+            "start_datetime_utc": start.isoformat().replace("+00:00", "Z"),
+            "end_datetime_utc": end.isoformat().replace("+00:00", "Z"),
+        }
+        model_name = None
+    else:
+        path = "/v0/solar/GB/national/forecast"
+        params = {
+            "start_datetime_utc": start.isoformat().replace("+00:00", "Z"),
+            "end_datetime_utc": end.isoformat().replace("+00:00", "Z"),
+            "include_metadata": "true",
+            "model_name": getattr(config, "QUARTZ_MODEL_NAME", "blend"),
+            "trend_adjuster_on": str(bool(getattr(config, "QUARTZ_TREND_ADJUSTER_ON", True))).lower(),
+        }
+        model_name = getattr(config, "QUARTZ_MODEL_NAME", "blend")
+    url = f"{base_url}{path}?{urllib.parse.urlencode(params)}"
+
+    def _do_fetch(bearer: str) -> dict[str, Any] | list[Any]:
+        req = urllib.request.Request(
+            url,
+            headers={"Accept": "application/json", "Authorization": f"Bearer {bearer}"},
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return json.loads(resp.read().decode())
+
+    try:
+        try:
+            payload = _do_fetch(token)
+        except urllib.error.HTTPError as http_err:
+            # 401 → cached token expired; force a fresh auth and retry once.
+            if http_err.code == 401:
+                logger.info("Quartz forecast 401; refreshing access token")
+                token = _quartz_token(force_refresh=True)
+                if not token:
+                    return ForecastFetchResult(forecast=[], source="quartz")
+                payload = _do_fetch(token)
+            else:
+                raise
+    except (urllib.error.URLError, json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+        logger.warning("Quartz forecast fetch failed: %s", e)
+        return ForecastFetchResult(forecast=[], source="quartz")
+
+    values: list[dict[str, Any]]
+    model_version = None
+    installed_capacity_mw: float | None = None
+    if isinstance(payload, dict):
+        values = list(payload.get("forecastValues") or [])
+        model = payload.get("model") or {}
+        model_name = str(model.get("name") or model_name or "quartz")
+        model_version = str(model.get("version") or "") or None
+        location = payload.get("location") or {}
+        try:
+            installed_capacity_mw = float(location.get("installedCapacityMw"))
+        except (AttributeError, TypeError, ValueError):
+            installed_capacity_mw = None
+    elif isinstance(payload, list):
+        values = list(payload)
+    else:
+        values = []
+
+    quartz_rows: list[HourlyForecast] = []
+    for row in values:
+        if not isinstance(row, dict):
+            continue
+        site_kw = _quartz_site_kw(row, installed_capacity_mw=installed_capacity_mw)
+        if site_kw is None:
+            continue
+        try:
+            target = datetime.fromisoformat(str(row["targetTime"]).replace("Z", "+00:00"))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if target.tzinfo is None:
+            target = target.replace(tzinfo=UTC)
+        # Quartz targetTime is the period end. Use the period start so it lines
+        # up with our half-hour slot starts.
+        slot_time = target - timedelta(minutes=30)
+        weather_row = get_forecast_for_slot(slot_time, base_weather)
+        temp_c = weather_row.temperature_c if weather_row else 10.0
+        cloud_pct = weather_row.cloud_cover_pct if weather_row else 50.0
+        equivalent_rad = site_kw / max(0.001, float(config.PV_CAPACITY_KWP) * float(config.PV_SYSTEM_EFFICIENCY)) * 1000.0
+        quartz_rows.append(
+            HourlyForecast(
+                time_utc=slot_time,
+                temperature_c=temp_c,
+                cloud_cover_pct=cloud_pct,
+                shortwave_radiation_wm2=max(0.0, equivalent_rad),
+                estimated_pv_kw=site_kw,
+                heating_demand_factor=compute_heating_demand_factor(temp_c),
+                pv_direct=True,
+            )
+        )
+
+    if not quartz_rows:
+        return ForecastFetchResult(forecast=[], source="quartz", raw_payload_json=json.dumps(payload))
+
+    quartz_by_time = {f.time_utc: f for f in quartz_rows}
+    first_q = min(quartz_by_time)
+    last_q = max(quartz_by_time)
+    merged = list(quartz_rows)
+    for f in base_weather:
+        if first_q <= f.time_utc <= last_q:
+            continue
+        merged.append(f)
+    merged.sort(key=lambda f: f.time_utc)
+    return ForecastFetchResult(
+        forecast=merged[: max(hours, len(quartz_rows))],
+        source="quartz",
+        model_name=model_name or ("quartz-gsp" if gsp_id else "quartz-national"),
+        model_version=model_version,
+        raw_payload_json=json.dumps(payload, separators=(",", ":")),
+    )
+
+
 def _forecast_delta(
     prev_rows: list[dict[str, Any]],
     new_rows: list[dict[str, Any]],
@@ -411,8 +707,18 @@ def _forecast_delta(
         p = prev_idx[slot]
         n = new_idx[slot]
         try:
-            prev_pv = estimate_pv_kw(float(p.get("solar_w_m2") or 0.0))
-            new_pv = estimate_pv_kw(float(n.get("solar_w_m2") or 0.0))
+            prev_pv = forecast_pv_kw_from_row(
+                slot.hour,
+                float(p.get("solar_w_m2") or 0.0),
+                p.get("cloud_cover_pct"),
+                direct_pv_kw=p.get("direct_pv_kw"),
+            )
+            new_pv = forecast_pv_kw_from_row(
+                slot.hour,
+                float(n.get("solar_w_m2") or 0.0),
+                n.get("cloud_cover_pct"),
+                direct_pv_kw=n.get("direct_pv_kw"),
+            )
             delta_pv_kwh_total += abs(new_pv - prev_pv)  # 1h slot → kW * 1h = kWh
         except (ValueError, TypeError):
             pass
@@ -704,6 +1010,9 @@ def compute_today_pv_correction_factor(
         forecast_rows = _db.get_meteo_forecast(today)
     except Exception:  # noqa: BLE001
         forecast_rows = []
+    cal_cloud = _db.get_pv_calibration_hourly_cloud()
+    cal_hour = _db.get_pv_calibration_hourly()
+    flat_cal = compute_pv_calibration_factor() if not cal_cloud and not cal_hour else 1.0
     forecast_per_hour: dict[int, float] = {}
     for r in forecast_rows:
         try:
@@ -712,9 +1021,15 @@ def compute_today_pv_correction_factor(
                 ts = ts.replace(tzinfo=UTC)
             if ts.date().isoformat() != today:
                 continue
-            rad = float(r.get("solar_w_m2") or 0.0)
-            # Forecast row is hour-anchored; estimate_pv_kw × 1h = kWh per hour
-            forecast_per_hour[ts.hour] = forecast_per_hour.get(ts.hour, 0.0) + estimate_pv_kw(rad)
+            forecast_per_hour[ts.hour] = forecast_per_hour.get(ts.hour, 0.0) + forecast_pv_kw_from_row(
+                ts.hour,
+                float(r.get("solar_w_m2") or 0.0),
+                r.get("cloud_cover_pct"),
+                direct_pv_kw=r.get("direct_pv_kw"),
+                cloud_table=cal_cloud,
+                hourly_table=cal_hour,
+                flat=flat_cal,
+            )
         except (ValueError, TypeError, KeyError):
             continue
 
@@ -791,12 +1106,25 @@ def get_pv_calibration_factor_for(
 
     Pass pre-fetched tables to avoid hitting the DB inside per-slot loops.
     """
+    import sqlite3
+
     from . import db as _db
 
+    # Tolerate missing DB tables. ``forecast_pv_kw_from_row`` is called from
+    # pure-function unit tests that don't run ``init_db()``, and from a
+    # cold-start window in prod between schema-create and the first
+    # calibration recompute. Either way the right behaviour is to fall back
+    # to ``flat`` rather than crash.
     if cloud_table is None:
-        cloud_table = _db.get_pv_calibration_hourly_cloud()
+        try:
+            cloud_table = _db.get_pv_calibration_hourly_cloud()
+        except sqlite3.OperationalError:
+            cloud_table = {}
     if hourly_table is None:
-        hourly_table = _db.get_pv_calibration_hourly()
+        try:
+            hourly_table = _db.get_pv_calibration_hourly()
+        except sqlite3.OperationalError:
+            hourly_table = {}
 
     bucket = cloud_bucket(cloud_cover_pct)
     if cloud_table:
@@ -1000,6 +1328,7 @@ def evaluate_pv_forecast_accuracy(
     actual_kw_samples: dict[tuple[str, int], list[float]] = defaultdict(list)
     forecast_radiation: dict[tuple[str, int], float] = {}
     forecast_cloud: dict[tuple[str, int], float | None] = {}
+    forecast_direct_pv: dict[tuple[str, int], float | None] = {}
 
     with _db._lock:
         conn = _db.get_connection()
@@ -1037,6 +1366,9 @@ def evaluate_pv_forecast_accuracy(
             key = (ts.date().isoformat(), ts.hour)
             forecast_radiation[key] = float(r.get("solar_w_m2") or 0.0)
             forecast_cloud[key] = float(r.get("cloud_cover_pct")) if r.get("cloud_cover_pct") is not None else None
+            forecast_direct_pv[key] = (
+                float(r.get("direct_pv_kw")) if r.get("direct_pv_kw") is not None else None
+            )
         current_day += _td(days=1)
 
     # Build paired (predicted_kw, actual_kw) tuples
@@ -1049,14 +1381,15 @@ def evaluate_pv_forecast_accuracy(
         rad = forecast_radiation.get(key)
         if rad is None:
             continue
-        cal = get_pv_calibration_factor_for(
+        predicted_kw = forecast_pv_kw_from_row(
             key[1],
+            rad,
             forecast_cloud.get(key),
+            direct_pv_kw=forecast_direct_pv.get(key),
             cloud_table=cal_cloud,
             hourly_table=cal_hourly,
             flat=flat_cal,
         )
-        predicted_kw = estimate_pv_kw(rad) * cal
         if predicted_kw < min_kw and actual_kw < min_kw:
             continue                      # both negligible — skip dawn/dusk
         pairs_per_hour[key[1]].append((predicted_kw, actual_kw))
@@ -1103,7 +1436,10 @@ def forecast_to_lp_inputs(
     """Build per-slot outdoor temperature, irradiance, PV kWh/slot, and COP arrays for the MILP.
 
     PV uses :func:`estimate_pv_kw` with ``PV_CAPACITY_KWP`` and ``PV_SYSTEM_EFFICIENCY``,
-    scaled by ``pv_scale``:
+    scaled by ``pv_scale`` and corrected through the site calibration tables.
+    Quartz direct PV follows the same calibration chain so the solver still
+    sees local shading/orientation bias instead of raw vendor output.
+    ``pv_scale`` can be:
       - ``float``: single multiplier applied to every slot (legacy behaviour).
       - ``dict[int, float]``: per-hour-of-day UTC factor (richer calibration that
         captures shading / sun-angle bias). Missing hours fall back to the median
@@ -1127,6 +1463,24 @@ def forecast_to_lp_inputs(
     dhw_pen = float(config.COP_DHW_PENALTY)
     cap = float(config.PV_CAPACITY_KWP)
     eff = float(config.PV_SYSTEM_EFFICIENCY)
+    import sqlite3
+
+    from . import db as _db
+
+    # Same DB-tolerance shape as ``get_pv_calibration_factor_for`` — pure
+    # callers may invoke this without ever running ``init_db()``.
+    try:
+        cal_cloud = _db.get_pv_calibration_hourly_cloud()
+    except sqlite3.OperationalError:
+        cal_cloud = {}
+    try:
+        cal_hourly = _db.get_pv_calibration_hourly()
+    except sqlite3.OperationalError:
+        cal_hourly = {}
+    try:
+        flat_cal = compute_pv_calibration_factor() if not cal_cloud and not cal_hourly else 1.0
+    except sqlite3.OperationalError:
+        flat_cal = 1.0
 
     # PV scale: explicit arg > config override > 1.0. Accept float OR per-hour dict.
     if pv_scale is None:
@@ -1145,11 +1499,14 @@ def forecast_to_lp_inputs(
         temp_c = _interp_hourly_scalar(forecast, st, "temperature_c", 10.0)
         rad_wm2 = _interp_hourly_scalar(forecast, st, "shortwave_radiation_wm2", 0.0)
         cloud_pct = _interp_hourly_scalar(forecast, st, "cloud_cover_pct", 50.0)
-        # Cloud attenuation on top of API irradiance
-        att = max(0.0, min(1.0, 1.0 - 0.25 * (cloud_pct / 100.0)))
-        rad_eff = max(0.0, rad_wm2 * att)
-        kw_ac = estimate_pv_kw(rad_eff, capacity_kwp=cap, efficiency=eff)
-        # Resolve the per-slot scale factor.
+        nearest = get_forecast_for_slot(st, forecast)
+        direct_pv = bool(nearest and nearest.pv_direct)
+        if direct_pv:
+            rad_eff = max(0.0, rad_wm2)
+        else:
+            # Cloud attenuation on top of API irradiance.
+            att = max(0.0, min(1.0, 1.0 - 0.25 * (cloud_pct / 100.0)))
+            rad_eff = max(0.0, rad_wm2 * att)
         if callable(pv_scale):
             try:
                 scale_for_slot = float(pv_scale(st.hour, cloud_pct))
@@ -1159,9 +1516,22 @@ def forecast_to_lp_inputs(
             scale_for_slot = pv_scale.get(st.hour, pv_scale_fallback)
         else:
             scale_for_slot = float(pv_scale)
+        # The provider-specific PV signal can still be locally corrected: Quartz
+        # direct PV is site-level, but it still benefits from the same calibration
+        # chain that the irradiance-based path uses.
+        kw_ac = forecast_pv_kw_from_row(
+            st.hour,
+            rad_wm2,
+            cloud_pct,
+            direct_pv_kw=_interp_hourly_scalar(forecast, st, "estimated_pv_kw", 0.0) if direct_pv else None,
+            cloud_table=cal_cloud,
+            hourly_table=cal_hourly,
+            flat=flat_cal,
+            scale=scale_for_slot,
+        )
         # Apply calibration scale and enforce per-hour physical ceiling
         slot_ceil = hourly_ceil.get(st.hour, cap * eff * 0.5)
-        pv_kwh = min(slot_ceil, max(0.0, kw_ac * 0.5 * scale_for_slot))
+        pv_kwh = min(slot_ceil, max(0.0, kw_ac * 0.5))
         base_cop = max(1.0, cop_at_temperature(curve, temp_c))
         cop_s = base_cop
         lift_pen = float(getattr(config, "LP_COP_LIFT_PENALTY_PER_KELVIN", 0.0))

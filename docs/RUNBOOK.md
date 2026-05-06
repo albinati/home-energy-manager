@@ -73,6 +73,13 @@ The script: backs up DB → git pull → pip install → DB migration → restar
 | `FOX_DAILY_BUDGET` | `1200` | Conservative cap below Fox's 1440/day |
 | `LP_MPC_HOURS` | `6,9,12,15` | Intra-day MPC re-plan hours (BST/local). See MPC schedule below. |
 | `LP_MPC_WRITE_DEVICES` | `true` | MPC and Octopus-fetch re-plans push updated Fox/Daikin schedule to hardware |
+| `FORECAST_SOURCE` | `open_meteo` | Set to `quartz` to use Quartz PV nowcasts; Open-Meteo remains weather fallback/context |
+| `QUARTZ_USERNAME` / `QUARTZ_PASSWORD` | required for Quartz | Auth0 login used to fetch the Quartz bearer token |
+| `QUARTZ_CLIENT_ID` / `QUARTZ_AUDIENCE` | defaults in code | Quartz Auth0 client settings |
+| `QUARTZ_GSP_ID` | optional | Hosted Quartz GSP mapping; omit for national default |
+| `QUARTZ_MODEL_NAME` | `blend` | Quartz model selector for hosted API |
+| `QUARTZ_TREND_ADJUSTER_ON` | `true` | Quartz trend-adjuster toggle |
+| `QUARTZ_INSTALLED_CAPACITY_MW` | `0` | Optional downscale hint when Quartz returns capacity metadata |
 | `FOX_SOLAR_CHARGE_MIN_SOC_PERCENT` | `100` | `minSocOnGrid` for `solar_charge` SelfUse windows (blocks discharge, lets PV fill) |
 | `OPENCLAW_HOOKS_URL` | required if notifications on | Full URL, e.g. `http://127.0.0.1:18789/hooks/agent` |
 | `OPENCLAW_HOOKS_TOKEN` | required if notifications on | Same secret as Gateway `hooks.token` |
@@ -139,7 +146,7 @@ print(json.dumps(json.loads(row[1]), indent=2))
 ## What the Bulletproof engine does on each optimizer run
 
 1. Reads Agile rates from `agile_rates` table
-2. Fetches weather forecast (Open-Meteo)
+2. Fetches weather / PV forecast (Quartz when configured, otherwise Open-Meteo)
 3. Runs PuLP MILP solver → produces per-slot Fox + Daikin actions
 4. **Uploads Fox Scheduler V3 immediately** (one call, `fox_schedule_uploaded=1` in optimizer_log)
 5. Writes Daikin `action_schedule` rows for today

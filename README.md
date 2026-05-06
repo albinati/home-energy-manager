@@ -22,7 +22,7 @@ Every solve is snapshotted to SQLite so any past day's plan can be re-run under 
 ```
                 ┌─────────────────────────────┐
   Octopus Agile ──→  half-hourly tariff       │
-  Open-Meteo    ──→  temp + cloud + radiation │
+  Quartz / Open-Meteo ─→ PV nowcast + weather │
   Fox ESS       ──→  load, PV, SoC, schedule  │
   Daikin Onecta ──→  tank, indoor, outdoor    │     PuLP MILP
   SmartThings   ──→  appliance state          │ ──→ 24–48h plan ──→  Fox V3 schedule
@@ -52,8 +52,9 @@ Everything is parameterised via `.env`. Adapting it to a different setup is feas
 ## What it does
 
 - **Octopus Agile fetch** every 30 min. Stores import + Outgoing Agile rates in SQLite for the next ~36 h.
-- **Open-Meteo forecast** every LP solve — temperature, shortwave radiation, cloud cover. Snapshotted per fetch for replay.
-- **PV forecast calibration** — three-tier resolver: cloud-aware `(hour, cloud bucket)` table → per-hour-of-day table → flat factor. Today-aware OCF Quartz-style adjuster on top.
+- **Quartz forecast source** — preferred PV nowcast for the UK site. Auth via env, direct PV is snapshotted per fetch, and Open-Meteo remains the weather fallback/context source.
+- **Open-Meteo forecast** — temperature, cloud cover, irradiance. Snapshotted per fetch for replay and used as fallback when Quartz is unavailable.
+- **PV forecast calibration** — three-tier resolver: cloud-aware `(hour, cloud bucket)` table → per-hour-of-day table → flat factor. Quartz direct PV and irradiance-based PV both pass through the same site calibration chain. Today-aware OCF Quartz-style adjuster on top.
 - **Load forecast accuracy evaluator** — per-slot MAE/RMSE/bias broken down by local hour, plus a daily Daikin physics check against Onecta-measured kWh. Captures the biases the LP hasn't yet learned.
 - **MILP solver (PuLP)** — 96-slot horizon, soft penalties for cycling/comfort/inverter stress, scenario LP for peak-export robustness, twice-daily and tier-boundary MPC.
 - **Fox ESS Scheduler V3** — single daily upload of the optimised charge/discharge windows. Heuristic fallback if the LP fails.
@@ -90,6 +91,7 @@ pip install -r requirements.txt -r requirements-dev.txt
 
 cp .env.example .env
 # Edit .env — at minimum set OPENCLAW_READ_ONLY=true so nothing dials out.
+# To switch PV nowcasting, set FORECAST_SOURCE=quartz and fill the Quartz auth vars.
 
 pytest                                    # 837+ tests, ~3 min on a laptop
 python -m src.cli serve                   # FastAPI on :8000, MCP at /mcp
@@ -121,7 +123,8 @@ OAuth bootstrap (Daikin + SmartThings) uses one-shot containers documented in [`
 | Vendor | What we use | Auth |
 |---|---|---|
 | Octopus Energy | Agile import + Outgoing Agile export rates, optional consumption backfill | API key (read-only) |
-| Open-Meteo | Hourly forecast (temp, radiation, cloud cover) | None — public |
+| Quartz Solar | PV nowcast source for the LP; direct site PV when configured | Auth0 bearer token via env |
+| Open-Meteo | Hourly weather forecast and fallback PV context (temp, radiation, cloud cover) | None — public |
 | Fox ESS | SoC, PV, load, grid, Scheduler V3 upload | Open API key + signature |
 | Daikin Altherma | Status read + LWT/tank writes via Onecta | OAuth2 (auto-refresh) |
 | Samsung SmartThings | Washer/dryer/dishwasher schedule | OAuth2 (auto-refresh) |

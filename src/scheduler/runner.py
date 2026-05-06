@@ -852,12 +852,13 @@ def bulletproof_forecast_refresh_job() -> None:
         return
     try:
         from .. import db as _db
-        from ..weather import _forecast_delta, fetch_forecast
+        from ..weather import _forecast_delta, fetch_forecast_snapshot
 
         lookahead_h = int(config.MPC_FORECAST_DRIFT_LOOKAHEAD_HOURS)
         # Pull a forecast at least as long as the lookahead window we'll compare on,
         # but cap reasonable: Open-Meteo gives 48h easily.
-        new_fcst = fetch_forecast(hours=max(lookahead_h, 24))
+        forecast_fetch = fetch_forecast_snapshot(hours=max(lookahead_h, 24))
+        new_fcst = forecast_fetch.forecast
         if not new_fcst:
             logger.debug("forecast refresh: empty fetch, skipping")
             return
@@ -868,6 +869,7 @@ def bulletproof_forecast_refresh_job() -> None:
                 "temp_c": f.temperature_c,
                 "solar_w_m2": f.shortwave_radiation_wm2,
                 "cloud_cover_pct": f.cloud_cover_pct,
+                "direct_pv_kw": f.estimated_pv_kw if getattr(f, "pv_direct", False) else None,
             }
             for f in new_fcst
         ]
@@ -876,6 +878,10 @@ def bulletproof_forecast_refresh_job() -> None:
         _db.save_meteo_forecast_snapshot(
             now_utc.isoformat(),
             new_rows,
+            source=forecast_fetch.source,
+            model_name=forecast_fetch.model_name,
+            model_version=forecast_fetch.model_version,
+            raw_payload_json=forecast_fetch.raw_payload_json,
             mark_latest=True,
         )
 

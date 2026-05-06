@@ -48,6 +48,13 @@ def main() -> int:
     n_b = baseline["overall"]["n"]
     n_c = current["overall"]["n"]
     print(f"\nSamples: baseline={n_b}, current={n_c}")
+    min_samples = max(1, int(n_b * 0.5))
+    if n_c < min_samples:
+        print(
+            "\n❌ INCONCLUSIVE — not enough paired forecast/actual samples "
+            f"({n_c} < required {min_samples})."
+        )
+        return 1
 
     # Verdict
     mae_b = baseline["overall"]["mae_kw"]
