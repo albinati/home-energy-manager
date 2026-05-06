@@ -1,33 +1,48 @@
 {
-  "days_back": 14,
-  "frozen_at_iso": "2026-04-29T08:05:02.222899+00:00",
-  "frozen_at_sha": "acf0979431f9f0c3b82304e41078387a1bb07f70",
+  "days_back": 7,
+  "frozen_at_iso": "2026-05-06T14:33:12.059607+00:00",
+  "frozen_at_sha": "",
   "per_date": {
-    "2026-04-25": {
-      "recalc_count": 22,
-      "total_original_cost_p": 215.748700801675,
-      "total_replayed_cost_p": 127.18994501102003
-    },
-    "2026-04-26": {
-      "recalc_count": 21,
-      "total_original_cost_p": 414.448505686299,
-      "total_replayed_cost_p": 173.56733565423608
-    },
-    "2026-04-27": {
-      "recalc_count": 28,
-      "total_original_cost_p": -3.244397772360004,
-      "total_replayed_cost_p": 27.221857368390005
-    },
-    "2026-04-28": {
-      "recalc_count": 21,
-      "total_original_cost_p": 218.02443517591996,
-      "total_replayed_cost_p": 182.153517036365
-    },
     "2026-04-29": {
-      "recalc_count": 3,
-      "total_original_cost_p": 60.96463003420202,
-      "total_replayed_cost_p": 56.380169138765396
+      "recalc_count": 15,
+      "total_original_cost_p": 44.38751059609652,
+      "total_replayed_cost_p": -0.14285666433699085
+    },
+    "2026-04-30": {
+      "recalc_count": 29,
+      "total_original_cost_p": -65.80344537071902,
+      "total_replayed_cost_p": -6.8273794773180185
+    },
+    "2026-05-01": {
+      "recalc_count": 16,
+      "total_original_cost_p": 106.39395686687499,
+      "total_replayed_cost_p": 87.90965877371504
+    },
+    "2026-05-02": {
+      "recalc_count": 28,
+      "total_original_cost_p": 142.45791086247505,
+      "total_replayed_cost_p": 128.94335263673764
+    },
+    "2026-05-03": {
+      "recalc_count": 18,
+      "total_original_cost_p": 278.19815015286105,
+      "total_replayed_cost_p": 206.18964718587503
+    },
+    "2026-05-04": {
+      "recalc_count": 15,
+      "total_original_cost_p": 241.03035363538595,
+      "total_replayed_cost_p": 153.45289917157905
+    },
+    "2026-05-05": {
+      "recalc_count": 16,
+      "total_original_cost_p": 218.54022586813198,
+      "total_replayed_cost_p": 170.84040054765848
+    },
+    "2026-05-06": {
+      "recalc_count": 31,
+      "total_original_cost_p": 480.70754628617703,
+      "total_replayed_cost_p": 358.57831789476904
     }
   },
-  "total_replayed_cost_p": 566.5128242087765
+  "total_replayed_cost_p": 1098.9440400686792
 }
