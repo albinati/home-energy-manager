@@ -985,6 +985,16 @@ class Config:
     DAIKIN_CALIBRATION_WINDOWS_LOCAL: str = (
         os.getenv("DAIKIN_CALIBRATION_WINDOWS_LOCAL", "06:00-08:00,14:30-16:30")
     )
+    # 2 h-aligned Daikin refresh window. Onecta caches consumption data in
+    # 2-hour buckets that rotate at fixed UTC times (00, 02, …, 22). When
+    # enabled, the heartbeat fires one refresh in the first few minutes
+    # past each even hour UTC, capturing the freshest 2 h bucket as soon
+    # as it lands. 12 calls/day (well under the 200/day Daikin budget).
+    # See issue #267 (Daikin observation strategy epic).
+    DAIKIN_2H_REFRESH_ENABLED: bool = (
+        os.getenv("DAIKIN_2H_REFRESH_ENABLED", "true").strip().lower()
+        in ("1", "true", "yes")
+    )
     # Phase 4.1 — per-caller cache staleness ceilings (seconds) so non-heartbeat paths reuse the cache.
     DAIKIN_LP_INIT_CACHE_MAX_AGE_SECONDS: int = int(
         os.getenv("DAIKIN_LP_INIT_CACHE_MAX_AGE_SECONDS", "600")

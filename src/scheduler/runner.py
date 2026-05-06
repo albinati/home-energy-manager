@@ -409,6 +409,34 @@ def _parse_hhmm_to_seconds(value: str) -> int:
     return hour * 3600 + minute * 60
 
 
+def _in_daikin_2h_refresh_window(
+    now_utc: datetime | None = None,
+    *,
+    fire_minute_start: int = 2,
+    fire_minute_end: int = 7,
+) -> bool:
+    """Return True for the first few minutes after each even-hour UTC tick.
+
+    Onecta buffers operational + consumption data in **2-hour buckets** that
+    rotate at fixed UTC times (00, 02, 04, …, 22). A refresh fired right
+    after rotation captures the fresh bucket data; firing earlier just gets
+    the previous bucket repeated. Default window = ``[02, 07)`` minutes
+    past each even hour, so 12 refreshes/day land deterministically right
+    after each Onecta cache rotation.
+
+    Cost: 12 calls/day vs the 200/day Daikin quota — leaves 188/day for
+    Octopus pre-slot + cold-start + manual fetches.
+
+    See issue #267 (Daikin observation strategy epic), story S1.
+    """
+    if now_utc is None:
+        now_utc = datetime.now(UTC)
+    # Even-hour rotation: 0, 2, 4, ..., 22 UTC
+    if now_utc.hour % 2 != 0:
+        return False
+    return fire_minute_start <= now_utc.minute < fire_minute_end
+
+
 def _in_daikin_calibration_window(
     now_local: datetime | None = None,
     windows: str | None = None,
@@ -1254,10 +1282,16 @@ def bulletproof_heartbeat_tick() -> None:
         try:
             # Heartbeat reads from cache only — no auto-refresh to protect 200/day quota.
             # allow_refresh=True fires only when we are in a high-value window:
-            # either the Octopus pre-slot boundary or a local Daikin calibration slot.
+            #   - Octopus pre-slot boundary (5 min before tariff slot transition)
+            #   - 2 h Onecta cache rotation (deterministic, 12/day, even-hour UTC)
+            #   - local Daikin calibration window (heuristic, complements 2h-aligned)
             in_pre_slot = _in_octopus_pre_slot_window(now_utc)
+            in_2h = (
+                getattr(config, "DAIKIN_2H_REFRESH_ENABLED", True)
+                and _in_daikin_2h_refresh_window(now_utc)
+            )
             in_calibration = _in_daikin_calibration_window(now_local)
-            allow_refresh = in_pre_slot or in_calibration
+            allow_refresh = in_pre_slot or in_2h or in_calibration
             daikin_result = daikin_service.get_cached_devices(
                 allow_refresh=allow_refresh,
                 actor="heartbeat",
@@ -1265,9 +1299,10 @@ def bulletproof_heartbeat_tick() -> None:
             devices = daikin_result.devices
             if allow_refresh and daikin_result.source == "fresh":
                 logger.info(
-                    "Daikin refresh: fetched %d device(s) (pre-slot=%s calibration=%s)",
+                    "Daikin refresh: fetched %d device(s) (pre-slot=%s 2h=%s calibration=%s)",
                     len(devices),
                     in_pre_slot,
+                    in_2h,
                     in_calibration,
                 )
         except Exception as e:
