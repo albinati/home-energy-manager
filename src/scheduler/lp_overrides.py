@@ -211,13 +211,6 @@ WHITELIST: dict[str, OverrideSpec] = {
         description="LP planning horizon (h). Rolling now → now+H.",
         group="solver",
     ),
-    "LP_HIGHS_TIME_LIMIT_SECONDS": OverrideSpec(
-        key="LP_HIGHS_TIME_LIMIT_SECONDS",
-        config_attr="LP_HIGHS_TIME_LIMIT_SECONDS",
-        type_name="int", min_value=5, max_value=600,
-        description="Solver wall-clock cap (s). Raise on infeasible.",
-        group="solver",
-    ),
     "LP_HP_MIN_ON_SLOTS": OverrideSpec(
         key="LP_HP_MIN_ON_SLOTS",
         config_attr="LP_HP_MIN_ON_SLOTS",

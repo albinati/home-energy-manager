@@ -971,6 +971,7 @@ async def cockpit_at(when: str):
     """
     from datetime import UTC as _UTC
     from datetime import datetime as _dt
+    import json as _json
     from zoneinfo import ZoneInfo
 
     try:
@@ -988,6 +989,13 @@ async def cockpit_at(when: str):
     run_id = db.find_run_for_time(when_iso)
     lp_inputs = db.get_lp_inputs(run_id) if run_id is not None else None
     lp_slots = db.get_lp_solution_slots(run_id) if run_id is not None else []
+    lp_exogenous: dict[str, Any] | None = None
+    if lp_inputs and lp_inputs.get("exogenous_snapshot_json"):
+        try:
+            raw = _json.loads(lp_inputs["exogenous_snapshot_json"] or "{}")
+            lp_exogenous = raw if isinstance(raw, dict) else None
+        except Exception:
+            lp_exogenous = None
 
     # --- Price at the moment, from agile_rates -------------------------------
     tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
@@ -1048,12 +1056,105 @@ async def cockpit_at(when: str):
 
     # --- LP plan for the slot containing `when` ------------------------------
     planned_slot: dict[str, Any] | None = None
-    if lp_slots and slot_from:
-        iso_from = slot_from.replace("+00:00", "Z")
-        for s in lp_slots:
-            if s.get("slot_time_utc") in (iso_from, slot_from):
-                planned_slot = dict(s)
-                break
+    if lp_slots:
+        if slot_from:
+            iso_from = slot_from.replace("+00:00", "Z")
+            for s in lp_slots:
+                if s.get("slot_time_utc") in (iso_from, slot_from):
+                    planned_slot = dict(s)
+                    break
+        if planned_slot is None:
+            from datetime import timedelta as _td
+            for s in lp_slots:
+                try:
+                    slot_start = _dt.fromisoformat(str(s.get("slot_time_utc") or "").replace("Z", "+00:00"))
+                except Exception:
+                    continue
+                if slot_start.tzinfo is None:
+                    slot_start = slot_start.replace(tzinfo=_UTC)
+                slot_end = slot_start + _td(minutes=30)
+                if slot_start <= w < slot_end:
+                    planned_slot = dict(s)
+                    break
+
+    lp_why: list[str] = []
+    if planned_slot:
+        try:
+            slot_index = int(planned_slot.get("slot_index"))
+        except (TypeError, ValueError):
+            slot_index = -1
+        load_bits = (lp_exogenous or {}).get("base_load_components") or {}
+        weather_bits = (lp_exogenous or {}).get("weather_adjustment") or {}
+        tariff_bits = (lp_exogenous or {}).get("tariffs") or {}
+
+        residual_profile = load_bits.get("residual_profile_kwh") or []
+        appliance_profile = load_bits.get("appliance_profile_kwh") or []
+        residual_kwh = None
+        appliance_kwh = None
+        if 0 <= slot_index < len(residual_profile):
+            try:
+                residual_kwh = float(residual_profile[slot_index])
+            except (TypeError, ValueError):
+                residual_kwh = None
+        if 0 <= slot_index < len(appliance_profile):
+            try:
+                appliance_kwh = float(appliance_profile[slot_index])
+            except (TypeError, ValueError):
+                appliance_kwh = None
+
+        import_kwh = float(planned_slot.get("import_kwh") or 0.0)
+        charge_kwh = float(planned_slot.get("charge_kwh") or 0.0)
+        discharge_kwh = float(planned_slot.get("discharge_kwh") or 0.0)
+        dhw_kwh = float(planned_slot.get("dhw_kwh") or 0.0)
+        space_kwh = float(planned_slot.get("space_kwh") or 0.0)
+
+        if import_kwh > 0.01 and charge_kwh > 0.01:
+            price_txt = f"{price_i:.1f}p" if price_i is not None else "unknown price"
+            lp_why.append(
+                f"Battery charge was scheduled in this slot, so the LP imported {import_kwh:.3f} kWh at {price_txt}."
+            )
+        elif discharge_kwh > 0.01:
+            lp_why.append(
+                f"Battery discharge was scheduled here ({discharge_kwh:.3f} kWh), reducing grid import in this slot."
+            )
+
+        if dhw_kwh > 0.01 or space_kwh > 0.01:
+            parts: list[str] = []
+            if dhw_kwh > 0.01:
+                parts.append(f"DHW {dhw_kwh:.3f} kWh")
+            if space_kwh > 0.01:
+                parts.append(f"space heat {space_kwh:.3f} kWh")
+            lp_why.append(f"Comfort demand shaped this slot via {' and '.join(parts)}.")
+
+        if residual_kwh is not None:
+            if appliance_kwh and appliance_kwh > 0.01:
+                lp_why.append(
+                    f"Base load for this slot was built from residual load {residual_kwh:.3f} kWh plus appliance allowance {appliance_kwh:.3f} kWh."
+                )
+            else:
+                lp_why.append(
+                    f"Base load for this slot came from the residual-load profile at {residual_kwh:.3f} kWh."
+                )
+
+        today_factor = weather_bits.get("today_factor")
+        forecast_fetch = weather_bits.get("forecast_fetch_at_utc")
+        if today_factor is not None and forecast_fetch:
+            try:
+                today_factor_f = float(today_factor)
+                lp_why.append(
+                    f"Weather inputs came from forecast fetch {forecast_fetch}; PV was adjusted with today-factor {today_factor_f:.3f}."
+                )
+            except (TypeError, ValueError):
+                pass
+
+        export_prices = tariff_bits.get("export_price_pence")
+        if isinstance(export_prices, list) and 0 <= slot_index < len(export_prices):
+            try:
+                lp_why.append(
+                    f"Export economics for this slot used {float(export_prices[slot_index]):.1f}p/kWh rather than a flat export rate."
+                )
+            except (TypeError, ValueError):
+                pass
 
     return {
         "when_utc": when_iso.replace("+00:00", "Z"),
@@ -1073,6 +1174,8 @@ async def cockpit_at(when: str):
         "state": state_block,
         "planned_slot": planned_slot,  # LP's decision for that slot, or None
         "lp_inputs": lp_inputs,        # Full inputs row at solve time, or None
+        "lp_exogenous": lp_exogenous,  # Parsed LP-only derived inputs, or None
+        "lp_why": lp_why,              # Compact human-readable reasons for this slot
         "slot_kind": realised.get("slot_kind"),
         # Same legend as /cockpit/now — keeps signs / units unambiguous for
         # historical replays consumed by LLM agents.
@@ -1158,15 +1261,32 @@ async def optimization_inputs(horizon_hours: int | None = None):
     )
 
     # --- Meteo forecast (latest-per-slot, in the plan window) ---------------
+    # Use the canonical store (meteo_forecast_value, keyed by the latest
+    # ``meteo_forecast_latest_state`` fetch). Falls back to the legacy
+    # ``meteo_forecast`` table for rows predating the V11 canonical migration.
     conn = db.get_connection()
     try:
-        cur = conn.execute(
-            """SELECT slot_time, temp_c, solar_w_m2 FROM meteo_forecast
-               WHERE slot_time >= ? AND slot_time < ?
-               ORDER BY slot_time""",
-            (day_start.isoformat(), window_end.isoformat()),
-        )
-        meteo_rows = [dict(r) for r in cur.fetchall()]
+        latest_fetch_at = db._get_latest_meteo_forecast_fetch_at(conn)
+        if latest_fetch_at:
+            cur = conn.execute(
+                """SELECT slot_time, temp_c, solar_w_m2
+                   FROM meteo_forecast_value
+                   WHERE forecast_fetch_at_utc = ?
+                     AND slot_time >= ? AND slot_time < ?
+                   ORDER BY slot_time""",
+                (latest_fetch_at, day_start.isoformat(), window_end.isoformat()),
+            )
+            meteo_rows = [dict(r) for r in cur.fetchall()]
+        else:
+            meteo_rows = []
+        if not meteo_rows:
+            cur = conn.execute(
+                """SELECT slot_time, temp_c, solar_w_m2 FROM meteo_forecast
+                   WHERE slot_time >= ? AND slot_time < ?
+                   ORDER BY slot_time""",
+                (day_start.isoformat(), window_end.isoformat()),
+            )
+            meteo_rows = [dict(r) for r in cur.fetchall()]
     finally:
         conn.close()
 

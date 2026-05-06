@@ -161,6 +161,36 @@ CREATE TABLE IF NOT EXISTS meteo_forecast (
     UNIQUE(slot_time)
 );
 
+CREATE TABLE IF NOT EXISTS meteo_forecast_snapshot (
+    forecast_fetch_at_utc TEXT PRIMARY KEY,
+    source TEXT,
+    model_name TEXT,
+    model_version TEXT,
+    raw_payload_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS meteo_forecast_value (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    forecast_fetch_at_utc TEXT NOT NULL,
+    slot_time TEXT NOT NULL,
+    temp_c REAL,
+    solar_w_m2 REAL,
+    cloud_cover_pct REAL,
+    UNIQUE(forecast_fetch_at_utc, slot_time)
+);
+
+CREATE INDEX IF NOT EXISTS idx_meteo_forecast_value_slot
+ON meteo_forecast_value(slot_time);
+
+CREATE INDEX IF NOT EXISTS idx_meteo_forecast_value_fetch
+ON meteo_forecast_value(forecast_fetch_at_utc);
+
+CREATE TABLE IF NOT EXISTS meteo_forecast_latest_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    forecast_fetch_at_utc TEXT
+);
+INSERT OR IGNORE INTO meteo_forecast_latest_state (id, forecast_fetch_at_utc) VALUES (1, NULL);
+
 CREATE TABLE IF NOT EXISTS api_call_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     vendor TEXT NOT NULL,
@@ -523,6 +553,8 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             indoor_source            TEXT,
             base_load_json           TEXT,
             micro_climate_offset_c   REAL,
+            forecast_fetch_at_utc    TEXT,
+            exogenous_snapshot_json  TEXT,
             config_snapshot_json     TEXT,
             price_quantize_p         REAL,
             peak_threshold_p         REAL,
@@ -556,6 +588,41 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_meteo_forecast_history_fetch ON meteo_forecast_history(forecast_fetch_at_utc)"
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS meteo_forecast_snapshot (
+            forecast_fetch_at_utc TEXT PRIMARY KEY,
+            source TEXT,
+            model_name TEXT,
+            model_version TEXT,
+            raw_payload_json TEXT
+        )"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS meteo_forecast_value (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            forecast_fetch_at_utc TEXT NOT NULL,
+            slot_time TEXT NOT NULL,
+            temp_c REAL,
+            solar_w_m2 REAL,
+            cloud_cover_pct REAL,
+            UNIQUE(forecast_fetch_at_utc, slot_time)
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_meteo_forecast_value_slot ON meteo_forecast_value(slot_time)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_meteo_forecast_value_fetch ON meteo_forecast_value(forecast_fetch_at_utc)"
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS meteo_forecast_latest_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            forecast_fetch_at_utc TEXT
+        )"""
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO meteo_forecast_latest_state (id, forecast_fetch_at_utc) VALUES (1, NULL)"
     )
 
     # V11c: config_audit — append-only log of runtime_settings changes so a
@@ -782,10 +849,30 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     # reserves the columns so V11-C/D don't need their own migration.
     cur = conn.execute("PRAGMA table_info(lp_inputs_snapshot)")
     lp_cols = {str(r[1]) for r in cur.fetchall()}
+    if "forecast_fetch_at_utc" not in lp_cols:
+        conn.execute("ALTER TABLE lp_inputs_snapshot ADD COLUMN forecast_fetch_at_utc TEXT")
+    if "exogenous_snapshot_json" not in lp_cols:
+        conn.execute("ALTER TABLE lp_inputs_snapshot ADD COLUMN exogenous_snapshot_json TEXT")
     if "dhw_draw_prior_json" not in lp_cols:
         conn.execute("ALTER TABLE lp_inputs_snapshot ADD COLUMN dhw_draw_prior_json TEXT")
     if "occupancy_prior_json" not in lp_cols:
         conn.execute("ALTER TABLE lp_inputs_snapshot ADD COLUMN occupancy_prior_json TEXT")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_lp_inputs_snapshot_forecast_fetch ON lp_inputs_snapshot(forecast_fetch_at_utc)"
+    )
+    # Older DBs predate the cloud-aware PV table (PR #232). Idempotent — when
+    # the table is already created at SCHEMA-load time this block is a no-op.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS pv_calibration_hourly_cloud (
+            hour_utc        INTEGER NOT NULL CHECK(hour_utc >= 0 AND hour_utc < 24),
+            cloud_bucket    INTEGER NOT NULL CHECK(cloud_bucket >= 0 AND cloud_bucket < 4),
+            factor          REAL NOT NULL,
+            samples         INTEGER NOT NULL,
+            window_days     INTEGER NOT NULL,
+            computed_at     TEXT NOT NULL,
+            PRIMARY KEY (hour_utc, cloud_bucket)
+        )"""
+    )
 
 
 def init_db() -> None:
@@ -1285,9 +1372,9 @@ def half_hourly_residual_load_profile_kwh(
     (``predict_passive_daikin_load``) per past sample to back out the
     residual (non-Daikin) load.
 
-    Outdoor temperature per sample comes from ``meteo_forecast_history``
-    (append-only hourly forecasts). When no history match exists, fall through
-    to ``meteo_forecast`` (latest-per-slot table) for the same hour-of-year;
+    Outdoor temperature per sample comes from the canonical forecast snapshot
+    store. When no historical match exists, fall through to the latest marked
+    forecast snapshot for the same hour-of-year;
     if both miss, the sample is dropped rather than emitting a polluted
     residual. The previous behaviour used a 25 °C sentinel that pushed
     physics above the climate-curve cutoff and silently included un-subtracted
@@ -1314,11 +1401,19 @@ def half_hourly_residual_load_profile_kwh(
         try:
             cur = conn.execute(
                 """SELECT pv.captured_at, pv.load_power_kw,
-                          (SELECT temp_c FROM meteo_forecast_history mh
-                           WHERE substr(mh.slot_time, 1, 13) = substr(pv.captured_at, 1, 13)
-                           ORDER BY mh.id DESC LIMIT 1) AS outdoor_history_c,
-                          (SELECT temp_c FROM meteo_forecast mf
-                           WHERE substr(mf.slot_time, 1, 13) = substr(pv.captured_at, 1, 13)
+                          (SELECT mv.temp_c
+                           FROM meteo_forecast_value mv
+                           JOIN meteo_forecast_snapshot ms
+                             ON ms.forecast_fetch_at_utc = mv.forecast_fetch_at_utc
+                           WHERE substr(mv.slot_time, 1, 13) = substr(pv.captured_at, 1, 13)
+                             AND ms.forecast_fetch_at_utc < pv.captured_at
+                           ORDER BY ms.forecast_fetch_at_utc DESC LIMIT 1) AS outdoor_history_c,
+                          (SELECT mv.temp_c
+                           FROM meteo_forecast_value mv
+                           JOIN meteo_forecast_latest_state ls
+                             ON ls.id = 1
+                            AND ls.forecast_fetch_at_utc = mv.forecast_fetch_at_utc
+                           WHERE substr(mv.slot_time, 1, 13) = substr(pv.captured_at, 1, 13)
                            LIMIT 1) AS outdoor_latest_c
                    FROM pv_realtime_history pv
                    WHERE pv.captured_at > ? AND pv.load_power_kw IS NOT NULL""",
@@ -2287,33 +2382,46 @@ def schedule_for_date(plan_date: str) -> list[dict[str, Any]]:
 # V2: meteo_forecast
 # ---------------------------------------------------------------------------
 
-def save_meteo_forecast(rows: list[dict[str, Any]], forecast_date: str) -> int:
-    """Upsert hourly Open-Meteo forecast rows for *forecast_date*.
 
-    Each dict must have: slot_time (ISO), temp_c (float), solar_w_m2 (float).
-    Optional: cloud_cover_pct (float, 0-100) — used by the cloud-aware
-    PV calibration table (PR #232).
-    """
+def save_meteo_forecast_snapshot(
+    forecast_fetch_at_utc: str,
+    rows: list[dict[str, Any]],
+    *,
+    source: str = "open-meteo",
+    model_name: str | None = None,
+    model_version: str | None = None,
+    raw_payload_json: str | None = None,
+    mark_latest: bool = True,
+) -> int:
+    """Persist one canonical forecast fetch and its normalized slot rows."""
     if not rows:
         return 0
     n = 0
     with _lock:
         conn = get_connection()
         try:
+            conn.execute(
+                """INSERT OR IGNORE INTO meteo_forecast_snapshot
+                   (forecast_fetch_at_utc, source, model_name, model_version, raw_payload_json)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (
+                    str(forecast_fetch_at_utc),
+                    str(source),
+                    model_name,
+                    model_version,
+                    raw_payload_json,
+                ),
+            )
             for r in rows:
                 slot = r.get("slot_time")
                 if not slot:
                     continue
                 conn.execute(
-                    """INSERT INTO meteo_forecast (forecast_date, slot_time, temp_c, solar_w_m2, cloud_cover_pct)
-                       VALUES (?, ?, ?, ?, ?)
-                       ON CONFLICT(slot_time) DO UPDATE SET
-                         forecast_date=excluded.forecast_date,
-                         temp_c=excluded.temp_c,
-                         solar_w_m2=excluded.solar_w_m2,
-                         cloud_cover_pct=COALESCE(excluded.cloud_cover_pct, meteo_forecast.cloud_cover_pct)""",
+                    """INSERT OR IGNORE INTO meteo_forecast_value
+                       (forecast_fetch_at_utc, slot_time, temp_c, solar_w_m2, cloud_cover_pct)
+                       VALUES (?, ?, ?, ?, ?)""",
                     (
-                        forecast_date,
+                        str(forecast_fetch_at_utc),
                         str(slot),
                         r.get("temp_c"),
                         r.get("solar_w_m2"),
@@ -2321,17 +2429,81 @@ def save_meteo_forecast(rows: list[dict[str, Any]], forecast_date: str) -> int:
                     ),
                 )
                 n += 1
+            if mark_latest:
+                conn.execute(
+                    """INSERT INTO meteo_forecast_latest_state (id, forecast_fetch_at_utc)
+                       VALUES (1, ?)
+                       ON CONFLICT(id) DO UPDATE SET forecast_fetch_at_utc=excluded.forecast_fetch_at_utc""",
+                    (str(forecast_fetch_at_utc),),
+                )
             conn.commit()
         finally:
             conn.close()
     return n
 
 
+def _get_latest_meteo_forecast_fetch_at(conn: sqlite3.Connection) -> str | None:
+    cur = conn.execute(
+        "SELECT forecast_fetch_at_utc FROM meteo_forecast_latest_state WHERE id = 1"
+    )
+    row = cur.fetchone()
+    if row and row[0]:
+        return str(row[0])
+    cur = conn.execute(
+        "SELECT forecast_fetch_at_utc FROM meteo_forecast_snapshot ORDER BY forecast_fetch_at_utc DESC LIMIT 1"
+    )
+    row = cur.fetchone()
+    return str(row[0]) if row and row[0] else None
+
+
+def _get_latest_meteo_forecast_rows_for_slot_date(
+    conn: sqlite3.Connection,
+    slot_date: str,
+) -> list[dict[str, Any]]:
+    """Return the latest canonical forecast row for each slot on *slot_date*.
+
+    Canonical forecast storage keeps one snapshot per fetch plus normalized slot
+    rows. For replay and live diagnostics we want the most recent row for each
+    slot_time, not just the most recent fetch as a whole.
+    """
+    cur = conn.execute(
+        """SELECT substr(mv.slot_time, 1, 10) AS forecast_date,
+                  mv.slot_time, mv.temp_c, mv.solar_w_m2, mv.cloud_cover_pct
+             FROM meteo_forecast_value mv
+             JOIN (
+                 SELECT slot_time, MAX(forecast_fetch_at_utc) AS forecast_fetch_at_utc
+                   FROM meteo_forecast_value
+                  WHERE substr(slot_time, 1, 10) = ?
+                  GROUP BY slot_time
+             ) latest
+               ON latest.slot_time = mv.slot_time
+              AND latest.forecast_fetch_at_utc = mv.forecast_fetch_at_utc
+            WHERE substr(mv.slot_time, 1, 10) = ?
+            ORDER BY mv.slot_time""",
+        (slot_date, slot_date),
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
+def save_meteo_forecast(rows: list[dict[str, Any]], forecast_date: str) -> int:
+    """Legacy helper that writes a latest forecast snapshot.
+
+    ``forecast_date`` is retained for compatibility with older callers/tests,
+    but canonical production writes should use
+    :func:`save_meteo_forecast_snapshot`.
+    """
+    _ = forecast_date
+    return save_meteo_forecast_snapshot(datetime.now(UTC).isoformat(), rows, mark_latest=True)
+
+
 def get_meteo_forecast(forecast_date: str) -> list[dict[str, Any]]:
-    """Return all meteo_forecast rows for *forecast_date* ordered by slot_time."""
+    """Return latest forecast rows whose target slot falls on *forecast_date*."""
     with _lock:
         conn = get_connection()
         try:
+            rows = _get_latest_meteo_forecast_rows_for_slot_date(conn, forecast_date)
+            if rows:
+                return rows
             cur = conn.execute(
                 "SELECT * FROM meteo_forecast WHERE forecast_date = ? ORDER BY slot_time",
                 (forecast_date,),
@@ -2339,6 +2511,89 @@ def get_meteo_forecast(forecast_date: str) -> list[dict[str, Any]]:
             return [dict(r) for r in cur.fetchall()]
         finally:
             conn.close()
+
+
+def get_meteo_forecast_for_slot_date(slot_date: str) -> list[dict[str, Any]]:
+    """Return meteo_forecast rows whose slot_time falls on *slot_date*.
+
+    This is distinct from ``forecast_date``: the latter is the solve date used
+    when rows were last upserted, while slot_time identifies the actual target
+    day the LP/heartbeat needs to reason about.
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            rows = _get_latest_meteo_forecast_rows_for_slot_date(conn, slot_date)
+            if rows:
+                return rows
+            cur = conn.execute(
+                """SELECT * FROM meteo_forecast
+                   WHERE substr(slot_time, 1, 10) = ?
+                   ORDER BY slot_time""",
+                (slot_date,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
+def get_meteo_forecast_at_time(when_utc: str) -> dict[str, Any] | None:
+    """Return the forecast row active at *when_utc*.
+
+    Prefers the latest slot at or before ``when_utc``. If the request lands
+    before the first available slot, falls back to the earliest future slot so
+    bootstrapping still has something to work with.
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            latest_fetch_at = _get_latest_meteo_forecast_fetch_at(conn)
+            if latest_fetch_at:
+                cur = conn.execute(
+                    """SELECT substr(slot_time, 1, 10) AS forecast_date,
+                              slot_time, temp_c, solar_w_m2, cloud_cover_pct
+                       FROM meteo_forecast_value
+                       WHERE forecast_fetch_at_utc = ?
+                         AND slot_time <= ?
+                       ORDER BY slot_time DESC
+                       LIMIT 1""",
+                    (latest_fetch_at, when_utc),
+                )
+                row = cur.fetchone()
+                if row is not None:
+                    return dict(row)
+                cur = conn.execute(
+                    """SELECT substr(slot_time, 1, 10) AS forecast_date,
+                              slot_time, temp_c, solar_w_m2, cloud_cover_pct
+                       FROM meteo_forecast_value
+                       WHERE forecast_fetch_at_utc = ?
+                       ORDER BY slot_time ASC
+                       LIMIT 1""",
+                    (latest_fetch_at,),
+                )
+                row = cur.fetchone()
+                if row is not None:
+                    return dict(row)
+            cur = conn.execute(
+                """SELECT * FROM meteo_forecast
+                   WHERE slot_time <= ?
+                   ORDER BY slot_time DESC
+                   LIMIT 1""",
+                (when_utc,),
+            )
+            row = cur.fetchone()
+            if row is not None:
+                return dict(row)
+            cur = conn.execute(
+                """SELECT * FROM meteo_forecast
+                   ORDER BY slot_time ASC
+                   LIMIT 1""",
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
 
 
 def get_micro_climate_offset_c(lookback: int = 96) -> float:
@@ -3367,16 +3622,21 @@ def save_lp_snapshots(
                    (run_id, run_at_utc, plan_date, horizon_hours,
                     soc_initial_kwh, tank_initial_c, indoor_initial_c,
                     soc_source, tank_source, indoor_source,
-                    base_load_json, micro_climate_offset_c, config_snapshot_json,
+                    base_load_json, micro_climate_offset_c, forecast_fetch_at_utc, exogenous_snapshot_json, config_snapshot_json,
                     price_quantize_p, peak_threshold_p, cheap_threshold_p,
                     daikin_control_mode, optimization_preset, energy_strategy_mode)
                    VALUES (:run_id, :run_at_utc, :plan_date, :horizon_hours,
                            :soc_initial_kwh, :tank_initial_c, :indoor_initial_c,
                            :soc_source, :tank_source, :indoor_source,
-                           :base_load_json, :micro_climate_offset_c, :config_snapshot_json,
+                           :base_load_json, :micro_climate_offset_c, :forecast_fetch_at_utc, :exogenous_snapshot_json, :config_snapshot_json,
                            :price_quantize_p, :peak_threshold_p, :cheap_threshold_p,
                            :daikin_control_mode, :optimization_preset, :energy_strategy_mode)""",
-                {"run_id": run_id, **inputs_row},
+                {
+                    "run_id": run_id,
+                    "forecast_fetch_at_utc": inputs_row.get("forecast_fetch_at_utc"),
+                    "exogenous_snapshot_json": inputs_row.get("exogenous_snapshot_json"),
+                    **inputs_row,
+                },
             )
             for row in solution_rows:
                 conn.execute(
@@ -3450,33 +3710,12 @@ def save_meteo_forecast_history(
     forecast_fetch_at_utc: str,
     rows: list[dict[str, Any]],
 ) -> None:
-    """Append a forecast fetch's per-slot rows to the history table.
-
-    Companion to :func:`save_meteo_forecast` (which is latest-per-slot). This
-    table preserves every fetch so the History view can show forecasts as they
-    were at past LP runs.
-    """
-    if not rows:
-        return
-    with _lock:
-        conn = get_connection()
-        try:
-            for r in rows:
-                conn.execute(
-                    """INSERT OR IGNORE INTO meteo_forecast_history
-                       (forecast_fetch_at_utc, slot_time, temp_c, solar_w_m2, cloud_cover_pct)
-                       VALUES (?, ?, ?, ?, ?)""",
-                    (
-                        forecast_fetch_at_utc,
-                        r.get("slot_time"),
-                        r.get("temp_c"),
-                        r.get("solar_w_m2"),
-                        r.get("cloud_cover_pct"),
-                    ),
-                )
-            conn.commit()
-        finally:
-            conn.close()
+    """Legacy wrapper for persisting a canonical forecast fetch without marking it latest."""
+    save_meteo_forecast_snapshot(
+        forecast_fetch_at_utc,
+        rows,
+        mark_latest=False,
+    )
 
 
 def get_meteo_forecast_at(fetch_at_utc: str) -> list[dict[str, Any]]:
@@ -3484,6 +3723,16 @@ def get_meteo_forecast_at(fetch_at_utc: str) -> list[dict[str, Any]]:
     with _lock:
         conn = get_connection()
         try:
+            cur = conn.execute(
+                """SELECT slot_time, temp_c, solar_w_m2, cloud_cover_pct
+                   FROM meteo_forecast_value
+                   WHERE forecast_fetch_at_utc = ?
+                   ORDER BY slot_time""",
+                (fetch_at_utc,),
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+            if rows:
+                return rows
             cur = conn.execute(
                 """SELECT slot_time, temp_c, solar_w_m2, cloud_cover_pct
                    FROM meteo_forecast_history
@@ -3611,6 +3860,26 @@ def get_meteo_forecast_history_latest_before(when_utc: str) -> list[dict[str, An
         try:
             cur = conn.execute(
                 """SELECT forecast_fetch_at_utc
+                   FROM meteo_forecast_snapshot
+                   WHERE forecast_fetch_at_utc < ?
+                   ORDER BY forecast_fetch_at_utc DESC
+                   LIMIT 1""",
+                (when_utc,),
+            )
+            row = cur.fetchone()
+            if row and row[0]:
+                cur = conn.execute(
+                    """SELECT slot_time, temp_c, solar_w_m2, cloud_cover_pct
+                       FROM meteo_forecast_value
+                       WHERE forecast_fetch_at_utc = ?
+                       ORDER BY slot_time""",
+                    (str(row[0]),),
+                )
+                rows = [dict(r) for r in cur.fetchall()]
+                if rows:
+                    return rows
+            cur = conn.execute(
+                """SELECT forecast_fetch_at_utc
                    FROM meteo_forecast_history
                    WHERE forecast_fetch_at_utc < ?
                    ORDER BY forecast_fetch_at_utc DESC
@@ -3629,6 +3898,58 @@ def get_meteo_forecast_history_latest_before(when_utc: str) -> list[dict[str, An
                 (prev_fetch_at,),
             )
             return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
+def prune_meteo_forecast_snapshots(max_age_days: int) -> tuple[int, int]:
+    """Prune canonical forecast fetches and their slot rows as one unit.
+
+    Returns ``(deleted_snapshots, deleted_values)``. We prune by fetch timestamp
+    because the snapshot row is the source of truth; per-slot rows are just its
+    normalized expansion for replay/query efficiency.
+    """
+    if max_age_days <= 0:
+        return 0, 0
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+
+    cutoff = (_dt.now(_UTC) - _td(days=max_age_days)).isoformat()
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT forecast_fetch_at_utc
+                   FROM meteo_forecast_snapshot
+                   WHERE forecast_fetch_at_utc < ?""",
+                (cutoff,),
+            )
+            old_fetches = [str(r[0]) for r in cur.fetchall() if r and r[0]]
+            if not old_fetches:
+                return 0, 0
+
+            latest_fetch_at = _get_latest_meteo_forecast_fetch_at(conn)
+            if latest_fetch_at and latest_fetch_at in old_fetches:
+                conn.execute(
+                    "UPDATE meteo_forecast_latest_state SET forecast_fetch_at_utc = NULL WHERE id = 1"
+                )
+
+            placeholders = ",".join("?" for _ in old_fetches)
+            cur = conn.execute(
+                f"""DELETE FROM meteo_forecast_value
+                    WHERE forecast_fetch_at_utc IN ({placeholders})""",
+                old_fetches,
+            )
+            deleted_values = int(cur.rowcount or 0)
+            cur = conn.execute(
+                f"""DELETE FROM meteo_forecast_snapshot
+                    WHERE forecast_fetch_at_utc IN ({placeholders})""",
+                old_fetches,
+            )
+            deleted_snapshots = int(cur.rowcount or 0)
+            conn.commit()
+            return deleted_snapshots, deleted_values
         finally:
             conn.close()
 
@@ -3688,7 +4009,7 @@ def prune_old_rows(
     """Delete rows from *table* older than *max_age_days*.
 
     Append-only tables (daikin_telemetry, meteo_forecast_history,
-    lp_solution_snapshot, lp_inputs_snapshot, config_audit) have no
+    meteo_forecast_snapshot/value, lp_solution_snapshot, lp_inputs_snapshot, config_audit) have no
     built-in purge policy. Without it they grow unbounded. This helper is
     called from :func:`prune_history_tables` on service startup + daily cron.
 
@@ -3746,6 +4067,16 @@ def prune_history_tables() -> dict[str, int]:
         ("acknowledged_warnings", "acknowledged_at", _config.ACKNOWLEDGED_WARNINGS_RETENTION_DAYS, False),
     ]
     results: dict[str, int] = {}
+    try:
+        deleted_snapshots, deleted_values = prune_meteo_forecast_snapshots(
+            _config.METEO_FORECAST_HISTORY_RETENTION_DAYS
+        )
+        results["meteo_forecast_snapshot"] = deleted_snapshots
+        results["meteo_forecast_value"] = deleted_values
+    except Exception as e:
+        logger.debug("prune meteo_forecast_snapshot/value failed: %s", e)
+        results["meteo_forecast_snapshot"] = -1
+        results["meteo_forecast_value"] = -1
     for table, col, days, epoch in policies:
         try:
             results[table] = prune_old_rows(table, col, days, epoch_seconds=epoch)

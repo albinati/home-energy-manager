@@ -13,10 +13,14 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import sqlite3
 
 import pytest
 
 from src import db
+from src.config import config as app_config
 
 
 @pytest.fixture(autouse=True)
@@ -61,10 +65,28 @@ def test_lp_inputs_snapshot_has_expected_columns():
         "soc_initial_kwh", "tank_initial_c", "indoor_initial_c",
         "soc_source", "tank_source", "indoor_source",
         "base_load_json", "micro_climate_offset_c", "config_snapshot_json",
+        "exogenous_snapshot_json",
         "price_quantize_p", "peak_threshold_p", "cheap_threshold_p",
         "daikin_control_mode", "optimization_preset", "energy_strategy_mode",
+        "forecast_fetch_at_utc",
         # V11-A (#194): nullable columns reserved for V11-C/D
         "dhw_draw_prior_json", "occupancy_prior_json",
+    ):
+        assert expected in cols, f"missing column {expected}"
+
+
+def test_meteo_forecast_snapshot_has_expected_columns():
+    cols = _columns("meteo_forecast_snapshot")
+    for expected in (
+        "forecast_fetch_at_utc", "source", "model_name", "model_version", "raw_payload_json",
+    ):
+        assert expected in cols, f"missing column {expected}"
+
+
+def test_meteo_forecast_value_has_expected_columns():
+    cols = _columns("meteo_forecast_value")
+    for expected in (
+        "id", "forecast_fetch_at_utc", "slot_time", "temp_c", "solar_w_m2", "cloud_cover_pct",
     ):
         assert expected in cols, f"missing column {expected}"
 
@@ -115,6 +137,29 @@ def test_meteo_forecast_history_handles_missing_cloud_gracefully():
     assert fetched[0].get("cloud_cover_pct") is None
 
 
+def test_meteo_forecast_slot_date_lookup_uses_slot_time_not_forecast_date():
+    rows = [
+        {"slot_time": "2026-05-02T00:00:00+00:00", "temp_c": 10.0, "solar_w_m2": 100.0},
+    ]
+    db.save_meteo_forecast(rows, "2026-05-01")
+    fetched = db.get_meteo_forecast_for_slot_date("2026-05-02")
+    assert len(fetched) == 1
+    assert fetched[0]["slot_time"] == "2026-05-02T00:00:00+00:00"
+    assert fetched[0]["forecast_date"] == "2026-05-02"
+
+
+def test_meteo_forecast_active_at_time_prefers_latest_past_slot():
+    rows = [
+        {"slot_time": "2026-05-02T00:00:00+00:00", "temp_c": 10.0, "solar_w_m2": 100.0},
+        {"slot_time": "2026-05-02T01:00:00+00:00", "temp_c": 11.0, "solar_w_m2": 200.0},
+    ]
+    db.save_meteo_forecast(rows, "2026-05-01")
+    row = db.get_meteo_forecast_at_time("2026-05-02T00:30:00+00:00")
+    assert row is not None
+    assert row["slot_time"] == "2026-05-02T00:00:00+00:00"
+
+
+
 def test_config_audit_has_expected_columns():
     cols = _columns("config_audit")
     for expected in ("id", "key", "value", "op", "actor", "changed_at_utc"):
@@ -125,6 +170,46 @@ def test_init_db_is_idempotent():
     # Second init must not raise — migrations use CREATE TABLE IF NOT EXISTS.
     db.init_db()
     db.init_db()
+
+
+def test_init_db_migrates_old_lp_inputs_snapshot_before_creating_forecast_index(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    db_path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """CREATE TABLE lp_inputs_snapshot (
+                run_id INTEGER PRIMARY KEY,
+                run_at_utc TEXT NOT NULL,
+                plan_date TEXT,
+                horizon_hours INTEGER,
+                soc_initial_kwh REAL,
+                tank_initial_c REAL,
+                indoor_initial_c REAL,
+                soc_source TEXT,
+                tank_source TEXT,
+                indoor_source TEXT,
+                base_load_json TEXT,
+                micro_climate_offset_c REAL,
+                config_snapshot_json TEXT,
+                price_quantize_p REAL,
+                peak_threshold_p REAL,
+                cheap_threshold_p REAL,
+                daikin_control_mode TEXT,
+                optimization_preset TEXT,
+                energy_strategy_mode TEXT
+            )"""
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(app_config, "DB_PATH", str(db_path), raising=False)
+    db.init_db()
+    cols = _columns("lp_inputs_snapshot")
+    assert "forecast_fetch_at_utc" in cols
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +247,7 @@ def _mk_inputs_row() -> dict:
         "indoor_source": "daikin_cache",
         "base_load_json": json.dumps([0.4] * 48),
         "micro_climate_offset_c": 0.3,
+        "exogenous_snapshot_json": json.dumps({"base_load_components": {"appliance_profile_kwh": [0.0] * 48}}),
         "config_snapshot_json": json.dumps({"LP_HORIZON_HOURS": 24, "BATTERY_CAPACITY_KWH": 10.0}),
         "price_quantize_p": 1.0,
         "peak_threshold_p": 25.0,
@@ -209,6 +295,7 @@ def test_save_lp_snapshots_round_trip():
     # JSON fields survive the round-trip intact
     assert json.loads(inputs["config_snapshot_json"])["LP_HORIZON_HOURS"] == 24
     assert len(json.loads(inputs["base_load_json"])) == 48
+    assert json.loads(inputs["exogenous_snapshot_json"])["base_load_components"]["appliance_profile_kwh"][0] == 0.0
 
     slots = db.get_lp_solution_slots(run_id)
     assert len(slots) == 4
