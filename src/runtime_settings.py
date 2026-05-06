@@ -166,15 +166,23 @@ SCHEMA: dict[str, SettingSpec] = {
     "MPC_FORECAST_REFRESH_INTERVAL_MINUTES": SettingSpec(
         key="MPC_FORECAST_REFRESH_INTERVAL_MINUTES",
         type_name="int",
-        env_default=_int_env("MPC_FORECAST_REFRESH_INTERVAL_MINUTES", "60"),
+        # Default 30 min — aligned with Quartz's ``blend`` model refresh
+        # cadence (the underlying ``pvnet_v2`` nowcast updates every
+        # ~30 min). Open-Meteo's hourly model rolls every 60 min so OM-only
+        # deployments could still set 60 in ``.env`` without losing signal,
+        # but 30 is cheap (24 free OM calls/day vs 12) and catches mid-hour
+        # nowcast adjustments when Quartz is active.
+        env_default=_int_env("MPC_FORECAST_REFRESH_INTERVAL_MINUTES", "30"),
         min_value=10,
         max_value=720,
         cron_reload=True,
         description=(
-            "Interval (minutes) for the Open-Meteo refresh + revision-trigger detector. "
-            "Each tick re-fetches the forecast and fires an MPC re-plan if the next 6h of "
-            "solar/temp diverged materially from the previous fetch. Lower = quicker reaction "
-            "to weather changes; higher = less Open-Meteo traffic."
+            "Interval (minutes) for the forecast refresh + revision-trigger detector. "
+            "Each tick re-fetches the active forecast source (Open-Meteo or Quartz per "
+            "FORECAST_SOURCE) and fires an MPC re-plan if the next 6 h of solar/temp "
+            "diverged materially from the previous fetch. Lower = quicker reaction to "
+            "intra-hour nowcast updates (especially relevant for Quartz which refreshes "
+            "every ~30 min); higher = less network traffic but missed nowcast cycles."
         ),
     ),
     "PV_TELEMETRY_INTERVAL_MINUTES": SettingSpec(
