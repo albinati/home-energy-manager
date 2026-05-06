@@ -232,7 +232,11 @@ def _validate_run(run_id: int, plan_date: str, run_at_utc: str) -> RunValidation
     )
 
     # Apply the filter.
-    _slots, decisions = filter_robust_peak_export(plan, dict(scenarios_dict))
+    _slots, decisions = filter_robust_peak_export(
+        plan,
+        dict(scenarios_dict),
+        export_price_pence=export_prices,
+    )
 
     terminal_value_p = float(getattr(config, "LP_SOC_TERMINAL_VALUE_PENCE_PER_KWH", 5.0))
 

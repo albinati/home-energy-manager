@@ -116,6 +116,21 @@ def test_forecast_skill_log_has_expected_columns():
         assert expected in cols, f"missing column {expected}"
 
 
+def test_dispatch_decisions_has_expected_economic_columns():
+    """PR-D + #259 hotfix: peak-export margin guard writes export_price_p_kwh,
+    refill_price_p_kwh, and economic_margin_p_kwh to every audit row.
+
+    The columns were retrofitted onto older prod DBs by the #259 migration
+    and are part of fresh CREATE TABLE since PR #257. This test pins both."""
+    cols = _columns("dispatch_decisions")
+    for expected in (
+        "export_price_p_kwh",
+        "refill_price_p_kwh",
+        "economic_margin_p_kwh",
+    ):
+        assert expected in cols, f"missing column {expected}"
+
+
 def test_meteo_forecast_history_round_trips_cloud_cover():
     """V11-A: save_meteo_forecast_history persists cloud_cover_pct, and
     get_meteo_forecast_history_latest_before reads it back."""

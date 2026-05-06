@@ -375,6 +375,7 @@ def write_daikin_from_lp_plan(
 def filter_robust_peak_export(
     plan: LpPlan,
     scenarios: dict[str, LpPlan] | None,
+    export_price_pence: list[float] | None = None,
 ) -> tuple[list[HalfHourSlot], list[dict[str, Any]]]:
     """Apply scenario-LP robustness filter to ``peak_export`` slots.
 
@@ -399,7 +400,9 @@ def filter_robust_peak_export(
        to ship the LP's nominal plan than nothing). Reason: ``pessimistic_failed``.
     4. ``pessimistic.export_kwh[i] >= LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH``
        → commit. Reason: ``robust``.
-    5. Otherwise → drop. Reason: ``pessimistic_disagrees``.
+    5. Economic margin must clear the future refill + wear shadow. Otherwise
+       drop. Reason: ``economic_margin``.
+    6. Otherwise → drop. Reason: ``pessimistic_disagrees``.
 
     Scenarios dict keys are the ``Scenario`` literal type ("optimistic",
     "nominal", "pessimistic") but accepted as plain strings to keep this
@@ -414,6 +417,28 @@ def filter_robust_peak_export(
         == "strict_savings"
     )
     floor_kwh = float(config.LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH)
+    eta = float(config.BATTERY_RT_EFFICIENCY)
+    terminal_value_p = float(getattr(config, "LP_SOC_TERMINAL_VALUE_PENCE_PER_KWH", 0.0))
+    wear_cost_p = float(getattr(config, "LP_BATTERY_WEAR_COST_PENCE_PER_KWH", 0.0))
+    min_margin_p = float(getattr(config, "LP_PEAK_EXPORT_MIN_MARGIN_PENCE_PER_KWH", 0.0))
+    export_rate_line = (
+        list(export_price_pence)
+        if export_price_pence is not None and len(export_price_pence) == len(plan.slot_starts_utc)
+        else [float(config.EXPORT_RATE_PENCE)] * len(plan.slot_starts_utc)
+    )
+
+    def _future_refill_shadow_p_kwh(idx: int) -> float:
+        future_prices = [float(p) for p in plan.price_pence[idx + 1:]]
+        if not future_prices:
+            return terminal_value_p
+        refill_shadow = min(future_prices) / max(0.01, eta)
+        return max(terminal_value_p, refill_shadow)
+
+    def _economic_margin_p_kwh(idx: int) -> tuple[float, float, float]:
+        export_price = export_rate_line[idx]
+        refill_shadow = _future_refill_shadow_p_kwh(idx)
+        wear_shadow = (1.0 + (1.0 / max(0.01, eta))) * wear_cost_p
+        return export_price - refill_shadow - wear_shadow, export_price, refill_shadow
 
     def _unwrap(s):
         """Accept either an ``LpPlan`` (legacy / test convenience) or a
@@ -448,9 +473,16 @@ def filter_robust_peak_export(
             "scen_optimistic_exp_kwh": opt_exp,
             "scen_nominal_exp_kwh": nom_exp,
             "scen_pessimistic_exp_kwh": pess_exp,
+            "export_price_p_kwh": None,
+            "refill_price_p_kwh": None,
+            "economic_margin_p_kwh": None,
         }
 
         if s.kind == "peak_export":
+            margin_p, export_price_p, refill_shadow_p = _economic_margin_p_kwh(i)
+            decision["export_price_p_kwh"] = export_price_p
+            decision["refill_price_p_kwh"] = refill_shadow_p
+            decision["economic_margin_p_kwh"] = margin_p
             if strict_savings:
                 # Drop: strict_savings is the kill switch for arbitrage discharge.
                 s = dataclasses.replace(s, kind="standard", lp_grid_import_w=None)
@@ -470,7 +502,23 @@ def filter_robust_peak_export(
                     slot_iso,
                 )
             elif pess_exp is not None and pess_exp >= floor_kwh:
-                decision["reason"] = "robust"
+                if margin_p >= min_margin_p:
+                    decision["reason"] = "robust"
+                else:
+                    s = dataclasses.replace(s, kind="standard", lp_grid_import_w=None)
+                    decision["dispatched_kind"] = "standard"
+                    decision["committed"] = False
+                    decision["reason"] = "economic_margin"
+                    logger.info(
+                        "filter_robust_peak_export: dropped slot=%s "
+                        "margin=%.2fp/kWh < min=%.2fp/kWh "
+                        "(export=%.2fp refill_shadow=%.2fp)",
+                        slot_iso,
+                        margin_p,
+                        min_margin_p,
+                        export_price_p,
+                        refill_shadow_p,
+                    )
             else:
                 # Drop: pessimistic scenario does not export here at the required floor.
                 s = dataclasses.replace(s, kind="standard", lp_grid_import_w=None)
@@ -497,6 +545,7 @@ def filter_robust_peak_export(
 def build_fox_groups_from_lp(
     plan: LpPlan,
     scenarios: dict[str, LpPlan] | None = None,
+    export_price_pence: list[float] | None = None,
 ) -> tuple[list[SchedulerGroup], datetime | None]:
     """Translate LP plan into Fox V3 groups.
 
@@ -521,7 +570,7 @@ def build_fox_groups_from_lp(
     should call ``filter_robust_peak_export`` directly to capture decisions
     alongside the run_id.
     """
-    slots, _decisions = filter_robust_peak_export(plan, scenarios)
+    slots, _decisions = filter_robust_peak_export(plan, scenarios, export_price_pence=export_price_pence)
     if slots:
         cutoff = slots[0].start_utc + timedelta(hours=24)
         slots = [s for s in slots if s.start_utc < cutoff]

@@ -9,9 +9,22 @@ script uses, and assert it correctly identifies "filter saved money" vs
 """
 from __future__ import annotations
 
+import importlib.util
+import sys
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
+
+
+def _load_validate_scenario_filter_module():
+    path = Path(__file__).resolve().parents[1] / "scripts" / "validate_scenario_filter.py"
+    spec = importlib.util.spec_from_file_location("validate_scenario_filter", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def _build_plan_with_peak_export(export_kwh: float = 1.84):
@@ -106,7 +119,7 @@ def test_filter_drops_with_high_terminal_value__net_can_be_positive():
 
 def test_validation_report_threshold_pass_fail():
     """ValidationReport.passed is governed by aggregate_delta_p vs fail_threshold_p."""
-    from scripts.validate_scenario_filter import ValidationReport
+    ValidationReport = _load_validate_scenario_filter_module().ValidationReport
 
     # Aggregate is well above threshold → pass.
     r = ValidationReport(
@@ -139,7 +152,7 @@ def test_validation_report_threshold_pass_fail():
 
 def test_validator_skips_runs_with_no_peak_export(monkeypatch):
     """Helper query should only yield runs that had peak_export in the LP plan."""
-    import scripts.validate_scenario_filter as v
+    v = _load_validate_scenario_filter_module()
 
     seen_calls: list[int] = []
 
