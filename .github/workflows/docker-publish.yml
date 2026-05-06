@@ -6,6 +6,21 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# Serialise builds per ref. Without this, two ``main`` commits landing
+# back-to-back kick off two parallel builds; whichever finishes second
+# wins the mutable ``:main`` tag, regardless of git commit order. We
+# observed this on 2026-05-06 (issue #268): the older commit's build
+# completed slightly later and overwrote the ``:main`` tag, sending
+# stale code to prod on the next ``docker compose pull``.
+#
+# ``cancel-in-progress: false`` keeps the older build running so we
+# still get a ``:<sha>`` tag for it (useful for rollback / audit);
+# the newer build queues up and pushes its tag last → ``:main``
+# always reflects the latest commit.
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
   packages: write
