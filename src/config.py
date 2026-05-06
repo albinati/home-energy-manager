@@ -507,6 +507,29 @@ class Config:
     LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH: float = float(
         os.getenv("LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH", "0.30")
     )
+    # Additional dispatch-layer guard on ``peak_export``: even when the
+    # pessimistic scenario still exports, only commit the slot if the export
+    # price beats the best future refill / saved-energy shadow value by at
+    # least this much pence/kWh. Default 0.0 = observation-only — the margin
+    # value is recorded in ``dispatch_decisions`` for audit but no slots are
+    # actually dropped. Raise this AFTER ≥14 days of dispatch_decisions data
+    # confirms the implied dropped-slot rate would not have hurt PnL on
+    # historical days. Caveat: the refill shadow uses ``min(future_prices)``
+    # which is trajectory-blind — multiple peak_export slots crediting the
+    # same future-cheap slot all see the same shadow, so the calculation is
+    # optimistic about refill availability.
+    LP_PEAK_EXPORT_MIN_MARGIN_PENCE_PER_KWH: float = float(
+        os.getenv("LP_PEAK_EXPORT_MIN_MARGIN_PENCE_PER_KWH", "0.0")
+    )
+    # Battery-wear shadow cost (p/kWh throughput). Folded into the
+    # peak_export margin check as ``(1 + 1/η) × wear_cost`` so a marginal
+    # export must cover both the future refill cost and the extra cycle
+    # wear it causes. Default 0 = no wear penalty applied. Story #185
+    # tracks the proper wear-tracking + EOL-projection work that should
+    # inform setting this.
+    LP_BATTERY_WEAR_COST_PENCE_PER_KWH: float = float(
+        os.getenv("LP_BATTERY_WEAR_COST_PENCE_PER_KWH", "0.0")
+    )
     # Comma-separated trigger reasons for which scenario LP runs. Other
     # triggers (drift, forecast_revision, hourly cron not in this list)
     # use only the nominal solve to keep latency low.
