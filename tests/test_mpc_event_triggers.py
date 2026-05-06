@@ -21,6 +21,9 @@ def _reset_runner_state(monkeypatch):
 
     monkeypatch.setattr(runner, "_last_mpc_run_at", None)
     monkeypatch.setattr(runner, "_consecutive_drift_ticks", 0)
+    monkeypatch.setattr(runner, "_consecutive_pv_up_ticks", 0)
+    monkeypatch.setattr(runner, "_consecutive_pv_down_ticks", 0)
+    monkeypatch.setattr(runner, "_consecutive_load_up_ticks", 0)
     monkeypatch.setattr(runner, "_scheduler_paused", False)
     monkeypatch.setattr(runner.config, "USE_BULLETPROOF_ENGINE", True)
     monkeypatch.setattr(runner.config, "OPTIMIZER_BACKEND", "lp")
@@ -214,6 +217,35 @@ def test_lp_predicted_soc_pct_at_returns_pct_for_matching_slot(monkeypatch):
     pct = runner._lp_predicted_soc_pct_at(base + timedelta(minutes=45))
     assert pct is not None
     assert pct == pytest.approx(5.1 / 10.0 * 100.0, abs=0.01)  # cap=10kWh
+
+
+def test_lp_predicted_load_kw_at_derives_expected_load_from_solution_slot(monkeypatch):
+    from src.scheduler import runner
+
+    base = datetime(2026, 6, 1, 10, 0, tzinfo=UTC)
+    monkeypatch.setattr("src.db.find_run_for_time", lambda when_utc_iso: 99)
+    monkeypatch.setattr(
+        "src.db.get_lp_solution_slots",
+        lambda run_id: [
+            {
+                "slot_time_utc": base.isoformat(),
+                "import_kwh": 1.0,
+                "pv_use_kwh": 0.6,
+                "discharge_kwh": 0.4,
+                "export_kwh": 0.2,
+                "charge_kwh": 0.3,
+                "dhw_kwh": 0.1,
+                "space_kwh": 0.2,
+            }
+        ],
+    )
+    # gross_load_kwh = imp + pv + dis - exp - chg = 1.5  (includes Daikin
+    # dhw + space because Fox ``loadsPower`` is gross AC including the heat
+    # pump on the typical retrofit CT placement). gross_load_kw = 3.0 kW.
+    # See docstring on ``_lp_predicted_load_kw_at`` for the CT-placement
+    # assumption that drives this formula.
+    kw = runner._lp_predicted_load_kw_at(base + timedelta(minutes=10))
+    assert kw == pytest.approx(3.0)
 
 
 # -------------------- Octopus rebadge --------------------

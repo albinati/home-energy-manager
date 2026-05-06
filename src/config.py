@@ -757,6 +757,16 @@ class Config:
     MPC_FORECAST_DRIFT_LOOKAHEAD_HOURS: int = int(os.getenv("MPC_FORECAST_DRIFT_LOOKAHEAD_HOURS", "6"))
     MPC_FORECAST_DRIFT_SOLAR_KWH_THRESHOLD: float = float(os.getenv("MPC_FORECAST_DRIFT_SOLAR_KWH_THRESHOLD", "2.0"))
     MPC_FORECAST_DRIFT_TEMP_C_THRESHOLD: float = float(os.getenv("MPC_FORECAST_DRIFT_TEMP_C_THRESHOLD", "2.0"))
+    # Live deviation triggers (Fox realtime vs LP/forecast expectations).
+    # Complement ``forecast_revision`` (forecast-vs-forecast) with
+    # actual-vs-expected checks. Default thresholds are intentionally
+    # conservative so the trigger only fires on substantial deviations —
+    # raise the hysteresis tick count to disable entirely during
+    # bring-up while we validate against measured CT-placement
+    # assumptions in ``_lp_predicted_load_kw_at``.
+    MPC_LIVE_PV_KW_THRESHOLD: float = float(os.getenv("MPC_LIVE_PV_KW_THRESHOLD", "1.5"))
+    MPC_LIVE_LOAD_KW_THRESHOLD: float = float(os.getenv("MPC_LIVE_LOAD_KW_THRESHOLD", "1.5"))
+    MPC_LIVE_DEVIATION_HYSTERESIS_TICKS: int = int(os.getenv("MPC_LIVE_DEVIATION_HYSTERESIS_TICKS", "3"))
 
     @property
     def DAIKIN_COP_CURVE(self) -> list[tuple[float, float]]:
