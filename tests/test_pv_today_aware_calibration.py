@@ -203,3 +203,97 @@ def test_per_hour_returns_empty_when_only_one_hour_observed():
     by_hour, diag = compute_today_pv_correction_factor_by_hour()
     assert by_hour == {}, "single observation should not produce a per-hour map"
     assert "min_hours_required" in diag
+
+
+# ---------------------------------------------------------------------------
+# PR-J: median computation fixes
+# Bug 1: clamped values were anchoring the median at clamp bounds.
+# Bug 2: ``sorted[len//2]`` is upper of two middles for even-length lists.
+# ---------------------------------------------------------------------------
+
+
+def test_per_hour_median_excludes_clamped_observations():
+    """Two valid + two clamped observations → median computed only from valid pair.
+
+    Repro of the 2026-05-06 prod state: observations at hours 5/6/7/9 produced
+    ratios [2.0(clamp), 0.67, 1.10, 0.30(clamp)]. The old code returned 1.10
+    (sorted[2] of all 4); after this fix it should return (0.67+1.10)/2 = 0.885
+    by excluding the two clamped values.
+    """
+    from src.weather import compute_today_pv_correction_factor_by_hour
+
+    # Hour 5: dawn, tiny forecast → ratio explodes → clamped to 2.0 (upper).
+    _seed_realtime(hour_utc=5, kw=0.10)
+    _seed_forecast(hour_utc=5, irradiance_wm2=2.0)
+    # Hour 6: ratio ~0.67 (within clamp range).
+    _seed_realtime(hour_utc=6, kw=1.0)
+    _seed_forecast(hour_utc=6, irradiance_wm2=440.0)  # cal ~1.495 kW; ratio ~0.67
+    # Hour 7: ratio ~1.10.
+    _seed_realtime(hour_utc=7, kw=2.0)
+    _seed_forecast(hour_utc=7, irradiance_wm2=475.0)  # cal ~1.815 kW; ratio ~1.10
+    # Hour 9: heavy cloud morning, ratio at lower clamp.
+    _seed_realtime(hour_utc=9, kw=0.10)
+    _seed_forecast(hour_utc=9, irradiance_wm2=350.0)  # cal ~1.34 kW; ratio ~0.075 → clamp 0.30
+
+    by_hour, diag = compute_today_pv_correction_factor_by_hour()
+    assert by_hour, f"expected non-empty map; diag={diag}"
+    # Two of four observations were clamped (hours 5 and 9).
+    assert set(diag["clamped_hours"]) == {5, 9}, f"clamped_hours: {diag['clamped_hours']}"
+    # Median should reflect ONLY the unclamped {6, 7} → mean(0.67, 1.10) ≈ 0.885.
+    assert diag["median_source"] == "unclamped_only"
+    assert 0.80 <= diag["median_ratio"] <= 0.95, f"expected ~0.89; got {diag['median_ratio']}"
+
+
+def test_per_hour_median_falls_back_when_too_few_unclamped():
+    """If excluding clamped leaves <min_hours observations, fall back to all-observed.
+
+    Otherwise we'd return an empty map when most of the day's data was at clamp
+    boundaries — losing the signal entirely.
+    """
+    from src.weather import compute_today_pv_correction_factor_by_hour
+
+    # Two clamped observations, no unclamped → unclamped subset has 0 entries.
+    _seed_realtime(hour_utc=5, kw=0.10)
+    _seed_forecast(hour_utc=5, irradiance_wm2=2.0)  # tiny forecast → clamp upper
+    _seed_realtime(hour_utc=18, kw=0.10)
+    _seed_forecast(hour_utc=18, irradiance_wm2=2.0)  # tiny forecast → clamp upper
+
+    by_hour, diag = compute_today_pv_correction_factor_by_hour()
+    assert by_hour, f"expected non-empty map (fallback to all-observed); diag={diag}"
+    assert diag["median_source"] == "all_observed", f"diag: {diag}"
+
+
+def test_scalar_uses_statistical_median_for_even_length():
+    """Scalar adjuster: 4 observations [0.4, 0.6, 1.4, 1.6] → median = 1.0,
+    not ``sorted[2] = 1.4``."""
+    from src.weather import compute_today_pv_correction_factor
+
+    # Calibrated forecast for hours 6/7/8/9 with ratios 0.4 / 0.6 / 1.4 / 1.6
+    # against measured kW.
+    seeds = [
+        (6,  0.4, 1.0),  # actual / forecast = 0.4 → ratio 0.4 (clamped if outside range)
+        (7,  0.6, 1.0),
+        (8,  1.4, 1.0),
+        (9,  1.6, 1.0),
+    ]
+    # We want to produce ratios [0.4, 0.6, 1.4, 1.6] so the calibrated forecast
+    # for each hour must be ~1.0 kW. estimate_pv_kw(rad) × cloud_attenuation
+    # × calibration ≈ 1.0 kW. Easiest: seed irradiance + a flat hourly cal of 1.0.
+    db.upsert_pv_calibration_hourly(
+        {h: 1.0 for h in range(6, 19)},
+        {h: 50 for h in range(6, 19)},
+        window_days=14,
+    )
+    for h, actual_kw, _ in seeds:
+        _seed_realtime(hour_utc=h, kw=actual_kw)
+    # Need irradiance such that estimate_pv_kw(att·rad) ≈ 1.0 → 4.5 × (rad/1000) × 0.85 = 1.0
+    # → rad ≈ 261. With cloud=0% (passed via _seed_forecast helper), att=1.0.
+    for h, _, _ in seeds:
+        _seed_forecast(hour_utc=h, irradiance_wm2=261.0)
+
+    factor, diag = compute_today_pv_correction_factor()
+    # True median of [0.4, 0.6, 1.4, 1.6] = (0.6 + 1.4) / 2 = 1.0
+    # Old (buggy) code returned sorted[2] = 1.4
+    assert diag["median_ratio"] == pytest.approx(1.0, abs=0.05), (
+        f"expected statistical median 1.0; got {diag['median_ratio']}"
+    )
