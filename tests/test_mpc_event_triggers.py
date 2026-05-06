@@ -250,6 +250,10 @@ def _make_forecast_rows(base_utc: datetime, *, count: int, solar_w_m2: float, te
             "slot_time": (base_utc + timedelta(hours=i)).isoformat(),
             "temp_c": temp_c,
             "solar_w_m2": solar_w_m2,
+            # Pin cloud cover to 0 so ``forecast_pv_kw_from_row`` does not
+            # apply its default 50% attenuation against the synthetic
+            # irradiance values these delta tests reason about.
+            "cloud_cover_pct": 0.0,
         }
         for i in range(count)
     ]

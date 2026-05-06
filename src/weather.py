@@ -1106,12 +1106,25 @@ def get_pv_calibration_factor_for(
 
     Pass pre-fetched tables to avoid hitting the DB inside per-slot loops.
     """
+    import sqlite3
+
     from . import db as _db
 
+    # Tolerate missing DB tables. ``forecast_pv_kw_from_row`` is called from
+    # pure-function unit tests that don't run ``init_db()``, and from a
+    # cold-start window in prod between schema-create and the first
+    # calibration recompute. Either way the right behaviour is to fall back
+    # to ``flat`` rather than crash.
     if cloud_table is None:
-        cloud_table = _db.get_pv_calibration_hourly_cloud()
+        try:
+            cloud_table = _db.get_pv_calibration_hourly_cloud()
+        except sqlite3.OperationalError:
+            cloud_table = {}
     if hourly_table is None:
-        hourly_table = _db.get_pv_calibration_hourly()
+        try:
+            hourly_table = _db.get_pv_calibration_hourly()
+        except sqlite3.OperationalError:
+            hourly_table = {}
 
     bucket = cloud_bucket(cloud_cover_pct)
     if cloud_table:
@@ -1368,15 +1381,15 @@ def evaluate_pv_forecast_accuracy(
         rad = forecast_radiation.get(key)
         if rad is None:
             continue
-        cal = get_pv_calibration_factor_for(
+        predicted_kw = forecast_pv_kw_from_row(
             key[1],
+            rad,
             forecast_cloud.get(key),
             direct_pv_kw=forecast_direct_pv.get(key),
             cloud_table=cal_cloud,
             hourly_table=cal_hourly,
             flat=flat_cal,
         )
-        predicted_kw = estimate_pv_kw(rad) * cal
         if predicted_kw < min_kw and actual_kw < min_kw:
             continue                      # both negligible — skip dawn/dusk
         pairs_per_hour[key[1]].append((predicted_kw, actual_kw))
@@ -1450,11 +1463,24 @@ def forecast_to_lp_inputs(
     dhw_pen = float(config.COP_DHW_PENALTY)
     cap = float(config.PV_CAPACITY_KWP)
     eff = float(config.PV_SYSTEM_EFFICIENCY)
+    import sqlite3
+
     from . import db as _db
 
-    cal_cloud = _db.get_pv_calibration_hourly_cloud()
-    cal_hourly = _db.get_pv_calibration_hourly()
-    flat_cal = compute_pv_calibration_factor() if not cal_cloud and not cal_hourly else 1.0
+    # Same DB-tolerance shape as ``get_pv_calibration_factor_for`` — pure
+    # callers may invoke this without ever running ``init_db()``.
+    try:
+        cal_cloud = _db.get_pv_calibration_hourly_cloud()
+    except sqlite3.OperationalError:
+        cal_cloud = {}
+    try:
+        cal_hourly = _db.get_pv_calibration_hourly()
+    except sqlite3.OperationalError:
+        cal_hourly = {}
+    try:
+        flat_cal = compute_pv_calibration_factor() if not cal_cloud and not cal_hourly else 1.0
+    except sqlite3.OperationalError:
+        flat_cal = 1.0
 
     # PV scale: explicit arg > config override > 1.0. Accept float OR per-hour dict.
     if pv_scale is None:

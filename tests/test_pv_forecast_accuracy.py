@@ -38,7 +38,7 @@ def _seed_day_with_samples(d: date, hour_kw: dict[int, float],
     rows = []
     for h, irr in forecast_irr.items():
         ts = datetime.combine(d, datetime.min.time()).replace(hour=h, tzinfo=UTC)
-        rows.append({"slot_time": ts.isoformat(), "temp_c": 15.0, "solar_w_m2": irr})
+        rows.append({"slot_time": ts.isoformat(), "temp_c": 15.0, "solar_w_m2": irr, "cloud_cover_pct": 0.0})
     db.save_meteo_forecast(rows, d.isoformat())
 
 
