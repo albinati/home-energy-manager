@@ -534,10 +534,11 @@ class Config:
     # Heat pump nameplate cap (kW) used in LP HP power bounds.
     DAIKIN_MAX_HP_KW: float = float(os.getenv("DAIKIN_MAX_HP_KW", "2.0"))
     LP_SHOWER_WINDOW_MINUTES: int = int(os.getenv("LP_SHOWER_WINDOW_MINUTES", "60"))
-    # V8 LP — solver
-    LP_SOLVER: str = (os.getenv("LP_SOLVER") or "highs").strip().lower()  # highs | cbc
+    # V8 LP — solver. We standardize on CBC; the HiGHS branch was implemented
+    # but never used in this system and was removed to avoid dead code.
+    # Any non-cbc value here logs an info line and falls back to CBC.
+    LP_SOLVER: str = (os.getenv("LP_SOLVER") or "cbc").strip().lower()
     LP_CBC_TIME_LIMIT_SECONDS: int = int(os.getenv("LP_CBC_TIME_LIMIT_SECONDS", "30"))
-    LP_HIGHS_TIME_LIMIT_SECONDS: int = int(os.getenv("LP_HIGHS_TIME_LIMIT_SECONDS", "30"))
     LP_COMFORT_SLACK_PENCE_PER_DEGC_SLOT: float = float(
         os.getenv("LP_COMFORT_SLACK_PENCE_PER_DEGC_SLOT", "100")
     )

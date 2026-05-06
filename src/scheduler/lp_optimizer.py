@@ -1,7 +1,6 @@
 """PuLP MILP home energy optimizer (V9): battery, grid, PV, DHW tank, space heating.
 
 State-of-the-art features vs V8:
-  - HiGHS solver (≫ CBC in speed and solution quality; falls back to CBC if unavailable)
   - Simplified HP model: 1 binary hp_on[i] + continuous e_hp[i] in [0, max_hp_kw×0.5]
     instead of 4-bucket SOS1 → fewer binaries, tighter LP relaxation, faster solve
   - Minimum ON-time constraint for HP (anti short-cycling)
@@ -24,9 +23,11 @@ from zoneinfo import ZoneInfo
 
 import pulp
 
-from ..config import config
+from ..config import config, cop_at_temperature
 from ..physics import (
+    apply_cop_lift_multiplier,
     get_daikin_heating_kw,
+    get_lwt_base_c,
     lwt_offset_from_space_kw,
     predict_passive_daikin_load,
 )
@@ -130,21 +131,20 @@ def _shower_slot_mask(
 
 
 def _make_solver() -> pulp.LpSolver:
-    """Return HiGHS (Python API) if available, else CBC. Configured via LP_SOLVER env var."""
-    solver_pref = (getattr(config, "LP_SOLVER", "highs") or "highs").lower()
-    time_limit = getattr(config, "LP_HIGHS_TIME_LIMIT_SECONDS", 30)
+    """Return the configured PuLP solver backend.
+
+    We standardize on CBC. The HiGHS branch was removed: it was implemented
+    but never used in this system, and caused native aborts in some test/
+    runtime environments. ``LP_SOLVER`` is kept for forward-compat — any
+    non-cbc value logs an info line and falls through to CBC.
+    """
+    solver_pref = (getattr(config, "LP_SOLVER", "cbc") or "cbc").lower()
     cbc_limit = getattr(config, "LP_CBC_TIME_LIMIT_SECONDS", 30)
-
-    available = pulp.listSolvers(onlyAvailable=True)
-
-    if solver_pref != "cbc" and "HiGHS" in available:
-        logger.debug("LP solver: HiGHS Python API (time_limit=%ds)", time_limit)
-        return pulp.HiGHS(
-            msg=False,
-            timeLimit=int(time_limit),
-            threads=0,  # 0 = auto (use all available cores)
+    if solver_pref != "cbc":
+        logger.info(
+            "LP_SOLVER=%s requested, but only CBC is supported; falling back to CBC",
+            solver_pref,
         )
-
     logger.debug("LP solver: CBC (time_limit=%ds)", cbc_limit)
     return pulp.PULP_CBC_CMD(msg=False, timeLimit=int(cbc_limit))
 
@@ -177,15 +177,25 @@ def solve_lp(
     initial: LpInitialState,
     tz: ZoneInfo,
     micro_climate_offset_c: float = 0.0,
+    micro_climate_offset_by_hour_c: dict[int, float] | None = None,
     export_price_pence: list[float] | None = None,
 ) -> LpPlan:
     """Build and solve the MILP. Raises ``ValueError`` on dimension mismatch.
 
-    ``export_price_pence`` (optional): half-hourly Octopus Outgoing Agile rates.
-    When provided, the objective uses the per-slot value so the LP correctly
-    weighs export revenue at the actual time-of-use rate. When ``None`` (no
-    export tariff configured / not yet fetched) we fall back to the flat
-    ``EXPORT_RATE_PENCE`` constant.
+    ``micro_climate_offset_c`` (default 0.0) and the optional per-hour
+    ``micro_climate_offset_by_hour_c`` map are interpreted as
+    ``actual − forecast`` (matching ``db.get_micro_climate_offset_c`` /
+    ``…_by_hour_c``). The calibrated outdoor temperature is therefore
+    ``forecast + offset`` — a positive offset means the local microclimate
+    runs warmer than forecast and the LP sees the warmer figure for both the
+    heat-loss curve and the COP curve. Hour-specific entries (UTC hour key)
+    take precedence over the flat default. Each offset is clamped to ±5 °C.
+
+    ``export_price_pence`` (optional): half-hourly Octopus Outgoing Agile
+    rates. When provided, the objective uses the per-slot value so the LP
+    correctly weighs export revenue at the actual time-of-use rate. When
+    ``None`` (no export tariff configured / not yet fetched) we fall back to
+    the flat ``EXPORT_RATE_PENCE`` constant.
     """
     n = len(slot_starts_utc)
     if n == 0:
@@ -198,12 +208,62 @@ def solve_lp(
         raise ValueError("LP: weather horizon mismatch")
 
     pv_avail = list(weather.pv_kwh_per_slot)
-    # Apply micro-climate offset: positive = local warmer than forecast, negative = colder.
-    # Subtract so that a negative offset (colder microclimate) lowers the effective t_out,
-    # increasing modelled building heat-loss and forcing higher e_space allocation.
-    t_out = [t - micro_climate_offset_c for t in weather.temperature_outdoor_c]
-    cop_dhw = list(weather.cop_dhw)
-    cop_space = list(weather.cop_space)
+    # Apply micro-climate offset and recompute COPs from the calibrated
+    # temperature. Earlier versions of this code subtracted the offset (which
+    # inverted the sign convention) and left the COP arrays as the
+    # pre-offset values from ``forecast_to_lp_inputs`` — so a negative
+    # microclimate offset in winter actually pushed t_out *higher* and the
+    # COP curve was evaluated against the un-calibrated forecast. The
+    # combined effect was a systematic morning over-heat / afternoon
+    # under-heat bias. Adding the offset and recomputing the COPs in lockstep
+    # keeps t_out, the heat-loss curve, and the COP curve internally
+    # consistent.
+    offset_by_hour = micro_climate_offset_by_hour_c or {}
+    offset_default = float(micro_climate_offset_c or 0.0)
+    curve = config.DAIKIN_COP_CURVE
+    dhw_pen = float(config.COP_DHW_PENALTY)
+    lift_pen = float(getattr(config, "LP_COP_LIFT_PENALTY_PER_KELVIN", 0.0))
+    lwt_off_max_for_cop = float(getattr(config, "OPTIMIZATION_LWT_OFFSET_MAX", 10.0))
+    lwt_ceiling = float(getattr(config, "LP_COP_SPACE_LWT_CEILING_C", 50.0))
+    lwt_dhw = float(getattr(config, "LP_COP_DHW_LIFT_SUPPLY_C", 45.0))
+    ref_k = float(getattr(config, "LP_COP_LIFT_REFERENCE_DELTA_K", 25.0))
+    min_m = float(getattr(config, "LP_COP_LIFT_MIN_MULTIPLIER", 0.5))
+    t_out: list[float] = []
+    cop_space: list[float] = []
+    cop_dhw: list[float] = []
+    for i, raw_temp in enumerate(weather.temperature_outdoor_c):
+        slot_hour = slot_starts_utc[i].hour if i < len(slot_starts_utc) else i % 24
+        offset = float(offset_by_hour.get(slot_hour, offset_default))
+        offset = max(-5.0, min(5.0, offset))
+        temp_c = float(raw_temp) + offset
+        t_out.append(temp_c)
+        base_cop = max(1.0, cop_at_temperature(curve, temp_c))
+        if lift_pen > 0.0:
+            lwt_space = min(lwt_ceiling, get_lwt_base_c(temp_c) + lwt_off_max_for_cop)
+            cop_s = apply_cop_lift_multiplier(
+                base_cop,
+                temp_c,
+                lwt_space,
+                penalty_per_k=lift_pen,
+                reference_delta_k=ref_k,
+                min_mult=min_m,
+            )
+            cop_d = max(
+                1.0,
+                apply_cop_lift_multiplier(
+                    max(1.0, base_cop - dhw_pen),
+                    temp_c,
+                    lwt_dhw,
+                    penalty_per_k=lift_pen,
+                    reference_delta_k=ref_k,
+                    min_mult=min_m,
+                ),
+            )
+        else:
+            cop_s = base_cop
+            cop_d = max(1.0, cop_s - dhw_pen)
+        cop_space.append(cop_s)
+        cop_dhw.append(cop_d)
 
     slot_h = 0.5  # 30-minute slots
     max_hp_kwh_per_slot = float(getattr(config, "DAIKIN_MAX_HP_KW", 2.0)) * slot_h
