@@ -61,6 +61,65 @@ def _now_utc() -> datetime:
     return datetime.now(UTC)
 
 
+def _load_yesterday_today_factor_by_hour() -> dict[int, float]:
+    """Read yesterday's per-hour today-factor table from the previous LP snapshot.
+
+    Used as a warm-start for hours not yet observed today. Without this, the
+    today-aware adjuster falls back to "median of observed hours" which on a
+    cloudy-morning day drags afternoon hours down to morning's bias even
+    though afternoons typically shed the cloud bias.
+
+    Returns ``{}`` when no usable previous snapshot exists (first day of
+    operation, schema mismatch, JSON parse failure, etc.) — caller treats it
+    as "no warm-start available" and behaves as before.
+    """
+    import sqlite3
+
+    try:
+        yesterday = (datetime.now(UTC) - timedelta(days=1)).date().isoformat()
+        with db._lock:
+            conn = db.get_connection()
+            try:
+                cur = conn.execute(
+                    """SELECT exogenous_snapshot_json FROM lp_inputs_snapshot
+                       WHERE substr(plan_date, 1, 10) = ?
+                         AND exogenous_snapshot_json IS NOT NULL
+                       ORDER BY run_id DESC""",
+                    (yesterday,),
+                )
+                rows = cur.fetchall()
+            finally:
+                conn.close()
+    except (sqlite3.OperationalError, sqlite3.DatabaseError):
+        return {}
+    if not rows:
+        return {}
+    # Newest-first; return the first snapshot whose JSON still has
+    # today_factor_by_hour populated.
+    for row in rows:
+        raw = (row[0] or "{}") if row else "{}"
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        adj = (payload or {}).get("weather_adjustment") or {}
+        # Prefer the post-warm-start "effective" map so the warm-start chains
+        # across days when today's observations are sparse. Fall back to the
+        # raw observed map for snapshots written before that key existed.
+        by_hour = adj.get("today_factor_effective_by_hour") or adj.get("today_factor_by_hour")
+        if not isinstance(by_hour, dict) or not by_hour:
+            continue
+        out: dict[int, float] = {}
+        for k, v in by_hour.items():
+            try:
+                out[int(k)] = float(v)
+            except (TypeError, ValueError):
+                continue
+        if out:
+            return out
+    return {}
+
+
 def _ceil_to_half_hour_utc(dt: datetime) -> datetime:
     """Round *dt* up to the next :00 or :30 boundary in UTC."""
     dt = dt.astimezone(UTC).replace(second=0, microsecond=0)
@@ -1390,14 +1449,31 @@ def _run_optimizer_lp(
     # under-corrected afternoons).
     today_factor_by_hour, today_diag_by_hour = compute_today_pv_correction_factor_by_hour()
     today_factor, today_diag = compute_today_pv_correction_factor()
+
+    # #1: today_factor must NOT contaminate tomorrow's slots in the same 48h
+    # solve. A cloudy-morning solve at 19:00 today produces today_factor ≈ 0.31;
+    # without scoping that scalar hammers tomorrow's morning predictions too,
+    # so the LP plans a grid charge before the next day's actuals can correct
+    # the bias.
+    today_utc_date = datetime.now(UTC).date()
+
+    # #5: warm-start unobserved hours from yesterday's per-hour factor table
+    # (persisted in the previous LP snapshot's exogenous_snapshot_json). This
+    # keeps the asymmetric per-hour shape from yesterday instead of the
+    # bias-dragging "median of observed" fallback. Best-effort — when there is
+    # no yesterday snapshot or the JSON path is empty, falls back silently.
+    yesterday_factor_by_hour = _load_yesterday_today_factor_by_hour()
+
     if today_factor_by_hour:
         logger.info(
             "PV calibration: per-hour today-aware adjuster active "
-            "(n_observed=%d, n_imputed=%d, median_ratio=%.3f, clamped_hours=%s)",
+            "(n_observed=%d, n_imputed=%d, median_ratio=%.3f, clamped_hours=%s, "
+            "warm_start_hours=%d)",
             today_diag_by_hour.get("n_observed", 0),
             today_diag_by_hour.get("n_imputed", 0),
             today_diag_by_hour.get("median_ratio", 0.0),
             today_diag_by_hour.get("clamped_hours", []),
+            len(yesterday_factor_by_hour),
         )
     elif today_factor != 1.0:
         logger.info(
@@ -1412,15 +1488,39 @@ def _run_optimizer_lp(
             today_diag.get("reason", "no diagnostic"),
         )
 
-    def _pv_scale_callable(hour_utc: int, cloud_pct: float) -> float:
+    # Build the per-hour map actually consumed by the LP: prefer today's
+    # observation if we have one, else warm-start from yesterday's value, else
+    # 1.0 (no per-hour bias). Exposed for the snapshot below.
+    today_factor_by_hour_imputed = today_diag_by_hour.get("imputed_hours") or []
+    effective_factor_by_hour: dict[int, float] = {}
+    if today_factor_by_hour:
+        for h in range(24):
+            if h not in today_factor_by_hour_imputed:
+                effective_factor_by_hour[h] = today_factor_by_hour[h]
+            elif h in yesterday_factor_by_hour:
+                effective_factor_by_hour[h] = yesterday_factor_by_hour[h]
+            else:
+                effective_factor_by_hour[h] = today_factor_by_hour[h]
+
+    def _pv_scale_callable(
+        hour_utc: int,
+        cloud_pct: float,
+        slot_start_utc: datetime | None = None,
+    ) -> float:
         cal = get_pv_calibration_factor_for(
             hour_utc, cloud_pct,
             cloud_table=pv_scale_cloud,
             hourly_table=pv_scale_hourly,
             flat=flat_scale,
         )
-        # Per-hour today factor wins; scalar fallback when the per-hour map
-        # is empty (not enough observed-vs-forecast data yet today).
+        # #1: only apply today_factor to slots IN the current UTC day. For
+        # tomorrow's slots return the cloud/hour calibration alone — today's
+        # observed bias is not evidence for tomorrow's weather.
+        if slot_start_utc is not None and slot_start_utc.date() != today_utc_date:
+            return cal
+        # Today's slots: prefer per-hour map (with warm-start fill); scalar fallback.
+        if effective_factor_by_hour:
+            return cal * effective_factor_by_hour.get(int(hour_utc), 1.0)
         if today_factor_by_hour:
             return cal * today_factor_by_hour.get(int(hour_utc), 1.0)
         return cal * today_factor
@@ -1457,6 +1557,22 @@ def _run_optimizer_lp(
                 if today_factor_by_hour else None
             ),
             "today_diag_by_hour": today_diag_by_hour,
+            # #5 — values actually consumed by the LP after the
+            # warm-start-from-yesterday fill-in. Distinct from
+            # today_factor_by_hour (raw observations + median fallback) so
+            # tomorrow's warm-start can read THIS dict instead of pulling
+            # in yesterday's median-fallback values.
+            "today_factor_effective_by_hour": (
+                {str(h): round(float(v), 6) for h, v in effective_factor_by_hour.items()}
+                if effective_factor_by_hour else None
+            ),
+            # #5 diag — non-empty when warm-start filled at least one hour.
+            "warm_start_from_yesterday_hours": sorted(
+                h for h in effective_factor_by_hour
+                if h in today_factor_by_hour_imputed and h in yesterday_factor_by_hour
+            ) if effective_factor_by_hour else [],
+            # #1 diag — applied today_factor only to today's UTC date.
+            "today_factor_scoped_to_utc_date": today_utc_date.isoformat(),
         },
         "temperature_adjustment": {
             "source": "forecast_skill_log",
