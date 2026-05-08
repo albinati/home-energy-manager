@@ -619,9 +619,15 @@ def _fetch_quartz_forecast(
         # Quartz targetTime is the period end. Use the period start so it lines
         # up with our half-hour slot starts.
         slot_time = target - timedelta(minutes=30)
-        weather_row = get_forecast_for_slot(slot_time, base_weather)
-        temp_c = weather_row.temperature_c if weather_row else 10.0
-        cloud_pct = weather_row.cloud_cover_pct if weather_row else 50.0
+        # Interpolate Open-Meteo's hourly temp/cloud at the (possibly half-hour)
+        # Quartz slot. Exact-match lookup misses the :30 slots (and any slot
+        # outside the hourly grid) and yields the placeholder 10.0/50.0.
+        if base_weather:
+            temp_c = _interp_hourly_scalar(base_weather, slot_time, "temperature_c", 10.0)
+            cloud_pct = _interp_hourly_scalar(base_weather, slot_time, "cloud_cover_pct", 50.0)
+        else:
+            temp_c = 10.0
+            cloud_pct = 50.0
         equivalent_rad = site_kw / max(0.001, float(config.PV_CAPACITY_KWP) * float(config.PV_SYSTEM_EFFICIENCY)) * 1000.0
         quartz_rows.append(
             HourlyForecast(
