@@ -245,6 +245,63 @@ def _get_forecast_pv_kw(now_utc: datetime) -> float | None:
         return None
 
 
+def _lp_planned_import_kwh_at(slot_start_utc: datetime) -> float | None:
+    """Planned grid import for a specific half-hour slot from the most recent
+    LP solution active at that slot. Used by the import_overshoot trigger.
+
+    Returns None when no LP run was active for that slot or the LP didn't
+    produce an import row for it (LP solve failed / horizon overshot).
+    """
+    try:
+        run_id = db.find_run_for_time(slot_start_utc.isoformat())
+        if not run_id:
+            return None
+        slots = db.get_lp_solution_slots(run_id)
+        if not slots:
+            return None
+        for s in slots:
+            st_raw = s.get("slot_time_utc")
+            if not st_raw:
+                continue
+            try:
+                st = datetime.fromisoformat(str(st_raw).replace("Z", "+00:00"))
+            except (ValueError, TypeError):
+                continue
+            # Match the slot starting at exactly slot_start_utc.
+            if st == slot_start_utc:
+                return float(s.get("import_kwh") or 0.0)
+        return None
+    except Exception as e:
+        logger.debug("_lp_planned_import_kwh_at failed: %s", e)
+        return None
+
+
+def _actual_import_kwh_for_slot(slot_start_utc: datetime) -> float | None:
+    """Average grid_import_kw × 0.5 h across pv_realtime_history samples in
+    the half-hour slot starting at ``slot_start_utc``.
+    """
+    try:
+        slot_end = slot_start_utc + timedelta(minutes=30)
+        with db._lock:
+            conn = db.get_connection()
+            try:
+                cur = conn.execute(
+                    """SELECT AVG(grid_import_kw) FROM pv_realtime_history
+                       WHERE captured_at >= ? AND captured_at < ?
+                         AND grid_import_kw IS NOT NULL""",
+                    (slot_start_utc.isoformat(), slot_end.isoformat()),
+                )
+                avg_kw = cur.fetchone()[0]
+            finally:
+                conn.close()
+        if avg_kw is None:
+            return None
+        return float(avg_kw) * 0.5
+    except Exception as e:
+        logger.debug("_actual_import_kwh_for_slot failed: %s", e)
+        return None
+
+
 def _lp_predicted_load_kw_at(when_utc: datetime) -> float | None:
     """Expected gross AC load kW (incl. heat pump) from the latest LP solution
     at the slot containing ``when_utc``.
@@ -1368,6 +1425,47 @@ def bulletproof_heartbeat_tick() -> None:
                     _consecutive_drift_ticks = 0
         except Exception as e:
             logger.debug("drift-trigger check failed (non-fatal): %s", e)
+
+    # Event-driven MPC: import_overshoot trigger.
+    # Compare actual grid import in the LAST COMPLETED half-hour slot vs the
+    # LP plan for that same slot. If actual exceeds plan by >= threshold and
+    # we're inside the cooldown-clear window, re-plan immediately. Catches
+    # the failure mode where Fox V3 ForceCharge over-pulls vs the LP's
+    # tapered schedule (2026-05-08 incident: planned 7.49 kWh / 4 h, actual
+    # 10.18 kWh = +36 %). Single-shot — by the time we know a slot
+    # overshot, it's already over and we want to revise the remaining
+    # ForceCharge window NOW.
+    threshold_kwh = float(config.MPC_IMPORT_OVERSHOOT_KWH_THRESHOLD)
+    if config.MPC_EVENT_DRIVEN_ENABLED and threshold_kwh > 0:
+        try:
+            # Last fully completed slot ends at the most recent :00 or :30
+            # boundary <= now. Subtract 30 minutes to get its start.
+            now_floor = now_utc.replace(second=0, microsecond=0)
+            slot_end_minute = 0 if now_floor.minute < 30 else 30
+            slot_end = now_floor.replace(minute=slot_end_minute)
+            slot_start = slot_end - timedelta(minutes=30)
+            actual_kwh = _actual_import_kwh_for_slot(slot_start)
+            planned_kwh = _lp_planned_import_kwh_at(slot_start)
+            if actual_kwh is not None and planned_kwh is not None:
+                overshoot_kwh = actual_kwh - planned_kwh
+                if overshoot_kwh >= threshold_kwh:
+                    logger.info(
+                        "MPC import_overshoot trigger: slot=%s actual=%.2f kWh "
+                        "planned=%.2f kWh delta=+%.2f kWh (>=%.2f) — re-planning",
+                        slot_start.isoformat(), actual_kwh, planned_kwh,
+                        overshoot_kwh, threshold_kwh,
+                    )
+                    bulletproof_mpc_job(
+                        force_write_devices=True,
+                        trigger_reason="import_overshoot",
+                    )
+                else:
+                    logger.debug(
+                        "MPC import_overshoot check: slot=%s delta=+%.2f kWh < %.2f, no fire",
+                        slot_start.isoformat(), overshoot_kwh, threshold_kwh,
+                    )
+        except Exception as e:
+            logger.debug("import_overshoot check failed (non-fatal): %s", e)
 
     # Event-driven MPC: live PV/load deviation trigger.
     # Complements forecast_revision (forecast-vs-forecast) with real-vs-expected checks.
