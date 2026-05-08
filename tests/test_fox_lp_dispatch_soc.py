@@ -72,7 +72,12 @@ def test_slot_fox_tuple_cheap_fallback_when_no_target() -> None:
     assert msg == _min_r()
 
 
-def test_merge_adjacent_force_charge_uses_max_fd_soc_and_min_soc() -> None:
+def test_merge_adjacent_force_charge_uses_duration_weighted_avg_pwr() -> None:
+    """Two equal-length slots → duration-weighted avg = arithmetic mean of pwr.
+
+    fd_soc and min_soc_on_grid still take MAX (charge to highest target,
+    enforce highest reserve). Only fd_pwr is averaged.
+    """
     t0 = datetime(2026, 6, 1, 0, 0, tzinfo=UTC)
     s1 = HalfHourSlot(
         start_utc=t0,
@@ -94,8 +99,45 @@ def test_merge_adjacent_force_charge_uses_max_fd_soc_and_min_soc() -> None:
     assert len(groups) == 1
     assert groups[0].work_mode == "ForceCharge"
     assert groups[0].fd_soc == 70
-    assert groups[0].fd_pwr == 1200
+    assert groups[0].fd_pwr == 1100  # weighted avg of 1000 & 1200 over equal durations
     assert groups[0].min_soc_on_grid == _min_r()
+
+
+def test_merge_adjacent_force_charge_weighted_avg_preserves_lp_total_energy() -> None:
+    """Front-loaded LP plan (high-pwr slot followed by low-pwr trickle) must
+    not get the entire merged block running at the high-pwr slot's rate.
+
+    Before this fix, max-merge meant the 09:30-13:30 ForceCharge today blew
+    through SoC 11→91% in 3 hours instead of taking the planned 4 hours
+    (over-imported by +36% / +2.7 kWh). Weighted-avg ensures the merged
+    fdPwr ≈ (LP planned total kWh) / window_hours × 1000.
+    """
+    t0 = datetime(2026, 6, 1, 9, 30, tzinfo=UTC)
+    # Mimic today's 09:30-13:30 LP plan (8 × 30-min slots, varying imports)
+    plan_imp_w = [1350, 4900, 2250, 2250, 750, 750, 750, 750]
+    slots = [
+        HalfHourSlot(
+            start_utc=t0 + timedelta(minutes=30 * i),
+            end_utc=t0 + timedelta(minutes=30 * (i + 1)),
+            price_pence=16.0,
+            kind="cheap",
+            lp_grid_import_w=p,
+            target_soc_pct=95,
+        )
+        for i, p in enumerate(plan_imp_w)
+    ]
+    groups = _merge_fox_groups(slots)
+    assert len(groups) == 1
+    assert groups[0].work_mode == "ForceCharge"
+    expected_avg = round(sum(plan_imp_w) / len(plan_imp_w))
+    assert groups[0].fd_pwr == expected_avg, (
+        f"expected weighted avg {expected_avg} W, got {groups[0].fd_pwr} W. "
+        "Max-merge would have returned 4900 W (the peak slot)."
+    )
+    # Sanity: weighted result is bounded by [min, max] of inputs
+    assert min(plan_imp_w) <= groups[0].fd_pwr <= max(plan_imp_w)
+    # Sanity: weighted result is far below the historical max-merge value
+    assert groups[0].fd_pwr < max(plan_imp_w) // 2
 
 
 def test_slot_fox_tuple_peak_export_uses_reserve_min_soc() -> None:

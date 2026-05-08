@@ -599,6 +599,16 @@ def _merge_adjacent_force_charge_rows(
     """Join consecutive ForceCharge segments even when fdSoc/fdPwr differ (e.g. negative vs cheap slot).
 
     Tuple convention: ``(work_mode, fd_soc, fd_pwr, min_soc_on_grid, max_soc)``.
+
+    fd_pwr (the W cap sent to Fox) is duration-weighted across the merged
+    windows rather than max-merged. Fox V3 treats fdPwr as a charging-rate
+    cap and pulls aggressively until fdSoc is reached, so a max-merge causes
+    a high-power slot to "set the rate" for the entire merged window — which
+    over-charges in the LP's tapered slots. Duration-weighted average means
+    total grid energy across the window matches the LP's planned total.
+
+    fd_soc still uses max so the merged block charges to the highest target
+    in the run, and min_soc_on_grid uses max for the same reason.
     """
     out: list[tuple[datetime, datetime, tuple]] = []
     for a, b, k in merged:
@@ -607,11 +617,20 @@ def _merge_adjacent_force_charge_rows(
             and out[-1][2][0] == "ForceCharge"
             and k[0] == "ForceCharge"
         ):
-            a0, _, k0 = out[-1]
+            a0, end0, k0 = out[-1]
+            dur0_s = max(0.0, (end0 - a0).total_seconds())
+            dur1_s = max(0.0, (b - a).total_seconds())
+            tot_s = dur0_s + dur1_s
+            pwr0 = float(k0[2] or 0)
+            pwr1 = float(k[2] or 0)
+            if tot_s > 0:
+                weighted_pwr = round((pwr0 * dur0_s + pwr1 * dur1_s) / tot_s)
+            else:
+                weighted_pwr = max(pwr0, pwr1)
             nk = (
                 "ForceCharge",
                 max(k0[1] or 0, k[1] or 0),
-                max(k0[2] or 0, k[2] or 0),
+                int(weighted_pwr),
                 max(k0[3], k[3]),
                 _max_optional(k0[4] if len(k0) > 4 else None, k[4] if len(k) > 4 else None),
             )
