@@ -1690,7 +1690,15 @@ def forecast_to_lp_inputs(
             rad_eff = max(0.0, rad_wm2 * att)
         if callable(pv_scale):
             try:
-                scale_for_slot = float(pv_scale(st.hour, cloud_pct))
+                # New signature: (hour_utc, cloud_pct, slot_start_utc) — lets
+                # the closure distinguish today vs tomorrow slots so a
+                # today-only PV bias factor doesn't leak across the date
+                # boundary. Fall back to the legacy 2-arg signature for
+                # callers that don't yet declare slot_start_utc.
+                try:
+                    scale_for_slot = float(pv_scale(st.hour, cloud_pct, st))
+                except TypeError:
+                    scale_for_slot = float(pv_scale(st.hour, cloud_pct))
             except Exception:
                 scale_for_slot = 1.0
         elif isinstance(pv_scale, dict):
