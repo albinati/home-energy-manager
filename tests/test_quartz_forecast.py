@@ -225,3 +225,58 @@ def test_quartz_token_refreshes_after_expiry(monkeypatch):
     token = weather._quartz_token()
     assert token == "fresh-token"
     assert calls["n"] == 1, "expected one auth round-trip when cache is stale"
+
+
+def test_quartz_half_hour_slot_interpolates_open_meteo_temp(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Quartz emits :30 slots (e.g. 18:30 UTC); Open-Meteo is hourly. The
+    adapter must interpolate temp/cloud at the off-hour slot rather than
+    fall back to the 10.0/50.0 placeholder."""
+    from src import weather
+
+    base = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    open_meteo_payload = {
+        "hourly": {
+            "time": [(base + timedelta(hours=i)).isoformat().replace("+00:00", "") for i in range(3)],
+            "temperature_2m": [10.0, 14.0, 18.0],
+            "cloud_cover": [40.0, 60.0, 80.0],
+            "shortwave_radiation_instant": [100.0, 200.0, 300.0],
+        }
+    }
+    # Quartz reports the slot ENDING at base+1h, i.e. slot_time = base+30min.
+    # Open-Meteo has rows at base (10C/40%) and base+1h (14C/60%) → interp at +30min: 12C/50%.
+    quartz_payload = [
+        {
+            "targetTime": (base + timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
+            "expectedPowerGenerationMegawatts": 5.0,
+            "expectedPowerGenerationNormalized": 0.25,
+        }
+    ]
+
+    def fake_urlopen(req, timeout=0):  # noqa: ANN001
+        url = req.full_url if hasattr(req, "full_url") else str(req)
+        if "api.open-meteo.com" in url:
+            return _Resp(open_meteo_payload)
+        if "oauth/token" in url:
+            return _Resp({"access_token": "token"})
+        if "/v0/solar/GB/" in url:
+            return _Resp(quartz_payload)
+        raise AssertionError(f"unexpected url {url}")
+
+    monkeypatch.setattr(app_config, "FORECAST_SOURCE", "quartz", raising=False)
+    monkeypatch.setattr(app_config, "QUARTZ_USERNAME", "user", raising=False)
+    monkeypatch.setattr(app_config, "QUARTZ_PASSWORD", "pass", raising=False)
+    monkeypatch.setattr(app_config, "QUARTZ_CLIENT_ID", "test-client-id", raising=False)
+    monkeypatch.setattr(app_config, "QUARTZ_GSP_ID", "42", raising=False)
+    monkeypatch.setattr(weather, "_QUARTZ_TOKEN", None)
+    monkeypatch.setattr(weather.urllib.request, "urlopen", fake_urlopen)
+
+    result = weather.fetch_forecast_snapshot(hours=2)
+
+    direct = [f for f in result.forecast if f.pv_direct]
+    assert len(direct) == 1
+    assert direct[0].time_utc == base + timedelta(minutes=30)
+    assert direct[0].temperature_c == pytest.approx(12.0), (
+        f"expected interpolated 12.0C, got {direct[0].temperature_c} "
+        f"(would be 10.0 placeholder if exact-match lookup failed)"
+    )
+    assert direct[0].cloud_cover_pct == pytest.approx(50.0)
