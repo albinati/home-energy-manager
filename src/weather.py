@@ -278,24 +278,26 @@ def forecast_pv_kw_from_row(
     """Apply the same PV forecast transform used by the LP and skill logger.
 
     When the provider supplies direct PV (Quartz), use that as the base signal
-    but still apply the same site calibration chain so Quartz can be corrected
-    for local shading / orientation bias. Otherwise cloud attenuation is
-    applied before the irradiance-to-kW conversion and the calibration lookup
-    follows the same cloud → hour → flat fallback chain as
-    ``forecast_to_lp_inputs``.
+    and skip the radiation-trained calibration tables. Quartz's blend model
+    already accounts for cloud cover via ECMWF inputs and self-calibrates
+    against actuals; applying our cloud-bucket factor (which was learned as
+    ``actual / estimate_pv_kw(open_meteo_radiation)``) on top of Quartz's
+    already-calibrated PV output double-corrects and biases mornings/dusk
+    too low (2026-05-08 audit caught morning over-prediction → grid charge,
+    afternoon under-prediction → battery filled too late). Quartz only gets
+    the ``flat * today_factor`` chain — site-level shading/orientation bias
+    can be captured by a future Quartz-trained calibration table without
+    breaking compatibility with the radiation path.
+
+    Otherwise cloud attenuation is applied before the irradiance-to-kW
+    conversion and the calibration lookup follows the same cloud → hour →
+    flat fallback chain as ``forecast_to_lp_inputs``.
     """
     scale_f = max(0.0, float(scale))
     if direct_pv_kw is not None:
         try:
             base_kw = max(0.0, float(direct_pv_kw))
-            cal = get_pv_calibration_factor_for(
-                int(hour_utc),
-                cloud_cover_pct,
-                cloud_table=cloud_table,
-                hourly_table=hourly_table,
-                flat=flat,
-            )
-            return base_kw * cal * scale_f
+            return base_kw * float(flat) * scale_f
         except (TypeError, ValueError):
             pass
     cloud_pct_f = float(cloud_cover_pct) if cloud_cover_pct is not None else 50.0

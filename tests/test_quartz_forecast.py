@@ -83,9 +83,18 @@ def test_quartz_fetch_merges_direct_pv_with_open_meteo_weather(monkeypatch: pyte
     assert result.raw_payload_json
 
 
-def test_direct_pv_uses_site_calibration_scale() -> None:
+def test_direct_pv_skips_radiation_trained_calibration_tables() -> None:
+    """Quartz's direct PV output must NOT be multiplied by the radiation-trained
+    cloud / hourly calibration tables. Those factors were learned against
+    Open-Meteo's shortwave_radiation_instant via
+    ``actual / estimate_pv_kw(rad)`` ratios, so applying them on top of
+    Quartz (which already does ECMWF-driven cloud blending and self-
+    calibrates against actuals) double-corrects and biases the LP's PV
+    expectation strongly toward zero — the 2026-05-08 prod incident.
+    """
     from src.weather import HourlyForecast, forecast_to_lp_inputs
 
+    # Stash a deliberately aggressive 0.5x hourly factor for hour 12.
     db.upsert_pv_calibration_hourly({12: 0.5}, {12: 8}, window_days=30)
 
     slot = datetime(2026, 5, 5, 12, 0, tzinfo=UTC)
@@ -97,13 +106,18 @@ def test_direct_pv_uses_site_calibration_scale() -> None:
             shortwave_radiation_wm2=0.0,
             estimated_pv_kw=2.0,
             heating_demand_factor=0.0,
-            pv_direct=True,
+            pv_direct=True,  # Quartz path
         )
     ]
 
     series = forecast_to_lp_inputs(forecast, [slot], pv_scale=1.0)
 
-    assert series.pv_kwh_per_slot == pytest.approx([0.5])
+    # Half-hour slot kWh = 2.0 kW × 0.5 h × flat(1.0) = 1.0 kWh.
+    # If the radiation-trained 0.5x factor were applied, we'd get 0.5.
+    assert series.pv_kwh_per_slot == pytest.approx([1.0]), (
+        "Quartz direct PV must skip the radiation-trained calibration; got "
+        f"{series.pv_kwh_per_slot} (expected [1.0], 0.5 indicates double-correction)"
+    )
 
 
 def test_quartz_national_metadata_capacity_can_downscale_site_kw(monkeypatch: pytest.MonkeyPatch) -> None:
