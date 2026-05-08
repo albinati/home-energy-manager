@@ -806,6 +806,7 @@ def _arm_or_replan(
             "appliance #%d armed: job=%d planned_start=%s avg_price=%.2fp",
             appliance_id, job_id, start_utc.isoformat(), avg_price,
         )
+        _notify_armed(appliance, start_utc, end_utc, deadline_utc, duration, avg_price, replan=False)
         return
 
     # Re-plan: only touch the cron if the slot actually shifted.
@@ -828,6 +829,34 @@ def _arm_or_replan(
         "appliance #%d re-planned: job=%d new_start=%s avg_price=%.2fp",
         appliance_id, existing_job["id"], start_utc.isoformat(), avg_price,
     )
+    _notify_armed(appliance, start_utc, end_utc, deadline_utc, duration, avg_price, replan=True)
+
+
+def _notify_armed(
+    appliance: dict[str, Any],
+    start_utc: datetime,
+    end_utc: datetime,
+    deadline_utc: datetime,
+    duration: int,
+    avg_price: float,
+    *,
+    replan: bool,
+) -> None:
+    """Best-effort armed/re-armed hook to OpenClaw. Failure must not break dispatch."""
+    try:
+        from ..notifier import notify_appliance_armed
+        tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+        notify_appliance_armed(
+            appliance_name=str(appliance.get("name") or "appliance"),
+            planned_start_local=start_utc.astimezone(tz).strftime("%a %H:%M"),
+            planned_end_local=end_utc.astimezone(tz).strftime("%H:%M"),
+            deadline_local=deadline_utc.astimezone(tz).strftime("%H:%M"),
+            duration_minutes=int(duration),
+            avg_price_pence=float(avg_price),
+            replan=replan,
+        )
+    except Exception:
+        logger.exception("appliance armed-notify failed (non-fatal)")
 
 
 def _cancel(appliance_id: int, job: dict[str, Any], *, reason: str) -> None:
@@ -837,6 +866,31 @@ def _cancel(appliance_id: int, job: dict[str, Any], *, reason: str) -> None:
         "appliance #%d job=%d cancelled (reason=%s)",
         appliance_id, job["id"], reason,
     )
+    try:
+        from ..notifier import notify_appliance_cancelled
+        appliance_row = db.get_appliance(appliance_id)
+        appliance_name = (
+            (appliance_row or {}).get("name") or f"appliance #{appliance_id}"
+        )
+        planned_start_local: str | None = None
+        planned_start_iso = job.get("planned_start_utc")
+        if planned_start_iso:
+            try:
+                tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+                planned_start_local = (
+                    datetime.fromisoformat(str(planned_start_iso).replace("Z", "+00:00"))
+                    .astimezone(tz)
+                    .strftime("%a %H:%M")
+                )
+            except (TypeError, ValueError):
+                planned_start_local = None
+        notify_appliance_cancelled(
+            appliance_name=str(appliance_name),
+            reason=reason,
+            planned_start_local=planned_start_local,
+        )
+    except Exception:
+        logger.exception("appliance cancelled-notify failed (non-fatal)")
 
 
 # ---------------------------------------------------------------------------

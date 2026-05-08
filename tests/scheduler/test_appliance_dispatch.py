@@ -212,6 +212,61 @@ class TestReconcile:
         assert fake_scheduler.add_calls == []
         assert fake_scheduler.remove_calls == []
 
+    def test_arm_fires_armed_hook(
+        self, monkeypatch, appliance_id, fake_scheduler, patch_st
+    ):
+        """First-time arm must hit notify_appliance_armed with replan=False."""
+        monkeypatch.setattr(config, "OCTOPUS_TARIFF_CODE", "TEST-AGILE")
+        now = datetime.now(UTC)
+        seed_start = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        _seed_agile_rates(seed_start, [10.0, 5.0, 5.0, 5.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0])
+        patch_st.get_remote_control_enabled.return_value = True
+
+        with patch("src.notifier._dispatch") as mock_dispatch:
+            appliance_dispatch.reconcile()
+
+        from src.notifier import AlertType
+        armed_calls = [
+            c for c in mock_dispatch.call_args_list
+            if c.args and c.args[0] == AlertType.APPLIANCE_ARMED
+        ]
+        assert len(armed_calls) == 1, f"expected 1 armed hook, got {len(armed_calls)}"
+        kwargs = armed_calls[0].kwargs
+        assert kwargs["extra"]["replan"] is False
+        assert kwargs["extra"]["appliance"]  # name populated
+
+    def test_cancel_fires_cancelled_hook(
+        self, monkeypatch, appliance_id, fake_scheduler, patch_st
+    ):
+        """Flipping remote_mode false on an armed job must emit the cancelled
+        hook with reason='remote_mode_dropped'."""
+        monkeypatch.setattr(config, "OCTOPUS_TARIFF_CODE", "TEST-AGILE")
+        now = datetime.now(UTC)
+        seed_start = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        _seed_agile_rates(seed_start, [10.0, 5.0, 5.0, 5.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0])
+
+        # Arm
+        patch_st.get_remote_control_enabled.return_value = True
+        appliance_dispatch.reconcile()
+        assert db.get_active_appliance_job(appliance_id) is not None
+
+        # Drop remote control
+        patch_st.get_remote_control_enabled.return_value = False
+        with patch("src.notifier._dispatch") as mock_dispatch:
+            appliance_dispatch.reconcile()
+
+        from src.notifier import AlertType
+        cancelled_calls = [
+            c for c in mock_dispatch.call_args_list
+            if c.args and c.args[0] == AlertType.APPLIANCE_CANCELLED
+        ]
+        assert len(cancelled_calls) == 1, (
+            f"expected 1 cancelled hook, got {len(cancelled_calls)}"
+        )
+        kwargs = cancelled_calls[0].kwargs
+        assert kwargs["extra"]["reason"] == "remote_mode_dropped"
+        assert "planned_start_local" in kwargs["extra"]
+
     def test_smartthings_error_records_then_pings_at_threshold(
         self, monkeypatch, appliance_id, fake_scheduler, patch_st
     ):

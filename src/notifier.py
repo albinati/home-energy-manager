@@ -47,6 +47,8 @@ class AlertType(str, Enum):
     # PR #234 — appliance lifecycle (laundry start/finish)
     APPLIANCE_STARTING = "appliance_starting"
     APPLIANCE_FINISHED = "appliance_finished"
+    APPLIANCE_ARMED = "appliance_armed"
+    APPLIANCE_CANCELLED = "appliance_cancelled"
 
 
 # OpenClaw hook payload ``name`` field (one stable label per alert key)
@@ -65,6 +67,8 @@ _HOOK_PAYLOAD_NAMES: dict[str, str] = {
     "negative_window_start": "EnergyNegativeWindow",
     "appliance_starting": "EnergyApplianceStart",
     "appliance_finished": "EnergyApplianceFinish",
+    "appliance_armed": "EnergyApplianceArmed",
+    "appliance_cancelled": "EnergyApplianceCancelled",
 }
 
 
@@ -447,6 +451,70 @@ def notify_appliance_finished(
         key = "actual_cost_pence" if kwh_is_measured else "estimated_cost_pence"
         extra[key] = round(float(estimated_cost_p), 2)
     _dispatch(AlertType.APPLIANCE_FINISHED, body, urgent=False, extra=extra)
+
+
+def notify_appliance_armed(
+    *,
+    appliance_name: str,
+    planned_start_local: str,
+    planned_end_local: str,
+    deadline_local: str,
+    duration_minutes: int,
+    avg_price_pence: float,
+    replan: bool = False,
+) -> None:
+    """🧺 LP picked a window for this appliance and armed the cron.
+
+    Fires when ``appliance_dispatch.reconcile()`` writes a new ``appliance_jobs``
+    row OR when an existing job's planned window shifted via re-plan (in which
+    case ``replan=True`` so OpenClaw can phrase the message as a revision).
+    """
+    headline = "🧺 **{name}** {verb} for {start} → {end}".format(
+        name=appliance_name,
+        verb="re-armed" if replan else "armed",
+        start=planned_start_local,
+        end=planned_end_local,
+    )
+    body = "\n".join([
+        headline,
+        f"Cycle: {duration_minutes} min · avg {avg_price_pence:.1f}p/kWh · deadline {deadline_local}",
+    ])
+    extra = {
+        "appliance": appliance_name,
+        "planned_start_local": planned_start_local,
+        "planned_end_local": planned_end_local,
+        "deadline_local": deadline_local,
+        "duration_minutes": int(duration_minutes),
+        "avg_price_pence": round(float(avg_price_pence), 2),
+        "replan": bool(replan),
+    }
+    _dispatch(AlertType.APPLIANCE_ARMED, body, urgent=False, extra=extra)
+
+
+def notify_appliance_cancelled(
+    *,
+    appliance_name: str,
+    reason: str,
+    planned_start_local: str | None = None,
+) -> None:
+    """🚫 Job was cancelled before it ran (cron dropped, status='cancelled').
+
+    Reasons surfaced today by ``appliance_dispatch._cancel``:
+    ``remote_mode_dropped`` — user disabled Smart Control on the appliance
+    ``replanned`` — LP picked a different window; new ARMED hook follows
+    ``deadline_passed`` — deadline expired before a feasible window opened
+    """
+    body_lines = [f"🚫 **{appliance_name}** cycle cancelled", f"Reason: {reason}"]
+    if planned_start_local:
+        body_lines.append(f"Was scheduled for {planned_start_local}")
+    body = "\n".join(body_lines)
+    extra: dict[str, Any] = {
+        "appliance": appliance_name,
+        "reason": reason,
+    }
+    if planned_start_local:
+        extra["planned_start_local"] = planned_start_local
+    _dispatch(AlertType.APPLIANCE_CANCELLED, body, urgent=False, extra=extra)
 
 
 def notify_plan_revision(body: str, *, trigger_reason: str | None = None) -> None:
