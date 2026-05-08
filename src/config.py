@@ -768,6 +768,18 @@ class Config:
     MPC_LIVE_LOAD_KW_THRESHOLD: float = float(os.getenv("MPC_LIVE_LOAD_KW_THRESHOLD", "1.5"))
     MPC_LIVE_DEVIATION_HYSTERESIS_TICKS: int = int(os.getenv("MPC_LIVE_DEVIATION_HYSTERESIS_TICKS", "3"))
 
+    # ``import_overshoot`` MPC trigger — fires when actual grid import in the
+    # last completed half-hour slot exceeds the LP-planned import for the
+    # same slot by more than this many kWh. Catches the failure mode where
+    # Fox V3 ForceCharge runs hot relative to the LP's tapered schedule
+    # (2026-05-08 incident: planned 7.49 kWh / 4 h, actual 10.18 kWh = +36 %).
+    # Single-shot — no hysteresis — because by the time we know a slot
+    # overshot, it's already over and we want to re-plan the remaining
+    # ForceCharge window NOW. Set to 0 to disable.
+    MPC_IMPORT_OVERSHOOT_KWH_THRESHOLD: float = float(
+        os.getenv("MPC_IMPORT_OVERSHOOT_KWH_THRESHOLD", "0.5")
+    )
+
     @property
     def DAIKIN_COP_CURVE(self) -> list[tuple[float, float]]:
         return parse_cop_curve_csv(self.DAIKIN_COP_CURVE_STR)
