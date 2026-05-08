@@ -121,8 +121,19 @@ def test_forecast_to_lp_inputs_callable_zero_factor_zeros_pv() -> None:
     assert out.pv_kwh_per_slot[0] == 0.0
 
 
-def test_direct_pv_path_still_uses_calibration_tables() -> None:
-    """Quartz direct PV should still be corrected by the site calibration tables."""
+def test_direct_pv_path_skips_radiation_trained_tables() -> None:
+    """Quartz direct PV must NOT be multiplied by the radiation-trained
+    cloud_table or hourly_table — those factors are
+    ``actual / estimate_pv_kw(open_meteo_radiation)`` ratios, so applying
+    them on top of Quartz output (which already self-calibrates against
+    its blend model's actuals) double-corrects.
+
+    Caught in the 2026-05-08 prod audit: morning cloud-table factors of
+    0.43-0.56× combined with the today_factor scalar pushed Quartz's
+    morning predictions to ~25 % of actuals, causing aggressive grid
+    charging in the cheap morning window followed by surplus-PV exports
+    in the afternoon at sub-peak Outgoing Agile rates.
+    """
     from src.weather import forecast_pv_kw_from_row
 
     cloud = {(12, 1): 0.50}
@@ -136,7 +147,12 @@ def test_direct_pv_path_still_uses_calibration_tables() -> None:
         hourly_table=hourly,
         flat=1.0,
     )
-    assert pv == pytest.approx(1.0)
+    # 2.0 kW × flat(1.0) × scale(1.0) = 2.0; tables are deliberately ignored.
+    # If they were applied the result would be 2.0 × 0.50 = 1.0.
+    assert pv == pytest.approx(2.0), (
+        f"Quartz path must skip radiation-trained tables; got {pv} "
+        "(1.0 indicates double-correction via cloud_table)"
+    )
 
 
 def test_forecast_to_lp_inputs_callable_exception_falls_back_safely() -> None:
