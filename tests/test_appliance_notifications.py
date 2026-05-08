@@ -16,6 +16,8 @@ from src import db
 from src.config import config as app_config
 from src.notifier import (
     AlertType,
+    notify_appliance_armed,
+    notify_appliance_cancelled,
     notify_appliance_finished,
     notify_appliance_starting,
 )
@@ -118,6 +120,85 @@ def test_notify_appliance_finished_handles_missing_cost_estimate() -> None:
             duration_minutes=77,
         )
     assert mock_dispatch.called
+
+
+def test_notify_appliance_armed_first_arm() -> None:
+    """When the LP picks the first window for an appliance, the hook fires
+    with replan=False and renders the planned start, end, deadline + cost."""
+    with patch("src.notifier._dispatch") as mock_dispatch:
+        notify_appliance_armed(
+            appliance_name="Washer",
+            planned_start_local="Sat 01:00",
+            planned_end_local="03:15",
+            deadline_local="07:00",
+            duration_minutes=135,
+            avg_price_pence=4.5,
+            replan=False,
+        )
+    assert mock_dispatch.called
+    args, kwargs = mock_dispatch.call_args
+    assert args[0] == AlertType.APPLIANCE_ARMED
+    body = args[1]
+    assert "armed" in body and "re-armed" not in body
+    assert "Sat 01:00" in body and "03:15" in body and "07:00" in body
+    assert "135 min" in body
+    assert "4.5p/kWh" in body
+    extra = kwargs["extra"]
+    assert extra["replan"] is False
+    assert extra["duration_minutes"] == 135
+    assert extra["avg_price_pence"] == 4.5
+
+
+def test_notify_appliance_armed_replan_phrasing() -> None:
+    """A re-plan flips the verb to 're-armed' so OpenClaw can phrase the
+    Telegram message as a window revision rather than a new arm."""
+    with patch("src.notifier._dispatch") as mock_dispatch:
+        notify_appliance_armed(
+            appliance_name="Washer",
+            planned_start_local="Sat 02:30",
+            planned_end_local="04:45",
+            deadline_local="07:00",
+            duration_minutes=135,
+            avg_price_pence=4.0,
+            replan=True,
+        )
+    body = mock_dispatch.call_args.args[1]
+    assert "re-armed" in body
+    assert mock_dispatch.call_args.kwargs["extra"]["replan"] is True
+
+
+def test_notify_appliance_cancelled_dispatches_with_reason_and_planned_start() -> None:
+    with patch("src.notifier._dispatch") as mock_dispatch:
+        notify_appliance_cancelled(
+            appliance_name="Washer",
+            reason="remote_mode_dropped",
+            planned_start_local="Sat 01:00",
+        )
+    assert mock_dispatch.called
+    args, kwargs = mock_dispatch.call_args
+    assert args[0] == AlertType.APPLIANCE_CANCELLED
+    body = args[1]
+    assert "Washer" in body
+    assert "cancelled" in body
+    assert "remote_mode_dropped" in body
+    assert "Sat 01:00" in body
+    extra = kwargs["extra"]
+    assert extra["reason"] == "remote_mode_dropped"
+    assert extra["planned_start_local"] == "Sat 01:00"
+
+
+def test_notify_appliance_cancelled_omits_planned_start_when_unknown() -> None:
+    """If the cancelled job had no planned_start (defensive), the hook still
+    fires with just the reason — no KeyError, no crash."""
+    with patch("src.notifier._dispatch") as mock_dispatch:
+        notify_appliance_cancelled(
+            appliance_name="Washer",
+            reason="deadline_passed",
+        )
+    args, kwargs = mock_dispatch.call_args
+    assert args[0] == AlertType.APPLIANCE_CANCELLED
+    assert "deadline_passed" in args[1]
+    assert "planned_start_local" not in kwargs["extra"]
 
 
 # ---------- build_brief_48h_summary degrades gracefully ----------
