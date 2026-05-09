@@ -215,19 +215,22 @@ def _build_peak_plan(base: datetime, n: int = 4) -> "LpPlan":
     return plan
 
 
-def test_dispatch_peak_idle_default_keeps_tank_on_low_target(
+def test_dispatch_peak_idle_default_keeps_tank_on_normal_target(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Default peak strategy ("idle") keeps tank ON at a low target during
-    peak. Firmware won't reheat (tank stays well above 30°C from prior
-    heating). Avoids turn-off/on cycle overhead. Climate still goes off."""
+    """Default peak strategy ("idle") keeps tank ON at the NORMAL target
+    during peak. If tank is inherited above target (from prior solar_preheat),
+    firmware sees current > setpoint and won't reheat — tank cools naturally.
+    If tank is at or below target, firmware maintains setpoint with small
+    reheats only when needed. Best for well-insulated tanks per user's
+    validated approach. Climate still goes off (saves grid)."""
     from src.config import config as app_config
     from src.scheduler.lp_dispatch import daikin_dispatch_preview
 
     monkeypatch.setattr(app_config, "DAIKIN_CONTROL_MODE", "active", raising=False)
     monkeypatch.setattr(app_config, "DAIKIN_MIN_WINDOW_SLOTS", 1, raising=False)
     monkeypatch.setattr(app_config, "DHW_PEAK_TANK_STRATEGY", "idle", raising=False)
-    monkeypatch.setattr(app_config, "DHW_TEMP_MIN_FLOOR_C", 30.0, raising=False)
+    monkeypatch.setattr(app_config, "DHW_TEMP_NORMAL_C", 45.0, raising=False)
     monkeypatch.setattr(
         "src.scheduler.lp_dispatch._optimization_preset_away_like",
         lambda: False,
@@ -240,15 +243,17 @@ def test_dispatch_peak_idle_default_keeps_tank_on_low_target(
     assert peak_pairs, "expected a shutdown action"
     for _restore, action in peak_pairs:
         params = action["params"]
-        # IDLE: tank stays ON, target is the low floor (30°C).
+        # IDLE: tank stays ON at NORMAL target (45°C, not the 30°C floor).
         assert params.get("tank_power") is True, (
             f"idle strategy must keep tank_power=True; params={params}"
         )
-        assert params.get("tank_temp") == pytest.approx(30.0), (
-            f"idle strategy must set tank_temp to DHW_TEMP_MIN_FLOOR_C (30°C); "
-            f"got {params.get('tank_temp')}"
+        assert params.get("tank_temp") == pytest.approx(45.0), (
+            f"idle strategy must set tank_temp to DHW_TEMP_NORMAL_C (45°C), "
+            f"NOT the absolute floor (30°C); got {params.get('tank_temp')}"
         )
-        # Climate STILL goes off during peak — that's a separate decision.
+        # Climate STILL goes off during peak — that's a separate decision
+        # the user explicitly said is "not discussing this yet" so default
+        # behaviour (climate off during peak) is preserved.
         assert params.get("climate_on") is False, (
             f"peak should still turn climate off; params={params}"
         )
