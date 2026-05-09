@@ -654,12 +654,26 @@ def solve_lp(
     #                   (b) holding 65 °C through the day bleeds back via standing losses
     #                   before the evening shower window arrives.
     #   else          → DHW_TEMP_COMFORT_C (default 48 °C).
-    # PV abundance per slot = (pv_avail − base_load − max battery charge headroom) > threshold.
-    # Soft constraint: heavy penalty on breach so an initial tank already above the ceiling
-    # (inherited from a prior lift) stays feasible.
+    # PV abundance per slot = (pv_avail − base_load) > threshold.
+    # The original formula in PR #287 also subtracted ``max_batt_kwh`` (the
+    # inverter's per-slot charge cap, ~2.5 kWh). That made abundance only
+    # trigger when PV > base_load + 2.5 + threshold ≈ 3.3 kWh/slot — basically
+    # peak-summer-noon territory only. The intent was "PV that would otherwise
+    # be exported / curtailed", but ``max_batt_kwh`` is a constant cap, not
+    # remaining battery capacity, so a full battery looked the same as an
+    # empty one.
+    #
+    # Dropping the battery term lets abundance trigger on more realistic
+    # sunny days. The LP's natural preference (cycle penalty + battery
+    # objective) still picks battery-charge over tank-heat when both are
+    # profitable; the threshold change just gives the LP the *option* to
+    # heat the tank when battery is full or cycle-penalty makes it the
+    # cheaper marginal sink. Soft constraint: heavy penalty on breach so an
+    # initial tank already above the ceiling (inherited from a prior lift)
+    # stays feasible.
     pv_abundance_threshold = float(getattr(config, "DHW_PV_ABUNDANCE_THRESHOLD_KWH", 0.5))
     pv_abundance: list[bool] = [
-        (pv_avail[i] - base_load_kwh[i] - max_batt_kwh) > pv_abundance_threshold
+        (pv_avail[i] - base_load_kwh[i]) > pv_abundance_threshold
         for i in range(n)
     ]
     pv_abundance_target = float(getattr(config, "DHW_TEMP_PV_ABUNDANCE_TARGET_C", 55.0))
