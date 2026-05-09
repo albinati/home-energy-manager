@@ -145,6 +145,30 @@ def backfill_for_date(target_local_date: date) -> BackfillResult:
         iso, len(slots), updated, missing, roles.import_mpan,
     )
 
+    # Phase A: cache the day's Octopus totals alongside Fox's so the brief can
+    # surface a side-by-side audit line without re-fetching every read. Sum
+    # the half-hourly slots we already have. Export side fetched separately
+    # if Outgoing is configured.
+    import_total = sum(s.consumption_kwh for s in slots) if slots else None
+    export_total: float | None = None
+    if roles.export_mpan and roles.export_serial:
+        try:
+            exp_slots = fetch_consumption(
+                mpan=str(roles.export_mpan),
+                serial=str(roles.export_serial),
+                period_from=period_from,
+                period_to=period_to,
+            )
+            export_total = sum(s.consumption_kwh for s in exp_slots) if exp_slots else 0.0
+        except Exception as e:
+            logger.debug("Octopus export fetch failed (non-fatal): %s", e)
+    try:
+        db.upsert_octopus_daily_meter(
+            iso, import_kwh=import_total, export_kwh=export_total
+        )
+    except Exception as e:
+        logger.warning("octopus_daily_meter upsert failed (non-fatal): %s", e)
+
     return BackfillResult(
         target_date=iso,
         slots_fetched=len(slots),

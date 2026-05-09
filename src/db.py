@@ -369,6 +369,19 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         )"""
     )
 
+    # Phase A (#306 follow-up): cache Octopus's smart-meter daily totals
+    # alongside the Fox CT-clamp totals so the daily brief can surface a
+    # side-by-side audit line (Fox vs meter divergence). Populated by the
+    # nightly consumption backfill cron right after V13's half-hour backfill.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS octopus_daily_meter (
+            date TEXT PRIMARY KEY,
+            import_kwh REAL,
+            export_kwh REAL,
+            fetched_at TEXT NOT NULL
+        )"""
+    )
+
     # V10.2: daikin_consumption_daily — per-day heat-pump energy attribution.
     # Source: 'onecta' (preferred) when Onecta consumption endpoint returns
     # the day, 'telemetry_integral' when computed from daikin_telemetry rows
@@ -3207,6 +3220,55 @@ def get_fox_energy_daily_range(start_date: str, end_date: str) -> list[dict[str,
             conn.close()
 
 
+def upsert_octopus_daily_meter(
+    date_str: str,
+    *,
+    import_kwh: float | None,
+    export_kwh: float | None,
+) -> None:
+    """Cache Octopus smart-meter daily totals (one row per local date).
+
+    Both kWh args are nullable — export is None for households without an
+    Outgoing tariff. ``fetched_at`` is set to UTC now on every call so
+    callers can detect stale rows.
+    """
+    now = datetime.now(UTC).isoformat()
+    with _lock:
+        conn = get_connection()
+        try:
+            conn.execute(
+                """INSERT INTO octopus_daily_meter
+                   (date, import_kwh, export_kwh, fetched_at)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(date) DO UPDATE SET
+                     import_kwh = excluded.import_kwh,
+                     export_kwh = excluded.export_kwh,
+                     fetched_at = excluded.fetched_at""",
+                (date_str, import_kwh, export_kwh, now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def get_octopus_daily_meter(date_str: str) -> dict[str, Any] | None:
+    """Cached Octopus smart-meter daily totals for ``date_str`` or None.
+
+    Returns ``{"date", "import_kwh", "export_kwh", "fetched_at"}``. The brief
+    surfaces this side-by-side with ``fox_energy_daily`` for divergence audit.
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM octopus_daily_meter WHERE date = ?", (date_str,)
+            )
+            r = cur.fetchone()
+            return dict(r) if r else None
+        finally:
+            conn.close()
+
+
 def get_fox_energy_dates_for_month(year: int, month: int) -> set[str]:
     """Set of ``YYYY-MM-DD`` already cached for the given calendar month.
 
@@ -4736,25 +4798,31 @@ def update_execution_log_metered(
     with _lock:
         conn = get_connection()
         try:
+            # Issue #306 follow-up: SELECT all rows in the slot window, not just
+            # the first. The legacy LIMIT 1 left straggler heartbeat rows (e.g.
+            # at 01:35:50 within a 01:30 slot) intact, double-counting in any
+            # SUM-over-execution_log path. Updating one + deleting the rest
+            # leaves exactly one canonical metered row per slot.
             cur = conn.execute(
                 """SELECT id, agile_price_pence, svt_shadow_price_pence,
                           fixed_shadow_price_pence, source
                    FROM execution_log
                    WHERE timestamp >= ? AND timestamp < ?
-                   ORDER BY timestamp ASC
-                   LIMIT 1""",
+                   ORDER BY timestamp ASC""",
                 (slot_start_iso, slot_end_iso),
             )
-            row = cur.fetchone()
-            if row:
-                agile = float(row["agile_price_pence"] or 0.0)
-                svt = float(row["svt_shadow_price_pence"] or 0.0)
-                fixed = float(row["fixed_shadow_price_pence"] or 0.0)
+            rows = cur.fetchall()
+            if rows:
+                primary = rows[0]
+                stragglers = rows[1:]
+                agile = float(primary["agile_price_pence"] or 0.0)
+                svt = float(primary["svt_shadow_price_pence"] or 0.0)
+                fixed = float(primary["fixed_shadow_price_pence"] or 0.0)
                 # Preserve 'metered_synthetic' lineage across idempotent re-runs;
                 # heartbeat-overlay rows otherwise become 'metered'.
                 next_source = (
                     "metered_synthetic"
-                    if row["source"] == "metered_synthetic"
+                    if primary["source"] == "metered_synthetic"
                     else "metered"
                 )
                 conn.execute(
@@ -4775,9 +4843,19 @@ def update_execution_log_metered(
                         kwh * (svt - agile),
                         kwh * (fixed - agile),
                         next_source,
-                        int(row["id"]),
+                        int(primary["id"]),
                     ),
                 )
+                if stragglers:
+                    placeholders = ",".join("?" for _ in stragglers)
+                    conn.execute(
+                        f"DELETE FROM execution_log WHERE id IN ({placeholders})",
+                        tuple(int(r["id"]) for r in stragglers),
+                    )
+                    logger.debug(
+                        "consumption_backfill: deduped %d straggler row(s) for slot %s",
+                        len(stragglers), slot_start_iso,
+                    )
                 conn.commit()
                 return True
 

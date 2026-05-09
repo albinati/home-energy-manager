@@ -1315,16 +1315,15 @@ def bulletproof_heartbeat_tick() -> None:
     if get_scheduler_paused():
         return
 
-    if config.DAIKIN_CLIENT_ID and config.DAIKIN_CLIENT_SECRET and config.DAIKIN_TOKEN_FILE.exists():
-        try:
-            from ..daikin.auth import prefetch_daikin_access_token
-
-            prefetch_daikin_access_token()
-        except FileNotFoundError:
-            pass
-        except Exception as e:
-            logger.debug("Daikin OAuth prefetch (before device calls): %s", e)
-
+    # PR Phase A — heartbeat NEVER calls Daikin API (#306 follow-up).
+    # The Onecta 200-call/day quota is too tight to spend any of it on the
+    # heartbeat's monitoring path. Token prefetch removed (auth.py refreshes
+    # lazily on next 401). Device cache refresh forced off (allow_refresh=False).
+    # Cache stays warm via:
+    #   - Plan dispatch (LP → Daikin write events)
+    #   - Twice-daily briefs (08:00, 22:00 local — read Daikin state)
+    #   - Slot-boundary reconciliation below (cache-only diff check)
+    #   - Manual MCP calls
     tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
     now_local = datetime.now(tz)
     now_utc = datetime.now(UTC)
@@ -1337,33 +1336,13 @@ def bulletproof_heartbeat_tick() -> None:
     devices = []
     if config.DAIKIN_CLIENT_ID and config.DAIKIN_CLIENT_SECRET and config.DAIKIN_TOKEN_FILE.exists():
         try:
-            # Heartbeat reads from cache only — no auto-refresh to protect 200/day quota.
-            # allow_refresh=True fires only when we are in a high-value window:
-            #   - Octopus pre-slot boundary (5 min before tariff slot transition)
-            #   - 2 h Onecta cache rotation (deterministic, 12/day, even-hour UTC)
-            #   - local Daikin calibration window (heuristic, complements 2h-aligned)
-            in_pre_slot = _in_octopus_pre_slot_window(now_utc)
-            in_2h = (
-                getattr(config, "DAIKIN_2H_REFRESH_ENABLED", True)
-                and _in_daikin_2h_refresh_window(now_utc)
-            )
-            in_calibration = _in_daikin_calibration_window(now_local)
-            allow_refresh = in_pre_slot or in_2h or in_calibration
             daikin_result = daikin_service.get_cached_devices(
-                allow_refresh=allow_refresh,
+                allow_refresh=False,
                 actor="heartbeat",
             )
             devices = daikin_result.devices
-            if allow_refresh and daikin_result.source == "fresh":
-                logger.info(
-                    "Daikin refresh: fetched %d device(s) (pre-slot=%s 2h=%s calibration=%s)",
-                    len(devices),
-                    in_pre_slot,
-                    in_2h,
-                    in_calibration,
-                )
         except Exception as e:
-            logger.debug("Daikin heartbeat skip: %s", e)
+            logger.debug("Daikin heartbeat cache read skip: %s", e)
             devices = []
 
     soc = None

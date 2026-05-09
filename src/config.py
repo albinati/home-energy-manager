@@ -279,7 +279,11 @@ class Config:
         "yes",
     )
     DB_PATH: str = (os.getenv("DB_PATH") or "energy_state.db").strip()
-    HEARTBEAT_INTERVAL_SECONDS: int = int(os.getenv("HEARTBEAT_INTERVAL_SECONDS", "120"))
+    # 300s default (#306 follow-up): heartbeat no longer calls Daikin API,
+    # so cadence is bounded by Fox cache freshness + MPC drift detection latency.
+    # 5-min latency on SoC drift / low-SoC alerts is well within battery safety
+    # margin. Override via env to tighten.
+    HEARTBEAT_INTERVAL_SECONDS: int = int(os.getenv("HEARTBEAT_INTERVAL_SECONDS", "300"))
     SVT_RATE_PENCE: float = float(os.getenv("SVT_RATE_PENCE", "24.50"))
     OPTIMIZATION_PEAK_THRESHOLD_PENCE: float = float(
         os.getenv("OPTIMIZATION_PEAK_THRESHOLD_PENCE", "25")
