@@ -350,6 +350,121 @@ def daikin_dispatch_preview(
     return out
 
 
+def _drop_legionella_window_pairs(
+    pairs: list[tuple[dict[str, Any], dict[str, Any]]],
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """Drop any (restore, action) pair whose action falls inside Sunday
+    10:30–12:00 local — Daikin firmware owns the weekly thermal-shock cycle.
+
+    Keeping a manual setpoint write in that window risks fighting the firmware
+    (or, worse, racing it). The cycle runs autonomously per CLAUDE.md; we just
+    stay out of its way.
+    """
+    out: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    tz = TZ()
+    for rest, act in pairs:
+        try:
+            start_utc = datetime.fromisoformat(act["start_time"].replace("Z", "+00:00"))
+            local = start_utc.astimezone(tz)
+            local_min = local.hour * 60 + local.minute
+            if local.weekday() == 6 and 10 * 60 + 30 <= local_min < 12 * 60:
+                logger.info(
+                    "write_daikin_from_lp_plan: skipping pair start=%s — Sunday legionella window",
+                    act["start_time"],
+                )
+                continue
+        except (KeyError, ValueError, TypeError):
+            pass
+        out.append((rest, act))
+    return out
+
+
+def _coalesce_low_value_pairs(
+    pairs: list[tuple[dict[str, Any], dict[str, Any]]],
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """Merge adjacent pairs with the same low-value action_type by extending
+    the earlier window's end_time and dropping the later pair.
+
+    Low-value kinds: ``pre_heat`` (cheap-slot tank lift) and ``solar_preheat``.
+    High-value kinds (``max_heat`` for negative slots, ``shutdown`` for peak
+    and peak_export) are NEVER coalesced — they target distinct windows that
+    can't be substituted.
+    """
+    if not pairs:
+        return pairs
+    coalescible = {"pre_heat", "solar_preheat"}
+    out = [pairs[0]]
+    for rest, act in pairs[1:]:
+        prev_rest, prev_act = out[-1]
+        prev_type = prev_act.get("action_type")
+        cur_type = act.get("action_type")
+        if (
+            prev_type == cur_type
+            and cur_type in coalescible
+            and prev_act.get("end_time") == act.get("start_time")
+        ):
+            # Extend previous action + restore to swallow this pair.
+            prev_act["end_time"] = act["end_time"]
+            prev_rest["start_time"] = rest["start_time"]
+            prev_rest["end_time"] = rest["end_time"]
+            out[-1] = (prev_rest, prev_act)
+            continue
+        out.append((rest, act))
+    return out
+
+
+def _apply_write_budget(
+    pairs: list[tuple[dict[str, Any], dict[str, Any]]],
+    headroom: int,
+) -> tuple[list[tuple[dict[str, Any], dict[str, Any]]], list[str]]:
+    """Bound the number of Daikin writes a plan will queue against quota headroom.
+
+    Algorithm (PR 5 of plan):
+    1. Each pair is 2 writes (action + restore). If 2*len(pairs) ≤ headroom,
+       pass through.
+    2. Coalesce adjacent same-kind low-value pairs (``pre_heat``,
+       ``solar_preheat``).
+    3. If still over budget, drop trailing low-value pairs until we fit.
+    4. NEVER drop or coalesce ``max_heat`` (negative-price) or ``shutdown``
+       (peak / peak_export) — these are the high-value pairs whose timing
+       can't be substituted.
+
+    Returns (filtered_pairs, dropped_action_descriptions). Caller surfaces the
+    dropped list via notification.
+    """
+    if headroom <= 0:
+        # Nothing to spend — drop every low-value pair, keep only high-value.
+        keep_kinds = {"max_heat", "shutdown"}
+        filtered = [(r, a) for r, a in pairs if a.get("action_type") in keep_kinds]
+        dropped = [
+            f"{a.get('action_type')}@{a.get('start_time')}"
+            for r, a in pairs if a.get("action_type") not in keep_kinds
+        ]
+        return filtered, dropped
+
+    if 2 * len(pairs) <= headroom:
+        return pairs, []
+
+    coalesced = _coalesce_low_value_pairs(pairs)
+    dropped: list[str] = []
+    if 2 * len(coalesced) <= headroom:
+        return coalesced, dropped
+
+    # Still over budget — drop trailing low-value pairs (preserve high-value
+    # earliest-first; each pair is 2 writes).
+    coalescible = {"pre_heat", "solar_preheat"}
+    # Walk from the END of the list and drop coalescible pairs first.
+    keep: list[tuple[dict[str, Any], dict[str, Any]]] = list(coalesced)
+    i = len(keep) - 1
+    while 2 * len(keep) > headroom and i >= 0:
+        _r, a = keep[i]
+        if a.get("action_type") in coalescible:
+            dropped.append(f"{a.get('action_type')}@{a.get('start_time')}")
+            keep.pop(i)
+        i -= 1
+    return keep, dropped
+
+
 def write_daikin_from_lp_plan(
     plan_date: str,
     plan: LpPlan,
@@ -366,6 +481,10 @@ def write_daikin_from_lp_plan(
     action_schedule row ids we've already pinged about; once the rows
     are cleared/replaced by this function, those ids are dead and the set
     would otherwise leak entries forever.
+
+    PR 5 of plan: applies the Daikin write-budget guard (coalesce low-value +
+    drop tail + notify) and skips any pair landing inside the Sunday legionella
+    window before the upsert loop.
     """
     try:
         from .. import state_machine as _sm
@@ -393,6 +512,30 @@ def write_daikin_from_lp_plan(
     else:
         db.clear_actions_for_date(plan_date, device="daikin")
     pairs = daikin_dispatch_preview(plan, forecast)
+    # PR 5: filter Sunday legionella window before budget guard so it doesn't
+    # eat into headroom counting against pairs that get dropped anyway.
+    pairs = _drop_legionella_window_pairs(pairs)
+    # PR 5: budget guard. quota_remaining returns full budget when api_call_log
+    # is empty; subtract a reservation so the heartbeat still has headroom for
+    # safe-default reconciles + telemetry reads.
+    try:
+        from ..api_quota import quota_remaining
+        reserve = int(getattr(config, "DAIKIN_RESERVE_FOR_HEARTBEAT", 30))
+        headroom = max(0, quota_remaining("daikin") - reserve)
+    except Exception:  # pragma: no cover — quota lookup must never break dispatch
+        headroom = 9999
+    pairs, dropped = _apply_write_budget(pairs, headroom)
+    if dropped:
+        try:
+            from ..notifier import notify_strategy_update
+            notify_strategy_update(
+                f"Daikin write-budget guard active: dropped {len(dropped)} low-value "
+                f"action(s) to fit headroom={headroom}. Consider raising "
+                f"DAIKIN_DAILY_BUDGET or lowering DAIKIN_RESERVE_FOR_HEARTBEAT.",
+                warnings=dropped,
+            )
+        except Exception:  # pragma: no cover — notification must never break dispatch
+            logger.exception("write-budget guard: notify_strategy_update failed")
     count = 0
     for restore_row, action_row in pairs:
         rid = db.upsert_action(

@@ -1055,6 +1055,13 @@ class Config:
     # the first time the api_quota module sees DAIKIN_CONTROL_MODE=active.
     DAIKIN_ACTIVE_SOAK_DAILY_BUDGET: int = int(os.getenv("DAIKIN_ACTIVE_SOAK_DAILY_BUDGET", "100"))
     DAIKIN_ACTIVE_SOAK_DAYS: int = int(os.getenv("DAIKIN_ACTIVE_SOAK_DAYS", "3"))
+    # PR 5 of plan: write-budget reservation. Each LP plan push, the budget
+    # guard subtracts this from quota_remaining("daikin") before deciding how
+    # many action_schedule pairs to upsert. Reserves headroom for the
+    # heartbeat's safe-default reconciles + telemetry reads (~30 calls/day on
+    # current prod). Lower if Daikin call volume drops; raise if heartbeat
+    # reconciles are starving for headroom.
+    DAIKIN_RESERVE_FOR_HEARTBEAT: int = int(os.getenv("DAIKIN_RESERVE_FOR_HEARTBEAT", "30"))
     # Circuit breaker: pause Daikin writes after N consecutive failures within W minutes,
     # cooldown for C minutes, reset on next successful write. Defends against an Onecta
     # outage burning quota with retries. 0 fails = breaker disabled.
