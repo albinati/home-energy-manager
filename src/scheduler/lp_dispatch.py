@@ -325,26 +325,40 @@ def daikin_dispatch_preview(
         # the slot lasts (negative: paid to import; solar: free PV otherwise
         # exported / curtailed). All other kinds keep powerful off.
         powerful_kinds = ("negative", "solar_charge")
+        # tank_power semantics:
+        #   peak / peak_export → tank_power=False (deliberate shutdown to avoid
+        #     drawing during expensive grid slot or while battery is exporting).
+        #   else with LP-planned heat (tank_pow=True) → tank_power=True with the
+        #     peak tank_temp target across the window.
+        #   else without LP-planned heat → omit tank_power AND tank_temp entirely.
+        #     This is "no operation needed" — leave the tank in whatever state
+        #     firmware/prior-action left it. Setting tank_power=False here would
+        #     ACTIVELY DISABLE the tank, which is wrong intent and was the
+        #     root cause of the 2026-05-09 active-flip bug.
+        is_shutdown = kind in ("peak", "peak_export")
         params: dict[str, Any] = {
             "lwt_offset": round(lwt, 1),  # Daikin rejects sub-0.1 precision; rounds float epsilon to 0.0
             "tank_powerful": tank_powful if kind in powerful_kinds else False,
-            "tank_power": tank_pow,
             "climate_on": es > EPS or ed > EPS or kind in ("negative", "cheap", "solar_charge"),
             "lp_optimizer": True,
         }
-        # Only set tank_temp when the tank will be on — Daikin rejects temperatureControl on a powered-off tank.
-        # Floor at DHW_TEMP_COMFORT_C (48 °C). Ceiling depends on slot kind:
-        #   negative      → DHW_TEMP_MAX_C (65 °C). Grid pays us; load all the kWh.
-        #   solar_charge  → DHW_TEMP_PV_ABUNDANCE_TARGET_C (55 °C). PV is free but
-        #                   holding 65 °C through afternoon bleeds standing losses
-        #                   before evening showers. Cap at 55 °C captures with
-        #                   margin without that bleed-back. Hard clamp here even
-        #                   though LP only soft-prefers it — Onecta write must
-        #                   reflect operator intent regardless of solver slack.
-        #   else (cheap)  → DHW_TEMP_MAX_C (65 °C). Cheap-grid imports may be
-        #                   marginal but the LP only emits cheap kind when it's
-        #                   chosen to charge → ride the LP plan.
-        if tank_pow:
+        if is_shutdown:
+            params["tank_power"] = False
+            # No tank_temp — tank off, target is meaningless.
+        elif tank_pow:
+            params["tank_power"] = True
+            # Floor at DHW_TEMP_COMFORT_C (48 °C). Ceiling depends on slot kind:
+            #   negative      → DHW_TEMP_MAX_C (65 °C). Grid pays us; load all the kWh.
+            #   solar_charge  → DHW_TEMP_PV_ABUNDANCE_TARGET_C (55 °C). PV is free
+            #                   but holding 65 °C through afternoon bleeds standing
+            #                   losses before evening showers. Cap at 55 °C captures
+            #                   with margin without that bleed-back. Hard clamp
+            #                   here even though LP only soft-prefers it — Onecta
+            #                   write must reflect operator intent regardless of
+            #                   solver slack.
+            #   else (cheap)  → DHW_TEMP_MAX_C (65 °C). Cheap-grid imports may be
+            #                   marginal but the LP only emits cheap kind when
+            #                   it's chosen to charge → ride the LP plan.
             if kind == "solar_charge":
                 ceiling = float(config.DHW_TEMP_PV_ABUNDANCE_TARGET_C)
             else:
@@ -353,9 +367,10 @@ def daikin_dispatch_preview(
                 min(ceiling, max(float(config.DHW_TEMP_COMFORT_C), tt)),
                 1,
             )
-        if kind == "peak" or kind == "peak_export":
-            params["tank_power"] = False
-            params.pop("tank_temp", None)  # tank off — no point setting target temp
+        # else: no LP-planned heat in this window AND not a shutdown.
+        # Don't touch the tank — omit tank_power + tank_temp from params.
+        # The action's other params (lwt_offset, climate_on, tank_powerful=False)
+        # still take effect. Restore at end of window resets to NORMAL safety state.
 
         st = start_utc.isoformat().replace("+00:00", "Z")
         en = end_utc.isoformat().replace("+00:00", "Z")

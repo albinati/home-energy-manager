@@ -131,6 +131,118 @@ def test_pv_abundance_threshold_relaxed_for_realistic_sunny_day(
     )
 
 
+def test_dispatch_omits_tank_power_when_no_heat_planned_and_not_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When LP plans NO DHW heating in a non-peak window (e.g. solar_charge
+    where battery alone absorbs all the PV and tank is already hot), the
+    dispatch must NOT emit ``tank_power=False`` — that would actively turn
+    the tank off mid-day. Correct behavior: omit ``tank_power`` and
+    ``tank_temp`` entirely; leave tank in whatever state firmware/prior-action
+    left it. The end-of-window restore action handles the safe-default reset.
+
+    This is the deeper fix beyond #294 (max-e_dhw scan): even after the scan,
+    the LP can still plan zero heat across the whole window when tank starts
+    hot enough to satisfy the shower constraint via natural cooling. In that
+    case we want NO tank operation, not tank_power=False."""
+    from src.config import config as app_config
+    from src.scheduler.lp_dispatch import daikin_dispatch_preview
+    from src.scheduler.lp_optimizer import LpPlan
+
+    monkeypatch.setattr(app_config, "DAIKIN_CONTROL_MODE", "active", raising=False)
+    monkeypatch.setattr(app_config, "DAIKIN_MIN_WINDOW_SLOTS", 1, raising=False)
+    monkeypatch.setattr(
+        "src.scheduler.lp_dispatch._optimization_preset_away_like",
+        lambda: False,
+        raising=True,
+    )
+
+    base = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    n = 4
+    plan = LpPlan(ok=True, status="Optimal", objective_pence=0.0,
+                  peak_threshold_pence=25.0, cheap_threshold_pence=10.0)
+    plan.slot_starts_utc = [base + timedelta(minutes=30 * i) for i in range(n)]
+    plan.price_pence = [15.0] * n
+    plan.import_kwh = [0.0] * n
+    plan.export_kwh = [0.0] * n
+    plan.battery_charge_kwh = [0.5] * n  # solar_charge kind
+    plan.battery_discharge_kwh = [0.0] * n
+    plan.dhw_electric_kwh = [0.0] * n     # NO heat planned
+    plan.space_electric_kwh = [0.0] * n
+    plan.soc_kwh = [5.0] * (n + 1)
+    plan.tank_temp_c = [48.0, 47.8, 47.6, 47.4, 47.2]  # already hot, naturally cooling
+    plan.indoor_temp_c = [21.0] * (n + 1)
+    plan.pv_curt_kwh = [0.0] * n
+    plan.lwt_offset_c = [0.0] * n
+    plan.temp_outdoor_c = [18.0] * n
+
+    pairs = daikin_dispatch_preview(plan, forecast=[])
+    solar_pairs = [(r, a) for r, a in pairs if a.get("action_type") == "solar_preheat"]
+    assert solar_pairs, "expected a solar_preheat action"
+
+    for _restore, action in solar_pairs:
+        params = action["params"]
+        # tank_power MUST NOT be False here. Either omitted (preferred) or True.
+        assert params.get("tank_power") is not False, (
+            f"non-shutdown action must NOT emit tank_power=False when LP plans "
+            f"no heat — it would actively disable the tank mid-day; params={params}"
+        )
+        # No tank_temp emitted either (since there's no heating to do).
+        assert "tank_temp" not in params or params.get("tank_power") is True, (
+            f"if tank_temp is set, tank_power must also be True; params={params}"
+        )
+
+
+def test_dispatch_shutdown_kinds_still_emit_tank_power_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Conversely, peak / peak_export windows MUST still emit tank_power=False
+    — that's the deliberate shutdown behaviour. The leave-alone semantics
+    only apply to non-peak / non-peak_export kinds."""
+    from src.config import config as app_config
+    from src.scheduler.lp_dispatch import daikin_dispatch_preview
+    from src.scheduler.lp_optimizer import LpPlan
+
+    monkeypatch.setattr(app_config, "DAIKIN_CONTROL_MODE", "active", raising=False)
+    monkeypatch.setattr(app_config, "DAIKIN_MIN_WINDOW_SLOTS", 1, raising=False)
+    monkeypatch.setattr(
+        "src.scheduler.lp_dispatch._optimization_preset_away_like",
+        lambda: False,
+        raising=True,
+    )
+
+    base = datetime(2026, 6, 1, 17, 0, tzinfo=UTC)  # peak hours
+    n = 4
+    plan = LpPlan(ok=True, status="Optimal", objective_pence=0.0,
+                  peak_threshold_pence=25.0, cheap_threshold_pence=10.0)
+    plan.slot_starts_utc = [base + timedelta(minutes=30 * i) for i in range(n)]
+    plan.price_pence = [30.0] * n  # > peak_threshold
+    plan.import_kwh = [0.0] * n
+    plan.export_kwh = [0.0] * n
+    plan.battery_charge_kwh = [0.0] * n
+    plan.battery_discharge_kwh = [0.0] * n
+    plan.dhw_electric_kwh = [0.0] * n
+    plan.space_electric_kwh = [0.0] * n
+    plan.soc_kwh = [5.0] * (n + 1)
+    plan.tank_temp_c = [45.0] * (n + 1)
+    plan.indoor_temp_c = [21.0] * (n + 1)
+    plan.pv_curt_kwh = [0.0] * n
+    plan.lwt_offset_c = [0.0] * n
+    plan.temp_outdoor_c = [18.0] * n
+
+    pairs = daikin_dispatch_preview(plan, forecast=[])
+    peak_pairs = [(r, a) for r, a in pairs if a.get("action_type") == "shutdown"]
+    assert peak_pairs, "expected a shutdown action"
+    for _restore, action in peak_pairs:
+        params = action["params"]
+        assert params.get("tank_power") is False, (
+            f"peak shutdown MUST emit tank_power=False; params={params}"
+        )
+        assert "tank_temp" not in params, (
+            f"shutdown should not emit tank_temp; params={params}"
+        )
+
+
 def test_dispatch_solar_preheat_picks_max_dhw_across_merged_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
