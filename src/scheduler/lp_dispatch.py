@@ -478,12 +478,12 @@ def daikin_dispatch_preview(
         restore_end = (
             end_utc + timedelta(minutes=restore_window)
         ).isoformat().replace("+00:00", "Z")
+        # Restore params: tank-only (per user 2026-05-09 — climate hands-off).
+        # No climate_on, no lwt_offset; firmware autonomously manages climate.
         restore_params = {
-            "lwt_offset": 0.0,
             "tank_powerful": False,
             "tank_temp": float(config.DHW_TEMP_NORMAL_C),
             "tank_power": True,
-            "climate_on": True,
         }
         restore_row = {
             "device": "daikin",
