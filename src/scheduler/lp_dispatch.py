@@ -325,16 +325,23 @@ def daikin_dispatch_preview(
         # the slot lasts (negative: paid to import; solar: free PV otherwise
         # exported / curtailed). All other kinds keep powerful off.
         powerful_kinds = ("negative", "solar_charge")
-        # tank_power semantics:
-        #   peak / peak_export → tank_power=False (deliberate shutdown to avoid
-        #     drawing during expensive grid slot or while battery is exporting).
+        # tank_power semantics (per-kind):
+        #   peak / peak_export →
+        #     IDLE strategy (default): tank_power=True with a LOW target
+        #       (DHW_TEMP_MIN_FLOOR_C, default 30°C). Firmware won't trigger
+        #       reheats because tank stays well above 30°C from prior heating;
+        #       climate is still off (saves grid). Avoids the turn-off / turn-on
+        #       cycle overhead and Daikin valve-resettle delay. Best for
+        #       well-insulated tanks where 3-h standing losses are tiny.
+        #     SHUTDOWN strategy (legacy): tank_power=False. Cleaner but adds
+        #       cycle-overhead cost.
+        #     Toggle via DHW_PEAK_TANK_STRATEGY env (default "idle").
         #   else with LP-planned heat (tank_pow=True) → tank_power=True with the
         #     peak tank_temp target across the window.
         #   else without LP-planned heat → omit tank_power AND tank_temp entirely.
         #     This is "no operation needed" — leave the tank in whatever state
         #     firmware/prior-action left it. Setting tank_power=False here would
-        #     ACTIVELY DISABLE the tank, which is wrong intent and was the
-        #     root cause of the 2026-05-09 active-flip bug.
+        #     ACTIVELY DISABLE the tank, which is wrong intent.
         is_shutdown = kind in ("peak", "peak_export")
         params: dict[str, Any] = {
             "lwt_offset": round(lwt, 1),  # Daikin rejects sub-0.1 precision; rounds float epsilon to 0.0
@@ -343,8 +350,20 @@ def daikin_dispatch_preview(
             "lp_optimizer": True,
         }
         if is_shutdown:
-            params["tank_power"] = False
-            # No tank_temp — tank off, target is meaningless.
+            peak_strategy = (getattr(config, "DHW_PEAK_TANK_STRATEGY", "idle") or "idle").strip().lower()
+            if peak_strategy == "shutdown":
+                params["tank_power"] = False
+                # No tank_temp — tank off, target is meaningless.
+            else:
+                # IDLE strategy: keep tank on at a low target so firmware
+                # doesn't reheat. Tank stays warm from prior heating; standing
+                # losses over peak window are minimal vs cycle overhead of a
+                # full power-off / power-on transition.
+                params["tank_power"] = True
+                params["tank_temp"] = round(
+                    float(getattr(config, "DHW_TEMP_MIN_FLOOR_C", 30.0)),
+                    1,
+                )
         elif tank_pow:
             params["tank_power"] = True
             # Floor at DHW_TEMP_COMFORT_C (48 °C). Ceiling depends on slot kind:

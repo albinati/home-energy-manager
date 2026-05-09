@@ -193,30 +193,13 @@ def test_dispatch_omits_tank_power_when_no_heat_planned_and_not_shutdown(
         )
 
 
-def test_dispatch_shutdown_kinds_still_emit_tank_power_false(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Conversely, peak / peak_export windows MUST still emit tank_power=False
-    — that's the deliberate shutdown behaviour. The leave-alone semantics
-    only apply to non-peak / non-peak_export kinds."""
-    from src.config import config as app_config
-    from src.scheduler.lp_dispatch import daikin_dispatch_preview
+def _build_peak_plan(base: datetime, n: int = 4) -> "LpPlan":
+    """Helper: synthetic plan with all slots at peak prices (no PV, no charge)."""
     from src.scheduler.lp_optimizer import LpPlan
-
-    monkeypatch.setattr(app_config, "DAIKIN_CONTROL_MODE", "active", raising=False)
-    monkeypatch.setattr(app_config, "DAIKIN_MIN_WINDOW_SLOTS", 1, raising=False)
-    monkeypatch.setattr(
-        "src.scheduler.lp_dispatch._optimization_preset_away_like",
-        lambda: False,
-        raising=True,
-    )
-
-    base = datetime(2026, 6, 1, 17, 0, tzinfo=UTC)  # peak hours
-    n = 4
     plan = LpPlan(ok=True, status="Optimal", objective_pence=0.0,
                   peak_threshold_pence=25.0, cheap_threshold_pence=10.0)
     plan.slot_starts_utc = [base + timedelta(minutes=30 * i) for i in range(n)]
-    plan.price_pence = [30.0] * n  # > peak_threshold
+    plan.price_pence = [30.0] * n
     plan.import_kwh = [0.0] * n
     plan.export_kwh = [0.0] * n
     plan.battery_charge_kwh = [0.0] * n
@@ -229,14 +212,74 @@ def test_dispatch_shutdown_kinds_still_emit_tank_power_false(
     plan.pv_curt_kwh = [0.0] * n
     plan.lwt_offset_c = [0.0] * n
     plan.temp_outdoor_c = [18.0] * n
+    return plan
 
+
+def test_dispatch_peak_idle_default_keeps_tank_on_low_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default peak strategy ("idle") keeps tank ON at a low target during
+    peak. Firmware won't reheat (tank stays well above 30°C from prior
+    heating). Avoids turn-off/on cycle overhead. Climate still goes off."""
+    from src.config import config as app_config
+    from src.scheduler.lp_dispatch import daikin_dispatch_preview
+
+    monkeypatch.setattr(app_config, "DAIKIN_CONTROL_MODE", "active", raising=False)
+    monkeypatch.setattr(app_config, "DAIKIN_MIN_WINDOW_SLOTS", 1, raising=False)
+    monkeypatch.setattr(app_config, "DHW_PEAK_TANK_STRATEGY", "idle", raising=False)
+    monkeypatch.setattr(app_config, "DHW_TEMP_MIN_FLOOR_C", 30.0, raising=False)
+    monkeypatch.setattr(
+        "src.scheduler.lp_dispatch._optimization_preset_away_like",
+        lambda: False,
+        raising=True,
+    )
+
+    plan = _build_peak_plan(datetime(2026, 6, 1, 17, 0, tzinfo=UTC))
+    pairs = daikin_dispatch_preview(plan, forecast=[])
+    peak_pairs = [(r, a) for r, a in pairs if a.get("action_type") == "shutdown"]
+    assert peak_pairs, "expected a shutdown action"
+    for _restore, action in peak_pairs:
+        params = action["params"]
+        # IDLE: tank stays ON, target is the low floor (30°C).
+        assert params.get("tank_power") is True, (
+            f"idle strategy must keep tank_power=True; params={params}"
+        )
+        assert params.get("tank_temp") == pytest.approx(30.0), (
+            f"idle strategy must set tank_temp to DHW_TEMP_MIN_FLOOR_C (30°C); "
+            f"got {params.get('tank_temp')}"
+        )
+        # Climate STILL goes off during peak — that's a separate decision.
+        assert params.get("climate_on") is False, (
+            f"peak should still turn climate off; params={params}"
+        )
+
+
+def test_dispatch_peak_shutdown_legacy_still_works(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy shutdown strategy still available via DHW_PEAK_TANK_STRATEGY=shutdown.
+    For poorly-insulated tanks where firmware would mid-peak-reheat from
+    standing losses alone."""
+    from src.config import config as app_config
+    from src.scheduler.lp_dispatch import daikin_dispatch_preview
+
+    monkeypatch.setattr(app_config, "DAIKIN_CONTROL_MODE", "active", raising=False)
+    monkeypatch.setattr(app_config, "DAIKIN_MIN_WINDOW_SLOTS", 1, raising=False)
+    monkeypatch.setattr(app_config, "DHW_PEAK_TANK_STRATEGY", "shutdown", raising=False)
+    monkeypatch.setattr(
+        "src.scheduler.lp_dispatch._optimization_preset_away_like",
+        lambda: False,
+        raising=True,
+    )
+
+    plan = _build_peak_plan(datetime(2026, 6, 1, 17, 0, tzinfo=UTC))
     pairs = daikin_dispatch_preview(plan, forecast=[])
     peak_pairs = [(r, a) for r, a in pairs if a.get("action_type") == "shutdown"]
     assert peak_pairs, "expected a shutdown action"
     for _restore, action in peak_pairs:
         params = action["params"]
         assert params.get("tank_power") is False, (
-            f"peak shutdown MUST emit tank_power=False; params={params}"
+            f"shutdown strategy MUST emit tank_power=False; params={params}"
         )
         assert "tank_temp" not in params, (
             f"shutdown should not emit tank_temp; params={params}"
