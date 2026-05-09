@@ -130,6 +130,93 @@ def _shower_slot_mask(
     return out
 
 
+def _parse_shower_schedule(schedule: str) -> list[tuple[int, int]]:
+    """Parse a ``DHW_SHOWER_SCHEDULE`` string ``"HH:MM-HH:MM,HH:MM-HH:MM"`` into
+    a list of ``(start_minutes_local, end_minutes_local)`` pairs.
+
+    Skips malformed entries silently — empty or invalid strings yield ``[]``.
+    """
+    out: list[tuple[int, int]] = []
+    if not schedule:
+        return out
+    for part in schedule.split(","):
+        part = part.strip()
+        if not part or "-" not in part:
+            continue
+        try:
+            start_s, end_s = part.split("-", 1)
+            sh, sm = start_s.strip().split(":")
+            eh, em = end_s.strip().split(":")
+            s_min = int(sh) * 60 + int(sm)
+            e_min = int(eh) * 60 + int(em)
+            if 0 <= s_min < 24 * 60 and 0 < e_min <= 24 * 60 and s_min < e_min:
+                out.append((s_min, e_min))
+        except (ValueError, AttributeError):
+            continue
+    return out
+
+
+def _window_set_slot_mask(
+    slot_starts_utc: list[datetime],
+    tz: ZoneInfo,
+    *,
+    windows: list[tuple[int, int]],
+) -> list[bool]:
+    """Multi-window generalisation of :func:`_shower_slot_mask`.
+
+    ``windows`` is a list of ``(start_minutes_local, end_minutes_local)`` pairs
+    (e.g. ``[(19*60, 22*60)]`` for 19:00–22:00). True when slot midpoint (local)
+    falls inside any window. Empty list → all-False mask.
+    """
+    if not windows:
+        return [False] * len(slot_starts_utc)
+    out: list[bool] = []
+    for st in slot_starts_utc:
+        mid_local = (st + timedelta(minutes=15)).astimezone(tz)
+        m = mid_local.hour * 60 + mid_local.minute
+        out.append(any(s <= m < e for s, e in windows))
+    return out
+
+
+def _resolve_active_shower_windows(guests_preset: bool) -> list[tuple[int, int]]:
+    """Pick which shower-window list applies for this solve.
+
+    Resolution order:
+    1. ``DHW_SHOWER_SCHEDULE_GUESTS`` (if guests preset and value non-empty).
+    2. ``DHW_SHOWER_SCHEDULE`` (if value non-empty).
+    3. Backward-compat: derive from the legacy
+       ``LP_SHOWER_MORNING_LOCAL``/``LP_SHOWER_EVENING_LOCAL`` scalars +
+       ``LP_SHOWER_WINDOW_MINUTES``.
+
+    Returns ``[]`` when no schedule is configured (LP applies no DHW floor —
+    matches the prior code path with both LP_SHOWER_*_LOCAL empty).
+    """
+    if guests_preset:
+        guests_str = (getattr(config, "DHW_SHOWER_SCHEDULE_GUESTS", "") or "").strip()
+        if guests_str:
+            return _parse_shower_schedule(guests_str)
+    schedule_str = (getattr(config, "DHW_SHOWER_SCHEDULE", "") or "").strip()
+    if schedule_str:
+        return _parse_shower_schedule(schedule_str)
+    # Back-compat: derive from the legacy scalar pair.
+    half = int(config.LP_SHOWER_WINDOW_MINUTES) / 2
+    out: list[tuple[int, int]] = []
+    for hhmm_attr in ("LP_SHOWER_MORNING_LOCAL", "LP_SHOWER_EVENING_LOCAL"):
+        hhmm = (getattr(config, hhmm_attr, "") or "").strip()
+        if not hhmm:
+            continue
+        try:
+            sh, sm = hhmm.split(":")
+            centre = int(sh) * 60 + int(sm)
+        except ValueError:
+            continue
+        s = max(0, int(centre - half))
+        e = min(24 * 60, int(centre + half))
+        if s < e:
+            out.append((s, e))
+    return out
+
+
 def _make_solver() -> pulp.LpSolver:
     """Return the configured PuLP solver backend.
 
@@ -538,25 +625,26 @@ def solve_lp(
     # -----------------------------------------------------------------------
     # DHW hard constraints (showers — legionella is owned by Daikin firmware)
     # -----------------------------------------------------------------------
-    morning_hhmm = (config.LP_SHOWER_MORNING_LOCAL or "").strip()
-    evening_hhmm = (config.LP_SHOWER_EVENING_LOCAL or "").strip()
-    window_mins = int(config.LP_SHOWER_WINDOW_MINUTES)
-    wm = (
-        _shower_slot_mask(slot_starts_utc, tz, shower_hhmm=morning_hhmm, window_minutes=window_mins)
-        if morning_hhmm
-        else [False] * n
-    )
-    we = (
-        _shower_slot_mask(slot_starts_utc, tz, shower_hhmm=evening_hhmm, window_minutes=window_mins)
-        if evening_hhmm
-        else [False] * n
-    )
+    # Resolve the active shower schedule (PR 4 of plan). New env
+    # ``DHW_SHOWER_SCHEDULE`` supersedes ``LP_SHOWER_MORNING_LOCAL`` /
+    # ``LP_SHOWER_EVENING_LOCAL``; legacy scalars are still honoured as a
+    # backward-compat fallback when DHW_SHOWER_SCHEDULE is empty. Guests preset
+    # picks DHW_SHOWER_SCHEDULE_GUESTS instead so morning showers are
+    # re-enabled when a guest is staying.
+    guests_preset = False
+    try:
+        from ..presets import OperationPreset
+        guests_preset = OperationPreset(config.OPTIMIZATION_PRESET) == OperationPreset.GUESTS
+    except (ValueError, AttributeError):
+        pass
+    shower_windows = _resolve_active_shower_windows(guests_preset)
+    shower_mask = _window_set_slot_mask(slot_starts_utc, tz, windows=shower_windows)
     # Skip shower hard constraint in passive mode — the LP can't decide e_dhw
     # to make this happen (firmware controls the tank). Enforcing would make
     # the solve infeasible whenever tank starts low.
     if not passive_daikin:
         for i in range(n):
-            if wm[i] or we[i]:
+            if shower_mask[i]:
                 prob += tank[i + 1] >= t_min_dhw
 
     # Per-slot DHW ceiling: 48 °C unless price < 0 OR PV is abundant (then DHW_TEMP_MAX_C, default 65 °C).
@@ -624,7 +712,18 @@ def solve_lp(
     # hard constraint above. Firmware controls comfort; the LP only optimises
     # battery/grid/PV around the predicted Daikin draw.
     if not passive_daikin:
-        prob += tank[n] >= t_min_dhw - 2.0
+        # PR 4 of plan: when the last slot lands inside a shower window, keep
+        # the tight terminal floor so the LP must finish with a hot tank for
+        # in-progress showers. When it lands OUTSIDE shower windows (e.g. a
+        # 48 h horizon ending at 04:00 local), fall back to a much lower
+        # ``DHW_TEMP_MIN_FLOOR_C`` so the LP isn't forced into expensive
+        # overnight reheat just to satisfy a horizon-end constraint.
+        last_in_shower = bool(shower_mask[-1]) if shower_mask else False
+        if last_in_shower:
+            terminal_dhw_floor = t_min_dhw - 2.0
+        else:
+            terminal_dhw_floor = float(getattr(config, "DHW_TEMP_MIN_FLOOR_C", 30.0))
+        prob += tank[n] >= terminal_dhw_floor
         prob += t_in[n] >= float(config.INDOOR_SETPOINT_C) - 0.5
 
     # -----------------------------------------------------------------------

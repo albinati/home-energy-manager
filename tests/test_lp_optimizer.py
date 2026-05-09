@@ -355,8 +355,11 @@ def test_simplified_hp_model_continuous_power(monkeypatch):
     """New HP model: e_dhw[i] should be continuous, not forced to discrete bucket values."""
     monkeypatch.setattr(app_config, "LP_HP_MIN_ON_SLOTS", 1)  # no min-on for this test
     monkeypatch.setattr(app_config, "LP_SOC_FINAL_KWH", 0.0)  # no hard soc floor
-    base = datetime(2026, 1, 15, 4, 0, tzinfo=UTC)  # 04:00 UTC = outside occupied
-    n = 16  # 8 hours — enough to heat and maintain
+    # PR 4 of plan: DHW floor is now only enforced inside shower windows.
+    # Span a horizon that covers the default 19:00-22:00 window so the LP has
+    # a reason to heat the cold tank.
+    base = datetime(2026, 1, 15, 12, 0, tzinfo=UTC)  # 12:00 UTC, ends 20:00 UTC (in evening window)
+    n = 16  # 8 hours
     slots, w = _series(n, base)
     prices = [6.0] * n  # cheap — heat pump should run
     base_load = [0.3] * n
@@ -371,7 +374,8 @@ def test_simplified_hp_model_continuous_power(monkeypatch):
         tz=ZoneInfo("Europe/London"),
     )
     assert plan.ok, f"Expected Optimal, got {plan.status}"
-    # At least one slot should have DHW heat (tank was below target)
+    # At least one slot should have DHW heat (tank was below target + horizon
+    # ends inside a shower window where the hard floor applies).
     total_dhw = sum(plan.dhw_electric_kwh)
     assert total_dhw > 0.0, "HP should have heated DHW tank when it was cold"
     # Verify values are bounded correctly by the new continuous model
