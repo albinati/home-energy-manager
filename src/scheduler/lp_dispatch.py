@@ -28,6 +28,42 @@ logger = logging.getLogger(__name__)
 EPS = 0.05
 
 
+def _compute_rank_percentiles(values: list[float]) -> list[float]:
+    """Per-slot percentile rank of ``values`` (0–100, higher = bigger value).
+
+    Used to audit ``where in the LP horizon's Outgoing-rate distribution did
+    this slot sit?`` — the metric tracked on every ``dispatch_decisions`` row
+    per #274. Ties get the average rank so a flat day where every slot ties
+    still resolves to 50, not 0 or 100. Empty input → empty list.
+    """
+    if not values:
+        return []
+    n = len(values)
+    sorted_pairs = sorted((float(v), i) for i, v in enumerate(values))
+    rank_sum: dict[int, float] = {}
+    rank_count: dict[int, int] = {}
+    i = 0
+    while i < n:
+        j = i
+        while j + 1 < n and sorted_pairs[j + 1][0] == sorted_pairs[i][0]:
+            j += 1
+        # Ranks 1-indexed; ties share the average.
+        avg_rank = (i + j + 2) / 2.0
+        for k in range(i, j + 1):
+            orig_idx = sorted_pairs[k][1]
+            rank_sum[orig_idx] = avg_rank
+            rank_count[orig_idx] = 1
+        i = j + 1
+    # Convert 1..n rank to 0..100 percentile (rank 1 → 0, rank n → 100, mid → 50).
+    if n == 1:
+        return [50.0]
+    out: list[float] = []
+    for idx in range(n):
+        r = rank_sum.get(idx, 1.0)
+        out.append(round(((r - 1.0) / (n - 1)) * 100.0, 2))
+    return out
+
+
 def lp_dispatch_slots_for_hardware(plan: LpPlan) -> list[HalfHourSlot]:
     """Half-hour kinds for Fox/Daikin — identical to :func:`lp_plan_to_slots` (pure MILP mapping).
 
@@ -426,6 +462,13 @@ def filter_robust_peak_export(
         if export_price_pence is not None and len(export_price_pence) == len(plan.slot_starts_utc)
         else [float(config.EXPORT_RATE_PENCE)] * len(plan.slot_starts_utc)
     )
+    # Per-slot Outgoing-rate percentile within the LP horizon (#274).
+    # 100 = highest-rate slot in the horizon, 0 = lowest. Used as an audit
+    # metric on every dispatch_decisions row so we can answer "where in the
+    # horizon's Outgoing distribution did this export sit" without re-querying
+    # agile_export_rates. NaN-safe — when all rates equal (flat fallback) the
+    # percentile is 50 for every slot.
+    rate_percentiles = _compute_rank_percentiles(export_rate_line)
 
     def _future_refill_shadow_p_kwh(idx: int) -> float:
         future_prices = [float(p) for p in plan.price_pence[idx + 1:]]
@@ -476,6 +519,7 @@ def filter_robust_peak_export(
             "export_price_p_kwh": None,
             "refill_price_p_kwh": None,
             "economic_margin_p_kwh": None,
+            "outgoing_rate_percentile": rate_percentiles[i] if i < len(rate_percentiles) else None,
         }
 
         if s.kind == "peak_export":
