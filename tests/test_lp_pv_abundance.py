@@ -193,6 +193,153 @@ def test_dispatch_omits_tank_power_when_no_heat_planned_and_not_shutdown(
         )
 
 
+def test_lp_plan_to_slots_marks_post_shower_slots_as_idle_overnight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After the LAST shower window of the day, "standard" slots should be
+    re-classified as ``tank_idle_overnight`` until the next productive slot
+    (cheap/negative/solar_charge) — meaning tank target drops to backup
+    overnight target (38°C default) instead of leaving it at NORMAL.
+    """
+    from src.config import config as app_config
+    from src.scheduler.lp_dispatch import lp_plan_to_slots
+    from src.scheduler.lp_optimizer import LpPlan
+
+    monkeypatch.setattr(app_config, "DHW_SHOWER_SCHEDULE", "19:00-22:00", raising=False)
+    monkeypatch.setattr(app_config, "DHW_TANK_OVERNIGHT_IDLE_ENABLED", "true", raising=False)
+    monkeypatch.setattr(app_config, "OPTIMIZATION_PRESET", "normal", raising=False)
+    # Disable strict_savings so the export path doesn't override slot kinds.
+    monkeypatch.setattr(app_config, "ENERGY_STRATEGY_MODE", "savings_first", raising=False)
+
+    # Build a slot sequence covering 18:00 today through 11:00 tomorrow.
+    # Some slots are shower-window (19:00-22:00); after that, all "standard";
+    # next morning we'll add a cheap slot to confirm the reset.
+    base = datetime(2026, 6, 1, 17, 0, tzinfo=UTC)  # 18:00 BST
+    n = 36  # 18 hours of half-hour slots
+    plan = LpPlan(ok=True, status="Optimal", objective_pence=0.0,
+                  peak_threshold_pence=25.0, cheap_threshold_pence=10.0)
+    plan.slot_starts_utc = [base + timedelta(minutes=30 * i) for i in range(n)]
+    plan.price_pence = [20.0] * n
+    # Make slot 28+ (11:00 BST next day onward) "cheap" so the reset triggers.
+    # Slot 28 = 18:00 + 14h = 08:00 UTC = 09:00 BST. Hmm not quite morning
+    # but close. Set those to negative price + grid charge to force "cheap".
+    plan.battery_charge_kwh = [0.0] * n
+    plan.import_kwh = [0.0] * n
+    plan.export_kwh = [0.0] * n
+    plan.battery_discharge_kwh = [0.0] * n
+    plan.dhw_electric_kwh = [0.0] * n
+    plan.space_electric_kwh = [0.0] * n
+    plan.soc_kwh = [5.0] * (n + 1)
+    plan.tank_temp_c = [45.0] * (n + 1)
+    plan.indoor_temp_c = [21.0] * (n + 1)
+    plan.pv_curt_kwh = [0.0] * n
+    plan.lwt_offset_c = [0.0] * n
+    plan.temp_outdoor_c = [18.0] * n
+
+    # Force last slot to "cheap" by making chg > EPS at price > 0.
+    plan.battery_charge_kwh[-1] = 0.5
+    plan.import_kwh[-1] = 0.5
+    plan.price_pence[-1] = 5.0  # below cheap_threshold
+
+    slots = lp_plan_to_slots(plan)
+
+    # Walk and verify state transitions.
+    seen_shower = False
+    seen_idle_overnight = False
+    seen_reset = False
+    for i, s in enumerate(slots):
+        local = s.start_utc.astimezone(ZoneInfo("Europe/London"))
+        h = local.hour + local.minute / 60
+        # 19-22 BST: shower window (mask True). Kind stays "standard" because
+        # LP planned no heat (e_dhw=0).
+        if 19 <= h < 22:
+            seen_shower = True
+        # 22-09 BST next morning: should be tank_idle_overnight (after shower,
+        # before any productive slot).
+        if seen_shower and not seen_reset and s.kind == "tank_idle_overnight":
+            seen_idle_overnight = True
+        # The last slot is "cheap" → resets the overnight tracker.
+        if s.kind == "cheap":
+            seen_reset = True
+            # After reset, no further idle_overnight should appear (we're at
+            # end of horizon anyway).
+
+    assert seen_idle_overnight, (
+        f"expected at least one tank_idle_overnight slot after the shower window; "
+        f"slot kinds: {[s.kind for s in slots]}"
+    )
+
+
+def test_dispatch_emits_overnight_idle_action_at_38c(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The overnight-idle action emits tank_temp=DHW_TANK_OVERNIGHT_TARGET_C
+    (default 38°C) with tank_power=True. Climate-side params are NOT emitted
+    (per user: 'climate shouldn't change anytime, we are not discussing this
+    yet')."""
+    from src.config import config as app_config
+    from src.scheduler.lp_dispatch import daikin_dispatch_preview
+    from src.scheduler.lp_optimizer import LpPlan
+
+    monkeypatch.setattr(app_config, "DAIKIN_CONTROL_MODE", "active", raising=False)
+    monkeypatch.setattr(app_config, "DAIKIN_MIN_WINDOW_SLOTS", 1, raising=False)
+    monkeypatch.setattr(app_config, "DHW_SHOWER_SCHEDULE", "19:00-22:00", raising=False)
+    monkeypatch.setattr(app_config, "DHW_TANK_OVERNIGHT_IDLE_ENABLED", "true", raising=False)
+    monkeypatch.setattr(app_config, "DHW_TANK_OVERNIGHT_TARGET_C", 38.0, raising=False)
+    monkeypatch.setattr(app_config, "OPTIMIZATION_PRESET", "normal", raising=False)
+    monkeypatch.setattr(app_config, "ENERGY_STRATEGY_MODE", "savings_first", raising=False)
+    monkeypatch.setattr(
+        "src.scheduler.lp_dispatch._optimization_preset_away_like",
+        lambda: False,
+        raising=True,
+    )
+
+    # 18:00 BST → 06:00 BST next day (12 hours). Includes shower window and
+    # plenty of overnight slots to mark.
+    base = datetime(2026, 6, 1, 17, 0, tzinfo=UTC)
+    n = 24
+    plan = LpPlan(ok=True, status="Optimal", objective_pence=0.0,
+                  peak_threshold_pence=25.0, cheap_threshold_pence=10.0)
+    plan.slot_starts_utc = [base + timedelta(minutes=30 * i) for i in range(n)]
+    plan.price_pence = [20.0] * n
+    plan.import_kwh = [0.0] * n
+    plan.export_kwh = [0.0] * n
+    plan.battery_charge_kwh = [0.0] * n
+    plan.battery_discharge_kwh = [0.0] * n
+    plan.dhw_electric_kwh = [0.0] * n
+    plan.space_electric_kwh = [0.0] * n
+    plan.soc_kwh = [5.0] * (n + 1)
+    plan.tank_temp_c = [50.0] * (n + 1)
+    plan.indoor_temp_c = [21.0] * (n + 1)
+    plan.pv_curt_kwh = [0.0] * n
+    plan.lwt_offset_c = [0.0] * n
+    plan.temp_outdoor_c = [18.0] * n
+
+    pairs = daikin_dispatch_preview(plan, forecast=[])
+    overnight_pairs = [(r, a) for r, a in pairs if a.get("action_type") == "tank_idle_overnight"]
+    assert overnight_pairs, (
+        f"expected a tank_idle_overnight action; got action_types: "
+        f"{[a.get('action_type') for _, a in pairs]}"
+    )
+    for _restore, action in overnight_pairs:
+        params = action["params"]
+        assert params.get("tank_power") is True, (
+            f"overnight idle keeps tank_power=True (NOT off — backup for "
+            f"unexpected morning shower); params={params}"
+        )
+        assert params.get("tank_temp") == pytest.approx(38.0), (
+            f"overnight idle target = DHW_TANK_OVERNIGHT_TARGET_C (38°C); "
+            f"got {params.get('tank_temp')}"
+        )
+        # Climate-side keys NOT emitted — user excluded climate from this work.
+        assert "climate_on" not in params, (
+            f"overnight idle should NOT touch climate_on; params={params}"
+        )
+        assert "lwt_offset" not in params, (
+            f"overnight idle should NOT touch lwt_offset; params={params}"
+        )
+
+
 def _build_peak_plan(base: datetime, n: int = 4) -> "LpPlan":
     """Helper: synthetic plan with all slots at peak prices (no PV, no charge)."""
     from src.scheduler.lp_optimizer import LpPlan

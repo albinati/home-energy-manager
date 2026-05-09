@@ -155,7 +155,62 @@ def lp_plan_to_slots(plan: LpPlan) -> list[HalfHourSlot]:
                 target_soc_pct=target_soc_pct,
             )
         )
+
+    # Second pass: mark "tank_idle_overnight" slots.
+    #
+    # Once we pass a shower-window slot, subsequent "standard" slots represent
+    # the post-shower-overnight period where the user doesn't need hot water
+    # until next-day's PV abundance. Tank should idle at a low backup target
+    # (default 38 °C — backup if someone showers unexpectedly in the morning,
+    # but firmware won't reheat to maintain higher temps overnight).
+    #
+    # Reset when we hit a productive slot (cheap/negative/solar_charge) — that
+    # signals "next day's economics are better, tank can heat now."
+    if _overnight_tank_idle_enabled():
+        try:
+            from .lp_optimizer import _resolve_active_shower_windows, _window_set_slot_mask
+            from ..presets import OperationPreset
+            try:
+                _is_guests = OperationPreset(config.OPTIMIZATION_PRESET) == OperationPreset.GUESTS
+            except (ValueError, AttributeError):
+                _is_guests = False
+            shower_windows = _resolve_active_shower_windows(_is_guests)
+            shower_mask = _window_set_slot_mask(plan.slot_starts_utc, TZ(), windows=shower_windows)
+        except Exception:  # pragma: no cover — never let the override break dispatch
+            shower_mask = [False] * n
+
+        seen_shower_in_window = False
+        productive_kinds = {"cheap", "negative", "solar_charge"}
+        for i in range(n):
+            if shower_mask[i]:
+                seen_shower_in_window = True
+                continue
+            if out[i].kind in productive_kinds:
+                # Productive slot resets the overnight tracker — next day's
+                # showers reset the cycle.
+                seen_shower_in_window = False
+                continue
+            if seen_shower_in_window and out[i].kind == "standard":
+                out[i] = HalfHourSlot(
+                    start_utc=out[i].start_utc,
+                    end_utc=out[i].end_utc,
+                    price_pence=out[i].price_pence,
+                    kind="tank_idle_overnight",
+                    lp_grid_import_w=out[i].lp_grid_import_w,
+                    target_soc_pct=out[i].target_soc_pct,
+                )
     return out
+
+
+def _overnight_tank_idle_enabled() -> bool:
+    """Toggle for the post-shower overnight tank idle override (default on).
+
+    Set ``DHW_TANK_OVERNIGHT_IDLE_ENABLED=false`` to disable — overnight slots
+    fall back to plain "standard" (no Daikin write, firmware does whatever it
+    wants based on its own schedule).
+    """
+    val = (getattr(config, "DHW_TANK_OVERNIGHT_IDLE_ENABLED", "true") or "true").strip().lower()
+    return val not in ("false", "0", "no", "off")
 
 
 def _lwt_offset_from_plan(i: int, plan: LpPlan) -> float:
@@ -271,6 +326,11 @@ def daikin_dispatch_preview(
             # drops back to DHW_TEMP_NORMAL_C — same safety scaffolding as
             # negative/cheap kinds.
             "solar_charge": "solar_preheat",
+            # tank_idle_overnight: post-shower-until-next-PV-abundance window.
+            # Tank target dropped to DHW_TANK_OVERNIGHT_TARGET_C (default 38°C)
+            # so firmware doesn't reheat overnight — but stays slightly above
+            # cold so an unexpected morning shower has some warm water.
+            "tank_idle_overnight": "tank_idle_overnight",
         }.get(kind, "normal")
 
         mid = start_utc + timedelta(minutes=15)
@@ -349,7 +409,24 @@ def daikin_dispatch_preview(
             "climate_on": es > EPS or ed > EPS or kind in ("negative", "cheap", "solar_charge"),
             "lp_optimizer": True,
         }
-        if is_shutdown:
+        if kind == "tank_idle_overnight":
+            # Post-shower-until-next-PV-abundance: tank ON at low backup
+            # target (default 38 °C). Firmware won't reheat from 50+ down to
+            # 38 (current > setpoint, no action). If tank cools to 38 over
+            # the long overnight, firmware maintains at 38 — backup buffer
+            # for unexpected morning shower. We also strip the climate-side
+            # params: user said "climate shouldn't change anytime, we are not
+            # discussing this yet" — leave Daikin's own zone scheduling alone.
+            params = {
+                "tank_powerful": False,
+                "tank_power": True,
+                "tank_temp": round(
+                    float(getattr(config, "DHW_TANK_OVERNIGHT_TARGET_C", 38.0)),
+                    1,
+                ),
+                "lp_optimizer": True,
+            }
+        elif is_shutdown:
             peak_strategy = (getattr(config, "DHW_PEAK_TANK_STRATEGY", "idle") or "idle").strip().lower()
             if peak_strategy == "shutdown":
                 params["tank_power"] = False
