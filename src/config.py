@@ -242,6 +242,12 @@ class Config:
         os.getenv("FIXED_TARIFF_STANDING_PENCE_PER_DAY", "0")
     )
 
+    # Window (in days) for the morning-vs-afternoon PV forecast bias report
+    # surfaced in the morning brief and via the ``get_pv_forecast_bias`` MCP
+    # tool. Reads ``pv_calibration_hourly`` and ``pv_realtime_history`` via
+    # ``weather.evaluate_pv_forecast_accuracy``.
+    PV_BIAS_REPORT_WINDOW_DAYS: int = int(os.getenv("PV_BIAS_REPORT_WINDOW_DAYS", "14"))
+
     # Effective start of the Octopus Agile tariff. Period aggregations
     # (weekly/monthly/MTD/YTD) clamp their start date upward to this value
     # so pre-switch days don't pollute the realised cost or shadow comparisons

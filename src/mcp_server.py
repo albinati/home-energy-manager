@@ -2199,6 +2199,26 @@ def build_mcp() -> FastMCP:
         return {"ok": True, "forecast_hourly": fc[:48], "daikin": daikin}
 
     @mcp.tool(
+        name="get_pv_forecast_bias",
+        description=(
+            "Morning vs afternoon PV forecast bias over a trailing window "
+            "(default PV_BIAS_REPORT_WINDOW_DAYS, 14 d). Returns weighted "
+            "bias_kw / mae_kw / rmse_kw for the morning (04–12 UTC) and "
+            "afternoon (12–20 UTC) bins plus an overall row and a one-line "
+            "headline. Sign convention: `bias_kw = mean(actual − predicted)` "
+            "— positive = forecast was too low (under-forecast), negative = "
+            "too high (over-forecast). Sibling to the live three-way "
+            "deviation tracker (#263); this is the static-prior view."
+        ),
+    )
+    def get_pv_forecast_bias(window_days: int | None = None) -> dict[str, Any]:
+        from .analytics.pv_bias_report import summarise_pv_bias
+        days = int(window_days) if window_days else int(config.PV_BIAS_REPORT_WINDOW_DAYS)
+        if days <= 0:
+            return {"ok": False, "error": "window_days must be > 0"}
+        return summarise_pv_bias(window_days=days)
+
+    @mcp.tool(
         name="get_action_log",
         description=(
             "Recent device-command rows from action_log: who triggered what, "
