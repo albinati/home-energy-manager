@@ -593,6 +593,16 @@ class Config:
     DHW_TEMP_PV_ABUNDANCE_TARGET_C: float = float(
         os.getenv("DHW_TEMP_PV_ABUNDANCE_TARGET_C", "55.0")
     )
+    # Strategy for tank during peak / peak_export windows (climate is always
+    # off during peak — this is just about the tank):
+    #   "idle" (default) — tank_power=True, target=DHW_TEMP_MIN_FLOOR_C (30°C).
+    #     Firmware won't reheat (tank stays warm from prior heating, well
+    #     above 30°C). Avoids turn-off / turn-on cycle overhead. Best for
+    #     well-insulated tanks where 3-h standing losses are tiny.
+    #   "shutdown" — tank_power=False (legacy). Cleaner state but adds cycle
+    #     overhead. Pick this for poorly-insulated tanks where firmware
+    #     would attempt mid-peak reheats from standing losses alone.
+    DHW_PEAK_TANK_STRATEGY: str = os.getenv("DHW_PEAK_TANK_STRATEGY", "idle").strip().lower()
     # Slack penalty on the soft DHW ceiling (#225 item 1, was hardcoded 0.01).
     # Operators who want stricter comfort vs cost can tune this. Default 0.01
     # p/°C-slot preserves prior behaviour.
