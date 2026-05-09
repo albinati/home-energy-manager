@@ -1,6 +1,6 @@
 {
   "days_back": 14,
-  "frozen_at_iso": "2026-05-09T12:25:57.059388+00:00",
+  "frozen_at_iso": "2026-05-09T12:19:31.547441+00:00",
   "frozen_at_sha": "28ffd8050dd9556897c89cc747fa80aecfd9d6af",
   "per_date": {
     "2026-04-25": {
@@ -79,5 +79,5 @@
       "total_replayed_cost_p": 88.628719039138
     }
   },
-  "total_replayed_cost_p": 1356.5368821298498
+  "total_replayed_cost_p": 2428.8703915064293
 }
