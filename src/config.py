@@ -569,6 +569,27 @@ class Config:
     LP_PEAK_EXPORT_TOP_QUARTILE_PERCENT: float = float(
         os.getenv("LP_PEAK_EXPORT_TOP_QUARTILE_PERCENT", "25")
     )
+    # PV-abundance DHW preheat (PR 3 of plan; tank ceiling lift). When per-slot
+    # (pv_avail − base_load − battery-charge headroom) exceeds this threshold,
+    # the LP lifts the tank ceiling to ``DHW_TEMP_MAX_C`` (same surface as the
+    # negative-price lift) and adds a small reward to e_dhw[i] so otherwise-
+    # curtailed PV gets stored as hot water for evening showers. Default 0.5
+    # kWh/slot — matches the user's empirical "afternoon set-point lift" pattern.
+    DHW_PV_ABUNDANCE_THRESHOLD_KWH: float = float(
+        os.getenv("DHW_PV_ABUNDANCE_THRESHOLD_KWH", "0.5")
+    )
+    # Reward magnitude for PV-abundance DHW heating. Must be smaller than
+    # ``EXPORT_RATE_PENCE × cop_dhw[i]`` so genuinely-profitable export still
+    # wins. Default 0.5 p/kWh.
+    LP_PV_ABUNDANCE_TANK_REWARD_PENCE_PER_KWH: float = float(
+        os.getenv("LP_PV_ABUNDANCE_TANK_REWARD_PENCE_PER_KWH", "0.5")
+    )
+    # Slack penalty on the soft DHW ceiling (#225 item 1, was hardcoded 0.01).
+    # Operators who want stricter comfort vs cost can tune this. Default 0.01
+    # p/°C-slot preserves prior behaviour.
+    LP_TANK_HI_SLACK_PENCE_PER_DEGC_SLOT: float = float(
+        os.getenv("LP_TANK_HI_SLACK_PENCE_PER_DEGC_SLOT", "0.01")
+    )
     # Comma-separated trigger reasons for which scenario LP runs. Other
     # triggers (drift, forecast_revision, hourly cron not in this list)
     # use only the nominal solve to keep latency low.
