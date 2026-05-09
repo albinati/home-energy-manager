@@ -611,6 +611,25 @@ class Config:
     TARGET_DHW_TEMP_MIN_NORMAL_C: float = float(os.getenv("TARGET_DHW_TEMP_MIN_NORMAL_C", "45.0"))
     TARGET_DHW_TEMP_MIN_GUESTS_C: float = float(os.getenv("TARGET_DHW_TEMP_MIN_GUESTS_C", "48.0"))
     TARGET_DHW_TEMP_MAX_C: float = float(os.getenv("TARGET_DHW_TEMP_MAX_C", "65.0"))
+    # PR 4 of plan: time-of-day shower schedule (LP-side hard floor only on
+    # slots inside a configured shower window). Multi-window comma-separated
+    # list, e.g. ``"19:00-22:00"`` (default; user has no morning showers
+    # normally) or ``"07:00-09:00,19:00-22:00"``. When empty, the LP falls
+    # back to the legacy ``LP_SHOWER_MORNING_LOCAL`` / ``LP_SHOWER_EVENING_LOCAL``
+    # scalars + ``LP_SHOWER_WINDOW_MINUTES`` for backward-compatibility.
+    DHW_SHOWER_SCHEDULE: str = os.getenv("DHW_SHOWER_SCHEDULE", "19:00-22:00")
+    # When ``PLAN_GUESTS_TODAY=true`` is active (manual toggle, eventually
+    # auto-detected via #197), the LP uses this schedule instead — re-enables
+    # morning showers + keeps evening.
+    DHW_SHOWER_SCHEDULE_GUESTS: str = os.getenv(
+        "DHW_SHOWER_SCHEDULE_GUESTS", "07:00-09:00,19:00-22:00"
+    )
+    # Tank temperature floor used at horizon-end when the last slot is NOT
+    # inside any shower window. Lets the LP let the tank cool overnight
+    # without forcing an expensive late-night reheat just to satisfy a 48 h
+    # horizon terminal constraint. User OK'd 30 °C as the aggressive default;
+    # raise toward 37 °C if cold-spot reheat times become a comfort issue.
+    DHW_TEMP_MIN_FLOOR_C: float = float(os.getenv("DHW_TEMP_MIN_FLOOR_C", "30.0"))
     MIN_SOC_RESERVE_PERCENT: float = float(os.getenv("MIN_SOC_RESERVE_PERCENT", "15"))
     OPTIMIZATION_WATCHDOG_HOUR_LOCAL: int = int(os.getenv("OPTIMIZATION_WATCHDOG_HOUR_LOCAL", "16"))
     OPTIMIZATION_WATCHDOG_MINUTE_LOCAL: int = int(os.getenv("OPTIMIZATION_WATCHDOG_MINUTE_LOCAL", "0"))
