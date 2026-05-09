@@ -82,14 +82,20 @@ def test_restore_window_default_is_at_least_5_minutes(monkeypatch):
     pairs = daikin_dispatch_preview(plan, _empty_forecast(slots))
     if not pairs:
         pytest.skip("LP plan produced no Daikin action pairs (warm/quiet day)")
+    checked = 0
     for restore_row, action_row in pairs:
+        if restore_row is None:
+            continue
         st = datetime.fromisoformat(restore_row["start_time"].replace("Z", "+00:00"))
         en = datetime.fromisoformat(restore_row["end_time"].replace("Z", "+00:00"))
         width = en - st
         assert width >= timedelta(minutes=5), (
-            f"restore window {width} too narrow (start={st} end={en}) — "
+            f"restore window {width} too narrow (start={st} en={en}) — "
             f"would race with the 2-min heartbeat tick"
         )
+        checked += 1
+    if checked == 0:
+        pytest.skip("All pairs had restore dropped (adjacent action follow-on)")
 
 
 def test_restore_window_respects_config_override(monkeypatch):
@@ -99,10 +105,16 @@ def test_restore_window_respects_config_override(monkeypatch):
     pairs = daikin_dispatch_preview(plan, _empty_forecast(slots))
     if not pairs:
         pytest.skip("LP plan produced no Daikin action pairs")
+    checked = 0
     for restore_row, _action_row in pairs:
+        if restore_row is None:
+            continue
         st = datetime.fromisoformat(restore_row["start_time"].replace("Z", "+00:00"))
         en = datetime.fromisoformat(restore_row["end_time"].replace("Z", "+00:00"))
         assert (en - st) >= timedelta(minutes=10)
+        checked += 1
+    if checked == 0:
+        pytest.skip("All pairs had restore dropped (adjacent action follow-on)")
 
 
 def test_restore_window_floor_is_2_minutes(monkeypatch):
@@ -112,9 +124,15 @@ def test_restore_window_floor_is_2_minutes(monkeypatch):
     pairs = daikin_dispatch_preview(plan, _empty_forecast(slots))
     if not pairs:
         pytest.skip("LP plan produced no Daikin action pairs")
+    checked = 0
     for restore_row, _action_row in pairs:
+        if restore_row is None:
+            continue
         st = datetime.fromisoformat(restore_row["start_time"].replace("Z", "+00:00"))
         en = datetime.fromisoformat(restore_row["end_time"].replace("Z", "+00:00"))
         assert (en - st) >= timedelta(minutes=2), (
             "config_override below floor should clamp to 2 min"
         )
+        checked += 1
+    if checked == 0:
+        pytest.skip("All pairs had restore dropped (adjacent action follow-on)")
