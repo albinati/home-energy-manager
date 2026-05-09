@@ -264,6 +264,13 @@ def daikin_dispatch_preview(
             "cheap": "pre_heat",
             "peak": "shutdown",
             "peak_export": "shutdown",
+            # PR 3 of plan: solar_charge → solar_preheat. The LP's PV-abundance
+            # ceiling lift means tank_temp_c[i+1] is already raised toward
+            # DHW_TEMP_MAX_C on these slots; dispatch translates that into a
+            # tank-target write + powerful boost. Restore row at end-of-window
+            # drops back to DHW_TEMP_NORMAL_C — same safety scaffolding as
+            # negative/cheap kinds.
+            "solar_charge": "solar_preheat",
         }.get(kind, "normal")
 
         mid = start_utc + timedelta(minutes=15)
@@ -283,11 +290,16 @@ def daikin_dispatch_preview(
             lwt = max(-2.0, float(config.OPTIMIZATION_LWT_OFFSET_MIN))
         tank_pow = ed > EPS
         tank_powful = ed >= max_b - 1e-3
+        # Powerful boost is enabled on negative *and* solar_preheat slots —
+        # both want to dump as much energy into the tank as possible while
+        # the slot lasts (negative: paid to import; solar: free PV otherwise
+        # exported / curtailed). All other kinds keep powerful off.
+        powerful_kinds = ("negative", "solar_charge")
         params: dict[str, Any] = {
             "lwt_offset": round(lwt, 1),  # Daikin rejects sub-0.1 precision; rounds float epsilon to 0.0
-            "tank_powerful": tank_powful if kind == "negative" else False,
+            "tank_powerful": tank_powful if kind in powerful_kinds else False,
             "tank_power": tank_pow,
-            "climate_on": es > EPS or ed > EPS or kind in ("negative", "cheap"),
+            "climate_on": es > EPS or ed > EPS or kind in ("negative", "cheap", "solar_charge"),
             "lp_optimizer": True,
         }
         # Only set tank_temp when the tank will be on — Daikin rejects temperatureControl on a powered-off tank.

@@ -559,12 +559,21 @@ def solve_lp(
             if wm[i] or we[i]:
                 prob += tank[i + 1] >= t_min_dhw
 
-    # Per-slot DHW ceiling: 48 °C unless price < 0 (then 65 °C).
-    # Soft constraint — heavy penalty on breach — so an initial tank already above 48 °C
-    # (inherited from a prior negative window) stays feasible and is allowed to cool
-    # naturally instead of forcing an infeasible instantaneous drop.
+    # Per-slot DHW ceiling: 48 °C unless price < 0 OR PV is abundant (then DHW_TEMP_MAX_C, default 65 °C).
+    # PV abundance per slot = (pv_avail − base_load − max battery charge headroom) > threshold.
+    # When true, free PV would otherwise be exported / curtailed; lifting the tank ceiling lets
+    # the LP store that energy as hot water for evening showers instead. Composes naturally with
+    # the negative-price lift — same mechanism, different trigger. Soft constraint: heavy penalty
+    # on breach so an initial tank already above 48 °C (inherited from a prior lift) stays feasible.
+    pv_abundance_threshold = float(getattr(config, "DHW_PV_ABUNDANCE_THRESHOLD_KWH", 0.5))
+    pv_abundance: list[bool] = [
+        (pv_avail[i] - base_load_kwh[i] - max_batt_kwh) > pv_abundance_threshold
+        for i in range(n)
+    ]
     tank_hi_slot = [
-        float(config.DHW_TEMP_MAX_C) if price_line[i] < 0 else float(config.DHW_TEMP_COMFORT_C)
+        float(config.DHW_TEMP_MAX_C)
+        if (price_line[i] < 0 or pv_abundance[i])
+        else float(config.DHW_TEMP_COMFORT_C)
         for i in range(n)
     ]
     s_tank_hi = pulp.LpVariable.dicts("tank_hi_slack", range(n), lowBound=0)
@@ -679,11 +688,26 @@ def solve_lp(
     obj_comfort = comfort_pen * pulp.lpSum(s_lo[i] + s_hi[i] for i in range(n))
     # DHW overshoot above the comfort ceiling is not a comfort issue — it's just stored
     # hot water that will drift back naturally via tank losses. A *tiny* penalty
-    # (0.01 p/°C-slot) breaks ties toward the lower tank target without blocking the LP
+    # (default 0.01 p/°C-slot, configurable via ``LP_TANK_HI_SLACK_PENCE_PER_DEGC_SLOT``;
+    # closes #225 item 1) breaks ties toward the lower tank target without blocking the LP
     # from filling the tank to 65 °C during negative-price windows (the whole point of
     # #50). Positive-price DHW heating is already discouraged by obj_grid, so no extra
     # penalty is needed to prevent gratuitous overshoot.
-    obj_tank_hi = 0.01 * pulp.lpSum(s_tank_hi[i] for i in range(n))
+    tank_hi_slack_p = float(getattr(config, "LP_TANK_HI_SLACK_PENCE_PER_DEGC_SLOT", 0.01))
+    obj_tank_hi = tank_hi_slack_p * pulp.lpSum(s_tank_hi[i] for i in range(n))
+    # PV-abundance DHW reward: when PV exceeds self-use + battery headroom, every kWh
+    # the LP routes into the tank instead of curtailing earns a small reward. Tied to
+    # the same per-slot bool used for the ceiling lift above. Reward must stay below
+    # ``EXPORT_RATE_PENCE × cop_dhw[i]`` so export still wins when more profitable —
+    # the unit test ``test_pv_abundance_reward_does_not_dominate_export`` enforces this.
+    pv_abundance_reward_p = float(getattr(config, "LP_PV_ABUNDANCE_TANK_REWARD_PENCE_PER_KWH", 0.0))
+    obj_pv_abundance_dhw: Any = 0
+    if pv_abundance_reward_p > 0:
+        abundant_indices = [i for i in range(n) if pv_abundance[i]]
+        if abundant_indices:
+            obj_pv_abundance_dhw = -pv_abundance_reward_p * pulp.lpSum(
+                e_dhw[i] for i in abundant_indices
+            )
     # PV curtailment penalty: prevents the LP from "happily curtailing" solar during
     # ForceCharge slots when the chg cap binds. Without this, pv_curt has zero objective
     # coefficient and the LP picks max-imp + curtail because grid imp at -7p ties or
@@ -696,7 +720,7 @@ def solve_lp(
     obj_pv_curt = (
         pv_curt_pen * pulp.lpSum(pv_curt[i] for i in range(n)) if pv_curt_pen > 0 else 0
     )
-    objective = obj_grid + obj_cycle + obj_comfort + obj_tank_hi + obj_pv_curt
+    objective = obj_grid + obj_cycle + obj_comfort + obj_tank_hi + obj_pv_curt + obj_pv_abundance_dhw
 
     if use_stress and stress_aux:
         # Stress cost is suppressed during negative-price slots: every kWh of
