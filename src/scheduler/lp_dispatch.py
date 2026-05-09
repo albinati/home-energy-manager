@@ -278,10 +278,40 @@ def daikin_dispatch_preview(
         outdoor = fc.temperature_c if fc else (plan.temp_outdoor_c[i0] if i0 < len(plan.temp_outdoor_c) else 0.0)
         peak_frost = kind == "peak" and outdoor < float(config.WEATHER_FROST_THRESHOLD_C)
 
-        j = min(i0, len(plan.dhw_electric_kwh) - 1)
-        ed = plan.dhw_electric_kwh[j] if plan.dhw_electric_kwh else 0.0
-        es = plan.space_electric_kwh[j] if plan.space_electric_kwh else 0.0
-        tt = plan.tank_temp_c[min(j + 1, len(plan.tank_temp_c) - 1)] if plan.tank_temp_c else float(config.DHW_TEMP_NORMAL_C)
+        # The merge in _merge_half_hour_slots_for_daikin groups slots by KIND
+        # (battery state), not by heat-pump activity. For solar_charge, the LP
+        # can plan e_dhw > 0 in just one slot inside a long merged window
+        # (e.g. one 30-min heat across a 3.5h window). Reading params from
+        # only the first slot would lose that — emitting tank_power=False
+        # for the whole window when the LP wanted heat in the middle.
+        #
+        # Scan the merged window for the MAX e_dhw and MAX tank_temp target.
+        # If any slot wants heat → tank_pow=True with the peak target. This
+        # is safe because Daikin's tolerance check skips the write when target
+        # is already met, so non-heating slots within the window become
+        # natural no-ops.
+        n_slots_in_window = max(1, round((end_utc - start_utc).total_seconds() / 1800))
+        i_end = min(i0 + n_slots_in_window, len(plan.dhw_electric_kwh)) if plan.dhw_electric_kwh else i0 + 1
+        j = min(i0, len(plan.dhw_electric_kwh) - 1) if plan.dhw_electric_kwh else 0
+        ed_max = max(
+            (plan.dhw_electric_kwh[k] for k in range(i0, i_end)),
+            default=0.0,
+        ) if plan.dhw_electric_kwh else 0.0
+        es_max = max(
+            (plan.space_electric_kwh[k] for k in range(i0, i_end)),
+            default=0.0,
+        ) if plan.space_electric_kwh else 0.0
+        # tank_temp_c is len N+1 (state at end of slot k is index k+1).
+        tt_max = max(
+            (plan.tank_temp_c[min(k + 1, len(plan.tank_temp_c) - 1)]
+             for k in range(i0, i_end)),
+            default=float(config.DHW_TEMP_NORMAL_C),
+        ) if plan.tank_temp_c else float(config.DHW_TEMP_NORMAL_C)
+        # Use first-slot params for the LWT offset (climate-curve adjustments
+        # don't accumulate the same way as DHW heat).
+        ed = ed_max
+        es = es_max
+        tt = tt_max
         # LP-derived LWT offset: continuous value back-computed from e_space[j] via the
         # inverse climate curve.  This replaces the old fixed-tier overrides so the solver's
         # energy decision directly controls the radiator temperature rather than a lookup table.
