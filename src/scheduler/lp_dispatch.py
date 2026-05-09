@@ -303,11 +303,24 @@ def daikin_dispatch_preview(
             "lp_optimizer": True,
         }
         # Only set tank_temp when the tank will be on — Daikin rejects temperatureControl on a powered-off tank.
-        # Floor at DHW_TEMP_COMFORT_C (48 °C); ceiling DHW_TEMP_MAX_C (65 °C).
-        # The LP already clamps tt ≤ 48 for positive-price slots and ≤ 65 for negative.
+        # Floor at DHW_TEMP_COMFORT_C (48 °C). Ceiling depends on slot kind:
+        #   negative      → DHW_TEMP_MAX_C (65 °C). Grid pays us; load all the kWh.
+        #   solar_charge  → DHW_TEMP_PV_ABUNDANCE_TARGET_C (55 °C). PV is free but
+        #                   holding 65 °C through afternoon bleeds standing losses
+        #                   before evening showers. Cap at 55 °C captures with
+        #                   margin without that bleed-back. Hard clamp here even
+        #                   though LP only soft-prefers it — Onecta write must
+        #                   reflect operator intent regardless of solver slack.
+        #   else (cheap)  → DHW_TEMP_MAX_C (65 °C). Cheap-grid imports may be
+        #                   marginal but the LP only emits cheap kind when it's
+        #                   chosen to charge → ride the LP plan.
         if tank_pow:
+            if kind == "solar_charge":
+                ceiling = float(config.DHW_TEMP_PV_ABUNDANCE_TARGET_C)
+            else:
+                ceiling = float(config.DHW_TEMP_MAX_C)
             params["tank_temp"] = round(
-                min(float(config.DHW_TEMP_MAX_C), max(float(config.DHW_TEMP_COMFORT_C), tt)),
+                min(ceiling, max(float(config.DHW_TEMP_COMFORT_C), tt)),
                 1,
             )
         if kind == "peak" or kind == "peak_export":

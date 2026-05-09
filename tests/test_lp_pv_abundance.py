@@ -86,6 +86,126 @@ def test_pv_abundance_lifts_tank_ceiling_above_comfort(
     )
 
 
+def test_dispatch_clamps_solar_preheat_at_pv_abundance_target_55c(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dispatch layer hard-clamps the solar_preheat tank target at
+    ``DHW_TEMP_PV_ABUNDANCE_TARGET_C`` (55 °C), even when the LP plan
+    specified a higher value. Holding 65 °C through afternoon bleeds standing
+    losses before evening showers. The LP's soft preference is a hint;
+    dispatch enforces the operator-defined hard cap on the actual Onecta write.
+
+    Negative-price slots still use the full DHW_TEMP_MAX_C (65 °C) cap —
+    only solar_charge is dispatched at the tighter target."""
+    from src.config import config as app_config
+    from src.scheduler.lp_dispatch import daikin_dispatch_preview
+    from src.scheduler.lp_optimizer import LpPlan
+
+    monkeypatch.setattr(app_config, "DAIKIN_CONTROL_MODE", "active", raising=False)
+    monkeypatch.setattr(app_config, "DHW_TEMP_PV_ABUNDANCE_TARGET_C", 55.0, raising=False)
+    monkeypatch.setattr(app_config, "DHW_TEMP_MAX_C", 65.0, raising=False)
+    monkeypatch.setattr(app_config, "DAIKIN_MIN_WINDOW_SLOTS", 1, raising=False)
+    monkeypatch.setattr(
+        "src.scheduler.lp_dispatch._optimization_preset_away_like",
+        lambda: False,
+        raising=True,
+    )
+
+    base = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    n = 4
+    plan = LpPlan(ok=True, status="Optimal", objective_pence=0.0,
+                  peak_threshold_pence=25.0, cheap_threshold_pence=10.0)
+    plan.slot_starts_utc = [base + timedelta(minutes=30 * i) for i in range(n)]
+    # Two solar_charge slots (PV-only charging) followed by two with chg<EPS price>0 → standard.
+    plan.price_pence = [15.0] * n
+    plan.import_kwh = [0.0] * n
+    plan.export_kwh = [0.0] * n
+    plan.battery_charge_kwh = [1.0, 1.0, 0.0, 0.0]
+    plan.battery_discharge_kwh = [0.0] * n
+    plan.dhw_electric_kwh = [0.6, 0.6, 0.0, 0.0]
+    plan.space_electric_kwh = [0.0] * n
+    plan.soc_kwh = [5.0, 6.0, 7.0, 7.0, 7.0]
+    # LP plan WANTS tank at 65°C — emulates a runaway-reward scenario where
+    # the soft cap was overridden. Dispatch must still clamp at 55.
+    plan.tank_temp_c = [40.0, 65.0, 65.0, 65.0, 65.0]
+    plan.indoor_temp_c = [21.0] * (n + 1)
+    plan.pv_curt_kwh = [0.0] * n
+    plan.lwt_offset_c = [0.0] * n
+    plan.temp_outdoor_c = [18.0] * n
+
+    pairs = daikin_dispatch_preview(plan, forecast=[])
+    solar_pairs = [
+        (rest, act) for rest, act in pairs
+        if act.get("action_type") == "solar_preheat"
+    ]
+    assert solar_pairs, "expected a solar_preheat action"
+    for _restore, action in solar_pairs:
+        # Every solar_preheat write must clamp at 55, NOT the LP plan's 65.
+        tank_temp = action["params"].get("tank_temp")
+        assert tank_temp is not None, action
+        assert tank_temp <= 55.0 + 0.001, (
+            f"solar_preheat dispatch must clamp at DHW_TEMP_PV_ABUNDANCE_TARGET_C "
+            f"(55), not honour LP plan's 65; got tank_temp={tank_temp}"
+        )
+        # Also above comfort floor — proving the lift fired.
+        assert tank_temp >= float(app_config.DHW_TEMP_COMFORT_C) - 0.001, action
+
+
+def test_dispatch_negative_price_action_uses_full_65c_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The PV-abundance dispatch clamp at 55 °C must NOT apply to
+    negative-price (max_heat) actions — those still use DHW_TEMP_MAX_C (65 °C).
+    Belt-and-braces against accidentally clamping the negative-price benefit."""
+    from src.config import config as app_config
+    from src.scheduler.lp_dispatch import daikin_dispatch_preview
+    from src.scheduler.lp_optimizer import LpPlan
+
+    monkeypatch.setattr(app_config, "DAIKIN_CONTROL_MODE", "active", raising=False)
+    monkeypatch.setattr(app_config, "DHW_TEMP_PV_ABUNDANCE_TARGET_C", 55.0, raising=False)
+    monkeypatch.setattr(app_config, "DHW_TEMP_MAX_C", 65.0, raising=False)
+    monkeypatch.setattr(app_config, "DAIKIN_MIN_WINDOW_SLOTS", 1, raising=False)
+    monkeypatch.setattr(
+        "src.scheduler.lp_dispatch._optimization_preset_away_like",
+        lambda: False,
+        raising=True,
+    )
+
+    base = datetime(2026, 1, 15, 1, 0, tzinfo=UTC)
+    n = 4
+    plan = LpPlan(ok=True, status="Optimal", objective_pence=0.0,
+                  peak_threshold_pence=25.0, cheap_threshold_pence=10.0)
+    plan.slot_starts_utc = [base + timedelta(minutes=30 * i) for i in range(n)]
+    # Negative price + grid charging → kind="negative" (not solar_charge)
+    plan.price_pence = [-5.0, -5.0, 10.0, 10.0]
+    plan.import_kwh = [2.0, 2.0, 0.0, 0.0]
+    plan.export_kwh = [0.0] * n
+    plan.battery_charge_kwh = [1.5, 1.5, 0.0, 0.0]
+    plan.battery_discharge_kwh = [0.0] * n
+    plan.dhw_electric_kwh = [0.6, 0.6, 0.0, 0.0]
+    plan.space_electric_kwh = [0.0] * n
+    plan.soc_kwh = [5.0, 6.0, 7.0, 7.0, 7.0]
+    plan.tank_temp_c = [40.0, 60.0, 65.0, 65.0, 65.0]
+    plan.indoor_temp_c = [21.0] * (n + 1)
+    plan.pv_curt_kwh = [0.0] * n
+    plan.lwt_offset_c = [0.0] * n
+    plan.temp_outdoor_c = [5.0] * n
+
+    pairs = daikin_dispatch_preview(plan, forecast=[])
+    neg_pairs = [
+        (rest, act) for rest, act in pairs
+        if act.get("action_type") == "max_heat"
+    ]
+    assert neg_pairs, "expected a max_heat action"
+    for _restore, action in neg_pairs:
+        tank_temp = action["params"].get("tank_temp")
+        assert tank_temp is not None, action
+        # negative slots may go up to 65 (not capped at 55).
+        assert tank_temp > 55.0, (
+            f"max_heat dispatch must allow tank_temp > 55; got {tank_temp}"
+        )
+
+
 # --------------------------------------------------------------------------
 # 2. Reward must NOT dominate export when export is profitable
 # --------------------------------------------------------------------------
