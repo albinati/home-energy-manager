@@ -578,11 +578,14 @@ class Config:
     DHW_PV_ABUNDANCE_THRESHOLD_KWH: float = float(
         os.getenv("DHW_PV_ABUNDANCE_THRESHOLD_KWH", "0.5")
     )
-    # Reward magnitude for PV-abundance DHW heating. Must be smaller than
-    # ``EXPORT_RATE_PENCE × cop_dhw[i]`` so genuinely-profitable export still
-    # wins. Default 0.5 p/kWh.
+    # Reward magnitude for PV-abundance DHW heating. Per user (2026-05-09):
+    # prefer tank-store over export when at home — household will use the
+    # stored hot water. Default 10 p/kWh × cop_dhw 3 ≈ 30 p/kWh equivalent
+    # stored value, well above 15 p export rate → tank wins. Zeroed at solve
+    # time when OPTIMIZATION_PRESET in (travel, away) — household isn't
+    # there to use stored hot water; revert to export-priority economics.
     LP_PV_ABUNDANCE_TANK_REWARD_PENCE_PER_KWH: float = float(
-        os.getenv("LP_PV_ABUNDANCE_TANK_REWARD_PENCE_PER_KWH", "0.5")
+        os.getenv("LP_PV_ABUNDANCE_TANK_REWARD_PENCE_PER_KWH", "10.0")
     )
     # Tank target ceiling on PV-abundance slots, distinct from
     # ``DHW_TEMP_MAX_C`` (65 °C) used on negative-price slots. The user's

@@ -856,10 +856,21 @@ def solve_lp(
     obj_tank_hi = tank_hi_slack_p * pulp.lpSum(s_tank_hi[i] for i in range(n))
     # PV-abundance DHW reward: when PV exceeds self-use + battery headroom, every kWh
     # the LP routes into the tank instead of curtailing earns a small reward. Tied to
-    # the same per-slot bool used for the ceiling lift above. Reward must stay below
-    # ``EXPORT_RATE_PENCE × cop_dhw[i]`` so export still wins when more profitable —
-    # the unit test ``test_pv_abundance_reward_does_not_dominate_export`` enforces this.
+    # the same per-slot bool used for the ceiling lift above.
+    #
+    # Per user 2026-05-09: prefer tank-store over export when at home (household
+    # will use the stored hot water). Default 10 p/kWh × cop ≈ 30 p stored
+    # value, well above 15 p export → tank wins. ZEROED here when preset is
+    # travel/away — household isn't there to use stored hot water, revert to
+    # export-priority economics.
     pv_abundance_reward_p = float(getattr(config, "LP_PV_ABUNDANCE_TANK_REWARD_PENCE_PER_KWH", 0.0))
+    try:
+        from ..presets import OperationPreset
+        _preset_value = OperationPreset(config.OPTIMIZATION_PRESET)
+        if _preset_value in (OperationPreset.TRAVEL, OperationPreset.AWAY):
+            pv_abundance_reward_p = 0.0
+    except (ValueError, AttributeError):
+        pass
     obj_pv_abundance_dhw: Any = 0
     if pv_abundance_reward_p > 0:
         abundant_indices = [i for i in range(n) if pv_abundance[i]]
