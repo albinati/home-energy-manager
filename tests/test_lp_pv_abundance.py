@@ -193,13 +193,113 @@ def test_dispatch_omits_tank_power_when_no_heat_planned_and_not_shutdown(
         )
 
 
+def test_overnight_idle_does_not_reset_on_cheap_grid_slots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Per user 2026-05-09: overnight tank-idle should NOT exit on a
+    cheap-grid battery-charging slot. Only PV abundance (solar_charge) or
+    negative-price slots reset the tracker. Cheap overnight charging is for
+    battery only — tank stays in low-target idle until real PV hits the
+    next day.
+    """
+    from src.config import config as app_config
+    from src.scheduler.lp_dispatch import lp_plan_to_slots
+    from src.scheduler.lp_optimizer import LpPlan
+
+    monkeypatch.setattr(app_config, "DHW_SHOWER_SCHEDULE", "19:00-22:00", raising=False)
+    monkeypatch.setattr(app_config, "DHW_TANK_OVERNIGHT_IDLE_ENABLED", "true", raising=False)
+    monkeypatch.setattr(app_config, "OPTIMIZATION_PRESET", "normal", raising=False)
+    monkeypatch.setattr(app_config, "ENERGY_STRATEGY_MODE", "savings_first", raising=False)
+
+    # Build slots covering Sat 18:00 BST → Sun 14:00 BST. Sat 19-22 = shower
+    # window. Sun 02:30 = cheap battery-charge (mimics overnight Octopus dip).
+    # Sun 11:00 = solar_charge (PV abundance). Test: slots between Sat 22:00
+    # and Sun 11:00 (including AROUND the cheap charge slot at 02:30) must
+    # all be tank_idle_overnight.
+    base = datetime(2026, 6, 1, 17, 0, tzinfo=UTC)  # 18:00 BST Sat
+    n = 40  # 20h
+    plan = LpPlan(ok=True, status="Optimal", objective_pence=0.0,
+                  peak_threshold_pence=25.0, cheap_threshold_pence=10.0)
+    plan.slot_starts_utc = [base + timedelta(minutes=30 * i) for i in range(n)]
+    plan.price_pence = [20.0] * n
+    plan.import_kwh = [0.0] * n
+    plan.export_kwh = [0.0] * n
+    plan.battery_charge_kwh = [0.0] * n
+    plan.battery_discharge_kwh = [0.0] * n
+    plan.dhw_electric_kwh = [0.0] * n
+    plan.space_electric_kwh = [0.0] * n
+    plan.soc_kwh = [5.0] * (n + 1)
+    plan.tank_temp_c = [45.0] * (n + 1)
+    plan.indoor_temp_c = [21.0] * (n + 1)
+    plan.pv_curt_kwh = [0.0] * n
+    plan.lwt_offset_c = [0.0] * n
+    plan.temp_outdoor_c = [18.0] * n
+
+    # Find slot indices for: Sun 02:30 (cheap-charge) and Sun 11:00 (solar)
+    tz_local = ZoneInfo("Europe/London")
+    sun_0230_idx = None
+    sun_1100_idx = None
+    for i, s in enumerate(plan.slot_starts_utc):
+        local = s.astimezone(tz_local)
+        if local.day == 2 and local.hour == 2 and local.minute == 30:
+            sun_0230_idx = i
+        if local.day == 2 and local.hour == 11 and local.minute == 0:
+            sun_1100_idx = i
+    assert sun_0230_idx is not None and sun_1100_idx is not None
+
+    # Inject cheap battery-charge at 02:30 (chg > EPS, grid_import > EPS)
+    plan.battery_charge_kwh[sun_0230_idx] = 0.5
+    plan.import_kwh[sun_0230_idx] = 0.5
+    plan.price_pence[sun_0230_idx] = 5.0  # cheap rate
+    # Inject PV-abundance at 11:00 (chg > EPS, no grid import = solar_charge)
+    plan.battery_charge_kwh[sun_1100_idx] = 0.5
+    plan.import_kwh[sun_1100_idx] = 0.0  # PV-only
+
+    slots = lp_plan_to_slots(plan)
+
+    # Verify: slots between Sat 22:00 and Sun 11:00 (excluding the cheap
+    # 02:30 itself, which keeps its "cheap" kind) should be tank_idle_overnight.
+    n_idle = 0
+    cheap_at_0230 = False
+    solar_at_1100 = False
+    idle_after_cheap = 0
+    for i, s in enumerate(slots):
+        local = s.start_utc.astimezone(tz_local)
+        if i == sun_0230_idx:
+            cheap_at_0230 = (s.kind == "cheap")
+            continue
+        if i == sun_1100_idx:
+            solar_at_1100 = (s.kind == "solar_charge")
+            continue
+        if local.day == 1 and local.hour >= 22:
+            # Sat night: should be tank_idle_overnight
+            if s.kind == "tank_idle_overnight":
+                n_idle += 1
+        elif local.day == 2 and local.hour < 11:
+            # Sun pre-PV: should ALSO be tank_idle_overnight (THIS is the bug:
+            # without the fix, tracker resets at the cheap 02:30 slot and
+            # subsequent slots stay "standard").
+            if s.kind == "tank_idle_overnight":
+                n_idle += 1
+                if i > sun_0230_idx:
+                    idle_after_cheap += 1
+    assert cheap_at_0230, "02:30 should be classified as cheap"
+    assert solar_at_1100, "11:00 should be classified as solar_charge"
+    assert n_idle > 5, f"expected several tank_idle_overnight slots; got {n_idle}"
+    assert idle_after_cheap > 0, (
+        f"After cheap-charge slot at 02:30, slots until 11:00 PV should still "
+        f"be tank_idle_overnight (cheap-grid charge does NOT reset tracker). "
+        f"Got {idle_after_cheap} idle-overnight slots after the cheap one."
+    )
+
+
 def test_lp_plan_to_slots_marks_post_shower_slots_as_idle_overnight(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """After the LAST shower window of the day, "standard" slots should be
     re-classified as ``tank_idle_overnight`` until the next productive slot
-    (cheap/negative/solar_charge) — meaning tank target drops to backup
-    overnight target (38°C default) instead of leaving it at NORMAL.
+    (solar_charge or negative — but NOT cheap) — meaning tank target drops
+    to backup overnight target (38°C default) instead of leaving it at NORMAL.
     """
     from src.config import config as app_config
     from src.scheduler.lp_dispatch import lp_plan_to_slots

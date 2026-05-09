@@ -180,7 +180,14 @@ def lp_plan_to_slots(plan: LpPlan) -> list[HalfHourSlot]:
             shower_mask = [False] * n
 
         seen_shower_in_window = False
-        productive_kinds = {"cheap", "negative", "solar_charge"}
+        # Reset overnight tracker ONLY on solar_charge (PV abundance kicks in)
+        # or negative-price slots (grid pays us — tank-heat free). NOT on
+        # cheap-grid battery-charging slots: a 02:30 cheap-charge slot for
+        # the battery doesn't mean "time to start tank heating" — tank
+        # should keep idling at low backup target until PV is available.
+        # Per user 2026-05-09: "we can heat it again during abundance of PV
+        # of the next day" — explicitly PV, not cheap-grid.
+        productive_kinds = {"negative", "solar_charge"}
         for i in range(n):
             if shower_mask[i]:
                 seen_shower_in_window = True
