@@ -526,25 +526,40 @@ def solve_lp(
         pass
     shower_windows = _resolve_active_shower_windows(guests_preset)
     shower_mask = _window_set_slot_mask(slot_starts_utc, tz, windows=shower_windows)
-    n_shower_slots = sum(1 for x in shower_mask if x)
     daily_shower_litres = float(getattr(config, "DHW_DAILY_SHOWER_LITRES", 0.0))
     cold_inlet_c = float(getattr(config, "DHW_COLD_INLET_TEMP_C", 10.0))
     use_temp_c = float(getattr(config, "DHW_USAGE_TEMP_C", 40.0))
     # Linearised hot-water draw per slot (kWh thermal). Hot litres drawn
     # from tank = mix_litres × (use - cold) / (target - cold). At target temp
     # (t_min_dhw) this gives a constant per slot.
-    if n_shower_slots > 0 and daily_shower_litres > 0 and t_min_dhw > cold_inlet_c:
-        litres_per_slot = daily_shower_litres / n_shower_slots
+    #
+    # CRITICAL: divide daily_shower_litres by the number of shower slots
+    # IN THAT SLOT'S LOCAL DAY, not by the horizon-wide total. A 48 h horizon
+    # with two daily shower windows has 12 shower slots total — using 12 as
+    # the divisor would split each day's draw across the OTHER day's slots
+    # too, under-modelling per-day draw by ~50%. Group by local date so
+    # each day's daily_litres distributes correctly across that day's slots.
+    from collections import defaultdict
+    slots_per_day: dict[Any, int] = defaultdict(int)
+    if daily_shower_litres > 0 and t_min_dhw > cold_inlet_c:
+        for i in range(n):
+            if shower_mask[i]:
+                local_date = slot_starts_utc[i].astimezone(tz).date()
+                slots_per_day[local_date] += 1
+
+    def _draw_j_for_slot(i: int) -> float:
+        if not shower_mask[i] or daily_shower_litres <= 0 or t_min_dhw <= cold_inlet_c:
+            return 0.0
+        local_date = slot_starts_utc[i].astimezone(tz).date()
+        n_today = slots_per_day.get(local_date, 0)
+        if n_today <= 0:
+            return 0.0
+        litres_per_slot = daily_shower_litres / n_today
         hot_litres = litres_per_slot * (use_temp_c - cold_inlet_c) / (t_min_dhw - cold_inlet_c)
         # Energy in J = L × CP_J/L/K × ΔT
-        draw_j_per_slot = hot_litres * float(config.DHW_WATER_CP) * (t_min_dhw - cold_inlet_c)
-    else:
-        draw_j_per_slot = 0.0
-    # Per-slot draw vector — non-zero only on shower-window slots.
-    shower_draw_j: list[float] = [
-        draw_j_per_slot if shower_mask[i] else 0.0
-        for i in range(n)
-    ]
+        return hot_litres * float(config.DHW_WATER_CP) * (t_min_dhw - cold_inlet_c)
+
+    shower_draw_j: list[float] = [_draw_j_for_slot(i) for i in range(n)]
 
     for i in range(n):
         e_hp_i = e_dhw[i] + e_space[i]

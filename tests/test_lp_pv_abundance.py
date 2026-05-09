@@ -440,6 +440,97 @@ def test_dispatch_emits_overnight_idle_action_at_38c(
         )
 
 
+def test_dispatch_drops_restore_when_next_action_immediately_follows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """REGRESSION: when ``tank_idle_overnight`` (38°C) ends right at the
+    start of the next solar_charge slot, the restore→45°C action would
+    cause firmware to briefly target 45 (with tank at 38) → grid reheat
+    38→45 → then solar_preheat sets 55. The 38→45 grid reheat is wasted
+    (~£0.07 per occurrence). Fix: drop the restore when next action's
+    start_time ≤ this restore's end_time."""
+    from src.config import config as app_config
+    from src.scheduler.lp_dispatch import daikin_dispatch_preview
+    from src.scheduler.lp_optimizer import LpPlan
+
+    monkeypatch.setattr(app_config, "DAIKIN_CONTROL_MODE", "active", raising=False)
+    monkeypatch.setattr(app_config, "DAIKIN_MIN_WINDOW_SLOTS", 1, raising=False)
+    monkeypatch.setattr(app_config, "DHW_SHOWER_SCHEDULE", "19:00-22:00", raising=False)
+    monkeypatch.setattr(app_config, "OPTIMIZATION_PRESET", "normal", raising=False)
+    monkeypatch.setattr(app_config, "ENERGY_STRATEGY_MODE", "savings_first", raising=False)
+    monkeypatch.setattr(
+        "src.scheduler.lp_dispatch._optimization_preset_away_like",
+        lambda: False,
+        raising=True,
+    )
+
+    # Build a sequence: shower 19-22, overnight idle 22-13:00, solar_charge
+    # 13:00-15:00. The restore at end of overnight (13:00 → 13:05) should
+    # be DROPPED because solar_charge starts at 13:00 immediately.
+    base = datetime(2026, 6, 1, 17, 0, tzinfo=UTC)  # 18:00 BST
+    n = 44  # 22h
+    plan = LpPlan(ok=True, status="Optimal", objective_pence=0.0,
+                  peak_threshold_pence=25.0, cheap_threshold_pence=10.0)
+    plan.slot_starts_utc = [base + timedelta(minutes=30 * i) for i in range(n)]
+    plan.price_pence = [20.0] * n
+    plan.import_kwh = [0.0] * n
+    plan.export_kwh = [0.0] * n
+    plan.battery_charge_kwh = [0.0] * n
+    plan.battery_discharge_kwh = [0.0] * n
+    plan.dhw_electric_kwh = [0.0] * n
+    plan.space_electric_kwh = [0.0] * n
+    plan.soc_kwh = [5.0] * (n + 1)
+    plan.tank_temp_c = [45.0] * (n + 1)
+    plan.indoor_temp_c = [21.0] * (n + 1)
+    plan.pv_curt_kwh = [0.0] * n
+    plan.lwt_offset_c = [0.0] * n
+    plan.temp_outdoor_c = [18.0] * n
+
+    # Force solar_charge slot at Sun 13:00 BST (12:00 UTC = slot index 38)
+    tz_local = ZoneInfo("Europe/London")
+    sun_1300_idx = None
+    for i, s in enumerate(plan.slot_starts_utc):
+        local = s.astimezone(tz_local)
+        if local.day == 2 and local.hour == 13 and local.minute == 0:
+            sun_1300_idx = i
+            break
+    assert sun_1300_idx is not None
+    plan.battery_charge_kwh[sun_1300_idx] = 0.5
+    plan.battery_charge_kwh[sun_1300_idx + 1] = 0.5
+    # No grid import → solar_charge
+
+    pairs = daikin_dispatch_preview(plan, forecast=[])
+
+    # Find the overnight idle pair AND the solar_preheat pair
+    overnight_idx = None
+    solar_idx = None
+    for i, (_r, a) in enumerate(pairs):
+        if a.get("action_type") == "tank_idle_overnight":
+            overnight_idx = i
+        elif a.get("action_type") == "solar_preheat":
+            solar_idx = i
+
+    assert overnight_idx is not None and solar_idx is not None, (
+        f"expected both overnight and solar_preheat pairs; got {[a.get('action_type') for _, a in pairs]}"
+    )
+    # The overnight ends right at solar_preheat's start → restore should be
+    # dropped (set to None).
+    overnight_rest, overnight_act = pairs[overnight_idx]
+    solar_rest, solar_act = pairs[solar_idx]
+
+    # Verify they are adjacent: overnight.end == solar.start
+    assert overnight_act["end_time"] == solar_act["start_time"], (
+        f"overnight end ({overnight_act['end_time']}) != solar start "
+        f"({solar_act['start_time']})"
+    )
+
+    # The restore should be None (skipped).
+    assert overnight_rest is None, (
+        f"Restore for tank_idle_overnight should be DROPPED when next action "
+        f"(solar_preheat) immediately follows; got {overnight_rest}"
+    )
+
+
 def _build_peak_plan(base: datetime, n: int = 4) -> "LpPlan":
     """Helper: synthetic plan with all slots at peak prices (no PV, no charge)."""
     from src.scheduler.lp_optimizer import LpPlan

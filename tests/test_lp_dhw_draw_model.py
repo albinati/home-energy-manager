@@ -86,6 +86,97 @@ def test_dhw_draw_model_drops_tank_temp_during_shower_window(
     )
 
 
+def test_dhw_draw_per_day_normalization_2day_horizon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """REGRESSION: daily_shower_litres must be divided by per-day shower
+    slot count, not the horizon-wide total. A 48h horizon with 2 daily
+    shower windows has 12 shower slots; using 12 as divisor would split
+    each day's draw across the OTHER day's slots, under-modelling per-day
+    draw by ~50%. Tank trajectory in the LP would diverge from physical
+    reality → firmware reheats from grid at unfavorable rates the LP
+    didn't predict (~£75-90/year of avoidable peak imports).
+    """
+    from src.config import config as app_config
+    from src.scheduler.lp_optimizer import (
+        _resolve_active_shower_windows,
+        _window_set_slot_mask,
+    )
+
+    monkeypatch.setattr(app_config, "DAIKIN_CONTROL_MODE", "active", raising=False)
+    monkeypatch.setattr(app_config, "DHW_SHOWER_SCHEDULE", "19:00-22:00", raising=False)
+    monkeypatch.setattr(app_config, "DHW_DAILY_SHOWER_LITRES", 144.0, raising=False)
+    monkeypatch.setattr(app_config, "DHW_USAGE_TEMP_C", 40.0, raising=False)
+    monkeypatch.setattr(app_config, "DHW_COLD_INLET_TEMP_C", 10.0, raising=False)
+    monkeypatch.setattr(app_config, "OPTIMIZATION_PRESET", "normal", raising=False)
+
+    # Solve the LP with a 48h horizon spanning 2 days.
+    # Each day's shower window: 19:00-22:00 BST = 6 slots × 30 min.
+    # Day 1: tank starts at 50°C. Day 2: tank should also reach the floor
+    # by end of shower window after appropriate heating.
+    base = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)  # 13:00 BST
+    n = 48  # 24 h
+    slots = [base + timedelta(minutes=30 * i) for i in range(n)]
+
+    # Sanity: there should be 6 shower slots in this 24h window
+    # (19:00, 19:30, 20:00, 20:30, 21:00, 21:30 BST = 6 slots).
+    tz = ZoneInfo("Europe/London")
+    shower_windows = _resolve_active_shower_windows(False)
+    mask = _window_set_slot_mask(slots, tz, windows=shower_windows)
+    n_mask_true = sum(1 for x in mask if x)
+    assert n_mask_true == 6, f"expected 6 shower slots in 24h, got {n_mask_true}"
+
+    # Now extend to 48h
+    n2 = 96
+    slots2 = [base + timedelta(minutes=30 * i) for i in range(n2)]
+    mask2 = _window_set_slot_mask(slots2, tz, windows=shower_windows)
+    n_mask_true_2 = sum(1 for x in mask2 if x)
+    assert n_mask_true_2 == 12, f"expected 12 shower slots in 48h, got {n_mask_true_2}"
+
+    # Solve the actual LP with 48h horizon
+    from src.scheduler.lp_optimizer import LpInitialState, solve_lp
+    plan = solve_lp(
+        slot_starts_utc=slots2,
+        price_pence=[20.0] * n2,
+        base_load_kwh=[0.3] * n2,
+        weather=_make_weather(slots2),
+        initial=LpInitialState(soc_kwh=4.0, tank_temp_c=50.0, indoor_temp_c=21.0),
+        tz=tz,
+    )
+    assert plan.ok, plan.status
+
+    # The total energy removed in shower-window slots must equal
+    # 2 days × daily_thermal_kWh ≈ 2 × 5 = 10 kWh thermal across both
+    # shower windows. Each day's window: ~5 kWh thermal. Per-slot: ~0.84 kWh.
+    #
+    # If the bug were still present (n=12 in divisor), per-slot draw would
+    # be ~0.42 kWh — half the correct value. Test below validates the
+    # per-day division is correct.
+    #
+    # We can't directly inspect shower_draw_j from outside solve_lp, but we
+    # can verify the LP plan: with correct draw, LP should plan ~5 kWh of
+    # heating PER DAY to maintain shower constraint. With the bug, it would
+    # plan only ~2.5 kWh per day.
+    daily_dhw_kwh: dict = {}
+    for i, t in enumerate(slots2):
+        local_d = t.astimezone(tz).date()
+        daily_dhw_kwh[local_d] = daily_dhw_kwh.get(local_d, 0.0) + plan.dhw_electric_kwh[i]
+    # Each day should have ~1.67 kWh electrical (5 kWh thermal / COP 3) of heating.
+    for d, kwh in daily_dhw_kwh.items():
+        # 0.84 expected — verify it's much closer to that than 0.42 (the bug)
+        # Floor the assertion at 1.0 kWh to detect the half-draw bug.
+        # (Could be slightly less than 1.67 because LP optimizes spread.)
+        if d == sorted(daily_dhw_kwh)[0]:
+            # First day's draw is the meaningful test (later days might be
+            # affected by horizon-end terminal-floor relaxation).
+            assert kwh > 1.0, (
+                f"Day {d}: LP planned only {kwh:.2f} kWh DHW heating. "
+                f"Expected ~1.67 kWh for 5 kWh thermal draw at COP 3. "
+                f"BUG: draw is being under-modelled (per-horizon vs per-day "
+                f"division)."
+            )
+
+
 def test_dhw_draw_model_zero_litres_disables_draw(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

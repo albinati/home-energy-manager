@@ -509,6 +509,33 @@ def daikin_dispatch_preview(
         }
         out.append((restore_row, action_row))
 
+    # Post-process: drop restore rows that are immediately superseded by the
+    # next action's start. Without this, the restore writes target=45 °C and
+    # then the next action immediately overwrites with its own target,
+    # causing a brief target-flip that can trigger a firmware reheat in the
+    # gap (~£0.07 per occurrence at typical mid-day rates).
+    #
+    # Specifically: when ``tank_idle_overnight`` ends at the start of the
+    # next solar_charge window, the restore→45 + solar_preheat→55 sequence
+    # would have firmware briefly target 45 (with tank at 38) → grid reheat
+    # 38→45 → then solar_preheat sets 55. The 38→45 grid reheat is wasted.
+    # Skipping the restore lets the next action take over directly.
+    #
+    # We only drop the RESTORE; the action itself is always preserved.
+    if len(out) >= 2:
+        deduped: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        for i, (rest, act) in enumerate(out):
+            if i + 1 < len(out):
+                next_rest, next_act = out[i + 1]
+                # If the next action starts at or before this restore's end,
+                # the restore would be immediately overwritten — drop it.
+                if next_act.get("start_time", "") <= rest.get("end_time", ""):
+                    # Mark restore as None — the action upserter will skip it.
+                    deduped.append((None, act))  # type: ignore[arg-type]
+                    continue
+            deduped.append((rest, act))
+        out = deduped
+
     return out
 
 
@@ -703,15 +730,20 @@ def write_daikin_from_lp_plan(
         )
     count = 0
     for restore_row, action_row in pairs:
-        rid = db.upsert_action(
-            plan_date=plan_date,
-            start_time=restore_row["start_time"],
-            end_time=restore_row["end_time"],
-            device="daikin",
-            action_type="restore",
-            params=restore_row["params"],
-            status="pending",
-        )
+        # Restore may be None when the next action immediately supersedes it
+        # (post-process skip in daikin_dispatch_preview avoids 38→45→55 flip).
+        rid: int | None = None
+        if restore_row is not None:
+            rid = db.upsert_action(
+                plan_date=plan_date,
+                start_time=restore_row["start_time"],
+                end_time=restore_row["end_time"],
+                device="daikin",
+                action_type="restore",
+                params=restore_row["params"],
+                status="pending",
+            )
+            count += 1
         aid = db.upsert_action(
             plan_date=plan_date,
             start_time=action_row["start_time"],
@@ -722,8 +754,9 @@ def write_daikin_from_lp_plan(
             status="pending",
             restore_action_id=rid,
         )
-        db.update_action_restore_link(aid, rid)
-        count += 2
+        if rid is not None:
+            db.update_action_restore_link(aid, rid)
+        count += 1
 
     return count
 
