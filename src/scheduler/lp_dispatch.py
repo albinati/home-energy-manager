@@ -403,10 +403,14 @@ def daikin_dispatch_preview(
         #     firmware/prior-action left it. Setting tank_power=False here would
         #     ACTIVELY DISABLE the tank, which is wrong intent.
         is_shutdown = kind in ("peak", "peak_export")
+        # CLIMATE HANDS-OFF: per user (2026-05-09), HEM does not touch the
+        # climate (space-heating) side. We do NOT emit climate_on or
+        # lwt_offset — Daikin firmware's own zone scheduling and weather
+        # curve handle space heating. The LP plans `e_space` as a forecast
+        # of likely consumption but doesn't direct it. All actions below are
+        # tank-only.
         params: dict[str, Any] = {
-            "lwt_offset": round(lwt, 1),  # Daikin rejects sub-0.1 precision; rounds float epsilon to 0.0
             "tank_powerful": tank_powful if kind in powerful_kinds else False,
-            "climate_on": es > EPS or ed > EPS or kind in ("negative", "cheap", "solar_charge"),
             "lp_optimizer": True,
         }
         if kind == "tank_idle_overnight":
@@ -414,18 +418,12 @@ def daikin_dispatch_preview(
             # target (default 38 °C). Firmware won't reheat from 50+ down to
             # 38 (current > setpoint, no action). If tank cools to 38 over
             # the long overnight, firmware maintains at 38 — backup buffer
-            # for unexpected morning shower. We also strip the climate-side
-            # params: user said "climate shouldn't change anytime, we are not
-            # discussing this yet" — leave Daikin's own zone scheduling alone.
-            params = {
-                "tank_powerful": False,
-                "tank_power": True,
-                "tank_temp": round(
-                    float(getattr(config, "DHW_TANK_OVERNIGHT_TARGET_C", 38.0)),
-                    1,
-                ),
-                "lp_optimizer": True,
-            }
+            # for unexpected morning shower.
+            params["tank_power"] = True
+            params["tank_temp"] = round(
+                float(getattr(config, "DHW_TANK_OVERNIGHT_TARGET_C", 38.0)),
+                1,
+            )
         elif is_shutdown:
             peak_strategy = (getattr(config, "DHW_PEAK_TANK_STRATEGY", "idle") or "idle").strip().lower()
             if peak_strategy == "shutdown":

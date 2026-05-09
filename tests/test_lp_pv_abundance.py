@@ -398,11 +398,14 @@ def test_dispatch_peak_idle_default_keeps_tank_on_normal_target(
             f"idle strategy must set tank_temp to DHW_TEMP_NORMAL_C (45°C), "
             f"NOT the absolute floor (30°C); got {params.get('tank_temp')}"
         )
-        # Climate STILL goes off during peak — that's a separate decision
-        # the user explicitly said is "not discussing this yet" so default
-        # behaviour (climate off during peak) is preserved.
-        assert params.get("climate_on") is False, (
-            f"peak should still turn climate off; params={params}"
+        # CLIMATE HANDS-OFF: HEM does not emit climate_on at all (per user
+        # 2026-05-09 — "we are not discussing climate yet"). Firmware
+        # autonomously manages the climate zone via its own schedule.
+        assert "climate_on" not in params, (
+            f"HEM must not touch climate_on; params={params}"
+        )
+        assert "lwt_offset" not in params, (
+            f"HEM must not touch lwt_offset (climate-side); params={params}"
         )
 
 
@@ -645,21 +648,25 @@ def test_dispatch_negative_price_action_uses_full_65c_cap(
 # 2. Reward must NOT dominate export when export is profitable
 # --------------------------------------------------------------------------
 
-def test_pv_abundance_reward_does_not_dominate_profitable_export(
+def test_pv_abundance_reward_zeroed_when_travel_or_away(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When export rate × COP > tank reward, the LP should still export
-    rather than dump everything into the tank. Guards the 'profit second'
-    side of the user's near-zero-grid-cost policy."""
+    """Per user 2026-05-09: prefer tank > export when AT HOME, but revert to
+    export-priority when travel/away (household isn't there to use stored hot
+    water). Test asserts the reward is zeroed under those presets — LP keeps
+    the standard export trade-off."""
     from src.config import config as app_config
+    monkeypatch.setattr(app_config, "DAIKIN_CONTROL_MODE", "active", raising=False)
     monkeypatch.setattr(app_config, "DHW_PV_ABUNDANCE_THRESHOLD_KWH", 0.5, raising=False)
-    monkeypatch.setattr(app_config, "LP_PV_ABUNDANCE_TANK_REWARD_PENCE_PER_KWH", 0.5, raising=False)
+    monkeypatch.setattr(app_config, "LP_PV_ABUNDANCE_TANK_REWARD_PENCE_PER_KWH", 10.0, raising=False)
+    # KEY: travel preset zeroes the reward at solve time.
+    monkeypatch.setattr(app_config, "OPTIMIZATION_PRESET", "travel", raising=False)
 
     base = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
     n = 4
     slots = [base + timedelta(minutes=30 * i) for i in range(n)]
-    # Plenty of PV; very high export rate (50p/kWh) → exporting is way more
-    # profitable than (reward 0.5p × cop_dhw 3.0 ≈ 1.5p of stored value).
+    # Healthy PV, profitable export rate (50p) → without the at-home reward,
+    # LP picks export (high revenue) over tank (lower deferred-heating value).
     plan = _solve(
         slots=slots,
         prices=[20.0] * n,
@@ -672,10 +679,43 @@ def test_pv_abundance_reward_does_not_dominate_profitable_export(
     assert plan.ok, plan.status
     total_export = sum(plan.export_kwh)
     total_dhw = sum(plan.dhw_electric_kwh)
-    # Most of the surplus PV must still go to export (dwarfs DHW heating).
     assert total_export > total_dhw * 3.0, (
-        f"Reward must not dominate profitable export; "
+        f"Travel/away preset should zero the reward → export wins. "
         f"export={total_export:.2f} kWh, dhw={total_dhw:.2f} kWh"
+    )
+
+
+def test_pv_abundance_reward_dominates_export_when_at_home(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default behaviour at home (preset=normal): user wants tank > export.
+    With 10 p/kWh reward × cop 3 ≈ 30 p stored value, well above 15 p export,
+    LP should prefer tank-storage."""
+    from src.config import config as app_config
+    monkeypatch.setattr(app_config, "DAIKIN_CONTROL_MODE", "active", raising=False)
+    monkeypatch.setattr(app_config, "DHW_PV_ABUNDANCE_THRESHOLD_KWH", 0.5, raising=False)
+    monkeypatch.setattr(app_config, "LP_PV_ABUNDANCE_TANK_REWARD_PENCE_PER_KWH", 10.0, raising=False)
+    monkeypatch.setattr(app_config, "OPTIMIZATION_PRESET", "normal", raising=False)
+
+    base = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    n = 4
+    slots = [base + timedelta(minutes=30 * i) for i in range(n)]
+    plan = _solve(
+        slots=slots,
+        prices=[20.0] * n,
+        pv=[3.0] * n,
+        base_load=[0.3] * n,
+        init_soc=4.0,
+        init_tank=40.0,
+        export_prices=[15.0] * n,  # typical Outgoing rate
+    )
+    assert plan.ok, plan.status
+    total_dhw = sum(plan.dhw_electric_kwh)
+    # Reward 10p × cop 3 = 30p stored value vs 15p export → tank wins. LP
+    # should plan substantial DHW heating.
+    assert total_dhw > 0.5, (
+        f"At home with reward=10, LP should prefer tank-storage over export; "
+        f"got dhw={total_dhw:.2f} kWh"
     )
 
 
