@@ -584,6 +584,15 @@ class Config:
     LP_PV_ABUNDANCE_TANK_REWARD_PENCE_PER_KWH: float = float(
         os.getenv("LP_PV_ABUNDANCE_TANK_REWARD_PENCE_PER_KWH", "0.5")
     )
+    # Tank target ceiling on PV-abundance slots, distinct from
+    # ``DHW_TEMP_MAX_C`` (65 °C) used on negative-price slots. The user's
+    # empirical manual schedule lifts to 45 °C on solar afternoons; this
+    # default 55 °C gives margin for guests + minor forecast error while
+    # avoiding the heavy standing losses of holding 65 °C through the day.
+    # Lower this toward 45 °C if standing-loss bleed-back becomes a concern.
+    DHW_TEMP_PV_ABUNDANCE_TARGET_C: float = float(
+        os.getenv("DHW_TEMP_PV_ABUNDANCE_TARGET_C", "55.0")
+    )
     # Slack penalty on the soft DHW ceiling (#225 item 1, was hardcoded 0.01).
     # Operators who want stricter comfort vs cost can tune this. Default 0.01
     # p/°C-slot preserves prior behaviour.

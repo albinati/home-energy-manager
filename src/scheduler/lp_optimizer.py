@@ -647,21 +647,26 @@ def solve_lp(
             if shower_mask[i]:
                 prob += tank[i + 1] >= t_min_dhw
 
-    # Per-slot DHW ceiling: 48 °C unless price < 0 OR PV is abundant (then DHW_TEMP_MAX_C, default 65 °C).
+    # Per-slot DHW ceiling — three tiers:
+    #   negative-price → DHW_TEMP_MAX_C (default 65 °C). Grid pays us; load all the kWh in.
+    #   PV-abundant   → DHW_TEMP_PV_ABUNDANCE_TARGET_C (default 55 °C). Lower than negative
+    #                   because (a) the user's empirical manual schedule lifts to 45 °C and
+    #                   (b) holding 65 °C through the day bleeds back via standing losses
+    #                   before the evening shower window arrives.
+    #   else          → DHW_TEMP_COMFORT_C (default 48 °C).
     # PV abundance per slot = (pv_avail − base_load − max battery charge headroom) > threshold.
-    # When true, free PV would otherwise be exported / curtailed; lifting the tank ceiling lets
-    # the LP store that energy as hot water for evening showers instead. Composes naturally with
-    # the negative-price lift — same mechanism, different trigger. Soft constraint: heavy penalty
-    # on breach so an initial tank already above 48 °C (inherited from a prior lift) stays feasible.
+    # Soft constraint: heavy penalty on breach so an initial tank already above the ceiling
+    # (inherited from a prior lift) stays feasible.
     pv_abundance_threshold = float(getattr(config, "DHW_PV_ABUNDANCE_THRESHOLD_KWH", 0.5))
     pv_abundance: list[bool] = [
         (pv_avail[i] - base_load_kwh[i] - max_batt_kwh) > pv_abundance_threshold
         for i in range(n)
     ]
+    pv_abundance_target = float(getattr(config, "DHW_TEMP_PV_ABUNDANCE_TARGET_C", 55.0))
+    # Negative-price wins when both conditions are true (always more aggressive).
     tank_hi_slot = [
-        float(config.DHW_TEMP_MAX_C)
-        if (price_line[i] < 0 or pv_abundance[i])
-        else float(config.DHW_TEMP_COMFORT_C)
+        float(config.DHW_TEMP_MAX_C) if price_line[i] < 0
+        else (pv_abundance_target if pv_abundance[i] else float(config.DHW_TEMP_COMFORT_C))
         for i in range(n)
     ]
     s_tank_hi = pulp.LpVariable.dicts("tank_hi_slack", range(n), lowBound=0)
