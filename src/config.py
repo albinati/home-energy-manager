@@ -552,6 +552,23 @@ class Config:
     LP_BATTERY_WEAR_COST_PENCE_PER_KWH: float = float(
         os.getenv("LP_BATTERY_WEAR_COST_PENCE_PER_KWH", "0.0")
     )
+    # Rank-based export-timing bonus (#274). On flat Outgoing-rate days the
+    # spread between top-quartile and median is small (~1–2 p/kWh), so the
+    # objective term ``-exp[i] × export_rate[i]`` doesn't strongly prefer
+    # top-quartile slots when they happen to coincide with low PV — the LP
+    # picks based on PV availability instead. This bonus adds a small extra
+    # reward for exporting in the horizon's top quartile, breaking ties on
+    # flat days while staying well below any genuinely profitable absolute
+    # spread (so it never causes curtailment when prices are uniformly low).
+    # Default 0.5 p/kWh = ~30 % of a typical flat-day spread.
+    LP_PEAK_EXPORT_RANK_BONUS_PENCE_PER_KWH: float = float(
+        os.getenv("LP_PEAK_EXPORT_RANK_BONUS_PENCE_PER_KWH", "0.5")
+    )
+    # Percentile cutoff for the rank bonus above. 25.0 = top quartile.
+    # Use a smaller number (e.g. 10) for a tighter "top decile" bonus.
+    LP_PEAK_EXPORT_TOP_QUARTILE_PERCENT: float = float(
+        os.getenv("LP_PEAK_EXPORT_TOP_QUARTILE_PERCENT", "25")
+    )
     # Comma-separated trigger reasons for which scenario LP runs. Other
     # triggers (drift, forecast_revision, hourly cron not in this list)
     # use only the nominal solve to keep latency low.

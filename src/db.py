@@ -261,6 +261,7 @@ CREATE TABLE IF NOT EXISTS dispatch_decisions (
     export_price_p_kwh REAL,
     refill_price_p_kwh REAL,
     economic_margin_p_kwh REAL,
+    outgoing_rate_percentile REAL,  -- #274: where the slot's Outgoing rate sat in the LP horizon (0=lowest, 100=highest)
     created_at TEXT NOT NULL,
     UNIQUE(run_id, slot_time_utc)
 );
@@ -898,6 +899,10 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE dispatch_decisions ADD COLUMN refill_price_p_kwh REAL")
     if "economic_margin_p_kwh" not in dd_cols:
         conn.execute("ALTER TABLE dispatch_decisions ADD COLUMN economic_margin_p_kwh REAL")
+    # #274: per-slot percentile of the Outgoing Agile rate within the LP
+    # horizon — where in the day's Outgoing distribution did this export sit?
+    if "outgoing_rate_percentile" not in dd_cols:
+        conn.execute("ALTER TABLE dispatch_decisions ADD COLUMN outgoing_rate_percentile REAL")
     # Older DBs predate the cloud-aware PV table (PR #232). Idempotent — when
     # the table is already created at SCHEMA-load time this block is a no-op.
     conn.execute(
@@ -4543,6 +4548,7 @@ def upsert_dispatch_decision(
     export_price_p_kwh: float | None = None,
     refill_price_p_kwh: float | None = None,
     economic_margin_p_kwh: float | None = None,
+    outgoing_rate_percentile: float | None = None,
 ) -> None:
     """Persist one slot's dispatch decision for the audit trail.
 
@@ -4560,8 +4566,9 @@ def upsert_dispatch_decision(
                    (run_id, slot_time_utc, lp_kind, dispatched_kind, committed,
                     reason, scen_optimistic_exp_kwh, scen_nominal_exp_kwh,
                     scen_pessimistic_exp_kwh, export_price_p_kwh,
-                    refill_price_p_kwh, economic_margin_p_kwh, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    refill_price_p_kwh, economic_margin_p_kwh,
+                    outgoing_rate_percentile, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(run_id, slot_time_utc) DO UPDATE SET
                      lp_kind=excluded.lp_kind,
                      dispatched_kind=excluded.dispatched_kind,
@@ -4573,13 +4580,15 @@ def upsert_dispatch_decision(
                      export_price_p_kwh=excluded.export_price_p_kwh,
                      refill_price_p_kwh=excluded.refill_price_p_kwh,
                      economic_margin_p_kwh=excluded.economic_margin_p_kwh,
+                     outgoing_rate_percentile=excluded.outgoing_rate_percentile,
                      created_at=excluded.created_at""",
                 (
                     run_id, slot_time_utc, lp_kind, dispatched_kind,
                     1 if committed else 0, reason,
                     scen_optimistic_exp_kwh, scen_nominal_exp_kwh,
                     scen_pessimistic_exp_kwh, export_price_p_kwh,
-                    refill_price_p_kwh, economic_margin_p_kwh, now_iso,
+                    refill_price_p_kwh, economic_margin_p_kwh,
+                    outgoing_rate_percentile, now_iso,
                 ),
             )
             conn.commit()
@@ -4596,7 +4605,8 @@ def get_dispatch_decisions(run_id: int) -> list[dict[str, Any]]:
                 """SELECT run_id, slot_time_utc, lp_kind, dispatched_kind, committed,
                           reason, scen_optimistic_exp_kwh, scen_nominal_exp_kwh,
                           scen_pessimistic_exp_kwh, export_price_p_kwh,
-                          refill_price_p_kwh, economic_margin_p_kwh, created_at
+                          refill_price_p_kwh, economic_margin_p_kwh,
+                          outgoing_rate_percentile, created_at
                    FROM dispatch_decisions
                    WHERE run_id = ?
                    ORDER BY slot_time_utc ASC""",

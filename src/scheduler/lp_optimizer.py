@@ -655,6 +655,26 @@ def solve_lp(
         imp[i] * price_line[i] - exp[i] * export_rate_line[i]
         for i in range(n)
     )
+    # Rank-based export-timing bonus (#274). On flat Outgoing-rate days the
+    # absolute spread between top-quartile and median can be ~1–2 p/kWh, so
+    # ``-exp[i] × export_rate[i]`` alone doesn't strongly prefer the top
+    # quartile when those slots happen to coincide with low PV. Add a small
+    # extra revenue term on slots whose Outgoing rate sits at or above the
+    # ``LP_PEAK_EXPORT_TOP_QUARTILE_PERCENT`` threshold of the LP horizon's
+    # distribution. The bonus is a tie-breaker — it must be small enough
+    # never to cause curtailment when prices are uniformly low.
+    rank_bonus_p = float(getattr(config, "LP_PEAK_EXPORT_RANK_BONUS_PENCE_PER_KWH", 0.0))
+    if rank_bonus_p > 0 and export_price_pence is not None:
+        positive_rates = [r for r in export_rate_line if r is not None and r > 0]
+        if len(positive_rates) >= 4:
+            pct = max(0.0, min(100.0, float(getattr(config, "LP_PEAK_EXPORT_TOP_QUARTILE_PERCENT", 25.0))))
+            sorted_rates = sorted(positive_rates)
+            cutoff_idx = int((1.0 - pct / 100.0) * len(sorted_rates))
+            cutoff_idx = min(max(cutoff_idx, 0), len(sorted_rates) - 1)
+            top_q_threshold = sorted_rates[cutoff_idx]
+            top_q_indices = [i for i in range(n) if export_rate_line[i] >= top_q_threshold]
+            if top_q_indices:
+                obj_grid -= rank_bonus_p * pulp.lpSum(exp[i] for i in top_q_indices)
     obj_cycle = cycle_pen * pulp.lpSum(chg[i] + dis[i] for i in range(n))
     obj_comfort = comfort_pen * pulp.lpSum(s_lo[i] + s_hi[i] for i in range(n))
     # DHW overshoot above the comfort ceiling is not a comfort issue — it's just stored
