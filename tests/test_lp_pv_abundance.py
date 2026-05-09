@@ -86,6 +86,51 @@ def test_pv_abundance_lifts_tank_ceiling_above_comfort(
     )
 
 
+def test_pv_abundance_threshold_relaxed_for_realistic_sunny_day(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The relaxed abundance formula triggers on realistic sunny-day PV
+    (~1.5 kWh/slot), not only peak-summer-noon (>3 kWh/slot).
+
+    The original PR #287 formula was ``(pv_avail − base_load − max_batt_kwh)``
+    which subtracted the inverter cap (~2.5 kWh/slot) — too restrictive for
+    a 4.5 kWp install whose typical sunny-day peak is 2-3 kWh/slot. The fix
+    drops the battery term: ``(pv_avail − base_load) > threshold``.
+
+    This test isolates the *threshold mechanics* (does the abundance flag
+    fire?) from the *economic competition* with export revenue. We zero the
+    export rate so the only LP incentive is the tank-storage reward.
+    Active mode used because passive clamps e_dhw."""
+    from src.config import config as app_config
+    monkeypatch.setattr(app_config, "DAIKIN_CONTROL_MODE", "active", raising=False)
+    monkeypatch.setattr(app_config, "DHW_PV_ABUNDANCE_THRESHOLD_KWH", 0.5, raising=False)
+    monkeypatch.setattr(app_config, "LP_PV_ABUNDANCE_TANK_REWARD_PENCE_PER_KWH", 5.0, raising=False)
+
+    base = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    n = 4
+    slots = [base + timedelta(minutes=30 * i) for i in range(n)]
+    plan = _solve(
+        slots=slots,
+        prices=[20.0] * n,
+        pv=[1.5] * n,        # Realistic sunny-day mid-day PV
+        base_load=[0.3] * n,
+        init_soc=8.5,
+        init_tank=40.0,
+        export_prices=[0.0] * n,  # Zero export revenue — isolate from export
+                                   # trade-off; pure threshold test.
+    )
+    assert plan.ok, plan.status
+    # Old formula: (1.5 − 0.3 − 2.5) = −1.3 < 0.5 → would NOT trigger.
+    # New formula: (1.5 − 0.3)        =  1.2 > 0.5 → triggers. With tank
+    # storage rewarded and export rate 0, LP must heat the tank to capture
+    # the only available value.
+    max_tank = max(plan.tank_temp_c[1:])
+    assert max_tank > float(app_config.DHW_TEMP_COMFORT_C) + 1.0, (
+        f"Relaxed PV-abundance threshold should fire on 1.5 kWh/slot PV "
+        f"(would not trigger under old formula); max_tank={max_tank:.1f}"
+    )
+
+
 def test_dispatch_clamps_solar_preheat_at_pv_abundance_target_55c(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
