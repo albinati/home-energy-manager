@@ -177,10 +177,14 @@ def fetch_consumption(
         period_from: Start of period (UTC). Defaults to 30 days ago.
         period_to: End of period (UTC). Defaults to now.
         group_by: Aggregation — None (half-hourly), "day", "week", "month"
-        order: "asc" (oldest first) or "desc"
+        order: "asc" (oldest first) or "desc". Mapped to Octopus's current
+            ``order_by`` values (``period`` / ``-period``); the legacy
+            ``asc``/``desc`` literals were rejected with HTTP 400 starting
+            ~2026-04, breaking the V13 nightly backfill silently.
 
     Returns:
-        List of ConsumptionSlot ordered by interval_start.
+        List of ConsumptionSlot sorted by interval_start ascending
+        (defensive sort, independent of the API's ordering).
     """
     if period_from is None:
         period_from = datetime.now(UTC) - timedelta(days=30)
@@ -191,10 +195,11 @@ def fetch_consumption(
         f"{OCTOPUS_BASE}/electricity-meter-points/{mpan}"
         f"/meters/{serial}/consumption/"
     )
+    order_by_param = "-period" if order == "desc" else "period"
     params: dict[str, str] = {
         "period_from": period_from.isoformat(),
         "period_to": period_to.isoformat(),
-        "order_by": order,
+        "order_by": order_by_param,
     }
     if group_by:
         params["group_by"] = group_by
@@ -213,6 +218,7 @@ def fetch_consumption(
                 interval_end=end,
                 consumption_kwh=float(kwh),
             ))
+    slots.sort(key=lambda s: s.interval_start)
     return slots
 
 

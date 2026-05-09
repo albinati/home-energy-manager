@@ -67,24 +67,92 @@ def _realised_export_pence(day: date) -> tuple[float, float]:
     return revenue, total_kwh
 
 
+def _realised_import_pence(day: date) -> tuple[float, float]:
+    """Per-slot ``import_kwh × Agile_slot_rate`` from MEASURED grid telemetry.
+
+    Returns ``(import_cost_pence, import_kwh_total)``. Per-slot import kWh comes
+    from :func:`db.half_hourly_grid_import_kwh_for_day` (trapezoidal integration
+    of ``pv_realtime_history.grid_import_kw``). Per-slot import rates come from
+    ``agile_rates`` matched on ``valid_from``.
+
+    Issue #306: replaces the load-based pre-image used by the legacy
+    ``realised_import_gbp`` field, which billed *household load* (not net grid
+    import) at Agile rates and inflated absolute £ figures ~3-4×.
+    """
+    bucket_kwh = db.half_hourly_grid_import_kwh_for_day(day)
+    if not bucket_kwh:
+        return 0.0, 0.0
+    a, b = _day_bounds(day)
+    # Pull every Agile import row touching the day (no tariff_code filter —
+    # we want whatever rate row the LP would have priced against).
+    rate_rows = db.get_execution_logs(from_ts=a, to_ts=b, limit=5000)
+    # The execution_log already aligns one row per slot with agile_price_pence
+    # at heartbeat write time, which is the same source the LP uses. Match
+    # buckets by slot ISO.
+    rate_by_start: dict[str, float] = {}
+    for r in rate_rows:
+        ts = r.get("timestamp")
+        p = r.get("agile_price_pence")
+        if ts is None or p is None:
+            continue
+        # Normalise heartbeat ts (microsecond precision) to half-hour slot key
+        try:
+            t = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            continue
+        slot_min = (t.minute // 30) * 30
+        slot = t.replace(minute=slot_min, second=0, microsecond=0)
+        slot_iso = slot.astimezone(UTC).isoformat().replace("+00:00", "Z")
+        rate_by_start.setdefault(slot_iso, float(p))
+    cost = 0.0
+    total_kwh = 0.0
+    matched = 0
+    unmatched_kwh = 0.0
+    for slot_iso, kwh in bucket_kwh.items():
+        rate = rate_by_start.get(slot_iso)
+        total_kwh += kwh
+        if rate is not None:
+            cost += kwh * rate
+            matched += 1
+        else:
+            unmatched_kwh += kwh
+    if unmatched_kwh > 0:
+        logger.info(
+            "Realised import %s: %d/%d slots matched Agile rates; %.3f kWh unmatched (priced at 0)",
+            day.isoformat(), matched, len(bucket_kwh), unmatched_kwh,
+        )
+    return cost, total_kwh
+
+
 def compute_daily_pnl(day: date) -> dict[str, Any]:
     """Daily PnL with apples-to-apples standing-charge accounting.
 
-    All shadow costs (SVT, Fixed, configured legacy fixed tariff) include the
-    standing charge so the deltas reflect what the household would actually
-    pay on each tariff. Realised cost on Agile likewise embeds the Agile
-    standing charge (``MANUAL_STANDING_CHARGE_PENCE_PER_DAY``) so the user-facing
-    "you saved £X vs SVT" figure isn't off by ~62p/day.
+    Two parallel views, both included in every result:
+
+    1. **Real-money fields** (``realised_net_cost_gbp``, ``*_shadow_real_gbp``,
+       ``delta_vs_*_real_gbp``, ``import_kwh``): computed from MEASURED grid
+       traffic in ``pv_realtime_history`` × per-slot tariff rates. This is
+       what actually moved through the meter.
+
+    2. **Load-billed counterfactual fields** (``realised_cost_gbp``,
+       ``*_shadow_gbp``, ``delta_vs_*_gbp``, ``kwh``): the legacy formulation
+       that bills the *whole household load* at Agile/SVT/Fixed rates. Useful
+       for "what would I pay if I had no solar/battery" framing but NOT what
+       the household actually paid. Inflates absolute £ ~3-4× on a typical
+       solar-rich day. Kept for backward compatibility (#306) — the brief
+       markdown labels these fields explicitly so callers can't confuse them.
+
+    All shadow costs include the standing charge so deltas reflect what the
+    household would actually pay on each tariff.
     """
     a, b = _day_bounds(day)
     rows = db.get_execution_logs(from_ts=a, to_ts=b, limit=5000)
     svt = svt_rate_pence()
     fixed = fixed_shadow_rate_pence()
-    realised_import = 0.0
+    realised_import_load = 0.0      # legacy: load × Agile (counterfactual)
     svt_energy_cost = 0.0
     fixed_energy_cost = 0.0
-    kwh_sum = 0.0
-    import_kwh = 0.0
+    kwh_sum = 0.0                   # household LOAD total (legacy)
     cheap_kwh = 0.0
     peak_kwh = 0.0
     for r in rows:
@@ -93,7 +161,7 @@ def compute_daily_pnl(day: date) -> dict[str, Any]:
         if p is None:
             continue
         kwh_sum += kwh
-        realised_import += kwh * float(p)
+        realised_import_load += kwh * float(p)
         svt_energy_cost += kwh * svt
         fixed_energy_cost += kwh * fixed
         sk = (r.get("slot_kind") or "").lower()
@@ -101,30 +169,43 @@ def compute_daily_pnl(day: date) -> dict[str, Any]:
             peak_kwh += kwh
         if sk in ("negative", "cheap"):
             cheap_kwh += kwh
-        if float(p) > 0 and kwh > 0:
-            import_kwh += kwh
 
     export_revenue, export_kwh = _realised_export_pence(day)
+    real_import_cost, import_kwh = _realised_import_pence(day)
     standing_p = float(config.MANUAL_STANDING_CHARGE_PENCE_PER_DAY or 0)
 
-    # Net daily cost = (energy import + standing) − export earnings.
-    # Standing is a fixed daily fee on Agile too, so it MUST be in here for
-    # comparisons to be meaningful.
-    realised = realised_import + standing_p - export_revenue
+    # === Legacy "load-billed" view (counterfactual: if no solar/battery) ===
+    realised = realised_import_load + standing_p - export_revenue
     svt_cost = svt_energy_cost + standing_p
     fixed_cost = fixed_energy_cost + standing_p
-
     alpha_svt = (svt_cost - realised) / 100.0
     alpha_fixed = (fixed_cost - realised) / 100.0
 
+    # === Real-money view (measured grid traffic × rates) ===
+    realised_real = real_import_cost + standing_p - export_revenue
+    svt_real = (import_kwh * svt) + standing_p - export_revenue
+    fixed_real = (import_kwh * fixed) + standing_p - export_revenue
+    alpha_svt_real = (svt_real - realised_real) / 100.0
+    alpha_fixed_real = (fixed_real - realised_real) / 100.0
+
     out: dict[str, Any] = {
         "date": day.isoformat(),
-        "kwh": round(kwh_sum, 3),
-        "realised_cost_gbp": round(realised / 100.0, 4),
-        "realised_import_gbp": round(realised_import / 100.0, 4),
+        # === Real-money (preferred — use these for user-facing £ figures) ===
+        "realised_net_cost_gbp": round(realised_real / 100.0, 4),
+        "import_kwh": round(import_kwh, 3),
+        "import_cost_gbp": round(real_import_cost / 100.0, 4),
+        "svt_shadow_real_gbp": round(svt_real / 100.0, 4),
+        "fixed_shadow_real_gbp": round(fixed_real / 100.0, 4),
+        "delta_vs_svt_real_gbp": round(alpha_svt_real, 4),
+        "delta_vs_fixed_real_gbp": round(alpha_fixed_real, 4),
+        # === Shared (true regardless of view) ===
         "export_revenue_gbp": round(export_revenue / 100.0, 4),
         "export_kwh": round(export_kwh, 3),
         "standing_charge_gbp": round(standing_p / 100.0, 4),
+        # === Legacy "load-billed" counterfactual (DO NOT quote as real money) ===
+        "kwh": round(kwh_sum, 3),
+        "realised_cost_gbp": round(realised / 100.0, 4),
+        "realised_import_gbp": round(realised_import_load / 100.0, 4),
         "svt_shadow_gbp": round(svt_cost / 100.0, 4),
         "fixed_shadow_gbp": round(fixed_cost / 100.0, 4),
         "delta_vs_svt_gbp": round(alpha_svt, 4),
@@ -134,14 +215,17 @@ def compute_daily_pnl(day: date) -> dict[str, Any]:
     }
 
     # Optional: legacy fixed tariff comparison (e.g. previous British Gas plan).
-    # Skipped entirely when not configured so the brief stays clean.
+    # Both real and load-billed flavours emitted when configured.
     bg_rate = float(config.FIXED_TARIFF_RATE_PENCE or 0)
     bg_standing = float(config.FIXED_TARIFF_STANDING_PENCE_PER_DAY or 0)
     if bg_rate > 0 and bg_standing > 0:
-        bg_cost = (kwh_sum * bg_rate) + bg_standing
+        bg_cost_load = (kwh_sum * bg_rate) + bg_standing
+        bg_cost_real = (import_kwh * bg_rate) + bg_standing - export_revenue
         out["fixed_tariff_label"] = config.FIXED_TARIFF_LABEL or "fixed tariff"
-        out["fixed_tariff_shadow_gbp"] = round(bg_cost / 100.0, 4)
-        out["delta_vs_fixed_tariff_gbp"] = round((bg_cost - realised) / 100.0, 4)
+        out["fixed_tariff_shadow_real_gbp"] = round(bg_cost_real / 100.0, 4)
+        out["delta_vs_fixed_tariff_real_gbp"] = round((bg_cost_real - realised_real) / 100.0, 4)
+        out["fixed_tariff_shadow_gbp"] = round(bg_cost_load / 100.0, 4)
+        out["delta_vs_fixed_tariff_gbp"] = round((bg_cost_load - realised) / 100.0, 4)
 
     return out
 
@@ -260,6 +344,13 @@ def compute_period_pnl(start_day: date, end_day: date, *, label: str = "") -> di
                     f"Entire range predates AGILE_TARIFF_START_DATE={agile_start.isoformat()}"
                 ),
                 "n_days": 0,
+                "realised_net_cost_gbp": 0.0,
+                "import_kwh": 0.0,
+                "import_cost_gbp": 0.0,
+                "svt_shadow_real_gbp": 0.0,
+                "fixed_shadow_real_gbp": 0.0,
+                "delta_vs_svt_real_gbp": 0.0,
+                "delta_vs_fixed_real_gbp": 0.0,
                 "kwh": 0.0,
                 "realised_cost_gbp": 0.0,
                 "realised_import_gbp": 0.0,
@@ -283,12 +374,22 @@ def compute_period_pnl(start_day: date, end_day: date, *, label: str = "") -> di
     n = (end_day - start_day).days + 1
 
     totals = {
-        "kwh": 0.0,
-        "realised_cost_gbp": 0.0,
-        "realised_import_gbp": 0.0,
+        # Real-money axis
+        "realised_net_cost_gbp": 0.0,
+        "import_kwh": 0.0,
+        "import_cost_gbp": 0.0,
+        "svt_shadow_real_gbp": 0.0,
+        "fixed_shadow_real_gbp": 0.0,
+        "delta_vs_svt_real_gbp": 0.0,
+        "delta_vs_fixed_real_gbp": 0.0,
+        # Shared
         "export_revenue_gbp": 0.0,
         "export_kwh": 0.0,
         "standing_charge_gbp": 0.0,
+        # Legacy load-billed axis
+        "kwh": 0.0,
+        "realised_cost_gbp": 0.0,
+        "realised_import_gbp": 0.0,
         "svt_shadow_gbp": 0.0,
         "fixed_shadow_gbp": 0.0,
         "delta_vs_svt_gbp": 0.0,
@@ -298,6 +399,8 @@ def compute_period_pnl(start_day: date, end_day: date, *, label: str = "") -> di
     }
     bg_shadow = 0.0
     bg_delta = 0.0
+    bg_shadow_real = 0.0
+    bg_delta_real = 0.0
     bg_label: str | None = None
     bg_seen = False
 
@@ -310,6 +413,8 @@ def compute_period_pnl(start_day: date, end_day: date, *, label: str = "") -> di
             bg_seen = True
             bg_shadow += float(p["fixed_tariff_shadow_gbp"])
             bg_delta += float(p["delta_vs_fixed_tariff_gbp"])
+            bg_shadow_real += float(p.get("fixed_tariff_shadow_real_gbp") or 0.0)
+            bg_delta_real += float(p.get("delta_vs_fixed_tariff_real_gbp") or 0.0)
             bg_label = bg_label or p.get("fixed_tariff_label")
 
     base_label = label or f"{start_day.isoformat()}..{end_day.isoformat()}"
@@ -329,6 +434,8 @@ def compute_period_pnl(start_day: date, end_day: date, *, label: str = "") -> di
     out.update({k: round(v, 4 if not k.endswith("_kwh") else 3) for k, v in totals.items()})
     if bg_seen:
         out["fixed_tariff_label"] = bg_label or "fixed tariff"
+        out["fixed_tariff_shadow_real_gbp"] = round(bg_shadow_real, 4)
+        out["delta_vs_fixed_tariff_real_gbp"] = round(bg_delta_real, 4)
         out["fixed_tariff_shadow_gbp"] = round(bg_shadow, 4)
         out["delta_vs_fixed_tariff_gbp"] = round(bg_delta, 4)
     return out
