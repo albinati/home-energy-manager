@@ -508,6 +508,44 @@ def solve_lp(
         else [flat_export_rate] * n
     )
 
+    # Resolve shower windows + DHW draw model EARLY (before the per-slot loop)
+    # so the tank thermo equation can subtract the realistic shower-time draw
+    # from each slot's energy balance. Without this, the LP only sees standing
+    # loss (~0.5°C/h) and misses the much bigger drop from someone showering
+    # (~6°C per shower for a 200L tank). Result without it: LP plans no
+    # heating during the day, evening tank is technically ≥ 45°C in the LP's
+    # math but reality has tank dropping below 45°C mid-shower → firmware
+    # reheats at unfavorable rates the LP didn't predict.
+    #
+    # Static-physics version (this PR; bridges to V11-C / #196's learned prior).
+    guests_preset = False
+    try:
+        from ..presets import OperationPreset
+        guests_preset = OperationPreset(config.OPTIMIZATION_PRESET) == OperationPreset.GUESTS
+    except (ValueError, AttributeError):
+        pass
+    shower_windows = _resolve_active_shower_windows(guests_preset)
+    shower_mask = _window_set_slot_mask(slot_starts_utc, tz, windows=shower_windows)
+    n_shower_slots = sum(1 for x in shower_mask if x)
+    daily_shower_litres = float(getattr(config, "DHW_DAILY_SHOWER_LITRES", 0.0))
+    cold_inlet_c = float(getattr(config, "DHW_COLD_INLET_TEMP_C", 10.0))
+    use_temp_c = float(getattr(config, "DHW_USAGE_TEMP_C", 40.0))
+    # Linearised hot-water draw per slot (kWh thermal). Hot litres drawn
+    # from tank = mix_litres × (use - cold) / (target - cold). At target temp
+    # (t_min_dhw) this gives a constant per slot.
+    if n_shower_slots > 0 and daily_shower_litres > 0 and t_min_dhw > cold_inlet_c:
+        litres_per_slot = daily_shower_litres / n_shower_slots
+        hot_litres = litres_per_slot * (use_temp_c - cold_inlet_c) / (t_min_dhw - cold_inlet_c)
+        # Energy in J = L × CP_J/L/K × ΔT
+        draw_j_per_slot = hot_litres * float(config.DHW_WATER_CP) * (t_min_dhw - cold_inlet_c)
+    else:
+        draw_j_per_slot = 0.0
+    # Per-slot draw vector — non-zero only on shower-window slots.
+    shower_draw_j: list[float] = [
+        draw_j_per_slot if shower_mask[i] else 0.0
+        for i in range(n)
+    ]
+
     for i in range(n):
         e_hp_i = e_dhw[i] + e_space[i]
 
@@ -562,7 +600,10 @@ def solve_lp(
         # DHW tank thermodynamics
         q_heat_dhw = e_dhw[i] * cop_dhw[i] * j_per_kwh
         loss_tank_j = ua_tank * (tank[i] - t_in[i]) * dt_s
-        prob += tank[i + 1] == tank[i] + (q_heat_dhw - loss_tank_j) / c_tank
+        # DHW draw on shower-window slots (static-physics model). Pre-computed
+        # in shower_draw_j[i]; zero outside shower windows.
+        draw_j_i = shower_draw_j[i]
+        prob += tank[i + 1] == tank[i] + (q_heat_dhw - loss_tank_j - draw_j_i) / c_tank
 
         # Building thermodynamics
         q_heat_space = e_space[i] * cop_space[i] * j_per_kwh
