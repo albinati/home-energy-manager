@@ -355,13 +355,16 @@ def daikin_dispatch_preview(
                 params["tank_power"] = False
                 # No tank_temp — tank off, target is meaningless.
             else:
-                # IDLE strategy: keep tank on at a low target so firmware
-                # doesn't reheat. Tank stays warm from prior heating; standing
-                # losses over peak window are minimal vs cycle overhead of a
-                # full power-off / power-on transition.
+                # IDLE strategy: keep tank on at the NORMAL target. If tank
+                # was inherited above target (e.g. from prior solar_preheat),
+                # firmware just stops reheating — no grid draw, tank cools
+                # naturally. If tank is at-or-below target, firmware maintains
+                # at the setpoint (small reheats only when needed). User's
+                # validated approach for well-insulated tanks: don't shut off,
+                # just lower the target back to "normal" and let physics work.
                 params["tank_power"] = True
                 params["tank_temp"] = round(
-                    float(getattr(config, "DHW_TEMP_MIN_FLOOR_C", 30.0)),
+                    float(getattr(config, "DHW_TEMP_NORMAL_C", 45.0)),
                     1,
                 )
         elif tank_pow:
