@@ -195,17 +195,31 @@ def _format_pnl_block(pnl: dict[str, Any], *, day: date, tz: ZoneInfo) -> list[s
     delta is genuine "money saved" not "energy-cost-only saved".
     """
     out: list[str] = []
-    net = pnl["realised_cost_gbp"]
-    imp = pnl["realised_import_gbp"]
+    # Real-money view (preferred for user-facing £)
+    net_real = pnl.get("realised_net_cost_gbp")
+    imp_kwh = pnl.get("import_kwh")
+    imp_real = pnl.get("import_cost_gbp")
     std = pnl.get("standing_charge_gbp", 0.0)
     exp_gbp = pnl["export_revenue_gbp"]
     exp_kwh = pnl["export_kwh"]
+    # Legacy load-billed view (counterfactual: if no solar/battery)
+    net_load = pnl["realised_cost_gbp"]
+    imp_load = pnl["realised_import_gbp"]
     used_kwh = pnl["kwh"]
 
-    out.append(
-        f"- Net cost: £{net:+.2f}  (import £{imp:.2f} + standing £{std:.2f} − export £{exp_gbp:.2f})"
-    )
-    out.append(f"- Energy used: {used_kwh:.1f} kWh  |  exported: {exp_kwh:.1f} kWh")
+    if net_real is not None and imp_real is not None and imp_kwh is not None:
+        out.append(
+            f"- Net cost: **£{net_real:+.2f}** (real, metered) "
+            f"— import £{imp_real:.2f} ({imp_kwh:.1f} kWh) + standing £{std:.2f} − export £{exp_gbp:.2f}"
+        )
+        out.append(
+            f"- Energy used: {used_kwh:.1f} kWh  |  imported: {imp_kwh:.1f} kWh  |  exported: {exp_kwh:.1f} kWh"
+        )
+    else:
+        out.append(
+            f"- Net cost: £{net_load:+.2f}  (import £{imp_load:.2f} + standing £{std:.2f} − export £{exp_gbp:.2f})"
+        )
+        out.append(f"- Energy used: {used_kwh:.1f} kWh  |  exported: {exp_kwh:.1f} kWh")
 
     # Forecasted-export fallback: telemetry sometimes drops grid_export_kw
     # samples, leaving export_kwh=0 even on days where the LP committed
@@ -220,26 +234,44 @@ def _format_pnl_block(pnl: dict[str, Any], *, day: date, tz: ZoneInfo) -> list[s
                 f"(from {f_slots} committed peak_export slot{'s' if f_slots != 1 else ''})"
             )
 
-    if "delta_vs_fixed_tariff_gbp" in pnl:
+    # Prefer real-money deltas when available, fall back to load-billed
+    have_real = "delta_vs_svt_real_gbp" in pnl
+
+    if "delta_vs_fixed_tariff_real_gbp" in pnl or "delta_vs_fixed_tariff_gbp" in pnl:
         label = pnl.get("fixed_tariff_label") or "fixed tariff"
-        shadow = pnl["fixed_tariff_shadow_gbp"]
-        delta = pnl["delta_vs_fixed_tariff_gbp"]
+        if have_real and "fixed_tariff_shadow_real_gbp" in pnl:
+            shadow = pnl["fixed_tariff_shadow_real_gbp"]
+            delta = pnl["delta_vs_fixed_tariff_real_gbp"]
+        else:
+            shadow = pnl["fixed_tariff_shadow_gbp"]
+            delta = pnl["delta_vs_fixed_tariff_gbp"]
         out.append(
             f"- vs {label} (would have cost £{shadow:.2f}): "
             f"£{delta:+.2f} {'saved' if delta >= 0 else 'extra'}"
         )
-    out.append(
-        f"- vs SVT (would have cost £{pnl['svt_shadow_gbp']:.2f}): "
-        f"£{pnl['delta_vs_svt_gbp']:+.2f} {'saved' if pnl['delta_vs_svt_gbp'] >= 0 else 'extra'}"
-    )
-    # "fixed shadow" is the legacy MANUAL_TARIFF_IMPORT_PENCE comparison —
-    # it falls back to SVT when not configured, so suppress the line in
-    # that case to avoid showing the same number twice.
-    if pnl["fixed_shadow_gbp"] != pnl["svt_shadow_gbp"]:
+
+    if have_real:
         out.append(
-            f"- vs fixed shadow (£{pnl['fixed_shadow_gbp']:.2f}): "
-            f"£{pnl['delta_vs_fixed_gbp']:+.2f} {'saved' if pnl['delta_vs_fixed_gbp'] >= 0 else 'extra'}"
+            f"- vs SVT (would have cost £{pnl['svt_shadow_real_gbp']:.2f}): "
+            f"£{pnl['delta_vs_svt_real_gbp']:+.2f} "
+            f"{'saved' if pnl['delta_vs_svt_real_gbp'] >= 0 else 'extra'}"
         )
+        if pnl["fixed_shadow_real_gbp"] != pnl["svt_shadow_real_gbp"]:
+            out.append(
+                f"- vs fixed shadow (£{pnl['fixed_shadow_real_gbp']:.2f}): "
+                f"£{pnl['delta_vs_fixed_real_gbp']:+.2f} "
+                f"{'saved' if pnl['delta_vs_fixed_real_gbp'] >= 0 else 'extra'}"
+            )
+    else:
+        out.append(
+            f"- vs SVT (would have cost £{pnl['svt_shadow_gbp']:.2f}): "
+            f"£{pnl['delta_vs_svt_gbp']:+.2f} {'saved' if pnl['delta_vs_svt_gbp'] >= 0 else 'extra'}"
+        )
+        if pnl["fixed_shadow_gbp"] != pnl["svt_shadow_gbp"]:
+            out.append(
+                f"- vs fixed shadow (£{pnl['fixed_shadow_gbp']:.2f}): "
+                f"£{pnl['delta_vs_fixed_gbp']:+.2f} {'saved' if pnl['delta_vs_fixed_gbp'] >= 0 else 'extra'}"
+            )
     return out
 
 
@@ -357,17 +389,21 @@ def build_brief_48h_summary(now_utc: datetime | None = None) -> str:
     today_line = _compact_tier(today)
     tomorrow_line = _compact_tier(tomorrow)
 
-    # Line 3 — running PnL today (best-effort)
+    # Line 3 — running PnL today (best-effort). Prefer real-money fields.
     pnl_line = "n/a"
     try:
         pnl = compute_daily_pnl(today)
-        if pnl and "realised_cost_gbp" in pnl:
-            net = pnl["realised_cost_gbp"]
-            svt = pnl.get("svt_shadow_gbp")
-            if svt is not None:
-                pnl_line = f"net £{net:+.2f} (SVT shadow £{svt:+.2f})"
-            else:
-                pnl_line = f"net £{net:+.2f}"
+        if pnl:
+            net = pnl.get("realised_net_cost_gbp")
+            svt = pnl.get("svt_shadow_real_gbp")
+            if net is None:
+                net = pnl.get("realised_cost_gbp")
+                svt = pnl.get("svt_shadow_gbp")
+            if net is not None:
+                if svt is not None:
+                    pnl_line = f"net £{net:+.2f} (SVT shadow £{svt:+.2f})"
+                else:
+                    pnl_line = f"net £{net:+.2f}"
     except Exception:
         pass
 

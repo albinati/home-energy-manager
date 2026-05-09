@@ -2875,24 +2875,26 @@ def compute_fox_energy_daily_from_realtime(
     return out
 
 
-def half_hourly_grid_export_kwh_for_day(
+def _half_hourly_grid_kwh_for_day(
     day: date,
+    column: str,
     *,
     max_gap_seconds: int = 1800,
 ) -> dict[str, float]:
-    """Per-slot grid-export kWh for ``day``, keyed by ISO half-hour slot start (UTC).
+    """Shared trapezoidal-integration over ``pv_realtime_history.<column>`` for
+    ``day``, keyed by ISO half-hour slot start (UTC). ``column`` must be one of
+    ``grid_export_kw`` / ``grid_import_kw`` (caller-vetted).
 
-    Trapezoidal-integrates ``pv_realtime_history.grid_export_kw`` and assigns each
-    sample-pair's energy to the bucket containing the EARLIER sample (matching
-    :func:`compute_fox_energy_daily_from_realtime`). Slots with no telemetry get no
-    key — caller decides whether to treat missing as zero or fall back to a daily
-    total.
-
-    Used by :mod:`src.analytics.pnl` to value realised exports against per-slot
-    Octopus Outgoing rates (issue #207).
+    Each sample-pair's energy is assigned to the bucket containing the EARLIER
+    sample (matching :func:`compute_fox_energy_daily_from_realtime`). Slots with
+    no telemetry get no key — caller decides whether to treat missing as zero
+    or fall back to a daily total.
     """
     from collections import defaultdict
     from datetime import datetime as _dt
+
+    if column not in ("grid_export_kw", "grid_import_kw"):
+        raise ValueError(f"unsupported column: {column}")
 
     day_iso = day.isoformat()
     # Pull samples for the day plus one before/after for boundary integration.
@@ -2900,7 +2902,7 @@ def half_hourly_grid_export_kwh_for_day(
         conn = get_connection()
         try:
             cur = conn.execute(
-                """SELECT captured_at, grid_export_kw
+                f"""SELECT captured_at, {column}
                    FROM pv_realtime_history
                    WHERE substr(captured_at, 1, 10) BETWEEN ? AND ?
                    ORDER BY captured_at""",
@@ -2931,24 +2933,61 @@ def half_hourly_grid_export_kwh_for_day(
 
     buckets: dict[str, float] = defaultdict(float)
     prev_ts: _dt | None = None
-    prev_export: float = 0.0
+    prev_val: float = 0.0
     for row in rows_raw:
         ts = _parse(row[0])
         if ts is None:
             continue
-        cur_export = float(row[1]) if row[1] is not None else 0.0
+        cur_val = float(row[1]) if row[1] is not None else 0.0
         if prev_ts is not None:
             dt_s = min((ts - prev_ts).total_seconds(), max_gap_seconds)
             if dt_s > 0:
                 hours = dt_s / 3600.0
-                avg_kw = (prev_export + cur_export) / 2.0
+                avg_kw = (prev_val + cur_val) / 2.0
                 # Only count pairs whose earlier sample falls on `day`.
                 if prev_ts.date().isoformat() == day_iso:
                     buckets[_slot_key(prev_ts)] += avg_kw * hours
         prev_ts = ts
-        prev_export = cur_export
+        prev_val = cur_val
 
     return dict(buckets)
+
+
+def half_hourly_grid_export_kwh_for_day(
+    day: date,
+    *,
+    max_gap_seconds: int = 1800,
+) -> dict[str, float]:
+    """Per-slot grid-export kWh for ``day``, keyed by ISO half-hour slot start (UTC).
+
+    Trapezoidal integration of ``pv_realtime_history.grid_export_kw``. See
+    :func:`_half_hourly_grid_kwh_for_day` for mechanics.
+
+    Used by :mod:`src.analytics.pnl` to value realised exports against per-slot
+    Octopus Outgoing rates (issue #207).
+    """
+    return _half_hourly_grid_kwh_for_day(day, "grid_export_kw", max_gap_seconds=max_gap_seconds)
+
+
+def half_hourly_grid_import_kwh_for_day(
+    day: date,
+    *,
+    max_gap_seconds: int = 1800,
+) -> dict[str, float]:
+    """Per-slot grid-import kWh for ``day``, keyed by ISO half-hour slot start (UTC).
+
+    Trapezoidal integration of ``pv_realtime_history.grid_import_kw``. Used by
+    :mod:`src.analytics.pnl` to compute the *real* net cost — billing
+    measured grid import (not household load) at per-slot Agile rates.
+
+    Issue #306: prior to this helper, ``compute_daily_pnl`` multiplied
+    ``execution_log.consumption_kwh`` (= load × Agile) which inflated absolute
+    £ figures ~3-4× because PV + battery self-supply was treated as if grid-
+    bought. The V13 nightly Octopus backfill was supposed to overwrite the
+    estimated rows with metered import but had been failing silently for
+    weeks (Octopus deprecated ``order_by=asc``).
+    """
+    return _half_hourly_grid_kwh_for_day(day, "grid_import_kw", max_gap_seconds=max_gap_seconds)
 
 
 def upsert_fox_energy_daily(rows: list[dict[str, Any]]) -> int:

@@ -37,6 +37,13 @@ domain.
 **Read-only.** No Fox / Daikin / network touches. Safe to run against a prod DB
 copy. Each day's replay takes ~1-3 s (one to ~five LP solves per day depending
 on how many MPC re-runs the day had); expect 1–3 min for 14 days.
+
+**Cost source — independent of PnL bug #306.** The replayed cost is
+``plan.import_kwh × agile_p − plan.export_kwh × export_p`` where ``import_kwh``
+and ``export_kwh`` come from the LP's own energy-balance decision variables
+(``src/scheduler/lp_replay.py``). It does NOT call ``compute_daily_pnl`` /
+``compute_period_pnl`` — so the load-vs-import bug in those analytics functions
+never affected the baseline. The frozen JSON pre-#306 values remain valid.
 """
 from __future__ import annotations
 
