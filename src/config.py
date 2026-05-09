@@ -133,6 +133,22 @@ class Config:
         os.getenv("OPENCLAW_INTERNAL_API_BASE_URL") or "http://127.0.0.1:8000"
     ).strip().rstrip("/")
 
+    # ── Direct Telegram Bot API transport (preferred when configured) ───────
+    # Set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID to bypass the OpenClaw
+    # /hooks/agent path. The OpenClaw hook fans out to an LLM that re-shapes
+    # already-formatted Markdown — that LLM call costs Anthropic tokens on
+    # every brief/plan-revision/tier-boundary/appliance ping. With Telegram
+    # configured, ``src/notifier.py`` POSTs straight to api.telegram.org
+    # using HTML parse mode and the OpenClaw hook is skipped entirely.
+    # OPENCLAW_NOTIFY_ENABLED still acts as the master mute (stdout +
+    # action_log keep running regardless).
+    TELEGRAM_BOT_TOKEN: str = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+    TELEGRAM_CHAT_ID: str = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
+    TELEGRAM_API_BASE_URL: str = (
+        os.getenv("TELEGRAM_API_BASE_URL") or "https://api.telegram.org"
+    ).strip().rstrip("/")
+    TELEGRAM_TIMEOUT_SECONDS: int = int(os.getenv("TELEGRAM_TIMEOUT_SECONDS", "10"))
+
     # ── Google Family Calendar publisher (Octopus rate windows) ─────────────
     # Side feature: after every Octopus fetch, classify each 30-min slot into
     # a 6-tier price bucket (day-relative + absolute floors) and publish merged

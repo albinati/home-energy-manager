@@ -1,0 +1,429 @@
+"""Tests for the direct Telegram Bot API transport (src/telegram_transport.py)
+and its integration with src/notifier.py.
+
+Covers:
+* ``markdown_to_html`` — XSS-safe escape + bold/code promotion.
+* ``send_message`` — payload shape, silent flag, error handling, truncation.
+* ``notifier._dispatch`` — routes to Telegram when configured, OpenClaw skipped.
+* ``notifier.push_alert`` — per-event-type rendering replaces the old JSON dump.
+* ``notify_plan_proposed`` — pre-built HTML body (``<pre>`` schedule) survives.
+"""
+from __future__ import annotations
+
+from typing import Any
+from unittest.mock import MagicMock
+
+import pytest
+
+
+def _make_config(**overrides):
+    """Minimal config-like namespace."""
+    defaults = dict(
+        # OpenClaw hook fallback
+        OPENCLAW_NOTIFY_ENABLED=True,
+        OPENCLAW_NOTIFY_CHANNEL="telegram",
+        OPENCLAW_NOTIFY_TARGET="7964600619",
+        OPENCLAW_NOTIFY_TARGET_CRITICAL="",
+        OPENCLAW_NOTIFY_CHANNEL_CRITICAL="",
+        OPENCLAW_NOTIFY_TARGET_REPORTS="",
+        OPENCLAW_NOTIFY_CHANNEL_REPORTS="",
+        OPENCLAW_HOOKS_URL="http://127.0.0.1:18789/hooks/agent",
+        OPENCLAW_HOOKS_TOKEN="hook-token",
+        OPENCLAW_HOOKS_TIMEOUT_SECONDS=30,
+        OPENCLAW_HOOKS_AGENT_ID="",
+        OPENCLAW_INTERNAL_API_BASE_URL="http://127.0.0.1:8000",
+        # Direct Telegram
+        TELEGRAM_BOT_TOKEN="123456:abcdef",
+        TELEGRAM_CHAT_ID="7964600619",
+        TELEGRAM_API_BASE_URL="https://api.telegram.org",
+        TELEGRAM_TIMEOUT_SECONDS=10,
+        # Plan-proposed timeout used by the helper
+        PLAN_APPROVAL_TIMEOUT_SECONDS=300,
+        BULLETPROOF_TIMEZONE="Europe/London",
+    )
+    defaults.update(overrides)
+    ns = MagicMock()
+    for k, v in defaults.items():
+        setattr(ns, k, v)
+    return ns
+
+
+def _patch_config(monkeypatch, cfg):
+    """Replace the config module attribute used by both modules under test."""
+    from src import notifier, telegram_transport
+
+    monkeypatch.setattr(notifier, "config", cfg)
+    monkeypatch.setattr(telegram_transport, "config", cfg)
+
+
+# ---------------------------------------------------------------------------
+# Pure-function unit tests
+# ---------------------------------------------------------------------------
+
+class TestMarkdownToHtml:
+    def test_empty_string(self):
+        from src.telegram_transport import markdown_to_html
+        assert markdown_to_html("") == ""
+
+    def test_plain_text_unchanged(self):
+        from src.telegram_transport import markdown_to_html
+        assert markdown_to_html("hello world") == "hello world"
+
+    def test_bold_converted(self):
+        from src.telegram_transport import markdown_to_html
+        assert markdown_to_html("**urgent**") == "<b>urgent</b>"
+
+    def test_inline_code_converted(self):
+        from src.telegram_transport import markdown_to_html
+        # quote=False is intentional in markdown_to_html — Telegram HTML accepts
+        # bare quotes in text content; escaping them adds noise.
+        assert markdown_to_html("run `confirm_plan(\"x\")`") == (
+            'run <code>confirm_plan("x")</code>'
+        )
+
+    def test_xss_escaped_before_tags(self):
+        """Ensure raw HTML in input is escaped — no markup injection."""
+        from src.telegram_transport import markdown_to_html
+        out = markdown_to_html("<script>alert(1)</script>")
+        assert "<script>" not in out
+        assert "&lt;script&gt;" in out
+
+    def test_bold_after_escape(self):
+        """**bold** containing HTML special chars still works (escape order)."""
+        from src.telegram_transport import markdown_to_html
+        out = markdown_to_html("**a<b**")
+        assert out == "<b>a&lt;b</b>"
+
+    def test_snake_case_not_italicised(self):
+        """Single underscore must NOT be promoted to italic — too many false positives."""
+        from src.telegram_transport import markdown_to_html
+        out = markdown_to_html("see action_log_duration")
+        assert "<i>" not in out
+        assert "action_log_duration" in out
+
+
+class TestIsConfigured:
+    def test_true_when_both_set(self, monkeypatch):
+        from src import telegram_transport
+        monkeypatch.setattr(telegram_transport, "config", _make_config())
+        assert telegram_transport.is_configured() is True
+
+    def test_false_when_token_missing(self, monkeypatch):
+        from src import telegram_transport
+        monkeypatch.setattr(
+            telegram_transport, "config",
+            _make_config(TELEGRAM_BOT_TOKEN=""),
+        )
+        assert telegram_transport.is_configured() is False
+
+    def test_false_when_chat_id_missing(self, monkeypatch):
+        from src import telegram_transport
+        monkeypatch.setattr(
+            telegram_transport, "config",
+            _make_config(TELEGRAM_CHAT_ID=""),
+        )
+        assert telegram_transport.is_configured() is False
+
+
+class TestSendMessage:
+    def test_returns_false_when_not_configured(self, monkeypatch):
+        from src import telegram_transport
+        monkeypatch.setattr(
+            telegram_transport, "config",
+            _make_config(TELEGRAM_BOT_TOKEN=""),
+        )
+        assert telegram_transport.send_message("hi") is False
+
+    def test_posts_correct_url_and_payload(self, monkeypatch):
+        from src import telegram_transport
+
+        captured: dict[str, Any] = {}
+
+        def fake_post(url, json=None, timeout=None):
+            captured["url"] = url
+            captured["json"] = json
+            captured["timeout"] = timeout
+            r = MagicMock()
+            r.status_code = 200
+            return r
+
+        monkeypatch.setattr(telegram_transport, "config", _make_config())
+        monkeypatch.setattr(telegram_transport.requests, "post", fake_post)
+
+        ok = telegram_transport.send_message("**hello** world")
+        assert ok is True
+        assert captured["url"] == "https://api.telegram.org/bot123456:abcdef/sendMessage"
+        body = captured["json"]
+        assert body["chat_id"] == "7964600619"
+        assert body["parse_mode"] == "HTML"
+        assert body["disable_web_page_preview"] is True
+        assert "disable_notification" not in body
+        assert body["text"] == "<b>hello</b> world"
+        assert captured["timeout"] == 10.0
+
+    def test_silent_sets_disable_notification(self, monkeypatch):
+        from src import telegram_transport
+
+        captured: dict[str, Any] = {}
+
+        def fake_post(url, json=None, timeout=None):
+            captured["json"] = json
+            r = MagicMock()
+            r.status_code = 200
+            return r
+
+        monkeypatch.setattr(telegram_transport, "config", _make_config())
+        monkeypatch.setattr(telegram_transport.requests, "post", fake_post)
+
+        telegram_transport.send_message("hi", silent=True)
+        assert captured["json"]["disable_notification"] is True
+
+    def test_convert_markdown_false_keeps_raw_html(self, monkeypatch):
+        """Pre-built HTML (e.g. plan-proposed <pre>) must survive."""
+        from src import telegram_transport
+
+        captured: dict[str, Any] = {}
+
+        def fake_post(url, json=None, timeout=None):
+            captured["json"] = json
+            r = MagicMock()
+            r.status_code = 200
+            return r
+
+        monkeypatch.setattr(telegram_transport, "config", _make_config())
+        monkeypatch.setattr(telegram_transport.requests, "post", fake_post)
+
+        telegram_transport.send_message(
+            "<pre>10:00  charge</pre>", convert_markdown=False
+        )
+        assert captured["json"]["text"] == "<pre>10:00  charge</pre>"
+        assert captured["json"]["parse_mode"] == "HTML"
+
+    def test_returns_false_on_http_error(self, monkeypatch):
+        from src import telegram_transport
+
+        def fake_post(*a, **kw):
+            r = MagicMock()
+            r.status_code = 500
+            r.text = "internal error"
+            return r
+
+        monkeypatch.setattr(telegram_transport, "config", _make_config())
+        monkeypatch.setattr(telegram_transport.requests, "post", fake_post)
+
+        assert telegram_transport.send_message("x") is False
+
+    def test_returns_false_on_request_exception(self, monkeypatch):
+        from src import telegram_transport
+        import requests as rq
+
+        def fake_post(*a, **kw):
+            raise rq.ConnectionError("boom")
+
+        monkeypatch.setattr(telegram_transport, "config", _make_config())
+        monkeypatch.setattr(telegram_transport.requests, "post", fake_post)
+
+        assert telegram_transport.send_message("x") is False
+
+    def test_truncates_over_limit(self, monkeypatch):
+        from src import telegram_transport
+
+        captured: dict[str, Any] = {}
+
+        def fake_post(url, json=None, timeout=None):
+            captured["json"] = json
+            r = MagicMock()
+            r.status_code = 200
+            return r
+
+        monkeypatch.setattr(telegram_transport, "config", _make_config())
+        monkeypatch.setattr(telegram_transport.requests, "post", fake_post)
+
+        long_text = "a" * 10_000
+        telegram_transport.send_message(long_text)
+        text = captured["json"]["text"]
+        assert len(text) <= 4096
+        assert text.endswith("<i>truncated</i>")
+
+
+# ---------------------------------------------------------------------------
+# notifier._dispatch — Telegram preferred when configured
+# ---------------------------------------------------------------------------
+
+class TestDispatchPrefersTelegram:
+    def _route_active(self, monkeypatch):
+        from src import notifier
+        monkeypatch.setattr(notifier.db, "get_notification_route", lambda _: {
+            "enabled": 1, "severity": "reports",
+            "target_override": None, "channel_override": None, "silent": 0,
+        })
+        monkeypatch.setattr(notifier.db, "log_action", lambda **kw: None)
+
+    def test_routes_to_telegram_when_configured(self, monkeypatch):
+        from src import notifier, telegram_transport
+
+        cfg = _make_config()
+        _patch_config(monkeypatch, cfg)
+        self._route_active(monkeypatch)
+
+        telegram_calls: list[dict[str, Any]] = []
+        hook_calls: list[Any] = []
+
+        def fake_send(text, *, silent=False, convert_markdown=True, parse_mode="HTML"):
+            telegram_calls.append({"text": text, "silent": silent})
+            return True
+
+        def fake_hook_post(*a, **kw):
+            hook_calls.append(1)
+            r = MagicMock(); r.status_code = 200
+            return r
+
+        # Pin transport.is_configured to True to bypass MagicMock-attr quirks.
+        monkeypatch.setattr(telegram_transport, "is_configured", lambda: True)
+        monkeypatch.setattr(telegram_transport, "send_message", fake_send)
+        monkeypatch.setattr(notifier.requests, "post", fake_hook_post)
+
+        notifier._dispatch(notifier.AlertType.RISK_ALERT, "battery low", urgent=True)
+
+        assert len(telegram_calls) == 1
+        assert hook_calls == []  # OpenClaw fully skipped
+        text = telegram_calls[0]["text"]
+        assert "Risk alert" in text
+        assert "battery low" in text
+        # Debug-prefix line from OpenClaw flow must not leak through
+        assert "energy-manager" not in text
+
+    def test_falls_back_to_openclaw_when_telegram_unset(self, monkeypatch):
+        from src import notifier, telegram_transport
+
+        cfg = _make_config(TELEGRAM_BOT_TOKEN="", TELEGRAM_CHAT_ID="")
+        _patch_config(monkeypatch, cfg)
+        self._route_active(monkeypatch)
+
+        hook_calls: list[Any] = []
+
+        def fake_hook_post(url, json=None, headers=None, timeout=None):
+            hook_calls.append({"url": url, "json": json})
+            r = MagicMock(); r.status_code = 200
+            return r
+
+        class ImmediateThread:
+            def __init__(self, target, daemon=True, name=""):
+                self._target = target
+
+            def start(self):
+                self._target()
+
+        monkeypatch.setattr(notifier.threading, "Thread", ImmediateThread)
+        # is_configured driven by the empty config above — no monkeypatch needed.
+        monkeypatch.setattr(notifier.requests, "post", fake_hook_post)
+
+        notifier._dispatch(notifier.AlertType.MORNING_REPORT, "morning")
+
+        assert len(hook_calls) == 1
+        assert "/hooks/agent" in hook_calls[0]["url"]
+
+
+# ---------------------------------------------------------------------------
+# push_alert — clean per-event rendering replaces JSON dump
+# ---------------------------------------------------------------------------
+
+class TestPushAlertTelegramRendering:
+    def _setup(self, monkeypatch):
+        from src import notifier, telegram_transport
+
+        captured: list[dict[str, Any]] = []
+
+        def fake_post(url, json=None, timeout=None):
+            captured.append({"url": url, "json": json})
+            r = MagicMock(); r.status_code = 200
+            return r
+
+        cfg = _make_config()
+        _patch_config(monkeypatch, cfg)
+        monkeypatch.setattr(telegram_transport.requests, "post", fake_post)
+        monkeypatch.setattr(notifier.db, "log_action", lambda **kw: None)
+        monkeypatch.setattr(notifier.db, "get_notification_route", lambda _: {
+            "enabled": 1, "severity": "reports",
+            "target_override": None, "channel_override": None, "silent": 0,
+        })
+        return captured
+
+    def test_cheap_window_human_readable(self, monkeypatch):
+        from src import notifier
+        captured = self._setup(monkeypatch)
+        notifier.push_cheap_window_start(soc=85.0, fox_mode="Self Use")
+        assert len(captured) == 1
+        text = captured[0]["json"]["text"]
+        assert "Cheap window" in text
+        assert "Battery charging" in text
+        assert "SoC 85" in text
+        assert "Fox: Self Use" in text
+        # The pre-Telegram path used to ship raw JSON — make sure it doesn't anymore.
+        assert '{"' not in text
+
+    def test_peak_window_human_readable(self, monkeypatch):
+        from src import notifier
+        captured = self._setup(monkeypatch)
+        notifier.push_peak_window_start(soc=42.0)
+        text = captured[0]["json"]["text"]
+        assert "Peak window" in text
+        assert "Daikin suspended" in text
+        assert "SoC 42" in text
+
+    def test_negative_window_includes_title_and_body(self, monkeypatch):
+        from src import notifier
+        captured = self._setup(monkeypatch)
+        notifier.push_negative_window_start(soc=70.0, fox_mode="Self Use", price_pence=-3.5)
+        text = captured[0]["json"]["text"]
+        assert "PAID to use" in text
+        assert "Octopus is paying us" in text  # body content
+        assert "SoC 70" in text
+        assert "-3.5p/kWh" in text
+
+
+# ---------------------------------------------------------------------------
+# notify_plan_proposed — HTML schedule block survives
+# ---------------------------------------------------------------------------
+
+class TestNotifyPlanProposedTelegram:
+    def test_emits_html_with_pre_block(self, monkeypatch):
+        from src import notifier, telegram_transport
+
+        captured: list[dict[str, Any]] = []
+
+        def fake_post(url, json=None, timeout=None):
+            captured.append({"json": json})
+            r = MagicMock(); r.status_code = 200
+            return r
+
+        _patch_config(monkeypatch, _make_config())
+        monkeypatch.setattr(telegram_transport.requests, "post", fake_post)
+        monkeypatch.setattr(notifier.db, "log_action", lambda **kw: None)
+        monkeypatch.setattr(notifier.db, "get_notification_route", lambda _: {
+            "enabled": 1, "severity": "reports",
+            "target_override": None, "channel_override": None, "silent": 0,
+        })
+
+        notifier.notify_plan_proposed(
+            "lp-2026-06-01",
+            "2026-06-01",
+            "PuLP ok",
+            [{
+                "start_time": "2026-06-01T12:00:00Z",
+                "end_time": "2026-06-01T12:30:00Z",
+                "action_type": "pre_heat",
+                "params": {"lwt_offset": 2, "tank_temp": 55},
+            }],
+        )
+
+        assert len(captured) == 1
+        body = captured[0]["json"]
+        text = body["text"]
+        assert body["parse_mode"] == "HTML"
+        assert "<pre>" in text
+        assert "</pre>" in text
+        assert "lp-2026-06-01" in text
+        assert "2026-06-01" in text
+        assert "Auto-applies" in text
+        assert "reject_plan" in text

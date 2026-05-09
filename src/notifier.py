@@ -1,17 +1,25 @@
-"""Alert notifier — stdout always; optional OpenClaw Gateway hook delivery.
+"""Alert notifier — stdout always; Telegram-direct or OpenClaw-hook delivery.
 
 Every alert is printed to stdout unconditionally and logged to action_log.
-If OPENCLAW_NOTIFY_ENABLED=true, a target is configured, and OPENCLAW_HOOKS_URL
-+ OPENCLAW_HOOKS_TOKEN are set, notifications POST to the Gateway ``/hooks/agent``
-endpoint so an agent can shape the message before Telegram (see
-docs/openclaw-nikola-plan-prompt.md). There is no ``openclaw message send`` path.
 
-Routing is controlled per-AlertType via the `notification_routes` SQLite table
-which can be updated at runtime through the MCP tools without restarting the
-service.  See src/db.py: get_notification_route / upsert_notification_route.
+Two delivery transports are supported, in priority order:
+
+1. **Direct Telegram Bot API** — when ``TELEGRAM_BOT_TOKEN`` +
+   ``TELEGRAM_CHAT_ID`` are set, ``src/telegram_transport.py`` POSTs
+   straight to ``api.telegram.org``. No LLM in the loop.
+2. **OpenClaw Gateway hook** — fallback path when Telegram is not
+   configured. POSTs to ``OPENCLAW_HOOKS_URL`` (e.g. ``/hooks/agent``)
+   so an agent can shape the message before Telegram. This costs an
+   Anthropic API call per notification.
+
+``OPENCLAW_NOTIFY_ENABLED=false`` mutes both paths (stdout + action_log
+keep running). Per-AlertType routing — enable/disable, severity, silent
+flag — still flows through the ``notification_routes`` SQLite table; see
+``src/db.py: get_notification_route / upsert_notification_route``.
 """
 from __future__ import annotations
 
+import html
 import json
 import logging
 import sqlite3
@@ -22,7 +30,7 @@ from typing import Any
 
 import requests
 
-from . import db
+from . import db, telegram_transport
 from .config import config
 
 logger = logging.getLogger(__name__)
@@ -74,6 +82,32 @@ _HOOK_PAYLOAD_NAMES: dict[str, str] = {
 
 def _payload_name_for_key(alert_key: str) -> str:
     return _HOOK_PAYLOAD_NAMES.get(alert_key, "EnergyNotification")
+
+
+# Per-alert headline shown at the top of the Telegram message. Used only on the
+# direct-Telegram path; the OpenClaw hook path uses ``_HOOK_PAYLOAD_NAMES``.
+_TELEGRAM_HEADERS: dict[str, str] = {
+    "morning_report": "🌅 Morning brief",
+    "night_brief": "🌙 Night brief",
+    "strategy_update": "🧭 Strategy update",
+    "risk_alert": "⚠️ Risk alert",
+    "action_confirmation": "✅ Action",
+    "critical_error": "🚨 Critical error",
+    "cheap_window_start": "💚 Cheap window",
+    "peak_window_start": "🔴 Peak window",
+    "negative_window_start": "🔵 PAID-to-use window",
+    "daily_pnl": "📊 Daily PnL",
+    "plan_proposed": "📋 New energy plan",
+    "plan_revision": "🔄 Plan revision",
+    "appliance_starting": "🧺 Appliance starting",
+    "appliance_finished": "✅ Appliance finished",
+    "appliance_armed": "🧺 Appliance armed",
+    "appliance_cancelled": "🚫 Appliance cancelled",
+}
+
+
+def _telegram_header_for(alert_key: str) -> str:
+    return _TELEGRAM_HEADERS.get(alert_key, "Home Energy Manager")
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +224,132 @@ def _send_hooks_agent_post(payload: dict[str, Any]) -> bool:
     except requests.RequestException as exc:
         print(f"[openclaw hooks] request failed: {exc}")
         return False
+
+
+# ---------------------------------------------------------------------------
+# Direct Telegram body builders (used when telegram_transport.is_configured())
+# ---------------------------------------------------------------------------
+
+def _build_telegram_dispatch_body(
+    alert_key: str,
+    message: str,
+    *,
+    urgent: bool,
+    extra: dict[str, Any] | None,
+) -> str:
+    """Compose a Telegram message for ``_dispatch`` flows.
+
+    Strips the ``[HH:MM] [info] energy-manager [kind]`` debug prefix that the
+    OpenClaw path used (the LLM ignored it anyway). Headline + caller body +
+    optional structured ``extra`` rendered as an inline code block. The string
+    returned is HEM-flavoured Markdown — ``send_message`` does the HTML escape.
+    """
+    head = _telegram_header_for(alert_key)
+    if urgent and not head.startswith(("🚨", "⚠️")):
+        head = f"🚨 {head}"
+    parts = [f"**{head}**", message]
+    if extra:
+        snippet = json.dumps(extra, default=str)[:400]
+        parts.append(f"`{snippet}`")
+    return "\n".join(p for p in parts if p)
+
+
+def _build_telegram_push_alert_body(event_type: str, payload: dict[str, Any]) -> str:
+    """Render a structured push event into a short, valuable Telegram message.
+
+    Until 2026-05-09 ``push_alert`` shipped raw JSON to OpenClaw and relied on
+    a Claude call there to humanize it. With the LLM out of the loop, we have
+    to format here — one or two lines per event with the key facts.
+    """
+    head = _telegram_header_for(event_type)
+    if event_type == AlertType.NEGATIVE_WINDOW_START.value:
+        title = payload.get("title") or head
+        body_text = payload.get("body") or ""
+        bits: list[str] = []
+        soc = payload.get("soc_pct")
+        if soc is not None:
+            bits.append(f"SoC {float(soc):.0f}%")
+        mode = payload.get("fox_mode")
+        if mode and mode != "unknown":
+            bits.append(f"Fox: {mode}")
+        price = payload.get("price_pence")
+        if price is not None:
+            bits.append(f"{float(price):.1f}p/kWh")
+        tail = ("\n" + " · ".join(bits)) if bits else ""
+        return f"**{title}**\n{body_text}{tail}"
+    if event_type == AlertType.CHEAP_WINDOW_START.value:
+        soc = payload.get("soc_percent")
+        mode = payload.get("fox_mode")
+        lines = [f"**{head}**", "Battery charging, DHW heating."]
+        bits = []
+        if soc is not None:
+            bits.append(f"SoC {float(soc):.0f}%")
+        if mode and mode != "unknown":
+            bits.append(f"Fox: {mode}")
+        if bits:
+            lines.append(" · ".join(bits))
+        return "\n".join(lines)
+    if event_type == AlertType.PEAK_WINDOW_START.value:
+        soc = payload.get("soc_percent")
+        lines = [f"**{head}**", "House on battery, Daikin suspended."]
+        if soc is not None:
+            lines.append(f"SoC {float(soc):.0f}%")
+        return "\n".join(lines)
+    if event_type == AlertType.DAILY_PNL.value:
+        lines = [f"**{head}**"]
+        for key, label, fmt in (
+            ("realised_cost_gbp", "Realised cost", "£{:.2f}"),
+            ("delta_vs_svt_gbp", "vs SVT", "£{:+.2f}"),
+            ("delta_vs_fixed_tariff_gbp", "vs fixed", "£{:+.2f}"),
+            ("kwh", "Imported", "{:.1f} kWh"),
+            ("export_kwh", "Exported", "{:.2f} kWh"),
+            ("export_revenue_gbp", "Export rev", "£{:.2f}"),
+        ):
+            v = payload.get(key)
+            if v is None:
+                continue
+            try:
+                lines.append(f"  {label}: {fmt.format(float(v))}")
+            except (TypeError, ValueError):
+                lines.append(f"  {label}: {v}")
+        return "\n".join(lines)
+    # Generic fallback — surface payload["message"] if present.
+    lines = [f"**{head}**"]
+    msg = payload.get("message") if isinstance(payload, dict) else None
+    if msg:
+        lines.append(str(msg))
+    return "\n".join(lines)
+
+
+def _build_telegram_plan_proposed_body(
+    plan_id: str,
+    plan_date: str,
+    summary: str,
+    table: str,
+    *,
+    approval_timeout_s: int,
+) -> str:
+    """Plan-proposed body. Returned as raw HTML — pass ``parse_html=False`` to
+    ``send_message`` so the schedule ``<pre>`` block survives intact."""
+    minutes = max(1, int(approval_timeout_s) // 60)
+    head = _telegram_header_for(AlertType.PLAN_PROPOSED.value)
+    plan_id_safe = html.escape(plan_id)
+    plan_date_safe = html.escape(plan_date)
+    summary_html = telegram_transport.markdown_to_html(summary)
+    parts = [
+        f"<b>{head} — {plan_date_safe}</b>",
+        f"Plan ID: <code>{plan_id_safe}</code>",
+    ]
+    if (table or "").strip():
+        parts.append("")
+        parts.append("<pre>" + html.escape(table) + "</pre>")
+    if summary_html:
+        parts.append("")
+        parts.append(summary_html)
+    parts.append("")
+    parts.append(f"Auto-applies in {minutes} min unless rejected.")
+    parts.append(f'Reject via MCP: <code>reject_plan("{plan_id_safe}")</code>')
+    return "\n".join(parts)
 
 
 def _enqueue_hooks_delivery(
@@ -323,6 +483,16 @@ def _dispatch(
     route = _resolve_route(kind.value)
     if not route:
         return
+    silent = bool(route.get("silent"))
+
+    # Direct Telegram is preferred when configured — bypasses OpenClaw LLM.
+    if telegram_transport.is_configured():
+        body = _build_telegram_dispatch_body(
+            kind.value, message, urgent=urgent, extra=extra
+        )
+        telegram_transport.send_message(body, silent=silent)
+        return
+
     if not _hooks_credentials_configured():
         print(
             "[openclaw hooks] OPENCLAW_HOOKS_URL and OPENCLAW_HOOKS_TOKEN are required "
@@ -334,7 +504,7 @@ def _dispatch(
         kind.value,
         full_msg,
         urgent=urgent,
-        silent=bool(route.get("silent")),
+        silent=silent,
         extra=extra,
     )
     _enqueue_hooks_delivery(kind.value, payload_name, agent_msg, route)
@@ -620,6 +790,12 @@ def push_alert(event_type: str, payload: dict[str, Any]) -> bool:
     route = _resolve_route(event_type)
     if not route:
         return False
+    silent = bool(route.get("silent"))
+
+    if telegram_transport.is_configured():
+        body = _build_telegram_push_alert_body(event_type, payload)
+        return telegram_transport.send_message(body, silent=silent)
+
     if not _hooks_credentials_configured():
         print(
             "[openclaw hooks] OPENCLAW_HOOKS_URL and OPENCLAW_HOOKS_TOKEN are required "
@@ -630,7 +806,7 @@ def push_alert(event_type: str, payload: dict[str, Any]) -> bool:
         event_type,
         full_msg,
         urgent=False,
-        silent=bool(route.get("silent")),
+        silent=silent,
         extra=payload,
     )
     pname = _payload_name_for_key(event_type)
@@ -733,6 +909,18 @@ def notify_plan_proposed(
     route = _resolve_route(AlertType.PLAN_PROPOSED.value)
     if not route:
         return
+    silent = bool(route.get("silent"))
+
+    if telegram_transport.is_configured():
+        body = _build_telegram_plan_proposed_body(
+            plan_id, plan_date, summary, table,
+            approval_timeout_s=approval_timeout_s,
+        )
+        # Body is already HTML (with <pre> for the schedule); keep parse_mode=HTML
+        # but skip the markdown→HTML pre-pass so our tags survive intact.
+        telegram_transport.send_message(body, silent=silent, convert_markdown=False)
+        return
+
     if not _hooks_credentials_configured():
         print(
             "[openclaw hooks] OPENCLAW_HOOKS_URL and OPENCLAW_HOOKS_TOKEN are required "
