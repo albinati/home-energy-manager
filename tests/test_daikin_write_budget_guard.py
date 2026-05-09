@@ -209,59 +209,38 @@ def test_budget_guard_coalesce_alone_can_fit_under_budget() -> None:
 # Notification side-effect
 # --------------------------------------------------------------------------
 
-def test_write_daikin_notifies_when_dropping(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When the budget guard drops actions, ``notify_strategy_update`` must
-    be called with the drop summary."""
+def test_write_daikin_logs_dropped_actions_no_telegram_push(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When the budget guard drops actions, the event is LOGGED (journalctl
+    + action_log via standard logger), NOT pushed to Telegram. Per user
+    pull-based notification preference (memory: feedback_low_push_load.md),
+    auto-applied FYI alerts should not push — operator sees them only if
+    they look. ``notify_strategy_update`` MUST NOT be called."""
+    import logging
     from src.config import config as app_config
     from src.scheduler import lp_dispatch
     from src.scheduler.lp_optimizer import LpPlan
 
-    # Stub quota_remaining tiny to force drops.
     def _fake_remaining(vendor: str) -> int:
         return 4 if vendor == "daikin" else 9999
     monkeypatch.setattr("src.api_quota.quota_remaining", _fake_remaining)
     monkeypatch.setattr(app_config, "DAIKIN_RESERVE_FOR_HEARTBEAT", 0, raising=False)
     monkeypatch.setattr(app_config, "DAIKIN_CONTROL_MODE", "active", raising=False)
 
-    # Stub upsert + clear so we don't touch SQLite.
     monkeypatch.setattr(lp_dispatch.db, "upsert_action", lambda **kw: 1)
     monkeypatch.setattr(lp_dispatch.db, "clear_actions_in_range", lambda *a, **kw: 0)
     monkeypatch.setattr(lp_dispatch.db, "clear_actions_for_date", lambda *a, **kw: 0)
     monkeypatch.setattr(lp_dispatch.db, "update_action_restore_link", lambda *a, **kw: None)
 
-    # Build a minimal LpPlan
     base = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
     plan = LpPlan(ok=True, status="Optimal", objective_pence=0.0,
                   peak_threshold_pence=25.0, cheap_threshold_pence=10.0)
     plan.slot_starts_utc = [base + timedelta(minutes=30 * i) for i in range(2)]
 
-    # Adjacent solar_preheat pairs (each pair contiguous: 12:00-12:30,
-    # 12:30-13:00, …) → coalesce to 1 → 2 writes. Headroom 4. No drops, no notify.
-    def _fake_preview_adjacent(plan: LpPlan, forecast: list) -> list:
-        out = []
-        for i in range(8):
-            start_h = 12 + i // 2
-            start_m = (i % 2) * 30
-            end_h = 12 + (i + 1) // 2
-            end_m = ((i + 1) % 2) * 30
-            out.append(_pair(
-                "solar_preheat",
-                f"2026-06-01T{start_h:02d}:{start_m:02d}:00Z",
-                f"2026-06-01T{end_h:02d}:{end_m:02d}:00Z",
-            ))
-        return out
-    monkeypatch.setattr(lp_dispatch, "daikin_dispatch_preview", _fake_preview_adjacent)
-
-    with patch("src.notifier.notify_strategy_update") as mock_notify:
-        lp_dispatch.write_daikin_from_lp_plan("2026-06-01", plan, forecast=[])
-        # 8 solar_preheat pairs adjacent → coalesce → 1 pair = 2 writes ≤ 4. No drops.
-        assert mock_notify.call_count == 0, (
-            f"Coalesce alone should fit headroom; mock called with: {mock_notify.call_args}"
-        )
-
-    # Non-adjacent pairs (1h gap each) so coalesce can't help → forces drops.
-    def _fake_preview_non_adjacent(plan: LpPlan, forecast: list) -> list:
-        # 6 pairs at 12,14,16,18,20,22 → all in 24 h, no contiguity.
+    # 6 non-adjacent solar_preheat pairs (1h gap, no coalesce) → forces drops.
+    def _fake_preview(plan: LpPlan, forecast: list) -> list:
         return [
             _pair(
                 "solar_preheat",
@@ -270,11 +249,18 @@ def test_write_daikin_notifies_when_dropping(monkeypatch: pytest.MonkeyPatch) ->
             )
             for i in range(6)
         ]
-    monkeypatch.setattr(lp_dispatch, "daikin_dispatch_preview", _fake_preview_non_adjacent)
+    monkeypatch.setattr(lp_dispatch, "daikin_dispatch_preview", _fake_preview)
 
-    with patch("src.notifier.notify_strategy_update") as mock_notify:
+    with patch("src.notifier.notify_strategy_update") as mock_notify, \
+         caplog.at_level(logging.INFO, logger="src.scheduler.lp_dispatch"):
         lp_dispatch.write_daikin_from_lp_plan("2026-06-01", plan, forecast=[])
-        assert mock_notify.call_count == 1
-        msg = mock_notify.call_args[0][0]
-        assert "Daikin write-budget guard" in msg
-        assert "dropped" in msg
+
+    # Telegram noise: MUST NOT be called.
+    assert mock_notify.call_count == 0, (
+        f"Budget guard must NOT push to Telegram (auto-applied FYI). "
+        f"notify_strategy_update was called: {mock_notify.call_args}"
+    )
+    # Journalctl-grade log: MUST be present so operators can grep.
+    assert any(
+        "budget guard" in r.message for r in caplog.records
+    ), f"Expected log line about budget guard; got: {[r.message for r in caplog.records]}"
