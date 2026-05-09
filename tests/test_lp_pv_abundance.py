@@ -131,6 +131,89 @@ def test_pv_abundance_threshold_relaxed_for_realistic_sunny_day(
     )
 
 
+def test_dispatch_solar_preheat_picks_max_dhw_across_merged_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the LP plans e_dhw > 0 in just ONE slot inside a long merged
+    solar_charge window (because one 30-min heat satisfies the evening shower
+    constraint), dispatch must scan the whole window for max e_dhw — not
+    just read the first slot. Otherwise the action emits tank_power=False
+    across the whole window, deactivating the tank when the LP wanted heat
+    mid-window.
+
+    Regression test for the prod-active-flip bug found 2026-05-09: dispatch
+    sent tank_power=False for a Sun 10:00-13:30 solar_preheat window where
+    the LP had planned heating at slot 11:00 only."""
+    from src.config import config as app_config
+    from src.scheduler.lp_dispatch import daikin_dispatch_preview
+    from src.scheduler.lp_optimizer import LpPlan
+
+    monkeypatch.setattr(app_config, "DAIKIN_CONTROL_MODE", "active", raising=False)
+    monkeypatch.setattr(app_config, "DAIKIN_MIN_WINDOW_SLOTS", 1, raising=False)
+    monkeypatch.setattr(
+        "src.scheduler.lp_dispatch._optimization_preset_away_like",
+        lambda: False,
+        raising=True,
+    )
+
+    base = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    n = 7  # 3.5h window, all solar_charge
+    plan = LpPlan(ok=True, status="Optimal", objective_pence=0.0,
+                  peak_threshold_pence=25.0, cheap_threshold_pence=10.0)
+    plan.slot_starts_utc = [base + timedelta(minutes=30 * i) for i in range(n)]
+    plan.price_pence = [15.0] * n
+    plan.import_kwh = [0.0] * n  # No grid import → solar_charge kind
+    plan.export_kwh = [0.0] * n
+    plan.battery_charge_kwh = [0.5] * n  # PV→battery in EVERY slot → kind=solar_charge for every slot
+    plan.battery_discharge_kwh = [0.0] * n
+    # LP planned heat in slot 1 ONLY (not slot 0). This mimics the prod bug:
+    # the merge-first-slot read e_dhw=~0 and emitted tank_power=False.
+    plan.dhw_electric_kwh = [0.009, 0.164, 0.005, 0.005, 0.005, 0.005, 0.005]
+    plan.space_electric_kwh = [0.0] * n
+    plan.soc_kwh = [5.0] + [5.0 + 0.5 * i for i in range(1, n + 1)]
+    # Tank rises sharply at slot 1 (the heat slot), then cools.
+    plan.tank_temp_c = [38.0, 38.2, 47.9, 47.6, 47.4, 47.2, 47.0, 46.8]
+    plan.indoor_temp_c = [21.0] * (n + 1)
+    plan.pv_curt_kwh = [0.0] * n
+    plan.lwt_offset_c = [0.0] * n
+    plan.temp_outdoor_c = [18.0] * n
+
+    pairs = daikin_dispatch_preview(plan, forecast=[])
+    solar = [(r, a) for r, a in pairs if a.get("action_type") == "solar_preheat"]
+    assert solar, f"expected a solar_preheat action; got {[a.get('action_type') for _, a in pairs]}"
+
+    # Multiple solar_charge slots may be merged. The merged action MUST
+    # cover the heat slot (slot 1, 12:30-13:00 UTC) AND set tank_power=True
+    # with a non-trivial tank_temp.
+    found_heat_action = False
+    for _restore, action in solar:
+        params = action["params"]
+        # If this action's window includes the heat slot:
+        s = datetime.fromisoformat(action["start_time"].replace("Z","+00:00"))
+        e = datetime.fromisoformat(action["end_time"].replace("Z","+00:00"))
+        heat_slot_start = base + timedelta(minutes=30 * 1)
+        if s <= heat_slot_start < e:
+            assert params.get("tank_power") is True, (
+                f"merged window covering the heat slot must have tank_power=True; "
+                f"params={params}"
+            )
+            assert "tank_temp" in params, (
+                f"tank_temp must be set when tank_power=True; params={params}"
+            )
+            assert params["tank_temp"] >= 47.0, (
+                f"tank_temp must reflect the peak target across the window "
+                f"(LP plan peaks at 47.9 in slot 1); got {params['tank_temp']}"
+            )
+            # 55°C cap from PR #292 still applies.
+            assert params["tank_temp"] <= float(app_config.DHW_TEMP_PV_ABUNDANCE_TARGET_C) + 0.001, (
+                f"tank_temp must respect PV-abundance cap (55°C); got {params['tank_temp']}"
+            )
+            found_heat_action = True
+    assert found_heat_action, (
+        "expected at least one solar_preheat action covering the LP heat slot"
+    )
+
+
 def test_dispatch_clamps_solar_preheat_at_pv_abundance_target_55c(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
