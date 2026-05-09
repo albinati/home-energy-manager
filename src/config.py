@@ -603,6 +603,22 @@ class Config:
     #     overhead. Pick this for poorly-insulated tanks where firmware
     #     would attempt mid-peak reheats from standing losses alone.
     DHW_PEAK_TANK_STRATEGY: str = os.getenv("DHW_PEAK_TANK_STRATEGY", "idle").strip().lower()
+    # Post-shower overnight tank idle (LP-driven). After the LAST shower window
+    # of the day, the LP has no DHW need until next-day's PV abundance — the
+    # tank is set to a low BACKUP target so firmware doesn't reheat overnight,
+    # but stays slightly above cold for unexpected morning showers. Reset to
+    # NORMAL when LP plans the next productive slot (cheap / negative /
+    # solar_charge — i.e. "next day's economics are better").
+    #   38 °C default — backup buffer for unplanned morning shower.
+    #   30 °C for full overnight cooling (no morning backup).
+    #   45 °C effectively disables the override.
+    DHW_TANK_OVERNIGHT_TARGET_C: float = float(
+        os.getenv("DHW_TANK_OVERNIGHT_TARGET_C", "38.0")
+    )
+    # Toggle the post-shower overnight override. Default true. Set to false
+    # to let overnight slots fall back to plain "standard" (no Daikin write,
+    # firmware does whatever it wants based on its own schedule).
+    DHW_TANK_OVERNIGHT_IDLE_ENABLED: str = os.getenv("DHW_TANK_OVERNIGHT_IDLE_ENABLED", "true")
     # Slack penalty on the soft DHW ceiling (#225 item 1, was hardcoded 0.01).
     # Operators who want stricter comfort vs cost can tune this. Default 0.01
     # p/°C-slot preserves prior behaviour.
