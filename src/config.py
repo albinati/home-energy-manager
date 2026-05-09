@@ -619,6 +619,25 @@ class Config:
     # to let overnight slots fall back to plain "standard" (no Daikin write,
     # firmware does whatever it wants based on its own schedule).
     DHW_TANK_OVERNIGHT_IDLE_ENABLED: str = os.getenv("DHW_TANK_OVERNIGHT_IDLE_ENABLED", "true")
+    # Static-physics DHW draw model (precursor to V11-C #196 learned prior).
+    # Total litres of hot water drawn per day, distributed evenly across
+    # configured shower-window slots. The LP subtracts the corresponding
+    # thermal energy from the tank balance so it sees realistic post-shower
+    # temperature drops instead of just standing-loss.
+    #
+    # Default 144 L = household of 4 (2 adults + 2 children sharing one
+    # shower together) × 8 min/shower × 6 L/min (low-flow eco showerhead).
+    # Adjust if your shower flow is higher (e.g. 8-10 L/min standard) — at
+    # 8 L/min the same usage = 192 L/day.
+    #
+    # Set to 0 to disable (LP reverts to previous behavior — only standing
+    # loss modeled).
+    DHW_DAILY_SHOWER_LITRES: float = float(os.getenv("DHW_DAILY_SHOWER_LITRES", "144"))
+    # Cold-mains inlet temp (°C). UK average ~10°C; varies seasonally.
+    DHW_COLD_INLET_TEMP_C: float = float(os.getenv("DHW_COLD_INLET_TEMP_C", "10.0"))
+    # Use temperature at the tap (°C) — typical mixer-tap shower temp.
+    # Used to compute hot-water litres drawn from tank: hot = mix × (use - cold) / (tank - cold).
+    DHW_USAGE_TEMP_C: float = float(os.getenv("DHW_USAGE_TEMP_C", "40.0"))
     # Slack penalty on the soft DHW ceiling (#225 item 1, was hardcoded 0.01).
     # Operators who want stricter comfort vs cost can tune this. Default 0.01
     # p/°C-slot preserves prior behaviour.
