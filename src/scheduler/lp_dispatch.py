@@ -688,16 +688,19 @@ def write_daikin_from_lp_plan(
         headroom = 9999
     pairs, dropped = _apply_write_budget(pairs, headroom)
     if dropped:
-        try:
-            from ..notifier import notify_strategy_update
-            notify_strategy_update(
-                f"Daikin write-budget guard active: dropped {len(dropped)} low-value "
-                f"action(s) to fit headroom={headroom}. Consider raising "
-                f"DAIKIN_DAILY_BUDGET or lowering DAIKIN_RESERVE_FOR_HEARTBEAT.",
-                warnings=dropped,
-            )
-        except Exception:  # pragma: no cover — notification must never break dispatch
-            logger.exception("write-budget guard: notify_strategy_update failed")
+        # Per user pull-based notification preference (memory:
+        # feedback_low_push_load.md): the budget guard is an auto-applied
+        # FYI — it doesn't require operator action because the guard
+        # already handled the situation by dropping low-value actions.
+        # Log to journalctl + action_log only; do NOT push to Telegram.
+        # Operators who care can grep ``journalctl -u hem | grep
+        # 'budget guard'`` or query api_call_log for the underlying quota
+        # state.
+        logger.info(
+            "Daikin write-budget guard: dropped %d low-value action(s) "
+            "(headroom=%d). Dropped: %s",
+            len(dropped), headroom, ",".join(dropped),
+        )
     count = 0
     for restore_row, action_row in pairs:
         rid = db.upsert_action(
