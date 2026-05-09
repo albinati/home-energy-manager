@@ -296,6 +296,147 @@ def run_check(
 # CLI
 # --------------------------------------------------------------------------
 
+def _build_wins_losses(
+    report: RegressionReport,
+    baseline_per_date: dict[str, dict[str, float]] | None,
+) -> list[dict[str, float | str]]:
+    """Per-day deltas of (current − baseline) replayed cost in pence.
+
+    Returns a list of ``{date, baseline_p, current_p, delta_p, classification}``
+    rows sorted by ``|delta_p|`` desc. ``classification`` is ``win`` when the
+    new code beats baseline (delta < 0), ``loss`` when worse, ``flat`` when
+    within 1 p, and ``no-baseline`` when the day isn't in the baseline.
+    """
+    rows: list[dict[str, float | str]] = []
+    by_date_current = {d.date: d for d in report.days if d.ok}
+    bd = baseline_per_date or {}
+    seen: set[str] = set()
+    for date_str, day in by_date_current.items():
+        seen.add(date_str)
+        bl = bd.get(date_str) or {}
+        try:
+            baseline_p = float(bl.get("total_replayed_cost_p", 0.0)) if bl else None
+        except (TypeError, ValueError):
+            baseline_p = None
+        if baseline_p is None:
+            classification = "no-baseline"
+            delta_p = 0.0
+            baseline_p_out = 0.0
+        else:
+            delta_p = day.total_replayed_cost_p - baseline_p
+            if delta_p < -1.0:
+                classification = "win"
+            elif delta_p > 1.0:
+                classification = "loss"
+            else:
+                classification = "flat"
+            baseline_p_out = baseline_p
+        rows.append({
+            "date": date_str,
+            "baseline_p": baseline_p_out,
+            "current_p": day.total_replayed_cost_p,
+            "delta_p": delta_p,
+            "classification": classification,
+        })
+    # Surface baseline-only days (regressed enough to fail to replay) too.
+    for date_str, bl in bd.items():
+        if date_str in seen:
+            continue
+        try:
+            baseline_p = float(bl.get("total_replayed_cost_p", 0.0))
+        except (TypeError, ValueError):
+            baseline_p = 0.0
+        rows.append({
+            "date": date_str,
+            "baseline_p": baseline_p,
+            "current_p": 0.0,
+            "delta_p": 0.0,
+            "classification": "missing-current",
+        })
+    rows.sort(key=lambda r: abs(float(r["delta_p"])), reverse=True)
+    return rows
+
+
+def _print_wins_losses(rows: list[dict[str, float | str]], top_k: int) -> None:
+    print()
+    print("=" * 80)
+    print(f"WINS / LOSSES vs baseline (top {top_k} by |Δ|)")
+    print("=" * 80)
+    print(f"{'date':>12}  {'baseline £':>11}  {'current £':>10}  {'Δ £':>9}  class")
+    for r in rows[: max(0, int(top_k))]:
+        print(
+            f"{str(r['date']):>12}  "
+            f"{float(r['baseline_p']) / 100:>+10.2f}  "
+            f"{float(r['current_p']) / 100:>+9.2f}  "
+            f"{float(r['delta_p']) / 100:>+8.2f}  "
+            f"{r['classification']}"
+        )
+    wins = [r for r in rows if r["classification"] == "win"]
+    losses = [r for r in rows if r["classification"] == "loss"]
+    flats = [r for r in rows if r["classification"] == "flat"]
+    win_total_p = sum(float(r["delta_p"]) for r in wins)
+    loss_total_p = sum(float(r["delta_p"]) for r in losses)
+    print("-" * 80)
+    print(
+        f"  Wins  : {len(wins):>3}  total Δ {win_total_p / 100:>+8.2f} £   "
+        f"Losses: {len(losses):>3}  total Δ {loss_total_p / 100:>+8.2f} £   "
+        f"Flat: {len(flats):>3}"
+    )
+    print()
+
+
+def _inspect_day(target: str, *, mode: str = "forward") -> int:
+    """Replay one day and dump per-slot LP outputs.
+
+    Reuses the existing ``replay_day`` machinery; surfaces ``slot_diffs`` for
+    the LAST run of the day (fully-resolved horizon) so the user can see the
+    plan that would have shipped if the day's recalc chain ran on current code.
+    """
+    from src.scheduler.lp_replay import replay_day
+
+    try:
+        r = replay_day(target, cadence="original", mode=mode)
+    except Exception as e:
+        print(f"[inspect-day] replay raised: {e}", file=sys.stderr)
+        return 1
+    if not r.ok:
+        print(f"[inspect-day] replay failed: {r.error}", file=sys.stderr)
+        return 1
+    runs = list(r.runs or [])
+    if not runs:
+        print(f"[inspect-day] no LP runs on {target}", file=sys.stderr)
+        return 1
+    last = runs[-1]
+    slots = last.slot_diffs or []
+    print()
+    print("=" * 100)
+    print(f"INSPECT-DAY {target} — last run (mode={mode}, run_id={last.run_id})")
+    print(f"  replayed cost (full day)  : {r.total_replayed_cost_p / 100:>+8.2f} £")
+    print(f"  original  cost (full day) : {r.total_original_cost_p / 100:>+8.2f} £")
+    print(f"  Δ                         : {r.total_delta_cost_p / 100:>+8.2f} £")
+    print("=" * 100)
+    print(
+        f"{'slot_utc':>20}  {'p':>6}  "
+        f"{'imp':>5}  {'exp':>5}  {'chg':>5}  {'dis':>5}  "
+        f"{'dhw':>5}  {'spc':>5}  {'soc':>6}  {'tank':>5}"
+    )
+    for s in slots:
+        print(
+            f"{str(s.get('slot_time_utc', ''))[-20:]:>20}  "
+            f"{float(s.get('price_p', 0.0)):>6.2f}  "
+            f"{float(s.get('new_import_kwh', 0.0)):>5.2f}  "
+            f"{float(s.get('new_export_kwh', 0.0)):>5.2f}  "
+            f"{float(s.get('new_charge_kwh', 0.0)):>5.2f}  "
+            f"{float(s.get('new_discharge_kwh', 0.0)):>5.2f}  "
+            f"{float(s.get('new_dhw_kwh', 0.0)):>5.2f}  "
+            f"{float(s.get('new_space_kwh', 0.0)):>5.2f}  "
+            f"{float(s.get('new_soc_kwh', 0.0)):>6.2f}  "
+            f"{float(s.get('new_tank_temp_c', 0.0)):>5.1f}"
+        )
+    print()
+    return 0
+
+
 def _print_report(report: RegressionReport) -> None:
     print()
     print("=" * 80)
@@ -386,6 +527,27 @@ def main(argv: list[str]) -> int:
         "--quiet", action="store_true",
         help="Suppress the human-readable table; useful in CI when --json is set.",
     )
+    parser.add_argument(
+        "--wins-losses", action="store_true",
+        help=(
+            "After the standard report, print a per-day wins/losses table "
+            "sorted by |Δ| vs baseline. Useful to localise WHICH days the "
+            "new code helps or hurts before refreshing the baseline."
+        ),
+    )
+    parser.add_argument(
+        "--wins-losses-top-k", type=int, default=14,
+        help="When --wins-losses is set, print up to this many rows (default 14).",
+    )
+    parser.add_argument(
+        "--inspect-day", type=str, default=None,
+        help=(
+            "Replay ONE local date (YYYY-MM-DD) under --mode and dump per-slot "
+            "LP outputs (price, kWh per pillar, SoC, tank temp) for the last "
+            "run of the day. Mutually exclusive with the regression-gate flow; "
+            "exits 0/1 based on whether the replay succeeded."
+        ),
+    )
     args = parser.parse_args(argv[1:])
 
     logging.basicConfig(
@@ -393,6 +555,12 @@ def main(argv: list[str]) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         stream=sys.stderr,
     )
+
+    if args.inspect_day:
+        # Single-day inspection short-circuits the regression-gate flow —
+        # the gate only makes sense as an aggregate over the window.
+        single_mode = "forward" if args.mode == "both" else args.mode
+        return _inspect_day(args.inspect_day, mode=single_mode)
 
     if args.mode == "both":
         # Run forward + honest sequentially, fail on EITHER regressing.
@@ -422,6 +590,11 @@ def main(argv: list[str]) -> int:
             if not args.quiet:
                 print(f"\n### MODE = {m.upper()} ###")
                 _print_report(r)
+                if args.wins_losses:
+                    bl = _load_baseline(mode_baseline_path) or {}
+                    per_date = bl.get("per_date") if isinstance(bl, dict) else None
+                    rows = _build_wins_losses(r, per_date if isinstance(per_date, dict) else None)
+                    _print_wins_losses(rows, args.wins_losses_top_k)
 
         if args.json:
             args.json.parent.mkdir(parents=True, exist_ok=True)
@@ -463,6 +636,11 @@ def main(argv: list[str]) -> int:
 
     if not args.quiet:
         _print_report(report)
+        if args.wins_losses:
+            bl = _load_baseline(args.baseline) or {}
+            per_date = bl.get("per_date") if isinstance(bl, dict) else None
+            rows = _build_wins_losses(report, per_date if isinstance(per_date, dict) else None)
+            _print_wins_losses(rows, args.wins_losses_top_k)
 
     return 0 if report.passed else 1
 

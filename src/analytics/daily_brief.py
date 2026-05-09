@@ -81,7 +81,29 @@ def build_morning_payload() -> str:
 
     lines.append(f"**Yesterday ({yesterday}) — financial summary**")
     lines.extend(_format_pnl_block(pnl, day=yesterday, tz=tz))
+
+    bias_line = _pv_bias_line()
+    if bias_line:
+        lines.extend(["", bias_line])
+
     return "\n".join(lines)
+
+
+def _pv_bias_line() -> str | None:
+    """One-line PV forecast bias (am/pm) for the morning brief.
+
+    Returns ``None`` when no paired samples exist yet — callers should skip
+    rather than render an empty line. Surfaces the same headline that the
+    ``get_pv_forecast_bias`` MCP tool returns, so OpenClaw + the brief agree.
+    """
+    try:
+        from .pv_bias_report import summarise_pv_bias
+        report = summarise_pv_bias(window_days=int(config.PV_BIAS_REPORT_WINDOW_DAYS))
+    except Exception:  # pragma: no cover — diagnostic line must never break the brief
+        return None
+    if int(report.get("n_paired", 0)) <= 0:
+        return None
+    return report.get("headline")
 
 
 # --------------------------------------------------------------------------
