@@ -221,6 +221,16 @@ def _format_pnl_block(pnl: dict[str, Any], *, day: date, tz: ZoneInfo) -> list[s
         )
         out.append(f"- Energy used: {used_kwh:.1f} kWh  |  exported: {exp_kwh:.1f} kWh")
 
+    # Phase A audit line: Fox CT clamps vs Octopus smart-meter daily totals
+    # for divergence detection. Both sources should agree to ~5%; bigger
+    # gaps suggest heartbeat coverage problems or meter calibration drift.
+    audit_line = _fox_vs_meter_audit_line(day)
+    if audit_line:
+        out.append(audit_line)
+    skill_line = _forecast_skill_line(day)
+    if skill_line:
+        out.append(skill_line)
+
     # Forecasted-export fallback: telemetry sometimes drops grid_export_kw
     # samples, leaving export_kwh=0 even on days where the LP committed
     # peak_export and the inverter genuinely discharged. Estimate from
@@ -273,6 +283,72 @@ def _format_pnl_block(pnl: dict[str, Any], *, day: date, tz: ZoneInfo) -> list[s
                 f"£{pnl['delta_vs_fixed_gbp']:+.2f} {'saved' if pnl['delta_vs_fixed_gbp'] >= 0 else 'extra'}"
             )
     return out
+
+
+def _fox_vs_meter_audit_line(day: date) -> str | None:
+    """Format a one-line side-by-side comparison of Fox CT-clamp totals vs
+    Octopus smart-meter daily totals. Both sources should agree to ~5%; bigger
+    gaps surface heartbeat-coverage or calibration issues early.
+
+    Returns ``None`` when either source is missing for ``day`` (e.g. no
+    Octopus daily cache yet, no Fox API rollup).
+    """
+    fox = db.get_fox_energy_daily_by_date(day.isoformat())
+    meter = db.get_octopus_daily_meter(day.isoformat())
+    if not fox or not meter:
+        return None
+
+    def _fmt_pair(fox_v: float | None, meter_v: float | None) -> str | None:
+        if fox_v is None or meter_v is None:
+            return None
+        gap_pct = ((fox_v - meter_v) / meter_v * 100) if meter_v else 0.0
+        return f"{fox_v:.2f} / {meter_v:.2f} kWh ({gap_pct:+.1f}%)"
+
+    imp = _fmt_pair(fox.get("import_kwh"), meter.get("import_kwh"))
+    exp = _fmt_pair(fox.get("export_kwh"), meter.get("export_kwh"))
+    if not imp:
+        return None
+    parts = [f"import {imp}"]
+    if exp:
+        parts.append(f"export {exp}")
+    return f"- Audit (Fox vs meter): {' | '.join(parts)}"
+
+
+def _forecast_skill_line(day: date) -> str | None:
+    """Format a one-line forecast-vs-actual summary from forecast_skill_log.
+
+    Reads ``forecast_skill_log`` rows for ``day`` (UTC) populated by
+    ``rebuild_forecast_skill_log_for_date``. Returns mean outdoor-temp MAE
+    and PV bias (forecast − actual). Skipped when no rows.
+    """
+    try:
+        iso = day.isoformat()
+        rows = db.get_forecast_skill_rows(iso, iso)
+    except Exception:
+        return None
+    if not rows:
+        return None
+
+    temp_errs: list[float] = []
+    pv_diffs: list[float] = []
+    for r in rows:
+        pt = r.get("predicted_temp_c")
+        at = r.get("actual_temp_c")
+        if pt is not None and at is not None:
+            temp_errs.append(abs(float(pt) - float(at)))
+        pp = r.get("predicted_pv_kwh")
+        ap = r.get("actual_pv_kwh")
+        if pp is not None and ap is not None:
+            pv_diffs.append(float(pp) - float(ap))
+
+    parts: list[str] = []
+    if temp_errs:
+        parts.append(f"outdoor MAE {sum(temp_errs)/len(temp_errs):.1f}°C")
+    if pv_diffs:
+        parts.append(f"PV bias {sum(pv_diffs)/len(pv_diffs):+.2f} kWh/h")
+    if not parts:
+        return None
+    return f"- Forecast skill ({len(rows)}h): {', '.join(parts)}"
 
 
 def _forecasted_export_for_day(day: date, tz: ZoneInfo) -> tuple[float, float, int]:

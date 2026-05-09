@@ -155,6 +155,43 @@ def test_fixed_tariff_real_shadow_when_configured(
     assert p["fixed_tariff_shadow_gbp"] == pytest.approx(1.40, abs=1e-3)
 
 
+def test_backfill_dedupes_stragglers_in_slot_window() -> None:
+    """update_execution_log_metered must leave exactly one canonical row per
+    slot bucket. Pre-fix LIMIT 1 left straggler heartbeat rows intact, which
+    double-counted in the legacy realised_cost_gbp SUM path."""
+    slot_start = datetime(2026, 5, 1, 13, 0, tzinfo=UTC)
+    # Three estimated heartbeat rows landed within the same 30-min slot
+    # at different microsecond offsets — typical when the heartbeat fires
+    # multiple times before the half-hour deduper kicks in.
+    _save_execution(slot_start + timedelta(seconds=12), kwh=0.4, agile_p=20.0)
+    _save_execution(slot_start + timedelta(minutes=5, seconds=33), kwh=0.5, agile_p=20.0)
+    _save_execution(slot_start + timedelta(minutes=18, seconds=47), kwh=0.3, agile_p=20.0)
+
+    # Pre-backfill: 3 rows in the slot
+    pre = db.get_execution_logs(
+        from_ts=slot_start.isoformat(),
+        to_ts=(slot_start + timedelta(minutes=30)).isoformat(),
+        limit=10,
+    )
+    assert len(pre) == 3
+
+    ok = db.update_execution_log_metered(
+        slot_start.isoformat().replace("+00:00", "Z"),
+        consumption_kwh=1.234,
+    )
+    assert ok is True
+
+    # Post-backfill: exactly one canonical row remains, with the metered kWh
+    post = db.get_execution_logs(
+        from_ts=slot_start.isoformat(),
+        to_ts=(slot_start + timedelta(minutes=30)).isoformat(),
+        limit=10,
+    )
+    assert len(post) == 1
+    assert post[0]["consumption_kwh"] == pytest.approx(1.234, abs=1e-6)
+    assert post[0]["source"] == "metered"
+
+
 def test_no_pv_telemetry_returns_zero_real_cost() -> None:
     """When ``pv_realtime_history`` has nothing for the day, real-money
     fields safely report zero (no inflation from missing data)."""
