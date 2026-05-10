@@ -230,6 +230,13 @@ def _format_pnl_block(pnl: dict[str, Any], *, day: date, tz: ZoneInfo) -> list[s
     skill_line = _forecast_skill_line(day)
     if skill_line:
         out.append(skill_line)
+    # #309: surface dispatch budget-guard drops so the user sees when the
+    # Daikin quota was tight enough that low-value plan pairs were pruned.
+    # Critical NEGATIVE/PEAK pairs are always preserved; only CHEAP /
+    # SOLAR_PREHEAT pairs get dropped, so this is an FYI not an alarm.
+    budget_line = _budget_guard_summary_line(day)
+    if budget_line:
+        out.append(budget_line)
 
     # Forecasted-export fallback: telemetry sometimes drops grid_export_kw
     # samples, leaving export_kwh=0 even on days where the LP committed
@@ -349,6 +356,58 @@ def _forecast_skill_line(day: date) -> str | None:
     if not parts:
         return None
     return f"- Forecast skill ({len(rows)}h): {', '.join(parts)}"
+
+
+def _budget_guard_summary_line(day: date) -> str | None:
+    """Format a one-line summary of any Daikin budget-guard drops on ``day``.
+
+    Reads ``action_log`` rows tagged ``action='budget_guard_drop'`` written
+    by ``write_daikin_from_lp_plan`` when the dispatch quota guard pruned
+    low-value pairs. Aggregates across the day. Returns ``None`` when no
+    drop events were logged.
+    """
+    try:
+        rows = db.get_action_logs(device="daikin", trigger="lp_dispatch", limit=200)
+    except Exception:
+        return None
+    if not rows:
+        return None
+    iso_prefix = day.isoformat()
+    drop_rows = [
+        r for r in rows
+        if str(r.get("action") or "") == "budget_guard_drop"
+        and str(r.get("timestamp") or "").startswith(iso_prefix)
+    ]
+    if not drop_rows:
+        return None
+
+    total_dropped = 0
+    min_headroom = 9999
+    drop_kinds: dict[str, int] = {}
+    for r in drop_rows:
+        params = r.get("params") or {}
+        try:
+            n = int(params.get("n_dropped") or 0)
+        except (TypeError, ValueError):
+            n = 0
+        total_dropped += n
+        try:
+            hr = int(params.get("headroom") or 0)
+            if hr < min_headroom:
+                min_headroom = hr
+        except (TypeError, ValueError):
+            pass
+        # Each "dropped" entry is "action_type@timestamp"; tally by action_type.
+        for entry in params.get("dropped") or []:
+            kind = str(entry).split("@", 1)[0] or "unknown"
+            drop_kinds[kind] = drop_kinds.get(kind, 0) + 1
+    if total_dropped == 0:
+        return None
+    kinds_str = ", ".join(f"{n}× {k}" for k, n in sorted(drop_kinds.items()))
+    return (
+        f"- ⚠️ Daikin quota: dropped {total_dropped} low-value pair(s) "
+        f"({kinds_str}); critical NEGATIVE/PEAK preserved (min headroom={min_headroom})"
+    )
 
 
 def _forecasted_export_for_day(day: date, tz: ZoneInfo) -> tuple[float, float, int]:
