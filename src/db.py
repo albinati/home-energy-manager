@@ -5716,3 +5716,53 @@ def compute_daikin_lwt_kw_calibration(
         "skipped_outlier_pre": len(skipped_outlier),
         "outliers_filtered": len(pairs) - len(anchored),
     }
+
+
+def refresh_daikin_lwt_kw_calibration(*, log_min_delta_pct: float = 1.0) -> dict[str, Any]:
+    """Recompute and upsert the calibration; called from the LP solve path.
+
+    Cheap enough to run on every LP solve (~30 daily rows, single regression).
+    Logging is gated to fires of substance: status changes (ok ↔ skipped) or
+    a >``log_min_delta_pct``% shift in ``k_per_degc`` from the prior row.
+    Other solves stay quiet so the journald stream isn't drowned in identical
+    "calibration unchanged" lines across 24+ daily solves.
+    """
+    prev = get_daikin_lwt_kw_calibration()
+    result = compute_daikin_lwt_kw_calibration()
+    if result.get("status") != "ok":
+        if prev is None:
+            # First run, no data yet — log once at INFO so cold-start is visible
+            logger.info(
+                "daikin_lwt_calibration: %s (reason=%s, samples=%s) — "
+                "loader will use module default until enough data accumulates",
+                result.get("status"), result.get("reason"), result.get("samples"),
+            )
+        return result
+    new_k = float(result["k_per_degc"])
+    upsert_daikin_lwt_kw_calibration(
+        k_per_degc=new_k,
+        samples=int(result["samples"]),
+        window_days=int(result["window_days"]),
+        rmse_kwh=float(result.get("rmse_kwh") or 0.0),
+        bias_kwh=float(result.get("bias_kwh") or 0.0),
+    )
+    prev_k = float(prev["k_per_degc"]) if prev else None
+    if prev_k is None:
+        logger.info(
+            "daikin_lwt_calibration: first fit k=%.5f kW/°C (default 0.0333); "
+            "samples=%d window=%dd rmse=%.2f kWh bias=%+0.2f kWh outliers_filtered=%d",
+            new_k, result["samples"], result["window_days"],
+            result.get("rmse_kwh") or 0.0, result.get("bias_kwh") or 0.0,
+            result.get("outliers_filtered", 0),
+        )
+    else:
+        delta_pct = abs(new_k - prev_k) / max(1e-9, prev_k) * 100.0
+        if delta_pct >= log_min_delta_pct:
+            logger.info(
+                "daikin_lwt_calibration: k=%.5f kW/°C (was %.5f, %+0.1f%%); "
+                "samples=%d rmse=%.2f kWh bias=%+0.2f kWh",
+                new_k, prev_k, (new_k - prev_k) / max(1e-9, prev_k) * 100.0,
+                result["samples"], result.get("rmse_kwh") or 0.0,
+                result.get("bias_kwh") or 0.0,
+            )
+    return result

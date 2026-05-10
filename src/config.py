@@ -345,11 +345,6 @@ class Config:
     # consumption data lands ~24 h after the slot; 04:00 local is safe.
     CONSUMPTION_BACKFILL_HOUR: int = int(os.getenv("CONSUMPTION_BACKFILL_HOUR", "4"))
     CONSUMPTION_BACKFILL_MINUTE: int = int(os.getenv("CONSUMPTION_BACKFILL_MINUTE", "0"))
-    # Daikin LWT→kW per-installation re-calibration. Default 04:30 local —
-    # 30 min after CONSUMPTION_BACKFILL so daikin_consumption_daily is fresh.
-    # Reads kwh_heating × outdoor_temp history; upserts daikin_lwt_kw_calibration.
-    DAIKIN_LWT_CALIBRATION_HOUR: int = int(os.getenv("DAIKIN_LWT_CALIBRATION_HOUR", "4"))
-    DAIKIN_LWT_CALIBRATION_MINUTE: int = int(os.getenv("DAIKIN_LWT_CALIBRATION_MINUTE", "30"))
     BULLETPROOF_TIMEZONE: str = (os.getenv("BULLETPROOF_TIMEZONE") or "Europe/London").strip()
 
     # ── SmartThings smart-appliance scheduling — OAuth 2.0 (mirrors Daikin) ──

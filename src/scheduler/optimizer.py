@@ -1319,6 +1319,17 @@ def _run_optimizer_lp(
     if not slots:
         return _self_use_fallback(fox, reason="No half-hour slots in LP horizon — check Agile rates coverage")
 
+    # Refresh the per-installation Daikin LWT→kW calibration BEFORE building the
+    # residual profile — both the residual subtraction (db.tariff_aware_…) and
+    # the LP's own space_floor[i] read get_kw_per_degc_lwt() at evaluation time,
+    # so picking up a new calibration here is enough to make the whole solve
+    # consistent with the freshest data. Best-effort: any failure is logged
+    # internally and the loader keeps serving the previous row (or default).
+    try:
+        db.refresh_daikin_lwt_kw_calibration()
+    except Exception:  # noqa: BLE001 — calibration must never block the solve
+        logger.exception("daikin_lwt_calibration refresh failed; continuing")
+
     # Per-slot residual load (Daikin physics subtracted per S10.13 / #179).
     # Phase B2 (#306 follow-up): use the tariff-aware profile when available
     # so cooking-pulled-into-cheap and peak-avoidance behaviours are

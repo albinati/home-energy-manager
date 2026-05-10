@@ -188,6 +188,71 @@ def test_lwt_offset_inverse_uses_calibrated_value() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Inline refresh wrapper (replaces the standalone cron)
+# ---------------------------------------------------------------------------
+
+def test_refresh_writes_row_when_data_supports_a_fit() -> None:
+    """End-to-end: refresh upserts the calibration row when data is sufficient."""
+    target_k = 0.042
+    base = date.today() - timedelta(days=20)
+    for i in range(12):
+        d = base + timedelta(days=i)
+        temps = [4.0 + (i % 11)] * 24
+        _seed_meteo_day(d, temps)
+        y = target_k * _x_day(temps)
+        db.upsert_daikin_consumption_daily(
+            date=d.isoformat(), kwh_total=y + 2.0, kwh_heating=y, kwh_dhw=2.0,
+            source="onecta",
+        )
+    result = db.refresh_daikin_lwt_kw_calibration()
+    assert result["status"] == "ok"
+    row = db.get_daikin_lwt_kw_calibration()
+    assert row is not None
+    assert row["k_per_degc"] == pytest.approx(target_k, abs=1e-3)
+
+
+def test_refresh_does_not_overwrite_when_data_insufficient() -> None:
+    """A 'skipped' refresh must NOT clobber a previously-good calibration row."""
+    db.upsert_daikin_lwt_kw_calibration(k_per_degc=0.045, samples=14, window_days=30)
+    # No daikin_consumption_daily rows seeded → refresh returns 'skipped'
+    result = db.refresh_daikin_lwt_kw_calibration()
+    assert result["status"] == "skipped"
+    row = db.get_daikin_lwt_kw_calibration()
+    # The previously-good row is preserved
+    assert row["k_per_degc"] == pytest.approx(0.045, abs=1e-9)
+
+
+def test_refresh_logs_only_on_meaningful_delta(caplog: pytest.LogCaptureFixture) -> None:
+    """24+ daily LP solves must NOT spam the log when k is unchanged."""
+    import logging
+    caplog.set_level(logging.INFO, logger="src.db")
+
+    target_k = 0.042
+    base = date.today() - timedelta(days=20)
+    for i in range(12):
+        d = base + timedelta(days=i)
+        temps = [4.0 + (i % 11)] * 24
+        _seed_meteo_day(d, temps)
+        y = target_k * _x_day(temps)
+        db.upsert_daikin_consumption_daily(
+            date=d.isoformat(), kwh_total=y + 2.0, kwh_heating=y, kwh_dhw=2.0,
+            source="onecta",
+        )
+
+    # First refresh — should log (cold start)
+    db.refresh_daikin_lwt_kw_calibration()
+    first_log_count = sum(1 for r in caplog.records if "daikin_lwt_calibration" in r.getMessage())
+    assert first_log_count >= 1
+
+    # Five identical refreshes — same data, k stays identical, must NOT log
+    caplog.clear()
+    for _ in range(5):
+        db.refresh_daikin_lwt_kw_calibration()
+    quiet_log_count = sum(1 for r in caplog.records if "daikin_lwt_calibration" in r.getMessage())
+    assert quiet_log_count == 0, f"unexpected log spam across redundant refreshes: {[r.getMessage() for r in caplog.records]}"
+
+
+# ---------------------------------------------------------------------------
 # Schema migration is idempotent
 # ---------------------------------------------------------------------------
 
