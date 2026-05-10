@@ -5616,10 +5616,16 @@ def compute_daikin_lwt_kw_calibration(
             "samples": 0,
         }
 
-    # Per-day outdoor integral. We pick the most-recent snapshot fetched on or
-    # after the day starts so the temps are the closest-to-actual we have
-    # (forecast_skill_log.actual_temp_c stays empty until the V13 backfill
-    # populates it; using the freshest snapshot is the best proxy until then).
+    # Per-day outdoor integral. For each historical day we want the freshest
+    # value per slot_time across BOTH meteo tables:
+    #   - meteo_forecast_value retains ~7 days (current canonical lookups)
+    #   - meteo_forecast_history retains ≥ 14 days (long-term audit)
+    # UNIONing them lets the rolling window go beyond _value's pruning cutoff.
+    # The MAX-fetched-value-per-slot subquery (correlated on slot_time, NOT on
+    # the day-of-slot) is what makes the outer query yield ALL covered slots
+    # of the day — earlier versions correlated on the day, which collapsed
+    # to whichever single snapshot had the latest fetch with any slot in
+    # that day, dropping coverage to a handful of hours for older days.
     pairs: list[tuple[float, float, str]] = []  # (X_day, y_day, date)
     skipped_no_meteo: list[str] = []
     skipped_outlier: list[str] = []
@@ -5629,35 +5635,53 @@ def compute_daikin_lwt_kw_calibration(
             for row in obs_rows:
                 d = str(row["date"])
                 kwh_heating = float(row["kwh_heating"])
-                # Per-hour outdoor temp: latest snapshot whose slot_time falls
-                # in this UTC date. Fall back to the very latest snapshot when
-                # the day's snapshot was overwritten (rare for days < 7 ago).
                 cur = conn.execute(
-                    """SELECT substr(slot_time, 12, 2) AS hour, temp_c
-                       FROM meteo_forecast_value
-                       WHERE substr(slot_time, 1, 10) = ?
-                         AND temp_c IS NOT NULL
-                         AND forecast_fetch_at_utc = (
-                           SELECT MAX(forecast_fetch_at_utc)
-                           FROM meteo_forecast_value
-                           WHERE substr(slot_time, 1, 10) = ?
-                         )""",
+                    """SELECT slot_time, temp_c FROM (
+                           SELECT slot_time, temp_c, forecast_fetch_at_utc
+                             FROM meteo_forecast_history
+                            WHERE substr(slot_time, 1, 10) = ?
+                              AND temp_c IS NOT NULL
+                           UNION ALL
+                           SELECT slot_time, temp_c, forecast_fetch_at_utc
+                             FROM meteo_forecast_value
+                            WHERE substr(slot_time, 1, 10) = ?
+                              AND temp_c IS NOT NULL
+                       ) AS u
+                       WHERE forecast_fetch_at_utc = (
+                           SELECT MAX(f) FROM (
+                               SELECT forecast_fetch_at_utc AS f
+                                 FROM meteo_forecast_history
+                                WHERE slot_time = u.slot_time AND temp_c IS NOT NULL
+                               UNION ALL
+                               SELECT forecast_fetch_at_utc AS f
+                                 FROM meteo_forecast_value
+                                WHERE slot_time = u.slot_time AND temp_c IS NOT NULL
+                           )
+                       )
+                       GROUP BY slot_time""",
                     (d, d),
                 )
-                hour_temps = cur.fetchall()
-                if len(hour_temps) < 12:  # need ≥ half-day coverage
+                slot_temps = cur.fetchall()
+                # Need ≥ 12 hours = ≥ 24 half-hour slots for the day to count.
+                # Half-hourly cadence is the canonical resolution; older fetches
+                # are sometimes hourly only (= 12 rows = 12 hours), so accept
+                # ≥ 12 rows as a fallback.
+                if len(slot_temps) < 12:
                     skipped_no_meteo.append(d)
                     continue
-                # X_day in °C·h: integrate (LWT(T) − 18)+ across covered hours.
-                # Each row is one hour-of-day, so multiplier is 1.0 h.
-                x_day = 0.0
-                for ht in hour_temps:
-                    t_out = float(ht["temp_c"])
-                    lwt = get_lwt_base_c(t_out)
-                    x_day += max(0.0, lwt - 18.0)
+                # X_day in °C·h. Δt per row depends on the snapshot cadence:
+                #   24 rows  ⇒ hourly,    Δt = 1 h
+                #   48 rows  ⇒ half-hour, Δt = 0.5 h
+                # Use the inverse of the row count over 24 hours so we honour
+                # whichever cadence the snapshot used.
+                slot_h = 24.0 / max(1, len(slot_temps))
+                x_day = sum(
+                    max(0.0, get_lwt_base_c(float(rr["temp_c"])) - 18.0)
+                    for rr in slot_temps
+                ) * slot_h
                 if x_day <= 0.0 and kwh_heating > 0.5:
-                    # Warm day predicted but real consumption — likely DHW
-                    # mis-attribution or anomalous setpoint. Drop.
+                    # Warm day predicted but real heating consumption — likely
+                    # DHW mis-attribution or anomalous setpoint. Drop.
                     skipped_outlier.append(d)
                     continue
                 pairs.append((x_day, kwh_heating, d))

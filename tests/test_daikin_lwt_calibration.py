@@ -26,29 +26,36 @@ def _isolated_db(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _seed_meteo_day(d: date, hourly_temps: list[float]) -> None:
-    """Insert one snapshot covering all 24 UTC hours of ``d``."""
+def _seed_meteo_day(d: date, hourly_temps: list[float], *, table: str = "meteo_forecast_value") -> None:
+    """Insert ONE snapshot covering all 24 UTC hours of ``d`` into ``table``.
+
+    Default writes to ``meteo_forecast_value``; pass ``table='meteo_forecast_history'``
+    to seed older days (the value table is pruned to ~7 days in prod).
+    """
     assert len(hourly_temps) == 24
     fetch_at = (datetime(d.year, d.month, d.day, 23, 0, tzinfo=UTC)).isoformat()
+    cols = "(forecast_fetch_at_utc, slot_time, temp_c, solar_w_m2, cloud_cover_pct"
+    vals = "(?, ?, ?, NULL, NULL"
+    if table == "meteo_forecast_value":
+        cols += ", direct_pv_kw)"
+        vals += ", NULL)"
+    else:
+        cols += ")"
+        vals += ")"
     with db._lock:
         conn = db.get_connection()
         try:
             for h, t in enumerate(hourly_temps):
                 slot = datetime(d.year, d.month, d.day, h, 0, tzinfo=UTC).isoformat()
-                conn.execute(
-                    """INSERT INTO meteo_forecast_value
-                       (forecast_fetch_at_utc, slot_time, temp_c, solar_w_m2, cloud_cover_pct, direct_pv_kw)
-                       VALUES (?, ?, ?, NULL, NULL, NULL)""",
-                    (fetch_at, slot, t),
-                )
+                conn.execute(f"INSERT INTO {table} {cols} VALUES {vals}", (fetch_at, slot, t))
             conn.commit()
         finally:
             conn.close()
 
 
 def _x_day(hourly_temps: list[float]) -> float:
-    """Recompute the ground-truth X_day = Σ_h max(0, LWT(t) − 18)."""
-    return sum(max(0.0, physics.get_lwt_base_c(t) - 18.0) for t in hourly_temps)
+    """Recompute the ground-truth X_day = Σ_h max(0, LWT(t) − 18) × 1 h."""
+    return sum(max(0.0, physics.get_lwt_base_c(t) - 18.0) for t in hourly_temps) * 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +192,131 @@ def test_lwt_offset_inverse_uses_calibrated_value() -> None:
     # The implied LWT_actual = 0.4 / 0.050 + 18 = 26 °C; clamped to bounds.
     # Just assert the offset is in the configured range.
     assert app_config.OPTIMIZATION_LWT_OFFSET_MIN <= offset <= app_config.OPTIMIZATION_LWT_OFFSET_MAX
+
+
+# ---------------------------------------------------------------------------
+# Bugs the dry-run-against-prod uncovered (regression coverage)
+# ---------------------------------------------------------------------------
+
+def test_calibration_uses_half_hour_units_consistently() -> None:
+    """Bug fix: X_day must integrate over time (Δt), not be a raw °C sum.
+
+    Half-hour cadence ⇒ Δt = 0.5 h, so X_day = Σ (LWT−18) × 0.5. If the code
+    forgot the multiplier, the resulting k would be ~2× too small and land
+    OUTSIDE the safety bounds — the loader would silently fall back to the
+    default and the whole feature is a no-op. We seed at HALF-HOUR cadence
+    here (same shape as prod) and verify the fitted k matches the synthetic
+    one we baked in.
+    """
+    target_k = 0.045
+    base = date.today() - timedelta(days=20)
+    for i in range(12):
+        d = base + timedelta(days=i)
+        # 48 half-hour slots (matches prod cadence)
+        slot_temps = [4.0 + (i % 11)] * 48
+        with db._lock:
+            conn = db.get_connection()
+            try:
+                fetch_at = datetime(d.year, d.month, d.day, 23, 30, tzinfo=UTC).isoformat()
+                for s, t in enumerate(slot_temps):
+                    minute = 30 if s % 2 else 0
+                    hour = s // 2
+                    slot = datetime(d.year, d.month, d.day, hour, minute, tzinfo=UTC).isoformat()
+                    conn.execute(
+                        """INSERT INTO meteo_forecast_value
+                           (forecast_fetch_at_utc, slot_time, temp_c, solar_w_m2, cloud_cover_pct, direct_pv_kw)
+                           VALUES (?, ?, ?, NULL, NULL, NULL)""",
+                        (fetch_at, slot, t),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+        # Ground truth y = k × X_day where X_day uses Δt = 0.5 (half-hour slots)
+        x = sum(max(0.0, physics.get_lwt_base_c(t) - 18.0) for t in slot_temps) * 0.5
+        y = target_k * x
+        db.upsert_daikin_consumption_daily(
+            date=d.isoformat(), kwh_total=y + 2.0, kwh_heating=y, kwh_dhw=2.0,
+            source="onecta",
+        )
+    result = db.compute_daikin_lwt_kw_calibration(window_days=30, min_samples=7)
+    assert result["status"] == "ok", result
+    assert result["k_per_degc"] == pytest.approx(target_k, abs=1e-3), (
+        f"unit-conversion bug: got k={result['k_per_degc']:.5f}, expected {target_k}"
+    )
+
+
+def test_calibration_finds_meteo_in_history_table() -> None:
+    """Bug fix: meteo_forecast_value gets pruned to ~7 days in prod, but
+    meteo_forecast_history retains 14+. The compute fn must UNION both so the
+    rolling window can extend past _value's cutoff."""
+    target_k = 0.040
+    base = date.today() - timedelta(days=25)
+    for i in range(12):
+        d = base + timedelta(days=i)
+        temps = [5.0 + (i % 8)] * 24
+        # Seed ONLY into history (older days in prod live exclusively here)
+        _seed_meteo_day(d, temps, table="meteo_forecast_history")
+        y = target_k * _x_day(temps)
+        db.upsert_daikin_consumption_daily(
+            date=d.isoformat(), kwh_total=y + 2.0, kwh_heating=y, kwh_dhw=2.0,
+            source="onecta",
+        )
+    result = db.compute_daikin_lwt_kw_calibration(window_days=30, min_samples=7)
+    assert result["status"] == "ok", result
+    assert result["samples"] >= 7
+    assert result["k_per_degc"] == pytest.approx(target_k, abs=1e-3)
+
+
+def test_calibration_per_slot_not_per_day_max_subquery() -> None:
+    """Bug fix: when multiple snapshots cover slots from the same day with
+    different `forecast_fetch_at_utc`, the compute fn must pick the latest
+    fetch PER slot_time, not the latest fetch that has any slot in that day.
+
+    Setup: for a given day, snapshot A covers hours 0-11, snapshot B (later)
+    covers hours 12-23. If we picked the latest fetch with any matching slot,
+    we'd get ONLY hours 12-23 from snapshot B. The fix walks per-slot, so we
+    get all 24 hours — half from A, half from B."""
+    target_k = 0.040
+    base = date.today() - timedelta(days=20)
+    for i in range(10):
+        d = base + timedelta(days=i)
+        # Two half-day snapshots with different fetch times
+        with db._lock:
+            conn = db.get_connection()
+            try:
+                fetch_a = datetime(d.year, d.month, d.day, 8, 0, tzinfo=UTC).isoformat()
+                fetch_b = datetime(d.year, d.month, d.day, 20, 0, tzinfo=UTC).isoformat()
+                temps_24h = [6.0 + (i % 9)] * 24
+                # First half from earlier fetch
+                for h in range(12):
+                    slot = datetime(d.year, d.month, d.day, h, 0, tzinfo=UTC).isoformat()
+                    conn.execute(
+                        """INSERT INTO meteo_forecast_value (forecast_fetch_at_utc, slot_time, temp_c, solar_w_m2, cloud_cover_pct, direct_pv_kw)
+                           VALUES (?, ?, ?, NULL, NULL, NULL)""",
+                        (fetch_a, slot, temps_24h[h]),
+                    )
+                # Second half from later fetch
+                for h in range(12, 24):
+                    slot = datetime(d.year, d.month, d.day, h, 0, tzinfo=UTC).isoformat()
+                    conn.execute(
+                        """INSERT INTO meteo_forecast_value (forecast_fetch_at_utc, slot_time, temp_c, solar_w_m2, cloud_cover_pct, direct_pv_kw)
+                           VALUES (?, ?, ?, NULL, NULL, NULL)""",
+                        (fetch_b, slot, temps_24h[h]),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+        y = target_k * _x_day(temps_24h)
+        db.upsert_daikin_consumption_daily(
+            date=d.isoformat(), kwh_total=y + 2.0, kwh_heating=y, kwh_dhw=2.0,
+            source="onecta",
+        )
+    result = db.compute_daikin_lwt_kw_calibration(window_days=30, min_samples=7)
+    assert result["status"] == "ok", result
+    assert result["k_per_degc"] == pytest.approx(target_k, abs=1e-3), (
+        f"per-day MAX bug: got k={result['k_per_degc']:.5f}, expected {target_k}; "
+        "likely only half the day's hours were used (half-day snapshot bug)"
+    )
 
 
 # ---------------------------------------------------------------------------
