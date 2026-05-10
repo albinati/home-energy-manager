@@ -608,9 +608,15 @@ def solve_lp(
         # ``DHW_TANK_STANDING_LOSS_W_PER_K`` calibration).
         q_heat_dhw = e_dhw[i] * cop_dhw[i] * j_per_kwh
         loss_tank_j = ua_tank * (tank[i] - float(config.INDOOR_SETPOINT_C)) * dt_s
-        # DHW draw on shower-window slots (static-physics model). Pre-computed
-        # in shower_draw_j[i]; zero outside shower windows.
-        draw_j_i = shower_draw_j[i]
+        # DHW draw on shower-window slots (static-physics model from #299).
+        # Pre-computed in shower_draw_j[i]; zero outside shower windows.
+        # PR #313: in PASSIVE mode the LP doesn't control DHW, so it can't
+        # respond to shower draws by heating more — but the firmware DOES
+        # reheat after showers. Subtracting shower draw without granting the
+        # LP a way to compensate makes the tank crash below the 20°C floor
+        # → infeasibility on shower-window replays. Skip the draw term in
+        # passive: the firmware handles reheat opaque to the LP.
+        draw_j_i = 0.0 if passive_daikin else shower_draw_j[i]
         prob += tank[i + 1] == tank[i] + (q_heat_dhw - loss_tank_j - draw_j_i) / c_tank
 
         # PR Phase B: building thermodynamics + comfort constraints removed.
