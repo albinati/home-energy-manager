@@ -302,6 +302,21 @@ CREATE TABLE IF NOT EXISTS forecast_skill_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_forecast_skill_log_date ON forecast_skill_log(date_utc);
+
+-- daikin_lwt_kw_calibration: rolling regression of observed kwh_heating against
+-- the integral of (LWT(t_outdoor) - 18) over each day. Replaces the hardcoded
+-- _KW_PER_DEGC_LWT in src/physics.py with a per-installation calibrated value.
+-- Single-row table (id = 1, INSERT OR REPLACE). Loader falls back to the
+-- module default when the row is missing or k is outside safety bounds.
+CREATE TABLE IF NOT EXISTS daikin_lwt_kw_calibration (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    k_per_degc REAL NOT NULL,
+    samples INTEGER NOT NULL,
+    window_days INTEGER NOT NULL,
+    rmse_kwh REAL,
+    bias_kwh REAL,
+    computed_at TEXT NOT NULL
+);
 """
 
 
@@ -951,6 +966,18 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE forecast_skill_log ADD COLUMN actual_load_kwh REAL")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_forecast_skill_log_date ON forecast_skill_log(date_utc)"
+    )
+    # Older DBs predate the Daikin LWT calibration table — idempotent CREATE.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS daikin_lwt_kw_calibration (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            k_per_degc REAL NOT NULL,
+            samples INTEGER NOT NULL,
+            window_days INTEGER NOT NULL,
+            rmse_kwh REAL,
+            bias_kwh REAL,
+            computed_at TEXT NOT NULL
+        )"""
     )
 
 
@@ -5475,3 +5502,217 @@ def get_active_appliance_jobs_overlapping(
             return [dict(r) for r in cur.fetchall()]
         finally:
             conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Daikin LWT → kW calibration (replaces hardcoded _KW_PER_DEGC_LWT in physics)
+# ---------------------------------------------------------------------------
+
+def get_daikin_lwt_kw_calibration() -> dict[str, Any] | None:
+    """Return the latest Daikin LWT→kW calibration row, or ``None`` when empty.
+
+    Loader keeps this cheap so :func:`src.physics.get_kw_per_degc_lwt` can call
+    it on every LP slot evaluation without DB pressure (single-row table,
+    primary-key seek, < 0.1 ms).
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT id, k_per_degc, samples, window_days,
+                          rmse_kwh, bias_kwh, computed_at
+                   FROM daikin_lwt_kw_calibration WHERE id = 1"""
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+
+def upsert_daikin_lwt_kw_calibration(
+    *,
+    k_per_degc: float,
+    samples: int,
+    window_days: int,
+    rmse_kwh: float | None = None,
+    bias_kwh: float | None = None,
+) -> None:
+    """Replace the single row in ``daikin_lwt_kw_calibration``."""
+    from datetime import UTC as _UTC, datetime as _dt
+    now = _dt.now(_UTC).isoformat()
+    with _lock:
+        conn = get_connection()
+        try:
+            conn.execute(
+                """INSERT OR REPLACE INTO daikin_lwt_kw_calibration
+                   (id, k_per_degc, samples, window_days,
+                    rmse_kwh, bias_kwh, computed_at)
+                   VALUES (1, ?, ?, ?, ?, ?, ?)""",
+                (
+                    float(k_per_degc),
+                    int(samples),
+                    int(window_days),
+                    float(rmse_kwh) if rmse_kwh is not None else None,
+                    float(bias_kwh) if bias_kwh is not None else None,
+                    now,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def compute_daikin_lwt_kw_calibration(
+    *,
+    window_days: int = 30,
+    min_samples: int = 7,
+) -> dict[str, Any]:
+    """Regress observed kwh_heating against Σ max(0, LWT(t_out) − 18) · Δt.
+
+    For each day in the rolling window, joins ``daikin_consumption_daily``
+    (kwh_heating, source-of-truth post-Phase-A backfill) with the per-hour
+    outdoor-temperature series from ``meteo_forecast_value`` (most-recent
+    snapshot covering each UTC hour of that day). The LWT curve in
+    :func:`src.physics.get_lwt_base_c` converts each hourly outdoor temp into
+    an LWT; the daily integrand ``X_day = Σ_h max(0, LWT_h − 18)`` (one-hour
+    slots, so units are °C·h) regresses linearly against ``y_day = kwh_heating``.
+
+    Least squares through the origin: ``k = Σ(X · y) / Σ(X²)`` — the LP's
+    space-heating constraint is also through-origin (zero LWT delta → zero
+    draw), so a fitted intercept would not be physically meaningful.
+
+    Returns a status dict so the caller (cron) can log how the recompute went.
+    Skips silently (status='skipped' with a reason) on missing data; never
+    raises. The caller decides whether to upsert based on ``status == 'ok'``.
+    """
+    from datetime import UTC as _UTC, datetime as _dt, date as _date, timedelta as _td
+    from .physics import get_lwt_base_c
+
+    end_day = _date.today() - _td(days=1)  # yesterday — today's heating row is incomplete
+    start_day = end_day - _td(days=window_days - 1)
+
+    # Pull observed kwh_heating per day in window. Skip rows lacking heating
+    # data (kwh_heating IS NULL or 0 with kwh_total > 0 — usually a backfill
+    # gap; not a real "no heating today" signal).
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT date, kwh_heating, kwh_total
+                   FROM daikin_consumption_daily
+                   WHERE date BETWEEN ? AND ?
+                     AND kwh_heating IS NOT NULL""",
+                (start_day.isoformat(), end_day.isoformat()),
+            )
+            obs_rows = cur.fetchall()
+        finally:
+            conn.close()
+
+    if not obs_rows:
+        return {
+            "status": "skipped",
+            "reason": "no daikin_consumption_daily rows in window",
+            "window_days": window_days,
+            "samples": 0,
+        }
+
+    # Per-day outdoor integral. We pick the most-recent snapshot fetched on or
+    # after the day starts so the temps are the closest-to-actual we have
+    # (forecast_skill_log.actual_temp_c stays empty until the V13 backfill
+    # populates it; using the freshest snapshot is the best proxy until then).
+    pairs: list[tuple[float, float, str]] = []  # (X_day, y_day, date)
+    skipped_no_meteo: list[str] = []
+    skipped_outlier: list[str] = []
+    with _lock:
+        conn = get_connection()
+        try:
+            for row in obs_rows:
+                d = str(row["date"])
+                kwh_heating = float(row["kwh_heating"])
+                # Per-hour outdoor temp: latest snapshot whose slot_time falls
+                # in this UTC date. Fall back to the very latest snapshot when
+                # the day's snapshot was overwritten (rare for days < 7 ago).
+                cur = conn.execute(
+                    """SELECT substr(slot_time, 12, 2) AS hour, temp_c
+                       FROM meteo_forecast_value
+                       WHERE substr(slot_time, 1, 10) = ?
+                         AND temp_c IS NOT NULL
+                         AND forecast_fetch_at_utc = (
+                           SELECT MAX(forecast_fetch_at_utc)
+                           FROM meteo_forecast_value
+                           WHERE substr(slot_time, 1, 10) = ?
+                         )""",
+                    (d, d),
+                )
+                hour_temps = cur.fetchall()
+                if len(hour_temps) < 12:  # need ≥ half-day coverage
+                    skipped_no_meteo.append(d)
+                    continue
+                # X_day in °C·h: integrate (LWT(T) − 18)+ across covered hours.
+                # Each row is one hour-of-day, so multiplier is 1.0 h.
+                x_day = 0.0
+                for ht in hour_temps:
+                    t_out = float(ht["temp_c"])
+                    lwt = get_lwt_base_c(t_out)
+                    x_day += max(0.0, lwt - 18.0)
+                if x_day <= 0.0 and kwh_heating > 0.5:
+                    # Warm day predicted but real consumption — likely DHW
+                    # mis-attribution or anomalous setpoint. Drop.
+                    skipped_outlier.append(d)
+                    continue
+                pairs.append((x_day, kwh_heating, d))
+        finally:
+            conn.close()
+
+    if len(pairs) < min_samples:
+        return {
+            "status": "skipped",
+            "reason": f"only {len(pairs)} usable day(s); need ≥ {min_samples}",
+            "window_days": window_days,
+            "samples": len(pairs),
+            "skipped_no_meteo": len(skipped_no_meteo),
+            "skipped_outlier": len(skipped_outlier),
+        }
+
+    # Outlier filter: drop days where observed/predicted ratio (using the
+    # default k as anchor) is > 3× or < 1/3×. The remaining set fits k
+    # robustly without leverage from anomalous days (open windows, party
+    # events, sensor glitches).
+    from .physics import _KW_PER_DEGC_LWT_DEFAULT
+    anchored = [
+        (x, y, d) for x, y, d in pairs
+        if x > 0 and 1.0 / 3.0 <= (y / max(1e-9, x * _KW_PER_DEGC_LWT_DEFAULT)) <= 3.0
+    ]
+    if len(anchored) < min_samples:
+        return {
+            "status": "skipped",
+            "reason": f"after outlier filter only {len(anchored)} day(s); need ≥ {min_samples}",
+            "window_days": window_days,
+            "samples": len(anchored),
+            "raw_pairs": len(pairs),
+        }
+
+    # Least-squares through origin: k = Σ(x·y) / Σ(x²)
+    sxy = sum(x * y for x, y, _ in anchored)
+    sxx = sum(x * x for x, _, _ in anchored)
+    if sxx <= 0:
+        return {"status": "skipped", "reason": "zero variance in X"}
+    k = sxy / sxx
+
+    # Residual stats for audit
+    residuals = [y - k * x for x, y, _ in anchored]
+    rmse = (sum(r * r for r in residuals) / len(residuals)) ** 0.5
+    bias = sum(residuals) / len(residuals)
+
+    return {
+        "status": "ok",
+        "k_per_degc": float(k),
+        "samples": len(anchored),
+        "window_days": window_days,
+        "rmse_kwh": float(rmse),
+        "bias_kwh": float(bias),
+        "raw_pairs": len(pairs),
+        "skipped_no_meteo": len(skipped_no_meteo),
+        "skipped_outlier_pre": len(skipped_outlier),
+        "outliers_filtered": len(pairs) - len(anchored),
+    }

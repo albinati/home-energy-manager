@@ -671,6 +671,48 @@ def bulletproof_consumption_backfill_job() -> None:
         logger.warning("Consumption backfill failed (non-fatal): %s", e)
 
 
+def bulletproof_daikin_lwt_calibration_job() -> None:
+    """Recompute the per-installation kW-per-°C-LWT factor.
+
+    Runs after the nightly consumption backfill so ``daikin_consumption_daily``
+    has yesterday's heating row. Regresses observed ``kwh_heating`` against
+    the daily integral of ``max(0, LWT(t_outdoor) − 18)``; replaces the
+    hardcoded module default in :func:`src.physics.get_kw_per_degc_lwt` when
+    the fit is sane. Best-effort: failures stay non-fatal — the loader keeps
+    serving the previous row (or default) until the next successful run.
+    """
+    from .. import db
+
+    try:
+        result = db.compute_daikin_lwt_kw_calibration()
+    except Exception as e:  # noqa: BLE001 — calibration must never break the cron loop
+        logger.warning("Daikin LWT calibration job failed: %s", e)
+        return
+
+    if result.get("status") != "ok":
+        logger.info(
+            "Daikin LWT calibration: status=%s reason=%s samples=%s",
+            result.get("status"), result.get("reason"), result.get("samples"),
+        )
+        return
+
+    db.upsert_daikin_lwt_kw_calibration(
+        k_per_degc=float(result["k_per_degc"]),
+        samples=int(result["samples"]),
+        window_days=int(result["window_days"]),
+        rmse_kwh=float(result.get("rmse_kwh") or 0.0),
+        bias_kwh=float(result.get("bias_kwh") or 0.0),
+    )
+    logger.info(
+        "Daikin LWT calibration: k=%.5f kW/°C (default %.5f); samples=%d window=%dd "
+        "rmse=%.2f kWh bias=%+0.2f kWh outliers_filtered=%d",
+        result["k_per_degc"], 0.0333,
+        result["samples"], result["window_days"],
+        result.get("rmse_kwh") or 0.0, result.get("bias_kwh") or 0.0,
+        result.get("outliers_filtered", 0),
+    )
+
+
 def bulletproof_forecast_skill_log_job() -> None:
     """Rebuild yesterday's UTC forecast-vs-actual skill rows.
 
@@ -1829,6 +1871,25 @@ def start_background_scheduler() -> None:
                 id="bulletproof_forecast_skill_log",
             )
             logger.info("Forecast skill rebuild cron scheduled (04:15 UTC daily)")
+            # Daikin LWT→kW per-installation calibration. Fires after the
+            # consumption backfill so daikin_consumption_daily has yesterday's
+            # heating row before regression.
+            _background_scheduler.add_job(
+                bulletproof_daikin_lwt_calibration_job,
+                CronTrigger(
+                    hour=config.DAIKIN_LWT_CALIBRATION_HOUR,
+                    minute=config.DAIKIN_LWT_CALIBRATION_MINUTE,
+                    timezone=tz,
+                ),
+                id="bulletproof_daikin_lwt_calibration",
+            )
+            logger.info(
+                "Daikin LWT calibration cron: %02d:%02d (%s) — re-fits "
+                "_KW_PER_DEGC_LWT from rolling kwh_heating vs outdoor history.",
+                config.DAIKIN_LWT_CALIBRATION_HOUR,
+                config.DAIKIN_LWT_CALIBRATION_MINUTE,
+                tz,
+            )
             # V12: MPC is fully event-driven. The fixed-hour cron is GONE.
             # Triggers: octopus_fetch (when new rates land), tier_boundary
             # (before every tariff transition), soc_drift / forecast_revision

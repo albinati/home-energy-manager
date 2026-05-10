@@ -10,11 +10,42 @@ from zoneinfo import ZoneInfo
 
 HEAT_LOSS_C_PER_HOUR: float = 0.3  # Daikin Altherma typical standing loss °C/h
 # kW drawn per °C of LWT above the 18 °C compressor-off threshold.
-# Calibrated empirically: LWT 36 °C at 4 °C outdoor → 0.60 kW → (36-18)*k = 0.60 → k = 0.0333
-_KW_PER_DEGC_LWT: float = 0.0333
+# Calibrated empirically: LWT 36 °C at 4 °C outdoor → 0.60 kW → (36-18)*k = 0.60 → k = 0.0333.
+# This default is overridden per-installation by the rolling regression in
+# db.compute_daikin_lwt_kw_calibration() when a calibration row exists and the
+# fitted value falls inside the safety bounds below.
+_KW_PER_DEGC_LWT_DEFAULT: float = 0.0333
+_KW_PER_DEGC_LWT_MIN: float = 0.015   # ~45 % of default
+_KW_PER_DEGC_LWT_MAX: float = 0.075   # ~225 % of default
 MARGIN_OF_SAFETY_C: float = 0.5    # Pipe-loss / measurement margin
 DHW_SETPOINT_MAX_C: float = 65.0   # Absolute safe ceiling (no boiling stress)
 DHW_SETPOINT_MIN_C: float = 35.0   # Never go below legionella risk floor
+
+
+def get_kw_per_degc_lwt() -> float:
+    """Return the per-installation kW-per-°C-LWT factor used by the heating model.
+
+    Reads the latest row from ``daikin_lwt_kw_calibration`` (single-row table).
+    Falls back to ``_KW_PER_DEGC_LWT_DEFAULT`` when the table is empty (cold
+    start, fresh install) or when the calibrated value is outside the safety
+    bounds (anomalous data, schema corruption, missing meteo joins).
+
+    Cheap to call (single PK seek); the LP invokes ``get_daikin_heating_kw``
+    once per slot, so amortised DB cost is negligible.
+    """
+    # Local import — physics.py must not import db.py at module load (db.py
+    # imports physics indirectly via the residual-load builder).
+    from . import db as _db
+    try:
+        row = _db.get_daikin_lwt_kw_calibration()
+    except Exception:  # noqa: BLE001 — never let calibration errors break LP
+        return _KW_PER_DEGC_LWT_DEFAULT
+    if row is None:
+        return _KW_PER_DEGC_LWT_DEFAULT
+    k = float(row.get("k_per_degc", _KW_PER_DEGC_LWT_DEFAULT))
+    if not (_KW_PER_DEGC_LWT_MIN <= k <= _KW_PER_DEGC_LWT_MAX):
+        return _KW_PER_DEGC_LWT_DEFAULT
+    return k
 
 
 def calculate_dhw_setpoint(
@@ -135,7 +166,7 @@ def get_daikin_heating_kw(temp_outdoor_c: float, lwt_offset_delta: float = 0.0) 
     lwt = get_lwt_base_c(temp_outdoor_c) + lwt_offset_delta
     lwt = min(50.0, max(18.0, lwt))
 
-    return (lwt - 18.0) * _KW_PER_DEGC_LWT
+    return (lwt - 18.0) * get_kw_per_degc_lwt()
 
 
 def apply_cop_lift_multiplier(
@@ -262,8 +293,8 @@ def lwt_offset_from_space_kw(space_kw: float, temp_outdoor_c: float) -> float:
     if space_kw <= 0.0:
         return float(config.OPTIMIZATION_LWT_OFFSET_MIN)
 
-    # kW = (lwt_actual - 18.0) * _KW_PER_DEGC_LWT  →  lwt_actual = kW / k + 18
-    lwt_actual = space_kw / _KW_PER_DEGC_LWT + 18.0
+    # kW = (lwt_actual - 18.0) * k  →  lwt_actual = kW / k + 18
+    lwt_actual = space_kw / get_kw_per_degc_lwt() + 18.0
     lwt_base = get_lwt_base_c(temp_outdoor_c)
     offset = lwt_actual - lwt_base
 
