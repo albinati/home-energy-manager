@@ -344,8 +344,11 @@ class TestDispatchPrefersTelegram:
         monkeypatch.setattr(telegram_transport, "is_configured", lambda: True)
         monkeypatch.setattr(telegram_transport, "send_message", fake_send)
 
+        # STRATEGY_UPDATE was removed by #319 (Telegram dedup). Use any
+        # remaining AlertType; the regression target is the dispatcher
+        # behaviour, not the specific alert.
         notifier._dispatch(
-            notifier.AlertType.STRATEGY_UPDATE,
+            notifier.AlertType.RISK_ALERT,
             "summary line",
             extra={"warnings": ["a", "b", "c"]},
         )
@@ -475,63 +478,13 @@ class TestPushAlertTelegramRendering:
         assert "-3.5p/kWh" in text
 
 
-# ---------------------------------------------------------------------------
-# notify_strategy_update — warnings as bullets, no Python repr / no JSON dump
-# ---------------------------------------------------------------------------
-
-class TestStrategyUpdateFormatting:
-    def _setup(self, monkeypatch):
-        from src import notifier, telegram_transport
-
-        captured: list[str] = []
-
-        def fake_send(text, *, silent=False, convert_markdown=True, parse_mode="HTML"):
-            captured.append(text)
-            return True
-
-        _patch_config(monkeypatch, _make_config())
-        monkeypatch.setattr(telegram_transport, "is_configured", lambda: True)
-        monkeypatch.setattr(telegram_transport, "send_message", fake_send)
-        monkeypatch.setattr(notifier.db, "log_action", lambda **kw: None)
-        monkeypatch.setattr(notifier.db, "get_notification_route", lambda _: {
-            "enabled": 1, "severity": "reports",
-            "target_override": None, "channel_override": None, "silent": 0,
-        })
-        return captured
-
-    def test_warnings_list_rendered_as_bullets(self, monkeypatch):
-        """``['a', 'b']`` was being str()'d into the message, producing
-        Python repr ``Warnings: ['a', 'b']``. After #330 the list becomes
-        a bullet list and the JSON dump is gone."""
-        from src import notifier
-        captured = self._setup(monkeypatch)
-
-        notifier.notify_strategy_update(
-            "Daikin write-budget guard active",
-            warnings=[
-                "tank_idle_overnight@2026-05-09T21:00:00Z",
-                "pre_heat@2026-05-10T12:00:00Z",
-            ],
-        )
-
-        assert len(captured) == 1
-        text = captured[0]
-        assert "Daikin write-budget guard active" in text
-        assert "Warnings (2)" in text
-        assert "• tank_idle_overnight@2026-05-09T21:00:00Z" in text
-        assert "• pre_heat@2026-05-10T12:00:00Z" in text
-        # No Python-repr brackets, no JSON dump duplicate.
-        assert "['tank_idle_overnight" not in text
-        assert '{"warnings"' not in text
-
-    def test_no_warnings_keeps_message_clean(self, monkeypatch):
-        from src import notifier
-        captured = self._setup(monkeypatch)
-        notifier.notify_strategy_update("plain summary")
-        assert len(captured) == 1
-        text = captured[0]
-        assert "plain summary" in text
-        assert "Warnings" not in text
+# TestStrategyUpdateFormatting was deleted alongside #319's removal of
+# ``notify_strategy_update`` (the function dispatched STRATEGY_UPDATE pings
+# that the v12 dedup pass classified as redundant — the same content lives
+# in the morning/night brief). The list-vs-JSON-formatting regression those
+# tests guarded against is now covered by
+# ``TestDispatchPrefersTelegram::test_extra_dict_not_dumped_as_json_into_body``
+# (rewritten to use RISK_ALERT instead).
 
 
 # ---------------------------------------------------------------------------
@@ -710,3 +663,44 @@ class TestNotifyPlanProposedTelegram:
         assert "2026-06-01" in text
         assert "Auto-applies" in text
         assert "reject_plan" in text
+
+    def test_auto_applied_drops_consent_footer(self, monkeypatch):
+        """auto_applied=True → no 'Auto-applies in N min' or reject_plan
+        instructions; instead points at get_plan_timeline. The plan is
+        already live."""
+        from src import notifier, telegram_transport
+
+        captured: list[dict[str, Any]] = []
+
+        def fake_post(url, json=None, timeout=None):
+            captured.append({"json": json})
+            r = MagicMock(); r.status_code = 200
+            return r
+
+        _patch_config(monkeypatch, _make_config())
+        monkeypatch.setattr(telegram_transport.requests, "post", fake_post)
+        monkeypatch.setattr(notifier.db, "log_action", lambda **kw: None)
+        monkeypatch.setattr(notifier.db, "get_notification_route", lambda _: {
+            "enabled": 1, "severity": "reports",
+            "target_override": None, "channel_override": None, "silent": 0,
+        })
+
+        notifier.notify_plan_proposed(
+            "lp-2026-06-01",
+            "2026-06-01",
+            "PuLP ok",
+            [{
+                "start_time": "2026-06-01T12:00:00Z",
+                "end_time": "2026-06-01T12:30:00Z",
+                "action_type": "pre_heat",
+                "params": {"lwt_offset": 2, "tank_temp": 55},
+            }],
+            auto_applied=True,
+        )
+
+        assert len(captured) == 1
+        text = captured[0]["json"]["text"]
+        assert "Auto-applies" not in text
+        assert "reject_plan" not in text
+        assert "Already applied" in text
+        assert "get_plan_timeline" in text

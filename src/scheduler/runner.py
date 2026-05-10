@@ -108,9 +108,10 @@ def _log_plan_delta_after_trigger(prev_run_id: int | None, new_run_id: int | Non
     failures here must never break the optimiser run.
 
     Returns a dict ``{max_soc_delta_pct, sum_grid_delta_kwh, sum_charge_delta_kwh,
-    overlap_count}`` so callers can decide whether to emit a ``PLAN_REVISION``
-    Telegram ping (gated by ``PLAN_REVISION_MIN_*`` thresholds, V12). Returns
-    ``None`` when there's nothing to compare.
+    overlap_count}`` for downstream observability (logged to ``optimizer_log`` /
+    journalctl). The user-facing PLAN_REVISION Telegram ping was removed in the
+    2026-05-10 cleanup — it duplicated the auto-applied PLAN_PROPOSED ping for
+    the same MPC tick. Returns ``None`` when there's nothing to compare.
     """
     if not prev_run_id or not new_run_id:
         return None
@@ -848,48 +849,16 @@ def bulletproof_mpc_job(
         # Stamp the cooldown only on a successful solve so transient errors don't lock us out.
         if result.get("ok"):
             _last_mpc_run_at = datetime.now(UTC)
-            # Plan-delta observability for event-driven runs.
+            # Plan-delta observability for event-driven runs (logged only —
+            # the user-facing ping is the digest pair + nightly plan_proposed;
+            # in-day deltas are pulled via get_plan_timeline / dispatch_decisions).
             try:
                 new_run_id = db.find_run_for_time(_last_mpc_run_at.isoformat())
-                delta = _log_plan_delta_after_trigger(prev_run_id, new_run_id, trigger_reason)
-                _maybe_notify_plan_revision(delta, trigger_reason)
+                _log_plan_delta_after_trigger(prev_run_id, new_run_id, trigger_reason)
             except Exception as e:
                 logger.debug("plan-delta post-run hook failed: %s", e)
     except Exception as e:
         logger.warning("MPC job failed (trigger=%s): %s", trigger_reason, e)
-
-
-def _maybe_notify_plan_revision(delta: dict[str, float] | None, trigger_reason: str) -> None:
-    """Emit a ``PLAN_REVISION`` Telegram ping when the in-day re-solve moved
-    the plan beyond the configured "material change" thresholds.
-
-    Suppresses on ``cron`` (boring routine re-plan) and on ``plan_push`` (the
-    nightly push already sends its own notification path). Other triggers —
-    ``forecast_revision``, ``soc_drift``, ``tier_boundary``, ``dynamic_replan``,
-    ``octopus_fetch`` — fire a ping only when the delta is genuinely
-    actionable (above either ``PLAN_REVISION_MIN_SOC_DELTA_PERCENT`` or
-    ``PLAN_REVISION_MIN_GRID_DELTA_KWH``).
-    """
-    if not delta:
-        return
-    if trigger_reason == "plan_push":
-        return  # nightly push has its own notification path
-    soc_delta = float(delta.get("max_soc_delta_pct", 0.0))
-    grid_delta = float(delta.get("sum_grid_delta_kwh", 0.0))
-    soc_thr = float(config.PLAN_REVISION_MIN_SOC_DELTA_PERCENT)
-    grid_thr = float(config.PLAN_REVISION_MIN_GRID_DELTA_KWH)
-    if soc_delta < soc_thr and grid_delta < grid_thr:
-        return  # change too small to bother the user
-    try:
-        from ..notifier import notify_plan_revision
-
-        body = (
-            f"Plan revised ({trigger_reason}): next-{int(config.MPC_PLAN_DELTA_LOOKAHEAD_HOURS)}h "
-            f"SoC max-Δ={soc_delta:.1f}%, grid Δ={grid_delta:.2f} kWh."
-        )
-        notify_plan_revision(body, trigger_reason=trigger_reason)
-    except Exception as e:
-        logger.debug("notify_plan_revision failed (non-fatal): %s", e)
 
 
 def _register_tier_boundary_triggers() -> dict[str, Any]:

@@ -329,16 +329,6 @@ class Config:
         os.getenv("TIER_BOUNDARY_MIN_LEAD_MINUTES", "1")
     )
 
-    # PLAN_REVISION emit thresholds — the in-day MPC re-solve must move the
-    # plan by at least one of these amounts in the next-4h window before we
-    # send a Telegram ping. Tuned to "material" not "noise".
-    PLAN_REVISION_MIN_SOC_DELTA_PERCENT: float = float(
-        os.getenv("PLAN_REVISION_MIN_SOC_DELTA_PERCENT", "10.0")
-    )
-    PLAN_REVISION_MIN_GRID_DELTA_KWH: float = float(
-        os.getenv("PLAN_REVISION_MIN_GRID_DELTA_KWH", "1.0")
-    )
-
     # Consumption backfill — when the nightly post-hoc reconciliation pulls
     # yesterday's actual half-hourly consumption from Octopus and rewrites
     # ``execution_log`` rows. Fires in BULLETPROOF_TIMEZONE local. Octopus
