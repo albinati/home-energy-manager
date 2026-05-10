@@ -1315,10 +1315,11 @@ async def optimization_inputs(horizon_hours: int | None = None):
             "soc_kwh": round(float(initial.soc_kwh), 3),
             "soc_pct": round(float(initial.soc_kwh) / float(config.BATTERY_CAPACITY_KWH) * 100.0, 1) if config.BATTERY_CAPACITY_KWH else None,
             "tank_c": round(float(initial.tank_temp_c), 2),
-            "indoor_c": round(float(initial.indoor_temp_c), 2),
+            # PR Phase B: indoor_c retained as null for back-compat with frontend.
+            "indoor_c": None,
             "soc_source": getattr(initial, "soc_source", "unknown"),
             "tank_source": getattr(initial, "tank_source", "unknown"),
-            "indoor_source": getattr(initial, "indoor_source", "unknown"),
+            "indoor_source": "removed_phase_b",
         }
     except Exception as e:
         initial_block = {

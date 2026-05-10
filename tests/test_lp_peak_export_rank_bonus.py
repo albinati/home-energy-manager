@@ -85,7 +85,7 @@ def test_rank_bonus_solves_cleanly_on_flat_day(
         cop_space=[3.5] * n,
         cop_dhw=[3.0] * n,
     )
-    init = LpInitialState(soc_kwh=10.0, tank_temp_c=45.0, indoor_temp_c=21.0)
+    init = LpInitialState(soc_kwh=10.0, tank_temp_c=45.0)
     plan = solve_lp(
         slot_starts_utc=slots,
         price_pence=[5.0] * n,
@@ -126,7 +126,7 @@ def test_rank_bonus_objective_term_only_when_export_prices_provided(
         cop_space=[3.5] * n,
         cop_dhw=[3.0] * n,
     )
-    init = LpInitialState(soc_kwh=5.0, tank_temp_c=45.0, indoor_temp_c=21.0)
+    init = LpInitialState(soc_kwh=5.0, tank_temp_c=45.0)
     plan = solve_lp(
         slot_starts_utc=slots,
         price_pence=[20.0] * n,
@@ -167,7 +167,7 @@ def test_rank_bonus_does_not_force_curtailment_at_zero_export_price(
         cop_space=[3.5] * n,
         cop_dhw=[3.0] * n,
     )
-    init = LpInitialState(soc_kwh=10.0, tank_temp_c=45.0, indoor_temp_c=21.0)
+    init = LpInitialState(soc_kwh=10.0, tank_temp_c=45.0)
     plan = solve_lp(
         slot_starts_utc=slots,
         price_pence=[5.0] * n,

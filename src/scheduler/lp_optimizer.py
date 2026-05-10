@@ -38,11 +38,18 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class LpInitialState:
-    """Physical state at the start of slot 0."""
+    """Physical state at the start of slot 0.
+
+    PR Phase B (#306 follow-up): ``indoor_temp_c`` was removed because the
+    Daikin Altherma exposes no room sensor (0% coverage in heartbeat) and the
+    LP's old comfort-band variable was modelling fiction. Space-heating demand
+    is now driven by ``get_daikin_heating_kw(t_outdoor)`` directly — the
+    physics floor + ceiling derived from the configured Daikin weather curve.
+    Tank thermal loss uses ``INDOOR_SETPOINT_C`` as a constant ambient.
+    """
 
     soc_kwh: float
     tank_temp_c: float
-    indoor_temp_c: float
     # Provenance strings ("fox_realtime_cache", "db_realtime_snapshot",
     # "daikin_live", "daikin_cache", "daikin_estimate", "execution_log",
     # "default"). Persisted to lp_inputs_snapshot so the History view can show
@@ -50,7 +57,6 @@ class LpInitialState:
     # backwards-compat for callers that construct LpInitialState directly.
     soc_source: str = "unknown"
     tank_source: str = "unknown"
-    indoor_source: str = "unknown"
 
 
 @dataclass
@@ -72,7 +78,6 @@ class LpPlan:
     space_electric_kwh: list[float] = field(default_factory=list)
     lwt_offset_c: list[float] = field(default_factory=list)  # back-computed per slot
     tank_temp_c: list[float] = field(default_factory=list)   # len N+1
-    indoor_temp_c: list[float] = field(default_factory=list)  # len N+1
     soc_kwh: list[float] = field(default_factory=list)       # len N+1
     temp_outdoor_c: list[float] = field(default_factory=list)
     peak_threshold_pence: float = 0.0
@@ -90,23 +95,11 @@ def _parse_hhmm_to_minutes(s: str) -> int:
     return h * 60 + m
 
 
-def _slot_occupancy_bounds(
-    slot_start_utc: datetime,
-    tz: ZoneInfo,
-) -> tuple[float, float]:
-    """Return (T_in_min, T_in_max) comfort bounds for this slot's *end* state."""
-    local = slot_start_utc.astimezone(tz)
-    minutes = local.hour * 60 + local.minute
-    ms = _parse_hhmm_to_minutes(config.LP_OCCUPIED_MORNING_START)
-    me = _parse_hhmm_to_minutes(config.LP_OCCUPIED_MORNING_END)
-    es = _parse_hhmm_to_minutes(config.LP_OCCUPIED_EVENING_START)
-    ee = _parse_hhmm_to_minutes(config.LP_OCCUPIED_EVENING_END)
-    sp = float(config.INDOOR_SETPOINT_C)
-    band = float(config.INDOOR_COMFORT_BAND_C)
-    if ms <= minutes < me or es <= minutes < ee:
-        return sp - band, sp + band
-    floor = float(config.LP_OVERNIGHT_COMFORT_FLOOR_C)
-    return floor, 24.0
+# PR Phase B: ``_slot_occupancy_bounds`` deleted — comfort-band logic depended
+# on the indoor_temp state variable, which was based on a non-existent room
+# sensor. Heating demand is now driven by the outdoor-temp physics floor +
+# LWT-offset choice variable; comfort is the firmware's job under its weather
+# curve, not the LP's.
 
 
 def _shower_slot_mask(
@@ -394,11 +387,9 @@ def solve_lp(
     sqrt_eta = math.sqrt(max(0.01, min(1.0, eta)))
     c_tank = float(config.DHW_TANK_LITRES) * float(config.DHW_WATER_CP)  # J/K
     ua_tank = float(config.DHW_TANK_UA_W_PER_K)
-    ua_bld = float(config.BUILDING_UA_W_PER_K)
-    c_bld = float(config.BUILDING_THERMAL_MASS_KWH_PER_K) * 3.6e6  # J/K
     j_per_kwh = 3.6e6
-    q_int_j = 0.1 * j_per_kwh
-    sg = float(config.SOLAR_GAIN_FRACTION)
+    # PR Phase B: ua_bld / c_bld / q_int_j / sg removed — building thermal
+    # dynamics no longer modelled in the LP (no indoor temp state variable).
 
     # Grid import cap per slot, derived from the inverter's AC import rating
     # (FoxESS app: "max charge from grid"). 10500 W → 5.25 kWh per 30 min slot.
@@ -479,10 +470,9 @@ def solve_lp(
 
     soc = pulp.LpVariable.dicts("soc", range(n + 1), lowBound=soc_min, upBound=soc_max)
     tank = pulp.LpVariable.dicts("tank", range(n + 1), lowBound=tank_lo, upBound=tank_hi)
-    t_in = pulp.LpVariable.dicts("indoor", range(n + 1), lowBound=10.0, upBound=28.0)
-
-    s_lo = pulp.LpVariable.dicts("comfort_slack_lo", range(n), lowBound=0)
-    s_hi = pulp.LpVariable.dicts("comfort_slack_hi", range(n), lowBound=0)
+    # PR Phase B: t_in / s_lo / s_hi removed. Heating demand is now bounded by
+    # space_floor_kwh / space_ceil_kwh (physics from get_daikin_heating_kw),
+    # not by indoor-temp tracking against a phantom room sensor.
 
     # Piecewise stress auxiliary variables (one per battery power slot)
     stress_aux: dict[int, pulp.LpVariable] = {}
@@ -494,13 +484,12 @@ def solve_lp(
     # -----------------------------------------------------------------------
     prob += soc[0] == initial.soc_kwh
     prob += tank[0] == initial.tank_temp_c
-    prob += t_in[0] == initial.indoor_temp_c
 
     # -----------------------------------------------------------------------
     # Per-slot constraints
     # -----------------------------------------------------------------------
     cycle_pen = float(config.LP_CYCLE_PENALTY_PENCE_PER_KWH)
-    comfort_pen = float(config.LP_COMFORT_SLACK_PENCE_PER_DEGC_SLOT)
+    # PR Phase B: comfort_pen unused — comfort slack vars removed.
     flat_export_rate = float(config.EXPORT_RATE_PENCE)
     # Per-slot export prices (Octopus Outgoing Agile) when supplied; flat fallback otherwise.
     export_rate_line: list[float] = (
@@ -612,22 +601,24 @@ def solve_lp(
             # mode flag=1 with zero power, so add explicit binding)
             prob += e_dhw[i] + e_space[i] >= 0  # already set; kept for clarity
 
-        # DHW tank thermodynamics
+        # DHW tank thermodynamics — PR Phase B: indoor temp is no longer a
+        # state variable. Tank loss uses INDOOR_SETPOINT_C as the constant
+        # ambient (tank usually sits in a heated utility space at ~setpoint;
+        # if it's outside that's a fixed offset already absorbed into
+        # ``DHW_TANK_STANDING_LOSS_W_PER_K`` calibration).
         q_heat_dhw = e_dhw[i] * cop_dhw[i] * j_per_kwh
-        loss_tank_j = ua_tank * (tank[i] - t_in[i]) * dt_s
+        loss_tank_j = ua_tank * (tank[i] - float(config.INDOOR_SETPOINT_C)) * dt_s
         # DHW draw on shower-window slots (static-physics model). Pre-computed
         # in shower_draw_j[i]; zero outside shower windows.
         draw_j_i = shower_draw_j[i]
         prob += tank[i + 1] == tank[i] + (q_heat_dhw - loss_tank_j - draw_j_i) / c_tank
 
-        # Building thermodynamics
-        q_heat_space = e_space[i] * cop_space[i] * j_per_kwh
-        loss_bld_j = ua_bld * (t_in[i] - t_out[i]) * dt_s
-        q_sol_j = sg * pv_avail[i] * j_per_kwh
-        prob += t_in[i + 1] == t_in[i] + (q_heat_space - loss_bld_j + q_sol_j + q_int_j) / c_bld
-
-        # Radiator output cap (skip in passive — the firmware respects this physically
-        # and prediction-based equality may otherwise sit at the boundary).
+        # PR Phase B: building thermodynamics + comfort constraints removed.
+        # Active mode now relies on the same physics floor as passive: the
+        # heat pump WILL run on its weather curve. The LP's only choice is
+        # WHEN within the (floor, ceil) corridor + lwt_offset — bounded by
+        # ``space_floor_kwh[i]`` / ``space_ceil_kwh[i]`` already enforced
+        # below in the active branch.
         if not passive_daikin:
             prob += e_space[i] * cop_space[i] <= float(config.RADIATOR_MAX_KW) * slot_h
 
@@ -636,11 +627,6 @@ def solve_lp(
             # on cold overnight slots (which the heuristic can't fix after the fact).
             if space_floor_kwh[i] > 0:
                 prob += e_space[i] + e_dhw[i] >= space_floor_kwh[i]
-
-        # Comfort soft constraints
-        t_end_lo, t_end_hi = _slot_occupancy_bounds(slot_starts_utc[i], tz)
-        prob += t_in[i + 1] >= t_end_lo - s_lo[i]
-        prob += t_in[i + 1] <= t_end_hi + s_hi[i]
 
         # Piecewise-linear inverter stress cost
         if use_stress:
@@ -799,7 +785,7 @@ def solve_lp(
         else:
             terminal_dhw_floor = float(getattr(config, "DHW_TEMP_MIN_FLOOR_C", 30.0))
         prob += tank[n] >= terminal_dhw_floor
-        prob += t_in[n] >= float(config.INDOOR_SETPOINT_C) - 0.5
+        # PR Phase B: terminal indoor-temp floor removed (no t_in variable).
 
     # -----------------------------------------------------------------------
     # Total Variation penalties
@@ -859,7 +845,8 @@ def solve_lp(
             if top_q_indices:
                 obj_grid -= rank_bonus_p * pulp.lpSum(exp[i] for i in top_q_indices)
     obj_cycle = cycle_pen * pulp.lpSum(chg[i] + dis[i] for i in range(n))
-    obj_comfort = comfort_pen * pulp.lpSum(s_lo[i] + s_hi[i] for i in range(n))
+    # PR Phase B: obj_comfort removed (no s_lo / s_hi slack variables).
+    obj_comfort = 0.0
     # DHW overshoot above the comfort ceiling is not a comfort issue — it's just stored
     # hot water that will drift back naturally via tank losses. A *tiny* penalty
     # (default 0.01 p/°C-slot, configurable via ``LP_TANK_HI_SLACK_PENCE_PER_DEGC_SLOT``;
@@ -981,6 +968,5 @@ def solve_lp(
     for i in range(n + 1):
         plan.soc_kwh.append(_v(soc[i]))
         plan.tank_temp_c.append(_v(tank[i]))
-        plan.indoor_temp_c.append(_v(t_in[i]))
 
     return plan

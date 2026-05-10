@@ -42,15 +42,13 @@ def _flat_weather(starts: list[datetime], pv_per_slot: float = 0.0) -> WeatherLp
 
 
 def _initial() -> LpInitialState:
-    # indoor_temp_c=20.5 matches the LP's terminal floor (INDOOR_SETPOINT_C − 0.5
+    #  matches the LP's terminal floor (INDOOR_SETPOINT_C − 0.5
     # = 21 − 0.5) — keeps the small-horizon LP feasible without forcing space heat.
     return LpInitialState(
         soc_kwh=2.5,                 # 50% of 5 kWh
         tank_temp_c=48.0,
-        indoor_temp_c=20.5,
         soc_source="test",
         tank_source="test",
-        indoor_source="test",
     )
 
 

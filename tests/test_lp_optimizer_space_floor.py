@@ -53,7 +53,7 @@ def test_solution_respects_minimum_hp_electric_vs_space_floor(monkeypatch: pytes
     base_load = [0.4] * n
     # indoor_temp_c at 20.5 matches the solver's terminal floor (INDOOR_SETPOINT_C−0.5) —
     # short horizons can't recover if it starts below, especially under the tighter LWT cap.
-    st = LpInitialState(soc_kwh=4.0, tank_temp_c=44.0, indoor_temp_c=20.5)
+    st = LpInitialState(soc_kwh=4.0, tank_temp_c=44.0)
     plan = solve_lp(
         slot_starts_utc=slots,
         price_pence=prices,

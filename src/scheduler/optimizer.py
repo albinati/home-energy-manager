@@ -1147,10 +1147,13 @@ def _persist_lp_snapshots(
         "horizon_hours": int(config.LP_HORIZON_HOURS),
         "soc_initial_kwh": float(initial.soc_kwh),
         "tank_initial_c": float(initial.tank_temp_c),
-        "indoor_initial_c": float(initial.indoor_temp_c),
+        # PR Phase B: indoor_initial_c retained as schema column for back-compat
+        # but now written as None — the LP no longer carries an indoor-temp
+        # state variable (Daikin Altherma has no room sensor here).
+        "indoor_initial_c": None,
         "soc_source": getattr(initial, "soc_source", "unknown"),
         "tank_source": getattr(initial, "tank_source", "unknown"),
-        "indoor_source": getattr(initial, "indoor_source", "unknown"),
+        "indoor_source": "removed_phase_b",
         "base_load_json": json.dumps([round(float(x), 4) for x in base_load]),
         "micro_climate_offset_c": float(micro_climate_offset or 0.0),
         "forecast_fetch_at_utc": forecast_fetch_at_utc,
@@ -1184,7 +1187,8 @@ def _persist_lp_snapshots(
             "space_kwh": float(plan.space_electric_kwh[i]) if i < len(plan.space_electric_kwh) else None,
             "soc_kwh": float(plan.soc_kwh[i + 1]) if (i + 1) < len(plan.soc_kwh) else None,
             "tank_temp_c": float(plan.tank_temp_c[i + 1]) if (i + 1) < len(plan.tank_temp_c) else None,
-            "indoor_temp_c": float(plan.indoor_temp_c[i + 1]) if (i + 1) < len(plan.indoor_temp_c) else None,
+            # PR Phase B: indoor_temp_c column retained, value now always None.
+            "indoor_temp_c": None,
             "outdoor_temp_c": float(plan.temp_outdoor_c[i]) if i < len(plan.temp_outdoor_c) else None,
             "lwt_offset_c": float(plan.lwt_offset_c[i]) if i < len(plan.lwt_offset_c) else None,
         })

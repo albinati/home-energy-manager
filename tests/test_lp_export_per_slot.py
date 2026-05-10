@@ -108,7 +108,7 @@ def test_solve_lp_uses_per_slot_export_when_provided():
         cop_space=[3.5] * n,
         cop_dhw=[3.0] * n,
     )
-    init = LpInitialState(soc_kwh=5.0, tank_temp_c=45.0, indoor_temp_c=21.0)
+    init = LpInitialState(soc_kwh=5.0, tank_temp_c=45.0)
     pv = pv  # silence linter
     plan = solve_lp(
         slot_starts_utc=slots,
@@ -140,7 +140,7 @@ def test_solve_lp_export_length_mismatch_raises():
         cop_space=[3.5] * n,
         cop_dhw=[3.0] * n,
     )
-    init = LpInitialState(soc_kwh=5.0, tank_temp_c=45.0, indoor_temp_c=21.0)
+    init = LpInitialState(soc_kwh=5.0, tank_temp_c=45.0)
     with pytest.raises(ValueError, match="export_price_pence length"):
         solve_lp(
             slot_starts_utc=slots,

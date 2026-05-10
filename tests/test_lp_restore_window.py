@@ -49,7 +49,7 @@ def _build_plan_with_peak():
     # Peak in the middle (slots 4-5)
     prices = [10.0] * 4 + [40.0, 40.0] + [10.0] * 4
     base_load = [0.4] * n
-    st = LpInitialState(soc_kwh=8.0, tank_temp_c=48.0, indoor_temp_c=21.0)
+    st = LpInitialState(soc_kwh=8.0, tank_temp_c=48.0)
     plan = solve_lp(
         slot_starts_utc=slots,
         price_pence=prices,
