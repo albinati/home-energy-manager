@@ -330,6 +330,28 @@ SCHEMA: dict[str, SettingSpec] = {
             "(target − DHW_TEMP_NORMAL_C) to size the predicted electric pulse."
         ),
     ),
+    # Post-shower overnight tank target sent to Daikin firmware. Lives in
+    # runtime_settings so the user can tune it without restart — mirrors the
+    # household's empirical "set tank low at bedtime, let it cool" pattern.
+    # Below this value the firmware reheats; above it, firmware idles. The
+    # default 38 °C is a safety backup for unexpected morning showers; users
+    # who confirm no morning shower demand can drop to 37 (matches the user's
+    # manual habit on this installation) or even 30 for full overnight cool.
+    "DHW_TANK_OVERNIGHT_TARGET_C": SettingSpec(
+        key="DHW_TANK_OVERNIGHT_TARGET_C",
+        type_name="float",
+        env_default=_float_env("DHW_TANK_OVERNIGHT_TARGET_C", "38"),
+        min_value=30.0,
+        max_value=55.0,
+        description=(
+            "Daikin tank target (°C) sent during tank_idle_overnight slots — "
+            "post-evening-shower until next-day PV abundance. Lower = more "
+            "overnight standing-loss savings; firmware won't reheat the tank "
+            "from 50+°C down to this value, only triggers if tank actually "
+            "drops to it. Min 30 (still well above pipe-freeze risk; weekly "
+            "legionella thermal-shock cycle handles pasteurisation)."
+        ),
+    ),
 }
 
 

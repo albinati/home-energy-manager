@@ -440,6 +440,69 @@ def test_dispatch_emits_overnight_idle_action_at_38c(
         )
 
 
+def test_dispatch_overnight_target_honours_runtime_setting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The overnight tank target reads from runtime_settings when set, falling
+    back to the env-derived default. Lets the user tune the floor live (e.g.
+    37 °C to match an empirical bedtime habit) without a service restart.
+    """
+    from src import db, runtime_settings as rts
+    from src.config import config as app_config
+    from src.scheduler.lp_dispatch import daikin_dispatch_preview
+    from src.scheduler.lp_optimizer import LpPlan
+
+    db.init_db()
+    monkeypatch.setattr(app_config, "DAIKIN_CONTROL_MODE", "active", raising=False)
+    monkeypatch.setattr(app_config, "DAIKIN_MIN_WINDOW_SLOTS", 1, raising=False)
+    monkeypatch.setattr(app_config, "DHW_SHOWER_SCHEDULE", "19:00-22:00", raising=False)
+    monkeypatch.setattr(app_config, "DHW_TANK_OVERNIGHT_IDLE_ENABLED", "true", raising=False)
+    monkeypatch.setattr(app_config, "DHW_TANK_OVERNIGHT_TARGET_C", 38.0, raising=False)
+    monkeypatch.setattr(app_config, "OPTIMIZATION_PRESET", "normal", raising=False)
+    monkeypatch.setattr(app_config, "ENERGY_STRATEGY_MODE", "savings_first", raising=False)
+    monkeypatch.setattr(
+        "src.scheduler.lp_dispatch._optimization_preset_away_like",
+        lambda: False,
+        raising=True,
+    )
+
+    # Override via runtime_settings — should take priority over the env default.
+    rts.set_setting("DHW_TANK_OVERNIGHT_TARGET_C", 37.0, actor="test")
+
+    base = datetime(2026, 6, 1, 17, 0, tzinfo=UTC)
+    n = 24
+    plan = LpPlan(ok=True, status="Optimal", objective_pence=0.0,
+                  peak_threshold_pence=25.0, cheap_threshold_pence=10.0)
+    plan.slot_starts_utc = [base + timedelta(minutes=30 * i) for i in range(n)]
+    plan.price_pence = [20.0] * n
+    plan.import_kwh = [0.0] * n
+    plan.export_kwh = [0.0] * n
+    plan.battery_charge_kwh = [0.0] * n
+    plan.battery_discharge_kwh = [0.0] * n
+    plan.dhw_electric_kwh = [0.0] * n
+    plan.space_electric_kwh = [0.0] * n
+    plan.soc_kwh = [5.0] * (n + 1)
+    plan.tank_temp_c = [50.0] * (n + 1)
+    plan.indoor_temp_c = [21.0] * (n + 1)
+    plan.pv_curt_kwh = [0.0] * n
+    plan.lwt_offset_c = [0.0] * n
+    plan.temp_outdoor_c = [18.0] * n
+
+    pairs = daikin_dispatch_preview(plan, forecast=[])
+    overnight = [a for _, a in pairs if a.get("action_type") == "tank_idle_overnight"]
+    assert overnight, "expected at least one tank_idle_overnight action"
+    for action in overnight:
+        assert action["params"].get("tank_temp") == pytest.approx(37.0), (
+            f"runtime_settings override should set tank_temp=37; got {action['params']}"
+        )
+
+    # Clear the override and verify fallback to env default kicks back in.
+    rts.delete_setting("DHW_TANK_OVERNIGHT_TARGET_C", actor="test")
+    pairs2 = daikin_dispatch_preview(plan, forecast=[])
+    overnight2 = [a for _, a in pairs2 if a.get("action_type") == "tank_idle_overnight"]
+    assert overnight2 and overnight2[0]["params"].get("tank_temp") == pytest.approx(38.0)
+
+
 def test_dispatch_drops_restore_when_next_action_immediately_follows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

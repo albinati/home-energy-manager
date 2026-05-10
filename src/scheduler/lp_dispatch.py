@@ -415,15 +415,21 @@ def daikin_dispatch_preview(
         }
         if kind == "tank_idle_overnight":
             # Post-shower-until-next-PV-abundance: tank ON at low backup
-            # target (default 38 °C). Firmware won't reheat from 50+ down to
-            # 38 (current > setpoint, no action). If tank cools to 38 over
-            # the long overnight, firmware maintains at 38 — backup buffer
-            # for unexpected morning shower.
+            # target (default 38 °C, runtime-tunable). Firmware won't reheat
+            # from 50+ down to that value (current > setpoint, no action).
+            # If tank cools to it over the long overnight, firmware maintains
+            # at the target — backup buffer for unexpected morning shower.
+            #
+            # Read via runtime_settings so the user can tune this live to
+            # match their empirical bedtime habit (e.g. 37 °C) without a
+            # restart. Falls back to the env-derived default on lookup error.
+            from .. import runtime_settings as _rts
+            try:
+                _overnight_target = float(_rts.get_setting("DHW_TANK_OVERNIGHT_TARGET_C"))
+            except (KeyError, TypeError, ValueError):
+                _overnight_target = float(getattr(config, "DHW_TANK_OVERNIGHT_TARGET_C", 38.0))
             params["tank_power"] = True
-            params["tank_temp"] = round(
-                float(getattr(config, "DHW_TANK_OVERNIGHT_TARGET_C", 38.0)),
-                1,
-            )
+            params["tank_temp"] = round(_overnight_target, 1)
         elif is_shutdown:
             peak_strategy = (getattr(config, "DHW_PEAK_TANK_STRATEGY", "idle") or "idle").strip().lower()
             if peak_strategy == "shutdown":
