@@ -294,3 +294,142 @@ def test_committed_peak_export_in_range_picks_latest_run() -> None:
     assert len(rows) == 1
     assert rows[0]["run_id"] == 200
     assert rows[0]["scen_pessimistic_exp_kwh"] == 1.60
+
+
+# ---------------------------------------------------------------------------
+# Madrugada (overnight) plan-vs-actual section
+# ---------------------------------------------------------------------------
+
+def _seed_overnight_meteo(yesterday: date, today: date) -> None:
+    """Seed half-hourly outdoor temps across yesterday 22:00 UTC → today 09:00 UTC.
+
+    Uses a stable cold pattern (4 °C lowest) so the predicted heating is
+    predictable in tests."""
+    fetch_at = datetime(today.year, today.month, today.day, 7, 0, tzinfo=UTC).isoformat()
+    start = datetime(yesterday.year, yesterday.month, yesterday.day, 22, 0, tzinfo=UTC)
+    with db._lock:
+        conn = db.get_connection()
+        try:
+            for i in range(22):  # 22 half-hour slots = 11 h
+                slot = (start + timedelta(minutes=30 * i)).isoformat()
+                # cold pattern: 8 °C → 4 °C → 8 °C
+                t = 8.0 - 4.0 * abs(i - 11) / 11.0
+                conn.execute(
+                    """INSERT INTO meteo_forecast_value
+                       (forecast_fetch_at_utc, slot_time, temp_c, solar_w_m2, cloud_cover_pct, direct_pv_kw)
+                       VALUES (?, ?, ?, NULL, NULL, NULL)""",
+                    (fetch_at, slot, t),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def _seed_overnight_realised_heating(yesterday: date, today: date) -> None:
+    """Seed daikin_consumption_2hourly buckets covering the overnight."""
+    db.upsert_daikin_consumption_daily(
+        date=yesterday.isoformat(), kwh_total=8.0, kwh_heating=6.0, kwh_dhw=2.0,
+        source="onecta",
+    )
+    with db._lock:
+        conn = db.get_connection()
+        try:
+            now = datetime.now(UTC).isoformat()
+            # yesterday bucket 11 = 22:00–24:00 (1.0 kWh heating)
+            conn.execute(
+                """INSERT INTO daikin_consumption_2hourly
+                   (date, bucket_idx, kwh_total, kwh_heating, kwh_dhw, source, fetched_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (yesterday.isoformat(), 11, 1.2, 1.0, 0.2, "onecta", now),
+            )
+            # today buckets 0..4 = 00:00–10:00 (covers the morning chunk)
+            for bi, kwh in enumerate([1.1, 1.3, 1.4, 1.0, 0.6]):
+                conn.execute(
+                    """INSERT INTO daikin_consumption_2hourly
+                       (date, bucket_idx, kwh_total, kwh_heating, kwh_dhw, source, fetched_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (today.isoformat(), bi, kwh + 0.2, kwh, 0.2, "onecta", now),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def _seed_overnight_pv_realtime(yesterday: date, today: date) -> None:
+    """Seed pv_realtime_history rows so SoC drift bullet has data."""
+    # Sample at 22:05 UTC yesterday: SoC 30 %
+    db.save_pv_realtime_sample(
+        captured_at=datetime(yesterday.year, yesterday.month, yesterday.day, 22, 5, tzinfo=UTC).isoformat().replace("+00:00", "Z"),
+        solar_power_kw=0.0, soc_pct=30.0, load_power_kw=0.5,
+        grid_import_kw=0.0, grid_export_kw=0.0,
+        battery_charge_kw=0.0, battery_discharge_kw=0.5, source="test",
+    )
+    # Latest sample (now-ish): SoC 65 %
+    db.save_pv_realtime_sample(
+        captured_at=datetime(today.year, today.month, today.day, 7, 30, tzinfo=UTC).isoformat().replace("+00:00", "Z"),
+        solar_power_kw=0.0, soc_pct=65.0, load_power_kw=0.5,
+        grid_import_kw=0.0, grid_export_kw=0.0,
+        battery_charge_kw=0.0, battery_discharge_kw=0.5, source="test",
+    )
+
+
+def test_morning_brief_includes_overnight_plan_vs_actual_when_data_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """All four bullets render when meteo + heating + SoC + calibration are present."""
+    yesterday = date(2026, 5, 1)
+    today = date(2026, 5, 2)
+    _seed_typical_yesterday()  # sets yesterday=2026-05-01 in PnL
+    _seed_overnight_meteo(yesterday, today)
+    _seed_overnight_realised_heating(yesterday, today)
+    _seed_overnight_pv_realtime(yesterday, today)
+    db.upsert_daikin_lwt_kw_calibration(
+        k_per_degc=0.0325, samples=14, window_days=30, rmse_kwh=2.3, bias_kwh=0.0,
+    )
+    monkeypatch.setattr(daily_brief, "datetime_now_local_date", lambda tz: today)
+
+    md = daily_brief.build_morning_payload()
+
+    assert "**Madrugada (plan vs actual):**" in md
+    assert "- Heating: predicted" in md and "kWh" in md
+    assert "- Battery SoC:" in md and "pp overnight" in md
+    # Arrow direction depends on data (↑ / ↓ / →); just ensure one is present.
+    assert any(arrow in md for arrow in ("↑", "↓", "→")), md
+    assert "- Calibration k:" in md
+    # Outdoor sensor data not seeded → only forecast min should appear
+    assert "Outdoor min (forecast only)" in md or "Outdoor min: forecast" in md
+
+
+def test_morning_brief_omits_overnight_section_when_no_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When NO source has data, the section header itself is suppressed
+    (no empty 'Madrugada' heading polluting the brief)."""
+    _seed_typical_yesterday()
+    monkeypatch.setattr(
+        daily_brief, "datetime_now_local_date", lambda tz: date(2026, 5, 2)
+    )
+
+    md = daily_brief.build_morning_payload()
+
+    assert "Madrugada" not in md, f"expected no overnight section; got:\n{md}"
+
+
+def test_morning_brief_overnight_renders_each_bullet_independently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the calibration bullet survives when other sources are missing."""
+    _seed_typical_yesterday()
+    db.upsert_daikin_lwt_kw_calibration(
+        k_per_degc=0.0335, samples=10, window_days=30,
+    )
+    monkeypatch.setattr(
+        daily_brief, "datetime_now_local_date", lambda tz: date(2026, 5, 2)
+    )
+
+    md = daily_brief.build_morning_payload()
+
+    assert "**Madrugada (plan vs actual):**" in md
+    assert "- Calibration k:" in md
+    assert "- Heating:" not in md
+    assert "- Battery SoC:" not in md
