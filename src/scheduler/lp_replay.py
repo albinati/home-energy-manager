@@ -270,10 +270,8 @@ def replay_run(
         initial = LpInitialState(
             soc_kwh=float(inputs.get("soc_initial_kwh") or 0.0),
             tank_temp_c=float(inputs.get("tank_initial_c") or 45.0),
-            indoor_temp_c=float(inputs.get("indoor_initial_c") or 20.0),
             soc_source=str(inputs.get("soc_source") or "snapshot"),
             tank_source=str(inputs.get("tank_source") or "snapshot"),
-            indoor_source=str(inputs.get("indoor_source") or "snapshot"),
         )
 
     # Weather: prefer the exact forecast fetch referenced by the LP snapshot;
@@ -925,7 +923,7 @@ def _state_at(plan: LpPlan, when_utc: datetime) -> LpInitialState:
     """
     starts = plan.slot_starts_utc
     if not starts:
-        return LpInitialState(soc_kwh=0.0, tank_temp_c=45.0, indoor_temp_c=20.0)
+        return LpInitialState(soc_kwh=0.0, tank_temp_c=45.0)
     if when_utc <= starts[0]:
         idx = 0
     elif when_utc >= starts[-1]:
@@ -939,14 +937,11 @@ def _state_at(plan: LpPlan, when_utc: datetime) -> LpInitialState:
                 break
     soc = plan.soc_kwh[idx] if idx < len(plan.soc_kwh) else (plan.soc_kwh[-1] if plan.soc_kwh else 0.0)
     tank = plan.tank_temp_c[idx] if idx < len(plan.tank_temp_c) else (plan.tank_temp_c[-1] if plan.tank_temp_c else 45.0)
-    indoor = plan.indoor_temp_c[idx] if idx < len(plan.indoor_temp_c) else (plan.indoor_temp_c[-1] if plan.indoor_temp_c else 20.0)
     return LpInitialState(
         soc_kwh=float(soc),
         tank_temp_c=float(tank),
-        indoor_temp_c=float(indoor),
         soc_source="replay_chain",
         tank_source="replay_chain",
-        indoor_source="replay_chain",
     )
 
 

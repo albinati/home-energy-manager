@@ -106,7 +106,6 @@ def test_daikin_action_schedule_keeps_utc_z_suffix():
         space_electric_kwh=[0.0, 0.5],
         lwt_offset_c=[5.0, 5.0],
         tank_temp_c=[45.0, 55.0, 60.0],
-        indoor_temp_c=[21.0, 21.0, 21.0],
         soc_kwh=[5.0, 8.0, 10.0],
         temp_outdoor_c=[10.0, 10.0],
         peak_threshold_pence=30.0,

@@ -104,7 +104,7 @@ def test_lp_solve_uses_conservative_quantization(
         cop_dhw=[3.0] * n,
     )
     init = LpInitialState(
-        soc_kwh=2.5, tank_temp_c=48.0, indoor_temp_c=20.5,
+        soc_kwh=2.5, tank_temp_c=48.0,
     )
 
     plan = solve_lp(

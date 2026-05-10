@@ -47,7 +47,7 @@ def test_micro_climate_offset_is_applied_as_forecast_plus_offset():
     """
     base = datetime(2026, 7, 1, 0, 0, tzinfo=UTC)
     slots, w = _series(1, base)
-    st = LpInitialState(soc_kwh=4.0, tank_temp_c=44.0, indoor_temp_c=20.5)
+    st = LpInitialState(soc_kwh=4.0, tank_temp_c=44.0)
 
     plan = solve_lp(
         slot_starts_utc=slots,
@@ -69,7 +69,7 @@ def test_micro_climate_offset_by_hour_overrides_flat_default():
     """Per-hour offsets win over the flat default for matching UTC hours."""
     base = datetime(2026, 7, 1, 0, 0, tzinfo=UTC)
     slots, w = _series(2, base)
-    st = LpInitialState(soc_kwh=4.0, tank_temp_c=44.0, indoor_temp_c=20.5)
+    st = LpInitialState(soc_kwh=4.0, tank_temp_c=44.0)
 
     plan = solve_lp(
         slot_starts_utc=slots,
@@ -93,7 +93,7 @@ def test_micro_climate_offset_clamped_to_five_degrees():
     """Anomalous offsets must not move t_out by more than ±5 °C."""
     base = datetime(2026, 7, 1, 0, 0, tzinfo=UTC)
     slots, w = _series(1, base)
-    st = LpInitialState(soc_kwh=4.0, tank_temp_c=44.0, indoor_temp_c=20.5)
+    st = LpInitialState(soc_kwh=4.0, tank_temp_c=44.0)
 
     plan = solve_lp(
         slot_starts_utc=slots,
@@ -119,7 +119,7 @@ def test_lp_solves_optimal_small_horizon():
     base_load = [0.4] * n
     # indoor_temp_c at 20.5 (= INDOOR_SETPOINT_C − 0.5) matches the solver's terminal floor
     # so short horizons remain feasible under the tighter LWT offset cap.
-    st = LpInitialState(soc_kwh=4.0, tank_temp_c=44.0, indoor_temp_c=20.5)
+    st = LpInitialState(soc_kwh=4.0, tank_temp_c=44.0)
     plan = solve_lp(
         slot_starts_utc=slots,
         price_pence=prices,
@@ -142,7 +142,7 @@ def test_seg_export_bounded_by_pv_and_discharge():
     prices = [30.0] * n
     base_load = [0.3] * n
     # Tank starts at the new DHW_TEMP_COMFORT_C ceiling (48°C) for positive-price slots.
-    st = LpInitialState(soc_kwh=8.0, tank_temp_c=48.0, indoor_temp_c=21.0)
+    st = LpInitialState(soc_kwh=8.0, tank_temp_c=48.0)
     plan = solve_lp(
         slot_starts_utc=slots,
         price_pence=prices,
@@ -166,7 +166,7 @@ def test_terminal_soc_at_least_initial(monkeypatch):
     base_load = [0.45] * n
     # indoor_temp_c must be close to INDOOR_SETPOINT_C (21°C) — the solver has a
     # hard terminal floor of INDOOR_SETPOINT_C-0.5 that short horizons can't recover from.
-    st = LpInitialState(soc_kwh=3.0, tank_temp_c=42.0, indoor_temp_c=20.5)
+    st = LpInitialState(soc_kwh=3.0, tank_temp_c=42.0)
     plan = solve_lp(
         slot_starts_utc=slots,
         price_pence=prices,
@@ -189,7 +189,7 @@ def test_terminal_soc_hard_floor(monkeypatch):
     prices = [8.0] * n
     base_load = [0.3] * n
     # indoor_temp_c at 20.5 = terminal floor; otherwise short horizons can't recover.
-    st = LpInitialState(soc_kwh=5.0, tank_temp_c=45.0, indoor_temp_c=20.5)
+    st = LpInitialState(soc_kwh=5.0, tank_temp_c=45.0)
     plan = solve_lp(
         slot_starts_utc=slots,
         price_pence=prices,
@@ -217,7 +217,7 @@ def test_terminal_soc_value_changes_terminal_soc(monkeypatch):
     # With terminal value=20p/kWh, the 22p spread is < 20p → keep battery.
     prices = [30.0] * 4 + [8.0] * (n - 4)
     base_load = [0.3] * n
-    st = LpInitialState(soc_kwh=6.0, tank_temp_c=45.0, indoor_temp_c=20.5)
+    st = LpInitialState(soc_kwh=6.0, tank_temp_c=45.0)
 
     monkeypatch.setattr(app_config, "LP_SOC_FINAL_KWH", 1.0)
 
@@ -269,7 +269,7 @@ def test_pv_curtailment_slack_prevents_infeasible():
     prices = [5.0] * n
     base_load = [0.2] * n
     # Tank capped at DHW_TEMP_COMFORT_C=48 °C for positive-price slots.
-    st = LpInitialState(soc_kwh=9.0, tank_temp_c=48.0, indoor_temp_c=22.0)
+    st = LpInitialState(soc_kwh=9.0, tank_temp_c=48.0)
     plan = solve_lp(
         slot_starts_utc=slots,
         price_pence=prices,
@@ -292,7 +292,7 @@ def test_smoothing_penalties_and_price_quantize_still_optimal(monkeypatch):
     slots, w = _series(n, base)
     prices = [10.2, 11.7, 10.1, 12.3, 9.8, 10.0, 11.1, 10.9, 12.0, 10.5]
     base_load = [0.35] * n
-    st = LpInitialState(soc_kwh=5.0, tank_temp_c=48.0, indoor_temp_c=20.5)
+    st = LpInitialState(soc_kwh=5.0, tank_temp_c=48.0)
     plan = solve_lp(
         slot_starts_utc=slots,
         price_pence=prices,
@@ -315,7 +315,7 @@ def test_inverter_stress_reduces_peak_battery_power(monkeypatch):
     # Flat price: without stress, solver is free to charge at max every slot
     prices = [10.0] * n
     base_load = [0.3] * n
-    st = LpInitialState(soc_kwh=2.0, tank_temp_c=45.0, indoor_temp_c=20.5)
+    st = LpInitialState(soc_kwh=2.0, tank_temp_c=45.0)
 
     monkeypatch.setattr(app_config, "LP_INVERTER_STRESS_COST_PENCE", 0.0)
     plan_no_stress = solve_lp(
@@ -364,7 +364,7 @@ def test_simplified_hp_model_continuous_power(monkeypatch):
     prices = [6.0] * n  # cheap — heat pump should run
     base_load = [0.3] * n
     # indoor_temp_c must be close to INDOOR_SETPOINT_C (21°C) — see terminal-floor note in earlier test.
-    st = LpInitialState(soc_kwh=5.0, tank_temp_c=40.0, indoor_temp_c=20.5)
+    st = LpInitialState(soc_kwh=5.0, tank_temp_c=40.0)
     plan = solve_lp(
         slot_starts_utc=slots,
         price_pence=prices,
@@ -424,7 +424,7 @@ def test_negative_price_max_charges_battery(monkeypatch):
     prices = [-5.0] * n
     base_load = [0.3] * n
     initial_soc = 2.0
-    st = LpInitialState(soc_kwh=initial_soc, tank_temp_c=45.0, indoor_temp_c=20.5)
+    st = LpInitialState(soc_kwh=initial_soc, tank_temp_c=45.0)
     plan = solve_lp(
         slot_starts_utc=slots,
         price_pence=prices,
@@ -449,7 +449,7 @@ def test_dhw_ceiling_48_when_positive_price():
     # First half positive, second half negative
     prices = [10.0] * 12 + [-3.0] * 12
     base_load = [0.3] * n
-    st = LpInitialState(soc_kwh=5.0, tank_temp_c=45.0, indoor_temp_c=20.5)
+    st = LpInitialState(soc_kwh=5.0, tank_temp_c=45.0)
     plan = solve_lp(
         slot_starts_utc=slots,
         price_pence=prices,
@@ -483,7 +483,7 @@ def test_no_grid_to_battery_before_plunge():
     )
     prices = [12.0] * 8 + [-2.0] * 8  # positive morning, negative afternoon
     base_load = [0.3] * n
-    st = LpInitialState(soc_kwh=5.0, tank_temp_c=45.0, indoor_temp_c=20.5)
+    st = LpInitialState(soc_kwh=5.0, tank_temp_c=45.0)
     plan = solve_lp(
         slot_starts_utc=slots,
         price_pence=prices,
@@ -510,7 +510,7 @@ def test_lwt_offset_capped_at_5():
     slots, w = _series(n, base)
     prices = [8.0] * n
     base_load = [0.3] * n
-    st = LpInitialState(soc_kwh=5.0, tank_temp_c=45.0, indoor_temp_c=20.5)
+    st = LpInitialState(soc_kwh=5.0, tank_temp_c=45.0)
     plan = solve_lp(
         slot_starts_utc=slots,
         price_pence=prices,
@@ -547,7 +547,7 @@ def test_dis_zero_during_negative_slots():
     # if the LP were allowed to swing battery both ways within the horizon).
     prices = [-3.0] * 4 + [35.0] * 4
     base_load = [0.3] * n
-    st = LpInitialState(soc_kwh=9.0, tank_temp_c=45.0, indoor_temp_c=20.5)
+    st = LpInitialState(soc_kwh=9.0, tank_temp_c=45.0)
     plan = solve_lp(
         slot_starts_utc=slots,
         price_pence=prices,
@@ -582,7 +582,7 @@ def test_stress_cost_inactive_during_negative_prices(monkeypatch):
     )
     prices = [-2.0] * n
     base_load = [0.3] * n
-    st = LpInitialState(soc_kwh=2.0, tank_temp_c=45.0, indoor_temp_c=20.5)
+    st = LpInitialState(soc_kwh=2.0, tank_temp_c=45.0)
 
     monkeypatch.setattr(app_config, "LP_INVERTER_STRESS_COST_PENCE", 0.0)
     plan_no = solve_lp(
@@ -651,7 +651,7 @@ def test_negative_run_has_no_charge_gaps(monkeypatch):
     prices = [-1.24, -0.90, -1.30, -1.30, -1.10, -0.95]
     base_load = [0.3] * n
     # SoC=5 kWh (50%): battery has ~5 kWh of headroom — ~2 slots of full-power charging.
-    st = LpInitialState(soc_kwh=5.0, tank_temp_c=45.0, indoor_temp_c=20.5)
+    st = LpInitialState(soc_kwh=5.0, tank_temp_c=45.0)
     plan = solve_lp(
         slot_starts_utc=slots,
         price_pence=prices,

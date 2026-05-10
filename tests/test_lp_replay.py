@@ -99,7 +99,7 @@ def _solve_baseline(
         prices = [12.0] * n
     if base_load is None:
         base_load = [0.4] * n
-    initial = LpInitialState(soc_kwh=soc0, tank_temp_c=tank0, indoor_temp_c=indoor0)
+    initial = LpInitialState(soc_kwh=soc0, tank_temp_c=tank0)
     plan = solve_lp(
         slot_starts_utc=slots,
         price_pence=prices,
@@ -146,10 +146,10 @@ def _persist_plan_as_run(
         "horizon_hours": int(len(slots) * 0.5),
         "soc_initial_kwh": initial.soc_kwh,
         "tank_initial_c": initial.tank_temp_c,
-        "indoor_initial_c": initial.indoor_temp_c,
+        "indoor_initial_c": None,
         "soc_source": initial.soc_source,
         "tank_source": initial.tank_source,
-        "indoor_source": initial.indoor_source,
+        "indoor_source": "removed_phase_b",
         "base_load_json": json.dumps(base_load),
         "micro_climate_offset_c": 0.0,
         "forecast_fetch_at_utc": fetch_at,
@@ -178,7 +178,7 @@ def _persist_plan_as_run(
             "space_kwh": float(plan.space_electric_kwh[i]),
             "soc_kwh": float(plan.soc_kwh[i + 1]) if i + 1 < len(plan.soc_kwh) else 0.0,
             "tank_temp_c": float(plan.tank_temp_c[i + 1]) if i + 1 < len(plan.tank_temp_c) else 0.0,
-            "indoor_temp_c": float(plan.indoor_temp_c[i + 1]) if i + 1 < len(plan.indoor_temp_c) else 0.0,
+            "indoor_temp_c": None,
             "outdoor_temp_c": float(plan.temp_outdoor_c[i]) if i < len(plan.temp_outdoor_c) else 10.0,
             "lwt_offset_c": float(plan.lwt_offset_c[i]) if i < len(plan.lwt_offset_c) else 0.0,
         })
@@ -259,7 +259,7 @@ def test_replay_run_v11a_honest_fidelity_when_cloud_cover_persisted():
             heating_demand_factor=compute_heating_demand_factor(12.0),
         ))
     w = forecast_to_lp_inputs(forecast, slots, pv_scale=1.0)
-    initial = LpInitialState(soc_kwh=4.0, tank_temp_c=44.0, indoor_temp_c=20.5)
+    initial = LpInitialState(soc_kwh=4.0, tank_temp_c=44.0)
     plan = solve_lp(
         slot_starts_utc=slots, price_pence=[12.0] * 8, base_load_kwh=[0.4] * 8,
         weather=w, initial=initial, tz=ZoneInfo("Europe/London"),
@@ -322,7 +322,7 @@ def test_replay_run_missing_weather_returns_clean_error():
         "horizon_hours": 4,
         "soc_initial_kwh": initial.soc_kwh,
         "tank_initial_c": initial.tank_temp_c,
-        "indoor_initial_c": initial.indoor_temp_c,
+        "indoor_initial_c": None,
         "soc_source": "test", "tank_source": "test", "indoor_source": "test",
         "base_load_json": json.dumps(base_load),
         "micro_climate_offset_c": 0.0,
@@ -355,9 +355,20 @@ def test_replay_run_unknown_run_id_returns_error():
 
 
 def test_replay_run_forward_mode_changes_under_config_drift(monkeypatch):
-    """Forward mode uses today's config; mutating config should change the result."""
+    """Forward mode uses today's config; mutating config should change the result.
+
+    Uses a peaky price curve so battery capacity has a measurable impact on the
+    optimal arbitrage strategy (the LP's decision space narrows when capacity
+    halves). PR Phase B note: the previous flat-price test relied on the old
+    indoor-temp comfort variable absorbing config sensitivity; with that
+    variable removed, flat prices give an LP-invariant result.
+    """
     base = datetime(2026, 7, 2, 0, 0, tzinfo=UTC)
-    plan, slots, prices, base_load, initial, forecast = _solve_baseline(8, base)
+    # Peaky: cheap-then-peak across 8 slots so battery sizing matters.
+    prices = [5.0, 5.0, 5.0, 5.0, 35.0, 35.0, 35.0, 35.0]
+    plan, slots, prices, base_load, initial, forecast = _solve_baseline(
+        8, base, prices=prices,
+    )
     # Capture current battery capacity so we can stash it in the snapshot.
     snap_capacity = float(app_config.BATTERY_CAPACITY_KWH)
     run_id = _persist_plan_as_run(

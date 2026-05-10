@@ -61,7 +61,7 @@ def test_dhw_draw_model_drops_tank_temp_during_shower_window(
         price_pence=[20.0] * n,
         base_load_kwh=[0.3] * n,
         weather=_make_weather(slots),
-        initial=LpInitialState(soc_kwh=4.0, tank_temp_c=50.0, indoor_temp_c=21.0),
+        initial=LpInitialState(soc_kwh=4.0, tank_temp_c=50.0),
         tz=ZoneInfo("Europe/London"),
     )
     assert plan.ok, plan.status
@@ -140,7 +140,7 @@ def test_dhw_draw_per_day_normalization_2day_horizon(
         price_pence=[20.0] * n2,
         base_load_kwh=[0.3] * n2,
         weather=_make_weather(slots2),
-        initial=LpInitialState(soc_kwh=4.0, tank_temp_c=50.0, indoor_temp_c=21.0),
+        initial=LpInitialState(soc_kwh=4.0, tank_temp_c=50.0),
         tz=tz,
     )
     assert plan.ok, plan.status
@@ -197,7 +197,7 @@ def test_dhw_draw_model_zero_litres_disables_draw(
         price_pence=[20.0] * n,
         base_load_kwh=[0.3] * n,
         weather=_make_weather(slots),
-        initial=LpInitialState(soc_kwh=4.0, tank_temp_c=50.0, indoor_temp_c=21.0),
+        initial=LpInitialState(soc_kwh=4.0, tank_temp_c=50.0),
         tz=ZoneInfo("Europe/London"),
     )
     assert plan.ok, plan.status
@@ -255,7 +255,7 @@ def test_dhw_draw_model_forces_pv_time_heating(
         price_pence=prices,
         base_load_kwh=[0.3] * n,
         weather=_make_weather(slots, pv_kwh=pv),
-        initial=LpInitialState(soc_kwh=4.0, tank_temp_c=50.0, indoor_temp_c=21.0),
+        initial=LpInitialState(soc_kwh=4.0, tank_temp_c=50.0),
         tz=ZoneInfo("Europe/London"),
     )
     assert plan.ok, plan.status

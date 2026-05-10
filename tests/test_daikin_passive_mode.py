@@ -140,7 +140,7 @@ def _solve_minimal(passive: bool):
         cop_space=[3.0] * n,
         cop_dhw=[2.5] * n,
     )
-    init = LpInitialState(soc_kwh=5.0, tank_temp_c=48.0, indoor_temp_c=21.0)
+    init = LpInitialState(soc_kwh=5.0, tank_temp_c=48.0)
     return solve_lp(
         slot_starts_utc=slots,
         price_pence=[10.0, 5.0, 25.0, 8.0],

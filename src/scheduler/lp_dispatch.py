@@ -228,19 +228,12 @@ def _lwt_offset_from_plan(i: int, plan: LpPlan) -> float:
     decision — bounded by the physical climate curve — into the exact Daikin offset command
     needed to deliver that energy draw.
 
-    Falls back to an indoor-error proportional estimate when the LP output is unavailable
-    (e.g. heuristic plan that never filled ``lwt_offset_c``).
+    PR Phase B: indoor-temp fallback removed (no plan.indoor_temp_c). When
+    ``plan.lwt_offset_c`` is empty (heuristic / legacy path), default to 0.
     """
     if plan.lwt_offset_c and i < len(plan.lwt_offset_c):
         return float(plan.lwt_offset_c[i])
-    # Fallback: proportional to indoor temperature error (heuristic / legacy path)
-    if i + 1 >= len(plan.indoor_temp_c):
-        return 0.0
-    err = float(config.INDOOR_SETPOINT_C) - plan.indoor_temp_c[i + 1]
-    raw = max(-1.0, min(1.0, err * 0.6))
-    lo = float(config.LWT_OFFSET_MIN)
-    hi = float(config.LWT_OFFSET_MAX)
-    return max(lo, min(hi, raw * (config.LWT_OFFSET_MAX - config.LWT_OFFSET_MIN) / 10.0))
+    return 0.0
 
 
 def _merge_half_hour_slots_for_daikin(plan: LpPlan) -> list[tuple[datetime, datetime, str, int]]:

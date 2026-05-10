@@ -31,7 +31,7 @@ def _fake_sim_result() -> MagicMock:
     result.forecast_solar_kwh_horizon = 6.2
     result.pv_scale_factor = 0.87
     result.mu_load_kwh = 0.42
-    result.initial = MagicMock(soc_kwh=5.2, tank_temp_c=45.0, indoor_temp_c=20.1)
+    result.initial = MagicMock(soc_kwh=5.2, tank_temp_c=45.0)
     result.plan = MagicMock(ok=True, objective_pence=-125.50, status="Optimal")
     result.error = None
     return result

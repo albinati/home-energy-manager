@@ -58,7 +58,7 @@ def test_penalty_eliminates_curtailment_when_export_feasible(monkeypatch):
     slots, w = _series_with_pv(n, base, pv_per_slot=1.0)
     prices = [10.0] * n      # standard import
     base_load = [0.3] * n
-    st = LpInitialState(soc_kwh=8.0, tank_temp_c=48.0, indoor_temp_c=21.0)
+    st = LpInitialState(soc_kwh=8.0, tank_temp_c=48.0)
     plan = solve_lp(
         slot_starts_utc=slots,
         price_pence=prices,
@@ -87,7 +87,7 @@ def test_legacy_zero_penalty_allows_curtailment(monkeypatch):
     # Negative-price slots so the LP wants max imp; PV becomes "competition"
     prices = [-7.0] * n
     base_load = [0.3] * n
-    st = LpInitialState(soc_kwh=2.0, tank_temp_c=48.0, indoor_temp_c=21.0)
+    st = LpInitialState(soc_kwh=2.0, tank_temp_c=48.0)
     plan = solve_lp(
         slot_starts_utc=slots,
         price_pence=prices,
@@ -115,7 +115,7 @@ def test_penalty_value_reduces_curtailment_under_chg_cap(monkeypatch):
     slots, w = _series_with_pv(n, base, pv_per_slot=1.5)
     prices = [-7.0] * n
     base_load = [0.3] * n
-    st = LpInitialState(soc_kwh=2.0, tank_temp_c=48.0, indoor_temp_c=21.0)
+    st = LpInitialState(soc_kwh=2.0, tank_temp_c=48.0)
     plan_with = solve_lp(
         slot_starts_utc=slots,
         price_pence=prices,

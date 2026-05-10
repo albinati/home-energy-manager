@@ -189,7 +189,7 @@ def test_lp_respects_tank_floor_under_extreme_prices(monkeypatch):
     )
     prices = [60.0] * n  # Expensive imports — LP wants to minimise DHW heating
     base_load = [0.3] * n
-    st = LpInitialState(soc_kwh=8.0, tank_temp_c=45.0, indoor_temp_c=21.0)
+    st = LpInitialState(soc_kwh=8.0, tank_temp_c=45.0)
     plan = solve_lp(
         slot_starts_utc=slots,
         price_pence=prices,
@@ -203,8 +203,7 @@ def test_lp_respects_tank_floor_under_extreme_prices(monkeypatch):
     assert all(t >= 20.0 - 1e-6 for t in plan.tank_temp_c), (
         f"Tank fell below 20 °C floor: min={min(plan.tank_temp_c):.2f}"
     )
-    # Indoor floor is 10 °C (variable bound in lp_optimizer.py); also assert no
-    # extreme dip even at 10 (catch a regression where comfort_pen disappears).
-    assert all(t >= 10.0 - 1e-6 for t in plan.indoor_temp_c), (
-        f"Indoor fell below 10 °C bound: min={min(plan.indoor_temp_c):.2f}"
-    )
+    # PR Phase B: indoor_temp_c removed from LpPlan — comfort floor is no
+    # longer LP-enforced; the heat pump runs on its weather curve via
+    # space_floor_kwh. The tank floor assertion above remains the canonical
+    # safety check for guardrail enforcement.

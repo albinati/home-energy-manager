@@ -189,7 +189,7 @@ def test_lp_solves_cleanly_with_default_schedule(monkeypatch: pytest.MonkeyPatch
             cop_space=[3.5] * n,
             cop_dhw=[3.0] * n,
         ),
-        initial=LpInitialState(soc_kwh=4.0, tank_temp_c=45.0, indoor_temp_c=21.0),
+        initial=LpInitialState(soc_kwh=4.0, tank_temp_c=45.0),
         tz=ZoneInfo("Europe/London"),
     )
     assert plan.ok, plan.status
@@ -233,7 +233,7 @@ def test_lp_enforces_tight_floor_when_horizon_ends_in_shower_window(
             cop_space=[3.5] * n,
             cop_dhw=[3.0] * n,
         ),
-        initial=LpInitialState(soc_kwh=4.0, tank_temp_c=45.0, indoor_temp_c=21.0),
+        initial=LpInitialState(soc_kwh=4.0, tank_temp_c=45.0),
         tz=ZoneInfo("Europe/London"),
     )
     assert plan.ok, plan.status

@@ -38,7 +38,7 @@ def _make_weather(slots, pv_kwh):
 def _solve(slots, prices, pv, base_load, init_soc=8.0, init_tank=40.0,
            export_prices=None, **monkeyed_config):
     from src.scheduler.lp_optimizer import LpInitialState, solve_lp
-    init = LpInitialState(soc_kwh=init_soc, tank_temp_c=init_tank, indoor_temp_c=21.0)
+    init = LpInitialState(soc_kwh=init_soc, tank_temp_c=init_tank)
     return solve_lp(
         slot_starts_utc=slots,
         price_pence=prices,
