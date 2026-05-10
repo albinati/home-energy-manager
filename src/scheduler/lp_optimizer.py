@@ -695,6 +695,41 @@ def solve_lp(
             if shower_mask[i]:
                 prob += tank[i + 1] >= t_min_dhw
 
+        # Weekly legionella thermal-shock cycle. When ``DHW_LEGIONELLA_DAY``
+        # ∈ [0,6] (Mon..Sun, Python weekday convention), force tank ≥ target
+        # at the END of every slot whose start lies inside the cycle window.
+        # The LP figures out the cheapest pre-heat schedule (likely the
+        # cheap window leading up to the cycle) — the natural physics
+        # handles the rest. Disabled when DAY = -1 (default).
+        from .. import runtime_settings as _rts
+        try:
+            _leg_day = int(_rts.get_setting("DHW_LEGIONELLA_DAY"))
+        except (TypeError, ValueError):
+            _leg_day = -1
+        if 0 <= _leg_day <= 6:
+            try:
+                _leg_hour = int(_rts.get_setting("DHW_LEGIONELLA_HOUR_LOCAL"))
+                _leg_minutes = int(_rts.get_setting("DHW_LEGIONELLA_DURATION_MIN"))
+                _leg_target_c = float(_rts.get_setting("DHW_LEGIONELLA_TANK_TARGET_C"))
+            except (TypeError, ValueError):
+                _leg_hour, _leg_minutes, _leg_target_c = 13, 60, 60.0
+            _cycle_window_h = max(0.5, (_leg_minutes / 60.0))
+            for i, _st in enumerate(slot_starts_utc):
+                _local = _st.astimezone(tz)
+                if _local.weekday() != _leg_day:
+                    continue
+                _hour_frac = _local.hour + _local.minute / 60.0
+                if not (_leg_hour <= _hour_frac < _leg_hour + _cycle_window_h):
+                    continue
+                # Cap at tank_hi − 1°C: the variable's upper bound is tank_hi
+                # exactly, but space_floor + mode-mutex constraints can force
+                # additional DHW heating that would push tank above the bound
+                # mid-cycle. 1°C of headroom keeps the constraint satisfiable
+                # without losing the safety value (60°C is the legionella floor;
+                # tank_hi is 65°C, so a 1°C dip is well within margin).
+                _floor = min(_leg_target_c, tank_hi - 1.0)
+                prob += tank[i + 1] >= _floor
+
     # Per-slot DHW ceiling — three tiers:
     #   negative-price → DHW_TEMP_MAX_C (default 65 °C). Grid pays us; load all the kWh in.
     #   PV-abundant   → DHW_TEMP_PV_ABUNDANCE_TARGET_C (default 55 °C). Lower than negative
