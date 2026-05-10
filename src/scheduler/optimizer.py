@@ -1319,25 +1319,57 @@ def _run_optimizer_lp(
     if not slots:
         return _self_use_fallback(fox, reason="No half-hour slots in LP horizon — check Agile rates coverage")
 
-    # Per-slot residual load (Daikin physics subtracted per S10.13 / #179)
+    # Per-slot residual load (Daikin physics subtracted per S10.13 / #179).
+    # Phase B2 (#306 follow-up): use the tariff-aware profile when available
+    # so cooking-pulled-into-cheap and peak-avoidance behaviours are
+    # captured in the LP forecast. Falls back to plain (h, m) when a
+    # (h, m, kind) bucket lacks samples; falls back to flat when both miss.
     _profile_limit = int(getattr(config, "LP_LOAD_PROFILE_SLOTS", 2016))
-    _load_profile = db.half_hourly_residual_load_profile_kwh()
-    # Fall back to Fox daily mean when execution_log is cold
+    _load_profile = db.tariff_aware_residual_load_profile_kwh()
+    if not _load_profile:
+        # Cold-start: legacy plain profile until 30 days of slot_kind history
+        # accumulates.
+        _load_profile = db.half_hourly_residual_load_profile_kwh()
     _fox_mean = db.mean_fox_load_kwh_per_slot(limit=60)
     _flat = _fox_mean if _fox_mean is not None else db.mean_consumption_kwh_from_execution_logs(limit=_profile_limit)
     if _load_profile:
-        logger.info(
-            "LP base_load: 48 buckets built; min=%.3f max=%.3f early-morning(03-07)=%s",
-            min(_load_profile.values()),
-            max(_load_profile.values()),
-            {f"{h:02d}:{m:02d}": round(_load_profile[(h, m)], 3)
-             for h in range(3, 8) for m in (0, 30) if (h, m) in _load_profile},
-        )
+        # Log only the (h, m) entries — the (h, m, kind) entries vary too
+        # widely to summarise in one line.
+        plain = {k: v for k, v in _load_profile.items() if len(k) == 2}
+        kind_count = sum(1 for k in _load_profile if len(k) == 3)
+        if plain:
+            logger.info(
+                "LP base_load: %d (h,m) buckets, %d (h,m,kind) buckets; "
+                "early-morning(03-07)=%s",
+                len(plain), kind_count,
+                {f"{h:02d}:{m:02d}": round(plain[(h, m)], 3)
+                 for h in range(3, 8) for m in (0, 30) if (h, m) in plain},
+            )
+
+    # Slot-kind classifier mirrors the LP's eventual classification so the
+    # base-load lookup is consistent with downstream slot-kind decisions.
+    _peak_thresh = float(getattr(config, "OPTIMIZATION_PEAK_THRESHOLD_PENCE", 25))
+    _cheap_thresh = float(getattr(config, "OPTIMIZATION_CHEAP_THRESHOLD_PENCE", 5))
+
+    def _classify_price(price_p: float) -> str:
+        if price_p < 0:
+            return "negative"
+        if price_p <= _cheap_thresh:
+            return "cheap"
+        if price_p >= _peak_thresh:
+            return "peak"
+        return "standard"
+
     base_load = []
     for s in slots:
         _local = s.start_utc.astimezone(tz)
-        _bucket = (_local.hour, 30 if _local.minute >= 30 else 0)
-        base_load.append(_load_profile.get(_bucket, _flat))
+        _hm = (_local.hour, 30 if _local.minute >= 30 else 0)
+        _kind = _classify_price(float(s.price_pence))
+        # Most-specific lookup first.
+        v = _load_profile.get((_hm[0], _hm[1], _kind))
+        if v is None:
+            v = _load_profile.get(_hm, _flat)
+        base_load.append(v)
     residual_base_load = list(base_load)
     appliance_profile_kwh = [0.0] * len(base_load)
 

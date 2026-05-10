@@ -1582,6 +1582,159 @@ def half_hourly_residual_load_profile_kwh(
     return profile
 
 
+def tariff_aware_residual_load_profile_kwh(
+    *,
+    window_days: int = 30,
+    min_samples_per_kind: int = 5,
+) -> dict[tuple, float]:
+    """Per-(hour, minute, slot_kind) MEDIAN residual load — captures the
+    household's tariff-driven behavioural shift (e.g. cooking pulled into
+    cheap windows; heating deferred during peak).
+
+    Phase B2 (#306 follow-up): the legacy
+    :func:`half_hourly_residual_load_profile_kwh` returned one median per
+    half-hour bucket regardless of price tier. After ~14 days on Agile, the
+    family changed routines (lunch ~12:00 in cheap quartile, evening peak
+    avoidance) but the LP forecast was treating "13:00 cheap day" the same
+    as "13:00 peak day". This function adds the slot_kind dimension by
+    joining with ``execution_log.slot_kind`` retrospectively.
+
+    Returns a dict whose keys may be 2-tuples ``(hour, minute)`` or 3-tuples
+    ``(hour, minute, kind)``. Caller looks up the most specific bucket
+    available, falling back to the plain bucket. ``kind`` ∈ {``negative``,
+    ``cheap``, ``standard``, ``peak``}.
+
+    Buckets with fewer than ``min_samples_per_kind`` samples are dropped
+    (graceful degradation): the caller's fallback to ``(hour, minute)``
+    median still applies.
+    """
+    from .config import config, cop_at_temperature
+    from .physics import predict_passive_daikin_load
+
+    cutoff_iso = (datetime.now(UTC) - timedelta(days=window_days)).isoformat().replace("+00:00", "Z")
+    cop_curve = config.DAIKIN_COP_CURVE
+
+    # Step 1: build slot_kind lookup by half-hour bucket from execution_log.
+    # Key shape: (YYYY-MM-DD, hour, 0|30) → kind.
+    kind_by_slot: dict[tuple[str, int, int], str] = {}
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT timestamp, slot_kind FROM execution_log
+                   WHERE timestamp > ? AND slot_kind IS NOT NULL""",
+                (cutoff_iso,),
+            )
+            for row in cur.fetchall():
+                ts_str = str(row["timestamp"])
+                k = str(row["slot_kind"]).strip().lower()
+                if not k:
+                    continue
+                try:
+                    from datetime import datetime as _dt
+                    ts = _dt.fromisoformat(ts_str.replace("Z", "+00:00"))
+                    local = ts.astimezone(ZoneInfo(config.BULLETPROOF_TIMEZONE))
+                except (ValueError, TypeError):
+                    continue
+                slot_key = (
+                    local.date().isoformat(),
+                    local.hour,
+                    30 if local.minute >= 30 else 0,
+                )
+                # First-seen wins (heartbeat may write multiple rows per slot
+                # before #308 dedup; slot_kind is consistent across them).
+                kind_by_slot.setdefault(slot_key, k)
+        finally:
+            conn.close()
+
+    # Step 2: walk pv_realtime samples, compute residual, key by both
+    # (hour, minute) and (hour, minute, kind) when known.
+    samples_used = 0
+    samples_dropped_no_meteo = 0
+    by_hm: dict[tuple[int, int], list[float]] = {}
+    by_hmk: dict[tuple[int, int, str], list[float]] = {}
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT pv.captured_at, pv.load_power_kw,
+                          (SELECT mv.temp_c
+                           FROM meteo_forecast_value mv
+                           JOIN meteo_forecast_snapshot ms
+                             ON ms.forecast_fetch_at_utc = mv.forecast_fetch_at_utc
+                           WHERE substr(mv.slot_time, 1, 13) = substr(pv.captured_at, 1, 13)
+                             AND ms.forecast_fetch_at_utc < pv.captured_at
+                           ORDER BY ms.forecast_fetch_at_utc DESC LIMIT 1) AS outdoor_history_c,
+                          (SELECT mv.temp_c
+                           FROM meteo_forecast_value mv
+                           JOIN meteo_forecast_latest_state ls
+                             ON ls.id = 1
+                            AND ls.forecast_fetch_at_utc = mv.forecast_fetch_at_utc
+                           WHERE substr(mv.slot_time, 1, 13) = substr(pv.captured_at, 1, 13)
+                           LIMIT 1) AS outdoor_latest_c
+                   FROM pv_realtime_history pv
+                   WHERE pv.captured_at > ? AND pv.load_power_kw IS NOT NULL""",
+                (cutoff_iso,),
+            )
+            rows = cur.fetchall()
+        finally:
+            conn.close()
+
+    from datetime import datetime as _dt
+    for row in rows:
+        ts_str = row["captured_at"]
+        load_kw = float(row["load_power_kw"])
+        outdoor = row["outdoor_history_c"]
+        if outdoor is None:
+            outdoor = row["outdoor_latest_c"]
+        if outdoor is None:
+            samples_dropped_no_meteo += 1
+            continue
+        outdoor_c = float(outdoor)
+        cop_at_t = cop_at_temperature(cop_curve, outdoor_c)
+        e_space, e_dhw = predict_passive_daikin_load(
+            [outdoor_c], [cop_at_t], [cop_at_t], slot_h=0.5
+        )
+        daikin_slot_kwh = e_space[0] + e_dhw[0]
+        sample_slot_kwh = load_kw * 0.5
+        residual = max(0.0, sample_slot_kwh - daikin_slot_kwh)
+        try:
+            ts = _dt.fromisoformat(str(ts_str).replace("Z", "+00:00"))
+            local = ts.astimezone(ZoneInfo(config.BULLETPROOF_TIMEZONE))
+        except (ValueError, TypeError):
+            continue
+        minute_bucket = 30 if local.minute >= 30 else 0
+        hm = (local.hour, minute_bucket)
+        by_hm.setdefault(hm, []).append(residual)
+        slot_key = (local.date().isoformat(), local.hour, minute_bucket)
+        kind = kind_by_slot.get(slot_key)
+        if kind:
+            by_hmk.setdefault((local.hour, minute_bucket, kind), []).append(residual)
+        samples_used += 1
+
+    # Step 3: build profile.
+    profile: dict[tuple, float] = {}
+    for hm, vs in by_hm.items():
+        if vs:
+            vs_sorted = sorted(vs)
+            profile[hm] = vs_sorted[len(vs_sorted) // 2]
+    for hmk, vs in by_hmk.items():
+        if len(vs) >= min_samples_per_kind:
+            vs_sorted = sorted(vs)
+            profile[hmk] = vs_sorted[len(vs_sorted) // 2]
+
+    n_kind_buckets = sum(1 for k in profile if len(k) == 3)
+    logger.info(
+        "tariff_aware_residual_profile: %d samples (%d dropped no-meteo); "
+        "%d (h,m) buckets, %d (h,m,kind) buckets ≥%d samples each",
+        samples_used, samples_dropped_no_meteo,
+        sum(1 for k in profile if len(k) == 2),
+        n_kind_buckets,
+        min_samples_per_kind,
+    )
+    return profile
+
+
 def half_hourly_load_profile_kwh(
     limit: int = 2016,
     *,
