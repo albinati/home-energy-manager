@@ -172,26 +172,6 @@ def apply_safe_defaults(
         logger.warning("Daikin safe defaults failed: %s", e)
 
 
-def should_act(
-    action: dict[str, Any],
-    *,
-    current_soc: float | None,
-    room_temp_c: float | None,
-    now_local: datetime | None = None,
-) -> tuple[bool, str]:
-    """Return (allowed, reason)."""
-    atype = action.get("action_type", "")
-    params = action.get("params") or {}
-    if atype in ("force_charge_max", "force_charge") and current_soc is not None:
-        target = params.get("fd_soc") or params.get("target_soc")
-        if target is not None and current_soc >= float(target) - 0.5:
-            return False, "SOC already at target"
-    if atype == "shutdown" and room_temp_c is not None:
-        if room_temp_c < 5.0:
-            return False, "frost risk — room very cold"
-    return True, "ok"
-
-
 def _reconcile_daikin_actions(
     actions: list[dict[str, Any]],
     client: DaikinClient,

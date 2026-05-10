@@ -93,13 +93,6 @@ class LpPlan:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _parse_hhmm_to_minutes(s: str) -> int:
-    parts = (s or "00:00").strip().split(":")
-    h = int(parts[0]) if parts else 0
-    m = int(parts[1]) if len(parts) > 1 else 0
-    return h * 60 + m
-
-
 # PR Phase B: ``_slot_occupancy_bounds`` deleted — comfort-band logic depended
 # on the indoor_temp state variable, which was based on a non-existent room
 # sensor. Heating demand is now driven by the outdoor-temp physics floor +

@@ -61,17 +61,6 @@ def test_morning_and_night_are_independent_calls():
     assert n1 == n2
 
 
-def test_legacy_aliases_preserved():
-    """Old callers using build_daily_brief_text / send_daily_brief_webhook
-    must keep working — they delegate to morning."""
-    import src.analytics.daily_brief as db_mod
-
-    assert db_mod.build_daily_brief_text() == db_mod.build_morning_payload()
-    # send_daily_brief_webhook now points at send_morning_brief_webhook —
-    # symbol-identity check.
-    assert db_mod.send_daily_brief_webhook is db_mod.send_morning_brief_webhook
-
-
 def test_morning_payload_includes_tier_summary_when_rates_present(monkeypatch):
     """When agile_rates is populated, the morning brief shows the tier-window
     summary (reusing the same classify_day call as the family calendar)."""

@@ -71,13 +71,6 @@ ALL_TIERS: list[Tier] = [
     TIER_NEGATIVE, TIER_VERY_CHEAP, TIER_GREEN_LIGHT, TIER_MODERATE,
     TIER_ABOVE_AVG, TIER_EXPENSIVE, TIER_SEVERE_PEAK,
 ]
-_BY_KEY: dict[str, Tier] = {t.key: t for t in ALL_TIERS}
-
-
-def tier_by_key(key: str) -> Tier:
-    return _BY_KEY[key]
-
-
 # Threshold constants — exposed as module-level so tests can document the
 # contract and downstream tooling can read them.
 VERY_CHEAP_ABS_CEILING_P = 12.0

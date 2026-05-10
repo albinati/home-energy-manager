@@ -124,74 +124,6 @@ def _code_fallback_page(code: str, err: str) -> bytes:
 </body></html>""".encode()
 
 
-EXCHANGE_PAGE = """<!DOCTYPE html>
-<html><head><title>Daikin Auth</title>
-<style>
-  body {{ font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-         display: flex; justify-content: center; align-items: center;
-         min-height: 100vh; margin: 0; background: #f5f5f5; }}
-  .card {{ background: white; border-radius: 12px; padding: 40px;
-           box-shadow: 0 2px 10px rgba(0,0,0,0.1); max-width: 480px;
-           text-align: center; }}
-  .spinner {{ border: 3px solid #eee; border-top: 3px solid #0078d4;
-              border-radius: 50%; width: 32px; height: 32px;
-              animation: spin 1s linear infinite; margin: 16px auto; }}
-  @keyframes spin {{ 0% {{ transform: rotate(0deg); }}
-                     100% {{ transform: rotate(360deg); }} }}
-  .ok {{ color: #2e7d32; font-size: 48px; }}
-  .err {{ color: #c62828; }}
-</style></head>
-<body><div class="card" id="card">
-  <div class="spinner" id="spinner"></div>
-  <p id="msg">Exchanging authorization code for tokens...</p>
-</div>
-<script>
-async function exchange() {{
-  try {{
-    const resp = await fetch("{token_url}", {{
-      method: "POST",
-      headers: {{ "Content-Type": "application/x-www-form-urlencoded" }},
-      body: new URLSearchParams({{
-        grant_type: "authorization_code",
-        code: "{code}",
-        redirect_uri: "{redirect_uri}",
-        client_id: "{client_id}",
-        client_secret: "{client_secret}"
-      }})
-    }});
-    const tokens = await resp.json();
-    if (tokens.access_token) {{
-      // Send tokens to local server
-      await fetch("/save-tokens", {{
-        method: "POST",
-        headers: {{ "Content-Type": "application/json" }},
-        body: JSON.stringify(tokens)
-      }});
-      document.getElementById("spinner").style.display = "none";
-      document.getElementById("msg").innerHTML =
-        '<div class="ok">&#10003;</div>' +
-        '<h2>Authentication successful!</h2>' +
-        '<p>You can close this tab and return to the terminal.</p>';
-    }} else {{
-      throw new Error(tokens.error_description || tokens.error || JSON.stringify(tokens));
-    }}
-  }} catch(e) {{
-    document.getElementById("spinner").style.display = "none";
-    document.getElementById("msg").innerHTML =
-      '<p class="err"><b>Error:</b> ' + e.message + '</p>' +
-      '<p>Check the terminal for details.</p>';
-    // Report error to server
-    await fetch("/save-tokens", {{
-      method: "POST",
-      headers: {{ "Content-Type": "application/json" }},
-      body: JSON.stringify({{ error: e.message }})
-    }});
-  }}
-}}
-exchange();
-</script></body></html>"""
-
-
 class CallbackHandler(BaseHTTPRequestHandler):
     """Handles OAuth callbacks AND registration-hook pings from the Daikin portal."""
 
@@ -532,17 +464,6 @@ def get_valid_access_token(*, force_refresh: bool = False) -> str:
             tokens = refresh_tokens(tokens)
             _last_token_refresh_monotonic = time.monotonic()
         return tokens["access_token"]
-
-
-def prefetch_daikin_access_token() -> None:
-    """Refresh the access token if it is within the configured leeway of expiry.
-
-    Hits only the OIDC token endpoint (not the device API). Safe to call on a
-    timer or at the start of the bulletproof heartbeat.
-    """
-    if not config.DAIKIN_CLIENT_ID or not config.DAIKIN_CLIENT_SECRET:
-        return
-    get_valid_access_token(force_refresh=False)
 
 
 def run_auth_flow_with_code(code: str) -> dict:

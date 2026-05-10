@@ -879,13 +879,3 @@ def send_morning_brief_webhook() -> None:
 def send_night_brief_webhook() -> None:
     notify_night_brief(build_night_payload())
 
-
-# --------------------------------------------------------------------------
-# Backwards-compatible aliases — pre-V12 callers
-# --------------------------------------------------------------------------
-
-# Kept so any external integration still calling the old names doesn't break;
-# new code should use the explicit morning / night helpers.
-
-build_daily_brief_text = build_morning_payload
-send_daily_brief_webhook = send_morning_brief_webhook
