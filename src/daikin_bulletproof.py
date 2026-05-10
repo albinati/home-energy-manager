@@ -161,7 +161,9 @@ def apply_scheduled_daikin_params(
                 logger.debug("Skipping lwt_offset: device reports settable=False (likely fixed setpoint mode — LWT offset is only writable when weatherDependent curve is active)")
             else:
                 try:
-                    client.set_lwt_offset(dev, float(p["lwt_offset"]))
+                    # Onecta leavingWaterOffset.stepValue == 1 → quantise to
+                    # int at the boundary (same reason as tank_temp above).
+                    client.set_lwt_offset(dev, int(round(float(p["lwt_offset"]))))
                 except DaikinError as exc:
                     if "[read_only]" in str(exc):
                         # Non-fatal: caught only when our pre-check above
@@ -189,7 +191,12 @@ def apply_scheduled_daikin_params(
 
         if "tank_temp" in p:
             try:
-                client.set_tank_temperature(dev, float(p["tank_temp"]))
+                # Daikin Onecta domesticHotWaterTemperature.stepValue == 1 on
+                # this Altherma — fractional values are rejected by the cloud
+                # API. Quantise defensively at the boundary so legacy callers
+                # or stale action_schedule rows that stored a float (e.g. 38.0)
+                # still go through cleanly.
+                client.set_tank_temperature(dev, int(round(float(p["tank_temp"]))))
             except DaikinError as exc:
                 if "[read_only]" in str(exc) and tank_turning_on:
                     # Cloud hasn't propagated tank-on yet; heartbeat will retry next tick

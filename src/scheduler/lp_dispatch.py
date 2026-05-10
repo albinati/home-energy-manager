@@ -429,7 +429,10 @@ def daikin_dispatch_preview(
             except (KeyError, TypeError, ValueError):
                 _overnight_target = float(getattr(config, "DHW_TANK_OVERNIGHT_TARGET_C", 38.0))
             params["tank_power"] = True
-            params["tank_temp"] = round(_overnight_target, 1)
+            # Daikin Onecta tank_temp setpoint is integer (stepValue=1 per
+            # device introspection 2026-05-10). Quantise here so a fractional
+            # runtime override (e.g. 37.5) doesn't become a 400 from the cloud.
+            params["tank_temp"] = int(round(_overnight_target))
         elif is_shutdown:
             peak_strategy = (getattr(config, "DHW_PEAK_TANK_STRATEGY", "idle") or "idle").strip().lower()
             if peak_strategy == "shutdown":
@@ -444,10 +447,10 @@ def daikin_dispatch_preview(
                 # validated approach for well-insulated tanks: don't shut off,
                 # just lower the target back to "normal" and let physics work.
                 params["tank_power"] = True
-                params["tank_temp"] = round(
-                    float(getattr(config, "DHW_TEMP_NORMAL_C", 45.0)),
-                    1,
-                )
+                # Onecta stepValue=1 (see overnight comment above).
+                params["tank_temp"] = int(round(
+                    float(getattr(config, "DHW_TEMP_NORMAL_C", 45.0))
+                ))
         elif tank_pow:
             params["tank_power"] = True
             # Floor at DHW_TEMP_COMFORT_C (48 °C). Ceiling depends on slot kind:
@@ -466,10 +469,10 @@ def daikin_dispatch_preview(
                 ceiling = float(config.DHW_TEMP_PV_ABUNDANCE_TARGET_C)
             else:
                 ceiling = float(config.DHW_TEMP_MAX_C)
-            params["tank_temp"] = round(
-                min(ceiling, max(float(config.DHW_TEMP_COMFORT_C), tt)),
-                1,
-            )
+            # Onecta stepValue=1 (see overnight comment above).
+            params["tank_temp"] = int(round(
+                min(ceiling, max(float(config.DHW_TEMP_COMFORT_C), tt))
+            ))
         # else: no LP-planned heat in this window AND not a shutdown.
         # Don't touch the tank — omit tank_power + tank_temp from params.
         # The action's other params (lwt_offset, climate_on, tank_powerful=False)
@@ -486,9 +489,10 @@ def daikin_dispatch_preview(
         ).isoformat().replace("+00:00", "Z")
         # Restore params: tank-only (per user 2026-05-09 — climate hands-off).
         # No climate_on, no lwt_offset; firmware autonomously manages climate.
+        # Onecta tank_temp stepValue=1 → quantise to int.
         restore_params = {
             "tank_powerful": False,
-            "tank_temp": float(config.DHW_TEMP_NORMAL_C),
+            "tank_temp": int(round(float(config.DHW_TEMP_NORMAL_C))),
             "tank_power": True,
         }
         restore_row = {

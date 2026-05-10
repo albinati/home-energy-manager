@@ -175,3 +175,58 @@ def test_parse_device_tank_fields_none_when_absent() -> None:
     assert dev is not None
     assert dev.tank_on is None
     assert dev.tank_powerful is None
+
+
+# ---------------------------------------------------------------------------
+# Onecta integer setpoint quantization (Daikin Altherma stepValue == 1)
+# ---------------------------------------------------------------------------
+
+def test_apply_quantizes_fractional_tank_temp_to_int(
+    operational: None,
+    no_settle: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Daikin Onecta domesticHotWaterTemperature.stepValue=1; fractional values
+    are rejected by the cloud. Boundary defensive: bulletproof must round
+    floats (legacy 38.0, runtime override 37.5) to int before set_tank_temperature."""
+    monkeypatch.setattr("src.daikin_bulletproof.db.log_action", MagicMock())
+    dev = DaikinDevice(
+        id="gw", name="x", is_on=True, tank_on=True, tank_target=45.0,
+    )
+    client = MagicMock()
+    apply_scheduled_daikin_params(
+        dev, client,
+        {"tank_temp": 37.5, "tank_power": True, "tank_powerful": False},
+        trigger="test",
+        skip_if_matches=False,
+    )
+    # The float 37.5 must reach the API as int 38 (round-half-to-even ⇒ 38).
+    client.set_tank_temperature.assert_called_once()
+    call_args = client.set_tank_temperature.call_args
+    sent_temp = call_args.args[1] if len(call_args.args) > 1 else call_args.kwargs.get("temperature")
+    assert isinstance(sent_temp, int), f"expected int, got {type(sent_temp).__name__}: {sent_temp!r}"
+    assert sent_temp == 38
+
+
+def test_apply_quantizes_fractional_lwt_offset_to_int(
+    operational: None,
+    no_settle: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same as tank_temp: leavingWaterOffset.stepValue=1 → quantise."""
+    monkeypatch.setattr("src.daikin_bulletproof.db.log_action", MagicMock())
+    dev = DaikinDevice(id="gw", name="x", is_on=True, lwt_offset=0.0)
+    dev.lwt_offset_range = SetpointRange(settable=True)
+    client = MagicMock()
+    apply_scheduled_daikin_params(
+        dev, client,
+        {"lwt_offset": -2.7, "climate_on": True, "tank_power": True, "tank_temp": 45.0},
+        trigger="test",
+        skip_if_matches=False,
+    )
+    # -2.7 → round to -3
+    client.set_lwt_offset.assert_called_once()
+    call_args = client.set_lwt_offset.call_args
+    sent_off = call_args.args[1] if len(call_args.args) > 1 else call_args.kwargs.get("offset")
+    assert isinstance(sent_off, int), f"expected int, got {type(sent_off).__name__}: {sent_off!r}"
+    assert sent_off == -3
