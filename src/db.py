@@ -522,6 +522,13 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     )
 
     # V9: daikin_telemetry — physics-estimator seed + live-fetch audit trail (#55)
+    # NOTE: fetched_at is REAL Unix epoch seconds (intentional asymmetry vs the
+    # rest of the schema, which uses ISO strings). Productive consumers
+    # (estimator.seed_age, service.py rate calcs) need sub-second math; parsing
+    # ISO strings on every call would be ~100× slower with no behaviour gain.
+    # For human / ad-hoc queries that expect ISO, use the read-only view
+    # ``daikin_telemetry_iso`` (defined later in _migrate_schema). Don't write
+    # `WHERE fetched_at LIKE 'YYYY-MM-DD%'` — it silently returns 0 rows.
     conn.execute(
         """CREATE TABLE IF NOT EXISTS daikin_telemetry (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -978,6 +985,23 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             bias_kwh REAL,
             computed_at TEXT NOT NULL
         )"""
+    )
+    # Read-only view that exposes daikin_telemetry.fetched_at as ISO 8601
+    # alongside the raw float-epoch column. Productive code paths (estimator,
+    # service.py rate calcs) consume the float directly for sub-second math —
+    # changing the underlying column would force every consumer to parse
+    # strings, ~100× slower with no behaviour gain. The view is for human
+    # exploration / ad-hoc audit queries that expect ISO-shaped timestamps,
+    # so they don't silently get 0 rows from `WHERE fetched_at LIKE '%'`.
+    conn.execute("DROP VIEW IF EXISTS daikin_telemetry_iso")
+    conn.execute(
+        """CREATE VIEW daikin_telemetry_iso AS
+           SELECT
+               strftime('%Y-%m-%dT%H:%M:%fZ', fetched_at, 'unixepoch') AS fetched_at_iso,
+               fetched_at AS fetched_at_epoch,
+               source, tank_temp_c, indoor_temp_c, outdoor_temp_c,
+               tank_target_c, lwt_actual_c, mode, weather_regulation
+           FROM daikin_telemetry"""
     )
 
 

@@ -195,3 +195,53 @@ def test_prune_history_tables_tolerates_one_bad_policy(monkeypatch):
     assert results["meteo_forecast_snapshot"] >= 0  # normal completion
     assert results["meteo_forecast_value"] >= 0  # normal completion
     assert results["meteo_forecast_history"] >= 0  # normal completion
+
+
+# ---------------------------------------------------------------------------
+# daikin_telemetry_iso view — human-friendly ISO read of the float-epoch column
+# ---------------------------------------------------------------------------
+
+def test_daikin_telemetry_iso_view_exposes_iso_alongside_epoch() -> None:
+    """The view returns both the original epoch and an ISO 8601 representation,
+    so ad-hoc queries (`WHERE fetched_at_iso LIKE 2026-05-10%`) work without
+    triggering the silent-zero-rows foot-gun on the underlying float column."""
+    epoch = 1_715_270_400.0  # 2024-05-09T16:00:00Z (round-trip-friendly)
+    _seed_daikin_telemetry([(epoch, "live")])
+    conn = db.get_connection()
+    try:
+        cur = conn.execute(
+            "SELECT fetched_at_iso, fetched_at_epoch, source, tank_temp_c "
+            "FROM daikin_telemetry_iso"
+        )
+        rows = cur.fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == 1
+    iso, epoch_back, source, tank = rows[0]
+    assert iso.startswith("2024-05-09T16:00:00")
+    assert iso.endswith("Z")
+    assert abs(float(epoch_back) - epoch) < 0.001
+    assert source == "live"
+    assert tank == 46.0
+
+
+def test_daikin_telemetry_iso_view_supports_iso_like_filter() -> None:
+    """LIKE on the ISO column must return matching rows (the original
+    foot-gun was the audit running LIKE on the float-epoch column and
+    silently getting 0 rows back)."""
+    # Two rows on different days
+    _seed_daikin_telemetry([
+        (1_715_184_000.0, "live"),  # 2024-05-08T16:00:00Z
+        (1_715_270_400.0, "live"),  # 2024-05-09T16:00:00Z
+    ])
+    conn = db.get_connection()
+    try:
+        cur = conn.execute(
+            "SELECT COUNT(*) FROM daikin_telemetry_iso WHERE fetched_at_iso LIKE ?",
+            ("2024-05-09%",),
+        )
+        n = int(cur.fetchone()[0])
+    finally:
+        conn.close()
+    assert n == 1
+
