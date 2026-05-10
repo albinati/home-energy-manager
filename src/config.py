@@ -819,9 +819,21 @@ class Config:
     # (mean difference between Daikin outdoor sensor and Open-Meteo forecast).
     DAIKIN_MICRO_CLIMATE_LOOKBACK: int = int(os.getenv("DAIKIN_MICRO_CLIMATE_LOOKBACK", "96"))
     DHW_TANK_UA_W_PER_K: float = float(os.getenv("DHW_TANK_UA_W_PER_K", "2.5"))
+    # Daikin Altherma 3 R EDLA11DA3 (11 kW R-32 split, low-temp).
+    # Values from manufacturer datasheet at W35 LWT (the operating range
+    # the user's weather curve produces — DAIKIN_WEATHER_CURVE_HIGH_LWT_C=22°C
+    # at A18°C, DAIKIN_WEATHER_CURVE_LOW_LWT_C=45°C at A-5°C).
+    # Source datasheet rows (A-T/W35):
+    #   A-7°C → COP 2.55,  A2°C → COP 3.54,  A7°C → COP 4.62,
+    #   A12°C → COP 4.98,  A20°C extrapolated → ~5.65
+    # Conservative ~5% derate applied to absorb real-world degradation +
+    # occasional DHW LWT lift (DHW penalty already covers W55 separately
+    # via ``COP_DHW_PENALTY``).
+    # Issue #312: prior placeholder curve was ~30% pessimistic at warm
+    # temps, biasing the LP toward over-provisioning electrical heating.
     DAIKIN_COP_CURVE_STR: str = os.getenv(
         "DAIKIN_COP_CURVE",
-        "-7:1.8,2:2.6,7:3.1,12:3.6,20:4.2",
+        "-7:2.4,2:3.4,7:4.3,12:4.7,20:5.2",
     )
     LP_OCCUPIED_MORNING_START: str = (os.getenv("LP_OCCUPIED_MORNING_START") or "06:30").strip()
     LP_OCCUPIED_MORNING_END: str = (os.getenv("LP_OCCUPIED_MORNING_END") or "08:30").strip()

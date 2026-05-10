@@ -152,14 +152,23 @@ def _solve_minimal(passive: bool):
 
 
 def test_lp_clamps_daikin_in_passive(passive_mode) -> None:
+    from src.config import config, cop_at_temperature
     from src.physics import predict_passive_daikin_load
 
     plan = _solve_minimal(passive=True)
     assert plan.ok and plan.status == "Optimal"
 
     n = len(plan.dhw_electric_kwh)
+    # Derive the same per-slot CoP the LP uses internally — the
+    # WeatherLpSeries.cop_* values get overridden by the LP from the
+    # configured DAIKIN_COP_CURVE (with COP_DHW_PENALTY applied to DHW),
+    # so the predict_passive_daikin_load call here must use the same
+    # source-of-truth values to produce comparable expected outputs.
+    base_cop = max(1.0, cop_at_temperature(config.DAIKIN_COP_CURVE, 5.0))
+    cop_space_curve = [base_cop] * n
+    cop_dhw_curve = [max(1.0, base_cop - float(config.COP_DHW_PENALTY))] * n
     exp_space, exp_dhw = predict_passive_daikin_load(
-        [5.0] * n, [2.5] * n, [3.0] * n, slot_h=0.5,
+        [5.0] * n, cop_dhw_curve, cop_space_curve, slot_h=0.5,
         max_kwh_per_slot=2.0 * 0.5,  # config.DAIKIN_MAX_HP_KW * slot_h
     )
     for i in range(n):
