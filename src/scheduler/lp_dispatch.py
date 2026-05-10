@@ -713,14 +713,29 @@ def write_daikin_from_lp_plan(
         # FYI — it doesn't require operator action because the guard
         # already handled the situation by dropping low-value actions.
         # Log to journalctl + action_log only; do NOT push to Telegram.
-        # Operators who care can grep ``journalctl -u hem | grep
-        # 'budget guard'`` or query api_call_log for the underlying quota
-        # state.
+        # The morning brief queries action_log for these rows so the user
+        # can see "Daikin quota: dropped N pair(s) today" without manually
+        # grepping journalctl.
         logger.info(
             "Daikin write-budget guard: dropped %d low-value action(s) "
             "(headroom=%d). Dropped: %s",
             len(dropped), headroom, ",".join(dropped),
         )
+        try:
+            db.log_action(
+                device="daikin",
+                action="budget_guard_drop",
+                params={
+                    "dropped": dropped,
+                    "headroom": headroom,
+                    "reserve": reserve,
+                    "n_dropped": len(dropped),
+                },
+                result="dropped",
+                trigger="lp_dispatch",
+            )
+        except Exception as _e:
+            logger.warning("budget_guard_drop log_action failed (non-fatal): %s", _e)
     count = 0
     for restore_row, action_row in pairs:
         # Restore may be None when the next action immediately supersedes it
