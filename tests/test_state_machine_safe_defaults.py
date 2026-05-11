@@ -79,6 +79,49 @@ def test_set_min_soc_clamps_to_valid_range(
     assert fox.set_min_soc_calls == [0]
 
 
+def test_daikin_safe_defaults_omits_climate_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """apply_safe_defaults must be tank-only (no lwt_offset, no climate_on).
+
+    Per the 2026-05-09 "hands-off climate" policy, HEM never writes climate
+    fields — only tank. The safe-default path used to inject lwt_offset=0.0
+    and climate_on=True, which then got persisted to action_schedule rows and
+    contributed to the 2026-05-11 incident where a 3-h shutdown row left
+    lwt_offset=-5 sabotaging the heat-pump's ability to reheat the tank.
+    """
+    captured: dict[str, dict] = {}
+
+    class _RecordingDaikinClient:
+        def get_devices(self):
+            return [object()]
+
+    def _fake_apply(dev, client, params, *, trigger, skip_if_matches):
+        captured["params"] = dict(params)
+
+    monkeypatch.setattr("src.config.config.MIN_SOC_RESERVE_PERCENT", 15.0)
+    monkeypatch.setattr(
+        "src.state_machine.apply_scheduled_daikin_params", _fake_apply
+    )
+    fox = _RecordingFox()
+    daikin = _RecordingDaikinClient()
+    with tempfile.TemporaryDirectory() as td:
+        _setup_db(monkeypatch, td)
+        apply_safe_defaults(fox, daikin=daikin, trigger="test")
+
+    assert "params" in captured, "apply_scheduled_daikin_params was not called"
+    p = captured["params"]
+    assert "lwt_offset" not in p, (
+        f"safe-defaults must not write lwt_offset (hands-off climate); got {p!r}"
+    )
+    assert "climate_on" not in p, (
+        f"safe-defaults must not write climate_on (hands-off climate); got {p!r}"
+    )
+    # Sanity: tank fields still present.
+    assert p.get("tank_power") is True
+    assert "tank_temp" in p
+
+
 def test_partial_failure_isolates_step_in_action_log(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

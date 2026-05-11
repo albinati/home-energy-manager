@@ -235,8 +235,6 @@ def apply_comfort_restore(
 ) -> None:
     """Neutral LWT + normal tank targets during peak comfort override."""
     params = {
-        "lwt_offset": 0.0,
-        "climate_on": True,
         "tank_power": True,
         "tank_powerful": False,
         "tank_temp": float(config.DHW_TEMP_NORMAL_C),

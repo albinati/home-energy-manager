@@ -153,11 +153,9 @@ def apply_safe_defaults(
             dev,
             daikin,
             {
-                "lwt_offset": 0.0,
                 "tank_powerful": False,
                 "tank_temp": float(config.DHW_TEMP_NORMAL_C),
                 "tank_power": True,
-                "climate_on": True,
             },
             trigger=trigger,
             skip_if_matches=False,
@@ -249,14 +247,14 @@ def _reconcile_daikin_actions(
 
         if status in ("pending", "active") and start <= now_utc < end:
             apply_params = dict(params)
-            if (
-                atype == "shutdown"
-                and outdoor_c is not None
-                and outdoor_c < float(config.WEATHER_FROST_THRESHOLD_C)
-            ):
-                lo = float(apply_params.get("lwt_offset", 0.0))
-                if lo < -2.0:
-                    apply_params["lwt_offset"] = -2.0
+            # Hands-off climate (PR #300, 2026-05-09): strip climate-side
+            # fields from any params reaching Daikin, including legacy
+            # action_schedule rows persisted before #300 landed (which the
+            # 2026-05-11 incident showed could still carry lwt_offset=-5,
+            # sabotaging the heat-pump's ability to reheat the tank). The
+            # LP only drives tank state — Daikin firmware owns the curve.
+            apply_params.pop("lwt_offset", None)
+            apply_params.pop("climate_on", None)
 
             # Phase 4.3 — check for user override before re-applying.
             # Phase 4 review C6: only run override detection after we've had at
