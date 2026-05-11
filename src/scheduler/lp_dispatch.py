@@ -490,20 +490,9 @@ def daikin_dispatch_preview(
         # Restore params: tank-only (per user 2026-05-09 — climate hands-off).
         # No climate_on, no lwt_offset; firmware autonomously manages climate.
         # Onecta tank_temp stepValue=1 → quantise to int.
-        # After a shutdown window the tank has been decaying for hours, so the
-        # restore aims a few °C above NORMAL_C to absorb the decay quickly
-        # (DHW_POST_PEAK_RESTORE_TARGET_C, default 47). All other action types
-        # restore to plain NORMAL_C (45).
-        if action_type == "shutdown":
-            _restore_target = float(
-                getattr(config, "DHW_POST_PEAK_RESTORE_TARGET_C",
-                        float(config.DHW_TEMP_NORMAL_C))
-            )
-        else:
-            _restore_target = float(config.DHW_TEMP_NORMAL_C)
         restore_params = {
             "tank_powerful": False,
-            "tank_temp": int(round(_restore_target)),
+            "tank_temp": int(round(float(config.DHW_TEMP_NORMAL_C))),
             "tank_power": True,
         }
         restore_row = {

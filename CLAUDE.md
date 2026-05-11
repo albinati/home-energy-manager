@@ -209,13 +209,11 @@ DHW_PEAK_TANK_STRATEGY=shutdown                 # `shutdown` cuts tank power dur
                                                  # 14-day data); `idle` keeps tank ON at 45 °C floor (legacy default).
                                                  # Validated 2026-05-11: 3 h shutdown drops tank ~6 °C (median decay
                                                  # -1.97 °C/h), still ≥ 44 °C for evening showers.
-DHW_TANK_PRE_PEAK_FLOOR_C=50.0                  # LP must charge tank ≥ this value BEFORE the first peak slot of a
-                                                 # peak window. Sized so 3 h shutdown decay (~6 °C median) leaves
-                                                 # tank ≥ NORMAL (45 °C) for the post-peak restore.
-DHW_POST_PEAK_RESTORE_TARGET_C=47.0             # tank_temp target of the restore action immediately after a
-                                                 # shutdown window. Slightly above NORMAL so the post-peak reheat
-                                                 # captures the standing-loss decay quickly. Heat pump takes
-                                                 # ~25 min to climb 6 °C in DHW mode.
+                                                 # IMPORTANT: tank pre-charge above 45 °C only happens when there's
+                                                 # an economic reason — `negative` (paid to import → 65 °C max),
+                                                 # `solar_charge` (free PV → 55 °C), `cheap` (modest → 48 °C). Peak
+                                                 # avoidance does NOT trigger pre-charging — see issue #322 for
+                                                 # conditional shutdown commit based on tank state at peak entry.
 
 # --- Scenario LP for peak-export robustness (see docs/DISPATCH_DECISIONS.md) ---
 LP_SCENARIO_OPTIMISTIC_TEMP_DELTA_C=1.0          # +°C applied to outdoor forecast

@@ -610,22 +610,6 @@ class Config:
     #     overhead. Pick this for poorly-insulated tanks where firmware
     #     would attempt mid-peak reheats from standing losses alone.
     DHW_PEAK_TANK_STRATEGY: str = os.getenv("DHW_PEAK_TANK_STRATEGY", "idle").strip().lower()
-    # Tank temperature floor enforced immediately BEFORE the first peak slot of
-    # a peak window. The LP must charge to at least this value so that 3 h of
-    # standing-loss decay (~6 °C median, ~8 °C worst-case per 14-day telemetry)
-    # still leaves the tank ≥ DHW_TEMP_NORMAL_C (45 °C) when the post-peak
-    # restore reactivates heating. Empirical floor: 50 °C. Tighten if you
-    # observe cold-water at start of evening showers; loosen for warmer tanks.
-    DHW_TANK_PRE_PEAK_FLOOR_C: float = float(
-        os.getenv("DHW_TANK_PRE_PEAK_FLOOR_C", "50.0")
-    )
-    # Tank temperature target for the restore action immediately AFTER a
-    # shutdown window. Slightly above DHW_TEMP_NORMAL_C so the reheat captures
-    # the standing-loss decay quickly (typically a 6–8 °C climb the heat pump
-    # finishes in ~25 min). Set equal to NORMAL_C to keep legacy behaviour.
-    DHW_POST_PEAK_RESTORE_TARGET_C: float = float(
-        os.getenv("DHW_POST_PEAK_RESTORE_TARGET_C", "47.0")
-    )
     # Post-shower overnight tank idle (LP-driven). After the LAST shower window
     # of the day, the LP has no DHW need until next-day's PV abundance — the
     # tank is set to a low BACKUP target so firmware doesn't reheat overnight,
