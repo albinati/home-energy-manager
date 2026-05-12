@@ -714,6 +714,13 @@ def test_dispatch_solar_preheat_picks_max_dhw_across_merged_window(
 
     monkeypatch.setattr(app_config, "DAIKIN_CONTROL_MODE", "active", raising=False)
     monkeypatch.setattr(app_config, "DAIKIN_MIN_WINDOW_SLOTS", 1, raising=False)
+    # Pin the PV-abundance ceiling at 55 °C for this test's invariant. Default
+    # was lowered to 45 °C in #325 (runtime-tunable per household occupancy);
+    # this test still asserts the OLD invariant ("dispatch emits the LP's
+    # mid-window peak target across the merged window"), which only triggers
+    # when the ceiling exceeds the peak (47.9). Households can still bump the
+    # ceiling at runtime via runtime_settings if they want this behaviour.
+    monkeypatch.setattr(app_config, "DHW_TEMP_PV_ABUNDANCE_TARGET_C", 55.0, raising=False)
     monkeypatch.setattr(
         "src.scheduler.lp_dispatch._optimization_preset_away_like",
         lambda: False,
