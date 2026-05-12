@@ -455,7 +455,8 @@ def daikin_dispatch_preview(
             params["tank_power"] = True
             # Floor at DHW_TEMP_COMFORT_C (48 °C). Ceiling depends on slot kind:
             #   negative      → DHW_TEMP_MAX_C (65 °C). Grid pays us; load all the kWh.
-            #   solar_charge  → DHW_TEMP_PV_ABUNDANCE_TARGET_C (55 °C). PV is free
+            #   solar_charge  → DHW_TEMP_PV_ABUNDANCE_TARGET_C (45 °C default,
+            #                   runtime-tunable per household occupancy). PV is free
             #                   but holding 65 °C through afternoon bleeds standing
             #                   losses before evening showers. Cap at 55 °C captures
             #                   with margin without that bleed-back. Hard clamp
