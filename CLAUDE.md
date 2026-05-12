@@ -211,9 +211,27 @@ DHW_PEAK_TANK_STRATEGY=shutdown                 # `shutdown` cuts tank power dur
                                                  # -1.97 °C/h), still ≥ 44 °C for evening showers.
                                                  # IMPORTANT: tank pre-charge above 45 °C only happens when there's
                                                  # an economic reason — `negative` (paid to import → 65 °C max),
-                                                 # `solar_charge` (free PV → 55 °C), `cheap` (modest → 48 °C). Peak
-                                                 # avoidance does NOT trigger pre-charging — see issue #322 for
-                                                 # conditional shutdown commit based on tank state at peak entry.
+                                                 # `solar_charge` (free PV → DHW_TEMP_PV_ABUNDANCE_TARGET_C, default
+                                                 # 45 → runtime-tunable per household occupancy), `cheap` (modest
+                                                 # → 48 °C). Peak avoidance does NOT trigger pre-charging — see
+                                                 # issue #322 for conditional shutdown commit.
+DHW_TEMP_PV_ABUNDANCE_TARGET_C=45               # tank target during solar_charge / solar_preheat slots. Runtime-
+                                                 # tunable via runtime_settings (PUT /api/v1/settings or MCP
+                                                 # `set_setting`). Raise per household: single ~42, family of 4
+                                                 # ~50, larger ~55. Default lowered from 55 → 45 (#325, 2026-05-12)
+                                                 # after Daikin telemetry showed overnight DHW reheat = 0 even at 45.
+
+# --- Forecast night bias (issue #324, minimal) ---
+FORECAST_NIGHT_TEMP_BIAS_C=-3.0                 # subtract this from Open Meteo's `temperature_c` when the LP
+                                                 # reads forecast slots inside the configured night window. The
+                                                 # ~10 km grid Open Meteo runs on tends to under-estimate how cold
+                                                 # the W4 1DZ microclimate gets overnight (observed 2026-05-12:
+                                                 # forecast 8 °C vs Daikin sensor 5 °C). Daikin's weather curve
+                                                 # still reacts to its OWN sensor — this is a planning-side
+                                                 # correction so the LP budgets heat-pump electric demand
+                                                 # realistically. Zero = disable.
+FORECAST_NIGHT_START_HOUR_UTC=21                # bias active from (inclusive)
+FORECAST_NIGHT_END_HOUR_UTC=6                   # bias active until (exclusive); wraps midnight when start > end
 
 # --- Scenario LP for peak-export robustness (see docs/DISPATCH_DECISIONS.md) ---
 LP_SCENARIO_OPTIMISTIC_TEMP_DELTA_C=1.0          # +°C applied to outdoor forecast

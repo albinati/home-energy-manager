@@ -1675,9 +1675,28 @@ def forecast_to_lp_inputs(
     # (falls back to capacity × η × 0.5 kWh/slot if no history available)
     hourly_ceil = _build_pv_hourly_ceiling()
 
+    # #324: night-temperature bias. Open Meteo under-estimates how cold the
+    # local microclimate gets overnight; without this correction the LP plans
+    # too-warm scenarios and the battery depletes faster than budgeted
+    # (observed 2026-05-12: pred 8 °C vs sensor 5 °C overnight). The bias is
+    # applied ONLY when the LP reads the forecast — the actual heat pump
+    # weather curve reacts to its own sensor, so this is a planning-side
+    # correction with no comfort impact. Set bias=0 to disable.
+    _night_bias = float(getattr(config, "FORECAST_NIGHT_TEMP_BIAS_C", 0.0))
+    _night_start = int(getattr(config, "FORECAST_NIGHT_START_HOUR_UTC", 21))
+    _night_end = int(getattr(config, "FORECAST_NIGHT_END_HOUR_UTC", 6))
+    _night_wraps_midnight = _night_start > _night_end
+
+    def _is_night_hour(h: int) -> bool:
+        if _night_wraps_midnight:
+            return h >= _night_start or h < _night_end
+        return _night_start <= h < _night_end
+
     for i in range(n):
         st = slot_starts_utc[i]
         temp_c = _interp_hourly_scalar(forecast, st, "temperature_c", 10.0)
+        if _night_bias != 0.0 and _is_night_hour(st.hour):
+            temp_c += _night_bias
         rad_wm2 = _interp_hourly_scalar(forecast, st, "shortwave_radiation_wm2", 0.0)
         cloud_pct = _interp_hourly_scalar(forecast, st, "cloud_cover_pct", 50.0)
         nearest = get_forecast_for_slot(st, forecast)

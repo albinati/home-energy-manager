@@ -352,6 +352,29 @@ SCHEMA: dict[str, SettingSpec] = {
             "legionella thermal-shock cycle handles pasteurisation)."
         ),
     ),
+    # PV abundance target — applied during ``solar_charge`` slots when free
+    # PV would otherwise be exported. Runtime-tunable per household occupancy:
+    # a 4-person household with evening shower load benefits from 50 °C; a
+    # solo dweller might drop to 42 to minimise standing loss. Default 45
+    # matches DHW_TEMP_NORMAL_C — assume "no extra °C unless household demands
+    # it". Bumped from a previous env-only default of 55, since 14-day Daikin
+    # consumption telemetry showed overnight DHW reheat = 0 even when tank
+    # exited PV-abundance windows at 45-48 °C.
+    "DHW_TEMP_PV_ABUNDANCE_TARGET_C": SettingSpec(
+        key="DHW_TEMP_PV_ABUNDANCE_TARGET_C",
+        type_name="float",
+        env_default=_float_env("DHW_TEMP_PV_ABUNDANCE_TARGET_C", "45"),
+        min_value=40.0,
+        max_value=60.0,
+        description=(
+            "Daikin tank target (°C) during solar_charge / solar_preheat "
+            "slots — PV-abundance window where free PV otherwise exports. "
+            "Default 45 (= DHW_TEMP_NORMAL_C). Raise per household size: "
+            "single/couple ~42, family of 4 ~48-50, larger ~55. Capped at "
+            "60 to keep the tank well below the legionella thermal-shock "
+            "ceiling and protect long-term tank life."
+        ),
+    ),
 }
 
 

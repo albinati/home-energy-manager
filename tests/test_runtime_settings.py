@@ -94,6 +94,20 @@ def test_config_property_reads_runtime_value():
     assert config.DHW_TEMP_COMFORT_C == 52.5
 
 
+def test_dhw_temp_pv_abundance_target_runtime_tunable():
+    """#325: solar_preheat target tunes per household occupancy at runtime."""
+    # Default = 45 (matches DHW_TEMP_NORMAL_C — no extra °C unless household needs it)
+    assert config.DHW_TEMP_PV_ABUNDANCE_TARGET_C == 45.0
+    # Bump for a family of 4 with evening showers
+    rts.set_setting("DHW_TEMP_PV_ABUNDANCE_TARGET_C", 50.0)
+    assert config.DHW_TEMP_PV_ABUNDANCE_TARGET_C == 50.0
+    # Range guards (40..60)
+    with pytest.raises(rts.SettingValidationError):
+        rts.set_setting("DHW_TEMP_PV_ABUNDANCE_TARGET_C", 35.0)
+    with pytest.raises(rts.SettingValidationError):
+        rts.set_setting("DHW_TEMP_PV_ABUNDANCE_TARGET_C", 65.0)
+
+
 def test_config_enum_property_round_trip():
     rts.set_setting("OPTIMIZATION_PRESET", "guests")
     assert config.OPTIMIZATION_PRESET == "guests"

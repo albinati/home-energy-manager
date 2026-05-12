@@ -597,9 +597,9 @@ class Config:
     # default 55 °C gives margin for guests + minor forecast error while
     # avoiding the heavy standing losses of holding 65 °C through the day.
     # Lower this toward 45 °C if standing-loss bleed-back becomes a concern.
-    DHW_TEMP_PV_ABUNDANCE_TARGET_C: float = float(
-        os.getenv("DHW_TEMP_PV_ABUNDANCE_TARGET_C", "55.0")
-    )
+    # DHW_TEMP_PV_ABUNDANCE_TARGET_C is now runtime-tunable via runtime_settings
+    # (see @property below). Default lowered from 55 → 45 (= DHW_TEMP_NORMAL_C);
+    # override per household occupancy at runtime without restart.
     # Strategy for tank during peak / peak_export windows (climate is always
     # off during peak — this is just about the tank):
     #   "idle" (default) — tank_power=True, target=DHW_TEMP_MIN_FLOOR_C (30°C).
@@ -621,6 +621,23 @@ class Config:
     #   45 °C effectively disables the override.
     DHW_TANK_OVERNIGHT_TARGET_C: float = float(
         os.getenv("DHW_TANK_OVERNIGHT_TARGET_C", "38.0")
+    )
+    # Forecast night-temperature bias (minimal #324 implementation).
+    # Open Meteo's grid coverage (~10 km) over-estimates the W4 1DZ
+    # microclimate's overnight outdoor temperature by ~3 °C in the household's
+    # forecast_skill_log (2026-05-12: pred 8.1 °C / actual 5.0 °C at 23 UTC).
+    # The bias is applied when the LP reads the forecast for slots inside the
+    # configured night window — the Daikin sensor still drives the actual
+    # weather curve, so this only corrects the LP's planning side, no
+    # comfort impact. Set the bias to 0.0 to disable.
+    FORECAST_NIGHT_TEMP_BIAS_C: float = float(
+        os.getenv("FORECAST_NIGHT_TEMP_BIAS_C", "-3.0")
+    )
+    FORECAST_NIGHT_START_HOUR_UTC: int = int(
+        os.getenv("FORECAST_NIGHT_START_HOUR_UTC", "21")
+    )
+    FORECAST_NIGHT_END_HOUR_UTC: int = int(
+        os.getenv("FORECAST_NIGHT_END_HOUR_UTC", "6")
     )
     # Toggle the post-shower overnight override. Default true. Set to false
     # to let overnight slots fall back to plain "standard" (no Daikin write,
@@ -989,6 +1006,14 @@ class Config:
     @DHW_TEMP_NORMAL_C.setter
     def DHW_TEMP_NORMAL_C(self, value: float) -> None:
         self._rt_set("DHW_TEMP_NORMAL_C", float(value))
+
+    @property
+    def DHW_TEMP_PV_ABUNDANCE_TARGET_C(self) -> float:
+        return float(self._rt_get("DHW_TEMP_PV_ABUNDANCE_TARGET_C"))
+
+    @DHW_TEMP_PV_ABUNDANCE_TARGET_C.setter
+    def DHW_TEMP_PV_ABUNDANCE_TARGET_C(self, value: float) -> None:
+        self._rt_set("DHW_TEMP_PV_ABUNDANCE_TARGET_C", float(value))
 
     @property
     def INDOOR_SETPOINT_C(self) -> float:
