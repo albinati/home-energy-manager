@@ -60,8 +60,11 @@ def build_morning_payload() -> str:
     # Peak-export commitments from the latest LP run with peak_export slots.
     pe_summary = _peak_export_commitments_for_today(today, tz)
 
+    # No "## Morning brief" headline here — the notifier prepends "🌅 Morning
+    # brief" (Telegram) and the action_log/journalctl entries already carry the
+    # ``[morning_report]`` alert-type tag. Duplicating the title produced a
+    # stacked header on Telegram (#330).
     lines: list[str] = [
-        "## ☀️ Morning brief",
         f"**Today ({today})**",
         strategy,
         "",
@@ -132,8 +135,10 @@ def build_night_payload() -> str:
 
     pe_today = _peak_export_outcomes_for_today(today, tz)
 
+    # No "## Night brief" headline — same reason as the morning brief above
+    # (#330): the notifier prepends "🌙 Night brief" on the Telegram path and
+    # the alert-type tag is on the action_log entry already.
     lines: list[str] = [
-        "## 🌙 Night brief",
         f"**Today ({today})** — actuals",
         "",
         _mode_status_line(),

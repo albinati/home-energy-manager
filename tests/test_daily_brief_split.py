@@ -19,12 +19,20 @@ def _isolated_db(monkeypatch, tmp_path):
 
 def test_morning_payload_renders_without_target_row():
     """Cold-start day with no daily_targets row should still produce a payload
-    (the fallback string path) instead of raising."""
+    (the fallback string path) instead of raising.
+
+    Post-#330 the body no longer carries its own "## ☀️ Morning brief" title
+    line — the notifier prepends the headline on the Telegram path. The body
+    starts at ``**Today (...)**`` straight away.
+    """
     from src.analytics.daily_brief import build_morning_payload
 
     body = build_morning_payload()
-    assert "Morning brief" in body
     assert "Today" in body
+    assert "Mode:" in body
+    # Body MUST NOT carry the old "## Morning brief" header — that was the
+    # source of the stacked-title bug on Telegram.
+    assert "Morning brief" not in body
 
 
 def test_night_payload_renders_with_zero_data():
@@ -32,8 +40,9 @@ def test_night_payload_renders_with_zero_data():
     from src.analytics.daily_brief import build_night_payload
 
     body = build_night_payload()
-    assert "Night brief" in body
     assert "actuals" in body
+    # Body must not contain the old "## Night brief" header (#330).
+    assert "Night brief" not in body
     # The brief now uses the structured "Net cost" line (was "Realised cost") —
     # see the daily-brief expansion for #207's follow-up. Either is acceptable.
     assert "Net cost:" in body

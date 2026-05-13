@@ -101,6 +101,34 @@ class TestMarkdownToHtml:
         assert "<i>" not in out
         assert "action_log_duration" in out
 
+    def test_atx_header_h2_becomes_bold(self):
+        """``## Title`` would render literally on Telegram HTML — convert to <b>."""
+        from src.telegram_transport import markdown_to_html
+        out = markdown_to_html("## ☀️ Morning brief")
+        assert out == "<b>☀️ Morning brief</b>"
+        # The raw '#' must NOT remain in the output.
+        assert "#" not in out
+
+    def test_atx_header_h3_becomes_bold(self):
+        from src.telegram_transport import markdown_to_html
+        out = markdown_to_html("### Subsection")
+        assert out == "<b>Subsection</b>"
+
+    def test_header_inside_multiline_body_converted(self):
+        """A header in the middle of a body — multiline matching must catch it."""
+        from src.telegram_transport import markdown_to_html
+        text = "prelude\n## Section\nbody"
+        out = markdown_to_html(text)
+        assert "<b>Section</b>" in out
+        assert "## Section" not in out
+
+    def test_hashtag_in_middle_of_line_not_a_header(self):
+        """``check #123`` must not be mistaken for a header."""
+        from src.telegram_transport import markdown_to_html
+        out = markdown_to_html("see issue #123 for context")
+        assert "<b>" not in out
+        assert "#123" in out
+
 
 class TestIsConfigured:
     def test_true_when_both_set(self, monkeypatch):
@@ -293,6 +321,71 @@ class TestDispatchPrefersTelegram:
         # Debug-prefix line from OpenClaw flow must not leak through
         assert "energy-manager" not in text
 
+    def test_extra_dict_not_dumped_as_json_into_body(self, monkeypatch):
+        """The ``extra`` payload is for the hook + action_log, not for humans.
+
+        Before #330 the dispatcher appended ``json.dumps(extra)`` in an inline
+        code block, producing ``{"warnings": [...]}`` blobs right after a
+        human-readable summary that already contained the same info — ugly
+        and confusing. The Telegram body must omit it.
+        """
+        from src import notifier, telegram_transport
+
+        cfg = _make_config()
+        _patch_config(monkeypatch, cfg)
+        self._route_active(monkeypatch)
+
+        captured: list[str] = []
+
+        def fake_send(text, *, silent=False, convert_markdown=True, parse_mode="HTML"):
+            captured.append(text)
+            return True
+
+        monkeypatch.setattr(telegram_transport, "is_configured", lambda: True)
+        monkeypatch.setattr(telegram_transport, "send_message", fake_send)
+
+        notifier._dispatch(
+            notifier.AlertType.STRATEGY_UPDATE,
+            "summary line",
+            extra={"warnings": ["a", "b", "c"]},
+        )
+
+        assert len(captured) == 1
+        text = captured[0]
+        assert "summary line" in text
+        assert '{"warnings"' not in text
+        assert "json" not in text.lower()
+
+    def test_leading_markdown_header_in_body_stripped(self, monkeypatch):
+        """A body that still leads with ``## ...`` must not stack on top of the
+        dispatcher's own bold headline (#330)."""
+        from src import notifier, telegram_transport
+
+        cfg = _make_config()
+        _patch_config(monkeypatch, cfg)
+        self._route_active(monkeypatch)
+
+        captured: list[str] = []
+
+        def fake_send(text, *, silent=False, convert_markdown=True, parse_mode="HTML"):
+            captured.append(text)
+            return True
+
+        monkeypatch.setattr(telegram_transport, "is_configured", lambda: True)
+        monkeypatch.setattr(telegram_transport, "send_message", fake_send)
+
+        notifier._dispatch(
+            notifier.AlertType.MORNING_REPORT,
+            "## ☀️ Morning brief\n**Today (2026-05-13)**\nstrategy line",
+        )
+
+        assert len(captured) == 1
+        text = captured[0]
+        # Only the dispatcher's headline survives; the inner duplicate is gone.
+        assert text.count("Morning brief") == 1
+        assert "## ☀️" not in text
+        assert "Today (2026-05-13)" in text
+
     def test_falls_back_to_openclaw_when_telegram_unset(self, monkeypatch):
         from src import notifier, telegram_transport
 
@@ -380,6 +473,196 @@ class TestPushAlertTelegramRendering:
         assert "Octopus is paying us" in text  # body content
         assert "SoC 70" in text
         assert "-3.5p/kWh" in text
+
+
+# ---------------------------------------------------------------------------
+# notify_strategy_update — warnings as bullets, no Python repr / no JSON dump
+# ---------------------------------------------------------------------------
+
+class TestStrategyUpdateFormatting:
+    def _setup(self, monkeypatch):
+        from src import notifier, telegram_transport
+
+        captured: list[str] = []
+
+        def fake_send(text, *, silent=False, convert_markdown=True, parse_mode="HTML"):
+            captured.append(text)
+            return True
+
+        _patch_config(monkeypatch, _make_config())
+        monkeypatch.setattr(telegram_transport, "is_configured", lambda: True)
+        monkeypatch.setattr(telegram_transport, "send_message", fake_send)
+        monkeypatch.setattr(notifier.db, "log_action", lambda **kw: None)
+        monkeypatch.setattr(notifier.db, "get_notification_route", lambda _: {
+            "enabled": 1, "severity": "reports",
+            "target_override": None, "channel_override": None, "silent": 0,
+        })
+        return captured
+
+    def test_warnings_list_rendered_as_bullets(self, monkeypatch):
+        """``['a', 'b']`` was being str()'d into the message, producing
+        Python repr ``Warnings: ['a', 'b']``. After #330 the list becomes
+        a bullet list and the JSON dump is gone."""
+        from src import notifier
+        captured = self._setup(monkeypatch)
+
+        notifier.notify_strategy_update(
+            "Daikin write-budget guard active",
+            warnings=[
+                "tank_idle_overnight@2026-05-09T21:00:00Z",
+                "pre_heat@2026-05-10T12:00:00Z",
+            ],
+        )
+
+        assert len(captured) == 1
+        text = captured[0]
+        assert "Daikin write-budget guard active" in text
+        assert "Warnings (2)" in text
+        assert "• tank_idle_overnight@2026-05-09T21:00:00Z" in text
+        assert "• pre_heat@2026-05-10T12:00:00Z" in text
+        # No Python-repr brackets, no JSON dump duplicate.
+        assert "['tank_idle_overnight" not in text
+        assert '{"warnings"' not in text
+
+    def test_no_warnings_keeps_message_clean(self, monkeypatch):
+        from src import notifier
+        captured = self._setup(monkeypatch)
+        notifier.notify_strategy_update("plain summary")
+        assert len(captured) == 1
+        text = captured[0]
+        assert "plain summary" in text
+        assert "Warnings" not in text
+
+
+# ---------------------------------------------------------------------------
+# Appliance lifecycle — dynamic Telegram header (no duplicated emoji/name/verb)
+# ---------------------------------------------------------------------------
+
+class TestApplianceTelegramHeader:
+    """The static ``_TELEGRAM_HEADERS`` map gives every alert a generic
+    headline (``🧺 Appliance armed``). For appliance lifecycle events, the
+    body used to repeat the name + verb on the next line — producing the
+    stacked ``🧺 Appliance armed / 🧺 Washing machine armed for …`` look the
+    user flagged. Each helper now injects a dynamic
+    ``telegram_header_override`` so the header carries the specific name
+    (``🧺 Washing machine armed``) and the body holds only schedule details.
+    """
+
+    def _setup(self, monkeypatch):
+        from src import notifier, telegram_transport
+
+        captured: list[str] = []
+
+        def fake_send(text, *, silent=False, convert_markdown=True, parse_mode="HTML"):
+            captured.append(text)
+            return True
+
+        _patch_config(monkeypatch, _make_config())
+        monkeypatch.setattr(telegram_transport, "is_configured", lambda: True)
+        monkeypatch.setattr(telegram_transport, "send_message", fake_send)
+        monkeypatch.setattr(notifier.db, "log_action", lambda **kw: None)
+        monkeypatch.setattr(notifier.db, "get_notification_route", lambda _: {
+            "enabled": 1, "severity": "reports",
+            "target_override": None, "channel_override": None, "silent": 0,
+        })
+        return captured
+
+    def test_armed_header_carries_appliance_name(self, monkeypatch):
+        from src import notifier
+        captured = self._setup(monkeypatch)
+        notifier.notify_appliance_armed(
+            appliance_name="Washing machine",
+            planned_start_local="Wed 15:00",
+            planned_end_local="16:17",
+            deadline_local="07:00",
+            duration_minutes=77,
+            avg_price_pence=2.3,
+            replan=False,
+        )
+        assert len(captured) == 1
+        text = captured[0]
+        # The bold dispatcher header carries the appliance name + verb.
+        assert "**🧺 Washing machine armed**" in text
+        # Body should NOT repeat the appliance name + emoji + verb again.
+        body_only = text.split("\n", 1)[1]
+        assert "Washing machine" not in body_only
+        assert "🧺" not in body_only
+        assert "armed" not in body_only
+        # Schedule details still in the body.
+        assert "Wed 15:00" in text
+        assert "16:17" in text
+        assert "2.3p/kWh" in text
+        # No JSON tail from #330 — make sure that fix still holds on this path.
+        assert '{"appliance"' not in text
+
+    def test_armed_replan_header_uses_re_armed(self, monkeypatch):
+        from src import notifier
+        captured = self._setup(monkeypatch)
+        notifier.notify_appliance_armed(
+            appliance_name="Dishwasher",
+            planned_start_local="Wed 02:00",
+            planned_end_local="03:30",
+            deadline_local="07:00",
+            duration_minutes=90,
+            avg_price_pence=2.1,
+            replan=True,
+        )
+        text = captured[0]
+        assert "**🧺 Dishwasher re-armed**" in text
+        assert "armed" in text  # substring of re-armed; that's fine
+
+    def test_starting_header_and_clean_body(self, monkeypatch):
+        from src import notifier
+        captured = self._setup(monkeypatch)
+        notifier.notify_appliance_starting(
+            appliance_name="Dryer",
+            planned_start_local="15:00",
+            deadline_local="17:00",
+            avg_price_pence=4.2,
+            duration_minutes=60,
+        )
+        text = captured[0]
+        assert "**🧺 Dryer starting**" in text
+        body_only = text.split("\n", 1)[1]
+        assert "Dryer" not in body_only
+        assert "starting" not in body_only
+        assert "15:00" in body_only
+        assert "60 min" in body_only
+
+    def test_finished_header_and_clean_body(self, monkeypatch):
+        from src import notifier
+        captured = self._setup(monkeypatch)
+        notifier.notify_appliance_finished(
+            appliance_name="Washing machine",
+            started_local="15:00",
+            ended_local="16:17",
+            duration_minutes=77,
+            estimated_kwh=0.85,
+            estimated_cost_p=1.9,
+            kwh_is_measured=True,
+        )
+        text = captured[0]
+        assert "**✅ Washing machine cycle complete**" in text
+        body_only = text.split("\n", 1)[1]
+        assert "Washing machine" not in body_only
+        assert "cycle complete" not in body_only
+        assert "0.85 kWh" in body_only
+
+    def test_cancelled_header_and_clean_body(self, monkeypatch):
+        from src import notifier
+        captured = self._setup(monkeypatch)
+        notifier.notify_appliance_cancelled(
+            appliance_name="Washing machine",
+            reason="replanned",
+            planned_start_local="Wed 15:00",
+        )
+        text = captured[0]
+        assert "**🚫 Washing machine cancelled**" in text
+        body_only = text.split("\n", 1)[1]
+        assert "Washing machine" not in body_only
+        assert "cancelled" not in body_only
+        assert "replanned" in body_only
+        assert "Wed 15:00" in body_only
 
 
 # ---------------------------------------------------------------------------

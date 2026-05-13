@@ -236,21 +236,41 @@ def _build_telegram_dispatch_body(
     *,
     urgent: bool,
     extra: dict[str, Any] | None,
+    header_override: str | None = None,
 ) -> str:
     """Compose a Telegram message for ``_dispatch`` flows.
 
     Strips the ``[HH:MM] [info] energy-manager [kind]`` debug prefix that the
-    OpenClaw path used (the LLM ignored it anyway). Headline + caller body +
-    optional structured ``extra`` rendered as an inline code block. The string
-    returned is HEM-flavoured Markdown — ``send_message`` does the HTML escape.
+    OpenClaw path used (the LLM ignored it anyway). The structured ``extra``
+    dict is **not** rendered on the Telegram path — callers already include
+    the relevant facts in *message*; ``extra`` exists only for the OpenClaw
+    hook + action_log payloads (#330).
+
+    ``header_override`` lets a caller swap the static ``_TELEGRAM_HEADERS[...]``
+    headline for one that carries dynamic context — e.g. the appliance name
+    (``🧺 Washing machine armed``) instead of the generic class
+    (``🧺 Appliance armed``). Set to a non-empty string to override; ``None``
+    (default) keeps the static lookup.
     """
-    head = _telegram_header_for(alert_key)
+    if header_override:
+        head = header_override
+    else:
+        head = _telegram_header_for(alert_key)
     if urgent and not head.startswith(("🚨", "⚠️")):
         head = f"🚨 {head}"
-    parts = [f"**{head}**", message]
-    if extra:
-        snippet = json.dumps(extra, default=str)[:400]
-        parts.append(f"`{snippet}`")
+    # Drop a body's own leading ``## ...`` headline if it duplicates the
+    # dispatcher header (the briefs used to embed their own `## ☀️ Morning
+    # brief` line; #330 strips it from the source, but defensive cleanup here
+    # keeps any straggler — or third-party caller — from producing two
+    # stacked headers.
+    stripped = message.lstrip("\n")
+    if stripped.startswith("##"):
+        first_nl = stripped.find("\n")
+        if first_nl == -1:
+            stripped = ""
+        else:
+            stripped = stripped[first_nl + 1 :]
+    parts = [f"**{head}**", stripped]
     return "\n".join(p for p in parts if p)
 
 
@@ -477,6 +497,7 @@ def _dispatch(
     *,
     urgent: bool = False,
     extra: dict[str, Any] | None = None,
+    telegram_header_override: str | None = None,
 ) -> None:
     full_msg = _compose_delivery_body(kind, message, urgent=urgent, extra=extra)
     _record_notification(kind, message, urgent=urgent, extra=extra, full_msg=full_msg)
@@ -488,7 +509,9 @@ def _dispatch(
     # Direct Telegram is preferred when configured — bypasses OpenClaw LLM.
     if telegram_transport.is_configured():
         body = _build_telegram_dispatch_body(
-            kind.value, message, urgent=urgent, extra=extra
+            kind.value, message,
+            urgent=urgent, extra=extra,
+            header_override=telegram_header_override,
         )
         telegram_transport.send_message(body, silent=silent)
         return
@@ -546,11 +569,15 @@ def notify_appliance_starting(
 
     Inlines a 4-line forward-looking brief so the family sees today + tomorrow
     tariff windows and the running PnL alongside the start confirmation.
+
+    Telegram headline carries the appliance name dynamically (``🧺 Washing
+    machine starting``) so the body doesn't have to repeat ``🧺 **Name**`` on
+    a second line. The static map's ``🧺 Appliance starting`` is still the
+    fallback for OpenClaw / action_log consumers (#330 follow-up).
     """
     body_lines = [
-        f"🧺 **{appliance_name}** starting now",
-        f"Window: {planned_start_local} → end ≤ {deadline_local}",
-        f"Cycle: {duration_minutes} min · avg {avg_price_pence:.1f}p/kWh",
+        f"{planned_start_local} → end ≤ {deadline_local}",
+        f"{duration_minutes} min · avg {avg_price_pence:.1f}p/kWh",
     ]
     if brief_md:
         body_lines.extend(["", brief_md])
@@ -562,7 +589,10 @@ def notify_appliance_starting(
         "avg_price_pence": round(float(avg_price_pence), 2),
         "duration_minutes": int(duration_minutes),
     }
-    _dispatch(AlertType.APPLIANCE_STARTING, body, urgent=False, extra=extra)
+    _dispatch(
+        AlertType.APPLIANCE_STARTING, body, urgent=False, extra=extra,
+        telegram_header_override=f"🧺 {appliance_name} starting",
+    )
 
 
 def notify_appliance_finished(
@@ -601,7 +631,6 @@ def notify_appliance_finished(
     else:
         cost_line = ""
     body_lines = [
-        f"✅ **{appliance_name}** cycle complete",
         f"{started_local} → {ended_local} ({duration_minutes} min)" + (f" · {cost_line}" if cost_line else ""),
     ]
     if brief_md:
@@ -620,7 +649,10 @@ def notify_appliance_finished(
     if estimated_cost_p is not None:
         key = "actual_cost_pence" if kwh_is_measured else "estimated_cost_pence"
         extra[key] = round(float(estimated_cost_p), 2)
-    _dispatch(AlertType.APPLIANCE_FINISHED, body, urgent=False, extra=extra)
+    _dispatch(
+        AlertType.APPLIANCE_FINISHED, body, urgent=False, extra=extra,
+        telegram_header_override=f"✅ {appliance_name} cycle complete",
+    )
 
 
 def notify_appliance_armed(
@@ -639,15 +671,10 @@ def notify_appliance_armed(
     row OR when an existing job's planned window shifted via re-plan (in which
     case ``replan=True`` so OpenClaw can phrase the message as a revision).
     """
-    headline = "🧺 **{name}** {verb} for {start} → {end}".format(
-        name=appliance_name,
-        verb="re-armed" if replan else "armed",
-        start=planned_start_local,
-        end=planned_end_local,
-    )
+    verb = "re-armed" if replan else "armed"
     body = "\n".join([
-        headline,
-        f"Cycle: {duration_minutes} min · avg {avg_price_pence:.1f}p/kWh · deadline {deadline_local}",
+        f"{planned_start_local} → {planned_end_local} ({duration_minutes} min)",
+        f"avg {avg_price_pence:.1f}p/kWh · deadline {deadline_local}",
     ])
     extra = {
         "appliance": appliance_name,
@@ -658,7 +685,10 @@ def notify_appliance_armed(
         "avg_price_pence": round(float(avg_price_pence), 2),
         "replan": bool(replan),
     }
-    _dispatch(AlertType.APPLIANCE_ARMED, body, urgent=False, extra=extra)
+    _dispatch(
+        AlertType.APPLIANCE_ARMED, body, urgent=False, extra=extra,
+        telegram_header_override=f"🧺 {appliance_name} {verb}",
+    )
 
 
 def notify_appliance_cancelled(
@@ -674,7 +704,7 @@ def notify_appliance_cancelled(
     ``replanned`` — LP picked a different window; new ARMED hook follows
     ``deadline_passed`` — deadline expired before a feasible window opened
     """
-    body_lines = [f"🚫 **{appliance_name}** cycle cancelled", f"Reason: {reason}"]
+    body_lines = [f"Reason: {reason}"]
     if planned_start_local:
         body_lines.append(f"Was scheduled for {planned_start_local}")
     body = "\n".join(body_lines)
@@ -684,7 +714,10 @@ def notify_appliance_cancelled(
     }
     if planned_start_local:
         extra["planned_start_local"] = planned_start_local
-    _dispatch(AlertType.APPLIANCE_CANCELLED, body, urgent=False, extra=extra)
+    _dispatch(
+        AlertType.APPLIANCE_CANCELLED, body, urgent=False, extra=extra,
+        telegram_header_override=f"🚫 {appliance_name} cancelled",
+    )
 
 
 def notify_plan_revision(body: str, *, trigger_reason: str | None = None) -> None:
@@ -736,7 +769,11 @@ def push_negative_window_start(
 def notify_strategy_update(summary: str, warnings: Any = None) -> None:
     msg = summary
     if warnings:
-        msg += f"\nWarnings: {warnings}"
+        if isinstance(warnings, (list, tuple)):
+            bullet_lines = "\n".join(f"  • {w}" for w in warnings)
+            msg += f"\n\nWarnings ({len(warnings)}):\n{bullet_lines}"
+        else:
+            msg += f"\n\nWarnings: {warnings}"
     _dispatch(AlertType.STRATEGY_UPDATE, msg, extra={"warnings": warnings} if warnings else None)
 
 
