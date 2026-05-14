@@ -30,6 +30,9 @@ _TELEGRAM_MAX_CHARS = 4096
 # would render as malformed entities. The OpenClaw LLM didn't use italic either.
 _BOLD_RE = re.compile(r"\*\*([^*\n][^*]*?)\*\*")
 _CODE_RE = re.compile(r"`([^`\n]+?)`")
+# Markdown ATX headers (``## Title``, ``### Sub``). Telegram HTML has no header
+# tags; without this conversion the leading ``#`` characters show up literally.
+_HEADER_RE = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$", re.MULTILINE)
 
 
 def is_configured() -> bool:
@@ -51,6 +54,7 @@ def markdown_to_html(text: str) -> str:
     if not text:
         return ""
     escaped = html.escape(text, quote=False)
+    escaped = _HEADER_RE.sub(r"<b>\1</b>", escaped)
     escaped = _BOLD_RE.sub(r"<b>\1</b>", escaped)
     escaped = _CODE_RE.sub(r"<code>\1</code>", escaped)
     return escaped

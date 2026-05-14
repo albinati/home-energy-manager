@@ -33,6 +33,10 @@ def _isolated_db(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 # ---------- Notifier helpers ----------
 
 def test_notify_appliance_starting_dispatches_with_correct_alert_type() -> None:
+    """Post-#330: appliance name + action verb live in the Telegram header
+    (dispatcher prepends ``🧺 Washer starting``); the body carries only the
+    schedule details so the message has no duplicated ``🧺 **Washer** starting``
+    second-line lead."""
     with patch("src.notifier._dispatch") as mock_dispatch:
         notify_appliance_starting(
             appliance_name="Washer",
@@ -46,12 +50,15 @@ def test_notify_appliance_starting_dispatches_with_correct_alert_type() -> None:
     args, kwargs = mock_dispatch.call_args
     assert args[0] == AlertType.APPLIANCE_STARTING
     body = args[1]
-    assert "Washer" in body
+    # Body MUST NOT repeat the name/action that the dispatcher header carries.
+    assert "Washer" not in body
+    assert "starting" not in body
     assert "Sat 04:30" in body
     assert "77 min" in body
     assert "3.7p/kWh" in body
     assert "🔆 Today" in body
     assert kwargs["urgent"] is False
+    assert kwargs["telegram_header_override"] == "🧺 Washer starting"
     extra = kwargs["extra"]
     assert extra["appliance"] == "Washer"
     assert extra["duration_minutes"] == 77
@@ -74,7 +81,10 @@ def test_notify_appliance_finished_dispatches_with_correct_alert_type() -> None:
     args, kwargs = mock_dispatch.call_args
     assert args[0] == AlertType.APPLIANCE_FINISHED
     body = args[1]
-    assert "Washer" in body
+    # Header carries the name + "cycle complete"; body keeps the timing.
+    assert "Washer" not in body
+    assert "cycle complete" not in body
+    assert kwargs["telegram_header_override"] == "✅ Washer cycle complete"
     assert "04:30" in body and "05:47" in body
     assert "77 min" in body
     assert "≈ 0.60 kWh" in body
@@ -139,7 +149,11 @@ def test_notify_appliance_armed_first_arm() -> None:
     args, kwargs = mock_dispatch.call_args
     assert args[0] == AlertType.APPLIANCE_ARMED
     body = args[1]
-    assert "armed" in body and "re-armed" not in body
+    # First-arm path: header is "🧺 Washer armed" (NOT "re-armed").
+    assert kwargs["telegram_header_override"] == "🧺 Washer armed"
+    # Body holds only schedule details; no name/verb repeats.
+    assert "Washer" not in body
+    assert "armed" not in body
     assert "Sat 01:00" in body and "03:15" in body and "07:00" in body
     assert "135 min" in body
     assert "4.5p/kWh" in body
@@ -150,8 +164,9 @@ def test_notify_appliance_armed_first_arm() -> None:
 
 
 def test_notify_appliance_armed_replan_phrasing() -> None:
-    """A re-plan flips the verb to 're-armed' so OpenClaw can phrase the
-    Telegram message as a window revision rather than a new arm."""
+    """A re-plan flips the verb to 're-armed' so the Telegram header reads
+    ``🧺 Washer re-armed`` instead of ``armed`` — a window revision rather
+    than a new arm."""
     with patch("src.notifier._dispatch") as mock_dispatch:
         notify_appliance_armed(
             appliance_name="Washer",
@@ -162,9 +177,9 @@ def test_notify_appliance_armed_replan_phrasing() -> None:
             avg_price_pence=4.0,
             replan=True,
         )
-    body = mock_dispatch.call_args.args[1]
-    assert "re-armed" in body
-    assert mock_dispatch.call_args.kwargs["extra"]["replan"] is True
+    kwargs = mock_dispatch.call_args.kwargs
+    assert kwargs["telegram_header_override"] == "🧺 Washer re-armed"
+    assert kwargs["extra"]["replan"] is True
 
 
 def test_notify_appliance_cancelled_dispatches_with_reason_and_planned_start() -> None:
@@ -178,8 +193,11 @@ def test_notify_appliance_cancelled_dispatches_with_reason_and_planned_start() -
     args, kwargs = mock_dispatch.call_args
     assert args[0] == AlertType.APPLIANCE_CANCELLED
     body = args[1]
-    assert "Washer" in body
-    assert "cancelled" in body
+    # Name + verb live in the dispatcher header.
+    assert kwargs["telegram_header_override"] == "🚫 Washer cancelled"
+    assert "Washer" not in body
+    assert "cancelled" not in body
+    # Reason + planned start stay in the body.
     assert "remote_mode_dropped" in body
     assert "Sat 01:00" in body
     extra = kwargs["extra"]
@@ -197,6 +215,7 @@ def test_notify_appliance_cancelled_omits_planned_start_when_unknown() -> None:
         )
     args, kwargs = mock_dispatch.call_args
     assert args[0] == AlertType.APPLIANCE_CANCELLED
+    assert kwargs["telegram_header_override"] == "🚫 Washer cancelled"
     assert "deadline_passed" in args[1]
     assert "planned_start_local" not in kwargs["extra"]
 
