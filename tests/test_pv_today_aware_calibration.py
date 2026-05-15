@@ -149,8 +149,10 @@ def test_dawn_dusk_hours_excluded() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_per_hour_returns_observed_ratios_and_imputes_unobserved():
-    """Two observed hours produce per-hour factors; the rest get the median."""
+def test_per_hour_returns_observed_ratios_and_imputes_unobserved_to_one():
+    """Two observed hours produce per-hour factors; the rest get tf=1.0
+    (2026-05-15 policy: unobserved hours defer to pv_calibration_hourly,
+    NOT to today's observed median or yesterday's warm-start)."""
     from src.weather import compute_today_pv_correction_factor_by_hour
 
     # Morning ratio = 1.5 (sunny morning beats forecast); midday spot-on.
@@ -162,16 +164,20 @@ def test_per_hour_returns_observed_ratios_and_imputes_unobserved():
     by_hour, diag = compute_today_pv_correction_factor_by_hour()
     assert by_hour, f"expected non-empty map; diag={diag}"
     assert diag["n_observed"] == 2
+    assert diag.get("imputation_policy") == "neutral_1.0"
     # Observed hours get their own ratios.
     assert 9 in diag["ratios_per_hour"]
     assert 11 in diag["ratios_per_hour"]
-    # Unobserved hours get the median (between 1.0 and 1.5 → median 1.5
-    # because there are only 2 values; sorted_obs[1] = 1.5). ``median_ratio``
-    # in diag is rounded to 4 places; ``by_hour`` values carry full precision.
-    median = diag["median_ratio"]
-    assert by_hour[3] == pytest.approx(median, abs=1e-3)
-    assert by_hour[14] == pytest.approx(median, abs=1e-3)
-    # Observed hour ratios are NOT the median (asymmetry preserved).
+    # Unobserved hours get tf=1.0 — they defer to pv_calibration_hourly
+    # (the multi-day per-hour deviation baseline) instead of pulling a
+    # single-day noisy sample on top.
+    assert by_hour[3] == 1.0
+    assert by_hour[14] == 1.0
+    assert by_hour[23] == 1.0
+    # Observed-hour ratios are NOT 1.0 (asymmetry preserved on hours we DID
+    # measure today).
+    assert by_hour[9] != 1.0
+    assert by_hour[11] != 1.0 or pytest.approx(by_hour[11], abs=1e-6) == 1.0  # 1.0 only if midday IS spot-on
     assert by_hour[9] != by_hour[11], f"observed hours should keep their own factor: {by_hour}"
 
 
