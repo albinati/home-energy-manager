@@ -773,35 +773,16 @@ class Config:
     # were in the cheap quartile on those days.
     LP_PLUNGE_PREP_HOURS: int = int(os.getenv("LP_PLUNGE_PREP_HOURS", "12"))
 
-    # --- PV-trust guard rail (incident 2026-05-15; docs/PV_TRUST_GUARDRAIL.md)
-    # Two-part defence against the LP grid-charging in the morning when
-    # today's PV would have filled the battery for free. Both knobs fire only
-    # under ``ENERGY_STRATEGY_MODE=strict_savings``; ``savings_first`` keeps
-    # legacy behaviour. See ``src/scheduler/pv_trust.py``.
-    #
-    # A — Hard PV-sufficiency constraint inside ``solve_lp``: when
-    # ``Σ forecast PV today × MARGIN ≥ (battery headroom + Σ load today)``
-    # add ``chg[i] ≤ pv_use[i]`` to every today-slot strictly before the
-    # first peak-tariff slot. ``MARGIN < 1`` requires extra headroom before
-    # the rail fires (more grid-charging allowed); ``> 1`` is more aggressive.
+    # --- PV-sufficiency guard rail (incident 2026-05-15; docs/PV_TRUST_GUARDRAIL.md)
+    # In ``strict_savings`` mode, block grid → battery for every today-slot
+    # strictly before the first peak-tariff slot when ``Σ forecast PV today ×
+    # MARGIN ≥ (battery headroom + Σ load today)``. ``MARGIN < 1`` demands
+    # extra cushion before the rail fires (more grid-charging allowed);
+    # ``> 1`` is more aggressive. Inert under ``savings_first``.
     LP_PV_SUFFICIENCY_GUARD: bool = (
         os.getenv("LP_PV_SUFFICIENCY_GUARD", "true").strip().lower() in ("1", "true", "yes")
     )
     LP_PV_SUFFICIENCY_MARGIN: float = float(os.getenv("LP_PV_SUFFICIENCY_MARGIN", "1.0"))
-    # B — Upward bias on the PV forecast input to the LP, derived from recent
-    # ``forecast_skill_log`` actual/predicted ratios. P50 = legacy implicit;
-    # P75 = upper-mid (default in strict_savings — trusts PV more, reducing
-    # morning grid-charge bias); P100 = optimistic ceiling. The factor is
-    # clamped to ``[MIN_BIAS, MAX_BIAS]`` so a wild upper tail can't cascade
-    # into a no-grid plan that can't recover overnight.
-    LP_PV_TRUST_ENABLED: bool = (
-        os.getenv("LP_PV_TRUST_ENABLED", "true").strip().lower() in ("1", "true", "yes")
-    )
-    LP_PV_TRUST_PERCENTILE: float = float(os.getenv("LP_PV_TRUST_PERCENTILE", "0.75"))
-    LP_PV_TRUST_LOOKBACK_DAYS: int = int(os.getenv("LP_PV_TRUST_LOOKBACK_DAYS", "14"))
-    LP_PV_TRUST_MIN_SAMPLES: int = int(os.getenv("LP_PV_TRUST_MIN_SAMPLES", "5"))
-    LP_PV_TRUST_MIN_BIAS: float = float(os.getenv("LP_PV_TRUST_MIN_BIAS", "0.7"))
-    LP_PV_TRUST_MAX_BIAS: float = float(os.getenv("LP_PV_TRUST_MAX_BIAS", "1.5"))
 
     # Inverter stress cost: piecewise-linear quadratic approximation on battery power per slot.
     # At nominal inverter power (MAX_INVERTER_KW), the penalty equals this value (p/kWh).

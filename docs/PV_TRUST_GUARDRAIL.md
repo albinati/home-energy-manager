@@ -1,6 +1,6 @@
 # PV-Trust Guard Rail — design doc
 
-**Status:** draft (decision pending)
+**Status:** decision made — ship the hard rail + daily PV-calibration refresh.
 **Owner:** Luis
 **Last revised:** 2026-05-15
 
@@ -25,240 +25,193 @@ the Outgoing rate instead of self-consumed.
 | 14:00 | 0.95 | 0.6 | — | 0.3 | — | 100 |
 | 16:00 | 1.5 | 0.6 | — | 0.9 | — | 99 |
 
-**Aggregates** (08:00–10:00 UTC window):
-- Grid imported: ~14 kWh @ avg 14.3 p/kWh → **£2.00 spend**
-- PV exported (12:00–16:00 UTC, after battery full): ~5–6 kWh and counting
-- Battery now at 99% with 4+ hours of sunlight left → ~6–8 kWh of additional
-  PV will export today instead of charging.
+Cost of the bad call:
+- Grid imported 08:00–10:00 UTC: ~14 kWh @ avg 14.3 p/kWh → **£2.00 spend**
+- PV exported once battery was full (12:00–16:00 UTC, and counting):
+  ~6 kWh at ~10 p/kWh of opportunity loss = ~£0.60
 
-## 2. Root cause
+## 2. Root cause — two layered failures
 
-### 2a — recent forecast skill: PV under-delivery
+### 2a — The system's existing per-hour calibration was 7 days stale
 
-`forecast_skill_log` shows the last 7 days of paired predicted vs realised:
+`pv_calibration_hourly` is the per-UTC-hour factor table that translates
+Open-Meteo / Quartz radiance forecasts into expected per-slot PV kWh. It
+was **last refreshed 2026-05-08** with a 14-day window, **7 days stale** by
+2026-05-15. The W4 1DZ site has a strong AM-over / PM-under asymmetry:
 
-| date | predicted PV kWh | actual PV kWh | ratio actual/pred |
-|---|---|---|---|
-| 2026-05-08 | 16.6 | 9.7 | 0.59 |
-| 2026-05-09 | 18.1 | 19.3 | 1.07 |
-| 2026-05-10 | 15.7 | 9.3 | 0.59 |
-| 2026-05-11 | 14.5 | 9.8 | 0.67 |
-| 2026-05-12 | 17.5 | 14.2 | 0.81 |
-| 2026-05-13 | 16.8 | 13.0 | 0.78 |
-| 2026-05-14 | 16.3 | 15.9 | 0.97 |
+| hours UTC | residual `actual/predicted` ratio (last 30 days) |
+|---|---|
+| AM (5–11) | **0.65** mean — forecast over-predicts mornings by 35% |
+| PM (12–18) | **1.11** mean — forecast under-predicts afternoons by 11% |
 
-Median ratio = ~0.78 (PV under-delivers 22%). The LP's
-`today_factor_effective_by_hour` pulls from this recent history. By the
-06:55 UTC solve it had clamped midday hours hard (factor 0.30–0.60),
-giving expected midday PV of ~0.6–1.1 kW per slot.
+And the bias is **not stable week-to-week**:
 
-### 2b — actual PV today: way above the calibrated forecast
+| | AM mean | PM mean |
+|---|---:|---:|
+| Week 19 (May 4–10) | 0.67 | **1.22** |
+| Week 20 (May 11–17) | 0.62 | **0.98** |
 
-| hour UTC | calibrated forecast kW | actual kW | ratio |
-|---|---|---|---|
-| 12:00 | ~0.96 | 2.59 | 2.7× |
-| 13:00 | ~1.09 | 2.60 | 2.4× |
-| 14:00 | ~0.59 | 0.95 | 1.6× |
-| 16:00 | ~0.82 | 1.53 | 1.9× |
+AM bias is structural (east-facing obstruction). PM bias drifts ~25%
+between adjacent weeks based on weather pattern. **A fortnightly refresh
+can't track that.**
 
-### 2c — LP behaviour
+### 2b — No hard "today's PV will fill the battery" rule
 
-With under-forecast PV and a cheap import window (08:00–09:30 = 13.9–14.6 p/kWh)
-ahead of an expensive evening peak (16:00–17:30 = 32–35 p/kWh), force-charging
-from grid was the LP's cost-minimising choice. **The LP did the right thing
-given its inputs.** The inputs were the bug.
+Even with a perfectly calibrated forecast, the LP's economic objective will
+still grid-charge in cheap morning slots when peak prices later are high
+enough. The household policy is `strict_savings` (peak_export OFF, prefer
+self-consumption to arbitrage), but nothing in the LP encoded:
+> "If today's PV is forecast to fill the battery anyway, don't grid-charge."
 
-In `strict_savings` mode (peak_export disabled — the user's chosen default),
-the only way force-charging pays back is via **evening grid displacement**.
-That's still profitable on paper:
+That makes the LP susceptible to the 2026-05-15 incident pattern *even with
+a correct forecast*.
 
-- Charge: 14 kWh @ 14.3 p = **£2.00**
-- Evening discharge: 14 kWh × ~28 p displaced peak = **£3.92**
-- Inverter round-trip loss (~5%) + cycle wear ≈ **£0.40**
-- **Net win: ~£1.50** if PV had been a no-show.
+## 3. Decision — two-part fix
 
-But if PV had been trusted (counterfactual: skip morning import):
-- Skip charge: **£0** spent
-- PV charges battery for free during 10:00–12:00
-- Same 14 kWh evening discharge: **+£3.92**
-- ~6–8 kWh less mid-day export (lost revenue): **-£0.60 to -£1.00** at
-  ~10 p export rate
-- **Net win: ~£2.90 to £3.30** — i.e. ~£1.50/day better than what happened.
+### Part A — Daily `pv_calibration_hourly` + `pv_calibration_hourly_cloud` refresh
 
-Over a season this is meaningful: ~30 sunny days × £1.50 = **~£45/year**
-in pure self-consumption efficiency.
+New cron `bulletproof_pv_calibration_refresh_job` at **04:30 UTC daily** in
+`src/scheduler/runner.py`. Calls
+`compute_pv_calibration_hourly_table()` + `compute_pv_calibration_hourly_cloud_table()`
+(both already exist in `src/weather.py`). Window = 30 days (default
+`PV_CALIBRATION_WINDOW_DAYS`).
 
-## 3. Design options
+Schedule placement:
+- 02:30 UTC: Fox energy rollup (PR #178)
+- 02:35 UTC: Daikin consumption rollup (PR #178)
+- 03:15 UTC: history retention prune
+- 04:00 UTC: consumption backfill (V13/PR #190)
+- 04:15 UTC: forecast_skill_log rebuild (already)
+- **04:30 UTC: PV calibration refresh (new)**
+- 08:00 BST = 07:00 UTC: morning brief uses the fresh factors
+- 00:05 UTC next day: plan_push uses the fresh factors (cron anchored to UTC)
 
-### Option A — Hard guard rail (PV-sufficiency check)
+Best-effort: failures are logged, the LP keeps the previous table contents.
 
-Add a constraint to `src/scheduler/lp_optimizer.py` analogous to the existing
-pre-plunge rule at line 794:
+### Part B — Hard PV-sufficiency guard rail in `solve_lp`
 
-```python
-if energy_strategy_mode == "strict_savings" and forecast_daytime_pv_kwh >= headroom_kwh:
-    for i in daytime_pre_peak_slots:
-        prob += chg[i] <= pv_use[i]   # no grid → battery, PV only
-```
+In `strict_savings` mode, when
+`Σ forecast PV today × LP_PV_SUFFICIENCY_MARGIN ≥ (battery headroom + Σ daytime load)`,
+the LP adds `chg[i] ≤ pv_use[i]` to every today-slot strictly before the
+first peak-tariff slot. Mirrors the existing pre-plunge constraint pattern
+at `lp_optimizer.py:794`. PV→battery stays allowed; grid→battery gets
+blocked on the days the guard fires.
 
-Where:
-- `forecast_daytime_pv_kwh` = Σ over today's remaining sunlit slots of
-  `direct_pv_kw * today_factor_effective_by_hour[h] * 0.5`
-- `headroom_kwh` = `(100% - current_soc%) × usable_capacity` + remaining
-  daytime load + DHW need
-- `daytime_pre_peak_slots` = slots between solve-time and first peak-tariff slot today
+Defaults to ON in `strict_savings`, inert under `savings_first`.
 
-**Trade-off:**
-- ✅ Deterministic, easy to audit, mirrors an existing pattern in the codebase
-- ✅ Aligns with `strict_savings` philosophy (near-zero grid cost first)
-- ⚠️ If a genuinely cloudy day surprises us, we eat one ~20 p evening hour
-  before next-day cheap window. Bounded loss.
+### What was dropped — Option B (P75 PV-trust upward bias)
 
-**Env knob:** `LP_PV_SUFFICIENCY_GUARD=true|false`, `LP_PV_SUFFICIENCY_MARGIN=1.0`
-(multiplier on `forecast_daytime_pv_kwh` — set <1 to demand a buffer, >1 to
-relax). Default proposed: `true` + margin `0.9` (require forecast 10% above headroom).
+Earlier iterations of this design considered a P-th-percentile multiplier
+derived from `forecast_skill_log` daily aggregates, applied as a flat
+scalar on top of `today_factor`. Investigation revealed this is the wrong
+tool for the AM/PM asymmetry — a single multiplier averages away the
+exact pattern that matters. The per-hour `pv_calibration_hourly` (when
+refreshed daily) already captures the same signal at the right granularity.
+Carrying Option B as well would have been duplicative.
 
-### Option B — Upward-biased PV trust
+## 4. Validation
 
-In `strict_savings` mode, scale the LP's PV forecast input by a percentile
-of the recent forecast/actual skill ratio rather than treating it as point
-estimate. Implementation lives in
-`src/weather.py:evaluate_pv_forecast_accuracy` neighbourhood — derive a P75
-(or configurable) factor from the last 14 days of `forecast_skill_log` and
-multiply `direct_pv_kw` by it before the LP consumes it.
+### Guard rail — 15-day replay
 
-**Trade-off:**
-- ✅ Less invasive — no new constraint, just better input
-- ✅ Continuous (handles partly-cloudy days gracefully)
-- ⚠️ Probabilistic, harder to audit ("why did the LP think PV would be X?")
-- ⚠️ Tail risk: on a truly grim day where actual < P25, we under-charge from
-  the cheap window and import at peak. **Quantify before shipping.**
+`scripts/replay_pv_trust.py --days 15 --as-of 2026-05-16` against prod
+DB on 2026-05-15:
 
-**Env knob:** `LP_PV_TRUST_PERCENTILE=0.75` (0.5 = current median behaviour,
-1.0 = optimistic), `LP_PV_TRUST_LOOKBACK_DAYS=14`.
-
-### Option C — Both (belt-and-braces)
-
-A as the safety net; B as the smoother. Each piece is small (<50 lines).
-Recommended only if we want both maximum protection now and tunability later.
-
-### Option D — Lower `MPC_LIVE_PV_KW_THRESHOLD`
-
-A reactive-only fix: drop the mid-day re-plan threshold (currently 1.5 kW
-sustained 1 tick) so the system reacts faster to PV overruns and abandons
-queued force-charges. **Does NOT fix today's incident** — the force-charge
-finished at 10:00 UTC, before the 11:00–13:00 PV spike that would have
-triggered. Mentioned for completeness.
-
-## 4. Recommendation
-
-**Option A first, alone.** Reasoning:
-1. The user's stated policy is `strict_savings` — near-zero grid cost
-   matters more than peak_export profit. The guard rail is a direct
-   encoding of that policy.
-2. Deterministic > probabilistic when the user is asking "why didn't it
-   do X" — auditability beats optimality at small £ stakes.
-3. If Option A turns out too conservative on stretches of bad weather,
-   Option B can stack on top.
-
-If we'd rather lean on the existing skill log (Option B), the prerequisite
-work is a 30-line script that computes the P75 trust factor over the last
-14 days and prints what the LP *would* have decided on each of those days.
-Replay-driven. Without that, Option B is shipping blind.
-
-## 5. Open questions
-
-1. Should the guard rail also trigger when `energy_strategy_mode == "savings_first"`
-   (the default in `.env`)? Today the household defaults to `strict_savings`
-   anyway (memory `feedback_near_zero_grid_cost_policy.md`), but downstream
-   the env-level default is `savings_first`. Decision: keep the guard rail
-   strategy-mode-aware, only fire in `strict_savings`. Avoids changing
-   behaviour for the (rare) `savings_first` runs.
-2. The pre-plunge constraint at `lp_optimizer.py:794` is bounded by
-   `LP_PLUNGE_PREP_HOURS` (12h ahead). Should the PV guard rail have a
-   symmetric look-ahead? Decision: no — PV forecast falls to zero overnight
-   automatically, so the rolling daytime-PV-remaining sum naturally bounds
-   the window.
-3. Quartz vs Open-Meteo provenance: today's incident used Quartz numbers
-   times today_factor. If we tune the today_factor calibration window
-   instead (Option B), do we need to switch source-weighting too? Out of
-   scope for this doc; tracked under #261 (Quartz prod HTTPS migration).
-
-## 6. 15-day replay (validation)
-
-`scripts/replay_pv_trust.py --days 15 --as-of 2026-05-16` run against the
-prod DB on 2026-05-15, scoring each variant at the Agile prices the LP saw
-when it solved (Octopus publishes day-ahead — no actual-vs-forecast noise
-injected; this is a model-vs-model comparison, the kind of regression
-signal the existing `lp_replay` infrastructure also reports).
-
-| Date | baseline | A only | B only | C both | ΔA | ΔB | ΔC | guard | bias |
-|---|---:|---:|---:|---:|---:|---:|---:|:---:|---:|
-| 2026-05-01 | £2.19 | £2.19 | £2.19 | £2.19 | 0 | 0 | 0 | n | 1.00 |
-| 2026-05-02 | £2.97 | £2.97 | £2.97 | £2.97 | 0 | 0 | 0 | n | 1.00 |
-| 2026-05-03 | £5.04 | £5.04 | £5.04 | £5.04 | 0 | 0 | 0 | n | 1.00 |
-| 2026-05-04 | £4.51 | £4.51 | £4.51 | £4.51 | 0 | 0 | 0 | n | 1.00 |
-| 2026-05-05 | £5.57 | £5.57 | £5.57 | £5.57 | 0 | 0 | 0 | n | 1.00 |
-| 2026-05-06 | £7.30 | £7.30 | £7.30 | £7.30 | 0 | 0 | 0 | n | 1.00 |
-| 2026-05-07 | £4.55 | £4.55 | £4.55 | £4.55 | 0 | 0 | 0 | n | 1.00 |
-| 2026-05-08 | £0.11 | £0.11 | £0.11 | £0.11 | 0 | 0 | 0 | Y | 1.00 |
-| 2026-05-09 | £0.63 | £0.63 | £0.63 | £0.63 | 0 | 0 | 0 | n | 1.00 |
-| 2026-05-10 | £1.58 | £1.94 | £1.58 | £1.94 | **+£0.37** | 0 | **+£0.37** | Y | 1.00 |
-| 2026-05-11 | £2.26 | £2.26 | £1.57 | £1.57 | 0 | -£0.70 | -£0.70 | n | 1.13 |
-| 2026-05-12 | £2.38 | £2.38 | £1.82 | £1.82 | 0 | -£0.56 | -£0.56 | n | 1.12 |
-| 2026-05-13 | £2.33 | £2.33 | £1.83 | £1.85 | 0 | -£0.50 | -£0.48 | n | 1.10 |
-| 2026-05-14 | £3.31 | £3.31 | £2.92 | £2.92 | 0 | -£0.39 | -£0.39 | n | 1.09 |
-| 2026-05-15 | £2.67 | £2.68 | £2.41 | £2.41 | +£0.01 | **-£0.26** | -£0.25 | Y | 1.07 |
-| **Total**  | **£47.38** | **£47.76** | **£44.97** | **£45.37** | **+£0.38** | **-£2.41** | **-£2.01** | | |
-| **Annualised** | | | | | **+£9.20/yr** | **-£58.69/yr** | **-£48.94/yr** | | |
+| Date | baseline | guard | Δ guard | fired | reason |
+|---|---:|---:|---:|:---:|:---|
+| 2026-05-01 | £2.19 | £2.19 | +£0.00 | n | insufficient_pv |
+| 2026-05-02 | £2.97 | £2.97 | +£0.00 | n | insufficient_pv |
+| 2026-05-03 | £5.04 | £5.04 | +£0.00 | n | insufficient_pv |
+| 2026-05-04 | £4.51 | £4.51 | +£0.00 | n | insufficient_pv |
+| 2026-05-05 | £5.57 | £5.57 | +£0.00 | n | insufficient_pv |
+| 2026-05-06 | £7.30 | £7.30 | +£0.00 | n | insufficient_pv |
+| 2026-05-07 | £4.55 | £4.55 | +£0.00 | n | insufficient_pv |
+| 2026-05-08 | £0.11 | £0.11 | +£0.00 | **Y** | sufficient_pv |
+| 2026-05-09 | £0.63 | £0.63 | +£0.00 | n | insufficient_pv |
+| 2026-05-10 | £1.58 | £1.94 | **+£0.37** | **Y** | sufficient_pv |
+| 2026-05-11 | £2.26 | £2.26 | +£0.00 | n | insufficient_pv |
+| 2026-05-12 | £2.38 | £2.38 | +£0.00 | n | insufficient_pv |
+| 2026-05-13 | £2.33 | £2.33 | +£0.00 | n | insufficient_pv |
+| 2026-05-14 | £3.31 | £3.31 | +£0.00 | n | insufficient_pv |
+| 2026-05-15 | £2.67 | £2.68 | +£0.01 | **Y** | sufficient_pv |
+| **Total** | **£47.39** | **£47.76** | **+£0.38** | 3/15 | |
+| **Annualised** | | | **+£9.20/yr** | | |
 
 Reads:
+- The guard fires on 3 of 15 days (the days with abundant forecast PV).
+- Two of those days are zero-cost (LP already preferring PV under baseline);
+  one (2026-05-10) is +£0.37 because the rail blocked a grid-charge that
+  reality wouldn't have backfilled.
+- Net annual cost ≈ £9.20/year. This is the **price of insurance** against
+  the 2026-05-15 incident pattern.
 
-- **Option B alone is the biggest winner** (–£59/year). The P75 bias kicks
-  in once the skill log has ≥ 5 contributing days (visible from 2026-05-11
-  onwards: bias factor 1.07–1.13). On every day after that it shaves
-  £0.26–£0.70 vs baseline by letting the LP trust PV more, which cuts
-  morning grid-charge volume.
-- **Option A alone costs ~£9/year** because the hard rail only fires on
-  the very sunniest forecasts (2026-05-08, 10, 15), and on 2026-05-10 the
-  blocked grid-charge couldn't be made back up by available PV → +£0.37.
-  This is the bounded tail risk the design doc anticipated.
-- **Option C is +£0.40/year worse than B alone**, the cost of carrying
-  A on top. We accept it because: (i) the user's policy is "near-zero grid
-  cost first, profit second" — A is the safety net against the exact 2026-05-15
-  incident pattern; (ii) £0.40/year is rounding noise on a £200+/year savings
-  baseline.
+**Caveat — model-vs-model.** Replay solves the LP at the snapshot prices
+(Agile is day-ahead so "actual = snapshot" for £/kWh). It does NOT inject
+actual-PV-vs-forecast-PV execution noise. The 2026-05-10 row (+£0.37) hints
+at the tail risk in reality.
 
-**Caveat — model-vs-model.** The replay solves the LP with the same per-slot
-prices the original run saw (Agile is day-ahead so "actual" == "snapshot" for
-£/kWh). It does NOT inject actual-PV-vs-forecast-PV noise during execution,
-so genuine tail-risk (forecast says sunny, day turns grim, blocked grid charge
-must be recovered at peak prices) is under-counted. The 2026-05-10 +£0.37 row
-hints at it (sunny forecast, actual ratio = 0.59 — the day Option A blocked
-charging and load fell back to grid). A future enhancement is to fold in
-the actual-PV ratio per day for execution-noise replay.
+### Calibration refresh — no formal replay
 
-## 7. Decision
+Backtesting the refresh cron is non-trivial because the calibration tables
+would have been different on each day if they had been refreshed daily.
+The qualitative argument:
 
-**Ship Option C** with both knobs ON by default in `strict_savings`:
+- AM bias is structural (~0.65 mean across 6 weeks of data); a daily
+  refresh adjusts the per-hour factors to track this consistently.
+- PM bias drifts 25% week-to-week; a daily refresh closes the lag from
+  fortnightly to ~1 day.
 
-- `LP_PV_SUFFICIENCY_GUARD=true` — the hard rail. The £9/yr regression is
-  the price of insurance against the 2026-05-15 incident pattern. Configurable
-  via `LP_PV_SUFFICIENCY_MARGIN` (default 1.0; raise to make the rail more
-  permissive, e.g. 0.85 demands forecast PV 18% above demand before firing).
-- `LP_PV_TRUST_ENABLED=true`, `LP_PV_TRUST_PERCENTILE=0.75` — the upward bias.
-  Tunable via `LP_PV_TRUST_*` env knobs.
+The single biggest lever in §2a is replacing "7 days stale" with "always
+fresh". Even at the same window size, daily refresh keeps the table aligned
+with the most recent observations.
 
-Both knobs are **inert in `savings_first` mode** — that mode keeps legacy
-behaviour. So this is opt-in via the existing `strict_savings` toggle the
-household already uses.
+## 5. Rollback
 
-## 8. Open questions (resolved)
+Set in `.env`:
+```
+LP_PV_SUFFICIENCY_GUARD=false
+```
+Or flip `ENERGY_STRATEGY_MODE=savings_first` via MCP — the guard is inert
+in that mode regardless.
 
-1. ✅ Should the guard rail also trigger under `savings_first`? Decided NO —
-   strict_savings only, matches the user's stated policy.
-2. ✅ Should the rail have a symmetric look-ahead like `LP_PLUNGE_PREP_HOURS`?
-   NO — PV forecast falls to zero overnight naturally, no look-ahead bound
-   needed.
-3. ✅ Should Quartz vs Open-Meteo source-weighting change? OUT OF SCOPE —
-   tracked under #261 (Quartz prod HTTPS migration).
+For the cron, comment out the `add_job` for `bulletproof_pv_calibration_refresh`
+in `runner.py` and restart `hem.service`. The previous fortnightly
+`pv_calibration_hourly` regeneration path (whatever existed before — possibly
+manual via the analytics script) keeps working.
+
+## 6. Open questions (resolved)
+
+1. ✅ Should the guard rail also trigger under `savings_first`?
+   NO — `strict_savings` only, matches household policy.
+2. ✅ Per-hour vs flat upward bias?
+   Per-hour is the right granularity; the existing `pv_calibration_hourly`
+   already provides it. Drop Option B entirely.
+3. ✅ Refresh cadence?
+   Daily at 04:30 UTC. Fortnightly was the de-facto status; daily is the
+   minimum cadence that tracks week-to-week PM bias drift.
+4. ✅ PV_CAPACITY tuning?
+   Skip — calibration tables compensate algebraically. Bumping
+   `PV_SYSTEM_EFFICIENCY` from 0.85 to 0.95 would not change LP behaviour.
+5. ✅ Hour-18 outlier (P50 ratio = 1.61)?
+   Real but tiny absolute kWh (~0.1 kWh × 20p = 2p/day). Not worth special
+   handling.
+
+## 7. Reference data
+
+### Physical PV limits (since 2026-04-17 Agile start)
+
+| Metric | Value | Date |
+|---|---:|---|
+| Peak instantaneous kW | **4.47 kW** | 2026-05-14 13:09 UTC |
+| Max 30-min slot kWh | **1.93 kWh** | 2026-05-06 13:00 UTC |
+| Max daily kWh | **19.35 kWh** | 2026-05-09 |
+| Configured ceiling | 3.83 kW (1.91 kWh/slot) | `PV_CAPACITY_KWP × η = 4.5 × 0.85` |
+| Inverter nameplate | 5.0 kW AC | Fox H1-5.0 |
+
+Inverter clipping appears to bind at ~3.9 kW for sustained periods (top-30
+peak observations cluster there). The few 4.1–4.5 kW observations are
+heartbeat samples catching brief overshoots before clipping.
+
+### Per-hour bias (last 30 days)
+
+See §2a. The skill_log residual ratios after current `pv_calibration_hourly`
+correction. Daily refresh shrinks these residuals further.

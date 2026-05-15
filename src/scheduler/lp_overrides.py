@@ -225,40 +225,12 @@ WHITELIST: dict[str, OverrideSpec] = {
         description="Piecewise segments for inverter stress (more = slower).",
         group="solver",
     ),
-    # --- PV-trust guard rail (incident 2026-05-15; docs/PV_TRUST_GUARDRAIL.md)
+    # --- PV-sufficiency guard rail (incident 2026-05-15; docs/PV_TRUST_GUARDRAIL.md)
     "LP_PV_SUFFICIENCY_MARGIN": OverrideSpec(
         key="LP_PV_SUFFICIENCY_MARGIN",
         config_attr="LP_PV_SUFFICIENCY_MARGIN",
         type_name="float", min_value=0.5, max_value=2.0,
         description="PV-sufficiency margin: rail fires when Σ today PV × margin ≥ headroom + load. <1 demands extra cushion.",
-        group="penalty",
-    ),
-    "LP_PV_TRUST_PERCENTILE": OverrideSpec(
-        key="LP_PV_TRUST_PERCENTILE",
-        config_attr="LP_PV_TRUST_PERCENTILE",
-        type_name="float", min_value=0.0, max_value=1.0,
-        description="Percentile of recent skill-log actual/predicted PV ratios used as LP PV bias.",
-        group="penalty",
-    ),
-    "LP_PV_TRUST_LOOKBACK_DAYS": OverrideSpec(
-        key="LP_PV_TRUST_LOOKBACK_DAYS",
-        config_attr="LP_PV_TRUST_LOOKBACK_DAYS",
-        type_name="int", min_value=3, max_value=90,
-        description="How many recent days of forecast_skill_log feed the PV-trust percentile.",
-        group="penalty",
-    ),
-    "LP_PV_TRUST_MIN_BIAS": OverrideSpec(
-        key="LP_PV_TRUST_MIN_BIAS",
-        config_attr="LP_PV_TRUST_MIN_BIAS",
-        type_name="float", min_value=0.3, max_value=1.0,
-        description="Lower clamp on PV-trust bias factor (prevents under-trust on a run of cloudy days).",
-        group="penalty",
-    ),
-    "LP_PV_TRUST_MAX_BIAS": OverrideSpec(
-        key="LP_PV_TRUST_MAX_BIAS",
-        config_attr="LP_PV_TRUST_MAX_BIAS",
-        type_name="float", min_value=1.0, max_value=3.0,
-        description="Upper clamp on PV-trust bias factor (prevents wild over-trust on a P75 outlier).",
         group="penalty",
     ),
     # --- Mode flags

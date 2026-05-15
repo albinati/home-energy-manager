@@ -690,6 +690,38 @@ def bulletproof_forecast_skill_log_job() -> None:
         logger.warning("forecast_skill_log rebuild failed (non-fatal): %s", e)
 
 
+def bulletproof_pv_calibration_refresh_job() -> None:
+    """Recompute the per-hour and per-(hour, cloud-bucket) PV calibration
+    tables from fresh ``pv_realtime_history`` and ``meteo_forecast_value``
+    rows.
+
+    The LP reads these tables to translate Open-Meteo / Quartz forecast PV
+    into the calibrated per-slot expectation. Without a regular refresh the
+    tables drift stale (audit 2026-05-15: 7 days stale, 14-day window —
+    PM under-prediction band shifted by 25% in the missed week and the LP
+    over-grid-charged in the mornings as a result).
+
+    Best-effort: a failure here must not interfere with the rest of the
+    scheduler. Failures are logged and the LP falls back to the previous
+    table contents (or to the flat ``compute_pv_calibration_factor()`` if
+    both tables are empty).
+    """
+    from ..weather import (
+        compute_pv_calibration_hourly_table,
+        compute_pv_calibration_hourly_cloud_table,
+    )
+    try:
+        result_h = compute_pv_calibration_hourly_table()
+        logger.info("pv_calibration_hourly refresh: %s", result_h)
+    except Exception as e:
+        logger.warning("pv_calibration_hourly refresh failed (non-fatal): %s", e)
+    try:
+        result_c = compute_pv_calibration_hourly_cloud_table()
+        logger.info("pv_calibration_hourly_cloud refresh: %s", result_c)
+    except Exception as e:
+        logger.warning("pv_calibration_hourly_cloud refresh failed (non-fatal): %s", e)
+
+
 def bulletproof_night_brief_job() -> None:
     """Daily night digest — today's actuals (V12). Companion to morning brief."""
     from ..analytics.daily_brief import send_night_brief_webhook
@@ -1829,6 +1861,20 @@ def start_background_scheduler() -> None:
                 id="bulletproof_forecast_skill_log",
             )
             logger.info("Forecast skill rebuild cron scheduled (04:15 UTC daily)")
+            # PV calibration refresh — keeps pv_calibration_hourly +
+            # pv_calibration_hourly_cloud current. Runs at 04:30 UTC, after
+            # skill-log rebuild (04:15) and Fox/Daikin rollups (02:30 / 02:35)
+            # so it consumes their fresh outputs. Before the morning brief
+            # (08:00 BST = 07:00 UTC) so the brief reflects the new factors.
+            _background_scheduler.add_job(
+                bulletproof_pv_calibration_refresh_job,
+                CronTrigger(hour=4, minute=30, timezone=ZoneInfo("UTC")),
+                id="bulletproof_pv_calibration_refresh",
+            )
+            logger.info(
+                "PV calibration refresh cron scheduled (04:30 UTC daily) — "
+                "recomputes pv_calibration_hourly + pv_calibration_hourly_cloud"
+            )
             # Daikin LWT→kW per-installation calibration runs INLINE at the top
             # of every LP solve (see src.scheduler.optimizer.run_optimizer →
             # db.refresh_daikin_lwt_kw_calibration). No separate cron — the

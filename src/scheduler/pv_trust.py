@@ -1,201 +1,30 @@
-"""PV-trust helpers for the strict_savings guard rail (issue: #incident-2026-05-15).
+"""PV-sufficiency guard rail (incident 2026-05-15).
 
-Two concerns:
+Under ``ENERGY_STRATEGY_MODE=strict_savings`` (the household's stated policy:
+near-zero grid cost over peak-export profit), the LP previously force-charged
+the battery from grid in the cheap morning window even on sunny days,
+leaving the battery 100% by midday and exporting subsequent PV at the
+Outgoing rate instead of self-consuming. This module decides whether the LP
+should add ``chg[i] ≤ pv_use[i]`` to today-slots strictly before the first
+peak-tariff slot — i.e. block grid → battery when today's PV forecast is
+enough to fill the battery on its own.
 
-1. **P75 upward bias** — When recent days' forecast under-delivers (skill log
-   shows ``actual/predicted`` ratios clustering above 1.0), the LP's
-   ``today_factor`` calibration drags PV expectations down, which then biases
-   the LP toward grid-charging in the morning "just in case". Computing the
-   P-th percentile of the recent ``actual_pv_kwh / predicted_pv_kwh`` ratios
-   (configurable, default P75) gives the LP a robust upper-mid estimate that
-   reduces this drag. The ratio is applied as a scalar multiplier on top of
-   the existing today_factor calibration, only to *today's* slots, only in
-   ``strict_savings`` mode.
-
-2. **Hard PV-sufficiency guard rail** — When the LP's forecast PV for today
-   (after #1) ≥ battery-headroom + remaining-daytime-load × ``margin``, the
-   LP must not grid-charge in any pre-peak slot today. Mirrors the pre-plunge
-   constraint at ``lp_optimizer.py:794`` — ``chg[i] <= pv_use[i]`` for the
-   matched slots. Bounded loss case (genuinely cloudy day after a sunny
-   forecast): one evening hour of grid imp at ~28 p before next-night cheap
-   window — small absolute, capped per-day.
-
-Both knobs default to enabled but only fire under ``ENERGY_STRATEGY_MODE=
-strict_savings``. ``savings_first`` (the alternate mode, peak_export-enabled)
-keeps legacy behaviour untouched.
+Inert under ``savings_first`` (peak-export-enabled mode). The per-hour
+forecast bias (the AM-over / PM-under asymmetry the calibration tables
+already capture) is OUT OF SCOPE here — see
+``src.weather.compute_pv_calibration_hourly_table`` and the daily refresh
+cron in ``runner.bulletproof_pv_calibration_refresh_job``.
 """
 from __future__ import annotations
 
 import logging
-import sqlite3
 from dataclasses import dataclass, field
-from datetime import UTC, date as _date, timedelta
+from datetime import UTC
 from typing import Any
 
 from ..config import config
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class PvTrustBias:
-    """Result of computing the recent forecast-skill bias."""
-
-    factor: float = 1.0
-    """Multiplier to apply on top of today_factor. 1.0 == no bias."""
-    n_samples: int = 0
-    """How many recent days contributed."""
-    percentile: float = 0.75
-    """Percentile used (P75 default)."""
-    raw_ratio: float | None = None
-    """The unclamped percentile value before min/max bounding."""
-    reason: str = ""
-    """Why factor is 1.0 (insufficient data, etc.) or "ok"."""
-    contributing_days: list[str] = field(default_factory=list)
-
-
-def compute_pv_trust_bias(
-    *,
-    db_path: str | None = None,
-    as_of_date_utc: _date | None = None,
-    lookback_days: int | None = None,
-    percentile: float | None = None,
-    min_samples: int | None = None,
-    min_bias: float | None = None,
-    max_bias: float | None = None,
-) -> PvTrustBias:
-    """Compute the P-th percentile of ``actual_pv_kwh / predicted_pv_kwh``
-    over the last ``lookback_days`` days from ``forecast_skill_log``.
-
-    Returns ``PvTrustBias(factor=1.0, reason='...')`` on any of these
-    fallbacks:
-
-    * insufficient samples (``< min_samples`` valid days)
-    * ``predicted_pv_kwh`` sums to zero (degenerate)
-    * exception reading the DB (returns ``factor=1.0, reason='db_error: ...'``)
-
-    The returned ``factor`` is bounded to ``[min_bias, max_bias]`` so a wildly
-    optimistic upper tail does not cascade into a no-grid-charge plan that
-    can't recover overnight.
-
-    All knobs default to the matching ``config.LP_PV_TRUST_*`` values. Pass
-    explicit values from tests / replay scripts.
-    """
-    lookback = int(
-        lookback_days
-        if lookback_days is not None
-        else getattr(config, "LP_PV_TRUST_LOOKBACK_DAYS", 14)
-    )
-    pct = float(
-        percentile
-        if percentile is not None
-        else getattr(config, "LP_PV_TRUST_PERCENTILE", 0.75)
-    )
-    min_n = int(
-        min_samples
-        if min_samples is not None
-        else getattr(config, "LP_PV_TRUST_MIN_SAMPLES", 5)
-    )
-    lo = float(
-        min_bias
-        if min_bias is not None
-        else getattr(config, "LP_PV_TRUST_MIN_BIAS", 0.7)
-    )
-    hi = float(
-        max_bias
-        if max_bias is not None
-        else getattr(config, "LP_PV_TRUST_MAX_BIAS", 1.5)
-    )
-    if lo > hi:
-        lo, hi = hi, lo
-
-    if as_of_date_utc is None:
-        from datetime import datetime
-        as_of_date_utc = datetime.now(UTC).date()
-
-    start = (as_of_date_utc - timedelta(days=lookback)).isoformat()
-    end_excl = as_of_date_utc.isoformat()  # exclude today; today is in-progress
-
-    try:
-        if db_path is None:
-            # Use the project's connection helper so monkey-patches
-            # (replay scripts) take effect.
-            from .. import db as _db
-            conn = _db.get_connection()
-        else:
-            conn = sqlite3.connect(db_path)
-            conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            """
-            SELECT date_utc,
-                   SUM(predicted_pv_kwh) AS pred,
-                   SUM(actual_pv_kwh)    AS actual
-            FROM forecast_skill_log
-            WHERE date_utc >= ?
-              AND date_utc <  ?
-              AND predicted_pv_kwh IS NOT NULL
-              AND actual_pv_kwh    IS NOT NULL
-            GROUP BY date_utc
-            ORDER BY date_utc
-            """,
-            (start, end_excl),
-        ).fetchall()
-        conn.close()
-    except sqlite3.Error as exc:
-        logger.warning("compute_pv_trust_bias: db error %s", exc)
-        return PvTrustBias(factor=1.0, percentile=pct, reason=f"db_error: {exc}")
-
-    # Drop degenerate days (zero predicted PV — usually winter / data gap).
-    DAY_MIN_KWH = 1.0  # 1 kWh predicted over the day — below this, ratios are noisy
-    ratios: list[float] = []
-    contributing: list[str] = []
-    for r in rows:
-        d = dict(r)
-        pred = float(d.get("pred") or 0.0)
-        actual = float(d.get("actual") or 0.0)
-        if pred < DAY_MIN_KWH:
-            continue
-        ratios.append(actual / pred)
-        contributing.append(str(d["date_utc"]))
-
-    if len(ratios) < min_n:
-        return PvTrustBias(
-            factor=1.0,
-            n_samples=len(ratios),
-            percentile=pct,
-            reason=f"insufficient_samples ({len(ratios)}<{min_n})",
-            contributing_days=contributing,
-        )
-
-    raw = _percentile(ratios, pct)
-    clamped = max(lo, min(hi, raw))
-    logger.info(
-        "PV-trust bias: %d days, P%d ratio=%.3f → factor=%.3f (clamp [%.2f, %.2f])",
-        len(ratios), int(pct * 100), raw, clamped, lo, hi,
-    )
-    return PvTrustBias(
-        factor=clamped,
-        n_samples=len(ratios),
-        percentile=pct,
-        raw_ratio=raw,
-        reason="ok",
-        contributing_days=contributing,
-    )
-
-
-def _percentile(xs: list[float], p: float) -> float:
-    """Linear-interp percentile. ``p`` in [0, 1]."""
-    if not xs:
-        return 1.0
-    sorted_xs = sorted(xs)
-    if len(sorted_xs) == 1:
-        return sorted_xs[0]
-    p = max(0.0, min(1.0, p))
-    pos = p * (len(sorted_xs) - 1)
-    lo_i = int(pos)
-    hi_i = min(lo_i + 1, len(sorted_xs) - 1)
-    frac = pos - lo_i
-    return sorted_xs[lo_i] * (1 - frac) + sorted_xs[hi_i] * frac
 
 
 @dataclass
