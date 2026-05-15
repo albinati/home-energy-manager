@@ -1,25 +1,30 @@
-"""today_factor scoped to today + warm-start from yesterday's per-hour table.
+"""today_factor scoping rules in the LP PV-scale closure.
 
 Two behaviors locked in here:
+
 1. Slots in tomorrow's UTC date must NOT receive today's PV-bias factor.
    A cloudy-morning solve at 19:00 today produces today_factor ≈ 0.31; before
    the fix that scalar contaminated tomorrow's morning predictions in the
    same 48h solve. Tomorrow's slots now ignore today_factor entirely.
-2. Hours unobserved today are warm-started from yesterday's per-hour map
-   (persisted in lp_inputs_snapshot.exogenous_snapshot_json) instead of
-   inheriting the median of today's observations.
+
+2. Hours unobserved today get tf=1.0 (no intraday adjustment) — they defer
+   to ``pv_calibration_hourly`` (the multi-day per-hour statistical
+   baseline) instead of pulling a single-day noisy sample on top. The
+   previous "warm-start from yesterday's snapshot" mechanism was removed
+   in 2026-05-15 as part of the PV-trust-guard-rail follow-up:
+   ``compute_today_pv_correction_factor_by_hour`` returns 1.0 for
+   unobserved hours; ``optimizer._run_optimizer_lp`` passes the map
+   through verbatim (no warm-start fill-in).
 """
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
 from src import db
 from src.config import config as app_config
-from src.scheduler.optimizer import _load_yesterday_today_factor_by_hour
 
 
 @pytest.fixture(autouse=True)
@@ -28,60 +33,57 @@ def _isolated_db(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     db.init_db()
 
 
-def _seed_yesterday_snapshot(*, run_id: int, plan_date: str, snapshot_json: str) -> None:
-    """Insert one lp_inputs_snapshot row dated yesterday with the given JSON."""
-    db.save_lp_snapshots(
-        run_id=run_id,
-        inputs_row={
-            "run_at_utc": (datetime.now(UTC) - timedelta(hours=12)).isoformat(),
-            "plan_date": plan_date,
-            "horizon_hours": 48,
-            "soc_initial_kwh": 5.0,
-            "tank_initial_c": 45.0,
-            "indoor_initial_c": 20.0,
-            "soc_source": "test",
-            "tank_source": "test",
-            "indoor_source": "test",
-            "base_load_json": "[]",
-            "micro_climate_offset_c": 0.0,
-            "forecast_fetch_at_utc": None,
-            "exogenous_snapshot_json": snapshot_json,
-            "config_snapshot_json": "{}",
-            "price_quantize_p": 0.1,
-            "peak_threshold_p": 30.0,
-            "cheap_threshold_p": 10.0,
-            "daikin_control_mode": "off",
-            "optimization_preset": "normal",
-            "energy_strategy_mode": "savings_first",
-        },
-        solution_rows=[],
-    )
+def test_unobserved_hours_imputed_to_one_not_yesterday() -> None:
+    """When no observation exists for an hour today, the per-hour map returns
+    1.0 — NOT yesterday's value, NOT today's observed median. The 30-day
+    baseline in ``pv_calibration_hourly`` is the only legitimate signal for
+    unobserved hours.
+    """
+    from src.weather import compute_today_pv_correction_factor_by_hour
 
+    today = datetime.now(UTC).date()
 
-def test_load_yesterday_factor_returns_empty_when_no_history() -> None:
-    """First-day-of-operation: no previous snapshot → return {} (no warm-start)."""
-    assert _load_yesterday_today_factor_by_hour() == {}
+    def _seed(hour: int, kw: float, irr: float) -> None:
+        for i in range(12):
+            ts = datetime.combine(today, datetime.min.time()).replace(
+                hour=hour, minute=i * 5, tzinfo=UTC,
+            )
+            db.save_pv_realtime_sample(
+                captured_at=ts.isoformat().replace("+00:00", "Z"),
+                solar_power_kw=kw,
+                soc_pct=50.0, load_power_kw=0.5,
+                grid_import_kw=0.0, grid_export_kw=kw,
+                battery_charge_kw=0.0, battery_discharge_kw=0.0,
+                source="seed",
+            )
+        ts0 = datetime.combine(today, datetime.min.time()).replace(
+            hour=hour, tzinfo=UTC,
+        )
+        db.save_meteo_forecast(
+            [{
+                "slot_time": ts0.isoformat(),
+                "temp_c": 15.0,
+                "solar_w_m2": irr,
+                "cloud_cover_pct": 0.0,
+            }],
+            today.isoformat(),
+        )
 
+    _seed(9, 2.0, 350.0)   # ratio ~1.5
+    _seed(10, 2.5, 500.0)  # ratio ~1.25
 
-def test_load_yesterday_factor_reads_effective_map_when_present() -> None:
-    """The post-#5 snapshot writes today_factor_effective_by_hour. The loader
-    must prefer it over the raw observed map so the warm-start chains across
-    days (yesterday's effective factor was already a warm-start mix)."""
-    yesterday = (datetime.now(UTC) - timedelta(days=1)).date().isoformat()
-    snapshot_json = '{"weather_adjustment": {"today_factor_by_hour": {"6":0.4}, "today_factor_effective_by_hour": {"6":0.9, "12":1.1, "16":1.4}}}'
-    _seed_yesterday_snapshot(run_id=1, plan_date=yesterday, snapshot_json=snapshot_json)
-    out = _load_yesterday_today_factor_by_hour()
-    # Effective map wins, not the raw observed map (which only has hour 6).
-    assert out == {6: 0.9, 12: 1.1, 16: 1.4}
-
-
-def test_load_yesterday_factor_falls_back_to_raw_for_old_snapshots() -> None:
-    """Pre-#5 snapshots only have today_factor_by_hour. The loader must still
-    return that map so the upgrade is backwards compatible."""
-    yesterday = (datetime.now(UTC) - timedelta(days=1)).date().isoformat()
-    snapshot_json = '{"weather_adjustment": {"today_factor_by_hour": {"7":0.5, "13":1.05}}}'
-    _seed_yesterday_snapshot(run_id=2, plan_date=yesterday, snapshot_json=snapshot_json)
-    assert _load_yesterday_today_factor_by_hour() == {7: 0.5, 13: 1.05}
+    by_hour, diag = compute_today_pv_correction_factor_by_hour()
+    assert by_hour, f"expected non-empty map; diag={diag}"
+    # Imputation policy reported in diag — guards regressions if the
+    # imputation default changes back to median or to a warm-start.
+    assert diag.get("imputation_policy") == "neutral_1.0"
+    # Unobserved hours (any hour not in {9, 10}) get exactly 1.0.
+    assert by_hour[3] == 1.0
+    assert by_hour[15] == 1.0
+    assert by_hour[20] == 1.0
+    # Observed hours keep their measured ratio (not 1.0).
+    assert by_hour[9] != 1.0
+    assert by_hour[10] != 1.0
 
 
 def test_pv_scale_callable_skips_today_factor_for_tomorrow_slots() -> None:
