@@ -32,6 +32,7 @@ from ..physics import (
     predict_passive_daikin_load,
 )
 from ..weather import WeatherLpSeries
+from .pv_trust import PvSufficiencyGuardDiag, evaluate_pv_sufficiency_guard
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,10 @@ class LpPlan:
     temp_outdoor_c: list[float] = field(default_factory=list)
     peak_threshold_pence: float = 0.0
     cheap_threshold_pence: float = 0.0
+    pv_sufficiency_guard: PvSufficiencyGuardDiag | None = None
+    """Audit data for the strict_savings PV-sufficiency guard rail. ``None``
+    when the rail was not evaluated (legacy callers / pre-#incident-2026-05-15
+    snapshots)."""
 
 
 # ---------------------------------------------------------------------------
@@ -793,6 +798,39 @@ def solve_lp(
             if next_neg_within_window[i] and price_line[i] >= 0:
                 prob += chg[i] <= pv_use[i]
 
+    # PV-sufficiency guard rail (issue: 2026-05-15 incident). In
+    # ``strict_savings`` mode, when forecast PV for today ≥ battery headroom
+    # + remaining daytime load × ``LP_PV_SUFFICIENCY_MARGIN``, block grid →
+    # battery for every today-slot strictly before the first peak-tariff
+    # slot. Constraint shape mirrors the pre-plunge rule above (PV → battery
+    # stays allowed via ``pv_use[i]``). See ``src/scheduler/pv_trust.py`` and
+    # ``docs/PV_TRUST_GUARDRAIL.md`` for the design.
+    strict_savings = (
+        (getattr(config, "ENERGY_STRATEGY_MODE", "savings_first") or "savings_first")
+        .strip().lower() == "strict_savings"
+    )
+    pv_guard_diag = evaluate_pv_sufficiency_guard(
+        slot_starts_utc=slot_starts_utc,
+        pv_avail=pv_avail,
+        base_load_kwh=base_load_kwh,
+        price_line=price_line,
+        peak_threshold_p=peak_thr,
+        initial_soc_kwh=float(initial.soc_kwh),
+        soc_max_kwh=float(soc_max),
+        strict_savings=strict_savings,
+    )
+    if pv_guard_diag.applied:
+        for i in pv_guard_diag.pre_peak_slot_indices:
+            prob += chg[i] <= pv_use[i]
+        logger.info(
+            "PV-sufficiency guard rail applied: forecast=%.2f kWh, demand=%.2f kWh, "
+            "margin=%.2f, blocking grid→battery on %d pre-peak slots",
+            pv_guard_diag.forecast_pv_today_kwh,
+            pv_guard_diag.demand_kwh,
+            pv_guard_diag.margin,
+            len(pv_guard_diag.pre_peak_slot_indices),
+        )
+
     # Negative-price discharge lock: dis = 0 when price < 0. Discharging while
     # the grid is paying us to import is strictly dominated — surplus import
     # capacity must flow into chg, e_hp, or exp. Also guarantees the dispatcher
@@ -980,6 +1018,7 @@ def solve_lp(
         objective_pence=0.0,
         peak_threshold_pence=peak_thr,
         cheap_threshold_pence=cheap_thr,
+        pv_sufficiency_guard=pv_guard_diag,
     )
     plan.slot_starts_utc = list(slot_starts_utc)
     plan.price_pence = list(price_pence)

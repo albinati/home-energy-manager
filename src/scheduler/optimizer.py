@@ -1549,6 +1549,35 @@ def _run_optimizer_lp(
             else:
                 effective_factor_by_hour[h] = today_factor_by_hour[h]
 
+    # PV-trust bias (issue: 2026-05-15 incident, docs/PV_TRUST_GUARDRAIL.md).
+    # Under ``strict_savings`` (the user's stated policy: near-zero grid cost
+    # over peak-export profit) compute the P-th percentile of the recent
+    # ``forecast_skill_log`` actual/predicted PV ratios and apply it as a
+    # scalar multiplier on top of today_factor. Only affects today's slots;
+    # tomorrow stays on the cloud/hour calibration alone (today's observed
+    # bias is not evidence for tomorrow's weather).
+    from .pv_trust import compute_pv_trust_bias
+    _strict_savings_mode = (
+        (config.ENERGY_STRATEGY_MODE or "savings_first").strip().lower()
+        == "strict_savings"
+    )
+    _pv_trust_enabled = bool(
+        getattr(config, "LP_PV_TRUST_ENABLED", True)
+    )
+    if _strict_savings_mode and _pv_trust_enabled:
+        pv_trust = compute_pv_trust_bias(as_of_date_utc=today_utc_date)
+    else:
+        from .pv_trust import PvTrustBias
+        pv_trust = PvTrustBias(
+            factor=1.0,
+            reason="disabled" if not _pv_trust_enabled else "not_strict_savings",
+        )
+    logger.info(
+        "PV-trust bias: factor=%.3f n=%d P%d reason=%s",
+        pv_trust.factor, pv_trust.n_samples,
+        int(pv_trust.percentile * 100), pv_trust.reason,
+    )
+
     def _pv_scale_callable(
         hour_utc: int,
         cloud_pct: float,
@@ -1567,10 +1596,14 @@ def _run_optimizer_lp(
             return cal
         # Today's slots: prefer per-hour map (with warm-start fill); scalar fallback.
         if effective_factor_by_hour:
-            return cal * effective_factor_by_hour.get(int(hour_utc), 1.0)
-        if today_factor_by_hour:
-            return cal * today_factor_by_hour.get(int(hour_utc), 1.0)
-        return cal * today_factor
+            tf = effective_factor_by_hour.get(int(hour_utc), 1.0)
+        elif today_factor_by_hour:
+            tf = today_factor_by_hour.get(int(hour_utc), 1.0)
+        else:
+            tf = today_factor
+        # PV-trust bias (Option B): upward scalar from recent skill log,
+        # active only when strict_savings + the table has enough samples.
+        return cal * tf * pv_trust.factor
 
     weather = forecast_to_lp_inputs(forecast, starts, pv_scale=_pv_scale_callable)
     initial = read_lp_initial_state(daikin)
@@ -1620,6 +1653,18 @@ def _run_optimizer_lp(
             ) if effective_factor_by_hour else [],
             # #1 diag — applied today_factor only to today's UTC date.
             "today_factor_scoped_to_utc_date": today_utc_date.isoformat(),
+            # PV-trust bias (incident 2026-05-15). Applied IN ADDITION to
+            # today_factor when strict_savings + LP_PV_TRUST_ENABLED. 1.0
+            # means "not active" (either insufficient skill-log samples or
+            # mode/flag off).
+            "pv_trust_bias_factor": round(float(pv_trust.factor), 4),
+            "pv_trust_bias_n_samples": int(pv_trust.n_samples),
+            "pv_trust_bias_percentile": float(pv_trust.percentile),
+            "pv_trust_bias_raw_ratio": (
+                round(float(pv_trust.raw_ratio), 4)
+                if pv_trust.raw_ratio is not None else None
+            ),
+            "pv_trust_bias_reason": pv_trust.reason,
         },
         "temperature_adjustment": {
             "source": "forecast_skill_log",
@@ -1649,6 +1694,14 @@ def _run_optimizer_lp(
     if not plan.ok:
         logger.warning("PuLP status %s — falling back to heuristic classifier", plan.status)
         return _run_optimizer_heuristic(fox, daikin)
+
+    # Fold the PV-sufficiency guard rail audit into the exogenous snapshot
+    # (decided inside solve_lp; persisted alongside the inputs for the
+    # History view + replay). Defensive: pre-incident plans may not have it.
+    if getattr(plan, "pv_sufficiency_guard", None) is not None:
+        exogenous_snapshot["pv_sufficiency_guard"] = (
+            plan.pv_sufficiency_guard.to_snapshot_dict()
+        )
 
     lp_slots = lp_plan_to_slots(plan)
     counts = {"negative": 0, "cheap": 0, "solar_charge": 0, "standard": 0, "peak": 0, "peak_export": 0}
