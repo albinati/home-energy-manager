@@ -1101,16 +1101,27 @@ def compute_today_pv_correction_factor_by_hour(
         these and applies the same correction at every hour, so
         afternoons stay under-forecast even after the adjuster runs.
       - With per-hour ratios, an observation at hour 9 (e.g. actual/cal
-        = 1.20) lifts the prediction at hour 9 specifically. Hours we
-        haven't observed yet inherit the median of observed hours so
-        the LP still sees today's general "weather vibe" applied to
-        unobserved future hours.
+        = 1.20) lifts the prediction at hour 9 specifically.
+
+    Imputation policy (2026-05-15 fix):
+      - Hours WITHOUT today's observation are set to ``1.0`` (no
+        intraday adjustment). The legitimate multi-day deviation pattern
+        is already in ``pv_calibration_hourly`` (the ``cal`` term that
+        is stacked separately at apply-time). Imputing yesterday's
+        factor or today's observed median for unobserved hours pulls a
+        SINGLE noisy sample on top of the statistical baseline, which is
+        wrong: outliers cascade into the next day's plan. Setting
+        ``tf=1.0`` for unobserved hours defers cleanly to the 30-day
+        statistical pattern. AM hours that ALREADY happened today (and
+        underperformed) still pull AM down via observed; PM hours that
+        haven't happened yet trust the long-term per-hour shape, which
+        is precisely what we want for a site with structural AM-over /
+        PM-under asymmetry.
 
     Returns ``(factor_by_hour, diag)``:
       - ``factor_by_hour`` covers all 24 UTC hours, populated for hours
         that had both forecast + actual today (clamped per-hour) and
-        with the observed median for the rest. Returns ``{}`` when not
-        enough data exists.
+        ``1.0`` for the rest. Returns ``{}`` when not enough data exists.
       - ``diag`` includes ``observed_hours``, ``imputed_hours``,
         ``median_ratio``, ``ratios_per_hour``, ``n_observed``,
         ``clamped_hours``.
@@ -1226,13 +1237,20 @@ def compute_today_pv_correction_factor_by_hour(
     else:
         median = (sorted_obs[n_obs // 2 - 1] + sorted_obs[n_obs // 2]) / 2.0
 
+    # Imputation policy: unobserved hours get factor 1.0 (no intraday
+    # adjustment), NOT yesterday's value or today's observed median.
+    # The 30-day per-hour deviation pattern is in ``pv_calibration_hourly``
+    # (the ``cal`` term in the LP's _pv_scale_callable). Stacking a
+    # single-day noisy sample on top would propagate outliers — see
+    # 2026-05-15 incident follow-up. Observed hours still pull today's
+    # weather in; unobserved hours defer cleanly to the multi-day baseline.
     factor_by_hour: dict[int, float] = {h: 1.0 for h in range(24)}
     imputed_hours: list[int] = []
     for h in range(24):
         if h in observed:
             factor_by_hour[h] = observed[h]
         else:
-            factor_by_hour[h] = median
+            # factor_by_hour[h] stays at the init value 1.0 — no override.
             imputed_hours.append(h)
 
     return factor_by_hour, {
@@ -1240,6 +1258,7 @@ def compute_today_pv_correction_factor_by_hour(
         "n_imputed": len(imputed_hours),
         "median_ratio": round(median, 4),
         "median_source": "unclamped_only" if median_source is unclamped else "all_observed",
+        "imputation_policy": "neutral_1.0",  # was "median_of_observed" pre 2026-05-15
         "ratios_per_hour": {h: round(v, 4) for h, v in observed.items()},
         "imputed_hours": imputed_hours,
         "clamped_hours": clamped_hours,
