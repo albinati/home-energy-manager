@@ -225,6 +225,14 @@ WHITELIST: dict[str, OverrideSpec] = {
         description="Piecewise segments for inverter stress (more = slower).",
         group="solver",
     ),
+    # --- PV-sufficiency guard rail (incident 2026-05-15; docs/PV_TRUST_GUARDRAIL.md)
+    "LP_PV_SUFFICIENCY_MARGIN": OverrideSpec(
+        key="LP_PV_SUFFICIENCY_MARGIN",
+        config_attr="LP_PV_SUFFICIENCY_MARGIN",
+        type_name="float", min_value=0.5, max_value=2.0,
+        description="PV-sufficiency margin: rail fires when Σ today PV × margin ≥ headroom + load. <1 demands extra cushion.",
+        group="penalty",
+    ),
     # --- Mode flags
     "OPTIMIZATION_PRESET": OverrideSpec(
         key="OPTIMIZATION_PRESET",

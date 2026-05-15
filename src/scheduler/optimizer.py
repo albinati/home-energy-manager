@@ -1650,6 +1650,14 @@ def _run_optimizer_lp(
         logger.warning("PuLP status %s — falling back to heuristic classifier", plan.status)
         return _run_optimizer_heuristic(fox, daikin)
 
+    # Fold the PV-sufficiency guard rail audit into the exogenous snapshot
+    # (decided inside solve_lp; persisted alongside the inputs for the
+    # History view + replay). Defensive: pre-incident plans may not have it.
+    if getattr(plan, "pv_sufficiency_guard", None) is not None:
+        exogenous_snapshot["pv_sufficiency_guard"] = (
+            plan.pv_sufficiency_guard.to_snapshot_dict()
+        )
+
     lp_slots = lp_plan_to_slots(plan)
     counts = {"negative": 0, "cheap": 0, "solar_charge": 0, "standard": 0, "peak": 0, "peak_export": 0}
     for s in lp_slots:

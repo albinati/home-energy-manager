@@ -1,0 +1,390 @@
+#!/usr/bin/env python
+"""15-day PV-sufficiency guard rail replay (incident 2026-05-15).
+
+Re-solves the LP for each of the last N UTC days (anchored on the first
+morning run of that UTC date) under two variants:
+
+  - baseline — guard OFF (matches pre-fix behaviour)
+  - guard ON — strict_savings + LP_PV_SUFFICIENCY_GUARD applied
+
+For every variant the script reports £ cost-at-actual (import × Agile_p −
+export × Outgoing_p) plus the £ delta vs baseline. Negative delta means the
+guard would have saved money on that day.
+
+Read-only: never touches Fox / Daikin / network, never writes to the DB.
+
+Usage:
+    DB_PATH=/srv/hem/data/energy_state.db \
+        python scripts/replay_pv_trust.py --days 14
+
+Optional flags:
+    --days N             Trailing days to include (default 14)
+    --margin M           LP_PV_SUFFICIENCY_MARGIN (default 1.0)
+    --as-of YYYY-MM-DD   Anchor date for the trailing window (default: today UTC)
+    --json               Emit JSON to stdout instead of the markdown table
+
+Designed to be runnable inside the prod container:
+    docker exec hem python /app/scripts/replay_pv_trust.py --days 14
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sqlite3
+import sys
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from datetime import UTC, date as _date, datetime, timedelta
+from typing import Any, Iterator
+from zoneinfo import ZoneInfo
+
+
+def _install_readonly_db() -> None:
+    """Monkey-patch ``src.db.get_connection`` to open the DB in SQLite URI
+    read-only mode. This lets the replay run safely against a prod DB mounted
+    read-only inside a container; SQLite otherwise tries to create journal
+    files and fails on a read-only filesystem.
+    """
+    from src import db as _db
+    from src.config import config as _cfg
+    db_path = os.path.abspath(_cfg.DB_PATH)
+    uri = f"file:{db_path}?mode=ro&immutable=1"
+
+    def _ro_connection(*_args: Any, **_kwargs: Any) -> sqlite3.Connection:
+        conn = sqlite3.connect(uri, uri=True, timeout=15.0)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    _db.get_connection = _ro_connection  # type: ignore[assignment]
+
+
+@dataclass
+class VariantResult:
+    """Per-variant solve outcome for one day."""
+
+    label: str
+    ok: bool
+    error: str = ""
+    cost_p: float = 0.0
+    grid_import_kwh: float = 0.0
+    grid_export_kwh: float = 0.0
+    soc_terminal_kwh: float = 0.0
+    guard_applied: bool = False
+    guard_reason: str = ""
+    forecast_pv_today_kwh: float = 0.0
+    expected_load_today_kwh: float = 0.0
+    battery_headroom_kwh: float = 0.0
+    demand_kwh: float = 0.0
+    n_pre_peak_slots: int = 0
+    initial_soc_kwh: float = 0.0
+
+
+@dataclass
+class DayResult:
+    """Per-day comparison."""
+
+    date_local: str = ""
+    run_id: int = 0
+    error: str = ""
+    variants: dict[str, VariantResult] = field(default_factory=dict)
+
+    def baseline_cost_p(self) -> float:
+        if "baseline" not in self.variants or not self.variants["baseline"].ok:
+            return 0.0
+        return self.variants["baseline"].cost_p
+
+    def delta_p(self, variant_label: str) -> float:
+        if variant_label not in self.variants or not self.variants[variant_label].ok:
+            return 0.0
+        return self.variants[variant_label].cost_p - self.baseline_cost_p()
+
+
+@contextmanager
+def _patched(**kwargs: Any) -> Iterator[None]:
+    """Temporarily set attributes on ``src.config.config``. Restores on exit."""
+    from src.config import config
+    prior: dict[str, Any] = {}
+    try:
+        for k, v in kwargs.items():
+            prior[k] = getattr(config, k, None)
+            setattr(config, k, v)
+        yield
+    finally:
+        for k, v in prior.items():
+            setattr(config, k, v)
+
+
+def _solve_variant(
+    *,
+    run_id: int,
+    variant_label: str,
+    guard_enabled: bool,
+    margin: float,
+) -> VariantResult:
+    """Replay one LP solve under the given variant. Pure function, no writes."""
+    from src import db
+    from src.scheduler.lp_optimizer import LpInitialState, solve_lp
+    from src.scheduler.lp_replay import (
+        _build_export_prices,
+        _parse_iso,
+        _reconstruct_weather,
+    )
+    from src.config import config as _cfg
+
+    inputs = db.get_lp_inputs(run_id)
+    if not inputs:
+        return VariantResult(label=variant_label, ok=False, error="no lp_inputs_snapshot")
+    slots = db.get_lp_solution_slots(run_id)
+    if not slots:
+        return VariantResult(label=variant_label, ok=False, error="no lp_solution_snapshot")
+
+    slot_starts_utc: list[datetime] = []
+    price_pence: list[float] = []
+    for s in slots:
+        try:
+            slot_starts_utc.append(_parse_iso(str(s["slot_time_utc"])))
+        except (KeyError, ValueError, TypeError) as e:
+            return VariantResult(label=variant_label, ok=False, error=f"bad slot_time_utc: {e}")
+        price_pence.append(float(s.get("price_p") or 0.0))
+
+    try:
+        base_load_kwh = [float(x) for x in json.loads(inputs.get("base_load_json") or "[]")]
+    except (TypeError, ValueError, json.JSONDecodeError) as e:
+        return VariantResult(label=variant_label, ok=False, error=f"bad base_load_json: {e}")
+    if len(base_load_kwh) != len(slot_starts_utc):
+        return VariantResult(
+            label=variant_label, ok=False,
+            error=f"base_load length {len(base_load_kwh)} != slot count {len(slot_starts_utc)}",
+        )
+
+    initial = LpInitialState(
+        soc_kwh=float(inputs.get("soc_initial_kwh") or 0.0),
+        tank_temp_c=float(inputs.get("tank_initial_c") or 45.0),
+    )
+
+    weather, fidelity = _reconstruct_weather(
+        str(inputs.get("run_at_utc") or ""),
+        slot_starts_utc,
+        forecast_fetch_at_utc=str(inputs.get("forecast_fetch_at_utc") or ""),
+    )
+    if fidelity == "missing":
+        return VariantResult(label=variant_label, ok=False, error="weather snapshot missing")
+
+    export_price_pence = _build_export_prices(slot_starts_utc)
+    tz = ZoneInfo(_cfg.BULLETPROOF_TIMEZONE)
+
+    with _patched(
+        LP_PV_SUFFICIENCY_GUARD=guard_enabled,
+        LP_PV_SUFFICIENCY_MARGIN=margin,
+        ENERGY_STRATEGY_MODE="strict_savings",
+    ):
+        plan = solve_lp(
+            slot_starts_utc=slot_starts_utc,
+            price_pence=price_pence,
+            base_load_kwh=base_load_kwh,
+            weather=weather,
+            initial=initial,
+            tz=tz,
+            micro_climate_offset_c=0.0,
+            micro_climate_offset_by_hour_c={},
+            export_price_pence=export_price_pence,
+        )
+
+    if not plan.ok:
+        return VariantResult(
+            label=variant_label, ok=False,
+            error=f"solver status: {plan.status}",
+        )
+
+    cost = 0.0
+    for i in range(len(plan.import_kwh)):
+        imp_kwh = float(plan.import_kwh[i])
+        exp_kwh = float(plan.export_kwh[i])
+        ip = float(price_pence[i])
+        ep = float(export_price_pence[i]) if export_price_pence else float(_cfg.EXPORT_RATE_PENCE)
+        cost += imp_kwh * ip - exp_kwh * ep
+
+    g = plan.pv_sufficiency_guard
+    return VariantResult(
+        label=variant_label,
+        ok=True,
+        cost_p=cost,
+        grid_import_kwh=sum(plan.import_kwh),
+        grid_export_kwh=sum(plan.export_kwh),
+        soc_terminal_kwh=plan.soc_kwh[-1] if plan.soc_kwh else 0.0,
+        guard_applied=(g.applied if g else False),
+        guard_reason=(g.reason if g else ""),
+        forecast_pv_today_kwh=(g.forecast_pv_today_kwh if g else 0.0),
+        expected_load_today_kwh=(g.expected_load_today_kwh if g else 0.0),
+        battery_headroom_kwh=(g.battery_headroom_kwh if g else 0.0),
+        demand_kwh=(g.demand_kwh if g else 0.0),
+        n_pre_peak_slots=(len(g.pre_peak_slot_indices) if g else 0),
+        initial_soc_kwh=float(initial.soc_kwh),
+    )
+
+
+def replay_day(date_local: str, *, margin: float = 1.0) -> DayResult:
+    """Run baseline + guard variants for the morning-LP solve of ``date_local``
+    (YYYY-MM-DD, UTC). Picks the EARLIEST run in the UTC day so the LP
+    horizon covers a full day of PV — late-evening runs (BST → prior UTC
+    day) would land slot[0] at 22:00 UTC with no PV in scope."""
+    from src.scheduler.lp_replay import list_run_ids_for_date, _parse_iso
+
+    res = DayResult(date_local=date_local)
+    try:
+        target_utc = _date.fromisoformat(date_local)
+    except ValueError:
+        res.error = f"invalid date: {date_local}"
+        return res
+
+    candidates: list[tuple[int, str]] = []
+    for d in (
+        (target_utc - timedelta(days=1)).isoformat(),
+        target_utc.isoformat(),
+        (target_utc + timedelta(days=1)).isoformat(),
+    ):
+        candidates.extend(list_run_ids_for_date(d))
+    target_start = datetime.combine(target_utc, datetime.min.time()).replace(tzinfo=UTC)
+    target_noon = target_start + timedelta(hours=12)
+    morning_runs = [
+        (rid, ts) for (rid, ts) in candidates
+        if target_start <= _parse_iso(ts) < target_noon
+    ]
+    morning_runs.sort(key=lambda x: x[1])
+    if not morning_runs:
+        res.error = "no morning LP run with snapshot for this UTC date"
+        return res
+    run_id = morning_runs[0][0]
+    res.run_id = run_id
+
+    res.variants["baseline"] = _solve_variant(
+        run_id=run_id, variant_label="baseline",
+        guard_enabled=False, margin=margin,
+    )
+    res.variants["guard"] = _solve_variant(
+        run_id=run_id, variant_label="guard",
+        guard_enabled=True, margin=margin,
+    )
+    return res
+
+
+def _fmt_p(p: float) -> str:
+    return f"{p/100:+8.3f} £"
+
+
+def _fmt_p_abs(p: float) -> str:
+    return f"{p/100:8.3f} £"
+
+
+def main(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", maxsplit=1)[0])
+    ap.add_argument("--days", type=int, default=14)
+    ap.add_argument("--margin", type=float, default=1.0)
+    ap.add_argument("--as-of", default=None)
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args(argv)
+
+    _install_readonly_db()
+
+    if args.as_of:
+        try:
+            end = _date.fromisoformat(args.as_of)
+        except ValueError:
+            print(f"bad --as-of: {args.as_of}", file=sys.stderr)
+            return 2
+    else:
+        end = datetime.now(UTC).date()
+    start = end - timedelta(days=args.days)
+    dates = [(end - timedelta(days=k)).isoformat() for k in range(args.days, 0, -1)]
+
+    rows: list[DayResult] = []
+    for d in dates:
+        rows.append(replay_day(d, margin=args.margin))
+
+    if args.json:
+        out = {
+            "window": {"start": start.isoformat(), "end": end.isoformat(), "days": args.days},
+            "config": {"margin": args.margin},
+            "rows": [
+                {
+                    "date": r.date_local,
+                    "run_id": r.run_id,
+                    "error": r.error,
+                    "variants": {
+                        v.label: {
+                            "ok": v.ok, "error": v.error,
+                            "cost_p": v.cost_p,
+                            "delta_baseline_p": r.delta_p(v.label),
+                            "import_kwh": v.grid_import_kwh,
+                            "export_kwh": v.grid_export_kwh,
+                            "guard_applied": v.guard_applied,
+                            "guard_reason": v.guard_reason,
+                            "forecast_pv_today_kwh": v.forecast_pv_today_kwh,
+                            "demand_kwh": v.demand_kwh,
+                        }
+                        for v in r.variants.values()
+                    },
+                }
+                for r in rows
+            ],
+        }
+        print(json.dumps(out, indent=2))
+        return 0
+
+    print()
+    print(f"PV-sufficiency guard rail replay over {args.days} days ({start} .. {end})")
+    print(f"  margin={args.margin}")
+    print()
+    header = (
+        f"  {'Date':<12} {'run_id':>6} "
+        f"{'baseline':>10} {'guard':>10}    "
+        f"{'Δguard':>10}  "
+        f"{'fired':>5}  {'reason':<18}"
+    )
+    print(header)
+    print("  " + "-" * (len(header) - 2))
+
+    sum_baseline = 0.0
+    sum_guard = 0.0
+    n_fired = 0
+    for r in rows:
+        if r.error:
+            print(f"  {r.date_local:<12} {'-':>6} {'-':>10} {'-':>10}    {'-':>10}  "
+                  f"{'-':>5}  {r.error:<18}")
+            continue
+        b = r.variants.get("baseline")
+        g = r.variants.get("guard")
+        if not (b and g and b.ok and g.ok):
+            note = next((v.error for v in r.variants.values() if v and not v.ok), "fail")
+            print(f"  {r.date_local:<12} {r.run_id:>6} {'-':>10} {'-':>10}    {'-':>10}  "
+                  f"{'-':>5}  {note[:18]:<18}")
+            continue
+        sum_baseline += b.cost_p
+        sum_guard += g.cost_p
+        if g.guard_applied:
+            n_fired += 1
+        print(
+            f"  {r.date_local:<12} {r.run_id:>6} "
+            f"{_fmt_p_abs(b.cost_p):>10} {_fmt_p_abs(g.cost_p):>10}    "
+            f"{_fmt_p(r.delta_p('guard')):>10}  "
+            f"{'Y' if g.guard_applied else 'n':>5}  {g.guard_reason[:18]:<18}"
+        )
+
+    print("  " + "-" * (len(header) - 2))
+    print(
+        f"  {'TOTAL':<12} {'':>6} "
+        f"{_fmt_p_abs(sum_baseline):>10} {_fmt_p_abs(sum_guard):>10}    "
+        f"{_fmt_p(sum_guard - sum_baseline):>10}  fired={n_fired}/{args.days}"
+    )
+    print()
+    print(
+        f"  Annualised (× 365 / {args.days}): "
+        f"{_fmt_p((sum_guard - sum_baseline) * 365.0 / args.days)}"
+    )
+    print()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -772,6 +772,18 @@ class Config:
     # days where the negative slot was >24 h ahead — only 33% of charge slots
     # were in the cheap quartile on those days.
     LP_PLUNGE_PREP_HOURS: int = int(os.getenv("LP_PLUNGE_PREP_HOURS", "12"))
+
+    # --- PV-sufficiency guard rail (incident 2026-05-15; docs/PV_TRUST_GUARDRAIL.md)
+    # In ``strict_savings`` mode, block grid → battery for every today-slot
+    # strictly before the first peak-tariff slot when ``Σ forecast PV today ×
+    # MARGIN ≥ (battery headroom + Σ load today)``. ``MARGIN < 1`` demands
+    # extra cushion before the rail fires (more grid-charging allowed);
+    # ``> 1`` is more aggressive. Inert under ``savings_first``.
+    LP_PV_SUFFICIENCY_GUARD: bool = (
+        os.getenv("LP_PV_SUFFICIENCY_GUARD", "true").strip().lower() in ("1", "true", "yes")
+    )
+    LP_PV_SUFFICIENCY_MARGIN: float = float(os.getenv("LP_PV_SUFFICIENCY_MARGIN", "1.0"))
+
     # Inverter stress cost: piecewise-linear quadratic approximation on battery power per slot.
     # At nominal inverter power (MAX_INVERTER_KW), the penalty equals this value (p/kWh).
     # 0 = disabled. Recommended: 0.05–0.20. Works alongside or instead of TV penalties.
