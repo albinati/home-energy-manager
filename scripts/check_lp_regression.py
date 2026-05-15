@@ -1,12 +1,24 @@
 #!/usr/bin/env python
 """Pre-merge regression gate: did this LP-touching commit make the planner worse?
 
+Two comparison modes:
+
+A) **Frozen baseline JSON** (legacy / fallback) — compares against
+   ``tests/fixtures/lp_regression_baseline.json``. Refreshed only after an
+   accepted strategy shift (``--refresh-baseline``). Drifts stale as
+   non-baseline-refreshing PRs land, surfacing false positives weeks after
+   the actual change. **Kept for back-compat / CI gate stability.**
+
+B) **vs ref** (preferred per-PR check) — ``--vs-ref=main`` runs the replay
+   at the named git ref via a temporary worktree + subprocess, then on the
+   current branch, then reports per-day deltas. Apples-to-apples on the
+   same prod DB. Origin of any change is localised to the PR + per-day
+   row, with no frozen-JSON dance. See ``docs/LP_REGRESSION_WORKFLOW.md``.
+
 For each historical day in the last ``--days`` (default 14), replays the LP via
 :func:`src.scheduler.lp_replay.replay_day` in **forward mode** (current code on
 the day's snapshot inputs) and scores the planned dispatch against the actually-
-published Agile rates. Compares the **total replayed cost** across the window
-against a frozen baseline pinned in
-``tests/fixtures/lp_regression_baseline.json``.
+published Agile rates.
 
 **Exit code semantics:**
 
@@ -51,7 +63,10 @@ import argparse
 import json
 import logging
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -226,6 +241,232 @@ def _detect_git_sha() -> str | None:
 # --------------------------------------------------------------------------
 # Top-level orchestration
 # --------------------------------------------------------------------------
+
+def _run_replay_at_ref(
+    ref: str,
+    *,
+    days: int,
+    mode: str,
+) -> dict:
+    """Run the regression replay at a different git ref via a temporary worktree.
+
+    Used by ``--vs-ref`` mode. Spawns a subprocess running THIS SAME SCRIPT
+    inside the worktree (so its imports come from ``ref``'s ``src/`` layout)
+    with ``--no-baseline-check`` so it just emits totals + per-day costs as
+    JSON. Returns the parsed JSON dict.
+
+    The worktree shares the prod DB (env ``DB_PATH`` is inherited), so both
+    refs see EXACTLY the same input data — apples-to-apples comparison.
+
+    Caveat — the worktree must use the same Python interpreter / venv. We
+    pin ``sys.executable`` for that. If the ref pre-dates a dependency the
+    current venv lacks, the subprocess will fail — surface the error and
+    stop.
+
+    The worktree is always cleaned up (best-effort) on exit.
+    """
+    try:
+        ref_sha = subprocess.run(
+            ["git", "rev-parse", ref],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(f"cannot resolve git ref {ref!r}: {exc.stderr}") from exc
+
+    worktree = Path(tempfile.mkdtemp(prefix="lp-reg-ref-"))
+    out_json = worktree / "_lp_replay_out.json"
+    try:
+        subprocess.run(
+            ["git", "worktree", "add", "--detach", str(worktree), ref_sha],
+            check=True,
+            capture_output=True,
+        )
+        # Always invoke THIS script (the current branch's version) — its
+        # ``--no-baseline-check`` flag is part of Patch 2 and predates no
+        # earlier ref. ``PYTHONPATH=<worktree>`` forces all ``src.*`` imports
+        # to come from the ref's source tree, so the LP behaviour measured
+        # is at the ref, while the orchestrator (this script) is at HEAD.
+        env = {**os.environ, "PYTHONPATH": str(worktree)}
+        subprocess.run(
+            [
+                sys.executable, str(Path(__file__).resolve()),
+                "--days", str(days),
+                "--mode", mode,
+                "--json", str(out_json),
+                "--no-baseline-check",
+                "--quiet",
+            ],
+            cwd=str(worktree),
+            env=env,
+            check=True,
+        )
+        data = json.loads(out_json.read_text())
+        data["_ref_sha"] = ref_sha
+        return data
+    finally:
+        # `git worktree remove` is the right cleanup. shutil rmtree is the
+        # belt-and-braces fallback when the worktree was never registered
+        # (e.g. the `git worktree add` itself failed).
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", str(worktree)],
+            capture_output=True,
+            check=False,
+        )
+        if worktree.exists():
+            shutil.rmtree(worktree, ignore_errors=True)
+
+
+@dataclass
+class VsRefRow:
+    """One day's comparison: cost at ref vs cost on current branch."""
+    date: str
+    ref_cost_p: float
+    current_cost_p: float
+    delta_p: float
+    classification: str  # win / loss / flat / missing-ref / missing-current
+    recalc_count: int
+
+
+@dataclass
+class VsRefReport:
+    ref: str
+    ref_sha: str
+    days_back: int
+    mode: str
+    fail_threshold_p: float
+    rows: list[VsRefRow] = field(default_factory=list)
+    ref_total_p: float = 0.0
+    current_total_p: float = 0.0
+    delta_total_p: float = 0.0
+
+    @property
+    def passed(self) -> bool:
+        return self.delta_total_p <= self.fail_threshold_p
+
+
+def run_vs_ref(
+    *,
+    ref: str,
+    days_back: int,
+    mode: str,
+    fail_threshold_p: float,
+) -> VsRefReport:
+    """Run the replay at ``ref`` AND on the current branch; return per-day
+    comparison.
+
+    Both replays use the SAME prod DB (via the inherited ``DB_PATH`` env),
+    so the only delta is code. Per-day numbers let the caller localise the
+    origin of any aggregate change.
+    """
+    ref_data = _run_replay_at_ref(ref, days=days_back, mode=mode)
+    # Run the current-branch replay in-process.
+    current_report = run_check(
+        days_back=days_back,
+        baseline_path=Path("/dev/null"),  # forces no_baseline_yet branch
+        fail_threshold_p=fail_threshold_p,
+        refresh_baseline=False,
+        mode=mode,
+    )
+    ref_days = {d["date"]: d for d in ref_data.get("days", [])}
+    cur_days = {d.date: d for d in current_report.days}
+    all_dates = sorted(set(ref_days) | set(cur_days))
+
+    report = VsRefReport(
+        ref=ref,
+        ref_sha=str(ref_data.get("_ref_sha", "")),
+        days_back=days_back,
+        mode=mode,
+        fail_threshold_p=fail_threshold_p,
+    )
+    for d in all_dates:
+        r = ref_days.get(d) or {}
+        c = cur_days.get(d)
+        r_ok = bool(r.get("ok")) if r else False
+        c_ok = bool(c.ok) if c else False
+        if not r_ok and not c_ok:
+            continue
+        if not r_ok:
+            row = VsRefRow(
+                date=d, ref_cost_p=0.0,
+                current_cost_p=float(c.total_replayed_cost_p) if c else 0.0,
+                delta_p=0.0, classification="missing-ref",
+                recalc_count=int(c.recalc_count) if c else 0,
+            )
+            report.rows.append(row)
+            continue
+        if not c_ok:
+            row = VsRefRow(
+                date=d, ref_cost_p=float(r.get("total_replayed_cost_p", 0.0)),
+                current_cost_p=0.0, delta_p=0.0, classification="missing-current",
+                recalc_count=int(r.get("recalc_count", 0)),
+            )
+            report.rows.append(row)
+            continue
+        ref_cost = float(r.get("total_replayed_cost_p", 0.0))
+        cur_cost = float(c.total_replayed_cost_p)
+        delta = cur_cost - ref_cost
+        if delta < -1.0:
+            cls = "win"
+        elif delta > 1.0:
+            cls = "loss"
+        else:
+            cls = "flat"
+        report.rows.append(VsRefRow(
+            date=d, ref_cost_p=ref_cost, current_cost_p=cur_cost,
+            delta_p=delta, classification=cls,
+            recalc_count=int(c.recalc_count),
+        ))
+        report.ref_total_p += ref_cost
+        report.current_total_p += cur_cost
+    report.delta_total_p = report.current_total_p - report.ref_total_p
+    return report
+
+
+def _print_vs_ref_report(report: VsRefReport) -> None:
+    print()
+    print("=" * 84)
+    print(
+        f"LP regression — CURRENT vs {report.ref} ({report.ref_sha[:8]}) "
+        f"over last {report.days_back} days, mode={report.mode}"
+    )
+    print("=" * 84)
+    print(
+        f"  {'date':>12}  {'recalcs':>7}  "
+        f"{'ref £':>+10}  {'current £':>+10}  {'Δ £':>+8}  class"
+    )
+    print("  " + "-" * 78)
+    for r in report.rows:
+        if r.classification in ("missing-ref", "missing-current"):
+            print(
+                f"  {r.date:>12}  {r.recalc_count:>7}  "
+                f"{r.ref_cost_p/100:>+9.2f}  {r.current_cost_p/100:>+9.2f}  "
+                f"{'—':>+8}  {r.classification}"
+            )
+            continue
+        print(
+            f"  {r.date:>12}  {r.recalc_count:>7}  "
+            f"{r.ref_cost_p/100:>+9.2f}  {r.current_cost_p/100:>+9.2f}  "
+            f"{r.delta_p/100:>+7.2f}  {r.classification}"
+        )
+    print("  " + "-" * 78)
+    print(
+        f"  {'TOTAL':>12}  {'':>7}  "
+        f"{report.ref_total_p/100:>+9.2f}  {report.current_total_p/100:>+9.2f}  "
+        f"{report.delta_total_p/100:>+7.2f}"
+    )
+    print()
+    wins = sum(1 for r in report.rows if r.classification == "win")
+    losses = sum(1 for r in report.rows if r.classification == "loss")
+    flat = sum(1 for r in report.rows if r.classification == "flat")
+    print(f"  Pattern: wins={wins}  losses={losses}  flat={flat}  "
+          f"(threshold |Δ|>1 p; allowed regression +{report.fail_threshold_p/100:.2f} £)")
+    if report.passed:
+        print(f"  VERDICT: PASS — current branch ≤ {report.ref} + threshold")
+    else:
+        print(f"  VERDICT: FAIL — current branch +£{report.delta_total_p/100:.2f} vs {report.ref}; "
+              "see the loss rows above for which days drove the regression.")
+    print()
+
 
 def run_check(
     *,
@@ -555,6 +796,26 @@ def main(argv: list[str]) -> int:
             "exits 0/1 based on whether the replay succeeded."
         ),
     )
+    parser.add_argument(
+        "--vs-ref", type=str, default=None,
+        help=(
+            "Compare against a git ref (e.g. ``main``, ``HEAD^``, or a SHA) "
+            "instead of the frozen JSON baseline. Uses a temporary git "
+            "worktree + subprocess to run the replay at the ref, then on the "
+            "current branch, then reports per-day deltas. This is the "
+            "preferred per-PR check — see docs/LP_REGRESSION_WORKFLOW.md. "
+            "Mutually exclusive with --refresh-baseline."
+        ),
+    )
+    parser.add_argument(
+        "--no-baseline-check", action="store_true",
+        help=(
+            "Skip the baseline-JSON comparison and always exit 0. The "
+            "regression flow still runs the replay and emits its JSON via "
+            "--json. Used internally by --vs-ref's subprocess; can also be "
+            "useful for ad-hoc 'just emit the totals' invocations."
+        ),
+    )
     args = parser.parse_args(argv[1:])
 
     logging.basicConfig(
@@ -568,6 +829,31 @@ def main(argv: list[str]) -> int:
         # the gate only makes sense as an aggregate over the window.
         single_mode = "forward" if args.mode == "both" else args.mode
         return _inspect_day(args.inspect_day, mode=single_mode)
+
+    if args.vs_ref:
+        if args.refresh_baseline:
+            print("ERROR: --vs-ref and --refresh-baseline are mutually exclusive.",
+                  file=sys.stderr)
+            return 2
+        # Run the comparison; one mode at a time (the "both" runner doesn't
+        # nest under vs-ref — caller invokes once per mode if they want both).
+        single_mode = "forward" if args.mode == "both" else args.mode
+        report = run_vs_ref(
+            ref=args.vs_ref,
+            days_back=args.days,
+            mode=single_mode,
+            fail_threshold_p=args.fail_above_pence,
+        )
+        if args.json:
+            args.json.parent.mkdir(parents=True, exist_ok=True)
+            args.json.write_text(json.dumps({
+                **{k: v for k, v in asdict(report).items() if k != "rows"},
+                "passed": report.passed,
+                "rows": [asdict(r) for r in report.rows],
+            }, indent=2))
+        if not args.quiet:
+            _print_vs_ref_report(report)
+        return 0 if report.passed else 1
 
     if args.mode == "both":
         # Run forward + honest sequentially, fail on EITHER regressing.
@@ -624,9 +910,13 @@ def main(argv: list[str]) -> int:
             print("Both forward and honest replay must pass for an LP-touching PR.")
         return 0 if passed_overall else 1
 
+    # --no-baseline-check is the "just emit totals" mode used by --vs-ref's
+    # subprocess (and ad-hoc invocations). Force baseline_path to /dev/null so
+    # run_check goes down the no_baseline_yet branch.
+    effective_baseline = Path("/dev/null") if args.no_baseline_check else args.baseline
     report = run_check(
         days_back=args.days,
-        baseline_path=args.baseline,
+        baseline_path=effective_baseline,
         fail_threshold_p=args.fail_above_pence,
         refresh_baseline=args.refresh_baseline,
         mode=args.mode,
@@ -649,6 +939,9 @@ def main(argv: list[str]) -> int:
             rows = _build_wins_losses(report, per_date if isinstance(per_date, dict) else None)
             _print_wins_losses(rows, args.wins_losses_top_k)
 
+    if args.no_baseline_check:
+        # Always exit 0 — the caller wanted totals, not a verdict.
+        return 0
     return 0 if report.passed else 1
 
 
