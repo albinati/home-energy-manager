@@ -1498,7 +1498,10 @@ def _run_optimizer_lp(
         # observed bias is not evidence for tomorrow's weather.
         if slot_start_utc is not None and slot_start_utc.date() != today_utc_date:
             return cal
-        # Today's slots: prefer per-hour map (with warm-start fill); scalar fallback.
+        # Today's slots: per-hour map holds observed-today ratio for observed
+        # hours and 1.0 for unobserved (defer to ``cal``'s 30-day baseline,
+        # per #333). Scalar today_factor fallback when the per-hour map is
+        # unavailable (first day of operation).
         if effective_factor_by_hour:
             return cal * effective_factor_by_hour.get(int(hour_utc), 1.0)
         if today_factor_by_hour:
