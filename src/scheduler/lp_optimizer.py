@@ -473,7 +473,19 @@ def solve_lp(
     a_grid = pulp.LpVariable.dicts("grid_import_mode", range(n), cat="Binary")
     b_bat = pulp.LpVariable.dicts("bat_charge_mode", range(n), cat="Binary")
 
+    # Forward slots ``soc[1..n]`` keep the operational reserve as a hard
+    # lower bound (``soc_min``). Slot 0 is relaxed below to ``[0, soc_max]``
+    # so the hard equality ``soc[0] == initial.soc_kwh`` (line 491) remains
+    # satisfiable when realtime SoC has slipped below the operational
+    # reserve. Previously a single ``lowBound=soc_min`` for ALL slots —
+    # combined with the hard equality — made every solve Infeasible whenever
+    # realtime SoC dipped below reserve, which then fell back to the
+    # heuristic that destructively grid-overcharged the battery (see
+    # [[project_heuristic_fox_dispatch_bug]] + PR #338). Observed 4× on
+    # 2026-05-18 when realtime SoC was 12-15 % overnight on prod (10.36 kWh
+    # battery, 15 % reserve = 1.55 kWh, realtime down to 1.04 kWh).
     soc = pulp.LpVariable.dicts("soc", range(n + 1), lowBound=soc_min, upBound=soc_max)
+    soc[0].lowBound = 0.0
     tank = pulp.LpVariable.dicts("tank", range(n + 1), lowBound=tank_lo, upBound=tank_hi)
     # PR Phase B: t_in / s_lo / s_hi removed. Heating demand is now bounded by
     # space_floor_kwh / space_ceil_kwh (physics from get_daikin_heating_kw),
