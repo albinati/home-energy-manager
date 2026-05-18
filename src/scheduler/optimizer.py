@@ -1580,8 +1580,49 @@ def _run_optimizer_lp(
         export_price_pence=export_prices,
     )
     if not plan.ok:
-        logger.warning("PuLP status %s — falling back to heuristic classifier", plan.status)
-        return _run_optimizer_heuristic(fox, daikin)
+        # Defensive: do NOT call _run_optimizer_heuristic on LP failure. The
+        # heuristic builds Fox V3 ForceCharge groups from a slot list that has
+        # no LP-derived lp_grid_import_w / target_soc_pct, so _slot_fox_tuple
+        # falls back to FOX_FORCE_CHARGE_NORMAL_PWR (3000 W) and fdSoc=95 — the
+        # inverter then grid-charges at full power until 95 % SoC. Audit on
+        # 2026-05-18 measured +£0.35-1.30/day vs the LP objective every day a
+        # fallback fired (LP infeasibles ran ~110/30d after the Phase B
+        # refactor). Holding the previous schedule is strictly safer than
+        # replacing it with the heuristic's defaults: Fox V3 is daily-cyclic,
+        # so the last successful LP plan remains in effect until the next
+        # successful solve overwrites it. Explicit OPTIMIZER_BACKEND=heuristic
+        # is unaffected — only the auto-fallback path changes.
+        logger.warning(
+            "LP %s — holding previous Fox/Daikin schedule (defensive: heuristic fallback disabled)",
+            plan.status,
+        )
+        try:
+            actual_mean = float(mean(prices)) if prices else None
+            db.log_optimizer_run({
+                "run_at": _now_utc().isoformat(),
+                "rates_count": len(prices),
+                "cheap_slots": 0,
+                "peak_slots": 0,
+                "standard_slots": 0,
+                "negative_slots": 0,
+                "target_vwap": None,
+                "actual_agile_mean": actual_mean,
+                "battery_warning": False,
+                "strategy_summary": (
+                    f"{plan_date}: LP {plan.status} — held previous schedule "
+                    f"(no hardware writes; heuristic fallback disabled)"
+                ),
+                "fox_schedule_uploaded": False,
+                "daikin_actions_count": 0,
+            })
+        except Exception:  # noqa: BLE001 — audit log must never abort the return
+            logger.exception("optimizer_log write failed during LP-infeasible hold")
+        return {
+            "ok": False,
+            "error": f"LP {plan.status}",
+            "fallback": "hold_previous_schedule",
+            "optimizer_backend": "lp",
+        }
 
     # Fold the PV-sufficiency guard rail audit into the exogenous snapshot
     # (decided inside solve_lp; persisted alongside the inputs for the
