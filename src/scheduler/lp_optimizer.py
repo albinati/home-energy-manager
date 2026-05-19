@@ -462,13 +462,19 @@ def solve_lp(
     pv_use = pulp.LpVariable.dicts("pv_use", range(n), lowBound=0)
     pv_curt = pulp.LpVariable.dicts("pv_curtail", range(n), lowBound=0)
 
-    # HP: 1 binary (on/off) + continuous power — simpler, tighter LP relaxation
+    # HP: 1 binary (on/off) + continuous power — simpler, tighter LP relaxation.
+    # Audit 2026-05-19: dropped the per-mode binaries (m_dhw, m_space) and the
+    # ``m_dhw + m_space <= 1`` mutex they enforced. The Daikin Altherma
+    # firmware interleaves DHW and space heating within a 30-min slot
+    # (e.g. 10 min DHW lift then 20 min radiator), so the strict
+    # single-mode-per-slot model misrepresented the hardware and stacked
+    # with the shower-floor + space-floor + tank-hi constraints to push the
+    # LP infeasible under tight conditions. Aggregate cap ``e_dhw + e_space
+    # <= max_hp_kwh * hp_on`` still enforces total electrical draw; per-mode
+    # physics caps (``e_space <= space_ceil_kwh``) are applied directly below.
     hp_on = pulp.LpVariable.dicts("hp_on", range(n), cat="Binary")
     e_dhw = pulp.LpVariable.dicts("dhw_kwh", range(n), lowBound=0, upBound=max_hp_kwh)
     e_space = pulp.LpVariable.dicts("space_kwh", range(n), lowBound=0, upBound=max_hp_kwh)
-    # DHW/space mode selection (still mutually exclusive)
-    m_dhw = pulp.LpVariable.dicts("mode_dhw", range(n), cat="Binary")
-    m_space = pulp.LpVariable.dicts("mode_space", range(n), cat="Binary")
 
     a_grid = pulp.LpVariable.dicts("grid_import_mode", range(n), cat="Binary")
     b_bat = pulp.LpVariable.dicts("bat_charge_mode", range(n), cat="Binary")
@@ -591,32 +597,23 @@ def solve_lp(
         prob += dis[i] <= max_batt_kwh * (1 - b_bat[i])
 
         if passive_daikin:
-            # Passive: clamp Daikin draw to firmware-predicted values; bind binaries
-            # to consistent values so other slot constraints stay feasible. The mode
-            # mutex (m_dhw + m_space <= 1) does NOT apply — the firmware can run
-            # both DHW and space in the same 30-min slot.
+            # Passive: clamp Daikin draw to firmware-predicted values + bind
+            # hp_on to a consistent value so other constraints (min-on,
+            # objective) stay feasible. The firmware can run both DHW and
+            # space heating inside a single 30-min slot, so e_dhw + e_space
+            # may both be positive.
             prob += e_dhw[i] == passive_e_dhw[i]
             prob += e_space[i] == passive_e_space[i]
             on_val = 1 if (passive_e_dhw[i] + passive_e_space[i]) > 1e-6 else 0
             prob += hp_on[i] == on_val
-            prob += m_dhw[i] == (1 if passive_e_dhw[i] > 1e-6 else 0)
-            prob += m_space[i] == (1 if passive_e_space[i] > 1e-6 else 0)
         else:
-            # Active (legacy v9): HP continuous power bounded by on/off binary,
-            # with single-mode-per-slot mutex.
+            # Active mode: aggregate HP electrical draw bounded by the on/off
+            # binary. NO mode mutex — both DHW and space heating can be active
+            # in the same slot, matching the Altherma firmware. e_dhw is capped
+            # by ``max_hp_kwh`` via its LpVariable upper bound; e_space is
+            # additionally capped by the climate-curve physics ceiling.
             prob += e_dhw[i] + e_space[i] <= max_hp_kwh * hp_on[i]
-            prob += e_dhw[i] + e_space[i] >= 0  # (implicit from lower bounds)
-            prob += m_dhw[i] + m_space[i] <= 1
-            prob += m_dhw[i] + m_space[i] >= hp_on[i]  # must pick a mode when on
-            # Each mode bounds its share.
-            # e_dhw: generic HP cap (DHW draw is controlled by tank temp setpoint, not climate curve)
-            # e_space: physics ceiling from climate curve + LWT_OFFSET_MAX (not the HP nameplate)
-            prob += e_dhw[i] <= max_hp_kwh * m_dhw[i]
-            prob += e_space[i] <= space_ceil_kwh[i] * m_space[i]
-            # When HP is off, both e_dhw and e_space are 0 (via hp_on bound above +
-            # mode bounds below; hp_on=0 → m_dhw+m_space≤1 and ≥0 still allows a
-            # mode flag=1 with zero power, so add explicit binding)
-            prob += e_dhw[i] + e_space[i] >= 0  # already set; kept for clarity
+            prob += e_space[i] <= space_ceil_kwh[i]
 
         # DHW tank thermodynamics — PR Phase B: indoor temp is no longer a
         # state variable. Tank loss uses INDOOR_SETPOINT_C as the constant
