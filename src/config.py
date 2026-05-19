@@ -798,8 +798,14 @@ class Config:
     LP_INVERTER_STRESS_COST_PENCE: float = float(os.getenv("LP_INVERTER_STRESS_COST_PENCE", "0.10"))
     # Segments for piecewise-linear stress approximation (higher = more accurate, slower; 6–10 is good)
     LP_INVERTER_STRESS_SEGMENTS: int = int(os.getenv("LP_INVERTER_STRESS_SEGMENTS", "8"))
-    # HP on/off minimum ON time: minimum slots the heat-pump must run once started (anti-cycling)
-    LP_HP_MIN_ON_SLOTS: int = int(os.getenv("LP_HP_MIN_ON_SLOTS", "2"))
+    # HP on/off minimum ON time: minimum slots the heat-pump must run once
+    # started (anti-cycling). Default lowered from 2 → 1 on 2026-05-20 (audit
+    # finding): the Daikin Altherma firmware enforces its own minimum-cycle
+    # protection on the compressor, so the LP's per-startup binary
+    # (startup_i + sum constraints, ~N extra integers per solve) is
+    # redundant and inflates the MILP. Set to 2 again only if observed
+    # plan-vs-reality divergence on short HP bursts.
+    LP_HP_MIN_ON_SLOTS: int = int(os.getenv("LP_HP_MIN_ON_SLOTS", "1"))
     # Total-variation penalties (pence per 1 kWh step between adjacent half-hours): discourage rapid
     # battery / HP / import changes — trade a little money for fewer hardware mode switches. 0 = off.
     LP_BATTERY_TV_PENALTY_PENCE_PER_KWH_DELTA: float = float(
