@@ -707,10 +707,29 @@ def solve_lp(
     # Skip shower hard constraint in passive mode — the LP can't decide e_dhw
     # to make this happen (firmware controls the tank). Enforcing would make
     # the solve infeasible whenever tank starts low.
+    #
+    # Soft floor with high penalty (PR #344): the previous hard floor
+    # ``tank[i+1] >= t_min_dhw`` on every shower-window slot drove an
+    # infeasibility class observed empirically — 8 of 9 above-reserve
+    # infeasibilities in the 60-day audit fired at the 21:25 BST tier-boundary
+    # MPC trigger where slot 0 lands inside the evening shower window and
+    # the tank is too cold to lift the required °C in a single 30-min slot
+    # (physics floor: ~10 K/slot at max HP draw + COP 2.5, vs. e.g. 45-28
+    # = 17 K required). With a hard constraint these solves returned
+    # Infeasible and PR #338 then held the previous schedule. With this
+    # soft floor + heavy penalty (default 50 p / K-slot, well above any
+    # marginal kWh saving), the LP heats as fast as physically possible
+    # and surfaces the unavoidable deficit as positive slack, instead of
+    # going Infeasible.
+    s_shower_lo: dict[int, pulp.LpVariable] = {}
+    shower_lo_penalty_p = float(
+        getattr(config, "LP_SHOWER_LO_PENALTY_PENCE_PER_DEGC_SLOT", 50.0)
+    )
     if not passive_daikin:
         for i in range(n):
             if shower_mask[i]:
-                prob += tank[i + 1] >= t_min_dhw
+                s_shower_lo[i] = pulp.LpVariable(f"shower_lo_slack_{i}", lowBound=0)
+                prob += tank[i + 1] + s_shower_lo[i] >= t_min_dhw
 
         # Weekly legionella thermal-shock cycle. When ``DHW_LEGIONELLA_DAY``
         # ∈ [0,6] (Mon..Sun, Python weekday convention), force tank ≥ target
@@ -947,6 +966,16 @@ def solve_lp(
     # penalty is needed to prevent gratuitous overshoot.
     tank_hi_slack_p = float(getattr(config, "LP_TANK_HI_SLACK_PENCE_PER_DEGC_SLOT", 0.01))
     obj_tank_hi = tank_hi_slack_p * pulp.lpSum(s_tank_hi[i] for i in range(n))
+    # PR #344 shower-floor slack penalty. Heavy by default (50 p / K-slot)
+    # so the LP only breaches when physically forced — the slack is the
+    # "we couldn't reach 45 °C in time" diagnostic. Setting the penalty to
+    # zero would degenerate to "ignore shower floor", which is wrong; tune
+    # downward only with care.
+    obj_shower_lo: Any = 0
+    if s_shower_lo:
+        obj_shower_lo = shower_lo_penalty_p * pulp.lpSum(
+            s_shower_lo[i] for i in s_shower_lo
+        )
     # PV-abundance DHW reward: when PV exceeds self-use + battery headroom, every kWh
     # the LP routes into the tank instead of curtailing earns a small reward. Tied to
     # the same per-slot bool used for the ceiling lift above.
@@ -983,7 +1012,10 @@ def solve_lp(
     obj_pv_curt = (
         pv_curt_pen * pulp.lpSum(pv_curt[i] for i in range(n)) if pv_curt_pen > 0 else 0
     )
-    objective = obj_grid + obj_cycle + obj_comfort + obj_tank_hi + obj_pv_curt + obj_pv_abundance_dhw
+    objective = (
+        obj_grid + obj_cycle + obj_comfort + obj_tank_hi
+        + obj_pv_curt + obj_pv_abundance_dhw + obj_shower_lo
+    )
 
     if use_stress and stress_aux:
         # Stress cost is suppressed during negative-price slots: every kWh of
