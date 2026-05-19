@@ -165,3 +165,90 @@ def test_lp_infeasible_writes_audit_row(monkeypatch: pytest.MonkeyPatch) -> None
     assert row["daikin_actions_count"] == 0
     assert "Infeasible" in (row["strategy_summary"] or "")
     assert "held previous schedule" in (row["strategy_summary"] or "")
+
+
+# ---------------------------------------------------------------------------
+# Infeasible-snapshot persistence — the inputs row must land in
+# lp_inputs_snapshot with lp_status='Infeasible' so the constraint set can be
+# replayed offline. Background: a residual class of above-reserve Infeasibles
+# survives PR #339 (most likely appliance+PV-down-revision interaction; see
+# 2026-05-19 prod incident). Without a snapshot we can only see "Infeasible"
+# in optimizer_log; with it we can reload solve_lp inputs and reproduce.
+# ---------------------------------------------------------------------------
+
+
+def _stub_infeasible_solve_realistic(
+    slot_starts_utc: list[datetime],
+    price_pence: list[float],
+    *_args: Any,
+    **_kwargs: Any,
+) -> LpPlan:
+    """Mirror real solve_lp's shape on Infeasible: slot_starts_utc + price_pence
+    + temp_outdoor_c populated, per-slot decision lists empty."""
+    plan = LpPlan(
+        ok=False,
+        status="Infeasible",
+        objective_pence=0.0,
+        peak_threshold_pence=18.0,
+        cheap_threshold_pence=8.0,
+    )
+    plan.slot_starts_utc = list(slot_starts_utc)
+    plan.price_pence = list(price_pence)
+    plan.temp_outdoor_c = [12.0] * len(slot_starts_utc)
+    return plan
+
+
+def test_lp_infeasible_persists_inputs_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Infeasible branch must persist an lp_inputs_snapshot row so the
+    audit/replay path can reload the exact inputs that broke. The row carries
+    ``lp_status='Infeasible'`` to distinguish from successful solves."""
+    now = datetime(2026, 4, 22, 18, 0, tzinfo=UTC)
+    monkeypatch.setattr(optimizer, "_now_utc", lambda: now)
+    _seed_realistic_day(datetime(2026, 4, 22, 0, 0, tzinfo=UTC))
+
+    monkeypatch.setattr(
+        "src.scheduler.lp_optimizer.solve_lp", _stub_infeasible_solve_realistic,
+    )
+
+    result = optimizer.run_optimizer(fox=None, daikin=None)
+    assert result["ok"] is False, result
+
+    # The optimizer_log row was written first; its id is the run_id we'd join on.
+    import sqlite3 as _sql
+    conn = db.get_connection()
+    try:
+        row = conn.execute(
+            "SELECT id, strategy_summary FROM optimizer_log ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert row is not None, "optimizer_log was not written"
+        run_id = int(row["id"])
+        assert "Infeasible" in (row["strategy_summary"] or "")
+
+        snap = conn.execute(
+            "SELECT * FROM lp_inputs_snapshot WHERE run_id = ?", (run_id,),
+        ).fetchone()
+        assert snap is not None, (
+            f"lp_inputs_snapshot row missing for infeasible run_id={run_id} — "
+            f"replay capability is broken"
+        )
+        assert dict(snap)["lp_status"] == "Infeasible", (
+            f"lp_status not tagged: {dict(snap)['lp_status']!r}"
+        )
+        # Replay-critical inputs must be present.
+        assert snap["soc_initial_kwh"] is not None
+        assert snap["tank_initial_c"] is not None
+        assert snap["base_load_json"], "base_load_json empty — replay impossible"
+        assert snap["config_snapshot_json"], "config_snapshot_json empty"
+        # And the per-slot solution rows must be EMPTY — there is no decision
+        # vector to write when the LP didn't solve. Writing NULL-filled rows
+        # would pollute the History view (which assumes lp_solution_snapshot
+        # rows describe a real solution).
+        n_solution = conn.execute(
+            "SELECT COUNT(*) FROM lp_solution_snapshot WHERE run_id = ?", (run_id,),
+        ).fetchone()[0]
+        assert n_solution == 0, (
+            f"lp_solution_snapshot wrote {n_solution} rows for an Infeasible "
+            f"solve — expected 0 (no decision vector exists)"
+        )
+    finally:
+        conn.close()

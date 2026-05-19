@@ -1045,6 +1045,7 @@ def _persist_lp_snapshots(
     micro_climate_offset: float,
     forecast_fetch_at_utc: str | None = None,
     exogenous_snapshot: dict[str, Any] | None = None,
+    lp_status: str = "Optimal",
 ) -> None:
     """Build and persist the inputs + per-slot rows for this LP run.
 
@@ -1052,6 +1053,14 @@ def _persist_lp_snapshots(
     cockpit History replay source of truth. Config fields captured here are
     the LP-relevant tunables; other knobs can be recovered from
     ``config_audit`` joined by timestamp if needed.
+
+    When ``lp_status != "Optimal"`` (Infeasible / Unbounded / Not Solved) the
+    plan carries no per-slot decision vector — only ``slot_starts_utc``,
+    ``price_pence`` and ``temp_outdoor_c`` are populated by ``solve_lp``.
+    In that case we still persist the inputs row so the run can be replayed
+    offline (the whole purpose of capturing infeasibles), but skip the
+    ``lp_solution_snapshot`` writes which would all be NULL columns. The
+    ``lp_status`` column on ``lp_inputs_snapshot`` partitions the two cases.
     """
     # Config snapshot — everything the LP meaningfully conditioned on. Keep
     # compact; dashboards read this directly from the JSON.
@@ -1106,7 +1115,16 @@ def _persist_lp_snapshots(
         "daikin_control_mode": str(config.DAIKIN_CONTROL_MODE),
         "optimization_preset": str(config.OPTIMIZATION_PRESET),
         "energy_strategy_mode": str(config.ENERGY_STRATEGY_MODE),
+        "lp_status": str(lp_status),
     }
+
+    # Skip the per-slot snapshot when the LP didn't find an optimal plan —
+    # there is no per-slot decision vector to write. The inputs row is still
+    # persisted above so the run can be re-solved offline against the same
+    # inputs to find which constraint binds.
+    if lp_status != "Optimal":
+        db.save_lp_snapshots(run_id=int(run_id), inputs_row=inputs_row, solution_rows=[])
+        return
 
     # tank_temp_c, indoor_temp_c, soc_kwh are length N+1 (include initial);
     # we persist the end-of-slot state (index i+1) to match how slot results
@@ -1596,10 +1614,12 @@ def _run_optimizer_lp(
             "LP %s — holding previous Fox/Daikin schedule (defensive: heuristic fallback disabled)",
             plan.status,
         )
+        run_at_iso = _now_utc().isoformat()
+        run_id: int | None = None
         try:
             actual_mean = float(mean(prices)) if prices else None
-            db.log_optimizer_run({
-                "run_at": _now_utc().isoformat(),
+            run_id = db.log_optimizer_run({
+                "run_at": run_at_iso,
                 "rates_count": len(prices),
                 "cheap_slots": 0,
                 "peak_slots": 0,
@@ -1617,6 +1637,28 @@ def _run_optimizer_lp(
             })
         except Exception:  # noqa: BLE001 — audit log must never abort the return
             logger.exception("optimizer_log write failed during LP-infeasible hold")
+        # Persist the inputs side of the snapshot so the run can be replayed
+        # offline. Without this the audit script can only see "Infeasible"
+        # in optimizer_log but not which constraints bound. lp_status carries
+        # the solver verdict; per-slot solution columns stay NULL.
+        if run_id is not None:
+            try:
+                _persist_lp_snapshots(
+                    run_id=run_id,
+                    run_at_iso=run_at_iso,
+                    plan_date=plan_date,
+                    plan=plan,
+                    initial=initial,
+                    base_load=base_load,
+                    micro_climate_offset=micro_climate_offset,
+                    forecast_fetch_at_utc=(forecast_fetch_at_utc if forecast else None),
+                    exogenous_snapshot=exogenous_snapshot,
+                    lp_status=plan.status,
+                )
+            except Exception as e:
+                logger.warning(
+                    "LP infeasible-snapshot persistence failed (non-fatal): %s", e,
+                )
         return {
             "ok": False,
             "error": f"LP {plan.status}",

@@ -616,7 +616,8 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             cheap_threshold_p        REAL,
             daikin_control_mode      TEXT,
             optimization_preset      TEXT,
-            energy_strategy_mode     TEXT
+            energy_strategy_mode     TEXT,
+            lp_status                TEXT
         )"""
     )
     conn.execute(
@@ -917,6 +918,12 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE lp_inputs_snapshot ADD COLUMN dhw_draw_prior_json TEXT")
     if "occupancy_prior_json" not in lp_cols:
         conn.execute("ALTER TABLE lp_inputs_snapshot ADD COLUMN occupancy_prior_json TEXT")
+    # Infeasible-replay column. NULL on rows written before this migration
+    # (interpret as 'Optimal' — only successful solves were snapshotted prior).
+    # From 2026-05-19 onwards the Infeasible branch in _run_optimizer_lp also
+    # writes a snapshot so the constraints can be replayed offline.
+    if "lp_status" not in lp_cols:
+        conn.execute("ALTER TABLE lp_inputs_snapshot ADD COLUMN lp_status TEXT")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_lp_inputs_snapshot_forecast_fetch ON lp_inputs_snapshot(forecast_fetch_at_utc)"
     )
@@ -4063,17 +4070,18 @@ def save_lp_snapshots(
                     soc_source, tank_source, indoor_source,
                     base_load_json, micro_climate_offset_c, forecast_fetch_at_utc, exogenous_snapshot_json, config_snapshot_json,
                     price_quantize_p, peak_threshold_p, cheap_threshold_p,
-                    daikin_control_mode, optimization_preset, energy_strategy_mode)
+                    daikin_control_mode, optimization_preset, energy_strategy_mode, lp_status)
                    VALUES (:run_id, :run_at_utc, :plan_date, :horizon_hours,
                            :soc_initial_kwh, :tank_initial_c, :indoor_initial_c,
                            :soc_source, :tank_source, :indoor_source,
                            :base_load_json, :micro_climate_offset_c, :forecast_fetch_at_utc, :exogenous_snapshot_json, :config_snapshot_json,
                            :price_quantize_p, :peak_threshold_p, :cheap_threshold_p,
-                           :daikin_control_mode, :optimization_preset, :energy_strategy_mode)""",
+                           :daikin_control_mode, :optimization_preset, :energy_strategy_mode, :lp_status)""",
                 {
                     "run_id": run_id,
                     "forecast_fetch_at_utc": inputs_row.get("forecast_fetch_at_utc"),
                     "exogenous_snapshot_json": inputs_row.get("exogenous_snapshot_json"),
+                    "lp_status": inputs_row.get("lp_status"),
                     **inputs_row,
                 },
             )
