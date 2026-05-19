@@ -225,28 +225,53 @@ def replay_run(
         return LpReplayResult(
             ok=False, error=f"no lp_inputs_snapshot for run_id={run_id}", run_id=run_id, mode=mode,
         )
+
+    run_at_utc = str(inputs.get("run_at_utc") or "")
+    plan_date = str(inputs.get("plan_date") or "")
+    lp_status = str(inputs.get("lp_status") or "Optimal")
+
     slots = db.get_lp_solution_slots(run_id)
-    if not slots:
+    if not slots and lp_status == "Optimal":
+        # Optimal solve with no solution rows → real snapshot gap.
         return LpReplayResult(
             ok=False, error=f"no lp_solution_snapshot for run_id={run_id}", run_id=run_id, mode=mode,
         )
 
-    run_at_utc = str(inputs.get("run_at_utc") or "")
-    plan_date = str(inputs.get("plan_date") or "")
-
-    # Slot vector + prices come from the snapshot — preserves DST 46/50 exactly.
     slot_starts_utc: list[datetime] = []
     price_pence: list[float] = []
-    for s in slots:
-        try:
-            t = _parse_iso(str(s["slot_time_utc"]))
-        except (KeyError, ValueError, TypeError) as e:
+    if slots:
+        # Slot vector + prices come from the snapshot — preserves DST 46/50 exactly.
+        for s in slots:
+            try:
+                t = _parse_iso(str(s["slot_time_utc"]))
+            except (KeyError, ValueError, TypeError) as e:
+                return LpReplayResult(
+                    ok=False, error=f"bad slot_time_utc in snapshot: {e}",
+                    run_id=run_id, mode=mode, run_at_utc=run_at_utc, plan_date=plan_date,
+                )
+            slot_starts_utc.append(t)
+            price_pence.append(float(s.get("price_p") or 0.0))
+    else:
+        # PR #341 Infeasible-branch replay: lp_solution_snapshot is empty for
+        # Infeasible solves (no decision vector exists). Reconstruct the slot
+        # vector from run_at_utc + horizon_hours by snapping to the next
+        # 30-min boundary, then fetch prices from ``agile_rates``. Same logic
+        # the LP itself used at solve time (see optimizer._build_slot_window).
+        slot_starts_utc, price_pence = _derive_infeasible_slot_window(
+            run_at_utc=run_at_utc,
+            horizon_hours=int(inputs.get("horizon_hours") or 48),
+        )
+        if not slot_starts_utc:
             return LpReplayResult(
-                ok=False, error=f"bad slot_time_utc in snapshot: {e}",
-                run_id=run_id, mode=mode, run_at_utc=run_at_utc, plan_date=plan_date,
+                ok=False,
+                error=(
+                    f"could not derive slot window for Infeasible run "
+                    f"run_id={run_id} (run_at_utc={run_at_utc!r}, "
+                    f"horizon_hours={inputs.get('horizon_hours')})"
+                ),
+                run_id=run_id, mode=mode,
+                run_at_utc=run_at_utc, plan_date=plan_date,
             )
-        slot_starts_utc.append(t)
-        price_pence.append(float(s.get("price_p") or 0.0))
 
     # base_load_json is what the LP saw at solve-time. Truth-as-the-LP-saw-it.
     try:
@@ -574,6 +599,69 @@ def sweep_cadences(
 # ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------
+
+def _derive_infeasible_slot_window(
+    *, run_at_utc: str, horizon_hours: int,
+) -> tuple[list[datetime], list[float]]:
+    """Reconstruct ``(slot_starts_utc, price_pence)`` for an Infeasible-branch
+    snapshot that has no ``lp_solution_snapshot`` rows.
+
+    Mirrors the live solver's slot-window logic: starts at the next 30-min
+    boundary ≥ ``run_at_utc``, builds ``horizon_hours × 2`` half-hour slots,
+    and fetches per-slot Octopus Agile import rates from the ``agile_rates``
+    table (the same rate table the LP read at solve time).
+
+    Returns ``([], [])`` if the run_at_utc is unparseable or no Agile rates
+    cover the window (caller surfaces this as a replay error).
+    """
+    try:
+        run_at = _parse_iso(run_at_utc)
+    except (ValueError, AttributeError):
+        return [], []
+    # Snap forward to the next half-hour boundary.
+    base = run_at.replace(second=0, microsecond=0)
+    if base.minute < 30:
+        base = base.replace(minute=30) if run_at > base else base.replace(minute=30)
+    elif base.minute == 30 and run_at > base:
+        base = (base + timedelta(hours=1)).replace(minute=0)
+    else:
+        base = (base + timedelta(hours=1)).replace(minute=0)
+    # In the unusual case run_at is exactly on a boundary, the live optimizer
+    # starts the horizon at that boundary — re-do the math without the strict
+    # ">" check to handle that edge cleanly.
+    if run_at.second == 0 and run_at.microsecond == 0 and run_at.minute in (0, 30):
+        base = run_at
+
+    n_slots = max(2, int(horizon_hours) * 2)
+    slot_starts = [base + i * timedelta(minutes=30) for i in range(n_slots)]
+
+    # Fetch per-slot prices from agile_rates. Best-effort: missing slots get
+    # the flat ``EXPORT_RATE_PENCE`` fallback (mirrors the live optimizer's
+    # behaviour when rates are sparse).
+    tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
+    if not tariff:
+        return [], []
+    try:
+        rows = db.get_rates_for_period(
+            tariff, slot_starts[0], slot_starts[-1] + timedelta(minutes=30),
+        )
+    except Exception:
+        rows = []
+    by_start: dict[str, float] = {}
+    for r in rows:
+        try:
+            by_start[r["valid_from"].replace("+00:00", "Z")] = float(r["value_inc_vat"])
+        except (KeyError, ValueError, TypeError):
+            continue
+    if not by_start:
+        return [], []
+    prices: list[float] = []
+    flat = float(getattr(config, "EXPORT_RATE_PENCE", 15.0))
+    for st in slot_starts:
+        key = st.isoformat().replace("+00:00", "Z")
+        prices.append(by_start.get(key, flat))
+    return slot_starts, prices
+
 
 def _parse_iso(s: str) -> datetime:
     """Parse a UTC ISO timestamp; tolerate trailing 'Z' and missing tz."""
