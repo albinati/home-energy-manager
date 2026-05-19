@@ -668,6 +668,14 @@ class Config:
     LP_TANK_HI_SLACK_PENCE_PER_DEGC_SLOT: float = float(
         os.getenv("LP_TANK_HI_SLACK_PENCE_PER_DEGC_SLOT", "0.01")
     )
+    # Shower-floor slack penalty (pence per °C-slot of breach). Heavy default
+    # (50 p / K-slot) so the LP only violates when physically forced — see
+    # PR #344. The slack becomes the "by how many K did the tank miss the
+    # shower floor" diagnostic. Lowering it weakens the comfort guarantee;
+    # raising it risks Infeasible if other constraints already strain.
+    LP_SHOWER_LO_PENALTY_PENCE_PER_DEGC_SLOT: float = float(
+        os.getenv("LP_SHOWER_LO_PENALTY_PENCE_PER_DEGC_SLOT", "50.0")
+    )
     # Comma-separated trigger reasons for which scenario LP runs. Other
     # triggers (drift, forecast_revision, hourly cron not in this list)
     # use only the nominal solve to keep latency low.
