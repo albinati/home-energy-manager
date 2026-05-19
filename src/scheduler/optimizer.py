@@ -1597,6 +1597,68 @@ def _run_optimizer_lp(
         micro_climate_offset_by_hour_c=micro_climate_offset_by_hour,
         export_price_pence=export_prices,
     )
+
+    # Appliance-aware infeasibility retry. The 2026-05-19 prod incident showed
+    # that arming an appliance dispatch (washing machine, +0.75 kWh across 3
+    # cheap-overnight slots) can push an otherwise-feasible 48 h horizon over
+    # the constraint boundary when combined with a late-day PV down-revision
+    # and tight tank/battery competition. The deadline check in
+    # appliance_dispatch.reconcile() is a hard pre-LP filter — if it fits at
+    # all, it gets folded into base_load — so the LP has no freedom to slip
+    # the appliance even by one slot, and goes Infeasible. PR #338 then holds
+    # the previous schedule (stale by hours).
+    #
+    # Soft-deadline retry: when the LP fails AND there's a non-zero appliance
+    # contribution in base_load, re-solve once with the appliance load
+    # dropped. If that clears, ship the appliance-blind plan. The APScheduler
+    # cron registered by reconcile() is untouched — the appliance still fires
+    # at its planned time; the LP just won't have shaped its plan around the
+    # appliance run. Trade-off: slightly suboptimal coordination during the
+    # appliance window vs. shipping a 2-3 h stale held-schedule. The former
+    # is strictly the smaller perturbation.
+    appliance_kwh_total = float(sum(appliance_profile_kwh))
+    appliance_retry_dropped = False
+    if (not plan.ok) and appliance_kwh_total > 1e-6:
+        n_appliance_slots = sum(1 for v in appliance_profile_kwh if v > 1e-6)
+        logger.warning(
+            "LP %s with armed appliance load (+%.3f kWh across %d slot(s)) — "
+            "retrying without appliance contribution. Cron stays; LP plan "
+            "won't be shaped around the appliance run.",
+            plan.status, appliance_kwh_total, n_appliance_slots,
+        )
+        try:
+            plan_retry = solve_lp(
+                slot_starts_utc=starts,
+                price_pence=prices,
+                base_load_kwh=residual_base_load,
+                weather=weather,
+                initial=initial,
+                tz=tz,
+                micro_climate_offset_c=micro_climate_offset,
+                micro_climate_offset_by_hour_c=micro_climate_offset_by_hour,
+                export_price_pence=export_prices,
+            )
+        except Exception as _retry_exc:  # noqa: BLE001 — defensive
+            logger.warning(
+                "LP appliance-drop retry raised %s — falling through to "
+                "held-schedule",
+                type(_retry_exc).__name__,
+            )
+            plan_retry = None
+        if plan_retry is not None and plan_retry.ok:
+            logger.info(
+                "LP appliance-drop retry: Optimal (objective %.0fp). Shipping "
+                "appliance-blind plan.",
+                plan_retry.objective_pence,
+            )
+            plan = plan_retry
+            base_load = list(residual_base_load)
+            appliance_retry_dropped = True
+            exogenous_snapshot["appliance_retry_dropped"] = True
+            exogenous_snapshot["appliance_retry_kwh_excluded"] = round(
+                appliance_kwh_total, 4,
+            )
+
     if not plan.ok:
         # Defensive: do NOT call _run_optimizer_heuristic on LP failure. The
         # heuristic builds Fox V3 ForceCharge groups from a slot list that has
@@ -1630,7 +1692,13 @@ def _run_optimizer_lp(
                 "battery_warning": False,
                 "strategy_summary": (
                     f"{plan_date}: LP {plan.status} — held previous schedule "
-                    f"(no hardware writes; heuristic fallback disabled)"
+                    f"(no hardware writes; heuristic fallback disabled"
+                    + (
+                        f"; appliance-drop retry also Infeasible "
+                        f"({appliance_kwh_total:.2f} kWh)"
+                        if appliance_kwh_total > 1e-6 else ""
+                    )
+                    + ")"
                 ),
                 "fox_schedule_uploaded": False,
                 "daikin_actions_count": 0,
@@ -1709,6 +1777,11 @@ def _run_optimizer_lp(
     naive_agile_cost = total_kwh * actual_mean
     savings_vs_svt_pence = max(0.0, naive_svt_cost - naive_agile_cost)
     strategy += f"; indicative vs SVT ~{savings_vs_svt_pence / 100:.2f} GBP/day at mean Agile"
+    if appliance_retry_dropped:
+        strategy += (
+            f"; appliance load (+{appliance_kwh_total:.2f} kWh) excluded "
+            f"from LP plan to clear Infeasible — cron still fires"
+        )
 
     db.save_daily_target(
         {
