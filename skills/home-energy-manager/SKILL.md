@@ -211,16 +211,67 @@ Use these to explain past decisions in the user's terms (price + temps + SoC), n
 ### "How did yesterday go?" / "PnL?"
 
 ```
-1. hem__get_energy_metrics()
+1. hem__get_brief_kpis()                 # defaults to yesterday
+     → structured KPI fields shown in the brief: realised_net_cost_gbp,
+       import_kwh, mean_import_rate_p_per_kwh, mtd context (avg/day,
+       weighted rate), strict_savings_forgone, lp_scorecard grade.
+       Lets you compose custom narratives without parsing the markdown.
+2. hem__get_energy_metrics()
      → daily/weekly/monthly delta vs SVT shadow + fixed-tariff shadow,
        VWAP, slippage, arbitrage efficiency, peak-import %, current SoC.
-2. hem__get_attribution_day()    # defaults to yesterday
+3. hem__get_attribution_day()    # defaults to yesterday
      → solar attribution: % of solar to self-use / battery / export.
-3. hem__get_fox_energy_range(start, end)
+4. hem__get_fox_energy_range(start, end)
      → daily totals across a date range for trend comparisons.
 ```
 
 `get_attribution_day` reads `fox_energy_daily`, populated by the nightly rollup — today's row only appears after rollover.
+
+### "Is the LP doing a good job?" / "Audit the last 24h"
+
+```
+1. hem__get_lp_scorecard()               # defaults to yesterday
+     → composite grade A/B/C/D plus three sections:
+       forecast_accuracy (was the LP's input right?),
+       dispatch_accuracy (did the plan execute?),
+       economic_value (did the LP beat naive SelfUse?).
+2. hem__get_audit_report(window_hours=24)
+     → held-schedule events (LP infeasibilities caught by PR #338's
+       fallback) + plan-vs-execution disparities (top-N slots by
+       absolute cost delta) + strict_savings_forgone totals.
+       Same data the 07:30 UTC Telegram cron uses.
+3. hem__explain_dispatch_decisions(run_id="latest")
+     → per-slot lp_kind → dispatched_kind classification and the reason
+       string (e.g. "scenario_filter_downgrade", "strict_savings_hold").
+```
+
+Use these together when the user asks "is the LP working?" — the
+scorecard's grade is the headline, the audit explains the held-schedule
+events, and `explain_dispatch_decisions` answers per-slot "why" questions.
+
+### "What is strict_savings costing us this month?"
+
+```
+1. hem__get_strict_savings_forgone_export(
+        start_date="2026-05-01",        # 1st of current month
+        end_date="2026-05-20",          # today
+   )
+     → totals.pounds = revenue NOT realised over the month because the
+       scenario filter / strict_savings policy held LP-preferred
+       peak_export slots; per-day breakdown shows when it bit.
+2. hem__get_tariff_comparison(period="mtd")
+     → realised cost vs SVT + Fixed shadows for the same window;
+       compose with #1 to extrapolate annual cost of the strategy.
+3. (if the gap is large and sustained)
+   hem__list_settings()   # ENERGY_STRATEGY_MODE row
+     → flip to "savings_first" via set_setting() if the user wants
+       to realise the missed revenue (overrides the user's
+       near-zero-grid-cost preference — confirm first).
+```
+
+The user prefers `strict_savings` for the near-zero grid-cost policy.
+Surface the forgone tally as a *trade-off* number, not a recommendation
+to switch — battery for overnight self-use is the explicit policy.
 
 ### "Mute the daily PnL alert until I'm back from holiday"
 
