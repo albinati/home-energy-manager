@@ -1166,46 +1166,6 @@ def get_agile_export_rates_in_range(
             conn.close()
 
 
-def get_agile_rates_daily_summary(
-    tariff_code: str,
-    start_date: str,
-    end_date: str,
-) -> list[dict[str, Any]]:
-    """Per-day aggregate stats for the given tariff and date range (UTC).
-
-    One SQL pass over ``agile_rates``. Returns a list ordered by date with:
-      ``date``, ``slot_count``, ``min_p``, ``max_p``, ``mean_p``,
-      ``vwap_p`` (volume-weighted equals mean here since slots are uniform
-      30 min — kept as a separate column so the front-end can show both).
-
-    Use ``YYYY-MM-DD`` strings for ``start_date`` / ``end_date``. Bounds are
-    UTC-local (we group by ``DATE(valid_from)`` which is the UTC component
-    of the ISO timestamp). Good enough for year-scale audit views.
-    """
-    with _lock:
-        conn = get_connection()
-        try:
-            cur = conn.execute(
-                """SELECT
-                       SUBSTR(valid_from, 1, 10) AS date,
-                       COUNT(*) AS slot_count,
-                       MIN(value_inc_vat) AS min_p,
-                       MAX(value_inc_vat) AS max_p,
-                       AVG(value_inc_vat) AS mean_p,
-                       AVG(value_inc_vat) AS vwap_p
-                   FROM agile_rates
-                   WHERE tariff_code = ?
-                     AND SUBSTR(valid_from, 1, 10) >= ?
-                     AND SUBSTR(valid_from, 1, 10) <= ?
-                   GROUP BY SUBSTR(valid_from, 1, 10)
-                   ORDER BY SUBSTR(valid_from, 1, 10) ASC""",
-                (tariff_code, start_date, end_date),
-            )
-            return [dict(r) for r in cur.fetchall()]
-        finally:
-            conn.close()
-
-
 def get_agile_rates_slots_for_local_day(
     tariff_code: str,
     local_date,  # datetime.date
@@ -1306,51 +1266,6 @@ def update_action_restore_link(action_id: int, restore_id: int) -> None:
             conn.commit()
         finally:
             conn.close()
-
-
-def get_pending_actions(plan_date: str | None = None) -> list[dict[str, Any]]:
-    with _lock:
-        conn = get_connection()
-        try:
-            if plan_date:
-                cur = conn.execute(
-                    """SELECT * FROM action_schedule WHERE status = 'pending' AND date = ?
-                       ORDER BY start_time""",
-                    (plan_date,),
-                )
-            else:
-                cur = conn.execute(
-                    """SELECT * FROM action_schedule
-                       WHERE status = 'pending'
-                       ORDER BY date, start_time"""
-                )
-            rows = [_row_action(r) for r in cur.fetchall()]
-        finally:
-            conn.close()
-    return rows
-
-
-def get_active_actions(plan_date: str | None = None) -> list[dict[str, Any]]:
-    with _lock:
-        conn = get_connection()
-        try:
-            if plan_date:
-                cur = conn.execute(
-                    """SELECT * FROM action_schedule
-                       WHERE status = 'active' AND date = ?
-                       ORDER BY start_time""",
-                    (plan_date,),
-                )
-            else:
-                cur = conn.execute(
-                    """SELECT * FROM action_schedule
-                       WHERE status = 'active'
-                       ORDER BY date, start_time"""
-                )
-            rows = [_row_action(r) for r in cur.fetchall()]
-        finally:
-            conn.close()
-    return rows
 
 
 def _row_action(r: sqlite3.Row) -> dict[str, Any]:
@@ -1864,41 +1779,6 @@ def half_hourly_load_profile_kwh(
     return profile
 
 
-def hourly_load_profile_kwh(limit: int = 2016) -> dict[int, float]:
-    """
-    Return per-hour-of-day (0–23) mean consumption kWh from execution_log.
-
-    Uses the last ``limit`` rows (default ~6 weeks of half-hour slots).
-    Falls back to the flat mean for hours with no data.
-    Returns a dict mapping hour-of-day → expected kWh per half-hour slot.
-
-    Kept for analytics / human-facing aggregates. The LP path uses
-    :func:`half_hourly_load_profile_kwh` for finer granularity (S10.8 / #175).
-    """
-    rows = get_execution_logs(limit=limit)
-    buckets: dict[int, list[float]] = {h: [] for h in range(24)}
-    for r in rows:
-        if r.get("consumption_kwh") is None:
-            continue
-        ts_str = r.get("timestamp") or ""
-        try:
-            from datetime import datetime as _dt
-            ts = _dt.fromisoformat(ts_str.replace("Z", "+00:00"))
-            hour = ts.astimezone(ZoneInfo(config.BULLETPROOF_TIMEZONE)).hour
-        except (ValueError, TypeError):
-            continue
-        buckets[hour].append(float(r["consumption_kwh"]))
-
-    flat_mean = mean_consumption_kwh_from_execution_logs(limit=limit)
-    profile: dict[int, float] = {}
-    for h in range(24):
-        if buckets[h]:
-            profile[h] = sum(buckets[h]) / len(buckets[h])
-        else:
-            profile[h] = flat_mean
-    return profile
-
-
 def estimate_dhw_standing_loss_c_per_hour_p50(
     *,
     limit: int = 2016,
@@ -1953,29 +1833,6 @@ def estimate_dhw_standing_loss_c_per_hour_p50(
     if len(rates) < 3:
         return None
     return float(median(rates))
-
-
-def actions_for_device_at(
-    device: str,
-    when_utc: datetime,
-    plan_date: str,
-) -> list[dict[str, Any]]:
-    """Actions where when_utc is in [start_time, end_time)."""
-    ts = when_utc.isoformat().replace("+00:00", "Z")
-    with _lock:
-        conn = get_connection()
-        try:
-            cur = conn.execute(
-                """SELECT * FROM action_schedule
-                   WHERE device = ? AND date = ? AND start_time <= ? AND end_time > ?
-                     AND status IN ('pending', 'active')
-                   ORDER BY start_time""",
-                (device, plan_date, ts, ts),
-            )
-            rows = [_row_action(r) for r in cur.fetchall()]
-        finally:
-            conn.close()
-    return rows
 
 
 def log_execution(row: dict[str, Any]) -> None:
@@ -3885,23 +3742,6 @@ def reject_plan(plan_id: str) -> bool:
             conn.close()
 
 
-def expire_plan(plan_id: str) -> bool:
-    """Set plan_consent status to expired. Returns True if a row was updated."""
-    with _lock:
-        conn = get_connection()
-        try:
-            cur = conn.execute(
-                """UPDATE plan_consent
-                   SET status='expired'
-                   WHERE plan_id=? AND status='pending_approval'""",
-                (plan_id,),
-            )
-            conn.commit()
-            return cur.rowcount > 0
-        finally:
-            conn.close()
-
-
 # ---------------------------------------------------------------------------
 # V9: daikin_telemetry — physics-estimator seed + live-fetch audit trail (#55)
 # ---------------------------------------------------------------------------
@@ -4814,39 +4654,6 @@ def upsert_calendar_event(
             conn.close()
 
 
-def get_calendar_events_for_date(
-    calendar_id: str, plan_date: str
-) -> list[dict[str, Any]]:
-    """Return rows for one calendar+date, ordered by slot_start_utc."""
-    with _lock:
-        conn = get_connection()
-        try:
-            cur = conn.execute(
-                """SELECT calendar_id, plan_date, slot_start_utc, slot_end_utc,
-                          tier, price_min, price_max, price_mean, google_event_id
-                   FROM calendar_events
-                   WHERE calendar_id = ? AND plan_date = ?
-                   ORDER BY slot_start_utc ASC""",
-                (calendar_id, plan_date),
-            )
-            return [dict(r) for r in cur.fetchall()]
-        finally:
-            conn.close()
-
-
-def delete_calendar_event(calendar_id: str, slot_start_utc: str) -> None:
-    with _lock:
-        conn = get_connection()
-        try:
-            conn.execute(
-                "DELETE FROM calendar_events WHERE calendar_id = ? AND slot_start_utc = ?",
-                (calendar_id, slot_start_utc),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
-
 def upsert_dispatch_decision(
     *,
     run_id: int,
@@ -5269,30 +5076,6 @@ def get_scenario_solve_batch(batch_id: int) -> list[dict[str, Any]]:
                 (batch_id,),
             )
             return [dict(r) for r in cur.fetchall()]
-        finally:
-            conn.close()
-
-
-def find_scenario_batch_for_run(run_id: int) -> int | None:
-    """Reverse lookup: given an optimizer_log run_id, return the batch_id it
-    belongs to (or None if no scenario solve was logged for that run).
-
-    Pattern: ``batch_id`` equals the canonical (nominal) run's id, so most
-    callers can just pass ``run_id``. This helper also catches the case
-    where the run_id was a non-canonical scenario solve — though we don't
-    currently emit those (only the canonical run reaches optimizer_log).
-    """
-    with _lock:
-        conn = get_connection()
-        try:
-            cur = conn.execute(
-                """SELECT DISTINCT batch_id FROM scenario_solve_log
-                   WHERE nominal_run_id = ? OR batch_id = ?
-                   LIMIT 1""",
-                (run_id, run_id),
-            )
-            r = cur.fetchone()
-            return int(r[0]) if r else None
         finally:
             conn.close()
 

@@ -732,11 +732,6 @@ def bulletproof_night_brief_job() -> None:
         logger.warning("Night brief failed: %s", e)
 
 
-# Backward-compat alias for the original cron name; lets tests / scripts that
-# still reference the old name keep working until they migrate.
-bulletproof_daily_brief_job = bulletproof_morning_brief_job
-
-
 def bulletproof_mpc_job(
     *,
     force_write_devices: bool = False,

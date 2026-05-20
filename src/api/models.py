@@ -185,11 +185,6 @@ class OpenClawCapabilitiesResponse(BaseModel):
     capabilities: list[OpenClawCapability]
 
 
-class ErrorResponse(BaseModel):
-    error: str
-    detail: str | None = None
-
-
 # Energy provider models
 
 class EnergyProviderEnum(str, Enum):
@@ -388,30 +383,6 @@ class SchedulerStatusResponse(BaseModel):
     next_cheap_to: str | None = None
     planned_lwt_adjustment: float = 0.0
     tariff_code: str | None = None
-
-
-class OptimizationPlanSlotResponse(BaseModel):
-    """One half-hour row from the V7 solver."""
-
-    valid_from: str
-    valid_to: str
-    import_price_pence: float
-    slot_kind: str
-    lwt_offset_delta: float
-    fox_mode_hint: str
-    notes: str = ""
-
-
-class OptimizationPlanResponse(BaseModel):
-    """48-block plan + headline target price."""
-
-    computed_at: str
-    preset: str
-    tariff_code: str
-    target_mean_price_pence: float
-    cheap_slot_count: int
-    peak_slot_count: int
-    slots: list[OptimizationPlanSlotResponse]
 
 
 class OptimizationStatusResponse(BaseModel):

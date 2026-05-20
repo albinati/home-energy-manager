@@ -428,16 +428,3 @@ def run_setup() -> dict | None:
     err = result.get("error", "unknown")
     print(f"\n[FAIL] {err}\n")
     return None
-
-
-# Convenience for prefetching at heartbeat (called by scheduler if wired)
-def prefetch_smartthings_access_token() -> None:
-    if not config.SMARTTHINGS_CLIENT_ID or not config.SMARTTHINGS_CLIENT_SECRET:
-        return
-    if not has_tokens():
-        return
-    try:
-        get_valid_access_token(force_refresh=False)
-    except (SmartThingsAuthError, SmartThingsAuthCircuitOpen):
-        # Quiet — on-the-wire errors will be handled by the caller's notify_risk.
-        pass

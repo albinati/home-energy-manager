@@ -32,16 +32,6 @@ TEMP_BANDS = [
 
 
 @dataclass
-class TempBandSummary:
-    """Heating spend/kWh for one temperature band."""
-    band: str
-    days: int
-    heating_kwh: float
-    cost_pounds: float
-    avg_temp_c: float | None = None
-
-
-@dataclass
 class HeatingAnalytics:
     """Heating share and weather-based analytics for the period."""
     heating_percent_of_cost: float | None = None  # heating cost / net cost * 100

@@ -64,15 +64,6 @@ def _str_env(name: str, default: str) -> Callable[[], str]:
     return lambda: (os.getenv(name) or default).strip().lower()
 
 
-def _int_list_env(name: str, default: str) -> Callable[[], list[int]]:
-    def _load() -> list[int]:
-        raw = (os.getenv(name) or default).strip()
-        if not raw:
-            return []
-        return sorted({int(p.strip()) for p in raw.split(",") if p.strip()})
-    return _load
-
-
 def _lp_soc_final_kwh_default() -> float:
     """LP terminal SoC floor: explicit env override wins; otherwise 25 % of BATTERY_CAPACITY_KWH."""
     env = os.getenv("LP_SOC_FINAL_KWH")
