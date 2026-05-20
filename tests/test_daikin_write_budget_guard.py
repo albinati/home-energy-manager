@@ -8,8 +8,9 @@ The dispatch layer must:
 3. Drop trailing low-value pairs if still over budget after coalescing.
 4. NEVER drop or coalesce ``max_heat`` (negative-price) or ``shutdown`` (peak)
    — those time-critical pairs always survive.
-5. Notify the operator (via ``notify_strategy_update``) when actions were
-   dropped so the budget can be raised if the pattern persists.
+5. Log the drop event at journalctl-grade so operators can grep — no
+   Telegram push (notify_strategy_update was removed in the 2026-05-10
+   notification cleanup; this is a deliberate pull-based FYI).
 
 These tests exercise the helpers directly with synthetic pair lists so we
 don't have to round-trip through a full LP solve.
@@ -18,7 +19,6 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from unittest.mock import patch
 
 import pytest
 
@@ -213,11 +213,9 @@ def test_write_daikin_logs_dropped_actions_no_telegram_push(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """When the budget guard drops actions, the event is LOGGED (journalctl
-    + action_log via standard logger), NOT pushed to Telegram. Per user
-    pull-based notification preference (memory: feedback_low_push_load.md),
-    auto-applied FYI alerts should not push — operator sees them only if
-    they look. ``notify_strategy_update`` MUST NOT be called."""
+    """When the budget guard drops actions, the event is LOGGED (journalctl-
+    grade) only — no Telegram push. Pull-based FYI per
+    feedback_low_push_load.md."""
     import logging
     from src.config import config as app_config
     from src.scheduler import lp_dispatch
@@ -251,15 +249,9 @@ def test_write_daikin_logs_dropped_actions_no_telegram_push(
         ]
     monkeypatch.setattr(lp_dispatch, "daikin_dispatch_preview", _fake_preview)
 
-    with patch("src.notifier.notify_strategy_update") as mock_notify, \
-         caplog.at_level(logging.INFO, logger="src.scheduler.lp_dispatch"):
+    with caplog.at_level(logging.INFO, logger="src.scheduler.lp_dispatch"):
         lp_dispatch.write_daikin_from_lp_plan("2026-06-01", plan, forecast=[])
 
-    # Telegram noise: MUST NOT be called.
-    assert mock_notify.call_count == 0, (
-        f"Budget guard must NOT push to Telegram (auto-applied FYI). "
-        f"notify_strategy_update was called: {mock_notify.call_args}"
-    )
     # Journalctl-grade log: MUST be present so operators can grep.
     assert any(
         "budget guard" in r.message for r in caplog.records

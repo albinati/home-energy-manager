@@ -219,7 +219,7 @@ class TestHooksDelivery:
         })
         monkeypatch.setattr(notifier.db, "log_action", lambda **kw: None)
 
-        notifier._dispatch(notifier.AlertType.STRATEGY_UPDATE, "x", urgent=False)
+        notifier._dispatch(notifier.AlertType.ACTION_CONFIRMATION, "x", urgent=False)
         err = capsys.readouterr().out
         assert "[openclaw hooks] delivery failed" in err
 

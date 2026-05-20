@@ -629,7 +629,6 @@ def _poll_running_jobs() -> None:
 
         # Build the finished notification (best-effort)
         try:
-            from ..analytics.daily_brief import build_brief_48h_summary
             from ..notifier import notify_appliance_finished
             tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
             actual_start = job.get("actual_start_utc") or job.get("planned_start_utc")
@@ -670,7 +669,6 @@ def _poll_running_jobs() -> None:
                 avg_price_pence=float(avg_p) if avg_p is not None else None,
                 estimated_kwh=kwh,
                 estimated_cost_p=cost_p,
-                brief_md=build_brief_48h_summary(),
                 kwh_is_measured=measured,
             )
         except Exception:
@@ -842,7 +840,7 @@ def _notify_armed(
     *,
     replan: bool,
 ) -> None:
-    """Best-effort armed/re-armed hook to OpenClaw. Failure must not break dispatch."""
+    """Best-effort armed/re-armed ping. Failure must not break dispatch."""
     try:
         from ..notifier import notify_appliance_armed
         tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
@@ -866,6 +864,11 @@ def _cancel(appliance_id: int, job: dict[str, Any], *, reason: str) -> None:
         "appliance #%d job=%d cancelled (reason=%s)",
         appliance_id, job["id"], reason,
     )
+    # Internal re-plan churn ("replanned") used to ping cancelled + a
+    # follow-up armed within the same LP solve — pure noise. User-facing
+    # cancellations (remote_mode_dropped, deadline_passed) still ping.
+    if reason.startswith("replanned"):
+        return
     try:
         from ..notifier import notify_appliance_cancelled
         appliance_row = db.get_appliance(appliance_id)
@@ -1054,10 +1057,9 @@ def _fire_cron(job_id: int) -> None:
         job_id, energy_start_wh,
     )
 
-    # PR #234: notify the family that laundry is starting + inline forward brief.
+    # PR #234: notify the family that laundry is starting.
     # Best-effort — never let a notification failure block the dispatch path.
     try:
-        from ..analytics.daily_brief import build_brief_48h_summary
         from ..notifier import notify_appliance_starting
         tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
         planned_start = datetime.fromisoformat(
@@ -1072,7 +1074,6 @@ def _fire_cron(job_id: int) -> None:
             deadline_local=deadline.strftime("%a %H:%M"),
             avg_price_pence=float(job.get("avg_price_pence") or 0.0),
             duration_minutes=int(job.get("duration_minutes") or 0),
-            brief_md=build_brief_48h_summary(),
         )
     except Exception:
         logger.exception("appliance fire: starting-notification failed (non-fatal)")

@@ -38,19 +38,17 @@ logger = logging.getLogger(__name__)
 
 class AlertType(str, Enum):
     MORNING_REPORT = "morning_report"
-    STRATEGY_UPDATE = "strategy_update"
     RISK_ALERT = "risk_alert"
     ACTION_CONFIRMATION = "action_confirmation"
     CRITICAL_ERROR = "critical_error"
     # V2 push events
     CHEAP_WINDOW_START = "cheap_window_start"
     PEAK_WINDOW_START = "peak_window_start"
-    DAILY_PNL = "daily_pnl"
-    # V7 plan consent
+    # V7 plan consent — fires only on the nightly plan_push (in-day MPC re-solves
+    # auto-apply silently; users pull the new plan via get_plan_timeline / UI).
     PLAN_PROPOSED = "plan_proposed"
     # V12 — twice-daily digest split + tier-aware policy
     NIGHT_BRIEF = "night_brief"
-    PLAN_REVISION = "plan_revision"
     NEGATIVE_WINDOW_START = "negative_window_start"
     # PR #234 — appliance lifecycle (laundry start/finish)
     APPLIANCE_STARTING = "appliance_starting"
@@ -62,16 +60,13 @@ class AlertType(str, Enum):
 # OpenClaw hook payload ``name`` field (one stable label per alert key)
 _HOOK_PAYLOAD_NAMES: dict[str, str] = {
     "morning_report": "EnergyMorningReport",
-    "strategy_update": "EnergyStrategyUpdate",
     "risk_alert": "EnergyRisk",
     "action_confirmation": "EnergyActionConfirmation",
     "critical_error": "EnergyCritical",
     "cheap_window_start": "EnergyCheapWindow",
     "peak_window_start": "EnergyPeakWindow",
-    "daily_pnl": "EnergyDailyPnl",
     "plan_proposed": "EnergyPlan",
     "night_brief": "EnergyNightBrief",
-    "plan_revision": "EnergyPlanRevision",
     "negative_window_start": "EnergyNegativeWindow",
     "appliance_starting": "EnergyApplianceStart",
     "appliance_finished": "EnergyApplianceFinish",
@@ -89,16 +84,13 @@ def _payload_name_for_key(alert_key: str) -> str:
 _TELEGRAM_HEADERS: dict[str, str] = {
     "morning_report": "🌅 Morning brief",
     "night_brief": "🌙 Night brief",
-    "strategy_update": "🧭 Strategy update",
     "risk_alert": "⚠️ Risk alert",
     "action_confirmation": "✅ Action",
     "critical_error": "🚨 Critical error",
     "cheap_window_start": "💚 Cheap window",
     "peak_window_start": "🔴 Peak window",
     "negative_window_start": "🔵 PAID-to-use window",
-    "daily_pnl": "📊 Daily PnL",
     "plan_proposed": "📋 New energy plan",
-    "plan_revision": "🔄 Plan revision",
     "appliance_starting": "🧺 Appliance starting",
     "appliance_finished": "✅ Appliance finished",
     "appliance_armed": "🧺 Appliance armed",
@@ -315,24 +307,6 @@ def _build_telegram_push_alert_body(event_type: str, payload: dict[str, Any]) ->
         if soc is not None:
             lines.append(f"SoC {float(soc):.0f}%")
         return "\n".join(lines)
-    if event_type == AlertType.DAILY_PNL.value:
-        lines = [f"**{head}**"]
-        for key, label, fmt in (
-            ("realised_cost_gbp", "Realised cost", "£{:.2f}"),
-            ("delta_vs_svt_gbp", "vs SVT", "£{:+.2f}"),
-            ("delta_vs_fixed_tariff_gbp", "vs fixed", "£{:+.2f}"),
-            ("kwh", "Imported", "{:.1f} kWh"),
-            ("export_kwh", "Exported", "{:.2f} kWh"),
-            ("export_revenue_gbp", "Export rev", "£{:.2f}"),
-        ):
-            v = payload.get(key)
-            if v is None:
-                continue
-            try:
-                lines.append(f"  {label}: {fmt.format(float(v))}")
-            except (TypeError, ValueError):
-                lines.append(f"  {label}: {v}")
-        return "\n".join(lines)
     # Generic fallback — surface payload["message"] if present.
     lines = [f"**{head}**"]
     msg = payload.get("message") if isinstance(payload, dict) else None
@@ -348,10 +322,16 @@ def _build_telegram_plan_proposed_body(
     table: str,
     *,
     approval_timeout_s: int,
+    auto_applied: bool,
 ) -> str:
     """Plan-proposed body. Returned as raw HTML — pass ``parse_html=False`` to
-    ``send_message`` so the schedule ``<pre>`` block survives intact."""
-    minutes = max(1, int(approval_timeout_s) // 60)
+    ``send_message`` so the schedule ``<pre>`` block survives intact.
+
+    ``auto_applied=True`` (the common case under PLAN_AUTO_APPROVE) drops the
+    "Auto-applies in N min unless rejected" footer — it confused readers when
+    the plan was already live. Auto-applied messages instead point at
+    ``get_plan_timeline()`` for review.
+    """
     head = _telegram_header_for(AlertType.PLAN_PROPOSED.value)
     plan_id_safe = html.escape(plan_id)
     plan_date_safe = html.escape(plan_date)
@@ -367,8 +347,12 @@ def _build_telegram_plan_proposed_body(
         parts.append("")
         parts.append(summary_html)
     parts.append("")
-    parts.append(f"Auto-applies in {minutes} min unless rejected.")
-    parts.append(f'Reject via MCP: <code>reject_plan("{plan_id_safe}")</code>')
+    if auto_applied:
+        parts.append("Already applied. Review via <code>get_plan_timeline()</code>.")
+    else:
+        minutes = max(1, int(approval_timeout_s) // 60)
+        parts.append(f"Auto-applies in {minutes} min unless rejected.")
+        parts.append(f'Reject via MCP: <code>reject_plan("{plan_id_safe}")</code>')
     return "\n".join(parts)
 
 
@@ -563,25 +547,19 @@ def notify_appliance_starting(
     deadline_local: str,
     avg_price_pence: float,
     duration_minutes: int,
-    brief_md: str | None = None,
 ) -> None:
     """🧺 Cycle is starting now (LP-armed cron just fired ``setMachineState run``).
 
-    Inlines a 4-line forward-looking brief so the family sees today + tomorrow
-    tariff windows and the running PnL alongside the start confirmation.
-
-    Telegram headline carries the appliance name dynamically (``🧺 Washing
-    machine starting``) so the body doesn't have to repeat ``🧺 **Name**`` on
-    a second line. The static map's ``🧺 Appliance starting`` is still the
-    fallback for OpenClaw / action_log consumers (#330 follow-up).
+    Lean message: window + cycle facts only. The appliance name lives in the
+    Telegram header (``telegram_header_override`` below) to avoid duplicating
+    ``🧺 **Name**`` on a second body line. Tariff/PnL context lives in the
+    morning brief — duplicating it here was just longer pings, not richer
+    information.
     """
-    body_lines = [
+    body = "\n".join([
         f"{planned_start_local} → end ≤ {deadline_local}",
         f"{duration_minutes} min · avg {avg_price_pence:.1f}p/kWh",
-    ]
-    if brief_md:
-        body_lines.extend(["", brief_md])
-    body = "\n".join(body_lines)
+    ])
     extra = {
         "appliance": appliance_name,
         "planned_start_local": planned_start_local,
@@ -604,7 +582,6 @@ def notify_appliance_finished(
     avg_price_pence: float | None = None,
     estimated_kwh: float | None = None,
     estimated_cost_p: float | None = None,
-    brief_md: str | None = None,
     kwh_is_measured: bool = False,
 ) -> None:
     """✅ Cycle has finished (poll detected state transition out of ``run``).
@@ -630,12 +607,11 @@ def notify_appliance_finished(
         cost_line = f"avg {avg_price_pence:.1f}p/kWh"
     else:
         cost_line = ""
-    body_lines = [
-        f"{started_local} → {ended_local} ({duration_minutes} min)" + (f" · {cost_line}" if cost_line else ""),
-    ]
-    if brief_md:
-        body_lines.extend(["", brief_md])
-    body = "\n".join(body_lines)
+    # Appliance name lives in the Telegram header (telegram_header_override
+    # below) to avoid duplicating it on a second body line.
+    body = f"{started_local} → {ended_local} ({duration_minutes} min)" + (
+        f" · {cost_line}" if cost_line else ""
+    )
     extra = {
         "appliance": appliance_name,
         "started_local": started_local,
@@ -668,8 +644,10 @@ def notify_appliance_armed(
     """🧺 LP picked a window for this appliance and armed the cron.
 
     Fires when ``appliance_dispatch.reconcile()`` writes a new ``appliance_jobs``
-    row OR when an existing job's planned window shifted via re-plan (in which
-    case ``replan=True`` so OpenClaw can phrase the message as a revision).
+    row OR when an existing job's planned window shifted via re-plan
+    (``replan=True``). Kept on the Telegram path during the appliance-dispatch
+    testing phase so the user can observe how often the LP shifts windows
+    in production — to decide whether to mute it later.
     """
     verb = "re-armed" if replan else "armed"
     body = "\n".join([
@@ -720,18 +698,6 @@ def notify_appliance_cancelled(
     )
 
 
-def notify_plan_revision(body: str, *, trigger_reason: str | None = None) -> None:
-    """Fires when an in-day MPC re-solve materially changed the plan.
-
-    ``trigger_reason`` is what surfaced the revision (e.g. ``forecast_revision``,
-    ``soc_drift``, ``tier_boundary``); recorded in the payload so OpenClaw can
-    explain *why* a revision happened. Non-urgent — these are FYI-grade pings,
-    not alerts.
-    """
-    extra = {"trigger_reason": trigger_reason} if trigger_reason else None
-    _dispatch(AlertType.PLAN_REVISION, body, urgent=False, extra=extra)
-
-
 def push_negative_window_start(
     *,
     soc: float | None = None,
@@ -764,17 +730,6 @@ def push_negative_window_start(
     if price_pence is not None:
         payload["price_pence"] = price_pence
     push_alert(AlertType.NEGATIVE_WINDOW_START.value, payload)
-
-
-def notify_strategy_update(summary: str, warnings: Any = None) -> None:
-    msg = summary
-    if warnings:
-        if isinstance(warnings, (list, tuple)):
-            bullet_lines = "\n".join(f"  • {w}" for w in warnings)
-            msg += f"\n\nWarnings ({len(warnings)}):\n{bullet_lines}"
-        else:
-            msg += f"\n\nWarnings: {warnings}"
-    _dispatch(AlertType.STRATEGY_UPDATE, msg, extra={"warnings": warnings} if warnings else None)
 
 
 def notify_risk(message: str, extra: dict[str, Any] | None = None) -> None:
@@ -873,11 +828,6 @@ def push_peak_window_start(soc: float | None = None) -> None:
     )
 
 
-def push_daily_pnl(metrics: dict[str, Any]) -> None:
-    """Emit DAILY_PNL report: hedge-fund format with PnL, VWAP, slippage."""
-    push_alert(AlertType.DAILY_PNL.value, metrics)
-
-
 # ---------------------------------------------------------------------------
 # V7: plan consent notification
 # ---------------------------------------------------------------------------
@@ -921,27 +871,40 @@ def notify_plan_proposed(
     plan_date: str,
     summary: str,
     actions: list[dict[str, Any]],
+    *,
+    auto_applied: bool = False,
 ) -> None:
-    """Send a PLAN_PROPOSED notification with the full schedule and approval instructions.
+    """Send a PLAN_PROPOSED notification with the full schedule.
 
-    Payload advertises ``autoAcceptOnTimeout: true`` and ``approvalTimeoutSeconds``
-    so interactive channels (Telegram/Discord) can surface accept/reject buttons
-    that default to *accept* on timeout — the plan goes live unless the user
-    rejects it in the grace window. OpenClaw implements the UI and the timeout.
+    ``auto_applied=True`` (default under PLAN_AUTO_APPROVE) means the plan is
+    already live — the message tells the user where to review it and skips the
+    approve/reject footer. ``auto_applied=False`` is the legacy consent flow.
+
+    Payload advertises ``autoAcceptOnTimeout`` + ``approvalTimeoutSeconds`` for
+    the OpenClaw fallback path that still implements interactive accept/reject
+    buttons; on the direct-Telegram path those keys are inert.
     """
     tz_name = getattr(config, "BULLETPROOF_TIMEZONE", "Europe/London")
     table = _format_plan_actions(actions, tz_name)
     approval_timeout_s = int(getattr(config, "PLAN_APPROVAL_TIMEOUT_SECONDS", 300))
-    msg = (
-        f"New energy plan for {plan_date} — ID: {plan_id}\n"
-        f"\n{table}\n"
-        f"\n{summary}\n"
-        f"\nTo activate: confirm_plan(\"{plan_id}\")\n"
-        f"To reject:   reject_plan(\"{plan_id}\")\n"
-        f"(Auto-activates in {approval_timeout_s // 60} min if no response)"
-    )
-    full_msg = _compose_delivery_body(AlertType.PLAN_PROPOSED, msg, urgent=True, extra=None)
-    _record_notification(AlertType.PLAN_PROPOSED, msg, urgent=True, extra=None, full_msg=full_msg)
+    if auto_applied:
+        msg = (
+            f"New energy plan for {plan_date} — ID: {plan_id} (auto-applied)\n"
+            f"\n{table}\n"
+            f"\n{summary}\n"
+            f"\nReview: get_plan_timeline()"
+        )
+    else:
+        msg = (
+            f"New energy plan for {plan_date} — ID: {plan_id}\n"
+            f"\n{table}\n"
+            f"\n{summary}\n"
+            f"\nTo activate: confirm_plan(\"{plan_id}\")\n"
+            f"To reject:   reject_plan(\"{plan_id}\")\n"
+            f"(Auto-activates in {approval_timeout_s // 60} min if no response)"
+        )
+    full_msg = _compose_delivery_body(AlertType.PLAN_PROPOSED, msg, urgent=not auto_applied, extra=None)
+    _record_notification(AlertType.PLAN_PROPOSED, msg, urgent=not auto_applied, extra=None, full_msg=full_msg)
 
     route = _resolve_route(AlertType.PLAN_PROPOSED.value)
     if not route:
@@ -952,6 +915,7 @@ def notify_plan_proposed(
         body = _build_telegram_plan_proposed_body(
             plan_id, plan_date, summary, table,
             approval_timeout_s=approval_timeout_s,
+            auto_applied=auto_applied,
         )
         # Body is already HTML (with <pre> for the schedule); keep parse_mode=HTML
         # but skip the markdown→HTML pre-pass so our tags survive intact.

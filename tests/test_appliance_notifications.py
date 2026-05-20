@@ -44,7 +44,6 @@ def test_notify_appliance_starting_dispatches_with_correct_alert_type() -> None:
             deadline_local="Sun 06:00",
             avg_price_pence=3.7,
             duration_minutes=77,
-            brief_md="🔆 Today: ...",
         )
     assert mock_dispatch.called
     args, kwargs = mock_dispatch.call_args
@@ -56,7 +55,9 @@ def test_notify_appliance_starting_dispatches_with_correct_alert_type() -> None:
     assert "Sat 04:30" in body
     assert "77 min" in body
     assert "3.7p/kWh" in body
-    assert "🔆 Today" in body
+    # Lean message: no inline 48h brief block.
+    assert "🔆 Today" not in body
+    assert "🔋 Battery" not in body
     assert kwargs["urgent"] is False
     assert kwargs["telegram_header_override"] == "🧺 Washer starting"
     extra = kwargs["extra"]
@@ -75,7 +76,6 @@ def test_notify_appliance_finished_dispatches_with_correct_alert_type() -> None:
             avg_price_pence=3.7,
             estimated_kwh=0.6,
             estimated_cost_p=2.22,
-            brief_md="🔆 Today: ...",
         )
     assert mock_dispatch.called
     args, kwargs = mock_dispatch.call_args
@@ -88,6 +88,8 @@ def test_notify_appliance_finished_dispatches_with_correct_alert_type() -> None:
     assert "04:30" in body and "05:47" in body
     assert "77 min" in body
     assert "≈ 0.60 kWh" in body
+    # Lean message: no inline 48h brief block.
+    assert "🔆 Today" not in body
     assert kwargs["extra"]["estimated_kwh"] == 0.6
     assert kwargs["extra"]["estimated_cost_pence"] == 2.22
     assert kwargs["extra"]["kwh_is_measured"] is False
@@ -133,8 +135,7 @@ def test_notify_appliance_finished_handles_missing_cost_estimate() -> None:
 
 
 def test_notify_appliance_armed_first_arm() -> None:
-    """When the LP picks the first window for an appliance, the hook fires
-    with replan=False and renders the planned start, end, deadline + cost."""
+    """First-arm: replan=False, body says 'armed' (not 're-armed')."""
     with patch("src.notifier._dispatch") as mock_dispatch:
         notify_appliance_armed(
             appliance_name="Washer",
@@ -145,7 +146,6 @@ def test_notify_appliance_armed_first_arm() -> None:
             avg_price_pence=4.5,
             replan=False,
         )
-    assert mock_dispatch.called
     args, kwargs = mock_dispatch.call_args
     assert args[0] == AlertType.APPLIANCE_ARMED
     body = args[1]
@@ -164,9 +164,8 @@ def test_notify_appliance_armed_first_arm() -> None:
 
 
 def test_notify_appliance_armed_replan_phrasing() -> None:
-    """A re-plan flips the verb to 're-armed' so the Telegram header reads
-    ``🧺 Washer re-armed`` instead of ``armed`` — a window revision rather
-    than a new arm."""
+    """Replan: verb flips to 're-armed' so the message reads as a window
+    revision instead of a duplicate first-arm."""
     with patch("src.notifier._dispatch") as mock_dispatch:
         notify_appliance_armed(
             appliance_name="Washer",
@@ -218,20 +217,6 @@ def test_notify_appliance_cancelled_omits_planned_start_when_unknown() -> None:
     assert kwargs["telegram_header_override"] == "🚫 Washer cancelled"
     assert "deadline_passed" in args[1]
     assert "planned_start_local" not in kwargs["extra"]
-
-
-# ---------- build_brief_48h_summary degrades gracefully ----------
-
-def test_brief_48h_summary_returns_string_with_no_data() -> None:
-    """Empty DB → still produces 4 lines, all gracefully reading n/a."""
-    from src.analytics.daily_brief import build_brief_48h_summary
-    out = build_brief_48h_summary()
-    lines = out.split("\n")
-    assert len(lines) == 4
-    assert lines[0].startswith("🔆 Today:")
-    assert lines[1].startswith("🔆 Tomorrow:")
-    assert lines[2].startswith("💰 Today PnL:")
-    assert lines[3].startswith("🔋 Battery")
 
 
 # ---------- Completion poll ----------

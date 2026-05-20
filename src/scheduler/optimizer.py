@@ -894,7 +894,12 @@ def _write_daikin_schedule(plan_date: str, slots: list[HalfHourSlot], forecast: 
     return count
 
 
-def _run_optimizer_heuristic(fox: FoxESSClient | None, daikin: Any | None = None) -> dict[str, Any]:
+def _run_optimizer_heuristic(
+    fox: FoxESSClient | None,
+    daikin: Any | None = None,
+    *,
+    trigger_reason: str = "manual",
+) -> dict[str, Any]:
     """Legacy price-quantile classifier + Fox/Daikin writers."""
     from .lp_dispatch import upload_fox_if_operational
 
@@ -1018,7 +1023,7 @@ def _run_optimizer_heuristic(fox: FoxESSClient | None, daikin: Any | None = None
         }
     )
 
-    _write_plan_consent(plan_date, strategy)
+    _write_plan_consent(plan_date, strategy, trigger_reason=trigger_reason)
 
     return {
         "ok": True,
@@ -1955,7 +1960,7 @@ def _run_optimizer_lp(
         except Exception as e:
             logger.warning("scenario_solve_log persistence failed (non-fatal): %s", e)
 
-    _write_plan_consent(plan_date, strategy)
+    _write_plan_consent(plan_date, strategy, trigger_reason=trigger_reason)
 
     return {
         "ok": True,
@@ -1994,16 +1999,23 @@ def _self_use_fallback(fox: FoxESSClient | None, reason: str = "No rates") -> di
     return {"ok": False, "error": reason, "fallback": "self_use"}
 
 
-def _write_plan_consent(plan_date: str, strategy: str) -> None:
-    """Write a plan_consent row and send the PLAN_PROPOSED notification.
+def _write_plan_consent(plan_date: str, strategy: str, *, trigger_reason: str = "manual") -> None:
+    """Write a plan_consent row and (sometimes) send the PLAN_PROPOSED notification.
 
     Idempotency rules:
     - If the plan is already approved/rejected, skip re-notifying and re-upsert only if
       the plan content changed (new hash).
     - If the plan is pending with the same hash, skip (no-op — avoid duplicate notifications).
     - A cooldown (PLAN_REGEN_COOLDOWN_SECONDS) prevents rapid successive re-planning.
-    - When PLAN_AUTO_APPROVE=true, plans are immediately approved and notification uses
-      "auto-applied" prefix instead of asking for approval.
+    - When PLAN_AUTO_APPROVE=true, plans are immediately approved.
+
+    Notification gating (2026-05-10): the Telegram ping fires ONLY when the
+    trigger is the nightly ``plan_push`` or a user-initiated ``manual`` solve.
+    In-day MPC re-solves (``tier_boundary``, ``soc_drift``, ``forecast_revision``,
+    ``dynamic_replan``, ``octopus_fetch``, ``cron``) auto-apply silently — the
+    user pulls the new plan via ``get_plan_timeline()``. Pre-cutoff this method
+    pinged on every material-content change, which produced 3-5 redundant
+    "📋 New energy plan" messages per day on top of the morning brief.
     """
     import hashlib
 
@@ -2066,6 +2078,11 @@ def _write_plan_consent(plan_date: str, strategy: str) -> None:
         and (time.time() - last_notified) < notify_min_interval
     )
 
+    # Gate: only ping for the nightly push or a user-initiated manual solve.
+    # Every other trigger applies silently and the user pulls via MCP.
+    notify_triggers = {"plan_push", "manual"}
+    should_notify = trigger_reason in notify_triggers
+
     if config.PLAN_AUTO_APPROVE:
         db.upsert_plan_consent(
             plan_id=plan_id,
@@ -2076,6 +2093,12 @@ def _write_plan_consent(plan_date: str, strategy: str) -> None:
         )
         db.approve_plan(plan_id)
         logger.info("Plan %s auto-approved (PLAN_AUTO_APPROVE=true)", plan_id)
+        if not should_notify:
+            logger.info(
+                "Plan %s notification skipped — trigger=%s applies silently",
+                plan_id, trigger_reason,
+            )
+            return
         if within_debounce:
             logger.info(
                 "Plan %s notification debounced (last ping %.0fs ago < %ds) — hardware applied silently",
@@ -2087,8 +2110,9 @@ def _write_plan_consent(plan_date: str, strategy: str) -> None:
             notify_plan_proposed(
                 plan_id=plan_id,
                 plan_date=plan_date,
-                summary=f"[AUTO-APPLIED] {strategy}",
+                summary=strategy,
                 actions=actions,
+                auto_applied=True,
             )
             db.mark_plan_notified(plan_id)
         except Exception as exc:
@@ -2102,6 +2126,12 @@ def _write_plan_consent(plan_date: str, strategy: str) -> None:
         expires_at=expires_at,
         plan_hash=plan_hash,
     )
+    if not should_notify:
+        logger.info(
+            "Plan %s consent written but notification skipped — trigger=%s",
+            plan_id, trigger_reason,
+        )
+        return
     if within_debounce:
         logger.info(
             "Plan %s notification debounced (last ping %.0fs ago < %ds) — pending approval, no new ping",
@@ -2136,5 +2166,5 @@ def run_optimizer(
     """
     backend = (config.OPTIMIZER_BACKEND or "lp").strip().lower()
     if backend == "heuristic":
-        return _run_optimizer_heuristic(fox, daikin)
+        return _run_optimizer_heuristic(fox, daikin, trigger_reason=trigger_reason)
     return _run_optimizer_lp(fox, daikin, trigger_reason=trigger_reason)
