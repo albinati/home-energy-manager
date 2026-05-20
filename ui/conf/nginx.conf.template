@@ -1,0 +1,59 @@
+# nginx config for the HEM SPA container.
+# Runs through `envsubst` at boot — only ${HEM_API_URL} is substituted; other
+# `$variable` references (nginx variables) are NOT in the substitution list.
+server {
+    listen 80;
+    server_name _;
+    root /usr/share/nginx/html;
+    index cockpit.html;
+
+    # Hardening — these don't cost anything and tighten the security posture
+    # for an internet-adjacent surface (Tailnet-bound but still).
+    server_tokens off;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    # Container-level health endpoint — used by docker compose healthcheck.
+    location = /healthz {
+        access_log off;
+        add_header Content-Type text/plain;
+        return 200 'ok\n';
+    }
+
+    # Runtime config — set by ui-entrypoint.sh from env vars. The SPA loads
+    # this BEFORE any other JS so it can read window.__HEM_CONFIG__.
+    location = /config.js {
+        access_log off;
+        add_header Cache-Control "no-store, no-cache, must-revalidate";
+        try_files $uri =404;
+    }
+
+    # Reverse-proxy /api → HEM. The browser sees same-origin, no CORS needed.
+    # The bearer header is injected client-side by the SPA's fetch wrapper.
+    location /api/ {
+        proxy_pass         ${HEM_API_URL};
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_read_timeout 60s;
+    }
+
+    # Static assets — long cache since SPA filenames are versioned by the CI
+    # build (or by image SHA in the URL — every push to main gets a new image).
+    location ~* \.(js|css|woff2?|svg|png|jpg|jpeg|gif|ico)$ {
+        access_log off;
+        expires 7d;
+        add_header Cache-Control "public, max-age=604800";
+        try_files $uri =404;
+    }
+
+    # SPA routes — every HTML path falls through to its corresponding file in
+    # html/. Unknown paths fall back to cockpit.html (Single-Page App default).
+    location / {
+        add_header Cache-Control "no-cache" always;
+        try_files $uri $uri/ /cockpit.html;
+    }
+}

@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HEM SPA · scaffold</title>
+  <script src="/config.js"></script>
+  <script src="/js/_api.js"></script>
+  <style>
+    body { font-family: ui-sans-serif, system-ui; background: #0b0f17; color: #e8eef6; padding: 2rem; }
+    .ok { color: #6fffa1; }
+    .err { color: #ff7070; }
+    pre { background: #131a26; padding: 1rem; border-radius: 8px; overflow: auto; }
+  </style>
+</head>
+<body>
+  <h1>HEM SPA — Story B3 scaffold</h1>
+  <p>
+    This is the placeholder page shipped by Story B3 of Epic 13b. Story B4
+    replaces this with the migrated cockpit (plus history, forecast,
+    insights, workbench, settings). The page below confirms the nginx
+    config, runtime <code>config.js</code>, and bearer-injecting fetch
+    wrapper are wired correctly end-to-end.
+  </p>
+
+  <h2>Health probe</h2>
+  <pre id="health">checking …</pre>
+
+  <h2>Runtime config (from <code>/config.js</code>)</h2>
+  <pre id="config"></pre>
+
+  <script>
+    document.getElementById("config").textContent = JSON.stringify(
+      window.__HEM_CONFIG__ || {}, null, 2
+    );
+
+    hemGetJson("/health")
+      .then(j => {
+        const el = document.getElementById("health");
+        el.classList.add("ok");
+        el.textContent = JSON.stringify(j, null, 2);
+      })
+      .catch(err => {
+        const el = document.getElementById("health");
+        el.classList.add("err");
+        el.textContent = err.message + (err.body ? "\n\n" + err.body : "");
+      });
+  </script>
+</body>
+</html>
