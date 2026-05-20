@@ -73,10 +73,11 @@ def send_message(
     silent: bool = False,
     convert_markdown: bool = True,
     parse_mode: str = "HTML",
+    chat_id_override: str | None = None,
 ) -> bool:
     """POST to Bot API ``sendMessage``. Returns True on HTTP 2xx.
 
-    Two flags, intentionally orthogonal:
+    Three flags, intentionally orthogonal:
 
     * ``convert_markdown`` — when True (default), HEM-style Markdown
       (``**bold**``, `` `code` ``) is HTML-escaped and promoted to Telegram
@@ -85,6 +86,11 @@ def send_message(
       pass ``False`` to keep their tags intact.
     * ``parse_mode`` — Telegram parse mode header. Defaults to ``"HTML"``;
       set to ``""`` to send literal text with no formatting.
+    * ``chat_id_override`` — when set (non-empty), POST to that chat ID
+      instead of ``config.TELEGRAM_CHAT_ID``. Used by the appliance fanout
+      path in ``notifier`` to deliver the same body to a secondary chat
+      (e.g. a household member). The bot token still comes from config —
+      both chats must have already started a conversation with the bot.
 
     Failures are logged and swallowed — a Telegram outage must never abort
     the LP solver, scheduler tick, or appliance dispatcher. stdout +
@@ -93,7 +99,9 @@ def send_message(
     if not is_configured():
         return False
     token = config.TELEGRAM_BOT_TOKEN.strip()
-    chat_id = config.TELEGRAM_CHAT_ID.strip()
+    chat_id = (chat_id_override or config.TELEGRAM_CHAT_ID).strip()
+    if not chat_id:
+        return False
     base = (
         getattr(config, "TELEGRAM_API_BASE_URL", "https://api.telegram.org") or ""
     ).rstrip("/") or "https://api.telegram.org"

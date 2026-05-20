@@ -219,6 +219,154 @@ def test_notify_appliance_cancelled_omits_planned_start_when_unknown() -> None:
     assert "planned_start_local" not in kwargs["extra"]
 
 
+# ---------- Telegram fanout to secondary household chats ----------
+
+
+def _force_telegram_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub the dispatcher so it always takes the direct-Telegram path with
+    delivery enabled. Tests below own the rest of the path via patches."""
+    monkeypatch.setattr(app_config, "OPENCLAW_NOTIFY_ENABLED", True, raising=False)
+    monkeypatch.setattr(app_config, "OPENCLAW_NOTIFY_TARGET", "fake-target", raising=False)
+    monkeypatch.setattr(app_config, "OPENCLAW_NOTIFY_CHANNEL", "fake-channel", raising=False)
+    monkeypatch.setattr(app_config, "TELEGRAM_BOT_TOKEN", "stub-token", raising=False)
+    monkeypatch.setattr(app_config, "TELEGRAM_CHAT_ID", "100", raising=False)
+
+
+def test_appliance_armed_fans_out_to_extra_chat(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When TELEGRAM_APPLIANCE_FANOUT_CHAT_IDS is set, the appliance_armed
+    notification is sent both to the primary chat and to each extra ID."""
+    _force_telegram_route(monkeypatch)
+    monkeypatch.setattr(
+        app_config, "TELEGRAM_APPLIANCE_FANOUT_CHAT_IDS", "200,300", raising=False
+    )
+    with patch("src.notifier.telegram_transport.send_message") as mock_send:
+        mock_send.return_value = True
+        notify_appliance_armed(
+            appliance_name="Washer",
+            planned_start_local="Sat 01:00",
+            planned_end_local="03:15",
+            deadline_local="07:00",
+            duration_minutes=135,
+            avg_price_pence=4.5,
+        )
+    # One primary send (no override) + two fanout sends with explicit chat_id
+    assert mock_send.call_count == 3
+    primary_call, fan_a, fan_b = mock_send.call_args_list
+    assert primary_call.kwargs.get("chat_id_override") is None
+    assert fan_a.kwargs["chat_id_override"] == "200"
+    assert fan_b.kwargs["chat_id_override"] == "300"
+    # All three deliveries carry the SAME body text — same message, different chats.
+    assert primary_call.args[0] == fan_a.args[0] == fan_b.args[0]
+
+
+def test_appliance_cancelled_fans_out_to_extra_chat(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cancellation is the other event the user explicitly wanted Karol to
+    receive — verify the fanout fires for it too."""
+    _force_telegram_route(monkeypatch)
+    monkeypatch.setattr(
+        app_config, "TELEGRAM_APPLIANCE_FANOUT_CHAT_IDS", "200", raising=False
+    )
+    with patch("src.notifier.telegram_transport.send_message") as mock_send:
+        mock_send.return_value = True
+        notify_appliance_cancelled(
+            appliance_name="Washer",
+            reason="remote_mode_dropped",
+            planned_start_local="Sat 01:00",
+        )
+    assert mock_send.call_count == 2
+    assert mock_send.call_args_list[1].kwargs["chat_id_override"] == "200"
+
+
+def test_appliance_starting_and_finished_also_fan_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Full lifecycle: ARMED + STARTING + FINISHED + CANCELLED all fan out
+    (the user opted for all four events to Karol)."""
+    _force_telegram_route(monkeypatch)
+    monkeypatch.setattr(
+        app_config, "TELEGRAM_APPLIANCE_FANOUT_CHAT_IDS", "200", raising=False
+    )
+    with patch("src.notifier.telegram_transport.send_message") as mock_send:
+        mock_send.return_value = True
+        notify_appliance_starting(
+            appliance_name="Washer",
+            planned_start_local="Sat 04:30",
+            deadline_local="Sun 06:00",
+            avg_price_pence=3.7,
+            duration_minutes=77,
+        )
+        notify_appliance_finished(
+            appliance_name="Washer",
+            started_local="04:30",
+            ended_local="05:47",
+            duration_minutes=77,
+            avg_price_pence=3.7,
+        )
+    # 2 events × (primary + 1 fanout) = 4 sends
+    assert mock_send.call_count == 4
+    fanout_calls = [c for c in mock_send.call_args_list
+                    if c.kwargs.get("chat_id_override") == "200"]
+    assert len(fanout_calls) == 2
+
+
+def test_non_appliance_alerts_do_not_fan_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Briefs, risks, tier-boundary pings stay on the primary chat only —
+    the secondary chat ID is *only* for appliance lifecycle events.
+
+    Imported lazily so the existing top-level imports stay minimal.
+    """
+    from src.notifier import notify_morning_report
+    _force_telegram_route(monkeypatch)
+    monkeypatch.setattr(
+        app_config, "TELEGRAM_APPLIANCE_FANOUT_CHAT_IDS", "200,300", raising=False
+    )
+    with patch("src.notifier.telegram_transport.send_message") as mock_send:
+        mock_send.return_value = True
+        notify_morning_report("Test morning report body")
+    assert mock_send.call_count == 1
+    assert mock_send.call_args_list[0].kwargs.get("chat_id_override") is None
+
+
+def test_fanout_skips_primary_chat_to_avoid_duplicates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If the user accidentally lists the primary chat ID in the fanout CSV,
+    it must NOT trigger a duplicate send to the same chat."""
+    _force_telegram_route(monkeypatch)
+    monkeypatch.setattr(
+        app_config, "TELEGRAM_APPLIANCE_FANOUT_CHAT_IDS", "100,200", raising=False
+    )
+    with patch("src.notifier.telegram_transport.send_message") as mock_send:
+        mock_send.return_value = True
+        notify_appliance_armed(
+            appliance_name="Washer",
+            planned_start_local="Sat 01:00",
+            planned_end_local="03:15",
+            deadline_local="07:00",
+            duration_minutes=135,
+            avg_price_pence=4.5,
+        )
+    # Primary chat is "100" — fanout CSV's "100" entry must be filtered out.
+    assert mock_send.call_count == 2
+    fanout_call = mock_send.call_args_list[1]
+    assert fanout_call.kwargs["chat_id_override"] == "200"
+
+
+def test_empty_fanout_csv_keeps_single_send(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default config (empty CSV) = no behavioural change vs pre-feature."""
+    _force_telegram_route(monkeypatch)
+    monkeypatch.setattr(
+        app_config, "TELEGRAM_APPLIANCE_FANOUT_CHAT_IDS", "", raising=False
+    )
+    with patch("src.notifier.telegram_transport.send_message") as mock_send:
+        mock_send.return_value = True
+        notify_appliance_armed(
+            appliance_name="Washer",
+            planned_start_local="Sat 01:00",
+            planned_end_local="03:15",
+            deadline_local="07:00",
+            duration_minutes=135,
+            avg_price_pence=4.5,
+        )
+    assert mock_send.call_count == 1
+
+
 # ---------- Completion poll ----------
 
 def _seed_running_job(

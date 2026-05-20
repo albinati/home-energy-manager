@@ -103,6 +103,41 @@ def _telegram_header_for(alert_key: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Appliance fanout — additional Telegram chats for lifecycle events
+# ---------------------------------------------------------------------------
+
+_APPLIANCE_FANOUT_ALERT_KEYS: frozenset[str] = frozenset({
+    AlertType.APPLIANCE_ARMED.value,
+    AlertType.APPLIANCE_STARTING.value,
+    AlertType.APPLIANCE_FINISHED.value,
+    AlertType.APPLIANCE_CANCELLED.value,
+})
+
+
+def _appliance_fanout_chat_ids() -> list[str]:
+    """Return extra Telegram chat IDs to fan appliance notifications out to.
+
+    Reads CSV from ``config.TELEGRAM_APPLIANCE_FANOUT_CHAT_IDS``. Empty
+    strings are filtered; the primary ``TELEGRAM_CHAT_ID`` is removed so
+    listing it here doesn't cause a duplicate send. Order is preserved
+    so the user can predict delivery order from the CSV.
+    """
+    raw = (getattr(config, "TELEGRAM_APPLIANCE_FANOUT_CHAT_IDS", "") or "").strip()
+    if not raw:
+        return []
+    primary = (getattr(config, "TELEGRAM_CHAT_ID", "") or "").strip()
+    seen: set[str] = {primary} if primary else set()
+    out: list[str] = []
+    for chunk in raw.split(","):
+        cid = chunk.strip()
+        if not cid or cid in seen:
+            continue
+        seen.add(cid)
+        out.append(cid)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Route resolution (SQLite → env fallback)
 # ---------------------------------------------------------------------------
 
@@ -498,6 +533,13 @@ def _dispatch(
             header_override=telegram_header_override,
         )
         telegram_transport.send_message(body, silent=silent)
+        # Appliance lifecycle events fan out to optional secondary chats so
+        # household members get the same message (washing-machine armed /
+        # starting / finished / cancelled). Failures are swallowed by the
+        # transport — one chat being unreachable must not block the others.
+        if kind.value in _APPLIANCE_FANOUT_ALERT_KEYS:
+            for cid in _appliance_fanout_chat_ids():
+                telegram_transport.send_message(body, silent=silent, chat_id_override=cid)
         return
 
     if not _hooks_credentials_configured():
