@@ -27,16 +27,39 @@ def _init_db() -> None:
 # _mtd_context_line
 # ---------------------------------------------------------------------------
 
-def test_mtd_context_returns_none_on_first_of_month() -> None:
-    """No MTD comparison available on the 1st."""
-    line = daily_brief._mtd_context_line(date(2026, 5, 1), {"realised_net_cost_gbp": 1.0})
+def test_mtd_summary_returns_none_on_first_of_month() -> None:
+    """No MTD aggregate available on the 1st — caller passes None to consumers."""
+    assert daily_brief._mtd_summary(date(2026, 5, 1)) is None
+
+
+def test_mtd_context_returns_none_when_mtd_missing() -> None:
+    """When the shared MTD summary is None (1st of month / aggregator failed),
+    the context line bails cleanly."""
+    line = daily_brief._mtd_context_line(date(2026, 5, 15), {"realised_net_cost_gbp": 1.0}, mtd=None)
     assert line is None
 
 
-def test_mtd_context_returns_none_when_no_history() -> None:
-    """No execution_log rows → compute_period_pnl returns n_days=0 → None."""
-    line = daily_brief._mtd_context_line(date(2026, 5, 15), {"realised_net_cost_gbp": 1.0})
+def test_mtd_context_returns_none_when_n_days_zero() -> None:
+    """Shared MTD summary with n_days=0 → bail."""
+    line = daily_brief._mtd_context_line(
+        date(2026, 5, 15),
+        {"realised_net_cost_gbp": 1.0},
+        mtd={"n_days": 0, "realised_net_cost_gbp": 0.0},
+    )
     assert line is None
+
+
+def test_mtd_context_formats_pct_when_data_present() -> None:
+    """Today £0.85 vs MTD avg £1.30 → 65% of avg, ↓ direction."""
+    line = daily_brief._mtd_context_line(
+        date(2026, 5, 15),
+        {"realised_net_cost_gbp": 0.85},
+        mtd={"n_days": 14, "realised_net_cost_gbp": 18.20},  # avg 1.30/d
+    )
+    assert line is not None
+    assert "£+0.85" in line
+    assert "65%" in line
+    assert "↓" in line
 
 
 # ---------------------------------------------------------------------------
@@ -44,29 +67,36 @@ def test_mtd_context_returns_none_when_no_history() -> None:
 # ---------------------------------------------------------------------------
 
 def test_mean_rate_line_returns_none_with_no_imports() -> None:
-    line = daily_brief._mean_agile_rate_line(date(2026, 5, 15), {"import_kwh": 0, "import_cost_gbp": 0})
+    line = daily_brief._mean_agile_rate_line(
+        date(2026, 5, 15), {"import_kwh": 0, "import_cost_gbp": 0}, mtd=None,
+    )
     assert line is None
 
 
-def test_mean_rate_line_today_only_when_no_mtd_history() -> None:
-    """On day-of-month > 1 but no MTD data, render today-only flavour."""
+def test_mean_rate_line_today_only_when_mtd_missing() -> None:
+    """No MTD data → render today-only flavour."""
     line = daily_brief._mean_agile_rate_line(
         date(2026, 5, 15),
         {"import_kwh": 5.0, "import_cost_gbp": 1.25},  # 25 p/kWh
+        mtd=None,
     )
     assert line is not None
     assert "25.0 p/kWh" in line
     assert "5.0 kWh imported" in line
 
 
-def test_mean_rate_line_on_first_of_month_today_only() -> None:
-    """Day 1 has no MTD context — still emits the today-only line."""
+def test_mean_rate_line_with_mtd_compares() -> None:
+    """Today 20 p/kWh, MTD 25 p/kWh → -20%, ↓ direction."""
     line = daily_brief._mean_agile_rate_line(
-        date(2026, 5, 1),
-        {"import_kwh": 3.0, "import_cost_gbp": 0.60},  # 20 p/kWh
+        date(2026, 5, 15),
+        {"import_kwh": 5.0, "import_cost_gbp": 1.0},  # 20 p/kWh
+        mtd={"import_kwh": 100.0, "import_cost_gbp": 25.0},  # 25 p/kWh
     )
     assert line is not None
     assert "20.0 p/kWh" in line
+    assert "25.0 p/kWh" in line
+    assert "-20%" in line
+    assert "↓" in line
 
 
 # ---------------------------------------------------------------------------

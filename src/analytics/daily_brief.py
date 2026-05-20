@@ -233,9 +233,12 @@ def _format_pnl_block(pnl: dict[str, Any], *, day: date, tz: ZoneInfo) -> list[s
     #   3. Forgone export — "what's the running cost of strict_savings?"
     # All three skip cleanly when the data isn't there (first of month, no
     # imports, non-strict_savings mode) so legacy briefs don't gain noise.
+    # ``_mtd_summary`` is computed ONCE here and shared so we don't pay the
+    # ~380 ms compute_period_pnl latency twice per brief.
+    mtd = _mtd_summary(day)
     for line in (
-        _mtd_context_line(day, pnl),
-        _mean_agile_rate_line(day, pnl),
+        _mtd_context_line(day, pnl, mtd),
+        _mean_agile_rate_line(day, pnl, mtd),
         _strict_savings_forgone_line(day, tz),
     ):
         if line:
@@ -340,14 +343,14 @@ def _fox_vs_meter_audit_line(day: date) -> str | None:
     return f"- Audit (Fox vs meter): {' | '.join(parts)}"
 
 
-def _mtd_context_line(day: date, pnl: dict[str, Any]) -> str | None:
-    """Today's net cost as % of MTD daily-average. Best-practice KPI: anchors
-    a single £ figure against the user's typical month-so-far daily spend
-    so the brief reads "good day / bad day" at a glance.
+def _mtd_summary(day: date) -> dict[str, Any] | None:
+    """Compute the MTD aggregate (start-of-month → day-1) ONCE per brief.
 
-    The MTD window EXCLUDES ``day`` itself (compares vs the previous days'
-    typical, not vs (today + prev days)). Returns ``None`` on the 1st of
-    the month — no MTD context available yet."""
+    The result is shared by ``_mtd_context_line`` and ``_mean_agile_rate_line``
+    so the brief pays ~380 ms of compute_period_pnl latency once, not twice.
+    Returns ``None`` on the 1st of the month or when the period aggregator
+    fails — both consumer helpers handle None gracefully.
+    """
     if day.day <= 1:
         return None
     try:
@@ -357,8 +360,21 @@ def _mtd_context_line(day: date, pnl: dict[str, Any]) -> str | None:
     start_day = day.replace(day=1)
     end_day = day - timedelta(days=1)
     try:
-        mtd = compute_period_pnl(start_day, end_day, label=f"MTD to {end_day.isoformat()}")
+        return compute_period_pnl(start_day, end_day, label=f"MTD to {end_day.isoformat()}")
     except Exception:
+        return None
+
+
+def _mtd_context_line(day: date, pnl: dict[str, Any], mtd: dict[str, Any] | None) -> str | None:
+    """Today's net cost as % of MTD daily-average. Best-practice KPI: anchors
+    a single £ figure against the user's typical month-so-far daily spend
+    so the brief reads "good day / bad day" at a glance.
+
+    The MTD window EXCLUDES ``day`` itself (compares vs the previous days'
+    typical, not vs (today + prev days)). Caller passes the shared MTD
+    summary from ``_mtd_summary(day)``; ``None`` means we're on the 1st
+    of the month or the aggregator failed."""
+    if mtd is None:
         return None
     n_days = int(mtd.get("n_days") or 0)
     if n_days <= 0:
@@ -382,14 +398,14 @@ def _mtd_context_line(day: date, pnl: dict[str, Any]) -> str | None:
     )
 
 
-def _mean_agile_rate_line(day: date, pnl: dict[str, Any]) -> str | None:
+def _mean_agile_rate_line(day: date, pnl: dict[str, Any], mtd: dict[str, Any] | None) -> str | None:
     """Import-weighted mean Agile rate for the day vs MTD weighted average.
 
     Import-weighted = what we ACTUALLY paid per imported kWh, not the
     24h-time-average of published rates. Tells the user "did we manage to
     import at the cheap end of today's range, or were we forced to import
     at peak?" — a leading indicator of LP + dispatch quality independent
-    of weather/load variance.
+    of weather/load variance. Caller passes the shared MTD summary.
     """
     imp_kwh = pnl.get("import_kwh")
     imp_gbp = pnl.get("import_cost_gbp")
@@ -397,20 +413,12 @@ def _mean_agile_rate_line(day: date, pnl: dict[str, Any]) -> str | None:
         return None
     today_p_per_kwh = (imp_gbp * 100.0) / imp_kwh
 
-    mtd_p_per_kwh = None
-    if day.day > 1:
-        try:
-            from .pnl import compute_period_pnl
-            mtd = compute_period_pnl(
-                day.replace(day=1), day - timedelta(days=1),
-                label=f"MTD to {(day - timedelta(days=1)).isoformat()}",
-            )
-            m_kwh = mtd.get("import_kwh")
-            m_gbp = mtd.get("import_cost_gbp")
-            if m_kwh and m_gbp is not None and m_kwh > 0:
-                mtd_p_per_kwh = (m_gbp * 100.0) / m_kwh
-        except Exception:
-            mtd_p_per_kwh = None
+    mtd_p_per_kwh: float | None = None
+    if mtd is not None:
+        m_kwh = mtd.get("import_kwh")
+        m_gbp = mtd.get("import_cost_gbp")
+        if m_kwh and m_gbp is not None and m_kwh > 0:
+            mtd_p_per_kwh = (m_gbp * 100.0) / m_kwh
 
     if mtd_p_per_kwh is None:
         return f"- Mean import rate today: **{today_p_per_kwh:.1f} p/kWh** ({imp_kwh:.1f} kWh imported)"
