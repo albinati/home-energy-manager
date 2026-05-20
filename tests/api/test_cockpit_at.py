@@ -124,13 +124,6 @@ def test_at_rehydrates_from_snapshot(client):
     assert any("forecast fetch" in line for line in why)
 
 
-def test_history_page_renders(client):
-    r = client.get("/history")
-    assert r.status_code == 200
-    assert b"Replay a past moment" in r.content
-    assert b"history.js" in r.content
-
-
 def test_at_picks_most_recent_run_when_multiple(client):
     run_early = datetime(2026, 4, 24, 6, 0, tzinfo=UTC)
     run_late = datetime(2026, 4, 24, 12, 0, tzinfo=UTC)

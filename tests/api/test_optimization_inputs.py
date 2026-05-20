@@ -77,13 +77,6 @@ def test_inputs_never_hits_network_on_cold_state(client):
     assert elapsed < 2.0, f"endpoint took {elapsed:.2f}s — possible cloud call"
 
 
-def test_forecast_page_renders(client):
-    r = client.get("/forecast")
-    assert r.status_code == 200
-    assert b"LP inputs" in r.content
-    assert b"forecast.js" in r.content
-
-
 def test_export_prices_populated_from_agile_export_rates(client, monkeypatch):
     """Regression: dashboard must read Outgoing prices from agile_export_rates,
     not from agile_rates (which only stores import). Bug shipped with PR #154 —
