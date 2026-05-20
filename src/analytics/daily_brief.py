@@ -475,6 +475,7 @@ def _format_pnl_block(pnl: dict[str, Any], *, day: date, tz: ZoneInfo) -> list[s
         _mtd_context_line(day, pnl, mtd),
         _mean_agile_rate_line(day, pnl, mtd),
         _strict_savings_forgone_line(day, tz),
+        _lp_scorecard_line(day),
     ):
         if line:
             out.append(line)
@@ -694,6 +695,48 @@ def _strict_savings_forgone_line(day: date, tz: ZoneInfo) -> str | None:
         f"- strict_savings forgone export: ~£{forgone_p / 100.0:.2f} "
         f"({forgone_kwh:.1f} kWh over {len(rows)} slot{'s' if len(rows) != 1 else ''}) "
         f"— what *savings_first* would have earned by exporting at peak"
+    )
+
+
+def _lp_scorecard_line(day: date) -> str | None:
+    """One-line LP optimisation grade + avoided-cost headline.
+
+    Composite signal: did the LP outperform a naive SelfUse-only strategy
+    AND did its plan execute as predicted? Hidden when the scorecard's
+    grade is N/A (data too sparse) so the brief doesn't render a useless
+    bullet on a fresh DB / partial-data day.
+    """
+    try:
+        from .lp_scorecard import build_lp_scorecard
+        card = build_lp_scorecard(day)
+    except Exception:  # pragma: no cover — never break the brief
+        return None
+    grade = card.get("grade")
+    if grade in (None, "N/A"):
+        return None
+    econ = card.get("economic_value") or {}
+    dispatch = card.get("dispatch_accuracy") or {}
+    avoided = econ.get("lp_avoided_cost_p")
+    pcts = [
+        dispatch.get(k) for k in
+        ("import_accuracy_pct", "export_accuracy_pct", "charge_accuracy_pct")
+        if dispatch.get(k) is not None
+    ]
+    if not pcts:
+        return None
+    avg_acc = sum(pcts) / len(pcts)
+    if avoided is None:
+        return f"- LP grade: **{grade}** (dispatch accuracy {avg_acc:.0f}%)"
+    if avoided >= 0:
+        verb = "avoided"
+        sign = "+"
+    else:
+        verb = "overspent"
+        sign = "-"
+        avoided = abs(avoided)
+    return (
+        f"- LP grade: **{grade}** — {verb} £{sign}{avoided / 100.0:.2f} vs naive SelfUse "
+        f"(dispatch accuracy {avg_acc:.0f}%)"
     )
 
 
