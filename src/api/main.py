@@ -50,7 +50,7 @@ from ..scheduler.lp_replay import (
     sweep_cadences as lp_sweep_cadences,
 )
 from . import safeguards
-from .middleware import BearerAuthMiddleware
+from .middleware import ApiV1BearerAuth, BearerAuthMiddleware
 from .models import (
     ActionResult,
     ActionStatus,
@@ -127,28 +127,30 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _GIT_SHA_PATH = _PROJECT_ROOT / ".git-sha"
 
 
-def _bootstrap_openclaw_token() -> str:
-    """Ensure ``config.HEM_OPENCLAW_TOKEN`` is set; persist a fresh token on first boot.
+def _bootstrap_bearer_token(
+    *, env_attr: str, file_attr: str, label: str,
+) -> str:
+    """Ensure ``config.<env_attr>`` is set; persist a fresh token on first boot.
 
-    Resolution order: env var (set at construction → already in config), then
-    the file at ``HEM_OPENCLAW_TOKEN_FILE``, otherwise generate a new
-    ``secrets.token_urlsafe(32)`` and write it (mode 0640). The file lives
-    under ``data/`` so it survives container restarts via the bind-mounted
-    volume; root on the host can read it (mode 0640) and hand it to the
-    OpenClaw user.
+    Resolution: env wins, otherwise read the file, otherwise mint
+    ``secrets.token_urlsafe(32)`` and write it (mode 0640). The file
+    lives under ``data/`` so it survives container restarts via the
+    bind-mount; root on the host can read it (0640) and hand it to the
+    consuming container.
     """
-    if config.HEM_OPENCLAW_TOKEN:
-        return config.HEM_OPENCLAW_TOKEN
+    existing = (getattr(config, env_attr) or "").strip()
+    if existing:
+        return existing
 
-    token_path = Path(config.HEM_OPENCLAW_TOKEN_FILE)
+    token_path = Path(getattr(config, file_attr))
     if not token_path.is_absolute():
         token_path = Path.cwd() / token_path
 
     if token_path.is_file():
-        existing = token_path.read_text(encoding="utf-8").strip()
-        if existing:
-            config.HEM_OPENCLAW_TOKEN = existing
-            return existing
+        cached = token_path.read_text(encoding="utf-8").strip()
+        if cached:
+            setattr(config, env_attr, cached)
+            return cached
 
     import secrets
     token = secrets.token_urlsafe(32)
@@ -158,9 +160,28 @@ def _bootstrap_openclaw_token() -> str:
         token_path.chmod(0o640)
     except OSError:
         logger.debug("Could not chmod %s to 0640 (continuing)", token_path)
-    config.HEM_OPENCLAW_TOKEN = token
-    logger.info("OpenClaw MCP token generated at %s", token_path)
+    setattr(config, env_attr, token)
+    logger.info("%s token generated at %s", label, token_path)
     return token
+
+
+def _bootstrap_openclaw_token() -> str:
+    """Bootstrap the OpenClaw bearer token (legacy entrypoint name kept for
+    callers / log messages)."""
+    return _bootstrap_bearer_token(
+        env_attr="HEM_OPENCLAW_TOKEN",
+        file_attr="HEM_OPENCLAW_TOKEN_FILE",
+        label="OpenClaw MCP",
+    )
+
+
+def _bootstrap_ui_token() -> str:
+    """Bootstrap the SPA UI bearer token (Epic 13b)."""
+    return _bootstrap_bearer_token(
+        env_attr="HEM_UI_TOKEN",
+        file_attr="HEM_UI_TOKEN_FILE",
+        label="HEM UI",
+    )
 
 
 # Build the FastMCP server once at import. ``streamable_http_app()`` lazily
@@ -176,6 +197,7 @@ _mcp_http_app = _mcp_instance.streamable_http_app()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _bootstrap_openclaw_token()
+    _bootstrap_ui_token()
     await asyncio.to_thread(db.init_db)
     # Prune append-only history tables so the DB doesn't grow unbounded.
     # Non-fatal — deletion failures are logged internally and the service
@@ -223,6 +245,42 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+# CORS — needed once the SPA container starts hitting /api/v1 from a
+# different origin (compose: http://localhost:8080, Tailnet:
+# http://hem-ui.<ts.net>). The origins list is CSV-parsed from
+# HEM_UI_CORS_ORIGINS; entries are exact-match. Methods + headers are
+# wide on purpose — the bearer guard handles authorisation.
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+
+_cors_origins = [
+    o.strip() for o in (config.HEM_UI_CORS_ORIGINS or "").split(",") if o.strip()
+]
+if _cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_credentials=False,    # bearer header → no cookie credentials
+        allow_methods=["*"],
+        allow_headers=["Authorization", "Content-Type"],
+        expose_headers=["WWW-Authenticate"],
+    )
+
+# Bearer guard for /api/v1/* — accepts the SPA's HEM_UI_TOKEN OR the
+# OpenClaw token so existing flows keep working through one header. The
+# guard is gated by HEM_UI_AUTH_REQUIRED so this PR can ship + reach
+# prod without breaking the inline UI before B6's cutover. Flip the
+# env var to True once the SPA container is the only /api/v1 consumer.
+app.add_middleware(
+    ApiV1BearerAuth,
+    tokens=[
+        lambda: config.HEM_UI_TOKEN,
+        lambda: config.HEM_OPENCLAW_TOKEN,
+    ],
+    enabled=lambda: bool(config.HEM_UI_AUTH_REQUIRED),
+    public_paths=("/api/v1/health",),
+)
+
 app.include_router(energy_providers_router.router)
 app.include_router(workbench_router.router)
 app.include_router(dispatch_router.router)
