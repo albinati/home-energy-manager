@@ -4965,6 +4965,62 @@ def get_committed_peak_export_in_range(
             conn.close()
 
 
+def list_strict_savings_forgone_export_for_day(date_iso: str) -> list[dict[str, Any]]:
+    """Per-slot export the LP would have committed had strict_savings been off.
+
+    For each local-day slot, picks the LATEST dispatch_decisions row (most
+    recent run_id) where ``lp_solution_snapshot.export_kwh > 0`` but
+    ``dispatched_kind != 'peak_export'`` — i.e. the strict_savings classifier
+    or the scenario-LP robustness filter downgraded the LP's preferred
+    export. Returns one row per affected slot with the kWh + export price,
+    so the brief can render the forgone revenue counterfactual.
+
+    ``date_iso`` is a local-calendar-day string (``YYYY-MM-DD``); the helper
+    converts to a half-open UTC slot range matching the LP's slot grid.
+    """
+    # Convert local day to UTC range. The slot_time_utc strings in
+    # dispatch_decisions are ISO with +00:00 — a local-date filter via
+    # `substr(..., 1, 10) = date_iso` would mis-classify slots near the
+    # DST/midnight boundary. Use a half-open UTC window instead.
+    from datetime import datetime as _dt, date as _date, time as _time, timedelta as _td
+    from zoneinfo import ZoneInfo
+    try:
+        d = _date.fromisoformat(date_iso)
+    except ValueError:
+        return []
+    tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+    local_start = _dt.combine(d, _time.min, tzinfo=tz)
+    local_end = local_start + _td(days=1)
+    utc_start = local_start.astimezone(UTC).isoformat()
+    utc_end = local_end.astimezone(UTC).isoformat()
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT dd.slot_time_utc,
+                          ls.export_kwh,
+                          dd.export_price_p_kwh,
+                          dd.dispatched_kind,
+                          dd.reason
+                   FROM dispatch_decisions dd
+                   JOIN lp_solution_snapshot ls
+                     ON ls.run_id = dd.run_id
+                    AND ls.slot_time_utc = dd.slot_time_utc
+                   WHERE dd.slot_time_utc >= ? AND dd.slot_time_utc < ?
+                     AND ls.export_kwh > 0
+                     AND dd.dispatched_kind != 'peak_export'
+                     AND dd.run_id = (
+                         SELECT MAX(run_id) FROM dispatch_decisions d2
+                         WHERE d2.slot_time_utc = dd.slot_time_utc
+                     )
+                   ORDER BY dd.slot_time_utc ASC""",
+                (utc_start, utc_end),
+            )
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
 def update_execution_log_metered(
     slot_start_utc: str,
     consumption_kwh: float,
