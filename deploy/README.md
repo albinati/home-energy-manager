@@ -89,7 +89,13 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
   http://127.0.0.1:8000/mcp/ -X POST \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | jq '.result.tools | length'
-# Esperado: 57
+# Esperado: 80 (76 originais + 3 audit tools do Epic 13a + lp_scorecard)
+
+# Epic 13b/B1 — token da UI container é gerado no boot junto com o do OpenClaw.
+ls -la /srv/hem/data/.hem-ui-token
+# 0640 root:gid-do-uid1001 — pronto pra ser entregue à SPA container (B6).
+# Sob HEM_UI_AUTH_REQUIRED=false (default), o /api/v1 segue aberto — só vira
+# guard depois da cutover (B6).
 
 # Bind correto (loopback + Tailscale, NÃO 0.0.0.0).
 ss -lntp | grep ':8000'

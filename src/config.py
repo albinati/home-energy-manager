@@ -226,6 +226,30 @@ class Config:
     )
     HEM_OPENCLAW_TOKEN: str = os.getenv("HEM_OPENCLAW_TOKEN", "").strip()
 
+    # ── Epic 13b — UI container bearer token + CORS ─────────────────────────
+    # The SPA container POSTs to /api/v1/* with `Authorization: Bearer
+    # <HEM_UI_TOKEN>`. Same mint pattern as the OpenClaw token: env wins,
+    # otherwise the lifespan reads the file or generates a fresh token on
+    # first boot (urlsafe-32). Mounted via `ApiV1BearerAuth` middleware,
+    # gated by HEM_UI_AUTH_REQUIRED below so B1 can land before B6 cutover.
+    HEM_UI_TOKEN_FILE: str = os.getenv(
+        "HEM_UI_TOKEN_FILE", "data/.hem-ui-token"
+    )
+    HEM_UI_TOKEN: str = os.getenv("HEM_UI_TOKEN", "").strip()
+    # Default False — keeps the inline UI working without bearer headers
+    # during the B1 → B6 transition. Flip to True once the SPA container
+    # is the only /api/v1 consumer (after B6 cutover).
+    HEM_UI_AUTH_REQUIRED: bool = os.getenv(
+        "HEM_UI_AUTH_REQUIRED", "false"
+    ).lower() in ("true", "1", "yes")
+    # CSV of origins allowed by the FastAPI CORSMiddleware. The SPA's nginx
+    # container reverse-proxies /api/v1 → HEM, so the browser sees both
+    # under one origin in compose; the entries here matter mainly for the
+    # Tailnet-direct case where the SPA host differs from HEM.
+    HEM_UI_CORS_ORIGINS: str = os.getenv(
+        "HEM_UI_CORS_ORIGINS", "http://localhost,http://localhost:8080"
+    )
+
     # AI Assistant (optional; if not set, rule-based suggestions only)
     ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
     # Legacy OpenAI — kept for backward compat; not used by default
