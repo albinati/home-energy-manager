@@ -400,14 +400,20 @@ def build_night_payload() -> str:
 def _mode_status_line() -> str:
     """One-line mode status so OpenClaw stops inventing Daikin advice.
 
-    The user runs Daikin in passive mode (telemetry-only — Onecta firmware drives
-    the heat pump on its own weather curve, HEM doesn't touch setpoints). Without
-    this line, the LLM that paraphrases the brief tends to fill in tactical
-    Daikin advice ("preheat tank during cheap window!") that has no basis.
+    Both ``passive`` and ``active`` modes leave SPACE heating to the Daikin
+    firmware's weather curve since PR #321 (climate-strip incident,
+    2026-05-11). The active-mode difference is solely that HEM dispatches
+    the **DHW tank target** based on the LP plan (e.g. cheap-overnight
+    pre-charge, peak-window idle). LWT offset + climate_on are never
+    written to Daikin in either mode now — surface that explicitly so the
+    LLM rendering the brief doesn't invent tactical space-heating advice.
     """
     daikin_mode = (config.DAIKIN_CONTROL_MODE or "passive").strip().lower()
     if daikin_mode == "active":
-        daikin_label = "active (HEM dispatches setpoints/LWT offset per LP plan)"
+        daikin_label = (
+            "active (HEM dispatches DHW tank target per LP plan; firmware "
+            "weather curve owns space heating — HEM does NOT write LWT offset)"
+        )
     else:
         daikin_label = (
             "passive (telemetry-only; Onecta firmware drives autonomously on weather curve — "
