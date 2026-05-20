@@ -2029,6 +2029,264 @@ def build_mcp() -> FastMCP:
         return {"ok": True, "scorecard": scorecard}
 
     @mcp.tool(
+        name="get_audit_report",
+        description=(
+            "Daily audit — held-schedule events + plan-vs-execution + "
+            "strict_savings forgone-export, all over a configurable trailing "
+            "window. Returns the same structured dict the prod 07:30 UTC cron "
+            "consumes to decide whether to push to Telegram. Three sections:\n"
+            "  * held_schedule — LP infeasibilities caught by PR #338's "
+            "defensive fallback, each annotated with closest SoC and tank "
+            "temp + classified below_reserve (harmless post-#339) vs "
+            "above_reserve (the residual class, shower-floor-in-slot-0)\n"
+            "  * plan_vs_execution — LP-run → Fox-upload coverage %, totals "
+            "(import + export kWh, cost in pence), top-N per-slot disparities "
+            "by absolute cost delta\n"
+            "  * strict_savings_forgone — kWh + pence the household didn't "
+            "earn because the scenario filter / strict_savings policy "
+            "downgraded LP-preferred peak_export slots\n"
+            "Pure read over DB; no Daikin API, no LP solve. Safe to call "
+            "mid-day. Default window = 24h."
+        ),
+    )
+    def get_audit_report(window_hours: int = 24) -> dict[str, Any]:
+        from .analytics.audit_report import build_audit_report
+
+        try:
+            window = int(window_hours)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": f"invalid window_hours {window_hours!r}"}
+        if window <= 0 or window > 168:
+            return {"ok": False, "error": "window_hours must be in (0, 168]"}
+        try:
+            report = build_audit_report(window_hours=window)
+        except Exception as e:
+            logger.exception("get_audit_report failed")
+            return {"ok": False, "error": str(e)}
+        return {"ok": True, "report": report}
+
+    @mcp.tool(
+        name="get_strict_savings_forgone_export",
+        description=(
+            "Counterfactual revenue NOT realised because the strict_savings "
+            "policy / scenario filter downgraded LP-preferred peak_export "
+            "slots to standard. For each day in [start_date, end_date] "
+            "(inclusive, YYYY-MM-DD local), returns per-slot detail + a "
+            "totals roll-up:\n"
+            "  - kwh: total forgone export kWh\n"
+            "  - pence / pounds: total forgone revenue\n"
+            "  - slot_count: number of downgraded slots\n"
+            "  - daily: list of {date, kwh, pence, slot_count}\n"
+            "Lets OpenClaw answer 'what is strict_savings costing us this "
+            "month?' composably (set start_date=YYYY-MM-01, end_date=today). "
+            "Pure read; no Daikin / Fox / Octopus calls. Range capped at "
+            "367 days."
+        ),
+    )
+    def get_strict_savings_forgone_export(
+        start_date: str,
+        end_date: str,
+    ) -> dict[str, Any]:
+        from datetime import date as _date
+        from datetime import timedelta as _td
+
+        try:
+            start_d = _date.fromisoformat(start_date)
+            end_d = _date.fromisoformat(end_date)
+        except (TypeError, ValueError) as e:
+            return {"ok": False, "error": f"invalid date: {e}"}
+        if end_d < start_d:
+            return {"ok": False, "error": "end_date must be >= start_date"}
+        if (end_d - start_d).days > 367:
+            return {"ok": False, "error": "range capped at 367 days"}
+
+        try:
+            from . import db as _db
+            total_kwh = 0.0
+            total_p = 0.0
+            total_slots = 0
+            daily: list[dict[str, Any]] = []
+            d = start_d
+            while d <= end_d:
+                rows = _db.list_strict_savings_forgone_export_for_day(d.isoformat())
+                day_kwh = sum(float(r.get("export_kwh") or 0) for r in rows)
+                day_p = sum(
+                    float(r.get("export_kwh") or 0)
+                    * float(r.get("export_price_p_kwh") or 0)
+                    for r in rows
+                )
+                daily.append({
+                    "date": d.isoformat(),
+                    "kwh": round(day_kwh, 3),
+                    "pence": round(day_p, 1),
+                    "slot_count": len(rows),
+                })
+                total_kwh += day_kwh
+                total_p += day_p
+                total_slots += len(rows)
+                d += _td(days=1)
+        except Exception as e:
+            logger.exception("get_strict_savings_forgone_export failed")
+            return {"ok": False, "error": str(e)}
+
+        return {
+            "ok": True,
+            "start_date": start_d.isoformat(),
+            "end_date": end_d.isoformat(),
+            "n_days": (end_d - start_d).days + 1,
+            "totals": {
+                "kwh": round(total_kwh, 3),
+                "pence": round(total_p, 1),
+                "pounds": round(total_p / 100.0, 2),
+                "slot_count": total_slots,
+            },
+            "daily": daily,
+        }
+
+    @mcp.tool(
+        name="get_brief_kpis",
+        description=(
+            "Structured KPI fields shown in the daily brief — composable for "
+            "dashboards / agents that want to compose their own narrative "
+            "instead of parsing the markdown the brief renders. Defaults to "
+            "yesterday (the brief's anchor). Returns:\n"
+            "  * realised_net_cost_gbp — what we actually paid net of exports "
+            "(includes standing charge)\n"
+            "  * import_kwh + import_cost_gbp — energy-import side only\n"
+            "  * mean_import_rate_p_per_kwh — import-weighted mean Agile rate "
+            "today (NOT 24h-time-average — what we actually paid per kWh)\n"
+            "  * mtd: {n_days, avg_per_day_gbp, mean_import_rate_p_per_kwh} — "
+            "month-to-date context (EXCLUDES today)\n"
+            "  * strict_savings_forgone: {kwh, pence, slot_count} for today\n"
+            "  * lp_scorecard: {grade, lp_avoided_cost_p, dispatch_accuracy_pct}\n"
+            "Pure read; no Daikin API call."
+        ),
+    )
+    def get_brief_kpis(date: str | None = None) -> dict[str, Any]:
+        from datetime import date as _date
+        from datetime import datetime as _dt
+        from datetime import timedelta as _td
+        from zoneinfo import ZoneInfo
+
+        from . import db as _db
+        from .analytics.lp_scorecard import build_lp_scorecard
+        from .analytics.pnl import compute_daily_pnl, compute_period_pnl
+
+        tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+        if date is None:
+            target = _dt.now(tz).date() - _td(days=1)
+        else:
+            try:
+                target = _date.fromisoformat(date)
+            except ValueError:
+                return {"ok": False, "error": f"invalid date {date!r} (expected YYYY-MM-DD)"}
+
+        try:
+            pnl = compute_daily_pnl(target)
+        except Exception as e:
+            logger.exception("get_brief_kpis: compute_daily_pnl failed")
+            return {"ok": False, "error": f"daily pnl: {e}"}
+
+        # MTD aggregate (1st of month → target-1, excluding target itself).
+        mtd_block: dict[str, Any] | None = None
+        if target.day > 1:
+            try:
+                mtd_summary = compute_period_pnl(
+                    target.replace(day=1), target - _td(days=1),
+                    label=f"MTD to {(target - _td(days=1)).isoformat()}",
+                )
+                n_days = int(mtd_summary.get("n_days") or 0)
+                if n_days > 0:
+                    mtd_net = mtd_summary.get("realised_net_cost_gbp")
+                    if mtd_net is None:
+                        mtd_net = mtd_summary.get("realised_cost_gbp")
+                    m_kwh = mtd_summary.get("import_kwh")
+                    m_gbp = mtd_summary.get("import_cost_gbp")
+                    mtd_mean_p = (
+                        (m_gbp * 100.0) / m_kwh
+                        if (m_kwh and m_gbp is not None and m_kwh > 0)
+                        else None
+                    )
+                    mtd_block = {
+                        "n_days": n_days,
+                        "avg_per_day_gbp": (
+                            round(mtd_net / n_days, 2)
+                            if mtd_net is not None else None
+                        ),
+                        "mean_import_rate_p_per_kwh": (
+                            round(mtd_mean_p, 2) if mtd_mean_p is not None else None
+                        ),
+                    }
+            except Exception:
+                logger.exception("get_brief_kpis: MTD compute failed (continuing)")
+
+        imp_kwh = pnl.get("import_kwh")
+        imp_gbp = pnl.get("import_cost_gbp")
+        today_mean_p = (
+            (imp_gbp * 100.0) / imp_kwh
+            if (imp_kwh and imp_gbp is not None and imp_kwh > 0)
+            else None
+        )
+
+        forgone_rows = _db.list_strict_savings_forgone_export_for_day(target.isoformat())
+        forgone_kwh = sum(float(r.get("export_kwh") or 0) for r in forgone_rows)
+        forgone_p = sum(
+            float(r.get("export_kwh") or 0) * float(r.get("export_price_p_kwh") or 0)
+            for r in forgone_rows
+        )
+
+        lp_block: dict[str, Any] = {"grade": "N/A", "lp_avoided_cost_p": None,
+                                     "dispatch_accuracy_pct": None}
+        try:
+            card = build_lp_scorecard(target)
+            grade = card.get("grade")
+            econ = card.get("economic_value") or {}
+            disp = card.get("dispatch_accuracy") or {}
+            pcts = [
+                disp.get(k) for k in
+                ("import_accuracy_pct", "export_accuracy_pct", "charge_accuracy_pct")
+                if disp.get(k) is not None
+            ]
+            avg_acc = sum(pcts) / len(pcts) if pcts else None
+            lp_block = {
+                "grade": grade,
+                "lp_avoided_cost_p": econ.get("lp_avoided_cost_p"),
+                "dispatch_accuracy_pct": (
+                    round(avg_acc, 1) if avg_acc is not None else None
+                ),
+            }
+        except Exception:
+            logger.exception("get_brief_kpis: scorecard compute failed (continuing)")
+
+        net_cost = pnl.get("realised_net_cost_gbp")
+        if net_cost is None:
+            net_cost = pnl.get("realised_cost_gbp")
+
+        return {
+            "ok": True,
+            "date": target.isoformat(),
+            "realised_net_cost_gbp": (
+                round(float(net_cost), 2) if net_cost is not None else None
+            ),
+            "import_kwh": (
+                round(float(imp_kwh), 2) if imp_kwh is not None else None
+            ),
+            "import_cost_gbp": (
+                round(float(imp_gbp), 2) if imp_gbp is not None else None
+            ),
+            "mean_import_rate_p_per_kwh": (
+                round(today_mean_p, 2) if today_mean_p is not None else None
+            ),
+            "mtd": mtd_block,
+            "strict_savings_forgone": {
+                "kwh": round(forgone_kwh, 3),
+                "pence": round(forgone_p, 1),
+                "slot_count": len(forgone_rows),
+            },
+            "lp_scorecard": lp_block,
+        }
+
+    @mcp.tool(
         name="get_tariff_comparison",
         description=(
             "Apples-to-apples cost comparison across every configured tariff: realised "
