@@ -34,8 +34,10 @@ Solves a 24–48 h MILP every few minutes, uploads a Fox ESS Scheduler V3, drive
 - 🌤️ **Per-hour PV calibration.** Three-tier resolver — `(hour, cloud-bucket)` table → per-hour-of-day → flat factor. Quartz nowcast preferred; Open-Meteo fallback. OCF-style today-aware adjuster on top.
 - 🔋 **Scenario-robust peak export.** Pessimistic forecast must also export ≥ floor before a `peak_export` slot is committed to Fox V3 — kills the cold-night export trap.
 - 🏃 **Event-driven MPC.** Re-solves fire on tier boundaries, forecast revisions, Octopus fetches, SoC drift, and import-overshoot detection. No fixed-time belt-and-braces.
-- 🧺 **Appliance dispatch.** Washer / dryer / dishwasher start times picked by the LP given a deadline; Smart Control button on the unit IS the consent gate.
-- 📋 **Closed-loop regression gate.** Every LP solve is a frozen replayable snapshot. `scripts/check_lp_regression.py --mode=both` blocks merges that worsen aggregate cost vs baseline.
+- 🧺 **Appliance dispatch.** Washer / dryer / dishwasher start times picked by the LP given a deadline; Smart Control button on the unit IS the consent gate. **v12**: drops the appliance and re-solves once if its load makes the LP Infeasible.
+- 🚿 **Soft shower-window tank floor (v12).** `tank ≥ 45 °C` on shower-window slots is a soft constraint with a heavy 50 p/K-slot penalty — heats as fast as physics allows, surfaces the unavoidable deficit as a quantified slack instead of returning Infeasible. Closes the residual-class Infeasibility surface that the 60-day audit identified.
+- 🔁 **Replayable Infeasibles (v12).** When the LP can't solve, the inputs are still snapshotted (`lp_inputs_snapshot.lp_status='Infeasible'`); `lp_replay.replay_run()` can reload + reproduce any past Infeasible offline against any code version.
+- 📋 **Closed-loop regression gate.** Every LP solve is a frozen replayable snapshot. `scripts/check_lp_regression.py --vs-ref=<ref> --mode=both` gives clean per-PR cost deltas; `--refresh-baseline` re-pins the frozen JSON when an accepted strategy shift improves the optimum.
 - 🔌 **75-tool MCP surface.** Bearer-guarded HTTP transport. Claude / OpenClaw read state, request plan changes, replay past days, and explain dispatch decisions.
 - 📲 **Direct Telegram notifications.** Optional bypass of the OpenClaw `/hooks/agent` LLM-shaping path; HEM POSTs straight to `api.telegram.org` when configured. Keeps free pings out of LLM loops.
 
@@ -107,7 +109,7 @@ cp .env.example .env
 # Edit .env — at minimum set OPENCLAW_READ_ONLY=true so nothing dials out.
 # To switch PV nowcasting, set FORECAST_SOURCE=quartz and fill the Quartz auth vars.
 
-pytest                                    # 930+ tests, ~3 min on a laptop
+pytest                                    # 1100+ tests, ~3 min on a laptop
 python -m src.cli serve                   # FastAPI on :8000, MCP at /mcp
 ```
 
@@ -167,7 +169,9 @@ Everything is parameterised via `.env`. Adapting it to a different setup is feas
 
 ## 🗺️ Roadmap
 
-Active epic: **[#193 V11 — Accuracy via past-data integration & uncertainty modelling](https://github.com/albinati/home-energy-manager/issues/193)**.
+**v12.0.0** (2026-05-20) shipped the LP residual-class Infeasibility fix stack — see [CHANGELOG.md](CHANGELOG.md) for the eight PRs and the −£1.09/14d honest-mode regression delta.
+
+V11 epic (accuracy via past-data integration) — open stories:
 
 | | Story | Status |
 |---|---|---|
@@ -185,9 +189,9 @@ The full backlog is on the [issues board](https://github.com/albinati/home-energ
 
 ## 🤝 Contributing
 
-Adding a feature, reproducing a bug, or porting to a different installation? See [CONTRIBUTING.md](CONTRIBUTING.md). Security issues — see [SECURITY.md](SECURITY.md).
+Adding a feature, reproducing a bug, or porting to a different installation? See [CONTRIBUTING.md](CONTRIBUTING.md). Project conduct — [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). Security issues — [SECURITY.md](SECURITY.md). Release history — [CHANGELOG.md](CHANGELOG.md).
 
-The PR template requires the LP regression gate (`scripts/check_lp_regression.py --mode=both`) to pass for any change under `src/scheduler/`: individual moments can be worse, but comparable aggregate cost must be better than or equal to the baseline.
+The PR bar for LP-touching changes: `scripts/check_lp_regression.py --vs-ref=main --mode=both` must show non-regressive aggregate cost on the comparable baseline window. Individual moments can be worse; aggregate must be ≤ baseline + the configured threshold.
 
 ---
 
