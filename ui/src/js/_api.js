@@ -64,4 +64,31 @@
   global.hemFetch    = hemFetch;
   global.hemGetJson  = hemGetJson;
   global.hemPostJson = hemPostJson;
+
+  // Transparent bearer injection on the global fetch.
+  // The legacy JS files in src/api/static/js/ (lifted in Story B4) call
+  // fetch('/api/v1/...') directly. Rather than rewrite every callsite,
+  // we wrap the global fetch so any URL beginning with /api/ gets the
+  // bearer header attached automatically. This is purely additive — if
+  // the caller already set Authorization the header is left alone.
+  const _originalFetch = global.fetch.bind(global);
+  global.fetch = function patchedFetch(input, init) {
+    let url;
+    try {
+      url = typeof input === "string" ? input : (input && input.url) || "";
+    } catch (_) {
+      url = "";
+    }
+    if (typeof url === "string" && url.startsWith("/api/")) {
+      const cfg = _config();
+      if (cfg.bearer) {
+        const headers = new Headers((init && init.headers) || {});
+        if (!headers.has("Authorization")) {
+          headers.set("Authorization", "Bearer " + cfg.bearer);
+        }
+        init = Object.assign({}, init || {}, { headers });
+      }
+    }
+    return _originalFetch(input, init);
+  };
 })(window);
