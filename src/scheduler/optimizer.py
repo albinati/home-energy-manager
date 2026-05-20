@@ -868,7 +868,15 @@ def _write_daikin_schedule(plan_date: str, slots: list[HalfHourSlot], forecast: 
         )
         st = start_utc.isoformat().replace("+00:00", "Z")
         en = end_utc.isoformat().replace("+00:00", "Z")
-        restore_end = (end_utc + timedelta(minutes=1)).isoformat().replace("+00:00", "Z")
+        # Restore window must be wider than the heartbeat tick so the state
+        # machine can't silently mark a restore "completed" without firing.
+        # Mirrors the LP path's fix at lp_dispatch.py:510 — share one config
+        # (``LP_RESTORE_WINDOW_MINUTES``, floor 2 min) so heuristic fallback
+        # never reintroduces the 2026-04-30 incident. See #253.
+        restore_window = max(2, int(getattr(config, "LP_RESTORE_WINDOW_MINUTES", 5)))
+        restore_end = (
+            end_utc + timedelta(minutes=restore_window)
+        ).isoformat().replace("+00:00", "Z")
         restore_params = _normal_params()
         rid = db.upsert_action(
             plan_date=plan_date,
