@@ -514,14 +514,21 @@ Dockerfile                 # multi-stage build (builder venv → slim runtime + 
 .dockerignore              # keeps tests/, scripts/, data/, .env, .venv/ out of the image
 .github/workflows/docker-publish.yml   # builds and pushes ARM64 image to GHCR on push to main / tags
 deploy/
-  compose.yaml             # canonical compose for prod (read-only rootfs, tmpfs, cap_drop, mem limits)
+  compose.yaml             # canonical compose for prod (hem + hem-ui services; read-only rootfs, tmpfs, cap_drop, mem limits)
   hem.service              # systemd wrapper around `docker compose up`
   compose.daikin-auth.yaml # one-shot OAuth re-enrollment container
-  README.md                # cutover runbook (install, enroll, rollback)
+  README.md                # cutover runbook (install, enroll, rollback, SPA cutover at §11)
+ui/                        # Epic 13b — SPA container (nginx + static assets)
+  Dockerfile               # nginx:alpine + envsubst for runtime config
+  conf/nginx.conf.template # reverse-proxies /api → hem; SPA fallback to cockpit.html
+  html/                    # one HTML page per route (cockpit, history, forecast, insights, workbench, settings)
+  src/{js,css}/            # vanilla JS + CSS, served by nginx; bearer injected by _api.js
+  ui-entrypoint.sh         # writes /config.js with bearer + apiBase at container boot
+.github/workflows/ui-publish.yml  # builds + pushes ghcr.io/<owner>/home-energy-manager-ui on push to main (paths-scoped)
 src/
   cli/__main__.py          # entrypoint: `python -m src.cli serve` (PID 1 in the container, behind tini)
-  api/main.py              # FastAPI app + lifespan (token bootstrap, MCP session manager, scheduler)
-  api/middleware.py        # BearerAuthMiddleware guarding the /mcp mount
+  api/main.py              # FastAPI app + lifespan (token bootstrap, MCP session manager, scheduler) — JSON API only since B5
+  api/middleware.py        # BearerAuthMiddleware (/mcp) + ApiV1BearerAuth (/api/v1/*, gated by HEM_UI_AUTH_REQUIRED)
   daikin/
     auth.py                # OAuth2 flow + token refresh (port 8080)
     client.py              # DaikinClient (wraps Onecta API)
