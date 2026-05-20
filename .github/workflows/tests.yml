@@ -27,14 +27,8 @@ jobs:
           pip install pytest
 
       - name: Run pytest
-        # The pre-existing test_mcp_singleton.py imports a function that was
-        # removed when MCP moved to HTTP transport (see src/mcp_server.py
-        # docstring). Excluded here pending its own cleanup PR.
         run: |
-          python -m pytest tests/ \
-            --tb=short \
-            --ignore=tests/test_mcp_singleton.py \
-            -q
+          python -m pytest tests/ --tb=short -q
 
   lint-imports:
     runs-on: ubuntu-24.04
