@@ -39,9 +39,25 @@ def _four_slot_plan_with_standard_gap() -> LpPlan:
 
 
 def test_lp_dispatch_slots_match_lp_plan_no_gap_bridge_promotion() -> None:
+    """The original intent: gap slots between cheap slots must NOT be
+    promoted to ``cheap`` (which would ForceCharge through the gap and
+    override the MILP). Slots 1+2 are between cheap slot 0 and cheap
+    slot 3 — they must end up as anything BUT cheap.
+
+    Updated 2026-05-20 (#323): with the default ``DHW_SHOWER_SCHEDULE``
+    of ``19:00-22:00`` and the synthetic plan running 01:00-03:00 BST
+    (post-shower idle window), the second-pass overnight-tank-idle
+    classifier now correctly marks slots 1+2 as ``tank_idle_overnight``
+    rather than leaving them ``standard`` — same gap-bridge guarantee
+    (not promoted to cheap), more accurate kind. The dispatch surface
+    must mirror the raw classifier output exactly."""
     plan = _four_slot_plan_with_standard_gap()
     raw = lp_plan_to_slots(plan)
-    assert [s.kind for s in raw] == ["cheap", "standard", "standard", "cheap"]
+    kinds = [s.kind for s in raw]
+    assert kinds[0] == "cheap" and kinds[3] == "cheap"
+    # The non-cheap-promotion guarantee: slots 1+2 are NOT cheap.
+    assert kinds[1] != "cheap"
+    assert kinds[2] != "cheap"
 
     dispatched = lp_dispatch_slots_for_hardware(plan)
     assert [s.kind for s in dispatched] == [s.kind for s in raw]

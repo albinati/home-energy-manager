@@ -180,6 +180,29 @@ def lp_plan_to_slots(plan: LpPlan) -> list[HalfHourSlot]:
             shower_mask = [False] * n
 
         seen_shower_in_window = False
+        # Bug fix (#323): when the LP horizon's first slot starts INSIDE an
+        # in-progress idle window (i.e. AFTER the last shower of the day
+        # already ended), the loop below would never see a shower slot —
+        # so it never flipped seen_shower_in_window to True — so the
+        # remaining slots stayed ``standard`` instead of becoming
+        # ``tank_idle_overnight``. Pre-arm the flag based on slot 0's local
+        # clock position relative to the shower schedule's wraparound idle
+        # window: from latest_shower_end through to next-day earliest start.
+        if shower_windows and plan.slot_starts_utc:
+            first_slot_mid = (
+                plan.slot_starts_utc[0] + timedelta(minutes=15)
+            ).astimezone(TZ())
+            first_min = first_slot_mid.hour * 60 + first_slot_mid.minute
+            latest_end = max(e for _, e in shower_windows)
+            earliest_start = min(s for s, _ in shower_windows)
+            if latest_end > earliest_start:
+                # Wraparound idle window: post-latest-end OR pre-earliest-start.
+                in_idle_window = first_min >= latest_end or first_min < earliest_start
+            else:
+                # Clean range, no wraparound (e.g. morning-only schedule).
+                in_idle_window = latest_end <= first_min < earliest_start
+            if in_idle_window:
+                seen_shower_in_window = True
         # Reset overnight tracker ONLY on solar_charge (PV abundance kicks in)
         # or negative-price slots (grid pays us — tank-heat free). NOT on
         # cheap-grid battery-charging slots: a 02:30 cheap-charge slot for
