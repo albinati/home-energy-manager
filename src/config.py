@@ -148,6 +148,14 @@ class Config:
         os.getenv("TELEGRAM_API_BASE_URL") or "https://api.telegram.org"
     ).strip().rstrip("/")
     TELEGRAM_TIMEOUT_SECONDS: int = int(os.getenv("TELEGRAM_TIMEOUT_SECONDS", "10"))
+    # Extra Telegram chat IDs (CSV) that receive a copy of every appliance
+    # lifecycle notification (armed / starting / finished / cancelled). The
+    # primary chat at TELEGRAM_CHAT_ID always gets the message; entries here
+    # are fanned out *in addition*. De-duplicated against the primary chat
+    # so listing the same ID twice is harmless. Empty = no fanout.
+    TELEGRAM_APPLIANCE_FANOUT_CHAT_IDS: str = (
+        os.getenv("TELEGRAM_APPLIANCE_FANOUT_CHAT_IDS") or ""
+    ).strip()
 
     # ── Google Family Calendar publisher (Octopus rate windows) ─────────────
     # Side feature: after every Octopus fetch, classify each 30-min slot into
