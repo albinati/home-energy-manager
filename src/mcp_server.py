@@ -1987,6 +1987,48 @@ def build_mcp() -> FastMCP:
         }
 
     @mcp.tool(
+        name="get_lp_scorecard",
+        description=(
+            "LP optimisation scorecard for a given day — surfaces 'did the LP "
+            "do a good job?' as structured data so OpenClaw / dashboards can "
+            "render a one-glance answer. Three sections + composite grade:\n"
+            "  * forecast_accuracy — PV/temp/load MAE+bias from forecast_skill_log "
+            "(was the LP's INPUT data accurate?)\n"
+            "  * dispatch_accuracy — per-channel planned vs realised import / export "
+            "/ charge kWh + per-channel accuracy_pct (did the OUTPUTS happen as "
+            "planned? — accounts for strict_savings filter downgrades)\n"
+            "  * economic_value — lp_realised_cost_p (what HEM actually paid) vs "
+            "naive_self_use_shadow_p (what plain SelfUse + no LP would have cost), "
+            "with lp_avoided_cost_p as the difference\n"
+            "  * grade — A/B/C/D composite combining accuracy + value-add\n"
+            "Pure read over DB; no Daikin API call, no LP solve, no live Fox poll. "
+            "Safe to call mid-day. Defaults to yesterday (full data); pass date="
+            "YYYY-MM-DD to query a specific historical day."
+        ),
+    )
+    def get_lp_scorecard(date: str | None = None) -> dict[str, Any]:
+        from datetime import datetime, timedelta
+        from datetime import date as _date
+        from zoneinfo import ZoneInfo
+
+        from .analytics.lp_scorecard import build_lp_scorecard
+
+        tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+        if date is None:
+            target = datetime.now(tz).date() - timedelta(days=1)
+        else:
+            try:
+                target = _date.fromisoformat(date)
+            except ValueError:
+                return {"ok": False, "error": f"invalid date {date!r} (expected YYYY-MM-DD)"}
+        try:
+            scorecard = build_lp_scorecard(target)
+        except Exception as e:
+            logger.exception("get_lp_scorecard failed")
+            return {"ok": False, "error": str(e)}
+        return {"ok": True, "scorecard": scorecard}
+
+    @mcp.tool(
         name="get_tariff_comparison",
         description=(
             "Apples-to-apples cost comparison across every configured tariff: realised "

@@ -2791,6 +2791,25 @@ async def optimization_dispatch_preview():
     )
 
 
+@app.get("/api/v1/lp/scorecard/{date}")
+async def get_lp_scorecard(date: str):
+    """LP optimisation scorecard for ``date`` (YYYY-MM-DD local).
+
+    Structured equivalent of the ``get_lp_scorecard`` MCP tool. Three
+    sections + composite grade — see ``src/analytics/lp_scorecard.py``
+    for the field shape. Read-only (no Daikin API, no LP solve, no Fox poll)."""
+    from datetime import date as _date
+    try:
+        target = _date.fromisoformat(date)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid date {date!r}; expected YYYY-MM-DD",
+        )
+    from ..analytics.lp_scorecard import build_lp_scorecard
+    return {"ok": True, "scorecard": build_lp_scorecard(target)}
+
+
 @app.post("/api/v1/optimization/refresh")
 async def optimization_refresh():
     """Fetch Agile rates from Octopus, persist to SQLite, and update in-memory cache.
