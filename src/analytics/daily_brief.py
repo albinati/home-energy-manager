@@ -15,13 +15,14 @@ restricted to genuine errors + the 🔵 PAID-to-use crossing.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from .. import db
 from ..config import config
 from ..notifier import notify_morning_report, notify_night_brief
+from ..physics import get_daikin_heating_kw, get_kw_per_degc_lwt
 from .pnl import (
     compute_arbitrage_efficiency,
     compute_daily_pnl,
@@ -85,6 +86,10 @@ def build_morning_payload() -> str:
     lines.append(f"**Yesterday ({yesterday}) — financial summary**")
     lines.extend(_format_pnl_block(pnl, day=yesterday, tz=tz))
 
+    overnight_lines = _overnight_plan_vs_actual_lines(today, tz)
+    if overnight_lines:
+        lines.extend(["", "**Madrugada (plan vs actual):**", *overnight_lines])
+
     bias_line = _pv_bias_line()
     if bias_line:
         lines.extend(["", bias_line])
@@ -107,6 +112,236 @@ def _pv_bias_line() -> str | None:
     if int(report.get("n_paired", 0)) <= 0:
         return None
     return report.get("headline")
+
+
+def _overnight_plan_vs_actual_lines(today: date, tz: ZoneInfo) -> list[str]:
+    """Return markdown bullets comparing last overnight's plan vs actual.
+
+    Window = yesterday 22:00 local → today 09:00 local (the post-shower,
+    pre-morning-shower stretch when the LP runs `tank_idle_overnight` and the
+    space-heating climate curve dominates the LP load forecast).
+
+    Each bullet is best-effort — if its data source is missing, that bullet
+    is omitted (no error). When ALL sources are missing, returns ``[]`` so
+    the caller skips the section header entirely.
+
+    Lines emitted (in order, when data permits):
+      - Heating: Σ predicted `space_floor` vs Σ realised `kwh_heating`
+      - Battery: SoC at start of overnight vs current
+      - Outdoor: forecast min vs Daikin sensor min
+      - Calibration k: current vs default (and updated_at)
+    """
+    bullets: list[str] = []
+
+    yesterday = today - timedelta(days=1)
+    start_local = datetime.combine(yesterday, time(22, 0)).replace(tzinfo=tz)
+    end_local = datetime.combine(today, time(9, 0)).replace(tzinfo=tz)
+    start_utc = start_local.astimezone(UTC)
+    end_utc = end_local.astimezone(UTC)
+
+    # ── Heating: predicted vs actual ────────────────────────────────────
+    heating_bullet = _heating_plan_vs_actual(start_utc, end_utc, yesterday, today)
+    if heating_bullet:
+        bullets.append(heating_bullet)
+
+    # ── Battery SoC drift ───────────────────────────────────────────────
+    bat_bullet = _battery_overnight_drift(start_utc)
+    if bat_bullet:
+        bullets.append(bat_bullet)
+
+    # ── Outdoor forecast vs Daikin sensor ───────────────────────────────
+    out_bullet = _outdoor_forecast_vs_sensor(start_utc, end_utc)
+    if out_bullet:
+        bullets.append(out_bullet)
+
+    # ── Calibration k status ────────────────────────────────────────────
+    k_bullet = _calibration_k_status_line()
+    if k_bullet:
+        bullets.append(k_bullet)
+
+    return bullets
+
+
+def _heating_plan_vs_actual(
+    start_utc: datetime, end_utc: datetime, yesterday: date, today: date,
+) -> str | None:
+    """Sum predicted heating energy (LP space_floor) vs realised kwh_heating.
+
+    Predicted comes from re-running the same physics the LP used:
+    ``Σ get_daikin_heating_kw(t_outdoor) × Δt`` over the overnight slots,
+    using the FRESHEST meteo snapshot per slot_time (latest fetched value
+    for each hour). Realised comes from ``daikin_consumption_2hourly``
+    bucket sums covering the same window.
+
+    Returns None when EITHER source is too sparse to be meaningful (< 6 h
+    of meteo coverage OR < 4 of the 5 expected 2h-buckets present), so the
+    bullet doesn't lie about non-existent comparison.
+    """
+    try:
+        with db._lock:
+            conn = db.get_connection()
+            try:
+                # Predicted: per-hour outdoor temps from the freshest snapshot
+                # covering each slot_time in the window. Same UNION pattern
+                # as compute_daikin_lwt_kw_calibration to span both meteo
+                # tables (history retains longer than value).
+                cur = conn.execute(
+                    """SELECT slot_time, temp_c FROM (
+                           SELECT slot_time, temp_c, forecast_fetch_at_utc
+                             FROM meteo_forecast_history
+                            WHERE slot_time >= ? AND slot_time < ?
+                              AND temp_c IS NOT NULL
+                           UNION ALL
+                           SELECT slot_time, temp_c, forecast_fetch_at_utc
+                             FROM meteo_forecast_value
+                            WHERE slot_time >= ? AND slot_time < ?
+                              AND temp_c IS NOT NULL
+                       ) AS u
+                       WHERE forecast_fetch_at_utc = (
+                           SELECT MAX(f) FROM (
+                               SELECT forecast_fetch_at_utc AS f
+                                 FROM meteo_forecast_history
+                                WHERE slot_time = u.slot_time AND temp_c IS NOT NULL
+                               UNION ALL
+                               SELECT forecast_fetch_at_utc AS f
+                                 FROM meteo_forecast_value
+                                WHERE slot_time = u.slot_time AND temp_c IS NOT NULL
+                           )
+                       )
+                       GROUP BY slot_time
+                       ORDER BY slot_time""",
+                    (start_utc.isoformat(), end_utc.isoformat(),
+                     start_utc.isoformat(), end_utc.isoformat()),
+                )
+                slot_temps = cur.fetchall()
+                # Realised heating from 2-hourly Daikin consumption.
+                # Yesterday's last bucket (idx 11 = 22:00–24:00 local) plus
+                # today's morning buckets (idx 0–4 = 00:00–10:00 local).
+                # Local time matches the 2h-bucket convention per CLAUDE.md.
+                cur = conn.execute(
+                    """SELECT date, bucket_idx, kwh_heating
+                       FROM daikin_consumption_2hourly
+                       WHERE (date = ? AND bucket_idx >= 11)
+                          OR (date = ? AND bucket_idx <= 4)""",
+                    (yesterday.isoformat(), today.isoformat()),
+                )
+                heat_rows = cur.fetchall()
+            finally:
+                conn.close()
+    except Exception:  # noqa: BLE001 — brief must never error
+        return None
+
+    # Predicted side
+    if len(slot_temps) < 12:  # need ≥ 6 h of slot coverage
+        return None
+    slot_h = (end_utc - start_utc).total_seconds() / 3600.0 / max(1, len(slot_temps))
+    predicted_kwh = sum(
+        get_daikin_heating_kw(float(r["temp_c"])) * slot_h for r in slot_temps
+    )
+
+    # Realised side
+    realised_buckets = [
+        float(r["kwh_heating"]) for r in heat_rows if r["kwh_heating"] is not None
+    ]
+    if len(realised_buckets) < 4:  # missing > 1 bucket → no honest comparison
+        return None
+    realised_kwh = sum(realised_buckets)
+
+    delta_kwh = realised_kwh - predicted_kwh
+    delta_pct = (delta_kwh / predicted_kwh * 100.0) if predicted_kwh > 0.01 else 0.0
+    k_now = get_kw_per_degc_lwt()
+    return (
+        f"- Heating: predicted {predicted_kwh:.1f} kWh (k={k_now:.4f}) → "
+        f"real {realised_kwh:.1f} kWh ({delta_kwh:+.1f} kWh, {delta_pct:+.0f} %)"
+    )
+
+
+def _battery_overnight_drift(start_utc: datetime) -> str | None:
+    """SoC % at start of overnight vs the latest snapshot. Net charge/discharge."""
+    try:
+        with db._lock:
+            conn = db.get_connection()
+            try:
+                # First sample at-or-after the overnight start
+                cur = conn.execute(
+                    """SELECT soc_pct FROM pv_realtime_history
+                       WHERE captured_at >= ? AND soc_pct IS NOT NULL
+                       ORDER BY captured_at ASC LIMIT 1""",
+                    (start_utc.isoformat(),),
+                )
+                start_row = cur.fetchone()
+                # Latest snapshot
+                cur = conn.execute(
+                    "SELECT soc_pct FROM pv_realtime_history "
+                    "WHERE soc_pct IS NOT NULL ORDER BY captured_at DESC LIMIT 1"
+                )
+                now_row = cur.fetchone()
+            finally:
+                conn.close()
+    except Exception:
+        return None
+    if not start_row or not now_row:
+        return None
+    soc_start = float(start_row["soc_pct"])
+    soc_now = float(now_row["soc_pct"])
+    delta = soc_now - soc_start
+    arrow = "→" if abs(delta) < 1 else ("↑" if delta > 0 else "↓")
+    return f"- Battery SoC: {soc_start:.0f} % {arrow} {soc_now:.0f} % ({delta:+.0f} pp overnight)"
+
+
+def _outdoor_forecast_vs_sensor(start_utc: datetime, end_utc: datetime) -> str | None:
+    """Coldest forecast vs coldest Daikin-sensor reading across the overnight."""
+    try:
+        with db._lock:
+            conn = db.get_connection()
+            try:
+                cur = conn.execute(
+                    """SELECT MIN(temp_c) AS t FROM meteo_forecast_value
+                       WHERE slot_time >= ? AND slot_time < ?
+                         AND temp_c IS NOT NULL""",
+                    (start_utc.isoformat(), end_utc.isoformat()),
+                )
+                fr = cur.fetchone()
+                # daikin_telemetry.fetched_at is REAL epoch — see schema note
+                cur = conn.execute(
+                    """SELECT MIN(outdoor_temp_c) AS t FROM daikin_telemetry
+                       WHERE fetched_at >= ? AND fetched_at < ?
+                         AND outdoor_temp_c IS NOT NULL""",
+                    (start_utc.timestamp(), end_utc.timestamp()),
+                )
+                dr = cur.fetchone()
+            finally:
+                conn.close()
+    except Exception:
+        return None
+    forecast_min = fr["t"] if fr else None
+    sensor_min = dr["t"] if dr else None
+    if forecast_min is None and sensor_min is None:
+        return None
+    if forecast_min is None:
+        return f"- Outdoor min (sensor only): {sensor_min:.1f} °C"
+    if sensor_min is None:
+        return f"- Outdoor min (forecast only): {forecast_min:.1f} °C"
+    delta = sensor_min - forecast_min
+    return (
+        f"- Outdoor min: forecast {forecast_min:.1f} °C → sensor {sensor_min:.1f} °C "
+        f"({delta:+.1f} °C off)"
+    )
+
+
+def _calibration_k_status_line() -> str | None:
+    """Surface the active LWT→kW calibration value."""
+    try:
+        row = db.get_daikin_lwt_kw_calibration()
+    except Exception:
+        return None
+    if row is None:
+        return None
+    k = float(row["k_per_degc"])
+    default = 0.0333
+    delta_pct = (k - default) / default * 100.0
+    samples = int(row.get("samples") or 0)
+    return f"- Calibration k: {k:.5f} kW/°C ({delta_pct:+.1f} % vs default, {samples} d)"
 
 
 # --------------------------------------------------------------------------
