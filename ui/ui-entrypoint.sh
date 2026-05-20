@@ -18,6 +18,13 @@ set -eu
 CONFIG_PATH=/usr/share/nginx/html/config.js
 TOKEN="${HEM_UI_TOKEN:-}"
 
+# Token-file fallback — prod compose mounts /srv/hem/data/.hem-ui-token at
+# /run/secrets/hem-ui-token (read-only) so the SPA container reads what
+# HEM's lifespan minted. Env still wins (handy for local dev `docker run`).
+if [ -z "$TOKEN" ] && [ -n "${HEM_UI_TOKEN_FILE:-}" ] && [ -r "$HEM_UI_TOKEN_FILE" ]; then
+  TOKEN="$(tr -d '\n\r ' < "$HEM_UI_TOKEN_FILE")"
+fi
+
 cat > "$CONFIG_PATH" <<EOF
 // Generated at container start by ui-entrypoint.sh — DO NOT EDIT.
 // Cached:no-store via nginx config.

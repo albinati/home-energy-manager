@@ -211,6 +211,45 @@ systemctl daemon-reload
 
 A partir desse ponto o código vive **só** na imagem em `ghcr.io/albinati/home-energy-manager` e no Git. OpenClaw, mesmo se for comprometido, não tem caminho de escrita pra alterar comportamento da próxima invocação.
 
+## 11. Cutover do SPA container (Epic 13b / B6)
+
+A partir do PR #356 (B1) o token UI já é gerado no boot do HEM em
+`/srv/hem/data/.hem-ui-token`. O B6 só liga o container `hem-ui` no
+compose e (uma vez que a SPA estiver verificada) flipa o gate flag.
+
+```bash
+# 1. Garante que o image SPA está publicado (após B3/B4 baterem em main).
+docker pull ghcr.io/albinati/home-energy-manager-ui:main
+
+# 2. Sobe o serviço hem-ui (já está em compose.yaml; o pull_policy=always
+#    cuida do refresh). HEM continua servindo a UI legacy em paralelo.
+cd /srv/hem && docker compose up -d hem-ui
+
+# 3. Smoke test do SPA na porta 8080 (loopback + Tailnet).
+curl -sS http://127.0.0.1:8080/healthz
+# Esperado: "ok"
+
+# 4. Abrir http://openclaw-overbot.tail0dbf20.ts.net:8080/ no navegador.
+#    Cockpit, history, forecast, insights, workbench, settings devem
+#    funcionar idênticos à UI inline (que segue rodando na :8000).
+#    Inspect Network: as chamadas /api/v1/* devem ter Authorization: Bearer.
+
+# 5. Quando confiar que está OK, flipa o gate flag pra exigir bearer em
+#    /api/v1/* — depois disso a UI inline em :8000 NÃO funciona mais
+#    (não envia bearer). Só faz esse passo depois de verificar :8080.
+echo 'HEM_UI_AUTH_REQUIRED=true' >> /srv/hem/.env
+chmod 640 /srv/hem/.env   # perms importam — ver feedback_flag_before_env_overwrite
+systemctl restart hem
+sleep 8
+curl -sS http://127.0.0.1:8000/api/v1/health   # health stays public
+# A UI legacy em :8000 vai responder 401 sem header — esperado.
+# B5 remove ela do container HEM no PR seguinte.
+
+# 6. Rollback (se o SPA tiver bug): tira o flag + restart, UI legacy volta.
+sed -i '/^HEM_UI_AUTH_REQUIRED=/d' /srv/hem/.env
+systemctl restart hem
+```
+
 ## Troubleshooting
 
 | Sintoma | Causa provável | Ação |
