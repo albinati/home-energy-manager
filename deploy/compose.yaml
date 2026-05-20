@@ -60,6 +60,78 @@ services:
     networks:
       - hem-net
 
+  # ── Story B6 — SPA container ────────────────────────────────────────────
+  # nginx-served frontend lifted from src/api/templates/ + src/api/static/.
+  # Reverse-proxies /api → hem:8000. Reads the bearer token from
+  # /srv/hem/data/.hem-ui-token (minted by HEM lifespan, B1) and writes it
+  # into /usr/share/nginx/html/config.js at boot so the SPA can attach it
+  # to every /api/* fetch.
+  #
+  # Rollback: `docker compose stop hem-ui` (the inline UI in HEM keeps
+  # serving until B5 decommissions it). Until HEM_UI_AUTH_REQUIRED=true
+  # the new bearer guard is inert — turning the SPA off is safe.
+  hem-ui:
+    image: ghcr.io/albinati/home-energy-manager-ui:${HEM_UI_IMAGE_TAG:-main}
+    container_name: hem-ui
+    pull_policy: always
+    restart: unless-stopped
+    depends_on:
+      hem:
+        condition: service_healthy
+
+    ports:
+      - "127.0.0.1:8080:80"
+      - "${HEM_TAILSCALE_IP:-127.0.0.1}:8080:80"
+
+    environment:
+      HEM_API_URL: http://hem:8000
+      # The token is loaded from the bind-mounted hem-ui-token file by
+      # ui-entrypoint.sh on container start. The file lives in HEM's
+      # data volume so the SPA container reads what HEM minted.
+      HEM_UI_TOKEN_FILE: /run/secrets/hem-ui-token
+
+    volumes:
+      # Read-only mount of the token file as a "secret" — mounted under
+      # /run/secrets/ which the entrypoint reads. Using a bind mount
+      # rather than docker secrets keeps the existing root-on-host
+      # operations the user has been doing.
+      - /srv/hem/data/.hem-ui-token:/run/secrets/hem-ui-token:ro
+
+    read_only: true
+    tmpfs:
+      - /tmp:rw,size=8m,mode=1777
+      - /var/cache/nginx:rw,size=32m,mode=1777
+      - /var/run:rw,size=8m,mode=1777
+      # nginx writes its boot-time generated /config.js into html/ — give
+      # it a writable tmpfs overlay there.
+      - /usr/share/nginx/html:rw,size=32m,mode=1777
+    cap_drop: [ALL]
+    cap_add:
+      - CHOWN
+      - NET_BIND_SERVICE
+      - SETUID
+      - SETGID
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 100
+    mem_limit: 64m
+    mem_reservation: 32m
+
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:80/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    logging:
+      driver: journald
+      options:
+        tag: hem-ui
+
+    networks:
+      - hem-net
+
 # Pin a known subnet so the bridge gateway IP (172.30.0.1) is stable. The
 # container resolves openclaw.host -> 172.30.0.1 (extra_hosts above) and
 # reaches OpenClaw on the host. Without this, compose picks the next free
