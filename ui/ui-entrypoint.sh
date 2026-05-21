@@ -25,12 +25,25 @@ if [ -z "$TOKEN" ] && [ -n "${HEM_UI_TOKEN_FILE:-}" ] && [ -r "$HEM_UI_TOKEN_FIL
   TOKEN="$(tr -d '\n\r ' < "$HEM_UI_TOKEN_FILE")"
 fi
 
+# Render bearer as a JSON literal — either "<token>" (string) or null. The
+# previous ``${TOKEN:+\"$TOKEN\"}${TOKEN:-null}`` trick was broken in POSIX
+# sh: the :- expansion fires whenever TOKEN is empty OR unset, so when TOKEN
+# was set the output was `"TOKEN"TOKEN` (string + bare token). That produced
+# a JS syntax error and the SPA fell back to ``window.__HEM_CONFIG__``
+# undefined, killing every authenticated /api/v1 call once the gate flag
+# flipped.
+if [ -n "$TOKEN" ]; then
+  BEARER_LITERAL="\"$TOKEN\""
+else
+  BEARER_LITERAL="null"
+fi
+
 cat > "$CONFIG_PATH" <<EOF
 // Generated at container start by ui-entrypoint.sh — DO NOT EDIT.
 // Cached:no-store via nginx config.
 window.__HEM_CONFIG__ = {
   apiBase: "/api/v1",
-  bearer:  ${TOKEN:+\"$TOKEN\"}${TOKEN:-null},
+  bearer:  $BEARER_LITERAL,
   buildSha: "${BUILD_SHA:-unknown}"
 };
 EOF

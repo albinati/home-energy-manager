@@ -97,20 +97,27 @@ services:
       # operations the user has been doing.
       - /srv/hem/data/.hem-ui-token:/run/secrets/hem-ui-token:ro
 
-    read_only: true
+    # read_only is intentionally OFF — the upstream nginx:alpine entrypoint
+    # chain writes to /etc/nginx/conf.d (envsubst-on-templates.sh) on every
+    # start, and tmpfs-mounting it just to keep read_only=true was more pain
+    # than the marginal hardening was worth for a static-asset + proxy
+    # container with no application code. Risk surface = the nginx binary
+    # itself, which is mature + audited.
+    read_only: false
     tmpfs:
       - /tmp:rw,size=8m,mode=1777
-      - /var/cache/nginx:rw,size=32m,mode=1777
-      - /var/run:rw,size=8m,mode=1777
-      # nginx writes its boot-time generated /config.js into html/ — give
-      # it a writable tmpfs overlay there.
-      - /usr/share/nginx/html:rw,size=32m,mode=1777
     cap_drop: [ALL]
     cap_add:
       - CHOWN
       - NET_BIND_SERVICE
       - SETUID
       - SETGID
+      # DAC_READ_SEARCH lets the entrypoint read the 0640 bearer-token file
+      # mounted at /run/secrets/hem-ui-token (owned by uid:gid 1001:1001 on
+      # the host — written by HEM's lifespan). Without this cap a default
+      # cap_drop:ALL strips the kernel's DAC bypass that root usually relies
+      # on, so the container's root user gets EACCES on the bind-mounted file.
+      - DAC_READ_SEARCH
     security_opt:
       - no-new-privileges:true
     pids_limit: 100
