@@ -274,6 +274,12 @@ def test_reconcile_detects_override_marks_row_and_notifies(monkeypatch):
     monkeypatch.setattr("src.daikin_bulletproof.config.DAIKIN_OVERRIDE_GRACE_SECONDS", 60)
     monkeypatch.setattr("src.daikin_bulletproof.config.DAIKIN_OVERRIDE_TOLERANCE_TANK_C", 0.6)
     monkeypatch.setattr("src.daikin_bulletproof.config.OPENCLAW_READ_ONLY", False)
+    # Epic 14 (#386): this test covers the legacy first-apply + later-divergence
+    # path. With PREFIRE_STATE_MATCH_ENABLED=True the reconciler would skip the
+    # first tick (state already matches) and the row would be completed before
+    # the user gesture happens — a different code path. Force the legacy path
+    # here so the override-detection logic stays under test.
+    monkeypatch.setattr("src.config.config.PREFIRE_STATE_MATCH_ENABLED", False)
 
     # C6: clear process-local state between tests.
     sm._FIRST_APPLIED_SESSION.clear()
@@ -369,3 +375,337 @@ def test_boot_recovery_does_not_false_flag_override_on_first_tick(monkeypatch):
         # Must have actually APPLIED on this tick — the whole point is that boot-recovery
         # pushes our value rather than assuming the user changed it.
         assert rid in sm._FIRST_APPLIED_SESSION
+
+
+# ── Epic 14 (#386): find_recent_user_override helper ──────────────────────────
+
+def test_find_recent_user_override_returns_recent(monkeypatch):
+    from src import db
+
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "t.db"
+        monkeypatch.setattr("src.config.config.DB_PATH", str(path))
+        db.init_db()
+        conn = db.get_connection()
+        try:
+            now = datetime.now(UTC)
+            rid = _seed_active_row(
+                conn, start_offset_seconds=3600, params={"tank_power": True, "tank_temp": 45},
+            )
+        finally:
+            conn.close()
+        # Mark overridden 30 min ago.
+        ts = (now - timedelta(minutes=30)).isoformat()
+        db.mark_action_user_overridden(rid, overridden_at=ts)
+
+        result = db.find_recent_user_override(
+            "daikin", within_hours=4.0, now_utc=now,
+        )
+        assert result is not None
+        assert result["id"] == rid
+
+
+def test_find_recent_user_override_outside_window_returns_none(monkeypatch):
+    from src import db
+
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "t.db"
+        monkeypatch.setattr("src.config.config.DB_PATH", str(path))
+        db.init_db()
+        conn = db.get_connection()
+        try:
+            now = datetime.now(UTC)
+            rid = _seed_active_row(
+                conn, start_offset_seconds=3600 * 10, params={"tank_power": True},
+            )
+        finally:
+            conn.close()
+        # Override 8 hours ago — outside the 4h window.
+        ts = (now - timedelta(hours=8)).isoformat()
+        db.mark_action_user_overridden(rid, overridden_at=ts)
+
+        result = db.find_recent_user_override(
+            "daikin", within_hours=4.0, now_utc=now,
+        )
+        assert result is None
+
+
+def test_find_recent_user_override_filters_by_device(monkeypatch):
+    from src import db
+
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "t.db"
+        monkeypatch.setattr("src.config.config.DB_PATH", str(path))
+        db.init_db()
+        # Seed a Fox-side overridden row — must not match a daikin query.
+        now = datetime.now(UTC)
+        conn = db.get_connection()
+        try:
+            start = (now - timedelta(seconds=3600)).isoformat()
+            end = (now + timedelta(seconds=1800)).isoformat()
+            conn.execute(
+                """INSERT INTO action_schedule
+                   (date, start_time, end_time, device, action_type, params, status, created_at)
+                   VALUES (?, ?, ?, 'foxess', 'discharge', '{}', 'active', ?)""",
+                (now.date().isoformat(), start, end, now.isoformat()),
+            )
+            rid = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+            conn.commit()
+        finally:
+            conn.close()
+        db.mark_action_user_overridden(rid, overridden_at=(now - timedelta(minutes=10)).isoformat())
+
+        # Daikin query returns nothing.
+        result = db.find_recent_user_override(
+            "daikin", within_hours=4.0, now_utc=now,
+        )
+        assert result is None
+        # Foxess query returns the row.
+        result = db.find_recent_user_override(
+            "foxess", within_hours=4.0, now_utc=now,
+        )
+        assert result is not None
+        assert result["id"] == rid
+
+
+# ── Epic 14 (#386): user_gesture_still_in_effect ──────────────────────────────
+
+def test_user_gesture_still_in_effect_tank_power_diverged():
+    """User turned tank OFF; override row wanted ON → gesture active."""
+    from src.daikin_bulletproof import user_gesture_still_in_effect
+
+    dev = DaikinDevice(id="gw", name="x", tank_on=False)
+    assert user_gesture_still_in_effect(dev, {"tank_power": True}) is True
+
+
+def test_user_gesture_still_in_effect_user_reverted():
+    """User turned tank back ON → state matches override row's intent → gesture OVER."""
+    from src.daikin_bulletproof import user_gesture_still_in_effect
+
+    dev = DaikinDevice(id="gw", name="x", tank_on=True)
+    assert user_gesture_still_in_effect(dev, {"tank_power": True}) is False
+
+
+def test_user_gesture_still_in_effect_state_unknown_returns_false():
+    """Telemetry blip — no confirmable evidence of divergence → don't over-suppress."""
+    from src.daikin_bulletproof import user_gesture_still_in_effect
+
+    dev = DaikinDevice(id="gw", name="x", tank_on=None, tank_target=None)
+    assert user_gesture_still_in_effect(dev, {"tank_power": True, "tank_temp": 45}) is False
+
+
+# ── Epic 14 (#386): pre-fire override-inheritance integration ─────────────────
+
+def test_inherited_override_suppresses_new_row(monkeypatch):
+    """The headline bug C scenario:
+    Row A (tank_power=True) is user-overridden at t-30min.
+    Row B is a fresh replan row with the same params, pending at now.
+    On reconcile, row B should be marked user_overridden and skip the API call.
+    """
+    import src.state_machine as sm
+    from src import db
+
+    monkeypatch.setattr("src.config.config.PREFIRE_STATE_MATCH_ENABLED", True)
+    monkeypatch.setattr("src.config.config.USER_OVERRIDE_RESPECT_HOURS", 4.0)
+    sm._FIRST_APPLIED_SESSION.clear()
+    sm._USER_OVERRIDE_INHERITED_NOTIFIED.clear()
+
+    notifications: list[str] = []
+    monkeypatch.setattr(
+        "src.state_machine.notify_user_override",
+        lambda msg: notifications.append(msg),
+    )
+
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "t.db"
+        monkeypatch.setattr("src.config.config.DB_PATH", str(path))
+        db.init_db()
+        now_utc = datetime.now(UTC)
+        conn = db.get_connection()
+        try:
+            # Row A — historical overridden row (past end_time).
+            start_a = (now_utc - timedelta(minutes=90)).isoformat()
+            end_a = (now_utc - timedelta(minutes=10)).isoformat()
+            conn.execute(
+                """INSERT INTO action_schedule
+                   (date, start_time, end_time, device, action_type, params, status, created_at)
+                   VALUES (?, ?, ?, 'daikin', 'tank_idle_overnight', ?, 'completed', ?)""",
+                (
+                    now_utc.date().isoformat(), start_a, end_a,
+                    json.dumps({"tank_power": True, "tank_temp": 37}),
+                    now_utc.isoformat(),
+                ),
+            )
+            row_a_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+            # Row B — fresh pending row with same params.
+            row_b_id = _seed_active_row(
+                conn, start_offset_seconds=60,
+                params={"tank_power": True, "tank_temp": 37},
+            )
+        finally:
+            conn.close()
+
+        # Mark Row A user-overridden 30 min ago.
+        db.mark_action_user_overridden(
+            row_a_id, overridden_at=(now_utc - timedelta(minutes=30)).isoformat(),
+        )
+
+        # User has turned tank OFF; live state contradicts Row A's intent.
+        dev = DaikinDevice(id="gw", name="x", tank_on=False, tank_target=37.0)
+        client = MagicMock()
+
+        rows = db.get_actions_for_plan_date(now_utc.date().isoformat(), device="daikin")
+        sm._reconcile_daikin_actions(rows, client, dev, now_utc, trigger="test")
+
+        row_b = db.get_action_by_id(row_b_id)
+        assert row_b is not None
+        assert row_b.get("overridden_by_user_at") is not None, (
+            "Row B must inherit the override from Row A"
+        )
+        assert client.set_tank_power.call_count == 0
+        assert client.set_tank_temperature.call_count == 0
+        assert len(notifications) == 1
+        assert f"row {row_a_id}" in notifications[0]
+
+
+def test_inherited_override_releases_when_user_reverts(monkeypatch):
+    """If the user turns the tank back ON between gesture and the next replan,
+    user_gesture_still_in_effect returns False → suppression skipped → row fires."""
+    import src.state_machine as sm
+    from src import db
+
+    monkeypatch.setattr("src.config.config.PREFIRE_STATE_MATCH_ENABLED", True)
+    monkeypatch.setattr("src.config.config.USER_OVERRIDE_RESPECT_HOURS", 4.0)
+    monkeypatch.setattr("src.daikin_bulletproof.config.OPENCLAW_READ_ONLY", False)
+    sm._FIRST_APPLIED_SESSION.clear()
+    sm._USER_OVERRIDE_INHERITED_NOTIFIED.clear()
+
+    monkeypatch.setattr("src.state_machine.notify_user_override", lambda msg: None)
+
+    # daikin_bulletproof.apply_scheduled_daikin_params calls into the client.
+    # Mock the whole function call to avoid touching real Daikin code paths.
+    apply_calls: list[dict] = []
+    monkeypatch.setattr(
+        "src.state_machine.apply_scheduled_daikin_params",
+        lambda dev, client, params, trigger: apply_calls.append(params),
+    )
+
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "t.db"
+        monkeypatch.setattr("src.config.config.DB_PATH", str(path))
+        db.init_db()
+        now_utc = datetime.now(UTC)
+        conn = db.get_connection()
+        try:
+            start_a = (now_utc - timedelta(minutes=90)).isoformat()
+            end_a = (now_utc - timedelta(minutes=10)).isoformat()
+            conn.execute(
+                """INSERT INTO action_schedule
+                   (date, start_time, end_time, device, action_type, params, status, created_at)
+                   VALUES (?, ?, ?, 'daikin', 'tank_idle_overnight', ?, 'completed', ?)""",
+                (
+                    now_utc.date().isoformat(), start_a, end_a,
+                    json.dumps({"tank_power": True, "tank_temp": 37}),
+                    now_utc.isoformat(),
+                ),
+            )
+            row_a_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+            row_b_id = _seed_active_row(
+                conn, start_offset_seconds=60,
+                params={"tank_power": True, "tank_temp": 50},  # diverges from current
+            )
+        finally:
+            conn.close()
+
+        db.mark_action_user_overridden(
+            row_a_id, overridden_at=(now_utc - timedelta(minutes=30)).isoformat(),
+        )
+
+        # User turned tank back ON — gesture reverted. Tank temp differs from
+        # row B's target so apply must run.
+        dev = DaikinDevice(id="gw", name="x", tank_on=True, tank_target=37.0)
+        client = MagicMock()
+
+        rows = db.get_actions_for_plan_date(now_utc.date().isoformat(), device="daikin")
+        sm._reconcile_daikin_actions(rows, client, dev, now_utc, trigger="test")
+
+        row_b = db.get_action_by_id(row_b_id)
+        assert row_b is not None
+        assert row_b.get("overridden_by_user_at") is None
+        # Apply must have been called normally
+        assert len(apply_calls) == 1
+
+
+def test_inherited_override_does_not_suppress_restore(monkeypatch):
+    """Restore rows are exempted so the system can return to baseline."""
+    import src.state_machine as sm
+    from src import db
+
+    monkeypatch.setattr("src.config.config.PREFIRE_STATE_MATCH_ENABLED", True)
+    monkeypatch.setattr("src.config.config.USER_OVERRIDE_RESPECT_HOURS", 4.0)
+    monkeypatch.setattr("src.daikin_bulletproof.config.OPENCLAW_READ_ONLY", False)
+    sm._FIRST_APPLIED_SESSION.clear()
+    sm._USER_OVERRIDE_INHERITED_NOTIFIED.clear()
+    monkeypatch.setattr("src.state_machine.notify_user_override", lambda msg: None)
+
+    apply_calls: list[dict] = []
+    monkeypatch.setattr(
+        "src.state_machine.apply_scheduled_daikin_params",
+        lambda dev, client, params, trigger: apply_calls.append(params),
+    )
+
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "t.db"
+        monkeypatch.setattr("src.config.config.DB_PATH", str(path))
+        db.init_db()
+        now_utc = datetime.now(UTC)
+        conn = db.get_connection()
+        try:
+            start_a = (now_utc - timedelta(minutes=90)).isoformat()
+            end_a = (now_utc - timedelta(minutes=10)).isoformat()
+            conn.execute(
+                """INSERT INTO action_schedule
+                   (date, start_time, end_time, device, action_type, params, status, created_at)
+                   VALUES (?, ?, ?, 'daikin', 'shutdown', ?, 'completed', ?)""",
+                (
+                    now_utc.date().isoformat(), start_a, end_a,
+                    json.dumps({"tank_power": True}),
+                    now_utc.isoformat(),
+                ),
+            )
+            row_a_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+            # Restore row that must fire even with active gesture.
+            start_b = (now_utc - timedelta(seconds=60)).isoformat()
+            end_b = (now_utc + timedelta(minutes=5)).isoformat()
+            conn.execute(
+                """INSERT INTO action_schedule
+                   (date, start_time, end_time, device, action_type, params, status, created_at)
+                   VALUES (?, ?, ?, 'daikin', 'restore', ?, 'active', ?)""",
+                (
+                    now_utc.date().isoformat(), start_b, end_b,
+                    json.dumps({"tank_power": True, "tank_temp": 45}),
+                    now_utc.isoformat(),
+                ),
+            )
+            row_b_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+            conn.commit()
+        finally:
+            conn.close()
+
+        db.mark_action_user_overridden(
+            row_a_id, overridden_at=(now_utc - timedelta(minutes=30)).isoformat(),
+        )
+
+        dev = DaikinDevice(id="gw", name="x", tank_on=False, tank_target=37.0)
+        client = MagicMock()
+
+        rows = db.get_actions_for_plan_date(now_utc.date().isoformat(), device="daikin")
+        sm._reconcile_daikin_actions(rows, client, dev, now_utc, trigger="test")
+
+        row_b = db.get_action_by_id(row_b_id)
+        assert row_b is not None
+        # Restore must NOT be marked inherited-override.
+        assert row_b.get("overridden_by_user_at") is None
+        # Restore params must have been applied.
+        assert len(apply_calls) == 1
+        assert apply_calls[0].get("tank_power") is True

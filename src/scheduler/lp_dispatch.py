@@ -457,23 +457,25 @@ def daikin_dispatch_preview(
             # runtime override (e.g. 37.5) doesn't become a 400 from the cloud.
             params["tank_temp"] = int(round(_overnight_target))
         elif is_shutdown:
-            peak_strategy = (getattr(config, "DHW_PEAK_TANK_STRATEGY", "idle") or "idle").strip().lower()
-            if peak_strategy == "shutdown":
-                params["tank_power"] = False
-                # No tank_temp — tank off, target is meaningless.
-            else:
-                # IDLE strategy: keep tank on at the NORMAL target. If tank
-                # was inherited above target (e.g. from prior solar_preheat),
-                # firmware just stops reheating — no grid draw, tank cools
-                # naturally. If tank is at-or-below target, firmware maintains
-                # at the setpoint (small reheats only when needed). User's
-                # validated approach for well-insulated tanks: don't shut off,
-                # just lower the target back to "normal" and let physics work.
-                params["tank_power"] = True
-                # Onecta stepValue=1 (see overnight comment above).
-                params["tank_temp"] = int(round(
-                    float(getattr(config, "DHW_TEMP_NORMAL_C", 45.0))
-                ))
+            # Epic 14 (#386) — single behaviour for peak / peak_export.
+            # The former ``DHW_PEAK_TANK_STRATEGY="shutdown"`` branch was
+            # removed because (a) prod telemetry across 8 May peak windows
+            # showed median tank decay of 0.00 °C/h — the tank coasts
+            # essentially perfectly even when held at 45 °C — and (b) the
+            # tank_power=False path failed 27% of the time on the Onecta
+            # cloud with READ_ONLY_CHARACTERISTIC errors when device state
+            # already matched (e.g. after a user override or a previous
+            # successful write).
+            #
+            # Keep tank ON at NORMAL target. If tank is above target from
+            # prior solar / cheap charging, firmware doesn't reheat (no grid
+            # draw). If at-or-below, firmware maintains at the setpoint.
+            # No power cycling, no Onecta state-mismatch failures.
+            params["tank_power"] = True
+            # Onecta stepValue=1 (see overnight comment above).
+            params["tank_temp"] = int(round(
+                float(getattr(config, "DHW_TEMP_NORMAL_C", 45.0))
+            ))
         elif tank_pow:
             params["tank_power"] = True
             # Floor at DHW_TEMP_COMFORT_C (48 °C). Ceiling depends on slot kind:

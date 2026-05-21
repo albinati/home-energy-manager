@@ -94,6 +94,50 @@ def detect_user_override(
     return False, None
 
 
+def user_gesture_still_in_effect(
+    dev: DaikinDevice,
+    override_row_params: dict[str, Any],
+) -> bool:
+    """Epic 14 (#386): True iff the live device state still contradicts the
+    overridden row's scheduled params on at least one known field.
+
+    The reconciler uses this to decide whether a user's earlier manual
+    gesture (e.g. tank power-off via Onecta) is still active when a fresh
+    LP-planned row arrives. Examples:
+
+    - Override row wanted ``tank_power=True``; live ``dev.tank_on`` is
+      ``False`` → user is still holding the tank off → gesture in effect.
+    - Override row wanted ``tank_power=True``; live ``dev.tank_on`` is
+      ``True`` → user has reverted (turned tank back on) → gesture over,
+      normal scheduling resumes.
+    - Live state is unknown (``None``) on every overridable field → we
+      cannot confirm divergence → return ``False`` (don't over-suppress
+      on a transient telemetry blip).
+
+    Distinct from ``daikin_device_matches_params`` which returns False on
+    unknown fields; here unknown fields are treated as non-evidence.
+    """
+    tank_tol = float(config.DAIKIN_OVERRIDE_TOLERANCE_TANK_C)
+    lwt_tol = float(config.DAIKIN_OVERRIDE_TOLERANCE_LWT_C)
+
+    if "tank_power" in override_row_params and dev.tank_on is not None:
+        if dev.tank_on != bool(override_row_params["tank_power"]):
+            return True
+    if "tank_temp" in override_row_params and dev.tank_target is not None:
+        if abs(float(dev.tank_target) - float(override_row_params["tank_temp"])) > tank_tol:
+            return True
+    if "climate_on" in override_row_params and dev.is_on is not None:
+        if dev.is_on != bool(override_row_params["climate_on"]):
+            return True
+    if "lwt_offset" in override_row_params and dev.lwt_offset is not None:
+        if abs(float(dev.lwt_offset) - float(override_row_params["lwt_offset"])) > lwt_tol:
+            return True
+    if "tank_powerful" in override_row_params and dev.tank_powerful is not None:
+        if dev.tank_powerful != bool(override_row_params["tank_powerful"]):
+            return True
+    return False
+
+
 def apply_scheduled_daikin_params(
     dev: DaikinDevice,
     client: DaikinClient,
