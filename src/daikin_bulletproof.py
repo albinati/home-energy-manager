@@ -188,8 +188,17 @@ def apply_scheduled_daikin_params(
         # If turning ON: send power first so lwt_offset is writable on the next call.
         # The 3-way valve needs time to settle; sleep before DHW commands to prevent
         # silent command drops from the Daikin mainboard.
+        # Epic 14 follow-up (#388): after each successful client.set_*, mutate
+        # the local ``dev`` snapshot so subsequent reads in this process see
+        # the predicted state. Without this, the Onecta cache only refreshes
+        # via the 30-min DAIKIN_DEVICES_CACHE_TTL_SECONDS cycle, and the
+        # state_machine pre-fire idempotency check (and the skip_if_matches
+        # branch above) keep falling through on rows fired in subsequent
+        # heartbeat ticks within the same window — the prod bug D pattern.
+
         if climate_going_on:
             client.set_power(dev, True)
+            dev.is_on = True
             if has_dhw_cmds and settle:
                 time.sleep(settle)
 
@@ -207,7 +216,9 @@ def apply_scheduled_daikin_params(
                 try:
                     # Onecta leavingWaterOffset.stepValue == 1 → quantise to
                     # int at the boundary (same reason as tank_temp above).
-                    client.set_lwt_offset(dev, int(round(float(p["lwt_offset"]))))
+                    _lwt = int(round(float(p["lwt_offset"])))
+                    client.set_lwt_offset(dev, _lwt)
+                    dev.lwt_offset = float(_lwt)
                 except DaikinError as exc:
                     if "[read_only]" in str(exc):
                         # Non-fatal: caught only when our pre-check above
@@ -222,6 +233,7 @@ def apply_scheduled_daikin_params(
 
         if climate_going_off:
             client.set_power(dev, False)
+            dev.is_on = False
             if has_dhw_cmds and settle:
                 time.sleep(settle)
 
@@ -230,6 +242,7 @@ def apply_scheduled_daikin_params(
         tank_turning_on = "tank_power" in p and bool(p["tank_power"])
         if tank_turning_on:
             client.set_tank_power(dev, True)
+            dev.tank_on = True
             if "tank_temp" in p and settle:
                 time.sleep(settle)  # onOffMode must settle before temperatureControl is writable
 
@@ -240,7 +253,9 @@ def apply_scheduled_daikin_params(
                 # API. Quantise defensively at the boundary so legacy callers
                 # or stale action_schedule rows that stored a float (e.g. 38.0)
                 # still go through cleanly.
-                client.set_tank_temperature(dev, int(round(float(p["tank_temp"]))))
+                _tt = int(round(float(p["tank_temp"])))
+                client.set_tank_temperature(dev, _tt)
+                dev.tank_target = float(_tt)
             except DaikinError as exc:
                 if "[read_only]" in str(exc) and tank_turning_on:
                     # Cloud hasn't propagated tank-on yet; heartbeat will retry next tick
@@ -249,8 +264,10 @@ def apply_scheduled_daikin_params(
                     raise
         if not tank_turning_on and "tank_power" in p:
             client.set_tank_power(dev, bool(p["tank_power"]))
+            dev.tank_on = bool(p["tank_power"])
         if "tank_powerful" in p:
             client.set_tank_powerful(dev, bool(p["tank_powerful"]))
+            dev.tank_powerful = bool(p["tank_powerful"])
     except (DaikinError, ValueError) as e:
         db.log_action(
             device="daikin",
