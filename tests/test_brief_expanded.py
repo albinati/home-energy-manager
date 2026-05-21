@@ -136,115 +136,30 @@ def _seed_typical_yesterday() -> date:
     return yesterday
 
 
-def test_morning_brief_breaks_out_net_cost_components(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _seed_typical_yesterday()
-    # Pin "today" so the morning brief looks back at 2026-05-01.
-    monkeypatch.setattr(
-        daily_brief, "datetime_now_local_date", lambda tz: date(2026, 5, 2)
-    )
-
-    md = daily_brief.build_morning_payload()
-
-    assert "Net cost:" in md, f"missing structured Net cost line:\n{md}"
-    assert "import £" in md, f"missing import breakdown:\n{md}"
-    assert "standing £" in md, f"missing standing breakdown:\n{md}"
-    assert "− export £" in md, f"missing export deduction:\n{md}"
-    assert "Energy used:" in md and "exported:" in md, (
-        f"missing kWh breakdown line:\n{md}"
-    )
-
-
-def test_morning_brief_includes_mode_status_line(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Mode line tells OpenClaw not to invent Daikin advice."""
-    _seed_typical_yesterday()
-    monkeypatch.setattr(app_config, "DAIKIN_CONTROL_MODE", "passive")
-    monkeypatch.setattr(app_config, "OPENCLAW_READ_ONLY", False)
-    monkeypatch.setattr(
-        daily_brief, "datetime_now_local_date", lambda tz: date(2026, 5, 2)
-    )
-
-    md = daily_brief.build_morning_payload()
-
-    assert "**Mode:**" in md
-    assert "Daikin=passive" in md
-    assert "HEM does NOT alter setpoints" in md
-    assert "Fox=LP-dispatched" in md
-
-
-def test_morning_brief_renders_british_gas_comparison_when_configured(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(app_config, "FIXED_TARIFF_LABEL", "British Gas Fixed v58")
-    monkeypatch.setattr(app_config, "FIXED_TARIFF_RATE_PENCE", 23.054)
-    monkeypatch.setattr(app_config, "FIXED_TARIFF_STANDING_PENCE_PER_DAY", 39.181)
-    _seed_typical_yesterday()
-    monkeypatch.setattr(
-        daily_brief, "datetime_now_local_date", lambda tz: date(2026, 5, 2)
-    )
-
-    md = daily_brief.build_morning_payload()
-
-    assert "British Gas Fixed v58" in md
-    # The shadow figure must appear with a £-amount
-    assert "would have cost £" in md
-
-
-def test_morning_brief_omits_british_gas_line_when_not_configured(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _seed_typical_yesterday()
-    monkeypatch.setattr(
-        daily_brief, "datetime_now_local_date", lambda tz: date(2026, 5, 2)
-    )
-
-    md = daily_brief.build_morning_payload()
-
-    assert "British Gas" not in md
-    assert "Fixed v58" not in md
+# Six morning-brief content tests deleted by the 2026-05-21 redesign (PR #381):
+#   - test_morning_brief_breaks_out_net_cost_components
+#   - test_morning_brief_includes_mode_status_line  (replaced by _preset_line tests)
+#   - test_morning_brief_renders_british_gas_comparison_when_configured
+#   - test_morning_brief_omits_british_gas_line_when_not_configured
+#
+# The morning brief is now forward-looking only: PV forecast, temp range,
+# charging plan, day cost forecast, SoC + tank, mode chip. Yesterday's PnL
+# breakdown, BG fixed-tariff shadow, and the per-component net cost lines
+# moved to the audit MCP tools (`get_audit_report`, `get_tariff_comparison`,
+# `get_brief_kpis`). The night brief carries a one-line PnL summary.
+#
+# The underlying _format_pnl_block helper still exists for callers that want
+# the full block (`compute_daily_pnl` + helpers).
 
 
 # ---------------------------------------------------------------------------
 # Forecasted-export fallback
 # ---------------------------------------------------------------------------
 
-def test_forecasted_export_line_appears_when_telemetry_export_is_zero(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When grid_export_kw telemetry is missing for a day, the brief must
-    fall back to LP-committed peak_export estimates and flag with 🔮."""
-    yesterday = date(2026, 5, 1)
-    slot = datetime(2026, 5, 1, 17, 0, tzinfo=UTC)  # peak window
-    _seed_execution(slot, kwh=2.0, p=35.0)
-    # NO pv_realtime_history samples → telemetry export = 0
-    # Seed a committed peak_export decision for that slot
-    db.upsert_dispatch_decision(
-        run_id=999,
-        slot_time_utc=slot.isoformat().replace("+00:00", "Z"),
-        lp_kind="peak_export",
-        dispatched_kind="peak_export",
-        committed=1,
-        reason="robust",
-        scen_optimistic_exp_kwh=2.0,
-        scen_nominal_exp_kwh=1.84,
-        scen_pessimistic_exp_kwh=1.60,
-    )
-    _seed_export_rate(slot, 30.0)
-    monkeypatch.setattr(
-        daily_brief, "datetime_now_local_date", lambda tz: date(2026, 5, 2)
-    )
-
-    md = daily_brief.build_morning_payload()
-
-    assert "🔮 Forecasted export (telemetry missing)" in md, (
-        f"forecasted line missing:\n{md}"
-    )
-    # Pessimistic 1.60 kWh × 30p = 48p ≈ £0.48
-    assert "1.60 kWh" in md
-    assert "1 committed peak_export slot" in md
+# test_forecasted_export_line_appears_when_telemetry_export_is_zero — deleted by PR #381.
+# The 🔮 forecasted-export fallback markup lived in the old morning brief's
+# yesterday-PnL block, which moved entirely to the audit MCP tools. The
+# helper _forecasted_export_for_day still exists for callers that need it.
 
 
 def test_forecasted_export_line_suppressed_when_telemetry_present(
@@ -373,63 +288,10 @@ def _seed_overnight_pv_realtime(yesterday: date, today: date) -> None:
     )
 
 
-def test_morning_brief_includes_overnight_plan_vs_actual_when_data_present(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """All four bullets render when meteo + heating + SoC + calibration are present."""
-    yesterday = date(2026, 5, 1)
-    today = date(2026, 5, 2)
-    _seed_typical_yesterday()  # sets yesterday=2026-05-01 in PnL
-    _seed_overnight_meteo(yesterday, today)
-    _seed_overnight_realised_heating(yesterday, today)
-    _seed_overnight_pv_realtime(yesterday, today)
-    db.upsert_daikin_lwt_kw_calibration(
-        k_per_degc=0.0325, samples=14, window_days=30, rmse_kwh=2.3, bias_kwh=0.0,
-    )
-    monkeypatch.setattr(daily_brief, "datetime_now_local_date", lambda tz: today)
-
-    md = daily_brief.build_morning_payload()
-
-    assert "**Madrugada (plan vs actual):**" in md
-    assert "- Heating: predicted" in md and "kWh" in md
-    assert "- Battery SoC:" in md and "pp overnight" in md
-    # Arrow direction depends on data (↑ / ↓ / →); just ensure one is present.
-    assert any(arrow in md for arrow in ("↑", "↓", "→")), md
-    assert "- Calibration k:" in md
-    # Outdoor sensor data not seeded → only forecast min should appear
-    assert "Outdoor min (forecast only)" in md or "Outdoor min: forecast" in md
-
-
-def test_morning_brief_omits_overnight_section_when_no_data(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When NO source has data, the section header itself is suppressed
-    (no empty 'Madrugada' heading polluting the brief)."""
-    _seed_typical_yesterday()
-    monkeypatch.setattr(
-        daily_brief, "datetime_now_local_date", lambda tz: date(2026, 5, 2)
-    )
-
-    md = daily_brief.build_morning_payload()
-
-    assert "Madrugada" not in md, f"expected no overnight section; got:\n{md}"
-
-
-def test_morning_brief_overnight_renders_each_bullet_independently(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Only the calibration bullet survives when other sources are missing."""
-    _seed_typical_yesterday()
-    db.upsert_daikin_lwt_kw_calibration(
-        k_per_degc=0.0335, samples=10, window_days=30,
-    )
-    monkeypatch.setattr(
-        daily_brief, "datetime_now_local_date", lambda tz: date(2026, 5, 2)
-    )
-
-    md = daily_brief.build_morning_payload()
-
-    assert "**Madrugada (plan vs actual):**" in md
-    assert "- Calibration k:" in md
-    assert "- Heating:" not in md
-    assert "- Battery SoC:" not in md
+# Three "Madrugada (overnight plan vs actual)" tests deleted by PR #381.
+# The morning brief is now forward-looking only; the overnight-plan-vs-actual
+# concept moved to the night brief's "today vs forecast" section (which uses
+# forecast_skill_log per-hour data instead of the bespoke Madrugada helpers).
+# The underlying helpers (_overnight_plan_vs_actual_lines, _heating_plan_vs_actual,
+# _battery_overnight_drift, _calibration_k_status_line) still exist if a future
+# composer wants to surface them.

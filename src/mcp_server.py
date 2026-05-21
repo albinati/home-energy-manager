@@ -2029,6 +2029,37 @@ def build_mcp() -> FastMCP:
         return {"ok": True, "scorecard": scorecard}
 
     @mcp.tool(
+        name="get_recent_lp_failures",
+        description=(
+            "List the N most recent LP solver failures from ``lp_failure_log`` "
+            "(Infeasible status, CBC crash, exception). Use when the user asks "
+            "'any LP problems lately?' or to investigate a notification. Each "
+            "row carries:\n"
+            "  * run_at_utc — when the LP solver ran\n"
+            "  * plan_date  — which day the LP was planning for\n"
+            "  * error_class — short category (e.g. ``LP_Infeasible``)\n"
+            "  * error_msg + stacktrace — full context\n"
+            "  * lp_inputs_run_id — pair with ``get_lp_solution()`` for replay\n"
+            "  * resolved_at_utc — null until you mark it investigated\n"
+            "Pure read; no Daikin API. Default limit 10, max 100."
+        ),
+    )
+    def get_recent_lp_failures(limit: int = 10) -> dict[str, Any]:
+        from . import db as _db
+
+        try:
+            n = int(limit)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": f"invalid limit {limit!r}"}
+        n = max(1, min(100, n))
+        try:
+            rows = _db.list_recent_lp_failures(limit=n)
+        except Exception as e:
+            logger.exception("get_recent_lp_failures failed")
+            return {"ok": False, "error": str(e)}
+        return {"ok": True, "limit": n, "count": len(rows), "failures": rows}
+
+    @mcp.tool(
         name="get_audit_report",
         description=(
             "Daily audit — held-schedule events + plan-vs-execution + "

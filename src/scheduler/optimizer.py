@@ -1740,6 +1740,38 @@ def _run_optimizer_lp(
                 logger.warning(
                     "LP infeasible-snapshot persistence failed (non-fatal): %s", e,
                 )
+        # 2026-05-21: write to lp_failure_log + emit LP_FAILURE alert so the
+        # operator hears about it instead of finding out via the next brief.
+        # Both calls are best-effort — the defensive fallback path must never
+        # be aborted by its own audit log or notifier delivery.
+        try:
+            db.insert_lp_failure(
+                run_at_utc=run_at_iso,
+                plan_date=plan_date,
+                error_class=f"LP_{plan.status}",
+                error_msg=(
+                    f"LP returned {plan.status}; defensive fallback held previous schedule"
+                    + (
+                        f"; appliance-drop retry also infeasible "
+                        f"({appliance_kwh_total:.2f} kWh)"
+                        if appliance_kwh_total > 1e-6 else ""
+                    )
+                ),
+                lp_inputs_run_id=run_id,
+            )
+        except Exception:
+            logger.exception("lp_failure_log insert failed (non-fatal)")
+        try:
+            from ..notifier import notify_lp_failure
+            notify_lp_failure(
+                run_at_utc=run_at_iso,
+                plan_date=plan_date,
+                error_class=f"LP_{plan.status}",
+                error_msg=f"LP solver returned {plan.status}; held previous schedule",
+                lp_inputs_run_id=run_id,
+            )
+        except Exception:
+            logger.exception("LP_FAILURE notification dispatch failed (non-fatal)")
         return {
             "ok": False,
             "error": f"LP {plan.status}",
