@@ -55,6 +55,10 @@ class AlertType(str, Enum):
     APPLIANCE_FINISHED = "appliance_finished"
     APPLIANCE_ARMED = "appliance_armed"
     APPLIANCE_CANCELLED = "appliance_cancelled"
+    # 2026-05-21 — LP solver failure (Infeasible / CBC crash). Default route:
+    # ``severity=critical`` so it bypasses the morning-brief mute; rate-limited
+    # by hash so a recurring failure across MPC re-solves only pages once.
+    LP_FAILURE = "lp_failure"
 
 
 # OpenClaw hook payload ``name`` field (one stable label per alert key)
@@ -72,6 +76,7 @@ _HOOK_PAYLOAD_NAMES: dict[str, str] = {
     "appliance_finished": "EnergyApplianceFinish",
     "appliance_armed": "EnergyApplianceArmed",
     "appliance_cancelled": "EnergyApplianceCancelled",
+    "lp_failure": "EnergyLPFailure",
 }
 
 
@@ -95,6 +100,7 @@ _TELEGRAM_HEADERS: dict[str, str] = {
     "appliance_finished": "✅ Appliance finished",
     "appliance_armed": "🧺 Appliance armed",
     "appliance_cancelled": "🚫 Appliance cancelled",
+    "lp_failure": "🚨 LP solver failure",
 }
 
 
@@ -789,6 +795,49 @@ def notify_action_confirmation(message: str) -> None:
 
 def notify_critical(message: str) -> None:
     _dispatch(AlertType.CRITICAL_ERROR, message, urgent=True)
+
+
+def notify_lp_failure(
+    *,
+    run_at_utc: str,
+    plan_date: str,
+    error_class: str,
+    error_msg: str,
+    lp_inputs_run_id: int | None = None,
+) -> None:
+    """🚨 Fired when the LP solver returns Infeasible, hits CBC timeout, or
+    raises. The defensive "hold previous schedule" path keeps hardware safe,
+    but the user should still know about the failure so it can be investigated.
+
+    Rate-limited by message hash via the existing per-AlertType notification
+    debounce — a recurring infeasible across many MPC re-solves only pages
+    once per debounce window. Investigation surface is the new MCP tool
+    :func:`get_recent_lp_failures` and the ``lp_failure_log`` DB table.
+    """
+    body_lines = [
+        f"At: {run_at_utc}",
+        f"Plan date: {plan_date}",
+        f"Reason: `{error_class}`",
+    ]
+    if error_msg:
+        # Keep one line — full stacktrace lives in lp_failure_log.
+        snippet = error_msg.split("\n", 1)[0][:200]
+        body_lines.append(f"Detail: {snippet}")
+    if lp_inputs_run_id is not None:
+        body_lines.append(
+            f"Replay: `get_lp_solution(run_id={lp_inputs_run_id})` + "
+            f"`get_recent_lp_failures()` for full context."
+        )
+    else:
+        body_lines.append("Investigate: `get_recent_lp_failures()`.")
+    body = "\n".join(body_lines)
+    extra = {
+        "run_at_utc": run_at_utc,
+        "plan_date": plan_date,
+        "error_class": error_class,
+        "lp_inputs_run_id": lp_inputs_run_id,
+    }
+    _dispatch(AlertType.LP_FAILURE, body, urgent=True, extra=extra)
 
 
 # ---------------------------------------------------------------------------

@@ -43,56 +43,50 @@ def datetime_now_local_date(tz: ZoneInfo) -> date:
 def build_morning_payload() -> str:
     """Return the morning-brief markdown body.
 
-    Anchored on **today** (local). Yesterday's PnL one-liner is included as a
-    reminder of how we did, but the meat is forward-looking.
+    2026-05-21 redesign: forward-looking only. Yesterday's PnL moved to the
+    night brief. The morning brief answers six questions in order:
+
+      1. What mode are we in? (guest / normal / away)
+      2. How good is today's PV forecast? (kWh + confidence chip)
+      3. What's the temperature range today?
+      4. What's the day cost forecast?
+      5. What's the household state right now? (SoC + tank)
+      6. What's the LP's charging plan today?
+
+    Each section is wrapped in :func:`_safe_call` so any one failure
+    surfaces as ``_(label unavailable)_`` rather than dropping the brief.
     """
     tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
     today = datetime_now_local_date(tz)
-    yesterday = today - timedelta(days=1)
 
-    pnl = compute_daily_pnl(yesterday)
-    tgt = db.get_daily_target(today)
-    strategy = (tgt or {}).get("strategy_summary") or "No strategy row for today yet."
+    lines: list[str] = [f"**Today ({today})**", ""]
 
-    # Tier-window summary for today (reuse the same classification the family
-    # calendar uses, so the morning brief and the calendar agree word-for-word).
-    tier_summary = _today_tier_window_summary(today, tz)
+    for label, fn, args in (
+        ("mode", _preset_line, ()),
+        ("pv_forecast", _pv_forecast_today_line, (today, tz)),
+        ("temperature", _temperature_range_today_line, (today, tz)),
+        ("day_cost_forecast", _day_cost_forecast_line, (today, tz)),
+        ("now_state", _now_state_line, ()),
+    ):
+        result = _safe_call(label, fn, *args)
+        if result:
+            lines.append(result)
 
-    # Peak-export commitments from the latest LP run with peak_export slots.
-    pe_summary = _peak_export_commitments_for_today(today, tz)
+    # Charging plan can return [] (no scheduled charges = solar day).
+    charges = _safe_call("charging_plan", _charging_plan_today_lines, today, tz)
+    if isinstance(charges, list) and charges:
+        lines.extend(["", "**Charging plan today:**", *charges])
+    elif isinstance(charges, str):
+        # Failure placeholder
+        lines.append(charges)
 
-    # No "## Morning brief" headline here — the notifier prepends "🌅 Morning
-    # brief" (Telegram) and the action_log/journalctl entries already carry the
-    # ``[morning_report]`` alert-type tag. Duplicating the title produced a
-    # stacked header on Telegram (#330).
-    lines: list[str] = [
-        f"**Today ({today})**",
-        strategy,
-        "",
-        _mode_status_line(),
-        "",
-    ]
-    if tier_summary:
-        lines.extend(["**Tariff windows today:**", tier_summary, ""])
-    # Tomorrow's peak windows surfaced separately so a low-action day
-    # (no LP `peak` slots) doesn't read as "no peaks tomorrow" when
-    # Octopus actually has an expensive evening.
-    tomorrow_peaks = _tariff_peak_windows_summary(today + timedelta(days=1), tz)
+    # Always-include: peaks for tomorrow (one of the few looking-ahead facts).
+    tomorrow_peaks = _safe_call(
+        "tomorrow_peaks",
+        _tariff_peak_windows_summary, today + timedelta(days=1), tz,
+    )
     if tomorrow_peaks:
-        lines.extend([f"**Tomorrow ({today + timedelta(days=1)}):**", tomorrow_peaks, ""])
-    if pe_summary:
-        lines.extend(["**Peak-export plan:**", pe_summary, ""])
-
-    lines.append(f"**Yesterday ({yesterday}) — financial summary**")
-    lines.extend(_format_pnl_block(pnl, day=yesterday, tz=tz))
-
-    overnight_lines = _overnight_plan_vs_actual_lines(today, tz)
-    if overnight_lines:
-        lines.extend(["", "**Madrugada (plan vs actual):**", *overnight_lines])
-
-    bias_line = _pv_bias_line()
-    if bias_line:
-        lines.extend(["", bias_line])
+        lines.extend(["", f"**Tomorrow ({today + timedelta(days=1)}):** {tomorrow_peaks}"])
 
     return "\n".join(lines)
 
@@ -361,39 +355,65 @@ def build_night_payload() -> str:
     """
     tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
     today = datetime_now_local_date(tz)
+    now_utc = datetime.now(UTC)
 
-    pnl = compute_daily_pnl(today)
-    vwap = compute_vwap(today)
-    slip = compute_slippage(today)
-    arb = compute_arbitrage_efficiency(today)
-    sla = compute_sla_metrics(limit=200)
-
-    pe_today = _peak_export_outcomes_for_today(today, tz)
-
-    # No "## Night brief" headline — same reason as the morning brief above
-    # (#330): the notifier prepends "🌙 Night brief" on the Telegram path and
-    # the alert-type tag is on the action_log entry already.
     lines: list[str] = [
-        f"**Today ({today})** — actuals",
-        "",
-        _mode_status_line(),
+        f"**Today ({today})** — actuals & tonight",
         "",
     ]
-    lines.extend(_format_pnl_block(pnl, day=today, tz=tz))
-    lines.append(f"- VWAP: {vwap}p/kWh" if vwap else "- VWAP: n/a")
-    if slip is not None:
-        lines.append(f"- Slippage vs target: {slip}p")
-    if arb is not None:
-        lines.append(f"- Arbitrage efficiency (cheap quartile): {arb}%")
-    lines.append(f"- SLA sample: {sla.get('sample_size', 0)} actions")
-    if pe_today:
-        lines.extend(["", "**Peak-export verdicts today:**", pe_today])
-    # Heads-up for tomorrow's expensive windows so the family knows when
-    # to expect the LP to draw the battery hardest. Independent of the
-    # LP `peak` classification (which counts shave actions, not raw price).
-    tomorrow_peaks = _tariff_peak_windows_summary(today + timedelta(days=1), tz)
-    if tomorrow_peaks:
-        lines.extend(["", f"**Heads-up for tomorrow:** {tomorrow_peaks}"])
+
+    # ── Mode + headline cost ────────────────────────────────────────────
+    mode = _safe_call("mode", _preset_line)
+    if mode:
+        lines.append(mode)
+
+    # ── Today vs forecast (the user's headline ask) ─────────────────────
+    vs_forecast = _safe_call("today_vs_forecast", _today_vs_forecast_block, today)
+    if isinstance(vs_forecast, list) and vs_forecast:
+        lines.extend(["", "**Today vs forecast:**", *vs_forecast])
+    elif isinstance(vs_forecast, str):  # failure placeholder
+        lines.append(vs_forecast)
+
+    # ── Tonight plan: battery sufficiency + cheap-slot charges ──────────
+    bat = _safe_call("battery_overnight", _tonight_battery_sufficiency_line, now_utc, tz)
+    if bat:
+        lines.extend(["", bat])
+
+    # Tonight's planned ForceCharge / SolarCharge windows from action_schedule
+    tonight_charges = _safe_call(
+        "tonight_charges", _charging_plan_today_lines, today, tz,
+    )
+    if isinstance(tonight_charges, list) and tonight_charges:
+        lines.extend(["**Planned charges:**", *tonight_charges])
+
+    # ── Daikin overnight (tank + LWT slots not yet executed) ────────────
+    daikin = _safe_call("daikin_tonight", _tonight_daikin_plan_lines, today, tz)
+    if isinstance(daikin, list) and daikin:
+        lines.extend(["", "**Daikin overnight:**", *daikin])
+
+    # ── Headline PnL (single line — full block lives in the audit) ──────
+    try:
+        pnl = compute_daily_pnl(today)
+        net = pnl.get("realised_net_cost_gbp")
+        imp = pnl.get("import_kwh")
+        exp = pnl.get("export_kwh")
+        if net is not None:
+            lines.extend([
+                "",
+                f"**PnL today:** £{float(net):+.2f} net "
+                f"({float(imp or 0):.1f} kWh import, {float(exp or 0):.1f} kWh export)",
+            ])
+    except Exception:
+        _section_logger.exception("night brief PnL line failed")
+
+    # ── Tomorrow heads-up: peaks ────────────────────────────────────────
+    peaks = _safe_call(
+        "tomorrow_peaks", _tariff_peak_windows_summary,
+        today + timedelta(days=1), tz,
+    )
+    if peaks:
+        lines.extend(["", f"**Heads-up for tomorrow:** {peaks}"])
+
     return "\n".join(lines)
 
 
@@ -561,25 +581,40 @@ def _fox_vs_meter_audit_line(day: date) -> str | None:
     Octopus smart-meter daily totals. Both sources should agree to ~5%; bigger
     gaps surface heartbeat-coverage or calibration issues early.
 
-    Returns ``None`` when either source is missing for ``day`` (e.g. no
-    Octopus daily cache yet, no Fox API rollup).
+    Returns ``None`` when either source is missing for ``day`` (e.g. no Fox
+    API rollup, or the meter row was never written).
+
+    Defensive against the "Octopus published 0 kWh" failure mode: when the
+    cached meter value is below the household-impossible floor (0.5 kWh/day)
+    but Fox saw real traffic, treats meter as unpublished rather than
+    rendering an absurd disparity (e.g. ``+32546%``). The 2026-05-21 backfill
+    fix also stops zero-rows from being cached in the first place, so this
+    is belt-and-suspenders for any zero-rows already in the DB.
     """
     fox = db.get_fox_energy_daily_by_date(day.isoformat())
     meter = db.get_octopus_daily_meter(day.isoformat())
     if not fox or not meter:
         return None
 
+    PUBLISHED_FLOOR_KWH = 0.5  # household never uses less than this per day
+
     def _fmt_pair(fox_v: float | None, meter_v: float | None) -> str | None:
         if fox_v is None or meter_v is None:
+            return None
+        # Treat as unpublished when meter value is below the floor but Fox
+        # measured real traffic — the disparity isn't a calibration issue.
+        if meter_v < PUBLISHED_FLOOR_KWH and (fox_v or 0) >= PUBLISHED_FLOOR_KWH:
             return None
         gap_pct = ((fox_v - meter_v) / meter_v * 100) if meter_v else 0.0
         return f"{fox_v:.2f} / {meter_v:.2f} kWh ({gap_pct:+.1f}%)"
 
     imp = _fmt_pair(fox.get("import_kwh"), meter.get("import_kwh"))
     exp = _fmt_pair(fox.get("export_kwh"), meter.get("export_kwh"))
-    if not imp:
-        return None
-    parts = [f"import {imp}"]
+    if not imp and not exp:
+        return "- Audit (Fox vs meter): _Octopus meter not yet published for this day_"
+    parts: list[str] = []
+    if imp:
+        parts.append(f"import {imp}")
     if exp:
         parts.append(f"export {exp}")
     return f"- Audit (Fox vs meter): {' | '.join(parts)}"
@@ -1055,6 +1090,355 @@ def _peak_export_outcomes_for_today(today: date, tz: ZoneInfo) -> str | None:
             f"(pessimistic {float(pess):.2f}; reason: {r['reason']})"
         )
     return "\n".join(parts)
+
+
+# --------------------------------------------------------------------------
+# 2026-05-21 — brief redesign helpers (Tier A)
+# --------------------------------------------------------------------------
+# Each helper below is independent + cheap + returns ``str | None``. Failures
+# inside any one helper must NOT drop the brief — the composer wraps every
+# call in :func:`_safe_call` so a single missing data source renders as
+# ``(unavailable)`` rather than blanking the whole message.
+
+import logging as _logging
+_section_logger = _logging.getLogger(__name__)
+
+
+def _safe_call(label: str, fn, *args, **kwargs) -> str | None:
+    """Call *fn(*args, **kwargs)*; on exception, log + return a placeholder.
+
+    Returns whatever the helper returned (incl. None to opt out of rendering)
+    when it ran cleanly. On failure returns ``_(label unavailable: ErrName)_``
+    so the brief surfaces the gap instead of a silently-missing section.
+    """
+    try:
+        return fn(*args, **kwargs)
+    except Exception as e:  # noqa: BLE001 — brief section must not abort the brief
+        _section_logger.exception("brief section %s failed", label)
+        return f"_({label} unavailable: {type(e).__name__})_"
+
+
+def _preset_line() -> str | None:
+    """One-line household mode: preset (normal/guest/away/travel) + Daikin mode.
+
+    Distinct from :func:`_mode_status_line` (which is verbose about Daikin
+    control mode for hardware-mutation context). This one is a single chip
+    the family reads at-a-glance for "are we in guest mode today?".
+    """
+    try:
+        preset = (config.OPTIMIZATION_PRESET or "normal").strip().lower()
+    except Exception:
+        preset = "normal"
+    try:
+        daikin = (config.DAIKIN_CONTROL_MODE or "passive").strip().lower()
+    except Exception:
+        daikin = "passive"
+    badge = {
+        "normal": "🏠 Normal",
+        "guests": "👥 Guests",
+        "away": "🧳 Away",
+        "travel": "✈ Travel",
+        "vacation": "🏖 Vacation",
+    }.get(preset, f"🏠 {preset.title()}")
+    return f"**Mode:** {badge} · Daikin: `{daikin}`"
+
+
+def _pv_forecast_today_line(today: date, tz: ZoneInfo) -> str | None:
+    """PV forecast for today: total kWh + recent-skill confidence chip.
+
+    Sums ``solar_w_m2 → estimated_pv_kw`` across the day's hours (the same
+    transform the LP applies) and grades the forecast by the AM/PM bias
+    pattern documented in memory ``project_pv_trust_guardrail_landed``.
+
+    Returns None when no forecast rows exist for today (cold-start day).
+    """
+    rows = db.get_meteo_forecast_for_slot_date(today.isoformat())
+    if not rows:
+        return None
+    from ..weather import estimate_pv_kw
+    total_kwh = 0.0
+    n_hours = 0
+    for r in rows:
+        rad = float(r.get("solar_w_m2") or 0)
+        if rad <= 0:
+            continue
+        total_kwh += estimate_pv_kw(rad) * 0.5   # 30-min slot
+        n_hours += 1
+    if n_hours == 0:
+        return f"**PV forecast today:** 0.0 kWh (overcast / night-only)"
+
+    # Confidence chip: use trailing 14d PV bias from pv_bias_report
+    confidence = ""
+    try:
+        from .pv_bias_report import summarise_pv_bias
+        report = summarise_pv_bias(window_days=14)
+        n = int(report.get("n_paired", 0))
+        if n >= 14:
+            # AM/PM bias absolute magnitude (kW). >0.4 = poor; >0.2 = moderate.
+            am = abs(float(report.get("am_bias_kw", 0)))
+            pm = abs(float(report.get("pm_bias_kw", 0)))
+            worst = max(am, pm)
+            if worst < 0.2:
+                confidence = " · 🟢 high confidence"
+            elif worst < 0.4:
+                confidence = " · 🟡 moderate confidence"
+            else:
+                confidence = " · 🔴 low confidence (recent AM/PM bias)"
+    except Exception:
+        pass
+
+    return f"**PV forecast today:** {total_kwh:.1f} kWh{confidence}"
+
+
+def _temperature_range_today_line(today: date, tz: ZoneInfo) -> str | None:
+    """Outdoor temperature range today: min/max + cloud cover qualifier."""
+    rows = db.get_meteo_forecast_for_slot_date(today.isoformat())
+    if not rows:
+        return None
+    temps = [
+        float(r["temp_c"]) for r in rows
+        if r.get("temp_c") is not None
+    ]
+    if not temps:
+        return None
+    clouds = [
+        float(r["cloud_cover_pct"]) for r in rows
+        if r.get("cloud_cover_pct") is not None
+    ]
+    mean_cloud = (sum(clouds) / len(clouds)) if clouds else None
+    cloud_chip = ""
+    if mean_cloud is not None:
+        if mean_cloud < 25:
+            cloud_chip = " · ☀ mostly clear"
+        elif mean_cloud < 60:
+            cloud_chip = " · ⛅ mixed"
+        elif mean_cloud < 85:
+            cloud_chip = " · ☁ cloudy"
+        else:
+            cloud_chip = " · 🌥 overcast"
+    return f"**Outdoor today:** {min(temps):.1f}°C → {max(temps):.1f}°C{cloud_chip}"
+
+
+def _now_state_line() -> str | None:
+    """Current battery SoC + tank temperature, both from in-memory caches.
+
+    Never calls a vendor API; only reads cached state to avoid burning quota.
+    """
+    bits: list[str] = []
+    try:
+        from ..foxess.service import get_cached_realtime
+        rt = get_cached_realtime()
+        if rt and rt.soc is not None:
+            bits.append(f"SoC **{float(rt.soc):.0f}%**")
+        if rt and rt.work_mode and rt.work_mode != "unknown":
+            bits.append(f"Fox `{rt.work_mode}`")
+    except Exception:
+        pass
+    try:
+        last_tank = db.get_latest_daikin_telemetry()
+        if last_tank and last_tank.get("tank_temp_c") is not None:
+            bits.append(f"Tank **{float(last_tank['tank_temp_c']):.1f}°C**")
+    except Exception:
+        pass
+    if not bits:
+        return None
+    return f"**Now:** {' · '.join(bits)}"
+
+
+def _day_cost_forecast_line(today: date, tz: ZoneInfo) -> str | None:
+    """Estimated cost band for today from the latest LP run.
+
+    Reads the LP solver's objective + planned import × per-slot Agile rates
+    from ``lp_solution_snapshot``. Falls back to a coarse ``mean_agile × est_load``
+    estimate when no LP run for today exists yet.
+    """
+    tgt = db.get_daily_target(today)
+    if not tgt:
+        return None
+    target_vwap = tgt.get("target_vwap")
+    est_kwh = tgt.get("estimated_total_kwh")
+    est_cost_p = tgt.get("estimated_cost_pence")
+    actual_mean = tgt.get("actual_agile_mean") or 0
+
+    if est_cost_p is not None and est_cost_p > 0:
+        low = est_cost_p / 100.0 * 0.90
+        high = est_cost_p / 100.0 * 1.10
+        return (
+            f"**Day cost forecast:** ~£{low:.2f}–£{high:.2f} "
+            f"(planned {est_kwh or 0:.1f} kWh @ VWAP {target_vwap or actual_mean:.1f}p)"
+        )
+    if est_kwh and actual_mean:
+        cost = est_kwh * actual_mean / 100.0
+        return f"**Day cost forecast:** ~£{cost:.2f} (mean Agile {actual_mean:.1f}p)"
+    return None
+
+
+def _charging_plan_today_lines(today: date, tz: ZoneInfo) -> list[str]:
+    """Per-slot ForceCharge / SolarCharge plan for today.
+
+    Reads ``action_schedule`` rows for today + correlates with
+    ``lp_solution_snapshot`` to surface the LP's planned import kWh. Returns
+    an empty list when no charge actions are scheduled (typical solar day).
+    """
+    actions = db.get_actions_for_plan_date(today.isoformat(), device="foxess")
+    if not actions:
+        return []
+    out: list[str] = []
+    for a in actions:
+        atype = (a.get("action_type") or "").lower()
+        if atype not in ("force_charge", "solar_charge", "feed_in", "force_discharge"):
+            continue
+        try:
+            st = datetime.fromisoformat(
+                a["start_time"].replace("Z", "+00:00")
+            ).astimezone(tz).strftime("%H:%M")
+            en = datetime.fromisoformat(
+                a["end_time"].replace("Z", "+00:00")
+            ).astimezone(tz).strftime("%H:%M")
+        except (ValueError, KeyError):
+            continue
+        params = a.get("params") or {}
+        kwh = params.get("planned_kwh")
+        rate = params.get("avg_rate_pence")
+        bits = [f"  • {st}–{en} {atype.replace('_', ' ')}"]
+        if kwh:
+            bits.append(f"{float(kwh):.1f} kWh")
+        if rate:
+            bits.append(f"@ {float(rate):.1f}p")
+        out.append(" ".join(bits))
+    return out
+
+
+def _tonight_battery_sufficiency_line(now_utc: datetime, tz: ZoneInfo) -> str | None:
+    """Project battery SoC through to the next ~06:00 local from the latest
+    LP plan. Tells the family whether tonight's battery is sized for the
+    overnight house load or whether the LP scheduled cheap-slot charges.
+    """
+    try:
+        from ..foxess.service import get_cached_realtime
+        rt = get_cached_realtime()
+        soc_now = float(rt.soc) if rt and rt.soc is not None else None
+    except Exception:
+        soc_now = None
+    if soc_now is None:
+        return None
+    cap = float(getattr(config, "BATTERY_CAPACITY_KWH", 10) or 10)
+    soc_kwh_now = soc_now / 100.0 * cap
+
+    # Pull the latest LP solution for the next ~12 hours (24 half-hour slots)
+    import sqlite3 as _sql
+    conn = _sql.connect(config.DB_PATH)
+    conn.row_factory = _sql.Row
+    try:
+        cur = conn.execute(
+            "SELECT s.import_kwh, s.charge_kwh, s.discharge_kwh, s.pv_use_kwh, "
+            "       s.slot_time_utc "
+            "FROM lp_solution_snapshot s "
+            "JOIN lp_inputs_snapshot i ON i.run_id = s.run_id "
+            "WHERE s.slot_time_utc >= ? "
+            "ORDER BY i.run_at_utc DESC, s.slot_time_utc ASC LIMIT 24",
+            (now_utc.isoformat(),),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+    if not rows:
+        return None
+    total_discharge = sum(float(r.get("discharge_kwh") or 0) for r in rows)
+    total_charge = sum(float(r.get("charge_kwh") or 0) for r in rows)
+    soc_kwh_dawn = soc_kwh_now - total_discharge + total_charge
+    soc_pct_dawn = max(0.0, min(100.0, soc_kwh_dawn / cap * 100.0))
+
+    reserve_pct = float(getattr(config, "MIN_SOC_RESERVE_PERCENT", 10) or 10)
+    verdict = (
+        "✅ holds above reserve overnight"
+        if soc_pct_dawn >= reserve_pct + 5
+        else "⚠ may dip near reserve"
+        if soc_pct_dawn >= reserve_pct
+        else "🚨 LP plans cheap-slot recharge"
+    )
+    return (
+        f"**Battery overnight:** SoC {soc_now:.0f}% → ~{soc_pct_dawn:.0f}% by dawn  "
+        f"(discharge {total_discharge:.1f} kWh, charge {total_charge:.1f} kWh) — {verdict}"
+    )
+
+
+def _tonight_daikin_plan_lines(today: date, tz: ZoneInfo) -> list[str]:
+    """List tonight's Daikin tank-target + LWT-offset slots.
+
+    Reads ``action_schedule`` rows for today (device='daikin'). Skips
+    ``restore`` rows (those are noise — the user wants the active phase).
+    """
+    actions = db.get_actions_for_plan_date(today.isoformat(), device="daikin")
+    if not actions:
+        return []
+    out: list[str] = []
+    now = datetime.now(tz)
+    for a in actions:
+        atype = (a.get("action_type") or "").lower()
+        if atype in ("restore", "normal"):
+            continue
+        try:
+            st = datetime.fromisoformat(a["start_time"].replace("Z", "+00:00")).astimezone(tz)
+            en = datetime.fromisoformat(a["end_time"].replace("Z", "+00:00")).astimezone(tz)
+        except (ValueError, KeyError):
+            continue
+        # Only "tonight" — slots that haven't ended yet
+        if en < now:
+            continue
+        params = a.get("params") or {}
+        tank = params.get("tank_temp")
+        lwt = params.get("lwt_offset")
+        bits = [f"  • {st.strftime('%H:%M')}–{en.strftime('%H:%M')} {atype}"]
+        if tank:
+            bits.append(f"tank {float(tank):.0f}°C")
+        if lwt is not None:
+            bits.append(f"LWT {float(lwt):+g}")
+        out.append(" · ".join(bits))
+    return out
+
+
+def _today_vs_forecast_block(today: date) -> list[str]:
+    """PV / load / cost — predicted vs actual, rolled up over today.
+
+    Reuses ``forecast_skill_log`` (per-hour) for PV + load, and the daily PnL
+    for cost. Returns ``[]`` when no skill data exists for today yet.
+    """
+    rows = db.get_forecast_skill_rows(today.isoformat(), today.isoformat())
+    if not rows:
+        return []
+    pv_pred = sum(float(r.get("predicted_pv_kwh") or 0) for r in rows)
+    pv_act = sum(float(r.get("actual_pv_kwh") or 0) for r in rows)
+    load_pred = sum(float(r.get("predicted_load_kwh") or 0) for r in rows)
+    load_act = sum(float(r.get("actual_load_kwh") or 0) for r in rows)
+
+    out: list[str] = []
+    if pv_pred > 0.1:
+        pv_pct = (pv_act - pv_pred) / pv_pred * 100.0
+        verdict = "🟢" if abs(pv_pct) < 10 else "🟡" if abs(pv_pct) < 25 else "🔴"
+        out.append(f"  PV:   {pv_act:.1f} / {pv_pred:.1f} kWh ({pv_pct:+.0f}%) {verdict}")
+    if load_pred > 0.1:
+        load_pct = (load_act - load_pred) / load_pred * 100.0
+        verdict = "🟢" if abs(load_pct) < 10 else "🟡" if abs(load_pct) < 25 else "🔴"
+        out.append(f"  Load: {load_act:.1f} / {load_pred:.1f} kWh ({load_pct:+.0f}%) {verdict}")
+    # Cost: realised vs LP-target from daily_targets
+    tgt = db.get_daily_target(today) or {}
+    forecast_cost = tgt.get("estimated_cost_pence")
+    if forecast_cost is not None and forecast_cost > 0:
+        try:
+            pnl = compute_daily_pnl(today)
+            actual_net = pnl.get("realised_net_cost_gbp")
+        except Exception:
+            actual_net = None
+        if actual_net is not None:
+            forecast_gbp = forecast_cost / 100.0
+            delta = actual_net - forecast_gbp
+            verdict = "🟢" if abs(delta) < 0.30 else "🟡" if abs(delta) < 0.80 else "🔴"
+            out.append(
+                f"  Cost: £{actual_net:+.2f} / £{forecast_gbp:+.2f} "
+                f"({delta:+.2f}) {verdict}"
+            )
+    return out
 
 
 # --------------------------------------------------------------------------

@@ -36,16 +36,20 @@ def test_morning_payload_renders_without_target_row():
 
 
 def test_night_payload_renders_with_zero_data():
-    """Empty execution_log + no peak-export decisions → realistic zero summary."""
+    """Empty execution_log → night brief still renders cleanly via the
+    2026-05-21 redesign. Mode line + PnL line always present; the
+    today-vs-forecast / battery / Daikin sections degrade to empty silently."""
     from src.analytics.daily_brief import build_night_payload
 
     body = build_night_payload()
     assert "actuals" in body
     # Body must not contain the old "## Night brief" header (#330).
     assert "Night brief" not in body
-    # The brief now uses the structured "Net cost" line (was "Realised cost") —
-    # see the daily-brief expansion for #207's follow-up. Either is acceptable.
-    assert "Net cost:" in body
+    # 2026-05-21 redesign: PnL is now a single line ("PnL today:") not a
+    # multi-line block ("Net cost:" / "Energy used:" / ...).
+    assert "**PnL today:**" in body
+    # Mode chip always renders
+    assert "**Mode:**" in body
 
 
 def test_morning_and_night_are_independent_calls():
@@ -61,9 +65,11 @@ def test_morning_and_night_are_independent_calls():
     assert n1 == n2
 
 
-def test_morning_payload_includes_tier_summary_when_rates_present(monkeypatch):
-    """When agile_rates is populated, the morning brief shows the tier-window
-    summary (reusing the same classify_day call as the family calendar)."""
+def test_morning_payload_includes_tomorrow_peaks_when_rates_present(monkeypatch):
+    """2026-05-21 redesign moved today's tariff-tier breakdown out of the
+    morning brief (it's now forward-looking only). Tomorrow's peak windows
+    stay — they're the actionable signal for 'when will the LP work hardest'.
+    Today's full tier breakdown lives in the daily calendar + audit MCP tools."""
     from datetime import UTC, date, datetime, timedelta
     from src import db
     from src.analytics import daily_brief as db_mod
@@ -72,11 +78,13 @@ def test_morning_payload_includes_tier_summary_when_rates_present(monkeypatch):
     monkeypatch.setattr(db_mod.config, "BULLETPROOF_TIMEZONE", "Europe/London", raising=False)
 
     today = date.today()
+    tomorrow = today + timedelta(days=1)
     rows = []
+    # Seed TOMORROW's rates with a clear peak window so the heads-up renders.
     for i in range(48):
-        # Two-tier day: 24 cheap (8p), 24 expensive (32p).
+        # Two-tier day: 24 cheap (8p), 24 expensive peak (32p).
         price = 8.0 if i < 24 else 32.0
-        st = datetime(today.year, today.month, today.day, 0, 0, tzinfo=UTC) + timedelta(minutes=30 * i)
+        st = datetime(tomorrow.year, tomorrow.month, tomorrow.day, 0, 0, tzinfo=UTC) + timedelta(minutes=30 * i)
         rows.append({
             "valid_from": st.isoformat().replace("+00:00", "Z"),
             "valid_to": (st + timedelta(minutes=30)).isoformat().replace("+00:00", "Z"),
@@ -91,4 +99,6 @@ def test_morning_payload_includes_tier_summary_when_rates_present(monkeypatch):
     } for r in rows], "TEST")
 
     body = db_mod.build_morning_payload()
-    assert "Tariff windows today:" in body
+    assert f"**Tomorrow ({tomorrow}):**" in body
+    # And the peak window is mentioned (tomorrow has 32p prices)
+    assert "peak" in body.lower()

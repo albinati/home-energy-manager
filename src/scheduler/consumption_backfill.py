@@ -162,12 +162,28 @@ def backfill_for_date(target_local_date: date) -> BackfillResult:
             export_total = sum(s.consumption_kwh for s in exp_slots) if exp_slots else 0.0
         except Exception as e:
             logger.debug("Octopus export fetch failed (non-fatal): %s", e)
-    try:
-        db.upsert_octopus_daily_meter(
-            iso, import_kwh=import_total, export_kwh=export_total
+
+    # Don't cache obviously-not-yet-published days. Octopus sometimes returns
+    # slot rows whose values are all zero (or near-zero) before the meter
+    # readings have propagated through their pipeline. Writing those zeros
+    # to ``octopus_daily_meter`` makes the brief's Fox-vs-meter audit line
+    # render absurd disparities like "+32546%". A real household never uses
+    # less than ~0.5 kWh/day, so a sum under that floor is the "no data yet"
+    # signal — skip the upsert and let the next backfill run re-attempt.
+    PUBLISHED_FLOOR_KWH = 0.5
+    if import_total is not None and import_total < PUBLISHED_FLOOR_KWH:
+        logger.info(
+            "consumption_backfill: date=%s import_total=%.3f kWh below "
+            "%.1f kWh floor — Octopus not yet published; skipping daily-meter upsert",
+            iso, import_total, PUBLISHED_FLOOR_KWH,
         )
-    except Exception as e:
-        logger.warning("octopus_daily_meter upsert failed (non-fatal): %s", e)
+    else:
+        try:
+            db.upsert_octopus_daily_meter(
+                iso, import_kwh=import_total, export_kwh=export_total
+            )
+        except Exception as e:
+            logger.warning("octopus_daily_meter upsert failed (non-fatal): %s", e)
 
     return BackfillResult(
         target_date=iso,

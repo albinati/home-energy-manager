@@ -624,6 +624,28 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_lp_inputs_snapshot_plan_date ON lp_inputs_snapshot(plan_date)"
     )
 
+    # 2026-05-21: lp_failure_log — append-only audit log of every LP solver
+    # failure (Infeasible status, CBC crash, Python exception). The defensive
+    # hold-previous-schedule path keeps prod safe; this table is for
+    # investigation. Notifier rate-limits the per-failure alert; this table
+    # is the full history.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS lp_failure_log (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_at_utc          TEXT NOT NULL,
+            plan_date           TEXT,
+            error_class         TEXT NOT NULL,
+            error_msg           TEXT,
+            stacktrace          TEXT,
+            lp_inputs_run_id    INTEGER,
+            resolved_at_utc     TEXT,
+            FOREIGN KEY (lp_inputs_run_id) REFERENCES lp_inputs_snapshot(run_id)
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_lp_failure_log_run_at ON lp_failure_log(run_at_utc DESC)"
+    )
+
     # V11b: meteo_forecast_history — append-only audit log of every forecast
     # fetch. The existing meteo_forecast table is latest-per-slot (overwrites on
     # UNIQUE(slot_time)) so heartbeat + LP reads stay simple; this companion
@@ -3967,6 +3989,56 @@ def get_lp_inputs(run_id: int) -> dict[str, Any] | None:
             )
             r = cur.fetchone()
             return dict(r) if r else None
+        finally:
+            conn.close()
+
+
+def insert_lp_failure(
+    *,
+    run_at_utc: str,
+    error_class: str,
+    error_msg: str | None = None,
+    plan_date: str | None = None,
+    stacktrace: str | None = None,
+    lp_inputs_run_id: int | None = None,
+) -> int:
+    """Append a row to lp_failure_log; return the new id.
+
+    Called from optimizer.py on every LP infeasible / CBC failure / exception.
+    Cheap (single INSERT); never raises — callers swallow on error so the
+    LP fallback path can't trip on its own audit log.
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """INSERT INTO lp_failure_log
+                       (run_at_utc, plan_date, error_class, error_msg,
+                        stacktrace, lp_inputs_run_id)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (run_at_utc, plan_date, error_class, error_msg, stacktrace,
+                 lp_inputs_run_id),
+            )
+            conn.commit()
+            return int(cur.lastrowid or 0)
+        finally:
+            conn.close()
+
+
+def list_recent_lp_failures(limit: int = 10) -> list[dict[str, Any]]:
+    """Return the N most recent LP failure rows, newest first.
+
+    Used by the ``get_recent_lp_failures`` MCP tool so OpenClaw can answer
+    'any LP problems lately?' without needing direct DB access.
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM lp_failure_log ORDER BY run_at_utc DESC LIMIT ?",
+                (int(limit),),
+            )
+            return [dict(r) for r in cur.fetchall()]
         finally:
             conn.close()
 
