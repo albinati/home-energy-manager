@@ -50,10 +50,17 @@ server {
         try_files $uri =404;
     }
 
-    # SPA routes — every HTML path falls through to its corresponding file in
-    # html/. Unknown paths fall back to cockpit.html (Single-Page App default).
+    # SPA routes — every clean URL maps to its `.html` file in html/. Unknown
+    # paths fall back to cockpit.html (single-page-app default).
+    #
+    # The `$uri.html` step is critical: clicking the nav tab to /history
+    # requests the bare path; without this step nginx tries `history` then
+    # `history/`, both miss, and the request falls through to cockpit.html
+    # — which was the "tabs don't change" bug observed on the 2026-05-21
+    # cutover. /api/ + /healthz + /config.js are handled by their own
+    # location blocks above; everything else is a page or a static asset.
     location / {
         add_header Cache-Control "no-cache" always;
-        try_files $uri $uri/ /cockpit.html;
+        try_files $uri $uri.html $uri/ /cockpit.html;
     }
 }
