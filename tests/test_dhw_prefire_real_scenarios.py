@@ -513,3 +513,101 @@ def test_real_bug_E_falls_back_to_override_inheritance_when_idempotency_off(monk
         )
         assert len(notifications) == 1
         assert "row 5828" in notifications[0]
+
+
+# ── AUDIT (2026-05-22): chain inheritance must not storm notifications ────────
+#
+# Bug discovered while auditing the merged Epic 14 stack:
+# When N rows in a row are suppressed via inheritance (because the LP keeps
+# replanning), the source_id rotates (A → B → C → ...) because each newly-
+# inherited row becomes the most recent overridden row in DB. The dedupe set
+# was keyed only on source_id, so each step of the chain fired a fresh
+# notification — turning one user gesture into N Telegram pings.
+#
+# After the dedupe-also-on-aid fix, the entire chain produces one
+# notification per gesture episode.
+
+
+def test_audit_chain_inheritance_emits_one_notification_per_gesture(monkeypatch):
+    """User overrides row A. LP then inserts B, C, D over the next 90 min,
+    each with the same conflicting params. With the dedupe fix, only one
+    notification fires (for B inheriting from A); C and D are silently
+    suppressed even though their source rotates.
+    """
+    import src.state_machine as sm
+    from src import db
+
+    monkeypatch.setattr("src.config.config.PREFIRE_STATE_MATCH_ENABLED", True)
+    monkeypatch.setattr("src.config.config.USER_OVERRIDE_RESPECT_HOURS", 4.0)
+    monkeypatch.setattr("src.daikin_bulletproof.config.OPENCLAW_READ_ONLY", False)
+    sm._FIRST_APPLIED_SESSION.clear()
+    sm._USER_OVERRIDE_INHERITED_NOTIFIED.clear()
+
+    notifications: list[str] = []
+    monkeypatch.setattr(
+        "src.state_machine.notify_user_override",
+        lambda msg: notifications.append(msg),
+    )
+    monkeypatch.setattr(
+        "src.state_machine.apply_scheduled_daikin_params",
+        lambda dev, client, params, trigger: True,
+    )
+    monkeypatch.setattr("src.state_machine.time.sleep", lambda _: None)
+
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "prod_replay.db"
+        _setup_test(monkeypatch, path)
+        now_utc = datetime(2026, 5, 22, 0, 0, tzinfo=UTC)
+
+        conn = db.get_connection()
+        try:
+            # Row A: real user gesture at 21:11 yesterday (~3h ago).
+            _insert_row(
+                conn, aid=100,
+                start="2026-05-21T21:00:00Z",
+                end="2026-05-22T06:00:00Z",
+                action_type="tank_idle_overnight",
+                status="active",
+                params={"tank_power": True, "tank_temp": 37},
+                overridden_at="2026-05-21T21:11:00.000000+00:00",
+            )
+            # Rows B, C, D: subsequent replan rows, all pending.
+            for i, t in enumerate(["21:30:00", "22:00:00", "22:30:00"]):
+                _insert_row(
+                    conn, aid=101 + i,
+                    start=f"2026-05-21T{t}Z",
+                    end="2026-05-22T06:00:00Z",
+                    action_type="tank_idle_overnight",
+                    status="pending",
+                    params={"tank_power": True, "tank_temp": 37},
+                )
+        finally:
+            conn.close()
+
+        # User still has the tank off (gesture in effect).
+        dev = DaikinDevice(
+            id="gw", name="x",
+            tank_on=False, tank_target=37.0, tank_powerful=False,
+        )
+        client = MagicMock()
+        rows = (
+            db.get_actions_for_plan_date("2026-05-21", device="daikin")
+            + db.get_actions_for_plan_date("2026-05-22", device="daikin")
+        )
+        sm._reconcile_daikin_actions(rows, client, dev, now_utc, trigger="heartbeat")
+
+        # All three later rows must be marked overridden.
+        for aid in (101, 102, 103):
+            r = db.get_action_by_id(aid)
+            assert r is not None
+            assert r.get("overridden_by_user_at") is not None, (
+                f"Row {aid} should be inherited-overridden"
+            )
+
+        # Pre-fix: would have been 3 notifications. Post-fix: exactly 1.
+        assert len(notifications) == 1, (
+            f"chain inheritance must collapse to one notification per "
+            f"gesture episode, got {len(notifications)}: {notifications}"
+        )
+        # The single notification references the original user-gesture row.
+        assert "row 100" in notifications[0]

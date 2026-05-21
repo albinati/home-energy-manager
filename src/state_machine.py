@@ -338,8 +338,18 @@ def _reconcile_daikin_actions(
                                 result="skipped",
                                 trigger=trigger,
                             )
+                            # Audit (#386 follow-up): inherited rows themselves
+                            # become the "source" for the next replan row's
+                            # find_recent_user_override lookup (their
+                            # overridden_by_user_at is now the most recent).
+                            # Without also deduping ``aid`` here, each step of
+                            # the chain (A → B → C → D) fires its own
+                            # notification because the src_id rotates
+                            # (A, B, C…). Add aid alongside src_id so the
+                            # next iteration sees its source pre-deduped.
                             if src_id and src_id not in _USER_OVERRIDE_INHERITED_NOTIFIED:
                                 _USER_OVERRIDE_INHERITED_NOTIFIED.add(src_id)
+                                _USER_OVERRIDE_INHERITED_NOTIFIED.add(aid)
                                 try:
                                     notify_user_override(
                                         f"override inherited from row {src_id} "
@@ -351,6 +361,11 @@ def _reconcile_daikin_actions(
                                         "notify_user_override (inherited) failed (non-fatal): %s",
                                         _exc,
                                     )
+                            else:
+                                # Source already known — silent inheritance
+                                # propagation. Still track ``aid`` so deeper
+                                # chain rows continue to be silent.
+                                _USER_OVERRIDE_INHERITED_NOTIFIED.add(aid)
                             continue
                 except Exception as _exc:
                     logger.debug(
