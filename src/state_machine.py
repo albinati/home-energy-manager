@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -192,6 +193,11 @@ def _reconcile_daikin_actions(
     outdoor_c: float | None = None,
 ) -> None:
     """Transition statuses and apply params for today's Daikin rows."""
+    # Epic 14 follow-up (#388): when more than one row triggers an apply in
+    # the SAME heartbeat tick, sleep DAIKIN_VALVE_SETTLE_SECONDS between
+    # them so the cloud has propagation time before our next read/write.
+    # Idle ticks (all rows pre-fire-skipped) take zero extra time.
+    _applied_in_this_tick = False
     for act in sorted(actions, key=lambda a: (a["start_time"], int(a["id"]))):
         try:
             start = _parse_utc(act["start_time"])
@@ -387,14 +393,41 @@ def _reconcile_daikin_actions(
                 # this same row would fire a fresh notification.
                 _USER_OVERRIDE_NOTIFIED.discard(aid)
 
+            # Epic 14 follow-up (#388): inter-row settle. If we already
+            # called apply_scheduled_daikin_params earlier in this same
+            # heartbeat tick for this device, give Onecta time to
+            # propagate the previous write before we PATCH again.
+            # Reusing DAIKIN_VALVE_SETTLE_SECONDS keeps the knob count low.
+            if _applied_in_this_tick:
+                inter_row_settle = max(
+                    0, int(getattr(config, "DAIKIN_VALVE_SETTLE_SECONDS", 10)),
+                )
+                if inter_row_settle > 0:
+                    logger.debug(
+                        "inter-row settle: sleeping %ds before applying row %s",
+                        inter_row_settle, aid,
+                    )
+                    time.sleep(inter_row_settle)
+
             try:
-                apply_scheduled_daikin_params(dev, client, apply_params, trigger=trigger)
+                applied = apply_scheduled_daikin_params(
+                    dev, client, apply_params, trigger=trigger,
+                )
                 # Mark the row as applied-in-session on the first successful call
                 # (skip_if_matches=True path also counts — match confirms alignment).
                 _FIRST_APPLIED_SESSION.setdefault(aid, now_utc)
+                # Track whether THIS call actually attempted writes. The fn
+                # returns False when skip_if_matches catches a match, or when
+                # the passive / read-only / disabled gates short-circuit.
+                # We only want to settle before the next row if the previous
+                # one actually hit the cloud.
+                if applied:
+                    _applied_in_this_tick = True
             except (DaikinError, ValueError) as e:
                 logger.warning("Boot Daikin apply %s: %s", aid, e)
                 db.mark_action(aid, "failed", error_msg=str(e))
+                # Even on failure, the attempt was made — wait before the next.
+                _applied_in_this_tick = True
 
 
 def reconcile_daikin_schedule_for_date(
