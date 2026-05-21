@@ -71,13 +71,17 @@ def test_morning_payload_includes_tomorrow_peaks_when_rates_present(monkeypatch)
     stay — they're the actionable signal for 'when will the LP work hardest'.
     Today's full tier breakdown lives in the daily calendar + audit MCP tools."""
     from datetime import UTC, date, datetime, timedelta
+    from zoneinfo import ZoneInfo
     from src import db
     from src.analytics import daily_brief as db_mod
 
     monkeypatch.setattr(db_mod.config, "OCTOPUS_TARIFF_CODE", "TEST", raising=False)
     monkeypatch.setattr(db_mod.config, "BULLETPROOF_TIMEZONE", "Europe/London", raising=False)
 
-    today = date.today()
+    # Use the same timezone as build_morning_payload so the assertion holds
+    # across midnight UTC (CI runs anywhere — UTC, BST, etc.). Without this,
+    # the test silently flakes when UTC and London disagree on "today".
+    today = datetime.now(ZoneInfo("Europe/London")).date()
     tomorrow = today + timedelta(days=1)
     rows = []
     # Seed TOMORROW's rates with a clear peak window so the heads-up renders.
