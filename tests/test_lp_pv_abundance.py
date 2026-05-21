@@ -616,21 +616,21 @@ def _build_peak_plan(base: datetime, n: int = 4) -> "LpPlan":
     return plan
 
 
-def test_dispatch_peak_idle_default_keeps_tank_on_normal_target(
+def test_dispatch_peak_keeps_tank_on_normal_target(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Default peak strategy ("idle") keeps tank ON at the NORMAL target
-    during peak. If tank is inherited above target (from prior solar_preheat),
+    """Epic 14 (#386): peak / peak_export windows always keep tank ON at the
+    NORMAL target. If tank is inherited above target (from prior solar_preheat),
     firmware sees current > setpoint and won't reheat — tank cools naturally.
     If tank is at or below target, firmware maintains setpoint with small
     reheats only when needed. Best for well-insulated tanks per user's
-    validated approach. Climate still goes off (saves grid)."""
+    validated approach. Climate still goes off (saves grid).
+    """
     from src.config import config as app_config
     from src.scheduler.lp_dispatch import daikin_dispatch_preview
 
     monkeypatch.setattr(app_config, "DAIKIN_CONTROL_MODE", "active", raising=False)
     monkeypatch.setattr(app_config, "DAIKIN_MIN_WINDOW_SLOTS", 1, raising=False)
-    monkeypatch.setattr(app_config, "DHW_PEAK_TANK_STRATEGY", "idle", raising=False)
     monkeypatch.setattr(app_config, "DHW_TEMP_NORMAL_C", 45.0, raising=False)
     monkeypatch.setattr(
         "src.scheduler.lp_dispatch._optimization_preset_away_like",
@@ -644,13 +644,17 @@ def test_dispatch_peak_idle_default_keeps_tank_on_normal_target(
     assert peak_pairs, "expected a shutdown action"
     for _restore, action in peak_pairs:
         params = action["params"]
-        # IDLE: tank stays ON at NORMAL target (45°C, not the 30°C floor).
+        # Epic 14 (#386): peak / peak_export always keeps tank ON at NORMAL
+        # target (45°C). The legacy SHUTDOWN branch was removed because (a)
+        # prod telemetry showed near-zero coast decay even when held warm,
+        # and (b) the tank_power=False writes failed 27% of the time with
+        # Onecta READ_ONLY_CHARACTERISTIC errors.
         assert params.get("tank_power") is True, (
-            f"idle strategy must keep tank_power=True; params={params}"
+            f"peak action must keep tank_power=True; params={params}"
         )
         assert params.get("tank_temp") == pytest.approx(45.0), (
-            f"idle strategy must set tank_temp to DHW_TEMP_NORMAL_C (45°C), "
-            f"NOT the absolute floor (30°C); got {params.get('tank_temp')}"
+            f"peak action must set tank_temp to DHW_TEMP_NORMAL_C (45°C); "
+            f"got {params.get('tank_temp')}"
         )
         # CLIMATE HANDS-OFF: HEM does not emit climate_on at all (per user
         # 2026-05-09 — "we are not discussing climate yet"). Firmware
@@ -660,38 +664,6 @@ def test_dispatch_peak_idle_default_keeps_tank_on_normal_target(
         )
         assert "lwt_offset" not in params, (
             f"HEM must not touch lwt_offset (climate-side); params={params}"
-        )
-
-
-def test_dispatch_peak_shutdown_legacy_still_works(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Legacy shutdown strategy still available via DHW_PEAK_TANK_STRATEGY=shutdown.
-    For poorly-insulated tanks where firmware would mid-peak-reheat from
-    standing losses alone."""
-    from src.config import config as app_config
-    from src.scheduler.lp_dispatch import daikin_dispatch_preview
-
-    monkeypatch.setattr(app_config, "DAIKIN_CONTROL_MODE", "active", raising=False)
-    monkeypatch.setattr(app_config, "DAIKIN_MIN_WINDOW_SLOTS", 1, raising=False)
-    monkeypatch.setattr(app_config, "DHW_PEAK_TANK_STRATEGY", "shutdown", raising=False)
-    monkeypatch.setattr(
-        "src.scheduler.lp_dispatch._optimization_preset_away_like",
-        lambda: False,
-        raising=True,
-    )
-
-    plan = _build_peak_plan(datetime(2026, 6, 1, 17, 0, tzinfo=UTC))
-    pairs = daikin_dispatch_preview(plan, forecast=[])
-    peak_pairs = [(r, a) for r, a in pairs if a.get("action_type") == "shutdown"]
-    assert peak_pairs, "expected a shutdown action"
-    for _restore, action in peak_pairs:
-        params = action["params"]
-        assert params.get("tank_power") is False, (
-            f"shutdown strategy MUST emit tank_power=False; params={params}"
-        )
-        assert "tank_temp" not in params, (
-            f"shutdown should not emit tank_temp; params={params}"
         )
 
 

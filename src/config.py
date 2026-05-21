@@ -622,16 +622,14 @@ class Config:
     # DHW_TEMP_PV_ABUNDANCE_TARGET_C is now runtime-tunable via runtime_settings
     # (see @property below). Default lowered from 55 → 45 (= DHW_TEMP_NORMAL_C);
     # override per household occupancy at runtime without restart.
-    # Strategy for tank during peak / peak_export windows (climate is always
-    # off during peak — this is just about the tank):
-    #   "idle" (default) — tank_power=True, target=DHW_TEMP_MIN_FLOOR_C (30°C).
-    #     Firmware won't reheat (tank stays warm from prior heating, well
-    #     above 30°C). Avoids turn-off / turn-on cycle overhead. Best for
-    #     well-insulated tanks where 3-h standing losses are tiny.
-    #   "shutdown" — tank_power=False (legacy). Cleaner state but adds cycle
-    #     overhead. Pick this for poorly-insulated tanks where firmware
-    #     would attempt mid-peak reheats from standing losses alone.
-    DHW_PEAK_TANK_STRATEGY: str = os.getenv("DHW_PEAK_TANK_STRATEGY", "idle").strip().lower()
+    # NOTE: ``DHW_PEAK_TANK_STRATEGY`` was removed 2026-05-21 (Epic 14, #386).
+    # Prod telemetry showed the SHUTDOWN branch failed 27% of the time with
+    # READ_ONLY_CHARACTERISTIC errors and produced no measurable kWh savings
+    # vs the IDLE behaviour for this well-insulated tank (median decay
+    # 0.00 °C/h across 8 May peak windows). The dispatch layer always uses
+    # the IDLE behaviour now (tank_power=True, tank_temp=DHW_TEMP_NORMAL_C).
+    # The env line in ``/srv/hem/.env`` becomes a harmless unknown; remove it
+    # opportunistically on the next ``.env`` touch.
     # Post-shower overnight tank idle (LP-driven). After the LAST shower window
     # of the day, the LP has no DHW need until next-day's PV abundance — the
     # tank is set to a low BACKUP target so firmware doesn't reheat overnight,
@@ -1264,6 +1262,27 @@ class Config:
     )
     DAIKIN_OVERRIDE_TOLERANCE_LWT_C: float = float(
         os.getenv("DAIKIN_OVERRIDE_TOLERANCE_LWT_C", "0.35")
+    )
+    # Epic 14 (#386) — pre-fire reconcile knobs.
+    #
+    # When the user has overridden a recent action_schedule row (Onecta app /
+    # physical button) and the next LP replan inserts a NEW row covering the
+    # overlapping window with identical params, that fresh row would normally
+    # fire and undo the user's gesture. Within this window after an override
+    # was recorded, the pre-fire reconcile inherits the override onto any
+    # would-be reversion row. Aged past the window → normal scheduling resumes.
+    USER_OVERRIDE_RESPECT_HOURS: float = float(
+        os.getenv("USER_OVERRIDE_RESPECT_HOURS", "4.0")
+    )
+    # Feature flag for the pre-fire state-match dedupe. When True (default),
+    # the heartbeat compares the live device state against a pending row's
+    # params before firing — already-matching rows are marked completed with
+    # no API call. Kills the READ_ONLY_CHARACTERISTIC failures and the
+    # redundant writes from overlapping replan rows. Flip to "false" for an
+    # instant rollback if the comparator misbehaves.
+    PREFIRE_STATE_MATCH_ENABLED: bool = (
+        os.getenv("PREFIRE_STATE_MATCH_ENABLED", "true").strip().lower()
+        in ("1", "true", "yes", "on")
     )
 
     # Fox ESS: soft daily budget (real limit ≈1440; we stop at 1200 for 15% headroom)

@@ -13,7 +13,9 @@ from .daikin.client import DaikinClient, DaikinError
 from .daikin_bulletproof import (
     apply_comfort_restore,
     apply_scheduled_daikin_params,
+    daikin_device_matches_params,
     detect_user_override,
+    user_gesture_still_in_effect,
 )
 from .foxess.client import FoxESSClient, FoxESSError, scheduler_groups_from_stored_json
 from .notifier import notify_risk, notify_user_override
@@ -33,6 +35,14 @@ _FIRST_APPLIED_SESSION: dict[int, datetime] = {}
 #  * the action's override is reconciled (row no longer detected as override), or
 #  * the action ends (row drops out of the reconcile window naturally).
 _USER_OVERRIDE_NOTIFIED: set[int] = set()
+
+# Epic 14 (#386) — dedup for the inherited-override notification. Keyed on the
+# SOURCE override row id (not the suppressed downstream row id), so each
+# user gesture produces a single ping even when N subsequent replan rows are
+# suppressed against it. Entries linger until the process restarts — set growth
+# is bounded by ``USER_OVERRIDE_RESPECT_HOURS`` × user-gesture frequency, well
+# below a kilobyte over a service lifetime.
+_USER_OVERRIDE_INHERITED_NOTIFIED: set[int] = set()
 
 
 def _parse_utc(s: str) -> datetime:
@@ -235,6 +245,111 @@ def _reconcile_daikin_actions(
             # LP only drives tank state — Daikin firmware owns the curve.
             apply_params.pop("lwt_offset", None)
             apply_params.pop("climate_on", None)
+
+            # Epic 14 (#386) — pre-fire reconcile.
+            #
+            # (1) Idempotency: if the live device state already matches the
+            #     row's params, mark completed without firing. Naturally
+            #     de-dupes overlapping replan rows (bug D) and prevents the
+            #     READ_ONLY_CHARACTERISTIC errors that come from PATCHing
+            #     a characteristic to a value it already holds (bug E).
+            #
+            #     We must observe *every* field in apply_params on the live
+            #     device before declaring a match. ``daikin_device_matches_params``
+            #     silently passes unknown fields (e.g. tank_temp when tank_target
+            #     is None) which would over-skip. Belt-and-braces here.
+            _obs_attr = {
+                "tank_temp": "tank_target",
+                "tank_power": "tank_on",
+                "tank_powerful": "tank_powerful",
+                "lwt_offset": "lwt_offset",
+                "climate_on": "is_on",
+            }
+            all_observable = all(
+                getattr(dev, _obs_attr[k], None) is not None
+                for k in apply_params
+                if k in _obs_attr
+            )
+            if config.PREFIRE_STATE_MATCH_ENABLED and all_observable:
+                try:
+                    if daikin_device_matches_params(dev, apply_params):
+                        db.mark_action(
+                            aid, "completed",
+                            error_msg="noop (state matched pre-fire)",
+                        )
+                        db.log_action(
+                            device="daikin",
+                            action="prefire_state_match",
+                            params={"row_id": aid, "kind": atype},
+                            result="skipped",
+                            trigger=trigger,
+                        )
+                        _USER_OVERRIDE_NOTIFIED.discard(aid)
+                        continue
+                except Exception as _exc:
+                    # Fail-open: if the comparator misbehaves we still fire.
+                    logger.debug("prefire state-match check failed (non-fatal): %s", _exc)
+
+            # (2) Override inheritance: if a recent user gesture is still
+            #     pushing the device away from the schedule, suppress fresh
+            #     replan rows that would reverse it (bug C). Restore rows are
+            #     exempted so the system can return to baseline once the
+            #     gesture either ages out or is reverted.
+            if atype != "restore":
+                try:
+                    src = db.find_recent_user_override(
+                        device="daikin",
+                        within_hours=float(config.USER_OVERRIDE_RESPECT_HOURS),
+                        now_utc=now_utc,
+                    )
+                    if src is not None and src.get("id") != aid:
+                        src_params = src.get("params") or {}
+                        if isinstance(src_params, str):
+                            try:
+                                src_params = json.loads(src_params)
+                            except (json.JSONDecodeError, TypeError):
+                                src_params = {}
+                        # Only suppress if (a) the user's gesture is still
+                        # detectable on the live device, AND (b) the row we're
+                        # about to fire would actually change device state
+                        # (i.e. would reverse the gesture). If (b) is False
+                        # the idempotency check already fired and we wouldn't
+                        # reach here — but we re-check for safety when the
+                        # idempotency feature flag is disabled.
+                        gesture_active = user_gesture_still_in_effect(dev, src_params)
+                        would_change_state = not daikin_device_matches_params(dev, apply_params)
+                        if gesture_active and would_change_state:
+                            db.mark_action_user_overridden(aid)
+                            src_id = int(src.get("id") or 0)
+                            db.log_action(
+                                device="daikin",
+                                action="prefire_override_inherited",
+                                params={
+                                    "row_id": aid,
+                                    "source_row_id": src_id,
+                                    "kind": atype,
+                                },
+                                result="skipped",
+                                trigger=trigger,
+                            )
+                            if src_id and src_id not in _USER_OVERRIDE_INHERITED_NOTIFIED:
+                                _USER_OVERRIDE_INHERITED_NOTIFIED.add(src_id)
+                                try:
+                                    notify_user_override(
+                                        f"override inherited from row {src_id} "
+                                        f"(user gesture still in effect, "
+                                        f"row {aid} suppressed)"
+                                    )
+                                except Exception as _exc:
+                                    logger.debug(
+                                        "notify_user_override (inherited) failed (non-fatal): %s",
+                                        _exc,
+                                    )
+                            continue
+                except Exception as _exc:
+                    logger.debug(
+                        "prefire override-inheritance check failed (non-fatal): %s", _exc,
+                    )
 
             # Phase 4.3 — check for user override before re-applying.
             # Phase 4 review C6: only run override detection after we've had at

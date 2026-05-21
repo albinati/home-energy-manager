@@ -1338,6 +1338,40 @@ def mark_action_user_overridden(
             conn.close()
 
 
+def find_recent_user_override(
+    device: str,
+    *,
+    within_hours: float,
+    now_utc: datetime | None = None,
+) -> dict[str, Any] | None:
+    """Epic 14 (#386): the most-recent ``user_overridden`` action_schedule row
+    for ``device`` whose ``overridden_by_user_at`` falls inside the trailing
+    ``within_hours`` window. Returns ``None`` when no such row exists.
+
+    Used by the heartbeat reconciler to propagate a user's manual gesture
+    (e.g. tank power-off via Onecta) onto fresh rows the LP inserts after
+    a replan, so the user doesn't have to keep undoing the same action.
+    """
+    if within_hours <= 0:
+        return None
+    now = now_utc or datetime.now(UTC)
+    cutoff = (now - timedelta(hours=within_hours)).isoformat()
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM action_schedule "
+                "WHERE device = ? AND overridden_by_user_at IS NOT NULL "
+                "AND overridden_by_user_at >= ? "
+                "ORDER BY overridden_by_user_at DESC LIMIT 1",
+                (device, cutoff),
+            )
+            r = cur.fetchone()
+            return _row_action(r) if r else None
+        finally:
+            conn.close()
+
+
 def get_action_by_id(action_id: int) -> dict[str, Any] | None:
     with _lock:
         conn = get_connection()

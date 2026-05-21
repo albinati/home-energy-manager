@@ -123,6 +123,30 @@ EOF
 
 Daikin Onecta firmware runs the weekly thermal-shock cycle autonomously (Sunday ~11:00 local). **The LP and dispatch layer do not schedule or override this cycle** — the `DHW_LEGIONELLA_*` env vars are gone from the code. Python ignores unrecognised keys in `.env` so lingering entries are harmless; delete them on your next `.env` touch. If a `shutdown` or `max_heat` action happens to overlap the cycle window, Onecta firmware arbitrates.
 
+### User-override propagation (Epic 14, #386 — 2026-05-21)
+
+When the user manually changes tank state (Onecta app / physical button),
+the active `action_schedule` row gets `overridden_by_user_at` set by the
+reactive detector in `src/daikin_bulletproof.py`. The pre-fire reconciler
+in `src/state_machine.py` now does two things:
+
+1. **Idempotency** — before firing a pending row, compare live device
+   state against the row's params. If they match, mark the row `completed`
+   with `error_msg='noop (state matched pre-fire)'` and skip the API call.
+   This is what drops the `READ_ONLY_CHARACTERISTIC` 400s and the
+   redundant solar_preheat writes that overlapping replan rows produced.
+2. **Override inheritance** — for non-`restore` rows, look up the most
+   recent `overridden_by_user_at` row for the same device within
+   `USER_OVERRIDE_RESPECT_HOURS` (default 4h). If the user's gesture is
+   still in effect (live state still contradicts the override row), mark
+   the new row overridden too and skip. One notification fires per
+   *source* user gesture, not per suppressed downstream row. Restore rows
+   are exempt so the system can always return to baseline.
+
+Both behaviours are gated by `PREFIRE_STATE_MATCH_ENABLED` (default true).
+Set to `false` for instant rollback. Telemetry shows up in `action_log` as
+`prefire_state_match` and `prefire_override_inherited` events.
+
 ---
 
 ## SmartThings (Samsung) — OAuth + appliance scheduling
@@ -205,16 +229,19 @@ PLAN_AUTO_APPROVE=true                          # default: simulate → auto-app
 PLAN_APPROVAL_TIMEOUT_SECONDS=300               # grace window advertised to OpenClaw for Telegram/Discord buttons
 DHW_TEMP_NORMAL_C=45.0                          # restore/safe-default tank target (45 °C = sufficient for normal use)
 TARGET_DHW_TEMP_MIN_GUESTS_C=55.0              # guest-mode LP floor (multiple showers at 20:30–22:00)
-DHW_PEAK_TANK_STRATEGY=shutdown                 # `shutdown` cuts tank power during peak (saves ~5p/day vs idle on
-                                                 # 14-day data); `idle` keeps tank ON at 45 °C floor (legacy default).
-                                                 # Validated 2026-05-11: 3 h shutdown drops tank ~6 °C (median decay
-                                                 # -1.97 °C/h), still ≥ 44 °C for evening showers.
-                                                 # IMPORTANT: tank pre-charge above 45 °C only happens when there's
-                                                 # an economic reason — `negative` (paid to import → 65 °C max),
-                                                 # `solar_charge` (free PV → DHW_TEMP_PV_ABUNDANCE_TARGET_C, default
-                                                 # 45 → runtime-tunable per household occupancy), `cheap` (modest
-                                                 # → 48 °C). Peak avoidance does NOT trigger pre-charging — see
-                                                 # issue #322 for conditional shutdown commit.
+# DHW_PEAK_TANK_STRATEGY was REMOVED 2026-05-21 (Epic 14, #386). The dispatch
+# layer always uses the IDLE behaviour (tank_power=True, tank_temp=DHW_TEMP_NORMAL_C)
+# during peak / peak_export windows. Prod telemetry (30d, 8 completed peak
+# windows) showed median tank decay 0.00 °C/h — the tank coasts essentially
+# perfectly even when held warm — and SHUTDOWN attempts failed 27% of the time
+# with READ_ONLY_CHARACTERISTIC errors. Leaving the env line in /srv/hem/.env
+# is harmless; remove on next .env touch.
+# IMPORTANT: tank pre-charge above 45 °C only happens when there's
+# an economic reason — `negative` (paid to import → 65 °C max),
+# `solar_charge` (free PV → DHW_TEMP_PV_ABUNDANCE_TARGET_C, default
+# 45 → runtime-tunable per household occupancy), `cheap` (modest
+# → 48 °C). Peak avoidance does NOT trigger pre-charging — see
+# issue #322 for conditional shutdown commit.
 DHW_TEMP_PV_ABUNDANCE_TARGET_C=45               # tank target during solar_charge / solar_preheat slots. Runtime-
                                                  # tunable via runtime_settings (PUT /api/v1/settings or MCP
                                                  # `set_setting`). Raise per household: single ~42, family of 4
