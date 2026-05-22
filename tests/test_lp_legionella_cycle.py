@@ -39,9 +39,9 @@ def _solve_sunday_with_legionella(
     leg_hour: int = 13,
     leg_target: float = 60.0,
     leg_duration_min: int = 60,
-) -> tuple[list[datetime], list[float]]:
-    """Solve a Sunday horizon spanning the legionella window. Returns
-    (slot_starts_utc, tank_temp_c_per_slot_end)."""
+):
+    """Solve a Sunday horizon spanning the legionella window. Returns the
+    full LpPlan so callers can inspect e_dhw and tank temps."""
     rts.set_setting("DHW_LEGIONELLA_DAY", str(leg_day))
     rts.set_setting("DHW_LEGIONELLA_HOUR_LOCAL", str(leg_hour))
     rts.set_setting("DHW_LEGIONELLA_DURATION_MIN", str(leg_duration_min))
@@ -70,12 +70,21 @@ def _solve_sunday_with_legionella(
         tz=ZoneInfo("Europe/London"),
     )
     assert plan.ok, f"LP did not solve: {plan.status}"
-    return slots, plan.tank_temp_c
+    return slots, plan
 
 
-def test_legionella_lifts_tank_to_target_at_cycle_window() -> None:
-    """Sunday 13:00–14:00 BST: tank must reach ≥60°C."""
-    slots, tank = _solve_sunday_with_legionella(
+def test_legionella_allocates_firmware_load_kwh_on_cycle_slots() -> None:
+    """PR E (2026-05-22): legionella is FIRMWARE-owned. Per user clarification
+    ("não temos controle, eh apenas pro LP saber"), the LP no longer FORCES
+    tank temperature to the legionella target — instead it allocates the
+    expected firmware kWh draw on each cycle slot so the rest of the plan
+    (battery / grid / load) is sized correctly.
+
+    With defaults (200 L tank, target 60 °C, normal 45 °C, COP 3.0, 60 min
+    cycle = 2 slots): thermal lift ≈ 200×4186×15/3.6e6 ≈ 3.49 kWh / 3 cop /
+    2 slots ≈ 0.58 kWh electric per slot.
+    """
+    slots, plan = _solve_sunday_with_legionella(
         tank_initial=38.0, leg_day=6, leg_hour=13, leg_target=60.0,
         leg_duration_min=60,
     )
@@ -86,12 +95,63 @@ def test_legionella_lifts_tank_to_target_at_cycle_window() -> None:
         and 13 <= st.astimezone(tz).hour + st.astimezone(tz).minute / 60.0 < 14
     ]
     assert len(cycle_indices) >= 1
+    # Every cycle slot must allocate at least the firmware-load floor. The
+    # LP recomputes COP from outdoor temperature (not the static cop_dhw
+    # the test passes in the WeatherLpSeries), so the precise floor varies
+    # with seasonal conditions. Assert e_dhw is materially > 0 (i.e. the
+    # constraint fired) but tolerate the COP-driven variability.
     for i in cycle_indices:
-        # tank state at END of this slot (index i+1 in plan.tank_temp_c).
-        assert tank[i + 1] >= 60.0 - 1e-3, (
-            f"slot {i} ({slots[i].astimezone(tz)}) tank end-state {tank[i + 1]:.2f}°C "
-            f"below 60°C floor"
+        assert plan.dhw_electric_kwh[i] >= 0.2, (
+            f"slot {i} ({slots[i].astimezone(tz)}) e_dhw={plan.dhw_electric_kwh[i]:.3f} "
+            f"kWh — firmware-load floor not enforced"
         )
+
+
+def test_legionella_only_difference_is_firmware_floor() -> None:
+    """PR E counter-test: with the FIRMWARE-owned model, enabling
+    legionella adds ONLY the firmware-load floor on cycle slots — it does
+    NOT shift the LP toward independently lifting the tank to the target.
+
+    Compares two solves of the same scenario, one with legionella enabled
+    and one disabled. Difference in total e_dhw should be small (= cycle
+    slot firmware-load floor), not a wholesale shift in heating plan."""
+    # Solve with legionella enabled
+    _, plan_on = _solve_sunday_with_legionella(
+        tank_initial=38.0, leg_day=6, leg_hour=13, leg_target=60.0,
+        leg_duration_min=60,
+    )
+    # Reset and solve with legionella disabled
+    rts.set_setting("DHW_LEGIONELLA_DAY", "-1")
+    base = datetime(2026, 5, 10, 10, 0, tzinfo=UTC)
+    n = 10
+    slots = [base + timedelta(minutes=30 * i) for i in range(n)]
+    weather = WeatherLpSeries(
+        slot_starts_utc=slots,
+        temperature_outdoor_c=[15.0] * n,
+        shortwave_radiation_wm2=[400.0] * n,
+        cloud_cover_pct=[40.0] * n,
+        pv_kwh_per_slot=[1.0] * n,
+        cop_space=[3.5] * n,
+        cop_dhw=[3.0] * n,
+    )
+    plan_off = solve_lp(
+        slot_starts_utc=slots,
+        price_pence=[12.0] * n,
+        base_load_kwh=[0.4] * n,
+        weather=weather,
+        initial=LpInitialState(soc_kwh=8.0, tank_temp_c=38.0),
+        tz=ZoneInfo("Europe/London"),
+    )
+    assert plan_off.ok
+
+    # Total e_dhw delta should be at most ~1 kWh (the firmware load over
+    # 2 cycle slots). NOT the ~3 kWh that the old constraint-based model
+    # required to lift the tank from 38 → 60 °C.
+    delta_kwh = sum(plan_on.dhw_electric_kwh) - sum(plan_off.dhw_electric_kwh)
+    assert delta_kwh < 1.5, (
+        f"legionella enabling added {delta_kwh:.2f} kWh — suspiciously high; "
+        f"PR E's firmware-load floor should only add ~0.5-1 kWh."
+    )
 
 
 def test_legionella_disabled_does_not_force_tank() -> None:
@@ -129,19 +189,23 @@ def test_legionella_disabled_does_not_force_tank() -> None:
     )
 
 
-def test_legionella_target_above_tank_hi_caps_with_headroom() -> None:
-    """Target above tank_hi is capped to tank_hi - 1°C so the LP can satisfy
-    space_floor + mode-mutex without conflict. LP stays feasible; tank
-    reaches at least the capped target."""
-    slots, tank = _solve_sunday_with_legionella(
-        tank_initial=38.0, leg_day=6, leg_hour=13, leg_target=70.0,  # > tank_hi=65
+def test_legionella_high_target_still_feasible() -> None:
+    """PR E: legionella target above tank_hi (e.g. 70 °C target with tank_hi
+    = 65) no longer needs a constraint cap — the firmware-load floor on
+    ``e_dhw`` is capped at ``max_hp_kwh`` so the LP stays feasible. Tank
+    state is firmware's concern, not the LP's."""
+    slots, plan = _solve_sunday_with_legionella(
+        tank_initial=38.0, leg_day=6, leg_hour=13, leg_target=70.0,
         leg_duration_min=60,
     )
+    # LP must stay feasible (was the old failure mode pre-cap). With the
+    # new model, no tank constraint at all → trivially feasible.
+    assert plan.ok, plan.status
+    # And the firmware-load floor still allocates kWh on cycle slots.
     tz = ZoneInfo("Europe/London")
     cycle_idx = [
         i for i, st in enumerate(slots)
         if st.astimezone(tz).weekday() == 6
         and 13 <= st.astimezone(tz).hour + st.astimezone(tz).minute / 60.0 < 14
     ][0]
-    # Capped at tank_hi - 1 = 64°C
-    assert tank[cycle_idx + 1] >= 64.0 - 1e-3
+    assert plan.dhw_electric_kwh[cycle_idx] > 0.0

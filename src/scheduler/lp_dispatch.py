@@ -118,7 +118,20 @@ def lp_plan_to_slots(plan: LpPlan) -> list[HalfHourSlot]:
 
         if chg > EPS:
             grid_import = plan.import_kwh[i] if plan.import_kwh else 0.0
-            if grid_import < EPS:
+            # PR E — vacation mode: the LP constraint ``chg <= pv_use`` (see
+            # lp_optimizer.py line ~612) guarantees battery charging draws
+            # only from PV. ``imp > 0`` in a vacation slot is for base_load
+            # coverage, not for chg. The right hardware mode is SelfUse
+            # (PV → battery + load); ForceCharge would wrongly grid-charge
+            # the battery in addition to base load.
+            try:
+                from ..presets import OperationPreset
+                _vacation = OperationPreset(config.OPTIMIZATION_PRESET) == OperationPreset.VACATION
+            except (ValueError, AttributeError):
+                _vacation = False
+            if _vacation:
+                kind = "solar_charge"
+            elif grid_import < EPS:
                 kind = "solar_charge"  # PV-only charging — use SelfUse, not ForceCharge
             elif price <= 0:
                 kind = "negative"
@@ -180,17 +193,27 @@ def lp_plan_to_slots(plan: LpPlan) -> list[HalfHourSlot]:
     # Reset when we hit a productive slot (cheap/negative/solar_charge) — that
     # signals "next day's economics are better, tank can heat now."
     if _overnight_tank_idle_enabled():
+        _is_vacation = False
         try:
             from .lp_optimizer import _resolve_active_shower_windows, _window_set_slot_mask
             from ..presets import OperationPreset
             try:
-                _is_guests = OperationPreset(config.OPTIMIZATION_PRESET) == OperationPreset.GUESTS
+                _preset = OperationPreset(config.OPTIMIZATION_PRESET)
             except (ValueError, AttributeError):
-                _is_guests = False
+                _preset = OperationPreset.NORMAL
+            _is_guests = _preset == OperationPreset.GUESTS
+            _is_vacation = _preset == OperationPreset.VACATION
             shower_windows = _resolve_active_shower_windows(_is_guests)
             shower_mask = _window_set_slot_mask(plan.slot_starts_utc, TZ(), windows=shower_windows)
         except Exception:  # pragma: no cover — never let the override break dispatch
             shower_mask = [False] * n
+
+        # PR E — vacation: DHW demand is zero (firmware owns the tank).
+        # The post-shower idle overlay is semantically moot; skip entirely
+        # so a config drift adding shower windows to vacation can't trigger
+        # surprise tank_idle_overnight labels.
+        if _is_vacation:
+            return out
 
         seen_shower_in_window = False
         # Bug fix (#323): when the LP horizon's first slot starts INSIDE an
