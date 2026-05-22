@@ -95,12 +95,19 @@ def test_config_property_reads_runtime_value():
 
 
 def test_dhw_temp_pv_abundance_target_runtime_tunable():
-    """#325: solar_preheat target tunes per household occupancy at runtime."""
-    # Default = 45 (matches DHW_TEMP_NORMAL_C — no extra °C unless household needs it)
-    assert config.DHW_TEMP_PV_ABUNDANCE_TARGET_C == 45.0
-    # Bump for a family of 4 with evening showers
-    rts.set_setting("DHW_TEMP_PV_ABUNDANCE_TARGET_C", 50.0)
+    """#325 / PR F: solar_preheat target tunes per household occupancy at
+    runtime. PR F bumped the default from 45 → 50 so the LP has 5 °C of
+    headroom above NORMAL to actually store PV-driven thermal energy
+    (at 45 == NORMAL the LP couldn't allocate e_dhw → PV was wasted)."""
+    # PR F default = 50 (5 °C above DHW_TEMP_NORMAL_C; ~1.16 kWh thermal
+    # storage at 200 L, usable for the evening shower window).
     assert config.DHW_TEMP_PV_ABUNDANCE_TARGET_C == 50.0
+    # Bump for guests / larger household
+    rts.set_setting("DHW_TEMP_PV_ABUNDANCE_TARGET_C", 55.0)
+    assert config.DHW_TEMP_PV_ABUNDANCE_TARGET_C == 55.0
+    # Tune down for a single occupant who showers less
+    rts.set_setting("DHW_TEMP_PV_ABUNDANCE_TARGET_C", 45.0)
+    assert config.DHW_TEMP_PV_ABUNDANCE_TARGET_C == 45.0
     # Range guards (40..60)
     with pytest.raises(rts.SettingValidationError):
         rts.set_setting("DHW_TEMP_PV_ABUNDANCE_TARGET_C", 35.0)

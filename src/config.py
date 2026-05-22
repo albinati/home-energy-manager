@@ -1389,6 +1389,26 @@ class Config:
         os.getenv("TANK_DRIFT_CHECK_ENABLED", "true").strip().lower()
         in ("1", "true", "yes", "on")
     )
+    # PR F (2026-05-22) — sibling of TANK_DRIFT_CHECK_ENABLED, but for the
+    # tank TARGET (vs the power switch). Catches "commanded tank_temp >
+    # NORMAL with no upcoming heating action" — typically a stale
+    # solar_preheat target after PV forecast collapsed mid-window.
+    # Auto-recovers by writing tank_temp = DHW_TEMP_NORMAL_C.
+    TANK_TARGET_DRIFT_CHECK_ENABLED: bool = (
+        os.getenv("TANK_TARGET_DRIFT_CHECK_ENABLED", "true").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+    # Tolerance above NORMAL (°C) before flagging drift. Daikin Onecta
+    # setpoint stepValue=1, so smaller would oscillate.
+    TANK_TARGET_DRIFT_TOLERANCE_C: float = float(
+        os.getenv("TANK_TARGET_DRIFT_TOLERANCE_C", "1.0")
+    )
+    # Look-ahead window (minutes) to scan action_schedule for a planned
+    # tank-heating action that justifies the high target. 30 min covers
+    # two heartbeat ticks of headroom.
+    TANK_TARGET_DRIFT_LOOKAHEAD_MIN: int = int(
+        os.getenv("TANK_TARGET_DRIFT_LOOKAHEAD_MIN", "30")
+    )
 
     # Fox ESS: soft daily budget (real limit ≈1440; we stop at 1200 for 15% headroom)
     FOX_DAILY_BUDGET: int = int(os.getenv("FOX_DAILY_BUDGET", "1200"))
