@@ -39,7 +39,7 @@ def _idle_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(app_config, "DHW_SHOWER_SCHEDULE", "06:00-07:30,21:30-22:30")
     monkeypatch.setattr(app_config, "DHW_SHOWER_SCHEDULE_GUESTS", "")
     monkeypatch.setattr(app_config, "OPTIMIZATION_PRESET", "normal")
-    monkeypatch.setattr(app_config, "ENERGY_STRATEGY_MODE", "savings_first")
+    # PR C — ENERGY_STRATEGY_MODE removed (was here).
 
 
 def _build_plan(

@@ -240,13 +240,12 @@ SCHEMA: dict[str, SettingSpec] = {
             "shower hour the morning after."
         ),
     ),
-    "ENERGY_STRATEGY_MODE": SettingSpec(
-        key="ENERGY_STRATEGY_MODE",
-        type_name="str",
-        env_default=_str_env("ENERGY_STRATEGY_MODE", "savings_first"),
-        enum=("savings_first", "strict_savings"),
-        description="savings_first allows peak-export discharge; strict_savings never does.",
-    ),
+    # ENERGY_STRATEGY_MODE removed in PR C (mode-collapse stack 3/3).
+    # Was a 2-value dispatch policy (savings_first / strict_savings) that
+    # gated the drop-peak-export branch. Replaced by household-mode-derived
+    # behaviour: vacation = max arbitrage; normal/guests use the scenario-LP
+    # filter. Anything stored under this key reads via the legacy alias path
+    # below as a no-op deprecation log; remove from /srv/hem/.env opportunistically.
     "DAIKIN_CONTROL_MODE": SettingSpec(
         key="DAIKIN_CONTROL_MODE",
         type_name="str",

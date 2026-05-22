@@ -43,7 +43,7 @@ def _active_mode_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(app_config, "LP_INVERTER_STRESS_COST_PENCE", 0.0)
     monkeypatch.setattr(app_config, "LP_HP_MIN_ON_SLOTS", 1)
     monkeypatch.setattr(app_config, "DAIKIN_CONTROL_MODE", "active")
-    monkeypatch.setattr(app_config, "ENERGY_STRATEGY_MODE", "savings_first")
+    # PR C — ENERGY_STRATEGY_MODE removed; no-op equivalent.
     monkeypatch.setattr(app_config, "BATTERY_CAPACITY_KWH", 10.36)
     monkeypatch.setattr(app_config, "MIN_SOC_RESERVE_PERCENT", 10.0)
     monkeypatch.setattr(app_config, "DAIKIN_MAX_HP_KW", 2.0)

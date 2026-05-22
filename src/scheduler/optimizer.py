@@ -1132,7 +1132,9 @@ def _persist_lp_snapshots(
         "cheap_threshold_p": float(plan.cheap_threshold_pence),
         "daikin_control_mode": str(config.DAIKIN_CONTROL_MODE),
         "optimization_preset": str(config.OPTIMIZATION_PRESET),
-        "energy_strategy_mode": str(config.ENERGY_STRATEGY_MODE),
+        # PR C — energy_strategy_mode removed; column kept for snapshot
+        # back-compat with old rows (read-only). Always writes "removed".
+        "energy_strategy_mode": "removed",
         "lp_status": str(lp_status),
     }
 

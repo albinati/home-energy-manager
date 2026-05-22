@@ -29,7 +29,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class PvSufficiencyGuardDiag:
-    """Audit data for the PV-sufficiency guard rail decision."""
+    """Audit data for the PV-sufficiency guard rail decision.
+
+    PR C: the ``strict_savings`` field is kept for snapshot back-compat
+    but is now always reported as ``False`` (the strict_savings mode was
+    removed). The guard is enabled by default for every solve.
+    """
 
     enabled: bool = False
     strict_savings: bool = False
@@ -69,7 +74,7 @@ def evaluate_pv_sufficiency_guard(
     peak_threshold_p: float,
     initial_soc_kwh: float,
     soc_max_kwh: float,
-    strict_savings: bool,
+    strict_savings: bool = False,  # kept for back-compat; ignored in PR C
     enabled: bool | None = None,
     margin: float | None = None,
     as_of_utc: Any = None,  # datetime — defaults to slot_starts_utc[0]
@@ -112,15 +117,16 @@ def evaluate_pv_sufficiency_guard(
     )
     diag = PvSufficiencyGuardDiag(
         enabled=enabled_eff,
-        strict_savings=strict_savings,
+        strict_savings=False,  # PR C — strict_savings removed
         margin=margin_eff,
     )
     if not enabled_eff:
         diag.reason = "disabled"
         return diag
-    if not strict_savings:
-        diag.reason = "not_strict_savings"
-        return diag
+    # PR C — guard is always evaluated when enabled (previously only fired
+    # under strict_savings mode). The economic argument is the same in any
+    # mode: when forecast PV would already fill the battery, grid-charging
+    # before the first peak slot is wasteful.
 
     n = len(slot_starts_utc)
     if n == 0:

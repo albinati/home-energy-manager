@@ -708,35 +708,14 @@ def _mean_agile_rate_line(day: date, pnl: dict[str, Any], mtd: dict[str, Any] | 
 
 
 def _strict_savings_forgone_line(day: date, tz: ZoneInfo) -> str | None:
-    """Counterfactual: revenue NOT realised because strict_savings (or the
-    scenario filter) downgraded LP-preferred peak_export slots to standard.
+    """PR C — strict_savings was removed; the line is permanently inactive.
 
-    For each slot on ``day`` whose ``dispatch_decisions.dispatched_kind`` is
-    not ``peak_export`` but whose snapshot ``lp_solution_snapshot.export_kwh``
-    is positive, sum the would-have-earned revenue. Gives the user a daily
-    running tally of holding the strict_savings policy — useful to revisit
-    the trade-off when the gap is sustained over weeks."""
-    if config.ENERGY_STRATEGY_MODE != "strict_savings":
-        return None
-    try:
-        rows = db.list_strict_savings_forgone_export_for_day(day.isoformat())
-    except (AttributeError, Exception):
-        # Helper may not exist in older DB layers — surface nothing gracefully.
-        return None
-    if not rows:
-        return None
-    forgone_kwh = sum(float(r.get("export_kwh") or 0) for r in rows)
-    forgone_p = sum(
-        float(r.get("export_kwh") or 0) * float(r.get("export_price_p_kwh") or 0)
-        for r in rows
-    )
-    if forgone_kwh <= 0:
-        return None
-    return (
-        f"- strict_savings forgone export: ~£{forgone_p / 100.0:.2f} "
-        f"({forgone_kwh:.1f} kWh over {len(rows)} slot{'s' if len(rows) != 1 else ''}) "
-        f"— what *savings_first* would have earned by exporting at peak"
-    )
+    Returns None so the brief composer keeps working without conditional
+    fan-out. The DB helper ``list_strict_savings_forgone_export_for_day``
+    remains for historical audit queries via MCP, but no fresh rows are
+    written because the dispatch reason `strict_savings` no longer fires.
+    """
+    return None
 
 
 def _lp_scorecard_line(day: date) -> str | None:
