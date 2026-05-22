@@ -591,12 +591,27 @@ def solve_lp(
         # Energy balance
         prob += imp[i] + pv_use[i] + dis[i] == base_load_kwh[i] + exp[i] + chg[i] + e_hp_i
 
-        # Export only from PV or battery
-        prob += exp[i] <= pv_use[i] + dis[i]
-
-        # PR C — Vacation mode: bateria carrega só de PV (sem grid charging)
+        # Export source — mode-derived:
+        #
+        # * vacation: bateria pode descarregar pro grid (peak_export arbitrage)
+        #   → ``exp <= pv_use + dis``.
+        # * normal / guests: bateria SÓ alimenta self-use (load / DHW); PV
+        #   excedente ainda exporta passivamente pelo Fox V3 SelfUse mode.
+        #   → ``exp <= pv_use``. Como ``dis`` não pode contribuir pra export,
+        #     o ramo ``dis > 0 AND exp > 0`` em ``lp_plan_to_slots`` nunca
+        #     dispara → nenhum slot vira ``peak_export`` → nenhuma
+        #     ForceDischarge group no Fox V3.
+        #
+        # PR D arquitetural (2026-05-22): substitui a regra dropped-at-dispatch
+        # do ENERGY_STRATEGY_MODE=strict_savings (removido em PR C). Em modo
+        # vacation o LP planeja arbitragem normalmente; em normal/guests, o LP
+        # não tem solução viável que envolve descarga pro grid.
         if _vacation_mode:
+            prob += exp[i] <= pv_use[i] + dis[i]
+            # Vacation: bateria carrega só de PV (sem grid charging)
             prob += chg[i] <= pv_use[i]
+        else:
+            prob += exp[i] <= pv_use[i]
 
         # Battery SoC dynamics
         prob += soc[i + 1] == soc[i] + chg[i] * sqrt_eta - dis[i] / sqrt_eta
