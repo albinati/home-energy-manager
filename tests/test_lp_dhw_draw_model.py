@@ -180,14 +180,21 @@ def test_dhw_draw_per_day_normalization_2day_horizon(
 def test_dhw_draw_model_zero_litres_disables_draw(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Setting DHW_DAILY_SHOWER_LITRES=0 reverts to previous behavior — LP
-    sees only standing loss, plans minimal heating."""
+    """Zero showers (PR B: explicit demand model) means no draw — LP sees
+    only standing loss, plans minimal heating.
+
+    PR B replaced ``DHW_DAILY_SHOWER_LITRES`` (single aggregate) with a
+    count × duration × flow × mixer-temp model. Setting all shower counts
+    to 0 plus the legacy aggregate to 0 unambiguously disables draw."""
     from src.config import config as app_config
     from src.scheduler.lp_optimizer import LpInitialState, solve_lp
 
     monkeypatch.setattr(app_config, "DAIKIN_CONTROL_MODE", "active", raising=False)
     monkeypatch.setattr(app_config, "DHW_SHOWER_SCHEDULE", "19:00-22:00", raising=False)
     monkeypatch.setattr(app_config, "DHW_DAILY_SHOWER_LITRES", 0.0, raising=False)
+    # PR B — zero out the explicit count model too.
+    monkeypatch.setattr(app_config, "DHW_SHOWERS_NORMAL_EVENING", 0, raising=False)
+    monkeypatch.setattr(app_config, "DHW_SHOWERS_NORMAL_MORNING_RESERVE", 0, raising=False)
 
     base = datetime(2026, 6, 1, 18, 0, tzinfo=UTC)
     n = 6

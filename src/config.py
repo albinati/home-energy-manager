@@ -1102,6 +1102,87 @@ class Config:
     def LP_SOC_FINAL_KWH(self, value: float) -> None:
         self._rt_set("LP_SOC_FINAL_KWH", float(value))
 
+    # --- PR B — shower demand model -------------------------------------
+    @property
+    def DHW_SHOWER_DURATION_MIN(self) -> float:
+        return float(self._rt_get("DHW_SHOWER_DURATION_MIN"))
+
+    @DHW_SHOWER_DURATION_MIN.setter
+    def DHW_SHOWER_DURATION_MIN(self, value: float) -> None:
+        self._rt_set("DHW_SHOWER_DURATION_MIN", float(value))
+
+    @property
+    def DHW_SHOWER_FLOW_LPM(self) -> float:
+        return float(self._rt_get("DHW_SHOWER_FLOW_LPM"))
+
+    @DHW_SHOWER_FLOW_LPM.setter
+    def DHW_SHOWER_FLOW_LPM(self, value: float) -> None:
+        self._rt_set("DHW_SHOWER_FLOW_LPM", float(value))
+
+    @property
+    def DHW_SHOWER_MIXER_TEMP_C(self) -> float:
+        return float(self._rt_get("DHW_SHOWER_MIXER_TEMP_C"))
+
+    @DHW_SHOWER_MIXER_TEMP_C.setter
+    def DHW_SHOWER_MIXER_TEMP_C(self, value: float) -> None:
+        self._rt_set("DHW_SHOWER_MIXER_TEMP_C", float(value))
+
+    @property
+    def DHW_SHOWER_COLD_INLET_TEMP_C(self) -> float:
+        return float(self._rt_get("DHW_SHOWER_COLD_INLET_TEMP_C"))
+
+    @DHW_SHOWER_COLD_INLET_TEMP_C.setter
+    def DHW_SHOWER_COLD_INLET_TEMP_C(self, value: float) -> None:
+        self._rt_set("DHW_SHOWER_COLD_INLET_TEMP_C", float(value))
+
+    @property
+    def DHW_SHOWERS_NORMAL_EVENING(self) -> int:
+        return int(self._rt_get("DHW_SHOWERS_NORMAL_EVENING"))
+
+    @DHW_SHOWERS_NORMAL_EVENING.setter
+    def DHW_SHOWERS_NORMAL_EVENING(self, value: int) -> None:
+        self._rt_set("DHW_SHOWERS_NORMAL_EVENING", int(value))
+
+    @property
+    def DHW_SHOWERS_NORMAL_MORNING_RESERVE(self) -> int:
+        return int(self._rt_get("DHW_SHOWERS_NORMAL_MORNING_RESERVE"))
+
+    @DHW_SHOWERS_NORMAL_MORNING_RESERVE.setter
+    def DHW_SHOWERS_NORMAL_MORNING_RESERVE(self, value: int) -> None:
+        self._rt_set("DHW_SHOWERS_NORMAL_MORNING_RESERVE", int(value))
+
+    @property
+    def DHW_SHOWERS_GUESTS_EVENING_EXTRA_PER_GUEST(self) -> int:
+        return int(self._rt_get("DHW_SHOWERS_GUESTS_EVENING_EXTRA_PER_GUEST"))
+
+    @DHW_SHOWERS_GUESTS_EVENING_EXTRA_PER_GUEST.setter
+    def DHW_SHOWERS_GUESTS_EVENING_EXTRA_PER_GUEST(self, value: int) -> None:
+        self._rt_set("DHW_SHOWERS_GUESTS_EVENING_EXTRA_PER_GUEST", int(value))
+
+    @property
+    def DHW_SHOWERS_GUESTS_MORNING_EXTRA_PER_GUEST(self) -> int:
+        return int(self._rt_get("DHW_SHOWERS_GUESTS_MORNING_EXTRA_PER_GUEST"))
+
+    @DHW_SHOWERS_GUESTS_MORNING_EXTRA_PER_GUEST.setter
+    def DHW_SHOWERS_GUESTS_MORNING_EXTRA_PER_GUEST(self, value: int) -> None:
+        self._rt_set("DHW_SHOWERS_GUESTS_MORNING_EXTRA_PER_GUEST", int(value))
+
+    @property
+    def DHW_GUEST_COUNT(self) -> int:
+        return int(self._rt_get("DHW_GUEST_COUNT"))
+
+    @DHW_GUEST_COUNT.setter
+    def DHW_GUEST_COUNT(self, value: int) -> None:
+        self._rt_set("DHW_GUEST_COUNT", int(value))
+
+    @property
+    def DHW_TANK_USABLE_FRACTION(self) -> float:
+        return float(self._rt_get("DHW_TANK_USABLE_FRACTION"))
+
+    @DHW_TANK_USABLE_FRACTION.setter
+    def DHW_TANK_USABLE_FRACTION(self, value: float) -> None:
+        self._rt_set("DHW_TANK_USABLE_FRACTION", float(value))
+
     @property
     def LP_SOC_TERMINAL_VALUE_PENCE_PER_KWH(self) -> float:
         return float(self._rt_get("LP_SOC_TERMINAL_VALUE_PENCE_PER_KWH"))
