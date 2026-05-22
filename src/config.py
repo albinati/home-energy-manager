@@ -1408,25 +1408,74 @@ class Config:
         os.getenv("TANK_DRIFT_CHECK_ENABLED", "true").strip().lower()
         in ("1", "true", "yes", "on")
     )
-    # PR F (2026-05-22) — sibling of TANK_DRIFT_CHECK_ENABLED, but for the
-    # tank TARGET (vs the power switch). Catches "commanded tank_temp >
-    # NORMAL with no upcoming heating action" — typically a stale
-    # solar_preheat target after PV forecast collapsed mid-window.
-    # Auto-recovers by writing tank_temp = DHW_TEMP_NORMAL_C.
-    TANK_TARGET_DRIFT_CHECK_ENABLED: bool = (
-        os.getenv("TANK_TARGET_DRIFT_CHECK_ENABLED", "true").strip().lower()
+    # PR J (2026-05-22) — Near-real-time PV diverter (Eddi/Zappi pattern).
+    # Replaces the PR F drift check (which was too reactive — fought against
+    # user's manual overrides). State machine: IDLE → DIVERTING → LOCKOUT,
+    # with multi-tick confirmation + hysteresis to prevent oscillation.
+    #
+    # Activates: lifts tank target to DHW_TEMP_PV_ABUNDANCE_TARGET_C when
+    # grid export is sustained AND battery is near-full AND forecast agrees.
+    # Deactivates: restores tank to DHW_TEMP_NORMAL_C when export stops.
+    # Heartbeat 2 min × tick counters keeps Daikin quota safe (~2-4 writes/day).
+    PV_DIVERTER_ENABLED: bool = (
+        os.getenv("PV_DIVERTER_ENABLED", "true").strip().lower()
         in ("1", "true", "yes", "on")
     )
-    # Tolerance above NORMAL (°C) before flagging drift. Daikin Onecta
-    # setpoint stepValue=1, so smaller would oscillate.
-    TANK_TARGET_DRIFT_TOLERANCE_C: float = float(
-        os.getenv("TANK_TARGET_DRIFT_TOLERANCE_C", "1.0")
+    # Threshold (kW) of GRID EXPORT to consider activating diverter.
+    # Convention: live `RealTimeData.grid_power` is negative when exporting;
+    # diverter sees `export_kw = max(0, -grid_power)`.
+    PV_DIVERTER_EXPORT_THRESHOLD_KW: float = float(
+        os.getenv("PV_DIVERTER_EXPORT_THRESHOLD_KW", "1.0")
     )
-    # Look-ahead window (minutes) to scan action_schedule for a planned
-    # tank-heating action that justifies the high target. 30 min covers
-    # two heartbeat ticks of headroom.
-    TANK_TARGET_DRIFT_LOOKAHEAD_MIN: int = int(
-        os.getenv("TANK_TARGET_DRIFT_LOOKAHEAD_MIN", "30")
+    # Hysteresis: deactivate when export falls below this threshold (kW).
+    # Lower than ACTIVATE threshold so brief drops don't flap.
+    PV_DIVERTER_DEACTIVATE_THRESHOLD_KW: float = float(
+        os.getenv("PV_DIVERTER_DEACTIVATE_THRESHOLD_KW", "0.3")
+    )
+    # Battery-first policy: don't divert until SoC is this high.
+    # User policy: "battery for overnight self-use; tank only after battery
+    # near-full" (memory: feedback_near_zero_grid_cost_policy).
+    PV_DIVERTER_MIN_SOC_PCT: float = float(
+        os.getenv("PV_DIVERTER_MIN_SOC_PCT", "95.0")
+    )
+    # Deactivate when SoC drops below this (battery suddenly draining
+    # means something else is consuming heavily — don't divert further).
+    PV_DIVERTER_SOC_DEACTIVATE_PCT: float = float(
+        os.getenv("PV_DIVERTER_SOC_DEACTIVATE_PCT", "90.0")
+    )
+    # Consecutive heartbeat ticks of ACTIVATE conditions required before
+    # writing the diverter ON. 3 ticks × 2-min heartbeat = 6 min sustained.
+    PV_DIVERTER_ACTIVATE_CONFIRM_TICKS: int = int(
+        os.getenv("PV_DIVERTER_ACTIVATE_CONFIRM_TICKS", "3")
+    )
+    # Consecutive ticks of DEACTIVATE conditions before writing diverter OFF.
+    # 5 ticks × 2 min = 10 min sustained (longer than activate so we don't
+    # flap during brief cloud cover).
+    PV_DIVERTER_DEACTIVATE_CONFIRM_TICKS: int = int(
+        os.getenv("PV_DIVERTER_DEACTIVATE_CONFIRM_TICKS", "5")
+    )
+    # Lockout ticks AFTER any state transition. During lockout, all
+    # transition signals are rejected. 8 ticks × 2 min = 16 min.
+    PV_DIVERTER_LOCKOUT_TICKS: int = int(
+        os.getenv("PV_DIVERTER_LOCKOUT_TICKS", "8")
+    )
+    # Whether ACTIVATE must also pass a forecast check (next ~60 min of
+    # predicted PV stays above a viable threshold). Prevents activating
+    # on a brief sun gap when forecast says "cloudy soon". Set to false
+    # to use instantaneous-only mode.
+    PV_DIVERTER_USE_FORECAST: bool = (
+        os.getenv("PV_DIVERTER_USE_FORECAST", "true").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+    # Forecast lookahead horizon (minutes) when PV_DIVERTER_USE_FORECAST is on.
+    PV_DIVERTER_FORECAST_LOOKAHEAD_MIN: int = int(
+        os.getenv("PV_DIVERTER_FORECAST_LOOKAHEAD_MIN", "60")
+    )
+    # Minimum avg forecasted PV (kW) over the lookahead window for the
+    # diverter to consider activating. Effectively "is the sun likely
+    # to keep generating enough excess?"
+    PV_DIVERTER_FORECAST_MIN_PV_KW: float = float(
+        os.getenv("PV_DIVERTER_FORECAST_MIN_PV_KW", "1.5")
     )
 
     # Fox ESS: soft daily budget (real limit ≈1440; we stop at 1200 for 15% headroom)
