@@ -113,6 +113,19 @@ def test_config_enum_property_round_trip():
     assert config.OPTIMIZATION_PRESET == "guests"
     rts.set_setting("OPTIMIZATION_PRESET", "normal")
     assert config.OPTIMIZATION_PRESET == "normal"
+    rts.set_setting("OPTIMIZATION_PRESET", "vacation")
+    assert config.OPTIMIZATION_PRESET == "vacation"
+
+
+def test_optimization_preset_rejects_invalid_value():
+    with pytest.raises(rts.SettingValidationError):
+        rts.set_setting("OPTIMIZATION_PRESET", "invalid")
+    # Legacy values are no longer accepted via set_setting (only via
+    # legacy translator on read of pre-existing stored values).
+    with pytest.raises(rts.SettingValidationError):
+        rts.set_setting("OPTIMIZATION_PRESET", "travel")
+    with pytest.raises(rts.SettingValidationError):
+        rts.set_setting("OPTIMIZATION_PRESET", "away")
 
 
 # ---------------------------------------------------------------------------

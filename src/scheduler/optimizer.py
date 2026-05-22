@@ -370,10 +370,15 @@ def _slot_fox_tuple(
 
 
 def _optimization_preset_away_like() -> bool:
-    """True when household preset is travel or away (hibernate / export-friendly)."""
+    """True when household preset is vacation (hibernate / export-friendly).
+
+    Legacy values ``travel``/``away`` are translated to ``vacation`` by the
+    runtime_settings layer; ``OperationPreset._missing_`` covers any direct
+    enum calls. PR A collapsed the 4-value preset into 3 with one alias.
+    """
     try:
         p = OperationPreset((config.OPTIMIZATION_PRESET or "normal").strip().lower())
-        return p in (OperationPreset.TRAVEL, OperationPreset.AWAY)
+        return p == OperationPreset.VACATION
     except ValueError:
         return False
 

@@ -979,7 +979,7 @@ def solve_lp(
     try:
         from ..presets import OperationPreset
         _preset_value = OperationPreset(config.OPTIMIZATION_PRESET)
-        if _preset_value in (OperationPreset.TRAVEL, OperationPreset.AWAY):
+        if _preset_value == OperationPreset.VACATION:
             pv_abundance_reward_p = 0.0
     except (ValueError, AttributeError):
         pass

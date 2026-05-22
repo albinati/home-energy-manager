@@ -28,10 +28,12 @@
       group: 'settingsComfort',
     },
     OPTIMIZATION_PRESET: {
-      label: 'Occupancy preset',
+      label: 'Household mode',
       desc:
-        'normal = standard household. guests = higher hot water + warmer rooms. travel/away = frost protection only, max battery export. ' +
-        '(BOOST retired in v10 — silently aliased to normal.)',
+        'normal = family at home (4 evening showers + morning reserve). ' +
+        'guests = extra showers per DHW_GUEST_COUNT visitors (default 2). ' +
+        'vacation = tank off + max battery arbitrage (peak-export aggressive, PV-only charging). ' +
+        'Legacy values travel/away silently map to vacation.',
       group: 'settingsStrategy',
     },
     ENERGY_STRATEGY_MODE: {

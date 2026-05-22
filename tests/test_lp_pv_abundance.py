@@ -881,19 +881,19 @@ def test_dispatch_negative_price_action_uses_full_65c_cap(
 # 2. Reward must NOT dominate export when export is profitable
 # --------------------------------------------------------------------------
 
-def test_pv_abundance_reward_zeroed_when_travel_or_away(
+def test_pv_abundance_reward_zeroed_when_vacation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Per user 2026-05-09: prefer tank > export when AT HOME, but revert to
-    export-priority when travel/away (household isn't there to use stored hot
-    water). Test asserts the reward is zeroed under those presets — LP keeps
-    the standard export trade-off."""
+    export-priority when vacation (household isn't there to use stored hot
+    water). PR A collapsed travel/away → vacation. Test asserts the reward
+    is zeroed under vacation — LP keeps the standard export trade-off."""
     from src.config import config as app_config
     monkeypatch.setattr(app_config, "DAIKIN_CONTROL_MODE", "active", raising=False)
     monkeypatch.setattr(app_config, "DHW_PV_ABUNDANCE_THRESHOLD_KWH", 0.5, raising=False)
     monkeypatch.setattr(app_config, "LP_PV_ABUNDANCE_TANK_REWARD_PENCE_PER_KWH", 10.0, raising=False)
-    # KEY: travel preset zeroes the reward at solve time.
-    monkeypatch.setattr(app_config, "OPTIMIZATION_PRESET", "travel", raising=False)
+    # KEY: vacation preset zeroes the reward at solve time.
+    monkeypatch.setattr(app_config, "OPTIMIZATION_PRESET", "vacation", raising=False)
 
     base = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
     n = 4

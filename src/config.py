@@ -608,8 +608,9 @@ class Config:
     # prefer tank-store over export when at home — household will use the
     # stored hot water. Default 10 p/kWh × cop_dhw 3 ≈ 30 p/kWh equivalent
     # stored value, well above 15 p export rate → tank wins. Zeroed at solve
-    # time when OPTIMIZATION_PRESET in (travel, away) — household isn't
-    # there to use stored hot water; revert to export-priority economics.
+    # time when OPTIMIZATION_PRESET == vacation (legacy travel/away values
+    # translate to vacation) — household isn't there to use stored hot water;
+    # revert to export-priority economics.
     LP_PV_ABUNDANCE_TANK_REWARD_PENCE_PER_KWH: float = float(
         os.getenv("LP_PV_ABUNDANCE_TANK_REWARD_PENCE_PER_KWH", "10.0")
     )
