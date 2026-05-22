@@ -125,6 +125,121 @@ SCHEMA: dict[str, SettingSpec] = {
             "are silently translated to 'vacation' on read."
         ),
     ),
+    # --- PR B — explicit shower-demand model -------------------------------
+    # Formalises DHW demand as count × duration × flow × mixer-temp instead of
+    # the legacy DHW_DAILY_SHOWER_LITRES aggregate. Each setting is runtime-
+    # tunable via /api/v1/settings or MCP set_setting; defaults match the
+    # household spec captured 2026-05-22 (4 evening showers, 5 min, ~9 L/min
+    # UK low-flow head, mixer-out 38 °C).
+    "DHW_SHOWER_DURATION_MIN": SettingSpec(
+        key="DHW_SHOWER_DURATION_MIN",
+        type_name="float",
+        env_default=_float_env("DHW_SHOWER_DURATION_MIN", "5.0"),
+        min_value=1.0,
+        max_value=30.0,
+        description="Average shower duration (minutes per shower).",
+    ),
+    "DHW_SHOWER_FLOW_LPM": SettingSpec(
+        key="DHW_SHOWER_FLOW_LPM",
+        type_name="float",
+        env_default=_float_env("DHW_SHOWER_FLOW_LPM", "9.0"),
+        min_value=4.0,
+        max_value=20.0,
+        description="Mixer-out flow rate (litres per minute).",
+    ),
+    "DHW_SHOWER_MIXER_TEMP_C": SettingSpec(
+        key="DHW_SHOWER_MIXER_TEMP_C",
+        type_name="float",
+        env_default=_float_env("DHW_SHOWER_MIXER_TEMP_C", "38.0"),
+        min_value=30.0,
+        max_value=45.0,
+        description="Target mixer-out temperature (°C); typical comfortable shower.",
+    ),
+    "DHW_SHOWER_COLD_INLET_TEMP_C": SettingSpec(
+        key="DHW_SHOWER_COLD_INLET_TEMP_C",
+        type_name="float",
+        env_default=_float_env("DHW_SHOWER_COLD_INLET_TEMP_C",
+                                _str_env("DHW_COLD_INLET_TEMP_C", "10.0")()),
+        min_value=4.0,
+        max_value=20.0,
+        description=(
+            "Mains cold-water inlet temperature (°C). Drives mixer math. "
+            "Default lifts the legacy DHW_COLD_INLET_TEMP_C env if set."
+        ),
+    ),
+    "DHW_SHOWERS_NORMAL_EVENING": SettingSpec(
+        key="DHW_SHOWERS_NORMAL_EVENING",
+        type_name="int",
+        env_default=_int_env("DHW_SHOWERS_NORMAL_EVENING", "4"),
+        min_value=0,
+        max_value=10,
+        description="Evening showers planned in normal mode (typical family count).",
+    ),
+    "DHW_SHOWERS_NORMAL_MORNING_RESERVE": SettingSpec(
+        key="DHW_SHOWERS_NORMAL_MORNING_RESERVE",
+        type_name="int",
+        env_default=_int_env("DHW_SHOWERS_NORMAL_MORNING_RESERVE", "1"),
+        min_value=0,
+        max_value=5,
+        description=(
+            "Morning reserve in normal mode: tank must be warm enough for N "
+            "showers but not necessarily consumed. Models as a soft floor "
+            "at the configured morning hour, NOT as drawn litres."
+        ),
+    ),
+    "DHW_SHOWERS_GUESTS_EVENING_EXTRA_PER_GUEST": SettingSpec(
+        key="DHW_SHOWERS_GUESTS_EVENING_EXTRA_PER_GUEST",
+        type_name="int",
+        env_default=_int_env("DHW_SHOWERS_GUESTS_EVENING_EXTRA_PER_GUEST", "1"),
+        min_value=0,
+        max_value=3,
+        description="Extra evening showers per visitor when mode=guests.",
+    ),
+    "DHW_SHOWERS_GUESTS_MORNING_EXTRA_PER_GUEST": SettingSpec(
+        key="DHW_SHOWERS_GUESTS_MORNING_EXTRA_PER_GUEST",
+        type_name="int",
+        env_default=_int_env("DHW_SHOWERS_GUESTS_MORNING_EXTRA_PER_GUEST", "1"),
+        min_value=0,
+        max_value=3,
+        description="Extra morning showers per visitor when mode=guests.",
+    ),
+    "DHW_GUEST_COUNT": SettingSpec(
+        key="DHW_GUEST_COUNT",
+        type_name="int",
+        env_default=_int_env("DHW_GUEST_COUNT", "2"),
+        min_value=0,
+        max_value=8,
+        description=(
+            "Number of visitors when mode=guests. Multiplies the per-guest "
+            "extras. Default 2 matches the assumption when the operator "
+            "switches to guests without specifying a count."
+        ),
+    ),
+    "DHW_TANK_USABLE_FRACTION": SettingSpec(
+        key="DHW_TANK_USABLE_FRACTION",
+        type_name="float",
+        env_default=_float_env("DHW_TANK_USABLE_FRACTION", "0.7"),
+        min_value=0.4,
+        max_value=1.0,
+        description=(
+            "Stratification fraction: portion of the nominal tank volume "
+            "that delivers hot water at the storage temperature before the "
+            "remaining cold inlet dilutes the draw. 0.7 is the empirical "
+            "Daikin Altherma figure. Lower for less stratified tanks."
+        ),
+    ),
+    "DHW_MORNING_RESERVE_HOUR_LOCAL": SettingSpec(
+        key="DHW_MORNING_RESERVE_HOUR_LOCAL",
+        type_name="int",
+        env_default=_int_env("DHW_MORNING_RESERVE_HOUR_LOCAL", "7"),
+        min_value=4,
+        max_value=12,
+        description=(
+            "Local hour for the morning-reserve soft floor (slot whose start "
+            "matches this hour). Defaults to 07:00 — the first plausible "
+            "shower hour the morning after."
+        ),
+    ),
     "ENERGY_STRATEGY_MODE": SettingSpec(
         key="ENERGY_STRATEGY_MODE",
         type_name="str",

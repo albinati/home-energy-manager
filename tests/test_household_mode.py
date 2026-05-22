@@ -27,9 +27,13 @@ def _isolated_db(monkeypatch, tmp_path):
     rts._LEGACY_TRANSLATION_LOGGED.clear()
     from src.presets import _LEGACY_LOGGED
     _LEGACY_LOGGED.clear()
-    # Invalidate the runtime_settings cache so each test sees fresh reads.
+    # Clear runtime_settings cache AND the class-level config._overrides
+    # so a previous test's `config.OPTIMIZATION_PRESET = ...` setter call
+    # doesn't bleed into this test's read.
     rts._cache.clear()
+    type(config)._overrides.clear()
     yield
+    type(config)._overrides.clear()
 
 
 # ---------------------------------------------------------------------------

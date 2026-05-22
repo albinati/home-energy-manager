@@ -49,6 +49,16 @@ def _active_mode_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(app_config, "DAIKIN_MAX_HP_KW", 2.0)
     monkeypatch.setattr(app_config, "DHW_TANK_LITRES", 200.0)
     monkeypatch.setattr(app_config, "DHW_DAILY_SHOWER_LITRES", 0.0)  # isolate the floor
+    # PR B: pin the new explicit shower-demand model to match the legacy
+    # ``t_min_dhw=45`` floor so this test's "warm tank ≥ 45 needs no slack"
+    # semantic stays valid. 2 showers × 5 min × 9 L/min = 90 L mix-out,
+    # well within tank usable_fraction × tank_litres (= 140 L), so the
+    # required temperature collapses to ``mixer + safety = 40 °C``. The
+    # warm-tank scenarios start at 45 °C (well above) and the cold-tank
+    # scenarios start at 28 °C (well below) — both still test the soft-
+    # slack mechanism as designed in PR #344.
+    monkeypatch.setattr(app_config, "DHW_SHOWERS_NORMAL_EVENING", 2, raising=False)
+    monkeypatch.setattr(app_config, "DHW_SHOWERS_NORMAL_MORNING_RESERVE", 0, raising=False)
     monkeypatch.setattr(app_config, "LP_PLUNGE_PREP_HOURS", 0)
     monkeypatch.setattr(app_config, "LP_SOC_FINAL_KWH", 0.0)
     monkeypatch.setattr(app_config, "LP_PV_SUFFICIENCY_GUARD", False)
@@ -135,7 +145,16 @@ def test_warm_tank_in_slot_0_shower_window_no_slack() -> None:
     """When tank starts warm enough to satisfy the shower floor naturally,
     the slack should be effectively zero (LP doesn't pay the penalty when
     not forced to).
+
+    PR B: floor now derived per-mode via ``dhw_demand``. The fixture pins
+    2 evening showers (defaults), which reduces ``mix_required`` below the
+    tank's usable hot capacity, so the required tank temperature collapses
+    to ``mixer + safety = 40 °C``. Test verifies tank stays at or above
+    that derived floor without paying slack penalty.
     """
+    from src.dhw_demand import required_tank_temp_for_window
+    from src.presets import OperationPreset
+    floor_c = required_tank_temp_for_window("evening", OperationPreset.NORMAL)
     n = 12
     starts, w, prices, base_load = _build(n)
     plan = solve_lp(
@@ -147,11 +166,11 @@ def test_warm_tank_in_slot_0_shower_window_no_slack() -> None:
         tz=ZoneInfo("Europe/London"),
     )
     assert plan.ok, f"LP status: {plan.status}"
-    # Tank starts ABOVE the floor; the LP should keep it there without
-    # paying slack penalty. Tank[1] (end of slot 0) should be ≥ 45.
-    assert plan.tank_temp_c[1] >= 45.0 - 1e-3, (
-        f"warm-tank scenario: tank[1] = {plan.tank_temp_c[1]} should ≥ 45 "
-        f"without using slack"
+    # Tank starts ABOVE the derived floor; the LP keeps it satisfied
+    # without slack. Allow 0.001 °C tolerance for solver float drift.
+    assert plan.tank_temp_c[1] >= floor_c - 1e-3, (
+        f"warm-tank scenario: tank[1] = {plan.tank_temp_c[1]} should ≥ "
+        f"derived floor {floor_c:.2f} without using slack"
     )
 
 

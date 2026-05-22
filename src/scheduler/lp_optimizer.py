@@ -522,21 +522,31 @@ def solve_lp(
     # math but reality has tank dropping below 45°C mid-shower → firmware
     # reheats at unfavorable rates the LP didn't predict.
     #
-    # Static-physics version (this PR; bridges to V11-C / #196's learned prior).
-    guests_preset = False
+    # PR B: explicit shower demand model via :mod:`src.dhw_demand`. Replaces
+    # the legacy ``DHW_DAILY_SHOWER_LITRES`` aggregate with per-mode count ×
+    # duration × flow × mixer-temp. The legacy env, if set > 0, still wins
+    # (escape hatch). See ``plans/groovy-singing-flute.md`` PR B section.
+    from .. import dhw_demand as _dhw
+    from ..presets import OperationPreset
     try:
-        from ..presets import OperationPreset
-        guests_preset = OperationPreset(config.OPTIMIZATION_PRESET) == OperationPreset.GUESTS
+        _preset_enum = OperationPreset((config.OPTIMIZATION_PRESET or "normal").strip().lower())
     except (ValueError, AttributeError):
-        pass
+        _preset_enum = OperationPreset.NORMAL
+    guests_preset = _preset_enum == OperationPreset.GUESTS
     shower_windows = _resolve_active_shower_windows(guests_preset)
     shower_mask = _window_set_slot_mask(slot_starts_utc, tz, windows=shower_windows)
-    daily_shower_litres = float(getattr(config, "DHW_DAILY_SHOWER_LITRES", 0.0))
-    cold_inlet_c = float(getattr(config, "DHW_COLD_INLET_TEMP_C", 10.0))
-    use_temp_c = float(getattr(config, "DHW_USAGE_TEMP_C", 40.0))
+    daily_shower_litres = _dhw.daily_shower_litres_drawn(_preset_enum)
+    cold_inlet_c = float(getattr(config, "DHW_SHOWER_COLD_INLET_TEMP_C",
+                                 getattr(config, "DHW_COLD_INLET_TEMP_C", 10.0)))
+    # Mixer-out temp drives the hot-fraction math. PR B prefers the new
+    # ``DHW_SHOWER_MIXER_TEMP_C`` (default 38 °C) but falls back to the
+    # legacy ``DHW_USAGE_TEMP_C`` (40 °C) when the new setting is absent.
+    use_temp_c = float(getattr(config, "DHW_SHOWER_MIXER_TEMP_C",
+                               getattr(config, "DHW_USAGE_TEMP_C", 40.0)))
     # Linearised hot-water draw per slot (kWh thermal). Hot litres drawn
-    # from tank = mix_litres × (use - cold) / (target - cold). At target temp
-    # (t_min_dhw) this gives a constant per slot.
+    # from tank = mix_litres × (mixer - cold) / (tank_storage - cold). The
+    # divisor uses ``t_min_dhw`` (the LP's lower-bound representative tank
+    # temperature) as a stable proxy, matching the prior model.
     #
     # CRITICAL: divide daily_shower_litres by the number of shower slots
     # IN THAT SLOT'S LOCAL DAY, not by the horizon-wide total. A 48 h horizon
@@ -686,14 +696,9 @@ def solve_lp(
     # backward-compat fallback when DHW_SHOWER_SCHEDULE is empty. Guests preset
     # picks DHW_SHOWER_SCHEDULE_GUESTS instead so morning showers are
     # re-enabled when a guest is staying.
-    guests_preset = False
-    try:
-        from ..presets import OperationPreset
-        guests_preset = OperationPreset(config.OPTIMIZATION_PRESET) == OperationPreset.GUESTS
-    except (ValueError, AttributeError):
-        pass
-    shower_windows = _resolve_active_shower_windows(guests_preset)
-    shower_mask = _window_set_slot_mask(slot_starts_utc, tz, windows=shower_windows)
+    #
+    # (``shower_mask`` was resolved earlier with the draw model around
+    # line 535; ``_preset_enum`` is the canonical preset enum.)
     # Skip shower hard constraint in passive mode — the LP can't decide e_dhw
     # to make this happen (firmware controls the tank). Enforcing would make
     # the solve infeasible whenever tank starts low.
@@ -711,15 +716,90 @@ def solve_lp(
     # marginal kWh saving), the LP heats as fast as physically possible
     # and surfaces the unavoidable deficit as positive slack, instead of
     # going Infeasible.
+    #
+    # PR B: the floor is now PER-SLOT, derived from the mode-aware demand
+    # via :mod:`src.dhw_demand`. Evening slots float the
+    # ``required_tank_temp_for_n_showers(evening_count)`` constraint;
+    # guests-mode morning slots float the morning-extras constraint;
+    # normal-mode morning slots get an additional reserve-only soft floor
+    # (no draw modelled) at the configured morning hour.
     s_shower_lo: dict[int, pulp.LpVariable] = {}
     shower_lo_penalty_p = float(
         getattr(config, "LP_SHOWER_LO_PENALTY_PENCE_PER_DEGC_SLOT", 50.0)
     )
+
+    def _floor_for_window(window: str) -> float:
+        """Per-window required tank temp; capped at ``tank_hi`` so the
+        soft-floor constraint can always be made feasible by enough slack."""
+        try:
+            req = _dhw.required_tank_temp_for_window(window, _preset_enum)
+        except (ValueError, AttributeError):
+            req = float(t_min_dhw)
+        return min(req, tank_hi)
+
+    evening_floor_c = _floor_for_window("evening")
+    morning_floor_c = _floor_for_window("morning")
+
+    def _slot_window_kind(slot_utc: datetime) -> str | None:
+        """Return 'evening', 'morning', or None for a slot start time
+        using local hour-of-day; assumes the shower_windows tuple was
+        sorted to evening = the later range, morning = the earlier."""
+        local = slot_utc.astimezone(tz)
+        hod_min = local.hour * 60 + local.minute
+        in_morning = False
+        in_evening = False
+        for start, end in shower_windows:
+            if start <= hod_min < end:
+                if start < 12 * 60:
+                    in_morning = True
+                else:
+                    in_evening = True
+        if in_evening:
+            return "evening"
+        if in_morning:
+            return "morning"
+        return None
+
     if not passive_daikin:
         for i in range(n):
             if shower_mask[i]:
+                kind = _slot_window_kind(slot_starts_utc[i])
+                if kind == "morning":
+                    floor_c = morning_floor_c
+                else:
+                    floor_c = evening_floor_c
                 s_shower_lo[i] = pulp.LpVariable(f"shower_lo_slack_{i}", lowBound=0)
-                prob += tank[i + 1] + s_shower_lo[i] >= t_min_dhw
+                prob += tank[i + 1] + s_shower_lo[i] >= floor_c
+
+        # PR B — normal-mode morning reserve. Single slot at the configured
+        # morning hour (default 07:00 local) with a floor of
+        # ``required_tank_temp_for_n_showers(reserve_count)``. No additional
+        # draw is subtracted: the household typically doesn't shower in the
+        # morning, this is the safety reserve for backup. Skipped in guests
+        # mode (the morning shower window already enforces a higher floor)
+        # and vacation mode (no floor at all).
+        if _preset_enum == OperationPreset.NORMAL:
+            reserve_count = _dhw.total_morning_showers(OperationPreset.NORMAL)
+            if reserve_count > 0:
+                from .. import runtime_settings as _rts
+                try:
+                    morning_hour = int(_rts.get_setting("DHW_MORNING_RESERVE_HOUR_LOCAL"))
+                except (TypeError, ValueError):
+                    morning_hour = 7
+                reserve_floor_c = min(
+                    _dhw.required_tank_temp_for_n_showers(reserve_count), tank_hi,
+                )
+                for i, st in enumerate(slot_starts_utc):
+                    local = st.astimezone(tz)
+                    if local.hour != morning_hour or local.minute >= 30:
+                        continue
+                    # Reuse the same slack variable mechanism so the LP can
+                    # surface a deficit instead of going infeasible.
+                    if i not in s_shower_lo:
+                        s_shower_lo[i] = pulp.LpVariable(
+                            f"shower_lo_slack_{i}", lowBound=0,
+                        )
+                    prob += tank[i + 1] + s_shower_lo[i] >= reserve_floor_c
 
         # Weekly legionella thermal-shock cycle. When ``DHW_LEGIONELLA_DAY``
         # ∈ [0,6] (Mon..Sun, Python weekday convention), force tank ≥ target
