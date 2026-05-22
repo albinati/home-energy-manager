@@ -57,21 +57,24 @@ def test_guard_skipped_when_disabled():
     assert diag.reason == "disabled"
 
 
-def test_guard_skipped_when_not_strict_savings():
+def test_guard_always_on_when_enabled():
+    """PR C — guard is mode-agnostic now; fires whenever PV is sufficient.
+    Previously gated by ``strict_savings`` (removed in PR C)."""
     starts = _slot_starts(4, datetime(2026, 5, 15, 8, 0, tzinfo=UTC))
     diag = evaluate_pv_sufficiency_guard(
         slot_starts_utc=starts,
-        pv_avail=[10.0] * 4,
+        pv_avail=[10.0] * 4,         # huge PV
         base_load_kwh=[0.1] * 4,
         price_line=[10.0] * 4,
         peak_threshold_p=25.0,
         initial_soc_kwh=0.0,
         soc_max_kwh=5.0,
-        strict_savings=False,
+        strict_savings=False,        # legacy arg, ignored now
         enabled=True,
     )
-    assert not diag.applied
-    assert diag.reason == "not_strict_savings"
+    # Forecast 40 kWh >> demand 5.4 kWh → fires
+    assert diag.applied
+    assert diag.reason == "sufficient_pv"
 
 
 def test_guard_fires_when_pv_sufficient():
@@ -190,10 +193,10 @@ def _minimal_weather(n: int) -> WeatherLpSeries:
     )
 
 
-def test_e2e_guard_blocks_grid_charging_under_strict_savings(monkeypatch):
-    """With strict_savings + abundant PV forecast, solve_lp must NOT grid-charge
-    in any pre-peak slot — every chg[i] ≤ pv_use[i] on those slots."""
-    monkeypatch.setattr(config, "ENERGY_STRATEGY_MODE", "strict_savings")
+def test_e2e_guard_blocks_grid_charging_when_pv_sufficient(monkeypatch):
+    """PR C — guard is mode-agnostic. With abundant PV forecast, solve_lp
+    must NOT grid-charge in any pre-peak slot regardless of mode (previously
+    gated by ``strict_savings``, removed in PR C)."""
     monkeypatch.setattr(config, "LP_PV_SUFFICIENCY_GUARD", True)
     monkeypatch.setattr(config, "LP_PV_SUFFICIENCY_MARGIN", 1.0)
     monkeypatch.setattr(config, "DAIKIN_CONTROL_MODE", "passive")
@@ -224,34 +227,12 @@ def test_e2e_guard_blocks_grid_charging_under_strict_savings(monkeypatch):
         )
 
 
-def test_e2e_guard_inactive_under_savings_first(monkeypatch):
-    """In savings_first mode, the guard is inert — the LP can grid-charge freely."""
-    monkeypatch.setattr(config, "ENERGY_STRATEGY_MODE", "savings_first")
-    monkeypatch.setattr(config, "LP_PV_SUFFICIENCY_GUARD", True)
-    monkeypatch.setattr(config, "DAIKIN_CONTROL_MODE", "passive")
-
-    weather = _minimal_weather(n=8)
-    prices = [10.0, 10.0, 10.0, 10.0, 40.0, 40.0, 40.0, 40.0]
-    base_load = [0.3] * 8
-
-    plan = solve_lp(
-        slot_starts_utc=weather.slot_starts_utc,
-        price_pence=prices,
-        base_load_kwh=base_load,
-        weather=weather,
-        initial=LpInitialState(soc_kwh=2.0, tank_temp_c=45.0),
-        tz=ZoneInfo("Europe/London"),
-        export_price_pence=[5.0] * 8,
-    )
-    assert plan.ok
-    assert plan.pv_sufficiency_guard is not None
-    assert not plan.pv_sufficiency_guard.applied
-    assert plan.pv_sufficiency_guard.reason == "not_strict_savings"
+# PR C — `test_e2e_guard_inactive_under_savings_first` removed.
+# strict_savings/savings_first is gone; the guard is always-on when enabled.
 
 
 def test_e2e_guard_skipped_when_pv_low(monkeypatch):
-    """Forecast PV well below demand → guard inert even in strict_savings."""
-    monkeypatch.setattr(config, "ENERGY_STRATEGY_MODE", "strict_savings")
+    """Forecast PV well below demand → guard inert regardless of mode."""
     monkeypatch.setattr(config, "LP_PV_SUFFICIENCY_GUARD", True)
     monkeypatch.setattr(config, "DAIKIN_CONTROL_MODE", "passive")
 

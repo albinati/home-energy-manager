@@ -1078,13 +1078,11 @@ class Config:
     def OPTIMIZATION_PRESET(self, value: str) -> None:
         self._rt_set("OPTIMIZATION_PRESET", str(value).strip().lower())
 
-    @property
-    def ENERGY_STRATEGY_MODE(self) -> str:
-        return str(self._rt_get("ENERGY_STRATEGY_MODE"))
-
-    @ENERGY_STRATEGY_MODE.setter
-    def ENERGY_STRATEGY_MODE(self, value: str) -> None:
-        self._rt_set("ENERGY_STRATEGY_MODE", str(value).strip().lower())
+    # PR C — ``ENERGY_STRATEGY_MODE`` property removed. Was the
+    # 2-value dispatch policy (savings_first / strict_savings). The
+    # household never wanted strict_savings (per user 2026-05-22), and
+    # the scenario-LP filter is now the sole peak-export gate. Leftover
+    # entries in /srv/hem/.env are harmless (Python ignores them).
 
     @property
     def DAIKIN_CONTROL_MODE(self) -> str:

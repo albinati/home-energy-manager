@@ -209,7 +209,7 @@ def test_overnight_idle_does_not_reset_on_cheap_grid_slots(
     monkeypatch.setattr(app_config, "DHW_SHOWER_SCHEDULE", "19:00-22:00", raising=False)
     monkeypatch.setattr(app_config, "DHW_TANK_OVERNIGHT_IDLE_ENABLED", "true", raising=False)
     monkeypatch.setattr(app_config, "OPTIMIZATION_PRESET", "normal", raising=False)
-    monkeypatch.setattr(app_config, "ENERGY_STRATEGY_MODE", "savings_first", raising=False)
+    # PR C — ENERGY_STRATEGY_MODE removed (was here).
 
     # Build slots covering Sat 18:00 BST → Sun 14:00 BST. Sat 19-22 = shower
     # window. Sun 02:30 = cheap battery-charge (mimics overnight Octopus dip).
@@ -309,7 +309,7 @@ def test_lp_plan_to_slots_marks_post_shower_slots_as_idle_overnight(
     monkeypatch.setattr(app_config, "DHW_TANK_OVERNIGHT_IDLE_ENABLED", "true", raising=False)
     monkeypatch.setattr(app_config, "OPTIMIZATION_PRESET", "normal", raising=False)
     # Disable strict_savings so the export path doesn't override slot kinds.
-    monkeypatch.setattr(app_config, "ENERGY_STRATEGY_MODE", "savings_first", raising=False)
+    # PR C — ENERGY_STRATEGY_MODE removed (was here).
 
     # Build a slot sequence covering 18:00 today through 11:00 tomorrow.
     # Some slots are shower-window (19:00-22:00); after that, all "standard";
@@ -387,7 +387,7 @@ def test_dispatch_emits_overnight_idle_action_at_38c(
     monkeypatch.setattr(app_config, "DHW_TANK_OVERNIGHT_IDLE_ENABLED", "true", raising=False)
     monkeypatch.setattr(app_config, "DHW_TANK_OVERNIGHT_TARGET_C", 38.0, raising=False)
     monkeypatch.setattr(app_config, "OPTIMIZATION_PRESET", "normal", raising=False)
-    monkeypatch.setattr(app_config, "ENERGY_STRATEGY_MODE", "savings_first", raising=False)
+    # PR C — ENERGY_STRATEGY_MODE removed (was here).
     monkeypatch.setattr(
         "src.scheduler.lp_dispatch._optimization_preset_away_like",
         lambda: False,
@@ -459,7 +459,7 @@ def test_dispatch_overnight_target_honours_runtime_setting(
     monkeypatch.setattr(app_config, "DHW_TANK_OVERNIGHT_IDLE_ENABLED", "true", raising=False)
     monkeypatch.setattr(app_config, "DHW_TANK_OVERNIGHT_TARGET_C", 38.0, raising=False)
     monkeypatch.setattr(app_config, "OPTIMIZATION_PRESET", "normal", raising=False)
-    monkeypatch.setattr(app_config, "ENERGY_STRATEGY_MODE", "savings_first", raising=False)
+    # PR C — ENERGY_STRATEGY_MODE removed (was here).
     monkeypatch.setattr(
         "src.scheduler.lp_dispatch._optimization_preset_away_like",
         lambda: False,
@@ -520,7 +520,7 @@ def test_dispatch_drops_restore_when_next_action_immediately_follows(
     monkeypatch.setattr(app_config, "DAIKIN_MIN_WINDOW_SLOTS", 1, raising=False)
     monkeypatch.setattr(app_config, "DHW_SHOWER_SCHEDULE", "19:00-22:00", raising=False)
     monkeypatch.setattr(app_config, "OPTIMIZATION_PRESET", "normal", raising=False)
-    monkeypatch.setattr(app_config, "ENERGY_STRATEGY_MODE", "savings_first", raising=False)
+    # PR C — ENERGY_STRATEGY_MODE removed (was here).
     monkeypatch.setattr(
         "src.scheduler.lp_dispatch._optimization_preset_away_like",
         lambda: False,

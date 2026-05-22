@@ -94,7 +94,7 @@ def test_lp_feasible_at_realistic_prod_state(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(config, "BATTERY_CAPACITY_KWH", 10.36)
     monkeypatch.setattr(config, "MIN_SOC_RESERVE_PERCENT", 15.0)
     monkeypatch.setattr(config, "DAIKIN_CONTROL_MODE", "active")
-    monkeypatch.setattr(config, "ENERGY_STRATEGY_MODE", "savings_first")
+    # PR C — ENERGY_STRATEGY_MODE removed (was here).
 
     n = 24  # 12 h horizon
     starts = _starts(n, datetime(2026, 5, 18, 1, 0, tzinfo=UTC))

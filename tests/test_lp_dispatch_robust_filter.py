@@ -184,19 +184,8 @@ def test_pessimistic_agrees_and_economic_margin_clears_commits_slot(monkeypatch)
     assert slots[2].kind == "peak_export"
 
 
-def test_strict_savings_drops_all_peak_export(monkeypatch):
-    monkeypatch.setattr("src.scheduler.lp_dispatch.config.ENERGY_STRATEGY_MODE", "strict_savings", raising=False)
-    plan = _make_plan(export_kwh=1.84)
-    pess = _make_plan(export_kwh=1.84)  # would otherwise pass
-    slots, decisions = filter_robust_peak_export(
-        plan,
-        scenarios={"optimistic": plan, "nominal": plan, "pessimistic": pess},
-    )
-    pe = [d for d in decisions if d["lp_kind"] == "peak_export"]
-    # In strict_savings mode, lp_plan_to_slots emits the slot as kind="peak"
-    # (not peak_export — see the strict_savings branch in lp_plan_to_slots).
-    # The filter therefore sees no peak_export to gate.
-    assert len(pe) == 0
+# PR C — `test_strict_savings_drops_all_peak_export` removed.
+# ENERGY_STRATEGY_MODE is gone; the scenario-LP filter is the sole gate.
 
 
 def test_pessimistic_solve_failure_degrades_to_commit():

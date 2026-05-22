@@ -245,14 +245,10 @@ WHITELIST: dict[str, OverrideSpec] = {
         ),
         group="mode", promotable=True,
     ),
-    "ENERGY_STRATEGY_MODE": OverrideSpec(
-        key="ENERGY_STRATEGY_MODE",
-        config_attr="ENERGY_STRATEGY_MODE",
-        type_name="str",
-        enum=("savings_first", "strict_savings"),
-        description="Allow peak-export discharge or never.",
-        group="mode", promotable=True,
-    ),
+    # ENERGY_STRATEGY_MODE removed in PR C — see runtime_settings.SCHEMA
+    # comment for rationale. The dispatch policy is now derived from
+    # OPTIMIZATION_PRESET (vacation = aggressive arbitrage; normal/guests
+    # use the scenario filter).
     "DAIKIN_CONTROL_MODE": OverrideSpec(
         key="DAIKIN_CONTROL_MODE",
         config_attr="DAIKIN_CONTROL_MODE",

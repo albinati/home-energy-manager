@@ -38,7 +38,7 @@ def _active_mode(monkeypatch):
     decides e_dhw (passive mode clamps e_dhw to firmware predictions and
     skips the shower floor)."""
     monkeypatch.setattr(config, "DAIKIN_CONTROL_MODE", "active", raising=False)
-    monkeypatch.setattr(config, "ENERGY_STRATEGY_MODE", "savings_first", raising=False)
+    # PR C — ENERGY_STRATEGY_MODE removed (was here).
     monkeypatch.setattr(config, "OPTIMIZATION_PRESET", "normal", raising=False)
     monkeypatch.setattr(config, "DAIKIN_MAX_HP_KW", 2.0, raising=False)
     monkeypatch.setattr(config, "DHW_TANK_LITRES", 200.0, raising=False)

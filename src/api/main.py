@@ -713,7 +713,9 @@ async def cockpit_now():
         "modes": {
             "daikin_control_mode": config.DAIKIN_CONTROL_MODE,
             "optimization_preset": config.OPTIMIZATION_PRESET,
-            "energy_strategy_mode": config.ENERGY_STRATEGY_MODE,
+            # PR C — energy_strategy_mode removed; emit "removed" for clients
+            # that still read the field.
+            "energy_strategy_mode": "removed",
         },
         "plan_date": plan_block["plan_date"],
         # Sign conventions for state.grid_kw / state.battery_kw / current_slot
@@ -1295,7 +1297,8 @@ async def optimization_inputs(horizon_hours: int | None = None):
         "MAX_INVERTER_KW": float(config.MAX_INVERTER_KW),
         "DAIKIN_CONTROL_MODE": str(config.DAIKIN_CONTROL_MODE),
         "OPTIMIZATION_PRESET": str(config.OPTIMIZATION_PRESET),
-        "ENERGY_STRATEGY_MODE": str(config.ENERGY_STRATEGY_MODE),
+        # PR C — ENERGY_STRATEGY_MODE removed; emit "removed" for back-compat.
+        "ENERGY_STRATEGY_MODE": "removed",
         "DHW_TEMP_COMFORT_C": float(config.DHW_TEMP_COMFORT_C),
         "DHW_TEMP_NORMAL_C": float(config.DHW_TEMP_NORMAL_C),
         "INDOOR_SETPOINT_C": float(config.INDOOR_SETPOINT_C),

@@ -91,9 +91,11 @@ def lp_plan_to_slots(plan: LpPlan) -> list[HalfHourSlot]:
     # No live-SoC gate. The LP itself decides exp[i] > 0 only when arbitrage is
     # profitable under its forecast; dispatch trusts the solver. Robustness
     # against forecast error is enforced separately by ``filter_robust_peak_export``
-    # (scenario LP, see src/scheduler/scenarios.py). ``ENERGY_STRATEGY_MODE``
-    # ``strict_savings`` is the kill switch and is honoured at filter time.
-    strict_savings = (config.ENERGY_STRATEGY_MODE or "savings_first").strip().lower() == "strict_savings"
+    # (scenario LP, see src/scheduler/scenarios.py).
+    #
+    # PR C — ``ENERGY_STRATEGY_MODE=strict_savings`` was the prior peak-export
+    # kill switch; removed in PR C. The scenario filter (pessimistic floor +
+    # economic margin) is the sole gate now.
 
     max_pwr_w = int(config.FOX_FORCE_CHARGE_MAX_PWR)
     min_pwr_w = 200  # floor: prevents inverter from interpreting "0 W" as unlimited
@@ -124,7 +126,7 @@ def lp_plan_to_slots(plan: LpPlan) -> list[HalfHourSlot]:
             # suffices). LP hard-forbids dis during negatives — encode that on
             # hardware via Fox's native "Backup" mode (see _slot_fox_tuple).
             kind = "negative_hold"
-        elif (not strict_savings) and dis > EPS and exp > EPS:
+        elif dis > EPS and exp > EPS:
             kind = "peak_export"
         elif ed < EPS and es < EPS and price >= peak_thr:
             kind = "peak"
@@ -824,18 +826,21 @@ def filter_robust_peak_export(
 
     Decision rules (in priority order):
 
-    1. ``ENERGY_STRATEGY_MODE=strict_savings`` → drop every ``peak_export``
-       slot. Reason: ``strict_savings``.
-    2. ``scenarios is None`` (trigger reason not in
+    1. ``scenarios is None`` (trigger reason not in
        ``LP_SCENARIOS_ON_TRIGGER_REASONS``) → commit every ``peak_export``
        slot. Reason: ``no_scenarios_run``.
-    3. Pessimistic scenario solve failed → commit (degenerate degrade — better
+    2. Pessimistic scenario solve failed → commit (degenerate degrade — better
        to ship the LP's nominal plan than nothing). Reason: ``pessimistic_failed``.
-    4. ``pessimistic.export_kwh[i] >= LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH``
+    3. ``pessimistic.export_kwh[i] >= LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH``
        → commit. Reason: ``robust``.
-    5. Economic margin must clear the future refill + wear shadow. Otherwise
+    4. Economic margin must clear the future refill + wear shadow. Otherwise
        drop. Reason: ``economic_margin``.
-    6. Otherwise → drop. Reason: ``pessimistic_disagrees``.
+    5. Otherwise → drop. Reason: ``pessimistic_disagrees``.
+
+    PR C removed the prior ``ENERGY_STRATEGY_MODE=strict_savings`` kill
+    switch. Vacation mode (``OPTIMIZATION_PRESET=vacation``) instead goes
+    the opposite direction (max arbitrage); normal/guests rely on the
+    scenario-LP filter below.
 
     Scenarios dict keys are the ``Scenario`` literal type ("optimistic",
     "nominal", "pessimistic") but accepted as plain strings to keep this
@@ -845,10 +850,6 @@ def filter_robust_peak_export(
     decisions: list[dict[str, Any]] = []
     out_slots: list[HalfHourSlot] = []
 
-    strict_savings = (
-        (config.ENERGY_STRATEGY_MODE or "savings_first").strip().lower()
-        == "strict_savings"
-    )
     floor_kwh = float(config.LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH)
     eta = float(config.BATTERY_RT_EFFICIENCY)
     terminal_value_p = float(getattr(config, "LP_SOC_TERMINAL_VALUE_PENCE_PER_KWH", 0.0))
@@ -924,17 +925,13 @@ def filter_robust_peak_export(
             decision["export_price_p_kwh"] = export_price_p
             decision["refill_price_p_kwh"] = refill_shadow_p
             decision["economic_margin_p_kwh"] = margin_p
-            if strict_savings:
-                # Drop: strict_savings is the kill switch for arbitrage discharge.
-                s = dataclasses.replace(s, kind="standard", lp_grid_import_w=None)
-                decision["dispatched_kind"] = "standard"
-                decision["committed"] = False
-                decision["reason"] = "strict_savings"
-                logger.info(
-                    "filter_robust_peak_export: dropped slot=%s reason=strict_savings",
-                    slot_iso,
-                )
-            elif scenarios is None:
+            # PR C — ``ENERGY_STRATEGY_MODE=strict_savings`` was the prior
+            # kill switch (drop every peak_export). It is removed in PR C:
+            # the household never wants strict_savings (per user
+            # 2026-05-22), and vacation mode goes the opposite direction
+            # (max arbitrage). The scenario-LP robustness filter below
+            # (pessimistic floor + economic margin) is now the sole gate.
+            if scenarios is None:
                 decision["reason"] = "no_scenarios_run"
             elif pess is None or not pess.ok:
                 decision["reason"] = "pessimistic_failed"

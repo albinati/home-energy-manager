@@ -576,6 +576,12 @@ def solve_lp(
 
     shower_draw_j: list[float] = [_draw_j_for_slot(i) for i in range(n)]
 
+    # PR C — Vacation: bateria carrega SÓ a partir de PV usada localmente
+    # (chg ≤ pv_use). Ninguém em casa → LP nunca importa pra carregar a
+    # bateria. Slots que normalmente fariam ForceCharge da grid (cheap /
+    # negative) viram standard/solar_charge no labeller.
+    _vacation_mode = _preset_enum == OperationPreset.VACATION
+
     for i in range(n):
         e_hp_i = e_dhw[i] + e_space[i]
 
@@ -587,6 +593,10 @@ def solve_lp(
 
         # Export only from PV or battery
         prob += exp[i] <= pv_use[i] + dis[i]
+
+        # PR C — Vacation mode: bateria carrega só de PV (sem grid charging)
+        if _vacation_mode:
+            prob += chg[i] <= pv_use[i]
 
         # Battery SoC dynamics
         prob += soc[i + 1] == soc[i] + chg[i] * sqrt_eta - dis[i] / sqrt_eta
@@ -760,7 +770,11 @@ def solve_lp(
             return "morning"
         return None
 
-    if not passive_daikin:
+    # PR C — Vacation mode: no shower floor at all. The tank is allowed
+    # to coast freely (down to ``tank_lo=20`` anti-freeze) and the Daikin
+    # firmware owns the weekly legionella cycle. The household is away;
+    # there's nothing to deliver hot water to.
+    if not passive_daikin and not _vacation_mode:
         for i in range(n):
             if shower_mask[i]:
                 kind = _slot_window_kind(slot_starts_utc[i])
@@ -899,17 +913,18 @@ def solve_lp(
             if next_neg_within_window[i] and price_line[i] >= 0:
                 prob += chg[i] <= pv_use[i]
 
-    # PV-sufficiency guard rail (issue: 2026-05-15 incident). In
-    # ``strict_savings`` mode, when forecast PV for today ≥ battery headroom
-    # + remaining daytime load × ``LP_PV_SUFFICIENCY_MARGIN``, block grid →
-    # battery for every today-slot strictly before the first peak-tariff
-    # slot. Constraint shape mirrors the pre-plunge rule above (PV → battery
-    # stays allowed via ``pv_use[i]``). See ``src/scheduler/pv_trust.py`` and
+    # PV-sufficiency guard rail (issue: 2026-05-15 incident). When forecast
+    # PV for today ≥ battery headroom + remaining daytime load ×
+    # ``LP_PV_SUFFICIENCY_MARGIN``, block grid → battery for every today-
+    # slot strictly before the first peak-tariff slot. Constraint shape
+    # mirrors the pre-plunge rule above (PV → battery stays allowed via
+    # ``pv_use[i]``). See ``src/scheduler/pv_trust.py`` and
     # ``docs/PV_TRUST_GUARDRAIL.md`` for the design.
-    strict_savings = (
-        (getattr(config, "ENERGY_STRATEGY_MODE", "savings_first") or "savings_first")
-        .strip().lower() == "strict_savings"
-    )
+    #
+    # PR C — promoted to always-on (previously only fired under
+    # ``ENERGY_STRATEGY_MODE=strict_savings``). The economic argument
+    # is mode-agnostic: when forecast PV would already fill the battery,
+    # grid-charging before the first peak slot is wasteful.
     pv_guard_diag = evaluate_pv_sufficiency_guard(
         slot_starts_utc=slot_starts_utc,
         pv_avail=pv_avail,
@@ -918,7 +933,6 @@ def solve_lp(
         peak_threshold_p=peak_thr,
         initial_soc_kwh=float(initial.soc_kwh),
         soc_max_kwh=float(soc_max),
-        strict_savings=strict_savings,
     )
     if pv_guard_diag.applied:
         for i in pv_guard_diag.pre_peak_slot_indices:

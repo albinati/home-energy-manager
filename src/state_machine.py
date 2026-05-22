@@ -490,6 +490,12 @@ def _check_tank_power_drift(
 
     if not config.TANK_DRIFT_CHECK_ENABLED:
         return
+    # PR C — Vacation mode: tank-off is the intended state, not drift.
+    # Skip the check entirely so the heartbeat doesn't ping or force-
+    # restore. The Daikin firmware still runs the weekly legionella
+    # cycle autonomously.
+    if (config.OPTIMIZATION_PRESET or "normal").strip().lower() == "vacation":
+        return
     tank_on = getattr(dev, "tank_on", None)
     if tank_on is None:
         return  # unknown live state — fail-safe
