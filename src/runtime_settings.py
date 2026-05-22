@@ -40,6 +40,18 @@ class SettingValidationError(ValueError):
     """Raised by :func:`set_setting` when the new value fails schema validation."""
 
 
+# Per-key legacy-value translators. Applied during ``get_setting`` after the
+# raw read but before caching, so a stored value like
+# ``OPTIMIZATION_PRESET="travel"`` (from before PR A) transparently reads as
+# ``"vacation"`` for every caller. The translator is allowed to violate the
+# spec's ``enum``: it runs after ``_coerce`` and before the caller sees the
+# value, while ``set_setting``'s validator only sees fresh writes.
+_LEGACY_VALUE_TRANSLATORS: dict[str, dict[str, str]] = {
+    "OPTIMIZATION_PRESET": {"travel": "vacation", "away": "vacation"},
+}
+_LEGACY_TRANSLATION_LOGGED: set[tuple[str, str]] = set()
+
+
 @dataclass(frozen=True)
 class SettingSpec:
     key: str
@@ -104,8 +116,14 @@ SCHEMA: dict[str, SettingSpec] = {
         key="OPTIMIZATION_PRESET",
         type_name="str",
         env_default=_str_env("OPTIMIZATION_PRESET", "normal"),
-        enum=("normal", "guests", "travel", "away"),
-        description="Occupancy preset — affects DHW floor and peak-export gates.",
+        enum=("normal", "guests", "vacation"),
+        description=(
+            "Household mode — drives DHW demand model, battery dispatch, and "
+            "peak-export aggressiveness. normal = family at home; guests = "
+            "extra showers (DHW_GUEST_COUNT); vacation = DHW off + max "
+            "arbitrage, PV-only charging. Legacy values 'travel' and 'away' "
+            "are silently translated to 'vacation' on read."
+        ),
     ),
     "ENERGY_STRATEGY_MODE": SettingSpec(
         key="ENERGY_STRATEGY_MODE",
@@ -477,6 +495,18 @@ def get_setting(key: str) -> Any:
                     e,
                 )
                 value = spec.env_default()
+        translators = _LEGACY_VALUE_TRANSLATORS.get(key)
+        if translators and isinstance(value, str) and value in translators:
+            translated = translators[value]
+            token = (key, value)
+            if token not in _LEGACY_TRANSLATION_LOGGED:
+                _LEGACY_TRANSLATION_LOGGED.add(token)
+                logger.warning(
+                    "runtime_setting %s: legacy value %r translated to %r "
+                    "(deprecated; update stored value when convenient).",
+                    key, value, translated,
+                )
+            value = translated
         _cache[key] = (value, _version, now)
         return value
 

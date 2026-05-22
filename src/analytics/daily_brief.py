@@ -1136,8 +1136,6 @@ def _preset_line() -> str | None:
     badge = {
         "normal": "🏠 Normal",
         "guests": "👥 Guests",
-        "away": "🧳 Away",
-        "travel": "✈ Travel",
         "vacation": "🏖 Vacation",
     }.get(preset, f"🏠 {preset.title()}")
     return f"**Mode:** {badge} · Daikin: `{daikin}`"

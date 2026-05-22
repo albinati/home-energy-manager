@@ -152,8 +152,11 @@ _SIMULATE_PLAN_CONFIG_MAP = {
 }
 
 # Phase 4 review — per-key value validators for simulate_plan.
-_VALID_OPTIMIZATION_PRESETS = frozenset({"normal", "guests", "travel", "away"})
-_VALID_OCCUPANCY_MODES = frozenset({"normal", "guests", "travel", "away"})
+# PR A: collapsed to 3 modes; legacy values are translated at the
+# runtime_settings layer (so a stored "travel"/"away" reads as "vacation"),
+# but new writes must use the canonical names below.
+_VALID_OPTIMIZATION_PRESETS = frozenset({"normal", "guests", "vacation"})
+_VALID_OCCUPANCY_MODES = frozenset({"normal", "guests", "vacation"})
 
 
 def _validate_simulate_override(key: str, value: Any) -> tuple[Any, str | None]:
@@ -1328,15 +1331,15 @@ def build_mcp() -> FastMCP:
         name="set_optimization_preset",
         description=(
             "Switch the household preset. "
-            "Options: normal (standard comfort), guests (higher DHW, warmer, less cost-cutting), "
-            "travel/away (frost protection; LP optimises self-use + arbitrage; "
-            "ENERGY_STRATEGY_MODE=strict_savings disables peak export entirely), "
-            "boost (temporary full-comfort override, ignores price). "
+            "Options: normal (family at home — standard DHW + selective peak-export), "
+            "guests (extra DHW for visitors via DHW_GUEST_COUNT), "
+            "vacation (DHW off, battery in pure arbitrage mode — peak-export aggressive, "
+            "PV-only charging). "
             "After switching, call propose_optimization_plan to re-solve with the new preset."
         ),
     )
     def set_optimization_preset(preset: str) -> dict[str, Any]:
-        valid = {"normal", "guests", "travel", "away"}
+        valid = {"normal", "guests", "vacation"}
         if preset not in valid:
             return {"ok": False, "error": f"Invalid preset '{preset}'. Valid: {sorted(valid)}"}
         config.OPTIMIZATION_PRESET = preset

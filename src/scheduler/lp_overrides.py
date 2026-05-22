@@ -238,8 +238,11 @@ WHITELIST: dict[str, OverrideSpec] = {
         key="OPTIMIZATION_PRESET",
         config_attr="OPTIMIZATION_PRESET",
         type_name="str",
-        enum=("normal", "guests", "travel", "away"),
-        description="Occupancy preset — affects DHW floor and peak-export gates.",
+        enum=("normal", "guests", "vacation"),
+        description=(
+            "Household mode — normal (baseline), guests (extra DHW), "
+            "vacation (DHW off + max arbitrage, PV-only charging)."
+        ),
         group="mode", promotable=True,
     ),
     "ENERGY_STRATEGY_MODE": OverrideSpec(
