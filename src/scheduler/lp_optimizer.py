@@ -830,12 +830,25 @@ def solve_lp(
                         )
                     prob += tank[i + 1] + s_shower_lo[i] >= reserve_floor_c
 
-        # Weekly legionella thermal-shock cycle. When ``DHW_LEGIONELLA_DAY``
-        # ∈ [0,6] (Mon..Sun, Python weekday convention), force tank ≥ target
-        # at the END of every slot whose start lies inside the cycle window.
-        # The LP figures out the cheapest pre-heat schedule (likely the
-        # cheap window leading up to the cycle) — the natural physics
-        # handles the rest. Disabled when DAY = -1 (default).
+        # Weekly legionella thermal-shock cycle — FIRMWARE-OWNED.
+        #
+        # PR E (2026-05-22, user clarification): Daikin Onecta firmware runs
+        # the cycle autonomously on Sunday ~11:00 local. HEM does NOT control
+        # it. The LP only needs to ACCOUNT FOR THE kWh LOAD on those slots so
+        # the rest of the plan (battery charge, grid import) is sized
+        # correctly.
+        #
+        # The previous hard constraint ``tank[i+1] >= leg_target`` made the
+        # LP plan active pre-heating to 60 °C as if HEM were driving the
+        # cycle — wasted compressor cycles overlapping with firmware's
+        # autonomous heat.
+        #
+        # New approach: add a fixed firmware-load floor on ``e_dhw[i]`` for
+        # slots inside the cycle window. The LP allocates AT LEAST the
+        # firmware load (matching what really happens on the hardware) but
+        # doesn't try to lift the tank itself. Mirrors the approach in
+        # ``physics.predict_passive_daikin_load:248-273`` which already does
+        # this for passive mode. Disabled when ``DHW_LEGIONELLA_DAY`` = -1.
         from .. import runtime_settings as _rts
         try:
             _leg_day = int(_rts.get_setting("DHW_LEGIONELLA_DAY"))
@@ -848,7 +861,22 @@ def solve_lp(
                 _leg_target_c = float(_rts.get_setting("DHW_LEGIONELLA_TANK_TARGET_C"))
             except (TypeError, ValueError):
                 _leg_hour, _leg_minutes, _leg_target_c = 13, 60, 60.0
-            _cycle_window_h = max(0.5, (_leg_minutes / 60.0))
+            # Slot duration in hours (assumes 30-min slots per the LP).
+            _slot_h = 0.5
+            _slots_per_cycle = max(
+                1, (_leg_minutes + int(_slot_h * 60) - 1) // int(_slot_h * 60)
+            )
+            _cycle_window_h = _slots_per_cycle * _slot_h
+            # Thermal energy to lift the tank from the LP's normal target to
+            # the legionella target. Modeled as a fixed exogenous draw the
+            # firmware imposes — independent of where the LP's tank state
+            # actually was at slot start.
+            _normal_target = float(config.DHW_TEMP_NORMAL_C)
+            _delta_c = max(0.0, _leg_target_c - _normal_target)
+            _thermal_kwh = (
+                float(config.DHW_TANK_LITRES) * float(config.DHW_WATER_CP)
+                * _delta_c / 3.6e6
+            )
             for i, _st in enumerate(slot_starts_utc):
                 _local = _st.astimezone(tz)
                 if _local.weekday() != _leg_day:
@@ -856,14 +884,14 @@ def solve_lp(
                 _hour_frac = _local.hour + _local.minute / 60.0
                 if not (_leg_hour <= _hour_frac < _leg_hour + _cycle_window_h):
                     continue
-                # Cap at tank_hi − 1°C: the variable's upper bound is tank_hi
-                # exactly, but space_floor + mode-mutex constraints can force
-                # additional DHW heating that would push tank above the bound
-                # mid-cycle. 1°C of headroom keeps the constraint satisfiable
-                # without losing the safety value (60°C is the legionella floor;
-                # tank_hi is 65°C, so a 1°C dip is well within margin).
-                _floor = min(_leg_target_c, tank_hi - 1.0)
-                prob += tank[i + 1] >= _floor
+                _cop_i = max(1.0, float(cop_dhw[i]))
+                _firmware_load_kwh = _thermal_kwh / _slots_per_cycle / _cop_i
+                # Cap at the heat-pump's per-slot ceiling so the constraint
+                # stays feasible. Real firmware also obeys this physical
+                # bound — undersized estimate is fine; the LP just won't
+                # over-allocate.
+                _floor = min(_firmware_load_kwh, max_hp_kwh)
+                prob += e_dhw[i] >= _floor
 
     # Per-slot DHW ceiling — three tiers:
     #   negative-price → DHW_TEMP_MAX_C (default 65 °C). Grid pays us; load all the kWh in.
