@@ -19,7 +19,7 @@ from .daikin_bulletproof import (
     user_gesture_still_in_effect,
 )
 from .foxess.client import FoxESSClient, FoxESSError, scheduler_groups_from_stored_json
-from .notifier import notify_risk, notify_user_override
+from .notifier import notify_critical, notify_risk, notify_user_override
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,12 @@ _USER_OVERRIDE_NOTIFIED: set[int] = set()
 # is bounded by ``USER_OVERRIDE_RESPECT_HOURS`` × user-gesture frequency, well
 # below a kilobyte over a service lifetime.
 _USER_OVERRIDE_INHERITED_NOTIFIED: set[int] = set()
+
+# Issue #382 — drift-detection dedup. The heartbeat sanity check fires once
+# per drift *episode* (tank off when no shutdown was planned) so we don't
+# page Telegram every 2 min for the same condition. Cleared when the heartbeat
+# observes tank_on == True again — a fresh drift episode then re-pings.
+_TANK_DRIFT_NOTIFIED: bool = False
 
 
 def _parse_utc(s: str) -> datetime:
@@ -443,6 +449,135 @@ def _reconcile_daikin_actions(
                 db.mark_action(aid, "failed", error_msg=str(e))
                 # Even on failure, the attempt was made — wait before the next.
                 _applied_in_this_tick = True
+
+    # Issue #382 — heartbeat tank-power sanity check. After the per-row loop,
+    # detect "tank is off but no plan slot intended it to be off" drift and
+    # either alert or alert+auto-recover. This catches the 2026-05-21
+    # scenario where the paired restore was deleted by an MPC re-plan
+    # (clear_actions_in_range) and never re-emitted; the new
+    # RESTORE_PRESERVE_LEAD_MINUTES guard is the primary fix, this is the
+    # belt-and-braces backstop for any drift mechanism we haven't yet
+    # imagined.
+    _check_tank_power_drift(actions, client, dev, now_utc, trigger=trigger)
+
+
+def _check_tank_power_drift(
+    actions: list[dict[str, Any]],
+    client: DaikinClient,
+    dev: Any,
+    now_utc: datetime,
+    *,
+    trigger: str,
+) -> None:
+    """Issue #382 — alert + (optionally) recover when the tank is off and no
+    plan slot intends it to be off.
+
+    Bails on any of the following (fail-safe — silence is OK, false-alerts
+    are not):
+    * Feature flag disabled.
+    * Live tank state unknown (Daikin cache miss).
+    * Tank is on — no drift.
+    * Any active/pending slot covering ``now_utc`` carries
+      ``tank_power=False`` (planned shutdown, drift is expected).
+    * A recent user override on Daikin is still in effect — the user wants
+      the tank off; respect their gesture.
+
+    Dedupes via module-level ``_TANK_DRIFT_NOTIFIED`` so a sustained drift
+    only pages once. When the tank comes back on, the flag clears and a
+    fresh drift episode pages again.
+    """
+    global _TANK_DRIFT_NOTIFIED
+
+    if not config.TANK_DRIFT_CHECK_ENABLED:
+        return
+    tank_on = getattr(dev, "tank_on", None)
+    if tank_on is None:
+        return  # unknown live state — fail-safe
+    if tank_on:
+        # Tank is on — clear the dedup token so any future drift re-pings.
+        if _TANK_DRIFT_NOTIFIED:
+            _TANK_DRIFT_NOTIFIED = False
+        return
+
+    # Tank is off. Is any current slot deliberately requesting it off?
+    planned_off = False
+    for act in actions:
+        try:
+            start = _parse_utc(act["start_time"])
+            end = _parse_utc(act["end_time"])
+        except (ValueError, KeyError, TypeError):
+            continue
+        if not (start <= now_utc < end):
+            continue
+        if (act.get("status") or "") not in ("pending", "active"):
+            continue
+        if act.get("overridden_by_user_at"):
+            continue
+        params = act.get("params") or {}
+        if isinstance(params, str):
+            try:
+                params = json.loads(params)
+            except (json.JSONDecodeError, TypeError):
+                params = {}
+        if "tank_power" in params and not bool(params["tank_power"]):
+            planned_off = True
+            break
+    if planned_off:
+        return
+
+    # Respect a user gesture that's still in effect.
+    try:
+        src = db.find_recent_user_override(
+            device="daikin",
+            within_hours=float(config.USER_OVERRIDE_RESPECT_HOURS),
+            now_utc=now_utc,
+        )
+        if src is not None:
+            src_params = src.get("params") or {}
+            if isinstance(src_params, str):
+                try:
+                    src_params = json.loads(src_params)
+                except (json.JSONDecodeError, TypeError):
+                    src_params = {}
+            if user_gesture_still_in_effect(dev, src_params):
+                return
+    except Exception as _exc:
+        logger.debug("tank-drift override lookup failed (non-fatal): %s", _exc)
+
+    # Drift confirmed.
+    db.log_action(
+        device="daikin",
+        action="tank_drift_detected",
+        params={
+            "tank_on": False,
+            "auto_recover": bool(config.TANK_DRIFT_AUTO_RECOVER),
+        },
+        result="alert",
+        trigger=trigger,
+    )
+    recovered = False
+    if (
+        config.TANK_DRIFT_AUTO_RECOVER
+        and not config.OPENCLAW_READ_ONLY
+        and config.DAIKIN_CONTROL_MODE == "active"
+    ):
+        try:
+            apply_comfort_restore(dev, client, trigger=f"tank_drift_recover:{trigger}")
+            recovered = True
+        except (DaikinError, ValueError) as exc:
+            logger.warning("tank-drift auto-recover failed: %s", exc)
+
+    if not _TANK_DRIFT_NOTIFIED:
+        _TANK_DRIFT_NOTIFIED = True
+        try:
+            msg = (
+                "Tank power=OFF and no plan slot scheduled it off — "
+                f"{'force-restored to NORMAL' if recovered else 'manual recovery may be needed'} "
+                f"(trigger={trigger})"
+            )
+            notify_critical(msg) if not recovered else notify_risk(msg)
+        except Exception as _exc:
+            logger.debug("tank-drift notify failed (non-fatal): %s", _exc)
 
 
 def reconcile_daikin_schedule_for_date(
