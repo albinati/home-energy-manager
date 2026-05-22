@@ -95,14 +95,19 @@ def test_config_property_reads_runtime_value():
 
 
 def test_dhw_temp_pv_abundance_target_runtime_tunable():
-    """#325 / PR F / PR G: solar_preheat target tunes per household at
-    runtime. PR F bumped 45 → 50 to give the LP headroom above NORMAL
-    for PV-driven thermal storage. PR G then recalibrated to 46 after
-    the user's empirical feedback (46 °C is the ideal ceiling — handles
-    guests easily, 50+ bleeds standing loss before evening showers)."""
-    # PR G default = 46 °C: 1 °C above NORMAL (= 45), small headroom for
-    # PV storage without over-bleeding standing loss.
-    assert config.DHW_TEMP_PV_ABUNDANCE_TARGET_C == 46.0
+    """#325 / PR F / PR G / PR H: solar_preheat target.
+
+    PR F: 45 → 50 (give LP headroom above NORMAL).
+    PR G: 50 → 46 (calibrated to user's comfort-ceiling — wrongly applied
+                   as the storage target, exported PV instead of storing).
+    PR H: 46 → 60 (corrected: this is a STORAGE target during free-PV
+                   windows, NOT a comfort cap. Restore drops to NORMAL
+                   after the window ends, so the tank only stays at 60 °C
+                   while solar is genuinely excess)."""
+    # PR H default = 60 °C: lifts tank by 15 °C during PV abundance,
+    # storing ~3.5 kWh thermal; restore action drops back to NORMAL
+    # immediately after the solar window.
+    assert config.DHW_TEMP_PV_ABUNDANCE_TARGET_C == 60.0
     # Bump for guests / larger household
     rts.set_setting("DHW_TEMP_PV_ABUNDANCE_TARGET_C", 55.0)
     assert config.DHW_TEMP_PV_ABUNDANCE_TARGET_C == 55.0
