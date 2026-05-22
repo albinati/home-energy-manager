@@ -45,10 +45,24 @@ def test_guests_mode_adds_per_guest_extras(monkeypatch):
 
 
 def test_guests_mode_scales_with_visitor_count(monkeypatch):
-    """A 3-visitor household sees more demand than a 2-visitor one."""
+    """A larger visitor count drives more total demand (split between
+    evening + morning per the PR G cap rules)."""
     monkeypatch.setattr(config, "DHW_GUEST_COUNT", 3, raising=False)
     monkeypatch.setattr(config, "DHW_SHOWERS_GUESTS_EVENING_EXTRA_PER_GUEST", 1, raising=False)
-    assert dhw.total_evening_showers(OperationPreset.GUESTS) == 4 + 3
+    monkeypatch.setattr(config, "DHW_SHOWERS_GUESTS_MORNING_EXTRA_PER_GUEST", 1, raising=False)
+    monkeypatch.setattr(config, "DHW_SHOWERS_NORMAL_MORNING_RESERVE", 1, raising=False)
+    # Raw evening = 4 + 3 = 7. Cap = 6 → evening = 6, overflow = 1.
+    # Morning = 1 reserve + 3 morning_extras + 1 overflow = 5.
+    assert dhw.total_evening_showers(OperationPreset.GUESTS) == 6
+    assert dhw.total_morning_showers(OperationPreset.GUESTS) == 5
+    # Total across day still grows with guest count: 6 + 5 = 11
+    # vs normal mode 4 + 1 = 5.
+    assert (
+        dhw.total_evening_showers(OperationPreset.GUESTS)
+        + dhw.total_morning_showers(OperationPreset.GUESTS)
+        > dhw.total_evening_showers(OperationPreset.NORMAL)
+        + dhw.total_morning_showers(OperationPreset.NORMAL)
+    )
 
 
 def test_vacation_mode_zero_showers():
@@ -57,14 +71,72 @@ def test_vacation_mode_zero_showers():
     assert dhw.total_morning_showers(OperationPreset.VACATION) == 0
 
 
+def test_evening_cap_enforced(monkeypatch):
+    """PR G: evening shower count is capped at DHW_SHOWERS_EVENING_CAP
+    (default 6); surplus spills to morning. User empirical: more than 6
+    can't fit in a single evening shift."""
+    monkeypatch.setattr(config, "DHW_GUEST_COUNT", 4, raising=False)
+    monkeypatch.setattr(config, "DHW_SHOWERS_GUESTS_EVENING_EXTRA_PER_GUEST", 1, raising=False)
+    # Raw evening = 4 base + 4 guests × 1 = 8. Cap = 6.
+    assert dhw.total_evening_showers(OperationPreset.GUESTS) == 6
+
+
+def test_evening_overflow_spills_to_morning(monkeypatch):
+    """PR G: when raw evening exceeds the cap, the surplus rolls to morning."""
+    monkeypatch.setattr(config, "DHW_GUEST_COUNT", 4, raising=False)
+    monkeypatch.setattr(config, "DHW_SHOWERS_GUESTS_EVENING_EXTRA_PER_GUEST", 1, raising=False)
+    monkeypatch.setattr(config, "DHW_SHOWERS_GUESTS_MORNING_EXTRA_PER_GUEST", 1, raising=False)
+    monkeypatch.setattr(config, "DHW_SHOWERS_NORMAL_MORNING_RESERVE", 1, raising=False)
+    # Raw evening = 8, cap = 6 → overflow = 2
+    # Morning = reserve 1 + 4 guests × 1 morning_extra + 2 overflow = 7
+    assert dhw.total_morning_showers(OperationPreset.GUESTS) == 7
+
+
+def test_evening_no_overflow_when_under_cap(monkeypatch):
+    """Normal case: raw evening (4 base + 2 guests = 6) ≤ cap → no overflow."""
+    monkeypatch.setattr(config, "DHW_GUEST_COUNT", 2, raising=False)
+    monkeypatch.setattr(config, "DHW_SHOWERS_GUESTS_EVENING_EXTRA_PER_GUEST", 1, raising=False)
+    monkeypatch.setattr(config, "DHW_SHOWERS_GUESTS_MORNING_EXTRA_PER_GUEST", 1, raising=False)
+    assert dhw.total_evening_showers(OperationPreset.GUESTS) == 6
+    # Morning = reserve 1 + 2 morning_extras + 0 overflow = 3
+    assert dhw.total_morning_showers(OperationPreset.GUESTS) == 3
+
+
+def test_required_tank_temp_morning_capped_at_normal(monkeypatch):
+    """PR G: morning window required temp is capped at DHW_TEMP_NORMAL_C
+    (default 45 °C) regardless of how many overflow showers land in the
+    morning. The LP accepts a slightly cooler average vs over-heating
+    overnight."""
+    # Pile a lot of morning showers via guests + overflow.
+    monkeypatch.setattr(config, "DHW_GUEST_COUNT", 5, raising=False)
+    monkeypatch.setattr(config, "DHW_SHOWERS_GUESTS_EVENING_EXTRA_PER_GUEST", 1, raising=False)
+    monkeypatch.setattr(config, "DHW_SHOWERS_GUESTS_MORNING_EXTRA_PER_GUEST", 1, raising=False)
+    # Raw evening = 9, cap 6 → overflow 3. Morning = 1 + 5 + 3 = 9.
+    # Without cap: 9 × 35 = 315 L >> 170 capacity → required ~62 °C.
+    # With cap at NORMAL=45 → 45.
+    morning_req = dhw.required_tank_temp_for_window("morning", OperationPreset.GUESTS)
+    assert morning_req == pytest.approx(float(config.DHW_TEMP_NORMAL_C), abs=0.1), (
+        f"morning required = {morning_req:.2f}, expected cap at NORMAL = {config.DHW_TEMP_NORMAL_C}"
+    )
+
+
+def test_required_tank_temp_evening_not_capped(monkeypatch):
+    """Counter-test: the evening required temp is NOT capped — guests'
+    evening showers genuinely need a warm tank."""
+    monkeypatch.setattr(config, "DHW_GUEST_COUNT", 2, raising=False)
+    evening_req = dhw.required_tank_temp_for_window("evening", OperationPreset.GUESTS)
+    # 6 showers × 35 L = 210 > 170 → storage = 10 + 210×28/170 + 2 ≈ 46.6
+    assert evening_req > 45.0
+
+
 # ---------------------------------------------------------------------------
 # Mixer math
 # ---------------------------------------------------------------------------
 
 
 def test_mix_litres_per_shower_uses_duration_and_flow():
-    """5 min × 9 L/min = 45 L mix per shower."""
-    assert dhw.mix_litres_per_shower() == pytest.approx(45.0)
+    """PR G default: 5 min × 7 L/min = 35 L mix per shower (UK low-flow)."""
+    assert dhw.mix_litres_per_shower() == pytest.approx(35.0)
 
 
 def test_hot_litres_per_shower_increases_as_tank_cools(monkeypatch):
@@ -79,9 +151,10 @@ def test_hot_litres_per_shower_increases_as_tank_cools(monkeypatch):
 
 
 def test_hot_litres_per_shower_handles_tank_at_cold():
-    """Tank at cold-inlet temp: mixer math undefined; we return mix litres."""
+    """Tank at cold-inlet temp: mixer math undefined; we return mix litres
+    (35 L = 5 min × 7 L/min per PR G defaults)."""
     monkeypatch_target = 10.0  # default cold inlet
-    assert dhw.hot_litres_per_shower(monkeypatch_target) == pytest.approx(45.0)
+    assert dhw.hot_litres_per_shower(monkeypatch_target) == pytest.approx(35.0)
 
 
 # ---------------------------------------------------------------------------
@@ -106,10 +179,16 @@ def test_required_tank_temp_small_n_collapses_to_mixer_safety():
 
 def test_required_tank_temp_large_n_pushes_above_mixer():
     """When mix_required > usable hot capacity, required rises with N.
-    4 showers = 180 L mix > 140 L usable. Required ≈ cold + 180×(mixer-cold)/140 + safety.
-    With cold=10, mixer=38: 10 + 180×28/140 + 2 = 10 + 36 + 2 = 48 °C."""
-    val = dhw.required_tank_temp_for_n_showers(4)
-    assert val == pytest.approx(48.0, abs=0.5)
+
+    PR G defaults: 0.85 × 200 = 170 L usable, 7 L/min × 5 min = 35 L/shower.
+    To exceed 170 L: need > 170/35 = 4.86 showers → 5 won't (175>170? exact
+    175 = barely), test with 6 showers = 210 L > 170 L.
+    storage = 10 + 210×28/170 + 2 ≈ 10 + 34.6 + 2 ≈ 46.6 °C.
+
+    Matches user empirical: tank ~48 °C delivers 6 (guest) showers
+    comfortably."""
+    val = dhw.required_tank_temp_for_n_showers(6)
+    assert val == pytest.approx(46.6, abs=0.5)
 
 
 def test_required_tank_temp_scales_monotonically():
@@ -178,23 +257,23 @@ def test_daily_litres_legacy_override(monkeypatch):
 
 def test_daily_litres_normal_excludes_morning_reserve(monkeypatch):
     """Normal mode: morning reserve is a floor, NOT a draw. Daily litres
-    = evening × mix = 4 × 45 = 180."""
+    = evening × mix = 4 × 35 = 140 (PR G defaults: 5 min × 7 L/min)."""
     monkeypatch.setattr(config, "DHW_DAILY_SHOWER_LITRES", 0.0, raising=False)
     val = dhw.daily_shower_litres_drawn(OperationPreset.NORMAL)
-    assert val == pytest.approx(4 * 5 * 9.0)
+    assert val == pytest.approx(4 * 5 * 7.0)
 
 
 def test_daily_litres_guests_includes_morning_extras(monkeypatch):
     """Guests mode: morning visitor extras ARE actual draw. Daily litres
     = (evening + guests×evening_extra) × mix + (guests × morning_extra) × mix.
-    With defaults: (4+2)×45 + 2×45 = 360 L."""
+    PR G defaults (5 min × 7 L/min = 35 L/shower): (4+2)×35 + 2×35 = 280 L."""
     monkeypatch.setattr(config, "DHW_DAILY_SHOWER_LITRES", 0.0, raising=False)
     monkeypatch.setattr(config, "DHW_GUEST_COUNT", 2, raising=False)
     monkeypatch.setattr(config, "DHW_SHOWERS_GUESTS_EVENING_EXTRA_PER_GUEST", 1, raising=False)
     monkeypatch.setattr(config, "DHW_SHOWERS_GUESTS_MORNING_EXTRA_PER_GUEST", 1, raising=False)
     val = dhw.daily_shower_litres_drawn(OperationPreset.GUESTS)
-    # 6 evening + 2 morning extras = 8 × 45 = 360
-    assert val == pytest.approx(8 * 45.0)
+    # 6 evening + 2 morning extras = 8 × 35 = 280
+    assert val == pytest.approx(8 * 35.0)
 
 
 def test_daily_litres_vacation_zero(monkeypatch):

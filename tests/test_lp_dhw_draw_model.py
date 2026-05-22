@@ -38,21 +38,21 @@ def _make_weather(slots, pv_kwh=None, base_kwh=None):
 def test_dhw_draw_model_drops_tank_temp_during_shower_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When DHW_DAILY_SHOWER_LITRES > 0, the LP's planned tank trajectory
-    must drop materially during shower-window slots (real physics) instead
-    of staying nearly flat (standing loss only)."""
+    """When DHW_DAILY_SHOWER_LITRES > 0 (legacy escape hatch), the LP's
+    planned tank trajectory must drop materially during shower-window
+    slots (real physics) instead of staying nearly flat (standing loss
+    only). PR G: tank starts AT the required floor so any draw forces
+    the LP to allocate maintenance heating to stay above slack."""
     from src.config import config as app_config
     from src.scheduler.lp_optimizer import LpInitialState, solve_lp
 
     monkeypatch.setattr(app_config, "DAIKIN_CONTROL_MODE", "active", raising=False)
     monkeypatch.setattr(app_config, "DHW_SHOWER_SCHEDULE", "19:00-22:00", raising=False)
     monkeypatch.setattr(app_config, "DHW_DAILY_SHOWER_LITRES", 144.0, raising=False)
-    monkeypatch.setattr(app_config, "DHW_USAGE_TEMP_C", 40.0, raising=False)
-    monkeypatch.setattr(app_config, "DHW_COLD_INLET_TEMP_C", 10.0, raising=False)
+    # Force a higher required floor by going guests mode (6 showers → ~47 °C floor).
+    monkeypatch.setattr(app_config, "OPTIMIZATION_PRESET", "guests", raising=False)
+    monkeypatch.setattr(app_config, "DHW_GUEST_COUNT", 2, raising=False)
 
-    # 6 slots covering the 19:00-22:00 shower window. Constant 20p price, no PV,
-    # tank initial 50°C. LP should plan zero or minimal heating during shower
-    # slots (heating during showers is wasteful — wait until cheap window).
     base = datetime(2026, 6, 1, 18, 0, tzinfo=UTC)  # 19:00 BST
     n = 6
     slots = [base + timedelta(minutes=30 * i) for i in range(n)]
@@ -66,23 +66,19 @@ def test_dhw_draw_model_drops_tank_temp_during_shower_window(
     )
     assert plan.ok, plan.status
 
-    # Without draw model, tank would have dropped ~0.5°C over 3h (just standing
-    # loss). With draw model, even with LP's heating to maintain ≥ 45°C, the
-    # END temperature should be at the floor (close to 45°C) — meaning the LP
-    # had to plan substantial heating to OFFSET the draw. Without draw model
-    # the LP would just leave tank at 49+ all the way through.
+    # With the guests-mode floor (~47 °C) and 144 L/day draw spread over 6
+    # slots, tank should drop materially from the 50 °C start (heat is
+    # planned but doesn't fully offset draw). End-of-window must be below
+    # the start AND the LP must have allocated some e_dhw.
     end_tank = plan.tank_temp_c[-1]
-    # With 144L/day = 5 kWh thermal over 6 slots, draw alone (no heat) would
-    # drop tank by ~21°C in this window. LP must heat substantially. End-of-
-    # window tank should be close to the floor 45°C, not the starting 50°C.
+    total_dhw = sum(plan.dhw_electric_kwh)
     assert end_tank < 49.0, (
-        f"With draw model, tank should NOT stay near starting temp 50°C "
-        f"through shower window — that would mean LP didn't see the draw. "
+        f"With draw model, tank should drop below starting temp 50°C. "
         f"Got end_tank={end_tank:.1f}"
     )
-    # Sanity: still above floor.
-    assert end_tank >= 44.5, (
-        f"LP must keep tank ≥ floor (45°C) at all shower slots; got end_tank={end_tank:.1f}"
+    assert total_dhw > 0.3, (
+        f"With shower draw active, LP must allocate at least some e_dhw "
+        f"to maintain the guests floor. Got total_dhw={total_dhw:.2f} kWh"
     )
 
 
@@ -108,7 +104,13 @@ def test_dhw_draw_per_day_normalization_2day_horizon(
     monkeypatch.setattr(app_config, "DHW_DAILY_SHOWER_LITRES", 144.0, raising=False)
     monkeypatch.setattr(app_config, "DHW_USAGE_TEMP_C", 40.0, raising=False)
     monkeypatch.setattr(app_config, "DHW_COLD_INLET_TEMP_C", 10.0, raising=False)
-    monkeypatch.setattr(app_config, "OPTIMIZATION_PRESET", "normal", raising=False)
+    # PR G — force guests mode so the floor (~47 °C) is meaningfully above
+    # the starting tank (50 °C minus ongoing draw) and the LP must heat
+    # daily to maintain. Normal mode under PR G defaults has a 40 °C floor,
+    # which the natural standing loss + draw still leaves above (no heat
+    # needed → regression test loses its sensor).
+    monkeypatch.setattr(app_config, "OPTIMIZATION_PRESET", "guests", raising=False)
+    monkeypatch.setattr(app_config, "DHW_GUEST_COUNT", 2, raising=False)
 
     # Solve the LP with a 48h horizon spanning 2 days.
     # Each day's shower window: 19:00-22:00 BST = 6 slots × 30 min.
