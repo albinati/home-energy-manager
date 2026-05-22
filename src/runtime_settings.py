@@ -521,25 +521,35 @@ SCHEMA: dict[str, SettingSpec] = {
     "DHW_TEMP_PV_ABUNDANCE_TARGET_C": SettingSpec(
         key="DHW_TEMP_PV_ABUNDANCE_TARGET_C",
         type_name="float",
-        env_default=_float_env("DHW_TEMP_PV_ABUNDANCE_TARGET_C", "46"),
+        env_default=_float_env("DHW_TEMP_PV_ABUNDANCE_TARGET_C", "60"),
         min_value=40.0,
         max_value=60.0,
         description=(
             "Daikin tank target (°C) during solar_charge / solar_preheat "
-            "slots — PV-abundance window where free PV would otherwise "
-            "export. Default 46 (PR G, recalibrated from 50): matches "
-            "the user's empirical observation that 48 °C tank delivers "
-            "6 showers (guests) easily and 46 is the ideal compromise. "
-            "Gives the LP 1 °C of headroom above the NORMAL 45 baseline — "
-            "small but enough to materially store excess PV instead of "
-            "exporting it. "
-            "Standing-loss math: each +1 °C above NORMAL costs ~0.06 "
-            "kWh/day in extra UA × ΔT loss (60 W per K vs INDOOR_SETPOINT_C "
-            "21 °C). Higher targets (50–55) bleed standing loss faster "
-            "than they store useful energy; the mixer math caps useful "
-            "storage anyway because showers don't need a 55+ °C tank. "
-            "Capped at 60 to keep the tank well below the legionella "
-            "thermal-shock ceiling and protect long-term tank life."
+            "slots. This is a STORAGE target, NOT a comfort target — "
+            "the tank is lifted as high as possible WHILE PV is excess "
+            "(free energy), then a paired 'restore' action at the end of "
+            "the solar window drops the target back to "
+            "``DHW_TEMP_NORMAL_C`` (45 °C). Outside the solar window the "
+            "tank decays naturally via standing loss until evening "
+            "showers consume the stored thermal energy. "
+            "\n\n"
+            "Default 60 (PR H, 2026-05-22): matches the user's manual "
+            "preference after they observed PR G's 46 °C (a comfort-"
+            "level setting wrongly applied as the storage ceiling) was "
+            "exporting PV instead of storing thermal. "
+            "\n\n"
+            "Economics: lifting 45 → 60 °C stores ~3.5 kWh thermal "
+            "(200 L × 4186 × 15 / 3.6e6). After ~5 h decay (standing "
+            "loss 97 W at indoor 21 °C → 0.5 kWh thermal lost), evening "
+            "showers can draw ~3 kWh thermal ≈ 1 kWh elec equivalent "
+            "(vs grid import at 12-30 p/kWh). Vs exporting that same PV "
+            "at 5-15 p/kWh export rate, storage wins by ~6-12 p/day on "
+            "PV-rich days. "
+            "\n\n"
+            "Capped at 60 (= legionella target floor) to protect tank "
+            "longevity. Lower this if you don't want to push the tank "
+            "that high (e.g. 50 = ~2 kWh thermal stored, less aggressive)."
         ),
     ),
 }
