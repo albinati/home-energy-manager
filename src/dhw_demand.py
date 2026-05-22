@@ -36,40 +36,53 @@ def _mode_enum() -> OperationPreset:
         return OperationPreset.NORMAL
 
 
-def total_evening_showers(mode: OperationPreset | str | None = None) -> int:
-    """Number of evening showers the LP must plan for under *mode*.
-
-    * ``normal``: ``DHW_SHOWERS_NORMAL_EVENING`` (default 4)
-    * ``guests``: normal + ``DHW_GUEST_COUNT × DHW_SHOWERS_GUESTS_EVENING_EXTRA_PER_GUEST``
-    * ``vacation``: 0
-    """
-    m = OperationPreset(mode) if mode is not None else _mode_enum()
-    if m == OperationPreset.VACATION:
+def _raw_evening_showers(mode: OperationPreset) -> int:
+    """Pre-cap evening shower count (count before
+    ``DHW_SHOWERS_EVENING_CAP`` is applied)."""
+    if mode == OperationPreset.VACATION:
         return 0
     base = int(getattr(config, "DHW_SHOWERS_NORMAL_EVENING", 4))
-    if m == OperationPreset.GUESTS:
+    if mode == OperationPreset.GUESTS:
         guests = int(getattr(config, "DHW_GUEST_COUNT", 2))
         per_guest = int(getattr(config, "DHW_SHOWERS_GUESTS_EVENING_EXTRA_PER_GUEST", 1))
         return max(0, base + guests * per_guest)
     return max(0, base)
 
 
-def total_morning_showers(mode: OperationPreset | str | None = None) -> int:
-    """Number of morning showers the LP must plan for under *mode*.
+def total_evening_showers(mode: OperationPreset | str | None = None) -> int:
+    """Number of evening showers the LP plans for, capped at
+    ``DHW_SHOWERS_EVENING_CAP`` (PR G — user empirical: ~6 is the
+    practical limit per evening shift; extras spill to morning).
 
-    In normal mode this is the **reserve** count (a soft floor at the
-    morning hour, no draw modelled). In guests mode the visitor extras
-    are actual draws.
+    * ``normal``: ``DHW_SHOWERS_NORMAL_EVENING`` (default 4)
+    * ``guests``: ``min(normal + guests × extras_per_guest, cap)``
+    * ``vacation``: 0
+    """
+    m = OperationPreset(mode) if mode is not None else _mode_enum()
+    raw = _raw_evening_showers(m)
+    cap = int(getattr(config, "DHW_SHOWERS_EVENING_CAP", 6))
+    return min(raw, cap)
+
+
+def total_morning_showers(mode: OperationPreset | str | None = None) -> int:
+    """Number of morning showers the LP plans for. Includes any
+    evening overflow (PR G — user empirical: "more than 6 evening
+    showers spills the remainder to next-day morning").
+
+    Normal mode: just the reserve count (soft floor, no draw modelled).
+    Guests mode: reserve + per-guest morning extras + evening overflow.
     """
     m = OperationPreset(mode) if mode is not None else _mode_enum()
     if m == OperationPreset.VACATION:
         return 0
     reserve = int(getattr(config, "DHW_SHOWERS_NORMAL_MORNING_RESERVE", 1))
+    cap = int(getattr(config, "DHW_SHOWERS_EVENING_CAP", 6))
+    overflow = max(0, _raw_evening_showers(m) - cap)
     if m == OperationPreset.GUESTS:
         guests = int(getattr(config, "DHW_GUEST_COUNT", 2))
         per_guest = int(getattr(config, "DHW_SHOWERS_GUESTS_MORNING_EXTRA_PER_GUEST", 1))
-        return max(0, reserve + guests * per_guest)
-    return max(0, reserve)
+        return max(0, reserve + guests * per_guest + overflow)
+    return max(0, reserve + overflow)
 
 
 def mix_litres_per_shower() -> float:
@@ -181,16 +194,28 @@ def required_tank_temp_for_window(
     window: str, mode: OperationPreset | str | None = None
 ) -> float:
     """Tank temperature required at the start of *window* ('evening' or
-    'morning') under *mode*. Reuses :func:`required_tank_temp_for_n_showers`
-    with the mode-appropriate shower count."""
+    'morning') under *mode*.
+
+    PR G — morning is **capped at ``DHW_TEMP_NORMAL_C``** (default 45 °C)
+    per user empirical: "morning showers heat the tank for the remaining
+    overflow people; cap of 45 °C is worth it in that case". Morning
+    showers are typically shorter and the LP doesn't pre-heat just to
+    deliver a slightly warmer shower at the cost of overnight standing
+    loss. If the derived requirement exceeds 45 °C (e.g. very large
+    guest counts spilling overflow to morning), the LP accepts a
+    slightly cooler average shower temperature.
+    """
     m = OperationPreset(mode) if mode is not None else _mode_enum()
     if window == "evening":
         n = total_evening_showers(m)
+        return required_tank_temp_for_n_showers(n)
     elif window == "morning":
         n = total_morning_showers(m)
+        derived = required_tank_temp_for_n_showers(n)
+        morning_cap = float(config.DHW_TEMP_NORMAL_C)
+        return min(derived, morning_cap)
     else:
         raise ValueError(f"window must be 'evening' or 'morning', got {window!r}")
-    return required_tank_temp_for_n_showers(n)
 
 
 def daily_shower_litres_drawn(mode: OperationPreset | str | None = None) -> float:

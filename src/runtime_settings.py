@@ -98,10 +98,16 @@ SCHEMA: dict[str, SettingSpec] = {
     "DHW_TEMP_NORMAL_C": SettingSpec(
         key="DHW_TEMP_NORMAL_C",
         type_name="float",
-        env_default=_float_env("DHW_TEMP_NORMAL_C", "50"),
+        env_default=_float_env("DHW_TEMP_NORMAL_C", "45"),
         min_value=40.0,
         max_value=65.0,
-        description="Restore / safe-default tank target (°C).",
+        description=(
+            "Restore / safe-default tank target (°C). PR G (2026-05-22): "
+            "lowered default 50 → 45 to match the user's empirical reality "
+            "— 45 °C delivers 4 daily showers comfortably; even 43 works "
+            "in practice. Matches the value already documented in CLAUDE.md "
+            "and used in /srv/hem/.env on prod."
+        ),
     ),
     "INDOOR_SETPOINT_C": SettingSpec(
         key="INDOOR_SETPOINT_C",
@@ -142,10 +148,17 @@ SCHEMA: dict[str, SettingSpec] = {
     "DHW_SHOWER_FLOW_LPM": SettingSpec(
         key="DHW_SHOWER_FLOW_LPM",
         type_name="float",
-        env_default=_float_env("DHW_SHOWER_FLOW_LPM", "9.0"),
+        env_default=_float_env("DHW_SHOWER_FLOW_LPM", "7.0"),
         min_value=4.0,
         max_value=20.0,
-        description="Mixer-out flow rate (litres per minute).",
+        description=(
+            "Mixer-out flow rate (litres per minute). PR G (2026-05-22): "
+            "lowered default 9 → 7 to match the user's actual UK low-flow "
+            "shower head. Reverse-engineered from empirical: with 7 L/min "
+            "and DHW_TANK_USABLE_FRACTION=0.85, the model's "
+            "required_tank_temp matches observed tank deliveries (40 °C "
+            "for 4 daily showers; 46 °C for 6 guest showers)."
+        ),
     ),
     "DHW_SHOWER_MIXER_TEMP_C": SettingSpec(
         key="DHW_SHOWER_MIXER_TEMP_C",
@@ -215,17 +228,39 @@ SCHEMA: dict[str, SettingSpec] = {
             "switches to guests without specifying a count."
         ),
     ),
+    "DHW_SHOWERS_EVENING_CAP": SettingSpec(
+        key="DHW_SHOWERS_EVENING_CAP",
+        type_name="int",
+        env_default=_int_env("DHW_SHOWERS_EVENING_CAP", "6"),
+        min_value=1,
+        max_value=12,
+        description=(
+            "Maximum showers the LP plans into a single evening shift "
+            "(PR G — user empirical: 6 is the practical limit per evening; "
+            "more spills to next-day morning). When "
+            "``base + guests × extras`` exceeds this cap, the surplus "
+            "rolls over into the morning count, and the morning required "
+            "tank temp is itself capped at ``DHW_TEMP_NORMAL_C`` so the "
+            "LP doesn't over-heat overnight just to satisfy spill-over "
+            "demand."
+        ),
+    ),
     "DHW_TANK_USABLE_FRACTION": SettingSpec(
         key="DHW_TANK_USABLE_FRACTION",
         type_name="float",
-        env_default=_float_env("DHW_TANK_USABLE_FRACTION", "0.7"),
+        env_default=_float_env("DHW_TANK_USABLE_FRACTION", "0.85"),
         min_value=0.4,
         max_value=1.0,
         description=(
             "Stratification fraction: portion of the nominal tank volume "
             "that delivers hot water at the storage temperature before the "
-            "remaining cold inlet dilutes the draw. 0.7 is the empirical "
-            "Daikin Altherma figure. Lower for less stratified tanks."
+            "remaining cold inlet dilutes the draw. PR G (2026-05-22): "
+            "bumped 0.7 → 0.85 based on this household's empirical "
+            "observation that 45 °C tank delivers 4 family showers and "
+            "48 °C delivers 6 guest showers. Daikin Altherma HPSU tanks "
+            "with their immersed coil show better stratification than the "
+            "conservative 0.7 default. Lower this if a future tank with "
+            "weaker stratification is installed."
         ),
     ),
     "DHW_MORNING_RESERVE_HOUR_LOCAL": SettingSpec(
@@ -486,25 +521,25 @@ SCHEMA: dict[str, SettingSpec] = {
     "DHW_TEMP_PV_ABUNDANCE_TARGET_C": SettingSpec(
         key="DHW_TEMP_PV_ABUNDANCE_TARGET_C",
         type_name="float",
-        env_default=_float_env("DHW_TEMP_PV_ABUNDANCE_TARGET_C", "50"),
+        env_default=_float_env("DHW_TEMP_PV_ABUNDANCE_TARGET_C", "46"),
         min_value=40.0,
         max_value=60.0,
         description=(
             "Daikin tank target (°C) during solar_charge / solar_preheat "
             "slots — PV-abundance window where free PV would otherwise "
-            "export. Default 50 (PR F): stores ~1.16 kWh thermal vs. the "
-            "45 °C NORMAL baseline, usable for the evening shower window. "
-            "Standing-loss trade-off: each +1 °C above NORMAL costs ~0.06 "
+            "export. Default 46 (PR G, recalibrated from 50): matches "
+            "the user's empirical observation that 48 °C tank delivers "
+            "6 showers (guests) easily and 46 is the ideal compromise. "
+            "Gives the LP 1 °C of headroom above the NORMAL 45 baseline — "
+            "small but enough to materially store excess PV instead of "
+            "exporting it. "
+            "Standing-loss math: each +1 °C above NORMAL costs ~0.06 "
             "kWh/day in extra UA × ΔT loss (60 W per K vs INDOOR_SETPOINT_C "
-            "21 °C). Sweet spot 50–55 °C for a family in W4 1DZ — higher "
-            "doesn't pay because evening showers don't need >55 °C tank "
-            "(mixer math caps useful storage). Raise per household size: "
-            "single/couple ~45, family of 4 ~50, guests/larger ~55. "
+            "21 °C). Higher targets (50–55) bleed standing loss faster "
+            "than they store useful energy; the mixer math caps useful "
+            "storage anyway because showers don't need a 55+ °C tank. "
             "Capped at 60 to keep the tank well below the legionella "
-            "thermal-shock ceiling and protect long-term tank life. "
-            "Bumping from default 45 → 50 in PR F because at 45 the LP "
-            "had zero room to lift the tank with PV (target == NORMAL → "
-            "no e_dhw allocation → PV wasted)."
+            "thermal-shock ceiling and protect long-term tank life."
         ),
     ),
 }

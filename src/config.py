@@ -1174,6 +1174,14 @@ class Config:
         self._rt_set("DHW_GUEST_COUNT", int(value))
 
     @property
+    def DHW_SHOWERS_EVENING_CAP(self) -> int:
+        return int(self._rt_get("DHW_SHOWERS_EVENING_CAP"))
+
+    @DHW_SHOWERS_EVENING_CAP.setter
+    def DHW_SHOWERS_EVENING_CAP(self, value: int) -> None:
+        self._rt_set("DHW_SHOWERS_EVENING_CAP", int(value))
+
+    @property
     def DHW_TANK_USABLE_FRACTION(self) -> float:
         return float(self._rt_get("DHW_TANK_USABLE_FRACTION"))
 

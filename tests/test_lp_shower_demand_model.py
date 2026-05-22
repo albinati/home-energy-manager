@@ -69,14 +69,12 @@ def _weather(n: int, t_out: float = 10.0, pv_per_slot: float = 0.0) -> WeatherLp
 
 
 def test_lp_heats_before_evening_window_with_cheap_lead_time(monkeypatch):
-    """Tank starts at a realistic warm overnight target (45 °C, the normal
-    DHW_TEMP_NORMAL_C). Evening shower window 7 h ahead has a derived
-    floor (~48 °C for 4 showers). The LP must allocate e_dhw in pre-shower
-    slots so that by the start of the window the tank meets the floor."""
-    # Anchor at 12:00 UTC; evening shower window 19:00-22:00 local = 18:00-
-    # 21:00 UTC (BST = UTC+1 in June). Tank starts at the normal overnight
-    # target so the LP has feasible heating headroom (not stuck in infeasible
-    # corner case where tank can't reach floor regardless of heating).
+    """When the derived floor exceeds the starting tank temp, the LP must
+    allocate e_dhw pre-window. PR G defaults make 4 normal showers feasible
+    from 45 °C with no extra heat (required ≈ 40 °C ≤ 45) — so this test
+    seeds GUESTS mode (6 showers → required ~47 °C) to force pre-heat."""
+    monkeypatch.setattr(config, "OPTIMIZATION_PRESET", "guests", raising=False)
+    monkeypatch.setattr(config, "DHW_GUEST_COUNT", 2, raising=False)
     base = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
     n = 24  # 12 h horizon: 12:00 → 24:00 UTC
     slots = [base + i * timedelta(minutes=30) for i in range(n)]
@@ -93,20 +91,20 @@ def test_lp_heats_before_evening_window_with_cheap_lead_time(monkeypatch):
     )
     assert plan.ok, plan.status
 
-    # Required tank at start of evening window (4 showers, defaults) ≈ 48 °C.
     from src.dhw_demand import required_tank_temp_for_window
     from src.presets import OperationPreset
-    required = required_tank_temp_for_window("evening", OperationPreset.NORMAL)
+    required = required_tank_temp_for_window("evening", OperationPreset.GUESTS)
+    # Sanity: required exceeds the starting tank temp so pre-heat is needed.
+    assert required > 45.0, f"test premise broken: required={required:.2f}"
 
-    # 19:00 local = 18:00 UTC = slot index 12 (since base = 12:00 UTC, 30 min/slot)
+    # 19:00 local = 18:00 UTC = slot index 12 (base = 12:00 UTC, 30 min/slot).
     shower_slot_index = 12
     assert plan.tank_temp_c[shower_slot_index] >= required - 1.0, (
         f"tank at shower window start = {plan.tank_temp_c[shower_slot_index]:.2f} °C, "
         f"required = {required:.2f} °C"
     )
 
-    # Confirm SOME heating happened before the shower slot — the LP starts
-    # at 45 °C and the floor is ~48 °C, so at least the gap must be heated.
+    # Confirm SOME heating happened before the shower slot.
     pre_window_dhw = sum(plan.dhw_electric_kwh[:shower_slot_index])
     assert pre_window_dhw > 0.2, (
         f"LP should have heated before the evening window; "
