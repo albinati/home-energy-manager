@@ -164,6 +164,149 @@ def test_normal_mode_can_still_grid_charge(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# PR D — peak_export is mode-gated at the LP level
+# ---------------------------------------------------------------------------
+
+
+def test_normal_mode_never_battery_exports(monkeypatch):
+    """PR D: in normal mode the LP constraint ``exp[i] <= pv_use[i]`` (no
+    contribution from ``dis``) means the LP cannot plan battery-to-grid
+    arbitrage. ``dis`` may still flow for self-use (load); ``exp`` only
+    surfaces when PV genuinely exceeds local consumption."""
+    monkeypatch.setattr(config, "OPTIMIZATION_PRESET", "normal", raising=False)
+    base = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    n = 12
+    slots = [base + i * timedelta(minutes=30) for i in range(n)]
+    # Big spread (cheap morning, peak afternoon) — would be classic arbitrage
+    # under the pre-PR-D rules. Some PV but bounded so dis would be tempted.
+    plan = solve_lp(
+        slot_starts_utc=slots,
+        price_pence=[10.0] * 6 + [40.0] * 6,
+        base_load_kwh=[0.3] * n,
+        weather=_weather(n, pv=0.5),
+        initial=LpInitialState(soc_kwh=8.0, tank_temp_c=45.0),
+        tz=ZoneInfo("Europe/London"),
+        export_price_pence=[35.0] * n,
+    )
+    assert plan.ok, plan.status
+    # Critical invariant: every slot where dis > 0 must have exp <= pv_use
+    # (i.e. nothing from battery shows up in exp).
+    for i in range(n):
+        assert plan.export_kwh[i] <= plan.pv_use_kwh[i] + 1e-6, (
+            f"normal: slot {i} battery-exported: "
+            f"exp={plan.export_kwh[i]:.3f} pv_use={plan.pv_use_kwh[i]:.3f} "
+            f"dis={plan.battery_discharge_kwh[i]:.3f}"
+        )
+
+
+def test_guests_mode_never_battery_exports(monkeypatch):
+    """Same invariant as normal — guests mode also gates battery export."""
+    monkeypatch.setattr(config, "OPTIMIZATION_PRESET", "guests", raising=False)
+    base = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    n = 12
+    slots = [base + i * timedelta(minutes=30) for i in range(n)]
+    plan = solve_lp(
+        slot_starts_utc=slots,
+        price_pence=[10.0] * 6 + [40.0] * 6,
+        base_load_kwh=[0.3] * n,
+        weather=_weather(n, pv=0.5),
+        initial=LpInitialState(soc_kwh=8.0, tank_temp_c=45.0),
+        tz=ZoneInfo("Europe/London"),
+        export_price_pence=[35.0] * n,
+    )
+    assert plan.ok, plan.status
+    for i in range(n):
+        assert plan.export_kwh[i] <= plan.pv_use_kwh[i] + 1e-6, (
+            f"guests: slot {i} battery-exported: "
+            f"exp={plan.export_kwh[i]:.3f} pv_use={plan.pv_use_kwh[i]:.3f} "
+            f"dis={plan.battery_discharge_kwh[i]:.3f}"
+        )
+
+
+def test_vacation_mode_can_battery_export(monkeypatch):
+    """Vacation mode IS the arbitrage mode — LP is free to plan
+    battery-to-grid export when peak prices justify it. The robust filter
+    downstream still applies for forecast-error safety."""
+    monkeypatch.setattr(config, "OPTIMIZATION_PRESET", "vacation", raising=False)
+    base = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    n = 12
+    slots = [base + i * timedelta(minutes=30) for i in range(n)]
+    # PV in the early cheap slots (charges battery), zero PV in peak slots
+    # (battery must discharge alone to export). G98 export cap = 1.84 kWh/slot.
+    pv_profile = [2.0] * 6 + [0.0] * 6
+    plan = solve_lp(
+        slot_starts_utc=slots,
+        price_pence=[10.0] * 6 + [40.0] * 6,
+        base_load_kwh=[0.3] * n,
+        weather=WeatherLpSeries(
+            slot_starts_utc=[base + i * timedelta(minutes=30) for i in range(n)],
+            temperature_outdoor_c=[15.0] * n,
+            shortwave_radiation_wm2=[0.0] * n,
+            cloud_cover_pct=[40.0] * n,
+            pv_kwh_per_slot=pv_profile,
+            cop_space=[3.0] * n,
+            cop_dhw=[2.8] * n,
+        ),
+        initial=LpInitialState(soc_kwh=8.0, tank_temp_c=45.0),
+        tz=ZoneInfo("Europe/London"),
+        export_price_pence=[35.0] * n,
+    )
+    assert plan.ok, plan.status
+    # In a peak slot with zero PV, any export must come from battery discharge.
+    EPS = 1e-3
+    battery_exported = any(
+        plan.export_kwh[i] > EPS
+        and plan.pv_use_kwh[i] < EPS
+        and plan.battery_discharge_kwh[i] > EPS
+        for i in range(n)
+    )
+    assert battery_exported, (
+        "vacation should plan battery export when peak prices justify; "
+        f"dis={plan.battery_discharge_kwh} exp={plan.export_kwh} "
+        f"pv_use={plan.pv_use_kwh}"
+    )
+
+
+def test_lp_plan_to_slots_emits_peak_export_only_under_vacation(monkeypatch):
+    """End-to-end check via the labeller: vacation produces peak_export
+    slots; normal does not (because the LP doesn't plan exp > pv_use)."""
+    from src.scheduler.lp_dispatch import lp_plan_to_slots
+    base = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    n = 12
+    slots = [base + i * timedelta(minutes=30) for i in range(n)]
+    # PV early (charges battery), zero PV at peak (any export must come
+    # from battery → labeller must see exp > pv_use → peak_export).
+    pv_profile = [2.0] * 6 + [0.0] * 6
+
+    def _solve(preset: str):
+        monkeypatch.setattr(config, "OPTIMIZATION_PRESET", preset, raising=False)
+        return solve_lp(
+            slot_starts_utc=slots,
+            price_pence=[10.0] * 6 + [40.0] * 6,
+            base_load_kwh=[0.3] * n,
+            weather=WeatherLpSeries(
+                slot_starts_utc=[base + i * timedelta(minutes=30) for i in range(n)],
+                temperature_outdoor_c=[15.0] * n,
+                shortwave_radiation_wm2=[0.0] * n,
+                cloud_cover_pct=[40.0] * n,
+                pv_kwh_per_slot=pv_profile,
+                cop_space=[3.0] * n,
+                cop_dhw=[2.8] * n,
+            ),
+            initial=LpInitialState(soc_kwh=8.0, tank_temp_c=45.0),
+            tz=ZoneInfo("Europe/London"),
+            export_price_pence=[35.0] * n,
+        )
+
+    p_vac = _solve("vacation")
+    p_norm = _solve("normal")
+    kinds_vac = {s.kind for s in lp_plan_to_slots(p_vac)}
+    kinds_norm = {s.kind for s in lp_plan_to_slots(p_norm)}
+    assert "peak_export" in kinds_vac, f"vacation kinds: {kinds_vac}"
+    assert "peak_export" not in kinds_norm, f"normal kinds: {kinds_norm}"
+
+
+# ---------------------------------------------------------------------------
 # Heartbeat tank-drift check is no-op in vacation
 # ---------------------------------------------------------------------------
 

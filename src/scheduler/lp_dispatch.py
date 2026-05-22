@@ -93,9 +93,11 @@ def lp_plan_to_slots(plan: LpPlan) -> list[HalfHourSlot]:
     # against forecast error is enforced separately by ``filter_robust_peak_export``
     # (scenario LP, see src/scheduler/scenarios.py).
     #
-    # PR C — ``ENERGY_STRATEGY_MODE=strict_savings`` was the prior peak-export
-    # kill switch; removed in PR C. The scenario filter (pessimistic floor +
-    # economic margin) is the sole gate now.
+    # PR D (2026-05-22) — peak_export only emerges when ``OPTIMIZATION_PRESET=
+    # vacation``: in normal/guests the LP carries the constraint
+    # ``exp[i] <= pv_use[i]`` (not ``pv_use + dis``), so the ``dis > 0 AND
+    # exp > 0`` branch below cannot fire by construction. The scenario filter
+    # downstream still applies for vacation-mode safety.
 
     max_pwr_w = int(config.FOX_FORCE_CHARGE_MAX_PWR)
     min_pwr_w = 200  # floor: prevents inverter from interpreting "0 W" as unlimited
@@ -107,6 +109,7 @@ def lp_plan_to_slots(plan: LpPlan) -> list[HalfHourSlot]:
         chg = plan.battery_charge_kwh[i]
         dis = plan.battery_discharge_kwh[i]
         exp = plan.export_kwh[i]
+        pv = plan.pv_use_kwh[i] if plan.pv_use_kwh else 0.0
         ed = plan.dhw_electric_kwh[i]
         es = plan.space_electric_kwh[i]
 
@@ -126,7 +129,15 @@ def lp_plan_to_slots(plan: LpPlan) -> list[HalfHourSlot]:
             # suffices). LP hard-forbids dis during negatives — encode that on
             # hardware via Fox's native "Backup" mode (see _slot_fox_tuple).
             kind = "negative_hold"
-        elif dis > EPS and exp > EPS:
+        elif dis > EPS and exp > pv + EPS:
+            # PR D — peak_export only when battery actively dumps to grid
+            # (exp exceeds what PV alone could have exported). Without the
+            # ``exp > pv`` check the labeller would false-positive on slots
+            # where dis goes to self-use AND PV excess naturally exports;
+            # in normal/guests mode the LP constraint ``exp <= pv_use``
+            # makes ``exp > pv`` mathematically impossible → kind stays
+            # ``standard``. Vacation mode (``exp <= pv_use + dis``) is the
+            # one place where this branch can fire.
             kind = "peak_export"
         elif ed < EPS and es < EPS and price >= peak_thr:
             kind = "peak"
