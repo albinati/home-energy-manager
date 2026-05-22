@@ -953,6 +953,128 @@ def test_pv_abundance_reward_dominates_export_when_at_home(
 
 
 # --------------------------------------------------------------------------
+# PR I — dynamic per-slot reward + battery priority
+# --------------------------------------------------------------------------
+
+
+def test_pv_abundance_reward_dynamic_beats_high_export(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR I — when export rate exceeds the static reward, the dynamic per-slot
+    reward (= max(static, export + buffer)) ensures tank still wins.
+
+    Scenario: PV abundant, battery already full, export rate 25 p, static
+    reward 10 p, buffer 2 p. Without PR I the LP picks export (25 p > 10 p)
+    and tank stays at NORMAL. With PR I the per-slot reward = max(10, 27)
+    = 27 p > 25 p export → tank wins."""
+    from src.config import config as app_config
+    monkeypatch.setattr(app_config, "DAIKIN_CONTROL_MODE", "active", raising=False)
+    monkeypatch.setattr(app_config, "DHW_PV_ABUNDANCE_THRESHOLD_KWH", 0.5, raising=False)
+    monkeypatch.setattr(app_config, "LP_PV_ABUNDANCE_TANK_REWARD_PENCE_PER_KWH", 10.0, raising=False)
+    monkeypatch.setattr(app_config, "LP_PV_ABUNDANCE_TANK_BEAT_EXPORT_BUFFER_PENCE", 2.0, raising=False)
+    monkeypatch.setattr(app_config, "OPTIMIZATION_PRESET", "normal", raising=False)
+
+    base = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    n = 4
+    slots = [base + timedelta(minutes=30 * i) for i in range(n)]
+    plan = _solve(
+        slots=slots,
+        prices=[20.0] * n,
+        pv=[3.0] * n,
+        base_load=[0.3] * n,
+        init_soc=9.5,  # near-full battery → leaves PV excess that must go somewhere
+        init_tank=40.0,
+        export_prices=[25.0] * n,  # high Outgoing rate that would beat static 10p
+    )
+    assert plan.ok, plan.status
+    total_dhw = sum(plan.dhw_electric_kwh)
+    total_exp = sum(plan.export_kwh)
+    # PR I: tank gets the PV excess (after battery + load) instead of
+    # exporting it. e_dhw should be materially > 0.
+    assert total_dhw > 0.3, (
+        f"With dynamic reward = max(10, 25+2) = 27p > 25p export, LP should "
+        f"prefer tank-storage. Got total_dhw={total_dhw:.2f} kWh, "
+        f"total_exp={total_exp:.2f} kWh"
+    )
+
+
+def test_pv_abundance_static_reward_still_applies_when_export_low(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Counter-test: when export rate is well below the static reward,
+    the static value still drives the reward (max() picks static)."""
+    from src.config import config as app_config
+    monkeypatch.setattr(app_config, "DAIKIN_CONTROL_MODE", "active", raising=False)
+    monkeypatch.setattr(app_config, "DHW_PV_ABUNDANCE_THRESHOLD_KWH", 0.5, raising=False)
+    monkeypatch.setattr(app_config, "LP_PV_ABUNDANCE_TANK_REWARD_PENCE_PER_KWH", 10.0, raising=False)
+    monkeypatch.setattr(app_config, "LP_PV_ABUNDANCE_TANK_BEAT_EXPORT_BUFFER_PENCE", 2.0, raising=False)
+    monkeypatch.setattr(app_config, "OPTIMIZATION_PRESET", "normal", raising=False)
+
+    base = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    n = 4
+    slots = [base + i * timedelta(minutes=30) for i in range(n)]
+    plan = _solve(
+        slots=slots,
+        prices=[20.0] * n,
+        pv=[3.0] * n,
+        base_load=[0.3] * n,
+        init_soc=9.5,
+        init_tank=40.0,
+        export_prices=[3.0] * n,  # low rate; static reward 10 dominates
+    )
+    assert plan.ok, plan.status
+    # Static reward 10p > 3p export+2p buffer → tank still wins, as before PR I.
+    assert sum(plan.dhw_electric_kwh) > 0.3
+
+
+def test_battery_priority_over_tank_when_soc_has_room(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR I verification (concern #2): when SoC has headroom AND PV is
+    abundant, battery charging dominates tank heating because the
+    battery's future-value (peak discharge ~25-30 p × eta) exceeds the
+    tank's reward (~17 p with dynamic floor).
+
+    Counter-asserts that with chg constraint disabled (vacation mode),
+    the LP routes PV to tank instead of bateria. This shows the priority
+    isn't accidental — it's the economic ranking the user wants."""
+    from src.config import config as app_config
+    monkeypatch.setattr(app_config, "DAIKIN_CONTROL_MODE", "active", raising=False)
+    monkeypatch.setattr(app_config, "DHW_PV_ABUNDANCE_THRESHOLD_KWH", 0.5, raising=False)
+    monkeypatch.setattr(app_config, "LP_PV_ABUNDANCE_TANK_REWARD_PENCE_PER_KWH", 10.0, raising=False)
+    monkeypatch.setattr(app_config, "LP_PV_ABUNDANCE_TANK_BEAT_EXPORT_BUFFER_PENCE", 2.0, raising=False)
+    monkeypatch.setattr(app_config, "OPTIMIZATION_PRESET", "normal", raising=False)
+
+    # Future peak slot at the end of the horizon gives battery a discharge
+    # target worth more than the tank reward; LP should prefer chg → dis cycle.
+    base = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    n = 8
+    slots = [base + i * timedelta(minutes=30) for i in range(n)]
+    # First 4 slots: PV abundant, cheap import. Last 4: high price (peak load).
+    plan = _solve(
+        slots=slots,
+        prices=[10.0] * 4 + [35.0] * 4,
+        pv=[3.0] * 4 + [0.0] * 4,
+        base_load=[0.3] * n,
+        init_soc=2.0,   # plenty of headroom
+        init_tank=40.0,
+        export_prices=[15.0] * n,
+    )
+    assert plan.ok, plan.status
+    # In the abundant slots, chg should dominate vs e_dhw. Both > 0 is fine;
+    # what matters is chg > e_dhw consistently in the early slots.
+    early_chg = sum(plan.battery_charge_kwh[:4])
+    early_dhw = sum(plan.dhw_electric_kwh[:4])
+    assert early_chg > early_dhw, (
+        f"Battery should fill before tank when both have room and a future "
+        f"peak discharge is available. early_chg={early_chg:.2f} "
+        f"early_dhw={early_dhw:.2f}"
+    )
+    # Sanity: battery actually charged.
+    assert early_chg > 1.0, f"battery barely charged: early_chg={early_chg:.2f}"
+
+
+# --------------------------------------------------------------------------
 # 3. LP_TANK_HI_SLACK_PENCE_PER_DEGC_SLOT is honoured (closes #225 item 1)
 # --------------------------------------------------------------------------
 

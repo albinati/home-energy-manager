@@ -614,6 +614,17 @@ class Config:
     LP_PV_ABUNDANCE_TANK_REWARD_PENCE_PER_KWH: float = float(
         os.getenv("LP_PV_ABUNDANCE_TANK_REWARD_PENCE_PER_KWH", "10.0")
     )
+    # PR I (2026-05-22) — dynamic floor on the PV-abundance tank reward.
+    # Without this, when Outgoing Agile export rate exceeds the static
+    # reward (e.g. 15 p > 10 p), the LP picks export over tank → PV is
+    # not stored thermally. Formula applied per slot in lp_optimizer:
+    # ``slot_reward = max(static, export_rate[i] + buffer)``. Battery
+    # charging still wins by future-value calculation in the energy
+    # balance (peak discharge ≈ 25-30 p/kWh, well above any plausible
+    # export+buffer). So priority order: battery → tank → export.
+    LP_PV_ABUNDANCE_TANK_BEAT_EXPORT_BUFFER_PENCE: float = float(
+        os.getenv("LP_PV_ABUNDANCE_TANK_BEAT_EXPORT_BUFFER_PENCE", "2.0")
+    )
     # Tank target ceiling on PV-abundance slots, distinct from
     # ``DHW_TEMP_MAX_C`` (65 °C) used on negative-price slots. The user's
     # empirical manual schedule lifts to 45 °C on solar afternoons; this
