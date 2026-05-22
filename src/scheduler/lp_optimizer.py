@@ -1120,12 +1120,31 @@ def solve_lp(
             pv_abundance_reward_p = 0.0
     except (ValueError, AttributeError):
         pass
+    # PR I (2026-05-22) — DYNAMIC per-slot reward. Without this, the LP
+    # picks export over tank whenever the slot's export rate exceeds the
+    # static reward (observed in prod 2026-05-22: Outgoing Agile ~15p
+    # beat the static 10p, so PV got exported with tank at 45 °C).
+    # Formula: ``slot_reward = max(static_reward, export_rate + buffer)``.
+    # The buffer keeps tank > export by a small margin (default 2 p) so
+    # the LP definitively prefers thermal storage over grid export. Battery
+    # charging still beats tank because its future-value (peak discharge
+    # or self-use avoidance) is computed via the energy balance and
+    # typically exceeds 25 p/kWh in evening peak hours, well above any
+    # plausible export+buffer combination. So priority order remains:
+    # battery → tank → export.
+    abundance_beat_export_buffer_p = float(
+        getattr(config, "LP_PV_ABUNDANCE_TANK_BEAT_EXPORT_BUFFER_PENCE", 2.0)
+    )
     obj_pv_abundance_dhw: Any = 0
     if pv_abundance_reward_p > 0:
         abundant_indices = [i for i in range(n) if pv_abundance[i]]
         if abundant_indices:
-            obj_pv_abundance_dhw = -pv_abundance_reward_p * pulp.lpSum(
-                e_dhw[i] for i in abundant_indices
+            obj_pv_abundance_dhw = -pulp.lpSum(
+                max(
+                    pv_abundance_reward_p,
+                    export_rate_line[i] + abundance_beat_export_buffer_p,
+                ) * e_dhw[i]
+                for i in abundant_indices
             )
     # PV curtailment penalty: prevents the LP from "happily curtailing" solar during
     # ForceCharge slots when the chg cap binds. Without this, pv_curt has zero objective
