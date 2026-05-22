@@ -2405,8 +2405,20 @@ def _preserve_daikin_pending_ids_for_replan(plan_date: str) -> set[int]:
       post-shutdown restore disappears while the commanded state is still active).
     * Pending main actions in ``[start, end)`` (MPC can run before heartbeat marks them
       ``active``) plus their paired restore row, if any.
+    * Issue #382 — pending **restore** rows whose ``start_time`` is within
+      ``RESTORE_PRESERVE_LEAD_MINUTES`` of now, regardless of parent status.
+      The 2026-05-21 incident showed the existing rules don't cover a
+      restore whose parent has already failed/completed: the parent isn't
+      ``active`` (rule #1 misses) and the restore window itself hasn't
+      started (rule #2 misses). Without a third rule the LP-replan sweep
+      deletes an imminent restore and the next solve doesn't necessarily
+      re-emit one (it may see "tank already off, fine" and never command
+      the recovery), leaving the tank to drain.
     """
+    from .config import config as _cfg
     now_utc = _now_utc()
+    lead_minutes = float(getattr(_cfg, "RESTORE_PRESERVE_LEAD_MINUTES", 10.0))
+    lead_cutoff = now_utc + timedelta(minutes=lead_minutes) if lead_minutes > 0 else None
     preserve: set[int] = set()
     for r in get_actions_for_plan_date(plan_date, device="daikin"):
         st = r.get("status") or ""
@@ -2424,6 +2436,12 @@ def _preserve_daikin_pending_ids_for_replan(plan_date: str) -> set[int]:
             rid = r.get("restore_action_id")
             if rid is not None:
                 preserve.add(int(rid))
+        if (
+            lead_cutoff is not None
+            and r.get("action_type") == "restore"
+            and start <= lead_cutoff
+        ):
+            preserve.add(int(r["id"]))
     return preserve
 
 
@@ -2437,8 +2455,16 @@ def _preserve_daikin_pending_ids_in_range(
     therefore inside the rolling clear window even when the active row itself is
     not. In-flight pending preservation scans only the pending rows whose
     ``start_time`` falls in ``[start_utc_iso, end_utc_iso)``.
+
+    Issue #382 — additionally preserves pending ``restore`` rows whose
+    ``start_time`` is within ``RESTORE_PRESERVE_LEAD_MINUTES`` of now,
+    regardless of parent state. See the docstring on
+    :func:`_preserve_daikin_pending_ids_for_replan` for the rationale.
     """
+    from .config import config as _cfg
     now_utc = _now_utc()
+    lead_minutes = float(getattr(_cfg, "RESTORE_PRESERVE_LEAD_MINUTES", 10.0))
+    lead_cutoff = now_utc + timedelta(minutes=lead_minutes) if lead_minutes > 0 else None
     preserve: set[int] = set()
     with _lock:
         conn = get_connection()
@@ -2454,7 +2480,7 @@ def _preserve_daikin_pending_ids_in_range(
                     preserve.add(int(rid))
 
             cur = conn.execute(
-                """SELECT id, start_time, end_time, restore_action_id
+                """SELECT id, start_time, end_time, restore_action_id, action_type
                    FROM action_schedule
                    WHERE device = 'daikin' AND status = 'pending'
                          AND start_time >= ? AND start_time < ?""",
@@ -2471,6 +2497,12 @@ def _preserve_daikin_pending_ids_in_range(
                     rid = row["restore_action_id"]
                     if rid is not None:
                         preserve.add(int(rid))
+                if (
+                    lead_cutoff is not None
+                    and row["action_type"] == "restore"
+                    and start <= lead_cutoff
+                ):
+                    preserve.add(int(row["id"]))
         finally:
             conn.close()
     return preserve

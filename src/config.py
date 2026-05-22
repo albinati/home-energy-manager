@@ -1284,6 +1284,31 @@ class Config:
         os.getenv("PREFIRE_STATE_MATCH_ENABLED", "true").strip().lower()
         in ("1", "true", "yes", "on")
     )
+    # Issue #382 — preserve pending restore rows whose start_time is within
+    # this many minutes of "now" from the LP-replan clear sweep. The 2026-05-21
+    # incident left a tank at 25 °C because a 17:55 MPC re-plan deleted the
+    # paired restore (start 18:00) before it could fire — the parent shutdown
+    # had failed READ_ONLY at 16:36, so the existing "active parent → preserve
+    # its restore" rule didn't apply. Restores within this window have no
+    # safe alternative path (the next LP solve may not re-emit one), so we
+    # treat them as in-flight regardless of parent state. Set to 0 to disable.
+    RESTORE_PRESERVE_LEAD_MINUTES: float = float(
+        os.getenv("RESTORE_PRESERVE_LEAD_MINUTES", "10.0")
+    )
+    # Issue #382 follow-on — heartbeat sanity check. When the live tank is
+    # OFF and no current plan slot intends it to be OFF, treat this as state
+    # drift: alert and force-restore via apply_comfort_restore (tank_power=True,
+    # tank_temp=DHW_TEMP_NORMAL_C). Skipped when the device was overridden by
+    # the user within USER_OVERRIDE_RESPECT_HOURS. Set to false to alert only
+    # (no auto-recover) or disable entirely.
+    TANK_DRIFT_AUTO_RECOVER: bool = (
+        os.getenv("TANK_DRIFT_AUTO_RECOVER", "true").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+    TANK_DRIFT_CHECK_ENABLED: bool = (
+        os.getenv("TANK_DRIFT_CHECK_ENABLED", "true").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
 
     # Fox ESS: soft daily budget (real limit ≈1440; we stop at 1200 for 15% headroom)
     FOX_DAILY_BUDGET: int = int(os.getenv("FOX_DAILY_BUDGET", "1200"))
