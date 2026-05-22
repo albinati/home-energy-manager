@@ -486,16 +486,25 @@ SCHEMA: dict[str, SettingSpec] = {
     "DHW_TEMP_PV_ABUNDANCE_TARGET_C": SettingSpec(
         key="DHW_TEMP_PV_ABUNDANCE_TARGET_C",
         type_name="float",
-        env_default=_float_env("DHW_TEMP_PV_ABUNDANCE_TARGET_C", "45"),
+        env_default=_float_env("DHW_TEMP_PV_ABUNDANCE_TARGET_C", "50"),
         min_value=40.0,
         max_value=60.0,
         description=(
             "Daikin tank target (°C) during solar_charge / solar_preheat "
-            "slots — PV-abundance window where free PV otherwise exports. "
-            "Default 45 (= DHW_TEMP_NORMAL_C). Raise per household size: "
-            "single/couple ~42, family of 4 ~48-50, larger ~55. Capped at "
-            "60 to keep the tank well below the legionella thermal-shock "
-            "ceiling and protect long-term tank life."
+            "slots — PV-abundance window where free PV would otherwise "
+            "export. Default 50 (PR F): stores ~1.16 kWh thermal vs. the "
+            "45 °C NORMAL baseline, usable for the evening shower window. "
+            "Standing-loss trade-off: each +1 °C above NORMAL costs ~0.06 "
+            "kWh/day in extra UA × ΔT loss (60 W per K vs INDOOR_SETPOINT_C "
+            "21 °C). Sweet spot 50–55 °C for a family in W4 1DZ — higher "
+            "doesn't pay because evening showers don't need >55 °C tank "
+            "(mixer math caps useful storage). Raise per household size: "
+            "single/couple ~45, family of 4 ~50, guests/larger ~55. "
+            "Capped at 60 to keep the tank well below the legionella "
+            "thermal-shock ceiling and protect long-term tank life. "
+            "Bumping from default 45 → 50 in PR F because at 45 the LP "
+            "had zero room to lift the tank with PV (target == NORMAL → "
+            "no e_dhw allocation → PV wasted)."
         ),
     ),
 }

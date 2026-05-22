@@ -459,6 +459,9 @@ def _reconcile_daikin_actions(
     # belt-and-braces backstop for any drift mechanism we haven't yet
     # imagined.
     _check_tank_power_drift(actions, client, dev, now_utc, trigger=trigger)
+    # PR F (2026-05-22) — catches stale-high tank target after PV-collapse
+    # mid-charge or passive→active flip. Mirrors the tank-power check above.
+    _check_tank_target_drift(actions, client, dev, now_utc, trigger=trigger)
 
 
 def _check_tank_power_drift(
@@ -584,6 +587,168 @@ def _check_tank_power_drift(
             notify_critical(msg) if not recovered else notify_risk(msg)
         except Exception as _exc:
             logger.debug("tank-drift notify failed (non-fatal): %s", _exc)
+
+
+# PR F (2026-05-22) — tank-target drift dedup. Fires once per "stale-high
+# target" episode (e.g. PV abundance collapsed mid-charge but the commanded
+# tank_temp=50 lingers). Cleared when the live target drops to NORMAL.
+_TANK_TARGET_DRIFT_NOTIFIED: bool = False
+
+
+def _check_tank_target_drift(
+    actions: list[dict[str, Any]],
+    client: DaikinClient,
+    dev: Any,
+    now_utc: datetime,
+    *,
+    trigger: str,
+) -> None:
+    """PR F — restore the tank to ``DHW_TEMP_NORMAL_C`` when the commanded
+    target is above NORMAL but no upcoming heating action justifies it.
+
+    Catches two real scenarios:
+
+    1. **PV collapses mid-solar_preheat**: HEM commanded ``tank_temp=50`` at
+       noon expecting PV abundance. Clouds roll in at 13:30; LP replans
+       without the solar_preheat. The previously-pending restore (at the
+       end of the original window) might survive PR #391's preserve guard
+       only within the 10-min lead window — far-future restores get
+       cleared. Without intervention, tank stays at 50 indefinitely and
+       bleeds extra standing loss.
+
+    2. **DAIKIN_CONTROL_MODE flips passive → active mid-day**: any prior
+       command (or manual user override that lifted the target) lingers
+       until a fresh action_schedule row writes a new value. This check
+       gives the system a self-correcting fallback.
+
+    Skips when:
+    * ``TANK_TARGET_DRIFT_CHECK_ENABLED=false`` (kill switch).
+    * Mode is vacation (tank target is moot; firmware owns).
+    * Mode is passive (HEM can't write to Daikin).
+    * Read-only (OpenClaw kill switch).
+    * Live ``dev.tank_target`` is unknown (Daikin cache miss).
+    * Live target is at-or-below ``DHW_TEMP_NORMAL_C + 1 °C`` tolerance.
+    * Any pending/active action in the next 30 min carries ``tank_temp``
+      above NORMAL (planned heating — high target is intentional).
+    * Recent user override on Daikin is still in effect.
+
+    Dedupes via module-level ``_TANK_TARGET_DRIFT_NOTIFIED``; clears
+    when the target drops back to NORMAL.
+    """
+    global _TANK_TARGET_DRIFT_NOTIFIED
+
+    if not getattr(config, "TANK_TARGET_DRIFT_CHECK_ENABLED", True):
+        return
+    if (config.OPTIMIZATION_PRESET or "normal").strip().lower() == "vacation":
+        return
+    if config.DAIKIN_CONTROL_MODE != "active":
+        return
+    if config.OPENCLAW_READ_ONLY:
+        return
+
+    tank_target = getattr(dev, "tank_target", None)
+    if tank_target is None:
+        return
+
+    normal_c = float(config.DHW_TEMP_NORMAL_C)
+    tolerance_c = float(
+        getattr(config, "TANK_TARGET_DRIFT_TOLERANCE_C", 1.0)
+    )
+    if float(tank_target) <= normal_c + tolerance_c:
+        # Target at/below NORMAL — no drift. Clear dedup so future episodes re-ping.
+        if _TANK_TARGET_DRIFT_NOTIFIED:
+            _TANK_TARGET_DRIFT_NOTIFIED = False
+        return
+
+    # Is there an upcoming heating action that justifies the high target?
+    horizon_cutoff = now_utc + timedelta(
+        minutes=int(getattr(config, "TANK_TARGET_DRIFT_LOOKAHEAD_MIN", 30))
+    )
+    heating_intent = False
+    for act in actions:
+        try:
+            start = _parse_utc(act["start_time"])
+            end = _parse_utc(act["end_time"])
+        except (ValueError, KeyError, TypeError):
+            continue
+        if end < now_utc:
+            continue
+        if start > horizon_cutoff:
+            continue
+        if (act.get("status") or "") not in ("pending", "active"):
+            continue
+        if act.get("overridden_by_user_at"):
+            continue
+        params = act.get("params") or {}
+        if isinstance(params, str):
+            try:
+                params = json.loads(params)
+            except (json.JSONDecodeError, TypeError):
+                params = {}
+        if "tank_temp" in params:
+            try:
+                if float(params["tank_temp"]) > normal_c + tolerance_c:
+                    heating_intent = True
+                    break
+            except (TypeError, ValueError):
+                continue
+    if heating_intent:
+        return
+
+    # Respect a user gesture that recently lifted the target.
+    try:
+        src = db.find_recent_user_override(
+            device="daikin",
+            within_hours=float(config.USER_OVERRIDE_RESPECT_HOURS),
+            now_utc=now_utc,
+        )
+        if src is not None:
+            src_params = src.get("params") or {}
+            if isinstance(src_params, str):
+                try:
+                    src_params = json.loads(src_params)
+                except (json.JSONDecodeError, TypeError):
+                    src_params = {}
+            if user_gesture_still_in_effect(dev, src_params):
+                return
+    except Exception as _exc:
+        logger.debug("tank-target-drift override lookup failed (non-fatal): %s", _exc)
+
+    # Drift confirmed: high target with no heating intent. Restore.
+    db.log_action(
+        device="daikin",
+        action="tank_target_drift_detected",
+        params={
+            "tank_target_c": float(tank_target),
+            "normal_c": normal_c,
+            "delta_c": float(tank_target) - normal_c,
+        },
+        result="alert",
+        trigger=trigger,
+    )
+    recovered = False
+    try:
+        apply_scheduled_daikin_params(
+            dev, client,
+            params={"tank_power": True, "tank_temp": int(round(normal_c))},
+            trigger=f"tank_target_drift_recover:{trigger}",
+            skip_if_matches=True,
+        )
+        recovered = True
+    except (DaikinError, ValueError) as exc:
+        logger.warning("tank-target-drift recover failed: %s", exc)
+
+    if not _TANK_TARGET_DRIFT_NOTIFIED:
+        _TANK_TARGET_DRIFT_NOTIFIED = True
+        try:
+            msg = (
+                f"Tank target {float(tank_target):.0f}°C → "
+                f"{'restored to NORMAL ' + str(int(normal_c)) + '°C' if recovered else 'manual recovery may be needed'} "
+                f"(no upcoming heating planned; trigger={trigger})"
+            )
+            (notify_risk if recovered else notify_critical)(msg)
+        except Exception as _exc:
+            logger.debug("tank-target-drift notify failed (non-fatal): %s", _exc)
 
 
 def reconcile_daikin_schedule_for_date(
