@@ -459,9 +459,10 @@ def _reconcile_daikin_actions(
     # belt-and-braces backstop for any drift mechanism we haven't yet
     # imagined.
     _check_tank_power_drift(actions, client, dev, now_utc, trigger=trigger)
-    # PR F (2026-05-22) — catches stale-high tank target after PV-collapse
-    # mid-charge or passive→active flip. Mirrors the tank-power check above.
-    _check_tank_target_drift(actions, client, dev, now_utc, trigger=trigger)
+    # PR J (2026-05-22) — Near-real-time PV diverter (replaces PR F drift
+    # check). State-machine activate/deactivate with hysteresis + lockout
+    # to convert exported PV into thermal storage when battery is full.
+    _check_pv_tank_diverter(actions, client, dev, now_utc, trigger=trigger)
 
 
 def _check_tank_power_drift(
@@ -589,13 +590,24 @@ def _check_tank_power_drift(
             logger.debug("tank-drift notify failed (non-fatal): %s", _exc)
 
 
-# PR F (2026-05-22) — tank-target drift dedup. Fires once per "stale-high
-# target" episode (e.g. PV abundance collapsed mid-charge but the commanded
-# tank_temp=50 lingers). Cleared when the live target drops to NORMAL.
-_TANK_TARGET_DRIFT_NOTIFIED: bool = False
+# PR J (2026-05-22) — Near-real-time PV diverter state machine.
+# Replaces the PR F drift check (`_check_tank_target_drift`) with a unified
+# divert+restore loop following the Eddi/Zappi PV-diverter pattern:
+# multi-tick confirmation windows + hysteresis bands + lockout periods to
+# prevent quota-wasting oscillation while the heat pump's 5-10 min ramp-up
+# means we can't react instantaneously like a CT-clamp immersion heater.
+#
+# States: "idle" → "diverting" → (lockout) → "idle"
+# All state machine variables live at module scope so they persist across
+# heartbeat ticks within the same process. Reset on container restart.
+_DIVERTER_STATE: str = "idle"  # "idle" | "diverting"
+_DIVERTER_ACTIVATE_COUNT: int = 0    # consecutive ticks meeting ACTIVATE conditions
+_DIVERTER_DEACTIVATE_COUNT: int = 0  # consecutive ticks meeting DEACTIVATE conditions
+_DIVERTER_LOCKOUT_TICKS_LEFT: int = 0
+_DIVERTER_LAST_NOTIFIED_STATE: str = "idle"
 
 
-def _check_tank_target_drift(
+def _check_pv_tank_diverter(
     actions: list[dict[str, Any]],
     client: DaikinClient,
     dev: Any,
@@ -603,41 +615,52 @@ def _check_tank_target_drift(
     *,
     trigger: str,
 ) -> None:
-    """PR F — restore the tank to ``DHW_TEMP_NORMAL_C`` when the commanded
-    target is above NORMAL but no upcoming heating action justifies it.
+    """PR J — Near-real-time PV diverter for the Daikin tank.
 
-    Catches two real scenarios:
+    When the inverter is actively exporting PV to the grid AND the battery
+    is already near-full AND the forecast says PV will continue, write a
+    high tank target so the excess PV converts to thermal storage instead
+    of being sold at low Outgoing Agile rates. Mirror Eddi's pattern but
+    adapted for our heat-pump rate-limited write loop.
 
-    1. **PV collapses mid-solar_preheat**: HEM commanded ``tank_temp=50`` at
-       noon expecting PV abundance. Clouds roll in at 13:30; LP replans
-       without the solar_preheat. The previously-pending restore (at the
-       end of the original window) might survive PR #391's preserve guard
-       only within the 10-min lead window — far-future restores get
-       cleared. Without intervention, tank stays at 50 indefinitely and
-       bleeds extra standing loss.
+    State transitions:
 
-    2. **DAIKIN_CONTROL_MODE flips passive → active mid-day**: any prior
-       command (or manual user override that lifted the target) lingers
-       until a fresh action_schedule row writes a new value. This check
-       gives the system a self-correcting fallback.
+    * IDLE → DIVERTING: ACTIVATE conditions hold for
+      ``PV_DIVERTER_ACTIVATE_CONFIRM_TICKS`` consecutive heartbeats AND
+      we're not in lockout. ACTIVATE conditions:
+        - live export > ``PV_DIVERTER_EXPORT_THRESHOLD_KW`` (1.0 kW default)
+        - live SoC ≥ ``PV_DIVERTER_MIN_SOC_PCT`` (95% default; battery first)
+        - forecast (if enabled) avg PV next 60 min > viable threshold
+        - tank target currently below ``DHW_TEMP_PV_ABUNDANCE_TARGET_C``
+
+    * DIVERTING → IDLE: DEACTIVATE conditions hold for
+      ``PV_DIVERTER_DEACTIVATE_CONFIRM_TICKS`` consecutive heartbeats AND
+      we're not in lockout. DEACTIVATE conditions (any of):
+        - live export < ``PV_DIVERTER_DEACTIVATE_THRESHOLD_KW`` (0.3 kW)
+        - live SoC < ``PV_DIVERTER_SOC_DEACTIVATE_PCT`` (90%)
+        - tank target back at NORMAL (= someone else already restored it)
+
+    * Any transition triggers a ``PV_DIVERTER_LOCKOUT_TICKS`` countdown
+      (default 8 ticks = 16 min) during which all transition signals are
+      ignored. Prevents flapping during borderline export windows.
 
     Skips when:
-    * ``TANK_TARGET_DRIFT_CHECK_ENABLED=false`` (kill switch).
-    * Mode is vacation (tank target is moot; firmware owns).
+    * Diverter disabled (kill switch).
+    * Mode is vacation (tank off; firmware owns).
     * Mode is passive (HEM can't write to Daikin).
-    * Read-only (OpenClaw kill switch).
-    * Live ``dev.tank_target`` is unknown (Daikin cache miss).
-    * Live target is at-or-below ``DHW_TEMP_NORMAL_C + 1 °C`` tolerance.
-    * Any pending/active action in the next 30 min carries ``tank_temp``
-      above NORMAL (planned heating — high target is intentional).
-    * Recent user override on Daikin is still in effect.
-
-    Dedupes via module-level ``_TANK_TARGET_DRIFT_NOTIFIED``; clears
-    when the target drops back to NORMAL.
+    * Read-only.
+    * Live Fox realtime unavailable (cache miss — degraded mode, no-op).
+    * Live Daikin state unknown.
+    * Recent user override on Daikin is still in effect (respect the
+      user's manual gesture exactly as the drift checks do).
     """
-    global _TANK_TARGET_DRIFT_NOTIFIED
+    global _DIVERTER_STATE
+    global _DIVERTER_ACTIVATE_COUNT
+    global _DIVERTER_DEACTIVATE_COUNT
+    global _DIVERTER_LOCKOUT_TICKS_LEFT
+    global _DIVERTER_LAST_NOTIFIED_STATE
 
-    if not getattr(config, "TANK_TARGET_DRIFT_CHECK_ENABLED", True):
+    if not getattr(config, "PV_DIVERTER_ENABLED", True):
         return
     if (config.OPTIMIZATION_PRESET or "normal").strip().lower() == "vacation":
         return
@@ -646,56 +669,22 @@ def _check_tank_target_drift(
     if config.OPENCLAW_READ_ONLY:
         return
 
-    tank_target = getattr(dev, "tank_target", None)
-    if tank_target is None:
+    # Count down lockout regardless of conditions — every tick spent in
+    # lockout brings us closer to being able to transition again.
+    if _DIVERTER_LOCKOUT_TICKS_LEFT > 0:
+        _DIVERTER_LOCKOUT_TICKS_LEFT -= 1
+        # During lockout, reset confirmation counters so signals must
+        # rebuild from scratch after lockout ends.
+        _DIVERTER_ACTIVATE_COUNT = 0
+        _DIVERTER_DEACTIVATE_COUNT = 0
+        logger.debug(
+            "pv_diverter: lockout (%d ticks remaining); ignoring transition signals",
+            _DIVERTER_LOCKOUT_TICKS_LEFT,
+        )
         return
 
-    normal_c = float(config.DHW_TEMP_NORMAL_C)
-    tolerance_c = float(
-        getattr(config, "TANK_TARGET_DRIFT_TOLERANCE_C", 1.0)
-    )
-    if float(tank_target) <= normal_c + tolerance_c:
-        # Target at/below NORMAL — no drift. Clear dedup so future episodes re-ping.
-        if _TANK_TARGET_DRIFT_NOTIFIED:
-            _TANK_TARGET_DRIFT_NOTIFIED = False
-        return
-
-    # Is there an upcoming heating action that justifies the high target?
-    horizon_cutoff = now_utc + timedelta(
-        minutes=int(getattr(config, "TANK_TARGET_DRIFT_LOOKAHEAD_MIN", 30))
-    )
-    heating_intent = False
-    for act in actions:
-        try:
-            start = _parse_utc(act["start_time"])
-            end = _parse_utc(act["end_time"])
-        except (ValueError, KeyError, TypeError):
-            continue
-        if end < now_utc:
-            continue
-        if start > horizon_cutoff:
-            continue
-        if (act.get("status") or "") not in ("pending", "active"):
-            continue
-        if act.get("overridden_by_user_at"):
-            continue
-        params = act.get("params") or {}
-        if isinstance(params, str):
-            try:
-                params = json.loads(params)
-            except (json.JSONDecodeError, TypeError):
-                params = {}
-        if "tank_temp" in params:
-            try:
-                if float(params["tank_temp"]) > normal_c + tolerance_c:
-                    heating_intent = True
-                    break
-            except (TypeError, ValueError):
-                continue
-    if heating_intent:
-        return
-
-    # Respect a user gesture that recently lifted the target.
+    # Respect a user gesture that's still in effect — same pattern as the
+    # other drift checks. If the user just set the tank manually, leave it.
     try:
         src = db.find_recent_user_override(
             device="daikin",
@@ -710,45 +699,231 @@ def _check_tank_target_drift(
                 except (json.JSONDecodeError, TypeError):
                     src_params = {}
             if user_gesture_still_in_effect(dev, src_params):
+                _DIVERTER_ACTIVATE_COUNT = 0
+                _DIVERTER_DEACTIVATE_COUNT = 0
                 return
     except Exception as _exc:
-        logger.debug("tank-target-drift override lookup failed (non-fatal): %s", _exc)
+        logger.debug("pv_diverter override lookup failed (non-fatal): %s", _exc)
 
-    # Drift confirmed: high target with no heating intent. Restore.
+    # Read live Fox realtime — cache only (no API call).
+    try:
+        from .foxess.service import get_cached_realtime
+        rt = get_cached_realtime()
+    except Exception as _exc:
+        logger.debug("pv_diverter: Fox realtime unavailable (%s) — degraded skip", _exc)
+        return
+
+    # grid_power sign convention: positive = importing, negative = exporting.
+    grid_kw = float(getattr(rt, "grid_power", 0.0) or 0.0)
+    export_kw = max(0.0, -grid_kw)
+    soc_pct = float(getattr(rt, "soc", 0.0) or 0.0)
+
+    # Live Daikin state.
+    tank_target = getattr(dev, "tank_target", None)
+    if tank_target is None:
+        return
+    tank_target = float(tank_target)
+    normal_c = float(config.DHW_TEMP_NORMAL_C)
+    pv_target_c = float(config.DHW_TEMP_PV_ABUNDANCE_TARGET_C)
+
+    # Compute ACTIVATE vs DEACTIVATE signals (this tick).
+    activate_threshold = float(config.PV_DIVERTER_EXPORT_THRESHOLD_KW)
+    deactivate_threshold = float(config.PV_DIVERTER_DEACTIVATE_THRESHOLD_KW)
+    min_soc = float(config.PV_DIVERTER_MIN_SOC_PCT)
+    soc_deactivate = float(config.PV_DIVERTER_SOC_DEACTIVATE_PCT)
+
+    signal_activate = (
+        export_kw > activate_threshold
+        and soc_pct >= min_soc
+        and tank_target < pv_target_c - 0.5
+    )
+
+    # Optional forecast confirmation for ACTIVATE only — keeps the LP
+    # forecast in the loop so a 1-min sun gap doesn't trigger a write.
+    if signal_activate and getattr(config, "PV_DIVERTER_USE_FORECAST", True):
+        try:
+            from .scheduler.runner import _get_forecast_pv_avg_kw
+            avg_pv = _get_forecast_pv_avg_kw(
+                now_utc,
+                int(config.PV_DIVERTER_FORECAST_LOOKAHEAD_MIN),
+            )
+            if avg_pv is None:
+                # Degraded: no forecast → trust instantaneous (don't block).
+                logger.debug("pv_diverter: forecast unavailable — using instantaneous-only")
+            elif avg_pv < float(config.PV_DIVERTER_FORECAST_MIN_PV_KW):
+                logger.debug(
+                    "pv_diverter: forecast avg=%.2f kW < %.2f threshold; not activating",
+                    avg_pv, float(config.PV_DIVERTER_FORECAST_MIN_PV_KW),
+                )
+                signal_activate = False
+        except Exception as _exc:
+            logger.debug("pv_diverter forecast check failed (non-fatal): %s", _exc)
+
+    signal_deactivate = (
+        export_kw < deactivate_threshold
+        or soc_pct < soc_deactivate
+    )
+
+    # Update counters based on current state.
+    if _DIVERTER_STATE == "idle":
+        if signal_activate:
+            _DIVERTER_ACTIVATE_COUNT += 1
+            _DIVERTER_DEACTIVATE_COUNT = 0
+        else:
+            _DIVERTER_ACTIVATE_COUNT = 0
+        # Transition IDLE → DIVERTING?
+        confirm_ticks = int(config.PV_DIVERTER_ACTIVATE_CONFIRM_TICKS)
+        if _DIVERTER_ACTIVATE_COUNT >= confirm_ticks:
+            _transition_diverter_activate(
+                client, dev, now_utc, trigger,
+                export_kw, soc_pct, tank_target, pv_target_c,
+            )
+
+    elif _DIVERTER_STATE == "diverting":
+        # In diverting state, also check that tank_target hasn't been
+        # externally reset back to NORMAL (e.g. LP write or user override).
+        # If so, transition silently to idle without writing.
+        if tank_target <= normal_c + 1.0:
+            logger.info(
+                "pv_diverter: tank target externally restored to %.0f °C; "
+                "transitioning DIVERTING → IDLE silently",
+                tank_target,
+            )
+            _DIVERTER_STATE = "idle"
+            _DIVERTER_ACTIVATE_COUNT = 0
+            _DIVERTER_DEACTIVATE_COUNT = 0
+            _DIVERTER_LOCKOUT_TICKS_LEFT = int(config.PV_DIVERTER_LOCKOUT_TICKS)
+            return
+        if signal_deactivate:
+            _DIVERTER_DEACTIVATE_COUNT += 1
+            _DIVERTER_ACTIVATE_COUNT = 0
+        else:
+            _DIVERTER_DEACTIVATE_COUNT = 0
+        # Transition DIVERTING → IDLE?
+        confirm_ticks = int(config.PV_DIVERTER_DEACTIVATE_CONFIRM_TICKS)
+        if _DIVERTER_DEACTIVATE_COUNT >= confirm_ticks:
+            _transition_diverter_deactivate(
+                client, dev, now_utc, trigger,
+                export_kw, soc_pct, tank_target, normal_c,
+            )
+
+
+def _transition_diverter_activate(
+    client: DaikinClient,
+    dev: Any,
+    now_utc: datetime,
+    trigger: str,
+    export_kw: float,
+    soc_pct: float,
+    tank_target: float,
+    pv_target_c: float,
+) -> None:
+    """Internal: write the diverter ACTIVATE action + log + notify."""
+    global _DIVERTER_STATE
+    global _DIVERTER_ACTIVATE_COUNT
+    global _DIVERTER_DEACTIVATE_COUNT
+    global _DIVERTER_LOCKOUT_TICKS_LEFT
+    global _DIVERTER_LAST_NOTIFIED_STATE
+
     db.log_action(
         device="daikin",
-        action="tank_target_drift_detected",
+        action="pv_diverter_activated",
         params={
-            "tank_target_c": float(tank_target),
-            "normal_c": normal_c,
-            "delta_c": float(tank_target) - normal_c,
+            "export_kw": round(export_kw, 2),
+            "soc_pct": round(soc_pct, 1),
+            "tank_target_before_c": tank_target,
+            "tank_target_after_c": pv_target_c,
         },
-        result="alert",
+        result="success",
         trigger=trigger,
     )
-    recovered = False
+    written = False
     try:
         apply_scheduled_daikin_params(
             dev, client,
-            params={"tank_power": True, "tank_temp": int(round(normal_c))},
-            trigger=f"tank_target_drift_recover:{trigger}",
+            params={
+                "tank_power": True,
+                "tank_temp": int(round(pv_target_c)),
+                "tank_powerful": True,
+            },
+            trigger=f"pv_diverter_activate:{trigger}",
             skip_if_matches=True,
         )
-        recovered = True
+        written = True
     except (DaikinError, ValueError) as exc:
-        logger.warning("tank-target-drift recover failed: %s", exc)
-
-    if not _TANK_TARGET_DRIFT_NOTIFIED:
-        _TANK_TARGET_DRIFT_NOTIFIED = True
+        logger.warning("pv_diverter activate write failed: %s", exc)
+    _DIVERTER_STATE = "diverting"
+    _DIVERTER_ACTIVATE_COUNT = 0
+    _DIVERTER_DEACTIVATE_COUNT = 0
+    _DIVERTER_LOCKOUT_TICKS_LEFT = int(config.PV_DIVERTER_LOCKOUT_TICKS)
+    if _DIVERTER_LAST_NOTIFIED_STATE != "diverting":
+        _DIVERTER_LAST_NOTIFIED_STATE = "diverting"
         try:
-            msg = (
-                f"Tank target {float(tank_target):.0f}°C → "
-                f"{'restored to NORMAL ' + str(int(normal_c)) + '°C' if recovered else 'manual recovery may be needed'} "
-                f"(no upcoming heating planned; trigger={trigger})"
+            notify_risk(
+                f"☀️ PV diverter ON — exporting {export_kw:.1f} kW @ "
+                f"SoC {soc_pct:.0f}% → lifting tank to {pv_target_c:.0f}°C "
+                f"(was {tank_target:.0f}°C). Lockout {config.PV_DIVERTER_LOCKOUT_TICKS} ticks."
             )
-            (notify_risk if recovered else notify_critical)(msg)
         except Exception as _exc:
-            logger.debug("tank-target-drift notify failed (non-fatal): %s", _exc)
+            logger.debug("pv_diverter activate notify failed: %s", _exc)
+
+
+def _transition_diverter_deactivate(
+    client: DaikinClient,
+    dev: Any,
+    now_utc: datetime,
+    trigger: str,
+    export_kw: float,
+    soc_pct: float,
+    tank_target: float,
+    normal_c: float,
+) -> None:
+    """Internal: write the diverter DEACTIVATE action + log + notify."""
+    global _DIVERTER_STATE
+    global _DIVERTER_ACTIVATE_COUNT
+    global _DIVERTER_DEACTIVATE_COUNT
+    global _DIVERTER_LOCKOUT_TICKS_LEFT
+    global _DIVERTER_LAST_NOTIFIED_STATE
+
+    db.log_action(
+        device="daikin",
+        action="pv_diverter_deactivated",
+        params={
+            "export_kw": round(export_kw, 2),
+            "soc_pct": round(soc_pct, 1),
+            "tank_target_before_c": tank_target,
+            "tank_target_after_c": normal_c,
+        },
+        result="success",
+        trigger=trigger,
+    )
+    try:
+        apply_scheduled_daikin_params(
+            dev, client,
+            params={
+                "tank_power": True,
+                "tank_temp": int(round(normal_c)),
+                "tank_powerful": False,
+            },
+            trigger=f"pv_diverter_deactivate:{trigger}",
+            skip_if_matches=True,
+        )
+    except (DaikinError, ValueError) as exc:
+        logger.warning("pv_diverter deactivate write failed: %s", exc)
+    _DIVERTER_STATE = "idle"
+    _DIVERTER_ACTIVATE_COUNT = 0
+    _DIVERTER_DEACTIVATE_COUNT = 0
+    _DIVERTER_LOCKOUT_TICKS_LEFT = int(config.PV_DIVERTER_LOCKOUT_TICKS)
+    if _DIVERTER_LAST_NOTIFIED_STATE != "idle":
+        _DIVERTER_LAST_NOTIFIED_STATE = "idle"
+        try:
+            notify_risk(
+                f"🌤 PV diverter OFF — export {export_kw:.2f} kW / SoC {soc_pct:.0f}% "
+                f"→ tank restored to {normal_c:.0f}°C. Lockout "
+                f"{config.PV_DIVERTER_LOCKOUT_TICKS} ticks."
+            )
+        except Exception as _exc:
+            logger.debug("pv_diverter deactivate notify failed: %s", _exc)
 
 
 def reconcile_daikin_schedule_for_date(

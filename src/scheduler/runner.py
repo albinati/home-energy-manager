@@ -246,6 +246,65 @@ def _get_forecast_pv_kw(now_utc: datetime) -> float | None:
         return None
 
 
+def _get_forecast_pv_avg_kw(now_utc: datetime, lookahead_minutes: int) -> float | None:
+    """PR J — average forecasted PV (kW) over *lookahead_minutes* starting
+    *now_utc*. Used by the PV diverter to confirm "current export will
+    continue" before activating tank heating.
+
+    Reuses the same calibration stack as :func:`_get_forecast_pv_kw`
+    (per-hour calibration × today's correction factor). Returns ``None``
+    when no forecast data is available (degraded mode — caller should
+    fall back to instantaneous-only logic).
+    """
+    try:
+        from ..weather import (
+            compute_pv_calibration_factor,
+            compute_today_pv_correction_factor,
+            estimate_pv_kw,
+            get_pv_calibration_factor_for,
+        )
+
+        today_iso = now_utc.date().isoformat()
+        rows = db.get_meteo_forecast(today_iso)
+        if not rows:
+            return None
+        cutoff = now_utc + timedelta(minutes=lookahead_minutes)
+        cal_cloud = db.get_pv_calibration_hourly_cloud()
+        cal_hour = db.get_pv_calibration_hourly()
+        flat = compute_pv_calibration_factor() if not cal_cloud and not cal_hour else 1.0
+        today_factor, _ = compute_today_pv_correction_factor()
+        samples: list[float] = []
+        for row in rows:
+            st_raw = row.get("slot_time")
+            if not st_raw:
+                continue
+            try:
+                slot_dt = datetime.fromisoformat(str(st_raw).replace("Z", "+00:00"))
+            except (ValueError, TypeError):
+                continue
+            if slot_dt < now_utc or slot_dt > cutoff:
+                continue
+            rad_wm2 = float(row.get("solar_w_m2") or 0.0)
+            cloud_pct = row.get("cloud_cover_pct")
+            cloud_pct_f = float(cloud_pct) if cloud_pct is not None else 50.0
+            att = max(0.0, min(1.0, 1.0 - 0.25 * (cloud_pct_f / 100.0)))
+            rad_eff = max(0.0, rad_wm2 * att)
+            cal = get_pv_calibration_factor_for(
+                slot_dt.hour,
+                cloud_pct_f,
+                cloud_table=cal_cloud,
+                hourly_table=cal_hour,
+                flat=flat,
+            )
+            samples.append(estimate_pv_kw(rad_eff) * cal * today_factor)
+        if not samples:
+            return None
+        return sum(samples) / len(samples)
+    except Exception as e:
+        logger.debug("_get_forecast_pv_avg_kw failed: %s", e)
+        return None
+
+
 def _lp_planned_import_kwh_at(slot_start_utc: datetime) -> float | None:
     """Planned grid import for a specific half-hour slot from the most recent
     LP solution active at that slot. Used by the import_overshoot trigger.
