@@ -522,6 +522,7 @@ def solve_lp(
             _mode = (config.OPTIMIZATION_PRESET or "normal").strip().lower()
             _pinned_e_dhw, _pinned_tank = _dhw_pol.forecast_dhw_load_per_slot(
                 list(slot_starts_utc), mode=_mode,
+                initial_tank_c=float(initial.tank_temp_c),
             )
         except Exception as _exc:  # pragma: no cover - defensive
             # Fall back to legacy free-variable behavior if the forecast

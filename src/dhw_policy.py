@@ -231,6 +231,7 @@ def forecast_dhw_load_per_slot(
     *,
     mode: str | None = None,
     target_date_local: date | None = None,
+    initial_tank_c: float | None = None,
 ) -> tuple[list[float], list[float]]:
     """Forecast the electric DHW load + tank temperature **trajectory** the
     fixed-schedule policy implies over the given LP horizon.
@@ -336,6 +337,39 @@ def forecast_dhw_load_per_slot(
             e_dhw.append(WARMUP_MAINTENANCE_KWH)
         else:  # setback
             e_dhw.append(SETBACK_MAINTENANCE_KWH)
+
+    # ----- Initial-tank "warm credit" adjustment ---------------------------
+    # If the tank arrives at the LP horizon ABOVE its scheduled target, the
+    # heat pump doesn't have to lift it — that stored thermal energy is a
+    # gift that offsets the first slots' warmup/reheat load until consumed
+    # by standing losses + draws. Without this, the LP forecast would over-
+    # estimate e_dhw on transition days (e.g. today after a hot-arrival).
+    if initial_tank_c is not None and initial_tank_c > normal_c + 0.5:
+        try:
+            tank_litres = float(getattr(config, "DHW_TANK_LITRES", 200.0))
+            water_cp = float(getattr(config, "DHW_WATER_CP", 4186.0))
+            cop_typical = 3.0  # heat-pump average DHW COP; matches lp_optimizer cop_dhw
+            excess_thermal_kwh = (
+                (initial_tank_c - normal_c) * tank_litres * water_cp / 3.6e6
+            )
+            excess_electric_kwh = excess_thermal_kwh / cop_typical
+            # Spend the credit on the first non-zero slots first (warmup
+            # transition + shower reheat are highest-value to offset).
+            for i in range(len(e_dhw)):
+                if excess_electric_kwh <= 0:
+                    break
+                if e_dhw[i] <= 0:
+                    continue
+                reduction = min(e_dhw[i], excess_electric_kwh)
+                e_dhw[i] -= reduction
+                excess_electric_kwh -= reduction
+            logger.debug(
+                "dhw_policy: applied %.2f kWh warm-credit (init_tank=%.1f, "
+                "normal=%.1f)",
+                excess_thermal_kwh / cop_typical, initial_tank_c, normal_c,
+            )
+        except Exception as _exc:  # pragma: no cover - defensive
+            logger.debug("dhw_policy: warm-credit calc failed: %s", _exc)
 
     # Tank temperature trajectory at slot boundaries. Slot boundary k is
     # the START of slot k (k=0..N-1); boundary N is the END of last slot.

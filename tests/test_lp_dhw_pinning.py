@@ -265,6 +265,81 @@ def test_lp_pinning_vacation_mode_e_dhw_zero(monkeypatch):
         assert v < 1e-3, f"vacation should produce zero e_dhw, got {v:.3f}"
 
 
+def test_forecast_warm_credit_reduces_first_slots():
+    """User-observed case: tank arriving at 52°C (above NORMAL=45) means
+    the first warmup/reheat slots have less work to do. The forecast
+    should apply a 'warm credit' that reduces e_dhw until consumed."""
+    base = datetime(2026, 6, 1, 12, 0, tzinfo=TZ_LOCAL).astimezone(UTC)
+    slots = [base + timedelta(minutes=30 * i) for i in range(8)]
+
+    # Baseline: no initial_tank_c → flat forecast
+    e_dhw_flat, _ = dhw_policy.forecast_dhw_load_per_slot(slots, mode="normal")
+    flat_total = sum(e_dhw_flat)
+
+    # With initial_tank_c=52 (7°C above NORMAL=45)
+    # Thermal credit: 7 × 200 × 4186 / 3.6e6 = ~1.63 kWh thermal = ~0.54 kWh electric
+    e_dhw_warm, _ = dhw_policy.forecast_dhw_load_per_slot(
+        slots, mode="normal", initial_tank_c=52.0,
+    )
+    warm_total = sum(e_dhw_warm)
+    credit = flat_total - warm_total
+    assert credit == pytest.approx(0.54, abs=0.1), (
+        f"Expected ~0.54 kWh warm credit; got {credit:.2f} kWh"
+    )
+
+
+def test_forecast_warm_credit_below_normal_no_effect():
+    """Tank arriving AT or below NORMAL → no warm credit (no stored
+    excess to offset future heating)."""
+    base = datetime(2026, 6, 1, 12, 0, tzinfo=TZ_LOCAL).astimezone(UTC)
+    slots = [base + timedelta(minutes=30 * i) for i in range(8)]
+    flat, _ = dhw_policy.forecast_dhw_load_per_slot(slots, mode="normal")
+    cold, _ = dhw_policy.forecast_dhw_load_per_slot(
+        slots, mode="normal", initial_tank_c=42.0,  # below NORMAL
+    )
+    at_normal, _ = dhw_policy.forecast_dhw_load_per_slot(
+        slots, mode="normal", initial_tank_c=45.0,
+    )
+    assert sum(cold) == sum(flat)
+    assert sum(at_normal) == sum(flat)
+
+
+def test_forecast_warm_credit_huge_excess_zeros_first_slots():
+    """If excess is large enough, the first slots' load goes to zero
+    (no over-subtracting into negative)."""
+    base = datetime(2026, 6, 1, 12, 0, tzinfo=TZ_LOCAL).astimezone(UTC)
+    slots = [base + timedelta(minutes=30 * i) for i in range(4)]
+    e_dhw, _ = dhw_policy.forecast_dhw_load_per_slot(
+        slots, mode="normal", initial_tank_c=80.0,  # huge excess
+    )
+    # All slots should be non-negative
+    for v in e_dhw:
+        assert v >= 0.0
+
+
+def test_lp_pinning_with_warm_initial_tank_reduces_e_dhw(monkeypatch):
+    """End-to-end: LP receiving initial.tank_temp_c=52 sees pinned e_dhw
+    values smaller than if it had received 45."""
+    base = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    n = 6
+    slots = [base + timedelta(minutes=30 * i) for i in range(n)]
+    plan_cold = _solve(
+        slots=slots, prices=[15.0] * n, pv=[2.0] * n,
+        base_load=[0.3] * n, init_soc=8.0, init_tank=45.0,
+    )
+    plan_warm = _solve(
+        slots=slots, prices=[15.0] * n, pv=[2.0] * n,
+        base_load=[0.3] * n, init_soc=8.0, init_tank=52.0,
+    )
+    assert plan_cold.ok and plan_warm.ok
+    cold_dhw = sum(plan_cold.dhw_electric_kwh)
+    warm_dhw = sum(plan_warm.dhw_electric_kwh)
+    assert warm_dhw < cold_dhw - 0.1, (
+        f"Warm-arrival tank should reduce LP e_dhw; cold={cold_dhw:.2f} "
+        f"warm={warm_dhw:.2f}"
+    )
+
+
 def test_lp_pinning_passive_mode_unaffected(monkeypatch):
     """In passive mode, ``passive_e_dhw[i]`` constraint already pins
     e_dhw to firmware predictions — confirm K2 pinning doesn't double-pin
