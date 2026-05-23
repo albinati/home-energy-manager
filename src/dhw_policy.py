@@ -144,6 +144,17 @@ def generate_daily_tank_schedule(
     if mode == "vacation":
         return []
 
+    # Past-date guard (K1.1 bug #5): generating rows for yesterday is
+    # always a no-op — the heartbeat would try to fire them immediately
+    # and they'd be wasted churn. Tomorrow is fine (advance scheduling).
+    today_local = datetime.now(_tz_local()).date()
+    if target_date_local < today_local:
+        logger.info(
+            "dhw_policy: skipping %s (in the past; today=%s)",
+            target_date_local, today_local,
+        )
+        return []
+
     tz = _tz_local()
     warmup_hour = int(getattr(config, "DHW_WARMUP_START_HOUR_LOCAL", 13))
     setback_hour = int(getattr(config, "DHW_SETBACK_START_HOUR_LOCAL", 22))
@@ -151,12 +162,25 @@ def generate_daily_tank_schedule(
     setback_c = int(round(float(getattr(config, "DHW_TEMP_SETBACK_C", 37))))
     boost_c = int(round(float(getattr(config, "DHW_NEGATIVE_PRICE_BOOST_C", 60))))
 
+    # DST-safe anchor construction (K1.1 bug #3 fix). Building each
+    # boundary explicitly via ``datetime(..., tzinfo=tz)`` lets ZoneInfo
+    # pick the correct UTC offset for that wall-clock moment. Avoid
+    # ``.replace(hour=...)`` and ``+timedelta(days=1)`` here because
+    # ``timedelta`` is offset-blind and ``.replace`` keeps the source
+    # tzinfo even when DST has flipped between the two times.
+    next_day = target_date_local + timedelta(days=1)
     warmup_start = datetime(
         target_date_local.year, target_date_local.month, target_date_local.day,
         warmup_hour, 0, tzinfo=tz,
     )
-    setback_start = warmup_start.replace(hour=setback_hour)
-    next_warmup = warmup_start + timedelta(days=1)
+    setback_start = datetime(
+        target_date_local.year, target_date_local.month, target_date_local.day,
+        setback_hour, 0, tzinfo=tz,
+    )
+    next_warmup = datetime(
+        next_day.year, next_day.month, next_day.day,
+        warmup_hour, 0, tzinfo=tz,
+    )
 
     rows: list[dict[str, Any]] = []
 
