@@ -312,6 +312,310 @@ def _residual_pv_kwh_per_slot(
     return out
 
 
+def _query_latest_lp_soc_trajectory() -> dict[datetime, float]:
+    """Return {slot_time_utc: soc_kwh} from the most recent LP solution.
+
+    Empty dict when no LP has run yet (cold-start / restart). Callers
+    must handle missing slots gracefully — typically fall back to
+    cheapest-grid window selection.
+    """
+    try:
+        import sqlite3
+        conn = sqlite3.connect(config.DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            run = conn.execute(
+                "SELECT id FROM optimizer_log ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if not run:
+                return {}
+            rows = conn.execute(
+                "SELECT slot_time_utc, soc_kwh FROM lp_solution_snapshot "
+                "WHERE run_id = ? ORDER BY slot_index",
+                (int(run["id"]),),
+            ).fetchall()
+            trajectory: dict[datetime, float] = {}
+            for r in rows:
+                try:
+                    ts = datetime.fromisoformat(
+                        str(r["slot_time_utc"]).replace("Z", "+00:00")
+                    )
+                    trajectory[ts] = float(r["soc_kwh"] or 0.0)
+                except (ValueError, TypeError):
+                    continue
+            return trajectory
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.debug("appliance: LP SoC trajectory unavailable: %s", e)
+        return {}
+
+
+def _historical_kwh_variance(
+    appliance_id: int,
+    *,
+    typical_kw: float,
+    duration_minutes: int,
+    min_samples: int = 3,
+    lookback_jobs: int = 20,
+) -> float:
+    """Estimate the σ of (actual_kwh − estimated_kwh) over recent completed
+    jobs of an appliance.
+
+    Returns 0.0 when fewer than ``min_samples`` completed jobs exist —
+    callers should fall back to a static safety margin in that case.
+
+    Uses ``actual_kwh`` populated by PR #235 (SmartThings energy-counter
+    delta at completion).
+    """
+    try:
+        import sqlite3
+        conn = sqlite3.connect(config.DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                """SELECT actual_kwh, duration_minutes
+                   FROM appliance_jobs
+                   WHERE appliance_id = ?
+                     AND status = 'completed'
+                     AND actual_kwh IS NOT NULL
+                     AND actual_kwh > 0
+                   ORDER BY id DESC LIMIT ?""",
+                (int(appliance_id), int(lookback_jobs)),
+            ).fetchall()
+        finally:
+            conn.close()
+        if len(rows) < min_samples:
+            return 0.0
+        residuals: list[float] = []
+        for r in rows:
+            try:
+                actual = float(r["actual_kwh"])
+                dur = float(r["duration_minutes"] or duration_minutes)
+                estimated = typical_kw * (dur / 60.0)
+                residuals.append(actual - estimated)
+            except (TypeError, ValueError):
+                continue
+        if len(residuals) < min_samples:
+            return 0.0
+        mean = sum(residuals) / len(residuals)
+        var = sum((r - mean) ** 2 for r in residuals) / max(1, len(residuals) - 1)
+        return float(var ** 0.5)
+    except Exception as e:
+        logger.debug("appliance: kwh variance calc failed: %s", e)
+        return 0.0
+
+
+def find_battery_aware_window(
+    earliest_start_utc: datetime,
+    deadline_utc: datetime,
+    duration_minutes: int,
+    *,
+    appliance_id: int,
+    typical_kw: float,
+    marginal_cost_per_slot: dict[datetime, float] | None = None,
+    soc_trajectory_kwh: dict[datetime, float] | None = None,
+) -> tuple[datetime, datetime, float]:
+    """Pick the appliance window that minimises *effective* cost, using
+    battery as a time-shift buffer where the LP's predicted SoC is high
+    enough to safely cover the load.
+
+    **Effective-cost model.** For each candidate window:
+
+    1. If the LP's predicted SoC at window start − ``appliance_kwh`` −
+       ``safety_margin`` ≥ ``soc_reserve_kwh``, the battery covers the
+       load. Effective cost ≈ the *cheapest future refill rate* (since
+       the LP will naturally refill from cheap grid later — drained
+       SoC means LP plans a force-charge slot).
+    2. Otherwise effective cost = the slot's grid/marginal cost.
+
+    Lowest effective cost wins; tiebreak by EARLIEST start (user
+    convenience — finish the wash earlier when it's cost-neutral).
+
+    Coordination with the LP is implicit: when this window is committed
+    to ``appliance_jobs``, the next LP solve reads it back via
+    :func:`appliance_load_profile_kw` and routes the load through
+    either battery or grid based on its broader cost calculation. We
+    don't have to explicitly schedule a force-charge — the LP does that.
+
+    **Safety margin** combines (a) ``k_sigma × σ`` of historical
+    ``actual_kwh`` variance (when ≥ ``APPLIANCE_VARIANCE_MIN_SAMPLES``
+    jobs available) with (b) a static minimum
+    ``APPLIANCE_FALLBACK_SAFETY_MARGIN_KWH``.
+
+    Falls back to :func:`find_cheapest_window` when:
+        * ``soc_trajectory_kwh`` is empty (no LP solution yet), OR
+        * No candidate window passes the battery-cover check.
+    """
+    enabled = bool(getattr(config, "APPLIANCE_BATTERY_AWARE_ENABLED", True))
+    if not enabled:
+        return find_cheapest_window(
+            earliest_start_utc, deadline_utc, duration_minutes,
+            marginal_cost_per_slot=marginal_cost_per_slot,
+        )
+
+    if soc_trajectory_kwh is None:
+        soc_trajectory_kwh = _query_latest_lp_soc_trajectory()
+    if not soc_trajectory_kwh:
+        # Cold-start: no LP plan to lean on. Use legacy cheapest-grid.
+        return find_cheapest_window(
+            earliest_start_utc, deadline_utc, duration_minutes,
+            marginal_cost_per_slot=marginal_cost_per_slot,
+        )
+
+    earliest_start_utc = _ceil_to_half_hour_utc(earliest_start_utc)
+    duration = max(30, int(duration_minutes))
+    if deadline_utc - earliest_start_utc < timedelta(minutes=duration):
+        raise ValueError(
+            f"deadline_utc {deadline_utc.isoformat()} is < {duration}min after "
+            f"earliest_start_utc {earliest_start_utc.isoformat()}"
+        )
+
+    appliance_kwh = typical_kw * (duration / 60.0)
+    sigma = _historical_kwh_variance(
+        appliance_id, typical_kw=typical_kw, duration_minutes=duration,
+        min_samples=int(getattr(config, "APPLIANCE_VARIANCE_MIN_SAMPLES", 3)),
+        lookback_jobs=int(getattr(config, "APPLIANCE_VARIANCE_LOOKBACK_JOBS", 20)),
+    )
+    k_sigma = float(getattr(config, "APPLIANCE_VARIANCE_SIGMA", 2.0))
+    static_margin = float(getattr(config, "APPLIANCE_FALLBACK_SAFETY_MARGIN_KWH", 0.3))
+    safety_margin = max(static_margin, k_sigma * sigma)
+
+    # Operational SoC reserve in kWh
+    battery_capacity_kwh = float(getattr(config, "BATTERY_CAPACITY_KWH", 10.0))
+    reserve_pct = float(getattr(config, "MIN_SOC_RESERVE_PERCENT", 15.0))
+    soc_reserve_kwh = battery_capacity_kwh * reserve_pct / 100.0
+
+    # Cheapest refill cost (used as the effective price for battery-covered
+    # slots — the LP will refill the drained kWh later at this rate).
+    refill_price_p = _cheapest_refill_price_per_kwh(
+        marginal_cost_per_slot, earliest_start_utc, deadline_utc,
+        refill_kwh=appliance_kwh,
+    )
+
+    # Iterate every candidate start at half-hour granularity.
+    n_slots = (duration + 29) // 30  # slots needed
+    candidates: list[tuple[float, datetime, datetime, bool]] = []
+    cursor = earliest_start_utc
+    while cursor + timedelta(minutes=duration) <= deadline_utc:
+        window_end = cursor + timedelta(minutes=duration)
+        # Grid/marginal cost for this candidate window
+        grid_price_p = _avg_marginal_cost_over_window(
+            marginal_cost_per_slot, cursor, n_slots,
+        )
+        # Predicted SoC at window start (interpolation: pick the nearest
+        # snapshot slot ≤ cursor; fall back to first available)
+        soc_kwh_at_start = _interp_soc(soc_trajectory_kwh, cursor)
+
+        if soc_kwh_at_start is None:
+            # Outside LP horizon — can't reason about battery, skip
+            cursor += timedelta(minutes=30)
+            continue
+
+        can_use_battery = (
+            soc_kwh_at_start - appliance_kwh - safety_margin >= soc_reserve_kwh
+        )
+
+        effective_price_p = (
+            refill_price_p if can_use_battery and refill_price_p is not None
+            else grid_price_p
+        )
+        candidates.append((effective_price_p, cursor, window_end, can_use_battery))
+        cursor += timedelta(minutes=30)
+
+    if not candidates:
+        return find_cheapest_window(
+            earliest_start_utc, deadline_utc, duration_minutes,
+            marginal_cost_per_slot=marginal_cost_per_slot,
+        )
+
+    # Lowest effective price wins; tiebreak by earliest start for user convenience.
+    candidates.sort(key=lambda c: (c[0], c[1]))
+    chosen_price, chosen_start, chosen_end, used_bat = candidates[0]
+    logger.info(
+        "appliance %s: chose window %s..%s (effective %.2fp/kWh, battery=%s, "
+        "kwh=%.2f, margin=%.2f, σ=%.3f)",
+        appliance_id, chosen_start.isoformat(), chosen_end.isoformat(),
+        chosen_price, used_bat, appliance_kwh, safety_margin, sigma,
+    )
+    return chosen_start, chosen_end, chosen_price
+
+
+def _interp_soc(
+    soc_trajectory_kwh: dict[datetime, float],
+    target_utc: datetime,
+) -> float | None:
+    """Return predicted SoC at ``target_utc`` from the LP trajectory.
+
+    Picks the nearest slot ≤ target. Returns None when target falls
+    before the LP horizon (rare — usually only when LP hasn't run yet).
+    """
+    if not soc_trajectory_kwh:
+        return None
+    sorted_keys = sorted(soc_trajectory_kwh.keys())
+    if target_utc < sorted_keys[0]:
+        return soc_trajectory_kwh[sorted_keys[0]]
+    best = None
+    for k in sorted_keys:
+        if k <= target_utc:
+            best = soc_trajectory_kwh[k]
+        else:
+            break
+    return best
+
+
+def _avg_marginal_cost_over_window(
+    marginal_cost_per_slot: dict[datetime, float] | None,
+    start: datetime,
+    n_slots: int,
+) -> float:
+    """Mean marginal/grid cost (pence/kWh) over n_slots starting at start."""
+    if not marginal_cost_per_slot:
+        return float("inf")
+    samples: list[float] = []
+    cursor = start
+    for _ in range(n_slots):
+        if cursor in marginal_cost_per_slot:
+            samples.append(float(marginal_cost_per_slot[cursor]))
+        cursor += timedelta(minutes=30)
+    if not samples:
+        return float("inf")
+    return sum(samples) / len(samples)
+
+
+def _cheapest_refill_price_per_kwh(
+    marginal_cost_per_slot: dict[datetime, float] | None,
+    earliest_utc: datetime,
+    deadline_utc: datetime,
+    *,
+    refill_kwh: float,
+    refill_window_minutes: int = 60,
+) -> float | None:
+    """Return the mean price (pence/kWh) of the cheapest contiguous refill
+    window large enough to put ``refill_kwh`` back into the battery.
+
+    Assumes a typical Fox EP11 grid-charge rate of ~3 kW → 1.5 kWh per
+    30-min slot, so a 1h refill window covers up to 3 kWh. For larger
+    appliance loads, callers should adjust ``refill_window_minutes``
+    accordingly.
+    """
+    if not marginal_cost_per_slot:
+        return None
+    refill_window_minutes = max(
+        refill_window_minutes,
+        int((refill_kwh / 1.5) * 30) if refill_kwh > 0 else refill_window_minutes,
+    )
+    n_slots = max(1, (refill_window_minutes + 29) // 30)
+    best: float | None = None
+    cursor = _ceil_to_half_hour_utc(earliest_utc)
+    while cursor + timedelta(minutes=n_slots * 30) <= deadline_utc:
+        avg = _avg_marginal_cost_over_window(marginal_cost_per_slot, cursor, n_slots)
+        if avg != float("inf") and (best is None or avg < best):
+            best = avg
+        cursor += timedelta(minutes=30)
+    return best
+
+
 def find_cheapest_window(
     earliest_start_utc: datetime,
     deadline_utc: datetime,
@@ -775,10 +1079,23 @@ def _arm_or_replan(
         )
 
     try:
-        start_utc, end_utc, avg_price = find_cheapest_window(
-            now, deadline_utc, duration,
-            marginal_cost_per_slot=marginal,
-        )
+        # PR K3 — battery-aware picker. Looks up the LP's predicted SoC
+        # trajectory and picks the EARLIEST window the battery can safely
+        # cover (with sigma-based safety margin). Falls through to
+        # ``find_cheapest_window`` when no LP plan exists or no candidate
+        # window passes the reserve check.
+        if getattr(config, "APPLIANCE_BATTERY_AWARE_ENABLED", True):
+            start_utc, end_utc, avg_price = find_battery_aware_window(
+                now, deadline_utc, duration,
+                appliance_id=appliance_id,
+                typical_kw=appliance_kw,
+                marginal_cost_per_slot=marginal,
+            )
+        else:
+            start_utc, end_utc, avg_price = find_cheapest_window(
+                now, deadline_utc, duration,
+                marginal_cost_per_slot=marginal,
+            )
     except ValueError as e:
         logger.warning("appliance #%d: cheapest-window infeasible: %s", appliance_id, e)
         return
