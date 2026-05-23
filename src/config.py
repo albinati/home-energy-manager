@@ -418,6 +418,59 @@ class Config:
     APPLIANCE_RECONCILE_ERROR_PING_THRESHOLD: int = int(
         os.getenv("APPLIANCE_RECONCILE_ERROR_PING_THRESHOLD", "3")
     )
+
+    # ------------------------------------------------------------------
+    # PR K3 (2026-05-23) — battery-aware appliance scheduling.
+    # ------------------------------------------------------------------
+    # When True, ``find_battery_aware_window`` uses the LP's predicted SoC
+    # trajectory to identify slots where the battery can safely cover
+    # the appliance load. This lets the dispatcher pick EARLIER windows
+    # (user convenience) at no extra grid cost — the LP naturally
+    # plans a force-charge refill later via cheap-slot imports.
+    # Falls back to legacy ``find_cheapest_window`` when no LP plan is
+    # available or when no candidate window passes the safety reserve.
+    APPLIANCE_BATTERY_AWARE_ENABLED: bool = (
+        os.getenv("APPLIANCE_BATTERY_AWARE_ENABLED", "true").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+    # k_σ multiplier on historical (actual − estimated) kWh stddev. 2σ
+    # ≈ 95% confidence the actual load won't exceed the budget.
+    APPLIANCE_VARIANCE_SIGMA: float = float(
+        os.getenv("APPLIANCE_VARIANCE_SIGMA", "2.0")
+    )
+    # Minimum completed jobs before trusting the empirical variance.
+    # Until then, the static fallback margin (next setting) is used.
+    APPLIANCE_VARIANCE_MIN_SAMPLES: int = int(
+        os.getenv("APPLIANCE_VARIANCE_MIN_SAMPLES", "3")
+    )
+    # Lookback depth (most-recent completed jobs) for variance calculation.
+    APPLIANCE_VARIANCE_LOOKBACK_JOBS: int = int(
+        os.getenv("APPLIANCE_VARIANCE_LOOKBACK_JOBS", "20")
+    )
+    # Static safety margin (kWh) used when not enough history exists for
+    # a reliable σ. Conservative default ≈ a small spike on top of the
+    # typical_kW × duration estimate.
+    APPLIANCE_FALLBACK_SAFETY_MARGIN_KWH: float = float(
+        os.getenv("APPLIANCE_FALLBACK_SAFETY_MARGIN_KWH", "0.3")
+    )
+    # Inverter grid-charge rate (kWh per 30-min slot) used to size the
+    # refill-window search in the battery-aware picker. Fox EP11 ≈ 1.5;
+    # smaller inverters under-fill / larger over-fill if hardcoded.
+    APPLIANCE_INVERTER_GRID_CHARGE_KWH_PER_SLOT: float = float(
+        os.getenv("APPLIANCE_INVERTER_GRID_CHARGE_KWH_PER_SLOT", "1.5")
+    )
+    # AC-DC-AC round-trip efficiency of the battery. ~92% typical for
+    # Fox EP11; applied as a penalty on battery-covered effective price
+    # so the picker correctly accounts for losses vs grid-direct.
+    APPLIANCE_BATTERY_ROUND_TRIP_EFF: float = float(
+        os.getenv("APPLIANCE_BATTERY_ROUND_TRIP_EFF", "0.92")
+    )
+    # Max age (hours) of the LP solution before the battery-aware picker
+    # treats it as stale and falls back to cheapest-grid. 2 h covers a
+    # typical LP cadence; older forecasts encode outdated tariff/weather.
+    APPLIANCE_LP_MAX_AGE_HOURS: float = float(
+        os.getenv("APPLIANCE_LP_MAX_AGE_HOURS", "2.0")
+    )
     # PV-aware appliance window dispatch (PR #219). When True (default), the
     # cheapest-window picker scores candidate windows by marginal cost
     # (= forgone export revenue + grid import for the appliance load) instead
