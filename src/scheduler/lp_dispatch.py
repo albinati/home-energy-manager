@@ -447,15 +447,10 @@ def daikin_dispatch_preview(
         powerful_kinds = ("negative", "solar_charge")
         # tank_power semantics (per-kind):
         #   peak / peak_export →
-        #     IDLE strategy (default): tank_power=True with a LOW target
-        #       (DHW_TEMP_MIN_FLOOR_C, default 30°C). Firmware won't trigger
-        #       reheats because tank stays well above 30°C from prior heating;
-        #       climate is still off (saves grid). Avoids the turn-off / turn-on
-        #       cycle overhead and Daikin valve-resettle delay. Best for
-        #       well-insulated tanks where 3-h standing losses are tiny.
-        #     SHUTDOWN strategy (legacy): tank_power=False. Cleaner but adds
-        #       cycle-overhead cost.
-        #     Toggle via DHW_PEAK_TANK_STRATEGY env (default "idle").
+        #     Tank stays ON at NORMAL via the existing schedule; LP relies
+        #     on natural standing-loss decay across peak (median 0.00 °C/h
+        #     per prod telemetry — see Epic 14 / #386 for why the old
+        #     SHUTDOWN strategy was removed 2026-05-21).
         #   else with LP-planned heat (tank_pow=True) → tank_power=True with the
         #     peak tank_temp target across the window.
         #   else without LP-planned heat → omit tank_power AND tank_temp entirely.

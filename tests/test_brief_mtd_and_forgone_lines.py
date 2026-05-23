@@ -99,21 +99,8 @@ def test_mean_rate_line_with_mtd_compares() -> None:
     assert "↓" in line
 
 
-# ---------------------------------------------------------------------------
-# _strict_savings_forgone_line — PR C removed the underlying mode.
-# The helper now always returns None so the brief composer keeps its shape.
-# ---------------------------------------------------------------------------
-
-def test_forgone_line_is_permanently_inactive() -> None:
-    """PR C — `ENERGY_STRATEGY_MODE=strict_savings` is gone. The forgone-export
-    line is a no-op; the historical MCP `get_strict_savings_forgone_export`
-    tool still serves DB queries for audit, but the brief line is gone."""
-    line = daily_brief._strict_savings_forgone_line(date(2026, 5, 15), ZoneInfo("Europe/London"))
-    assert line is None
-
-
-# PR C — `test_forgone_line_summarises_downgrades` removed.
-# ENERGY_STRATEGY_MODE is gone; the line always returns None now.
-# The MCP `get_strict_savings_forgone_export` tool still serves historical
-# queries against existing dispatch_decisions rows with `reason='strict_savings'`,
-# but the brief no longer surfaces them.
+# K2-cleanup 2026-05-23 — `_strict_savings_forgone_line` deleted (was
+# already a no-op since PR C removed ENERGY_STRATEGY_MODE). The MCP
+# tool `get_strict_savings_forgone_export` and the underlying DB helper
+# remain for historical audit queries against legacy `dispatch_decisions`
+# rows but no new rows are written.
