@@ -766,17 +766,6 @@ def write_daikin_from_lp_plan(
     # tank schedule comes from :mod:`src.dhw_policy` instead. See
     # ``DHW_FIXED_SCHEDULE_ENABLED`` docstring in config.py for rationale.
     if getattr(config, "DHW_FIXED_SCHEDULE_ENABLED", False):
-        if plan.slot_starts_utc:
-            window_start_iso = plan.slot_starts_utc[0].isoformat().replace("+00:00", "Z")
-            window_end = plan.slot_starts_utc[-1] + timedelta(minutes=30)
-            window_end_iso = window_end.isoformat().replace("+00:00", "Z")
-            db.clear_actions_in_range(window_start_iso, window_end_iso, device="daikin")
-        else:
-            db.clear_actions_for_date(plan_date, device="daikin")
-        # Generate fixed schedule rows. plan_date may anchor today or
-        # tomorrow depending on when this LP solve fired; write both
-        # today's and tomorrow's tank cycles to cover the full LP horizon
-        # (max 48h).
         from datetime import UTC as _UTC_T
         from datetime import date as _date_t
 
@@ -787,17 +776,56 @@ def write_daikin_from_lp_plan(
             anchor = _date_t.fromisoformat(plan_date)
         except (ValueError, TypeError):
             anchor = datetime.now(tz_local_local).date()
-        days_written = 0
+
+        # K1.1 bug #1 — widen the clear range so it includes today's
+        # warmup boundary (12:00 UTC = 13:00 BST). LP runs at, e.g.,
+        # 13:30 BST would have clear start = next-half-hour = 14:00 BST,
+        # leaving today's tank_warmup row (start 13:00 BST) UNCLEARED
+        # while dhw_policy inserts a fresh one → duplicate. Use the
+        # dhw_policy horizon (today's warmup → day-after-tomorrow's
+        # warmup) as the clear floor + ceiling.
+        warmup_hour = int(getattr(config, "DHW_WARMUP_START_HOUR_LOCAL", 13))
+        clear_floor_local = datetime(
+            anchor.year, anchor.month, anchor.day, warmup_hour, 0,
+            tzinfo=tz_local_local,
+        )
+        clear_ceiling_local = clear_floor_local + timedelta(days=2)
+        clear_floor_iso = (
+            clear_floor_local.astimezone(_UTC_T).isoformat().replace("+00:00", "Z")
+        )
+        clear_ceiling_iso = (
+            clear_ceiling_local.astimezone(_UTC_T).isoformat().replace("+00:00", "Z")
+        )
+        if plan.slot_starts_utc:
+            lp_start_iso = plan.slot_starts_utc[0].isoformat().replace("+00:00", "Z")
+            lp_end = plan.slot_starts_utc[-1] + timedelta(minutes=30)
+            lp_end_iso = lp_end.isoformat().replace("+00:00", "Z")
+            # Widen to cover both LP horizon AND dhw_policy horizon.
+            clear_start = min(lp_start_iso, clear_floor_iso)
+            clear_end = max(lp_end_iso, clear_ceiling_iso)
+        else:
+            clear_start = clear_floor_iso
+            clear_end = clear_ceiling_iso
+        db.clear_actions_in_range(clear_start, clear_end, device="daikin")
+
         rows_total = 0
         for offset in (0, 1):
             day = anchor + timedelta(days=offset)
-            # Pull Outgoing Agile rates for negative-price detection
+            # K1.1 bug #4 — outgoing rates fetch range must match
+            # dhw_policy's schedule horizon (warmup → next warmup),
+            # NOT the calendar day. Otherwise early-morning negative
+            # slots (e.g. 03:00 BST during overnight setback) sit
+            # inside day-D's schedule horizon but outside its 00:00
+            # calendar-day fetch range → silently skipped.
+            day_start_local = datetime(
+                day.year, day.month, day.day, warmup_hour, 0,
+                tzinfo=tz_local_local,
+            )
+            day_end_local = day_start_local + timedelta(days=1)
             try:
-                day_start_local = datetime(day.year, day.month, day.day, 0, 0,
-                                            tzinfo=tz_local_local)
                 outgoing = get_agile_export_rates_in_range(
                     day_start_local.astimezone(_UTC_T).isoformat().replace("+00:00", "Z"),
-                    (day_start_local + timedelta(days=1)).astimezone(_UTC_T).isoformat().replace("+00:00", "Z"),
+                    day_end_local.astimezone(_UTC_T).isoformat().replace("+00:00", "Z"),
                 )
             except Exception as _e:
                 logger.debug("dhw_policy: outgoing rates unavailable for %s: %s", day, _e)
@@ -806,15 +834,16 @@ def write_daikin_from_lp_plan(
                 n = dhw_policy.write_daily_tank_schedule(
                     target_date_local=day,
                     outgoing_rates=outgoing,
-                    clear_existing=False,  # already cleared above
+                    clear_existing=False,  # already cleared widely above
                 )
                 rows_total += n
-                days_written += 1
             except Exception as e:
                 logger.warning("dhw_policy: write for %s failed: %s", day, e)
+        # K1.1 bug #6 — log says "0 rows" not "2 days" when vacation
+        # silenced both calls. Counting is row-count only now.
         logger.info(
-            "write_daikin_from_lp_plan: DHW_FIXED_SCHEDULE — wrote %d rows across %d days (no LP tank actions)",
-            rows_total, days_written,
+            "write_daikin_from_lp_plan: DHW_FIXED_SCHEDULE — wrote %d rows (no LP tank actions)",
+            rows_total,
         )
         return rows_total
     if plan.slot_starts_utc:
