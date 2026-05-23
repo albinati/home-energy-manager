@@ -312,12 +312,16 @@ def _residual_pv_kwh_per_slot(
     return out
 
 
-def _query_latest_lp_soc_trajectory() -> dict[datetime, float]:
+def _query_latest_lp_soc_trajectory(
+    max_age_hours: float = 2.0,
+) -> dict[datetime, float]:
     """Return {slot_time_utc: soc_kwh} from the most recent LP solution.
 
-    Empty dict when no LP has run yet (cold-start / restart). Callers
-    must handle missing slots gracefully — typically fall back to
-    cheapest-grid window selection.
+    Empty dict when no LP has run yet (cold-start / restart) OR when the
+    most-recent run is older than ``max_age_hours`` — stale forecasts
+    are worse than no forecast (encode-once-decode-many bias). 2 h
+    covers a typical LP cadence; older trajectories reflect tariff /
+    weather state that has likely shifted.
     """
     try:
         import sqlite3
@@ -325,9 +329,26 @@ def _query_latest_lp_soc_trajectory() -> dict[datetime, float]:
         conn.row_factory = sqlite3.Row
         try:
             run = conn.execute(
-                "SELECT id FROM optimizer_log ORDER BY id DESC LIMIT 1"
+                "SELECT id, run_at FROM optimizer_log ORDER BY id DESC LIMIT 1"
             ).fetchone()
             if not run:
+                return {}
+            try:
+                run_at = datetime.fromisoformat(
+                    str(run["run_at"]).replace("Z", "+00:00")
+                )
+                if run_at.tzinfo is None:
+                    run_at = run_at.replace(tzinfo=UTC)
+                age = datetime.now(UTC) - run_at
+                if age > timedelta(hours=max_age_hours):
+                    logger.info(
+                        "appliance: LP run %s too stale (%.1fh > %.1fh) — "
+                        "falling back to cheapest-grid picker",
+                        run["id"], age.total_seconds() / 3600, max_age_hours,
+                    )
+                    return {}
+            except (ValueError, TypeError) as e:
+                logger.debug("appliance: LP run_at parse failed: %s", e)
                 return {}
             rows = conn.execute(
                 "SELECT slot_time_utc, soc_kwh FROM lp_solution_snapshot "
@@ -486,11 +507,25 @@ def find_battery_aware_window(
     reserve_pct = float(getattr(config, "MIN_SOC_RESERVE_PERCENT", 15.0))
     soc_reserve_kwh = battery_capacity_kwh * reserve_pct / 100.0
 
-    # Cheapest refill cost (used as the effective price for battery-covered
-    # slots — the LP will refill the drained kWh later at this rate).
-    refill_price_p = _cheapest_refill_price_per_kwh(
-        marginal_cost_per_slot, earliest_start_utc, deadline_utc,
-        refill_kwh=appliance_kwh,
+    # K3.1 — Round-trip efficiency penalty. Battery-covered effective
+    # price must reflect ~8% AC-DC-AC loss; otherwise grid-direct vs
+    # battery-via-refill at same nominal price look equivalent when
+    # battery is actually more expensive by the loss factor.
+    rtt_eff = float(getattr(config, "APPLIANCE_BATTERY_ROUND_TRIP_EFF", 0.92))
+    rtt_eff = max(0.5, min(1.0, rtt_eff))  # clamp
+
+    # K3.1 — Subtract loads from OTHER appliance jobs already committed
+    # for the same horizon (concurrent-double-book guard). They aren't
+    # yet in the LP's SoC trajectory because the LP solve preceded these
+    # commits. Built locally to filter on appliance_id since
+    # ``appliance_load_profile_kw`` doesn't support exclusion natively.
+    committed_loads_kw = _committed_load_profile_excluding(
+        earliest_start_utc, deadline_utc, exclude_appliance_id=appliance_id,
+    )
+
+    # Inverter rate for refill-window sizing (no longer hardcoded).
+    inverter_charge_per_slot_kwh = float(
+        getattr(config, "APPLIANCE_INVERTER_GRID_CHARGE_KWH_PER_SLOT", 1.5)
     )
 
     # Iterate every candidate start at half-hour granularity.
@@ -512,14 +547,35 @@ def find_battery_aware_window(
             cursor += timedelta(minutes=30)
             continue
 
+        # K3.1 — Subtract committed concurrent appliance load through
+        # window start (another job armed for an earlier slot).
+        committed_kwh_through_start = _committed_load_kwh_through(
+            committed_loads_kw, cursor,
+        )
+        soc_after_others = soc_kwh_at_start - committed_kwh_through_start
+
         can_use_battery = (
-            soc_kwh_at_start - appliance_kwh - safety_margin >= soc_reserve_kwh
+            soc_after_others - appliance_kwh - safety_margin >= soc_reserve_kwh
         )
 
-        effective_price_p = (
-            refill_price_p if can_use_battery and refill_price_p is not None
-            else grid_price_p
+        # K3.1 HIGH — Refill search now runs FORWARD of this window's
+        # END, not the appliance's allowed range. The LP can only
+        # refill AFTER the appliance run drains the battery.
+        refill_search_start = window_end
+        refill_search_end = window_end + timedelta(hours=24)  # bounded
+        refill_price_p = _cheapest_refill_price_per_kwh(
+            marginal_cost_per_slot, refill_search_start, refill_search_end,
+            refill_kwh=appliance_kwh,
+            inverter_charge_per_slot_kwh=inverter_charge_per_slot_kwh,
         )
+
+        if can_use_battery and refill_price_p is not None:
+            # Effective price = refill rate × round-trip-loss penalty
+            effective_price_p = refill_price_p / rtt_eff
+        else:
+            effective_price_p = grid_price_p
+            can_use_battery = False  # downgrade if no refill window available
+
         candidates.append((effective_price_p, cursor, window_end, can_use_battery))
         cursor += timedelta(minutes=30)
 
@@ -529,8 +585,10 @@ def find_battery_aware_window(
             marginal_cost_per_slot=marginal_cost_per_slot,
         )
 
-    # Lowest effective price wins; tiebreak by earliest start for user convenience.
-    candidates.sort(key=lambda c: (c[0], c[1]))
+    # K3.1 — Tiebreak order: (1) lowest effective price, (2) prefer
+    # GRID over battery when tied (avoids unnecessary round-trip loss),
+    # (3) earliest start for user convenience.
+    candidates.sort(key=lambda c: (c[0], c[3], c[1]))
     chosen_price, chosen_start, chosen_end, used_bat = candidates[0]
     logger.info(
         "appliance %s: chose window %s..%s (effective %.2fp/kWh, battery=%s, "
@@ -589,23 +647,21 @@ def _cheapest_refill_price_per_kwh(
     deadline_utc: datetime,
     *,
     refill_kwh: float,
-    refill_window_minutes: int = 60,
+    inverter_charge_per_slot_kwh: float = 1.5,
 ) -> float | None:
     """Return the mean price (pence/kWh) of the cheapest contiguous refill
     window large enough to put ``refill_kwh`` back into the battery.
 
-    Assumes a typical Fox EP11 grid-charge rate of ~3 kW → 1.5 kWh per
-    30-min slot, so a 1h refill window covers up to 3 kWh. For larger
-    appliance loads, callers should adjust ``refill_window_minutes``
-    accordingly.
+    K3.1 — search range is supplied by the caller (typically forward
+    of the candidate appliance window's END). ``inverter_charge_per_slot_kwh``
+    sizes the window to match the user's actual inverter charge rate
+    (Fox EP11 ≈ 1.5 kWh/30min; larger/smaller inverters tune via config).
     """
     if not marginal_cost_per_slot:
         return None
-    refill_window_minutes = max(
-        refill_window_minutes,
-        int((refill_kwh / 1.5) * 30) if refill_kwh > 0 else refill_window_minutes,
-    )
-    n_slots = max(1, (refill_window_minutes + 29) // 30)
+    if refill_kwh <= 0:
+        return None
+    n_slots = max(1, int((refill_kwh / max(0.1, inverter_charge_per_slot_kwh)) + 0.99))
     best: float | None = None
     cursor = _ceil_to_half_hour_utc(earliest_utc)
     while cursor + timedelta(minutes=n_slots * 30) <= deadline_utc:
@@ -614,6 +670,58 @@ def _cheapest_refill_price_per_kwh(
             best = avg
         cursor += timedelta(minutes=30)
     return best
+
+
+def _committed_load_profile_excluding(
+    start_utc: datetime, end_utc: datetime, *, exclude_appliance_id: int,
+) -> dict[datetime, float]:
+    """Return per-slot kW load from committed jobs EXCEPT the appliance
+    currently being scheduled. Used to avoid double-booking battery
+    when multiple appliances are armed in the same reconcile pass."""
+    if not config.APPLIANCE_DISPATCH_ENABLED:
+        return {}
+    try:
+        rows = db.get_active_appliance_jobs_overlapping(
+            from_utc=_iso(start_utc), to_utc=_iso(end_utc),
+        )
+    except Exception:
+        logger.debug("committed_load_profile: query failed", exc_info=True)
+        return {}
+    profile: dict[datetime, float] = {}
+    for row in rows:
+        try:
+            if int(row.get("appliance_id") or 0) == int(exclude_appliance_id):
+                continue
+            ps = _parse_iso(row["planned_start_utc"])
+            pe = _parse_iso(row["planned_end_utc"])
+        except (KeyError, ValueError, TypeError):
+            continue
+        kw = float(row.get("appliance_typical_kw") or 0.0)
+        if kw <= 0:
+            continue
+        slot = ps.replace(second=0, microsecond=0)
+        if slot.minute < 30:
+            slot = slot.replace(minute=0)
+        else:
+            slot = slot.replace(minute=30)
+        while slot < pe:
+            profile[slot] = profile.get(slot, 0.0) + kw
+            slot += timedelta(minutes=30)
+    return profile
+
+
+def _committed_load_kwh_through(
+    profile_kw: dict[datetime, float], target_utc: datetime,
+) -> float:
+    """Sum kWh of all committed-load slots whose start < target_utc.
+    Represents energy ALREADY drained before the candidate window."""
+    if not profile_kw:
+        return 0.0
+    total = 0.0
+    for slot_start, kw in profile_kw.items():
+        if slot_start < target_utc:
+            total += kw * 0.5  # half-hour slot → kWh
+    return total
 
 
 def find_cheapest_window(

@@ -453,6 +453,24 @@ class Config:
     APPLIANCE_FALLBACK_SAFETY_MARGIN_KWH: float = float(
         os.getenv("APPLIANCE_FALLBACK_SAFETY_MARGIN_KWH", "0.3")
     )
+    # Inverter grid-charge rate (kWh per 30-min slot) used to size the
+    # refill-window search in the battery-aware picker. Fox EP11 ≈ 1.5;
+    # smaller inverters under-fill / larger over-fill if hardcoded.
+    APPLIANCE_INVERTER_GRID_CHARGE_KWH_PER_SLOT: float = float(
+        os.getenv("APPLIANCE_INVERTER_GRID_CHARGE_KWH_PER_SLOT", "1.5")
+    )
+    # AC-DC-AC round-trip efficiency of the battery. ~92% typical for
+    # Fox EP11; applied as a penalty on battery-covered effective price
+    # so the picker correctly accounts for losses vs grid-direct.
+    APPLIANCE_BATTERY_ROUND_TRIP_EFF: float = float(
+        os.getenv("APPLIANCE_BATTERY_ROUND_TRIP_EFF", "0.92")
+    )
+    # Max age (hours) of the LP solution before the battery-aware picker
+    # treats it as stale and falls back to cheapest-grid. 2 h covers a
+    # typical LP cadence; older forecasts encode outdated tariff/weather.
+    APPLIANCE_LP_MAX_AGE_HOURS: float = float(
+        os.getenv("APPLIANCE_LP_MAX_AGE_HOURS", "2.0")
+    )
     # PV-aware appliance window dispatch (PR #219). When True (default), the
     # cheapest-window picker scores candidate windows by marginal cost
     # (= forgone export revenue + grid import for the appliance load) instead

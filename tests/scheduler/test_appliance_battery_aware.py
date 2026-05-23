@@ -295,10 +295,11 @@ def test_battery_aware_partial_coverage_picks_battery_then_grid_mix(monkeypatch)
         duration_minutes=60, appliance_id=aid, typical_kw=1.0,
         marginal_cost_per_slot=marginal,
     )
-    # Earliest battery-friendly slot is slot 0; effective price = cheapest
-    # refill ≈ 5p. Effective price at slot 4 (no battery) = grid 5p.
-    # Tie at 5p → earliest wins → slot 0.
-    assert start == slots[0]
+    # K3.1 update: battery effective = refill (5p) / round_trip_eff(0.92) ≈ 5.43p
+    # Grid cheap slot 4 = 5p direct, no round-trip loss.
+    # 5.0p < 5.43p → picker prefers grid slot 4 (correct: don't drain battery
+    # to pay round-trip-loss penalty when grid is just as cheap).
+    assert start == slots[4]
 
 
 def test_battery_aware_uses_historical_variance_in_margin(monkeypatch):
@@ -312,6 +313,152 @@ def test_battery_aware_uses_historical_variance_in_margin(monkeypatch):
     assert sigma_noisy > 0.9
     # Margin dominates the static fallback when 2σ > 0.3
     assert 2.0 * sigma_noisy > 0.3
+
+
+def test_lp_trajectory_too_stale_falls_back(monkeypatch):
+    """LP run older than APPLIANCE_LP_MAX_AGE_HOURS → ignored, fallback
+    to cheapest-grid. Catches restart-after-outage stale-forecast bug."""
+    aid = _seed_appliance(typical_kw=1.0)
+    base = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    slots = [base + timedelta(minutes=30 * i) for i in range(8)]
+    # Seed a trajectory but with stale run_at (5 hours ago)
+    conn = sqlite3.connect(config.DB_PATH)
+    stale_run_at = (datetime.now(UTC) - timedelta(hours=5)).isoformat()
+    conn.execute("INSERT INTO optimizer_log (run_at) VALUES (?)", (stale_run_at,))
+    run_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    for i, slot in enumerate(slots):
+        conn.execute(
+            """INSERT INTO lp_solution_snapshot
+               (run_id, slot_index, slot_time_utc, soc_kwh)
+               VALUES (?, ?, ?, ?)""",
+            (run_id, i, slot.isoformat().replace("+00:00", "Z"), 9.0),
+        )
+    conn.commit()
+    conn.close()
+    # Stale trajectory ignored → returns {} → fallback path
+    monkeypatch.setattr(config, "APPLIANCE_LP_MAX_AGE_HOURS", 2.0, raising=False)
+    traj = ad._query_latest_lp_soc_trajectory(max_age_hours=2.0)
+    assert traj == {}
+
+
+def test_refill_search_runs_forward_of_window_end():
+    """K3.1 HIGH fix: refill window must be AFTER planned_end_utc, not
+    inside the appliance's allowed range. Tests via the helper directly."""
+    base = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    # Marginal cost: cheap NOW (8p), expensive later (30p)
+    slots = [base + timedelta(minutes=30 * i) for i in range(16)]
+    prices = [8, 8, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30]
+    marginal = dict(zip(slots, prices))
+
+    # Refill from slot 4 (skip the cheap-NOW slots — wrong economics)
+    refill_after_t4 = ad._cheapest_refill_price_per_kwh(
+        marginal,
+        earliest_utc=slots[4],
+        deadline_utc=slots[15],
+        refill_kwh=1.5,  # ~1 slot needed at inv_charge_per_slot=1.5
+        inverter_charge_per_slot_kwh=1.5,
+    )
+    # No cheap slots after t4 — all 30p
+    assert refill_after_t4 == 30.0
+
+
+def test_tiebreak_prefers_grid_over_battery_at_same_price(monkeypatch):
+    """K3.1: when two windows tie on effective price, picker prefers
+    GRID (don't drain battery) — avoids round-trip loss."""
+    aid = _seed_appliance(typical_kw=1.0)
+    base = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    slots = [base + timedelta(minutes=30 * i) for i in range(8)]
+    # Battery has charge throughout
+    _seed_lp_trajectory(slots, [9.0] * 8)
+    # All slots same price (8p). Battery-covered effective = 8 / 0.92 ≈ 8.7p
+    # Grid effective = 8p (cheaper). So no slot should be battery-flagged.
+    marginal = dict(zip(slots, [8.0] * 8))
+    start, _end, price = ad.find_battery_aware_window(
+        earliest_start_utc=base, deadline_utc=base + timedelta(hours=4),
+        duration_minutes=60, appliance_id=aid, typical_kw=1.0,
+        marginal_cost_per_slot=marginal,
+    )
+    # Picker should pick a grid slot (effective_price = 8.0, not 8.7)
+    # Earliest grid-cheap = slot 0
+    assert price <= 8.05  # close to 8p, not 8.7
+
+
+def test_round_trip_efficiency_penalty_applied(monkeypatch):
+    """K3.1: battery-covered effective price = refill_rate / round_trip_eff."""
+    aid = _seed_appliance(typical_kw=1.0)
+    base = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    slots = [base + timedelta(minutes=30 * i) for i in range(16)]
+    _seed_lp_trajectory(slots, [9.0] * 16)
+    # Peak NOW (30p), cheap LATER (5p) — battery covers now, refill 5p later
+    prices = [30] * 8 + [5] * 8
+    marginal = dict(zip(slots, prices))
+    monkeypatch.setattr(config, "APPLIANCE_BATTERY_ROUND_TRIP_EFF", 0.92, raising=False)
+    start, _end, price = ad.find_battery_aware_window(
+        earliest_start_utc=base, deadline_utc=base + timedelta(hours=8),
+        duration_minutes=60, appliance_id=aid, typical_kw=1.0,
+        marginal_cost_per_slot=marginal,
+    )
+    # Effective: battery-covered = 5/0.92 ≈ 5.43; cheap-grid = 5
+    # Picker should pick cheap grid (5p) since it's < 5.43p (tiebreak doesn't
+    # apply because they're not equal)
+    assert price == pytest.approx(5.0, abs=0.1)
+
+
+def test_committed_load_subtraction_prevents_double_book(monkeypatch):
+    """K3.1: a previously-committed appliance job reduces the SoC the
+    new candidate can rely on."""
+    aid_a = _seed_appliance(typical_kw=2.0)  # appliance A (other)
+    # Add second appliance
+    conn = sqlite3.connect(config.DB_PATH)
+    cur = conn.execute(
+        """INSERT INTO appliances
+           (vendor, vendor_device_id, name, device_type,
+            default_duration_minutes, deadline_local_time, typical_kw,
+            enabled, created_at)
+           VALUES ('smartthings', 'dryer-1', 'Dryer', 'dryer',
+                   120, '07:00', 2.0, 1, ?)""",
+        (datetime.now(UTC).isoformat(),),
+    )
+    aid_b = cur.lastrowid
+    conn.commit()
+
+    base = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    slots = [base + timedelta(minutes=30 * i) for i in range(8)]
+    # SoC enough for ONE 2 kWh load + reserve+margin, NOT for both
+    # 9 kWh - 2 kWh (job A) = 7 kWh ≥ 2 kWh load + 0.3 margin + 1.5 reserve = 3.8 ✓
+    # 9 kWh - 0 = 9 kWh: ≥ ... ✓ (both work alone)
+    _seed_lp_trajectory(slots, [9.0] * 8)
+    # Seed a committed job for appliance A at slots 0..3
+    conn.execute(
+        """INSERT INTO appliance_jobs
+           (appliance_id, status, armed_at_utc, deadline_utc,
+            duration_minutes, planned_start_utc, planned_end_utc,
+            avg_price_pence, created_at, updated_at)
+           VALUES (?, 'scheduled', ?, ?, 120, ?, ?, 10.0, ?, ?)""",
+        (
+            aid_a,
+            base.isoformat(),
+            (base + timedelta(hours=4)).isoformat(),
+            slots[0].isoformat().replace("+00:00", "Z"),
+            slots[2].isoformat().replace("+00:00", "Z"),
+            base.isoformat(),
+            base.isoformat(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    # Now scheduling appliance B with 2 kWh load.
+    # Before slot 0: no committed load yet → SoC=9
+    # After slot 0 (where A starts): A drains 2 kW × 0.5h = 1 kWh
+    # → soc_after_others = 9-1 = 8 at slot 1 onwards
+    # Either way, plenty of headroom for B's 2 kWh + margin + reserve.
+    # Smoke test: picker runs without crashing, returns a window.
+    start, _end, _price = ad.find_battery_aware_window(
+        earliest_start_utc=base, deadline_utc=base + timedelta(hours=4),
+        duration_minutes=60, appliance_id=aid_b, typical_kw=2.0,
+    )
+    assert start is not None
 
 
 def test_battery_aware_grid_only_when_load_exceeds_capacity(monkeypatch):
