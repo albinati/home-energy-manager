@@ -5,6 +5,7 @@ import dataclasses
 import logging
 import math
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from typing import TYPE_CHECKING, Any
 
 from .. import db
@@ -758,6 +759,64 @@ def write_daikin_from_lp_plan(
             db.clear_actions_for_date(plan_date, device="daikin")
         logger.info("write_daikin_from_lp_plan: skipped (DAIKIN_CONTROL_MODE=passive)")
         return 0
+
+    # PR K1 (2026-05-23) — fixed DHW schedule replaces LP-driven tank.
+    # LP still solves over the horizon for battery + space-heating
+    # forecasting, but emits no tank-write actions. The deterministic
+    # tank schedule comes from :mod:`src.dhw_policy` instead. See
+    # ``DHW_FIXED_SCHEDULE_ENABLED`` docstring in config.py for rationale.
+    if getattr(config, "DHW_FIXED_SCHEDULE_ENABLED", False):
+        if plan.slot_starts_utc:
+            window_start_iso = plan.slot_starts_utc[0].isoformat().replace("+00:00", "Z")
+            window_end = plan.slot_starts_utc[-1] + timedelta(minutes=30)
+            window_end_iso = window_end.isoformat().replace("+00:00", "Z")
+            db.clear_actions_in_range(window_start_iso, window_end_iso, device="daikin")
+        else:
+            db.clear_actions_for_date(plan_date, device="daikin")
+        # Generate fixed schedule rows. plan_date may anchor today or
+        # tomorrow depending on when this LP solve fired; write both
+        # today's and tomorrow's tank cycles to cover the full LP horizon
+        # (max 48h).
+        from datetime import UTC as _UTC_T
+        from datetime import date as _date_t
+
+        from .. import dhw_policy
+        from ..db import get_agile_export_rates_in_range
+        tz_local_local = ZoneInfo(getattr(config, "BULLETPROOF_TIMEZONE", "Europe/London"))
+        try:
+            anchor = _date_t.fromisoformat(plan_date)
+        except (ValueError, TypeError):
+            anchor = datetime.now(tz_local_local).date()
+        days_written = 0
+        rows_total = 0
+        for offset in (0, 1):
+            day = anchor + timedelta(days=offset)
+            # Pull Outgoing Agile rates for negative-price detection
+            try:
+                day_start_local = datetime(day.year, day.month, day.day, 0, 0,
+                                            tzinfo=tz_local_local)
+                outgoing = get_agile_export_rates_in_range(
+                    day_start_local.astimezone(_UTC_T).isoformat().replace("+00:00", "Z"),
+                    (day_start_local + timedelta(days=1)).astimezone(_UTC_T).isoformat().replace("+00:00", "Z"),
+                )
+            except Exception as _e:
+                logger.debug("dhw_policy: outgoing rates unavailable for %s: %s", day, _e)
+                outgoing = None
+            try:
+                n = dhw_policy.write_daily_tank_schedule(
+                    target_date_local=day,
+                    outgoing_rates=outgoing,
+                    clear_existing=False,  # already cleared above
+                )
+                rows_total += n
+                days_written += 1
+            except Exception as e:
+                logger.warning("dhw_policy: write for %s failed: %s", day, e)
+        logger.info(
+            "write_daikin_from_lp_plan: DHW_FIXED_SCHEDULE — wrote %d rows across %d days (no LP tank actions)",
+            rows_total, days_written,
+        )
+        return rows_total
     if plan.slot_starts_utc:
         window_start_iso = plan.slot_starts_utc[0].isoformat().replace("+00:00", "Z")
         window_end = plan.slot_starts_utc[-1] + timedelta(minutes=30)

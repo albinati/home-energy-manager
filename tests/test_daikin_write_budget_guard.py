@@ -226,6 +226,9 @@ def test_write_daikin_logs_dropped_actions_no_telegram_push(
     monkeypatch.setattr("src.api_quota.quota_remaining", _fake_remaining)
     monkeypatch.setattr(app_config, "DAIKIN_RESERVE_FOR_HEARTBEAT", 0, raising=False)
     monkeypatch.setattr(app_config, "DAIKIN_CONTROL_MODE", "active", raising=False)
+    # PR K1 — this test exercises the LP-driven write path (budget guard
+    # logic). Disable the fixed-schedule shortcut so the legacy path runs.
+    monkeypatch.setattr(app_config, "DHW_FIXED_SCHEDULE_ENABLED", False, raising=False)
 
     monkeypatch.setattr(lp_dispatch.db, "upsert_action", lambda **kw: 1)
     monkeypatch.setattr(lp_dispatch.db, "clear_actions_in_range", lambda *a, **kw: 0)

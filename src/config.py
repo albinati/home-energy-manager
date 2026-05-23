@@ -654,6 +654,43 @@ class Config:
     DHW_TANK_OVERNIGHT_TARGET_C: float = float(
         os.getenv("DHW_TANK_OVERNIGHT_TARGET_C", "38.0")
     )
+
+    # ------------------------------------------------------------------
+    # PR K (2026-05-23) — DHW fixed schedule (replaces LP-driven tank).
+    # ------------------------------------------------------------------
+    # When True, the LP no longer emits tank-write actions. Instead,
+    # ``src.dhw_policy`` writes a deterministic 2-row schedule per day:
+    #   - tank_warmup at DHW_WARMUP_START_HOUR_LOCAL → DHW_SETBACK_START_HOUR_LOCAL
+    #     with tank_temp = DHW_TEMP_NORMAL_C
+    #   - tank_setback for the rest of the day, tank_temp = DHW_TEMP_SETBACK_C
+    # Guests preset collapses to a single 24h warmup row. Vacation skips
+    # the schedule entirely (Daikin firmware owns).
+    # User constraint: "battery first, don't drain it overnight; no DHW
+    # tariff arb beyond negative-price events." Trades ~£20-50/year of
+    # DHW arbitrage savings for ZERO operational tank drama.
+    DHW_FIXED_SCHEDULE_ENABLED: bool = (
+        os.getenv("DHW_FIXED_SCHEDULE_ENABLED", "true").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+    # Local-time hour the daily warmup window starts (tank → NORMAL).
+    DHW_WARMUP_START_HOUR_LOCAL: int = int(
+        os.getenv("DHW_WARMUP_START_HOUR_LOCAL", "13")
+    )
+    # Local-time hour the daily setback window starts (tank → SETBACK).
+    DHW_SETBACK_START_HOUR_LOCAL: int = int(
+        os.getenv("DHW_SETBACK_START_HOUR_LOCAL", "22")
+    )
+    # Tank setback temperature during overnight window (°C).
+    # 37 °C = enough for emergency morning shower without battery drain.
+    DHW_TEMP_SETBACK_C: float = float(
+        os.getenv("DHW_TEMP_SETBACK_C", "37")
+    )
+    # Tank temperature during negative-price slots (Outgoing Agile < 0 p/kWh).
+    # Sole permitted exception to the fixed schedule — grid is paying us
+    # to consume, so load the tank.
+    DHW_NEGATIVE_PRICE_BOOST_C: float = float(
+        os.getenv("DHW_NEGATIVE_PRICE_BOOST_C", "60")
+    )
     # Forecast night-temperature bias (minimal #324 implementation).
     # Open Meteo's grid coverage (~10 km) over-estimates the W4 1DZ
     # microclimate's overnight outdoor temperature by ~3 °C in the household's
@@ -1417,8 +1454,12 @@ class Config:
     # grid export is sustained AND battery is near-full AND forecast agrees.
     # Deactivates: restores tank to DHW_TEMP_NORMAL_C when export stops.
     # Heartbeat 2 min × tick counters keeps Daikin quota safe (~2-4 writes/day).
+    # PR K1 (2026-05-23) — diverter default flipped to false. The fixed
+    # DHW schedule (DHW_FIXED_SCHEDULE_ENABLED) supersedes diverter as
+    # the sole DHW control mechanism. Diverter code remains for rollback;
+    # K2 will delete it. Set true to re-enable.
     PV_DIVERTER_ENABLED: bool = (
-        os.getenv("PV_DIVERTER_ENABLED", "true").strip().lower()
+        os.getenv("PV_DIVERTER_ENABLED", "false").strip().lower()
         in ("1", "true", "yes", "on")
     )
     # Threshold (kW) of GRID EXPORT to consider activating diverter.
