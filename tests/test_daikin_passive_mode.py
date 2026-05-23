@@ -21,9 +21,12 @@ from src.runtime_settings import clear_cache
 
 
 @pytest.fixture(autouse=True)
-def _init_db() -> None:
+def _init_db(monkeypatch) -> None:
     db.init_db()
     clear_cache()
+    # PR K2 legacy-tests: this file exercises the LP's free e_dhw / tank
+    # optimization. Disable the new pinning so those code paths run.
+    monkeypatch.setattr(config, "DHW_FIXED_SCHEDULE_ENABLED", False, raising=False)
 
 
 @pytest.fixture

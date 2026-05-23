@@ -30,6 +30,9 @@ def _fast_solver(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(app_config, "LP_HP_MIN_ON_SLOTS", 1)
     monkeypatch.setattr(app_config, "LP_SOC_TERMINAL_VALUE_PENCE_PER_KWH", 0.0)
     monkeypatch.setattr(app_config, "DAIKIN_CONTROL_MODE", "active")
+    # PR K2: tests of the legacy legionella-firmware-floor constraint
+    # require LP free-variable optimization on e_dhw.
+    monkeypatch.setattr(app_config, "DHW_FIXED_SCHEDULE_ENABLED", False, raising=False)
 
 
 def _solve_sunday_with_legionella(

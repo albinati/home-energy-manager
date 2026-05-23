@@ -32,8 +32,10 @@ from src.weather import WeatherLpSeries
 
 
 @pytest.fixture(autouse=True)
-def _init_db() -> None:
+def _init_db(monkeypatch) -> None:
     _db.init_db()
+    # PR K2 legacy-tests: exercise the LP's free e_dhw / tank optimization.
+    monkeypatch.setattr(app_config, "DHW_FIXED_SCHEDULE_ENABLED", False, raising=False)
 
 
 def test_default_is_now_one() -> None:

@@ -21,6 +21,13 @@ from zoneinfo import ZoneInfo
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _opt_out_pinning(monkeypatch):
+    """PR K2: DHW-draw-model tests exercise the legacy LP free-DHW path."""
+    from src.config import config as _cfg
+    monkeypatch.setattr(_cfg, "DHW_FIXED_SCHEDULE_ENABLED", False, raising=False)
+
+
 def _make_weather(slots, pv_kwh=None, base_kwh=None):
     from src.weather import WeatherLpSeries
     n = len(slots)

@@ -42,6 +42,8 @@ def _active_mode_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(app_config, "LP_CBC_TIME_LIMIT_SECONDS", 15)
     monkeypatch.setattr(app_config, "LP_INVERTER_STRESS_COST_PENCE", 0.0)
     monkeypatch.setattr(app_config, "LP_HP_MIN_ON_SLOTS", 1)
+    # PR K2: soft-floor mechanism requires LP free e_dhw / tank.
+    monkeypatch.setattr(app_config, "DHW_FIXED_SCHEDULE_ENABLED", False, raising=False)
     monkeypatch.setattr(app_config, "DAIKIN_CONTROL_MODE", "active")
     # PR C — ENERGY_STRATEGY_MODE removed; no-op equivalent.
     monkeypatch.setattr(app_config, "BATTERY_CAPACITY_KWH", 10.36)

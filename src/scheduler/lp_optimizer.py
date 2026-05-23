@@ -501,6 +501,45 @@ def solve_lp(
     prob += soc[0] == initial.soc_kwh
     prob += tank[0] == initial.tank_temp_c
 
+    # PR K2 (2026-05-23) — DHW pinning. When the deterministic schedule
+    # from dhw_policy owns the tank, the LP must NOT optimize e_dhw or
+    # tank_temp as free variables. Otherwise the LP's planned PV
+    # consumption (which includes e_dhw) drifts from reality and the
+    # battery scheduling sub-problem makes choices based on phantom DHW
+    # load (e.g. over-aggressive Force Charge because LP thinks PV will
+    # be eaten by tank heating that K1 already turned off).
+    #
+    # We pin e_dhw[i] to a forecast derived from the dhw_policy schedule
+    # and pin tank[i] to the policy's target trajectory for audit honesty.
+    # The tank-thermodynamic constraint below is conditionally skipped so
+    # the pinned values don't over-constrain the LP into infeasibility.
+    _dhw_pinned = bool(getattr(config, "DHW_FIXED_SCHEDULE_ENABLED", False))
+    _pinned_e_dhw: list[float] = []
+    _pinned_tank: list[float] = []
+    if _dhw_pinned:
+        from .. import dhw_policy as _dhw_pol
+        try:
+            _mode = (config.OPTIMIZATION_PRESET or "normal").strip().lower()
+            _pinned_e_dhw, _pinned_tank = _dhw_pol.forecast_dhw_load_per_slot(
+                list(slot_starts_utc), mode=_mode,
+                initial_tank_c=float(initial.tank_temp_c),
+            )
+        except Exception as _exc:  # pragma: no cover - defensive
+            # Fall back to legacy free-variable behavior if the forecast
+            # helper fails so we never break the solver.
+            _pinned_e_dhw = []
+            _pinned_tank = []
+            _dhw_pinned = False
+    if _dhw_pinned and len(_pinned_e_dhw) == n and len(_pinned_tank) == n + 1:
+        # Pin e_dhw values (drop subscript 0 of tank because that's already
+        # pinned to initial.tank_temp_c above).
+        for i in range(n):
+            prob += e_dhw[i] == _pinned_e_dhw[i]
+            prob += tank[i + 1] == _pinned_tank[i + 1]
+    else:
+        # Disable pinning for this solve (forecast unavailable / shape mismatch).
+        _dhw_pinned = False
+
     # -----------------------------------------------------------------------
     # Per-slot constraints
     # -----------------------------------------------------------------------
@@ -659,7 +698,14 @@ def solve_lp(
         # → infeasibility on shower-window replays. Skip the draw term in
         # passive: the firmware handles reheat opaque to the LP.
         draw_j_i = 0.0 if passive_daikin else shower_draw_j[i]
-        prob += tank[i + 1] == tank[i] + (q_heat_dhw - loss_tank_j - draw_j_i) / c_tank
+        # PR K2 — skip the tank thermodynamic equation when DHW pinning is
+        # active. e_dhw and tank[i+1] are already pinned to the dhw_policy
+        # forecast above; layering this constraint on top would over-
+        # constrain the system (LP cannot satisfy both pinned values AND
+        # the physics-derived relation, since the forecast is a simple
+        # phase-based model, not a thermal sim).
+        if not _dhw_pinned:
+            prob += tank[i + 1] == tank[i] + (q_heat_dhw - loss_tank_j - draw_j_i) / c_tank
 
         # PR Phase B: building thermodynamics + comfort constraints removed.
         # Active mode now relies on the same physics floor as passive: the
@@ -789,7 +835,11 @@ def solve_lp(
     # to coast freely (down to ``tank_lo=20`` anti-freeze) and the Daikin
     # firmware owns the weekly legionella cycle. The household is away;
     # there's nothing to deliver hot water to.
-    if not passive_daikin and not _vacation_mode:
+    # PR K2 — when DHW is pinned, the shower floor would over-constrain
+    # against the pinned tank trajectory (37 °C overnight < typical
+    # evening floor of 40+ °C). Tank temp is fully owned by dhw_policy
+    # now; this floor is irrelevant.
+    if not passive_daikin and not _vacation_mode and not _dhw_pinned:
         for i in range(n):
             if shower_mask[i]:
                 kind = _slot_window_kind(slot_starts_utc[i])
@@ -854,7 +904,12 @@ def solve_lp(
             _leg_day = int(_rts.get_setting("DHW_LEGIONELLA_DAY"))
         except (TypeError, ValueError):
             _leg_day = -1
-        if 0 <= _leg_day <= 6:
+        # PR K2 — when DHW is pinned to dhw_policy forecast, the e_dhw
+        # values are fixed; layering a legionella floor on top would force
+        # infeasibility (pinned 0.04 < floor 0.5). Daikin firmware still
+        # runs the cycle autonomously; the slight LP under-estimate of
+        # Sunday-afternoon DHW load is a known acceptable cost (~£0.05/week).
+        if 0 <= _leg_day <= 6 and not _dhw_pinned:
             try:
                 _leg_hour = int(_rts.get_setting("DHW_LEGIONELLA_HOUR_LOCAL"))
                 _leg_minutes = int(_rts.get_setting("DHW_LEGIONELLA_DURATION_MIN"))
