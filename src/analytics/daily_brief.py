@@ -491,16 +491,15 @@ def _format_pnl_block(pnl: dict[str, Any], *, day: date, tz: ZoneInfo) -> list[s
     # distinct question:
     #   1. MTD-context  — "is today good vs my typical day this month?"
     #   2. Mean import rate — "did I import at the cheap end or the peak?"
-    #   3. Forgone export — "what's the running cost of strict_savings?"
-    # All three skip cleanly when the data isn't there (first of month, no
-    # imports, non-strict_savings mode) so legacy briefs don't gain noise.
-    # ``_mtd_summary`` is computed ONCE here and shared so we don't pay the
-    # ~380 ms compute_period_pnl latency twice per brief.
+    #   3. LP scorecard — grade + avoided cost
+    # All skip cleanly when the data isn't there (first of month, no
+    # imports) so legacy briefs don't gain noise. ``_mtd_summary`` is
+    # computed ONCE here and shared so we don't pay the ~380 ms
+    # ``compute_period_pnl`` latency twice per brief.
     mtd = _mtd_summary(day)
     for line in (
         _mtd_context_line(day, pnl, mtd),
         _mean_agile_rate_line(day, pnl, mtd),
-        _strict_savings_forgone_line(day, tz),
         _lp_scorecard_line(day),
     ):
         if line:
@@ -705,17 +704,6 @@ def _mean_agile_rate_line(day: date, pnl: dict[str, Any], mtd: dict[str, Any] | 
         f"- Mean import rate today: **{today_p_per_kwh:.1f} p/kWh** "
         f"vs MTD {mtd_p_per_kwh:.1f} p/kWh ({arrow} {delta_pct:+.0f}%)"
     )
-
-
-def _strict_savings_forgone_line(day: date, tz: ZoneInfo) -> str | None:
-    """PR C — strict_savings was removed; the line is permanently inactive.
-
-    Returns None so the brief composer keeps working without conditional
-    fan-out. The DB helper ``list_strict_savings_forgone_export_for_day``
-    remains for historical audit queries via MCP, but no fresh rows are
-    written because the dispatch reason `strict_savings` no longer fires.
-    """
-    return None
 
 
 def _lp_scorecard_line(day: date) -> str | None:
