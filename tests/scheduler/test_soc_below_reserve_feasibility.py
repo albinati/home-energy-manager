@@ -32,8 +32,10 @@ from src.weather import WeatherLpSeries
 
 
 @pytest.fixture(autouse=True)
-def _init_db():
+def _init_db(monkeypatch):
     _db.init_db()
+    # PR K2: SoC feasibility test exercises free-DHW path; opt out of pinning.
+    monkeypatch.setattr(config, "DHW_FIXED_SCHEDULE_ENABLED", False, raising=False)
 
 
 def _starts(n: int, base: datetime) -> list[datetime]:

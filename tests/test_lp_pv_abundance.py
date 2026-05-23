@@ -59,8 +59,13 @@ def test_pv_abundance_lifts_tank_ceiling_above_comfort(
 ) -> None:
     """When PV >> self-use + battery headroom, the LP can heat the tank
     above DHW_TEMP_COMFORT_C (48 °C) without paying the soft-ceiling slack.
+
+    PR K2: legacy-path test. Opts out of DHW pinning so the LP's free
+    tank/e_dhw decision variables are exercised. Real prod has pinning
+    on by default and this branch is slated for K2-cleanup deletion.
     """
     from src.config import config as app_config
+    monkeypatch.setattr(app_config, "DHW_FIXED_SCHEDULE_ENABLED", False, raising=False)
     monkeypatch.setattr(app_config, "DHW_PV_ABUNDANCE_THRESHOLD_KWH", 0.5, raising=False)
     monkeypatch.setattr(app_config, "LP_PV_ABUNDANCE_TANK_REWARD_PENCE_PER_KWH", 5.0, raising=False)
 
@@ -100,8 +105,11 @@ def test_pv_abundance_threshold_relaxed_for_realistic_sunny_day(
     This test isolates the *threshold mechanics* (does the abundance flag
     fire?) from the *economic competition* with export revenue. We zero the
     export rate so the only LP incentive is the tank-storage reward.
-    Active mode used because passive clamps e_dhw."""
+    Active mode used because passive clamps e_dhw.
+
+    PR K2: legacy-path test (DHW_FIXED_SCHEDULE_ENABLED=False)."""
     from src.config import config as app_config
+    monkeypatch.setattr(app_config, "DHW_FIXED_SCHEDULE_ENABLED", False, raising=False)
     monkeypatch.setattr(app_config, "DAIKIN_CONTROL_MODE", "active", raising=False)
     monkeypatch.setattr(app_config, "DHW_PV_ABUNDANCE_THRESHOLD_KWH", 0.5, raising=False)
     monkeypatch.setattr(app_config, "LP_PV_ABUNDANCE_TANK_REWARD_PENCE_PER_KWH", 5.0, raising=False)

@@ -28,8 +28,10 @@ from src.weather import WeatherLpSeries
 
 
 @pytest.fixture(autouse=True)
-def _init_db():
+def _init_db(monkeypatch):
     _db.init_db()
+    # PR K2: e2e LP test exercises legacy free-DHW path; opt out of pinning.
+    monkeypatch.setattr(config, "DHW_FIXED_SCHEDULE_ENABLED", False, raising=False)
 
 
 # ---------------------------------------------------------------------------
