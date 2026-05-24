@@ -121,18 +121,17 @@ def test_forecast_to_lp_inputs_callable_zero_factor_zeros_pv() -> None:
     assert out.pv_kwh_per_slot[0] == 0.0
 
 
-def test_direct_pv_path_skips_radiation_trained_tables() -> None:
-    """Quartz direct PV must NOT be multiplied by the radiation-trained
-    cloud_table or hourly_table — those factors are
-    ``actual / estimate_pv_kw(open_meteo_radiation)`` ratios, so applying
-    them on top of Quartz output (which already self-calibrates against
-    its blend model's actuals) double-corrects.
+def test_direct_pv_path_applies_calibration_tables_by_default() -> None:
+    """PR L1 (2026-05-24) — Quartz direct PV NOW applies calibration tables
+    by default. Previous behaviour (PR #279 bypass) was based on the
+    assumption "Quartz self-calibrates", but `forecast_skill_log` showed
+    GSP-level Quartz mispredicts the W4 1DZ east-facing array by ~35 %
+    AM / ~20 % PM. The calibration tables encode that orientation
+    correction; applying them on top of Quartz output gets us closer
+    to actual.
 
-    Caught in the 2026-05-08 prod audit: morning cloud-table factors of
-    0.43-0.56× combined with the today_factor scalar pushed Quartz's
-    morning predictions to ~25 % of actuals, causing aggressive grid
-    charging in the cheap morning window followed by surplus-PV exports
-    in the afternoon at sub-peak Outgoing Agile rates.
+    Legacy bypass remains available via `PV_QUARTZ_APPLY_CALIBRATION=false`
+    (see :func:`test_direct_pv_path_legacy_bypass_when_flag_false`).
     """
     from src.weather import forecast_pv_kw_from_row
 
@@ -147,11 +146,31 @@ def test_direct_pv_path_skips_radiation_trained_tables() -> None:
         hourly_table=hourly,
         flat=1.0,
     )
-    # 2.0 kW × flat(1.0) × scale(1.0) = 2.0; tables are deliberately ignored.
-    # If they were applied the result would be 2.0 × 0.50 = 1.0.
+    # 2.0 kW × cloud_table[(12, 1)]=0.50 × scale(1.0) = 1.0 (calibration applied)
+    assert pv == pytest.approx(1.0), (
+        f"Quartz path must apply calibration when PV_QUARTZ_APPLY_CALIBRATION=true; "
+        f"got {pv} (2.0 indicates legacy bypass still active)"
+    )
+
+
+def test_direct_pv_path_legacy_bypass_when_flag_false(monkeypatch) -> None:
+    """PR L1 — rollback path: when ``PV_QUARTZ_APPLY_CALIBRATION=false``,
+    the legacy bypass (PR #279 behavior) is restored — Quartz output is
+    used as-is, calibration tables ignored. Acts as a kill switch."""
+    from src.config import config as app_config
+    from src.weather import forecast_pv_kw_from_row
+
+    monkeypatch.setattr(app_config, "PV_QUARTZ_APPLY_CALIBRATION", False, raising=False)
+    cloud = {(12, 1): 0.50}
+    hourly = {12: 0.75}
+    pv = forecast_pv_kw_from_row(
+        12, 0.0, 40.0,
+        direct_pv_kw=2.0,
+        cloud_table=cloud, hourly_table=hourly, flat=1.0,
+    )
+    # Flag off → legacy bypass → cloud_table ignored → 2.0 × flat(1.0) = 2.0
     assert pv == pytest.approx(2.0), (
-        f"Quartz path must skip radiation-trained tables; got {pv} "
-        "(1.0 indicates double-correction via cloud_table)"
+        f"Flag off must restore legacy bypass; got {pv}"
     )
 
 
