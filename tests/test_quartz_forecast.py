@@ -96,6 +96,17 @@ def test_direct_pv_applies_calibration_tables_by_default() -> None:
     """
     from src.weather import HourlyForecast, forecast_to_lp_inputs
 
+    # PR L1 M2 fix — clear cloud-bucket table so lookup falls back to
+    # the per-hour table deterministically. Otherwise stale (12, bucket)
+    # rows from prior tests in the same session would shadow the hourly
+    # 0.5x factor.
+    import sqlite3
+    from src.config import config as app_config
+    conn = sqlite3.connect(app_config.DB_PATH)
+    conn.execute("DELETE FROM pv_calibration_hourly_cloud")
+    conn.commit()
+    conn.close()
+
     # Aggressive 0.5x hourly factor for hour 12.
     db.upsert_pv_calibration_hourly({12: 0.5}, {12: 8}, window_days=30)
 

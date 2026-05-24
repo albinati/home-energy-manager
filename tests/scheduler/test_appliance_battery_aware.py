@@ -461,6 +461,99 @@ def test_committed_load_subtraction_prevents_double_book(monkeypatch):
     assert start is not None
 
 
+def test_residual_pv_quartz_path_applies_calibration_when_flag_on(monkeypatch):
+    """PR L1 H2 regression — when ``PV_QUARTZ_APPLY_CALIBRATION=true``
+    (the new default), the appliance dispatcher's ``_residual_pv_kwh_per_slot``
+    must apply the SAME calibration that the LP applies via
+    ``forecast_pv_kw_from_row``. Otherwise the LP would plan against
+    Quartz × cal × today_factor while the appliance picker optimises
+    against raw Quartz — exact LP/dispatch drift bug class (K1 → K2).
+    """
+    monkeypatch.setattr(config, "PV_QUARTZ_APPLY_CALIBRATION", True, raising=False)
+    base = datetime(2026, 6, 15, 12, 0, tzinfo=UTC)
+    slots = [base + timedelta(minutes=30 * i) for i in range(4)]
+
+    # Stub forecast to return Quartz direct-PV (pv_direct=True)
+    from src.weather import HourlyForecast
+    def fake_fetch(*_a, **_kw):
+        return [
+            HourlyForecast(
+                time_utc=base + timedelta(hours=h),
+                temperature_c=20.0,
+                cloud_cover_pct=20.0,
+                shortwave_radiation_wm2=0.0,
+                estimated_pv_kw=4.0,
+                heating_demand_factor=0.0,
+                pv_direct=True,
+            )
+            for h in range(2)
+        ]
+    monkeypatch.setattr("src.weather.fetch_forecast", fake_fetch)
+    # Stub the calibration tables: cloud_table has (12, 0)=0.5, hourly_table empty
+    monkeypatch.setattr(
+        "src.weather.compute_pv_calibration_factor", lambda *a, **kw: 1.0,
+    )
+    monkeypatch.setattr(
+        "src.weather.compute_today_pv_correction_factor", lambda *a, **kw: (1.0, {}),
+    )
+    monkeypatch.setattr(
+        "src.db.get_pv_calibration_hourly_cloud", lambda: {(12, 0): 0.5},
+    )
+    monkeypatch.setattr(
+        "src.db.get_pv_calibration_hourly", lambda: {},
+    )
+
+    out = ad._residual_pv_kwh_per_slot(slots)
+    # With flag ON, slot at 12:00 UTC (cloud_bucket=0) should be scaled by 0.5.
+    # Half-hour kWh = 4.0 kW × 0.5h × 0.5 cal × 1.0 today = 1.0 kWh
+    assert out[slots[0]] == pytest.approx(1.0), (
+        f"Quartz path must apply calibration; got {out[slots[0]]} (2.0 = bypass active)"
+    )
+
+
+def test_residual_pv_quartz_path_bypasses_calibration_when_flag_off(monkeypatch):
+    """PR L1 H2 — when flag OFF, the appliance dispatcher restores
+    legacy bypass (matches the LP's behavior under the same flag).
+    """
+    monkeypatch.setattr(config, "PV_QUARTZ_APPLY_CALIBRATION", False, raising=False)
+    base = datetime(2026, 6, 15, 12, 0, tzinfo=UTC)
+    slots = [base + timedelta(minutes=30 * i) for i in range(4)]
+
+    from src.weather import HourlyForecast
+    def fake_fetch(*_a, **_kw):
+        return [
+            HourlyForecast(
+                time_utc=base + timedelta(hours=h),
+                temperature_c=20.0,
+                cloud_cover_pct=20.0,
+                shortwave_radiation_wm2=0.0,
+                estimated_pv_kw=4.0,
+                heating_demand_factor=0.0,
+                pv_direct=True,
+            )
+            for h in range(2)
+        ]
+    monkeypatch.setattr("src.weather.fetch_forecast", fake_fetch)
+    monkeypatch.setattr(
+        "src.weather.compute_pv_calibration_factor", lambda *a, **kw: 1.0,
+    )
+    monkeypatch.setattr(
+        "src.weather.compute_today_pv_correction_factor", lambda *a, **kw: (1.0, {}),
+    )
+    monkeypatch.setattr(
+        "src.db.get_pv_calibration_hourly_cloud", lambda: {(12, 0): 0.5},
+    )
+    monkeypatch.setattr(
+        "src.db.get_pv_calibration_hourly", lambda: {},
+    )
+
+    out = ad._residual_pv_kwh_per_slot(slots)
+    # Flag OFF, Quartz path bypasses calibration → 4.0 × 0.5h × 1.0 = 2.0 kWh
+    assert out[slots[0]] == pytest.approx(2.0), (
+        f"Flag off must restore legacy bypass; got {out[slots[0]]}"
+    )
+
+
 def test_battery_aware_grid_only_when_load_exceeds_capacity(monkeypatch):
     """Load > full battery capacity → no slot can be battery-covered."""
     aid = _seed_appliance(typical_kw=5.0)  # 5 kW × 2h = 10 kWh — exceeds 10 kWh battery

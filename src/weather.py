@@ -283,9 +283,19 @@ def forecast_pv_kw_from_row(
     Quartz mispredicts our W4 1DZ east-facing array by ~35 % AM and ~20 %
     PM (`forecast_skill_log` 30-day mean ratios). The calibration tables
     already encode the orientation correction (they're computed from
-    actual vs forecasted residuals each 04:30 UTC), we just weren't
-    applying them. Now we are. Set ``PV_QUARTZ_APPLY_CALIBRATION=false``
-    to restore the legacy bypass.
+    actual vs forecasted-PV residuals each 04:30 UTC).
+
+    **Known semantic gap (acknowledged):** the calibration tables are
+    trained against ``actual / estimate_pv_kw(open_meteo_radiation)``,
+    NOT against ``actual / quartz_prediction``. Applying them as a
+    Quartz multiplier is empirically effective (the 30-day mean factors
+    roughly match the observed Quartz bias because both correct for the
+    same physical orientation), but the conversion is imperfect in
+    partly-cloudy regimes where Quartz's blend model diverges from raw
+    shortwave radiation. Phase 1.1 of the calibration epic adds a
+    ``source`` column to segregate Quartz-vs-Open-Meteo residuals if
+    post-deploy data shows over-correction. Set
+    ``PV_QUARTZ_APPLY_CALIBRATION=false`` to restore the legacy bypass.
 
     Cloud attenuation is applied to the radiation path before the
     irradiance-to-kW conversion. The Quartz path skips attenuation
