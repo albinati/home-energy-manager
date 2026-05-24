@@ -250,10 +250,13 @@ class ForecastFetchResult:
 # PR L3 H5 — one-shot warning latch for astral-missing degradation.
 _ASTRAL_WARNED = False
 
-# System constants for PV estimate (London W4 system — split install: 6 panels
-# SW-pitched ~225°/30° + 6 panels flat-roof racked ~south/10°, aggregate
-# empirical azimuth ~200° SSW). Orientation is NOT encoded here; the per-hour
-# × cloud × elevation calibration tables absorb it empirically.
+# System constants for PV estimate (London W4 system — 10 × 450 W DMEGC
+# panels per MCS cert MCS-02470690-S, mounted "Above Roof" with Van der
+# Valk Valkpitched rails. Aggregate empirical azimuth ~200° SSW from
+# the 2026-05-24 orientation sweep. Production shows a late-PM cliff at
+# 17:00 UTC consistent with a fixed obstruction roughly due west.
+# Orientation/obstruction are NOT encoded here; the per-hour × cloud ×
+# elevation calibration tables absorb them empirically.
 _PV_CAPACITY_KWP = 4.5
 _PV_SYSTEM_EFFICIENCY = 0.85  # accounts for inverter, wiring, temp de-rating
 _IRRADIANCE_AT_STC_WM2 = 1000.0  # standard test conditions
@@ -289,11 +292,15 @@ def forecast_pv_kw_from_row(
     calibration tables (was previously SKIPPED per PR #279's
     "Quartz self-calibrates" assumption). Prod telemetry showed GSP-level
     Quartz mispredicts our W4 1DZ array by ~35 % AM and ~20 % PM
-    (`forecast_skill_log` 30-day mean ratios). The bias originally read
-    as "east-facing" was actually the signature of a split install
-    (SW-pitched + flat-roof south rack, aggregate ~200° SSW) with
-    non-ideal tilt mix. The calibration tables absorb all of it
-    empirically — they don't need to know the geometry.
+    (`forecast_skill_log` 30-day mean ratios). Half-hourly evidence on 10
+    clear days (2026-05-12 to -24) shows a consistent **late-PM cliff**
+    between 16:30 and 17:00 UTC — production drops 50–72 % in 30 min on
+    6 of 10 clear days, far steeper than geometry (max ~25 %) allows.
+    Sun at that time sits at azimuth ~270°, elevation ~21°, so a fixed
+    obstruction roughly due west of the panels is the only plausible
+    cause. The calibration tables absorb the cliff empirically (hour 17 Z
+    cell ratio 0.84 vs neighbouring 16 Z ~1.01) — they don't need to know
+    the cause.
 
     **Known semantic gap (acknowledged):** the calibration tables are
     trained against ``actual / estimate_pv_kw(open_meteo_radiation)``,
@@ -1346,10 +1353,9 @@ def compute_solar_elevation_deg(
 
     PR L3 (2026-05-24) — used by the 3D calibration table to separate
     same-UTC-hour samples by sun position (winter low / summer high).
-    A real array (split SW-pitched + flat-rack at W4 1DZ, with non-ideal
-    tilt mix) has fundamentally different physics when the sun is at
-    10° vs 50° elevation — same hour, different physics → different
-    correction factor.
+    The W4 1DZ install has fundamentally different physics when the sun
+    is at 10° vs 50° elevation — same hour, different physics, different
+    obstruction-shadow geometry → different correction factor.
 
     Defaults to ``config.WEATHER_LAT`` / ``WEATHER_LON`` when omitted.
 
