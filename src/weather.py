@@ -274,6 +274,8 @@ def forecast_pv_kw_from_row(
     hourly_table: dict[int, float] | None = None,
     flat: float = 1.0,
     scale: float = 1.0,
+    table_3d: dict[tuple[int, int, int], float] | None = None,
+    slot_utc: datetime | None = None,
 ) -> float:
     """Apply the same PV forecast transform used by the LP and skill logger.
 
@@ -316,6 +318,8 @@ def forecast_pv_kw_from_row(
                     cloud_table=cloud_table,
                     hourly_table=hourly_table,
                     flat=flat,
+                    table_3d=table_3d,
+                    slot_utc=slot_utc,
                 )
                 return base_kw * cal * scale_f
             return base_kw * float(flat) * scale_f
@@ -330,6 +334,8 @@ def forecast_pv_kw_from_row(
         cloud_table=cloud_table,
         hourly_table=hourly_table,
         flat=flat,
+        table_3d=table_3d,
+        slot_utc=slot_utc,
     )
     return estimate_pv_kw(rad_eff) * cal * scale_f
 
@@ -1070,6 +1076,7 @@ def compute_today_pv_correction_factor(
         forecast_rows = []
     cal_cloud = _db.get_pv_calibration_hourly_cloud()
     cal_hour = _db.get_pv_calibration_hourly()
+    cal_3d = _db.get_pv_calibration_3d()
     flat_cal = compute_pv_calibration_factor() if not cal_cloud and not cal_hour else 1.0
     forecast_per_hour: dict[int, float] = {}
     for r in forecast_rows:
@@ -1087,6 +1094,8 @@ def compute_today_pv_correction_factor(
                 cloud_table=cal_cloud,
                 hourly_table=cal_hour,
                 flat=flat_cal,
+                table_3d=cal_3d,
+                slot_utc=ts,
             )
         except (ValueError, TypeError, KeyError):
             continue
@@ -1215,6 +1224,7 @@ def compute_today_pv_correction_factor_by_hour(
         forecast_rows = []
     cal_cloud = _db.get_pv_calibration_hourly_cloud()
     cal_hour = _db.get_pv_calibration_hourly()
+    cal_3d = _db.get_pv_calibration_3d()
     flat_cal = compute_pv_calibration_factor() if not cal_cloud and not cal_hour else 1.0
     forecast_per_hour: dict[int, float] = {}
     for r in forecast_rows:
@@ -1232,6 +1242,8 @@ def compute_today_pv_correction_factor_by_hour(
                 cloud_table=cal_cloud,
                 hourly_table=cal_hour,
                 flat=flat_cal,
+                table_3d=cal_3d,
+                slot_utc=ts,
             )
         except (ValueError, TypeError, KeyError):
             continue
@@ -1329,8 +1341,11 @@ def compute_solar_elevation_deg(
     physics → different correction factor.
 
     Defaults to ``config.WEATHER_LAT`` / ``WEATHER_LON`` when omitted.
-    Returns 0.0 when astral is unavailable (degraded mode — caller
-    falls back to non-3D lookup chain).
+
+    Raises ImportError if ``astral`` is unavailable — the caller should
+    handle it explicitly (we DON'T silently return 0.0, because that
+    would collapse every slot into bucket 0 and silently poison the
+    calibration table).
     """
     if lat is None:
         try:
@@ -1342,12 +1357,12 @@ def compute_solar_elevation_deg(
             lon = float(config.WEATHER_LON or "0")
         except (TypeError, ValueError):
             return 0.0
+    from astral import Observer  # noqa: imported for the side effect of failing loudly
+    from astral.sun import elevation
     try:
-        from astral import Observer
-        from astral.sun import elevation
         obs = Observer(latitude=lat, longitude=lon)
         return float(elevation(observer=obs, dateandtime=slot_utc))
-    except Exception:
+    except (ValueError, TypeError):
         return 0.0
 
 
@@ -1450,7 +1465,13 @@ def get_pv_calibration_factor_for(
 
     # 3D — only attempted when slot_utc is available so we can compute elevation
     if table_3d and slot_utc is not None:
-        elev = compute_solar_elevation_deg(slot_utc)
+        # PR L3 H2 fix — normalize lookup timestamp to mid-hour so it
+        # matches what compute_pv_calibration_3d_table used during training.
+        # Without this, :00 slots would compute elevation 30 min earlier
+        # than the training reference and could land in a different bucket
+        # at dawn/dusk transitions → miss the populated cell.
+        midhour_dt = slot_utc.replace(minute=30, second=0, microsecond=0)
+        elev = compute_solar_elevation_deg(midhour_dt)
         elev_b = elevation_bucket(elev)
         f = table_3d.get((hour_utc, bucket, elev_b))
         if f is not None:
@@ -1835,6 +1856,7 @@ def evaluate_pv_forecast_accuracy(
 
     cal_hourly = _db.get_pv_calibration_hourly()
     cal_cloud = _db.get_pv_calibration_hourly_cloud()
+    cal_3d = _db.get_pv_calibration_3d()
     flat_cal = compute_pv_calibration_factor() if not cal_hourly and not cal_cloud else 1.0
 
     # Pull all measurements in window.
@@ -1894,6 +1916,12 @@ def evaluate_pv_forecast_accuracy(
         rad = forecast_radiation.get(key)
         if rad is None:
             continue
+        try:
+            slot_utc_key = _dt.fromisoformat(key[0]).replace(
+                hour=key[1], tzinfo=_UTC,
+            )
+        except (ValueError, TypeError):
+            slot_utc_key = None
         predicted_kw = forecast_pv_kw_from_row(
             key[1],
             rad,
@@ -1902,6 +1930,8 @@ def evaluate_pv_forecast_accuracy(
             cloud_table=cal_cloud,
             hourly_table=cal_hourly,
             flat=flat_cal,
+            table_3d=cal_3d,
+            slot_utc=slot_utc_key,
         )
         if predicted_kw < min_kw and actual_kw < min_kw:
             continue                      # both negligible — skip dawn/dusk
@@ -1990,6 +2020,12 @@ def forecast_to_lp_inputs(
         cal_hourly = _db.get_pv_calibration_hourly()
     except sqlite3.OperationalError:
         cal_hourly = {}
+    # PR L3 — pull 3D table once; passed through to forecast_pv_kw_from_row
+    # so each slot can dispatch on its own (hour, cloud, elevation) cell.
+    try:
+        cal_3d = _db.get_pv_calibration_3d()
+    except sqlite3.OperationalError:
+        cal_3d = {}
     try:
         flat_cal = compute_pv_calibration_factor() if not cal_cloud and not cal_hourly else 1.0
     except sqlite3.OperationalError:
@@ -2068,6 +2104,8 @@ def forecast_to_lp_inputs(
             hourly_table=cal_hourly,
             flat=flat_cal,
             scale=scale_for_slot,
+            table_3d=cal_3d,
+            slot_utc=st,
         )
         # Apply calibration scale and enforce per-hour physical ceiling
         slot_ceil = hourly_ceil.get(st.hour, cap * eff * 0.5)

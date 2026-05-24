@@ -1447,6 +1447,9 @@ def _run_optimizer_lp(
     )
     pv_scale_cloud = db.get_pv_calibration_hourly_cloud()
     pv_scale_hourly = db.get_pv_calibration_hourly()
+    # PR L3 — 3D table (hour × cloud × solar elevation). Fetched once per
+    # solve so per-slot lookups don't hit SQLite. Empty when sparse data.
+    pv_scale_3d = db.get_pv_calibration_3d()
     flat_scale = (
         compute_pv_calibration_factor()
         if not pv_scale_cloud and not pv_scale_hourly else 1.0
@@ -1530,6 +1533,8 @@ def _run_optimizer_lp(
             cloud_table=pv_scale_cloud,
             hourly_table=pv_scale_hourly,
             flat=flat_scale,
+            table_3d=pv_scale_3d,
+            slot_utc=slot_start_utc,
         )
         # #1: only apply today_factor to slots IN the current UTC day. For
         # tomorrow's slots return the cloud/hour calibration alone — today's

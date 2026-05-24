@@ -266,3 +266,64 @@ def test_upsert_and_get_3d_roundtrip():
         (15, 2, 1): pytest.approx(1.10),
         (18, 3, 0): pytest.approx(0.45),
     }
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: 3D table threads through forecast_to_lp_inputs
+# ---------------------------------------------------------------------------
+
+
+def test_forecast_to_lp_inputs_consumes_3d_table():
+    """PR L3 H1 — the 3D table populated by the 04:30 UTC cron must reach
+    per-slot PV output. Regression guard against the silent-collapse class
+    of bug (where slot_utc isn't threaded through callchain → 3D never fires).
+
+    Strategy: populate ONLY the 3D table with a sharply divergent factor.
+    Leave 2D / 1D / flat at their defaults. Drive forecast_to_lp_inputs;
+    the resulting pv_kwh must reflect the 3D factor (not the empty 2D/1D
+    paths). Verifies the production wiring delivers slot_utc.
+    """
+    from src.weather import (
+        HourlyForecast,
+        compute_solar_elevation_deg,
+        elevation_bucket,
+        forecast_to_lp_inputs,
+    )
+
+    # Solar noon on solstice → predictable bucket 4.
+    slot_utc = datetime(2026, 6, 21, 12, 0, tzinfo=UTC)
+    elev = compute_solar_elevation_deg(slot_utc.replace(minute=30))
+    elev_b = elevation_bucket(elev)
+
+    # Seed the 3D table with a distinctive factor in the matching cell.
+    cloud_pct = 10.0  # bucket 0 (clear)
+    # Cell key uses hour and cloud bucket plus elev bucket.
+    distinctive = 0.42
+    db.upsert_pv_calibration_3d(
+        {(12, 0, elev_b): distinctive},
+        {(12, 0, elev_b): 10},
+        window_days=30,
+    )
+
+    # Build a single-slot forecast with quartz direct_pv_kw so the
+    # `forecast_pv_kw_from_row` direct-PV branch is the one we exercise.
+    forecast = [
+        HourlyForecast(
+            time_utc=slot_utc, temperature_c=15.0, cloud_cover_pct=cloud_pct,
+            shortwave_radiation_wm2=600.0, estimated_pv_kw=4.0,
+            heating_demand_factor=0.0, pv_direct=True,
+        ),
+    ]
+
+    out = forecast_to_lp_inputs(forecast, [slot_utc], pv_scale=1.0)
+    # raw 4.0 kW × 0.5h × 0.42 (3D cell) = 0.84 kWh expected, but clamped
+    # by hourly_ceil if any — verify it's neither the unclamped raw value
+    # (would be 2.0) nor 0 (would mean 3D was missed and 2D/1D empty).
+    pv = out.pv_kwh_per_slot[0]
+    assert pv > 0.0, f"PV was zero — calibration chain broke; got {pv}"
+    # Tight check: under 2.0 (the raw uncalibrated value) and reflects the
+    # 0.42 multiplier (allowing for the per-slot ceiling clamp).
+    assert pv < 1.5, (
+        f"PV {pv:.3f} kWh suggests 3D factor 0.42 was NOT applied "
+        f"(raw direct_pv would be ~2.0 kWh). slot_utc may not be threaded."
+    )

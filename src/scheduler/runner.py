@@ -231,6 +231,7 @@ def _get_forecast_pv_kw(now_utc: datetime) -> float | None:
         rad_eff = max(0.0, rad_wm2 * att)
         cal_cloud = db.get_pv_calibration_hourly_cloud()
         cal_hour = db.get_pv_calibration_hourly()
+        cal_3d = db.get_pv_calibration_3d()
         flat = compute_pv_calibration_factor() if not cal_cloud and not cal_hour else 1.0
         cal = get_pv_calibration_factor_for(
             now_utc.hour,
@@ -238,6 +239,8 @@ def _get_forecast_pv_kw(now_utc: datetime) -> float | None:
             cloud_table=cal_cloud,
             hourly_table=cal_hour,
             flat=flat,
+            table_3d=cal_3d,
+            slot_utc=now_utc,
         )
         today_factor, _diag = compute_today_pv_correction_factor()
         return estimate_pv_kw(rad_eff) * cal * today_factor
