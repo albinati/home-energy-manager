@@ -250,13 +250,13 @@ class ForecastFetchResult:
 # PR L3 H5 — one-shot warning latch for astral-missing degradation.
 _ASTRAL_WARNED = False
 
-# System constants for PV estimate (London W4 system — 10 × 450 W DMEGC
-# panels per MCS cert MCS-02470690-S, mounted "Above Roof" with Van der
-# Valk Valkpitched rails. Aggregate empirical azimuth ~200° SSW from
-# the 2026-05-24 orientation sweep. Production shows a late-PM cliff at
-# 17:00 UTC consistent with a fixed obstruction roughly due west.
-# Orientation/obstruction are NOT encoded here; the per-hour × cloud ×
-# elevation calibration tables absorb them empirically.
+# System constants for PV estimate (London W4 system — 4.5 kWp DMEGC
+# 450 W modules per MCS cert MCS-02470690-S, mounted "Above Roof" with
+# Van der Valk Valkpitched rails. Aggregate empirical azimuth ~200° SSW
+# from the 2026-05-24 orientation sweep. Production shows a late-PM
+# cliff at 17:00 UTC consistent with a fixed obstruction roughly due
+# west. Orientation/obstruction are NOT encoded here; the per-hour ×
+# cloud × elevation calibration tables absorb them empirically.
 _PV_CAPACITY_KWP = 4.5
 _PV_SYSTEM_EFFICIENCY = 0.85  # accounts for inverter, wiring, temp de-rating
 _IRRADIANCE_AT_STC_WM2 = 1000.0  # standard test conditions
