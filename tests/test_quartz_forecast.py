@@ -83,18 +83,31 @@ def test_quartz_fetch_merges_direct_pv_with_open_meteo_weather(monkeypatch: pyte
     assert result.raw_payload_json
 
 
-def test_direct_pv_skips_radiation_trained_calibration_tables() -> None:
-    """Quartz's direct PV output must NOT be multiplied by the radiation-trained
-    cloud / hourly calibration tables. Those factors were learned against
-    Open-Meteo's shortwave_radiation_instant via
-    ``actual / estimate_pv_kw(rad)`` ratios, so applying them on top of
-    Quartz (which already does ECMWF-driven cloud blending and self-
-    calibrates against actuals) double-corrects and biases the LP's PV
-    expectation strongly toward zero — the 2026-05-08 prod incident.
+def test_direct_pv_applies_calibration_tables_by_default() -> None:
+    """PR L1 (2026-05-24) — Quartz direct PV NOW applies calibration tables.
+
+    `forecast_skill_log` (last 30 days) showed GSP-level Quartz mispredicts
+    the W4 1DZ east-facing array by ~35 % AM / ~20 % PM. The calibration
+    tables encode that orientation correction; applying them on top of
+    Quartz output brings forecast closer to actual.
+
+    Legacy bypass (PR #279 behavior) remains available via the kill
+    switch ``PV_QUARTZ_APPLY_CALIBRATION=false``.
     """
     from src.weather import HourlyForecast, forecast_to_lp_inputs
 
-    # Stash a deliberately aggressive 0.5x hourly factor for hour 12.
+    # PR L1 M2 fix — clear cloud-bucket table so lookup falls back to
+    # the per-hour table deterministically. Otherwise stale (12, bucket)
+    # rows from prior tests in the same session would shadow the hourly
+    # 0.5x factor.
+    import sqlite3
+    from src.config import config as app_config
+    conn = sqlite3.connect(app_config.DB_PATH)
+    conn.execute("DELETE FROM pv_calibration_hourly_cloud")
+    conn.commit()
+    conn.close()
+
+    # Aggressive 0.5x hourly factor for hour 12.
     db.upsert_pv_calibration_hourly({12: 0.5}, {12: 8}, window_days=30)
 
     slot = datetime(2026, 5, 5, 12, 0, tzinfo=UTC)
@@ -112,11 +125,10 @@ def test_direct_pv_skips_radiation_trained_calibration_tables() -> None:
 
     series = forecast_to_lp_inputs(forecast, [slot], pv_scale=1.0)
 
-    # Half-hour slot kWh = 2.0 kW × 0.5 h × flat(1.0) = 1.0 kWh.
-    # If the radiation-trained 0.5x factor were applied, we'd get 0.5.
-    assert series.pv_kwh_per_slot == pytest.approx([1.0]), (
-        "Quartz direct PV must skip the radiation-trained calibration; got "
-        f"{series.pv_kwh_per_slot} (expected [1.0], 0.5 indicates double-correction)"
+    # Half-hour slot kWh = 2.0 kW × 0.5 × 0.5h = 0.5 kWh (calibration applied)
+    assert series.pv_kwh_per_slot == pytest.approx([0.5]), (
+        "PR L1: Quartz direct PV must apply calibration tables by default; "
+        f"got {series.pv_kwh_per_slot} (1.0 indicates legacy bypass still active)"
     )
 
 

@@ -558,6 +558,19 @@ class Config:
     QUARTZ_INSTALLED_CAPACITY_MW: float = float(
         os.getenv("QUARTZ_INSTALLED_CAPACITY_MW", "0") or "0"
     )
+    # PR L1 (2026-05-24) — apply the per-hour + per-(hour, cloud) calibration
+    # tables on top of Quartz's direct PV output. Previously SKIPPED (PR #279)
+    # under the assumption "Quartz self-calibrates", but observed AM 0.65 /
+    # PM 1.11 bias in `forecast_skill_log` confirms the GSP-level Quartz
+    # endpoint does NOT capture our W4 1DZ east-facing orientation. The
+    # calibration tables (populated daily 04:30 UTC from `pv_realtime_history`
+    # actuals vs Quartz forecasts) already encode the orientation correction
+    # — we just weren't applying it. Set to false to restore legacy bypass
+    # (for rollback if double-correction issues surface).
+    PV_QUARTZ_APPLY_CALIBRATION: bool = (
+        os.getenv("PV_QUARTZ_APPLY_CALIBRATION", "true").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
 
     # Agile scheduler (Daikin ASHP by price)
     SCHEDULER_ENABLED: bool = os.getenv("SCHEDULER_ENABLED", "false").lower() in ("true", "1", "yes")

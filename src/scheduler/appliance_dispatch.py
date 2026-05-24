@@ -304,11 +304,19 @@ def _residual_pv_kwh_per_slot(
             hour_anchor.hour, cloud_pct,
             cloud_table=cal_cloud, hourly_table=cal_hourly, flat=flat_cal,
         )
-        if pv_direct:
+        slot_today_factor = today_factor
+        # PR L1 (2026-05-24) — when Quartz direct PV path is active and
+        # the operator hasn't disabled calibration via
+        # ``PV_QUARTZ_APPLY_CALIBRATION``, apply the same calibration + today
+        # factor here that the LP applies in `forecast_pv_kw_from_row`.
+        # Otherwise the appliance window picker would optimise against a
+        # different PV signal than the LP plans against — exactly the kind
+        # of dispatch/LP drift bug that bit K1 → K2.
+        if pv_direct and not getattr(config, "PV_QUARTZ_APPLY_CALIBRATION", True):
             scale = 1.0
-            today_factor = 1.0
+            slot_today_factor = 1.0
         # Half-hour kWh = kW × 0.5h × calibration × today-aware factor
-        out[slot_start] = pv_kw * 0.5 * scale * today_factor
+        out[slot_start] = pv_kw * 0.5 * scale * slot_today_factor
     return out
 
 

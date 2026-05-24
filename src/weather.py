@@ -277,26 +277,47 @@ def forecast_pv_kw_from_row(
 ) -> float:
     """Apply the same PV forecast transform used by the LP and skill logger.
 
-    When the provider supplies direct PV (Quartz), use that as the base signal
-    and skip the radiation-trained calibration tables. Quartz's blend model
-    already accounts for cloud cover via ECMWF inputs and self-calibrates
-    against actuals; applying our cloud-bucket factor (which was learned as
-    ``actual / estimate_pv_kw(open_meteo_radiation)``) on top of Quartz's
-    already-calibrated PV output double-corrects and biases mornings/dusk
-    too low (2026-05-08 audit caught morning over-prediction → grid charge,
-    afternoon under-prediction → battery filled too late). Quartz only gets
-    the ``flat * today_factor`` chain — site-level shading/orientation bias
-    can be captured by a future Quartz-trained calibration table without
-    breaking compatibility with the radiation path.
+    **PR L1 (2026-05-24)** — Quartz direct-PV path now ALSO applies the
+    calibration tables (was previously SKIPPED per PR #279's
+    "Quartz self-calibrates" assumption). Prod telemetry showed GSP-level
+    Quartz mispredicts our W4 1DZ east-facing array by ~35 % AM and ~20 %
+    PM (`forecast_skill_log` 30-day mean ratios). The calibration tables
+    already encode the orientation correction (they're computed from
+    actual vs forecasted-PV residuals each 04:30 UTC).
 
-    Otherwise cloud attenuation is applied before the irradiance-to-kW
-    conversion and the calibration lookup follows the same cloud → hour →
-    flat fallback chain as ``forecast_to_lp_inputs``.
+    **Known semantic gap (acknowledged):** the calibration tables are
+    trained against ``actual / estimate_pv_kw(open_meteo_radiation)``,
+    NOT against ``actual / quartz_prediction``. Applying them as a
+    Quartz multiplier is empirically effective (the 30-day mean factors
+    roughly match the observed Quartz bias because both correct for the
+    same physical orientation), but the conversion is imperfect in
+    partly-cloudy regimes where Quartz's blend model diverges from raw
+    shortwave radiation. Phase 1.1 of the calibration epic adds a
+    ``source`` column to segregate Quartz-vs-Open-Meteo residuals if
+    post-deploy data shows over-correction. Set
+    ``PV_QUARTZ_APPLY_CALIBRATION=false`` to restore the legacy bypass.
+
+    Cloud attenuation is applied to the radiation path before the
+    irradiance-to-kW conversion. The Quartz path skips attenuation
+    (its prediction is already AC kW) but uses the cloud bucket to look
+    up the matching calibration factor.
     """
     scale_f = max(0.0, float(scale))
     if direct_pv_kw is not None:
         try:
             base_kw = max(0.0, float(direct_pv_kw))
+            if getattr(config, "PV_QUARTZ_APPLY_CALIBRATION", True):
+                cloud_pct_f = (
+                    float(cloud_cover_pct) if cloud_cover_pct is not None else 50.0
+                )
+                cal = get_pv_calibration_factor_for(
+                    int(hour_utc),
+                    cloud_pct_f,
+                    cloud_table=cloud_table,
+                    hourly_table=hourly_table,
+                    flat=flat,
+                )
+                return base_kw * cal * scale_f
             return base_kw * float(flat) * scale_f
         except (TypeError, ValueError):
             pass
