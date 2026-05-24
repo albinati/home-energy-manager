@@ -273,6 +273,51 @@ def test_upsert_and_get_3d_roundtrip():
 # ---------------------------------------------------------------------------
 
 
+def test_no_double_apply_when_pv_scale_callable_returns_today_factor_only():
+    """PR L3 H4 — regression guard for the squared-factor bug.
+
+    The bug: ``_pv_scale_callable`` in optimizer.py used to return
+    ``cal × today_factor``, and ``forecast_pv_kw_from_row`` independently
+    applied ``cal`` again from the same tables → net ``cal² × today_factor``.
+
+    The fix: ``_pv_scale_callable`` now returns ONLY ``today_factor``;
+    calibration is applied exactly once inside ``forecast_pv_kw_from_row``.
+
+    This test reproduces the production callchain shape (callable +
+    cal_cloud table) and asserts the output reflects ``cal`` applied
+    ONCE, not squared.
+    """
+    from src.weather import HourlyForecast, forecast_to_lp_inputs
+
+    # Seed 2D cal cell: hour=12, cloud_bucket=0 → factor 0.5
+    db.upsert_pv_calibration_hourly_cloud({(12, 0): 0.5}, {(12, 0): 10}, window_days=30)
+
+    slot_utc = datetime(2026, 6, 21, 12, 0, tzinfo=UTC)
+    forecast = [
+        HourlyForecast(
+            time_utc=slot_utc, temperature_c=15.0, cloud_cover_pct=10.0,
+            shortwave_radiation_wm2=600.0, estimated_pv_kw=4.0,
+            heating_demand_factor=0.0, pv_direct=True,
+        ),
+    ]
+
+    # Callable returns ONLY today_factor (1.0 here, the post-fix contract).
+    # Pre-fix this callable would have returned cal × today_factor, and
+    # forecast_pv_kw_from_row's internal cal would have squared it.
+    today_factor = 1.0
+    def callable_today_only(h: int, c: float, slot=None) -> float:
+        return today_factor
+
+    out = forecast_to_lp_inputs(forecast, [slot_utc], pv_scale=callable_today_only)
+    pv = out.pv_kwh_per_slot[0]
+    # Expected single-apply: 4.0 kW × 0.5h × 0.5 cal × 1.0 today = 1.0 kWh
+    # Squared (bug): 4.0 × 0.5 × 0.5 × 0.5 = 0.5 kWh
+    assert pv == pytest.approx(1.0, rel=0.01), (
+        f"Expected 1.0 kWh (single cal apply); got {pv:.4f}. "
+        f"If this is ~0.5 the squared-factor bug has regressed."
+    )
+
+
 def test_forecast_to_lp_inputs_consumes_3d_table():
     """PR L3 H1 — the 3D table populated by the 04:30 UTC cron must reach
     per-slot PV output. Regression guard against the silent-collapse class
@@ -326,4 +371,16 @@ def test_forecast_to_lp_inputs_consumes_3d_table():
     assert pv < 1.5, (
         f"PV {pv:.3f} kWh suggests 3D factor 0.42 was NOT applied "
         f"(raw direct_pv would be ~2.0 kWh). slot_utc may not be threaded."
+    )
+
+    # Also drive the production-shaped callable path (mirrors
+    # ``_pv_scale_callable`` post-H4-fix: returns today_factor only).
+    def callable_today_only(h: int, c: float, slot=None) -> float:
+        return 1.0
+    out_callable = forecast_to_lp_inputs(forecast, [slot_utc], pv_scale=callable_today_only)
+    pv_c = out_callable.pv_kwh_per_slot[0]
+    # Same outcome — single 3D cell application via forecast_pv_kw_from_row.
+    assert pv_c == pytest.approx(pv, rel=0.01), (
+        f"Callable path got {pv_c:.4f} but scalar got {pv:.4f}; "
+        f"slot_utc threading may differ between paths."
     )

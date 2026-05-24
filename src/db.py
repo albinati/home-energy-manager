@@ -4489,6 +4489,7 @@ def rebuild_forecast_skill_log_for_date(date_utc: str) -> int:
 
     cal_cloud = get_pv_calibration_hourly_cloud()
     cal_hour = get_pv_calibration_hourly()
+    cal_3d = get_pv_calibration_3d()
     flat_cal = compute_pv_calibration_factor() if not cal_cloud and not cal_hour else 1.0
 
     for row in history_rows:
@@ -4500,6 +4501,16 @@ def rebuild_forecast_skill_log_for_date(date_utc: str) -> int:
             hour_utc = int(slot_time[11:13])
         except ValueError:
             continue
+        # PR L3 — reconstruct slot_utc so the 3D lookup chain fires for
+        # the bias-audit path. Without this, ``forecast_skill_log`` would
+        # report bias against the 2D-calibrated forecast while the LP
+        # runs against the 3D-calibrated one — phantom skew in the audit.
+        try:
+            slot_utc_dt = datetime.fromisoformat(slot_time.replace("Z", "+00:00"))
+            if slot_utc_dt.tzinfo is None:
+                slot_utc_dt = slot_utc_dt.replace(tzinfo=UTC)
+        except (ValueError, TypeError):
+            slot_utc_dt = None
         cloud_raw = row.get("cloud_cover_pct")
         cloud_pct = float(cloud_raw) if cloud_raw is not None else 50.0
         rad_wm2 = float(row.get("solar_w_m2") or 0.0)
@@ -4515,6 +4526,8 @@ def rebuild_forecast_skill_log_for_date(date_utc: str) -> int:
                 cloud_table=cal_cloud,
                 hourly_table=cal_hour,
                 flat=flat_cal,
+                table_3d=cal_3d,
+                slot_utc=slot_utc_dt,
             ),
         }
 

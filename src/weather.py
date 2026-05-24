@@ -247,6 +247,9 @@ class ForecastFetchResult:
     raw_payload_json: str | None = None
 
 
+# PR L3 H5 — one-shot warning latch for astral-missing degradation.
+_ASTRAL_WARNED = False
+
 # System constants for PV estimate (London W4 system)
 _PV_CAPACITY_KWP = 4.5
 _PV_SYSTEM_EFFICIENCY = 0.85  # accounts for inverter, wiring, temp de-rating
@@ -1471,11 +1474,26 @@ def get_pv_calibration_factor_for(
         # than the training reference and could land in a different bucket
         # at dawn/dusk transitions → miss the populated cell.
         midhour_dt = slot_utc.replace(minute=30, second=0, microsecond=0)
-        elev = compute_solar_elevation_deg(midhour_dt)
-        elev_b = elevation_bucket(elev)
-        f = table_3d.get((hour_utc, bucket, elev_b))
-        if f is not None:
-            return float(f)
+        # PR L3 H5 fix — catch ImportError here (astral may be missing in
+        # minimal-install envs) so we degrade cleanly to the 2D path rather
+        # than crashing every LP solve when ``pv_calibration_3d`` is also
+        # populated. astral is in requirements.txt — this is defence in
+        # depth for partial deploys.
+        try:
+            elev = compute_solar_elevation_deg(midhour_dt)
+            elev_b = elevation_bucket(elev)
+            f = table_3d.get((hour_utc, bucket, elev_b))
+            if f is not None:
+                return float(f)
+        except ImportError:
+            global _ASTRAL_WARNED
+            if not _ASTRAL_WARNED:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "astral not installed — 3D calibration disabled; "
+                    "falling back to 2D cloud table"
+                )
+                _ASTRAL_WARNED = True
 
     if cloud_table:
         f = cloud_table.get((hour_utc, bucket))

@@ -1443,7 +1443,6 @@ def _run_optimizer_lp(
         compute_pv_calibration_factor,
         compute_today_pv_correction_factor,
         compute_today_pv_correction_factor_by_hour,
-        get_pv_calibration_factor_for,
     )
     pv_scale_cloud = db.get_pv_calibration_hourly_cloud()
     pv_scale_hourly = db.get_pv_calibration_hourly()
@@ -1528,28 +1527,25 @@ def _run_optimizer_lp(
         cloud_pct: float,
         slot_start_utc: datetime | None = None,
     ) -> float:
-        cal = get_pv_calibration_factor_for(
-            hour_utc, cloud_pct,
-            cloud_table=pv_scale_cloud,
-            hourly_table=pv_scale_hourly,
-            flat=flat_scale,
-            table_3d=pv_scale_3d,
-            slot_utc=slot_start_utc,
-        )
-        # #1: only apply today_factor to slots IN the current UTC day. For
-        # tomorrow's slots return the cloud/hour calibration alone — today's
-        # observed bias is not evidence for tomorrow's weather.
+        """Return ONLY the today-aware runtime adjustment (not the calibration
+        tables). ``forecast_pv_kw_from_row`` is invoked downstream and applies
+        the calibration tables itself; returning ``cal × today_factor`` here
+        would square the calibration factor (bug existed since L1; L3 H4 fix
+        removes the duplication).
+
+        Date scoping preserved: today_factor only applies to today's slots —
+        tomorrow's slots get 1.0 (today's observed bias is not evidence for
+        tomorrow's weather).
+        """
+        # Tomorrow's slots → no today-bias correction.
         if slot_start_utc is not None and slot_start_utc.date() != today_utc_date:
-            return cal
-        # Today's slots: per-hour map holds observed-today ratio for observed
-        # hours and 1.0 for unobserved (defer to ``cal``'s 30-day baseline,
-        # per #333). Scalar today_factor fallback when the per-hour map is
-        # unavailable (first day of operation).
+            return 1.0
+        # Today's slots — prefer per-hour map; fall back to scalar.
         if effective_factor_by_hour:
-            return cal * effective_factor_by_hour.get(int(hour_utc), 1.0)
+            return float(effective_factor_by_hour.get(int(hour_utc), 1.0))
         if today_factor_by_hour:
-            return cal * today_factor_by_hour.get(int(hour_utc), 1.0)
-        return cal * today_factor
+            return float(today_factor_by_hour.get(int(hour_utc), 1.0))
+        return float(today_factor)
 
     weather = forecast_to_lp_inputs(forecast, starts, pv_scale=_pv_scale_callable)
     initial = read_lp_initial_state(daikin)
@@ -1575,6 +1571,7 @@ def _run_optimizer_lp(
             "forecast_fetch_at_utc": forecast_fetch_at_utc if forecast else None,
             "cloud_table_cells": len(pv_scale_cloud),
             "hourly_table_cells": len(pv_scale_hourly),
+            "table_3d_cells": len(pv_scale_3d),
             "flat_scale": round(float(flat_scale), 6),
             "today_factor": round(float(today_factor), 6),
             "today_diag": today_diag,

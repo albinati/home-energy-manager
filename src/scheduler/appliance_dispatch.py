@@ -271,11 +271,15 @@ def _residual_pv_kwh_per_slot(
     cal_cloud: dict[tuple[int, int], float] = {}
     cal_hourly: dict[int, float] = {}
     cal_3d: dict[tuple[int, int, int], float] = {}
+    # Narrow the catch to schema/connection issues; broader Exception
+    # would mask logic bugs in the cal-fetch path (same anti-pattern that
+    # produced the silent-collapse class of bugs we fixed in L1.1 + L3).
+    import sqlite3 as _sqlite3
     try:
         cal_cloud = db.get_pv_calibration_hourly_cloud()
         cal_hourly = db.get_pv_calibration_hourly()
         cal_3d = db.get_pv_calibration_3d()
-    except Exception:
+    except _sqlite3.OperationalError:
         cal_cloud, cal_hourly, cal_3d = {}, {}, {}
     # Today-aware adjuster on top of per-hour table (or flat fallback).
     # Same logic the LP uses (see optimizer.py) — keeps appliance dispatch's
