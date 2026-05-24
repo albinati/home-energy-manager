@@ -90,6 +90,18 @@ def fetch_and_store_rates(fox: FoxESSClient | None = None) -> dict[str, Any]:
     except Exception as e:
         logger.warning("PV cloud-aware calibration recompute failed (non-fatal): %s", e)
 
+    # PR L3 (2026-05-24): 3D table (hour × cloud × solar elevation). Adds
+    # seasonal sun-position separation on top of the 2D cloud table.
+    # Sparse cells fall through to the 2D table via the lookup chain so
+    # a partial-coverage 3D table is strictly additive (no regression).
+    try:
+        from ..weather import compute_pv_calibration_3d_table
+
+        d3_status = compute_pv_calibration_3d_table()
+        logger.info("PV 3D calibration recompute: %s", d3_status)
+    except Exception as e:
+        logger.warning("PV 3D calibration recompute failed (non-fatal): %s", e)
+
     summary: dict[str, Any] = {"ok": True, "rows": n, "export_rows": export_n}
     if config.USE_BULLETPROOF_ENGINE:
         try:
