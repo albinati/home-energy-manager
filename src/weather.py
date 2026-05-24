@@ -247,6 +247,9 @@ class ForecastFetchResult:
     raw_payload_json: str | None = None
 
 
+# PR L3 H5 — one-shot warning latch for astral-missing degradation.
+_ASTRAL_WARNED = False
+
 # System constants for PV estimate (London W4 system)
 _PV_CAPACITY_KWP = 4.5
 _PV_SYSTEM_EFFICIENCY = 0.85  # accounts for inverter, wiring, temp de-rating
@@ -274,6 +277,8 @@ def forecast_pv_kw_from_row(
     hourly_table: dict[int, float] | None = None,
     flat: float = 1.0,
     scale: float = 1.0,
+    table_3d: dict[tuple[int, int, int], float] | None = None,
+    slot_utc: datetime | None = None,
 ) -> float:
     """Apply the same PV forecast transform used by the LP and skill logger.
 
@@ -316,6 +321,8 @@ def forecast_pv_kw_from_row(
                     cloud_table=cloud_table,
                     hourly_table=hourly_table,
                     flat=flat,
+                    table_3d=table_3d,
+                    slot_utc=slot_utc,
                 )
                 return base_kw * cal * scale_f
             return base_kw * float(flat) * scale_f
@@ -330,6 +337,8 @@ def forecast_pv_kw_from_row(
         cloud_table=cloud_table,
         hourly_table=hourly_table,
         flat=flat,
+        table_3d=table_3d,
+        slot_utc=slot_utc,
     )
     return estimate_pv_kw(rad_eff) * cal * scale_f
 
@@ -1070,6 +1079,7 @@ def compute_today_pv_correction_factor(
         forecast_rows = []
     cal_cloud = _db.get_pv_calibration_hourly_cloud()
     cal_hour = _db.get_pv_calibration_hourly()
+    cal_3d = _db.get_pv_calibration_3d()
     flat_cal = compute_pv_calibration_factor() if not cal_cloud and not cal_hour else 1.0
     forecast_per_hour: dict[int, float] = {}
     for r in forecast_rows:
@@ -1087,6 +1097,8 @@ def compute_today_pv_correction_factor(
                 cloud_table=cal_cloud,
                 hourly_table=cal_hour,
                 flat=flat_cal,
+                table_3d=cal_3d,
+                slot_utc=ts,
             )
         except (ValueError, TypeError, KeyError):
             continue
@@ -1215,6 +1227,7 @@ def compute_today_pv_correction_factor_by_hour(
         forecast_rows = []
     cal_cloud = _db.get_pv_calibration_hourly_cloud()
     cal_hour = _db.get_pv_calibration_hourly()
+    cal_3d = _db.get_pv_calibration_3d()
     flat_cal = compute_pv_calibration_factor() if not cal_cloud and not cal_hour else 1.0
     forecast_per_hour: dict[int, float] = {}
     for r in forecast_rows:
@@ -1232,6 +1245,8 @@ def compute_today_pv_correction_factor_by_hour(
                 cloud_table=cal_cloud,
                 hourly_table=cal_hour,
                 flat=flat_cal,
+                table_3d=cal_3d,
+                slot_utc=ts,
             )
         except (ValueError, TypeError, KeyError):
             continue
@@ -1315,6 +1330,70 @@ def compute_today_pv_correction_factor_by_hour(
     }
 
 
+def compute_solar_elevation_deg(
+    slot_utc: datetime,
+    lat: float | None = None,
+    lon: float | None = None,
+) -> float:
+    """Solar elevation angle (degrees above horizon) at ``slot_utc``.
+
+    PR L3 (2026-05-24) — used by the 3D calibration table to separate
+    same-UTC-hour samples by sun position (winter low / summer high).
+    The east-facing W4 1DZ array has fundamentally different physics
+    when the sun is at 10° vs 50° elevation — same hour, different
+    physics → different correction factor.
+
+    Defaults to ``config.WEATHER_LAT`` / ``WEATHER_LON`` when omitted.
+
+    Raises ImportError if ``astral`` is unavailable — the caller should
+    handle it explicitly (we DON'T silently return 0.0, because that
+    would collapse every slot into bucket 0 and silently poison the
+    calibration table).
+    """
+    if lat is None:
+        try:
+            lat = float(config.WEATHER_LAT or "0")
+        except (TypeError, ValueError):
+            return 0.0
+    if lon is None:
+        try:
+            lon = float(config.WEATHER_LON or "0")
+        except (TypeError, ValueError):
+            return 0.0
+    from astral import Observer  # noqa: imported for the side effect of failing loudly
+    from astral.sun import elevation
+    try:
+        obs = Observer(latitude=lat, longitude=lon)
+        return float(elevation(observer=obs, dateandtime=slot_utc))
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def elevation_bucket(elev_deg: float) -> int:
+    """Map solar elevation (degrees) to a calibration bucket.
+
+    Buckets chosen to separate the physically-distinct PV regimes:
+        0 = very-low  (<10°)   night-edge, dawn/dusk; PV negligible
+        1 = low       (10-25°) winter midday, summer dawn/dusk
+        2 = mid       (25-40°) spring/autumn midday, shoulder
+        3 = high      (40-55°) summer midday outside solstice
+        4 = very-high (>55°)   peak summer solstice noon
+
+    A 5-bucket split keeps the cells dense enough to populate from
+    30 days of data while still separating the worst-bias regimes
+    (low elevation = obstruction shadow on east-facing W4 1DZ array).
+    """
+    if elev_deg < 10.0:
+        return 0
+    if elev_deg < 25.0:
+        return 1
+    if elev_deg < 40.0:
+        return 2
+    if elev_deg < 55.0:
+        return 3
+    return 4
+
+
 def cloud_bucket(cloud_cover_pct: float | None) -> int:
     """Map a cloud-cover % (0-100) to the calibration bucket index.
 
@@ -1346,13 +1425,21 @@ def get_pv_calibration_factor_for(
     cloud_table: dict[tuple[int, int], float] | None = None,
     hourly_table: dict[int, float] | None = None,
     flat: float = 1.0,
+    table_3d: dict[tuple[int, int, int], float] | None = None,
+    slot_utc: datetime | None = None,
 ) -> float:
-    """Resolve the calibration factor with the cloud → hour → flat fallback chain.
+    """Resolve calibration factor with the 3d → 2d → 1d → flat fallback chain.
 
-    Lookup priority:
-        1. ``pv_calibration_hourly_cloud[(hour, bucket(cloud))]`` — per-hour × per-cloud
-        2. ``pv_calibration_hourly[hour]``                       — per-hour only
-        3. ``flat`` (caller's flat fallback, typically from compute_pv_calibration_factor)
+    Lookup priority (PR L3 extends with 3D):
+        1. ``pv_calibration_3d[(hour, cloud_bucket, elev_bucket)]`` — full 3D
+        2. ``pv_calibration_hourly_cloud[(hour, cloud_bucket)]``    — 2D
+        3. ``pv_calibration_hourly[hour]``                           — 1D
+        4. ``flat`` (caller's flat fallback)
+
+    The 3D lookup requires ``slot_utc`` to compute solar elevation. When
+    omitted (back-compat with callers that don't have slot_utc, e.g.
+    aggregation helpers), the 3D layer is skipped and we fall through
+    to the 2D lookup.
 
     Pass pre-fetched tables to avoid hitting the DB inside per-slot loops.
     """
@@ -1360,11 +1447,12 @@ def get_pv_calibration_factor_for(
 
     from . import db as _db
 
-    # Tolerate missing DB tables. ``forecast_pv_kw_from_row`` is called from
-    # pure-function unit tests that don't run ``init_db()``, and from a
-    # cold-start window in prod between schema-create and the first
-    # calibration recompute. Either way the right behaviour is to fall back
-    # to ``flat`` rather than crash.
+    # Tolerate missing DB tables (cold-start, pure-function tests).
+    if table_3d is None and slot_utc is not None:
+        try:
+            table_3d = _db.get_pv_calibration_3d()
+        except sqlite3.OperationalError:
+            table_3d = {}
     if cloud_table is None:
         try:
             cloud_table = _db.get_pv_calibration_hourly_cloud()
@@ -1377,6 +1465,36 @@ def get_pv_calibration_factor_for(
             hourly_table = {}
 
     bucket = cloud_bucket(cloud_cover_pct)
+
+    # 3D — only attempted when slot_utc is available so we can compute elevation
+    if table_3d and slot_utc is not None:
+        # PR L3 H2 fix — normalize lookup timestamp to mid-hour so it
+        # matches what compute_pv_calibration_3d_table used during training.
+        # Without this, :00 slots would compute elevation 30 min earlier
+        # than the training reference and could land in a different bucket
+        # at dawn/dusk transitions → miss the populated cell.
+        midhour_dt = slot_utc.replace(minute=30, second=0, microsecond=0)
+        # PR L3 H5 fix — catch ImportError here (astral may be missing in
+        # minimal-install envs) so we degrade cleanly to the 2D path rather
+        # than crashing every LP solve when ``pv_calibration_3d`` is also
+        # populated. astral is in requirements.txt — this is defence in
+        # depth for partial deploys.
+        try:
+            elev = compute_solar_elevation_deg(midhour_dt)
+            elev_b = elevation_bucket(elev)
+            f = table_3d.get((hour_utc, bucket, elev_b))
+            if f is not None:
+                return float(f)
+        except ImportError:
+            global _ASTRAL_WARNED
+            if not _ASTRAL_WARNED:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "astral not installed — 3D calibration disabled; "
+                    "falling back to 2D cloud table"
+                )
+                _ASTRAL_WARNED = True
+
     if cloud_table:
         f = cloud_table.get((hour_utc, bucket))
         if f is not None:
@@ -1542,6 +1660,168 @@ def compute_pv_calibration_hourly_cloud_table(
     }
 
 
+def compute_pv_calibration_3d_table(
+    window_days: int | None = None,
+    min_samples_per_cell: int = 3,
+) -> dict[str, Any]:
+    """PR L3 (2026-05-24) — 3D calibration table:
+    (hour_utc, cloud_bucket, elevation_bucket) → factor.
+
+    Same input as the 2D cloud-aware version (Quartz forecast vs actual
+    PV from ``pv_realtime_history``) but adds solar elevation as a 3rd
+    binning dimension. Separates winter-low-sun from summer-high-sun at
+    the same UTC hour — fundamentally different physics for an east-
+    facing obstructed array.
+
+    Sample density: 5 elevation buckets × 4 cloud buckets × 14 daylight
+    hours = up to 280 cells. With 30 days of data, each cell averages
+    only a handful of samples → ``min_samples_per_cell=3`` is set lower
+    than the 2D table's 4 to keep coverage acceptable; sparse cells
+    fall through to the 2D table via the lookup chain.
+    """
+    from collections import defaultdict
+    from datetime import UTC as _UTC
+    from datetime import date as _date
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+
+    from . import db as _db
+
+    if window_days is None:
+        window_days = int(getattr(config, "PV_CALIBRATION_WINDOW_DAYS", 30))
+    end = _date.today()
+    start = end - _td(days=window_days)
+
+    # 1. Actual PV per (day, hour) — same pattern as 2D compute
+    actual_kw_samples: dict[tuple[str, int], list[float]] = defaultdict(list)
+    with _db._lock:
+        conn = _db.get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT captured_at, solar_power_kw FROM pv_realtime_history
+                   WHERE substr(captured_at, 1, 10) BETWEEN ? AND ?
+                     AND solar_power_kw IS NOT NULL""",
+                (start.isoformat(), end.isoformat()),
+            )
+            for ts_raw, kw in cur.fetchall():
+                try:
+                    ts = _dt.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+                except (ValueError, TypeError):
+                    continue
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=_UTC)
+                actual_kw_samples[(ts.date().isoformat(), ts.hour)].append(float(kw or 0.0))
+        finally:
+            conn.close()
+    measured_per_day_hour: dict[tuple[str, int], float] = {
+        k: sum(s) / len(s) for k, s in actual_kw_samples.items() if s
+    }
+    if not measured_per_day_hour:
+        return {"status": "skipped", "reason": "no pv_realtime_history in window"}
+
+    # 2. Quartz forecast per (day, hour, half) + cloud + elevation
+    archive_per_half: dict[tuple[str, int, int], tuple[float, float | None, _dt]] = {}
+    with _db._lock:
+        conn = _db.get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT mv.slot_time, mv.direct_pv_kw, mv.cloud_cover_pct
+                   FROM meteo_forecast_value mv
+                   WHERE mv.direct_pv_kw IS NOT NULL
+                     AND substr(mv.slot_time, 1, 10) BETWEEN ? AND ?
+                     AND mv.forecast_fetch_at_utc < mv.slot_time
+                   ORDER BY mv.slot_time ASC, mv.forecast_fetch_at_utc ASC""",
+                (start.isoformat(), end.isoformat()),
+            )
+            for row in cur.fetchall():
+                slot_time_str, direct_pv, cloud_pct = row
+                try:
+                    slot_dt = _dt.fromisoformat(str(slot_time_str).replace("Z", "+00:00"))
+                except (ValueError, TypeError):
+                    continue
+                if slot_dt.tzinfo is None:
+                    slot_dt = slot_dt.replace(tzinfo=_UTC)
+                day = slot_dt.date().isoformat()
+                hour = slot_dt.hour
+                half = 0 if slot_dt.minute < 30 else 1
+                cloud_f = float(cloud_pct) if cloud_pct is not None else None
+                archive_per_half[(day, hour, half)] = (
+                    float(direct_pv or 0.0), cloud_f, slot_dt,
+                )
+        finally:
+            conn.close()
+
+    if not archive_per_half:
+        return {
+            "status": "skipped",
+            "reason": "no Quartz direct_pv_kw in meteo_forecast_value window",
+        }
+
+    # 3. Aggregate half-hour to hourly kWh + bucketize cloud + elevation.
+    # Solar elevation taken from the MID-HOUR moment (slot_time + 30 min)
+    # so it represents the average elevation across the hour.
+    halves_seen: dict[tuple[str, int], list[tuple[float, float | None]]] = defaultdict(list)
+    midhour_dts: dict[tuple[str, int], _dt] = {}
+    for (day, hour, _half), (direct_pv, cloud, slot_dt) in archive_per_half.items():
+        halves_seen[(day, hour)].append((direct_pv, cloud))
+        # Mid-hour timestamp (used for elevation calc)
+        midhour_dts[(day, hour)] = _dt(
+            slot_dt.year, slot_dt.month, slot_dt.day, hour, 30, tzinfo=_UTC,
+        )
+
+    archive: dict[tuple[str, int], tuple[float, float | None, _dt]] = {}
+    for key, datas in halves_seen.items():
+        total_kwh = sum(pv * 0.5 for pv, _c in datas)
+        if len(datas) == 1:
+            total_kwh *= 2.0
+        clouds = [c for _pv, c in datas if c is not None]
+        avg_cloud = (sum(clouds) / len(clouds)) if clouds else None
+        archive[key] = (total_kwh, avg_cloud, midhour_dts[key])
+
+    # 4. Build per-cell ratio lists (hour, cloud_bucket, elevation_bucket)
+    ratios_per_cell: dict[tuple[int, int, int], list[float]] = defaultdict(list)
+    for (day, hour), measured_kwh in measured_per_day_hour.items():
+        forecast = archive.get((day, hour))
+        if forecast is None:
+            continue
+        modelled_kwh, cloud, midhour = forecast
+        if modelled_kwh < 0.05 or measured_kwh < 0.05:
+            continue
+        ratio = measured_kwh / modelled_kwh
+        if ratio > 5.0:
+            continue
+        cloud_b = cloud_bucket(cloud)
+        elev = compute_solar_elevation_deg(midhour)
+        elev_b = elevation_bucket(elev)
+        ratios_per_cell[(hour, cloud_b, elev_b)].append(ratio)
+
+    # 5. Median per cell, clamp [0.05, 2.0]
+    factors: dict[tuple[int, int, int], float] = {}
+    samples: dict[tuple[int, int, int], int] = {}
+    for cell, rs in ratios_per_cell.items():
+        if len(rs) < min_samples_per_cell:
+            continue
+        rs_sorted = sorted(rs)
+        median = rs_sorted[len(rs_sorted) // 2]
+        clamped = max(0.05, min(2.0, median))
+        factors[cell] = round(clamped, 4)
+        samples[cell] = len(rs)
+
+    if not factors:
+        return {
+            "status": "skipped",
+            "reason": "insufficient samples per (hour, cloud, elevation) cell",
+        }
+
+    n = _db.upsert_pv_calibration_3d(factors, samples, window_days)
+    return {
+        "status": "ok",
+        "rows": n,
+        "window_days": window_days,
+        "cells_calibrated": len(factors),
+    }
+
+
 def evaluate_pv_forecast_accuracy(
     window_days: int = 30,
     *,
@@ -1594,6 +1874,7 @@ def evaluate_pv_forecast_accuracy(
 
     cal_hourly = _db.get_pv_calibration_hourly()
     cal_cloud = _db.get_pv_calibration_hourly_cloud()
+    cal_3d = _db.get_pv_calibration_3d()
     flat_cal = compute_pv_calibration_factor() if not cal_hourly and not cal_cloud else 1.0
 
     # Pull all measurements in window.
@@ -1653,6 +1934,12 @@ def evaluate_pv_forecast_accuracy(
         rad = forecast_radiation.get(key)
         if rad is None:
             continue
+        try:
+            slot_utc_key = _dt.fromisoformat(key[0]).replace(
+                hour=key[1], tzinfo=_UTC,
+            )
+        except (ValueError, TypeError):
+            slot_utc_key = None
         predicted_kw = forecast_pv_kw_from_row(
             key[1],
             rad,
@@ -1661,6 +1948,8 @@ def evaluate_pv_forecast_accuracy(
             cloud_table=cal_cloud,
             hourly_table=cal_hourly,
             flat=flat_cal,
+            table_3d=cal_3d,
+            slot_utc=slot_utc_key,
         )
         if predicted_kw < min_kw and actual_kw < min_kw:
             continue                      # both negligible — skip dawn/dusk
@@ -1749,6 +2038,12 @@ def forecast_to_lp_inputs(
         cal_hourly = _db.get_pv_calibration_hourly()
     except sqlite3.OperationalError:
         cal_hourly = {}
+    # PR L3 — pull 3D table once; passed through to forecast_pv_kw_from_row
+    # so each slot can dispatch on its own (hour, cloud, elevation) cell.
+    try:
+        cal_3d = _db.get_pv_calibration_3d()
+    except sqlite3.OperationalError:
+        cal_3d = {}
     try:
         flat_cal = compute_pv_calibration_factor() if not cal_cloud and not cal_hourly else 1.0
     except sqlite3.OperationalError:
@@ -1827,6 +2122,8 @@ def forecast_to_lp_inputs(
             hourly_table=cal_hourly,
             flat=flat_cal,
             scale=scale_for_slot,
+            table_3d=cal_3d,
+            slot_utc=st,
         )
         # Apply calibration scale and enforce per-hour physical ceiling
         slot_ceil = hourly_ceil.get(st.hour, cap * eff * 0.5)

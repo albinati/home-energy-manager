@@ -831,6 +831,25 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         )"""
     )
 
+    # PR L3 (2026-05-24): pv_calibration_3d — 3-dimensional table that adds
+    # solar elevation as a binning dimension on top of (hour, cloud_bucket).
+    # Separates winter-noon (elev ~10°) from summer-noon (elev ~60°) which
+    # the 2D table averages together → masks structurally-different bias
+    # patterns for east-facing array (obstruction shadow magnitude depends
+    # on sun position, not just clock hour). Lookup chain: 3d → 2d → 1d → flat.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS pv_calibration_3d (
+            hour_utc        INTEGER NOT NULL CHECK(hour_utc >= 0 AND hour_utc < 24),
+            cloud_bucket    INTEGER NOT NULL CHECK(cloud_bucket >= 0 AND cloud_bucket < 4),
+            elevation_bucket INTEGER NOT NULL CHECK(elevation_bucket >= 0 AND elevation_bucket < 5),
+            factor          REAL NOT NULL,
+            samples         INTEGER NOT NULL,
+            window_days     INTEGER NOT NULL,
+            computed_at     TEXT NOT NULL,
+            PRIMARY KEY (hour_utc, cloud_bucket, elevation_bucket)
+        )"""
+    )
+
     # V14: presence_periods — manually-flagged periods of household presence
     # (home / travel / guests) so future load-pattern analyses + LP calibration
     # can de-bias the rolling load profile by occupancy. Read by analytics
@@ -4273,6 +4292,65 @@ def get_pv_calibration_hourly_cloud() -> dict[tuple[int, int], float]:
             conn.close()
 
 
+def upsert_pv_calibration_3d(
+    factors: dict[tuple[int, int, int], float],
+    samples: dict[tuple[int, int, int], int],
+    window_days: int,
+) -> int:
+    """Replace pv_calibration_3d rows for the given (hour, cloud, elevation) cells.
+
+    PR L3 (2026-05-24) — 3D table extends the 2D cloud table with a solar
+    elevation dimension. Lookup chain in ``get_pv_calibration_factor_for``:
+    3d → 2d → 1d → flat.
+    """
+    if not factors:
+        return 0
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+    now = _dt.now(_UTC).isoformat()
+    n = 0
+    with _lock:
+        conn = get_connection()
+        try:
+            for (hour, cloud, elev), factor in factors.items():
+                conn.execute(
+                    """INSERT OR REPLACE INTO pv_calibration_3d
+                       (hour_utc, cloud_bucket, elevation_bucket,
+                        factor, samples, window_days, computed_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        int(hour), int(cloud), int(elev),
+                        float(factor),
+                        int(samples.get((hour, cloud, elev), 0)),
+                        int(window_days),
+                        now,
+                    ),
+                )
+                n += 1
+            conn.commit()
+        finally:
+            conn.close()
+    return n
+
+
+def get_pv_calibration_3d() -> dict[tuple[int, int, int], float]:
+    """Return cached (hour, cloud_bucket, elevation_bucket) → factor map,
+    or ``{}`` when empty. PR L3."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT hour_utc, cloud_bucket, elevation_bucket, factor
+                   FROM pv_calibration_3d"""
+            )
+            return {
+                (int(r[0]), int(r[1]), int(r[2])): float(r[3])
+                for r in cur.fetchall()
+            }
+        finally:
+            conn.close()
+
+
 def upsert_forecast_skill_rows(rows: list[dict[str, Any]]) -> int:
     """Upsert daily per-hour forecast-skill rows.
 
@@ -4411,6 +4489,7 @@ def rebuild_forecast_skill_log_for_date(date_utc: str) -> int:
 
     cal_cloud = get_pv_calibration_hourly_cloud()
     cal_hour = get_pv_calibration_hourly()
+    cal_3d = get_pv_calibration_3d()
     flat_cal = compute_pv_calibration_factor() if not cal_cloud and not cal_hour else 1.0
 
     for row in history_rows:
@@ -4422,6 +4501,16 @@ def rebuild_forecast_skill_log_for_date(date_utc: str) -> int:
             hour_utc = int(slot_time[11:13])
         except ValueError:
             continue
+        # PR L3 — reconstruct slot_utc so the 3D lookup chain fires for
+        # the bias-audit path. Without this, ``forecast_skill_log`` would
+        # report bias against the 2D-calibrated forecast while the LP
+        # runs against the 3D-calibrated one — phantom skew in the audit.
+        try:
+            slot_utc_dt = datetime.fromisoformat(slot_time.replace("Z", "+00:00"))
+            if slot_utc_dt.tzinfo is None:
+                slot_utc_dt = slot_utc_dt.replace(tzinfo=UTC)
+        except (ValueError, TypeError):
+            slot_utc_dt = None
         cloud_raw = row.get("cloud_cover_pct")
         cloud_pct = float(cloud_raw) if cloud_raw is not None else 50.0
         rad_wm2 = float(row.get("solar_w_m2") or 0.0)
@@ -4437,6 +4526,8 @@ def rebuild_forecast_skill_log_for_date(date_utc: str) -> int:
                 cloud_table=cal_cloud,
                 hourly_table=cal_hour,
                 flat=flat_cal,
+                table_3d=cal_3d,
+                slot_utc=slot_utc_dt,
             ),
         }
 

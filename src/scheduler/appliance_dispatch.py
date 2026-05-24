@@ -270,11 +270,17 @@ def _residual_pv_kwh_per_slot(
 
     cal_cloud: dict[tuple[int, int], float] = {}
     cal_hourly: dict[int, float] = {}
+    cal_3d: dict[tuple[int, int, int], float] = {}
+    # Narrow the catch to schema/connection issues; broader Exception
+    # would mask logic bugs in the cal-fetch path (same anti-pattern that
+    # produced the silent-collapse class of bugs we fixed in L1.1 + L3).
+    import sqlite3 as _sqlite3
     try:
         cal_cloud = db.get_pv_calibration_hourly_cloud()
         cal_hourly = db.get_pv_calibration_hourly()
-    except Exception:
-        cal_cloud, cal_hourly = {}, {}
+        cal_3d = db.get_pv_calibration_3d()
+    except _sqlite3.OperationalError:
+        cal_cloud, cal_hourly, cal_3d = {}, {}, {}
     # Today-aware adjuster on top of per-hour table (or flat fallback).
     # Same logic the LP uses (see optimizer.py) — keeps appliance dispatch's
     # PV view consistent with the LP's PV view per solve.
@@ -303,6 +309,7 @@ def _residual_pv_kwh_per_slot(
         scale = get_pv_calibration_factor_for(
             hour_anchor.hour, cloud_pct,
             cloud_table=cal_cloud, hourly_table=cal_hourly, flat=flat_cal,
+            table_3d=cal_3d, slot_utc=slot_start,
         )
         slot_today_factor = today_factor
         # PR L1 (2026-05-24) — when Quartz direct PV path is active and
