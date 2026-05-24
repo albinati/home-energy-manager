@@ -66,37 +66,29 @@ def fetch_and_store_rates(fox: FoxESSClient | None = None) -> dict[str, Any]:
         except Exception as e:
             logger.warning("Octopus export-rates fetch failed (non-fatal): %s", e)
 
-    # Refresh the per-hour-of-day + cloud-aware PV calibration tables (Fox
-    # actual vs Open-Meteo archive). Skipped when FORECAST_SOURCE=quartz — the
-    # tables are radiation-trained (actual / estimate_pv_kw(open_meteo_rad))
-    # and ``forecast_pv_kw_from_row`` ignores them on the Quartz path (PR #279
-    # removed the double-correction). Recomputing them is wasted work + an
-    # avoidable Open-Meteo archive request. If the source ever flips back to
-    # open-meteo (manual fallback / Quartz outage) the tables get rebuilt
-    # again on the next octopus fetch.
-    forecast_source = (getattr(config, "FORECAST_SOURCE", "open-meteo") or "open-meteo").strip().lower()
-    if forecast_source in ("quartz", "quartz_solar"):
-        logger.info("PV calibration recompute skipped (FORECAST_SOURCE=%s; tables unused on Quartz path)", forecast_source)
-    else:
-        # Daily cadence is sufficient — bias drifts over weeks, not minutes.
-        # Failure is non-fatal; LP falls back to the flat factor.
-        try:
-            from ..weather import compute_pv_calibration_hourly_table
+    # Refresh the per-hour-of-day + cloud-aware PV calibration tables.
+    # PR L1.1 (2026-05-24) — tables are now Quartz-trained (actual /
+    # direct_pv_kw from meteo_forecast_value), so we ALWAYS recompute
+    # regardless of FORECAST_SOURCE. Quartz path applies the new factors
+    # (PR L1); Open-Meteo fallback path also benefits (orientation
+    # correction is source-agnostic in the limit).
+    # Daily cadence is sufficient — bias drifts over weeks, not minutes.
+    # Failure is non-fatal; LP falls back to the flat factor.
+    try:
+        from ..weather import compute_pv_calibration_hourly_table
 
-            cal_status = compute_pv_calibration_hourly_table()
-            logger.info("PV per-hour calibration recompute: %s", cal_status)
-        except Exception as e:
-            logger.warning("PV per-hour calibration recompute failed (non-fatal): %s", e)
+        cal_status = compute_pv_calibration_hourly_table()
+        logger.info("PV per-hour calibration recompute: %s", cal_status)
+    except Exception as e:
+        logger.warning("PV per-hour calibration recompute failed (non-fatal): %s", e)
 
-        # PR #232: cloud-aware (hour × cloud-bucket) recompute. Same daily cadence,
-        # same failure mode (non-fatal — falls back to per-hour table or flat).
-        try:
-            from ..weather import compute_pv_calibration_hourly_cloud_table
+    try:
+        from ..weather import compute_pv_calibration_hourly_cloud_table
 
-            cloud_status = compute_pv_calibration_hourly_cloud_table()
-            logger.info("PV cloud-aware calibration recompute: %s", cloud_status)
-        except Exception as e:
-            logger.warning("PV cloud-aware calibration recompute failed (non-fatal): %s", e)
+        cloud_status = compute_pv_calibration_hourly_cloud_table()
+        logger.info("PV cloud-aware calibration recompute: %s", cloud_status)
+    except Exception as e:
+        logger.warning("PV cloud-aware calibration recompute failed (non-fatal): %s", e)
 
     summary: dict[str, Any] = {"ok": True, "rows": n, "export_rows": export_n}
     if config.USE_BULLETPROOF_ENGINE:

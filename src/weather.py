@@ -836,19 +836,25 @@ def compute_pv_calibration_hourly_table(
     window_days: int | None = None,
     min_samples_per_hour: int = 7,
 ) -> dict[str, Any]:
-    """Recompute the per-hour-of-day PV calibration table from ``pv_realtime_history``.
+    """Recompute the per-hour-of-day PV calibration table.
 
-    For each UTC hour-of-day, sums measured PV (5-min samples × 1/12 → kWh per
-    hour) and compares against Open-Meteo Archive ``shortwave_radiation_instant``
-    converted via :func:`estimate_pv_kw`. The median ratio per hour becomes the
-    factor stored in ``pv_calibration_hourly``.
+    **PR L1.1 (2026-05-24)** — Re-baselined from Quartz ``direct_pv_kw``
+    (the same prediction the LP consumes) instead of
+    ``estimate_pv_kw(open_meteo_radiation)``. Open-Meteo's radiation-derived
+    PV assumes a south-facing array; the W4 1DZ install is east-facing.
+    The resulting "actual / Open-Meteo prediction" ratios were
+    structurally low (0.2-0.5) and would have driven Quartz forecasts
+    severely down when applied as multipliers (PR L1 over-correction bug).
 
-    Hours with fewer than ``min_samples_per_hour`` samples in the window are
-    skipped (low statistical confidence). Returns a status dict so the caller
-    can log how the recompute went.
+    The new baseline is the latest pre-slot Quartz forecast from
+    ``meteo_forecast_value.direct_pv_kw``. The ratio becomes
+    ``actual / Quartz_raw`` — exactly the correction needed to align
+    LP's Quartz-driven plan with reality.
 
-    Failure modes (no Fox data, Open-Meteo down, etc.) return a dict with
-    ``status='skipped'`` and never raise — the LP keeps the flat fallback.
+    Hours with fewer than ``min_samples_per_hour`` Quartz samples in the
+    window are skipped (low statistical confidence). Returns a status dict.
+    Failure modes return ``status='skipped'`` and never raise — LP keeps
+    the flat fallback.
     """
     from . import db as _db
     from datetime import date as _date, timedelta as _td
@@ -859,13 +865,7 @@ def compute_pv_calibration_hourly_table(
     start = end - _td(days=window_days)
 
     # Pull measured PV per UTC hour from pv_realtime_history.
-    # NOTE: average kW × 1h, NOT sum × (5/60). The previous "kw × (5/60)" formula
-    # assumed 12 samples/hour (5-min cadence). In practice the heartbeat writes
-    # samples sparsely (often 1-3/hour), so the sum-based formula collapses
-    # by ~10× — the resulting "ratio" was artificially low and made the per-hour
-    # calibration table over-correct against forecast (audit 2026-05-02:
-    # factors at the 0.10 floor when reality should give 0.5-0.7).
-    measured_per_hour: dict[int, list[float]] = {h: [] for h in range(24)}
+    # mean kW × 1h = kWh per hour (sample-density-independent).
     measured_kw_samples: dict[tuple[str, int], list[float]] = {}
     with _db._lock:
         conn = _db.get_connection()
@@ -891,7 +891,6 @@ def compute_pv_calibration_hourly_table(
                 measured_kw_samples.setdefault((day, hour), []).append(kw)
         finally:
             conn.close()
-    # mean kW × 1h = kWh per hour (sample-density-independent)
     measured_per_day_hour: dict[tuple[str, int], float] = {
         k: (sum(samples) / len(samples)) for k, samples in measured_kw_samples.items() if samples
     }
@@ -899,40 +898,67 @@ def compute_pv_calibration_hourly_table(
     if not measured_per_day_hour:
         return {"status": "skipped", "reason": "no pv_realtime_history in window"}
 
-    # Pull modelled PV per hour from Open-Meteo Archive — same conversion the LP uses.
-    lat = (config.WEATHER_LAT or "").strip()
-    lon = (config.WEATHER_LON or "").strip()
-    if not lat or not lon:
-        return {"status": "skipped", "reason": "no lat/lon configured"}
-    try:
-        url = (
-            "https://archive-api.open-meteo.com/v1/archive?"
-            f"latitude={lat}&longitude={lon}"
-            f"&start_date={start.isoformat()}&end_date={end.isoformat()}"
-            "&hourly=shortwave_radiation_instant"
-            "&timezone=UTC"
-        )
-        req = urllib.request.Request(url, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            api_data = json.loads(resp.read().decode())
-    except (urllib.error.URLError, json.JSONDecodeError, KeyError, TypeError) as e:
-        return {"status": "skipped", "reason": f"open-meteo fetch failed: {e}"}
-
-    times = api_data.get("hourly", {}).get("time", [])
-    rads = api_data.get("hourly", {}).get("shortwave_radiation_instant", [])
-    modelled_per_day_hour: dict[tuple[str, int], float] = {}
-    for t, r in zip(times, rads):
-        if r is None:
-            continue
+    # PR L1.1 — pull modelled PV from Quartz forecasts (the actual
+    # baseline the LP uses). Quartz writes HALF-HOUR slots (slot_time
+    # at :00 + :30 per hour, each = avg kW for that 30-min window).
+    # For each half-hour, pick the LATEST pre-slot fetch (calibration
+    # trains against what the LP saw, not post-hoc revisions). Then
+    # aggregate half-hours into hourly kWh for ratio against measured
+    # mean-kW-over-hour × 1h.
+    modelled_per_half: dict[tuple[str, int, int], float] = {}
+    with _db._lock:
+        conn = _db.get_connection()
         try:
-            dt = datetime.fromisoformat(str(t).replace("Z", "+00:00"))
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=UTC)
-            day = dt.date().isoformat()
-            hour = dt.hour
-            modelled_per_day_hour[(day, hour)] = estimate_pv_kw(float(r))  # 1-hour slot → kWh
-        except (ValueError, TypeError):
-            continue
+            cur = conn.execute(
+                """SELECT mv.slot_time, mv.direct_pv_kw, mv.forecast_fetch_at_utc
+                   FROM meteo_forecast_value mv
+                   WHERE mv.direct_pv_kw IS NOT NULL
+                     AND substr(mv.slot_time, 1, 10) BETWEEN ? AND ?
+                     AND mv.forecast_fetch_at_utc < mv.slot_time
+                   ORDER BY mv.slot_time ASC, mv.forecast_fetch_at_utc ASC""",
+                (start.isoformat(), end.isoformat()),
+            )
+            # Iterate in order; later rows overwrite earlier → latest pre-slot wins
+            # per (day, hour, half_of_hour)
+            for row in cur.fetchall():
+                slot_time_str = row[0]
+                direct_pv = float(row[1] or 0.0)
+                try:
+                    slot_dt = datetime.fromisoformat(str(slot_time_str).replace("Z", "+00:00"))
+                except (ValueError, TypeError):
+                    continue
+                if slot_dt.tzinfo is None:
+                    slot_dt = slot_dt.replace(tzinfo=UTC)
+                day = slot_dt.date().isoformat()
+                hour = slot_dt.hour
+                half = 0 if slot_dt.minute < 30 else 1
+                modelled_per_half[(day, hour, half)] = direct_pv
+        finally:
+            conn.close()
+
+    if not modelled_per_half:
+        return {
+            "status": "skipped",
+            "reason": "no Quartz direct_pv_kw in meteo_forecast_value window",
+        }
+
+    # Aggregate half-hour kW values to hourly kWh.
+    # hourly kWh = sum_over_halves(direct_pv_kw × 0.5h). When only one
+    # half is present (rare; usually edge of horizon), we extrapolate
+    # by doubling rather than under-counting — keeps the ratio sane.
+    modelled_per_day_hour: dict[tuple[str, int], float] = {}
+    for (day, hour, half), direct_pv in modelled_per_half.items():
+        key = (day, hour)
+        modelled_per_day_hour[key] = modelled_per_day_hour.get(key, 0.0) + direct_pv * 0.5
+    # For hours with only ONE half-hour present, double up so we approximate
+    # the full hour rather than reporting half. This avoids a 2x under-count
+    # on hours that lack their second sample.
+    halves_count: dict[tuple[str, int], int] = {}
+    for (day, hour, _half) in modelled_per_half:
+        halves_count[(day, hour)] = halves_count.get((day, hour), 0) + 1
+    for key, cnt in halves_count.items():
+        if cnt == 1:
+            modelled_per_day_hour[key] = modelled_per_day_hour[key] * 2.0
 
     # Build per-hour ratio lists, skipping dawn/dusk noise (both < 0.05).
     ratios_per_hour: dict[int, list[float]] = {h: [] for h in range(24)}
@@ -943,7 +969,7 @@ def compute_pv_calibration_hourly_table(
         if measured_kwh < 0.05 and modelled_kwh < 0.05:
             continue
         ratio = measured_kwh / modelled_kwh
-        # Drop egregious outliers (sensor spike or archive anomaly)
+        # Drop egregious outliers (sensor spike or forecast anomaly)
         if ratio > 5.0:
             continue
         ratios_per_hour[hour].append(ratio)
@@ -953,10 +979,13 @@ def compute_pv_calibration_hourly_table(
     for hour, rs in ratios_per_hour.items():
         if len(rs) < min_samples_per_hour:
             continue
-        # Use median (robust to single bad day) and clamp to safe range
+        # Use median (robust to single bad day) and clamp.
+        # PR L1.1 — UPPER bound raised to 2.0 (was 1.10) because Quartz can
+        # legitimately UNDER-predict (PM ratio observed ~1.19-1.59 for
+        # east-facing array). Lower bound stays at 0.10 as a safety floor.
         rs_sorted = sorted(rs)
         median = rs_sorted[len(rs_sorted) // 2]
-        clamped = max(0.10, min(1.10, median))
+        clamped = max(0.10, min(2.0, median))
         factors[hour] = round(clamped, 4)
         samples[hour] = len(rs)
 
@@ -1412,62 +1441,84 @@ def compute_pv_calibration_hourly_cloud_table(
         k: sum(s) / len(s) for k, s in actual_kw_samples.items() if s
     }
 
-    # 2. Pull historical forecasts WITH cloud_cover via Open-Meteo Archive
-    lat = (config.WEATHER_LAT or "").strip()
-    lon = (config.WEATHER_LON or "").strip()
-    if not lat or not lon:
-        return {"status": "skipped", "reason": "no lat/lon configured"}
-    try:
-        url = (
-            "https://archive-api.open-meteo.com/v1/archive?"
-            f"latitude={lat}&longitude={lon}"
-            f"&start_date={start.isoformat()}&end_date={end.isoformat()}"
-            "&hourly=shortwave_radiation_instant,cloud_cover"
-            "&timezone=UTC"
-        )
-        req = urllib.request.Request(url, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            api_data = json.loads(resp.read().decode())
-    except (urllib.error.URLError, json.JSONDecodeError, KeyError, TypeError) as e:
-        return {"status": "skipped", "reason": f"open-meteo archive fetch failed: {e}"}
-
-    times = api_data.get("hourly", {}).get("time", [])
-    rads = api_data.get("hourly", {}).get("shortwave_radiation_instant", [])
-    clouds = api_data.get("hourly", {}).get("cloud_cover", [])
-    archive: dict[tuple[str, int], tuple[float, float | None]] = {}
-    for i, t in enumerate(times):
+    # 2. PR L1.1 — pull Quartz half-hour forecasts (with Open-Meteo
+    # cloud_cover for bucketing) from local snapshot store. Latest
+    # pre-slot fetch wins per half-hour, then aggregate to hourly kWh
+    # (matching the measured side's mean kW × 1h units).
+    archive_per_half: dict[tuple[str, int, int], tuple[float, float | None]] = {}
+    with _db._lock:
+        conn = _db.get_connection()
         try:
-            dt = _dt.fromisoformat(str(t).replace("Z", "+00:00"))
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=_UTC)
-            day = dt.date().isoformat()
-            hour = dt.hour
-            r = rads[i] if i < len(rads) else None
-            c = clouds[i] if i < len(clouds) else None
-            if r is None:
-                continue
-            archive[(day, hour)] = (float(r), float(c) if c is not None else None)
-        except (ValueError, TypeError, IndexError):
-            continue
+            cur = conn.execute(
+                """SELECT mv.slot_time, mv.direct_pv_kw, mv.cloud_cover_pct,
+                          mv.forecast_fetch_at_utc
+                   FROM meteo_forecast_value mv
+                   WHERE mv.direct_pv_kw IS NOT NULL
+                     AND substr(mv.slot_time, 1, 10) BETWEEN ? AND ?
+                     AND mv.forecast_fetch_at_utc < mv.slot_time
+                   ORDER BY mv.slot_time ASC, mv.forecast_fetch_at_utc ASC""",
+                (start.isoformat(), end.isoformat()),
+            )
+            for row in cur.fetchall():
+                slot_time_str, direct_pv, cloud_pct, _fetch_at = row
+                try:
+                    slot_dt = _dt.fromisoformat(str(slot_time_str).replace("Z", "+00:00"))
+                except (ValueError, TypeError):
+                    continue
+                if slot_dt.tzinfo is None:
+                    slot_dt = slot_dt.replace(tzinfo=_UTC)
+                day = slot_dt.date().isoformat()
+                hour = slot_dt.hour
+                half = 0 if slot_dt.minute < 30 else 1
+                cloud_f = float(cloud_pct) if cloud_pct is not None else None
+                archive_per_half[(day, hour, half)] = (float(direct_pv or 0.0), cloud_f)
+        finally:
+            conn.close()
 
-    # 3. Build per-(hour, bucket) ratio lists
+    if not archive_per_half:
+        return {
+            "status": "skipped",
+            "reason": "no Quartz direct_pv_kw in meteo_forecast_value window",
+        }
+
+    # Aggregate half-hour kW into hourly kWh; pick the dominant cloud
+    # bucket per hour (when halves differ in cloud cover, the average is
+    # close enough — clouds drift slowly). Single-half-only hours
+    # extrapolate by ×2.
+    archive: dict[tuple[str, int], tuple[float, float | None]] = {}
+    halves_seen: dict[tuple[str, int], list[tuple[float, float | None]]] = defaultdict(list)
+    for (day, hour, _half), data in archive_per_half.items():
+        halves_seen[(day, hour)].append(data)
+    for key, datas in halves_seen.items():
+        total_kwh = sum(pv * 0.5 for pv, _c in datas)
+        if len(datas) == 1:
+            total_kwh *= 2.0
+        # Average cloud over the halves (ignore Nones).
+        clouds = [c for _pv, c in datas if c is not None]
+        avg_cloud = (sum(clouds) / len(clouds)) if clouds else None
+        archive[key] = (total_kwh, avg_cloud)
+
+    # 3. Build per-(hour, bucket) ratio lists.
+    # measured_per_day_hour value is mean kW over hour → numerically = kWh
+    # for that hour. archive value is hourly kWh from above aggregation.
     ratios_per_cell: dict[tuple[int, int], list[float]] = defaultdict(list)
-    for (day, hour), measured_kw in measured_per_day_hour.items():
+    for (day, hour), measured_kwh in measured_per_day_hour.items():
         forecast = archive.get((day, hour))
         if forecast is None:
             continue
-        rad, cloud = forecast
-        modelled_kw = estimate_pv_kw(rad)
-        if modelled_kw < 0.05 or measured_kw < 0.05:
+        modelled_kwh, cloud = forecast
+        if modelled_kwh < 0.05 or measured_kwh < 0.05:
             continue                          # dawn/dusk noise
-        ratio = measured_kw / modelled_kw
+        ratio = measured_kwh / modelled_kwh
         if ratio > 5.0:
             continue                          # outlier
         bucket = cloud_bucket(cloud)
         ratios_per_cell[(hour, bucket)].append(ratio)
 
-    # 4. Median per cell, clamp to [0.05, 1.20] (slightly wider than per-hour
-    #    table because clear-sky bucket can legitimately reach 1.0+)
+    # 4. Median per cell, clamp to [0.05, 2.0]
+    # PR L1.1 — upper bound raised from 1.20 → 2.0 because Quartz can
+    # legitimately under-predict for east-facing arrays (observed PM ratios
+    # 1.19-1.59 in W4 1DZ). Lower bound stays at 0.05 as safety floor.
     factors: dict[tuple[int, int], float] = {}
     samples: dict[tuple[int, int], int] = {}
     for cell, rs in ratios_per_cell.items():
@@ -1475,7 +1526,7 @@ def compute_pv_calibration_hourly_cloud_table(
             continue
         rs_sorted = sorted(rs)
         median = rs_sorted[len(rs_sorted) // 2]
-        clamped = max(0.05, min(1.20, median))
+        clamped = max(0.05, min(2.0, median))
         factors[cell] = round(clamped, 4)
         samples[cell] = len(rs)
 
