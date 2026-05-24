@@ -563,7 +563,7 @@ class Config:
     # under the assumption "Quartz self-calibrates", but observed AM 0.65 /
     # PM 1.11 bias in `forecast_skill_log` confirms the GSP-level Quartz
     # endpoint does NOT capture our W4 1DZ site (split array: SW-pitched +
-    # flat-rack, aggregate ~200° SSW, with a physical west obstruction). The
+    # flat-rack, aggregate ~200° SSW, with non-ideal tilt mix). The
     # calibration tables (populated daily 04:30 UTC from `pv_realtime_history`
     # actuals vs Quartz forecasts) already encode the residual empirically —
     # we just weren't applying it. Set to false to restore legacy bypass

@@ -52,9 +52,9 @@ And the bias is **not stable week-to-week**:
 | Week 20 (May 11–17) | 0.62 | **0.98** |
 
 AM bias is structural (sub-optimal angle-of-incidence on the split SSW
-array + AM-side obstruction). PM bias drifts ~25% between adjacent weeks
-based on weather pattern, and the late-PM cliff (~16:30 UTC) is a fixed
-west obstruction. **A fortnightly refresh can't track that.**
+array — likely tilt mismatch between the SW-pitched and flat-rack
+sections). PM bias drifts ~25% between adjacent weeks based on weather
+pattern. **A fortnightly refresh can't track that.**
 
 ### 2b — No hard "today's PV will fill the battery" rule
 

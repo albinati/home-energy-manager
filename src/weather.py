@@ -291,9 +291,9 @@ def forecast_pv_kw_from_row(
     Quartz mispredicts our W4 1DZ array by ~35 % AM and ~20 % PM
     (`forecast_skill_log` 30-day mean ratios). The bias originally read
     as "east-facing" was actually the signature of a split install
-    (SW-pitched + flat-roof south rack, aggregate ~200° SSW) plus
-    physical west obstruction past 16:30 UTC. The calibration tables
-    absorb all of it empirically — they don't need to know the geometry.
+    (SW-pitched + flat-roof south rack, aggregate ~200° SSW) with
+    non-ideal tilt mix. The calibration tables absorb all of it
+    empirically — they don't need to know the geometry.
 
     **Known semantic gap (acknowledged):** the calibration tables are
     trained against ``actual / estimate_pv_kw(open_meteo_radiation)``,
@@ -1346,10 +1346,10 @@ def compute_solar_elevation_deg(
 
     PR L3 (2026-05-24) — used by the 3D calibration table to separate
     same-UTC-hour samples by sun position (winter low / summer high).
-    A real array (split SW-pitched + flat-rack at W4 1DZ, with a west
-    obstruction past 16:30 UTC) has fundamentally different physics
-    when the sun is at 10° vs 50° elevation — same hour, different
-    physics → different correction factor.
+    A real array (split SW-pitched + flat-rack at W4 1DZ, with non-ideal
+    tilt mix) has fundamentally different physics when the sun is at
+    10° vs 50° elevation — same hour, different physics → different
+    correction factor.
 
     Defaults to ``config.WEATHER_LAT`` / ``WEATHER_LON`` when omitted.
 
