@@ -835,8 +835,9 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     # solar elevation as a binning dimension on top of (hour, cloud_bucket).
     # Separates winter-noon (elev ~10°) from summer-noon (elev ~60°) which
     # the 2D table averages together → masks structurally-different bias
-    # patterns for east-facing array (obstruction shadow magnitude depends
-    # on sun position, not just clock hour). Lookup chain: 3d → 2d → 1d → flat.
+    # patterns (west-obstruction shadow magnitude + split-array angle-of-
+    # incidence both depend on sun position, not just clock hour).
+    # Lookup chain: 3d → 2d → 1d → flat.
     conn.execute(
         """CREATE TABLE IF NOT EXISTS pv_calibration_3d (
             hour_utc        INTEGER NOT NULL CHECK(hour_utc >= 0 AND hour_utc < 24),

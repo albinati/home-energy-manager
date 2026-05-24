@@ -250,7 +250,10 @@ class ForecastFetchResult:
 # PR L3 H5 — one-shot warning latch for astral-missing degradation.
 _ASTRAL_WARNED = False
 
-# System constants for PV estimate (London W4 system)
+# System constants for PV estimate (London W4 system — split install: 6 panels
+# SW-pitched ~225°/30° + 6 panels flat-roof racked ~south/10°, aggregate
+# empirical azimuth ~200° SSW). Orientation is NOT encoded here; the per-hour
+# × cloud × elevation calibration tables absorb it empirically.
 _PV_CAPACITY_KWP = 4.5
 _PV_SYSTEM_EFFICIENCY = 0.85  # accounts for inverter, wiring, temp de-rating
 _IRRADIANCE_AT_STC_WM2 = 1000.0  # standard test conditions
@@ -285,17 +288,19 @@ def forecast_pv_kw_from_row(
     **PR L1 (2026-05-24)** — Quartz direct-PV path now ALSO applies the
     calibration tables (was previously SKIPPED per PR #279's
     "Quartz self-calibrates" assumption). Prod telemetry showed GSP-level
-    Quartz mispredicts our W4 1DZ east-facing array by ~35 % AM and ~20 %
-    PM (`forecast_skill_log` 30-day mean ratios). The calibration tables
-    already encode the orientation correction (they're computed from
-    actual vs forecasted-PV residuals each 04:30 UTC).
+    Quartz mispredicts our W4 1DZ array by ~35 % AM and ~20 % PM
+    (`forecast_skill_log` 30-day mean ratios). The bias originally read
+    as "east-facing" was actually the signature of a split install
+    (SW-pitched + flat-roof south rack, aggregate ~200° SSW) plus
+    physical west obstruction past 16:30 UTC. The calibration tables
+    absorb all of it empirically — they don't need to know the geometry.
 
     **Known semantic gap (acknowledged):** the calibration tables are
     trained against ``actual / estimate_pv_kw(open_meteo_radiation)``,
     NOT against ``actual / quartz_prediction``. Applying them as a
     Quartz multiplier is empirically effective (the 30-day mean factors
     roughly match the observed Quartz bias because both correct for the
-    same physical orientation), but the conversion is imperfect in
+    same per-hour residual pattern), but the conversion is imperfect in
     partly-cloudy regimes where Quartz's blend model diverges from raw
     shortwave radiation. Phase 1.1 of the calibration epic adds a
     ``source`` column to segregate Quartz-vs-Open-Meteo residuals if
@@ -850,7 +855,8 @@ def compute_pv_calibration_hourly_table(
     **PR L1.1 (2026-05-24)** — Re-baselined from Quartz ``direct_pv_kw``
     (the same prediction the LP consumes) instead of
     ``estimate_pv_kw(open_meteo_radiation)``. Open-Meteo's radiation-derived
-    PV assumes a south-facing array; the W4 1DZ install is east-facing.
+    PV assumes a south-facing array; the W4 1DZ install is a split array
+    (aggregate ~200° SSW) plus a physical west obstruction past ~16:30 UTC.
     The resulting "actual / Open-Meteo prediction" ratios were
     structurally low (0.2-0.5) and would have driven Quartz forecasts
     severely down when applied as multipliers (PR L1 over-correction bug).
@@ -990,8 +996,9 @@ def compute_pv_calibration_hourly_table(
             continue
         # Use median (robust to single bad day) and clamp.
         # PR L1.1 — UPPER bound raised to 2.0 (was 1.10) because Quartz can
-        # legitimately UNDER-predict (PM ratio observed ~1.19-1.59 for
-        # east-facing array). Lower bound stays at 0.10 as a safety floor.
+        # legitimately UNDER-predict (PM ratio observed ~1.19-1.59 — the
+        # split-array SSW + flat surfaces both peak PM relative to Quartz's
+        # GSP-aggregate assumption). Lower bound stays at 0.10 as a safety floor.
         rs_sorted = sorted(rs)
         median = rs_sorted[len(rs_sorted) // 2]
         clamped = max(0.10, min(2.0, median))
@@ -1339,7 +1346,8 @@ def compute_solar_elevation_deg(
 
     PR L3 (2026-05-24) — used by the 3D calibration table to separate
     same-UTC-hour samples by sun position (winter low / summer high).
-    The east-facing W4 1DZ array has fundamentally different physics
+    A real array (split SW-pitched + flat-rack at W4 1DZ, with a west
+    obstruction past 16:30 UTC) has fundamentally different physics
     when the sun is at 10° vs 50° elevation — same hour, different
     physics → different correction factor.
 
@@ -1381,7 +1389,8 @@ def elevation_bucket(elev_deg: float) -> int:
 
     A 5-bucket split keeps the cells dense enough to populate from
     30 days of data while still separating the worst-bias regimes
-    (low elevation = obstruction shadow on east-facing W4 1DZ array).
+    (low elevation = obstruction shadow + sub-optimal angle-of-incidence
+    on the W4 1DZ split array).
     """
     if elev_deg < 10.0:
         return 0
@@ -1635,8 +1644,9 @@ def compute_pv_calibration_hourly_cloud_table(
 
     # 4. Median per cell, clamp to [0.05, 2.0]
     # PR L1.1 — upper bound raised from 1.20 → 2.0 because Quartz can
-    # legitimately under-predict for east-facing arrays (observed PM ratios
-    # 1.19-1.59 in W4 1DZ). Lower bound stays at 0.05 as safety floor.
+    # legitimately under-predict (observed PM ratios 1.19-1.59 in W4 1DZ:
+    # the split SW-pitched + flat-rack array peaks PM relative to GSP).
+    # Lower bound stays at 0.05 as safety floor.
     factors: dict[tuple[int, int], float] = {}
     samples: dict[tuple[int, int], int] = {}
     for cell, rs in ratios_per_cell.items():

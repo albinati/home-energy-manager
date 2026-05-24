@@ -562,10 +562,11 @@ class Config:
     # tables on top of Quartz's direct PV output. Previously SKIPPED (PR #279)
     # under the assumption "Quartz self-calibrates", but observed AM 0.65 /
     # PM 1.11 bias in `forecast_skill_log` confirms the GSP-level Quartz
-    # endpoint does NOT capture our W4 1DZ east-facing orientation. The
+    # endpoint does NOT capture our W4 1DZ site (split array: SW-pitched +
+    # flat-rack, aggregate ~200° SSW, with a physical west obstruction). The
     # calibration tables (populated daily 04:30 UTC from `pv_realtime_history`
-    # actuals vs Quartz forecasts) already encode the orientation correction
-    # — we just weren't applying it. Set to false to restore legacy bypass
+    # actuals vs Quartz forecasts) already encode the residual empirically —
+    # we just weren't applying it. Set to false to restore legacy bypass
     # (for rollback if double-correction issues surface).
     PV_QUARTZ_APPLY_CALIBRATION: bool = (
         os.getenv("PV_QUARTZ_APPLY_CALIBRATION", "true").strip().lower()
