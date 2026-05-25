@@ -74,6 +74,9 @@ export function ModeSwitcher({ spec, pendingValue, onChange, onRevert }: ModeSwi
           );
         })}
       </div>
+      <div class="mode-switcher-footnote">
+        💡 Scheduling a mode for a date range (e.g. guests next weekend, vacation in July) isn't built yet — mode changes are immediate. Tracked separately.
+      </div>
     </section>
   );
 }

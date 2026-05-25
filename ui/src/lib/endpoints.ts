@@ -49,6 +49,10 @@ export const getEnergyMonthly = (month: string) =>
   getJson<MonthlyEnergy>(`/energy/monthly?month=${encodeURIComponent(month)}`);
 export const getAttributionDay = (date?: string) =>
   getJson<AttributionDay>(date ? `/attribution/day?date=${encodeURIComponent(date)}` : "/attribution/day");
+export const getEnergyPeriod = (start: string, end: string, grouping = "daily") =>
+  getJson<{ period?: string; total_cost_gbp?: number; metrics?: Array<Record<string, number | string>>; export_kwh?: number; export_revenue_gbp?: number }>(
+    `/energy/period?start_date=${encodeURIComponent(start)}&end_date=${encodeURIComponent(end)}&grouping=${grouping}`,
+  );
 export const getTariffsDashboard = (body: {
   start_date: string;
   end_date: string;

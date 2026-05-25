@@ -10,9 +10,10 @@ import { HemApiError } from "../lib/api";
 import { Spinner } from "../components/common/Spinner";
 import { Modal } from "../components/common/Modal";
 import { ModeSwitcher } from "../components/settings/ModeSwitcher";
-import { SettingGroup } from "../components/settings/SettingGroup";
+import { SettingField } from "../components/settings/SettingField";
 import { BatchBar } from "../components/settings/BatchBar";
-import { SETTINGS_GROUPS, labelFor, type GroupSpec } from "../components/settings/groups";
+import { SettingsTabs } from "../components/settings/SettingsTabs";
+import { SETTINGS_GROUPS, labelFor } from "../components/settings/groups";
 import type { SettingSpec, SimulateBatchResponse } from "../lib/types";
 import "../components/settings/settings.css";
 
@@ -21,34 +22,13 @@ function isEqual(a: unknown, b: unknown): boolean {
   return a === b;
 }
 
-function renderGroup(
-  group: GroupSpec,
-  specByKey: Map<string, SettingSpec>,
-  pending: Record<string, unknown>,
-  onChange: (key: string, value: unknown) => void,
-  onRevert: (key: string) => void,
-) {
-  const specs = group.keys.map((k) => specByKey.get(k)).filter((s): s is SettingSpec => !!s);
-  if (specs.length === 0) return null;
-  return (
-    <SettingGroup
-      key={group.id}
-      group={group}
-      specs={specs}
-      pending={pending}
-      onChange={onChange}
-      onRevert={onRevert}
-    />
-  );
-}
-
 export default function Settings() {
   const settings = useFetch(getSettings, []);
   const [pending, setPending] = useState<Record<string, unknown>>({});
   const [busy, setBusy] = useState(false);
   const [simResult, setSimResult] = useState<SimulateBatchResponse | null>(null);
   const [simOpen, setSimOpen] = useState(false);
-  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [activeTab, setActiveTab] = useState<string>(SETTINGS_GROUPS[0].id);
 
   const specByKey = useMemo(() => {
     const map = new Map<string, SettingSpec>();
@@ -62,7 +42,6 @@ export default function Settings() {
     const spec = specByKey.get(key);
     if (!spec) return;
     setPending((prev) => {
-      // If new value equals server value, drop the pending entry.
       if (isEqual(value, spec.value)) {
         const next = { ...prev };
         delete next[key];
@@ -89,6 +68,20 @@ export default function Settings() {
       if (spec && !isEqual(pending[k], spec.value)) n += 1;
     }
     return n;
+  }, [pending, specByKey]);
+
+  // Pending count per group, for the tab badges.
+  const pendingByGroup = useMemo(() => {
+    const out: Record<string, number> = {};
+    for (const g of SETTINGS_GROUPS) {
+      let n = 0;
+      for (const k of g.keys) {
+        const spec = specByKey.get(k);
+        if (spec && k in pending && !isEqual(pending[k], spec.value)) n += 1;
+      }
+      if (n > 0) out[g.id] = n;
+    }
+    return out;
   }, [pending, specByKey]);
 
   const onSimulate = async () => {
@@ -128,7 +121,6 @@ export default function Settings() {
       }
       setSimOpen(false);
       setSimResult(null);
-      // Refetch the canonical state.
       await settings.refresh();
     } catch (e) {
       const err = e as HemApiError;
@@ -155,6 +147,11 @@ export default function Settings() {
     );
   }
 
+  const activeGroup = SETTINGS_GROUPS.find((g) => g.id === activeTab) || SETTINGS_GROUPS[0];
+  const activeSpecs = activeGroup.keys
+    .map((k) => specByKey.get(k))
+    .filter((s): s is SettingSpec => !!s);
+
   return (
     <div class="settings-page">
       <header class="settings-header">
@@ -162,11 +159,7 @@ export default function Settings() {
           <div class="settings-header-eyebrow">Runtime configuration</div>
           <h1 class="settings-header-title">Settings</h1>
           <p class="settings-header-sub">
-            Every change goes through three steps:
-            {" "}<strong>Edit</strong> values inline (yellow "Edited" pill marks pending edits),
-            {" "}<strong>Simulate</strong> opens a diff modal so you can review,
-            {" "}then <strong>Apply</strong> writes to <code>runtime_settings</code>. Schedule
-            keys hot-reload the cron jobs; everything else takes effect on the next LP run.
+            Three-step flow: <strong>Edit</strong> values inline (yellow "Edited" pill marks pending), then <strong>Simulate</strong> opens a diff modal, then <strong>Apply</strong> writes to <code>runtime_settings</code>. Schedule keys hot-reload the cron jobs.
           </p>
         </div>
       </header>
@@ -180,36 +173,30 @@ export default function Settings() {
         />
       )}
 
-      {/* Everyday groups */}
-      {SETTINGS_GROUPS.filter((g) => !g.advanced).map((group) =>
-        renderGroup(group, specByKey, pending, onChange, onRevert)
-      )}
+      <SettingsTabs
+        groups={SETTINGS_GROUPS}
+        activeId={activeTab}
+        pendingByGroup={pendingByGroup}
+        onSelect={setActiveTab}
+      />
 
-      {/* Advanced toggle */}
-      <button
-        type="button"
-        class="settings-advanced-toggle"
-        onClick={() => setShowAdvanced((v) => !v)}
-      >
-        <span class="settings-advanced-toggle-icon">{showAdvanced ? "▾" : "▸"}</span>
-        <span class="settings-advanced-toggle-label">
-          {showAdvanced ? "Hide advanced settings" : "Show advanced settings"}
-        </span>
-        <span class="settings-advanced-toggle-count">
-          {SETTINGS_GROUPS.filter((g) => g.advanced).reduce((n, g) => n + g.keys.length, 0)} keys ·
-          {" "}{SETTINGS_GROUPS.filter((g) => g.advanced).length} groups
-        </span>
-      </button>
-      {showAdvanced && (
-        <div class="settings-advanced-hint">
-          Schedule timings, calibration, terminal SoC valuation, legionella prediction, admin gates. Changing these may affect dispatch behaviour — pair edits with a Simulate.
+      <div class="settings-section">
+        <div class="settings-section-header">
+          <div class="settings-section-title">{activeGroup.title}</div>
+          <div class="settings-section-subtitle">{activeGroup.subtitle}</div>
         </div>
-      )}
-
-      {/* Advanced groups */}
-      {showAdvanced && SETTINGS_GROUPS.filter((g) => g.advanced).map((group) =>
-        renderGroup(group, specByKey, pending, onChange, onRevert)
-      )}
+        <div class="setting-group-fields">
+          {activeSpecs.map((spec) => (
+            <SettingField
+              key={spec.key}
+              spec={spec}
+              pending={pending[spec.key]}
+              onChange={onChange}
+              onRevert={onRevert}
+            />
+          ))}
+        </div>
+      </div>
 
       <BatchBar
         pendingCount={pendingCount}

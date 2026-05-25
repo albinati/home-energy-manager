@@ -12,6 +12,32 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* Ambient body background — fixed, very subtle, theme-aware. Doesn't scroll
+ * so it always feels alive without distracting. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(900px 600px at 80% -10%, rgba(59, 130, 246, 0.07), transparent 60%),
+    radial-gradient(700px 500px at -10% 30%, rgba(16, 185, 129, 0.06), transparent 65%),
+    radial-gradient(600px 400px at 50% 110%, rgba(251, 191, 36, 0.04), transparent 70%);
+  animation: body-bg-drift 60s ease-in-out infinite alternate;
+}
+:root.theme-light body::before {
+  background:
+    radial-gradient(900px 600px at 80% -10%, rgba(37, 99, 235, 0.05), transparent 60%),
+    radial-gradient(700px 500px at -10% 30%, rgba(5, 150, 105, 0.04), transparent 65%),
+    radial-gradient(600px 400px at 50% 110%, rgba(217, 119, 6, 0.03), transparent 70%);
+}
+@keyframes body-bg-drift {
+  0%   { transform: translate(0, 0); }
+  100% { transform: translate(-2%, 3%); }
+}
+body > * { position: relative; z-index: 1; }
+
 a {
   color: var(--accent);
   text-decoration: none;

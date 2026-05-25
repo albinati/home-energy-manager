@@ -9,6 +9,7 @@ import {
   getExecutionToday,
   getEnergyMonthly,
   getDecisionsLatest,
+  getAttributionDay,
 } from "../lib/endpoints";
 import { Widget } from "../components/common/Widget";
 import { Spinner } from "../components/common/Spinner";
@@ -19,6 +20,8 @@ import { TariffWidget } from "../components/cockpit/TariffWidget";
 import { ThermalWidget } from "../components/cockpit/ThermalWidget";
 import { ComingUp } from "../components/home/ComingUp";
 import { SavingsSparkline } from "../components/home/SavingsSparkline";
+import { Hero } from "../components/home/Hero";
+import { ExportsWidget } from "../components/home/ExportsWidget";
 import { gbpSigned } from "../lib/format";
 import type { MonthlyEnergy, DispatchDecisionsResponse } from "../lib/types";
 import "../components/home/home.css";
@@ -57,6 +60,7 @@ export default function Landing() {
   const timeline = useFetch(getSchedulerTimeline, []);
   const execution = useFetch(getExecutionToday, []);
   const decisions = useFetch(getDecisionsLatest, []);
+  const attribution = useFetch(() => getAttributionDay(), []);
   const monthly = useMonthlyHistory(3);
 
   if (now.loading && !now.data) {
@@ -73,38 +77,11 @@ export default function Landing() {
 
   const data = now.data;
   const s = data.state;
-  const daily = metrics.data?.pnl?.daily;
-  const todayDelta = daily?.delta_vs_svt_pounds ?? null;
-  const monthDelta = metrics.data?.pnl?.monthly?.delta_vs_svt_pounds ?? null;
-  const weekDelta = metrics.data?.pnl?.weekly?.delta_vs_svt_pounds ?? null;
   const currentReason = extractCurrentReason(data.now_utc, decisions.data);
 
   return (
     <div class="home">
-      {/* HERO */}
-      <section class="home-hero" aria-label="Today">
-        <div>
-          <div class="home-hero-eyebrow"><strong>Today</strong> · saved vs Standard Variable Tariff</div>
-          <div class={`home-hero-cost ${todayDelta == null ? "home-hero-cost-neutral" : todayDelta >= 0 ? "home-hero-cost-positive" : "home-hero-cost-negative"}`}>
-            {todayDelta == null ? (metrics.loading ? <SkelText w="6rem" /> : "—") : gbpSigned(todayDelta)}
-          </div>
-          {daily?.delta_vs_fixed_pounds != null && (
-            <div class="home-hero-delta">
-              vs fixed tariff: <strong class={daily.delta_vs_fixed_pounds >= 0 ? "" : "neg"}>{gbpSigned(daily.delta_vs_fixed_pounds)}</strong>
-            </div>
-          )}
-        </div>
-        <aside class="home-hero-aside">
-          <div class="home-hero-aside-row">
-            <span class="home-hero-aside-label">This week</span>
-            <span class="home-hero-aside-value">{weekDelta != null ? gbpSigned(weekDelta) : metrics.loading ? <SkelText w="4rem" /> : "—"}</span>
-          </div>
-          <div class="home-hero-aside-row">
-            <span class="home-hero-aside-label">This month</span>
-            <span class="home-hero-aside-value">{monthDelta != null ? gbpSigned(monthDelta) : metrics.loading ? <SkelText w="4rem" /> : "—"}</span>
-          </div>
-        </aside>
-      </section>
+      <Hero metrics={metrics.data} metricsLoading={metrics.loading} />
 
       {/* WIDGET GRID */}
       <div class="widget-grid">
@@ -124,8 +101,12 @@ export default function Landing() {
           <ThermalWidget state={s} />
         </Widget>
 
-        <Widget title="Right now" icon="🎯" tone="plan" size="medium">
+        <Widget title="Right now" icon="🎯" tone="plan" size="large">
           <DispatchReason now={data} decisionReason={currentReason} />
+        </Widget>
+
+        <Widget title="Exports" icon="📤" tone="savings" size="medium">
+          <ExportsWidget now={data} yesterday={attribution.data} />
         </Widget>
 
         <Widget title="Coming up" icon="📅" tone="coming" size="medium">
@@ -138,7 +119,7 @@ export default function Landing() {
           />
         </Widget>
 
-        <Widget title="Savings" icon="💚" tone="savings" size="medium" badge={`last ${monthly.data.length || 3} mo`}>
+        <Widget title="Monthly savings trend" icon="💚" tone="savings" size="large" badge={`last ${monthly.data.length || 3} mo`}>
           <div class="home-savings">
             <div class="home-savings-headline">
               <div class="home-savings-headline-value">

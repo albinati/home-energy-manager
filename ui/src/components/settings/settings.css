@@ -131,6 +131,16 @@
   line-height: 1.4;
 }
 
+.mode-switcher-footnote {
+  margin-top: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  background: var(--bg);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-xs);
+  color: var(--text-mute);
+}
+
 /* Setting group */
 .setting-group {
   /* override card-pad-tight body padding so the head is full-width clickable */
@@ -267,39 +277,97 @@
   min-width: 1.5rem;
 }
 
-/* "Show advanced" toggle */
-.settings-advanced-toggle {
+/* Horizontal tabs */
+.settings-tabs {
+  position: sticky;
+  top: 64px;
+  z-index: 30;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  margin: 0 calc(var(--space-4) * -1);
+  padding: 0 var(--space-4);
+}
+.settings-tabs-inner {
   display: flex;
+  gap: var(--space-1);
   align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-3) var(--space-4);
-  background: var(--bg-card);
-  border: 1px dashed var(--border-strong);
-  border-radius: var(--radius);
+  overflow-x: auto;
+  scrollbar-width: thin;
+  padding: var(--space-2) 0;
+}
+.settings-tabs-inner::-webkit-scrollbar { height: 4px; }
+.settings-tabs-inner::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.settings-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  border: 1px solid transparent;
   color: var(--text-dim);
   font-size: var(--font-sm);
+  font-weight: 500;
   cursor: pointer;
-  text-align: left;
-  width: 100%;
+  white-space: nowrap;
   transition: background 100ms, color 100ms, border-color 100ms;
 }
-.settings-advanced-toggle:hover {
-  background: var(--bg-card-2);
+.settings-tab:hover {
+  background: var(--bg-card);
   color: var(--text);
-  border-style: solid;
 }
-.settings-advanced-toggle-icon { font-size: 1rem; }
-.settings-advanced-toggle-label { font-weight: 500; }
-.settings-advanced-toggle-count {
-  margin-left: auto;
-  font-size: var(--font-xs);
-  color: var(--text-mute);
-  font-variant-numeric: tabular-nums;
+.settings-tab.is-active {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+  box-shadow: var(--glow-accent);
 }
-.settings-advanced-hint {
-  font-size: var(--font-xs);
+.settings-tab.is-advanced {
   color: var(--text-mute);
-  padding: 0 var(--space-2);
+}
+.settings-tab.is-advanced.is-active {
+  color: white;
+}
+.settings-tab-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--warn);
+  color: white;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+.settings-tab.is-active .settings-tab-badge {
+  background: white;
+  color: var(--accent);
+}
+.settings-tabs-sep {
+  display: inline-block;
+  width: 1px;
+  height: 20px;
+  background: var(--border);
+  margin: 0 var(--space-2);
+}
+.settings-section-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding-bottom: var(--space-2);
+}
+.settings-section-title {
+  font-size: var(--font-lg);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+.settings-section-subtitle {
+  font-size: var(--font-sm);
+  color: var(--text-dim);
+  max-width: 60ch;
+  line-height: 1.5;
 }
 .setting-field-desc {
   font-size: var(--font-xs);

@@ -1,0 +1,63 @@
+.exports-widget {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.exports-now {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--border);
+}
+.exports-now-rate {
+  font-size: 2.2rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.025em;
+  line-height: 1;
+}
+.exports-now-rate-unit {
+  font-size: var(--font-sm);
+  color: var(--text-dim);
+  font-weight: 500;
+  margin-left: 4px;
+}
+.exports-now-rate-label {
+  font-size: var(--font-xs);
+  color: var(--text-dim);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.exports-row-live {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-2);
+}
+.exports-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.exports-cell-label {
+  font-size: var(--font-xs);
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.exports-cell-value {
+  font-size: var(--font-md);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.exports-cell-sub {
+  font-size: var(--font-xs);
+  color: var(--text-mute);
+}
+.exports-note {
+  font-size: var(--font-xs);
+  color: var(--text-mute);
+  font-style: italic;
+  padding-top: var(--space-2);
+  border-top: 1px dashed var(--border);
+}

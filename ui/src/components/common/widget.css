@@ -9,7 +9,9 @@
 
 .widget {
   position: relative;
-  background: var(--bg-card);
+  background:
+    linear-gradient(160deg, var(--widget-tint, transparent) 0%, transparent 35%),
+    var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   overflow: hidden;
@@ -18,9 +20,11 @@
   transition: border-color 200ms, transform 200ms, box-shadow 200ms;
   grid-column: span 12;
   min-width: 0;
+  box-shadow: var(--shadow);
 }
 .widget:hover {
   border-color: var(--border-strong);
+  box-shadow: var(--shadow-lg);
 }
 
 @media (min-width: 720px) {
@@ -44,15 +48,15 @@
   z-index: 1;
 }
 
-/* Tone colours — set via custom property the accent reads */
-.widget--tone-default  { --widget-accent: var(--border-strong); }
-.widget--tone-power    { --widget-accent: var(--accent); }
-.widget--tone-battery  { --widget-accent: var(--batt); }
-.widget--tone-tariff   { --widget-accent: var(--peak); }
-.widget--tone-thermal  { --widget-accent: var(--import); }
-.widget--tone-savings  { --widget-accent: var(--ok); }
-.widget--tone-plan     { --widget-accent: var(--accent); }
-.widget--tone-coming   { --widget-accent: var(--house); }
+/* Tone colours — accent line on the left edge + a faint top-corner tint */
+.widget--tone-default  { --widget-accent: var(--border-strong); --widget-tint: transparent; }
+.widget--tone-power    { --widget-accent: var(--accent);  --widget-tint: rgba(59, 130, 246, 0.05); }
+.widget--tone-battery  { --widget-accent: var(--batt);    --widget-tint: rgba(16, 185, 129, 0.05); }
+.widget--tone-tariff   { --widget-accent: var(--peak);    --widget-tint: rgba(245, 158, 11, 0.04); }
+.widget--tone-thermal  { --widget-accent: var(--import);  --widget-tint: rgba(239, 68, 68, 0.04); }
+.widget--tone-savings  { --widget-accent: var(--ok);      --widget-tint: rgba(16, 185, 129, 0.06); }
+.widget--tone-plan     { --widget-accent: var(--accent);  --widget-tint: rgba(59, 130, 246, 0.05); }
+.widget--tone-coming   { --widget-accent: var(--house);   --widget-tint: rgba(192, 132, 252, 0.06); }
 
 .widget-header {
   display: flex;
@@ -71,10 +75,10 @@
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  font-size: var(--font-xs);
-  font-weight: 600;
+  font-size: 0.7rem;
+  font-weight: 700;
   color: var(--text-dim);
-  letter-spacing: 0.08em;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
 }
 .widget-header-icon {

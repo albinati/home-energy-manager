@@ -1,0 +1,149 @@
+/* Hero — savings as the primary surface. Dramatic typography over a subtle
+ * mesh gradient. Three comparison bars on the right. */
+
+.hero {
+  position: relative;
+  isolation: isolate;
+  display: grid;
+  grid-template-columns: 1.5fr 1fr;
+  gap: var(--space-6);
+  padding: var(--space-7) var(--space-6);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+}
+@media (max-width: 760px) {
+  .hero {
+    grid-template-columns: 1fr;
+    padding: var(--space-5);
+    gap: var(--space-4);
+  }
+}
+
+/* Ambient mesh gradient — dark/light aware via CSS vars */
+.hero-bg {
+  position: absolute;
+  inset: -40%;
+  z-index: -1;
+  background:
+    radial-gradient(500px 360px at 10% 10%, rgba(16, 185, 129, 0.16), transparent 70%),
+    radial-gradient(700px 480px at 100% 0%, rgba(59, 130, 246, 0.14), transparent 60%),
+    radial-gradient(420px 320px at 60% 110%, rgba(251, 191, 36, 0.10), transparent 70%);
+  filter: blur(6px);
+  animation: hero-bg-drift 28s ease-in-out infinite alternate;
+}
+@keyframes hero-bg-drift {
+  0%   { transform: translate(0, 0) scale(1); }
+  100% { transform: translate(-3%, 2%) scale(1.05); }
+}
+:root.theme-light .hero-bg {
+  background:
+    radial-gradient(500px 360px at 10% 10%, rgba(5, 150, 105, 0.10), transparent 70%),
+    radial-gradient(700px 480px at 100% 0%, rgba(37, 99, 235, 0.08), transparent 60%),
+    radial-gradient(420px 320px at 60% 110%, rgba(217, 119, 6, 0.06), transparent 70%);
+}
+
+.hero-main { min-width: 0; }
+
+.hero-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-xs);
+  color: var(--text-dim);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+.hero-eyebrow strong {
+  color: var(--text);
+  font-weight: 700;
+}
+.hero-eyebrow-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 12px var(--accent);
+  animation: hero-dot-pulse 2.2s ease-in-out infinite;
+}
+@keyframes hero-dot-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.4; transform: scale(0.7); }
+}
+
+.hero-headline {
+  font-size: clamp(3rem, 9vw, 5.4rem);
+  font-weight: 800;
+  letter-spacing: -0.035em;
+  line-height: 1;
+  margin-top: var(--space-3);
+  font-variant-numeric: tabular-nums;
+}
+.hero-headline--positive {
+  background: linear-gradient(135deg, var(--ok) 0%, #34d399 60%, #6ee7b7 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
+.hero-headline--negative { color: var(--bad); }
+.hero-headline--neutral  { color: var(--text); }
+
+.hero-subline {
+  margin-top: var(--space-3);
+  font-size: var(--font-md);
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.hero-strong-pos { color: var(--ok); font-weight: 700; }
+.hero-strong-neg { color: var(--bad); font-weight: 700; }
+
+/* Bar comparison */
+.hero-bars {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-3);
+  align-items: end;
+}
+.hero-bar {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+}
+.hero-bar-track {
+  height: 110px;
+  width: 32px;
+  background: var(--bg);
+  border-radius: 6px;
+  overflow: hidden;
+  display: flex;
+  align-items: flex-end;
+  border: 1px solid var(--border);
+}
+.hero-bar.is-active .hero-bar-track {
+  border-color: var(--border-strong);
+  box-shadow: 0 0 16px rgba(16, 185, 129, 0.15);
+}
+.hero-bar-fill {
+  width: 100%;
+  border-radius: 4px;
+  transition: height 600ms ease;
+}
+.hero-bar-value {
+  font-size: var(--font-sm);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.hero-bar-label {
+  font-size: var(--font-xs);
+  color: var(--text-dim);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.hero-bar.is-active .hero-bar-label {
+  color: var(--text);
+  font-weight: 700;
+}
