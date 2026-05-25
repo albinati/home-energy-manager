@@ -49,99 +49,108 @@
 }
 .powerflow-svg {
   width: 100%;
-  max-width: 520px;
+  max-width: 560px;
   height: auto;
 }
 @keyframes pf-dash {
   to { stroke-dashoffset: -28; }
 }
+@keyframes pf-node-pulse {
+  0%   { transform: scale(1);    opacity: 0.55; }
+  50%  { transform: scale(1.15); opacity: 0.15; }
+  100% { transform: scale(1);    opacity: 0.55; }
+}
+.powerflow-svg circle {
+  transform-origin: center;
+  transform-box: fill-box;
+}
 
-/* Battery widget */
+/* Battery widget — battery cell shape + numeric readout */
 .battery-widget {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
 }
-.battery-head {
+.battery-widget-main {
   display: flex;
-  justify-content: space-between;
-  align-items: flex-end;
-  gap: var(--space-3);
+  gap: var(--space-4);
+  align-items: center;
 }
-.battery-label {
-  font-size: var(--font-xs);
-  color: var(--text-dim);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+.battery-svg {
+  flex-shrink: 0;
 }
-.battery-pct {
-  font-size: 2.6rem;
+.battery-widget-readout {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.battery-widget-pct {
+  font-size: 2.8rem;
   font-weight: 700;
+  font-variant-numeric: tabular-nums;
   letter-spacing: -0.025em;
   line-height: 1;
+}
+.battery-widget-kwh {
+  font-size: var(--font-sm);
+  color: var(--text-dim);
   font-variant-numeric: tabular-nums;
 }
-.battery-dir {
+.battery-widget-dir {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  margin-top: var(--space-1);
   font-variant-numeric: tabular-nums;
 }
-.battery-dir-arrow {
-  font-size: 1.2rem;
+.battery-widget-dir-icon {
+  font-size: 1.05rem;
   line-height: 1;
 }
-.battery-dir-label {
+.battery-widget-dir-label {
   font-size: var(--font-sm);
   font-weight: 500;
 }
-.battery-dir-kw {
+.battery-widget-dir-kw {
   font-size: var(--font-md);
   font-weight: 600;
 }
-.battery-bar {
-  position: relative;
-  height: 16px;
-  border-radius: 8px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  overflow: hidden;
-}
-.battery-bar-fill {
-  height: 100%;
-  border-radius: 7px 0 0 7px;
-  transition: width 400ms ease, background 200ms ease;
-}
-.battery-bar-mark {
-  position: absolute;
-  top: -2px;
-  bottom: -2px;
-  width: 2px;
-  background: var(--text-mute);
-  transform: translateX(-1px);
-  opacity: 0.6;
-  pointer-events: auto;
-}
-.battery-stats {
-  display: flex;
-  gap: var(--space-4);
-  flex-wrap: wrap;
-}
-.battery-stat {
+.battery-widget-meta {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border);
 }
-.battery-stat-label {
+.battery-widget-meta-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: var(--font-sm);
+  font-variant-numeric: tabular-nums;
+}
+.battery-widget-meta-label {
   font-size: var(--font-xs);
   color: var(--text-dim);
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
-.battery-stat-value {
-  font-size: var(--font-sm);
+.battery-widget-meta-value {
   font-weight: 600;
-  font-variant-numeric: tabular-nums;
+}
+.battery-charge-overlay text {
+  animation: battery-bolt 1.4s ease-in-out infinite;
+}
+.battery-discharge-overlay text {
+  animation: battery-down 1.6s ease-in-out infinite;
+}
+@keyframes battery-bolt {
+  0%, 100% { opacity: 0.95; transform: scale(1); }
+  50%      { opacity: 0.55; transform: scale(0.92); }
+}
+@keyframes battery-down {
+  0%, 100% { opacity: 0.85; transform: translateY(0); }
+  50%      { opacity: 0.5; transform: translateY(3px); }
 }
 
 /* SoC ring */
@@ -380,6 +389,91 @@
   padding: var(--space-3);
   text-align: center;
 }
+
+/* Thermal widget */
+.thermal-widget {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.thermal-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  align-self: flex-start;
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-pill);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  font-size: var(--font-xs);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.thermal-mode[data-mode="heating"] {
+  color: var(--warn);
+  border-color: rgba(245, 158, 11, 0.4);
+  background: rgba(245, 158, 11, 0.08);
+}
+.thermal-mode[data-mode="cooling"] {
+  color: var(--accent);
+  border-color: rgba(59, 130, 246, 0.4);
+  background: rgba(59, 130, 246, 0.08);
+}
+.thermal-flame {
+  font-size: 0.95rem;
+  animation: thermal-flame-flicker 1.2s ease-in-out infinite;
+}
+.thermal-snow {
+  font-size: 0.95rem;
+  animation: thermal-snow-spin 4s linear infinite;
+}
+.thermal-zzz { font-size: 0.85rem; opacity: 0.65; }
+.thermal-mode-label { line-height: 1; }
+@keyframes thermal-flame-flicker {
+  0%, 100% { transform: scale(1) rotate(-2deg); opacity: 1; }
+  50%      { transform: scale(1.08) rotate(2deg); opacity: 0.85; }
+}
+@keyframes thermal-snow-spin {
+  to { transform: rotate(360deg); }
+}
+
+.thermal-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-3);
+  align-items: end;
+}
+.thermal-metric {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  text-align: center;
+}
+.thermal-metric-icon {
+  font-size: 1.5rem;
+  line-height: 1;
+  height: 1.5rem;
+}
+.thermal-metric-label {
+  font-size: var(--font-xs);
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.thermal-metric-value {
+  font-size: var(--font-lg);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+.thermal-metric-sub {
+  font-size: 0.7rem;
+  color: var(--text-mute);
+}
+.thermal-tank-svg { height: 80px; }
 
 /* Price summary */
 .price-summary {

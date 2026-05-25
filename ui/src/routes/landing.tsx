@@ -10,15 +10,16 @@ import {
   getEnergyMonthly,
   getDecisionsLatest,
 } from "../lib/endpoints";
-import { Card } from "../components/common/Card";
+import { Widget } from "../components/common/Widget";
 import { Spinner } from "../components/common/Spinner";
 import { PowerFlow } from "../components/cockpit/PowerFlow";
 import { BatteryWidget } from "../components/cockpit/BatteryWidget";
 import { DispatchReason } from "../components/cockpit/DispatchReason";
-import { TariffStrip } from "../components/cockpit/TariffStrip";
+import { TariffWidget } from "../components/cockpit/TariffWidget";
+import { ThermalWidget } from "../components/cockpit/ThermalWidget";
 import { ComingUp } from "../components/home/ComingUp";
 import { SavingsSparkline } from "../components/home/SavingsSparkline";
-import { gbpSigned, tempC } from "../lib/format";
+import { gbpSigned } from "../lib/format";
 import type { MonthlyEnergy, DispatchDecisionsResponse } from "../lib/types";
 import "../components/home/home.css";
 
@@ -32,7 +33,6 @@ function lastMonths(n: number): string[] {
   return out;
 }
 
-// Deferred — non-blocking. Renders progressively without holding the page back.
 function useMonthlyHistory(n: number) {
   const [data, setData] = useState<MonthlyEnergy[]>([]);
   const [loading, setLoading] = useState(true);
@@ -60,11 +60,7 @@ export default function Landing() {
   const monthly = useMonthlyHistory(3);
 
   if (now.loading && !now.data) {
-    return (
-      <div class="home">
-        <Spinner label="Loading dashboard…" />
-      </div>
-    );
+    return <div class="home"><Spinner label="Loading dashboard…" /></div>;
   }
   if (!now.data) {
     return (
@@ -85,7 +81,7 @@ export default function Landing() {
 
   return (
     <div class="home">
-      {/* HERO — Today's savings */}
+      {/* HERO */}
       <section class="home-hero" aria-label="Today">
         <div>
           <div class="home-hero-eyebrow"><strong>Today</strong> · saved vs Standard Variable Tariff</div>
@@ -107,77 +103,61 @@ export default function Landing() {
             <span class="home-hero-aside-label">This month</span>
             <span class="home-hero-aside-value">{monthDelta != null ? gbpSigned(monthDelta) : metrics.loading ? <SkelText w="4rem" /> : "—"}</span>
           </div>
-          <div class="home-hero-aside-row">
-            <span class="home-hero-aside-label">Mode</span>
-            <span class="home-hero-aside-value">{s.daikin_mode || "—"}</span>
-          </div>
         </aside>
       </section>
 
-      {/* POWER FLOW */}
-      <Card title="Live power flow">
-        <PowerFlow state={s} />
-      </Card>
+      {/* WIDGET GRID */}
+      <div class="widget-grid">
+        <Widget title="Live power" icon="⚡" tone="power" size="large" badge={data.now_utc ? new Date(data.now_utc).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }) : undefined}>
+          <PowerFlow state={s} />
+        </Widget>
 
-      {/* BATTERY */}
-      <Card title="Battery" subtitle="State of charge, today's range, next planned event.">
-        <BatteryWidget state={s} timeline={timeline.data} execution={execution.data} />
-      </Card>
+        <Widget title="Battery" icon="🔋" tone="battery" size="medium">
+          <BatteryWidget state={s} timeline={timeline.data} execution={execution.data} />
+        </Widget>
 
-      {/* WHAT'S HAPPENING NOW (dispatch + tariff strip combined) */}
-      <Card title="Right now" subtitle="Slot kind, prices, and what the LP is doing.">
-        <DispatchReason now={data} decisionReason={currentReason} />
-      </Card>
+        <Widget title="Today's tariff" icon="💷" tone="tariff" size="large">
+          <TariffWidget agile={agile.data} now={data} />
+        </Widget>
 
-      <Card title="Today's tariff" subtitle="Half-hourly Octopus Agile import prices. Marker = current slot.">
-        <TariffStrip
-          agile={agile.data}
-          cheapP={data.thresholds?.cheap_p ?? 12}
-          peakP={data.thresholds?.peak_p ?? 28}
-          nowUtc={data.now_utc}
-        />
-      </Card>
+        <Widget title="Thermal" icon="♨" tone="thermal" size="medium">
+          <ThermalWidget state={s} />
+        </Widget>
 
-      {/* COMING UP */}
-      <Card title="Coming up" subtitle="Next interesting events on today's price + solar horizon.">
-        <ComingUp
-          agile={agile.data}
-          weather={weather.data}
-          cheapP={data.thresholds?.cheap_p ?? 12}
-          peakP={data.thresholds?.peak_p ?? 28}
-          nowUtc={data.now_utc}
-        />
-      </Card>
+        <Widget title="Right now" icon="🎯" tone="plan" size="medium">
+          <DispatchReason now={data} decisionReason={currentReason} />
+        </Widget>
 
-      {/* THERMAL — small footer row, low-priority data */}
-      <Card title="Thermal" pad="tight" variant="subtle">
-        <div class="home-thermal-row">
-          <span><strong>{tempC(s.tank_c, 0)}</strong> tank</span>
-          <span><strong>{tempC(s.indoor_c, 0)}</strong> indoor</span>
-          <span><strong>{tempC(s.lwt_c, 0)}</strong> LWT</span>
-        </div>
-      </Card>
+        <Widget title="Coming up" icon="📅" tone="coming" size="medium">
+          <ComingUp
+            agile={agile.data}
+            weather={weather.data}
+            cheapP={data.thresholds?.cheap_p ?? 12}
+            peakP={data.thresholds?.peak_p ?? 28}
+            nowUtc={data.now_utc}
+          />
+        </Widget>
 
-      {/* SAVINGS SPARKLINE — deferred, fills in async */}
-      <Card title="Monthly savings vs SVT" subtitle={`Last ${monthly.data.length || 3} months. Green = Agile beat SVT.`}>
-        <div class="home-savings">
-          <div class="home-savings-headline">
-            <div class="home-savings-headline-value">
-              {monthly.data.length > 0
-                ? gbpSigned(monthly.data[monthly.data.length - 1].savings_vs_svt_gbp ?? 0)
-                : monthly.loading ? <SkelText w="5rem" /> : "—"}
+        <Widget title="Savings" icon="💚" tone="savings" size="medium" badge={`last ${monthly.data.length || 3} mo`}>
+          <div class="home-savings">
+            <div class="home-savings-headline">
+              <div class="home-savings-headline-value">
+                {monthly.data.length > 0
+                  ? gbpSigned(monthly.data[monthly.data.length - 1].savings_vs_svt_gbp ?? 0)
+                  : monthly.loading ? <SkelText w="5rem" /> : "—"}
+              </div>
+              <div class="home-savings-headline-label">This month vs SVT</div>
             </div>
-            <div class="home-savings-headline-label">This month vs SVT</div>
+            <div class="home-savings-aside">
+              {monthly.loading ? (
+                <Spinner size="sm" label="loading…" />
+              ) : (
+                <SavingsSparkline monthly={monthly.data} />
+              )}
+            </div>
           </div>
-          <div class="home-savings-aside">
-            {monthly.loading ? (
-              <Spinner size="sm" label="loading history…" />
-            ) : (
-              <SavingsSparkline monthly={monthly.data} />
-            )}
-          </div>
-        </div>
-      </Card>
+        </Widget>
+      </div>
     </div>
   );
 }

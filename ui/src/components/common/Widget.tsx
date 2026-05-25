@@ -1,0 +1,48 @@
+import type { ComponentChildren } from "preact";
+import "./widget.css";
+
+export type WidgetSize = "small" | "medium" | "large" | "wide";
+export type WidgetTone = "default" | "power" | "battery" | "tariff" | "thermal" | "savings" | "plan" | "coming";
+
+interface WidgetProps {
+  title: ComponentChildren;
+  icon?: ComponentChildren;
+  badge?: ComponentChildren;
+  action?: ComponentChildren;
+  size?: WidgetSize;
+  tone?: WidgetTone;
+  children: ComponentChildren;
+  class?: string;
+}
+
+// Visual primitive for the home + plan grids. Each widget has a consistent
+// header (icon + title + badge slot) and an accent line on the left edge
+// coloured by `tone` so domains read at a glance. Size controls grid span
+// on desktop (mobile always stacks to full width).
+export function Widget({
+  title,
+  icon,
+  badge,
+  action,
+  size = "medium",
+  tone = "default",
+  children,
+  class: cls = "",
+}: WidgetProps) {
+  return (
+    <section class={`widget widget--${size} widget--tone-${tone} ${cls}`}>
+      <span class="widget-accent" aria-hidden="true" />
+      <header class="widget-header">
+        <div class="widget-header-title">
+          {icon && <span class="widget-header-icon" aria-hidden="true">{icon}</span>}
+          {title}
+        </div>
+        <div class="widget-header-meta">
+          {badge && <span class="widget-header-badge">{badge}</span>}
+          {action}
+        </div>
+      </header>
+      <div class="widget-body">{children}</div>
+    </section>
+  );
+}

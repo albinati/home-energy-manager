@@ -1,0 +1,105 @@
+/* Widget — primitive for dashboard tiles. Header + body + accent edge.
+ * Sizes map to grid spans on desktop; mobile always single-column. */
+
+.widget-grid {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: var(--space-3);
+}
+
+.widget {
+  position: relative;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  transition: border-color 200ms, transform 200ms, box-shadow 200ms;
+  grid-column: span 12;
+  min-width: 0;
+}
+.widget:hover {
+  border-color: var(--border-strong);
+}
+
+@media (min-width: 720px) {
+  .widget--small { grid-column: span 6; }
+  .widget--medium { grid-column: span 6; }
+  .widget--large { grid-column: span 12; }
+  .widget--wide { grid-column: span 12; }
+}
+@media (min-width: 1024px) {
+  .widget--small { grid-column: span 3; }
+  .widget--medium { grid-column: span 4; }
+  .widget--large { grid-column: span 8; }
+  .widget--wide { grid-column: span 12; }
+}
+
+.widget-accent {
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 3px;
+  background: var(--widget-accent, var(--accent));
+  z-index: 1;
+}
+
+/* Tone colours — set via custom property the accent reads */
+.widget--tone-default  { --widget-accent: var(--border-strong); }
+.widget--tone-power    { --widget-accent: var(--accent); }
+.widget--tone-battery  { --widget-accent: var(--batt); }
+.widget--tone-tariff   { --widget-accent: var(--peak); }
+.widget--tone-thermal  { --widget-accent: var(--import); }
+.widget--tone-savings  { --widget-accent: var(--ok); }
+.widget--tone-plan     { --widget-accent: var(--accent); }
+.widget--tone-coming   { --widget-accent: var(--house); }
+
+.widget-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, transparent, rgba(255,255,255,0.02));
+}
+:root.theme-light .widget-header {
+  background: linear-gradient(180deg, transparent, rgba(0,0,0,0.02));
+}
+
+.widget-header-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-xs);
+  font-weight: 600;
+  color: var(--text-dim);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.widget-header-icon {
+  font-size: 1rem;
+  opacity: 0.85;
+  filter: saturate(1.1);
+}
+.widget-header-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.widget-header-badge {
+  font-size: var(--font-xs);
+  color: var(--text-mute);
+  font-variant-numeric: tabular-nums;
+}
+
+.widget-body {
+  flex: 1;
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+.widget-body.is-tight { padding: var(--space-3); gap: var(--space-2); }
+.widget-body.is-loose { padding: var(--space-5); gap: var(--space-4); }
