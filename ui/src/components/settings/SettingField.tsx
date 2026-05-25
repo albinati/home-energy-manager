@@ -1,7 +1,7 @@
 import type { SettingSpec } from "../../lib/types";
 import { NumberInput, Select, Toggle, TextInput, SliderInput } from "../common/Inputs";
 import { Pill } from "../common/Pill";
-import { labelFor } from "./groups";
+import { labelFor, unitFor } from "./groups";
 import "./settings.css";
 
 interface SettingFieldProps {
@@ -20,23 +20,8 @@ function hasPendingEdit(spec: SettingSpec, pending: unknown | undefined): boolea
   return pending !== spec.value;
 }
 
-// Unit guess from key suffix — keeps the slider readable without backend changes.
-function unitFor(key: string): string {
-  if (key.endsWith("_C")) return "°C";
-  if (key.endsWith("_KWH")) return "kWh";
-  if (key.endsWith("_MIN") || key.endsWith("_MINUTES") || key.endsWith("_MINUTE")) return "min";
-  if (key.endsWith("_HOUR") || key.endsWith("_HOUR_LOCAL")) return "h";
-  if (key.endsWith("_LPM")) return "L/m";
-  if (key.endsWith("_PENCE_PER_KWH")) return "p/kWh";
-  if (key.endsWith("_DAYS")) return "d";
-  if (key.endsWith("_DAY")) return "";
-  if (key.endsWith("_FRACTION") || key.endsWith("_PERCENT")) return "";
-  return "";
-}
-
 function stepFor(spec: SettingSpec): number {
   if (spec.type === "int") return 1;
-  // Float: pick reasonable step from range magnitude.
   if (spec.min != null && spec.max != null) {
     const range = spec.max - spec.min;
     if (range <= 1) return 0.01;
@@ -50,6 +35,7 @@ export function SettingField({ spec, pending, onChange, onRevert }: SettingField
   const value = effectiveValue(spec, pending);
   const dirty = hasPendingEdit(spec, pending);
   const hasRange = (spec.type === "int" || spec.type === "float") && spec.min != null && spec.max != null;
+  const unit = unitFor(spec.key);
 
   const inputEl = (() => {
     switch (spec.type) {
@@ -62,7 +48,7 @@ export function SettingField({ spec, pending, onChange, onRevert }: SettingField
               min={spec.min as number}
               max={spec.max as number}
               step={stepFor(spec)}
-              unit={unitFor(spec.key)}
+              unit={unit}
               defaultValue={spec.default as number}
               ariaLabel={spec.key}
               onChange={(n) => onChange(spec.key, n)}
@@ -70,14 +56,17 @@ export function SettingField({ spec, pending, onChange, onRevert }: SettingField
           );
         }
         return (
-          <NumberInput
-            value={value as number}
-            min={spec.min ?? null}
-            max={spec.max ?? null}
-            step={stepFor(spec)}
-            ariaLabel={spec.key}
-            onChange={(n) => onChange(spec.key, n)}
-          />
+          <div class="setting-input-with-unit">
+            <NumberInput
+              value={value as number}
+              min={spec.min ?? null}
+              max={spec.max ?? null}
+              step={stepFor(spec)}
+              ariaLabel={spec.key}
+              onChange={(n) => onChange(spec.key, n)}
+            />
+            {unit && <span class="setting-input-unit">{unit}</span>}
+          </div>
         );
       case "bool":
         return (
@@ -107,6 +96,8 @@ export function SettingField({ spec, pending, onChange, onRevert }: SettingField
     }
   })();
 
+  const defaultDisplay = `${String(spec.default)}${unit ? " " + unit : ""}`;
+
   return (
     <div class={`setting-field${dirty ? " is-dirty" : ""}${hasRange ? " has-slider" : ""}`}>
       <div class="setting-field-info">
@@ -115,7 +106,7 @@ export function SettingField({ spec, pending, onChange, onRevert }: SettingField
           <div class="setting-field-tags">
             {spec.overridden && !dirty && (
               <Pill tone="accent" title="This value differs from the .env default and is being driven by the runtime_settings table">
-                Custom value
+                Custom
               </Pill>
             )}
             {dirty && (
@@ -124,17 +115,15 @@ export function SettingField({ spec, pending, onChange, onRevert }: SettingField
               </Pill>
             )}
             {spec.cron_reload && (
-              <Pill tone="dim" title="Changing this key hot-reloads the APScheduler cron jobs">
-                cron-reload
+              <Pill tone="dim" title="Changing this key hot-reloads the APScheduler cron jobs (no restart needed)">
+                hot-reload
               </Pill>
             )}
           </div>
         </div>
         <div class="setting-field-key">
           <code>{spec.key}</code>
-          <span class="setting-field-default">
-            default <strong>{String(spec.default)}</strong>
-          </span>
+          <span class="setting-field-default">default <strong>{defaultDisplay}</strong></span>
         </div>
         {spec.description && <div class="setting-field-desc">{spec.description}</div>}
       </div>

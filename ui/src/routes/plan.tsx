@@ -9,7 +9,7 @@ import {
   getWeather,
   getPvCalibration,
 } from "../lib/endpoints";
-import { Card } from "../components/common/Card";
+import { Widget } from "../components/common/Widget";
 import { Pill } from "../components/common/Pill";
 import { Spinner } from "../components/common/Spinner";
 import { DispatchPlanStrip } from "../components/forecast/DispatchPlanStrip";
@@ -79,92 +79,115 @@ export default function Plan() {
         )}
       </header>
 
-      <Card
-        title={<span>The plan <span class="muted">— next 48 h</span></span>}
-        subtitle={
-          timeline.data?.plan_date
-            ? `Plan ${timeline.data.plan_date}, solved ${timeline.data.run_at?.slice(11, 16) || "—"} UTC`
-            : "Cells = 30-min slots, coloured by dispatch kind. Blue line above = predicted SoC. Hover any cell."
-        }
-      >
-        {timeline.loading ? <Spinner label="Loading plan…" /> : <DispatchPlanStrip timeline={timeline.data} decisions={decisions.data} />}
-      </Card>
+      <div class="widget-grid">
+        <Widget
+          title="The plan — next 48 h"
+          icon="🎯"
+          tone="plan"
+          size="wide"
+          badge={timeline.data?.plan_date
+            ? `${timeline.data.plan_date} · ${timeline.data.run_at?.slice(11, 16) || "—"} UTC`
+            : undefined}
+        >
+          {timeline.loading ? <Spinner label="Loading plan…" /> : <DispatchPlanStrip timeline={timeline.data} decisions={decisions.data} />}
+        </Widget>
 
-      <Card title="Today's rates" subtitle={todayStats ? `Import: min ${pence(todayStats.min)} · avg ${pence(todayStats.avg)} · peak ${pence(todayStats.max)}` : "Import + export half-hourly."}>
-        {agileToday.loading ? (
-          <Spinner label="Loading today's rates…" />
-        ) : agileToday.data ? (
-          <RatesChart
-            importSlots={agileToday.data.import_slots}
-            exportSlots={agileToday.data.export_slots}
-            cheapP={cheapP}
-            peakP={peakP}
-          />
-        ) : <p class="muted">No data.</p>}
-      </Card>
+        <Widget
+          title="Today's rates"
+          icon="💷"
+          tone="tariff"
+          size="wide"
+          badge={todayStats ? `min ${pence(todayStats.min)} · avg ${pence(todayStats.avg)} · peak ${pence(todayStats.max)}` : undefined}
+        >
+          {agileToday.loading ? (
+            <Spinner label="Loading today's rates…" />
+          ) : agileToday.data ? (
+            <RatesChart
+              importSlots={agileToday.data.import_slots}
+              exportSlots={agileToday.data.export_slots}
+              cheapP={cheapP}
+              peakP={peakP}
+            />
+          ) : <p class="muted">No data.</p>}
+        </Widget>
 
-      <Card
-        title="Tomorrow's rates"
-        subtitle={
-          tomorrowStats
-            ? `Import: min ${pence(tomorrowStats.min)} · avg ${pence(tomorrowStats.avg)} · peak ${pence(tomorrowStats.max)}`
-            : "Published by Octopus around 16:00 local."
-        }
-      >
-        {agileTomorrow.loading ? (
-          <Spinner label="Checking tomorrow…" />
-        ) : agileTomorrow.data?.slots && agileTomorrow.data.slots.length > 0 ? (
-          <RatesChart
-            importSlots={agileTomorrow.data.slots}
-            cheapP={cheapP}
-            peakP={peakP}
-          />
-        ) : (
-          <div class="plan-empty">
-            <strong>Not published yet.</strong> Tomorrow's Agile rates land around 16:00 local once Octopus releases them.
-          </div>
-        )}
-      </Card>
+        <Widget
+          title="Tomorrow's rates"
+          icon="🔮"
+          tone="tariff"
+          size="wide"
+          badge={tomorrowStats
+            ? `min ${pence(tomorrowStats.min)} · avg ${pence(tomorrowStats.avg)} · peak ${pence(tomorrowStats.max)}`
+            : "Awaiting Octopus"}
+        >
+          {agileTomorrow.loading ? (
+            <Spinner label="Checking tomorrow…" />
+          ) : agileTomorrow.data?.slots && agileTomorrow.data.slots.length > 0 ? (
+            <RatesChart
+              importSlots={agileTomorrow.data.slots}
+              cheapP={cheapP}
+              peakP={peakP}
+            />
+          ) : (
+            <div class="plan-empty">
+              <strong>Not published yet.</strong> Tomorrow's Agile rates land around 16:00 local once Octopus releases them.
+            </div>
+          )}
+        </Widget>
 
-      <Card
-        title="Yesterday + what we actually used"
-        subtitle={
-          yesterdayCost != null
-            ? `Realised cost ~ £${yesterdayCost.toFixed(2)} (import kWh × Agile rate)`
+        <Widget
+          title="Yesterday + what we actually used"
+          icon="📊"
+          tone="savings"
+          size="wide"
+          badge={yesterdayCost != null
+            ? `realised ~ £${yesterdayCost.toFixed(2)}`
             : yesterdayStats
-              ? `Rates: min ${pence(yesterdayStats.min)} · avg ${pence(yesterdayStats.avg)} · peak ${pence(yesterdayStats.max)}`
-              : "Bars = rates, line = your import kWh per slot."
-        }
-      >
-        {agileYesterday.loading ? (
-          <Spinner label="Loading yesterday…" />
-        ) : agileYesterday.data ? (
-          <RatesChart
-            importSlots={agileYesterday.data.slots}
-            consumptionByStart={consumptionByStart}
-            cheapP={cheapP}
-            peakP={peakP}
-          />
-        ) : <p class="muted">No data.</p>}
-      </Card>
+              ? `min ${pence(yesterdayStats.min)} · avg ${pence(yesterdayStats.avg)} · peak ${pence(yesterdayStats.max)}`
+              : undefined}
+        >
+          {agileYesterday.loading ? (
+            <Spinner label="Loading yesterday…" />
+          ) : agileYesterday.data ? (
+            <RatesChart
+              importSlots={agileYesterday.data.slots}
+              consumptionByStart={consumptionByStart}
+              cheapP={cheapP}
+              peakP={peakP}
+            />
+          ) : <p class="muted">No data.</p>}
+        </Widget>
 
-      <Card title="Last 7 days · daily mean" subtitle="Mean rate per day, with min/max whisker. Anchored to the same Agile import tariff.">
-        {sevenDay.loading ? (
-          <Spinner label="Loading week…" />
-        ) : sevenDay.data.length === 0 ? (
-          <p class="muted">No history loaded.</p>
-        ) : (
-          <SevenDayBar days={sevenDay.data} />
-        )}
-      </Card>
+        <Widget
+          title="Last 7 days · daily mean"
+          icon="📈"
+          tone="tariff"
+          size="large"
+          badge="min/max whisker"
+        >
+          {sevenDay.loading ? (
+            <Spinner label="Loading week…" />
+          ) : sevenDay.data.length === 0 ? (
+            <p class="muted">No history loaded.</p>
+          ) : (
+            <SevenDayBar days={sevenDay.data} />
+          )}
+        </Widget>
 
-      <Card title="Solar forecast" subtitle="48-hour PV forecast (Quartz / Open-Meteo).">
-        {weather.loading || !weather.data ? (
-          <Spinner label="Loading forecast…" />
-        ) : (
-          <PvSparkline data={weather.data.forecast} />
-        )}
-      </Card>
+        <Widget
+          title="Solar forecast"
+          icon="☀"
+          tone="default"
+          size="medium"
+          badge="48 h"
+        >
+          {weather.loading || !weather.data ? (
+            <Spinner label="Loading forecast…" />
+          ) : (
+            <PvSparkline data={weather.data.forecast} />
+          )}
+        </Widget>
+      </div>
     </div>
   );
 }

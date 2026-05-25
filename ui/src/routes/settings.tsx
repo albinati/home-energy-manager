@@ -12,7 +12,7 @@ import { Modal } from "../components/common/Modal";
 import { ModeSwitcher } from "../components/settings/ModeSwitcher";
 import { SettingGroup } from "../components/settings/SettingGroup";
 import { BatchBar } from "../components/settings/BatchBar";
-import { SETTINGS_GROUPS, labelFor } from "../components/settings/groups";
+import { SETTINGS_GROUPS, labelFor, type GroupSpec } from "../components/settings/groups";
 import type { SettingSpec, SimulateBatchResponse } from "../lib/types";
 import "../components/settings/settings.css";
 
@@ -21,12 +21,34 @@ function isEqual(a: unknown, b: unknown): boolean {
   return a === b;
 }
 
+function renderGroup(
+  group: GroupSpec,
+  specByKey: Map<string, SettingSpec>,
+  pending: Record<string, unknown>,
+  onChange: (key: string, value: unknown) => void,
+  onRevert: (key: string) => void,
+) {
+  const specs = group.keys.map((k) => specByKey.get(k)).filter((s): s is SettingSpec => !!s);
+  if (specs.length === 0) return null;
+  return (
+    <SettingGroup
+      key={group.id}
+      group={group}
+      specs={specs}
+      pending={pending}
+      onChange={onChange}
+      onRevert={onRevert}
+    />
+  );
+}
+
 export default function Settings() {
   const settings = useFetch(getSettings, []);
   const [pending, setPending] = useState<Record<string, unknown>>({});
   const [busy, setBusy] = useState(false);
   const [simResult, setSimResult] = useState<SimulateBatchResponse | null>(null);
   const [simOpen, setSimOpen] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   const specByKey = useMemo(() => {
     const map = new Map<string, SettingSpec>();
@@ -158,20 +180,36 @@ export default function Settings() {
         />
       )}
 
-      {SETTINGS_GROUPS.map((group) => {
-        const specs = group.keys.map((k) => specByKey.get(k)).filter((s): s is SettingSpec => !!s);
-        if (specs.length === 0) return null;
-        return (
-          <SettingGroup
-            key={group.id}
-            group={group}
-            specs={specs}
-            pending={pending}
-            onChange={onChange}
-            onRevert={onRevert}
-          />
-        );
-      })}
+      {/* Everyday groups */}
+      {SETTINGS_GROUPS.filter((g) => !g.advanced).map((group) =>
+        renderGroup(group, specByKey, pending, onChange, onRevert)
+      )}
+
+      {/* Advanced toggle */}
+      <button
+        type="button"
+        class="settings-advanced-toggle"
+        onClick={() => setShowAdvanced((v) => !v)}
+      >
+        <span class="settings-advanced-toggle-icon">{showAdvanced ? "▾" : "▸"}</span>
+        <span class="settings-advanced-toggle-label">
+          {showAdvanced ? "Hide advanced settings" : "Show advanced settings"}
+        </span>
+        <span class="settings-advanced-toggle-count">
+          {SETTINGS_GROUPS.filter((g) => g.advanced).reduce((n, g) => n + g.keys.length, 0)} keys ·
+          {" "}{SETTINGS_GROUPS.filter((g) => g.advanced).length} groups
+        </span>
+      </button>
+      {showAdvanced && (
+        <div class="settings-advanced-hint">
+          Schedule timings, calibration, terminal SoC valuation, legionella prediction, admin gates. Changing these may affect dispatch behaviour — pair edits with a Simulate.
+        </div>
+      )}
+
+      {/* Advanced groups */}
+      {showAdvanced && SETTINGS_GROUPS.filter((g) => g.advanced).map((group) =>
+        renderGroup(group, specByKey, pending, onChange, onRevert)
+      )}
 
       <BatchBar
         pendingCount={pendingCount}
