@@ -301,3 +301,122 @@
   gap: var(--space-1);
   flex-wrap: wrap;
 }
+
+/* Tariff strip */
+.tariff-strip {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.tariff-strip-cells {
+  display: grid;
+  grid-template-columns: repeat(48, 1fr);
+  gap: 1px;
+  height: 36px;
+  background: var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  padding: 1px;
+}
+.tariff-cell {
+  position: relative;
+  min-width: 0;
+  transition: opacity 120ms, transform 120ms;
+}
+.tariff-cell:hover {
+  transform: scaleY(1.15);
+  z-index: 2;
+}
+.tariff-cell.is-past { opacity: 0.5; }
+.tariff-cell.is-current {
+  outline: 2px solid var(--text);
+  outline-offset: -1px;
+  opacity: 1 !important;
+  z-index: 3;
+}
+.tariff-cell-marker {
+  position: absolute;
+  top: -6px;
+  bottom: -6px;
+  left: 50%;
+  width: 2px;
+  background: var(--text);
+  transform: translateX(-1px);
+  pointer-events: none;
+}
+
+.tariff-cell--negative { background: var(--neg-price); }
+.tariff-cell--cheap    { background: var(--cheap); }
+.tariff-cell--standard { background: var(--standard); }
+.tariff-cell--peak     { background: var(--peak); }
+
+.tariff-strip-axis {
+  display: flex;
+  justify-content: space-between;
+  font-size: var(--font-xs);
+  color: var(--text-mute);
+  font-variant-numeric: tabular-nums;
+  padding: 0 2px;
+}
+.tariff-strip-legend {
+  display: flex;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  font-size: var(--font-xs);
+  color: var(--text-dim);
+  margin-top: var(--space-1);
+}
+.tariff-swatch {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.tariff-swatch-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+.tariff-strip-empty {
+  padding: var(--space-3);
+  text-align: center;
+}
+
+/* Price summary */
+.price-summary {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-2);
+}
+@media (max-width: 720px) { .price-summary { grid-template-columns: repeat(2, 1fr); } }
+
+.price-stat {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-left: 3px solid var(--border-strong);
+}
+.price-stat-label {
+  font-size: var(--font-xs);
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.price-stat-value {
+  font-size: var(--font-lg);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+.price-stat-sub {
+  font-size: var(--font-xs);
+  color: var(--text-mute);
+  font-variant-numeric: tabular-nums;
+}
+.price-stat--cheap    { border-left-color: var(--cheap); }
+.price-stat--peak     { border-left-color: var(--peak); }
+.price-stat--negative { border-left-color: var(--neg-price); }
+.price-stat--default  { border-left-color: var(--border-strong); }

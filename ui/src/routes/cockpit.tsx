@@ -5,6 +5,7 @@ import {
   getSchedulerTimeline,
   getDecisionsLatest,
   getExecutionToday,
+  getAgileToday,
 } from "../lib/endpoints";
 import { Card } from "../components/common/Card";
 import { Pill } from "../components/common/Pill";
@@ -13,6 +14,8 @@ import { PowerFlow } from "../components/cockpit/PowerFlow";
 import { BatteryWidget } from "../components/cockpit/BatteryWidget";
 import { DispatchReason } from "../components/cockpit/DispatchReason";
 import { NextTransitionStrip } from "../components/cockpit/NextTransitionStrip";
+import { TariffStrip } from "../components/cockpit/TariffStrip";
+import { PriceSummary } from "../components/cockpit/PriceSummary";
 import { hhmm, kw, kwh, tempC, relTime } from "../lib/format";
 import type { DispatchDecisionsResponse } from "../lib/types";
 import "../components/cockpit/cockpit.css";
@@ -22,6 +25,7 @@ export default function Cockpit() {
   const timeline = usePoll(getSchedulerTimeline, 5 * 60_000);
   const decisions = usePoll(getDecisionsLatest, 60_000);
   const execution = useFetch(getExecutionToday, []);
+  const agile = useFetch(getAgileToday, []);
 
   const currentReason = useMemo(
     () => extractCurrentReason(now.data?.now_utc, decisions.data),
@@ -80,6 +84,22 @@ export default function Cockpit() {
 
       <Card title="What's happening now" subtitle="Slot kind, current prices, and the LP's reasoning.">
         <DispatchReason now={data} decisionReason={currentReason} />
+      </Card>
+
+      <Card
+        title="Today's tariff"
+        subtitle="Half-hourly Octopus Agile import prices. Cells colour by band; the marker shows the current slot."
+      >
+        <TariffStrip
+          agile={agile.data}
+          cheapP={data.thresholds?.cheap_p ?? 12}
+          peakP={data.thresholds?.peak_p ?? 28}
+          nowUtc={data.now_utc}
+        />
+      </Card>
+
+      <Card title="Price summary">
+        <PriceSummary agile={agile.data} currentP={data.current_slot.price_import_p} />
       </Card>
 
       <Card title="Live metrics">
