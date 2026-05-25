@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "preact/hooks";
 import { makeChart, baseOption, chartTheme, type EChartsType } from "../../lib/charts";
+import { useResolvedTheme } from "../../lib/theme";
 import type { AgileSlot } from "../../lib/types";
 
 interface RatesChartProps {
@@ -17,6 +18,7 @@ interface RatesChartProps {
 export function RatesChart({ importSlots, exportSlots, consumptionByStart, cheapP, peakP, height = 220 }: RatesChartProps) {
   const ref = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<EChartsType | null>(null);
+  const theme = useResolvedTheme();
 
   useEffect(() => {
     if (!ref.current) return;
@@ -131,7 +133,7 @@ export function RatesChart({ importSlots, exportSlots, consumptionByStart, cheap
       yAxis: yAxes,
       series,
     }, { notMerge: true });
-  }, [importSlots, exportSlots, consumptionByStart, cheapP, peakP]);
+  }, [importSlots, exportSlots, consumptionByStart, cheapP, peakP, theme]);
 
   return <div ref={ref} style={{ width: "100%", height: `${height}px` }} />;
 }

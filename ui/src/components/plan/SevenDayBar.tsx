@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "preact/hooks";
 import { makeChart, baseOption, chartTheme, type EChartsType } from "../../lib/charts";
+import { useResolvedTheme } from "../../lib/theme";
 import type { AgileDaySlotsResponse } from "../../lib/types";
 
 interface SevenDayBarProps {
@@ -11,6 +12,7 @@ interface SevenDayBarProps {
 export function SevenDayBar({ days }: SevenDayBarProps) {
   const ref = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<EChartsType | null>(null);
+  const theme = useResolvedTheme();
 
   useEffect(() => {
     if (!ref.current) return;
@@ -99,7 +101,7 @@ export function SevenDayBar({ days }: SevenDayBarProps) {
         },
       ],
     }, { notMerge: true });
-  }, [days]);
+  }, [days, theme]);
 
   return <div ref={ref} style={{ width: "100%", height: "200px" }} />;
 }

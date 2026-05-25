@@ -1,8 +1,8 @@
-/* Design tokens — ported from the previous cockpit.css palette, extended
- * with a spacing scale and a small-text hierarchy. Stays dark-only for now;
- * the colours are tuned for a 0b0f17 background and high-contrast data. */
+/* Design tokens — dark by default, light variant under .theme-light.
+ * Selection is driven by src/lib/theme.ts which toggles a class on <html>.
+ * Tariff/energy/chart colours stay the same in both themes for legibility. */
 
-:root {
+:root, :root.theme-dark {
   /* surfaces */
   --bg: #0b0f17;
   --bg-card: #111827;
@@ -72,4 +72,59 @@
 
   /* legacy aliases kept for parity */
   --gap: var(--space-3);
+}
+
+/* Light theme — applied when src/lib/theme.ts sets .theme-light on <html>. */
+:root.theme-light {
+  --bg: #f8fafc;
+  --bg-card: #ffffff;
+  --bg-card-2: #f1f5f9;
+  --bg-card-3: #e2e8f0;
+  --border: #d1d5db;
+  --border-strong: #9ca3af;
+
+  --text: #0f172a;
+  --text-dim: #475569;
+  --text-mute: #64748b;
+
+  --accent: #2563eb;
+  --accent-dim: #1e40af;
+  --ok: #059669;
+  --warn: #d97706;
+  --bad: #dc2626;
+
+  --neg-price: #2563eb;
+  --cheap: #059669;
+  --standard: #94a3b8;
+  --peak: #d97706;
+  --peak-export: #dc2626;
+
+  --pv: #d97706;
+  --batt: #059669;
+  --grid: #2563eb;
+  --house: #9333ea;
+  --import: #dc2626;
+  --export: #059669;
+
+  --shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+  --shadow-lg: 0 10px 30px rgba(15, 23, 42, 0.12);
+  --glow-accent: 0 0 16px rgba(37, 99, 235, 0.18);
+  --glow-ok: 0 0 14px rgba(5, 150, 105, 0.18);
+}
+
+/* Respect prefers-color-scheme on first paint when JS hasn't applied a class
+ * yet. As soon as src/lib/theme.ts runs it adds .theme-dark or .theme-light
+ * which overrides this. */
+@media (prefers-color-scheme: light) {
+  :root:not(.theme-dark):not(.theme-light) {
+    --bg: #f8fafc;
+    --bg-card: #ffffff;
+    --bg-card-2: #f1f5f9;
+    --bg-card-3: #e2e8f0;
+    --border: #d1d5db;
+    --border-strong: #9ca3af;
+    --text: #0f172a;
+    --text-dim: #475569;
+    --text-mute: #64748b;
+  }
 }
