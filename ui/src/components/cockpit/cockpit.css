@@ -49,14 +49,99 @@
 }
 .powerflow-svg {
   width: 100%;
-  max-width: 480px;
+  max-width: 520px;
   height: auto;
 }
 @keyframes pf-dash {
   to { stroke-dashoffset: -28; }
 }
-@keyframes pf-dash-rev {
-  to { stroke-dashoffset: 28; }
+
+/* Battery widget */
+.battery-widget {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.battery-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: var(--space-3);
+}
+.battery-label {
+  font-size: var(--font-xs);
+  color: var(--text-dim);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.battery-pct {
+  font-size: 2.6rem;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.battery-dir {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-variant-numeric: tabular-nums;
+}
+.battery-dir-arrow {
+  font-size: 1.2rem;
+  line-height: 1;
+}
+.battery-dir-label {
+  font-size: var(--font-sm);
+  font-weight: 500;
+}
+.battery-dir-kw {
+  font-size: var(--font-md);
+  font-weight: 600;
+}
+.battery-bar {
+  position: relative;
+  height: 16px;
+  border-radius: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+.battery-bar-fill {
+  height: 100%;
+  border-radius: 7px 0 0 7px;
+  transition: width 400ms ease, background 200ms ease;
+}
+.battery-bar-mark {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  background: var(--text-mute);
+  transform: translateX(-1px);
+  opacity: 0.6;
+  pointer-events: auto;
+}
+.battery-stats {
+  display: flex;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+.battery-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.battery-stat-label {
+  font-size: var(--font-xs);
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.battery-stat-value {
+  font-size: var(--font-sm);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
 /* SoC ring */

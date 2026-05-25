@@ -1,15 +1,16 @@
 import { useMemo } from "preact/hooks";
-import { usePoll } from "../lib/poll";
+import { usePoll, useFetch } from "../lib/poll";
 import {
   getCockpitNow,
   getSchedulerTimeline,
   getDecisionsLatest,
+  getExecutionToday,
 } from "../lib/endpoints";
 import { Card } from "../components/common/Card";
 import { Pill } from "../components/common/Pill";
 import { Spinner } from "../components/common/Spinner";
 import { PowerFlow } from "../components/cockpit/PowerFlow";
-import { SoCRing } from "../components/cockpit/SoCRing";
+import { BatteryWidget } from "../components/cockpit/BatteryWidget";
 import { DispatchReason } from "../components/cockpit/DispatchReason";
 import { NextTransitionStrip } from "../components/cockpit/NextTransitionStrip";
 import { hhmm, kw, kwh, tempC, relTime } from "../lib/format";
@@ -20,6 +21,7 @@ export default function Cockpit() {
   const now = usePoll(getCockpitNow, 20_000);
   const timeline = usePoll(getSchedulerTimeline, 5 * 60_000);
   const decisions = usePoll(getDecisionsLatest, 60_000);
+  const execution = useFetch(getExecutionToday, []);
 
   const currentReason = useMemo(
     () => extractCurrentReason(now.data?.now_utc, decisions.data),
@@ -71,8 +73,8 @@ export default function Cockpit() {
           </div>
         </Card>
 
-        <Card title="Battery">
-          <SoCRing socPct={s.soc_pct} socKwh={s.soc_kwh} batteryKw={s.battery_kw} />
+        <Card title="Battery" subtitle="State of charge, today's range, next planned event.">
+          <BatteryWidget state={s} timeline={timeline.data} execution={execution.data} />
         </Card>
       </div>
 

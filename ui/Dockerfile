@@ -44,12 +44,6 @@ RUN apk add --no-cache gettext
 # Built SPA → nginx html root
 COPY --from=build /app/dist/  /usr/share/nginx/html/
 
-# Legacy pages — copied verbatim, served alongside the SPA. The new SPA owns
-# /, /cockpit, /forecast, /settings; nginx serves these legacy HTML files at
-# /history, /insights, /workbench. See conf/nginx.conf.template for the
-# routing rules.
-COPY legacy/                  /usr/share/nginx/html/
-
 # nginx config — single template; entrypoint envsubsts HEM_API_URL into it
 COPY conf/nginx.conf.template  /etc/nginx/templates/default.conf.template
 

@@ -27,20 +27,13 @@ ui/
 │   ├── components/             shared + per-page UI
 │   ├── lib/                    api, types, polling, charts, formatting, toast
 │   └── styles/                 design tokens + base/shell CSS
-├── legacy/                     static HTML kept from the previous UI
-│   ├── history.html            /history
-│   ├── insights.html           /insights
-│   ├── workbench.html          /workbench
-│   ├── css/                    legacy stylesheets
-│   └── js/                     legacy vanilla JS
 ├── conf/
 │   └── nginx.conf.template     server config; ${HEM_API_URL} substituted at boot
 └── ui-entrypoint.sh            generates /usr/share/nginx/html/config.js at boot
 ```
 
-The SPA owns `/`, `/cockpit`, `/forecast`, `/settings`. The legacy HTML pages
-remain at `/history`, `/insights`, `/workbench` and are full-page-reloaded (not
-SPA-routed) from the top nav. A follow-up PR will rebuild those routes too.
+The SPA owns `/`, `/cockpit`, `/forecast`, `/settings`. The previous
+`/history`, `/insights`, `/workbench` vanilla HTML pages have been retired.
 
 ## Stack
 
@@ -114,10 +107,3 @@ docker run --rm -p 8080:80 \
   ghcr.io/albinati/home-energy-manager-ui:main
 ```
 
-## Why coexist with the legacy pages?
-
-The rebuild cut the four highest-impact pages (landing, cockpit, forecast,
-settings) in one PR. Rebuilding the operator pages (history, insights,
-workbench) needs more API plumbing — they keep working as vanilla HTML in
-the meantime. nginx's `try_files $uri $uri.html` resolves them as static
-HTML; only paths that miss every file fall back to the SPA's `index.html`.

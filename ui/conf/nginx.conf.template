@@ -51,21 +51,13 @@ server {
     }
 
     # Routes — resolution order:
-    #   1. $uri        → exact file (e.g. /history.html, /assets/*.js)
-    #   2. $uri.html   → legacy pages addressed by clean path
-    #                    (/history → /history.html copied from legacy/)
-    #   3. $uri/       → directory index
-    #   4. /index.html → SPA fallback (Vite owns /, /cockpit, /forecast, /settings;
-    #                    wouter resolves client-side once index.html boots)
+    #   1. $uri        → exact file (e.g. /favicon.svg, /assets/*.js)
+    #   2. /index.html → SPA fallback (wouter resolves all routes client-side)
     #
-    # The `$uri.html` step is critical for legacy pages: clicking the nav tab to
-    # /history requests the bare path; without this step nginx tries `history`
-    # then `history/`, both miss, and the request falls through to /index.html
-    # — which would boot the SPA's "Not found" route instead of serving the
-    # legacy history page. /api/ + /healthz + /config.js are handled by their
-    # own location blocks above; everything else is a page or a static asset.
+    # /api/ + /healthz + /config.js are handled by their own location blocks
+    # above; everything else is either a static asset or the SPA entry.
     location / {
         add_header Cache-Control "no-cache" always;
-        try_files $uri $uri.html $uri/ /index.html;
+        try_files $uri /index.html;
     }
 }
