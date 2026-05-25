@@ -1,5 +1,6 @@
 import { watts } from "../../lib/format";
 import type { CockpitState } from "../../lib/types";
+import "./cockpit.css";
 
 interface PowerFlowProps {
   state: CockpitState;

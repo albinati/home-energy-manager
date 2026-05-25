@@ -1,4 +1,3 @@
-import { useEffect, useState } from "preact/hooks";
 import { usePoll, useFetch } from "../lib/poll";
 import {
   getCockpitNow,
@@ -7,7 +6,6 @@ import {
   getWeather,
   getSchedulerTimeline,
   getExecutionToday,
-  getEnergyMonthly,
   getDecisionsLatest,
   getAttributionDay,
 } from "../lib/endpoints";
@@ -19,38 +17,10 @@ import { DispatchReason } from "../components/cockpit/DispatchReason";
 import { TariffWidget } from "../components/cockpit/TariffWidget";
 import { ThermalWidget } from "../components/cockpit/ThermalWidget";
 import { ComingUp } from "../components/home/ComingUp";
-import { SavingsSparkline } from "../components/home/SavingsSparkline";
 import { Hero } from "../components/home/Hero";
 import { ExportsWidget } from "../components/home/ExportsWidget";
-import { gbpSigned } from "../lib/format";
-import type { MonthlyEnergy, DispatchDecisionsResponse } from "../lib/types";
+import type { DispatchDecisionsResponse } from "../lib/types";
 import "../components/home/home.css";
-
-function lastMonths(n: number): string[] {
-  const now = new Date();
-  const out: string[] = [];
-  for (let i = n - 1; i >= 0; i--) {
-    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-    out.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
-  }
-  return out;
-}
-
-function useMonthlyHistory(n: number) {
-  const [data, setData] = useState<MonthlyEnergy[]>([]);
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    let alive = true;
-    setLoading(true);
-    Promise.all(lastMonths(n).map((m) => getEnergyMonthly(m).catch(() => null))).then((r) => {
-      if (!alive) return;
-      setData(r.filter((x): x is MonthlyEnergy => !!x));
-      setLoading(false);
-    });
-    return () => { alive = false; };
-  }, [n]);
-  return { data, loading };
-}
 
 export default function Landing() {
   const now = usePoll(getCockpitNow, 20_000);
@@ -61,7 +31,6 @@ export default function Landing() {
   const execution = useFetch(getExecutionToday, []);
   const decisions = useFetch(getDecisionsLatest, []);
   const attribution = useFetch(() => getAttributionDay(), []);
-  const monthly = useMonthlyHistory(3);
 
   if (now.loading && !now.data) {
     return <div class="home"><Spinner label="Loading dashboard…" /></div>;
@@ -119,25 +88,6 @@ export default function Landing() {
           />
         </Widget>
 
-        <Widget title="Monthly savings trend" icon="💚" tone="savings" size="large" badge={`last ${monthly.data.length || 3} mo`}>
-          <div class="home-savings">
-            <div class="home-savings-headline">
-              <div class="home-savings-headline-value">
-                {monthly.data.length > 0
-                  ? gbpSigned(monthly.data[monthly.data.length - 1].savings_vs_svt_gbp ?? 0)
-                  : monthly.loading ? <SkelText w="5rem" /> : "—"}
-              </div>
-              <div class="home-savings-headline-label">This month vs SVT</div>
-            </div>
-            <div class="home-savings-aside">
-              {monthly.loading ? (
-                <Spinner size="sm" label="loading…" />
-              ) : (
-                <SavingsSparkline monthly={monthly.data} />
-              )}
-            </div>
-          </div>
-        </Widget>
       </div>
     </div>
   );
@@ -152,8 +102,4 @@ function extractCurrentReason(nowUtc: string | undefined, decisions: DispatchDec
     if (d.slot_time_utc && Date.parse(d.slot_time_utc) <= t) return d.reason || null;
   }
   return null;
-}
-
-function SkelText({ w }: { w: string }) {
-  return <span class="skel-text" style={{ width: w }} />;
 }

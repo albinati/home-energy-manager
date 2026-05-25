@@ -1,5 +1,5 @@
 import type { CockpitNow } from "../../lib/types";
-import { pence, slotKindLabel, slotKindColorVar, hhmm, kw, pct } from "../../lib/format";
+import { slotKindLabel, slotKindColorVar, hhmm, kw, pct } from "../../lib/format";
 import "./dispatch-reason.css";
 
 interface DispatchReasonProps {
@@ -30,10 +30,6 @@ export function DispatchReason({ now, decisionReason }: DispatchReasonProps) {
 
       <div class="rightnow-meta">
         <MetaChip label={slotKindLabel(kind)} color={kindColor} icon="●" />
-        <MetaChip label={`${pence(slot.price_import_p)} in`} />
-        <MetaChip label={`${pence(slot.price_export_p)} out`} />
-        <MetaChip label={`SoC ${pct(now.state.soc_pct, 0)}`} />
-        <MetaChip label={`Fox: ${slot.fox_mode || "—"}`} />
       </div>
 
       {decisionReason && (

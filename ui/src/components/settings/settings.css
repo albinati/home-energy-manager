@@ -277,32 +277,26 @@
   min-width: 1.5rem;
 }
 
-/* Horizontal tabs */
+/* Settings tab pills — wrap onto multiple rows so all groups are visible
+ * at once. No horizontal scroll. */
 .settings-tabs {
-  position: sticky;
-  top: 64px;
-  z-index: 30;
-  background: var(--bg);
-  border-bottom: 1px solid var(--border);
-  margin: 0 calc(var(--space-4) * -1);
-  padding: 0 var(--space-4);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-2);
 }
 .settings-tabs-inner {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--space-1);
   align-items: center;
-  overflow-x: auto;
-  scrollbar-width: thin;
-  padding: var(--space-2) 0;
 }
-.settings-tabs-inner::-webkit-scrollbar { height: 4px; }
-.settings-tabs-inner::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 .settings-tab {
   display: inline-flex;
   align-items: center;
   gap: var(--space-1);
   padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-pill);
   background: transparent;
   border: 1px solid transparent;
   color: var(--text-dim);
@@ -313,7 +307,7 @@
   transition: background 100ms, color 100ms, border-color 100ms;
 }
 .settings-tab:hover {
-  background: var(--bg-card);
+  background: var(--bg);
   color: var(--text);
 }
 .settings-tab.is-active {
@@ -348,7 +342,7 @@
 .settings-tabs-sep {
   display: inline-block;
   width: 1px;
-  height: 20px;
+  height: 24px;
   background: var(--border);
   margin: 0 var(--space-2);
 }

@@ -100,21 +100,20 @@
 .battery-widget-dir {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  flex-wrap: wrap;
   margin-top: var(--space-1);
   font-variant-numeric: tabular-nums;
+  font-size: var(--font-sm);
 }
+.battery-widget-dir > * { margin-right: 6px; }
+.battery-widget-dir > *:last-child { margin-right: 0; }
 .battery-widget-dir-icon {
   font-size: 1.05rem;
   line-height: 1;
 }
-.battery-widget-dir-label {
-  font-size: var(--font-sm);
-  font-weight: 500;
-}
+.battery-widget-dir-sep { color: var(--text-mute); }
 .battery-widget-dir-kw {
-  font-size: var(--font-md);
-  font-weight: 600;
+  font-weight: 700;
 }
 .battery-widget-meta {
   display: flex;
@@ -320,6 +319,7 @@
 .tariff-strip-cells {
   display: grid;
   grid-template-columns: repeat(48, 1fr);
+  grid-auto-rows: 1fr;
   gap: 1px;
   height: 36px;
   background: var(--border);
@@ -330,6 +330,8 @@
 .tariff-cell {
   position: relative;
   min-width: 0;
+  min-height: 0;
+  height: 100%;
   transition: opacity 120ms, transform 120ms;
 }
 .tariff-cell:hover {
@@ -439,41 +441,40 @@
   to { transform: rotate(360deg); }
 }
 
-.thermal-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: var(--space-3);
-  align-items: end;
-}
-.thermal-metric {
+.thermal-rows {
   display: flex;
   flex-direction: column;
+  gap: var(--space-2);
+}
+.thermal-row {
+  display: grid;
+  grid-template-columns: 24px 1fr auto;
+  gap: var(--space-2);
   align-items: center;
-  gap: 4px;
-  text-align: center;
+  padding: var(--space-2) var(--space-3);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
 }
-.thermal-metric-icon {
-  font-size: 1.5rem;
+.thermal-row-icon {
+  font-size: 1.1rem;
   line-height: 1;
-  height: 1.5rem;
 }
-.thermal-metric-label {
+.thermal-row-label {
+  font-size: var(--font-sm);
+  font-weight: 600;
+}
+.thermal-row-sub {
   font-size: var(--font-xs);
-  color: var(--text-dim);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  color: var(--text-mute);
+  margin-left: var(--space-2);
 }
-.thermal-metric-value {
+.thermal-row-temp {
   font-size: var(--font-lg);
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.01em;
 }
-.thermal-metric-sub {
-  font-size: 0.7rem;
-  color: var(--text-mute);
-}
-.thermal-tank-svg { height: 80px; }
 
 /* Price summary */
 .price-summary {

@@ -1,5 +1,6 @@
 import type { AgileTodayResponse, CockpitNow } from "../../lib/types";
 import { hhmm, pence, slotKindLabel } from "../../lib/format";
+import "./cockpit.css";
 
 interface TariffWidgetProps {
   agile: AgileTodayResponse | null;

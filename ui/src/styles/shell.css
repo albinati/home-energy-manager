@@ -14,7 +14,7 @@
   position: sticky;
   top: 0;
   z-index: 40;
-  background: rgba(11, 15, 23, 0.85);
+  background: color-mix(in srgb, var(--bg) 85%, transparent);
   backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--border);
   padding-top: env(safe-area-inset-top);

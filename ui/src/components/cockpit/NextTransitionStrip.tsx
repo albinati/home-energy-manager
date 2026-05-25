@@ -1,5 +1,6 @@
 import { hhmm, slotKindLabel, slotKindColorVar } from "../../lib/format";
 import type { SchedulerTimeline, TimelineSlot } from "../../lib/types";
+import "./cockpit.css";
 
 interface NextTransitionStripProps {
   timeline: SchedulerTimeline | null;

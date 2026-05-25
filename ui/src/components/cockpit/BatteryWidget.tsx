@@ -1,5 +1,6 @@
 import { kw, kwh, pct } from "../../lib/format";
 import type { CockpitState, SchedulerTimeline, ExecutionTodayResponse } from "../../lib/types";
+import "./cockpit.css";
 
 interface BatteryWidgetProps {
   state: CockpitState;
@@ -7,20 +8,19 @@ interface BatteryWidgetProps {
   execution: ExecutionTodayResponse | null;
 }
 
-// Stylised battery cell with animated fill + direction icon. Today's
-// min/max SoC and the next planned charge/discharge come from the LP
-// timeline + execution history.
+// Stylised battery cell with animated fill + a single-line direction summary.
+// Today's range + next planned event in the footer.
 export function BatteryWidget({ state, timeline, execution }: BatteryWidgetProps) {
   const socPct = state.soc_pct ?? 0;
   const charging = state.battery_kw > 0.05;
   const discharging = state.battery_kw < -0.05;
   const dirLabel = charging ? "Charging" : discharging ? "Discharging" : "Idle";
   const dirColor = charging ? "var(--ok)" : discharging ? "var(--warn)" : "var(--text-mute)";
+  const dirArrow = charging ? "⚡" : discharging ? "↓" : "·";
 
   const todayRange = computeTodayRange(execution);
   const nextEvent = nextSocEvent(timeline);
 
-  // Fill colour by SoC band
   let fillColor = "var(--ok)";
   if (socPct < 20) fillColor = "var(--bad)";
   else if (socPct < 50) fillColor = "var(--warn)";
@@ -33,10 +33,13 @@ export function BatteryWidget({ state, timeline, execution }: BatteryWidgetProps
           <div class="battery-widget-pct">{pct(socPct, 0)}</div>
           <div class="battery-widget-kwh">{kwh(state.soc_kwh)}</div>
           <div class="battery-widget-dir" style={{ color: dirColor }}>
-            <DirIcon charging={charging} discharging={discharging} />
-            <span class="battery-widget-dir-label">{dirLabel}</span>
+            <span class="battery-widget-dir-icon">{dirArrow}</span>
+            <span>{dirLabel}</span>
             {Math.abs(state.battery_kw) > 0.05 && (
-              <span class="battery-widget-dir-kw">{kw(Math.abs(state.battery_kw))}</span>
+              <>
+                <span class="battery-widget-dir-sep">·</span>
+                <span class="battery-widget-dir-kw">{kw(Math.abs(state.battery_kw))}</span>
+              </>
             )}
           </div>
         </div>
@@ -64,15 +67,13 @@ export function BatteryWidget({ state, timeline, execution }: BatteryWidgetProps
   );
 }
 
-// Battery cell shape — vertical rectangle with terminal at top. Fill animates
-// to current SoC. When charging/discharging an overlay shimmer plays.
 function BatteryShape({ pct, fillColor, charging, discharging }: {
   pct: number; fillColor: string; charging: boolean; discharging: boolean;
 }) {
   const clamped = Math.max(0, Math.min(100, pct));
   const W = 80;
   const H = 130;
-  const term = 12;     // terminal height
+  const term = 12;
   const bodyTop = term;
   const bodyH = H - term;
   const fillH = (clamped / 100) * (bodyH - 6);
@@ -89,13 +90,9 @@ function BatteryShape({ pct, fillColor, charging, discharging }: {
           <stop offset="100%" stop-color={fillColor} stop-opacity="1" />
         </linearGradient>
       </defs>
-
-      {/* Terminal */}
       <rect x={(W - 32) / 2} y={2} width={32} height={term - 2} rx="2" fill="var(--border-strong)" />
-      {/* Body outline */}
       <rect x={4} y={bodyTop} width={W - 8} height={bodyH} rx="6"
             fill="var(--bg)" stroke="var(--border-strong)" stroke-width="2" />
-      {/* Fill */}
       <rect
         x={7}
         y={bodyTop + bodyH - 3 - fillH}
@@ -105,10 +102,7 @@ function BatteryShape({ pct, fillColor, charging, discharging }: {
         fill="url(#batt-fill-grad)"
         style={{ transition: "y 600ms ease, height 600ms ease, fill 200ms ease" }}
       />
-      {/* Shine highlight */}
       <rect x={7} y={bodyTop + 3} width={W - 14} height={(bodyH - 6) / 2} rx="4" fill="url(#batt-shine)" />
-
-      {/* Direction overlay */}
       {(charging || discharging) && (
         <g class={charging ? "battery-charge-overlay" : "battery-discharge-overlay"}>
           <text
@@ -125,12 +119,6 @@ function BatteryShape({ pct, fillColor, charging, discharging }: {
       )}
     </svg>
   );
-}
-
-function DirIcon({ charging, discharging }: { charging: boolean; discharging: boolean }) {
-  if (charging) return <span class="battery-widget-dir-icon">⚡</span>;
-  if (discharging) return <span class="battery-widget-dir-icon">↓</span>;
-  return <span class="battery-widget-dir-icon">•</span>;
 }
 
 function computeTodayRange(exec: ExecutionTodayResponse | null): { min: number; max: number } | null {

@@ -7,10 +7,10 @@ interface ExportsWidgetProps {
   yesterday: AttributionDay | null;
 }
 
-// Surfaces export economics: live export rate + current exporting power,
-// and yesterday's total exported energy with estimated earnings (kWh ×
-// average per-slot export rate). Yesterday is the freshest fully-settled
-// window — today's per-slot export kWh isn't logged yet.
+// Compact vertical layout that works at any widget width. Three lines:
+//   1. Current export rate (big)
+//   2. Live status (exporting / not exporting + kW)
+//   3. Yesterday total + estimated earnings
 export function ExportsWidget({ now, yesterday }: ExportsWidgetProps) {
   const grid = now.state.grid_kw;
   const exportingNow = grid < -0.05;
@@ -21,47 +21,34 @@ export function ExportsWidget({ now, yesterday }: ExportsWidgetProps) {
   const ydayEarn = ydayKwh != null && exportRate != null
     ? (ydayKwh * exportRate) / 100
     : null;
-  // Note: yesterday's earnings use the CURRENT export rate as an approximation
-  // since we don't carry yesterday's avg export rate via this endpoint.
-  // For a precise figure use /energy/report on the Plan page.
 
   return (
     <div class="exports-widget">
-      <div class="exports-now">
-        <div class="exports-now-rate" style={{ color: rateColor(exportRate) }}>
+      <div class="exports-rate">
+        <div class="exports-rate-value" style={{ color: rateColor(exportRate) }}>
           {pence(exportRate)}
-          <span class="exports-now-rate-unit">/kWh</span>
         </div>
-        <div class="exports-now-rate-label">Current export rate</div>
+        <div class="exports-rate-label">/kWh right now</div>
       </div>
 
-      <div class="exports-row exports-row-live">
-        <div class="exports-cell">
-          <div class="exports-cell-label">Right now</div>
-          <div class="exports-cell-value" style={{ color: exportingNow ? "var(--export)" : "var(--text-mute)" }}>
-            {exportingNow ? kw(exportingKw) : "—"}
-          </div>
-          <div class="exports-cell-sub">{exportingNow ? "exporting" : "not exporting"}</div>
-        </div>
-        <div class="exports-cell">
-          <div class="exports-cell-label">Yesterday</div>
-          <div class="exports-cell-value">{ydayKwh != null ? kwh(ydayKwh) : "—"}</div>
-          <div class="exports-cell-sub">total exported</div>
-        </div>
-        <div class="exports-cell">
-          <div class="exports-cell-label">Earnings ≈</div>
-          <div class="exports-cell-value" style={{ color: "var(--ok)" }}>
-            {ydayEarn != null ? gbp(ydayEarn) : "—"}
-          </div>
-          <div class="exports-cell-sub">yesterday</div>
-        </div>
+      <div class={`exports-live${exportingNow ? " is-exporting" : ""}`}>
+        <span class="exports-live-dot" />
+        {exportingNow ? (
+          <>Exporting <strong>{kw(exportingKw)}</strong> to grid</>
+        ) : (
+          <>Not exporting</>
+        )}
       </div>
 
-      {ydayEarn != null && (
-        <div class="exports-note">
-          ≈ estimate · yesterday kWh × current export rate. Precise figure on the Plan page.
-        </div>
-      )}
+      <div class="exports-yesterday">
+        <span class="exports-yesterday-label">Yesterday</span>
+        <span class="exports-yesterday-value">
+          {ydayKwh != null ? kwh(ydayKwh) : "—"}
+          {ydayEarn != null && (
+            <span class="exports-yesterday-earn"> ≈ {gbp(ydayEarn)}</span>
+          )}
+        </span>
+      </div>
     </div>
   );
 }
