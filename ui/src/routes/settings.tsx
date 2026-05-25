@@ -140,9 +140,11 @@ export default function Settings() {
           <div class="settings-header-eyebrow">Runtime configuration</div>
           <h1 class="settings-header-title">Settings</h1>
           <p class="settings-header-sub">
-            Edits stage as pending changes. Hit <strong>Simulate</strong> to see what
-            would change, then <strong>Apply</strong> to commit. Schedule keys hot-reload
-            the cron jobs; everything else takes effect on the next LP run.
+            Every change goes through three steps:
+            {" "}<strong>Edit</strong> values inline (yellow "Edited" pill marks pending edits),
+            {" "}<strong>Simulate</strong> opens a diff modal so you can review,
+            {" "}then <strong>Apply</strong> writes to <code>runtime_settings</code>. Schedule
+            keys hot-reload the cron jobs; everything else takes effect on the next LP run.
           </p>
         </div>
       </header>
@@ -174,6 +176,7 @@ export default function Settings() {
       <BatchBar
         pendingCount={pendingCount}
         busy={busy}
+        stage={simOpen ? (simResult ? "apply" : "simulate") : "edit"}
         onSimulate={onSimulate}
         onDiscardAll={onDiscardAll}
       />
