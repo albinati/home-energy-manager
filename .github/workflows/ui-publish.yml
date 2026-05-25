@@ -17,6 +17,10 @@ on:
       # publish workflow handles its own paths.
       - "ui/**"
       - ".github/workflows/ui-publish.yml"
+  pull_request:
+    paths:
+      - "ui/**"
+      - ".github/workflows/ui-publish.yml"
   workflow_dispatch:
 
 permissions:
@@ -53,7 +57,9 @@ jobs:
         run: npm run build
 
   build-and-push:
+    # Publish only on push to main / tags; on PRs we just typecheck above.
     needs: typecheck
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
