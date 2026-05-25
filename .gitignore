@@ -4,6 +4,7 @@
 !.env.example
 !docs/**/*.json
 !tests/fixtures/**/*.json
+!ui/**/*.json
 __pycache__/
 *.pyc
 *.pyo

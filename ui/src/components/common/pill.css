@@ -1,0 +1,22 @@
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-pill);
+  font-size: var(--font-xs);
+  font-weight: 500;
+  border: 1px solid var(--border);
+  background: var(--bg-card-2);
+  color: var(--text-dim);
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.pill-icon { display: inline-flex; }
+
+.pill--neutral { /* default */ }
+.pill--accent  { color: var(--accent); border-color: rgba(59,130,246,0.4); background: rgba(59,130,246,0.08); }
+.pill--ok      { color: var(--ok);     border-color: rgba(16,185,129,0.4); background: rgba(16,185,129,0.08); }
+.pill--warn    { color: var(--warn);   border-color: rgba(245,158,11,0.4); background: rgba(245,158,11,0.08); }
+.pill--bad     { color: var(--bad);    border-color: rgba(239,68,68,0.4);  background: rgba(239,68,68,0.08); }
+.pill--dim     { color: var(--text-mute); background: transparent; }

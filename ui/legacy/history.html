@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="theme-color" content="#0b0f17">
-  <title>Workbench · Home Energy</title>
+  <title>History · Home Energy</title>
   <link rel="stylesheet" href="/css/cockpit.css">
   <script src="/config.js"></script>
   <script src="/js/_api.js"></script>
@@ -24,7 +24,8 @@
                 <span class="mode-value">passive</span>
             </button>
             <nav class="tabs" aria-label="Pages">
-                <a href="/" class="tab">Cockpit</a>
+                <a href="/" class="tab">Home</a>
+                <a href="/cockpit" class="tab">Cockpit</a>
                 <a href="/forecast" class="tab">Forecast</a>
                 <a href="/history" class="tab">History</a>
                 <a href="/insights" class="tab">Insights</a>
@@ -43,61 +44,113 @@
     </header>
 
 <main class="page">
-<section class="card workbench-header">
-    <div class="workbench-header-row">
-        <h2 class="card-title" style="margin:0;">Workbench</h2>
-        <div class="workbench-actions">
-            <select id="profileSelect" class="btn btn-sm btn-secondary" aria-label="Load profile">
-                <option value="">Load profile…</option>
-            </select>
-            <button id="btnSaveProfile" class="btn btn-sm btn-secondary">Save as…</button>
-            <button id="btnDeleteProfile" class="btn btn-sm btn-secondary">Delete</button>
-            <button id="btnSimulate" class="btn btn-sm btn-primary">Run simulation</button>
-            <button id="btnPromote" class="btn btn-sm btn-primary" disabled>Promote to prod</button>
-        </div>
+<section class="card">
+    <h2 class="card-title">
+        Replay a past moment
+        <span class="card-actions">
+            <input type="datetime-local" id="historyWhen" class="history-picker" />
+            <button class="btn btn-sm btn-secondary" id="btnHistoryJump" title="Replay the snapshot at the chosen moment">Replay</button>
+            <button class="btn btn-sm btn-secondary" id="btnHistoryNow" title="Jump to the latest run">Latest run</button>
+        </span>
+    </h2>
+    <p class="text-mute" style="font-size:0.78rem;margin:0 0 0.75rem 0;">
+        Reads from the LP snapshot tables — the same layout as the Cockpit NOW panel, frozen at the chosen moment.
+        Source labels below show exactly which <code>optimizer_log</code> run and which <code>execution_log</code>
+        row the data came from.
+    </p>
+    <div class="history-source" id="historySource">—</div>
+</section>
+
+<section class="card">
+    <h3 class="card-title">State at that moment</h3>
+    <div class="hero-state-grid">
+        <div class="hero-kpi"><span class="hero-kpi-label">SoC</span><span class="hero-kpi-value" id="hSoc">—</span></div>
+        <div class="hero-kpi"><span class="hero-kpi-label">Load</span><span class="hero-kpi-value" id="hLoad">—</span></div>
+        <div class="hero-kpi"><span class="hero-kpi-label">Fox mode</span><span class="hero-kpi-value" id="hFoxMode">—</span></div>
+        <div class="hero-kpi"><span class="hero-kpi-label">Tank</span><span class="hero-kpi-value" id="hTank">—</span></div>
+        <div class="hero-kpi"><span class="hero-kpi-label">Indoor</span><span class="hero-kpi-value" id="hIndoor">—</span></div>
+        <div class="hero-kpi"><span class="hero-kpi-label">Outdoor</span><span class="hero-kpi-value" id="hOutdoor">—</span></div>
+        <div class="hero-kpi"><span class="hero-kpi-label">LWT</span><span class="hero-kpi-value" id="hLwt">—</span></div>
+        <div class="hero-kpi"><span class="hero-kpi-label">Slot kind</span><span class="hero-kpi-value" id="hKind">—</span></div>
+        <div class="hero-kpi"><span class="hero-kpi-label">Import p</span><span class="hero-kpi-value" id="hPriceImp">—</span></div>
+        <div class="hero-kpi"><span class="hero-kpi-label">Export p</span><span class="hero-kpi-value" id="hPriceExp">—</span></div>
     </div>
-    <p class="text-dim" style="font-size:0.78rem;margin:0.45rem 0 0 0;">
-        Edit LP knobs, run a simulation, then promote the promotable subset to prod through the standard simulate-confirm gate. Non-promotable knobs (penalties, solver flags) only affect the simulation.
+</section>
+
+<section class="card">
+    <h3 class="card-title">Plan vs Actual (this slot)</h3>
+    <table class="fc-kv-table" id="histPlanActual">
+        <thead>
+            <tr><th>Metric</th><th>Plan</th><th>Actual</th></tr>
+        </thead>
+        <tbody>
+            <tr><th>Import kWh</th><td id="paPlanImport">—</td><td id="paActImport">—</td></tr>
+            <tr><th>Battery charge kWh</th><td id="paPlanChg">—</td><td class="text-dim">—</td></tr>
+            <tr><th>Battery discharge kWh</th><td id="paPlanDis">—</td><td class="text-dim">—</td></tr>
+            <tr><th>DHW kWh</th><td id="paPlanDhw">—</td><td class="text-dim">—</td></tr>
+            <tr><th>Space heat kWh</th><td id="paPlanSpace">—</td><td class="text-dim">—</td></tr>
+            <tr><th>Tank end °C</th><td id="paPlanTank">—</td><td id="paActTank">—</td></tr>
+            <tr><th>Indoor end °C</th><td id="paPlanIndoor">—</td><td id="paActIndoor">—</td></tr>
+            <tr><th>SoC end kWh</th><td id="paPlanSoc">—</td><td id="paActSoc">—</td></tr>
+        </tbody>
+    </table>
+    <p class="text-mute" style="font-size:0.72rem;margin:0.5rem 0 0 0;">
+        Plan columns come from <code>lp_solution_snapshot</code> (the LP's per-slot decision at solve time).
+        Actual comes from <code>execution_log</code>. A row of dashes means we have no actual telemetry
+        for that metric (e.g. per-slot battery charge isn't logged yet).
     </p>
 </section>
 
-<div class="workbench-grid">
-    <section class="card workbench-edit">
-        <div class="workbench-tabs" id="workbenchTabs">
-            <button class="workbench-tab is-active" data-tab="edit">Edit</button>
-            <button class="workbench-tab" data-tab="compare">Compare</button>
-        </div>
+<section class="card">
+    <h3 class="card-title">Solar attribution (day of replay)</h3>
+    <div class="attribution-block" id="attributionBlock">
+        <div class="attribution-donut" id="attributionDonut" aria-hidden="true"></div>
+        <div class="attribution-legend" id="attributionLegend">—</div>
+    </div>
+    <p class="text-mute" style="font-size:0.72rem;margin:0.5rem 0 0 0;">
+        Where today's solar went: self-used, stored in battery, or exported. Historical-only — today's running totals appear once the nightly Fox rollup fires.
+    </p>
+</section>
 
-        <div class="workbench-pane is-active" id="paneEdit">
-            <p class="text-dim" style="font-size:0.78rem;margin:0 0 0.55rem 0;">
-                Tweak any field then <strong>Run simulation</strong>. Promotable fields are marked
-                <span class="badge-promotable">●</span>.
-            </p>
-            <div id="editorBody" class="editor-body">Loading schema…</div>
-        </div>
+<section class="card">
+    <h3 class="card-title">LP inputs at solve time</h3>
+    <table class="fc-kv-table">
+        <tbody>
+            <tr><th>Run at</th><td id="liRunAt">—</td></tr>
+            <tr><th>Plan date</th><td id="liPlanDate">—</td></tr>
+            <tr><th>Horizon</th><td id="liHorizon">—</td></tr>
+            <tr><th>Initial SoC</th><td id="liSoc">—</td></tr>
+            <tr><th>Initial tank</th><td id="liTank">—</td></tr>
+            <tr><th>Initial indoor</th><td id="liIndoor">—</td></tr>
+            <tr><th>Micro-climate Δ</th><td id="liMicro">—</td></tr>
+            <tr><th>Cheap threshold</th><td id="liCheap">—</td></tr>
+            <tr><th>Peak threshold</th><td id="liPeak">—</td></tr>
+            <tr><th>Daikin mode</th><td id="liDkMode">—</td></tr>
+            <tr><th>Preset</th><td id="liPreset">—</td></tr>
+        </tbody>
+    </table>
+</section>
 
-        <div class="workbench-pane" id="paneCompare">
-            <p class="text-dim" style="font-size:0.78rem;margin:0 0 0.55rem 0;">
-                Side-by-side: current production plan vs the simulated plan with your overrides.
-            </p>
-            <div class="compare-summary" id="compareSummary"></div>
-            <div style="overflow-x:auto;">
-                <table class="plan-table" id="compareTable">
-                    <thead><tr>
-                        <th>Slot</th>
-                        <th class="num">Tariff</th>
-                        <th class="num">Curr import</th>
-                        <th class="num">Sim import</th>
-                        <th class="num">Curr SOC</th>
-                        <th class="num">Sim SOC</th>
-                        <th class="num">Δ import</th>
-                    </tr></thead>
-                    <tbody><tr><td colspan="7" class="text-mute">Run a simulation to compare.</td></tr></tbody>
-                </table>
-            </div>
-        </div>
-    </section>
-</div>
+<section class="card">
+    <h3 class="card-title">LP exogenous build</h3>
+    <table class="fc-kv-table">
+        <tbody>
+            <tr><th>Residual base load</th><td id="lxResidual">—</td></tr>
+            <tr><th>Appliance-added load</th><td id="lxAppliance">—</td></tr>
+            <tr><th>Flat fallback</th><td id="lxFlat">—</td></tr>
+            <tr><th>Fox mean / slot</th><td id="lxFoxMean">—</td></tr>
+            <tr><th>Load buckets</th><td id="lxBuckets">—</td></tr>
+            <tr><th>Forecast fetch</th><td id="lxFetch">—</td></tr>
+            <tr><th>PV adjust</th><td id="lxPvAdjust">—</td></tr>
+            <tr><th>Export pricing</th><td id="lxExport">—</td></tr>
+        </tbody>
+    </table>
+</section>
+
+<section class="card">
+    <h3 class="card-title">Why This Slot</h3>
+    <div id="historyWhy" class="text-mute">—</div>
+</section>
 </main>
 
 <div class="modal-backdrop" id="modalBackdrop" hidden>
@@ -208,7 +261,6 @@
 <script src="/js/quota.js"></script>
 <script src="/js/mode_switcher.js"></script>
 <script src="/js/_chrome.js"></script>
-<script src="/js/plan_render.js"></script>
-<script src="/js/workbench.js"></script>
+<script src="/js/history.js"></script>
 </body>
 </html>

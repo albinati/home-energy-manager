@@ -1,0 +1,18 @@
+.spinner {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-dim);
+  font-size: var(--font-sm);
+}
+.spinner-ring {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  animation: spin 700ms linear infinite;
+}
+.spinner--sm .spinner-ring { width: 10px; height: 10px; border-width: 1.5px; }
+.spinner-label { letter-spacing: 0.02em; }
+@keyframes spin { to { transform: rotate(360deg); } }

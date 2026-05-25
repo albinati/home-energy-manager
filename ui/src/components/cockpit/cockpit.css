@@ -1,0 +1,218 @@
+.cockpit-page {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: var(--space-5) var(--space-4) var(--space-7);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.cockpit-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+.cockpit-eyebrow {
+  font-size: var(--font-xs);
+  color: var(--text-dim);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.cockpit-title {
+  font-size: var(--font-2xl);
+  letter-spacing: -0.02em;
+}
+.cockpit-now {
+  color: var(--text-dim);
+  font-size: var(--font-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.cockpit-grid {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr;
+  gap: var(--space-4);
+}
+@media (max-width: 880px) {
+  .cockpit-grid { grid-template-columns: 1fr; }
+}
+
+.cockpit-strip-card .card-body { padding: var(--space-3) var(--space-4); }
+
+/* Power flow */
+.powerflow {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: var(--space-3) 0;
+}
+.powerflow-svg {
+  width: 100%;
+  max-width: 480px;
+  height: auto;
+}
+@keyframes pf-dash {
+  to { stroke-dashoffset: -28; }
+}
+@keyframes pf-dash-rev {
+  to { stroke-dashoffset: 28; }
+}
+
+/* SoC ring */
+.soc-ring {
+  position: relative;
+  width: 160px;
+  height: 160px;
+  margin: 0 auto;
+}
+.soc-ring-inner {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+  gap: 2px;
+}
+.soc-ring-pct {
+  font-size: var(--font-2xl);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+.soc-ring-kwh {
+  font-size: var(--font-xs);
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.soc-ring-arrow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--font-xs);
+  margin-top: var(--space-1);
+  font-variant-numeric: tabular-nums;
+}
+.soc-ring-arrow-glyph { font-size: 0.95rem; line-height: 1; }
+
+/* Dispatch reason */
+.dispatch-reason {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.dispatch-reason-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+.dispatch-reason-kind {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.dispatch-reason-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  box-shadow: 0 0 12px currentColor;
+}
+.dispatch-reason-kind-label {
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+.dispatch-reason-prices {
+  display: flex;
+  gap: var(--space-1);
+  flex-wrap: wrap;
+}
+.dispatch-reason-text {
+  color: var(--text-dim);
+  font-size: var(--font-sm);
+  line-height: 1.5;
+}
+
+/* Live metrics tiles */
+.metrics-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: var(--space-2);
+}
+.metric-tile {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.metric-tile-label {
+  font-size: var(--font-xs);
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.metric-tile-value {
+  font-size: var(--font-lg);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.metric-tile-sub {
+  font-size: var(--font-xs);
+  color: var(--text-mute);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Next-transition strip */
+.next-transition {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: var(--space-2);
+}
+.next-transition--empty {
+  padding: var(--space-3);
+  text-align: center;
+}
+.next-transition-cell {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  position: relative;
+  overflow: hidden;
+}
+.next-transition-bar {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+}
+.next-transition-when {
+  font-size: var(--font-sm);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.next-transition-label {
+  font-size: var(--font-xs);
+  color: var(--text-dim);
+}
+.next-transition-mode {
+  font-size: var(--font-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Freshness ribbon */
+.freshness-ribbon {
+  display: flex;
+  gap: var(--space-1);
+  flex-wrap: wrap;
+}

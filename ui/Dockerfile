@@ -1,4 +1,7 @@
-# HEM SPA container — nginx serving the static SPA + reverse-proxying /api → HEM.
+# HEM SPA container — multi-stage:
+#   1. Build the Vite + Preact SPA inside node:20-alpine.
+#   2. Pack the static output into nginx:1.27-alpine alongside the legacy/
+#      pages that are still hand-written.
 #
 # Built + published by .github/workflows/ui-publish.yml on every push to main:
 #   ghcr.io/albinati/home-energy-manager-ui:<sha>
@@ -12,15 +15,40 @@
 #                  entrypoint substitutes the token into a runtime config file
 #                  the SPA reads on boot (so the token never gets baked into
 #                  the image).
+
+# --- Stage 1: build the SPA ------------------------------------------------
+FROM node:20-alpine AS build
+WORKDIR /app
+
+# Install deps first (cache friendly).
+COPY package.json package-lock.json* ./
+RUN npm ci --no-audit --no-fund
+
+# Source.
+COPY tsconfig.json vite.config.ts vite-env.d.ts index.html ./
+COPY src ./src
+COPY public ./public
+
+# BUILD_SHA bakes into the bundle so the footer can show it.
+ARG BUILD_SHA=unknown
+ENV VITE_BUILD_SHA=$BUILD_SHA
+
+RUN npm run build
+
+# --- Stage 2: runtime nginx -------------------------------------------------
 FROM nginx:1.27-alpine
 
 # gettext provides `envsubst` for the entrypoint
 RUN apk add --no-cache gettext
 
-# Static assets — html/, src/js/, src/css/ map to /usr/share/nginx/html/
-COPY html/        /usr/share/nginx/html/
-COPY src/js/      /usr/share/nginx/html/js/
-COPY src/css/     /usr/share/nginx/html/css/
+# Built SPA → nginx html root
+COPY --from=build /app/dist/  /usr/share/nginx/html/
+
+# Legacy pages — copied verbatim, served alongside the SPA. The new SPA owns
+# /, /cockpit, /forecast, /settings; nginx serves these legacy HTML files at
+# /history, /insights, /workbench. See conf/nginx.conf.template for the
+# routing rules.
+COPY legacy/                  /usr/share/nginx/html/
 
 # nginx config — single template; entrypoint envsubsts HEM_API_URL into it
 COPY conf/nginx.conf.template  /etc/nginx/templates/default.conf.template
