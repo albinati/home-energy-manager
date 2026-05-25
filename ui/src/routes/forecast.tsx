@@ -5,11 +5,14 @@ import {
   getExecutionToday,
   getAgileToday,
   getPvCalibration,
+  getSchedulerTimeline,
+  getDecisionsLatest,
 } from "../lib/endpoints";
 import { Card } from "../components/common/Card";
 import { Pill } from "../components/common/Pill";
 import { Spinner } from "../components/common/Spinner";
 import { ForecastChart } from "../components/forecast/ForecastChart";
+import { DispatchPlanStrip } from "../components/forecast/DispatchPlanStrip";
 import { chartTheme, baseOption, echarts } from "../lib/charts";
 import { hhmm } from "../lib/format";
 import type {
@@ -32,9 +35,18 @@ export default function Forecast() {
   const execution = useFetch(getExecutionToday, []);
   const agile = useFetch(getAgileToday, []);
   const cal = useFetch(getPvCalibration, []);
+  const timeline = useFetch(getSchedulerTimeline, []);
+  const decisions = useFetch(getDecisionsLatest, []);
 
   const refreshAll = async () => {
-    await Promise.all([weather.refresh(), execution.refresh(), agile.refresh(), cal.refresh()]);
+    await Promise.all([
+      weather.refresh(),
+      execution.refresh(),
+      agile.refresh(),
+      cal.refresh(),
+      timeline.refresh(),
+      decisions.refresh(),
+    ]);
   };
 
   const pvOption = useMemo(
@@ -90,6 +102,22 @@ export default function Forecast() {
           </button>
         </div>
       </header>
+
+      <Card
+        title={
+          <div class="forecast-panel-title">
+            <h3>The plan</h3>
+            <span class="muted">
+              {timeline.data?.plan_date
+                ? `Plan ${timeline.data.plan_date}, solved ${timeline.data.run_at?.slice(11, 16) || "—"} UTC`
+                : "LP dispatch over the planning horizon"}
+            </span>
+          </div>
+        }
+        subtitle="Each cell is a 30-min slot, coloured by what the LP intends to do. Blue line above is predicted state of charge. Hover any cell for the reason."
+      >
+        <DispatchPlanStrip timeline={timeline.data} decisions={decisions.data} />
+      </Card>
 
       <Card
         title={
