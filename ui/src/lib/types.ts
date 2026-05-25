@@ -169,17 +169,45 @@ export interface ExecutionTodayResponse {
   slots: ExecutionSlot[];
 }
 
+// /agile/today response — both directions, with a current-slot price.
 export interface AgileSlot {
-  slot_time_utc: string;
-  value_inc_vat: number;
-  valid_from?: string;
-  valid_to?: string;
+  valid_from: string;
+  valid_to: string;
+  p: number;
+  kind?: string; // negative | cheap | standard | peak (server classification)
 }
 
-export interface AgileDayResponse {
+export interface AgileTodayResponse {
+  tariff_import_code: string;
+  tariff_export_code: string;
+  import_slots: AgileSlot[];
+  export_slots: AgileSlot[];
+  current_import_p?: number;
+  current_export_p?: number;
+  now_utc?: string;
+}
+
+// /agile/day?date=YYYY-MM-DD — single direction (default import).
+export interface AgileDaySlotsResponse {
   date: string;
-  import: AgileSlot[];
-  export: AgileSlot[];
+  tariff_code: string;
+  tz?: string;
+  slots: AgileSlot[];
+}
+
+// /octopus/consumption — half-hour slots from the smart meter (cached).
+export interface OctopusConsumptionSlot {
+  interval_start: string;    // ISO with offset
+  interval_end: string;
+  consumption_kwh: number;
+}
+
+export interface OctopusConsumptionResponse {
+  ok: boolean;
+  error?: string | null;
+  mpan?: string;
+  serial?: string;
+  slots: OctopusConsumptionSlot[];
 }
 
 /* ----- /patterns/pv-calibration ----- */

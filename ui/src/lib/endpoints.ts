@@ -5,7 +5,9 @@ import type {
   DispatchDecisionsResponse,
   WeatherResponse,
   ExecutionTodayResponse,
-  AgileDayResponse,
+  AgileTodayResponse,
+  AgileDaySlotsResponse,
+  OctopusConsumptionResponse,
   PvCalibration,
   AttributionDay,
   EnergyReport,
@@ -31,7 +33,11 @@ export const getMetrics = () => getJson<MetricsResponse>("/metrics");
 export const getWeather = () => getJson<WeatherResponse>("/weather");
 export const getExecutionToday = () =>
   getJson<ExecutionTodayResponse>("/execution/today");
-export const getAgileToday = () => getJson<AgileDayResponse>("/agile/today");
+export const getAgileToday = () => getJson<AgileTodayResponse>("/agile/today");
+export const getAgileDay = (date: string) =>
+  getJson<AgileDaySlotsResponse>(`/agile/day?date=${encodeURIComponent(date)}`);
+export const getOctopusConsumption = () =>
+  getJson<OctopusConsumptionResponse>("/octopus/consumption");
 export const getPvCalibration = () =>
   getJson<PvCalibration>("/patterns/pv-calibration");
 

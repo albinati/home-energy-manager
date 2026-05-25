@@ -1,15 +1,14 @@
-import type { AgileDayResponse } from "../../lib/types";
+import type { AgileTodayResponse } from "../../lib/types";
 import { pence, hhmm } from "../../lib/format";
 
 interface PriceSummaryProps {
-  agile: AgileDayResponse | null;
+  agile: AgileTodayResponse | null;
   currentP: number | null | undefined;
 }
 
-// Today's price stats: min, avg, peak, with timestamps for min/peak. Tiny
-// cards arranged in a 4-up grid.
+// Today's price stats: min, avg, peak, with timestamps for min/peak.
 export function PriceSummary({ agile, currentP }: PriceSummaryProps) {
-  const slots = agile?.import || [];
+  const slots = agile?.import_slots ?? [];
   if (slots.length === 0) {
     return <div class="muted">No Agile rates yet.</div>;
   }
@@ -20,17 +19,19 @@ export function PriceSummary({ agile, currentP }: PriceSummaryProps) {
   let minSlot = "";
   let maxSlot = "";
   for (const s of slots) {
-    if (s.value_inc_vat < min) { min = s.value_inc_vat; minSlot = s.slot_time_utc; }
-    if (s.value_inc_vat > max) { max = s.value_inc_vat; maxSlot = s.slot_time_utc; }
-    sum += s.value_inc_vat;
+    if (s.p < min) { min = s.p; minSlot = s.valid_from; }
+    if (s.p > max) { max = s.p; maxSlot = s.valid_from; }
+    sum += s.p;
   }
   const avg = sum / slots.length;
-
-  const currentVsAvg = currentP != null && Number.isFinite(currentP) ? currentP - avg : null;
+  const effectiveCurrent = currentP ?? agile?.current_import_p ?? null;
+  const currentVsAvg = effectiveCurrent != null && Number.isFinite(effectiveCurrent)
+    ? effectiveCurrent - avg
+    : null;
 
   return (
     <div class="price-summary">
-      <Stat label="Now" value={pence(currentP)} sub={currentVsAvg != null ? `${currentVsAvg >= 0 ? "+" : ""}${currentVsAvg.toFixed(1)}p vs avg` : null} tone={currentP != null ? toneFor(currentP, min, max, avg) : "default"} />
+      <Stat label="Now" value={pence(effectiveCurrent)} sub={currentVsAvg != null ? `${currentVsAvg >= 0 ? "+" : ""}${currentVsAvg.toFixed(1)}p vs avg` : null} tone={effectiveCurrent != null ? toneFor(effectiveCurrent, min, max, avg) : "default"} />
       <Stat label="Today min" value={pence(min)} sub={`at ${hhmm(minSlot)}`} tone="cheap" />
       <Stat label="Today avg" value={pence(avg)} sub={null} tone="default" />
       <Stat label="Today peak" value={pence(max)} sub={`at ${hhmm(maxSlot)}`} tone="peak" />

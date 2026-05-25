@@ -1,44 +1,42 @@
-import type { AgileDayResponse } from "../../lib/types";
+import type { AgileTodayResponse } from "../../lib/types";
 import { hhmm, pence, slotKindLabel } from "../../lib/format";
 
 interface TariffStripProps {
-  agile: AgileDayResponse | null;
+  agile: AgileTodayResponse | null;
   cheapP: number;
   peakP: number;
   nowUtc: string;
 }
 
-// 48-slot horizontal heatmap of today's import prices. Cells coloured by
-// tariff band against `cheapP`/`peakP` thresholds. Current-slot marker shows
-// where we are on the day; hover for the price + time.
+// 48-slot horizontal heatmap of today's import prices, coloured by tariff
+// band against `cheapP`/`peakP` thresholds. Current-slot marker shows where
+// we are on the day; hover for the price + time.
 export function TariffStrip({ agile, cheapP, peakP, nowUtc }: TariffStripProps) {
-  if (!agile?.import || agile.import.length === 0) {
+  const slots = agile?.import_slots ?? [];
+  if (slots.length === 0) {
     return <div class="tariff-strip-empty muted">No Agile rates yet.</div>;
   }
 
-  // Sort by slot time ascending.
-  const slots = agile.import.slice().sort((a, b) => a.slot_time_utc.localeCompare(b.slot_time_utc));
-
-  // Determine current-slot index by finding the slot whose start ≤ now.
+  const sorted = slots.slice().sort((a, b) => a.valid_from.localeCompare(b.valid_from));
   const nowMs = Date.parse(nowUtc);
   let currentIdx = -1;
-  for (let i = 0; i < slots.length; i++) {
-    if (Date.parse(slots[i].slot_time_utc) <= nowMs) currentIdx = i;
+  for (let i = 0; i < sorted.length; i++) {
+    if (Date.parse(sorted[i].valid_from) <= nowMs) currentIdx = i;
     else break;
   }
 
   return (
     <div class="tariff-strip">
       <div class="tariff-strip-cells" role="presentation">
-        {slots.map((s, i) => {
-          const kind = classifySlot(s.value_inc_vat, cheapP, peakP);
+        {sorted.map((s, i) => {
+          const kind = s.kind || classifySlot(s.p, cheapP, peakP);
           const isCurrent = i === currentIdx;
           const isPast = i < currentIdx;
           return (
             <div
-              key={s.slot_time_utc}
+              key={s.valid_from}
               class={`tariff-cell tariff-cell--${kind}${isCurrent ? " is-current" : ""}${isPast ? " is-past" : ""}`}
-              title={`${hhmm(s.slot_time_utc)} · ${pence(s.value_inc_vat)} · ${slotKindLabel(kind)}`}
+              title={`${hhmm(s.valid_from)} · ${pence(s.p)} · ${slotKindLabel(kind)}`}
             >
               {isCurrent && <span class="tariff-cell-marker" aria-hidden="true" />}
             </div>

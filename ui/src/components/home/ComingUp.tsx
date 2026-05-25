@@ -1,8 +1,8 @@
-import type { AgileDayResponse, WeatherResponse } from "../../lib/types";
-import { hhmm, pence } from "../../lib/format";
+import type { AgileTodayResponse, WeatherResponse } from "../../lib/types";
+import { hhmm } from "../../lib/format";
 
 interface ComingUpProps {
-  agile: AgileDayResponse | null;
+  agile: AgileTodayResponse | null;
   weather: WeatherResponse | null;
   cheapP: number;
   peakP: number;
@@ -11,60 +11,57 @@ interface ComingUpProps {
 
 type Event = {
   kind: "negative" | "cheap" | "peak" | "solar";
-  when: string;            // ISO
+  when: string;
   title: string;
   sub: string;
   color: string;
   icon: string;
 };
 
-// Surfaces the next few interesting things on today's horizon: next negative
-// price slot, next peak window, today's forecast solar peak. Empty when
-// today's plan is uneventful — useful in itself.
 export function ComingUp({ agile, weather, cheapP, peakP, nowUtc }: ComingUpProps) {
   const nowMs = Date.parse(nowUtc);
   const events: Event[] = [];
 
-  // --- Next negative-price window ---
-  if (agile?.import) {
-    const future = agile.import
+  if (agile?.import_slots) {
+    const future = agile.import_slots
       .slice()
-      .sort((a, b) => a.slot_time_utc.localeCompare(b.slot_time_utc))
-      .filter((s) => Date.parse(s.slot_time_utc) > nowMs);
-    const negStart = future.findIndex((s) => s.value_inc_vat < 0);
+      .sort((a, b) => a.valid_from.localeCompare(b.valid_from))
+      .filter((s) => Date.parse(s.valid_from) > nowMs);
+
+    const negStart = future.findIndex((s) => s.p < 0);
     if (negStart >= 0) {
       const first = future[negStart];
       let count = 0;
-      for (let i = negStart; i < future.length && future[i].value_inc_vat < 0; i++) count++;
+      for (let i = negStart; i < future.length && future[i].p < 0; i++) count++;
       events.push({
         kind: "negative",
-        when: first.slot_time_utc,
+        when: first.valid_from,
         title: "Negative price",
-        sub: `${first.value_inc_vat.toFixed(1)}p · ${count * 30} min window`,
+        sub: `${first.p.toFixed(1)}p · ${count * 30} min window`,
         color: "var(--neg-price)",
         icon: "🔵",
       });
     }
-    // Next peak window (>= peakP)
-    const peakStart = future.findIndex((s) => s.value_inc_vat >= peakP);
+
+    const peakStart = future.findIndex((s) => s.p >= peakP);
     if (peakStart >= 0) {
       const first = future[peakStart];
       let count = 0;
-      for (let i = peakStart; i < future.length && future[i].value_inc_vat >= peakP; i++) count++;
+      for (let i = peakStart; i < future.length && future[i].p >= peakP; i++) count++;
       events.push({
         kind: "peak",
-        when: first.slot_time_utc,
+        when: first.valid_from,
         title: "Peak price",
-        sub: `${first.value_inc_vat.toFixed(1)}p · ${count * 30} min window`,
+        sub: `${first.p.toFixed(1)}p · ${count * 30} min window`,
         color: "var(--peak)",
         icon: "🟠",
       });
     }
-    // Next cheap-cluster (≥ 4 contiguous slots below cheap threshold)
+
     let runStart = -1;
     let runLen = 0;
     for (let i = 0; i < future.length; i++) {
-      if (future[i].value_inc_vat < cheapP) {
+      if (future[i].p < cheapP) {
         if (runStart < 0) runStart = i;
         runLen++;
         if (runLen >= 4) break;
@@ -77,16 +74,15 @@ export function ComingUp({ agile, weather, cheapP, peakP, nowUtc }: ComingUpProp
       const first = future[runStart];
       events.push({
         kind: "cheap",
-        when: first.slot_time_utc,
+        when: first.valid_from,
         title: "Cheap charging window",
-        sub: `${first.value_inc_vat.toFixed(1)}p · ${runLen * 30}+ min`,
+        sub: `${first.p.toFixed(1)}p · ${runLen * 30}+ min`,
         color: "var(--cheap)",
         icon: "🟢",
       });
     }
   }
 
-  // --- Today's solar peak (max pv_kw in the forecast after now) ---
   if (weather?.forecast) {
     const future = weather.forecast.filter((f) => Date.parse(f.time) > nowMs);
     if (future.length > 0) {
@@ -107,7 +103,6 @@ export function ComingUp({ agile, weather, cheapP, peakP, nowUtc }: ComingUpProp
     }
   }
 
-  // Sort by time
   events.sort((a, b) => a.when.localeCompare(b.when));
 
   if (events.length === 0) {
@@ -133,6 +128,3 @@ export function ComingUp({ agile, weather, cheapP, peakP, nowUtc }: ComingUpProp
     </div>
   );
 }
-
-// Re-export pence for callers that want to render thresholds nicely.
-export { pence };
