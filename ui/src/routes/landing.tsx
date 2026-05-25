@@ -1,16 +1,25 @@
 import { useEffect, useState } from "preact/hooks";
-import { Link } from "wouter-preact";
-import { useFetch } from "../lib/poll";
-import { getEnergyReport, getAttributionDay, getEnergyMonthly } from "../lib/endpoints";
-import { Spinner } from "../components/common/Spinner";
+import { usePoll, useFetch } from "../lib/poll";
+import {
+  getCockpitNow,
+  getEnergyReport,
+  getEnergyMonthly,
+  getAgileToday,
+  getWeather,
+} from "../lib/endpoints";
 import { Card } from "../components/common/Card";
-import { AttributionDonut } from "../components/landing/AttributionDonut";
-import { SavingsTrend } from "../components/landing/SavingsTrend";
-import { gbp, gbpSigned, kwh } from "../lib/format";
+import { Spinner } from "../components/common/Spinner";
+import { TariffStrip } from "../components/cockpit/TariffStrip";
+import { ComingUp } from "../components/home/ComingUp";
+import { SavingsSparkline } from "../components/home/SavingsSparkline";
+import { gbp, gbpSigned, kw, kwh, pct, tempC } from "../lib/format";
 import type { MonthlyEnergy } from "../lib/types";
-import "../components/landing/landing.css";
+import "../components/home/home.css";
 
-// Last N month-codes ending on the current month. e.g. ["2026-01", "2026-02", ...]
+function todayIso(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
 function lastMonths(n: number): string[] {
   const now = new Date();
   const out: string[] = [];
@@ -31,11 +40,7 @@ function useMonthlyHistory(n: number) {
     let alive = true;
     setLoading(true);
     const months = lastMonths(n);
-    Promise.all(
-      months.map((m) =>
-        getEnergyMonthly(m).catch(() => null)
-      ),
-    ).then((results) => {
+    Promise.all(months.map((m) => getEnergyMonthly(m).catch(() => null))).then((results) => {
       if (!alive) return;
       setData(results.filter((r): r is MonthlyEnergy => !!r));
       setLoading(false);
@@ -49,166 +54,171 @@ function useMonthlyHistory(n: number) {
 }
 
 export default function Landing() {
-  const report = useFetch(getEnergyReport, []);
-  const attribution = useFetch(getAttributionDay, []);
+  const now = usePoll(getCockpitNow, 20_000);
+  const report = useFetch(() => getEnergyReport(todayIso()), []);
+  const agile = useFetch(getAgileToday, []);
+  const weather = useFetch(getWeather, []);
   const monthly = useMonthlyHistory(6);
 
-  const savingsThisMonth = monthly.data[monthly.data.length - 1]?.savings_vs_svt_gbp ?? null;
-  const savingsTotal = monthly.data.reduce((acc, m) => acc + (m.savings_vs_svt_gbp ?? 0), 0);
-  const fixedDelta =
-    report.data?.pnl?.delta_vs_fixed_real_gbp ??
-    report.data?.pnl?.delta_vs_fixed_tariff_real_gbp ??
-    report.data?.pnl?.delta_vs_fixed_gbp ??
-    null;
+  if (now.loading && !now.data) {
+    return (
+      <div class="home">
+        <Spinner label="Loading dashboard…" />
+      </div>
+    );
+  }
+  if (!now.data) {
+    return (
+      <div class="home">
+        <h1>Home</h1>
+        <p class="muted">Cockpit unavailable: {now.error?.message || "no data"}</p>
+        <button class="btn" onClick={() => now.refresh()}>Retry</button>
+      </div>
+    );
+  }
+
+  const data = now.data;
+  const s = data.state;
+  const pnl = report.data?.pnl;
+
+  // Today's running cost (net): realised_net_cost_gbp if present, else fall back to realised_cost_gbp
+  const todayNet = pnl?.realised_net_cost_gbp ?? pnl?.realised_cost_gbp ?? null;
+  const todaySvt = pnl?.svt_shadow_gbp ?? null;
+  const todayDelta =
+    pnl?.delta_vs_svt_real_gbp ??
+    pnl?.delta_vs_svt_gbp ??
+    (todaySvt != null && todayNet != null ? todaySvt - todayNet : null);
+
+  const heroToneClass =
+    todayNet == null
+      ? "home-hero-cost-neutral"
+      : todayNet < 0
+        ? "home-hero-cost-positive"
+        : "home-hero-cost-neutral";
+
+  // Savings — this month is last entry of monthly history
+  const thisMonth = monthly.data[monthly.data.length - 1];
+  const monthSavings = thisMonth?.savings_vs_svt_gbp ?? null;
+  const monthCost = thisMonth?.cost_gbp ?? null;
 
   return (
-    <div class="landing">
-      {/* Hero */}
-      <section class="landing-hero">
-        <div class="landing-hero-inner">
-          <div>
-            <span class="landing-eyebrow">
-              <span class="landing-hero-eyebrow-dot" aria-hidden="true"></span>
-              Live in production
-            </span>
-            <h1 class="landing-hero-title">
-              A home that <br/>
-              <span class="landing-hero-title-savings">{renderHeroSavings(savingsTotal)}</span>{" "}
-              by thinking for itself.
-            </h1>
-            <p class="landing-hero-sub">
-              Solar, a battery, a heat pump, and Octopus Agile — orchestrated by a small
-              Python service that forecasts the day ahead, solves an LP for the cheapest
-              dispatch, and writes the plan straight into the inverter. No taps. No taps
-              missed. No surprises on the bill.
-            </p>
-            <div class="landing-hero-cta">
-              <Link href="/cockpit" class="btn btn--primary">Open the live cockpit →</Link>
-              <Link href="/forecast" class="btn">See today's forecast</Link>
-            </div>
+    <div class="home">
+      {/* HERO — Today's running cost */}
+      <section class="home-hero" aria-label="Today">
+        <div>
+          <div class="home-hero-eyebrow">
+            <strong>Today</strong> · running net cost
           </div>
-          <aside class="landing-hero-card" aria-label="Headline saving">
-            <div class="landing-hero-card-label">Last {monthly.data.length || "—"} months</div>
-            <div class="landing-hero-card-value">{gbp(savingsTotal)}</div>
-            <div class="landing-hero-card-detail">
-              versus the standard variable tariff — the cumulative effect of cheap-rate charging,
-              peak-time discharging, and solar self-use.
+          <div class={`home-hero-cost ${heroToneClass}`}>
+            {todayNet != null ? gbp(todayNet) : "—"}
+          </div>
+          {todayDelta != null && (
+            <div class="home-hero-delta">
+              {todaySvt != null && <>vs SVT {gbp(todaySvt)} — </>}
+              <strong class={todayDelta >= 0 ? "" : "neg"}>
+                {todayDelta >= 0 ? "saved" : "lost"} {gbp(Math.abs(todayDelta))}
+              </strong>
+              {" so far"}
             </div>
-            {fixedDelta != null && (
-              <div class="landing-hero-card-detail" style={{ marginTop: "0.6rem" }}>
-                Today vs fixed: <strong style={{ color: fixedDelta >= 0 ? "var(--ok)" : "var(--bad)" }}>{gbpSigned(fixedDelta)}</strong>
+          )}
+        </div>
+        <aside class="home-hero-aside">
+          <div class="home-hero-aside-row">
+            <span class="home-hero-aside-label">This month</span>
+            <span class="home-hero-aside-value">
+              {monthCost != null ? gbp(monthCost) : "—"}
+              {monthSavings != null && (
+                <span class="muted" style="margin-left:0.5rem; font-size:var(--font-sm)">
+                  ({gbpSigned(monthSavings)})
+                </span>
+              )}
+            </span>
+          </div>
+          <div class="home-hero-aside-row">
+            <span class="home-hero-aside-label">Active mode</span>
+            <span class="home-hero-aside-value">{s.daikin_mode || "—"}</span>
+          </div>
+          <div class="home-hero-aside-row">
+            <span class="home-hero-aside-label">Current slot</span>
+            <span class="home-hero-aside-value">
+              {data.current_slot.price_import_p.toFixed(1)}p / {data.current_slot.fox_mode}
+            </span>
+          </div>
+        </aside>
+      </section>
+
+      {/* Tariff strip */}
+      <Card title="Today's tariff" subtitle="Half-hourly Octopus Agile import prices. Marker = current slot.">
+        <TariffStrip
+          agile={agile.data}
+          cheapP={data.thresholds?.cheap_p ?? 12}
+          peakP={data.thresholds?.peak_p ?? 28}
+          nowUtc={data.now_utc}
+        />
+      </Card>
+
+      {/* Live tiles */}
+      <section class="home-live" aria-label="Live state">
+        <Tile icon="🔋" label="Battery" value={pct(s.soc_pct, 0)} sub={`${kwh(s.soc_kwh)}`} />
+        <Tile icon="☀" label="Solar" value={kw(s.solar_kw)} sub={s.solar_kw > 0.1 ? "producing" : "off"} subTone={s.solar_kw > 0.1 ? "ok" : "mute"} />
+        <Tile
+          icon="⚡"
+          label="Grid"
+          value={kw(Math.abs(s.grid_kw))}
+          sub={s.grid_kw > 0.05 ? "importing" : s.grid_kw < -0.05 ? "exporting" : "idle"}
+          subTone={s.grid_kw > 0.05 ? "bad" : s.grid_kw < -0.05 ? "ok" : "mute"}
+        />
+        <Tile icon="🏠" label="House" value={kw(s.load_kw)} sub="consuming" subTone="mute" />
+        <Tile icon="♨" label="Tank" value={tempC(s.tank_c, 0)} sub={s.indoor_c != null ? `indoor ${tempC(s.indoor_c, 0)}` : ""} />
+      </section>
+
+      {/* Savings */}
+      <Card title="Savings vs SVT" subtitle="How Octopus Agile + battery + solar dispatch compares against the variable tariff.">
+        <div class="home-savings">
+          <div class="home-savings-headline">
+            <div class="home-savings-headline-value">
+              {monthSavings != null ? gbpSigned(monthSavings) : "—"}
+            </div>
+            <div class="home-savings-headline-label">This month vs SVT</div>
+          </div>
+          <div class="home-savings-aside">
+            <SavingsSparkline monthly={monthly.data} />
+            {monthly.data.length > 0 && (
+              <div class="home-savings-aside-row">
+                Last <strong>{monthly.data.length}</strong> months tracked
               </div>
             )}
-          </aside>
+          </div>
         </div>
-      </section>
+      </Card>
 
-      {/* KPI strip */}
-      <section class="landing-kpi-strip">
-        <div class="landing-kpi">
-          <span class="landing-kpi-label">This month vs SVT</span>
-          <span class={`landing-kpi-value ${savingsThisMonth != null && savingsThisMonth >= 0 ? "landing-kpi-accent" : "landing-kpi-bad"}`}>
-            {savingsThisMonth != null ? gbpSigned(savingsThisMonth) : "—"}
-          </span>
-          <span class="landing-kpi-detail">
-            Energy savings against the variable tariff for the current calendar month.
-          </span>
-        </div>
-        <div class="landing-kpi">
-          <span class="landing-kpi-label">Yesterday's solar</span>
-          <span class="landing-kpi-value">
-            {attribution.data?.solar_kwh != null ? kwh(attribution.data.solar_kwh) : "—"}
-          </span>
-          <span class="landing-kpi-detail">
-            {attribution.data?.shares
-              ? `${attribution.data.shares.self_use_pct.toFixed(0)}% self-used, ${attribution.data.shares.battery_pct.toFixed(0)}% to battery, ${attribution.data.shares.export_pct.toFixed(0)}% exported.`
-              : "Solar production attribution by destination."}
-          </span>
-        </div>
-        <div class="landing-kpi">
-          <span class="landing-kpi-label">Exported</span>
-          <span class="landing-kpi-value">
-            {attribution.data?.export_kwh != null ? kwh(attribution.data.export_kwh) : "—"}
-          </span>
-          <span class="landing-kpi-detail">
-            kWh sold back at the Outgoing Agile rate yesterday.
-          </span>
-        </div>
-      </section>
+      {/* Coming up */}
+      <Card title="Coming up" subtitle="The next interesting things on today's price + solar horizon.">
+        <ComingUp
+          agile={agile.data}
+          weather={weather.data}
+          cheapP={data.thresholds?.cheap_p ?? 12}
+          peakP={data.thresholds?.peak_p ?? 28}
+          nowUtc={data.now_utc}
+        />
+      </Card>
 
-      {/* Charts */}
-      <section class="landing-section">
-        <h2 class="landing-section-title">The receipts</h2>
-        <p class="landing-section-sub">
-          The system files a daily PnL against shadow tariffs. Months that beat the
-          variable tariff are green; months that lost are red. No averages, no spin.
-        </p>
-        <div class="landing-twocol">
-          <Card title="Monthly savings vs SVT" subtitle="Bars are signed: positive = Agile beat SVT, negative = it lost.">
-            {monthly.loading ? (
-              <Spinner label="Crunching monthly PnL…" />
-            ) : monthly.data.length === 0 ? (
-              <p class="muted">No monthly data yet — system needs ≥ 1 day of Agile history.</p>
-            ) : (
-              <SavingsTrend monthly={monthly.data} />
-            )}
-          </Card>
-          <Card title="Where yesterday's solar went" subtitle="Self-use vs battery-charged vs exported, from the attribution report.">
-            {attribution.loading ? (
-              <Spinner label="Loading attribution…" />
-            ) : attribution.error || !attribution.data ? (
-              <p class="muted">No attribution data yet.</p>
-            ) : (
-              <AttributionDonut data={attribution.data} />
-            )}
-          </Card>
-        </div>
-      </section>
-
-      {/* How it works */}
-      <section class="landing-section">
-        <h2 class="landing-section-title">How it works</h2>
-        <p class="landing-section-sub">
-          Three jobs in a loop, every 30 minutes. No black-box ML, just an LP solver
-          and a robustness filter over forecast scenarios.
-        </p>
-        <div class="landing-threecol">
-          <Link href="/forecast" class="feature-card">
-            <div class="feature-card-step">1</div>
-            <div class="feature-card-title">Forecast</div>
-            <div class="feature-card-body">
-              Pull Quartz solar + Open-Meteo weather + Octopus Agile rates. Apply a
-              14-day calibration factor to handle local microclimate. See the inputs.
-            </div>
-            <span class="feature-card-link">View forecast →</span>
-          </Link>
-          <Link href="/settings" class="feature-card">
-            <div class="feature-card-step">2</div>
-            <div class="feature-card-title">Optimise</div>
-            <div class="feature-card-body">
-              Linear-program the next 48 half-hours. Plan cheap-rate charging,
-              peak-export windows, and DHW thermal storage. Re-solve at every tier
-              boundary plus on forecast drift.
-            </div>
-            <span class="feature-card-link">Tune settings →</span>
-          </Link>
-          <Link href="/cockpit" class="feature-card">
-            <div class="feature-card-step">3</div>
-            <div class="feature-card-title">Dispatch</div>
-            <div class="feature-card-body">
-              Write the plan to the Fox inverter and the Daikin heat pump. Watch every
-              slot fire in the cockpit, with the LP's reasoning attached.
-            </div>
-            <span class="feature-card-link">Open cockpit →</span>
-          </Link>
-        </div>
-      </section>
+      {monthly.loading && (
+        <div class="muted" style="text-align:center; font-size:var(--font-xs)">Loading monthly history…</div>
+      )}
     </div>
   );
 }
 
-function renderHeroSavings(n: number | null | undefined): string {
-  if (n == null || !Number.isFinite(n)) return "saves money quietly";
-  if (Math.abs(n) < 1) return "saves money quietly";
-  return `saved ${gbp(n, 0)}`;
+type TileTone = "ok" | "bad" | "warn" | "mute";
+function Tile({ icon, label, value, sub, subTone }: { icon: string; label: string; value: string; sub?: string; subTone?: TileTone }) {
+  const toneClass = subTone ? `home-live-tile-sub--${subTone}` : "";
+  return (
+    <div class="home-live-tile">
+      <div class="home-live-tile-icon">{icon}</div>
+      <div class="home-live-tile-label">{label}</div>
+      <div class="home-live-tile-value">{value}</div>
+      {sub && <div class={`home-live-tile-sub ${toneClass}`}>{sub}</div>}
+    </div>
+  );
 }
