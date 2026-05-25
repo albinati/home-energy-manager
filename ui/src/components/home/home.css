@@ -188,6 +188,36 @@
   font-style: italic;
 }
 
+/* Thermal footer row */
+.home-thermal-row {
+  display: flex;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+  color: var(--text-dim);
+  font-size: var(--font-sm);
+  font-variant-numeric: tabular-nums;
+}
+.home-thermal-row strong {
+  color: var(--text);
+  font-weight: 600;
+  margin-right: 4px;
+}
+
+/* Skeleton text — shown while a slow field loads */
+.skel-text {
+  display: inline-block;
+  height: 0.85em;
+  background: linear-gradient(90deg, var(--bg-card-2) 25%, var(--bg-card-3) 50%, var(--bg-card-2) 75%);
+  background-size: 200% 100%;
+  animation: skel 1.4s ease-in-out infinite;
+  border-radius: 4px;
+  vertical-align: middle;
+}
+@keyframes skel {
+  0%   { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+
 /* Savings band — small inline sparkline */
 .home-savings {
   display: grid;

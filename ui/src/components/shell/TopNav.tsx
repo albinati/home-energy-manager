@@ -2,8 +2,7 @@ import { Link, useLocation } from "wouter-preact";
 
 const tabs = [
   { href: "/", label: "Home" },
-  { href: "/cockpit", label: "Cockpit" },
-  { href: "/forecast", label: "Forecast" },
+  { href: "/plan", label: "Plan" },
   { href: "/settings", label: "Settings" },
 ];
 

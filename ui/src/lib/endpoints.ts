@@ -15,6 +15,7 @@ import type {
   SettingSpec,
   SimulateBatchResponse,
   ApplyBatchResponse,
+  MetricsResponse,
 } from "./types";
 
 /* ----- Real-time / cockpit ----- */
@@ -23,6 +24,7 @@ export const getCockpitNow = () => getJson<CockpitNow>("/cockpit/now");
 export const getSchedulerTimeline = () => getJson<SchedulerTimeline>("/scheduler/timeline");
 export const getDecisionsLatest = () =>
   getJson<DispatchDecisionsResponse>("/optimization/decisions/latest");
+export const getMetrics = () => getJson<MetricsResponse>("/metrics");
 
 /* ----- Forecast vs actuals ----- */
 

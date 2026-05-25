@@ -3,8 +3,7 @@ import { TopNav } from "./components/shell/TopNav";
 import { Footer } from "./components/shell/Footer";
 import { ToastHost } from "./components/common/Toast";
 import Landing from "./routes/landing";
-import Cockpit from "./routes/cockpit";
-import Forecast from "./routes/forecast";
+import Plan from "./routes/plan";
 import Settings from "./routes/settings";
 
 export function App() {
@@ -14,8 +13,7 @@ export function App() {
       <main class="shell-main">
         <Switch>
           <Route path="/" component={Landing} />
-          <Route path="/cockpit" component={Cockpit} />
-          <Route path="/forecast" component={Forecast} />
+          <Route path="/plan" component={Plan} />
           <Route path="/settings" component={Settings} />
           <Route>
             <div class="page-padded">

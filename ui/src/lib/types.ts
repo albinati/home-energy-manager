@@ -264,3 +264,35 @@ export interface TariffDashboardResponse {
   tariff_comparison?: TariffComparisonRow[];
   daily_costs?: Array<{ date: string; cost_gbp: number; tariff_code: string }>;
 }
+
+/* ----- /metrics (~1s, summary KPIs) ----- */
+
+export interface MetricsResponse {
+  pnl?: {
+    daily?: { delta_vs_svt_pounds?: number; delta_vs_fixed_pounds?: number };
+    weekly?: { delta_vs_svt_pounds?: number };
+    monthly?: { delta_vs_svt_pounds?: number };
+  };
+  target_vwap_pence?: number;
+  realised_vwap_pence?: number;
+  slippage_pence?: number;
+  arbitrage_efficiency_pct?: number;
+  peak_import_pct?: number;
+  off_peak_import_pct?: number;
+  battery_soc_percent?: number;
+  battery_capacity_kwh?: number;
+  octopus_fetch?: {
+    last_success_at?: string | null;
+    consecutive_failures?: number;
+    survival_mode_since?: string | null;
+  };
+  sla?: {
+    actions_executed_on_time_pct?: number;
+    safe_default_restored_pct?: number;
+    optimizer_success_pct?: number;
+    sample_size?: number;
+  };
+  today_strategy?: string;
+  cheap_threshold_pence?: number;
+  peak_threshold_pence?: number;
+}
