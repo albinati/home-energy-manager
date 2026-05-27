@@ -32,11 +32,11 @@ export function ExportsWidget({ now, yesterday, report, monthly }: ExportsWidget
       ? (ydayKwh * liveRate) / 100
       : null;
 
-  // This month: sum the export_kwh + a back-of-envelope revenue (we don't
-  // have per-month revenue field; use current rate as proxy).
-  const monthExportKwh = monthly.length > 0
-    ? monthly[monthly.length - 1]?.export_kwh ?? 0
-    : 0;
+  // This month: real export_kwh + export_earnings_pounds from the latest
+  // monthly aggregate.
+  const latestMonth = monthly.length > 0 ? monthly[monthly.length - 1] : null;
+  const monthExportKwh = latestMonth?.energy?.export_kwh ?? 0;
+  const monthExportEarn = latestMonth?.cost?.export_earnings_pounds ?? 0;
 
   return (
     <div class="exports-widget">
@@ -73,6 +73,9 @@ export function ExportsWidget({ now, yesterday, report, monthly }: ExportsWidget
           <span class="exports-row-label">This month</span>
           <span class="exports-row-value">
             {monthExportKwh > 0 ? kwh(monthExportKwh) : "—"}
+            {monthExportEarn > 0 && (
+              <span class="exports-row-earn"> = {gbp(monthExportEarn)}</span>
+            )}
           </span>
         </div>
       </div>

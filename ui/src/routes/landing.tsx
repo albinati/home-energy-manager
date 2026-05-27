@@ -120,7 +120,7 @@ export default function Landing() {
         </Widget>
 
         <Widget title="Heating" icon="♨" tone="thermal" size="medium">
-          <HeatingWidget state={s} daikin={daikin.data} daikinQuota={daikinQuota.data} report={report.data} />
+          <HeatingWidget state={s} daikin={daikin.data} daikinQuota={daikinQuota.data} report={report.data} weather={weather.data} />
         </Widget>
 
         <Widget title="Next 6 hours" icon="📅" tone="plan" size="medium">

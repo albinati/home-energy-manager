@@ -16,8 +16,6 @@ interface TodayBillWidgetProps {
 export function TodayBillWidget({ report, reportLoading, metrics }: TodayBillWidgetProps) {
   const history = useWeekHistory();
 
-  if (reportLoading && !report) return <Spinner label="Crunching today's bill…" />;
-
   const pnl = report?.pnl;
   const realised = pnl?.realised_net_cost_gbp ?? pnl?.realised_cost_gbp ?? null;
 
@@ -26,6 +24,10 @@ export function TodayBillWidget({ report, reportLoading, metrics }: TodayBillWid
   const projected = realised != null && hoursElapsed > 0
     ? (realised / hoursElapsed) * 24
     : null;
+
+  // Don't full-blank the widget while /energy/report (~4 s) is in flight —
+  // show skeletons inside instead so the widget renders immediately.
+  const isLoadingReport = reportLoading && !report;
 
   const monthDelta = metrics?.pnl?.monthly?.delta_vs_svt_pounds ?? null;
   const dayOfMonth = now.getDate();
@@ -39,13 +41,21 @@ export function TodayBillWidget({ report, reportLoading, metrics }: TodayBillWid
         <div class="today-bill-realised">
           <span class="today-bill-label">Today so far</span>
           <span class="today-bill-amount today-bill-amount-realised">
-            {realised != null ? gbp(realised) : "—"}
+            {realised != null
+              ? gbp(realised)
+              : isLoadingReport
+                ? <span class="skel-text" style={{ width: "4rem", height: "1.4rem" }} />
+                : "—"}
           </span>
         </div>
         <div class="today-bill-projected">
           <span class="today-bill-label">→ projected EOD</span>
           <span class="today-bill-amount today-bill-amount-projected">
-            {projected != null ? gbp(projected) : "—"}
+            {projected != null
+              ? gbp(projected)
+              : isLoadingReport
+                ? <span class="skel-text" style={{ width: "4rem", height: "1.4rem" }} />
+                : "—"}
           </span>
         </div>
       </div>

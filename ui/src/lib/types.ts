@@ -267,16 +267,37 @@ export interface EnergyReport {
   };
 }
 
-export interface MonthlyEnergy {
-  month: string;
-  cost_gbp: number;
+// Actual /energy/monthly response shape. The endpoint nests energy + cost.
+// No savings_vs_svt is exposed here — for that we'd call /energy/report per
+// month or sum /metrics.pnl over time.
+export interface MonthlyEnergyEnergy {
+  year: number;
+  month: number;
+  month_str: string;       // "YYYY-MM"
   import_kwh: number;
   export_kwh: number;
   solar_kwh: number;
-  peak_import_pct?: number;
-  peak_ratio?: number;
-  savings_vs_svt_gbp?: number;
-  battery_cycles?: number;
+  load_kwh: number;
+  charge_kwh: number;
+  discharge_kwh: number;
+}
+export interface MonthlyEnergyCost {
+  import_cost_pence: number;
+  export_earnings_pence: number;
+  standing_charge_pence: number;
+  net_cost_pence: number;
+  net_cost_pounds: number;
+  import_cost_pounds: number;
+  export_earnings_pounds: number;
+}
+export interface MonthlyEnergy {
+  energy: MonthlyEnergyEnergy;
+  cost: MonthlyEnergyCost;
+  heating_estimate_kwh?: number | null;
+  heating_estimate_cost_pence?: number | null;
+  equivalent_gas_cost_pence?: number | null;
+  equivalent_gas_cost_pounds?: number | null;
+  gas_comparison_ahead_pounds?: number | null;
 }
 
 export interface TariffComparisonRow {

@@ -47,12 +47,18 @@ export function EfficiencyWidget({ metrics, loading }: EfficiencyWidgetProps) {
       {realisedVwap != null && targetVwap != null && slippage != null && (
         <Row
           label="Realised vs target"
-          subLabel="what we paid vs the LP's ideal"
+          subLabel="what we paid vs the LP's ideal — lower realised is better"
           value={`${pence(realisedVwap)} / ${pence(targetVwap)}`}
-          benchmark={slippage < 2 ? "Tight · within 2p of target" :
-                     slippage < 8 ? "OK · slippage " + slippage.toFixed(1) + "p" :
-                     "Wide · slippage " + slippage.toFixed(1) + "p (forecast drift?)"}
-          tone={slippage < 2 ? "ok" : slippage < 8 ? "warn" : "bad"}
+          benchmark={
+            slippage <= 0
+              ? `Beat target · paid ${Math.abs(slippage).toFixed(1)}p less than LP ideal`
+              : slippage < 2
+                ? `Tight · ${slippage.toFixed(1)}p above target`
+                : slippage < 8
+                  ? `OK · ${slippage.toFixed(1)}p above target`
+                  : `Wide · ${slippage.toFixed(1)}p above target (forecast drift?)`
+          }
+          tone={slippage <= 0 ? "ok" : slippage < 2 ? "ok" : slippage < 8 ? "warn" : "bad"}
         />
       )}
       {offPeak != null && (

@@ -1,4 +1,4 @@
-import type { CockpitState, DaikinDevice, ApiQuotaResponse, EnergyReport } from "../../lib/types";
+import type { CockpitState, DaikinDevice, ApiQuotaResponse, EnergyReport, WeatherResponse } from "../../lib/types";
 import { tempC, kwh, relTime } from "../../lib/format";
 import { Pill } from "../common/Pill";
 import "./heating.css";
@@ -8,12 +8,13 @@ interface HeatingWidgetProps {
   daikin: DaikinDevice[] | null;
   daikinQuota: ApiQuotaResponse | null;
   report: EnergyReport | null;
+  weather: WeatherResponse | null;
 }
 
 // Heating-focused panel: tank (current + target + on/off), outdoor temp
 // (from Daikin sensor), LWT, mode pill, today's DHW vs space heating split,
 // Daikin daily quota indicator + cache freshness.
-export function HeatingWidget({ state, daikin, daikinQuota, report }: HeatingWidgetProps) {
+export function HeatingWidget({ state, daikin, daikinQuota, report, weather }: HeatingWidgetProps) {
   const dev = daikin && daikin.length > 0 ? daikin[0] : null;
   const mode = (state.daikin_mode || dev?.mode || "").toLowerCase();
   const isHeating = mode.includes("heat");
@@ -23,8 +24,26 @@ export function HeatingWidget({ state, daikin, daikinQuota, report }: HeatingWid
   const tankTemp = state.tank_c ?? dev?.tank_temp ?? null;
   const tankTarget = dev?.tank_target ?? null;
   const tankPower = dev?.tank_power ?? null;
-  const outdoorTemp = dev?.outdoor_temp ?? null;
   const lwt = state.lwt_c ?? dev?.lwt ?? null;
+
+  // Outdoor: prefer Daikin's sensor (most accurate microclimate), fall back
+  // to /weather's daikin echo, then to /weather's current forecast slot.
+  let outdoorTemp = dev?.outdoor_temp ?? weather?.daikin?.outdoor_temp ?? null;
+  let outdoorSource: "daikin" | "openmeteo" = "daikin";
+  if (outdoorTemp == null && weather?.forecast && weather.forecast.length > 0) {
+    const nowMs = Date.parse(state ? "" : "");  // placeholder to suppress unused
+    void nowMs;
+    // Find the forecast slot closest to now
+    const nowTs = Date.now();
+    let closest = weather.forecast[0];
+    let closestDist = Math.abs(Date.parse(closest.time) - nowTs);
+    for (const f of weather.forecast) {
+      const d = Math.abs(Date.parse(f.time) - nowTs);
+      if (d < closestDist) { closest = f; closestDist = d; }
+    }
+    outdoorTemp = closest.temp_c ?? null;
+    outdoorSource = "openmeteo";
+  }
 
   const dhwKwh = report?.heating?.kwh_for_showers ?? null;
   const spaceKwh = report?.heating?.kwh_for_heating ?? null;
@@ -88,7 +107,7 @@ export function HeatingWidget({ state, daikin, daikinQuota, report }: HeatingWid
           <span class="heating-row-icon">🌡</span>
           <div class="heating-row-body">
             <div class="heating-row-label">Outdoor</div>
-            <div class="heating-row-sub">Daikin sensor</div>
+            <div class="heating-row-sub">{outdoorSource === "daikin" ? "Daikin sensor" : "Open-Meteo forecast"}</div>
           </div>
           <span class="heating-row-temp">{tempC(outdoorTemp, 0)}</span>
         </div>
