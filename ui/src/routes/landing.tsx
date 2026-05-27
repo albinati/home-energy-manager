@@ -12,6 +12,7 @@ import {
   getEnergyMonthly,
   getDaikinStatus,
   getDaikinQuota,
+  getAgileDay,
 } from "../lib/endpoints";
 import { Widget } from "../components/common/Widget";
 import { Spinner } from "../components/common/Spinner";
@@ -71,6 +72,11 @@ export default function Landing() {
   // Daikin cached read — no refresh=true, so no live cloud call (30-min cache TTL).
   const daikin = useFetch(getDaikinStatus, []);
   const daikinQuota = useFetch(getDaikinQuota, []);
+  // Tomorrow's rates if Octopus has published them (16:00 local). Failure = blank.
+  const agileTomorrow = useFetch(() => {
+    const d = new Date(); d.setDate(d.getDate() + 1);
+    return getAgileDay(d.toISOString().slice(0, 10)).catch(() => null as never);
+  }, []);
 
   if (now.loading && !now.data) {
     return <div class="home"><Spinner label="Loading dashboard…" /></div>;
@@ -102,7 +108,7 @@ export default function Landing() {
         </Widget>
 
         <Widget title="Exports" icon="📤" tone="savings" size="medium">
-          <ExportsWidget now={data} yesterday={attribution.data} />
+          <ExportsWidget now={data} yesterday={attribution.data} report={report.data} monthly={monthly.data} />
         </Widget>
 
         <Widget title="Lifetime" icon="🏆" tone="savings" size="medium" badge={monthly.data.length > 0 ? `${monthly.data.length} mo on Agile` : undefined}>
@@ -110,7 +116,7 @@ export default function Landing() {
         </Widget>
 
         <Widget title="Today's tariff" icon="💷" tone="tariff" size="large">
-          <TariffWidget agile={agile.data} now={data} />
+          <TariffWidget agile={agile.data} now={data} metrics={metrics.data} />
         </Widget>
 
         <Widget title="Heating" icon="♨" tone="thermal" size="medium">
@@ -125,13 +131,15 @@ export default function Landing() {
           <EfficiencyWidget metrics={metrics.data} loading={metrics.loading} />
         </Widget>
 
-        <Widget title="Coming up" icon="📌" tone="coming" size="medium">
+        <Widget title="Coming up · next 24h" icon="📌" tone="coming" size="large">
           <ComingUp
             agile={agile.data}
+            agileTomorrow={agileTomorrow.data}
             weather={weather.data}
             cheapP={data.thresholds?.cheap_p ?? 12}
             peakP={data.thresholds?.peak_p ?? 28}
             nowUtc={data.now_utc}
+            horizonHours={24}
           />
         </Widget>
       </div>

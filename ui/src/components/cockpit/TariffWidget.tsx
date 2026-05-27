@@ -1,15 +1,16 @@
-import type { AgileTodayResponse, CockpitNow } from "../../lib/types";
+import type { AgileTodayResponse, CockpitNow, MetricsResponse } from "../../lib/types";
 import { hhmm, pence, slotKindLabel } from "../../lib/format";
 import "./cockpit.css";
 
 interface TariffWidgetProps {
   agile: AgileTodayResponse | null;
   now: CockpitNow;
+  metrics: MetricsResponse | null;
 }
 
 // Current price hero + 48-cell strip with current-time marker. Designed
 // to live inside a widget chrome so it stays compact.
-export function TariffWidget({ agile, now }: TariffWidgetProps) {
+export function TariffWidget({ agile, now, metrics }: TariffWidgetProps) {
   const importSlots = agile?.import_slots ?? [];
   const cheapP = now.thresholds?.cheap_p ?? 12;
   const peakP = now.thresholds?.peak_p ?? 28;
@@ -52,6 +53,8 @@ export function TariffWidget({ agile, now }: TariffWidgetProps) {
     sum += s.p;
   }
   const avg = sum / sorted.length;
+  const realisedVwap = metrics?.realised_vwap_pence ?? null;
+  const ourVsMarket = realisedVwap != null && Number.isFinite(realisedVwap) ? realisedVwap - avg : null;
 
   return (
     <div class="tariff-widget">
@@ -103,19 +106,27 @@ export function TariffWidget({ agile, now }: TariffWidgetProps) {
       </div>
 
       <div class="tariff-widget-summary">
-        <SummaryStat label="Today min" value={pence(min)} color="var(--cheap)" />
-        <SummaryStat label="Today avg" value={pence(avg)} color="var(--text-dim)" />
-        <SummaryStat label="Today peak" value={pence(max)} color="var(--peak)" />
+        <SummaryStat label="Market min" value={pence(min)} color="var(--cheap)" />
+        <SummaryStat label="Market avg" value={pence(avg)} color="var(--text-dim)" />
+        <SummaryStat
+          label="You paid"
+          value={realisedVwap != null ? pence(realisedVwap) : "—"}
+          color={ourVsMarket == null ? "var(--text)" : ourVsMarket < 0 ? "var(--ok)" : "var(--warn)"}
+          sub={ourVsMarket != null ? `${ourVsMarket >= 0 ? "+" : ""}${ourVsMarket.toFixed(1)}p vs market` : null}
+          emphasize
+        />
+        <SummaryStat label="Market peak" value={pence(max)} color="var(--peak)" />
       </div>
     </div>
   );
 }
 
-function SummaryStat({ label, value, color }: { label: string; value: string; color: string }) {
+function SummaryStat({ label, value, color, sub, emphasize }: { label: string; value: string; color: string; sub?: string | null; emphasize?: boolean }) {
   return (
-    <div class="tariff-summary-stat">
+    <div class={`tariff-summary-stat${emphasize ? " is-emphasized" : ""}`}>
       <div class="tariff-summary-label" style={{ color }}>{label}</div>
-      <div class="tariff-summary-value">{value}</div>
+      <div class="tariff-summary-value" style={emphasize ? { color } : undefined}>{value}</div>
+      {sub && <div class="tariff-summary-sub" style={{ color }}>{sub}</div>}
     </div>
   );
 }

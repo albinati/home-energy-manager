@@ -146,13 +146,25 @@
   font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
+.hero-bar-sub {
+  font-size: 0.65rem;
+  color: var(--text-mute);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
 .hero-bar-label {
   font-size: var(--font-xs);
   color: var(--text-dim);
   letter-spacing: 0.06em;
   text-transform: uppercase;
+  margin-top: 2px;
 }
 .hero-bar.is-active .hero-bar-label {
   color: var(--text);
   font-weight: 700;
+}
+.hero-bar-total {
+  font-size: 0.65rem;
+  color: var(--text-mute);
+  font-variant-numeric: tabular-nums;
 }

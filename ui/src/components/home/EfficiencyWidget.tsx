@@ -8,10 +8,9 @@ interface EfficiencyWidgetProps {
   loading: boolean;
 }
 
-// Surfaces the LP performance KPIs from /metrics that were previously
-// invisible: arbitrage efficiency, peak/off-peak import split, realised
-// VWAP vs target VWAP. Operator-y but signals whether the system is
-// "working" the tariff.
+// Operator-facing KPIs from /metrics with inline benchmarks so each number
+// reads as "good / ok / needs attention" without you needing to remember
+// what good looks like.
 export function EfficiencyWidget({ metrics, loading }: EfficiencyWidgetProps) {
   if (loading && !metrics) return <Spinner label="Loading efficiency…" />;
   if (!metrics) return <div class="muted">No metrics.</div>;
@@ -28,47 +27,75 @@ export function EfficiencyWidget({ metrics, loading }: EfficiencyWidgetProps) {
       {arb != null && (
         <Row
           label="Arbitrage efficiency"
-          help="Battery cycle ROI — how much value the LP captured vs perfect"
+          subLabel="how much of the price spread the LP captured"
           value={pct(arb, 0)}
+          benchmark={benchmarkText(arb, 25, 10, "%", "captured of theoretical max")}
           tone={arb >= 25 ? "ok" : arb >= 10 ? "warn" : "bad"}
         />
       )}
-      {peak != null && offPeak != null && (
+      {peak != null && (
         <Row
-          label="Peak / off-peak import"
-          help="Lower peak% = more arbitrage win"
-          value={`${peak.toFixed(0)}% / ${offPeak.toFixed(0)}%`}
-          tone={peak < 15 ? "ok" : peak < 30 ? "warn" : "bad"}
+          label="Import during peak"
+          subLabel="% of today's import that landed in peak slots"
+          value={pct(peak, 0)}
+          benchmark={peak <= 15 ? "Great · ≤15% means LP avoided peak well" :
+                     peak <= 30 ? "OK · 15–30% is typical" :
+                     "High · room to shift more out of peak"}
+          tone={peak <= 15 ? "ok" : peak <= 30 ? "warn" : "bad"}
         />
       )}
-      {realisedVwap != null && (
+      {realisedVwap != null && targetVwap != null && slippage != null && (
         <Row
-          label="Realised VWAP"
-          help="Volume-weighted price you actually paid"
-          value={pence(realisedVwap)}
-          tone="neutral"
+          label="Realised vs target"
+          subLabel="what we paid vs the LP's ideal"
+          value={`${pence(realisedVwap)} / ${pence(targetVwap)}`}
+          benchmark={slippage < 2 ? "Tight · within 2p of target" :
+                     slippage < 8 ? "OK · slippage " + slippage.toFixed(1) + "p" :
+                     "Wide · slippage " + slippage.toFixed(1) + "p (forecast drift?)"}
+          tone={slippage < 2 ? "ok" : slippage < 8 ? "warn" : "bad"}
         />
       )}
-      {targetVwap != null && slippage != null && (
+      {offPeak != null && (
         <Row
-          label="Target VWAP / slippage"
-          help="Slippage = realised − target. Lower is better."
-          value={`${pence(targetVwap)} / +${slippage.toFixed(1)}p`}
-          tone="neutral"
+          label="Off-peak import share"
+          subLabel="% of today's import that came in cheap slots"
+          value={pct(offPeak, 0)}
+          benchmark={offPeak >= 70 ? "Strong · ≥70% off-peak" :
+                     offPeak >= 50 ? "OK · 50–70%" :
+                     "Low · battery couldn't cover enough"}
+          tone={offPeak >= 70 ? "ok" : offPeak >= 50 ? "warn" : "bad"}
         />
       )}
     </div>
   );
 }
 
-function Row({ label, help, value, tone }: { label: string; help?: string; value: string; tone: "ok" | "warn" | "bad" | "neutral" }) {
+interface RowProps {
+  label: string;
+  subLabel: string;
+  value: string;
+  benchmark: string;
+  tone: "ok" | "warn" | "bad" | "neutral";
+}
+
+function Row({ label, subLabel, value, benchmark, tone }: RowProps) {
   return (
     <div class={`eff-row eff-row--${tone}`}>
-      <div class="eff-row-left">
+      <div class="eff-row-top">
         <div class="eff-row-label">{label}</div>
-        {help && <div class="eff-row-help">{help}</div>}
+        <div class="eff-row-value">{value}</div>
       </div>
-      <div class="eff-row-value">{value}</div>
+      <div class="eff-row-sub">{subLabel}</div>
+      <div class={`eff-row-benchmark eff-row-benchmark--${tone}`}>
+        <span class={`eff-row-dot eff-row-dot--${tone}`} />
+        {benchmark}
+      </div>
     </div>
   );
+}
+
+function benchmarkText(value: number, goodAt: number, okAt: number, unit: string, suffix: string): string {
+  if (value >= goodAt) return `Good · ≥${goodAt}${unit} ${suffix}`;
+  if (value >= okAt) return `OK · ${okAt}–${goodAt}${unit} ${suffix}`;
+  return `Low · <${okAt}${unit} ${suffix}`;
 }

@@ -307,6 +307,24 @@
   margin-right: 4px;
 }
 
+/* Tariff summary tweaks */
+.tariff-widget-summary {
+  grid-template-columns: repeat(4, 1fr) !important;
+}
+@media (max-width: 720px) {
+  .tariff-widget-summary { grid-template-columns: repeat(2, 1fr) !important; }
+}
+.tariff-summary-stat.is-emphasized {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-1) var(--space-2);
+}
+.tariff-summary-stat .tariff-summary-sub {
+  font-size: 0.65rem;
+  color: var(--text-mute);
+}
+
 /* Skeleton text — shown while a slow field loads */
 .skel-text {
   display: inline-block;

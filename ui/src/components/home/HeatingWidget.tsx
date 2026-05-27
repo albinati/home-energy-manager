@@ -1,5 +1,5 @@
 import type { CockpitState, DaikinDevice, ApiQuotaResponse, EnergyReport } from "../../lib/types";
-import { tempC, kwh } from "../../lib/format";
+import { tempC, kwh, relTime } from "../../lib/format";
 import { Pill } from "../common/Pill";
 import "./heating.css";
 
@@ -10,10 +10,9 @@ interface HeatingWidgetProps {
   report: EnergyReport | null;
 }
 
-// Heating-focused panel: tank status (current temp + target + on/off),
-// space heating mode + setpoint, today's DHW vs space split from
-// /energy/report.heating, and the Daikin daily quota indicator so the
-// operator knows whether they can hit Daikin live.
+// Heating-focused panel: tank (current + target + on/off), outdoor temp
+// (from Daikin sensor), LWT, mode pill, today's DHW vs space heating split,
+// Daikin daily quota indicator + cache freshness.
 export function HeatingWidget({ state, daikin, daikinQuota, report }: HeatingWidgetProps) {
   const dev = daikin && daikin.length > 0 ? daikin[0] : null;
   const mode = (state.daikin_mode || dev?.mode || "").toLowerCase();
@@ -24,8 +23,8 @@ export function HeatingWidget({ state, daikin, daikinQuota, report }: HeatingWid
   const tankTemp = state.tank_c ?? dev?.tank_temp ?? null;
   const tankTarget = dev?.tank_target ?? null;
   const tankPower = dev?.tank_power ?? null;
-  const indoorTemp = state.indoor_c ?? dev?.room_temp ?? null;
-  const indoorTarget = dev?.target_temp ?? null;
+  const outdoorTemp = dev?.outdoor_temp ?? null;
+  const lwt = state.lwt_c ?? dev?.lwt ?? null;
 
   const dhwKwh = report?.heating?.kwh_for_showers ?? null;
   const spaceKwh = report?.heating?.kwh_for_heating ?? null;
@@ -37,6 +36,13 @@ export function HeatingWidget({ state, daikin, daikinQuota, report }: HeatingWid
     : null;
   const quotaTone = quotaPct == null ? "neutral" : quotaPct > 85 ? "bad" : quotaPct > 60 ? "warn" : "ok";
 
+  // Cache freshness — when did we last refresh Daikin from the cloud?
+  const cacheAge = daikinQuota?.cache_age_seconds;
+  const lastRefresh = daikinQuota?.last_refresh_at_utc;
+  const freshLabel = lastRefresh ? relTime(lastRefresh) :
+                    cacheAge != null ? `${Math.round(cacheAge / 60)}m ago` :
+                    null;
+
   return (
     <div class="heating">
       <div class="heating-header">
@@ -46,12 +52,19 @@ export function HeatingWidget({ state, daikin, daikinQuota, report }: HeatingWid
           {isOff && <span class="heating-mode-icon">⏸</span>}
           <span>{state.daikin_mode || "—"}</span>
         </div>
-        {quotaBudget != null && (
-          <Pill tone={quotaTone === "ok" ? "ok" : quotaTone === "warn" ? "warn" : quotaTone === "bad" ? "bad" : "dim"}
-                title={`Daikin daily quota — ${quotaUsed}/${quotaBudget} calls used`}>
-            Daikin {quotaUsed}/{quotaBudget}
-          </Pill>
-        )}
+        <div class="heating-header-meta">
+          {freshLabel && (
+            <span class="heating-freshness" title={`Daikin cache last refreshed ${freshLabel}`}>
+              {freshLabel}
+            </span>
+          )}
+          {quotaBudget != null && (
+            <Pill tone={quotaTone === "ok" ? "ok" : quotaTone === "warn" ? "warn" : quotaTone === "bad" ? "bad" : "dim"}
+                  title={`Daikin daily quota — ${quotaUsed}/${quotaBudget} calls used`}>
+              {quotaUsed}/{quotaBudget}
+            </Pill>
+          )}
+        </div>
       </div>
 
       <div class="heating-rows">
@@ -72,12 +85,12 @@ export function HeatingWidget({ state, daikin, daikinQuota, report }: HeatingWid
         </div>
 
         <div class="heating-row">
-          <span class="heating-row-icon">🏠</span>
+          <span class="heating-row-icon">🌡</span>
           <div class="heating-row-body">
-            <div class="heating-row-label">Indoor</div>
-            <div class="heating-row-sub">{indoorTarget != null ? `setpoint ${tempC(indoorTarget, 0)}` : ""}</div>
+            <div class="heating-row-label">Outdoor</div>
+            <div class="heating-row-sub">Daikin sensor</div>
           </div>
-          <span class="heating-row-temp">{tempC(indoorTemp, 0)}</span>
+          <span class="heating-row-temp">{tempC(outdoorTemp, 0)}</span>
         </div>
 
         <div class="heating-row">
@@ -86,7 +99,7 @@ export function HeatingWidget({ state, daikin, daikinQuota, report }: HeatingWid
             <div class="heating-row-label">LWT</div>
             <div class="heating-row-sub">leaving water</div>
           </div>
-          <span class="heating-row-temp">{tempC(state.lwt_c, 0)}</span>
+          <span class="heating-row-temp">{tempC(lwt, 0)}</span>
         </div>
       </div>
 

@@ -27,6 +27,16 @@
 .heating-mode--heating { color: var(--warn); border-color: rgba(245,158,11,0.35); background: rgba(245,158,11,0.08); }
 .heating-mode--cooling { color: var(--accent); border-color: rgba(59,130,246,0.35); background: rgba(59,130,246,0.08); }
 .heating-mode-icon { font-size: 0.85rem; }
+.heating-header-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.heating-freshness {
+  font-size: 0.65rem;
+  color: var(--text-mute);
+  font-variant-numeric: tabular-nums;
+}
 
 .heating-rows {
   display: flex;

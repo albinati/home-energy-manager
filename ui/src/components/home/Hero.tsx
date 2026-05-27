@@ -7,26 +7,28 @@ interface HeroProps {
   metricsLoading: boolean;
 }
 
-// Big-number savings hero with Today / Week / Month comparison chips and
-// a vs-Fixed line when /metrics carries it. Pulls from /metrics:
-//   pnl.daily.delta_vs_svt_pounds + delta_vs_fixed_pounds
-//   pnl.weekly.delta_vs_svt_pounds
-//   pnl.monthly.delta_vs_svt_pounds
+// Big-number savings hero. Three comparison cells, all DAILY-NORMALISED
+// (£/day) so they're directly comparable:
+//   Today = literal today
+//   Week  = weekly total / 7
+//   Month = monthly total / day_of_month
+// Eliminates the previous "today saving > whole week" visual paradox.
 export function Hero({ metrics, metricsLoading }: HeroProps) {
   const daily = metrics?.pnl?.daily;
   const today = daily?.delta_vs_svt_pounds ?? null;
-  const week = metrics?.pnl?.weekly?.delta_vs_svt_pounds ?? null;
-  const month = metrics?.pnl?.monthly?.delta_vs_svt_pounds ?? null;
+  const weekTotal = metrics?.pnl?.weekly?.delta_vs_svt_pounds ?? null;
+  const monthTotal = metrics?.pnl?.monthly?.delta_vs_svt_pounds ?? null;
   const todayFixed = daily?.delta_vs_fixed_pounds ?? null;
+
+  const dayOfMonth = new Date().getDate();
+  const weekDaily = weekTotal != null ? weekTotal / 7 : null;
+  const monthDaily = monthTotal != null ? monthTotal / Math.max(1, dayOfMonth) : null;
 
   const sign = (n: number | null) => (n == null ? "neutral" : n >= 0 ? "positive" : "negative");
   const heroSign = sign(today);
 
-  // For the bar scaling: normalize against the largest of (today, week, month)
-  // so today's bar always reads in proportion.
-  const maxAbs = Math.max(Math.abs(today ?? 0), Math.abs(week ?? 0), Math.abs(month ?? 0), 1);
-  const heightPct = (v: number | null) =>
-    v == null ? 0 : Math.max(8, (Math.abs(v) / maxAbs) * 100);
+  const maxAbs = Math.max(Math.abs(today ?? 0), Math.abs(weekDaily ?? 0), Math.abs(monthDaily ?? 0), 1);
+  const heightPct = (v: number | null) => (v == null ? 0 : Math.max(8, (Math.abs(v) / maxAbs) * 100));
 
   return (
     <section class="hero" aria-label="Savings overview">
@@ -49,14 +51,42 @@ export function Hero({ metrics, metricsLoading }: HeroProps) {
               </strong>
             </div>
           )}
-          <DmaChip month={month} />
+          {monthDaily != null && (
+            <div class="hero-subline hero-subline-dma">
+              This month's running average:&nbsp;
+              <strong class={monthDaily >= 0 ? "hero-strong-pos" : "hero-strong-neg"}>
+                {gbpSigned(monthDaily)}/day
+              </strong>
+            </div>
+          )}
         </div>
       </div>
 
       <div class="hero-bars">
-        <HeroBar label="Today" value={today} pct={heightPct(today)} sign={sign(today)} active />
-        <HeroBar label="Week" value={week} pct={heightPct(week)} sign={sign(week)} />
-        <HeroBar label="Month" value={month} pct={heightPct(month)} sign={sign(month)} />
+        <HeroBar
+          label="Today"
+          sub="actual"
+          value={today}
+          pct={heightPct(today)}
+          sign={sign(today)}
+          active
+        />
+        <HeroBar
+          label="Week"
+          sub="avg/day"
+          value={weekDaily}
+          totalLabel={weekTotal != null ? `${gbpSigned(weekTotal)} total` : null}
+          pct={heightPct(weekDaily)}
+          sign={sign(weekDaily)}
+        />
+        <HeroBar
+          label="Month"
+          sub="avg/day"
+          value={monthDaily}
+          totalLabel={monthTotal != null ? `${gbpSigned(monthTotal)} total` : null}
+          pct={heightPct(monthDaily)}
+          sign={sign(monthDaily)}
+        />
       </div>
     </section>
   );
@@ -64,13 +94,15 @@ export function Hero({ metrics, metricsLoading }: HeroProps) {
 
 interface HeroBarProps {
   label: string;
+  sub: string;
   value: number | null;
+  totalLabel?: string | null;
   pct: number;
   sign: "positive" | "negative" | "neutral";
   active?: boolean;
 }
 
-function HeroBar({ label, value, pct, sign, active }: HeroBarProps) {
+function HeroBar({ label, sub, value, totalLabel, pct, sign, active }: HeroBarProps) {
   const color = sign === "positive" ? "var(--ok)" : sign === "negative" ? "var(--bad)" : "var(--text-mute)";
   return (
     <div class={`hero-bar${active ? " is-active" : ""}`}>
@@ -80,31 +112,17 @@ function HeroBar({ label, value, pct, sign, active }: HeroBarProps) {
           style={{
             height: `${pct}%`,
             background: `linear-gradient(180deg, ${color}33 0%, ${color} 100%)`,
-            transform: sign === "negative" ? "scaleY(-1)" : undefined,
-            transformOrigin: "bottom",
           }}
         />
       </div>
       <div class="hero-bar-value" style={{ color }}>{value == null ? "—" : gbpSigned(value)}</div>
+      <div class="hero-bar-sub">{sub}</div>
       <div class="hero-bar-label">{label}</div>
+      {totalLabel && <div class="hero-bar-total">{totalLabel}</div>}
     </div>
   );
 }
 
 function SkelHero() {
   return <span class="skel-text" style={{ width: "8rem", height: "0.85em" }} />;
-}
-
-function DmaChip({ month }: { month: number | null }) {
-  if (month == null) return null;
-  const dayOfMonth = new Date().getDate();
-  const dma = month / Math.max(1, dayOfMonth);
-  return (
-    <div class="hero-subline hero-subline-dma">
-      30-day average:&nbsp;
-      <strong class={dma >= 0 ? "hero-strong-pos" : "hero-strong-neg"}>
-        {gbpSigned(dma)}/day
-      </strong>
-    </div>
-  );
 }

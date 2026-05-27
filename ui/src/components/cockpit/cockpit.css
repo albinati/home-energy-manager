@@ -479,10 +479,11 @@
 /* Price summary */
 .price-summary {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: var(--space-2);
 }
-@media (max-width: 720px) { .price-summary { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 880px) { .price-summary { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 480px) { .price-summary { grid-template-columns: repeat(2, 1fr); } }
 
 .price-stat {
   background: var(--bg);
@@ -493,6 +494,14 @@
   flex-direction: column;
   gap: 2px;
   border-left: 3px solid var(--border-strong);
+}
+.price-stat.is-emphasized {
+  background: var(--bg-card-2);
+  border-color: var(--border-strong);
+}
+.price-stat.is-emphasized .price-stat-label {
+  color: var(--text);
+  font-weight: 700;
 }
 .price-stat-label {
   font-size: var(--font-xs);
