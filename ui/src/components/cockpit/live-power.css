@@ -1,0 +1,128 @@
+/* Composite live-power widget: action header + flow diagram + battery panel */
+
+.livepower {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/* Action header — replaces the standalone "Right Now" widget */
+.livepower-action {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--border);
+}
+.livepower-action-icon {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.2rem;
+  color: white;
+  flex-shrink: 0;
+}
+.livepower-action-text { min-width: 0; }
+.livepower-action-title {
+  font-size: var(--font-lg);
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  line-height: 1.1;
+}
+.livepower-action-sub {
+  font-size: var(--font-xs);
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+}
+
+/* Body: flow on the left, battery on the right */
+.livepower-body {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: var(--space-4);
+  align-items: start;
+}
+@media (max-width: 760px) {
+  .livepower-body { grid-template-columns: 1fr; }
+}
+
+.livepower-flow { min-width: 0; }
+
+.livepower-batt {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 140px;
+  padding-left: var(--space-3);
+  border-left: 1px solid var(--border);
+}
+@media (max-width: 760px) {
+  .livepower-batt {
+    border-left: none;
+    border-top: 1px solid var(--border);
+    padding-left: 0;
+    padding-top: var(--space-3);
+  }
+}
+
+.livepower-batt-cell {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-rows: auto auto;
+  grid-template-areas: "svg pct" "svg kwh";
+  gap: 0 var(--space-2);
+  align-items: center;
+}
+.livepower-batt-svg { grid-area: svg; }
+.livepower-batt-pct {
+  grid-area: pct;
+  font-size: 2rem;
+  font-weight: 800;
+  letter-spacing: -0.025em;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.livepower-batt-kwh {
+  grid-area: kwh;
+  font-size: var(--font-xs);
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.livepower-batt-dir {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--font-sm);
+  font-variant-numeric: tabular-nums;
+}
+.livepower-batt-dir-icon { font-size: 1rem; line-height: 1; }
+.livepower-batt-dir-kw { font-weight: 700; }
+
+.livepower-batt-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: var(--space-2);
+  border-top: 1px dashed var(--border);
+}
+.livepower-batt-meta-row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-2);
+  font-size: var(--font-xs);
+  font-variant-numeric: tabular-nums;
+}
+.livepower-batt-meta-label {
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.livepower-batt-meta-value {
+  font-weight: 600;
+  text-align: right;
+}

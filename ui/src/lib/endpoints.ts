@@ -18,6 +18,9 @@ import type {
   SimulateBatchResponse,
   ApplyBatchResponse,
   MetricsResponse,
+  DaikinDevice,
+  ApiQuotaResponse,
+  LoadBreakdownResponse,
 } from "./types";
 
 /* ----- Real-time / cockpit ----- */
@@ -27,6 +30,10 @@ export const getSchedulerTimeline = () => getJson<SchedulerTimeline>("/scheduler
 export const getDecisionsLatest = () =>
   getJson<DispatchDecisionsResponse>("/optimization/decisions/latest");
 export const getMetrics = () => getJson<MetricsResponse>("/metrics");
+export const getDaikinStatus = () => getJson<DaikinDevice[]>("/daikin/status");
+export const getDaikinQuota = () => getJson<ApiQuotaResponse>("/daikin/quota");
+export const getFoxQuota = () => getJson<ApiQuotaResponse>("/foxess/quota");
+export const getLoadBreakdown = () => getJson<LoadBreakdownResponse>("/load/breakdown");
 
 /* ----- Forecast vs actuals ----- */
 

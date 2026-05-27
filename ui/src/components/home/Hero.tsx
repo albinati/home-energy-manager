@@ -40,14 +40,17 @@ export function Hero({ metrics, metricsLoading }: HeroProps) {
         <div class={`hero-headline hero-headline--${heroSign}`}>
           {today == null ? (metricsLoading ? <SkelHero /> : "—") : gbpSigned(today)}
         </div>
-        {todayFixed != null && (
-          <div class="hero-subline">
-            vs British Gas Fixed:&nbsp;
-            <strong class={todayFixed >= 0 ? "hero-strong-pos" : "hero-strong-neg"}>
-              {gbpSigned(todayFixed)}
-            </strong>
-          </div>
-        )}
+        <div class="hero-sublines">
+          {todayFixed != null && (
+            <div class="hero-subline">
+              vs British Gas Fixed:&nbsp;
+              <strong class={todayFixed >= 0 ? "hero-strong-pos" : "hero-strong-neg"}>
+                {gbpSigned(todayFixed)}
+              </strong>
+            </div>
+          )}
+          <DmaChip month={month} />
+        </div>
       </div>
 
       <div class="hero-bars">
@@ -90,4 +93,18 @@ function HeroBar({ label, value, pct, sign, active }: HeroBarProps) {
 
 function SkelHero() {
   return <span class="skel-text" style={{ width: "8rem", height: "0.85em" }} />;
+}
+
+function DmaChip({ month }: { month: number | null }) {
+  if (month == null) return null;
+  const dayOfMonth = new Date().getDate();
+  const dma = month / Math.max(1, dayOfMonth);
+  return (
+    <div class="hero-subline hero-subline-dma">
+      30-day average:&nbsp;
+      <strong class={dma >= 0 ? "hero-strong-pos" : "hero-strong-neg"}>
+        {gbpSigned(dma)}/day
+      </strong>
+    </div>
+  );
 }

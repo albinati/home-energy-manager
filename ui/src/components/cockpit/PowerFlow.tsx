@@ -6,67 +6,74 @@ interface PowerFlowProps {
   state: CockpitState;
 }
 
-// Diamond layout with truly-animated flow:
-//   - Active edges carry SVG <circle> particles that travel along the path
-//     via <animateMotion mpath>. Particle speed scales with watts (faster
-//     when more power flows). Multiple particles per edge for a "stream"
-//     feel.
-//   - Source/sink nodes pulse when actively producing/consuming.
+// 2x2 grid layout — eliminates the diamond overlap by giving each node its
+// own quadrant. Labels live BELOW each node with plenty of whitespace.
+// Particles travel along the connecting curves.
 //
-//        ☀ PV (top)
-//       ↙    ↘
-//   🔋 Batt   🏠 House
-//       ↘    ↙
-//        ⚡ Grid (bottom)
+//   ☀ Solar (top-left)     🏠 House (top-right)
+//        ╲                 ╱
+//         ╲               ╱
+//   🔋 Battery (bot-left)  ⚡ Grid (bot-right)
 //
-// Signs from /cockpit/now:
+// Sign convention (from /cockpit/now):
 //   battery_kw > 0 = charging,    < 0 = discharging
 //   grid_kw    > 0 = importing,   < 0 = exporting
 
 const ACTIVATION_W = 50;
 
-export function PowerFlow({ state }: PowerFlowProps) {
-  // Per-edge watts (positive in the named direction).
-  const pvHouseW = state.solar_kw > 0 ? Math.max(0, state.solar_kw * 1000 - Math.max(0, state.battery_kw * 1000)) : 0;
-  const pvBattW = state.solar_kw > 0 && state.battery_kw > 0 ? state.battery_kw * 1000 : 0;
-  const gridHouseW = state.grid_kw > 0 ? state.grid_kw * 1000 : 0;
-  const houseGridW = state.grid_kw < 0 ? -state.grid_kw * 1000 : 0;
-  const battHouseW = state.battery_kw < 0 ? -state.battery_kw * 1000 : 0;
-  const gridBattW = state.grid_kw > 0 && state.battery_kw > 0 ? Math.min(state.grid_kw, state.battery_kw) * 1000 : 0;
+// Quadrant centers — pick spacing that keeps node circles + labels clear.
+const NODES = {
+  pv:    { x: 110, y: 80 },
+  house: { x: 370, y: 80 },
+  batt:  { x: 110, y: 230 },
+  grid:  { x: 370, y: 230 },
+};
 
-  const gridImporting = state.grid_kw > 0.05;
-  const gridExporting = state.grid_kw < -0.05;
-  const battCharging = state.battery_kw > 0.05;
-  const battDischarging = state.battery_kw < -0.05;
-  const solarProducing = state.solar_kw > 0.05;
-  const houseConsuming = state.load_kw > 0.05;
+export function PowerFlow({ state }: PowerFlowProps) {
+  const s = state;
+  const pvHouseW = s.solar_kw > 0 ? Math.max(0, s.solar_kw * 1000 - Math.max(0, s.battery_kw * 1000)) : 0;
+  const pvBattW = s.solar_kw > 0 && s.battery_kw > 0 ? s.battery_kw * 1000 : 0;
+  const gridHouseW = s.grid_kw > 0 ? s.grid_kw * 1000 : 0;
+  const houseGridW = s.grid_kw < 0 ? -s.grid_kw * 1000 : 0;
+  const battHouseW = s.battery_kw < 0 ? -s.battery_kw * 1000 : 0;
+  const gridBattW = s.grid_kw > 0 && s.battery_kw > 0 ? Math.min(s.grid_kw, s.battery_kw) * 1000 : 0;
+
+  const gridImporting = s.grid_kw > 0.05;
+  const gridExporting = s.grid_kw < -0.05;
+  const battCharging = s.battery_kw > 0.05;
+  const battDischarging = s.battery_kw < -0.05;
+  const solarProducing = s.solar_kw > 0.05;
+  const houseConsuming = s.load_kw > 0.05;
+
+  // Curved paths between quadrants (SVG q commands)
+  const pvToHouse = "M 142 80 C 220 60 280 60 338 80";
+  const battToHouse = "M 130 200 C 200 150 280 130 350 95";
+  const gridToHouse = "M 370 200 C 380 160 380 130 370 110";
+  const houseToGrid = "M 370 110 C 360 140 360 170 370 200";
+  const pvToBatt = "M 110 112 C 80 150 80 180 110 198";
+  const gridToBatt = "M 338 230 C 280 240 200 240 142 230";
 
   return (
     <div class="powerflow" aria-label="Live power flow">
-      <svg viewBox="0 0 440 280" class="powerflow-svg" aria-hidden="true">
+      <svg viewBox="0 0 480 310" class="powerflow-svg" aria-hidden="true">
         <defs>
-          <path id="pf-pv-house"   d="M 130 70 Q 250 80 320 140" />
-          <path id="pf-pv-batt"   d="M 110 75 Q 60 140 100 200" />
-          <path id="pf-grid-house" d="M 320 215 Q 350 175 325 140" />
-          <path id="pf-house-grid" d="M 325 140 Q 350 175 320 215" />
-          <path id="pf-batt-house" d="M 130 200 Q 240 230 320 145" />
-          <path id="pf-grid-batt"  d="M 290 230 Q 200 245 110 215" />
-
+          <Marker id="arrow-pv" colorVar="var(--pv)" />
+          <Marker id="arrow-batt" colorVar="var(--batt)" />
+          <Marker id="arrow-import" colorVar="var(--import)" />
+          <Marker id="arrow-export" colorVar="var(--export)" />
           <filter id="pf-glow" x="-50%" y="-50%" width="200%" height="200%">
             <feGaussianBlur stdDeviation="3" result="blur" />
-            <feMerge>
-              <feMergeNode in="blur" />
-              <feMergeNode in="SourceGraphic" />
-            </feMerge>
+            <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
           </filter>
-
-          <radialGradient id="pf-pulse-grad">
-            <stop offset="0%" stop-color="var(--accent)" stop-opacity="0.6" />
-            <stop offset="100%" stop-color="var(--accent)" stop-opacity="0" />
-          </radialGradient>
+          <path id="pf-pv-house"   d={pvToHouse} />
+          <path id="pf-pv-batt"   d={pvToBatt} />
+          <path id="pf-grid-house" d={gridToHouse} />
+          <path id="pf-house-grid" d={houseToGrid} />
+          <path id="pf-batt-house" d={battToHouse} />
+          <path id="pf-grid-batt"  d={gridToBatt} />
         </defs>
 
-        {/* Background dashed paths (always shown) */}
+        {/* Background edges (always visible faintly) */}
         <BackgroundEdge href="#pf-pv-house" />
         <BackgroundEdge href="#pf-pv-batt" />
         <BackgroundEdge href="#pf-grid-house" />
@@ -82,22 +89,38 @@ export function PowerFlow({ state }: PowerFlowProps) {
         <ActiveEdge pathId="pf-grid-batt"  w={gridBattW}  colorVar="var(--import)" />
 
         {/* Nodes */}
-        <Node x={120} y={70}  icon="☀"  label="Solar"   valueW={state.solar_kw * 1000}      colorVar="var(--pv)"
+        <Node {...NODES.pv} icon="☀" label="Solar"
+              valueW={s.solar_kw * 1000}
+              colorVar="var(--pv)"
               status={solarProducing ? "producing" : "off"}
               active={solarProducing} />
-        <Node x={120} y={215} icon="🔋" label="Battery" valueW={Math.abs(state.battery_kw) * 1000} colorVar="var(--batt)"
+        <Node {...NODES.house} icon="🏠" label="House"
+              valueW={s.load_kw * 1000}
+              colorVar="var(--house)"
+              status="consuming"
+              active={houseConsuming} />
+        <Node {...NODES.batt} icon="🔋" label="Battery"
+              valueW={Math.abs(s.battery_kw) * 1000}
+              colorVar="var(--batt)"
               status={battCharging ? "charging" : battDischarging ? "discharging" : "idle"}
               statusColor={battCharging ? "var(--ok)" : battDischarging ? "var(--warn)" : "var(--text-mute)"}
               active={battCharging || battDischarging} />
-        <Node x={325} y={140} icon="🏠" label="House"   valueW={state.load_kw * 1000}        colorVar="var(--house)"
-              status="consuming"
-              active={houseConsuming} />
-        <Node x={325} y={215} icon="⚡" label="Grid"    valueW={Math.abs(state.grid_kw) * 1000} colorVar="var(--grid)"
+        <Node {...NODES.grid} icon="⚡" label="Grid"
+              valueW={Math.abs(s.grid_kw) * 1000}
+              colorVar={gridExporting ? "var(--export)" : gridImporting ? "var(--import)" : "var(--grid)"}
               status={gridExporting ? "exporting" : gridImporting ? "importing" : "idle"}
               statusColor={gridExporting ? "var(--export)" : gridImporting ? "var(--import)" : "var(--text-mute)"}
               active={gridImporting || gridExporting} />
       </svg>
     </div>
+  );
+}
+
+function Marker({ id, colorVar }: { id: string; colorVar: string }) {
+  return (
+    <marker id={id} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill={colorVar} />
+    </marker>
   );
 }
 
@@ -108,39 +131,21 @@ function BackgroundEdge({ href }: { href: string }) {
   );
 }
 
-interface ActiveEdgeProps {
-  pathId: string;
-  w: number;
-  colorVar: string;
-}
-
-function ActiveEdge({ pathId, w, colorVar }: ActiveEdgeProps) {
+function ActiveEdge({ pathId, w, colorVar }: { pathId: string; w: number; colorVar: string }) {
   if (w < ACTIVATION_W) return null;
-
-  // Particle travel duration scales inversely with watts (capped 0.8s..3s).
   const dur = Math.max(0.8, Math.min(3, 4000 / w));
-  // More watts = more particles.
   const particleCount = w > 1500 ? 3 : w > 500 ? 2 : 1;
-
   return (
     <g>
-      {/* Glowing live path under particles */}
       <use href={`#${pathId}`} stroke={colorVar} stroke-width="3" fill="none"
            opacity="0.45" filter="url(#pf-glow)" />
       <use href={`#${pathId}`} stroke={colorVar} stroke-width="1.5" fill="none"
            opacity="0.9" />
-
-      {/* Particles travelling along path */}
       {Array.from({ length: particleCount }).map((_, i) => {
         const offset = (i / particleCount) * dur;
         return (
           <circle key={i} r="3.5" fill={colorVar} filter="url(#pf-glow)">
-            <animateMotion
-              dur={`${dur}s`}
-              repeatCount="indefinite"
-              begin={`-${offset}s`}
-              rotate="auto"
-            >
+            <animateMotion dur={`${dur}s`} repeatCount="indefinite" begin={`-${offset}s`} rotate="auto">
               <mpath href={`#${pathId}`} />
             </animateMotion>
           </circle>
@@ -151,8 +156,7 @@ function ActiveEdge({ pathId, w, colorVar }: ActiveEdgeProps) {
 }
 
 interface NodeProps {
-  x: number;
-  y: number;
+  x: number; y: number;
   icon: string;
   label: string;
   valueW: number;
@@ -163,7 +167,7 @@ interface NodeProps {
 }
 
 function Node({ x, y, icon, label, valueW, colorVar, status, statusColor, active }: NodeProps) {
-  const r = 34;
+  const r = 30;
   return (
     <g>
       {active && (
@@ -175,14 +179,15 @@ function Node({ x, y, icon, label, valueW, colorVar, status, statusColor, active
       <circle cx={x} cy={y} r={r}
               fill="var(--bg-card-2)" stroke={colorVar} stroke-width="2"
               style={active ? { filter: "drop-shadow(0 0 8px " + colorVar + "55)" } : undefined} />
-      <text x={x} y={y - 10} text-anchor="middle" font-size="17">{icon}</text>
-      <text x={x} y={y + 7} text-anchor="middle" fill="var(--text)" font-size="11" font-weight="600">{label}</text>
-      <text x={x} y={y + 21} text-anchor="middle" fill="var(--text-dim)" font-size="10"
+      <text x={x} y={y - 6} text-anchor="middle" font-size="16">{icon}</text>
+      <text x={x} y={y + 9} text-anchor="middle" fill="var(--text)" font-size="10" font-weight="600">{label}</text>
+      <text x={x} y={y + 22} text-anchor="middle" fill="var(--text-dim)" font-size="9.5"
             font-variant-numeric="tabular-nums">
         {watts(Math.abs(valueW))}
       </text>
-      <text x={x} y={y + r + 16} text-anchor="middle"
-            fill={statusColor || "var(--text-mute)"} font-size="10" font-weight="500">
+      {/* Status label below the circle, far enough not to collide with siblings */}
+      <text x={x} y={y + r + 18} text-anchor="middle"
+            fill={statusColor || "var(--text-mute)"} font-size="9.5" font-weight="500">
         {status}
       </text>
     </g>

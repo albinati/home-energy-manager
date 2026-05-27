@@ -1,3 +1,4 @@
+import { useEffect, useState } from "preact/hooks";
 import { usePoll, useFetch } from "../lib/poll";
 import {
   getCockpitNow,
@@ -6,31 +7,70 @@ import {
   getWeather,
   getSchedulerTimeline,
   getExecutionToday,
-  getDecisionsLatest,
   getAttributionDay,
+  getEnergyReport,
+  getEnergyMonthly,
+  getDaikinStatus,
+  getDaikinQuota,
 } from "../lib/endpoints";
 import { Widget } from "../components/common/Widget";
 import { Spinner } from "../components/common/Spinner";
-import { PowerFlow } from "../components/cockpit/PowerFlow";
-import { BatteryWidget } from "../components/cockpit/BatteryWidget";
-import { DispatchReason } from "../components/cockpit/DispatchReason";
+import { LivePowerWidget } from "../components/cockpit/LivePowerWidget";
 import { TariffWidget } from "../components/cockpit/TariffWidget";
-import { ThermalWidget } from "../components/cockpit/ThermalWidget";
 import { ComingUp } from "../components/home/ComingUp";
 import { Hero } from "../components/home/Hero";
 import { ExportsWidget } from "../components/home/ExportsWidget";
-import type { DispatchDecisionsResponse } from "../lib/types";
+import { TodayBillWidget } from "../components/home/TodayBillWidget";
+import { LifetimeWidget } from "../components/home/LifetimeWidget";
+import { EfficiencyWidget } from "../components/home/EfficiencyWidget";
+import { HeatingWidget } from "../components/home/HeatingWidget";
+import { PlanPreview } from "../components/home/PlanPreview";
+import type { MonthlyEnergy } from "../lib/types";
 import "../components/home/home.css";
 
+function lastMonths(n: number): string[] {
+  const now = new Date();
+  const out: string[] = [];
+  for (let i = n - 1; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    out.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
+  }
+  return out;
+}
+
+function useMonthlyHistory(n: number) {
+  const [data, setData] = useState<MonthlyEnergy[]>([]);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    Promise.all(lastMonths(n).map((m) => getEnergyMonthly(m).catch(() => null))).then((r) => {
+      if (!alive) return;
+      setData(r.filter((x): x is MonthlyEnergy => !!x));
+      setLoading(false);
+    });
+    return () => { alive = false; };
+  }, [n]);
+  return { data, loading };
+}
+
 export default function Landing() {
+  // Cache-only endpoints — poll while the tab is visible (usePoll auto-pauses
+  // via visibilitychange). All of these read SQLite/memory, no cloud calls.
   const now = usePoll(getCockpitNow, 20_000);
-  const metrics = useFetch(getMetrics, []);
+  const metrics = usePoll(getMetrics, 5 * 60_000);
+  const timeline = usePoll(getSchedulerTimeline, 5 * 60_000);
+
+  // Fetch-once endpoints — refresh on tab return, otherwise no churn.
   const agile = useFetch(getAgileToday, []);
   const weather = useFetch(getWeather, []);
-  const timeline = useFetch(getSchedulerTimeline, []);
   const execution = useFetch(getExecutionToday, []);
-  const decisions = useFetch(getDecisionsLatest, []);
   const attribution = useFetch(() => getAttributionDay(), []);
+  const report = useFetch(() => getEnergyReport(new Date().toISOString().slice(0, 10)), []);
+  const monthly = useMonthlyHistory(6);
+  // Daikin cached read — no refresh=true, so no live cloud call (30-min cache TTL).
+  const daikin = useFetch(getDaikinStatus, []);
+  const daikinQuota = useFetch(getDaikinQuota, []);
 
   if (now.loading && !now.data) {
     return <div class="home"><Spinner label="Loading dashboard…" /></div>;
@@ -46,39 +86,46 @@ export default function Landing() {
 
   const data = now.data;
   const s = data.state;
-  const currentReason = extractCurrentReason(data.now_utc, decisions.data);
 
   return (
     <div class="home">
       <Hero metrics={metrics.data} metricsLoading={metrics.loading} />
 
-      {/* WIDGET GRID */}
       <div class="widget-grid">
-        <Widget title="Live power" icon="⚡" tone="power" size="large" badge={data.now_utc ? new Date(data.now_utc).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }) : undefined}>
-          <PowerFlow state={s} />
+        <Widget title="Live power" icon="⚡" tone="power" size="large"
+                badge={data.now_utc ? new Date(data.now_utc).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }) : undefined}>
+          <LivePowerWidget state={s} timeline={timeline.data} execution={execution.data} />
         </Widget>
 
-        <Widget title="Battery" icon="🔋" tone="battery" size="medium">
-          <BatteryWidget state={s} timeline={timeline.data} execution={execution.data} />
-        </Widget>
-
-        <Widget title="Today's tariff" icon="💷" tone="tariff" size="large">
-          <TariffWidget agile={agile.data} now={data} />
-        </Widget>
-
-        <Widget title="Thermal" icon="♨" tone="thermal" size="medium">
-          <ThermalWidget state={s} />
-        </Widget>
-
-        <Widget title="Right now" icon="🎯" tone="plan" size="large">
-          <DispatchReason now={data} decisionReason={currentReason} />
+        <Widget title="Today's bill" icon="💰" tone="savings" size="medium">
+          <TodayBillWidget report={report.data} reportLoading={report.loading} metrics={metrics.data} />
         </Widget>
 
         <Widget title="Exports" icon="📤" tone="savings" size="medium">
           <ExportsWidget now={data} yesterday={attribution.data} />
         </Widget>
 
-        <Widget title="Coming up" icon="📅" tone="coming" size="medium">
+        <Widget title="Lifetime" icon="🏆" tone="savings" size="medium" badge={monthly.data.length > 0 ? `${monthly.data.length} mo on Agile` : undefined}>
+          <LifetimeWidget monthly={monthly.data} monthlyLoading={monthly.loading} />
+        </Widget>
+
+        <Widget title="Today's tariff" icon="💷" tone="tariff" size="large">
+          <TariffWidget agile={agile.data} now={data} />
+        </Widget>
+
+        <Widget title="Heating" icon="♨" tone="thermal" size="medium">
+          <HeatingWidget state={s} daikin={daikin.data} daikinQuota={daikinQuota.data} report={report.data} />
+        </Widget>
+
+        <Widget title="Next 6 hours" icon="📅" tone="plan" size="medium">
+          <PlanPreview timeline={timeline.data} nowUtc={data.now_utc} horizonHours={6} />
+        </Widget>
+
+        <Widget title="Efficiency" icon="🎯" tone="plan" size="medium">
+          <EfficiencyWidget metrics={metrics.data} loading={metrics.loading} />
+        </Widget>
+
+        <Widget title="Coming up" icon="📌" tone="coming" size="medium">
           <ComingUp
             agile={agile.data}
             weather={weather.data}
@@ -87,19 +134,7 @@ export default function Landing() {
             nowUtc={data.now_utc}
           />
         </Widget>
-
       </div>
     </div>
   );
-}
-
-function extractCurrentReason(nowUtc: string | undefined, decisions: DispatchDecisionsResponse | null): string | null {
-  if (!nowUtc || !decisions?.decisions || decisions.decisions.length === 0) return null;
-  const t = Date.parse(nowUtc);
-  if (!Number.isFinite(t)) return null;
-  for (let i = decisions.decisions.length - 1; i >= 0; i--) {
-    const d = decisions.decisions[i];
-    if (d.slot_time_utc && Date.parse(d.slot_time_utc) <= t) return d.reason || null;
-  }
-  return null;
 }

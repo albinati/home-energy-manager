@@ -295,6 +295,50 @@ export interface TariffDashboardResponse {
 
 /* ----- /metrics (~1s, summary KPIs) ----- */
 
+// /daikin/status — cached when refresh=false (default)
+export interface DaikinDevice {
+  device_id: string;
+  device_name?: string;
+  mode?: string | null;
+  room_temp?: number | null;
+  target_temp?: number | null;
+  tank_temp?: number | null;
+  tank_target?: number | null;
+  outdoor_temp?: number | null;
+  lwt?: number | null;
+  weather_regulation?: boolean | null;
+  control_mode?: string | null;
+  state_summary?: string | null;
+  is_on?: boolean | null;
+  tank_power?: boolean | null;
+}
+
+// /daikin/quota + /foxess/quota — shared shape
+export interface ApiQuotaResponse {
+  cache_age_seconds?: number | null;
+  cache_warm?: boolean;
+  stale?: boolean;
+  last_refresh_at_utc?: string | null;
+  last_updated_epoch?: number;
+  refresh_count_24h?: number;
+  quota_used_24h?: number;
+  quota_remaining_24h?: number;
+  daily_budget?: number;
+  blocked?: boolean;
+  last_blocked_at?: number | null;
+}
+
+// /load/breakdown — components of consumption
+export interface LoadBreakdownComponent {
+  name: string;
+  kwh: number;
+  pct_of_total: number;
+}
+export interface LoadBreakdownResponse {
+  components: LoadBreakdownComponent[];
+  total_kwh: number;
+}
+
 export interface MetricsResponse {
   pnl?: {
     daily?: { delta_vs_svt_pounds?: number; delta_vs_fixed_pounds?: number };

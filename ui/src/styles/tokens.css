@@ -80,18 +80,18 @@
   --bg-card: #ffffff;
   --bg-card-2: #f1f5f9;
   --bg-card-3: #e2e8f0;
-  --border: #d1d5db;
-  --border-strong: #9ca3af;
+  --border: #cbd5e1;
+  --border-strong: #94a3b8;
 
   --text: #0f172a;
-  --text-dim: #475569;
+  --text-dim: #334155;
   --text-mute: #64748b;
 
   --accent: #2563eb;
   --accent-dim: #1e40af;
-  --ok: #059669;
-  --warn: #d97706;
-  --bad: #dc2626;
+  --ok: #047857;
+  --warn: #b45309;
+  --bad: #b91c1c;
 
   --neg-price: #2563eb;
   --cheap: #059669;

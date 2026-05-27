@@ -1,0 +1,68 @@
+.today-bill {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.today-bill-headline {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-3);
+}
+.today-bill-realised,
+.today-bill-projected {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.today-bill-projected {
+  padding-left: var(--space-3);
+  border-left: 1px dashed var(--border);
+}
+.today-bill-label {
+  font-size: var(--font-xs);
+  color: var(--text-dim);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.today-bill-amount {
+  font-size: 1.8rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.025em;
+  line-height: 1;
+}
+.today-bill-amount-realised { color: var(--text); }
+.today-bill-amount-projected { color: var(--text-dim); }
+
+.today-bill-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border);
+}
+.today-bill-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: var(--font-sm);
+  font-variant-numeric: tabular-nums;
+}
+.today-bill-row-label {
+  color: var(--text-dim);
+}
+.today-bill-row-value {
+  font-weight: 600;
+}
+.today-bill-row-value-ok { color: var(--ok); }
+.today-bill-row-value-bad { color: var(--bad); }
+
+.today-bill-note {
+  font-size: var(--font-xs);
+  color: var(--text-mute);
+  font-style: italic;
+  padding-top: var(--space-1);
+  border-top: 1px dashed var(--border);
+}

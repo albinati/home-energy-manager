@@ -1,4 +1,5 @@
 import { buildSha, hasBearer } from "../../lib/api";
+import { QuotaChips } from "./QuotaChips";
 
 export function Footer() {
   const sha = buildSha();
@@ -13,6 +14,8 @@ export function Footer() {
         <span title={hasBearer() ? "Authorization header attached to /api requests" : "No bearer configured"}>
           {hasBearer() ? "Authenticated" : "Unauthenticated"}
         </span>
+        <span>•</span>
+        <QuotaChips />
         <span class="grow"></span>
         <a href="https://github.com/albinati/home-energy-manager" rel="noreferrer">
           GitHub
