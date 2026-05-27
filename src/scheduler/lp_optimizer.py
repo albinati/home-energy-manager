@@ -1064,7 +1064,13 @@ def solve_lp(
     # Skip terminal tank/indoor floors in passive mode — same reason as shower
     # hard constraint above. Firmware controls comfort; the LP only optimises
     # battery/grid/PV around the predicted Daikin draw.
-    if not passive_daikin:
+    #
+    # Also skip when DHW is pinned (PR K2): ``tank[n]`` is already pinned by
+    # ``dhw_policy.forecast_dhw_load_per_slot``, and the policy can target a
+    # value below ``terminal_dhw_floor`` (e.g. guests mode pins 45 °C while
+    # ``t_min_dhw=55`` → floor 53 °C → infeasible). This mirrors the K2
+    # guard on the soft shower floor above.
+    if not passive_daikin and not _dhw_pinned:
         # PR 4 of plan: when the last slot lands inside a shower window, keep
         # the tight terminal floor so the LP must finish with a hot tank for
         # in-progress showers. When it lands OUTSIDE shower windows (e.g. a

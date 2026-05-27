@@ -359,3 +359,31 @@ def test_lp_pinning_passive_mode_unaffected(monkeypatch):
     # Passive mode + pinning could be infeasible — LP returns ok=False if so.
     # Either outcome is acceptable as long as it doesn't crash.
     assert plan is not None
+
+
+def test_lp_pinning_guests_with_last_slot_in_shower_window_is_feasible(monkeypatch):
+    """Regression: prod run 1154 (2026-05-27 19:55 UTC) went Infeasible
+    because the K2 pin clamped ``tank[n]`` to ``DHW_TEMP_NORMAL_C=45`` while
+    ``terminal_dhw_floor`` was still active and used ``TARGET_DHW_TEMP_MIN_GUESTS_C-2=53``
+    when the last slot lands inside the evening shower window. The fix: skip
+    the terminal floor when ``_dhw_pinned`` is True (the pinned trajectory
+    fully owns the tank). Without the fix this test errors with
+    ``plan.ok=False``."""
+    monkeypatch.setattr(config, "OPTIMIZATION_PRESET", "guests", raising=False)
+    monkeypatch.setattr(config, "TARGET_DHW_TEMP_MIN_GUESTS_C", 55.0, raising=False)
+    monkeypatch.setattr(config, "TARGET_DHW_TEMP_MIN_NORMAL_C", 45.0, raising=False)
+    # Build a horizon that ends inside the evening shower window (20:00-22:00 BST).
+    # Start at 21:00 local (slot 0 in window) so the last slot of an N-slot
+    # horizon ending at 21:30 BST + N×30min also lands in the window.
+    base_local = datetime(2026, 6, 1, 21, 0, tzinfo=TZ_LOCAL)
+    base = base_local.astimezone(UTC)
+    # 4 slots = 21:00, 21:30, 22:00, 22:30 — last slot at 22:30 is OUT of evening
+    # window but the morning shower window (07:00-09:00) exists too; we want a
+    # horizon that ENDS in evening window, so use 2 slots only.
+    n = 2  # slots: 21:00, 21:30 — both inside 20-22 evening window
+    slots = [base + timedelta(minutes=30 * i) for i in range(n)]
+    plan = _solve(
+        slots=slots, prices=[15.0] * n, pv=[1.0] * n,
+        base_load=[0.3] * n, init_soc=5.8, init_tank=45.0,
+    )
+    assert plan.ok, f"LP should be Optimal under guests+pinning with last slot in shower window; got {plan.status}"
