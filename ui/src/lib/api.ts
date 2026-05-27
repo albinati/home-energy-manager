@@ -87,26 +87,6 @@ export async function postJson<T>(
   return r.json() as Promise<T>;
 }
 
-export async function putJson<T>(
-  path: string,
-  body: unknown,
-  init?: FetchInit,
-): Promise<T> {
-  const headers = new Headers(init?.headers);
-  if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
-  const r = await hemFetch(path, {
-    method: "PUT",
-    body: JSON.stringify(body ?? {}),
-    ...(init || {}),
-    headers,
-  });
-  return r.json() as Promise<T>;
-}
-
-export async function del(path: string, init?: FetchInit): Promise<Response> {
-  return hemFetch(path, { method: "DELETE", ...(init || {}) });
-}
-
 export function buildSha(): string {
   return runtimeConfig().buildSha || (typeof __BUILD_SHA__ !== "undefined" ? __BUILD_SHA__ : "dev");
 }

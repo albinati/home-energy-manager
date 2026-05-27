@@ -1,4 +1,4 @@
-import { getJson, putJson, postJson, del, hemFetch } from "./api";
+import { postJson, getJson, hemFetch } from "./api";
 import type {
   CockpitNow,
   SchedulerTimeline,
@@ -12,15 +12,12 @@ import type {
   AttributionDay,
   EnergyReport,
   MonthlyEnergy,
-  TariffDashboardResponse,
   SettingsList,
-  SettingSpec,
   SimulateBatchResponse,
   ApplyBatchResponse,
   MetricsResponse,
   DaikinDevice,
   ApiQuotaResponse,
-  LoadBreakdownResponse,
 } from "./types";
 
 /* ----- Real-time / cockpit ----- */
@@ -33,7 +30,6 @@ export const getMetrics = () => getJson<MetricsResponse>("/metrics");
 export const getDaikinStatus = () => getJson<DaikinDevice[]>("/daikin/status");
 export const getDaikinQuota = () => getJson<ApiQuotaResponse>("/daikin/quota");
 export const getFoxQuota = () => getJson<ApiQuotaResponse>("/foxess/quota");
-export const getLoadBreakdown = () => getJson<LoadBreakdownResponse>("/load/breakdown");
 
 /* ----- Forecast vs actuals ----- */
 
@@ -56,25 +52,10 @@ export const getEnergyMonthly = (month: string) =>
   getJson<MonthlyEnergy>(`/energy/monthly?month=${encodeURIComponent(month)}`);
 export const getAttributionDay = (date?: string) =>
   getJson<AttributionDay>(date ? `/attribution/day?date=${encodeURIComponent(date)}` : "/attribution/day");
-export const getEnergyPeriod = (start: string, end: string, grouping = "daily") =>
-  getJson<{ period?: string; total_cost_gbp?: number; metrics?: Array<Record<string, number | string>>; export_kwh?: number; export_revenue_gbp?: number }>(
-    `/energy/period?start_date=${encodeURIComponent(start)}&end_date=${encodeURIComponent(end)}&grouping=${grouping}`,
-  );
-export const getTariffsDashboard = (body: {
-  start_date: string;
-  end_date: string;
-  tariff_codes: string[];
-}) => postJson<TariffDashboardResponse>("/tariffs/dashboard", body);
 
 /* ----- Settings ----- */
 
 export const getSettings = () => getJson<SettingsList>("/settings");
-export const getSetting = (key: string) =>
-  getJson<{ key: string; value: unknown }>(`/settings/${encodeURIComponent(key)}`);
-export const putSetting = (key: string, value: unknown) =>
-  putJson<SettingSpec>(`/settings/${encodeURIComponent(key)}`, { value });
-export const deleteSetting = (key: string) =>
-  del(`/settings/${encodeURIComponent(key)}`);
 
 export const simulateBatch = (changes: Record<string, unknown>) =>
   postJson<SimulateBatchResponse>("/settings/batch/simulate", { changes });

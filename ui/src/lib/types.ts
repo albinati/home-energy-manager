@@ -300,20 +300,6 @@ export interface MonthlyEnergy {
   gas_comparison_ahead_pounds?: number | null;
 }
 
-export interface TariffComparisonRow {
-  tariff_code: string;
-  tariff_name?: string;
-  total_cost_gbp: number;
-  monthly_cost_gbp?: number;
-  savings_vs_active_gbp?: number;
-}
-
-export interface TariffDashboardResponse {
-  baseline_tariff?: string;
-  tariff_comparison?: TariffComparisonRow[];
-  daily_costs?: Array<{ date: string; cost_gbp: number; tariff_code: string }>;
-}
-
 /* ----- /metrics (~1s, summary KPIs) ----- */
 
 // /daikin/status — cached when refresh=false (default)
@@ -347,17 +333,6 @@ export interface ApiQuotaResponse {
   daily_budget?: number;
   blocked?: boolean;
   last_blocked_at?: number | null;
-}
-
-// /load/breakdown — components of consumption
-export interface LoadBreakdownComponent {
-  name: string;
-  kwh: number;
-  pct_of_total: number;
-}
-export interface LoadBreakdownResponse {
-  components: LoadBreakdownComponent[];
-  total_kwh: number;
 }
 
 export interface MetricsResponse {
