@@ -28,13 +28,11 @@
 }
 
 @media (min-width: 720px) {
-  .widget--small { grid-column: span 6; }
   .widget--medium { grid-column: span 6; }
   .widget--large { grid-column: span 12; }
   .widget--wide { grid-column: span 12; }
 }
 @media (min-width: 1024px) {
-  .widget--small { grid-column: span 3; }
   .widget--medium { grid-column: span 4; }
   .widget--large { grid-column: span 8; }
   .widget--wide { grid-column: span 12; }
@@ -51,7 +49,6 @@
 /* Tone colours — accent line on the left edge + a faint top-corner tint */
 .widget--tone-default  { --widget-accent: var(--border-strong); --widget-tint: transparent; }
 .widget--tone-power    { --widget-accent: var(--accent);  --widget-tint: rgba(59, 130, 246, 0.05); }
-.widget--tone-battery  { --widget-accent: var(--batt);    --widget-tint: rgba(16, 185, 129, 0.05); }
 .widget--tone-tariff   { --widget-accent: var(--peak);    --widget-tint: rgba(245, 158, 11, 0.04); }
 .widget--tone-thermal  { --widget-accent: var(--import);  --widget-tint: rgba(239, 68, 68, 0.04); }
 .widget--tone-savings  { --widget-accent: var(--ok);      --widget-tint: rgba(16, 185, 129, 0.06); }
@@ -105,5 +102,3 @@
   gap: var(--space-3);
   min-width: 0;
 }
-.widget-body.is-tight { padding: var(--space-3); gap: var(--space-2); }
-.widget-body.is-loose { padding: var(--space-5); gap: var(--space-4); }

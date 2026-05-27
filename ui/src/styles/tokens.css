@@ -18,7 +18,6 @@
 
   /* brand + state */
   --accent: #3b82f6;
-  --accent-dim: #1e40af;
   --ok: #10b981;
   --warn: #f59e0b;
   --bad: #ef4444;
@@ -46,7 +45,6 @@
   --space-5: 1.5rem;
   --space-6: 2rem;
   --space-7: 3rem;
-  --space-8: 4rem;
 
   /* radius */
   --radius-sm: 6px;
@@ -61,17 +59,11 @@
   --font-lg: 1.15rem;
   --font-xl: 1.4rem;
   --font-2xl: 1.8rem;
-  --font-3xl: 2.4rem;
-  --font-hero: 3.4rem;
 
   /* effects */
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow-lg: 0 10px 30px rgba(0, 0, 0, 0.5);
   --glow-accent: 0 0 20px rgba(59, 130, 246, 0.25);
-  --glow-ok: 0 0 16px rgba(16, 185, 129, 0.25);
-
-  /* legacy aliases kept for parity */
-  --gap: var(--space-3);
 }
 
 /* Light theme — applied when src/lib/theme.ts sets .theme-light on <html>. */
@@ -88,7 +80,6 @@
   --text-mute: #64748b;
 
   --accent: #2563eb;
-  --accent-dim: #1e40af;
   --ok: #047857;
   --warn: #b45309;
   --bad: #b91c1c;
@@ -109,7 +100,6 @@
   --shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
   --shadow-lg: 0 10px 30px rgba(15, 23, 42, 0.12);
   --glow-accent: 0 0 16px rgba(37, 99, 235, 0.18);
-  --glow-ok: 0 0 14px rgba(5, 150, 105, 0.18);
 }
 
 /* Respect prefers-color-scheme on first paint when JS hasn't applied a class

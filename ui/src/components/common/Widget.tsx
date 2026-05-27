@@ -1,8 +1,8 @@
 import type { ComponentChildren } from "preact";
 import "./widget.css";
 
-export type WidgetSize = "small" | "medium" | "large" | "wide";
-export type WidgetTone = "default" | "power" | "battery" | "tariff" | "thermal" | "savings" | "plan" | "coming";
+export type WidgetSize = "medium" | "large" | "wide";
+export type WidgetTone = "default" | "power" | "tariff" | "thermal" | "savings" | "plan" | "coming";
 
 interface WidgetProps {
   title: ComponentChildren;

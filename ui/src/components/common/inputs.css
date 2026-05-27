@@ -164,27 +164,3 @@
 .btn--ghost {
   background: transparent;
 }
-.btn--danger { color: var(--bad); border-color: rgba(239,68,68,0.3); }
-.btn--danger:hover { background: rgba(239,68,68,0.1); }
-
-/* Segmented control */
-.segmented {
-  display: inline-flex;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 2px;
-  gap: 2px;
-}
-.segmented-btn {
-  padding: var(--space-2) var(--space-4);
-  font-size: var(--font-sm);
-  color: var(--text-dim);
-  border-radius: calc(var(--radius-sm) - 2px);
-  transition: background 100ms, color 100ms;
-}
-.segmented-btn:hover { color: var(--text); }
-.segmented-btn.is-active {
-  background: var(--accent);
-  color: white;
-}

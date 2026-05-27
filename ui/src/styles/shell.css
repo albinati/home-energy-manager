@@ -74,13 +74,6 @@
   background: var(--bg-card);
   border-color: var(--border);
 }
-.topnav-tab.legacy {
-  color: var(--text-mute);
-}
-.topnav-tab.legacy:hover {
-  color: var(--text-dim);
-}
-
 /* Footer */
 .footer {
   border-top: 1px solid var(--border);
