@@ -31,8 +31,6 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather }: H
   let outdoorTemp = dev?.outdoor_temp ?? weather?.daikin?.outdoor_temp ?? null;
   let outdoorSource: "daikin" | "openmeteo" = "daikin";
   if (outdoorTemp == null && weather?.forecast && weather.forecast.length > 0) {
-    const nowMs = Date.parse(state ? "" : "");  // placeholder to suppress unused
-    void nowMs;
     // Find the forecast slot closest to now
     const nowTs = Date.now();
     let closest = weather.forecast[0];

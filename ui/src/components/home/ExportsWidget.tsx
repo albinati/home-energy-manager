@@ -17,7 +17,6 @@ interface ExportsWidgetProps {
 export function ExportsWidget({ now, yesterday, report, monthly }: ExportsWidgetProps) {
   const grid = now.state.grid_kw;
   const exportingNow = grid < -0.05;
-  const exportRate = now.current_slot.price_export_p ?? now.state == null ? null : (now as { current_slot?: { price_export_p?: number } }).current_slot?.price_export_p;
   const liveRate = now.current_slot.price_export_p;
   const exportingKw = exportingNow ? -grid : 0;
 
@@ -85,8 +84,6 @@ export function ExportsWidget({ now, yesterday, report, monthly }: ExportsWidget
           ≈ estimate · yesterday kWh × current rate (per-slot export rates not yet logged — see #420).
         </div>
       )}
-      {/* The static expression keeps tsc from complaining about the unused var */}
-      <span style="display:none" data-x={exportRate} />
     </div>
   );
 }
