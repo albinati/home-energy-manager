@@ -34,7 +34,6 @@ export function Widget({
   const label = typeof title === "string" ? title : undefined;
   return (
     <section class={`widget widget--${size} widget--tone-${tone} ${cls}`}>
-      <span class="widget-accent" aria-hidden="true" />
       <header class="widget-header">
         <div class="widget-header-title">
           {icon && <span class="widget-header-icon" aria-hidden="true">{icon}</span>}

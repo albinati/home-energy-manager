@@ -1,5 +1,14 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 
+// Read the OS reduced-motion preference once at module load. Under reduce we
+// skip the tween entirely and snap straight to the target — the count-up is
+// cosmetic; the final displayed figure must equal the formatter output exactly
+// in BOTH modes (accuracy guardrail — no parallel rounding path).
+const PREFERS_REDUCED_MOTION =
+  typeof window !== "undefined" &&
+  typeof window.matchMedia === "function" &&
+  window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
 // Smoothly tween a numeric value when it changes — for the hero counters
 // and lifetime stats so refreshes feel alive instead of snapping. Uses
 // requestAnimationFrame + easeOutCubic for a financial-app feel (fast
@@ -34,6 +43,16 @@ export function useAnimatedNumber(
     }
     // Identical value — no work
     if (lastTargetRef.current === target) return;
+
+    // Reduced motion — snap to the exact value, no tween.
+    if (PREFERS_REDUCED_MOTION) {
+      if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+      setDisplay(target);
+      fromRef.current = target;
+      lastTargetRef.current = target;
+      return;
+    }
 
     fromRef.current = display ?? lastTargetRef.current ?? target;
     startRef.current = performance.now();

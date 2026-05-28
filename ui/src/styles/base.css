@@ -1,5 +1,9 @@
 * { box-sizing: border-box; }
 
+html {
+  /* Dark↔light cross-fades instead of snapping (Apple-grade theme switch). */
+  transition: background-color 220ms ease, color 220ms ease;
+}
 html,
 body {
   margin: 0;
@@ -12,31 +16,38 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* Ambient body background — fixed, very subtle, theme-aware. Doesn't scroll
- * so it always feels alive without distracting. */
+/* Ambient body background — ONE faint near-neutral accent glow. Domain colours
+ * (pv-yellow / batt-green) were removed from the wash: colour must mean
+ * something, and spraying it into the ambient layer dilutes the meaning-only
+ * rule. Just enough depth, no false signal. */
 body::before {
   content: "";
   position: fixed;
   inset: 0;
   pointer-events: none;
   z-index: 0;
-  background:
-    radial-gradient(900px 600px at 80% -10%, rgba(59, 130, 246, 0.07), transparent 60%),
-    radial-gradient(700px 500px at -10% 30%, rgba(16, 185, 129, 0.06), transparent 65%),
-    radial-gradient(600px 400px at 50% 110%, rgba(251, 191, 36, 0.04), transparent 70%);
+  background: radial-gradient(1200px 800px at 75% -10%, rgba(59, 130, 246, 0.05), transparent 60%);
   animation: body-bg-drift 60s ease-in-out infinite alternate;
 }
 :root.theme-light body::before {
-  background:
-    radial-gradient(900px 600px at 80% -10%, rgba(37, 99, 235, 0.05), transparent 60%),
-    radial-gradient(700px 500px at -10% 30%, rgba(5, 150, 105, 0.04), transparent 65%),
-    radial-gradient(600px 400px at 50% 110%, rgba(217, 119, 6, 0.03), transparent 70%);
+  background: radial-gradient(1200px 800px at 75% -10%, rgba(37, 99, 235, 0.035), transparent 60%);
 }
 @keyframes body-bg-drift {
   0%   { transform: translate(0, 0); }
   100% { transform: translate(-2%, 3%); }
 }
 body > * { position: relative; z-index: 1; }
+
+/* Shared "live" pulse — the ONLY continuous motion outside the power-flow.
+ * Opacity-only (no scale), one element per surface max (hero dot, exports
+ * live dot, power-flow panel dot, plan playhead). */
+@keyframes live-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.4; }
+}
+.live-pulse {
+  animation: live-pulse 1600ms ease-in-out infinite;
+}
 
 a {
   color: var(--accent);
@@ -98,3 +109,22 @@ code, pre {
 .dim { color: var(--text-mute); }
 
 .grow { flex: 1; }
+
+/* Reduced motion — disable all entrance/ambient/loop motion; final state is
+ * instant. Number tweens snap via useAnimatedNumber's own guard. Power-flow
+ * particles freeze into static proportional lines (handled in PowerFlow).
+ * Hover lift is kept but capped to 1px (non-vestibular, aids affordance). */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+  .widget { animation: none !important; opacity: 1 !important; transform: none !important; }
+  .widget:hover { transform: translateY(-1px); }
+  body::before { animation: none !important; }
+  .live-pulse { animation: none !important; opacity: 1 !important; }
+}

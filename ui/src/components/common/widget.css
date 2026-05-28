@@ -9,23 +9,42 @@
 
 .widget {
   position: relative;
-  background:
-    linear-gradient(160deg, var(--widget-tint, transparent) 0%, transparent 35%),
-    var(--bg-card);
-  border: 1px solid var(--border);
+  /* De-chromed: flat surface, depth from the two-layer --shadow, no border,
+   * no per-card coloured accent edge or corner tint (monochrome-first). */
+  background: var(--bg-card);
+  border: 1px solid transparent;
   border-radius: var(--radius-lg);
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  transition: border-color 200ms, transform 200ms, box-shadow 200ms;
+  transition: transform 160ms ease-out, box-shadow 160ms ease-out;
   grid-column: span 12;
   min-width: 0;
   box-shadow: var(--shadow);
 }
+/* Hover = a depth lift, never a colour change. */
 .widget:hover {
-  border-color: var(--border-strong);
+  transform: translateY(-2px);
   box-shadow: var(--shadow-lg);
 }
+
+/* Choreographed entrance — every card rises + fades in once on mount, staggered
+ * so the grid settles in sequence. Animates transform/opacity ONLY over a
+ * pre-sized grid so nothing reflows. Stagger capped at ~7 cards (280ms). */
+@keyframes widget-rise {
+  from { opacity: 0; transform: translateY(12px) scale(0.985); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+.widget {
+  animation: widget-rise var(--dur-enter) var(--ease-entrance) both;
+}
+.widget-grid .widget:nth-child(1) { animation-delay: 0ms; }
+.widget-grid .widget:nth-child(2) { animation-delay: calc(var(--stagger-step) * 1); }
+.widget-grid .widget:nth-child(3) { animation-delay: calc(var(--stagger-step) * 2); }
+.widget-grid .widget:nth-child(4) { animation-delay: calc(var(--stagger-step) * 3); }
+.widget-grid .widget:nth-child(5) { animation-delay: calc(var(--stagger-step) * 4); }
+.widget-grid .widget:nth-child(6) { animation-delay: calc(var(--stagger-step) * 5); }
+.widget-grid .widget:nth-child(n+7) { animation-delay: calc(var(--stagger-step) * 6); }
 
 @media (min-width: 720px) {
   .widget--medium { grid-column: span 6; }
@@ -38,22 +57,9 @@
   .widget--wide { grid-column: span 12; }
 }
 
-.widget-accent {
-  position: absolute;
-  left: 0; top: 0; bottom: 0;
-  width: 3px;
-  background: var(--widget-accent, var(--accent));
-  z-index: 1;
-}
-
-/* Tone colours — accent line on the left edge + a faint top-corner tint */
-.widget--tone-default  { --widget-accent: var(--border-strong); --widget-tint: transparent; }
-.widget--tone-power    { --widget-accent: var(--accent);  --widget-tint: rgba(59, 130, 246, 0.05); }
-.widget--tone-tariff   { --widget-accent: var(--peak);    --widget-tint: rgba(245, 158, 11, 0.04); }
-.widget--tone-thermal  { --widget-accent: var(--import);  --widget-tint: rgba(239, 68, 68, 0.04); }
-.widget--tone-savings  { --widget-accent: var(--ok);      --widget-tint: rgba(16, 185, 129, 0.06); }
-.widget--tone-plan     { --widget-accent: var(--accent);  --widget-tint: rgba(59, 130, 246, 0.05); }
-.widget--tone-coming   { --widget-accent: var(--house);   --widget-tint: rgba(192, 132, 252, 0.06); }
+/* Tone is monochrome-first: the prop is kept for compile-safety but paints
+ * nothing. Domain identity now reads from the header icon + the focal-number
+ * tint, not a coloured card edge. (.widget-accent element removed.) */
 
 .widget-header {
   display: flex;
@@ -79,9 +85,9 @@
   text-transform: uppercase;
 }
 .widget-header-icon {
-  font-size: 1rem;
-  opacity: 0.85;
-  filter: saturate(1.1);
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-dim);
 }
 .widget-header-meta {
   display: flex;
