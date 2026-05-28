@@ -1,5 +1,8 @@
+import { useState } from "preact/hooks";
 import type { EnergyReport, MetricsResponse, ExecutionTodayResponse } from "../../lib/types";
 import { gbp, gbpSigned, kwh } from "../../lib/format";
+import { Icon } from "../common/Icon";
+import { useAnimatedNumber } from "../../lib/useAnimatedNumber";
 import "./today-bill.css";
 
 interface TodayBillWidgetProps {
@@ -9,13 +12,11 @@ interface TodayBillWidgetProps {
   execution: ExecutionTodayResponse | null;
 }
 
-// Today's actual bill from /energy/report?period=day:
-//   cost.net_cost_pounds       = realised net (includes standing charge)
-//   cost.import_cost_pounds    = energy we paid for
-//   cost.export_earnings_pounds = energy we got paid for
-//   energy.import_kwh / export_kwh = volumes
-// Plus an hourly cost spark from /execution/today (per-slot realised data).
+// Today's actual bill. The NET cost (includes standing charge) is the card's
+// one focal number; projection, breakdown, and the hourly spark collapse
+// behind a "Details" disclosure so the default view is calm.
 export function TodayBillWidget({ report, reportLoading, metrics, execution }: TodayBillWidgetProps) {
+  const [open, setOpen] = useState(false);
   const cost = report?.cost;
   const energy = report?.energy;
 
@@ -26,15 +27,12 @@ export function TodayBillWidget({ report, reportLoading, metrics, execution }: T
   const importKwh = energy?.import_kwh ?? null;
   const exportKwh = energy?.export_kwh ?? null;
 
-  // Linear projection from hours elapsed (rough — assumes the rest of the
-  // day costs at the average rate-so-far).
   const now = new Date();
   const hoursElapsed = Math.max(0.5, now.getHours() + now.getMinutes() / 60);
   const projected = realised != null && hoursElapsed > 0
     ? (realised / hoursElapsed) * 24
     : null;
 
-  // 30-day DMA from /metrics
   const monthDelta = metrics?.pnl?.monthly?.delta_vs_svt_pounds ?? null;
   const dayOfMonth = now.getDate();
   const dma = monthDelta != null ? monthDelta / Math.max(1, dayOfMonth) : null;
@@ -43,82 +41,91 @@ export function TodayBillWidget({ report, reportLoading, metrics, execution }: T
 
   const isLoadingReport = reportLoading && !report;
   const hourly = buildHourlyCost(execution);
+  const realisedAnim = useAnimatedNumber(realised);
 
   return (
     <div class="today-bill">
-      <div class="today-bill-headline">
-        <div class="today-bill-realised">
-          <span class="today-bill-label">Today net</span>
-          <span class="today-bill-amount today-bill-amount-realised">
-            {realised != null
-              ? gbp(realised)
-              : isLoadingReport
-                ? <span class="skel-text" style={{ width: "4rem", height: "1.4rem" }} />
-                : "—"}
-          </span>
+      {/* Focal number — today's net cost */}
+      <div class="today-bill-hero-block">
+        <div class="today-bill-label">
+          <span class="live-pulse today-bill-dot" /> Today net
         </div>
-        <div class="today-bill-projected">
-          <span class="today-bill-label">→ projected EOD</span>
-          <span class="today-bill-amount today-bill-amount-projected">
-            {projected != null
-              ? gbp(projected)
-              : isLoadingReport
-                ? <span class="skel-text" style={{ width: "4rem", height: "1.4rem" }} />
-                : "—"}
-          </span>
+        <div class="today-bill-hero">
+          {realisedAnim != null
+            ? gbp(realisedAnim)
+            : isLoadingReport
+              ? <span class="skel-text" style={{ width: "5rem", height: "2.4rem" }} />
+              : "—"}
         </div>
+        {todayDelta != null && (
+          <div class={`today-bill-vs ${todayDelta >= 0 ? "today-bill-vs-ok" : "today-bill-vs-bad"}`}>
+            {gbpSigned(todayDelta)} vs SVT today
+          </div>
+        )}
       </div>
 
-      {/* Real flow: imported / exported / standing — answers "where did the £ go" */}
-      <div class="today-bill-flow">
-        <div class="today-bill-flow-row">
-          <span class="today-bill-flow-icon">↓</span>
-          <span class="today-bill-flow-label">Imported</span>
-          <span class="today-bill-flow-kwh">{importKwh != null ? kwh(importKwh) : "—"}</span>
-          <span class="today-bill-flow-cost today-bill-flow-cost-paid">
-            {importCost != null ? `−${gbp(importCost)}` : "—"}
-          </span>
-        </div>
-        <div class="today-bill-flow-row">
-          <span class="today-bill-flow-icon">↑</span>
-          <span class="today-bill-flow-label">Exported</span>
-          <span class="today-bill-flow-kwh">{exportKwh != null ? kwh(exportKwh) : "—"}</span>
-          <span class="today-bill-flow-cost today-bill-flow-cost-earned">
-            {exportEarn != null && exportEarn > 0 ? `+${gbp(exportEarn)}` : "—"}
-          </span>
-        </div>
-        <div class="today-bill-flow-row today-bill-flow-row-fixed">
-          <span class="today-bill-flow-icon">📅</span>
-          <span class="today-bill-flow-label">Standing charge</span>
-          <span class="today-bill-flow-kwh"></span>
-          <span class="today-bill-flow-cost">{standingPence != null ? `−${gbp(standingPence / 100)}` : "—"}</span>
-        </div>
-      </div>
+      <button class="today-bill-disclose" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
+        <span>Details</span>
+        <span class={`today-bill-chevron ${open ? "is-open" : ""}`}><Icon name="chevron" size={12} /></span>
+      </button>
 
-      {/* Hourly cost spark from execution_today */}
-      {hourly.some((h) => h.costP > 0) && (
-        <div class="today-bill-hourly">
-          <div class="today-bill-hourly-label">Hourly cost (p)</div>
-          <HourlySpark hourly={hourly} />
+      {open && (
+        <div class="today-bill-detail">
+          <div class="today-bill-row">
+            <span class="today-bill-row-label">Projected end of day</span>
+            <span class="today-bill-row-value">{projected != null ? gbp(projected) : "—"}</span>
+          </div>
+
+          <div class="today-bill-flow">
+            <div class="today-bill-flow-row">
+              <span class="today-bill-flow-icon"><Icon name="import" size={16} /></span>
+              <span class="today-bill-flow-label">Imported</span>
+              <span class="today-bill-flow-kwh">{importKwh != null ? kwh(importKwh) : "—"}</span>
+              <span class="today-bill-flow-cost today-bill-flow-cost-paid">
+                {importCost != null ? `−${gbp(importCost)}` : "—"}
+              </span>
+            </div>
+            <div class="today-bill-flow-row">
+              <span class="today-bill-flow-icon"><Icon name="export" size={16} /></span>
+              <span class="today-bill-flow-label">Exported</span>
+              <span class="today-bill-flow-kwh">{exportKwh != null ? kwh(exportKwh) : "—"}</span>
+              <span class="today-bill-flow-cost today-bill-flow-cost-earned">
+                {exportEarn != null && exportEarn > 0 ? `+${gbp(exportEarn)}` : "—"}
+              </span>
+            </div>
+            <div class="today-bill-flow-row today-bill-flow-row-fixed">
+              <span class="today-bill-flow-icon"><Icon name="schedule" size={16} /></span>
+              <span class="today-bill-flow-label">Standing charge</span>
+              <span class="today-bill-flow-kwh"></span>
+              <span class="today-bill-flow-cost">{standingPence != null ? `−${gbp(standingPence / 100)}` : "—"}</span>
+            </div>
+          </div>
+
+          {hourly.some((h) => h.costP > 0) && (
+            <div class="today-bill-hourly">
+              <div class="today-bill-hourly-label">Hourly cost (p)</div>
+              <HourlySpark hourly={hourly} />
+            </div>
+          )}
+
+          <div class="today-bill-rows">
+            {dma != null && (
+              <div class="today-bill-row">
+                <span class="today-bill-row-label">30-day avg saving</span>
+                <span class="today-bill-row-value">{gbpSigned(dma)}/day</span>
+              </div>
+            )}
+            {dmaCompare != null && (
+              <div class="today-bill-row">
+                <span class="today-bill-row-label">vs typical day</span>
+                <span class={`today-bill-row-value ${dmaCompare >= 0 ? "today-bill-row-value-ok" : "today-bill-row-value-bad"}`}>
+                  {gbpSigned(dmaCompare)}
+                </span>
+              </div>
+            )}
+          </div>
         </div>
       )}
-
-      <div class="today-bill-rows">
-        {dma != null && (
-          <div class="today-bill-row">
-            <span class="today-bill-row-label">30-day avg saving</span>
-            <span class="today-bill-row-value">{gbpSigned(dma)}/day</span>
-          </div>
-        )}
-        {dmaCompare != null && (
-          <div class="today-bill-row">
-            <span class="today-bill-row-label">vs typical day</span>
-            <span class={`today-bill-row-value ${dmaCompare >= 0 ? "today-bill-row-value-ok" : "today-bill-row-value-bad"}`}>
-              {gbpSigned(dmaCompare)}
-            </span>
-          </div>
-        )}
-      </div>
     </div>
   );
 }
@@ -159,8 +166,8 @@ function HourlySpark({ hourly }: { hourly: HourBin[] }) {
             y={y}
             width={stepX - 2}
             height={barH}
-            fill={isNow ? "var(--accent)" : isPast ? "var(--ok)" : "var(--text-mute)"}
-            opacity={isNow ? 1 : isPast ? 0.7 : 0.25}
+            fill={isNow ? "var(--accent)" : isPast ? "var(--text-dim)" : "var(--text-mute)"}
+            opacity={isNow ? 1 : isPast ? 0.55 : 0.22}
             rx="1"
           >
             <title>{`${String(h.hour).padStart(2, "0")}:00 — ${h.costP.toFixed(1)}p · ${h.kwh.toFixed(2)} kWh`}</title>

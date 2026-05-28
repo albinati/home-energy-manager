@@ -1,6 +1,7 @@
 import type { MetricsResponse } from "../../lib/types";
 import { pct, pence } from "../../lib/format";
 import { Spinner } from "../common/Spinner";
+import { Icon } from "../common/Icon";
 import "./efficiency.css";
 
 interface EfficiencyWidgetProps {
@@ -34,7 +35,7 @@ export function EfficiencyWidget({ metrics, loading }: EfficiencyWidgetProps) {
     <div class="efficiency">
       {isSelfUseDay && (
         <div class="eff-banner">
-          <span class="eff-banner-icon">☀</span>
+          <span class="eff-banner-icon"><Icon name="solar" size={20} /></span>
           <div>
             <div class="eff-banner-title">Self-use day — only {importKwh!.toFixed(1)} kWh imported</div>
             <div class="eff-banner-sub">

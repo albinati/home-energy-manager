@@ -138,7 +138,7 @@ export function CostBreakdownChart({ today, month, loading }: CostBreakdownChart
                     text-anchor="middle"
                     fill={c.per_day_net_p >= 0 ? "var(--text)" : "var(--ok)"}
                     font-size="15"
-                    font-weight="800"
+                    font-weight="700"
                     font-variant-numeric="tabular-nums"
                     letter-spacing="-0.01em">
                 {c.hasData ? `${gbp(c.per_day_net_p)}/d` : "—"}

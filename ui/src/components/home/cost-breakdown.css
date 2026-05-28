@@ -16,7 +16,7 @@
   display: flex;
   justify-content: center;
   gap: var(--space-3);
-  font-size: 0.6rem;
+  font-size: var(--font-2xs);
   color: var(--text-mute);
   letter-spacing: 0.04em;
 }
@@ -30,7 +30,7 @@
 .cbd-swatch {
   width: 10px;
   height: 10px;
-  border-radius: 2px;
+  border-radius: 3px;
   display: inline-block;
 }
 .cbd-swatch-import   { background: var(--import); opacity: 0.92; }

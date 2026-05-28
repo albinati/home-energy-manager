@@ -56,15 +56,16 @@
   text-transform: uppercase;
   padding: 0 var(--space-3) 2px;
 }
+/* Current row: quiet left-flush inset marker + faint fill (not a bordered box) */
 .tcomp-row--current {
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 .tcomp-row--bg {
-  background: color-mix(in srgb, var(--warn) 6%, transparent);
+  background: color-mix(in srgb, var(--warn) 5%, transparent);
 }
 .tcomp-row:not(.tcomp-row--head):not(.tcomp-row--current):not(.tcomp-row--bg):hover {
-  background: var(--bg);
+  background: var(--bg-card-2);
 }
 
 .tcomp-cell { font-size: var(--font-sm); }
@@ -80,32 +81,32 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Monochrome outline chips — quiet labels, not coloured decoration. NOW keeps
+ * a single accent text colour (identity); FIXED stays neutral. */
 .tcomp-current-pill,
 .tcomp-bg-pill {
   display: inline-flex;
   align-items: center;
   padding: 1px 5px;
-  border-radius: var(--radius-pill);
-  font-size: 0.55rem;
-  font-weight: 800;
-  letter-spacing: 0.05em;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-2xs);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  border: 1px solid var(--border);
+  background: transparent;
   flex-shrink: 0;
 }
-.tcomp-current-pill {
-  color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 18%, transparent);
-}
-.tcomp-bg-pill {
-  color: var(--warn);
-  background: color-mix(in srgb, var(--warn) 18%, transparent);
-}
+.tcomp-current-pill { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+.tcomp-bg-pill { color: var(--text-dim); }
 .tcomp-cell-period {
   font-weight: 700;
   text-align: right;
+  font-feature-settings: "tnum" 1;
 }
 .tcomp-cell-delta {
   text-align: right;
   font-weight: 700;
+  font-feature-settings: "tnum" 1;
 }
 .tcomp-cell-delta--ok      { color: var(--ok); }
 .tcomp-cell-delta--bad     { color: var(--bad); }

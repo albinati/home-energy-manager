@@ -3,33 +3,34 @@
   flex-direction: column;
   gap: var(--space-2);
 }
+/* Flat rows, no per-row accent edge — colour lives only on the status dot
+ * + benchmark text. Rows separate via a hairline, not borders. */
 .eff-row {
   padding: var(--space-2) var(--space-3);
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--border-strong);
+  border: none;
   border-radius: var(--radius-sm);
 }
-.eff-row--ok      { border-left-color: var(--ok); }
-.eff-row--warn    { border-left-color: var(--warn); }
-.eff-row--bad     { border-left-color: var(--bad); }
-.eff-row--neutral { border-left-color: var(--text-mute); opacity: 0.78; }
+.eff-row + .eff-row {
+  border-top: 1px solid color-mix(in srgb, var(--border) 40%, transparent);
+}
+.eff-row--neutral { opacity: 0.78; }
 
-/* Self-use day banner — fronts the import-dependent KPIs so a 1-kWh
- * import day reads as "good" rather than "everything is red". */
+/* Self-use day banner — solar is the semantic domain colour here (the banner's
+ * whole meaning is "solar covered the load"), so the icon tints --pv. */
 .eff-banner {
   display: flex;
   align-items: flex-start;
   gap: var(--space-3);
   padding: var(--space-3);
   border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--pv) 12%, var(--bg));
-  border: 1px solid color-mix(in srgb, var(--pv) 35%, transparent);
+  background: color-mix(in srgb, var(--pv) 8%, var(--bg-card));
+  border: 1px solid color-mix(in srgb, var(--pv) 25%, transparent);
 }
 .eff-banner-icon {
-  font-size: 1.4rem;
+  display: inline-flex;
   line-height: 1;
   color: var(--pv);
+  flex-shrink: 0;
 }
 .eff-banner-title {
   font-size: var(--font-sm);
@@ -58,6 +59,7 @@
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.01em;
+  color: var(--text);
 }
 .eff-row-sub {
   font-size: var(--font-xs);

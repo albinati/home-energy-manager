@@ -1,6 +1,7 @@
 import type { MetricsResponse, CockpitNow, AgileTodayResponse, MonthlyEnergy, PeriodInsightsResponse } from "../../lib/types";
 import { gbp, gbpSigned, kw, kwh } from "../../lib/format";
 import { useAnimatedNumber } from "../../lib/useAnimatedNumber";
+import { Icon, type IconName } from "../common/Icon";
 import { CostBreakdownChart } from "./CostBreakdownChart";
 import "./hero.css";
 
@@ -65,10 +66,10 @@ export function Hero({ metrics, metricsLoading, cockpit, agile: _agile, monthly,
 
       <div class="hero-main">
         <div class="hero-eyebrow">
-          <span class="hero-eyebrow-dot" />
+          <span class="live-pulse hero-eyebrow-dot" />
           Today · saved vs Standard Variable Tariff
         </div>
-        <div class={`hero-headline hero-headline--${sign}`}>
+        <div class={`hero-headline hero-headline--enter hero-headline--${sign}`}>
           {todayAnim == null ? (metricsLoading ? <SkelHero /> : "—") : gbpSigned(todayAnim)}
         </div>
         <div class="hero-sublines">
@@ -96,10 +97,10 @@ export function Hero({ metrics, metricsLoading, cockpit, agile: _agile, monthly,
               Lifetime on Agile · {lifetime.months} mo
             </div>
             <div class="hero-lifetime-stats">
-              <HeroStat value={kwh(solarAnim ?? 0, 0)} label="solar produced" tone="pv" />
-              <HeroStat value={kwh(exportKwhAnim ?? 0, 0)} label="exported" tone="export" />
-              <HeroStat value={gbp(exportEarnAnim ?? 0)} label="export earnings" tone="ok" />
-              <HeroStat value={gbp(totalCostAnim ?? 0)} label="total bills" tone="cost" />
+              <HeroStat value={kwh(solarAnim ?? 0, 0)} label="solar produced" />
+              <HeroStat value={kwh(exportKwhAnim ?? 0, 0)} label="exported" />
+              <HeroStat value={gbp(exportEarnAnim ?? 0)} label="export earnings" />
+              <HeroStat value={gbp(totalCostAnim ?? 0)} label="total bills" />
             </div>
           </div>
         )}
@@ -108,11 +109,9 @@ export function Hero({ metrics, metricsLoading, cockpit, agile: _agile, monthly,
       <div class="hero-status">
         {motion && (
           <div class="hero-motion">
-            <span class="hero-motion-icon" style={{ background: motion.color, boxShadow: `0 0 16px ${motion.color}66` }}>
-              {motion.icon}
-            </span>
+            <span class="hero-motion-icon"><Icon name={motion.icon} size={20} /></span>
             <div class="hero-motion-text">
-              <div class="hero-motion-title" style={{ color: motion.color }}>{motion.title}</div>
+              <div class="hero-motion-title">{motion.title}</div>
               <div class="hero-motion-sub">{motion.sub}</div>
             </div>
           </div>
@@ -126,30 +125,32 @@ export function Hero({ metrics, metricsLoading, cockpit, agile: _agile, monthly,
   );
 }
 
-interface Motion { title: string; sub: string; icon: string; color: string; }
+interface Motion { title: string; sub: string; icon: IconName; }
 
+// Branch conditions + kw() value strings UNCHANGED — only emoji → icon names
+// and the per-action colour dropped (icon is monochrome currentColor).
 function inferMotion(s: { grid_kw: number; battery_kw: number; solar_kw: number; load_kw: number }): Motion {
   const grid = s.grid_kw, batt = s.battery_kw, solar = s.solar_kw, load = s.load_kw, E = 0.1;
   const importing = grid > E, exporting = grid < -E;
   const charging = batt > E, discharging = batt < -E;
   const producing = solar > E;
-  if (discharging && exporting) return { title: "Exporting from battery", sub: `${kw(-batt + Math.max(0, solar))} → grid`, icon: "⚡", color: "var(--peak-export)" };
-  if (exporting && !discharging) return { title: "Exporting solar", sub: `${kw(-grid)} → grid · ${kw(load)} house`, icon: "☀", color: "var(--export)" };
-  if (charging && importing) return { title: "Charging from grid", sub: `${kw(grid)} import · ${kw(batt)} into battery`, icon: "⚡", color: "var(--cheap)" };
-  if (charging && producing) return { title: "Charging from solar", sub: `${kw(solar)} solar · ${kw(batt)} into battery`, icon: "⚡", color: "var(--pv)" };
-  if (discharging) return { title: "Battery → house", sub: `${kw(-batt)} battery · ${kw(load)} load`, icon: "🔋", color: "var(--warn)" };
-  if (importing) return { title: "Importing from grid", sub: `${kw(grid)} import · ${kw(load)} house`, icon: "⬇", color: "var(--import)" };
-  if (producing) return { title: "Self-using solar", sub: `${kw(solar)} solar · ${kw(load)} house`, icon: "☀", color: "var(--pv)" };
-  return { title: "Holding", sub: `${kw(load)} house · waiting`, icon: "•", color: "var(--text-mute)" };
+  if (discharging && exporting) return { title: "Exporting from battery", sub: `${kw(-batt + Math.max(0, solar))} → grid`, icon: "export" };
+  if (exporting && !discharging) return { title: "Exporting solar", sub: `${kw(-grid)} → grid · ${kw(load)} house`, icon: "export" };
+  if (charging && importing) return { title: "Charging from grid", sub: `${kw(grid)} import · ${kw(batt)} into battery`, icon: "import" };
+  if (charging && producing) return { title: "Charging from solar", sub: `${kw(solar)} solar · ${kw(batt)} into battery`, icon: "solar" };
+  if (discharging) return { title: "Battery → house", sub: `${kw(-batt)} battery · ${kw(load)} load`, icon: "battery" };
+  if (importing) return { title: "Importing from grid", sub: `${kw(grid)} import · ${kw(load)} house`, icon: "import" };
+  if (producing) return { title: "Self-using solar", sub: `${kw(solar)} solar · ${kw(load)} house`, icon: "solar" };
+  return { title: "Holding", sub: `${kw(load)} house · waiting`, icon: "power-live" };
 }
 
 function SkelHero() {
   return <span class="skel-text" style={{ width: "8rem", height: "0.85em" }} />;
 }
 
-function HeroStat({ value, label, tone }: { value: string; label: string; tone: "pv" | "export" | "ok" | "cost" }) {
+function HeroStat({ value, label }: { value: string; label: string }) {
   return (
-    <div class={`hero-stat hero-stat--${tone}`}>
+    <div class="hero-stat">
       <div class="hero-stat-value">{value}</div>
       <div class="hero-stat-label">{label}</div>
     </div>

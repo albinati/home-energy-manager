@@ -47,7 +47,7 @@ export function ExportsWidget({ now, yesterday, report, monthly }: ExportsWidget
       </div>
 
       <div class={`exports-live${exportingNow ? " is-exporting" : ""}`}>
-        <span class="exports-live-dot" />
+        <span class={`exports-live-dot${exportingNow ? " live-pulse" : ""}`} />
         {exportingNow ? (
           <>Exporting <strong>{kw(exportingKw)}</strong> to grid</>
         ) : (
@@ -61,7 +61,7 @@ export function ExportsWidget({ now, yesterday, report, monthly }: ExportsWidget
           <span class="exports-row-value">
             {ydayKwh != null ? kwh(ydayKwh) : "—"}
             {ydayEarn != null && (
-              <span class="exports-row-earn">
+              <span class={`exports-row-earn${ydayRevenueReal == null ? " exports-row-earn--est" : ""}`}>
                 {ydayRevenueReal != null ? " = " : " ≈ "}
                 {gbp(ydayEarn)}
               </span>

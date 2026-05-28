@@ -2,21 +2,22 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
+  min-height: 168px;
 }
 
 .exports-rate {
   display: flex;
   align-items: baseline;
   gap: var(--space-2);
-  padding-bottom: var(--space-3);
-  border-bottom: 1px solid var(--border);
 }
+/* Export rate is the card's focal number. rateColor() tint (set inline)
+ * encodes attractiveness — a meaning-use, kept. */
 .exports-rate-value {
-  font-size: 2.4rem;
-  font-weight: 800;
+  font-size: var(--font-display);
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
-  letter-spacing: -0.025em;
-  line-height: 1;
+  letter-spacing: -0.02em;
+  line-height: 1.0;
 }
 .exports-rate-label {
   font-size: var(--font-xs);
@@ -57,11 +58,7 @@
 .exports-live.is-exporting .exports-live-dot {
   background: var(--export);
   box-shadow: 0 0 10px var(--export);
-  animation: exports-pulse 1.6s ease-in-out infinite;
-}
-@keyframes exports-pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50%      { opacity: 0.4; transform: scale(0.7); }
+  /* pulse comes from the shared .live-pulse keyframe (opacity-only) */
 }
 
 .exports-yesterday,
@@ -70,7 +67,7 @@
   flex-direction: column;
   gap: 4px;
   padding-top: var(--space-2);
-  border-top: 1px dashed var(--border);
+  border-top: 1px solid color-mix(in srgb, var(--border) 40%, transparent);
   font-variant-numeric: tabular-nums;
 }
 .exports-row {
@@ -93,11 +90,17 @@
 }
 .exports-row-earn,
 .exports-yesterday-earn {
-  color: var(--ok);
+  color: var(--export);
   font-weight: 600;
 }
+/* Estimate (≈) reads dimmer than measured (=) — precision shows
+ * typographically as well as via the glyph (#420). */
+.exports-row-earn--est {
+  color: var(--text-dim);
+  font-weight: 500;
+}
 .exports-note {
-  font-size: 0.65rem;
+  font-size: var(--font-2xs);
   color: var(--text-mute);
   font-style: italic;
   margin-top: 4px;

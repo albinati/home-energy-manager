@@ -2,38 +2,71 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
+  min-height: 132px;
 }
 
-.today-bill-headline {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--space-3);
-}
-.today-bill-realised,
-.today-bill-projected {
+/* Focal block — net cost is the one big number */
+.today-bill-hero-block {
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
-.today-bill-projected {
-  padding-left: var(--space-3);
-  border-left: 1px dashed var(--border);
-}
 .today-bill-label {
-  font-size: var(--font-xs);
-  color: var(--text-dim);
-  letter-spacing: 0.06em;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-2xs);
+  color: var(--text-mute);
+  letter-spacing: 0.12em;
   text-transform: uppercase;
+  font-weight: 700;
 }
-.today-bill-amount {
-  font-size: 1.8rem;
-  font-weight: 800;
+.today-bill-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent);
+}
+.today-bill-hero {
+  font-size: var(--font-display);
+  font-weight: 700;
+  line-height: 1.0;
+  letter-spacing: -0.02em;
   font-variant-numeric: tabular-nums;
-  letter-spacing: -0.025em;
-  line-height: 1;
+  color: var(--text);
 }
-.today-bill-amount-realised { color: var(--text); }
-.today-bill-amount-projected { color: var(--text-dim); }
+.today-bill-vs {
+  font-size: var(--font-xs);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.today-bill-vs-ok  { color: var(--ok); }
+.today-bill-vs-bad { color: var(--bad); }
+
+/* Disclosure toggle — borderless text + rotating chevron */
+.today-bill-disclose {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  align-self: flex-start;
+  font-size: var(--font-xs);
+  font-weight: 500;
+  color: var(--text-dim);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+.today-bill-disclose:hover { color: var(--text); }
+.today-bill-chevron {
+  display: inline-flex;
+  transition: transform 200ms ease;
+}
+.today-bill-chevron.is-open { transform: rotate(90deg); }
+.today-bill-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
 
 .today-bill-rows {
   display: flex;
