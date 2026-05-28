@@ -104,6 +104,52 @@
 .hero-strong-pos { color: var(--ok); font-weight: 700; }
 .hero-strong-neg { color: var(--bad); font-weight: 700; }
 
+/* Lifetime strip — folded in from the removed Lifetime widget. Sits below
+ * the daily/monthly sublines as a 4-stat horizontal grid. Shows the long-
+ * horizon savings narrative with the rest of the hero. */
+.hero-lifetime {
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px dashed var(--border);
+}
+.hero-lifetime-label {
+  font-size: 0.65rem;
+  color: var(--text-mute);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 700;
+  margin-bottom: var(--space-2);
+}
+.hero-lifetime-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-3);
+}
+@media (max-width: 640px) {
+  .hero-lifetime-stats { grid-template-columns: repeat(2, 1fr); }
+}
+.hero-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.hero-stat-value {
+  font-size: var(--font-lg);
+  font-weight: 800;
+  letter-spacing: -0.015em;
+  font-variant-numeric: tabular-nums;
+}
+.hero-stat-label {
+  font-size: 0.65rem;
+  color: var(--text-mute);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.hero-stat--pv     .hero-stat-value { color: var(--pv); }
+.hero-stat--export .hero-stat-value { color: var(--export); }
+.hero-stat--ok     .hero-stat-value { color: var(--ok); }
+.hero-stat--cost   .hero-stat-value { color: var(--text); }
+
 /* Right panel — live motion + tariff strip */
 .hero-status {
   display: flex;

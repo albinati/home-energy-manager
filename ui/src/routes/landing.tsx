@@ -21,7 +21,6 @@ import { LivePowerWidget } from "../components/cockpit/LivePowerWidget";
 import { Hero } from "../components/home/Hero";
 import { ExportsWidget } from "../components/home/ExportsWidget";
 import { TodayBillWidget } from "../components/home/TodayBillWidget";
-import { LifetimeWidget } from "../components/home/LifetimeWidget";
 import { EfficiencyWidget } from "../components/home/EfficiencyWidget";
 import { HeatingWidget } from "../components/home/HeatingWidget";
 import { TariffComparisonWidget } from "../components/home/TariffComparisonWidget";
@@ -99,7 +98,7 @@ export default function Landing() {
 
   return (
     <div class="home">
-      <Hero metrics={metrics.data} metricsLoading={metrics.loading} cockpit={data} agile={agile.data} />
+      <Hero metrics={metrics.data} metricsLoading={metrics.loading} cockpit={data} agile={agile.data} monthly={monthly.data} />
 
       {/* ── LIVE ───────────────────────────────────────────────────── */}
       <div class="widget-grid widget-band">
@@ -134,11 +133,6 @@ export default function Landing() {
                 badge={tariffDash.data?.usage?.total_days ? `last ${tariffDash.data.usage.total_days}d of your usage` : undefined}
                 action={<RefreshAction onRefresh={tariffDash.refresh} loading={tariffDash.loading} />}>
           <TariffComparisonWidget dashboard={tariffDash.data} dashboardLoading={tariffDash.loading} metrics={metrics.data} />
-        </Widget>
-
-        <Widget title="Lifetime" icon="🏆" tone="savings" size="medium"
-                badge={monthly.data.length > 0 ? `${monthly.data.length} mo on Agile` : undefined}>
-          <LifetimeWidget monthly={monthly.data} monthlyLoading={monthly.loading} />
         </Widget>
       </div>
 

@@ -1,5 +1,5 @@
-import type { MetricsResponse, CockpitNow, AgileTodayResponse } from "../../lib/types";
-import { gbpSigned, kw, pct } from "../../lib/format";
+import type { MetricsResponse, CockpitNow, AgileTodayResponse, MonthlyEnergy } from "../../lib/types";
+import { gbp, gbpSigned, kw, kwh, pct } from "../../lib/format";
 import "./hero.css";
 
 interface HeroProps {
@@ -7,6 +7,7 @@ interface HeroProps {
   metricsLoading: boolean;
   cockpit: CockpitNow | null;
   agile: AgileTodayResponse | null;
+  monthly: MonthlyEnergy[];
 }
 
 // The hero is the at-a-glance "where are we right now" surface. It bundles:
@@ -18,7 +19,7 @@ interface HeroProps {
 //      export p/kWh, with band colour).
 // The three £/day bars from the previous Hero were removed — they didn't
 // add information that wasn't already in the headline + DMA subline.
-export function Hero({ metrics, metricsLoading, cockpit, agile }: HeroProps) {
+export function Hero({ metrics, metricsLoading, cockpit, agile, monthly }: HeroProps) {
   const daily = metrics?.pnl?.daily;
   const today = daily?.delta_vs_svt_pounds ?? null;
   const todayFixed = daily?.delta_vs_fixed_pounds ?? null;
@@ -34,6 +35,22 @@ export function Hero({ metrics, metricsLoading, cockpit, agile }: HeroProps) {
   const currentImport = agile?.current_import_p ?? null;
   const currentExport = agile?.current_export_p ?? null;
   const importBand = classifyBand(currentImport, metrics?.cheap_threshold_pence, metrics?.peak_threshold_pence);
+
+  // Lifetime totals — folded in from the (now-removed) Lifetime widget so
+  // the long-horizon story sits with the savings narrative instead of
+  // floating in the MONEY band. Sums across all months with real activity.
+  const activeMonths = monthly.filter(
+    (m) => (m.cost?.net_cost_pounds ?? 0) !== 0 || (m.energy?.export_kwh ?? 0) > 0,
+  );
+  const lifetime = activeMonths.length > 0
+    ? {
+        months: activeMonths.length,
+        solar_kwh: activeMonths.reduce((s, m) => s + (m.energy?.solar_kwh ?? 0), 0),
+        export_kwh: activeMonths.reduce((s, m) => s + (m.energy?.export_kwh ?? 0), 0),
+        export_earn: activeMonths.reduce((s, m) => s + (m.cost?.export_earnings_pounds ?? 0), 0),
+        total_cost: activeMonths.reduce((s, m) => s + (m.cost?.net_cost_pounds ?? 0), 0),
+      }
+    : null;
 
   return (
     <section class="hero" aria-label="Live status + savings overview">
@@ -65,6 +82,20 @@ export function Hero({ metrics, metricsLoading, cockpit, agile }: HeroProps) {
             </div>
           )}
         </div>
+
+        {lifetime && (
+          <div class="hero-lifetime" title={`Sums across ${lifetime.months} active months on Agile`}>
+            <div class="hero-lifetime-label">
+              Lifetime on Agile · {lifetime.months} mo
+            </div>
+            <div class="hero-lifetime-stats">
+              <HeroStat value={kwh(lifetime.solar_kwh, 0)} label="solar produced" tone="pv" />
+              <HeroStat value={kwh(lifetime.export_kwh, 0)} label="exported" tone="export" />
+              <HeroStat value={gbp(lifetime.export_earn)} label="export earnings" tone="ok" />
+              <HeroStat value={gbp(lifetime.total_cost)} label="total bills" tone="cost" />
+            </div>
+          </div>
+        )}
       </div>
 
       <div class="hero-status">
@@ -144,4 +175,13 @@ function labelForBand(b: Band): string {
 
 function SkelHero() {
   return <span class="skel-text" style={{ width: "8rem", height: "0.85em" }} />;
+}
+
+function HeroStat({ value, label, tone }: { value: string; label: string; tone: "pv" | "export" | "ok" | "cost" }) {
+  return (
+    <div class={`hero-stat hero-stat--${tone}`}>
+      <div class="hero-stat-value">{value}</div>
+      <div class="hero-stat-label">{label}</div>
+    </div>
+  );
 }
