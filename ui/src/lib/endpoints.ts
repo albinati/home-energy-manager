@@ -19,6 +19,7 @@ import type {
   DaikinDevice,
   ApiQuotaResponse,
   TariffDashboardResponse,
+  PeriodInsightsResponse,
 } from "./types";
 
 /* ----- Real-time / cockpit ----- */
@@ -58,6 +59,20 @@ export const getEnergyReport = (date?: string, period: "day" | "month" = "day") 
   );
 export const getEnergyMonthly = (month: string) =>
   getJson<MonthlyEnergy>(`/energy/monthly?month=${encodeURIComponent(month)}`);
+
+// /energy/period — granular chart_data (day=1pt, week=7pts, month=≤31pts,
+// year=≤12pts). Per-point shape: { date, import_kwh, export_kwh,
+// solar_kwh, load_kwh, charge_kwh, discharge_kwh }.
+export const getEnergyPeriod = (
+  period: "day" | "week" | "month" | "year",
+  opts: { date?: string; month?: string; year?: number } = {},
+) => {
+  const qs = new URLSearchParams({ period });
+  if (opts.date)  qs.set("date",  opts.date);
+  if (opts.month) qs.set("month", opts.month);
+  if (opts.year != null) qs.set("year", String(opts.year));
+  return getJson<PeriodInsightsResponse>(`/energy/period?${qs.toString()}`);
+};
 export const getAttributionDay = (date?: string) =>
   getJson<AttributionDay>(date ? `/attribution/day?date=${encodeURIComponent(date)}` : "/attribution/day");
 

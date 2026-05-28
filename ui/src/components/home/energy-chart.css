@@ -1,0 +1,75 @@
+.echart {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.echart-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.echart-pills {
+  display: inline-flex;
+  gap: 4px;
+  padding: 2px;
+  border-radius: var(--radius-pill);
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+.echart-pill {
+  padding: 4px 12px;
+  border-radius: var(--radius-pill);
+  font-size: var(--font-sm);
+  font-weight: 600;
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: background 100ms, color 100ms;
+}
+.echart-pill:hover { color: var(--text); }
+.echart-pill.is-active {
+  background: var(--bg-card-2);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.15);
+}
+
+.echart-label {
+  font-size: var(--font-sm);
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.echart-host {
+  width: 100%;
+  height: 280px;
+}
+
+.echart-state {
+  font-size: var(--font-sm);
+  color: var(--text-mute);
+  text-align: center;
+  padding: var(--space-3);
+}
+.echart-state--err { color: var(--bad); }
+
+.echart-flag {
+  font-size: var(--font-xs);
+  color: var(--warn);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn) 25%, transparent);
+}
+.echart-flag strong { font-weight: 700; }
+
+.echart-foot {
+  font-size: var(--font-xs);
+  color: var(--text-mute);
+  font-variant-numeric: tabular-nums;
+  padding-top: var(--space-2);
+  border-top: 1px dashed var(--border);
+}

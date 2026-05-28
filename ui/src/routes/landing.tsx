@@ -26,6 +26,7 @@ import { LifetimeWidget } from "../components/home/LifetimeWidget";
 import { EfficiencyWidget } from "../components/home/EfficiencyWidget";
 import { HeatingWidget } from "../components/home/HeatingWidget";
 import { TariffComparisonWidget } from "../components/home/TariffComparisonWidget";
+import { EnergyChartWidget } from "../components/home/EnergyChartWidget";
 import type { MonthlyEnergy } from "../lib/types";
 import "../components/home/home.css";
 
@@ -107,6 +108,10 @@ export default function Landing() {
 
         <Widget title="Efficiency" icon="🎯" tone="plan" size="medium">
           <EfficiencyWidget metrics={metrics.data} loading={metrics.loading} />
+        </Widget>
+
+        <Widget title="Energy flow" icon="📈" tone="power" size="wide">
+          <EnergyChartWidget execution={execution.data} />
         </Widget>
 
         <Widget title="Tariff comparison" icon="📊" tone="tariff" size="wide"

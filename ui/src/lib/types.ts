@@ -322,6 +322,33 @@ export interface MonthlyEnergy {
   gas_comparison_ahead_pounds?: number | null;
 }
 
+/* ----- /energy/period — drill-down (day/week/month/year) ----- */
+
+// Same chart_data point shape across all granularities — granularity is
+// indicated by the wrapping `period` field on the response.
+export interface PeriodChartPoint {
+  date: string;       // YYYY-MM-DD for day/week/month; YYYY-MM-01 for year
+  import_kwh: number;
+  export_kwh: number;
+  solar_kwh: number;
+  load_kwh: number;
+  charge_kwh: number;
+  discharge_kwh: number;
+}
+
+export interface PeriodInsightsResponse {
+  period: "day" | "week" | "month" | "year" | string;
+  period_label: string;
+  energy: MonthlyEnergyEnergy;
+  cost: MonthlyEnergyCost;
+  chart_data: PeriodChartPoint[];
+  heating_estimate_kwh?: number | null;
+  heating_estimate_cost_pence?: number | null;
+  equivalent_gas_cost_pence?: number | null;
+  equivalent_gas_cost_pounds?: number | null;
+  gas_comparison_ahead_pounds?: number | null;
+}
+
 /* ----- /metrics (~1s, summary KPIs) ----- */
 
 // /daikin/status — cached when refresh=false (default)
