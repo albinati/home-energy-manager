@@ -9,76 +9,53 @@
   border-radius: var(--radius-sm);
 }
 
-.tcomp-header {
+/* Inline title bar between the cost-breakdown chart and the comparison
+ * table. Replaces the old vertical "header" block — saves ~50 px. */
+.tcomp-table-head-row {
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
+  align-items: baseline;
   gap: var(--space-3);
   flex-wrap: wrap;
-  padding-bottom: var(--space-2);
-  border-bottom: 1px solid var(--border);
+  padding-top: var(--space-2);
+  border-top: 1px dashed color-mix(in srgb, var(--border) 55%, transparent);
 }
-.tcomp-header-text {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-.tcomp-header-label {
-  font-size: 0.65rem;
-  color: var(--text-mute);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-.tcomp-header-value {
+.tcomp-table-title {
   font-size: var(--font-sm);
   color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
+  font-weight: 600;
 }
-.tcomp-cheapest {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 2px;
-}
-.tcomp-cheapest-label {
-  font-size: 0.65rem;
+.tcomp-cheapest-inline {
+  font-size: var(--font-xs);
   color: var(--text-mute);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
 }
-.tcomp-cheapest-name {
-  font-size: var(--font-sm);
-  font-weight: 700;
-  color: var(--ok);
-}
+.tcomp-cheapest-inline strong { color: var(--ok); font-weight: 700; }
 
 /* Table */
 .tcomp-table {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
 }
 .tcomp-row {
   display: grid;
-  grid-template-columns: 1.8fr 0.9fr 1fr 0.7fr;
+  grid-template-columns: 1.8fr 0.8fr 0.7fr;
   gap: var(--space-2);
   align-items: center;
-  padding: var(--space-2) var(--space-3);
+  padding: 6px var(--space-3);
   border-radius: var(--radius-sm);
   font-variant-numeric: tabular-nums;
 }
 .tcomp-row--head {
-  font-size: 0.65rem;
+  font-size: 0.6rem;
   color: var(--text-mute);
-  letter-spacing: 0.06em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
-  padding-top: 0;
-  padding-bottom: var(--space-1);
+  padding: 0 var(--space-3) 2px;
 }
 .tcomp-row--current {
   background: color-mix(in srgb, var(--accent) 8%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
 }
 .tcomp-row--bg {
   background: color-mix(in srgb, var(--warn) 6%, transparent);
@@ -91,7 +68,7 @@
 .tcomp-cell-name {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: 6px;
   min-width: 0;
 }
 .tcomp-name-text {
@@ -104,9 +81,9 @@
 .tcomp-bg-pill {
   display: inline-flex;
   align-items: center;
-  padding: 1px 6px;
+  padding: 1px 5px;
   border-radius: var(--radius-pill);
-  font-size: 0.6rem;
+  font-size: 0.55rem;
   font-weight: 800;
   letter-spacing: 0.05em;
   flex-shrink: 0;
@@ -119,27 +96,9 @@
   color: var(--warn);
   background: color-mix(in srgb, var(--warn) 18%, transparent);
 }
-.tcomp-cell-rate {
-  color: var(--text-dim);
-  font-size: var(--font-xs);
-}
-.tcomp-cell-standing { color: var(--text-mute); }
 .tcomp-cell-period {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 1px;
+  font-weight: 700;
   text-align: right;
-}
-.tcomp-cell-period strong {
-  font-weight: 800;
-  font-size: var(--font-md);
-  color: var(--text);
-}
-.tcomp-cell-annual {
-  font-size: 0.65rem;
-  color: var(--text-mute);
-  font-weight: 500;
 }
 .tcomp-cell-delta {
   text-align: right;
@@ -150,18 +109,15 @@
 .tcomp-cell-delta--neutral { color: var(--text-mute); }
 
 .tcomp-foot {
-  display: flex;
-  justify-content: space-between;
   font-size: 0.65rem;
   color: var(--text-mute);
   letter-spacing: 0.04em;
   padding-top: var(--space-2);
-  border-top: 1px dashed var(--border);
+  border-top: 1px dashed color-mix(in srgb, var(--border) 55%, transparent);
 }
 
 @media (max-width: 540px) {
-  .tcomp-row {
-    grid-template-columns: 1.4fr 1fr 0.8fr;
-  }
-  .tcomp-cell-rate { display: none; }
+  .tcomp-table-head-row { gap: var(--space-2); }
+  .tcomp-row { grid-template-columns: 1.6fr 0.8fr 0.7fr; padding: 4px var(--space-2); }
+  .tcomp-cell { font-size: var(--font-xs); }
 }

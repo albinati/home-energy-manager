@@ -1,5 +1,8 @@
-import type { TariffDashboardResponse, TariffTotalRow, MetricsResponse } from "../../lib/types";
+import { useEffect, useState } from "preact/hooks";
+import type { TariffDashboardResponse, TariffTotalRow, MetricsResponse, PeriodInsightsResponse } from "../../lib/types";
+import { getEnergyPeriod } from "../../lib/endpoints";
 import { gbp, gbpSigned } from "../../lib/format";
+import { CostBreakdownChart } from "./CostBreakdownChart";
 import "./tariff-comparison.css";
 
 interface TariffComparisonWidgetProps {
@@ -23,13 +26,40 @@ const SEG_EXPORT_FALLBACK_P = 4.0;
 // + the configured FIXED_TARIFF_* rates from /metrics. No annual-from-daily
 // extrapolation; pure replay over the same window as the Octopus rows.
 export function TariffComparisonWidget({ dashboard, dashboardLoading, metrics }: TariffComparisonWidgetProps) {
+  // Fetch three period cost blocks for the breakdown chart. /energy/period
+  // returns cost { import_cost_pounds, export_earnings_pounds,
+  // standing_charge_pence, net_cost_pounds } per period — exactly what we
+  // need. Three independent fetches; failures fall back to "no data" bars.
+  const [todayP, setTodayP] = useState<PeriodInsightsResponse | null>(null);
+  const [weekP, setWeekP] = useState<PeriodInsightsResponse | null>(null);
+  const [monthP, setMonthP] = useState<PeriodInsightsResponse | null>(null);
+  const [periodsLoading, setPeriodsLoading] = useState(true);
+
+  useEffect(() => {
+    let alive = true;
+    setPeriodsLoading(true);
+    const today = new Date().toISOString().slice(0, 10);
+    const month = today.slice(0, 7);
+    Promise.all([
+      getEnergyPeriod("day", { date: today }).catch(() => null),
+      getEnergyPeriod("week", { date: today }).catch(() => null),
+      getEnergyPeriod("month", { month }).catch(() => null),
+    ]).then(([d, w, m]) => {
+      if (!alive) return;
+      setTodayP(d); setWeekP(w); setMonthP(m);
+      setPeriodsLoading(false);
+    });
+    return () => { alive = false; };
+  }, []);
+
   if (dashboardLoading) {
     return <div class="tcomp"><div class="tcomp-skel skel" /></div>;
   }
   if (!dashboard?.ok || !dashboard.totals?.length) {
     return (
       <div class="tcomp">
-        <p class="muted">No tariff data available yet — Octopus catalogue or usage history missing.</p>
+        <CostBreakdownChart today={todayP} week={weekP} month={monthP} loading={periodsLoading} />
+        <p class="muted">No tariff catalogue available — Octopus data missing.</p>
       </div>
     );
   }
@@ -77,45 +107,35 @@ export function TariffComparisonWidget({ dashboard, dashboardLoading, metrics }:
 
   return (
     <div class="tcomp">
-      <div class="tcomp-header">
-        <div class="tcomp-header-text">
-          <span class="tcomp-header-label">Replay against your usage</span>
-          <span class="tcomp-header-value">
-            {days} days · {usage ? `${usage.total_import_kwh.toFixed(0)} kWh imported, ${usage.total_export_kwh.toFixed(0)} kWh exported` : "—"}
-          </span>
-        </div>
+      <CostBreakdownChart today={todayP} week={weekP} month={monthP} loading={periodsLoading} />
+
+      <div class="tcomp-table-head-row">
+        <span class="tcomp-table-title">
+          What other tariffs would have cost you over the last {days}d
+        </span>
         {cheapest && (
-          <div class="tcomp-cheapest">
-            <span class="tcomp-cheapest-label">Cheapest</span>
-            <span class="tcomp-cheapest-name">{cheapest.display_name}</span>
-          </div>
+          <span class="tcomp-cheapest-inline">
+            cheapest: <strong>{cheapest.display_name}</strong>
+          </span>
         )}
       </div>
 
       <div class="tcomp-table">
         <div class="tcomp-row tcomp-row--head">
           <span class="tcomp-cell tcomp-cell-name">Tariff</span>
-          <span class="tcomp-cell tcomp-cell-rate">Unit / day</span>
-          <span class="tcomp-cell tcomp-cell-period">£ for {days}d</span>
-          <span class="tcomp-cell tcomp-cell-delta">vs current</span>
+          <span class="tcomp-cell tcomp-cell-period">£ / {days}d</span>
+          <span class="tcomp-cell tcomp-cell-delta">vs now</span>
         </div>
-        {rows.slice(0, 10).map((r) => (
+        {rows.slice(0, 8).map((r) => (
           <TariffRow key={r.product_code} row={r} isBg={r.product_code === "BG-FIX-V58"} />
         ))}
       </div>
 
       <div class="tcomp-foot">
         <span>
-          Includes standing charge + export earnings.
-          {ft?.label && !bgRow && " "}
-          {ft?.label && !bgRow && (
-            <em>{ft.label} comparison needs FIXED_TARIFF_* + usage data.</em>
-          )}
-          {outgoingCount > 0 && (
-            <> · {outgoingCount} outgoing-only tariff{outgoingCount > 1 ? "s" : ""} hidden.</>
-          )}
+          Replay of your {usage ? `${usage.total_import_kwh.toFixed(0)}/${usage.total_export_kwh.toFixed(0)} kWh in/out` : ""} against each tariff's rates.
+          {outgoingCount > 0 && <> {outgoingCount} export-only hidden.</>}
         </span>
-        <span>Source: real-usage replay · Octopus catalogue{ft?.label ? ` + ${ft.label}` : ""}</span>
       </div>
     </div>
   );
@@ -126,22 +146,16 @@ function TariffRow({ row, isBg }: { row: TariffTotalRow; isBg: boolean }) {
   const delta = row.savings_vs_current_pounds;
   const deltaTone = row.is_current ? "neutral" : delta > 0 ? "ok" : delta < 0 ? "bad" : "neutral";
   const periodPounds = row.total_pence / 100;
+  const tooltip = `${row.unit_rate_pence > 0 ? `${row.unit_rate_pence.toFixed(1)}p/kWh · ` : ""}${row.standing_per_day.toFixed(0)}p/day standing${row.is_current ? " · your current tariff" : isBg ? " · computed from your usage × configured fixed rate" : ""}`;
 
   return (
-    <div class={cls} title={row.is_current ? "Your current tariff" : isBg ? "Computed from your real usage × configured fixed rate" : row.product_code}>
+    <div class={cls} title={tooltip}>
       <span class="tcomp-cell tcomp-cell-name">
         {row.is_current && <span class="tcomp-current-pill">NOW</span>}
         {isBg && <span class="tcomp-bg-pill">FIXED</span>}
         <span class="tcomp-name-text">{row.display_name}</span>
       </span>
-      <span class="tcomp-cell tcomp-cell-rate">
-        {row.unit_rate_pence > 0 ? `${row.unit_rate_pence.toFixed(1)}p` : "—"}
-        <span class="tcomp-cell-standing"> · {row.standing_per_day.toFixed(0)}p/d</span>
-      </span>
-      <span class="tcomp-cell tcomp-cell-period">
-        <strong>{gbp(periodPounds)}</strong>
-        <span class="tcomp-cell-annual">{gbp(row.annual_pounds)}/yr</span>
-      </span>
+      <span class="tcomp-cell tcomp-cell-period">{gbp(periodPounds)}</span>
       <span class={`tcomp-cell tcomp-cell-delta tcomp-cell-delta--${deltaTone}`}>
         {row.is_current ? "—" : gbpSigned(delta)}
       </span>
