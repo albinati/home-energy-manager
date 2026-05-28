@@ -1349,6 +1349,141 @@ async def foxess_quota():
     return get_refresh_stats_extended()
 
 
+@app.get("/api/v1/daikin/consumption")
+async def daikin_consumption(
+    period: str = "week",
+    date: str | None = None,
+    month: str | None = None,
+    year: int | None = None,
+):
+    """Daikin actual consumption — measured by Onecta, not estimated.
+
+    Reads SQLite only (zero Daikin API quota). Sources:
+      * ``daikin_consumption_2hourly`` for fine-grained buckets (12/day, 2h
+        each, kwh_total / kwh_heating / kwh_dhw).
+      * ``daikin_consumption_daily`` for rollups (kwh_total + COP).
+
+    Granularity:
+      * ``period=day``   → 12 2-hour buckets for the requested date.
+      * ``period=week``  → 7 daily rollups ending on `date`.
+      * ``period=month`` → ≤31 daily rollups for the requested YYYY-MM.
+      * ``period=year``  → 12 monthly aggregates for the requested year.
+
+    Returns ``{ "period", "label", "buckets": [...], "totals": {...} }``
+    where each bucket carries ``{ when, kwh_total, kwh_heating, kwh_dhw }``.
+    """
+    from datetime import date as _date, datetime, timedelta
+    from .. import db as _db
+
+    if period not in ("day", "week", "month", "year"):
+        raise HTTPException(status_code=400, detail="period must be day, week, month, or year")
+
+    def _today() -> _date:
+        return datetime.utcnow().date()
+
+    def _parse_date(s: str | None) -> _date:
+        if not s:
+            return _today()
+        try:
+            return _date.fromisoformat(s)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+
+    buckets: list[dict] = []
+    label = ""
+    t_total = 0.0
+    t_heat = 0.0
+    t_dhw = 0.0
+
+    with _db._lock:
+        conn = _db.get_connection()
+        try:
+            if period == "day":
+                d = _parse_date(date)
+                label = d.isoformat()
+                rows = conn.execute(
+                    """SELECT bucket_idx, kwh_total, kwh_heating, kwh_dhw, source
+                       FROM daikin_consumption_2hourly
+                       WHERE date = ? ORDER BY bucket_idx""",
+                    (label,),
+                ).fetchall()
+                got = {int(r[0]): r for r in rows}
+                for idx in range(12):
+                    r = got.get(idx)
+                    hh = idx * 2
+                    when = f"{label}T{hh:02d}:00"
+                    if r is None:
+                        buckets.append({"when": when, "bucket_idx": idx,
+                                        "kwh_total": None, "kwh_heating": None, "kwh_dhw": None,
+                                        "source": None})
+                    else:
+                        kt, kh, kd = float(r[1] or 0), float(r[2] or 0), float(r[3] or 0)
+                        buckets.append({"when": when, "bucket_idx": idx,
+                                        "kwh_total": kt, "kwh_heating": kh, "kwh_dhw": kd,
+                                        "source": r[4]})
+                        t_total += kt; t_heat += kh; t_dhw += kd
+
+            elif period in ("week", "month"):
+                if period == "week":
+                    end = _parse_date(date)
+                    start = end - timedelta(days=6)
+                    label = f"{start.isoformat()} → {end.isoformat()}"
+                    rows = conn.execute(
+                        """SELECT date, kwh_total, kwh_heating, kwh_dhw, cop_daily, source
+                           FROM daikin_consumption_daily
+                           WHERE date BETWEEN ? AND ? ORDER BY date""",
+                        (start.isoformat(), end.isoformat()),
+                    ).fetchall()
+                else:
+                    if not month or len(month) != 7 or month[4] != "-":
+                        raise HTTPException(status_code=400, detail="Use month=YYYY-MM")
+                    label = month
+                    rows = conn.execute(
+                        """SELECT date, kwh_total, kwh_heating, kwh_dhw, cop_daily, source
+                           FROM daikin_consumption_daily
+                           WHERE date LIKE ? ORDER BY date""",
+                        (month + "-%",),
+                    ).fetchall()
+                for r in rows:
+                    kt, kh, kd = float(r[1] or 0), float(r[2] or 0), float(r[3] or 0)
+                    buckets.append({"when": r[0], "kwh_total": kt, "kwh_heating": kh,
+                                    "kwh_dhw": kd, "cop": r[4], "source": r[5]})
+                    t_total += kt; t_heat += kh; t_dhw += kd
+
+            else:  # year
+                yr = int(year) if year is not None else _today().year
+                label = str(yr)
+                rows = conn.execute(
+                    """SELECT substr(date,1,7) AS ym,
+                              SUM(kwh_total), SUM(kwh_heating), SUM(kwh_dhw),
+                              AVG(cop_daily)
+                       FROM daikin_consumption_daily
+                       WHERE date LIKE ? GROUP BY ym ORDER BY ym""",
+                    (f"{yr}-%",),
+                ).fetchall()
+                for r in rows:
+                    kt, kh, kd = float(r[1] or 0), float(r[2] or 0), float(r[3] or 0)
+                    buckets.append({"when": r[0] + "-01",
+                                    "kwh_total": kt, "kwh_heating": kh, "kwh_dhw": kd,
+                                    "cop": r[4]})
+                    t_total += kt; t_heat += kh; t_dhw += kd
+        finally:
+            conn.close()
+
+    return {
+        "period": period,
+        "label": label,
+        "buckets": buckets,
+        "totals": {
+            "kwh_total": round(t_total, 2),
+            "kwh_heating": round(t_heat, 2),
+            "kwh_dhw": round(t_dhw, 2),
+            "dhw_share_pct": round(100 * t_dhw / t_total, 1) if t_total else None,
+        },
+        "source": "daikin_consumption_2hourly + daikin_consumption_daily (Onecta-measured)",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Runtime-tunable settings (#52). PUT takes effect within the 30-sec cache
 # TTL; settings that drive cron cadence trigger an APScheduler re-register.
@@ -3943,6 +4078,53 @@ async def execution_today(date: str | None = None):
         slot = _slot_floor(r["timestamp"]).isoformat().replace("+00:00", "Z")
         buckets.setdefault(slot, []).append(r)
 
+    # Onecta-measured 2-hourly actuals — the physics estimate can return 0
+    # above the weather-curve cutoff and ignores DHW entirely, so we prefer
+    # actuals when available. Buckets are anchored to LOCAL time (12 × 2h),
+    # so we spread each bucket's kWh evenly over its four 30-min UTC slots.
+    daikin_actual_per_30min: dict[str, float] = {}
+    try:
+        # Match the same local-date that the Onecta consumption fetcher
+        # writes (its `date` is the local day of the bucket).
+        from .. import db as _db2
+        with _db2._lock:
+            conn2 = _db2.get_connection()
+            try:
+                act_rows = conn2.execute(
+                    """SELECT date, bucket_idx, kwh_total
+                       FROM daikin_consumption_2hourly
+                       WHERE date IN (?, ?) ORDER BY date, bucket_idx""",
+                    (day_start.date().isoformat(),
+                     (day_start - timedelta(days=1)).date().isoformat()),
+                ).fetchall()
+            finally:
+                conn2.close()
+        # We don't know the user's tz here without a config import; the
+        # daily_brief module already handles this rigorously. For the
+        # execution view we approximate by treating the bucket's local
+        # midnight as UTC midnight on the same calendar date — this is
+        # within an hour even at BST, which is good enough for the
+        # day-view chart where the user is comparing magnitudes, not
+        # boundary-aligning. A precise fix lands when bucket_idx is
+        # written with a UTC offset (#424 follow-up).
+        for r in act_rows:
+            d_str = r[0]
+            idx = int(r[1])
+            kt = float(r[2] or 0.0)
+            if kt <= 0:
+                continue
+            # 2h bucket → 4 slots of 30 min
+            base = datetime.fromisoformat(d_str + "T00:00:00+00:00") + timedelta(hours=idx * 2)
+            for k in range(4):
+                slot_dt = base + timedelta(minutes=30 * k)
+                if not (day_start <= slot_dt <= day_end):
+                    continue
+                key = slot_dt.isoformat().replace("+00:00", "Z")
+                daikin_actual_per_30min[key] = kt / 4.0
+    except Exception:
+        # If the actuals table is empty / missing, fall back to physics.
+        daikin_actual_per_30min = {}
+
     from ..physics import get_daikin_heating_kw
     SLOT_HOURS = 0.5
     slots = []
@@ -3964,9 +4146,15 @@ async def execution_today(date: str | None = None):
         out_vals = [float(t["daikin_outdoor_temp"]) for t in ticks
                     if t.get("daikin_outdoor_temp") is not None]
         outdoor = sorted(out_vals)[len(out_vals) // 2] if out_vals else None
-        # Daikin physics estimate for this slot
-        daikin_kw = float(get_daikin_heating_kw(outdoor)) if outdoor is not None else 0.0
-        daikin_kwh = min(daikin_kw * SLOT_HOURS, load_kwh)  # can't exceed total load
+        # Daikin actuals first (Onecta-measured), fall back to physics.
+        actual = daikin_actual_per_30min.get(slot_iso)
+        if actual is not None:
+            daikin_source = "onecta"
+            daikin_kwh = min(actual, load_kwh)  # can't exceed total load
+        else:
+            daikin_source = "physics"
+            daikin_kw = float(get_daikin_heating_kw(outdoor)) if outdoor is not None else 0.0
+            daikin_kwh = min(daikin_kw * SLOT_HOURS, load_kwh)
         residual_kwh = max(0.0, load_kwh - daikin_kwh)
         # Costs: re-derive from the slot's totals (don't trust per-tick fakes)
         cost = load_kwh * agile_p if agile_p is not None else 0.0
@@ -3992,6 +4180,7 @@ async def execution_today(date: str | None = None):
             "fox_mode": last.get("fox_mode"),
             "daikin_outdoor_c": outdoor,
             "daikin_lwt_c": last.get("daikin_lwt"),
+            "daikin_source": daikin_source,
             "_tick_count": len(ticks),
         })
         total_cost += cost

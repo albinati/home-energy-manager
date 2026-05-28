@@ -20,6 +20,7 @@ import type {
   ApiQuotaResponse,
   TariffDashboardResponse,
   PeriodInsightsResponse,
+  DaikinConsumptionResponse,
 } from "./types";
 
 /* ----- Real-time / cockpit ----- */
@@ -32,6 +33,19 @@ export const getMetrics = () => getJson<MetricsResponse>("/metrics");
 export const getDaikinStatus = () => getJson<DaikinDevice[]>("/daikin/status");
 export const getDaikinQuota = () => getJson<ApiQuotaResponse>("/daikin/quota");
 export const getFoxQuota = () => getJson<ApiQuotaResponse>("/foxess/quota");
+
+// /daikin/consumption — Onecta-measured Daikin energy split by heating vs DHW.
+// SQLite read only — zero Daikin API quota. Granularities mirror /energy/period.
+export const getDaikinConsumption = (
+  period: "day" | "week" | "month" | "year",
+  opts: { date?: string; month?: string; year?: number } = {},
+) => {
+  const qs = new URLSearchParams({ period });
+  if (opts.date)  qs.set("date",  opts.date);
+  if (opts.month) qs.set("month", opts.month);
+  if (opts.year != null) qs.set("year", String(opts.year));
+  return getJson<DaikinConsumptionResponse>(`/daikin/consumption?${qs.toString()}`);
+};
 
 /* ----- Forecast vs actuals ----- */
 

@@ -349,6 +349,31 @@ export interface PeriodInsightsResponse {
   gas_comparison_ahead_pounds?: number | null;
 }
 
+/* ----- /daikin/consumption — Onecta-measured actuals ----- */
+
+export interface DaikinConsumptionBucket {
+  when: string;                     // ISO timestamp (day=YYYY-MM-DDTHH:00, other=YYYY-MM-DD)
+  bucket_idx?: number;              // 0-11 for day period
+  kwh_total: number | null;
+  kwh_heating: number | null;
+  kwh_dhw: number | null;
+  cop?: number | null;              // weekly/monthly only
+  source?: string | null;
+}
+
+export interface DaikinConsumptionResponse {
+  period: "day" | "week" | "month" | "year" | string;
+  label: string;
+  buckets: DaikinConsumptionBucket[];
+  totals: {
+    kwh_total: number;
+    kwh_heating: number;
+    kwh_dhw: number;
+    dhw_share_pct?: number | null;
+  };
+  source?: string;
+}
+
 /* ----- /metrics (~1s, summary KPIs) ----- */
 
 // /daikin/status — cached when refresh=false (default)
