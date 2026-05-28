@@ -1,4 +1,4 @@
-import type { TariffDashboardResponse, TariffTotalRow, MetricsResponse } from "../../lib/types";
+import type { TariffDashboardResponse, TariffTotalRow, MetricsResponse, PeriodInsightsResponse } from "../../lib/types";
 import { gbp, gbpSigned } from "../../lib/format";
 import "./tariff-comparison.css";
 
@@ -6,6 +6,14 @@ interface TariffComparisonWidgetProps {
   dashboard: TariffDashboardResponse | null;
   dashboardLoading: boolean;
   metrics: MetricsResponse | null;
+  // Real realised cost for the same calendar window — used to replace the
+  // current tariff's PROJECTED total. The dashboard engine bills total
+  // consumption at the tariff's average rate, which ignores the LP's
+  // battery-arbitrage on half-hourly tariffs (Agile) and over-states the
+  // current cost by ~30 % on solar+battery setups. The realised number
+  // (from /energy/period) bills measured grid import at the half-hourly
+  // Agile rate per slot — the actual money out the door.
+  monthPeriod: PeriodInsightsResponse | null;
 }
 
 // Default SEG floor used when a fixed-tariff doesn't expose its own outgoing
@@ -22,7 +30,7 @@ const SEG_EXPORT_FALLBACK_P = 4.0;
 // BG Fixed v58 row is computed client-side using the same real-usage block
 // + the configured FIXED_TARIFF_* rates from /metrics. No annual-from-daily
 // extrapolation; pure replay over the same window as the Octopus rows.
-export function TariffComparisonWidget({ dashboard, dashboardLoading, metrics }: TariffComparisonWidgetProps) {
+export function TariffComparisonWidget({ dashboard, dashboardLoading, metrics, monthPeriod }: TariffComparisonWidgetProps) {
   if (dashboardLoading) {
     return <div class="tcomp"><div class="tcomp-skel skel" /></div>;
   }
@@ -38,7 +46,22 @@ export function TariffComparisonWidget({ dashboard, dashboardLoading, metrics }:
   // a positive "unit rate" that's actually an export price. Treating them
   // as cheapest import would mislabel revenue as cost (see commit ec81a4b).
   const importOnly = dashboard.totals.filter((r) => isImportTariff(r));
-  const rows = importOnly.slice().sort((a, b) => a.total_pence - b.total_pence);
+  const realisedMonthlyP = monthPeriod?.cost?.net_cost_pence ?? null;
+  const realisedDays = monthPeriod?.chart_data?.length ?? null;
+  // Override the current tariff's projected totals with the real realised
+  // ones. The engine's projection is consumption × avg rate (no battery-
+  // arbitrage); the realised number is half-hourly grid_import × Agile_p.
+  const replaced = importOnly.map((r) => {
+    if (!r.is_current || realisedMonthlyP == null) return r;
+    const adjusted: TariffTotalRow = {
+      ...r,
+      total_pence: realisedMonthlyP,
+      daily_avg_pence: realisedDays && realisedDays > 0 ? realisedMonthlyP / realisedDays : r.daily_avg_pence,
+      annual_pounds: realisedDays && realisedDays > 0 ? (realisedMonthlyP / realisedDays * 365) / 100 : r.annual_pounds,
+    };
+    return adjusted;
+  });
+  const rows = replaced.slice().sort((a, b) => a.total_pence - b.total_pence);
   const cheapest = rows[0];
   const currentRow = rows.find((r) => r.is_current) ?? null;
   const usage = dashboard.usage;
@@ -105,7 +128,8 @@ export function TariffComparisonWidget({ dashboard, dashboardLoading, metrics }:
 
       <div class="tcomp-foot">
         <span>
-          Replay of your {usage ? `${usage.total_import_kwh.toFixed(0)}/${usage.total_export_kwh.toFixed(0)} kWh in/out` : ""} against each tariff's rates.
+          Your current tariff = <strong>real realised cost</strong> (half-hourly Agile × measured grid import).
+          Others = engine projection (flat avg rate × usage, no battery-arbitrage credit), so they over-state TOU tariffs.
           {outgoingCount > 0 && <> {outgoingCount} export-only hidden.</>}
         </span>
       </div>
