@@ -192,6 +192,17 @@
 .livepower-fox-window--solar_preheat { color: var(--cheap); border-color: color-mix(in srgb, var(--cheap) 35%, transparent); }
 .livepower-fox-window--peak_export   { color: var(--peak-export); border-color: color-mix(in srgb, var(--peak-export) 35%, transparent); }
 
+/* Future-day events — LP plan only, not yet uploaded to Fox. Slightly faded
+ * + dashed border so the user knows they won't see them in the Fox app yet. */
+.livepower-fox-window--future {
+  opacity: 0.72;
+  border-style: dashed;
+}
+.livepower-fox-window--future::before {
+  content: "📅 ";
+  margin-right: 1px;
+}
+
 .livepower-fox-debug {
   font-size: 0.65rem;
   color: var(--text-mute);

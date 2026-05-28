@@ -1,6 +1,6 @@
 import { PowerFlow } from "./PowerFlow";
 import { kw, kwh, pct } from "../../lib/format";
-import type { CockpitState, CockpitNow, SchedulerTimeline, ExecutionTodayResponse, TimelineSlot } from "../../lib/types";
+import type { CockpitState, CockpitNow, SchedulerTimeline, ExecutionTodayResponse } from "../../lib/types";
 import "./cockpit.css";
 import "./live-power.css";
 
@@ -30,7 +30,7 @@ export function LivePowerWidget({ state, cockpit, timeline, execution }: LivePow
   const todayRange = computeTodayRange(execution);
   const nextEvent = nextSocEvent(timeline);
   const foxMode = cockpit.current_slot?.fox_mode ?? "—";
-  const forced = timeline ? upcomingForced(timeline, 12) : [];
+  const forced = timeline ? upcomingForcedWindows(timeline, 4) : [];
   const lpInfo = timeline ? { runId: timeline.run_id ?? null, runAt: timeline.run_at ?? null, planDate: timeline.plan_date ?? null } : null;
 
   return (
@@ -86,12 +86,21 @@ export function LivePowerWidget({ state, cockpit, timeline, execution }: LivePow
           <span class={`livepower-fox-mode livepower-fox-mode--${foxMode.toLowerCase()}`}>{foxMode}</span>
           {forced.length > 0 && (
             <span class="livepower-fox-windows">
-              {forced.slice(0, 3).map((f) => (
-                <span key={f.slot_time_utc} class={`livepower-fox-window livepower-fox-window--${f.dispatched_kind || f.lp_kind || "std"}`}
-                      title={`${f.dispatched_kind || f.lp_kind || "?"} @ ${formatLocalTime(f.slot_time_utc)}`}>
-                  {labelForKind(f.dispatched_kind || f.lp_kind)} {formatLocalTime(f.slot_time_utc)}
-                </span>
-              ))}
+              {forced.map((w) => {
+                const start = formatRelativeSlot(w.start_utc, cockpit.now_utc);
+                const endTime = endLabelFor(w.end_utc);
+                const range = w.slot_count > 1 ? `${start.timeLabel}–${endTime}` : start.timeLabel;
+                const tooltip = start.isToday
+                  ? `${w.kind} · ${range} · already uploaded to Fox (visible in the app now)`
+                  : `${w.kind} · ${start.dayLabel} ${range} · LP plan only — uploads to Fox at 00:05 UTC on the day`;
+                return (
+                  <span key={w.start_utc}
+                        class={`livepower-fox-window livepower-fox-window--${w.kind}${start.isToday ? "" : " livepower-fox-window--future"}`}
+                        title={tooltip}>
+                    {labelForKind(w.kind)} {start.dayLabel ? `${start.dayLabel} ` : ""}{range}
+                  </span>
+                );
+              })}
             </span>
           )}
         </div>
@@ -110,21 +119,37 @@ export function LivePowerWidget({ state, cockpit, timeline, execution }: LivePow
   );
 }
 
-// Return the next N planned slots whose dispatched kind ACTUALLY translates
-// to a non-SelfUse Fox group (ForceCharge / ForceDischarge). solar_charge
-// and solar_preheat are LP annotations meaning "stay in SelfUse, expect
-// solar to fill the battery naturally" — Fox keeps SelfUse, no upload, so
-// they don't belong on a "scheduled events" strip the user cross-checks
-// against the Fox ESS app.
-function upcomingForced(timeline: SchedulerTimeline, limit: number): TimelineSlot[] {
-  const out: TimelineSlot[] = [];
+// Collapse upcoming planned slots that ACTUALLY translate to a non-SelfUse
+// Fox group (ForceCharge / ForceDischarge) into contiguous windows of the
+// same kind. solar_charge and solar_preheat are LP annotations meaning
+// "stay in SelfUse, expect solar to fill the battery naturally" — Fox
+// keeps SelfUse, no upload, so they don't belong on a "scheduled events"
+// strip the user cross-checks against the Fox ESS app.
+interface ForcedWindow { kind: string; start_utc: string; end_utc: string; slot_count: number; }
+function upcomingForcedWindows(timeline: SchedulerTimeline, limit: number): ForcedWindow[] {
+  const out: ForcedWindow[] = [];
   const interesting = new Set(["cheap", "negative", "peak_export"]);
+  let current: ForcedWindow | null = null;
   for (const s of timeline.planned || []) {
     const k = (s.dispatched_kind || s.lp_kind || "").toLowerCase();
-    if (interesting.has(k)) out.push(s);
-    if (out.length >= limit) break;
+    const iso = s.slot_time_utc;
+    if (!iso) continue;
+    if (interesting.has(k)) {
+      if (current && current.kind === k) {
+        current.end_utc = iso;
+        current.slot_count += 1;
+      } else {
+        if (current) out.push(current);
+        current = { kind: k, start_utc: iso, end_utc: iso, slot_count: 1 };
+      }
+    } else if (current) {
+      out.push(current);
+      current = null;
+      if (out.length >= limit) break;
+    }
   }
-  return out;
+  if (current) out.push(current);
+  return out.slice(0, limit);
 }
 
 function labelForKind(k: string | undefined): string {
@@ -226,4 +251,46 @@ function formatLocalTime(iso: string | undefined): string {
   if (!iso) return "—";
   try { return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }); }
   catch { return iso; }
+}
+
+// Window end = start of the slot AFTER the last counted one (slots are 30 min).
+function endLabelFor(lastSlotStartIso: string): string {
+  try {
+    const end = new Date(new Date(lastSlotStartIso).getTime() + 30 * 60 * 1000);
+    return end.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+  } catch {
+    return "?";
+  }
+}
+
+// Compares a slot's local date to "now" and returns (dayLabel, timeLabel,
+// isToday). Fox ESS only carries today's schedule — anything dated later
+// is LP intent that won't appear in the Fox app until the next 00:05 UTC
+// upload. The dayLabel surfaces that gap so the user knows where to look.
+interface RelativeSlot { dayLabel: string; timeLabel: string; isToday: boolean; }
+function formatRelativeSlot(iso: string | undefined, nowIso?: string | null): RelativeSlot {
+  if (!iso) return { dayLabel: "", timeLabel: "—", isToday: false };
+  try {
+    const slot = new Date(iso);
+    const now = nowIso ? new Date(nowIso) : new Date();
+    const timeLabel = slot.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+    const slotKey = `${slot.getFullYear()}-${slot.getMonth()}-${slot.getDate()}`;
+    const nowKey = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`;
+    if (slotKey === nowKey) return { dayLabel: "", timeLabel, isToday: true };
+    // 1-day difference → "Tomorrow"; longer → short weekday
+    const dayDiff = Math.round(
+      (Date.UTC(slot.getFullYear(), slot.getMonth(), slot.getDate())
+        - Date.UTC(now.getFullYear(), now.getMonth(), now.getDate())) / 86400000,
+    );
+    if (dayDiff === 1) return { dayLabel: "Tomorrow", timeLabel, isToday: false };
+    if (dayDiff > 1 && dayDiff < 7) {
+      return { dayLabel: slot.toLocaleDateString([], { weekday: "short" }), timeLabel, isToday: false };
+    }
+    return {
+      dayLabel: slot.toLocaleDateString([], { day: "2-digit", month: "short" }),
+      timeLabel, isToday: false,
+    };
+  } catch {
+    return { dayLabel: "", timeLabel: iso, isToday: false };
+  }
 }
