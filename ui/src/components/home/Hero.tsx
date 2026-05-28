@@ -1,5 +1,6 @@
 import type { MetricsResponse, CockpitNow, AgileTodayResponse, MonthlyEnergy } from "../../lib/types";
 import { gbp, gbpSigned, kw, kwh, pct } from "../../lib/format";
+import { useAnimatedNumber } from "../../lib/useAnimatedNumber";
 import "./hero.css";
 
 interface HeroProps {
@@ -14,11 +15,10 @@ interface HeroProps {
 //   1. Savings vs SVT (the biggest number on the screen)
 //   2. Comparison vs the previous BG Fixed contract
 //   3. Today's running DMA (£/day)
-//   4. Live "motion" — the action verb (Battery → house etc.) inferred
-//      from cockpit power flow + a 1-line tariff band (current import +
-//      export p/kWh, with band colour).
-// The three £/day bars from the previous Hero were removed — they didn't
-// add information that wasn't already in the headline + DMA subline.
+//   4. Lifetime totals on Agile (folded in from the old Lifetime widget)
+//   5. Live "motion" — action verb + tariff band + import/export p/kWh
+// Numeric values are tweened via useAnimatedNumber so refreshes feel alive
+// rather than snapping.
 export function Hero({ metrics, metricsLoading, cockpit, agile, monthly }: HeroProps) {
   const daily = metrics?.pnl?.daily;
   const today = daily?.delta_vs_svt_pounds ?? null;
@@ -36,9 +36,6 @@ export function Hero({ metrics, metricsLoading, cockpit, agile, monthly }: HeroP
   const currentExport = agile?.current_export_p ?? null;
   const importBand = classifyBand(currentImport, metrics?.cheap_threshold_pence, metrics?.peak_threshold_pence);
 
-  // Lifetime totals — folded in from the (now-removed) Lifetime widget so
-  // the long-horizon story sits with the savings narrative instead of
-  // floating in the MONEY band. Sums across all months with real activity.
   const activeMonths = monthly.filter(
     (m) => (m.cost?.net_cost_pounds ?? 0) !== 0 || (m.energy?.export_kwh ?? 0) > 0,
   );
@@ -52,6 +49,18 @@ export function Hero({ metrics, metricsLoading, cockpit, agile, monthly }: HeroP
       }
     : null;
 
+  // Smooth tweens for every refreshing figure.
+  const todayAnim = useAnimatedNumber(today);
+  const todayFixedAnim = useAnimatedNumber(todayFixed);
+  const monthDailyAnim = useAnimatedNumber(monthDaily);
+  const solarAnim = useAnimatedNumber(lifetime?.solar_kwh ?? null);
+  const exportKwhAnim = useAnimatedNumber(lifetime?.export_kwh ?? null);
+  const exportEarnAnim = useAnimatedNumber(lifetime?.export_earn ?? null);
+  const totalCostAnim = useAnimatedNumber(lifetime?.total_cost ?? null);
+  const importAnim = useAnimatedNumber(currentImport);
+  const exportRateAnim = useAnimatedNumber(currentExport);
+  const socAnim = useAnimatedNumber(state?.soc_pct ?? null);
+
   return (
     <section class="hero" aria-label="Live status + savings overview">
       <div class="hero-bg" aria-hidden="true" />
@@ -62,22 +71,22 @@ export function Hero({ metrics, metricsLoading, cockpit, agile, monthly }: HeroP
           Today · saved vs Standard Variable Tariff
         </div>
         <div class={`hero-headline hero-headline--${sign}`}>
-          {today == null ? (metricsLoading ? <SkelHero /> : "—") : gbpSigned(today)}
+          {todayAnim == null ? (metricsLoading ? <SkelHero /> : "—") : gbpSigned(todayAnim)}
         </div>
         <div class="hero-sublines">
-          {todayFixed != null && (
+          {todayFixedAnim != null && (
             <div class="hero-subline">
               vs British Gas Fixed:&nbsp;
-              <strong class={todayFixed >= 0 ? "hero-strong-pos" : "hero-strong-neg"}>
-                {gbpSigned(todayFixed)}
+              <strong class={todayFixedAnim >= 0 ? "hero-strong-pos" : "hero-strong-neg"}>
+                {gbpSigned(todayFixedAnim)}
               </strong>
             </div>
           )}
-          {monthDaily != null && (
+          {monthDailyAnim != null && (
             <div class="hero-subline hero-subline-dma">
               This month's running average:&nbsp;
-              <strong class={monthDaily >= 0 ? "hero-strong-pos" : "hero-strong-neg"}>
-                {gbpSigned(monthDaily)}/day
+              <strong class={monthDailyAnim >= 0 ? "hero-strong-pos" : "hero-strong-neg"}>
+                {gbpSigned(monthDailyAnim)}/day
               </strong>
             </div>
           )}
@@ -89,10 +98,10 @@ export function Hero({ metrics, metricsLoading, cockpit, agile, monthly }: HeroP
               Lifetime on Agile · {lifetime.months} mo
             </div>
             <div class="hero-lifetime-stats">
-              <HeroStat value={kwh(lifetime.solar_kwh, 0)} label="solar produced" tone="pv" />
-              <HeroStat value={kwh(lifetime.export_kwh, 0)} label="exported" tone="export" />
-              <HeroStat value={gbp(lifetime.export_earn)} label="export earnings" tone="ok" />
-              <HeroStat value={gbp(lifetime.total_cost)} label="total bills" tone="cost" />
+              <HeroStat value={kwh(solarAnim ?? 0, 0)} label="solar produced" tone="pv" />
+              <HeroStat value={kwh(exportKwhAnim ?? 0, 0)} label="exported" tone="export" />
+              <HeroStat value={gbp(exportEarnAnim ?? 0)} label="export earnings" tone="ok" />
+              <HeroStat value={gbp(totalCostAnim ?? 0)} label="total bills" tone="cost" />
             </div>
           </div>
         )}
@@ -119,16 +128,16 @@ export function Hero({ metrics, metricsLoading, cockpit, agile, monthly }: HeroP
           <div class="hero-tariff-rates">
             <div class="hero-tariff-rate">
               <span class="hero-tariff-rate-label">Import</span>
-              <span class="hero-tariff-rate-value">{currentImport != null ? `${currentImport.toFixed(2)}p` : "—"}</span>
+              <span class="hero-tariff-rate-value">{importAnim != null ? `${importAnim.toFixed(2)}p` : "—"}</span>
             </div>
             <div class="hero-tariff-rate">
               <span class="hero-tariff-rate-label">Export</span>
-              <span class="hero-tariff-rate-value">{currentExport != null ? `${currentExport.toFixed(2)}p` : "—"}</span>
+              <span class="hero-tariff-rate-value">{exportRateAnim != null ? `${exportRateAnim.toFixed(2)}p` : "—"}</span>
             </div>
-            {state && (
+            {socAnim != null && (
               <div class="hero-tariff-rate">
                 <span class="hero-tariff-rate-label">Battery</span>
-                <span class="hero-tariff-rate-value">{pct(state.soc_pct, 0)}</span>
+                <span class="hero-tariff-rate-value">{pct(socAnim, 0)}</span>
               </div>
             )}
           </div>
