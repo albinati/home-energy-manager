@@ -1,11 +1,12 @@
 import { PowerFlow } from "./PowerFlow";
 import { kw, kwh, pct } from "../../lib/format";
-import type { CockpitState, SchedulerTimeline, ExecutionTodayResponse } from "../../lib/types";
+import type { CockpitState, CockpitNow, SchedulerTimeline, ExecutionTodayResponse, TimelineSlot } from "../../lib/types";
 import "./cockpit.css";
 import "./live-power.css";
 
 interface LivePowerWidgetProps {
   state: CockpitState;
+  cockpit: CockpitNow;
   timeline: SchedulerTimeline | null;
   execution: ExecutionTodayResponse | null;
 }
@@ -13,7 +14,7 @@ interface LivePowerWidgetProps {
 // Composite widget: action verb + power flow on the left, battery details
 // on the right. Replaces the standalone Battery widget AND the Right Now
 // widget — one canonical surface for "what's happening with the energy".
-export function LivePowerWidget({ state, timeline, execution }: LivePowerWidgetProps) {
+export function LivePowerWidget({ state, cockpit, timeline, execution }: LivePowerWidgetProps) {
   const action = inferAction(state);
   const socPct = state.soc_pct ?? 0;
   const charging = state.battery_kw > 0.05;
@@ -28,6 +29,9 @@ export function LivePowerWidget({ state, timeline, execution }: LivePowerWidgetP
 
   const todayRange = computeTodayRange(execution);
   const nextEvent = nextSocEvent(timeline);
+  const foxMode = cockpit.current_slot?.fox_mode ?? "—";
+  const forced = timeline ? upcomingForced(timeline, 12) : [];
+  const lpInfo = timeline ? { runId: timeline.run_id ?? null, runAt: timeline.run_at ?? null, planDate: timeline.plan_date ?? null } : null;
 
   return (
     <div class="livepower">
@@ -75,8 +79,59 @@ export function LivePowerWidget({ state, timeline, execution }: LivePowerWidgetP
           </div>
         </aside>
       </div>
+
+      <div class="livepower-fox">
+        <div class="livepower-fox-row">
+          <span class="livepower-fox-label">Fox mode</span>
+          <span class={`livepower-fox-mode livepower-fox-mode--${foxMode.toLowerCase()}`}>{foxMode}</span>
+          {forced.length > 0 && (
+            <span class="livepower-fox-windows">
+              {forced.slice(0, 3).map((f) => (
+                <span key={f.slot_time_utc} class={`livepower-fox-window livepower-fox-window--${f.dispatched_kind || f.lp_kind || "std"}`}
+                      title={`${f.dispatched_kind || f.lp_kind || "?"} @ ${formatLocalTime(f.slot_time_utc)}`}>
+                  {labelForKind(f.dispatched_kind || f.lp_kind)} {formatLocalTime(f.slot_time_utc)}
+                </span>
+              ))}
+            </span>
+          )}
+        </div>
+        {lpInfo && (lpInfo.runId != null || lpInfo.runAt) && (
+          <div class="livepower-fox-debug">
+            <span title="Last LP run id + wall time + plan target date">
+              LP&nbsp;
+              {lpInfo.runId != null && <strong>#{lpInfo.runId}</strong>}
+              {lpInfo.runAt && <> · {formatLocalTime(lpInfo.runAt)}</>}
+              {lpInfo.planDate && <> · plan {lpInfo.planDate}</>}
+            </span>
+          </div>
+        )}
+      </div>
     </div>
   );
+}
+
+// Return the next N planned slots whose dispatched kind requires Fox to go
+// into a non-SelfUse mode — force-charge cycles or peak_export windows.
+function upcomingForced(timeline: SchedulerTimeline, limit: number): TimelineSlot[] {
+  const out: TimelineSlot[] = [];
+  const interesting = new Set(["cheap", "negative", "solar_charge", "solar_preheat", "peak_export"]);
+  for (const s of timeline.planned || []) {
+    const k = (s.dispatched_kind || s.lp_kind || "").toLowerCase();
+    if (interesting.has(k)) out.push(s);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+function labelForKind(k: string | undefined): string {
+  switch ((k || "").toLowerCase()) {
+    case "cheap":         return "⚡ charge";
+    case "negative":      return "🔵 charge";
+    case "solar_charge":  return "☀ charge";
+    case "solar_preheat": return "♨ preheat";
+    case "peak_export":   return "💸 export";
+    default:              return k || "?";
+  }
 }
 
 function BatteryShape({ pct, fillColor, charging, discharging }: {

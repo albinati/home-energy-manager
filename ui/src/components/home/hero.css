@@ -1,5 +1,4 @@
-/* Hero — savings as the primary surface. Dramatic typography over a subtle
- * mesh gradient. Three comparison bars on the right. */
+/* Hero — savings number on the left, live motion + current tariff on the right. */
 
 .hero {
   position: relative;
@@ -56,10 +55,6 @@
   text-transform: uppercase;
   font-weight: 600;
 }
-.hero-eyebrow strong {
-  color: var(--text);
-  font-weight: 700;
-}
 .hero-eyebrow-dot {
   width: 6px;
   height: 6px;
@@ -109,62 +104,100 @@
 .hero-strong-pos { color: var(--ok); font-weight: 700; }
 .hero-strong-neg { color: var(--bad); font-weight: 700; }
 
-/* Bar comparison */
-.hero-bars {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: var(--space-3);
-  align-items: end;
-}
-.hero-bar {
+/* Right panel — live motion + tariff strip */
+.hero-status {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: var(--space-2);
+  gap: var(--space-4);
+  justify-content: center;
+  min-width: 0;
 }
-.hero-bar-track {
-  height: 110px;
-  width: 32px;
-  background: var(--bg);
-  border-radius: 6px;
-  overflow: hidden;
+
+.hero-motion {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--bg-card-2) 80%, transparent);
   border: 1px solid var(--border);
 }
-.hero-bar.is-active .hero-bar-track {
-  border-color: var(--border-strong);
-  box-shadow: 0 0 16px rgba(16, 185, 129, 0.15);
+.hero-motion-icon {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.2rem;
+  color: white;
+  flex-shrink: 0;
 }
-.hero-bar-fill {
-  width: 100%;
-  border-radius: 4px;
-  transition: height 600ms ease;
-}
-.hero-bar-value {
-  font-size: var(--font-sm);
+.hero-motion-text { min-width: 0; }
+.hero-motion-title {
+  font-size: var(--font-lg);
   font-weight: 700;
-  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.015em;
+  line-height: 1.15;
 }
-.hero-bar-sub {
-  font-size: 0.65rem;
-  color: var(--text-mute);
+.hero-motion-sub {
+  font-size: var(--font-xs);
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+}
+
+.hero-tariff {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--bg-card-2) 80%, transparent);
+  border: 1px solid var(--border);
+}
+.hero-tariff-band {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  align-self: flex-start;
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  font-size: var(--font-xs);
+  font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
-.hero-bar-label {
-  font-size: var(--font-xs);
-  color: var(--text-dim);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  margin-top: 2px;
+.hero-tariff-band-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 8px currentColor;
 }
-.hero-bar.is-active .hero-bar-label {
-  color: var(--text);
-  font-weight: 700;
+.hero-tariff-band--negative { color: var(--neg-price); background: color-mix(in srgb, var(--neg-price) 18%, transparent); }
+.hero-tariff-band--cheap    { color: var(--cheap);     background: color-mix(in srgb, var(--cheap) 18%, transparent); }
+.hero-tariff-band--standard { color: var(--standard);  background: color-mix(in srgb, var(--standard) 22%, transparent); }
+.hero-tariff-band--peak     { color: var(--peak);      background: color-mix(in srgb, var(--peak) 18%, transparent); }
+.hero-tariff-band--unknown  { color: var(--text-mute); background: color-mix(in srgb, var(--text-mute) 18%, transparent); }
+
+.hero-tariff-rates {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-2);
 }
-.hero-bar-total {
+.hero-tariff-rate {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.hero-tariff-rate-label {
   font-size: 0.65rem;
   color: var(--text-mute);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.hero-tariff-rate-value {
+  font-size: var(--font-lg);
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
 }

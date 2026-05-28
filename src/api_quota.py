@@ -135,6 +135,38 @@ def count_calls_24h(vendor: str) -> int:
             conn.close()
 
 
+def count_calls_window(vendor: str, since_ts: float, *, only_failed: bool = False) -> int:
+    """Return number of calls for *vendor* since *since_ts* (unix seconds).
+
+    Useful for the "since-midnight-UTC" figure that matches what the upstream
+    vendor enforces (Daikin and Fox both reset at midnight UTC), versus the
+    rolling-24h window that drives the local soft cap.
+    """
+    cond = " AND ok = 0" if only_failed else ""
+    with _lock:
+        conn = _conn()
+        try:
+            cur = conn.execute(
+                f"SELECT COUNT(*) FROM api_call_log WHERE vendor = ? AND ts_utc >= ?{cond}",
+                (vendor, since_ts),
+            )
+            row = cur.fetchone()
+            return int(row[0]) if row else 0
+        except sqlite3.OperationalError:
+            return 0
+        finally:
+            conn.close()
+
+
+def _midnight_utc_epoch() -> float:
+    """Return today's midnight UTC as a unix timestamp."""
+    import datetime as _dt
+    today_utc = _dt.datetime.now(_dt.timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0,
+    )
+    return today_utc.timestamp()
+
+
 def _budget(vendor: str) -> int:
     if vendor == "daikin":
         full = int(getattr(config, "DAIKIN_DAILY_BUDGET", 180))
@@ -245,15 +277,30 @@ def daikin_circuit_open() -> bool:
 
 
 def get_quota_status(vendor: str | None = None) -> dict:
-    """Return a dict suitable for status endpoints."""
+    """Return a dict suitable for status endpoints.
+
+    Three counters now travel together so callers can pick whichever matches
+    what they care about:
+      * ``quota_used_24h`` — rolling 24 hours; this drives the local soft cap.
+      * ``quota_used_today_utc`` — since midnight UTC; matches what Daikin/Fox
+        actually enforce on their side and resets at the same boundary.
+      * ``quota_failed_24h`` — calls in the rolling window that returned
+        non-2xx (auth, 429, etc.) — surfaces retry storms in the UI.
+    """
     vendors = [vendor] if vendor else ["daikin", "fox"]
     out: dict = {}
+    midnight_utc = _midnight_utc_epoch()
     for v in vendors:
         used = count_calls_24h(v)
+        used_today = count_calls_window(v, midnight_utc)
+        failed_24h = count_calls_window(v, time.time() - 24 * 3600, only_failed=True)
         budget = _budget(v)
         out[v] = {
             "quota_used_24h": used,
+            "quota_used_today_utc": used_today,
+            "quota_failed_24h": failed_24h,
             "quota_remaining_24h": max(0, budget - used),
+            "quota_remaining_today_utc": max(0, budget - used_today),
             "daily_budget": budget,
             "blocked": used >= budget,
         }

@@ -350,11 +350,56 @@ export interface ApiQuotaResponse {
   last_refresh_at_utc?: string | null;
   last_updated_epoch?: number;
   refresh_count_24h?: number;
+  // Rolling 24h — drives the local soft cap; can exceed budget during retry storms.
   quota_used_24h?: number;
   quota_remaining_24h?: number;
+  // Since midnight UTC — matches what Daikin/Fox actually enforce. Optional;
+  // older backends won't return it (UI falls back to quota_used_24h).
+  quota_used_today_utc?: number | null;
+  quota_remaining_today_utc?: number | null;
+  // Failed calls in the rolling 24h — surfaces retry-loop incidents.
+  quota_failed_24h?: number | null;
   daily_budget?: number;
   blocked?: boolean;
   last_blocked_at?: number | null;
+}
+
+/* ----- /tariffs/dashboard (POST) — comparison vs Octopus catalogue ----- */
+
+export interface TariffTotalRow {
+  product_code: string;
+  display_name: string;
+  pricing: "half_hourly" | "time_of_use" | "flat" | string;
+  total_pence: number;
+  daily_avg_pence: number;
+  annual_pounds: number;
+  standing_per_day: number;
+  unit_rate_pence: number;
+  contract_type?: string;
+  contract_months?: number;
+  exit_fee_pounds?: number;
+  is_green?: boolean;
+  wins?: number;
+  is_current?: boolean;
+  savings_vs_current_pounds: number;
+}
+
+export interface TariffDashboardUsage {
+  total_import_kwh: number;
+  total_export_kwh: number;
+  total_days: number;
+}
+
+export interface TariffDashboardResponse {
+  ok: boolean;
+  error?: string | null;
+  granularity?: "daily" | "weekly" | "monthly" | string;
+  periods?: Array<{ label: string; import_kwh: number; export_kwh: number; days: number; costs: Record<string, number>; winner: string }>;
+  totals?: TariffTotalRow[];
+  current_product_code?: string;
+  current_annual_pounds?: number;
+  usage?: TariffDashboardUsage;
+  data_source?: string;
 }
 
 export interface MetricsResponse {

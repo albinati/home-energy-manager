@@ -21,7 +21,12 @@ export function QuotaChips() {
 
 function QuotaChip({ label, data }: { label: string; data: ApiQuotaResponse | null }) {
   if (!data) return <span class="quota-chip quota-chip--loading">{label} —</span>;
-  const used = data.quota_used_24h ?? 0;
+  // Prefer "today since midnight UTC" — that's what the upstream vendor
+  // actually enforces. Fall back to rolling-24h when the backend is older.
+  const usedToday = data.quota_used_today_utc;
+  const used = usedToday ?? data.quota_used_24h ?? 0;
+  const used24h = data.quota_used_24h ?? 0;
+  const failed = data.quota_failed_24h ?? 0;
   const budget = data.daily_budget ?? 0;
   const blocked = data.blocked === true;
   const pct = budget > 0 ? (used / budget) * 100 : 0;
@@ -29,11 +34,19 @@ function QuotaChip({ label, data }: { label: string; data: ApiQuotaResponse | nu
   if (blocked || pct >= 90) tone = "bad";
   else if (pct >= 60) tone = "warn";
 
+  const windowLabel = usedToday != null ? "today" : "24h";
+  const tooltipParts = [
+    `${label}: ${used}/${budget} (${windowLabel})`,
+    usedToday != null ? `rolling 24h: ${used24h}` : null,
+    failed > 0 ? `failed in 24h: ${failed}` : null,
+    blocked ? "BLOCKED — soft cap reached" : null,
+  ].filter(Boolean);
+
   return (
-    <span class={`quota-chip quota-chip--${tone}`}
-          title={`${label}: ${used}/${budget} API calls used in last 24h${blocked ? " (BLOCKED)" : ""}`}>
+    <span class={`quota-chip quota-chip--${tone}`} title={tooltipParts.join(" · ")}>
       <span class="quota-chip-label">{label}</span>
       <span class="quota-chip-value">{used}/{budget}</span>
+      {failed > 0 && <span class="quota-chip-fail" title={`${failed} failed calls in last 24h`}>⚠{failed}</span>}
     </span>
   );
 }

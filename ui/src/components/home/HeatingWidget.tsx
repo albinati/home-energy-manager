@@ -26,11 +26,8 @@ interface HeatingWidgetProps {
 // zero quota cost.
 export function HeatingWidget({ state, daikin, daikinQuota, report, weather, execution }: HeatingWidgetProps) {
   const dev = daikin && daikin.length > 0 ? daikin[0] : null;
-  const mode = (state.daikin_mode || dev?.mode || "").toLowerCase();
-  const isHeating = mode.includes("heat");
-  const isCooling = mode.includes("cool");
-  const isOff = mode === "" || mode === "off" || mode === "idle";
-
+  // No cooling on this system — only heating + DHW. We surface compressor
+  // status via the tank/space rows themselves (ON/OFF), not a "mode" chip.
   const tankTemp = state.tank_c ?? dev?.tank_temp ?? null;
   const tankTarget = dev?.tank_target ?? null;
   const tankPower = dev?.tank_power ?? null;
@@ -81,25 +78,17 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather, exe
   return (
     <div class="heating">
       <div class="heating-header">
-        <div class={`heating-mode heating-mode--${isHeating ? "heating" : isCooling ? "cooling" : "idle"}`}>
-          {isHeating && <span class="heating-mode-icon">🔥</span>}
-          {isCooling && <span class="heating-mode-icon">❄</span>}
-          {isOff && <span class="heating-mode-icon">⏸</span>}
-          <span>{state.daikin_mode || "—"}</span>
-        </div>
-        <div class="heating-header-meta">
-          {freshLabel && (
-            <span class="heating-freshness" title={`Daikin cache last refreshed ${freshLabel}`}>
-              {freshLabel}
-            </span>
-          )}
-          {quotaBudget != null && (
-            <Pill tone={quotaTone === "ok" ? "ok" : quotaTone === "warn" ? "warn" : quotaTone === "bad" ? "bad" : "dim"}
-                  title={`Daikin daily quota — ${quotaUsed}/${quotaBudget} calls used`}>
-              {quotaUsed}/{quotaBudget}
-            </Pill>
-          )}
-        </div>
+        {freshLabel && (
+          <span class="heating-freshness" title={`Daikin cache last refreshed ${freshLabel}`}>
+            Cache · {freshLabel}
+          </span>
+        )}
+        {quotaBudget != null && (
+          <Pill tone={quotaTone === "ok" ? "ok" : quotaTone === "warn" ? "warn" : quotaTone === "bad" ? "bad" : "dim"}
+                title={`Daikin API — ${quotaUsed}/${quotaBudget} calls in the last 24h (Daikin enforces ~200/day, resets midnight UTC)`}>
+            {quotaUsed}/{quotaBudget} · 24h
+          </Pill>
+        )}
       </div>
 
       <div class="heating-rows">

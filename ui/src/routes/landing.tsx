@@ -12,21 +12,20 @@ import {
   getEnergyMonthly,
   getDaikinStatus,
   getDaikinQuota,
-  getAgileDay,
+  getTariffDashboard,
 } from "../lib/endpoints";
 import { Widget } from "../components/common/Widget";
 import { Spinner } from "../components/common/Spinner";
 import { RefreshAction } from "../components/common/RefreshAction";
 import { LivePowerWidget } from "../components/cockpit/LivePowerWidget";
 import { TariffWidget } from "../components/cockpit/TariffWidget";
-import { ComingUp } from "../components/home/ComingUp";
 import { Hero } from "../components/home/Hero";
 import { ExportsWidget } from "../components/home/ExportsWidget";
 import { TodayBillWidget } from "../components/home/TodayBillWidget";
 import { LifetimeWidget } from "../components/home/LifetimeWidget";
 import { EfficiencyWidget } from "../components/home/EfficiencyWidget";
 import { HeatingWidget } from "../components/home/HeatingWidget";
-import { PlanPreview } from "../components/home/PlanPreview";
+import { TariffComparisonWidget } from "../components/home/TariffComparisonWidget";
 import type { MonthlyEnergy } from "../lib/types";
 import "../components/home/home.css";
 
@@ -73,11 +72,8 @@ export default function Landing() {
   // Daikin cached read — no refresh=true, so no live cloud call (30-min cache TTL).
   const daikin = useFetch(getDaikinStatus, []);
   const daikinQuota = useFetch(getDaikinQuota, []);
-  // Tomorrow's rates if Octopus has published them (16:00 local). Failure = blank.
-  const agileTomorrow = useFetch(() => {
-    const d = new Date(); d.setDate(d.getDate() + 1);
-    return getAgileDay(d.toISOString().slice(0, 10)).catch(() => null as never);
-  }, []);
+  // Tariff comparison vs Octopus catalogue + BG Fixed v58.
+  const tariffDash = useFetch(() => getTariffDashboard(1, "monthly", 8), []);
 
   if (now.loading && !now.data) {
     return <div class="home"><Spinner label="Loading dashboard…" /></div>;
@@ -96,12 +92,12 @@ export default function Landing() {
 
   return (
     <div class="home">
-      <Hero metrics={metrics.data} metricsLoading={metrics.loading} />
+      <Hero metrics={metrics.data} metricsLoading={metrics.loading} cockpit={data} agile={agile.data} />
 
       <div class="widget-grid">
         <Widget title="Live power" icon="⚡" tone="power" size="large"
                 badge={data.now_utc ? new Date(data.now_utc).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }) : undefined}>
-          <LivePowerWidget state={s} timeline={timeline.data} execution={execution.data} />
+          <LivePowerWidget state={s} cockpit={data} timeline={timeline.data} execution={execution.data} />
         </Widget>
 
         <Widget title="Today's bill" icon="💰" tone="savings" size="medium"
@@ -109,13 +105,14 @@ export default function Landing() {
           <TodayBillWidget report={report.data} reportLoading={report.loading} metrics={metrics.data} execution={execution.data} />
         </Widget>
 
-        <Widget title="Exports" icon="📤" tone="savings" size="medium"
-                action={<RefreshAction onRefresh={() => { void attribution.refresh(); void report.refresh(); }} loading={attribution.loading || report.loading} />}>
-          <ExportsWidget now={data} yesterday={attribution.data} report={report.data} monthly={monthly.data} />
+        <Widget title="Efficiency" icon="🎯" tone="plan" size="medium">
+          <EfficiencyWidget metrics={metrics.data} loading={metrics.loading} />
         </Widget>
 
-        <Widget title="Lifetime" icon="🏆" tone="savings" size="medium" badge={monthly.data.length > 0 ? `${monthly.data.length} mo on Agile` : undefined}>
-          <LifetimeWidget monthly={monthly.data} monthlyLoading={monthly.loading} />
+        <Widget title="Tariff comparison" icon="📊" tone="tariff" size="wide"
+                badge={tariffDash.data?.usage?.total_days ? `last ${tariffDash.data.usage.total_days}d` : undefined}
+                action={<RefreshAction onRefresh={tariffDash.refresh} loading={tariffDash.loading} />}>
+          <TariffComparisonWidget dashboard={tariffDash.data} dashboardLoading={tariffDash.loading} metrics={metrics.data} />
         </Widget>
 
         <Widget title="Today's tariff" icon="💷" tone="tariff" size="large">
@@ -127,24 +124,14 @@ export default function Landing() {
           <HeatingWidget state={s} daikin={daikin.data} daikinQuota={daikinQuota.data} report={report.data} weather={weather.data} execution={execution.data} />
         </Widget>
 
-        <Widget title="Next 6 hours" icon="📅" tone="plan" size="medium">
-          <PlanPreview timeline={timeline.data} nowUtc={data.now_utc} horizonHours={6} />
+        <Widget title="Exports" icon="📤" tone="savings" size="medium"
+                action={<RefreshAction onRefresh={() => { void attribution.refresh(); void report.refresh(); }} loading={attribution.loading || report.loading} />}>
+          <ExportsWidget now={data} yesterday={attribution.data} report={report.data} monthly={monthly.data} />
         </Widget>
 
-        <Widget title="Efficiency" icon="🎯" tone="plan" size="medium">
-          <EfficiencyWidget metrics={metrics.data} loading={metrics.loading} />
-        </Widget>
-
-        <Widget title="Coming up · next 24h" icon="📌" tone="coming" size="large">
-          <ComingUp
-            agile={agile.data}
-            agileTomorrow={agileTomorrow.data}
-            weather={weather.data}
-            cheapP={data.thresholds?.cheap_p ?? 12}
-            peakP={data.thresholds?.peak_p ?? 28}
-            nowUtc={data.now_utc}
-            horizonHours={24}
-          />
+        <Widget title="Lifetime" icon="🏆" tone="savings" size="medium"
+                badge={monthly.data.length > 0 ? `${monthly.data.length} mo on Agile` : undefined}>
+          <LifetimeWidget monthly={monthly.data} monthlyLoading={monthly.loading} />
         </Widget>
       </div>
     </div>

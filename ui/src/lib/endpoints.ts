@@ -18,6 +18,7 @@ import type {
   MetricsResponse,
   DaikinDevice,
   ApiQuotaResponse,
+  TariffDashboardResponse,
 } from "./types";
 
 /* ----- Real-time / cockpit ----- */
@@ -59,6 +60,11 @@ export const getEnergyMonthly = (month: string) =>
   getJson<MonthlyEnergy>(`/energy/monthly?month=${encodeURIComponent(month)}`);
 export const getAttributionDay = (date?: string) =>
   getJson<AttributionDay>(date ? `/attribution/day?date=${encodeURIComponent(date)}` : "/attribution/day");
+
+// POST /tariffs/dashboard — Octopus-tariff comparison engine, includes
+// standing charges + export earnings in the per-tariff costs.
+export const getTariffDashboard = (months_back = 1, granularity: "daily" | "weekly" | "monthly" = "monthly", max_tariffs = 8) =>
+  postJson<TariffDashboardResponse>("/tariffs/dashboard", { months_back, granularity, max_tariffs });
 
 /* ----- Settings ----- */
 
