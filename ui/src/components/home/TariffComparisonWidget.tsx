@@ -96,7 +96,10 @@ export function TariffComparisonWidget({ dashboard, dashboardLoading, metrics }:
           <span class="tcomp-cell tcomp-cell-delta">vs now</span>
         </div>
         {rows.slice(0, 8).map((r) => (
-          <TariffRow key={r.product_code} row={r} isBg={r.product_code === "BG-FIX-V58"} />
+          <TariffRow key={r.product_code} row={r}
+                     isBg={r.product_code === "BG-FIX-V58"}
+                     currentTotalP={currentRow?.total_pence ?? null}
+                     currentAnnualPounds={currentRow?.annual_pounds ?? null} />
         ))}
       </div>
 
@@ -110,12 +113,26 @@ export function TariffComparisonWidget({ dashboard, dashboardLoading, metrics }:
   );
 }
 
-function TariffRow({ row, isBg }: { row: TariffTotalRow; isBg: boolean }) {
+function TariffRow({ row, isBg, currentTotalP, currentAnnualPounds }: {
+  row: TariffTotalRow; isBg: boolean;
+  currentTotalP: number | null; currentAnnualPounds: number | null;
+}) {
   const cls = `tcomp-row${row.is_current ? " tcomp-row--current" : ""}${isBg ? " tcomp-row--bg" : ""}`;
-  const delta = row.savings_vs_current_pounds;
-  const deltaTone = row.is_current ? "neutral" : delta > 0 ? "ok" : delta < 0 ? "bad" : "neutral";
   const periodPounds = row.total_pence / 100;
-  const tooltip = `${row.unit_rate_pence > 0 ? `${row.unit_rate_pence.toFixed(1)}p/kWh · ` : ""}${row.standing_per_day.toFixed(0)}p/day standing${row.is_current ? " · your current tariff" : isBg ? " · computed from your usage × configured fixed rate" : ""}`;
+  // The backend's `savings_vs_current_pounds` is ANNUALISED for Octopus
+  // rows (derived from annual_pounds), while the BG row I compute client-
+  // side from real-usage replay returns a period-aligned figure — mixing
+  // them made the table delta column read up to 12× too big for some
+  // tariffs and correct for others. Both deltas are now computed here
+  // from period vs period and annual vs annual, consistently.
+  const periodDelta = currentTotalP != null
+    ? (currentTotalP - row.total_pence) / 100
+    : 0;
+  const annualDelta = currentAnnualPounds != null
+    ? currentAnnualPounds - row.annual_pounds
+    : 0;
+  const deltaTone = row.is_current ? "neutral" : periodDelta > 0 ? "ok" : periodDelta < 0 ? "bad" : "neutral";
+  const tooltip = `${row.unit_rate_pence > 0 ? `${row.unit_rate_pence.toFixed(1)}p/kWh · ` : ""}${row.standing_per_day.toFixed(0)}p/day standing${row.is_current ? " · your current tariff" : isBg ? " · computed from your usage × configured fixed rate" : ""}${currentAnnualPounds != null && !row.is_current ? ` · annualised ≈ ${annualDelta >= 0 ? "+" : ""}£${annualDelta.toFixed(0)}/yr` : ""}`;
 
   return (
     <div class={cls} title={tooltip}>
@@ -126,7 +143,7 @@ function TariffRow({ row, isBg }: { row: TariffTotalRow; isBg: boolean }) {
       </span>
       <span class="tcomp-cell tcomp-cell-period">{gbp(periodPounds)}</span>
       <span class={`tcomp-cell tcomp-cell-delta tcomp-cell-delta--${deltaTone}`}>
-        {row.is_current ? "—" : gbpSigned(delta)}
+        {row.is_current ? "—" : gbpSigned(periodDelta)}
       </span>
     </div>
   );
