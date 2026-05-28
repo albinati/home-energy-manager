@@ -590,9 +590,16 @@ def build_mcp() -> FastMCP:
         ),
     )
     def get_daikin_status() -> dict[str, Any]:
+        # Route through daikin_service so MCP polls share the same cache +
+        # cold-start backoff that the REST /daikin/status uses. OpenClaw can
+        # poll this frequently when an agent is reasoning about the heat
+        # pump — without the cache it'd exhaust the 200/day Daikin quota
+        # independently of the UI (#423 follow-up).
+        from .daikin import service as daikin_service
         try:
             client = _daikin_client()
-            devices = client.get_devices()
+            cached = daikin_service.get_cached_devices(allow_refresh=False, actor="mcp")
+            devices = cached.devices
         except FileNotFoundError as e:
             logger.warning("get_daikin_status not configured: %s", e)
             return {"ok": False, "error": f"Daikin not configured: {e}"}
@@ -602,8 +609,17 @@ def build_mcp() -> FastMCP:
         except (TimeoutError, OSError) as e:
             logger.warning("get_daikin_status network error: %s", e)
             return {"ok": False, "error": f"Daikin unreachable: {e}"}
+        if not devices:
+            return {
+                "ok": False,
+                "error": (
+                    "Daikin cache is cold and the daily API quota is "
+                    "exhausted — try again after midnight UTC. "
+                    f"Cache source: {cached.source}, stale: {cached.stale}."
+                ),
+            }
         payload = [_device_status_dict(client, d) for d in devices]
-        return {"ok": True, "devices": payload}
+        return {"ok": True, "devices": payload, "cache_source": cached.source, "stale": cached.stale}
 
     @mcp.tool(
         name="set_daikin_power",
