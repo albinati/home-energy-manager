@@ -334,6 +334,11 @@ async def api_v1_metrics():
     daily = pnl.compute_daily_pnl(today)
     weekly = pnl.compute_weekly_pnl(today)
     monthly = pnl.compute_monthly_pnl(today)
+    # Used by the UI to soften the "Arbitrage efficiency"/"Slippage" rows
+    # when imports are tiny — a self-use day with 1 kWh import vs a 25 kWh
+    # winter import day demand very different interpretations of those KPIs.
+    today_import_kwh = float(daily.get("import_kwh") or 0.0)
+    today_export_kwh = float(daily.get("export_kwh") or 0.0)
     tgt = db.get_daily_target(today)
     soc = None
     try:
@@ -369,6 +374,8 @@ async def api_v1_metrics():
         "today_strategy": (tgt or {}).get("strategy_summary"),
         "cheap_threshold_pence": (tgt or {}).get("cheap_threshold"),
         "peak_threshold_pence": (tgt or {}).get("peak_threshold"),
+        "today_import_kwh": today_import_kwh,
+        "today_export_kwh": today_export_kwh,
         # Fixed-tariff (BG Fixed v58 etc.) config for UI tariff comparison —
         # lets the UI compute a real-usage replay against the configured
         # fixed-tariff rates without round-tripping through the engine.

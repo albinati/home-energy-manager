@@ -10,9 +10,38 @@
   border-left: 3px solid var(--border-strong);
   border-radius: var(--radius-sm);
 }
-.eff-row--ok   { border-left-color: var(--ok); }
-.eff-row--warn { border-left-color: var(--warn); }
-.eff-row--bad  { border-left-color: var(--bad); }
+.eff-row--ok      { border-left-color: var(--ok); }
+.eff-row--warn    { border-left-color: var(--warn); }
+.eff-row--bad     { border-left-color: var(--bad); }
+.eff-row--neutral { border-left-color: var(--text-mute); opacity: 0.78; }
+
+/* Self-use day banner — fronts the import-dependent KPIs so a 1-kWh
+ * import day reads as "good" rather than "everything is red". */
+.eff-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--pv) 12%, var(--bg));
+  border: 1px solid color-mix(in srgb, var(--pv) 35%, transparent);
+}
+.eff-banner-icon {
+  font-size: 1.4rem;
+  line-height: 1;
+  color: var(--pv);
+}
+.eff-banner-title {
+  font-size: var(--font-sm);
+  font-weight: 700;
+  color: var(--text);
+}
+.eff-banner-sub {
+  font-size: var(--font-xs);
+  color: var(--text-dim);
+  margin-top: 2px;
+  line-height: 1.4;
+}
 
 .eff-row-top {
   display: flex;
@@ -43,15 +72,17 @@
   font-size: var(--font-xs);
   font-weight: 500;
 }
-.eff-row-benchmark--ok   { color: var(--ok); }
-.eff-row-benchmark--warn { color: var(--warn); }
-.eff-row-benchmark--bad  { color: var(--bad); }
+.eff-row-benchmark--ok      { color: var(--ok); }
+.eff-row-benchmark--warn    { color: var(--warn); }
+.eff-row-benchmark--bad     { color: var(--bad); }
+.eff-row-benchmark--neutral { color: var(--text-mute); }
 .eff-row-dot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
   flex-shrink: 0;
 }
-.eff-row-dot--ok   { background: var(--ok); }
-.eff-row-dot--warn { background: var(--warn); }
-.eff-row-dot--bad  { background: var(--bad); }
+.eff-row-dot--ok      { background: var(--ok); }
+.eff-row-dot--warn    { background: var(--warn); }
+.eff-row-dot--bad     { background: var(--bad); }
+.eff-row-dot--neutral { background: var(--text-mute); }

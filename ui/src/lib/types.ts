@@ -482,6 +482,11 @@ export interface MetricsResponse {
   today_strategy?: string;
   cheap_threshold_pence?: number;
   peak_threshold_pence?: number;
+  // Used by the Efficiency widget to soften the noisy KPIs when imports
+  // are tiny (self-use day — VWAP / arbitrage% become uninformative
+  // below ~3 kWh).
+  today_import_kwh?: number;
+  today_export_kwh?: number;
   // FIXED_TARIFF_* from env — empty/0 when the household hasn't configured
   // a "previous fixed contract" comparison. Used by TariffComparison to
   // replay BG Fixed v58 (etc.) against the real-usage block.
