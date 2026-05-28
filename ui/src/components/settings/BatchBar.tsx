@@ -1,3 +1,4 @@
+import { Icon } from "../common/Icon";
 import "./settings.css";
 
 type BatchStage = "edit" | "simulate" | "apply";
@@ -23,9 +24,9 @@ export function BatchBar({ pendingCount, busy, stage, onSimulate, onDiscardAll }
         <div class="batch-stages" aria-label="Apply flow">
           <Stage n={1} label="Edit" sub={pendingCount === 0 ? "no changes" : `${pendingCount} change${pendingCount === 1 ? "" : "s"}`}
                  active={stage === "edit"} done={stage !== "edit"} />
-          <span class="batch-stages-arrow">→</span>
+          <span class="batch-stages-arrow"><Icon name="chevron" size={12} /></span>
           <Stage n={2} label="Simulate" sub="dry-run the diff" active={stage === "simulate"} done={stage === "apply"} />
-          <span class="batch-stages-arrow">→</span>
+          <span class="batch-stages-arrow"><Icon name="chevron" size={12} /></span>
           <Stage n={3} label="Apply" sub="write to runtime_settings" active={stage === "apply"} done={false} />
         </div>
         <div class="batch-bar-actions">
@@ -33,7 +34,7 @@ export function BatchBar({ pendingCount, busy, stage, onSimulate, onDiscardAll }
             Discard all
           </button>
           <button type="button" class="btn btn--primary" onClick={onSimulate} disabled={busy || pendingCount === 0}>
-            {busy ? "Working…" : "Simulate →"}
+            {busy ? "Working…" : "Simulate"}
           </button>
         </div>
       </div>
@@ -44,7 +45,7 @@ export function BatchBar({ pendingCount, busy, stage, onSimulate, onDiscardAll }
 function Stage({ n, label, sub, active, done }: { n: number; label: string; sub: string; active: boolean; done: boolean }) {
   return (
     <div class={`batch-stage${active ? " is-active" : ""}${done ? " is-done" : ""}`}>
-      <div class="batch-stage-num">{done ? "✓" : n}</div>
+      <div class="batch-stage-num">{done ? <Icon name="check" size={12} /> : n}</div>
       <div class="batch-stage-text">
         <div class="batch-stage-label">{label}</div>
         <div class="batch-stage-sub">{sub}</div>

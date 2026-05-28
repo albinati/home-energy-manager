@@ -8,6 +8,7 @@ import {
 import { toast } from "../lib/toast";
 import { HemApiError } from "../lib/api";
 import { Spinner } from "../components/common/Spinner";
+import { Icon } from "../components/common/Icon";
 import { Modal } from "../components/common/Modal";
 import { ModeSwitcher } from "../components/settings/ModeSwitcher";
 import { SettingField } from "../components/settings/SettingField";
@@ -245,7 +246,7 @@ export default function Settings() {
                     </td>
                     <td>
                       <code class="from">{String(d.current)}</code>
-                      <span class="arrow">→</span>
+                      <span class="arrow"><Icon name="chevron" size={12} /></span>
                       <code class="to">{String(d.proposed)}</code>
                       {d.cron_reload && (
                         <div class="muted">Hot-reloads scheduler</div>

@@ -1,6 +1,7 @@
 import type { SettingSpec } from "../../lib/types";
 import { NumberInput, Select, Toggle, TextInput, SliderInput } from "../common/Inputs";
 import { Pill } from "../common/Pill";
+import { Icon } from "../common/Icon";
 import { labelFor, unitFor } from "./groups";
 import "./settings.css";
 
@@ -135,8 +136,9 @@ export function SettingField({ spec, pending, onChange, onRevert }: SettingField
             class="setting-field-revert"
             onClick={() => onRevert(spec.key)}
             title="Discard this pending change"
+            aria-label="Revert"
           >
-            ↺
+            <Icon name="revert" size={16} />
           </button>
         )}
       </div>
