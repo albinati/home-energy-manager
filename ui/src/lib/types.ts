@@ -151,22 +151,32 @@ export interface WeatherResponse {
   };
 }
 
+// Real /execution/today shape — per 30-min slot with rich realised data:
+// price paid, energy split (consumption / daikin / residual), realised cost
+// vs SVT shadow, Daikin sensor temps.
 export interface ExecutionSlot {
-  slot_time_utc: string;
-  soc_percent: number | null;
-  consumption_kwh: number | null;
+  slot_utc: string;
+  slot_kind?: string;
+  agile_p?: number | null;
+  consumption_kwh?: number | null;
+  daikin_kwh_est?: number | null;
+  residual_kwh?: number | null;
+  cost_realised_p?: number | null;
+  cost_daikin_p?: number | null;
+  cost_residual_p?: number | null;
+  cost_svt_p?: number | null;
+  delta_vs_svt_p?: number | null;
+  soc_percent?: number | null;
   fox_mode?: string | null;
-  daikin_tank_temp?: number | null;
-  daikin_room_temp?: number | null;
-  pv_kwh?: number | null;
-  import_kwh?: number | null;
-  export_kwh?: number | null;
-  outdoor_temp_c?: number | null;
+  daikin_outdoor_c?: number | null;
+  daikin_lwt_c?: number | null;
 }
 
 export interface ExecutionTodayResponse {
   date: string;
+  data_quality_note?: string;
   slots: ExecutionSlot[];
+  totals?: Record<string, number>;
 }
 
 // /agile/today response — both directions, with a current-slot price.
@@ -236,35 +246,47 @@ export interface AttributionDay {
   };
 }
 
-/* ----- /energy/report + /energy/monthly + /tariffs/dashboard ----- */
-
+/* ----- /energy/report (day or month) ----- */
+// Real shape — flat energy + cost objects, no nested pnl. /energy/report
+// defaults to period=month; pass period=day for a single day rollup.
 export interface EnergyReport {
-  period?: string;
-  pnl?: {
-    realised_cost_gbp?: number;
-    realised_net_cost_gbp?: number;
-    realised_import_gbp?: number;
-    export_revenue_gbp?: number;
-    standing_charge_gbp?: number;
-    svt_shadow_gbp?: number;
-    fixed_shadow_gbp?: number;
-    fixed_tariff_shadow_gbp?: number;
-    delta_vs_svt_gbp?: number;
-    delta_vs_fixed_gbp?: number;
-    delta_vs_fixed_tariff_gbp?: number;
-    delta_vs_svt_real_gbp?: number;
-    delta_vs_fixed_real_gbp?: number;
-    delta_vs_fixed_tariff_real_gbp?: number;
+  period?: "day" | "month" | string;
+  period_label?: string;
+  energy?: {
+    year?: number;
+    month?: number;
+    month_str?: string;
+    import_kwh: number;
+    export_kwh: number;
+    solar_kwh: number;
+    load_kwh: number;
+    charge_kwh: number;
+    discharge_kwh: number;
   };
-  tariff_comparison?: {
-    agile?: number;
-    go?: number;
-    fixed?: number;
+  cost?: {
+    import_cost_pence: number;
+    export_earnings_pence: number;
+    standing_charge_pence: number;
+    net_cost_pence: number;
+    net_cost_pounds: number;
+    import_cost_pounds: number;
+    export_earnings_pounds: number;
   };
-  heating?: {
-    kwh_for_showers?: number;
-    kwh_for_heating?: number;
-  };
+  heating_estimate_kwh?: number | null;
+  heating_estimate_cost_pence?: number | null;
+  equivalent_gas_cost_pence?: number | null;
+  equivalent_gas_cost_pounds?: number | null;
+  gas_comparison_ahead_pounds?: number | null;
+  chart_data?: Array<{
+    date: string;
+    import_kwh: number;
+    export_kwh: number;
+    solar_kwh: number;
+    load_kwh: number;
+    charge_kwh: number;
+    discharge_kwh: number;
+  }>;
+  heating_analytics?: Record<string, unknown>;
 }
 
 // Actual /energy/monthly response shape. The endpoint nests energy + cost.

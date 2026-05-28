@@ -76,13 +76,13 @@
   --border-strong: #94a3b8;
 
   --text: #0f172a;
-  --text-dim: #334155;
-  --text-mute: #64748b;
+  --text-dim: #1e293b;
+  --text-mute: #475569;
 
-  --accent: #2563eb;
+  --accent: #1d4ed8;
   --ok: #047857;
-  --warn: #b45309;
-  --bad: #b91c1c;
+  --warn: #92400e;
+  --bad: #991b1b;
 
   --neg-price: #2563eb;
   --cheap: #059669;

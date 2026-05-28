@@ -16,6 +16,7 @@ import {
 } from "../lib/endpoints";
 import { Widget } from "../components/common/Widget";
 import { Spinner } from "../components/common/Spinner";
+import { RefreshAction } from "../components/common/RefreshAction";
 import { LivePowerWidget } from "../components/cockpit/LivePowerWidget";
 import { TariffWidget } from "../components/cockpit/TariffWidget";
 import { ComingUp } from "../components/home/ComingUp";
@@ -103,11 +104,13 @@ export default function Landing() {
           <LivePowerWidget state={s} timeline={timeline.data} execution={execution.data} />
         </Widget>
 
-        <Widget title="Today's bill" icon="💰" tone="savings" size="medium">
-          <TodayBillWidget report={report.data} reportLoading={report.loading} metrics={metrics.data} />
+        <Widget title="Today's bill" icon="💰" tone="savings" size="medium"
+                action={<RefreshAction onRefresh={report.refresh} loading={report.loading} />}>
+          <TodayBillWidget report={report.data} reportLoading={report.loading} metrics={metrics.data} execution={execution.data} />
         </Widget>
 
-        <Widget title="Exports" icon="📤" tone="savings" size="medium">
+        <Widget title="Exports" icon="📤" tone="savings" size="medium"
+                action={<RefreshAction onRefresh={() => { void attribution.refresh(); void report.refresh(); }} loading={attribution.loading || report.loading} />}>
           <ExportsWidget now={data} yesterday={attribution.data} report={report.data} monthly={monthly.data} />
         </Widget>
 
@@ -119,8 +122,9 @@ export default function Landing() {
           <TariffWidget agile={agile.data} now={data} metrics={metrics.data} />
         </Widget>
 
-        <Widget title="Heating" icon="♨" tone="thermal" size="medium">
-          <HeatingWidget state={s} daikin={daikin.data} daikinQuota={daikinQuota.data} report={report.data} weather={weather.data} />
+        <Widget title="Heating" icon="♨" tone="thermal" size="medium"
+                action={<RefreshAction onRefresh={() => { void daikin.refresh(); void daikinQuota.refresh(); }} loading={daikin.loading} title="Re-fetch Daikin (cached server-side ~30min)" />}>
+          <HeatingWidget state={s} daikin={daikin.data} daikinQuota={daikinQuota.data} report={report.data} weather={weather.data} execution={execution.data} />
         </Widget>
 
         <Widget title="Next 6 hours" icon="📅" tone="plan" size="medium">

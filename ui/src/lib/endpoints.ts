@@ -46,8 +46,15 @@ export const getPvCalibration = () =>
 
 /* ----- Landing / story ----- */
 
-export const getEnergyReport = (date?: string) =>
-  getJson<EnergyReport>(date ? `/energy/report?date=${encodeURIComponent(date)}` : "/energy/report");
+// /energy/report defaults to period=month on the backend. Pass period="day"
+// to get a single-day rollup — same shape, just covering one day. Critical
+// for "Today's bill" since we want today, not the whole month.
+export const getEnergyReport = (date?: string, period: "day" | "month" = "day") =>
+  getJson<EnergyReport>(
+    date
+      ? `/energy/report?date=${encodeURIComponent(date)}&period=${period}`
+      : `/energy/report?period=${period}`,
+  );
 export const getEnergyMonthly = (month: string) =>
   getJson<MonthlyEnergy>(`/energy/monthly?month=${encodeURIComponent(month)}`);
 export const getAttributionDay = (date?: string) =>

@@ -9,27 +9,27 @@ interface ExportsWidgetProps {
   monthly: MonthlyEnergy[];
 }
 
-// Now backed by real revenue figures (not estimates):
-//   - Current export rate from /cockpit/now (dynamic Outgoing Agile)
-//   - Live exporting kW if currently exporting
-//   - Yesterday total kWh + actual revenue from /energy/report.pnl.export_revenue_gbp
-//   - This month total kWh + revenue from /energy/monthly sum
+// Real revenue numbers (not estimates) using the corrected EnergyReport
+// shape:
+//   /cockpit/now.current_slot.price_export_p — current Outgoing Agile rate
+//   /attribution/day.export_kwh                — yesterday's kWh exported
+//   /energy/monthly.cost.export_earnings_pounds — this month's actual £
+// Yesterday-specific revenue isn't in /energy/report?period=day (it covers
+// today, not yesterday), so we fall back to kWh × current rate as estimate.
 export function ExportsWidget({ now, yesterday, report, monthly }: ExportsWidgetProps) {
   const grid = now.state.grid_kw;
   const exportingNow = grid < -0.05;
   const liveRate = now.current_slot.price_export_p;
   const exportingKw = exportingNow ? -grid : 0;
 
-  // Yesterday: prefer real revenue from /energy/report (if today's report
-  // returns yesterday-window data or if we extend the type). Otherwise fall
-  // back to kWh × current rate estimate.
+  // Yesterday: report is for TODAY (period=day) so it doesn't carry
+  // yesterday's revenue. Estimate kWh × current rate; mark with ≈.
   const ydayKwh = yesterday?.export_kwh ?? null;
-  const ydayRevenueReal = report?.pnl?.export_revenue_gbp ?? null;
-  const ydayEarn = ydayRevenueReal != null
-    ? ydayRevenueReal
-    : ydayKwh != null && liveRate != null
-      ? (ydayKwh * liveRate) / 100
-      : null;
+  const ydayRevenueReal: number | null = null;
+  void report; // kept for future per-day report wiring
+  const ydayEarn = ydayKwh != null && liveRate != null
+    ? (ydayKwh * liveRate) / 100
+    : null;
 
   // This month: real export_kwh + export_earnings_pounds from the latest
   // monthly aggregate.

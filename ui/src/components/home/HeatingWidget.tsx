@@ -1,4 +1,12 @@
-import type { CockpitState, DaikinDevice, ApiQuotaResponse, EnergyReport, WeatherResponse } from "../../lib/types";
+import type {
+  CockpitState,
+  DaikinDevice,
+  ApiQuotaResponse,
+  EnergyReport,
+  WeatherResponse,
+  ExecutionTodayResponse,
+  ExecutionSlot,
+} from "../../lib/types";
 import { tempC, kwh, relTime } from "../../lib/format";
 import { Pill } from "../common/Pill";
 import "./heating.css";
@@ -9,12 +17,14 @@ interface HeatingWidgetProps {
   daikinQuota: ApiQuotaResponse | null;
   report: EnergyReport | null;
   weather: WeatherResponse | null;
+  execution: ExecutionTodayResponse | null;
 }
 
-// Heating-focused panel: tank (current + target + on/off), outdoor temp
-// (from Daikin sensor), LWT, mode pill, today's DHW vs space heating split,
-// Daikin daily quota indicator + cache freshness.
-export function HeatingWidget({ state, daikin, daikinQuota, report, weather }: HeatingWidgetProps) {
+// Tank / outdoor / LWT + Daikin mode + cache freshness + quota.
+// Outdoor temp + LWT now prefer /execution/today (logged Daikin readings,
+// no live API call) over the cached /daikin/status — same data freshness,
+// zero quota cost.
+export function HeatingWidget({ state, daikin, daikinQuota, report, weather, execution }: HeatingWidgetProps) {
   const dev = daikin && daikin.length > 0 ? daikin[0] : null;
   const mode = (state.daikin_mode || dev?.mode || "").toLowerCase();
   const isHeating = mode.includes("heat");
@@ -24,14 +34,22 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather }: H
   const tankTemp = state.tank_c ?? dev?.tank_temp ?? null;
   const tankTarget = dev?.tank_target ?? null;
   const tankPower = dev?.tank_power ?? null;
-  const lwt = state.lwt_c ?? dev?.lwt ?? null;
 
-  // Outdoor: prefer Daikin's sensor (most accurate microclimate), fall back
-  // to /weather's daikin echo, then to /weather's current forecast slot.
-  let outdoorTemp = dev?.outdoor_temp ?? weather?.daikin?.outdoor_temp ?? null;
-  let outdoorSource: "daikin" | "openmeteo" = "daikin";
+  // LWT: latest execution slot first, then live cockpit state.
+  const lwtFromExec = latestExecValue(execution, (s) => s.daikin_lwt_c);
+  const lwt = lwtFromExec ?? state.lwt_c ?? dev?.lwt ?? null;
+
+  // Outdoor: 1) execution_today logged Daikin sensor (fresh, free)
+  //          2) cached Daikin device sensor
+  //          3) Daikin echo in /weather
+  //          4) Open-Meteo forecast slot closest to now
+  let outdoorTemp = latestExecValue(execution, (s) => s.daikin_outdoor_c);
+  let outdoorSource: "execution" | "daikin" | "openmeteo" = "execution";
+  if (outdoorTemp == null) {
+    outdoorTemp = dev?.outdoor_temp ?? weather?.daikin?.outdoor_temp ?? null;
+    outdoorSource = "daikin";
+  }
   if (outdoorTemp == null && weather?.forecast && weather.forecast.length > 0) {
-    // Find the forecast slot closest to now
     const nowTs = Date.now();
     let closest = weather.forecast[0];
     let closestDist = Math.abs(Date.parse(closest.time) - nowTs);
@@ -43,8 +61,9 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather }: H
     outdoorSource = "openmeteo";
   }
 
-  const dhwKwh = report?.heating?.kwh_for_showers ?? null;
-  const spaceKwh = report?.heating?.kwh_for_heating ?? null;
+  // /energy/report?period=day doesn't carry a DHW vs space heating split —
+  // only a single heating_estimate_kwh total. Show that when present.
+  const totalHeatingKwh = report?.heating_estimate_kwh ?? null;
 
   const quotaUsed = daikinQuota?.quota_used_24h ?? null;
   const quotaBudget = daikinQuota?.daily_budget ?? null;
@@ -53,7 +72,6 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather }: H
     : null;
   const quotaTone = quotaPct == null ? "neutral" : quotaPct > 85 ? "bad" : quotaPct > 60 ? "warn" : "ok";
 
-  // Cache freshness — when did we last refresh Daikin from the cloud?
   const cacheAge = daikinQuota?.cache_age_seconds;
   const lastRefresh = daikinQuota?.last_refresh_at_utc;
   const freshLabel = lastRefresh ? relTime(lastRefresh) :
@@ -105,7 +123,11 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather }: H
           <span class="heating-row-icon">🌡</span>
           <div class="heating-row-body">
             <div class="heating-row-label">Outdoor</div>
-            <div class="heating-row-sub">{outdoorSource === "daikin" ? "Daikin sensor" : "Open-Meteo forecast"}</div>
+            <div class="heating-row-sub">{
+              outdoorSource === "execution" ? "Daikin sensor (logged)" :
+              outdoorSource === "daikin" ? "Daikin sensor (live)" :
+              "Open-Meteo forecast"
+            }</div>
           </div>
           <span class="heating-row-temp">{tempC(outdoorTemp, 0)}</span>
         </div>
@@ -120,23 +142,31 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather }: H
         </div>
       </div>
 
-      {(dhwKwh != null || spaceKwh != null) && (
+      {totalHeatingKwh != null && (
         <div class="heating-split">
           <div class="heating-split-label">Today's heating energy</div>
           <div class="heating-split-row">
             <div class="heating-split-item">
               <span class="heating-split-dot heating-split-dot--dhw" />
-              <span class="heating-split-name">DHW (tank)</span>
-              <span class="heating-split-value">{dhwKwh != null ? kwh(dhwKwh) : "—"}</span>
-            </div>
-            <div class="heating-split-item">
-              <span class="heating-split-dot heating-split-dot--space" />
-              <span class="heating-split-name">Space</span>
-              <span class="heating-split-value">{spaceKwh != null ? kwh(spaceKwh) : "—"}</span>
+              <span class="heating-split-name">Total estimate</span>
+              <span class="heating-split-value">{kwh(totalHeatingKwh)}</span>
             </div>
           </div>
         </div>
       )}
     </div>
   );
+}
+
+function latestExecValue(
+  exec: ExecutionTodayResponse | null,
+  pick: (s: ExecutionSlot) => number | null | undefined,
+): number | null {
+  if (!exec?.slots || exec.slots.length === 0) return null;
+  const sorted = exec.slots.slice().sort((a, b) => (b.slot_utc ?? "").localeCompare(a.slot_utc ?? ""));
+  for (const s of sorted) {
+    const v = pick(s);
+    if (v != null && Number.isFinite(v)) return v;
+  }
+  return null;
 }
