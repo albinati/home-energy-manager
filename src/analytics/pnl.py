@@ -231,18 +231,23 @@ def compute_daily_pnl(day: date) -> dict[str, Any]:
 
 
 def compute_vwap(day: date) -> float | None:
-    a, b = _day_bounds(day)
-    rows = db.get_execution_logs(from_ts=a, to_ts=b, limit=5000)
-    num = 0.0
-    den = 0.0
-    for r in rows:
-        kwh = float(r.get("consumption_kwh") or 0)
-        p = r.get("agile_price_pence")
-        if p is None or kwh <= 0:
-            continue
-        num += kwh * float(p)
-        den += kwh
-    return round(num / den, 4) if den > 0 else None
+    """Realised import VWAP — the average p/kWh we actually paid for grid
+    imports today.
+
+    Uses MEASURED grid import (``pv_realtime_history.grid_import_kw`` →
+    half-hour buckets) weighted by Agile rates, NOT total household
+    consumption. The LP's ``target_vwap`` is also import-only; matching
+    the weighting basis makes the two directly comparable.
+
+    Prior bug: this used ``execution_log.consumption_kwh`` (total load),
+    which conflated battery-discharge + solar self-use with grid spend.
+    On a heavy-self-use day with 1 kWh of import, that produced a notional
+    ~17 p/kWh that looked like a 19 p/kWh slippage against a -2 p target.
+    """
+    imp_pence, imp_kwh = _realised_import_pence(day)
+    if imp_kwh <= 0:
+        return None
+    return round(imp_pence / imp_kwh, 4)
 
 
 def compute_slippage(day: date) -> float | None:
@@ -255,37 +260,90 @@ def compute_slippage(day: date) -> float | None:
     return round(vwap - float(tgt["target_vwap"]), 4)
 
 
-def compute_arbitrage_efficiency(day: date) -> float | None:
+def _slot_anchor_iso(timestamp_iso: str) -> str | None:
+    """Floor a heartbeat-tick ISO timestamp to its 30-minute slot anchor,
+    matching the key format used by ``db.half_hourly_grid_*_kwh_for_day``."""
+    if not timestamp_iso:
+        return None
+    s = timestamp_iso.replace("Z", "+00:00")
+    try:
+        d = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=UTC)
+    d = d.astimezone(UTC).replace(minute=(d.minute // 30) * 30, second=0, microsecond=0)
+    return d.isoformat().replace("+00:00", "Z")
+
+
+def _slot_index_by_anchor(day: date) -> tuple[dict[str, float], dict[str, str]]:
+    """Walk execution_log for the day, indexing price + slot_kind by 30-min
+    anchor (matches the import-bucket keying)."""
     a, b = _day_bounds(day)
     rows = db.get_execution_logs(from_ts=a, to_ts=b, limit=5000)
-    prices = [float(r["agile_price_pence"]) for r in rows if r.get("agile_price_pence") is not None]
+    price_by: dict[str, float] = {}
+    kind_by: dict[str, str] = {}
+    for r in rows:
+        anchor = _slot_anchor_iso(r.get("timestamp") or "")
+        if not anchor:
+            continue
+        p = r.get("agile_price_pence")
+        if p is not None:
+            price_by.setdefault(anchor, float(p))
+        k = (r.get("slot_kind") or "").lower()
+        if k:
+            kind_by.setdefault(anchor, k)
+    return price_by, kind_by
+
+
+def compute_arbitrage_efficiency(day: date) -> float | None:
+    """Percent of ACTUAL GRID IMPORT that landed in today's cheap quartile.
+
+    Same weighting basis as ``compute_vwap`` — measured grid import per
+    slot, not total consumption. Prior bug treated self-use as if it were
+    grid spend, which inflated the "cheap-quartile share" when most load
+    was actually covered by battery/solar (the cheap-slot question doesn't
+    apply to non-imported kWh).
+    """
+    bucket_kwh = db.half_hourly_grid_import_kwh_for_day(day)
+    if not bucket_kwh:
+        return None
+    price_by, _ = _slot_index_by_anchor(day)
+    prices = sorted(price_by.values())
     if len(prices) < 4:
         return None
-    q1 = sorted(prices)[max(0, len(prices) // 4 - 1)]
+    q1 = prices[max(0, len(prices) // 4 - 1)]
     imp = 0.0
     cheap = 0.0
-    for r in rows:
-        kwh = float(r.get("consumption_kwh") or 0)
-        p = r.get("agile_price_pence")
+    for slot_iso, kwh in bucket_kwh.items():
+        p = price_by.get(slot_iso)
         if p is None or kwh <= 0:
             continue
         imp += kwh
-        if float(p) <= q1:
+        if p <= q1:
             cheap += kwh
     return round(100.0 * cheap / imp, 2) if imp > 0 else None
 
 
 def compute_peak_ratio(day: date) -> float | None:
-    a, b = _day_bounds(day)
-    rows = db.get_execution_logs(from_ts=a, to_ts=b, limit=5000)
+    """Percent of ACTUAL GRID IMPORT that landed in peak slots.
+
+    Same weighting basis as ``compute_vwap``. Prior bug used total
+    consumption, which made the ratio meaningless on solar-heavy days
+    (all consumption coincides with daylight peaks but most of it was
+    self-use, not paid imports).
+    """
+    bucket_kwh = db.half_hourly_grid_import_kwh_for_day(day)
+    if not bucket_kwh:
+        return None
+    _, kind_by = _slot_index_by_anchor(day)
     tot = 0.0
     peak = 0.0
-    for r in rows:
-        kwh = float(r.get("consumption_kwh") or 0)
+    for slot_iso, kwh in bucket_kwh.items():
         if kwh <= 0:
             continue
         tot += kwh
-        if (r.get("slot_kind") or "").lower() == "peak":
+        if kind_by.get(slot_iso) == "peak":
             peak += kwh
     return round(100.0 * peak / tot, 2) if tot > 0 else None
 

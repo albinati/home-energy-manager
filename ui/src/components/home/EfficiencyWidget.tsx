@@ -35,8 +35,8 @@ export function EfficiencyWidget({ metrics, loading }: EfficiencyWidgetProps) {
       )}
       {peak != null && (
         <Row
-          label="Import during peak"
-          subLabel="% of today's import that landed in peak slots"
+          label="Imports in peak slots"
+          subLabel="% of measured grid import that landed in peak-price slots"
           value={pct(peak, 0)}
           benchmark={peak <= 15 ? "Great · ≤15% means LP avoided peak well" :
                      peak <= 30 ? "OK · 15–30% is typical" :
@@ -46,8 +46,8 @@ export function EfficiencyWidget({ metrics, loading }: EfficiencyWidgetProps) {
       )}
       {realisedVwap != null && targetVwap != null && slippage != null && (
         <Row
-          label="Realised vs target"
-          subLabel="what we paid vs the LP's ideal — lower realised is better"
+          label="Grid import VWAP vs LP target"
+          subLabel="average p/kWh paid for ACTUAL grid imports (excludes self-use) vs LP plan"
           value={`${pence(realisedVwap)} / ${pence(targetVwap)}`}
           benchmark={
             slippage <= 0
@@ -56,7 +56,7 @@ export function EfficiencyWidget({ metrics, loading }: EfficiencyWidgetProps) {
                 ? `Tight · ${slippage.toFixed(1)}p above target`
                 : slippage < 8
                   ? `OK · ${slippage.toFixed(1)}p above target`
-                  : `Wide · ${slippage.toFixed(1)}p above target (forecast drift?)`
+                  : `Wide · ${slippage.toFixed(1)}p above target — LP expected more cheap-slot imports`
           }
           tone={slippage <= 0 ? "ok" : slippage < 2 ? "ok" : slippage < 8 ? "warn" : "bad"}
         />
@@ -64,7 +64,7 @@ export function EfficiencyWidget({ metrics, loading }: EfficiencyWidgetProps) {
       {offPeak != null && (
         <Row
           label="Off-peak import share"
-          subLabel="% of today's import that came in cheap slots"
+          subLabel="% of measured grid import in cheap / standard slots"
           value={pct(offPeak, 0)}
           benchmark={offPeak >= 70 ? "Strong · ≥70% off-peak" :
                      offPeak >= 50 ? "OK · 50–70%" :
