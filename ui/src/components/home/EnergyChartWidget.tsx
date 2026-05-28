@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { getEnergyPeriod, getDaikinConsumption } from "../../lib/endpoints";
-import { makeChart, baseOption, chartTheme, type EChartsType } from "../../lib/charts";
+import { makeChart, baseOption, chartTheme, barGradient, areaGradient, type EChartsType } from "../../lib/charts";
+import { Icon } from "../common/Icon";
 import type {
   PeriodInsightsResponse,
   PeriodChartPoint,
@@ -158,6 +159,7 @@ export function EnergyChartWidget({ execution }: EnergyChartWidgetProps) {
   return (
     <div class="echart">
       <div class="echart-toolbar">
+        <span class="echart-id-icon"><Icon name={granularity === "day" ? "schedule" : "chart-bars"} size={18} /></span>
         <div class="echart-pills" role="tablist">
           {(["day", "week", "month", "year"] as Granularity[]).map((g) => (
             <button key={g}
@@ -173,15 +175,23 @@ export function EnergyChartWidget({ execution }: EnergyChartWidgetProps) {
         )}
       </div>
 
-      <div class="echart-host" ref={elRef} aria-label="Energy flow chart" />
+      {/* Host wrap — loading state overlays (position:absolute) so it never
+          displaces the chart, killing load-jump. */}
+      <div class="echart-host-wrap">
+        <div class="echart-host" ref={elRef} aria-label="Energy flow chart" />
+        {loading && <div class="echart-state">Loading…</div>}
+        {error && <div class="echart-state echart-state--err">{error}</div>}
+      </div>
 
-      {loading && <div class="echart-state">Loading…</div>}
-      {error && <div class="echart-state echart-state--err">{error}</div>}
       {granularity === "day" && !dayHasSlots && (
-        <div class="echart-flag">No execution data for today yet — switch to Week.</div>
+        <div class="echart-flag">
+          <span class="echart-flag-icon"><Icon name="schedule" size={14} /></span>
+          No execution data for today yet — switch to Week.
+        </div>
       )}
       {granularity === "day" && dayHasSlots && (
         <div class="echart-flag">
+          <span class="echart-flag-icon"><Icon name="schedule" size={14} /></span>
           Day view: Daikin <strong>{daikinSourceLabel}</strong> / Residual stacked,
           + <strong>realised grid cost</strong>. Per-slot solar / import / export
           are not yet captured — see #424.
@@ -308,59 +318,75 @@ function optionForPeriod(
       data: ["Solar", "Discharge", "Grid Import", "Charge", "Grid Export", "Load", "Daikin heating", "Daikin DHW"],
     },
     xAxis: { ...(base.xAxis as object), data: labels },
-    yAxis: [{ ...(base.yAxis as object), name: "kWh", nameTextStyle: { color: t.textDim, fontSize: 10 } }],
+    yAxis: [{ ...(base.yAxis as object), name: "kWh", nameTextStyle: { color: t.textMute, fontSize: 10 } }],
     series: [
-      seriesBar("Solar",       points.map((p) => round1(p.solar_kwh)),                t.pv,           "house"),
-      seriesBar("Discharge",   points.map((p) => round1(p.discharge_kwh)),            t.batt,         "house"),
-      seriesBar("Grid Import", points.map((p) => round1(p.import_kwh)),               t.importColor,  "house"),
-      seriesBar("Charge",      points.map((p) => -round1(p.charge_kwh)),              t.batt,         "out", 0.55),
-      seriesBar("Grid Export", points.map((p) => -round1(p.export_kwh)),              t.exportColor,  "out", 0.85),
+      {
+        ...seriesBar("Solar", points.map((p) => round1(p.solar_kwh)), t.pv, "house"),
+        // The single structural rule separating sources (above) from sinks (below).
+        markLine: {
+          silent: true, symbol: "none",
+          lineStyle: { color: t.border, width: 1, opacity: 0.5 },
+          data: [{ yAxis: 0 }], label: { show: false },
+        },
+      },
+      seriesBar("Discharge",   points.map((p) => round1(p.discharge_kwh)),  t.batt,        "house"),
+      seriesBar("Grid Import", points.map((p) => round1(p.import_kwh)),     t.importColor, "house"),
+      seriesBar("Charge",      points.map((p) => -round1(p.charge_kwh)),    t.batt,        "out", true),
+      seriesBar("Grid Export", points.map((p) => -round1(p.export_kwh)),    t.exportColor, "out", true),
       {
         name: "Load",
         type: "line",
         data: points.map((p) => round1(p.load_kwh)),
-        smooth: true,
-        symbol: "circle",
-        symbolSize: 5,
+        smooth: 0.4,
+        symbol: "none",
         z: 10,
-        lineStyle: { color: t.house, width: 2.5 },
-        itemStyle: { color: t.house, borderColor: t.bg, borderWidth: 1 },
+        lineStyle: { color: t.house, width: 2.5, cap: "round" },
+        areaStyle: { color: areaGradient(t.house, 0.28, 0.02) },
+        emphasis: { focus: "series" },
+        universalTransition: { enabled: true },
       },
+      // Daikin overlays — quiet secondary lines (dashed = heating, sparse
+      // dotted = DHW estimate). No fills; they ride above the stack.
       {
         name: "Daikin heating",
         type: "line",
         data: daikinHeatLine,
-        smooth: true,
-        symbol: "circle",
-        symbolSize: 4,
+        smooth: 0.3,
+        symbol: "none",
         z: 11,
-        lineStyle: { color: t.warn, width: 2, type: "dashed" },
-        itemStyle: { color: t.warn },
+        lineStyle: { color: t.warn, width: 1.5, type: [4, 4], opacity: 0.9, cap: "round" },
+        emphasis: { focus: "series" },
       },
       {
         name: "Daikin DHW",
         type: "line",
         data: daikinDhwLine,
-        smooth: true,
-        symbol: "circle",
-        symbolSize: 4,
+        smooth: 0.3,
+        symbol: "none",
         z: 11,
-        lineStyle: { color: t.pv, width: 2, type: "dotted", opacity: 0.85 },
-        itemStyle: { color: t.pv },
+        lineStyle: { color: t.pv, width: 1.5, type: [1, 5], opacity: 0.85, cap: "round" },
+        emphasis: { focus: "series" },
       },
     ],
   };
 }
 
-function seriesBar(name: string, data: number[], color: string, stack: string, opacity = 0.9) {
+function seriesBar(name: string, data: number[], color: string, stack: string, sink = false) {
+  // Rounded + gradient bars. Sources (above zero) round their top; sinks
+  // (below zero) round their bottom. Gradient fades top→bottom per domain.
   return {
     name,
     type: "bar",
     stack,
     data,
-    itemStyle: { color, opacity },
-    emphasis: { focus: "series" },
-    barCategoryGap: "20%",
+    itemStyle: {
+      color: barGradient(color, sink ? 0.55 : 0.95, sink ? 0.25 : 0.45),
+      borderRadius: sink ? [0, 0, 4, 4] : [4, 4, 0, 0],
+    },
+    emphasis: { focus: "series", itemStyle: { opacity: 1 } },
+    barCategoryGap: "38%",
+    universalTransition: { enabled: true },
+    animationDelay: (idx: number) => idx * 8,
   };
 }
 
@@ -429,6 +455,12 @@ function optionForDay(
   return {
     ...base,
     legend: { ...(base.legend as object), data: ["Daikin DHW", "Daikin heating", "Residual", "Realised grid cost"] },
+    // Quiet ghost note — per-slot solar/import/export genuinely unavailable
+    // (#424). A text annotation, NOT a fabricated series/markArea.
+    graphic: [{
+      type: "text", right: 28, top: 30,
+      style: { text: "per-slot solar · import · export — coming (#424)", fill: t.textMute, font: "600 11px system-ui", opacity: 0.55 },
+    }],
     xAxis: { ...(base.xAxis as object), data: labels },
     yAxis: [
       { ...(base.yAxis as object), name: "kWh",  position: "left" },
@@ -437,7 +469,7 @@ function optionForDay(
         name: "p",
         position: "right",
         splitLine: { show: false },
-        axisLabel: { color: t.textDim, fontSize: 10, formatter: "{value}p" },
+        axisLabel: { color: t.textMute, fontSize: 11, formatter: "{value}p" },
       },
     ],
     series: [
@@ -446,15 +478,16 @@ function optionForDay(
         type: "bar",
         stack: "load",
         data: dhwPerSlot,
-        itemStyle: { color: t.pv, opacity: 0.85 },
+        itemStyle: { color: barGradient(t.pv, 0.9, 0.5) },
         emphasis: { focus: "series" },
+        barCategoryGap: "40%",
       },
       {
         name: "Daikin heating",
         type: "bar",
         stack: "load",
         data: heatingPerSlot,
-        itemStyle: { color: t.warn, opacity: 0.9 },
+        itemStyle: { color: barGradient(t.warn, 0.9, 0.5) },
         emphasis: { focus: "series" },
       },
       {
@@ -462,7 +495,8 @@ function optionForDay(
         type: "bar",
         stack: "load",
         data: residualPerSlot,
-        itemStyle: { color: t.house, opacity: 0.7 },
+        // Top segment of the stack — rounds the crown so the bar reads as one.
+        itemStyle: { color: barGradient(t.house, 0.75, 0.4), borderRadius: [3, 3, 0, 0] },
         emphasis: { focus: "series" },
       },
       {
@@ -470,10 +504,11 @@ function optionForDay(
         type: "line",
         yAxisIndex: 1,
         data: slots.map((s) => s.cost_realised_p == null ? null : round2(s.cost_realised_p)),
-        smooth: true,
+        smooth: 0.4,
         symbol: "none",
-        lineStyle: { color: t.bad, width: 2 },
-        itemStyle: { color: t.bad },
+        z: 10,
+        lineStyle: { color: t.bad, width: 2, cap: "round" },
+        areaStyle: { color: areaGradient(t.bad, 0.10, 0.0) },
       },
     ],
   };

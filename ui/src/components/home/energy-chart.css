@@ -7,85 +7,109 @@
 .echart-toolbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: var(--space-3);
+}
+.echart-id-icon {
+  display: inline-flex;
+  color: var(--text-dim);
+  flex-shrink: 0;
 }
 
 .echart-pills {
   display: inline-flex;
-  gap: 4px;
-  padding: 2px;
-  border-radius: var(--radius-pill);
-  background: var(--bg);
-  border: 1px solid var(--border);
+  gap: var(--space-1);
 }
 .echart-pill {
+  position: relative;
   padding: 4px 12px;
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-sm);
   font-size: var(--font-sm);
   font-weight: 600;
   color: var(--text-dim);
   background: transparent;
   border: none;
   cursor: pointer;
-  transition: background 100ms, color 100ms;
+  transition: background 140ms ease, color 140ms ease;
 }
 .echart-pill:hover { color: var(--text); }
 .echart-pill.is-active {
   background: var(--bg-card-2);
   color: var(--text);
-  box-shadow: 0 1px 2px rgba(0,0,0,0.15);
+}
+/* Single interaction accent — a 2px underline on the active pill. */
+.echart-pill.is-active::after {
+  content: "";
+  position: absolute;
+  left: 12px; right: 12px; bottom: 1px;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 2px;
 }
 
 .echart-label {
-  font-size: var(--font-sm);
-  color: var(--text-dim);
+  margin-left: auto;
+  font-size: var(--font-xs);
+  font-weight: 500;
+  color: var(--text-mute);
   font-variant-numeric: tabular-nums;
 }
 
+/* Host wrap pre-sizes the chart; the loading state overlays it (absolute) so
+ * nothing reflows on load. */
+.echart-host-wrap {
+  position: relative;
+  min-height: 300px;
+}
 .echart-host {
   width: 100%;
-  height: 280px;
+  height: 300px;
 }
-
 .echart-state {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   font-size: var(--font-sm);
   color: var(--text-mute);
-  text-align: center;
-  padding: var(--space-3);
 }
 .echart-state--err { color: var(--bad); }
 
+/* #424 limitation note — quiet, not a warning. Schedule icon signals
+ * time-of-day / pending. Wording unchanged. */
 .echart-flag {
-  font-size: var(--font-xs);
-  color: var(--warn);
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--warn) 8%, transparent);
-  border: 1px solid color-mix(in srgb, var(--warn) 25%, transparent);
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: var(--font-2xs);
+  line-height: 1.5;
+  color: var(--text-mute);
+  padding: var(--space-2) 0 0;
+  border-top: 1px dashed var(--border);
 }
-.echart-flag strong { font-weight: 700; }
+.echart-flag-icon { display: inline-flex; color: var(--text-mute); flex-shrink: 0; margin-top: 1px; }
+.echart-flag strong { color: var(--text-dim); font-weight: 600; }
 
 .echart-foot {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-3) var(--space-4);
-  font-size: var(--font-xs);
+  font-size: var(--font-2xs);
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
   padding-top: var(--space-2);
-  border-top: 1px dashed var(--border);
+  border-top: 1px dashed color-mix(in srgb, var(--border) 55%, transparent);
 }
 .echart-foot-grp { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 .echart-foot-grp strong {
   color: var(--text-mute);
   font-weight: 700;
-  font-size: 0.65rem;
-  letter-spacing: 0.08em;
+  font-size: var(--font-2xs);
+  letter-spacing: 0.12em;
   text-transform: uppercase;
 }
 
-.echart-tok { color: var(--text-dim); font-weight: 600; }
+.echart-tok { color: var(--text-dim); font-weight: 600; font-variant-numeric: tabular-nums; }
 .echart-tok-solar  { color: var(--pv); }
 .echart-tok-disc   { color: var(--batt); }
 .echart-tok-imp,
