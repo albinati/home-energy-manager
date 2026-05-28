@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Maskable icon: full-bleed background + content inside the 80% safe zone
+       so Android/iOS adaptive masks (circle, squircle, rounded square) don't
+       clip the mark. -->
+  <rect width="512" height="512" fill="#0b0f17"/>
+  <g transform="translate(96 96) scale(5)">
+    <path d="M14 38 L32 16 L50 38 L50 50 L14 50 Z" fill="none" stroke="#3b82f6" stroke-width="3" stroke-linejoin="round"/>
+    <circle cx="32" cy="40" r="4" fill="#10b981"/>
+    <path d="M32 36 L32 28" stroke="#10b981" stroke-width="3" stroke-linecap="round"/>
+  </g>
+</svg>

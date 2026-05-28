@@ -4,9 +4,21 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#0b0f17" />
+    <meta name="theme-color" content="#0b0f17" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#f8fafc" media="(prefers-color-scheme: light)" />
     <meta name="description" content="Home Energy Manager — solar + battery + Octopus Agile, optimised." />
     <title>Home Energy Manager</title>
+
+    <!-- PWA — installable on phone/tablet ("Add to Home Screen"). No service
+         worker: this is a live dashboard, an offline cache would only serve
+         stale data. The manifest + standalone metas give the installed-app
+         shell (icon, fullscreen, status bar) without the staleness footgun. -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/icon-maskable.svg" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Energy" />
     <!-- Runtime config — written by ui-entrypoint.sh at container start.
          Must load BEFORE the module bundle so window.__HEM_CONFIG__ is set
          when src/lib/api.ts reads it. -->
