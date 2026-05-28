@@ -10,8 +10,7 @@
 }
 .dispatch-strip-soc {
   position: relative;
-  height: 44px;
-  border-bottom: 1px dashed var(--border);
+  height: 56px;
   margin-bottom: 2px;
 }
 .dispatch-strip-soc svg {
@@ -33,31 +32,41 @@
 .dispatch-strip-soc-axis--bot { bottom: 2px; }
 
 .dispatch-strip-cells {
+  position: relative;
   display: grid;
   grid-auto-flow: column;
   grid-auto-columns: 1fr;
   gap: 1px;
-  height: 36px;
+  height: 44px;
   background: var(--border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-lg);
   overflow: hidden;
   padding: 1px;
 }
 .dispatch-cell {
   min-width: 0;
   cursor: pointer;
-  transition: opacity 100ms, transform 100ms;
+  transition: opacity 160ms ease-out, transform 160ms ease-out;
 }
-.dispatch-cell.is-past { opacity: 0.4; }
-.dispatch-cell.is-now {
-  outline: 2px solid var(--text);
-  outline-offset: -1px;
-  z-index: 2;
-}
+/* Executed slots recede ('done'); planned stays vivid. */
+.dispatch-cell.is-past { opacity: 0.35; filter: saturate(0.6); }
 .dispatch-cell.is-hover,
 .dispatch-cell:hover {
-  transform: scaleY(1.18);
+  transform: scaleY(1.12);
   z-index: 3;
+}
+/* Live now-marker — the one infinite animation, a single accent playhead. */
+.soc-playhead {
+  position: absolute;
+  top: -2px; bottom: -2px;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent);
+  border-radius: 2px;
+  pointer-events: none;
+  z-index: 4;
+  animation: live-pulse 1600ms ease-in-out infinite;
 }
 
 .dispatch-strip-axis {
@@ -71,9 +80,9 @@
 
 .dispatch-strip-detail {
   min-height: 56px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  background: var(--bg-card-2);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
   padding: var(--space-3);
   font-size: var(--font-sm);
 }
@@ -116,18 +125,24 @@
 
 .dispatch-strip-legend {
   display: flex;
-  gap: var(--space-3);
+  gap: var(--space-4);
   flex-wrap: wrap;
-  font-size: var(--font-xs);
+  font-size: var(--font-2xs);
   color: var(--text-dim);
+  letter-spacing: 0.02em;
 }
 .dispatch-swatch {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
 }
 .dispatch-swatch-dot {
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
   border-radius: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .soc-playhead { animation: none; opacity: 1; }
+  .dispatch-cell { transition: none; }
 }

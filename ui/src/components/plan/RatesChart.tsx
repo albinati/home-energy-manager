@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "preact/hooks";
-import { makeChart, baseOption, chartTheme, type EChartsType } from "../../lib/charts";
+import { makeChart, baseOption, chartTheme, areaGradient, type EChartsType } from "../../lib/charts";
 import { useResolvedTheme } from "../../lib/theme";
 import type { AgileSlot } from "../../lib/types";
 
@@ -43,7 +43,7 @@ export function RatesChart({ importSlots, exportSlots, consumptionByStart, cheap
     const importData = sorted.map((s) => {
       const kind = s.kind || (s.p < 0 ? "negative" : s.p < cheapP ? "cheap" : s.p >= peakP ? "peak" : "standard");
       const color = kind === "negative" ? t.neg : kind === "cheap" ? t.cheap : kind === "peak" ? t.peak : t.textDim;
-      return { value: s.p, itemStyle: { color } };
+      return { value: s.p, itemStyle: { color, borderRadius: [3, 3, 0, 0] } };
     });
 
     const exportData = exportSlots
@@ -90,20 +90,23 @@ export function RatesChart({ importSlots, exportSlots, consumptionByStart, cheap
         type: "line",
         smooth: false,
         symbol: "none",
-        lineStyle: { color: t.exportColor, width: 2, type: "dotted" },
+        lineStyle: { color: t.exportColor, width: 1.75 },
+        areaStyle: { color: areaGradient(t.exportColor, 0.06, 0.0) },
         yAxisIndex: 0,
         data: exportData,
       });
     }
     if (consumptionData) {
+      // Consumption is not a domain — monochrome, not accent (accent stays for
+      // interaction only).
       series.push({
         name: "Imported kWh",
         type: "line",
         smooth: false,
         symbol: "circle",
         symbolSize: 3,
-        lineStyle: { color: t.accent, width: 2 },
-        itemStyle: { color: t.accent },
+        lineStyle: { color: t.textDim, width: 2 },
+        itemStyle: { color: t.textDim },
         yAxisIndex: 1,
         data: consumptionData,
       });
@@ -116,10 +119,10 @@ export function RatesChart({ importSlots, exportSlots, consumptionByStart, cheap
       yAxes.push({
         type: "value",
         name: "kWh",
-        nameTextStyle: { color: t.accent, fontSize: 10 },
+        nameTextStyle: { color: t.textMute, fontSize: 10 },
         position: "right",
         splitLine: { show: false },
-        axisLabel: { color: t.accent, fontSize: 10 },
+        axisLabel: { color: t.textMute, fontSize: 10 },
       });
     }
 

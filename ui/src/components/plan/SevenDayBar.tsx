@@ -53,6 +53,23 @@ export function SevenDayBar({ days }: SevenDayBarProps) {
       s.min != null && s.max != null && s.mean != null ? [s.min, s.max] : null,
     );
 
+    // Median of the same means (no new data) → colour each bar by where its
+    // day sits: below = cheaper (cheap green), above = dearer (peak amber),
+    // within ±5% = monochrome.
+    const meansOnly = meanData.filter((m): m is number => m != null).slice().sort((a, b) => a - b);
+    const median = meansOnly.length
+      ? meansOnly.length % 2
+        ? meansOnly[(meansOnly.length - 1) / 2]
+        : (meansOnly[meansOnly.length / 2 - 1] + meansOnly[meansOnly.length / 2]) / 2
+      : 0;
+    const barColor = (m: number): string => {
+      if (median <= 0) return t.textDim;
+      const dev = (m - median) / median;
+      if (dev < -0.05) return t.cheap;
+      if (dev > 0.05) return t.peak;
+      return t.textDim;
+    };
+
     chartRef.current.setOption({
       ...base,
       legend: { show: false },
@@ -95,7 +112,7 @@ export function SevenDayBar({ days }: SevenDayBarProps) {
           barWidth: "60%",
           data: meanData.map((m) => (m == null ? null : {
             value: m,
-            itemStyle: { color: t.accent, borderRadius: [3, 3, 0, 0] },
+            itemStyle: { color: barColor(m), borderRadius: [3, 3, 0, 0] },
           })),
           z: 2,
         },

@@ -12,10 +12,12 @@ import {
 import { Widget } from "../components/common/Widget";
 import { Pill } from "../components/common/Pill";
 import { Spinner } from "../components/common/Spinner";
+import { Icon } from "../components/common/Icon";
 import { DispatchPlanStrip } from "../components/forecast/DispatchPlanStrip";
 import { RatesChart } from "../components/plan/RatesChart";
 import { SevenDayBar } from "../components/plan/SevenDayBar";
-import { pence } from "../lib/format";
+import { useAnimatedNumber } from "../lib/useAnimatedNumber";
+import { pence, pct } from "../lib/format";
 import type {
   AgileDaySlotsResponse,
   OctopusConsumptionResponse,
@@ -61,6 +63,18 @@ export default function Plan() {
   const yesterdayStats = priceStats(agileYesterday.data?.slots ?? []);
   const yesterdayCost = computeYesterdayCost(agileYesterday.data, consumptionByStart);
 
+  // Focal number for this surface: predicted end-of-horizon SoC — the LAST
+  // finite soc_percent already in the timeline (no recompute, no new fetch).
+  const tl = timeline.data;
+  const planSlots = tl
+    ? [...(tl.executed || []), ...(tl.ongoing ? [tl.ongoing] : []), ...(tl.planned || [])]
+    : [];
+  let endSoc: number | null = null;
+  for (const s of planSlots) {
+    if (s.soc_percent != null && Number.isFinite(s.soc_percent)) endSoc = s.soc_percent;
+  }
+  const endSocAnim = useAnimatedNumber(endSoc);
+
   return (
     <div class="plan-page">
       <header class="plan-header">
@@ -74,6 +88,7 @@ export default function Plan() {
         </div>
         {cal.data?.factor != null && (
           <Pill tone={Math.abs(cal.data.factor - 1) < 0.1 ? "ok" : "warn"}>
+            <span class="plan-pill-icon"><Icon name="efficiency" size={14} /></span>
             PV cal {cal.data.factor.toFixed(2)}×
           </Pill>
         )}
@@ -82,19 +97,28 @@ export default function Plan() {
       <div class="widget-grid">
         <Widget
           title="The plan — next 48 h"
-          icon="🎯"
+          icon={<Icon name="schedule" size={18} />}
           tone="plan"
           size="wide"
           badge={timeline.data?.plan_date
             ? `${timeline.data.plan_date} · ${timeline.data.run_at?.slice(11, 16) || "—"} UTC`
             : undefined}
         >
+          {endSoc != null && (
+            <div class="plan-focal">
+              <span class="plan-focal-icon"><Icon name="battery" size={20} /></span>
+              <div class="plan-focal-num">
+                {endSocAnim != null ? pct(endSocAnim, 0) : "—"}
+              </div>
+              <div class="plan-focal-label">predicted battery<br />at end of horizon</div>
+            </div>
+          )}
           {timeline.loading ? <Spinner label="Loading plan…" /> : <DispatchPlanStrip timeline={timeline.data} decisions={decisions.data} />}
         </Widget>
 
         <Widget
           title="Today's rates"
-          icon="💷"
+          icon={<Icon name="cost" size={18} />}
           tone="tariff"
           size="wide"
           badge={todayStats ? `min ${pence(todayStats.min)} · avg ${pence(todayStats.avg)} · peak ${pence(todayStats.max)}` : undefined}
@@ -113,7 +137,7 @@ export default function Plan() {
 
         <Widget
           title="Tomorrow's rates"
-          icon="🔮"
+          icon={<Icon name="cost" size={18} />}
           tone="tariff"
           size="wide"
           badge={tomorrowStats
@@ -137,7 +161,7 @@ export default function Plan() {
 
         <Widget
           title="Yesterday + what we actually used"
-          icon="📊"
+          icon={<Icon name="chart-bars" size={18} />}
           tone="savings"
           size="wide"
           badge={yesterdayCost != null
@@ -160,7 +184,7 @@ export default function Plan() {
 
         <Widget
           title="Last 7 days · daily mean"
-          icon="📈"
+          icon={<Icon name="trend" size={18} />}
           tone="tariff"
           size="large"
           badge="min/max whisker"
@@ -176,7 +200,7 @@ export default function Plan() {
 
         <Widget
           title="Solar forecast"
-          icon="☀"
+          icon={<Icon name="solar" size={18} />}
           tone="default"
           size="medium"
           badge="48 h"
@@ -267,8 +291,15 @@ function PvSparkline({ data }: { data: ForecastSlot[] }) {
   const stepX = w / (data.length - 1 || 1);
   const points = data.map((d, i) => `${(i * stepX).toFixed(1)},${(h - (d.pv_kw / max) * (h - 4)).toFixed(1)}`).join(" ");
   return (
-    <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" style="width:100%; height:120px">
-      <polygon points={`0,${h} ${points} ${w},${h}`} fill="var(--pv)" opacity="0.18" />
+    <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" style="width:100%; height:110px">
+      <defs>
+        <linearGradient id="pv-spark-fill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="var(--pv)" stop-opacity="0.20" />
+          <stop offset="100%" stop-color="var(--pv)" stop-opacity="0" />
+        </linearGradient>
+      </defs>
+      <line x1="0" y1={h - 0.5} x2={w} y2={h - 0.5} stroke="var(--border)" stroke-width="1" vector-effect="non-scaling-stroke" />
+      <polygon points={`0,${h} ${points} ${w},${h}`} fill="url(#pv-spark-fill)" />
       <polyline points={points} fill="none" stroke="var(--pv)" stroke-width="2" vector-effect="non-scaling-stroke" />
     </svg>
   );
