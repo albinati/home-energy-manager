@@ -168,8 +168,13 @@ def _compute_cost_octopus(
         if not import_slots:
             return None
 
-        # Fetch half-hourly rates for the period
-        agile_rates_raw = fetch_agile_rates(period_from, period_to)
+        # Fetch half-hourly rates for the period. ``fetch_agile_rates`` takes
+        # (tariff_code, period_from, period_to) — positional args here would
+        # bind ``period_from`` to ``tariff_code`` and crash with
+        # "'datetime.datetime' object has no attribute 'strip'".
+        agile_rates_raw = fetch_agile_rates(
+            period_from=period_from, period_to=period_to,
+        )
 
         import_cost_pence = 0.0
         if agile_rates_raw:
