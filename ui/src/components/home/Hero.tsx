@@ -1,6 +1,7 @@
-import type { MetricsResponse, CockpitNow, AgileTodayResponse, MonthlyEnergy } from "../../lib/types";
-import { gbp, gbpSigned, kw, kwh, pct } from "../../lib/format";
+import type { MetricsResponse, CockpitNow, AgileTodayResponse, MonthlyEnergy, PeriodInsightsResponse } from "../../lib/types";
+import { gbp, gbpSigned, kw, kwh } from "../../lib/format";
 import { useAnimatedNumber } from "../../lib/useAnimatedNumber";
+import { CostBreakdownChart } from "./CostBreakdownChart";
 import "./hero.css";
 
 interface HeroProps {
@@ -9,6 +10,9 @@ interface HeroProps {
   cockpit: CockpitNow | null;
   agile: AgileTodayResponse | null;
   monthly: MonthlyEnergy[];
+  todayPeriod: PeriodInsightsResponse | null;
+  monthPeriod: PeriodInsightsResponse | null;
+  periodsLoading: boolean;
 }
 
 // The hero is the at-a-glance "where are we right now" surface. It bundles:
@@ -19,7 +23,7 @@ interface HeroProps {
 //   5. Live "motion" — action verb + tariff band + import/export p/kWh
 // Numeric values are tweened via useAnimatedNumber so refreshes feel alive
 // rather than snapping.
-export function Hero({ metrics, metricsLoading, cockpit, agile, monthly }: HeroProps) {
+export function Hero({ metrics, metricsLoading, cockpit, agile: _agile, monthly, todayPeriod, monthPeriod, periodsLoading }: HeroProps) {
   const daily = metrics?.pnl?.daily;
   const today = daily?.delta_vs_svt_pounds ?? null;
   const todayFixed = daily?.delta_vs_fixed_pounds ?? null;
@@ -32,9 +36,6 @@ export function Hero({ metrics, metricsLoading, cockpit, agile, monthly }: HeroP
 
   const state = cockpit?.state;
   const motion = state ? inferMotion(state) : null;
-  const currentImport = agile?.current_import_p ?? null;
-  const currentExport = agile?.current_export_p ?? null;
-  const importBand = classifyBand(currentImport, metrics?.cheap_threshold_pence, metrics?.peak_threshold_pence);
 
   const activeMonths = monthly.filter(
     (m) => (m.cost?.net_cost_pounds ?? 0) !== 0 || (m.energy?.export_kwh ?? 0) > 0,
@@ -57,9 +58,6 @@ export function Hero({ metrics, metricsLoading, cockpit, agile, monthly }: HeroP
   const exportKwhAnim = useAnimatedNumber(lifetime?.export_kwh ?? null);
   const exportEarnAnim = useAnimatedNumber(lifetime?.export_earn ?? null);
   const totalCostAnim = useAnimatedNumber(lifetime?.total_cost ?? null);
-  const importAnim = useAnimatedNumber(currentImport);
-  const exportRateAnim = useAnimatedNumber(currentExport);
-  const socAnim = useAnimatedNumber(state?.soc_pct ?? null);
 
   return (
     <section class="hero" aria-label="Live status + savings overview">
@@ -120,27 +118,8 @@ export function Hero({ metrics, metricsLoading, cockpit, agile, monthly }: HeroP
           </div>
         )}
 
-        <div class="hero-tariff">
-          <div class={`hero-tariff-band hero-tariff-band--${importBand}`}>
-            <span class="hero-tariff-band-dot" />
-            <span>{labelForBand(importBand)}</span>
-          </div>
-          <div class="hero-tariff-rates">
-            <div class="hero-tariff-rate">
-              <span class="hero-tariff-rate-label">Import</span>
-              <span class="hero-tariff-rate-value">{importAnim != null ? `${importAnim.toFixed(2)}p` : "—"}</span>
-            </div>
-            <div class="hero-tariff-rate">
-              <span class="hero-tariff-rate-label">Export</span>
-              <span class="hero-tariff-rate-value">{exportRateAnim != null ? `${exportRateAnim.toFixed(2)}p` : "—"}</span>
-            </div>
-            {socAnim != null && (
-              <div class="hero-tariff-rate">
-                <span class="hero-tariff-rate-label">Battery</span>
-                <span class="hero-tariff-rate-value">{pct(socAnim, 0)}</span>
-              </div>
-            )}
-          </div>
+        <div class="hero-chart">
+          <CostBreakdownChart today={todayPeriod} month={monthPeriod} loading={periodsLoading} />
         </div>
       </div>
     </section>
@@ -162,24 +141,6 @@ function inferMotion(s: { grid_kw: number; battery_kw: number; solar_kw: number;
   if (importing) return { title: "Importing from grid", sub: `${kw(grid)} import · ${kw(load)} house`, icon: "⬇", color: "var(--import)" };
   if (producing) return { title: "Self-using solar", sub: `${kw(solar)} solar · ${kw(load)} house`, icon: "☀", color: "var(--pv)" };
   return { title: "Holding", sub: `${kw(load)} house · waiting`, icon: "•", color: "var(--text-mute)" };
-}
-
-type Band = "negative" | "cheap" | "standard" | "peak" | "unknown";
-
-function classifyBand(p: number | null | undefined, cheapAt?: number, peakAt?: number): Band {
-  if (p == null) return "unknown";
-  if (p < 0) return "negative";
-  if (cheapAt != null && p <= cheapAt) return "cheap";
-  if (peakAt != null && p >= peakAt) return "peak";
-  return "standard";
-}
-
-function labelForBand(b: Band): string {
-  if (b === "negative") return "Paid to import";
-  if (b === "cheap") return "Cheap";
-  if (b === "peak") return "Peak";
-  if (b === "standard") return "Standard";
-  return "—";
 }
 
 function SkelHero() {

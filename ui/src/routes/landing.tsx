@@ -10,6 +10,7 @@ import {
   getAttributionDay,
   getEnergyReport,
   getEnergyMonthly,
+  getEnergyPeriod,
   getDaikinStatus,
   getDaikinQuota,
   getTariffDashboard,
@@ -80,6 +81,11 @@ export default function Landing() {
   const daikinQuota = useFetch(getDaikinQuota, []);
   // Tariff comparison vs Octopus catalogue + BG Fixed v58.
   const tariffDash = useFetch(() => getTariffDashboard(1, "monthly", 8), []);
+  // Hero cost-breakdown chart needs today + month (trailing-7d is derived
+  // client-side from the month chart_data).
+  const today = new Date().toISOString().slice(0, 10);
+  const todayPeriod = useFetch(() => getEnergyPeriod("day", { date: today }), []);
+  const monthPeriod = useFetch(() => getEnergyPeriod("month", { month: today.slice(0, 7) }), []);
 
   if (now.loading && !now.data) {
     return <div class="home"><Spinner label="Loading dashboard…" /></div>;
@@ -98,13 +104,15 @@ export default function Landing() {
 
   return (
     <div class="home">
-      <Hero metrics={metrics.data} metricsLoading={metrics.loading} cockpit={data} agile={agile.data} monthly={monthly.data} />
+      <Hero metrics={metrics.data} metricsLoading={metrics.loading} cockpit={data} agile={agile.data} monthly={monthly.data}
+            todayPeriod={todayPeriod.data} monthPeriod={monthPeriod.data}
+            periodsLoading={todayPeriod.loading || monthPeriod.loading} />
 
       {/* ── LIVE ───────────────────────────────────────────────────── */}
       <div class="widget-grid widget-band">
         <Widget title="Live power" icon="⚡" tone="power" size="large"
                 badge={data.now_utc ? new Date(data.now_utc).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }) : undefined}>
-          <LivePowerWidget state={s} cockpit={data} timeline={timeline.data} execution={execution.data} />
+          <LivePowerWidget state={s} cockpit={data} timeline={timeline.data} execution={execution.data} agile={agile.data} metrics={metrics.data} />
         </Widget>
 
         <Widget title="Heating" icon="♨" tone="thermal" size="medium"

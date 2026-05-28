@@ -1,8 +1,5 @@
-import { useEffect, useState } from "preact/hooks";
-import type { TariffDashboardResponse, TariffTotalRow, MetricsResponse, PeriodInsightsResponse } from "../../lib/types";
-import { getEnergyPeriod } from "../../lib/endpoints";
+import type { TariffDashboardResponse, TariffTotalRow, MetricsResponse } from "../../lib/types";
 import { gbp, gbpSigned } from "../../lib/format";
-import { CostBreakdownChart } from "./CostBreakdownChart";
 import "./tariff-comparison.css";
 
 interface TariffComparisonWidgetProps {
@@ -26,40 +23,13 @@ const SEG_EXPORT_FALLBACK_P = 4.0;
 // + the configured FIXED_TARIFF_* rates from /metrics. No annual-from-daily
 // extrapolation; pure replay over the same window as the Octopus rows.
 export function TariffComparisonWidget({ dashboard, dashboardLoading, metrics }: TariffComparisonWidgetProps) {
-  // Fetch three period cost blocks for the breakdown chart. /energy/period
-  // returns cost { import_cost_pounds, export_earnings_pounds,
-  // standing_charge_pence, net_cost_pounds } per period — exactly what we
-  // need. Three independent fetches; failures fall back to "no data" bars.
-  const [todayP, setTodayP] = useState<PeriodInsightsResponse | null>(null);
-  const [weekP, setWeekP] = useState<PeriodInsightsResponse | null>(null);
-  const [monthP, setMonthP] = useState<PeriodInsightsResponse | null>(null);
-  const [periodsLoading, setPeriodsLoading] = useState(true);
-
-  useEffect(() => {
-    let alive = true;
-    setPeriodsLoading(true);
-    const today = new Date().toISOString().slice(0, 10);
-    const month = today.slice(0, 7);
-    Promise.all([
-      getEnergyPeriod("day", { date: today }).catch(() => null),
-      getEnergyPeriod("week", { date: today }).catch(() => null),
-      getEnergyPeriod("month", { month }).catch(() => null),
-    ]).then(([d, w, m]) => {
-      if (!alive) return;
-      setTodayP(d); setWeekP(w); setMonthP(m);
-      setPeriodsLoading(false);
-    });
-    return () => { alive = false; };
-  }, []);
-
   if (dashboardLoading) {
     return <div class="tcomp"><div class="tcomp-skel skel" /></div>;
   }
   if (!dashboard?.ok || !dashboard.totals?.length) {
     return (
       <div class="tcomp">
-        <CostBreakdownChart today={todayP} week={weekP} month={monthP} loading={periodsLoading} />
-        <p class="muted">No tariff catalogue available — Octopus data missing.</p>
+        <p class="muted">No tariff data available yet — Octopus catalogue or usage history missing.</p>
       </div>
     );
   }
@@ -107,11 +77,10 @@ export function TariffComparisonWidget({ dashboard, dashboardLoading, metrics }:
 
   return (
     <div class="tcomp">
-      <CostBreakdownChart today={todayP} week={weekP} month={monthP} loading={periodsLoading} />
-
       <div class="tcomp-table-head-row">
         <span class="tcomp-table-title">
-          What other tariffs would have cost you over the last {days}d
+          What other tariffs would have cost over the last {days}d of your usage
+          {usage ? <span class="tcomp-table-usage"> · {usage.total_import_kwh.toFixed(0)} kWh in / {usage.total_export_kwh.toFixed(0)} kWh out</span> : null}
         </span>
         {cheapest && (
           <span class="tcomp-cheapest-inline">

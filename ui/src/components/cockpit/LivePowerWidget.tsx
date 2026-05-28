@@ -1,6 +1,6 @@
 import { PowerFlow } from "./PowerFlow";
 import { kw, kwh, pct } from "../../lib/format";
-import type { CockpitState, CockpitNow, SchedulerTimeline, ExecutionTodayResponse } from "../../lib/types";
+import type { CockpitState, CockpitNow, SchedulerTimeline, ExecutionTodayResponse, AgileTodayResponse, MetricsResponse } from "../../lib/types";
 import "./cockpit.css";
 import "./live-power.css";
 
@@ -9,12 +9,14 @@ interface LivePowerWidgetProps {
   cockpit: CockpitNow;
   timeline: SchedulerTimeline | null;
   execution: ExecutionTodayResponse | null;
+  agile: AgileTodayResponse | null;
+  metrics: MetricsResponse | null;
 }
 
 // Composite widget: action verb + power flow on the left, battery details
 // on the right. Replaces the standalone Battery widget AND the Right Now
 // widget — one canonical surface for "what's happening with the energy".
-export function LivePowerWidget({ state, cockpit, timeline, execution }: LivePowerWidgetProps) {
+export function LivePowerWidget({ state, cockpit, timeline, execution, agile, metrics }: LivePowerWidgetProps) {
   const action = inferAction(state);
   const socPct = state.soc_pct ?? 0;
   const charging = state.battery_kw > 0.05;
@@ -32,6 +34,9 @@ export function LivePowerWidget({ state, cockpit, timeline, execution }: LivePow
   const foxMode = cockpit.current_slot?.fox_mode ?? "—";
   const forced = timeline ? upcomingForcedWindows(timeline, 4) : [];
   const lpInfo = timeline ? { runId: timeline.run_id ?? null, runAt: timeline.run_at ?? null, planDate: timeline.plan_date ?? null } : null;
+  const importP = agile?.current_import_p ?? null;
+  const exportP = agile?.current_export_p ?? null;
+  const importBand = classifyBand(importP, metrics?.cheap_threshold_pence, metrics?.peak_threshold_pence);
 
   return (
     <div class="livepower">
@@ -81,6 +86,16 @@ export function LivePowerWidget({ state, cockpit, timeline, execution }: LivePow
       </div>
 
       <div class="livepower-fox">
+        <div class="livepower-fox-rates" title="Live Agile p/kWh — import is what you'd pay now, export is what you'd earn now">
+          <span class={`livepower-fox-rate livepower-fox-rate--import livepower-fox-rate--band-${importBand}`}>
+            <span class="livepower-fox-rate-label">Import</span>
+            <span class="livepower-fox-rate-value">{importP != null ? `${importP.toFixed(2)}p` : "—"}</span>
+          </span>
+          <span class="livepower-fox-rate livepower-fox-rate--export">
+            <span class="livepower-fox-rate-label">Export</span>
+            <span class="livepower-fox-rate-value">{exportP != null ? `${exportP.toFixed(2)}p` : "—"}</span>
+          </span>
+        </div>
         <div class="livepower-fox-row">
           <span class="livepower-fox-label">Fox mode</span>
           <span class={`livepower-fox-mode livepower-fox-mode--${foxMode.toLowerCase()}`}>{foxMode}</span>
@@ -159,6 +174,16 @@ function labelForKind(k: string | undefined): string {
     case "peak_export":   return "💸 ForceDischarge";
     default:              return k || "?";
   }
+}
+
+type Band = "negative" | "cheap" | "standard" | "peak" | "unknown";
+
+function classifyBand(p: number | null | undefined, cheapAt?: number, peakAt?: number): Band {
+  if (p == null) return "unknown";
+  if (p < 0) return "negative";
+  if (cheapAt != null && p <= cheapAt) return "cheap";
+  if (peakAt != null && p >= peakAt) return "peak";
+  return "standard";
 }
 
 function BatteryShape({ pct, fillColor, charging, discharging }: {

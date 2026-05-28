@@ -127,15 +127,55 @@
   text-align: right;
 }
 
-/* Fox mode + scheduled windows + LP debug — the "Fox 2.0 ESS"-style strip */
+/* Fox mode + scheduled windows + LP debug + live Agile rates — the
+ * "Fox 2.0 ESS"-style strip. Compact rate chips at the top, then the
+ * mode row, then the LP debug line. */
 .livepower-fox {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-2);
   padding-top: var(--space-3);
   margin-top: var(--space-2);
-  border-top: 1px dashed var(--border);
+  border-top: 1px dashed color-mix(in srgb, var(--border) 55%, transparent);
 }
+
+.livepower-fox-rates {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-2);
+}
+.livepower-fox-rate {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+.livepower-fox-rate-label {
+  font-size: 0.6rem;
+  color: var(--text-mute);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-weight: 700;
+}
+.livepower-fox-rate-value {
+  font-size: var(--font-lg);
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.015em;
+  text-align: right;
+}
+.livepower-fox-rate--import .livepower-fox-rate-value { color: var(--text); }
+.livepower-fox-rate--export .livepower-fox-rate-value { color: var(--export); }
+.livepower-fox-rate--band-negative { border-color: color-mix(in srgb, var(--neg-price) 50%, transparent); background: color-mix(in srgb, var(--neg-price) 10%, var(--bg)); }
+.livepower-fox-rate--band-cheap    { border-color: color-mix(in srgb, var(--cheap) 50%, transparent);     background: color-mix(in srgb, var(--cheap) 10%, var(--bg)); }
+.livepower-fox-rate--band-peak     { border-color: color-mix(in srgb, var(--peak) 50%, transparent);      background: color-mix(in srgb, var(--peak) 10%, var(--bg)); }
+.livepower-fox-rate--band-negative .livepower-fox-rate-value { color: var(--neg-price); }
+.livepower-fox-rate--band-cheap    .livepower-fox-rate-value { color: var(--cheap); }
+.livepower-fox-rate--band-peak     .livepower-fox-rate-value { color: var(--peak); }
 .livepower-fox-row {
   display: flex;
   align-items: center;

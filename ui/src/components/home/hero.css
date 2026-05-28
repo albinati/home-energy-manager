@@ -222,61 +222,11 @@
   margin-top: 2px;
 }
 
-.hero-tariff {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
+.hero-chart {
   padding: var(--space-3);
   border-radius: var(--radius);
   background: color-mix(in srgb, var(--bg-card-2) 70%, transparent);
   border: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
-}
-.hero-tariff-band {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  align-self: flex-start;
-  padding: 4px 10px;
-  border-radius: var(--radius-pill);
-  font-size: var(--font-xs);
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-.hero-tariff-band-dot {
-  width: 6px; height: 6px; border-radius: 50%;
-  background: currentColor;
-  box-shadow: 0 0 8px currentColor;
-}
-.hero-tariff-band--negative { color: var(--neg-price); background: color-mix(in srgb, var(--neg-price) 18%, transparent); }
-.hero-tariff-band--cheap    { color: var(--cheap);     background: color-mix(in srgb, var(--cheap) 18%, transparent); }
-.hero-tariff-band--standard { color: var(--standard);  background: color-mix(in srgb, var(--standard) 22%, transparent); }
-.hero-tariff-band--peak     { color: var(--peak);      background: color-mix(in srgb, var(--peak) 18%, transparent); }
-.hero-tariff-band--unknown  { color: var(--text-mute); background: color-mix(in srgb, var(--text-mute) 18%, transparent); }
-
-.hero-tariff-rates {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: var(--space-2);
-}
-.hero-tariff-rate {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-.hero-tariff-rate-label {
-  font-size: 0.65rem;
-  color: var(--text-mute);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-.hero-tariff-rate-value {
-  font-size: clamp(1rem, 2.8vw, var(--font-lg));
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: -0.01em;
-  transition: color 200ms ease-out;
 }
 
 /* Reduced-motion users — skip the gradient drift + dot pulse. The number

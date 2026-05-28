@@ -17,13 +17,16 @@
   align-items: baseline;
   gap: var(--space-3);
   flex-wrap: wrap;
-  padding-top: var(--space-2);
-  border-top: 1px dashed color-mix(in srgb, var(--border) 55%, transparent);
 }
 .tcomp-table-title {
   font-size: var(--font-sm);
   color: var(--text-dim);
   font-weight: 600;
+}
+.tcomp-table-usage {
+  font-weight: 400;
+  color: var(--text-mute);
+  font-variant-numeric: tabular-nums;
 }
 .tcomp-cheapest-inline {
   font-size: var(--font-xs);
