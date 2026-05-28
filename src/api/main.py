@@ -1574,7 +1574,7 @@ async def daikin_status(refresh: bool = False):
         devices = cached.devices
         client = get_daikin_client()
         result = []
-        from .mcp_server import _daikin_state_summary
+        from ..mcp_server import _daikin_state_summary
         for dev in devices:
             s = client.get_status(dev)
             result.append(DaikinStatusResponse(

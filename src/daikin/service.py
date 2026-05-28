@@ -44,6 +44,12 @@ _force_refresh_timestamps: dict[str, float] = {}
 # #55 — one-shot cold-start 429 log: prevents the 2-minute log-spam loop when
 # Daikin quota is already exhausted at boot. Reset on first successful refresh.
 _cold_start_quota_logged: bool = False
+# Module-level backoff for cold-start failures. Without it, every UI poll
+# (cockpit_now, weather, api etc., ~3/min combined) re-tries the Daikin
+# API and burns 429s while the daily quota window remains exhausted —
+# this caused the 2026-05-27 22:00 UTC retry storm (#423).
+_cold_start_failed_at: float | None = None
+_COLD_START_BACKOFF_SECONDS: int = 600  # 10 min — bounds API attempts to ≤6/h
 
 
 # ---------------------------------------------------------------------------
@@ -151,11 +157,55 @@ def get_cached_devices(
         max_age_seconds = config.DAIKIN_DEVICES_CACHE_TTL_SECONDS
 
     with _lock:
-        # Cold-start: no cache at all — do exactly one initial fetch regardless of quota.
+        # Cold-start: no cache at all.
         if _devices_cache is None:
+            global _cold_start_quota_logged, _cold_start_failed_at
+
+            now = time.time()
+            backoff_active = (
+                _cold_start_failed_at is not None
+                and (now - _cold_start_failed_at) < _COLD_START_BACKOFF_SECONDS
+            )
+
+            # Belt-and-braces — if the local soft-cap says blocked, don't even
+            # try the API. Daikin's hard daily limit is 200/day; once we're
+            # over, every additional 429 contributes to nothing but the
+            # bookkeeping count.
+            quota_blocked = should_block("daikin")
+
+            if backoff_active or quota_blocked:
+                if not _cold_start_quota_logged:
+                    if quota_blocked:
+                        logger.warning(
+                            "Daikin cold-start skipped — soft cap exhausted "
+                            "(actor=%s); using physics estimator until reset",
+                            actor,
+                        )
+                    else:
+                        logger.warning(
+                            "Daikin cold-start in backoff (actor=%s, %.0fs since "
+                            "last failure) — skipping API call",
+                            actor, now - (_cold_start_failed_at or now),
+                        )
+                    _cold_start_quota_logged = True
+                else:
+                    logger.debug("Daikin cold-start skipped (suppressed, actor=%s)", actor)
+                # Record the skip so subsequent callers re-hit the backoff
+                # check, not the API.
+                if not backoff_active:
+                    _cold_start_failed_at = now
+                return CachedDevices(
+                    devices=[],
+                    fetched_at_wall=None,
+                    age_seconds=float("inf"),
+                    stale=True,
+                    source="cold_start_backoff",
+                )
+
             logger.info("Daikin service: cold-start fetch (actor=%s)", actor)
             try:
                 devices = _do_refresh(actor)
+                _cold_start_failed_at = None  # success clears the backoff
                 return CachedDevices(
                     devices=devices,
                     fetched_at_wall=_devices_fetched_wall,
@@ -164,14 +214,14 @@ def get_cached_devices(
                     source="cold_start",
                 )
             except Exception as e:
-                # #55 — log the cold-start failure exactly once per boot instead
-                # of every 2 minutes (the old heartbeat-loop behavior).
-                global _cold_start_quota_logged
+                # On failure, set the backoff so we don't retry on the next UI
+                # poll (~20 s). Log once until the next successful refresh.
+                _cold_start_failed_at = now
                 if not _cold_start_quota_logged:
                     logger.warning(
                         "Daikin cold-start fetch failed: %s — service will use "
-                        "the physics estimator until the quota window rolls over",
-                        e,
+                        "the physics estimator; next attempt in %ds",
+                        e, _COLD_START_BACKOFF_SECONDS,
                     )
                     _cold_start_quota_logged = True
                 else:
