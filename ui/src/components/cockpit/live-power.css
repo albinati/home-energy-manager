@@ -1,45 +1,89 @@
-/* Composite live-power widget: action header + flow diagram + battery panel */
+/* Live-power instrument panel — hero net-power → action → flow → battery/fox.
+ * Chrome disappears: sections separated by negative space, one hairline before
+ * the secondary Fox strip. Domain colour only on the flow + focal-value tints. */
 
 .livepower {
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+  gap: var(--space-5);
 }
 
-/* Action header — replaces the standalone "Right Now" widget */
+/* Hero — the one focal number of this surface (live net grid power) */
+.livepower-hero {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 88px;
+}
+.livepower-hero-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-2xs);
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-mute);
+}
+.livepower-hero-icon { display: inline-flex; color: var(--text-dim); }
+.livepower-hero-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent);
+}
+.livepower-hero-num {
+  font-size: var(--font-hero);
+  font-weight: 700;
+  line-height: 0.95;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+  /* Lock-in settle: ~2% overshoot ~300ms after the card rises. */
+  animation: livepower-lock 500ms var(--ease-lock) 300ms both;
+}
+@keyframes livepower-lock {
+  from { transform: scale(0.96); }
+  to   { transform: scale(1); }
+}
+.livepower-hero-unit {
+  font-size: 0.5em;
+  font-weight: 500;
+  color: var(--text-dim);
+  letter-spacing: 0.02em;
+  margin-left: 0.3em;
+}
+
+/* Quiet action verb — supporting copy */
 .livepower-action {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  padding-bottom: var(--space-3);
-  border-bottom: 1px solid var(--border);
 }
 .livepower-action-icon {
-  width: 38px;
-  height: 38px;
-  border-radius: 10px;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-sm);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 1.2rem;
-  color: white;
+  background: var(--bg-card-2);
+  color: var(--text-dim);
   flex-shrink: 0;
 }
 .livepower-action-text { min-width: 0; }
 .livepower-action-title {
-  font-size: var(--font-lg);
-  font-weight: 700;
-  letter-spacing: -0.015em;
-  line-height: 1.1;
+  font-size: var(--font-sm);
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.2;
 }
 .livepower-action-sub {
   font-size: var(--font-xs);
-  color: var(--text-dim);
+  color: var(--text-mute);
   font-variant-numeric: tabular-nums;
-  margin-top: 2px;
+  margin-top: 1px;
 }
 
-/* Body: flow on the left, battery on the right */
+/* Body: flow centerpiece + battery panel */
 .livepower-body {
   display: grid;
   grid-template-columns: 1fr auto;
@@ -49,23 +93,20 @@
 @media (max-width: 760px) {
   .livepower-body { grid-template-columns: 1fr; }
 }
-
-.livepower-flow { min-width: 0; }
+.livepower-flow { min-width: 0; min-height: 200px; }
 
 .livepower-batt {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
   min-width: 140px;
-  padding-left: var(--space-3);
-  border-left: 1px solid var(--border);
+  padding-left: var(--space-4);
 }
 @media (max-width: 760px) {
   .livepower-batt {
-    border-left: none;
-    border-top: 1px solid var(--border);
     padding-left: 0;
     padding-top: var(--space-3);
+    border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
   }
 }
 
@@ -80,11 +121,12 @@
 .livepower-batt-svg { grid-area: svg; }
 .livepower-batt-pct {
   grid-area: pct;
-  font-size: 2rem;
-  font-weight: 800;
-  letter-spacing: -0.025em;
+  font-size: var(--font-lg);
+  font-weight: 600;
+  letter-spacing: -0.015em;
   line-height: 1;
   font-variant-numeric: tabular-nums;
+  color: var(--batt);
 }
 .livepower-batt-kwh {
   grid-area: kwh;
@@ -100,7 +142,7 @@
   font-size: var(--font-sm);
   font-variant-numeric: tabular-nums;
 }
-.livepower-batt-dir-icon { font-size: 1rem; line-height: 1; }
+.livepower-batt-dir-icon { display: inline-flex; line-height: 1; }
 .livepower-batt-dir-kw { font-weight: 700; }
 
 .livepower-batt-meta {
@@ -108,7 +150,7 @@
   flex-direction: column;
   gap: 2px;
   padding-top: var(--space-2);
-  border-top: 1px dashed var(--border);
+  border-top: 1px dashed color-mix(in srgb, var(--border) 55%, transparent);
 }
 .livepower-batt-meta-row {
   display: grid;
@@ -118,7 +160,7 @@
   font-variant-numeric: tabular-nums;
 }
 .livepower-batt-meta-label {
-  color: var(--text-dim);
+  color: var(--text-mute);
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
@@ -127,16 +169,15 @@
   text-align: right;
 }
 
-/* Fox mode + scheduled windows + LP debug + live Agile rates — the
- * "Fox 2.0 ESS"-style strip. Compact rate chips at the top, then the
- * mode row, then the LP debug line. */
+/* Secondary Fox strip — separated by one hairline + space. Monochrome-first:
+ * colour only on the rate VALUE and the leading mode dot, never a flooded
+ * pill/chip surface. */
 .livepower-fox {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
-  padding-top: var(--space-3);
-  margin-top: var(--space-2);
-  border-top: 1px dashed color-mix(in srgb, var(--border) 55%, transparent);
+  gap: var(--space-3);
+  padding-top: var(--space-4);
+  border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
 }
 
 .livepower-fox-rates {
@@ -151,11 +192,10 @@
   gap: var(--space-2);
   padding: 6px 10px;
   border-radius: var(--radius-sm);
-  background: var(--bg);
-  border: 1px solid var(--border);
+  background: var(--bg-card-2);
 }
 .livepower-fox-rate-label {
-  font-size: 0.6rem;
+  font-size: var(--font-2xs);
   color: var(--text-mute);
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -163,19 +203,18 @@
 }
 .livepower-fox-rate-value {
   font-size: var(--font-lg);
-  font-weight: 800;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.015em;
   text-align: right;
+  color: var(--text);
 }
-.livepower-fox-rate--import .livepower-fox-rate-value { color: var(--text); }
-.livepower-fox-rate--export .livepower-fox-rate-value { color: var(--export); }
-.livepower-fox-rate--band-negative { border-color: color-mix(in srgb, var(--neg-price) 50%, transparent); background: color-mix(in srgb, var(--neg-price) 10%, var(--bg)); }
-.livepower-fox-rate--band-cheap    { border-color: color-mix(in srgb, var(--cheap) 50%, transparent);     background: color-mix(in srgb, var(--cheap) 10%, var(--bg)); }
-.livepower-fox-rate--band-peak     { border-color: color-mix(in srgb, var(--peak) 50%, transparent);      background: color-mix(in srgb, var(--peak) 10%, var(--bg)); }
-.livepower-fox-rate--band-negative .livepower-fox-rate-value { color: var(--neg-price); }
-.livepower-fox-rate--band-cheap    .livepower-fox-rate-value { color: var(--cheap); }
-.livepower-fox-rate--band-peak     .livepower-fox-rate-value { color: var(--peak); }
+/* Import value tints by band; export value is green (income). */
+.livepower-rate--band-negative { color: var(--neg-price); }
+.livepower-rate--band-cheap    { color: var(--cheap); }
+.livepower-rate--band-peak     { color: var(--peak); }
+.livepower-rate--export        { color: var(--export); }
+
 .livepower-fox-row {
   display: flex;
   align-items: center;
@@ -188,26 +227,32 @@
   letter-spacing: 0.06em;
   text-transform: uppercase;
   font-weight: 700;
-  font-size: 0.65rem;
+  font-size: var(--font-2xs);
 }
 .livepower-fox-mode {
   display: inline-flex;
   align-items: center;
+  gap: 6px;
   padding: 2px var(--space-2);
   border-radius: var(--radius-pill);
-  font-weight: 700;
+  font-weight: 600;
   font-size: var(--font-xs);
   letter-spacing: 0.02em;
   border: 1px solid var(--border);
-  background: var(--bg);
+  background: transparent;
   color: var(--text-dim);
 }
-.livepower-fox-mode--selfuse      { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, transparent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
-.livepower-fox-mode--forcecharge,
-.livepower-fox-mode--feedin       { color: var(--ok);     border-color: color-mix(in srgb, var(--ok) 35%, transparent);     background: color-mix(in srgb, var(--ok) 12%, transparent); }
-.livepower-fox-mode--forcedischarge,
-.livepower-fox-mode--peakexport   { color: var(--peak-export); border-color: color-mix(in srgb, var(--peak-export) 35%, transparent); background: color-mix(in srgb, var(--peak-export) 12%, transparent); }
-.livepower-fox-mode--backup       { color: var(--warn);   border-color: color-mix(in srgb, var(--warn) 35%, transparent);   background: color-mix(in srgb, var(--warn) 12%, transparent); }
+.livepower-fox-mode-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--text-mute);
+  flex-shrink: 0;
+}
+.livepower-fox-mode--selfuse      .livepower-fox-mode-dot { background: var(--accent); }
+.livepower-fox-mode--forcecharge  .livepower-fox-mode-dot,
+.livepower-fox-mode--feedin       .livepower-fox-mode-dot { background: var(--ok); }
+.livepower-fox-mode--forcedischarge .livepower-fox-mode-dot,
+.livepower-fox-mode--peakexport   .livepower-fox-mode-dot { background: var(--peak-export); }
+.livepower-fox-mode--backup       .livepower-fox-mode-dot { background: var(--warn); }
 
 .livepower-fox-windows {
   display: inline-flex;
@@ -218,35 +263,30 @@
 .livepower-fox-window {
   display: inline-flex;
   align-items: center;
+  gap: 3px;
   padding: 2px 6px;
   border-radius: var(--radius-sm);
-  font-size: 0.7rem;
+  font-size: var(--font-2xs);
   font-variant-numeric: tabular-nums;
-  background: var(--bg);
-  border: 1px solid var(--border);
+  background: var(--bg-card-2);
   color: var(--text-dim);
 }
-.livepower-fox-window--cheap,
-.livepower-fox-window--negative,
-.livepower-fox-window--solar_charge,
-.livepower-fox-window--solar_preheat { color: var(--cheap); border-color: color-mix(in srgb, var(--cheap) 35%, transparent); }
-.livepower-fox-window--peak_export   { color: var(--peak-export); border-color: color-mix(in srgb, var(--peak-export) 35%, transparent); }
-
-/* Future-day events — LP plan only, not yet uploaded to Fox. Slightly faded
- * + dashed border so the user knows they won't see them in the Fox app yet. */
+.livepower-fox-window-icon { display: inline-flex; color: var(--text-mute); }
+/* Future-day events — LP plan only, not yet uploaded to Fox. */
 .livepower-fox-window--future {
   opacity: 0.72;
-  border-style: dashed;
-}
-.livepower-fox-window--future::before {
-  content: "📅 ";
-  margin-right: 1px;
+  border: 1px dashed var(--border);
+  background: transparent;
 }
 
 .livepower-fox-debug {
-  font-size: 0.65rem;
+  font-size: var(--font-2xs);
   color: var(--text-mute);
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.02em;
 }
 .livepower-fox-debug strong { color: var(--text-dim); font-weight: 700; }
+
+@media (prefers-reduced-motion: reduce) {
+  .livepower-hero-num { animation: none; transform: none; }
+}

@@ -1,4 +1,7 @@
+import { useEffect, useState } from "preact/hooks";
 import { PowerFlow } from "./PowerFlow";
+import { Icon, type IconName } from "../common/Icon";
+import { useAnimatedNumber } from "../../lib/useAnimatedNumber";
 import { kw, kwh, pct } from "../../lib/format";
 import type { CockpitState, CockpitNow, SchedulerTimeline, ExecutionTodayResponse, AgileTodayResponse, MetricsResponse } from "../../lib/types";
 import "./cockpit.css";
@@ -13,18 +16,36 @@ interface LivePowerWidgetProps {
   metrics: MetricsResponse | null;
 }
 
-// Composite widget: action verb + power flow on the left, battery details
-// on the right. Replaces the standalone Battery widget AND the Right Now
-// widget — one canonical surface for "what's happening with the energy".
+const RM =
+  typeof window !== "undefined" &&
+  typeof window.matchMedia === "function" &&
+  window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+// The instrument panel: a hero NET grid-power number anchors the surface,
+// the live power-flow is the centerpiece, everything else (action verb,
+// battery SoC, Fox mode, tariff, scheduled windows) recedes to quiet
+// monochrome. Domain colour appears only on the flow + the focal-value tint.
 export function LivePowerWidget({ state, cockpit, timeline, execution, agile, metrics }: LivePowerWidgetProps) {
   const action = inferAction(state);
   const socPct = state.soc_pct ?? 0;
   const charging = state.battery_kw > 0.05;
   const discharging = state.battery_kw < -0.05;
   const dirLabel = charging ? "Charging" : discharging ? "Discharging" : "Idle";
-  const dirArrow = charging ? "⚡" : discharging ? "↓" : "·";
+  const dirIcon: IconName | null = charging ? "power-live" : discharging ? "export" : null;
   const dirColor = charging ? "var(--ok)" : discharging ? "var(--warn)" : "var(--text-mute)";
 
+  // Hero NET grid power. ACCURACY: sign of grid_kw drives meaning, never the
+  // magnitude — positive = import (red), negative = export (green),
+  // |grid_kw| < 0.05 = balanced. Value/unit/source (/cockpit/now) unchanged.
+  const gridKw = state.grid_kw;
+  const importing = gridKw > 0.05;
+  const exporting = gridKw < -0.05;
+  const netLabel = importing ? "IMPORTING" : exporting ? "EXPORTING" : "BALANCED";
+  const netColor = importing ? "var(--import)" : exporting ? "var(--export)" : "var(--text-dim)";
+  const netKwAnim = useAnimatedNumber(Math.abs(gridKw));
+  const socAnim = useAnimatedNumber(socPct);
+
+  // SoC fill colour by threshold (meaning — unchanged).
   let fillColor = "var(--ok)";
   if (socPct < 20) fillColor = "var(--bad)";
   else if (socPct < 50) fillColor = "var(--warn)";
@@ -40,16 +61,31 @@ export function LivePowerWidget({ state, cockpit, timeline, execution, agile, me
 
   return (
     <div class="livepower">
+      {/* Hero — the one focal number of this surface */}
+      <div class="livepower-hero">
+        <div class="livepower-hero-eyebrow">
+          <span class="livepower-hero-icon"><Icon name="power-live" size={14} /></span>
+          <span class="live-pulse livepower-hero-dot" />
+          {netLabel}
+        </div>
+        <div class="livepower-hero-num" style={{ color: netColor }}>
+          {netKwAnim != null ? netKwAnim.toFixed(2) : "—"}
+          <span class="livepower-hero-unit">kW</span>
+        </div>
+      </div>
+
+      {/* Quiet action verb — supporting copy beneath the hero */}
       <div class="livepower-action">
-        <span class="livepower-action-icon" style={{ background: action.color, boxShadow: `0 0 14px ${action.color}55` }}>
-          {action.icon}
+        <span class="livepower-action-icon">
+          <Icon name={action.icon} size={18} />
         </span>
         <div class="livepower-action-text">
-          <div class="livepower-action-title" style={{ color: action.color }}>{action.title}</div>
+          <div class="livepower-action-title">{action.title}</div>
           <div class="livepower-action-sub">{action.sub}</div>
         </div>
       </div>
 
+      {/* The power-flow centerpiece + battery panel */}
       <div class="livepower-body">
         <div class="livepower-flow">
           <PowerFlow state={state} />
@@ -57,12 +93,12 @@ export function LivePowerWidget({ state, cockpit, timeline, execution, agile, me
 
         <aside class="livepower-batt">
           <div class="livepower-batt-cell">
-            <BatteryShape pct={socPct} fillColor={fillColor} charging={charging} discharging={discharging} />
-            <div class="livepower-batt-pct">{pct(socPct, 0)}</div>
+            <BatteryShape pct={socPct} fillColor={fillColor} />
+            <div class="livepower-batt-pct">{socAnim != null ? pct(socAnim, 0) : "—"}</div>
             <div class="livepower-batt-kwh">{kwh(state.soc_kwh)}</div>
           </div>
           <div class="livepower-batt-dir" style={{ color: dirColor }}>
-            <span class="livepower-batt-dir-icon">{dirArrow}</span>
+            {dirIcon && <span class="livepower-batt-dir-icon"><Icon name={dirIcon} size={14} /></span>}
             <span>{dirLabel}</span>
             {Math.abs(state.battery_kw) > 0.05 && (
               <span class="livepower-batt-dir-kw">{` · ${kw(Math.abs(state.battery_kw))}`}</span>
@@ -85,20 +121,24 @@ export function LivePowerWidget({ state, cockpit, timeline, execution, agile, me
         </aside>
       </div>
 
+      {/* Secondary: tariff rates + Fox mode + scheduled windows + LP run */}
       <div class="livepower-fox">
         <div class="livepower-fox-rates" title="Live Agile p/kWh — import is what you'd pay now, export is what you'd earn now">
-          <span class={`livepower-fox-rate livepower-fox-rate--import livepower-fox-rate--band-${importBand}`}>
+          <span class="livepower-fox-rate">
             <span class="livepower-fox-rate-label">Import</span>
-            <span class="livepower-fox-rate-value">{importP != null ? `${importP.toFixed(2)}p` : "—"}</span>
+            <span class={`livepower-fox-rate-value livepower-rate--band-${importBand}`}>{importP != null ? `${importP.toFixed(2)}p` : "—"}</span>
           </span>
-          <span class="livepower-fox-rate livepower-fox-rate--export">
+          <span class="livepower-fox-rate">
             <span class="livepower-fox-rate-label">Export</span>
-            <span class="livepower-fox-rate-value">{exportP != null ? `${exportP.toFixed(2)}p` : "—"}</span>
+            <span class="livepower-fox-rate-value livepower-rate--export">{exportP != null ? `${exportP.toFixed(2)}p` : "—"}</span>
           </span>
         </div>
         <div class="livepower-fox-row">
           <span class="livepower-fox-label">Fox mode</span>
-          <span class={`livepower-fox-mode livepower-fox-mode--${foxMode.toLowerCase()}`}>{foxMode}</span>
+          <span class={`livepower-fox-mode livepower-fox-mode--${foxMode.toLowerCase()}`}>
+            <span class="livepower-fox-mode-dot" />
+            {foxMode}
+          </span>
           {forced.length > 0 && (
             <span class="livepower-fox-windows">
               {forced.map((w) => {
@@ -112,6 +152,7 @@ export function LivePowerWidget({ state, cockpit, timeline, execution, agile, me
                   <span key={w.start_utc}
                         class={`livepower-fox-window livepower-fox-window--${w.kind}${start.isToday ? "" : " livepower-fox-window--future"}`}
                         title={tooltip}>
+                    {!start.isToday && <span class="livepower-fox-window-icon"><Icon name="schedule" size={12} /></span>}
                     {labelForKind(w.kind)} {start.dayLabel ? `${start.dayLabel} ` : ""}{range}
                   </span>
                 );
@@ -134,12 +175,6 @@ export function LivePowerWidget({ state, cockpit, timeline, execution, agile, me
   );
 }
 
-// Collapse upcoming planned slots that ACTUALLY translate to a non-SelfUse
-// Fox group (ForceCharge / ForceDischarge) into contiguous windows of the
-// same kind. solar_charge and solar_preheat are LP annotations meaning
-// "stay in SelfUse, expect solar to fill the battery naturally" — Fox
-// keeps SelfUse, no upload, so they don't belong on a "scheduled events"
-// strip the user cross-checks against the Fox ESS app.
 interface ForcedWindow { kind: string; start_utc: string; end_utc: string; slot_count: number; }
 function upcomingForcedWindows(timeline: SchedulerTimeline, limit: number): ForcedWindow[] {
   const out: ForcedWindow[] = [];
@@ -167,11 +202,12 @@ function upcomingForcedWindows(timeline: SchedulerTimeline, limit: number): Forc
   return out.slice(0, limit);
 }
 
+// Kind conveyed by the leading coloured dot + band colour — no emoji.
 function labelForKind(k: string | undefined): string {
   switch ((k || "").toLowerCase()) {
-    case "cheap":         return "⚡ ForceCharge";
-    case "negative":      return "🔵 ForceCharge";
-    case "peak_export":   return "💸 ForceDischarge";
+    case "cheap":         return "Force charge";
+    case "negative":      return "Force charge";
+    case "peak_export":   return "Force discharge";
     default:              return k || "?";
   }
 }
@@ -186,16 +222,22 @@ function classifyBand(p: number | null | undefined, cheapAt?: number, peakAt?: n
   return "standard";
 }
 
-function BatteryShape({ pct, fillColor, charging, discharging }: {
-  pct: number; fillColor: string; charging: boolean; discharging: boolean;
-}) {
-  const clamped = Math.max(0, Math.min(100, pct));
-  const W = 60;
-  const H = 100;
-  const term = 8;
-  const bodyTop = term;
-  const bodyH = H - term;
-  const fillH = (clamped / 100) * (bodyH - 6);
+// Battery cell with a spring fill: on mount the level rises from 0 to the real
+// SoC with a ~2% overshoot lock-in (--ease-lock). No in-cell glyph — direction
+// reads from the text below. SoC value/units/colour-meaning unchanged.
+function BatteryShape({ pct: socPct, fillColor }: { pct: number; fillColor: string }) {
+  const clamped = Math.max(0, Math.min(100, socPct));
+  const W = 60, H = 100, term = 8;
+  const bodyTop = term, bodyH = H - term;
+  const targetFillH = (clamped / 100) * (bodyH - 6);
+
+  // Start at 0 on mount, spring to real value next frame (skip under RM).
+  const [fillH, setFillH] = useState(RM ? targetFillH : 0);
+  useEffect(() => {
+    if (RM) { setFillH(targetFillH); return; }
+    const id = requestAnimationFrame(() => setFillH(targetFillH));
+    return () => cancelAnimationFrame(id);
+  }, [targetFillH]);
 
   return (
     <svg viewBox={`0 0 ${W} ${H}`} width={W} height={H} class="livepower-batt-svg" aria-hidden="true">
@@ -215,33 +257,27 @@ function BatteryShape({ pct, fillColor, charging, discharging }: {
         height={fillH}
         rx="3"
         fill="url(#lp-batt-fill)"
-        style={{ transition: "y 600ms ease, height 600ms ease, fill 200ms ease" }}
+        style={{ transition: RM ? "none" : "y 700ms var(--ease-lock), height 700ms var(--ease-lock), fill 200ms ease" }}
       />
-      {(charging || discharging) && (
-        <text x={W / 2} y={bodyTop + bodyH / 2 + 7} text-anchor="middle" font-size="26" fill="white"
-              style={{ filter: "drop-shadow(0 0 4px " + (charging ? "var(--ok)" : "var(--warn)") + ")" }}>
-          {charging ? "⚡" : "↓"}
-        </text>
-      )}
     </svg>
   );
 }
 
-interface Action { title: string; sub: string; icon: string; color: string; }
+interface Action { title: string; sub: string; icon: IconName; }
 
 function inferAction(s: CockpitState): Action {
   const grid = s.grid_kw, batt = s.battery_kw, solar = s.solar_kw, E = 0.1;
   const importing = grid > E, exporting = grid < -E;
   const charging = batt > E, discharging = batt < -E;
   const producing = solar > E;
-  if (discharging && exporting) return { title: "Exporting from battery", sub: `${kw(-batt + Math.max(0, solar))} flowing to the grid`, icon: "⚡", color: "var(--peak-export)" };
-  if (exporting && !discharging) return { title: "Exporting solar surplus", sub: `${kw(-grid)} to grid · ${kw(s.load_kw)} house · ${kw(solar)} solar`, icon: "☀", color: "var(--export)" };
-  if (charging && importing) return { title: "Charging from grid", sub: `${kw(grid)} import · battery climbing at ${kw(batt)}`, icon: "⚡", color: "var(--cheap)" };
-  if (charging && producing) return { title: "Charging from solar", sub: `${kw(solar)} solar · battery climbing at ${kw(batt)}`, icon: "⚡", color: "var(--pv)" };
-  if (discharging) return { title: "Battery → house", sub: `${kw(-batt)} from battery · ${kw(s.load_kw)} house load`, icon: "🔋", color: "var(--warn)" };
-  if (importing) return { title: "Importing from grid", sub: `${kw(grid)} import · ${kw(s.load_kw)} house`, icon: "⬇", color: "var(--import)" };
-  if (producing) return { title: "Self-using solar", sub: `${kw(solar)} solar covering ${kw(s.load_kw)} house`, icon: "☀", color: "var(--pv)" };
-  return { title: "Holding", sub: `${kw(s.load_kw)} house · battery ${pct(s.soc_pct, 0)} · waiting`, icon: "•", color: "var(--text-mute)" };
+  if (discharging && exporting) return { title: "Exporting from battery", sub: `${kw(-batt + Math.max(0, solar))} flowing to the grid`, icon: "export" };
+  if (exporting && !discharging) return { title: "Exporting solar surplus", sub: `${kw(-grid)} to grid · ${kw(s.load_kw)} house · ${kw(solar)} solar`, icon: "export" };
+  if (charging && importing) return { title: "Charging from grid", sub: `${kw(grid)} import · battery climbing at ${kw(batt)}`, icon: "power-live" };
+  if (charging && producing) return { title: "Charging from solar", sub: `${kw(solar)} solar · battery climbing at ${kw(batt)}`, icon: "solar" };
+  if (discharging) return { title: "Battery → house", sub: `${kw(-batt)} from battery · ${kw(s.load_kw)} house load`, icon: "battery" };
+  if (importing) return { title: "Importing from grid", sub: `${kw(grid)} import · ${kw(s.load_kw)} house`, icon: "import" };
+  if (producing) return { title: "Self-using solar", sub: `${kw(solar)} solar covering ${kw(s.load_kw)} house`, icon: "solar" };
+  return { title: "Holding", sub: `${kw(s.load_kw)} house · battery ${pct(s.soc_pct, 0)} · waiting`, icon: "power-live" };
 }
 
 function computeTodayRange(exec: ExecutionTodayResponse | null): { min: number; max: number } | null {
@@ -278,7 +314,6 @@ function formatLocalTime(iso: string | undefined): string {
   catch { return iso; }
 }
 
-// Window end = start of the slot AFTER the last counted one (slots are 30 min).
 function endLabelFor(lastSlotStartIso: string): string {
   try {
     const end = new Date(new Date(lastSlotStartIso).getTime() + 30 * 60 * 1000);
@@ -288,10 +323,6 @@ function endLabelFor(lastSlotStartIso: string): string {
   }
 }
 
-// Compares a slot's local date to "now" and returns (dayLabel, timeLabel,
-// isToday). Fox ESS only carries today's schedule — anything dated later
-// is LP intent that won't appear in the Fox app until the next 00:05 UTC
-// upload. The dayLabel surfaces that gap so the user knows where to look.
 interface RelativeSlot { dayLabel: string; timeLabel: string; isToday: boolean; }
 function formatRelativeSlot(iso: string | undefined, nowIso?: string | null): RelativeSlot {
   if (!iso) return { dayLabel: "", timeLabel: "—", isToday: false };
@@ -302,7 +333,6 @@ function formatRelativeSlot(iso: string | undefined, nowIso?: string | null): Re
     const slotKey = `${slot.getFullYear()}-${slot.getMonth()}-${slot.getDate()}`;
     const nowKey = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`;
     if (slotKey === nowKey) return { dayLabel: "", timeLabel, isToday: true };
-    // 1-day difference → "Tomorrow"; longer → short weekday
     const dayDiff = Math.round(
       (Date.UTC(slot.getFullYear(), slot.getMonth(), slot.getDate())
         - Date.UTC(now.getFullYear(), now.getMonth(), now.getDate())) / 86400000,
