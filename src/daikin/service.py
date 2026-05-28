@@ -89,9 +89,23 @@ def _cache_is_warm() -> bool:
 
 
 def _do_refresh(actor: str) -> list[DaikinDevice]:
-    """Call get_devices() and update cache. Quota accounting is at the transport layer (DaikinClient._get)."""
+    """Call get_devices() and update cache. Quota accounting is at the transport layer (DaikinClient._get).
+
+    Defensive guard: refuse to call Daikin when the soft cap is exhausted.
+    Every caller higher up SHOULD already check should_block, but this
+    extra check is cheap and stops any future bypass from silently
+    burning quota on 429s (#423 belt-and-braces).
+    """
     global _devices_cache, _devices_fetched_monotonic, _devices_fetched_wall, _devices_stale
     global _cold_start_quota_logged
+
+    if should_block("daikin"):
+        # Raising means callers fall through to their stale-cache / empty
+        # branches without ever hitting the wire. Logging level kept low —
+        # the cache layer's own messaging surfaces the user-facing state.
+        logger.debug("_do_refresh blocked: daikin soft cap exhausted (actor=%s)", actor)
+        raise DaikinError("Daikin daily quota exhausted")
+
     client = _get_or_create_client()
     devices = client.get_devices()
     _devices_cache = devices
