@@ -660,3 +660,274 @@ def sync_daikin_daily(date_obj) -> dict | None:
     return _db.get_daikin_consumption_daily_by_date(iso)
 
 
+# ---------------------------------------------------------------------------
+# 2-hourly telemetry-integral fallback for daikin_consumption_2hourly (#425).
+#
+# Why: Onecta's public ``consumptionData.value.electrical.<mode>.d`` array
+# returns INTEGER kWh per 2-hour bucket. That truncates everything below 1
+# kWh to zero — a typical 0.6 kWh DHW reheat cycle shows up as "0", which
+# makes the home Energy-chart Daikin breakdown look flat in summer. The
+# mobile app sees sub-integer numbers because it talks to a private endpoint
+# we don't have access to. Telemetry integration is our legitimate path to
+# the same precision.
+#
+# Inputs (all already in SQLite, zero Daikin API quota):
+#   * ``daikin_telemetry`` rows (~every 30 min): outdoor temp, tank temp,
+#     LWT, mode. ``fetched_at`` is epoch seconds.
+#   * ``DAIKIN_COP_CURVE`` + ``COP_DHW_PENALTY`` from config.
+#   * ``DHW_TANK_LITRES`` for the thermal-mass calc.
+#   * ``physics.get_daikin_heating_kw(outdoor)`` for the space-heating draw.
+#
+# Algorithm: between each pair of consecutive telemetry samples,
+#   space_kwh = get_daikin_heating_kw(midpoint_outdoor) × dt
+#     (already returns 0 above the weather-curve cutoff)
+#   dhw_kwh  = max(0, tank_temp_delta) × m_water × c_water / cop_dhw
+#     (only positive ramps count — a cooling tank is loss, not consumption)
+# Both kWh fall into the local-time 2h bucket containing the midpoint.
+# ---------------------------------------------------------------------------
+
+# Thermal mass calc constants — c_water in kWh/(kg·K). Tank water mass ≈
+# DHW_TANK_LITRES kg (1 L ≈ 1 kg for water).
+_C_WATER_KWH_PER_KG_K = 0.001163  # = 4.186 kJ/(kg·K) / 3600
+
+# Tiny tank delta filter — within sensor noise / 0.1 °C resolution, ignore.
+_TANK_DELTA_NOISE_C = 0.15
+
+# Standing-loss model — a well-insulated 200 L cylinder loses roughly 1.5 kWh
+# of thermal energy per day at 45 °C tank vs 21 °C room (consistent with the
+# 1.5–2 kWh manufacturer EN 12897 figures for class C cylinders). Per-K, per-
+# litre, per-hour: 1.5 / (200 × (45-21) × 24) ≈ 1.3e-5 kWh.
+_TANK_STANDING_LOSS_KWH_PER_K_L_H = 1.3e-5
+# Room temperature reference for the standing-loss ΔT. Telemetry has
+# indoor_temp_c when available — we fall back to this value when not.
+_TANK_ROOM_TEMP_REF_C = 21.0
+
+
+def compute_daikin_2hourly_telemetry(
+    date_obj,
+    local_tz: str | None = None,
+) -> dict[int, dict[str, float]]:
+    """Integrate ``daikin_telemetry`` rows into 12 × 2h buckets for *date_obj*.
+
+    Returns ``{bucket_idx: {"kwh_heating", "kwh_dhw", "kwh_total"}}`` keyed by
+    the local 2-hour bucket (0 = local 00:00–02:00, 11 = 22:00–24:00, same
+    convention as the Onecta cache writer). Buckets with no telemetry are
+    omitted.
+
+    Pure read; nothing is written to the DB here — see
+    :func:`sync_daikin_2hourly_telemetry` for the upsert side.
+    """
+    from datetime import date as _date, datetime as _dt, time as _time, timedelta as _td
+    from zoneinfo import ZoneInfo
+
+    from .. import db as _db
+    from ..config import cop_at_temperature
+    from ..physics import get_daikin_heating_kw
+
+    if not isinstance(date_obj, _date):
+        raise ValueError("date_obj must be a datetime.date")
+
+    tz_name = local_tz or getattr(config, "BULLETPROOF_TIMEZONE", "UTC")
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = ZoneInfo("UTC")
+
+    # Local midnight of the requested date, expressed in epoch seconds — this
+    # is the same anchor the Onecta cache writer uses (12 buckets starting at
+    # local midnight).
+    day_start_local = _dt.combine(date_obj, _time(0, 0)).replace(tzinfo=tz)
+    day_start_epoch = day_start_local.timestamp()
+    day_end_epoch = day_start_epoch + 24 * 3600
+
+    with _db._lock:
+        conn = _db.get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT fetched_at, outdoor_temp_c, tank_temp_c, lwt_actual_c, mode
+                   FROM daikin_telemetry
+                   WHERE fetched_at >= ? AND fetched_at < ?
+                   ORDER BY fetched_at ASC""",
+                (day_start_epoch, day_end_epoch),
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+    if len(rows) < 2:
+        return {}
+
+    tank_litres = float(getattr(config, "DHW_TANK_LITRES", 200))
+    cop_curve = config.DAIKIN_COP_CURVE
+    dhw_penalty = float(getattr(config, "COP_DHW_PENALTY", 0.5))
+
+    buckets: dict[int, dict[str, float]] = {}
+
+    def _bucket_of(epoch_s: float) -> int:
+        local_dt = _dt.fromtimestamp(epoch_s, tz=tz)
+        # Same local-date check — drop samples that round into a different
+        # day when local TZ wraps. This can happen with one stray row at the
+        # boundary; clamp to nearest bucket within [0, 11].
+        if local_dt.date() != date_obj:
+            return -1
+        return min(11, max(0, local_dt.hour // 2))
+
+    for i in range(len(rows) - 1):
+        a, b = rows[i], rows[i + 1]
+        dt_h = (float(b["fetched_at"]) - float(a["fetched_at"])) / 3600.0
+        # Skip suspicious gaps — telemetry usually fires ~30 min. A 2h+ gap
+        # likely means the service was down; don't extrapolate over a void.
+        if dt_h <= 0 or dt_h > 2.0:
+            continue
+
+        # Midpoint outdoor temp — falls back if either sample is None
+        outs = [v for v in (a.get("outdoor_temp_c"), b.get("outdoor_temp_c")) if v is not None]
+        mid_outdoor = sum(outs) / len(outs) if outs else None
+
+        # Space heating: physics function already returns 0 above the
+        # weather-curve cutoff, so it naturally handles "summer day,
+        # space heating off". When mode is known to be off, force 0 to
+        # avoid charging stand-by losses to the heat pump.
+        space_kwh = 0.0
+        if mid_outdoor is not None:
+            mode_a = (a.get("mode") or "").lower()
+            mode_b = (b.get("mode") or "").lower()
+            mode_off = (mode_a in ("off", "standby")) and (mode_b in ("off", "standby"))
+            if not mode_off:
+                space_kw = float(get_daikin_heating_kw(mid_outdoor))
+                space_kwh = space_kw * dt_h
+
+        # DHW: positive tank-temp ramp + standing-loss replacement (the heat
+        # pump fights losses even when the observed tank temp is flat).
+        # Without the loss term we undercount by ~50-70 % vs Onecta because
+        # most "DHW heating" replaces continuous loss to the room, not the
+        # comparatively-rare reheat events.
+        dhw_kwh = 0.0
+        ta, tb = a.get("tank_temp_c"), b.get("tank_temp_c")
+        if ta is not None and tb is not None:
+            mid_tank = (float(ta) + float(tb)) / 2.0
+            room_temp = a.get("indoor_temp_c") or b.get("indoor_temp_c") or _TANK_ROOM_TEMP_REF_C
+            dt_room = max(0.0, mid_tank - float(room_temp))
+            # Standing loss component — always present (heat leaks 24/7).
+            loss_thermal_kwh = (
+                _TANK_STANDING_LOSS_KWH_PER_K_L_H * dt_room * tank_litres * dt_h
+            )
+            # Ramp component — explicit ΔT × m × c when tank climbs.
+            delta_c = float(tb) - float(ta)
+            ramp_thermal_kwh = (
+                tank_litres * _C_WATER_KWH_PER_KG_K * delta_c
+                if delta_c > _TANK_DELTA_NOISE_C else 0.0
+            )
+            thermal_kwh = ramp_thermal_kwh + loss_thermal_kwh
+            if thermal_kwh > 0:
+                # DHW COP = space COP × penalty (0.5 default — DHW supply
+                # LWT is higher than space heat, so COP is worse).
+                space_cop = cop_at_temperature(cop_curve, mid_outdoor) if mid_outdoor is not None else 3.0
+                dhw_cop = max(1.5, space_cop * dhw_penalty)
+                dhw_kwh = thermal_kwh / dhw_cop
+
+        mid_epoch = (float(a["fetched_at"]) + float(b["fetched_at"])) / 2.0
+        bi = _bucket_of(mid_epoch)
+        if bi < 0:
+            continue
+        slot = buckets.setdefault(bi, {"kwh_heating": 0.0, "kwh_dhw": 0.0})
+        slot["kwh_heating"] += space_kwh
+        slot["kwh_dhw"] += dhw_kwh
+
+    for slot in buckets.values():
+        slot["kwh_heating"] = round(slot["kwh_heating"], 3)
+        slot["kwh_dhw"] = round(slot["kwh_dhw"], 3)
+        slot["kwh_total"] = round(slot["kwh_heating"] + slot["kwh_dhw"], 3)
+
+    return buckets
+
+
+def sync_daikin_2hourly_telemetry(date_obj) -> dict:
+    """Compute telemetry-integral 2h buckets for *date_obj* and upsert into
+    ``daikin_consumption_2hourly`` with ``source='telemetry_integral'``.
+
+    Reconciliation with existing Onecta rows:
+      * If no row exists for ``(date, bucket_idx)`` → write telemetry value.
+      * If existing row is ``source='onecta_cache'`` and its integer kwh_total
+        equals 0 while telemetry shows > 0.2 kWh → write telemetry value
+        (Onecta missed sub-integer activity, which is the whole point).
+      * If existing row is ``onecta_cache`` and the integer differs from
+        telemetry by less than 0.5 kWh → write telemetry value (refines
+        the rounded integer to a real decimal).
+      * If existing row is ``onecta_cache`` and disagrees by ≥ 0.5 kWh →
+        leave Onecta in place (it's measured at the inverter; trust it).
+      * If existing row is already ``telemetry_integral`` → overwrite
+        unconditionally (re-running the integral with more telemetry).
+
+    Returns ``{"written": N, "skipped": M, "buckets": [...]}``.
+    """
+    from datetime import date as _date
+
+    from .. import db as _db
+
+    if not isinstance(date_obj, _date):
+        raise ValueError("date_obj must be a datetime.date")
+
+    buckets = compute_daikin_2hourly_telemetry(date_obj)
+    if not buckets:
+        return {"written": 0, "skipped": 0, "buckets": []}
+
+    iso = date_obj.isoformat()
+    written = 0
+    skipped = 0
+    detail: list[dict] = []
+
+    with _db._lock:
+        conn = _db.get_connection()
+        try:
+            existing_rows = conn.execute(
+                """SELECT bucket_idx, kwh_total, source
+                   FROM daikin_consumption_2hourly WHERE date = ?""",
+                (iso,),
+            ).fetchall()
+            existing = {int(r[0]): {"kwh_total": float(r[1] or 0), "source": r[2]}
+                        for r in existing_rows}
+        finally:
+            conn.close()
+
+    for bi, slot in buckets.items():
+        tele_total = slot["kwh_total"]
+        ex = existing.get(bi)
+        write = False
+        reason = ""
+        if ex is None:
+            write = True
+            reason = "no_existing_row"
+        elif ex["source"] == "telemetry_integral":
+            write = True
+            reason = "refresh_telemetry"
+        elif ex["source"] == "onecta_cache":
+            onecta_int = ex["kwh_total"]
+            if onecta_int == 0 and tele_total > 0.2:
+                write = True
+                reason = "onecta_zero_telemetry_positive"
+            elif abs(onecta_int - tele_total) < 0.5:
+                write = True
+                reason = "refine_integer_to_decimal"
+            else:
+                reason = f"onecta_authoritative (int={onecta_int}, tele={tele_total})"
+        else:
+            write = True
+            reason = "unknown_source_overwrite"
+
+        if write:
+            _db.upsert_daikin_consumption_2hourly(
+                date=iso, bucket_idx=bi,
+                kwh_total=tele_total,
+                kwh_heating=slot["kwh_heating"],
+                kwh_dhw=slot["kwh_dhw"],
+                source="telemetry_integral",
+            )
+            written += 1
+        else:
+            skipped += 1
+        detail.append({"bucket_idx": bi, **slot, "decision": reason})
+
+    return {"written": written, "skipped": skipped, "buckets": detail}
+
+

@@ -111,7 +111,25 @@ export function EnergyChartWidget({ execution }: EnergyChartWidgetProps) {
   }, [granularity]);
 
   const dayHasSlots = granularity === "day" && !!execution?.slots?.length;
-  const daikinDhwSource = granularity === "day" && daikin?.buckets?.some((b) => (b.kwh_total ?? 0) > 0);
+  // Detect which source dominates the Daikin buckets — surfaced in the flag
+  // text so the user knows whether they're reading an Onecta integer or
+  // a telemetry-integral decimal refinement.
+  const sourceCounts = (daikin?.buckets ?? []).reduce(
+    (acc, b) => {
+      const s = b.source || "";
+      if (s) acc[s] = (acc[s] ?? 0) + 1;
+      return acc;
+    },
+    {} as Record<string, number>,
+  );
+  const daikinSourceLabel =
+    sourceCounts["telemetry_integral"] && !sourceCounts["onecta_cache"]
+      ? "telemetry-integral (sub-integer precision)"
+      : sourceCounts["telemetry_integral"] && sourceCounts["onecta_cache"]
+        ? "mixed Onecta integer + telemetry-integral decimals"
+        : sourceCounts["onecta_cache"]
+          ? "Onecta cache (integer-rounded)"
+          : "physics estimate (no actuals yet)";
 
   // Foot summary — totals + the grid-only cost view.
   const summary = period
@@ -164,9 +182,9 @@ export function EnergyChartWidget({ execution }: EnergyChartWidgetProps) {
       )}
       {granularity === "day" && dayHasSlots && (
         <div class="echart-flag">
-          Day view: Daikin {daikinDhwSource ? "(actual from Onecta)" : "(physics estimate)"} /
-          Residual stacked, + <strong>realised grid cost</strong>. Per-slot
-          solar / import / export are not yet captured — see #424.
+          Day view: Daikin <strong>{daikinSourceLabel}</strong> / Residual stacked,
+          + <strong>realised grid cost</strong>. Per-slot solar / import / export
+          are not yet captured — see #424.
         </div>
       )}
 
