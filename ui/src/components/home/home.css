@@ -9,6 +9,13 @@
   gap: var(--space-4);
 }
 
+/* Semantic bands — wider gap between LIVE / MONEY / ENERGY groups so the
+ * eye can skim them as three distinct surfaces. No visible labels (Apple-
+ * style) — the wider gap + section-local accent tones do the grouping. */
+.widget-band + .widget-band {
+  margin-top: var(--space-5);
+}
+
 /* Coming-up timeline — used by PlanPreview */
 .home-coming-empty {
   padding: var(--space-4);

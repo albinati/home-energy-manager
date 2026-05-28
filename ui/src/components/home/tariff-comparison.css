@@ -61,7 +61,7 @@
 }
 .tcomp-row {
   display: grid;
-  grid-template-columns: 1.8fr 0.9fr 0.7fr 0.7fr;
+  grid-template-columns: 1.8fr 0.9fr 1fr 0.7fr;
   gap: var(--space-2);
   align-items: center;
   padding: var(--space-2) var(--space-3);
@@ -124,9 +124,22 @@
   font-size: var(--font-xs);
 }
 .tcomp-cell-standing { color: var(--text-mute); }
-.tcomp-cell-annual {
-  font-weight: 700;
+.tcomp-cell-period {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
   text-align: right;
+}
+.tcomp-cell-period strong {
+  font-weight: 800;
+  font-size: var(--font-md);
+  color: var(--text);
+}
+.tcomp-cell-annual {
+  font-size: 0.65rem;
+  color: var(--text-mute);
+  font-weight: 500;
 }
 .tcomp-cell-delta {
   text-align: right;
@@ -148,7 +161,7 @@
 
 @media (max-width: 540px) {
   .tcomp-row {
-    grid-template-columns: 1.4fr 0.8fr 0.8fr;
+    grid-template-columns: 1.4fr 1fr 0.8fr;
   }
   .tcomp-cell-rate { display: none; }
 }

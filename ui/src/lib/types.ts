@@ -482,4 +482,12 @@ export interface MetricsResponse {
   today_strategy?: string;
   cheap_threshold_pence?: number;
   peak_threshold_pence?: number;
+  // FIXED_TARIFF_* from env — empty/0 when the household hasn't configured
+  // a "previous fixed contract" comparison. Used by TariffComparison to
+  // replay BG Fixed v58 (etc.) against the real-usage block.
+  fixed_tariff?: {
+    label?: string | null;
+    rate_pence?: number | null;
+    standing_pence_per_day?: number | null;
+  };
 }

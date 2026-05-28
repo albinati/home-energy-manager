@@ -110,11 +110,15 @@ export function LivePowerWidget({ state, cockpit, timeline, execution }: LivePow
   );
 }
 
-// Return the next N planned slots whose dispatched kind requires Fox to go
-// into a non-SelfUse mode — force-charge cycles or peak_export windows.
+// Return the next N planned slots whose dispatched kind ACTUALLY translates
+// to a non-SelfUse Fox group (ForceCharge / ForceDischarge). solar_charge
+// and solar_preheat are LP annotations meaning "stay in SelfUse, expect
+// solar to fill the battery naturally" — Fox keeps SelfUse, no upload, so
+// they don't belong on a "scheduled events" strip the user cross-checks
+// against the Fox ESS app.
 function upcomingForced(timeline: SchedulerTimeline, limit: number): TimelineSlot[] {
   const out: TimelineSlot[] = [];
-  const interesting = new Set(["cheap", "negative", "solar_charge", "solar_preheat", "peak_export"]);
+  const interesting = new Set(["cheap", "negative", "peak_export"]);
   for (const s of timeline.planned || []) {
     const k = (s.dispatched_kind || s.lp_kind || "").toLowerCase();
     if (interesting.has(k)) out.push(s);
@@ -125,11 +129,9 @@ function upcomingForced(timeline: SchedulerTimeline, limit: number): TimelineSlo
 
 function labelForKind(k: string | undefined): string {
   switch ((k || "").toLowerCase()) {
-    case "cheap":         return "⚡ charge";
-    case "negative":      return "🔵 charge";
-    case "solar_charge":  return "☀ charge";
-    case "solar_preheat": return "♨ preheat";
-    case "peak_export":   return "💸 export";
+    case "cheap":         return "⚡ ForceCharge";
+    case "negative":      return "🔵 ForceCharge";
+    case "peak_export":   return "💸 ForceDischarge";
     default:              return k || "?";
   }
 }

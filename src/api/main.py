@@ -369,6 +369,15 @@ async def api_v1_metrics():
         "today_strategy": (tgt or {}).get("strategy_summary"),
         "cheap_threshold_pence": (tgt or {}).get("cheap_threshold"),
         "peak_threshold_pence": (tgt or {}).get("peak_threshold"),
+        # Fixed-tariff (BG Fixed v58 etc.) config for UI tariff comparison —
+        # lets the UI compute a real-usage replay against the configured
+        # fixed-tariff rates without round-tripping through the engine.
+        # All zero / empty when FIXED_TARIFF_* not configured.
+        "fixed_tariff": {
+            "label": config.FIXED_TARIFF_LABEL or None,
+            "rate_pence": config.FIXED_TARIFF_RATE_PENCE or None,
+            "standing_pence_per_day": config.FIXED_TARIFF_STANDING_PENCE_PER_DAY or None,
+        },
     }
 
 

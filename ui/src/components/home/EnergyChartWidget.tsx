@@ -288,16 +288,24 @@ function optionForPeriod(
       dhw: b.kwh_dhw ?? 0,
     });
   });
-  const daikinLine = points.map((p) => {
+  // Two sub-lines (heating + DHW) instead of a single combined Daikin line.
+  // User asked for the breakdown to be visible everywhere, not just on hover.
+  const daikinHeatLine = points.map((p) => {
     const k = gran === "year" ? p.date.slice(0, 7) : p.date.slice(0, 10);
-    return round1(daikinByKey.get(k)?.total ?? null);
+    const d = daikinByKey.get(k);
+    return d ? round1(d.heat) : null;
+  });
+  const daikinDhwLine = points.map((p) => {
+    const k = gran === "year" ? p.date.slice(0, 7) : p.date.slice(0, 10);
+    const d = daikinByKey.get(k);
+    return d ? round1(d.dhw) : null;
   });
 
   return {
     ...base,
     legend: {
       ...(base.legend as object),
-      data: ["Solar", "Discharge", "Grid Import", "Charge", "Grid Export", "Load", "Daikin"],
+      data: ["Solar", "Discharge", "Grid Import", "Charge", "Grid Export", "Load", "Daikin heating", "Daikin DHW"],
     },
     xAxis: { ...(base.xAxis as object), data: labels },
     yAxis: [{ ...(base.yAxis as object), name: "kWh", nameTextStyle: { color: t.textDim, fontSize: 10 } }],
@@ -319,15 +327,26 @@ function optionForPeriod(
         itemStyle: { color: t.house, borderColor: t.bg, borderWidth: 1 },
       },
       {
-        name: "Daikin",
+        name: "Daikin heating",
         type: "line",
-        data: daikinLine,
+        data: daikinHeatLine,
         smooth: true,
         symbol: "circle",
         symbolSize: 4,
         z: 11,
         lineStyle: { color: t.warn, width: 2, type: "dashed" },
         itemStyle: { color: t.warn },
+      },
+      {
+        name: "Daikin DHW",
+        type: "line",
+        data: daikinDhwLine,
+        smooth: true,
+        symbol: "circle",
+        symbolSize: 4,
+        z: 11,
+        lineStyle: { color: t.pv, width: 2, type: "dotted", opacity: 0.85 },
+        itemStyle: { color: t.pv },
       },
     ],
   };
@@ -349,23 +368,29 @@ function seriesBar(name: string, data: number[], color: string, stack: string, o
 // Each bucket covers 2 local-time hours; we spread its kWh evenly over the
 // four 30-min slots inside it. Local-day boundary handling is approximate
 // (within an hour at BST/GMT); fine-grained alignment lands when the backend
-// writes per-slot Daikin directly.
-function daikinKwhBySlotIso(daikin: DaikinConsumptionResponse | null, slots: ExecutionSlot[]): Map<string, number> {
-  const out = new Map<string, number>();
+// writes per-slot Daikin directly. Returns separate heating + DHW so the
+// day-view chart can stack them as distinct segments.
+interface DaikinSplitPerSlot {
+  total: number;
+  heating: number;
+  dhw: number;
+}
+
+function daikinSplitBySlotIso(daikin: DaikinConsumptionResponse | null, slots: ExecutionSlot[]): Map<string, DaikinSplitPerSlot> {
+  const out = new Map<string, DaikinSplitPerSlot>();
   if (!daikin || !daikin.buckets?.length) return out;
   if (!slots.length) return out;
-  // The 'when' field for a day-period bucket is YYYY-MM-DDTHH:00 (no tz). We
-  // approximate "local hour 0" as UTC midnight of the same calendar date,
-  // good enough for visual comparison.
   for (const b of daikin.buckets) {
     if (!b.when || (b.kwh_total ?? 0) <= 0) continue;
     const baseUtc = new Date(b.when + "Z");
     if (Number.isNaN(baseUtc.getTime())) continue;
-    const per30 = (b.kwh_total ?? 0) / 4;
+    const totPer30  = (b.kwh_total   ?? 0) / 4;
+    const heatPer30 = (b.kwh_heating ?? 0) / 4;
+    const dhwPer30  = (b.kwh_dhw     ?? 0) / 4;
     for (let k = 0; k < 4; k++) {
       const slotDt = new Date(baseUtc.getTime() + k * 30 * 60 * 1000);
       const iso = slotDt.toISOString().replace(/\.\d{3}Z$/, "Z").replace(/T(\d{2}):(\d{2}):\d{2}Z/, "T$1:$2:00Z");
-      out.set(iso, per30);
+      out.set(iso, { total: totPer30, heating: heatPer30, dhw: dhwPer30 });
     }
   }
   return out;
@@ -379,25 +404,31 @@ function optionForDay(
   const base = baseOption();
   const slots = (exec?.slots || []).slice().sort((a, b) => (a.slot_utc ?? "").localeCompare(b.slot_utc ?? ""));
   const labels = slots.map((s) => formatSlotLabel(s.slot_utc));
-  const actualBySlot = daikinKwhBySlotIso(daikinConsumption, slots);
+  const splitBySlot = daikinSplitBySlotIso(daikinConsumption, slots);
 
-  // Prefer Onecta actuals client-side too — clamp to the slot's measured
-  // load so the stack stays consistent with consumption_kwh.
-  const daikinPerSlot = slots.map((s) => {
-    const a = s.slot_utc ? actualBySlot.get(s.slot_utc) : undefined;
-    const load = s.consumption_kwh ?? 0;
-    const physicsFromExec = s.daikin_kwh_est ?? 0;
-    const pick = a != null ? a : physicsFromExec;
-    return round2(Math.min(pick, load));
+  // Three-segment load stack — DHW (lightest) + Heating + Residual. When
+  // we only have a single Daikin total (e.g. physics-estimate fallback
+  // where heating/DHW split isn't known), bucket the unknown share into
+  // Heating so the visual sums match consumption_kwh.
+  const dhwPerSlot = slots.map((s) => {
+    const split = s.slot_utc ? splitBySlot.get(s.slot_utc) : undefined;
+    return round2(split?.dhw ?? 0);
+  });
+  const heatingPerSlot = slots.map((s) => {
+    const split = s.slot_utc ? splitBySlot.get(s.slot_utc) : undefined;
+    if (split) return round2(split.heating);
+    // Fallback: whole physics estimate goes into Heating
+    return round2(s.daikin_kwh_est ?? 0);
   });
   const residualPerSlot = slots.map((s, i) => {
     const load = s.consumption_kwh ?? 0;
-    return round2(Math.max(0, load - daikinPerSlot[i]));
+    const daikin = (dhwPerSlot[i] ?? 0) + (heatingPerSlot[i] ?? 0);
+    return round2(Math.max(0, load - daikin));
   });
 
   return {
     ...base,
-    legend: { ...(base.legend as object), data: ["Daikin", "Residual", "Realised grid cost"] },
+    legend: { ...(base.legend as object), data: ["Daikin DHW", "Daikin heating", "Residual", "Realised grid cost"] },
     xAxis: { ...(base.xAxis as object), data: labels },
     yAxis: [
       { ...(base.yAxis as object), name: "kWh",  position: "left" },
@@ -411,10 +442,18 @@ function optionForDay(
     ],
     series: [
       {
-        name: "Daikin",
+        name: "Daikin DHW",
         type: "bar",
         stack: "load",
-        data: daikinPerSlot,
+        data: dhwPerSlot,
+        itemStyle: { color: t.pv, opacity: 0.85 },
+        emphasis: { focus: "series" },
+      },
+      {
+        name: "Daikin heating",
+        type: "bar",
+        stack: "load",
+        data: heatingPerSlot,
         itemStyle: { color: t.warn, opacity: 0.9 },
         emphasis: { focus: "series" },
       },
