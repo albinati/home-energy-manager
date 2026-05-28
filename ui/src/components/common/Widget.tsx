@@ -1,4 +1,5 @@
 import type { ComponentChildren } from "preact";
+import { WidgetBoundary } from "./WidgetBoundary";
 import "./widget.css";
 
 export type WidgetSize = "medium" | "large" | "wide";
@@ -29,6 +30,8 @@ export function Widget({
   children,
   class: cls = "",
 }: WidgetProps) {
+  // The title is usually a plain string — use it to label the error fallback.
+  const label = typeof title === "string" ? title : undefined;
   return (
     <section class={`widget widget--${size} widget--tone-${tone} ${cls}`}>
       <span class="widget-accent" aria-hidden="true" />
@@ -42,7 +45,9 @@ export function Widget({
           {action}
         </div>
       </header>
-      <div class="widget-body">{children}</div>
+      <div class="widget-body">
+        <WidgetBoundary label={label}>{children}</WidgetBoundary>
+      </div>
     </section>
   );
 }

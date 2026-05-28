@@ -66,9 +66,32 @@ export async function hemFetch(path: string, init?: FetchInit): Promise<Response
   return resp;
 }
 
+// In-flight GET coalescing. When several widgets request the same endpoint
+// on the same paint (e.g. /daikin/quota from both the Heating widget and the
+// footer chips), share ONE network request instead of firing duplicates.
+// Keyed by path; the entry is cleared as soon as the promise settles, so this
+// is a coalescer for concurrent calls, NOT a response cache — staleness is
+// still governed by the polling hooks.
+const _inflightGets = new Map<string, Promise<unknown>>();
+
 export async function getJson<T>(path: string, init?: FetchInit): Promise<T> {
-  const r = await hemFetch(path, init);
-  return r.json() as Promise<T>;
+  // Only coalesce plain GETs with no custom init (the common widget case).
+  // Anything with a custom body/headers bypasses the cache to stay correct.
+  const coalescable = !init || (!init.body && !init.method);
+  if (coalescable) {
+    const existing = _inflightGets.get(path);
+    if (existing) return existing as Promise<T>;
+  }
+  const p = hemFetch(path, init).then((r) => r.json() as Promise<T>);
+  if (coalescable) {
+    _inflightGets.set(path, p);
+    p.finally(() => {
+      // Clear only if this is still the tracked promise (avoid evicting a
+      // newer in-flight request that replaced ours).
+      if (_inflightGets.get(path) === p) _inflightGets.delete(path);
+    });
+  }
+  return p;
 }
 
 export async function postJson<T>(

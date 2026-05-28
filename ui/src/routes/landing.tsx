@@ -1,4 +1,5 @@
 import { useEffect, useState } from "preact/hooks";
+import { lazy, Suspense } from "preact/compat";
 import { usePoll, useFetch } from "../lib/poll";
 import {
   getCockpitNow,
@@ -25,9 +26,14 @@ import { TodayBillWidget } from "../components/home/TodayBillWidget";
 import { EfficiencyWidget } from "../components/home/EfficiencyWidget";
 import { HeatingWidget } from "../components/home/HeatingWidget";
 import { TariffComparisonWidget } from "../components/home/TariffComparisonWidget";
-import { EnergyChartWidget } from "../components/home/EnergyChartWidget";
 import type { MonthlyEnergy } from "../lib/types";
 import "../components/home/home.css";
+
+// Energy chart owns the echarts dependency (~193 KB gzip). Lazy-load it so
+// the hero + money tiles paint immediately and the chart streams in after.
+const EnergyChartWidget = lazy(() =>
+  import("../components/home/EnergyChartWidget").then((m) => ({ default: m.EnergyChartWidget })),
+);
 
 function lastMonths(n: number): string[] {
   const now = new Date();
@@ -147,7 +153,9 @@ export default function Landing() {
       {/* ── ENERGY ─────────────────────────────────────────────────── */}
       <div class="widget-grid widget-band">
         <Widget title="Energy flow" icon="📈" tone="power" size="wide">
-          <EnergyChartWidget execution={execution.data} />
+          <Suspense fallback={<Spinner label="Loading chart…" />}>
+            <EnergyChartWidget execution={execution.data} />
+          </Suspense>
         </Widget>
       </div>
     </div>
