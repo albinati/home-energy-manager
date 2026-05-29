@@ -35,6 +35,10 @@ def reset_service_state(monkeypatch):
     monkeypatch.setattr(daikin_service, "_devices_fetched_wall", None, raising=False)
     monkeypatch.setattr(daikin_service, "_devices_stale", False, raising=False)
     monkeypatch.setattr(daikin_service, "_cold_start_quota_logged", False, raising=False)
+    # Cold-start backoff global (added with the quota-safe caching refactor) —
+    # must also reset or it leaks between tests and short-circuits the cold-start
+    # fetch path into the backoff branch.
+    monkeypatch.setattr(daikin_service, "_cold_start_failed_at", None, raising=False)
     yield
 
 
