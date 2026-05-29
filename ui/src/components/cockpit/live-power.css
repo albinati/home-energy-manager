@@ -288,3 +288,10 @@
 .livepower-fox-debug strong { color: var(--text-dim); font-weight: 700; }
 
 :root.hem-reduce-motion .livepower-hero-num { animation: none; transform: none; }
+
+/* Caption under the net-grid hero number — explains what the kW figure means. */
+.livepower-hero-cap {
+  margin-top: 2px;
+  font-size: var(--font-xs);
+  color: var(--text-mute);
+}

@@ -38,7 +38,12 @@ export function LivePowerWidget({ state, cockpit, timeline, execution, agile, me
   const gridKw = state.grid_kw;
   const importing = gridKw > 0.05;
   const exporting = gridKw < -0.05;
-  const netLabel = importing ? "IMPORTING" : exporting ? "EXPORTING" : "BALANCED";
+  const netLabel = importing ? "IMPORTING" : exporting ? "EXPORTING" : "SELF-SUPPLIED";
+  // One-line caption so the big kW number reads unambiguously as grid power,
+  // and "self-supplied" (formerly "balanced") is explained.
+  const netCaption = importing ? "drawn from the grid"
+    : exporting ? "sent to the grid"
+    : "no grid flow — solar + battery are covering the house";
   const netColor = importing ? "var(--import)" : exporting ? "var(--export)" : "var(--text-dim)";
   const netKwAnim = useAnimatedNumber(Math.abs(gridKw));
   const socAnim = useAnimatedNumber(socPct);
@@ -70,6 +75,7 @@ export function LivePowerWidget({ state, cockpit, timeline, execution, agile, me
           {netKwAnim != null ? netKwAnim.toFixed(2) : "—"}
           <span class="livepower-hero-unit">kW</span>
         </div>
+        <div class="livepower-hero-cap">{netCaption}</div>
       </div>
 
       {/* Quiet action verb — supporting copy beneath the hero */}
