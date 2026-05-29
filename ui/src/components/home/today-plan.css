@@ -42,6 +42,7 @@
   height: 12px;
   border-radius: 3px;
 }
-.today-plan-band--charge::before { background: color-mix(in srgb, var(--cheap) 35%, transparent); }
-.today-plan-band--discharge::before { background: color-mix(in srgb, var(--peak) 35%, transparent); }
+.today-plan-band--cheap::before { background: color-mix(in srgb, var(--cheap) 35%, transparent); }
+.today-plan-band--peak::before { background: color-mix(in srgb, var(--peak) 35%, transparent); }
+.today-plan-band--neg::before { background: color-mix(in srgb, var(--neg-price, #2563eb) 35%, transparent); }
 .today-plan-band-hint { margin-left: auto; }

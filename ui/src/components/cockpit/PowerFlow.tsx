@@ -145,9 +145,13 @@ function BackgroundEdge({ href }: { href: string }) {
 
 function ActiveEdge({ pathId, w, colorVar }: { pathId: string; w: number; colorVar: string }) {
   if (w < ACTIVATION_W) return null;
-  // kW → speed + density + size. Faster + denser + slightly larger = more power.
-  const dur = Math.max(0.7, Math.min(2.6, 3200 / w));
-  const particleCount = w > 2000 ? 4 : w > 1000 ? 3 : w > 400 ? 2 : 1;
+  // kW → speed + density + size. Particle travel time ∝ 1/power, so higher
+  // flow = visibly faster particles. Wide range (0.5s–3.0s) and a low fast-end
+  // clamp so a >4 kW import/export streams noticeably quicker than 2 kW, which
+  // is quicker than 1 kW (operator-requested proportional motion).
+  //   ~800 W → 3.0s · 1 kW → 2.4s · 2 kW → 1.2s · 4 kW → 0.6s · ≥4.8 kW → 0.5s
+  const dur = Math.max(0.5, Math.min(3.0, 2400 / w));
+  const particleCount = w > 3000 ? 5 : w > 2000 ? 4 : w > 1000 ? 3 : w > 400 ? 2 : 1;
   const r = 3 + Math.min(1.5, w / 3000);
   const glowOpacity = 0.35 + Math.min(0.25, w / 4000);
 

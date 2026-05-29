@@ -117,6 +117,10 @@ export interface PvTodaySlot {
   import_price_p?: number | null;
   base_load_kwh?: number | null;
   kind?: string | null;
+  // Heating plan: dhw_policy tank-temp trajectory (°C at slot start) + planned
+  // DHW heat-pump energy that slot. null when vacation mode / policy off.
+  tank_target_c?: number | null;
+  dhw_load_kwh?: number | null;
 }
 
 export interface PvTodayAccuracy {
