@@ -143,21 +143,21 @@ export default function Landing() {
         </Widget>
       </div>
 
-      {/* ── MONEY ──────────────────────────────────────────────────── */}
-      <div class="widget-grid widget-band">
-        <Widget title="Tariff comparison" icon="📊" tone="savings" size="wide"
-                badge={tariffDash.data?.usage?.total_days ? `last ${tariffDash.data.usage.total_days}d of your usage` : undefined}
-                action={<RefreshAction onRefresh={tariffDash.refresh} loading={tariffDash.loading} />}>
-          <TariffComparisonWidget dashboard={tariffDash.data} dashboardLoading={tariffDash.loading} metrics={metrics.data} monthPeriod={monthPeriod.data} monthPeriodLoading={monthPeriod.loading} />
-        </Widget>
-      </div>
-
       {/* ── ENERGY ─────────────────────────────────────────────────── */}
       <div class="widget-grid widget-band">
         <Widget title="Energy flow" icon="📈" tone="power" size="wide">
           <Suspense fallback={<Spinner label="Loading chart…" />}>
             <EnergyChartWidget execution={execution.data} />
           </Suspense>
+        </Widget>
+      </div>
+
+      {/* ── MONEY (bottom of page) ─────────────────────────────────── */}
+      <div class="widget-grid widget-band">
+        <Widget title="Tariff comparison" icon="📊" tone="savings" size="wide"
+                badge={tariffDash.data?.usage?.total_days ? `last ${tariffDash.data.usage.total_days}d of your usage` : undefined}
+                action={<RefreshAction onRefresh={tariffDash.refresh} loading={tariffDash.loading} />}>
+          <TariffComparisonWidget dashboard={tariffDash.data} dashboardLoading={tariffDash.loading} metrics={metrics.data} monthPeriod={monthPeriod.data} monthPeriodLoading={monthPeriod.loading} />
         </Widget>
       </div>
     </div>

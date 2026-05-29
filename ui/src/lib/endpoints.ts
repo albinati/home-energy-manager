@@ -21,6 +21,7 @@ import type {
   TariffDashboardResponse,
   PeriodInsightsResponse,
   DaikinConsumptionResponse,
+  DhwScheduleResponse,
   PvTodayResponse,
   OptimizationInputsResponse,
   ActionResult,
@@ -47,6 +48,8 @@ export const getDaikinStatus = () => getJson<DaikinDevice[]>("/daikin/status");
 export const forceRefreshDaikin = () => getJson<DaikinDevice[]>("/daikin/status?refresh=true");
 export const getDaikinQuota = () => getJson<ApiQuotaResponse>("/daikin/quota");
 export const getFoxQuota = () => getJson<ApiQuotaResponse>("/foxess/quota");
+// Today's deterministic DHW tank plan (times + targets). Zero Daikin quota.
+export const getDhwSchedule = () => getJson<DhwScheduleResponse>("/daikin/dhw-schedule");
 
 /* ----- Daikin controls (writes — require DAIKIN_CONTROL_MODE=active) -----
    The UI shows its own confirm dialog, then sends skip_confirmation:true so
@@ -56,6 +59,9 @@ export const setTankTemperature = (temperature: number) =>
   postJson<ActionResult>("/daikin/tank-temperature", { temperature });
 export const setTankPower = (on: boolean) =>
   postJson<ActionResult>("/daikin/tank-power", { on, skip_confirmation: true });
+// Climate (space-heating) zone power — mirrors tank-power.
+export const setClimatePower = (on: boolean) =>
+  postJson<ActionResult>("/daikin/power", { on, skip_confirmation: true });
 export const setLwtOffset = (offset: number) =>
   postJson<ActionResult>("/daikin/lwt-offset", { offset });
 export const setDaikinMode = (mode: DaikinOperationMode) =>

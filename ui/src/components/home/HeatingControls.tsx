@@ -1,8 +1,9 @@
 import { useEffect, useState } from "preact/hooks";
 import type { DaikinDevice, ActionResult } from "../../lib/types";
-import { setTankTemperature, setTankPower, setLwtOffset } from "../../lib/endpoints";
+import { setTankTemperature, setTankPower, setLwtOffset, setClimatePower } from "../../lib/endpoints";
 import { Toggle } from "../common/Inputs";
 import { Modal } from "../common/Modal";
+import { Icon } from "../common/Icon";
 import { toast } from "../../lib/toast";
 
 interface HeatingControlsProps {
@@ -20,10 +21,11 @@ function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
 }
 
-// Manual Daikin controls, modelled on the Onecta app: tank-target dial stepper,
-// DHW power, LWT offset. Locked by default (the heat pump runs on dhw_policy);
-// unlocking requires a confirmation modal — that consent is the gate, so the
-// individual controls then apply directly (no per-action confirm).
+// Manual Daikin controls, modelled on the Onecta app and split into two cards —
+// Climate (space-heating power + leaving-water offset) and Tank/DHW (power +
+// target). Locked by default (the heat pump runs on dhw_policy); unlocking
+// needs a confirmation modal — that consent is the gate, so the controls then
+// apply directly (no per-action confirm).
 export function HeatingControls({ dev, controlMode, onChanged }: HeatingControlsProps) {
   const active = (dev?.control_mode ?? controlMode) === "active";
   const [unlocked, setUnlocked] = useState(false);
@@ -55,7 +57,10 @@ export function HeatingControls({ dev, controlMode, onChanged }: HeatingControls
     }
   };
 
-  const dhwOn = dev?.tank_power ?? false;
+  // Correct power semantics: climate_on / dhw_on are what /daikin/status serves
+  // (tank_power is legacy and never populated → it always read OFF before).
+  const climateOn = dev?.climate_on ?? dev?.is_on ?? false;
+  const tankOn = dev?.dhw_on ?? dev?.tank_power ?? false;
 
   return (
     <div class="heating-controls">
@@ -77,31 +82,46 @@ export function HeatingControls({ dev, controlMode, onChanged }: HeatingControls
         )}
       </div>
 
-      <div class="heating-control-row">
-        <label class="heating-control-label">Tank target</label>
-        <Stepper value={tankTarget} unit="°C" disabled={!editable || busy}
-                 onStep={(d) => setTankTarget((v) => clamp(v + d, TANK_MIN, TANK_MAX))} />
-        <button class="btn btn--sm" disabled={!editable || busy || tankTarget === dev?.tank_target}
-                onClick={() => run(`Tank set to ${tankTarget}°C`, () => setTankTemperature(tankTarget))}>
-          Apply
-        </button>
-      </div>
+      <div class="heating-controls-cards">
+        {/* Climate (space heating) — power + leaving-water offset */}
+        <section class="hc-card">
+          <header class="hc-card-head">
+            <span class="hc-card-icon"><Icon name="power-live" size={14} /></span>
+            <span class="hc-card-title">Climate</span>
+            <span class={`hc-card-state${climateOn ? " is-on" : ""}`}>{climateOn ? "ON" : "OFF"}</span>
+            <Toggle value={climateOn} ariaLabel="Climate power"
+                    onChange={(next) => editable && run(`Climate ${next ? "ON" : "OFF"}`, () => setClimatePower(next))} />
+          </header>
+          <div class="hc-card-body">
+            <span class="hc-card-label">Water offset</span>
+            <Stepper value={lwt} unit="°" step={0.5} disabled={!editable || busy}
+                     onStep={(d) => setLwt((v) => clamp(Math.round((v + d) * 2) / 2, LWT_MIN, LWT_MAX))} />
+            <button class="btn btn--sm hc-apply" disabled={!editable || busy || lwt === dev?.lwt_offset}
+                    onClick={() => run(`LWT offset ${lwt >= 0 ? "+" : ""}${lwt}`, () => setLwtOffset(lwt))}>
+              Apply
+            </button>
+          </div>
+        </section>
 
-      <div class="heating-control-row">
-        <label class="heating-control-label">DHW power</label>
-        <Toggle value={dhwOn} ariaLabel="DHW power"
-                onChange={(next) => editable && run(`DHW ${next ? "ON" : "OFF"}`, () => setTankPower(next))} />
-        <span class="heating-control-state">{dhwOn ? "ON" : "OFF"}</span>
-      </div>
-
-      <div class="heating-control-row">
-        <label class="heating-control-label">LWT offset</label>
-        <Stepper value={lwt} unit="" step={0.5} disabled={!editable || busy}
-                 onStep={(d) => setLwt((v) => clamp(Math.round((v + d) * 2) / 2, LWT_MIN, LWT_MAX))} />
-        <button class="btn btn--sm" disabled={!editable || busy || lwt === dev?.lwt_offset}
-                onClick={() => run(`LWT offset ${lwt >= 0 ? "+" : ""}${lwt}`, () => setLwtOffset(lwt))}>
-          Apply
-        </button>
+        {/* Tank (DHW) — power + target */}
+        <section class="hc-card">
+          <header class="hc-card-head">
+            <span class="hc-card-icon"><Icon name="schedule" size={14} /></span>
+            <span class="hc-card-title">Tank</span>
+            <span class={`hc-card-state${tankOn ? " is-on" : ""}`}>{tankOn ? "ON" : "OFF"}</span>
+            <Toggle value={tankOn} ariaLabel="Tank power"
+                    onChange={(next) => editable && run(`Tank ${next ? "ON" : "OFF"}`, () => setTankPower(next))} />
+          </header>
+          <div class="hc-card-body">
+            <span class="hc-card-label">Target</span>
+            <Stepper value={tankTarget} unit="°C" disabled={!editable || busy}
+                     onStep={(d) => setTankTarget((v) => clamp(v + d, TANK_MIN, TANK_MAX))} />
+            <button class="btn btn--sm hc-apply" disabled={!editable || busy || tankTarget === dev?.tank_target}
+                    onClick={() => run(`Tank set to ${tankTarget}°C`, () => setTankTemperature(tankTarget))}>
+              Apply
+            </button>
+          </div>
+        </section>
       </div>
 
       <Modal open={confirmingUnlock} onClose={() => setConfirmingUnlock(false)} width="sm"

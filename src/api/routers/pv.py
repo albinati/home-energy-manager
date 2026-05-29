@@ -136,25 +136,6 @@ async def get_pv_today(date: str | None = None) -> dict[str, Any]:
     except Exception as e:
         logger.warning("pv/today: dispatch kinds failed (%s)", e)
 
-    # --- Heating plan: the deterministic dhw_policy tank trajectory the LP
-    # pins to (warmup rise during the day, setback fall after the evening
-    # showers). tank_target_c[i] = predicted tank °C at the START of slot i;
-    # dhw_load_kwh[i] = predicted heat-pump electric draw for DHW that slot.
-    # Lets the Home "Today's plan" overlay the heating plan without a 2nd call.
-    tank_c_per_slot: list[float | None] = [None] * _SLOTS_PER_DAY
-    dhw_kwh_per_slot: list[float | None] = [None] * _SLOTS_PER_DAY
-    try:
-        from ... import dhw_policy
-
-        e_dhw, tank_traj = dhw_policy.forecast_dhw_load_per_slot(slot_starts)
-        for i in range(_SLOTS_PER_DAY):
-            if i < len(tank_traj):
-                tank_c_per_slot[i] = round(float(tank_traj[i]), 2)
-            if i < len(e_dhw):
-                dhw_kwh_per_slot[i] = round(float(e_dhw[i]), 4)
-    except Exception as e:  # vacation mode / policy off → no heating-plan line
-        logger.warning("pv/today: dhw policy forecast unavailable (%s)", e)
-
     slots_out: list[dict[str, Any]] = []
     acc_f = acc_a = 0.0
     acc_abs = 0.0
@@ -177,8 +158,6 @@ async def get_pv_today(date: str | None = None) -> dict[str, Any]:
             "import_price_p": price_by_start.get(key),
             "base_load_kwh": round(float(bl), 4) if bl is not None else None,
             "kind": kind_by.get(key),
-            "tank_target_c": tank_c_per_slot[i],
-            "dhw_load_kwh": dhw_kwh_per_slot[i],
         })
         if elapsed and a is not None:
             compared += 1
