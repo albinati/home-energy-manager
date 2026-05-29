@@ -1,7 +1,6 @@
 import type { MetricsResponse, CockpitNow, AgileTodayResponse, MonthlyEnergy, PeriodInsightsResponse } from "../../lib/types";
-import { gbp, gbpSigned, kw, kwh } from "../../lib/format";
+import { gbp, gbpSigned, kwh } from "../../lib/format";
 import { useAnimatedNumber } from "../../lib/useAnimatedNumber";
-import { Icon, type IconName } from "../common/Icon";
 import { CostBreakdownChart } from "./CostBreakdownChart";
 import "./hero.css";
 
@@ -35,8 +34,6 @@ export function Hero({ metrics, metricsLoading, cockpit, agile, monthly, todayPe
 
   const sign = today == null ? "neutral" : today >= 0 ? "positive" : "negative";
 
-  const state = cockpit?.state;
-  const motion = state ? inferMotion(state) : null;
 
   const activeMonths = monthly.filter(
     (m) => (m.cost?.net_cost_pounds ?? 0) !== 0 || (m.energy?.export_kwh ?? 0) > 0,
@@ -132,41 +129,12 @@ export function Hero({ metrics, metricsLoading, cockpit, agile, monthly, todayPe
       </div>
 
       <div class="hero-status">
-        {motion && (
-          <div class="hero-motion">
-            <span class="hero-motion-icon"><Icon name={motion.icon} size={20} /></span>
-            <div class="hero-motion-text">
-              <div class="hero-motion-title">{motion.title}</div>
-              <div class="hero-motion-sub">{motion.sub}</div>
-            </div>
-          </div>
-        )}
-
         <div class="hero-chart">
           <CostBreakdownChart today={todayPeriod} month={monthPeriod} loading={periodsLoading} />
         </div>
       </div>
     </section>
   );
-}
-
-interface Motion { title: string; sub: string; icon: IconName; }
-
-// Branch conditions + kw() value strings UNCHANGED — only emoji → icon names
-// and the per-action colour dropped (icon is monochrome currentColor).
-function inferMotion(s: { grid_kw: number; battery_kw: number; solar_kw: number; load_kw: number }): Motion {
-  const grid = s.grid_kw, batt = s.battery_kw, solar = s.solar_kw, load = s.load_kw, E = 0.1;
-  const importing = grid > E, exporting = grid < -E;
-  const charging = batt > E, discharging = batt < -E;
-  const producing = solar > E;
-  if (discharging && exporting) return { title: "Exporting from battery", sub: `${kw(-batt + Math.max(0, solar))} → grid`, icon: "export" };
-  if (exporting && !discharging) return { title: "Exporting solar", sub: `${kw(-grid)} → grid · ${kw(load)} house`, icon: "export" };
-  if (charging && importing) return { title: "Charging from grid", sub: `${kw(grid)} import · ${kw(batt)} into battery`, icon: "import" };
-  if (charging && producing) return { title: "Charging from solar", sub: `${kw(solar)} solar · ${kw(batt)} into battery`, icon: "solar" };
-  if (discharging) return { title: "Battery → house", sub: `${kw(-batt)} battery · ${kw(load)} load`, icon: "battery" };
-  if (importing) return { title: "Importing from grid", sub: `${kw(grid)} import · ${kw(load)} house`, icon: "import" };
-  if (producing) return { title: "Self-using solar", sub: `${kw(solar)} solar · ${kw(load)} house`, icon: "solar" };
-  return { title: "Holding", sub: `${kw(load)} house · waiting`, icon: "power-live" };
 }
 
 function SkelHero() {

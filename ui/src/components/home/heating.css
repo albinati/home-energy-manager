@@ -111,3 +111,42 @@
 }
 .heating-controls-lock--open { color: var(--warn); border-color: var(--warn); }
 .heating-controls-lock:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Secondary gauges (outdoor / LWT) below the tank dial */
+.heating-gauges--secondary {
+  flex-direction: row;
+  gap: var(--space-4);
+  margin-top: var(--space-2);
+}
+.heating-gauges--secondary > * { flex: 1; min-width: 0; }
+
+/* Onecta-style − value + stepper */
+.heating-stepper {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1;
+}
+.heating-stepper-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-card-2);
+  color: var(--text);
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.heating-stepper-btn:hover:not(:disabled) { background: var(--bg-card-3); border-color: var(--border-strong); }
+.heating-stepper-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.heating-stepper-value {
+  min-width: 3.2rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--text);
+}
