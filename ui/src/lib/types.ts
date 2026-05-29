@@ -117,10 +117,6 @@ export interface PvTodaySlot {
   import_price_p?: number | null;
   base_load_kwh?: number | null;
   kind?: string | null;
-  // Heating plan: dhw_policy tank-temp trajectory (°C at slot start) + planned
-  // DHW heat-pump energy that slot. null when vacation mode / policy off.
-  tank_target_c?: number | null;
-  dhw_load_kwh?: number | null;
 }
 
 export interface PvTodayAccuracy {
@@ -438,8 +434,25 @@ export interface DaikinDevice {
   weather_regulation?: boolean | null;
   control_mode?: string | null;
   state_summary?: string | null;
+  // is_on === climate (space-heating) onOffMode; prefer climate_on / dhw_on
+  // (unambiguous, what /daikin/status actually serves). tank_power is legacy
+  // and NOT populated by the status route — use dhw_on for the tank.
   is_on?: boolean | null;
+  climate_on?: boolean | null;
+  dhw_on?: boolean | null;
   tank_power?: boolean | null;
+}
+
+// Today's deterministic DHW tank plan — GET /api/v1/daikin/dhw-schedule.
+export interface DhwScheduleRow {
+  action_type?: string | null;   // tank_warmup | tank_setback | tank_negative_boost
+  start_utc?: string | null;
+  end_utc?: string | null;
+  tank_temp_c?: number | null;
+}
+export interface DhwScheduleResponse {
+  mode: string;
+  rows: DhwScheduleRow[];
 }
 
 // Daikin operation modes accepted by POST /daikin/mode.

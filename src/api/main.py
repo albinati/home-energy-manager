@@ -1372,6 +1372,39 @@ async def foxess_quota():
     return get_refresh_stats_extended()
 
 
+@app.get("/api/v1/daikin/dhw-schedule")
+async def daikin_dhw_schedule():
+    """Today's deterministic DHW tank plan (dhw_policy) — the programmed
+    warmup / setback / boost rows with their times + tank targets. Pure
+    schedule generation; **zero Daikin quota** (no device read). Powers the
+    Heating widget's "tank plan" list.
+    """
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo
+    from .. import dhw_policy
+
+    try:
+        tz = ZoneInfo(getattr(config, "BULLETPROOF_TIMEZONE", "Europe/London"))
+    except Exception:
+        tz = timezone.utc
+    today_local = _dt.now(tz).date()
+    mode = (getattr(config, "OPTIMIZATION_PRESET", "normal") or "normal").strip().lower()
+    rows_out: list[dict] = []
+    try:
+        rows = dhw_policy.generate_daily_tank_schedule(today_local)
+        for r in rows:
+            params = r.get("params") or {}
+            rows_out.append({
+                "action_type": r.get("action_type"),
+                "start_utc": r.get("start_time"),
+                "end_utc": r.get("end_time"),
+                "tank_temp_c": params.get("tank_temp"),
+            })
+    except Exception as e:
+        logger.warning("dhw-schedule: generation failed (%s)", e)
+    return {"mode": mode, "rows": rows_out}
+
+
 @app.get("/api/v1/daikin/consumption")
 async def daikin_consumption(
     period: str = "week",

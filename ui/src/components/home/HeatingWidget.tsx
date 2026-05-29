@@ -9,7 +9,8 @@ import type {
 } from "../../lib/types";
 import { useState, useEffect } from "preact/hooks";
 import { kwh, relTime } from "../../lib/format";
-import { forceRefreshDaikin } from "../../lib/endpoints";
+import { forceRefreshDaikin, getDhwSchedule } from "../../lib/endpoints";
+import type { DhwScheduleRow } from "../../lib/types";
 import { Pill } from "../common/Pill";
 import { Gauge } from "../common/Gauge";
 import { RadialGauge } from "../common/RadialGauge";
@@ -84,7 +85,16 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather, exe
   // status via the tank/space rows themselves (ON/OFF), not a "mode" chip.
   const tankTemp = state.tank_c ?? dev?.tank_temp ?? null;
   const tankTarget = dev?.tank_target ?? null;
-  const tankPower = dev?.tank_power ?? null;
+  // dhw_on is what /daikin/status serves; tank_power is legacy (never populated).
+  const tankPower = dev?.dhw_on ?? dev?.tank_power ?? null;
+
+  // Today's deterministic tank plan (times + targets) — dhw_policy, zero quota.
+  const [schedule, setSchedule] = useState<DhwScheduleRow[]>([]);
+  useEffect(() => {
+    let alive = true;
+    getDhwSchedule().then((r) => { if (alive) setSchedule(r.rows || []); }).catch(() => {});
+    return () => { alive = false; };
+  }, []);
 
   // LWT: latest execution slot first, then live cockpit state.
   const lwtFromExec = latestExecValue(execution, (s) => s.daikin_lwt_c);
@@ -175,6 +185,22 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather, exe
         </div>
       )}
 
+      {schedule.length > 0 && (
+        <div class="heating-plan">
+          <div class="heating-plan-title">Tank plan · today</div>
+          <ul class="heating-plan-list">
+            {schedule.map((r, i) => (
+              <li key={i} class={`heating-plan-row heating-plan-row--${planKind(r.action_type)}`}>
+                <span class="heating-plan-dot" />
+                <span class="heating-plan-when">{planTime(r.start_utc)}</span>
+                <span class="heating-plan-label">{planLabel(r.action_type)}</span>
+                <span class="heating-plan-temp">{r.tank_temp_c != null ? `${r.tank_temp_c}°C` : "—"}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       <HeatingControls dev={dev} controlMode={daikinQuota?.control_mode} onChanged={() => onRefresh?.()} />
 
       <Modal open={confirmingRefresh} onClose={() => { setConfirmingRefresh(false); setRefreshError(null); }} width="sm"
@@ -198,6 +224,25 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather, exe
       </Modal>
     </div>
   );
+}
+
+function planKind(action?: string | null): string {
+  if (action === "tank_setback") return "setback";
+  if (action === "tank_negative_boost") return "boost";
+  return "warmup";
+}
+function planLabel(action?: string | null): string {
+  switch (action) {
+    case "tank_setback": return "Setback";
+    case "tank_negative_boost": return "Boost (neg price)";
+    case "tank_warmup": return "Warmup";
+    default: return action || "—";
+  }
+}
+function planTime(iso?: string | null): string {
+  if (!iso) return "—";
+  try { return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }); }
+  catch { return "—"; }
 }
 
 function latestExecValue(

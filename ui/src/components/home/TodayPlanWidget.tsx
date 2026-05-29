@@ -56,8 +56,6 @@ export function TodayPlanWidget({ pv, loading, cheapThresholdP, peakThresholdP }
     const pvActual = slots.map((s) => (s.pv_actual_kwh == null ? null : round2(s.pv_actual_kwh)));
     const load = slots.map((s) => (s.base_load_kwh == null ? null : round2(s.base_load_kwh)));
     const price = slots.map((s) => (s.import_price_p == null ? null : s.import_price_p));
-    const tank = slots.map((s) => (s.tank_target_c == null ? null : round2(s.tank_target_c)));
-    const hasTank = tank.some((v) => v != null);
 
     // --- Rate-tier background bands. Classify each slot by import price into
     // negative / cheap / peak (standard → no shade), then shade contiguous
@@ -110,14 +108,13 @@ export function TodayPlanWidget({ pv, loading, cheapThresholdP, peakThresholdP }
 
     chartRef.current.setOption({
       ...base,
-      // Extra right margin for the second (°C) axis; legend pinned bottom so it
-      // never collides with the top axis labels or the plot.
-      grid: { left: 16, right: hasTank ? 64 : 44, top: 16, bottom: 44, containLabel: true },
+      // Legend pinned bottom so it never collides with the top axis labels or
+      // the plot (the caption-overlap fix).
+      grid: { left: 16, right: 44, top: 16, bottom: 44, containLabel: true },
       legend: {
         ...(base.legend as object),
         show: true, top: undefined, right: undefined, bottom: 4, left: "center",
-        data: ["PV actual", "PV planned", "Load forecast", "Heating plan (tank °C)", "Import price"]
-          .filter((n) => hasTank || n !== "Heating plan (tank °C)"),
+        data: ["PV actual", "PV planned", "Load forecast", "Import price"],
       },
       tooltip: {
         ...(base.tooltip as object),
@@ -130,8 +127,7 @@ export function TodayPlanWidget({ pv, loading, cheapThresholdP, peakThresholdP }
             (price[i] != null ? `Import ${price[i]!.toFixed(1)}p/kWh<br/>` : "") +
             `PV planned ${pvPlanned[i].toFixed(2)} kWh<br/>` +
             (pvActual[i] != null ? `PV actual ${pvActual[i]!.toFixed(2)} kWh<br/>` : "") +
-            (load[i] != null ? `Load ${load[i]!.toFixed(2)} kWh<br/>` : "") +
-            (tank[i] != null ? `Tank target ${tank[i]!.toFixed(0)}°C` : "");
+            (load[i] != null ? `Load ${load[i]!.toFixed(2)} kWh` : "");
         },
       },
       xAxis: { ...(base.xAxis as object), data: labels, axisLabel: { color: t.textMute, fontSize: 10, interval: 5 } },
@@ -141,12 +137,6 @@ export function TodayPlanWidget({ pv, loading, cheapThresholdP, peakThresholdP }
           ...(base.yAxis as object),
           position: "right", splitLine: { show: false },
           axisLabel: { color: t.textMute, fontSize: 10, formatter: "{value}p" },
-        },
-        {
-          ...(base.yAxis as object),
-          position: "right", offset: 40, splitLine: { show: false },
-          min: 35, max: 62,
-          axisLabel: { color: withAlpha(t.thermal, 0.85), fontSize: 10, formatter: "{value}°" },
         },
       ],
       series: [
@@ -180,12 +170,6 @@ export function TodayPlanWidget({ pv, loading, cheapThresholdP, peakThresholdP }
           name: "Load forecast", type: "line", smooth: true, showSymbol: false, color: t.grid,
           data: load, lineStyle: { color: t.grid, width: 1.5, type: "dashed" }, z: 3,
         },
-        ...(hasTank ? [{
-          name: "Heating plan (tank °C)", type: "line", smooth: true, showSymbol: false, color: t.thermal,
-          yAxisIndex: 2, data: tank, connectNulls: true,
-          lineStyle: { color: t.thermal, width: 2, cap: "round" },
-          z: 3,
-        }] : []),
         {
           name: "Import price", type: "line", step: "middle", showSymbol: false, color: t.importColor,
           yAxisIndex: 1, data: price, lineStyle: { color: t.importColor, width: 1.5, opacity: 0.75 }, z: 1,

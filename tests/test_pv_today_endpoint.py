@@ -51,9 +51,7 @@ def test_pv_today_shape_and_accuracy():
     assert len(resp["slots"]) == 48
     # Every slot carries the full overlay key set; forecast is 0 (no provider
     # in test); price/load/kind are null (no rates/profile/runs seeded).
-    # tank_target_c / dhw_load_kwh come from the dhw_policy heating-plan forecast.
-    expected_keys = {"slot_utc", "pv_forecast_kwh", "pv_actual_kwh", "import_price_p",
-                     "base_load_kwh", "kind", "tank_target_c", "dhw_load_kwh"}
+    expected_keys = {"slot_utc", "pv_forecast_kwh", "pv_actual_kwh", "import_price_p", "base_load_kwh", "kind"}
     assert all(set(s) == expected_keys for s in resp["slots"])
     assert all(s["pv_forecast_kwh"] == 0.0 for s in resp["slots"])
 
