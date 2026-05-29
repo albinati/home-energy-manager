@@ -21,8 +21,6 @@ import { Spinner } from "../components/common/Spinner";
 import { RefreshAction } from "../components/common/RefreshAction";
 import { LivePowerWidget } from "../components/cockpit/LivePowerWidget";
 import { Hero } from "../components/home/Hero";
-import { TodayBillWidget } from "../components/home/TodayBillWidget";
-import { EfficiencyWidget } from "../components/home/EfficiencyWidget";
 import { HeatingWidget } from "../components/home/HeatingWidget";
 import { TariffComparisonWidget } from "../components/home/TariffComparisonWidget";
 import type { MonthlyEnergy } from "../lib/types";
@@ -146,15 +144,6 @@ export default function Landing() {
 
       {/* ── MONEY ──────────────────────────────────────────────────── */}
       <div class="widget-grid widget-band">
-        <Widget title="Today's bill" icon="💰" tone="savings" size="medium"
-                action={<RefreshAction onRefresh={report.refresh} loading={report.loading} />}>
-          <TodayBillWidget report={report.data} reportLoading={report.loading} metrics={metrics.data} execution={execution.data} />
-        </Widget>
-
-        <Widget title="Efficiency" icon="🎯" tone="savings" size="medium">
-          <EfficiencyWidget metrics={metrics.data} loading={metrics.loading} />
-        </Widget>
-
         <Widget title="Tariff comparison" icon="📊" tone="savings" size="wide"
                 badge={tariffDash.data?.usage?.total_days ? `last ${tariffDash.data.usage.total_days}d of your usage` : undefined}
                 action={<RefreshAction onRefresh={tariffDash.refresh} loading={tariffDash.loading} />}>

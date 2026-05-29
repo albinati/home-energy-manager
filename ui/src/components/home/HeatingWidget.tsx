@@ -119,7 +119,7 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather, exe
         </div>
       )}
 
-      <HeatingControls dev={dev} onChanged={() => onRefresh?.()} />
+      <HeatingControls dev={dev} controlMode={daikinQuota?.control_mode} onChanged={() => onRefresh?.()} />
     </div>
   );
 }

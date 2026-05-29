@@ -96,6 +96,12 @@ export function Hero({ metrics, metricsLoading, cockpit, agile, monthly, todayPe
               </strong>
             </div>
           )}
+          {todayPeriod?.cost?.net_cost_pounds != null && (
+            <div class="hero-subline">
+              Today's bill so far:&nbsp;
+              <strong>{gbp(todayPeriod.cost.net_cost_pounds)}</strong>
+            </div>
+          )}
         </div>
 
         {lifetime && (

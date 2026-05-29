@@ -470,6 +470,9 @@ export interface ApiQuotaResponse {
   daily_budget?: number;
   blocked?: boolean;
   last_blocked_at?: number | null;
+  // Daikin only — DAIKIN_CONTROL_MODE, surfaced so the heating lock/active
+  // state shows even when device telemetry is cold (quota blocked).
+  control_mode?: string | null;
 }
 
 /* ----- /tariffs/dashboard (POST) — comparison vs Octopus catalogue ----- */

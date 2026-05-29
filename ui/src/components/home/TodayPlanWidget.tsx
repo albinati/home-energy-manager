@@ -139,7 +139,7 @@ export function TodayPlanWidget({ pv, loading }: TodayPlanWidgetProps) {
         },
         {
           name: "Load forecast", type: "line", smooth: true, showSymbol: false,
-          data: load, lineStyle: { color: t.house, width: 1.5, type: "dashed" }, z: 2,
+          data: load, lineStyle: { color: t.grid, width: 1.5, type: "dashed" }, z: 2,
         },
         {
           name: "Import price", type: "line", step: "middle", showSymbol: false,
