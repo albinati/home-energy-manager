@@ -152,23 +152,26 @@ export function TodayPlanWidget({ pv, loading, cheapThresholdP, peakThresholdP }
           } : undefined,
           z: 0,
         },
-        // PV planned — Open-Meteo forecast in the BACKGROUND: dim, dashed, flat fill.
-        // `color` set so the legend swatch matches the line (ECharts colours the
-        // legend marker from series.color/itemStyle, NOT lineStyle).
+        // Colour scheme: each metric keeps ONE hue; the REFERENCE (forecast/
+        // planned) is the dim/dark, dashed version, the ACTUAL is the bright,
+        // solid one. So PV planned vs PV actual read as the same thing, dim→bright.
+        // `color` is set so the legend swatch matches the line (ECharts colours
+        // the legend marker from series.color, NOT lineStyle).
         {
-          name: "PV planned", type: "line", smooth: true, showSymbol: false, color: t.textDim,
-          data: pvPlanned, lineStyle: { color: t.textDim, width: 1, type: "dashed", opacity: 0.7 },
-          areaStyle: { color: withAlpha(t.textDim, 0.06) }, z: 2,
+          name: "PV planned", type: "line", smooth: true, showSymbol: false, color: withAlpha(t.pv, 0.45),
+          data: pvPlanned, lineStyle: { color: withAlpha(t.pv, 0.45), width: 1.25, type: "dashed" },
+          areaStyle: { color: withAlpha(t.pv, 0.05) }, z: 2,
         },
         // PV actual — realised in the FOREGROUND: vivid PV colour, thick, gradient fill.
         {
           name: "PV actual", type: "line", smooth: true, showSymbol: false, connectNulls: false, color: t.pv,
           data: pvActual, lineStyle: { color: t.pv, width: 2.75 },
-          areaStyle: { color: areaGradient(t.pv, 0.34, 0.04) }, z: 4,
+          areaStyle: { color: areaGradient(t.pv, 0.36, 0.04) }, z: 4,
         },
+        // Load forecast is a reference → dim, dashed (its own cool hue).
         {
-          name: "Load forecast", type: "line", smooth: true, showSymbol: false, color: t.grid,
-          data: load, lineStyle: { color: t.grid, width: 1.5, type: "dashed" }, z: 3,
+          name: "Load forecast", type: "line", smooth: true, showSymbol: false, color: withAlpha(t.grid, 0.5),
+          data: load, lineStyle: { color: withAlpha(t.grid, 0.5), width: 1.25, type: "dashed" }, z: 3,
         },
         {
           name: "Import price", type: "line", step: "middle", showSymbol: false, color: t.importColor,
