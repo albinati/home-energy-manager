@@ -20,3 +20,28 @@
 .today-plan-acc-sep {
   color: var(--text-mute);
 }
+
+/* Dispatch-band legend under the chart */
+.today-plan-bands {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: var(--font-xs);
+  color: var(--text-mute);
+}
+.today-plan-band {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--text-dim);
+}
+.today-plan-band::before {
+  content: "";
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+}
+.today-plan-band--charge::before { background: color-mix(in srgb, var(--cheap) 35%, transparent); }
+.today-plan-band--discharge::before { background: color-mix(in srgb, var(--peak) 35%, transparent); }
+.today-plan-band-hint { margin-left: auto; }

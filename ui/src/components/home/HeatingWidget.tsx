@@ -7,8 +7,9 @@ import type {
   ExecutionTodayResponse,
   ExecutionSlot,
 } from "../../lib/types";
-import { tempC, kwh, relTime } from "../../lib/format";
+import { kwh, relTime } from "../../lib/format";
 import { Pill } from "../common/Pill";
+import { Gauge } from "../common/Gauge";
 import { HeatingControls } from "./HeatingControls";
 import "./heating.css";
 
@@ -94,44 +95,15 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather, exe
         )}
       </div>
 
-      <div class="heating-rows">
-        <div class="heating-row">
-          <span class="heating-row-icon">♨</span>
-          <div class="heating-row-body">
-            <div class="heating-row-label">Tank</div>
-            <div class="heating-row-sub">
-              {tankTarget != null ? `target ${tempC(tankTarget, 0)}` : "no target"}
-              {tankPower != null && (
-                <> · <strong class={tankPower ? "heating-on" : "heating-off"}>
-                  {tankPower ? "ON" : "OFF"}
-                </strong></>
-              )}
-            </div>
-          </div>
-          <span class="heating-row-temp">{tempC(tankTemp, 0)}</span>
-        </div>
-
-        <div class="heating-row">
-          <span class="heating-row-icon">🌡</span>
-          <div class="heating-row-body">
-            <div class="heating-row-label">Outdoor</div>
-            <div class="heating-row-sub">{
-              outdoorSource === "execution" ? "Daikin sensor (logged)" :
-              outdoorSource === "daikin" ? "Daikin sensor (live)" :
-              "Open-Meteo forecast"
-            }</div>
-          </div>
-          <span class="heating-row-temp">{tempC(outdoorTemp, 0)}</span>
-        </div>
-
-        <div class="heating-row">
-          <span class="heating-row-icon">💧</span>
-          <div class="heating-row-body">
-            <div class="heating-row-label">LWT</div>
-            <div class="heating-row-sub">leaving water</div>
-          </div>
-          <span class="heating-row-temp">{tempC(lwt, 0)}</span>
-        </div>
+      <div class="heating-gauges">
+        <Gauge label="Tank" value={tankTemp} min={20} max={65} target={tankTarget} tone="thermal"
+               sub={(tankTarget != null ? `target ${Math.round(tankTarget)}°C` : "no target")
+                    + (tankPower != null ? ` · ${tankPower ? "ON" : "OFF"}` : "")} />
+        <Gauge label="Outdoor" value={outdoorTemp} min={-5} max={35} tone="cool"
+               sub={outdoorSource === "execution" ? "Daikin sensor (logged)"
+                    : outdoorSource === "daikin" ? "Daikin sensor (live)"
+                    : "Open-Meteo forecast"} />
+        <Gauge label="LWT" value={lwt} min={20} max={55} tone="thermal" sub="leaving water" />
       </div>
 
       {totalHeatingKwh != null && (

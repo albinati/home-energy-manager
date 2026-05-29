@@ -71,15 +71,22 @@ async def get_pv_today(date: str | None = None) -> dict[str, Any]:
     now = datetime.now(UTC)
 
     # --- Planned PV: the LP's exact forecast→kWh conversion (calibration
-    # tables + W/m²→kW + 0.5h), so the planned line matches what the optimizer
-    # plans against. Default pv_scale (no today-factor) — this is the
-    # calibrated forecast, not a post-hoc re-fit.
+    # tables + W/m²→kW + 0.5h). Pass pv_scale=1.0 EXPLICITLY:
+    #  * the default (None) resolves to PV_FORECAST_SCALE_FACTOR, which is 0
+    #    ("auto-calibrate") on prod → would zero every slot (the flat line bug);
+    #  * compute_pv_calibration_factor() would DOUBLE-apply — forecast_to_lp_inputs
+    #    already folds that factor in as `flat_cal` when no cloud/hourly tables
+    #    exist, so passing it again squares it (see optimizer.py _pv_scale_callable,
+    #    which returns only the today-factor for exactly this reason).
+    #  1.0 lets the function apply its own calibration exactly once.
+    # NOTE: slots before "now" may be approximate — fetch_forecast is forward-
+    # looking; overnight radiation is ~0 so the impact is negligible.
     forecast_kwh: list[float] = [0.0] * _SLOTS_PER_DAY
     try:
         from ... import weather
 
         fc = weather.fetch_forecast(hours=48)
-        series = weather.forecast_to_lp_inputs(fc, slot_starts)
+        series = weather.forecast_to_lp_inputs(fc, slot_starts, pv_scale=1.0)
         pv = series.pv_kwh_per_slot
         for i in range(min(_SLOTS_PER_DAY, len(pv))):
             forecast_kwh[i] = round(float(pv[i]), 4)

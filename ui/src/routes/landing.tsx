@@ -8,7 +8,6 @@ import {
   getWeather,
   getSchedulerTimeline,
   getExecutionToday,
-  getAttributionDay,
   getEnergyReport,
   getEnergyMonthly,
   getEnergyPeriod,
@@ -22,7 +21,6 @@ import { Spinner } from "../components/common/Spinner";
 import { RefreshAction } from "../components/common/RefreshAction";
 import { LivePowerWidget } from "../components/cockpit/LivePowerWidget";
 import { Hero } from "../components/home/Hero";
-import { ExportsWidget } from "../components/home/ExportsWidget";
 import { TodayBillWidget } from "../components/home/TodayBillWidget";
 import { EfficiencyWidget } from "../components/home/EfficiencyWidget";
 import { HeatingWidget } from "../components/home/HeatingWidget";
@@ -70,7 +68,8 @@ function useMonthlyHistory(n: number) {
 
 // Home dashboard, grouped into three semantic bands so the eye can skim:
 //   1. LIVE   — what's happening right now (Live power, Heating)
-//   2. MONEY  — £ in (Today's bill, Efficiency, Tariff comparison, Exports, Lifetime)
+//   2. MONEY  — £ in (Today's bill, Efficiency, Tariff comparison). Export
+//      earnings (today + month) live in the Hero now, not a standalone widget.
 //   3. ENERGY — kWh details over time (Energy flow chart, day/week/month/year)
 // Bands are separated by spacing only (no labels) — minimal, Apple-style.
 // "Today's tariff" widget removed: its info is already in the Hero (current
@@ -87,7 +86,6 @@ export default function Landing() {
   const agile = useFetch(getAgileToday, []);
   const weather = useFetch(getWeather, []);
   const execution = useFetch(getExecutionToday, []);
-  const attribution = useFetch(() => getAttributionDay(), []);
   const report = useFetch(() => getEnergyReport(new Date().toISOString().slice(0, 10)), []);
   const monthly = useMonthlyHistory(6);
   // Daikin cached read — no refresh=true, so no live cloud call (30-min cache TTL).
@@ -155,11 +153,6 @@ export default function Landing() {
 
         <Widget title="Efficiency" icon="🎯" tone="savings" size="medium">
           <EfficiencyWidget metrics={metrics.data} loading={metrics.loading} />
-        </Widget>
-
-        <Widget title="Exports" icon="📤" tone="savings" size="medium"
-                action={<RefreshAction onRefresh={() => { void attribution.refresh(); void report.refresh(); }} loading={attribution.loading || report.loading} />}>
-          <ExportsWidget now={data} yesterday={attribution.data} report={report.data} monthly={monthly.data} />
         </Widget>
 
         <Widget title="Tariff comparison" icon="📊" tone="savings" size="wide"

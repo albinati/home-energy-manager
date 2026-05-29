@@ -23,6 +23,11 @@ const MODES: DaikinOperationMode[] = ["heating", "cooling", "auto", "fan_only", 
 // modal first, then sent with skip_confirmation:true.
 export function HeatingControls({ dev, onChanged }: HeatingControlsProps) {
   const active = dev?.control_mode === "active";
+  // Locked by default even in active mode — the heat pump runs on dhw_policy,
+  // so manual writes are a deliberate gesture, not a stray click. The lock must
+  // be opened per-session before any control is live.
+  const [unlocked, setUnlocked] = useState(false);
+  const editable = active && unlocked;
   const [tankTarget, setTankTarget] = useState<number>(dev?.tank_target ?? 45);
   const [lwt, setLwt] = useState<number>(dev?.lwt_offset ?? 0);
   const [pending, setPending] = useState<PendingAction | null>(null);
@@ -71,12 +76,21 @@ export function HeatingControls({ dev, onChanged }: HeatingControlsProps) {
             passive · read-only
           </span>
         )}
+        {active && (
+          <button type="button"
+                  class={`heating-controls-lock${unlocked ? " heating-controls-lock--open" : ""}`}
+                  aria-pressed={unlocked}
+                  title={unlocked ? "Editing enabled — click to lock" : "Locked — click to enable manual control"}
+                  onClick={() => setUnlocked((v) => !v)}>
+            {unlocked ? "🔓 editing" : "🔒 locked"}
+          </button>
+        )}
       </div>
 
       <div class="heating-control-row">
         <label class="heating-control-label">Tank target</label>
         <NumberInput value={tankTarget} onChange={setTankTarget} min={30} max={65} step={1} ariaLabel="Tank target °C" />
-        <button class="btn btn--sm" disabled={!active || busy}
+        <button class="btn btn--sm" disabled={!editable || busy}
                 onClick={() => confirm(`Set DHW tank target to ${tankTarget}°C?`, () => setTankTemperature(tankTarget))}>
           Set
         </button>
@@ -85,14 +99,14 @@ export function HeatingControls({ dev, onChanged }: HeatingControlsProps) {
       <div class="heating-control-row">
         <label class="heating-control-label">DHW power</label>
         <Toggle value={dhwOn} ariaLabel="DHW power"
-                onChange={(next) => active && confirm(`Turn DHW tank ${next ? "ON" : "OFF"}?`, () => setTankPower(next))} />
+                onChange={(next) => editable && confirm(`Turn DHW tank ${next ? "ON" : "OFF"}?`, () => setTankPower(next))} />
         <span class="heating-control-state">{dhwOn ? "ON" : "OFF"}</span>
       </div>
 
       <div class="heating-control-row">
         <label class="heating-control-label">LWT offset</label>
         <NumberInput value={lwt} onChange={setLwt} min={-10} max={10} step={0.5} ariaLabel="LWT offset" />
-        <button class="btn btn--sm" disabled={!active || busy}
+        <button class="btn btn--sm" disabled={!editable || busy}
                 onClick={() => confirm(`Set leaving-water offset to ${lwt >= 0 ? "+" : ""}${lwt}?`, () => setLwtOffset(lwt))}>
           Set
         </button>
@@ -101,7 +115,7 @@ export function HeatingControls({ dev, onChanged }: HeatingControlsProps) {
       <div class="heating-control-row">
         <label class="heating-control-label">Mode</label>
         <Select<DaikinOperationMode> value={mode} options={modeOptions} ariaLabel="Operation mode"
-                onChange={(m) => active && m !== mode && confirm(`Set Daikin mode to ${m}?`, () => setDaikinMode(m))} />
+                onChange={(m) => editable && m !== mode && confirm(`Set Daikin mode to ${m}?`, () => setDaikinMode(m))} />
       </div>
 
       <Modal open={pending != null} onClose={() => !busy && setPending(null)} title="Confirm Daikin command" width="sm"

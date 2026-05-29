@@ -24,7 +24,7 @@ interface HeroProps {
 //   5. Live "motion" — action verb + tariff band + import/export p/kWh
 // Numeric values are tweened via useAnimatedNumber so refreshes feel alive
 // rather than snapping.
-export function Hero({ metrics, metricsLoading, cockpit, agile: _agile, monthly, todayPeriod, monthPeriod, periodsLoading }: HeroProps) {
+export function Hero({ metrics, metricsLoading, cockpit, agile, monthly, todayPeriod, monthPeriod, periodsLoading }: HeroProps) {
   const daily = metrics?.pnl?.daily;
   const today = daily?.delta_vs_svt_pounds ?? null;
   const todayFixed = daily?.delta_vs_fixed_pounds ?? null;
@@ -59,6 +59,13 @@ export function Hero({ metrics, metricsLoading, cockpit, agile: _agile, monthly,
   const exportKwhAnim = useAnimatedNumber(lifetime?.export_kwh ?? null);
   const exportEarnAnim = useAnimatedNumber(lifetime?.export_earn ?? null);
   const totalCostAnim = useAnimatedNumber(lifetime?.total_cost ?? null);
+
+  // Export earnings — folded in from the removed standalone Exports widget.
+  const exportToday = todayPeriod?.cost?.export_earnings_pounds ?? null;
+  const exportMonth = monthPeriod?.cost?.export_earnings_pounds ?? null;
+  const curExportP = agile?.current_export_p ?? cockpit?.current_slot?.price_export_p ?? null;
+  const exportTodayAnim = useAnimatedNumber(exportToday);
+  const exportMonthAnim = useAnimatedNumber(exportMonth);
 
   return (
     <section class="hero" aria-label="Live status + savings overview">
@@ -101,6 +108,18 @@ export function Hero({ metrics, metricsLoading, cockpit, agile: _agile, monthly,
               <HeroStat value={kwh(exportKwhAnim ?? 0, 0)} label="exported" />
               <HeroStat value={gbp(exportEarnAnim ?? 0)} label="export earnings" />
               <HeroStat value={gbp(totalCostAnim ?? 0)} label="total bills" />
+            </div>
+          </div>
+        )}
+
+        {(exportToday != null || exportMonth != null) && (
+          <div class="hero-lifetime hero-export">
+            <div class="hero-lifetime-label">
+              Export earnings{curExportP != null ? ` · now ${curExportP.toFixed(1)}p/kWh` : ""}
+            </div>
+            <div class="hero-lifetime-stats">
+              <HeroStat value={gbp(exportTodayAnim ?? 0)} label="today" />
+              <HeroStat value={gbp(exportMonthAnim ?? 0)} label="this month" />
             </div>
           </div>
         )}
