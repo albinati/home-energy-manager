@@ -3072,7 +3072,7 @@ def _half_hourly_grid_kwh_for_day(
 ) -> dict[str, float]:
     """Shared trapezoidal-integration over ``pv_realtime_history.<column>`` for
     ``day``, keyed by ISO half-hour slot start (UTC). ``column`` must be one of
-    ``grid_export_kw`` / ``grid_import_kw`` (caller-vetted).
+    ``grid_export_kw`` / ``grid_import_kw`` / ``solar_power_kw`` (caller-vetted).
 
     Each sample-pair's energy is assigned to the bucket containing the EARLIER
     sample (matching :func:`compute_fox_energy_daily_from_realtime`). Slots with
@@ -3082,7 +3082,7 @@ def _half_hourly_grid_kwh_for_day(
     from collections import defaultdict
     from datetime import datetime as _dt
 
-    if column not in ("grid_export_kw", "grid_import_kw"):
+    if column not in ("grid_export_kw", "grid_import_kw", "solar_power_kw"):
         raise ValueError(f"unsupported column: {column}")
 
     day_iso = day.isoformat()
@@ -3156,6 +3156,21 @@ def half_hourly_grid_export_kwh_for_day(
     Octopus Outgoing rates (issue #207).
     """
     return _half_hourly_grid_kwh_for_day(day, "grid_export_kw", max_gap_seconds=max_gap_seconds)
+
+
+def half_hourly_solar_kwh_for_day(
+    day: date,
+    *,
+    max_gap_seconds: int = 1800,
+) -> dict[str, float]:
+    """Per-slot realised solar (PV generation) kWh for ``day``, keyed by ISO
+    half-hour slot start (UTC).
+
+    Trapezoidal integration of ``pv_realtime_history.solar_power_kw``. See
+    :func:`_half_hourly_grid_kwh_for_day` for mechanics. Powers the
+    ``GET /api/v1/pv/today`` planned-vs-realised overlay.
+    """
+    return _half_hourly_grid_kwh_for_day(day, "solar_power_kw", max_gap_seconds=max_gap_seconds)
 
 
 def half_hourly_grid_import_kwh_for_day(

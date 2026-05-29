@@ -9,6 +9,7 @@ import type {
 } from "../../lib/types";
 import { tempC, kwh, relTime } from "../../lib/format";
 import { Pill } from "../common/Pill";
+import { HeatingControls } from "./HeatingControls";
 import "./heating.css";
 
 interface HeatingWidgetProps {
@@ -18,13 +19,15 @@ interface HeatingWidgetProps {
   report: EnergyReport | null;
   weather: WeatherResponse | null;
   execution: ExecutionTodayResponse | null;
+  // Re-fetch Daikin status + quota after a manual control write.
+  onRefresh?: () => void;
 }
 
 // Tank / outdoor / LWT + Daikin mode + cache freshness + quota.
 // Outdoor temp + LWT now prefer /execution/today (logged Daikin readings,
 // no live API call) over the cached /daikin/status — same data freshness,
 // zero quota cost.
-export function HeatingWidget({ state, daikin, daikinQuota, report, weather, execution }: HeatingWidgetProps) {
+export function HeatingWidget({ state, daikin, daikinQuota, report, weather, execution, onRefresh }: HeatingWidgetProps) {
   const dev = daikin && daikin.length > 0 ? daikin[0] : null;
   // No cooling on this system — only heating + DHW. We surface compressor
   // status via the tank/space rows themselves (ON/OFF), not a "mode" chip.
@@ -143,6 +146,8 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather, exe
           </div>
         </div>
       )}
+
+      <HeatingControls dev={dev} onChanged={() => onRefresh?.()} />
     </div>
   );
 }

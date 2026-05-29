@@ -76,3 +76,44 @@
 .heating-split-dot--space { background: var(--accent); }
 .heating-split-name { color: var(--text-dim); }
 .heating-split-value { font-weight: 700; }
+
+/* --- Manual Daikin controls (P3) --- */
+.heating-controls {
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.heating-controls-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+.heating-controls-title {
+  font-size: var(--font-sm);
+  color: var(--text-dim);
+  font-weight: 600;
+}
+.heating-controls-passive {
+  font-size: var(--font-xs);
+  color: var(--warn);
+}
+.heating-control-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.heating-control-label {
+  flex: 0 0 5.5rem;
+  font-size: var(--font-sm);
+  color: var(--text-dim);
+}
+.heating-control-row .input { flex: 1; min-width: 0; }
+.heating-control-state {
+  font-size: var(--font-sm);
+  color: var(--text-mute);
+  min-width: 2rem;
+}
+.heating-controls-hint { font-size: var(--font-xs); }

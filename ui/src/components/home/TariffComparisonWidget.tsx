@@ -14,6 +14,12 @@ interface TariffComparisonWidgetProps {
   // (from /energy/period) bills measured grid import at the half-hourly
   // Agile rate per slot — the actual money out the door.
   monthPeriod: PeriodInsightsResponse | null;
+  // Whether the /energy/period fetch that feeds `monthPeriod` is still
+  // in-flight. The dashboard and monthPeriod are independent fetches: if the
+  // dashboard lands first we must NOT render the current tariff's projected
+  // total — it would flash a wrong (over-stated) number until the realised
+  // cost arrives and overwrites it. Hold the skeleton until BOTH have settled.
+  monthPeriodLoading: boolean;
 }
 
 // Default SEG floor used when a fixed-tariff doesn't expose its own outgoing
@@ -30,8 +36,10 @@ const SEG_EXPORT_FALLBACK_P = 4.0;
 // BG Fixed v58 row is computed client-side using the same real-usage block
 // + the configured FIXED_TARIFF_* rates from /metrics. No annual-from-daily
 // extrapolation; pure replay over the same window as the Octopus rows.
-export function TariffComparisonWidget({ dashboard, dashboardLoading, metrics, monthPeriod }: TariffComparisonWidgetProps) {
-  if (dashboardLoading) {
+export function TariffComparisonWidget({ dashboard, dashboardLoading, metrics, monthPeriod, monthPeriodLoading }: TariffComparisonWidgetProps) {
+  // Gate on BOTH fetches: the current tariff's realised total comes from
+  // monthPeriod, so rendering before it settles flashes the projected number.
+  if (dashboardLoading || monthPeriodLoading) {
     return <div class="tcomp"><div class="tcomp-skel skel" /></div>;
   }
   if (!dashboard?.ok || !dashboard.totals?.length) {

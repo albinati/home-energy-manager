@@ -15,6 +15,7 @@ import {
   getDaikinStatus,
   getDaikinQuota,
   getTariffDashboard,
+  getPvToday,
 } from "../lib/endpoints";
 import { Widget } from "../components/common/Widget";
 import { Spinner } from "../components/common/Spinner";
@@ -33,6 +34,12 @@ import "../components/home/home.css";
 // the hero + money tiles paint immediately and the chart streams in after.
 const EnergyChartWidget = lazy(() =>
   import("../components/home/EnergyChartWidget").then((m) => ({ default: m.EnergyChartWidget })),
+);
+
+// Combined "today's plan" chart also owns echarts — lazy-load alongside the
+// energy chart so the hero + money tiles paint first.
+const TodayPlanWidget = lazy(() =>
+  import("../components/home/TodayPlanWidget").then((m) => ({ default: m.TodayPlanWidget })),
 );
 
 function lastMonths(n: number): string[] {
@@ -74,6 +81,7 @@ export default function Landing() {
   const now = usePoll(getCockpitNow, 20_000);
   const metrics = usePoll(getMetrics, 5 * 60_000);
   const timeline = usePoll(getSchedulerTimeline, 5 * 60_000);
+  const pvToday = usePoll(getPvToday, 5 * 60_000);
 
   // Fetch-once endpoints — refresh on tab return, otherwise no churn.
   const agile = useFetch(getAgileToday, []);
@@ -123,7 +131,18 @@ export default function Landing() {
 
         <Widget title="Heating" icon="♨" tone="thermal" size="medium"
                 action={<RefreshAction onRefresh={() => { void daikin.refresh(); void daikinQuota.refresh(); }} loading={daikin.loading} title="Re-fetch Daikin (cached server-side ~30min)" />}>
-          <HeatingWidget state={s} daikin={daikin.data} daikinQuota={daikinQuota.data} report={report.data} weather={weather.data} execution={execution.data} />
+          <HeatingWidget state={s} daikin={daikin.data} daikinQuota={daikinQuota.data} report={report.data} weather={weather.data} execution={execution.data}
+                         onRefresh={() => { void daikin.refresh(); void daikinQuota.refresh(); }} />
+        </Widget>
+      </div>
+
+      {/* ── PLAN ───────────────────────────────────────────────────── */}
+      <div class="widget-grid widget-band">
+        <Widget title="Today's plan" icon="🗓" tone="plan" size="wide"
+                badge={pvToday.data?.forecast_kwh_day_total != null ? `${pvToday.data.forecast_kwh_day_total.toFixed(1)} kWh PV planned` : undefined}>
+          <Suspense fallback={<Spinner label="Loading plan…" />}>
+            <TodayPlanWidget pv={pvToday.data} loading={pvToday.loading} />
+          </Suspense>
         </Widget>
       </div>
 
@@ -146,7 +165,7 @@ export default function Landing() {
         <Widget title="Tariff comparison" icon="📊" tone="savings" size="wide"
                 badge={tariffDash.data?.usage?.total_days ? `last ${tariffDash.data.usage.total_days}d of your usage` : undefined}
                 action={<RefreshAction onRefresh={tariffDash.refresh} loading={tariffDash.loading} />}>
-          <TariffComparisonWidget dashboard={tariffDash.data} dashboardLoading={tariffDash.loading} metrics={metrics.data} monthPeriod={monthPeriod.data} />
+          <TariffComparisonWidget dashboard={tariffDash.data} dashboardLoading={tariffDash.loading} metrics={metrics.data} monthPeriod={monthPeriod.data} monthPeriodLoading={monthPeriod.loading} />
         </Widget>
       </div>
 

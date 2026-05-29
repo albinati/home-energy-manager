@@ -58,11 +58,14 @@ def _build_load_profile(slot_starts_utc: list[datetime]) -> list[float]:
     flat_from_log = db.mean_consumption_kwh_from_execution_logs(limit=limit)
     fox_mean = db.mean_fox_load_kwh_per_slot(limit=60)
     flat = fox_mean if fox_mean is not None else flat_from_log
+    # Operator load scale — mirror _run_optimizer_lp so the Workbench Simulate
+    # actually reflects LP_LOAD_SCALE_FACTOR (no-op at the default 1.0).
+    load_scale = float(getattr(config, "LP_LOAD_SCALE_FACTOR", 1.0))
     out: list[float] = []
     for s in slot_starts_utc:
         local = s.astimezone(ZoneInfo(config.BULLETPROOF_TIMEZONE))
         bucket = (local.hour, 30 if local.minute >= 30 else 0)
-        out.append(profile.get(bucket, flat))
+        out.append(profile.get(bucket, flat) * load_scale)
     return out
 
 

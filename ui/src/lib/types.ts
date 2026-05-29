@@ -108,6 +108,49 @@ export interface SchedulerTimeline {
   planned: TimelineSlot[];
 }
 
+/* ----- /pv/today ----- */
+
+export interface PvTodaySlot {
+  slot_utc: string;
+  pv_forecast_kwh: number;
+  pv_actual_kwh: number | null;
+  import_price_p?: number | null;
+  base_load_kwh?: number | null;
+  kind?: string | null;
+}
+
+export interface PvTodayAccuracy {
+  slots_compared: number;
+  forecast_kwh: number;
+  actual_kwh: number;
+  mae_kwh: number;
+  bias_kwh: number;
+}
+
+export interface PvTodayResponse {
+  date: string;
+  now_utc: string;
+  slots: PvTodaySlot[];
+  accuracy: PvTodayAccuracy | null;
+  forecast_kwh_day_total: number;
+}
+
+/* ----- /optimization/inputs ----- */
+
+export interface OptimizationInputSlot {
+  t_utc: string;
+  price_import_p?: number | null;
+  price_export_p?: number | null;
+  temp_c?: number | null;
+  solar_w_m2?: number | null;
+  base_load_kwh?: number | null;
+}
+
+export interface OptimizationInputsResponse {
+  slots: OptimizationInputSlot[];
+  thresholds?: { cheap_p?: number; peak_p?: number } | null;
+}
+
 /* ----- /optimization/decisions/{run_id} ----- */
 
 export interface DispatchDecision {
@@ -387,11 +430,24 @@ export interface DaikinDevice {
   tank_target?: number | null;
   outdoor_temp?: number | null;
   lwt?: number | null;
+  lwt_offset?: number | null;
   weather_regulation?: boolean | null;
   control_mode?: string | null;
   state_summary?: string | null;
   is_on?: boolean | null;
   tank_power?: boolean | null;
+}
+
+// Daikin operation modes accepted by POST /daikin/mode.
+export type DaikinOperationMode = "heating" | "cooling" | "auto" | "fan_only" | "dry";
+
+// Shape returned by the Daikin write routes (ActionResult). When a route
+// requires confirmation and skip_confirmation is false it returns a different
+// (pending) shape — the UI always sends skip_confirmation:true after its own
+// confirm dialog, so it only ever sees this.
+export interface ActionResult {
+  success: boolean;
+  message: string;
 }
 
 // /daikin/quota + /foxess/quota — shared shape
@@ -495,4 +551,64 @@ export interface MetricsResponse {
     rate_pence?: number | null;
     standing_pence_per_day?: number | null;
   };
+}
+
+/* ----- /workbench (LP override editor) ----- */
+
+export interface WorkbenchField {
+  key: string;
+  config_attr: string;
+  type: string; // "float" | "int" | "str"
+  min?: number | null;
+  max?: number | null;
+  enum?: string[] | null;
+  description: string;
+  group: string;
+  promotable: boolean;
+  current: number | string | boolean | null;
+}
+
+export interface WorkbenchSchema {
+  groups: string[];
+  fields: WorkbenchField[];
+}
+
+export interface WorkbenchSimSlot {
+  t: string | null;
+  price_p: number | null;
+  import_kwh: number | null;
+  export_kwh: number | null;
+  battery_charge_kwh: number | null;
+  battery_discharge_kwh: number | null;
+  soc_kwh: number | null;
+}
+
+export interface WorkbenchSimulateResponse {
+  ok: boolean;
+  error?: string | null;
+  plan_date?: string | null;
+  objective_pence?: number | null;
+  status?: string | null;
+  slot_count?: number | null;
+  actual_mean_agile_pence?: number | null;
+  forecast_solar_kwh_horizon?: number | null;
+  mu_load_kwh_per_slot?: number | null;
+  applied_overrides: Record<string, unknown>;
+  ignored_overrides: Record<string, unknown>;
+  slots?: WorkbenchSimSlot[];
+}
+
+// ActionDiff shape from /workbench/promote/simulate. We render human_summary +
+// the non-promotable list; the detailed diff items vary, so keep them loose.
+export interface WorkbenchPromoteDiff {
+  simulation_id: string;
+  action?: string;
+  human_summary?: string;
+  non_promotable_overrides?: Record<string, unknown>;
+}
+
+export interface WorkbenchPromoteResult {
+  ok: boolean;
+  promoted: Array<{ key: string; ok: boolean; value?: unknown; error?: string }>;
+  profile_name?: string | null;
 }

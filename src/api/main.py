@@ -117,6 +117,7 @@ from .models import (
 from .routers import appliances as appliances_router
 from .routers import dispatch as dispatch_router
 from .routers import energy_providers as energy_providers_router
+from .routers import pv as pv_router
 from .routers import workbench as workbench_router
 
 
@@ -282,6 +283,7 @@ app.include_router(energy_providers_router.router)
 app.include_router(workbench_router.router)
 app.include_router(dispatch_router.router)
 app.include_router(appliances_router.router)
+app.include_router(pv_router.router)
 
 # Mount the FastMCP streamable-HTTP transport at /mcp, guarded by a bearer
 # token. Replaces the legacy stdio subprocess (`bin/mcp`) for OpenClaw in
@@ -1168,6 +1170,9 @@ async def optimization_inputs(horizon_hours: int | None = None):
         flat = fox_mean if fox_mean is not None else db.mean_consumption_kwh_from_execution_logs(limit=profile_limit)
     except Exception:
         flat = 0.4
+    # Operator load scale — mirrors the multiplier the optimizer applies to the
+    # residual profile, so this view matches the plan (no-op at default 1.0).
+    _load_scale = float(getattr(config, "LP_LOAD_SCALE_FACTOR", 1.0))
 
     # --- Initial state (quota-safe: no Daikin refresh) ----------------------
     try:
@@ -1293,7 +1298,9 @@ async def optimization_inputs(horizon_hours: int | None = None):
             hr_local = t.hour
             min_local = 30 if t.minute >= 30 else 0
         # S10.8 (#175): half-hour bucket lookup; falls back to flat mean.
-        bl = float(load_profile.get((hr_local, min_local), flat))
+        # Apply the operator load scale so this debug view matches what the LP
+        # actually plans against (no-op at the default 1.0).
+        bl = float(load_profile.get((hr_local, min_local), flat)) * _load_scale
         slots_out.append({
             "t_utc": iso.replace("+00:00", "Z"),
             "price_import_p": price_i,
