@@ -150,7 +150,13 @@ class TestMCPServerDaikinTools(unittest.IsolatedAsyncioTestCase):
             tank_target=48.0,
             weather_regulation=False,
         )
-        with patch("src.mcp_server._daikin_client", return_value=mock_client):
+        # The tool now reads devices from the quota-safe cache layer
+        # (daikin_service.get_cached_devices, #423) rather than calling the
+        # client directly — mock that seam too, else it hits the real cold-start
+        # path and returns a different device.
+        cached = MagicMock(devices=[dev], source="test", stale=False)
+        with patch("src.mcp_server._daikin_client", return_value=mock_client), \
+             patch("src.daikin.service.get_cached_devices", return_value=cached):
             _blocks, out = await mcp.call_tool("get_daikin_status", {})
         self.assertTrue(out["ok"])
         self.assertEqual(len(out["devices"]), 1)
