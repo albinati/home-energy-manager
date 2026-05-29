@@ -108,6 +108,49 @@ export interface SchedulerTimeline {
   planned: TimelineSlot[];
 }
 
+/* ----- /pv/today ----- */
+
+export interface PvTodaySlot {
+  slot_utc: string;
+  pv_forecast_kwh: number;
+  pv_actual_kwh: number | null;
+  import_price_p?: number | null;
+  base_load_kwh?: number | null;
+  kind?: string | null;
+}
+
+export interface PvTodayAccuracy {
+  slots_compared: number;
+  forecast_kwh: number;
+  actual_kwh: number;
+  mae_kwh: number;
+  bias_kwh: number;
+}
+
+export interface PvTodayResponse {
+  date: string;
+  now_utc: string;
+  slots: PvTodaySlot[];
+  accuracy: PvTodayAccuracy | null;
+  forecast_kwh_day_total: number;
+}
+
+/* ----- /optimization/inputs ----- */
+
+export interface OptimizationInputSlot {
+  t_utc: string;
+  price_import_p?: number | null;
+  price_export_p?: number | null;
+  temp_c?: number | null;
+  solar_w_m2?: number | null;
+  base_load_kwh?: number | null;
+}
+
+export interface OptimizationInputsResponse {
+  slots: OptimizationInputSlot[];
+  thresholds?: { cheap_p?: number; peak_p?: number } | null;
+}
+
 /* ----- /optimization/decisions/{run_id} ----- */
 
 export interface DispatchDecision {
