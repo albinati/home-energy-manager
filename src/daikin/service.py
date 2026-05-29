@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import traceback
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -50,6 +51,14 @@ _cold_start_quota_logged: bool = False
 # this caused the 2026-05-27 22:00 UTC retry storm (#423).
 _cold_start_failed_at: float | None = None
 _COLD_START_BACKOFF_SECONDS: int = 600  # 10 min — bounds API attempts to ≤6/h
+
+# Anti-burst: a hard floor on how often a REAL Daikin device read can happen,
+# regardless of caller. The read-storm (#423 follow-up) was a caller hitting the
+# live-fetch path ~1s apart in bursts whenever quota freed up — a sawtooth that
+# kept quota pinned at the cap. This makes bursts structurally impossible: a
+# read within the window returns the warm cache instead of going to the wire.
+_last_refresh_monotonic: float = 0.0
+_refresh_throttle_logged: bool = False  # log the offending call stack once
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +106,7 @@ def _do_refresh(actor: str) -> list[DaikinDevice]:
     burning quota on 429s (#423 belt-and-braces).
     """
     global _devices_cache, _devices_fetched_monotonic, _devices_fetched_wall, _devices_stale
-    global _cold_start_quota_logged
+    global _cold_start_quota_logged, _last_refresh_monotonic, _refresh_throttle_logged
 
     if should_block("daikin"):
         # Raising means callers fall through to their stale-cache / empty
@@ -105,6 +114,28 @@ def _do_refresh(actor: str) -> list[DaikinDevice]:
         # the cache layer's own messaging surfaces the user-facing state.
         logger.debug("_do_refresh blocked: daikin soft cap exhausted (actor=%s)", actor)
         raise DaikinError("Daikin daily quota exhausted")
+
+    # Anti-burst floor: at most one real device read per
+    # DAIKIN_REFRESH_MIN_INTERVAL_SECONDS, regardless of caller. A tight read
+    # loop thus gets the warm cache instead of hammering the wire. Set BEFORE
+    # the fetch so a failing read still holds the window. First call (cache
+    # present) within the window logs the offending stack once, to pinpoint the
+    # looping caller without a separate instrumentation deploy.
+    now_m = time.monotonic()
+    min_iv = float(getattr(config, "DAIKIN_REFRESH_MIN_INTERVAL_SECONDS", 90))
+    if _last_refresh_monotonic and (now_m - _last_refresh_monotonic) < min_iv and _devices_cache is not None:
+        if not _refresh_throttle_logged:
+            _refresh_throttle_logged = True
+            logger.warning(
+                "Daikin _do_refresh throttled (%.1fs since last read < %.0fs floor, actor=%s) "
+                "— returning warm cache. Offending caller:\n%s",
+                now_m - _last_refresh_monotonic, min_iv, actor,
+                "".join(traceback.format_stack(limit=10)),
+            )
+        else:
+            logger.debug("Daikin _do_refresh throttled (actor=%s) — warm cache", actor)
+        return _devices_cache
+    _last_refresh_monotonic = now_m
 
     client = _get_or_create_client()
     devices = client.get_devices()
