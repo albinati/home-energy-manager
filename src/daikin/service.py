@@ -398,6 +398,9 @@ def get_quota_status_daikin() -> dict:
                 tz=__import__("datetime").timezone.utc,
             ).isoformat()
         ),
+        # Surfaced so the UI shows the heating lock/active state even when
+        # device telemetry is cold (quota blocked → /daikin/status empty).
+        "control_mode": config.DAIKIN_CONTROL_MODE,
         **qst,
     }
 

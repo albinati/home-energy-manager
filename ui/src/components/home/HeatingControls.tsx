@@ -1,12 +1,15 @@
 import { useEffect, useState } from "preact/hooks";
-import type { DaikinDevice, DaikinOperationMode, ActionResult } from "../../lib/types";
-import { setTankTemperature, setTankPower, setLwtOffset, setDaikinMode } from "../../lib/endpoints";
-import { NumberInput, Select, Toggle } from "../common/Inputs";
+import type { DaikinDevice, ActionResult } from "../../lib/types";
+import { setTankTemperature, setTankPower, setLwtOffset } from "../../lib/endpoints";
+import { NumberInput, Toggle } from "../common/Inputs";
 import { Modal } from "../common/Modal";
 import { toast } from "../../lib/toast";
 
 interface HeatingControlsProps {
   dev: DaikinDevice | null;
+  // control_mode from /daikin/quota — lets the lock + active state show even
+  // when device telemetry is cold (Daikin quota), since `dev` would be null.
+  controlMode?: string | null;
   onChanged: () => void;
 }
 
@@ -15,14 +18,12 @@ interface PendingAction {
   run: () => Promise<ActionResult>;
 }
 
-const MODES: DaikinOperationMode[] = ["heating", "cooling", "auto", "fan_only", "dry"];
-
 // Manual Daikin controls (tank target / DHW power / LWT offset / mode). All
 // writes are gated server-side by DAIKIN_CONTROL_MODE=active; when passive the
 // panel renders disabled with an explanation. Each write is confirmed in a
 // modal first, then sent with skip_confirmation:true.
-export function HeatingControls({ dev, onChanged }: HeatingControlsProps) {
-  const active = dev?.control_mode === "active";
+export function HeatingControls({ dev, controlMode, onChanged }: HeatingControlsProps) {
+  const active = (dev?.control_mode ?? controlMode) === "active";
   // Locked by default even in active mode — the heat pump runs on dhw_policy,
   // so manual writes are a deliberate gesture, not a stray click. The lock must
   // be opened per-session before any control is live.
@@ -62,10 +63,6 @@ export function HeatingControls({ dev, onChanged }: HeatingControlsProps) {
   };
 
   const dhwOn = dev?.tank_power ?? false;
-  const mode = (dev?.mode as DaikinOperationMode) || "heating";
-  // If the device reports a mode outside the known union, surface it as an
-  // extra option so the Select shows the real state instead of a blank.
-  const modeOptions: DaikinOperationMode[] = MODES.includes(mode) ? MODES : [...MODES, mode];
 
   return (
     <div class="heating-controls">
@@ -110,12 +107,6 @@ export function HeatingControls({ dev, onChanged }: HeatingControlsProps) {
                 onClick={() => confirm(`Set leaving-water offset to ${lwt >= 0 ? "+" : ""}${lwt}?`, () => setLwtOffset(lwt))}>
           Set
         </button>
-      </div>
-
-      <div class="heating-control-row">
-        <label class="heating-control-label">Mode</label>
-        <Select<DaikinOperationMode> value={mode} options={modeOptions} ariaLabel="Operation mode"
-                onChange={(m) => editable && m !== mode && confirm(`Set Daikin mode to ${m}?`, () => setDaikinMode(m))} />
       </div>
 
       <Modal open={pending != null} onClose={() => !busy && setPending(null)} title="Confirm Daikin command" width="sm"
