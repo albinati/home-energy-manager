@@ -40,15 +40,19 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather, exe
   // quota. quota-blocked → backend returns warm cache (no network).
   const [confirmingRefresh, setConfirmingRefresh] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
   async function doForceRefresh() {
     setRefreshing(true);
+    setRefreshError(null);
     try {
       await forceRefreshDaikin();
-    } catch { /* surfaced by the re-fetch below; keep the UI responsive */ }
-    finally {
       setConfirmingRefresh(false);
+      onRefresh?.();  // re-pull the now-fresh cache
+    } catch (e) {
+      // Keep the modal open so a failed live read isn't mistaken for success.
+      setRefreshError(e instanceof Error ? e.message : "Live read failed");
+    } finally {
       setRefreshing(false);
-      onRefresh?.();
     }
   }
   // No cooling on this system — only heating + DHW. We surface compressor
@@ -146,7 +150,7 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather, exe
 
       <HeatingControls dev={dev} controlMode={daikinQuota?.control_mode} onChanged={() => onRefresh?.()} />
 
-      <Modal open={confirmingRefresh} onClose={() => setConfirmingRefresh(false)} width="sm"
+      <Modal open={confirmingRefresh} onClose={() => { setConfirmingRefresh(false); setRefreshError(null); }} width="sm"
              title="Fetch live heat-pump data?"
              footer={
                <>
@@ -163,6 +167,7 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather, exe
         <p class="muted heating-controls-hint">You normally don't need this: the
            planner already refreshes these values about every 30 minutes, and
            everything here shows that reading.</p>
+        {refreshError && <p class="heating-refresh-error">Live read failed: {refreshError}</p>}
       </Modal>
     </div>
   );

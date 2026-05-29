@@ -19,6 +19,11 @@
   padding: 2px 8px;
   font-size: 0.65rem;
 }
+.heating-refresh-error {
+  color: var(--danger, #ef4444);
+  font-size: var(--font-sm);
+  margin-top: var(--space-2);
+}
 
 .heating-split {
   padding-top: var(--space-2);
