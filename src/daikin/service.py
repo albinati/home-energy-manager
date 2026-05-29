@@ -418,9 +418,15 @@ def invalidate_after_write() -> None:
 def get_quota_status_daikin() -> dict:
     """Return cache and quota info for dashboard / status endpoints."""
     from ..api_quota import get_quota_status as _qs
+    force_iv = int(config.DAIKIN_FORCE_REFRESH_MIN_INTERVAL_SECONDS)
     with _lock:
         age = _cache_age_seconds()
         qst = _qs("daikin")
+        # Remaining cooldown for the UI's manual "force refresh" (actor="api"),
+        # so the button can lock + count down in lock-step with the server.
+        last_api_force = _force_refresh_timestamps.get("api", 0.0)
+        elapsed = time.time() - last_api_force if last_api_force else force_iv
+        force_available_in = max(0.0, force_iv - elapsed)
     return {
         "cache_age_seconds": None if age == float("inf") else round(age, 1),
         "cache_warm": _cache_is_warm(),
@@ -436,6 +442,9 @@ def get_quota_status_daikin() -> dict:
         # Surfaced so the UI shows the heating lock/active state even when
         # device telemetry is cold (quota blocked → /daikin/status empty).
         "control_mode": config.DAIKIN_CONTROL_MODE,
+        # Manual force-refresh cooldown (UI lock).
+        "force_refresh_min_interval_seconds": force_iv,
+        "force_refresh_available_in_seconds": round(force_available_in, 1),
         **qst,
     }
 

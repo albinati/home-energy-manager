@@ -7,7 +7,7 @@ import type {
   ExecutionTodayResponse,
   ExecutionSlot,
 } from "../../lib/types";
-import { useState } from "preact/hooks";
+import { useState, useEffect } from "preact/hooks";
 import { kwh, relTime } from "../../lib/format";
 import { forceRefreshDaikin } from "../../lib/endpoints";
 import { Pill } from "../common/Pill";
@@ -41,12 +41,37 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather, exe
   const [confirmingRefresh, setConfirmingRefresh] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
+  // Manual force-refresh cooldown — locks the button (and counts down) in
+  // lock-step with the server's per-actor throttle, so you can't re-click for
+  // a few minutes and silently burn a wasted (throttled) call.
+  const forceIv = daikinQuota?.force_refresh_min_interval_seconds ?? 300;
+  const serverAvailIn = daikinQuota?.force_refresh_available_in_seconds ?? 0;
+  const [cooldownUntil, setCooldownUntil] = useState(0);  // epoch ms
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  // Seed from the server (covers page reloads mid-cooldown); never lower it.
+  useEffect(() => {
+    if (serverAvailIn > 0) {
+      setCooldownUntil((prev) => Math.max(prev, Date.now() + serverAvailIn * 1000));
+    }
+  }, [serverAvailIn]);
+  // Tick once a second while the lock is active.
+  useEffect(() => {
+    if (cooldownUntil <= Date.now()) return;
+    const id = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [cooldownUntil]);
+  const cooldownLeft = Math.max(0, Math.ceil((cooldownUntil - nowMs) / 1000));
+  const onCooldown = cooldownLeft > 0;
+  const cooldownLabel = onCooldown
+    ? `↻ ${Math.floor(cooldownLeft / 60)}:${String(cooldownLeft % 60).padStart(2, "0")}`
+    : "↻ Live";
   async function doForceRefresh() {
     setRefreshing(true);
     setRefreshError(null);
     try {
       await forceRefreshDaikin();
       setConfirmingRefresh(false);
+      setCooldownUntil(Date.now() + forceIv * 1000);  // lock the button
       onRefresh?.();  // re-pull the now-fresh cache
     } catch (e) {
       // Keep the modal open so a failed live read isn't mistaken for success.
@@ -118,10 +143,12 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather, exe
             {quotaUsed}/{quotaBudget} · 24h
           </Pill>
         )}
-        <button class="btn btn--ghost btn--sm heating-refresh" disabled={refreshing}
-                title="Fetch live data from the heat pump now (uses one Daikin API call)"
+        <button class="btn btn--ghost btn--sm heating-refresh" disabled={refreshing || onCooldown}
+                title={onCooldown
+                  ? `Just refreshed — available again in ${cooldownLabel.replace("↻ ", "")}`
+                  : "Fetch live data from the heat pump now (uses one Daikin API call)"}
                 onClick={() => setConfirmingRefresh(true)}>
-          {refreshing ? "…" : "↻ Live"}
+          {refreshing ? "…" : cooldownLabel}
         </button>
       </div>
 

@@ -1432,9 +1432,11 @@ class Config:
     DAIKIN_REFRESH_MIN_INTERVAL_SECONDS: int = int(
         os.getenv("DAIKIN_REFRESH_MIN_INTERVAL_SECONDS", "90")
     )
-    # Minimum interval between explicit "force refresh" calls (UI refresh button, CLI --force-refresh)
+    # Minimum interval between explicit "force refresh" calls (UI refresh button, CLI --force-refresh).
+    # 5 min: long enough to stop button-mashing through the ~200/day quota, short
+    # enough that an operator who genuinely needs fresh state isn't stuck waiting.
     DAIKIN_FORCE_REFRESH_MIN_INTERVAL_SECONDS: int = int(
-        os.getenv("DAIKIN_FORCE_REFRESH_MIN_INTERVAL_SECONDS", "1800")
+        os.getenv("DAIKIN_FORCE_REFRESH_MIN_INTERVAL_SECONDS", "300")
     )
     # Width of the Octopus pre-slot window that allows automatic device refresh (seconds before HH:30/HH:00)
     DAIKIN_SLOT_TRANSITION_WINDOW_SECONDS: int = int(
