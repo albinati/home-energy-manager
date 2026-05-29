@@ -435,6 +435,21 @@ SCHEMA: dict[str, SettingSpec] = {
             "BATTERY_CAPACITY_KWH."
         ),
     ),
+    "LP_LOAD_SCALE_FACTOR": SettingSpec(
+        key="LP_LOAD_SCALE_FACTOR",
+        type_name="float",
+        env_default=_float_env("LP_LOAD_SCALE_FACTOR", "1.0"),
+        min_value=0.5,
+        max_value=2.0,
+        description=(
+            "Operator multiplier on the residual house-load forecast the LP "
+            "plans against. 1.0 = as-measured (default, no-op). Nudge down "
+            "(e.g. 0.7 when away) or up (e.g. 1.3 for guests) to shift the "
+            "plan's demand assumption without re-learning the profile. Applies "
+            "to the residual profile only — explicit appliance loads are "
+            "unaffected."
+        ),
+    ),
     # Legionella thermal-shock awareness. The Daikin Onecta firmware fires the
     # cycle autonomously on a user-configured day/hour (set in the Onecta app);
     # the LP cannot command it. These knobs let the LP *predict* the resulting

@@ -496,3 +496,63 @@ export interface MetricsResponse {
     standing_pence_per_day?: number | null;
   };
 }
+
+/* ----- /workbench (LP override editor) ----- */
+
+export interface WorkbenchField {
+  key: string;
+  config_attr: string;
+  type: string; // "float" | "int" | "str"
+  min?: number | null;
+  max?: number | null;
+  enum?: string[] | null;
+  description: string;
+  group: string;
+  promotable: boolean;
+  current: number | string | boolean | null;
+}
+
+export interface WorkbenchSchema {
+  groups: string[];
+  fields: WorkbenchField[];
+}
+
+export interface WorkbenchSimSlot {
+  t: string | null;
+  price_p: number | null;
+  import_kwh: number | null;
+  export_kwh: number | null;
+  battery_charge_kwh: number | null;
+  battery_discharge_kwh: number | null;
+  soc_kwh: number | null;
+}
+
+export interface WorkbenchSimulateResponse {
+  ok: boolean;
+  error?: string | null;
+  plan_date?: string | null;
+  objective_pence?: number | null;
+  status?: string | null;
+  slot_count?: number | null;
+  actual_mean_agile_pence?: number | null;
+  forecast_solar_kwh_horizon?: number | null;
+  mu_load_kwh_per_slot?: number | null;
+  applied_overrides: Record<string, unknown>;
+  ignored_overrides: Record<string, unknown>;
+  slots?: WorkbenchSimSlot[];
+}
+
+// ActionDiff shape from /workbench/promote/simulate. We render human_summary +
+// the non-promotable list; the detailed diff items vary, so keep them loose.
+export interface WorkbenchPromoteDiff {
+  simulation_id: string;
+  action?: string;
+  human_summary?: string;
+  non_promotable_overrides?: Record<string, unknown>;
+}
+
+export interface WorkbenchPromoteResult {
+  ok: boolean;
+  promoted: Array<{ key: string; ok: boolean; value?: unknown; error?: string }>;
+  profile_name?: string | null;
+}

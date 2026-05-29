@@ -1215,6 +1215,14 @@ class Config:
     def LP_SOC_FINAL_KWH(self, value: float) -> None:
         self._rt_set("LP_SOC_FINAL_KWH", float(value))
 
+    @property
+    def LP_LOAD_SCALE_FACTOR(self) -> float:
+        return float(self._rt_get("LP_LOAD_SCALE_FACTOR"))
+
+    @LP_LOAD_SCALE_FACTOR.setter
+    def LP_LOAD_SCALE_FACTOR(self, value: float) -> None:
+        self._rt_set("LP_LOAD_SCALE_FACTOR", float(value))
+
     # --- PR B — shower demand model -------------------------------------
     @property
     def DHW_SHOWER_DURATION_MIN(self) -> float:
