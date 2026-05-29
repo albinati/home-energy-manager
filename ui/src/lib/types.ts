@@ -473,6 +473,10 @@ export interface ApiQuotaResponse {
   // Daikin only — DAIKIN_CONTROL_MODE, surfaced so the heating lock/active
   // state shows even when device telemetry is cold (quota blocked).
   control_mode?: string | null;
+  // Daikin only — manual force-refresh cooldown, so the UI button locks +
+  // counts down in lock-step with the server-side per-actor throttle.
+  force_refresh_min_interval_seconds?: number;
+  force_refresh_available_in_seconds?: number;
 }
 
 /* ----- /tariffs/dashboard (POST) — comparison vs Octopus catalogue ----- */

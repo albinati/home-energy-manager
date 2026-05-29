@@ -97,8 +97,12 @@ def _cache_is_warm() -> bool:
     )
 
 
-def _do_refresh(actor: str) -> list[DaikinDevice]:
+def _do_refresh(actor: str, *, force: bool = False) -> list[DaikinDevice]:
     """Call get_devices() and update cache. Quota accounting is at the transport layer (DaikinClient._get).
+
+    ``force=True`` (explicit user-triggered refresh) bypasses the anti-burst
+    interval floor — the auto paths (LP init etc.) read on their natural ~30 min
+    cache cadence, and a deliberate "refresh now" should still get fresh data.
 
     Defensive guard: refuse to call Daikin when the soft cap is exhausted.
     Every caller higher up SHOULD already check should_block, but this
@@ -123,7 +127,7 @@ def _do_refresh(actor: str) -> list[DaikinDevice]:
     # looping caller without a separate instrumentation deploy.
     now_m = time.monotonic()
     min_iv = float(getattr(config, "DAIKIN_REFRESH_MIN_INTERVAL_SECONDS", 90))
-    if _last_refresh_monotonic and (now_m - _last_refresh_monotonic) < min_iv and _devices_cache is not None:
+    if not force and _last_refresh_monotonic and (now_m - _last_refresh_monotonic) < min_iv and _devices_cache is not None:
         if not _refresh_throttle_logged:
             _refresh_throttle_logged = True
             logger.warning(
@@ -383,7 +387,7 @@ def force_refresh_devices(
 
         _force_refresh_timestamps[actor] = time.time()
         try:
-            devices = _do_refresh(actor)
+            devices = _do_refresh(actor, force=True)
             return CachedDevices(
                 devices=devices,
                 fetched_at_wall=_devices_fetched_wall,
@@ -414,9 +418,15 @@ def invalidate_after_write() -> None:
 def get_quota_status_daikin() -> dict:
     """Return cache and quota info for dashboard / status endpoints."""
     from ..api_quota import get_quota_status as _qs
+    force_iv = int(config.DAIKIN_FORCE_REFRESH_MIN_INTERVAL_SECONDS)
     with _lock:
         age = _cache_age_seconds()
         qst = _qs("daikin")
+        # Remaining cooldown for the UI's manual "force refresh" (actor="api"),
+        # so the button can lock + count down in lock-step with the server.
+        last_api_force = _force_refresh_timestamps.get("api", 0.0)
+        elapsed = time.time() - last_api_force if last_api_force else force_iv
+        force_available_in = max(0.0, force_iv - elapsed)
     return {
         "cache_age_seconds": None if age == float("inf") else round(age, 1),
         "cache_warm": _cache_is_warm(),
@@ -432,6 +442,9 @@ def get_quota_status_daikin() -> dict:
         # Surfaced so the UI shows the heating lock/active state even when
         # device telemetry is cold (quota blocked → /daikin/status empty).
         "control_mode": config.DAIKIN_CONTROL_MODE,
+        # Manual force-refresh cooldown (UI lock).
+        "force_refresh_min_interval_seconds": force_iv,
+        "force_refresh_available_in_seconds": round(force_available_in, 1),
         **qst,
     }
 

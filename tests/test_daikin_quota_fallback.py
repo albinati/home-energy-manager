@@ -67,6 +67,45 @@ def test_do_refresh_throttles_rapid_reads(monkeypatch):
     assert second is sentinel, "throttled call returns the warm cache"
 
 
+def test_do_refresh_force_bypasses_throttle(monkeypatch):
+    """An explicit user-triggered refresh (force=True) must hit the API even
+    inside the anti-burst window — the auto floor only gates background callers,
+    not a deliberate "refresh now"."""
+    from unittest.mock import MagicMock
+
+    monkeypatch.setattr(daikin_service, "should_block", lambda _v: False)
+    monkeypatch.setattr(daikin_service.config, "DAIKIN_REFRESH_MIN_INTERVAL_SECONDS", 300, raising=False)
+    monkeypatch.setattr(daikin_service, "_persist_daikin_telemetry_live", lambda _d: None)
+
+    mock_client = MagicMock()
+    mock_client.get_devices.side_effect = [[object()], [object()]]
+    monkeypatch.setattr(daikin_service, "_get_or_create_client", lambda: mock_client)
+
+    daikin_service._do_refresh("auto")  # primes the window
+    daikin_service._do_refresh("user", force=True)  # inside window but forced
+
+    assert mock_client.get_devices.call_count == 2, "force=True must bypass the throttle"
+
+
+def test_quota_status_exposes_force_refresh_cooldown(monkeypatch):
+    """The quota payload surfaces the manual force-refresh cooldown so the UI
+    button can lock + count down in lock-step with the server throttle."""
+    import time as _time
+
+    monkeypatch.setattr(daikin_service.config, "DAIKIN_FORCE_REFRESH_MIN_INTERVAL_SECONDS", 300, raising=False)
+
+    # No prior force → button available (0 remaining).
+    monkeypatch.setattr(daikin_service, "_force_refresh_timestamps", {}, raising=False)
+    fresh = daikin_service.get_quota_status_daikin()
+    assert fresh["force_refresh_min_interval_seconds"] == 300
+    assert fresh["force_refresh_available_in_seconds"] == 0.0
+
+    # A just-fired force → remaining is (almost) the full interval.
+    monkeypatch.setattr(daikin_service, "_force_refresh_timestamps", {"api": _time.time()}, raising=False)
+    locked = daikin_service.get_quota_status_daikin()
+    assert 295.0 <= locked["force_refresh_available_in_seconds"] <= 300.0
+
+
 def _seed_live_row(age_seconds: float, *, tank: float = 50.0, indoor: float = 21.0) -> None:
     now = datetime.now(UTC)
     db.insert_daikin_telemetry({

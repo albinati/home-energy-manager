@@ -7,10 +7,13 @@ import type {
   ExecutionTodayResponse,
   ExecutionSlot,
 } from "../../lib/types";
+import { useState, useEffect } from "preact/hooks";
 import { kwh, relTime } from "../../lib/format";
+import { forceRefreshDaikin } from "../../lib/endpoints";
 import { Pill } from "../common/Pill";
 import { Gauge } from "../common/Gauge";
 import { RadialGauge } from "../common/RadialGauge";
+import { Modal } from "../common/Modal";
 import { HeatingControls } from "./HeatingControls";
 import "./heating.css";
 
@@ -31,6 +34,52 @@ interface HeatingWidgetProps {
 // zero quota cost.
 export function HeatingWidget({ state, daikin, daikinQuota, report, weather, execution, onRefresh }: HeatingWidgetProps) {
   const dev = daikin && daikin.length > 0 ? daikin[0] : null;
+  // Explicit, confirmed LIVE read. Everything on this widget normally renders
+  // the cache the LP/scheduler already refreshed (~30 min cadence) — we only
+  // hit the Daikin API on demand, behind this confirm, to protect the ~200/day
+  // quota. quota-blocked → backend returns warm cache (no network).
+  const [confirmingRefresh, setConfirmingRefresh] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+  // Manual force-refresh cooldown — locks the button (and counts down) in
+  // lock-step with the server's per-actor throttle, so you can't re-click for
+  // a few minutes and silently burn a wasted (throttled) call.
+  const forceIv = daikinQuota?.force_refresh_min_interval_seconds ?? 300;
+  const serverAvailIn = daikinQuota?.force_refresh_available_in_seconds ?? 0;
+  const [cooldownUntil, setCooldownUntil] = useState(0);  // epoch ms
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  // Seed from the server (covers page reloads mid-cooldown); never lower it.
+  useEffect(() => {
+    if (serverAvailIn > 0) {
+      setCooldownUntil((prev) => Math.max(prev, Date.now() + serverAvailIn * 1000));
+    }
+  }, [serverAvailIn]);
+  // Tick once a second while the lock is active.
+  useEffect(() => {
+    if (cooldownUntil <= Date.now()) return;
+    const id = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [cooldownUntil]);
+  const cooldownLeft = Math.max(0, Math.ceil((cooldownUntil - nowMs) / 1000));
+  const onCooldown = cooldownLeft > 0;
+  const cooldownLabel = onCooldown
+    ? `↻ ${Math.floor(cooldownLeft / 60)}:${String(cooldownLeft % 60).padStart(2, "0")}`
+    : "↻ Live";
+  async function doForceRefresh() {
+    setRefreshing(true);
+    setRefreshError(null);
+    try {
+      await forceRefreshDaikin();
+      setConfirmingRefresh(false);
+      setCooldownUntil(Date.now() + forceIv * 1000);  // lock the button
+      onRefresh?.();  // re-pull the now-fresh cache
+    } catch (e) {
+      // Keep the modal open so a failed live read isn't mistaken for success.
+      setRefreshError(e instanceof Error ? e.message : "Live read failed");
+    } finally {
+      setRefreshing(false);
+    }
+  }
   // No cooling on this system — only heating + DHW. We surface compressor
   // status via the tank/space rows themselves (ON/OFF), not a "mode" chip.
   const tankTemp = state.tank_c ?? dev?.tank_temp ?? null;
@@ -94,6 +143,13 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather, exe
             {quotaUsed}/{quotaBudget} · 24h
           </Pill>
         )}
+        <button class="btn btn--ghost btn--sm heating-refresh" disabled={refreshing || onCooldown}
+                title={onCooldown
+                  ? `Just refreshed — available again in ${cooldownLabel.replace("↻ ", "")}`
+                  : "Fetch live data from the heat pump now (uses one Daikin API call)"}
+                onClick={() => setConfirmingRefresh(true)}>
+          {refreshing ? "…" : cooldownLabel}
+        </button>
       </div>
 
       <RadialGauge label={`Tank${tankPower != null ? (tankPower ? " · on" : " · off") : ""}`}
@@ -120,6 +176,26 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather, exe
       )}
 
       <HeatingControls dev={dev} controlMode={daikinQuota?.control_mode} onChanged={() => onRefresh?.()} />
+
+      <Modal open={confirmingRefresh} onClose={() => { setConfirmingRefresh(false); setRefreshError(null); }} width="sm"
+             title="Fetch live heat-pump data?"
+             footer={
+               <>
+                 <button class="btn btn--ghost" disabled={refreshing}
+                         onClick={() => setConfirmingRefresh(false)}>Cancel</button>
+                 <button class="btn btn--primary" disabled={refreshing} onClick={doForceRefresh}>
+                   {refreshing ? "Refreshing…" : "Refresh now"}
+                 </button>
+               </>
+             }>
+        <p>This reads the tank, leaving-water and outdoor temperatures straight
+           from the heat pump — one of the limited <strong>~200 Daikin API
+           calls/day</strong>.</p>
+        <p class="muted heating-controls-hint">You normally don't need this: the
+           planner already refreshes these values about every 30 minutes, and
+           everything here shows that reading.</p>
+        {refreshError && <p class="heating-refresh-error">Live read failed: {refreshError}</p>}
+      </Modal>
     </div>
   );
 }
