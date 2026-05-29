@@ -164,3 +164,7 @@
 .btn--ghost {
   background: transparent;
 }
+.btn--sm {
+  padding: 4px 10px;
+  font-size: var(--font-sm);
+}

@@ -387,11 +387,24 @@ export interface DaikinDevice {
   tank_target?: number | null;
   outdoor_temp?: number | null;
   lwt?: number | null;
+  lwt_offset?: number | null;
   weather_regulation?: boolean | null;
   control_mode?: string | null;
   state_summary?: string | null;
   is_on?: boolean | null;
   tank_power?: boolean | null;
+}
+
+// Daikin operation modes accepted by POST /daikin/mode.
+export type DaikinOperationMode = "heating" | "cooling" | "auto" | "fan_only" | "dry";
+
+// Shape returned by the Daikin write routes (ActionResult). When a route
+// requires confirmation and skip_confirmation is false it returns a different
+// (pending) shape — the UI always sends skip_confirmation:true after its own
+// confirm dialog, so it only ever sees this.
+export interface ActionResult {
+  success: boolean;
+  message: string;
 }
 
 // /daikin/quota + /foxess/quota — shared shape
