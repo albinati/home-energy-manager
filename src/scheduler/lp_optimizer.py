@@ -860,9 +860,10 @@ def solve_lp(
         if _preset_enum == OperationPreset.NORMAL:
             reserve_count = _dhw.total_morning_showers(OperationPreset.NORMAL)
             if reserve_count > 0:
-                from .. import runtime_settings as _rts
+                # DHW_MORNING_RESERVE_HOUR_LOCAL was demoted to env-only
+                # (2026-05-29); read it off config rather than runtime_settings.
                 try:
-                    morning_hour = int(_rts.get_setting("DHW_MORNING_RESERVE_HOUR_LOCAL"))
+                    morning_hour = int(getattr(config, "DHW_MORNING_RESERVE_HOUR_LOCAL", 7))
                 except (TypeError, ValueError):
                     morning_hour = 7
                 reserve_floor_c = min(

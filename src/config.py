@@ -692,15 +692,11 @@ class Config:
     LP_PV_ABUNDANCE_TANK_BEAT_EXPORT_BUFFER_PENCE: float = float(
         os.getenv("LP_PV_ABUNDANCE_TANK_BEAT_EXPORT_BUFFER_PENCE", "2.0")
     )
-    # Tank target ceiling on PV-abundance slots, distinct from
-    # ``DHW_TEMP_MAX_C`` (65 °C) used on negative-price slots. The user's
-    # empirical manual schedule lifts to 45 °C on solar afternoons; this
-    # default 55 °C gives margin for guests + minor forecast error while
-    # avoiding the heavy standing losses of holding 65 °C through the day.
-    # Lower this toward 45 °C if standing-loss bleed-back becomes a concern.
-    # DHW_TEMP_PV_ABUNDANCE_TARGET_C is now runtime-tunable via runtime_settings
-    # (see @property below). Default lowered from 55 → 45 (= DHW_TEMP_NORMAL_C);
-    # override per household occupancy at runtime without restart.
+    # DHW_TEMP_PV_ABUNDANCE_TARGET_C was demoted to env-only on 2026-05-29
+    # (removed from runtime_settings.SCHEMA). The default deterministic schedule
+    # has no PV-abundance tank lift; only the DHW_FIXED_SCHEDULE_ENABLED=false
+    # rollback path reads it. The plain attribute lives in the DHW knobs block
+    # below.
     # NOTE: ``DHW_PEAK_TANK_STRATEGY`` was removed 2026-05-21 (Epic 14, #386).
     # Prod telemetry showed the SHUTDOWN branch failed 27% of the time with
     # READ_ONLY_CHARACTERISTIC errors and produced no measurable kWh savings
@@ -747,17 +743,41 @@ class Config:
     DHW_SETBACK_START_HOUR_LOCAL: int = int(
         os.getenv("DHW_SETBACK_START_HOUR_LOCAL", "22")
     )
-    # Tank setback temperature during overnight window (°C).
-    # 37 °C = enough for emergency morning shower without battery drain.
-    DHW_TEMP_SETBACK_C: float = float(
-        os.getenv("DHW_TEMP_SETBACK_C", "37")
+    # DHW_TEMP_SETBACK_C and DHW_NEGATIVE_PRICE_BOOST_C were PROMOTED to
+    # runtime-tunable in the 2026-05-29 settings simplification — they are the
+    # real knobs the deterministic schedule (dhw_policy) reads, so they now
+    # have runtime_settings.SCHEMA entries + @property getters below. The env
+    # var is still the default (env_default in the schema).
+    #
+    # --- DHW knobs DEMOTED to env-only in the same change (removed from
+    # runtime_settings.SCHEMA). They were either misleading (overnight target
+    # that didn't drive the setback) or inert under the default schedule. Kept
+    # as plain attributes so the DHW_FIXED_SCHEDULE_ENABLED=false rollback path
+    # (and a couple of debug-snapshot reads) still resolve.
+    DHW_TEMP_COMFORT_C: float = float(os.getenv("DHW_TEMP_COMFORT_C", "48"))
+    DHW_TEMP_PV_ABUNDANCE_TARGET_C: float = float(
+        os.getenv("DHW_TEMP_PV_ABUNDANCE_TARGET_C", "60")
     )
-    # Tank temperature during negative-price slots (Outgoing Agile < 0 p/kWh).
-    # Sole permitted exception to the fixed schedule — grid is paying us
-    # to consume, so load the tank.
-    DHW_NEGATIVE_PRICE_BOOST_C: float = float(
-        os.getenv("DHW_NEGATIVE_PRICE_BOOST_C", "60")
+    DHW_SHOWER_DURATION_MIN: float = float(os.getenv("DHW_SHOWER_DURATION_MIN", "5.0"))
+    DHW_SHOWER_FLOW_LPM: float = float(os.getenv("DHW_SHOWER_FLOW_LPM", "7.0"))
+    DHW_SHOWER_MIXER_TEMP_C: float = float(os.getenv("DHW_SHOWER_MIXER_TEMP_C", "38.0"))
+    DHW_SHOWER_COLD_INLET_TEMP_C: float = float(
+        os.getenv("DHW_SHOWER_COLD_INLET_TEMP_C", os.getenv("DHW_COLD_INLET_TEMP_C", "10.0"))
     )
+    DHW_SHOWERS_NORMAL_EVENING: int = int(os.getenv("DHW_SHOWERS_NORMAL_EVENING", "4"))
+    DHW_SHOWERS_NORMAL_MORNING_RESERVE: int = int(
+        os.getenv("DHW_SHOWERS_NORMAL_MORNING_RESERVE", "1")
+    )
+    DHW_SHOWERS_GUESTS_EVENING_EXTRA_PER_GUEST: int = int(
+        os.getenv("DHW_SHOWERS_GUESTS_EVENING_EXTRA_PER_GUEST", "1")
+    )
+    DHW_SHOWERS_GUESTS_MORNING_EXTRA_PER_GUEST: int = int(
+        os.getenv("DHW_SHOWERS_GUESTS_MORNING_EXTRA_PER_GUEST", "1")
+    )
+    DHW_GUEST_COUNT: int = int(os.getenv("DHW_GUEST_COUNT", "2"))
+    DHW_SHOWERS_EVENING_CAP: int = int(os.getenv("DHW_SHOWERS_EVENING_CAP", "6"))
+    DHW_TANK_USABLE_FRACTION: float = float(os.getenv("DHW_TANK_USABLE_FRACTION", "0.85"))
+    DHW_MORNING_RESERVE_HOUR_LOCAL: int = int(os.getenv("DHW_MORNING_RESERVE_HOUR_LOCAL", "7"))
     # Forecast night-temperature bias (minimal #324 implementation).
     # Open Meteo's grid coverage (~10 km) over-estimates the W4 1DZ
     # microclimate's overnight outdoor temperature by ~3 °C in the household's
@@ -1153,13 +1173,11 @@ class Config:
     def WEATHER_LON(self, value: str) -> None:
         self._rt_set("WEATHER_LON", str(value).strip())
 
-    @property
-    def DHW_TEMP_COMFORT_C(self) -> float:
-        return float(self._rt_get("DHW_TEMP_COMFORT_C"))
-
-    @DHW_TEMP_COMFORT_C.setter
-    def DHW_TEMP_COMFORT_C(self, value: float) -> None:
-        self._rt_set("DHW_TEMP_COMFORT_C", float(value))
+    # DHW_TEMP_COMFORT_C: demoted from runtime-tunable to env-only in the
+    # 2026-05-29 settings simplification (removed from runtime_settings.SCHEMA).
+    # Only read by the DHW_FIXED_SCHEDULE_ENABLED=false rollback path; the
+    # default schedule never uses it. Plain attribute defined in the class body
+    # (see DHW_TEMP_SETBACK_C region) so reads still resolve.
 
     @property
     def DHW_TEMP_NORMAL_C(self) -> float:
@@ -1169,13 +1187,28 @@ class Config:
     def DHW_TEMP_NORMAL_C(self, value: float) -> None:
         self._rt_set("DHW_TEMP_NORMAL_C", float(value))
 
+    # Promoted to runtime-tunable 2026-05-29 — the two knobs the deterministic
+    # tank schedule (dhw_policy) actually reads besides DHW_TEMP_NORMAL_C.
     @property
-    def DHW_TEMP_PV_ABUNDANCE_TARGET_C(self) -> float:
-        return float(self._rt_get("DHW_TEMP_PV_ABUNDANCE_TARGET_C"))
+    def DHW_TEMP_SETBACK_C(self) -> float:
+        return float(self._rt_get("DHW_TEMP_SETBACK_C"))
 
-    @DHW_TEMP_PV_ABUNDANCE_TARGET_C.setter
-    def DHW_TEMP_PV_ABUNDANCE_TARGET_C(self, value: float) -> None:
-        self._rt_set("DHW_TEMP_PV_ABUNDANCE_TARGET_C", float(value))
+    @DHW_TEMP_SETBACK_C.setter
+    def DHW_TEMP_SETBACK_C(self, value: float) -> None:
+        self._rt_set("DHW_TEMP_SETBACK_C", float(value))
+
+    @property
+    def DHW_NEGATIVE_PRICE_BOOST_C(self) -> float:
+        return float(self._rt_get("DHW_NEGATIVE_PRICE_BOOST_C"))
+
+    @DHW_NEGATIVE_PRICE_BOOST_C.setter
+    def DHW_NEGATIVE_PRICE_BOOST_C(self, value: float) -> None:
+        self._rt_set("DHW_NEGATIVE_PRICE_BOOST_C", float(value))
+
+    # DHW_TEMP_PV_ABUNDANCE_TARGET_C: demoted to env-only in the 2026-05-29
+    # settings simplification (removed from runtime_settings.SCHEMA). Only read
+    # by the DHW_FIXED_SCHEDULE_ENABLED=false rollback path. Plain attribute
+    # defined in the class body so reads still resolve.
 
     @property
     def INDOOR_SETPOINT_C(self) -> float:
@@ -1215,94 +1248,13 @@ class Config:
     def LP_SOC_FINAL_KWH(self, value: float) -> None:
         self._rt_set("LP_SOC_FINAL_KWH", float(value))
 
-    # --- PR B — shower demand model -------------------------------------
-    @property
-    def DHW_SHOWER_DURATION_MIN(self) -> float:
-        return float(self._rt_get("DHW_SHOWER_DURATION_MIN"))
-
-    @DHW_SHOWER_DURATION_MIN.setter
-    def DHW_SHOWER_DURATION_MIN(self, value: float) -> None:
-        self._rt_set("DHW_SHOWER_DURATION_MIN", float(value))
-
-    @property
-    def DHW_SHOWER_FLOW_LPM(self) -> float:
-        return float(self._rt_get("DHW_SHOWER_FLOW_LPM"))
-
-    @DHW_SHOWER_FLOW_LPM.setter
-    def DHW_SHOWER_FLOW_LPM(self, value: float) -> None:
-        self._rt_set("DHW_SHOWER_FLOW_LPM", float(value))
-
-    @property
-    def DHW_SHOWER_MIXER_TEMP_C(self) -> float:
-        return float(self._rt_get("DHW_SHOWER_MIXER_TEMP_C"))
-
-    @DHW_SHOWER_MIXER_TEMP_C.setter
-    def DHW_SHOWER_MIXER_TEMP_C(self, value: float) -> None:
-        self._rt_set("DHW_SHOWER_MIXER_TEMP_C", float(value))
-
-    @property
-    def DHW_SHOWER_COLD_INLET_TEMP_C(self) -> float:
-        return float(self._rt_get("DHW_SHOWER_COLD_INLET_TEMP_C"))
-
-    @DHW_SHOWER_COLD_INLET_TEMP_C.setter
-    def DHW_SHOWER_COLD_INLET_TEMP_C(self, value: float) -> None:
-        self._rt_set("DHW_SHOWER_COLD_INLET_TEMP_C", float(value))
-
-    @property
-    def DHW_SHOWERS_NORMAL_EVENING(self) -> int:
-        return int(self._rt_get("DHW_SHOWERS_NORMAL_EVENING"))
-
-    @DHW_SHOWERS_NORMAL_EVENING.setter
-    def DHW_SHOWERS_NORMAL_EVENING(self, value: int) -> None:
-        self._rt_set("DHW_SHOWERS_NORMAL_EVENING", int(value))
-
-    @property
-    def DHW_SHOWERS_NORMAL_MORNING_RESERVE(self) -> int:
-        return int(self._rt_get("DHW_SHOWERS_NORMAL_MORNING_RESERVE"))
-
-    @DHW_SHOWERS_NORMAL_MORNING_RESERVE.setter
-    def DHW_SHOWERS_NORMAL_MORNING_RESERVE(self, value: int) -> None:
-        self._rt_set("DHW_SHOWERS_NORMAL_MORNING_RESERVE", int(value))
-
-    @property
-    def DHW_SHOWERS_GUESTS_EVENING_EXTRA_PER_GUEST(self) -> int:
-        return int(self._rt_get("DHW_SHOWERS_GUESTS_EVENING_EXTRA_PER_GUEST"))
-
-    @DHW_SHOWERS_GUESTS_EVENING_EXTRA_PER_GUEST.setter
-    def DHW_SHOWERS_GUESTS_EVENING_EXTRA_PER_GUEST(self, value: int) -> None:
-        self._rt_set("DHW_SHOWERS_GUESTS_EVENING_EXTRA_PER_GUEST", int(value))
-
-    @property
-    def DHW_SHOWERS_GUESTS_MORNING_EXTRA_PER_GUEST(self) -> int:
-        return int(self._rt_get("DHW_SHOWERS_GUESTS_MORNING_EXTRA_PER_GUEST"))
-
-    @DHW_SHOWERS_GUESTS_MORNING_EXTRA_PER_GUEST.setter
-    def DHW_SHOWERS_GUESTS_MORNING_EXTRA_PER_GUEST(self, value: int) -> None:
-        self._rt_set("DHW_SHOWERS_GUESTS_MORNING_EXTRA_PER_GUEST", int(value))
-
-    @property
-    def DHW_GUEST_COUNT(self) -> int:
-        return int(self._rt_get("DHW_GUEST_COUNT"))
-
-    @DHW_GUEST_COUNT.setter
-    def DHW_GUEST_COUNT(self, value: int) -> None:
-        self._rt_set("DHW_GUEST_COUNT", int(value))
-
-    @property
-    def DHW_SHOWERS_EVENING_CAP(self) -> int:
-        return int(self._rt_get("DHW_SHOWERS_EVENING_CAP"))
-
-    @DHW_SHOWERS_EVENING_CAP.setter
-    def DHW_SHOWERS_EVENING_CAP(self, value: int) -> None:
-        self._rt_set("DHW_SHOWERS_EVENING_CAP", int(value))
-
-    @property
-    def DHW_TANK_USABLE_FRACTION(self) -> float:
-        return float(self._rt_get("DHW_TANK_USABLE_FRACTION"))
-
-    @DHW_TANK_USABLE_FRACTION.setter
-    def DHW_TANK_USABLE_FRACTION(self, value: float) -> None:
-        self._rt_set("DHW_TANK_USABLE_FRACTION", float(value))
+    # --- Shower-demand model: demoted from runtime-tunable to env-only in the
+    # 2026-05-29 settings simplification (removed from runtime_settings.SCHEMA).
+    # Inert under the default deterministic schedule (dhw_policy uses a fixed
+    # SHOWER_REHEAT_KWH constant). Plain class attributes defined in the class
+    # body (see "shower-demand model (env-only)" block) so the gated LP
+    # shower-floor path in the DHW_FIXED_SCHEDULE_ENABLED=false rollback still
+    # reads them.
 
     @property
     def LP_SOC_TERMINAL_VALUE_PENCE_PER_KWH(self) -> float:

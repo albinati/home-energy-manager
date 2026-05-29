@@ -34,11 +34,11 @@ def test_validate_rejects_unknown_key():
 
 
 def test_validate_enforces_range():
-    # DHW_TEMP_COMFORT_C: 40..65
+    # DHW_TEMP_SETBACK_C: 25..50
     with pytest.raises(rts.SettingValidationError):
-        rts.set_setting("DHW_TEMP_COMFORT_C", 30)
+        rts.set_setting("DHW_TEMP_SETBACK_C", 20)
     with pytest.raises(rts.SettingValidationError):
-        rts.set_setting("DHW_TEMP_COMFORT_C", 80)
+        rts.set_setting("DHW_TEMP_SETBACK_C", 60)
 
 
 def test_validate_enforces_enum():
@@ -52,36 +52,36 @@ def test_validate_enforces_enum():
 
 
 def test_get_setting_falls_back_to_env_default_when_db_empty(monkeypatch):
-    monkeypatch.delenv("DHW_TEMP_COMFORT_C", raising=False)
+    monkeypatch.delenv("DHW_TEMP_SETBACK_C", raising=False)
     # Simulate "no override in DB" — default from the schema's env_default lambda.
     rts.clear_cache()
-    assert rts.get_setting("DHW_TEMP_COMFORT_C") == 48.0  # schema default
+    assert rts.get_setting("DHW_TEMP_SETBACK_C") == 37.0  # schema default
 
 
 def test_put_then_get_round_trip():
-    rts.set_setting("DHW_TEMP_COMFORT_C", 52.0)
-    assert rts.get_setting("DHW_TEMP_COMFORT_C") == 52.0
+    rts.set_setting("DHW_TEMP_SETBACK_C", 42.0)
+    assert rts.get_setting("DHW_TEMP_SETBACK_C") == 42.0
 
 
 def test_put_invalidates_cache_via_version_counter(monkeypatch):
     """Two successive PUTs within the TTL window must both be visible — the
     version bump is what makes the cache invalidate, not the TTL."""
-    rts.set_setting("DHW_TEMP_COMFORT_C", 50.0)
-    assert rts.get_setting("DHW_TEMP_COMFORT_C") == 50.0
-    rts.set_setting("DHW_TEMP_COMFORT_C", 55.0)
-    assert rts.get_setting("DHW_TEMP_COMFORT_C") == 55.0
+    rts.set_setting("DHW_TEMP_SETBACK_C", 38.0)
+    assert rts.get_setting("DHW_TEMP_SETBACK_C") == 38.0
+    rts.set_setting("DHW_TEMP_SETBACK_C", 44.0)
+    assert rts.get_setting("DHW_TEMP_SETBACK_C") == 44.0
 
 
 def test_delete_reverts_to_env_default():
-    rts.set_setting("DHW_TEMP_COMFORT_C", 55.0)
-    assert rts.get_setting("DHW_TEMP_COMFORT_C") == 55.0
-    removed = rts.delete_setting("DHW_TEMP_COMFORT_C")
+    rts.set_setting("DHW_TEMP_SETBACK_C", 44.0)
+    assert rts.get_setting("DHW_TEMP_SETBACK_C") == 44.0
+    removed = rts.delete_setting("DHW_TEMP_SETBACK_C")
     assert removed is True
-    assert rts.get_setting("DHW_TEMP_COMFORT_C") == 48.0  # env default
+    assert rts.get_setting("DHW_TEMP_SETBACK_C") == 37.0  # env default
 
 
 def test_delete_returns_false_when_no_row():
-    assert rts.delete_setting("DHW_TEMP_COMFORT_C") is False
+    assert rts.delete_setting("DHW_TEMP_SETBACK_C") is False
 
 
 # ---------------------------------------------------------------------------
@@ -90,35 +90,26 @@ def test_delete_returns_false_when_no_row():
 
 
 def test_config_property_reads_runtime_value():
-    rts.set_setting("DHW_TEMP_COMFORT_C", 52.5)
-    assert config.DHW_TEMP_COMFORT_C == 52.5
+    rts.set_setting("DHW_TEMP_SETBACK_C", 41.5)
+    assert config.DHW_TEMP_SETBACK_C == 41.5
 
 
-def test_dhw_temp_pv_abundance_target_runtime_tunable():
-    """#325 / PR F / PR G / PR H: solar_preheat target.
+def test_dhw_negative_price_boost_runtime_tunable():
+    """DHW_NEGATIVE_PRICE_BOOST_C promoted to runtime-tunable 2026-05-29.
 
-    PR F: 45 → 50 (give LP headroom above NORMAL).
-    PR G: 50 → 46 (calibrated to user's comfort-ceiling — wrongly applied
-                   as the storage target, exported PV instead of storing).
-    PR H: 46 → 60 (corrected: this is a STORAGE target during free-PV
-                   windows, NOT a comfort cap. Restore drops to NORMAL
-                   after the window ends, so the tank only stays at 60 °C
-                   while solar is genuinely excess)."""
-    # PR H default = 60 °C: lifts tank by 15 °C during PV abundance,
-    # storing ~3.5 kWh thermal; restore action drops back to NORMAL
-    # immediately after the solar window.
-    assert config.DHW_TEMP_PV_ABUNDANCE_TARGET_C == 60.0
-    # Bump for guests / larger household
-    rts.set_setting("DHW_TEMP_PV_ABUNDANCE_TARGET_C", 55.0)
-    assert config.DHW_TEMP_PV_ABUNDANCE_TARGET_C == 55.0
-    # Tune down for a single occupant who showers less
-    rts.set_setting("DHW_TEMP_PV_ABUNDANCE_TARGET_C", 45.0)
-    assert config.DHW_TEMP_PV_ABUNDANCE_TARGET_C == 45.0
-    # Range guards (40..60)
+    It's the tank target during negative-price windows — the sole exception
+    to the deterministic fixed schedule (dhw_policy). Default 60 °C; range
+    45..65."""
+    assert config.DHW_NEGATIVE_PRICE_BOOST_C == 60.0
+    rts.set_setting("DHW_NEGATIVE_PRICE_BOOST_C", 62.0)
+    assert config.DHW_NEGATIVE_PRICE_BOOST_C == 62.0
+    rts.set_setting("DHW_NEGATIVE_PRICE_BOOST_C", 50.0)
+    assert config.DHW_NEGATIVE_PRICE_BOOST_C == 50.0
+    # Range guards (45..65)
     with pytest.raises(rts.SettingValidationError):
-        rts.set_setting("DHW_TEMP_PV_ABUNDANCE_TARGET_C", 35.0)
+        rts.set_setting("DHW_NEGATIVE_PRICE_BOOST_C", 40.0)
     with pytest.raises(rts.SettingValidationError):
-        rts.set_setting("DHW_TEMP_PV_ABUNDANCE_TARGET_C", 65.0)
+        rts.set_setting("DHW_NEGATIVE_PRICE_BOOST_C", 70.0)
 
 
 def test_config_enum_property_round_trip():
@@ -147,10 +138,10 @@ def test_optimization_preset_rejects_invalid_value():
 
 
 def test_list_settings_marks_overridden(monkeypatch):
-    rts.set_setting("DHW_TEMP_COMFORT_C", 53.0)
+    rts.set_setting("DHW_TEMP_SETBACK_C", 43.0)
     rows = {r["key"]: r for r in rts.list_settings()}
-    assert rows["DHW_TEMP_COMFORT_C"]["overridden"] is True
-    assert rows["DHW_TEMP_COMFORT_C"]["value"] == 53.0
+    assert rows["DHW_TEMP_SETBACK_C"]["overridden"] is True
+    assert rows["DHW_TEMP_SETBACK_C"]["value"] == 43.0
     # A key we haven't touched stays overridden=False.
     assert rows["INDOOR_SETPOINT_C"]["overridden"] is False
 

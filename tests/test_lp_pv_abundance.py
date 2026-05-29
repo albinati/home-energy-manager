@@ -451,11 +451,13 @@ def test_dispatch_emits_overnight_idle_action_at_38c(
 def test_dispatch_overnight_target_honours_runtime_setting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The overnight tank target reads from runtime_settings when set, falling
-    back to the env-derived default. Lets the user tune the floor live (e.g.
-    37 °C to match an empirical bedtime habit) without a service restart.
+    """The overnight tank target (legacy tank_idle_overnight dispatch path)
+    reads from the config attribute. DHW_TANK_OVERNIGHT_TARGET_C was demoted
+    to env-only on 2026-05-29 (removed from runtime_settings.SCHEMA) — it was
+    an orphaned knob under the default deterministic schedule. The dispatch
+    KeyError-falls-back to ``config.DHW_TANK_OVERNIGHT_TARGET_C``.
     """
-    from src import db, runtime_settings as rts
+    from src import db
     from src.config import config as app_config
     from src.scheduler.lp_dispatch import daikin_dispatch_preview
     from src.scheduler.lp_optimizer import LpPlan
@@ -465,7 +467,8 @@ def test_dispatch_overnight_target_honours_runtime_setting(
     monkeypatch.setattr(app_config, "DAIKIN_MIN_WINDOW_SLOTS", 1, raising=False)
     monkeypatch.setattr(app_config, "DHW_SHOWER_SCHEDULE", "19:00-22:00", raising=False)
     monkeypatch.setattr(app_config, "DHW_TANK_OVERNIGHT_IDLE_ENABLED", "true", raising=False)
-    monkeypatch.setattr(app_config, "DHW_TANK_OVERNIGHT_TARGET_C", 38.0, raising=False)
+    # Env-only override (no longer settable via runtime_settings).
+    monkeypatch.setattr(app_config, "DHW_TANK_OVERNIGHT_TARGET_C", 37.0, raising=False)
     monkeypatch.setattr(app_config, "OPTIMIZATION_PRESET", "normal", raising=False)
     # PR C — ENERGY_STRATEGY_MODE removed (was here).
     monkeypatch.setattr(
@@ -473,9 +476,6 @@ def test_dispatch_overnight_target_honours_runtime_setting(
         lambda: False,
         raising=True,
     )
-
-    # Override via runtime_settings — should take priority over the env default.
-    rts.set_setting("DHW_TANK_OVERNIGHT_TARGET_C", 37.0, actor="test")
 
     base = datetime(2026, 6, 1, 17, 0, tzinfo=UTC)
     n = 24
@@ -501,11 +501,11 @@ def test_dispatch_overnight_target_honours_runtime_setting(
     assert overnight, "expected at least one tank_idle_overnight action"
     for action in overnight:
         assert action["params"].get("tank_temp") == pytest.approx(37.0), (
-            f"runtime_settings override should set tank_temp=37; got {action['params']}"
+            f"config override should set tank_temp=37; got {action['params']}"
         )
 
-    # Clear the override and verify fallback to env default kicks back in.
-    rts.delete_setting("DHW_TANK_OVERNIGHT_TARGET_C", actor="test")
+    # Change the env-only config value and verify the dispatch tracks it.
+    monkeypatch.setattr(app_config, "DHW_TANK_OVERNIGHT_TARGET_C", 38.0, raising=False)
     pairs2 = daikin_dispatch_preview(plan, forecast=[])
     overnight2 = [a for _, a in pairs2 if a.get("action_type") == "tank_idle_overnight"]
     assert overnight2 and overnight2[0]["params"].get("tank_temp") == pytest.approx(38.0)

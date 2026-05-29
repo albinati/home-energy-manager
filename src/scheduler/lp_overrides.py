@@ -50,8 +50,13 @@ WHITELIST: dict[str, OverrideSpec] = {
         key="DHW_TEMP_COMFORT_C",
         config_attr="DHW_TEMP_COMFORT_C",
         type_name="float", min_value=40.0, max_value=65.0,
-        description="Tank target when negative-price plunge fills headroom (°C).",
-        group="comfort", promotable=True,
+        description=(
+            "Tank target when negative-price plunge fills headroom (°C). "
+            "Transient workbench override only — demoted from runtime_settings "
+            "2026-05-29 (inert under the default fixed schedule), so it can no "
+            "longer be promoted to prod."
+        ),
+        group="comfort", promotable=False,
     ),
     "INDOOR_SETPOINT_C": OverrideSpec(
         key="INDOOR_SETPOINT_C",

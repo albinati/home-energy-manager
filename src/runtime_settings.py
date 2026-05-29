@@ -86,15 +86,16 @@ def _lp_soc_final_kwh_default() -> float:
 
 
 SCHEMA: dict[str, SettingSpec] = {
-    # DHW comfort knobs — user-tunable per season / presence.
-    "DHW_TEMP_COMFORT_C": SettingSpec(
-        key="DHW_TEMP_COMFORT_C",
-        type_name="float",
-        env_default=_float_env("DHW_TEMP_COMFORT_C", "48"),
-        min_value=40.0,
-        max_value=65.0,
-        description="Tank target when negative-price plunge fills headroom (°C).",
-    ),
+    # DHW tank knobs — the three temperatures the deterministic tank schedule
+    # (``src/dhw_policy.py``) actually reads when DHW_FIXED_SCHEDULE_ENABLED is
+    # true (the default). These are the ONLY tank-temperature settings that
+    # change live behaviour; the legacy LP-tank-arbitrage knobs
+    # (DHW_TEMP_COMFORT_C, DHW_TEMP_PV_ABUNDANCE_TARGET_C,
+    # DHW_TANK_OVERNIGHT_TARGET_C) were removed from this schema in the
+    # 2026-05-29 settings simplification — they only fed the
+    # DHW_FIXED_SCHEDULE_ENABLED=false rollback path and never the schedule the
+    # user experiences. They remain plain ``config`` attributes (env-only) so
+    # that rollback path keeps working.
     "DHW_TEMP_NORMAL_C": SettingSpec(
         key="DHW_TEMP_NORMAL_C",
         type_name="float",
@@ -102,11 +103,40 @@ SCHEMA: dict[str, SettingSpec] = {
         min_value=40.0,
         max_value=65.0,
         description=(
-            "Restore / safe-default tank target (°C). PR G (2026-05-22): "
-            "lowered default 50 → 45 to match the user's empirical reality "
-            "— 45 °C delivers 4 daily showers comfortably; even 43 works "
-            "in practice. Matches the value already documented in CLAUDE.md "
-            "and used in /srv/hem/.env on prod."
+            "Daytime tank target (°C) — the warmup setpoint dhw_policy holds "
+            "from DHW_WARMUP_START_HOUR_LOCAL (13:00) until setback. PR G "
+            "(2026-05-22): lowered default 50 → 45 to match the user's "
+            "empirical reality — 45 °C delivers 4 daily showers comfortably; "
+            "even 43 works in practice."
+        ),
+    ),
+    "DHW_TEMP_SETBACK_C": SettingSpec(
+        key="DHW_TEMP_SETBACK_C",
+        type_name="float",
+        env_default=_float_env("DHW_TEMP_SETBACK_C", "37"),
+        min_value=25.0,
+        max_value=50.0,
+        description=(
+            "Overnight setback target (°C) — the setpoint dhw_policy holds "
+            "from DHW_SETBACK_START_HOUR_LOCAL (22:00) until the next "
+            "afternoon warmup. This is the REAL overnight knob (the old "
+            "'Overnight setback target' / DHW_TANK_OVERNIGHT_TARGET_C in the "
+            "UI was orphaned and never drove the schedule). Lower = more "
+            "overnight standing-loss savings. Weekly firmware legionella cycle "
+            "handles pasteurisation, so values well below 60 are safe."
+        ),
+    ),
+    "DHW_NEGATIVE_PRICE_BOOST_C": SettingSpec(
+        key="DHW_NEGATIVE_PRICE_BOOST_C",
+        type_name="float",
+        env_default=_float_env("DHW_NEGATIVE_PRICE_BOOST_C", "60"),
+        min_value=45.0,
+        max_value=65.0,
+        description=(
+            "Tank target (°C) during negative-price (Outgoing < 0) windows — "
+            "the sole exception to the fixed schedule, where the grid pays us "
+            "to import so dhw_policy boosts the tank to soak up free energy. "
+            "Capped near the legionella target to protect tank longevity."
         ),
     ),
     "INDOOR_SETPOINT_C": SettingSpec(
@@ -131,150 +161,20 @@ SCHEMA: dict[str, SettingSpec] = {
             "are silently translated to 'vacation' on read."
         ),
     ),
-    # --- PR B — explicit shower-demand model -------------------------------
-    # Formalises DHW demand as count × duration × flow × mixer-temp instead of
-    # the legacy DHW_DAILY_SHOWER_LITRES aggregate. Each setting is runtime-
-    # tunable via /api/v1/settings or MCP set_setting; defaults match the
-    # household spec captured 2026-05-22 (4 evening showers, 5 min, ~9 L/min
-    # UK low-flow head, mixer-out 38 °C).
-    "DHW_SHOWER_DURATION_MIN": SettingSpec(
-        key="DHW_SHOWER_DURATION_MIN",
-        type_name="float",
-        env_default=_float_env("DHW_SHOWER_DURATION_MIN", "5.0"),
-        min_value=1.0,
-        max_value=30.0,
-        description="Average shower duration (minutes per shower).",
-    ),
-    "DHW_SHOWER_FLOW_LPM": SettingSpec(
-        key="DHW_SHOWER_FLOW_LPM",
-        type_name="float",
-        env_default=_float_env("DHW_SHOWER_FLOW_LPM", "7.0"),
-        min_value=4.0,
-        max_value=20.0,
-        description=(
-            "Mixer-out flow rate (litres per minute). PR G (2026-05-22): "
-            "lowered default 9 → 7 to match the user's actual UK low-flow "
-            "shower head. Reverse-engineered from empirical: with 7 L/min "
-            "and DHW_TANK_USABLE_FRACTION=0.85, the model's "
-            "required_tank_temp matches observed tank deliveries (40 °C "
-            "for 4 daily showers; 46 °C for 6 guest showers)."
-        ),
-    ),
-    "DHW_SHOWER_MIXER_TEMP_C": SettingSpec(
-        key="DHW_SHOWER_MIXER_TEMP_C",
-        type_name="float",
-        env_default=_float_env("DHW_SHOWER_MIXER_TEMP_C", "38.0"),
-        min_value=30.0,
-        max_value=45.0,
-        description="Target mixer-out temperature (°C); typical comfortable shower.",
-    ),
-    "DHW_SHOWER_COLD_INLET_TEMP_C": SettingSpec(
-        key="DHW_SHOWER_COLD_INLET_TEMP_C",
-        type_name="float",
-        env_default=_float_env("DHW_SHOWER_COLD_INLET_TEMP_C",
-                                _str_env("DHW_COLD_INLET_TEMP_C", "10.0")()),
-        min_value=4.0,
-        max_value=20.0,
-        description=(
-            "Mains cold-water inlet temperature (°C). Drives mixer math. "
-            "Default lifts the legacy DHW_COLD_INLET_TEMP_C env if set."
-        ),
-    ),
-    "DHW_SHOWERS_NORMAL_EVENING": SettingSpec(
-        key="DHW_SHOWERS_NORMAL_EVENING",
-        type_name="int",
-        env_default=_int_env("DHW_SHOWERS_NORMAL_EVENING", "4"),
-        min_value=0,
-        max_value=10,
-        description="Evening showers planned in normal mode (typical family count).",
-    ),
-    "DHW_SHOWERS_NORMAL_MORNING_RESERVE": SettingSpec(
-        key="DHW_SHOWERS_NORMAL_MORNING_RESERVE",
-        type_name="int",
-        env_default=_int_env("DHW_SHOWERS_NORMAL_MORNING_RESERVE", "1"),
-        min_value=0,
-        max_value=5,
-        description=(
-            "Morning reserve in normal mode: tank must be warm enough for N "
-            "showers but not necessarily consumed. Models as a soft floor "
-            "at the configured morning hour, NOT as drawn litres."
-        ),
-    ),
-    "DHW_SHOWERS_GUESTS_EVENING_EXTRA_PER_GUEST": SettingSpec(
-        key="DHW_SHOWERS_GUESTS_EVENING_EXTRA_PER_GUEST",
-        type_name="int",
-        env_default=_int_env("DHW_SHOWERS_GUESTS_EVENING_EXTRA_PER_GUEST", "1"),
-        min_value=0,
-        max_value=3,
-        description="Extra evening showers per visitor when mode=guests.",
-    ),
-    "DHW_SHOWERS_GUESTS_MORNING_EXTRA_PER_GUEST": SettingSpec(
-        key="DHW_SHOWERS_GUESTS_MORNING_EXTRA_PER_GUEST",
-        type_name="int",
-        env_default=_int_env("DHW_SHOWERS_GUESTS_MORNING_EXTRA_PER_GUEST", "1"),
-        min_value=0,
-        max_value=3,
-        description="Extra morning showers per visitor when mode=guests.",
-    ),
-    "DHW_GUEST_COUNT": SettingSpec(
-        key="DHW_GUEST_COUNT",
-        type_name="int",
-        env_default=_int_env("DHW_GUEST_COUNT", "2"),
-        min_value=0,
-        max_value=8,
-        description=(
-            "Number of visitors when mode=guests. Multiplies the per-guest "
-            "extras. Default 2 matches the assumption when the operator "
-            "switches to guests without specifying a count."
-        ),
-    ),
-    "DHW_SHOWERS_EVENING_CAP": SettingSpec(
-        key="DHW_SHOWERS_EVENING_CAP",
-        type_name="int",
-        env_default=_int_env("DHW_SHOWERS_EVENING_CAP", "6"),
-        min_value=1,
-        max_value=12,
-        description=(
-            "Maximum showers the LP plans into a single evening shift "
-            "(PR G — user empirical: 6 is the practical limit per evening; "
-            "more spills to next-day morning). When "
-            "``base + guests × extras`` exceeds this cap, the surplus "
-            "rolls over into the morning count, and the morning required "
-            "tank temp is itself capped at ``DHW_TEMP_NORMAL_C`` so the "
-            "LP doesn't over-heat overnight just to satisfy spill-over "
-            "demand."
-        ),
-    ),
-    "DHW_TANK_USABLE_FRACTION": SettingSpec(
-        key="DHW_TANK_USABLE_FRACTION",
-        type_name="float",
-        env_default=_float_env("DHW_TANK_USABLE_FRACTION", "0.85"),
-        min_value=0.4,
-        max_value=1.0,
-        description=(
-            "Stratification fraction: portion of the nominal tank volume "
-            "that delivers hot water at the storage temperature before the "
-            "remaining cold inlet dilutes the draw. PR G (2026-05-22): "
-            "bumped 0.7 → 0.85 based on this household's empirical "
-            "observation that 45 °C tank delivers 4 family showers and "
-            "48 °C delivers 6 guest showers. Daikin Altherma HPSU tanks "
-            "with their immersed coil show better stratification than the "
-            "conservative 0.7 default. Lower this if a future tank with "
-            "weaker stratification is installed."
-        ),
-    ),
-    "DHW_MORNING_RESERVE_HOUR_LOCAL": SettingSpec(
-        key="DHW_MORNING_RESERVE_HOUR_LOCAL",
-        type_name="int",
-        env_default=_int_env("DHW_MORNING_RESERVE_HOUR_LOCAL", "7"),
-        min_value=4,
-        max_value=12,
-        description=(
-            "Local hour for the morning-reserve soft floor (slot whose start "
-            "matches this hour). Defaults to 07:00 — the first plausible "
-            "shower hour the morning after."
-        ),
-    ),
+    # --- Shower-demand model knobs were REMOVED from this schema in the
+    # 2026-05-29 settings simplification. Under the default deterministic tank
+    # schedule (DHW_FIXED_SCHEDULE_ENABLED=true) dhw_policy uses a fixed
+    # SHOWER_REHEAT_KWH constant, not the count × duration × flow model, so
+    # these 10+ knobs were inert on the Settings screen. They remain plain
+    # ``config`` attributes (env-only) so the LP shower-floor block in the
+    # DHW_FIXED_SCHEDULE_ENABLED=false rollback path keeps working:
+    #   DHW_SHOWER_DURATION_MIN, DHW_SHOWER_FLOW_LPM, DHW_SHOWER_MIXER_TEMP_C,
+    #   DHW_SHOWER_COLD_INLET_TEMP_C, DHW_SHOWERS_NORMAL_EVENING,
+    #   DHW_SHOWERS_NORMAL_MORNING_RESERVE,
+    #   DHW_SHOWERS_GUESTS_EVENING_EXTRA_PER_GUEST,
+    #   DHW_SHOWERS_GUESTS_MORNING_EXTRA_PER_GUEST, DHW_GUEST_COUNT,
+    #   DHW_SHOWERS_EVENING_CAP, DHW_TANK_USABLE_FRACTION,
+    #   DHW_MORNING_RESERVE_HOUR_LOCAL.
     # ENERGY_STRATEGY_MODE removed in PR C (mode-collapse stack 3/3).
     # Was a 2-value dispatch policy (savings_first / strict_savings) that
     # gated the drop-peak-export branch. Replaced by household-mode-derived
@@ -488,70 +388,15 @@ SCHEMA: dict[str, SettingSpec] = {
             "(target − DHW_TEMP_NORMAL_C) to size the predicted electric pulse."
         ),
     ),
-    # Post-shower overnight tank target sent to Daikin firmware. Lives in
-    # runtime_settings so the user can tune it without restart — mirrors the
-    # household's empirical "set tank low at bedtime, let it cool" pattern.
-    # Below this value the firmware reheats; above it, firmware idles. The
-    # default 38 °C is a safety backup for unexpected morning showers; users
-    # who confirm no morning shower demand can drop to 37 (matches the user's
-    # manual habit on this installation) or even 30 for full overnight cool.
-    "DHW_TANK_OVERNIGHT_TARGET_C": SettingSpec(
-        key="DHW_TANK_OVERNIGHT_TARGET_C",
-        type_name="float",
-        env_default=_float_env("DHW_TANK_OVERNIGHT_TARGET_C", "38"),
-        min_value=30.0,
-        max_value=55.0,
-        description=(
-            "Daikin tank target (°C) sent during tank_idle_overnight slots — "
-            "post-evening-shower until next-day PV abundance. Lower = more "
-            "overnight standing-loss savings; firmware won't reheat the tank "
-            "from 50+°C down to this value, only triggers if tank actually "
-            "drops to it. Min 30 (still well above pipe-freeze risk; weekly "
-            "legionella thermal-shock cycle handles pasteurisation)."
-        ),
-    ),
-    # PV abundance target — applied during ``solar_charge`` slots when free
-    # PV would otherwise be exported. Runtime-tunable per household occupancy:
-    # a 4-person household with evening shower load benefits from 50 °C; a
-    # solo dweller might drop to 42 to minimise standing loss. Default 45
-    # matches DHW_TEMP_NORMAL_C — assume "no extra °C unless household demands
-    # it". Bumped from a previous env-only default of 55, since 14-day Daikin
-    # consumption telemetry showed overnight DHW reheat = 0 even when tank
-    # exited PV-abundance windows at 45-48 °C.
-    "DHW_TEMP_PV_ABUNDANCE_TARGET_C": SettingSpec(
-        key="DHW_TEMP_PV_ABUNDANCE_TARGET_C",
-        type_name="float",
-        env_default=_float_env("DHW_TEMP_PV_ABUNDANCE_TARGET_C", "60"),
-        min_value=40.0,
-        max_value=60.0,
-        description=(
-            "Daikin tank target (°C) during solar_charge / solar_preheat "
-            "slots. This is a STORAGE target, NOT a comfort target — "
-            "the tank is lifted as high as possible WHILE PV is excess "
-            "(free energy), then a paired 'restore' action at the end of "
-            "the solar window drops the target back to "
-            "``DHW_TEMP_NORMAL_C`` (45 °C). Outside the solar window the "
-            "tank decays naturally via standing loss until evening "
-            "showers consume the stored thermal energy. "
-            "\n\n"
-            "Default 60 (PR H, 2026-05-22): matches the user's manual "
-            "preference after they observed PR G's 46 °C (a comfort-"
-            "level setting wrongly applied as the storage ceiling) was "
-            "exporting PV instead of storing thermal. "
-            "\n\n"
-            "Economics: lifting 45 → 60 °C stores ~3.5 kWh thermal "
-            "(200 L × 4186 × 15 / 3.6e6). After ~5 h decay (standing "
-            "loss 97 W at indoor 21 °C → 0.5 kWh thermal lost), evening "
-            "showers can draw ~3 kWh thermal ≈ 1 kWh elec equivalent "
-            "(vs grid import at 12-30 p/kWh). Vs exporting that same PV "
-            "at 5-15 p/kWh export rate, storage wins by ~6-12 p/day on "
-            "PV-rich days. "
-            "\n\n"
-            "Capped at 60 (= legionella target floor) to protect tank "
-            "longevity. Lower this if you don't want to push the tank "
-            "that high (e.g. 50 = ~2 kWh thermal stored, less aggressive)."
-        ),
-    ),
+    # DHW_TANK_OVERNIGHT_TARGET_C and DHW_TEMP_PV_ABUNDANCE_TARGET_C were
+    # removed from this schema in the 2026-05-29 settings simplification.
+    # Both were artefacts of the LP-tank-arbitrage era: the deterministic
+    # schedule (dhw_policy) drives overnight setback via DHW_TEMP_SETBACK_C —
+    # the "Overnight setback target" UI knob was orphaned — and there is no
+    # PV-abundance tank lift any more (battery → tank → export priority is
+    # handled by dhw_policy, not a tank-temp ceiling). They remain plain
+    # ``config`` attributes (env-only) for the DHW_FIXED_SCHEDULE_ENABLED=false
+    # rollback path.
 }
 
 

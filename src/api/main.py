@@ -1315,8 +1315,12 @@ async def optimization_inputs(horizon_hours: int | None = None):
         "OPTIMIZATION_PRESET": str(config.OPTIMIZATION_PRESET),
         # PR C — ENERGY_STRATEGY_MODE removed; emit "removed" for back-compat.
         "ENERGY_STRATEGY_MODE": "removed",
-        "DHW_TEMP_COMFORT_C": float(config.DHW_TEMP_COMFORT_C),
+        # The three tank temperatures the deterministic schedule (dhw_policy)
+        # actually drives. DHW_TEMP_COMFORT_C was demoted to an env-only
+        # rollback knob 2026-05-29 and no longer appears here.
         "DHW_TEMP_NORMAL_C": float(config.DHW_TEMP_NORMAL_C),
+        "DHW_TEMP_SETBACK_C": float(config.DHW_TEMP_SETBACK_C),
+        "DHW_NEGATIVE_PRICE_BOOST_C": float(config.DHW_NEGATIVE_PRICE_BOOST_C),
         "INDOOR_SETPOINT_C": float(config.INDOOR_SETPOINT_C),
         "LP_PRICE_QUANTIZE_PENCE": float(getattr(config, "LP_PRICE_QUANTIZE_PENCE", 0.0)),
         "LP_BATTERY_TV_PENALTY_PENCE_PER_KWH_DELTA": float(getattr(config, "LP_BATTERY_TV_PENALTY_PENCE_PER_KWH_DELTA", 0.0)),
