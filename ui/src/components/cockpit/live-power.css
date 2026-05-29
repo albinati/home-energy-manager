@@ -287,6 +287,4 @@
 }
 .livepower-fox-debug strong { color: var(--text-dim); font-weight: 700; }
 
-@media (prefers-reduced-motion: reduce) {
-  .livepower-hero-num { animation: none; transform: none; }
-}
+:root.hem-reduce-motion .livepower-hero-num { animation: none; transform: none; }

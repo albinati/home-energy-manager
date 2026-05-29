@@ -2,6 +2,7 @@ import { useEffect, useState } from "preact/hooks";
 import { PowerFlow } from "./PowerFlow";
 import { Icon, type IconName } from "../common/Icon";
 import { useAnimatedNumber } from "../../lib/useAnimatedNumber";
+import { reducedMotion } from "../../lib/motion";
 import { kw, kwh, pct } from "../../lib/format";
 import type { CockpitState, CockpitNow, SchedulerTimeline, ExecutionTodayResponse, AgileTodayResponse, MetricsResponse } from "../../lib/types";
 import "./cockpit.css";
@@ -16,10 +17,7 @@ interface LivePowerWidgetProps {
   metrics: MetricsResponse | null;
 }
 
-const RM =
-  typeof window !== "undefined" &&
-  typeof window.matchMedia === "function" &&
-  window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const RM = reducedMotion();
 
 // The instrument panel: a hero NET grid-power number anchors the surface,
 // the live power-flow is the centerpiece, everything else (action verb,

@@ -223,7 +223,5 @@
   background: var(--bg-card-2);
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .hero-bg { animation: none; }
-  .hero-headline--enter { animation: none; transform: none; }
-}
+:root.hem-reduce-motion .hero-bg { animation: none; }
+:root.hem-reduce-motion .hero-headline--enter { animation: none; transform: none; }

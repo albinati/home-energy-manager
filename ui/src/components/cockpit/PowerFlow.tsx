@@ -1,4 +1,5 @@
 import { watts } from "../../lib/format";
+import { reducedMotion } from "../../lib/motion";
 import type { CockpitState } from "../../lib/types";
 import type { JSX } from "preact";
 import "./cockpit.css";
@@ -20,10 +21,8 @@ interface PowerFlowProps {
 const ACTIVATION_W = 50;
 
 // Reduced motion — freeze particles into static proportional connector lines.
-const RM =
-  typeof window !== "undefined" &&
-  typeof window.matchMedia === "function" &&
-  window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+// Honours the in-app motion override (default on), not just the OS setting.
+const RM = reducedMotion();
 
 const NODES = {
   pv:    { x: 110, y: 80 },

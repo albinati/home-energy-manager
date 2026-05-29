@@ -114,17 +114,18 @@ code, pre {
  * instant. Number tweens snap via useAnimatedNumber's own guard. Power-flow
  * particles freeze into static proportional lines (handled in PowerFlow).
  * Hover lift is kept but capped to 1px (non-vestibular, aids affordance). */
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.001ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.001ms !important;
-    scroll-behavior: auto !important;
-  }
-  .widget { animation: none !important; opacity: 1 !important; transform: none !important; }
-  .widget:hover { transform: translateY(-1px); }
-  body::before { animation: none !important; }
-  .live-pulse { animation: none !important; opacity: 1 !important; }
+/* Reduce-motion is driven by the `.hem-reduce-motion` html class (set from the
+   in-app motion preference, default ON) — NOT the raw OS media query — so the
+   override can win. See src/lib/motion.ts. */
+:root.hem-reduce-motion *,
+:root.hem-reduce-motion *::before,
+:root.hem-reduce-motion *::after {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001ms !important;
+  scroll-behavior: auto !important;
 }
+:root.hem-reduce-motion .widget { animation: none !important; opacity: 1 !important; transform: none !important; }
+:root.hem-reduce-motion .widget:hover { transform: translateY(-1px); }
+:root.hem-reduce-motion body::before { animation: none !important; }
+:root.hem-reduce-motion .live-pulse { animation: none !important; opacity: 1 !important; }

@@ -4,6 +4,7 @@
 // it into its own chunk).
 
 import * as echarts from "echarts/core";
+import { reducedMotion } from "./motion";
 import {
   LineChart,
   BarChart,
@@ -68,13 +69,10 @@ export function chartTheme() {
   };
 }
 
-// Detected once — drives ECharts animation:false under reduced motion.
+// Drives ECharts animation:false under reduced motion — honours the in-app
+// motion override (default on), not just the OS setting.
 function prefersReducedMotion(): boolean {
-  return (
-    typeof window !== "undefined" &&
-    typeof window.matchMedia === "function" &&
-    window.matchMedia("(prefers-reduced-motion: reduce)").matches
-  );
+  return reducedMotion();
 }
 
 // #rrggbb + alpha → rgba() string (ECharts canvas doesn't accept color-mix()).
