@@ -59,7 +59,7 @@ def _profile_path(name: str) -> Path:
 async def workbench_schema():
     """Return the override whitelist with metadata for the editor."""
     return {
-        "groups": ["comfort", "battery", "hardware", "penalty", "solver", "schedule", "mode"],
+        "groups": ["comfort", "battery", "hardware", "penalty", "solver", "schedule", "mode", "load"],
         "fields": lp_overrides.schema_for_response(),
     }
 

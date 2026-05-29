@@ -25,6 +25,10 @@ import type {
   OptimizationInputsResponse,
   ActionResult,
   DaikinOperationMode,
+  WorkbenchSchema,
+  WorkbenchSimulateResponse,
+  WorkbenchPromoteDiff,
+  WorkbenchPromoteResult,
 } from "./types";
 
 /* ----- Real-time / cockpit ----- */
@@ -133,4 +137,28 @@ export async function applyBatch(
     headers,
   });
   return r.json() as Promise<ApplyBatchResponse>;
+}
+
+/* ----- Workbench (LP override editor) ----- */
+
+export const getWorkbenchSchema = () => getJson<WorkbenchSchema>("/workbench/schema");
+
+export const simulateWorkbench = (overrides: Record<string, unknown>) =>
+  postJson<WorkbenchSimulateResponse>("/workbench/simulate", { overrides });
+
+export const promoteSimulateWorkbench = (overrides: Record<string, unknown>) =>
+  postJson<WorkbenchPromoteDiff>("/workbench/promote/simulate", { overrides });
+
+export async function promoteWorkbench(
+  simulationId: string,
+  overrides: Record<string, unknown>,
+  profileName?: string,
+): Promise<WorkbenchPromoteResult> {
+  const headers = new Headers({ "Content-Type": "application/json", "X-Simulation-Id": simulationId });
+  const r = await hemFetch("/workbench/promote", {
+    method: "POST",
+    body: JSON.stringify({ overrides, profile_name: profileName }),
+    headers,
+  });
+  return r.json() as Promise<WorkbenchPromoteResult>;
 }

@@ -11,6 +11,7 @@ import Landing from "./routes/landing";
 // here means a visitor who never opens /plan never downloads echarts.
 const Plan = lazy(() => import("./routes/plan"));
 const Settings = lazy(() => import("./routes/settings"));
+const Workbench = lazy(() => import("./routes/workbench"));
 
 export function App() {
   return (
@@ -22,6 +23,7 @@ export function App() {
             <Route path="/" component={Landing} />
             <Route path="/plan" component={Plan} />
             <Route path="/settings" component={Settings} />
+            <Route path="/workbench" component={Workbench} />
             <Route>
               <div class="page-padded">
                 <h1>Not found</h1>

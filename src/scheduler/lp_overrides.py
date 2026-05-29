@@ -257,6 +257,19 @@ WHITELIST: dict[str, OverrideSpec] = {
         description="passive = firmware autonomous (LP load-follows HP); active = LP schedules tank + LWT.",
         group="mode", promotable=True,
     ),
+    # --- Load forecast
+    "LP_LOAD_SCALE_FACTOR": OverrideSpec(
+        key="LP_LOAD_SCALE_FACTOR",
+        config_attr="LP_LOAD_SCALE_FACTOR",
+        type_name="float", min_value=0.5, max_value=2.0,
+        description=(
+            "Multiplier on the residual house-load forecast the LP plans "
+            "against. 1.0 = as-measured. Lower when away, raise for guests — "
+            "shifts the plan's demand assumption without re-learning the "
+            "profile. Appliance loads are unaffected."
+        ),
+        group="load", promotable=True,
+    ),
 }
 
 
