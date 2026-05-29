@@ -39,7 +39,32 @@ def reset_service_state(monkeypatch):
     # must also reset or it leaks between tests and short-circuits the cold-start
     # fetch path into the backoff branch.
     monkeypatch.setattr(daikin_service, "_cold_start_failed_at", None, raising=False)
+    # Anti-burst refresh throttle globals.
+    monkeypatch.setattr(daikin_service, "_last_refresh_monotonic", 0.0, raising=False)
+    monkeypatch.setattr(daikin_service, "_refresh_throttle_logged", False, raising=False)
     yield
+
+
+def test_do_refresh_throttles_rapid_reads(monkeypatch):
+    """Anti-burst floor: two reads inside DAIKIN_REFRESH_MIN_INTERVAL_SECONDS hit
+    the API only ONCE — the second returns the warm cache. This is what
+    structurally kills the read-storm sawtooth regardless of the caller."""
+    from unittest.mock import MagicMock
+
+    monkeypatch.setattr(daikin_service, "should_block", lambda _v: False)
+    monkeypatch.setattr(daikin_service.config, "DAIKIN_REFRESH_MIN_INTERVAL_SECONDS", 300, raising=False)
+    monkeypatch.setattr(daikin_service, "_persist_daikin_telemetry_live", lambda _d: None)
+
+    sentinel = [object()]
+    mock_client = MagicMock()
+    mock_client.get_devices.return_value = sentinel
+    monkeypatch.setattr(daikin_service, "_get_or_create_client", lambda: mock_client)
+
+    first = daikin_service._do_refresh("test")
+    second = daikin_service._do_refresh("test")  # within 300s window → throttled
+
+    assert mock_client.get_devices.call_count == 1, "second rapid read must be throttled"
+    assert second is sentinel, "throttled call returns the warm cache"
 
 
 def _seed_live_row(age_seconds: float, *, tank: float = 50.0, indoor: float = 21.0) -> None:

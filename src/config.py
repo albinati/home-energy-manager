@@ -1425,6 +1425,13 @@ class Config:
     DAIKIN_CIRCUIT_BREAKER_COOLDOWN_MINUTES: int = int(os.getenv("DAIKIN_CIRCUIT_BREAKER_COOLDOWN_MINUTES", "30"))
     # How long to serve device data from cache without refreshing (1800 s = 30 min)
     DAIKIN_DEVICES_CACHE_TTL_SECONDS: int = int(os.getenv("DAIKIN_DEVICES_CACHE_TTL_SECONDS", "1800"))
+    # Hard anti-burst floor between REAL Daikin device reads (any caller). Stops
+    # the read-storm sawtooth (#423 follow-up) — a tight loop gets the warm cache
+    # instead of hitting the wire. Distinct from the 30-min cache TTL and the
+    # force-refresh cooldown; this is the low-level _do_refresh guard.
+    DAIKIN_REFRESH_MIN_INTERVAL_SECONDS: int = int(
+        os.getenv("DAIKIN_REFRESH_MIN_INTERVAL_SECONDS", "90")
+    )
     # Minimum interval between explicit "force refresh" calls (UI refresh button, CLI --force-refresh)
     DAIKIN_FORCE_REFRESH_MIN_INTERVAL_SECONDS: int = int(
         os.getenv("DAIKIN_FORCE_REFRESH_MIN_INTERVAL_SECONDS", "1800")
