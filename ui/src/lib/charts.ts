@@ -9,6 +9,7 @@ import {
   LineChart,
   BarChart,
   PieChart,
+  EffectScatterChart,
 } from "echarts/charts";
 import {
   GridComponent,
@@ -27,6 +28,7 @@ echarts.use([
   LineChart,
   BarChart,
   PieChart,
+  EffectScatterChart,
   GridComponent,
   TooltipComponent,
   LegendComponent,
@@ -61,6 +63,7 @@ export function chartTheme() {
     peak: cssVar("--peak", "#f59e0b"),
     neg: cssVar("--neg-price", "#2563eb"),
     pv: cssVar("--pv", "#fbbf24"),
+    thermal: cssVar("--thermal", "#fb923c"),
     batt: cssVar("--batt", "#10b981"),
     grid: cssVar("--grid", "#60a5fa"),
     house: cssVar("--house", "#c084fc"),

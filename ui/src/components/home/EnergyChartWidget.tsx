@@ -203,13 +203,11 @@ export function EnergyChartWidget({ execution }: EnergyChartWidgetProps) {
           <span class="echart-foot-grp">
             <strong>Sources</strong>&nbsp;
             <span class="echart-tok echart-tok-solar">{fmt(summary.solar)} solar</span> ·
-            <span class="echart-tok echart-tok-disc">{fmt(summary.discharge)} discharge</span> ·
             <span class="echart-tok echart-tok-imp">{fmt(summary.import)} import</span>
           </span>
           <span class="echart-foot-grp">
             <strong>Sinks</strong>&nbsp;
             <span class="echart-tok echart-tok-load">{fmt(summary.load)} load</span> ·
-            <span class="echart-tok echart-tok-chg">{fmt(summary.charge)} charge</span> ·
             <span class="echart-tok echart-tok-exp">{fmt(summary.export)} export</span>
           </span>
           {daikinTotals && (daikinTotals.kwh_total || 0) > 0 && (
@@ -220,7 +218,7 @@ export function EnergyChartWidget({ execution }: EnergyChartWidgetProps) {
                 <> · <span class="echart-tok-mute">{fmt(daikinTotals.kwh_heating)} heating</span></>
               )}
               {daikinTotals.kwh_dhw > 0 && (
-                <> · <span class="echart-tok-mute">{fmt(daikinTotals.kwh_dhw)} DHW</span></>
+                <> · <span class="echart-tok-mute">{fmt(daikinTotals.kwh_dhw)} tank</span></>
               )}
             </span>
           )}
@@ -242,7 +240,7 @@ export function EnergyChartWidget({ execution }: EnergyChartWidgetProps) {
               <>
                 <span class="echart-tok echart-tok-daikin">{fmt(daikinTotals.kwh_total)} Daikin</span>
                 {daikinTotals.kwh_heating > 0 && <span class="echart-tok-mute"> ({fmt(daikinTotals.kwh_heating)} heat)</span>}
-                {daikinTotals.kwh_dhw > 0 && <span class="echart-tok-mute"> ({fmt(daikinTotals.kwh_dhw)} DHW)</span>}
+                {daikinTotals.kwh_dhw > 0 && <span class="echart-tok-mute"> ({fmt(daikinTotals.kwh_dhw)} tank)</span>}
                 {" · "}
               </>
             )}
@@ -315,7 +313,9 @@ function optionForPeriod(
     ...base,
     legend: {
       ...(base.legend as object),
-      data: ["Solar", "Discharge", "Grid Import", "Charge", "Grid Export", "Load", "Daikin heating", "Daikin DHW"],
+      // Per operator request: only solar, grid import/export, load + the two
+      // Daikin slices. Battery charge/discharge bars intentionally dropped.
+      data: ["Solar", "Grid Import", "Grid Export", "Load", "Daikin heating", "Daikin tank"],
     },
     xAxis: { ...(base.xAxis as object), data: labels },
     yAxis: [{ ...(base.yAxis as object), name: "kWh", nameTextStyle: { color: t.textMute, fontSize: 10 } }],
@@ -329,9 +329,7 @@ function optionForPeriod(
           data: [{ yAxis: 0 }], label: { show: false },
         },
       },
-      seriesBar("Discharge",   points.map((p) => round1(p.discharge_kwh)),  t.batt,        "house"),
       seriesBar("Grid Import", points.map((p) => round1(p.import_kwh)),     t.importColor, "house"),
-      seriesBar("Charge",      points.map((p) => -round1(p.charge_kwh)),    t.batt,        "out", true),
       seriesBar("Grid Export", points.map((p) => -round1(p.export_kwh)),    t.exportColor, "out", true),
       {
         name: "Load",
@@ -358,7 +356,7 @@ function optionForPeriod(
         emphasis: { focus: "series" },
       },
       {
-        name: "Daikin DHW",
+        name: "Daikin tank",
         type: "line",
         data: daikinDhwLine,
         smooth: 0.3,
@@ -454,7 +452,7 @@ function optionForDay(
 
   return {
     ...base,
-    legend: { ...(base.legend as object), data: ["Daikin DHW", "Daikin heating", "Residual", "Realised grid cost"] },
+    legend: { ...(base.legend as object), data: ["Daikin tank", "Daikin heating", "Residual", "Realised grid cost"] },
     // Quiet ghost note — per-slot solar/import/export genuinely unavailable
     // (#424). A text annotation, NOT a fabricated series/markArea.
     graphic: [{
@@ -474,7 +472,7 @@ function optionForDay(
     ],
     series: [
       {
-        name: "Daikin DHW",
+        name: "Daikin tank",
         type: "bar",
         stack: "load",
         data: dhwPerSlot,

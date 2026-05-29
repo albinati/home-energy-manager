@@ -1,31 +1,33 @@
 import { useEffect, useRef } from "preact/hooks";
 import { makeChart, baseOption, chartTheme, areaGradient, withAlpha, type EChartsType } from "../../lib/charts";
 import { useResolvedTheme } from "../../lib/theme";
+import { reducedMotion } from "../../lib/motion";
 import type { PvTodayResponse } from "../../lib/types";
 import "./today-plan.css";
 
 interface TodayPlanWidgetProps {
   pv: PvTodayResponse | null;
   loading: boolean;
+  // Tariff-tier thresholds (p/kWh) for the cheap/peak background shading. From
+  // /metrics — same thresholds the rest of the app classifies bands with.
+  cheapThresholdP?: number | null;
+  peakThresholdP?: number | null;
 }
-
-// Slot kinds that mean the battery is being FILLED (cheap/free energy in) vs
-// EMPTIED to the grid. Mirrors DispatchPlanStrip's colour buckets so the bands
-// read the same across the app.
-const CHARGE_KINDS = new Set(["negative", "cheap", "solar_charge", "solar_preheat", "charge"]);
-const DISCHARGE_KINDS = new Set(["peak_export", "peak", "discharge"]);
 
 function localHM(iso: string): string {
   const d = new Date(iso);
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
 }
 
+type Tier = "negative" | "cheap" | "peak" | null;
+
 // One chart that answers "what's the plan today?" without tab-switching:
-// import price + charge/discharge windows + load forecast + PV planned vs
-// realised, all on a shared 30-min slot axis. Price on the right axis (p/kWh),
-// energy on the left (kWh). All series come from /pv/today — a single
+// import price + cheap/peak rate windows (background) + load forecast + the
+// heating plan (tank-temp trajectory) + PV planned (background) vs realised
+// (foreground). PV/load/DHW on the left kWh axis, price on the right p axis,
+// tank °C on a second right axis. All series come from /pv/today — one
 // full-day, server-aligned source (no client-side ISO key-matching).
-export function TodayPlanWidget({ pv, loading }: TodayPlanWidgetProps) {
+export function TodayPlanWidget({ pv, loading, cheapThresholdP, peakThresholdP }: TodayPlanWidgetProps) {
   const ref = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<EChartsType | null>(null);
   const theme = useResolvedTheme();
@@ -54,32 +56,46 @@ export function TodayPlanWidget({ pv, loading }: TodayPlanWidgetProps) {
     const pvActual = slots.map((s) => (s.pv_actual_kwh == null ? null : round2(s.pv_actual_kwh)));
     const load = slots.map((s) => (s.base_load_kwh == null ? null : round2(s.base_load_kwh)));
     const price = slots.map((s) => (s.import_price_p == null ? null : s.import_price_p));
+    const tank = slots.map((s) => (s.tank_target_c == null ? null : round2(s.tank_target_c)));
+    const hasTank = tank.some((v) => v != null);
 
-    // Charge/discharge background bands — contiguous runs of charge/discharge
-    // kinds. markArea references the slot INDEX (DST-safe; two slots can share
-    // a local HH:MM label on the autumn clock change).
+    // --- Rate-tier background bands. Classify each slot by import price into
+    // negative / cheap / peak (standard → no shade), then shade contiguous
+    // runs. Thresholds come from /metrics; if absent, fall back to this day's
+    // own price distribution (33rd pct = cheap, 75th = peak).
+    const known = price.filter((p): p is number => p != null).slice().sort((a, b) => a - b);
+    const pct = (q: number) => (known.length ? known[Math.min(known.length - 1, Math.floor(q * known.length))] : null);
+    const cheapAt = cheapThresholdP ?? pct(0.33);
+    const peakAt = peakThresholdP ?? pct(0.75);
+    const tierOf = (p: number | null): Tier => {
+      if (p == null) return null;
+      if (p < 0) return "negative";
+      if (cheapAt != null && p <= cheapAt) return "cheap";
+      if (peakAt != null && p >= peakAt) return "peak";
+      return null;
+    };
+    const tierColor = (k: Tier): string =>
+      k === "negative" ? t.neg : k === "cheap" ? t.cheap : t.peak;
+    // markArea references slot INDEX (DST-safe; two slots can share a label).
     const bands: Array<[{ xAxis: number; itemStyle: object }, { xAxis: number }]> = [];
     let runStart = -1;
-    let runKind: "charge" | "discharge" | null = null;
+    let runTier: Tier = null;
     const flush = (endIdx: number) => {
-      if (runStart < 0 || runKind == null) return;
-      const color = runKind === "charge" ? t.cheap : t.peak;
+      if (runStart < 0 || runTier == null) return;
       bands.push([
-        { xAxis: runStart, itemStyle: { color: withAlpha(color, 0.22) } },
+        { xAxis: runStart, itemStyle: { color: withAlpha(tierColor(runTier), runTier === "peak" ? 0.16 : 0.20) } },
         { xAxis: endIdx },
       ]);
     };
-    slots.forEach((s, i) => {
-      const k = s.kind || undefined;
-      const cur: "charge" | "discharge" | null =
-        k && CHARGE_KINDS.has(k) ? "charge" : k && DISCHARGE_KINDS.has(k) ? "discharge" : null;
-      if (cur !== runKind) {
-        if (runKind != null) flush(i - 1);
-        runKind = cur;
+    slots.forEach((_, i) => {
+      const cur = tierOf(price[i]);
+      if (cur !== runTier) {
+        if (runTier != null) flush(i - 1);
+        runTier = cur;
         runStart = cur != null ? i : -1;
       }
     });
-    if (runKind != null) flush(slots.length - 1);
+    if (runTier != null) flush(slots.length - 1);
 
     // "Now" marker — only when now falls within this day's slots.
     const nowMs = pv.now_utc ? new Date(pv.now_utc).getTime() : Date.now();
@@ -90,64 +106,102 @@ export function TodayPlanWidget({ pv, loading }: TodayPlanWidgetProps) {
       const idx = slots.findIndex((s) => new Date(s.slot_utc).getTime() > nowMs);
       nowIdx = idx <= 0 ? slots.length - 1 : idx - 1;
     }
+    const animate = !reducedMotion();
 
     chartRef.current.setOption({
       ...base,
-      grid: { left: 48, right: 52, top: 28, bottom: 28, containLabel: true },
-      legend: { ...(base.legend as object), show: true },
+      // Extra right margin for the second (°C) axis; legend pinned bottom so it
+      // never collides with the top axis labels or the plot.
+      grid: { left: 16, right: hasTank ? 64 : 44, top: 16, bottom: 44, containLabel: true },
+      legend: {
+        ...(base.legend as object),
+        show: true, top: undefined, right: undefined, bottom: 4, left: "center",
+        data: ["PV actual", "PV planned", "Load forecast", "Heating plan (tank °C)", "Import price"]
+          .filter((n) => hasTank || n !== "Heating plan (tank °C)"),
+      },
       tooltip: {
         ...(base.tooltip as object),
         formatter: (params: Array<{ dataIndex: number }>) => {
           const i = params[0]?.dataIndex ?? 0;
           const s = slots[i];
           if (!s) return "";
-          return `<strong>${labels[i]}</strong>${s.kind ? ` · ${s.kind}` : ""}<br/>` +
+          const tier = tierOf(price[i]);
+          return `<strong>${labels[i]}</strong>${tier ? ` · ${tier}` : ""}<br/>` +
             (price[i] != null ? `Import ${price[i]!.toFixed(1)}p/kWh<br/>` : "") +
             `PV planned ${pvPlanned[i].toFixed(2)} kWh<br/>` +
             (pvActual[i] != null ? `PV actual ${pvActual[i]!.toFixed(2)} kWh<br/>` : "") +
-            (load[i] != null ? `Load ${load[i]!.toFixed(2)} kWh` : "");
+            (load[i] != null ? `Load ${load[i]!.toFixed(2)} kWh<br/>` : "") +
+            (tank[i] != null ? `Tank target ${tank[i]!.toFixed(0)}°C` : "");
         },
       },
       xAxis: { ...(base.xAxis as object), data: labels, axisLabel: { color: t.textMute, fontSize: 10, interval: 5 } },
       yAxis: [
-        { ...(base.yAxis as object), name: "kWh", nameTextStyle: { color: t.textDim, fontSize: 10 } },
+        { ...(base.yAxis as object), axisLabel: { color: t.textMute, fontSize: 10, formatter: "{value}" } },
         {
           ...(base.yAxis as object),
-          name: "p/kWh", position: "right",
-          nameTextStyle: { color: t.textDim, fontSize: 10 },
-          splitLine: { show: false },
+          position: "right", splitLine: { show: false },
           axisLabel: { color: t.textMute, fontSize: 10, formatter: "{value}p" },
+        },
+        {
+          ...(base.yAxis as object),
+          position: "right", offset: 40, splitLine: { show: false },
+          min: 35, max: 62,
+          axisLabel: { color: withAlpha(t.thermal, 0.85), fontSize: 10, formatter: "{value}°" },
         },
       ],
       series: [
+        // Rate-tier shading lives on a silent baseline series (z below all).
         {
-          name: "PV planned", type: "line", smooth: true, showSymbol: false,
-          data: pvPlanned, lineStyle: { color: t.pv, width: 1.5, type: "dashed" },
-          areaStyle: { color: areaGradient(t.pv, 0.16, 0.02) }, z: 2,
+          name: "_bands", type: "line", data: pvPlanned.map(() => null), silent: true,
           markArea: bands.length ? { silent: true, data: bands } : undefined,
           markLine: nowIdx >= 0 ? {
             silent: true, symbol: "none",
-            lineStyle: { color: t.textDim, width: 1, type: "dotted" },
-            label: { show: true, formatter: "now", color: t.textMute, fontSize: 10 },
+            lineStyle: { color: t.text, width: 1.5, type: "solid", opacity: 0.5 },
+            label: { show: false },
             data: [{ xAxis: nowIdx }],
           } : undefined,
+          z: 0,
+        },
+        // PV planned — Open-Meteo forecast in the BACKGROUND: dim, dashed, flat fill.
+        // `color` set so the legend swatch matches the line (ECharts colours the
+        // legend marker from series.color/itemStyle, NOT lineStyle).
+        {
+          name: "PV planned", type: "line", smooth: true, showSymbol: false, color: t.textDim,
+          data: pvPlanned, lineStyle: { color: t.textDim, width: 1, type: "dashed", opacity: 0.7 },
+          areaStyle: { color: withAlpha(t.textDim, 0.06) }, z: 2,
+        },
+        // PV actual — realised in the FOREGROUND: vivid PV colour, thick, gradient fill.
+        {
+          name: "PV actual", type: "line", smooth: true, showSymbol: false, connectNulls: false, color: t.pv,
+          data: pvActual, lineStyle: { color: t.pv, width: 2.75 },
+          areaStyle: { color: areaGradient(t.pv, 0.34, 0.04) }, z: 4,
         },
         {
-          name: "PV actual", type: "line", smooth: true, showSymbol: false, connectNulls: false,
-          data: pvActual, lineStyle: { color: t.pv, width: 2.5 },
-          areaStyle: { color: areaGradient(t.pv, 0.32, 0.04) }, z: 3,
+          name: "Load forecast", type: "line", smooth: true, showSymbol: false, color: t.grid,
+          data: load, lineStyle: { color: t.grid, width: 1.5, type: "dashed" }, z: 3,
         },
+        ...(hasTank ? [{
+          name: "Heating plan (tank °C)", type: "line", smooth: true, showSymbol: false, color: t.thermal,
+          yAxisIndex: 2, data: tank, connectNulls: true,
+          lineStyle: { color: t.thermal, width: 2, cap: "round" },
+          z: 3,
+        }] : []),
         {
-          name: "Load forecast", type: "line", smooth: true, showSymbol: false,
-          data: load, lineStyle: { color: t.grid, width: 1.5, type: "dashed" }, z: 2,
+          name: "Import price", type: "line", step: "middle", showSymbol: false, color: t.importColor,
+          yAxisIndex: 1, data: price, lineStyle: { color: t.importColor, width: 1.5, opacity: 0.75 }, z: 1,
         },
-        {
-          name: "Import price", type: "line", step: "middle", showSymbol: false,
-          yAxisIndex: 1, data: price, lineStyle: { color: t.importColor, width: 1.5, opacity: 0.8 }, z: 1,
-        },
+        // Blinking "now" — a pulsing ripple at the current slot on the baseline.
+        ...(nowIdx >= 0 ? [{
+          name: "_now", type: "effectScatter", silent: true,
+          coordinateSystem: "cartesian2d", symbolSize: 10, z: 6,
+          showEffectOn: "render",
+          rippleEffect: { period: animate ? 2.4 : 0, scale: animate ? 3.2 : 1, brushType: "stroke" },
+          itemStyle: { color: t.accent, shadowBlur: 8, shadowColor: t.accent },
+          data: [[nowIdx, 0]],
+        }] : []),
       ],
     }, { notMerge: true });
-  }, [pv, theme]);
+  }, [pv, theme, cheapThresholdP, peakThresholdP]);
 
   const acc = pv?.accuracy;
 
@@ -162,11 +216,12 @@ export function TodayPlanWidget({ pv, loading }: TodayPlanWidgetProps) {
           </span>
         </div>
       )}
-      <div ref={ref} style={{ width: "100%", height: "300px" }} />
+      <div ref={ref} style={{ width: "100%", height: "320px" }} />
       <div class="today-plan-bands">
-        <span class="today-plan-band today-plan-band--charge">charge / cheap / solar window</span>
-        <span class="today-plan-band today-plan-band--discharge">discharge / peak-export window</span>
-        <span class="today-plan-band-hint">shaded bands = LP dispatch plan</span>
+        <span class="today-plan-band today-plan-band--cheap">cheap rate</span>
+        <span class="today-plan-band today-plan-band--peak">peak rate</span>
+        <span class="today-plan-band today-plan-band--neg">negative price</span>
+        <span class="today-plan-band-hint">shaded = tariff tier · ◉ now</span>
       </div>
       {!pv?.slots?.length && !loading && <p class="muted">No plan data for today yet.</p>}
     </div>

@@ -136,7 +136,9 @@ export default function Landing() {
         <Widget title="Today's plan" icon="🗓" tone="plan" size="wide"
                 badge={pvToday.data?.forecast_kwh_day_total != null ? `${pvToday.data.forecast_kwh_day_total.toFixed(1)} kWh PV planned` : undefined}>
           <Suspense fallback={<Spinner label="Loading plan…" />}>
-            <TodayPlanWidget pv={pvToday.data} loading={pvToday.loading} />
+            <TodayPlanWidget pv={pvToday.data} loading={pvToday.loading}
+                             cheapThresholdP={metrics.data?.cheap_threshold_pence}
+                             peakThresholdP={metrics.data?.peak_threshold_pence} />
           </Suspense>
         </Widget>
       </div>
