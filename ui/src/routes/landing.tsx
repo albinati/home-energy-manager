@@ -131,7 +131,8 @@ export default function Landing() {
 
         <Widget title="Heating" icon="♨" tone="thermal" size="medium"
                 action={<RefreshAction onRefresh={() => { void daikin.refresh(); void daikinQuota.refresh(); }} loading={daikin.loading} title="Re-fetch Daikin (cached server-side ~30min)" />}>
-          <HeatingWidget state={s} daikin={daikin.data} daikinQuota={daikinQuota.data} report={report.data} weather={weather.data} execution={execution.data} />
+          <HeatingWidget state={s} daikin={daikin.data} daikinQuota={daikinQuota.data} report={report.data} weather={weather.data} execution={execution.data}
+                         onRefresh={() => { void daikin.refresh(); void daikinQuota.refresh(); }} />
         </Widget>
       </div>
 

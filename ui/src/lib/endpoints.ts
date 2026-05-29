@@ -23,6 +23,8 @@ import type {
   DaikinConsumptionResponse,
   PvTodayResponse,
   OptimizationInputsResponse,
+  ActionResult,
+  DaikinOperationMode,
 } from "./types";
 
 /* ----- Real-time / cockpit ----- */
@@ -38,6 +40,19 @@ export const getOptimizationInputs = () =>
 export const getDaikinStatus = () => getJson<DaikinDevice[]>("/daikin/status");
 export const getDaikinQuota = () => getJson<ApiQuotaResponse>("/daikin/quota");
 export const getFoxQuota = () => getJson<ApiQuotaResponse>("/foxess/quota");
+
+/* ----- Daikin controls (writes — require DAIKIN_CONTROL_MODE=active) -----
+   The UI shows its own confirm dialog, then sends skip_confirmation:true so
+   the backend doesn't return a separate pending-action step. A 409
+   PassiveModeLocked surfaces as a HemApiError the caller can toast. */
+export const setTankTemperature = (temperature: number) =>
+  postJson<ActionResult>("/daikin/tank-temperature", { temperature });
+export const setTankPower = (on: boolean) =>
+  postJson<ActionResult>("/daikin/tank-power", { on, skip_confirmation: true });
+export const setLwtOffset = (offset: number) =>
+  postJson<ActionResult>("/daikin/lwt-offset", { offset });
+export const setDaikinMode = (mode: DaikinOperationMode) =>
+  postJson<ActionResult>("/daikin/mode", { mode });
 
 // /daikin/consumption — Onecta-measured Daikin energy split by heating vs DHW.
 // SQLite read only — zero Daikin API quota. Granularities mirror /energy/period.
