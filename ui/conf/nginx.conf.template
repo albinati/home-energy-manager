@@ -14,6 +14,23 @@ server {
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
 
+    # Compression — the JS/CSS/echarts bundles were served RAW (echarts alone
+    # is ~577 KB → ~193 KB gzipped). Without this the first load is slow and
+    # chart-heavy views feel janky. Runtime gzip (Vite emits no .gz files).
+    gzip on;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_comp_level 6;
+    gzip_min_length 1024;
+    gzip_types
+        text/plain
+        text/css
+        application/javascript
+        application/json
+        image/svg+xml
+        application/manifest+json
+        application/wasm;
+
     # Container-level health endpoint — used by docker compose healthcheck.
     location = /healthz {
         access_log off;
