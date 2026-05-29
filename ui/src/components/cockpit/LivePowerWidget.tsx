@@ -24,7 +24,6 @@ const RM = reducedMotion();
 // battery SoC, Fox mode, tariff, scheduled windows) recedes to quiet
 // monochrome. Domain colour appears only on the flow + the focal-value tint.
 export function LivePowerWidget({ state, cockpit, timeline, execution, agile, metrics }: LivePowerWidgetProps) {
-  const action = inferAction(state);
   const socPct = state.soc_pct ?? 0;
   const charging = state.battery_kw > 0.05;
   const discharging = state.battery_kw < -0.05;
@@ -76,17 +75,6 @@ export function LivePowerWidget({ state, cockpit, timeline, execution, agile, me
           <span class="livepower-hero-unit">kW</span>
         </div>
         <div class="livepower-hero-cap">{netCaption}</div>
-      </div>
-
-      {/* Quiet action verb — supporting copy beneath the hero */}
-      <div class="livepower-action">
-        <span class="livepower-action-icon">
-          <Icon name={action.icon} size={18} />
-        </span>
-        <div class="livepower-action-text">
-          <div class="livepower-action-title">{action.title}</div>
-          <div class="livepower-action-sub">{action.sub}</div>
-        </div>
       </div>
 
       {/* The power-flow centerpiece + battery panel */}
@@ -265,23 +253,6 @@ function BatteryShape({ pct: socPct, fillColor }: { pct: number; fillColor: stri
       />
     </svg>
   );
-}
-
-interface Action { title: string; sub: string; icon: IconName; }
-
-function inferAction(s: CockpitState): Action {
-  const grid = s.grid_kw, batt = s.battery_kw, solar = s.solar_kw, E = 0.1;
-  const importing = grid > E, exporting = grid < -E;
-  const charging = batt > E, discharging = batt < -E;
-  const producing = solar > E;
-  if (discharging && exporting) return { title: "Exporting from battery", sub: `${kw(-batt + Math.max(0, solar))} flowing to the grid`, icon: "export" };
-  if (exporting && !discharging) return { title: "Exporting solar surplus", sub: `${kw(-grid)} to grid · ${kw(s.load_kw)} house · ${kw(solar)} solar`, icon: "export" };
-  if (charging && importing) return { title: "Charging from grid", sub: `${kw(grid)} import · battery climbing at ${kw(batt)}`, icon: "power-live" };
-  if (charging && producing) return { title: "Charging from solar", sub: `${kw(solar)} solar · battery climbing at ${kw(batt)}`, icon: "solar" };
-  if (discharging) return { title: "Battery → house", sub: `${kw(-batt)} from battery · ${kw(s.load_kw)} house load`, icon: "battery" };
-  if (importing) return { title: "Importing from grid", sub: `${kw(grid)} import · ${kw(s.load_kw)} house`, icon: "import" };
-  if (producing) return { title: "Self-using solar", sub: `${kw(solar)} solar covering ${kw(s.load_kw)} house`, icon: "solar" };
-  return { title: "Holding", sub: `${kw(s.load_kw)} house · battery ${pct(s.soc_pct, 0)} · waiting`, icon: "power-live" };
 }
 
 function computeTodayRange(exec: ExecutionTodayResponse | null): { min: number; max: number } | null {
