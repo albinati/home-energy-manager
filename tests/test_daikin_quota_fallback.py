@@ -67,6 +67,26 @@ def test_do_refresh_throttles_rapid_reads(monkeypatch):
     assert second is sentinel, "throttled call returns the warm cache"
 
 
+def test_do_refresh_force_bypasses_throttle(monkeypatch):
+    """An explicit user-triggered refresh (force=True) must hit the API even
+    inside the anti-burst window — the auto floor only gates background callers,
+    not a deliberate "refresh now"."""
+    from unittest.mock import MagicMock
+
+    monkeypatch.setattr(daikin_service, "should_block", lambda _v: False)
+    monkeypatch.setattr(daikin_service.config, "DAIKIN_REFRESH_MIN_INTERVAL_SECONDS", 300, raising=False)
+    monkeypatch.setattr(daikin_service, "_persist_daikin_telemetry_live", lambda _d: None)
+
+    mock_client = MagicMock()
+    mock_client.get_devices.side_effect = [[object()], [object()]]
+    monkeypatch.setattr(daikin_service, "_get_or_create_client", lambda: mock_client)
+
+    daikin_service._do_refresh("auto")  # primes the window
+    daikin_service._do_refresh("user", force=True)  # inside window but forced
+
+    assert mock_client.get_devices.call_count == 2, "force=True must bypass the throttle"
+
+
 def _seed_live_row(age_seconds: float, *, tank: float = 50.0, indoor: float = 21.0) -> None:
     now = datetime.now(UTC)
     db.insert_daikin_telemetry({

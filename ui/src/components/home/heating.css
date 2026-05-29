@@ -15,6 +15,10 @@
   color: var(--text-mute);
   font-variant-numeric: tabular-nums;
 }
+.heating-refresh {
+  padding: 2px 8px;
+  font-size: 0.65rem;
+}
 
 .heating-split {
   padding-top: var(--space-2);

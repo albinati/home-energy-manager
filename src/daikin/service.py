@@ -97,8 +97,12 @@ def _cache_is_warm() -> bool:
     )
 
 
-def _do_refresh(actor: str) -> list[DaikinDevice]:
+def _do_refresh(actor: str, *, force: bool = False) -> list[DaikinDevice]:
     """Call get_devices() and update cache. Quota accounting is at the transport layer (DaikinClient._get).
+
+    ``force=True`` (explicit user-triggered refresh) bypasses the anti-burst
+    interval floor — the auto paths (LP init etc.) read on their natural ~30 min
+    cache cadence, and a deliberate "refresh now" should still get fresh data.
 
     Defensive guard: refuse to call Daikin when the soft cap is exhausted.
     Every caller higher up SHOULD already check should_block, but this
@@ -123,7 +127,7 @@ def _do_refresh(actor: str) -> list[DaikinDevice]:
     # looping caller without a separate instrumentation deploy.
     now_m = time.monotonic()
     min_iv = float(getattr(config, "DAIKIN_REFRESH_MIN_INTERVAL_SECONDS", 90))
-    if _last_refresh_monotonic and (now_m - _last_refresh_monotonic) < min_iv and _devices_cache is not None:
+    if not force and _last_refresh_monotonic and (now_m - _last_refresh_monotonic) < min_iv and _devices_cache is not None:
         if not _refresh_throttle_logged:
             _refresh_throttle_logged = True
             logger.warning(
@@ -383,7 +387,7 @@ def force_refresh_devices(
 
         _force_refresh_timestamps[actor] = time.time()
         try:
-            devices = _do_refresh(actor)
+            devices = _do_refresh(actor, force=True)
             return CachedDevices(
                 devices=devices,
                 fetched_at_wall=_devices_fetched_wall,

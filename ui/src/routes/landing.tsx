@@ -125,8 +125,7 @@ export default function Landing() {
           <LivePowerWidget state={s} cockpit={data} timeline={timeline.data} execution={execution.data} agile={agile.data} metrics={metrics.data} />
         </Widget>
 
-        <Widget title="Heating" icon="♨" tone="thermal" size="medium"
-                action={<RefreshAction onRefresh={() => { void daikin.refresh(); void daikinQuota.refresh(); }} loading={daikin.loading} title="Re-fetch Daikin (cached server-side ~30min)" />}>
+        <Widget title="Heating" icon="♨" tone="thermal" size="medium">
           <HeatingWidget state={s} daikin={daikin.data} daikinQuota={daikinQuota.data} report={report.data} weather={weather.data} execution={execution.data}
                          onRefresh={() => { void daikin.refresh(); void daikinQuota.refresh(); }} />
         </Widget>

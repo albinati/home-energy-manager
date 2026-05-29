@@ -42,6 +42,9 @@ export const getPvToday = () => getJson<PvTodayResponse>("/pv/today");
 export const getOptimizationInputs = () =>
   getJson<OptimizationInputsResponse>("/optimization/inputs");
 export const getDaikinStatus = () => getJson<DaikinDevice[]>("/daikin/status");
+// Explicit, user-triggered LIVE read (one Daikin API call). Everything else
+// reads the cache the LP/scheduler already refreshed (~30 min cadence).
+export const forceRefreshDaikin = () => getJson<DaikinDevice[]>("/daikin/status?refresh=true");
 export const getDaikinQuota = () => getJson<ApiQuotaResponse>("/daikin/quota");
 export const getFoxQuota = () => getJson<ApiQuotaResponse>("/foxess/quota");
 
