@@ -11,6 +11,7 @@ import { Spinner } from "../components/common/Spinner";
 import { NumberInput, Select } from "../components/common/Inputs";
 import { Modal } from "../components/common/Modal";
 import { Pill } from "../components/common/Pill";
+import { WorkbenchPlanChart } from "../components/workbench/WorkbenchPlanChart";
 import { toast } from "../lib/toast";
 import { gbp } from "../lib/format";
 import "../components/workbench/workbench.css";
@@ -206,6 +207,7 @@ function SimResult({ sim }: { sim: WorkbenchSimulateResponse }) {
         <Stat label="Mean load/slot" value={sim.mu_load_kwh_per_slot != null ? `${sim.mu_load_kwh_per_slot.toFixed(2)} kWh` : "—"} />
         <Stat label="Slots" value={String(sim.slot_count ?? "—")} />
       </div>
+      {sim.slots && sim.slots.length > 0 && <WorkbenchPlanChart slots={sim.slots} />}
       {applied.length > 0 && <p class="wb-sim-applied">Applied: <code>{applied.join(", ")}</code></p>}
       {ignored.length > 0 && <p class="muted">Ignored: {ignored.join(", ")}</p>}
     </div>
