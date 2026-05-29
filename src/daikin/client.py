@@ -15,7 +15,7 @@ import time
 import urllib.error
 import urllib.request
 
-from ..api_quota import record_call
+from ..api_quota import record_call, should_block
 from ..config import config
 from .auth import get_valid_access_token
 from .models import DaikinDevice, DaikinStatus, SetpointRange
@@ -56,6 +56,17 @@ class DaikinClient:
             pass
 
     def _get(self, path: str) -> dict | list:
+        # Soft-cap circuit breaker on the READ path. Once the daily Daikin
+        # budget is exhausted (or the failure circuit is open), stop issuing
+        # network reads entirely and fail fast locally. Without this, a caller
+        # that retries on failure keeps hitting Daikin's hard ~200/day limit —
+        # every 429 is recorded, self-perpetuating the overage (the read-storm
+        # incident: 528 calls/24h, 358 failing). Cold-start / _do_refresh already
+        # honour should_block; this closes the bypass for direct reads
+        # (e.g. /weather, get_status). Do NOT record — no network call is made,
+        # so it consumes no quota and the rolling window can slide back down.
+        if should_block("daikin"):
+            raise DaikinError("daikin daily quota soft-cap reached — read skipped")
         url = f"{self.BASE_URL}{path}"
         max_429 = max(0, int(config.DAIKIN_HTTP_429_MAX_RETRIES))
         for auth_try in range(2):
