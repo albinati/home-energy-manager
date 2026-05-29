@@ -65,7 +65,7 @@ export function TodayPlanWidget({ pv, loading }: TodayPlanWidgetProps) {
       if (runStart < 0 || runKind == null) return;
       const color = runKind === "charge" ? t.cheap : t.peak;
       bands.push([
-        { xAxis: runStart, itemStyle: { color: withAlpha(color, 0.1) } },
+        { xAxis: runStart, itemStyle: { color: withAlpha(color, 0.22) } },
         { xAxis: endIdx },
       ]);
     };
@@ -163,6 +163,11 @@ export function TodayPlanWidget({ pv, loading }: TodayPlanWidgetProps) {
         </div>
       )}
       <div ref={ref} style={{ width: "100%", height: "300px" }} />
+      <div class="today-plan-bands">
+        <span class="today-plan-band today-plan-band--charge">charge / cheap / solar window</span>
+        <span class="today-plan-band today-plan-band--discharge">discharge / peak-export window</span>
+        <span class="today-plan-band-hint">shaded bands = LP dispatch plan</span>
+      </div>
       {!pv?.slots?.length && !loading && <p class="muted">No plan data for today yet.</p>}
     </div>
   );
