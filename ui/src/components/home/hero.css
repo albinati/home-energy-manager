@@ -124,6 +124,18 @@
  * inline colour; surrounding label stays dim so only the figure carries it. */
 .hero-strong-pos { color: var(--ok); font-weight: 600; }
 .hero-strong-neg { color: var(--bad); font-weight: 600; }
+/* "est" tag on the intraday today figure — quiet, italic, recessed. */
+.hero-est-tag {
+  margin-left: 6px;
+  padding: 1px 5px;
+  font-size: 0.6rem;
+  font-style: italic;
+  letter-spacing: 0.04em;
+  color: var(--text-mute);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  vertical-align: middle;
+}
 
 /* Lifetime strip — supporting context, fully monochrome. Hairline + space. */
 .hero-lifetime {
