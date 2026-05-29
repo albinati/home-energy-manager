@@ -104,6 +104,18 @@ class TestDaikinClient(unittest.TestCase):
         self.assertEqual(devices[0].temperature.set_point, 21.0)
         self.assertEqual(devices[0].temperature.room_temperature, 19.5)
 
+    def test_get_skips_network_when_quota_blocked(self):
+        """Read circuit breaker: once should_block('daikin') is true, _get must
+        fail fast WITHOUT a network call, so a retrying caller can't keep
+        hammering Daikin's hard limit (the read-storm incident)."""
+        from src.daikin.client import DaikinError
+        client = DaikinClient()
+        with patch("src.daikin.client.should_block", return_value=True), \
+             patch("urllib.request.urlopen") as mock_urlopen:
+            with self.assertRaises(DaikinError):
+                client._get("/gateway-devices")
+            mock_urlopen.assert_not_called()
+
     @patch.object(DaikinClient, "_patch")
     @patch.object(DaikinClient, "_get")
     def test_set_temperature(self, mock_get, mock_patch):
