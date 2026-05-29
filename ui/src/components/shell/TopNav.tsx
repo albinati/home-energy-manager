@@ -1,6 +1,5 @@
 import { Link, useLocation } from "wouter-preact";
 import { ThemeToggle } from "./ThemeToggle";
-import { MotionToggle } from "./MotionToggle";
 
 const tabs = [
   { href: "/", label: "Home" },
@@ -27,7 +26,6 @@ export function TopNav() {
             </Link>
           ))}
         </nav>
-        <MotionToggle />
         <ThemeToggle />
       </div>
     </header>

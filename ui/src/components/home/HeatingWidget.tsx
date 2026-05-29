@@ -10,6 +10,7 @@ import type {
 import { kwh, relTime } from "../../lib/format";
 import { Pill } from "../common/Pill";
 import { Gauge } from "../common/Gauge";
+import { RadialGauge } from "../common/RadialGauge";
 import { HeatingControls } from "./HeatingControls";
 import "./heating.css";
 
@@ -95,10 +96,9 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather, exe
         )}
       </div>
 
-      <div class="heating-gauges">
-        <Gauge label="Tank" value={tankTemp} min={20} max={65} target={tankTarget} tone="thermal"
-               sub={(tankTarget != null ? `target ${Math.round(tankTarget)}°C` : "no target")
-                    + (tankPower != null ? ` · ${tankPower ? "ON" : "OFF"}` : "")} />
+      <RadialGauge label={`Tank${tankPower != null ? (tankPower ? " · on" : " · off") : ""}`}
+                   value={tankTemp} min={20} max={65} target={tankTarget} tone="thermal" />
+      <div class="heating-gauges heating-gauges--secondary">
         <Gauge label="Outdoor" value={outdoorTemp} min={-5} max={35} tone="cool"
                sub={outdoorSource === "execution" ? "Daikin sensor (logged)"
                     : outdoorSource === "daikin" ? "Daikin sensor (live)"
