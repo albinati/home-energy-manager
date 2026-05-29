@@ -1,0 +1,110 @@
+/* Widget — primitive for dashboard tiles. Header + body + accent edge.
+ * Sizes map to grid spans on desktop; mobile always single-column. */
+
+.widget-grid {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: var(--space-3);
+}
+
+.widget {
+  position: relative;
+  /* De-chromed: flat surface, depth from the two-layer --shadow, no border,
+   * no per-card coloured accent edge or corner tint (monochrome-first). */
+  background: var(--bg-card);
+  border: 1px solid transparent;
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  transition: transform 160ms ease-out, box-shadow 160ms ease-out;
+  grid-column: span 12;
+  min-width: 0;
+  box-shadow: var(--shadow);
+}
+/* Hover = a depth lift, never a colour change. */
+.widget:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-lg);
+}
+
+/* Choreographed entrance — every card rises + fades in once on mount, staggered
+ * so the grid settles in sequence. Animates transform/opacity ONLY over a
+ * pre-sized grid so nothing reflows. Stagger capped at ~7 cards (280ms). */
+@keyframes widget-rise {
+  from { opacity: 0; transform: translateY(12px) scale(0.985); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+.widget {
+  animation: widget-rise var(--dur-enter) var(--ease-entrance) both;
+}
+.widget-grid .widget:nth-child(1) { animation-delay: 0ms; }
+.widget-grid .widget:nth-child(2) { animation-delay: calc(var(--stagger-step) * 1); }
+.widget-grid .widget:nth-child(3) { animation-delay: calc(var(--stagger-step) * 2); }
+.widget-grid .widget:nth-child(4) { animation-delay: calc(var(--stagger-step) * 3); }
+.widget-grid .widget:nth-child(5) { animation-delay: calc(var(--stagger-step) * 4); }
+.widget-grid .widget:nth-child(6) { animation-delay: calc(var(--stagger-step) * 5); }
+.widget-grid .widget:nth-child(n+7) { animation-delay: calc(var(--stagger-step) * 6); }
+
+@media (min-width: 720px) {
+  .widget--medium { grid-column: span 6; }
+  .widget--large { grid-column: span 12; }
+  .widget--wide { grid-column: span 12; }
+}
+@media (min-width: 1024px) {
+  .widget--medium { grid-column: span 4; }
+  .widget--large { grid-column: span 8; }
+  .widget--wide { grid-column: span 12; }
+}
+
+/* Tone is monochrome-first: the prop is kept for compile-safety but paints
+ * nothing. Domain identity now reads from the header icon + the focal-number
+ * tint, not a coloured card edge. (.widget-accent element removed.) */
+
+.widget-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, transparent, rgba(255,255,255,0.02));
+}
+:root.theme-light .widget-header {
+  background: linear-gradient(180deg, transparent, rgba(0,0,0,0.02));
+}
+
+.widget-header-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--text-dim);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.widget-header-icon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-dim);
+}
+.widget-header-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.widget-header-badge {
+  font-size: var(--font-xs);
+  color: var(--text-mute);
+  font-variant-numeric: tabular-nums;
+}
+
+.widget-body {
+  flex: 1;
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}

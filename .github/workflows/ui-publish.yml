@@ -17,6 +17,10 @@ on:
       # publish workflow handles its own paths.
       - "ui/**"
       - ".github/workflows/ui-publish.yml"
+  pull_request:
+    paths:
+      - "ui/**"
+      - ".github/workflows/ui-publish.yml"
   workflow_dispatch:
 
 permissions:
@@ -24,7 +28,38 @@ permissions:
   packages: write
 
 jobs:
+  # Fast-fail on TypeScript or Vite build errors. Runs on x86 Ubuntu so it
+  # finishes in ~30 s — a broken TS-types PR aborts before paying for an
+  # emulated arm64 Docker build that takes minutes.
+  typecheck:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
   build-and-push:
+    # Publish only on push to main / tags; on PRs we just typecheck above.
+    needs: typecheck
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

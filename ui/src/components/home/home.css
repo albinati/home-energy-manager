@@ -1,0 +1,32 @@
+/* Home — widget-grid dashboard. */
+
+.home {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: var(--space-5) var(--space-4) var(--space-7);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/* Semantic bands — wider gap between LIVE / MONEY / ENERGY groups so the
+ * eye can skim them as three distinct surfaces. No visible labels (Apple-
+ * style) — the wider gap + section-local accent tones do the grouping. */
+.widget-band + .widget-band {
+  margin-top: var(--space-5);
+}
+
+/* Skeleton text — shown while a slow field loads */
+.skel-text {
+  display: inline-block;
+  height: 0.85em;
+  background: linear-gradient(90deg, var(--bg-card-2) 25%, var(--bg-card-3) 50%, var(--bg-card-2) 75%);
+  background-size: 200% 100%;
+  animation: skel 1.4s ease-in-out infinite;
+  border-radius: 4px;
+  vertical-align: middle;
+}
+@keyframes skel {
+  0%   { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}

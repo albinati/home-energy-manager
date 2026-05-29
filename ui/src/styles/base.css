@@ -1,0 +1,130 @@
+* { box-sizing: border-box; }
+
+html {
+  /* Dark↔light cross-fades instead of snapping (Apple-grade theme switch). */
+  transition: background-color 220ms ease, color 220ms ease;
+}
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: var(--font-md)/1.5 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Ambient body background — ONE faint near-neutral accent glow. Domain colours
+ * (pv-yellow / batt-green) were removed from the wash: colour must mean
+ * something, and spraying it into the ambient layer dilutes the meaning-only
+ * rule. Just enough depth, no false signal. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background: radial-gradient(1200px 800px at 75% -10%, rgba(59, 130, 246, 0.05), transparent 60%);
+  animation: body-bg-drift 60s ease-in-out infinite alternate;
+}
+:root.theme-light body::before {
+  background: radial-gradient(1200px 800px at 75% -10%, rgba(37, 99, 235, 0.035), transparent 60%);
+}
+@keyframes body-bg-drift {
+  0%   { transform: translate(0, 0); }
+  100% { transform: translate(-2%, 3%); }
+}
+body > * { position: relative; z-index: 1; }
+
+/* Shared "live" pulse — the ONLY continuous motion outside the power-flow.
+ * Opacity-only (no scale), one element per surface max (hero dot, exports
+ * live dot, power-flow panel dot, plan playhead). */
+@keyframes live-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.4; }
+}
+.live-pulse {
+  animation: live-pulse 1600ms ease-in-out infinite;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+h1, h2, h3, h4 {
+  margin: 0;
+  font-weight: 600;
+  line-height: 1.2;
+}
+h1 { font-size: var(--font-2xl); }
+h2 { font-size: var(--font-xl); }
+h3 { font-size: var(--font-lg); }
+
+p { margin: 0; }
+
+code, pre {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.9em;
+}
+
+::selection {
+  background: rgba(59, 130, 246, 0.4);
+}
+
+.page-padded {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: var(--space-5) var(--space-4);
+}
+
+.muted { color: var(--text-dim); }
+.dim { color: var(--text-mute); }
+
+.grow { flex: 1; }
+
+/* Reduced motion — disable all entrance/ambient/loop motion; final state is
+ * instant. Number tweens snap via useAnimatedNumber's own guard. Power-flow
+ * particles freeze into static proportional lines (handled in PowerFlow).
+ * Hover lift is kept but capped to 1px (non-vestibular, aids affordance). */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+  .widget { animation: none !important; opacity: 1 !important; transform: none !important; }
+  .widget:hover { transform: translateY(-1px); }
+  body::before { animation: none !important; }
+  .live-pulse { animation: none !important; opacity: 1 !important; }
+}

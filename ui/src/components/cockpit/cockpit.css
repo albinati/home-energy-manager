@@ -1,0 +1,14 @@
+/* Power flow — used by PowerFlow.tsx (inside LivePowerWidget). The flow is the
+ * one place domain colour + continuous motion live; nodes are static (depth via
+ * shadow, no breathing pulse) and liveness reads from the particles. */
+.powerflow {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: var(--space-2) 0;
+}
+.powerflow-svg {
+  width: 100%;
+  max-width: 560px;
+  height: auto;
+}

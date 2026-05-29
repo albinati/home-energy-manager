@@ -1,0 +1,71 @@
+.plan-page {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: var(--space-5) var(--space-4) var(--space-7);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.plan-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+.plan-eyebrow {
+  font-size: var(--font-2xs);
+  color: var(--text-mute);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  font-weight: 700;
+}
+.plan-header h1 {
+  font-size: var(--font-2xl);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.05;
+}
+.plan-sub {
+  color: var(--text-dim);
+  font-size: var(--font-sm);
+  margin-top: var(--space-2);
+  max-width: 60ch;
+}
+.plan-pill-icon { display: inline-flex; vertical-align: -2px; margin-right: 3px; }
+
+/* Focal end-of-horizon SoC — the one display number on the Plan surface */
+.plan-focal {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+.plan-focal-icon { display: inline-flex; color: var(--batt); }
+.plan-focal-num {
+  font-size: var(--font-display);
+  font-weight: 700;
+  line-height: 1.0;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  color: var(--batt);
+}
+.plan-focal-label {
+  font-size: var(--font-2xs);
+  color: var(--text-mute);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+/* Empty state — flat tonal panel with a quiet illustrative icon */
+.plan-empty {
+  padding: var(--space-5);
+  background: var(--bg-card-2);
+  border-radius: var(--radius-lg);
+  color: var(--text-dim);
+  text-align: center;
+  font-size: var(--font-sm);
+}
+.plan-empty strong { color: var(--text); }

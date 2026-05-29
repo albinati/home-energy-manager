@@ -590,6 +590,27 @@ def bulletproof_daikin_consumption_rollup_job() -> None:
     except Exception as e:
         logger.warning("daikin 2h rollup failed (non-fatal): %s", e)
 
+    # Telemetry-integral 2h refinement (#425). Onecta's public API returns
+    # INTEGER kWh per 2h bucket — every value under 1 kWh truncates to 0.
+    # We integrate the per-30-min telemetry through physics + tank-thermal-
+    # mass to recover sub-integer precision. Only overwrites Onecta rows
+    # when the integer rounds to 0 or differs by < 0.5 (see decision logic
+    # in ``sync_daikin_2hourly_telemetry``).
+    try:
+        from datetime import date as _date, timedelta as _td
+        from ..daikin.service import sync_daikin_2hourly_telemetry
+        today = _date.today()
+        wrote = 0
+        for d in (today - _td(days=1), today):
+            try:
+                r = sync_daikin_2hourly_telemetry(d)
+                wrote += r.get("written", 0)
+            except Exception as exc:
+                logger.warning("telemetry-integral 2h sync failed for %s: %s", d, exc)
+        logger.info("daikin_consumption_2hourly telemetry-integral: %d bucket rows refined", wrote)
+    except Exception as e:
+        logger.warning("telemetry-integral 2h rollup failed (non-fatal): %s", e)
+
 
 def bulletproof_fox_energy_rollup_job() -> None:
     """Aggregate ``pv_realtime_history`` into per-day kWh totals (S10.10 / #177).

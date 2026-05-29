@@ -1350,6 +1350,13 @@ def _run_optimizer_lp(
             return "peak"
         return "standard"
 
+    # Operator load-forecast scale (workbench/runtime-tunable). Multiplies the
+    # residual house-load profile so the user can nudge the plan's demand
+    # assumption up/down (e.g. "we'll be away → 0.7", "guests → 1.3"). Default
+    # 1.0 is a bit-identical no-op (v * 1.0 == v), so the LP regression
+    # baseline is unaffected. Applies to the residual profile only — explicit
+    # appliance dispatch loads (below) are added at their true kWh.
+    _load_scale = float(getattr(config, "LP_LOAD_SCALE_FACTOR", 1.0))
     base_load = []
     for s in slots:
         _local = s.start_utc.astimezone(tz)
@@ -1359,7 +1366,9 @@ def _run_optimizer_lp(
         v = _load_profile.get((_hm[0], _hm[1], _kind))
         if v is None:
             v = _load_profile.get(_hm, _flat)
-        base_load.append(v)
+        base_load.append(v * _load_scale)
+    if _load_scale != 1.0:
+        logger.info("LP base_load: operator load scale %.2f applied to residual profile", _load_scale)
     residual_base_load = list(base_load)
     appliance_profile_kwh = [0.0] * len(base_load)
 

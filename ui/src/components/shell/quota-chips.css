@@ -1,0 +1,36 @@
+.quota-chips {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.quota-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-pill);
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+}
+.quota-chip-label {
+  color: var(--text-mute);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-weight: 700;
+}
+.quota-chip-value {
+  color: var(--text-dim);
+  font-weight: 600;
+}
+.quota-chip-fail {
+  margin-left: 2px;
+  font-weight: 800;
+  color: var(--warn);
+  font-size: 0.7rem;
+}
+.quota-chip--ok   .quota-chip-value { color: var(--ok); }
+.quota-chip--warn .quota-chip-value { color: var(--warn); }
+.quota-chip--bad  .quota-chip-value { color: var(--bad); }
+.quota-chip--loading { opacity: 0.5; }
