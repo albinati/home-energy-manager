@@ -125,10 +125,8 @@
 .mode-segment-btn:hover { color: var(--text); }
 .mode-segment-btn.is-active { color: #fff; }
 .mode-segment-icon { display: inline-flex; }
-@media (prefers-reduced-motion: reduce) {
-  .mode-segment-thumb { transition: none; }
-  .mode-consequence { animation: none; }
-}
+:root.hem-reduce-motion .mode-segment-thumb { transition: none; }
+:root.hem-reduce-motion .mode-consequence { animation: none; }
 
 .mode-switcher-footnote {
   display: flex;

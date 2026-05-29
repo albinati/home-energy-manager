@@ -1,13 +1,10 @@
 import { useEffect, useRef, useState } from "preact/hooks";
+import { reducedMotion } from "./motion";
 
-// Read the OS reduced-motion preference once at module load. Under reduce we
-// skip the tween entirely and snap straight to the target — the count-up is
-// cosmetic; the final displayed figure must equal the formatter output exactly
-// in BOTH modes (accuracy guardrail — no parallel rounding path).
-const PREFERS_REDUCED_MOTION =
-  typeof window !== "undefined" &&
-  typeof window.matchMedia === "function" &&
-  window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+// Under reduced motion we skip the tween and snap to the target — the count-up
+// is cosmetic; the final displayed figure must equal the formatter output
+// exactly in BOTH modes (accuracy guardrail). Honours the in-app motion
+// override (default on), evaluated at tween time (see PREFERS check below).
 
 // Smoothly tween a numeric value when it changes — for the hero counters
 // and lifetime stats so refreshes feel alive instead of snapping. Uses
@@ -45,7 +42,7 @@ export function useAnimatedNumber(
     if (lastTargetRef.current === target) return;
 
     // Reduced motion — snap to the exact value, no tween.
-    if (PREFERS_REDUCED_MOTION) {
+    if (reducedMotion()) {
       if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
       setDisplay(target);
