@@ -20,7 +20,7 @@ from ..notifier import (
 )
 from ..state_machine import heartbeat_repair_fox_scheduler, reconcile_daikin_schedule_for_date
 from .agile import fetch_agile_rates, get_current_and_next_slots
-from .daikin import compute_lwt_adjustment, run_daikin_scheduler_tick
+from .daikin import compute_lwt_adjustment
 
 logger = logging.getLogger(__name__)
 
@@ -415,11 +415,6 @@ def get_scheduler_status() -> dict:
             config.SCHEDULER_PREHEAT_LWT_BOOST,
         )
     return out
-
-
-def run_scheduler_tick() -> str | None:
-    """Run one legacy scheduler tick (Daikin LWT only)."""
-    return run_daikin_scheduler_tick(get_scheduler_paused())
 
 
 def _try_fox() -> FoxESSClient | None:
@@ -1776,12 +1771,6 @@ def start_background_scheduler() -> None:
 
         _background_scheduler = BackgroundScheduler()
         tz = ZoneInfo(config.BULLETPROOF_TIMEZONE if config.USE_BULLETPROOF_ENGINE else config.OPTIMIZATION_TIMEZONE)
-
-        if config.SCHEDULER_ENABLED and config.OCTOPUS_TARIFF_CODE and not config.USE_BULLETPROOF_ENGINE:
-            _background_scheduler.add_job(
-                run_scheduler_tick, "interval", minutes=30, id="agile_daikin"
-            )
-            logger.info("Agile Daikin scheduler started (every 30 min)")
 
         if config.USE_BULLETPROOF_ENGINE and config.OCTOPUS_TARIFF_CODE:
             _background_scheduler.add_job(

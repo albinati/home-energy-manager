@@ -93,19 +93,9 @@ def test_service_setters_passive_skip(passive_mode, fn_name: str, args: tuple) -
 # S2: scheduler tick
 # ---------------------------------------------------------------------------
 
-def test_scheduler_tick_passive_skip(passive_mode, monkeypatch: pytest.MonkeyPatch) -> None:
-    from src.scheduler import daikin as sched_daikin
-
-    # Ensure the rate-fetch path would otherwise be exercised so the early-return
-    # is the only reason no error is raised.
-    monkeypatch.setattr(config, "OCTOPUS_TARIFF_CODE", "TEST")
-    monkeypatch.setattr(config, "SCHEDULER_ENABLED", True)
-    fake = MagicMock(side_effect=AssertionError("rates fetch should not run in passive"))
-    monkeypatch.setattr(sched_daikin, "fetch_agile_rates", fake)
-
-    result = sched_daikin.run_daikin_scheduler_tick(is_paused=False)
-    assert result is None
-    fake.assert_not_called()
+# (Removed test_scheduler_tick_passive_skip — the legacy run_daikin_scheduler_tick
+#  was deleted as dead code. Passive-mode write blocking is still covered by the
+#  service-setter + apply_scheduled + comfort-restore tests above.)
 
 
 # ---------------------------------------------------------------------------
