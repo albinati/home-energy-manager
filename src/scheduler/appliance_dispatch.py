@@ -354,7 +354,7 @@ def _query_latest_lp_soc_trajectory(
                 )
                 if run_at.tzinfo is None:
                     run_at = run_at.replace(tzinfo=UTC)
-                age = datetime.now(UTC) - run_at
+                age = _now_utc() - run_at
                 if age > timedelta(hours=max_age_hours):
                     logger.info(
                         "appliance: LP run %s too stale (%.1fh > %.1fh) — "

@@ -43,6 +43,11 @@ def _isolated(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "APPLIANCE_FALLBACK_SAFETY_MARGIN_KWH", 0.3, raising=False)
     monkeypatch.setattr(config, "BATTERY_CAPACITY_KWH", 10.0, raising=False)
     monkeypatch.setattr(config, "MIN_SOC_RESERVE_PERCENT", 15.0, raising=False)
+    # Freeze "now" just before the fixed test base (12:00) so the seeded LP
+    # trajectory (run_at = slots[0]) is always fresh — otherwise the staleness
+    # check compared the hardcoded 2026-06-01 base to the real clock and the
+    # picker fell back to cheapest-grid as soon as the date rolled past it.
+    monkeypatch.setattr(ad, "_now_utc", lambda: datetime(2026, 6, 1, 11, 0, tzinfo=UTC))
     yield
 
 
@@ -321,9 +326,9 @@ def test_lp_trajectory_too_stale_falls_back(monkeypatch):
     aid = _seed_appliance(typical_kw=1.0)
     base = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
     slots = [base + timedelta(minutes=30 * i) for i in range(8)]
-    # Seed a trajectory but with stale run_at (5 hours ago)
+    # Seed a trajectory but with stale run_at (5 hours before the frozen now).
     conn = sqlite3.connect(config.DB_PATH)
-    stale_run_at = (datetime.now(UTC) - timedelta(hours=5)).isoformat()
+    stale_run_at = (ad._now_utc() - timedelta(hours=5)).isoformat()
     conn.execute("INSERT INTO optimizer_log (run_at) VALUES (?)", (stale_run_at,))
     run_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     for i, slot in enumerate(slots):
