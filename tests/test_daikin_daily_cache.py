@@ -7,7 +7,6 @@ Two-path sync_daikin_daily:
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
-from unittest.mock import patch
 
 import pytest
 
@@ -20,21 +19,23 @@ def _init_db():
     db.init_db()
 
 
-class _FakeDaikinClient:
-    def __init__(self, daily_kwh: list | None = None):
-        self.daily_kwh = daily_kwh
-        self.calls: list[tuple[int, int]] = []
+def _stub_heating_daily(monkeypatch, daily: list | None):
+    """Stub the cached service read used by sync_daikin_daily (post read-burst
+    fix it goes through ``heating_daily_kwh`` instead of a raw client)."""
+    calls: list[tuple[int, int]] = []
 
-    def get_heating_daily_kwh(self, year: int, month: int):
-        self.calls.append((year, month))
-        return self.daily_kwh
+    def _fake(year: int, month: int, *, actor: str = "energy_insights"):
+        calls.append((year, month))
+        return daily
+
+    monkeypatch.setattr(daikin_svc, "heating_daily_kwh", _fake)
+    return calls
 
 
 def test_onecta_path_records_source(monkeypatch):
     daily = [0.0] * 30
     daily[14] = 12.5  # day 15 (idx 14)
-    fake = _FakeDaikinClient(daily_kwh=daily)
-    monkeypatch.setattr(daikin_svc, "_get_or_create_client", lambda: fake)
+    _stub_heating_daily(monkeypatch, daily)
     monkeypatch.setattr(daikin_svc, "should_block", lambda _v: False)
 
     row = daikin_svc.sync_daikin_daily(date(2024, 11, 15))
@@ -46,9 +47,7 @@ def test_onecta_path_records_source(monkeypatch):
 
 def test_onecta_zero_falls_back_to_telemetry_integral(monkeypatch):
     """Onecta returns the day but value is 0 → fall back to telemetry."""
-    daily = [0.0] * 30
-    fake = _FakeDaikinClient(daily_kwh=daily)
-    monkeypatch.setattr(daikin_svc, "_get_or_create_client", lambda: fake)
+    _stub_heating_daily(monkeypatch, [0.0] * 30)
     monkeypatch.setattr(daikin_svc, "should_block", lambda _v: False)
 
     # Seed daikin_telemetry: 4 ticks across the day with cold outdoor temps.
@@ -75,8 +74,7 @@ def test_onecta_zero_falls_back_to_telemetry_integral(monkeypatch):
 
 
 def test_no_data_returns_none(monkeypatch):
-    fake = _FakeDaikinClient(daily_kwh=None)
-    monkeypatch.setattr(daikin_svc, "_get_or_create_client", lambda: fake)
+    _stub_heating_daily(monkeypatch, None)
     monkeypatch.setattr(daikin_svc, "should_block", lambda _v: False)
 
     row = daikin_svc.sync_daikin_daily(date(2024, 11, 15))
@@ -85,11 +83,10 @@ def test_no_data_returns_none(monkeypatch):
 
 def test_quota_blocked_skips_onecta_path(monkeypatch):
     """When Daikin quota is exhausted, Onecta path is skipped entirely."""
-    fake = _FakeDaikinClient(daily_kwh=[10.0] * 30)
-    monkeypatch.setattr(daikin_svc, "_get_or_create_client", lambda: fake)
+    calls = _stub_heating_daily(monkeypatch, [10.0] * 30)
     monkeypatch.setattr(daikin_svc, "should_block", lambda _v: True)  # blocked!
 
     row = daikin_svc.sync_daikin_daily(date(2024, 11, 15))
     # No telemetry seeded → returns None; importantly Onecta was never called.
     assert row is None
-    assert fake.calls == [], "must not call Daikin client when quota blocked"
+    assert calls == [], "must not read Daikin when quota blocked"
