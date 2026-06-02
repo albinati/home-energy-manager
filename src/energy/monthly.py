@@ -692,13 +692,14 @@ def get_period_insights(
         except Exception:
             raise
         energy = _foxess_to_energy_summary(y, m, totals)
-        # Standing charge must cover the same day-window as the energy: elapsed
-        # days for the current (partial) month, full month for a past month.
-        # len(daily) == days with Fox data; clamp to today.day to be robust to
-        # any trailing zero-padded days the breakdown might include.
-        n_days = len(daily)
+        # For the current (partial) month Fox returns a full-month daily
+        # breakdown with zero-padded future days. Trim to elapsed days so the
+        # standing-charge day-count, chart_data length, and the UI's per-day
+        # math (standing ÷ chart_data.length) all agree. Past months keep the
+        # full month.
         if (y, m) == (today.year, today.month):
-            n_days = min(n_days, today.day)
+            daily = [r for r in daily if r.get("date", "") <= today.isoformat()]
+        n_days = len(daily)
         cost = _best_cost(energy, n_days=n_days)
         daikin_heating = _get_daikin_heating_kwh(y, m)
         heating_kwh, heating_cost_pence, equiv_gas_pence, ahead_pounds = _compute_heating_and_gas(
