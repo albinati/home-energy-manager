@@ -134,11 +134,16 @@ def test_period_month_current_prorates_standing(monkeypatch):
 
 
 def test_period_month_current_clamps_zero_padded_days(monkeypatch):
-    """Even if Fox zero-pads to a full month, standing clamps to today.day."""
+    """Fox zero-pads the current month to a full breakdown — we trim chart_data
+    to elapsed days so standing, day-count, and the UI per-day math all agree."""
     today = date.today()
     _patch_client(monkeypatch, _FakeClient(days_with_data=today.day, pad_to_full=True))
     out = monthly.get_period_insights("month", month_str=today.strftime("%Y-%m"))
+    # chart_data trimmed to elapsed days (not the full padded month).
+    assert len(out.chart_data) == today.day
     assert out.insights.cost.standing_charge_pence == pytest.approx(today.day * 50.0)
+    # The UI invariant: standing / chart_data.length == standing_per_day.
+    assert out.insights.cost.standing_charge_pence / len(out.chart_data) == pytest.approx(50.0)
 
 
 def test_period_month_past_bills_full_month(monkeypatch):
