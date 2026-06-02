@@ -477,7 +477,15 @@ def _get_usage_data(months_back: int = 1) -> tuple[float, float, int]:
                 raw = get_cached_energy_month(y, m)
                 total_import += float(raw.get("gridConsumptionEnergyToday", 0) or 0)
                 total_export += float(raw.get("feedinEnergyToday", 0) or 0)
-                total_days += monthrange(y, m)[1]
+                # The Fox aggregate covers only elapsed days for the current
+                # month, so the day-count (used for standing + the usage label)
+                # must match: elapsed days now, full month for past months.
+                # Billing the full month here while import/export are elapsed
+                # inflates every tariff row's standing charge.
+                if (y, m) == (today.year, today.month):
+                    total_days += today.day
+                else:
+                    total_days += monthrange(y, m)[1]
             except Exception:
                 continue
         if total_days > 0:

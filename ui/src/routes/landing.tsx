@@ -19,6 +19,8 @@ import {
 import { Widget } from "../components/common/Widget";
 import { Spinner } from "../components/common/Spinner";
 import { RefreshAction } from "../components/common/RefreshAction";
+import { PeriodNavigator } from "../components/shell/PeriodNavigator";
+import { usePeriod, periodFetchOpts } from "../lib/period";
 import { LivePowerWidget } from "../components/cockpit/LivePowerWidget";
 import { Hero } from "../components/home/Hero";
 import { HeatingWidget } from "../components/home/HeatingWidget";
@@ -89,12 +91,20 @@ export default function Landing() {
   // Daikin cached read — no refresh=true, so no live cloud call (30-min cache TTL).
   const daikin = useFetch(getDaikinStatus, []);
   const daikinQuota = useFetch(getDaikinQuota, []);
-  // Tariff comparison vs Octopus catalogue + BG Fixed v58.
+  // Tariff comparison vs Octopus catalogue + the configured fixed tariff.
   const tariffDash = useFetch(() => getTariffDashboard(1, "monthly", 8), []);
-  // Hero cost-breakdown chart needs today + month (trailing-7d is derived
-  // client-side from the month chart_data).
+  // The shared period navigator drives the Hero headline + cost breakdown +
+  // energy chart. Re-fetch /energy/period whenever the selection changes.
+  const period = usePeriod();
+  const periodInsights = useFetch(
+    () => getEnergyPeriod(period.gran, periodFetchOpts(period)),
+    [period.gran, period.anchor],
+  );
+  // The tariff comparison is inherently a monthly/usage-window construct
+  // (the catalogue replay is monthly), so it stays pinned to the current month
+  // regardless of the navigator — its realised cost + fixed shadow come from
+  // this fetch.
   const today = new Date().toISOString().slice(0, 10);
-  const todayPeriod = useFetch(() => getEnergyPeriod("day", { date: today }), []);
   const monthPeriod = useFetch(() => getEnergyPeriod("month", { month: today.slice(0, 7) }), []);
 
   if (now.loading && !now.data) {
@@ -114,9 +124,10 @@ export default function Landing() {
 
   return (
     <div class="home">
+      <PeriodNavigator />
       <Hero metrics={metrics.data} metricsLoading={metrics.loading} cockpit={data} agile={agile.data} monthly={monthly.data}
-            todayPeriod={todayPeriod.data} monthPeriod={monthPeriod.data}
-            periodsLoading={todayPeriod.loading || monthPeriod.loading} />
+            period={periodInsights.data} periodState={period}
+            periodLoading={periodInsights.loading} />
 
       {/* ── LIVE ───────────────────────────────────────────────────── */}
       <div class="widget-grid widget-band">

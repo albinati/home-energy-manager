@@ -261,6 +261,13 @@ class MonthlyCostSummaryResponse(BaseModel):
     net_cost_pounds: float = 0.0
     import_cost_pounds: float = 0.0
     export_earnings_pounds: float = 0.0
+    # Fixed-tariff counterfactual on the same metered kWh + day-window as the
+    # realised cost. None unless FIXED_TARIFF_* is configured. Positive delta =
+    # Agile cheaper than the fixed tariff over this period.
+    fixed_shadow_pence: float | None = None
+    fixed_shadow_pounds: float | None = None
+    delta_vs_fixed_pence: float | None = None
+    delta_vs_fixed_pounds: float | None = None
 
 
 class MonthlyInsightsResponse(BaseModel):

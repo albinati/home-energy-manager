@@ -14,11 +14,19 @@ from calendar import monthrange
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 
+from .. import db
 from ..config import config
 from ..foxess import get_cached_energy_month
 from ..foxess.client import FoxESSClient
 
 logger = logging.getLogger(__name__)
+
+
+# SEG export floor used for the fixed-tariff counterfactual. A flat fixed
+# import tariff would pair with SEG export (not Octopus Outgoing Agile), so the
+# shadow bills export at this floor. Mirrors SEG_EXPORT_FALLBACK_P in the UI
+# (ui/src/components/home/Hero.tsx / TariffComparisonWidget.tsx).
+SEG_EXPORT_FALLBACK_PENCE = 4.0
 
 
 # Temperature bands for "spend by outdoor temp" (°C)
@@ -64,6 +72,11 @@ class MonthlyCostSummary:
     export_earnings_pence: float = 0.0
     standing_charge_pence: float = 0.0
     net_cost_pence: float = 0.0
+    # Fixed-tariff counterfactual on the SAME metered kWh + day-window as the
+    # realised cost above. None when FIXED_TARIFF_* is not configured. Positive
+    # delta = Agile cheaper than the fixed tariff would have been.
+    fixed_shadow_pence: float | None = None
+    delta_vs_fixed_pence: float | None = None
 
     @property
     def net_cost_pounds(self) -> float:
@@ -76,6 +89,14 @@ class MonthlyCostSummary:
     @property
     def export_earnings_pounds(self) -> float:
         return self.export_earnings_pence / 100
+
+    @property
+    def fixed_shadow_pounds(self) -> float | None:
+        return None if self.fixed_shadow_pence is None else self.fixed_shadow_pence / 100
+
+    @property
+    def delta_vs_fixed_pounds(self) -> float | None:
+        return None if self.delta_vs_fixed_pence is None else self.delta_vs_fixed_pence / 100
 
 
 @dataclass
@@ -110,21 +131,55 @@ def _foxess_to_energy_summary(year: int, month: int, raw: dict) -> MonthlyEnergy
     )
 
 
-def _compute_cost(energy: MonthlyEnergySummary) -> MonthlyCostSummary:
-    """Apply manual tariff and standing charge."""
+def _fixed_shadow(
+    import_kwh: float,
+    export_kwh: float,
+    n_days: float,
+    net_cost_pence: float,
+) -> tuple[float | None, float | None]:
+    """Fixed-tariff counterfactual (pence) on the given metered kWh + day-window.
+
+    Returns ``(fixed_shadow_pence, delta_vs_fixed_pence)``, or ``(None, None)``
+    when ``FIXED_TARIFF_*`` is not configured. The fixed tariff would pair with
+    SEG export (flat :data:`SEG_EXPORT_FALLBACK_PENCE`), not Octopus Outgoing —
+    that asymmetry is intentional. ``delta`` is positive when Agile is cheaper.
+    """
+    if not (config.FIXED_TARIFF_LABEL and config.FIXED_TARIFF_RATE_PENCE):
+        return None, None
+    standing = (config.FIXED_TARIFF_STANDING_PENCE_PER_DAY or 0.0) * n_days
+    shadow = (
+        import_kwh * config.FIXED_TARIFF_RATE_PENCE
+        + standing
+        - export_kwh * SEG_EXPORT_FALLBACK_PENCE
+    )
+    return round(shadow, 2), round(shadow - net_cost_pence, 2)
+
+
+def _compute_cost(energy: MonthlyEnergySummary, n_days: int | None = None) -> MonthlyCostSummary:
+    """Apply manual tariff and standing charge.
+
+    ``n_days`` bills the standing charge for that many days (use the elapsed-day
+    count for the current/partial month). When ``None`` the full calendar month
+    is billed — the original behaviour, kept for completed past months.
+    """
     import_rate = config.MANUAL_TARIFF_IMPORT_PENCE or 0.0
     export_rate = config.MANUAL_TARIFF_EXPORT_PENCE or 0.0
     standing_per_day = config.MANUAL_STANDING_CHARGE_PENCE_PER_DAY or 0.0
-    days = monthrange(energy.year, energy.month)[1]
+    days = n_days if n_days is not None else monthrange(energy.year, energy.month)[1]
     import_cost_pence = energy.import_kwh * import_rate
     export_earnings_pence = energy.export_kwh * export_rate
     standing_charge_pence = days * standing_per_day
     net_cost_pence = import_cost_pence + standing_charge_pence - export_earnings_pence
+    shadow_pence, delta_pence = _fixed_shadow(
+        energy.import_kwh, energy.export_kwh, days, net_cost_pence
+    )
     return MonthlyCostSummary(
         import_cost_pence=round(import_cost_pence, 2),
         export_earnings_pence=round(export_earnings_pence, 2),
         standing_charge_pence=round(standing_charge_pence, 2),
         net_cost_pence=round(net_cost_pence, 2),
+        fixed_shadow_pence=shadow_pence,
+        delta_vs_fixed_pence=delta_pence,
     )
 
 
@@ -132,6 +187,7 @@ def _compute_cost_octopus(
     energy: MonthlyEnergySummary,
     period_from: datetime | None = None,
     period_to: datetime | None = None,
+    n_days: int | None = None,
 ) -> MonthlyCostSummary | None:
     """Compute monthly cost using Octopus half-hourly consumption x half-hourly rates.
 
@@ -198,8 +254,14 @@ def _compute_cost_octopus(
             import_rate = config.MANUAL_TARIFF_IMPORT_PENCE or 0.0
             import_cost_pence = sum(s.consumption_kwh for s in import_slots) * import_rate
 
-        # Export: use Octopus export consumption if available
+        import_kwh_metered = sum(s.consumption_kwh for s in import_slots)
+
+        # Export: use Octopus export consumption if available, billed at the
+        # per-slot Outgoing Agile rate (matching pnl.py:_realised_export_pence).
+        # Falls back to the flat manual export rate for unmatched slots / when
+        # no Outgoing tariff is configured.
         export_earnings_pence = 0.0
+        export_kwh_metered = 0.0
         if roles.export_mpan and roles.export_serial:
             export_slots = fetch_consumption(
                 roles.export_mpan,
@@ -207,34 +269,84 @@ def _compute_cost_octopus(
                 period_from,
                 period_to,
             )
-            export_rate = config.MANUAL_TARIFF_EXPORT_PENCE or 0.0
-            export_earnings_pence = sum(s.consumption_kwh for s in export_slots) * export_rate
+            export_kwh_metered = sum(s.consumption_kwh for s in export_slots)
+            flat_export_rate = config.MANUAL_TARIFF_EXPORT_PENCE or 0.0
+            export_rate_by_start: dict[str, float] = {}
+            if config.OCTOPUS_EXPORT_TARIFF_CODE:
+                for r in db.get_agile_export_rates_in_range(
+                    period_from.isoformat(), period_to.isoformat()
+                ):
+                    ts = r.get("valid_from") or ""
+                    if ts:
+                        export_rate_by_start[ts[:16]] = float(r.get("value_inc_vat") or 0)
+            matched = 0
+            for slot in export_slots:
+                key = slot.interval_start.isoformat()[:16]
+                rate = export_rate_by_start.get(key)
+                if rate is not None:
+                    matched += 1
+                else:
+                    rate = flat_export_rate
+                export_earnings_pence += slot.consumption_kwh * rate
+            logger.info(
+                "Monthly export (Octopus %d-%02d): %.3f kWh -> %.2fp (%d/%d slots per-slot rate)",
+                year, month, export_kwh_metered, export_earnings_pence, matched, len(export_slots),
+            )
 
-        _, ndays = monthrange(year, month)
-        standing_pence = (config.MANUAL_STANDING_CHARGE_PENCE_PER_DAY or 0.0) * ndays
+        days = n_days if n_days is not None else monthrange(year, month)[1]
+        standing_pence = (config.MANUAL_STANDING_CHARGE_PENCE_PER_DAY or 0.0) * days
         net_pence = import_cost_pence + standing_pence - export_earnings_pence
+        shadow_pence, delta_pence = _fixed_shadow(
+            import_kwh_metered, export_kwh_metered, days, net_pence
+        )
 
         logger.info(
-            "Monthly cost (Octopus %d-%02d): import=%.2fp export=%.2fp net=%.2fp",
-            year, month, import_cost_pence, export_earnings_pence, net_pence,
+            "Monthly cost (Octopus %d-%02d): import=%.2fp export=%.2fp net=%.2fp (standing %d d)",
+            year, month, import_cost_pence, export_earnings_pence, net_pence, days,
         )
         return MonthlyCostSummary(
             import_cost_pence=round(import_cost_pence, 2),
             export_earnings_pence=round(export_earnings_pence, 2),
             standing_charge_pence=round(standing_pence, 2),
             net_cost_pence=round(net_pence, 2),
+            fixed_shadow_pence=shadow_pence,
+            delta_vs_fixed_pence=delta_pence,
         )
     except Exception as exc:
         logger.info("Octopus cost calculation unavailable for %d-%02d: %s", year, month, exc)
         return None
 
 
-def _best_cost(energy: MonthlyEnergySummary) -> MonthlyCostSummary:
-    """Return Octopus-sourced cost if available, else manual flat rate."""
-    octopus_cost = _compute_cost_octopus(energy)
+def _best_cost(energy: MonthlyEnergySummary, n_days: int | None = None) -> MonthlyCostSummary:
+    """Return Octopus-sourced cost if available, else manual flat rate.
+
+    ``n_days`` (elapsed days) is threaded through so the standing charge matches
+    the energy window for the current/partial month; ``None`` bills the full
+    calendar month (completed past months).
+    """
+    octopus_cost = _compute_cost_octopus(energy, n_days=n_days)
     if octopus_cost is not None:
         return octopus_cost
-    return _compute_cost(energy)
+    return _compute_cost(energy, n_days=n_days)
+
+
+def _period_cost(
+    energy: MonthlyEnergySummary,
+    period_from: datetime,
+    period_to: datetime,
+    n_days: int,
+) -> MonthlyCostSummary:
+    """Cost for an arbitrary [from, to) window — Octopus per-slot when available,
+    else manual flat rate. Used by the day/week branches so every granularity
+    bills import/export at the same half-hourly Agile rates as the month view
+    (falls back gracefully when Octopus consumption isn't backfilled yet, e.g.
+    for 'today')."""
+    octopus_cost = _compute_cost_octopus(
+        energy, period_from=period_from, period_to=period_to, n_days=n_days
+    )
+    if octopus_cost is not None:
+        return octopus_cost
+    return _compute_cost(energy, n_days=n_days)
 
 
 def _get_daikin_heating_kwh(year: int, month: int) -> float | None:
@@ -428,7 +540,10 @@ def get_monthly_insights(year: int, month: int) -> MonthlyInsights | None:
     except Exception:
         raise  # Let API layer return 502 with the actual error
     energy = _foxess_to_energy_summary(year, month, raw)
-    cost = _best_cost(energy)
+    # Prorate standing to elapsed days for the current month (the Fox aggregate
+    # covers only elapsed days); past months bill the full calendar month.
+    n_days = today.day if (year, month) == (today.year, today.month) else None
+    cost = _best_cost(energy, n_days=n_days)
     daikin_heating = _get_daikin_heating_kwh(year, month)
     heating_kwh, heating_cost_pence, equiv_gas_pence, ahead_pounds = _compute_heating_and_gas(
         energy, cost, daikin_heating_kwh=daikin_heating
@@ -478,6 +593,8 @@ def get_period_insights(
         chart_data = []
         import_kwh = export_kwh = solar_kwh = load_kwh = charge_kwh = discharge_kwh = 0.0
         import_cost_pence = export_earnings_pence = standing_charge_pence = 0.0
+        fixed_shadow_sum = delta_vs_fixed_sum = 0.0
+        any_fixed_shadow = False
         heating_kwh_sum = heating_cost_sum = equiv_gas_sum = ahead_sum = 0.0
         n_months = 0
         for m in range(1, 13):
@@ -488,7 +605,12 @@ def get_period_insights(
             except Exception:
                 continue
             e = _foxess_to_energy_summary(year, m, totals)
-            c = _best_cost(e)
+            # Prorate standing to elapsed days for the current month; past
+            # months bill the full month (len(daily) == days-in-month).
+            n_days = len(daily)
+            if (year, m) == (today.year, today.month):
+                n_days = min(n_days, today.day)
+            c = _best_cost(e, n_days=n_days)
             daikin_h = _get_daikin_heating_kwh(year, m)
             h_kwh, h_cost, equiv, ahead = _compute_heating_and_gas(e, c, daikin_heating_kwh=daikin_h)
             import_kwh += e.import_kwh
@@ -500,6 +622,10 @@ def get_period_insights(
             import_cost_pence += c.import_cost_pence
             export_earnings_pence += c.export_earnings_pence
             standing_charge_pence += c.standing_charge_pence
+            if c.fixed_shadow_pence is not None:
+                any_fixed_shadow = True
+                fixed_shadow_sum += c.fixed_shadow_pence
+                delta_vs_fixed_sum += c.delta_vs_fixed_pence or 0.0
             if h_kwh is not None:
                 heating_kwh_sum += h_kwh
             if h_cost is not None:
@@ -535,6 +661,8 @@ def get_period_insights(
             export_earnings_pence=round(export_earnings_pence, 2),
             standing_charge_pence=round(standing_charge_pence, 2),
             net_cost_pence=round(net_cost_pence, 2),
+            fixed_shadow_pence=round(fixed_shadow_sum, 2) if any_fixed_shadow else None,
+            delta_vs_fixed_pence=round(delta_vs_fixed_sum, 2) if any_fixed_shadow else None,
         )
         heating_kwh = round(heating_kwh_sum, 2) if heating_kwh_sum else None
         heating_cost_pence_out = round(heating_cost_sum, 2) if heating_cost_sum else None
@@ -564,7 +692,14 @@ def get_period_insights(
         except Exception:
             raise
         energy = _foxess_to_energy_summary(y, m, totals)
-        cost = _best_cost(energy)
+        # Standing charge must cover the same day-window as the energy: elapsed
+        # days for the current (partial) month, full month for a past month.
+        # len(daily) == days with Fox data; clamp to today.day to be robust to
+        # any trailing zero-padded days the breakdown might include.
+        n_days = len(daily)
+        if (y, m) == (today.year, today.month):
+            n_days = min(n_days, today.day)
+        cost = _best_cost(energy, n_days=n_days)
         daikin_heating = _get_daikin_heating_kwh(y, m)
         heating_kwh, heating_cost_pence, equiv_gas_pence, ahead_pounds = _compute_heating_and_gas(
             energy, cost, daikin_heating_kwh=daikin_heating
@@ -605,17 +740,9 @@ def get_period_insights(
                 charge_kwh=raw.get("chargeEnergyToday", 0) or 0,
                 discharge_kwh=raw.get("dischargeEnergyToday", 0) or 0,
             )
-            standing_per_day = config.MANUAL_STANDING_CHARGE_PENCE_PER_DAY or 0
-            import_rate = config.MANUAL_TARIFF_IMPORT_PENCE or 0
-            export_rate = config.MANUAL_TARIFF_EXPORT_PENCE or 0
-            imp = energy.import_kwh * import_rate
-            exp = energy.export_kwh * export_rate
-            cost = MonthlyCostSummary(
-                import_cost_pence=round(imp, 2),
-                export_earnings_pence=round(exp, 2),
-                standing_charge_pence=round(standing_per_day, 2),
-                net_cost_pence=round(imp + standing_per_day - exp, 2),
-            )
+            day_from = datetime(y, m, d, 0, 0, 0, tzinfo=UTC)
+            day_to = datetime(y, m, d, 23, 59, 59, tzinfo=UTC)
+            cost = _period_cost(energy, day_from, day_to, n_days=1)
             heating_kwh, heating_cost_pence, equiv_gas_pence, ahead_pounds = _compute_heating_and_gas(energy, cost)
             insights = MonthlyInsights(
                 energy=energy,
@@ -663,16 +790,9 @@ def get_period_insights(
         discharge_kwh = sum(r["discharge_kwh"] for r in daily_all)
         energy = MonthlyEnergySummary(year=week_start.year, month=week_start.month, month_str=week_start.strftime("%Y-%m"), import_kwh=import_kwh, export_kwh=export_kwh, solar_kwh=solar_kwh, load_kwh=load_kwh, charge_kwh=charge_kwh, discharge_kwh=discharge_kwh)
         days_count = max(1, len(daily_all))
-        standing_per_day = config.MANUAL_STANDING_CHARGE_PENCE_PER_DAY or 0
-        imp_w = import_kwh * (config.MANUAL_TARIFF_IMPORT_PENCE or 0)
-        exp_w = export_kwh * (config.MANUAL_TARIFF_EXPORT_PENCE or 0)
-        stand_w = days_count * standing_per_day
-        cost = MonthlyCostSummary(
-            import_cost_pence=round(imp_w, 2),
-            export_earnings_pence=round(exp_w, 2),
-            standing_charge_pence=round(stand_w, 2),
-            net_cost_pence=round(imp_w + stand_w - exp_w, 2),
-        )
+        week_from = datetime(week_start.year, week_start.month, week_start.day, 0, 0, 0, tzinfo=UTC)
+        week_to = datetime(week_end.year, week_end.month, week_end.day, 23, 59, 59, tzinfo=UTC)
+        cost = _period_cost(energy, week_from, week_to, n_days=days_count)
         heating_kwh, heating_cost_pence, equiv_gas_pence, ahead_pounds = _compute_heating_and_gas(energy, cost)
         insights = MonthlyInsights(energy=energy, cost=cost, heating_estimate_kwh=heating_kwh, heating_estimate_cost_pence=heating_cost_pence, equivalent_gas_cost_pence=equiv_gas_pence, gas_comparison_ahead_pounds=ahead_pounds)
         label = f"{week_start.strftime('%d')}–{week_end.strftime('%d %b %Y')}" if week_start.month == week_end.month else f"{week_start.strftime('%d %b')} – {week_end.strftime('%d %b %Y')}"

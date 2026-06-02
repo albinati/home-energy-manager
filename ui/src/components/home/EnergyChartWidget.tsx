@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { getEnergyPeriod, getDaikinConsumption } from "../../lib/endpoints";
+import { usePeriod, setGranularity, selectedPeriod } from "../../lib/period";
 import { makeChart, baseOption, chartTheme, barGradient, areaGradient, type EChartsType } from "../../lib/charts";
 import { Icon } from "../common/Icon";
 import type {
@@ -12,6 +13,13 @@ import type {
 import "./energy-chart.css";
 
 type Granularity = "day" | "week" | "month" | "year";
+
+// Local-date ISO (matches lib/period.ts) — avoids the UTC drift that
+// `toISOString().slice(0,10)` causes near the day boundary.
+function localTodayISO(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
 
 interface EnergyChartWidgetProps {
   // Execution slots used for the *day* view (30-min granularity) — same
@@ -38,8 +46,13 @@ interface EnergyChartWidgetProps {
 // Drill-down: clicking a label in year view → month; in week/month, only
 // clicking *today's* label drills to day (historical day requires #424).
 export function EnergyChartWidget({ execution }: EnergyChartWidgetProps) {
-  const [granularity, setGranularity] = useState<Granularity>("week");
-  const [anchor, setAnchor] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  // Granularity + anchor come from the shared period navigator so the chart
+  // re-scopes together with the Hero + cost breakdown.
+  const { gran: granularity, anchor } = usePeriod();
+  // Local "today" (matches period.ts) — the per-slot day chart only has data
+  // for today (historical per-slot capture is #424).
+  const todayLocalISO = localTodayISO();
+  const isToday = anchor === todayLocalISO;
   const [period, setPeriod] = useState<PeriodInsightsResponse | null>(null);
   const [daikin, setDaikin] = useState<DaikinConsumptionResponse | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
@@ -57,7 +70,9 @@ export function EnergyChartWidget({ execution }: EnergyChartWidgetProps) {
     else if (granularity === "year") opts.year = Number(anchor.slice(0, 4));
     else opts.date = anchor;
 
-    const periodPromise = granularity === "day"
+    // Today's day view comes from per-slot execution; a past day still fetches
+    // /energy/period so we can at least render its (correct) daily totals.
+    const periodPromise = granularity === "day" && isToday
       ? Promise.resolve(null)
       : getEnergyPeriod(granularity, opts).catch(() => null);
     const daikinPromise = getDaikinConsumption(granularity, opts).catch(() => null);
@@ -75,14 +90,14 @@ export function EnergyChartWidget({ execution }: EnergyChartWidgetProps) {
     if (!elRef.current) return;
     if (!chartRef.current) chartRef.current = makeChart(elRef.current);
     const chart = chartRef.current;
-    const option = granularity === "day"
+    const option = granularity === "day" && isToday
       ? optionForDay(execution, daikin)
       : optionForPeriod(period, daikin, granularity);
     chart.setOption(option, true);
     const ro = new ResizeObserver(() => chart.resize());
     ro.observe(elRef.current);
     return () => ro.disconnect();
-  }, [granularity, period, daikin, execution]);
+  }, [granularity, period, daikin, execution, isToday]);
 
   useEffect(() => () => {
     if (chartRef.current) {
@@ -102,8 +117,8 @@ export function EnergyChartWidget({ execution }: EnergyChartWidgetProps) {
         if (lbl === today) setGranularity("day");
       } else if (granularity === "year") {
         if (/^\d{4}-\d{2}$/.test(lbl)) {
-          setAnchor(`${lbl}-01`);
-          setGranularity("month");
+          // Drill from a year bar into that month (set both gran + anchor).
+          selectedPeriod.value = { gran: "month", anchor: `${lbl}-01` };
         }
       }
     };
@@ -111,7 +126,8 @@ export function EnergyChartWidget({ execution }: EnergyChartWidgetProps) {
     return () => { c.off("click", handler); };
   }, [granularity]);
 
-  const dayHasSlots = granularity === "day" && !!execution?.slots?.length;
+  const dayHasSlots = granularity === "day" && isToday && !!execution?.slots?.length;
+  const isPastDay = granularity === "day" && !isToday;
   // Detect which source dominates the Daikin buckets — surfaced in the flag
   // text so the user knows whether they're reading an Onecta integer or
   // a telemetry-integral decimal refinement.
@@ -160,19 +176,11 @@ export function EnergyChartWidget({ execution }: EnergyChartWidgetProps) {
     <div class="echart">
       <div class="echart-toolbar">
         <span class="echart-id-icon"><Icon name={granularity === "day" ? "schedule" : "chart-bars"} size={18} /></span>
-        <div class="echart-pills" role="tablist">
-          {(["day", "week", "month", "year"] as Granularity[]).map((g) => (
-            <button key={g}
-                    class={`echart-pill${granularity === g ? " is-active" : ""}`}
-                    onClick={() => setGranularity(g)}
-                    role="tab" aria-selected={granularity === g}>
-              {g === "day" ? "Today" : g === "week" ? "Week" : g === "month" ? "Month" : "Year"}
-            </button>
-          ))}
-        </div>
-        {period?.period_label && granularity !== "day" && (
-          <span class="echart-label">{period.period_label}</span>
-        )}
+        {/* Granularity + stepping live in the shared PeriodNavigator at the top
+            of the page; this just labels what the chart is currently showing. */}
+        <span class="echart-label">
+          {period?.period_label ?? (granularity === "day" ? (isToday ? "Today" : anchor) : "")}
+        </span>
       </div>
 
       {/* Host wrap — loading state overlays (position:absolute) so it never
@@ -183,10 +191,16 @@ export function EnergyChartWidget({ execution }: EnergyChartWidgetProps) {
         {error && <div class="echart-state echart-state--err">{error}</div>}
       </div>
 
-      {granularity === "day" && !dayHasSlots && (
+      {granularity === "day" && isToday && !dayHasSlots && (
         <div class="echart-flag">
           <span class="echart-flag-icon"><Icon name="schedule" size={14} /></span>
           No execution data for today yet — switch to Week.
+        </div>
+      )}
+      {isPastDay && (
+        <div class="echart-flag">
+          <span class="echart-flag-icon"><Icon name="schedule" size={14} /></span>
+          Daily totals shown — per-slot history for past days isn't captured yet (#424).
         </div>
       )}
       {granularity === "day" && dayHasSlots && (

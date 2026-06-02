@@ -22,20 +22,15 @@ interface TariffComparisonWidgetProps {
   monthPeriodLoading: boolean;
 }
 
-// Default SEG floor used when a fixed-tariff doesn't expose its own outgoing
-// rate. Octopus Flux/Outgoing varies; 4p/kWh is the long-standing SEG export
-// minimum HEM falls back to elsewhere — matches user's mental model.
-const SEG_EXPORT_FALLBACK_P = 4.0;
-
 // Tariff comparison anchored ENTIRELY on the household's real usage. The
 // engine in /tariffs/dashboard replays the same import/export half-hour
 // profile against every Octopus tariff's rate schedule — so `total_pence`
 // IS the £ that tariff would have cost over the comparison window. We lead
 // with that real number; the annualised projection is a small chip.
 //
-// BG Fixed v58 row is computed client-side using the same real-usage block
-// + the configured FIXED_TARIFF_* rates from /metrics. No annual-from-daily
-// extrapolation; pure replay over the same window as the Octopus rows.
+// The fixed-tariff row uses the BACKEND-computed fixed shadow on the
+// monthPeriod cost (same metered kWh + day-window as the realised current
+// tariff), not a client recompute — so it can't drift from the current row.
 export function TariffComparisonWidget({ dashboard, dashboardLoading, metrics, monthPeriod, monthPeriodLoading }: TariffComparisonWidgetProps) {
   // Gate on BOTH fetches: the current tariff's realised total comes from
   // monthPeriod, so rendering before it settles flashes the projected number.
@@ -76,17 +71,15 @@ export function TariffComparisonWidget({ dashboard, dashboardLoading, metrics, m
   const days = usage?.total_days ?? 0;
   const outgoingCount = dashboard.totals.length - importOnly.length;
 
-  // Compute BG Fixed v58 (or whatever FIXED_TARIFF_LABEL is set to) from
-  // the same real-usage block. No annual-from-daily extrapolation —
-  // straight: cost = (import_kwh × rate) + (days × standing) − (export_kwh × 4p)
+  // Fixed-tariff row from the BACKEND fixed shadow (computed on the SAME
+  // metered kWh + day-window as the realised current-tariff cost — no
+  // Fox-vs-Octopus meter mixing, no client recompute that could drift).
   const ft = metrics?.fixed_tariff;
+  const fixedShadowP = monthPeriod?.cost?.fixed_shadow_pence ?? null;
   let bgRow: TariffTotalRow | null = null;
-  if (ft?.label && ft.rate_pence && usage && days > 0) {
-    const importCostP = (usage.total_import_kwh ?? 0) * ft.rate_pence;
-    const standingP   = days * (ft.standing_pence_per_day ?? 0);
-    const exportEarnP = (usage.total_export_kwh ?? 0) * SEG_EXPORT_FALLBACK_P;
-    const netP = importCostP + standingP - exportEarnP;
-    const dailyAvgP = netP / days;
+  if (ft?.label && fixedShadowP != null && realisedDays && realisedDays > 0) {
+    const netP = fixedShadowP;
+    const dailyAvgP = netP / realisedDays;
     const savings = currentRow ? (currentRow.total_pence - netP) / 100 : 0;
     bgRow = {
       product_code: "BG-FIX-V58",
@@ -96,7 +89,7 @@ export function TariffComparisonWidget({ dashboard, dashboardLoading, metrics, m
       daily_avg_pence: dailyAvgP,
       annual_pounds: (dailyAvgP * 365) / 100,
       standing_per_day: ft.standing_pence_per_day ?? 0,
-      unit_rate_pence: ft.rate_pence,
+      unit_rate_pence: ft.rate_pence ?? 0,
       savings_vs_current_pounds: savings,
       is_current: false,
     } as TariffTotalRow;

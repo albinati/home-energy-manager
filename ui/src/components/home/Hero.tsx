@@ -1,6 +1,7 @@
 import type { MetricsResponse, CockpitNow, AgileTodayResponse, MonthlyEnergy, PeriodInsightsResponse } from "../../lib/types";
 import { gbp, gbpSigned, kwh } from "../../lib/format";
 import { useAnimatedNumber } from "../../lib/useAnimatedNumber";
+import { isCurrentPeriod, periodLabel, type PeriodState } from "../../lib/period";
 import { CostBreakdownChart } from "./CostBreakdownChart";
 import "./hero.css";
 
@@ -10,53 +11,41 @@ interface HeroProps {
   cockpit: CockpitNow | null;
   agile: AgileTodayResponse | null;
   monthly: MonthlyEnergy[];
-  todayPeriod: PeriodInsightsResponse | null;
-  monthPeriod: PeriodInsightsResponse | null;
-  periodsLoading: boolean;
+  // The period selected in the navigator — drives the headline + savings.
+  period: PeriodInsightsResponse | null;
+  periodState: PeriodState;
+  periodLoading: boolean;
 }
 
-// SEG export floor used when comparing against a flat fixed tariff (which
-// wouldn't have Agile's outgoing rate). Matches TariffComparisonWidget.
-const SEG_EXPORT_FALLBACK_P = 4.0;
+// The hero answers ONE question for the SELECTED period: how is it going on
+// Agile vs the household's real alternative (the configured fixed tariff)? It
+// re-scopes with the period navigator above it. The "live now" strip is the
+// only always-current element. Hierarchy:
+//   1. Live now strip (price + SoC) — ignores the selector
+//   2. The period's real net bill (the big number)
+//   3. Saved vs fixed + exported (the outcome line) — from the backend shadow
+//   4. Today so far (only when viewing the current period) — explicit estimate
+//   5. Lifetime totals on Agile
+//   6. The cost-composition chart for the selected period
+export function Hero({ metrics, cockpit, agile, monthly, period, periodState, periodLoading }: HeroProps) {
+  const isNow = isCurrentPeriod(periodState);
+  const label = periodLabel(periodState);
 
-// The hero answers ONE question clearly: how is this month going on Agile vs the
-// household's real alternative (British Gas Fixed)?  We lead with the MONTH —
-// it's the figure backed by complete, metered data — because *today* only fills
-// in after the next-day Octopus backfill, so an intraday "today" headline would
-// be empty or estimated. Hierarchy:
-//   1. This month's real net bill (the big number)
-//   2. Saved vs BG Fixed + exported (the outcome line)
-//   3. Today so far — small, explicitly an estimate
-//   4. Lifetime totals on Agile
-//   5. The cost-composition chart (Today / 7d / Month)
-export function Hero({ metrics, cockpit, agile, monthly, todayPeriod, monthPeriod, periodsLoading }: HeroProps) {
-  const monthName = new Date().toLocaleDateString([], { month: "long" });
+  // --- The selected period, real money (NET, incl standing, measured grid) ---
+  const periodNet = period?.cost?.net_cost_pounds ?? null;
+  const periodExport = period?.cost?.export_earnings_pounds ?? null;
 
-  // --- This month, real money ---
-  const monthNet = monthPeriod?.cost?.net_cost_pounds ?? null;          // £ out the door
-  const monthExport = monthPeriod?.cost?.export_earnings_pounds ?? null;
-  const cd = monthPeriod?.chart_data ?? [];
-  const monthDays = cd.length;
-  const monthImportKwh = cd.reduce((s, d) => s + (d.import_kwh ?? 0), 0);
-  const monthExportKwh = cd.reduce((s, d) => s + (d.export_kwh ?? 0), 0);
-
-  // --- Saved vs British Gas Fixed (computed client-side from the same real
-  // usage block + the configured FIXED_TARIFF_* rates — the engine's
-  // delta_vs_fixed uses a different MANUAL_TARIFF rate, so we don't use it). ---
+  // --- Saved vs the fixed tariff — computed BY THE BACKEND on the same metered
+  // kWh + day-window as the realised cost (no Fox-vs-Octopus meter mixing). ---
+  const savedVsFixed = period?.cost?.delta_vs_fixed_pounds ?? null;
   const ft = metrics?.fixed_tariff;
-  let savedVsFixed: number | null = null;
-  if (ft?.label && ft.rate_pence && monthNet != null && monthDays > 0) {
-    const bgImport = monthImportKwh * ft.rate_pence / 100;
-    const bgStanding = monthDays * (ft.standing_pence_per_day ?? 0) / 100;
-    const bgExport = monthExportKwh * SEG_EXPORT_FALLBACK_P / 100;
-    const bgNet = bgImport + bgStanding - bgExport;
-    savedVsFixed = bgNet - monthNet;
-  }
   const fixedLabel = ft?.label || "fixed tariff";
 
-  // --- Today so far — estimate only (realised lands next-day). The engine's
-  // daily fixed delta is the available "today savings" figure. ---
-  const todayEst = metrics?.pnl?.daily?.delta_vs_fixed_pounds ?? null;
+  // --- Today so far — estimate only (realised lands next-day). Shown only when
+  // the current period is in view, so historical browsing stays clean. ---
+  const todayEst = isNow && periodState.gran !== "day"
+    ? (metrics?.pnl?.daily?.delta_vs_fixed_pounds ?? null)
+    : null;
 
   // --- Lifetime totals on Agile (folded in from the old Lifetime widget) ---
   const activeMonths = monthly.filter(
@@ -73,28 +62,32 @@ export function Hero({ metrics, cockpit, agile, monthly, todayPeriod, monthPerio
     : null;
 
   // Smooth tweens for the refreshing figures.
-  const monthNetAnim = useAnimatedNumber(monthNet);
+  const periodNetAnim = useAnimatedNumber(periodNet);
   const savedAnim = useAnimatedNumber(savedVsFixed);
   const todayAnim = useAnimatedNumber(todayEst);
   const solarAnim = useAnimatedNumber(lifetime?.solar_kwh ?? null);
   const exportKwhAnim = useAnimatedNumber(lifetime?.export_kwh ?? null);
   const exportEarnAnim = useAnimatedNumber(lifetime?.export_earn ?? null);
   const totalCostAnim = useAnimatedNumber(lifetime?.total_cost ?? null);
+
+  // Live-now strip — always current, ignores the period selector.
+  const curImportP = cockpit?.current_slot?.price_import_p ?? null;
   const curExportP = agile?.current_export_p ?? cockpit?.current_slot?.price_export_p ?? null;
+  const socPct = cockpit?.state?.soc_pct ?? null;
 
   return (
-    <section class="hero" aria-label="This month's energy outcome">
+    <section class="hero" aria-label="Selected period energy outcome">
       <div class="hero-bg" aria-hidden="true" />
 
       <div class="hero-main">
         <div class="hero-eyebrow">
           <span class="live-pulse hero-eyebrow-dot" />
-          {monthName} on Agile · net bill so far
+          {label} on Agile · net bill{isNow ? " so far" : ""}
         </div>
         {/* The big number is the BILL — kept neutral; the savings line below
             carries the good/bad colour. */}
         <div class="hero-headline hero-headline--enter">
-          {monthNetAnim == null ? (periodsLoading ? <SkelHero /> : "—") : gbp(monthNetAnim)}
+          {periodNetAnim == null ? (periodLoading ? <SkelHero /> : "—") : gbp(periodNetAnim)}
         </div>
         <div class="hero-sublines">
           {savedAnim != null && (
@@ -103,8 +96,8 @@ export function Hero({ metrics, cockpit, agile, monthly, todayPeriod, monthPerio
                 {savedAnim >= 0 ? "Saved " : "Cost "}{gbpSigned(savedAnim)}
               </strong>
               &nbsp;vs {fixedLabel}
-              {monthExport != null && monthExport > 0 && (
-                <>&nbsp;·&nbsp;<strong class="hero-strong-pos">{gbp(monthExport)}</strong> exported</>
+              {periodExport != null && periodExport > 0 && (
+                <>&nbsp;·&nbsp;<strong class="hero-strong-pos">{gbp(periodExport)}</strong> exported</>
               )}
             </div>
           )}
@@ -120,11 +113,19 @@ export function Hero({ metrics, cockpit, agile, monthly, todayPeriod, monthPerio
           )}
         </div>
 
+        {(curImportP != null || socPct != null) && (
+          <div class="hero-livenow" title="Live now — independent of the selected period">
+            <span class="live-pulse hero-livenow-dot" />
+            {curImportP != null && <span>import <strong>{curImportP.toFixed(1)}p</strong></span>}
+            {curExportP != null && <span>· export <strong>{curExportP.toFixed(1)}p</strong></span>}
+            {socPct != null && <span>· battery <strong>{Math.round(socPct)}%</strong></span>}
+          </div>
+        )}
+
         {lifetime && (
           <div class="hero-lifetime" title={`Sums across ${lifetime.months} active months on Agile`}>
             <div class="hero-lifetime-label">
               Lifetime on Agile · {lifetime.months} mo
-              {curExportP != null ? ` · export now ${curExportP.toFixed(1)}p/kWh` : ""}
             </div>
             <div class="hero-lifetime-stats">
               <HeroStat value={kwh(solarAnim ?? 0, 0)} label="solar produced" />
@@ -138,7 +139,7 @@ export function Hero({ metrics, cockpit, agile, monthly, todayPeriod, monthPerio
 
       <div class="hero-status">
         <div class="hero-chart">
-          <CostBreakdownChart today={todayPeriod} month={monthPeriod} loading={periodsLoading} />
+          <CostBreakdownChart period={period} label={label} loading={periodLoading} />
         </div>
       </div>
     </section>

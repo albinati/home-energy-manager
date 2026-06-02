@@ -237,3 +237,22 @@
 
 :root.hem-reduce-motion .hero-bg { animation: none; }
 :root.hem-reduce-motion .hero-headline--enter { animation: none; transform: none; }
+
+/* Live-now strip — always current, independent of the period selector. */
+.hero-livenow {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  font-size: var(--font-xs);
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.hero-livenow strong { color: var(--text); font-weight: 700; }
+.hero-livenow-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ok, #36d399);
+  box-shadow: 0 0 10px var(--ok, #36d399);
+}
