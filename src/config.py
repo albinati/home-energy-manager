@@ -1457,13 +1457,6 @@ class Config:
         os.getenv("DAIKIN_2H_REFRESH_ENABLED", "true").strip().lower()
         in ("1", "true", "yes")
     )
-    # Phase 4.1 — per-caller cache staleness ceilings (seconds) so non-heartbeat paths reuse the cache.
-    DAIKIN_LP_INIT_CACHE_MAX_AGE_SECONDS: int = int(
-        os.getenv("DAIKIN_LP_INIT_CACHE_MAX_AGE_SECONDS", "600")
-    )
-    DAIKIN_LEGACY_TICK_CACHE_MAX_AGE_SECONDS: int = int(
-        os.getenv("DAIKIN_LEGACY_TICK_CACHE_MAX_AGE_SECONDS", "1200")
-    )
     # #55 — how old a live telemetry row can be before the LP wrapper falls back
     # to the physics estimator instead of returning the stale value.
     DAIKIN_TELEMETRY_MAX_STALENESS_SECONDS: int = int(

@@ -65,10 +65,10 @@ def read_lp_initial_state(
         if allow_daikin_refresh:
             state = daikin_service.get_lp_state_cached_or_estimated(actor="lp_init")
         else:
-            # Simulation: cache-only path; never burns Daikin quota.
+            # Simulation: cache-only path; never burns Daikin quota. Uses the
+            # canonical device-cache TTL (the per-caller LP_INIT knob was retired).
             result = daikin_service.get_cached_devices(
                 allow_refresh=False,
-                max_age_seconds=config.DAIKIN_LP_INIT_CACHE_MAX_AGE_SECONDS,
                 actor="lp_init",
             )
             state = {
