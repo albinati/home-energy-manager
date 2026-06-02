@@ -124,9 +124,19 @@ export const getAttributionDay = (date?: string) =>
   getJson<AttributionDay>(date ? `/attribution/day?date=${encodeURIComponent(date)}` : "/attribution/day");
 
 // POST /tariffs/dashboard — Octopus-tariff comparison engine, includes
-// standing charges + export earnings in the per-tariff costs.
-export const getTariffDashboard = (months_back = 1, granularity: "daily" | "weekly" | "monthly" = "monthly", max_tariffs = 8) =>
-  postJson<TariffDashboardResponse>("/tariffs/dashboard", { months_back, granularity, max_tariffs });
+// standing charges + export earnings in the per-tariff costs. Pass
+// start_date/end_date (inclusive YYYY-MM-DD) to scope to a navigator period;
+// omit them to use the trailing months_back window.
+export const getTariffDashboard = (
+  months_back = 1,
+  granularity: "daily" | "weekly" | "monthly" = "monthly",
+  max_tariffs = 8,
+  window?: { start: string; end: string },
+) =>
+  postJson<TariffDashboardResponse>("/tariffs/dashboard", {
+    months_back, granularity, max_tariffs,
+    ...(window ? { start_date: window.start, end_date: window.end } : {}),
+  });
 
 /* ----- Settings ----- */
 

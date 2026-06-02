@@ -3312,11 +3312,22 @@ async def tariffs_dashboard(req: TariffDashboardRequest):
     tariffs, identifying the winner for each period. The current tariff (Octopus
     Flexible by default) is flagged as baseline.
     """
+    from datetime import date as _date
+
     from ..energy.tariff_engine import get_tariff_comparison_dashboard
+    window_from = window_to = None
+    if req.start_date and req.end_date:
+        try:
+            window_from = _date.fromisoformat(req.start_date)
+            window_to = _date.fromisoformat(req.end_date)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="start_date/end_date must be YYYY-MM-DD")
     data = get_tariff_comparison_dashboard(
         months_back=req.months_back,
         granularity=req.granularity,
         max_tariffs=req.max_tariffs,
+        window_from=window_from,
+        window_to=window_to,
     )
     if not data.get("ok"):
         return TariffDashboardResponse(ok=False, error=data.get("error", "Unknown error"))

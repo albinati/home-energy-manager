@@ -64,6 +64,32 @@ export function stepPeriod(dir: -1 | 1): void {
   selectedPeriod.value = { gran, anchor: next };
 }
 
+/** Inclusive [start, end] ISO date window for the selected period, end clamped
+ * to today (no future). Used to scope the tariff comparison to the navigator. */
+export function periodDateRange(p: PeriodState): { start: string; end: string } {
+  const t = todayISO();
+  const d = parse(p.anchor);
+  let start: Date;
+  let end: Date;
+  if (p.gran === "day") {
+    start = d; end = d;
+  } else if (p.gran === "week") {
+    start = new Date(d);
+    start.setDate(d.getDate() - ((d.getDay() + 6) % 7)); // Monday
+    end = new Date(start);
+    end.setDate(start.getDate() + 6);
+  } else if (p.gran === "month") {
+    start = new Date(d.getFullYear(), d.getMonth(), 1);
+    end = new Date(d.getFullYear(), d.getMonth() + 1, 0); // last day of month
+  } else {
+    start = new Date(d.getFullYear(), 0, 1);
+    end = new Date(d.getFullYear(), 11, 31);
+  }
+  const startISO = isoOf(start);
+  const endISO = isoOf(end);
+  return { start: startISO, end: endISO > t ? t : endISO };
+}
+
 /** Query params for getEnergyPeriod(). */
 export function periodFetchOpts(p: PeriodState): { date?: string; month?: string; year?: number } {
   if (p.gran === "month") return { month: p.anchor.slice(0, 7) };
