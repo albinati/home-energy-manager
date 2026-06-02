@@ -1432,6 +1432,10 @@ class Config:
     DAIKIN_REFRESH_MIN_INTERVAL_SECONDS: int = int(
         os.getenv("DAIKIN_REFRESH_MIN_INTERVAL_SECONDS", "90")
     )
+    # Temporary diagnostic: log the caller stack on every Daikin device read
+    # (client.get_devices). Used to pinpoint the residual read-burst source.
+    # Off by default; flip in prod .env for a capture window, then remove.
+    DAIKIN_TRACE_READS: bool = os.getenv("DAIKIN_TRACE_READS", "false").lower() == "true"
     # Minimum interval between explicit "force refresh" calls (UI refresh button, CLI --force-refresh).
     # 5 min: long enough to stop button-mashing through the ~200/day quota, short
     # enough that an operator who genuinely needs fresh state isn't stuck waiting.
