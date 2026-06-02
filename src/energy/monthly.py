@@ -238,21 +238,24 @@ def _best_cost(energy: MonthlyEnergySummary) -> MonthlyCostSummary:
 
 
 def _get_daikin_heating_kwh(year: int, month: int) -> float | None:
-    """Get heating electrical consumption (kWh) for the month from Daikin when available. Returns None if not configured or not exposed."""
+    """Get heating electrical consumption (kWh) for the month from Daikin when available. Returns None if not configured or not exposed.
+
+    Routes through the cached service layer (30-min device TTL) instead of a
+    fresh client — energy insights are built/polled often, and a raw client
+    here wire-read on every call (the read-burst root cause)."""
     try:
-        from ..daikin.client import DaikinClient
-        client = DaikinClient()
-        return client.get_heating_consumption_kwh(year, month)
+        from ..daikin import service as daikin_service
+        return daikin_service.heating_consumption_kwh(year, month)
     except Exception:
         return None
 
 
 def _get_daikin_heating_daily_kwh(year: int, month: int) -> list[float] | None:
-    """Get daily heating (kWh) for the month from Daikin when available. List length = days in month."""
+    """Get daily heating (kWh) for the month from Daikin when available. List
+    length = days in month. Cached service read — see :func:`_get_daikin_heating_kwh`."""
     try:
-        from ..daikin.client import DaikinClient
-        client = DaikinClient()
-        return client.get_heating_daily_kwh(year, month)
+        from ..daikin import service as daikin_service
+        return daikin_service.heating_daily_kwh(year, month)
     except Exception:
         return None
 

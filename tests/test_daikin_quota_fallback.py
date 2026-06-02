@@ -106,6 +106,44 @@ def test_quota_status_exposes_force_refresh_cooldown(monkeypatch):
     assert 295.0 <= locked["force_refresh_available_in_seconds"] <= 300.0
 
 
+def test_heating_reads_route_through_cache(monkeypatch):
+    """Energy-insights heating reads pull from the CACHED device payload — no
+    fresh get_devices() wire read. This is the read-burst fix: /energy/period
+    etc. previously spun up a raw client and hit the wire on every call."""
+    from src.daikin.service import CachedDevices
+
+    sentinel = object()
+    monkeypatch.setattr(
+        daikin_service, "get_cached_devices",
+        lambda **kw: CachedDevices(devices=[sentinel], fetched_at_wall=None,
+                                   age_seconds=1.0, stale=False, source="cache"),
+    )
+
+    class _FakeClient:
+        def __init__(self):
+            self.wire_read = False
+            self.passed_consumption = "unset"
+            self.passed_daily = "unset"
+        def get_devices(self):
+            self.wire_read = True
+            return []
+        def get_heating_consumption_kwh(self, year, month, devices=None):
+            self.passed_consumption = devices
+            return 3.21
+        def get_heating_daily_kwh(self, year, month, devices=None):
+            self.passed_daily = devices
+            return [1.0, 2.0]
+
+    fc = _FakeClient()
+    monkeypatch.setattr(daikin_service, "_get_or_create_client", lambda: fc)
+
+    assert daikin_service.heating_consumption_kwh(2026, 6) == 3.21
+    assert daikin_service.heating_daily_kwh(2026, 6) == [1.0, 2.0]
+    assert fc.passed_consumption == [sentinel], "must feed cached devices to the client"
+    assert fc.passed_daily == [sentinel]
+    assert fc.wire_read is False, "must NOT trigger a fresh get_devices wire read"
+
+
 def _seed_live_row(age_seconds: float, *, tank: float = 50.0, indoor: float = 21.0) -> None:
     now = datetime.now(UTC)
     db.insert_daikin_telemetry({

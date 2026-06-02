@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from ..api_quota import quota_remaining, record_call, should_block
+from ..api_quota import quota_remaining, should_block
 from ..config import config
 from .client import DaikinClient, DaikinError
 from .models import DaikinDevice
@@ -673,6 +673,27 @@ def set_weather_regulation(enabled: bool, actor: str = "api") -> None:
 # v10.2 — daikin_consumption_daily sync (deferred Epic #70 minimal first cut)
 # ---------------------------------------------------------------------------
 
+def heating_consumption_kwh(year: int, month: int, *, actor: str = "energy_insights") -> float | None:
+    """Monthly heating kWh, read from the CACHED device payload (30-min TTL) —
+    the consumption figures live inside the gateway-devices response, so this
+    never needs its own wire read when the cache is warm. This is the fix for
+    the energy-insights read-burst: ``/energy/period`` etc. previously spun up a
+    fresh client and hit ``get_devices()`` on every call."""
+    result = get_cached_devices(allow_refresh=True, actor=actor)
+    if not result.devices:
+        return None
+    return _get_or_create_client().get_heating_consumption_kwh(year, month, devices=result.devices)
+
+
+def heating_daily_kwh(year: int, month: int, *, actor: str = "energy_insights") -> list[float] | None:
+    """Per-day heating kWh for the month, from the cached device payload. See
+    :func:`heating_consumption_kwh`."""
+    result = get_cached_devices(allow_refresh=True, actor=actor)
+    if not result.devices:
+        return None
+    return _get_or_create_client().get_heating_daily_kwh(year, month, devices=result.devices)
+
+
 def sync_daikin_daily(date_obj) -> dict | None:
     """Populate ``daikin_consumption_daily`` for the given date.
 
@@ -700,9 +721,10 @@ def sync_daikin_daily(date_obj) -> dict | None:
     source = "unknown"
     try:
         if not should_block("daikin"):
-            client = _get_or_create_client()
-            daily = client.get_heating_daily_kwh(date_obj.year, date_obj.month)
-            record_call("daikin", "read", ok=True)
+            # Cached read — the transport records its own quota on a real fetch,
+            # so no manual record_call here (that double-counted), and a warm
+            # cache means zero extra reads.
+            daily = heating_daily_kwh(date_obj.year, date_obj.month, actor="daikin_daily_sync")
             if daily:
                 idx = date_obj.day - 1
                 if 0 <= idx < len(daily):
@@ -712,7 +734,6 @@ def sync_daikin_daily(date_obj) -> dict | None:
                         source = "onecta"
     except Exception as exc:
         logger.debug("sync_daikin_daily Onecta path failed for %s: %s", iso, exc)
-        record_call("daikin", "read", ok=False)
 
     # Path 2: telemetry integral fallback. daikin_telemetry.fetched_at is
     # stored as epoch seconds (float), so bound the range in epoch.

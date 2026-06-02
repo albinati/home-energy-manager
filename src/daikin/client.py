@@ -11,9 +11,7 @@ Usage:
 """
 import datetime as _datetime  # noqa: F401 — used in type hint of get_daily_consumption_from_cache
 import json
-import logging
 import time
-import traceback
 import urllib.error
 import urllib.request
 
@@ -21,8 +19,6 @@ from ..api_quota import record_call, should_block
 from ..config import config
 from .auth import get_valid_access_token
 from .models import DaikinDevice, DaikinStatus, SetpointRange
-
-logger = logging.getLogger(__name__)
 
 
 class DaikinError(Exception):
@@ -137,18 +133,6 @@ class DaikinClient:
 
     def get_devices(self) -> list[DaikinDevice]:
         """List all gateway devices."""
-        # Temporary diagnostic (DAIKIN_TRACE_READS): every Daikin READ funnels
-        # through here → _get. Logging the caller chain on each call pinpoints
-        # the burst source (the ~10-29-read clusters that pass under the 90s
-        # throttle floor). Off by default; flip the .env flag to capture, then
-        # remove. Compact: skip the two innermost frames (this method + caller
-        # shim), keep the next ~8.
-        if getattr(config, "DAIKIN_TRACE_READS", False):
-            # Full stack (deep under the scheduler thread pool), then the
-            # INNERMOST ~12 frames — those nearest get_devices are the real
-            # app caller. stack[-1] is this method itself, so end at -1.
-            stack = traceback.format_stack()
-            logger.warning("DAIKIN_READ_CALLER ↓\n%s", "".join(stack[-13:-1]))
         data = self._get("/gateway-devices")
         devices = []
         for gw in data if isinstance(data, list) else []:
@@ -334,15 +318,20 @@ class DaikinClient:
         self._patch(self._dhw_path(device, "powerfulMode"), {"value": "on" if on else "off"})
 
     def get_heating_consumption_kwh(
-        self, year: int, month: int
+        self, year: int, month: int, devices: list[DaikinDevice] | None = None
     ) -> float | None:
         """
         Get heating electrical consumption (kWh) for a given month from Daikin when available.
         Onecta exposes this for some devices (e.g. Altherma) via electricalConsumption.
         Returns None if not available or on error.
+
+        Pass ``devices`` (e.g. the cached service-layer payload) to read the
+        consumption out of an already-fetched device list — avoids a fresh
+        ``get_devices()`` wire read (the energy-insights read-burst fix).
         """
         try:
-            devices = self.get_devices()
+            if devices is None:
+                devices = self.get_devices()
             total = 0.0
             for device in devices:
                 val = self._device_heating_kwh_for_month(device, year, month)
@@ -562,13 +551,19 @@ class DaikinClient:
                 b["dhw_kwh"] = round(b["dhw_kwh"], 3)
         return out
 
-    def get_heating_daily_kwh(self, year: int, month: int) -> list[float] | None:
+    def get_heating_daily_kwh(
+        self, year: int, month: int, devices: list[DaikinDevice] | None = None
+    ) -> list[float] | None:
         """
         Get daily heating consumption (kWh) for the month when available.
         Returns list of 28–31 values (index 0 = day 1). None if not available.
+
+        Pass ``devices`` to read from an already-fetched payload (cache) instead
+        of a fresh wire read — see :meth:`get_heating_consumption_kwh`.
         """
         try:
-            devices = self.get_devices()
+            if devices is None:
+                devices = self.get_devices()
             # Sum daily from all devices (usually one)
             result: list[float] = []
             for device in devices:

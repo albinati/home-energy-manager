@@ -2540,8 +2540,11 @@ def build_mcp() -> FastMCP:
         fc = [{"time": f.time_utc.isoformat(), "temp_c": f.temperature_c} for f in fetch_forecast(hours=48)]
         daikin = None
         try:
+            # Cached read (30-min TTL) — this MCP tool is user-callable; a direct
+            # client.get_devices() here bypassed the cache/throttle/quota guard.
+            from .daikin import service as _daikin_svc
             c = _daikin_client()
-            devs = c.get_devices()
+            devs = _daikin_svc.get_cached_devices(allow_refresh=False, actor="mcp_weather").devices
             if devs:
                 daikin = _device_status_dict(c, devs[0])
         except Exception as e:
