@@ -11,7 +11,9 @@ Usage:
 """
 import datetime as _datetime  # noqa: F401 — used in type hint of get_daily_consumption_from_cache
 import json
+import logging
 import time
+import traceback
 import urllib.error
 import urllib.request
 
@@ -19,6 +21,8 @@ from ..api_quota import record_call, should_block
 from ..config import config
 from .auth import get_valid_access_token
 from .models import DaikinDevice, DaikinStatus, SetpointRange
+
+logger = logging.getLogger(__name__)
 
 
 class DaikinError(Exception):
@@ -133,6 +137,15 @@ class DaikinClient:
 
     def get_devices(self) -> list[DaikinDevice]:
         """List all gateway devices."""
+        # Temporary diagnostic (DAIKIN_TRACE_READS): every Daikin READ funnels
+        # through here → _get. Logging the caller chain on each call pinpoints
+        # the burst source (the ~10-29-read clusters that pass under the 90s
+        # throttle floor). Off by default; flip the .env flag to capture, then
+        # remove. Compact: skip the two innermost frames (this method + caller
+        # shim), keep the next ~8.
+        if getattr(config, "DAIKIN_TRACE_READS", False):
+            stack = traceback.format_stack(limit=12)[:-1]
+            logger.warning("DAIKIN_READ_CALLER ↓\n%s", "".join(stack[-9:]))
         data = self._get("/gateway-devices")
         devices = []
         for gw in data if isinstance(data, list) else []:
