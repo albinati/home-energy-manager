@@ -144,8 +144,11 @@ class DaikinClient:
         # remove. Compact: skip the two innermost frames (this method + caller
         # shim), keep the next ~8.
         if getattr(config, "DAIKIN_TRACE_READS", False):
-            stack = traceback.format_stack(limit=12)[:-1]
-            logger.warning("DAIKIN_READ_CALLER ↓\n%s", "".join(stack[-9:]))
+            # Full stack (deep under the scheduler thread pool), then the
+            # INNERMOST ~12 frames — those nearest get_devices are the real
+            # app caller. stack[-1] is this method itself, so end at -1.
+            stack = traceback.format_stack()
+            logger.warning("DAIKIN_READ_CALLER ↓\n%s", "".join(stack[-13:-1]))
         data = self._get("/gateway-devices")
         devices = []
         for gw in data if isinstance(data, list) else []:
