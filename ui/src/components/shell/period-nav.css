@@ -1,0 +1,70 @@
+/* Shared period navigator — sits above the Hero and drives the page. */
+.pnav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.pnav-stepper {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.pnav-arrow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease, opacity 140ms ease;
+}
+.pnav-arrow:hover { background: var(--bg-card-2); }
+.pnav-arrow:disabled { opacity: 0.35; cursor: default; }
+
+.pnav-label {
+  min-width: 9ch;
+  text-align: center;
+  font-size: var(--font-md);
+  font-weight: 700;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+/* Segmented granularity toggle — reuses the echart-pill visual language. */
+.pnav-grans {
+  display: inline-flex;
+  gap: var(--space-1);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 3px;
+}
+.pnav-gran {
+  position: relative;
+  padding: 4px 14px;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-sm);
+  font-weight: 600;
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease;
+}
+.pnav-gran:hover { color: var(--text); }
+.pnav-gran.is-active {
+  background: var(--bg-card-2);
+  color: var(--text);
+}

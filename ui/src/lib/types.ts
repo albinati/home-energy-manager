@@ -354,6 +354,13 @@ export interface MonthlyEnergyCost {
   net_cost_pounds: number;
   import_cost_pounds: number;
   export_earnings_pounds: number;
+  // Fixed-tariff counterfactual on the same metered kWh + day-window as the
+  // realised cost. null unless FIXED_TARIFF_* is configured. Positive delta =
+  // Agile cheaper than the fixed tariff over this period.
+  fixed_shadow_pence?: number | null;
+  fixed_shadow_pounds?: number | null;
+  delta_vs_fixed_pence?: number | null;
+  delta_vs_fixed_pounds?: number | null;
 }
 export interface MonthlyEnergy {
   energy: MonthlyEnergyEnergy;
