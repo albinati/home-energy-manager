@@ -589,9 +589,14 @@ class ListAvailableTariffsResponse(BaseModel):
 
 
 class TariffDashboardRequest(BaseModel):
-    months_back: int = Field(default=1, ge=1, le=12, description="Months of usage data")
+    months_back: int = Field(default=1, ge=1, le=12, description="Months of usage data (used when start_date/end_date are absent)")
     granularity: str = Field(default="daily", pattern=r"^(daily|weekly|monthly)$")
     max_tariffs: int = Field(default=10, ge=1, le=20)
+    # Optional explicit usage window (inclusive ISO dates) — when both are set
+    # the comparison replays the catalogue over exactly this window instead of
+    # the trailing months_back. Lets the UI period navigator drive the widget.
+    start_date: str | None = Field(default=None, description="YYYY-MM-DD inclusive start")
+    end_date: str | None = Field(default=None, description="YYYY-MM-DD inclusive end")
 
 
 class TariffPeriodCosts(BaseModel):

@@ -6,20 +6,19 @@ interface TariffComparisonWidgetProps {
   dashboard: TariffDashboardResponse | null;
   dashboardLoading: boolean;
   metrics: MetricsResponse | null;
-  // Real realised cost for the same calendar window — used to replace the
-  // current tariff's PROJECTED total. The dashboard engine bills total
-  // consumption at the tariff's average rate, which ignores the LP's
-  // battery-arbitrage on half-hourly tariffs (Agile) and over-states the
-  // current cost by ~30 % on solar+battery setups. The realised number
-  // (from /energy/period) bills measured grid import at the half-hourly
-  // Agile rate per slot — the actual money out the door.
-  monthPeriod: PeriodInsightsResponse | null;
-  // Whether the /energy/period fetch that feeds `monthPeriod` is still
-  // in-flight. The dashboard and monthPeriod are independent fetches: if the
-  // dashboard lands first we must NOT render the current tariff's projected
-  // total — it would flash a wrong (over-stated) number until the realised
-  // cost arrives and overwrites it. Hold the skeleton until BOTH have settled.
-  monthPeriodLoading: boolean;
+  // The navigator-selected period. Its realised net (from /energy/period —
+  // measured grid import × half-hourly Agile, the actual money out the door)
+  // replaces the current tariff's PROJECTED engine total, which bills total
+  // consumption at the avg rate and ignores battery arbitrage (over-states
+  // ~30% on solar+battery). Its backend fixed shadow drives the fixed row.
+  // Same window as the dashboard's catalogue replay → rows line up.
+  period: PeriodInsightsResponse | null;
+  // Whether the /energy/period fetch that feeds `period` is still in-flight.
+  // The dashboard and period are independent fetches: if the dashboard lands
+  // first we must NOT render the current tariff's projected total — it would
+  // flash a wrong (over-stated) number until the realised cost arrives and
+  // overwrites it. Hold the skeleton until BOTH have settled.
+  periodLoading: boolean;
 }
 
 // Tariff comparison anchored ENTIRELY on the household's real usage. The
@@ -31,10 +30,10 @@ interface TariffComparisonWidgetProps {
 // The fixed-tariff row uses the BACKEND-computed fixed shadow on the
 // monthPeriod cost (same metered kWh + day-window as the realised current
 // tariff), not a client recompute — so it can't drift from the current row.
-export function TariffComparisonWidget({ dashboard, dashboardLoading, metrics, monthPeriod, monthPeriodLoading }: TariffComparisonWidgetProps) {
+export function TariffComparisonWidget({ dashboard, dashboardLoading, metrics, period, periodLoading }: TariffComparisonWidgetProps) {
   // Gate on BOTH fetches: the current tariff's realised total comes from
   // monthPeriod, so rendering before it settles flashes the projected number.
-  if (dashboardLoading || monthPeriodLoading) {
+  if (dashboardLoading || periodLoading) {
     return <div class="tcomp"><div class="tcomp-skel skel" /></div>;
   }
   if (!dashboard?.ok || !dashboard.totals?.length) {
@@ -49,8 +48,8 @@ export function TariffComparisonWidget({ dashboard, dashboardLoading, metrics, m
   // a positive "unit rate" that's actually an export price. Treating them
   // as cheapest import would mislabel revenue as cost (see commit ec81a4b).
   const importOnly = dashboard.totals.filter((r) => isImportTariff(r));
-  const realisedMonthlyP = monthPeriod?.cost?.net_cost_pence ?? null;
-  const realisedDays = monthPeriod?.chart_data?.length ?? null;
+  const realisedMonthlyP = period?.cost?.net_cost_pence ?? null;
+  const realisedDays = period?.chart_data?.length ?? null;
   // Override the current tariff's projected totals with the real realised
   // ones. The engine's projection is consumption × avg rate (no battery-
   // arbitrage); the realised number is half-hourly grid_import × Agile_p.
@@ -75,7 +74,7 @@ export function TariffComparisonWidget({ dashboard, dashboardLoading, metrics, m
   // metered kWh + day-window as the realised current-tariff cost — no
   // Fox-vs-Octopus meter mixing, no client recompute that could drift).
   const ft = metrics?.fixed_tariff;
-  const fixedShadowP = monthPeriod?.cost?.fixed_shadow_pence ?? null;
+  const fixedShadowP = period?.cost?.fixed_shadow_pence ?? null;
   let bgRow: TariffTotalRow | null = null;
   if (ft?.label && fixedShadowP != null && realisedDays && realisedDays > 0) {
     const netP = fixedShadowP;

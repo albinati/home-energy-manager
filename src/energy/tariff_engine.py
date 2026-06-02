@@ -143,8 +143,18 @@ def _simulate_day_cost_pence(
 
 # ── Granular period comparison ───────────────────────────────────────────────
 
-def _get_daily_usage(months_back: int = 1) -> list[dict]:
+def _get_daily_usage(
+    months_back: int = 1,
+    *,
+    window_from: date | None = None,
+    window_to: date | None = None,
+) -> list[dict]:
     """Get per-day import/export kWh.
+
+    When ``window_from``/``window_to`` (inclusive local dates) are both given,
+    usage is gathered for exactly that window — this is how the UI period
+    navigator scopes the tariff comparison. Otherwise the trailing
+    ``months_back`` window is used.
 
     Priority:
     1. Octopus smart meter day-aggregated consumption (authenticated)
@@ -152,8 +162,22 @@ def _get_daily_usage(months_back: int = 1) -> list[dict]:
     3. Synthetic defaults
     """
     today = date.today()
-    period_to = datetime.now(UTC)
-    period_from = period_to - timedelta(days=months_back * 31)
+    explicit_window = window_from is not None and window_to is not None
+    if explicit_window:
+        # Clamp the end to today (no future data) and bound the fetch range.
+        window_to = min(window_to, today)
+        period_from = datetime(window_from.year, window_from.month, window_from.day, tzinfo=UTC)
+        period_to = datetime(window_to.year, window_to.month, window_to.day, 23, 59, 59, tzinfo=UTC)
+    else:
+        period_to = datetime.now(UTC)
+        period_from = period_to - timedelta(days=months_back * 31)
+
+    def _in_window(d: date) -> bool:
+        if d > today:
+            return False
+        if explicit_window:
+            return window_from <= d <= window_to
+        return True
 
     # --- Source 1: Octopus day-aggregated consumption ---
     if config.OCTOPUS_API_KEY and (config.OCTOPUS_MPAN_IMPORT or config.OCTOPUS_MPAN_1):
@@ -201,7 +225,7 @@ def _get_daily_usage(months_back: int = 1) -> list[dict]:
                 )
                 for ds in all_dates:
                     d = date.fromisoformat(ds)
-                    if d <= today:
+                    if _in_window(d):
                         daily_all.append({
                             "date": ds,
                             "import_kwh": import_by_date.get(ds, 0.0),
@@ -222,13 +246,25 @@ def _get_daily_usage(months_back: int = 1) -> list[dict]:
         from ..foxess.client import FoxESSClient
         client = FoxESSClient(**config.foxess_client_kwargs())
         daily_all = []
+        # Months to fetch: the calendar months overlapping the requested window
+        # (explicit) or the trailing months_back (default).
+        months: list[tuple[int, int]] = []
+        if explicit_window:
+            cur = date(window_from.year, window_from.month, 1)
+            last = date(window_to.year, window_to.month, 1)
+            while cur <= last:
+                months.append((cur.year, cur.month))
+                cur = date(cur.year + 1, 1, 1) if cur.month == 12 else date(cur.year, cur.month + 1, 1)
+        else:
+            for offset in range(months_back):
+                m = today.month - offset
+                y = today.year
+                while m <= 0:
+                    m += 12
+                    y -= 1
+                months.append((y, m))
         months_done: set[tuple[int, int]] = set()
-        for offset in range(months_back):
-            m = today.month - offset
-            y = today.year
-            while m <= 0:
-                m += 12
-                y -= 1
+        for (y, m) in months:
             key = (y, m)
             if key in months_done:
                 continue
@@ -237,7 +273,7 @@ def _get_daily_usage(months_back: int = 1) -> list[dict]:
                 _totals, daily = client.get_energy_month_daily_breakdown(y, m)
                 for row in daily:
                     d = date.fromisoformat(row["date"])
-                    if d <= today:
+                    if _in_window(d):
                         daily_all.append({**row, "source": "foxess"})
             except Exception:
                 continue
@@ -255,14 +291,19 @@ def _get_daily_usage(months_back: int = 1) -> list[dict]:
         "No real usage data available — using synthetic defaults (8.5/2.0 kWh/day)"
     )
     daily_all = []
-    for i in range(months_back * 30):
-        d = today - timedelta(days=i)
-        daily_all.append({
-            "date": d.isoformat(),
-            "import_kwh": 8.5,
-            "export_kwh": 2.0,
-            "source": "synthetic",
-        })
+    if explicit_window:
+        d = window_from
+        while d <= window_to:
+            daily_all.append({
+                "date": d.isoformat(), "import_kwh": 8.5, "export_kwh": 2.0, "source": "synthetic",
+            })
+            d += timedelta(days=1)
+    else:
+        for i in range(months_back * 30):
+            d = today - timedelta(days=i)
+            daily_all.append({
+                "date": d.isoformat(), "import_kwh": 8.5, "export_kwh": 2.0, "source": "synthetic",
+            })
     daily_all.sort(key=lambda r: r["date"])
     return daily_all
 
@@ -338,6 +379,8 @@ def compare_tariffs_granular(
     *,
     months_back: int = 1,
     granularity: str = "daily",  # daily | weekly | monthly
+    window_from: date | None = None,
+    window_to: date | None = None,
 ) -> dict:
     """Compare tariffs at daily/weekly/monthly granularity.
 
@@ -349,7 +392,7 @@ def compare_tariffs_granular(
         "usage": {total_import_kwh, total_export_kwh, total_days}
     }
     """
-    daily_data = _get_daily_usage(months_back)
+    daily_data = _get_daily_usage(months_back, window_from=window_from, window_to=window_to)
     if not daily_data:
         return {"granularity": granularity, "periods": [], "totals": [], "usage": {}}
 
@@ -682,10 +725,15 @@ def get_tariff_comparison_dashboard(
     months_back: int = 1,
     granularity: str = "daily",
     max_tariffs: int = 10,
+    window_from: date | None = None,
+    window_to: date | None = None,
 ) -> dict:
     """Full dashboard payload: granular comparison + totals + recommendation.
 
-    This is the main entry point for the tariff dashboard.
+    This is the main entry point for the tariff dashboard. When
+    ``window_from``/``window_to`` are given, the comparison is scoped to that
+    exact window (driven by the UI period navigator); otherwise the trailing
+    ``months_back`` window is used.
     """
     from .octopus_products import get_available_tariffs
 
@@ -700,6 +748,8 @@ def get_tariff_comparison_dashboard(
         tariffs,
         months_back=months_back,
         granularity=granularity,
+        window_from=window_from,
+        window_to=window_to,
     )
 
     # Identify current tariff in totals and compute savings

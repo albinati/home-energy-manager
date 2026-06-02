@@ -20,7 +20,7 @@ import { Widget } from "../components/common/Widget";
 import { Spinner } from "../components/common/Spinner";
 import { RefreshAction } from "../components/common/RefreshAction";
 import { PeriodNavigator } from "../components/shell/PeriodNavigator";
-import { usePeriod, periodFetchOpts } from "../lib/period";
+import { usePeriod, periodFetchOpts, periodDateRange } from "../lib/period";
 import { LivePowerWidget } from "../components/cockpit/LivePowerWidget";
 import { Hero } from "../components/home/Hero";
 import { HeatingWidget } from "../components/home/HeatingWidget";
@@ -91,21 +91,20 @@ export default function Landing() {
   // Daikin cached read — no refresh=true, so no live cloud call (30-min cache TTL).
   const daikin = useFetch(getDaikinStatus, []);
   const daikinQuota = useFetch(getDaikinQuota, []);
-  // Tariff comparison vs Octopus catalogue + the configured fixed tariff.
-  const tariffDash = useFetch(() => getTariffDashboard(1, "monthly", 8), []);
   // The shared period navigator drives the Hero headline + cost breakdown +
-  // energy chart. Re-fetch /energy/period whenever the selection changes.
+  // energy chart + tariff comparison. Re-fetch whenever the selection changes.
   const period = usePeriod();
   const periodInsights = useFetch(
     () => getEnergyPeriod(period.gran, periodFetchOpts(period)),
     [period.gran, period.anchor],
   );
-  // The tariff comparison is inherently a monthly/usage-window construct
-  // (the catalogue replay is monthly), so it stays pinned to the current month
-  // regardless of the navigator — its realised cost + fixed shadow come from
-  // this fetch.
-  const today = new Date().toISOString().slice(0, 10);
-  const monthPeriod = useFetch(() => getEnergyPeriod("month", { month: today.slice(0, 7) }), []);
+  // Tariff comparison scoped to the SAME window as the navigator — the
+  // catalogue replay + usage now cover exactly the selected period, so its
+  // realised current-tariff row + fixed shadow (from periodInsights) line up.
+  const tariffDash = useFetch(() => {
+    const w = periodDateRange(period);
+    return getTariffDashboard(1, "daily", 8, w);
+  }, [period.gran, period.anchor]);
 
   if (now.loading && !now.data) {
     return <div class="home"><Spinner label="Loading dashboard…" /></div>;
@@ -168,7 +167,7 @@ export default function Landing() {
         <Widget title="Tariff comparison" icon="📊" tone="savings" size="wide"
                 badge={tariffDash.data?.usage?.total_days ? `last ${tariffDash.data.usage.total_days}d of your usage` : undefined}
                 action={<RefreshAction onRefresh={tariffDash.refresh} loading={tariffDash.loading} />}>
-          <TariffComparisonWidget dashboard={tariffDash.data} dashboardLoading={tariffDash.loading} metrics={metrics.data} monthPeriod={monthPeriod.data} monthPeriodLoading={monthPeriod.loading} />
+          <TariffComparisonWidget dashboard={tariffDash.data} dashboardLoading={tariffDash.loading} metrics={metrics.data} period={periodInsights.data} periodLoading={periodInsights.loading} />
         </Widget>
       </div>
     </div>
