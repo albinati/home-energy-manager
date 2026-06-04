@@ -163,7 +163,14 @@ def _compute_cost(energy: MonthlyEnergySummary, n_days: int | None = None) -> Mo
     is billed — the original behaviour, kept for completed past months.
     """
     import_rate = config.MANUAL_TARIFF_IMPORT_PENCE or 0.0
-    export_rate = config.MANUAL_TARIFF_EXPORT_PENCE or 0.0
+    # Export at the household's actual tariff. In seg_flat mode (default) that's
+    # the flat SEG rate, keeping the Octopus-unavailable fallback (e.g. "today"
+    # before backfill) consistent with _compute_cost_octopus + the Insights tab.
+    export_rate = (
+        (config.EXPORT_SEG_RATE_PENCE or 0.0)
+        if config.EXPORT_TARIFF_MODE != "outgoing_agile"
+        else (config.MANUAL_TARIFF_EXPORT_PENCE or 0.0)
+    )
     standing_per_day = config.MANUAL_STANDING_CHARGE_PENCE_PER_DAY or 0.0
     days = n_days if n_days is not None else monthrange(energy.year, energy.month)[1]
     import_cost_pence = energy.import_kwh * import_rate
@@ -256,10 +263,10 @@ def _compute_cost_octopus(
 
         import_kwh_metered = sum(s.consumption_kwh for s in import_slots)
 
-        # Export: use Octopus export consumption if available, billed at the
-        # per-slot Outgoing Agile rate (matching pnl.py:_realised_export_pence).
-        # Falls back to the flat manual export rate for unmatched slots / when
-        # no Outgoing tariff is configured.
+        # Export: use Octopus export consumption if available, valued by the
+        # tariff the household is ACTUALLY paid on (config.EXPORT_TARIFF_MODE) —
+        # flat Octopus SEG by default, per-slot Outgoing Agile when switched.
+        # Mirrors pnl.export_revenues_for_day so Home and Insights agree.
         export_earnings_pence = 0.0
         export_kwh_metered = 0.0
         if roles.export_mpan and roles.export_serial:
@@ -270,28 +277,39 @@ def _compute_cost_octopus(
                 period_to,
             )
             export_kwh_metered = sum(s.consumption_kwh for s in export_slots)
-            flat_export_rate = config.MANUAL_TARIFF_EXPORT_PENCE or 0.0
-            export_rate_by_start: dict[str, float] = {}
-            if config.OCTOPUS_EXPORT_TARIFF_CODE:
-                for r in db.get_agile_export_rates_in_range(
-                    period_from.isoformat(), period_to.isoformat()
-                ):
-                    ts = r.get("valid_from") or ""
-                    if ts:
-                        export_rate_by_start[ts[:16]] = float(r.get("value_inc_vat") or 0)
-            matched = 0
-            for slot in export_slots:
-                key = slot.interval_start.isoformat()[:16]
-                rate = export_rate_by_start.get(key)
-                if rate is not None:
-                    matched += 1
-                else:
-                    rate = flat_export_rate
-                export_earnings_pence += slot.consumption_kwh * rate
-            logger.info(
-                "Monthly export (Octopus %d-%02d): %.3f kWh -> %.2fp (%d/%d slots per-slot rate)",
-                year, month, export_kwh_metered, export_earnings_pence, matched, len(export_slots),
-            )
+            if config.EXPORT_TARIFF_MODE == "outgoing_agile":
+                # Variable Outgoing Agile — price each slot by its own rate,
+                # falling back to the flat manual rate for unmatched slots.
+                flat_export_rate = config.MANUAL_TARIFF_EXPORT_PENCE or 0.0
+                export_rate_by_start: dict[str, float] = {}
+                if config.OCTOPUS_EXPORT_TARIFF_CODE:
+                    for r in db.get_agile_export_rates_in_range(
+                        period_from.isoformat(), period_to.isoformat()
+                    ):
+                        ts = r.get("valid_from") or ""
+                        if ts:
+                            export_rate_by_start[ts[:16]] = float(r.get("value_inc_vat") or 0)
+                matched = 0
+                for slot in export_slots:
+                    key = slot.interval_start.isoformat()[:16]
+                    rate = export_rate_by_start.get(key)
+                    if rate is not None:
+                        matched += 1
+                    else:
+                        rate = flat_export_rate
+                    export_earnings_pence += slot.consumption_kwh * rate
+                logger.info(
+                    "Monthly export (Octopus %d-%02d, agile): %.3f kWh -> %.2fp (%d/%d slots per-slot rate)",
+                    year, month, export_kwh_metered, export_earnings_pence, matched, len(export_slots),
+                )
+            else:
+                # Flat Octopus Outgoing SEG (the household's real export tariff).
+                seg_rate = config.EXPORT_SEG_RATE_PENCE or 0.0
+                export_earnings_pence = export_kwh_metered * seg_rate
+                logger.info(
+                    "Monthly export (Octopus %d-%02d, seg_flat): %.3f kWh -> %.2fp @ %.2fp/kWh",
+                    year, month, export_kwh_metered, export_earnings_pence, seg_rate,
+                )
 
         days = n_days if n_days is not None else monthrange(year, month)[1]
         standing_pence = (config.MANUAL_STANDING_CHARGE_PENCE_PER_DAY or 0.0) * days

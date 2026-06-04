@@ -159,6 +159,7 @@ export function EnergyChartWidget({ execution }: EnergyChartWidgetProps) {
         discharge: period.energy.discharge_kwh,
         importCost: period.cost?.import_cost_pounds ?? 0,
         exportRevenue: period.cost?.export_earnings_pounds ?? 0,
+        standing: (period.cost?.standing_charge_pence ?? 0) / 100,
         netCost: period.cost?.net_cost_pounds ?? 0,
       }
     : null;
@@ -238,7 +239,8 @@ export function EnergyChartWidget({ execution }: EnergyChartWidgetProps) {
           )}
           <span class="echart-foot-grp">
             <strong>Grid £</strong>&nbsp;
-            <span class="echart-tok echart-tok-cost">£{summary.importCost.toFixed(2)} paid</span> −
+            <span class="echart-tok echart-tok-cost">£{summary.importCost.toFixed(2)} paid</span> +
+            <span class="echart-tok echart-tok-cost">£{summary.standing.toFixed(2)} standing</span> −
             <span class="echart-tok echart-tok-rev">£{summary.exportRevenue.toFixed(2)} earned</span> =
             <strong class={summary.netCost >= 0 ? "echart-tok-cost" : "echart-tok-rev"}>
               £{summary.netCost.toFixed(2)} net
