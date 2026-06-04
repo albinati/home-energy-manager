@@ -3,6 +3,7 @@ import { ThemeToggle } from "./ThemeToggle";
 
 const tabs = [
   { href: "/", label: "Home" },
+  { href: "/insights", label: "Insights" },
   { href: "/report", label: "Journal" },
   { href: "/settings", label: "Settings" },
 ];

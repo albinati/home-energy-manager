@@ -1199,6 +1199,12 @@ def _build_export_price_line(slot_starts_utc: list[datetime]) -> list[float] | N
     """
     if not slot_starts_utc:
         return None
+    # When the household is paid a flat SEG, the MARGINAL value of exporting a kWh
+    # is that flat rate — NOT the Outgoing Agile curve. Return a flat line so the
+    # LP doesn't chase daytime export arbitrage that only pays EXPORT_SEG_RATE_PENCE.
+    # (Realised £ are scored at the same actual rate; see pnl._realised_export_pence.)
+    if config.EXPORT_TARIFF_MODE == "seg_flat":
+        return [float(config.EXPORT_SEG_RATE_PENCE or 0)] * len(slot_starts_utc)
     if not (config.OCTOPUS_EXPORT_TARIFF_CODE or "").strip():
         return None
     period_from = slot_starts_utc[0].isoformat()

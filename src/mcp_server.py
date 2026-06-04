@@ -1569,52 +1569,7 @@ def build_mcp() -> FastMCP:
             }
         return result
 
-    @mcp.tool(
-        name="compare_tariffs_dashboard",
-        description=(
-            "Get granular tariff comparison data for daily, weekly, or monthly views. "
-            "Returns per-period cost breakdowns showing which tariff wins each day/week/month, "
-            "total rankings with savings vs current tariff, and win counts. "
-            "The current tariff (Octopus Flexible by default) is flagged as baseline. "
-            "Use this for detailed analysis like 'Show me which tariff was cheapest each day this month'."
-        ),
-    )
-    def compare_tariffs_dashboard_tool(
-        months_back: int = 1,
-        granularity: str = "daily",
-        max_tariffs: int = 10,
-    ) -> dict[str, Any]:
-        from .energy.tariff_engine import get_tariff_comparison_dashboard
-        data = get_tariff_comparison_dashboard(
-            months_back=months_back,
-            granularity=granularity,
-            max_tariffs=max_tariffs,
-        )
-        if not data.get("ok"):
-            return {"ok": False, "error": data.get("error", "Unknown error")}
-        # Summarise for MCP (full periods would be too verbose)
-        totals = data.get("totals", [])
-        periods_count = len(data.get("periods", []))
-        summary_lines = []
-        for i, t in enumerate(totals[:5]):
-            marker = " (CURRENT)" if t.get("is_current") else ""
-            sav = t.get("savings_vs_current_pounds")
-            sav_str = f" — saves £{sav:.0f}/yr vs current" if sav and sav > 0 else ""
-            summary_lines.append(
-                f"  {i+1}. {t['display_name']}: £{t['annual_pounds']:.0f}/yr, "
-                f"wins {t['wins']}/{periods_count} periods{marker}{sav_str}"
-            )
-        return {
-            "ok": True,
-            "granularity": data.get("granularity"),
-            "periods_count": periods_count,
-            "ranking": "\n".join(summary_lines),
-            "totals": totals[:10],
-            "current_product_code": data.get("current_product_code"),
-            "current_annual_pounds": data.get("current_annual_pounds"),
-            "usage": data.get("usage"),
-            "data_source": data.get("data_source"),
-        }
+    # (compare_tariffs_dashboard removed — folded into the fair get_tariff_comparison.)
 
     # ── Octopus account + consumption tools ───────────────────────────────────
 
@@ -2339,20 +2294,20 @@ def build_mcp() -> FastMCP:
     @mcp.tool(
         name="get_tariff_comparison",
         description=(
-            "Apples-to-apples cost comparison across every configured tariff: realised "
-            "Octopus Agile + your current shadows (SVT, Fixed, optional legacy fixed "
-            "tariff via FIXED_TARIFF_*). All shadow costs INCLUDE the standing charge "
-            "× n_days so deltas are real money saved.\n\n"
+            "FAIR, apples-to-apples tariff comparison: your MEASURED half-hourly "
+            "import/export replayed against every tariff's OWN rate card — current "
+            "Octopus Agile (realised) + SVT + configured fixed + the live Octopus "
+            "catalogue. Each tariff uses its own per-day standing charge and its own "
+            "export rate (0 if it has none); negative-price imports CREDIT the bill.\n\n"
             "Three input modes (mutually exclusive):\n"
             "  1. ``date='YYYY-MM-DD'`` — single day (default = yesterday).\n"
             "  2. ``period='week'|'month'|'mtd'|'ytd'`` — preset trailing/calendar "
-            "     ranges anchored on today: trailing-7d, full calendar month, "
-            "     month-to-date (1st → today), year-to-date (Jan 1 → today).\n"
-            "  3. ``start_date='YYYY-MM-DD'`` + ``end_date='YYYY-MM-DD'`` — custom "
-            "     inclusive range.\n\n"
-            "Each comparison entry returns shadow_cost_pounds, delta_vs_realised_pounds "
-            "(positive = saved on Agile vs that tariff), rate_pence_per_kwh, "
-            "standing_pence_per_day, source ('configured' / 'svt' / 'agile_realised')."
+            "     ranges anchored on today.\n"
+            "  3. ``start_date`` + ``end_date`` — custom inclusive range.\n\n"
+            "Each comparison entry: net_cost_pounds, import_cost_pounds, "
+            "standing_pounds, export_credit_pounds, negative_credit_pounds (≤0), "
+            "delta_vs_current_pounds (>0 = cheaper than your tariff), is_current, "
+            "approximate (non-current half-hourly priced by proxy)."
         ),
     )
     def get_tariff_comparison(
@@ -2364,8 +2319,6 @@ def build_mcp() -> FastMCP:
         from datetime import datetime, timedelta
         from datetime import date as _date_t
         from zoneinfo import ZoneInfo
-
-        from .analytics import pnl
 
         tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
         today = datetime.now(tz).date()
@@ -2414,83 +2367,61 @@ def build_mcp() -> FastMCP:
             start = end = today - timedelta(days=1)
             label_used = start.isoformat()
 
-        # ---- Aggregate -----------------------------------------------------
-        is_single_day = start == end
-        p = (
-            pnl.compute_daily_pnl(start)
-            if is_single_day
-            else pnl.compute_period_pnl(start, end, label=label_used)
+        # ---- Fair per-slot comparison --------------------------------------
+        from .analytics.fair_compare import compute_fair_comparison
+
+        data = compute_fair_comparison(start, end)
+        rows = data.get("tariffs", [])
+        cur_net = next(
+            (r["net_pence"] for r in rows if r.get("is_current")), 0.0
         )
-
-        realised = float(p.get("realised_cost_gbp") or 0)
-        kwh = float(p.get("kwh") or 0)
-        standing_p_per_day = float(config.MANUAL_STANDING_CHARGE_PENCE_PER_DAY or 0)
-        n_days = int(p.get("n_days") or 1)
-
-        comparisons: list[dict[str, Any]] = [
+        comparisons = [
             {
-                "label": "Octopus Agile (realised)",
-                "source": "agile_realised",
-                "shadow_cost_pounds": realised,
-                "delta_vs_realised_pounds": 0.0,
-                "rate_pence_per_kwh": None,
-                "standing_pence_per_day": standing_p_per_day,
-                "_note": "Per-slot Agile import rates + standing × n_days − export earnings.",
-            },
-            {
-                "label": "Octopus SVT (would-have)",
-                "source": "svt",
-                "shadow_cost_pounds": float(p.get("svt_shadow_gbp") or 0),
-                "delta_vs_realised_pounds": float(p.get("delta_vs_svt_gbp") or 0),
-                "rate_pence_per_kwh": float(config.SVT_RATE_PENCE),
-                "standing_pence_per_day": standing_p_per_day,
-            },
+                "label": r["display_name"],
+                "product_code": r["product_code"],
+                "pricing": r["pricing"],
+                "is_current": r["is_current"],
+                "approximate": r["approximate"],
+                "net_cost_pounds": round(r["net_pence"] / 100.0, 2),
+                "import_cost_pounds": round(r["import_cost_pence"] / 100.0, 2),
+                "standing_pounds": round(r["standing_pence"] / 100.0, 2),
+                "export_credit_pounds": round(r["export_credit_pence"] / 100.0, 2),
+                "negative_credit_pounds": round(r["negative_credit_pence"] / 100.0, 2),
+                "delta_vs_current_pounds": round((cur_net - r["net_pence"]) / 100.0, 2),
+            }
+            for r in rows
         ]
-        if "delta_vs_fixed_tariff_gbp" in p:
-            comparisons.append(
-                {
-                    "label": p.get("fixed_tariff_label") or "Configured fixed tariff",
-                    "source": "configured",
-                    "shadow_cost_pounds": float(p.get("fixed_tariff_shadow_gbp") or 0),
-                    "delta_vs_realised_pounds": float(p.get("delta_vs_fixed_tariff_gbp") or 0),
-                    "rate_pence_per_kwh": float(config.FIXED_TARIFF_RATE_PENCE),
-                    "standing_pence_per_day": float(
-                        config.FIXED_TARIFF_STANDING_PENCE_PER_DAY
-                    ),
-                }
-            )
-
-        # Use the values FROM the period_pnl response — they reflect the actual
-        # window used after AGILE_TARIFF_START_DATE clamping (#214). Echoing
-        # `start`/`end`/`n_days` from local variables ignores the clamp and
-        # produces internally inconsistent output (Jan 1 → May 2 with n_days=32).
-        period_start_used = p.get("period_start", start.isoformat())
-        period_end_used = p.get("period_end", end.isoformat())
-        label_resolved = p.get("label", label_used)
-
+        label = label_used
+        if data.get("clamped"):
+            label = f"{label_used} (since {data['period_start']})"
         result = {
             "ok": True,
-            "label": label_resolved,
-            "period_start": period_start_used,
-            "period_end": period_end_used,
-            "n_days": n_days,
-            "energy_used_kwh": kwh,
-            "energy_exported_kwh": float(p.get("export_kwh") or 0),
-            "import_pounds": float(p.get("realised_import_gbp") or 0),
-            "export_revenue_pounds": float(p.get("export_revenue_gbp") or 0),
+            "label": label,
+            "period_start": data["period_start"],
+            "period_end": data["period_end"],
+            "n_days": data["n_days"],
+            "days_with_data": data["days_with_data"],
+            "energy_imported_kwh": data["basis"]["import_kwh"],
+            "energy_exported_kwh": data["basis"]["export_kwh"],
+            "current_product_code": data["current_product_code"],
+            "winner_product_code": data["winner_product_code"],
+            "savings_vs_current_pounds": data["savings_vs_current_pounds"],
             "comparisons": comparisons,
+            "catalogue_unavailable": data["catalogue_unavailable"],
             "_note": (
-                "Positive delta_vs_realised_pounds = Agile saved money vs that shadow. "
-                "All shadow costs include the standing charge × n_days."
+                "Every tariff priced on the SAME measured per-slot usage. "
+                "net = import + standing − export_credit. negative_credit_pounds "
+                "(≤0) is the bill credit from negative-price imports. 'approximate' "
+                "rows are non-current half-hourly tariffs priced by proxy. "
+                "delta_vs_current_pounds > 0 → that tariff is cheaper than yours."
             ),
         }
-        if p.get("clamped"):
+        if data.get("clamped"):
             result["clamped"] = True
-            result["clamp_reason"] = p.get("clamp_reason")
-            result["requested_start"] = p.get("requested_start")
-        if is_single_day:
-            # Back-compat: callers from before the period extension expect ``date``.
-            result["date"] = period_start_used
+            result["clamp_reason"] = data.get("clamp_reason")
+            result["requested_start"] = data.get("requested_start")
+        if start == end:
+            result["date"] = data["period_start"]
         return result
 
     @mcp.tool(

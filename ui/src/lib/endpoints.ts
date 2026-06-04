@@ -18,7 +18,7 @@ import type {
   MetricsResponse,
   DaikinDevice,
   ApiQuotaResponse,
-  TariffDashboardResponse,
+  FairCompareResponse,
   PeriodInsightsResponse,
   DaikinConsumptionResponse,
   DhwScheduleResponse,
@@ -135,20 +135,17 @@ export const getEnergyPeriod = (
 export const getAttributionDay = (date?: string) =>
   getJson<AttributionDay>(date ? `/attribution/day?date=${encodeURIComponent(date)}` : "/attribution/day");
 
-// POST /tariffs/dashboard — Octopus-tariff comparison engine, includes
-// standing charges + export earnings in the per-tariff costs. Pass
-// start_date/end_date (inclusive YYYY-MM-DD) to scope to a navigator period;
-// omit them to use the trailing months_back window.
-export const getTariffDashboard = (
-  months_back = 1,
-  granularity: "daily" | "weekly" | "monthly" = "monthly",
-  max_tariffs = 8,
-  window?: { start: string; end: string },
+// GET /tariffs/compare — fair per-slot tariff comparison for the navigator
+// period. Your measured usage replayed against every tariff's own rate card
+// (per-tariff standing + export; negative-price imports credit the bill).
+export const getFairCompare = (
+  gran: "day" | "week" | "month" | "year",
+  anchor: string,
+  maxTariffs = 14,
 ) =>
-  postJson<TariffDashboardResponse>("/tariffs/dashboard", {
-    months_back, granularity, max_tariffs,
-    ...(window ? { start_date: window.start, end_date: window.end } : {}),
-  });
+  getJson<FairCompareResponse>(
+    `/tariffs/fair-compare?period=${gran}&anchor=${encodeURIComponent(anchor)}&max_tariffs=${maxTariffs}`,
+  );
 
 /* ----- Settings ----- */
 

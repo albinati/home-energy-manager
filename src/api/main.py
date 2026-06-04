@@ -101,16 +101,13 @@ from .models import (
     SuggestedActionSchema,
     TankPowerRequest,
     TankTemperatureRequest,
+    FairCompareResponse,
     TariffCompareRequest,
-    TariffDashboardRequest,
-    TariffDashboardResponse,
-    TariffPeriodCosts,
     TariffPolicyResponse,
     TariffProductResponse,
     TariffRatesResponse,
     TariffRecommendationResponse,
     TariffSimulationResultResponse,
-    TariffTotalRow,
     TempBandSummaryResponse,
     TemperatureRequest,
 )
@@ -3388,44 +3385,52 @@ async def tariffs_compare(req: TariffCompareRequest):
     )
 
 
-@app.post("/api/v1/tariffs/dashboard", response_model=TariffDashboardResponse)
-async def tariffs_dashboard(req: TariffDashboardRequest):
-    """Granular tariff comparison dashboard data.
-
-    Returns per-period (daily/weekly/monthly) cost breakdown across all available
-    tariffs, identifying the winner for each period. The current tariff (Octopus
-    Flexible by default) is flagged as baseline.
-    """
+def _resolve_period_range(period: str, anchor: str):
+    """Resolve (period, anchor) → inclusive [start, end] dates, mirroring the UI's
+    `period.ts periodDateRange` (Monday weeks, calendar month/year, end ≤ today)."""
     from datetime import date as _date
+    from zoneinfo import ZoneInfo
 
-    from ..energy.tariff_engine import get_tariff_comparison_dashboard
-    window_from = window_to = None
-    if req.start_date and req.end_date:
-        try:
-            window_from = _date.fromisoformat(req.start_date)
-            window_to = _date.fromisoformat(req.end_date)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="start_date/end_date must be YYYY-MM-DD")
+    tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+    today = datetime.now(tz).date()
+    try:
+        a = _date.fromisoformat(anchor) if anchor else today
+    except ValueError:
+        a = today
+    if period == "day":
+        start = end = a
+    elif period == "week":
+        start = a - timedelta(days=a.weekday())  # Monday (weekday: Mon=0)
+        end = start + timedelta(days=6)
+    elif period == "month":
+        start = a.replace(day=1)
+        nxt = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+        end = nxt - timedelta(days=1)
+    else:  # year
+        start = _date(a.year, 1, 1)
+        end = _date(a.year, 12, 31)
+    if end > today:
+        end = today
+    return start, end
+
+
+@app.get("/api/v1/tariffs/fair-compare", response_model=FairCompareResponse)
+async def tariffs_fair_compare(period: str = "month", anchor: str = "", max_tariffs: int = 14):
+    """Fair per-slot tariff comparison for the selected navigator period.
+
+    Replays the household's MEASURED half-hourly grid import/export against every
+    tariff's own rate card (per-tariff standing + per-tariff export; negative-price
+    imports credit the bill). Powers the Insights tab.
+    """
+    if period not in ("day", "week", "month", "year"):
+        raise HTTPException(status_code=400, detail="period must be day|week|month|year")
+    start, end = _resolve_period_range(period, anchor)
+    from ..analytics.fair_compare import compute_fair_comparison
+
     data = await asyncio.to_thread(
-        get_tariff_comparison_dashboard,
-        months_back=req.months_back,
-        granularity=req.granularity,
-        max_tariffs=req.max_tariffs,
-        window_from=window_from,
-        window_to=window_to,
+        compute_fair_comparison, start, end, max_tariffs=max_tariffs
     )
-    if not data.get("ok"):
-        return TariffDashboardResponse(ok=False, error=data.get("error", "Unknown error"))
-    return TariffDashboardResponse(
-        ok=True,
-        granularity=data.get("granularity"),
-        periods=[TariffPeriodCosts(**p) for p in data.get("periods", [])],
-        totals=[TariffTotalRow(**t) for t in data.get("totals", [])],
-        current_product_code=data.get("current_product_code"),
-        current_annual_pounds=data.get("current_annual_pounds"),
-        usage=data.get("usage"),
-        data_source=data.get("data_source"),
-    )
+    return FairCompareResponse(**data)
 
 
 # ── Octopus account + consumption endpoints ───────────────────────────────────

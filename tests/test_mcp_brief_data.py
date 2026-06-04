@@ -135,14 +135,20 @@ class TestMCPBriefData(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(out["ok"])
         self.assertEqual(out["date"], yesterday.isoformat())
+        # Fair comparison: the current tariff + SVT + the configured fixed are
+        # always present (the live Octopus catalogue may add more rows).
         labels = [c["label"] for c in out["comparisons"]]
-        self.assertIn("Octopus Agile (realised)", labels)
-        self.assertIn("Octopus SVT (would-have)", labels)
+        self.assertTrue(any(c["is_current"] for c in out["comparisons"]))
+        self.assertIn("Standard Variable (SVT)", labels)
         self.assertIn("British Gas Fixed v58", labels)
-        # BG entry has the configured rate
+        # Each row carries the fair breakdown (no shadow_cost / rate fields).
         bg = next(c for c in out["comparisons"] if c["label"] == "British Gas Fixed v58")
-        self.assertEqual(bg["rate_pence_per_kwh"], 20.70)
-        self.assertEqual(bg["standing_pence_per_day"], 41.14)
+        for k in ("net_cost_pounds", "import_cost_pounds", "standing_pounds",
+                  "export_credit_pounds", "negative_credit_pounds",
+                  "delta_vs_current_pounds"):
+            self.assertIn(k, bg)
+        # BG standing = FIXED_TARIFF_STANDING_PENCE_PER_DAY (41.14p) × 1 day.
+        self.assertAlmostEqual(bg["standing_pounds"], 0.41, places=2)
 
     async def test_get_tariff_comparison_omits_bg_when_not_configured(self) -> None:
         app_config.FIXED_TARIFF_LABEL = ""
@@ -156,9 +162,10 @@ class TestMCPBriefData(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(out["ok"])
         labels = [c["label"] for c in out["comparisons"]]
-        # Only Agile + SVT, no third comparison
-        self.assertEqual(len(labels), 2)
+        # No fixed row when unconfigured; current + SVT still present.
         self.assertNotIn("British Gas Fixed v58", labels)
+        self.assertIn("Standard Variable (SVT)", labels)
+        self.assertTrue(any(c["is_current"] for c in out["comparisons"]))
 
     async def test_get_tariff_comparison_rejects_bad_date(self) -> None:
         mcp = build_mcp()

@@ -184,9 +184,12 @@ Cooldown: re-proposing within `PLAN_REGEN_COOLDOWN_SECONDS` (default 300 s) retu
 3. (if user wants detail)
    hem__compare_tariffs(months_back=3, max_tariffs=15)
      → ranked list with annual cost, lock-in, exit fee, green flag.
-4. (if user wants per-day breakdown)
-   hem__compare_tariffs_dashboard(months_back=1, granularity="daily")
-     → which tariff would have won each day this month.
+4. (for a FAIR, period-scoped comparison vs every tariff)
+   hem__get_tariff_comparison(period="month")   # or day|week|mtd|ytd, or date=/start_date=+end_date=
+     → your MEASURED usage replayed per-slot against current Agile + SVT +
+       fixed + the live Octopus catalogue; per-tariff standing + export,
+       negative-price imports credit the bill. delta_vs_current_pounds > 0
+       means that tariff is cheaper than yours.
 ```
 
 Suggest a comparison after major usage shifts (new heat pump, EV, solar) or quarterly. The tool uses real Fox import/export kWh from the chosen window.
@@ -260,7 +263,7 @@ events, and `explain_dispatch_decisions` answers per-slot "why" questions.
        scenario filter / strict_savings policy held LP-preferred
        peak_export slots; per-day breakdown shows when it bit.
 2. hem__get_tariff_comparison(period="mtd")
-     → realised cost vs SVT + Fixed shadows for the same window;
+     → fair per-slot cost vs SVT + Fixed + catalogue for the same window;
        compose with #1 to extrapolate annual cost of the strategy.
 3. (if the gap is large and sustained)
    hem__list_settings()   # ENERGY_STRATEGY_MODE row
@@ -648,7 +651,7 @@ about meter data, tariff fit, or wants to confirm the import/export MPAN roles.
 | `list_available_tariffs(max_tariffs=15)` | Currently available Octopus electricity products + rates + standing charges + lock-in / exit-fee policy. Use to scout the market before a comparison. |
 | `compare_tariffs(months_back, max_tariffs)` | Ranked simulation against the household's actual Fox ESS import/export kWh for the window. Returns annual cost, savings vs current, lock-in months, exit fees, green flag. Best for a "should I switch?" answer. |
 | `get_tariff_recommendation(months_back=1)` | One-paragraph verdict: best tariff + projected annual savings vs current. Use for quick answers. |
-| `compare_tariffs_dashboard(months_back, granularity)` | Per-period (`daily` / `weekly` / `monthly`) breakdown showing which tariff would have won each bucket + win counts. Best for "show me which tariff was cheapest each day this month". |
+| `get_tariff_comparison(period=…)` | **Fair** per-slot comparison for a window (`date` / `period=week\|month\|mtd\|ytd` / `start_date`+`end_date`): your MEASURED usage replayed against current Agile + SVT + fixed + the live Octopus catalogue. Each tariff uses its OWN standing + export rate; negative-price imports credit the bill. Per row: net/import/standing/export_credit/negative_credit + `delta_vs_current_pounds` (>0 = cheaper than yours) + `approximate`. Best for "am I on the best tariff this month?". |
 
 ```
 hem__get_energy_metrics              → daily PnL, VWAP, slippage vs SVT/fixed shadow

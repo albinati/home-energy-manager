@@ -99,6 +99,7 @@ def test_compute_daily_pnl_subtracts_export_revenue(monkeypatch: pytest.MonkeyPa
     realised cost is 20 - 30 = -10p (i.e. net earnings)."""
     tariff = "E-1R-AGILE-OUTGOING-TEST-207"
     monkeypatch.setattr(app_config, "OCTOPUS_EXPORT_TARIFF_CODE", tariff)
+    monkeypatch.setattr(app_config, "EXPORT_TARIFF_MODE", "outgoing_agile")
     day = date(2026, 5, 1)
     slot = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
     _save_execution(slot, kwh=1.0, agile_p=20.0)
@@ -118,8 +119,9 @@ def test_compute_daily_pnl_subtracts_export_revenue(monkeypatch: pytest.MonkeyPa
 def test_compute_daily_pnl_falls_back_to_flat_export_rate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """No Outgoing tariff configured → flat ``EXPORT_RATE_PENCE`` is used."""
+    """Outgoing-Agile mode with no rate rows → flat ``EXPORT_RATE_PENCE`` is used."""
     monkeypatch.setattr(app_config, "OCTOPUS_EXPORT_TARIFF_CODE", "")
+    monkeypatch.setattr(app_config, "EXPORT_TARIFF_MODE", "outgoing_agile")
     monkeypatch.setattr(app_config, "EXPORT_RATE_PENCE", 15.0)
     day = date(2026, 5, 1)
     t0 = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
@@ -134,6 +136,32 @@ def test_compute_daily_pnl_falls_back_to_flat_export_rate(
     assert p["export_revenue_gbp"] == pytest.approx(0.30, abs=1e-3)
     # Net: 5p import - 30p export = -25p net cost
     assert p["realised_cost_gbp"] == pytest.approx(-0.25, abs=1e-3)
+
+
+def test_compute_daily_pnl_values_export_at_flat_seg_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default EXPORT_TARIFF_MODE=seg_flat: realised export is valued at the flat
+    SEG (EXPORT_SEG_RATE_PENCE), NOT the Outgoing Agile curve — even when Agile
+    export rates are present. The Agile alternative is still exposed separately."""
+    tariff = "E-1R-AGILE-OUTGOING-TEST-SEG"
+    monkeypatch.setattr(app_config, "OCTOPUS_EXPORT_TARIFF_CODE", tariff)
+    monkeypatch.setattr(app_config, "EXPORT_TARIFF_MODE", "seg_flat")
+    monkeypatch.setattr(app_config, "EXPORT_SEG_RATE_PENCE", 4.10)
+    monkeypatch.setattr(app_config, "EXPORT_METER_START_DATE", "")
+    day = date(2026, 5, 1)
+    slot = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    _save_execution(slot, kwh=1.0, agile_p=20.0)
+    _save_export_rate(slot, 30.0, tariff)  # Agile would pay 30p
+    _save_pv_sample(slot, 2.0)
+    _save_pv_sample(slot + timedelta(minutes=30), 2.0)  # 1 kWh exported
+
+    p = pnl.compute_daily_pnl(day)
+    # Realised export = 1 kWh × 4.10p SEG (the actual), not 30p Agile.
+    assert p["export_revenue_gbp"] == pytest.approx(0.041, abs=1e-3)
+    assert p["export_revenue_seg_gbp"] == pytest.approx(0.041, abs=1e-3)
+    # The Agile alternative is surfaced for the side-by-side comparison.
+    assert p["export_revenue_agile_gbp"] == pytest.approx(0.30, abs=1e-3)
 
 
 def test_compute_daily_pnl_with_no_export_keeps_old_behaviour() -> None:
@@ -159,6 +187,7 @@ def test_delta_vs_svt_flips_sign_when_export_is_significant(
     brief reports a deficit but the system actually saved money vs SVT."""
     tariff = "E-1R-AGILE-OUTGOING-TEST-207"
     monkeypatch.setattr(app_config, "OCTOPUS_EXPORT_TARIFF_CODE", tariff)
+    monkeypatch.setattr(app_config, "EXPORT_TARIFF_MODE", "outgoing_agile")
     monkeypatch.setattr(app_config, "SVT_RATE_PENCE", 25.0)
 
     day = date(2026, 5, 1)

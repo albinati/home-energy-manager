@@ -536,42 +536,50 @@ export interface ApiQuotaResponse {
   force_refresh_available_in_seconds?: number;
 }
 
-/* ----- /tariffs/dashboard (POST) — comparison vs Octopus catalogue ----- */
+/* ----- GET /tariffs/compare — fair per-slot tariff comparison ----- */
 
-export interface TariffTotalRow {
+export interface FairTariffRow {
   product_code: string;
   display_name: string;
   pricing: "half_hourly" | "time_of_use" | "flat" | string;
-  total_pence: number;
-  daily_avg_pence: number;
-  annual_pounds: number;
-  standing_per_day: number;
-  unit_rate_pence: number;
-  contract_type?: string;
-  contract_months?: number;
-  exit_fee_pounds?: number;
-  is_green?: boolean;
-  wins?: number;
-  is_current?: boolean;
+  is_current: boolean;
+  approximate: boolean;          // non-current half-hourly priced by proxy
+  import_cost_pence: number;
+  standing_pence: number;
+  export_credit_pence: number;
+  negative_credit_pence: number; // ≤0 — bill credit from negative-price imports
+  net_pence: number;             // import + standing − export_credit
+  import_kwh: number;
+  export_kwh: number;
+  n_days: number;
+}
+
+export interface FairCompareResponse {
+  period_start: string;
+  period_end: string;
+  requested_start?: string | null;
+  clamped: boolean;
+  clamp_reason?: string | null;
+  n_days: number;
+  days_with_data: number;
+  basis: { import_kwh: number; export_kwh: number };
+  current_product_code: string;
+  tariffs: FairTariffRow[];
+  winner_product_code?: string | null;
   savings_vs_current_pounds: number;
+  catalogue_unavailable: boolean;
+  data_source: string;
+  export?: FairCompareExport | null;
 }
 
-export interface TariffDashboardUsage {
-  total_import_kwh: number;
-  total_export_kwh: number;
-  total_days: number;
-}
-
-export interface TariffDashboardResponse {
-  ok: boolean;
-  error?: string | null;
-  granularity?: "daily" | "weekly" | "monthly" | string;
-  periods?: Array<{ label: string; import_kwh: number; export_kwh: number; days: number; costs: Record<string, number>; winner: string }>;
-  totals?: TariffTotalRow[];
-  current_product_code?: string;
-  current_annual_pounds?: number;
-  usage?: TariffDashboardUsage;
-  data_source?: string;
+export interface FairCompareExport {
+  export_kwh: number;
+  mode: string;                  // seg_flat | outgoing_agile (the actual one)
+  seg_rate_p: number;
+  seg_revenue_pence: number;     // flat SEG revenue (actual)
+  agile_revenue_pence: number;   // Outgoing Agile alternative on the same kWh
+  agile_avg_p: number;
+  uplift_if_switch_pence: number;
 }
 
 export interface MetricsResponse {
@@ -608,8 +616,8 @@ export interface MetricsResponse {
   today_import_kwh?: number;
   today_export_kwh?: number;
   // FIXED_TARIFF_* from env — empty/0 when the household hasn't configured
-  // a "previous fixed contract" comparison. Used by TariffComparison to
-  // replay BG Fixed v58 (etc.) against the real-usage block.
+  // a "previous fixed contract" comparison. The fair compare engine replays it
+  // (BG Fixed v58, etc.) against the measured-usage block as a candidate tariff.
   fixed_tariff?: {
     label?: string | null;
     rate_pence?: number | null;

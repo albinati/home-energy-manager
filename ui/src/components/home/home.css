@@ -30,3 +30,12 @@
   0%   { background-position: 100% 0; }
   100% { background-position: -100% 0; }
 }
+
+/* Tariff link card — replaces the inline comparison widget; links to /insights. */
+.tariff-link-card {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--space-3);
+  padding: var(--space-2) var(--space-1); text-decoration: none; color: inherit;
+}
+.tariff-link-card:hover .tariff-link-cta { color: var(--accent); }
+.tariff-link-main { font-size: var(--font-sm); min-width: 0; }
+.tariff-link-cta { flex: none; font-size: var(--font-sm); font-weight: 600; color: var(--text-dim); }
