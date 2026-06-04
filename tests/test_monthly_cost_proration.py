@@ -218,36 +218,3 @@ def test_usage_days_current_month_is_elapsed(monkeypatch):
     imp, exp, days = tariff_engine._get_usage_data(months_back=1)
     assert days == today.day
 
-
-# ── tariff_engine windowed usage (period navigator) ──────────────────────────
-
-def test_daily_usage_explicit_window_filters_to_range(monkeypatch):
-    """An explicit window restricts daily usage to exactly that date range."""
-    from datetime import timedelta
-    # Force the Octopus + Fox paths off so we land on the synthetic generator,
-    # which deterministically emits one row per day in the window.
-    monkeypatch.setattr(config, "OCTOPUS_API_KEY", "", raising=False)
-    monkeypatch.setattr(config, "OCTOPUS_MPAN_IMPORT", "", raising=False)
-    monkeypatch.setattr(config, "OCTOPUS_MPAN_1", "", raising=False)
-    monkeypatch.setattr(tariff_engine.config, "foxess_client_kwargs", lambda: (_ for _ in ()).throw(RuntimeError("no fox")), raising=False)
-
-    today = date.today()
-    wf = today - timedelta(days=5)
-    wt = today - timedelta(days=2)
-    rows = tariff_engine._get_daily_usage(window_from=wf, window_to=wt)
-    dates = [date.fromisoformat(r["date"]) for r in rows]
-    assert dates == [wf + timedelta(days=i) for i in range(4)]  # wf..wt inclusive
-    assert all(wf <= d <= wt for d in dates)
-
-
-def test_daily_usage_window_clamps_future_to_today(monkeypatch):
-    from datetime import timedelta
-    monkeypatch.setattr(config, "OCTOPUS_API_KEY", "", raising=False)
-    monkeypatch.setattr(config, "OCTOPUS_MPAN_IMPORT", "", raising=False)
-    monkeypatch.setattr(config, "OCTOPUS_MPAN_1", "", raising=False)
-    monkeypatch.setattr(tariff_engine.config, "foxess_client_kwargs", lambda: (_ for _ in ()).throw(RuntimeError("no fox")), raising=False)
-
-    today = date.today()
-    rows = tariff_engine._get_daily_usage(window_from=today - timedelta(days=1), window_to=today + timedelta(days=10))
-    dates = [date.fromisoformat(r["date"]) for r in rows]
-    assert max(dates) == today  # never returns future days

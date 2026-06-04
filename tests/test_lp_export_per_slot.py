@@ -51,8 +51,19 @@ def test_save_export_rates_idempotent_upsert():
     assert got[0]["value_inc_vat"] == 25.0
 
 
+def test_build_export_price_line_flat_seg_when_mode_seg_flat(monkeypatch):
+    """seg_flat mode → a flat EXPORT_SEG_RATE_PENCE line (the real marginal payout),
+    regardless of the Agile rates, so the LP doesn't over-export."""
+    from src.scheduler.optimizer import _build_export_price_line
+    monkeypatch.setattr(config, "EXPORT_TARIFF_MODE", "seg_flat")
+    monkeypatch.setattr(config, "EXPORT_SEG_RATE_PENCE", 4.10)
+    slots = [datetime(2026, 5, 1, 12, 0, tzinfo=UTC), datetime(2026, 5, 1, 12, 30, tzinfo=UTC)]
+    assert _build_export_price_line(slots) == [4.10, 4.10]
+
+
 def test_build_export_price_line_returns_none_when_tariff_empty(monkeypatch):
     from src.scheduler.optimizer import _build_export_price_line
+    monkeypatch.setattr(config, "EXPORT_TARIFF_MODE", "outgoing_agile")
     monkeypatch.setattr(config, "OCTOPUS_EXPORT_TARIFF_CODE", "")
     slots = [datetime(2026, 5, 1, 12, 0, tzinfo=UTC)]
     assert _build_export_price_line(slots) is None
@@ -60,6 +71,7 @@ def test_build_export_price_line_returns_none_when_tariff_empty(monkeypatch):
 
 def test_build_export_price_line_returns_none_when_table_empty(monkeypatch):
     from src.scheduler.optimizer import _build_export_price_line
+    monkeypatch.setattr(config, "EXPORT_TARIFF_MODE", "outgoing_agile")
     monkeypatch.setattr(config, "OCTOPUS_EXPORT_TARIFF_CODE", "E-1R-AGILE-OUTGOING-19-05-13-H")
     slots = [datetime(2026, 5, 1, 12, 0, tzinfo=UTC)]
     assert _build_export_price_line(slots) is None
@@ -67,6 +79,7 @@ def test_build_export_price_line_returns_none_when_table_empty(monkeypatch):
 
 def test_build_export_price_line_matches_per_slot_rows(monkeypatch):
     from src.scheduler.optimizer import _build_export_price_line
+    monkeypatch.setattr(config, "EXPORT_TARIFF_MODE", "outgoing_agile")
     monkeypatch.setattr(config, "OCTOPUS_EXPORT_TARIFF_CODE", "X")
     monkeypatch.setattr(config, "EXPORT_RATE_PENCE", 15.0)
     db.save_agile_export_rates(

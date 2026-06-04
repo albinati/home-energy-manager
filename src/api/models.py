@@ -638,6 +638,56 @@ class TariffDashboardResponse(BaseModel):
     data_source: str | None = None
 
 
+# ── Fair per-slot tariff comparison (GET /tariffs/compare) ───────────────────
+class FairTariffRow(BaseModel):
+    product_code: str
+    display_name: str
+    pricing: str                       # flat | time_of_use | half_hourly | …
+    is_current: bool = False
+    approximate: bool = False          # priced by proxy (non-current half-hourly)
+    import_cost_pence: float
+    standing_pence: float
+    export_credit_pence: float
+    negative_credit_pence: float       # subset of import_cost from negative-price slots (≤0)
+    net_pence: float                   # import + standing − export_credit
+    import_kwh: float
+    export_kwh: float
+    n_days: int
+
+
+class FairCompareBasis(BaseModel):
+    import_kwh: float
+    export_kwh: float
+
+
+class FairCompareExport(BaseModel):
+    export_kwh: float
+    mode: str                          # seg_flat | outgoing_agile (the actual one)
+    seg_rate_p: float
+    seg_revenue_pence: float           # flat SEG revenue (actual)
+    agile_revenue_pence: float         # Outgoing Agile alternative on the same kWh
+    agile_avg_p: float
+    uplift_if_switch_pence: float      # agile − seg
+
+
+class FairCompareResponse(BaseModel):
+    period_start: str
+    period_end: str
+    requested_start: str | None = None
+    clamped: bool = False
+    clamp_reason: str | None = None
+    n_days: int
+    days_with_data: int
+    basis: FairCompareBasis
+    current_product_code: str
+    tariffs: list[FairTariffRow] = []
+    winner_product_code: str | None = None
+    savings_vs_current_pounds: float = 0.0
+    catalogue_unavailable: bool = False
+    data_source: str = "measured_per_slot"
+    export: FairCompareExport | None = None
+
+
 # ── Octopus account + consumption models ─────────────────────────────────────
 
 class OctopusCurrentTariffResponse(BaseModel):

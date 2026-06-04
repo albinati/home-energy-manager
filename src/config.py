@@ -317,6 +317,12 @@ class Config:
     # margin. Override via env to tighten.
     HEARTBEAT_INTERVAL_SECONDS: int = int(os.getenv("HEARTBEAT_INTERVAL_SECONDS", "300"))
     SVT_RATE_PENCE: float = float(os.getenv("SVT_RATE_PENCE", "24.50"))
+    # SVT daily standing charge for the shadow comparison. Defaults to 0 →
+    # callers fall back to MANUAL_STANDING_CHARGE_PENCE_PER_DAY. Set when the SVT
+    # standing differs from your Agile standing so the comparison is per-tariff.
+    SVT_STANDING_PENCE_PER_DAY: float = float(
+        os.getenv("SVT_STANDING_PENCE_PER_DAY", "0")
+    )
     OPTIMIZATION_PEAK_THRESHOLD_PENCE: float = float(
         os.getenv("OPTIMIZATION_PEAK_THRESHOLD_PENCE", "25")
     )
@@ -587,6 +593,17 @@ class Config:
     # Optional: Octopus Agile Export tariff code for SEG export rate fetch.
     # E.g. E-1R-AGILE-OUTGOING-24-10-01-C. Leave blank if not on export tariff.
     OCTOPUS_EXPORT_TARIFF_CODE: str = (os.getenv("OCTOPUS_EXPORT_TARIFF_CODE") or "").strip()
+    # Which export tariff the household is ACTUALLY paid on (drives realised £ +
+    # the LP's export valuation). "seg_flat" = a flat SEG at EXPORT_SEG_RATE_PENCE
+    # (the real bill — confirmed via the Octopus statement); "outgoing_agile" =
+    # the per-slot Outgoing Agile curve from agile_export_rates. The other one is
+    # always computed too, for the side-by-side comparison in the Insights tab.
+    EXPORT_TARIFF_MODE: str = (os.getenv("EXPORT_TARIFF_MODE") or "seg_flat").strip().lower()
+    # Flat Smart Export Guarantee rate (p/kWh) actually paid when on the SEG.
+    EXPORT_SEG_RATE_PENCE: float = float(os.getenv("EXPORT_SEG_RATE_PENCE", "4.10"))
+    # Export meter activation date (ISO). Export before this earns nothing (the
+    # export MPAN wasn't live yet). Blank = credit all export.
+    EXPORT_METER_START_DATE: str = (os.getenv("EXPORT_METER_START_DATE") or "").strip()
     # Grid Supply Point (GSP) letter A-P for regional tariff lookup.
     # Default H = South East England (London W4). Auto-detected from account if not set.
     OCTOPUS_GSP: str = (os.getenv("OCTOPUS_GSP") or "H").strip().upper()

@@ -18,25 +18,42 @@ def _day_bounds(d: date) -> tuple[str, str]:
     return start.isoformat(), end.isoformat()
 
 
-def _realised_export_pence(day: date) -> tuple[float, float]:
-    """Sum per-slot ``export_kwh × export_rate_pence`` for the day.
+def _seg_flat_rate_pence() -> float:
+    """The flat Smart Export Guarantee rate (p/kWh) the household is actually paid."""
+    return float(config.EXPORT_SEG_RATE_PENCE or 0)
 
-    Returns ``(export_revenue_pence, export_kwh_total)``. Per-slot export kWh
-    comes from :func:`db.half_hourly_grid_export_kwh_for_day` (trapezoidal
-    integration of ``pv_realtime_history.grid_export_kw``). Per-slot export
-    rates come from ``agile_export_rates`` when ``OCTOPUS_EXPORT_TARIFF_CODE``
-    is configured; otherwise (or for unmatched slots) the flat
-    ``EXPORT_RATE_PENCE`` constant is used.
 
-    Closes #207: ``compute_daily_pnl`` previously sank only import × import-
-    tariff and silently dropped export earnings. On the user's tariff (Outgoing
-    Agile), peak export hours land at 30-60p/kWh — losing them flipped the
-    delta-vs-SVT sign on solar-heavy days (e.g. 2026-05-01 reported as
-    -£0.30 deficit when the actual delta was +£0.40 surplus).
+def _export_meter_start() -> date | None:
+    """Export-meter activation date; export before it earns nothing (MPAN not live)."""
+    raw = (config.EXPORT_METER_START_DATE or "").strip()
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(raw)
+    except ValueError:
+        logger.warning("EXPORT_METER_START_DATE=%r is not a valid ISO date — ignoring", raw)
+        return None
+
+
+def export_revenues_for_day(day: date) -> dict[str, float]:
+    """BOTH export valuations for ``day`` on the same measured kWh:
+
+    - ``seg_flat_pence`` — Σ export_kwh × flat ``EXPORT_SEG_RATE_PENCE`` (the real
+      SEG bill).
+    - ``agile_pence`` — Σ per-slot export_kwh × Outgoing Agile rate
+      (``agile_export_rates``; flat ``EXPORT_RATE_PENCE`` for unmatched slots) —
+      the alternative tariff, for the side-by-side comparison.
+
+    Per-slot export kWh from :func:`db.half_hourly_grid_export_kwh_for_day`. Zero
+    before :func:`_export_meter_start` (export MPAN not yet live). No VAT on export.
     """
+    empty = {"seg_flat_pence": 0.0, "agile_pence": 0.0, "export_kwh": 0.0, "agile_avg_p": 0.0}
+    start = _export_meter_start()
+    if start is not None and day < start:
+        return empty
     bucket_kwh = db.half_hourly_grid_export_kwh_for_day(day)
     if not bucket_kwh:
-        return 0.0, 0.0
+        return empty
     a, b = _day_bounds(day)
     rate_rows = (
         db.get_agile_export_rates_in_range(a, b)
@@ -46,49 +63,51 @@ def _realised_export_pence(day: date) -> tuple[float, float]:
     rate_by_start: dict[str, float] = {}
     for r in rate_rows:
         try:
-            iso = r["valid_from"].replace("+00:00", "Z")
-            rate_by_start[iso] = float(r["value_inc_vat"])
+            rate_by_start[r["valid_from"].replace("+00:00", "Z")] = float(r["value_inc_vat"])
         except (KeyError, TypeError, ValueError):
             continue
-    flat = float(config.EXPORT_RATE_PENCE)
-    revenue = 0.0
+    flat_agile = float(config.EXPORT_RATE_PENCE)
+    seg = _seg_flat_rate_pence()
+    seg_rev = 0.0
+    agile_rev = 0.0
     total_kwh = 0.0
-    matched = 0
     for slot_iso, kwh in bucket_kwh.items():
-        rate = rate_by_start.get(slot_iso, flat)
-        if slot_iso in rate_by_start:
-            matched += 1
-        revenue += kwh * rate
         total_kwh += kwh
-    logger.info(
-        "Realised export %s: %.3f kWh -> %.2fp (%d/%d slots matched per-slot rates, rest @ flat %.2fp)",
-        day.isoformat(), total_kwh, revenue, matched, len(bucket_kwh), flat,
+        seg_rev += kwh * seg
+        agile_rev += kwh * rate_by_start.get(slot_iso, flat_agile)
+    return {
+        "seg_flat_pence": seg_rev,
+        "agile_pence": agile_rev,
+        "export_kwh": total_kwh,
+        "agile_avg_p": (agile_rev / total_kwh) if total_kwh > 0 else 0.0,
+    }
+
+
+def _realised_export_pence(day: date) -> tuple[float, float]:
+    """Realised export revenue (pence) + kWh, valued at the ACTUAL export tariff
+    the household is paid on (``config.EXPORT_TARIFF_MODE``): ``seg_flat`` → flat
+    SEG, ``outgoing_agile`` → per-slot Agile. Same signature as before so every
+    consumer (compute_daily_pnl, fair_compare, brief, /energy/today-cumulative,
+    VWAP) stays correct. Rates are inc-VAT (no VAT on export)."""
+    rev = export_revenues_for_day(day)
+    actual = (
+        rev["agile_pence"]
+        if config.EXPORT_TARIFF_MODE == "outgoing_agile"
+        else rev["seg_flat_pence"]
     )
-    return revenue, total_kwh
+    return actual, rev["export_kwh"]
 
 
-def _realised_import_pence(day: date) -> tuple[float, float]:
-    """Per-slot ``import_kwh × Agile_slot_rate`` from MEASURED grid telemetry.
+def agile_import_rate_by_slot(day: date) -> dict[str, float]:
+    """Per-slot realised Agile import rate (p/kWh) for ``day``, keyed by ISO
+    half-hour slot start. Source: ``execution_log.agile_price_pence`` (the same
+    rate the LP priced against). Rates may be NEGATIVE on plunge-price slots.
 
-    Returns ``(import_cost_pence, import_kwh_total)``. Per-slot import kWh comes
-    from :func:`db.half_hourly_grid_import_kwh_for_day` (trapezoidal integration
-    of ``pv_realtime_history.grid_import_kw``). Per-slot import rates come from
-    ``agile_rates`` matched on ``valid_from``.
-
-    Issue #306: replaces the load-based pre-image used by the legacy
-    ``realised_import_gbp`` field, which billed *household load* (not net grid
-    import) at Agile rates and inflated absolute £ figures ~3-4×.
+    Shared by :func:`_realised_import_pence` and the fair tariff comparison so the
+    realised bill and the negative-price credit are computed off one rate map.
     """
-    bucket_kwh = db.half_hourly_grid_import_kwh_for_day(day)
-    if not bucket_kwh:
-        return 0.0, 0.0
     a, b = _day_bounds(day)
-    # Pull every Agile import row touching the day (no tariff_code filter —
-    # we want whatever rate row the LP would have priced against).
     rate_rows = db.get_execution_logs(from_ts=a, to_ts=b, limit=5000)
-    # The execution_log already aligns one row per slot with agile_price_pence
-    # at heartbeat write time, which is the same source the LP uses. Match
-    # buckets by slot ISO.
     rate_by_start: dict[str, float] = {}
     for r in rate_rows:
         ts = r.get("timestamp")
@@ -104,6 +123,78 @@ def _realised_import_pence(day: date) -> tuple[float, float]:
         slot = t.replace(minute=slot_min, second=0, microsecond=0)
         slot_iso = slot.astimezone(UTC).isoformat().replace("+00:00", "Z")
         rate_by_start.setdefault(slot_iso, float(p))
+    return rate_by_start
+
+
+def _import_buckets_preferring_meter(day: date) -> dict[str, float]:
+    """Per-slot import kWh, preferring the Octopus METER over Fox telemetry.
+
+    The Octopus import meter is the billed truth; Fox CT-clamp telemetry under-
+    reads ~4% (sampling + >30min gaps). For a PAST day with metered data we use
+    it; today/live (no backfill yet) falls back to Fox.
+
+    Priority:
+      1. day < today AND metered ``execution_log`` rows exist → per-slot metered
+         consumption (the import MPAN reads grid import; keeps slot-level pricing).
+      2. only a daily ``octopus_daily_meter`` total → scale Fox per-slot buckets by
+         ``meter_total / fox_total`` (Fox shape, meter magnitude — approximate).
+      3. else → Fox per-slot (``half_hourly_grid_import_kwh_for_day``).
+    """
+    fox = db.half_hourly_grid_import_kwh_for_day(day)
+    # Local "today" (the backfill runs on the local plan day); a UTC date would
+    # mis-flag yesterday-local as "today" during the 00:00-01:00 BST window.
+    from zoneinfo import ZoneInfo
+    today = datetime.now(ZoneInfo(config.BULLETPROOF_TIMEZONE)).date()
+    if day >= today:
+        return fox
+    # 1. per-slot metered execution_log. The backfill tags real metered readings
+    # "metered"; slots it had to synthesise (heartbeat gap) are "metered_synthetic"
+    # — both are metered truth, so accept either (else gap days under-report).
+    a, b = _day_bounds(day)
+    metered: dict[str, float] = {}
+    for r in db.get_execution_logs(from_ts=a, to_ts=b, limit=5000):
+        if not (r.get("source") or "").startswith("metered"):
+            continue
+        ts = r.get("timestamp")
+        kwh = r.get("consumption_kwh")
+        if ts is None or kwh is None:
+            continue
+        try:
+            t = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            continue
+        slot = t.replace(minute=(t.minute // 30) * 30, second=0, microsecond=0)
+        slot_iso = slot.astimezone(UTC).isoformat().replace("+00:00", "Z")
+        metered[slot_iso] = metered.get(slot_iso, 0.0) + float(kwh)
+    if metered:
+        return metered
+    # 2. scale Fox by the daily meter total
+    meter = db.get_octopus_daily_meter(day.isoformat())
+    fox_total = sum(fox.values())
+    if meter and meter.get("import_kwh") and fox_total > 0:
+        ratio = float(meter["import_kwh"]) / fox_total
+        return {k: v * ratio for k, v in fox.items()}
+    # 3. Fox
+    return fox
+
+
+def _realised_import_pence(day: date) -> tuple[float, float]:
+    """Per-slot ``import_kwh × Agile_slot_rate``, preferring the metered grid
+    import (the billed truth) over Fox telemetry — see
+    :func:`_import_buckets_preferring_meter`.
+
+    Returns ``(import_cost_pence, import_kwh_total)``. Per-slot import rates come
+    from ``execution_log.agile_price_pence`` (inc-VAT; the same the LP priced
+    against). Negative rates pass through as a credit, no clamp.
+
+    Issue #306: replaces the load-based pre-image used by the legacy
+    ``realised_import_gbp`` field, which billed *household load* (not net grid
+    import) at Agile rates and inflated absolute £ figures ~3-4×.
+    """
+    bucket_kwh = _import_buckets_preferring_meter(day)
+    if not bucket_kwh:
+        return 0.0, 0.0
+    rate_by_start = agile_import_rate_by_slot(day)
     cost = 0.0
     total_kwh = 0.0
     matched = 0
@@ -170,9 +261,22 @@ def compute_daily_pnl(day: date) -> dict[str, Any]:
         if sk in ("negative", "cheap"):
             cheap_kwh += kwh
 
-    export_revenue, export_kwh = _realised_export_pence(day)
+    # One export integration; derive the actual from the mode (avoids calling
+    # _realised_export_pence, which re-runs export_revenues_for_day internally).
+    export_both = export_revenues_for_day(day)
+    export_revenue = (
+        export_both["agile_pence"]
+        if config.EXPORT_TARIFF_MODE == "outgoing_agile"
+        else export_both["seg_flat_pence"]
+    )
+    export_kwh = export_both["export_kwh"]
     real_import_cost, import_kwh = _realised_import_pence(day)
     standing_p = float(config.MANUAL_STANDING_CHARGE_PENCE_PER_DAY or 0)
+    # Per-tariff fairness (matches src/analytics/fair_compare): SVT uses its own
+    # standing; non-Agile shadows don't earn the Outgoing Agile export revenue —
+    # they'd be on the same flat SEG the household is actually on (EXPORT_SEG_RATE_PENCE).
+    svt_standing_p = float(config.SVT_STANDING_PENCE_PER_DAY or 0) or standing_p
+    seg_export = export_kwh * _seg_flat_rate_pence()
 
     # === Legacy "load-billed" view (counterfactual: if no solar/battery) ===
     realised = realised_import_load + standing_p - export_revenue
@@ -183,8 +287,8 @@ def compute_daily_pnl(day: date) -> dict[str, Any]:
 
     # === Real-money view (measured grid traffic × rates) ===
     realised_real = real_import_cost + standing_p - export_revenue
-    svt_real = (import_kwh * svt) + standing_p - export_revenue
-    fixed_real = (import_kwh * fixed) + standing_p - export_revenue
+    svt_real = (import_kwh * svt) + svt_standing_p - seg_export
+    fixed_real = (import_kwh * fixed) + standing_p - seg_export
     alpha_svt_real = (svt_real - realised_real) / 100.0
     alpha_fixed_real = (fixed_real - realised_real) / 100.0
 
@@ -200,6 +304,10 @@ def compute_daily_pnl(day: date) -> dict[str, Any]:
         "delta_vs_fixed_real_gbp": round(alpha_fixed_real, 4),
         # === Shared (true regardless of view) ===
         "export_revenue_gbp": round(export_revenue / 100.0, 4),
+        # Both export valuations for the side-by-side comparison (summed by
+        # compute_period_pnl). actual = seg or agile per EXPORT_TARIFF_MODE.
+        "export_revenue_seg_gbp": round(export_both["seg_flat_pence"] / 100.0, 4),
+        "export_revenue_agile_gbp": round(export_both["agile_pence"] / 100.0, 4),
         "export_kwh": round(export_kwh, 3),
         "standing_charge_gbp": round(standing_p / 100.0, 4),
         # === Legacy "load-billed" counterfactual (DO NOT quote as real money) ===
@@ -220,7 +328,7 @@ def compute_daily_pnl(day: date) -> dict[str, Any]:
     bg_standing = float(config.FIXED_TARIFF_STANDING_PENCE_PER_DAY or 0)
     if bg_rate > 0 and bg_standing > 0:
         bg_cost_load = (kwh_sum * bg_rate) + bg_standing
-        bg_cost_real = (import_kwh * bg_rate) + bg_standing - export_revenue
+        bg_cost_real = (import_kwh * bg_rate) + bg_standing - seg_export
         out["fixed_tariff_label"] = config.FIXED_TARIFF_LABEL or "fixed tariff"
         out["fixed_tariff_shadow_real_gbp"] = round(bg_cost_real / 100.0, 4)
         out["delta_vs_fixed_tariff_real_gbp"] = round((bg_cost_real - realised_real) / 100.0, 4)
@@ -413,6 +521,8 @@ def compute_period_pnl(start_day: date, end_day: date, *, label: str = "") -> di
                 "realised_cost_gbp": 0.0,
                 "realised_import_gbp": 0.0,
                 "export_revenue_gbp": 0.0,
+                "export_revenue_seg_gbp": 0.0,
+                "export_revenue_agile_gbp": 0.0,
                 "export_kwh": 0.0,
                 "standing_charge_gbp": 0.0,
                 "svt_shadow_gbp": 0.0,
@@ -442,6 +552,8 @@ def compute_period_pnl(start_day: date, end_day: date, *, label: str = "") -> di
         "delta_vs_fixed_real_gbp": 0.0,
         # Shared
         "export_revenue_gbp": 0.0,
+        "export_revenue_seg_gbp": 0.0,
+        "export_revenue_agile_gbp": 0.0,
         "export_kwh": 0.0,
         "standing_charge_gbp": 0.0,
         # Legacy load-billed axis

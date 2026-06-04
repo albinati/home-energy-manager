@@ -13,21 +13,21 @@ import {
   getEnergyPeriod,
   getDaikinStatus,
   getDaikinQuota,
-  getTariffDashboard,
+  getFairCompare,
   getPvToday,
   getDhwSchedule,
   getEnergyTodayCumulative,
 } from "../lib/endpoints";
+import { Link } from "wouter-preact";
 import { Widget } from "../components/common/Widget";
 import { Spinner } from "../components/common/Spinner";
-import { RefreshAction } from "../components/common/RefreshAction";
 import { RefreshCountdown } from "../components/common/RefreshCountdown";
 import { PeriodNavigator } from "../components/shell/PeriodNavigator";
-import { usePeriod, periodFetchOpts, periodDateRange } from "../lib/period";
+import { usePeriod, periodFetchOpts, periodLabel } from "../lib/period";
 import { LivePowerWidget } from "../components/cockpit/LivePowerWidget";
 import { Hero } from "../components/home/Hero";
 import { HeatingWidget } from "../components/home/HeatingWidget";
-import { TariffComparisonWidget } from "../components/home/TariffComparisonWidget";
+import { gbp } from "../lib/format";
 import type { MonthlyEnergy } from "../lib/types";
 import "../components/home/home.css";
 
@@ -113,12 +113,11 @@ export default function Landing() {
     () => getEnergyPeriod(period.gran, periodFetchOpts(period)),
     [period.gran, period.anchor],
   );
-  // Tariff comparison scoped to the SAME window as the navigator — the
-  // catalogue replay + usage now cover exactly the selected period, so its
-  // realised current-tariff row + fixed shadow (from periodInsights) line up.
-  // Deferred (bottom of page + heaviest single call): only fetch once idle.
-  const tariffDash = useFetch(
-    () => (deferred ? getTariffDashboard(1, "daily", 8, periodDateRange(period)) : Promise.resolve(null)),
+  // Fair tariff comparison for the selected period — a light summary for the
+  // home link card; the full breakdown lives on the /insights tab. Deferred
+  // (network: catalogue) so it doesn't compete with the above-the-fold data.
+  const fairCmp = useFetch(
+    () => (deferred ? getFairCompare(period.gran, period.anchor) : Promise.resolve(null)),
     [deferred, period.gran, period.anchor],
   );
 
@@ -179,12 +178,25 @@ export default function Landing() {
         </Widget>
       </div>
 
-      {/* ── MONEY (bottom of page) ─────────────────────────────────── */}
+      {/* ── MONEY (bottom of page) — link to the full Insights tab ──── */}
       <div class="widget-grid widget-band">
-        <Widget title="Tariff comparison" icon="📊" tone="savings" size="wide"
-                badge={tariffDash.data?.usage?.total_days ? `last ${tariffDash.data.usage.total_days}d of your usage` : undefined}
-                action={<RefreshAction onRefresh={tariffDash.refresh} loading={tariffDash.loading} />}>
-          <TariffComparisonWidget dashboard={tariffDash.data} dashboardLoading={!deferred || tariffDash.loading} metrics={metrics.data} period={periodInsights.data} periodLoading={periodInsights.loading} />
+        <Widget title="Tariff comparison" icon="📊" tone="savings" size="wide">
+          <Link href="/insights" class="tariff-link-card">
+            <div class="tariff-link-main">
+              {(() => {
+                const d = fairCmp.data;
+                if (!d || !d.tariffs.length) {
+                  return <span class="muted">Compare your usage against every tariff →</span>;
+                }
+                const winner = d.tariffs.find((r) => r.product_code === d.winner_product_code);
+                const onBest = winner?.is_current;
+                return onBest
+                  ? <span>You're on the cheapest tariff for {periodLabel(period)} — <strong>{winner?.display_name}</strong>.</span>
+                  : <span>Cheapest for {periodLabel(period)}: <strong>{winner?.display_name}</strong> — save <strong>{gbp(d.savings_vs_current_pounds)}</strong>.</span>;
+              })()}
+            </div>
+            <span class="tariff-link-cta">Compare →</span>
+          </Link>
         </Widget>
       </div>
     </div>
