@@ -3,10 +3,9 @@ import { PowerFlow } from "./PowerFlow";
 import { Icon, type IconName } from "../common/Icon";
 import { useAnimatedNumber } from "../../lib/useAnimatedNumber";
 import { reducedMotion } from "../../lib/motion";
-import { kw, kwh, pct } from "../../lib/format";
-import type { CockpitState, CockpitNow, SchedulerTimeline, ExecutionTodayResponse, AgileTodayResponse, MetricsResponse, DhwScheduleRow } from "../../lib/types";
-import { TankScheduleBadges } from "../common/TankScheduleBadges";
-import { formatRelativeSlot, endLabelFor } from "../../lib/slotLabels";
+import { kw, kwh, pct, gbp } from "../../lib/format";
+import type { CockpitState, CockpitNow, SchedulerTimeline, ExecutionTodayResponse, AgileTodayResponse, MetricsResponse, DhwScheduleRow, TodayCumulativeResponse } from "../../lib/types";
+import { formatRelativeSlot, endLabelFor, tankLabelOf } from "../../lib/slotLabels";
 import "./cockpit.css";
 import "./live-power.css";
 
@@ -18,6 +17,7 @@ interface LivePowerWidgetProps {
   agile: AgileTodayResponse | null;
   metrics: MetricsResponse | null;
   dhwSchedule?: DhwScheduleRow[] | null;
+  todayCumulative?: TodayCumulativeResponse | null;
 }
 
 const RM = reducedMotion();
@@ -26,7 +26,7 @@ const RM = reducedMotion();
 // the live power-flow is the centerpiece, everything else (action verb,
 // battery SoC, Fox mode, tariff, scheduled windows) recedes to quiet
 // monochrome. Domain colour appears only on the flow + the focal-value tint.
-export function LivePowerWidget({ state, cockpit, timeline, execution, agile, metrics, dhwSchedule }: LivePowerWidgetProps) {
+export function LivePowerWidget({ state, cockpit, timeline, execution, agile, metrics, dhwSchedule, todayCumulative }: LivePowerWidgetProps) {
   const socPct = state.soc_pct ?? 0;
   const charging = state.battery_kw > 0.05;
   const discharging = state.battery_kw < -0.05;
@@ -58,11 +58,18 @@ export function LivePowerWidget({ state, cockpit, timeline, execution, agile, me
   const todayRange = computeTodayRange(execution);
   const nextEvent = nextSocEvent(timeline);
   const foxMode = cockpit.current_slot?.fox_mode ?? "—";
+  // SelfUse is the resting state already implied by the big net-power number up
+  // top — only surface the Fox mode pill when it's actively forcing the battery.
+  const foxActive = !["selfuse", "self_use", "idle", "—", ""].includes(foxMode.toLowerCase());
   const forced = timeline ? upcomingForcedWindows(timeline, 4) : [];
   const lpInfo = timeline ? { runId: timeline.run_id ?? null, runAt: timeline.run_at ?? null, planDate: timeline.plan_date ?? null } : null;
   const importP = agile?.current_import_p ?? null;
-  const exportP = agile?.current_export_p ?? null;
+  const exportP = agile?.current_export_p ?? cockpit.current_slot?.price_export_p ?? null;
   const importBand = classifyBand(importP, metrics?.cheap_threshold_pence, metrics?.peak_threshold_pence);
+  // What the system does NEXT — the soonest upcoming battery + tank actions,
+  // surfaced as one quiet line so "what's the plan about to do?" reads at a
+  // glance (tank chips moved to the Heating tile; this keeps tank awareness here).
+  const nextActions = buildNextActions(forced, dhwSchedule, cockpit.now_utc);
 
   return (
     <div class="livepower">
@@ -78,6 +85,17 @@ export function LivePowerWidget({ state, cockpit, timeline, execution, agile, me
           <span class="livepower-hero-unit">kW</span>
         </div>
         <div class="livepower-hero-cap">{netCaption}</div>
+        {nextActions.length > 0 && (
+          <div class="livepower-next" title="The next scheduled battery + tank actions">
+            <span class="livepower-next-label">Next</span>
+            {nextActions.map((a, i) => (
+              <span key={i} class="livepower-next-item" style={{ color: a.color }}>
+                <span class="livepower-next-dot" style={{ background: a.color }} />
+                {a.label} <span class="livepower-next-when">{a.when}</span>
+              </span>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* The power-flow centerpiece + battery panel */}
@@ -118,22 +136,41 @@ export function LivePowerWidget({ state, cockpit, timeline, execution, agile, me
 
       {/* Secondary: tariff rates + Fox mode + scheduled windows + LP run */}
       <div class="livepower-fox">
-        <div class="livepower-fox-rates" title="Live Agile p/kWh — import is what you'd pay now, export is what you'd earn now">
+        <div class="livepower-fox-rates" title="Live Agile p/kWh + how much you've imported/exported so far today (to now)">
           <span class="livepower-fox-rate">
             <span class="livepower-fox-rate-label">Import</span>
             <span class={`livepower-fox-rate-value livepower-rate--band-${importBand}`}>{importP != null ? `${importP.toFixed(2)}p` : "—"}</span>
+            {todayCumulative && (
+              <span class="livepower-fox-rate-sub">
+                {kwh(todayCumulative.import_kwh)} today ·{" "}
+                {todayCumulative.import_cost_gbp < -0.005
+                  ? <span class="livepower-credit" title="Paid to import on negative-price slots">+{gbp(Math.abs(todayCumulative.import_cost_gbp))} credit</span>
+                  : <span>{gbp(todayCumulative.import_cost_gbp)}</span>}
+              </span>
+            )}
           </span>
           <span class="livepower-fox-rate">
             <span class="livepower-fox-rate-label">Export</span>
-            <span class="livepower-fox-rate-value livepower-rate--export">{exportP != null ? `${exportP.toFixed(2)}p` : "—"}</span>
+            {exportP != null
+              ? <span class="livepower-fox-rate-value livepower-rate--export">{exportP.toFixed(2)}p</span>
+              : <span class="livepower-fox-rate-value livepower-fox-rate-value--none">no export</span>}
+            {todayCumulative && (
+              <span class="livepower-fox-rate-sub">
+                {kwh(todayCumulative.export_kwh)} today ·{" "}
+                <span class="livepower-rate--export">{gbp(todayCumulative.export_revenue_gbp)}</span>
+              </span>
+            )}
           </span>
         </div>
+        {(foxActive || forced.length > 0) && (
         <div class="livepower-fox-row">
-          <span class="livepower-fox-label">Fox mode</span>
-          <span class={`livepower-fox-mode livepower-fox-mode--${foxMode.toLowerCase()}`}>
-            <span class="livepower-fox-mode-dot" />
-            {foxMode}
-          </span>
+          <span class="livepower-fox-label">Grid plan</span>
+          {foxActive && (
+            <span class={`livepower-fox-mode livepower-fox-mode--${foxMode.toLowerCase()}`}>
+              <span class="livepower-fox-mode-dot" />
+              {foxMode}
+            </span>
+          )}
           {forced.length > 0 && (
             <span class="livepower-fox-windows">
               {forced.map((w) => {
@@ -154,10 +191,8 @@ export function LivePowerWidget({ state, cockpit, timeline, execution, agile, me
               })}
             </span>
           )}
-          {dhwSchedule && dhwSchedule.length > 0 && (
-            <TankScheduleBadges rows={dhwSchedule} nowIso={cockpit.now_utc} limit={4} />
-          )}
         </div>
+        )}
         {lpInfo && (lpInfo.runId != null || lpInfo.runAt) && (
           <div class="livepower-fox-debug">
             <span title="Last LP run id + wall time + plan target date">
@@ -198,6 +233,52 @@ function upcomingForcedWindows(timeline: SchedulerTimeline, limit: number): Forc
   }
   if (current) out.push(current);
   return out.slice(0, limit);
+}
+
+interface NextAction { label: string; when: string; whenMs: number; color: string; }
+
+// Merge the soonest upcoming battery window + the next future tank action into
+// a single chronologically-ordered "Next" line (max 2 items). Reuses the same
+// kind/label vocabulary as the chips; the dot colour here is SEMANTIC (charge =
+// ok/green, drain = warn/amber), intentionally not the band hue the chips use.
+function buildNextActions(
+  forced: ForcedWindow[],
+  dhw: DhwScheduleRow[] | null | undefined,
+  nowIso: string | undefined,
+): NextAction[] {
+  const out: NextAction[] = [];
+  const rel = (iso: string) => {
+    const r = formatRelativeSlot(iso, nowIso);
+    return `${r.dayLabel ? r.dayLabel + " " : ""}${r.timeLabel}`;
+  };
+  if (forced.length > 0) {
+    const w = forced[0];
+    out.push({ label: labelForKind(w.kind), when: rel(w.start_utc), whenMs: Date.parse(w.start_utc),
+               color: kindColorVar(w.kind) });
+  }
+  const nowMs = nowIso ? Date.parse(nowIso) : Date.now();
+  const nextTank = (dhw || [])
+    .filter((r) => r.start_utc && Date.parse(r.start_utc) > nowMs)
+    .sort((a, b) => Date.parse(a.start_utc!) - Date.parse(b.start_utc!))[0];
+  if (nextTank?.start_utc) {
+    out.push({ label: tankLabelOf(nextTank.action_type), when: rel(nextTank.start_utc),
+               whenMs: Date.parse(nextTank.start_utc), color: "var(--warn)" });
+  }
+  // Drop any entry whose timestamp failed to parse (whenMs NaN) — a NaN in the
+  // comparator leaves the sort order undefined and could surface the wrong action.
+  return out.filter((a) => Number.isFinite(a.whenMs)).sort((a, b) => a.whenMs - b.whenMs).slice(0, 2);
+}
+
+// Battery window kind → the same semantic colour the rest of the surface uses
+// (charge = ok/green, discharge/drain = warn/amber).
+function kindColorVar(k: string | undefined): string {
+  switch ((k || "").toLowerCase()) {
+    case "cheap":
+    case "negative":            return "var(--ok)";
+    case "peak_export":
+    case "pre_negative_export": return "var(--warn)";
+    default:                    return "var(--text-dim)";
+  }
 }
 
 // Kind conveyed by the leading coloured dot + band colour — no emoji.

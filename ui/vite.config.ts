@@ -14,6 +14,15 @@ import preact from "@preact/preset-vite";
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
   const apiTarget = env.VITE_DEV_API_TARGET || "http://localhost:8000";
+  // Optional split: route specific paths to a SECOND backend (e.g. local box
+  // running not-yet-deployed endpoints) while the rest hits VITE_DEV_API_TARGET.
+  // Comma-separated path prefixes in VITE_DEV_LOCAL_PATHS → VITE_DEV_LOCAL_API.
+  const localTarget = env.VITE_DEV_LOCAL_API || "http://localhost:8000";
+  const localPaths = (env.VITE_DEV_LOCAL_PATHS || "")
+    .split(",").map((p) => p.trim()).filter(Boolean);
+  const proxy: Record<string, { target: string; changeOrigin: boolean }> = {};
+  for (const p of localPaths) proxy[p] = { target: localTarget, changeOrigin: true };
+  proxy["/api"] = { target: apiTarget, changeOrigin: true };
 
   return {
     plugins: [preact()],
@@ -23,12 +32,7 @@ export default defineConfig(({ mode }) => {
     server: {
       port: 5173,
       strictPort: true,
-      proxy: {
-        "/api": {
-          target: apiTarget,
-          changeOrigin: true,
-        },
-      },
+      proxy,
     },
     build: {
       outDir: "dist",

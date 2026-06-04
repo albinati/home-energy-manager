@@ -6,8 +6,9 @@ import { ToastHost } from "./components/common/Toast";
 import { Spinner } from "./components/common/Spinner";
 import Landing from "./routes/landing";
 
-// Settings is lazy — off the critical path (home is the default route).
+// Settings + Report are lazy — off the critical path (home is the default route).
 const Settings = lazy(() => import("./routes/settings"));
+const Report = lazy(() => import("./routes/report"));
 
 export function App() {
   return (
@@ -17,6 +18,7 @@ export function App() {
         <Suspense fallback={<div class="page-padded"><Spinner label="Loading…" /></div>}>
           <Switch>
             <Route path="/" component={Landing} />
+            <Route path="/report" component={Report} />
             <Route path="/settings" component={Settings} />
             <Route>
               <div class="page-padded">

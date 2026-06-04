@@ -11,11 +11,22 @@
 .gauge-label {
   font-size: var(--font-sm);
   color: var(--text-dim);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.gauge-icon {
+  display: inline-flex;
+  color: var(--text-mute);
 }
 .gauge-value {
   font-size: var(--font-lg);
   font-variant-numeric: tabular-nums;
   color: var(--text);
+}
+.gauge-value-alt {
+  font-size: var(--font-xs);
+  color: var(--text-mute);
 }
 .gauge-track {
   position: relative;
@@ -32,6 +43,9 @@
 .gauge--thermal .gauge-fill { background: linear-gradient(90deg, var(--pv), var(--warn)); }
 .gauge--cool .gauge-fill { background: linear-gradient(90deg, var(--grid), var(--accent)); }
 .gauge--neutral .gauge-fill { background: var(--text-mute); }
+/* Outdoor temperature tones — by how warm it actually is. */
+.gauge--cold .gauge-fill { background: linear-gradient(90deg, var(--grid), var(--accent)); }
+.gauge--warm .gauge-fill { background: linear-gradient(90deg, var(--warn), var(--peak-export, var(--bad))); }
 /* target marker sits ABOVE the fill — overflow on track clips it, so render
    it as a full-height notch via a thin high-contrast line that isn't clipped. */
 .gauge-track .gauge-target {

@@ -62,6 +62,11 @@ export function HeatingControls({ dev, controlMode, onChanged }: HeatingControls
   const climateOn = dev?.climate_on ?? dev?.is_on ?? false;
   const tankOn = dev?.dhw_on ?? dev?.tank_power ?? false;
 
+  // Require a KNOWN device value that differs — otherwise (value absent) we'd let
+  // an Apply fire a redundant no-op write to the heat pump, burning Daikin quota.
+  const tankChanged = editable && !busy && dev?.tank_target != null && tankTarget !== dev.tank_target;
+  const lwtChanged = editable && !busy && dev?.lwt_offset != null && lwt !== dev.lwt_offset;
+
   return (
     <div class="heating-controls">
       <div class="heating-controls-head">
@@ -71,18 +76,25 @@ export function HeatingControls({ dev, controlMode, onChanged }: HeatingControls
             passive · read-only
           </span>
         )}
-        {active && (
-          <button type="button"
-                  class={`heating-controls-lock${unlocked ? " heating-controls-lock--open" : ""}`}
-                  aria-pressed={unlocked}
-                  title={unlocked ? "Manual control enabled — click to lock" : "Locked — click to enable manual control"}
-                  onClick={() => (unlocked ? setUnlocked(false) : setConfirmingUnlock(true))}>
-            {unlocked ? "🔓 editing" : "🔒 locked"}
-          </button>
-        )}
       </div>
 
-      <div class="heating-controls-cards">
+      {active && (
+        <div class={`hc-lockbar${unlocked ? " hc-lockbar--open" : ""}`}>
+          <span class="hc-lockbar-icon" aria-hidden="true">{unlocked ? "🔓" : "🔒"}</span>
+          <span class="hc-lockbar-text">
+            {unlocked
+              ? "Manual control on — what you apply is written to the heat pump."
+              : "Locked — the tank follows the automatic schedule."}
+          </span>
+          <button type="button" class={`btn btn--sm${unlocked ? " btn--ghost" : " btn--primary"}`}
+                  aria-pressed={unlocked}
+                  onClick={() => (unlocked ? setUnlocked(false) : setConfirmingUnlock(true))}>
+            {unlocked ? "Re-lock" : "Take control"}
+          </button>
+        </div>
+      )}
+
+      <div class={`heating-controls-cards${active && !unlocked ? " is-locked" : ""}`}>
         {/* Climate (space heating) — power + leaving-water offset */}
         <section class="hc-card">
           <header class="hc-card-head">
@@ -94,12 +106,11 @@ export function HeatingControls({ dev, controlMode, onChanged }: HeatingControls
           </header>
           <div class="hc-card-body">
             <span class="hc-card-label">Water offset</span>
-            <Stepper value={lwt} unit="°" step={0.5} disabled={!editable || busy}
-                     onStep={(d) => setLwt((v) => clamp(Math.round((v + d) * 2) / 2, LWT_MIN, LWT_MAX))} />
-            <button class="btn btn--sm hc-apply" disabled={!editable || busy || lwt === dev?.lwt_offset}
-                    onClick={() => run(`LWT offset ${lwt >= 0 ? "+" : ""}${lwt}`, () => setLwtOffset(lwt))}>
-              Apply
-            </button>
+            <Slider value={lwt} min={LWT_MIN} max={LWT_MAX} step={0.5} current={dev?.lwt_offset}
+                    unit="°" tone="cool" disabled={!editable || busy}
+                    onInput={(v) => setLwt(clamp(Math.round(v * 2) / 2, LWT_MIN, LWT_MAX))} />
+            <ApplyBtn changed={lwtChanged} label={`Set ${lwt >= 0 ? "+" : ""}${lwt}°`}
+                      onClick={() => run(`LWT offset ${lwt >= 0 ? "+" : ""}${lwt}`, () => setLwtOffset(lwt))} />
           </div>
         </section>
 
@@ -114,12 +125,11 @@ export function HeatingControls({ dev, controlMode, onChanged }: HeatingControls
           </header>
           <div class="hc-card-body">
             <span class="hc-card-label">Target</span>
-            <Stepper value={tankTarget} unit="°C" disabled={!editable || busy}
-                     onStep={(d) => setTankTarget((v) => clamp(v + d, TANK_MIN, TANK_MAX))} />
-            <button class="btn btn--sm hc-apply" disabled={!editable || busy || tankTarget === dev?.tank_target}
-                    onClick={() => run(`Tank set to ${tankTarget}°C`, () => setTankTemperature(tankTarget))}>
-              Apply
-            </button>
+            <Slider value={tankTarget} min={TANK_MIN} max={TANK_MAX} step={1} current={dev?.tank_target}
+                    unit="°C" tone="thermal" disabled={!editable || busy}
+                    onInput={(v) => setTankTarget(clamp(Math.round(v), TANK_MIN, TANK_MAX))} />
+            <ApplyBtn changed={tankChanged} label={`Set ${tankTarget}°C`}
+                      onClick={() => run(`Tank set to ${tankTarget}°C`, () => setTankTemperature(tankTarget))} />
           </div>
         </section>
       </div>
@@ -143,17 +153,43 @@ export function HeatingControls({ dev, controlMode, onChanged }: HeatingControls
   );
 }
 
-// Onecta-style − value + stepper.
-function Stepper({ value, unit = "°C", step = 1, disabled, onStep }: {
-  value: number; unit?: string; step?: number; disabled?: boolean; onStep: (delta: number) => void;
+// Slider with a tick marking the device's CURRENT value, so you see where you're
+// dragging relative to where the unit is now. Native range for a11y + touch.
+function Slider({ value, min, max, step = 1, current, unit, tone = "thermal", disabled, onInput }: {
+  value: number; min: number; max: number; step?: number; current?: number | null;
+  unit: string; tone?: "thermal" | "cool"; disabled?: boolean; onInput: (v: number) => void;
 }) {
+  const fmt = (v: number) => (v % 1 === 0 ? String(v) : v.toFixed(1));
+  const pct = (v: number) => Math.max(0, Math.min(1, (v - min) / (max - min))) * 100;
+  const curValid = current != null && Number.isFinite(current);
   return (
-    <div class="heating-stepper">
-      <button type="button" class="heating-stepper-btn" disabled={disabled} aria-label="decrease"
-              onClick={() => onStep(-step)}>−</button>
-      <span class="heating-stepper-value">{value % 1 === 0 ? value : value.toFixed(1)}{unit}</span>
-      <button type="button" class="heating-stepper-btn" disabled={disabled} aria-label="increase"
-              onClick={() => onStep(step)}>+</button>
+    <div class={`hc-slider hc-slider--${tone}${disabled ? " is-disabled" : ""}`}>
+      <div class="hc-slider-rail">
+        <div class="hc-slider-fill" style={{ width: `${pct(value)}%` }} />
+        {curValid && (
+          <span class="hc-slider-cur" style={{ left: `${pct(current as number)}%` }}
+                title={`now ${fmt(current as number)}${unit}`} />
+        )}
+        <input class="hc-slider-input" type="range" min={min} max={max} step={step}
+               value={value} disabled={disabled} aria-label={`Set value (${unit})`}
+               onInput={(e) => onInput(Number((e.target as HTMLInputElement).value))} />
+      </div>
+      <div class="hc-slider-readout">
+        <span class="hc-slider-value">{fmt(value)}{unit}</span>
+        {curValid && value !== current && (
+          <span class="hc-slider-from">from {fmt(current as number)}{unit}</span>
+        )}
+      </div>
     </div>
+  );
+}
+
+// Apply button — primary + pending value when there's a change, quiet otherwise.
+function ApplyBtn({ changed, label, onClick }: { changed: boolean; label: string; onClick: () => void }) {
+  return (
+    <button class={`btn btn--sm hc-apply${changed ? " btn--primary hc-apply--ready" : ""}`}
+            disabled={!changed} onClick={onClick}>
+      {changed ? label : "Apply"}
+    </button>
   );
 }

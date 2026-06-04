@@ -409,6 +409,28 @@ async def api_v1_schedule_history(limit: int = 200):
     return {"action_log": db.get_action_logs(limit=limit)}
 
 
+@app.get("/api/v1/action-log")
+async def api_v1_action_log(
+    device: str | None = None,
+    trigger: str | None = None,
+    limit: int = 200,
+    days: int | None = None,
+):
+    """Executed-action journal (tank / Fox battery / appliances).
+
+    Reads ``action_log`` — the source of truth for what actually fired. Optional
+    ``device`` (daikin|fox|appliance), ``trigger``, and ``days`` (only entries
+    from the last N days). Powers the Report/Journal UI tab.
+    """
+    since = None
+    if days is not None and days > 0:
+        since = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+    entries = await asyncio.to_thread(
+        db.get_action_logs, device, trigger, limit, since
+    )
+    return {"entries": entries}
+
+
 @app.get("/api/v1/weather")
 async def api_v1_weather():
     # Blocking (Open-Meteo HTTP + Daikin read) — offload so it doesn't stall
@@ -519,7 +541,17 @@ async def cockpit_now():
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     day_end = day_start + _td(days=1)
     import_rows = db.get_rates_for_period(tariff, day_start, day_end) if tariff else []
-    export_rows = db.get_rates_for_period(export_tariff, day_start, day_end) if export_tariff else []
+    # Export (Outgoing Agile) rates live in their OWN table — get_rates_for_period
+    # only reads agile_rates (import), so the export tariff is never found there.
+    # Use the dedicated getter the PnL/LP already rely on (issue: export p showed
+    # blank on the cockpit). Same row shape (valid_from/valid_to/value_inc_vat).
+    export_rows = (
+        db.get_agile_export_rates_in_range(
+            day_start.isoformat().replace("+00:00", "Z"),
+            day_end.isoformat().replace("+00:00", "Z"),
+        )
+        if export_tariff else []
+    )
 
     def _price_at(rows: list, t: _dt) -> tuple[float | None, str | None, str | None]:
         iso_t = t.isoformat().replace("+00:00", "Z")
@@ -2742,6 +2774,32 @@ async def energy_report(
     return EnergyReportResponse(**resp.model_dump(), summary=summary)
 
 
+@app.get("/api/v1/energy/today-cumulative")
+async def energy_today_cumulative():
+    """Today's grid import/export so far — kWh + real money, to now.
+
+    For *today*, realised telemetry (``pv_realtime_history``) only exists up to
+    the current moment, so ``compute_daily_pnl(today)`` IS the day-to-now figure.
+    ``import_cost_gbp`` is the real-money import cost from measured grid traffic
+    × per-slot Agile rates — it goes **negative (a credit)** on negative-price
+    slots, which is exactly what the Live-power widget surfaces. No standing
+    charge here (this is the energy in/out, not the net bill).
+    """
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo
+    from src.analytics.pnl import compute_daily_pnl
+
+    today = _dt.now(ZoneInfo(config.BULLETPROOF_TIMEZONE)).date()
+    pnl = await asyncio.to_thread(compute_daily_pnl, today)
+    return {
+        "date": today.isoformat(),
+        "import_kwh": pnl.get("import_kwh", 0.0),
+        "export_kwh": pnl.get("export_kwh", 0.0),
+        "import_cost_gbp": pnl.get("import_cost_gbp", 0.0),
+        "export_revenue_gbp": pnl.get("export_revenue_gbp", 0.0),
+    }
+
+
 @app.get("/api/v1/energy/insights", response_model=EnergyInsightsTextResponse)
 async def energy_insights():
     """Short narrative summary for OpenClaw: this month cost and equivalent gas.
@@ -3885,7 +3943,15 @@ async def agile_today():
     day_end = day_start + timedelta(days=1)
 
     import_rows = _db.get_rates_for_period(tariff, day_start, day_end) if tariff else []
-    export_rows = _db.get_rates_for_period(export_tariff, day_start, day_end) if export_tariff else []
+    # Export rates live in agile_export_rates (not agile_rates) — use the
+    # dedicated getter so the Outgoing tariff actually resolves (was blank).
+    export_rows = (
+        _db.get_agile_export_rates_in_range(
+            day_start.isoformat().replace("+00:00", "Z"),
+            day_end.isoformat().replace("+00:00", "Z"),
+        )
+        if export_tariff else []
+    )
 
     def _slot_price_at(rows: list, t: datetime) -> float | None:
         iso_t = t.isoformat().replace("+00:00", "Z")
@@ -4239,6 +4305,23 @@ async def execution_today(date: str | None = None):
     total_load = 0.0
     total_daikin_kwh = 0.0
 
+    # Per-slot appliance load (planned/typical kW while a washer/dryer/dishwasher
+    # job is armed or running). This is an ESTIMATE (typical_kw × 0.5h), not a
+    # metered value, and only present for armed/running jobs — but it lets the UI
+    # peel appliances out of the residual so "base load" is genuinely base.
+    appliance_kw_by_slot: dict[str, float] = {}
+    if buckets:
+        try:
+            from ..scheduler.appliance_dispatch import appliance_load_profile_kw
+            _isos = sorted(buckets.keys())
+            _d0 = datetime.fromisoformat(_isos[0].replace("Z", "+00:00"))
+            _d1 = datetime.fromisoformat(_isos[-1].replace("Z", "+00:00")) + timedelta(minutes=30)
+            for _dt, _kw in appliance_load_profile_kw(_d0, _d1).items():
+                _key = _dt.astimezone(UTC).isoformat().replace("+00:00", "Z")
+                appliance_kw_by_slot[_key] = float(_kw)
+        except Exception:
+            logger.debug("execution_today: appliance profile unavailable", exc_info=True)
+
     for slot_iso in sorted(buckets.keys()):
         ticks = buckets[slot_iso]
         # Sum consumption across ticks in the slot (real per-tick from heartbeat)
@@ -4262,6 +4345,9 @@ async def execution_today(date: str | None = None):
             daikin_kw = float(get_daikin_heating_kw(outdoor)) if outdoor is not None else 0.0
             daikin_kwh = min(daikin_kw * SLOT_HOURS, load_kwh)
         residual_kwh = max(0.0, load_kwh - daikin_kwh)
+        # Split residual into appliance (estimated) + true base load.
+        appliance_kwh = min(appliance_kw_by_slot.get(slot_iso, 0.0) * SLOT_HOURS, residual_kwh)
+        base_load_kwh = max(0.0, residual_kwh - appliance_kwh)
         # Costs: re-derive from the slot's totals (don't trust per-tick fakes)
         cost = load_kwh * agile_p if agile_p is not None else 0.0
         svt_cost = load_kwh * svt_rate if svt_rate is not None else 0.0
@@ -4277,6 +4363,8 @@ async def execution_today(date: str | None = None):
             "consumption_kwh": round(load_kwh, 3),
             "daikin_kwh_est": round(daikin_kwh, 3),
             "residual_kwh": round(residual_kwh, 3),
+            "appliance_kwh_est": round(appliance_kwh, 3),
+            "base_load_kwh_est": round(base_load_kwh, 3),
             "cost_realised_p": round(cost, 2),
             "cost_daikin_p": round(cost_daikin, 2),
             "cost_residual_p": round(cost_residual, 2),

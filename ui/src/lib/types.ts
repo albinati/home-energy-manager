@@ -207,6 +207,8 @@ export interface ExecutionSlot {
   consumption_kwh?: number | null;
   daikin_kwh_est?: number | null;
   residual_kwh?: number | null;
+  appliance_kwh_est?: number | null;   // estimated appliance load (armed jobs)
+  base_load_kwh_est?: number | null;    // residual − appliance = measured base load
   cost_realised_p?: number | null;
   cost_daikin_p?: number | null;
   cost_residual_p?: number | null;
@@ -463,6 +465,34 @@ export interface DhwScheduleRow {
 export interface DhwScheduleResponse {
   mode: string;
   rows: DhwScheduleRow[];
+}
+
+// GET /energy/today-cumulative — today's grid traffic so far (to now). Real-
+// money import cost goes NEGATIVE (a credit) on negative-price slots.
+export interface TodayCumulativeResponse {
+  date: string;
+  import_kwh: number;
+  export_kwh: number;
+  import_cost_gbp: number;       // <0 = we were paid to import (credit)
+  export_revenue_gbp: number;
+}
+
+// One executed action from action_log — GET /action-log.
+export interface ActionLogEntry {
+  id: number;
+  timestamp: string;
+  device: string;                // daikin | foxess | appliance
+  action: string;                // tank_warmup | max_heat | charge | washer_start | …
+  params: Record<string, unknown>;
+  result: string;                // success | failed | skipped
+  error_msg: string | null;
+  trigger: string | null;        // lp_dispatch | negative_window | user_manual | …
+  slot_kind: string | null;      // cheap | peak | negative | standard
+  agile_price_at_time: number | null;
+  actor?: string | null;
+}
+export interface ActionLogResponse {
+  entries: ActionLogEntry[];
 }
 
 // Daikin operation modes accepted by POST /daikin/mode.

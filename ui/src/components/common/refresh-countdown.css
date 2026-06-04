@@ -1,0 +1,32 @@
+.refresh-cd {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  position: relative;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px;
+  color: var(--text-mute);
+  font-variant-numeric: tabular-nums;
+}
+.refresh-cd:hover { color: var(--text); }
+.refresh-cd:disabled { cursor: default; opacity: 0.7; }
+.refresh-cd svg { display: block; }
+.refresh-cd-num {
+  position: absolute;
+  left: 11px;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 9px;
+  font-weight: 600;
+  pointer-events: none;
+}
+.refresh-cd-label { font-size: var(--font-2xs); }
+.refresh-cd--plain .refresh-cd-glyph { font-size: var(--font-md); }
+
+@keyframes refresh-cd-spin { to { transform: rotate(360deg); } }
+.refresh-cd .spin, .refresh-cd-glyph.spin { animation: refresh-cd-spin 0.8s linear infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .refresh-cd .spin, .refresh-cd-glyph.spin { animation: none; }
+}

@@ -1,5 +1,5 @@
 import type { MetricsResponse, CockpitNow, AgileTodayResponse, MonthlyEnergy, PeriodInsightsResponse } from "../../lib/types";
-import { gbp, gbpSigned, kwh } from "../../lib/format";
+import { gbp, kwh } from "../../lib/format";
 import { useAnimatedNumber } from "../../lib/useAnimatedNumber";
 import { isCurrentPeriod, periodLabel, type PeriodState } from "../../lib/period";
 import { CostBreakdownChart } from "./CostBreakdownChart";
@@ -58,6 +58,7 @@ export function Hero({ metrics, cockpit, agile, monthly, period, periodState, pe
         export_kwh: activeMonths.reduce((s, m) => s + (m.energy?.export_kwh ?? 0), 0),
         export_earn: activeMonths.reduce((s, m) => s + (m.cost?.export_earnings_pounds ?? 0), 0),
         total_cost: activeMonths.reduce((s, m) => s + (m.cost?.net_cost_pounds ?? 0), 0),
+        saved_vs_fixed: activeMonths.reduce((s, m) => s + (m.cost?.delta_vs_fixed_pounds ?? 0), 0),
       }
     : null;
 
@@ -69,6 +70,7 @@ export function Hero({ metrics, cockpit, agile, monthly, period, periodState, pe
   const exportKwhAnim = useAnimatedNumber(lifetime?.export_kwh ?? null);
   const exportEarnAnim = useAnimatedNumber(lifetime?.export_earn ?? null);
   const totalCostAnim = useAnimatedNumber(lifetime?.total_cost ?? null);
+  const savedVsFixedAnim = useAnimatedNumber(lifetime?.saved_vs_fixed ?? null);
 
   // Live-now strip — always current, ignores the period selector.
   const curImportP = cockpit?.current_slot?.price_import_p ?? null;
@@ -93,7 +95,7 @@ export function Hero({ metrics, cockpit, agile, monthly, period, periodState, pe
           {savedAnim != null && (
             <div class="hero-subline">
               <strong class={savedAnim >= 0 ? "hero-strong-pos" : "hero-strong-neg"}>
-                {savedAnim >= 0 ? "Saved " : "Cost "}{gbpSigned(savedAnim)}
+                {savedAnim >= 0 ? "Saved " : "Extra "}{gbp(Math.abs(savedAnim))}
               </strong>
               &nbsp;vs {fixedLabel}
               {periodExport != null && periodExport > 0 && (
@@ -105,7 +107,7 @@ export function Hero({ metrics, cockpit, agile, monthly, period, periodState, pe
             <div class="hero-subline hero-subline-dma">
               Today so far:&nbsp;
               <strong class={todayAnim >= 0 ? "hero-strong-pos" : "hero-strong-neg"}>
-                {gbpSigned(todayAnim)}
+                {todayAnim >= 0 ? "Saved " : "Extra "}{gbp(Math.abs(todayAnim))}
               </strong>
               &nbsp;vs {fixedLabel}
               <span class="hero-est-tag" title="Estimate — today's metered cost confirms after the next-day Octopus backfill.">est</span>
@@ -132,6 +134,12 @@ export function Hero({ metrics, cockpit, agile, monthly, period, periodState, pe
               <HeroStat value={kwh(exportKwhAnim ?? 0, 0)} label="exported" />
               <HeroStat value={gbp(exportEarnAnim ?? 0)} label="export earnings" />
               <HeroStat value={gbp(totalCostAnim ?? 0)} label="total bills" />
+              <HeroStat
+                value={gbp(Math.abs(savedVsFixedAnim ?? 0))}
+                label={(savedVsFixedAnim ?? 0) >= 0 ? "saved vs fixed" : "extra vs fixed"}
+                tone={(savedVsFixedAnim ?? 0) >= 0 ? "pos" : "neg"}
+                title={`Net £ vs ${fixedLabel} across ${lifetime.months} active months on Agile`}
+              />
             </div>
           </div>
         )}
@@ -150,10 +158,10 @@ function SkelHero() {
   return <span class="skel-text" style={{ width: "8rem", height: "0.85em" }} />;
 }
 
-function HeroStat({ value, label }: { value: string; label: string }) {
+function HeroStat({ value, label, tone, title }: { value: string; label: string; tone?: "pos" | "neg"; title?: string }) {
   return (
-    <div class="hero-stat">
-      <div class="hero-stat-value">{value}</div>
+    <div class="hero-stat" title={title}>
+      <div class={`hero-stat-value${tone ? ` hero-stat-value--${tone}` : ""}`}>{value}</div>
       <div class="hero-stat-label">{label}</div>
     </div>
   );

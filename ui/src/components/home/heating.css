@@ -36,27 +36,22 @@
   text-transform: uppercase;
   margin-bottom: var(--space-2);
 }
-.heating-split-row {
-  display: flex;
-  gap: var(--space-3);
-  flex-wrap: wrap;
-}
-.heating-split-item {
+.heating-energy-value {
   display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  font-size: var(--font-sm);
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: var(--font-lg);
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
+  color: var(--text);
 }
-.heating-split-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
+.heating-energy-est {
+  font-size: var(--font-2xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-mute);
 }
-.heating-split-dot--dhw { background: var(--warn); }
-.heating-split-dot--space { background: var(--accent); }
-.heating-split-name { color: var(--text-dim); }
-.heating-split-value { font-weight: 700; }
 
 /* --- Manual Daikin controls (P3) --- */
 .heating-controls {
@@ -105,22 +100,6 @@
   flex-direction: column;
   gap: var(--space-3);
 }
-/* Lock affordance on the controls */
-.heating-controls-lock {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: var(--font-xs);
-  padding: 2px 8px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: var(--bg-card-2);
-  color: var(--text-dim);
-  cursor: pointer;
-}
-.heating-controls-lock--open { color: var(--warn); border-color: var(--warn); }
-.heating-controls-lock:disabled { opacity: 0.5; cursor: not-allowed; }
-
 /* Secondary gauges (outdoor / LWT) below the tank dial */
 .heating-gauges--secondary {
   flex-direction: row;
@@ -129,36 +108,64 @@
 }
 .heating-gauges--secondary > * { flex: 1; min-width: 0; }
 
-/* Onecta-style − value + stepper */
-.heating-stepper {
-  display: inline-flex;
+/* Lock bar — explicit state + action for manual control */
+.hc-lockbar {
+  display: flex;
   align-items: center;
   gap: var(--space-2);
-  flex: 1;
-}
-.heating-stepper-btn {
-  width: 28px;
-  height: 28px;
-  border-radius: 999px;
+  padding: var(--space-2) var(--space-3);
   border: 1px solid var(--border);
+  border-radius: var(--radius, 10px);
   background: var(--bg-card-2);
-  color: var(--text);
-  font-size: 1.1rem;
-  line-height: 1;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  margin-bottom: var(--space-3);
 }
-.heating-stepper-btn:hover:not(:disabled) { background: var(--bg-card-3); border-color: var(--border-strong); }
-.heating-stepper-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.heating-stepper-value {
-  min-width: 3.2rem;
-  text-align: center;
-  font-variant-numeric: tabular-nums;
-  font-weight: 600;
-  color: var(--text);
+.hc-lockbar--open {
+  border-color: color-mix(in srgb, var(--warn) 55%, transparent);
+  background: color-mix(in srgb, var(--warn) 8%, var(--bg-card-2));
 }
+.hc-lockbar-icon { font-size: var(--font-md); }
+.hc-lockbar-text { font-size: var(--font-xs); color: var(--text-dim); flex: 1; min-width: 0; }
+.hc-lockbar .btn { flex: none; }
+
+/* Slider control (replaces the −/+ stepper) */
+.hc-slider { display: flex; flex-direction: column; gap: 4px; width: 100%; }
+.hc-slider-rail { position: relative; height: 22px; display: flex; align-items: center; }
+.hc-slider-rail::before {
+  content: ""; position: absolute; left: 0; right: 0; height: 5px;
+  border-radius: 999px; background: var(--bg-card-3, var(--border));
+}
+.hc-slider-fill {
+  position: absolute; left: 0; height: 5px; border-radius: 999px; pointer-events: none;
+}
+.hc-slider--thermal .hc-slider-fill { background: linear-gradient(90deg, var(--pv), var(--warn)); }
+.hc-slider--cool .hc-slider-fill { background: linear-gradient(90deg, var(--grid), var(--accent)); }
+.hc-slider-cur {
+  position: absolute; top: 50%; width: 2px; height: 13px;
+  transform: translate(-50%, -50%); background: var(--text); opacity: 0.55;
+  border-radius: 1px; pointer-events: none;
+}
+.hc-slider-input {
+  position: absolute; left: 0; width: 100%; height: 22px; margin: 0;
+  -webkit-appearance: none; appearance: none; background: transparent; cursor: pointer;
+}
+.hc-slider-input::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%;
+  background: var(--text); border: 2px solid var(--bg-card); cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.35);
+}
+.hc-slider-input::-moz-range-thumb {
+  width: 16px; height: 16px; border-radius: 50%;
+  background: var(--text); border: 2px solid var(--bg-card); cursor: pointer;
+}
+.hc-slider.is-disabled { opacity: 0.55; }
+.hc-slider.is-disabled .hc-slider-input { cursor: not-allowed; }
+.hc-slider-readout {
+  display: flex; align-items: baseline; justify-content: flex-end; gap: var(--space-2);
+}
+.hc-slider-value { font-weight: 700; font-variant-numeric: tabular-nums; color: var(--text); }
+.hc-slider-from { font-size: var(--font-2xs); color: var(--text-mute); }
+
+.heating-controls-cards.is-locked { opacity: 0.55; }
 
 /* --- Two-card control layout: Climate | Tank --- */
 .heating-controls-cards {
@@ -204,8 +211,8 @@
   font-size: var(--font-xs);
   color: var(--text-dim);
 }
-.hc-card-body .heating-stepper { justify-content: space-between; width: 100%; }
-.hc-apply { align-self: flex-end; }
+.hc-apply { align-self: stretch; }
+.hc-apply--ready { font-weight: 600; }
 
 /* --- Tank plan (today's dhw_policy schedule) --- */
 .heating-plan {

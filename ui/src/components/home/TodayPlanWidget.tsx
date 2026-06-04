@@ -2,12 +2,15 @@ import { useEffect, useRef } from "preact/hooks";
 import { makeChart, baseOption, chartTheme, areaGradient, withAlpha, type EChartsType } from "../../lib/charts";
 import { useResolvedTheme } from "../../lib/theme";
 import { reducedMotion } from "../../lib/motion";
-import type { PvTodayResponse } from "../../lib/types";
+import type { PvTodayResponse, ExecutionTodayResponse } from "../../lib/types";
 import "./today-plan.css";
 
 interface TodayPlanWidgetProps {
   pv: PvTodayResponse | null;
   loading: boolean;
+  // Execution slots — used to overlay MEASURED base load (consumption − daikin −
+  // appliance) against the forecast base-load line.
+  execution?: ExecutionTodayResponse | null;
   // Tariff-tier thresholds (p/kWh) for the cheap/peak background shading. From
   // /metrics — same thresholds the rest of the app classifies bands with.
   cheapThresholdP?: number | null;
@@ -19,7 +22,7 @@ function localHM(iso: string): string {
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
 }
 
-type Tier = "negative" | "cheap" | "peak" | null;
+type Tier = "negative" | "cheap" | "standard" | "peak" | null;
 
 // One chart that answers "what's the plan today?" without tab-switching:
 // import price + cheap/peak rate windows (background) + load forecast + the
@@ -27,7 +30,7 @@ type Tier = "negative" | "cheap" | "peak" | null;
 // (foreground). PV/load/DHW on the left kWh axis, price on the right p axis,
 // tank °C on a second right axis. All series come from /pv/today — one
 // full-day, server-aligned source (no client-side ISO key-matching).
-export function TodayPlanWidget({ pv, loading, cheapThresholdP, peakThresholdP }: TodayPlanWidgetProps) {
+export function TodayPlanWidget({ pv, loading, execution, cheapThresholdP, peakThresholdP }: TodayPlanWidgetProps) {
   const ref = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<EChartsType | null>(null);
   const theme = useResolvedTheme();
@@ -59,6 +62,16 @@ export function TodayPlanWidget({ pv, loading, cheapThresholdP, peakThresholdP }
     const pvForecastLive = slots.map((s) => round2(s.pv_forecast_kwh));
     const pvActual = slots.map((s) => (s.pv_actual_kwh == null ? null : round2(s.pv_actual_kwh)));
     const load = slots.map((s) => (s.base_load_kwh == null ? null : round2(s.base_load_kwh)));
+    // Measured base load (consumption − daikin − appliance), aligned to these
+    // slots by slot_utc — the actual to compare against the forecast `load`.
+    const execBase = new Map<string, number>();
+    for (const e of execution?.slots ?? []) {
+      if (e.slot_utc && e.base_load_kwh_est != null) execBase.set(e.slot_utc, e.base_load_kwh_est);
+    }
+    const loadActual = slots.map((s) => {
+      const v = execBase.get(s.slot_utc);
+      return v == null ? null : round2(v);
+    });
     const price = slots.map((s) => (s.import_price_p == null ? null : s.import_price_p));
 
     // --- Rate-tier background bands. Classify each slot by import price into
@@ -69,24 +82,41 @@ export function TodayPlanWidget({ pv, loading, cheapThresholdP, peakThresholdP }
     const pct = (q: number) => (known.length ? known[Math.min(known.length - 1, Math.floor(q * known.length))] : null);
     const cheapAt = cheapThresholdP ?? pct(0.33);
     const peakAt = peakThresholdP ?? pct(0.75);
+    // Every slot with a known price gets a tier — no blank gaps. Mid-priced
+    // slots are "standard" (a neutral wash) rather than nothing, so the band
+    // reads as a continuous tariff ribbon: paid / cheap / standard / peak.
     const tierOf = (p: number | null): Tier => {
       if (p == null) return null;
       if (p < 0) return "negative";
       if (cheapAt != null && p <= cheapAt) return "cheap";
       if (peakAt != null && p >= peakAt) return "peak";
-      return null;
+      return "standard";
     };
     const tierColor = (k: Tier): string =>
-      k === "negative" ? t.neg : k === "cheap" ? t.cheap : t.peak;
+      k === "negative" ? t.neg : k === "cheap" ? t.cheap : k === "peak" ? t.peak : t.textMute;
+    // Negative ("paid to import") is the rare money-maker → the only strong band
+    // (visible border, distinct blue). Cheap/peak are soft context washes;
+    // standard is the faintest neutral so it fills the gap without greying the
+    // plot. (The load line is greyed elsewhere, not by these bands.)
+    const tierFill = (k: Tier): object =>
+      k === "negative"
+        ? { color: withAlpha(t.neg, 0.26), borderColor: withAlpha(t.neg, 0.9), borderWidth: 1 }
+        : k === "standard"
+        ? { color: withAlpha(t.textMute, 0.05) }
+        : { color: withAlpha(tierColor(k), 0.10) };
     // markArea references slot INDEX (DST-safe; two slots can share a label).
     const bands: Array<[{ xAxis: number; itemStyle: object }, { xAxis: number }]> = [];
     let runStart = -1;
     let runTier: Tier = null;
+    // Expand each run by half a category cell on both sides so a SINGLE-slot
+    // tier (e.g. one 30-min negative window) still renders a full-width cell.
+    // Without this, runStart === endIdx → a zero-width band → invisible, which
+    // is why today's short negative windows weren't showing up.
     const flush = (endIdx: number) => {
       if (runStart < 0 || runTier == null) return;
       bands.push([
-        { xAxis: runStart, itemStyle: { color: withAlpha(tierColor(runTier), runTier === "peak" ? 0.16 : 0.20) } },
-        { xAxis: endIdx },
+        { xAxis: runStart - 0.5, itemStyle: tierFill(runTier) },
+        { xAxis: endIdx + 0.5 },
       ]);
     };
     slots.forEach((_, i) => {
@@ -110,16 +140,23 @@ export function TodayPlanWidget({ pv, loading, cheapThresholdP, peakThresholdP }
     }
     const animate = !reducedMotion();
 
+    // ONE projected-PV line: behind 'now' it's the committed plan we executed,
+    // ahead it's the live forecast — but drawn in a single uniform thin dotted
+    // light-yellow style so it reads as "the projection", with ACTUAL as the one
+    // bold line. (Past vs future is still distinguished in the hover tooltip.)
+    const mergeIdx = nowIdx; // -1 when 'now' is outside this day
+    const planLine = slots.map((_, i) =>
+      mergeIdx >= 0 && i > mergeIdx ? pvForecastLive[i] : (pvCommitted[i] ?? pvForecastLive[i]));
+
     chartRef.current.setOption({
       ...base,
       // Legend pinned bottom so it never collides with the top axis labels or
       // the plot (the caption-overlap fix).
-      grid: { left: 16, right: 44, top: 16, bottom: 44, containLabel: true },
-      legend: {
-        ...(base.legend as object),
-        show: true, top: undefined, right: undefined, bottom: 4, left: "center",
-        data: ["PV actual", "PV plan (committed)", "PV forecast (live)", "Load forecast", "Import price"],
-      },
+      grid: { left: 16, right: 44, top: 16, bottom: 24, containLabel: true },
+      // Legend removed — the lines are explained by the caption below the chart
+      // (bold = actual, dotted = projection) + the tier-band legend, so the
+      // floating legend over the plot was redundant clutter.
+      legend: { show: false },
       tooltip: {
         ...(base.tooltip as object),
         formatter: (params: Array<{ dataIndex: number }>) => {
@@ -127,12 +164,37 @@ export function TodayPlanWidget({ pv, loading, cheapThresholdP, peakThresholdP }
           const s = slots[i];
           if (!s) return "";
           const tier = tierOf(price[i]);
-          return `<strong>${labels[i]}</strong>${tier ? ` · ${tier}` : ""}<br/>` +
-            (price[i] != null ? `Import ${price[i]!.toFixed(1)}p/kWh<br/>` : "") +
-            (pvCommitted[i] != null ? `PV plan ${pvCommitted[i]!.toFixed(2)} kWh<br/>` : "") +
-            `PV forecast (live) ${pvForecastLive[i].toFixed(2)} kWh<br/>` +
-            (pvActual[i] != null ? `PV actual ${pvActual[i]!.toFixed(2)} kWh<br/>` : "") +
-            (load[i] != null ? `Load ${load[i]!.toFixed(2)} kWh` : "");
+          const isPast = nowIdx >= 0 && i <= nowIdx;
+          const planVal = isPast ? (pvCommitted[i] ?? pvForecastLive[i]) : pvForecastLive[i];
+          // A mini horizontal bar so plan vs actual compare at a glance — the
+          // "show the error graphically on hover" ask. All bars share one scale.
+          const scale = Math.max(0.01, planVal ?? 0, pvActual[i] ?? 0, load[i] ?? 0, loadActual[i] ?? 0);
+          const bar = (label: string, val: number | null, col: string, sub?: string) => {
+            if (val == null || !Number.isFinite(val)) return "";
+            const w = Math.round(Math.max(0, Math.min(1, val / scale)) * 78);
+            return `<div style="display:flex;align-items:center;gap:6px;margin-top:3px;">` +
+              `<span style="width:62px;color:${t.textMute};font-size:11px;">${label}</span>` +
+              `<span style="display:inline-block;width:${w}px;height:7px;border-radius:3px;background:${col};"></span>` +
+              `<span style="font-size:11px;color:${t.text};">${val.toFixed(2)}${sub || ""}</span></div>`;
+          };
+          // Miss readout (actual − committed plan), coloured by direction.
+          let missRow = "";
+          if (isPast && pvActual[i] != null && pvCommitted[i] != null) {
+            const miss = pvActual[i]! - pvCommitted[i]!;
+            const col = miss >= 0 ? t.cheap : t.importColor;
+            missRow = `<div style="margin-top:4px;font-size:11px;color:${col};">` +
+              `solar ${miss >= 0 ? "beat plan by +" : "fell short −"}${Math.abs(miss).toFixed(2)} kWh</div>`;
+          }
+          const head = `<strong>${labels[i]}</strong>${tier ? ` · ${tier}` : ""}` +
+            (price[i] != null ? ` · ${price[i]!.toFixed(1)}p/kWh` : "");
+          return head +
+            bar(isPast ? "PV plan" : "PV forecast", planVal, withAlpha(t.pv, 0.55)) +
+            bar("PV actual", pvActual[i], t.pv) +
+            missRow +
+            (load[i] != null || loadActual[i] != null
+              ? `<div style="margin-top:5px;border-top:1px solid ${withAlpha(t.textMute, 0.25)};padding-top:2px;"></div>` : "") +
+            bar("Load fcast", load[i], withAlpha(t.textMute, 0.5)) +
+            bar("Load actual", loadActual[i], withAlpha(t.textMute, 0.9));
         },
       },
       xAxis: { ...(base.xAxis as object), data: labels, axisLabel: { color: t.textMute, fontSize: 10, interval: 5 } },
@@ -157,36 +219,34 @@ export function TodayPlanWidget({ pv, loading, cheapThresholdP, peakThresholdP }
           } : undefined,
           z: 0,
         },
-        // Three PV lines share the PV hue, distinguished by treatment:
-        //   committed plan = dotted, mid-alpha (the frozen plan being executed)
-        //   live forecast  = dashed, dim (revises through the day)
-        //   actual         = solid, bright, filled (realised)
-        // `color` is set so the legend swatch matches the line (ECharts colours
-        // the legend marker from series.color, NOT lineStyle).
+        // PV plan/forecast — one thin dotted light-yellow projection line.
         {
-          name: "PV plan (committed)", type: "line", smooth: true, showSymbol: false,
-          connectNulls: false, color: withAlpha(t.pv, 0.7),
-          data: pvCommitted, lineStyle: { color: withAlpha(t.pv, 0.7), width: 1.5, type: "dotted" }, z: 3,
+          name: "PV plan", type: "line", smooth: true, showSymbol: false, connectNulls: false,
+          color: withAlpha(t.pv, 0.5),
+          data: planLine, lineStyle: { color: withAlpha(t.pv, 0.5), width: 1, type: "dotted" }, z: 3,
         },
-        {
-          name: "PV forecast (live)", type: "line", smooth: true, showSymbol: false, color: withAlpha(t.pv, 0.4),
-          data: pvForecastLive, lineStyle: { color: withAlpha(t.pv, 0.4), width: 1.25, type: "dashed" },
-          areaStyle: { color: withAlpha(t.pv, 0.05) }, z: 2,
-        },
-        // PV actual — realised in the FOREGROUND: vivid PV colour, thick, gradient fill.
+        // PV actual — the ONE bold line: vivid PV colour, thick, gradient fill.
         {
           name: "PV actual", type: "line", smooth: true, showSymbol: false, connectNulls: false, color: t.pv,
-          data: pvActual, lineStyle: { color: t.pv, width: 2.75 },
-          areaStyle: { color: areaGradient(t.pv, 0.36, 0.04) }, z: 4,
+          data: pvActual, lineStyle: { color: t.pv, width: 3 },
+          areaStyle: { color: areaGradient(t.pv, 0.46, 0.05) }, z: 4,
         },
-        // Load forecast is a reference → dim, dashed (its own cool hue).
+        // Load — neutral GREY (doesn't clash with PV yellow / price red).
+        // Forecast = dim dashed; ACTUAL (measured base load) = solid, mirroring
+        // the PV actual-vs-plan treatment so load reads the same way.
         {
-          name: "Load forecast", type: "line", smooth: true, showSymbol: false, color: withAlpha(t.grid, 0.5),
-          data: load, lineStyle: { color: withAlpha(t.grid, 0.5), width: 1.25, type: "dashed" }, z: 3,
+          name: "Load forecast", type: "line", smooth: true, showSymbol: false, color: withAlpha(t.textMute, 0.55),
+          data: load, lineStyle: { color: withAlpha(t.textMute, 0.45), width: 1.25, type: "dashed" }, z: 2,
         },
+        {
+          name: "Load actual", type: "line", smooth: true, showSymbol: false, connectNulls: false,
+          color: withAlpha(t.textMute, 0.95),
+          data: loadActual, lineStyle: { color: withAlpha(t.textMute, 0.9), width: 1.75 }, z: 3,
+        },
+        // Import price → dashed step (reads as a reference, not a hard line).
         {
           name: "Import price", type: "line", step: "middle", showSymbol: false, color: t.importColor,
-          yAxisIndex: 1, data: price, lineStyle: { color: t.importColor, width: 1.5, opacity: 0.75 }, z: 1,
+          yAxisIndex: 1, data: price, lineStyle: { color: t.importColor, width: 1.5, opacity: 0.8, type: "dashed" }, z: 1,
         },
         // Blinking "now" — a pulsing ripple at the current slot on the baseline.
         ...(nowIdx >= 0 ? [{
@@ -199,34 +259,58 @@ export function TodayPlanWidget({ pv, loading, cheapThresholdP, peakThresholdP }
         }] : []),
       ],
     }, { notMerge: true });
-  }, [pv, theme, cheapThresholdP, peakThresholdP]);
+  }, [pv, execution, theme, cheapThresholdP, peakThresholdP]);
 
   const acc = pv?.accuracy;
+  // Plain-language accuracy: did solar come in above or below the forecast so
+  // far, and by how much. The per-slot detail (miss bar) is in the chart hover.
+  const biasWord = acc == null ? "" :
+    Math.abs(acc.bias_kwh) < 0.1 ? "tracking forecast"
+    : acc.bias_kwh > 0 ? `${acc.bias_kwh.toFixed(1)} kWh above forecast`
+    : `${Math.abs(acc.bias_kwh).toFixed(1)} kWh below forecast`;
+  const biasTone = acc == null ? "" : Math.abs(acc.bias_kwh) < 0.1 ? "" : acc.bias_kwh > 0 ? " today-plan-acc--pos" : " today-plan-acc--neg";
+
+  // Headline day total = solar ALREADY generated (actual, locked) + forecast for
+  // the slots still to come. Use actual ONLY for fully-elapsed slots; the current
+  // in-progress slot has just a partial actual (lower than its full-slot forecast),
+  // so counting that would make the headline DIP at every slot boundary — use the
+  // slot's forecast there instead. The realised part can't change, so only the
+  // shrinking remainder moves: steady, and the right magnitude.
+  const dayTotalNowMs = pv?.now_utc ? new Date(pv.now_utc).getTime() : Date.now();
+  const dayTotal = pv?.slots?.length
+    ? pv.slots.reduce((sum, s) => {
+        const elapsed = new Date(s.slot_utc).getTime() + 30 * 60_000 <= dayTotalNowMs;
+        const v = elapsed ? (s.pv_actual_kwh ?? s.pv_forecast_kwh) : s.pv_forecast_kwh;
+        return sum + (v ?? 0);
+      }, 0)
+    : (pv?.forecast_kwh_day_total ?? null);
 
   return (
     <div class="today-plan">
+      {dayTotal != null && (
+        <div class="today-plan-summary">
+          <span class="today-plan-summary-icon" aria-hidden="true">☀</span>
+          <span class="today-plan-summary-value">{dayTotal.toFixed(1)}<span class="today-plan-summary-unit"> kWh</span></span>
+          <span class="today-plan-summary-label">solar expected today (generated + forecast)</span>
+        </div>
+      )}
       {acc && (
         <div class="today-plan-acc">
-          <span>PV today so far: <strong>{acc.actual_kwh.toFixed(1)}</strong> kWh actual vs <strong>{acc.forecast_kwh.toFixed(1)}</strong> planned</span>
+          <span>Solar so far today: <strong>{acc.actual_kwh.toFixed(1)}</strong> kWh vs <strong>{acc.forecast_kwh.toFixed(1)}</strong> expected by now</span>
           <span class="today-plan-acc-sep">·</span>
-          <span title="Mean absolute error per slot, and forecast bias (positive = forecast under-predicted).">
-            MAE {acc.mae_kwh.toFixed(2)} kWh · bias {acc.bias_kwh >= 0 ? "+" : ""}{acc.bias_kwh.toFixed(1)} kWh
+          <span class={biasTone.trim()} title="Actual vs the forecast for the slots elapsed so far (not the full-day total in the card header). Hover any slot for its miss.">
+            {biasWord}
           </span>
         </div>
       )}
       <div ref={ref} style={{ width: "100%", height: "320px" }} />
-      <div class="today-plan-bands">
-        <span class="today-plan-band today-plan-band--cheap">cheap rate</span>
-        <span class="today-plan-band today-plan-band--peak">peak rate</span>
-        <span class="today-plan-band today-plan-band--neg">negative price</span>
-        <span class="today-plan-band-hint">shaded = tariff tier · ◉ now</span>
-      </div>
-      {pv?.plan_committed_at && (
+      {pv?.slots?.length ? (
         <p class="today-plan-note muted">
-          Committed plan from {localHM(pv.plan_committed_at)} (the line the system is executing);
-          the live forecast re-fetches from Quartz through the day, so it moves.
+          Bold line = actual solar; dotted = the plan (committed behind ◉ now,
+          live forecast ahead). Background shades the tariff tier — blue = paid
+          (negative), green = cheap, amber = peak. Hover a slot for its detail.
         </p>
-      )}
+      ) : null}
       {!pv?.slots?.length && !loading && <p class="muted">No plan data for today yet.</p>}
     </div>
   );

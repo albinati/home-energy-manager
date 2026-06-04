@@ -30,6 +30,8 @@ import type {
   WorkbenchSimulateResponse,
   WorkbenchPromoteDiff,
   WorkbenchPromoteResult,
+  TodayCumulativeResponse,
+  ActionLogResponse,
 } from "./types";
 
 /* ----- Real-time / cockpit ----- */
@@ -106,6 +108,16 @@ export const getEnergyReport = (date?: string, period: "day" | "month" = "day") 
   );
 export const getEnergyMonthly = (month: string) =>
   getJson<MonthlyEnergy>(`/energy/monthly?month=${encodeURIComponent(month)}`);
+export const getEnergyTodayCumulative = () =>
+  getJson<TodayCumulativeResponse>("/energy/today-cumulative");
+export const getActionLog = (opts?: { device?: string; days?: number; limit?: number }) => {
+  const p = new URLSearchParams();
+  if (opts?.device) p.set("device", opts.device);
+  if (opts?.days != null) p.set("days", String(opts.days));
+  if (opts?.limit != null) p.set("limit", String(opts.limit));
+  const qs = p.toString();
+  return getJson<ActionLogResponse>(`/action-log${qs ? `?${qs}` : ""}`);
+};
 
 // /energy/period — granular chart_data (day=1pt, week=7pts, month=≤31pts,
 // year=≤12pts). Per-point shape: { date, import_kwh, export_kwh,
