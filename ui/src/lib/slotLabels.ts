@@ -21,6 +21,22 @@ export function endLabelFor(iso: string | undefined, addSlot = true): string {
   }
 }
 
+// Tank (DHW) action vocabulary — shared by the tank schedule chips and the
+// Live-power "next action" summary so they always speak the same words/kinds.
+export function tankKindOf(action?: string | null): "warmup" | "setback" | "boost" {
+  if (action === "tank_setback") return "setback";
+  if (action === "tank_negative_boost") return "boost";
+  return "warmup";
+}
+export function tankLabelOf(action?: string | null): string {
+  switch (action) {
+    case "tank_setback": return "Setback";
+    case "tank_negative_boost": return "Boost (neg)";
+    case "tank_warmup": return "Warmup";
+    default: return action || "—";
+  }
+}
+
 export function formatRelativeSlot(iso: string | undefined, nowIso?: string | null): RelativeSlot {
   if (!iso) return { dayLabel: "", timeLabel: "—", isToday: false };
   try {

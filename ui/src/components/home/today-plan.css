@@ -4,6 +4,34 @@
   gap: var(--space-2);
 }
 
+.today-plan-summary {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin-bottom: var(--space-1);
+}
+.today-plan-summary-icon {
+  font-size: var(--font-lg);
+  align-self: center;
+  filter: saturate(1.2);
+}
+.today-plan-summary-value {
+  font-size: var(--font-2xl);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--pv, #fbbf24);
+  font-variant-numeric: tabular-nums;
+}
+.today-plan-summary-unit {
+  font-size: var(--font-md);
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.today-plan-summary-label {
+  font-size: var(--font-sm);
+  color: var(--text-mute);
+}
+
 .today-plan-acc {
   display: flex;
   flex-wrap: wrap;
@@ -20,29 +48,5 @@
 .today-plan-acc-sep {
   color: var(--text-mute);
 }
-
-/* Dispatch-band legend under the chart */
-.today-plan-bands {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-3);
-  font-size: var(--font-xs);
-  color: var(--text-mute);
-}
-.today-plan-band {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  color: var(--text-dim);
-}
-.today-plan-band::before {
-  content: "";
-  width: 12px;
-  height: 12px;
-  border-radius: 3px;
-}
-.today-plan-band--cheap::before { background: color-mix(in srgb, var(--cheap) 35%, transparent); }
-.today-plan-band--peak::before { background: color-mix(in srgb, var(--peak) 35%, transparent); }
-.today-plan-band--neg::before { background: color-mix(in srgb, var(--neg-price, #2563eb) 35%, transparent); }
-.today-plan-band-hint { margin-left: auto; }
+.today-plan-acc--pos { color: var(--ok); font-weight: 600; }
+.today-plan-acc--neg { color: var(--warn); font-weight: 600; }

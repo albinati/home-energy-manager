@@ -17,6 +17,7 @@ import { RadialGauge } from "../common/RadialGauge";
 import { Modal } from "../common/Modal";
 import { HeatingControls } from "./HeatingControls";
 import { TankScheduleBadges } from "../common/TankScheduleBadges";
+import { RefreshCountdown } from "../common/RefreshCountdown";
 import "./heating.css";
 
 interface HeatingWidgetProps {
@@ -66,9 +67,6 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather, exe
   }, [cooldownUntil]);
   const cooldownLeft = Math.max(0, Math.ceil((cooldownUntil - nowMs) / 1000));
   const onCooldown = cooldownLeft > 0;
-  const cooldownLabel = onCooldown
-    ? `↻ ${Math.floor(cooldownLeft / 60)}:${String(cooldownLeft % 60).padStart(2, "0")}`
-    : "↻ Live";
   async function doForceRefresh() {
     setRefreshing(true);
     setRefreshError(null);
@@ -100,7 +98,13 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather, exe
     getDhwSchedule().then((r) => { if (alive) setSelfSchedule(r.rows || []); }).catch(() => {});
     return () => { alive = false; };
   }, [dhwSchedule]);
-  const schedule = dhwSchedule ?? selfSchedule;
+  const scheduleAll = dhwSchedule ?? selfSchedule;
+  // Drop windows that have already finished — a boost/warmup that ran earlier
+  // today is noise here; show only what's ongoing or still upcoming.
+  const schedule = scheduleAll.filter((r) => {
+    const end = r.end_utc ? Date.parse(r.end_utc) : NaN;
+    return Number.isNaN(end) || end >= Date.now();
+  });
 
   // LWT: latest execution slot first, then live cockpit state.
   const lwtFromExec = latestExecValue(execution, (s) => s.daikin_lwt_c);
@@ -159,34 +163,33 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather, exe
             {quotaUsed}/{quotaBudget} · 24h
           </Pill>
         )}
-        <button class="btn btn--ghost btn--sm heating-refresh" disabled={refreshing || onCooldown}
-                title={onCooldown
-                  ? `Just refreshed — available again in ${cooldownLabel.replace("↻ ", "")}`
-                  : "Fetch live data from the heat pump now (uses one Daikin API call)"}
-                onClick={() => setConfirmingRefresh(true)}>
-          {refreshing ? "…" : cooldownLabel}
-        </button>
+        <RefreshCountdown
+          lastFetchAt={onCooldown ? cooldownUntil - forceIv * 1000 : null}
+          intervalMs={forceIv * 1000}
+          loading={refreshing}
+          disabled={onCooldown}
+          onRefresh={() => setConfirmingRefresh(true)}
+          label={onCooldown ? undefined : "Live"} />
       </div>
 
       <RadialGauge label={`Tank${tankPower != null ? (tankPower ? " · on" : " · off") : ""}`}
                    value={tankTemp} min={20} max={65} target={tankTarget} tone="thermal" />
       <div class="heating-gauges heating-gauges--secondary">
-        <Gauge label="Outdoor" value={outdoorTemp} min={-5} max={35} tone="cool"
+        <Gauge label="Outdoor" value={outdoorTemp} min={-5} max={40}
+               fillColor={tempColor(outdoorTemp)}
+               icon={<ThermometerIcon />} showFahrenheit
                sub={outdoorSource === "execution" ? "Daikin sensor (logged)"
                     : outdoorSource === "daikin" ? "Daikin sensor (live)"
                     : "Open-Meteo forecast"} />
-        <Gauge label="LWT" value={lwt} min={20} max={55} tone="thermal" sub="leaving water" />
+        <Gauge label="LWT" value={lwt} min={20} max={55} tone="thermal" showFahrenheit sub="leaving water" />
       </div>
 
       {totalHeatingKwh != null && (
         <div class="heating-split">
           <div class="heating-split-label">Today's heating energy</div>
-          <div class="heating-split-row">
-            <div class="heating-split-item">
-              <span class="heating-split-dot heating-split-dot--dhw" />
-              <span class="heating-split-name">Total estimate</span>
-              <span class="heating-split-value">{kwh(totalHeatingKwh)}</span>
-            </div>
+          <div class="heating-energy-value" title="Estimated total heat-pump electricity today (DHW + space, not split by the meter)">
+            {kwh(totalHeatingKwh)}
+            <span class="heating-energy-est">est</span>
           </div>
         </div>
       )}
@@ -220,6 +223,44 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather, exe
         {refreshError && <p class="heating-refresh-error">Live read failed: {refreshError}</p>}
       </Modal>
     </div>
+  );
+}
+
+// Continuous outdoor-temperature colour: light-blue (cold) → dark-blue → green
+// (mild, ~18°C) → yellow → red → purple (very hot). Interpolated in HSL along
+// the shortest hue path so the midpoints stay vivid (RGB lerp would go muddy).
+function tempColor(t: number | null): string | undefined {
+  if (t == null || !Number.isFinite(t)) return undefined;
+  // [temp, hue, sat%, light%]
+  const stops: [number, number, number, number][] = [
+    [0, 195, 90, 72],   // light blue
+    [10, 222, 78, 48],  // dark blue
+    [25, 48, 95, 55],   // yellow
+    [30, 6, 85, 55],    // red
+    [40, 285, 65, 55],  // purple
+  ];
+  const c = Math.max(stops[0][0], Math.min(stops[stops.length - 1][0], t));
+  let a = stops[0], b = stops[stops.length - 1];
+  for (let i = 0; i < stops.length - 1; i++) {
+    if (c >= stops[i][0] && c <= stops[i + 1][0]) { a = stops[i]; b = stops[i + 1]; break; }
+  }
+  const f = b[0] === a[0] ? 0 : (c - a[0]) / (b[0] - a[0]);
+  // Shortest-path hue interpolation.
+  let dh = b[1] - a[1];
+  if (dh > 180) dh -= 360;
+  if (dh < -180) dh += 360;
+  const h = ((a[1] + dh * f) % 360 + 360) % 360;
+  const s = a[2] + (b[2] - a[2]) * f;
+  const l = a[3] + (b[3] - a[3]) * f;
+  return `hsl(${h.toFixed(0)} ${s.toFixed(0)}% ${l.toFixed(0)}%)`;
+}
+
+function ThermometerIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M14 14.76V5a2 2 0 0 0-4 0v9.76a4 4 0 1 0 4 0z" />
+    </svg>
   );
 }
 

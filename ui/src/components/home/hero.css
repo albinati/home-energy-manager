@@ -153,7 +153,7 @@
 }
 .hero-lifetime-stats {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: var(--space-3);
 }
 @media (max-width: 640px) {
@@ -178,6 +178,8 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.hero-stat-value--pos { color: var(--ok); }
+.hero-stat-value--neg { color: var(--bad); }
 .hero-stat-label {
   font-size: var(--font-2xs);
   color: var(--text-mute);

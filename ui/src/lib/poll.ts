@@ -9,6 +9,9 @@ export interface PollState<T> {
   error: Error | null;
   loading: boolean;
   refresh: () => Promise<void>;
+  // Epoch ms of the last successful fetch (for "next refresh in Ns" UIs).
+  lastFetchAt: number | null;
+  intervalMs: number;
 }
 
 export function usePoll<T>(
@@ -19,6 +22,7 @@ export function usePoll<T>(
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<Error | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
+  const [lastFetchAt, setLastFetchAt] = useState<number | null>(null);
   const fnRef = useRef(fn);
   fnRef.current = fn;
 
@@ -35,6 +39,7 @@ export function usePoll<T>(
       const next = await fnRef.current();
       if (!mountedRef.current) return;
       setData(next);
+      setLastFetchAt(Date.now());
       setError(null);
     } catch (e) {
       if (!mountedRef.current) return;
@@ -77,7 +82,7 @@ export function usePoll<T>(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [intervalMs, ...deps]);
 
-  return { data, error, loading, refresh };
+  return { data, error, loading, refresh, lastFetchAt, intervalMs };
 }
 
 // Fetch-once hook for endpoints we don't poll.
@@ -119,7 +124,7 @@ export function useFetch<T>(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);
 
-  return { data, error, loading, refresh };
+  return { data, error, loading, refresh, lastFetchAt: null, intervalMs: 0 };
 }
 
 // useAfterPaint returns false on first render, then flips true once the browser

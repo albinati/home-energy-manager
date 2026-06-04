@@ -16,10 +16,12 @@ import {
   getTariffDashboard,
   getPvToday,
   getDhwSchedule,
+  getEnergyTodayCumulative,
 } from "../lib/endpoints";
 import { Widget } from "../components/common/Widget";
 import { Spinner } from "../components/common/Spinner";
 import { RefreshAction } from "../components/common/RefreshAction";
+import { RefreshCountdown } from "../components/common/RefreshCountdown";
 import { PeriodNavigator } from "../components/shell/PeriodNavigator";
 import { usePeriod, periodFetchOpts, periodDateRange } from "../lib/period";
 import { LivePowerWidget } from "../components/cockpit/LivePowerWidget";
@@ -102,6 +104,8 @@ export default function Landing() {
   const daikinQuota = useFetch(getDaikinQuota, []);
   // DHW tank plan (today+tomorrow) — shared by Heating + Live-power tank badges.
   const dhwSched = useFetch(getDhwSchedule, []);
+  // Today's grid import/export so far (kWh + real £, credit on negative slots).
+  const todayCum = usePoll(getEnergyTodayCumulative, 60_000);
   // The shared period navigator drives the Hero headline + cost breakdown +
   // energy chart + tariff comparison. Re-fetch whenever the selection changes.
   const period = usePeriod();
@@ -143,8 +147,9 @@ export default function Landing() {
       {/* ── LIVE ───────────────────────────────────────────────────── */}
       <div class="widget-grid widget-band">
         <Widget title="Live power" icon="⚡" tone="power" size="large"
-                badge={data.now_utc ? new Date(data.now_utc).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }) : undefined}>
-          <LivePowerWidget state={s} cockpit={data} timeline={timeline.data} execution={execution.data} agile={agile.data} metrics={metrics.data} dhwSchedule={dhwSched.data?.rows} />
+                badge={data.now_utc ? new Date(data.now_utc).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }) : undefined}
+                action={<RefreshCountdown lastFetchAt={now.lastFetchAt} intervalMs={now.intervalMs} loading={now.loading} onRefresh={() => void now.refresh()} />}>
+          <LivePowerWidget state={s} cockpit={data} timeline={timeline.data} execution={execution.data} agile={agile.data} metrics={metrics.data} dhwSchedule={dhwSched.data?.rows} todayCumulative={todayCum.data} />
         </Widget>
 
         <Widget title="Heating" icon="♨" tone="thermal" size="medium">
@@ -155,10 +160,10 @@ export default function Landing() {
 
       {/* ── PLAN ───────────────────────────────────────────────────── */}
       <div class="widget-grid widget-band">
-        <Widget title="Today's plan" icon="🗓" tone="plan" size="wide"
-                badge={pvToday.data?.forecast_kwh_day_total != null ? `${pvToday.data.forecast_kwh_day_total.toFixed(1)} kWh PV planned` : undefined}>
+        <Widget title="Today's plan" icon="🗓" tone="plan" size="wide">
           <Suspense fallback={<Spinner label="Loading plan…" />}>
             <TodayPlanWidget pv={pvToday.data} loading={pvToday.loading}
+                             execution={execution.data}
                              cheapThresholdP={metrics.data?.cheap_threshold_pence}
                              peakThresholdP={metrics.data?.peak_threshold_pence} />
           </Suspense>

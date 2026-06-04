@@ -206,9 +206,9 @@ export function EnergyChartWidget({ execution }: EnergyChartWidgetProps) {
       {granularity === "day" && dayHasSlots && (
         <div class="echart-flag">
           <span class="echart-flag-icon"><Icon name="schedule" size={14} /></span>
-          Day view: Daikin <strong>{daikinSourceLabel}</strong> / Residual stacked,
-          + <strong>realised grid cost</strong>. Per-slot solar / import / export
-          are not yet captured — see #424.
+          Day view: load split into Daikin (<strong>{daikinSourceLabel}</strong>),
+          appliances &amp; base, + <strong>realised grid cost</strong>. Per-slot
+          solar / import / export aren't captured yet — see #424.
         </div>
       )}
 
@@ -458,15 +458,23 @@ function optionForDay(
     // Fallback: whole physics estimate goes into Heating
     return round2(s.daikin_kwh_est ?? 0);
   });
-  const residualPerSlot = slots.map((s, i) => {
+  // Residual (load minus Daikin) splits into APPLIANCE (washer/dryer/dishwasher,
+  // estimated from armed jobs) + BASE load. Prefer the backend's per-slot
+  // appliance/base split; fall back to all-residual-as-base when absent.
+  const appliancePerSlot = slots.map((s) => round2(s.appliance_kwh_est ?? 0));
+  const basePerSlot = slots.map((s, i) => {
+    if (s.base_load_kwh_est != null) return round2(s.base_load_kwh_est);
     const load = s.consumption_kwh ?? 0;
     const daikin = (dhwPerSlot[i] ?? 0) + (heatingPerSlot[i] ?? 0);
-    return round2(Math.max(0, load - daikin));
+    return round2(Math.max(0, load - daikin - (appliancePerSlot[i] ?? 0)));
   });
+  const hasAppliance = appliancePerSlot.some((v) => v > 0);
 
   return {
     ...base,
-    legend: { ...(base.legend as object), data: ["Daikin tank", "Daikin heating", "Residual", "Realised grid cost"] },
+    legend: { ...(base.legend as object), data: hasAppliance
+      ? ["Daikin tank", "Daikin heating", "Appliances", "Base load", "Realised grid cost"]
+      : ["Daikin tank", "Daikin heating", "Base load", "Realised grid cost"] },
     // Quiet ghost note — per-slot solar/import/export genuinely unavailable
     // (#424). A text annotation, NOT a fabricated series/markArea.
     graphic: [{
@@ -502,11 +510,19 @@ function optionForDay(
         itemStyle: { color: barGradient(t.warn, 0.9, 0.5) },
         emphasis: { focus: "series" },
       },
-      {
-        name: "Residual",
+      ...(hasAppliance ? [{
+        name: "Appliances",
         type: "bar",
         stack: "load",
-        data: residualPerSlot,
+        data: appliancePerSlot,
+        itemStyle: { color: barGradient(t.accent, 0.85, 0.45) },
+        emphasis: { focus: "series" },
+      }] : []),
+      {
+        name: "Base load",
+        type: "bar",
+        stack: "load",
+        data: basePerSlot,
         // Top segment of the stack — rounds the crown so the bar reads as one.
         itemStyle: { color: barGradient(t.house, 0.75, 0.4), borderRadius: [3, 3, 0, 0] },
         emphasis: { focus: "series" },

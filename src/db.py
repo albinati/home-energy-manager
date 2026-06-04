@@ -2263,6 +2263,7 @@ def get_action_logs(
     device: str | None = None,
     trigger: str | None = None,
     limit: int = 200,
+    since: str | None = None,
 ) -> list[dict[str, Any]]:
     with _lock:
         conn = get_connection()
@@ -2275,6 +2276,9 @@ def get_action_logs(
             if trigger:
                 q += " AND trigger = ?"
                 args.append(trigger)
+            if since:
+                q += " AND timestamp >= ?"
+                args.append(since)
             q += " ORDER BY timestamp DESC LIMIT ?"
             args.append(limit)
             cur = conn.execute(q, args)
