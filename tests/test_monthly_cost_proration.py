@@ -126,6 +126,10 @@ def _patch_client(monkeypatch, client):
     monkeypatch.setattr(monthly, "_client", lambda: client)
     monkeypatch.setattr(monthly, "_get_daikin_heating_kwh", lambda *a, **k: None)
     monkeypatch.setattr(monthly, "_build_heating_analytics", lambda *a, **k: None)
+    # These tests cover the Fox/Octopus engine proration + chart_data trimming,
+    # which is now the FALLBACK. Force it by making the pnl engine decline, so
+    # they stay deterministic and independent of the SQLite pnl path.
+    monkeypatch.setattr(monthly, "_pnl_cost_for_range", lambda *a, **k: None)
 
 
 def test_period_month_current_prorates_standing(monkeypatch):
@@ -162,6 +166,84 @@ def test_period_month_past_bills_full_month(monkeypatch):
     _patch_client(monkeypatch, _FakeClient(days_with_data=ndays))
     out = monthly.get_period_insights("month", month_str=f"{py:04d}-{pm:02d}")
     assert out.insights.cost.standing_charge_pence == pytest.approx(ndays * 50.0)
+
+
+def test_pnl_cost_for_range_maps_real_money_fields(monkeypatch):
+    """_pnl_cost_for_range maps compute_period_pnl's real-money axis correctly:
+    import_cost_gbp, export_revenue_gbp, standing_charge_gbp, realised_net_cost_gbp,
+    and the FIXED_TARIFF_* shadow → pence on MonthlyCostSummary."""
+    import src.analytics.pnl as pnl_mod
+    fake = {
+        "n_days": 31,
+        "import_cost_gbp": 50.91,
+        "export_revenue_gbp": 2.26,
+        "standing_charge_gbp": 18.37,
+        "realised_net_cost_gbp": 67.02,
+        "import_kwh": 314.1,
+        "export_kwh": 55.2,
+        "fixed_tariff_shadow_real_gbp": 75.0,
+        "delta_vs_fixed_tariff_real_gbp": 7.98,
+    }
+    monkeypatch.setattr(pnl_mod, "compute_period_pnl", lambda s, e: fake)
+    res = monthly._pnl_cost_for_range(date(2026, 5, 1), date(2026, 5, 31))
+    assert res is not None
+    cost, imp, exp = res
+    assert cost.import_cost_pence == pytest.approx(5091.0)
+    assert cost.export_earnings_pence == pytest.approx(226.0)
+    assert cost.standing_charge_pence == pytest.approx(1837.0)
+    assert cost.net_cost_pence == pytest.approx(6702.0)
+    assert cost.fixed_shadow_pence == pytest.approx(7500.0)
+    assert cost.delta_vs_fixed_pence == pytest.approx(798.0)
+    assert (imp, exp) == pytest.approx((314.1, 55.2))
+
+
+def test_pnl_cost_for_range_returns_none_when_unpriced(monkeypatch):
+    """Empty/pre-Agile range (n_days == 0) → None so the caller falls back."""
+    import src.analytics.pnl as pnl_mod
+    monkeypatch.setattr(pnl_mod, "compute_period_pnl", lambda s, e: {"n_days": 0})
+    assert monthly._pnl_cost_for_range(date(2026, 1, 1), date(2026, 1, 31)) is None
+
+
+def test_pnl_cost_for_range_no_fixed_shadow(monkeypatch):
+    """When FIXED_TARIFF_* isn't configured, pnl omits the bg keys → None shadow."""
+    import src.analytics.pnl as pnl_mod
+    monkeypatch.setattr(pnl_mod, "compute_period_pnl", lambda s, e: {
+        "n_days": 7, "import_cost_gbp": 10.0, "export_revenue_gbp": 1.0,
+        "standing_charge_gbp": 4.0, "realised_net_cost_gbp": 13.0,
+        "import_kwh": 60.0, "export_kwh": 24.0,
+    })
+    res = monthly._pnl_cost_for_range(date(2026, 5, 1), date(2026, 5, 7))
+    assert res is not None
+    cost, _, _ = res
+    assert cost.fixed_shadow_pence is None
+    assert cost.delta_vs_fixed_pence is None
+
+
+def test_period_month_prefers_pnl_and_overrides_kwh(monkeypatch):
+    """When the pnl engine prices the range, get_period_insights uses ITS cost
+    and import/export kWh (so Home matches Hero + Insights), not the Fox sum."""
+    today = date.today()
+    _patch_client(monkeypatch, _FakeClient(days_with_data=today.day))
+    # Fox would report import=3×days, export=1×days. pnl says otherwise.
+    pnl_cost = monthly.MonthlyCostSummary(
+        import_cost_pence=5000.0, export_earnings_pence=226.0,
+        standing_charge_pence=1837.0, net_cost_pence=6611.0,
+        fixed_shadow_pence=7000.0, delta_vs_fixed_pence=389.0,
+    )
+    monkeypatch.setattr(
+        monthly, "_pnl_cost_for_range",
+        lambda start, end: (pnl_cost, 314.1, 55.2),
+    )
+    out = monthly.get_period_insights("month", month_str=today.strftime("%Y-%m"))
+    # Cost comes from pnl…
+    assert out.insights.cost.net_cost_pence == pytest.approx(6611.0)
+    assert out.insights.cost.export_earnings_pence == pytest.approx(226.0)
+    # …and so do the displayed import/export kWh (overridden from Fox).
+    assert out.insights.energy.import_kwh == pytest.approx(314.1)
+    assert out.insights.energy.export_kwh == pytest.approx(55.2)
+    # Equation balances: paid + standing − earned == net.
+    c = out.insights.cost
+    assert c.import_cost_pence + c.standing_charge_pence - c.export_earnings_pence == pytest.approx(c.net_cost_pence)
 
 
 # ── _compute_cost_octopus: per-slot Outgoing export billing ──────────────────
