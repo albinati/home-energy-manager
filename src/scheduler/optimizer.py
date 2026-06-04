@@ -1064,6 +1064,7 @@ def _persist_lp_snapshots(
     forecast_fetch_at_utc: str | None = None,
     exogenous_snapshot: dict[str, Any] | None = None,
     lp_status: str = "Optimal",
+    pv_forecast_kwh_per_slot: list[float] | None = None,
 ) -> None:
     """Build and persist the inputs + per-slot rows for this LP run.
 
@@ -1162,6 +1163,13 @@ def _persist_lp_snapshots(
             "discharge_kwh": float(plan.battery_discharge_kwh[i]) if i < len(plan.battery_discharge_kwh) else None,
             "pv_use_kwh": float(plan.pv_use_kwh[i]) if i < len(plan.pv_use_kwh) else None,
             "pv_curtail_kwh": float(plan.pv_curtail_kwh[i]) if i < len(plan.pv_curtail_kwh) else None,
+            # Committed per-slot PV-generation forecast (calibrated, today-factor
+            # folded in) the LP solved against — the "committed plan" PV line.
+            "pv_forecast_kwh": (
+                float(pv_forecast_kwh_per_slot[i])
+                if pv_forecast_kwh_per_slot is not None and i < len(pv_forecast_kwh_per_slot)
+                else None
+            ),
             "dhw_kwh": float(plan.dhw_electric_kwh[i]) if i < len(plan.dhw_electric_kwh) else None,
             "space_kwh": float(plan.space_electric_kwh[i]) if i < len(plan.space_electric_kwh) else None,
             "soc_kwh": float(plan.soc_kwh[i + 1]) if (i + 1) < len(plan.soc_kwh) else None,
@@ -1946,6 +1954,9 @@ def _run_optimizer_lp(
             micro_climate_offset=micro_climate_offset,
             forecast_fetch_at_utc=(forecast_fetch_at_utc if forecast else None),
             exogenous_snapshot=exogenous_snapshot,
+            pv_forecast_kwh_per_slot=(
+                list(weather.pv_kwh_per_slot) if weather is not None and weather.pv_kwh_per_slot else None
+            ),
         )
     except Exception as e:
         logger.warning("LP snapshot persistence failed (non-fatal): %s", e)

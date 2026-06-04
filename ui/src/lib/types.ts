@@ -112,7 +112,8 @@ export interface SchedulerTimeline {
 
 export interface PvTodaySlot {
   slot_utc: string;
-  pv_forecast_kwh: number;
+  pv_forecast_kwh: number;            // live forecast (re-fetched per request)
+  pv_planned_kwh?: number | null;     // committed plan (frozen since last LP solve)
   pv_actual_kwh: number | null;
   import_price_p?: number | null;
   base_load_kwh?: number | null;
@@ -133,6 +134,8 @@ export interface PvTodayResponse {
   slots: PvTodaySlot[];
   accuracy: PvTodayAccuracy | null;
   forecast_kwh_day_total: number;
+  plan_committed_at?: string | null;  // ISO ...Z of the committed LP solve
+  plan_run_id?: number | null;
 }
 
 /* ----- /optimization/inputs ----- */
