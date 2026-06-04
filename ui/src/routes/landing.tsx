@@ -15,6 +15,7 @@ import {
   getDaikinQuota,
   getTariffDashboard,
   getPvToday,
+  getDhwSchedule,
 } from "../lib/endpoints";
 import { Widget } from "../components/common/Widget";
 import { Spinner } from "../components/common/Spinner";
@@ -99,6 +100,8 @@ export default function Landing() {
   // Daikin cached read — no refresh=true, so no live cloud call (30-min cache TTL).
   const daikin = useFetch(getDaikinStatus, []);
   const daikinQuota = useFetch(getDaikinQuota, []);
+  // DHW tank plan (today+tomorrow) — shared by Heating + Live-power tank badges.
+  const dhwSched = useFetch(getDhwSchedule, []);
   // The shared period navigator drives the Hero headline + cost breakdown +
   // energy chart + tariff comparison. Re-fetch whenever the selection changes.
   const period = usePeriod();
@@ -141,11 +144,11 @@ export default function Landing() {
       <div class="widget-grid widget-band">
         <Widget title="Live power" icon="⚡" tone="power" size="large"
                 badge={data.now_utc ? new Date(data.now_utc).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }) : undefined}>
-          <LivePowerWidget state={s} cockpit={data} timeline={timeline.data} execution={execution.data} agile={agile.data} metrics={metrics.data} />
+          <LivePowerWidget state={s} cockpit={data} timeline={timeline.data} execution={execution.data} agile={agile.data} metrics={metrics.data} dhwSchedule={dhwSched.data?.rows} />
         </Widget>
 
         <Widget title="Heating" icon="♨" tone="thermal" size="medium">
-          <HeatingWidget state={s} daikin={daikin.data} daikinQuota={daikinQuota.data} report={report.data} weather={weather.data} execution={execution.data}
+          <HeatingWidget state={s} daikin={daikin.data} daikinQuota={daikinQuota.data} report={report.data} weather={weather.data} execution={execution.data} dhwSchedule={dhwSched.data?.rows}
                          onRefresh={() => { void daikin.refresh(); void daikinQuota.refresh(); }} />
         </Widget>
       </div>

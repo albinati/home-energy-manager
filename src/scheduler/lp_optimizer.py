@@ -83,6 +83,10 @@ class LpPlan:
     temp_outdoor_c: list[float] = field(default_factory=list)
     peak_threshold_pence: float = 0.0
     cheap_threshold_pence: float = 0.0
+    pre_negative_export_slots: list[int] = field(default_factory=list)
+    """Slot indices where the pre-negative drain relaxation allowed battery→grid
+    export (1B). The labeller marks committed drains here ``pre_negative_export``
+    so they bypass the peak_export robustness filter."""
     pv_sufficiency_guard: PvSufficiencyGuardDiag | None = None
     """Audit data for the strict_savings PV-sufficiency guard rail. ``None``
     when the rail was not evaluated (legacy callers / pre-#incident-2026-05-15
@@ -523,6 +527,10 @@ def solve_lp(
             _pinned_e_dhw, _pinned_tank = _dhw_pol.forecast_dhw_load_per_slot(
                 list(slot_starts_utc), mode=_mode,
                 initial_tank_c=float(initial.tank_temp_c),
+                # Budget the negative-price boost-to-max energy (+ pre-cool) so
+                # the pinned LP plans the extra import. Use the import price_line
+                # to align with the LP's negative-slot logic (dis-lock, ceiling).
+                price_line=list(price_line),
             )
         except Exception as _exc:  # pragma: no cover - defensive
             # Fall back to legacy free-variable behavior if the forecast
@@ -621,6 +629,25 @@ def solve_lp(
     # negative) viram standard/solar_charge no labeller.
     _vacation_mode = _preset_enum == OperationPreset.VACATION
 
+    # Pre-negative export drain (1B): within the plunge prep window before a
+    # negative window, ALLOW battery→grid export (relax the normal/guests
+    # exp<=pv_use rule) on positive slots so the LP can drain the battery —
+    # sell high now, refill at the paid negative price, and free headroom to
+    # absorb maximum import during the window. The LP objective + cycle penalty
+    # decide whether/how much to drain (and the SoC reserve floors it). Gated by
+    # a minimum export price so we never give energy away for headroom alone.
+    pre_neg_export = [False] * n
+    if getattr(config, "LP_PRE_NEGATIVE_PREP_ENABLED", True) and not _vacation_mode:
+        _prep_slots = int(max(0, int(getattr(config, "LP_PLUNGE_PREP_HOURS", 12))) * 2)
+        _drain_margin = float(getattr(config, "LP_PRE_NEGATIVE_EXPORT_MARGIN_PENCE", 2.0))
+        if _prep_slots > 0:
+            for i in range(n):
+                if price_line[i] < 0 or export_rate_line[i] < _drain_margin:
+                    continue
+                j_end = min(n, i + _prep_slots)
+                if any(price_line[j] < 0 for j in range(i, j_end)):
+                    pre_neg_export[i] = True
+
     for i in range(n):
         e_hp_i = e_dhw[i] + e_space[i]
 
@@ -649,6 +676,9 @@ def solve_lp(
             prob += exp[i] <= pv_use[i] + dis[i]
             # Vacation: bateria carrega só de PV (sem grid charging)
             prob += chg[i] <= pv_use[i]
+        elif pre_neg_export[i]:
+            # 1B: pre-negative drain — allow battery→grid export this slot.
+            prob += exp[i] <= pv_use[i] + dis[i]
         else:
             prob += exp[i] <= pv_use[i]
 
@@ -1052,6 +1082,13 @@ def solve_lp(
         if price_line[i] < 0:
             prob += dis[i] == 0
 
+    # Negative-EXPORT-price safety (1C): never export when the Outgoing rate is
+    # negative — exporting would PAY the grid. Surplus PV goes to pv_curt
+    # instead. Always on (no flag); cheap belt-and-braces.
+    for i in range(n):
+        if export_rate_line[i] < 0:
+            prob += exp[i] == 0
+
     # -----------------------------------------------------------------------
     # Terminal constraints
     # -----------------------------------------------------------------------
@@ -1263,6 +1300,7 @@ def solve_lp(
         objective_pence=0.0,
         peak_threshold_pence=peak_thr,
         cheap_threshold_pence=cheap_thr,
+        pre_negative_export_slots=[i for i in range(n) if pre_neg_export[i]],
         pv_sufficiency_guard=pv_guard_diag,
     )
     plan.slot_starts_utc = list(slot_starts_utc)

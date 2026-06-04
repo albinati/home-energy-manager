@@ -345,7 +345,10 @@ def _slot_fox_tuple(
         pwr = s.lp_grid_import_w if s.lp_grid_import_w is not None else config.FOX_FORCE_CHARGE_NORMAL_PWR
         fds = s.target_soc_pct if s.target_soc_pct is not None else 95
         return ("ForceCharge", fds, pwr, min_r, None)
-    if s.kind == "peak_export":
+    if s.kind in ("peak_export", "pre_negative_export"):
+        # pre_negative_export: drain the battery to grid ahead of a negative
+        # window (sell high → refill at the paid negative price). Same hardware
+        # action as peak_export — ForceDischarge to the export SoC floor.
         return (
             "ForceDischarge",
             int(config.EXPORT_DISCHARGE_FLOOR_SOC_PERCENT),

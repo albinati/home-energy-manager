@@ -753,10 +753,13 @@ class Config:
         os.getenv("DHW_TEMP_SETBACK_C", "37")
     )
     # Tank temperature during negative-price slots (Outgoing Agile < 0 p/kWh).
-    # Sole permitted exception to the fixed schedule — grid is paying us
-    # to consume, so load the tank.
+    # Sole permitted exception to the fixed schedule — grid is paying us to
+    # consume, so load the tank to MAX. Default raised 60 → 65 (= DHW_TEMP_MAX_C;
+    # heat is free money during negative price). The LP now also BUDGETS this
+    # heat-up energy (forecast_dhw_load_per_slot ramp) so it plans the extra
+    # import. Clamped to DHW_TEMP_MAX_C in dhw_policy.
     DHW_NEGATIVE_PRICE_BOOST_C: float = float(
-        os.getenv("DHW_NEGATIVE_PRICE_BOOST_C", "60")
+        os.getenv("DHW_NEGATIVE_PRICE_BOOST_C", "65")
     )
     # Forecast night-temperature bias (minimal #324 implementation).
     # Open Meteo's grid coverage (~10 km) over-estimates the W4 1DZ
@@ -916,6 +919,29 @@ class Config:
     # days where the negative slot was >24 h ahead — only 33% of charge slots
     # were in the cheap quartile on those days.
     LP_PLUNGE_PREP_HOURS: int = int(os.getenv("LP_PLUNGE_PREP_HOURS", "12"))
+
+    # Pre-negative ACTIVE pre-positioning: within LP_PLUNGE_PREP_HOURS of a
+    # negative window, actively DRAIN the battery to the grid (force export,
+    # selling high) so it has maximum headroom to absorb paid import during the
+    # negative window. Only fires when selling-now beats buying-back-during-
+    # negative by LP_PRE_NEGATIVE_EXPORT_MARGIN_PENCE (round-trip adjusted), and
+    # never below the export SoC floor. This DELIBERATELY reverses the standard
+    # "no battery export in normal/guests" rule (PR D) for the pre-negative
+    # window only — set false to disable.
+    LP_PRE_NEGATIVE_PREP_ENABLED: bool = (
+        os.getenv("LP_PRE_NEGATIVE_PREP_ENABLED", "true").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+    LP_PRE_NEGATIVE_EXPORT_MARGIN_PENCE: float = float(
+        os.getenv("LP_PRE_NEGATIVE_EXPORT_MARGIN_PENCE", "2.0")
+    )
+    # Pre-cool the DHW tank for this many hours before a negative window: don't
+    # re-warm it (let it coast to setback) so it has maximum headroom to absorb
+    # the boost-to-max during the negative window. Short + shower-safe (never
+    # overrides a shower-reheat slot). 0 disables active pre-cool.
+    LP_PRE_NEGATIVE_PRECOOL_HOURS: float = float(
+        os.getenv("LP_PRE_NEGATIVE_PRECOOL_HOURS", "3")
+    )
 
     # --- PV-sufficiency guard rail (incident 2026-05-15; docs/PV_TRUST_GUARDRAIL.md)
     # In ``strict_savings`` mode, block grid → battery for every today-slot

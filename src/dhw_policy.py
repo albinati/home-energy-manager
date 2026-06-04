@@ -160,7 +160,11 @@ def generate_daily_tank_schedule(
     setback_hour = int(getattr(config, "DHW_SETBACK_START_HOUR_LOCAL", 22))
     normal_c = int(round(float(config.DHW_TEMP_NORMAL_C)))
     setback_c = int(round(float(getattr(config, "DHW_TEMP_SETBACK_C", 37))))
-    boost_c = int(round(float(getattr(config, "DHW_NEGATIVE_PRICE_BOOST_C", 60))))
+    # Negative-price boost target → MAX (free money to heat). Clamp to DHW_TEMP_MAX_C.
+    boost_c = int(round(min(
+        float(getattr(config, "DHW_NEGATIVE_PRICE_BOOST_C", 65)),
+        float(config.DHW_TEMP_MAX_C),
+    )))
 
     # DST-safe anchor construction (K1.1 bug #3 fix). Building each
     # boundary explicitly via ``datetime(..., tzinfo=tz)`` lets ZoneInfo
@@ -232,6 +236,7 @@ def forecast_dhw_load_per_slot(
     mode: str | None = None,
     target_date_local: date | None = None,
     initial_tank_c: float | None = None,
+    price_line: list[float] | None = None,
 ) -> tuple[list[float], list[float]]:
     """Forecast the electric DHW load + tank temperature **trajectory** the
     fixed-schedule policy implies over the given LP horizon.
@@ -325,8 +330,10 @@ def forecast_dhw_load_per_slot(
         return "setback"
 
     e_dhw: list[float] = []
+    phases: list[str] = []
     for slot in slot_starts_utc:
         phase = _phase_for_slot(slot)
+        phases.append(phase)
         if phase == "vacation":
             e_dhw.append(VACATION_KWH)
         elif phase == "warmup_transition":
@@ -391,6 +398,65 @@ def forecast_dhw_load_per_slot(
             tank_temps.append(setback_c)
     # Boundary N: same as last slot's target (assume flat at end)
     tank_temps.append(tank_temps[-1] if tank_temps else normal_c)
+
+    # ----- Negative-price boost (1A) + pre-cool (1C) -----------------------
+    # When paid to import, BUDGET the heat-up energy to drive the tank to MAX so
+    # the pinned LP plans the extra import; in the short window before, don't
+    # re-warm the tank (let it coast to setback) so it has maximum headroom to
+    # absorb. Shower-safe + skipped in vacation (firmware owns the tank).
+    if price_line is not None and len(price_line) == n and mode != "vacation":
+        boost_target = min(
+            float(getattr(config, "DHW_NEGATIVE_PRICE_BOOST_C", 65)),
+            float(config.DHW_TEMP_MAX_C),
+        )
+        max_hp_kwh = max(0.05, float(getattr(config, "DAIKIN_MAX_HP_KW", 2.0)) * 0.5)
+        tank_litres = float(getattr(config, "DHW_TANK_LITRES", 200.0))
+        water_cp = float(getattr(config, "DHW_WATER_CP", 4186.0))
+        cop_typical = 3.0  # matches lp_optimizer cop_dhw + warm-credit above
+        elec_per_degree = (tank_litres * water_cp / 3.6e6) / cop_typical  # kWh elec / °C
+        precool_slots = int(max(0.0, float(getattr(config, "LP_PRE_NEGATIVE_PRECOOL_HOURS", 3.0))) * 2)
+
+        # Contiguous runs of negative-price slots.
+        windows: list[tuple[int, int]] = []
+        i = 0
+        while i < n:
+            if price_line[i] < 0:
+                j = i
+                while j + 1 < n and price_line[j + 1] < 0:
+                    j += 1
+                windows.append((i, j))
+                i = j + 1
+            else:
+                i += 1
+
+        for ws, we in windows:
+            # 1C pre-cool: in the slots just before the window, don't re-warm —
+            # coast to setback. Never touch a shower-reheat slot (comfort).
+            for k in range(max(0, ws - precool_slots), ws):
+                if phases[k] == "shower_reheat":
+                    continue
+                tank_temps[k] = min(tank_temps[k], setback_c)
+                if e_dhw[k] > SETBACK_MAINTENANCE_KWH:
+                    e_dhw[k] = SETBACK_MAINTENANCE_KWH
+            # 1A boost ramp: heat from the (cooled) entry temp up to boost_target,
+            # clamped to the heater's per-slot electric capacity. Short windows
+            # only reach what's physically possible.
+            entry = float(tank_temps[ws])
+            if precool_slots > 0:
+                entry = min(entry, setback_c)
+                tank_temps[ws] = entry
+            cur = entry
+            for k in range(ws, we + 1):
+                if cur >= boost_target - 1e-6:
+                    e_dhw[k] = WARMUP_MAINTENANCE_KWH      # maintain at max
+                    tank_temps[k + 1] = boost_target
+                    cur = boost_target
+                    continue
+                lift_deg = (max_hp_kwh / elec_per_degree) if elec_per_degree > 0 else 0.0
+                new_temp = min(boost_target, cur + lift_deg)
+                e_dhw[k] = min(max_hp_kwh, (new_temp - cur) * elec_per_degree + SETBACK_MAINTENANCE_KWH)
+                cur = new_temp
+                tank_temps[k + 1] = cur
 
     return e_dhw, tank_temps
 

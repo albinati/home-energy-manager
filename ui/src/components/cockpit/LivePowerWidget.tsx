@@ -4,7 +4,9 @@ import { Icon, type IconName } from "../common/Icon";
 import { useAnimatedNumber } from "../../lib/useAnimatedNumber";
 import { reducedMotion } from "../../lib/motion";
 import { kw, kwh, pct } from "../../lib/format";
-import type { CockpitState, CockpitNow, SchedulerTimeline, ExecutionTodayResponse, AgileTodayResponse, MetricsResponse } from "../../lib/types";
+import type { CockpitState, CockpitNow, SchedulerTimeline, ExecutionTodayResponse, AgileTodayResponse, MetricsResponse, DhwScheduleRow } from "../../lib/types";
+import { TankScheduleBadges } from "../common/TankScheduleBadges";
+import { formatRelativeSlot, endLabelFor } from "../../lib/slotLabels";
 import "./cockpit.css";
 import "./live-power.css";
 
@@ -15,6 +17,7 @@ interface LivePowerWidgetProps {
   execution: ExecutionTodayResponse | null;
   agile: AgileTodayResponse | null;
   metrics: MetricsResponse | null;
+  dhwSchedule?: DhwScheduleRow[] | null;
 }
 
 const RM = reducedMotion();
@@ -23,7 +26,7 @@ const RM = reducedMotion();
 // the live power-flow is the centerpiece, everything else (action verb,
 // battery SoC, Fox mode, tariff, scheduled windows) recedes to quiet
 // monochrome. Domain colour appears only on the flow + the focal-value tint.
-export function LivePowerWidget({ state, cockpit, timeline, execution, agile, metrics }: LivePowerWidgetProps) {
+export function LivePowerWidget({ state, cockpit, timeline, execution, agile, metrics, dhwSchedule }: LivePowerWidgetProps) {
   const socPct = state.soc_pct ?? 0;
   const charging = state.battery_kw > 0.05;
   const discharging = state.battery_kw < -0.05;
@@ -150,6 +153,9 @@ export function LivePowerWidget({ state, cockpit, timeline, execution, agile, me
                 );
               })}
             </span>
+          )}
+          {dhwSchedule && dhwSchedule.length > 0 && (
+            <TankScheduleBadges rows={dhwSchedule} nowIso={cockpit.now_utc} limit={4} />
           )}
         </div>
         {lpInfo && (lpInfo.runId != null || lpInfo.runAt) && (
@@ -289,38 +295,5 @@ function formatLocalTime(iso: string | undefined): string {
   catch { return iso; }
 }
 
-function endLabelFor(lastSlotStartIso: string): string {
-  try {
-    const end = new Date(new Date(lastSlotStartIso).getTime() + 30 * 60 * 1000);
-    return end.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
-  } catch {
-    return "?";
-  }
-}
-
-interface RelativeSlot { dayLabel: string; timeLabel: string; isToday: boolean; }
-function formatRelativeSlot(iso: string | undefined, nowIso?: string | null): RelativeSlot {
-  if (!iso) return { dayLabel: "", timeLabel: "—", isToday: false };
-  try {
-    const slot = new Date(iso);
-    const now = nowIso ? new Date(nowIso) : new Date();
-    const timeLabel = slot.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
-    const slotKey = `${slot.getFullYear()}-${slot.getMonth()}-${slot.getDate()}`;
-    const nowKey = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`;
-    if (slotKey === nowKey) return { dayLabel: "", timeLabel, isToday: true };
-    const dayDiff = Math.round(
-      (Date.UTC(slot.getFullYear(), slot.getMonth(), slot.getDate())
-        - Date.UTC(now.getFullYear(), now.getMonth(), now.getDate())) / 86400000,
-    );
-    if (dayDiff === 1) return { dayLabel: "Tomorrow", timeLabel, isToday: false };
-    if (dayDiff > 1 && dayDiff < 7) {
-      return { dayLabel: slot.toLocaleDateString([], { weekday: "short" }), timeLabel, isToday: false };
-    }
-    return {
-      dayLabel: slot.toLocaleDateString([], { day: "2-digit", month: "short" }),
-      timeLabel, isToday: false,
-    };
-  } catch {
-    return { dayLabel: "", timeLabel: iso, isToday: false };
-  }
-}
+// formatRelativeSlot + endLabelFor now live in ../../lib/slotLabels (shared
+// with the tank badges).
