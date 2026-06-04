@@ -103,6 +103,11 @@ def lp_plan_to_slots(plan: LpPlan) -> list[HalfHourSlot]:
     max_pwr_w = int(config.FOX_FORCE_CHARGE_MAX_PWR)
     min_pwr_w = 200  # floor: prevents inverter from interpreting "0 W" as unlimited
 
+    # Slots where the LP relaxed the export cap to drain the battery ahead of a
+    # negative window (1B). These export>pv slots are labelled pre_negative_export
+    # (not peak_export) so they bypass the peak_export robustness filter.
+    pre_neg_set = set(getattr(plan, "pre_negative_export_slots", []) or [])
+
     for i in range(n):
         st = plan.slot_starts_utc[i]
         en = st + timedelta(minutes=30)
@@ -150,9 +155,9 @@ def lp_plan_to_slots(plan: LpPlan) -> list[HalfHourSlot]:
             # where dis goes to self-use AND PV excess naturally exports;
             # in normal/guests mode the LP constraint ``exp <= pv_use``
             # makes ``exp > pv`` mathematically impossible → kind stays
-            # ``standard``. Vacation mode (``exp <= pv_use + dis``) is the
-            # one place where this branch can fire.
-            kind = "peak_export"
+            # ``standard``. Vacation mode (``exp <= pv_use + dis``) and the
+            # pre-negative drain relaxation (1B) are where this branch fires.
+            kind = "pre_negative_export" if i in pre_neg_set else "peak_export"
         elif ed < EPS and es < EPS and price >= peak_thr:
             kind = "peak"
 

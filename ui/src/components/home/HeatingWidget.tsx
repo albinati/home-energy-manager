@@ -16,6 +16,7 @@ import { Gauge } from "../common/Gauge";
 import { RadialGauge } from "../common/RadialGauge";
 import { Modal } from "../common/Modal";
 import { HeatingControls } from "./HeatingControls";
+import { TankScheduleBadges } from "../common/TankScheduleBadges";
 import "./heating.css";
 
 interface HeatingWidgetProps {
@@ -25,6 +26,8 @@ interface HeatingWidgetProps {
   report: EnergyReport | null;
   weather: WeatherResponse | null;
   execution: ExecutionTodayResponse | null;
+  // Shared DHW schedule (today+tomorrow). When omitted the widget self-fetches.
+  dhwSchedule?: DhwScheduleRow[] | null;
   // Re-fetch Daikin status + quota after a manual control write.
   onRefresh?: () => void;
 }
@@ -33,7 +36,7 @@ interface HeatingWidgetProps {
 // Outdoor temp + LWT now prefer /execution/today (logged Daikin readings,
 // no live API call) over the cached /daikin/status — same data freshness,
 // zero quota cost.
-export function HeatingWidget({ state, daikin, daikinQuota, report, weather, execution, onRefresh }: HeatingWidgetProps) {
+export function HeatingWidget({ state, daikin, daikinQuota, report, weather, execution, dhwSchedule, onRefresh }: HeatingWidgetProps) {
   const dev = daikin && daikin.length > 0 ? daikin[0] : null;
   // Explicit, confirmed LIVE read. Everything on this widget normally renders
   // the cache the LP/scheduler already refreshed (~30 min cadence) — we only
@@ -88,13 +91,16 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather, exe
   // dhw_on is what /daikin/status serves; tank_power is legacy (never populated).
   const tankPower = dev?.dhw_on ?? dev?.tank_power ?? null;
 
-  // Today's deterministic tank plan (times + targets) — dhw_policy, zero quota.
-  const [schedule, setSchedule] = useState<DhwScheduleRow[]>([]);
+  // Deterministic tank plan (today+tomorrow times + targets) — dhw_policy, zero
+  // quota. Prefer the shared prop from the parent; self-fetch as a fallback.
+  const [selfSchedule, setSelfSchedule] = useState<DhwScheduleRow[]>([]);
   useEffect(() => {
+    if (dhwSchedule) return;  // provided by parent
     let alive = true;
-    getDhwSchedule().then((r) => { if (alive) setSchedule(r.rows || []); }).catch(() => {});
+    getDhwSchedule().then((r) => { if (alive) setSelfSchedule(r.rows || []); }).catch(() => {});
     return () => { alive = false; };
-  }, []);
+  }, [dhwSchedule]);
+  const schedule = dhwSchedule ?? selfSchedule;
 
   // LWT: latest execution slot first, then live cockpit state.
   const lwtFromExec = latestExecValue(execution, (s) => s.daikin_lwt_c);
@@ -187,17 +193,8 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather, exe
 
       {schedule.length > 0 && (
         <div class="heating-plan">
-          <div class="heating-plan-title">Tank plan · today</div>
-          <ul class="heating-plan-list">
-            {schedule.map((r, i) => (
-              <li key={i} class={`heating-plan-row heating-plan-row--${planKind(r.action_type)}`}>
-                <span class="heating-plan-dot" />
-                <span class="heating-plan-when">{planTime(r.start_utc)}</span>
-                <span class="heating-plan-label">{planLabel(r.action_type)}</span>
-                <span class="heating-plan-temp">{r.tank_temp_c != null ? `${r.tank_temp_c}°C` : "—"}</span>
-              </li>
-            ))}
-          </ul>
+          <div class="heating-plan-title">Tank plan</div>
+          <TankScheduleBadges rows={schedule} />
         </div>
       )}
 
@@ -224,25 +221,6 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather, exe
       </Modal>
     </div>
   );
-}
-
-function planKind(action?: string | null): string {
-  if (action === "tank_setback") return "setback";
-  if (action === "tank_negative_boost") return "boost";
-  return "warmup";
-}
-function planLabel(action?: string | null): string {
-  switch (action) {
-    case "tank_setback": return "Setback";
-    case "tank_negative_boost": return "Boost (neg price)";
-    case "tank_warmup": return "Warmup";
-    default: return action || "—";
-  }
-}
-function planTime(iso?: string | null): string {
-  if (!iso) return "—";
-  try { return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }); }
-  catch { return "—"; }
 }
 
 function latestExecValue(

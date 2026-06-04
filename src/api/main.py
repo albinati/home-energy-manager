@@ -1380,34 +1380,54 @@ async def foxess_quota():
 
 @app.get("/api/v1/daikin/dhw-schedule")
 async def daikin_dhw_schedule():
-    """Today's deterministic DHW tank plan (dhw_policy) — the programmed
-    warmup / setback / boost rows with their times + tank targets. Pure
-    schedule generation; **zero Daikin quota** (no device read). Powers the
-    Heating widget's "tank plan" list.
+    """Deterministic DHW tank plan (dhw_policy) for today + tomorrow — the
+    programmed warmup / setback / negative-boost rows with their times + tank
+    targets. Pure schedule generation; **zero Daikin quota** (no device read).
+    Powers the Heating-widget + Live-power tank badges.
+
+    Fetches Outgoing-Agile rates over each day's warmup→next-warmup horizon
+    (mirrors the dispatch writer, lp_dispatch.py) so negative-price boost rows
+    appear; spans 2 days so tomorrow's cycle (and its boosts, once tomorrow's
+    rates land ~16:00) is visible.
     """
-    from datetime import datetime as _dt
+    from datetime import datetime as _dt, timedelta as _td
     from zoneinfo import ZoneInfo
     from .. import dhw_policy
+    from .. import db as _db
 
     try:
         tz = ZoneInfo(getattr(config, "BULLETPROOF_TIMEZONE", "Europe/London"))
     except Exception:
-        tz = timezone.utc
+        tz = UTC
     today_local = _dt.now(tz).date()
     mode = (getattr(config, "OPTIMIZATION_PRESET", "normal") or "normal").strip().lower()
+    warmup_hour = int(getattr(config, "DHW_WARMUP_START_HOUR_LOCAL", 13))
     rows_out: list[dict] = []
-    try:
-        rows = dhw_policy.generate_daily_tank_schedule(today_local)
-        for r in rows:
-            params = r.get("params") or {}
-            rows_out.append({
-                "action_type": r.get("action_type"),
-                "start_utc": r.get("start_time"),
-                "end_utc": r.get("end_time"),
-                "tank_temp_c": params.get("tank_temp"),
-            })
-    except Exception as e:
-        logger.warning("dhw-schedule: generation failed (%s)", e)
+    for offset in (0, 1):
+        day = today_local + _td(days=offset)
+        outgoing = None
+        if (config.OCTOPUS_EXPORT_TARIFF_CODE or "").strip():
+            try:
+                ds = _dt(day.year, day.month, day.day, warmup_hour, 0, tzinfo=tz)
+                de = ds + _td(days=1)
+                outgoing = _db.get_agile_export_rates_in_range(
+                    ds.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+                    de.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+                )
+            except Exception as e:
+                logger.debug("dhw-schedule: outgoing rates unavailable for %s: %s", day, e)
+        try:
+            rows = dhw_policy.generate_daily_tank_schedule(day, outgoing_rates=outgoing)
+            for r in rows:
+                params = r.get("params") or {}
+                rows_out.append({
+                    "action_type": r.get("action_type"),
+                    "start_utc": r.get("start_time"),
+                    "end_utc": r.get("end_time"),
+                    "tank_temp_c": params.get("tank_temp"),
+                })
+        except Exception as e:
+            logger.warning("dhw-schedule: generation failed for %s (%s)", day, e)
     return {"mode": mode, "rows": rows_out}
 
 
