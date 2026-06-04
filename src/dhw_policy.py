@@ -186,38 +186,72 @@ def generate_daily_tank_schedule(
         warmup_hour, 0, tzinfo=tz,
     )
 
+    # Negative-price boost windows are the sole permitted exception to the fixed
+    # schedule. Detect them FIRST so they can genuinely SUPERSEDE the leading
+    # warmup (not just sit alongside it): we must never pre-heat to normal_c at a
+    # positive price right before a free, paid-to-import boost to boost_c.
+    warmup_start_utc = warmup_start.astimezone(UTC)
+    setback_start_utc = setback_start.astimezone(UTC)
+    next_warmup_utc = next_warmup.astimezone(UTC)
+    neg_windows = _detect_negative_windows(agile_rates, warmup_start_utc, next_warmup_utc)
+
+    # If a boost window opens at/near the warmup start, defer the warmup past it
+    # (chaining consecutive boosts that each fall within the lead window of the
+    # running start). The boost does the heating during the paid window; the
+    # warmup then resumes its hold-at-normal_c role afterwards — the tank simply
+    # coasts down from boost_c, so no positive-price heating happens until it
+    # falls below normal_c. A boost LATER in the day (beyond the lead window of
+    # the warmup start) leaves the warmup intact: the afternoon still needs hot
+    # water before that boost arrives.
+    #
+    # The lead window is LP_PRE_NEGATIVE_PRECOOL_HOURS — deliberately the SAME
+    # window the LP's energy forecast (forecast_dhw_load_per_slot) uses to
+    # pre-cool: the forecast zeroes warmup energy for slots within precool_hours
+    # before a negative window, so deferring the fired warmup over exactly that
+    # window keeps the actions and the budgeted DHW import consistent. (The LP
+    # suppresses the warmup-start slot iff boost_start <= warmup_start +
+    # precool — identical to this defer condition.)
+    effective_warmup_start_utc = warmup_start_utc
+    defer_lead = timedelta(hours=max(
+        0.0, float(getattr(config, "LP_PRE_NEGATIVE_PRECOOL_HOURS", 3.0))
+    ))
+    if neg_windows and defer_lead > timedelta(0):
+        for nw_start, nw_end in sorted(neg_windows):
+            if nw_start <= effective_warmup_start_utc + defer_lead:
+                effective_warmup_start_utc = max(effective_warmup_start_utc, nw_end)
+            else:
+                break
+
     rows: list[dict[str, Any]] = []
 
     if mode == "guests":
         # Single 24h warmup row — no setback during guest visits because of
-        # potential morning showers.
-        rows.append(_make_action(
-            action_type="tank_warmup",
-            start_utc=warmup_start.astimezone(UTC),
-            end_utc=next_warmup.astimezone(UTC),
-            tank_temp_c=normal_c,
-        ))
+        # potential morning showers. Skip entirely if a boost chain has deferred
+        # the start past the window end.
+        if effective_warmup_start_utc < next_warmup_utc:
+            rows.append(_make_action(
+                action_type="tank_warmup",
+                start_utc=effective_warmup_start_utc,
+                end_utc=next_warmup_utc,
+                tank_temp_c=normal_c,
+            ))
     else:
-        # Normal mode: warmup → setback → next-day warmup pattern
-        rows.append(_make_action(
-            action_type="tank_warmup",
-            start_utc=warmup_start.astimezone(UTC),
-            end_utc=setback_start.astimezone(UTC),
-            tank_temp_c=normal_c,
-        ))
+        # Normal mode: warmup → setback → next-day warmup pattern. The warmup is
+        # emitted only when it still has positive duration after any boost defer.
+        if effective_warmup_start_utc < setback_start_utc:
+            rows.append(_make_action(
+                action_type="tank_warmup",
+                start_utc=effective_warmup_start_utc,
+                end_utc=setback_start_utc,
+                tank_temp_c=normal_c,
+            ))
         rows.append(_make_action(
             action_type="tank_setback",
-            start_utc=setback_start.astimezone(UTC),
-            end_utc=next_warmup.astimezone(UTC),
+            start_utc=setback_start_utc,
+            end_utc=next_warmup_utc,
             tank_temp_c=setback_c,
         ))
 
-    # Negative-price boost windows — sole permitted exception to the fixed
-    # schedule. Override the underlying tank_warmup / tank_setback for the
-    # duration of any negative-priced contiguous window within the horizon.
-    horizon_start = warmup_start.astimezone(UTC)
-    horizon_end = next_warmup.astimezone(UTC)
-    neg_windows = _detect_negative_windows(agile_rates, horizon_start, horizon_end)
     for nw_start, nw_end in neg_windows:
         rows.append(_make_action(
             action_type="tank_negative_boost",

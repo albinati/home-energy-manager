@@ -182,7 +182,8 @@ def test_fall_back_day_emits_correct_local_hours():
 
 def test_warmup_to_setback_duration_normal_day():
     """On a regular (non-DST) day, warmup window is exactly 9h."""
-    rows = dhw_policy.generate_daily_tank_schedule(date(2026, 6, 1), mode="normal")
+    # Future BST date to clear the bug #5 past-date guard (cf. spring-forward test).
+    rows = dhw_policy.generate_daily_tank_schedule(date(2027, 6, 1), mode="normal")
     warmup = next(r for r in rows if r["action_type"] == "tank_warmup")
     s = datetime.fromisoformat(warmup["start_time"].replace("Z", "+00:00"))
     e = datetime.fromisoformat(warmup["end_time"].replace("Z", "+00:00"))
@@ -192,7 +193,8 @@ def test_warmup_to_setback_duration_normal_day():
 
 def test_setback_to_next_warmup_duration_normal_day():
     """Setback window is 15h on a regular day (22:00 → 13:00 next day)."""
-    rows = dhw_policy.generate_daily_tank_schedule(date(2026, 6, 1), mode="normal")
+    # Future BST date to clear the bug #5 past-date guard (cf. spring-forward test).
+    rows = dhw_policy.generate_daily_tank_schedule(date(2027, 6, 1), mode="normal")
     setback = next(r for r in rows if r["action_type"] == "tank_setback")
     s = datetime.fromisoformat(setback["start_time"].replace("Z", "+00:00"))
     e = datetime.fromisoformat(setback["end_time"].replace("Z", "+00:00"))

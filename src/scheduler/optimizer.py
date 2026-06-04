@@ -798,7 +798,10 @@ def _daikin_params_for_kind(kind: str, peak_frost: bool) -> dict[str, Any]:
         return {
             "lwt_offset": config.LWT_OFFSET_MAX,
             "tank_powerful": True,
-            "tank_temp": config.DHW_TEMP_MAX_C,
+            # Commandable setpoint, NOT the physical ceiling — Onecta rejects
+            # setpoints above the heat-pump max (60 °C). tank_powerful=True still
+            # engages the immersion booster for max heat during the paid window.
+            "tank_temp": min(config.DHW_NEGATIVE_PRICE_BOOST_C, config.DHW_TEMP_MAX_C),
             "tank_power": True,
             "climate_on": True,
         }

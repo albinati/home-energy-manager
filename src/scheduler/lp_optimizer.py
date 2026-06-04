@@ -636,13 +636,25 @@ def solve_lp(
     # absorb maximum import during the window. The LP objective + cycle penalty
     # decide whether/how much to drain (and the SoC reserve floors it). Gated by
     # a minimum export price so we never give energy away for headroom alone.
+    # Pre-negative drain ELIGIBILITY (not a decision): a positive-price slot is
+    # *allowed* to export battery→grid when a negative window sits within the
+    # prep horizon ahead. Whether — and how much — it actually drains is left
+    # entirely to the objective: export revenue (``-exp×export_rate``) net of
+    # the cycle penalty (``obj_cycle``) and the cost of buying the energy back.
+    # There is deliberately NO economic threshold gate here. The old
+    # ``export_rate >= LP_PRE_NEGATIVE_EXPORT_MARGIN_PENCE`` floor was an
+    # arbitrary 2p cliff that could flip a slot's drain availability on tiny
+    # export-rate moves near the threshold; the objective already declines to
+    # drain when it isn't worth it, and the ``export_rate < 0`` safety below
+    # forces ``exp == 0`` so we never pay to export.
     pre_neg_export = [False] * n
     if getattr(config, "LP_PRE_NEGATIVE_PREP_ENABLED", True) and not _vacation_mode:
         _prep_slots = int(max(0, int(getattr(config, "LP_PLUNGE_PREP_HOURS", 12))) * 2)
-        _drain_margin = float(getattr(config, "LP_PRE_NEGATIVE_EXPORT_MARGIN_PENCE", 2.0))
         if _prep_slots > 0:
             for i in range(n):
-                if price_line[i] < 0 or export_rate_line[i] < _drain_margin:
+                # Negative slots charge (paid to import) and have dis locked to
+                # 0 — never drain candidates.
+                if price_line[i] < 0:
                     continue
                 j_end = min(n, i + _prep_slots)
                 if any(price_line[j] < 0 for j in range(i, j_end)):
@@ -957,7 +969,13 @@ def solve_lp(
             # firmware imposes — independent of where the LP's tank state
             # actually was at slot start.
             _normal_target = float(config.DHW_TEMP_NORMAL_C)
-            _delta_c = max(0.0, _leg_target_c - _normal_target)
+            # The tank can't physically exceed the ceiling (heat pump AND the
+            # firmware legionella cycle both top out at DHW_TEMP_MAX_C). Cap the
+            # modeled lift there: a configured target above the ceiling is
+            # unreachable and would otherwise force the tank past its hard bound
+            # → Infeasible. Keeps the solver robust to a misconfigured target.
+            _effective_leg_target = min(_leg_target_c, tank_hi)
+            _delta_c = max(0.0, _effective_leg_target - _normal_target)
             _thermal_kwh = (
                 float(config.DHW_TANK_LITRES) * float(config.DHW_WATER_CP)
                 * _delta_c / 3.6e6
