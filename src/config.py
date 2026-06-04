@@ -1102,6 +1102,13 @@ class Config:
     # is wasted budget against the 8-group hardware cap. Setting this False reverts to the
     # original behaviour (every LP window becomes a Fox group, including SelfUse gaps).
     FOX_SKIP_TRIVIAL_SELFUSE_GROUPS: bool = os.getenv("FOX_SKIP_TRIVIAL_SELFUSE_GROUPS", "true").lower() in ("1", "true", "yes")
+    # On a mid-slot re-upload, bridge the in-progress half-hour slot with the
+    # previously-uploaded work mode so a live ForceCharge/ForceDischarge isn't
+    # dropped to the firmware's SelfUse default (the plan horizon starts at the
+    # NEXT boundary for Daikin quota integrity, but a Fox upload replaces the
+    # whole schedule). Fixes force-charge silently stopping mid negative-price
+    # slot. Set false to roll back to the bare next-boundary schedule.
+    FOX_PRESERVE_INFLIGHT_GROUP: bool = os.getenv("FOX_PRESERVE_INFLIGHT_GROUP", "true").lower() in ("1", "true", "yes")
 
     # Event-driven MPC ("Waze recalculating") — see Epic #73.
     # Kill switch: setting this False disables drift + forecast triggers (cron MPC continues).

@@ -1282,6 +1282,51 @@ def upsert_action(
     with _lock:
         conn = get_connection()
         try:
+            # Genuine upsert on the natural key (device, action_type, start_time).
+            # Without this the function was a plain INSERT, so every re-plan that
+            # re-emitted the same slot created a duplicate row — and because
+            # clear_actions_in_range only removes *pending* rows in range, an
+            # already-fired (completed) or in-flight row for the same slot was
+            # never cleared, so the re-emit produced a past-dated pending dup
+            # that fired again. Observed in prod: ~18 identical tank_warmup rows
+            # in one day. Rule:
+            #   * existing pending+future row  → refresh it (pick up new params)
+            #   * existing completed/failed/in-flight row → SKIP (already handled;
+            #     never recreate a past or actively-firing action)
+            existing = conn.execute(
+                """SELECT id, status, start_time, end_time FROM action_schedule
+                   WHERE device = ? AND action_type = ? AND start_time = ?
+                   ORDER BY id DESC""",
+                (device, action_type, start_time),
+            ).fetchall()
+            if existing:
+                now_iso = created
+                refreshable = None
+                for row in existing:
+                    in_flight = (
+                        row["status"] == "pending"
+                        and row["start_time"] <= now_iso < (row["end_time"] or "")
+                    )
+                    if row["status"] == "pending" and not in_flight:
+                        refreshable = row
+                        break
+                if refreshable is not None:
+                    conn.execute(
+                        """UPDATE action_schedule
+                           SET date = ?, end_time = ?, params = ?, status = ?,
+                               restore_action_id = ?, created_at = ?
+                           WHERE id = ?""",
+                        (
+                            plan_date, end_time, params_json, status,
+                            restore_action_id, created, refreshable["id"],
+                        ),
+                    )
+                    conn.commit()
+                    return int(refreshable["id"])
+                # Only completed/failed/in-flight rows exist for this slot —
+                # the action is already handled; do not create a duplicate.
+                conn.commit()
+                return int(existing[0]["id"])
             cur = conn.execute(
                 """INSERT INTO action_schedule
                    (date, start_time, end_time, device, action_type, params, status,

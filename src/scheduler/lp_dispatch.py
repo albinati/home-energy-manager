@@ -1184,9 +1184,89 @@ def _detect_overlapping_groups(
     return overlaps
 
 
+def _prepend_inflight_group(
+    groups: list[SchedulerGroup],
+    *,
+    now_local: datetime | None = None,
+) -> list[SchedulerGroup]:
+    """Re-assert the in-progress slot's work mode so a mid-slot re-upload can't
+    drop a live ForceCharge/ForceDischarge to the firmware's SelfUse default.
+
+    The plan window starts at the NEXT half-hour boundary (``_ceil_to_half_hour_utc``
+    — quota integrity for Daikin), but a Fox upload REPLACES the whole schedule.
+    So when a re-solve fires *mid-slot* (e.g. the ``negative_window_start``
+    trigger), the in-progress slot has no group and the firmware falls back to
+    SelfUse for its remainder — silently stopping force-charge during a paid
+    negative-price slot (observed 2026-06-04, upload left 13:34–14:00 BST bare).
+
+    We bridge ``[slot_start, next_boundary)`` with the work mode the PREVIOUSLY
+    uploaded schedule had for *now*, so whatever was decided for the live slot
+    survives the re-upload. Only active modes are carried (SelfUse is the
+    firmware default anyway). Issue #458 follow-up; ``FOX_PRESERVE_INFLIGHT_GROUP``
+    set false to roll back.
+    """
+    if not groups or not getattr(config, "FOX_PRESERVE_INFLIGHT_GROUP", True):
+        return groups
+    if len(groups) >= 8:
+        return groups  # no room under the Fox V3 8-group cap
+    tz = TZ()
+    now_local = now_local or datetime.now(tz)
+    now_min = now_local.hour * 60 + now_local.minute
+    slot_start_min = (now_min // 30) * 30          # floor to half-hour
+    slot_end_min = slot_start_min + 30             # exclusive end = next boundary
+
+    g0 = groups[0]
+    first_start_min = g0.start_hour * 60 + g0.start_minute
+    if first_start_min <= now_min:
+        return groups                              # first group already covers now
+    if first_start_min < slot_end_min:
+        return groups                              # would overlap the current slot
+    try:
+        prev = db.get_latest_fox_schedule_state()
+    except Exception as e:                          # never block an upload on this read
+        logger.debug("Fox in-flight preserve: prev-schedule read failed: %s", e)
+        return groups
+    if not prev or not prev.get("groups"):
+        return groups
+    carry = None
+    for pg in prev["groups"]:
+        try:
+            ps = int(pg["startHour"]) * 60 + int(pg["startMinute"])
+            pe = int(pg["endHour"]) * 60 + int(pg["endMinute"])  # inclusive :59
+        except (KeyError, TypeError, ValueError):
+            continue
+        if ps <= now_min <= pe:
+            carry = pg
+            break
+    if carry is None:
+        return groups
+    wm = carry.get("workMode")
+    if wm not in ("ForceCharge", "ForceDischarge", "Backup"):
+        return groups                              # SelfUse is the default — nothing to preserve
+    extra = carry.get("extraParam") or {}
+    sh, sm = divmod(slot_start_min, 60)
+    eh, em = divmod(slot_end_min - 1, 60)          # :59 inclusive-minute convention
+    bridge = SchedulerGroup(
+        start_hour=sh, start_minute=sm,
+        end_hour=eh, end_minute=em,
+        work_mode=wm,
+        min_soc_on_grid=int(extra.get("minSocOnGrid", config.MIN_SOC_RESERVE_PERCENT)),
+        fd_soc=extra.get("fdSoc"),
+        fd_pwr=extra.get("fdPwr"),
+        max_soc=extra.get("maxSoc"),
+    )
+    logger.info(
+        "Fox upload: re-asserting in-flight %s for current slot %02d:%02d-%02d:%02d "
+        "(horizon starts %02d:%02d) — prevents mid-slot SelfUse gap",
+        wm, sh, sm, eh, em, g0.start_hour, g0.start_minute,
+    )
+    return [bridge] + groups
+
+
 def upload_fox_if_operational(fox: FoxESSClient | None, groups: list[SchedulerGroup]) -> bool:
     fox_ok = False
     if fox and fox.api_key and not config.OPENCLAW_READ_ONLY:
+        groups = _prepend_inflight_group(groups)
         overlaps = _detect_overlapping_groups(groups)
         if overlaps:
             for i, j in overlaps:
