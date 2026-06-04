@@ -33,10 +33,13 @@ def test_dhw_schedule_two_days_with_negative_boost(monkeypatch):
     # Rows span two days (today + tomorrow).
     days = {r["start_utc"][:10] for r in rows if r.get("start_utc")}
     assert len(days) >= 2, f"expected today+tomorrow, got {days}"
-    # The negative window produced a boost row at MAX (65).
+    # The negative window produced a boost row at the commandable setpoint cap
+    # (DHW_NEGATIVE_PRICE_BOOST_C = 60 °C; the heat pump rejects higher). Note
+    # this is NOT DHW_TEMP_MAX_C (65, the physical/immersion ceiling).
     boosts = [r for r in rows if r["action_type"] == "tank_negative_boost"]
     assert boosts, "expected a tank_negative_boost row for the negative window"
-    assert boosts[0]["tank_temp_c"] == int(config.DHW_TEMP_MAX_C)
+    expected = int(round(min(config.DHW_NEGATIVE_PRICE_BOOST_C, config.DHW_TEMP_MAX_C)))
+    assert boosts[0]["tank_temp_c"] == expected
 
 
 def test_dhw_schedule_no_rates_no_boost(monkeypatch):

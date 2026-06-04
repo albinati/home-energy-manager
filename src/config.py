@@ -485,7 +485,15 @@ class Config:
         os.getenv("APPLIANCE_DEFAULT_BASE_LOAD_KW", "0.4")
     )
 
-    DHW_TEMP_MAX_C: float = float(os.getenv("DHW_TEMP_MAX_C", "65"))
+    # Max tank temperature (°C) — the physical ceiling for EVERYTHING: the LP
+    # tank-variable bound, the soft per-slot ceiling, every setpoint we command,
+    # and the cap on the firmware legionella lift. The heat pump AND the
+    # firmware legionella cycle both top out here; Onecta rejects any setpoint
+    # above it ("Max tank temperature is 60°C", client.py:306), which made the
+    # old 65 °C negative-price boost silently FAIL (tank got no extra heat). The
+    # app's "powerful"/immersion button can momentarily push higher, but we
+    # never command that. Was 65 → now 60 to match the hardware.
+    DHW_TEMP_MAX_C: float = float(os.getenv("DHW_TEMP_MAX_C", "60"))
     # Plunge-only ceiling (≥ DHW_TEMP_COMFORT_C and ≤ DHW_TEMP_MAX_C is allowed only when price < 0).
     # DHW_TEMP_COMFORT_C + DHW_TEMP_NORMAL_C are runtime-tunable via
     # /api/v1/settings (#52) — see the @property definitions below.
@@ -752,24 +760,24 @@ class Config:
     DHW_TEMP_SETBACK_C: float = float(
         os.getenv("DHW_TEMP_SETBACK_C", "37")
     )
-    # Tank temperature during negative-price slots (Outgoing Agile < 0 p/kWh).
-    # Sole permitted exception to the fixed schedule — grid is paying us to
-    # consume, so load the tank to MAX. Default raised 60 → 65 (= DHW_TEMP_MAX_C;
-    # heat is free money during negative price). The LP now also BUDGETS this
-    # heat-up energy (forecast_dhw_load_per_slot ramp) so it plans the extra
-    # import. Clamped to DHW_TEMP_MAX_C in dhw_policy.
+    # Commandable SETPOINT during negative-price slots (import price < 0 p/kWh):
+    # the tank target we WRITE to the heat pump. Grid is paying us to consume, so
+    # we drive the setpoint to its max. MUST stay ≤ the device's heat-pump
+    # setpoint ceiling (60 °C) — Onecta rejects anything higher
+    # ("Max tank temperature is 60°C", client.py:306), which made every boost
+    # write FAIL (the tank got NO extra heat). Was 65 → now 60. The tank can
+    # still reach 65 physically via the app's "powerful"/immersion button or the
+    # legionella cycle (that's DHW_TEMP_MAX_C), but those are not commanded here.
+    # The LP also BUDGETS this heat-up energy (forecast_dhw_load_per_slot ramp).
     DHW_NEGATIVE_PRICE_BOOST_C: float = float(
-        os.getenv("DHW_NEGATIVE_PRICE_BOOST_C", "65")
+        os.getenv("DHW_NEGATIVE_PRICE_BOOST_C", "60")
     )
-    # When a negative-price boost window opens within this many minutes of the
-    # daily warmup start, the warmup is DEFERRED past the boost (chaining
-    # consecutive early boosts) instead of pre-heating to NORMAL at a positive
-    # price right before the free boost-to-MAX. The warmup then resumes its
-    # hold-at-NORMAL role after the boost (tank coasts down from the boost temp).
-    # A boost later than this lead leaves the warmup intact. 0 disables.
-    DHW_WARMUP_BOOST_OVERRIDE_LEAD_MINUTES: int = int(
-        os.getenv("DHW_WARMUP_BOOST_OVERRIDE_LEAD_MINUTES", "120")
-    )
+    # NOTE: the leading-warmup defer (a boost SUPERSEDES the warmup that would
+    # otherwise pre-heat at a positive price right before it) is driven by
+    # LP_PRE_NEGATIVE_PRECOOL_HOURS below — the SAME window the LP's energy
+    # forecast (forecast_dhw_load_per_slot) uses to pre-cool. Sharing one knob
+    # keeps the fired tank actions and the LP's budgeted DHW import consistent
+    # by construction (no separate DHW_WARMUP_BOOST_OVERRIDE_LEAD_MINUTES).
     # Forecast night-temperature bias (minimal #324 implementation).
     # Open Meteo's grid coverage (~10 km) over-estimates the W4 1DZ
     # microclimate's overnight outdoor temperature by ~3 °C in the household's

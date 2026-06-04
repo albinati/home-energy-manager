@@ -203,9 +203,17 @@ def generate_daily_tank_schedule(
     # falls below normal_c. A boost LATER in the day (beyond the lead window of
     # the warmup start) leaves the warmup intact: the afternoon still needs hot
     # water before that boost arrives.
+    #
+    # The lead window is LP_PRE_NEGATIVE_PRECOOL_HOURS — deliberately the SAME
+    # window the LP's energy forecast (forecast_dhw_load_per_slot) uses to
+    # pre-cool: the forecast zeroes warmup energy for slots within precool_hours
+    # before a negative window, so deferring the fired warmup over exactly that
+    # window keeps the actions and the budgeted DHW import consistent. (The LP
+    # suppresses the warmup-start slot iff boost_start <= warmup_start +
+    # precool — identical to this defer condition.)
     effective_warmup_start_utc = warmup_start_utc
-    defer_lead = timedelta(minutes=int(
-        getattr(config, "DHW_WARMUP_BOOST_OVERRIDE_LEAD_MINUTES", 120)
+    defer_lead = timedelta(hours=max(
+        0.0, float(getattr(config, "LP_PRE_NEGATIVE_PRECOOL_HOURS", 3.0))
     ))
     if neg_windows and defer_lead > timedelta(0):
         for nw_start, nw_end in sorted(neg_windows):

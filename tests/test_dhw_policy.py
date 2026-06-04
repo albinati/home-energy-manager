@@ -318,20 +318,49 @@ def test_boost_chain_can_drop_guest_warmup_start():
     assert start == datetime(2026, 6, 1, 13, 0, tzinfo=UTC), start
 
 
-def test_warmup_override_disabled_by_zero_lead():
-    """Lead=0 disables the defer — warmup stays at 13:00 even with a boost at
-    the very next slot (rollback escape hatch)."""
+def test_warmup_override_disabled_by_zero_precool():
+    """precool_hours=0 disables both the LP pre-cool AND the schedule defer —
+    warmup stays at 13:00 even with a boost at the very next slot (rollback
+    escape hatch, and the two paths stay consistent: no pre-cool ⇒ no defer)."""
     outgoing = [{"valid_from": "2026-06-01T12:30:00Z", "value_inc_vat": -5.0}]
     import src.dhw_policy as _dp
     import pytest as _pytest
     with _pytest.MonkeyPatch.context() as mp:
-        mp.setattr(_dp.config, "DHW_WARMUP_BOOST_OVERRIDE_LEAD_MINUTES", 0, raising=False)
+        mp.setattr(_dp.config, "LP_PRE_NEGATIVE_PRECOOL_HOURS", 0.0, raising=False)
         rows = _dp.generate_daily_tank_schedule(
             date(2026, 6, 1), agile_rates=outgoing, mode="normal",
         )
     warmup = _warmup(rows)
     start = datetime.fromisoformat(warmup["start_time"].replace("Z", "+00:00"))
     assert start.astimezone(TZ_LOCAL).hour == 13
+
+
+def test_schedule_defer_matches_lp_forecast_precool():
+    """Cross-path consistency: the warmup-start slot the SCHEDULE defers is the
+    same slot the LP ENERGY FORECAST pre-cools (zeroes warmup energy for). If
+    these ever diverge, the LP budgets DHW import for heating that won't fire
+    (or vice-versa) — the architectural drift this guard exists to catch."""
+    # Negative window opening one slot after the 13:00 BST (12:00 UTC) warmup.
+    outgoing = [{"valid_from": "2026-06-01T12:30:00Z", "value_inc_vat": -5.0}]
+    rows = dhw_policy.generate_daily_tank_schedule(
+        date(2026, 6, 1), agile_rates=outgoing, mode="normal",
+    )
+    warmup = _warmup(rows)
+    start = datetime.fromisoformat(warmup["start_time"].replace("Z", "+00:00"))
+    # SCHEDULE side: warmup deferred past the boost (not firing at 12:00 UTC).
+    assert start > datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+
+    # FORECAST side: same horizon + a price_line negative on the 12:30 slot.
+    slots = [datetime(2026, 6, 1, 12, 0, tzinfo=UTC) + i * timedelta(minutes=30)
+             for i in range(12)]
+    price_line = [5.0] * 12
+    price_line[1] = -5.0  # 12:30 UTC negative
+    e_dhw, _temps = dhw_policy.forecast_dhw_load_per_slot(
+        slots, mode="normal", price_line=price_line,
+    )
+    # The 12:00 UTC warmup-transition slot must be pre-cooled (no warmup energy
+    # budgeted) — consistent with the schedule deferring that warmup.
+    assert e_dhw[0] <= 0.05, f"LP still budgets leading warmup energy: {e_dhw[0]:.3f} kWh"
 
 
 # ---------------------------------------------------------------------------
@@ -436,15 +465,33 @@ def test_setback_temp_override(monkeypatch):
     assert setback["params"]["tank_temp"] == 40
 
 
-def test_negative_boost_temp_override(monkeypatch):
-    """DHW_NEGATIVE_PRICE_BOOST_C is tunable (e.g. could be 65 for max)."""
+def test_negative_boost_temp_clamped_to_device_max(monkeypatch):
+    """The boost target is clamped to DHW_TEMP_MAX_C (the device setpoint
+    ceiling). Requesting 65 must NOT emit a 65 °C setpoint — the heat pump
+    rejects anything above its max ("Max tank temperature is 60°C",
+    client.py:306), which made the whole boost write FAIL in prod (no heating
+    at all). This guard ensures we only ever write a setpoint the device
+    accepts."""
     monkeypatch.setattr(config, "DHW_NEGATIVE_PRICE_BOOST_C", 65.0, raising=False)
+    monkeypatch.setattr(config, "DHW_TEMP_MAX_C", 60.0, raising=False)
     outgoing = [{"valid_from": "2026-06-01T14:00:00Z", "value_inc_vat": -5.0}]
     rows = dhw_policy.generate_daily_tank_schedule(
         date(2026, 6, 1), agile_rates=outgoing, mode="normal",
     )
     boost = next(r for r in rows if r["action_type"] == "tank_negative_boost")
-    assert boost["params"]["tank_temp"] == 65
+    assert boost["params"]["tank_temp"] == 60  # clamped to device max, not 65
+
+
+def test_negative_boost_temp_tunable_below_max(monkeypatch):
+    """A valid sub-max boost target passes through unchanged."""
+    monkeypatch.setattr(config, "DHW_NEGATIVE_PRICE_BOOST_C", 55.0, raising=False)
+    monkeypatch.setattr(config, "DHW_TEMP_MAX_C", 60.0, raising=False)
+    outgoing = [{"valid_from": "2026-06-01T14:00:00Z", "value_inc_vat": -5.0}]
+    rows = dhw_policy.generate_daily_tank_schedule(
+        date(2026, 6, 1), agile_rates=outgoing, mode="normal",
+    )
+    boost = next(r for r in rows if r["action_type"] == "tank_negative_boost")
+    assert boost["params"]["tank_temp"] == 55
 
 
 def test_normal_temp_override(monkeypatch):

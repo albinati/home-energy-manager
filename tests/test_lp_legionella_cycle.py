@@ -219,16 +219,17 @@ def test_legionella_disabled_does_not_force_tank() -> None:
 
 
 def test_legionella_high_target_still_feasible() -> None:
-    """PR E: legionella target above tank_hi (e.g. 70 °C target with tank_hi
-    = 65) no longer needs a constraint cap — the firmware-load floor on
-    ``e_dhw`` is capped at ``max_hp_kwh`` so the LP stays feasible. Tank
-    state is firmware's concern, not the LP's."""
+    """A legionella target ABOVE the tank ceiling (e.g. 70 °C with
+    DHW_TEMP_MAX_C = 60) must NOT make the solver infeasible. The tank can't
+    physically exceed the ceiling (heat pump + firmware both top out there),
+    so the modeled firmware lift is capped at the ceiling — a misconfigured
+    high target degrades gracefully instead of crashing the LP."""
     slots, plan = _solve_sunday_with_legionella(
         tank_initial=38.0, leg_day=6, leg_hour=13, leg_target=70.0,
         leg_duration_min=60,
     )
-    # LP must stay feasible (was the old failure mode pre-cap). With the
-    # new model, no tank constraint at all → trivially feasible.
+    # LP must stay feasible: the firmware lift is capped at tank_hi (60), so
+    # the forced e_dhw can't push the tank past its hard bound.
     assert plan.ok, plan.status
     # And the firmware-load floor still allocates kWh on cycle slots.
     tz = ZoneInfo("Europe/London")

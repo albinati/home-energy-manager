@@ -969,7 +969,13 @@ def solve_lp(
             # firmware imposes — independent of where the LP's tank state
             # actually was at slot start.
             _normal_target = float(config.DHW_TEMP_NORMAL_C)
-            _delta_c = max(0.0, _leg_target_c - _normal_target)
+            # The tank can't physically exceed the ceiling (heat pump AND the
+            # firmware legionella cycle both top out at DHW_TEMP_MAX_C). Cap the
+            # modeled lift there: a configured target above the ceiling is
+            # unreachable and would otherwise force the tank past its hard bound
+            # → Infeasible. Keeps the solver robust to a misconfigured target.
+            _effective_leg_target = min(_leg_target_c, tank_hi)
+            _delta_c = max(0.0, _effective_leg_target - _normal_target)
             _thermal_kwh = (
                 float(config.DHW_TANK_LITRES) * float(config.DHW_WATER_CP)
                 * _delta_c / 3.6e6
