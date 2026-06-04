@@ -31,6 +31,11 @@ def _fixed_tariff(monkeypatch):
     monkeypatch.setattr(config, "FIXED_TARIFF_LABEL", "Test Fixed", raising=False)
     monkeypatch.setattr(config, "FIXED_TARIFF_RATE_PENCE", 30.0, raising=False)
     monkeypatch.setattr(config, "FIXED_TARIFF_STANDING_PENCE_PER_DAY", 45.0, raising=False)
+    # Export tariff: pin deterministically so tests don't depend on prod .env.
+    # seg_flat is the household's actual mode; SEG rate matches the shadow's
+    # SEG_EXPORT_FALLBACK_PENCE constant so realised and shadow export agree.
+    monkeypatch.setattr(config, "EXPORT_TARIFF_MODE", "seg_flat", raising=False)
+    monkeypatch.setattr(config, "EXPORT_SEG_RATE_PENCE", monthly.SEG_EXPORT_FALLBACK_PENCE, raising=False)
     monkeypatch.setattr(config, "OCTOPUS_API_KEY", "", raising=False)  # force manual path
 
 
@@ -54,8 +59,10 @@ def test_compute_cost_prorates_to_n_days():
     e = _energy(2026, 1)
     cost = monthly._compute_cost(e, n_days=10)
     assert cost.standing_charge_pence == 10 * 50.0
-    # net = import×rate + standing − export×rate
-    assert cost.net_cost_pence == pytest.approx(100 * 20.0 + 10 * 50.0 - 40 * 5.0)
+    # net = import×rate + standing − export×SEG (seg_flat mode → SEG, not the 5p manual rate)
+    assert cost.net_cost_pence == pytest.approx(
+        100 * 20.0 + 10 * 50.0 - 40 * monthly.SEG_EXPORT_FALLBACK_PENCE
+    )
 
 
 def test_best_cost_threads_n_days(monkeypatch):
@@ -160,7 +167,7 @@ def test_period_month_past_bills_full_month(monkeypatch):
 # ── _compute_cost_octopus: per-slot Outgoing export billing ──────────────────
 
 def test_octopus_export_billed_per_slot(monkeypatch):
-    """Export revenue must use per-slot Outgoing Agile rates, not a flat rate."""
+    """In outgoing_agile mode, export revenue uses per-slot rates, not a flat rate."""
     from datetime import datetime, UTC
 
     import src.db as db_mod
@@ -170,6 +177,7 @@ def test_octopus_export_billed_per_slot(monkeypatch):
     monkeypatch.setattr(config, "OCTOPUS_API_KEY", "key", raising=False)
     monkeypatch.setattr(config, "OCTOPUS_EXPORT_TARIFF_CODE", "E-1R-AGILE-OUTGOING", raising=False)
     monkeypatch.setattr(config, "MANUAL_TARIFF_EXPORT_PENCE", 5.0, raising=False)
+    monkeypatch.setattr(config, "EXPORT_TARIFF_MODE", "outgoing_agile", raising=False)
 
     class _Slot:
         def __init__(self, interval_start, consumption_kwh):
@@ -203,6 +211,53 @@ def test_octopus_export_billed_per_slot(monkeypatch):
     assert cost is not None
     # 1×30 + 1×50 = 80p, NOT 2×5 = 10p flat.
     assert cost.export_earnings_pence == pytest.approx(80.0)
+
+
+def test_octopus_export_billed_flat_seg_by_default(monkeypatch):
+    """Default seg_flat mode values export at the flat SEG rate, ignoring Agile."""
+    from datetime import datetime, UTC
+
+    import src.db as db_mod
+    import src.energy.octopus_client as oc
+    import src.scheduler.agile as agile_mod
+
+    monkeypatch.setattr(config, "OCTOPUS_API_KEY", "key", raising=False)
+    monkeypatch.setattr(config, "OCTOPUS_EXPORT_TARIFF_CODE", "E-1R-AGILE-OUTGOING", raising=False)
+    monkeypatch.setattr(config, "EXPORT_TARIFF_MODE", "seg_flat", raising=False)
+    monkeypatch.setattr(config, "EXPORT_SEG_RATE_PENCE", 4.10, raising=False)
+
+    class _Slot:
+        def __init__(self, interval_start, consumption_kwh):
+            self.interval_start = interval_start
+            self.consumption_kwh = consumption_kwh
+
+    t0 = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    t1 = datetime(2026, 1, 1, 12, 30, tzinfo=UTC)
+
+    monkeypatch.setattr(oc, "get_mpan_roles", lambda *a, **k: oc.MpanRoles(
+        import_mpan="imp", import_serial="is", export_mpan="exp", export_serial="es",
+        gsp="_C", source="test"))
+
+    def _fake_consumption(mpan, serial, pf, pt):
+        if mpan == "imp":
+            return [_Slot(t0, 2.0), _Slot(t1, 2.0)]
+        return [_Slot(t0, 1.0), _Slot(t1, 1.0)]  # 1 kWh export each slot
+    monkeypatch.setattr(oc, "fetch_consumption", _fake_consumption)
+    monkeypatch.setattr(agile_mod, "fetch_agile_rates", lambda **k: [
+        {"valid_from": t0.isoformat(), "value_inc_vat": 10.0},
+        {"valid_from": t1.isoformat(), "value_inc_vat": 10.0},
+    ])
+    # High Agile rates must be IGNORED in seg_flat mode.
+    monkeypatch.setattr(db_mod, "get_agile_export_rates_in_range", lambda a, b: [
+        {"valid_from": t0.isoformat(), "value_inc_vat": 30.0},
+        {"valid_from": t1.isoformat(), "value_inc_vat": 50.0},
+    ])
+
+    e = _energy(2026, 1, import_kwh=4.0, export_kwh=2.0)
+    cost = monthly._compute_cost_octopus(e, n_days=1)
+    assert cost is not None
+    # 2 kWh × 4.10p flat SEG = 8.2p, NOT the 80p per-slot Agile.
+    assert cost.export_earnings_pence == pytest.approx(8.2)
 
 
 # ── tariff_engine usage-days proration ───────────────────────────────────────

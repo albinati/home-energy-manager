@@ -262,13 +262,19 @@ export function TodayPlanWidget({ pv, loading, execution, cheapThresholdP, peakT
   }, [pv, execution, theme, cheapThresholdP, peakThresholdP]);
 
   const acc = pv?.accuracy;
+  // Forecast for elapsed slots isn't persisted yet (#462), so by evening the
+  // "expected by now" baseline collapses toward 0 — which would make any real
+  // generation read as a huge bogus "above forecast". Detect that and show an
+  // honest "comparison unavailable" instead of a misleading number.
+  const forecastMissing = acc != null && acc.forecast_kwh < 0.1 && acc.actual_kwh >= 0.1;
   // Plain-language accuracy: did solar come in above or below the forecast so
   // far, and by how much. The per-slot detail (miss bar) is in the chart hover.
   const biasWord = acc == null ? "" :
-    Math.abs(acc.bias_kwh) < 0.1 ? "tracking forecast"
+    forecastMissing ? "forecast comparison unavailable"
+    : Math.abs(acc.bias_kwh) < 0.1 ? "tracking forecast"
     : acc.bias_kwh > 0 ? `${acc.bias_kwh.toFixed(1)} kWh above forecast`
     : `${Math.abs(acc.bias_kwh).toFixed(1)} kWh below forecast`;
-  const biasTone = acc == null ? "" : Math.abs(acc.bias_kwh) < 0.1 ? "" : acc.bias_kwh > 0 ? " today-plan-acc--pos" : " today-plan-acc--neg";
+  const biasTone = acc == null || forecastMissing ? "" : Math.abs(acc.bias_kwh) < 0.1 ? "" : acc.bias_kwh > 0 ? " today-plan-acc--pos" : " today-plan-acc--neg";
 
   // Headline day total = solar ALREADY generated (actual, locked) + forecast for
   // the slots still to come. Use actual ONLY for fully-elapsed slots; the current
@@ -296,9 +302,18 @@ export function TodayPlanWidget({ pv, loading, execution, cheapThresholdP, peakT
       )}
       {acc && (
         <div class="today-plan-acc">
-          <span>Solar so far today: <strong>{acc.actual_kwh.toFixed(1)}</strong> kWh vs <strong>{acc.forecast_kwh.toFixed(1)}</strong> expected by now</span>
+          {forecastMissing ? (
+            <span>Solar so far today: <strong>{acc.actual_kwh.toFixed(1)}</strong> kWh generated</span>
+          ) : (
+            <span>Solar so far today: <strong>{acc.actual_kwh.toFixed(1)}</strong> kWh vs <strong>{acc.forecast_kwh.toFixed(1)}</strong> expected by now</span>
+          )}
           <span class="today-plan-acc-sep">·</span>
-          <span class={biasTone.trim()} title="Actual vs the forecast for the slots elapsed so far (not the full-day total in the card header). Hover any slot for its miss.">
+          <span
+            class={biasTone.trim()}
+            title={forecastMissing
+              ? "The forecast for slots earlier today isn't persisted yet (#462), so there's no baseline to compare against this far into the day."
+              : "Actual vs the forecast for the slots elapsed so far (not the full-day total in the card header). Hover any slot for its miss."}
+          >
             {biasWord}
           </span>
         </div>
