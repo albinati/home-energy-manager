@@ -9,6 +9,7 @@ forecast cache only — no cloud writes.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
@@ -85,7 +86,9 @@ async def get_pv_today(date: str | None = None) -> dict[str, Any]:
     try:
         from ... import weather
 
-        fc = weather.fetch_forecast(hours=48)
+        # Open-Meteo HTTP — offload so it doesn't block the event loop and
+        # serialize the other dashboard requests behind it.
+        fc = await asyncio.to_thread(weather.fetch_forecast, hours=48)
         series = weather.forecast_to_lp_inputs(fc, slot_starts, pv_scale=1.0)
         pv = series.pv_kwh_per_slot
         for i in range(min(_SLOTS_PER_DAY, len(pv))):

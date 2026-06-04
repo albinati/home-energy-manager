@@ -1,6 +1,6 @@
 import { useEffect, useState } from "preact/hooks";
 import { lazy, Suspense } from "preact/compat";
-import { usePoll, useFetch } from "../lib/poll";
+import { usePoll, useFetch, useAfterPaint } from "../lib/poll";
 import {
   getCockpitNow,
   getMetrics,
@@ -50,10 +50,11 @@ function lastMonths(n: number): string[] {
   return out;
 }
 
-function useMonthlyHistory(n: number) {
+function useMonthlyHistory(n: number, enabled = true) {
   const [data, setData] = useState<MonthlyEnergy[]>([]);
   const [loading, setLoading] = useState(true);
   useEffect(() => {
+    if (!enabled) return;
     let alive = true;
     setLoading(true);
     Promise.all(lastMonths(n).map((m) => getEnergyMonthly(m).catch(() => null))).then((r) => {
@@ -62,7 +63,7 @@ function useMonthlyHistory(n: number) {
       setLoading(false);
     });
     return () => { alive = false; };
-  }, [n]);
+  }, [n, enabled]);
   return { data, loading };
 }
 
@@ -82,12 +83,19 @@ export default function Landing() {
   const timeline = usePoll(getSchedulerTimeline, 5 * 60_000);
   const pvToday = usePoll(getPvToday, 5 * 60_000);
 
+  // Non-critical, below-the-fold data waits until the browser is idle after
+  // first paint — keeps the heavy Fox/Octopus rollups (lifetime, tariff) from
+  // competing with the above-the-fold hero / live-power / plan data.
+  const deferred = useAfterPaint();
+
   // Fetch-once endpoints — refresh on tab return, otherwise no churn.
   const agile = useFetch(getAgileToday, []);
   const weather = useFetch(getWeather, []);
   const execution = useFetch(getExecutionToday, []);
   const report = useFetch(() => getEnergyReport(new Date().toISOString().slice(0, 10)), []);
-  const monthly = useMonthlyHistory(6);
+  // Lifetime rollup = 6 sequential /energy/monthly calls — deferred (it's a
+  // small stats strip low in the hero, not the headline).
+  const monthly = useMonthlyHistory(6, deferred);
   // Daikin cached read — no refresh=true, so no live cloud call (30-min cache TTL).
   const daikin = useFetch(getDaikinStatus, []);
   const daikinQuota = useFetch(getDaikinQuota, []);
@@ -101,10 +109,11 @@ export default function Landing() {
   // Tariff comparison scoped to the SAME window as the navigator — the
   // catalogue replay + usage now cover exactly the selected period, so its
   // realised current-tariff row + fixed shadow (from periodInsights) line up.
-  const tariffDash = useFetch(() => {
-    const w = periodDateRange(period);
-    return getTariffDashboard(1, "daily", 8, w);
-  }, [period.gran, period.anchor]);
+  // Deferred (bottom of page + heaviest single call): only fetch once idle.
+  const tariffDash = useFetch(
+    () => (deferred ? getTariffDashboard(1, "daily", 8, periodDateRange(period)) : Promise.resolve(null)),
+    [deferred, period.gran, period.anchor],
+  );
 
   if (now.loading && !now.data) {
     return <div class="home"><Spinner label="Loading dashboard…" /></div>;
@@ -167,7 +176,7 @@ export default function Landing() {
         <Widget title="Tariff comparison" icon="📊" tone="savings" size="wide"
                 badge={tariffDash.data?.usage?.total_days ? `last ${tariffDash.data.usage.total_days}d of your usage` : undefined}
                 action={<RefreshAction onRefresh={tariffDash.refresh} loading={tariffDash.loading} />}>
-          <TariffComparisonWidget dashboard={tariffDash.data} dashboardLoading={tariffDash.loading} metrics={metrics.data} period={periodInsights.data} periodLoading={periodInsights.loading} />
+          <TariffComparisonWidget dashboard={tariffDash.data} dashboardLoading={!deferred || tariffDash.loading} metrics={metrics.data} period={periodInsights.data} periodLoading={periodInsights.loading} />
         </Widget>
       </div>
     </div>

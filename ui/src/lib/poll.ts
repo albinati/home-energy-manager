@@ -121,3 +121,25 @@ export function useFetch<T>(
 
   return { data, error, loading, refresh };
 }
+
+// useAfterPaint returns false on first render, then flips true once the browser
+// is idle after the initial paint. Gate below-the-fold / non-critical fetches
+// on it so the hero + live power paint first and the heavy Fox/Octopus calls
+// (lifetime rollup, tariff comparison) stream in a beat later instead of
+// competing with the critical above-the-fold data.
+export function useAfterPaint(timeoutMs = 1500): boolean {
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    const w = window as unknown as {
+      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+      cancelIdleCallback?: (id: number) => void;
+    };
+    if (w.requestIdleCallback) {
+      const id = w.requestIdleCallback(() => setReady(true), { timeout: timeoutMs });
+      return () => w.cancelIdleCallback?.(id);
+    }
+    const id = window.setTimeout(() => setReady(true), 200);
+    return () => clearTimeout(id);
+  }, [timeoutMs]);
+  return ready;
+}
