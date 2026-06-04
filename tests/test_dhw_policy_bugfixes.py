@@ -95,7 +95,7 @@ def test_negative_slot_in_overnight_setback_window_detected():
     ).isoformat().replace("+00:00", "Z")
     outgoing = [{"valid_from": neg_slot_utc, "value_inc_vat": -5.0}]
     rows = dhw_policy.generate_daily_tank_schedule(
-        today, outgoing_rates=outgoing, mode="normal",
+        today, agile_rates=outgoing, mode="normal",
     )
     boost = [r for r in rows if r["action_type"] == "tank_negative_boost"]
     assert len(boost) == 1, (
@@ -116,7 +116,7 @@ def test_negative_slot_at_horizon_end_excluded():
     ).astimezone(UTC).isoformat().replace("+00:00", "Z")
     outgoing = [{"valid_from": boundary_utc, "value_inc_vat": -3.0}]
     rows = dhw_policy.generate_daily_tank_schedule(
-        today, outgoing_rates=outgoing, mode="normal",
+        today, agile_rates=outgoing, mode="normal",
     )
     boost = [r for r in rows if r["action_type"] == "tank_negative_boost"]
     assert boost == []  # at horizon end (exclusive); belongs to next day

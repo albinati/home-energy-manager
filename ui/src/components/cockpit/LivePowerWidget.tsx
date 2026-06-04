@@ -176,7 +176,7 @@ export function LivePowerWidget({ state, cockpit, timeline, execution, agile, me
 interface ForcedWindow { kind: string; start_utc: string; end_utc: string; slot_count: number; }
 function upcomingForcedWindows(timeline: SchedulerTimeline, limit: number): ForcedWindow[] {
   const out: ForcedWindow[] = [];
-  const interesting = new Set(["cheap", "negative", "peak_export"]);
+  const interesting = new Set(["cheap", "negative", "peak_export", "pre_negative_export"]);
   let current: ForcedWindow | null = null;
   for (const s of timeline.planned || []) {
     const k = (s.dispatched_kind || s.lp_kind || "").toLowerCase();
@@ -206,6 +206,7 @@ function labelForKind(k: string | undefined): string {
     case "cheap":         return "Force charge";
     case "negative":      return "Force charge";
     case "peak_export":   return "Force discharge";
+    case "pre_negative_export": return "Drain (pre-neg)";
     default:              return k || "?";
   }
 }

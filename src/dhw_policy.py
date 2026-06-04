@@ -69,20 +69,20 @@ def _make_action(
 
 
 def _detect_negative_windows(
-    outgoing_rates: list[dict[str, Any]] | None,
+    agile_rates: list[dict[str, Any]] | None,
     horizon_start_utc: datetime,
     horizon_end_utc: datetime,
 ) -> list[tuple[datetime, datetime]]:
     """Group consecutive negative-price 30-min slots into contiguous windows.
 
-    ``outgoing_rates`` is a list of dicts with at least ``valid_from`` (ISO
+    ``agile_rates`` is a list of dicts with at least ``valid_from`` (ISO
     UTC) and ``value_inc_vat`` (pence/kWh). Returns list of (start, end)
     UTC datetime tuples; empty when no negative slots in horizon.
     """
-    if not outgoing_rates:
+    if not agile_rates:
         return []
     neg_slot_starts: list[datetime] = []
-    for r in outgoing_rates:
+    for r in agile_rates:
         try:
             ts_raw = r.get("valid_from") or r.get("slot_time_utc")
             rate = float(r.get("value_inc_vat", r.get("rate_p", 999)))
@@ -118,7 +118,7 @@ def _detect_negative_windows(
 def generate_daily_tank_schedule(
     target_date_local: date,
     *,
-    outgoing_rates: list[dict[str, Any]] | None = None,
+    agile_rates: list[dict[str, Any]] | None = None,
     mode: str | None = None,
 ) -> list[dict[str, Any]]:
     """Generate tank action rows for the local calendar day starting at
@@ -131,7 +131,7 @@ def generate_daily_tank_schedule(
 
     Args:
         target_date_local: anchor day in local TZ
-        outgoing_rates: optional list of {valid_from, value_inc_vat}; used
+        agile_rates: optional list of {valid_from, value_inc_vat}; used
             to detect negative-price windows for boost overrides
         mode: optimization preset; defaults to ``config.OPTIMIZATION_PRESET``
 
@@ -217,7 +217,7 @@ def generate_daily_tank_schedule(
     # duration of any negative-priced contiguous window within the horizon.
     horizon_start = warmup_start.astimezone(UTC)
     horizon_end = next_warmup.astimezone(UTC)
-    neg_windows = _detect_negative_windows(outgoing_rates, horizon_start, horizon_end)
+    neg_windows = _detect_negative_windows(agile_rates, horizon_start, horizon_end)
     for nw_start, nw_end in neg_windows:
         rows.append(_make_action(
             action_type="tank_negative_boost",
@@ -464,7 +464,7 @@ def forecast_dhw_load_per_slot(
 def write_daily_tank_schedule(
     target_date_local: date | None = None,
     *,
-    outgoing_rates: list[dict[str, Any]] | None = None,
+    agile_rates: list[dict[str, Any]] | None = None,
     mode: str | None = None,
     clear_existing: bool = True,
 ) -> int:
@@ -477,7 +477,7 @@ def write_daily_tank_schedule(
 
     Args:
         target_date_local: defaults to today in local TZ
-        outgoing_rates: optional, for negative-price detection
+        agile_rates: optional, for negative-price detection
         mode: optional override; defaults to ``config.OPTIMIZATION_PRESET``
         clear_existing: when True, calls ``db.clear_actions_in_range`` over
             the warmup window before upserting
@@ -490,7 +490,7 @@ def write_daily_tank_schedule(
 
     rows = generate_daily_tank_schedule(
         target_date_local,
-        outgoing_rates=outgoing_rates,
+        agile_rates=agile_rates,
         mode=mode,
     )
     if not rows:

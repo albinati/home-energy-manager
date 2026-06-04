@@ -822,18 +822,24 @@ def write_daikin_from_lp_plan(
                 tzinfo=tz_local_local,
             )
             day_end_local = day_start_local + timedelta(days=1)
+            # Negative-price boost fires on negative IMPORT (Agile) price — "paid
+            # to import → load the tank". Must match the LP forecast (1A keys on
+            # the import price_line); the export/Outgoing rate is a different
+            # tariff and is rarely negative when import plunges.
+            import_tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
             try:
-                outgoing = get_agile_export_rates_in_range(
-                    day_start_local.astimezone(_UTC_T).isoformat().replace("+00:00", "Z"),
-                    day_end_local.astimezone(_UTC_T).isoformat().replace("+00:00", "Z"),
-                )
+                agile = db.get_rates_for_period(
+                    import_tariff,
+                    day_start_local.astimezone(_UTC_T),
+                    day_end_local.astimezone(_UTC_T),
+                ) if import_tariff else None
             except Exception as _e:
-                logger.debug("dhw_policy: outgoing rates unavailable for %s: %s", day, _e)
-                outgoing = None
+                logger.debug("dhw_policy: import rates unavailable for %s: %s", day, _e)
+                agile = None
             try:
                 n = dhw_policy.write_daily_tank_schedule(
                     target_date_local=day,
-                    outgoing_rates=outgoing,
+                    agile_rates=agile,
                     clear_existing=False,  # already cleared widely above
                 )
                 rows_total += n

@@ -1403,21 +1403,21 @@ async def daikin_dhw_schedule():
     mode = (getattr(config, "OPTIMIZATION_PRESET", "normal") or "normal").strip().lower()
     warmup_hour = int(getattr(config, "DHW_WARMUP_START_HOUR_LOCAL", 13))
     rows_out: list[dict] = []
+    import_tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
     for offset in (0, 1):
         day = today_local + _td(days=offset)
-        outgoing = None
-        if (config.OCTOPUS_EXPORT_TARIFF_CODE or "").strip():
+        agile = None
+        if import_tariff:
             try:
                 ds = _dt(day.year, day.month, day.day, warmup_hour, 0, tzinfo=tz)
                 de = ds + _td(days=1)
-                outgoing = _db.get_agile_export_rates_in_range(
-                    ds.astimezone(UTC).isoformat().replace("+00:00", "Z"),
-                    de.astimezone(UTC).isoformat().replace("+00:00", "Z"),
-                )
+                # Negative boost fires on negative IMPORT (Agile) price (the
+                # plunge), matching the LP forecast — see lp_dispatch writer.
+                agile = _db.get_rates_for_period(import_tariff, ds.astimezone(UTC), de.astimezone(UTC))
             except Exception as e:
-                logger.debug("dhw-schedule: outgoing rates unavailable for %s: %s", day, e)
+                logger.debug("dhw-schedule: import rates unavailable for %s: %s", day, e)
         try:
-            rows = dhw_policy.generate_daily_tank_schedule(day, outgoing_rates=outgoing)
+            rows = dhw_policy.generate_daily_tank_schedule(day, agile_rates=agile)
             for r in rows:
                 params = r.get("params") or {}
                 rows_out.append({
