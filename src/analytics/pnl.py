@@ -166,15 +166,25 @@ def _import_buckets_preferring_meter(day: date) -> dict[str, float]:
         slot = t.replace(minute=(t.minute // 30) * 30, second=0, microsecond=0)
         slot_iso = slot.astimezone(UTC).isoformat().replace("+00:00", "Z")
         metered[slot_iso] = metered.get(slot_iso, 0.0) + float(kwh)
-    if metered:
-        return metered
-    # 2. scale Fox by the daily meter total
-    meter = db.get_octopus_daily_meter(day.isoformat())
     fox_total = sum(fox.values())
-    if meter and meter.get("import_kwh") and fox_total > 0:
+    # SANITY GUARD: the metered backfill can be INCOMPLETE (missing slots/days) —
+    # observed on prod where a month's metered total was ~40% of Fox. Trusting a
+    # partial meter UNDER-reports the bill far worse than Fox's ~4% noise. So only
+    # prefer the meter when its total is plausibly complete vs Fox (within ±35%);
+    # otherwise Fox is the better source. (When Fox itself is ~0, accept the meter.)
+    def _plausible(meter_total: float) -> bool:
+        if fox_total <= 0.01:
+            return meter_total > 0
+        return 0.65 <= (meter_total / fox_total) <= 1.5
+    # 1. per-slot metered execution_log (if plausibly complete)
+    if metered and _plausible(sum(metered.values())):
+        return metered
+    # 2. scale Fox by the daily meter total (if plausibly complete)
+    meter = db.get_octopus_daily_meter(day.isoformat())
+    if meter and meter.get("import_kwh") and fox_total > 0 and _plausible(float(meter["import_kwh"])):
         ratio = float(meter["import_kwh"]) / fox_total
         return {k: v * ratio for k, v in fox.items()}
-    # 3. Fox
+    # 3. Fox (default — and the fallback when the meter looks incomplete)
     return fox
 
 
