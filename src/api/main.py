@@ -411,6 +411,12 @@ async def api_v1_schedule_history(limit: int = 200):
 
 @app.get("/api/v1/weather")
 async def api_v1_weather():
+    # Blocking (Open-Meteo HTTP + Daikin read) — offload so it doesn't stall
+    # the event loop and serialize every other dashboard request.
+    return await asyncio.to_thread(_api_v1_weather_sync)
+
+
+def _api_v1_weather_sync():
     from ..weather import fetch_forecast
 
     fc = fetch_forecast(hours=48)
@@ -2451,7 +2457,7 @@ async def energy_monthly(month: str):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     try:
-        insights = get_monthly_insights(year, month_num)
+        insights = await asyncio.to_thread(get_monthly_insights, year, month_num)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -2527,7 +2533,7 @@ async def energy_period(
     if period in ("day", "week") and (len(date) != 10 or date[4] != "-" or date[7] != "-"):
         raise HTTPException(status_code=400, detail="Use date=YYYY-MM-DD")
     try:
-        out = get_period_insights(period, date_str=date, month_str=month, year=year)
+        out = await asyncio.to_thread(get_period_insights, period, date_str=date, month_str=month, year=year)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -2650,7 +2656,7 @@ async def energy_report(
     if period in ("day", "week") and date and (len(date) != 10 or date[4] != "-" or date[7] != "-"):
         raise HTTPException(status_code=400, detail="Use date=YYYY-MM-DD")
     try:
-        out = get_period_insights(period, date_str=date, month_str=month, year=year)
+        out = await asyncio.to_thread(get_period_insights, period, date_str=date, month_str=month, year=year)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -2729,7 +2735,7 @@ async def energy_insights():
         )
     from datetime import date
     today = date.today()
-    insights = get_monthly_insights(today.year, today.month)
+    insights = await asyncio.to_thread(get_monthly_insights, today.year, today.month)
     if insights is None:
         return EnergyInsightsTextResponse(
             summary="Monthly data is temporarily unavailable. Try again later."
@@ -3322,7 +3328,8 @@ async def tariffs_dashboard(req: TariffDashboardRequest):
             window_to = _date.fromisoformat(req.end_date)
         except ValueError:
             raise HTTPException(status_code=400, detail="start_date/end_date must be YYYY-MM-DD")
-    data = get_tariff_comparison_dashboard(
+    data = await asyncio.to_thread(
+        get_tariff_comparison_dashboard,
         months_back=req.months_back,
         granularity=req.granularity,
         max_tariffs=req.max_tariffs,
