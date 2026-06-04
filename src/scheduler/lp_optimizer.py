@@ -636,13 +636,25 @@ def solve_lp(
     # absorb maximum import during the window. The LP objective + cycle penalty
     # decide whether/how much to drain (and the SoC reserve floors it). Gated by
     # a minimum export price so we never give energy away for headroom alone.
+    # Pre-negative drain ELIGIBILITY (not a decision): a positive-price slot is
+    # *allowed* to export battery→grid when a negative window sits within the
+    # prep horizon ahead. Whether — and how much — it actually drains is left
+    # entirely to the objective: export revenue (``-exp×export_rate``) net of
+    # the cycle penalty (``obj_cycle``) and the cost of buying the energy back.
+    # There is deliberately NO economic threshold gate here. The old
+    # ``export_rate >= LP_PRE_NEGATIVE_EXPORT_MARGIN_PENCE`` floor was an
+    # arbitrary 2p cliff that could flip a slot's drain availability on tiny
+    # export-rate moves near the threshold; the objective already declines to
+    # drain when it isn't worth it, and the ``export_rate < 0`` safety below
+    # forces ``exp == 0`` so we never pay to export.
     pre_neg_export = [False] * n
     if getattr(config, "LP_PRE_NEGATIVE_PREP_ENABLED", True) and not _vacation_mode:
         _prep_slots = int(max(0, int(getattr(config, "LP_PLUNGE_PREP_HOURS", 12))) * 2)
-        _drain_margin = float(getattr(config, "LP_PRE_NEGATIVE_EXPORT_MARGIN_PENCE", 2.0))
         if _prep_slots > 0:
             for i in range(n):
-                if price_line[i] < 0 or export_rate_line[i] < _drain_margin:
+                # Negative slots charge (paid to import) and have dis locked to
+                # 0 — never drain candidates.
+                if price_line[i] < 0:
                     continue
                 j_end = min(n, i + _prep_slots)
                 if any(price_line[j] < 0 for j in range(i, j_end)):

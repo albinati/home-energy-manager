@@ -22,11 +22,23 @@ from src.config import config
 TZ_LOCAL = ZoneInfo("Europe/London")
 
 
+class _FrozenDatetime(datetime):
+    """Pin ``dhw_policy``'s clock so the fixed 2026-06-01 anchor date is never
+    treated as "in the past" by the past-date guard. Kills the date-flake that
+    otherwise breaks the whole module once the wall clock passes 2026-06-01."""
+
+    @classmethod
+    def now(cls, tz=None):  # noqa: D401
+        base = datetime(2026, 6, 1, 10, 0, tzinfo=UTC)
+        return base.astimezone(tz) if tz is not None else base.replace(tzinfo=None)
+
+
 @pytest.fixture(autouse=True)
 def _isolated(monkeypatch, tmp_path):
     db_path = str(tmp_path / "test.db")
     monkeypatch.setenv("DB_PATH", db_path)
     monkeypatch.setattr(config, "DB_PATH", db_path, raising=False)
+    monkeypatch.setattr(dhw_policy, "datetime", _FrozenDatetime, raising=False)
     _db.init_db()
     monkeypatch.setattr(config, "DHW_FIXED_SCHEDULE_ENABLED", True, raising=False)
     monkeypatch.setattr(config, "DHW_WARMUP_START_HOUR_LOCAL", 13, raising=False)
@@ -225,6 +237,101 @@ def test_malformed_outgoing_rate_skipped():
     boost = [r for r in rows if r["action_type"] == "tank_negative_boost"]
     # Only the one good negative rate emits a boost
     assert len(boost) == 1
+
+
+# ---------------------------------------------------------------------------
+# Boost-supersedes-warmup override (no positive-price pre-heat before a boost)
+# ---------------------------------------------------------------------------
+
+
+def _warmup(rows):
+    return next((r for r in rows if r["action_type"] == "tank_warmup"), None)
+
+
+def test_boost_near_warmup_start_defers_warmup():
+    """A boost opening shortly after the warmup start defers the warmup past it
+    — no pre-heating to NORMAL at a positive price right before the free boost.
+    Warmup start moves from 13:00 BST (12:00 UTC) to the boost end."""
+    # Negative slot at 12:30 UTC (13:30 BST) — 30 min after the 13:00 warmup.
+    outgoing = [{"valid_from": "2026-06-01T12:30:00Z", "value_inc_vat": -5.0}]
+    rows = dhw_policy.generate_daily_tank_schedule(
+        date(2026, 6, 1), agile_rates=outgoing, mode="normal",
+    )
+    warmup = _warmup(rows)
+    assert warmup is not None
+    start = datetime.fromisoformat(warmup["start_time"].replace("Z", "+00:00"))
+    # Deferred to the boost end (13:00 UTC = 14:00 BST), NOT the original 12:00 UTC.
+    assert start == datetime(2026, 6, 1, 13, 0, tzinfo=UTC), start
+    # Setback is untouched.
+    setback = next(r for r in rows if r["action_type"] == "tank_setback")
+    s_start = datetime.fromisoformat(setback["start_time"].replace("Z", "+00:00"))
+    assert s_start.astimezone(TZ_LOCAL).hour == 22
+
+
+def test_boost_far_from_warmup_start_keeps_warmup():
+    """A boost later than the lead window leaves the warmup intact — the
+    afternoon still needs hot water before that boost arrives."""
+    # Boost at 16:00 UTC (17:00 BST), well beyond the 120-min lead.
+    outgoing = [{"valid_from": "2026-06-01T16:00:00Z", "value_inc_vat": -5.0}]
+    rows = dhw_policy.generate_daily_tank_schedule(
+        date(2026, 6, 1), agile_rates=outgoing, mode="normal",
+    )
+    warmup = _warmup(rows)
+    assert warmup is not None
+    start = datetime.fromisoformat(warmup["start_time"].replace("Z", "+00:00"))
+    assert start.astimezone(TZ_LOCAL).hour == 13  # unchanged 13:00 BST
+    assert warmup["params"]["tank_temp"] == 45
+
+
+def test_interleaved_negative_window_chains_warmup_defer():
+    """The real prod case (2026-06-04): negatives at 12:30 / 13:30 / 14:00 UTC
+    with a positive slot at 13:00 between them. The warmup must defer past the
+    WHOLE early cluster (two boost windows chained) — no warmup at the positive
+    12:00 or 13:00 slots."""
+    outgoing = [
+        {"valid_from": "2026-06-01T12:30:00Z", "value_inc_vat": -0.34},
+        {"valid_from": "2026-06-01T13:00:00Z", "value_inc_vat": 0.77},  # positive gap
+        {"valid_from": "2026-06-01T13:30:00Z", "value_inc_vat": -1.30},
+        {"valid_from": "2026-06-01T14:00:00Z", "value_inc_vat": -0.86},
+    ]
+    rows = dhw_policy.generate_daily_tank_schedule(
+        date(2026, 6, 1), agile_rates=outgoing, mode="normal",
+    )
+    boost = [r for r in rows if r["action_type"] == "tank_negative_boost"]
+    assert len(boost) == 2  # (12:30-13:00) and (13:30-14:30)
+    warmup = _warmup(rows)
+    assert warmup is not None
+    start = datetime.fromisoformat(warmup["start_time"].replace("Z", "+00:00"))
+    # Deferred past the last chained boost end: 14:30 UTC (15:30 BST).
+    assert start == datetime(2026, 6, 1, 14, 30, tzinfo=UTC), start
+
+
+def test_boost_chain_can_drop_guest_warmup_start():
+    """Guests mode: a near-start boost defers the single 24h warmup too."""
+    outgoing = [{"valid_from": "2026-06-01T12:30:00Z", "value_inc_vat": -5.0}]
+    rows = dhw_policy.generate_daily_tank_schedule(
+        date(2026, 6, 1), agile_rates=outgoing, mode="guests",
+    )
+    warmup = _warmup(rows)
+    assert warmup is not None
+    start = datetime.fromisoformat(warmup["start_time"].replace("Z", "+00:00"))
+    assert start == datetime(2026, 6, 1, 13, 0, tzinfo=UTC), start
+
+
+def test_warmup_override_disabled_by_zero_lead():
+    """Lead=0 disables the defer — warmup stays at 13:00 even with a boost at
+    the very next slot (rollback escape hatch)."""
+    outgoing = [{"valid_from": "2026-06-01T12:30:00Z", "value_inc_vat": -5.0}]
+    import src.dhw_policy as _dp
+    import pytest as _pytest
+    with _pytest.MonkeyPatch.context() as mp:
+        mp.setattr(_dp.config, "DHW_WARMUP_BOOST_OVERRIDE_LEAD_MINUTES", 0, raising=False)
+        rows = _dp.generate_daily_tank_schedule(
+            date(2026, 6, 1), agile_rates=outgoing, mode="normal",
+        )
+    warmup = _warmup(rows)
+    start = datetime.fromisoformat(warmup["start_time"].replace("Z", "+00:00"))
+    assert start.astimezone(TZ_LOCAL).hour == 13
 
 
 # ---------------------------------------------------------------------------

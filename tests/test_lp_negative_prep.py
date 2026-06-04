@@ -61,7 +61,6 @@ def test_pre_negative_export_drains_battery(monkeypatch):
     drains the battery to the grid (export > PV) on pre-window slots."""
     monkeypatch.setattr(app_config, "LP_PRE_NEGATIVE_PREP_ENABLED", True)
     monkeypatch.setattr(app_config, "LP_PLUNGE_PREP_HOURS", 12)
-    monkeypatch.setattr(app_config, "LP_PRE_NEGATIVE_EXPORT_MARGIN_PENCE", 2.0)
     n = 24
     # Slots 0-7 positive import (15p), HIGH export (25p). Slots 8-9 negative (-8p).
     prices = [15.0] * 8 + [-8.0] * 2 + [15.0] * 14
@@ -90,16 +89,40 @@ def test_pre_negative_export_off_keeps_no_battery_export(monkeypatch):
     assert sum(plan.export_kwh) < 0.05, f"battery exported with flag off: {sum(plan.export_kwh):.3f}"
 
 
-def test_pre_negative_export_gated_by_margin(monkeypatch):
-    """Export price below the margin → no drain offered."""
+def test_pre_negative_export_drains_below_old_margin(monkeypatch):
+    """No arbitrary margin gate: a sub-2p export rate still drains when the
+    economics work out — selling now plus the paid refill during the negative
+    window beats the round-trip loss. The removed
+    ``LP_PRE_NEGATIVE_EXPORT_MARGIN_PENCE=2p`` cliff would have wrongly blocked
+    this and is exactly the kind of spurious toggle we eliminated."""
     monkeypatch.setattr(app_config, "LP_PRE_NEGATIVE_PREP_ENABLED", True)
     monkeypatch.setattr(app_config, "LP_PLUNGE_PREP_HOURS", 12)
-    monkeypatch.setattr(app_config, "LP_PRE_NEGATIVE_EXPORT_MARGIN_PENCE", 10.0)
-    prices = [15.0] * 8 + [-8.0] * 2 + [15.0] * 14
-    export = [3.0] * 24  # below 10p margin
+    # Battery near-full → no headroom to absorb the long negative window unless
+    # it drains first. Sell at 1.5p (below the old 2p gate), then get paid 8p to
+    # refill that freed capacity. The drained energy is recovered in-window, so
+    # the only cost is round-trip loss — comfortably beaten.
+    prices = [15.0] * 8 + [-8.0] * 4 + [15.0] * 12
+    export = [1.5] * 24
+    plan = _solve(prices, export, soc=9.5, pv=0.0)
+    assert plan.ok, plan.status
+    drained = sum(plan.export_kwh[i] for i in range(8))
+    assert drained > 0.3, f"sub-margin export should still drain on good economics, got {drained:.3f}"
+
+
+def test_pre_negative_export_declines_when_uneconomic(monkeypatch):
+    """The OBJECTIVE (not a threshold gate) decides: with a negligible export
+    value, a shallow negative window, and a heavy cycle penalty, draining loses
+    money so the LP declines — even though pre-negative export is *eligible*."""
+    monkeypatch.setattr(app_config, "LP_PRE_NEGATIVE_PREP_ENABLED", True)
+    monkeypatch.setattr(app_config, "LP_PLUNGE_PREP_HOURS", 12)
+    monkeypatch.setattr(app_config, "LP_CYCLE_PENALTY_PENCE_PER_KWH", 5.0)
+    prices = [15.0] * 8 + [-0.5] * 2 + [15.0] * 14  # shallow negative (tiny paid refill)
+    export = [0.2] * 24  # negligible export value
     plan = _solve(prices, export, soc=4.5, pv=0.0)
     assert plan.ok, plan.status
-    assert sum(plan.export_kwh) < 0.05, f"drained despite sub-margin export: {sum(plan.export_kwh):.3f}"
+    assert sum(plan.export_kwh) < 0.1, (
+        f"should not drain when the gain can't cover cycle cost: {sum(plan.export_kwh):.3f}"
+    )
 
 
 # ── 1C: never export when export price is negative ───────────────────────────

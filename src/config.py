@@ -761,6 +761,15 @@ class Config:
     DHW_NEGATIVE_PRICE_BOOST_C: float = float(
         os.getenv("DHW_NEGATIVE_PRICE_BOOST_C", "65")
     )
+    # When a negative-price boost window opens within this many minutes of the
+    # daily warmup start, the warmup is DEFERRED past the boost (chaining
+    # consecutive early boosts) instead of pre-heating to NORMAL at a positive
+    # price right before the free boost-to-MAX. The warmup then resumes its
+    # hold-at-NORMAL role after the boost (tank coasts down from the boost temp).
+    # A boost later than this lead leaves the warmup intact. 0 disables.
+    DHW_WARMUP_BOOST_OVERRIDE_LEAD_MINUTES: int = int(
+        os.getenv("DHW_WARMUP_BOOST_OVERRIDE_LEAD_MINUTES", "120")
+    )
     # Forecast night-temperature bias (minimal #324 implementation).
     # Open Meteo's grid coverage (~10 km) over-estimates the W4 1DZ
     # microclimate's overnight outdoor temperature by ~3 °C in the household's
@@ -921,19 +930,18 @@ class Config:
     LP_PLUNGE_PREP_HOURS: int = int(os.getenv("LP_PLUNGE_PREP_HOURS", "12"))
 
     # Pre-negative ACTIVE pre-positioning: within LP_PLUNGE_PREP_HOURS of a
-    # negative window, actively DRAIN the battery to the grid (force export,
+    # negative window, ALLOW the battery to drain to the grid (force export,
     # selling high) so it has maximum headroom to absorb paid import during the
-    # negative window. Only fires when selling-now beats buying-back-during-
-    # negative by LP_PRE_NEGATIVE_EXPORT_MARGIN_PENCE (round-trip adjusted), and
-    # never below the export SoC floor. This DELIBERATELY reverses the standard
-    # "no battery export in normal/guests" rule (PR D) for the pre-negative
-    # window only — set false to disable.
+    # negative window. This only sets *eligibility* — the LP objective decides
+    # whether and how much to drain (export revenue net of cycle penalty and
+    # buy-back cost); there is no economic threshold gate. This DELIBERATELY
+    # reverses the standard "no battery export in normal/guests" rule (PR D)
+    # for the pre-negative window only — set false to disable.
+    # NOTE: LP_PRE_NEGATIVE_EXPORT_MARGIN_PENCE was REMOVED — it was an arbitrary
+    # 2p cliff that could toggle drain availability on small export-rate moves.
     LP_PRE_NEGATIVE_PREP_ENABLED: bool = (
         os.getenv("LP_PRE_NEGATIVE_PREP_ENABLED", "true").strip().lower()
         in ("1", "true", "yes", "on")
-    )
-    LP_PRE_NEGATIVE_EXPORT_MARGIN_PENCE: float = float(
-        os.getenv("LP_PRE_NEGATIVE_EXPORT_MARGIN_PENCE", "2.0")
     )
     # Pre-cool the DHW tank for this many hours before a negative window: don't
     # re-warm it (let it coast to setback) so it has maximum headroom to absorb
