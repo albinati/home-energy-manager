@@ -52,7 +52,11 @@ export function TodayPlanWidget({ pv, loading, cheapThresholdP, peakThresholdP }
     const slots = pv.slots;
     const labels = slots.map((s) => localHM(s.slot_utc));
 
-    const pvPlanned = slots.map((s) => round2(s.pv_forecast_kwh));
+    // Three PV lines: the COMMITTED plan (frozen since the last LP solve), the
+    // LIVE forecast (re-fetched per request — revises through the day), and the
+    // realised actual. See get_pv_today: pv_planned_kwh vs pv_forecast_kwh.
+    const pvCommitted = slots.map((s) => (s.pv_planned_kwh == null ? null : round2(s.pv_planned_kwh)));
+    const pvForecastLive = slots.map((s) => round2(s.pv_forecast_kwh));
     const pvActual = slots.map((s) => (s.pv_actual_kwh == null ? null : round2(s.pv_actual_kwh)));
     const load = slots.map((s) => (s.base_load_kwh == null ? null : round2(s.base_load_kwh)));
     const price = slots.map((s) => (s.import_price_p == null ? null : s.import_price_p));
@@ -114,7 +118,7 @@ export function TodayPlanWidget({ pv, loading, cheapThresholdP, peakThresholdP }
       legend: {
         ...(base.legend as object),
         show: true, top: undefined, right: undefined, bottom: 4, left: "center",
-        data: ["PV actual", "PV planned", "Load forecast", "Import price"],
+        data: ["PV actual", "PV plan (committed)", "PV forecast (live)", "Load forecast", "Import price"],
       },
       tooltip: {
         ...(base.tooltip as object),
@@ -125,7 +129,8 @@ export function TodayPlanWidget({ pv, loading, cheapThresholdP, peakThresholdP }
           const tier = tierOf(price[i]);
           return `<strong>${labels[i]}</strong>${tier ? ` · ${tier}` : ""}<br/>` +
             (price[i] != null ? `Import ${price[i]!.toFixed(1)}p/kWh<br/>` : "") +
-            `PV planned ${pvPlanned[i].toFixed(2)} kWh<br/>` +
+            (pvCommitted[i] != null ? `PV plan ${pvCommitted[i]!.toFixed(2)} kWh<br/>` : "") +
+            `PV forecast (live) ${pvForecastLive[i].toFixed(2)} kWh<br/>` +
             (pvActual[i] != null ? `PV actual ${pvActual[i]!.toFixed(2)} kWh<br/>` : "") +
             (load[i] != null ? `Load ${load[i]!.toFixed(2)} kWh` : "");
         },
@@ -142,7 +147,7 @@ export function TodayPlanWidget({ pv, loading, cheapThresholdP, peakThresholdP }
       series: [
         // Rate-tier shading lives on a silent baseline series (z below all).
         {
-          name: "_bands", type: "line", data: pvPlanned.map(() => null), silent: true,
+          name: "_bands", type: "line", data: pvForecastLive.map(() => null), silent: true,
           markArea: bands.length ? { silent: true, data: bands } : undefined,
           markLine: nowIdx >= 0 ? {
             silent: true, symbol: "none",
@@ -152,14 +157,20 @@ export function TodayPlanWidget({ pv, loading, cheapThresholdP, peakThresholdP }
           } : undefined,
           z: 0,
         },
-        // Colour scheme: each metric keeps ONE hue; the REFERENCE (forecast/
-        // planned) is the dim/dark, dashed version, the ACTUAL is the bright,
-        // solid one. So PV planned vs PV actual read as the same thing, dim→bright.
+        // Three PV lines share the PV hue, distinguished by treatment:
+        //   committed plan = dotted, mid-alpha (the frozen plan being executed)
+        //   live forecast  = dashed, dim (revises through the day)
+        //   actual         = solid, bright, filled (realised)
         // `color` is set so the legend swatch matches the line (ECharts colours
         // the legend marker from series.color, NOT lineStyle).
         {
-          name: "PV planned", type: "line", smooth: true, showSymbol: false, color: withAlpha(t.pv, 0.45),
-          data: pvPlanned, lineStyle: { color: withAlpha(t.pv, 0.45), width: 1.25, type: "dashed" },
+          name: "PV plan (committed)", type: "line", smooth: true, showSymbol: false,
+          connectNulls: false, color: withAlpha(t.pv, 0.7),
+          data: pvCommitted, lineStyle: { color: withAlpha(t.pv, 0.7), width: 1.5, type: "dotted" }, z: 3,
+        },
+        {
+          name: "PV forecast (live)", type: "line", smooth: true, showSymbol: false, color: withAlpha(t.pv, 0.4),
+          data: pvForecastLive, lineStyle: { color: withAlpha(t.pv, 0.4), width: 1.25, type: "dashed" },
           areaStyle: { color: withAlpha(t.pv, 0.05) }, z: 2,
         },
         // PV actual — realised in the FOREGROUND: vivid PV colour, thick, gradient fill.
@@ -210,6 +221,12 @@ export function TodayPlanWidget({ pv, loading, cheapThresholdP, peakThresholdP }
         <span class="today-plan-band today-plan-band--neg">negative price</span>
         <span class="today-plan-band-hint">shaded = tariff tier · ◉ now</span>
       </div>
+      {pv?.plan_committed_at && (
+        <p class="today-plan-note muted">
+          Committed plan from {localHM(pv.plan_committed_at)} (the line the system is executing);
+          the live forecast re-fetches from Quartz through the day, so it moves.
+        </p>
+      )}
       {!pv?.slots?.length && !loading && <p class="muted">No plan data for today yet.</p>}
     </div>
   );

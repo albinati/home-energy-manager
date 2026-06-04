@@ -28,4 +28,6 @@ agent_apply_v2.log
 backups/
 .claude/
 _scratch/
+
+# gstack browse local artifacts
 .gstack/

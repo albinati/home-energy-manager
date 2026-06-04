@@ -127,9 +127,18 @@ async def get_pv_today(date: str | None = None) -> dict[str, Any]:
     except Exception:
         tz = UTC  # type: ignore[assignment]
 
+    # The run that governs this day: the last solve committed at/over the day
+    # (for a past day) or the latest solve (today). Drives both the dispatch
+    # kinds and the committed-plan PV line.
+    rid: int | None = None
+    try:
+        when = _iso_z(min(day_start + timedelta(days=1), now))
+        rid = db.find_run_for_time(when) or db.find_latest_optimizer_run_id()
+    except Exception as e:
+        logger.warning("pv/today: run lookup failed (%s)", e)
+
     kind_by: dict[str, str] = {}
     try:
-        rid = db.find_latest_optimizer_run_id()
         if rid is not None:
             for dec in db.get_dispatch_decisions(rid):
                 k = dec.get("dispatched_kind") or dec.get("lp_kind")
@@ -138,6 +147,25 @@ async def get_pv_today(date: str | None = None) -> dict[str, Any]:
                     kind_by[_norm_z(stu)] = k
     except Exception as e:
         logger.warning("pv/today: dispatch kinds failed (%s)", e)
+
+    # Committed-plan PV: the frozen per-slot PV-generation forecast the LP last
+    # solved against (lp_solution_snapshot.pv_forecast_kwh). Distinct from the
+    # live forecast above — it only moves when the LP re-solves. slot_time_utc
+    # is stored in +00:00 form, so normalise to the ...Z key via _norm_z.
+    planned_by: dict[str, float] = {}
+    plan_committed_at: str | None = None
+    try:
+        if rid is not None:
+            for row in db.get_lp_solution_slots(rid):
+                pf = row.get("pv_forecast_kwh")
+                stu = row.get("slot_time_utc")
+                if pf is not None and stu:
+                    planned_by[_norm_z(stu)] = float(pf)
+            inp = db.get_lp_inputs(rid)
+            if inp and inp.get("run_at_utc"):
+                plan_committed_at = _norm_z(inp["run_at_utc"])
+    except Exception as e:
+        logger.warning("pv/today: committed-plan PV lookup failed (%s)", e)
 
     slots_out: list[dict[str, Any]] = []
     acc_f = acc_a = 0.0
@@ -156,7 +184,8 @@ async def get_pv_today(date: str | None = None) -> dict[str, Any]:
         bl = load_profile.get((local.hour, local.minute))
         slots_out.append({
             "slot_utc": key,
-            "pv_forecast_kwh": f,
+            "pv_forecast_kwh": f,  # live forecast (revises through the day)
+            "pv_planned_kwh": planned_by.get(key),  # committed plan (frozen since last solve)
             "pv_actual_kwh": a,
             "import_price_p": price_by_start.get(key),
             "base_load_kwh": round(float(bl), 4) if bl is not None else None,
@@ -184,6 +213,8 @@ async def get_pv_today(date: str | None = None) -> dict[str, Any]:
         "slots": slots_out,
         "accuracy": accuracy,
         "forecast_kwh_day_total": round(sum(forecast_kwh), 3),
+        "plan_committed_at": plan_committed_at,
+        "plan_run_id": rid,
     }
 
 

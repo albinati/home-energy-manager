@@ -982,35 +982,34 @@ def compute_pv_calibration_hourly_table(
         if cnt == 1:
             modelled_per_day_hour[key] = modelled_per_day_hour[key] * 2.0
 
-    # Build per-hour ratio lists, skipping dawn/dusk noise (both < 0.05).
-    ratios_per_hour: dict[int, list[float]] = {h: [] for h in range(24)}
+    # Build per-hour (measured, modelled) pairs, skipping dawn/dusk noise.
+    pairs_per_hour: dict[int, list[tuple[float, float]]] = {h: [] for h in range(24)}
     for (day, hour), measured_kwh in measured_per_day_hour.items():
         modelled_kwh = modelled_per_day_hour.get((day, hour))
         if modelled_kwh is None or modelled_kwh < 0.05:
             continue
         if measured_kwh < 0.05 and modelled_kwh < 0.05:
             continue
-        ratio = measured_kwh / modelled_kwh
         # Drop egregious outliers (sensor spike or forecast anomaly)
-        if ratio > 5.0:
+        if measured_kwh / modelled_kwh > 5.0:
             continue
-        ratios_per_hour[hour].append(ratio)
+        pairs_per_hour[hour].append((measured_kwh, modelled_kwh))
 
     factors: dict[int, float] = {}
     samples: dict[int, int] = {}
-    for hour, rs in ratios_per_hour.items():
-        if len(rs) < min_samples_per_hour:
+    for hour, ps in pairs_per_hour.items():
+        if len(ps) < min_samples_per_hour:
             continue
-        # Use median (robust to single bad day) and clamp.
-        # PR L1.1 — UPPER bound raised to 2.0 (was 1.10) because Quartz can
-        # legitimately UNDER-predict (PM ratio observed ~1.19-1.59 — the
-        # split-array SSW + flat surfaces both peak PM relative to Quartz's
-        # GSP-aggregate assumption). Lower bound stays at 0.10 as a safety floor.
-        rs_sorted = sorted(rs)
-        median = rs_sorted[len(rs_sorted) // 2]
-        clamped = max(0.10, min(2.0, median))
-        factors[hour] = round(clamped, 4)
-        samples[hour] = len(rs)
+        # Ratio-of-sums (magnitude-weighted), not median-of-ratios. Median
+        # ignores error magnitude and left a systematic over-forecast at
+        # high-generation hours (10 UTC / high sun); Σactual/Σmodelled zeroes
+        # the per-hour kWh bias. Clamp [0.10, 2.0]: Quartz can legitimately
+        # UNDER-predict PM (split SSW + flat surfaces peak PM vs GSP aggregate).
+        sum_m = sum(m for m, _ in ps)
+        sum_f = sum(f for _, f in ps)
+        factor = (sum_m / sum_f) if sum_f > 0 else 1.0
+        factors[hour] = round(max(0.10, min(2.0, factor)), 4)
+        samples[hour] = len(ps)
 
     if not factors:
         return {"status": "skipped", "reason": "insufficient samples per hour"}
@@ -1634,7 +1633,7 @@ def compute_pv_calibration_hourly_cloud_table(
     # 3. Build per-(hour, bucket) ratio lists.
     # measured_per_day_hour value is mean kW over hour → numerically = kWh
     # for that hour. archive value is hourly kWh from above aggregation.
-    ratios_per_cell: dict[tuple[int, int], list[float]] = defaultdict(list)
+    pairs_per_cell: dict[tuple[int, int], list[tuple[float, float]]] = defaultdict(list)
     for (day, hour), measured_kwh in measured_per_day_hour.items():
         forecast = archive.get((day, hour))
         if forecast is None:
@@ -1642,27 +1641,25 @@ def compute_pv_calibration_hourly_cloud_table(
         modelled_kwh, cloud = forecast
         if modelled_kwh < 0.05 or measured_kwh < 0.05:
             continue                          # dawn/dusk noise
-        ratio = measured_kwh / modelled_kwh
-        if ratio > 5.0:
+        if measured_kwh / modelled_kwh > 5.0:
             continue                          # outlier
         bucket = cloud_bucket(cloud)
-        ratios_per_cell[(hour, bucket)].append(ratio)
+        pairs_per_cell[(hour, bucket)].append((measured_kwh, modelled_kwh))
 
-    # 4. Median per cell, clamp to [0.05, 2.0]
-    # PR L1.1 — upper bound raised from 1.20 → 2.0 because Quartz can
-    # legitimately under-predict (observed PM ratios 1.19-1.59 in W4 1DZ:
-    # the split SW-pitched + flat-rack array peaks PM relative to GSP).
-    # Lower bound stays at 0.05 as safety floor.
+    # 4. Ratio-of-sums per cell (magnitude-weighted), clamp [0.05, 2.0].
+    # Σactual/Σmodelled zeroes the per-cell kWh bias; median-of-ratios left a
+    # high-generation over-forecast. Upper bound 2.0: Quartz can legitimately
+    # under-predict PM (split SW-pitched + flat-rack array peaks PM vs GSP).
     factors: dict[tuple[int, int], float] = {}
     samples: dict[tuple[int, int], int] = {}
-    for cell, rs in ratios_per_cell.items():
-        if len(rs) < min_samples_per_cell:
+    for cell, ps in pairs_per_cell.items():
+        if len(ps) < min_samples_per_cell:
             continue
-        rs_sorted = sorted(rs)
-        median = rs_sorted[len(rs_sorted) // 2]
-        clamped = max(0.05, min(2.0, median))
-        factors[cell] = round(clamped, 4)
-        samples[cell] = len(rs)
+        sum_m = sum(m for m, _ in ps)
+        sum_f = sum(f for _, f in ps)
+        factor = (sum_m / sum_f) if sum_f > 0 else 1.0
+        factors[cell] = round(max(0.05, min(2.0, factor)), 4)
+        samples[cell] = len(ps)
 
     if not factors:
         return {"status": "skipped", "reason": "insufficient samples per (hour, bucket)"}
@@ -1794,8 +1791,8 @@ def compute_pv_calibration_3d_table(
         avg_cloud = (sum(clouds) / len(clouds)) if clouds else None
         archive[key] = (total_kwh, avg_cloud, midhour_dts[key])
 
-    # 4. Build per-cell ratio lists (hour, cloud_bucket, elevation_bucket)
-    ratios_per_cell: dict[tuple[int, int, int], list[float]] = defaultdict(list)
+    # 4. Build per-cell (measured, modelled) pairs (hour, cloud_b, elev_b)
+    pairs_per_cell: dict[tuple[int, int, int], list[tuple[float, float]]] = defaultdict(list)
     for (day, hour), measured_kwh in measured_per_day_hour.items():
         forecast = archive.get((day, hour))
         if forecast is None:
@@ -1803,25 +1800,26 @@ def compute_pv_calibration_3d_table(
         modelled_kwh, cloud, midhour = forecast
         if modelled_kwh < 0.05 or measured_kwh < 0.05:
             continue
-        ratio = measured_kwh / modelled_kwh
-        if ratio > 5.0:
+        if measured_kwh / modelled_kwh > 5.0:
             continue
         cloud_b = cloud_bucket(cloud)
         elev = compute_solar_elevation_deg(midhour)
         elev_b = elevation_bucket(elev)
-        ratios_per_cell[(hour, cloud_b, elev_b)].append(ratio)
+        pairs_per_cell[(hour, cloud_b, elev_b)].append((measured_kwh, modelled_kwh))
 
-    # 5. Median per cell, clamp [0.05, 2.0]
+    # 5. Ratio-of-sums per cell (magnitude-weighted), clamp [0.05, 2.0].
+    # Σactual/Σmodelled zeroes the per-cell kWh bias — median-of-ratios left a
+    # systematic over-forecast at high-generation (10 UTC / high-elevation) cells.
     factors: dict[tuple[int, int, int], float] = {}
     samples: dict[tuple[int, int, int], int] = {}
-    for cell, rs in ratios_per_cell.items():
-        if len(rs) < min_samples_per_cell:
+    for cell, ps in pairs_per_cell.items():
+        if len(ps) < min_samples_per_cell:
             continue
-        rs_sorted = sorted(rs)
-        median = rs_sorted[len(rs_sorted) // 2]
-        clamped = max(0.05, min(2.0, median))
-        factors[cell] = round(clamped, 4)
-        samples[cell] = len(rs)
+        sum_m = sum(m for m, _ in ps)
+        sum_f = sum(f for _, f in ps)
+        factor = (sum_m / sum_f) if sum_f > 0 else 1.0
+        factors[cell] = round(max(0.05, min(2.0, factor)), 4)
+        samples[cell] = len(ps)
 
     if not factors:
         return {

@@ -577,6 +577,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             discharge_kwh   REAL,
             pv_use_kwh      REAL,
             pv_curtail_kwh  REAL,
+            pv_forecast_kwh REAL,
             dhw_kwh         REAL,
             space_kwh       REAL,
             soc_kwh         REAL,
@@ -587,6 +588,13 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             UNIQUE(run_id, slot_index)
         )"""
     )
+    # Additive migration for existing DBs: pv_forecast_kwh = the calibrated
+    # per-slot PV-generation forecast the LP committed to (lets the UI show the
+    # frozen "committed plan" line distinct from the live forecast). Mirrors the
+    # PRAGMA/ALTER idiom used elsewhere in init_db (e.g. meteo_forecast_value).
+    lss_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(lp_solution_snapshot)")}
+    if "pv_forecast_kwh" not in lss_cols:
+        conn.execute("ALTER TABLE lp_solution_snapshot ADD COLUMN pv_forecast_kwh REAL")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_lp_solution_snapshot_run ON lp_solution_snapshot(run_id)"
     )
@@ -4053,13 +4061,15 @@ def save_lp_snapshots(
                     """INSERT OR REPLACE INTO lp_solution_snapshot
                        (run_id, slot_index, slot_time_utc, price_p,
                         import_kwh, export_kwh, charge_kwh, discharge_kwh,
-                        pv_use_kwh, pv_curtail_kwh, dhw_kwh, space_kwh,
+                        pv_use_kwh, pv_curtail_kwh, pv_forecast_kwh, dhw_kwh, space_kwh,
                         soc_kwh, tank_temp_c, indoor_temp_c, outdoor_temp_c, lwt_offset_c)
                        VALUES (:run_id, :slot_index, :slot_time_utc, :price_p,
                                :import_kwh, :export_kwh, :charge_kwh, :discharge_kwh,
-                               :pv_use_kwh, :pv_curtail_kwh, :dhw_kwh, :space_kwh,
+                               :pv_use_kwh, :pv_curtail_kwh, :pv_forecast_kwh, :dhw_kwh, :space_kwh,
                                :soc_kwh, :tank_temp_c, :indoor_temp_c, :outdoor_temp_c, :lwt_offset_c)""",
-                    {"run_id": run_id, **row},
+                    # `pv_forecast_kwh` last so it's always bound (None when a
+                    # caller's row omits it) without a KeyError on **row.
+                    {"run_id": run_id, **row, "pv_forecast_kwh": row.get("pv_forecast_kwh")},
                 )
             conn.commit()
         finally:
