@@ -235,7 +235,7 @@ def test_w3_winter_negative_price_still_emits_boost():
     neg_slot_utc = datetime(2026, 12, 15, 2, 0, tzinfo=UTC).isoformat().replace("+00:00", "Z")
     outgoing = [{"valid_from": neg_slot_utc, "value_inc_vat": -8.0}]
     rows = dhw_policy.generate_daily_tank_schedule(
-        schedule_day, outgoing_rates=outgoing, mode="normal",
+        schedule_day, agile_rates=outgoing, mode="normal",
     )
     boost = [r for r in rows if r["action_type"] == "tank_negative_boost"]
     assert len(boost) == 1

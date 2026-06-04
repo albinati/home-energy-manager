@@ -126,7 +126,7 @@ def test_negative_price_single_slot_overlay():
         {"valid_from": neg_slot_utc, "value_inc_vat": -5.0, "tariff_code": "AGILE-OUTGOING"},
     ]
     rows = dhw_policy.generate_daily_tank_schedule(
-        date(2026, 6, 1), outgoing_rates=outgoing, mode="normal",
+        date(2026, 6, 1), agile_rates=outgoing, mode="normal",
     )
     boost = [r for r in rows if r["action_type"] == "tank_negative_boost"]
     assert len(boost) == 1
@@ -142,7 +142,7 @@ def test_consecutive_negative_slots_merged_into_window():
         {"valid_from": "2026-06-01T15:00:00Z", "value_inc_vat": -1.2},
     ]
     rows = dhw_policy.generate_daily_tank_schedule(
-        date(2026, 6, 1), outgoing_rates=outgoing, mode="normal",
+        date(2026, 6, 1), agile_rates=outgoing, mode="normal",
     )
     boost = [r for r in rows if r["action_type"] == "tank_negative_boost"]
     assert len(boost) == 1
@@ -160,7 +160,7 @@ def test_non_contiguous_negative_slots_emit_separate_windows():
         {"valid_from": "2026-06-01T15:30:00Z", "value_inc_vat": -2.0},
     ]
     rows = dhw_policy.generate_daily_tank_schedule(
-        date(2026, 6, 1), outgoing_rates=outgoing, mode="normal",
+        date(2026, 6, 1), agile_rates=outgoing, mode="normal",
     )
     boost = [r for r in rows if r["action_type"] == "tank_negative_boost"]
     assert len(boost) == 2
@@ -173,7 +173,7 @@ def test_positive_outgoing_rates_do_not_trigger_boost():
         {"valid_from": "2026-06-01T15:00:00Z", "value_inc_vat": 20.0},
     ]
     rows = dhw_policy.generate_daily_tank_schedule(
-        date(2026, 6, 1), outgoing_rates=outgoing, mode="normal",
+        date(2026, 6, 1), agile_rates=outgoing, mode="normal",
     )
     assert all(r["action_type"] != "tank_negative_boost" for r in rows)
 
@@ -186,16 +186,16 @@ def test_negative_slot_outside_horizon_ignored():
         {"valid_from": "2026-06-01T10:00:00Z", "value_inc_vat": -5.0},
     ]
     rows = dhw_policy.generate_daily_tank_schedule(
-        date(2026, 6, 1), outgoing_rates=outgoing, mode="normal",
+        date(2026, 6, 1), agile_rates=outgoing, mode="normal",
     )
     boost = [r for r in rows if r["action_type"] == "tank_negative_boost"]
     assert boost == []
 
 
 def test_outgoing_rates_none_no_crash():
-    """outgoing_rates=None just yields warmup+setback, no boost; doesn't crash."""
+    """agile_rates=None just yields warmup+setback, no boost; doesn't crash."""
     rows = dhw_policy.generate_daily_tank_schedule(
-        date(2026, 6, 1), outgoing_rates=None, mode="normal",
+        date(2026, 6, 1), agile_rates=None, mode="normal",
     )
     assert len(rows) == 2
     assert all(r["action_type"] in ("tank_warmup", "tank_setback") for r in rows)
@@ -205,7 +205,7 @@ def test_outgoing_rate_zero_does_not_trigger_boost():
     """Rate=0 is not strictly negative; no boost."""
     outgoing = [{"valid_from": "2026-06-01T14:00:00Z", "value_inc_vat": 0.0}]
     rows = dhw_policy.generate_daily_tank_schedule(
-        date(2026, 6, 1), outgoing_rates=outgoing, mode="normal",
+        date(2026, 6, 1), agile_rates=outgoing, mode="normal",
     )
     boost = [r for r in rows if r["action_type"] == "tank_negative_boost"]
     assert boost == []
@@ -220,7 +220,7 @@ def test_malformed_outgoing_rate_skipped():
         {"valid_from": "2026-06-01T15:00:00Z", "value_inc_vat": -1.0},  # good
     ]
     rows = dhw_policy.generate_daily_tank_schedule(
-        date(2026, 6, 1), outgoing_rates=outgoing, mode="normal",
+        date(2026, 6, 1), agile_rates=outgoing, mode="normal",
     )
     boost = [r for r in rows if r["action_type"] == "tank_negative_boost"]
     # Only the one good negative rate emits a boost
@@ -236,7 +236,7 @@ def test_write_daily_tank_schedule_persists_rows():
     """write_daily_tank_schedule upserts rows into action_schedule."""
     n = dhw_policy.write_daily_tank_schedule(
         target_date_local=date(2026, 6, 1),
-        outgoing_rates=None,
+        agile_rates=None,
         mode="normal",
         clear_existing=False,
     )
@@ -334,7 +334,7 @@ def test_negative_boost_temp_override(monkeypatch):
     monkeypatch.setattr(config, "DHW_NEGATIVE_PRICE_BOOST_C", 65.0, raising=False)
     outgoing = [{"valid_from": "2026-06-01T14:00:00Z", "value_inc_vat": -5.0}]
     rows = dhw_policy.generate_daily_tank_schedule(
-        date(2026, 6, 1), outgoing_rates=outgoing, mode="normal",
+        date(2026, 6, 1), agile_rates=outgoing, mode="normal",
     )
     boost = next(r for r in rows if r["action_type"] == "tank_negative_boost")
     assert boost["params"]["tank_temp"] == 65
@@ -376,7 +376,7 @@ def test_negative_boost_uses_powerful():
     """Negative-price boost loads tank fast — tank_powerful=True."""
     outgoing = [{"valid_from": "2026-06-01T14:00:00Z", "value_inc_vat": -5.0}]
     rows = dhw_policy.generate_daily_tank_schedule(
-        date(2026, 6, 1), outgoing_rates=outgoing, mode="normal",
+        date(2026, 6, 1), agile_rates=outgoing, mode="normal",
     )
     boost = next(r for r in rows if r["action_type"] == "tank_negative_boost")
     assert boost["params"]["tank_powerful"] is True

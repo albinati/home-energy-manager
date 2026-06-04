@@ -232,7 +232,7 @@ def test_scenario_negative_price_emits_boost():
                         tzinfo=UTC).isoformat().replace("+00:00", "Z")
     outgoing = [{"valid_from": neg_slot, "value_inc_vat": -3.5}]
     rows = dhw_policy.generate_daily_tank_schedule(
-        tomorrow, outgoing_rates=outgoing, mode="normal",
+        tomorrow, agile_rates=outgoing, mode="normal",
     )
     boost = [r for r in rows if r["action_type"] == "tank_negative_boost"]
     assert len(boost) == 1
