@@ -86,7 +86,12 @@ def test_tariff_aware_profile_separates_cheap_vs_peak_for_same_clock_time(
         _save_pv_load(ts, load_kw=0.8)  # 0.8 kW × 0.5 h = 0.4 kWh
         _save_exec_with_kind(ts, kind="peak", agile_p=30.0)
 
-    profile = db.tariff_aware_residual_load_profile_kwh(min_samples_per_kind=5)
+    # Wide window so the FIXED May-2026 seed dates always fall inside the rolling
+    # lookback regardless of the wall-clock date the suite runs on (#464 — the
+    # default 30-day window made these fail once "today" drifted past June 2026).
+    # The fixed May dates are deliberate: May is BST, so 12:00 UTC → 13:00 local
+    # deterministically, with no DST-boundary ambiguity across the 13-day span.
+    profile = db.tariff_aware_residual_load_profile_kwh(min_samples_per_kind=5, window_days=100_000)
 
     # Expect both kind-aware buckets present (6 samples each ≥ 5)
     cheap_key = (13, 0, "cheap")
@@ -121,7 +126,9 @@ def test_tariff_aware_profile_drops_buckets_below_threshold(
         _save_pv_load(ts, load_kw=2.4)
         _save_exec_with_kind(ts, kind="cheap", agile_p=4.0)
 
-    profile = db.tariff_aware_residual_load_profile_kwh(min_samples_per_kind=5)
+    # Wide window — see the note in the sibling test (#464: fixed dates vs the
+    # default 30-day rolling lookback).
+    profile = db.tariff_aware_residual_load_profile_kwh(min_samples_per_kind=5, window_days=100_000)
 
     assert (13, 0, "cheap") not in profile
     assert (13, 0) in profile  # plain fallback always available

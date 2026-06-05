@@ -124,13 +124,14 @@ def test_compute_3d_separates_low_vs_high_elevation():
     from src.weather import compute_pv_calibration_3d_table
 
     conn = sqlite3.connect(config.DB_PATH)
-    today = datetime.now(UTC).date()
-    # Seed 5 days of hour 12 UTC. May has elevation ~58° at noon in
-    # London → bucket 4 (>55°). All samples should populate (12, 0, 4).
+    # Seed 5 days of hour 12 UTC on FIXED, distinct May-2026 dates. May noon in
+    # London has elevation ~58° → bucket 4 (>55°). Fixed dates (not today-d) so
+    # captured_at never collides regardless of the wall-clock date the suite runs
+    # on (#464 — the old `day.day if <=28 else 15` clamp mapped two days onto
+    # May 15 → UNIQUE constraint crash). When these dates age out of the lookback
+    # window the table is simply "skipped" — the assertion tolerates that.
     for d in range(1, 6):
-        day = today - timedelta(days=d)
-        # Use May date to control elevation ~58°
-        base = datetime(2026, 5, day.day if day.day <= 28 else 15, 12, 0, tzinfo=UTC)
+        base = datetime(2026, 5, 10 + d, 12, 0, tzinfo=UTC)  # May 11..15, distinct
         _seed_meteo(conn, base, direct_pv_kw=4.0, cloud_pct=10.0)
         _seed_meteo(conn, base + timedelta(minutes=30), direct_pv_kw=4.0, cloud_pct=10.0)
         for m in (10, 30, 50):
