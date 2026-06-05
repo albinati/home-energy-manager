@@ -1,9 +1,11 @@
-import { buildSha, hasBearer } from "../../lib/api";
+import { buildSha } from "../../lib/api";
 import { QuotaChips } from "./QuotaChips";
+import { role } from "../../lib/auth";
 
 export function Footer() {
   const sha = buildSha();
   const shortSha = sha.length > 7 ? sha.slice(0, 7) : sha;
+  const isAdmin = role.value === "admin";
   return (
     <footer class="footer">
       <div class="footer-inner">
@@ -11,8 +13,8 @@ export function Footer() {
           HEM build <code>{shortSha}</code>
         </span>
         <span>•</span>
-        <span title={hasBearer() ? "Authorization header attached to /api requests" : "No bearer configured"}>
-          {hasBearer() ? "Authenticated" : "Unauthenticated"}
+        <span title={isAdmin ? "Admin: write access enabled" : "Viewer: read-only"}>
+          {isAdmin ? "Admin" : "Viewer"}
         </span>
         <span>•</span>
         <QuotaChips />

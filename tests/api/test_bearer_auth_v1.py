@@ -1,12 +1,16 @@
-"""Tests for ApiV1BearerAuth (Story B1, Epic 13b).
+"""Tests for ApiV1RoleAuth — the viewer-open / admin-gated /api/v1 guard.
 
-Covers the auth contract for the new /api/v1/* middleware:
+The model (replacing the old all-or-nothing bearer guard):
 
-* gate flag off → no header required (preserves pre-B1 behaviour)
-* gate flag on  → 401 without header / 401 with wrong token /
-                  200 with HEM_UI_TOKEN / 200 with HEM_OPENCLAW_TOKEN
-* /api/v1/health stays public regardless of gate
-* /mcp keeps using HEM_OPENCLAW_TOKEN (its own middleware path unaffected)
+* gate flag off → middleware is a no-op (dev: everything open)
+* gate flag on:
+    - safe reads (GET) on non-admin paths → open to VIEWERS (no token)
+    - writes (POST/PUT/PATCH/DELETE) → require an ADMIN token
+    - Settings + Journal (action-log) reads → require an ADMIN token
+    - HEM_UI_TOKEN is NOT admin (it's baked into the UI's config.js)
+    - HEM_ADMIN_TOKEN + HEM_OPENCLAW_TOKEN ARE admin
+* /api/v1/health and /api/v1/whoami stay public
+* /mcp keeps its own HEM_OPENCLAW_TOKEN guard
 """
 from __future__ import annotations
 
@@ -21,7 +25,6 @@ def _isolated_db(monkeypatch, tmp_path):
     monkeypatch.setenv("DB_PATH", db_path)
     from src import config as _config
     monkeypatch.setattr(_config.config, "DB_PATH", db_path, raising=False)
-    # Point the token files at tmp_path so we don't clobber the dev tokens.
     monkeypatch.setattr(
         _config.config, "HEM_UI_TOKEN_FILE",
         str(tmp_path / ".hem-ui-token"), raising=False,
@@ -35,13 +38,12 @@ def _isolated_db(monkeypatch, tmp_path):
     yield
 
 
-def _set_tokens(monkeypatch, *, ui: str, openclaw: str, required: bool) -> None:
+def _set_tokens(monkeypatch, *, ui="ui-tok", admin="admin-tok", openclaw="oc-tok", required=True) -> None:
     from src import config as _config
     monkeypatch.setattr(_config.config, "HEM_UI_TOKEN", ui, raising=False)
+    monkeypatch.setattr(_config.config, "HEM_ADMIN_TOKEN", admin, raising=False)
     monkeypatch.setattr(_config.config, "HEM_OPENCLAW_TOKEN", openclaw, raising=False)
-    monkeypatch.setattr(
-        _config.config, "HEM_UI_AUTH_REQUIRED", required, raising=False,
-    )
+    monkeypatch.setattr(_config.config, "HEM_UI_AUTH_REQUIRED", required, raising=False)
 
 
 def _client() -> TestClient:
@@ -49,110 +51,163 @@ def _client() -> TestClient:
     return TestClient(app)
 
 
-# ---------------------------------------------------------------------------
-# Gate OFF — preserves pre-B1 behaviour
-# ---------------------------------------------------------------------------
-
-def test_api_v1_open_when_gate_disabled(monkeypatch) -> None:
-    """Default config (HEM_UI_AUTH_REQUIRED=false) → bearer not required.
-    Critical to keep the inline UI working during the B1 → B6 transition."""
-    _set_tokens(monkeypatch, ui="ui-tok", openclaw="oc-tok", required=False)
-    resp = _client().get("/api/v1/health")
-    assert resp.status_code == 200
+def _auth(tok: str) -> dict:
+    return {"Authorization": f"Bearer {tok}"}
 
 
-# ---------------------------------------------------------------------------
-# Gate ON — rejects unauthenticated and bad-token calls
-# ---------------------------------------------------------------------------
+# ── Gate OFF — everything open (dev) ────────────────────────────────────────
 
-def test_api_v1_rejects_missing_bearer_when_required(monkeypatch) -> None:
-    _set_tokens(monkeypatch, ui="ui-tok", openclaw="oc-tok", required=True)
+def test_all_open_when_gate_disabled(monkeypatch) -> None:
+    _set_tokens(monkeypatch, required=False)
+    c = _client()
+    assert c.get("/api/v1/health").status_code == 200
+    # Even a write passes with no token when the gate is off.
+    assert c.post("/api/v1/optimization/propose", json={}).status_code != 401
+
+
+# ── Viewer reads are OPEN when the gate is on ───────────────────────────────
+
+def test_safe_read_open_to_viewer_without_token(monkeypatch) -> None:
+    _set_tokens(monkeypatch, required=True)
     resp = _client().get("/api/v1/scheduler/timeline")
+    # The whole point: a viewer with NO token can read. Endpoint may 200 or
+    # 5xx on its own, but the auth layer must not 401.
+    assert resp.status_code != 401
+
+
+def test_ui_token_is_viewer_level_for_reads(monkeypatch) -> None:
+    _set_tokens(monkeypatch, required=True)
+    resp = _client().get("/api/v1/scheduler/timeline", headers=_auth("ui-tok"))
+    assert resp.status_code != 401
+
+
+# ── Writes require an ADMIN token ───────────────────────────────────────────
+
+def test_write_rejected_without_token(monkeypatch) -> None:
+    _set_tokens(monkeypatch, required=True)
+    resp = _client().post("/api/v1/optimization/propose", json={})
     assert resp.status_code == 401
     assert resp.headers.get("www-authenticate", "").startswith("Bearer")
-    assert "bearer" in resp.json()["error"].lower()
 
 
-def test_api_v1_rejects_wrong_bearer_when_required(monkeypatch) -> None:
-    _set_tokens(monkeypatch, ui="ui-tok", openclaw="oc-tok", required=True)
-    resp = _client().get(
-        "/api/v1/scheduler/timeline",
-        headers={"Authorization": "Bearer wrong-token"},
-    )
+def test_write_rejected_with_ui_token(monkeypatch) -> None:
+    """HEM_UI_TOKEN is baked into config.js → must NOT grant writes."""
+    _set_tokens(monkeypatch, required=True)
+    resp = _client().post("/api/v1/optimization/propose", json={}, headers=_auth("ui-tok"))
     assert resp.status_code == 401
-    assert "invalid" in resp.json()["error"].lower()
+    assert "admin" in resp.json()["error"].lower()
 
 
-def test_api_v1_accepts_ui_token_when_required(monkeypatch) -> None:
-    _set_tokens(monkeypatch, ui="ui-tok-A", openclaw="oc-tok", required=True)
-    resp = _client().get(
-        "/api/v1/health",
-        headers={"Authorization": "Bearer ui-tok-A"},
-    )
-    # health stays public, but accepting the header here proves the middleware
-    # tolerates a correct token even on public paths
-    assert resp.status_code == 200
+def test_write_passes_auth_with_admin_token(monkeypatch) -> None:
+    _set_tokens(monkeypatch, required=True)
+    resp = _client().post("/api/v1/optimization/propose", json={}, headers=_auth("admin-tok"))
+    assert resp.status_code != 401  # past the auth layer (handler may still 4xx/5xx)
 
 
-def test_api_v1_accepts_openclaw_token_when_required(monkeypatch) -> None:
-    """OpenClaw's token also passes the /api/v1 guard so server-to-server
-    flows that already use it keep working without a second token mint."""
-    _set_tokens(monkeypatch, ui="ui-tok", openclaw="oc-tok-B", required=True)
-    resp = _client().get(
-        "/api/v1/scheduler/timeline",
-        headers={"Authorization": "Bearer oc-tok-B"},
-    )
-    # 200 if endpoint returns data, 4xx/5xx is fine — we're testing
-    # middleware passthrough, NOT the endpoint's own logic. The key
-    # invariant: NOT 401 from the auth layer.
+def test_write_passes_auth_with_openclaw_token(monkeypatch) -> None:
+    _set_tokens(monkeypatch, required=True)
+    resp = _client().post("/api/v1/optimization/propose", json={}, headers=_auth("oc-tok"))
     assert resp.status_code != 401
 
 
-# ---------------------------------------------------------------------------
-# Public path exception — /api/v1/health stays open even when gate is on
-# ---------------------------------------------------------------------------
+# ── Settings + Journal reads require ADMIN ──────────────────────────────────
 
-def test_api_v1_health_stays_public_when_gate_required(monkeypatch) -> None:
-    """compose's healthcheck: needs /api/v1/health reachable without a header."""
-    _set_tokens(monkeypatch, ui="ui-tok", openclaw="oc-tok", required=True)
-    resp = _client().get("/api/v1/health")
-    assert resp.status_code == 200
-    assert resp.json()["status"] == "ok"
+def test_settings_read_requires_admin(monkeypatch) -> None:
+    _set_tokens(monkeypatch, required=True)
+    c = _client()
+    assert c.get("/api/v1/settings").status_code == 401
+    assert c.get("/api/v1/settings", headers=_auth("ui-tok")).status_code == 401
+    assert c.get("/api/v1/settings", headers=_auth("admin-tok")).status_code != 401
 
 
-# ---------------------------------------------------------------------------
-# /mcp untouched — separate BearerAuthMiddleware path
-# ---------------------------------------------------------------------------
+def test_action_log_read_requires_admin(monkeypatch) -> None:
+    _set_tokens(monkeypatch, required=True)
+    c = _client()
+    assert c.get("/api/v1/action-log").status_code == 401
+    assert c.get("/api/v1/action-log", headers=_auth("admin-tok")).status_code != 401
+
+
+@pytest.mark.parametrize("path", [
+    "/api/v1/schedule/history",   # same action_log journal, different route
+    "/api/v1/recent-triggers",    # action_log triggers
+    "/api/v1/workbench/profiles", # LP override sandbox (admin tool)
+    "/api/v1/integrations/smartthings/status",
+])
+def test_other_journal_and_admin_reads_require_admin(monkeypatch, path) -> None:
+    """The Journal data leaks via more than one path — gate the DATA, not one
+    route. A viewer must not read any of these."""
+    _set_tokens(monkeypatch, required=True)
+    c = _client()
+    assert c.get(path).status_code == 401, f"{path} leaked to viewer"
+    assert c.get(path, headers=_auth("ui-tok")).status_code == 401, f"{path} leaked to ui-token"
+    assert c.get(path, headers=_auth("admin-tok")).status_code != 401, f"{path} blocked admin"
+
+
+def test_viewer_can_read_plan_schedule_not_history(monkeypatch) -> None:
+    """The PLAN (/api/v1/schedule) is viewer-readable; only its /history
+    (the journal) is admin-gated. Guards against over-gating the prefix."""
+    _set_tokens(monkeypatch, required=True)
+    assert _client().get("/api/v1/schedule").status_code != 401
+
+
+def test_viewer_refresh_does_not_burn_daikin_quota(monkeypatch) -> None:
+    """GET /daikin/status?refresh=true is a privileged side effect (spends the
+    Onecta quota). A viewer's refresh must be downgraded to the cached read;
+    only an admin forces a live refresh."""
+    _set_tokens(monkeypatch, required=True)
+    from src.api import main as _main
+
+    class _Cached:
+        devices: list = []
+        source = "test"
+        stale = False
+
+    calls = {"force": 0, "cached": 0}
+    monkeypatch.setattr(_main.daikin_service, "force_refresh_devices",
+                        lambda actor=None: (calls.__setitem__("force", calls["force"] + 1), _Cached())[1])
+    monkeypatch.setattr(_main.daikin_service, "get_cached_devices",
+                        lambda allow_refresh=False, actor=None: (calls.__setitem__("cached", calls["cached"] + 1), _Cached())[1])
+    monkeypatch.setattr(_main, "get_daikin_client", lambda: None)
+
+    c = _client()
+    # Viewer asks to refresh → downgraded to cached (no quota burn).
+    c.get("/api/v1/daikin/status?refresh=true")
+    assert calls["force"] == 0 and calls["cached"] == 1
+    # Admin refresh → live force.
+    c.get("/api/v1/daikin/status?refresh=true", headers=_auth("admin-tok"))
+    assert calls["force"] == 1
+
+
+# ── Public paths ────────────────────────────────────────────────────────────
+
+def test_health_and_whoami_public(monkeypatch) -> None:
+    _set_tokens(monkeypatch, required=True)
+    c = _client()
+    assert c.get("/api/v1/health").status_code == 200
+    assert c.get("/api/v1/whoami").status_code == 200
+
+
+def test_whoami_reports_role(monkeypatch) -> None:
+    _set_tokens(monkeypatch, required=True)
+    c = _client()
+    assert c.get("/api/v1/whoami").json()["role"] == "viewer"
+    assert c.get("/api/v1/whoami", headers=_auth("ui-tok")).json()["role"] == "viewer"
+    body = c.get("/api/v1/whoami", headers=_auth("admin-tok")).json()
+    assert body["role"] == "admin"
+    assert body["admin_configured"] is True
+    assert body["auth_enforced"] is True
+
+
+# ── /mcp untouched ──────────────────────────────────────────────────────────
 
 def test_mcp_still_uses_openclaw_token(monkeypatch) -> None:
-    """The /mcp mount must continue to require HEM_OPENCLAW_TOKEN
-    regardless of HEM_UI_AUTH_REQUIRED — that's its own middleware."""
-    _set_tokens(monkeypatch, ui="ui-tok", openclaw="oc-tok-mcp", required=False)
-    # No header → 401 from BearerAuthMiddleware on /mcp
-    resp = _client().get("/mcp/")
-    assert resp.status_code == 401
-    # Wrong token → 401
-    resp = _client().get(
-        "/mcp/", headers={"Authorization": "Bearer wrong"},
-    )
-    assert resp.status_code == 401
-    # UI token alone does NOT open /mcp (that mount only knows the OpenClaw token)
-    resp = _client().get(
-        "/mcp/", headers={"Authorization": "Bearer ui-tok"},
-    )
-    assert resp.status_code == 401
+    _set_tokens(monkeypatch, openclaw="oc-tok-mcp", required=False)
+    c = _client()
+    assert c.get("/mcp/").status_code == 401
+    assert c.get("/mcp/", headers=_auth("wrong")).status_code == 401
+    assert c.get("/mcp/", headers=_auth("ui-tok")).status_code == 401
 
 
-# ---------------------------------------------------------------------------
-# Non-/api/v1 routes (root, /static, etc) — untouched by the new middleware
-# ---------------------------------------------------------------------------
-
-def test_non_api_v1_routes_unaffected_when_gate_required(monkeypatch) -> None:
-    """The cockpit / static templates served from the FastAPI app's root
-    must not be gated by the /api/v1 middleware. (B5 removes them
-    entirely; until then they stay open even with HEM_UI_AUTH_REQUIRED=True.)"""
-    _set_tokens(monkeypatch, ui="ui-tok", openclaw="oc-tok", required=True)
-    # Health is FastAPI-served (not /api/v1 prefix), confirm passthrough
-    resp = _client().get("/healthz")
-    # 200 or 404 are both fine — what matters is NOT 401 from the new guard
-    assert resp.status_code != 401
+def test_non_api_v1_routes_unaffected(monkeypatch) -> None:
+    _set_tokens(monkeypatch, required=True)
+    assert _client().get("/healthz").status_code != 401

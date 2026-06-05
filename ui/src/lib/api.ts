@@ -24,6 +24,27 @@ function runtimeConfig(): RuntimeConfig {
   return window.__HEM_CONFIG__ || DEFAULT_CONFIG;
 }
 
+// ── Admin token (viewer/admin role model) ──────────────────────────────────
+// The UI is a passive VIEWER by default: no Authorization header → the API
+// serves read-only data. An admin "unlocks" by entering the admin secret,
+// which we store here (+ localStorage) and send as the bearer on every request
+// so the API grants write + Settings/Journal access. The baked config.js token
+// is intentionally NOT used — viewer means no token. See lib/auth.ts.
+const ADMIN_TOKEN_KEY = "hem.adminToken";
+let _adminToken: string | null =
+  typeof localStorage !== "undefined" ? localStorage.getItem(ADMIN_TOKEN_KEY) : null;
+
+export function getAdminToken(): string | null {
+  return _adminToken;
+}
+
+export function setAdminToken(token: string | null): void {
+  _adminToken = token && token.trim() ? token.trim() : null;
+  if (typeof localStorage === "undefined") return;
+  if (_adminToken) localStorage.setItem(ADMIN_TOKEN_KEY, _adminToken);
+  else localStorage.removeItem(ADMIN_TOKEN_KEY);
+}
+
 function joinUrl(base: string, path: string): string {
   const cleanPath = path.startsWith("/") ? path : "/" + path;
   const cleanBase = base.replace(/\/$/, "");
@@ -43,10 +64,12 @@ export class HemApiError extends Error {
 type FetchInit = RequestInit & { headers?: HeadersInit };
 
 function withAuth(init: FetchInit | undefined): FetchInit {
-  const cfg = runtimeConfig();
   const headers = new Headers(init?.headers);
-  if (cfg.bearer && !headers.has("Authorization")) {
-    headers.set("Authorization", `Bearer ${cfg.bearer}`);
+  // Admin token only — viewer sends no Authorization header. (The baked
+  // config.js bearer is no longer used: it would be a token readable by any
+  // viewer, so it must not carry privilege.)
+  if (_adminToken && !headers.has("Authorization")) {
+    headers.set("Authorization", `Bearer ${_adminToken}`);
   }
   return { ...(init || {}), headers };
 }
@@ -115,5 +138,5 @@ export function buildSha(): string {
 }
 
 export function hasBearer(): boolean {
-  return !!runtimeConfig().bearer;
+  return !!_adminToken;
 }

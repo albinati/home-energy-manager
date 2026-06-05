@@ -5,6 +5,7 @@ import { Toggle } from "../common/Inputs";
 import { Modal } from "../common/Modal";
 import { Icon } from "../common/Icon";
 import { toast } from "../../lib/toast";
+import { role } from "../../lib/auth";
 
 interface HeatingControlsProps {
   dev: DaikinDevice | null;
@@ -27,6 +28,26 @@ function clamp(v: number, lo: number, hi: number): number {
 // needs a confirmation modal — that consent is the gate, so the controls then
 // apply directly (no per-action confirm).
 export function HeatingControls({ dev, controlMode, onChanged }: HeatingControlsProps) {
+  // Viewer is passive — no heat-pump controls. (The API also rejects the
+  // underlying writes; this hides the surface so viewers aren't misled.)
+  if (role.value !== "admin") {
+    return (
+      <div class="heating-controls heating-controls--locked">
+        <div class="heating-controls-head">
+          <span class="heating-controls-title">Controls</span>
+          <span
+            class="heating-controls-passive"
+            title="Heat-pump controls are admin-only. Use the Admin button in the top bar to unlock."
+          >
+            🔒 admin
+          </span>
+        </div>
+        <p class="muted heating-controls-hint">
+          Heat-pump controls are available to admins. Unlock <strong>Admin</strong> in the top bar to change settings.
+        </p>
+      </div>
+    );
+  }
   const active = (dev?.control_mode ?? controlMode) === "active";
   const [unlocked, setUnlocked] = useState(false);
   const [confirmingUnlock, setConfirmingUnlock] = useState(false);

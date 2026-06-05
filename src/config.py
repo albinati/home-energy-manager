@@ -236,9 +236,20 @@ class Config:
         "HEM_UI_TOKEN_FILE", "data/.hem-ui-token"
     )
     HEM_UI_TOKEN: str = os.getenv("HEM_UI_TOKEN", "").strip()
-    # Default False — keeps the inline UI working without bearer headers
-    # during the B1 → B6 transition. Flip to True once the SPA container
-    # is the only /api/v1 consumer (after B6 cutover).
+    # ── Viewer/Admin role model ─────────────────────────────────────────────
+    # The UI defaults to a passive VIEWER (read-only, no token) so it can be
+    # shared (even outside Tailscale) without exposing controls. Mutating the
+    # system (writes) and the Settings/Journal admin reads require the ADMIN
+    # secret below — the user types it once in the UI ("unlock"), it's stored
+    # in the browser and sent as the bearer. HEM_OPENCLAW_TOKEN is also
+    # admin-level so server-to-server flows keep working.
+    # IMPORTANT: HEM_UI_TOKEN is NOT admin — it is baked into the UI's
+    # config.js (readable by any viewer), so granting it write power would
+    # defeat the model. Only HEM_ADMIN_TOKEN + HEM_OPENCLAW_TOKEN are admin.
+    HEM_ADMIN_TOKEN: str = os.getenv("HEM_ADMIN_TOKEN", "").strip()
+    # Default False — middleware is a no-op (dev: everything open). When True,
+    # the role model is enforced: safe reads open to viewers, writes +
+    # Settings/Journal gated on an admin token. Set True in prod.
     HEM_UI_AUTH_REQUIRED: bool = os.getenv(
         "HEM_UI_AUTH_REQUIRED", "false"
     ).lower() in ("true", "1", "yes")
