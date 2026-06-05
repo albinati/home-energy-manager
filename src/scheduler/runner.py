@@ -710,6 +710,20 @@ def bulletproof_forecast_skill_log_job() -> None:
         logger.warning("forecast_skill_log rebuild failed (non-fatal): %s", e)
 
 
+def bulletproof_pv_error_log_job() -> None:
+    """Persist yesterday's per-slot committed-forecast-vs-actual PV rows (#462).
+
+    Runs nightly after the Fox/PV roll-ups so the prior UTC day has its fullest
+    actuals. Best-effort only — a failure must not disturb the scheduler.
+    """
+    target_day = datetime.now(UTC).date() - timedelta(days=1)
+    try:
+        rows = db.rebuild_pv_error_log_for_date(target_day)
+        logger.info("pv_error_log rebuild: date_utc=%s rows=%d", target_day.isoformat(), rows)
+    except Exception as e:
+        logger.warning("pv_error_log rebuild failed (non-fatal): %s", e)
+
+
 def bulletproof_pv_calibration_refresh_job() -> None:
     """Recompute the per-hour and per-(hour, cloud-bucket) PV calibration
     tables from fresh ``pv_realtime_history`` and ``meteo_forecast_value``
@@ -1838,6 +1852,15 @@ def start_background_scheduler() -> None:
                 id="bulletproof_forecast_skill_log",
             )
             logger.info("Forecast skill rebuild cron scheduled (04:15 UTC daily)")
+            # Per-slot PV forecast-error log (#462). 04:20 UTC — after the skill
+            # rebuild (04:15) and the Fox/PV roll-ups (02:30), before PV
+            # calibration refresh (04:30) so it has the prior day's full actuals.
+            _background_scheduler.add_job(
+                bulletproof_pv_error_log_job,
+                CronTrigger(hour=4, minute=20, timezone=ZoneInfo("UTC")),
+                id="bulletproof_pv_error_log",
+            )
+            logger.info("PV error-log rebuild cron scheduled (04:20 UTC daily)")
             # PV calibration refresh — keeps pv_calibration_hourly +
             # pv_calibration_hourly_cloud current. Runs at 04:30 UTC, after
             # skill-log rebuild (04:15) and Fox/Daikin rollups (02:30 / 02:35)

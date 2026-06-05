@@ -320,11 +320,20 @@ export function TodayPlanWidget({ pv, loading, execution, cheapThresholdP, peakT
       )}
       <div ref={ref} style={{ width: "100%", height: "320px" }} />
       {pv?.slots?.length ? (
-        <p class="today-plan-note muted">
-          Bold line = actual solar; dotted = the plan (committed behind ◉ now,
-          live forecast ahead). Background shades the tariff tier — blue = paid
-          (negative), green = cheap, amber = peak. Hover a slot for its detail.
-        </p>
+        <div class="today-plan-legend" role="note" aria-label="Chart legend">
+          <span class="tpl-grp">
+            <strong>Solar</strong>
+            <span class="tpl-tok"><span class="tpl-line tpl-line--actual" aria-hidden="true" /> actual</span>
+            <span class="tpl-tok"><span class="tpl-line tpl-line--plan" aria-hidden="true" /> plan</span>
+          </span>
+          <span class="tpl-grp">
+            <strong>Tariff</strong>
+            <span class="tpl-tok"><span class="tpl-sw tpl-sw--neg" aria-hidden="true" /> paid</span>
+            <span class="tpl-tok"><span class="tpl-sw tpl-sw--cheap" aria-hidden="true" /> cheap</span>
+            <span class="tpl-tok"><span class="tpl-sw tpl-sw--peak" aria-hidden="true" /> peak</span>
+          </span>
+          <span class="tpl-hint">◉ now · hover a slot for detail</span>
+        </div>
       ) : null}
       {!pv?.slots?.length && !loading && <p class="muted">No plan data for today yet.</p>}
     </div>
