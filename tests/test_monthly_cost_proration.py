@@ -219,6 +219,27 @@ def test_pnl_cost_for_range_no_fixed_shadow(monkeypatch):
     assert cost.delta_vs_fixed_pence is None
 
 
+def test_period_month_overlays_chart_bars_from_pnl(monkeypatch):
+    """#470: when pnl prices the month, the per-day chart bars' import/export are
+    overlaid from pnl per-day so they sum to the foot; solar/load stay Fox."""
+    today = date.today()
+    _patch_client(monkeypatch, _FakeClient(days_with_data=today.day))  # sets _pnl→None
+    pnl_cost = monthly.MonthlyCostSummary(
+        import_cost_pence=100.0, export_earnings_pence=10.0,
+        standing_charge_pence=50.0, net_cost_pence=140.0,
+    )
+    # Re-enable pnl (overriding _patch_client's None) + stub per-day pnl.
+    monkeypatch.setattr(monthly, "_pnl_cost_for_range", lambda s, e: (pnl_cost, 7.0, 3.0))
+    import src.analytics.pnl as pnl_mod
+    monkeypatch.setattr(pnl_mod, "compute_daily_pnl", lambda d: {"import_kwh": 9.9, "export_kwh": 4.4})
+    out = monthly.get_period_insights("month", month_str=today.strftime("%Y-%m"))
+    assert out.chart_data, "expected chart rows"
+    assert all(r["import_kwh"] == pytest.approx(9.9) for r in out.chart_data)
+    assert all(r["export_kwh"] == pytest.approx(4.4) for r in out.chart_data)
+    # Fox-only series untouched.
+    assert all(r["solar_kwh"] == pytest.approx(0.0) for r in out.chart_data)
+
+
 def test_period_month_prefers_pnl_and_overrides_kwh(monkeypatch):
     """When the pnl engine prices the range, get_period_insights uses ITS cost
     and import/export kWh (so Home matches Hero + Insights), not the Fox sum."""

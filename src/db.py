@@ -1031,6 +1031,26 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_forecast_skill_log_date ON forecast_skill_log(date_utc)"
     )
+    # Per-slot PV forecast error log (issue #462). Persists, for each half-hour
+    # slot, the COMMITTED PV-generation forecast (stitched across LP solves — the
+    # forecast as known when the slot began) vs the realised actual, so model
+    # improvement has a slot-level history and the /pv/today accuracy block has a
+    # real baseline for already-elapsed slots. Distinct from forecast_skill_log
+    # (which is hourly and sourced from raw meteo snapshots, not the committed LP
+    # plan). One row per slot; rebuilt nightly, idempotent on slot_time_utc.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS pv_error_log (
+            slot_time_utc   TEXT PRIMARY KEY,
+            run_id          INTEGER,
+            forecast_kwh    REAL,
+            actual_kwh      REAL,
+            error_kwh       REAL,
+            built_at_utc    TEXT NOT NULL
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pv_error_log_slot ON pv_error_log(slot_time_utc)"
+    )
     # Older DBs predate the Daikin LWT calibration table — idempotent CREATE.
     conn.execute(
         """CREATE TABLE IF NOT EXISTS daikin_lwt_kw_calibration (
@@ -4139,6 +4159,144 @@ def get_lp_solution_slots(run_id: int) -> list[dict[str, Any]]:
             conn.close()
 
 
+def _parse_iso_utc(s: str | None) -> datetime | None:
+    """Parse an ISO timestamp (``...Z`` or ``+00:00``) to an aware UTC datetime."""
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+    except ValueError:
+        return None
+
+
+def committed_pv_forecast_by_slot(day: date) -> dict[str, float]:
+    """Per-slot committed PV-generation forecast for ``day`` (issue #462).
+
+    The latest LP solve only covers ``run_at → horizon``, so a single snapshot
+    leaves a hole over the morning by evening (why /pv/today showed "0 expected
+    by now"). This STITCHES across every solve of the day: for each slot it
+    returns the ``pv_forecast_kwh`` from the most recent solve whose ``run_at <=
+    slot_start`` (the forecast as known when the slot began); if none qualifies
+    (e.g. the day's first solve fired after that slot), it falls back to the
+    EARLIEST solve that forecast the slot. Future slots naturally resolve to the
+    latest committed plan (their start is after every run_at).
+
+    Returns ``{slot_time_utc (stored form): pv_forecast_kwh}``. Empty on error.
+    """
+    day_start = datetime(day.year, day.month, day.day, tzinfo=UTC)
+    day_end = day_start + timedelta(days=1)
+    with _lock:
+        conn = get_connection()
+        try:
+            rows = conn.execute(
+                """SELECT s.slot_time_utc, s.pv_forecast_kwh, o.run_at
+                   FROM lp_solution_snapshot s
+                   JOIN optimizer_log o ON s.run_id = o.id
+                   WHERE s.slot_time_utc >= ? AND s.slot_time_utc < ?
+                     AND s.pv_forecast_kwh IS NOT NULL""",
+                (day_start.isoformat(), day_end.isoformat()),
+            ).fetchall()
+        except sqlite3.Error as e:
+            logger.warning("committed_pv_forecast_by_slot query failed: %s", e)
+            return {}
+        finally:
+            conn.close()
+
+    # Per slot, pick: latest eligible run (run_at <= slot_start); else earliest.
+    best: dict[str, tuple[datetime, float, bool]] = {}
+    for slot_iso, kwh, run_at in rows:
+        slot_dt = _parse_iso_utc(slot_iso)
+        run_dt = _parse_iso_utc(run_at)
+        if slot_dt is None or run_dt is None:
+            continue
+        eligible = run_dt <= slot_dt
+        cur = best.get(slot_iso)
+        if cur is None:
+            best[slot_iso] = (run_dt, float(kwh), eligible)
+            continue
+        c_run, _c_kwh, c_elig = cur
+        if eligible and not c_elig:
+            best[slot_iso] = (run_dt, float(kwh), True)  # eligible beats not
+        elif eligible and c_elig:
+            if run_dt > c_run:  # most recent forecast known at slot start
+                best[slot_iso] = (run_dt, float(kwh), True)
+        elif (not eligible) and (not c_elig):
+            if run_dt < c_run:  # earliest forecast ever made for the slot
+                best[slot_iso] = (run_dt, float(kwh), False)
+        # else: keep the existing eligible row over a non-eligible newcomer
+    return {k: v[1] for k, v in best.items()}
+
+
+def rebuild_pv_error_log_for_date(day: date) -> int:
+    """Persist per-slot committed-forecast-vs-actual rows for ``day`` (#462).
+
+    Joins the stitched committed forecast (:func:`committed_pv_forecast_by_slot`)
+    with the realised half-hour solar roll-up. One row per slot that has a
+    forecast and/or an actual; idempotent on ``slot_time_utc``. Returns rows
+    written. Best-effort: callers (the nightly cron) swallow exceptions.
+    """
+    forecast = committed_pv_forecast_by_slot(day)
+    try:
+        actual = half_hourly_solar_kwh_for_day(day)
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("rebuild_pv_error_log: actual roll-up failed for %s: %s", day, e)
+        actual = {}
+    # actual_map keys are Z-form; forecast keys are stored (+00:00) form. Index
+    # both by a canonical Z key so they line up.
+    def _z(s: str) -> str:
+        dt = _parse_iso_utc(s)
+        return dt.strftime("%Y-%m-%dT%H:%M:%SZ") if dt else s
+    f_by_z = {_z(k): v for k, v in forecast.items()}
+    a_by_z = {_z(k): v for k, v in actual.items()}
+    built_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    written = 0
+    with _lock:
+        conn = get_connection()
+        try:
+            for slot_z in sorted(set(f_by_z) | set(a_by_z)):
+                f = f_by_z.get(slot_z)
+                a = a_by_z.get(slot_z)
+                err = (a - f) if (a is not None and f is not None) else None
+                conn.execute(
+                    """INSERT INTO pv_error_log
+                         (slot_time_utc, run_id, forecast_kwh, actual_kwh, error_kwh, built_at_utc)
+                       VALUES (?, NULL, ?, ?, ?, ?)
+                       ON CONFLICT(slot_time_utc) DO UPDATE SET
+                         forecast_kwh=excluded.forecast_kwh,
+                         actual_kwh=excluded.actual_kwh,
+                         error_kwh=excluded.error_kwh,
+                         built_at_utc=excluded.built_at_utc""",
+                    (slot_z, f, a, err, built_at),
+                )
+                written += 1
+            conn.commit()
+        except sqlite3.Error as e:
+            logger.warning("rebuild_pv_error_log write failed for %s: %s", day, e)
+        finally:
+            conn.close()
+    return written
+
+
+def get_pv_error_log_for_date(day: date) -> list[dict[str, Any]]:
+    """Return persisted per-slot forecast/actual/error rows for ``day`` (#462)."""
+    day_start = datetime(day.year, day.month, day.day, tzinfo=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    day_end = (datetime(day.year, day.month, day.day, tzinfo=UTC) + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT slot_time_utc, forecast_kwh, actual_kwh, error_kwh, built_at_utc
+                   FROM pv_error_log
+                   WHERE slot_time_utc >= ? AND slot_time_utc < ?
+                   ORDER BY slot_time_utc""",
+                (day_start, day_end),
+            )
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
 def get_lp_inputs(run_id: int) -> dict[str, Any] | None:
     """Return the inputs row for a run_id, or None if absent."""
     with _lock:
@@ -4875,6 +5033,7 @@ def prune_history_tables() -> dict[str, int]:
         ("daikin_telemetry", "fetched_at", _config.DAIKIN_TELEMETRY_RETENTION_DAYS, True),
         ("meteo_forecast_history", "forecast_fetch_at_utc", _config.METEO_FORECAST_HISTORY_RETENTION_DAYS, False),
         ("forecast_skill_log", "built_at_utc", _config.METEO_FORECAST_HISTORY_RETENTION_DAYS, False),
+        ("pv_error_log", "slot_time_utc", _config.METEO_FORECAST_HISTORY_RETENTION_DAYS, False),
         ("lp_solution_snapshot", "slot_time_utc", _config.LP_SNAPSHOT_RETENTION_DAYS, False),
         ("lp_inputs_snapshot", "run_at_utc", _config.LP_SNAPSHOT_RETENTION_DAYS, False),
         ("config_audit", "changed_at_utc", _config.CONFIG_AUDIT_RETENTION_DAYS, False),

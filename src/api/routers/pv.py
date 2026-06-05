@@ -148,19 +148,20 @@ async def get_pv_today(date: str | None = None) -> dict[str, Any]:
     except Exception as e:
         logger.warning("pv/today: dispatch kinds failed (%s)", e)
 
-    # Committed-plan PV: the frozen per-slot PV-generation forecast the LP last
-    # solved against (lp_solution_snapshot.pv_forecast_kwh). Distinct from the
-    # live forecast above — it only moves when the LP re-solves. slot_time_utc
-    # is stored in +00:00 form, so normalise to the ...Z key via _norm_z.
+    # Committed-plan PV: the per-slot PV-generation forecast the LP committed to,
+    # STITCHED across every solve of the day (#462). A single snapshot only
+    # covers run_at→horizon, so by evening the morning slots would be missing —
+    # the stitch back-fills each elapsed slot with the forecast that was current
+    # when it began, and resolves future slots to the latest plan. This is what
+    # gives the accuracy block a real "expected by now" baseline (the live
+    # forecast above is forward-only → 0 for elapsed slots). slot_time_utc is
+    # stored in +00:00 form, so normalise to the ...Z key via _norm_z.
     planned_by: dict[str, float] = {}
     plan_committed_at: str | None = None
     try:
+        for stu, pf in db.committed_pv_forecast_by_slot(d).items():
+            planned_by[_norm_z(stu)] = float(pf)
         if rid is not None:
-            for row in db.get_lp_solution_slots(rid):
-                pf = row.get("pv_forecast_kwh")
-                stu = row.get("slot_time_utc")
-                if pf is not None and stu:
-                    planned_by[_norm_z(stu)] = float(pf)
             inp = db.get_lp_inputs(rid)
             if inp and inp.get("run_at_utc"):
                 plan_committed_at = _norm_z(inp["run_at_utc"])
@@ -192,10 +193,18 @@ async def get_pv_today(date: str | None = None) -> dict[str, Any]:
             "kind": kind_by.get(key),
         })
         if elapsed and a is not None:
+            # Compare against the COMMITTED plan (frozen at solve time, stitched
+            # so elapsed slots have a real value). The live forecast `f` is
+            # forward-only → 0 for elapsed slots, which is why "expected by now"
+            # used to collapse to 0 by evening (#462). Fall back to `f` only if a
+            # slot has no committed forecast at all.
+            base = planned_by.get(key)
+            if base is None:
+                base = f
             compared += 1
-            acc_f += f
+            acc_f += base
             acc_a += a
-            acc_abs += abs(a - f)
+            acc_abs += abs(a - base)
 
     accuracy: dict[str, Any] | None = None
     if compared > 0:

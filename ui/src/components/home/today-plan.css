@@ -50,3 +50,45 @@
 }
 .today-plan-acc--pos { color: var(--ok); font-weight: 600; }
 .today-plan-acc--neg { color: var(--warn); font-weight: 600; }
+
+/* Chart legend — mirrors the Energy Flow foot legend (.echart-foot): a row of
+   labelled groups with colour swatches, replacing the old prose caption. */
+.today-plan-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-4);
+  font-size: var(--font-2xs);
+  color: var(--text-dim);
+  padding-top: var(--space-2);
+  border-top: 1px dashed color-mix(in srgb, var(--border) 55%, transparent);
+}
+.tpl-grp { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.tpl-grp strong {
+  color: var(--text-mute);
+  font-weight: 700;
+  font-size: var(--font-2xs);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.tpl-tok { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; }
+/* Line glyphs: solid bold = realised actual, dotted = the plan/forecast. */
+.tpl-line { display: inline-block; width: 16px; height: 0; }
+.tpl-line--actual { border-top: 2.5px solid var(--pv); }
+.tpl-line--plan { border-bottom: 1.5px dotted var(--pv); }
+/* Tier swatches: match the chart's markArea fills (neg has a visible border;
+   cheap/peak are soft washes). */
+.tpl-sw { display: inline-block; width: 11px; height: 11px; border-radius: 2px; }
+.tpl-sw--neg {
+  background: color-mix(in srgb, var(--neg-price) 26%, transparent);
+  border: 1px solid var(--neg-price);
+}
+.tpl-sw--cheap {
+  background: color-mix(in srgb, var(--cheap) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--cheap) 55%, transparent);
+}
+.tpl-sw--peak {
+  background: color-mix(in srgb, var(--peak) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--peak) 55%, transparent);
+}
+.tpl-hint { color: var(--text-mute); font-weight: 500; margin-left: auto; }
