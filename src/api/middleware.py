@@ -26,9 +26,39 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 TokenLike = Union[str, Callable[[], str]]
 
+SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
 
 def _resolve(t: TokenLike) -> str:
     return (t() if callable(t) else t or "").strip()
+
+
+def token_matches_any(presented: str, tokens: Iterable[TokenLike]) -> bool:
+    """Constant-time check: does ``presented`` equal any non-empty token?
+
+    Shared by :class:`ApiV1RoleAuth` and the ``/whoami`` handler so the
+    definition of "is this an admin token" lives in exactly one place.
+    """
+    offered = (presented or "").strip().encode("utf-8")
+    if not offered:
+        return False
+    matched = False
+    for t in tokens:
+        exp = _resolve(t)
+        if exp and hmac.compare_digest(offered, exp.encode("utf-8")):
+            matched = True  # keep looping — constant-ish, don't early-return
+    return matched
+
+
+def bearer_from_scope(scope: Scope) -> str:
+    """Extract the bearer token value from an ASGI scope's headers (or "")."""
+    for name, value in scope.get("headers") or []:
+        if name == b"authorization":
+            presented = value.decode("latin-1", errors="replace")
+            if presented.lower().startswith("bearer "):
+                return presented[7:].strip()
+            return ""
+    return ""
 
 
 class BearerAuthMiddleware:
@@ -131,6 +161,91 @@ class ApiV1BearerAuth:
             for exp in expected_tokens
         ):
             await _reject(send, 401, "invalid token", realm="hem-api")
+            return
+
+        await self.app(scope, receive, send)
+
+
+class ApiV1RoleAuth:
+    """Role-based guard for ``/api/v1/*`` — viewer-open, admin-gated.
+
+    The system is shareable as a passive **viewer** (read-only) without any
+    token, while **admin** actions (anything that mutates state, plus the
+    Settings and Journal admin reads) require an admin token.
+
+    Per request (when ``enabled()``):
+
+    * **Public paths** (``/health``, ``/whoami``) — always pass.
+    * **Safe reads** — ``GET``/``HEAD``/``OPTIONS`` on a non-admin path pass for
+      everyone, with or without a token (the viewer surface).
+    * **Admin-required** — any non-safe method (POST/PUT/PATCH/DELETE) OR a
+      path under ``admin_read_prefixes`` (Settings, Journal/action-log,
+      integration credentials) — pass only with a valid admin token, else 401.
+
+    When ``enabled()`` is False the middleware is a no-op (dev: all open).
+    """
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        admin_tokens: Iterable[TokenLike],
+        enabled: Callable[[], bool],
+        prefix: str = "/api/v1/",
+        public_paths: Iterable[str] = ("/api/v1/health", "/api/v1/whoami"),
+        admin_read_prefixes: Iterable[str] = (
+            "/api/v1/settings",
+            # Journal/action-log is served under several paths — gate the DATA,
+            # not just one route (a security review caught /schedule/history and
+            # /recent-triggers leaking the same action_log a viewer must not see).
+            "/api/v1/action-log",
+            "/api/v1/schedule/history",
+            "/api/v1/recent-triggers",
+            "/api/v1/integrations",   # SmartThings credentials / OAuth
+            "/api/v1/workbench",      # LP override sandbox (admin tool, in Settings)
+        ),
+    ) -> None:
+        self.app = app
+        self._admin_tokens = list(admin_tokens)
+        self._enabled = enabled
+        self._prefix = prefix
+        self._public_paths = frozenset(public_paths)
+        self._admin_read_prefixes = tuple(admin_read_prefixes)
+
+    def _needs_admin(self, method: str, path: str) -> bool:
+        if method.upper() not in SAFE_METHODS:
+            return True
+        return any(path.startswith(p) for p in self._admin_read_prefixes)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        if not path.startswith(self._prefix):
+            await self.app(scope, receive, send)
+            return
+
+        if not self._enabled():
+            await self.app(scope, receive, send)
+            return
+
+        if path in self._public_paths:
+            await self.app(scope, receive, send)
+            return
+
+        if not self._needs_admin(scope.get("method", "GET"), path):
+            await self.app(scope, receive, send)  # viewer-permissible read
+            return
+
+        # Admin required from here on.
+        presented = bearer_from_scope(scope)
+        if not presented:
+            await _reject(send, 401, "admin token required", realm="hem-api")
+            return
+        if not token_matches_any(presented, self._admin_tokens):
+            await _reject(send, 401, "invalid admin token", realm="hem-api")
             return
 
         await self.app(scope, receive, send)

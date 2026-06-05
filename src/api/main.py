@@ -47,7 +47,7 @@ from ..scheduler.lp_replay import (
     sweep_cadences as lp_sweep_cadences,
 )
 from . import safeguards
-from .middleware import ApiV1BearerAuth, BearerAuthMiddleware
+from .middleware import ApiV1RoleAuth, BearerAuthMiddleware, token_matches_any
 from .models import (
     ActionResult,
     ActionStatus,
@@ -261,19 +261,29 @@ if _cors_origins:
         expose_headers=["WWW-Authenticate"],
     )
 
-# Bearer guard for /api/v1/* — accepts the SPA's HEM_UI_TOKEN OR the
-# OpenClaw token so existing flows keep working through one header. The
-# guard is gated by HEM_UI_AUTH_REQUIRED so this PR can ship + reach
-# prod without breaking the inline UI before B6's cutover. Flip the
-# env var to True once the SPA container is the only /api/v1 consumer.
+# Role guard for /api/v1/* — viewer-open, admin-gated. Safe reads pass for
+# everyone (the shareable passive surface); writes + Settings/Journal require
+# an admin token (HEM_ADMIN_TOKEN, typed in the UI "unlock", or the OpenClaw
+# token for server-to-server). HEM_UI_TOKEN is deliberately NOT admin — it is
+# baked into the UI's config.js and readable by any viewer. Gated by
+# HEM_UI_AUTH_REQUIRED (no-op when False, for dev).
+_ADMIN_TOKEN_GETTERS = [
+    lambda: config.HEM_ADMIN_TOKEN,
+    lambda: config.HEM_OPENCLAW_TOKEN,
+]
+
+
+def _request_is_admin(request: Request) -> bool:
+    """True when the request carries a valid admin bearer. Used by the few
+    handlers that must gate a *side effect* on a GET (which the method-based
+    middleware can't see) — e.g. ?refresh=true forcing a Daikin quota burn."""
+    presented = request.headers.get("authorization", "")
+    tok = presented[7:].strip() if presented.lower().startswith("bearer ") else ""
+    return token_matches_any(tok, _ADMIN_TOKEN_GETTERS)
 app.add_middleware(
-    ApiV1BearerAuth,
-    tokens=[
-        lambda: config.HEM_UI_TOKEN,
-        lambda: config.HEM_OPENCLAW_TOKEN,
-    ],
+    ApiV1RoleAuth,
+    admin_tokens=_ADMIN_TOKEN_GETTERS,
     enabled=lambda: bool(config.HEM_UI_AUTH_REQUIRED),
-    public_paths=("/api/v1/health",),
 )
 
 app.include_router(energy_providers_router.router)
@@ -472,6 +482,26 @@ async def health():
         "version": app.version,
         "revision": sha,
         "mcp_token_present": bool(config.HEM_OPENCLAW_TOKEN),
+    }
+
+
+@app.get("/api/v1/whoami")
+async def whoami(request: Request):
+    """Report the caller's role so the UI can show admin controls or not.
+
+    Public (no auth needed): a viewer with no token gets ``viewer``; presenting
+    a valid admin token gets ``admin``. ``admin_configured`` tells the UI
+    whether an admin secret exists at all (so it can hide the unlock prompt when
+    none is set), and ``auth_enforced`` mirrors HEM_UI_AUTH_REQUIRED.
+    """
+    presented = request.headers.get("authorization", "")
+    tok = presented[7:].strip() if presented.lower().startswith("bearer ") else ""
+    is_admin = token_matches_any(tok, _ADMIN_TOKEN_GETTERS)
+    admin_configured = any((g() or "").strip() for g in _ADMIN_TOKEN_GETTERS)
+    return {
+        "role": "admin" if is_admin else "viewer",
+        "admin_configured": admin_configured,
+        "auth_enforced": bool(config.HEM_UI_AUTH_REQUIRED),
     }
 
 
@@ -1661,12 +1691,18 @@ async def settings_delete(key: str):
 
 
 @app.get("/api/v1/daikin/status", response_model=list[DaikinStatusResponse])
-async def daikin_status(refresh: bool = False):
+async def daikin_status(request: Request, refresh: bool = False):
     """Get status of all Daikin devices.
 
     Set ?refresh=true to force a live fetch (subject to rate limiting and the daily
     quota). Without the flag the cached value is returned immediately.
+
+    ``refresh`` is a privileged side effect (it spends the daily Onecta quota),
+    so it is honoured only for admins when auth is enforced — a viewer always
+    gets the cached value, preventing a tokenless quota-drain DoS.
     """
+    if refresh and config.HEM_UI_AUTH_REQUIRED and not _request_is_admin(request):
+        refresh = False
     logger.debug("GET /api/v1/daikin/status refresh=%s", refresh)
     try:
         if refresh:
