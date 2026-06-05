@@ -117,9 +117,9 @@ async def get_pv_today(date: str | None = None) -> dict[str, Any]:
     except Exception as e:
         logger.warning("pv/today: import-rate lookup failed (%s)", e)
 
-    load_profile: dict[tuple[int, int], float] = {}
+    load_prof: dict[str, Any] | None = None
     try:
-        load_profile = db.half_hourly_residual_load_profile_kwh()
+        load_prof = db.residual_load_profile_v2()
     except Exception as e:
         logger.warning("pv/today: load profile failed (%s)", e)
     try:
@@ -182,7 +182,10 @@ async def get_pv_today(date: str | None = None) -> dict[str, Any]:
         a_raw = actual_map.get(key)
         a: float | None = round(float(a_raw), 4) if (elapsed and a_raw is not None) else None
         local = st.astimezone(tz)
-        bl = load_profile.get((local.hour, local.minute))
+        bl = (
+            db.lookup_residual_kwh(load_prof, local.weekday(), local.hour, 30 if local.minute >= 30 else 0)
+            if load_prof is not None else None
+        )
         slots_out.append({
             "slot_utc": key,
             "pv_forecast_kwh": f,  # live forecast (revises through the day)
@@ -229,3 +232,47 @@ async def get_pv_today(date: str | None = None) -> dict[str, Any]:
 
 def _date_from_iso(s: str) -> date:
     return date.fromisoformat(s)
+
+
+@router.get("/api/v1/load/residual-profile")
+async def get_residual_load_profile(window_days: int | None = None) -> dict[str, Any]:
+    """The learned household residual-load profile the LP plans against (#477).
+
+    Returns the per-(day-of-week, half-hour) median + p75 spread (resolved
+    through the same fallback hierarchy the LP uses), the plain (h,m) baseline,
+    the excluded "away" days, and coverage stats (how many days were calibrated
+    against the measured Daikin split). Read-only, viewer-safe.
+    """
+    # Clamp the caller-supplied window so a bad/huge value can't trigger a
+    # full-table scan; None uses the configured default (the LP's window).
+    if window_days is not None:
+        window_days = max(1, min(int(window_days), 365))
+    prof = await asyncio.to_thread(db.residual_load_profile_v2, window_days=window_days)
+
+    def _series(dow: int) -> list[dict[str, Any]]:
+        out = []
+        for h in range(24):
+            for m in (0, 30):
+                out.append({
+                    "h": h, "m": m,
+                    "median": round(db.lookup_residual_kwh(prof, dow, h, m), 4),
+                    "p75": round(db.lookup_residual_spread_kwh(prof, dow, h, m), 4),
+                })
+        return out
+
+    p = prof.get("profile", {})
+    all_series = [
+        {"h": h, "m": m,
+         "median": round(float(p.get((h, m), prof.get("flat", 0.0))), 4),
+         "p75": round(float(prof.get("spread", {}).get((h, m), 0.0)), 4)}
+        for h in range(24) for m in (0, 30)
+    ]
+    return {
+        "by_dow": {str(d): _series(d) for d in range(7)},
+        "all": all_series,
+        "flat": round(float(prof.get("flat", 0.0)), 4),
+        "away_days": prof.get("away_days", []),
+        "day_counts": prof.get("day_counts", {}),
+        "calibrated_days": prof.get("calibrated_days", 0),
+        "physics_only_days": prof.get("physics_only_days", 0),
+    }

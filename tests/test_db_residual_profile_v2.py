@@ -1,0 +1,208 @@
+"""db.residual_load_profile_v2 — day-of-week buckets, measured-split-calibrated
+residual, away-day exclusion, median + p75 spread (#477)."""
+from __future__ import annotations
+
+from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo
+
+import pytest
+
+from src import db
+
+LON = ZoneInfo("Europe/London")
+
+
+@pytest.fixture(autouse=True)
+def _init_db() -> None:
+    db.init_db()
+    db.clear_residual_profile_cache()
+
+
+def _seed_pv(t_utc: datetime, load_kw: float) -> None:
+    db.save_pv_realtime_sample(t_utc.isoformat().replace("+00:00", "Z"), load_power_kw=load_kw)
+
+
+def _seed_meteo(t_utc: datetime, temp_c: float) -> None:
+    hour_iso = t_utc.replace(minute=0, second=0, microsecond=0).isoformat()
+    db.save_meteo_forecast_history(
+        (t_utc - timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
+        [{"slot_time": hour_iso, "temp_c": temp_c, "solar_w_m2": 0.0}],
+    )
+
+
+def _seed_local(d: date, hour: int, minute: int, load_kw: float, temp_c: float = 25.0) -> None:
+    """Seed one pv+meteo sample at LOCAL (hour:minute) on date d."""
+    t_utc = datetime(d.year, d.month, d.day, hour, minute, tzinfo=LON).astimezone(UTC)
+    _seed_meteo(t_utc, temp_c)
+    _seed_pv(t_utc, load_kw)
+
+
+def _seed_daikin_2h(d: date, bucket_idx: int, heating: float, dhw: float) -> None:
+    db.upsert_daikin_consumption_2hourly(
+        date=d.isoformat(), bucket_idx=bucket_idx,
+        kwh_total=heating + dhw, kwh_heating=heating, kwh_dhw=dhw, source="test",
+    )
+
+
+def _recent_days_of_weekday(weekday: int, n: int, *, start_ago: int = 4) -> list[date]:
+    """The n most recent past dates whose weekday() == weekday."""
+    out: list[date] = []
+    d = datetime.now(LON).date() - timedelta(days=start_ago)
+    while len(out) < n:
+        if d.weekday() == weekday:
+            out.append(d)
+        d -= timedelta(days=1)
+    return out
+
+
+def test_day_of_week_split() -> None:
+    """Saturdays high, Tuesdays low at the same (h,m) → weekend bucket > weekday
+    bucket, and the plain (h,m) tier sits between."""
+    for d in _recent_days_of_weekday(1, 6):   # Tuesdays, low
+        _seed_local(d, 19, 0, load_kw=0.6)
+        _seed_local(d, 19, 10, load_kw=0.6)
+    for d in _recent_days_of_weekday(5, 6):   # Saturdays, high
+        _seed_local(d, 19, 0, load_kw=2.0)
+        _seed_local(d, 19, 10, load_kw=2.0)
+
+    prof = db.residual_load_profile_v2(window_days=120)
+    p = prof["profile"]
+    tue = db.lookup_residual_kwh(prof, 1, 19, 0)   # Tuesday
+    sat = db.lookup_residual_kwh(prof, 5, 19, 0)   # Saturday
+    assert sat > tue + 0.3, (sat, tue)
+    # Distinct per-dow buckets exist (warm → residual ≈ load×0.5).
+    assert p[(5, 19, 0)] == pytest.approx(1.0, abs=0.1)
+    assert p[(1, 19, 0)] == pytest.approx(0.3, abs=0.1)
+    # Plain (h,m) tier blends both, between the two.
+    assert tue <= p[(19, 0)] <= sat
+
+
+def test_away_day_excluded() -> None:
+    """A day whose daytime residual is anomalously low is flagged away and not
+    counted in the medians."""
+    normal = _recent_days_of_weekday(2, 8)   # 8 Wednesdays, normal load
+    for d in normal:
+        for hr in (10, 13, 16, 19):
+            _seed_local(d, hr, 0, load_kw=1.0)
+    # One extra Wednesday with near-zero daytime load (away).
+    away = _recent_days_of_weekday(2, 9)[-1]
+    for hr in (10, 13, 16, 19):
+        _seed_local(away, hr, 0, load_kw=0.02)
+
+    prof = db.residual_load_profile_v2(window_days=120)
+    assert away.isoformat() in prof["away_days"]
+    # Wednesday 19:00 median reflects the normal days (~0.5 kWh), not dragged down.
+    assert db.lookup_residual_kwh(prof, 2, 19, 0) == pytest.approx(0.5, abs=0.12)
+
+
+def test_calibration_lowers_daikin_raises_residual() -> None:
+    """Cold day: pure physics would subtract a big Daikin chunk. A MEASURED 2h
+    split smaller than physics scales it down → residual rises toward raw load."""
+    days = _recent_days_of_weekday(3, 6)   # Thursdays
+    # cold (5C) at local 08:00 → bucket_idx = 4; load 1.5 kW → 0.75 kWh/slot
+    for d in days:
+        _seed_local(d, 8, 0, load_kw=1.5, temp_c=5.0)
+        _seed_local(d, 8, 10, load_kw=1.5, temp_c=5.0)
+
+    pure = db.residual_load_profile_v2(window_days=120, use_cache=False)
+    r_pure = db.lookup_residual_kwh(pure, 3, 8, 0)
+
+    # Now add a measured split far BELOW physics for those days/bucket.
+    for d in days:
+        _seed_daikin_2h(d, 4, heating=0.02, dhw=0.0)
+    cal = db.residual_load_profile_v2(window_days=120, use_cache=False)
+    r_cal = db.lookup_residual_kwh(cal, 3, 8, 0)
+
+    assert r_cal > r_pure + 0.1, (r_cal, r_pure)
+    assert cal["calibrated_days"] >= 1
+    assert pure["calibrated_days"] == 0
+
+
+def test_calibration_fallback_equals_pure_physics() -> None:
+    """No measured split → identical to the pure-physics residual (parity)."""
+    days = _recent_days_of_weekday(4, 5)   # Fridays
+    for d in days:
+        _seed_local(d, 8, 0, load_kw=1.5, temp_c=5.0)
+        _seed_local(d, 8, 10, load_kw=1.5, temp_c=5.0)
+    prof = db.residual_load_profile_v2(window_days=120)
+    assert prof["physics_only_days"] >= 1
+    assert prof["calibrated_days"] == 0
+    # Matches the legacy builder's residual for the same warm/cold physics.
+    legacy = db.half_hourly_residual_load_profile_kwh(window_days=120)
+    assert db.lookup_residual_kwh(prof, 4, 8, 0) == pytest.approx(legacy[(8, 0)], abs=0.05)
+
+
+def test_fallback_hierarchy_and_min_samples() -> None:
+    """A (dow,h,m) bucket below min_samples is dropped; lookup falls to (h,m).
+    Every (h,m) leaf is always present."""
+    for d in _recent_days_of_weekday(0, 6):   # Mondays
+        _seed_local(d, 20, 0, load_kw=1.0)
+    prof = db.residual_load_profile_v2(window_days=120, min_samples_per_bucket=4)
+    # Monday 20:00 has ≥4 samples → specific bucket exists.
+    assert (0, 20, 0) in prof["profile"]
+    # Sunday 20:00 has no samples → lookup falls through to the (h,m) leaf.
+    assert (6, 20, 0) not in prof["profile"]
+    assert db.lookup_residual_kwh(prof, 6, 20, 0) == pytest.approx(prof["profile"][(20, 0)])
+    # All 48 (h,m) leaves filled (hour-aware fallback).
+    assert all((h, m) in prof["profile"] for h in range(24) for m in (0, 30))
+
+
+def test_kill_switch_off_emits_only_hm_tier(monkeypatch) -> None:
+    """LP_RESIDUAL_PROFILE_V2=false → no day-of-week tiers, no calibration, no
+    away exclusion (≈ legacy). Lookup falls back to the (h,m) leaf."""
+    from src.config import config
+    monkeypatch.setattr(config, "LP_RESIDUAL_PROFILE_V2", False, raising=False)
+    for d in _recent_days_of_weekday(5, 6):
+        _seed_local(d, 19, 0, load_kw=2.0)
+        _seed_local(d, 19, 10, load_kw=2.0)
+        _seed_daikin_2h(d, 9, heating=0.5, dhw=0.0)  # would calibrate if v2 on
+    prof = db.residual_load_profile_v2(window_days=120)
+    # No (dow,h,m) or (group,h,m) keys — only (h,m) 2-tuples.
+    assert all(isinstance(k, tuple) and len(k) == 2 for k in prof["profile"])
+    assert prof["away_days"] == []
+    assert prof["calibrated_days"] == 0  # calibration skipped
+
+
+def test_spread_is_present_and_not_below_median() -> None:
+    for d in _recent_days_of_weekday(5, 8):   # Saturdays, varied load
+        _seed_local(d, 18, 0, load_kw=0.5)
+        _seed_local(d, 18, 10, load_kw=2.5)   # wide spread within the bucket
+    prof = db.residual_load_profile_v2(window_days=120)
+    med = prof["profile"].get((5, 18, 0))
+    sp = prof["spread"].get((5, 18, 0))
+    assert med is not None and sp is not None
+    assert sp >= med  # p75 >= median
+
+
+def test_cache_returns_same_object_until_cleared() -> None:
+    """The TTL cache collapses repeated calls (per solve) to one rebuild."""
+    for d in _recent_days_of_weekday(5, 4):
+        _seed_local(d, 19, 0, load_kw=1.0)
+    a = db.residual_load_profile_v2(window_days=120)
+    b = db.residual_load_profile_v2(window_days=120)
+    assert a is b  # cached
+    c = db.residual_load_profile_v2(window_days=120, use_cache=False)
+    assert c is not a  # bypass forces a rebuild
+    db.clear_residual_profile_cache()
+    d2 = db.residual_load_profile_v2(window_days=120)
+    assert d2 is not a  # cleared → rebuilt
+
+
+def test_residual_profile_endpoint_shape() -> None:
+    """GET /api/v1/load/residual-profile returns JSON-serialisable per-dow series."""
+    import asyncio
+    from src.api.routers import pv as pv_router
+
+    for d in _recent_days_of_weekday(5, 6):
+        _seed_local(d, 19, 0, load_kw=2.0)
+        _seed_local(d, 19, 10, load_kw=2.0)
+    resp = asyncio.run(pv_router.get_residual_load_profile(window_days=120))
+    assert set(resp.keys()) >= {"by_dow", "all", "flat", "away_days", "day_counts",
+                                "calibrated_days", "physics_only_days"}
+    assert len(resp["by_dow"]) == 7
+    assert len(resp["all"]) == 48
+    sat19 = next(s for s in resp["by_dow"]["5"] if s["h"] == 19 and s["m"] == 0)
+    assert sat19["median"] == pytest.approx(1.0, abs=0.1)
+    # JSON-serialisable (no tuple keys leaked).
+    import json
+    json.dumps(resp)

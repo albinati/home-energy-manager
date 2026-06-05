@@ -68,6 +68,35 @@ def test_perturb_base_load_negative_clamped():
     assert out[1] == 0.0
 
 
+def test_perturb_base_load_uses_spread_when_provided(monkeypatch):
+    """#477 Stage 2 — with a per-slot p75 spread + USE_SPREAD on, the pessimistic
+    side adds the (p75−median) gap and the optimistic side subtracts it (clamped),
+    instead of the flat factor."""
+    from src.config import config
+    monkeypatch.setattr(config, "LP_SCENARIO_USE_SPREAD", True, raising=False)
+    med = [0.4, 0.5, 0.3]
+    p75 = [0.7, 0.6, 0.3]  # gaps: 0.3, 0.1, 0.0
+    hi = scenarios.perturb_base_load(med, factor=1.15, spread=p75)
+    assert hi == pytest.approx([0.7, 0.6, 0.3 * 1.15])  # last gap 0 → flat factor
+    lo = scenarios.perturb_base_load(med, factor=0.90, spread=p75)
+    assert lo == pytest.approx([0.1, 0.4, 0.3 * 0.90])
+
+
+def test_perturb_base_load_spread_disabled_falls_back_to_factor(monkeypatch):
+    from src.config import config
+    monkeypatch.setattr(config, "LP_SCENARIO_USE_SPREAD", False, raising=False)
+    out = scenarios.perturb_base_load([0.4, 0.5], factor=1.15, spread=[0.9, 0.9])
+    assert out == pytest.approx([0.46, 0.575])  # flat factor, spread ignored
+
+
+def test_perturb_base_load_nominal_identity_even_with_spread(monkeypatch):
+    from src.config import config
+    monkeypatch.setattr(config, "LP_SCENARIO_USE_SPREAD", True, raising=False)
+    bl = [0.4, 0.5]
+    out = scenarios.perturb_base_load(bl, factor=1.0, spread=[0.9, 0.9])
+    assert out == bl and out is not bl
+
+
 def test_perturbation_for_scenarios_match_config_defaults():
     p_pess = scenarios._perturbation_for("pessimistic")
     assert p_pess.temp_delta_c == config.LP_SCENARIO_PESSIMISTIC_TEMP_DELTA_C

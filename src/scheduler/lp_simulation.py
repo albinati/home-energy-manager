@@ -46,26 +46,23 @@ class LpSimulationResult:
 
 
 def _build_load_profile(slot_starts_utc: list[datetime]) -> list[float]:
-    """Per-slot base load using half-hourly profile from execution_log.
+    """Per-slot base load via the unified day-of-week residual profile (#477).
 
-    Half-hour granularity (S10.8 / #175) preserves intra-hour variance.
-    Falls back to Fox daily mean (load_kwh / 48) when execution_log is cold,
-    then to a hardcoded default of 0.4 kWh/slot.
+    Same builder + lookup the optimizer uses (`residual_load_profile_v2` +
+    `lookup_residual_kwh`), so the Workbench Simulate now reflects the
+    measured-split-calibrated, day-of-week-aware residual — and can never
+    diverge from the LP. Operator scale (`LP_LOAD_SCALE_FACTOR`) is mirrored
+    (no-op at the default 1.0). The optimizer additionally overlays explicit
+    appliance-dispatch loads; the simulation intentionally does not.
     """
-    limit = int(getattr(config, "LP_LOAD_PROFILE_SLOTS", 2016))
-    # Daikin-subtracted residual profile (S10.13 / #179) — avoids LP double-count
-    profile = db.half_hourly_residual_load_profile_kwh()
-    flat_from_log = db.mean_consumption_kwh_from_execution_logs(limit=limit)
-    fox_mean = db.mean_fox_load_kwh_per_slot(limit=60)
-    flat = fox_mean if fox_mean is not None else flat_from_log
-    # Operator load scale — mirror _run_optimizer_lp so the Workbench Simulate
-    # actually reflects LP_LOAD_SCALE_FACTOR (no-op at the default 1.0).
+    prof = db.residual_load_profile_v2()
     load_scale = float(getattr(config, "LP_LOAD_SCALE_FACTOR", 1.0))
+    tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
     out: list[float] = []
     for s in slot_starts_utc:
-        local = s.astimezone(ZoneInfo(config.BULLETPROOF_TIMEZONE))
-        bucket = (local.hour, 30 if local.minute >= 30 else 0)
-        out.append(profile.get(bucket, flat) * load_scale)
+        local = s.astimezone(tz)
+        m = 30 if local.minute >= 30 else 0
+        out.append(db.lookup_residual_kwh(prof, local.weekday(), local.hour, m) * load_scale)
     return out
 
 

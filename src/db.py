@@ -9,6 +9,7 @@ import json
 import logging
 import sqlite3
 import threading
+import time
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -1855,6 +1856,324 @@ def tariff_aware_residual_load_profile_kwh(
         min_samples_per_kind,
     )
     return profile
+
+
+def _physics_daikin_slot_kwh(outdoor_c: float, cop_curve) -> float:
+    """Pure-physics Daikin estimate (space + DHW) for one 0.5 h slot — the same
+    estimator the LP uses for prediction. Shared by the residual builders."""
+    from .config import cop_at_temperature
+    from .physics import predict_passive_daikin_load
+    cop_at_t = cop_at_temperature(cop_curve, outdoor_c)
+    e_space, e_dhw = predict_passive_daikin_load(
+        [outdoor_c], [cop_at_t], [cop_at_t], slot_h=0.5
+    )
+    return float(e_space[0] + e_dhw[0])
+
+
+_RESIDUAL_V2_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
+_RESIDUAL_V2_TTL_S = 240.0  # 4 min — covers the multiple calls within one solve
+
+
+def clear_residual_profile_cache() -> None:
+    """Drop the residual_load_profile_v2 TTL cache (tests / forced refresh)."""
+    _RESIDUAL_V2_CACHE.clear()
+
+
+def residual_load_profile_v2(
+    *,
+    window_days: int | None = None,
+    min_samples_per_bucket: int = 4,
+    use_cache: bool = True,
+) -> dict[str, Any]:
+    """Day-of-week-aware residual (non-Daikin) household load profile with
+    robust stats and a measured-split-calibrated Daikin subtraction (#477).
+
+    Improves on :func:`half_hourly_residual_load_profile_kwh` in three ways:
+
+    1. **Day-of-week buckets.** Each retained sample is bucketed into three
+       tiers — ``(dow, h, m)``, ``(group, h, m)`` (group ∈ {"weekday",
+       "weekend"}), and ``(h, m)``. The lookup (:func:`lookup_residual_kwh`)
+       prefers the most specific tier with data, so weekday vs weekend routines
+       are captured where there's enough history and gracefully fall back where
+       there isn't.
+    2. **Measured-split calibration.** The per-sample physics Daikin estimate is
+       scaled so its per-day (or per-2h-bucket) sum matches the MEASURED
+       Onecta/telemetry heating+DHW split (``daikin_consumption_2hourly`` →
+       ``daikin_consumption_daily`` → pure physics fallback). Removes the
+       systematic physics bias from the residual.
+    3. **Robust stats + away-day exclusion.** Median per bucket (the central
+       estimate the LP uses) plus the p75 spread (for the scenario LP). Days
+       whose 09:00–21:00 residual signature is anomalously low ("away") are
+       detected and excluded so the profile reflects the typical AT-HOME day.
+
+    Returns one object consumed by every caller + the inspection endpoint::
+
+        {"profile": {(dow,h,m)|(group,h,m)|(h,m): median_kwh},
+         "spread":  {same keys: p75_kwh},
+         "flat": float, "away_days": [iso...],
+         "day_counts": {"weekday":N, "weekend":M, "away_excluded":K, "total":T},
+         "calibrated_days": int, "physics_only_days": int}
+    """
+    from statistics import median as _median, quantiles as _quantiles
+
+    from .config import config
+
+    if window_days is None:
+        window_days = int(getattr(config, "LP_LOAD_PROFILE_WINDOW_DAYS", 120) or 120)
+    # Kill-switch: when off, behave ≈ legacy (only the (h,m) median tier, pure
+    # physics, no away exclusion) so the LP plan can be rolled back live (#477).
+    _v2 = bool(getattr(config, "LP_RESIDUAL_PROFILE_V2", True))
+    away_fraction = float(getattr(config, "LP_AWAY_DAY_FRACTION", 0.4) or 0.0) if _v2 else 0.0
+
+    # Short-TTL cache — this 120-day rebuild runs the physics estimator over
+    # ~thousands of pv samples and is called multiple times per optimizer solve
+    # (optimizer + appliance_dispatch + the inputs view). The profile only moves
+    # as new telemetry / the nightly Daikin sync land, so a 4-min TTL is safe and
+    # collapses the per-solve cost to one rebuild. Keyed by DB_PATH so isolated
+    # test DBs never share an entry.
+    cache_key = (config.DB_PATH, window_days, min_samples_per_bucket, _v2)
+    if use_cache:
+        ent = _RESIDUAL_V2_CACHE.get(cache_key)
+        if ent is not None and ent[0] > time.monotonic():
+            return ent[1]
+
+    def _finish(res: dict[str, Any]) -> dict[str, Any]:
+        if use_cache:
+            _RESIDUAL_V2_CACHE[cache_key] = (time.monotonic() + _RESIDUAL_V2_TTL_S, res)
+        return res
+
+    cop_curve = config.DAIKIN_COP_CURVE
+    tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+    cutoff_iso = (datetime.now(UTC) - timedelta(days=window_days)).isoformat().replace("+00:00", "Z")
+
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT pv.captured_at, pv.load_power_kw,
+                          (SELECT mv.temp_c
+                           FROM meteo_forecast_value mv
+                           JOIN meteo_forecast_snapshot ms
+                             ON ms.forecast_fetch_at_utc = mv.forecast_fetch_at_utc
+                           WHERE substr(mv.slot_time, 1, 13) = substr(pv.captured_at, 1, 13)
+                             AND ms.forecast_fetch_at_utc < pv.captured_at
+                           ORDER BY ms.forecast_fetch_at_utc DESC LIMIT 1) AS outdoor_history_c,
+                          (SELECT mv.temp_c
+                           FROM meteo_forecast_value mv
+                           JOIN meteo_forecast_latest_state ls
+                             ON ls.id = 1
+                            AND ls.forecast_fetch_at_utc = mv.forecast_fetch_at_utc
+                           WHERE substr(mv.slot_time, 1, 13) = substr(pv.captured_at, 1, 13)
+                           LIMIT 1) AS outdoor_latest_c
+                   FROM pv_realtime_history pv
+                   WHERE pv.captured_at > ? AND pv.load_power_kw IS NOT NULL""",
+                (cutoff_iso,),
+            )
+            rows = cur.fetchall()
+        finally:
+            conn.close()
+
+    # Pass 1 — parse, compute the pure-physics Daikin estimate per sample, and
+    # accumulate physics totals per (local_date, 2h-bucket) for calibration.
+    from datetime import datetime as _dt
+    samples: list[tuple[datetime, str, int, float, float]] = []  # (local, date_iso, bucket_idx, load_slot_kwh, physics_slot_kwh)
+    physics_bucket: dict[tuple[str, int], float] = {}
+    physics_day: dict[str, float] = {}
+    dropped_no_meteo = 0
+    for row in rows:
+        outdoor = row["outdoor_history_c"]
+        if outdoor is None:
+            outdoor = row["outdoor_latest_c"]
+        if outdoor is None:
+            dropped_no_meteo += 1
+            continue
+        try:
+            ts = _dt.fromisoformat(str(row["captured_at"]).replace("Z", "+00:00"))
+            local = ts.astimezone(tz)
+        except (ValueError, TypeError):
+            continue
+        load_slot = float(row["load_power_kw"]) * 0.5
+        physics_slot = _physics_daikin_slot_kwh(float(outdoor), cop_curve)
+        date_iso = local.date().isoformat()
+        b = local.hour // 2
+        samples.append((local, date_iso, b, load_slot, physics_slot))
+        physics_bucket[(date_iso, b)] = physics_bucket.get((date_iso, b), 0.0) + physics_slot
+        physics_day[date_iso] = physics_day.get(date_iso, 0.0) + physics_slot
+
+    if not samples:
+        flat = mean_fox_load_kwh_per_slot(limit=60)
+        if flat is None:
+            flat = mean_consumption_kwh_from_execution_logs(limit=2016)
+        return _finish({
+            "profile": {(h, m): flat for h in range(24) for m in (0, 30)},
+            "spread": {}, "flat": flat, "away_days": [],
+            "day_counts": {"weekday": 0, "weekend": 0, "away_excluded": 0, "total": 0},
+            "calibrated_days": 0, "physics_only_days": 0,
+        })
+
+    # Measured Daikin split over the covered date range (helpers take _lock —
+    # call them OUTSIDE our own lock block above).
+    dates = sorted({s[1] for s in samples})
+    measured_2h: dict[tuple[str, int], float] = {}
+    for r in get_daikin_consumption_2hourly_range(dates[0], dates[-1]):
+        h_ = r.get("kwh_heating") or 0.0
+        d_ = r.get("kwh_dhw") or 0.0
+        measured_2h[(str(r["date"]), int(r["bucket_idx"]))] = float(h_) + float(d_)
+    measured_day: dict[str, float] = {}
+    for r in get_daikin_consumption_daily_range(dates[0], dates[-1]):
+        h_ = r.get("kwh_heating") or 0.0
+        d_ = r.get("kwh_dhw") or 0.0
+        measured_day[str(r["date"])] = float(h_) + float(d_)
+
+    def _clamp_k(k: float) -> float:
+        return min(5.0, max(0.2, k))
+
+    # Calibration factor per (date, bucket): prefer 2-hourly (intra-day shape),
+    # then daily, then 1.0 (pure physics). Track which days were calibrated.
+    calibrated_dates: set[str] = set()
+
+    def _calib(date_iso: str, bucket_idx: int) -> float:
+        if not _v2:
+            return 1.0  # kill-switch: pure physics, no measured-split calibration
+        pb = physics_bucket.get((date_iso, bucket_idx), 0.0)
+        mb = measured_2h.get((date_iso, bucket_idx))
+        if mb is not None and pb > 1e-6:
+            calibrated_dates.add(date_iso)
+            return _clamp_k(mb / pb)
+        pd = physics_day.get(date_iso, 0.0)
+        md = measured_day.get(date_iso)
+        if md is not None and pd > 1e-6:
+            calibrated_dates.add(date_iso)
+            return _clamp_k(md / pd)
+        return 1.0
+
+    # Pass 2 — calibrated residual per sample, grouped by date for away detection.
+    by_date_daytime: dict[str, list[float]] = {}
+    residual_samples: list[tuple[datetime, str, float]] = []  # (local, date_iso, residual)
+    for local, date_iso, b, load_slot, physics_slot in samples:
+        k = _calib(date_iso, b)
+        residual = max(0.0, load_slot - physics_slot * k)
+        residual_samples.append((local, date_iso, residual))
+        if 9 <= local.hour < 21:
+            by_date_daytime.setdefault(date_iso, []).append(residual)
+
+    # Away-day detection: a day is "away" when its daytime (09–21) median
+    # residual is far below the population daytime median. Skip thin days.
+    day_signatures = {
+        d: _median(vs) for d, vs in by_date_daytime.items() if len(vs) >= 4
+    }
+    away_days: set[str] = set()
+    if day_signatures and away_fraction > 0:
+        pop_median = _median(list(day_signatures.values()))
+        threshold = away_fraction * pop_median
+        away_days = {d for d, sig in day_signatures.items() if sig < threshold}
+
+    # Aggregation (away days removed) into the three tiers.
+    tiers: dict[Any, list[float]] = {}
+    weekday_days: set[str] = set()
+    weekend_days: set[str] = set()
+    for local, date_iso, residual in residual_samples:
+        if date_iso in away_days:
+            continue
+        dow = local.weekday()
+        group = "weekend" if dow >= 5 else "weekday"
+        (weekend_days if dow >= 5 else weekday_days).add(date_iso)
+        m = 30 if local.minute >= 30 else 0
+        h = local.hour
+        if _v2:  # day-of-week + weekday/weekend tiers (kill-switch off → (h,m) only)
+            tiers.setdefault((dow, h, m), []).append(residual)
+            tiers.setdefault((group, h, m), []).append(residual)
+        tiers.setdefault((h, m), []).append(residual)
+
+    def _p75(vs: list[float]) -> float:
+        if len(vs) < 2:
+            return vs[0] if vs else 0.0
+        return _quantiles(vs, n=4)[2]
+
+    retained = [r for (_l, d, r) in residual_samples if d not in away_days]
+    flat = _median(retained) if retained else (
+        mean_fox_load_kwh_per_slot(limit=60) or mean_consumption_kwh_from_execution_logs(limit=2016)
+    )
+
+    profile: dict[Any, float] = {}
+    spread: dict[Any, float] = {}
+    for key, vs in tiers.items():
+        if len(vs) >= min_samples_per_bucket:
+            profile[key] = _median(vs)
+            spread[key] = _p75(vs)
+
+    # Always fill all 48 (h, m) buckets (hour-aware fallback) so the lookup chain
+    # has a guaranteed leaf below the dow/group tiers.
+    hm_medians = {k: v for k, v in profile.items() if isinstance(k, tuple) and len(k) == 2}
+
+    def _hour_aware(h: int, m: int) -> float:
+        other = hm_medians.get((h, 30 if m == 0 else 0))
+        if other is not None:
+            return other
+        neigh: list[float] = []
+        for dh in (-2, -1, 1, 2):
+            for nm in (0, 30):
+                v = hm_medians.get(((h + dh) % 24, nm))
+                if v is not None:
+                    neigh.append(v)
+        return _median(neigh) if neigh else flat
+
+    for h in range(24):
+        for m in (0, 30):
+            if (h, m) not in profile:
+                profile[(h, m)] = _hour_aware(h, m)
+                spread.setdefault((h, m), profile[(h, m)])
+
+    calibrated_days = len(calibrated_dates - away_days)
+    physics_only_days = len(set(dates) - calibrated_dates - away_days)
+    logger.info(
+        "residual_profile_v2: %d samples (%d no-meteo), window=%dd; "
+        "%d weekday / %d weekend days, %d away excluded; "
+        "%d calibrated / %d physics-only days",
+        len(samples), dropped_no_meteo, window_days,
+        len(weekday_days), len(weekend_days), len(away_days),
+        calibrated_days, physics_only_days,
+    )
+    return _finish({
+        "profile": profile,
+        "spread": spread,
+        "flat": float(flat),
+        "away_days": sorted(away_days),
+        "day_counts": {
+            "weekday": len(weekday_days),
+            "weekend": len(weekend_days),
+            "away_excluded": len(away_days),
+            "total": len(set(dates)),
+        },
+        "calibrated_days": calibrated_days,
+        "physics_only_days": physics_only_days,
+    })
+
+
+def lookup_residual_kwh(profile_obj: dict[str, Any], dow: int, h: int, m: int) -> float:
+    """Resolve the residual kWh for a slot from a :func:`residual_load_profile_v2`
+    object, applying the fallback hierarchy ONCE so every caller is identical:
+    ``(dow, h, m)`` → ``(group, h, m)`` → ``(h, m)`` → ``flat``."""
+    prof = profile_obj.get("profile", {})
+    group = "weekend" if dow >= 5 else "weekday"
+    for key in ((dow, h, m), (group, h, m), (h, m)):
+        v = prof.get(key)
+        if v is not None:
+            return float(v)
+    return float(profile_obj.get("flat", 0.0))
+
+
+def lookup_residual_spread_kwh(profile_obj: dict[str, Any], dow: int, h: int, m: int) -> float:
+    """The p75 spread for a slot (same hierarchy as :func:`lookup_residual_kwh`).
+    Returns 0.0 when no spread is known (caller falls back to the flat scenario
+    factor)."""
+    sp = profile_obj.get("spread", {})
+    group = "weekend" if dow >= 5 else "weekday"
+    for key in ((dow, h, m), (group, h, m), (h, m)):
+        v = sp.get(key)
+        if v is not None:
+            return float(v)
+    return 0.0
 
 
 def half_hourly_load_profile_kwh(
