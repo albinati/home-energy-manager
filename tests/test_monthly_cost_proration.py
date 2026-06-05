@@ -183,11 +183,20 @@ def test_pnl_cost_for_range_maps_real_money_fields(monkeypatch):
         "export_kwh": 55.2,
         "fixed_tariff_shadow_real_gbp": 75.0,
         "delta_vs_fixed_tariff_real_gbp": 7.98,
+        "daily": [
+            {"date": "2026-05-01", "import_kwh": 10.0, "export_kwh": 2.0},
+            {"date": "2026-05-02", "import_kwh": 9.0, "export_kwh": 1.5},
+        ],
     }
-    monkeypatch.setattr(pnl_mod, "compute_period_pnl", lambda s, e: fake)
+    captured = {}
+    def _fake(s, e, *, include_daily=False, label=""):
+        captured["include_daily"] = include_daily
+        return fake
+    monkeypatch.setattr(pnl_mod, "compute_period_pnl", _fake)
     res = monthly._pnl_cost_for_range(date(2026, 5, 1), date(2026, 5, 31))
     assert res is not None
-    cost, imp, exp = res
+    cost, imp, exp, daily_map = res
+    assert captured["include_daily"] is True  # asks for the per-day rows
     assert cost.import_cost_pence == pytest.approx(5091.0)
     assert cost.export_earnings_pence == pytest.approx(226.0)
     assert cost.standing_charge_pence == pytest.approx(1837.0)
@@ -195,28 +204,31 @@ def test_pnl_cost_for_range_maps_real_money_fields(monkeypatch):
     assert cost.fixed_shadow_pence == pytest.approx(7500.0)
     assert cost.delta_vs_fixed_pence == pytest.approx(798.0)
     assert (imp, exp) == pytest.approx((314.1, 55.2))
+    assert daily_map["2026-05-01"] == pytest.approx((10.0, 2.0))
+    assert daily_map["2026-05-02"] == pytest.approx((9.0, 1.5))
 
 
 def test_pnl_cost_for_range_returns_none_when_unpriced(monkeypatch):
     """Empty/pre-Agile range (n_days == 0) → None so the caller falls back."""
     import src.analytics.pnl as pnl_mod
-    monkeypatch.setattr(pnl_mod, "compute_period_pnl", lambda s, e: {"n_days": 0})
+    monkeypatch.setattr(pnl_mod, "compute_period_pnl", lambda s, e, **k: {"n_days": 0})
     assert monthly._pnl_cost_for_range(date(2026, 1, 1), date(2026, 1, 31)) is None
 
 
 def test_pnl_cost_for_range_no_fixed_shadow(monkeypatch):
     """When FIXED_TARIFF_* isn't configured, pnl omits the bg keys → None shadow."""
     import src.analytics.pnl as pnl_mod
-    monkeypatch.setattr(pnl_mod, "compute_period_pnl", lambda s, e: {
+    monkeypatch.setattr(pnl_mod, "compute_period_pnl", lambda s, e, **k: {
         "n_days": 7, "import_cost_gbp": 10.0, "export_revenue_gbp": 1.0,
         "standing_charge_gbp": 4.0, "realised_net_cost_gbp": 13.0,
         "import_kwh": 60.0, "export_kwh": 24.0,
     })
     res = monthly._pnl_cost_for_range(date(2026, 5, 1), date(2026, 5, 7))
     assert res is not None
-    cost, _, _ = res
+    cost, _imp, _exp, _daily = res
     assert cost.fixed_shadow_pence is None
     assert cost.delta_vs_fixed_pence is None
+    assert _daily == {}  # no "daily" key in the fake → empty map
 
 
 def test_period_month_overlays_chart_bars_from_pnl(monkeypatch):
@@ -228,10 +240,14 @@ def test_period_month_overlays_chart_bars_from_pnl(monkeypatch):
         import_cost_pence=100.0, export_earnings_pence=10.0,
         standing_charge_pence=50.0, net_cost_pence=140.0,
     )
-    # Re-enable pnl (overriding _patch_client's None) + stub per-day pnl.
-    monkeypatch.setattr(monthly, "_pnl_cost_for_range", lambda s, e: (pnl_cost, 7.0, 3.0))
-    import src.analytics.pnl as pnl_mod
-    monkeypatch.setattr(pnl_mod, "compute_daily_pnl", lambda d: {"import_kwh": 9.9, "export_kwh": 4.4})
+    # Per-day map (from the single pnl daily loop) covering this month's days.
+    daily_map = {
+        f"{today.year:04d}-{today.month:02d}-{d:02d}": (9.9, 4.4)
+        for d in range(1, today.day + 1)
+    }
+    # Re-enable pnl (overriding _patch_client's None); the overlay reads the
+    # daily_map — no separate compute_daily_pnl calls.
+    monkeypatch.setattr(monthly, "_pnl_cost_for_range", lambda s, e: (pnl_cost, 7.0, 3.0, daily_map))
     out = monthly.get_period_insights("month", month_str=today.strftime("%Y-%m"))
     assert out.chart_data, "expected chart rows"
     assert all(r["import_kwh"] == pytest.approx(9.9) for r in out.chart_data)
@@ -253,7 +269,7 @@ def test_period_month_prefers_pnl_and_overrides_kwh(monkeypatch):
     )
     monkeypatch.setattr(
         monthly, "_pnl_cost_for_range",
-        lambda start, end: (pnl_cost, 314.1, 55.2),
+        lambda start, end: (pnl_cost, 314.1, 55.2, {}),  # empty daily_map: bars not asserted here
     )
     out = monthly.get_period_insights("month", month_str=today.strftime("%Y-%m"))
     # Cost comes from pnl…
