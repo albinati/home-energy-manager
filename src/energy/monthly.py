@@ -369,8 +369,8 @@ def _period_cost(
 
 def _pnl_cost_for_range(
     start: date, end: date
-) -> tuple[MonthlyCostSummary, float, float] | None:
-    """Realised cost + import/export kWh from the authoritative pnl engine.
+) -> tuple[MonthlyCostSummary, float, float, dict[str, tuple[float, float]]] | None:
+    """Realised cost + import/export kWh + per-day kWh from the pnl engine.
 
     Reuses :func:`analytics.pnl.compute_period_pnl` so the Home period views
     (Energy Flow foot + headline £) report the SAME realised cost as the Hero
@@ -380,6 +380,10 @@ def _pnl_cost_for_range(
     quantities replace the raw Fox import/export so the displayed kWh and £ stay
     internally consistent — ``paid + standing − earned = net`` balances exactly.
 
+    The 4th element is a ``{date_iso: (import_kwh, export_kwh)}`` per-day map,
+    sourced from the SAME daily loop as the foot total (``include_daily=True``),
+    so the chart-bar overlay (#470) doesn't re-run ``compute_daily_pnl``.
+
     Returns ``None`` when pnl can't price the range (no Agile data / fully
     pre-Agile) so the caller falls back to the Fox/Octopus engine. Imported
     lazily to avoid a circular import (pnl → db → … → monthly is not a cycle,
@@ -387,7 +391,7 @@ def _pnl_cost_for_range(
     """
     try:
         from ..analytics.pnl import compute_period_pnl
-        p = compute_period_pnl(start, end)
+        p = compute_period_pnl(start, end, include_daily=True)
     except Exception as exc:  # pragma: no cover - defensive
         # WARNING (not info): a pnl failure silently reverts the endpoint to the
         # Fox/Octopus engine — the very one that over-states export — so this
@@ -416,44 +420,43 @@ def _pnl_cost_for_range(
         fixed_shadow_pence=round(float(bg_shadow) * 100, 2) if bg_shadow is not None else None,
         delta_vs_fixed_pence=round(float(bg_delta) * 100, 2) if bg_delta is not None else None,
     )
-    return cost, float(p.get("import_kwh") or 0.0), float(p.get("export_kwh") or 0.0)
+    daily_map: dict[str, tuple[float, float]] = {
+        str(r.get("date")): (float(r.get("import_kwh") or 0.0), float(r.get("export_kwh") or 0.0))
+        for r in (p.get("daily") or [])
+    }
+    return cost, float(p.get("import_kwh") or 0.0), float(p.get("export_kwh") or 0.0), daily_map
 
 
-def _overlay_pnl_daily_kwh(chart_rows: list[dict]) -> None:
+def _overlay_pnl_daily_kwh(chart_rows: list[dict], daily_map: dict[str, tuple[float, float]]) -> None:
     """Replace each chart row's import/export kWh with the pnl per-day values so
     the stacked bars sum to the pnl FOOT total (#470). Without this the bars stay
     Fox telemetry (which over-counts export) and don't add up to the foot. Only
-    import/export are touched — solar/load/charge/discharge stay Fox. In-place,
-    best-effort per row; a row that can't be priced keeps its Fox value.
-
-    ``chart_rows`` must be per-DAY rows (``date`` = ``YYYY-MM-DD``) — never call
-    on the year view's per-month rows."""
-    from ..analytics.pnl import compute_daily_pnl
+    import/export are touched — solar/load/charge/discharge stay Fox. In-place;
+    a row with no pnl entry (e.g. a pre-Agile day the clamp dropped) keeps its
+    Fox value. ``daily_map`` comes from :func:`_pnl_cost_for_range` — the SAME
+    daily loop as the foot, so no extra ``compute_daily_pnl`` calls."""
     for row in chart_rows:
-        try:
-            d = date.fromisoformat(str(row.get("date"))[:10])
-            p = compute_daily_pnl(d)
-            row["import_kwh"] = round(float(p.get("import_kwh") or 0.0), 2)
-            row["export_kwh"] = round(float(p.get("export_kwh") or 0.0), 2)
-        except Exception:  # pragma: no cover - defensive; keep Fox value
+        kv = daily_map.get(str(row.get("date", ""))[:10]) or daily_map.get(str(row.get("date", "")))
+        if kv is None:
             continue
+        row["import_kwh"] = round(kv[0], 2)
+        row["export_kwh"] = round(kv[1], 2)
 
 
 def _apply_pnl_cost(
     energy: MonthlyEnergySummary, start: date, end: date
-) -> MonthlyCostSummary | None:
+) -> tuple[MonthlyCostSummary, dict[str, tuple[float, float]]] | None:
     """Override ``energy``'s import/export kWh from pnl and return the matching
-    realised cost, or ``None`` if pnl can't price the range (caller falls back).
-
-    Mutates ``energy`` only on success so the displayed kWh and the cost come
-    from the same source."""
+    realised cost + per-day kWh map, or ``None`` if pnl can't price the range
+    (caller falls back). Mutates ``energy`` only on success so the displayed kWh
+    and the cost come from the same source."""
     res = _pnl_cost_for_range(start, end)
     if res is None:
         return None
-    cost, import_kwh, export_kwh = res
+    cost, import_kwh, export_kwh, daily_map = res
     energy.import_kwh = round(import_kwh, 2)
     energy.export_kwh = round(export_kwh, 2)
-    return cost
+    return cost, daily_map
 
 
 def _get_daikin_heating_kwh(year: int, month: int) -> float | None:
@@ -767,7 +770,8 @@ def get_period_insights(
         # year headline matches Hero + Insights (overrides energy import/export
         # kWh too). Per-month chart_data + heating analytics stay Fox-sourced.
         year_end = min(date(year, 12, 31), today)
-        cost = _apply_pnl_cost(energy, date(year, 1, 1), year_end) or MonthlyCostSummary(
+        _pnl_res = _apply_pnl_cost(energy, date(year, 1, 1), year_end)
+        cost = _pnl_res[0] if _pnl_res is not None else MonthlyCostSummary(
             import_cost_pence=round(import_cost_pence, 2),
             export_earnings_pence=round(export_earnings_pence, 2),
             standing_charge_pence=round(standing_charge_pence, 2),
@@ -816,10 +820,12 @@ def get_period_insights(
         month_end = date(y, m, monthrange(y, m)[1])
         if (y, m) == (today.year, today.month):
             month_end = today
-        pnl_cost = _apply_pnl_cost(energy, date(y, m, 1), month_end)
-        cost = pnl_cost or _best_cost(energy, n_days=n_days)
-        if pnl_cost is not None:
-            _overlay_pnl_daily_kwh(daily)  # bars sum to the pnl foot (#470)
+        pnl_res = _apply_pnl_cost(energy, date(y, m, 1), month_end)
+        if pnl_res is not None:
+            cost, _daily_map = pnl_res
+            _overlay_pnl_daily_kwh(daily, _daily_map)  # bars sum to the pnl foot (#470)
+        else:
+            cost = _best_cost(energy, n_days=n_days)
         daikin_heating = _get_daikin_heating_kwh(y, m)
         heating_kwh, heating_cost_pence, equiv_gas_pence, ahead_pounds = _compute_heating_and_gas(
             energy, cost, daikin_heating_kwh=daikin_heating
@@ -863,7 +869,10 @@ def get_period_insights(
             day_from = datetime(y, m, d, 0, 0, 0, tzinfo=UTC)
             day_to = datetime(y, m, d, 23, 59, 59, tzinfo=UTC)
             # pnl engine first (matches Hero + Insights); Fox/Octopus fallback.
-            cost = _apply_pnl_cost(energy, dte, dte) or _period_cost(energy, day_from, day_to, n_days=1)
+            # chart_data below is built from the (pnl-overridden) energy, so the
+            # single day bar already matches — no separate overlay needed.
+            _pnl_res = _apply_pnl_cost(energy, dte, dte)
+            cost = _pnl_res[0] if _pnl_res is not None else _period_cost(energy, day_from, day_to, n_days=1)
             heating_kwh, heating_cost_pence, equiv_gas_pence, ahead_pounds = _compute_heating_and_gas(energy, cost)
             insights = MonthlyInsights(
                 energy=energy,
@@ -914,10 +923,12 @@ def get_period_insights(
         week_from = datetime(week_start.year, week_start.month, week_start.day, 0, 0, 0, tzinfo=UTC)
         week_to = datetime(week_end.year, week_end.month, week_end.day, 23, 59, 59, tzinfo=UTC)
         # pnl engine first (matches Hero + Insights); Fox/Octopus fallback.
-        pnl_cost = _apply_pnl_cost(energy, week_start, week_end)
-        cost = pnl_cost or _period_cost(energy, week_from, week_to, n_days=days_count)
-        if pnl_cost is not None:
-            _overlay_pnl_daily_kwh(daily_all)  # bars sum to the pnl foot (#470)
+        pnl_res = _apply_pnl_cost(energy, week_start, week_end)
+        if pnl_res is not None:
+            cost, _daily_map = pnl_res
+            _overlay_pnl_daily_kwh(daily_all, _daily_map)  # bars sum to the pnl foot (#470)
+        else:
+            cost = _period_cost(energy, week_from, week_to, n_days=days_count)
         heating_kwh, heating_cost_pence, equiv_gas_pence, ahead_pounds = _compute_heating_and_gas(energy, cost)
         insights = MonthlyInsights(energy=energy, cost=cost, heating_estimate_kwh=heating_kwh, heating_estimate_cost_pence=heating_cost_pence, equivalent_gas_cost_pence=equiv_gas_pence, gas_comparison_ahead_pounds=ahead_pounds)
         label = f"{week_start.strftime('%d')}–{week_end.strftime('%d %b %Y')}" if week_start.month == week_end.month else f"{week_start.strftime('%d %b')} – {week_end.strftime('%d %b %Y')}"

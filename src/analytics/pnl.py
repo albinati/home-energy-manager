@@ -480,8 +480,16 @@ def _agile_start_date() -> date | None:
         return None
 
 
-def compute_period_pnl(start_day: date, end_day: date, *, label: str = "") -> dict[str, Any]:
+def compute_period_pnl(
+    start_day: date, end_day: date, *, label: str = "", include_daily: bool = False
+) -> dict[str, Any]:
     """Aggregate daily PnL across a date range (both bounds inclusive).
+
+    ``include_daily=True`` attaches an ``out["daily"]`` list of
+    ``{date, import_kwh, export_kwh}`` (one per day in the clamped range) so a
+    caller that also needs per-day kWh (e.g. chart bars that must sum to the
+    foot, #470) gets them from this single daily loop instead of re-running
+    ``compute_daily_pnl`` itself.
 
     Sums every numeric component of ``compute_daily_pnl`` so callers get a full
     breakdown — not just the deltas. Standing charge is implicitly accounted for
@@ -583,12 +591,19 @@ def compute_period_pnl(start_day: date, end_day: date, *, label: str = "") -> di
     bg_delta_real = 0.0
     bg_label: str | None = None
     bg_seen = False
+    daily_rows: list[dict[str, Any]] = []
 
     for i in range(n):
         d = start_day + timedelta(days=i)
         p = compute_daily_pnl(d)
         for k in totals:
             totals[k] += float(p.get(k) or 0.0)
+        if include_daily:
+            daily_rows.append({
+                "date": d.isoformat(),
+                "import_kwh": round(float(p.get("import_kwh") or 0.0), 3),
+                "export_kwh": round(float(p.get("export_kwh") or 0.0), 3),
+            })
         if "fixed_tariff_shadow_gbp" in p:
             bg_seen = True
             bg_shadow += float(p["fixed_tariff_shadow_gbp"])
@@ -612,6 +627,8 @@ def compute_period_pnl(start_day: date, end_day: date, *, label: str = "") -> di
         out["clamped"] = True
         out["clamp_reason"] = clamp_reason
     out.update({k: round(v, 4 if not k.endswith("_kwh") else 3) for k, v in totals.items()})
+    if include_daily:
+        out["daily"] = daily_rows
     if bg_seen:
         out["fixed_tariff_label"] = bg_label or "fixed tariff"
         out["fixed_tariff_shadow_real_gbp"] = round(bg_shadow_real, 4)
