@@ -476,6 +476,8 @@ export interface HeatingPlanSlot {
   price_p?: number | null;
   tier?: "negative" | "cheap" | "standard" | "peak" | null;
   lwt_offset?: number | null;     // integer °C, e.g. +3 / -2; null = no offset
+  lwt_base_c?: number | null;     // weather-curve LWT at this outdoor temp (offset 0)
+  lwt_setpoint_c?: number | null; // actual radiator target = base + offset
   heating_on?: boolean;
   tank_temp_c?: number | null;
   tank_kind?: "warmup" | "setback" | "boost" | null;

@@ -360,6 +360,62 @@ def _preheat_lwt_offset(
     return max(lo, min(hi, int(off)))
 
 
+def smooth_lwt_offsets(offsets: list[int | None], min_block: int) -> list[int | None]:
+    """Make a per-slot LWT-offset sequence thermally coherent (#481 follow-up).
+
+    A building's thermal mass has a multi-hour time constant, so a per-slot
+    price-tier offset chatters (e.g. ``+3, 0, +3, 0, +3`` when the price hovers
+    at the cheap threshold) — thermally pointless and a waste of Daikin writes.
+    Two passes, in order:
+
+    1. **Bridge** short ``0`` gaps (``< min_block`` slots) that sit between two
+       runs of the SAME non-zero offset — a brief price blip shouldn't fracture
+       a sustained boost/setback block.
+    2. **Drop** any non-zero run shorter than ``min_block`` to ``0`` — a boost
+       or setback too short to move the thermal mass isn't worth a write.
+
+    ``None`` slots (not heating / feature off) are inert: never bridged across,
+    never counted in a run. With ``min_block <= 1`` the input is returned as-is.
+    """
+    out = list(offsets)
+    n = len(out)
+    if min_block <= 1 or n == 0:
+        return out
+
+    # Pass 1 — bridge short same-value 0-gaps.
+    i = 0
+    while i < n:
+        if out[i] != 0:
+            i += 1
+            continue
+        j = i
+        while j < n and out[j] == 0:
+            j += 1
+        left = out[i - 1] if i > 0 else None
+        right = out[j] if j < n else None
+        if (j - i) < min_block and left is not None and left != 0 and left == right:
+            for k in range(i, j):
+                out[k] = left
+        i = j
+
+    # Pass 2 — drop sub-threshold non-zero blocks to neutral.
+    i = 0
+    while i < n:
+        v = out[i]
+        if not v:  # None or 0
+            i += 1
+            continue
+        j = i
+        while j < n and out[j] == v:
+            j += 1
+        if (j - i) < min_block:
+            for k in range(i, j):
+                out[k] = 0
+        i = j
+
+    return out
+
+
 def _lwt_preheat_pairs(
     plan: LpPlan,
     forecast: list[HourlyForecast],
@@ -398,6 +454,11 @@ def _lwt_preheat_pairs(
         offsets.append(_preheat_lwt_offset(
             price, outdoor, cheap_thr=cheap_thr, peak_thr=peak_thr, indoor_c=indoor_c,
         ))
+
+    # Thermal coherence: collapse per-slot price chatter into sustained blocks
+    # so we don't toggle the heat pump for wiggles the thermal mass can't follow
+    # (and don't burn Daikin writes doing it). See ``smooth_lwt_offsets``.
+    offsets = smooth_lwt_offsets(offsets, int(config.DAIKIN_LWT_PREHEAT_MIN_BLOCK_SLOTS))
 
     restore_window = max(2, int(getattr(config, "LP_RESTORE_WINDOW_MINUTES", 5)))
     out: list[tuple[dict[str, Any] | None, dict[str, Any]]] = []

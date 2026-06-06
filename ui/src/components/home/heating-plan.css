@@ -48,7 +48,8 @@
 }
 .hpl-line--outdoor { border-top-color: var(--grid, #60a5fa); }
 .hpl-line--tank    { border-top-style: dashed; border-top-color: var(--thermal, #fb923c); }
-.hpl-line--lwt     { border-top-color: var(--house, #c084fc); }
+.hpl-line--lwt     { border-top-width: 3px; border-top-color: var(--house, #c084fc); }
+.hpl-line--curve   { border-top-style: dotted; border-top-color: color-mix(in srgb, var(--house, #c084fc) 55%, transparent); }
 .hpl-sw {
   display: inline-block;
   width: 11px;

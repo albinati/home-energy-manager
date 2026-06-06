@@ -1508,7 +1508,8 @@ async def daikin_heating_plan():
 
     from .. import db as _db
     from .. import dhw_policy as _dhw
-    from ..scheduler.lp_dispatch import _preheat_lwt_offset
+    from ..physics import get_lwt_base_c
+    from ..scheduler.lp_dispatch import _preheat_lwt_offset, smooth_lwt_offsets
 
     try:
         tz = ZoneInfo(getattr(config, "BULLETPROOF_TIMEZONE", "Europe/London"))
@@ -1606,6 +1607,7 @@ async def daikin_heating_plan():
         return "standard"
 
     slots_out: list[dict] = []
+    raw_offsets: list[int | None] = []
     cur = win_start_utc
     while cur < win_end_utc:
         outdoor = temp_by_hour.get(cur.isoformat().replace("+00:00", "")[:13])
@@ -1614,18 +1616,36 @@ async def daikin_heating_plan():
         off = None
         if enabled and outdoor is not None and price is not None:
             off = _preheat_lwt_offset(price, outdoor, cheap_thr=cheap_thr, peak_thr=peak_thr)
+        raw_offsets.append(off)
         tank_temp, tank_kind = _tank_at(cur)
+        # Natural weather-curve LWT (radiator water temp the firmware targets at
+        # this outdoor temp, offset 0). The offset is only meaningful relative
+        # to this — the real setpoint is curve + offset.
+        lwt_base = round(get_lwt_base_c(outdoor), 1) if (heating_on and outdoor is not None) else None
         slots_out.append({
             "slot_utc": cur.isoformat().replace("+00:00", "Z"),
             "outdoor_c": round(outdoor, 1) if outdoor is not None else None,
             "price_p": round(price, 2) if price is not None else None,
             "tier": _tier(price),
             "lwt_offset": off,
+            "lwt_base_c": lwt_base,
+            "lwt_setpoint_c": None,   # filled after smoothing (depends on offset)
             "heating_on": heating_on,
             "tank_temp_c": tank_temp,
             "tank_kind": tank_kind,
         })
         cur = cur + _td(minutes=30)
+
+    # Apply the same thermal-coherence smoothing the dispatch layer applies, so
+    # the chart shows the sustained blocks we'll actually command (not the raw
+    # per-slot price chatter). The actual radiator setpoint = curve base + the
+    # (smoothed) offset, clamped to the device LWT range.
+    smoothed = smooth_lwt_offsets(raw_offsets, int(getattr(config, "DAIKIN_LWT_PREHEAT_MIN_BLOCK_SLOTS", 4)))
+    for s, off in zip(slots_out, smoothed):
+        s["lwt_offset"] = off
+        base = s.get("lwt_base_c")
+        if base is not None:
+            s["lwt_setpoint_c"] = round(max(18.0, min(50.0, base + (off or 0))), 1)
 
     days_out = [
         {"date": d.isoformat(),

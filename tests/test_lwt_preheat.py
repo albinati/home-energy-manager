@@ -19,8 +19,40 @@ import pytest
 
 from src.config import config
 from src.daikin.models import DaikinDevice
-from src.scheduler.lp_dispatch import _lwt_preheat_pairs, _preheat_lwt_offset
+from src.scheduler.lp_dispatch import _lwt_preheat_pairs, _preheat_lwt_offset, smooth_lwt_offsets
 from src.scheduler.lp_optimizer import LpPlan
+
+
+# --------------------------------------------------------------------------- #
+# smooth_lwt_offsets — thermal coherence (no per-slot chatter)
+# --------------------------------------------------------------------------- #
+def test_smooth_drops_short_isolated_blocks():
+    # A lone 1-slot boost is thermally negligible → dropped to neutral.
+    assert smooth_lwt_offsets([0, 0, 3, 0, 0], 4) == [0, 0, 0, 0, 0]
+
+
+def test_smooth_keeps_sustained_blocks():
+    # A 4-slot boost meets the threshold → kept.
+    assert smooth_lwt_offsets([3, 3, 3, 3, 0], 4) == [3, 3, 3, 3, 0]
+
+
+def test_smooth_bridges_short_gap_between_same_blocks():
+    # The real chatter case: +3,0,+3,0,+3 around the cheap threshold → one block.
+    assert smooth_lwt_offsets([3, 0, 3, 0, 3, 3, 3, 3], 4) == [3, 3, 3, 3, 3, 3, 3, 3]
+
+
+def test_smooth_does_not_bridge_different_neighbours():
+    # boost→0→setback is a genuine transition; the 0 buffer stays.
+    out = smooth_lwt_offsets([3, 3, 3, 3, 0, -2, -2, -2, -2], 4)
+    assert out == [3, 3, 3, 3, 0, -2, -2, -2, -2]
+
+
+def test_smooth_passthrough_when_min_block_one():
+    assert smooth_lwt_offsets([3, 0, -2, 0, 3], 1) == [3, 0, -2, 0, 3]
+
+
+def test_smooth_preserves_none():
+    assert smooth_lwt_offsets([None, None, 3, 3, 3, 3, None], 4) == [None, None, 3, 3, 3, 3, None]
 
 # Tiers used throughout: cheap ≤ 12, peak ≥ 25 (the prod defaults).
 CHEAP = 12.0
@@ -39,6 +71,9 @@ def enabled(monkeypatch):
     monkeypatch.setattr(config, "OPTIMIZATION_LWT_OFFSET_MAX", 5.0)
     monkeypatch.setattr(config, "DAIKIN_WEATHER_CURVE_HIGH_C", 18.0)
     monkeypatch.setattr(config, "INDOOR_SETPOINT_C", 21.0)
+    # Disable thermal-coherence smoothing for the per-slot windowing tests so a
+    # short test sequence isn't collapsed; smoothing is exercised separately.
+    monkeypatch.setattr(config, "DAIKIN_LWT_PREHEAT_MIN_BLOCK_SLOTS", 1)
 
 
 def _off(price, outdoor, **kw):

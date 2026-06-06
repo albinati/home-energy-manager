@@ -43,6 +43,9 @@ def test_heating_plan_cold_cheap_slot_boosts(monkeypatch):
     monkeypatch.setattr(config, "OPTIMIZATION_CHEAP_THRESHOLD_PENCE", 12.0, raising=False)
     monkeypatch.setattr(config, "OPTIMIZATION_PEAK_THRESHOLD_PENCE", 25.0, raising=False)
     monkeypatch.setattr(config, "OCTOPUS_TARIFF_CODE", "E-1R-AGILE", raising=False)
+    # Disable smoothing so a single seeded slot's offset survives (smoothing has
+    # its own tests); this checks the per-slot offset + curve-setpoint math.
+    monkeypatch.setattr(config, "DAIKIN_LWT_PREHEAT_MIN_BLOCK_SLOTS", 1, raising=False)
 
     # A cold (5 °C) + cheap (5p) slot at 10:00 UTC today → boost +3.
     today = datetime.now(_tz()).date()
@@ -77,6 +80,9 @@ def test_heating_plan_cold_cheap_slot_boosts(monkeypatch):
     assert target["tier"] == "cheap"
     assert target["heating_on"] is True
     assert target["lwt_offset"] == 3  # cold + cheap → +BOOST
+    # Radiator setpoint = weather-curve base (at 5 °C) + offset; base in [18,50].
+    assert target["lwt_base_c"] is not None and 18.0 <= target["lwt_base_c"] <= 50.0
+    assert target["lwt_setpoint_c"] == round(min(50.0, target["lwt_base_c"] + 3), 1)
     # A tank target/kind is resolved for the slot (dhw_policy, allow_past).
     assert target["tank_kind"] in ("warmup", "setback", "boost")
 
