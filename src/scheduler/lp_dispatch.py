@@ -301,6 +301,157 @@ def _lwt_offset_from_plan(i: int, plan: LpPlan) -> float:
     return 0.0
 
 
+def _preheat_lwt_offset(
+    price_p: float,
+    outdoor_c: float,
+    *,
+    cheap_thr: float,
+    peak_thr: float,
+    indoor_c: float | None = None,
+) -> int | None:
+    """Heuristic LWT offset (integer, clamped to the device range) for a slot.
+
+    Open-loop space-heating pre-heat (#481): boost the leaving-water
+    temperature in cheap slots (pre-heat the house, store heat in the thermal
+    mass) and set it back in peak slots (coast). Returns:
+
+    * ``None`` when the feature is disabled, or when ``outdoor_c`` is at/above
+      ``DAIKIN_WEATHER_CURVE_HIGH_C`` — the firmware won't be running the
+      compressor, so we emit nothing and stay climate-hands-off on warm days
+      (which also keeps the Daikin daily quota untouched).
+    * an ``int`` offset otherwise: ``+BOOST`` (price ≤ cheap tier),
+      ``PEAK_SETBACK`` (price ≥ peak tier), else ``0`` (neutral — let the
+      firmware's natural weather curve run).
+
+    The offset is the only thing HEM writes; the firmware curve still decides
+    *when* to heat — we only nudge the water temperature when it already is.
+
+    ``indoor_c`` is a forward-looking hook for a future room sensor. While no
+    sensor exists it is ``None`` and the comfort guard is a no-op. Once wired,
+    it suppresses boosting when the room is already warm (≥ setpoint + band)
+    and suppresses setback when it's already cold (≤ setpoint − band).
+    """
+    if not config.DAIKIN_LWT_PREHEAT_ENABLED:
+        return None
+    # Firmware only heats below the curve's high anchor; nothing to nudge above it.
+    if outdoor_c >= float(config.DAIKIN_WEATHER_CURVE_HIGH_C):
+        return None
+
+    boost = int(config.DAIKIN_LWT_PREHEAT_BOOST_C)
+    setback = int(config.DAIKIN_LWT_PREHEAT_PEAK_SETBACK_C)
+    band = float(config.DAIKIN_LWT_PREHEAT_COMFORT_BAND_C)
+    setpoint = float(config.INDOOR_SETPOINT_C)
+
+    if price_p <= cheap_thr:
+        off = boost
+        # Comfort guard (sensor-ready): don't pre-heat an already-warm room.
+        if indoor_c is not None and indoor_c >= setpoint + band:
+            off = 0
+    elif price_p >= peak_thr:
+        off = setback
+        # Comfort guard (sensor-ready): don't set back an already-cold room.
+        if indoor_c is not None and indoor_c <= setpoint - band:
+            off = 0
+    else:
+        off = 0
+
+    lo = int(config.OPTIMIZATION_LWT_OFFSET_MIN)
+    hi = int(config.OPTIMIZATION_LWT_OFFSET_MAX)
+    return max(lo, min(hi, int(off)))
+
+
+def _lwt_preheat_pairs(
+    plan: LpPlan,
+    forecast: list[HourlyForecast],
+    *,
+    indoor_c: float | None = None,
+) -> list[tuple[dict[str, Any] | None, dict[str, Any]]]:
+    """``(restore_row, action_row)`` pairs that drive the Daikin LWT offset from
+    the price-tier pre-heat heuristic (#481).
+
+    Empty when ``DAIKIN_LWT_PREHEAT_ENABLED`` is false (climate hands-off
+    preserved). Consecutive slots with the same non-zero offset merge into one
+    window — a handful per day — so the device is written only at offset-change
+    boundaries. Each window's ``restore`` returns the offset to ``0`` (the
+    natural curve); neutral (``0``/``None``) slots emit nothing. SQLite-free —
+    the caller reads the room sensor (if any) and does the upsert.
+    """
+    if not config.DAIKIN_LWT_PREHEAT_ENABLED:
+        return []
+    if not plan.slot_starts_utc or not plan.price_pence:
+        return []
+
+    # Prefer the plan's own tier thresholds (what the LP actually classified
+    # against); fall back to the static config tiers.
+    cheap_thr = plan.cheap_threshold_pence or float(config.OPTIMIZATION_CHEAP_THRESHOLD_PENCE)
+    peak_thr = plan.peak_threshold_pence or float(config.OPTIMIZATION_PEAK_THRESHOLD_PENCE)
+
+    n = len(plan.slot_starts_utc)
+    offsets: list[int | None] = []
+    for i in range(n):
+        mid = plan.slot_starts_utc[i] + timedelta(minutes=15)
+        fc = get_forecast_for_slot(mid, forecast)
+        outdoor = fc.temperature_c if fc else (
+            plan.temp_outdoor_c[i] if i < len(plan.temp_outdoor_c) else 0.0
+        )
+        price = plan.price_pence[i] if i < len(plan.price_pence) else 0.0
+        offsets.append(_preheat_lwt_offset(
+            price, outdoor, cheap_thr=cheap_thr, peak_thr=peak_thr, indoor_c=indoor_c,
+        ))
+
+    restore_window = max(2, int(getattr(config, "LP_RESTORE_WINDOW_MINUTES", 5)))
+    out: list[tuple[dict[str, Any] | None, dict[str, Any]]] = []
+
+    i = 0
+    while i < n:
+        off = offsets[i]
+        if not off:  # None (warm/disabled) or 0 (neutral) → no write
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and offsets[j + 1] == off:
+            j += 1
+        start_utc = plan.slot_starts_utc[i]
+        end_utc = plan.slot_starts_utc[j] + timedelta(minutes=30)
+        st_iso = start_utc.isoformat().replace("+00:00", "Z")
+        en_iso = end_utc.isoformat().replace("+00:00", "Z")
+        restore_end = (
+            end_utc + timedelta(minutes=restore_window)
+        ).isoformat().replace("+00:00", "Z")
+        action_row = {
+            "device": "daikin",
+            "action_type": "lwt_preheat",
+            "start_time": st_iso,
+            "end_time": en_iso,
+            "params": {"lwt_offset": int(off), "lp_optimizer": True},
+        }
+        restore_row = {
+            "device": "daikin",
+            "action_type": "restore",
+            "start_time": en_iso,
+            "end_time": restore_end,
+            "params": {"lwt_offset": 0, "lp_optimizer": True},
+        }
+        out.append((restore_row, action_row))
+        i = j + 1
+
+    # Drop a restore immediately superseded by the next action (offset flips
+    # boost→setback with no neutral gap) — mirror the tank-path post-process so
+    # we don't bounce the offset to 0 for a few minutes between windows.
+    if len(out) >= 2:
+        deduped: list[tuple[dict[str, Any] | None, dict[str, Any]]] = []
+        for k, (rest, act) in enumerate(out):
+            if k + 1 < len(out):
+                _nrest, nact = out[k + 1]
+                if rest is not None and nact.get("start_time", "") <= rest.get("end_time", ""):
+                    deduped.append((None, act))
+                    continue
+            deduped.append((rest, act))
+        out = deduped
+
+    return out
+
+
 def _merge_half_hour_slots_for_daikin(plan: LpPlan) -> list[tuple[datetime, datetime, str, int]]:
     """Contiguous same-kind slots → merged windows (start, end, kind, first_slot_index).
 
@@ -463,12 +614,17 @@ def daikin_dispatch_preview(
         #     firmware/prior-action left it. Setting tank_power=False here would
         #     ACTIVELY DISABLE the tank, which is wrong intent.
         is_shutdown = kind in ("peak", "peak_export")
-        # CLIMATE HANDS-OFF: per user (2026-05-09), HEM does not touch the
-        # climate (space-heating) side. We do NOT emit climate_on or
-        # lwt_offset — Daikin firmware's own zone scheduling and weather
-        # curve handle space heating. The LP plans `e_space` as a forecast
-        # of likely consumption but doesn't direct it. All actions below are
-        # tank-only.
+        # TANK-ONLY here. The per-window actions built in this loop never carry
+        # `climate_on`/`lwt_offset` — Daikin firmware's own zone scheduling and
+        # weather curve decide *when* to heat, and the LP plans `e_space` only
+        # as a consumption forecast.
+        #
+        # Active space-heating control (#481) is opt-in and emitted SEPARATELY
+        # by `_write_lwt_preheat_actions` (gated by DAIKIN_LWT_PREHEAT_ENABLED),
+        # which nudges the LWT *offset* by a price-tier heuristic. It lives
+        # outside this loop because the fixed-DHW (K1) regime returns before
+        # this loop ever runs. When the flag is off, no offset is ever written
+        # (the original 2026-05-09 climate-hands-off behaviour).
         params: dict[str, Any] = {
             "tank_powerful": tank_powful if kind in powerful_kinds else False,
             "lp_optimizer": True,
@@ -720,6 +876,98 @@ def _apply_write_budget(
     return keep, dropped
 
 
+def _write_lwt_preheat_actions(
+    plan_date: str,
+    plan: LpPlan,
+    forecast: list[HourlyForecast],
+) -> int:
+    """Upsert the heuristic LWT-offset action rows (#481), if enabled.
+
+    Self-contained so it can run in BOTH dispatch regimes (the fixed-DHW K1
+    path and the legacy tank-loop path), since the two return from
+    :func:`write_daikin_from_lp_plan` at different points. Returns the number of
+    rows written (0 when the feature is off → climate hands-off preserved).
+
+    Quota safety (user hard constraint): the offset rows ride the same fire-time
+    idempotency (pre-fire state-match skips a write when the device already
+    holds that offset) and integer/range clamping as every other Daikin action.
+    On top of that we deterministically cap the number of writes to the live
+    quota headroom here, dropping trailing pairs so we can never exceed budget.
+    """
+    if not config.DAIKIN_LWT_PREHEAT_ENABLED:
+        return 0
+
+    # Sensor-ready hook: read the latest LIVE indoor temperature if any exists.
+    # Currently null in ~all rows → the comfort guard is a no-op until a room
+    # sensor lands. One clean seam; no rework when the sensor arrives.
+    indoor_c: float | None = None
+    try:
+        tel = db.get_latest_daikin_telemetry(source="live")
+        if tel and tel.get("indoor_temp_c") is not None:
+            indoor_c = float(tel["indoor_temp_c"])
+    except Exception:  # pragma: no cover — telemetry read must never break dispatch
+        indoor_c = None
+
+    pairs = _lwt_preheat_pairs(plan, forecast, indoor_c=indoor_c)
+    if not pairs:
+        return 0
+
+    # Deterministic quota cap: 2 writes per pair (action + restore). Keep only
+    # as many earliest pairs as fit under headroom = quota_remaining − reserve.
+    try:
+        from ..api_quota import quota_remaining
+        reserve = int(getattr(config, "DAIKIN_RESERVE_FOR_HEARTBEAT", 30))
+        headroom = max(0, quota_remaining("daikin") - reserve)
+    except Exception:  # pragma: no cover — quota lookup must never break dispatch
+        headroom = 9999
+    max_pairs = headroom // 2
+    if max_pairs <= 0:
+        logger.info(
+            "LWT pre-heat: skipped all %d offset row(s) — Daikin quota headroom %d too low",
+            len(pairs), headroom,
+        )
+        return 0
+    if len(pairs) > max_pairs:
+        logger.info(
+            "LWT pre-heat: capped offset windows %d→%d for quota headroom %d",
+            len(pairs), max_pairs, headroom,
+        )
+        pairs = pairs[:max_pairs]
+
+    count = 0
+    for restore_row, action_row in pairs:
+        rid: int | None = None
+        if restore_row is not None:
+            rid = db.upsert_action(
+                plan_date=plan_date,
+                start_time=restore_row["start_time"],
+                end_time=restore_row["end_time"],
+                device="daikin",
+                action_type="restore",
+                params=restore_row["params"],
+                status="pending",
+            )
+            count += 1
+        aid = db.upsert_action(
+            plan_date=plan_date,
+            start_time=action_row["start_time"],
+            end_time=action_row["end_time"],
+            device="daikin",
+            action_type=action_row["action_type"],
+            params=action_row["params"],
+            status="pending",
+            restore_action_id=rid,
+        )
+        if rid is not None:
+            db.update_action_restore_link(aid, rid)
+        count += 1
+
+    logger.info(
+        "write_daikin_from_lp_plan: LWT pre-heat — wrote %d offset row(s)", count
+    )
+    return count
+
+
 def write_daikin_from_lp_plan(
     plan_date: str,
     plan: LpPlan,
@@ -851,6 +1099,9 @@ def write_daikin_from_lp_plan(
             "write_daikin_from_lp_plan: DHW_FIXED_SCHEDULE — wrote %d rows (no LP tank actions)",
             rows_total,
         )
+        # #481 — active space-heating: emit LWT-offset rows alongside the fixed
+        # DHW schedule (independent of the tank; gated by DAIKIN_LWT_PREHEAT_ENABLED).
+        rows_total += _write_lwt_preheat_actions(plan_date, plan, forecast)
         return rows_total
     if plan.slot_starts_utc:
         window_start_iso = plan.slot_starts_utc[0].isoformat().replace("+00:00", "Z")
@@ -931,6 +1182,11 @@ def write_daikin_from_lp_plan(
         if rid is not None:
             db.update_action_restore_link(aid, rid)
         count += 1
+
+    # #481 — active space-heating: emit LWT-offset rows (gated by
+    # DAIKIN_LWT_PREHEAT_ENABLED). The clear above already removed any prior
+    # offset rows in range, so this re-establishes them idempotently.
+    count += _write_lwt_preheat_actions(plan_date, plan, forecast)
 
     return count
 

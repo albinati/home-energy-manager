@@ -931,6 +931,25 @@ class Config:
     )
     OPTIMIZATION_LWT_OFFSET_MIN: float = float(os.getenv("OPTIMIZATION_LWT_OFFSET_MIN", "-10"))
     OPTIMIZATION_LWT_OFFSET_MAX: float = float(os.getenv("OPTIMIZATION_LWT_OFFSET_MAX", "5"))
+    # --- Heuristic LWT pre-heat (#481) — active space-heating control ---------
+    # When enabled, HEM drives the Daikin leaving-water-temperature OFFSET by a
+    # simple price-tier rule: boost in cheap slots (pre-heat the house) and set
+    # back in peak slots (coast on thermal mass). Offset-only — the firmware's
+    # weather curve still decides WHEN to heat; we only nudge the water temp when
+    # it's already heating. Open-loop (no room sensor yet) — the offset is
+    # clamped to OPTIMIZATION_LWT_OFFSET_MIN/MAX and written as an integer; the
+    # firmware's own curve is the comfort floor. Default OFF (climate hands-off).
+    DAIKIN_LWT_PREHEAT_ENABLED: bool = os.getenv(
+        "DAIKIN_LWT_PREHEAT_ENABLED", "false"
+    ).lower() in ("true", "1", "yes")
+    DAIKIN_LWT_PREHEAT_BOOST_C: int = int(os.getenv("DAIKIN_LWT_PREHEAT_BOOST_C", "3"))
+    DAIKIN_LWT_PREHEAT_PEAK_SETBACK_C: int = int(os.getenv("DAIKIN_LWT_PREHEAT_PEAK_SETBACK_C", "-2"))
+    # Comfort dead-band (°C) used by the sensor-ready guard: once a real room
+    # temperature is available, suppress boost above SETPOINT+band and suppress
+    # setback below SETPOINT-band. No-op while indoor_temp telemetry is absent.
+    DAIKIN_LWT_PREHEAT_COMFORT_BAND_C: float = float(
+        os.getenv("DAIKIN_LWT_PREHEAT_COMFORT_BAND_C", "0.5")
+    )
     OPTIMIZATION_DISABLE_WEATHER_REGULATION: bool = os.getenv(
         "OPTIMIZATION_DISABLE_WEATHER_REGULATION", "false"
     ).lower() in ("true", "1", "yes")
