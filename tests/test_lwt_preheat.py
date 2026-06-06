@@ -65,6 +65,7 @@ WARM = 20.0  # outdoor ≥ 18 → firmware idle
 def enabled(monkeypatch):
     monkeypatch.setattr(config, "DAIKIN_LWT_PREHEAT_ENABLED", True)
     monkeypatch.setattr(config, "DAIKIN_LWT_PREHEAT_BOOST_C", 3)
+    monkeypatch.setattr(config, "DAIKIN_LWT_PREHEAT_NEGATIVE_BOOST_C", 5)
     monkeypatch.setattr(config, "DAIKIN_LWT_PREHEAT_PEAK_SETBACK_C", -2)
     monkeypatch.setattr(config, "DAIKIN_LWT_PREHEAT_COMFORT_BAND_C", 0.5)
     monkeypatch.setattr(config, "OPTIMIZATION_LWT_OFFSET_MIN", -10.0)
@@ -97,6 +98,23 @@ def test_warm_day_returns_none(enabled):
 def test_cheap_slot_boosts(enabled):
     assert _off(5.0, COLD) == 3
     assert _off(CHEAP, COLD) == 3  # boundary inclusive
+
+
+def test_negative_slot_pushes_to_max(enabled):
+    # Paid to import → aggressive boost to the top of the range (5), not +3.
+    assert _off(-3.0, COLD) == 5
+    assert _off(-0.01, COLD) == 5
+
+
+def test_negative_boost_clamped_to_offset_max(enabled, monkeypatch):
+    # The aggressive negative boost is still bounded by OPTIMIZATION_LWT_OFFSET_MAX.
+    monkeypatch.setattr(config, "DAIKIN_LWT_PREHEAT_NEGATIVE_BOOST_C", 9)
+    assert _off(-3.0, COLD) == 5  # clamp at MAX=5
+
+
+def test_negative_warm_day_still_none(enabled):
+    # Even when paid, no boost if the firmware isn't heating (mild outdoor).
+    assert _off(-3.0, WARM) is None
 
 
 def test_peak_slot_sets_back(enabled):

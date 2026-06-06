@@ -338,11 +338,21 @@ def _preheat_lwt_offset(
         return None
 
     boost = int(config.DAIKIN_LWT_PREHEAT_BOOST_C)
+    neg_boost = int(getattr(config, "DAIKIN_LWT_PREHEAT_NEGATIVE_BOOST_C", boost))
     setback = int(config.DAIKIN_LWT_PREHEAT_PEAK_SETBACK_C)
     band = float(config.DAIKIN_LWT_PREHEAT_COMFORT_BAND_C)
     setpoint = float(config.INDOOR_SETPOINT_C)
 
-    if price_p <= cheap_thr:
+    if price_p < 0:
+        # PAID to import — push space heating to the TOP of the operating range
+        # (clamped below) to bank the most thermal mass while we're paid for it,
+        # not the modest cheap-slot nudge. Heating-cutoff gate above already
+        # ensures this only fires when the firmware is actually heating.
+        off = neg_boost
+        # Comfort guard (sensor-ready): don't over-heat an already-warm room.
+        if indoor_c is not None and indoor_c >= setpoint + band:
+            off = 0
+    elif price_p <= cheap_thr:
         off = boost
         # Comfort guard (sensor-ready): don't pre-heat an already-warm room.
         if indoor_c is not None and indoor_c >= setpoint + band:
