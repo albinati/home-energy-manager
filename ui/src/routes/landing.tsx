@@ -16,6 +16,7 @@ import {
   getFairCompare,
   getPvToday,
   getDhwSchedule,
+  getHeatingPlan,
   getEnergyTodayCumulative,
 } from "../lib/endpoints";
 import { Link } from "wouter-preact";
@@ -41,6 +42,11 @@ const EnergyChartWidget = lazy(() =>
 // energy chart so the hero + money tiles paint first.
 const TodayPlanWidget = lazy(() =>
   import("../components/home/TodayPlanWidget").then((m) => ({ default: m.TodayPlanWidget })),
+);
+
+// Heating-plan timeline (D-1/D/D+1) — also echarts-backed, lazy-loaded.
+const HeatingPlanWidget = lazy(() =>
+  import("../components/home/HeatingPlanWidget").then((m) => ({ default: m.HeatingPlanWidget })),
 );
 
 function lastMonths(n: number): string[] {
@@ -102,8 +108,11 @@ export default function Landing() {
   // Daikin cached read — no refresh=true, so no live cloud call (30-min cache TTL).
   const daikin = useFetch(getDaikinStatus, []);
   const daikinQuota = useFetch(getDaikinQuota, []);
-  // DHW tank plan (today+tomorrow) — shared by Heating + Live-power tank badges.
+  // DHW tank plan (today+tomorrow) — used by the Live-power tank badges.
   const dhwSched = useFetch(getDhwSchedule, []);
+  // Heating-plan timeline (yesterday/today/tomorrow): outdoor temp + LWT offset
+  // + tank + heating-on, recomputed per slot. Cache-only, poll while visible.
+  const heatingPlan = usePoll(getHeatingPlan, 5 * 60_000);
   // Today's grid import/export so far (kWh + real £, credit on negative slots).
   const todayCum = usePoll(getEnergyTodayCumulative, 60_000);
   // The shared period navigator drives the Hero headline + cost breakdown +
@@ -152,7 +161,7 @@ export default function Landing() {
         </Widget>
 
         <Widget title="Heating" icon="♨" tone="thermal" size="medium">
-          <HeatingWidget state={s} daikin={daikin.data} daikinQuota={daikinQuota.data} report={report.data} weather={weather.data} execution={execution.data} dhwSchedule={dhwSched.data?.rows}
+          <HeatingWidget state={s} daikin={daikin.data} daikinQuota={daikinQuota.data} report={report.data} weather={weather.data} execution={execution.data}
                          onRefresh={() => { void daikin.refresh(); void daikinQuota.refresh(); }} />
         </Widget>
       </div>
@@ -165,6 +174,12 @@ export default function Landing() {
                              execution={execution.data}
                              cheapThresholdP={metrics.data?.cheap_threshold_pence}
                              peakThresholdP={metrics.data?.peak_threshold_pence} />
+          </Suspense>
+        </Widget>
+
+        <Widget title="Heating plan" icon="♨" tone="thermal" size="wide">
+          <Suspense fallback={<Spinner label="Loading heating plan…" />}>
+            <HeatingPlanWidget plan={heatingPlan.data} loading={heatingPlan.loading} />
           </Suspense>
         </Widget>
       </div>

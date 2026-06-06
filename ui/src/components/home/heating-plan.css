@@ -1,0 +1,63 @@
+/* Heating-plan timeline (D-1 · D · D+1) — temp + plan overlay chart. */
+.heating-plan-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* Day band labels above the chart — three equal thirds matching the day
+   separators in the plot (Yesterday | Today | Tomorrow). */
+.hpl-days {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  margin: 0 40px 0 28px;   /* roughly aligns with the plot grid (l16+axis / r40) */
+  font-size: var(--font-2xs);
+  color: var(--text-mute);
+  text-align: center;
+}
+.hpl-day {
+  padding: 2px 0;
+  border-left: 1px solid var(--border);
+}
+.hpl-day:first-child { border-left: none; }
+.hpl-day--today {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.hpl-legend {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: var(--font-2xs);
+  color: var(--text-dim);
+  padding: 2px 4px 0;
+}
+.hpl-tok {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.hpl-line {
+  display: inline-block;
+  width: 16px;
+  height: 0;
+  border-top-width: 2.5px;
+  border-top-style: solid;
+}
+.hpl-line--outdoor { border-top-color: var(--grid, #60a5fa); }
+.hpl-line--tank    { border-top-style: dashed; border-top-color: var(--thermal, #fb923c); }
+.hpl-line--lwt     { border-top-color: var(--house, #c084fc); }
+.hpl-sw {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+}
+.hpl-sw--heat { background: color-mix(in srgb, var(--warn, #f59e0b) 22%, transparent); }
+.hpl-sw--neg  { background: color-mix(in srgb, var(--neg-price, #2563eb) 30%, transparent); border: 1px solid var(--neg-price, #2563eb); }
+.hpl-hint {
+  margin-left: auto;
+  color: var(--text-mute);
+}

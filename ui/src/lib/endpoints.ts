@@ -22,7 +22,7 @@ import type {
   PeriodInsightsResponse,
   DaikinConsumptionResponse,
   DhwScheduleResponse,
-  LwtScheduleResponse,
+  HeatingPlanResponse,
   PvTodayResponse,
   OptimizationInputsResponse,
   ActionResult,
@@ -53,8 +53,9 @@ export const getDaikinQuota = () => getJson<ApiQuotaResponse>("/daikin/quota");
 export const getFoxQuota = () => getJson<ApiQuotaResponse>("/foxess/quota");
 // Today's deterministic DHW tank plan (times + targets). Zero Daikin quota.
 export const getDhwSchedule = () => getJson<DhwScheduleResponse>("/daikin/dhw-schedule");
-// Committed LWT-offset pre-heat plan (#481) — boost/setback windows. Zero quota.
-export const getLwtSchedule = () => getJson<LwtScheduleResponse>("/daikin/lwt-schedule");
+// Per-slot heating-plan timeline (D-1/D/D+1): outdoor temp + LWT offset + tank
+// + heating-on, deterministically recomputed. Zero Daikin quota.
+export const getHeatingPlan = () => getJson<HeatingPlanResponse>("/daikin/heating-plan");
 
 /* ----- Daikin controls (writes — require DAIKIN_CONTROL_MODE=active) -----
    The UI shows its own confirm dialog, then sends skip_confirmation:true so

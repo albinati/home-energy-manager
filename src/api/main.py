@@ -1484,22 +1484,31 @@ async def daikin_dhw_schedule():
     return {"mode": mode, "rows": rows_out}
 
 
-@app.get("/api/v1/daikin/lwt-schedule")
-async def daikin_lwt_schedule():
-    """Committed LWT-offset pre-heat plan (#481) for today + tomorrow — the
-    ``lwt_preheat`` action rows the LP/dispatch layer wrote to
-    ``action_schedule`` (per-slot integer offset by price tier: boost in cheap
-    slots, setback in peak). Reads the schedule table — **zero Daikin quota**.
-    Powers the Heating-widget "Heating plan" badges, mirroring the tank plan.
+@app.get("/api/v1/daikin/heating-plan")
+async def daikin_heating_plan():
+    """Per-slot heating-plan timeline for **yesterday · today · tomorrow** — a
+    deterministic recompute (NOT the messy overlapping ``action_schedule``
+    rows), zero Daikin quota. Powers the Heating-plan widget (#481 follow-up):
 
-    ``enabled`` reflects ``DAIKIN_LWT_PREHEAT_ENABLED``; when false the LP emits
-    no offset rows and the UI shows the climate-hands-off state.
+    For each half-hour slot across the 3 local days:
+      * ``outdoor_c``  — Open-Meteo forecast temp (``meteo_forecast.temp_c``)
+      * ``price_p`` / ``tier`` — Agile import rate + cheap/standard/peak class
+      * ``lwt_offset`` — the heuristic pre-heat offset for that slot (the same
+        ``_preheat_lwt_offset`` the dispatch layer applies; ``null`` when the
+        feature is off or the firmware isn't heating)
+      * ``heating_on`` — firmware plausibly heating (outdoor < curve high anchor)
+      * ``tank_temp_c`` / ``tank_kind`` — the dhw_policy tank target/kind
+
+    Recomputing per slot avoids the overlapping in-flight rows the raw schedule
+    accumulates across re-plans.
     """
-    import json as _json
     from datetime import datetime as _dt
     from datetime import timedelta as _td
     from zoneinfo import ZoneInfo
+
     from .. import db as _db
+    from .. import dhw_policy as _dhw
+    from ..scheduler.lp_dispatch import _preheat_lwt_offset
 
     try:
         tz = ZoneInfo(getattr(config, "BULLETPROOF_TIMEZONE", "Europe/London"))
@@ -1507,42 +1516,130 @@ async def daikin_lwt_schedule():
         tz = UTC
     today_local = _dt.now(tz).date()
     enabled = bool(getattr(config, "DAIKIN_LWT_PREHEAT_ENABLED", False))
-    rows_out: list[dict] = []
-    seen: set[tuple] = set()
-    for offset in (0, 1):
-        day = (today_local + _td(days=offset)).isoformat()
+    high_c = float(getattr(config, "DAIKIN_WEATHER_CURVE_HIGH_C", 18.0))
+    cheap_thr = float(getattr(config, "OPTIMIZATION_CHEAP_THRESHOLD_PENCE", 12.0))
+    peak_thr = float(getattr(config, "OPTIMIZATION_PEAK_THRESHOLD_PENCE", 25.0))
+
+    # 3-day window: D-1 00:00 local → D+2 00:00 local (144 half-hour slots).
+    day_dates = [today_local + _td(days=d) for d in (-1, 0, 1)]
+    win_start_local = _dt(day_dates[0].year, day_dates[0].month, day_dates[0].day, 0, 0, tzinfo=tz)
+    win_end_local = win_start_local + _td(days=3)
+    win_start_utc = win_start_local.astimezone(UTC)
+    win_end_utc = win_end_local.astimezone(UTC)
+
+    # --- Outdoor temp: hour-keyed map from meteo_forecast over the 3 dates.
+    temp_by_hour: dict[str, float] = {}
+    for d in day_dates:
         try:
-            rows = _db.schedule_for_date(day)
+            for r in _db.get_meteo_forecast_for_slot_date(d.isoformat()):
+                st = r.get("slot_time")
+                tc = r.get("temp_c")
+                if st and tc is not None:
+                    temp_by_hour[str(st)[:13]] = float(tc)  # "YYYY-MM-DDTHH"
         except Exception as e:
-            logger.debug("lwt-schedule: read failed for %s: %s", day, e)
+            logger.debug("heating-plan: meteo read failed for %s: %s", d, e)
+
+    # --- Price: half-hour Agile import rates keyed by slot-start (UTC, to-minute).
+    price_by_slot: dict[str, float] = {}
+    import_tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
+    if import_tariff:
+        try:
+            for r in _db.get_rates_for_period(import_tariff, win_start_utc, win_end_utc):
+                vf = r.get("valid_from")
+                val = r.get("value_inc_vat")
+                if vf and val is not None:
+                    price_by_slot[str(vf)[:16]] = float(val)  # "YYYY-MM-DDTHH:MM"
+        except Exception as e:
+            logger.debug("heating-plan: rates read failed: %s", e)
+
+    # --- Tank: dhw_policy windows over anchors D-2..D+1 (allow_past for display).
+    tank_windows: list[tuple[datetime, datetime, int | None, str]] = []
+    _kind_map = {"tank_warmup": "warmup", "tank_setback": "setback", "tank_negative_boost": "boost"}
+    for anchor in [today_local + _td(days=d) for d in (-2, -1, 0, 1)]:
+        agile = None
+        if import_tariff:
+            try:
+                ds = _dt(anchor.year, anchor.month, anchor.day,
+                         int(getattr(config, "DHW_WARMUP_START_HOUR_LOCAL", 13)), 0, tzinfo=tz)
+                de = ds + _td(days=1)
+                agile = _db.get_rates_for_period(import_tariff, ds.astimezone(UTC), de.astimezone(UTC))
+            except Exception:
+                agile = None
+        try:
+            rows = _dhw.generate_daily_tank_schedule(anchor, agile_rates=agile, allow_past=True)
+        except Exception as e:
+            logger.debug("heating-plan: tank gen failed for %s: %s", anchor, e)
             continue
         for r in rows:
-            if r.get("device") != "daikin" or r.get("action_type") != "lwt_preheat":
-                continue
             params = r.get("params") or {}
-            if isinstance(params, str):
-                try:
-                    params = _json.loads(params)
-                except (_json.JSONDecodeError, TypeError):
-                    params = {}
-            off = params.get("lwt_offset")
-            if off is None:
+            try:
+                ws = datetime.fromisoformat(str(r.get("start_time")).replace("Z", "+00:00"))
+                we = datetime.fromisoformat(str(r.get("end_time")).replace("Z", "+00:00"))
+            except (ValueError, TypeError):
                 continue
-            # A rolling 48 h plan can list the same window under both plan_dates;
-            # de-dupe on the (start,end,offset) identity.
-            key = (r.get("start_time"), r.get("end_time"), off)
-            if key in seen:
-                continue
-            seen.add(key)
-            rows_out.append({
-                "action_type": r.get("action_type"),
-                "start_utc": r.get("start_time"),
-                "end_utc": r.get("end_time"),
-                "lwt_offset": off,
-                "status": r.get("status"),
-            })
-    rows_out.sort(key=lambda x: x.get("start_utc") or "")
-    return {"enabled": enabled, "rows": rows_out}
+            tank_windows.append((ws, we, params.get("tank_temp"), _kind_map.get(r.get("action_type"), "warmup")))
+
+    def _tank_at(slot_dt: datetime) -> tuple[int | None, str | None]:
+        # dhw_policy emits full-span warmup/setback rows AND layers
+        # negative-price boost rows as sub-intervals on top. Prefer a boost
+        # match so the "paid to import" override wins over the setback it sits
+        # inside (otherwise the tank line contradicts the blue negative band).
+        match: tuple[int | None, str | None] | None = None
+        for ws, we, temp, kind in tank_windows:
+            if ws <= slot_dt < we:
+                resolved = (int(temp) if temp is not None else None, kind)
+                if kind == "boost":
+                    return resolved
+                if match is None:
+                    match = resolved
+        return match if match is not None else (None, None)
+
+    def _tier(p: float | None) -> str | None:
+        if p is None:
+            return None
+        if p < 0:
+            return "negative"
+        if p <= cheap_thr:
+            return "cheap"
+        if p >= peak_thr:
+            return "peak"
+        return "standard"
+
+    slots_out: list[dict] = []
+    cur = win_start_utc
+    while cur < win_end_utc:
+        outdoor = temp_by_hour.get(cur.isoformat().replace("+00:00", "")[:13])
+        price = price_by_slot.get(cur.isoformat().replace("+00:00", "")[:16])
+        heating_on = outdoor is not None and outdoor < high_c
+        off = None
+        if enabled and outdoor is not None and price is not None:
+            off = _preheat_lwt_offset(price, outdoor, cheap_thr=cheap_thr, peak_thr=peak_thr)
+        tank_temp, tank_kind = _tank_at(cur)
+        slots_out.append({
+            "slot_utc": cur.isoformat().replace("+00:00", "Z"),
+            "outdoor_c": round(outdoor, 1) if outdoor is not None else None,
+            "price_p": round(price, 2) if price is not None else None,
+            "tier": _tier(price),
+            "lwt_offset": off,
+            "heating_on": heating_on,
+            "tank_temp_c": tank_temp,
+            "tank_kind": tank_kind,
+        })
+        cur = cur + _td(minutes=30)
+
+    days_out = [
+        {"date": d.isoformat(),
+         "label": ("Yesterday" if i == 0 else "Today" if i == 1 else "Tomorrow"),
+         "start_utc": _dt(d.year, d.month, d.day, 0, 0, tzinfo=tz).astimezone(UTC).isoformat().replace("+00:00", "Z")}
+        for i, d in enumerate(day_dates)
+    ]
+    return {
+        "enabled": enabled,
+        "now_utc": _dt.now(UTC).isoformat().replace("+00:00", "Z"),
+        "high_temp_c": high_c,
+        "days": days_out,
+        "slots": slots_out,
+    }
 
 
 @app.get("/api/v1/daikin/consumption")
