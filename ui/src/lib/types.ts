@@ -184,6 +184,8 @@ export interface WeatherSlot {
   time: string;          // ISO datetime
   temp_c: number;
   pv_kw: number;
+  cloud_cover_pct?: number | null;
+  irradiance_wm2?: number | null;
 }
 
 export interface WeatherResponse {

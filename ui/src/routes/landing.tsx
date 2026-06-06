@@ -28,6 +28,7 @@ import { usePeriod, periodFetchOpts, periodLabel } from "../lib/period";
 import { LivePowerWidget } from "../components/cockpit/LivePowerWidget";
 import { Hero } from "../components/home/Hero";
 import { HeatingWidget } from "../components/home/HeatingWidget";
+import { WeatherWidget } from "../components/home/WeatherWidget";
 import { gbp } from "../lib/format";
 import type { MonthlyEnergy } from "../lib/types";
 import "../components/home/home.css";
@@ -151,6 +152,13 @@ export default function Landing() {
       <Hero metrics={metrics.data} metricsLoading={metrics.loading} cockpit={data} agile={agile.data} monthly={monthly.data}
             period={periodInsights.data} periodState={period}
             periodLoading={periodInsights.loading} />
+
+      {/* ── WEATHER (ambient context) ──────────────────────────────── */}
+      <div class="widget-grid widget-band">
+        <Widget title="Weather" icon="⛅" tone="thermal" size="wide">
+          <WeatherWidget weather={weather.data} pv={pvToday.data} />
+        </Widget>
+      </div>
 
       {/* ── LIVE ───────────────────────────────────────────────────── */}
       <div class="widget-grid widget-band">
