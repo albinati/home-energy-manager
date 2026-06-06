@@ -280,6 +280,10 @@ def test_reconcile_detects_override_marks_row_and_notifies(monkeypatch):
     # the user gesture happens — a different code path. Force the legacy path
     # here so the override-detection logic stays under test.
     monkeypatch.setattr("src.config.config.PREFIRE_STATE_MATCH_ENABLED", False)
+    # The 120 s second-tick advance below assumes a 60 s grace; pin it so the
+    # test doesn't depend on the env default (600 s) or test-ordering — it
+    # otherwise passes only when a sibling test left the grace lowered.
+    monkeypatch.setattr("src.daikin_bulletproof.config.DAIKIN_OVERRIDE_GRACE_SECONDS", 60)
 
     # C6: clear process-local state between tests.
     sm._FIRST_APPLIED_SESSION.clear()
