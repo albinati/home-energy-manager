@@ -9,11 +9,16 @@ no-op until a room sensor exists.
 """
 from __future__ import annotations
 
+import json
+import tempfile
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
 from src.config import config
+from src.daikin.models import DaikinDevice
 from src.scheduler.lp_dispatch import _lwt_preheat_pairs, _preheat_lwt_offset
 from src.scheduler.lp_optimizer import LpPlan
 
@@ -180,3 +185,110 @@ def test_rows_tagged_lp_optimizer_and_device(enabled):
     assert a["device"] == "daikin"
     assert a["action_type"] == "lwt_preheat"
     assert a["params"]["lp_optimizer"] is True
+
+
+# --------------------------------------------------------------------------- #
+# Fire-path gating — the lwt_offset hands-off strip (#300) must yield to #481
+# when the feature is enabled, else the emitted rows are silently neutered.
+# --------------------------------------------------------------------------- #
+def _seed_lwt_row(conn, params: dict) -> int:
+    now = datetime.now(UTC)
+    start = (now - timedelta(seconds=60)).isoformat()
+    end = (now + timedelta(seconds=1800)).isoformat()
+    conn.execute(
+        """INSERT INTO action_schedule
+           (date, start_time, end_time, device, action_type, params, status, created_at)
+           VALUES (?, ?, ?, 'daikin', 'lwt_preheat', ?, 'active', ?)""",
+        (now.date().isoformat(), start, end, json.dumps(params), now.isoformat()),
+    )
+    rid = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+    conn.commit()
+    return rid
+
+
+def _run_reconcile_with_offset(monkeypatch, *, enabled_flag: bool, prefire: bool):
+    """Seed an lwt_preheat row (wants +3), device at offset 0, run the
+    reconciler with a stubbed apply, and return the captured apply params.
+    """
+    import src.state_machine as sm
+    from src import db
+
+    monkeypatch.setattr("src.config.config.DAIKIN_LWT_PREHEAT_ENABLED", enabled_flag)
+    monkeypatch.setattr("src.config.config.PREFIRE_STATE_MATCH_ENABLED", prefire)
+    monkeypatch.setattr("src.config.config.USER_OVERRIDE_RESPECT_HOURS", 4.0)
+    monkeypatch.setattr("src.daikin_bulletproof.config.OPENCLAW_READ_ONLY", False)
+    sm._FIRST_APPLIED_SESSION.clear()
+    sm._USER_OVERRIDE_INHERITED_NOTIFIED.clear()
+
+    apply_calls: list[dict] = []
+    monkeypatch.setattr(
+        "src.state_machine.apply_scheduled_daikin_params",
+        lambda dev, client, params, trigger: apply_calls.append(params) or True,
+    )
+
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "t.db"
+        monkeypatch.setattr("src.config.config.DB_PATH", str(path))
+        db.init_db()
+        conn = db.get_connection()
+        try:
+            _seed_lwt_row(conn, {"lwt_offset": 3, "lp_optimizer": True})
+        finally:
+            conn.close()
+
+        dev = DaikinDevice(id="gw", name="x", lwt_offset=0.0)
+        now_utc = datetime.now(UTC)
+        rows = db.get_actions_for_plan_date(now_utc.date().isoformat(), device="daikin")
+        sm._reconcile_daikin_actions(rows, MagicMock(), dev, now_utc, trigger="test")
+    return apply_calls
+
+
+def test_enabled_lets_lwt_offset_reach_apply(monkeypatch):
+    # #481 regression: with the feature ON and device offset diverging (0 → 3),
+    # the row must fire WITH lwt_offset intact (not stripped by the #300 guard).
+    apply_calls = _run_reconcile_with_offset(monkeypatch, enabled_flag=True, prefire=True)
+    assert len(apply_calls) == 1
+    assert apply_calls[0].get("lwt_offset") == 3
+
+
+def test_disabled_strips_lwt_offset(monkeypatch):
+    # Feature OFF: climate-hands-off preserved — lwt_offset is stripped before
+    # apply (prefire disabled here so we observe the stripped apply directly).
+    apply_calls = _run_reconcile_with_offset(monkeypatch, enabled_flag=False, prefire=False)
+    assert len(apply_calls) == 1
+    assert "lwt_offset" not in apply_calls[0]
+
+
+def test_enabled_idempotency_skips_when_offset_matches(monkeypatch):
+    # Quota guard: device already at the target offset → pre-fire match → no apply.
+    import src.state_machine as sm
+    from src import db
+
+    monkeypatch.setattr("src.config.config.DAIKIN_LWT_PREHEAT_ENABLED", True)
+    monkeypatch.setattr("src.config.config.PREFIRE_STATE_MATCH_ENABLED", True)
+    monkeypatch.setattr("src.config.config.USER_OVERRIDE_RESPECT_HOURS", 4.0)
+    sm._FIRST_APPLIED_SESSION.clear()
+    sm._USER_OVERRIDE_INHERITED_NOTIFIED.clear()
+
+    apply_calls: list[dict] = []
+    monkeypatch.setattr(
+        "src.state_machine.apply_scheduled_daikin_params",
+        lambda dev, client, params, trigger: apply_calls.append(params) or True,
+    )
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "t.db"
+        monkeypatch.setattr("src.config.config.DB_PATH", str(path))
+        db.init_db()
+        conn = db.get_connection()
+        try:
+            rid = _seed_lwt_row(conn, {"lwt_offset": 3, "lp_optimizer": True})
+        finally:
+            conn.close()
+        dev = DaikinDevice(id="gw", name="x", lwt_offset=3.0)  # already at target
+        now_utc = datetime.now(UTC)
+        rows = db.get_actions_for_plan_date(now_utc.date().isoformat(), device="daikin")
+        sm._reconcile_daikin_actions(rows, MagicMock(), dev, now_utc, trigger="test")
+        row = db.get_action_by_id(rid)
+    assert len(apply_calls) == 0
+    assert row is not None and row["status"] == "completed"
+    assert (row.get("error_msg") or "").startswith("noop")

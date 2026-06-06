@@ -255,7 +255,14 @@ def _reconcile_daikin_actions(
             # 2026-05-11 incident showed could still carry lwt_offset=-5,
             # sabotaging the heat-pump's ability to reheat the tank). The
             # LP only drives tank state — Daikin firmware owns the curve.
-            apply_params.pop("lwt_offset", None)
+            #
+            # #481 — active LWT pre-heat: when that feature is ENABLED, HEM
+            # deliberately drives the LWT offset (heuristic, clamped integer),
+            # so let lwt_offset through. ``climate_on`` is still stripped (we
+            # never drive zone on/off). When disabled, both are stripped — the
+            # original climate-hands-off behaviour, defending against stale rows.
+            if not config.DAIKIN_LWT_PREHEAT_ENABLED:
+                apply_params.pop("lwt_offset", None)
             apply_params.pop("climate_on", None)
 
             # Epic 14 (#386) — pre-fire reconcile.
