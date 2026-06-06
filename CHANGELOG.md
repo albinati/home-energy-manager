@@ -6,7 +6,73 @@ Major versions track significant LP / dispatch architecture iterations. Minor ve
 
 ## [Unreleased]
 
-_Nothing yet — open an issue if you'd like to propose something._
+**Theme (2026-06-06): active space-heating control + a self-correcting solar
+forecast + a UI that explains itself.** HEM now (optionally) drives the Daikin
+leaving-water-temperature offset to pre-heat the house off cheap power and coast
+the peak; the PV forecast closes a feedback loop on its own realised error so it
+stops being chronically pessimistic about the morning sun; and the dashboard
+gained a heating-plan timeline, a load-composition view, and a weather card. The
+two control-side features ship **off by default** (`DAIKIN_LWT_PREHEAT_ENABLED`,
+`PV_RECENT_BIAS_ENABLED`) — enabled on the prod lab to observe before promotion.
+
+### Added — active climate control
+- **Heuristic LWT pre-heat** (#481, PR #482). Price-tier offset: `+BOOST` in
+  cheap slots, `PEAK_SETBACK` in peak, neutral otherwise, only while the firmware
+  is plausibly heating (`outdoor < DAIKIN_WEATHER_CURVE_HIGH_C`). Integer offset,
+  quota-safe (idempotency + deterministic write-budget cap + zone-off skip).
+  First active space-heating since the 2026-05-09 climate-hands-off freeze; the
+  `state_machine` `lwt_offset` strip is gated on the new flag so the offset
+  actually reaches the device. Knobs: `DAIKIN_LWT_PREHEAT_{ENABLED,BOOST_C,
+  PEAK_SETBACK_C,COMFORT_BAND_C}` (sensor-ready comfort guard pre-wired).
+- **Thermal-coherence smoothing of the offset** (PR #485). A building's thermal
+  mass has a multi-hour time constant, so the per-slot offset is smoothed into
+  sustained blocks (`DAIKIN_LWT_PREHEAT_MIN_BLOCK_SLOTS`, default 4 = 2 h):
+  short 0-gaps between equal blocks are bridged, sub-2 h blocks dropped. Kills
+  the `+3/0/+3/0` chatter at the cheap threshold and the wasted Daikin writes.
+
+### Added — adaptive solar forecast
+- **PV recent-bias corrector** (#486, PRs #488 + #489). A convergent feedback
+  loop: per UTC hour, the recency-weighted mean of `actual/forecast` from
+  `pv_error_log` (the committed forecast's own residual error) nudges the
+  day-ahead PV forecast — **warm-started** to the full measured correction from
+  history, then damped-accumulated nightly for stable tracking. Because it's
+  driven by realised error (not clear-sky potential), genuine morning shade is
+  left alone while systematic under-forecast is corrected. Fixes the
+  overnight-over-import-then-midday-export pattern (audited: morning forecast was
+  2.1–2.7× too low). Separate from the calibration tables (no training
+  contamination). Knobs: `PV_RECENT_BIAS_*`. New `pv_recent_bias` table; nightly
+  refresh chained after the `pv_error_log` rebuild.
+
+### Added — dashboard (Preact/ECharts SPA)
+- **Heating-plan timeline** (#481 follow-up, PR #484/#485). One continuous
+  D-1·today·D+1 chart in the Today's-plan idiom: outdoor temp → weather-curve LWT
+  (faint) → actual radiator LWT (curve + offset, bold — the gap *is* the offset)
+  → tank target, with heating-on shading, negative-price bands, now-marker.
+  Backed by a deterministic `/api/v1/daikin/heating-plan` endpoint (recomputed
+  per slot, no overlapping `action_schedule` rows).
+- **Weather card** (PR #487). Apple/Tesla-style, solar-home tuned: current
+  condition from cloud cover, today's solar generation sparkline + kWh expected,
+  and an hourly strip (temp / sky / PV potential). `/weather` slots now carry
+  `cloud_cover_pct` + `irradiance_wm2`. All inline SVG, no chart engine.
+- **Load details** (PR #483/#485). The old "Energy flow" widget is now
+  load-specific: day view is a stacked composition (base + appliances + heat
+  pump = where the energy goes) with a household-demand forecast overlay; the
+  grid/solar/export series moved out.
+
+### Added — LP load forecast
+- **Day-of-week residual-load forecast v2** (#477, PR #478). Day-of-week buckets
+  + measured-Daikin-split calibration + median/p75 spread, one unified builder
+  across the 6 call sites; scenario variance from the spread. Kill-switch
+  `LP_RESIDUAL_PROFILE_V2`; Insights "when you spend the most" heatmap.
+
+### Fixed
+- **Fox V3 merge froze the battery** (#479, PR #480). `_coarse_merge_fox` took
+  `max(minSocOnGrid)`, so a midday `solar_charge` hold (min 100) merged with the
+  evening discharge windows (min 10) → the battery couldn't discharge through the
+  peak it was charged for. Now only same-floor SelfUse windows merge.
+- **`_tank_at` masked negative-price boost** in the heating-plan endpoint
+  (review-caught, PR #484): the full-span setback row matched before the boost
+  sub-interval. Boost windows are now preferred.
 
 ## [12.0.0] — 2026-05-20
 
