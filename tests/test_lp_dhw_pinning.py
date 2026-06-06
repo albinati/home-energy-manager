@@ -359,3 +359,28 @@ def test_lp_pinning_passive_mode_unaffected(monkeypatch):
     # Passive mode + pinning could be infeasible — LP returns ok=False if so.
     # Either outcome is acceptable as long as it doesn't crash.
     assert plan is not None
+
+
+def test_lp_pinning_guests_with_last_slot_in_shower_window_is_feasible(monkeypatch):
+    """#422 regression: under K2 pinning the pinned trajectory clamps
+    ``tank[n]`` to the dhw_policy value (e.g. NORMAL 45 °C), but the terminal
+    DHW floor was still active and (guests mode, last slot in the evening shower
+    window) used ``TARGET_DHW_TEMP_MIN_GUESTS_C-2 = 53`` — directly contradicting
+    the pin → Infeasible. Fix: skip the terminal floor when ``_dhw_pinned``.
+    Without the guard this asserts ``plan.ok=False``.
+    """
+    monkeypatch.setattr(config, "OPTIMIZATION_PRESET", "guests", raising=False)
+    monkeypatch.setattr(config, "TARGET_DHW_TEMP_MIN_GUESTS_C", 55.0, raising=False)
+    # Horizon ending inside the evening shower window (20:00-22:00 BST): 2 slots
+    # at 21:00 + 21:30 local, both in-window, so the LAST slot is in-window.
+    base = datetime(2026, 6, 1, 21, 0, tzinfo=TZ_LOCAL).astimezone(UTC)
+    n = 2
+    slots = [base + timedelta(minutes=30 * i) for i in range(n)]
+    plan = _solve(
+        slots=slots, prices=[15.0] * n, pv=[1.0] * n,
+        base_load=[0.3] * n, init_soc=5.8, init_tank=45.0,
+    )
+    assert plan.ok, (
+        "LP must be feasible under guests+pinning with the last slot in the "
+        f"shower window (terminal floor must defer to the pin); got {plan.status}"
+    )
