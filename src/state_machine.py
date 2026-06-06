@@ -50,6 +50,9 @@ _USER_OVERRIDE_INHERITED_NOTIFIED: set[int] = set()
 # page Telegram every 2 min for the same condition. Cleared when the heartbeat
 # observes tank_on == True again — a fresh drift episode then re-pings.
 _TANK_DRIFT_NOTIFIED: bool = False
+# #461 — dedup for the LWT-offset drift backstop (same one-page-per-episode
+# semantics as the tank flag above). Cleared when the offset is back at 0.
+_LWT_DRIFT_NOTIFIED: bool = False
 
 
 def _parse_utc(s: str) -> datetime:
@@ -466,6 +469,11 @@ def _reconcile_daikin_actions(
     # belt-and-braces backstop for any drift mechanism we haven't yet
     # imagined.
     _check_tank_power_drift(actions, client, dev, now_utc, trigger=trigger)
+    # #461 — LWT-offset drift: when HEM owns the offset (pre-heat enabled) but
+    # the live device holds a non-zero offset no plan slot justifies, reset it
+    # to 0 once the user's grace window has passed. Catches a manual offset with
+    # no paired restore.
+    _check_lwt_offset_drift(actions, client, dev, now_utc, trigger=trigger)
     # PR J diverter removed 2026-05-23 (K2-cleanup) — superseded by K1's
     # dhw_policy fixed schedule. The diverter's "lift tank during PV
     # abundance" goal is now redundant: tank lives at NORMAL=45 °C via
@@ -596,6 +604,126 @@ def _check_tank_power_drift(
             notify_critical(msg) if not recovered else notify_risk(msg)
         except Exception as _exc:
             logger.debug("tank-drift notify failed (non-fatal): %s", _exc)
+
+
+def _check_lwt_offset_drift(
+    actions: list[dict[str, Any]],
+    client: DaikinClient,
+    dev: Any,
+    now_utc: datetime,
+    *,
+    trigger: str,
+) -> None:
+    """#461 — reset a stray non-zero LWT offset to 0 when nothing justifies it.
+
+    Only acts when HEM is actually managing the offset
+    (``DAIKIN_LWT_PREHEAT_ENABLED``); otherwise climate is hands-off and a
+    non-zero offset is the user's/firmware's to keep. Bails (fail-safe) on:
+
+    * feature/check flag disabled, or vacation preset;
+    * live offset unknown (cache miss) or already ≈0 (no drift);
+    * an active/pending ``lwt_preheat`` slot covering now carries a non-zero
+      offset (the pre-heat plan justifies it);
+    * a recent user override is still in effect — respect the gesture for
+      ``USER_OVERRIDE_RESPECT_HOURS`` (this is what lets a *manual* offset stand
+      for the grace window, then get reset once it ages out — the #461 ask).
+
+    Dedupes via ``_LWT_DRIFT_NOTIFIED`` (one page per episode; cleared at 0).
+    """
+    global _LWT_DRIFT_NOTIFIED
+
+    if not config.DAIKIN_LWT_PREHEAT_ENABLED or not config.LWT_OFFSET_DRIFT_CHECK_ENABLED:
+        return
+    if (config.OPTIMIZATION_PRESET or "normal").strip().lower() == "vacation":
+        return
+    off = getattr(dev, "lwt_offset", None)
+    if off is None:
+        return  # unknown live state — fail-safe
+    if abs(float(off)) < 0.5:
+        if _LWT_DRIFT_NOTIFIED:
+            _LWT_DRIFT_NOTIFIED = False
+        return
+
+    # Does any current slot's lwt_preheat action justify a non-zero offset?
+    for act in actions:
+        try:
+            start = _parse_utc(act["start_time"])
+            end = _parse_utc(act["end_time"])
+        except (ValueError, KeyError, TypeError):
+            continue
+        if not (start <= now_utc < end):
+            continue
+        if (act.get("status") or "") not in ("pending", "active"):
+            continue
+        if act.get("overridden_by_user_at"):
+            continue
+        if act.get("action_type") != "lwt_preheat":
+            continue
+        params = act.get("params") or {}
+        if isinstance(params, str):
+            try:
+                params = json.loads(params)
+            except (json.JSONDecodeError, TypeError):
+                params = {}
+        po = params.get("lwt_offset")
+        if po is not None and abs(float(po)) >= 0.5:
+            return  # a pre-heat window justifies the non-zero offset
+
+    # Respect a still-in-effect user gesture (grace window before reset).
+    try:
+        src = db.find_recent_user_override(
+            device="daikin",
+            within_hours=float(config.USER_OVERRIDE_RESPECT_HOURS),
+            now_utc=now_utc,
+        )
+        if src is not None:
+            src_params = src.get("params") or {}
+            if isinstance(src_params, str):
+                try:
+                    src_params = json.loads(src_params)
+                except (json.JSONDecodeError, TypeError):
+                    src_params = {}
+            if user_gesture_still_in_effect(dev, src_params):
+                return
+    except Exception as _exc:
+        logger.debug("lwt-drift override lookup failed (non-fatal): %s", _exc)
+
+    # Drift confirmed — reset the offset to 0 (full settable/zone/read-only
+    # guard is inside apply_scheduled_daikin_params).
+    db.log_action(
+        device="daikin",
+        action="lwt_offset_drift_detected",
+        params={"lwt_offset": float(off), "auto_recover": bool(config.LWT_OFFSET_DRIFT_AUTO_RECOVER)},
+        result="alert",
+        trigger=trigger,
+    )
+    recovered = False
+    if (
+        config.LWT_OFFSET_DRIFT_AUTO_RECOVER
+        and not config.OPENCLAW_READ_ONLY
+        and config.DAIKIN_CONTROL_MODE == "active"
+    ):
+        try:
+            apply_scheduled_daikin_params(
+                dev, client, {"lwt_offset": 0, "lp_optimizer": True},
+                trigger=f"lwt_drift_recover:{trigger}",
+            )
+            recovered = True
+        except (DaikinError, ValueError) as exc:
+            logger.warning("lwt-offset-drift auto-recover failed: %s", exc)
+
+    if not _LWT_DRIFT_NOTIFIED:
+        _LWT_DRIFT_NOTIFIED = True
+        try:
+            msg = (
+                f"LWT offset = {off:+.0f}°C with no plan slot justifying it — "
+                f"{'reset to 0' if recovered else 'manual reset may be needed'} "
+                f"(trigger={trigger})"
+            )
+            notify_risk(msg)
+        except Exception as _exc:
+            logger.debug("lwt-drift notify failed (non-fatal): %s", _exc)
+
 
 def reconcile_daikin_schedule_for_date(
     plan_date: str,
