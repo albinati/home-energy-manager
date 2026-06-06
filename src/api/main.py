@@ -1625,9 +1625,10 @@ async def daikin_heating_plan():
         raw_offsets.append(off)
         tank_temp, tank_kind = _tank_at(cur)
         # Natural weather-curve LWT (radiator water temp the firmware targets at
-        # this outdoor temp, offset 0). The offset is only meaningful relative
-        # to this — the real setpoint is curve + offset.
-        lwt_base = round(get_lwt_base_c(outdoor), 1) if (heating_on and outdoor is not None) else None
+        # this outdoor temp, offset 0). Computed whenever outdoor is known so the
+        # commanded setpoint (curve + offset) shows across the whole window — the
+        # firmware owns the actual on/off, not our old cutoff.
+        lwt_base = round(get_lwt_base_c(outdoor), 1) if outdoor is not None else None
         slots_out.append({
             "slot_utc": cur.isoformat().replace("+00:00", "Z"),
             "outdoor_c": round(outdoor, 1) if outdoor is not None else None,

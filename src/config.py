@@ -843,6 +843,17 @@ class Config:
     DHW_TEMP_SETBACK_C: float = float(
         os.getenv("DHW_TEMP_SETBACK_C", "37")
     )
+    # Pre-cool the tank toward the device minimum during the setback that runs
+    # INTO a negative-price window, so the paid boost (cold → 60 °C) absorbs the
+    # most kWh while we're paid — and zero positive-price reheat happens just
+    # before. Only applied when no shower window falls between setback start and
+    # the boost (the boost reheats to 60 before showers). NOTE: the gain is
+    # bounded by standing loss (~0.5 °C/h) — the tank can't be force-cooled, only
+    # left to coast — so expect ~0.5–1 kWh, not a step change.
+    DHW_TANK_PRECOOL_ENABLED: bool = (
+        os.getenv("DHW_TANK_PRECOOL_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+    )
+    DHW_TANK_PRECOOL_TARGET_C: int = int(os.getenv("DHW_TANK_PRECOOL_TARGET_C", "30"))
     # Commandable SETPOINT during negative-price slots (import price < 0 p/kWh):
     # the tank target we WRITE to the heat pump. Grid is paying us to consume, so
     # we drive the setpoint to its max. MUST stay ≤ the device's heat-pump
@@ -968,7 +979,11 @@ class Config:
         os.getenv("OPTIMIZATION_PREHEAT_LWT_BOOST", os.getenv("SCHEDULER_PREHEAT_LWT_BOOST", "2"))
     )
     OPTIMIZATION_LWT_OFFSET_MIN: float = float(os.getenv("OPTIMIZATION_LWT_OFFSET_MIN", "-10"))
-    OPTIMIZATION_LWT_OFFSET_MAX: float = float(os.getenv("OPTIMIZATION_LWT_OFFSET_MAX", "5"))
+    # Device range is ±10. Raised 5→10 (2026-06-06): the Daikin firmware applies
+    # the offset relative to its OWN weather curve and decides whether to heat,
+    # so a high offset doesn't force pointless heating — it lets paid windows
+    # push the radiator water to the top of the operating range.
+    OPTIMIZATION_LWT_OFFSET_MAX: float = float(os.getenv("OPTIMIZATION_LWT_OFFSET_MAX", "10"))
     # --- Heuristic LWT pre-heat (#481) — active space-heating control ---------
     # When enabled, HEM drives the Daikin leaving-water-temperature OFFSET by a
     # simple price-tier rule: boost in cheap slots (pre-heat the house) and set
@@ -990,7 +1005,7 @@ class Config:
     # OPTIMIZATION_LWT_OFFSET_MAX clamp; the comfort guard suppresses it once a
     # room sensor exists. Default = the current offset ceiling (+5). Raise
     # OPTIMIZATION_LWT_OFFSET_MAX (and this) for an even wider paid-window range.
-    DAIKIN_LWT_PREHEAT_NEGATIVE_BOOST_C: int = int(os.getenv("DAIKIN_LWT_PREHEAT_NEGATIVE_BOOST_C", "5"))
+    DAIKIN_LWT_PREHEAT_NEGATIVE_BOOST_C: int = int(os.getenv("DAIKIN_LWT_PREHEAT_NEGATIVE_BOOST_C", "10"))
     # Comfort dead-band (°C) used by the sensor-ready guard: once a real room
     # temperature is available, suppress boost above SETPOINT+band and suppress
     # setback below SETPOINT-band. No-op while indoor_temp telemetry is absent.
