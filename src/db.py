@@ -6014,6 +6014,44 @@ def get_appliance(appliance_id: int) -> dict[str, Any] | None:
             conn.close()
 
 
+def appliance_learned_typical_kw(
+    appliance_id: int, *, lookback_n: int = 10, min_samples: int = 3
+) -> tuple[float, int] | None:
+    """Rolling-mean power (kW) learned from measured cycle energy (#222).
+
+    From the most recent ``lookback_n`` completed jobs with a real
+    ``actual_kwh`` (SmartThings energy counter, #235), per-job
+    ``kW = actual_kwh / (duration_minutes/60)``. Returns ``(mean_kw,
+    n_samples)`` once ``n >= min_samples``, else ``None`` so the caller falls
+    back to the static registration ``typical_kw``.
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            rows = conn.execute(
+                """SELECT actual_kwh, duration_minutes FROM appliance_jobs
+                   WHERE appliance_id = ? AND status = 'completed'
+                     AND actual_kwh IS NOT NULL AND actual_kwh > 0
+                     AND duration_minutes IS NOT NULL AND duration_minutes > 0
+                   ORDER BY id DESC LIMIT ?""",
+                (int(appliance_id), max(1, int(lookback_n))),
+            ).fetchall()
+        finally:
+            conn.close()
+    kws: list[float] = []
+    for r in rows:
+        try:
+            a = float(r["actual_kwh"])
+            d = float(r["duration_minutes"])
+            if a > 0 and d > 0:
+                kws.append(a / (d / 60.0))
+        except (TypeError, ValueError, KeyError):
+            continue
+    if len(kws) < int(min_samples):
+        return None
+    return (round(sum(kws) / len(kws), 4), len(kws))
+
+
 def update_appliance(appliance_id: int, **fields: Any) -> bool:
     """Update one or more fields on an appliance. Returns True if a row was
     updated. Silently ignores keys not in :data:`_APPLIANCE_UPDATABLE_FIELDS`."""

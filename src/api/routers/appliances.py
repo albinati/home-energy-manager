@@ -66,6 +66,16 @@ class UpdateApplianceRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 def _public_appliance(row: dict[str, Any]) -> dict[str, Any]:
+    # #222 — surface the learned power so the operator can see the system
+    # learning ("0.42 kW, mean of 8 runs") vs the static registration default.
+    learned_kw: float | None = None
+    learned_n = 0
+    try:
+        learned = db.appliance_learned_typical_kw(int(row["id"]))
+        if learned is not None:
+            learned_kw, learned_n = learned
+    except Exception:  # pragma: no cover — display enrichment must never 500
+        pass
     return {
         "id": row["id"],
         "vendor": row["vendor"],
@@ -75,6 +85,9 @@ def _public_appliance(row: dict[str, Any]) -> dict[str, Any]:
         "default_duration_minutes": row["default_duration_minutes"],
         "deadline_local_time": row["deadline_local_time"],
         "typical_kw": row["typical_kw"],
+        "learned_typical_kw": learned_kw,   # null until >= min_samples runs
+        "learned_samples": learned_n,
+        "effective_typical_kw": learned_kw if learned_kw is not None else row["typical_kw"],
         "enabled": bool(row["enabled"]),
         "created_at": row["created_at"],
     }

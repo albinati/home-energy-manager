@@ -445,6 +445,24 @@ def _historical_kwh_variance(
         return 0.0
 
 
+def _effective_typical_kw(appliance_id: int, static_kw: float) -> tuple[float, int]:
+    """#222 — the LEARNED rolling-mean power (kW) when enough measured runs
+    exist, else the static registration ``typical_kw``. Returns
+    ``(kw, n_learned)``; ``n_learned == 0`` means the static fallback was used.
+    """
+    try:
+        learned = db.appliance_learned_typical_kw(
+            int(appliance_id),
+            lookback_n=int(getattr(config, "APPLIANCE_LEARNED_KW_LOOKBACK", 10)),
+            min_samples=int(getattr(config, "APPLIANCE_LEARNED_KW_MIN_SAMPLES", 3)),
+        )
+    except Exception:  # pragma: no cover — never let learning break dispatch
+        learned = None
+    if learned is not None and learned[0] > 0:
+        return (float(learned[0]), int(learned[1]))
+    return (float(static_kw), 0)
+
+
 def find_battery_aware_window(
     earliest_start_utc: datetime,
     deadline_utc: datetime,
@@ -706,9 +724,11 @@ def _committed_load_profile_excluding(
         logger.debug("committed_load_profile: query failed", exc_info=True)
         return {}
     profile: dict[datetime, float] = {}
+    _kw_memo: dict[int, float] = {}
     for row in rows:
         try:
-            if int(row.get("appliance_id") or 0) == int(exclude_appliance_id):
+            aid = int(row.get("appliance_id") or 0)
+            if aid == int(exclude_appliance_id):
                 continue
             ps = _parse_iso(row["planned_start_utc"])
             pe = _parse_iso(row["planned_end_utc"])
@@ -717,6 +737,11 @@ def _committed_load_profile_excluding(
         kw = float(row.get("appliance_typical_kw") or 0.0)
         if kw <= 0:
             continue
+        # #222 — overlay the learned power when available.
+        if aid:
+            if aid not in _kw_memo:
+                _kw_memo[aid] = _effective_typical_kw(aid, kw)[0]
+            kw = _kw_memo[aid]
         slot = ps.replace(second=0, microsecond=0)
         if slot.minute < 30:
             slot = slot.replace(minute=0)
@@ -1194,7 +1219,16 @@ def _arm_or_replan(
             )
         return
 
-    appliance_kw = float(appliance.get("typical_kw") or 0.5)
+    # #222 — prefer the learned rolling-mean power over the static registration
+    # default once enough measured runs exist, so the LP stops over-estimating
+    # the cycle energy (and routing around the wash more than necessary).
+    static_kw = float(appliance.get("typical_kw") or 0.5)
+    appliance_kw, _learned_n = _effective_typical_kw(appliance_id, static_kw)
+    if _learned_n:
+        logger.info(
+            "appliance #%d: using LEARNED %.3f kW (mean of %d runs) vs registered %.3f kW",
+            appliance_id, appliance_kw, _learned_n, static_kw,
+        )
     marginal = build_marginal_cost_per_slot(now, deadline_utc, appliance_kw)
     if marginal:
         logger.info(
@@ -1547,6 +1581,7 @@ def appliance_load_profile_kw(
         return {}
 
     profile: dict[datetime, float] = {}
+    _kw_memo: dict[int, float] = {}
     for row in rows:
         try:
             ps = _parse_iso(row["planned_start_utc"])
@@ -1556,6 +1591,13 @@ def appliance_load_profile_kw(
         kw = float(row.get("appliance_typical_kw") or 0.0)
         if kw <= 0:
             continue
+        # #222 — overlay the LEARNED power when available (same value the picker
+        # committed with), so the LP residual profile matches the real cycle.
+        aid = int(row.get("appliance_id") or 0)
+        if aid:
+            if aid not in _kw_memo:
+                _kw_memo[aid] = _effective_typical_kw(aid, kw)[0]
+            kw = _kw_memo[aid]
         # Snap to half-hour grid and walk slots.
         slot = ps.replace(second=0, microsecond=0)
         if slot.minute < 30:

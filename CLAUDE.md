@@ -213,6 +213,15 @@ appliance IS the consent gate — no MCP confirm.
 `setMachineState run` command for all three. Register multiple devices
 via the discover/register MCP tools or REST endpoints.
 
+**Learned `typical_kw` (#222).** The cycle-energy estimate prefers the rolling
+mean of recent completed runs' measured `actual_kwh` (SmartThings energy
+counter, #235) over the static registration `typical_kw`, once
+`APPLIANCE_LEARNED_KW_MIN_SAMPLES` (3) runs exist — `db.appliance_learned_typical_kw`
+over the last `APPLIANCE_LEARNED_KW_LOOKBACK` (10). Registration default 0.5 kW
+over-estimated eco cycles ~3× (real ~0.2–0.4 kW), so the LP used to route around
+the wash more than necessary. `GET /api/v1/appliances` surfaces
+`learned_typical_kw` / `learned_samples` / `effective_typical_kw`.
+
 ---
 
 ## Key `.env` settings to know
