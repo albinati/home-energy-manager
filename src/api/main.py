@@ -1484,6 +1484,67 @@ async def daikin_dhw_schedule():
     return {"mode": mode, "rows": rows_out}
 
 
+@app.get("/api/v1/daikin/lwt-schedule")
+async def daikin_lwt_schedule():
+    """Committed LWT-offset pre-heat plan (#481) for today + tomorrow — the
+    ``lwt_preheat`` action rows the LP/dispatch layer wrote to
+    ``action_schedule`` (per-slot integer offset by price tier: boost in cheap
+    slots, setback in peak). Reads the schedule table — **zero Daikin quota**.
+    Powers the Heating-widget "Heating plan" badges, mirroring the tank plan.
+
+    ``enabled`` reflects ``DAIKIN_LWT_PREHEAT_ENABLED``; when false the LP emits
+    no offset rows and the UI shows the climate-hands-off state.
+    """
+    import json as _json
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+    from zoneinfo import ZoneInfo
+    from .. import db as _db
+
+    try:
+        tz = ZoneInfo(getattr(config, "BULLETPROOF_TIMEZONE", "Europe/London"))
+    except Exception:
+        tz = UTC
+    today_local = _dt.now(tz).date()
+    enabled = bool(getattr(config, "DAIKIN_LWT_PREHEAT_ENABLED", False))
+    rows_out: list[dict] = []
+    seen: set[tuple] = set()
+    for offset in (0, 1):
+        day = (today_local + _td(days=offset)).isoformat()
+        try:
+            rows = _db.schedule_for_date(day)
+        except Exception as e:
+            logger.debug("lwt-schedule: read failed for %s: %s", day, e)
+            continue
+        for r in rows:
+            if r.get("device") != "daikin" or r.get("action_type") != "lwt_preheat":
+                continue
+            params = r.get("params") or {}
+            if isinstance(params, str):
+                try:
+                    params = _json.loads(params)
+                except (_json.JSONDecodeError, TypeError):
+                    params = {}
+            off = params.get("lwt_offset")
+            if off is None:
+                continue
+            # A rolling 48 h plan can list the same window under both plan_dates;
+            # de-dupe on the (start,end,offset) identity.
+            key = (r.get("start_time"), r.get("end_time"), off)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows_out.append({
+                "action_type": r.get("action_type"),
+                "start_utc": r.get("start_time"),
+                "end_utc": r.get("end_time"),
+                "lwt_offset": off,
+                "status": r.get("status"),
+            })
+    rows_out.sort(key=lambda x: x.get("start_utc") or "")
+    return {"enabled": enabled, "rows": rows_out}
+
+
 @app.get("/api/v1/daikin/consumption")
 async def daikin_consumption(
     period: str = "week",

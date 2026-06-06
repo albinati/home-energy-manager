@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { getEnergyPeriod, getDaikinConsumption } from "../../lib/endpoints";
 import { usePeriod, setGranularity, selectedPeriod } from "../../lib/period";
-import { makeChart, baseOption, chartTheme, barGradient, areaGradient, type EChartsType } from "../../lib/charts";
+import { makeChart, baseOption, chartTheme, barGradient, areaGradient, withAlpha, type EChartsType } from "../../lib/charts";
 import { Icon } from "../common/Icon";
 import type {
   PeriodInsightsResponse,
   PeriodChartPoint,
   ExecutionTodayResponse,
   ExecutionSlot,
+  PvTodayResponse,
   DaikinConsumptionResponse,
 } from "../../lib/types";
 import "./energy-chart.css";
@@ -25,27 +26,24 @@ interface EnergyChartWidgetProps {
   // Execution slots used for the *day* view (30-min granularity) — same
   // source as the Today's bill widget so we don't duplicate the fetch.
   execution: ExecutionTodayResponse | null;
+  // /pv/today — supplies the per-slot LOAD FORECAST (base_load_kwh) and price
+  // for the day-view forecast-vs-actual comparison + tariff bands.
+  pv?: PvTodayResponse | null;
 }
 
-// Energy flow chart with proper source / sink split. House load is fed by
-// three things: solar self-use, battery discharge, and grid import — the
-// last is the only one that costs money, so cost figures derive from grid
-// only (never load × price, since solar self-use is free).
-//
-// Granularity switcher:
-//   * Today → 30-min from /execution/today, with Daikin actuals from the
-//     Onecta consumption table mapped client-side to slots when present
-//     (physics estimate is the fallback; it returns 0 above the
-//     weather-curve cutoff — that's why the chart used to look empty).
-//   * Week / Month / Year → /energy/period:
-//       positive bars: Solar | Discharge | Grid Import   (sources)
-//       negative bars: Charge | Grid Export              (sinks)
-//       line:          Load                              (total demand)
-//       overlay:       Daikin   (heating+DHW slice of load)
+// LOAD DETAILS chart — household demand only (no grid import/export/solar; the
+// flow/source-sink view moved to Insights). Two modes:
+//   * Today → 30-min forecast-vs-actual for the household (residual) load:
+//     the LP's load forecast (base_load_kwh from /pv/today) vs the measured
+//     residual (consumption − Daikin), mirroring the Today's-plan treatment,
+//     with the Daikin (heat-pump) actual as a context line + tariff bands.
+//   * Week / Month / Year → /energy/period: Load (total demand) + the two
+//     Daikin slices (heating / tank) over time. Actual only — per-day forecast
+//     history isn't captured yet (#424).
 //
 // Drill-down: clicking a label in year view → month; in week/month, only
 // clicking *today's* label drills to day (historical day requires #424).
-export function EnergyChartWidget({ execution }: EnergyChartWidgetProps) {
+export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
   // Granularity + anchor come from the shared period navigator so the chart
   // re-scopes together with the Hero + cost breakdown.
   const { gran: granularity, anchor } = usePeriod();
@@ -91,13 +89,13 @@ export function EnergyChartWidget({ execution }: EnergyChartWidgetProps) {
     if (!chartRef.current) chartRef.current = makeChart(elRef.current);
     const chart = chartRef.current;
     const option = granularity === "day" && isToday
-      ? optionForDay(execution, daikin)
+      ? optionForDay(execution, pv ?? null, daikin)
       : optionForPeriod(period, daikin, granularity);
     chart.setOption(option, true);
     const ro = new ResizeObserver(() => chart.resize());
     ro.observe(elRef.current);
     return () => ro.disconnect();
-  }, [granularity, period, daikin, execution, isToday]);
+  }, [granularity, period, daikin, execution, pv, isToday]);
 
   useEffect(() => () => {
     if (chartRef.current) {
@@ -128,48 +126,13 @@ export function EnergyChartWidget({ execution }: EnergyChartWidgetProps) {
 
   const dayHasSlots = granularity === "day" && isToday && !!execution?.slots?.length;
   const isPastDay = granularity === "day" && !isToday;
-  // Detect which source dominates the Daikin buckets — surfaced in the flag
-  // text so the user knows whether they're reading an Onecta integer or
-  // a telemetry-integral decimal refinement.
-  const sourceCounts = (daikin?.buckets ?? []).reduce(
-    (acc, b) => {
-      const s = b.source || "";
-      if (s) acc[s] = (acc[s] ?? 0) + 1;
-      return acc;
-    },
-    {} as Record<string, number>,
-  );
-  const daikinSourceLabel =
-    sourceCounts["telemetry_integral"] && !sourceCounts["onecta_cache"]
-      ? "telemetry-integral (sub-integer precision)"
-      : sourceCounts["telemetry_integral"] && sourceCounts["onecta_cache"]
-        ? "mixed Onecta integer + telemetry-integral decimals"
-        : sourceCounts["onecta_cache"]
-          ? "Onecta cache (integer-rounded)"
-          : "physics estimate (no actuals yet)";
-
-  // Foot summary — totals + the grid-only cost view.
-  const summary = period
-    ? {
-        solar: period.energy.solar_kwh,
-        load: period.energy.load_kwh,
-        import: period.energy.import_kwh,
-        export: period.energy.export_kwh,
-        charge: period.energy.charge_kwh,
-        discharge: period.energy.discharge_kwh,
-        importCost: period.cost?.import_cost_pounds ?? 0,
-        exportRevenue: period.cost?.export_earnings_pounds ?? 0,
-        standing: (period.cost?.standing_charge_pence ?? 0) / 100,
-        netCost: period.cost?.net_cost_pounds ?? 0,
-      }
-    : null;
+  // Foot summary — LOAD totals only (grid/solar moved to Insights).
+  const summary = period ? { load: period.energy.load_kwh } : null;
   const daikinTotals = daikin?.totals;
-  const todayTotals = granularity === "day" && execution?.totals
+  const todayTotals = granularity === "day" && isToday && execution?.totals
     ? {
         load: execution.totals.load_kwh ?? null,
         residual: execution.totals.residual_kwh_est ?? null,
-        grid_cost_p: execution.totals.cost_realised_p ?? null,
-        svt_cost_p: execution.totals.cost_svt_p ?? null,
       }
     : null;
 
@@ -187,7 +150,7 @@ export function EnergyChartWidget({ execution }: EnergyChartWidgetProps) {
       {/* Host wrap — loading state overlays (position:absolute) so it never
           displaces the chart, killing load-jump. */}
       <div class="echart-host-wrap">
-        <div class="echart-host" ref={elRef} aria-label="Energy flow chart" />
+        <div class="echart-host" ref={elRef} aria-label="Load details chart" />
         {loading && <div class="echart-state">Loading…</div>}
         {error && <div class="echart-state echart-state--err">{error}</div>}
       </div>
@@ -207,23 +170,17 @@ export function EnergyChartWidget({ execution }: EnergyChartWidgetProps) {
       {granularity === "day" && dayHasSlots && (
         <div class="echart-flag">
           <span class="echart-flag-icon"><Icon name="schedule" size={14} /></span>
-          Day view: load split into Daikin (<strong>{daikinSourceLabel}</strong>),
-          appliances &amp; base, + <strong>realised grid cost</strong>. Per-slot
-          solar / import / export aren't captured yet — see #424.
+          Household load: <strong>forecast</strong> (dashed) vs <strong>actual</strong>
+          {" "}(solid) — residual demand, i.e. consumption minus the heat pump.
+          Daikin shown as a context line; tariff tier shades the background.
         </div>
       )}
 
       {summary && granularity !== "day" && (
         <div class="echart-foot">
           <span class="echart-foot-grp">
-            <strong>Sources</strong>&nbsp;
-            <span class="echart-tok echart-tok-solar">{fmt(summary.solar)} solar</span> ·
-            <span class="echart-tok echart-tok-imp">{fmt(summary.import)} import</span>
-          </span>
-          <span class="echart-foot-grp">
-            <strong>Sinks</strong>&nbsp;
-            <span class="echart-tok echart-tok-load">{fmt(summary.load)} load</span> ·
-            <span class="echart-tok echart-tok-exp">{fmt(summary.export)} export</span>
+            <strong>Load</strong>&nbsp;
+            <span class="echart-tok echart-tok-load">{fmt(summary.load)} total demand</span>
           </span>
           {daikinTotals && (daikinTotals.kwh_total || 0) > 0 && (
             <span class="echart-foot-grp">
@@ -237,43 +194,24 @@ export function EnergyChartWidget({ execution }: EnergyChartWidgetProps) {
               )}
             </span>
           )}
-          <span class="echart-foot-grp">
-            <strong>Grid £</strong>&nbsp;
-            <span class="echart-tok echart-tok-cost">£{summary.importCost.toFixed(2)} paid</span> +
-            <span class="echart-tok echart-tok-cost">£{summary.standing.toFixed(2)} standing</span> −
-            <span class="echart-tok echart-tok-rev">£{summary.exportRevenue.toFixed(2)} earned</span> =
-            <strong class={summary.netCost >= 0 ? "echart-tok-cost" : "echart-tok-rev"}>
-              £{summary.netCost.toFixed(2)} net
-            </strong>
-          </span>
         </div>
       )}
       {todayTotals && (
         <div class="echart-foot">
           <span class="echart-foot-grp">
             <strong>Today so far</strong>&nbsp;
+            {todayTotals.residual != null && <span class="echart-tok echart-tok-resid">{fmt(todayTotals.residual)} residual load</span>}
+            {todayTotals.load != null && (
+              <>{" · "}<span class="echart-tok echart-tok-load">{fmt(todayTotals.load)} total demand</span></>
+            )}
             {daikinTotals && (daikinTotals.kwh_total || 0) > 0 && (
               <>
-                <span class="echart-tok echart-tok-daikin">{fmt(daikinTotals.kwh_total)} Daikin</span>
+                {" · "}<span class="echart-tok echart-tok-daikin">{fmt(daikinTotals.kwh_total)} Daikin</span>
                 {daikinTotals.kwh_heating > 0 && <span class="echart-tok-mute"> ({fmt(daikinTotals.kwh_heating)} heat)</span>}
                 {daikinTotals.kwh_dhw > 0 && <span class="echart-tok-mute"> ({fmt(daikinTotals.kwh_dhw)} tank)</span>}
-                {" · "}
               </>
             )}
-            {todayTotals.residual != null && <span class="echart-tok echart-tok-resid">{fmt(todayTotals.residual)} residual</span>}
-            {todayTotals.load != null && (
-              <>{" · "}<span class="echart-tok echart-tok-load">{fmt(todayTotals.load)} total load</span></>
-            )}
           </span>
-          {todayTotals.grid_cost_p != null && (
-            <span class="echart-foot-grp">
-              <strong>Grid cost</strong>&nbsp;
-              <span class="echart-tok echart-tok-cost">{pence(todayTotals.grid_cost_p)}</span>
-              {todayTotals.svt_cost_p != null && (
-                <> <span class="echart-tok-mute">(SVT would be {pence(todayTotals.svt_cost_p)})</span></>
-              )}
-            </span>
-          )}
         </div>
       )}
     </div>
@@ -283,12 +221,6 @@ export function EnergyChartWidget({ execution }: EnergyChartWidgetProps) {
 function fmt(v: number | null | undefined): string {
   if (v == null) return "—";
   return `${v.toFixed(v >= 100 ? 0 : 1)} kWh`;
-}
-
-function pence(p: number | null | undefined): string {
-  if (p == null) return "—";
-  if (Math.abs(p) >= 100) return `£${(p / 100).toFixed(2)}`;
-  return `${p.toFixed(1)}p`;
 }
 
 function optionForPeriod(
@@ -329,38 +261,19 @@ function optionForPeriod(
     ...base,
     legend: {
       ...(base.legend as object),
-      // Per operator request: only solar, grid import/export, load + the two
-      // Daikin slices. Battery charge/discharge bars intentionally dropped.
-      data: ["Solar", "Grid Import", "Grid Export", "Load", "Daikin heating", "Daikin tank"],
+      // Load details: total demand as the bar, with the two Daikin (heat-pump)
+      // slices overlaid. Grid import/export + solar live on the Insights tab.
+      data: ["Load", "Daikin heating", "Daikin tank"],
     },
     xAxis: { ...(base.xAxis as object), data: labels },
     yAxis: [{ ...(base.yAxis as object), name: "kWh", nameTextStyle: { color: t.textMute, fontSize: 10 } }],
     series: [
       {
-        ...seriesBar("Solar", points.map((p) => round1(p.solar_kwh)), t.pv, "house"),
-        // The single structural rule separating sources (above) from sinks (below).
-        markLine: {
-          silent: true, symbol: "none",
-          lineStyle: { color: t.border, width: 1, opacity: 0.5 },
-          data: [{ yAxis: 0 }], label: { show: false },
-        },
-      },
-      seriesBar("Grid Import", points.map((p) => round1(p.import_kwh)),     t.importColor, "house"),
-      seriesBar("Grid Export", points.map((p) => -round1(p.export_kwh)),    t.exportColor, "out", true),
-      {
-        name: "Load",
-        type: "line",
-        data: points.map((p) => round1(p.load_kwh)),
-        smooth: 0.4,
-        symbol: "none",
-        z: 10,
-        lineStyle: { color: t.house, width: 2.5, cap: "round" },
-        areaStyle: { color: areaGradient(t.house, 0.28, 0.02) },
-        emphasis: { focus: "series" },
-        universalTransition: { enabled: true },
+        ...seriesBar("Load", points.map((p) => round1(p.load_kwh)), t.house, "load"),
+        itemStyle: { color: barGradient(t.house, 0.85, 0.4), borderRadius: [4, 4, 0, 0] },
       },
       // Daikin overlays — quiet secondary lines (dashed = heating, sparse
-      // dotted = DHW estimate). No fills; they ride above the stack.
+      // dotted = DHW estimate). No fills; they ride above the bar.
       {
         name: "Daikin heating",
         type: "line",
@@ -404,88 +317,151 @@ function seriesBar(name: string, data: number[], color: string, stack: string, s
   };
 }
 
-// Map Onecta's 2-hour Daikin buckets onto 30-min execution slots client-side.
-// Each bucket covers 2 local-time hours; we spread its kWh evenly over the
-// four 30-min slots inside it. Local-day boundary handling is approximate
-// (within an hour at BST/GMT); fine-grained alignment lands when the backend
-// writes per-slot Daikin directly. Returns separate heating + DHW so the
-// day-view chart can stack them as distinct segments.
-interface DaikinSplitPerSlot {
-  total: number;
-  heating: number;
-  dhw: number;
-}
+type DayTier = "negative" | "cheap" | "standard" | "peak" | null;
 
-function daikinSplitBySlotIso(daikin: DaikinConsumptionResponse | null, slots: ExecutionSlot[]): Map<string, DaikinSplitPerSlot> {
-  const out = new Map<string, DaikinSplitPerSlot>();
-  if (!daikin || !daikin.buckets?.length) return out;
-  if (!slots.length) return out;
-  for (const b of daikin.buckets) {
-    if (!b.when || (b.kwh_total ?? 0) <= 0) continue;
-    const baseUtc = new Date(b.when + "Z");
-    if (Number.isNaN(baseUtc.getTime())) continue;
-    const totPer30  = (b.kwh_total   ?? 0) / 4;
-    const heatPer30 = (b.kwh_heating ?? 0) / 4;
-    const dhwPer30  = (b.kwh_dhw     ?? 0) / 4;
-    for (let k = 0; k < 4; k++) {
-      const slotDt = new Date(baseUtc.getTime() + k * 30 * 60 * 1000);
-      const iso = slotDt.toISOString().replace(/\.\d{3}Z$/, "Z").replace(/T(\d{2}):(\d{2}):\d{2}Z/, "T$1:$2:00Z");
-      out.set(iso, { total: totPer30, heating: heatPer30, dhw: dhwPer30 });
-    }
-  }
-  return out;
-}
-
+// Day view = household LOAD forecast vs actual (residual = consumption − heat
+// pump), mirroring the Today's-plan line treatment: forecast dashed, actual
+// solid + fill. Daikin (heat-pump) actual rides as a quiet context line; the
+// tariff tier shades the background. No grid/solar series — this is load only.
 function optionForDay(
   exec: ExecutionTodayResponse | null,
-  daikinConsumption: DaikinConsumptionResponse | null,
+  pv: PvTodayResponse | null,
+  _daikinConsumption: DaikinConsumptionResponse | null,
 ): Record<string, unknown> {
   const t = chartTheme();
   const base = baseOption();
-  const slots = (exec?.slots || []).slice().sort((a, b) => (a.slot_utc ?? "").localeCompare(b.slot_utc ?? ""));
-  const labels = slots.map((s) => formatSlotLabel(s.slot_utc));
-  const splitBySlot = daikinSplitBySlotIso(daikinConsumption, slots);
 
-  // Three-segment load stack — DHW (lightest) + Heating + Residual. When
-  // we only have a single Daikin total (e.g. physics-estimate fallback
-  // where heating/DHW split isn't known), bucket the unknown share into
-  // Heating so the visual sums match consumption_kwh.
-  const dhwPerSlot = slots.map((s) => {
-    const split = s.slot_utc ? splitBySlot.get(s.slot_utc) : undefined;
-    return round2(split?.dhw ?? 0);
+  // Axis: the full day from /pv/today (server-aligned, all 48 slots). Fall back
+  // to the execution slots when pv is missing so the view still renders.
+  const pvSlots = pv?.slots ?? [];
+  const axis: string[] = pvSlots.length
+    ? pvSlots.map((s) => s.slot_utc)
+    : (exec?.slots ?? [])
+        .slice()
+        .sort((a, b) => (a.slot_utc ?? "").localeCompare(b.slot_utc ?? ""))
+        .map((s) => s.slot_utc ?? "");
+  const labels = axis.map((iso) => formatSlotLabel(iso));
+
+  const execBy = new Map<string, ExecutionSlot>();
+  for (const e of exec?.slots ?? []) if (e.slot_utc) execBy.set(e.slot_utc, e);
+  const fcastBy = new Map<string, number | null>();
+  const priceBy = new Map<string, number | null>();
+  for (const s of pvSlots) {
+    fcastBy.set(s.slot_utc, s.base_load_kwh ?? null);
+    priceBy.set(s.slot_utc, s.import_price_p ?? null);
+  }
+
+  // Forecast residual household load (LP's load forecast, excludes heat pump).
+  const loadForecast = axis.map((iso) => {
+    const v = fcastBy.get(iso);
+    return v == null ? null : round2(v);
   });
-  const heatingPerSlot = slots.map((s) => {
-    const split = s.slot_utc ? splitBySlot.get(s.slot_utc) : undefined;
-    if (split) return round2(split.heating);
-    // Fallback: whole physics estimate goes into Heating
-    return round2(s.daikin_kwh_est ?? 0);
+  // Measured residual load = consumption − Daikin. Prefer residual_kwh; else
+  // base+appliance estimate; else consumption − daikin estimate.
+  const loadActual = axis.map((iso) => {
+    const e = execBy.get(iso);
+    if (!e) return null;
+    if (e.residual_kwh != null) return round2(e.residual_kwh);
+    if (e.base_load_kwh_est != null) return round2((e.base_load_kwh_est ?? 0) + (e.appliance_kwh_est ?? 0));
+    if (e.consumption_kwh != null) return round2(Math.max(0, e.consumption_kwh - (e.daikin_kwh_est ?? 0)));
+    return null;
   });
-  // Residual (load minus Daikin) splits into APPLIANCE (washer/dryer/dishwasher,
-  // estimated from armed jobs) + BASE load. Prefer the backend's per-slot
-  // appliance/base split; fall back to all-residual-as-base when absent.
-  const appliancePerSlot = slots.map((s) => round2(s.appliance_kwh_est ?? 0));
-  const basePerSlot = slots.map((s, i) => {
-    if (s.base_load_kwh_est != null) return round2(s.base_load_kwh_est);
-    const load = s.consumption_kwh ?? 0;
-    const daikin = (dhwPerSlot[i] ?? 0) + (heatingPerSlot[i] ?? 0);
-    return round2(Math.max(0, load - daikin - (appliancePerSlot[i] ?? 0)));
+  // Daikin (heat-pump) actual — context only, not part of the forecast pair.
+  const daikinActual = axis.map((iso) => {
+    const e = execBy.get(iso);
+    return e?.daikin_kwh_est == null ? null : round2(e.daikin_kwh_est);
   });
-  const hasAppliance = appliancePerSlot.some((v) => v > 0);
+  const price = axis.map((iso) => priceBy.get(iso) ?? null);
+
+  // --- Tariff-tier background bands (paid / cheap / peak) — same context wash
+  // as the Today's-plan chart. Mid-priced slots get a faint neutral fill.
+  const known = price.filter((p): p is number => p != null).slice().sort((a, b) => a - b);
+  const pct = (q: number) => (known.length ? known[Math.min(known.length - 1, Math.floor(q * known.length))] : null);
+  const cheapAt = pct(0.33);
+  const peakAt = pct(0.75);
+  const tierOf = (p: number | null): DayTier => {
+    if (p == null) return null;
+    if (p < 0) return "negative";
+    if (cheapAt != null && p <= cheapAt) return "cheap";
+    if (peakAt != null && p >= peakAt) return "peak";
+    return "standard";
+  };
+  const tierColor = (k: DayTier): string =>
+    k === "negative" ? t.neg : k === "cheap" ? t.cheap : k === "peak" ? t.peak : t.textMute;
+  const tierFill = (k: DayTier): object =>
+    k === "negative"
+      ? { color: withAlpha(t.neg, 0.26), borderColor: withAlpha(t.neg, 0.9), borderWidth: 1 }
+      : k === "standard"
+        ? { color: withAlpha(t.textMute, 0.05) }
+        : { color: withAlpha(tierColor(k), 0.10) };
+  const bands: Array<[{ xAxis: number; itemStyle: object }, { xAxis: number }]> = [];
+  let runStart = -1;
+  let runTier: DayTier = null;
+  const flush = (endIdx: number) => {
+    if (runStart < 0 || runTier == null) return;
+    bands.push([{ xAxis: runStart - 0.5, itemStyle: tierFill(runTier) }, { xAxis: endIdx + 0.5 }]);
+  };
+  axis.forEach((_, i) => {
+    const cur = tierOf(price[i]);
+    if (cur !== runTier) {
+      if (runTier != null) flush(i - 1);
+      runTier = cur;
+      runStart = cur != null ? i : -1;
+    }
+  });
+  if (runTier != null) flush(axis.length - 1);
+
+  // "Now" marker.
+  const nowMs = pv?.now_utc ? new Date(pv.now_utc).getTime() : Date.now();
+  let nowIdx = -1;
+  if (axis.length) {
+    const firstMs = new Date(axis[0]).getTime();
+    const lastMs = new Date(axis[axis.length - 1]).getTime() + 30 * 60_000;
+    if (nowMs >= firstMs && nowMs < lastMs) {
+      const idx = axis.findIndex((iso) => new Date(iso).getTime() > nowMs);
+      nowIdx = idx <= 0 ? axis.length - 1 : idx - 1;
+    }
+  }
 
   return {
     ...base,
-    legend: { ...(base.legend as object), data: hasAppliance
-      ? ["Daikin tank", "Daikin heating", "Appliances", "Base load", "Realised grid cost"]
-      : ["Daikin tank", "Daikin heating", "Base load", "Realised grid cost"] },
-    // Quiet ghost note — per-slot solar/import/export genuinely unavailable
-    // (#424). A text annotation, NOT a fabricated series/markArea.
-    graphic: [{
-      type: "text", right: 28, top: 30,
-      style: { text: "per-slot solar · import · export — coming (#424)", fill: t.textMute, font: "600 11px system-ui", opacity: 0.55 },
-    }],
-    xAxis: { ...(base.xAxis as object), data: labels },
+    legend: { ...(base.legend as object), data: ["Load forecast", "Load actual", "Daikin"] },
+    tooltip: {
+      ...(base.tooltip as object),
+      formatter: (params: Array<{ dataIndex: number }>) => {
+        const i = params[0]?.dataIndex ?? 0;
+        const tier = tierOf(price[i]);
+        const scale = Math.max(0.01, loadForecast[i] ?? 0, loadActual[i] ?? 0, daikinActual[i] ?? 0);
+        const bar = (label: string, val: number | null, col: string) => {
+          if (val == null || !Number.isFinite(val)) return "";
+          const w = Math.round(Math.max(0, Math.min(1, val / scale)) * 78);
+          return `<div style="display:flex;align-items:center;gap:6px;margin-top:3px;">` +
+            `<span style="width:74px;color:${t.textMute};font-size:11px;">${label}</span>` +
+            `<span style="display:inline-block;width:${w}px;height:7px;border-radius:3px;background:${col};"></span>` +
+            `<span style="font-size:11px;color:${t.text};">${val.toFixed(2)}</span></div>`;
+        };
+        let missRow = "";
+        if (loadActual[i] != null && loadForecast[i] != null) {
+          const miss = loadActual[i]! - loadForecast[i]!;
+          const col = miss <= 0 ? t.cheap : t.importColor;
+          missRow = `<div style="margin-top:4px;font-size:11px;color:${col};">` +
+            `load ${miss <= 0 ? "under forecast −" : "over forecast +"}${Math.abs(miss).toFixed(2)} kWh</div>`;
+        }
+        const head = `<strong>${labels[i]}</strong>${tier ? ` · ${tier}` : ""}` +
+          (price[i] != null ? ` · ${price[i]!.toFixed(1)}p/kWh` : "");
+        return head +
+          bar("Load forecast", loadForecast[i], withAlpha(t.textMute, 0.5)) +
+          bar("Load actual", loadActual[i], withAlpha(t.textMute, 0.95)) +
+          missRow +
+          (daikinActual[i] != null
+            ? `<div style="margin-top:5px;border-top:1px solid ${withAlpha(t.textMute, 0.25)};padding-top:2px;"></div>` +
+              bar("Daikin (heat)", daikinActual[i], t.warn)
+            : "");
+      },
+    },
+    xAxis: { ...(base.xAxis as object), data: labels, axisLabel: { color: t.textMute, fontSize: 10, interval: 5 } },
     yAxis: [
-      { ...(base.yAxis as object), name: "kWh",  position: "left" },
+      { ...(base.yAxis as object), name: "kWh", position: "left" },
       {
         ...(base.yAxis as object),
         name: "p",
@@ -495,51 +471,50 @@ function optionForDay(
       },
     ],
     series: [
+      // Tariff bands + now marker on a silent baseline series.
       {
-        name: "Daikin tank",
-        type: "bar",
-        stack: "load",
-        data: dhwPerSlot,
-        itemStyle: { color: barGradient(t.pv, 0.9, 0.5) },
-        emphasis: { focus: "series" },
-        barCategoryGap: "40%",
+        name: "_bands", type: "line", data: axis.map(() => null), silent: true,
+        markArea: bands.length ? { silent: true, data: bands } : undefined,
+        markLine: nowIdx >= 0 ? {
+          silent: true, symbol: "none",
+          lineStyle: { color: t.text, width: 1.5, type: "solid", opacity: 0.5 },
+          label: { show: false }, data: [{ xAxis: nowIdx }],
+        } : undefined,
+        z: 0,
       },
+      // Load forecast — dim dashed line (the LP's prediction).
       {
-        name: "Daikin heating",
-        type: "bar",
-        stack: "load",
-        data: heatingPerSlot,
-        itemStyle: { color: barGradient(t.warn, 0.9, 0.5) },
-        emphasis: { focus: "series" },
+        name: "Load forecast", type: "line", smooth: true, showSymbol: false,
+        data: loadForecast,
+        lineStyle: { color: withAlpha(t.textMute, 0.5), width: 1.5, type: "dashed", cap: "round" }, z: 2,
       },
-      ...(hasAppliance ? [{
-        name: "Appliances",
-        type: "bar",
-        stack: "load",
-        data: appliancePerSlot,
-        itemStyle: { color: barGradient(t.accent, 0.85, 0.45) },
-        emphasis: { focus: "series" },
+      // Load actual — the ONE bold line: solid grey + gradient fill.
+      {
+        name: "Load actual", type: "line", smooth: true, showSymbol: false, connectNulls: false,
+        data: loadActual,
+        lineStyle: { color: withAlpha(t.house, 0.95), width: 2.75, cap: "round" },
+        areaStyle: { color: areaGradient(t.house, 0.28, 0.02) }, z: 4,
+      },
+      // Daikin (heat-pump) actual — quiet amber context line.
+      {
+        name: "Daikin", type: "line", smooth: true, showSymbol: false, connectNulls: false,
+        data: daikinActual,
+        lineStyle: { color: withAlpha(t.warn, 0.85), width: 1.25, type: [4, 4], cap: "round" }, z: 3,
+      },
+      // Import price → dashed step on the right axis (reference, not a hard line).
+      {
+        name: "Import price", type: "line", step: "middle", showSymbol: false,
+        yAxisIndex: 1, data: price,
+        lineStyle: { color: t.importColor, width: 1.25, opacity: 0.7, type: "dashed" }, z: 1,
+      },
+      // Pulsing "now".
+      ...(nowIdx >= 0 ? [{
+        name: "_now", type: "effectScatter", silent: true,
+        coordinateSystem: "cartesian2d", symbolSize: 9, z: 6, showEffectOn: "render",
+        rippleEffect: { period: 2.4, scale: 3.0, brushType: "stroke" },
+        itemStyle: { color: t.accent, shadowBlur: 8, shadowColor: t.accent },
+        data: [[nowIdx, 0]],
       }] : []),
-      {
-        name: "Base load",
-        type: "bar",
-        stack: "load",
-        data: basePerSlot,
-        // Top segment of the stack — rounds the crown so the bar reads as one.
-        itemStyle: { color: barGradient(t.house, 0.75, 0.4), borderRadius: [3, 3, 0, 0] },
-        emphasis: { focus: "series" },
-      },
-      {
-        name: "Realised grid cost",
-        type: "line",
-        yAxisIndex: 1,
-        data: slots.map((s) => s.cost_realised_p == null ? null : round2(s.cost_realised_p)),
-        smooth: 0.4,
-        symbol: "none",
-        z: 10,
-        lineStyle: { color: t.bad, width: 2, cap: "round" },
-        areaStyle: { color: areaGradient(t.bad, 0.10, 0.0) },
-      },
     ],
   };
 }

@@ -467,6 +467,20 @@ export interface DhwScheduleResponse {
   rows: DhwScheduleRow[];
 }
 
+// GET /daikin/lwt-schedule — committed LWT-offset pre-heat plan (#481).
+// Per-slot integer offset: positive = boost (cheap), negative = setback (peak).
+export interface LwtScheduleRow {
+  action_type?: string | null;   // lwt_preheat
+  start_utc?: string | null;
+  end_utc?: string | null;
+  lwt_offset?: number | null;     // integer °C, e.g. +3 / -2
+  status?: string | null;
+}
+export interface LwtScheduleResponse {
+  enabled: boolean;
+  rows: LwtScheduleRow[];
+}
+
 // GET /energy/today-cumulative — today's grid traffic so far (to now). Real-
 // money import cost goes NEGATIVE (a credit) on negative-price slots.
 export interface TodayCumulativeResponse {
