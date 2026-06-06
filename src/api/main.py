@@ -449,7 +449,13 @@ def _api_v1_weather_sync():
     from ..weather import fetch_forecast
 
     fc = fetch_forecast(hours=48)
-    out = [{"time": f.time_utc.isoformat(), "temp_c": f.temperature_c, "pv_kw": f.estimated_pv_kw} for f in fc]
+    out = [{
+        "time": f.time_utc.isoformat(),
+        "temp_c": f.temperature_c,
+        "pv_kw": f.estimated_pv_kw,
+        "cloud_cover_pct": f.cloud_cover_pct,
+        "irradiance_wm2": f.shortwave_radiation_wm2,
+    } for f in fc]
     daikin = None
     try:
         cached = daikin_service.get_cached_devices(allow_refresh=False, actor="weather")
