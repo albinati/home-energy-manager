@@ -1335,58 +1335,38 @@ def _run_optimizer_lp(
     # captured in the LP forecast. Falls back to plain (h, m) when a
     # (h, m, kind) bucket lacks samples; falls back to flat when both miss.
     _profile_limit = int(getattr(config, "LP_LOAD_PROFILE_SLOTS", 2016))
-    _load_profile = db.tariff_aware_residual_load_profile_kwh()
-    if not _load_profile:
-        # Cold-start: legacy plain profile until 30 days of slot_kind history
-        # accumulates.
-        _load_profile = db.half_hourly_residual_load_profile_kwh()
-    _fox_mean = db.mean_fox_load_kwh_per_slot(limit=60)
-    _flat = _fox_mean if _fox_mean is not None else db.mean_consumption_kwh_from_execution_logs(limit=_profile_limit)
-    if _load_profile:
-        # Log only the (h, m) entries — the (h, m, kind) entries vary too
-        # widely to summarise in one line.
-        plain = {k: v for k, v in _load_profile.items() if len(k) == 2}
-        kind_count = sum(1 for k in _load_profile if len(k) == 3)
-        if plain:
-            logger.info(
-                "LP base_load: %d (h,m) buckets, %d (h,m,kind) buckets; "
-                "early-morning(03-07)=%s",
-                len(plain), kind_count,
-                {f"{h:02d}:{m:02d}": round(plain[(h, m)], 3)
-                 for h in range(3, 8) for m in (0, 30) if (h, m) in plain},
-            )
-
-    # Slot-kind classifier mirrors the LP's eventual classification so the
-    # base-load lookup is consistent with downstream slot-kind decisions.
-    _peak_thresh = float(getattr(config, "OPTIMIZATION_PEAK_THRESHOLD_PENCE", 25))
-    _cheap_thresh = float(getattr(config, "OPTIMIZATION_CHEAP_THRESHOLD_PENCE", 5))
-
-    def _classify_price(price_p: float) -> str:
-        if price_p < 0:
-            return "negative"
-        if price_p <= _cheap_thresh:
-            return "cheap"
-        if price_p >= _peak_thresh:
-            return "peak"
-        return "standard"
+    # Unified day-of-week residual profile (#477): measured-split-calibrated,
+    # away-day-excluded, median + p75 spread. ONE builder + ONE lookup shared by
+    # the optimizer, the simulation, and the displays so they never diverge.
+    _prof = db.residual_load_profile_v2()
+    _load_profile = _prof["profile"]  # kept for the snapshot bucket-count below
+    _fox_mean = db.mean_fox_load_kwh_per_slot(limit=60)  # snapshot diagnostics only
+    _dc = _prof.get("day_counts", {})
+    logger.info(
+        "LP base_load: residual_profile_v2 — %d wd / %d we days, %d away, "
+        "%d calibrated / %d physics-only days; flat=%.3f",
+        _dc.get("weekday", 0), _dc.get("weekend", 0), _dc.get("away_excluded", 0),
+        _prof.get("calibrated_days", 0), _prof.get("physics_only_days", 0),
+        float(_prof.get("flat", 0.0)),
+    )
 
     # Operator load-forecast scale (workbench/runtime-tunable). Multiplies the
     # residual house-load profile so the user can nudge the plan's demand
     # assumption up/down (e.g. "we'll be away → 0.7", "guests → 1.3"). Default
-    # 1.0 is a bit-identical no-op (v * 1.0 == v), so the LP regression
-    # baseline is unaffected. Applies to the residual profile only — explicit
-    # appliance dispatch loads (below) are added at their true kWh.
+    # 1.0 is a bit-identical no-op (v * 1.0 == v), so the LP regression baseline
+    # is unaffected. Applies to the residual profile only — explicit appliance
+    # dispatch loads (below) are added at their true kWh. ``base_load_spread`` is
+    # the per-slot p75 spread used by the scenario LP (#477 Stage 2).
     _load_scale = float(getattr(config, "LP_LOAD_SCALE_FACTOR", 1.0))
     base_load = []
+    base_load_spread = []
     for s in slots:
         _local = s.start_utc.astimezone(tz)
-        _hm = (_local.hour, 30 if _local.minute >= 30 else 0)
-        _kind = _classify_price(float(s.price_pence))
-        # Most-specific lookup first.
-        v = _load_profile.get((_hm[0], _hm[1], _kind))
-        if v is None:
-            v = _load_profile.get(_hm, _flat)
-        base_load.append(v * _load_scale)
+        _dow = _local.weekday()
+        _h = _local.hour
+        _m = 30 if _local.minute >= 30 else 0
+        base_load.append(db.lookup_residual_kwh(_prof, _dow, _h, _m) * _load_scale)
+        base_load_spread.append(db.lookup_residual_spread_kwh(_prof, _dow, _h, _m) * _load_scale)
     if _load_scale != 1.0:
         logger.info("LP base_load: operator load scale %.2f applied to residual profile", _load_scale)
     residual_base_load = list(base_load)
@@ -1591,7 +1571,7 @@ def _run_optimizer_lp(
         "base_load_components": {
             "residual_profile_kwh": [round(float(x), 4) for x in residual_base_load],
             "appliance_profile_kwh": [round(float(x), 4) for x in appliance_profile_kwh],
-            "flat_fallback_kwh": round(float(_flat), 4),
+            "flat_fallback_kwh": round(float(_prof.get("flat", 0.0)), 4),
             "fox_mean_kwh_per_slot": round(float(_fox_mean), 4) if _fox_mean is not None else None,
             "profile_bucket_count": len(_load_profile),
             "profile_limit_slots": int(_profile_limit),
@@ -1901,6 +1881,7 @@ def _run_optimizer_lp(
                     tz=tz,
                     micro_climate_offset_c=micro_climate_offset,
                     export_price_pence=export_prices,
+                    base_load_spread=base_load_spread,  # #477 Stage 2 — per-slot p75 spread
                 )
             )
         except Exception as e:

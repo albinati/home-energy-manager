@@ -655,6 +655,23 @@ class Config:
     LP_SCENARIO_PESSIMISTIC_LOAD_FACTOR: float = float(
         os.getenv("LP_SCENARIO_PESSIMISTIC_LOAD_FACTOR", "1.15")
     )
+    # #477 Stage 2 — when true, the scenario LP perturbs base load per-slot by
+    # the LEARNED p75 spread (median ± (p75−median)) from residual_load_profile_v2
+    # instead of the flat factors above. Sharper protection where the variance is
+    # actually high (e.g. variable evenings), gentler where load is steady. Falls
+    # back to the flat factors per-slot when no spread is known for a slot, or
+    # globally when set false (rollback).
+    LP_SCENARIO_USE_SPREAD: bool = os.getenv(
+        "LP_SCENARIO_USE_SPREAD", "true"
+    ).lower() in ("true", "1", "yes")
+    # #477 kill-switch for the LP-critical residual_load_profile_v2 behaviours.
+    # True (default): day-of-week buckets + measured-split calibration + away-day
+    # exclusion. False: emit only the per-(h,m) median tier with pure-physics
+    # subtraction (≈ the legacy half_hourly_residual profile) so the LP plan can
+    # be rolled back to the prior shape WITHOUT a redeploy if a regression shows.
+    LP_RESIDUAL_PROFILE_V2: bool = os.getenv(
+        "LP_RESIDUAL_PROFILE_V2", "true"
+    ).lower() in ("true", "1", "yes")
     LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH: float = float(
         os.getenv("LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH", "0.30")
     )

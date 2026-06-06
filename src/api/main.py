@@ -1218,23 +1218,13 @@ async def optimization_inputs(horizon_hours: int | None = None):
     finally:
         conn.close()
 
-    # --- Base-load hour-of-day profile --------------------------------------
-    profile_limit = int(getattr(config, "LP_LOAD_PROFILE_SLOTS", 2016))
+    # --- Base-load profile (unified day-of-week residual, #477) -------------
+    # Same builder + lookup the LP uses (measured-split-calibrated, away-day
+    # excluded, day-of-week aware) so this debug view matches the plan.
     try:
-        # Half-hour granularity (#175) + Daikin physics subtracted (#179) so the LP
-        # energy balance doesn't double-count Daikin (base_load + e_dhw + e_space
-        # would otherwise sum twice the heat-pump draw).
-        load_profile = db.half_hourly_residual_load_profile_kwh()
+        load_prof = db.residual_load_profile_v2()
     except Exception:
-        load_profile = {}
-    try:
-        fox_mean = db.mean_fox_load_kwh_per_slot(limit=60)
-    except Exception:
-        fox_mean = None
-    try:
-        flat = fox_mean if fox_mean is not None else db.mean_consumption_kwh_from_execution_logs(limit=profile_limit)
-    except Exception:
-        flat = 0.4
+        load_prof = None
     # Operator load scale — mirrors the multiplier the optimizer applies to the
     # residual profile, so this view matches the plan (no-op at default 1.0).
     _load_scale = float(getattr(config, "LP_LOAD_SCALE_FACTOR", 1.0))
@@ -1359,13 +1349,17 @@ async def optimization_inputs(horizon_hours: int | None = None):
             local_dt = t.astimezone(ZoneInfo(tz_name))
             hr_local = local_dt.hour
             min_local = 30 if local_dt.minute >= 30 else 0
+            dow_local = local_dt.weekday()
         except Exception:
             hr_local = t.hour
             min_local = 30 if t.minute >= 30 else 0
-        # S10.8 (#175): half-hour bucket lookup; falls back to flat mean.
-        # Apply the operator load scale so this debug view matches what the LP
-        # actually plans against (no-op at the default 1.0).
-        bl = float(load_profile.get((hr_local, min_local), flat)) * _load_scale
+            dow_local = t.weekday()
+        # Day-of-week residual lookup (#477); operator load scale applied so this
+        # debug view matches what the LP actually plans against (no-op at 1.0).
+        bl = (
+            db.lookup_residual_kwh(load_prof, dow_local, hr_local, min_local)
+            if load_prof is not None else 0.0
+        ) * _load_scale
         slots_out.append({
             "t_utc": iso.replace("+00:00", "Z"),
             "price_import_p": price_i,

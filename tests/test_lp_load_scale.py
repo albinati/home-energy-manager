@@ -51,10 +51,20 @@ def _base_loads_from_inputs() -> list[float]:
     return [s["base_load_kwh"] for s in resp["slots"] if s["base_load_kwh"] is not None]
 
 
+def _flat_v2(value: float = 0.5) -> dict:
+    """A residual_load_profile_v2 object whose every (h,m) leaf is ``value``,
+    so lookups resolve to it regardless of day-of-week."""
+    return {
+        "profile": {(h, m): value for h in range(24) for m in (0, 30)},
+        "spread": {(h, m): value for h in range(24) for m in (0, 30)},
+        "flat": value, "away_days": [], "day_counts": {},
+        "calibrated_days": 0, "physics_only_days": 0,
+    }
+
+
 def test_optimization_inputs_scales_base_load(monkeypatch):
     # Constant residual profile so the scale is unambiguous.
-    profile = {(h, m): 0.5 for h in range(24) for m in (0, 30)}
-    monkeypatch.setattr(db, "half_hourly_residual_load_profile_kwh", lambda *a, **k: profile)
+    monkeypatch.setattr(db, "residual_load_profile_v2", lambda *a, **k: _flat_v2(0.5))
 
     rts.set_setting("LP_LOAD_SCALE_FACTOR", 1.0)
     base = _base_loads_from_inputs()
@@ -72,8 +82,7 @@ def test_simulation_load_builder_scales(monkeypatch):
     from datetime import UTC, datetime, timedelta
     from src.scheduler import lp_simulation
 
-    profile = {(h, m): 0.5 for h in range(24) for m in (0, 30)}
-    monkeypatch.setattr(db, "half_hourly_residual_load_profile_kwh", lambda *a, **k: profile)
+    monkeypatch.setattr(db, "residual_load_profile_v2", lambda *a, **k: _flat_v2(0.5))
     starts = [datetime(2026, 6, 1, 0, 0, tzinfo=UTC) + timedelta(minutes=30 * i) for i in range(8)]
 
     rts.set_setting("LP_LOAD_SCALE_FACTOR", 1.0)

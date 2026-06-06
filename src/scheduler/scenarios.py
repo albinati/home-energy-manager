@@ -106,11 +106,37 @@ def perturb_weather(weather: WeatherLpSeries, temp_delta_c: float) -> WeatherLpS
     )
 
 
-def perturb_base_load(base_load_kwh: list[float], factor: float) -> list[float]:
-    """Multiplicative perturbation of the residual (non-Daikin) base-load profile."""
+def perturb_base_load(
+    base_load_kwh: list[float],
+    factor: float,
+    *,
+    spread: list[float] | None = None,
+) -> list[float]:
+    """Perturb the residual base-load profile for a side scenario.
+
+    Default (``spread=None``): the legacy flat multiply by ``factor`` (optimistic
+    0.90 / pessimistic 1.15). When a per-slot ``spread`` (the p75 from
+    ``residual_load_profile_v2``) is supplied AND ``LP_SCENARIO_USE_SPREAD`` is
+    on, shift each slot by its LEARNED ``(p75 − median)`` gap instead — up for the
+    pessimistic side (``factor > 1``), down for the optimistic side
+    (``factor < 1``). ``factor == 1.0`` (nominal) is always an identity copy.
+    Per-slot fallback to the flat factor when a slot's spread is missing/≤0.
+    """
     if factor == 1.0:
         return list(base_load_kwh)
-    return [max(0.0, x * factor) for x in base_load_kwh]
+    use_spread = spread is not None and bool(getattr(config, "LP_SCENARIO_USE_SPREAD", True))
+    if not use_spread:
+        return [max(0.0, x * factor) for x in base_load_kwh]
+    direction = 1.0 if factor > 1.0 else -1.0
+    out: list[float] = []
+    for i, med in enumerate(base_load_kwh):
+        p75 = spread[i] if i < len(spread) else None
+        gap = max(0.0, float(p75) - med) if p75 is not None else 0.0
+        if gap <= 0.0:
+            out.append(max(0.0, med * factor))  # no learned spread → flat factor
+        else:
+            out.append(max(0.0, med + direction * gap))
+    return out
 
 
 def _solve_one_scenario(
@@ -124,6 +150,7 @@ def _solve_one_scenario(
     tz,
     micro_climate_offset_c: float,
     export_price_pence: list[float] | None,
+    base_load_spread: list[float] | None = None,
 ) -> ScenarioSolveResult:
     """Solve one perturbed scenario; capture wall-clock duration + error.
 
@@ -134,7 +161,7 @@ def _solve_one_scenario(
     """
     p = _perturbation_for(scenario)
     w = perturb_weather(weather, p.temp_delta_c)
-    bl = perturb_base_load(base_load_kwh, p.load_factor)
+    bl = perturb_base_load(base_load_kwh, p.load_factor, spread=base_load_spread)
     t0 = time.monotonic()
     try:
         plan = solve_lp(
@@ -187,6 +214,7 @@ def solve_scenarios(
     micro_climate_offset_c: float = 0.0,
     export_price_pence: list[float] | None = None,
     scenarios: tuple[Scenario, ...] = SCENARIOS,
+    base_load_spread: list[float] | None = None,
 ) -> dict[Scenario, ScenarioSolveResult]:
     """Solve the LP under each scenario in parallel; return scenario → result.
 
@@ -218,6 +246,7 @@ def solve_scenarios(
                 tz=tz,
                 micro_climate_offset_c=micro_climate_offset_c,
                 export_price_pence=export_price_pence,
+                base_load_spread=base_load_spread,
             ): s
             for s in scenarios
         }
@@ -253,6 +282,7 @@ def solve_scenarios_with_nominal(
     tz,
     micro_climate_offset_c: float = 0.0,
     export_price_pence: list[float] | None = None,
+    base_load_spread: list[float] | None = None,
 ) -> dict[Scenario, ScenarioSolveResult]:
     """Same as ``solve_scenarios`` but reuses an already-computed nominal plan.
 
@@ -270,6 +300,7 @@ def solve_scenarios_with_nominal(
         micro_climate_offset_c=micro_climate_offset_c,
         export_price_pence=export_price_pence,
         scenarios=("optimistic", "pessimistic"),
+        base_load_spread=base_load_spread,
     )
     extras["nominal"] = ScenarioSolveResult(
         scenario="nominal",

@@ -200,12 +200,12 @@ def build_marginal_cost_per_slot(
         sorted(import_by_start.keys()),
     )
 
-    # Base-load profile (kWh/half-hour by hour-of-day)
+    # Base-load profile — unified day-of-week residual (#477), same as the LP.
     try:
-        base_load_profile = db.half_hourly_residual_load_profile_kwh()
+        base_load_prof = db.residual_load_profile_v2()
     except Exception as e:
         logger.warning("appliance pv-aware: load profile fetch failed: %s", e)
-        base_load_profile = {}
+        base_load_prof = None
     base_load_flat = float(getattr(config, "APPLIANCE_DEFAULT_BASE_LOAD_KW", 0.4))
 
     washer_kwh_per_slot = float(appliance_kw) * 0.5
@@ -220,8 +220,11 @@ def build_marginal_cost_per_slot(
         if slot_start + timedelta(minutes=30) > deadline_utc:
             break
         local = slot_start.astimezone(tz)
-        bucket = (local.hour, 30 if local.minute >= 30 else 0)
-        base_load = base_load_profile.get(bucket, base_load_flat)
+        m = 30 if local.minute >= 30 else 0
+        base_load = (
+            db.lookup_residual_kwh(base_load_prof, local.weekday(), local.hour, m)
+            if base_load_prof is not None else base_load_flat
+        )
         pv = pv_per_slot.get(slot_start, 0.0)
         residual_pv = max(0.0, pv - base_load)
         import_p = import_by_start[slot_start]

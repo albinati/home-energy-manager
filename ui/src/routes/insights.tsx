@@ -8,6 +8,7 @@ import { Pill } from "../components/common/Pill";
 import { gbp, gbpSigned, kwh } from "../lib/format";
 import { makeChart, baseOption, chartTheme, barGradient, withAlpha, type EChartsType } from "../lib/charts";
 import type { FairTariffRow } from "../lib/types";
+import { LoadPatternCard } from "../components/insights/LoadPatternCard";
 import "./insights.css";
 
 const p2 = (p: number) => gbp(p / 100);
@@ -143,6 +144,8 @@ export default function Insights() {
           </p>
         </>
       )}
+
+      <LoadPatternCard />
     </div>
   );
 }
