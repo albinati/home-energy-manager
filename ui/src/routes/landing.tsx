@@ -171,9 +171,9 @@ export default function Landing() {
 
       {/* ── ENERGY ─────────────────────────────────────────────────── */}
       <div class="widget-grid widget-band">
-        <Widget title="Energy flow" icon="📈" tone="power" size="wide">
+        <Widget title="Load details" icon="📈" tone="power" size="wide">
           <Suspense fallback={<Spinner label="Loading chart…" />}>
-            <EnergyChartWidget execution={execution.data} />
+            <EnergyChartWidget execution={execution.data} pv={pvToday.data} />
           </Suspense>
         </Widget>
       </div>

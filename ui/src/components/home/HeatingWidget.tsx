@@ -9,14 +9,15 @@ import type {
 } from "../../lib/types";
 import { useState, useEffect } from "preact/hooks";
 import { kwh, relTime } from "../../lib/format";
-import { forceRefreshDaikin, getDhwSchedule } from "../../lib/endpoints";
-import type { DhwScheduleRow } from "../../lib/types";
+import { forceRefreshDaikin, getDhwSchedule, getLwtSchedule } from "../../lib/endpoints";
+import type { DhwScheduleRow, LwtScheduleRow } from "../../lib/types";
 import { Pill } from "../common/Pill";
 import { Gauge } from "../common/Gauge";
 import { RadialGauge } from "../common/RadialGauge";
 import { Modal } from "../common/Modal";
 import { HeatingControls } from "./HeatingControls";
 import { TankScheduleBadges } from "../common/TankScheduleBadges";
+import { LwtScheduleBadges } from "../common/LwtScheduleBadges";
 import { RefreshCountdown } from "../common/RefreshCountdown";
 import "./heating.css";
 
@@ -102,6 +103,20 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather, exe
   // Drop windows that have already finished — a boost/warmup that ran earlier
   // today is noise here; show only what's ongoing or still upcoming.
   const schedule = scheduleAll.filter((r) => {
+    const end = r.end_utc ? Date.parse(r.end_utc) : NaN;
+    return Number.isNaN(end) || end >= Date.now();
+  });
+
+  // Committed LWT-offset pre-heat plan (#481) — boost/setback windows, same
+  // deterministic-schedule pattern as the tank plan, zero Daikin quota. Empty
+  // when DAIKIN_LWT_PREHEAT_ENABLED is off (climate hands-off).
+  const [lwtSchedule, setLwtSchedule] = useState<LwtScheduleRow[]>([]);
+  useEffect(() => {
+    let alive = true;
+    getLwtSchedule().then((r) => { if (alive) setLwtSchedule(r.rows || []); }).catch(() => {});
+    return () => { alive = false; };
+  }, []);
+  const lwtPlan = lwtSchedule.filter((r) => {
     const end = r.end_utc ? Date.parse(r.end_utc) : NaN;
     return Number.isNaN(end) || end >= Date.now();
   });
@@ -198,6 +213,13 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather, exe
         <div class="heating-plan">
           <div class="heating-plan-title">Tank plan</div>
           <TankScheduleBadges rows={schedule} />
+        </div>
+      )}
+
+      {lwtPlan.length > 0 && (
+        <div class="heating-plan">
+          <div class="heating-plan-title">Heating plan · LWT offset</div>
+          <LwtScheduleBadges rows={lwtPlan} />
         </div>
       )}
 
