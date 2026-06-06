@@ -1343,6 +1343,94 @@ def compute_today_pv_correction_factor_by_hour(
     }
 
 
+def compute_pv_recent_bias_by_hour() -> tuple[dict[int, float], dict[int, float], dict[int, int], dict[str, Any]]:
+    """Adaptive closed-loop PV bias corrector (#486).
+
+    Per UTC hour, the **recency-weighted mean** of ``actual/forecast`` from
+    ``pv_error_log`` — i.e. how wrong the COMMITTED forecast was, weighted so
+    recent days dominate (half-life decay). Returns
+    ``(applied_factors, raw_ratios, samples, diag)``:
+
+    * ``raw_ratios[h]`` — the measured weighted actual/forecast (the RESIDUAL
+      error of the already-corrected forecast).
+    * ``applied_factors[h]`` — the PREVIOUS factor accumulated by the residual:
+      ``old × (1 + damping·(ratio−1))``, clamped to ``[MIN, MAX]``. Ramps to
+      full correction over a few refreshes and self-stabilises on over-shoot;
+      the loop's fixed point is ratio ≈ 1 (zero residual error).
+
+    Because it's keyed on realised error, genuine morning shade (actual low →
+    ratio ≈ 1) is left alone while systematic under-forecast (ratio > 1) is
+    corrected. Slots below ``PV_RECENT_BIAS_MIN_KWH`` on either side are dropped.
+    """
+    from . import db as _db
+    window = int(getattr(config, "PV_RECENT_BIAS_WINDOW_DAYS", 14))
+    half_life = float(getattr(config, "PV_RECENT_BIAS_HALFLIFE_DAYS", 5))
+    damping = float(getattr(config, "PV_RECENT_BIAS_DAMPING", 0.5))
+    lo = float(getattr(config, "PV_RECENT_BIAS_MIN", 0.4))
+    hi = float(getattr(config, "PV_RECENT_BIAS_MAX", 2.5))
+    min_kwh = float(getattr(config, "PV_RECENT_BIAS_MIN_KWH", 0.05))
+    # Accumulate on the previous factor → the loop ramps to FULL correction
+    # (measuring residual error against the already-corrected forecast).
+    try:
+        prev = _db.get_pv_recent_bias()
+    except Exception:  # pragma: no cover — cold start / missing table
+        prev = {}
+
+    now = datetime.now(UTC)
+    start = now - timedelta(days=window)
+    rows = _db.get_pv_error_log_range(
+        start.strftime("%Y-%m-%dT%H:%M:%SZ"), now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    )
+    acc: dict[int, list[float]] = {}  # hour -> [sum_w_ratio, sum_w, n]
+    for r in rows:
+        f = r.get("forecast_kwh") or 0.0
+        a = r.get("actual_kwh")
+        if a is None or f < min_kwh or a < min_kwh:
+            continue
+        try:
+            ts = datetime.fromisoformat(str(r["slot_time_utc"]).replace("Z", "+00:00"))
+        except (ValueError, TypeError, KeyError):
+            continue
+        age_days = max(0.0, (now - ts).total_seconds() / 86400.0)
+        w = 0.5 ** (age_days / half_life) if half_life > 0 else 1.0
+        d = acc.setdefault(ts.hour, [0.0, 0.0, 0.0])
+        d[0] += w * (a / f)
+        d[1] += w
+        d[2] += 1
+
+    factors: dict[int, float] = {}
+    raw: dict[int, float] = {}
+    samples: dict[int, int] = {}
+    for h, (sw, w, n) in acc.items():
+        if w <= 0 or n < 2:
+            continue
+        ratio = sw / w
+        old = float(prev.get(h, 1.0))
+        applied = max(lo, min(hi, old * (1.0 + damping * (ratio - 1.0))))
+        raw[h] = round(ratio, 4)
+        factors[h] = round(applied, 4)
+        samples[h] = int(n)
+    diag = {"window_days": window, "half_life_days": half_life, "damping": damping,
+            "min_kwh": min_kwh, "clamp": [lo, hi], "n_hours": len(factors)}
+    return factors, raw, samples, diag
+
+
+def refresh_pv_recent_bias() -> int:
+    """Recompute + persist the adaptive PV bias table (cron after error rebuild)."""
+    from . import db as _db
+    factors, raw, samples, diag = compute_pv_recent_bias_by_hour()
+    if not factors:
+        logger.info("pv_recent_bias: nothing to compute (%s)", diag)
+        return 0
+    ca = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    n = _db.upsert_pv_recent_bias(factors, raw, samples, ca)
+    logger.info(
+        "pv_recent_bias refreshed: %d hours; applied=%s raw=%s",
+        n, {h: factors[h] for h in sorted(factors)}, {h: raw[h] for h in sorted(raw)},
+    )
+    return n
+
+
 def compute_solar_elevation_deg(
     slot_utc: datetime,
     lat: float | None = None,
@@ -2062,6 +2150,16 @@ def forecast_to_lp_inputs(
         flat_cal = compute_pv_calibration_factor() if not cal_cloud and not cal_hourly else 1.0
     except sqlite3.OperationalError:
         flat_cal = 1.0
+    # #486 — adaptive recent-bias corrector: a per-hour final nudge from the
+    # committed forecast's own realised error (pv_error_log). Separate from the
+    # calibration tables (which train on raw data), so applying it here closes a
+    # convergent loop without contaminating training. Off → empty dict → no-op.
+    recent_bias: dict[int, float] = {}
+    if getattr(config, "PV_RECENT_BIAS_ENABLED", False):
+        try:
+            recent_bias = _db.get_pv_recent_bias()
+        except sqlite3.OperationalError:
+            recent_bias = {}
 
     # PV scale: explicit arg > config override > 1.0. Accept float OR per-hour dict.
     if pv_scale is None:
@@ -2139,6 +2237,9 @@ def forecast_to_lp_inputs(
             table_3d=cal_3d,
             slot_utc=st,
         )
+        # #486 — adaptive recent-bias nudge (no-op when disabled / no data).
+        if recent_bias:
+            kw_ac *= recent_bias.get(st.hour, 1.0)
         # Apply calibration scale and enforce per-hour physical ceiling
         slot_ceil = hourly_ceil.get(st.hour, cap * eff * 0.5)
         pv_kwh = min(slot_ceil, max(0.0, kw_ac * 0.5))
