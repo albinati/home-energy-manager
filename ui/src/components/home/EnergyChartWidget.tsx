@@ -168,11 +168,12 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
         </div>
       )}
       {granularity === "day" && dayHasSlots && (
-        <div class="echart-flag">
-          <span class="echart-flag-icon"><Icon name="schedule" size={14} /></span>
-          Household load: <strong>forecast</strong> (dashed) vs <strong>actual</strong>
-          {" "}(solid) — residual demand, i.e. consumption minus the heat pump.
-          Daikin shown as a context line; tariff tier shades the background.
+        <div class="echart-legend2">
+          <span class="echart-l2"><span class="echart-l2-sw" style="background:var(--house)" /> Base</span>
+          <span class="echart-l2"><span class="echart-l2-sw" style="background:var(--accent)" /> Appliances</span>
+          <span class="echart-l2"><span class="echart-l2-sw" style="background:var(--warn)" /> Heat pump</span>
+          <span class="echart-l2"><span class="echart-l2-line" /> Forecast</span>
+          <span class="echart-l2-hint">stacked = where your energy goes · ◉ now</span>
         </div>
       )}
 
@@ -351,25 +352,38 @@ function optionForDay(
     priceBy.set(s.slot_utc, s.import_price_p ?? null);
   }
 
-  // Forecast residual household load (LP's load forecast, excludes heat pump).
-  const loadForecast = axis.map((iso) => {
-    const v = fcastBy.get(iso);
-    return v == null ? null : round2(v);
-  });
-  // Measured residual load = consumption − Daikin. Prefer residual_kwh; else
-  // base+appliance estimate; else consumption − daikin estimate.
-  const loadActual = axis.map((iso) => {
+  // Actual consumption split into a stacked composition — where the energy
+  // actually went, slot by slot: base (lights/fridge/always-on) + appliances
+  // (armed washer/dryer/dishwasher) + the Daikin heat pump.
+  const baseActual = axis.map((iso) => {
     const e = execBy.get(iso);
     if (!e) return null;
-    if (e.residual_kwh != null) return round2(e.residual_kwh);
-    if (e.base_load_kwh_est != null) return round2((e.base_load_kwh_est ?? 0) + (e.appliance_kwh_est ?? 0));
-    if (e.consumption_kwh != null) return round2(Math.max(0, e.consumption_kwh - (e.daikin_kwh_est ?? 0)));
+    if (e.base_load_kwh_est != null) return round2(e.base_load_kwh_est);
+    if (e.consumption_kwh != null) return round2(Math.max(0, e.consumption_kwh - (e.daikin_kwh_est ?? 0) - (e.appliance_kwh_est ?? 0)));
     return null;
   });
-  // Daikin (heat-pump) actual — context only, not part of the forecast pair.
+  const applianceActual = axis.map((iso) => {
+    const e = execBy.get(iso);
+    return e?.appliance_kwh_est == null ? null : round2(e.appliance_kwh_est);
+  });
   const daikinActual = axis.map((iso) => {
     const e = execBy.get(iso);
     return e?.daikin_kwh_est == null ? null : round2(e.daikin_kwh_est);
+  });
+  const hasAppliance = applianceActual.some((v) => (v ?? 0) > 0);
+  const totalActual = axis.map((iso, k) => {
+    const e = execBy.get(iso);
+    if (!e) return null;
+    if (e.consumption_kwh != null) return round2(e.consumption_kwh);
+    const b = baseActual[k] ?? 0, a = applianceActual[k] ?? 0, d = daikinActual[k] ?? 0;
+    return (baseActual[k] == null && applianceActual[k] == null && daikinActual[k] == null)
+      ? null : round2(b + a + d);
+  });
+  // Forecast household demand (LP's residual load forecast, excludes heat pump)
+  // — overlaid as a dashed line to compare against the base+appliance stack.
+  const loadForecast = axis.map((iso) => {
+    const v = fcastBy.get(iso);
+    return v == null ? null : round2(v);
   });
   const price = axis.map((iso) => priceBy.get(iso) ?? null);
 
@@ -423,53 +437,42 @@ function optionForDay(
     }
   }
 
+  const stackArea = (color: string, top: number) => ({
+    opacity: 1, color: areaGradient(color, top, top * 0.55),
+  });
   return {
     ...base,
-    legend: { ...(base.legend as object), data: ["Load forecast", "Load actual", "Daikin"] },
+    legend: { show: false },
     tooltip: {
       ...(base.tooltip as object),
       formatter: (params: Array<{ dataIndex: number }>) => {
         const i = params[0]?.dataIndex ?? 0;
         const tier = tierOf(price[i]);
-        const scale = Math.max(0.01, loadForecast[i] ?? 0, loadActual[i] ?? 0, daikinActual[i] ?? 0);
+        const scale = Math.max(0.01, totalActual[i] ?? 0, loadForecast[i] ?? 0);
         const bar = (label: string, val: number | null, col: string) => {
-          if (val == null || !Number.isFinite(val)) return "";
-          const w = Math.round(Math.max(0, Math.min(1, val / scale)) * 78);
+          if (val == null || !Number.isFinite(val) || val <= 0) return "";
+          const w = Math.round(Math.max(0, Math.min(1, val / scale)) * 70);
           return `<div style="display:flex;align-items:center;gap:6px;margin-top:3px;">` +
-            `<span style="width:74px;color:${t.textMute};font-size:11px;">${label}</span>` +
+            `<span style="width:70px;color:${t.textMute};font-size:11px;">${label}</span>` +
             `<span style="display:inline-block;width:${w}px;height:7px;border-radius:3px;background:${col};"></span>` +
             `<span style="font-size:11px;color:${t.text};">${val.toFixed(2)}</span></div>`;
         };
-        let missRow = "";
-        if (loadActual[i] != null && loadForecast[i] != null) {
-          const miss = loadActual[i]! - loadForecast[i]!;
-          const col = miss <= 0 ? t.cheap : t.importColor;
-          missRow = `<div style="margin-top:4px;font-size:11px;color:${col};">` +
-            `load ${miss <= 0 ? "under forecast −" : "over forecast +"}${Math.abs(miss).toFixed(2)} kWh</div>`;
-        }
         const head = `<strong>${labels[i]}</strong>${tier ? ` · ${tier}` : ""}` +
           (price[i] != null ? ` · ${price[i]!.toFixed(1)}p/kWh` : "");
-        return head +
-          bar("Load forecast", loadForecast[i], withAlpha(t.textMute, 0.5)) +
-          bar("Load actual", loadActual[i], withAlpha(t.textMute, 0.95)) +
-          missRow +
-          (daikinActual[i] != null
-            ? `<div style="margin-top:5px;border-top:1px solid ${withAlpha(t.textMute, 0.25)};padding-top:2px;"></div>` +
-              bar("Daikin (heat)", daikinActual[i], t.warn)
+        const totalRow = totalActual[i] != null
+          ? `<div style="margin-top:2px;font-size:11px;color:${t.text};">Total <strong>${totalActual[i]!.toFixed(2)} kWh</strong></div>` : "";
+        return head + totalRow +
+          bar("Base", baseActual[i], t.house) +
+          (hasAppliance ? bar("Appliances", applianceActual[i], t.accent) : "") +
+          bar("Heat pump", daikinActual[i], t.warn) +
+          (loadForecast[i] != null
+            ? `<div style="margin-top:4px;border-top:1px solid ${withAlpha(t.textMute, 0.25)};padding-top:2px;"></div>` +
+              bar("Forecast", loadForecast[i], withAlpha(t.textMute, 0.7))
             : "");
       },
     },
     xAxis: { ...(base.xAxis as object), data: labels, axisLabel: { color: t.textMute, fontSize: 10, interval: 5 } },
-    yAxis: [
-      { ...(base.yAxis as object), name: "kWh", position: "left" },
-      {
-        ...(base.yAxis as object),
-        name: "p",
-        position: "right",
-        splitLine: { show: false },
-        axisLabel: { color: t.textMute, fontSize: 11, formatter: "{value}p" },
-      },
-    ],
+    yAxis: [{ ...(base.yAxis as object), name: "kWh", position: "left" }],
     series: [
       // Tariff bands + now marker on a silent baseline series.
       {
@@ -482,30 +485,26 @@ function optionForDay(
         } : undefined,
         z: 0,
       },
-      // Load forecast — dim dashed line (the LP's prediction).
+      // Stacked composition — base (bottom) + appliances + heat pump. Smooth
+      // areas so the total reads as one filled shape; this is "where the energy
+      // went" through the day.
       {
-        name: "Load forecast", type: "line", smooth: true, showSymbol: false,
+        name: "Base", type: "line", stack: "load", smooth: true, showSymbol: false,
+        data: baseActual, lineStyle: { width: 0 }, areaStyle: stackArea(t.house, 0.7), z: 2,
+      },
+      ...(hasAppliance ? [{
+        name: "Appliances", type: "line", stack: "load", smooth: true, showSymbol: false,
+        data: applianceActual, lineStyle: { width: 0 }, areaStyle: stackArea(t.accent, 0.7), z: 2,
+      }] : []),
+      {
+        name: "Heat pump", type: "line", stack: "load", smooth: true, showSymbol: false,
+        data: daikinActual, lineStyle: { width: 0 }, areaStyle: stackArea(t.warn, 0.75), z: 2,
+      },
+      // Forecast household demand — a clean dashed line over the stack.
+      {
+        name: "Forecast", type: "line", smooth: true, showSymbol: false, connectNulls: false,
         data: loadForecast,
-        lineStyle: { color: withAlpha(t.textMute, 0.5), width: 1.5, type: "dashed", cap: "round" }, z: 2,
-      },
-      // Load actual — the ONE bold line: solid grey + gradient fill.
-      {
-        name: "Load actual", type: "line", smooth: true, showSymbol: false, connectNulls: false,
-        data: loadActual,
-        lineStyle: { color: withAlpha(t.house, 0.95), width: 2.75, cap: "round" },
-        areaStyle: { color: areaGradient(t.house, 0.28, 0.02) }, z: 4,
-      },
-      // Daikin (heat-pump) actual — quiet amber context line.
-      {
-        name: "Daikin", type: "line", smooth: true, showSymbol: false, connectNulls: false,
-        data: daikinActual,
-        lineStyle: { color: withAlpha(t.warn, 0.85), width: 1.25, type: [4, 4], cap: "round" }, z: 3,
-      },
-      // Import price → dashed step on the right axis (reference, not a hard line).
-      {
-        name: "Import price", type: "line", step: "middle", showSymbol: false,
-        yAxisIndex: 1, data: price,
-        lineStyle: { color: t.importColor, width: 1.25, opacity: 0.7, type: "dashed" }, z: 1,
+        lineStyle: { color: withAlpha(t.textMute, 0.85), width: 1.5, type: "dashed", cap: "round" }, z: 5,
       },
       // Pulsing "now".
       ...(nowIdx >= 0 ? [{

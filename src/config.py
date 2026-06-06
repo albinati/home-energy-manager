@@ -950,6 +950,15 @@ class Config:
     DAIKIN_LWT_PREHEAT_COMFORT_BAND_C: float = float(
         os.getenv("DAIKIN_LWT_PREHEAT_COMFORT_BAND_C", "0.5")
     )
+    # Thermal coherence: a building's thermal mass has a multi-hour time
+    # constant, so toggling the LWT offset for short price wiggles is both
+    # ineffective and wasteful of the Daikin quota. Smooth the per-slot offset
+    # sequence so it changes only in sustained blocks: short 0-gaps between two
+    # equal non-zero blocks are bridged, and any boost/setback block shorter
+    # than this many half-hour slots is dropped to neutral. Default 4 = 2 h.
+    DAIKIN_LWT_PREHEAT_MIN_BLOCK_SLOTS: int = int(
+        os.getenv("DAIKIN_LWT_PREHEAT_MIN_BLOCK_SLOTS", "4")
+    )
     OPTIMIZATION_DISABLE_WEATHER_REGULATION: bool = os.getenv(
         "OPTIMIZATION_DISABLE_WEATHER_REGULATION", "false"
     ).lower() in ("true", "1", "yes")
