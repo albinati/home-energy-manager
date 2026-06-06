@@ -982,6 +982,15 @@ class Config:
     ).lower() in ("true", "1", "yes")
     DAIKIN_LWT_PREHEAT_BOOST_C: int = int(os.getenv("DAIKIN_LWT_PREHEAT_BOOST_C", "3"))
     DAIKIN_LWT_PREHEAT_PEAK_SETBACK_C: int = int(os.getenv("DAIKIN_LWT_PREHEAT_PEAK_SETBACK_C", "-2"))
+    # NEGATIVE (paid-to-import) slots: push the space-heating offset to the TOP
+    # of the operating range instead of the modest cheap-slot boost — bank the
+    # most thermal mass into the building while the grid pays us, alongside the
+    # already-maxed tank. Bounded above by the firmware heating cutoff
+    # (DAIKIN_WEATHER_CURVE_HIGH_C — no heat when it's mild out) and below by the
+    # OPTIMIZATION_LWT_OFFSET_MAX clamp; the comfort guard suppresses it once a
+    # room sensor exists. Default = the current offset ceiling (+5). Raise
+    # OPTIMIZATION_LWT_OFFSET_MAX (and this) for an even wider paid-window range.
+    DAIKIN_LWT_PREHEAT_NEGATIVE_BOOST_C: int = int(os.getenv("DAIKIN_LWT_PREHEAT_NEGATIVE_BOOST_C", "5"))
     # Comfort dead-band (°C) used by the sensor-ready guard: once a real room
     # temperature is available, suppress boost above SETPOINT+band and suppress
     # setback below SETPOINT-band. No-op while indoor_temp telemetry is absent.
