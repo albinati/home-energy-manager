@@ -23,7 +23,7 @@ def _seed(conn, *, hour: int, days_ago: float, forecast: float, actual: float):
 
 
 def _cfg(monkeypatch, **kw):
-    defaults = dict(WINDOW_DAYS=14, HALFLIFE_DAYS=5.0, DAMPING=0.5, MIN=0.6, MAX=1.6, MIN_KWH=0.05)
+    defaults = dict(WINDOW_DAYS=14, HALFLIFE_DAYS=5.0, DAMPING=0.5, MIN=0.4, MAX=2.5, MIN_KWH=0.05)
     defaults.update(kw)
     monkeypatch.setattr(config, "PV_RECENT_BIAS_WINDOW_DAYS", defaults["WINDOW_DAYS"], raising=False)
     monkeypatch.setattr(config, "PV_RECENT_BIAS_HALFLIFE_DAYS", defaults["HALFLIFE_DAYS"], raising=False)
@@ -33,7 +33,9 @@ def _cfg(monkeypatch, **kw):
     monkeypatch.setattr(config, "PV_RECENT_BIAS_MIN_KWH", defaults["MIN_KWH"], raising=False)
 
 
-def test_damped_clamped_correction(monkeypatch):
+def test_warm_start_full_correction_first_pass(monkeypatch):
+    # No prior factor → jump straight to the measured ratio (we already have the
+    # history; don't crawl from 1.0). Damping only kicks in once a factor exists.
     import src.db as db
     from src import weather
 
@@ -55,10 +57,9 @@ def test_damped_clamped_correction(monkeypatch):
         factors, raw, samples, diag = weather.compute_pv_recent_bias_by_hour()
 
     assert round(raw[9], 2) == 2.0
-    # Damped 0.5 toward 1.0: 1 + 0.5*(2-1) = 1.5 (within clamp).
-    assert factors[9] == 1.5
+    assert factors[9] == 2.0  # warm start = full measured correction
     assert round(raw[14], 2) == 0.5
-    assert factors[14] == 0.75
+    assert factors[14] == 0.5
     assert samples[9] == 4
 
 
@@ -200,4 +201,4 @@ def test_refresh_persists_and_get(monkeypatch):
         n = weather.refresh_pv_recent_bias()
         got = db.get_pv_recent_bias()
     assert n >= 1
-    assert got.get(9) == 1.5
+    assert got.get(9) == 2.0  # warm start (no prior) = full measured ratio

@@ -1405,8 +1405,16 @@ def compute_pv_recent_bias_by_hour() -> tuple[dict[int, float], dict[int, float]
         if w <= 0 or n < 2:
             continue
         ratio = sw / w
-        old = float(prev.get(h, 1.0))
-        applied = max(lo, min(hi, old * (1.0 + damping * (ratio - 1.0))))
+        if h in prev:
+            # Have a prior factor → damped accumulation (stable ongoing tracking,
+            # avoids overshoot on a noisy new day).
+            applied = float(prev[h]) * (1.0 + damping * (ratio - 1.0))
+        else:
+            # WARM START (#486 Q2): we already have the historical error — jump
+            # straight to the measured correction instead of crawling from 1.0
+            # over days. The window mean is itself a smoothed estimate.
+            applied = ratio
+        applied = max(lo, min(hi, applied))
         raw[h] = round(ratio, 4)
         factors[h] = round(applied, 4)
         samples[h] = int(n)
