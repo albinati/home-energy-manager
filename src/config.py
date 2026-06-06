@@ -470,6 +470,17 @@ class Config:
     APPLIANCE_FALLBACK_SAFETY_MARGIN_KWH: float = float(
         os.getenv("APPLIANCE_FALLBACK_SAFETY_MARGIN_KWH", "0.3")
     )
+    # #222 — learn an appliance's typical power from measured `actual_kwh`
+    # history (SmartThings energy counter) instead of the static registration
+    # default. The central cycle-energy estimate uses the rolling mean of the
+    # last N completed runs once ≥ MIN_SAMPLES exist; otherwise it falls back to
+    # `appliances.typical_kw`. (The σ-based safety margin is separate, #235.)
+    APPLIANCE_LEARNED_KW_LOOKBACK: int = int(
+        os.getenv("APPLIANCE_LEARNED_KW_LOOKBACK", "10")
+    )
+    APPLIANCE_LEARNED_KW_MIN_SAMPLES: int = int(
+        os.getenv("APPLIANCE_LEARNED_KW_MIN_SAMPLES", "3")
+    )
     # Inverter grid-charge rate (kWh per 30-min slot) used to size the
     # refill-window search in the battery-aware picker. Fox EP11 ≈ 1.5;
     # smaller inverters under-fill / larger over-fill if hardcoded.

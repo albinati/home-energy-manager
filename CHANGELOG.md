@@ -29,6 +29,25 @@ two control-side features ship **off by default** (`DAIKIN_LWT_PREHEAT_ENABLED`,
   sustained blocks (`DAIKIN_LWT_PREHEAT_MIN_BLOCK_SLOTS`, default 4 = 2 h):
   short 0-gaps between equal blocks are bridged, sub-2 h blocks dropped. Kills
   the `+3/0/+3/0` chatter at the cheap threshold and the wasted Daikin writes.
+- **LWT-offset drift backstop** (#461 ask 1, PR #492). When HEM owns the offset
+  (pre-heat enabled) and the live device holds a non-zero offset no plan slot
+  justifies, the heartbeat resets it to 0 — after respecting a still-in-effect
+  user gesture for `USER_OVERRIDE_RESPECT_HOURS`. Catches a manual offset
+  (Onecta / physical) that has no paired restore. Mirrors the tank-power drift
+  backstop; gated by `LWT_OFFSET_DRIFT_{CHECK_ENABLED,AUTO_RECOVER}`.
+
+### Added — appliance scheduling
+- **Learned `typical_kw` from measured history** (#222). The cycle-energy
+  estimate the LP and dispatch use now prefers the rolling mean of recent
+  completed runs' measured `actual_kwh` (`kW = actual_kwh / duration`) over the
+  static registration default, once `APPLIANCE_LEARNED_KW_MIN_SAMPLES` (3) runs
+  exist — `db.appliance_learned_typical_kw` over the last
+  `APPLIANCE_LEARNED_KW_LOOKBACK` (10). Fixes the ~3× over-estimate (registration
+  0.5 kW vs measured ~0.2–0.4 kW eco cycles) that made the LP route around the
+  wash more than necessary. Applied at `_arm_or_replan` (window picker) and both
+  LP residual-load overlays; the σ-based safety margin (#235) is unchanged.
+  `GET /api/v1/appliances` now returns `learned_typical_kw` + `learned_samples`
+  + `effective_typical_kw` so the learning is visible.
 
 ### Added — adaptive solar forecast
 - **PV recent-bias corrector** (#486, PRs #488 + #489). A convergent feedback
