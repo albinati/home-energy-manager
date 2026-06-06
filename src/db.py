@@ -860,6 +860,20 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         )"""
     )
 
+    # #486: pv_recent_bias — adaptive closed-loop corrector. Per UTC hour, the
+    # damped recency-weighted mean of actual/forecast from ``pv_error_log``
+    # (the COMMITTED forecast's own realised error). Applied as a final nudge
+    # on the day-ahead PV forecast; self-converges as the error shrinks.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS pv_recent_bias (
+            hour_utc        INTEGER PRIMARY KEY CHECK(hour_utc >= 0 AND hour_utc < 24),
+            factor          REAL NOT NULL,
+            raw_ratio       REAL,
+            samples         INTEGER NOT NULL,
+            computed_at     TEXT NOT NULL
+        )"""
+    )
+
     # V14: presence_periods — manually-flagged periods of household presence
     # (home / travel / guests) so future load-pattern analyses + LP calibration
     # can de-bias the rolling load profile by occupancy. Read by analytics
@@ -4597,6 +4611,23 @@ def rebuild_pv_error_log_for_date(day: date) -> int:
     return written
 
 
+def get_pv_error_log_range(start_utc_iso: str, end_utc_iso: str) -> list[dict[str, Any]]:
+    """Return per-slot forecast/actual rows in [start, end) (#486 bias loop)."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT slot_time_utc, forecast_kwh, actual_kwh
+                   FROM pv_error_log
+                   WHERE slot_time_utc >= ? AND slot_time_utc < ?
+                   ORDER BY slot_time_utc""",
+                (start_utc_iso, end_utc_iso),
+            )
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
 def get_pv_error_log_for_date(day: date) -> list[dict[str, Any]]:
     """Return persisted per-slot forecast/actual/error rows for ``day`` (#462)."""
     day_start = datetime(day.year, day.month, day.day, tzinfo=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -4788,6 +4819,43 @@ def get_pv_calibration_hourly() -> dict[int, float]:
             cur = conn.execute(
                 "SELECT hour_utc, factor FROM pv_calibration_hourly"
             )
+            return {int(r[0]): float(r[1]) for r in cur.fetchall()}
+        finally:
+            conn.close()
+
+
+def upsert_pv_recent_bias(
+    factors: dict[int, float],
+    raw_ratios: dict[int, float],
+    samples: dict[int, int],
+    computed_at: str,
+) -> int:
+    """Replace the ``pv_recent_bias`` table with freshly-computed factors (#486)."""
+    n = 0
+    with _lock:
+        conn = get_connection()
+        try:
+            conn.execute("DELETE FROM pv_recent_bias")
+            for h, f in factors.items():
+                conn.execute(
+                    """INSERT OR REPLACE INTO pv_recent_bias
+                       (hour_utc, factor, raw_ratio, samples, computed_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (int(h), float(f), float(raw_ratios.get(h, f)), int(samples.get(h, 0)), computed_at),
+                )
+                n += 1
+            conn.commit()
+        finally:
+            conn.close()
+    return n
+
+
+def get_pv_recent_bias() -> dict[int, float]:
+    """Return cached per-hour adaptive PV bias factors, or ``{}`` when empty."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute("SELECT hour_utc, factor FROM pv_recent_bias")
             return {int(r[0]): float(r[1]) for r in cur.fetchall()}
         finally:
             conn.close()

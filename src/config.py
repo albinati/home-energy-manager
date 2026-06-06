@@ -598,6 +598,33 @@ class Config:
         in ("1", "true", "yes", "on")
     )
 
+    # --- Adaptive PV recent-bias corrector (#486) ----------------------------
+    # Closed feedback loop on the COMMITTED forecast's own error: per UTC hour,
+    # the recency-weighted mean of actual/forecast from ``pv_error_log`` nudges
+    # the day-ahead PV forecast. Because it's driven by REALISED error (not
+    # clear-sky potential), genuine morning shade stays low (actual low there →
+    # factor ≈ 1) while systematic under-forecast (e.g. clear mornings 2× low)
+    # gets corrected. Damped + clamped + recomputed daily after the error
+    # rebuild → stable, self-converging. Off by default (observe first).
+    PV_RECENT_BIAS_ENABLED: bool = (
+        os.getenv("PV_RECENT_BIAS_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
+    )
+    PV_RECENT_BIAS_WINDOW_DAYS: int = int(os.getenv("PV_RECENT_BIAS_WINDOW_DAYS", "14"))
+    PV_RECENT_BIAS_HALFLIFE_DAYS: float = float(os.getenv("PV_RECENT_BIAS_HALFLIFE_DAYS", "5"))
+    # The corrector ACCUMULATES on its previous factor each refresh, nudged by
+    # the RESIDUAL error (ratio of actual to the already-corrected forecast):
+    # ``new = old × (1 + damping·(ratio−1))``. So it ramps to FULL correction
+    # over a few days (while the corrected forecast still under-shoots, ratio>1
+    # keeps pushing the factor up; once it matches, ratio≈1 and it settles) and
+    # self-stabilises if it over-shoots (ratio<1 pulls it back). Damping sets the
+    # ramp speed. Clamp is a hard safety rail, wide enough to fully correct the
+    # observed ~2× morning bias.
+    PV_RECENT_BIAS_DAMPING: float = float(os.getenv("PV_RECENT_BIAS_DAMPING", "0.5"))
+    PV_RECENT_BIAS_MIN: float = float(os.getenv("PV_RECENT_BIAS_MIN", "0.4"))
+    PV_RECENT_BIAS_MAX: float = float(os.getenv("PV_RECENT_BIAS_MAX", "2.5"))
+    # A slot needs at least this forecast+actual kWh to contribute (drop noise).
+    PV_RECENT_BIAS_MIN_KWH: float = float(os.getenv("PV_RECENT_BIAS_MIN_KWH", "0.05"))
+
     # Agile scheduler (Daikin ASHP by price)
     SCHEDULER_ENABLED: bool = os.getenv("SCHEDULER_ENABLED", "false").lower() in ("true", "1", "yes")
     OCTOPUS_TARIFF_CODE: str = (os.getenv("OCTOPUS_TARIFF_CODE") or "").strip()

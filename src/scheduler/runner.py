@@ -722,6 +722,13 @@ def bulletproof_pv_error_log_job() -> None:
         logger.info("pv_error_log rebuild: date_utc=%s rows=%d", target_day.isoformat(), rows)
     except Exception as e:
         logger.warning("pv_error_log rebuild failed (non-fatal): %s", e)
+    # #486 — refresh the adaptive recent-bias corrector from the just-rebuilt
+    # error log (no-op effect on the LP unless PV_RECENT_BIAS_ENABLED).
+    try:
+        from ..weather import refresh_pv_recent_bias
+        refresh_pv_recent_bias()
+    except Exception as e:
+        logger.warning("pv_recent_bias refresh failed (non-fatal): %s", e)
 
 
 def bulletproof_pv_calibration_refresh_job() -> None:
