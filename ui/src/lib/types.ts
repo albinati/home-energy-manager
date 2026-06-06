@@ -467,18 +467,30 @@ export interface DhwScheduleResponse {
   rows: DhwScheduleRow[];
 }
 
-// GET /daikin/lwt-schedule — committed LWT-offset pre-heat plan (#481).
-// Per-slot integer offset: positive = boost (cheap), negative = setback (peak).
-export interface LwtScheduleRow {
-  action_type?: string | null;   // lwt_preheat
-  start_utc?: string | null;
-  end_utc?: string | null;
-  lwt_offset?: number | null;     // integer °C, e.g. +3 / -2
-  status?: string | null;
+// GET /daikin/heating-plan — deterministic per-slot heating timeline across
+// yesterday/today/tomorrow (#481 follow-up): outdoor temp + price tier + LWT
+// offset + heating-on + tank target/kind, recomputed (no action_schedule).
+export interface HeatingPlanSlot {
+  slot_utc: string;
+  outdoor_c?: number | null;
+  price_p?: number | null;
+  tier?: "negative" | "cheap" | "standard" | "peak" | null;
+  lwt_offset?: number | null;     // integer °C, e.g. +3 / -2; null = no offset
+  heating_on?: boolean;
+  tank_temp_c?: number | null;
+  tank_kind?: "warmup" | "setback" | "boost" | null;
 }
-export interface LwtScheduleResponse {
+export interface HeatingPlanDay {
+  date: string;
+  label: string;                  // "Yesterday" | "Today" | "Tomorrow"
+  start_utc: string;
+}
+export interface HeatingPlanResponse {
   enabled: boolean;
-  rows: LwtScheduleRow[];
+  now_utc: string;
+  high_temp_c: number;            // heating cutoff (DAIKIN_WEATHER_CURVE_HIGH_C)
+  days: HeatingPlanDay[];
+  slots: HeatingPlanSlot[];
 }
 
 // GET /energy/today-cumulative — today's grid traffic so far (to now). Real-

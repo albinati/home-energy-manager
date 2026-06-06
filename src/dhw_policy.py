@@ -120,6 +120,7 @@ def generate_daily_tank_schedule(
     *,
     agile_rates: list[dict[str, Any]] | None = None,
     mode: str | None = None,
+    allow_past: bool = False,
 ) -> list[dict[str, Any]]:
     """Generate tank action rows for the local calendar day starting at
     ``DHW_WARMUP_START_HOUR_LOCAL`` (default 13:00) on ``target_date_local``
@@ -145,10 +146,13 @@ def generate_daily_tank_schedule(
         return []
 
     # Past-date guard (K1.1 bug #5): generating rows for yesterday is
-    # always a no-op — the heartbeat would try to fire them immediately
-    # and they'd be wasted churn. Tomorrow is fine (advance scheduling).
+    # always a no-op for the WRITER — the heartbeat would try to fire them
+    # immediately and they'd be wasted churn. Tomorrow is fine (advance
+    # scheduling). ``allow_past=True`` lets read-only callers (e.g. the
+    # heating-plan timeline endpoint) regenerate a past day's deterministic
+    # schedule for display without writing anything.
     today_local = datetime.now(_tz_local()).date()
-    if target_date_local < today_local:
+    if not allow_past and target_date_local < today_local:
         logger.info(
             "dhw_policy: skipping %s (in the past; today=%s)",
             target_date_local, today_local,
