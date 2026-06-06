@@ -660,7 +660,16 @@ def _max_optional(a: int | None, b: int | None) -> int | None:
 def _coarse_merge_fox(
     merged: list[tuple[datetime, datetime, tuple]],
 ) -> list[tuple[datetime, datetime, tuple]]:
-    """Collapse SelfUse variants; preserve highest minSocOnGrid + maxSoc when merging solar_charge windows."""
+    """Collapse adjacent SelfUse windows — but ONLY when they share the same
+    ``minSocOnGrid``. A ``solar_charge`` hold (min 100, "let PV stockpile, no
+    discharge") must NEVER merge-absorb a normal SelfUse/peak window (min 10,
+    "discharge to cover load / the evening peak"): taking the higher min froze
+    the battery for the whole merged span — e.g. 11:00–23:59 at 100 % after the
+    morning grid-charge, leaving it unusable through the peak it was charged for
+    (prod 2026-06-06). Keeping differing-min windows separate preserves the
+    standalone hold AND lets the discharge windows discharge; the group-cap /
+    overflow logic handles any extra windows. ``maxSoc`` keeps the higher cap
+    (harmless — it caps charging, not discharge)."""
     out: list[tuple[datetime, datetime, tuple]] = []
     for a, b, k in merged:
         # Normalise SelfUse-shape entries; preserve the original max_soc (5th element).
@@ -668,11 +677,13 @@ def _coarse_merge_fox(
             nk = ("SelfUse", None, None, k[3], k[4] if len(k) > 4 else None)
         else:
             nk = k
-        if out and out[-1][2][0] == "SelfUse" and nk[0] == "SelfUse" and out[-1][1] == a:
+        if (
+            out and out[-1][2][0] == "SelfUse" and nk[0] == "SelfUse"
+            and out[-1][1] == a and out[-1][2][3] == nk[3]  # same floor only
+        ):
             prev = out[-1][2]
-            merged_msg = max(prev[3], nk[3])
             merged_max = _max_optional(prev[4] if len(prev) > 4 else None, nk[4])
-            out[-1] = (out[-1][0], b, ("SelfUse", None, None, merged_msg, merged_max))
+            out[-1] = (out[-1][0], b, ("SelfUse", None, None, nk[3], merged_max))
         elif out and out[-1][2] == nk and out[-1][1] == a:
             out[-1] = (out[-1][0], b, nk)
         else:
