@@ -89,10 +89,11 @@ def test_disabled_returns_none(monkeypatch):
     assert _off(5.0, COLD) is None
 
 
-def test_warm_day_returns_none(enabled):
-    # Firmware won't run the compressor → emit nothing (climate hands-off, no quota).
-    assert _off(5.0, WARM) is None
-    assert _off(30.0, WARM) is None
+def test_warm_day_still_emits_offset(enabled):
+    # No outdoor cutoff: the offset is emitted regardless of outdoor temp; the
+    # Daikin firmware (its own weather curve) decides whether to actually heat.
+    assert _off(5.0, WARM) == 3       # cheap → +3 (firmware ignores if too warm)
+    assert _off(30.0, WARM) == -2     # peak → setback
 
 
 def test_cheap_slot_boosts(enabled):
@@ -112,9 +113,10 @@ def test_negative_boost_clamped_to_offset_max(enabled, monkeypatch):
     assert _off(-3.0, COLD) == 5  # clamp at MAX=5
 
 
-def test_negative_warm_day_still_none(enabled):
-    # Even when paid, no boost if the firmware isn't heating (mild outdoor).
-    assert _off(-3.0, WARM) is None
+def test_negative_warm_day_still_boosts(enabled):
+    # Paid window: push the offset to max regardless of outdoor temp — the
+    # firmware decides whether to heat (cutoff removed).
+    assert _off(-3.0, WARM) == 5  # fixture clamp MAX=5
 
 
 def test_peak_slot_sets_back(enabled):
@@ -202,10 +204,13 @@ def test_neutral_slots_emit_nothing(enabled):
     assert _lwt_preheat_pairs(plan, []) == []
 
 
-def test_warm_slots_emit_nothing(enabled):
-    # Cheap price but warm outdoor → firmware idle → no offset write.
+def test_warm_slots_still_emit(enabled):
+    # Cutoff removed: cheap+warm slots still emit the offset (the firmware
+    # decides whether to heat). One +3 boost window over the three slots.
     plan = _plan([5, 5, 5], [WARM] * 3)
-    assert _lwt_preheat_pairs(plan, []) == []
+    pairs = _lwt_preheat_pairs(plan, [])
+    assert len(pairs) == 1
+    assert pairs[0][1]["params"]["lwt_offset"] == 3
 
 
 def test_restore_returns_offset_to_zero(enabled):

@@ -68,6 +68,42 @@ def _make_action(
     }
 
 
+def _shower_in_span(start_utc: datetime, end_utc: datetime, tz: ZoneInfo) -> bool:
+    """True if any configured DHW shower window overlaps ``[start, end)`` in
+    local time (#tank-precool guard). Parses ``DHW_SHOWER_SCHEDULE``
+    (``"HH:MM-HH:MM,…"``). Conservative: any parse trouble → True (don't
+    pre-cool when unsure). Empty schedule → False.
+    """
+    sched = (getattr(config, "DHW_SHOWER_SCHEDULE", "") or "").strip()
+    if not sched or end_utc <= start_utc:
+        return False
+    windows: list[tuple[int, int]] = []
+    for part in sched.split(","):
+        part = part.strip()
+        if "-" not in part:
+            continue
+        try:
+            a, b = part.split("-", 1)
+            sh, sm = a.split(":")
+            eh, em = b.split(":")
+            windows.append((int(sh) * 60 + int(sm), int(eh) * 60 + int(em)))
+        except ValueError:
+            return True  # unparseable → assume a shower could be there
+    if not windows:
+        return False
+    day = start_utc.astimezone(tz).date()
+    last = end_utc.astimezone(tz).date()
+    while day <= last:
+        midnight = datetime(day.year, day.month, day.day, tzinfo=tz)
+        for ws, we in windows:
+            sw = (midnight + timedelta(minutes=ws)).astimezone(UTC)
+            ew = (midnight + timedelta(minutes=we)).astimezone(UTC)
+            if sw < end_utc and ew > start_utc:
+                return True
+        day = day + timedelta(days=1)
+    return False
+
+
 def _detect_negative_windows(
     agile_rates: list[dict[str, Any]] | None,
     horizon_start_utc: datetime,
@@ -226,6 +262,28 @@ def generate_daily_tank_schedule(
             else:
                 break
 
+    # Tank pre-cool into a negative window: drop the setback target toward the
+    # device minimum so the paid boost (cold → boost_c) absorbs the most kWh and
+    # no positive-price reheat fires just before it. Guarded by no shower in the
+    # setback→first-boost span (the boost reheats to boost_c before any later
+    # shower). PHYSICS CAVEAT: standing loss (~0.5 °C/h) caps real cooling — for
+    # a window soon after the warmup the tank is still coasting well above the
+    # target, so the gain is small; the value is mostly far-from-warmup windows
+    # + the guaranteed no-reheat-before-paid.
+    effective_setback_c = setback_c
+    if (
+        getattr(config, "DHW_TANK_PRECOOL_ENABLED", False)
+        and mode != "guests"
+        and neg_windows
+    ):
+        first_neg_start = min(nw[0] for nw in neg_windows)
+        if setback_start_utc <= first_neg_start and not _shower_in_span(
+            setback_start_utc, first_neg_start, tz
+        ):
+            effective_setback_c = min(
+                setback_c, int(getattr(config, "DHW_TANK_PRECOOL_TARGET_C", 30))
+            )
+
     rows: list[dict[str, Any]] = []
 
     if mode == "guests":
@@ -253,7 +311,7 @@ def generate_daily_tank_schedule(
             action_type="tank_setback",
             start_utc=setback_start_utc,
             end_utc=next_warmup_utc,
-            tank_temp_c=setback_c,
+            tank_temp_c=effective_setback_c,
         ))
 
     for nw_start, nw_end in neg_windows:

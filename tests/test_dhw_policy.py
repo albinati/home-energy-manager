@@ -534,3 +534,34 @@ def test_negative_boost_uses_powerful():
     )
     boost = next(r for r in rows if r["action_type"] == "tank_negative_boost")
     assert boost["params"]["tank_powerful"] is True
+
+
+def test_precool_lowers_setback_into_negative_window(monkeypatch):
+    # A negative window in the setback period + evening showers (no conflict) →
+    # the setback target drops toward the device minimum (pre-cool).
+    monkeypatch.setattr(config, "DHW_TANK_PRECOOL_ENABLED", True, raising=False)
+    monkeypatch.setattr(config, "DHW_TANK_PRECOOL_TARGET_C", 30, raising=False)
+    monkeypatch.setattr(config, "DHW_SHOWER_SCHEDULE", "19:00-22:00", raising=False)
+    neg = datetime(2026, 6, 2, 4, 0, tzinfo=UTC)  # inside setback (22:00 d1→13:00 d2)
+    rates = [{"valid_from": neg.isoformat().replace("+00:00", "Z"), "value_inc_vat": -5.0}]
+    rows = dhw_policy.generate_daily_tank_schedule(date(2026, 6, 1), mode="normal", agile_rates=rates)
+    setback = [r for r in rows if r["action_type"] == "tank_setback"][0]
+    assert setback["params"]["tank_temp"] == 30
+
+
+def test_no_precool_without_negative_window(monkeypatch):
+    monkeypatch.setattr(config, "DHW_TANK_PRECOOL_ENABLED", True, raising=False)
+    rows = dhw_policy.generate_daily_tank_schedule(date(2026, 6, 1), mode="normal")
+    setback = [r for r in rows if r["action_type"] == "tank_setback"][0]
+    assert setback["params"]["tank_temp"] == int(round(float(config.DHW_TEMP_SETBACK_C)))
+
+
+def test_no_precool_when_shower_in_span(monkeypatch):
+    # A morning shower between setback start and the boost → guard blocks precool.
+    monkeypatch.setattr(config, "DHW_TANK_PRECOOL_ENABLED", True, raising=False)
+    monkeypatch.setattr(config, "DHW_SHOWER_SCHEDULE", "07:00-08:00", raising=False)
+    neg = datetime(2026, 6, 2, 9, 0, tzinfo=UTC)  # boost after the 07:00 BST shower
+    rates = [{"valid_from": neg.isoformat().replace("+00:00", "Z"), "value_inc_vat": -5.0}]
+    rows = dhw_policy.generate_daily_tank_schedule(date(2026, 6, 1), mode="normal", agile_rates=rates)
+    setback = [r for r in rows if r["action_type"] == "tank_setback"][0]
+    assert setback["params"]["tank_temp"] == int(round(float(config.DHW_TEMP_SETBACK_C)))

@@ -333,9 +333,12 @@ def _preheat_lwt_offset(
     """
     if not config.DAIKIN_LWT_PREHEAT_ENABLED:
         return None
-    # Firmware only heats below the curve's high anchor; nothing to nudge above it.
-    if outdoor_c >= float(config.DAIKIN_WEATHER_CURVE_HIGH_C):
-        return None
+    # No outdoor cutoff: the Daikin firmware applies the offset relative to its
+    # OWN weather curve and decides whether to run the compressor, so emitting
+    # the offset when it's mild doesn't force pointless heating — the firmware
+    # ignores it above its own heating ambient threshold. We just set the offset;
+    # the unit owns the on/off. (Was previously gated at DAIKIN_WEATHER_CURVE_
+    # HIGH_C, which cut the offset mid-paid-window — the user's call to remove.)
 
     boost = int(config.DAIKIN_LWT_PREHEAT_BOOST_C)
     neg_boost = int(getattr(config, "DAIKIN_LWT_PREHEAT_NEGATIVE_BOOST_C", boost))
