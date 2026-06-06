@@ -1671,6 +1671,19 @@ class Config:
         os.getenv("TANK_DRIFT_CHECK_ENABLED", "true").strip().lower()
         in ("1", "true", "yes", "on")
     )
+    # #461 — LWT-offset drift backstop. When HEM owns the offset (pre-heat
+    # enabled) and the live offset is non-zero but no active lwt_preheat slot
+    # justifies it, reset it to 0 — after the user's grace window
+    # (USER_OVERRIDE_RESPECT_HOURS) so a manual override gets respected then
+    # cleared. Catches a manual offset that has no paired restore.
+    LWT_OFFSET_DRIFT_CHECK_ENABLED: bool = (
+        os.getenv("LWT_OFFSET_DRIFT_CHECK_ENABLED", "true").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+    LWT_OFFSET_DRIFT_AUTO_RECOVER: bool = (
+        os.getenv("LWT_OFFSET_DRIFT_AUTO_RECOVER", "true").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
     # Fox ESS: soft daily budget (real limit ≈1440; we stop at 1200 for 15% headroom)
     FOX_DAILY_BUDGET: int = int(os.getenv("FOX_DAILY_BUDGET", "1200"))
     # Default realtime data TTL — raised from 30 s to 300 s (5 min) to match heartbeat
