@@ -601,6 +601,7 @@ def write_daily_tank_schedule(
     mode: str | None = None,
     clear_existing: bool = True,
     boosts_only_as_of: datetime | None = None,
+    plan_date_override: str | None = None,
 ) -> int:
     """Write a day's tank schedule into ``action_schedule``.
 
@@ -615,6 +616,13 @@ def write_daily_tank_schedule(
         mode: optional override; defaults to ``config.OPTIMIZATION_PRESET``
         clear_existing: when True, calls ``db.clear_actions_in_range`` over
             the warmup window before upserting
+        plan_date_override: stamp rows with this ``plan_date`` instead of
+            ``target_date_local``. CRITICAL for the boosts-only live-cycle
+            recovery: the heartbeat reconciler selects rows by
+            ``get_actions_for_plan_date(today_local)``, so a live-cycle boost
+            anchored at *yesterday* must be filed under TODAY's plan_date or it
+            is never fired (2026-06-07: the recovered boost sat pending all
+            window because it inherited yesterday's plan_date).
 
     Returns:
         Number of rows written.
@@ -641,6 +649,7 @@ def write_daily_tank_schedule(
         end_iso = max(r["end_time"] for r in rows)
         db.clear_actions_in_range(start_iso, end_iso, device="daikin")
 
+    plan_date_str = plan_date_override or str(target_date_local)
     n_written = 0
     for r in rows:
         try:
@@ -650,7 +659,7 @@ def write_daily_tank_schedule(
                 start_time=r["start_time"],
                 end_time=r["end_time"],
                 params=r["params"],
-                plan_date=str(target_date_local),
+                plan_date=plan_date_str,
                 status="pending",
             )
             n_written += 1

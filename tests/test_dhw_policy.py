@@ -520,6 +520,32 @@ def test_boosts_only_writer_is_idempotent_across_replans():
     assert n == 1, f"expected a single boost row across re-plans, got {n}"
 
 
+def test_boosts_only_files_under_override_plan_date():
+    """Finding 3 (2026-06-07): a live-cycle boost is anchored at yesterday, but
+    MUST be filed under TODAY's plan_date or the heartbeat reconciler
+    (get_actions_for_plan_date(today)) never selects it → never fires."""
+    import sqlite3
+    outgoing = [
+        {"valid_from": "2026-06-01T04:00:00Z", "value_inc_vat": -4.0},
+        {"valid_from": "2026-06-01T04:30:00Z", "value_inc_vat": -4.5},
+    ]
+    dhw_policy.write_daily_tank_schedule(
+        target_date_local=date(2026, 5, 31),          # live cycle anchored yesterday
+        agile_rates=outgoing,
+        mode="normal",
+        clear_existing=False,
+        boosts_only_as_of=datetime(2026, 6, 1, 4, 5, tzinfo=UTC),
+        plan_date_override="2026-06-01",               # file under TODAY
+    )
+    # The reconciler keys on the `date` column == today.
+    rows = _db.get_actions_for_plan_date("2026-06-01", device="daikin")
+    boosts = [r for r in rows if r["action_type"] == "tank_negative_boost"]
+    assert len(boosts) == 1, "boost must be selectable under today's plan_date"
+    # And NOT under yesterday's date.
+    y = _db.get_actions_for_plan_date("2026-05-31", device="daikin")
+    assert [r for r in y if r["action_type"] == "tank_negative_boost"] == []
+
+
 def test_write_vacation_writes_zero_rows():
     """write_daily_tank_schedule in vacation mode is a no-op."""
     n = dhw_policy.write_daily_tank_schedule(

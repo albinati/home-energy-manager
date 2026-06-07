@@ -1203,6 +1203,10 @@ def write_daikin_from_lp_plan(
                     agile_rates=agile_live,
                     clear_existing=False,  # cleared widely above
                     boosts_only_as_of=datetime.now(_UTC_T),
+                    # File under TODAY's plan_date — the heartbeat reconciler
+                    # selects rows by today_local; a yesterday-anchored boost
+                    # stamped with yesterday's date would never fire.
+                    plan_date_override=now_local_t.date().isoformat(),
                 )
             except Exception as e:
                 logger.warning("dhw_policy: live-cycle boost recovery failed: %s", e)
