@@ -1035,7 +1035,6 @@ def compute_appliance_window_suggestions(
     )
     if not windows:
         return []
-    first_window_start, _ = windows[0]
     out: list[dict[str, Any]] = []
     for app in db.list_appliances(enabled_only=True):
         try:
@@ -1047,15 +1046,26 @@ def compute_appliance_window_suggestions(
                 or config.APPLIANCE_DEFAULT_DEADLINE_LOCAL
             )
             deadline_utc = _next_deadline_utc(deadline_local, now=now)
+            # Clamp the recommendation search to the SAME detection horizon so the
+            # recommended window can't sit beyond it (review HIGH/MEDIUM: detection
+            # 24h vs deadline up to ~31h diverged, and the message then pointed at
+            # a window the trigger never saw).
+            eff_deadline = min(deadline_utc, horizon_end)
             duration = int(app.get("default_duration_minutes") or 120)
-            # Cheapest fitting run window in [now, deadline] — naturally anchors
+            # Cheapest fitting run window in [now, eff_deadline] — naturally anchors
             # on the negative/cheap slots (lowest mean). Raises if it can't fit.
             try:
                 start_utc, end_utc, avg_p = find_cheapest_window(
-                    now, deadline_utc, duration,
+                    now, eff_deadline, duration,
                 )
             except ValueError:
                 continue  # no fit before the deadline
+            # Coherence guard: the recommended window MUST overlap a detected
+            # qualifying window, else the nudge would advertise a slot that isn't
+            # actually cheap/negative (kills the synthetic _fallback_window=0.0p
+            # case and the deadline-before-the-window case).
+            if not any(ws < end_utc and we > start_utc for ws, we in windows):
+                continue
             kw, _n = _effective_typical_kw(
                 appliance_id, float(app.get("typical_kw") or 0.5),
             )
@@ -1064,7 +1074,6 @@ def compute_appliance_window_suggestions(
             out.append({
                 "appliance_id": appliance_id,
                 "appliance_name": app.get("name") or f"appliance #{appliance_id}",
-                "candidate_window_start_utc": first_window_start,
                 "recommended_start_utc": start_utc,
                 "recommended_end_utc": end_utc,
                 "deadline_utc": deadline_utc,
@@ -1118,7 +1127,10 @@ def nudge_appliance_windows(
     fired: list[dict[str, Any]] = []
     for s in suggestions:
         key = f"appliance_nudge_last_{s['appliance_id']}"
-        window_id = _iso(s["candidate_window_start_utc"])
+        # Debounce on the RECOMMENDED window the user actually sees — one push per
+        # recommended window. A genuinely new (cheaper) window shifts the start →
+        # re-fires; re-plans of the same window keep the same start → suppressed.
+        window_id = _iso(s["recommended_start_utc"])
         try:
             if db.get_runtime_setting(key) == window_id:
                 continue  # already nudged for this window

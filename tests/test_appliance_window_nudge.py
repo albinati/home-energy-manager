@@ -171,14 +171,15 @@ def test_nudge_refires_for_new_window(monkeypatch):
     _setup_cfg(monkeypatch)
     calls = _capture_notify(monkeypatch)
     now = _now_top_of_hour()
-    _add_washer(deadline_hours_ahead=40)
-    # First window tomorrow-ish; nudge once.
-    _seed_rates(now + timedelta(hours=1), [-4.0, -4.5, -3.0])
+    _add_washer(deadline_hours_ahead=12)
+    # First: a window at now+3h → recommended start = now+3h, nudge once.
+    _seed_rates(now + timedelta(hours=3), [-3.0, -3.0, -3.0, -3.0])
     appliance_dispatch.nudge_appliance_windows(now=now)
     assert len(calls) == 1
-    # A DIFFERENT (later) negative window → new candidate start → re-fires.
-    _seed_rates(now + timedelta(hours=20), [-5.0, -5.0, -4.0])
-    appliance_dispatch.nudge_appliance_windows(now=now + timedelta(hours=10))
+    # A cheaper, EARLIER window appears (now+1h) → new cheapest → recommended start
+    # shifts to now+1h ≠ now+3h → re-fires (same now, no deadline wrap).
+    _seed_rates(now + timedelta(hours=1), [-5.0, -5.0, -5.0, -5.0])
+    appliance_dispatch.nudge_appliance_windows(now=now)
     assert len(calls) == 2
 
 
@@ -189,6 +190,20 @@ def test_nudge_no_fit_before_deadline_skips(monkeypatch):
     _add_washer(deadline_hours_ahead=1.0)  # deadline only 1h away, wash needs 2h
     _seed_rates(now + timedelta(minutes=30), [-4.0, -4.5, -3.0])
     appliance_dispatch.nudge_appliance_windows(now=now)
+    assert calls == []
+
+
+def test_nudge_skips_when_negative_window_unreachable_before_deadline(monkeypatch):
+    """Review MEDIUM: a negative window exists in the horizon but the deadline is
+    BEFORE it → the recommended (pre-deadline) window can't overlap it → no nudge
+    (and no fabricated _fallback_window=0.0p push)."""
+    _setup_cfg(monkeypatch)
+    calls = _capture_notify(monkeypatch)
+    now = _now_top_of_hour()
+    _add_washer(deadline_hours_ahead=2.0)  # deadline ~2h away
+    # Negative window is 5h out — after the deadline → unreachable.
+    _seed_rates(now + timedelta(hours=5), [-4.0, -4.5, -3.0, -2.0])
+    assert appliance_dispatch.nudge_appliance_windows(now=now) == []
     assert calls == []
 
 
