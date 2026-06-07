@@ -268,6 +268,13 @@ class MonthlyCostSummaryResponse(BaseModel):
     fixed_shadow_pounds: float | None = None
     delta_vs_fixed_pence: float | None = None
     delta_vs_fixed_pounds: float | None = None
+    # The authoritative slot-level PnL comparison vs the configured fixed tariff
+    # (British Gas) on the IMPORT basis — `compute_monthly_pnl`'s
+    # delta_vs_fixed_tariff_real_gbp. Differs from `delta_vs_fixed_*` above,
+    # which is a coarser Fox-energy aggregate that can flip sign on Agile months.
+    # None for pre-Agile months (clamped by AGILE_TARIFF_START_DATE). Positive =
+    # Agile cheaper. Use THIS for lifetime "saved vs British Gas".
+    delta_vs_fixed_real_pounds: float | None = None
 
 
 class MonthlyInsightsResponse(BaseModel):

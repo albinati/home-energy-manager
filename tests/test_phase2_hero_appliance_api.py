@@ -30,10 +30,51 @@ def test_today_cumulative_exposes_savings_fields(monkeypatch):
     for k in (
         "import_kwh", "export_kwh", "import_cost_gbp", "export_revenue_gbp",
         "realised_net_cost_gbp", "earnings_today_gbp", "negative_import_credit_gbp",
+        # The standing charge is surfaced so the credit math is explicit
+        # (earned − standing = net) and doesn't "look too small".
+        "standing_charge_gbp",
         # The CONFIGURED fixed tariff (British Gas) — correct shadow, not the generic.
         "fixed_tariff_label", "delta_vs_fixed_tariff_real_gbp", "fixed_tariff_shadow_real_gbp",
     ):
         assert k in body, f"hero needs {k} in today-cumulative"
+
+
+def test_monthly_exposes_bg_real_delta(monkeypatch):
+    """/energy/monthly must surface the authoritative slot-level British-Gas
+    delta (compute_monthly_pnl) as `delta_vs_fixed_real_pounds` — the hero's
+    lifetime "saved vs fixed" sums THIS, not the coarse Fox-energy delta which
+    flips sign on Agile months."""
+    db.init_db()
+    client = _client(monkeypatch)
+
+    from src.energy.monthly import (
+        MonthlyCostSummary,
+        MonthlyEnergySummary,
+        MonthlyInsights,
+    )
+
+    fake = MonthlyInsights(
+        energy=MonthlyEnergySummary(year=2026, month=5, month_str="2026-05"),
+        cost=MonthlyCostSummary(
+            net_cost_pence=8696.0,
+            # The coarse delta disagrees with the real one (the bug under test).
+            delta_vs_fixed_pence=-1263.0,
+        ),
+    )
+    monkeypatch.setattr("src.api.main._foxess_configured", lambda: True)
+    monkeypatch.setattr("src.api.main.get_monthly_insights", lambda y, m: fake)
+    monkeypatch.setattr(
+        "src.analytics.pnl.compute_monthly_pnl",
+        lambda anchor: {"delta_vs_fixed_tariff_real_gbp": 6.19},
+    )
+
+    r = client.get("/api/v1/energy/monthly?month=2026-05")
+    assert r.status_code == 200, r.text
+    cost = r.json()["cost"]
+    # The new authoritative field carries the real (positive = Agile won) delta…
+    assert cost["delta_vs_fixed_real_pounds"] == 6.19
+    # …while the legacy coarse field is left untouched (kept for other consumers).
+    assert cost["delta_vs_fixed_pounds"] == -12.63
 
 
 def _seed_rates(start_utc: datetime, prices: list[float]) -> None:

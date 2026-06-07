@@ -2766,6 +2766,22 @@ async def energy_monthly(month: str):
             detail="Failed to fetch monthly data from Fox ESS. Try again later.",
         )
     cost = insights.cost
+    # The authoritative slot-level PnL vs the configured fixed tariff (British
+    # Gas), import basis. The monthly `delta_vs_fixed_*` above is a coarser
+    # Fox-energy aggregate that can flip sign on Agile months and counts
+    # pre-Agile months too — so the hero's lifetime "saved vs fixed" must use
+    # THIS field. None for pre-Agile months (AGILE_TARIFF_START_DATE clamp).
+    delta_vs_fixed_real_pounds: float | None = None
+    try:
+        from datetime import date as _date
+
+        from ..analytics.pnl import compute_monthly_pnl
+
+        anchor = _date(year, month_num, 15)
+        mpnl = await asyncio.to_thread(compute_monthly_pnl, anchor)
+        delta_vs_fixed_real_pounds = mpnl.get("delta_vs_fixed_tariff_real_gbp")
+    except Exception as e:  # pragma: no cover - defensive; lifetime stat is non-critical
+        logger.debug("monthly BG-real delta unavailable for %s: %s", month, e)
     return MonthlyInsightsResponse(
         energy=MonthlyEnergySummaryResponse(
             year=insights.energy.year,
@@ -2790,6 +2806,7 @@ async def energy_monthly(month: str):
             fixed_shadow_pounds=cost.fixed_shadow_pounds,
             delta_vs_fixed_pence=cost.delta_vs_fixed_pence,
             delta_vs_fixed_pounds=cost.delta_vs_fixed_pounds,
+            delta_vs_fixed_real_pounds=delta_vs_fixed_real_pounds,
         ),
         heating_estimate_kwh=insights.heating_estimate_kwh,
         heating_estimate_cost_pence=insights.heating_estimate_cost_pence,
@@ -3069,6 +3086,10 @@ async def energy_today_cumulative():
         "export_revenue_gbp": pnl.get("export_revenue_gbp", 0.0),
         # The day's net bill so far (negative = a credit/paid day).
         "realised_net_cost_gbp": pnl.get("realised_net_cost_gbp", 0.0),
+        # The fixed daily standing charge baked into the net — surfaced so the
+        # money block is honest (e.g. earned £0.85 but £0.59 standing → only a
+        # £0.26 credit). Without this the credit "looks too small".
+        "standing_charge_gbp": pnl.get("standing_charge_gbp", 0.0),
         # Concrete earnings today (negative-import credit + export revenue).
         "earnings_today_gbp": round(neg_import_credit + export_rev, 4),
         "negative_import_credit_gbp": round(neg_import_credit, 4),
