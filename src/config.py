@@ -1671,6 +1671,18 @@ class Config:
     USER_OVERRIDE_RESPECT_HOURS: float = float(
         os.getenv("USER_OVERRIDE_RESPECT_HOURS", "4.0")
     )
+    # 2026-06-07: extend respect of a manual LWT/tank gesture to the END of the
+    # planned window it was made in (the overridden row's end_time), not just
+    # the fixed USER_OVERRIDE_RESPECT_HOURS grace. Matters for windows longer
+    # than that grace — e.g. a multi-hour negative-price tank boost: nudge the
+    # tank by hand and HEM leaves it alone until the boost window closes. The
+    # live ``user_gesture_still_in_effect`` check is still the safety gate
+    # (revert the manual change → HEM resumes at once), so a long window can
+    # never wedge the schedule. Set false to revert to the fixed-hours grace.
+    USER_OVERRIDE_RESPECT_UNTIL_WINDOW_END: bool = (
+        os.getenv("USER_OVERRIDE_RESPECT_UNTIL_WINDOW_END", "true").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
     # Feature flag for the pre-fire state-match dedupe. When True (default),
     # the heartbeat compares the live device state against a pending row's
     # params before firing — already-matching rows are marked completed with

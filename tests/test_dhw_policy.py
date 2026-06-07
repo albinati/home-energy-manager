@@ -204,6 +204,90 @@ def test_negative_slot_outside_horizon_ignored():
     assert boost == []
 
 
+# ---------------------------------------------------------------------------
+# Boosts-only recovery (2026-06-07 cycle-split paid-window incident)
+# ---------------------------------------------------------------------------
+
+
+def test_boosts_only_emits_only_clipped_boost():
+    """``boosts_only_from`` returns ONLY the negative-boost rows of the live
+    (yesterday-anchored) cycle, clipped to start at the clip point — never the
+    structural warmup/setback rows."""
+    # Live cycle anchored 2026-05-31 (warmup 31st 13:00 BST → 1st 13:00 BST).
+    # Paid window 04:00→07:00 UTC on the 1st sits in that cycle's tail.
+    outgoing = [
+        {"valid_from": "2026-06-01T04:00:00Z", "value_inc_vat": -4.0},
+        {"valid_from": "2026-06-01T04:30:00Z", "value_inc_vat": -4.5},
+        {"valid_from": "2026-06-01T05:00:00Z", "value_inc_vat": -3.0},
+        {"valid_from": "2026-06-01T05:30:00Z", "value_inc_vat": -2.0},
+    ]
+    clip = datetime(2026, 6, 1, 5, 0, tzinfo=UTC)  # "now" mid-window
+    rows = dhw_policy.generate_daily_tank_schedule(
+        date(2026, 5, 31), agile_rates=outgoing, mode="normal",
+        boosts_only_from=clip,
+    )
+    assert len(rows) == 1
+    assert rows[0]["action_type"] == "tank_negative_boost"
+    assert rows[0]["params"]["tank_temp"] == 60
+    assert rows[0]["params"]["tank_powerful"] is True
+    start = datetime.fromisoformat(rows[0]["start_time"].replace("Z", "+00:00"))
+    end = datetime.fromisoformat(rows[0]["end_time"].replace("Z", "+00:00"))
+    assert start == clip                       # clipped to now, not 04:00
+    assert end == datetime(2026, 6, 1, 6, 0, tzinfo=UTC)  # window end (05:30+30)
+
+
+def test_boosts_only_drops_fully_elapsed_window():
+    """A negative window that has entirely passed the clip point yields no row."""
+    outgoing = [
+        {"valid_from": "2026-06-01T04:00:00Z", "value_inc_vat": -4.0},
+    ]
+    clip = datetime(2026, 6, 1, 9, 0, tzinfo=UTC)  # well after the 04:00-04:30 window
+    rows = dhw_policy.generate_daily_tank_schedule(
+        date(2026, 5, 31), agile_rates=outgoing, mode="normal",
+        boosts_only_from=clip,
+    )
+    assert rows == []
+
+
+def test_boosts_only_bypasses_past_date_guard():
+    """The live cycle is yesterday-anchored; boosts_only_from must bypass the
+    past-date guard that would otherwise return [] for the writer."""
+    outgoing = [
+        {"valid_from": "2026-06-01T04:00:00Z", "value_inc_vat": -4.0},
+    ]
+    # date(2026,5,31) < frozen-today(2026,6,1) → guard would normally skip.
+    rows = dhw_policy.generate_daily_tank_schedule(
+        date(2026, 5, 31), agile_rates=outgoing, mode="normal",
+        boosts_only_from=datetime(2026, 6, 1, 0, 0, tzinfo=UTC),
+    )
+    assert len(rows) == 1
+    assert rows[0]["action_type"] == "tank_negative_boost"
+
+
+def test_boosts_only_no_negative_window_is_noop():
+    """No live negative window → no rows (and no structural rows leak in)."""
+    outgoing = [
+        {"valid_from": "2026-06-01T04:00:00Z", "value_inc_vat": 8.0},
+    ]
+    rows = dhw_policy.generate_daily_tank_schedule(
+        date(2026, 5, 31), agile_rates=outgoing, mode="normal",
+        boosts_only_from=datetime(2026, 6, 1, 0, 0, tzinfo=UTC),
+    )
+    assert rows == []
+
+
+def test_boosts_only_vacation_still_empty():
+    """Vacation mode emits nothing even on the boosts-only path."""
+    outgoing = [
+        {"valid_from": "2026-06-01T04:00:00Z", "value_inc_vat": -4.0},
+    ]
+    rows = dhw_policy.generate_daily_tank_schedule(
+        date(2026, 5, 31), agile_rates=outgoing, mode="vacation",
+        boosts_only_from=datetime(2026, 6, 1, 0, 0, tzinfo=UTC),
+    )
+    assert rows == []
+
+
 def test_outgoing_rates_none_no_crash():
     """agile_rates=None just yields warmup+setback, no boost; doesn't crash."""
     rows = dhw_policy.generate_daily_tank_schedule(

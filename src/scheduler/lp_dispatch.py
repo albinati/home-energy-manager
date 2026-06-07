@@ -1167,6 +1167,48 @@ def write_daikin_from_lp_plan(
                 rows_total += n
             except Exception as e:
                 logger.warning("dhw_policy: write for %s failed: %s", day, e)
+
+        # 2026-06-07 paid-window incident — cycle-split boost recovery.
+        # The dhw "day" anchors at warmup_hour (13:00 local), so before that
+        # hour we are still inside YESTERDAY's cycle. The (0,1) loop above only
+        # covers today's + tomorrow's cycles, and the past-date guard drops
+        # yesterday's — so a negative-price boost that lands in the live cycle's
+        # still-future tail (e.g. an 04:00→12:00 UTC paid window) is silently
+        # lost on every overnight re-plan. Re-emit just that cycle's boost rows,
+        # clipped to the LP horizon start (= the range-clear floor, so the next
+        # re-plan idempotently replaces them). No-op when no live negative window.
+        now_local_t = datetime.now(tz_local_local)
+        if now_local_t.hour < warmup_hour:
+            live_anchor = now_local_t.date() - timedelta(days=1)
+            live_start_local = datetime(
+                live_anchor.year, live_anchor.month, live_anchor.day,
+                warmup_hour, 0, tzinfo=tz_local_local,
+            )
+            live_end_local = live_start_local + timedelta(days=1)
+            import_tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
+            try:
+                agile_live = db.get_rates_for_period(
+                    import_tariff,
+                    live_start_local.astimezone(_UTC_T),
+                    live_end_local.astimezone(_UTC_T),
+                ) if import_tariff else None
+            except Exception as _e:
+                logger.debug("dhw_policy: live-cycle import rates unavailable: %s", _e)
+                agile_live = None
+            clip_from = (
+                plan.slot_starts_utc[0] if plan.slot_starts_utc
+                else datetime.now(_UTC_T)
+            )
+            try:
+                rows_total += dhw_policy.write_daily_tank_schedule(
+                    target_date_local=live_anchor,
+                    agile_rates=agile_live,
+                    clear_existing=False,  # cleared widely above
+                    boosts_only_from=clip_from,
+                )
+            except Exception as e:
+                logger.warning("dhw_policy: live-cycle boost recovery failed: %s", e)
+
         # K1.1 bug #6 — log says "0 rows" not "2 days" when vacation
         # silenced both calls. Counting is row-count only now.
         logger.info(
