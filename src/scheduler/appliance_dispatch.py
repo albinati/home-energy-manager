@@ -1074,6 +1074,7 @@ def compute_appliance_window_suggestions(
             out.append({
                 "appliance_id": appliance_id,
                 "appliance_name": app.get("name") or f"appliance #{appliance_id}",
+                "vendor_device_id": app.get("vendor_device_id"),
                 "recommended_start_utc": start_utc,
                 "recommended_end_utc": end_utc,
                 "deadline_utc": deadline_utc,
@@ -1088,6 +1089,35 @@ def compute_appliance_window_suggestions(
             logger.debug("appliance nudge compute skip #%s: %s", app.get("id"), e)
             continue
     return out
+
+
+def _appliance_busy_or_loaded(device_id: str | None) -> bool:
+    """True when a cycle is already running/paused, OR the machine is loaded with
+    remote control enabled (about to be armed by the next reconcile) — either way
+    "load the machine" would be wrong, so suppress the nudge.
+
+    Degrades to False (nudge proceeds) when SmartThings is unreachable / the
+    device id is missing — better a rare redundant nudge than silence on an ST
+    blip (the whole feature exists because the user wasn't being told in time).
+    """
+    if not device_id:
+        return False
+    try:
+        client = _get_st_client()
+    except Exception:
+        return False
+    try:
+        state, _ts = client.get_machine_state(device_id)
+        if state in ("run", "pause"):  # a cycle is already in progress
+            return True
+    except Exception:
+        pass
+    try:
+        if client.get_remote_control_enabled(device_id):  # loaded + ready → will be armed
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def nudge_appliance_windows(
@@ -1126,6 +1156,13 @@ def nudge_appliance_windows(
     )
     fired: list[dict[str, Any]] = []
     for s in suggestions:
+        # Don't tell the user to load a machine that's already running/loaded.
+        # (The active-job check only catches HEM-scheduled runs; a manually
+        # started cycle has no job — so check the LIVE SmartThings state too.)
+        # Skipped WITHOUT setting the debounce, so once the cycle ends a later
+        # fetch can still nudge for a window that's still upcoming.
+        if _appliance_busy_or_loaded(s.get("vendor_device_id")):
+            continue
         key = f"appliance_nudge_last_{s['appliance_id']}"
         # Debounce on the RECOMMENDED window the user actually sees — one push per
         # recommended window. A genuinely new (cheaper) window shifts the start →

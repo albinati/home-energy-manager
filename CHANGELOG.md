@@ -111,7 +111,10 @@ two control-side features ship **off by default** (`DAIKIN_LWT_PREHEAT_ENABLED`,
   gap was the heads-up. New `AlertType.APPLIANCE_WINDOW_NUDGE`; knobs
   `APPLIANCE_WINDOW_NUDGE_{ENABLED,PRICE_THRESHOLD_P,HORIZON_HOURS,BRIEF_THRESHOLD_P}`.
   Note: the deadline already rolls to tomorrow when passed, so a stale 07:00
-  deadline was never the blocker — the missing load + nudge was.
+  deadline was never the blocker — the missing load + nudge was. Skips the nudge
+  when the machine is already running/paused or loaded with remote control on
+  (live SmartThings check — the active-job check alone misses a manually started
+  cycle); degrades to nudging if SmartThings is unreachable.
 
 ### Added — legionella tank stand-off (2026-06-07)
 - **HEM stands off the DHW tank during the firmware's weekly thermal-shock
