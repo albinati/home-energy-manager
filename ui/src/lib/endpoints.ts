@@ -24,6 +24,7 @@ import type {
   DhwScheduleResponse,
   HeatingPlanResponse,
   PvTodayResponse,
+  GridTodayResponse,
   OptimizationInputsResponse,
   ActionResult,
   DaikinOperationMode,
@@ -45,7 +46,12 @@ export const getSchedulerTimeline = () => getJson<SchedulerTimeline>("/scheduler
 export const getDecisionsLatest = () =>
   getJson<DispatchDecisionsResponse>("/optimization/decisions/latest");
 export const getMetrics = () => getJson<MetricsResponse>("/metrics");
-export const getPvToday = () => getJson<PvTodayResponse>("/pv/today");
+export const getPvToday = (date?: string) =>
+  getJson<PvTodayResponse>(`/pv/today${date ? `?date=${encodeURIComponent(date)}` : ""}`);
+// Per-slot planned-vs-realised GRID import/export for a UTC day (#3b). Mirrors
+// /pv/today; powers the synced Grid timeline widget.
+export const getGridToday = (date?: string) =>
+  getJson<GridTodayResponse>(`/grid/today${date ? `?date=${encodeURIComponent(date)}` : ""}`);
 export const getOptimizationInputs = () =>
   getJson<OptimizationInputsResponse>("/optimization/inputs");
 export const getDaikinStatus = () => getJson<DaikinDevice[]>("/daikin/status");
@@ -92,8 +98,8 @@ export const getDaikinConsumption = (
 /* ----- Forecast vs actuals ----- */
 
 export const getWeather = () => getJson<WeatherResponse>("/weather");
-export const getExecutionToday = () =>
-  getJson<ExecutionTodayResponse>("/execution/today");
+export const getExecutionToday = (date?: string) =>
+  getJson<ExecutionTodayResponse>(`/execution/today${date ? `?date=${encodeURIComponent(date)}` : ""}`);
 export const getAgileToday = () => getJson<AgileTodayResponse>("/agile/today");
 export const getAgileDay = (date: string) =>
   getJson<AgileDaySlotsResponse>(`/agile/day?date=${encodeURIComponent(date)}`);

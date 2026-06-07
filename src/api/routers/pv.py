@@ -231,6 +231,129 @@ async def get_pv_today(date: str | None = None) -> dict[str, Any]:
     }
 
 
+@router.get("/api/v1/grid/today")
+async def get_grid_today(date: str | None = None) -> dict[str, Any]:
+    """Per-slot planned-vs-realised GRID import/export for the UTC day.
+
+    The Home "Grid" widget's data: for each 30-min UTC slot, the *committed
+    plan's* grid import/export (stitched across the day's solves, like the PV
+    line) and the *realised* import/export (trapezoidal roll-up of
+    ``pv_realtime_history.grid_import_kw`` / ``grid_export_kw``). Closes the gap
+    where ``/execution/today`` carried load but no grid traffic.
+
+    Query params:
+      * ``date`` — optional ``YYYY-MM-DD`` (UTC day). Defaults to today UTC.
+
+    Response mirrors ``/pv/today``:
+      * ``slots[]`` — ``{slot_utc, import_planned_kwh, export_planned_kwh,
+        import_actual_kwh, export_actual_kwh, import_price_p, kind}``. Actuals
+        are ``null`` for future slots (and elapsed slots with no telemetry) so
+        the chart draws a clean planned-only line ahead of now.
+      * ``totals`` — day sums for planned + (elapsed-so-far) realised.
+      * ``now_utc``, ``plan_run_id``.
+    """
+    if date:
+        try:
+            d = _date_from_iso(date)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+    else:
+        d = datetime.now(UTC).date()
+
+    day_start = datetime(d.year, d.month, d.day, tzinfo=UTC)
+    slot_starts = [day_start + timedelta(minutes=_SLOT_MINUTES * i) for i in range(_SLOTS_PER_DAY)]
+    now = datetime.now(UTC)
+
+    # --- Committed plan: stitched per-slot grid import/export from the LP
+    # snapshots (same stitch the PV line uses, so elapsed slots keep the plan
+    # that was current when they began rather than a hole). Keys are stored
+    # (+00:00) form → normalise to the ...Z slot key.
+    plan_imp: dict[str, float] = {}
+    plan_exp: dict[str, float] = {}
+    try:
+        plan_imp = {_norm_z(k): float(v) for k, v in db.committed_lp_field_by_slot(d, "import_kwh").items()}
+        plan_exp = {_norm_z(k): float(v) for k, v in db.committed_lp_field_by_slot(d, "export_kwh").items()}
+    except Exception as e:
+        logger.warning("grid/today: committed-plan grid lookup failed (%s)", e)
+
+    # --- Realised import/export: trapezoidal roll-up of pv_realtime_history
+    # (the same helpers the PnL engine costs against). Keys are ...Z form.
+    act_imp: dict[str, float] = {}
+    act_exp: dict[str, float] = {}
+    try:
+        act_imp = {_norm_z(k): float(v) for k, v in db.half_hourly_grid_import_kwh_for_day(d).items()}
+        act_exp = {_norm_z(k): float(v) for k, v in db.half_hourly_grid_export_kwh_for_day(d).items()}
+    except Exception as e:
+        logger.warning("grid/today: realised grid roll-up failed (%s)", e)
+
+    # --- Import price + dispatch kind overlays (one endpoint feeds the chart).
+    price_by_start: dict[str, float] = {}
+    try:
+        tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
+        if tariff:
+            for r in db.get_rates_for_period(tariff, day_start, day_start + timedelta(days=1)):
+                price_by_start[_norm_z(r["valid_from"])] = float(r["value_inc_vat"])
+    except Exception as e:
+        logger.warning("grid/today: import-rate lookup failed (%s)", e)
+
+    rid: int | None = None
+    kind_by: dict[str, str] = {}
+    try:
+        when = _iso_z(min(day_start + timedelta(days=1), now))
+        rid = db.find_run_for_time(when) or db.find_latest_optimizer_run_id()
+        if rid is not None:
+            for dec in db.get_dispatch_decisions(rid):
+                k = dec.get("dispatched_kind") or dec.get("lp_kind")
+                stu = dec.get("slot_time_utc")
+                if k and stu:
+                    kind_by[_norm_z(stu)] = k
+    except Exception as e:
+        logger.warning("grid/today: run/kind lookup failed (%s)", e)
+
+    slots_out: list[dict[str, Any]] = []
+    t_pimp = t_pexp = t_aimp = t_aexp = 0.0
+    for st in slot_starts:
+        key = _iso_z(st)
+        slot_end = st + timedelta(minutes=_SLOT_MINUTES)
+        elapsed = slot_end <= now
+        pi = plan_imp.get(key)
+        pe = plan_exp.get(key)
+        ai_raw = act_imp.get(key)
+        ae_raw = act_exp.get(key)
+        ai = round(float(ai_raw), 4) if (elapsed and ai_raw is not None) else None
+        ae = round(float(ae_raw), 4) if (elapsed and ae_raw is not None) else None
+        slots_out.append({
+            "slot_utc": key,
+            "import_planned_kwh": round(pi, 4) if pi is not None else None,
+            "export_planned_kwh": round(pe, 4) if pe is not None else None,
+            "import_actual_kwh": ai,
+            "export_actual_kwh": ae,
+            "import_price_p": price_by_start.get(key),
+            "kind": kind_by.get(key),
+        })
+        if pi is not None:
+            t_pimp += pi
+        if pe is not None:
+            t_pexp += pe
+        if ai is not None:
+            t_aimp += ai
+        if ae is not None:
+            t_aexp += ae
+
+    return {
+        "date": d.isoformat(),
+        "now_utc": _iso_z(now),
+        "slots": slots_out,
+        "totals": {
+            "import_planned_kwh": round(t_pimp, 3),
+            "export_planned_kwh": round(t_pexp, 3),
+            "import_actual_kwh": round(t_aimp, 3),
+            "export_actual_kwh": round(t_aexp, 3),
+        },
+        "plan_run_id": rid,
+    }
+
+
 def _date_from_iso(s: str) -> date:
     return date.fromisoformat(s)
 

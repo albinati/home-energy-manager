@@ -4528,42 +4528,54 @@ def _parse_iso_utc(s: str | None) -> datetime | None:
         return None
 
 
-def committed_pv_forecast_by_slot(day: date) -> dict[str, float]:
-    """Per-slot committed PV-generation forecast for ``day`` (issue #462).
+# Numeric lp_solution_snapshot columns that may be stitched per-slot. Whitelisted
+# so the column name can be interpolated into SQL safely (never user-supplied).
+_STITCHABLE_LP_FIELDS = frozenset({
+    "pv_forecast_kwh", "import_kwh", "export_kwh", "charge_kwh", "discharge_kwh",
+    "pv_use_kwh", "dhw_kwh", "space_kwh", "soc_kwh", "tank_temp_c", "lwt_offset_c",
+})
+
+
+def committed_lp_field_by_slot(day: date, field: str) -> dict[str, float]:
+    """Per-slot committed value of an ``lp_solution_snapshot`` column for ``day``.
 
     The latest LP solve only covers ``run_at → horizon``, so a single snapshot
-    leaves a hole over the morning by evening (why /pv/today showed "0 expected
-    by now"). This STITCHES across every solve of the day: for each slot it
-    returns the ``pv_forecast_kwh`` from the most recent solve whose ``run_at <=
-    slot_start`` (the forecast as known when the slot began); if none qualifies
-    (e.g. the day's first solve fired after that slot), it falls back to the
-    EARLIEST solve that forecast the slot. Future slots naturally resolve to the
-    latest committed plan (their start is after every run_at).
+    leaves a hole over the morning by evening. This STITCHES across every solve
+    of the day: for each slot it returns the column from the most recent solve
+    whose ``run_at <= slot_start`` (the plan as known when the slot began); if
+    none qualifies (the day's first solve fired after that slot), it falls back
+    to the EARLIEST solve that covered the slot. Future slots naturally resolve
+    to the latest committed plan (their start is after every run_at).
 
-    Returns ``{slot_time_utc (stored form): pv_forecast_kwh}``. Empty on error.
+    ``field`` must be one of :data:`_STITCHABLE_LP_FIELDS` (whitelisted — the
+    name is interpolated into SQL). Returns ``{slot_time_utc (stored form):
+    value}``. Empty on error or unknown field.
     """
+    if field not in _STITCHABLE_LP_FIELDS:
+        logger.warning("committed_lp_field_by_slot: refusing unknown field %r", field)
+        return {}
     day_start = datetime(day.year, day.month, day.day, tzinfo=UTC)
     day_end = day_start + timedelta(days=1)
     with _lock:
         conn = get_connection()
         try:
             rows = conn.execute(
-                """SELECT s.slot_time_utc, s.pv_forecast_kwh, o.run_at
+                f"""SELECT s.slot_time_utc, s.{field}, o.run_at
                    FROM lp_solution_snapshot s
                    JOIN optimizer_log o ON s.run_id = o.id
                    WHERE s.slot_time_utc >= ? AND s.slot_time_utc < ?
-                     AND s.pv_forecast_kwh IS NOT NULL""",
+                     AND s.{field} IS NOT NULL""",
                 (day_start.isoformat(), day_end.isoformat()),
             ).fetchall()
         except sqlite3.Error as e:
-            logger.warning("committed_pv_forecast_by_slot query failed: %s", e)
+            logger.warning("committed_lp_field_by_slot(%s) query failed: %s", field, e)
             return {}
         finally:
             conn.close()
 
     # Per slot, pick: latest eligible run (run_at <= slot_start); else earliest.
     best: dict[str, tuple[datetime, float, bool]] = {}
-    for slot_iso, kwh, run_at in rows:
+    for slot_iso, val, run_at in rows:
         slot_dt = _parse_iso_utc(slot_iso)
         run_dt = _parse_iso_utc(run_at)
         if slot_dt is None or run_dt is None:
@@ -4571,19 +4583,29 @@ def committed_pv_forecast_by_slot(day: date) -> dict[str, float]:
         eligible = run_dt <= slot_dt
         cur = best.get(slot_iso)
         if cur is None:
-            best[slot_iso] = (run_dt, float(kwh), eligible)
+            best[slot_iso] = (run_dt, float(val), eligible)
             continue
-        c_run, _c_kwh, c_elig = cur
+        c_run, _c_val, c_elig = cur
         if eligible and not c_elig:
-            best[slot_iso] = (run_dt, float(kwh), True)  # eligible beats not
+            best[slot_iso] = (run_dt, float(val), True)  # eligible beats not
         elif eligible and c_elig:
-            if run_dt > c_run:  # most recent forecast known at slot start
-                best[slot_iso] = (run_dt, float(kwh), True)
+            if run_dt > c_run:  # most recent value known at slot start
+                best[slot_iso] = (run_dt, float(val), True)
         elif (not eligible) and (not c_elig):
-            if run_dt < c_run:  # earliest forecast ever made for the slot
-                best[slot_iso] = (run_dt, float(kwh), False)
+            if run_dt < c_run:  # earliest value ever planned for the slot
+                best[slot_iso] = (run_dt, float(val), False)
         # else: keep the existing eligible row over a non-eligible newcomer
     return {k: v[1] for k, v in best.items()}
+
+
+def committed_pv_forecast_by_slot(day: date) -> dict[str, float]:
+    """Per-slot committed PV-generation forecast for ``day`` (issue #462).
+
+    Thin wrapper over :func:`committed_lp_field_by_slot` for ``pv_forecast_kwh``
+    — kept as a named entry point for the many existing callers (/pv/today,
+    rebuild_pv_error_log_for_date). Returns ``{slot_time_utc: pv_forecast_kwh}``.
+    """
+    return committed_lp_field_by_slot(day, "pv_forecast_kwh")
 
 
 def rebuild_pv_error_log_for_date(day: date) -> int:
