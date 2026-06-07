@@ -866,6 +866,33 @@ class Config:
     DHW_NEGATIVE_PRICE_BOOST_C: float = float(
         os.getenv("DHW_NEGATIVE_PRICE_BOOST_C", "60")
     )
+    # --- Legionella thermal-shock STAND-OFF (2026-06-07) ---
+    # The Onecta firmware owns the DHW tank during its weekly thermal-shock
+    # cycle. Any tank PATCH HEM sends in that window is arbitrated/overridden by
+    # the firmware → wasted Daikin quota + churn + READ_ONLY. So the reconciler
+    # SKIPS tank-device writes during a configured window (LWT / space heating
+    # are NOT affected — legionella is a DHW-tank cycle only). This does NOT
+    # schedule the cycle (firmware does) and is unrelated to the removed
+    # DHW_LEGIONELLA_* scheduling vars — it only tells HEM when to stand off the
+    # tank. Window is defined in UTC on one weekday; must not cross midnight.
+    # Default: Sunday (weekday 6) 11:00 UTC for 120 min — covers the ramp from
+    # the overnight setback (~37 °C) up to ~60 °C plus the firmware's ~1 h hold.
+    DHW_LEGIONELLA_STANDOFF_ENABLED: bool = (
+        os.getenv("DHW_LEGIONELLA_STANDOFF_ENABLED", "true").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+    DHW_LEGIONELLA_STANDOFF_DOW: int = int(  # Mon=0 .. Sun=6 (datetime.weekday())
+        os.getenv("DHW_LEGIONELLA_STANDOFF_DOW", "6")
+    )
+    DHW_LEGIONELLA_STANDOFF_START_HOUR_UTC: int = int(
+        os.getenv("DHW_LEGIONELLA_STANDOFF_START_HOUR_UTC", "11")
+    )
+    DHW_LEGIONELLA_STANDOFF_START_MINUTE_UTC: int = int(
+        os.getenv("DHW_LEGIONELLA_STANDOFF_START_MINUTE_UTC", "0")
+    )
+    DHW_LEGIONELLA_STANDOFF_DURATION_MINUTES: int = int(
+        os.getenv("DHW_LEGIONELLA_STANDOFF_DURATION_MINUTES", "120")
+    )
     # NOTE: the leading-warmup defer (a boost SUPERSEDES the warmup that would
     # otherwise pre-heat at a positive price right before it) is driven by
     # LP_PRE_NEGATIVE_PRECOOL_HOURS below — the SAME window the LP's energy

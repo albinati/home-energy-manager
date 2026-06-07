@@ -84,6 +84,18 @@ two control-side features ship **off by default** (`DAIKIN_LWT_PREHEAT_ENABLED`,
   across the 6 call sites; scenario variance from the spread. Kill-switch
   `LP_RESIDUAL_PROFILE_V2`; Insights "when you spend the most" heatmap.
 
+### Added — legionella tank stand-off (2026-06-07)
+- **HEM stands off the DHW tank during the firmware's weekly thermal-shock
+  cycle** (Tracked by #498). The Onecta firmware owns the tank during legionella,
+  so any tank PATCH HEM sends is arbitrated/overridden (wasted quota + churn +
+  `READ_ONLY`). The reconciler now skips tank-device writes inside a configured
+  window and leaves those rows pending so they resume once it closes. **TANK ONLY
+  — LWT / space-heating still fire.** Window defaults to Sunday 11:00 UTC for
+  120 min (ramp + ~1 h hold); knobs `DHW_LEGIONELLA_STANDOFF_{ENABLED,DOW,
+  START_HOUR_UTC,START_MINUTE_UTC,DURATION_MINUTES}`. Telemetry:
+  `legionella_tank_standoff` in `action_log`. The LP already budgets the cycle's
+  heat-up energy, so only the actuation side needed the guard.
+
 ### Fixed — 2026-06-07 negative-price-window incident (live)
 - **LWT drift backstop reset a legitimate offset from a completed row** (#497).
   Pre-fire idempotency marks an applied `lwt_preheat` row `completed`; the drift
