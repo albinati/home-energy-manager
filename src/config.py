@@ -1799,6 +1799,24 @@ class Config:
     FOX_DAILY_BUDGET: int = int(os.getenv("FOX_DAILY_BUDGET", "1200"))
     # Default realtime data TTL — raised from 30 s to 300 s (5 min) to match heartbeat
     FOX_REALTIME_CACHE_TTL_SECONDS: int = int(os.getenv("FOX_REALTIME_CACHE_TTL_SECONDS", "300"))
+    # 2026-06-07: the pv-telemetry background job is the canonical Fox-snapshot
+    # refresher; it forces a read older than this so the cockpit serves a fresh
+    # snapshot at the telemetry cadence (PV_TELEMETRY_INTERVAL_MINUTES). Keeps the
+    # cockpit/API reads cache-only (they never fetch on the request path).
+    FOX_SNAPSHOT_REFRESH_MAX_AGE_SECONDS: int = int(
+        os.getenv("FOX_SNAPSHOT_REFRESH_MAX_AGE_SECONDS", "60")
+    )
+    # In-process TTL cache for the Open-Meteo forecast fetch (shared by /weather +
+    # /pv/today). Open-Meteo is hourly-deterministic, so a short cache turns the
+    # 0.5–2 s blocking HTTP call into ~0 ms for the cockpit. 0 disables.
+    WEATHER_FORECAST_CACHE_TTL_SECONDS: int = int(
+        os.getenv("WEATHER_FORECAST_CACHE_TTL_SECONDS", "900")
+    )
+    # In-process TTL cache for /energy/period day & week (Fox ESS HTTP). Month
+    # already has a 1 h cache; this mirrors it so period-nav clicks are instant.
+    ENERGY_PERIOD_CACHE_TTL_SECONDS: int = int(
+        os.getenv("ENERGY_PERIOD_CACHE_TTL_SECONDS", "1200")
+    )
     # Minimum interval between user-initiated "force refresh" calls
     FOX_FORCE_REFRESH_MIN_INTERVAL_SECONDS: int = int(
         os.getenv("FOX_FORCE_REFRESH_MIN_INTERVAL_SECONDS", "60")

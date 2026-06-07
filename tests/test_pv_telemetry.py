@@ -68,7 +68,7 @@ def test_pv_telemetry_job_persists_when_realtime_available(monkeypatch):
     from src import db
 
     fake_rt = MagicMock(soc=75.0, solar_power=2.0, load_power=0.5, grid_power=-1.5, battery_power=1.0, work_mode="SelfUse")
-    monkeypatch.setattr(runner, "get_cached_realtime", lambda: fake_rt)
+    monkeypatch.setattr(runner, "get_cached_realtime", lambda **_k: fake_rt)
     monkeypatch.setattr(runner, "_scheduler_paused", False)
 
     runner.bulletproof_pv_telemetry_job()
@@ -95,7 +95,7 @@ def test_pv_telemetry_job_silent_when_realtime_empty(monkeypatch):
     from src.scheduler import runner
 
     fake_rt = MagicMock(soc=None, solar_power=None, load_power=None, grid_power=None, battery_power=None, work_mode="unknown")
-    monkeypatch.setattr(runner, "get_cached_realtime", lambda: fake_rt)
+    monkeypatch.setattr(runner, "get_cached_realtime", lambda **_k: fake_rt)
     monkeypatch.setattr(runner, "_scheduler_paused", False)
 
     # Should not raise; should not write
