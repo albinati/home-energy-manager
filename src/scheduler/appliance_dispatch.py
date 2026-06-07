@@ -1020,20 +1020,27 @@ def compute_appliance_window_suggestions(
     *,
     max_price_p: float,
     strict: bool,
+    always: bool = False,
 ) -> list[dict[str, Any]]:
-    """Pure compute (no notify, no debounce). When a qualifying (≤/< ``max_price_p``)
-    window exists in the next ``APPLIANCE_WINDOW_NUDGE_HORIZON_HOURS``, return one
-    suggestion per enabled + idle appliance for its cheapest run window before the
-    deadline. Used by both the push path (negative-only) and the brief line
-    (cheap). Returns ``[]`` when nothing qualifies. Never raises on a single
-    appliance — bad rows are skipped.
+    """Pure compute (no notify, no debounce). For each enabled + idle appliance,
+    the cheapest run window before its deadline.
+
+    Two modes:
+    - ``always=False`` (push/nudge + brief): only surface a window that overlaps a
+      detected qualifying (≤/< ``max_price_p``) window; returns ``[]`` when none.
+    - ``always=True`` (cockpit widget): ALWAYS surface the cheapest fitting window
+      even when none is below threshold ("próxima janela") so the widget can show
+      the best available time instead of "no cheap window". ``meets_threshold``
+      flags whether the window is actually cheap.
+
+    Never raises on a single appliance — bad rows are skipped.
     """
     horizon_h = float(getattr(config, "APPLIANCE_WINDOW_NUDGE_HORIZON_HOURS", 24))
     horizon_end = now + timedelta(hours=max(1.0, horizon_h))
     windows = _detect_price_windows(
         rates, now, horizon_end, max_price_p=max_price_p, strict=strict,
     )
-    if not windows:
+    if not windows and not always:
         return []
     out: list[dict[str, Any]] = []
     for app in db.list_appliances(enabled_only=True):
@@ -1060,11 +1067,13 @@ def compute_appliance_window_suggestions(
                 )
             except ValueError:
                 continue  # no fit before the deadline
-            # Coherence guard: the recommended window MUST overlap a detected
-            # qualifying window, else the nudge would advertise a slot that isn't
-            # actually cheap/negative (kills the synthetic _fallback_window=0.0p
-            # case and the deadline-before-the-window case).
-            if not any(ws < end_utc and we > start_utc for ws, we in windows):
+            # Coherence guard (push/nudge only): the recommended window MUST overlap
+            # a detected qualifying window, else the nudge would advertise a slot
+            # that isn't actually cheap/negative (kills the synthetic
+            # _fallback_window=0.0p case + the deadline-before-the-window case). In
+            # ``always`` mode (widget) we surface the cheapest fit regardless.
+            overlaps = any(ws < end_utc and we > start_utc for ws, we in windows)
+            if not always and not overlaps:
                 continue
             kw, _n = _effective_typical_kw(
                 appliance_id, float(app.get("typical_kw") or 0.5),
@@ -1084,6 +1093,9 @@ def compute_appliance_window_suggestions(
                 "est_kwh": est_kwh,
                 "est_cost_pence": est_cost_p,
                 "is_negative": avg_p < 0,
+                # True when this window is genuinely cheap (overlaps a detected
+                # ≤-threshold window); False = "next/cheapest available" only.
+                "meets_threshold": overlaps,
             })
         except Exception as e:  # pragma: no cover — never break the scan
             logger.debug("appliance nudge compute skip #%s: %s", app.get("id"), e)

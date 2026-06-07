@@ -204,6 +204,30 @@ def test_nudge_proceeds_when_smartthings_unavailable(monkeypatch):
     assert len(calls) == 1
 
 
+def test_always_mode_returns_cheapest_when_nothing_cheap(monkeypatch):
+    """always=True (widget): surface the cheapest fitting window even when NO
+    window is below threshold, flagged meets_threshold=False."""
+    _setup_cfg(monkeypatch)
+    now = _now_top_of_hour()
+    _add_washer()
+    _seed_rates(now + timedelta(hours=1), [20.0, 22.0, 25.0, 21.0, 30.0, 28.0])  # all expensive
+    # nudge mode (always=False) → nothing qualifies → empty
+    none_mode = appliance_dispatch.compute_appliance_window_suggestions(
+        now, db.get_rates_for_period("TEST-TARIFF", now, now + timedelta(hours=24)),
+        max_price_p=0.0, strict=True,
+    )
+    assert none_mode == []
+    # widget mode (always=True) → returns the cheapest fit, not cheap
+    sugg = appliance_dispatch.compute_appliance_window_suggestions(
+        now, db.get_rates_for_period("TEST-TARIFF", now, now + timedelta(hours=24)),
+        max_price_p=8.0, strict=False, always=True,
+    )
+    assert len(sugg) == 1
+    s = sugg[0]
+    assert s["meets_threshold"] is False
+    assert s["avg_price_pence"] > 8.0  # genuinely above the cheap threshold
+
+
 def test_nudge_skips_when_no_negative_window(monkeypatch):
     _setup_cfg(monkeypatch)
     calls = _capture_notify(monkeypatch)

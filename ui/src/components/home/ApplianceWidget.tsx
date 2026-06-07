@@ -59,15 +59,27 @@ export function ApplianceWidget({ suggestions, jobs, appliances }: ApplianceWidg
               )
             ) : sug ? (
               <div class="appliance-state appliance-state--idle">
-                <span class={sug.is_negative ? "appliance-tag appliance-tag--paid" : "appliance-tag appliance-tag--cheap"}>
-                  {sug.is_negative ? "janela paga" : "janela barata"}
-                </span>
-                <strong>{fmtLocal(sug.recommended_start_utc)}–{fmtLocal(sug.recommended_end_utc)}</strong>
-                <span class="appliance-price"> · {sug.avg_price_pence.toFixed(1)}p</span>
-                <div class="appliance-cta">Carregue + Smart Control até {sug.deadline_local}</div>
+                {sug.meets_threshold === false ? (
+                  // No cheap window ahead → still show the NEXT/cheapest available.
+                  <>
+                    <span class="appliance-tag appliance-tag--next">próxima</span>
+                    <strong>{fmtLocal(sug.recommended_start_utc)}–{fmtLocal(sug.recommended_end_utc)}</strong>
+                    <span class="appliance-price"> · {sug.avg_price_pence.toFixed(1)}p (sem janela barata)</span>
+                    <div class="appliance-cta">Carregue + Smart Control até {sug.deadline_local}</div>
+                  </>
+                ) : (
+                  <>
+                    <span class={sug.is_negative ? "appliance-tag appliance-tag--paid" : "appliance-tag appliance-tag--cheap"}>
+                      {sug.is_negative ? "janela paga" : "janela barata"}
+                    </span>
+                    <strong>{fmtLocal(sug.recommended_start_utc)}–{fmtLocal(sug.recommended_end_utc)}</strong>
+                    <span class="appliance-price"> · {sug.avg_price_pence.toFixed(1)}p</span>
+                    <div class="appliance-cta">Carregue + Smart Control até {sug.deadline_local}</div>
+                  </>
+                )}
               </div>
             ) : (
-              <div class="appliance-state appliance-state--none muted">Sem janela barata à frente</div>
+              <div class="appliance-state appliance-state--none muted">Sem janela disponível antes do prazo</div>
             )}
           </div>
         );

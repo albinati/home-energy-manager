@@ -3055,21 +3055,30 @@ async def energy_today_cumulative():
 
     today = _dt.now(ZoneInfo(config.BULLETPROOF_TIMEZONE)).date()
     pnl = await asyncio.to_thread(compute_daily_pnl, today)
+    import_cost = float(pnl.get("import_cost_gbp", 0.0) or 0.0)
+    export_rev = float(pnl.get("export_revenue_gbp", 0.0) or 0.0)
+    # "Economia hoje" = money that actually came IN today: the negative-price
+    # import credit (when the metered import cost went negative) + export revenue.
+    # The UI hides this when both are ~0 (a plain spend day).
+    neg_import_credit = max(0.0, -import_cost)
     return {
         "date": today.isoformat(),
         "import_kwh": pnl.get("import_kwh", 0.0),
         "export_kwh": pnl.get("export_kwh", 0.0),
         "import_cost_gbp": pnl.get("import_cost_gbp", 0.0),
         "export_revenue_gbp": pnl.get("export_revenue_gbp", 0.0),
-        # Real-money savings so the hero can show "saved £X today (Y% off)".
-        # net = realised net cost incl. standing (negative = a credit/paid day);
-        # delta_* = real money saved vs the fixed/SVT shadow (positive = Agile
-        # won); *_shadow_real = the counterfactual cost (for the % off).
+        # The day's net bill so far (negative = a credit/paid day).
         "realised_net_cost_gbp": pnl.get("realised_net_cost_gbp", 0.0),
-        "delta_vs_fixed_real_gbp": pnl.get("delta_vs_fixed_real_gbp", 0.0),
-        "delta_vs_svt_real_gbp": pnl.get("delta_vs_svt_real_gbp", 0.0),
-        "fixed_shadow_real_gbp": pnl.get("fixed_shadow_real_gbp", 0.0),
-        "svt_shadow_real_gbp": pnl.get("svt_shadow_real_gbp", 0.0),
+        # Concrete earnings today (negative-import credit + export revenue).
+        "earnings_today_gbp": round(neg_import_credit + export_rev, 4),
+        "negative_import_credit_gbp": round(neg_import_credit, 4),
+        # The CONFIGURED fixed tariff (e.g. British Gas) — the correct shadow on
+        # the IMPORT basis with THAT tariff's own rate + standing. NOT the generic
+        # ~23p `delta_vs_fixed_real` (which mislabels a generic fixed as "British
+        # Gas" and inflates the saving).
+        "fixed_tariff_label": pnl.get("fixed_tariff_label"),
+        "delta_vs_fixed_tariff_real_gbp": pnl.get("delta_vs_fixed_tariff_real_gbp"),
+        "fixed_tariff_shadow_real_gbp": pnl.get("fixed_tariff_shadow_real_gbp"),
     }
 
 

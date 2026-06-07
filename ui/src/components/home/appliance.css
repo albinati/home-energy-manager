@@ -58,3 +58,7 @@
   color: var(--cheap, #36d399);
   background: color-mix(in srgb, var(--cheap, #36d399) 16%, transparent);
 }
+.appliance-tag--next {
+  color: var(--text-mute, #8a8f98);
+  background: color-mix(in srgb, var(--text-mute, #8a8f98) 16%, transparent);
+}

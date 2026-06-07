@@ -84,6 +84,28 @@ two control-side features ship **off by default** (`DAIKIN_LWT_PREHEAT_ENABLED`,
   across the 6 call sites; scenario variance from the spread. Kill-switch
   `LP_RESIDUAL_PROFILE_V2`; Insights "when you spend the most" heatmap.
 
+### Changed/Fixed — hero money reframe + correct British Gas comparison (2026-06-07, UI Phase 3a)
+- **The hero "saved vs fixed" used the wrong shadow.** It read the generic
+  `delta_vs_fixed_real` (~23p fixed rate + the *Agile* standing) and labelled it
+  "British Gas", inflating the saving (£5.80 vs the correct £5.10). The realised
+  net (−£0.26 credit) was always correct — the £0.59 standing charge legitimately
+  eats most of the negative-price energy credit. Fix: `/energy/today-cumulative`
+  now exposes the **configured fixed-tariff** fields (`delta_vs_fixed_tariff_real_gbp`,
+  `fixed_tariff_shadow_real_gbp`, `fixed_tariff_label` — British Gas's own
+  20.7p + 41.14p standing, import basis) + concrete `earnings_today_gbp`
+  (negative-import credit + export). No `pnl.py` change — the British-Gas fields
+  were already correct; the hero just used the wrong one.
+- **Hero reframed:** one deduped British-Gas line (was 4 "vs fixed" renders), the
+  day's bill ("Conta hoje: crédito £X"), and the concrete "⚡ foi pago £Y (£A
+  import negativo + £B export)" shown only on credit days. The
+  import/standing/export `CostBreakdownChart` is replaced by an **SVG price
+  timeline** (today's import price by tier + now-marker; no ECharts — the hero is
+  above the fold).
+- **Appliance widget** now shows the **next/cheapest available** window even when
+  none is below threshold ("próxima HH:MM · Xp (sem janela barata)") instead of
+  "Sem janela barata" — `compute_appliance_window_suggestions(always=True)` +
+  `meets_threshold`. The push/nudge path keeps the threshold.
+
 ### Added — hero "saved today" + appliance-schedule widget (2026-06-07, UI Phase 2)
 - **Hero shows today's real-money savings** at a glance, independent of the period
   selector: "Hoje: crédito £X · economizou £Y (Z% abaixo do fixo)". Reuses
