@@ -121,7 +121,19 @@ EOF
 
 ### Legionella thermal-shock cycle
 
-Daikin Onecta firmware runs the weekly thermal-shock cycle autonomously (Sunday ~11:00 local). **The LP and dispatch layer do not schedule or override this cycle** — the `DHW_LEGIONELLA_*` env vars are gone from the code. Python ignores unrecognised keys in `.env` so lingering entries are harmless; delete them on your next `.env` touch. If a `shutdown` or `max_heat` action happens to overlap the cycle window, Onecta firmware arbitrates.
+Daikin Onecta firmware runs the weekly thermal-shock cycle autonomously (default Sunday 11:00 UTC; user-reconfigurable on the unit). **HEM does not schedule this cycle** — the old `DHW_LEGIONELLA_*` *scheduling* vars are gone. Python ignores unrecognised keys in `.env` so lingering entries are harmless; delete them on your next `.env` touch.
+
+**Tank stand-off (2026-06-07).** Because the firmware OWNS the DHW tank during the cycle, any tank PATCH HEM sends in that window is arbitrated/overridden (wasted Daikin quota + churn + `READ_ONLY`). So the reconciler now **skips tank-device writes inside a configured stand-off window and leaves those rows pending** so they resume the moment the window closes (the firmware leaves the tank hot; HEM's next warmup/setback then brings it back to plan). **TANK ONLY — LWT / space-heating rows still fire** (legionella is a DHW-tank cycle). The LP already BUDGETS the cycle's heat-up energy (`forecast_dhw_load_per_slot` ramp), so only the *actuation* side needed the guard. Telemetry: `legionella_tank_standoff` events in `action_log`. New `.env` knobs (defaults = Sunday 11:00 UTC, 120 min — covers the ramp from the overnight setback up to ~60 °C plus the firmware's ~1 h hold):
+
+```
+DHW_LEGIONELLA_STANDOFF_ENABLED=true            # master switch (the ONLY tank-write block during the cycle)
+DHW_LEGIONELLA_STANDOFF_DOW=6                    # weekday, Mon=0 .. Sun=6 (datetime.weekday())
+DHW_LEGIONELLA_STANDOFF_START_HOUR_UTC=11        # window start (UTC); must not cross midnight
+DHW_LEGIONELLA_STANDOFF_START_MINUTE_UTC=0
+DHW_LEGIONELLA_STANDOFF_DURATION_MINUTES=120     # ramp + ~1 h hold; tune from `legionella_tank_standoff` telemetry
+```
+
+Helper: `src/state_machine.py:in_legionella_standoff(now_utc)`. The guard sits in `_reconcile_daikin_actions` before the pending→active transition. If a `shutdown`/`max_heat` action overlaps the cycle window outside the guard, Onecta firmware still arbitrates.
 
 ### User-override propagation (Epic 14, #386 — 2026-05-21)
 

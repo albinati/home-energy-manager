@@ -54,6 +54,41 @@ _TANK_DRIFT_NOTIFIED: bool = False
 # semantics as the tank flag above). Cleared when the offset is back at 0.
 _LWT_DRIFT_NOTIFIED: bool = False
 
+# 2026-06-07 — dedup for the legionella tank stand-off skip log (one telemetry
+# row per suppressed action_schedule row per process, not per 5-min tick).
+_LEGIONELLA_STANDOFF_LOGGED: set[int] = set()
+
+
+def _is_tank_action(params: dict[str, Any]) -> bool:
+    """True when a row commands the DHW tank (vs. an LWT/space-heating row).
+
+    Legionella stand-off only suppresses tank writes; LWT rows still fire.
+    """
+    if not isinstance(params, dict):
+        return False
+    return any(k in params for k in ("tank_temp", "tank_power", "tank_powerful"))
+
+
+def in_legionella_standoff(now_utc: datetime) -> bool:
+    """True when ``now_utc`` is inside the configured weekly legionella
+    thermal-shock window, during which the Onecta firmware owns the DHW tank
+    and HEM must not write to it (see ``DHW_LEGIONELLA_STANDOFF_*``).
+
+    The window is defined in UTC on one weekday and must not cross midnight
+    (the default Sunday 11:00 + 120 min does not).
+    """
+    if not getattr(config, "DHW_LEGIONELLA_STANDOFF_ENABLED", False):
+        return False
+    if now_utc.weekday() != int(config.DHW_LEGIONELLA_STANDOFF_DOW):
+        return False
+    start = now_utc.replace(
+        hour=int(config.DHW_LEGIONELLA_STANDOFF_START_HOUR_UTC),
+        minute=int(config.DHW_LEGIONELLA_STANDOFF_START_MINUTE_UTC),
+        second=0, microsecond=0,
+    )
+    end = start + timedelta(minutes=int(config.DHW_LEGIONELLA_STANDOFF_DURATION_MINUTES))
+    return start <= now_utc < end
+
 
 def _parse_utc(s: str) -> datetime:
     x = str(s).replace("Z", "+00:00")
@@ -245,6 +280,32 @@ def _reconcile_daikin_actions(
                 )
             if status in ("pending", "active"):
                 db.mark_action(aid, "completed")
+            continue
+
+        # Legionella stand-off (2026-06-07): the Onecta firmware owns the DHW
+        # tank during its weekly thermal-shock cycle, so any tank PATCH we send
+        # is arbitrated/overridden by the firmware (TANK ONLY — LWT / space
+        # heating are unaffected). Skip firing tank rows inside the window and
+        # leave them PENDING so they resume the moment the window closes (the
+        # firmware leaves the tank hot; HEM's next warmup/setback then brings it
+        # back to plan). Do not mark completed — that would strand the row.
+        if (
+            getattr(config, "DHW_LEGIONELLA_STANDOFF_ENABLED", False)
+            and _is_tank_action(params)
+            and in_legionella_standoff(now_utc)
+        ):
+            if aid not in _LEGIONELLA_STANDOFF_LOGGED:
+                _LEGIONELLA_STANDOFF_LOGGED.add(aid)
+                try:
+                    db.log_action(
+                        device="daikin",
+                        action="legionella_tank_standoff",
+                        params={"row_id": aid, "kind": atype},
+                        result="skipped",
+                        trigger=trigger,
+                    )
+                except Exception as _exc:
+                    logger.debug("legionella stand-off log failed (non-fatal): %s", _exc)
             continue
 
         if status == "pending" and start <= now_utc < end:
