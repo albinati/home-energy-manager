@@ -66,6 +66,16 @@ def test_justified_by_preheat_slot(monkeypatch):
     assert applied == []
 
 
+def test_completed_preheat_slot_still_justifies(monkeypatch):
+    # #496-incident regression: a lwt_preheat row whose window covers now but is
+    # already `completed` (fired / noop'd by pre-fire idempotency) must STILL
+    # justify the live offset — the backstop must not reset it to 0.
+    sm, applied = _common(monkeypatch)
+    dev = DaikinDevice(id="gw", name="x", lwt_offset=10.0)
+    _run(monkeypatch, sm, [_slot("lwt_preheat", 10, status="completed")], dev)
+    assert applied == [], "completed in-window row must justify the offset"
+
+
 def test_zero_offset_is_noop(monkeypatch):
     sm, applied = _common(monkeypatch)
     dev = DaikinDevice(id="gw", name="x", lwt_offset=0.0)

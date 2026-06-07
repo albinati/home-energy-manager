@@ -74,14 +74,22 @@ def patch_st(fake_client):
 
 @pytest.fixture
 def appliance_id():
-    """Insert a single appliance and return its id."""
+    """Insert a single appliance and return its id.
+
+    The deadline is ~12 h ahead of *now* (not a fixed "07:00") so the reconcile
+    always has room to place the 120-min window regardless of the wall-clock
+    time the suite runs at — a fixed early-morning deadline failed when CI ran
+    near it (no room before it).
+    """
+    from zoneinfo import ZoneInfo
+    deadline = (datetime.now(ZoneInfo("Europe/London")) + timedelta(hours=12)).strftime("%H:%M")
     return db.add_appliance(
         vendor="smartthings",
         vendor_device_id="dev-test",
         name="Test Washer",
         device_type="washer",
         default_duration_minutes=120,
-        deadline_local_time="07:00",
+        deadline_local_time=deadline,
         typical_kw=0.5,
     )
 

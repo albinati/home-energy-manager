@@ -645,6 +645,12 @@ def _check_lwt_offset_drift(
         return
 
     # Does any current slot's lwt_preheat action justify a non-zero offset?
+    # NOTE: status is NOT filtered — a lwt_preheat row whose window covers now
+    # justifies the offset even when it's ``completed`` (it fired, or the
+    # pre-fire idempotency marked it noop because the device already held the
+    # value). Filtering to pending/active was a bug (#496-incident): it reset a
+    # legitimate live offset to 0 the moment its row completed. The time-window
+    # check below is what makes the row "current".
     for act in actions:
         try:
             start = _parse_utc(act["start_time"])
@@ -652,8 +658,6 @@ def _check_lwt_offset_drift(
         except (ValueError, KeyError, TypeError):
             continue
         if not (start <= now_utc < end):
-            continue
-        if (act.get("status") or "") not in ("pending", "active"):
             continue
         if act.get("overridden_by_user_at"):
             continue
