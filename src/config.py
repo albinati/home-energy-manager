@@ -576,6 +576,18 @@ class Config:
     FOX_FORCE_CHARGE_MAX_PWR: int = int(os.getenv("FOX_FORCE_CHARGE_MAX_PWR", "5000"))
     FOX_FORCE_CHARGE_NORMAL_PWR: int = int(os.getenv("FOX_FORCE_CHARGE_NORMAL_PWR", "3000"))
     FOX_EXPORT_MAX_PWR: int = int(os.getenv("FOX_EXPORT_MAX_PWR", "3680"))
+    # 2026-06-07: pin maxSoc to the reserve floor on `negative_hold` (Backup)
+    # slots so SOLAR can't trickle-charge the battery during the hold — preserving
+    # headroom for the PAID force-charge later in a negative window (surplus PV
+    # exports @ SEG instead of being banked for free, which forgoes the paid
+    # import). Live data 2026-06-07 showed Backup with maxSoc=None let PV creep
+    # the battery 10→21% mid-negative-window. The Fox wiki says Backup normally
+    # lets PV charge, and the maxSoc-pin is UNDOCUMENTED → verify on the H1 that
+    # it actually clips PV in Backup before trusting it. Kill-switch = false.
+    LP_NEGATIVE_HOLD_PIN_MAXSOC: bool = (
+        os.getenv("LP_NEGATIVE_HOLD_PIN_MAXSOC", "true").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
 
     LWT_OFFSET_MAX: float = float(os.getenv("LWT_OFFSET_MAX", "5"))
     LWT_OFFSET_MIN: float = float(os.getenv("LWT_OFFSET_MIN", "-5"))
