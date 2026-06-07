@@ -209,22 +209,22 @@ def test_negative_slot_outside_horizon_ignored():
 # ---------------------------------------------------------------------------
 
 
-def test_boosts_only_emits_only_clipped_boost():
-    """``boosts_only_from`` returns ONLY the negative-boost rows of the live
-    (yesterday-anchored) cycle, clipped to start at the clip point — never the
-    structural warmup/setback rows."""
+def test_boosts_only_emits_boost_at_natural_start():
+    """``boosts_only_as_of`` returns ONLY the negative-boost rows of the live
+    (yesterday-anchored) cycle — never the structural warmup/setback rows — and
+    keeps each window at its NATURAL start (NOT clipped to the as-of time), so
+    the upsert key is stable across re-plans."""
     # Live cycle anchored 2026-05-31 (warmup 31st 13:00 BST → 1st 13:00 BST).
-    # Paid window 04:00→07:00 UTC on the 1st sits in that cycle's tail.
     outgoing = [
         {"valid_from": "2026-06-01T04:00:00Z", "value_inc_vat": -4.0},
         {"valid_from": "2026-06-01T04:30:00Z", "value_inc_vat": -4.5},
         {"valid_from": "2026-06-01T05:00:00Z", "value_inc_vat": -3.0},
         {"valid_from": "2026-06-01T05:30:00Z", "value_inc_vat": -2.0},
     ]
-    clip = datetime(2026, 6, 1, 5, 0, tzinfo=UTC)  # "now" mid-window
+    as_of = datetime(2026, 6, 1, 5, 0, tzinfo=UTC)  # "now" mid-window
     rows = dhw_policy.generate_daily_tank_schedule(
         date(2026, 5, 31), agile_rates=outgoing, mode="normal",
-        boosts_only_from=clip,
+        boosts_only_as_of=as_of,
     )
     assert len(rows) == 1
     assert rows[0]["action_type"] == "tank_negative_boost"
@@ -232,25 +232,44 @@ def test_boosts_only_emits_only_clipped_boost():
     assert rows[0]["params"]["tank_powerful"] is True
     start = datetime.fromisoformat(rows[0]["start_time"].replace("Z", "+00:00"))
     end = datetime.fromisoformat(rows[0]["end_time"].replace("Z", "+00:00"))
-    assert start == clip                       # clipped to now, not 04:00
-    assert end == datetime(2026, 6, 1, 6, 0, tzinfo=UTC)  # window end (05:30+30)
+    assert start == datetime(2026, 6, 1, 4, 0, tzinfo=UTC)  # NATURAL start, not as_of
+    assert end == datetime(2026, 6, 1, 6, 0, tzinfo=UTC)    # window end (05:30+30)
+
+
+def test_boosts_only_start_is_stable_across_advancing_as_of():
+    """Idempotency anchor: the emitted start does NOT move as ``as_of`` advances
+    through a still-running window — so re-plans refresh one row, not many."""
+    outgoing = [
+        {"valid_from": "2026-06-01T04:00:00Z", "value_inc_vat": -4.0},
+        {"valid_from": "2026-06-01T04:30:00Z", "value_inc_vat": -4.5},
+        {"valid_from": "2026-06-01T05:00:00Z", "value_inc_vat": -3.0},
+    ]
+    starts = set()
+    for as_of_h, as_of_m in [(4, 10), (4, 45), (5, 0)]:
+        rows = dhw_policy.generate_daily_tank_schedule(
+            date(2026, 5, 31), agile_rates=outgoing, mode="normal",
+            boosts_only_as_of=datetime(2026, 6, 1, as_of_h, as_of_m, tzinfo=UTC),
+        )
+        assert len(rows) == 1
+        starts.add(rows[0]["start_time"])
+    assert len(starts) == 1  # one stable start regardless of as_of
 
 
 def test_boosts_only_drops_fully_elapsed_window():
-    """A negative window that has entirely passed the clip point yields no row."""
+    """A negative window that has entirely passed the as-of point yields no row."""
     outgoing = [
         {"valid_from": "2026-06-01T04:00:00Z", "value_inc_vat": -4.0},
     ]
-    clip = datetime(2026, 6, 1, 9, 0, tzinfo=UTC)  # well after the 04:00-04:30 window
+    as_of = datetime(2026, 6, 1, 9, 0, tzinfo=UTC)  # well after the 04:00-04:30 window
     rows = dhw_policy.generate_daily_tank_schedule(
         date(2026, 5, 31), agile_rates=outgoing, mode="normal",
-        boosts_only_from=clip,
+        boosts_only_as_of=as_of,
     )
     assert rows == []
 
 
 def test_boosts_only_bypasses_past_date_guard():
-    """The live cycle is yesterday-anchored; boosts_only_from must bypass the
+    """The live cycle is yesterday-anchored; boosts_only_as_of must bypass the
     past-date guard that would otherwise return [] for the writer."""
     outgoing = [
         {"valid_from": "2026-06-01T04:00:00Z", "value_inc_vat": -4.0},
@@ -258,7 +277,7 @@ def test_boosts_only_bypasses_past_date_guard():
     # date(2026,5,31) < frozen-today(2026,6,1) → guard would normally skip.
     rows = dhw_policy.generate_daily_tank_schedule(
         date(2026, 5, 31), agile_rates=outgoing, mode="normal",
-        boosts_only_from=datetime(2026, 6, 1, 0, 0, tzinfo=UTC),
+        boosts_only_as_of=datetime(2026, 6, 1, 0, 0, tzinfo=UTC),
     )
     assert len(rows) == 1
     assert rows[0]["action_type"] == "tank_negative_boost"
@@ -271,7 +290,7 @@ def test_boosts_only_no_negative_window_is_noop():
     ]
     rows = dhw_policy.generate_daily_tank_schedule(
         date(2026, 5, 31), agile_rates=outgoing, mode="normal",
-        boosts_only_from=datetime(2026, 6, 1, 0, 0, tzinfo=UTC),
+        boosts_only_as_of=datetime(2026, 6, 1, 0, 0, tzinfo=UTC),
     )
     assert rows == []
 
@@ -283,7 +302,7 @@ def test_boosts_only_vacation_still_empty():
     ]
     rows = dhw_policy.generate_daily_tank_schedule(
         date(2026, 5, 31), agile_rates=outgoing, mode="vacation",
-        boosts_only_from=datetime(2026, 6, 1, 0, 0, tzinfo=UTC),
+        boosts_only_as_of=datetime(2026, 6, 1, 0, 0, tzinfo=UTC),
     )
     assert rows == []
 
@@ -474,6 +493,31 @@ def test_write_daily_tank_schedule_persists_rows():
     for r in rows:
         params = json.loads(r[1])
         assert params["dhw_policy"] is True  # marker present
+
+
+def test_boosts_only_writer_is_idempotent_across_replans():
+    """Finding 1 regression: re-running the boosts-only writer with an advancing
+    as-of (simulating overnight re-plans) must NOT accumulate duplicate
+    tank_negative_boost rows — the stable natural start keeps upsert at one row."""
+    import sqlite3
+    outgoing = [
+        {"valid_from": "2026-06-01T04:00:00Z", "value_inc_vat": -4.0},
+        {"valid_from": "2026-06-01T04:30:00Z", "value_inc_vat": -4.5},
+        {"valid_from": "2026-06-01T05:00:00Z", "value_inc_vat": -3.0},
+    ]
+    for as_of_h, as_of_m in [(4, 5), (4, 35), (5, 5)]:
+        dhw_policy.write_daily_tank_schedule(
+            target_date_local=date(2026, 5, 31),
+            agile_rates=outgoing,
+            mode="normal",
+            clear_existing=False,
+            boosts_only_as_of=datetime(2026, 6, 1, as_of_h, as_of_m, tzinfo=UTC),
+        )
+    conn = sqlite3.connect(config.DB_PATH)
+    n = list(conn.execute(
+        "SELECT COUNT(*) FROM action_schedule WHERE action_type='tank_negative_boost'"
+    ))[0][0]
+    assert n == 1, f"expected a single boost row across re-plans, got {n}"
 
 
 def test_write_vacation_writes_zero_rows():

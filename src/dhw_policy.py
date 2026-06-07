@@ -157,7 +157,7 @@ def generate_daily_tank_schedule(
     agile_rates: list[dict[str, Any]] | None = None,
     mode: str | None = None,
     allow_past: bool = False,
-    boosts_only_from: datetime | None = None,
+    boosts_only_as_of: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """Generate tank action rows for the local calendar day starting at
     ``DHW_WARMUP_START_HOUR_LOCAL`` (default 13:00) on ``target_date_local``
@@ -172,9 +172,13 @@ def generate_daily_tank_schedule(
         agile_rates: optional list of {valid_from, value_inc_vat}; used
             to detect negative-price windows for boost overrides
         mode: optimization preset; defaults to ``config.OPTIMIZATION_PRESET``
-        boosts_only_from: when set, return ONLY this cycle's
-            ``tank_negative_boost`` rows, each clipped to start at
-            ``max(window_start, boosts_only_from)`` (drop any already ended).
+        boosts_only_as_of: when set, return ONLY this cycle's
+            ``tank_negative_boost`` rows, dropping any window that has fully
+            ended (``end <= boosts_only_as_of``) and keeping each remaining
+            window at its NATURAL start (NOT clipped to the as-of time). The
+            stable start keeps the writer idempotent: ``upsert_action`` keys on
+            ``(device, action_type, start_time)``, so re-plans refresh the one
+            row instead of accumulating a fresh row per advancing clip point.
             Used by the writer to recover the early-morning paid boost of the
             *currently-live* cycle (anchored at yesterday's warmup) that the
             cycle-split otherwise drops on an overnight re-plan — the
@@ -197,11 +201,11 @@ def generate_daily_tank_schedule(
     # immediately and they'd be wasted churn. Tomorrow is fine (advance
     # scheduling). ``allow_past=True`` lets read-only callers (e.g. the
     # heating-plan timeline endpoint) regenerate a past day's deterministic
-    # schedule for display without writing anything. ``boosts_only_from``
+    # schedule for display without writing anything. ``boosts_only_as_of``
     # deliberately reaches back into the live (yesterday-anchored) cycle, so it
-    # also bypasses this guard — it clips to ``boosts_only_from`` instead.
+    # also bypasses this guard — it drops only windows that have fully ended.
     today_local = datetime.now(_tz_local()).date()
-    if boosts_only_from is None and not allow_past and target_date_local < today_local:
+    if boosts_only_as_of is None and not allow_past and target_date_local < today_local:
         logger.info(
             "dhw_policy: skipping %s (in the past; today=%s)",
             target_date_local, today_local,
@@ -249,18 +253,19 @@ def generate_daily_tank_schedule(
     neg_windows = _detect_negative_windows(agile_rates, warmup_start_utc, next_warmup_utc)
 
     # Boosts-only recovery path: emit just the negative-boost rows of this
-    # (already-running) cycle, clipped to ``boosts_only_from``. No structural
-    # rows — see the param docstring. Keeps the writer idempotent: the next
-    # re-plan's range-clear removes these and rewrites with a fresh clip.
-    if boosts_only_from is not None:
+    # (already-running) cycle. Drop windows that have fully ended; keep the rest
+    # at their NATURAL start (a stable upsert key → no per-re-plan accumulation,
+    # see the param docstring). A still-running window keeps its past start; the
+    # reconciler fires it on the next tick (start <= now < end) and state-match
+    # de-dupes thereafter. No structural rows.
+    if boosts_only_as_of is not None:
         boost_rows: list[dict[str, Any]] = []
         for nw_start, nw_end in neg_windows:
-            start = max(nw_start, boosts_only_from)
-            if start >= nw_end:
+            if nw_end <= boosts_only_as_of:
                 continue  # window already fully elapsed
             boost_rows.append(_make_action(
                 action_type="tank_negative_boost",
-                start_utc=start,
+                start_utc=nw_start,
                 end_utc=nw_end,
                 tank_temp_c=boost_c,
                 tank_powerful=True,
@@ -595,7 +600,7 @@ def write_daily_tank_schedule(
     agile_rates: list[dict[str, Any]] | None = None,
     mode: str | None = None,
     clear_existing: bool = True,
-    boosts_only_from: datetime | None = None,
+    boosts_only_as_of: datetime | None = None,
 ) -> int:
     """Write a day's tank schedule into ``action_schedule``.
 
@@ -621,7 +626,7 @@ def write_daily_tank_schedule(
         target_date_local,
         agile_rates=agile_rates,
         mode=mode,
-        boosts_only_from=boosts_only_from,
+        boosts_only_as_of=boosts_only_as_of,
     )
     if not rows:
         logger.info("dhw_policy: no rows for %s (mode=%s)", target_date_local, mode)

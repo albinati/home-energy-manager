@@ -1474,16 +1474,19 @@ def find_recent_user_override(
     a replan, so the user doesn't have to keep undoing the same action.
     """
     now = now_utc or datetime.now(UTC)
-    now_iso = now.isoformat()
     clauses: list[str] = ["device = ?", "overridden_by_user_at IS NOT NULL"]
     params: list[Any] = [device]
     time_terms: list[str] = []
     if within_hours > 0:
+        # overridden_by_user_at is stored in +00:00 form (datetime.isoformat).
         time_terms.append("overridden_by_user_at >= ?")
         params.append((now - timedelta(hours=within_hours)).isoformat())
     if respect_until_window_end:
+        # end_time is stored in Z form (dhw_policy._iso_z / lp_dispatch). Compare
+        # against a Z-form "now" so the lexicographic boundary is exact — a
+        # +00:00 "now" sorts after the same instant in Z form ('Z' > '+').
         time_terms.append("end_time > ?")
-        params.append(now_iso)
+        params.append(now.isoformat().replace("+00:00", "Z"))
     if not time_terms:
         return None
     clauses.append("(" + " OR ".join(time_terms) + ")")
