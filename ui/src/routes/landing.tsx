@@ -47,8 +47,11 @@ const SolarWidget = lazy(() =>
 const GridWidget = lazy(() =>
   import("../components/home/GridWidget").then((m) => ({ default: m.GridWidget })),
 );
-const LoadWidget = lazy(() =>
-  import("../components/home/LoadWidget").then((m) => ({ default: m.LoadWidget })),
+// Load = the rich load-only breakdown (Base + Appliances + Heat-pump stacked,
+// forecast line, tariff bands; week/month/year split into Daikin heating + tank).
+// Kept as the focused 3rd timeline rather than a thin total-load line.
+const EnergyChartWidget = lazy(() =>
+  import("../components/home/EnergyChartWidget").then((m) => ({ default: m.EnergyChartWidget })),
 );
 const HeatingPlanWidget = lazy(() =>
   import("../components/home/HeatingPlanWidget").then((m) => ({ default: m.HeatingPlanWidget })),
@@ -207,8 +210,7 @@ export default function Landing() {
 
         <Widget title="Load" icon="📈" tone="power" size="wide">
           <Suspense fallback={<Spinner label="Loading load…" />}>
-            <LoadWidget period={period} periodData={periodInsights.data} periodLoading={periodInsights.loading}
-                        cheapP={metrics.data?.cheap_threshold_pence} peakP={metrics.data?.peak_threshold_pence} />
+            <EnergyChartWidget execution={execution.data} pv={pvToday.data} />
           </Suspense>
         </Widget>
 
