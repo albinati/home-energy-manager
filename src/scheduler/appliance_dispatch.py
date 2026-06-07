@@ -952,6 +952,226 @@ def _fallback_window(
 
 
 # ---------------------------------------------------------------------------
+# Proactive load nudge (2026-06-07)
+#
+# HEM can't load the machine (the physical Smart-Control button is the consent
+# gate), so when a notably-cheap / NEGATIVE Agile window is upcoming and a
+# registered appliance is idle, push ONE nudge to load it + Smart-Control, with
+# a recommended run window. The scheduler then arms it the moment the user
+# enables remote control. SmartThings is deliberately NOT consulted here — the
+# whole premise is the machine isn't enabled yet, so a ST outage can't block it.
+# ---------------------------------------------------------------------------
+
+def _detect_price_windows(
+    rates: list[dict[str, Any]] | None,
+    start_utc: datetime,
+    end_utc: datetime,
+    *,
+    max_price_p: float,
+    strict: bool = False,
+) -> list[tuple[datetime, datetime]]:
+    """Group consecutive 30-min slots whose price is at/below ``max_price_p``
+    (``strict`` → strictly below) into contiguous windows within
+    ``[start, end)``. Sibling of ``dhw_policy._detect_negative_windows`` (which
+    is negative-only and must stay that way — DHW depends on it). Returns
+    ``[(start, end), ...]``; empty when no qualifying slots.
+    """
+    if not rates:
+        return []
+    qual: list[datetime] = []
+    for r in rates:
+        try:
+            ts_raw = r.get("valid_from") or r.get("slot_time_utc")
+            rate = float(r.get("value_inc_vat", r.get("rate_p", 999)))
+        except (TypeError, ValueError):
+            continue
+        if not ts_raw:
+            continue
+        qualifies = (rate < max_price_p) if strict else (rate <= max_price_p)
+        if not qualifies:
+            continue
+        try:
+            ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            continue
+        if not (start_utc <= ts < end_utc):
+            continue
+        qual.append(ts)
+    if not qual:
+        return []
+    qual.sort()
+    windows: list[tuple[datetime, datetime]] = []
+    cur_start = qual[0]
+    cur_end = cur_start + timedelta(minutes=30)
+    for ts in qual[1:]:
+        if ts == cur_end:
+            cur_end = ts + timedelta(minutes=30)
+        else:
+            windows.append((cur_start, cur_end))
+            cur_start = ts
+            cur_end = ts + timedelta(minutes=30)
+    windows.append((cur_start, cur_end))
+    return windows
+
+
+def compute_appliance_window_suggestions(
+    now: datetime,
+    rates: list[dict[str, Any]] | None,
+    *,
+    max_price_p: float,
+    strict: bool,
+) -> list[dict[str, Any]]:
+    """Pure compute (no notify, no debounce). When a qualifying (≤/< ``max_price_p``)
+    window exists in the next ``APPLIANCE_WINDOW_NUDGE_HORIZON_HOURS``, return one
+    suggestion per enabled + idle appliance for its cheapest run window before the
+    deadline. Used by both the push path (negative-only) and the brief line
+    (cheap). Returns ``[]`` when nothing qualifies. Never raises on a single
+    appliance — bad rows are skipped.
+    """
+    horizon_h = float(getattr(config, "APPLIANCE_WINDOW_NUDGE_HORIZON_HOURS", 24))
+    horizon_end = now + timedelta(hours=max(1.0, horizon_h))
+    windows = _detect_price_windows(
+        rates, now, horizon_end, max_price_p=max_price_p, strict=strict,
+    )
+    if not windows:
+        return []
+    out: list[dict[str, Any]] = []
+    for app in db.list_appliances(enabled_only=True):
+        try:
+            appliance_id = int(app["id"])
+            if db.get_active_appliance_job(appliance_id) is not None:
+                continue  # already loaded / scheduled — no nudge
+            deadline_local = (
+                app.get("deadline_local_time")
+                or config.APPLIANCE_DEFAULT_DEADLINE_LOCAL
+            )
+            deadline_utc = _next_deadline_utc(deadline_local, now=now)
+            # Clamp the recommendation search to the SAME detection horizon so the
+            # recommended window can't sit beyond it (review HIGH/MEDIUM: detection
+            # 24h vs deadline up to ~31h diverged, and the message then pointed at
+            # a window the trigger never saw).
+            eff_deadline = min(deadline_utc, horizon_end)
+            duration = int(app.get("default_duration_minutes") or 120)
+            # Cheapest fitting run window in [now, eff_deadline] — naturally anchors
+            # on the negative/cheap slots (lowest mean). Raises if it can't fit.
+            try:
+                start_utc, end_utc, avg_p = find_cheapest_window(
+                    now, eff_deadline, duration,
+                )
+            except ValueError:
+                continue  # no fit before the deadline
+            # Coherence guard: the recommended window MUST overlap a detected
+            # qualifying window, else the nudge would advertise a slot that isn't
+            # actually cheap/negative (kills the synthetic _fallback_window=0.0p
+            # case and the deadline-before-the-window case).
+            if not any(ws < end_utc and we > start_utc for ws, we in windows):
+                continue
+            kw, _n = _effective_typical_kw(
+                appliance_id, float(app.get("typical_kw") or 0.5),
+            )
+            est_kwh = kw * duration / 60.0
+            est_cost_p = est_kwh * avg_p  # signed: negative = paid to run
+            out.append({
+                "appliance_id": appliance_id,
+                "appliance_name": app.get("name") or f"appliance #{appliance_id}",
+                "recommended_start_utc": start_utc,
+                "recommended_end_utc": end_utc,
+                "deadline_utc": deadline_utc,
+                "deadline_local": deadline_local,
+                "duration_minutes": duration,
+                "avg_price_pence": avg_p,
+                "est_kwh": est_kwh,
+                "est_cost_pence": est_cost_p,
+                "is_negative": avg_p < 0,
+            })
+        except Exception as e:  # pragma: no cover — never break the scan
+            logger.debug("appliance nudge compute skip #%s: %s", app.get("id"), e)
+            continue
+    return out
+
+
+def nudge_appliance_windows(
+    *,
+    now: datetime | None = None,
+    rates: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Push at most one load nudge per enabled+idle appliance for an upcoming
+    negative (or ≤ threshold) window. Debounced per appliance per window via
+    ``runtime_settings`` (restart-safe). Returns the suggestions that fired.
+    Never raises — all DB / notify failures are swallowed.
+    """
+    if not getattr(config, "APPLIANCE_WINDOW_NUDGE_ENABLED", False):
+        return []
+    now = now or _now_utc()
+    # Push threshold: empty → negative-only (strict < 0); else ≤ X p.
+    thr_raw = (getattr(config, "APPLIANCE_WINDOW_NUDGE_PRICE_THRESHOLD_P", "") or "").strip()
+    if thr_raw:
+        try:
+            max_price_p, strict = float(thr_raw), False
+        except ValueError:
+            max_price_p, strict = 0.0, True
+    else:
+        max_price_p, strict = 0.0, True  # negative-only
+    if rates is None:
+        tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
+        horizon_h = float(getattr(config, "APPLIANCE_WINDOW_NUDGE_HORIZON_HOURS", 24))
+        try:
+            rates = db.get_rates_for_period(
+                tariff, now, now + timedelta(hours=max(1.0, horizon_h)),
+            ) if tariff else None
+        except Exception:
+            rates = None
+    suggestions = compute_appliance_window_suggestions(
+        now, rates, max_price_p=max_price_p, strict=strict,
+    )
+    fired: list[dict[str, Any]] = []
+    for s in suggestions:
+        key = f"appliance_nudge_last_{s['appliance_id']}"
+        # Debounce on the RECOMMENDED window the user actually sees — one push per
+        # recommended window. A genuinely new (cheaper) window shifts the start →
+        # re-fires; re-plans of the same window keep the same start → suppressed.
+        window_id = _iso(s["recommended_start_utc"])
+        try:
+            if db.get_runtime_setting(key) == window_id:
+                continue  # already nudged for this window
+        except Exception:
+            pass
+        if _push_appliance_nudge(s):
+            try:
+                db.set_runtime_setting(key, window_id)
+            except Exception as e:  # pragma: no cover
+                logger.debug("appliance nudge debounce persist failed: %s", e)
+            fired.append(s)
+    return fired
+
+
+def _push_appliance_nudge(s: dict[str, Any]) -> bool:
+    """Deliver one nudge via the notifier. Returns True on a successful send."""
+    from ..notifier import notify_appliance_window_nudge
+    tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+
+    def _loc(dt: datetime) -> str:
+        return dt.astimezone(tz).strftime("%H:%M")
+
+    try:
+        notify_appliance_window_nudge(
+            appliance_name=s["appliance_name"],
+            recommended_start_local=_loc(s["recommended_start_utc"]),
+            recommended_end_local=_loc(s["recommended_end_utc"]),
+            deadline_local=s["deadline_local"],
+            duration_minutes=int(s["duration_minutes"]),
+            avg_price_pence=float(s["avg_price_pence"]),
+            est_kwh=float(s["est_kwh"]),
+            est_cost_pence=float(s["est_cost_pence"]),
+            is_negative=bool(s["is_negative"]),
+        )
+        return True
+    except Exception as e:  # pragma: no cover — notify must never break the scan
+        logger.warning("appliance nudge push failed (non-fatal): %s", e)
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Reconcile (called from the LP solve)
 # ---------------------------------------------------------------------------
 

@@ -52,6 +52,17 @@ def fetch_and_store_rates(fox: FoxESSClient | None = None) -> dict[str, Any]:
         clear_failure_streak=True,
     )
 
+    # Proactive appliance load nudge — fresh day-ahead rates just landed (~16:00),
+    # the natural moment to discover tomorrow's negative/cheap windows and prompt
+    # the user to LOAD the washer/dishwasher (the physical Smart-Control is the
+    # consent gate; HEM can only nudge). Debounced once per appliance per window.
+    # Non-fatal: a nudge failure must never block the rate store / LP solve.
+    try:
+        from .appliance_dispatch import nudge_appliance_windows
+        nudge_appliance_windows(now=now, rates=rates)
+    except Exception as e:
+        logger.warning("appliance window nudge (non-fatal): %s", e)
+
     # Fetch + persist Octopus Outgoing (export) rates when configured. Stored separately
     # in agile_export_rates so the LP can use a per-slot export price (Outgoing Agile
     # varies ±20p/kWh half-hourly, just like the import side). Failure here is non-fatal —

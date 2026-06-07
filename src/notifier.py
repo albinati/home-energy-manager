@@ -55,6 +55,10 @@ class AlertType(str, Enum):
     APPLIANCE_FINISHED = "appliance_finished"
     APPLIANCE_ARMED = "appliance_armed"
     APPLIANCE_CANCELLED = "appliance_cancelled"
+    # 2026-06-07 — proactive "load the machine for an upcoming cheap/negative
+    # window" nudge (the user must physically load + Smart-Control; HEM can only
+    # prompt). Negative-only by default; debounced once per appliance per window.
+    APPLIANCE_WINDOW_NUDGE = "appliance_window_nudge"
     # 2026-05-21 — LP solver failure (Infeasible / CBC crash). Default route:
     # ``severity=critical`` so it bypasses the morning-brief mute; rate-limited
     # by hash so a recurring failure across MPC re-solves only pages once.
@@ -76,6 +80,7 @@ _HOOK_PAYLOAD_NAMES: dict[str, str] = {
     "appliance_finished": "EnergyApplianceFinish",
     "appliance_armed": "EnergyApplianceArmed",
     "appliance_cancelled": "EnergyApplianceCancelled",
+    "appliance_window_nudge": "EnergyApplianceNudge",
     "lp_failure": "EnergyLPFailure",
 }
 
@@ -100,6 +105,7 @@ _TELEGRAM_HEADERS: dict[str, str] = {
     "appliance_finished": "✅ Appliance finished",
     "appliance_armed": "🧺 Appliance armed",
     "appliance_cancelled": "🚫 Appliance cancelled",
+    "appliance_window_nudge": "🧺⚡ Carregue a máquina",
     "lp_failure": "🚨 LP solver failure",
 }
 
@@ -117,6 +123,7 @@ _APPLIANCE_FANOUT_ALERT_KEYS: frozenset[str] = frozenset({
     AlertType.APPLIANCE_STARTING.value,
     AlertType.APPLIANCE_FINISHED.value,
     AlertType.APPLIANCE_CANCELLED.value,
+    AlertType.APPLIANCE_WINDOW_NUDGE.value,
 })
 
 
@@ -714,6 +721,56 @@ def notify_appliance_armed(
     _dispatch(
         AlertType.APPLIANCE_ARMED, body, urgent=False, extra=extra,
         telegram_header_override=f"🧺 {appliance_name} {verb}",
+    )
+
+
+def notify_appliance_window_nudge(
+    *,
+    appliance_name: str,
+    recommended_start_local: str,
+    recommended_end_local: str,
+    deadline_local: str,
+    duration_minutes: int,
+    avg_price_pence: float,
+    est_kwh: float,
+    est_cost_pence: float,
+    is_negative: bool,
+) -> None:
+    """🧺⚡ A cheap/negative window is coming — prompt the user to LOAD the
+    machine + enable Smart Control so the dispatcher can run it at the best slot.
+
+    HEM can't load the machine (the physical Smart-Control button is the consent
+    gate), so this is the only lever. pt-BR body; debounced once per window by
+    the caller (``appliance_dispatch.nudge_appliance_windows``).
+    """
+    if is_negative or est_cost_pence < 0:
+        headline = "Janela paga (negativa) chegando!"
+        # est_cost_pence is signed; negative = you're paid to run.
+        money = f"você RECEBE ~{abs(est_cost_pence):.0f}p"
+    else:
+        headline = "Janela barata chegando!"
+        money = f"custo ~{est_cost_pence:.0f}p"
+    body = "\n".join([
+        headline,
+        f"Carregue a {appliance_name} e ative o Smart Control até {deadline_local}.",
+        f"Recomendado: {recommended_start_local}–{recommended_end_local} "
+        f"({duration_minutes} min) · média {avg_price_pence:.1f}p/kWh",
+        f"Estimado: {est_kwh:.1f} kWh → {money}",
+    ])
+    extra = {
+        "appliance": appliance_name,
+        "recommended_start_local": recommended_start_local,
+        "recommended_end_local": recommended_end_local,
+        "deadline_local": deadline_local,
+        "duration_minutes": int(duration_minutes),
+        "avg_price_pence": round(float(avg_price_pence), 2),
+        "est_kwh": round(float(est_kwh), 2),
+        "est_cost_pence": round(float(est_cost_pence), 1),
+        "is_negative": bool(is_negative),
+    }
+    _dispatch(
+        AlertType.APPLIANCE_WINDOW_NUDGE, body, urgent=False, extra=extra,
+        telegram_header_override=f"🧺⚡ Carregue a {appliance_name}",
     )
 
 
