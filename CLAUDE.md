@@ -137,11 +137,18 @@ in `src/state_machine.py` now does two things:
    redundant solar_preheat writes that overlapping replan rows produced.
 2. **Override inheritance** — for non-`restore` rows, look up the most
    recent `overridden_by_user_at` row for the same device within
-   `USER_OVERRIDE_RESPECT_HOURS` (default 4h). If the user's gesture is
-   still in effect (live state still contradicts the override row), mark
-   the new row overridden too and skip. One notification fires per
-   *source* user gesture, not per suppressed downstream row. Restore rows
-   are exempt so the system can always return to baseline.
+   `USER_OVERRIDE_RESPECT_HOURS` (default 4h) — OR, when
+   `USER_OVERRIDE_RESPECT_UNTIL_WINDOW_END` (default true, 2026-06-07),
+   while the overridden row's own `end_time` is still in the future. The
+   latter keeps a hand-set tank/LWT respected for the WHOLE planned window
+   (e.g. a multi-hour negative-price boost), not just the fixed grace. If
+   the user's gesture is still in effect (live state still contradicts the
+   override row), mark the new row overridden too and skip. The live
+   `user_gesture_still_in_effect` check is the safety gate — revert the
+   manual change and HEM resumes at once, so a long window can't wedge the
+   schedule. One notification fires per *source* user gesture, not per
+   suppressed downstream row. Restore rows are exempt so the system can
+   always return to baseline.
 
 Both behaviours are gated by `PREFIRE_STATE_MATCH_ENABLED` (default true).
 Set to `false` for instant rollback. Telemetry shows up in `action_log` as

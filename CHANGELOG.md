@@ -84,7 +84,35 @@ two control-side features ship **off by default** (`DAIKIN_LWT_PREHEAT_ENABLED`,
   across the 6 call sites; scenario variance from the spread. Kill-switch
   `LP_RESIDUAL_PROFILE_V2`; Insights "when you spend the most" heatmap.
 
-### Fixed
+### Fixed — 2026-06-07 negative-price-window incident (live)
+- **LWT drift backstop reset a legitimate offset from a completed row** (#497).
+  Pre-fire idempotency marks an applied `lwt_preheat` row `completed`; the drift
+  backstop only treated `pending`/`active` rows as justification, so a still-in-
+  window completed +10 was reset to 0 mid paid-window. The backstop now honours a
+  `completed` row whose window still covers now.
+- **DHW cycle-split dropped the live cycle's negative-price boost** (#499,
+  Tracked by #498). The tank "day" anchors at `DHW_WARMUP_START_HOUR_LOCAL`
+  (13:00), so before that hour *now* is inside yesterday's cycle; the writer only
+  emitted today+tomorrow and the past-date guard dropped the rest, so an early-
+  morning paid boost (e.g. 04:00→12:00 UTC) was lost on every overnight re-plan.
+  New `generate_daily_tank_schedule(boosts_only_as_of=)` re-emits just the live
+  cycle's `tank_negative_boost` rows at their natural (stable) start.
+- **Respect a manual LWT/tank gesture until the planned window ends** (#499).
+  `USER_OVERRIDE_RESPECT_UNTIL_WINDOW_END` (default true) keeps a manual override
+  in effect while the overridden row's own `end_time > now`, not just the fixed
+  `USER_OVERRIDE_RESPECT_HOURS` — so a hand-set tank during a multi-hour boost is
+  left alone for the whole window. The live `user_gesture_still_in_effect` check
+  stays the safety gate (revert → HEM resumes). No new Daikin polling.
+- **Boost recovery idempotency + override window-end boundary** (#500, review-
+  caught). The recovery clipped each boost to the advancing LP-horizon start, so
+  `upsert_action` (keyed on `start_time`) inserted a fresh row per re-plan instead
+  of refreshing one; now emits the stable natural start. `find_recent_user_override`
+  compared a `Z`-form `end_time` against a `+00:00` now (`'Z' > '+'`); normalised.
+- **Live-cycle boost never fired (wrong `plan_date`)** (#501, caught by verifying
+  the live fire). The heartbeat reconciler selects rows by
+  `get_actions_for_plan_date(today_local)`, but the recovery stamped the boost
+  with the live cycle's anchor date (yesterday) → today's reconcile never selected
+  it. New `plan_date_override` files the recovered boost under today.
 - **Fox V3 merge froze the battery** (#479, PR #480). `_coarse_merge_fox` took
   `max(minSocOnGrid)`, so a midday `solar_charge` hold (min 100) merged with the
   evening discharge windows (min 10) → the battery couldn't discharge through the
