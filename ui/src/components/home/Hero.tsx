@@ -42,6 +42,7 @@ export function Hero({ metrics, cockpit, agile, monthly, period, periodState, pe
   const earningsToday = todayCum?.earnings_today_gbp ?? null;          // negative-import credit + export
   const negCreditToday = todayCum?.negative_import_credit_gbp ?? null;
   const exportToday = todayCum?.export_revenue_gbp ?? null;
+  const standingToday = todayCum?.standing_charge_gbp ?? null;         // fixed daily standing in the net
   const showEarnings = (earningsToday ?? 0) > 0.005;                   // hide on a plain spend day
 
   // --- The selected period, real money (NET, incl standing, measured grid) ---
@@ -58,7 +59,11 @@ export function Hero({ metrics, cockpit, agile, monthly, period, periodState, pe
         export_kwh: activeMonths.reduce((s, m) => s + (m.energy?.export_kwh ?? 0), 0),
         export_earn: activeMonths.reduce((s, m) => s + (m.cost?.export_earnings_pounds ?? 0), 0),
         total_cost: activeMonths.reduce((s, m) => s + (m.cost?.net_cost_pounds ?? 0), 0),
-        saved_vs_fixed: activeMonths.reduce((s, m) => s + (m.cost?.delta_vs_fixed_pounds ?? 0), 0),
+        // Use the authoritative slot-level British-Gas comparison
+        // (delta_vs_fixed_real_pounds), NOT the coarse Fox-energy delta which
+        // flips sign on Agile months and counts pre-Agile months. null months
+        // (pre-Agile) contribute 0, so this is the on-Agile saving.
+        saved_vs_fixed: activeMonths.reduce((s, m) => s + (m.cost?.delta_vs_fixed_real_pounds ?? 0), 0),
       }
     : null;
 
@@ -110,13 +115,16 @@ export function Hero({ metrics, cockpit, agile, monthly, period, periodState, pe
                 ? <strong class="hero-strong-pos">crédito {gbp(Math.abs(gastoTodayAnim))}</strong>
                 : <strong>{gbp(gastoTodayAnim)}</strong>}
             {showEarnings && earningsTodayAnim != null && (
-              <span class="hero-earnings" title="Dinheiro que entrou hoje: crédito da importação a preço negativo + receita de export.">
+              <span class="hero-earnings" title="Dinheiro que entrou hoje: crédito da importação a preço negativo + receita de export. A standing charge fixa do dia é descontada para chegar na conta.">
                 &nbsp;·&nbsp;⚡ foi pago&nbsp;<strong class="hero-strong-pos">{gbp(earningsTodayAnim)}</strong>
                 {(negCreditToday ?? 0) > 0.005 && (exportToday ?? 0) > 0.005
                   ? <> ({gbp(negCreditToday!)} negativo + {gbp(exportToday!)} export)</>
                   : (negCreditToday ?? 0) > 0.005
                     ? <> (import negativo)</>
                     : <> (export)</>}
+                {(standingToday ?? 0) > 0.005 && (
+                  <span class="hero-standing"> &minus; {gbp(standingToday!)} standing</span>
+                )}
               </span>
             )}
           </div>

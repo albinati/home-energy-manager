@@ -368,6 +368,10 @@ export interface MonthlyEnergyCost {
   fixed_shadow_pounds?: number | null;
   delta_vs_fixed_pence?: number | null;
   delta_vs_fixed_pounds?: number | null;
+  // Authoritative slot-level PnL vs the configured fixed tariff (British Gas),
+  // import basis. Use THIS for "saved vs fixed" — the coarse delta_vs_fixed_*
+  // above can flip sign on Agile months. null for pre-Agile months.
+  delta_vs_fixed_real_pounds?: number | null;
 }
 export interface MonthlyEnergy {
   energy: MonthlyEnergyEnergy;
@@ -507,6 +511,7 @@ export interface TodayCumulativeResponse {
   export_revenue_gbp: number;
   // Real-money figures for the hero money block (Phase 3a).
   realised_net_cost_gbp?: number;            // the day's net bill so far; <0 = a credit/paid day
+  standing_charge_gbp?: number;              // fixed daily standing charge baked into the net
   earnings_today_gbp?: number;               // money IN today: negative-import credit + export
   negative_import_credit_gbp?: number;       // the negative-price import credit part
   // The CONFIGURED fixed tariff (British Gas) — the correct comparison.
