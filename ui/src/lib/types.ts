@@ -138,6 +138,31 @@ export interface PvTodayResponse {
   plan_run_id?: number | null;
 }
 
+/* ----- /grid/today — per-slot planned-vs-realised grid import/export ----- */
+
+export interface GridTodaySlot {
+  slot_utc: string;
+  import_planned_kwh: number | null;   // committed LP plan (stitched across solves)
+  export_planned_kwh: number | null;
+  import_actual_kwh: number | null;    // realised roll-up; null for future/no-telemetry
+  export_actual_kwh: number | null;
+  import_price_p?: number | null;
+  kind?: string | null;
+}
+
+export interface GridTodayResponse {
+  date: string;
+  now_utc: string;
+  slots: GridTodaySlot[];
+  totals: {
+    import_planned_kwh: number;
+    export_planned_kwh: number;
+    import_actual_kwh: number;
+    export_actual_kwh: number;
+  };
+  plan_run_id?: number | null;
+}
+
 /* ----- /optimization/inputs ----- */
 
 export interface OptimizationInputSlot {
