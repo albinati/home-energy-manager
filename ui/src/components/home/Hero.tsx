@@ -2,7 +2,7 @@ import type { MetricsResponse, CockpitNow, AgileTodayResponse, MonthlyEnergy, Pe
 import { gbp, kwh } from "../../lib/format";
 import { useAnimatedNumber } from "../../lib/useAnimatedNumber";
 import { isCurrentPeriod, periodLabel, type PeriodState } from "../../lib/period";
-import { CostBreakdownChart } from "./CostBreakdownChart";
+import { PriceTimeline } from "./PriceTimeline";
 import "./hero.css";
 
 interface HeroProps {
@@ -33,31 +33,19 @@ export function Hero({ metrics, cockpit, agile, monthly, period, periodState, pe
   const isNow = isCurrentPeriod(periodState);
   const label = periodLabel(periodState);
 
-  // --- Always-today real-money savings (independent of the period selector) ---
-  // saved = £ vs the fixed-tariff shadow on the same metered kWh; pct = how much
-  // of that fixed bill we erased (>100% on a paid/negative day → "100+").
-  const savedToday = todayCum?.delta_vs_fixed_real_gbp ?? null;
-  const netToday = todayCum?.realised_net_cost_gbp ?? null;
-  const shadowToday = todayCum?.fixed_shadow_real_gbp ?? null;
-  const pctOffToday = (savedToday != null && shadowToday != null && shadowToday > 0)
-    ? Math.round((savedToday / shadowToday) * 100)
-    : null;
+  // --- TODAY's real money (the hero money block, independent of the period
+  // selector). Uses the CONFIGURED fixed-tariff (British Gas) comparison — NOT
+  // the generic ~23p fixed shadow that mislabels + inflates the saving. ---
+  const gastoToday = todayCum?.realised_net_cost_gbp ?? null;          // net bill (<0 = credit)
+  const savedVsBG = todayCum?.delta_vs_fixed_tariff_real_gbp ?? null;  // £ cheaper than British Gas
+  const fixedLabel = todayCum?.fixed_tariff_label || metrics?.fixed_tariff?.label || "British Gas";
+  const earningsToday = todayCum?.earnings_today_gbp ?? null;          // negative-import credit + export
+  const negCreditToday = todayCum?.negative_import_credit_gbp ?? null;
+  const exportToday = todayCum?.export_revenue_gbp ?? null;
+  const showEarnings = (earningsToday ?? 0) > 0.005;                   // hide on a plain spend day
 
   // --- The selected period, real money (NET, incl standing, measured grid) ---
   const periodNet = period?.cost?.net_cost_pounds ?? null;
-  const periodExport = period?.cost?.export_earnings_pounds ?? null;
-
-  // --- Saved vs the fixed tariff — computed BY THE BACKEND on the same metered
-  // kWh + day-window as the realised cost (no Fox-vs-Octopus meter mixing). ---
-  const savedVsFixed = period?.cost?.delta_vs_fixed_pounds ?? null;
-  const ft = metrics?.fixed_tariff;
-  const fixedLabel = ft?.label || "fixed tariff";
-
-  // --- Today so far — estimate only (realised lands next-day). Shown only when
-  // the current period is in view, so historical browsing stays clean. ---
-  const todayEst = isNow && periodState.gran !== "day"
-    ? (metrics?.pnl?.daily?.delta_vs_fixed_pounds ?? null)
-    : null;
 
   // --- Lifetime totals on Agile (folded in from the old Lifetime widget) ---
   const activeMonths = monthly.filter(
@@ -76,8 +64,9 @@ export function Hero({ metrics, cockpit, agile, monthly, period, periodState, pe
 
   // Smooth tweens for the refreshing figures.
   const periodNetAnim = useAnimatedNumber(periodNet);
-  const savedAnim = useAnimatedNumber(savedVsFixed);
-  const todayAnim = useAnimatedNumber(todayEst);
+  const savedVsBGAnim = useAnimatedNumber(savedVsBG);
+  const gastoTodayAnim = useAnimatedNumber(gastoToday);
+  const earningsTodayAnim = useAnimatedNumber(earningsToday);
   const solarAnim = useAnimatedNumber(lifetime?.solar_kwh ?? null);
   const exportKwhAnim = useAnimatedNumber(lifetime?.export_kwh ?? null);
   const exportEarnAnim = useAnimatedNumber(lifetime?.export_earn ?? null);
@@ -103,28 +92,34 @@ export function Hero({ metrics, cockpit, agile, monthly, period, periodState, pe
         <div class="hero-headline hero-headline--enter">
           {periodNetAnim == null ? (periodLoading ? <SkelHero /> : "—") : gbp(periodNetAnim)}
         </div>
+        {/* TODAY money block — one British-Gas comparison (deduped), the day's
+            bill, and the concrete money earned (negative-import credit + export). */}
         <div class="hero-sublines">
-          {savedAnim != null && (
+          {savedVsBGAnim != null && (
             <div class="hero-subline">
-              <strong class={savedAnim >= 0 ? "hero-strong-pos" : "hero-strong-neg"}>
-                {savedAnim >= 0 ? "Saved " : "Extra "}{gbp(Math.abs(savedAnim))}
+              <strong class={savedVsBGAnim >= 0 ? "hero-strong-pos" : "hero-strong-neg"}>
+                {savedVsBGAnim >= 0 ? "Economizou " : "Gastou +"}{gbp(Math.abs(savedVsBGAnim))}
               </strong>
-              &nbsp;vs {fixedLabel}
-              {periodExport != null && periodExport > 0 && (
-                <>&nbsp;·&nbsp;<strong class="hero-strong-pos">{gbp(periodExport)}</strong> exported</>
-              )}
+              &nbsp;hoje vs {fixedLabel}
             </div>
           )}
-          {todayAnim != null && (
-            <div class="hero-subline hero-subline-dma">
-              Today so far:&nbsp;
-              <strong class={todayAnim >= 0 ? "hero-strong-pos" : "hero-strong-neg"}>
-                {todayAnim >= 0 ? "Saved " : "Extra "}{gbp(Math.abs(todayAnim))}
-              </strong>
-              &nbsp;vs {fixedLabel}
-              <span class="hero-est-tag" title="Estimate — today's metered cost confirms after the next-day Octopus backfill.">est</span>
-            </div>
-          )}
+          <div class="hero-subline hero-subline-dma">
+            Conta hoje:&nbsp;
+            {gastoTodayAnim == null ? "—"
+              : gastoTodayAnim < 0
+                ? <strong class="hero-strong-pos">crédito {gbp(Math.abs(gastoTodayAnim))}</strong>
+                : <strong>{gbp(gastoTodayAnim)}</strong>}
+            {showEarnings && earningsTodayAnim != null && (
+              <span class="hero-earnings" title="Dinheiro que entrou hoje: crédito da importação a preço negativo + receita de export.">
+                &nbsp;·&nbsp;⚡ foi pago&nbsp;<strong class="hero-strong-pos">{gbp(earningsTodayAnim)}</strong>
+                {(negCreditToday ?? 0) > 0.005 && (exportToday ?? 0) > 0.005
+                  ? <> ({gbp(negCreditToday!)} negativo + {gbp(exportToday!)} export)</>
+                  : (negCreditToday ?? 0) > 0.005
+                    ? <> (import negativo)</>
+                    : <> (export)</>}
+              </span>
+            )}
+          </div>
         </div>
 
         {(curImportP != null || socPct != null) && (
@@ -136,25 +131,6 @@ export function Hero({ metrics, cockpit, agile, monthly, period, periodState, pe
           </div>
         )}
 
-        {savedToday != null && (savedToday > 0.005 || (netToday != null && netToday < 0)) && (
-          <div class="hero-savedtoday" title="Economia real de hoje vs a tarifa fixa — sobre o consumo medido, incluindo standing charge.">
-            <span class="hero-savedtoday-ico" aria-hidden="true">💚</span>
-            <span>
-              Hoje:&nbsp;
-              {netToday != null && netToday < 0
-                ? <strong class="hero-strong-pos">crédito {gbp(Math.abs(netToday))}</strong>
-                : netToday != null ? <strong>{gbp(netToday)}</strong> : null}
-              {savedToday > 0.005 && (
-                <>&nbsp;·&nbsp;economizou&nbsp;
-                  <strong class="hero-strong-pos">{gbp(savedToday)}</strong>
-                  {pctOffToday != null && pctOffToday > 0 && (
-                    <>&nbsp;({pctOffToday > 100 ? "100+" : pctOffToday}% abaixo do {fixedLabel})</>
-                  )}
-                </>
-              )}
-            </span>
-          </div>
-        )}
 
         {lifetime && (
           <div class="hero-lifetime" title={`Sums across ${lifetime.months} active months on Agile`}>
@@ -179,7 +155,11 @@ export function Hero({ metrics, cockpit, agile, monthly, period, periodState, pe
 
       <div class="hero-status">
         <div class="hero-chart">
-          <CostBreakdownChart period={period} label={label} loading={periodLoading} />
+          <PriceTimeline
+            agile={agile}
+            cheapP={metrics?.cheap_threshold_pence}
+            peakP={metrics?.peak_threshold_pence}
+          />
         </div>
       </div>
     </section>

@@ -29,8 +29,9 @@ def test_today_cumulative_exposes_savings_fields(monkeypatch):
     body = r.json()
     for k in (
         "import_kwh", "export_kwh", "import_cost_gbp", "export_revenue_gbp",
-        "realised_net_cost_gbp", "delta_vs_fixed_real_gbp", "delta_vs_svt_real_gbp",
-        "fixed_shadow_real_gbp", "svt_shadow_real_gbp",
+        "realised_net_cost_gbp", "earnings_today_gbp", "negative_import_credit_gbp",
+        # The CONFIGURED fixed tariff (British Gas) — correct shadow, not the generic.
+        "fixed_tariff_label", "delta_vs_fixed_tariff_real_gbp", "fixed_tariff_shadow_real_gbp",
     ):
         assert k in body, f"hero needs {k} in today-cumulative"
 

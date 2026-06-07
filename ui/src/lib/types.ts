@@ -505,12 +505,14 @@ export interface TodayCumulativeResponse {
   export_kwh: number;
   import_cost_gbp: number;       // <0 = we were paid to import (credit)
   export_revenue_gbp: number;
-  // Real-money savings so far today (for the hero "saved £X today" chip).
-  realised_net_cost_gbp?: number;       // net incl. standing; <0 = a credit/paid day
-  delta_vs_fixed_real_gbp?: number;     // £ saved vs the fixed-tariff shadow (>0 = Agile won)
-  delta_vs_svt_real_gbp?: number;       // £ saved vs SVT shadow
-  fixed_shadow_real_gbp?: number;       // counterfactual cost on fixed (for the % off)
-  svt_shadow_real_gbp?: number;
+  // Real-money figures for the hero money block (Phase 3a).
+  realised_net_cost_gbp?: number;            // the day's net bill so far; <0 = a credit/paid day
+  earnings_today_gbp?: number;               // money IN today: negative-import credit + export
+  negative_import_credit_gbp?: number;       // the negative-price import credit part
+  // The CONFIGURED fixed tariff (British Gas) — the correct comparison.
+  fixed_tariff_label?: string | null;
+  delta_vs_fixed_tariff_real_gbp?: number | null;  // £ cheaper than British Gas (>0 = Agile won)
+  fixed_tariff_shadow_real_gbp?: number | null;    // what British Gas would have cost
 }
 
 // GET /appliances/suggestions — cheapest upcoming run window per idle appliance.
@@ -525,6 +527,7 @@ export interface ApplianceSuggestion {
   est_kwh: number;
   est_cost_pence: number;        // signed: <0 = paid to run
   is_negative: boolean;
+  meets_threshold?: boolean;     // true = genuinely cheap; false = "next/cheapest available"
 }
 export interface ApplianceSuggestionsResponse {
   suggestions: ApplianceSuggestion[];

@@ -240,9 +240,11 @@ async def appliance_suggestions() -> dict[str, Any]:
     except Exception:
         rates = None
     try:
+        # always=True → surface the cheapest fitting window even when none is
+        # below threshold ("próxima janela") so the widget shows the best time.
         sugg = await asyncio.to_thread(
             appliance_dispatch.compute_appliance_window_suggestions,
-            now, rates, max_price_p=thr, strict=False,
+            now, rates, max_price_p=thr, strict=False, always=True,
         )
     except Exception as e:  # never break the cockpit on a suggestion glitch
         logger.debug("appliance suggestions failed: %s", e)
@@ -258,6 +260,7 @@ async def appliance_suggestions() -> dict[str, Any]:
         "est_kwh": s["est_kwh"],
         "est_cost_pence": s["est_cost_pence"],
         "is_negative": s["is_negative"],
+        "meets_threshold": s.get("meets_threshold", True),
     } for s in sugg]
     return {"suggestions": out, "count": len(out)}
 
