@@ -144,6 +144,66 @@ def test_nudge_skips_when_flag_off(monkeypatch):
     assert calls == []
 
 
+def _mock_st(monkeypatch, *, machine_state="stop", remote_enabled=False, raises=False):
+    from unittest.mock import MagicMock
+    cli = MagicMock()
+    cli.get_machine_state = MagicMock(return_value=(machine_state, None))
+    cli.get_remote_control_enabled = MagicMock(return_value=remote_enabled)
+    if raises:
+        monkeypatch.setattr(
+            appliance_dispatch, "_get_st_client",
+            MagicMock(side_effect=RuntimeError("ST down")),
+        )
+    else:
+        monkeypatch.setattr(appliance_dispatch, "_get_st_client", MagicMock(return_value=cli))
+    return cli
+
+
+def test_nudge_skips_when_machine_running(monkeypatch):
+    _setup_cfg(monkeypatch)
+    calls = _capture_notify(monkeypatch)
+    _mock_st(monkeypatch, machine_state="run")  # a cycle is already washing
+    now = _now_top_of_hour()
+    _add_washer()
+    _seed_rates(now + timedelta(hours=1), [-4.0, -4.5, -3.0, -2.0])
+    assert appliance_dispatch.nudge_appliance_windows(now=now) == []
+    assert calls == []
+
+
+def test_nudge_skips_when_remote_control_enabled(monkeypatch):
+    _setup_cfg(monkeypatch)
+    calls = _capture_notify(monkeypatch)
+    _mock_st(monkeypatch, machine_state="stop", remote_enabled=True)  # loaded, will be armed
+    now = _now_top_of_hour()
+    _add_washer()
+    _seed_rates(now + timedelta(hours=1), [-4.0, -4.5, -3.0, -2.0])
+    assert appliance_dispatch.nudge_appliance_windows(now=now) == []
+    assert calls == []
+
+
+def test_nudge_proceeds_when_machine_stopped_and_idle(monkeypatch):
+    _setup_cfg(monkeypatch)
+    calls = _capture_notify(monkeypatch)
+    _mock_st(monkeypatch, machine_state="stop", remote_enabled=False)
+    now = _now_top_of_hour()
+    _add_washer()
+    _seed_rates(now + timedelta(hours=1), [-4.0, -4.5, -3.0, -2.0])
+    assert len(appliance_dispatch.nudge_appliance_windows(now=now)) == 1
+    assert len(calls) == 1
+
+
+def test_nudge_proceeds_when_smartthings_unavailable(monkeypatch):
+    """Graceful degrade: an ST blip must not silence the nudge."""
+    _setup_cfg(monkeypatch)
+    calls = _capture_notify(monkeypatch)
+    _mock_st(monkeypatch, raises=True)
+    now = _now_top_of_hour()
+    _add_washer()
+    _seed_rates(now + timedelta(hours=1), [-4.0, -4.5, -3.0, -2.0])
+    assert len(appliance_dispatch.nudge_appliance_windows(now=now)) == 1
+    assert len(calls) == 1
+
+
 def test_nudge_skips_when_no_negative_window(monkeypatch):
     _setup_cfg(monkeypatch)
     calls = _capture_notify(monkeypatch)
