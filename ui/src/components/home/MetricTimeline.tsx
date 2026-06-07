@@ -29,8 +29,14 @@ export interface TimelineLine {
 interface MetricTimelineProps {
   labels: string[];
   lines: TimelineLine[];
-  /** Import price per slot (p/kWh) — drives the tariff bands + right axis. */
+  /** Price per slot (p/kWh) drawn on the right axis — IMPORT on the consumption
+   * widget, EXPORT (Octopus Outgoing) on the generation widget. */
   prices?: (number | null)[];
+  /** Optional separate price series that drives the cheap/peak/negative tariff
+   * SHADING (always the import price — the canonical tariff context). When
+   * omitted, `prices` is used for both the shading and the right-axis line. */
+  bandPrices?: (number | null)[];
+  priceLabel?: string;          // right-axis suffix label intent (unused styling hook)
   /** Slot index of "now" (intraday only); -1 / undefined to hide. */
   nowIdx?: number;
   cheapAt?: number | null;
@@ -44,7 +50,7 @@ interface MetricTimelineProps {
 type Tier = "negative" | "cheap" | "standard" | "peak" | null;
 
 export function MetricTimeline({
-  labels, lines, prices, nowIdx = -1, cheapAt, peakAt, barMode = false, height = 260, unit = "kWh",
+  labels, lines, prices, bandPrices, nowIdx = -1, cheapAt, peakAt, barMode = false, height = 260, unit = "kWh",
 }: MetricTimelineProps) {
   const ref = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<EChartsType | null>(null);
@@ -69,12 +75,18 @@ export function MetricTimeline({
     const base = baseOption();
     const animate = !reducedMotion();
     const hasPrice = !barMode && (prices?.some((p) => p != null) ?? false);
+    // The shading always follows the IMPORT price (the canonical cheap/peak/
+    // negative classification), even on the generation widget where the right-
+    // axis LINE is the export price.
+    const shadePrices = bandPrices ?? prices;
+    const hasBands = !barMode && (shadePrices?.some((p) => p != null) ?? false);
 
     // --- Tariff-tier background bands (intraday only). Classify each slot by
     // import price into negative / cheap / peak; shade contiguous runs. Mirrors
     // TodayPlanWidget so all timelines share one tariff ribbon.
     const bands: Array<[{ xAxis: number; itemStyle: object }, { xAxis: number }]> = [];
-    if (hasPrice && prices) {
+    if (hasBands && shadePrices) {
+      const prices = shadePrices;  // shadow: tier classification uses the band series
       const known = prices.filter((p): p is number => p != null).slice().sort((a, b) => a - b);
       const pct = (q: number) => (known.length ? known[Math.min(known.length - 1, Math.floor(q * known.length))] : null);
       const cAt = cheapAt ?? pct(0.33);

@@ -173,7 +173,8 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
           <span class="echart-l2"><span class="echart-l2-sw" style="background:var(--accent)" /> Appliances</span>
           <span class="echart-l2"><span class="echart-l2-sw" style="background:var(--warn)" /> Heat pump</span>
           <span class="echart-l2"><span class="echart-l2-line" /> Forecast</span>
-          <span class="echart-l2-hint">stacked = where your energy goes · ◉ now</span>
+          <span class="echart-l2"><span class="echart-l2-line" style="border-color:var(--import)" /> Import price</span>
+          <span class="echart-l2-hint">stacked = where your energy goes · paid/cheap/peak shaded · ◉ now</span>
         </div>
       )}
 
@@ -471,8 +472,17 @@ function optionForDay(
             : "");
       },
     },
+    grid: { left: 16, right: 44, top: 16, bottom: 24, containLabel: true },
     xAxis: { ...(base.xAxis as object), data: labels, axisLabel: { color: t.textMute, fontSize: 10, interval: 5 } },
-    yAxis: [{ ...(base.yAxis as object), name: "kWh", position: "left" }],
+    yAxis: [
+      { ...(base.yAxis as object), name: "kWh", position: "left" },
+      // Right axis: the Octopus IMPORT price slots — what each kWh of demand
+      // costs, the "import slots" overlay the user asked for on consumption.
+      {
+        ...(base.yAxis as object), position: "right", splitLine: { show: false },
+        axisLabel: { color: t.textMute, fontSize: 10, formatter: "{value}p" },
+      },
+    ],
     series: [
       // Tariff bands + now marker on a silent baseline series.
       {
@@ -505,6 +515,12 @@ function optionForDay(
         name: "Forecast", type: "line", smooth: true, showSymbol: false, connectNulls: false,
         data: loadForecast,
         lineStyle: { color: withAlpha(t.textMute, 0.85), width: 1.5, type: "dashed", cap: "round" }, z: 5,
+      },
+      // Import price → dashed step on the right axis (the "import slots" overlay).
+      {
+        name: "Import price", type: "line", step: "middle", showSymbol: false, color: t.importColor,
+        yAxisIndex: 1, data: price,
+        lineStyle: { color: t.importColor, width: 1.5, opacity: 0.8, type: "dashed" }, z: 4,
       },
       // Pulsing "now".
       ...(nowIdx >= 0 ? [{

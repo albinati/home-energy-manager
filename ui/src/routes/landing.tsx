@@ -41,15 +41,15 @@ import "../components/home/home.css";
 // (~193 KB gzip, shared chunk). Lazy-load so the hero + live band paint first
 // and the charts stream in below the fold. Solar/Grid/Load sync to the period
 // navigator; Heating keeps its own D-1/D/D+1 frame (not period-synced).
-const SolarWidget = lazy(() =>
-  import("../components/home/SolarWidget").then((m) => ({ default: m.SolarWidget })),
+// Two synced energy timelines (each owns echarts, shared chunk):
+//   • Generation — solar plan-vs-actual + grid export + Octopus EXPORT price.
+//   • Consumption — the rich load breakdown (Base+Appliances+Heat-pump stacked,
+//     forecast line, Daikin heating/tank over periods) + Octopus IMPORT price.
+// Both sync to the period navigator (day = intraday detail + tariff zones;
+// week/month/year = actuals bars). Heating keeps its own D-1/D/D+1 frame.
+const GenerationWidget = lazy(() =>
+  import("../components/home/GenerationWidget").then((m) => ({ default: m.GenerationWidget })),
 );
-const GridWidget = lazy(() =>
-  import("../components/home/GridWidget").then((m) => ({ default: m.GridWidget })),
-);
-// Load = the rich load-only breakdown (Base + Appliances + Heat-pump stacked,
-// forecast line, tariff bands; week/month/year split into Daikin heating + tank).
-// Kept as the focused 3rd timeline rather than a thin total-load line.
 const EnergyChartWidget = lazy(() =>
   import("../components/home/EnergyChartWidget").then((m) => ({ default: m.EnergyChartWidget })),
 );
@@ -189,27 +189,22 @@ export default function Landing() {
         </Widget>
       </div>
 
-      {/* ── TIMELINES — Solar / Grid / Load, all synced to the period
+      {/* ── TIMELINES — Generation + Consumption, both synced to the period
           navigator (navigate one → navigate all). Heating keeps its own
-          D-1/D/D+1 frame as the visual 4th. Day = forecast-vs-actual; week/
-          month/year = actuals only (no historical intraday forecast). ─────── */}
+          D-1/D/D+1 frame. Day = forecast-vs-actual + cheap/peak/negative tariff
+          zones + the Octopus export/import price slots; week/month/year =
+          actuals bars (no historical intraday forecast). ─────────────────── */}
       <div class="widget-grid widget-band">
-        <Widget title="Solar" icon="☀" tone="plan" size="wide">
-          <Suspense fallback={<Spinner label="Loading solar…" />}>
-            <SolarWidget period={period} periodData={periodInsights.data} periodLoading={periodInsights.loading}
-                         cheapP={metrics.data?.cheap_threshold_pence} peakP={metrics.data?.peak_threshold_pence} />
+        <Widget title="Generation" icon="☀" tone="plan" size="wide">
+          <Suspense fallback={<Spinner label="Loading generation…" />}>
+            <GenerationWidget period={period} periodData={periodInsights.data} periodLoading={periodInsights.loading}
+                              agile={agile.data}
+                              cheapP={metrics.data?.cheap_threshold_pence} peakP={metrics.data?.peak_threshold_pence} />
           </Suspense>
         </Widget>
 
-        <Widget title="Grid" icon="🔌" tone="power" size="wide">
-          <Suspense fallback={<Spinner label="Loading grid…" />}>
-            <GridWidget period={period} periodData={periodInsights.data} periodLoading={periodInsights.loading}
-                        cheapP={metrics.data?.cheap_threshold_pence} peakP={metrics.data?.peak_threshold_pence} />
-          </Suspense>
-        </Widget>
-
-        <Widget title="Load" icon="📈" tone="power" size="wide">
-          <Suspense fallback={<Spinner label="Loading load…" />}>
+        <Widget title="Consumption" icon="📈" tone="power" size="wide">
+          <Suspense fallback={<Spinner label="Loading consumption…" />}>
             <EnergyChartWidget execution={execution.data} pv={pvToday.data} />
           </Suspense>
         </Widget>
