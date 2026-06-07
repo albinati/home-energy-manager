@@ -58,6 +58,34 @@ def test_slot_fox_tuple_force_charge_uses_target_and_reserve() -> None:
     assert msg == _min_r()
 
 
+def test_slot_fox_tuple_negative_hold_pins_maxsoc_to_floor(monkeypatch) -> None:
+    """2026-06-07: negative_hold (Backup) pins maxSoc = reserve floor so solar
+    can't trickle-charge the battery during the hold (when enabled)."""
+    monkeypatch.setattr(config, "LP_NEGATIVE_HOLD_PIN_MAXSOC", True, raising=False)
+    t0 = datetime(2026, 6, 1, 11, 0, tzinfo=UTC)
+    s = HalfHourSlot(
+        start_utc=t0, end_utc=t0 + timedelta(minutes=30),
+        price_pence=-4.0, kind="negative_hold",
+    )
+    wm, fds, pwr, msg, max_soc = _slot_fox_tuple(s)
+    assert wm == "Backup"
+    assert msg == _min_r()
+    assert max_soc == _min_r()  # pinned at the floor → no solar charge above it
+
+
+def test_slot_fox_tuple_negative_hold_maxsoc_none_when_disabled(monkeypatch) -> None:
+    """Kill-switch: maxSoc stays None (legacy Backup) when the pin is off."""
+    monkeypatch.setattr(config, "LP_NEGATIVE_HOLD_PIN_MAXSOC", False, raising=False)
+    t0 = datetime(2026, 6, 1, 11, 0, tzinfo=UTC)
+    s = HalfHourSlot(
+        start_utc=t0, end_utc=t0 + timedelta(minutes=30),
+        price_pence=-4.0, kind="negative_hold",
+    )
+    wm, fds, pwr, msg, max_soc = _slot_fox_tuple(s)
+    assert wm == "Backup"
+    assert max_soc is None
+
+
 def test_slot_fox_tuple_cheap_fallback_when_no_target() -> None:
     t0 = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
     s = HalfHourSlot(
@@ -190,10 +218,11 @@ def test_solar_charge_emits_solar_sponge_max_soc_100() -> None:
 
 
 def test_non_solar_charge_kinds_have_no_max_soc() -> None:
-    """ForceCharge / ForceDischarge / Backup / standard SelfUse must NOT emit maxSoc —
-    only solar_charge does. Defensive against accidentally capping other modes."""
+    """ForceCharge / ForceDischarge / standard SelfUse must NOT emit maxSoc.
+    Only solar_charge (cap=100) and negative_hold (cap=floor, 2026-06-07 pin,
+    tested separately) do. Defensive against accidentally capping other modes."""
     t0 = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
-    for kind in ("cheap", "negative", "standard", "negative_hold", "peak_export"):
+    for kind in ("cheap", "negative", "standard", "peak_export"):
         s = HalfHourSlot(
             start_utc=t0,
             end_utc=t0 + timedelta(minutes=30),

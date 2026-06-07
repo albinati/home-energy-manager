@@ -84,6 +84,20 @@ two control-side features ship **off by default** (`DAIKIN_LWT_PREHEAT_ENABLED`,
   across the 6 call sites; scenario variance from the spread. Kill-switch
   `LP_RESIDUAL_PROFILE_V2`; Insights "when you spend the most" heatmap.
 
+### Added — pin maxSoc on negative-hold so solar can't waste paid-import headroom (2026-06-07)
+- **`negative_hold` (Backup) slots now emit `maxSoc = reserve floor`** so PV can't
+  trickle-charge the battery during the hold phase of a negative-price window
+  (Tracked by #498). Live data showed Backup with `maxSoc=None` let free solar
+  creep the battery 10→21% mid-window — banking free PV at the exact time you'd
+  rather be *paid* to import. With the pin, surplus PV exports at SEG and the
+  battery refills from the paid force-charge instead. Pure post-solve Fox dispatch
+  mapping (`_slot_fox_tuple`) — the LP objective is unchanged. **The Fox wiki says
+  Backup normally lets PV charge and the maxSoc-pin is undocumented → it must be
+  empirically confirmed to clip PV on the H1.** Gated + kill-switch
+  `LP_NEGATIVE_HOLD_PIN_MAXSOC` (default true). No simultaneous import/export and
+  no PV curtailment exist on this inverter (researched) — this is the one real
+  lever.
+
 ### Added — proactive appliance load nudge (2026-06-07)
 - **Nudge the user to LOAD the washer/dishwasher for an upcoming negative/cheap
   window** (Tracked by #498). HEM can't load the machine (the physical

@@ -368,7 +368,19 @@ def _slot_fox_tuple(
         # Fox "Backup" work mode = native "hold battery": no discharge, no grid
         # charge. Directly enforces the LP's dis = 0 constraint during negative
         # slots when chg is also zero (battery saturated or PV alone suffices).
-        return ("Backup", None, None, min_r, None)
+        #
+        # 2026-06-07: pin maxSoc to the reserve floor so SOLAR can't trickle-charge
+        # the battery during the hold (Backup otherwise lets PV charge — confirmed
+        # live: the battery crept 10→21% on free solar mid-negative-window). That
+        # surplus PV should EXPORT @ SEG and the battery refill from the PAID
+        # force-charge instead. Gated + kill-switch; the maxSoc-clips-PV-in-Backup
+        # behaviour is unverified on the H1 → confirm before fully trusting.
+        hold_max = (
+            int(min_r)
+            if getattr(config, "LP_NEGATIVE_HOLD_PIN_MAXSOC", False)
+            else None
+        )
+        return ("Backup", None, None, min_r, hold_max)
     return ("SelfUse", None, None, min_r, None)
 
 
