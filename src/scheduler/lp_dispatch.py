@@ -1174,9 +1174,11 @@ def write_daikin_from_lp_plan(
         # covers today's + tomorrow's cycles, and the past-date guard drops
         # yesterday's — so a negative-price boost that lands in the live cycle's
         # still-future tail (e.g. an 04:00→12:00 UTC paid window) is silently
-        # lost on every overnight re-plan. Re-emit just that cycle's boost rows,
-        # clipped to the LP horizon start (= the range-clear floor, so the next
-        # re-plan idempotently replaces them). No-op when no live negative window.
+        # lost on every overnight re-plan. Re-emit just that cycle's boost rows
+        # at their natural window start (a stable upsert key, so re-plans refresh
+        # the one row rather than accumulate a fresh one per advancing clip).
+        # ``as_of`` only drops windows that have fully ended. No-op when no live
+        # negative window.
         now_local_t = datetime.now(tz_local_local)
         if now_local_t.hour < warmup_hour:
             live_anchor = now_local_t.date() - timedelta(days=1)
@@ -1195,16 +1197,12 @@ def write_daikin_from_lp_plan(
             except Exception as _e:
                 logger.debug("dhw_policy: live-cycle import rates unavailable: %s", _e)
                 agile_live = None
-            clip_from = (
-                plan.slot_starts_utc[0] if plan.slot_starts_utc
-                else datetime.now(_UTC_T)
-            )
             try:
                 rows_total += dhw_policy.write_daily_tank_schedule(
                     target_date_local=live_anchor,
                     agile_rates=agile_live,
                     clear_existing=False,  # cleared widely above
-                    boosts_only_from=clip_from,
+                    boosts_only_as_of=datetime.now(_UTC_T),
                 )
             except Exception as e:
                 logger.warning("dhw_policy: live-cycle boost recovery failed: %s", e)
