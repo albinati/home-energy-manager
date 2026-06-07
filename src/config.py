@@ -512,6 +512,31 @@ class Config:
     APPLIANCE_DEFAULT_BASE_LOAD_KW: float = float(
         os.getenv("APPLIANCE_DEFAULT_BASE_LOAD_KW", "0.4")
     )
+    # --- Proactive appliance load nudge (2026-06-07) ---
+    # HEM can't load the machine (the physical Smart-Control button is the consent
+    # gate), so when a notably-cheap / NEGATIVE Agile window is upcoming and a
+    # registered appliance is idle, it pushes ONE high-signal Telegram nudge to
+    # load it + Smart-Control, with a recommended run window. Fires when day-ahead
+    # rates land (octopus_fetch); debounced once per appliance per window.
+    APPLIANCE_WINDOW_NUDGE_ENABLED: bool = (
+        os.getenv("APPLIANCE_WINDOW_NUDGE_ENABLED", "true").strip().lower()
+        in ("true", "1", "yes", "on")
+    )
+    # Push threshold: empty → push on NEGATIVE windows only (high signal, aligns
+    # with the "negative always pings" rule). Set a number (pence) to also push
+    # on windows whose mean ≤ that — more nudges, more push load.
+    APPLIANCE_WINDOW_NUDGE_PRICE_THRESHOLD_P: str = (
+        os.getenv("APPLIANCE_WINDOW_NUDGE_PRICE_THRESHOLD_P") or ""
+    )
+    # How far ahead (hours) to scan for a candidate window.
+    APPLIANCE_WINDOW_NUDGE_HORIZON_HOURS: float = float(
+        os.getenv("APPLIANCE_WINDOW_NUDGE_HORIZON_HOURS", "24")
+    )
+    # Cheap-window threshold (pence) for the PULL morning/night brief suggestion
+    # line — independent of the push threshold; covers cheap-but-not-negative.
+    APPLIANCE_WINDOW_NUDGE_BRIEF_THRESHOLD_P: float = float(
+        os.getenv("APPLIANCE_WINDOW_NUDGE_BRIEF_THRESHOLD_P", "8.0")
+    )
 
     # Max tank temperature (°C) — the physical ceiling for EVERYTHING: the LP
     # tank-variable bound, the soft per-slot ceiling, every setpoint we command,

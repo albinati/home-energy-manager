@@ -67,6 +67,7 @@ def build_morning_payload() -> str:
         ("temperature", _temperature_range_today_line, (today, tz)),
         ("day_cost_forecast", _day_cost_forecast_line, (today, tz)),
         ("now_state", _now_state_line, ()),
+        ("appliance_window", _appliance_window_suggestion_line, (tz,)),
     ):
         result = _safe_call(label, fn, *args)
         if result:
@@ -89,6 +90,39 @@ def build_morning_payload() -> str:
         lines.extend(["", f"**Tomorrow ({today + timedelta(days=1)}):** {tomorrow_peaks}"])
 
     return "\n".join(lines)
+
+
+def _appliance_window_suggestion_line(tz: ZoneInfo) -> str | None:
+    """Brief (pull) suggestion: if a registered+idle appliance faces an upcoming
+    cheap window (≤ ``APPLIANCE_WINDOW_NUDGE_BRIEF_THRESHOLD_P``), suggest loading
+    it. Covers cheap-but-not-negative windows (the push path is negative-only).
+    Returns one line or ``None`` (no appliance / no fitting cheap window).
+    """
+    try:
+        from ..scheduler import appliance_dispatch
+        now = datetime.now(UTC)
+        thr = float(getattr(config, "APPLIANCE_WINDOW_NUDGE_BRIEF_THRESHOLD_P", 8.0))
+        horizon_h = float(getattr(config, "APPLIANCE_WINDOW_NUDGE_HORIZON_HOURS", 24))
+        tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
+        rates = (
+            db.get_rates_for_period(tariff, now, now + timedelta(hours=horizon_h))
+            if tariff else None
+        )
+        sugg = appliance_dispatch.compute_appliance_window_suggestions(
+            now, rates, max_price_p=thr, strict=False,
+        )
+    except Exception:  # pragma: no cover — diagnostic line must never break the brief
+        return None
+    if not sugg:
+        return None
+    s = sugg[0]
+    start = s["recommended_start_utc"].astimezone(tz).strftime("%H:%M")
+    end = s["recommended_end_utc"].astimezone(tz).strftime("%H:%M")
+    tag = "paga" if s["is_negative"] else "barata"
+    return (
+        f"🧺 Janela {tag} {start}–{end} (média {s['avg_price_pence']:.1f}p) — "
+        f"carregue a {s['appliance_name']} + Smart Control (prazo {s['deadline_local']})."
+    )
 
 
 def _pv_bias_line() -> str | None:
@@ -413,6 +447,11 @@ def build_night_payload() -> str:
     )
     if peaks:
         lines.extend(["", f"**Heads-up for tomorrow:** {peaks}"])
+
+    # ── Appliance load suggestion (cheap window ahead — load it tonight) ─
+    appliance_line = _safe_call("appliance_window", _appliance_window_suggestion_line, tz)
+    if appliance_line:
+        lines.extend(["", appliance_line])
 
     return "\n".join(lines)
 

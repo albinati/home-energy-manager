@@ -61,3 +61,16 @@ def _default_daikin_active_for_tests(monkeypatch):
     monkeypatch.setenv("DAIKIN_CONTROL_MODE", "active")
     from src.runtime_settings import clear_cache
     clear_cache()
+
+
+@pytest.fixture(autouse=True)
+def _default_legionella_standoff_off_for_tests(monkeypatch):
+    """2026-06-07: the legionella tank stand-off (prod default ON) skips tank
+    writes during a Sunday 11:00–13:00 UTC window. Legacy tank-reconcile tests
+    use ``datetime.now(UTC)`` as ``now`` and would intermittently fail when the
+    suite happens to run inside that window. Default it OFF for tests; the
+    dedicated ``test_legionella_standoff`` suite re-enables it explicitly.
+    """
+    monkeypatch.setattr(
+        "src.config.config.DHW_LEGIONELLA_STANDOFF_ENABLED", False, raising=False,
+    )

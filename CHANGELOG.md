@@ -84,6 +84,21 @@ two control-side features ship **off by default** (`DAIKIN_LWT_PREHEAT_ENABLED`,
   across the 6 call sites; scenario variance from the spread. Kill-switch
   `LP_RESIDUAL_PROFILE_V2`; Insights "when you spend the most" heatmap.
 
+### Added — proactive appliance load nudge (2026-06-07)
+- **Nudge the user to LOAD the washer/dishwasher for an upcoming negative/cheap
+  window** (Tracked by #498). HEM can't load the machine (the physical
+  Smart-Control button is the consent gate), so when day-ahead rates land
+  (`octopus_fetch`) and a registered appliance is *idle*, it pushes ONE Telegram
+  nudge with the recommended run window, deadline, and est. cost (negative = paid
+  to run). Debounced once per appliance per window via `runtime_settings`
+  (restart-safe). Negative-only push by default; the morning/night brief carries
+  a softer cheap-window suggestion line (pull). Reuses the existing cheapest-
+  window picker + deadline roll — both already prefer negative slots; the only
+  gap was the heads-up. New `AlertType.APPLIANCE_WINDOW_NUDGE`; knobs
+  `APPLIANCE_WINDOW_NUDGE_{ENABLED,PRICE_THRESHOLD_P,HORIZON_HOURS,BRIEF_THRESHOLD_P}`.
+  Note: the deadline already rolls to tomorrow when passed, so a stale 07:00
+  deadline was never the blocker — the missing load + nudge was.
+
 ### Added — legionella tank stand-off (2026-06-07)
 - **HEM stands off the DHW tank during the firmware's weekly thermal-shock
   cycle** (Tracked by #498). The Onecta firmware owns the tank during legionella,
