@@ -33,6 +33,9 @@ import type {
   WorkbenchPromoteResult,
   TodayCumulativeResponse,
   ActionLogResponse,
+  ApplianceSuggestionsResponse,
+  ApplianceJobsResponse,
+  AppliancesResponse,
 } from "./types";
 
 /* ----- Real-time / cockpit ----- */
@@ -114,6 +117,17 @@ export const getEnergyMonthly = (month: string) =>
   getJson<MonthlyEnergy>(`/energy/monthly?month=${encodeURIComponent(month)}`);
 export const getEnergyTodayCumulative = () =>
   getJson<TodayCumulativeResponse>("/energy/today-cumulative");
+export const getApplianceSuggestions = () =>
+  getJson<ApplianceSuggestionsResponse>("/appliances/suggestions");
+export const getApplianceJobs = (opts?: { status?: string; limit?: number }) => {
+  const p = new URLSearchParams();
+  if (opts?.status) p.set("status", opts.status);
+  if (opts?.limit != null) p.set("limit", String(opts.limit));
+  const qs = p.toString();
+  return getJson<ApplianceJobsResponse>(`/appliances/jobs${qs ? `?${qs}` : ""}`);
+};
+export const getAppliances = () =>
+  getJson<AppliancesResponse>("/appliances");
 export const getActionLog = (opts?: { device?: string; days?: number; limit?: number }) => {
   const p = new URLSearchParams();
   if (opts?.device) p.set("device", opts.device);

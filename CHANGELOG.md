@@ -84,6 +84,18 @@ two control-side features ship **off by default** (`DAIKIN_LWT_PREHEAT_ENABLED`,
   across the 6 call sites; scenario variance from the spread. Kill-switch
   `LP_RESIDUAL_PROFILE_V2`; Insights "when you spend the most" heatmap.
 
+### Added — hero "saved today" + appliance-schedule widget (2026-06-07, UI Phase 2)
+- **Hero shows today's real-money savings** at a glance, independent of the period
+  selector: "Hoje: crédito £X · economizou £Y (Z% abaixo do fixo)". Reuses
+  `compute_daily_pnl` — `/api/v1/energy/today-cumulative` now also returns
+  `realised_net_cost_gbp` + `delta_vs_{fixed,svt}_real_gbp` + `*_shadow_real_gbp`.
+- **New Appliances widget** (medium, next to Heating) — at a glance: running /
+  scheduled (window + avg price, from `/appliances/jobs`) / idle-with-a-cheap-
+  window-ahead ("janela paga|barata HH:MM — carregue + Smart Control", from a new
+  read-only `GET /api/v1/appliances/suggestions` wrapping
+  `compute_appliance_window_suggestions`) / register hint when none. Best-effort:
+  degrades to empty when SmartThings/Fox unconfigured.
+
 ### Changed — cockpit performance: server-side TTL caches + Cache-Control (2026-06-07)
 - **The cockpit loaded slowly** because `/weather` + `/pv/today` hit Open-Meteo and
   `/energy/period` (day/week) hit Fox ESS on EVERY request with no server-side cache

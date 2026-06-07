@@ -3061,6 +3061,15 @@ async def energy_today_cumulative():
         "export_kwh": pnl.get("export_kwh", 0.0),
         "import_cost_gbp": pnl.get("import_cost_gbp", 0.0),
         "export_revenue_gbp": pnl.get("export_revenue_gbp", 0.0),
+        # Real-money savings so the hero can show "saved £X today (Y% off)".
+        # net = realised net cost incl. standing (negative = a credit/paid day);
+        # delta_* = real money saved vs the fixed/SVT shadow (positive = Agile
+        # won); *_shadow_real = the counterfactual cost (for the % off).
+        "realised_net_cost_gbp": pnl.get("realised_net_cost_gbp", 0.0),
+        "delta_vs_fixed_real_gbp": pnl.get("delta_vs_fixed_real_gbp", 0.0),
+        "delta_vs_svt_real_gbp": pnl.get("delta_vs_svt_real_gbp", 0.0),
+        "fixed_shadow_real_gbp": pnl.get("fixed_shadow_real_gbp", 0.0),
+        "svt_shadow_real_gbp": pnl.get("svt_shadow_real_gbp", 0.0),
     }
 
 

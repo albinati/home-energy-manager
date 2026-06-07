@@ -1,4 +1,4 @@
-import type { MetricsResponse, CockpitNow, AgileTodayResponse, MonthlyEnergy, PeriodInsightsResponse } from "../../lib/types";
+import type { MetricsResponse, CockpitNow, AgileTodayResponse, MonthlyEnergy, PeriodInsightsResponse, TodayCumulativeResponse } from "../../lib/types";
 import { gbp, kwh } from "../../lib/format";
 import { useAnimatedNumber } from "../../lib/useAnimatedNumber";
 import { isCurrentPeriod, periodLabel, type PeriodState } from "../../lib/period";
@@ -15,6 +15,8 @@ interface HeroProps {
   period: PeriodInsightsResponse | null;
   periodState: PeriodState;
   periodLoading: boolean;
+  // Today's real-money cumulative (for the always-current "saved today" chip).
+  todayCum?: TodayCumulativeResponse | null;
 }
 
 // The hero answers ONE question for the SELECTED period: how is it going on
@@ -27,9 +29,19 @@ interface HeroProps {
 //   4. Today so far (only when viewing the current period) — explicit estimate
 //   5. Lifetime totals on Agile
 //   6. The cost-composition chart for the selected period
-export function Hero({ metrics, cockpit, agile, monthly, period, periodState, periodLoading }: HeroProps) {
+export function Hero({ metrics, cockpit, agile, monthly, period, periodState, periodLoading, todayCum }: HeroProps) {
   const isNow = isCurrentPeriod(periodState);
   const label = periodLabel(periodState);
+
+  // --- Always-today real-money savings (independent of the period selector) ---
+  // saved = £ vs the fixed-tariff shadow on the same metered kWh; pct = how much
+  // of that fixed bill we erased (>100% on a paid/negative day → "100+").
+  const savedToday = todayCum?.delta_vs_fixed_real_gbp ?? null;
+  const netToday = todayCum?.realised_net_cost_gbp ?? null;
+  const shadowToday = todayCum?.fixed_shadow_real_gbp ?? null;
+  const pctOffToday = (savedToday != null && shadowToday != null && shadowToday > 0)
+    ? Math.round((savedToday / shadowToday) * 100)
+    : null;
 
   // --- The selected period, real money (NET, incl standing, measured grid) ---
   const periodNet = period?.cost?.net_cost_pounds ?? null;
@@ -121,6 +133,26 @@ export function Hero({ metrics, cockpit, agile, monthly, period, periodState, pe
             {curImportP != null && <span>import <strong>{curImportP.toFixed(1)}p</strong></span>}
             {curExportP != null && <span>· export <strong>{curExportP.toFixed(1)}p</strong></span>}
             {socPct != null && <span>· battery <strong>{Math.round(socPct)}%</strong></span>}
+          </div>
+        )}
+
+        {savedToday != null && (savedToday > 0.005 || (netToday != null && netToday < 0)) && (
+          <div class="hero-savedtoday" title="Economia real de hoje vs a tarifa fixa — sobre o consumo medido, incluindo standing charge.">
+            <span class="hero-savedtoday-ico" aria-hidden="true">💚</span>
+            <span>
+              Hoje:&nbsp;
+              {netToday != null && netToday < 0
+                ? <strong class="hero-strong-pos">crédito {gbp(Math.abs(netToday))}</strong>
+                : netToday != null ? <strong>{gbp(netToday)}</strong> : null}
+              {savedToday > 0.005 && (
+                <>&nbsp;·&nbsp;economizou&nbsp;
+                  <strong class="hero-strong-pos">{gbp(savedToday)}</strong>
+                  {pctOffToday != null && pctOffToday > 0 && (
+                    <>&nbsp;({pctOffToday > 100 ? "100+" : pctOffToday}% abaixo do {fixedLabel})</>
+                  )}
+                </>
+              )}
+            </span>
           </div>
         )}
 

@@ -18,6 +18,9 @@ import {
   getDhwSchedule,
   getHeatingPlan,
   getEnergyTodayCumulative,
+  getApplianceSuggestions,
+  getApplianceJobs,
+  getAppliances,
 } from "../lib/endpoints";
 import { Link } from "wouter-preact";
 import { Widget } from "../components/common/Widget";
@@ -29,6 +32,7 @@ import { LivePowerWidget } from "../components/cockpit/LivePowerWidget";
 import { Hero } from "../components/home/Hero";
 import { HeatingWidget } from "../components/home/HeatingWidget";
 import { WeatherWidget } from "../components/home/WeatherWidget";
+import { ApplianceWidget } from "../components/home/ApplianceWidget";
 import { gbp } from "../lib/format";
 import type { MonthlyEnergy } from "../lib/types";
 import "../components/home/home.css";
@@ -116,6 +120,12 @@ export default function Landing() {
   const heatingPlan = usePoll(getHeatingPlan, 5 * 60_000);
   // Today's grid import/export so far (kWh + real £, credit on negative slots).
   const todayCum = usePoll(getEnergyTodayCumulative, 60_000);
+  // Appliance status: registered list (once) + active jobs + cheapest-window
+  // suggestions for idle machines. All optional/best-effort (SmartThings may be
+  // unconfigured → the widget shows an empty/register hint).
+  const appliances = useFetch(getAppliances, []);
+  const applianceJobs = usePoll(() => getApplianceJobs({ limit: 20 }), 5 * 60_000);
+  const applianceSug = usePoll(getApplianceSuggestions, 5 * 60_000);
   // The shared period navigator drives the Hero headline + cost breakdown +
   // energy chart + tariff comparison. Re-fetch whenever the selection changes.
   const period = usePeriod();
@@ -151,7 +161,7 @@ export default function Landing() {
       <PeriodNavigator />
       <Hero metrics={metrics.data} metricsLoading={metrics.loading} cockpit={data} agile={agile.data} monthly={monthly.data}
             period={periodInsights.data} periodState={period}
-            periodLoading={periodInsights.loading} />
+            periodLoading={periodInsights.loading} todayCum={todayCum.data} />
 
       {/* ── WEATHER (ambient context) ──────────────────────────────── */}
       <div class="widget-grid widget-band">
@@ -171,6 +181,10 @@ export default function Landing() {
         <Widget title="Heating" icon="♨" tone="thermal" size="medium">
           <HeatingWidget state={s} daikin={daikin.data} daikinQuota={daikinQuota.data} report={report.data} weather={weather.data} execution={execution.data}
                          onRefresh={() => { void daikin.refresh(); void daikinQuota.refresh(); }} />
+        </Widget>
+
+        <Widget title="Appliances" icon="🧺" tone="power" size="medium">
+          <ApplianceWidget suggestions={applianceSug.data?.suggestions} jobs={applianceJobs.data?.jobs} appliances={appliances.data?.appliances} />
         </Widget>
       </div>
 
