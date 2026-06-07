@@ -215,6 +215,53 @@ async def list_jobs(
     }
 
 
+@router.get("/appliances/suggestions")
+async def appliance_suggestions() -> dict[str, Any]:
+    """Cheapest upcoming run window per enabled + IDLE appliance, for the cockpit
+    widget ("Sem ciclo — próxima janela barata HH:MM"). Read-only wrapper over
+    ``compute_appliance_window_suggestions`` using the brief cheap threshold so it
+    surfaces cheap-but-not-negative windows too. Appliances with an active job are
+    already excluded by the compute (they're shown via /appliances/jobs instead).
+    DB-only (no SmartThings / external call) → fast.
+    """
+    import asyncio
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+
+    now = _dt.now(_UTC)
+    thr = float(getattr(config, "APPLIANCE_WINDOW_NUDGE_BRIEF_THRESHOLD_P", 8.0))
+    horizon_h = float(getattr(config, "APPLIANCE_WINDOW_NUDGE_HORIZON_HOURS", 24))
+    tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
+    try:
+        rates = db.get_rates_for_period(
+            tariff, now, now + _td(hours=max(1.0, horizon_h))
+        ) if tariff else None
+    except Exception:
+        rates = None
+    try:
+        sugg = await asyncio.to_thread(
+            appliance_dispatch.compute_appliance_window_suggestions,
+            now, rates, max_price_p=thr, strict=False,
+        )
+    except Exception as e:  # never break the cockpit on a suggestion glitch
+        logger.debug("appliance suggestions failed: %s", e)
+        sugg = []
+    out = [{
+        "appliance_id": s["appliance_id"],
+        "appliance_name": s["appliance_name"],
+        "recommended_start_utc": s["recommended_start_utc"].isoformat(),
+        "recommended_end_utc": s["recommended_end_utc"].isoformat(),
+        "deadline_local": s["deadline_local"],
+        "duration_minutes": s["duration_minutes"],
+        "avg_price_pence": s["avg_price_pence"],
+        "est_kwh": s["est_kwh"],
+        "est_cost_pence": s["est_cost_pence"],
+        "is_negative": s["is_negative"],
+    } for s in sugg]
+    return {"suggestions": out, "count": len(out)}
+
+
 @router.post("/appliances/jobs/{job_id}/cancel")
 async def cancel_job(job_id: int) -> dict[str, Any]:
     job = db.get_appliance_job(job_id)

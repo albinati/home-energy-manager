@@ -505,6 +505,59 @@ export interface TodayCumulativeResponse {
   export_kwh: number;
   import_cost_gbp: number;       // <0 = we were paid to import (credit)
   export_revenue_gbp: number;
+  // Real-money savings so far today (for the hero "saved £X today" chip).
+  realised_net_cost_gbp?: number;       // net incl. standing; <0 = a credit/paid day
+  delta_vs_fixed_real_gbp?: number;     // £ saved vs the fixed-tariff shadow (>0 = Agile won)
+  delta_vs_svt_real_gbp?: number;       // £ saved vs SVT shadow
+  fixed_shadow_real_gbp?: number;       // counterfactual cost on fixed (for the % off)
+  svt_shadow_real_gbp?: number;
+}
+
+// GET /appliances/suggestions — cheapest upcoming run window per idle appliance.
+export interface ApplianceSuggestion {
+  appliance_id: number;
+  appliance_name: string;
+  recommended_start_utc: string;
+  recommended_end_utc: string;
+  deadline_local: string;
+  duration_minutes: number;
+  avg_price_pence: number;
+  est_kwh: number;
+  est_cost_pence: number;        // signed: <0 = paid to run
+  is_negative: boolean;
+}
+export interface ApplianceSuggestionsResponse {
+  suggestions: ApplianceSuggestion[];
+  count: number;
+}
+
+// GET /appliances/jobs — a scheduled/running/completed appliance cycle.
+export interface ApplianceJob {
+  id: number;
+  appliance_id: number;
+  status: string;                // scheduled | running | completed | cancelled | …
+  planned_start_utc: string | null;
+  planned_end_utc: string | null;
+  avg_price_pence: number | null;
+  duration_minutes: number | null;
+  deadline_utc: string | null;
+}
+export interface ApplianceJobsResponse {
+  jobs: ApplianceJob[];
+  count: number;
+}
+
+// GET /appliances — registered appliances.
+export interface Appliance {
+  id: number;
+  name: string;
+  device_type: string;
+  enabled: boolean;
+  effective_typical_kw?: number;
+  deadline_local_time?: string;
+}
+export interface AppliancesResponse {
+  appliances: Appliance[];
 }
 
 // One executed action from action_log — GET /action-log.
