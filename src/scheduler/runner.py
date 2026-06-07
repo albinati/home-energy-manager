@@ -1158,7 +1158,13 @@ def bulletproof_pv_telemetry_job() -> None:
     if get_scheduler_paused():
         return
     try:
-        rt = get_cached_realtime()
+        # This job is the canonical Fox-snapshot refresher: force a read older than
+        # FOX_SNAPSHOT_REFRESH_MAX_AGE_SECONDS so the cockpit serves a snapshot fresh
+        # to the telemetry cadence (PV_TELEMETRY_INTERVAL_MINUTES) WITHOUT the API
+        # reads ever fetching on the request path (they use the longer default TTL).
+        rt = get_cached_realtime(
+            max_age_seconds=int(config.FOX_SNAPSHOT_REFRESH_MAX_AGE_SECONDS)
+        )
     except Exception as e:
         logger.debug("pv telemetry: realtime unavailable: %s", e)
         return

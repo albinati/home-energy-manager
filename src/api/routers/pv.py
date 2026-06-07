@@ -87,8 +87,9 @@ async def get_pv_today(date: str | None = None) -> dict[str, Any]:
         from ... import weather
 
         # Open-Meteo HTTP — offload so it doesn't block the event loop and
-        # serialize the other dashboard requests behind it.
-        fc = await asyncio.to_thread(weather.fetch_forecast, hours=48)
+        # serialize the other dashboard requests behind it. TTL-cached so the
+        # cockpit's /weather + /pv/today share one fetch.
+        fc = await asyncio.to_thread(weather.fetch_forecast_cached, hours=48)
         series = weather.forecast_to_lp_inputs(fc, slot_starts, pv_scale=1.0)
         pv = series.pv_kwh_per_slot
         for i in range(min(_SLOTS_PER_DAY, len(pv))):

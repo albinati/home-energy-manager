@@ -286,6 +286,36 @@ app.add_middleware(
     enabled=lambda: bool(config.HEM_UI_AUTH_REQUIRED),
 )
 
+
+# Short browser Cache-Control on the read-heavy cockpit GETs so a hard refresh /
+# tab-return doesn't re-hit every endpoint. `private` (bearer-gated, per-user) +
+# short max-age; the SPA's own polling still drives live updates. Server-side TTL
+# caches already make the misses cheap.
+_CACHE_CONTROL_MAX_AGE: dict[str, int] = {
+    "/api/v1/cockpit/now": 15,
+    "/api/v1/metrics": 120,
+    "/api/v1/weather": 900,
+    "/api/v1/pv/today": 180,
+    "/api/v1/energy/today-cumulative": 30,
+    "/api/v1/daikin/status": 120,
+    "/api/v1/daikin/heating-plan": 120,
+    "/api/v1/scheduler/timeline": 120,
+}
+
+
+@app.middleware("http")
+async def _cockpit_cache_headers(request, call_next):
+    resp = await call_next(request)
+    try:
+        if request.method == "GET" and resp.status_code == 200:
+            ma = _CACHE_CONTROL_MAX_AGE.get(request.url.path)
+            if ma is not None and "cache-control" not in resp.headers:
+                resp.headers["Cache-Control"] = f"private, max-age={ma}"
+    except Exception:
+        pass
+    return resp
+
+
 app.include_router(energy_providers_router.router)
 app.include_router(workbench_router.router)
 app.include_router(dispatch_router.router)
@@ -446,9 +476,9 @@ async def api_v1_weather():
 
 
 def _api_v1_weather_sync():
-    from ..weather import fetch_forecast
+    from ..weather import fetch_forecast_cached
 
-    fc = fetch_forecast(hours=48)
+    fc = fetch_forecast_cached(hours=48)
     out = [{
         "time": f.time_utc.isoformat(),
         "temp_c": f.temperature_c,
@@ -2769,6 +2799,28 @@ async def energy_monthly(month: str):
     )
 
 
+# In-process TTL cache for day/week period insights (Fox ESS HTTP). Month already
+# self-caches (get_cached_energy_month, 1 h). Keyed on the full param tuple; turns
+# repeat period-nav clicks into instant cache hits. Short TTL → ≤ minutes stale.
+_period_insights_cache: dict[tuple, tuple[float, object]] = {}
+
+
+def _get_period_insights_cached(period, date_str=None, month_str=None, year=None):
+    import time as _t
+    ttl = int(getattr(config, "ENERGY_PERIOD_CACHE_TTL_SECONDS", 1200))
+    if period not in ("day", "week") or ttl <= 0:
+        return get_period_insights(period, date_str=date_str, month_str=month_str, year=year)
+    key = (period, date_str, month_str, year)
+    now = _t.monotonic()
+    hit = _period_insights_cache.get(key)
+    if hit and (now - hit[0]) < ttl:
+        return hit[1]
+    out = get_period_insights(period, date_str=date_str, month_str=month_str, year=year)
+    if out is not None:
+        _period_insights_cache[key] = (now, out)
+    return out
+
+
 @app.get("/api/v1/energy/period", response_model=PeriodInsightsResponse)
 async def energy_period(
     period: str,
@@ -2797,7 +2849,7 @@ async def energy_period(
     if period in ("day", "week") and (len(date) != 10 or date[4] != "-" or date[7] != "-"):
         raise HTTPException(status_code=400, detail="Use date=YYYY-MM-DD")
     try:
-        out = await asyncio.to_thread(get_period_insights, period, date_str=date, month_str=month, year=year)
+        out = await asyncio.to_thread(_get_period_insights_cached, period, date, month, year)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -2920,7 +2972,7 @@ async def energy_report(
     if period in ("day", "week") and date and (len(date) != 10 or date[4] != "-" or date[7] != "-"):
         raise HTTPException(status_code=400, detail="Use date=YYYY-MM-DD")
     try:
-        out = await asyncio.to_thread(get_period_insights, period, date_str=date, month_str=month, year=year)
+        out = await asyncio.to_thread(_get_period_insights_cached, period, date, month, year)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:

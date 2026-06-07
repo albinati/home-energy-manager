@@ -84,6 +84,22 @@ two control-side features ship **off by default** (`DAIKIN_LWT_PREHEAT_ENABLED`,
   across the 6 call sites; scenario variance from the spread. Kill-switch
   `LP_RESIDUAL_PROFILE_V2`; Insights "when you spend the most" heatmap.
 
+### Changed — cockpit performance: server-side TTL caches + Cache-Control (2026-06-07)
+- **The cockpit loaded slowly** because `/weather` + `/pv/today` hit Open-Meteo and
+  `/energy/period` (day/week) hit Fox ESS on EVERY request with no server-side cache
+  (0.5–2 s blocking HTTP each). Added in-process TTL caches (no Redis — single
+  container): a shared forecast cache (`weather.fetch_forecast_cached`, 15 min) feeds
+  both `/weather` and `/pv/today` from one fetch; a day/week period-insights cache
+  (20 min, mirrors the existing 1 h month cache) makes period-nav instant. Plus short
+  `Cache-Control` (`private, max-age=…`) on the read-heavy cockpit GETs so a hard
+  refresh / tab-return doesn't re-hit everything. Knobs
+  `WEATHER_FORECAST_CACHE_TTL_SECONDS`, `ENERGY_PERIOD_CACHE_TTL_SECONDS`.
+- **Better Fox realtime freshness without a request-path fetch:** the pv-telemetry
+  background job is now the canonical Fox-snapshot refresher (forces a read older than
+  `FOX_SNAPSHOT_REFRESH_MAX_AGE_SECONDS`=60 s), so lowering `PV_TELEMETRY_INTERVAL_MINUTES`
+  (e.g. 5→2) tightens the cockpit snapshot to ~2 min while the API reads stay cache-only
+  (never fetch on the request path). ~720 Fox calls/day, well under budget; zero Daikin impact.
+
 ### Added — pin maxSoc on negative-hold so solar can't waste paid-import headroom (2026-06-07)
 - **`negative_hold` (Backup) slots now emit `maxSoc = reserve floor`** so PV can't
   trickle-charge the battery during the hold phase of a negative-price window

@@ -380,6 +380,37 @@ def fetch_forecast(
     return fetch_forecast_snapshot(lat=lat, lon=lon, hours=hours).forecast
 
 
+# In-process TTL cache for the forecast fetch — keyed on ``hours`` (lat/lon are
+# config-pinned). Shared by /weather + /pv/today so the cockpit doesn't make two
+# blocking Open-Meteo calls per load. Open-Meteo is hourly-deterministic, so a
+# ~15 min cache is safe; the LP/heartbeat keep using ``fetch_forecast`` directly.
+_forecast_cache: dict[int, tuple[float, list[HourlyForecast]]] = {}
+
+
+def fetch_forecast_cached(
+    lat: str | None = None,
+    lon: str | None = None,
+    hours: int = 48,
+    ttl_seconds: int | None = None,
+) -> list[HourlyForecast]:
+    """TTL-cached :func:`fetch_forecast` for the cockpit API endpoints. Serves the
+    last good value on a failed/empty refresh rather than an empty list."""
+    import time as _t
+    if ttl_seconds is None:
+        ttl_seconds = int(getattr(config, "WEATHER_FORECAST_CACHE_TTL_SECONDS", 900))
+    if ttl_seconds <= 0:
+        return fetch_forecast(lat=lat, lon=lon, hours=hours)
+    now = _t.monotonic()
+    hit = _forecast_cache.get(hours)
+    if hit and hit[1] and (now - hit[0]) < ttl_seconds:
+        return hit[1]
+    fresh = fetch_forecast(lat=lat, lon=lon, hours=hours)
+    if fresh:
+        _forecast_cache[hours] = (now, fresh)
+        return fresh
+    return hit[1] if hit else fresh  # serve stale on a failed fetch
+
+
 def fetch_forecast_snapshot(
     lat: str | None = None,
     lon: str | None = None,
