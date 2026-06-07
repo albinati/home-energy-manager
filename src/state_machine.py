@@ -323,6 +323,9 @@ def _reconcile_daikin_actions(
                         device="daikin",
                         within_hours=float(config.USER_OVERRIDE_RESPECT_HOURS),
                         now_utc=now_utc,
+                        respect_until_window_end=bool(
+                            config.USER_OVERRIDE_RESPECT_UNTIL_WINDOW_END
+                        ),
                     )
                     if src is not None and src.get("id") != aid:
                         src_params = src.get("params") or {}
@@ -557,6 +560,9 @@ def _check_tank_power_drift(
             device="daikin",
             within_hours=float(config.USER_OVERRIDE_RESPECT_HOURS),
             now_utc=now_utc,
+            respect_until_window_end=bool(
+                config.USER_OVERRIDE_RESPECT_UNTIL_WINDOW_END
+            ),
         )
         if src is not None:
             src_params = src.get("params") or {}
@@ -679,6 +685,9 @@ def _check_lwt_offset_drift(
             device="daikin",
             within_hours=float(config.USER_OVERRIDE_RESPECT_HOURS),
             now_utc=now_utc,
+            respect_until_window_end=bool(
+                config.USER_OVERRIDE_RESPECT_UNTIL_WINDOW_END
+            ),
         )
         if src is not None:
             src_params = src.get("params") or {}

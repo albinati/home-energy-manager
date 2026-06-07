@@ -472,6 +472,81 @@ def test_find_recent_user_override_filters_by_device(monkeypatch):
         assert result["id"] == rid
 
 
+# ── 2026-06-07: respect_until_window_end ──────────────────────────────────────
+
+def _seed_row_window(conn, *, start_offset_seconds: int, end_offset_seconds: int,
+                     params: dict) -> int:
+    """Insert a daikin row with explicit start/end offsets (seconds, signed)."""
+    now = datetime.now(UTC)
+    start = (now + timedelta(seconds=start_offset_seconds)).isoformat()
+    end = (now + timedelta(seconds=end_offset_seconds)).isoformat()
+    conn.execute(
+        """INSERT INTO action_schedule
+           (date, start_time, end_time, device, action_type, params, status, created_at)
+           VALUES (?, ?, ?, 'daikin', 'tank_negative_boost', ?, 'active', ?)""",
+        (now.date().isoformat(), start, end, json.dumps(params), now.isoformat()),
+    )
+    rid = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+    conn.commit()
+    return rid
+
+
+def test_respect_until_window_end_keeps_override_past_fixed_grace(monkeypatch):
+    """Gesture older than within_hours, but the overridden row's window still
+    covers now → respected when respect_until_window_end=True."""
+    from src import db
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "t.db"
+        monkeypatch.setattr("src.config.config.DB_PATH", str(path))
+        db.init_db()
+        now = datetime.now(UTC)
+        conn = db.get_connection()
+        try:
+            # 11h boost window: started 8h ago, ends in 3h.
+            rid = _seed_row_window(
+                conn, start_offset_seconds=-3600 * 8, end_offset_seconds=3600 * 3,
+                params={"tank_temp": 60, "tank_power": True},
+            )
+        finally:
+            conn.close()
+        # Gesture 8h ago — well outside the 4h fixed grace.
+        db.mark_action_user_overridden(rid, overridden_at=(now - timedelta(hours=8)).isoformat())
+
+        # Fixed grace only → expired.
+        assert db.find_recent_user_override(
+            "daikin", within_hours=4.0, now_utc=now,
+        ) is None
+        # Window-end extension → still respected (window not over).
+        res = db.find_recent_user_override(
+            "daikin", within_hours=4.0, now_utc=now, respect_until_window_end=True,
+        )
+        assert res is not None and res["id"] == rid
+
+
+def test_respect_until_window_end_releases_after_window_closes(monkeypatch):
+    """Once the overridden row's window has fully passed, even the window-end
+    extension stops respecting it (falls back to the fixed grace)."""
+    from src import db
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "t.db"
+        monkeypatch.setattr("src.config.config.DB_PATH", str(path))
+        db.init_db()
+        now = datetime.now(UTC)
+        conn = db.get_connection()
+        try:
+            # Window ended 1h ago.
+            rid = _seed_row_window(
+                conn, start_offset_seconds=-3600 * 9, end_offset_seconds=-3600,
+                params={"tank_temp": 60},
+            )
+        finally:
+            conn.close()
+        db.mark_action_user_overridden(rid, overridden_at=(now - timedelta(hours=8)).isoformat())
+        assert db.find_recent_user_override(
+            "daikin", within_hours=4.0, now_utc=now, respect_until_window_end=True,
+        ) is None
+
+
 # ── Epic 14 (#386): user_gesture_still_in_effect ──────────────────────────────
 
 def test_user_gesture_still_in_effect_tank_power_diverged():

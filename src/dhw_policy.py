@@ -157,6 +157,7 @@ def generate_daily_tank_schedule(
     agile_rates: list[dict[str, Any]] | None = None,
     mode: str | None = None,
     allow_past: bool = False,
+    boosts_only_from: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """Generate tank action rows for the local calendar day starting at
     ``DHW_WARMUP_START_HOUR_LOCAL`` (default 13:00) on ``target_date_local``
@@ -171,6 +172,16 @@ def generate_daily_tank_schedule(
         agile_rates: optional list of {valid_from, value_inc_vat}; used
             to detect negative-price windows for boost overrides
         mode: optimization preset; defaults to ``config.OPTIMIZATION_PRESET``
+        boosts_only_from: when set, return ONLY this cycle's
+            ``tank_negative_boost`` rows, each clipped to start at
+            ``max(window_start, boosts_only_from)`` (drop any already ended).
+            Used by the writer to recover the early-morning paid boost of the
+            *currently-live* cycle (anchored at yesterday's warmup) that the
+            cycle-split otherwise drops on an overnight re-plan — the
+            2026-06-07 paid-window incident. Structural warmup/setback rows are
+            deliberately NOT re-emitted: they already fired when the cycle
+            began, and a fresh setback sharing the boost's start would thrash
+            against it (neither row ever reaches a state-matched "completed").
 
     Returns:
         List of action dicts; empty when ``mode='vacation'``.
@@ -186,9 +197,11 @@ def generate_daily_tank_schedule(
     # immediately and they'd be wasted churn. Tomorrow is fine (advance
     # scheduling). ``allow_past=True`` lets read-only callers (e.g. the
     # heating-plan timeline endpoint) regenerate a past day's deterministic
-    # schedule for display without writing anything.
+    # schedule for display without writing anything. ``boosts_only_from``
+    # deliberately reaches back into the live (yesterday-anchored) cycle, so it
+    # also bypasses this guard — it clips to ``boosts_only_from`` instead.
     today_local = datetime.now(_tz_local()).date()
-    if not allow_past and target_date_local < today_local:
+    if boosts_only_from is None and not allow_past and target_date_local < today_local:
         logger.info(
             "dhw_policy: skipping %s (in the past; today=%s)",
             target_date_local, today_local,
@@ -234,6 +247,25 @@ def generate_daily_tank_schedule(
     setback_start_utc = setback_start.astimezone(UTC)
     next_warmup_utc = next_warmup.astimezone(UTC)
     neg_windows = _detect_negative_windows(agile_rates, warmup_start_utc, next_warmup_utc)
+
+    # Boosts-only recovery path: emit just the negative-boost rows of this
+    # (already-running) cycle, clipped to ``boosts_only_from``. No structural
+    # rows — see the param docstring. Keeps the writer idempotent: the next
+    # re-plan's range-clear removes these and rewrites with a fresh clip.
+    if boosts_only_from is not None:
+        boost_rows: list[dict[str, Any]] = []
+        for nw_start, nw_end in neg_windows:
+            start = max(nw_start, boosts_only_from)
+            if start >= nw_end:
+                continue  # window already fully elapsed
+            boost_rows.append(_make_action(
+                action_type="tank_negative_boost",
+                start_utc=start,
+                end_utc=nw_end,
+                tank_temp_c=boost_c,
+                tank_powerful=True,
+            ))
+        return boost_rows
 
     # If a boost window opens at/near the warmup start, defer the warmup past it
     # (chaining consecutive boosts that each fall within the lead window of the
@@ -563,6 +595,7 @@ def write_daily_tank_schedule(
     agile_rates: list[dict[str, Any]] | None = None,
     mode: str | None = None,
     clear_existing: bool = True,
+    boosts_only_from: datetime | None = None,
 ) -> int:
     """Write a day's tank schedule into ``action_schedule``.
 
@@ -588,6 +621,7 @@ def write_daily_tank_schedule(
         target_date_local,
         agile_rates=agile_rates,
         mode=mode,
+        boosts_only_from=boosts_only_from,
     )
     if not rows:
         logger.info("dhw_policy: no rows for %s (mode=%s)", target_date_local, mode)

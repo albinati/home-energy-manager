@@ -1451,28 +1451,50 @@ def find_recent_user_override(
     *,
     within_hours: float,
     now_utc: datetime | None = None,
+    respect_until_window_end: bool = False,
 ) -> dict[str, Any] | None:
     """Epic 14 (#386): the most-recent ``user_overridden`` action_schedule row
-    for ``device`` whose ``overridden_by_user_at`` falls inside the trailing
-    ``within_hours`` window. Returns ``None`` when no such row exists.
+    for ``device`` whose override is still in effect. Returns ``None`` when no
+    such row exists.
+
+    An override qualifies when EITHER:
+      * its ``overridden_by_user_at`` timestamp is inside the trailing
+        ``within_hours`` window (the original fixed grace), OR
+      * ``respect_until_window_end`` is set AND the overridden row's own
+        planned window still covers now (``end_time > now``). This honours
+        "if I change the tank/LWT by hand, don't touch it until the end of the
+        planned window" for windows longer than ``within_hours`` (e.g. a
+        multi-hour negative-price boost) — the 2026-06-07 requirement. The
+        caller's live ``user_gesture_still_in_effect`` check remains the real
+        safety gate: revert the manual change and HEM resumes control at once,
+        so a far-future ``end_time`` can never wedge the schedule.
 
     Used by the heartbeat reconciler to propagate a user's manual gesture
     (e.g. tank power-off via Onecta) onto fresh rows the LP inserts after
     a replan, so the user doesn't have to keep undoing the same action.
     """
-    if within_hours <= 0:
-        return None
     now = now_utc or datetime.now(UTC)
-    cutoff = (now - timedelta(hours=within_hours)).isoformat()
+    now_iso = now.isoformat()
+    clauses: list[str] = ["device = ?", "overridden_by_user_at IS NOT NULL"]
+    params: list[Any] = [device]
+    time_terms: list[str] = []
+    if within_hours > 0:
+        time_terms.append("overridden_by_user_at >= ?")
+        params.append((now - timedelta(hours=within_hours)).isoformat())
+    if respect_until_window_end:
+        time_terms.append("end_time > ?")
+        params.append(now_iso)
+    if not time_terms:
+        return None
+    clauses.append("(" + " OR ".join(time_terms) + ")")
     with _lock:
         conn = get_connection()
         try:
             cur = conn.execute(
                 "SELECT * FROM action_schedule "
-                "WHERE device = ? AND overridden_by_user_at IS NOT NULL "
-                "AND overridden_by_user_at >= ? "
+                "WHERE " + " AND ".join(clauses) + " "
                 "ORDER BY overridden_by_user_at DESC LIMIT 1",
-                (device, cutoff),
+                tuple(params),
             )
             r = cur.fetchone()
             return _row_action(r) if r else None
