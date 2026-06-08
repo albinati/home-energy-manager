@@ -1,4 +1,7 @@
-import type { SchedulerTimeline, DhwScheduleRow, HeatingPlanResponse, HeatingPlanSlot } from "../../lib/types";
+import type {
+  SchedulerTimeline, DhwScheduleRow, HeatingPlanResponse, HeatingPlanSlot,
+  Appliance, ApplianceJob, ApplianceSuggestion,
+} from "../../lib/types";
 import { formatRelativeSlot, endLabelFor, tankLabelOf, tankKindOf } from "../../lib/slotLabels";
 import { upcomingForcedWindows, labelForKind, kindColorVar } from "../../lib/planHelpers";
 import "./plan-widget.css";
@@ -7,9 +10,19 @@ interface Props {
   timeline: SchedulerTimeline | null;
   dhwSchedule?: DhwScheduleRow[] | null;
   heatingPlan?: HeatingPlanResponse | null;
+  // Appliances (merged in from the standalone widget).
+  appliances?: Appliance[] | null;
+  applianceJobs?: ApplianceJob[] | null;
+  applianceSuggestions?: ApplianceSuggestion[] | null;
   nowUtc?: string;
   foxMode?: string;
   foxActive?: boolean;
+}
+
+function hm(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  try { return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }); }
+  catch { return "—"; }
 }
 
 interface LwtWindow { kind: "boost" | "setback"; start_utc: string; end_utc: string; slot_count: number; peak: number; }
@@ -48,7 +61,10 @@ function upcomingLwtWindows(slots: HeatingPlanSlot[], nowMs: number, limit = 3):
 // card next to Weather: the upcoming Fox battery windows + the tank (DHW)
 // schedule, side by side. Forward-looking only — "what the system is about to
 // do". The live power flow stays in the Live-power tile.
-export function PlanWidget({ timeline, dhwSchedule, heatingPlan, nowUtc, foxMode, foxActive }: Props) {
+export function PlanWidget({
+  timeline, dhwSchedule, heatingPlan, appliances, applianceJobs, applianceSuggestions,
+  nowUtc, foxMode, foxActive,
+}: Props) {
   const forced = timeline ? upcomingForcedWindows(timeline, 4) : [];
   const nowMs = nowUtc ? Date.parse(nowUtc) : Date.now();
   const tank = (dhwSchedule || [])
@@ -59,6 +75,13 @@ export function PlanWidget({ timeline, dhwSchedule, heatingPlan, nowUtc, foxMode
   const lwt = upcomingLwtWindows(
     (heatingPlan?.slots || []).filter((s) => !!s.slot_utc), nowMs, 3,
   );
+
+  const apps = (appliances || []).filter((a) => a.enabled);
+  const jobByApp = new Map(
+    (applianceJobs || []).filter((j) => j.status === "scheduled" || j.status === "running")
+      .map((j) => [j.appliance_id, j]),
+  );
+  const sugByApp = new Map((applianceSuggestions || []).map((s) => [s.appliance_id, s]));
 
   const runId = timeline?.run_id ?? null;
   const planDate = timeline?.plan_date ?? null;
@@ -144,7 +167,52 @@ export function PlanWidget({ timeline, dhwSchedule, heatingPlan, nowUtc, foxMode
         )}
       </div>
 
-      {nothing && <span class="planw-allquiet">Plan steady — nothing scheduled soon</span>}
+      {/* APPLIANCES (merged from the standalone widget) */}
+      {apps.length > 0 && (
+        <div class="planw-group">
+          <div class="planw-head"><span class="planw-title">Appliances</span></div>
+          <div class="planw-chips">
+            {apps.map((a) => {
+              const job = jobByApp.get(a.id);
+              const sug = sugByApp.get(a.id);
+              if (job?.status === "running") {
+                return (
+                  <span key={a.id} class="planw-chip planw-chip--run">
+                    <span class="planw-dot" style="background:var(--ok)" />🧺 {a.name} <span class="planw-when">running</span>
+                  </span>
+                );
+              }
+              if (job) {
+                return (
+                  <span key={a.id} class="planw-chip"
+                        title={`Scheduled ${hm(job.planned_start_utc)}–${hm(job.planned_end_utc)}${job.avg_price_pence != null ? ` · ${job.avg_price_pence.toFixed(1)}p/kWh` : ""}`}>
+                    <span class="planw-dot" style="background:var(--cheap,#36d399)" />🧺 {a.name}
+                    <span class="planw-when">{hm(job.planned_start_utc)}–{hm(job.planned_end_utc)}</span>
+                  </span>
+                );
+              }
+              if (sug) {
+                const paid = sug.is_negative;
+                const cheap = sug.meets_threshold !== false;
+                return (
+                  <span key={a.id} class="planw-chip"
+                        title={`${cheap ? (paid ? "Paid" : "Cheap") + " window" : "Next window (no cheap window ahead)"} ${hm(sug.recommended_start_utc)}–${hm(sug.recommended_end_utc)} · ${sug.avg_price_pence.toFixed(1)}p · load + Smart Control by ${sug.deadline_local}`}>
+                    <span class="planw-dot" style={`background:${paid ? "var(--neg,#38bdf8)" : cheap ? "var(--cheap,#36d399)" : "var(--text-mute)"}`} />🧺 {a.name}
+                    <span class="planw-when">{cheap ? "" : "next "}{hm(sug.recommended_start_utc)} · {sug.avg_price_pence.toFixed(1)}p</span>
+                  </span>
+                );
+              }
+              return (
+                <span key={a.id} class="planw-chip planw-chip--idle">
+                  <span class="planw-dot" style="background:var(--text-mute)" />🧺 {a.name} <span class="planw-when">idle</span>
+                </span>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {nothing && apps.length === 0 && <span class="planw-allquiet">Plan steady — nothing scheduled soon</span>}
 
       {(runId != null || planDate) && (
         <div class="planw-foot" title="The LP run this plan came from">

@@ -2,7 +2,7 @@ import type { ComponentChildren } from "preact";
 import { WidgetBoundary } from "./WidgetBoundary";
 import "./widget.css";
 
-export type WidgetSize = "medium" | "large" | "wide";
+export type WidgetSize = "medium" | "half" | "large" | "wide";
 export type WidgetTone = "default" | "power" | "tariff" | "thermal" | "savings" | "plan" | "coming";
 
 interface WidgetProps {
