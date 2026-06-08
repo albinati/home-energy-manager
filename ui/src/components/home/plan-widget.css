@@ -1,0 +1,58 @@
+.planw {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.planw-group { display: flex; flex-direction: column; gap: var(--space-2); }
+.planw-head { display: flex; align-items: center; gap: var(--space-2); }
+.planw-title {
+  font-size: var(--font-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-mute);
+}
+.planw-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.planw-mode-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--warn);
+}
+.planw-chips { display: flex; flex-direction: column; gap: 4px; }
+.planw-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--font-xs);
+  color: var(--text);
+  padding: 2px 8px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--border) 35%, transparent);
+}
+.planw-chip--future { opacity: 0.78; }
+.planw-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.planw-dot--tank { background: var(--thermal, #fb923c); }
+.planw-when { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.planw-temp {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-mute);
+  font-size: 10px;
+}
+.planw-empty, .planw-allquiet {
+  font-size: var(--font-xs);
+  color: var(--text-mute);
+  font-style: italic;
+}
+.planw-foot {
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--text-mute);
+  font-variant-numeric: tabular-nums;
+}

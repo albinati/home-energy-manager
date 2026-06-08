@@ -5,7 +5,8 @@ import { useAnimatedNumber } from "../../lib/useAnimatedNumber";
 import { reducedMotion } from "../../lib/motion";
 import { kw, kwh, pct, gbp } from "../../lib/format";
 import type { CockpitState, CockpitNow, SchedulerTimeline, ExecutionTodayResponse, AgileTodayResponse, MetricsResponse, DhwScheduleRow, TodayCumulativeResponse } from "../../lib/types";
-import { formatRelativeSlot, endLabelFor, tankLabelOf } from "../../lib/slotLabels";
+import { formatRelativeSlot, tankLabelOf } from "../../lib/slotLabels";
+import { upcomingForcedWindows, labelForKind, kindColorVar, type ForcedWindow } from "../../lib/planHelpers";
 import "./cockpit.css";
 import "./live-power.css";
 
@@ -57,12 +58,9 @@ export function LivePowerWidget({ state, cockpit, timeline, execution, agile, me
 
   const todayRange = computeTodayRange(execution);
   const nextEvent = nextSocEvent(timeline);
-  const foxMode = cockpit.current_slot?.fox_mode ?? "—";
-  // SelfUse is the resting state already implied by the big net-power number up
-  // top — only surface the Fox mode pill when it's actively forcing the battery.
-  const foxActive = !["selfuse", "self_use", "idle", "—", ""].includes(foxMode.toLowerCase());
+  // Fox windows feed the quiet "Next" glance below; the full plan (Fox mode,
+  // windows, LP run) now lives in the standalone Plan widget.
   const forced = timeline ? upcomingForcedWindows(timeline, 4) : [];
-  const lpInfo = timeline ? { runId: timeline.run_id ?? null, runAt: timeline.run_at ?? null, planDate: timeline.plan_date ?? null } : null;
   const importP = agile?.current_import_p ?? null;
   const exportP = agile?.current_export_p ?? cockpit.current_slot?.price_export_p ?? null;
   const importBand = classifyBand(importP, metrics?.cheap_threshold_pence, metrics?.peak_threshold_pence);
@@ -162,77 +160,12 @@ export function LivePowerWidget({ state, cockpit, timeline, execution, agile, me
             )}
           </span>
         </div>
-        {(foxActive || forced.length > 0) && (
-        <div class="livepower-fox-row">
-          <span class="livepower-fox-label">Grid plan</span>
-          {foxActive && (
-            <span class={`livepower-fox-mode livepower-fox-mode--${foxMode.toLowerCase()}`}>
-              <span class="livepower-fox-mode-dot" />
-              {foxMode}
-            </span>
-          )}
-          {forced.length > 0 && (
-            <span class="livepower-fox-windows">
-              {forced.map((w) => {
-                const start = formatRelativeSlot(w.start_utc, cockpit.now_utc);
-                const endTime = endLabelFor(w.end_utc);
-                const range = w.slot_count > 1 ? `${start.timeLabel}–${endTime}` : start.timeLabel;
-                const tooltip = start.isToday
-                  ? `${w.kind} · ${range} · already uploaded to Fox (visible in the app now)`
-                  : `${w.kind} · ${start.dayLabel} ${range} · LP plan only — uploads to Fox at 00:05 UTC on the day`;
-                return (
-                  <span key={w.start_utc}
-                        class={`livepower-fox-window livepower-fox-window--${w.kind}${start.isToday ? "" : " livepower-fox-window--future"}`}
-                        title={tooltip}>
-                    {!start.isToday && <span class="livepower-fox-window-icon"><Icon name="schedule" size={12} /></span>}
-                    {labelForKind(w.kind)} {start.dayLabel ? `${start.dayLabel} ` : ""}{range}
-                  </span>
-                );
-              })}
-            </span>
-          )}
-        </div>
-        )}
-        {lpInfo && (lpInfo.runId != null || lpInfo.runAt) && (
-          <div class="livepower-fox-debug">
-            <span title="Last LP run id + wall time + plan target date">
-              LP&nbsp;
-              {lpInfo.runId != null && <strong>#{lpInfo.runId}</strong>}
-              {lpInfo.runAt && <> · {formatLocalTime(lpInfo.runAt)}</>}
-              {lpInfo.planDate && <> · plan {lpInfo.planDate}</>}
-            </span>
-          </div>
-        )}
+        {/* The committed dispatch plan (Fox battery windows + tank schedule +
+            LP run) moved out to its own Plan widget next to Weather. The quiet
+            "Next" glance at the top of this tile keeps the live awareness. */}
       </div>
     </div>
   );
-}
-
-interface ForcedWindow { kind: string; start_utc: string; end_utc: string; slot_count: number; }
-function upcomingForcedWindows(timeline: SchedulerTimeline, limit: number): ForcedWindow[] {
-  const out: ForcedWindow[] = [];
-  const interesting = new Set(["cheap", "negative", "peak_export", "pre_negative_export"]);
-  let current: ForcedWindow | null = null;
-  for (const s of timeline.planned || []) {
-    const k = (s.dispatched_kind || s.lp_kind || "").toLowerCase();
-    const iso = s.slot_time_utc;
-    if (!iso) continue;
-    if (interesting.has(k)) {
-      if (current && current.kind === k) {
-        current.end_utc = iso;
-        current.slot_count += 1;
-      } else {
-        if (current) out.push(current);
-        current = { kind: k, start_utc: iso, end_utc: iso, slot_count: 1 };
-      }
-    } else if (current) {
-      out.push(current);
-      current = null;
-      if (out.length >= limit) break;
-    }
-  }
-  if (current) out.push(current);
-  return out.slice(0, limit);
 }
 
 interface NextAction { label: string; when: string; whenMs: number; color: string; }
@@ -267,29 +200,6 @@ function buildNextActions(
   // Drop any entry whose timestamp failed to parse (whenMs NaN) — a NaN in the
   // comparator leaves the sort order undefined and could surface the wrong action.
   return out.filter((a) => Number.isFinite(a.whenMs)).sort((a, b) => a.whenMs - b.whenMs).slice(0, 2);
-}
-
-// Battery window kind → the same semantic colour the rest of the surface uses
-// (charge = ok/green, discharge/drain = warn/amber).
-function kindColorVar(k: string | undefined): string {
-  switch ((k || "").toLowerCase()) {
-    case "cheap":
-    case "negative":            return "var(--ok)";
-    case "peak_export":
-    case "pre_negative_export": return "var(--warn)";
-    default:                    return "var(--text-dim)";
-  }
-}
-
-// Kind conveyed by the leading coloured dot + band colour — no emoji.
-function labelForKind(k: string | undefined): string {
-  switch ((k || "").toLowerCase()) {
-    case "cheap":         return "Force charge";
-    case "negative":      return "Force charge";
-    case "peak_export":   return "Force discharge";
-    case "pre_negative_export": return "Drain (pre-neg)";
-    default:              return k || "?";
-  }
 }
 
 type Band = "negative" | "cheap" | "standard" | "peak" | "unknown";
