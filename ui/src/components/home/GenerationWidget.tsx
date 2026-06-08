@@ -58,11 +58,15 @@ export function GenerationWidget({ period, periodData, periodLoading, agile }: P
       { name: "Solar", color: t.pv, data: solarActual, area: true, width: 3 },
       { name: "Export", color: t.exportColor, data: exportActual, width: 1.75 },
     ];
-    // What export ACTUALLY earns: the flat SEG rate (the household isn't on
-    // Outgoing Agile, whose per-slot rates just track the import curve — that's
-    // why plotting them looked identical to the import line). Show it as a
-    // label, not a redundant wholesale-tracking price line.
+    // Export price line (right axis, green dashed) = the rate ACTUALLY earned.
+    // On SEG flat it's a flat line at that rate (4.1p) — flat, so it does NOT
+    // mirror the import curve. If/when on Outgoing Agile, it tracks the per-slot
+    // export_slots automatically. Mirrors Consumption's import price line.
     const segRate = agile?.export_seg_rate_p ?? null;
+    const expPriceBy = new Map<string, number>();
+    for (const es of agile?.export_slots ?? []) expPriceBy.set(normZ(es.valid_from), es.p);
+    const exportPrice = slots.map((s) =>
+      segRate != null ? segRate : (expPriceBy.get(normZ(s.slot_utc)) ?? null));
     const nowMs = pv?.now_utc ? new Date(pv.now_utc).getTime() : Date.now();
     const genTotal = slots.reduce((sum, s) => {
       const elapsed = new Date(s.slot_utc).getTime() + 30 * 60_000 <= nowMs;
@@ -76,15 +80,16 @@ export function GenerationWidget({ period, periodData, periodLoading, agile }: P
           <span class="tlw-summary-value tlw-pos">{exportedTotal.toFixed(1)}<span class="tlw-summary-unit"> kWh export</span></span>
           <span class="tlw-summary-label">esperado hoje{segRate != null ? ` · export pago a ${segRate.toFixed(1)}p/kWh (SEG flat)` : ""}</span>
         </div>
-        {/* No price line / tariff zones here: the import tariff (cheap/peak/
-            negative) belongs on Consumption, and export earns a FLAT SEG rate
-            (shown above) — plotting the Outgoing Agile curve just mirrored the
-            import line. Generation stays about solar produced vs exported. */}
-        <MetricTimeline labels={labels} lines={lines} nowIdx={nowIdx} height={270} />
+        {/* Export price line (green, right axis) mirrors Consumption's import
+            line; the cheap/peak/negative ZONES stay on Consumption only (that's
+            the import tariff) so the two timelines don't repeat the same bands. */}
+        <MetricTimeline labels={labels} lines={lines} prices={exportPrice}
+                        priceLabel="Export price" priceColor={t.exportColor} nowIdx={nowIdx} height={270} />
         <div class="tlw-legend">
           <span><i style={`border-color:${t.pv}`} /> solar actual</span>
           <span><i class="dashed" style={`border-color:${withAlpha(t.pv, 0.6)}`} /> solar plan</span>
           <span><i style={`border-color:${t.exportColor}`} /> export kWh</span>
+          <span><i class="dashed" style={`border-color:${t.exportColor}`} /> export price{segRate != null ? ` (${segRate.toFixed(1)}p SEG)` : ""}</span>
           <span>◉ now</span>
         </div>
       </div>
@@ -114,6 +119,9 @@ export function GenerationWidget({ period, periodData, periodLoading, agile }: P
   );
 }
 
+function normZ(iso: string): string {
+  try { return new Date(iso).toISOString().replace(".000Z", "Z"); } catch { return iso; }
+}
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
 }
