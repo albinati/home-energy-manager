@@ -35,10 +35,41 @@ def test_today_cumulative_exposes_savings_fields(monkeypatch):
         "standing_charge_gbp",
         # Total consumption — the headline kWh the hero leads with.
         "consumption_kwh",
+        # "Meta a bater": break-even import price vs the fixed tariff.
+        "breakeven_avg_import_p", "realised_avg_import_p", "forecast_import_kwh",
         # The CONFIGURED fixed tariff (British Gas) — correct shadow, not the generic.
         "fixed_tariff_label", "delta_vs_fixed_tariff_real_gbp", "fixed_tariff_shadow_real_gbp",
     ):
         assert k in body, f"hero needs {k} in today-cumulative"
+
+
+def test_today_cumulative_breakeven_target(monkeypatch):
+    """The "meta a bater": Agile must keep its average import price under the
+    break-even to beat the fixed tariff, since it loses on the daily standing.
+    break-even = bg_rate − (agile_standing − bg_standing) / forecast_import_kwh."""
+    db.init_db()
+    monkeypatch.setattr(config, "FIXED_TARIFF_RATE_PENCE", 20.7, raising=False)
+    monkeypatch.setattr(config, "FIXED_TARIFF_STANDING_PENCE_PER_DAY", 41.14, raising=False)
+    # 10 kWh imported at a net £1.50 → realised avg 15.0 p/kWh; agile standing 59.26p.
+    monkeypatch.setattr(
+        "src.analytics.pnl.compute_daily_pnl",
+        lambda day: {
+            "import_kwh": 10.0, "export_kwh": 0.0, "import_cost_gbp": 1.50,
+            "export_revenue_gbp": 0.0, "realised_net_cost_gbp": 2.0926,
+            "standing_charge_gbp": 0.5926, "kwh": 14.0,
+        },
+    )
+    # Forecast grid import for the day = 12 kWh (committed LP plan).
+    monkeypatch.setattr(db, "committed_lp_field_by_slot",
+                        lambda d, field: {"a": 5.0, "b": 7.0} if field == "import_kwh" else {})
+    client = _client(monkeypatch)
+    body = client.get("/api/v1/energy/today-cumulative").json()
+
+    # break-even = 20.7 − (59.26 − 41.14)/12 = 20.7 − 1.51 = 19.19 p/kWh.
+    assert body["breakeven_avg_import_p"] == 19.19
+    # realised avg = £1.50 × 100 / 10 kWh = 15.0 p/kWh → under target (Agile wins).
+    assert body["realised_avg_import_p"] == 15.0
+    assert body["forecast_import_kwh"] == 12.0
 
 
 def test_monthly_exposes_bg_real_delta(monkeypatch):

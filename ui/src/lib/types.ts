@@ -544,6 +544,11 @@ export interface TodayCumulativeResponse {
   fixed_tariff_label?: string | null;
   delta_vs_fixed_tariff_real_gbp?: number | null;  // £ cheaper than British Gas (>0 = Agile won)
   fixed_tariff_shadow_real_gbp?: number | null;    // what British Gas would have cost
+  // "Meta a bater": avg import p/kWh Agile needs to match British Gas (standing
+  // gap spread over the day's forecast grid import), vs the realised avg so far.
+  breakeven_avg_import_p?: number | null;
+  realised_avg_import_p?: number | null;
+  forecast_import_kwh?: number;
 }
 
 // GET /appliances/suggestions — cheapest upcoming run window per idle appliance.

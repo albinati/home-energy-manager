@@ -3078,8 +3078,38 @@ async def energy_today_cumulative():
     # import credit (when the metered import cost went negative) + export revenue.
     # The UI hides this when both are ~0 (a plain spend day).
     neg_import_credit = max(0.0, -import_cost)
+
+    # --- "Meta a bater": the average grid-import price Agile needs to MATCH the
+    # configured fixed tariff (British Gas). Agile carries a higher daily
+    # standing, so it only wins if it beats the fixed unit rate by enough to
+    # absorb that gap — spread over the day's FORECAST grid import (the committed
+    # LP plan, stable all day) rather than the volatile realised-so-far:
+    #   beat ⇔ avg_import_p ≤ bg_rate − (agile_standing − bg_standing) / import_kwh
+    # (export cancels: both Agile and BG value export at flat SEG for this site).
+    import_kwh_realised = float(pnl.get("import_kwh", 0.0) or 0.0)
+    bg_rate_p = float(getattr(config, "FIXED_TARIFF_RATE_PENCE", 0) or 0)
+    bg_standing_p = float(getattr(config, "FIXED_TARIFF_STANDING_PENCE_PER_DAY", 0) or 0)
+    agile_standing_p = float(pnl.get("standing_charge_gbp", 0.0) or 0.0) * 100.0
+    forecast_import_kwh = 0.0
+    try:
+        forecast_import_kwh = sum(db.committed_lp_field_by_slot(today, "import_kwh").values())
+    except Exception:  # pragma: no cover - best-effort; the target is non-critical
+        forecast_import_kwh = 0.0
+    breakeven_avg_import_p = None
+    if bg_rate_p > 0 and forecast_import_kwh > 0.05:
+        breakeven_avg_import_p = round(bg_rate_p - (agile_standing_p - bg_standing_p) / forecast_import_kwh, 2)
+    realised_avg_import_p = (
+        round(import_cost * 100.0 / import_kwh_realised, 2) if import_kwh_realised > 0.01 else None
+    )
+
     return {
         "date": today.isoformat(),
+        # The break-even target: beat British Gas when the realised average import
+        # price stays at/under breakeven_avg_import_p (computed on the day's
+        # forecast grid import so it's stable, not jumpy early in the day).
+        "breakeven_avg_import_p": breakeven_avg_import_p,
+        "realised_avg_import_p": realised_avg_import_p,
+        "forecast_import_kwh": round(forecast_import_kwh, 2),
         # Total household consumption (load) so far today — the headline kWh the
         # hero leads with (the metric the user cares about most).
         "consumption_kwh": pnl.get("kwh", 0.0),
