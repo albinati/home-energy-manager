@@ -48,11 +48,13 @@
 
 @media (min-width: 720px) {
   .widget--medium { grid-column: span 6; }
+  .widget--half { grid-column: span 6; }
   .widget--large { grid-column: span 12; }
   .widget--wide { grid-column: span 12; }
 }
 @media (min-width: 1024px) {
   .widget--medium { grid-column: span 4; }
+  .widget--half { grid-column: span 6; }   /* exactly half — splits a row 50/50 */
   .widget--large { grid-column: span 8; }
   .widget--wide { grid-column: span 12; }
 }

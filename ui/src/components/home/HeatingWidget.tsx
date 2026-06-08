@@ -14,7 +14,6 @@ import { Pill } from "../common/Pill";
 import { Gauge } from "../common/Gauge";
 import { RadialGauge } from "../common/RadialGauge";
 import { Modal } from "../common/Modal";
-import { HeatingControls } from "./HeatingControls";
 import { RefreshCountdown } from "../common/RefreshCountdown";
 import "./heating.css";
 
@@ -175,8 +174,6 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather, exe
           </div>
         </div>
       )}
-
-      <HeatingControls dev={dev} controlMode={daikinQuota?.control_mode} onChanged={() => onRefresh?.()} />
 
       <Modal open={confirmingRefresh} onClose={() => { setConfirmingRefresh(false); setRefreshError(null); }} width="sm"
              title="Fetch live heat-pump data?"

@@ -31,7 +31,6 @@ import { LivePowerWidget } from "../components/cockpit/LivePowerWidget";
 import { Hero } from "../components/home/Hero";
 import { HeatingWidget } from "../components/home/HeatingWidget";
 import { WeatherWidget } from "../components/home/WeatherWidget";
-import { ApplianceWidget } from "../components/home/ApplianceWidget";
 import { PlanWidget } from "../components/home/PlanWidget";
 import type { MonthlyEnergy } from "../lib/types";
 import "../components/home/home.css";
@@ -164,39 +163,41 @@ export default function Landing() {
             period={periodInsights.data} periodState={period}
             periodLoading={periodInsights.loading} todayCum={todayCum.data} />
 
-      {/* ── LIVE (glanceable now-state, up top — Apple/Tesla) ──────────
-          These three IGNORE the period navigator: they're always "now". */}
+      {/* ── LIVE — split 50/50: live power flow + live heating (gauges + the
+          heating-plan timeline). Always "now"; ignore the period navigator. */}
       <div class="widget-grid widget-band">
-        <Widget title="Live power" icon="⚡" tone="power" size="large"
+        <Widget title="Live power" icon="⚡" tone="power" size="half"
                 badge={data.now_utc ? new Date(data.now_utc).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }) : undefined}
                 action={<RefreshCountdown lastFetchAt={now.lastFetchAt} intervalMs={now.intervalMs} loading={now.loading} onRefresh={() => void now.refresh()} />}>
           <LivePowerWidget state={s} cockpit={data} timeline={timeline.data} execution={execution.data} agile={agile.data} metrics={metrics.data} dhwSchedule={dhwSched.data?.rows} todayCumulative={todayCum.data} />
         </Widget>
 
-        <Widget title="Heating" icon="♨" tone="thermal" size="medium">
+        <Widget title="Live heating" icon="♨" tone="thermal" size="half">
           <HeatingWidget state={s} daikin={daikin.data} daikinQuota={daikinQuota.data} report={report.data} weather={weather.data} execution={execution.data}
                          onRefresh={() => { void daikin.refresh(); void daikinQuota.refresh(); }} />
-        </Widget>
-
-        <Widget title="Appliances" icon="🧺" tone="power" size="medium">
-          <ApplianceWidget suggestions={applianceSug.data?.suggestions} jobs={applianceJobs.data?.jobs} appliances={appliances.data?.appliances} />
-        </Widget>
-
-        <Widget title="Weather" icon="⛅" tone="thermal" size="medium">
-          <WeatherWidget weather={weather.data} pv={pvToday.data} />
-        </Widget>
-
-        <Widget title="Plan" icon="🗓" tone="plan" size="medium">
-          <PlanWidget timeline={timeline.data} dhwSchedule={dhwSched.data?.rows} heatingPlan={heatingPlan.data}
-                      nowUtc={data.now_utc} foxMode={foxMode} foxActive={foxActive} />
+          <Suspense fallback={<Spinner label="Loading heating plan…" />}>
+            <HeatingPlanWidget plan={heatingPlan.data} loading={heatingPlan.loading} />
+          </Suspense>
         </Widget>
       </div>
 
-      {/* ── TIMELINES — Generation + Consumption, both synced to the period
-          navigator (navigate one → navigate all). Heating keeps its own
-          D-1/D/D+1 frame. Day = forecast-vs-actual + cheap/peak/negative tariff
-          zones + the Octopus export/import price slots; week/month/year =
-          actuals bars (no historical intraday forecast). ─────────────────── */}
+      {/* ── PLAN + WEATHER (50/50). Plan = the committed dispatch (battery +
+          heating LWT + tank + appliances). No manual climate/tank controls. */}
+      <div class="widget-grid widget-band">
+        <Widget title="Plan" icon="🗓" tone="plan" size="half">
+          <PlanWidget timeline={timeline.data} dhwSchedule={dhwSched.data?.rows} heatingPlan={heatingPlan.data}
+                      appliances={appliances.data?.appliances} applianceJobs={applianceJobs.data?.jobs}
+                      applianceSuggestions={applianceSug.data?.suggestions}
+                      nowUtc={data.now_utc} foxMode={foxMode} foxActive={foxActive} />
+        </Widget>
+
+        <Widget title="Weather" icon="⛅" tone="thermal" size="half">
+          <WeatherWidget weather={weather.data} pv={pvToday.data} />
+        </Widget>
+      </div>
+
+      {/* ── TIMELINES — Generation + Consumption, synced to the period navigator.
+          Stacked full-width so a given time reads straight down the screen. ── */}
       <div class="widget-grid widget-band">
         <Widget title="Generation" icon="☀" tone="plan" size="wide">
           <Suspense fallback={<Spinner label="Loading generation…" />}>
@@ -209,12 +210,6 @@ export default function Landing() {
         <Widget title="Consumption" icon="📈" tone="power" size="wide">
           <Suspense fallback={<Spinner label="Loading consumption…" />}>
             <EnergyChartWidget execution={execution.data} pv={pvToday.data} />
-          </Suspense>
-        </Widget>
-
-        <Widget title="Heating plan" icon="♨" tone="thermal" size="wide">
-          <Suspense fallback={<Spinner label="Loading heating plan…" />}>
-            <HeatingPlanWidget plan={heatingPlan.data} loading={heatingPlan.loading} />
           </Suspense>
         </Widget>
       </div>
