@@ -35,8 +35,10 @@ function parse(anchor: string): Date {
   return new Date(`${anchor}T00:00:00`);
 }
 
-// Default view: the current month (the figure backed by the most metered data).
-export const selectedPeriod = signal<PeriodState>({ gran: "month", anchor: todayISO() });
+// Default view: today — so the intraday detail (forecast-vs-actual + tariff
+// zones + export/import price slots) shows on the timelines without first
+// having to step down from a coarser granularity.
+export const selectedPeriod = signal<PeriodState>({ gran: "day", anchor: todayISO() });
 
 /** Subscribe to the selected period inside a component (re-renders on change). */
 export function usePeriod(): PeriodState {

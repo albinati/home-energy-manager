@@ -530,6 +530,7 @@ export interface HeatingPlanResponse {
 // money import cost goes NEGATIVE (a credit) on negative-price slots.
 export interface TodayCumulativeResponse {
   date: string;
+  consumption_kwh?: number;      // total household load so far today (hero headline)
   import_kwh: number;
   export_kwh: number;
   import_cost_gbp: number;       // <0 = we were paid to import (credit)

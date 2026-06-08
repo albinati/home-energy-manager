@@ -33,6 +33,8 @@ def test_today_cumulative_exposes_savings_fields(monkeypatch):
         # The standing charge is surfaced so the credit math is explicit
         # (earned − standing = net) and doesn't "look too small".
         "standing_charge_gbp",
+        # Total consumption — the headline kWh the hero leads with.
+        "consumption_kwh",
         # The CONFIGURED fixed tariff (British Gas) — correct shadow, not the generic.
         "fixed_tariff_label", "delta_vs_fixed_tariff_real_gbp", "fixed_tariff_shadow_real_gbp",
     ):

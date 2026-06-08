@@ -31,11 +31,18 @@ export function WeatherWidget({ weather, pv }: Props) {
   const temps = today.map((s) => s.temp_c);
   const hi = temps.length ? Math.max(...temps) : null;
   const lo = temps.length ? Math.min(...temps) : null;
-  // Expected solar today — prefer the calibrated /pv/today total; fall back to
-  // integrating the hourly weather PV estimate.
+  // Solar still to come — expected generation from NOW to end of day (the
+  // forward-looking number that's actionable), summing the /pv/today forecast
+  // for the remaining slots. Falls back to the full-day total if slots absent.
+  const pvNowMs = pv?.now_utc ? new Date(pv.now_utc).getTime() : nowMs;
+  const solarRestOfDay = (pv?.slots ?? []).reduce((a, s) => {
+    const start = new Date(s.slot_utc).getTime();
+    return start >= pvNowMs ? a + Math.max(0, s.pv_forecast_kwh || 0) : a;
+  }, 0);
   const pvDayTotal = pv?.forecast_kwh_day_total ?? null;
   const pvFromForecast = today.reduce((a, s) => a + Math.max(0, s.pv_kw || 0), 0);
-  const solarKwh = pvDayTotal ?? pvFromForecast;
+  const hasSlots = (pv?.slots?.length ?? 0) > 0;
+  const solarKwh = hasSlots ? solarRestOfDay : (pvDayTotal ?? pvFromForecast);
 
   const next = fc.slice(curIdx, curIdx + 12);
 
@@ -56,7 +63,7 @@ export function WeatherWidget({ weather, pv }: Props) {
         <div class="wx-solar-sum">
           <SunIcon size={26} />
           <span class="wx-solar-kwh">{solarKwh.toFixed(1)}<span class="wx-solar-unit"> kWh</span></span>
-          <span class="wx-solar-label">solar expected today</span>
+          <span class="wx-solar-label">{hasSlots ? "solar expected · rest of day" : "solar expected today"}</span>
         </div>
       </div>
 
