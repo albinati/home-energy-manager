@@ -4317,6 +4317,16 @@ async def agile_today():
         ],
         "current_import_p": _slot_price_at(import_rows, now),
         "current_export_p": _slot_price_at(export_rows, now),
+        # The rate the household ACTUALLY earns for export. On seg_flat (the
+        # default) that's the flat SEG rate — NOT the per-slot Outgoing Agile
+        # `export_slots`/`current_export_p`, which track the wholesale curve and
+        # are only relevant if on Outgoing Agile. Null when on per-slot export.
+        "export_mode": getattr(config, "EXPORT_TARIFF_MODE", "seg_flat"),
+        "export_seg_rate_p": (
+            float(config.EXPORT_SEG_RATE_PENCE)
+            if getattr(config, "EXPORT_TARIFF_MODE", "seg_flat") == "seg_flat" and config.EXPORT_SEG_RATE_PENCE
+            else None
+        ),
         "now_utc": now.isoformat().replace("+00:00", "Z"),
     }
 
