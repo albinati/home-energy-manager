@@ -269,6 +269,8 @@ export interface AgileTodayResponse {
   export_slots: AgileSlot[];
   current_import_p?: number;
   current_export_p?: number;
+  export_mode?: string;             // "seg_flat" | "outgoing_agile"
+  export_seg_rate_p?: number | null; // the flat rate actually earned (seg_flat)
   now_utc?: string;
 }
 

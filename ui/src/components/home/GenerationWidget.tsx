@@ -53,18 +53,16 @@ export function GenerationWidget({ period, periodData, periodLoading, agile }: P
       const v = expBy.get(s.slot_utc);
       return v == null ? null : round2(v);
     });
-    // Right-axis price line = the Octopus EXPORT slots (what export earns).
-    const expPriceBy = new Map<string, number>();
-    for (const es of agile?.export_slots ?? []) expPriceBy.set(normZ(es.valid_from), es.p);
-    const exportPrice = slots.map((s) => {
-      const v = expPriceBy.get(normZ(s.slot_utc));
-      return v == null ? null : v;
-    });
     const lines: TimelineLine[] = [
       { name: "Solar plan", color: withAlpha(t.pv, 0.5), data: solarPlan, dashed: true },
       { name: "Solar", color: t.pv, data: solarActual, area: true, width: 3 },
       { name: "Export", color: t.exportColor, data: exportActual, width: 1.75 },
     ];
+    // What export ACTUALLY earns: the flat SEG rate (the household isn't on
+    // Outgoing Agile, whose per-slot rates just track the import curve — that's
+    // why plotting them looked identical to the import line). Show it as a
+    // label, not a redundant wholesale-tracking price line.
+    const segRate = agile?.export_seg_rate_p ?? null;
     const nowMs = pv?.now_utc ? new Date(pv.now_utc).getTime() : Date.now();
     const genTotal = slots.reduce((sum, s) => {
       const elapsed = new Date(s.slot_utc).getTime() + 30 * 60_000 <= nowMs;
@@ -76,18 +74,17 @@ export function GenerationWidget({ period, periodData, periodLoading, agile }: P
         <div class="tlw-summary">
           <span class="tlw-summary-value">{genTotal.toFixed(1)}<span class="tlw-summary-unit"> kWh solar</span></span>
           <span class="tlw-summary-value tlw-pos">{exportedTotal.toFixed(1)}<span class="tlw-summary-unit"> kWh export</span></span>
-          <span class="tlw-summary-label">esperado hoje · {agile?.current_export_p != null ? `export ${agile.current_export_p.toFixed(1)}p agora` : ""}</span>
+          <span class="tlw-summary-label">esperado hoje{segRate != null ? ` · export pago a ${segRate.toFixed(1)}p/kWh (SEG flat)` : ""}</span>
         </div>
-        {/* No cheap/peak/negative shading here — those are the IMPORT tariff
-            and belong on Consumption; Generation's tariff context is the export
-            price line (green), so the two timelines don't repeat the same bands. */}
-        <MetricTimeline labels={labels} lines={lines} prices={exportPrice}
-                        priceLabel="Export price" priceColor={t.exportColor} nowIdx={nowIdx} height={270} />
+        {/* No price line / tariff zones here: the import tariff (cheap/peak/
+            negative) belongs on Consumption, and export earns a FLAT SEG rate
+            (shown above) — plotting the Outgoing Agile curve just mirrored the
+            import line. Generation stays about solar produced vs exported. */}
+        <MetricTimeline labels={labels} lines={lines} nowIdx={nowIdx} height={270} />
         <div class="tlw-legend">
           <span><i style={`border-color:${t.pv}`} /> solar actual</span>
           <span><i class="dashed" style={`border-color:${withAlpha(t.pv, 0.6)}`} /> solar plan</span>
           <span><i style={`border-color:${t.exportColor}`} /> export kWh</span>
-          <span><i class="dashed" style={`border-color:${t.exportColor}`} /> export price</span>
           <span>◉ now</span>
         </div>
       </div>
@@ -117,9 +114,6 @@ export function GenerationWidget({ period, periodData, periodLoading, agile }: P
   );
 }
 
-function normZ(iso: string): string {
-  try { return new Date(iso).toISOString().replace(".000Z", "Z"); } catch { return iso; }
-}
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
 }
