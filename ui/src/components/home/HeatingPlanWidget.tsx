@@ -50,6 +50,7 @@ export function HeatingPlanWidget({ plan, loading }: Props) {
     const labels = slots.map((s) => localHM(s.slot_utc));
 
     const outdoor = slots.map((s) => (s.outdoor_c == null ? null : s.outdoor_c));
+    const price = slots.map((s) => (s.price_p == null ? null : s.price_p));
     const lwtBase = slots.map((s) => (s.lwt_base_c == null ? null : s.lwt_base_c));
     const lwtSet = slots.map((s) => (s.lwt_setpoint_c == null ? null : s.lwt_setpoint_c));
     const tank = slots.map((s) => (s.tank_temp_c == null ? null : s.tank_temp_c));
@@ -89,7 +90,10 @@ export function HeatingPlanWidget({ plan, loading }: Props) {
     chartRef.current.setOption({
       ...base,
       legend: { show: false },
-      grid: { left: 14, right: 16, top: 14, bottom: 22, containLabel: true },
+      // Match the Generation/Consumption grid (incl. the right:44 the price axis
+      // reserves there) so all three intraday charts line up on the x-axis and
+      // a given time reads straight down the screen.
+      grid: { left: 16, right: 44, top: 16, bottom: 24, containLabel: true },
       tooltip: {
         ...(base.tooltip as object),
         formatter: (params: Array<{ dataIndex: number }>) => {
@@ -108,9 +112,16 @@ export function HeatingPlanWidget({ plan, loading }: Props) {
           return rows.join("<br/>");
         },
       },
-      xAxis: { ...(base.xAxis as object), data: labels, axisLabel: { color: t.textMute, fontSize: 10, interval: 11 } },
-      yAxis: [{ ...(base.yAxis as object), name: "°C", nameTextStyle: { color: t.textMute, fontSize: 10 },
-        axisLabel: { color: t.textMute, fontSize: 10, formatter: "{value}" } }],
+      xAxis: { ...(base.xAxis as object), data: labels, axisLabel: { color: t.textMute, fontSize: 10, interval: 5 } },
+      yAxis: [
+        { ...(base.yAxis as object), name: "°C", nameTextStyle: { color: t.textMute, fontSize: 10 },
+          axisLabel: { color: t.textMute, fontSize: 10, formatter: "{value}" } },
+        // Right import-price axis — mirrors Generation/Consumption so all three
+        // intraday charts share the same plot box + the heating plan reads
+        // against the price it's responding to (boost cheap / setback peak).
+        { ...(base.yAxis as object), position: "right", splitLine: { show: false },
+          axisLabel: { color: t.textMute, fontSize: 10, formatter: "{value}p" } },
+      ],
       series: [
         { name: "_bg", type: "line", data: slots.map(() => null), silent: true, z: 0,
           markArea: bands.length ? { silent: true, data: bands } : undefined,
@@ -129,6 +140,9 @@ export function HeatingPlanWidget({ plan, loading }: Props) {
         // Tank target — orange step.
         { name: "Tank", type: "line", step: "middle", showSymbol: false, connectNulls: false,
           data: tank, lineStyle: { color: t.thermal, width: 1.5, type: "dashed", cap: "round" }, z: 4 },
+        // Import price on the right axis (faint) — the signal HEM offsets against.
+        { name: "Import price", type: "line", step: "middle", showSymbol: false, yAxisIndex: 1,
+          data: price, lineStyle: { color: t.importColor, width: 1.25, opacity: 0.7, type: "dashed" }, z: 1 },
         ...(nowIdx >= 0 ? [{
           name: "_now", type: "effectScatter", silent: true, coordinateSystem: "cartesian2d",
           symbolSize: 8, z: 6, showEffectOn: "render",
@@ -149,6 +163,7 @@ export function HeatingPlanWidget({ plan, loading }: Props) {
           <span class="hpl-tok"><span class="hpl-line hpl-line--lwt" /> radiator LWT</span>
           <span class="hpl-tok"><span class="hpl-line hpl-line--curve" /> curve (no offset)</span>
           <span class="hpl-tok"><span class="hpl-line hpl-line--tank" /> tank</span>
+          <span class="hpl-tok"><span class="hpl-line" style="border-top:1.5px dashed var(--import)" /> import p</span>
           <span class="hpl-tok"><span class="hpl-sw hpl-sw--heat" /> heating</span>
           <span class="hpl-tok"><span class="hpl-sw hpl-sw--neg" /> paid to import</span>
           <span class="hpl-hint">◉ now · hover for detail</span>
