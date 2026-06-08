@@ -24,6 +24,7 @@ export interface TimelineLine {
   area?: boolean;        // gradient fill (the one bold "actual" line)
   step?: boolean;        // price reference
   yAxis?: number;        // 0 = left (kWh), 1 = right (price p)
+  isPrice?: boolean;     // a price series: forced onto the right p-axis + p-formatted in the tooltip
 }
 
 interface MetricTimelineProps {
@@ -77,7 +78,12 @@ export function MetricTimeline({
     const t = chartTheme();
     const base = baseOption();
     const animate = !reducedMotion();
-    const hasPrice = !barMode && (prices?.some((p) => p != null) ?? false);
+    // Right p-axis exists when there's a `prices` series OR any isPrice line.
+    const hasPriceLines = lines.some((l) => l.isPrice);
+    const hasPrice = !barMode && ((prices?.some((p) => p != null) ?? false) || hasPriceLines);
+    // Series rendered as prices (pence-formatted, right axis): the `prices`
+    // series (named priceLabel) plus any line flagged isPrice.
+    const priceNames = new Set<string>([priceLabel, ...lines.filter((l) => l.isPrice).map((l) => l.name)]);
     // Shading appears ONLY when bandPrices is given (the import price). A widget
     // that just wants a price LINE (export) passes no bandPrices → no zones, so
     // the two timelines don't both repeat the same tariff bands.
@@ -136,8 +142,8 @@ export function MetricTimeline({
       }
       return {
         name: ln.name, type: "line", smooth: true, showSymbol: false, connectNulls: false,
-        color: ln.color, data: ln.data, yAxisIndex: ln.yAxis ?? 0,
-        step: ln.step ? "middle" : undefined,
+        color: ln.color, data: ln.data, yAxisIndex: ln.isPrice ? 1 : (ln.yAxis ?? 0),
+        step: ln.step || ln.isPrice ? "middle" : undefined,
         lineStyle: {
           color: ln.color, width: ln.width ?? (ln.dashed ? 1.25 : 2.5),
           type: ln.dashed ? "dashed" : "solid", opacity: ln.dashed ? 0.8 : 1,
@@ -172,7 +178,7 @@ export function MetricTimeline({
             .filter((p) => p.seriesName && !p.seriesName.startsWith("_"))
             .map((p) => {
               if (p.value == null || !Number.isFinite(p.value)) return "";
-              const isPrice = p.seriesName === priceLabel;
+              const isPrice = p.seriesName != null && priceNames.has(p.seriesName);
               const txt = isPrice ? `${Number(p.value).toFixed(1)}p` : `${Number(p.value).toFixed(2)} ${unit}`;
               return `<div>${p.marker ?? ""} ${p.seriesName}: <strong>${txt}</strong></div>`;
             })

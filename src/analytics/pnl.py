@@ -83,6 +83,39 @@ def export_revenues_for_day(day: date) -> dict[str, float]:
     }
 
 
+def record_export_opportunity_for_day(day: date) -> dict[str, float]:
+    """Compute + persist a day's export opportunity cost (Agile − SEG).
+
+    Uses :func:`export_revenues_for_day` (both valuations on the same measured
+    export) and writes one idempotent row to ``export_opportunity_log``. The
+    running tally is the money left on the table by being on flat SEG instead of
+    Outgoing Agile — surfaced via ``GET /api/v1/export/opportunity``. Returns the
+    computed values. Best-effort; callers (the nightly cron) swallow exceptions.
+    """
+    rev = export_revenues_for_day(day)
+    seg = float(rev.get("seg_flat_pence", 0.0) or 0.0)
+    agile = float(rev.get("agile_pence", 0.0) or 0.0)
+    kwh = float(rev.get("export_kwh", 0.0) or 0.0)
+    db.upsert_export_opportunity(day, kwh, seg, agile)
+    return {"export_kwh": kwh, "seg_pence": seg, "agile_pence": agile,
+            "opportunity_pence": agile - seg}
+
+
+def backfill_export_opportunity(start_day: date, end_day: date) -> int:
+    """Compute + persist export opportunity for every day in the range. Returns
+    the number of days written. Used to seed history on first run."""
+    n = 0
+    d = start_day
+    while d <= end_day:
+        try:
+            record_export_opportunity_for_day(d)
+            n += 1
+        except Exception:  # pragma: no cover - best-effort backfill
+            pass
+        d = d + timedelta(days=1)
+    return n
+
+
 def _realised_export_pence(day: date) -> tuple[float, float]:
     """Realised export revenue (pence) + kWh, valued at the ACTUAL export tariff
     the household is paid on (``config.EXPORT_TARIFF_MODE``): ``seg_flat`` → flat

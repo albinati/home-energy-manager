@@ -731,6 +731,45 @@ def bulletproof_pv_error_log_job() -> None:
         logger.warning("pv_recent_bias refresh failed (non-fatal): %s", e)
 
 
+def bulletproof_export_opportunity_job() -> None:
+    """Persist yesterday's export opportunity cost (Outgoing Agile − flat SEG).
+
+    The running tally of money left on the table by being on flat SEG export
+    instead of Outgoing Agile — ammunition to push Octopus to switch. Backfills
+    the on-Agile history on first run (empty table). Best-effort; a failure must
+    not disturb the scheduler.
+    """
+    from datetime import date as _date
+
+    from ..analytics.pnl import (
+        backfill_export_opportunity,
+        record_export_opportunity_for_day,
+    )
+    try:
+        tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+    except Exception:
+        tz = UTC  # type: ignore[assignment]
+    yesterday = (datetime.now(tz) - timedelta(days=1)).date()
+    try:
+        existing = db.get_export_opportunity(_date(2000, 1, 1), yesterday)
+        if not existing:
+            # Seed history. Start at the Agile join date if configured, else 60d.
+            start = yesterday - timedelta(days=60)
+            cfg_start = (getattr(config, "AGILE_TARIFF_START_DATE", "") or "").strip()
+            if cfg_start:
+                try:
+                    start = max(start, _date.fromisoformat(cfg_start))
+                except ValueError:
+                    pass
+            n = backfill_export_opportunity(start, yesterday)
+            logger.info("export_opportunity backfill: %d days from %s", n, start.isoformat())
+        else:
+            record_export_opportunity_for_day(yesterday)
+            logger.info("export_opportunity recorded for %s", yesterday.isoformat())
+    except Exception as e:
+        logger.warning("export_opportunity job failed (non-fatal): %s", e)
+
+
 def bulletproof_pv_calibration_refresh_job() -> None:
     """Recompute the per-hour and per-(hour, cloud-bucket) PV calibration
     tables from fresh ``pv_realtime_history`` and ``meteo_forecast_value``
@@ -1874,6 +1913,14 @@ def start_background_scheduler() -> None:
                 id="bulletproof_pv_error_log",
             )
             logger.info("PV error-log rebuild cron scheduled (04:20 UTC daily)")
+            # Daily export opportunity cost (Agile vs SEG). 04:25 UTC — after the
+            # Fox/PV roll-ups (02:30) so the prior day's export is complete.
+            _background_scheduler.add_job(
+                bulletproof_export_opportunity_job,
+                CronTrigger(hour=4, minute=25, timezone=ZoneInfo("UTC")),
+                id="bulletproof_export_opportunity",
+            )
+            logger.info("Export-opportunity cron scheduled (04:25 UTC daily)")
             # PV calibration refresh — keeps pv_calibration_hourly +
             # pv_calibration_hourly_cloud current. Runs at 04:30 UTC, after
             # skill-log rebuild (04:15) and Fox/Daikin rollups (02:30 / 02:35)

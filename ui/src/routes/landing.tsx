@@ -17,6 +17,7 @@ import {
   getDhwSchedule,
   getHeatingPlan,
   getEnergyTodayCumulative,
+  getExportOpportunity,
   getApplianceSuggestions,
   getApplianceJobs,
   getAppliances,
@@ -111,6 +112,8 @@ export default function Landing() {
   // Lifetime rollup = 6 sequential /energy/monthly calls — deferred (it's a
   // small stats strip low in the hero, not the headline).
   const monthly = useMonthlyHistory(6, deferred);
+  // Export opportunity (SEG-vs-Agile money left on the table) — deferred, slow.
+  const exportOppy = useFetch(() => (deferred ? getExportOpportunity(60) : Promise.resolve(null)), [deferred]);
   // Daikin cached read — no refresh=true, so no live cloud call (30-min cache TTL).
   const daikin = useFetch(getDaikinStatus, []);
   const daikinQuota = useFetch(getDaikinQuota, []);
@@ -198,7 +201,7 @@ export default function Landing() {
         <Widget title="Generation" icon="☀" tone="plan" size="wide">
           <Suspense fallback={<Spinner label="Loading generation…" />}>
             <GenerationWidget period={period} periodData={periodInsights.data} periodLoading={periodInsights.loading}
-                              agile={agile.data}
+                              agile={agile.data} opportunity={exportOppy.data}
                               cheapP={metrics.data?.cheap_threshold_pence} peakP={metrics.data?.peak_threshold_pence} />
           </Suspense>
         </Widget>

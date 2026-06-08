@@ -25,6 +25,7 @@ import type {
   HeatingPlanResponse,
   PvTodayResponse,
   GridTodayResponse,
+  ExportOpportunityResponse,
   OptimizationInputsResponse,
   ActionResult,
   DaikinOperationMode,
@@ -52,6 +53,9 @@ export const getPvToday = (date?: string) =>
 // /pv/today; powers the synced Grid timeline widget.
 export const getGridToday = (date?: string) =>
   getJson<GridTodayResponse>(`/grid/today${date ? `?date=${encodeURIComponent(date)}` : ""}`);
+// Running tally of export £ left on the table by being on flat SEG vs Agile.
+export const getExportOpportunity = (days = 60) =>
+  getJson<ExportOpportunityResponse>(`/export/opportunity?days=${days}`);
 export const getOptimizationInputs = () =>
   getJson<OptimizationInputsResponse>("/optimization/inputs");
 export const getDaikinStatus = () => getJson<DaikinDevice[]>("/daikin/status");

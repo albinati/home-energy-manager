@@ -1066,6 +1066,20 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_pv_error_log_slot ON pv_error_log(slot_time_utc)"
     )
+    # Daily export opportunity cost: what the day's export earned on the current
+    # flat SEG tariff vs what it WOULD have earned on Outgoing Agile. The running
+    # tally of money left on the table by not being on Agile export — ammunition
+    # to push Octopus to switch. One row per local day, recomputed idempotently.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS export_opportunity_log (
+            day                TEXT PRIMARY KEY,
+            export_kwh         REAL,
+            seg_pence          REAL,
+            agile_pence        REAL,
+            opportunity_pence  REAL,
+            computed_at_utc    TEXT NOT NULL
+        )"""
+    )
     # Older DBs predate the Daikin LWT calibration table — idempotent CREATE.
     conn.execute(
         """CREATE TABLE IF NOT EXISTS daikin_lwt_kw_calibration (
@@ -4656,6 +4670,63 @@ def rebuild_pv_error_log_for_date(day: date) -> int:
         finally:
             conn.close()
     return written
+
+
+def upsert_export_opportunity(
+    day: date, export_kwh: float, seg_pence: float, agile_pence: float
+) -> None:
+    """Persist a day's export opportunity cost (Agile − SEG). Idempotent on day.
+
+    ``opportunity_pence`` = ``agile_pence − seg_pence`` (>0 = money left on the
+    table by being on flat SEG instead of Outgoing Agile). Best-effort.
+    """
+    opp = round(agile_pence - seg_pence, 4)
+    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with _lock:
+        conn = get_connection()
+        try:
+            conn.execute(
+                """INSERT INTO export_opportunity_log
+                     (day, export_kwh, seg_pence, agile_pence, opportunity_pence, computed_at_utc)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(day) DO UPDATE SET
+                     export_kwh=excluded.export_kwh,
+                     seg_pence=excluded.seg_pence,
+                     agile_pence=excluded.agile_pence,
+                     opportunity_pence=excluded.opportunity_pence,
+                     computed_at_utc=excluded.computed_at_utc""",
+                (day.isoformat(), round(export_kwh, 4), round(seg_pence, 4),
+                 round(agile_pence, 4), opp, now),
+            )
+            conn.commit()
+        except sqlite3.Error as e:
+            logger.warning("upsert_export_opportunity write failed for %s: %s", day, e)
+        finally:
+            conn.close()
+
+
+def get_export_opportunity(start_day: date, end_day: date) -> list[dict[str, Any]]:
+    """Daily export-opportunity rows in ``[start_day, end_day]`` (inclusive)."""
+    with _lock:
+        conn = get_connection()
+        try:
+            rows = conn.execute(
+                """SELECT day, export_kwh, seg_pence, agile_pence, opportunity_pence
+                   FROM export_opportunity_log
+                   WHERE day >= ? AND day <= ?
+                   ORDER BY day""",
+                (start_day.isoformat(), end_day.isoformat()),
+            ).fetchall()
+        except sqlite3.Error as e:
+            logger.warning("get_export_opportunity query failed: %s", e)
+            return []
+        finally:
+            conn.close()
+    return [
+        {"day": r[0], "export_kwh": r[1], "seg_pence": r[2],
+         "agile_pence": r[3], "opportunity_pence": r[4]}
+        for r in rows
+    ]
 
 
 def get_pv_error_log_range(start_utc_iso: str, end_utc_iso: str) -> list[dict[str, Any]]:
