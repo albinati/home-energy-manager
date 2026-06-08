@@ -187,8 +187,8 @@ export default function Landing() {
         </Widget>
 
         <Widget title="Plan" icon="🗓" tone="plan" size="medium">
-          <PlanWidget timeline={timeline.data} dhwSchedule={dhwSched.data?.rows} nowUtc={data.now_utc}
-                      foxMode={foxMode} foxActive={foxActive} />
+          <PlanWidget timeline={timeline.data} dhwSchedule={dhwSched.data?.rows} heatingPlan={heatingPlan.data}
+                      nowUtc={data.now_utc} foxMode={foxMode} foxActive={foxActive} />
         </Widget>
       </div>
 

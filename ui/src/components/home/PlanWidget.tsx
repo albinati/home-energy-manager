@@ -1,4 +1,4 @@
-import type { SchedulerTimeline, DhwScheduleRow } from "../../lib/types";
+import type { SchedulerTimeline, DhwScheduleRow, HeatingPlanResponse, HeatingPlanSlot } from "../../lib/types";
 import { formatRelativeSlot, endLabelFor, tankLabelOf, tankKindOf } from "../../lib/slotLabels";
 import { upcomingForcedWindows, labelForKind, kindColorVar } from "../../lib/planHelpers";
 import "./plan-widget.css";
@@ -6,16 +6,49 @@ import "./plan-widget.css";
 interface Props {
   timeline: SchedulerTimeline | null;
   dhwSchedule?: DhwScheduleRow[] | null;
+  heatingPlan?: HeatingPlanResponse | null;
   nowUtc?: string;
   foxMode?: string;
   foxActive?: boolean;
+}
+
+interface LwtWindow { kind: "boost" | "setback"; start_utc: string; end_utc: string; slot_count: number; peak: number; }
+
+// Upcoming space-heating LWT offset windows: contiguous future slots where HEM
+// nudges the radiator water temp up (boost, on cheap/negative) or down (setback,
+// on peak). Neutral (offset 0) slots break a run.
+function upcomingLwtWindows(slots: HeatingPlanSlot[], nowMs: number, limit = 3): LwtWindow[] {
+  const out: LwtWindow[] = [];
+  let cur: LwtWindow | null = null;
+  for (const s of slots) {
+    const st = s.slot_utc ? Date.parse(s.slot_utc) : NaN;
+    if (!Number.isFinite(st) || st <= nowMs) continue;   // future only
+    const off = s.lwt_offset ?? 0;
+    const kind = off > 0 ? "boost" : off < 0 ? "setback" : null;
+    if (kind) {
+      if (cur && cur.kind === kind) {
+        cur.end_utc = s.slot_utc!;
+        cur.slot_count += 1;
+        if (Math.abs(off) > Math.abs(cur.peak)) cur.peak = off;
+      } else {
+        if (cur) out.push(cur);
+        cur = { kind, start_utc: s.slot_utc!, end_utc: s.slot_utc!, slot_count: 1, peak: off };
+      }
+    } else if (cur) {
+      out.push(cur);
+      cur = null;
+      if (out.length >= limit) break;
+    }
+  }
+  if (cur) out.push(cur);
+  return out.slice(0, limit);
 }
 
 // The committed dispatch PLAN, lifted out of the Live-power tile into its own
 // card next to Weather: the upcoming Fox battery windows + the tank (DHW)
 // schedule, side by side. Forward-looking only — "what the system is about to
 // do". The live power flow stays in the Live-power tile.
-export function PlanWidget({ timeline, dhwSchedule, nowUtc, foxMode, foxActive }: Props) {
+export function PlanWidget({ timeline, dhwSchedule, heatingPlan, nowUtc, foxMode, foxActive }: Props) {
   const forced = timeline ? upcomingForcedWindows(timeline, 4) : [];
   const nowMs = nowUtc ? Date.parse(nowUtc) : Date.now();
   const tank = (dhwSchedule || [])
@@ -23,9 +56,13 @@ export function PlanWidget({ timeline, dhwSchedule, nowUtc, foxMode, foxActive }
     .sort((a, b) => Date.parse(a.start_utc!) - Date.parse(b.start_utc!))
     .slice(0, 4);
 
+  const lwt = upcomingLwtWindows(
+    (heatingPlan?.slots || []).filter((s) => !!s.slot_utc), nowMs, 3,
+  );
+
   const runId = timeline?.run_id ?? null;
   const planDate = timeline?.plan_date ?? null;
-  const nothing = forced.length === 0 && tank.length === 0;
+  const nothing = forced.length === 0 && tank.length === 0 && lwt.length === 0;
 
   return (
     <div class="planw">
@@ -56,6 +93,31 @@ export function PlanWidget({ timeline, dhwSchedule, nowUtc, foxMode, foxActive }
           </div>
         ) : (
           <span class="planw-empty">Self-use — no forced windows ahead</span>
+        )}
+      </div>
+
+      {/* HEATING (space-heating LWT offset) */}
+      <div class="planw-group">
+        <div class="planw-head"><span class="planw-title">Heating</span></div>
+        {lwt.length > 0 ? (
+          <div class="planw-chips">
+            {lwt.map((w) => {
+              const start = formatRelativeSlot(w.start_utc, nowUtc);
+              const endTime = endLabelFor(w.end_utc);
+              const range = w.slot_count > 1 ? `${start.timeLabel}–${endTime}` : start.timeLabel;
+              const label = w.kind === "boost" ? "Boost" : "Setback";
+              return (
+                <span key={w.start_utc} class={`planw-chip planw-chip--lwt-${w.kind}`}
+                      title={`Radiator ${label} ${w.peak > 0 ? "+" : ""}${w.peak}°C · ${start.dayLabel ? start.dayLabel + " " : ""}${range}`}>
+                  <span class="planw-dot" style={`background:${w.kind === "boost" ? "var(--ok)" : "var(--warn)"}`} />
+                  {label} <span class="planw-temp-inline">{w.peak > 0 ? "+" : ""}{w.peak}°</span>
+                  <span class="planw-when">{start.dayLabel ? `${start.dayLabel} ` : ""}{range}</span>
+                </span>
+              );
+            })}
+          </div>
+        ) : (
+          <span class="planw-empty">Weather curve — no LWT offset ahead</span>
         )}
       </div>
 
