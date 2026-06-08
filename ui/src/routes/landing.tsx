@@ -31,6 +31,7 @@ import { Hero } from "../components/home/Hero";
 import { HeatingWidget } from "../components/home/HeatingWidget";
 import { WeatherWidget } from "../components/home/WeatherWidget";
 import { ApplianceWidget } from "../components/home/ApplianceWidget";
+import { PlanWidget } from "../components/home/PlanWidget";
 import type { MonthlyEnergy } from "../lib/types";
 import "../components/home/home.css";
 
@@ -148,6 +149,10 @@ export default function Landing() {
 
   const data = now.data;
   const s = data.state;
+  // Fox inverter mode for the Plan widget — only surface the pill when actively
+  // forcing the battery (SelfUse is the resting state).
+  const foxMode = data.current_slot?.fox_mode ?? undefined;
+  const foxActive = foxMode ? !["selfuse", "self_use", "idle", "—", ""].includes(foxMode.toLowerCase()) : false;
 
   return (
     <div class="home">
@@ -176,6 +181,11 @@ export default function Landing() {
 
         <Widget title="Weather" icon="⛅" tone="thermal" size="medium">
           <WeatherWidget weather={weather.data} pv={pvToday.data} />
+        </Widget>
+
+        <Widget title="Plan" icon="🗓" tone="plan" size="medium">
+          <PlanWidget timeline={timeline.data} dhwSchedule={dhwSched.data?.rows} nowUtc={data.now_utc}
+                      foxMode={foxMode} foxActive={foxActive} />
         </Widget>
       </div>
 
