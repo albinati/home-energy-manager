@@ -43,7 +43,14 @@ export function Hero({ metrics, cockpit, agile, monthly, period, periodState, pe
   const negCreditToday = todayCum?.negative_import_credit_gbp ?? null;
   const exportToday = todayCum?.export_revenue_gbp ?? null;
   const standingToday = todayCum?.standing_charge_gbp ?? null;         // fixed daily standing in the net
-  const consumptionToday = todayCum?.consumption_kwh ?? null;          // total load so far today (the headline kWh)
+  // The cost-relevant kWh: what was drawn FROM THE GRID (import), not total
+  // household load — solar self-consumption is free, only grid import is billed.
+  const gridImportToday = todayCum?.import_kwh ?? null;
+  // "Meta a bater": the avg import p/kWh needed to match British Gas (Agile
+  // loses on standing, must win on the unit price), vs the realised avg so far.
+  const breakevenP = todayCum?.breakeven_avg_import_p ?? null;
+  const realisedAvgP = todayCum?.realised_avg_import_p ?? null;
+  const beatingTarget = breakevenP != null && realisedAvgP != null && realisedAvgP <= breakevenP;
   const showEarnings = (earningsToday ?? 0) > 0.005;                   // hide on a plain spend day
 
   // --- The selected period, real money (NET, incl standing, measured grid) ---
@@ -72,7 +79,7 @@ export function Hero({ metrics, cockpit, agile, monthly, period, periodState, pe
   const periodNetAnim = useAnimatedNumber(periodNet);
   const savedVsBGAnim = useAnimatedNumber(savedVsBG);
   const gastoTodayAnim = useAnimatedNumber(gastoToday);
-  const consumptionTodayAnim = useAnimatedNumber(consumptionToday);
+  const gridImportTodayAnim = useAnimatedNumber(gridImportToday);
   const earningsTodayAnim = useAnimatedNumber(earningsToday);
   const solarAnim = useAnimatedNumber(lifetime?.solar_kwh ?? null);
   const exportKwhAnim = useAnimatedNumber(lifetime?.export_kwh ?? null);
@@ -99,12 +106,12 @@ export function Hero({ metrics, cockpit, agile, monthly, period, periodState, pe
         <div class="hero-headline hero-headline--enter">
           {periodNetAnim == null ? (periodLoading ? <SkelHero /> : "—") : gbp(periodNetAnim)}
         </div>
-        {/* The metric the household cares about most: how much energy was used
-            today, with the fixed daily standing charge alongside it. */}
-        {consumptionTodayAnim != null && (
+        {/* The cost-relevant metric: kWh drawn from the grid (what's billed),
+            with the fixed daily standing charge alongside it. */}
+        {gridImportTodayAnim != null && (
           <div class="hero-keystat">
-            <span class="hero-keystat-value">{kwh(consumptionTodayAnim, 1)}</span>
-            <span class="hero-keystat-label">consumido{isNow ? " hoje" : ""}</span>
+            <span class="hero-keystat-value">{kwh(gridImportTodayAnim, 1)}</span>
+            <span class="hero-keystat-label">da rede{isNow ? " hoje" : ""}</span>
             {standingToday != null && standingToday > 0.0001 && (
               <span class="hero-keystat-aux">· standing {gbp(standingToday)}/dia</span>
             )}
@@ -119,6 +126,21 @@ export function Hero({ metrics, cockpit, agile, monthly, period, periodState, pe
                 {savedVsBGAnim >= 0 ? "Economizou " : "Gastou +"}{gbp(Math.abs(savedVsBGAnim))}
               </strong>
               &nbsp;hoje vs {fixedLabel}
+            </div>
+          )}
+          {/* The target to beat: Agile loses on standing, so it must keep the
+              average import price under this break-even to win vs the fixed
+              tariff. Spread over the day's forecast grid import (stable). */}
+          {breakevenP != null && (
+            <div class="hero-subline hero-subline-dma" title={`Para bater ${fixedLabel}, o preço médio de import precisa ficar ≤ ${breakevenP.toFixed(1)}p/kWh — a Agile paga ~${gbp(standingToday ?? 0)}/dia de standing, mais que a tarifa fixa, então tem que ganhar na energia. Diluído no forecast de import do dia (${todayCum?.forecast_import_kwh ?? 0} kWh).`}>
+              🎯 meta: import médio ≤ <strong>{breakevenP.toFixed(1)}p</strong>
+              {realisedAvgP != null && (
+                <>&nbsp;·&nbsp;hoje&nbsp;
+                  <strong class={beatingTarget ? "hero-strong-pos" : "hero-strong-neg"}>
+                    {realisedAvgP.toFixed(1)}p {beatingTarget ? "✓" : "✗"}
+                  </strong>
+                </>
+              )}
             </div>
           )}
           <div class="hero-subline hero-subline-dma">
