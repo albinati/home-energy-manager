@@ -3080,6 +3080,9 @@ async def energy_today_cumulative():
     neg_import_credit = max(0.0, -import_cost)
     return {
         "date": today.isoformat(),
+        # Total household consumption (load) so far today — the headline kWh the
+        # hero leads with (the metric the user cares about most).
+        "consumption_kwh": pnl.get("kwh", 0.0),
         "import_kwh": pnl.get("import_kwh", 0.0),
         "export_kwh": pnl.get("export_kwh", 0.0),
         "import_cost_gbp": pnl.get("import_cost_gbp", 0.0),

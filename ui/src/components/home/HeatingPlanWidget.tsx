@@ -42,7 +42,10 @@ export function HeatingPlanWidget({ plan, loading }: Props) {
     if (!chartRef.current || !plan?.slots?.length) return;
     const t = chartTheme();
     const base = baseOption();
-    const slots = plan.slots;
+    // Today only — yesterday/tomorrow dropped (the user finds today enough).
+    const todayKey = new Date().toDateString();
+    const slots = plan.slots.filter((s) => new Date(s.slot_utc).toDateString() === todayKey);
+    if (!slots.length) return;
     const n = slots.length;
     const labels = slots.map((s) => localHM(s.slot_utc));
 
@@ -139,11 +142,6 @@ export function HeatingPlanWidget({ plan, loading }: Props) {
 
   return (
     <div class="heating-plan-chart">
-      <div class="hpl-days">
-        {(plan?.days || []).map((d) => (
-          <span key={d.date} class={`hpl-day${d.label === "Today" ? " hpl-day--today" : ""}`}>{d.label}</span>
-        ))}
-      </div>
       <div ref={ref} style={{ width: "100%", height: "300px" }} />
       {plan?.slots?.length ? (
         <div class="hpl-legend" role="note" aria-label="Chart legend">

@@ -13,7 +13,6 @@ import {
   getEnergyPeriod,
   getDaikinStatus,
   getDaikinQuota,
-  getFairCompare,
   getPvToday,
   getDhwSchedule,
   getHeatingPlan,
@@ -22,18 +21,16 @@ import {
   getApplianceJobs,
   getAppliances,
 } from "../lib/endpoints";
-import { Link } from "wouter-preact";
 import { Widget } from "../components/common/Widget";
 import { Spinner } from "../components/common/Spinner";
 import { RefreshCountdown } from "../components/common/RefreshCountdown";
 import { PeriodNavigator } from "../components/shell/PeriodNavigator";
-import { usePeriod, periodFetchOpts, periodLabel } from "../lib/period";
+import { usePeriod, periodFetchOpts } from "../lib/period";
 import { LivePowerWidget } from "../components/cockpit/LivePowerWidget";
 import { Hero } from "../components/home/Hero";
 import { HeatingWidget } from "../components/home/HeatingWidget";
 import { WeatherWidget } from "../components/home/WeatherWidget";
 import { ApplianceWidget } from "../components/home/ApplianceWidget";
-import { gbp } from "../lib/format";
 import type { MonthlyEnergy } from "../lib/types";
 import "../components/home/home.css";
 
@@ -136,13 +133,6 @@ export default function Landing() {
     () => getEnergyPeriod(period.gran, periodFetchOpts(period)),
     [period.gran, period.anchor],
   );
-  // Fair tariff comparison for the selected period — a light summary for the
-  // home link card; the full breakdown lives on the /insights tab. Deferred
-  // (network: catalogue) so it doesn't compete with the above-the-fold data.
-  const fairCmp = useFetch(
-    () => (deferred ? getFairCompare(period.gran, period.anchor) : Promise.resolve(null)),
-    [deferred, period.gran, period.anchor],
-  );
 
   if (now.loading && !now.data) {
     return <div class="home"><Spinner label="Loading dashboard…" /></div>;
@@ -213,28 +203,6 @@ export default function Landing() {
           <Suspense fallback={<Spinner label="Loading heating plan…" />}>
             <HeatingPlanWidget plan={heatingPlan.data} loading={heatingPlan.loading} />
           </Suspense>
-        </Widget>
-      </div>
-
-      {/* ── MONEY (bottom of page) — link to the full Insights tab ──── */}
-      <div class="widget-grid widget-band">
-        <Widget title="Tariff comparison" icon="📊" tone="savings" size="wide">
-          <Link href="/insights" class="tariff-link-card">
-            <div class="tariff-link-main">
-              {(() => {
-                const d = fairCmp.data;
-                if (!d || !d.tariffs.length) {
-                  return <span class="muted">Compare your usage against every tariff →</span>;
-                }
-                const winner = d.tariffs.find((r) => r.product_code === d.winner_product_code);
-                const onBest = winner?.is_current;
-                return onBest
-                  ? <span>You're on the cheapest tariff for {periodLabel(period)} — <strong>{winner?.display_name}</strong>.</span>
-                  : <span>Cheapest for {periodLabel(period)}: <strong>{winner?.display_name}</strong> — save <strong>{gbp(d.savings_vs_current_pounds)}</strong>.</span>;
-              })()}
-            </div>
-            <span class="tariff-link-cta">Compare →</span>
-          </Link>
         </Widget>
       </div>
     </div>

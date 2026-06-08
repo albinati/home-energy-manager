@@ -43,6 +43,7 @@ export function Hero({ metrics, cockpit, agile, monthly, period, periodState, pe
   const negCreditToday = todayCum?.negative_import_credit_gbp ?? null;
   const exportToday = todayCum?.export_revenue_gbp ?? null;
   const standingToday = todayCum?.standing_charge_gbp ?? null;         // fixed daily standing in the net
+  const consumptionToday = todayCum?.consumption_kwh ?? null;          // total load so far today (the headline kWh)
   const showEarnings = (earningsToday ?? 0) > 0.005;                   // hide on a plain spend day
 
   // --- The selected period, real money (NET, incl standing, measured grid) ---
@@ -71,6 +72,7 @@ export function Hero({ metrics, cockpit, agile, monthly, period, periodState, pe
   const periodNetAnim = useAnimatedNumber(periodNet);
   const savedVsBGAnim = useAnimatedNumber(savedVsBG);
   const gastoTodayAnim = useAnimatedNumber(gastoToday);
+  const consumptionTodayAnim = useAnimatedNumber(consumptionToday);
   const earningsTodayAnim = useAnimatedNumber(earningsToday);
   const solarAnim = useAnimatedNumber(lifetime?.solar_kwh ?? null);
   const exportKwhAnim = useAnimatedNumber(lifetime?.export_kwh ?? null);
@@ -97,6 +99,17 @@ export function Hero({ metrics, cockpit, agile, monthly, period, periodState, pe
         <div class="hero-headline hero-headline--enter">
           {periodNetAnim == null ? (periodLoading ? <SkelHero /> : "—") : gbp(periodNetAnim)}
         </div>
+        {/* The metric the household cares about most: how much energy was used
+            today, with the fixed daily standing charge alongside it. */}
+        {consumptionTodayAnim != null && (
+          <div class="hero-keystat">
+            <span class="hero-keystat-value">{kwh(consumptionTodayAnim, 1)}</span>
+            <span class="hero-keystat-label">consumido{isNow ? " hoje" : ""}</span>
+            {standingToday != null && standingToday > 0.0001 && (
+              <span class="hero-keystat-aux">· standing {gbp(standingToday)}/dia</span>
+            )}
+          </div>
+        )}
         {/* TODAY money block — one British-Gas comparison (deduped), the day's
             bill, and the concrete money earned (negative-import credit + export). */}
         <div class="hero-sublines">

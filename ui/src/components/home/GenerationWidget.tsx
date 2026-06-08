@@ -80,7 +80,7 @@ export function GenerationWidget({ period, periodData, periodLoading, agile, che
           <span class="tlw-summary-label">esperado hoje · {agile?.current_export_p != null ? `export ${agile.current_export_p.toFixed(1)}p agora` : ""}</span>
         </div>
         <MetricTimeline labels={labels} lines={lines} prices={exportPrice} bandPrices={importPrice}
-                        nowIdx={nowIdx} cheapAt={cheapP} peakAt={peakP} height={270} />
+                        priceLabel="Export price" nowIdx={nowIdx} cheapAt={cheapP} peakAt={peakP} height={270} />
         <div class="tlw-legend">
           <span><i style={`border-color:${t.pv}`} /> solar actual</span>
           <span><i class="dashed" style={`border-color:${withAlpha(t.pv, 0.6)}`} /> solar plan</span>

@@ -124,6 +124,23 @@
  * inline colour; surrounding label stays dim so only the figure carries it. */
 .hero-strong-pos { color: var(--ok); font-weight: 600; }
 .hero-strong-neg { color: var(--bad); font-weight: 600; }
+/* Today's consumption — the headline kWh, prominent right under the £ bill,
+ * with the daily standing charge alongside. */
+.hero-keystat {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  margin-top: 2px;
+  flex-wrap: wrap;
+}
+.hero-keystat-value {
+  font-size: 1.35rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+.hero-keystat-label { font-size: var(--font-xs); color: var(--text-dim); }
+.hero-keystat-aux { font-size: var(--font-xs); color: var(--text-mute); font-variant-numeric: tabular-nums; }
 /* The standing-charge deduction in the "foi pago" breakdown — recessed so the
  * earned figure stays prominent while the arithmetic (earned − standing = net)
  * still reads. */

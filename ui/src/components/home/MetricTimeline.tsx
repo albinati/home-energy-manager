@@ -50,7 +50,8 @@ interface MetricTimelineProps {
 type Tier = "negative" | "cheap" | "standard" | "peak" | null;
 
 export function MetricTimeline({
-  labels, lines, prices, bandPrices, nowIdx = -1, cheapAt, peakAt, barMode = false, height = 260, unit = "kWh",
+  labels, lines, prices, bandPrices, priceLabel = "Import price",
+  nowIdx = -1, cheapAt, peakAt, barMode = false, height = 260, unit = "kWh",
 }: MetricTimelineProps) {
   const ref = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<EChartsType | null>(null);
@@ -160,7 +161,22 @@ export function MetricTimeline({
       legend: { show: false },
       tooltip: {
         ...(base.tooltip as object),
-        valueFormatter: (v: number | null) => (v == null ? "—" : `${Number(v).toFixed(2)} ${unit}`),
+        // Hide the silent helper series (_bands / _now) and format the price
+        // series in pence, everything else in the energy unit.
+        formatter: (params: Array<{ axisValue?: string; seriesName?: string; value?: number | null; marker?: string }>) => {
+          const arr = Array.isArray(params) ? params : [params];
+          if (!arr.length) return "";
+          const rows = arr
+            .filter((p) => p.seriesName && !p.seriesName.startsWith("_"))
+            .map((p) => {
+              if (p.value == null || !Number.isFinite(p.value)) return "";
+              const isPrice = p.seriesName === priceLabel;
+              const txt = isPrice ? `${Number(p.value).toFixed(1)}p` : `${Number(p.value).toFixed(2)} ${unit}`;
+              return `<div>${p.marker ?? ""} ${p.seriesName}: <strong>${txt}</strong></div>`;
+            })
+            .join("");
+          return `<strong>${arr[0].axisValue ?? ""}</strong>${rows}`;
+        },
       },
       xAxis: {
         ...(base.xAxis as object), data: labels,
@@ -175,9 +191,10 @@ export function MetricTimeline({
           z: 0,
         }] : []),
         ...kwhSeries,
-        // Import price → dashed step on the right axis (intraday only).
+        // Price → dashed step on the right axis (intraday only). Named per the
+        // widget (export on generation, import on consumption).
         ...(hasPrice ? [{
-          name: "Import price", type: "line", step: "middle", showSymbol: false, color: t.importColor,
+          name: priceLabel, type: "line", step: "middle", showSymbol: false, color: t.importColor,
           yAxisIndex: 1, data: prices, lineStyle: { color: t.importColor, width: 1.5, opacity: 0.8, type: "dashed" }, z: 1,
         }] : []),
         // Pulsing "now" ripple at the current slot.

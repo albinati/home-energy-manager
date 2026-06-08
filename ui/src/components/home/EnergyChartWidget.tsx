@@ -173,7 +173,7 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
           <span class="echart-l2"><span class="echart-l2-sw" style="background:var(--accent)" /> Appliances</span>
           <span class="echart-l2"><span class="echart-l2-sw" style="background:var(--warn)" /> Heat pump</span>
           <span class="echart-l2"><span class="echart-l2-line" /> Forecast</span>
-          <span class="echart-l2"><span class="echart-l2-line" style="border-color:var(--import)" /> Import price</span>
+          <span class="echart-l2"><span class="echart-l2-line" style="border-top-color:var(--import)" /> Import price</span>
           <span class="echart-l2-hint">stacked = where your energy goes · paid/cheap/peak shaded · ◉ now</span>
         </div>
       )}
