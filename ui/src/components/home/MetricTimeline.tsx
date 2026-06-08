@@ -32,11 +32,13 @@ interface MetricTimelineProps {
   /** Price per slot (p/kWh) drawn on the right axis — IMPORT on the consumption
    * widget, EXPORT (Octopus Outgoing) on the generation widget. */
   prices?: (number | null)[];
-  /** Optional separate price series that drives the cheap/peak/negative tariff
-   * SHADING (always the import price — the canonical tariff context). When
-   * omitted, `prices` is used for both the shading and the right-axis line. */
+  /** Optional price series that drives the cheap/peak/negative tariff SHADING
+   * (the import price). Shading appears ONLY when this is provided — so a
+   * widget can show a price LINE (e.g. export) without the import zones, which
+   * avoids both timelines repeating the same tariff bands. */
   bandPrices?: (number | null)[];
-  priceLabel?: string;          // right-axis suffix label intent (unused styling hook)
+  priceLabel?: string;          // right-axis price series name (Import/Export price)
+  priceColor?: string;          // right-axis line colour (import red / export green)
   /** Slot index of "now" (intraday only); -1 / undefined to hide. */
   nowIdx?: number;
   cheapAt?: number | null;
@@ -50,7 +52,7 @@ interface MetricTimelineProps {
 type Tier = "negative" | "cheap" | "standard" | "peak" | null;
 
 export function MetricTimeline({
-  labels, lines, prices, bandPrices, priceLabel = "Import price",
+  labels, lines, prices, bandPrices, priceLabel = "Import price", priceColor,
   nowIdx = -1, cheapAt, peakAt, barMode = false, height = 260, unit = "kWh",
 }: MetricTimelineProps) {
   const ref = useRef<HTMLDivElement | null>(null);
@@ -76,10 +78,10 @@ export function MetricTimeline({
     const base = baseOption();
     const animate = !reducedMotion();
     const hasPrice = !barMode && (prices?.some((p) => p != null) ?? false);
-    // The shading always follows the IMPORT price (the canonical cheap/peak/
-    // negative classification), even on the generation widget where the right-
-    // axis LINE is the export price.
-    const shadePrices = bandPrices ?? prices;
+    // Shading appears ONLY when bandPrices is given (the import price). A widget
+    // that just wants a price LINE (export) passes no bandPrices → no zones, so
+    // the two timelines don't both repeat the same tariff bands.
+    const shadePrices = bandPrices;
     const hasBands = !barMode && (shadePrices?.some((p) => p != null) ?? false);
 
     // --- Tariff-tier background bands (intraday only). Classify each slot by
@@ -194,8 +196,8 @@ export function MetricTimeline({
         // Price → dashed step on the right axis (intraday only). Named per the
         // widget (export on generation, import on consumption).
         ...(hasPrice ? [{
-          name: priceLabel, type: "line", step: "middle", showSymbol: false, color: t.importColor,
-          yAxisIndex: 1, data: prices, lineStyle: { color: t.importColor, width: 1.5, opacity: 0.8, type: "dashed" }, z: 1,
+          name: priceLabel, type: "line", step: "middle", showSymbol: false, color: priceColor ?? t.importColor,
+          yAxisIndex: 1, data: prices, lineStyle: { color: priceColor ?? t.importColor, width: 1.5, opacity: 0.85, type: "dashed" }, z: 1,
         }] : []),
         // Pulsing "now" ripple at the current slot.
         ...(!barMode && nowIdx >= 0 ? [{

@@ -36,7 +36,6 @@ export function Hero({ metrics, cockpit, agile, monthly, period, periodState, pe
   // --- TODAY's real money (the hero money block, independent of the period
   // selector). Uses the CONFIGURED fixed-tariff (British Gas) comparison — NOT
   // the generic ~23p fixed shadow that mislabels + inflates the saving. ---
-  const gastoToday = todayCum?.realised_net_cost_gbp ?? null;          // net bill (<0 = credit)
   const savedVsBG = todayCum?.delta_vs_fixed_tariff_real_gbp ?? null;  // £ cheaper than British Gas
   const fixedLabel = todayCum?.fixed_tariff_label || metrics?.fixed_tariff?.label || "British Gas";
   const earningsToday = todayCum?.earnings_today_gbp ?? null;          // negative-import credit + export
@@ -78,7 +77,6 @@ export function Hero({ metrics, cockpit, agile, monthly, period, periodState, pe
   // Smooth tweens for the refreshing figures.
   const periodNetAnim = useAnimatedNumber(periodNet);
   const savedVsBGAnim = useAnimatedNumber(savedVsBG);
-  const gastoTodayAnim = useAnimatedNumber(gastoToday);
   const gridImportTodayAnim = useAnimatedNumber(gridImportToday);
   const earningsTodayAnim = useAnimatedNumber(earningsToday);
   const solarAnim = useAnimatedNumber(lifetime?.solar_kwh ?? null);
@@ -143,15 +141,13 @@ export function Hero({ metrics, cockpit, agile, monthly, period, periodState, pe
               )}
             </div>
           )}
-          <div class="hero-subline hero-subline-dma">
-            Conta hoje:&nbsp;
-            {gastoTodayAnim == null ? "—"
-              : gastoTodayAnim < 0
-                ? <strong class="hero-strong-pos">crédito {gbp(Math.abs(gastoTodayAnim))}</strong>
-                : <strong>{gbp(gastoTodayAnim)}</strong>}
-            {showEarnings && earningsTodayAnim != null && (
+          {/* "Conta hoje" removed — the headline above already IS today's net
+              bill (default period = day). Keep only the concrete "foi pago"
+              earnings, which is distinct info (money that came in). */}
+          {showEarnings && earningsTodayAnim != null && (
+            <div class="hero-subline hero-subline-dma">
               <span class="hero-earnings" title="Dinheiro que entrou hoje: crédito da importação a preço negativo + receita de export. A standing charge fixa do dia é descontada para chegar na conta.">
-                &nbsp;·&nbsp;⚡ foi pago&nbsp;<strong class="hero-strong-pos">{gbp(earningsTodayAnim)}</strong>
+                ⚡ foi pago&nbsp;<strong class="hero-strong-pos">{gbp(earningsTodayAnim)}</strong>
                 {(negCreditToday ?? 0) > 0.005 && (exportToday ?? 0) > 0.005
                   ? <> ({gbp(negCreditToday!)} negativo + {gbp(exportToday!)} export)</>
                   : (negCreditToday ?? 0) > 0.005
@@ -161,8 +157,8 @@ export function Hero({ metrics, cockpit, agile, monthly, period, periodState, pe
                   <span class="hero-standing"> &minus; {gbp(standingToday!)} standing</span>
                 )}
               </span>
-            )}
-          </div>
+            </div>
+          )}
         </div>
 
         {(curImportP != null || socPct != null) && (
