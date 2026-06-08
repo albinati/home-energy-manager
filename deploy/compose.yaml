@@ -80,8 +80,12 @@ services:
         condition: service_healthy
 
     ports:
+      # Loopback ONLY — the SPA is served to the world exclusively through the
+      # Tailscale funnel (https://<host>.ts.net:8443, valid TLS cert), which
+      # proxies to this loopback port. We deliberately do NOT bind the Tailscale
+      # interface here: that would expose the UI as plain HTTP (no TLS) to the
+      # tailnet. Funnel → 127.0.0.1:8080 is the only path in.
       - "127.0.0.1:8080:80"
-      - "${HEM_TAILSCALE_IP:-127.0.0.1}:8080:80"
 
     environment:
       HEM_API_URL: http://hem:8000
