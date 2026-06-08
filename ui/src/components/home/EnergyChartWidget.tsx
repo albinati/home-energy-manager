@@ -462,7 +462,11 @@ function optionForDay(
           (price[i] != null ? ` · ${price[i]!.toFixed(1)}p/kWh` : "");
         const totalRow = totalActual[i] != null
           ? `<div style="margin-top:2px;font-size:11px;color:${t.text};">Total <strong>${totalActual[i]!.toFixed(2)} kWh</strong></div>` : "";
-        return head + totalRow +
+        // Explicit import-price row — the cost of each kWh drawn from the grid
+        // in this slot (the user couldn't find it in the hover otherwise).
+        const priceRow = price[i] != null
+          ? `<div style="margin-top:2px;font-size:11px;color:${t.importColor};">Import <strong>${price[i]!.toFixed(1)}p/kWh</strong></div>` : "";
+        return head + totalRow + priceRow +
           bar("Base", baseActual[i], t.house) +
           (hasAppliance ? bar("Appliances", applianceActual[i], t.accent) : "") +
           bar("Heat pump", daikinActual[i], t.warn) +

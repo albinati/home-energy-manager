@@ -21,7 +21,7 @@ interface Props {
 // vs realised + grid export, with the Octopus EXPORT price slots on the right
 // axis and the cheap/peak/negative tariff zones shaded (from the import price —
 // the canonical tariff context). Week/month/year → daily solar + export bars.
-export function GenerationWidget({ period, periodData, periodLoading, agile, cheapP, peakP }: Props) {
+export function GenerationWidget({ period, periodData, periodLoading, agile }: Props) {
   const isDay = period.gran === "day";
   const dayArg = isCurrentPeriod(period) ? undefined : period.anchor;
   const day = useFetch(
@@ -53,8 +53,7 @@ export function GenerationWidget({ period, periodData, periodLoading, agile, che
       const v = expBy.get(s.slot_utc);
       return v == null ? null : round2(v);
     });
-    // Prices: zones from import (pv.import_price_p); right-axis line = export.
-    const importPrice = slots.map((s) => s.import_price_p ?? null);
+    // Right-axis price line = the Octopus EXPORT slots (what export earns).
     const expPriceBy = new Map<string, number>();
     for (const es of agile?.export_slots ?? []) expPriceBy.set(normZ(es.valid_from), es.p);
     const exportPrice = slots.map((s) => {
@@ -79,13 +78,17 @@ export function GenerationWidget({ period, periodData, periodLoading, agile, che
           <span class="tlw-summary-value tlw-pos">{exportedTotal.toFixed(1)}<span class="tlw-summary-unit"> kWh export</span></span>
           <span class="tlw-summary-label">esperado hoje · {agile?.current_export_p != null ? `export ${agile.current_export_p.toFixed(1)}p agora` : ""}</span>
         </div>
-        <MetricTimeline labels={labels} lines={lines} prices={exportPrice} bandPrices={importPrice}
-                        priceLabel="Export price" nowIdx={nowIdx} cheapAt={cheapP} peakAt={peakP} height={270} />
+        {/* No cheap/peak/negative shading here — those are the IMPORT tariff
+            and belong on Consumption; Generation's tariff context is the export
+            price line (green), so the two timelines don't repeat the same bands. */}
+        <MetricTimeline labels={labels} lines={lines} prices={exportPrice}
+                        priceLabel="Export price" priceColor={t.exportColor} nowIdx={nowIdx} height={270} />
         <div class="tlw-legend">
           <span><i style={`border-color:${t.pv}`} /> solar actual</span>
           <span><i class="dashed" style={`border-color:${withAlpha(t.pv, 0.6)}`} /> solar plan</span>
-          <span><i style={`border-color:${t.exportColor}`} /> export</span>
-          <span><i class="dashed" style={`border-color:${t.importColor}`} /> export price · paid/cheap/peak shaded</span>
+          <span><i style={`border-color:${t.exportColor}`} /> export kWh</span>
+          <span><i class="dashed" style={`border-color:${t.exportColor}`} /> export price</span>
+          <span>◉ now</span>
         </div>
       </div>
     );
