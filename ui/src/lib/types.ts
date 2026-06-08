@@ -138,6 +138,23 @@ export interface PvTodayResponse {
   plan_run_id?: number | null;
 }
 
+/* ----- /export/opportunity — money lost on flat SEG vs Outgoing Agile ----- */
+
+export interface ExportOpportunityResponse {
+  export_mode: string;             // "seg_flat" | "outgoing_agile"
+  seg_rate_p: number;
+  daily: Array<{ day: string; export_kwh: number; seg_gbp: number; agile_gbp: number; opportunity_gbp: number }>;
+  n_days: number;
+  export_kwh: number;
+  seg_gbp: number;
+  agile_gbp: number;
+  opportunity_gbp: number;         // total Agile − SEG over the window (>0 = lost on SEG)
+  annualized_gbp: number;
+  avg_seg_p: number;
+  avg_agile_p: number;
+  today: { export_kwh: number; opportunity_gbp: number };
+}
+
 /* ----- /grid/today — per-slot planned-vs-realised grid import/export ----- */
 
 export interface GridTodaySlot {

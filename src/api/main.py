@@ -3136,6 +3136,73 @@ async def energy_today_cumulative():
     }
 
 
+@app.get("/api/v1/export/opportunity")
+async def export_opportunity(days: int = 60):
+    """Daily export opportunity cost (Outgoing Agile − flat SEG) + running totals.
+
+    The money left on the table by being on flat SEG export instead of Outgoing
+    Agile. Persisted nightly to ``export_opportunity_log``; this lazily backfills
+    on an empty table so the figure is there right after deploy. ``today`` is the
+    live in-progress accrual (not yet persisted).
+    """
+    from datetime import date as _date
+    from zoneinfo import ZoneInfo as _ZI
+
+    from src.analytics import pnl as _pnl
+
+    try:
+        tz = _ZI(config.BULLETPROOF_TIMEZONE)
+    except Exception:
+        tz = UTC
+    today = datetime.now(tz).date()
+    yesterday = today - timedelta(days=1)
+    window = max(1, min(int(days), 730))
+    start = yesterday - timedelta(days=window)
+    rows = await asyncio.to_thread(db.get_export_opportunity, start, yesterday)
+    if not rows:
+        bf_start = start
+        cfg_start = (getattr(config, "AGILE_TARIFF_START_DATE", "") or "").strip()
+        if cfg_start:
+            try:
+                bf_start = max(start, _date.fromisoformat(cfg_start))
+            except ValueError:
+                pass
+        await asyncio.to_thread(_pnl.backfill_export_opportunity, bf_start, yesterday)
+        rows = await asyncio.to_thread(db.get_export_opportunity, start, yesterday)
+    try:
+        tod = await asyncio.to_thread(_pnl.export_revenues_for_day, today)
+        today_opp = (float(tod.get("agile_pence", 0.0)) - float(tod.get("seg_flat_pence", 0.0))) / 100.0
+        today_kwh = float(tod.get("export_kwh", 0.0))
+    except Exception:
+        today_opp = 0.0
+        today_kwh = 0.0
+    daily = [
+        {"day": r["day"], "export_kwh": round(r["export_kwh"], 2),
+         "seg_gbp": round(r["seg_pence"] / 100, 4), "agile_gbp": round(r["agile_pence"] / 100, 4),
+         "opportunity_gbp": round(r["opportunity_pence"] / 100, 4)}
+        for r in rows
+    ]
+    opp_tot = sum(r["opportunity_pence"] for r in rows) / 100.0
+    kwh_tot = sum(r["export_kwh"] for r in rows)
+    seg_tot = sum(r["seg_pence"] for r in rows) / 100.0
+    agile_tot = sum(r["agile_pence"] for r in rows) / 100.0
+    n = len(rows)
+    return {
+        "export_mode": config.EXPORT_TARIFF_MODE,
+        "seg_rate_p": float(config.EXPORT_SEG_RATE_PENCE or 0),
+        "daily": daily,
+        "n_days": n,
+        "export_kwh": round(kwh_tot, 1),
+        "seg_gbp": round(seg_tot, 2),
+        "agile_gbp": round(agile_tot, 2),
+        "opportunity_gbp": round(opp_tot, 2),
+        "annualized_gbp": round(opp_tot / n * 365, 2) if n else 0.0,
+        "avg_seg_p": round(seg_tot * 100 / kwh_tot, 2) if kwh_tot > 0 else 0.0,
+        "avg_agile_p": round(agile_tot * 100 / kwh_tot, 2) if kwh_tot > 0 else 0.0,
+        "today": {"export_kwh": round(today_kwh, 2), "opportunity_gbp": round(today_opp, 4)},
+    }
+
+
 @app.get("/api/v1/energy/insights", response_model=EnergyInsightsTextResponse)
 async def energy_insights():
     """Short narrative summary for OpenClaw: this month cost and equivalent gas.
