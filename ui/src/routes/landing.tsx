@@ -155,6 +155,9 @@ export default function Landing() {
   // forcing the battery (SelfUse is the resting state).
   const foxMode = data.current_slot?.fox_mode ?? undefined;
   const foxActive = foxMode ? !["selfuse", "self_use", "idle", "—", ""].includes(foxMode.toLowerCase()) : false;
+  const liveTime = data.now_utc
+    ? new Date(data.now_utc).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })
+    : undefined;
 
   return (
     <div class="home">
@@ -164,22 +167,31 @@ export default function Landing() {
             periodLoading={periodInsights.loading} todayCum={todayCum.data}
             weather={weather.data} pv={pvToday.data} />
 
-      {/* ── LIVE — split 50/50: live power flow + live heating (gauges + the
-          heating-plan timeline). Always "now"; ignore the period navigator. */}
-      <div class="widget-grid widget-band">
-        <Widget title="Live power" icon={<Icon name="power-live" size={14} />} tone="power" size="half"
-                badge={data.now_utc ? new Date(data.now_utc).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }) : undefined}
-                action={<RefreshCountdown lastFetchAt={now.lastFetchAt} intervalMs={now.intervalMs} loading={now.loading} onRefresh={() => void now.refresh()} />}>
-          <LivePowerWidget state={s} cockpit={data} timeline={timeline.data} execution={execution.data} agile={agile.data} metrics={metrics.data} dhwSchedule={dhwSched.data?.rows} todayCumulative={todayCum.data} />
-        </Widget>
+      {/* ── LIVE band (redesign P4) — split 50/50: live power flow + live heating
+          (gauges + the heating-plan timeline). Wrapped in the accent-wash band
+          so it reads as the always-now, self-driving surface that ignores the
+          period selector above. */}
+      <div class="widget-band live-band">
+        <div class="live-band-head">
+          <Icon name="power-live" size={13} /> Live · self-driving
+          <span class="grow" />
+          <span class="when">read-only · updates automatically{liveTime ? ` · ${liveTime}` : ""}</span>
+        </div>
+        <div class="widget-grid">
+          <Widget title="Live power" icon={<Icon name="power-live" size={14} />} tone="power" size="half"
+                  badge={liveTime}
+                  action={<RefreshCountdown lastFetchAt={now.lastFetchAt} intervalMs={now.intervalMs} loading={now.loading} onRefresh={() => void now.refresh()} />}>
+            <LivePowerWidget state={s} cockpit={data} timeline={timeline.data} execution={execution.data} agile={agile.data} metrics={metrics.data} dhwSchedule={dhwSched.data?.rows} todayCumulative={todayCum.data} />
+          </Widget>
 
-        <Widget title="Live heating" icon={<Icon name="heating" size={14} />} tone="thermal" size="half">
-          <HeatingWidget state={s} daikin={daikin.data} daikinQuota={daikinQuota.data} report={report.data} weather={weather.data} execution={execution.data}
-                         onRefresh={() => { void daikin.refresh(); void daikinQuota.refresh(); }} />
-          <Suspense fallback={<Spinner label="Loading heating plan…" />}>
-            <HeatingPlanWidget plan={heatingPlan.data} loading={heatingPlan.loading} />
-          </Suspense>
-        </Widget>
+          <Widget title="Live heating" icon={<Icon name="heating" size={14} />} tone="thermal" size="half">
+            <HeatingWidget state={s} daikin={daikin.data} daikinQuota={daikinQuota.data} report={report.data} weather={weather.data} execution={execution.data}
+                           onRefresh={() => { void daikin.refresh(); void daikinQuota.refresh(); }} />
+            <Suspense fallback={<Spinner label="Loading heating plan…" />}>
+              <HeatingPlanWidget plan={heatingPlan.data} loading={heatingPlan.loading} />
+            </Suspense>
+          </Widget>
+        </div>
       </div>
 
       {/* ── PLAN (full width). Weather moved into the hero (redesign P2). Plan =
@@ -191,6 +203,14 @@ export default function Landing() {
                       applianceSuggestions={applianceSug.data?.suggestions}
                       nowUtc={data.now_utc} foxMode={foxMode} foxActive={foxActive} />
         </Widget>
+      </div>
+
+      {/* ── PERIOD scope divider (redesign P4) — everything below follows the
+          day/week/month/year selector at the top, in contrast to the live band. */}
+      <div class="scope scope--period">
+        <span class="scope-dot" />
+        Period · energy
+        <span class="scope-when">follows the selector above</span>
       </div>
 
       {/* ── TIMELINES — Generation + Consumption, synced to the period navigator.

@@ -42,29 +42,31 @@
   letter-spacing: -0.01em;
 }
 
-/* Segmented granularity toggle — reuses the echart-pill visual language. */
+/* Segmented granularity toggle — redesign P4 `.seg`: a recessed pill track with
+ * an accent-filled active segment (matches the cockpit chrome control). */
 .pnav-grans {
   display: inline-flex;
-  gap: var(--space-1);
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  gap: 2px;
+  background: var(--bg-card-2);
+  border: none;
+  border-radius: var(--radius-pill);
   padding: 3px;
 }
 .pnav-gran {
   position: relative;
-  padding: 4px 14px;
-  border-radius: var(--radius-sm);
+  padding: 5px 14px;
+  border-radius: var(--radius-pill);
   font-size: var(--font-sm);
-  font-weight: 600;
+  font-weight: 500;
   color: var(--text-dim);
   background: transparent;
   border: none;
   cursor: pointer;
+  white-space: nowrap;
   transition: background 140ms ease, color 140ms ease;
 }
 .pnav-gran:hover { color: var(--text); }
 .pnav-gran.is-active {
-  background: var(--bg-card-2);
-  color: var(--text);
+  background: var(--accent);
+  color: #fff;
 }
