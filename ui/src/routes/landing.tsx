@@ -23,6 +23,7 @@ import {
   getAppliances,
 } from "../lib/endpoints";
 import { Widget } from "../components/common/Widget";
+import { Icon } from "../components/common/Icon";
 import { Spinner } from "../components/common/Spinner";
 import { RefreshCountdown } from "../components/common/RefreshCountdown";
 import { PeriodNavigator } from "../components/shell/PeriodNavigator";
@@ -166,13 +167,13 @@ export default function Landing() {
       {/* ── LIVE — split 50/50: live power flow + live heating (gauges + the
           heating-plan timeline). Always "now"; ignore the period navigator. */}
       <div class="widget-grid widget-band">
-        <Widget title="Live power" icon="⚡" tone="power" size="half"
+        <Widget title="Live power" icon={<Icon name="power-live" size={14} />} tone="power" size="half"
                 badge={data.now_utc ? new Date(data.now_utc).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }) : undefined}
                 action={<RefreshCountdown lastFetchAt={now.lastFetchAt} intervalMs={now.intervalMs} loading={now.loading} onRefresh={() => void now.refresh()} />}>
           <LivePowerWidget state={s} cockpit={data} timeline={timeline.data} execution={execution.data} agile={agile.data} metrics={metrics.data} dhwSchedule={dhwSched.data?.rows} todayCumulative={todayCum.data} />
         </Widget>
 
-        <Widget title="Live heating" icon="♨" tone="thermal" size="half">
+        <Widget title="Live heating" icon={<Icon name="heating" size={14} />} tone="thermal" size="half">
           <HeatingWidget state={s} daikin={daikin.data} daikinQuota={daikinQuota.data} report={report.data} weather={weather.data} execution={execution.data}
                          onRefresh={() => { void daikin.refresh(); void daikinQuota.refresh(); }} />
           <Suspense fallback={<Spinner label="Loading heating plan…" />}>
@@ -184,14 +185,14 @@ export default function Landing() {
       {/* ── PLAN + WEATHER (50/50). Plan = the committed dispatch (battery +
           heating LWT + tank + appliances). No manual climate/tank controls. */}
       <div class="widget-grid widget-band">
-        <Widget title="Plan" icon="🗓" tone="plan" size="half">
+        <Widget title="Plan" icon={<Icon name="schedule" size={14} />} tone="plan" size="half">
           <PlanWidget timeline={timeline.data} dhwSchedule={dhwSched.data?.rows} heatingPlan={heatingPlan.data}
                       appliances={appliances.data?.appliances} applianceJobs={applianceJobs.data?.jobs}
                       applianceSuggestions={applianceSug.data?.suggestions}
                       nowUtc={data.now_utc} foxMode={foxMode} foxActive={foxActive} />
         </Widget>
 
-        <Widget title="Weather" icon="⛅" tone="thermal" size="half">
+        <Widget title="Weather" icon={<Icon name="weather" size={14} />} tone="thermal" size="half">
           <WeatherWidget weather={weather.data} pv={pvToday.data} />
         </Widget>
       </div>
@@ -199,7 +200,7 @@ export default function Landing() {
       {/* ── TIMELINES — Generation + Consumption, synced to the period navigator.
           Stacked full-width so a given time reads straight down the screen. ── */}
       <div class="widget-grid widget-band">
-        <Widget title="Generation" icon="☀" tone="plan" size="wide">
+        <Widget title="Generation" icon={<Icon name="solar" size={14} />} tone="plan" size="wide">
           <Suspense fallback={<Spinner label="Loading generation…" />}>
             <GenerationWidget period={period} periodData={periodInsights.data} periodLoading={periodInsights.loading}
                               agile={agile.data} opportunity={exportOppy.data}
@@ -207,7 +208,7 @@ export default function Landing() {
           </Suspense>
         </Widget>
 
-        <Widget title="Consumption" icon="📈" tone="power" size="wide">
+        <Widget title="Consumption" icon={<Icon name="chart-bars" size={14} />} tone="power" size="wide">
           <Suspense fallback={<Spinner label="Loading consumption…" />}>
             <EnergyChartWidget execution={execution.data} pv={pvToday.data} />
           </Suspense>

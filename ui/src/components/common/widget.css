@@ -9,10 +9,12 @@
 
 .widget {
   position: relative;
-  /* De-chromed: flat surface, depth from the two-layer --shadow, no border,
-   * no per-card coloured accent edge or corner tint (monochrome-first). */
-  background: var(--bg-card);
-  border: 1px solid transparent;
+  /* De-chromed, monochrome-first: no grey border. Depth is the two-layer
+   * --shadow + an Apple/Tesla specular treatment (top sheen gradient + inset
+   * highlight + a faint white hairline) — the redesign card surface. */
+  background-color: var(--bg-card);
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0) 42%);
+  border: 1px solid rgba(255, 255, 255, 0.045);
   border-radius: var(--radius-lg);
   overflow: hidden;
   display: flex;
@@ -20,13 +22,19 @@
   transition: transform 160ms ease-out, box-shadow 160ms ease-out;
   grid-column: span 12;
   min-width: 0;
+  box-shadow: var(--shadow), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+:root.theme-light .widget {
+  background-image: none;
+  border: 1px solid rgba(15, 23, 42, 0.06);
   box-shadow: var(--shadow);
 }
 /* Hover = a depth lift, never a colour change. */
 .widget:hover {
   transform: translateY(-2px);
-  box-shadow: var(--shadow-lg);
+  box-shadow: var(--shadow-lg), inset 0 1px 0 rgba(255, 255, 255, 0.07);
 }
+:root.theme-light .widget:hover { box-shadow: var(--shadow-lg); }
 
 /* Choreographed entrance — every card rises + fades in once on mount, staggered
  * so the grid settles in sequence. Animates transform/opacity ONLY over a
