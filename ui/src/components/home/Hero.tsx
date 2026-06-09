@@ -1,8 +1,12 @@
-import type { MetricsResponse, CockpitNow, AgileTodayResponse, MonthlyEnergy, PeriodInsightsResponse, TodayCumulativeResponse } from "../../lib/types";
+import type {
+  MetricsResponse, CockpitNow, AgileTodayResponse, MonthlyEnergy,
+  PeriodInsightsResponse, TodayCumulativeResponse, WeatherResponse, PvTodayResponse,
+} from "../../lib/types";
 import { gbp, kwh } from "../../lib/format";
 import { useAnimatedNumber } from "../../lib/useAnimatedNumber";
 import { isCurrentPeriod, periodLabel, type PeriodState } from "../../lib/period";
-import { PriceTimeline } from "./PriceTimeline";
+import { Icon } from "../common/Icon";
+import { Link } from "wouter-preact";
 import "./hero.css";
 
 interface HeroProps {
@@ -11,209 +15,277 @@ interface HeroProps {
   cockpit: CockpitNow | null;
   agile: AgileTodayResponse | null;
   monthly: MonthlyEnergy[];
-  // The period selected in the navigator — drives the headline + savings.
   period: PeriodInsightsResponse | null;
   periodState: PeriodState;
   periodLoading: boolean;
-  // Today's real-money cumulative (for the always-current "saved today" chip).
   todayCum?: TodayCumulativeResponse | null;
+  weather?: WeatherResponse | null;
+  pv?: PvTodayResponse | null;
 }
 
-// The hero answers ONE question for the SELECTED period: how is it going on
-// Agile vs the household's real alternative (the configured fixed tariff)? It
-// re-scopes with the period navigator above it. The "live now" strip is the
-// only always-current element. Hierarchy:
-//   1. Live now strip (price + SoC) — ignores the selector
-//   2. The period's real net bill (the big number)
-//   3. Saved vs fixed + exported (the outcome line) — from the backend shadow
-//   4. Today so far (only when viewing the current period) — explicit estimate
-//   5. Lifetime totals on Agile
-//   6. The cost-composition chart for the selected period
-export function Hero({ metrics, cockpit, agile, monthly, period, periodState, periodLoading, todayCum }: HeroProps) {
+// The redesign hero (Claude Design handoff): the period's net bill + an
+// Agile-vs-fixed verdict + cost bars on the LEFT, the live weather panel on the
+// RIGHT, a lifetime strip below. Money figures follow the period navigator; the
+// today-only extras (break-even target, money paid in) show only on "today".
+export function Hero({ metrics, monthly, period, periodState, periodLoading, todayCum, weather, pv }: HeroProps) {
   const isNow = isCurrentPeriod(periodState);
   const label = periodLabel(periodState);
+  const fixedLabel = todayCum?.fixed_tariff_label || metrics?.fixed_tariff?.label || "British Gas Fixed";
 
-  // --- TODAY's real money (the hero money block, independent of the period
-  // selector). Uses the CONFIGURED fixed-tariff (British Gas) comparison — NOT
-  // the generic ~23p fixed shadow that mislabels + inflates the saving. ---
-  const savedVsBG = todayCum?.delta_vs_fixed_tariff_real_gbp ?? null;  // £ cheaper than British Gas
-  const fixedLabel = todayCum?.fixed_tariff_label || metrics?.fixed_tariff?.label || "British Gas";
-  const earningsToday = todayCum?.earnings_today_gbp ?? null;          // negative-import credit + export
-  const negCreditToday = todayCum?.negative_import_credit_gbp ?? null;
-  const exportToday = todayCum?.export_revenue_gbp ?? null;
-  const standingToday = todayCum?.standing_charge_gbp ?? null;         // fixed daily standing in the net
-  // The cost-relevant kWh: what was drawn FROM THE GRID (import), not total
-  // household load — solar self-consumption is free, only grid import is billed.
-  const gridImportToday = todayCum?.import_kwh ?? null;
-  // "Meta a bater": the avg import p/kWh needed to match British Gas (Agile
-  // loses on standing, must win on the unit price), vs the realised avg so far.
-  const breakevenP = todayCum?.breakeven_avg_import_p ?? null;
-  const realisedAvgP = todayCum?.realised_avg_import_p ?? null;
+  // --- Money story for the SELECTED period (period-aware; today == todayCum). ---
+  const bill = period?.cost?.net_cost_pounds ?? null;
+  const savedVsBG = period?.cost?.delta_vs_fixed_real_pounds
+    ?? (isNow ? todayCum?.delta_vs_fixed_tariff_real_gbp : null) ?? null;
+  const grid = period?.energy?.import_kwh ?? (isNow ? todayCum?.import_kwh : null) ?? null;
+  const standing = period?.cost?.standing_charge_pence != null
+    ? period.cost.standing_charge_pence / 100
+    : (isNow ? todayCum?.standing_charge_gbp ?? null : null);
+  const fixedShadow = bill != null && savedVsBG != null ? bill + savedVsBG : null;
+  const win = (savedVsBG ?? 0) >= 0;
+
+  // --- Today-only extras (the user's earlier asks, kept as quiet notes). ---
+  const breakevenP = isNow ? todayCum?.breakeven_avg_import_p ?? null : null;
+  const realisedAvgP = isNow ? todayCum?.realised_avg_import_p ?? null : null;
   const beatingTarget = breakevenP != null && realisedAvgP != null && realisedAvgP <= breakevenP;
-  const showEarnings = (earningsToday ?? 0) > 0.005;                   // hide on a plain spend day
+  const earnings = isNow ? todayCum?.earnings_today_gbp ?? null : null;
+  const negCredit = isNow ? todayCum?.negative_import_credit_gbp ?? null : null;
+  const exportRev = isNow ? todayCum?.export_revenue_gbp ?? null : null;
+  const showEarnings = (earnings ?? 0) > 0.005;
 
-  // --- The selected period, real money (NET, incl standing, measured grid) ---
-  const periodNet = period?.cost?.net_cost_pounds ?? null;
+  // --- Lifetime totals on Agile. ---
+  const active = monthly.filter((m) => (m.cost?.net_cost_pounds ?? 0) !== 0 || (m.energy?.export_kwh ?? 0) > 0);
+  const lifetime = active.length > 0 ? {
+    months: active.length,
+    solar_kwh: active.reduce((s, m) => s + (m.energy?.solar_kwh ?? 0), 0),
+    export_kwh: active.reduce((s, m) => s + (m.energy?.export_kwh ?? 0), 0),
+    saved_vs_fixed: active.reduce((s, m) => s + (m.cost?.delta_vs_fixed_real_pounds ?? 0), 0),
+  } : null;
 
-  // --- Lifetime totals on Agile (folded in from the old Lifetime widget) ---
-  const activeMonths = monthly.filter(
-    (m) => (m.cost?.net_cost_pounds ?? 0) !== 0 || (m.energy?.export_kwh ?? 0) > 0,
-  );
-  const lifetime = activeMonths.length > 0
-    ? {
-        months: activeMonths.length,
-        solar_kwh: activeMonths.reduce((s, m) => s + (m.energy?.solar_kwh ?? 0), 0),
-        export_kwh: activeMonths.reduce((s, m) => s + (m.energy?.export_kwh ?? 0), 0),
-        export_earn: activeMonths.reduce((s, m) => s + (m.cost?.export_earnings_pounds ?? 0), 0),
-        total_cost: activeMonths.reduce((s, m) => s + (m.cost?.net_cost_pounds ?? 0), 0),
-        // Use the authoritative slot-level British-Gas comparison
-        // (delta_vs_fixed_real_pounds), NOT the coarse Fox-energy delta which
-        // flips sign on Agile months and counts pre-Agile months. null months
-        // (pre-Agile) contribute 0, so this is the on-Agile saving.
-        saved_vs_fixed: activeMonths.reduce((s, m) => s + (m.cost?.delta_vs_fixed_real_pounds ?? 0), 0),
-      }
-    : null;
-
-  // Smooth tweens for the refreshing figures.
-  const periodNetAnim = useAnimatedNumber(periodNet);
-  const savedVsBGAnim = useAnimatedNumber(savedVsBG);
-  const gridImportTodayAnim = useAnimatedNumber(gridImportToday);
-  const earningsTodayAnim = useAnimatedNumber(earningsToday);
-  const solarAnim = useAnimatedNumber(lifetime?.solar_kwh ?? null);
-  const exportKwhAnim = useAnimatedNumber(lifetime?.export_kwh ?? null);
-  const exportEarnAnim = useAnimatedNumber(lifetime?.export_earn ?? null);
-  const totalCostAnim = useAnimatedNumber(lifetime?.total_cost ?? null);
-  const savedVsFixedAnim = useAnimatedNumber(lifetime?.saved_vs_fixed ?? null);
-
-  // Live-now strip — always current, ignores the period selector.
-  const curImportP = cockpit?.current_slot?.price_import_p ?? null;
-  const curExportP = agile?.current_export_p ?? cockpit?.current_slot?.price_export_p ?? null;
-  const socPct = cockpit?.state?.soc_pct ?? null;
+  const billA = useAnimatedNumber(bill);
+  const max = Math.max(bill ?? 0, fixedShadow ?? 0) * 1.12 || 1;
 
   return (
     <section class="hero" aria-label="Selected period energy outcome">
-      <div class="hero-bg" aria-hidden="true" />
-
-      <div class="hero-main">
-        <div class="hero-eyebrow">
-          <span class="live-pulse hero-eyebrow-dot" />
-          {label} on Agile · net bill{isNow ? " so far" : ""}
-        </div>
-        {/* The big number is the BILL — kept neutral; the savings line below
-            carries the good/bad colour. */}
-        <div class="hero-headline hero-headline--enter">
-          {periodNetAnim == null ? (periodLoading ? <SkelHero /> : "—") : gbp(periodNetAnim)}
-        </div>
-        {/* The cost-relevant metric: kWh drawn from the grid (what's billed),
-            with the fixed daily standing charge alongside it. */}
-        {gridImportTodayAnim != null && (
-          <div class="hero-keystat">
-            <span class="hero-keystat-value">{kwh(gridImportTodayAnim, 1)}</span>
-            <span class="hero-keystat-label">da rede{isNow ? " hoje" : ""}</span>
-            {standingToday != null && standingToday > 0.0001 && (
-              <span class="hero-keystat-aux">· standing {gbp(standingToday)}/dia</span>
-            )}
+      <div class="hero-grid">
+        {/* ── LEFT: the money story ─────────────────────────────────── */}
+        <div class="hero-left">
+          <div class="eyebrow"><Icon name="cost" size={13} />{label} on Agile · net bill{isNow ? " so far" : ""}</div>
+          <div class="hero-number">
+            {billA == null ? (periodLoading ? <span class="skel-text" style={{ width: "7rem", height: "0.8em" }} /> : "—") : gbp(billA)}
           </div>
-        )}
-        {/* TODAY money block — one British-Gas comparison (deduped), the day's
-            bill, and the concrete money earned (negative-import credit + export). */}
-        <div class="hero-sublines">
-          {savedVsBGAnim != null && (
-            <div class="hero-subline">
-              <strong class={savedVsBGAnim >= 0 ? "hero-strong-pos" : "hero-strong-neg"}>
-                {savedVsBGAnim >= 0 ? "Economizou " : "Gastou +"}{gbp(Math.abs(savedVsBGAnim))}
-              </strong>
-              &nbsp;hoje vs {fixedLabel}
-            </div>
-          )}
-          {/* The target to beat: Agile loses on standing, so it must keep the
-              average import price under this break-even to win vs the fixed
-              tariff. Spread over the day's forecast grid import (stable). */}
-          {breakevenP != null && (
-            <div class="hero-subline hero-subline-dma" title={`Para bater ${fixedLabel}, o preço médio de import precisa ficar ≤ ${breakevenP.toFixed(1)}p/kWh — a Agile paga ~${gbp(standingToday ?? 0)}/dia de standing, mais que a tarifa fixa, então tem que ganhar na energia. Diluído no forecast de import do dia (${todayCum?.forecast_import_kwh ?? 0} kWh).`}>
-              Meta: import médio ≤ <strong>{breakevenP.toFixed(1)}p</strong>
-              {realisedAvgP != null && (
-                <>&nbsp;·&nbsp;hoje&nbsp;
-                  <strong class={beatingTarget ? "hero-strong-pos" : "hero-strong-neg"}>
-                    {realisedAvgP.toFixed(1)}p {beatingTarget ? "✓" : "✗"}
-                  </strong>
-                </>
-              )}
-            </div>
-          )}
-          {/* "Conta hoje" removed — the headline above already IS today's net
-              bill (default period = day). Keep only the concrete "foi pago"
-              earnings, which is distinct info (money that came in). */}
-          {showEarnings && earningsTodayAnim != null && (
-            <div class="hero-subline hero-subline-dma">
-              <span class="hero-earnings" title="Dinheiro que entrou hoje: crédito da importação a preço negativo + receita de export. A standing charge fixa do dia é descontada para chegar na conta.">
-                Foi pago&nbsp;<strong class="hero-strong-pos">{gbp(earningsTodayAnim)}</strong>
-                {(negCreditToday ?? 0) > 0.005 && (exportToday ?? 0) > 0.005
-                  ? <> ({gbp(negCreditToday!)} negativo + {gbp(exportToday!)} export)</>
-                  : (negCreditToday ?? 0) > 0.005
-                    ? <> (import negativo)</>
-                    : <> (export)</>}
-                {(standingToday ?? 0) > 0.005 && (
-                  <span class="hero-standing"> &minus; {gbp(standingToday!)} standing</span>
-                )}
+
+          {savedVsBG != null && (
+            <div class="verdict-wrap">
+              <span class={`verdict ${win ? "verdict--win" : "verdict--behind"}`}>
+                <Icon name={win ? "check" : "trend"} size={15} />
+                {win ? "Beating fixed by " : "Behind fixed by "}{gbp(Math.abs(savedVsBG))}
+                <span class="verdict-sub">· vs {fixedLabel}</span>
               </span>
+              <Link href="/insights" class="league-note">
+                Compare every tariff<span class="ln-cta"><Icon name="chevron" size={12} /></span>
+              </Link>
+            </div>
+          )}
+
+          {grid != null && (
+            <div class="statline">
+              <div class="stat">
+                <div class="stat-v">{kwh(grid, 1)}</div>
+                <div class="stat-l">Grid import (billed)</div>
+              </div>
+            </div>
+          )}
+
+          {/* cost-so-far vs fixed — the two bars */}
+          {bill != null && fixedShadow != null && (
+            <div class="vsfixed">
+              <div class="flex between items-baseline vsfixed-head">
+                <span class="stat-l">Cost vs fixed tariff</span>
+                <span class="rate-sub">measured grid use</span>
+              </div>
+              <div class="vf-bars">
+                <div class="vf-row">
+                  <span class="vf-k">Agile</span>
+                  <div class="vf-track"><div class="vf-fill" style={{ width: `${Math.min(100, bill / max * 100)}%`, background: win ? "var(--ok)" : "var(--bad)" }} /></div>
+                  <span class="vf-v">{gbp(bill)}</span>
+                </div>
+                <div class="vf-row">
+                  <span class="vf-k">Fixed</span>
+                  <div class="vf-track"><div class="vf-fill" style={{ width: `${Math.min(100, fixedShadow / max * 100)}%`, background: "var(--text-mute)" }} /></div>
+                  <span class="vf-v">{gbp(fixedShadow)}</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {standing != null && standing > 0.0001 && (
+            <div class="standing-note"><Icon name="cost" size={12} />Standing charge {gbp(standing)}/day · fixed, applies either way</div>
+          )}
+
+          {/* today-only quiet notes (kept from earlier asks) */}
+          {breakevenP != null && (
+            <div class="hero-note" title={`To beat ${fixedLabel}, keep the average import price ≤ ${breakevenP.toFixed(1)}p/kWh — Agile's higher standing must be won back on the unit rate.`}>
+              Target: import avg ≤ <strong>{breakevenP.toFixed(1)}p</strong>
+              {realisedAvgP != null && <> · now <strong class={beatingTarget ? "pos" : "neg"}>{realisedAvgP.toFixed(1)}p {beatingTarget ? "✓" : "✗"}</strong></>}
+            </div>
+          )}
+          {showEarnings && earnings != null && (
+            <div class="hero-note">
+              Paid in <strong class="pos">{gbp(earnings)}</strong>
+              {(negCredit ?? 0) > 0.005 && (exportRev ?? 0) > 0.005
+                ? <> ({gbp(negCredit!)} negative + {gbp(exportRev!)} export)</>
+                : (negCredit ?? 0) > 0.005 ? <> (negative import)</> : <> (export)</>}
             </div>
           )}
         </div>
 
-        {(curImportP != null || socPct != null) && (
-          <div class="hero-livenow" title="Live now — independent of the selected period">
-            <span class="live-pulse hero-livenow-dot" />
-            {curImportP != null && <span>import <strong>{curImportP.toFixed(1)}p</strong></span>}
-            {curExportP != null && <span>· export <strong>{curExportP.toFixed(1)}p</strong></span>}
-            {socPct != null && <span>· battery <strong>{Math.round(socPct)}%</strong></span>}
-          </div>
-        )}
-
-
-        {lifetime && (
-          <div class="hero-lifetime" title={`Sums across ${lifetime.months} active months on Agile`}>
-            <div class="hero-lifetime-label">
-              Lifetime on Agile · {lifetime.months} mo
-            </div>
-            <div class="hero-lifetime-stats">
-              <HeroStat value={kwh(solarAnim ?? 0, 0)} label="solar produced" />
-              <HeroStat value={kwh(exportKwhAnim ?? 0, 0)} label="exported" />
-              <HeroStat value={gbp(exportEarnAnim ?? 0)} label="export earnings" />
-              <HeroStat value={gbp(totalCostAnim ?? 0)} label="total bills" />
-              <HeroStat
-                value={gbp(Math.abs(savedVsFixedAnim ?? 0))}
-                label={(savedVsFixedAnim ?? 0) >= 0 ? "saved vs fixed" : "extra vs fixed"}
-                tone={(savedVsFixedAnim ?? 0) >= 0 ? "pos" : "neg"}
-                title={`Net £ vs ${fixedLabel} across ${lifetime.months} active months on Agile`}
-              />
-            </div>
-          </div>
-        )}
+        {/* ── RIGHT: live weather ───────────────────────────────────── */}
+        <div class="hero-right"><HeroWeather weather={weather} pv={pv} /></div>
       </div>
 
-      <div class="hero-status">
-        <div class="hero-chart">
-          <PriceTimeline
-            agile={agile}
-            cheapP={metrics?.cheap_threshold_pence}
-            peakP={metrics?.peak_threshold_pence}
-          />
+      {/* ── lifetime strip ──────────────────────────────────────────── */}
+      {lifetime && (
+        <div class="lifetime" title={`Sums across ${lifetime.months} active months on Agile`}>
+          <div class="stat"><div class="stat-v">{kwh(lifetime.solar_kwh, 0)}</div><div class="stat-l">Solar produced · {lifetime.months} mo</div></div>
+          <div class="stat"><div class="stat-v">{kwh(lifetime.export_kwh, 0)}</div><div class="stat-l">Exported</div></div>
+          <div class="stat">
+            <div class={`stat-v ${lifetime.saved_vs_fixed >= 0 ? "pos" : "neg"}`}>{gbp(Math.abs(lifetime.saved_vs_fixed))}</div>
+            <div class="stat-l">{lifetime.saved_vs_fixed >= 0 ? "Saved vs fixed" : "Extra vs fixed"}</div>
+          </div>
         </div>
-      </div>
+      )}
     </section>
   );
 }
 
-function SkelHero() {
-  return <span class="skel-text" style={{ width: "8rem", height: "0.85em" }} />;
+/* ── Weather panel (hero-right) ──────────────────────────────────────── */
+type Cond = "clear" | "partly" | "cloud" | "rain";
+function condOf(cloud: number | null | undefined): Cond {
+  if (cloud == null) return "partly";
+  if (cloud < 25) return "clear";
+  if (cloud < 60) return "partly";
+  return "cloud";
+}
+function condLabel(c: Cond): string {
+  return c === "clear" ? "Clear" : c === "partly" ? "Partly cloudy" : c === "rain" ? "Rain" : "Cloudy";
 }
 
-function HeroStat({ value, label, tone, title }: { value: string; label: string; tone?: "pos" | "neg"; title?: string }) {
+function HeroWeather({ weather, pv }: { weather?: WeatherResponse | null; pv?: PvTodayResponse | null }) {
+  const fc = weather?.forecast ?? [];
+  if (!fc.length) return <div class="hw"><span class="muted">Weather unavailable.</span></div>;
+  const nowMs = Date.now();
+  let curIdx = 0;
+  for (let i = 0; i < fc.length; i++) { if (new Date(fc[i].time).getTime() <= nowMs) curIdx = i; else break; }
+  const cur = fc[curIdx];
+  const outdoor = weather?.daikin?.outdoor_temp ?? cur.temp_c;
+  const cond = condOf(cur.cloud_cover_pct);
+
+  // Today's hi/lo + a now-marker on the range.
+  const todayKey = new Date().toDateString();
+  const todaySlots = fc.filter((s) => new Date(s.time).toDateString() === todayKey);
+  const temps = todaySlots.map((s) => s.temp_c);
+  const hi = temps.length ? Math.max(...temps) : null;
+  const lo = temps.length ? Math.min(...temps) : null;
+  const markPct = hi != null && lo != null && hi > lo
+    ? Math.max(6, Math.min(94, ((outdoor - lo) / (hi - lo)) * 100)) : 50;
+
+  // Daily forecast (up to 4 days) from the hourly slots.
+  const byDay = new Map<string, { temps: number[]; clouds: number[]; date: Date }>();
+  for (const s of fc) {
+    const d = new Date(s.time);
+    const k = d.toDateString();
+    if (!byDay.has(k)) byDay.set(k, { temps: [], clouds: [], date: d });
+    const e = byDay.get(k)!;
+    e.temps.push(s.temp_c);
+    if (s.cloud_cover_pct != null) e.clouds.push(s.cloud_cover_pct);
+  }
+  const days = [...byDay.values()].slice(0, 4).map((e, i) => ({
+    label: i === 0 ? "Today" : e.date.toLocaleDateString([], { weekday: "short" }),
+    hi: Math.round(Math.max(...e.temps)),
+    lo: Math.round(Math.min(...e.temps)),
+    cond: condOf(e.clouds.length ? e.clouds.reduce((a, b) => a + b, 0) / e.clouds.length : null),
+  }));
+
+  // Solar today: generated so far (pv actual) toward the day's forecast total.
+  const pvNowMs = pv?.now_utc ? new Date(pv.now_utc).getTime() : nowMs;
+  const slots = pv?.slots ?? [];
+  const solarDone = slots.reduce((a, s) => a + (s.pv_actual_kwh ?? 0), 0);
+  const solarTotal = pv?.forecast_kwh_day_total ?? slots.reduce((a, s) => a + (s.pv_forecast_kwh ?? 0), 0);
+  const solarToGo = slots.reduce((a, s) => (new Date(s.slot_utc).getTime() >= pvNowMs ? a + (s.pv_forecast_kwh ?? 0) : a), 0);
+  const solarPct = solarTotal > 0 ? Math.round((solarDone / solarTotal) * 100) : 0;
+
   return (
-    <div class="hero-stat" title={title}>
-      <div class={`hero-stat-value${tone ? ` hero-stat-value--${tone}` : ""}`}>{value}</div>
-      <div class="hero-stat-label">{label}</div>
+    <div class="hw">
+      <div class="flex between items-center">
+        <div class="eyebrow weather-eyebrow"><WxIcon cond={cond} size={13} />Weather · now</div>
+      </div>
+      <div class="hw-now">
+        <div class="weather-temp">{Math.round(outdoor)}°</div>
+        <div class="hw-cond">
+          <WxIcon cond={cond} size={26} />
+          <div>
+            <div class="hw-cond-label">{condLabel(cond)}</div>
+            {cur.cloud_cover_pct != null && <div class="dim small">{Math.round(cur.cloud_cover_pct)}% cloud</div>}
+          </div>
+        </div>
+      </div>
+
+      {hi != null && lo != null && (
+        <div class="thermo">
+          <div class="thermo-track"><span class="thermo-mark" style={{ left: `${markPct}%` }} /></div>
+          <div class="thermo-row">
+            <span class="t-lo">L {Math.round(lo)}°</span>
+            <span class="dim small">today's range</span>
+            <span class="t-hi">H {Math.round(hi)}°</span>
+          </div>
+        </div>
+      )}
+
+      {days.length > 1 && (
+        <div class="forecast" style={{ gridTemplateColumns: `repeat(${days.length}, 1fr)` }}>
+          {days.map((f) => (
+            <div class="fc-day" key={f.label}>
+              <span class="fc-d">{f.label}</span>
+              <WxIcon cond={f.cond} size={22} />
+              <div class="fc-hl"><span class="fc-hi">{f.hi}°</span><span class="fc-lo">{f.lo}°</span></div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {solarTotal > 0 && (
+        <div class="solar-prog">
+          <div class="flex between items-baseline solar-prog-head">
+            <span class="rate-k weather-eyebrow"><Icon name="solar" size={13} style={{ color: "var(--pv)" }} />Solar today</span>
+            <span class="rate-sub"><b class="solar-done">{solarDone.toFixed(1)}</b> / {solarTotal.toFixed(1)} kWh forecast</span>
+          </div>
+          <div class="solar-prog-track"><div class="solar-prog-fill" style={{ width: `${solarPct}%` }} /></div>
+          <div class="thermo-row"><span class="dim small">{solarPct}% generated</span><span class="dim small">{solarToGo.toFixed(1)} kWh to go</span></div>
+        </div>
+      )}
     </div>
   );
+}
+
+// Thin-line weather glyphs (no emoji), sized to match the Icon family.
+function WxIcon({ cond, size = 20 }: { cond: Cond; size?: number }) {
+  const s = { width: size, height: size, display: "block" } as const;
+  if (cond === "clear") return (
+    <svg viewBox="0 0 24 24" style={s} fill="none" stroke="var(--pv)" stroke-width="1.75" stroke-linecap="round">
+      <circle cx="12" cy="12" r="4" /><path d="M12 3 V5 M12 19 V21 M3 12 H5 M19 12 H21 M5.6 5.6 L7 7 M17 17 L18.4 18.4 M18.4 5.6 L17 7 M7 17 L5.6 18.4" />
+    </svg>);
+  if (cond === "rain") return (
+    <svg viewBox="0 0 24 24" style={s} fill="none" stroke="var(--grid)" stroke-width="1.75" stroke-linecap="round">
+      <path d="M7 16 H16.5 A3 3 0 0 0 16.5 10 A3.4 3.4 0 0 0 10 9.6 A3.2 3.2 0 0 0 7 16 Z" /><path d="M9 19 L8.5 21 M13 19 L12.5 21 M16 19 L15.5 21" />
+    </svg>);
+  if (cond === "cloud") return (
+    <svg viewBox="0 0 24 24" style={s} fill="none" stroke="var(--text-dim)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M7 18 H16.5 A3.2 3.2 0 0 0 16.5 11.6 A3.6 3.6 0 0 0 9.5 11 A3.3 3.3 0 0 0 7 18 Z" />
+    </svg>);
+  // partly
+  return (
+    <svg viewBox="0 0 24 24" style={s} fill="none" stroke="var(--pv)" stroke-width="1.75" stroke-linecap="round">
+      <circle cx="9" cy="8" r="3" /><path d="M9 3.2 V4.4 M4.2 8 H5.4 M5.6 4.6 L6.4 5.4 M12.4 4.6 L11.6 5.4" />
+      <path d="M8 19 H16.5 A3 3 0 0 0 16.5 13 A3.4 3.4 0 0 0 10 12.6 A3.2 3.2 0 0 0 8 19 Z" stroke="var(--text-dim)" />
+    </svg>);
 }

@@ -478,7 +478,8 @@ async def api_v1_weather():
 def _api_v1_weather_sync():
     from ..weather import fetch_forecast_cached
 
-    fc = fetch_forecast_cached(hours=48)
+    # 96 h = a 4-day forecast for the redesign hero weather panel (was 48 h).
+    fc = fetch_forecast_cached(hours=96)
     out = [{
         "time": f.time_utc.isoformat(),
         "temp_c": f.temperature_c,
