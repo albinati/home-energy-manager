@@ -163,6 +163,7 @@ export interface GridTodaySlot {
   export_planned_kwh: number | null;
   import_actual_kwh: number | null;    // realised roll-up; null for future/no-telemetry
   export_actual_kwh: number | null;
+  discharge_actual_kwh?: number | null; // battery discharge (covers load) — for the by-source view
   import_price_p?: number | null;
   kind?: string | null;
 }

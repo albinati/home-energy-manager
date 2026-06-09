@@ -411,6 +411,39 @@ def fetch_forecast_cached(
     return hit[1] if hit else fresh  # serve stale on a failed fetch
 
 
+# Separate TTL cache for the WEATHER PANEL forecast (open-meteo only — temp +
+# cloud over a multi-day horizon). The planning fetch above is merged with
+# Quartz, which caps the horizon to Quartz's ~2-day PV window; the panel only
+# needs temp/cloud, so it uses open-meteo direct for a real 4-day forecast.
+_weather_panel_cache: dict[int, tuple[float, list[HourlyForecast]]] = {}
+
+
+def fetch_weather_panel_forecast_cached(
+    lat: str | None = None,
+    lon: str | None = None,
+    hours: int = 96,
+    ttl_seconds: int | None = None,
+) -> list[HourlyForecast]:
+    """TTL-cached open-meteo-only forecast for the cockpit weather panel (temp +
+    cloud over ``hours``, default 96 h = 4 days). Bypasses the Quartz merge so
+    the multi-day forecast isn't truncated to the PV-forecast horizon."""
+    import time as _t
+    if ttl_seconds is None:
+        ttl_seconds = int(getattr(config, "WEATHER_FORECAST_CACHE_TTL_SECONDS", 900))
+    now = _t.monotonic()
+    hit = _weather_panel_cache.get(hours)
+    if ttl_seconds > 0 and hit and hit[1] and (now - hit[0]) < ttl_seconds:
+        return hit[1]
+    try:
+        fresh = _fetch_open_meteo_forecast(lat=lat, lon=lon, hours=hours)
+    except Exception:  # pragma: no cover - degrade gracefully
+        return hit[1] if hit else []
+    if fresh:
+        _weather_panel_cache[hours] = (now, fresh)
+        return fresh
+    return hit[1] if hit else fresh
+
+
 def fetch_forecast_snapshot(
     lat: str | None = None,
     lon: str | None = None,
