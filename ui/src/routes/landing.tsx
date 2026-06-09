@@ -31,7 +31,6 @@ import { usePeriod, periodFetchOpts } from "../lib/period";
 import { LivePowerWidget } from "../components/cockpit/LivePowerWidget";
 import { Hero } from "../components/home/Hero";
 import { HeatingWidget } from "../components/home/HeatingWidget";
-import { WeatherWidget } from "../components/home/WeatherWidget";
 import { PlanWidget } from "../components/home/PlanWidget";
 import type { MonthlyEnergy } from "../lib/types";
 import "../components/home/home.css";
@@ -162,7 +161,8 @@ export default function Landing() {
       <PeriodNavigator />
       <Hero metrics={metrics.data} metricsLoading={metrics.loading} cockpit={data} agile={agile.data} monthly={monthly.data}
             period={periodInsights.data} periodState={period}
-            periodLoading={periodInsights.loading} todayCum={todayCum.data} />
+            periodLoading={periodInsights.loading} todayCum={todayCum.data}
+            weather={weather.data} pv={pvToday.data} />
 
       {/* ── LIVE — split 50/50: live power flow + live heating (gauges + the
           heating-plan timeline). Always "now"; ignore the period navigator. */}
@@ -182,18 +182,14 @@ export default function Landing() {
         </Widget>
       </div>
 
-      {/* ── PLAN + WEATHER (50/50). Plan = the committed dispatch (battery +
-          heating LWT + tank + appliances). No manual climate/tank controls. */}
+      {/* ── PLAN (full width). Weather moved into the hero (redesign P2). Plan =
+          the committed dispatch (battery + heating LWT + tank + appliances). */}
       <div class="widget-grid widget-band">
-        <Widget title="Plan" icon={<Icon name="schedule" size={14} />} tone="plan" size="half">
+        <Widget title="Plan" icon={<Icon name="schedule" size={14} />} tone="plan" size="wide">
           <PlanWidget timeline={timeline.data} dhwSchedule={dhwSched.data?.rows} heatingPlan={heatingPlan.data}
                       appliances={appliances.data?.appliances} applianceJobs={applianceJobs.data?.jobs}
                       applianceSuggestions={applianceSug.data?.suggestions}
                       nowUtc={data.now_utc} foxMode={foxMode} foxActive={foxActive} />
-        </Widget>
-
-        <Widget title="Weather" icon={<Icon name="weather" size={14} />} tone="thermal" size="half">
-          <WeatherWidget weather={weather.data} pv={pvToday.data} />
         </Widget>
       </div>
 
