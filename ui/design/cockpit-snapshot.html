@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>HEM cockpit — current state (design starting point)</title>
+<!--
+  Self-contained snapshot of the HEM energy cockpit as it is RIGHT NOW
+  (data frozen 2026-06-08). Real design tokens + layout + live numbers; the
+  ECharts canvases are approximated as inline SVG so this is one portable file.
+  Hand this to claude.ai/design as the starting point for a redesign.
+  Stack to port back to: Preact + TypeScript + ECharts, 12-col widget grid.
+-->
+<style>
+  :root {
+    --bg:#0b0f17; --bg-card:#111827; --bg-card-2:#1f2937; --bg-card-3:#2a3343;
+    --border:#374151; --border-strong:#4b5563;
+    --text:#f3f4f6; --text-dim:#9ca3af; --text-mute:#6b7280;
+    --accent:#3b82f6; --ok:#10b981; --warn:#f59e0b; --bad:#ef4444;
+    --neg:#2563eb; --cheap:#10b981; --peak:#f59e0b;
+    --pv:#fbbf24; --batt:#10b981; --grid:#60a5fa; --house:#c084fc;
+    --import:#ef4444; --export:#10b981;
+    --space-1:.25rem; --space-2:.5rem; --space-3:.75rem; --space-4:1rem; --space-5:1.5rem;
+    --radius:10px; --radius-lg:16px;
+    --font-xs:.75rem; --font-sm:.875rem; --font-md:1rem; --font-lg:1.125rem; --font-xl:1.5rem; --font-2xl:2rem; --font-hero:4rem;
+    --shadow:0 1px 2px rgba(0,0,0,.5), 0 8px 24px rgba(0,0,0,.35);
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; background:var(--bg); color:var(--text); padding:24px;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    font-variant-numeric:tabular-nums; line-height:1.4;
+  }
+  .home { max-width:1180px; margin:0 auto; display:flex; flex-direction:column; gap:18px; }
+
+  /* period navigator */
+  .navbar { display:flex; align-items:center; justify-content:space-between; }
+  .gran { display:flex; gap:4px; }
+  .gran button { background:var(--bg-card-2); color:var(--text-dim); border:1px solid var(--border);
+    padding:5px 12px; border-radius:999px; font-size:var(--font-xs); cursor:pointer; }
+  .gran button.active { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .navstep { display:flex; align-items:center; gap:10px; color:var(--text-dim); font-size:var(--font-sm); }
+  .navstep button { background:var(--bg-card-2); border:1px solid var(--border); color:var(--text); width:28px; height:28px; border-radius:8px; cursor:pointer; }
+
+  /* hero */
+  .hero { background:linear-gradient(160deg,var(--bg-card),var(--bg-card-2)); border:1px solid var(--border);
+    border-radius:var(--radius-lg); padding:22px 24px; box-shadow:var(--shadow); position:relative; overflow:hidden; }
+  .hero-eyebrow { font-size:var(--font-xs); color:var(--text-mute); text-transform:none; display:flex; align-items:center; gap:8px; }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--ok); box-shadow:0 0 8px var(--ok); }
+  .hero-headline { font-size:var(--font-hero); font-weight:800; letter-spacing:-.02em; line-height:1; margin:4px 0; }
+  .hero-keystat { display:flex; align-items:baseline; gap:.5rem; margin-top:2px; }
+  .hero-keystat b { font-size:1.35rem; font-weight:700; }
+  .muted { color:var(--text-mute); }
+  .dim { color:var(--text-dim); }
+  .pos { color:var(--ok); } .neg { color:var(--bad); }
+  .sub { font-size:var(--font-sm); color:var(--text-dim); margin-top:6px; display:flex; flex-direction:column; gap:3px; }
+  .hero-row { display:flex; gap:24px; align-items:flex-start; }
+  .hero-left { flex:1; }
+  .hero-right { width:340px; }
+  .livenow { margin-top:12px; font-size:var(--font-sm); color:var(--text-dim); display:flex; gap:8px; }
+  .livenow b { color:var(--text); }
+
+  /* grid */
+  .grid { display:grid; grid-template-columns:repeat(12,1fr); gap:18px; }
+  .half { grid-column:span 6; } .full { grid-column:span 12; }
+  @media (max-width:860px){ .half,.full{ grid-column:span 12; } .hero-row{ flex-direction:column; } .hero-right{ width:100%; } }
+
+  .card { background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius-lg); box-shadow:var(--shadow); overflow:hidden; display:flex; flex-direction:column; }
+  .card-h { display:flex; align-items:center; justify-content:space-between; padding:12px 16px; border-bottom:1px solid var(--border); }
+  .card-t { display:flex; align-items:center; gap:8px; font-weight:600; font-size:var(--font-sm); }
+  .card-b { padding:14px 16px; display:flex; flex-direction:column; gap:12px; }
+  .badge { font-size:var(--font-xs); color:var(--text-mute); background:var(--bg-card-2); padding:2px 8px; border-radius:999px; }
+
+  /* gauges */
+  .gauges { display:flex; gap:16px; align-items:center; }
+  .ring { width:96px; height:96px; flex:none; }
+  .ring-label { text-anchor:middle; font-size:11px; fill:var(--text-mute); }
+  .ring-val { text-anchor:middle; font-size:18px; font-weight:700; fill:var(--text); }
+  .minigauges { display:flex; gap:18px; flex:1; }
+  .mg { display:flex; flex-direction:column; gap:2px; }
+  .mg-v { font-size:var(--font-lg); font-weight:700; }
+  .mg-l { font-size:var(--font-xs); color:var(--text-mute); }
+
+  /* plan chips */
+  .grp { display:flex; flex-direction:column; gap:6px; }
+  .grp-t { font-size:var(--font-xs); font-weight:700; letter-spacing:.04em; text-transform:uppercase; color:var(--text-mute); }
+  .chip { display:inline-flex; align-items:center; gap:6px; font-size:var(--font-xs); padding:3px 8px; border-radius:8px; background:rgba(55,65,81,.35); }
+  .cdot { width:7px; height:7px; border-radius:50%; flex:none; }
+  .when { color:var(--text-dim); }
+
+  .rate { display:flex; gap:18px; }
+  .rate .v { font-size:var(--font-lg); font-weight:700; }
+  .legend { display:flex; gap:14px; font-size:10px; color:var(--text-mute); flex-wrap:wrap; }
+  .legend i { display:inline-block; width:14px; border-top:2px solid; margin-right:4px; vertical-align:middle; }
+  svg { display:block; }
+  .chart { width:100%; height:200px; }
+  .chart-tall { width:100%; height:240px; }
+  h4 { margin:0 0 2px; font-size:var(--font-sm); }
+  .note { font-size:var(--font-xs); color:var(--warn); background:color-mix(in srgb,var(--warn) 12%,transparent); padding:3px 8px; border-radius:8px; align-self:flex-start; }
+</style>
+</head>
+<body>
+<div class="home">
+
+  <!-- PERIOD NAVIGATOR -->
+  <div class="navbar">
+    <div class="gran">
+      <button class="active">Day</button><button>Week</button><button>Month</button><button>Year</button>
+    </div>
+    <div class="navstep"><button>‹</button><span>Today · 8 Jun 2026</span><button>›</button></div>
+  </div>
+
+  <!-- HERO -->
+  <div class="hero">
+    <div class="hero-row">
+      <div class="hero-left">
+        <div class="hero-eyebrow"><span class="dot"></span> Today on Agile · net bill so far</div>
+        <div class="hero-headline">£1.26</div>
+        <div class="hero-keystat"><b>4.0</b><span class="dim">kWh da rede hoje</span><span class="muted">· standing £0.59/dia</span></div>
+        <div class="sub">
+          <div><span class="neg">Gastou +£0.03</span> hoje vs British Gas Fixed v58</div>
+          <div>🎯 meta: import médio ≤ <b>18.7p</b> · hoje <span class="pos"><b>16.9p ✓</b></span></div>
+        </div>
+        <div class="livenow"><span class="dot" style="background:var(--accent)"></span> import <b>15.4p</b> · export <b>9.0p</b> · battery <b>48%</b></div>
+      </div>
+      <div class="hero-right">
+        <div class="muted" style="font-size:var(--font-xs);margin-bottom:6px;">Preço de importação · hoje</div>
+        <!-- price tier sparkline -->
+        <svg viewBox="0 0 320 116" class="chart" style="height:116px" preserveAspectRatio="none">
+          <line x1="0" x2="320" y1="86" y2="86" stroke="var(--border)" stroke-dasharray="2 3" opacity=".5"/>
+          <!-- bars: cheap(green) overnight, standard(grey), peak(amber) evening, one neg(blue) -->
+          <g>
+            <rect x="2" y="60" width="11" height="26" fill="var(--cheap)" opacity=".85"/>
+            <rect x="15" y="58" width="11" height="28" fill="var(--cheap)" opacity=".85"/>
+            <rect x="28" y="62" width="11" height="24" fill="var(--cheap)" opacity=".85"/>
+            <rect x="41" y="40" width="11" height="46" fill="var(--neg)" opacity=".9"/>
+            <rect x="54" y="48" width="11" height="38" fill="var(--text-mute)" opacity=".7"/>
+            <rect x="80" y="44" width="11" height="42" fill="var(--text-mute)" opacity=".7"/>
+            <rect x="160" y="40" width="11" height="46" fill="var(--text-mute)" opacity=".7"/>
+            <rect x="232" y="20" width="11" height="66" fill="var(--peak)" opacity=".85"/>
+            <rect x="245" y="16" width="11" height="70" fill="var(--peak)" opacity=".85"/>
+            <rect x="258" y="24" width="11" height="62" fill="var(--peak)" opacity=".85"/>
+            <rect x="284" y="50" width="11" height="36" fill="var(--text-mute)" opacity=".7"/>
+            <rect x="297" y="54" width="11" height="32" fill="var(--text-mute)" opacity=".7"/>
+          </g>
+          <line x1="150" x2="150" y1="6" y2="112" stroke="var(--accent)" stroke-width="1.5" opacity=".9"/>
+        </svg>
+        <div class="legend" style="margin-top:6px;">
+          <span><i style="border-color:var(--neg)"></i>pago</span>
+          <span><i style="border-color:var(--cheap)"></i>barato</span>
+          <span><i style="border-color:var(--peak)"></i>pico</span>
+          <span>◉ now</span>
+        </div>
+        <div style="margin-top:14px;display:flex;gap:18px;font-size:var(--font-xs)" class="dim">
+          <div>Lifetime · 3 mo</div><div><b style="color:var(--text)">540 kWh</b> solar</div>
+          <div><b style="color:var(--pv)">68 kWh</b> export</div><div><b class="pos">£22</b> saved vs BG</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ROW 1: Live power | Live heating -->
+  <div class="grid">
+    <div class="card half">
+      <div class="card-h"><div class="card-t">⚡ Live power</div><span class="badge">12:34 · Live</span></div>
+      <div class="card-b">
+        <!-- power flow schematic -->
+        <svg viewBox="0 0 360 150" class="chart" style="height:150px">
+          <!-- nodes -->
+          <g font-size="11" fill="var(--text-dim)" text-anchor="middle">
+            <circle cx="60" cy="40" r="22" fill="none" stroke="var(--pv)" stroke-width="2"/><text x="60" y="44" fill="var(--pv)">☀</text><text x="60" y="78">solar</text>
+            <circle cx="180" cy="40" r="22" fill="none" stroke="var(--grid)" stroke-width="2"/><text x="180" y="44" fill="var(--grid)">⌁</text><text x="180" y="78">grid</text>
+            <circle cx="300" cy="40" r="22" fill="none" stroke="var(--house)" stroke-width="2"/><text x="300" y="44" fill="var(--house)">🏠</text><text x="300" y="78">house</text>
+            <rect x="150" y="105" width="60" height="30" rx="6" fill="none" stroke="var(--batt)" stroke-width="2"/><text x="180" y="124" fill="var(--batt)">battery 48%</text>
+          </g>
+          <g stroke-width="2" fill="none" opacity=".7">
+            <path d="M82,40 H158" stroke="var(--pv)"/>
+            <path d="M202,40 H278" stroke="var(--grid)"/>
+            <path d="M180,62 V105" stroke="var(--batt)"/>
+          </g>
+        </svg>
+        <div class="rate">
+          <div><div class="muted" style="font-size:var(--font-xs)">Import</div><div class="v" style="color:var(--import)">15.4p</div><div class="muted" style="font-size:var(--font-xs)">4.0 kWh · £0.67</div></div>
+          <div><div class="muted" style="font-size:var(--font-xs)">Export</div><div class="v" style="color:var(--export)">9.0p</div><div class="muted" style="font-size:var(--font-xs)">0.0 kWh · £0.00</div></div>
+        </div>
+        <div class="dim" style="font-size:var(--font-xs)">Next: Force charge 23:30–01:30 · Tank warmup 13:00</div>
+      </div>
+    </div>
+
+    <div class="card half">
+      <div class="card-h"><div class="card-t">♨ Live heating</div><span class="badge">Cache · 8m</span></div>
+      <div class="card-b">
+        <div class="gauges">
+          <svg viewBox="0 0 96 96" class="ring">
+            <circle cx="48" cy="48" r="40" fill="none" stroke="var(--border)" stroke-width="8"/>
+            <circle cx="48" cy="48" r="40" fill="none" stroke="var(--warn)" stroke-width="8" stroke-linecap="round"
+              stroke-dasharray="251" stroke-dashoffset="138" transform="rotate(-90 48 48)"/>
+            <text class="ring-val" x="48" y="46">50°</text><text class="ring-label" x="48" y="64">Tank · on</text>
+          </svg>
+          <div class="minigauges">
+            <div class="mg"><div class="mg-v">16°</div><div class="mg-l">Outdoor</div></div>
+            <div class="mg"><div class="mg-v" style="color:var(--house)">+3°</div><div class="mg-l">LWT offset</div></div>
+            <div class="mg"><div class="mg-v">2.1<span style="font-size:11px;color:var(--text-mute)"> kWh</span></div><div class="mg-l">Heating today</div></div>
+          </div>
+        </div>
+        <!-- heating plan timeline (temps + price right axis) -->
+        <h4>Heating plan · today</h4>
+        <svg viewBox="0 0 360 150" class="chart" style="height:150px" preserveAspectRatio="none">
+          <rect x="232" y="8" width="60" height="142" fill="var(--peak)" opacity=".07"/>
+          <rect x="40" y="8" width="40" height="142" fill="var(--neg)" opacity=".12"/>
+          <!-- outdoor (blue) -->
+          <polyline fill="none" stroke="var(--grid)" stroke-width="2" points="0,110 60,112 120,104 180,96 240,98 300,108 360,114"/>
+          <!-- radiator LWT (purple, bold) -->
+          <polyline fill="none" stroke="var(--house)" stroke-width="2.5" points="0,70 40,52 80,52 140,70 200,72 232,88 292,90 360,72"/>
+          <!-- tank (orange step) -->
+          <polyline fill="none" stroke="var(--warn)" stroke-width="1.5" stroke-dasharray="4 3" points="0,60 160,60 160,40 360,40"/>
+          <!-- import price (red dashed, right axis) -->
+          <polyline fill="none" stroke="var(--import)" stroke-width="1.25" stroke-dasharray="4 3" opacity=".7" points="0,118 60,120 120,112 180,104 240,100 280,60 320,64 360,116"/>
+        </svg>
+        <div class="legend">
+          <span><i style="border-color:var(--grid)"></i>outdoor</span>
+          <span><i style="border-color:var(--house)"></i>radiator LWT</span>
+          <span><i style="border-color:var(--warn);border-top-style:dashed"></i>tank</span>
+          <span><i style="border-color:var(--import);border-top-style:dashed"></i>import p</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ROW 2: Plan | Weather -->
+  <div class="grid">
+    <div class="card half">
+      <div class="card-h"><div class="card-t">🗓 Plan</div></div>
+      <div class="card-b">
+        <div class="grp"><div class="grp-t">Battery <span class="dim" style="font-weight:400;text-transform:none">· SelfUse</span></div>
+          <div><span class="chip"><span class="cdot" style="background:var(--ok)"></span>Force charge <span class="when">23:30–01:30</span></span>
+               <span class="chip"><span class="cdot" style="background:var(--warn)"></span>Force discharge <span class="when">17:00–19:00</span></span></div>
+        </div>
+        <div class="grp"><div class="grp-t">Heating</div>
+          <div><span class="chip"><span class="cdot" style="background:var(--ok)"></span>Boost <b>+3°</b> <span class="when">13:00–15:00</span></span>
+               <span class="chip"><span class="cdot" style="background:var(--warn)"></span>Setback <b>−2°</b> <span class="when">17:00–19:00</span></span></div>
+        </div>
+        <div class="grp"><div class="grp-t">Tank</div>
+          <div><span class="chip"><span class="cdot" style="background:var(--warn)"></span>Warmup <span class="when">13:00</span> <span class="muted">45°</span></span>
+               <span class="chip"><span class="cdot" style="background:var(--warn)"></span>Setback <span class="when">22:00</span> <span class="muted">37°</span></span></div>
+        </div>
+        <div class="grp"><div class="grp-t">Appliances</div>
+          <div><span class="chip"><span class="cdot" style="background:var(--cheap)"></span>🧺 Washing machine <span class="when">00:30–02:30 · 14.2p</span></span></div>
+        </div>
+        <div class="dim" style="font-size:10px">LP #4821 · plan 2026-06-08</div>
+      </div>
+    </div>
+
+    <div class="card half">
+      <div class="card-h"><div class="card-t">⛅ Weather</div></div>
+      <div class="card-b">
+        <div style="display:flex;align-items:center;gap:18px">
+          <div style="font-size:2.6rem;font-weight:300">14°</div>
+          <div><div class="dim">Partly cloudy</div><div class="muted" style="font-size:var(--font-xs)">H 18° · L 11° · 40% cloud</div></div>
+          <div style="margin-left:auto;text-align:right">
+            <div style="font-size:var(--font-xl);font-weight:700;color:var(--pv)">6.2<span style="font-size:.6em;color:var(--text-mute)"> kWh</span></div>
+            <div class="muted" style="font-size:var(--font-xs)">solar · rest of day</div>
+          </div>
+        </div>
+        <!-- solar curve -->
+        <svg viewBox="0 0 360 110" class="chart" style="height:110px" preserveAspectRatio="none">
+          <path d="M0,108 C60,108 90,40 180,28 C270,40 300,108 360,108 Z" fill="var(--pv)" opacity=".18"/>
+          <path d="M0,108 C60,108 90,40 180,28 C270,40 300,108 360,108" fill="none" stroke="var(--pv)" stroke-width="2"/>
+          <line x1="150" x2="150" y1="6" y2="108" stroke="var(--accent)" stroke-width="1.5" opacity=".8"/>
+        </svg>
+        <div class="legend"><span>sunrise 04:48</span><span>peak 13:00</span><span>sunset 21:18</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ROW 3: Generation (full) -->
+  <div class="grid">
+    <div class="card full">
+      <div class="card-h"><div class="card-t">☀ Generation</div></div>
+      <div class="card-b">
+        <div class="rate">
+          <div><div class="v">14.2<span style="font-size:11px;color:var(--text-mute)"> kWh solar</span></div><div class="muted" style="font-size:var(--font-xs)">esperado hoje</div></div>
+          <div><div class="v pos">0.0<span style="font-size:11px;color:var(--text-mute)"> kWh export</span></div></div>
+        </div>
+        <svg viewBox="0 0 1100 240" class="chart-tall" preserveAspectRatio="none">
+          <!-- solar plan (dashed) vs actual (area) -->
+          <path d="M0,238 C200,238 300,80 550,46 C800,80 900,238 1100,238 Z" fill="var(--pv)" opacity=".22"/>
+          <path d="M0,238 C200,238 300,80 550,46 C800,80 900,238 1100,238" fill="none" stroke="var(--pv)" stroke-width="3"/>
+          <path d="M0,238 C200,238 300,70 550,40 C800,70 900,238 1100,238" fill="none" stroke="var(--pv)" stroke-width="1.25" stroke-dasharray="5 4" opacity=".55"/>
+          <!-- export price line (green dashed, right axis) — Outgoing Agile now -->
+          <polyline fill="none" stroke="var(--export)" stroke-width="1.5" stroke-dasharray="5 4" points="0,150 200,156 400,120 550,96 700,110 900,70 1000,80 1100,150"/>
+          <line x1="500" x2="500" y1="6" y2="238" stroke="var(--accent)" stroke-width="1.5" opacity=".6"/>
+        </svg>
+        <div class="legend">
+          <span><i style="border-color:var(--pv)"></i>solar actual</span>
+          <span><i style="border-color:var(--pv);border-top-style:dashed"></i>solar plan</span>
+          <span><i style="border-color:var(--export)"></i>export kWh</span>
+          <span><i style="border-color:var(--export);border-top-style:dashed"></i>export price (Outgoing Agile)</span>
+          <span>◉ now</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ROW 3: Consumption (full) -->
+  <div class="grid">
+    <div class="card full">
+      <div class="card-h"><div class="card-t">📈 Consumption</div></div>
+      <div class="card-b">
+        <div class="rate"><div><div class="v">9.6<span style="font-size:11px;color:var(--text-mute)"> kWh</span></div><div class="muted" style="font-size:var(--font-xs)">consumido so far today</div></div></div>
+        <svg viewBox="0 0 1100 240" class="chart-tall" preserveAspectRatio="none">
+          <!-- tariff bands -->
+          <rect x="720" y="6" width="170" height="232" fill="var(--peak)" opacity=".07"/>
+          <rect x="120" y="6" width="80" height="232" fill="var(--neg)" opacity=".12"/>
+          <!-- stacked composition (base + appliances + heat pump) as areas -->
+          <path d="M0,238 L0,210 C200,205 400,200 550,196 C800,200 1000,206 1100,210 L1100,238 Z" fill="var(--house)" opacity=".5"/>
+          <path d="M0,210 C200,205 400,200 550,196 C800,200 1000,206 1100,210 C1000,180 800,150 550,140 C400,150 200,170 0,182 Z" fill="var(--warn)" opacity=".35"/>
+          <!-- forecast (grey dashed) -->
+          <polyline fill="none" stroke="var(--text-mute)" stroke-width="1.5" stroke-dasharray="5 4" points="0,190 200,176 400,168 550,150 700,168 900,180 1100,186"/>
+          <!-- import price (red dashed, right axis) -->
+          <polyline fill="none" stroke="var(--import)" stroke-width="1.5" stroke-dasharray="5 4" opacity=".8" points="0,150 200,156 400,120 550,96 720,90 780,46 900,52 1100,150"/>
+          <line x1="500" x2="500" y1="6" y2="238" stroke="var(--accent)" stroke-width="1.5" opacity=".6"/>
+        </svg>
+        <div class="legend">
+          <span><i style="border-color:var(--house)"></i>base</span>
+          <span><i style="border-color:var(--warn)"></i>heat pump</span>
+          <span><i style="border-color:var(--text-mute);border-top-style:dashed"></i>forecast</span>
+          <span><i style="border-color:var(--import);border-top-style:dashed"></i>import price</span>
+          <span>paid/cheap/peak shaded · ◉ now</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="muted" style="font-size:var(--font-xs);text-align:center;padding:8px">
+    HEM cockpit snapshot · data frozen 2026-06-08 · dark theme · port target: Preact + TS + ECharts, 12-col grid
+  </div>
+</div>
+</body>
+</html>

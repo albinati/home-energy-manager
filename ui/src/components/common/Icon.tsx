@@ -23,6 +23,8 @@ export type IconName =
   | "settings"
   | "efficiency"
   | "house"
+  | "weather"
+  | "appliance"
   | "chevron"
   | "check"
   | "revert";
@@ -125,6 +127,20 @@ const PATHS: Record<IconName, JSX.Element> = {
     <>
       <path d="M5 11 L12 5 L19 11 V20 H5 Z" />
       <path d="M10 20 V15 H14 V20" />
+    </>
+  ),
+  weather: (
+    <>
+      <circle cx="9" cy="8" r="3" />
+      <path d="M9 3.2 V4.4 M4.2 8 H5.4 M5.6 4.6 L6.4 5.4 M12.4 4.6 L11.6 5.4" />
+      <path d="M8 19 H16.5 A3 3 0 0 0 16.5 13 A3.4 3.4 0 0 0 10 12.6 A3.2 3.2 0 0 0 8 19 Z" />
+    </>
+  ),
+  appliance: (
+    <>
+      <rect x="5" y="3.5" width="14" height="17" rx="2.5" />
+      <circle cx="12" cy="13" r="4" />
+      <path d="M8 6.5 H9 M11 6.5 H12" />
     </>
   ),
   chevron: <path d="M9 6 L15 12 L9 18" />,

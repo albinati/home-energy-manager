@@ -178,7 +178,7 @@ export function PlanWidget({
               if (job?.status === "running") {
                 return (
                   <span key={a.id} class="planw-chip planw-chip--run">
-                    <span class="planw-dot" style="background:var(--ok)" />🧺 {a.name} <span class="planw-when">running</span>
+                    <span class="planw-dot" style="background:var(--ok)" />{a.name} <span class="planw-when">running</span>
                   </span>
                 );
               }
@@ -186,7 +186,7 @@ export function PlanWidget({
                 return (
                   <span key={a.id} class="planw-chip"
                         title={`Scheduled ${hm(job.planned_start_utc)}–${hm(job.planned_end_utc)}${job.avg_price_pence != null ? ` · ${job.avg_price_pence.toFixed(1)}p/kWh` : ""}`}>
-                    <span class="planw-dot" style="background:var(--cheap,#36d399)" />🧺 {a.name}
+                    <span class="planw-dot" style="background:var(--cheap,#36d399)" />{a.name}
                     <span class="planw-when">{hm(job.planned_start_utc)}–{hm(job.planned_end_utc)}</span>
                   </span>
                 );
@@ -197,14 +197,14 @@ export function PlanWidget({
                 return (
                   <span key={a.id} class="planw-chip"
                         title={`${cheap ? (paid ? "Paid" : "Cheap") + " window" : "Next window (no cheap window ahead)"} ${hm(sug.recommended_start_utc)}–${hm(sug.recommended_end_utc)} · ${sug.avg_price_pence.toFixed(1)}p · load + Smart Control by ${sug.deadline_local}`}>
-                    <span class="planw-dot" style={`background:${paid ? "var(--neg,#38bdf8)" : cheap ? "var(--cheap,#36d399)" : "var(--text-mute)"}`} />🧺 {a.name}
+                    <span class="planw-dot" style={`background:${paid ? "var(--neg,#38bdf8)" : cheap ? "var(--cheap,#36d399)" : "var(--text-mute)"}`} />{a.name}
                     <span class="planw-when">{cheap ? "" : "next "}{hm(sug.recommended_start_utc)} · {sug.avg_price_pence.toFixed(1)}p</span>
                   </span>
                 );
               }
               return (
                 <span key={a.id} class="planw-chip planw-chip--idle">
-                  <span class="planw-dot" style="background:var(--text-mute)" />🧺 {a.name} <span class="planw-when">idle</span>
+                  <span class="planw-dot" style="background:var(--text-mute)" />{a.name} <span class="planw-when">idle</span>
                 </span>
               );
             })}

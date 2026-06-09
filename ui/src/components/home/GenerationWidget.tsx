@@ -25,7 +25,7 @@ function OppyLine({ o }: { o?: ExportOpportunityResponse | null }) {
   if (!o || o.export_mode !== "seg_flat" || o.opportunity_gbp <= 0.01) return null;
   return (
     <div class="tlw-oppy" title={`Sobre ${o.n_days} dias de export: SEG pagou ${gbp(o.seg_gbp)} vs Outgoing Agile ${gbp(o.agile_gbp)}. A diferença é o que deixamos de ganhar por não estar na Agile (média SEG ${o.avg_seg_p}p vs Agile ${o.avg_agile_p}p/kWh).`}>
-      💸 perdido vs Agile: <strong>{gbp(o.opportunity_gbp)}</strong> em {o.n_days}d
+      Perdido vs Agile: <strong>{gbp(o.opportunity_gbp)}</strong> em {o.n_days}d
       {o.annualized_gbp > 0 && <> · ~{gbp(o.annualized_gbp)}/ano</>}
       {o.today.opportunity_gbp > 0.005 && <> · hoje {gbp(o.today.opportunity_gbp)}</>}
     </div>

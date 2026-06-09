@@ -131,7 +131,7 @@ export function Hero({ metrics, cockpit, agile, monthly, period, periodState, pe
               tariff. Spread over the day's forecast grid import (stable). */}
           {breakevenP != null && (
             <div class="hero-subline hero-subline-dma" title={`Para bater ${fixedLabel}, o preço médio de import precisa ficar ≤ ${breakevenP.toFixed(1)}p/kWh — a Agile paga ~${gbp(standingToday ?? 0)}/dia de standing, mais que a tarifa fixa, então tem que ganhar na energia. Diluído no forecast de import do dia (${todayCum?.forecast_import_kwh ?? 0} kWh).`}>
-              🎯 meta: import médio ≤ <strong>{breakevenP.toFixed(1)}p</strong>
+              Meta: import médio ≤ <strong>{breakevenP.toFixed(1)}p</strong>
               {realisedAvgP != null && (
                 <>&nbsp;·&nbsp;hoje&nbsp;
                   <strong class={beatingTarget ? "hero-strong-pos" : "hero-strong-neg"}>
@@ -147,7 +147,7 @@ export function Hero({ metrics, cockpit, agile, monthly, period, periodState, pe
           {showEarnings && earningsTodayAnim != null && (
             <div class="hero-subline hero-subline-dma">
               <span class="hero-earnings" title="Dinheiro que entrou hoje: crédito da importação a preço negativo + receita de export. A standing charge fixa do dia é descontada para chegar na conta.">
-                ⚡ foi pago&nbsp;<strong class="hero-strong-pos">{gbp(earningsTodayAnim)}</strong>
+                Foi pago&nbsp;<strong class="hero-strong-pos">{gbp(earningsTodayAnim)}</strong>
                 {(negCreditToday ?? 0) > 0.005 && (exportToday ?? 0) > 0.005
                   ? <> ({gbp(negCreditToday!)} negativo + {gbp(exportToday!)} export)</>
                   : (negCreditToday ?? 0) > 0.005
