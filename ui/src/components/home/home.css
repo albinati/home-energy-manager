@@ -16,6 +16,87 @@
   margin-top: var(--space-5);
 }
 
+/* ── Scope dividers (redesign P4) — the live/period separation made explicit.
+ * A tracked uppercase label + a coloured dot + a hairline that runs to the
+ * right edge. LIVE = accent (always-now, self-driving); PERIOD = muted (the
+ * timelines follow the day/week/month/year selector). */
+.scope {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  /* The .home flex column owns a uniform gap; pull the divider toward the
+   * section it heads (below) so the label reads as belonging to it. */
+  margin-top: var(--space-2);
+  margin-bottom: calc(-1 * var(--space-2));
+  font-size: var(--font-2xs);
+  font-weight: 700;
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--text-mute);
+}
+.scope::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+.scope-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.scope-when {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+  color: var(--text-mute);
+  font-size: var(--font-xs);
+}
+.scope--live { color: var(--accent); }
+.scope--live .scope-dot { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+.scope--period .scope-dot { background: var(--text-mute); }
+
+/* ── LIVE band (redesign P4) — wraps the always-now widgets in a faint accent
+ * wash + a left accent bar, so it reads as a distinct "self-driving" surface
+ * that ignores the period selector above. The nested .widget cards keep their
+ * own specular treatment on top of the wash. */
+.live-band {
+  position: relative;
+  border-radius: var(--radius-lg);
+  padding: var(--space-4);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--accent) 7%, var(--bg)),
+    color-mix(in srgb, var(--accent) 3%, var(--bg))
+  );
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.live-band::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 14px;
+  bottom: 14px;
+  width: 3px;
+  border-radius: 3px;
+  background: var(--accent);
+  opacity: 0.55;
+}
+.live-band-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-2xs);
+  font-weight: 700;
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.live-band-head .grow { flex: 1; }
+.live-band-head .when {
+  color: var(--text-mute);
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  font-size: var(--font-xs);
+  font-variant-numeric: tabular-nums;
+}
+/* The live row inside the band drops its own top-margin (the band owns spacing). */
+.live-band .widget-grid { margin: 0; }
+
 /* Skeleton text — shown while a slow field loads */
 .skel-text {
   display: inline-block;

@@ -53,6 +53,9 @@
   --radius-lg: 18px;
   --radius-pill: 999px;
 
+  /* tracked uppercase eyebrow/widget-header label spacing (redesign P4) */
+  --tracking-eyebrow: 0.12em;
+
   /* type scale — hierarchy carried by SIZE + WEIGHT contrast, not colour.
    * --font-display = the one focal number per card; --font-hero = the single
    * anchor number of a whole surface (live net power, today's saving). */
