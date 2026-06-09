@@ -206,13 +206,22 @@ function HeroWeather({ weather, pv }: { weather?: WeatherResponse | null; pv?: P
     cond: condOf(e.clouds.length ? e.clouds.reduce((a, b) => a + b, 0) / e.clouds.length : null),
   }));
 
-  // Solar today: generated so far (pv actual) toward the day's forecast total.
+  // Solar today: generated so far (actual) toward the DAY total (locked actuals
+  // for elapsed slots + forecast for the rest). Using the day total — not the
+  // forward-only forecast — so it stays meaningful in the evening (forecast → 0).
   const pvNowMs = pv?.now_utc ? new Date(pv.now_utc).getTime() : nowMs;
   const slots = pv?.slots ?? [];
+  const elapsedOf = (s: { slot_utc: string }) => new Date(s.slot_utc).getTime() + 30 * 60_000 <= pvNowMs;
   const solarDone = slots.reduce((a, s) => a + (s.pv_actual_kwh ?? 0), 0);
-  const solarTotal = pv?.forecast_kwh_day_total ?? slots.reduce((a, s) => a + (s.pv_forecast_kwh ?? 0), 0);
-  const solarToGo = slots.reduce((a, s) => (new Date(s.slot_utc).getTime() >= pvNowMs ? a + (s.pv_forecast_kwh ?? 0) : a), 0);
-  const solarPct = solarTotal > 0 ? Math.round((solarDone / solarTotal) * 100) : 0;
+  const solarTotal = slots.length
+    ? slots.reduce((a, s) => a + ((elapsedOf(s) ? (s.pv_actual_kwh ?? s.pv_forecast_kwh) : s.pv_forecast_kwh) ?? 0), 0)
+    : (pv?.forecast_kwh_day_total ?? 0);
+  const solarToGo = slots.reduce((a, s) => (!elapsedOf(s) ? a + (s.pv_forecast_kwh ?? 0) : a), 0);
+  const solarPct = solarTotal > 0 ? Math.min(100, Math.round((solarDone / solarTotal) * 100)) : 0;
+  // Peak slot (max actual-or-forecast) → local HH:MM.
+  let peakV = -1, peakIso = "";
+  for (const s of slots) { const v = Math.max(s.pv_actual_kwh ?? 0, s.pv_forecast_kwh ?? 0); if (v > peakV) { peakV = v; peakIso = s.slot_utc; } }
+  const peakLabel = peakV > 0.05 && peakIso ? new Date(peakIso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }) : null;
 
   return (
     <div class="hw">
@@ -260,7 +269,10 @@ function HeroWeather({ weather, pv }: { weather?: WeatherResponse | null; pv?: P
             <span class="rate-sub"><b class="solar-done">{solarDone.toFixed(1)}</b> / {solarTotal.toFixed(1)} kWh forecast</span>
           </div>
           <div class="solar-prog-track"><div class="solar-prog-fill" style={{ width: `${solarPct}%` }} /></div>
-          <div class="thermo-row"><span class="dim small">{solarPct}% generated</span><span class="dim small">{solarToGo.toFixed(1)} kWh to go</span></div>
+          <div class="thermo-row">
+            <span class="dim small">{solarPct}% generated</span>
+            <span class="dim small">{solarToGo > 0.05 ? `${solarToGo.toFixed(1)} kWh to go` : "done for today"}{peakLabel ? ` · peak ${peakLabel}` : ""}</span>
+          </div>
         </div>
       )}
     </div>

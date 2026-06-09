@@ -280,9 +280,13 @@ async def get_grid_today(date: str | None = None) -> dict[str, Any]:
     # (the same helpers the PnL engine costs against). Keys are ...Z form.
     act_imp: dict[str, float] = {}
     act_exp: dict[str, float] = {}
+    act_dis: dict[str, float] = {}
     try:
         act_imp = {_norm_z(k): float(v) for k, v in db.half_hourly_grid_import_kwh_for_day(d).items()}
         act_exp = {_norm_z(k): float(v) for k, v in db.half_hourly_grid_export_kwh_for_day(d).items()}
+        # Battery discharge — for the Consumption "by source" view (how much of
+        # the load the battery covered vs the grid).
+        act_dis = {_norm_z(k): float(v) for k, v in db.half_hourly_battery_discharge_kwh_for_day(d).items()}
     except Exception as e:
         logger.warning("grid/today: realised grid roll-up failed (%s)", e)
 
@@ -320,14 +324,17 @@ async def get_grid_today(date: str | None = None) -> dict[str, Any]:
         pe = plan_exp.get(key)
         ai_raw = act_imp.get(key)
         ae_raw = act_exp.get(key)
+        ad_raw = act_dis.get(key)
         ai = round(float(ai_raw), 4) if (elapsed and ai_raw is not None) else None
         ae = round(float(ae_raw), 4) if (elapsed and ae_raw is not None) else None
+        ad = round(float(ad_raw), 4) if (elapsed and ad_raw is not None) else None
         slots_out.append({
             "slot_utc": key,
             "import_planned_kwh": round(pi, 4) if pi is not None else None,
             "export_planned_kwh": round(pe, 4) if pe is not None else None,
             "import_actual_kwh": ai,
             "export_actual_kwh": ae,
+            "discharge_actual_kwh": ad,
             "import_price_p": price_by_start.get(key),
             "kind": kind_by.get(key),
         })

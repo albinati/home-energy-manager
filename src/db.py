@@ -3531,7 +3531,7 @@ def _half_hourly_grid_kwh_for_day(
     from collections import defaultdict
     from datetime import datetime as _dt
 
-    if column not in ("grid_export_kw", "grid_import_kw", "solar_power_kw"):
+    if column not in ("grid_export_kw", "grid_import_kw", "solar_power_kw", "battery_discharge_kw"):
         raise ValueError(f"unsupported column: {column}")
 
     day_iso = day.isoformat()
@@ -3641,6 +3641,20 @@ def half_hourly_grid_import_kwh_for_day(
     weeks (Octopus deprecated ``order_by=asc``).
     """
     return _half_hourly_grid_kwh_for_day(day, "grid_import_kw", max_gap_seconds=max_gap_seconds)
+
+
+def half_hourly_battery_discharge_kwh_for_day(
+    day: date,
+    *,
+    max_gap_seconds: int = 1800,
+) -> dict[str, float]:
+    """Per-slot battery-DISCHARGE kWh for ``day`` (UTC half-hour slots).
+
+    Trapezoidal integration of ``pv_realtime_history.battery_discharge_kw`` —
+    how much the battery contributed to covering load each slot. Used by the
+    Consumption "by source" view (solar self-use + battery + grid = load).
+    """
+    return _half_hourly_grid_kwh_for_day(day, "battery_discharge_kw", max_gap_seconds=max_gap_seconds)
 
 
 def upsert_fox_energy_daily(rows: list[dict[str, Any]]) -> int:

@@ -476,10 +476,12 @@ async def api_v1_weather():
 
 
 def _api_v1_weather_sync():
-    from ..weather import fetch_forecast_cached
+    from ..weather import fetch_weather_panel_forecast_cached
 
-    # 96 h = a 4-day forecast for the redesign hero weather panel (was 48 h).
-    fc = fetch_forecast_cached(hours=96)
+    # 96 h = a 4-day forecast for the redesign hero weather panel. Open-meteo
+    # direct (not the Quartz-merged planning fetch, which caps at the ~2-day PV
+    # horizon) — the panel only needs temp/cloud.
+    fc = fetch_weather_panel_forecast_cached(hours=96)
     out = [{
         "time": f.time_utc.isoformat(),
         "temp_c": f.temperature_c,

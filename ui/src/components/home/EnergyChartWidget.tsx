@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import { getEnergyPeriod, getDaikinConsumption } from "../../lib/endpoints";
+import { getEnergyPeriod, getDaikinConsumption, getGridToday } from "../../lib/endpoints";
 import { usePeriod, setGranularity, selectedPeriod } from "../../lib/period";
 import { makeChart, baseOption, chartTheme, barGradient, areaGradient, withAlpha, type EChartsType } from "../../lib/charts";
 import { Icon } from "../common/Icon";
@@ -9,6 +9,7 @@ import type {
   ExecutionTodayResponse,
   ExecutionSlot,
   PvTodayResponse,
+  GridTodayResponse,
   DaikinConsumptionResponse,
 } from "../../lib/types";
 import "./energy-chart.css";
@@ -53,6 +54,8 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
   const isToday = anchor === todayLocalISO;
   const [period, setPeriod] = useState<PeriodInsightsResponse | null>(null);
   const [daikin, setDaikin] = useState<DaikinConsumptionResponse | null>(null);
+  // Day view: per-slot grid import + battery discharge — for the "by source" stack.
+  const [grid, setGrid] = useState<GridTodayResponse | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const elRef = useRef<HTMLDivElement | null>(null);
@@ -74,11 +77,16 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
       ? Promise.resolve(null)
       : getEnergyPeriod(granularity, opts).catch(() => null);
     const daikinPromise = getDaikinConsumption(granularity, opts).catch(() => null);
+    // Grid import + battery discharge per slot for the day source-stack.
+    const gridPromise = granularity === "day" && isToday
+      ? getGridToday().catch(() => null)
+      : Promise.resolve(null);
 
-    Promise.all([periodPromise, daikinPromise]).then(([p, d]) => {
+    Promise.all([periodPromise, daikinPromise, gridPromise]).then(([p, d, g]) => {
       if (!alive) return;
       setPeriod(p);
       setDaikin(d);
+      setGrid(g);
       setLoading(false);
     });
     return () => { alive = false; };
@@ -89,13 +97,13 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
     if (!chartRef.current) chartRef.current = makeChart(elRef.current);
     const chart = chartRef.current;
     const option = granularity === "day" && isToday
-      ? optionForDay(execution, pv ?? null, daikin)
+      ? optionForDay(execution, pv ?? null, grid)
       : optionForPeriod(period, daikin, granularity);
     chart.setOption(option, true);
     const ro = new ResizeObserver(() => chart.resize());
     ro.observe(elRef.current);
     return () => ro.disconnect();
-  }, [granularity, period, daikin, execution, pv, isToday]);
+  }, [granularity, period, daikin, grid, execution, pv, isToday]);
 
   useEffect(() => () => {
     if (chartRef.current) {
@@ -169,12 +177,11 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
       )}
       {granularity === "day" && dayHasSlots && (
         <div class="echart-legend2">
-          <span class="echart-l2"><span class="echart-l2-sw" style="background:var(--house)" /> Base</span>
-          <span class="echart-l2"><span class="echart-l2-sw" style="background:var(--accent)" /> Appliances</span>
-          <span class="echart-l2"><span class="echart-l2-sw" style="background:var(--warn)" /> Heat pump</span>
-          <span class="echart-l2"><span class="echart-l2-line" /> Forecast</span>
-          <span class="echart-l2"><span class="echart-l2-line" style="border-top-color:var(--import)" /> Import price</span>
-          <span class="echart-l2-hint">stacked = where your energy goes · paid/cheap/peak shaded · ◉ now</span>
+          <span class="echart-l2"><span class="echart-l2-sw" style="background:var(--pv)" /> Solar</span>
+          <span class="echart-l2"><span class="echart-l2-sw" style="background:var(--batt)" /> Battery</span>
+          <span class="echart-l2"><span class="echart-l2-sw" style="background:var(--import)" /> Grid</span>
+          <span class="echart-l2"><span class="echart-l2-line" style="border-top-color:var(--batt);border-top-style:dashed" /> SoC %</span>
+          <span class="echart-l2-hint">stacked = who covered the load · SoC on right · paid/cheap/peak shaded · ◉ now</span>
         </div>
       )}
 
@@ -328,7 +335,7 @@ type DayTier = "negative" | "cheap" | "standard" | "peak" | null;
 function optionForDay(
   exec: ExecutionTodayResponse | null,
   pv: PvTodayResponse | null,
-  _daikinConsumption: DaikinConsumptionResponse | null,
+  grid: GridTodayResponse | null,
 ): Record<string, unknown> {
   const t = chartTheme();
   const base = baseOption();
@@ -346,46 +353,32 @@ function optionForDay(
 
   const execBy = new Map<string, ExecutionSlot>();
   for (const e of exec?.slots ?? []) if (e.slot_utc) execBy.set(e.slot_utc, e);
-  const fcastBy = new Map<string, number | null>();
   const priceBy = new Map<string, number | null>();
-  for (const s of pvSlots) {
-    fcastBy.set(s.slot_utc, s.base_load_kwh ?? null);
-    priceBy.set(s.slot_utc, s.import_price_p ?? null);
+  for (const s of pvSlots) priceBy.set(s.slot_utc, s.import_price_p ?? null);
+  // Grid import + battery discharge per slot, keyed by slot_utc (...Z form).
+  const gridImpBy = new Map<string, number | null>();
+  const battDisBy = new Map<string, number | null>();
+  for (const gs of grid?.slots ?? []) {
+    if (gs.slot_utc) { gridImpBy.set(gs.slot_utc, gs.import_actual_kwh); battDisBy.set(gs.slot_utc, gs.discharge_actual_kwh ?? null); }
   }
 
-  // Actual consumption split into a stacked composition — where the energy
-  // actually went, slot by slot: base (lights/fridge/always-on) + appliances
-  // (armed washer/dryer/dishwasher) + the Daikin heat pump.
-  const baseActual = axis.map((iso) => {
+  // Consumption BY SOURCE — how the load was covered, slot by slot:
+  //   solar self-use (free) + battery discharge + grid import = total load.
+  // solar self-use is the residual (load − grid − battery), so the stack always
+  // sums to the measured consumption. This shows whether the battery is pulling
+  // its weight vs the grid; the SoC line shows if charge was left unused.
+  const consumption = axis.map((iso) => {
     const e = execBy.get(iso);
-    if (!e) return null;
-    if (e.base_load_kwh_est != null) return round2(e.base_load_kwh_est);
-    if (e.consumption_kwh != null) return round2(Math.max(0, e.consumption_kwh - (e.daikin_kwh_est ?? 0) - (e.appliance_kwh_est ?? 0)));
-    return null;
+    return e?.consumption_kwh != null ? round2(e.consumption_kwh) : null;
   });
-  const applianceActual = axis.map((iso) => {
-    const e = execBy.get(iso);
-    return e?.appliance_kwh_est == null ? null : round2(e.appliance_kwh_est);
+  const gridImp = axis.map((iso) => { const v = gridImpBy.get(iso); return v == null ? null : round2(v); });
+  const battDis = axis.map((iso) => { const v = battDisBy.get(iso); return v == null ? null : round2(v); });
+  const solarSelf = axis.map((_iso, k) => {
+    const c = consumption[k]; if (c == null) return null;
+    return round2(Math.max(0, c - (gridImp[k] ?? 0) - (battDis[k] ?? 0)));
   });
-  const daikinActual = axis.map((iso) => {
-    const e = execBy.get(iso);
-    return e?.daikin_kwh_est == null ? null : round2(e.daikin_kwh_est);
-  });
-  const hasAppliance = applianceActual.some((v) => (v ?? 0) > 0);
-  const totalActual = axis.map((iso, k) => {
-    const e = execBy.get(iso);
-    if (!e) return null;
-    if (e.consumption_kwh != null) return round2(e.consumption_kwh);
-    const b = baseActual[k] ?? 0, a = applianceActual[k] ?? 0, d = daikinActual[k] ?? 0;
-    return (baseActual[k] == null && applianceActual[k] == null && daikinActual[k] == null)
-      ? null : round2(b + a + d);
-  });
-  // Forecast household demand (LP's residual load forecast, excludes heat pump)
-  // — overlaid as a dashed line to compare against the base+appliance stack.
-  const loadForecast = axis.map((iso) => {
-    const v = fcastBy.get(iso);
-    return v == null ? null : round2(v);
-  });
+  const soc = axis.map((iso) => { const e = execBy.get(iso); return e?.soc_percent ?? null; });
+  const totalActual = consumption;
   const price = axis.map((iso) => priceBy.get(iso) ?? null);
 
   // --- Tariff-tier background bands (paid / cheap / peak) — same context wash
@@ -449,7 +442,7 @@ function optionForDay(
       formatter: (params: Array<{ dataIndex: number }>) => {
         const i = params[0]?.dataIndex ?? 0;
         const tier = tierOf(price[i]);
-        const scale = Math.max(0.01, totalActual[i] ?? 0, loadForecast[i] ?? 0);
+        const scale = Math.max(0.01, totalActual[i] ?? 0);
         const bar = (label: string, val: number | null, col: string) => {
           if (val == null || !Number.isFinite(val) || val <= 0) return "";
           const w = Math.round(Math.max(0, Math.min(1, val / scale)) * 70);
@@ -461,30 +454,26 @@ function optionForDay(
         const head = `<strong>${labels[i]}</strong>${tier ? ` · ${tier}` : ""}` +
           (price[i] != null ? ` · ${price[i]!.toFixed(1)}p/kWh` : "");
         const totalRow = totalActual[i] != null
-          ? `<div style="margin-top:2px;font-size:11px;color:${t.text};">Total <strong>${totalActual[i]!.toFixed(2)} kWh</strong></div>` : "";
-        // Explicit import-price row — the cost of each kWh drawn from the grid
-        // in this slot (the user couldn't find it in the hover otherwise).
-        const priceRow = price[i] != null
-          ? `<div style="margin-top:2px;font-size:11px;color:${t.importColor};">Import <strong>${price[i]!.toFixed(1)}p/kWh</strong></div>` : "";
-        return head + totalRow + priceRow +
-          bar("Base", baseActual[i], t.house) +
-          (hasAppliance ? bar("Appliances", applianceActual[i], t.accent) : "") +
-          bar("Heat pump", daikinActual[i], t.warn) +
-          (loadForecast[i] != null
-            ? `<div style="margin-top:4px;border-top:1px solid ${withAlpha(t.textMute, 0.25)};padding-top:2px;"></div>` +
-              bar("Forecast", loadForecast[i], withAlpha(t.textMute, 0.7))
-            : "");
+          ? `<div style="margin-top:2px;font-size:11px;color:${t.text};">Load <strong>${totalActual[i]!.toFixed(2)} kWh</strong></div>` : "";
+        const socRow = soc[i] != null
+          ? `<div style="margin-top:2px;font-size:11px;color:${t.text};">Battery SoC <strong>${Math.round(soc[i]!)}%</strong></div>` : "";
+        return head + totalRow +
+          bar("Solar", solarSelf[i], t.pv) +
+          bar("Battery", battDis[i], t.batt) +
+          bar("Grid", gridImp[i], t.importColor) +
+          socRow;
       },
     },
     grid: { left: 16, right: 44, top: 16, bottom: 24, containLabel: true },
     xAxis: { ...(base.xAxis as object), data: labels, axisLabel: { color: t.textMute, fontSize: 10, interval: 5 } },
     yAxis: [
       { ...(base.yAxis as object), name: "kWh", position: "left" },
-      // Right axis: the Octopus IMPORT price slots — what each kWh of demand
-      // costs, the "import slots" overlay the user asked for on consumption.
+      // Right axis: battery SoC (%). Watching this against the source stack
+      // shows whether the battery was used (SoC falling while it discharges) or
+      // whether charge was left on the table (SoC high while the grid covers load).
       {
-        ...(base.yAxis as object), position: "right", splitLine: { show: false },
-        axisLabel: { color: t.textMute, fontSize: 10, formatter: "{value}p" },
+        ...(base.yAxis as object), position: "right", min: 0, max: 100, splitLine: { show: false },
+        axisLabel: { color: t.textMute, fontSize: 10, formatter: "{value}%" },
       },
     ],
     series: [
@@ -499,32 +488,25 @@ function optionForDay(
         } : undefined,
         z: 0,
       },
-      // Stacked composition — base (bottom) + appliances + heat pump. Smooth
-      // areas so the total reads as one filled shape; this is "where the energy
-      // went" through the day.
+      // Stacked BY SOURCE — solar self-use (bottom) + battery discharge + grid
+      // import (top). The stack height = total load; the split shows who covered it.
       {
-        name: "Base", type: "line", stack: "load", smooth: true, showSymbol: false,
-        data: baseActual, lineStyle: { width: 0 }, areaStyle: stackArea(t.house, 0.7), z: 2,
+        name: "Solar", type: "line", stack: "src", smooth: true, showSymbol: false,
+        data: solarSelf, lineStyle: { width: 0 }, areaStyle: stackArea(t.pv, 0.55), z: 2,
       },
-      ...(hasAppliance ? [{
-        name: "Appliances", type: "line", stack: "load", smooth: true, showSymbol: false,
-        data: applianceActual, lineStyle: { width: 0 }, areaStyle: stackArea(t.accent, 0.7), z: 2,
-      }] : []),
       {
-        name: "Heat pump", type: "line", stack: "load", smooth: true, showSymbol: false,
-        data: daikinActual, lineStyle: { width: 0 }, areaStyle: stackArea(t.warn, 0.75), z: 2,
+        name: "Battery", type: "line", stack: "src", smooth: true, showSymbol: false,
+        data: battDis, lineStyle: { width: 0 }, areaStyle: stackArea(t.batt, 0.6), z: 2,
       },
-      // Forecast household demand — a clean dashed line over the stack.
       {
-        name: "Forecast", type: "line", smooth: true, showSymbol: false, connectNulls: false,
-        data: loadForecast,
-        lineStyle: { color: withAlpha(t.textMute, 0.85), width: 1.5, type: "dashed", cap: "round" }, z: 5,
+        name: "Grid", type: "line", stack: "src", smooth: true, showSymbol: false,
+        data: gridImp, lineStyle: { width: 0 }, areaStyle: stackArea(t.importColor, 0.5), z: 2,
       },
-      // Import price → dashed step on the right axis (the "import slots" overlay).
+      // Battery SoC → solid line on the right axis.
       {
-        name: "Import price", type: "line", step: "middle", showSymbol: false, color: t.importColor,
-        yAxisIndex: 1, data: price,
-        lineStyle: { color: t.importColor, width: 1.5, opacity: 0.8, type: "dashed" }, z: 4,
+        name: "SoC", type: "line", smooth: true, showSymbol: false, connectNulls: true,
+        yAxisIndex: 1, data: soc,
+        lineStyle: { color: t.batt, width: 1.75, type: "dashed", cap: "round" }, z: 5,
       },
       // Pulsing "now".
       ...(nowIdx >= 0 ? [{
