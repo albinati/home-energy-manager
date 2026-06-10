@@ -73,7 +73,7 @@
 
 /* ── chrome variant (redesign P4c) — compact form living inside the sticky
  * TopNav: seg first then stepper (the redesign chrome order), quieter
- * borderless arrows, dimmer label. One breakpoint (880px) swaps it with the
+ * borderless arrows, dimmer label. One breakpoint (960px) swaps it with the
  * in-flow page variant: below it the topnav hasn't the width (and collapses
  * to a column at 640px), so the page selector takes over. ───────────────── */
 .pnav--chrome {
@@ -101,7 +101,8 @@
   font-size: var(--font-sm);
   font-weight: 500;
   color: var(--text-dim);
+  white-space: nowrap;
 }
 
-@media (max-width: 880px) { .pnav--chrome { display: none; } }
-@media (min-width: 881px) { .pnav--page { display: none; } }
+@media (max-width: 960px) { .pnav--chrome { display: none; } }
+@media (min-width: 961px) { .pnav--page { display: none; } }
