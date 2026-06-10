@@ -75,3 +75,9 @@
   letter-spacing: -0.01em;
   text-align: center;
 }
+.rgauge-sub {
+  font-size: var(--font-2xs);
+  color: var(--text-mute);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}

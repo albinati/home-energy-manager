@@ -94,19 +94,16 @@
 }
 .heating-controls-hint { font-size: var(--font-xs); }
 
-/* Gauge stack (replaces the old icon rows) */
-.heating-gauges {
+/* Radial gauge row (redesign .heat-gauges): outdoor · tank · LWT side by
+ * side, demoted beneath the heating-plan chart. */
+.heat-gauges {
   display: flex;
-  flex-direction: column;
+  align-items: flex-start;
   gap: var(--space-3);
+  justify-content: space-around;
 }
-/* Secondary gauges (outdoor / LWT) below the tank dial */
-.heating-gauges--secondary {
-  flex-direction: row;
-  gap: var(--space-4);
-  margin-top: var(--space-2);
-}
-.heating-gauges--secondary > * { flex: 1; min-width: 0; }
+.heat-gauges > * { flex: 1; min-width: 0; }
+.heat-gauges .rgauge { max-width: 124px; }
 
 /* Lock bar — explicit state + action for manual control */
 .hc-lockbar {

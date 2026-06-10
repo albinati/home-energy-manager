@@ -7,11 +7,11 @@ import type {
   ExecutionTodayResponse,
   ExecutionSlot,
 } from "../../lib/types";
+import type { ComponentChildren } from "preact";
 import { useState, useEffect } from "preact/hooks";
 import { kwh, relTime } from "../../lib/format";
 import { forceRefreshDaikin } from "../../lib/endpoints";
 import { Pill } from "../common/Pill";
-import { Gauge } from "../common/Gauge";
 import { RadialGauge } from "../common/RadialGauge";
 import { Modal } from "../common/Modal";
 import { RefreshCountdown } from "../common/RefreshCountdown";
@@ -26,13 +26,16 @@ interface HeatingWidgetProps {
   execution: ExecutionTodayResponse | null;
   // Re-fetch Daikin status + quota after a manual control write.
   onRefresh?: () => void;
+  // The heating-plan timeline slot — redesign order puts the plan chart first
+  // (it's the hero of this card); the gauges demote to a row beneath it.
+  children?: ComponentChildren;
 }
 
 // Tank / outdoor / LWT + Daikin mode + cache freshness + quota.
 // Outdoor temp + LWT now prefer /execution/today (logged Daikin readings,
 // no live API call) over the cached /daikin/status — same data freshness,
 // zero quota cost.
-export function HeatingWidget({ state, daikin, daikinQuota, report, weather, execution, onRefresh }: HeatingWidgetProps) {
+export function HeatingWidget({ state, daikin, daikinQuota, report, weather, execution, onRefresh, children }: HeatingWidgetProps) {
   const dev = daikin && daikin.length > 0 ? daikin[0] : null;
   // Explicit, confirmed LIVE read. Everything on this widget normally renders
   // the cache the LP/scheduler already refreshed (~30 min cadence) — we only
@@ -153,16 +156,24 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather, exe
           label={onCooldown ? undefined : "Live"} />
       </div>
 
-      <RadialGauge label={`Tank${tankPower != null ? (tankPower ? " · on" : " · off") : ""}`}
-                   value={tankTemp} min={20} max={65} target={tankTarget} tone="thermal" />
-      <div class="heating-gauges heating-gauges--secondary">
-        <Gauge label="Outdoor" value={outdoorTemp} min={-5} max={40}
-               fillColor={tempColor(outdoorTemp)}
-               icon={<ThermometerIcon />} showFahrenheit
-               sub={outdoorSource === "execution" ? "Daikin sensor (logged)"
+      {/* Heating-plan timeline — the hero of this card (redesign). */}
+      {children}
+
+      {/* Gauges demote to a thin accessory row beneath the chart: three radial
+          dials, domain-coloured — outdoor (cool blue) · tank (amber heat) ·
+          LWT (house/radiators). */}
+      <div class="heat-gauges">
+        <div title={outdoorSource === "execution" ? "Daikin sensor (logged)"
                     : outdoorSource === "daikin" ? "Daikin sensor (live)"
-                    : "Open-Meteo forecast"} />
-        <Gauge label="LWT" value={lwt} min={20} max={55} tone="thermal" showFahrenheit sub="leaving water" />
+                    : "Open-Meteo forecast"}>
+          <RadialGauge label="Outdoor" value={outdoorTemp} min={-5} max={35}
+                       color="var(--grid)" sub={cAndF(outdoorTemp)} />
+        </div>
+        <RadialGauge label={`Tank${tankPower != null ? (tankPower ? " · on" : " · off") : ""}`}
+                     value={tankTemp} min={20} max={65} target={tankTarget} color="var(--peak)"
+                     sub={tankTarget != null ? `set ${Math.round(tankTarget)}°` : undefined} />
+        <RadialGauge label="LWT" value={lwt} min={20} max={55}
+                     color="var(--house)" sub={cAndF(lwt) ?? "leaving water"} />
       </div>
 
       {totalHeatingKwh != null && (
@@ -198,42 +209,10 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather, exe
   );
 }
 
-// Continuous outdoor-temperature colour: light-blue (cold) → dark-blue → green
-// (mild, ~18°C) → yellow → red → purple (very hot). Interpolated in HSL along
-// the shortest hue path so the midpoints stay vivid (RGB lerp would go muddy).
-function tempColor(t: number | null): string | undefined {
-  if (t == null || !Number.isFinite(t)) return undefined;
-  // [temp, hue, sat%, light%]
-  const stops: [number, number, number, number][] = [
-    [0, 195, 90, 72],   // light blue
-    [10, 222, 78, 48],  // dark blue
-    [25, 48, 95, 55],   // yellow
-    [30, 6, 85, 55],    // red
-    [40, 285, 65, 55],  // purple
-  ];
-  const c = Math.max(stops[0][0], Math.min(stops[stops.length - 1][0], t));
-  let a = stops[0], b = stops[stops.length - 1];
-  for (let i = 0; i < stops.length - 1; i++) {
-    if (c >= stops[i][0] && c <= stops[i + 1][0]) { a = stops[i]; b = stops[i + 1]; break; }
-  }
-  const f = b[0] === a[0] ? 0 : (c - a[0]) / (b[0] - a[0]);
-  // Shortest-path hue interpolation.
-  let dh = b[1] - a[1];
-  if (dh > 180) dh -= 360;
-  if (dh < -180) dh += 360;
-  const h = ((a[1] + dh * f) % 360 + 360) % 360;
-  const s = a[2] + (b[2] - a[2]) * f;
-  const l = a[3] + (b[3] - a[3]) * f;
-  return `hsl(${h.toFixed(0)} ${s.toFixed(0)}% ${l.toFixed(0)}%)`;
-}
-
-function ThermometerIcon() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-         stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-      <path d="M14 14.76V5a2 2 0 0 0-4 0v9.76a4 4 0 1 0 4 0z" />
-    </svg>
-  );
+// "16°C · 61°F" gauge subline (redesign).
+function cAndF(c: number | null): string | undefined {
+  if (c == null || !Number.isFinite(c)) return undefined;
+  return `${Math.round(c)}°C · ${Math.round(c * 9 / 5 + 32)}°F`;
 }
 
 function latestExecValue(

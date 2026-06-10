@@ -4,6 +4,7 @@ import {
   stepPeriod,
   isCurrentPeriod,
   periodLabel,
+  periodScope,
   type Granularity,
 } from "../../lib/period";
 import "./period-nav.css";
@@ -29,12 +30,16 @@ const GRANS: { key: Granularity; label: string }[] = [
 export function PeriodNavigator({ variant = "page" }: { variant?: "page" | "chrome" }) {
   const p = usePeriod();
   const atNow = isCurrentPeriod(p);
+  // Chrome stepper reads "Today · 8 Jun 2026" (scope · date) per the redesign;
+  // the in-flow page variant keeps the short label.
+  const scope = periodScope(p);
+  const label = variant === "chrome" && scope.date ? `${scope.scope} · ${scope.date}` : periodLabel(p);
 
   return (
     <div class={`pnav pnav--${variant}`} role="group" aria-label="Period selector">
       <div class="pnav-stepper">
         <button class="pnav-arrow" onClick={() => stepPeriod(-1)} aria-label="Previous period">‹</button>
-        <span class="pnav-label" aria-live="polite">{periodLabel(p)}</span>
+        <span class="pnav-label" aria-live="polite">{label}</span>
         <button class="pnav-arrow" onClick={() => stepPeriod(1)} disabled={atNow}
                 aria-label="Next period" title={atNow ? "Already at the current period" : undefined}>›</button>
       </div>

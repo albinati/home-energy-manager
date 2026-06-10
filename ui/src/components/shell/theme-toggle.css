@@ -1,26 +1,13 @@
-.theme-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  padding: var(--space-1) var(--space-2);
-  border-radius: var(--radius-pill);
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  font-size: var(--font-xs);
-  color: var(--text-dim);
-  cursor: pointer;
-  transition: background 100ms, color 100ms, border-color 100ms;
-}
-.theme-toggle:hover {
-  background: var(--bg-card-2);
-  color: var(--text);
-  border-color: var(--border-strong);
-}
-.theme-toggle-icon {
-  font-size: 0.9rem;
+/* Theme toggle = a chrome .icon-btn (styles in shell.css) with an "A" corner
+ * mark when following the system theme. */
+.theme-toggle { position: relative; }
+.theme-toggle--auto { color: var(--text-mute); }
+.theme-toggle-auto {
+  position: absolute;
+  top: 2px;
+  right: 3px;
+  font-size: 8px;
+  font-weight: 700;
   line-height: 1;
-}
-.theme-toggle-label {
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+  color: var(--text-mute);
 }

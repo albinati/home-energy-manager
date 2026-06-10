@@ -8,6 +8,10 @@ interface RadialGaugeProps {
   target?: number | null;
   unit?: string;
   tone?: "thermal" | "cool";
+  /** Explicit dial colour (overrides the tone class), e.g. "var(--grid)". */
+  color?: string;
+  /** Quiet line under the label ("set 45°", "16°C · 61°F", source). */
+  sub?: string;
 }
 
 // Near-full-circle instrument dial (redesign "Tesla-clean radial", P4b): a 276°
@@ -40,7 +44,7 @@ function gArc(cx: number, cy: number, r: number, a0: number, a1: number): string
   return `M ${x0.toFixed(1)} ${y0.toFixed(1)} A ${r} ${r} 0 ${large} 1 ${x1.toFixed(1)} ${y1.toFixed(1)}`;
 }
 
-export function RadialGauge({ label, value, min, max, target, unit = "°", tone = "thermal" }: RadialGaugeProps) {
+export function RadialGauge({ label, value, min, max, target, unit = "°", tone = "thermal", color, sub }: RadialGaugeProps) {
   const has = value != null && Number.isFinite(value);
   const t = has ? frac(value as number, min, max) : 0;
   const ang = A0 + t * SWEEP;
@@ -63,8 +67,8 @@ export function RadialGauge({ label, value, min, max, target, unit = "°", tone 
     <div class={`rgauge rgauge--${tone}`}>
       <svg viewBox={`0 0 ${SIZE} ${SIZE * 0.9}`} class="rgauge-svg" aria-hidden="true">
         <path d={gArc(CX, CY, R, A0, A1)} class="rgauge-track" />
-        {has && <path d={gArc(CX, CY, R, A0, ang)} class="rgauge-fill" />}
-        {has && <circle cx={hx} cy={hy} r="4.5" class="rgauge-head" />}
+        {has && <path d={gArc(CX, CY, R, A0, ang)} class="rgauge-fill" style={color ? { stroke: color } : undefined} />}
+        {has && <circle cx={hx} cy={hy} r="4.5" class="rgauge-head" style={color ? { stroke: color } : undefined} />}
         {tick && <line x1={tick.x0} y1={tick.y0} x2={tick.x1} y2={tick.y1} class="rgauge-tick" />}
         {tick && <circle cx={tick.dx} cy={tick.dy} r="1.6" class="rgauge-tick-dot" />}
         <text x={CX} y={CY + 1} text-anchor="middle" dominant-baseline="middle" class="rgauge-v">
@@ -74,9 +78,10 @@ export function RadialGauge({ label, value, min, max, target, unit = "°", tone 
         <text x={lx0} y={yBase} text-anchor="middle" class="rgauge-lim">{min}{unit}</text>
         <text x={lx1} y={yBase} text-anchor="middle" class="rgauge-lim">{max}{unit}</text>
       </svg>
-      <div class="rgauge-label">
-        {label}{target != null ? ` · set ${Math.round(target)}${unit}` : ""}
-      </div>
+      <div class="rgauge-label">{label}</div>
+      {(sub || target != null) && (
+        <div class="rgauge-sub">{sub ?? `set ${Math.round(target as number)}${unit}`}</div>
+      )}
     </div>
   );
 }

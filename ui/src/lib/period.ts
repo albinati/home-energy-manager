@@ -136,3 +136,24 @@ export function periodLabel(p: PeriodState): string {
 export function periodNoun(p: PeriodState): string {
   return periodLabel(p);
 }
+
+/** Chrome-stepper / scope-divider form (redesign): a scope word plus, when it
+ * adds information, the concrete date — "Today · 8 Jun 2026",
+ * "This week · 9–15 Jun 2026". Month/year labels already ARE the date. */
+export function periodScope(p: PeriodState): { scope: string; date?: string } {
+  const scope = periodLabel(p);
+  if (p.gran === "day") {
+    const d = parse(p.anchor);
+    const date = `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
+    return isCurrentPeriod(p) ? { scope, date } : { scope };
+  }
+  if (p.gran === "week") {
+    const { start, end } = periodDateRange(p);
+    const s = parse(start), e = parse(end);
+    const date = s.getMonth() === e.getMonth()
+      ? `${s.getDate()}–${e.getDate()} ${MONTHS[e.getMonth()]} ${e.getFullYear()}`
+      : `${s.getDate()} ${MONTHS[s.getMonth()]} – ${e.getDate()} ${MONTHS[e.getMonth()]} ${e.getFullYear()}`;
+    return { scope, date };
+  }
+  return { scope };
+}

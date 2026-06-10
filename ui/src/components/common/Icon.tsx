@@ -27,7 +27,8 @@ export type IconName =
   | "appliance"
   | "chevron"
   | "check"
-  | "revert";
+  | "revert"
+  | "moon";
 
 interface IconProps {
   name: IconName;
@@ -151,6 +152,7 @@ const PATHS: Record<IconName, JSX.Element> = {
       <path d="M5 8 V12 H9" />
     </>
   ),
+  moon: <path d="M20 13.5 A8.5 8.5 0 1 1 10.5 4 A7 7 0 0 0 20 13.5 Z" />,
 };
 
 export function Icon({ name, size = 18, class: cls = "", title, style }: IconProps) {

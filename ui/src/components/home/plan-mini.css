@@ -1,0 +1,57 @@
+/* In-card "Planned dispatch" section (redesign .plan-mini) — dashed hairline
+ * on top, pinned to the card foot (margin-top:auto inside the tile flex). */
+.plan-mini {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding-top: var(--space-3);
+  margin-top: auto;
+  border-top: 1px dashed var(--border);
+}
+.plan-mini-h {
+  font-size: var(--font-2xs);
+  font-weight: 700;
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--text-mute);
+}
+
+.plan-grp { display: flex; flex-direction: column; gap: var(--space-2); }
+.plan-grp-t {
+  font-size: var(--font-2xs);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-mute);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.plan-grp-sub {
+  color: var(--text-mute);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.plan-grp-empty {
+  font-size: var(--font-xs);
+  color: var(--text-mute);
+  font-style: italic;
+}
+
+.chips { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--font-xs);
+  padding: 4px 9px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-card-2);
+  white-space: nowrap;
+}
+.chip b { font-variant-numeric: tabular-nums; }
+.chip .when { color: var(--text-mute); font-variant-numeric: tabular-nums; }
+.chip .note { color: var(--text-mute); font-variant-numeric: tabular-nums; }
+.chip--faded { opacity: 0.72; }
+.cdot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
