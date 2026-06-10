@@ -1,8 +1,12 @@
 .rgauge {
   position: relative;
   width: 100%;
-  max-width: 200px;
+  max-width: 168px;
   margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
 }
 .rgauge-svg {
   display: block;
@@ -10,47 +14,64 @@
   height: auto;
   overflow: visible;
 }
+
+/* faint full-sweep track */
 .rgauge-track {
   fill: none;
   stroke: var(--bg-card-3, var(--bg-card-2));
-  stroke-width: 8;
+  stroke-width: 7;
   stroke-linecap: round;
 }
+/* domain-coloured progress arc */
 .rgauge-fill {
   fill: none;
-  stroke-width: 8;
+  stroke-width: 7;
   stroke-linecap: round;
-  transition: stroke-dasharray 420ms cubic-bezier(0.22, 1, 0.36, 1);
+  transition: d 420ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 .rgauge--thermal .rgauge-fill { stroke: var(--pv); }
 .rgauge--cool .rgauge-fill { stroke: var(--grid); }
-.rgauge-target {
-  fill: none;
-  stroke: var(--text);
-  stroke-width: 11;
-  stroke-linecap: butt;
-  opacity: 0.85;
+
+/* clean filled head dot at the progress end (card-fill core + domain ring) */
+.rgauge-head {
+  fill: var(--bg-card);
+  stroke-width: 2.5;
 }
-/* Centre readout sits inside the arc (arc spans y 12→62 in the 120×72 vb). */
-.rgauge-center {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 6%;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
+.rgauge--thermal .rgauge-head { stroke: var(--pv); }
+.rgauge--cool .rgauge-head { stroke: var(--grid); }
+
+/* set-mark — a short radial tick + a small dot just beyond the rim */
+.rgauge-tick {
+  stroke: var(--text-mute);
+  stroke-width: 2;
+  stroke-linecap: round;
 }
-.rgauge-value {
-  font-size: 1.9rem;
-  font-weight: 700;
-  line-height: 1;
+.rgauge-tick-dot { fill: var(--text-mute); }
+
+/* centre read-out, rendered as SVG text so it sits dead-centre in the dial */
+.rgauge-v {
+  font-size: 27px;
+  font-weight: 600;
+  fill: var(--text);
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.02em;
-  color: var(--text);
 }
+.rgauge-deg {
+  font-size: 13px;
+  font-weight: 500;
+  fill: var(--text-mute);
+}
+.rgauge-lim {
+  font-size: 10px;
+  font-weight: 500;
+  fill: var(--text-mute);
+  font-variant-numeric: tabular-nums;
+}
+
 .rgauge-label {
   font-size: var(--font-xs);
-  color: var(--text-mute);
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: -0.01em;
+  text-align: center;
 }
