@@ -161,7 +161,9 @@ export default function Landing() {
 
   return (
     <div class="home">
-      <PeriodNavigator />
+      {/* Narrow screens only — wide screens get the chrome variant in the
+          sticky TopNav (redesign P4c). Same global signal either way. */}
+      <PeriodNavigator variant="page" />
       <Hero metrics={metrics.data} metricsLoading={metrics.loading} cockpit={data} agile={agile.data} monthly={monthly.data}
             period={periodInsights.data} periodState={period}
             periodLoading={periodInsights.loading} todayCum={todayCum.data}

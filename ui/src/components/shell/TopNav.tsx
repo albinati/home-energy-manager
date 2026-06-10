@@ -1,6 +1,7 @@
 import { Link, useLocation } from "wouter-preact";
 import { ThemeToggle } from "./ThemeToggle";
 import { AdminButton } from "./AdminButton";
+import { PeriodNavigator } from "./PeriodNavigator";
 import { role } from "../../lib/auth";
 
 const tabs = [
@@ -11,6 +12,11 @@ const tabs = [
   { href: "/settings", label: "Settings", adminOnly: true },
 ];
 
+// Routes whose content follows the shared period signal — these get the
+// compact period control in the chrome (redesign P4c). Other routes keep a
+// plain bar (the spacers collapse the gap).
+const periodRoutes = ["/", "/insights"];
+
 export function TopNav() {
   const [path] = useLocation();
   const isAdmin = role.value === "admin";
@@ -20,8 +26,11 @@ export function TopNav() {
       <div class="topnav-inner">
         <Link href="/" class="brand">
           <span class="brand-mark">H</span>
-          <span>Home Energy Manager</span>
+          <span class="brand-name">Home Energy Manager</span>
         </Link>
+        <span class="topnav-spacer" />
+        {periodRoutes.includes(path) && <PeriodNavigator variant="chrome" />}
+        <span class="topnav-spacer" />
         <nav class="topnav-tabs" aria-label="Primary">
           {visible.map((t) => (
             <Link

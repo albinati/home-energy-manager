@@ -12,6 +12,13 @@ import "./period-nav.css";
 //   ‹  [period label]  ›        day | week | month | year
 // Stepping is bounded — "next" is disabled once the selected period contains
 // today (you can't browse the future). Granularity is a segmented toggle.
+//
+// Two render variants share the same global period signal (redesign P4c):
+//   • "chrome" — compact, lives inside the sticky TopNav on period-scoped
+//     routes (cockpit, insights). Hidden on narrow screens where the topnav
+//     collapses to a column (a 3-row sticky header would eat the viewport).
+//   • "page"  — the in-flow selector at the top of the route; shown ONLY on
+//     narrow screens, where it replaces the hidden chrome control.
 const GRANS: { key: Granularity; label: string }[] = [
   { key: "day", label: "Day" },
   { key: "week", label: "Week" },
@@ -19,12 +26,12 @@ const GRANS: { key: Granularity; label: string }[] = [
   { key: "year", label: "Year" },
 ];
 
-export function PeriodNavigator() {
+export function PeriodNavigator({ variant = "page" }: { variant?: "page" | "chrome" }) {
   const p = usePeriod();
   const atNow = isCurrentPeriod(p);
 
   return (
-    <div class="pnav" role="group" aria-label="Period selector">
+    <div class={`pnav pnav--${variant}`} role="group" aria-label="Period selector">
       <div class="pnav-stepper">
         <button class="pnav-arrow" onClick={() => stepPeriod(-1)} aria-label="Previous period">‹</button>
         <span class="pnav-label" aria-live="polite">{periodLabel(p)}</span>
