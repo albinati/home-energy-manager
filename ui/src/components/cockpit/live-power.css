@@ -24,14 +24,15 @@
   flex-wrap: wrap;
 }
 .rates .grow { flex: 1; }
-.rate-k {
+/* lp- prefixed: hero.css already owns global .rate-k/.rate-sub names. */
+.lp-rate-k {
   font-size: var(--font-2xs);
   color: var(--text-mute);
   text-transform: uppercase;
   letter-spacing: 0.05em;
   font-weight: 600;
 }
-.rate-v {
+.lp-rate-v {
   font-size: var(--font-xl);
   font-weight: 700;
   font-variant-numeric: tabular-nums;
@@ -39,13 +40,13 @@
   color: var(--text);
 }
 /* No live export price — quiet, smaller, never reads as a live green value. */
-.rate-v--none {
+.lp-rate-v--none {
   color: var(--text-mute);
   font-size: var(--font-sm);
   font-weight: 600;
   line-height: 2;
 }
-.rate-sub {
+.lp-rate-sub {
   font-size: var(--font-xs);
   color: var(--text-mute);
   font-variant-numeric: tabular-nums;

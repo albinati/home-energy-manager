@@ -39,10 +39,10 @@ export function LivePowerWidget({ state, cockpit, agile, metrics, todayCumulativ
 
       <div class="rates">
         <div class="rate" title="Live Agile import p/kWh + how much you've imported so far today (to now)">
-          <div class="rate-k">Import</div>
-          <div class={`rate-v livepower-rate--band-${importBand}`}>{importP != null ? `${importP.toFixed(1)}p` : "—"}</div>
+          <div class="lp-rate-k">Import</div>
+          <div class={`lp-rate-v livepower-rate--band-${importBand}`}>{importP != null ? `${importP.toFixed(1)}p` : "—"}</div>
           {todayCumulative && (
-            <div class="rate-sub">
+            <div class="lp-rate-sub">
               {kwh(todayCumulative.import_kwh)} ·{" "}
               {todayCumulative.import_cost_gbp < -0.005
                 ? <span class="livepower-credit" title="Paid to import on negative-price slots">+{gbp(Math.abs(todayCumulative.import_cost_gbp))} credit</span>
@@ -51,12 +51,12 @@ export function LivePowerWidget({ state, cockpit, agile, metrics, todayCumulativ
           )}
         </div>
         <div class="rate" title="Live export p/kWh + what you've exported so far today">
-          <div class="rate-k">Export</div>
+          <div class="lp-rate-k">Export</div>
           {exportP != null
-            ? <div class="rate-v livepower-rate--export">{exportP.toFixed(1)}p</div>
-            : <div class="rate-v rate-v--none">no export</div>}
+            ? <div class="lp-rate-v livepower-rate--export">{exportP.toFixed(1)}p</div>
+            : <div class="lp-rate-v lp-rate-v--none">no export</div>}
           {todayCumulative && (
-            <div class="rate-sub">
+            <div class="lp-rate-sub">
               {kwh(todayCumulative.export_kwh)} ·{" "}
               <span class="livepower-rate--export">{gbp(todayCumulative.export_revenue_gbp)}</span> today
             </div>

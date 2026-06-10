@@ -148,11 +148,18 @@ export function periodScope(p: PeriodState): { scope: string; date?: string } {
     return isCurrentPeriod(p) ? { scope, date } : { scope };
   }
   if (p.gran === "week") {
-    const { start, end } = periodDateRange(p);
-    const s = parse(start), e = parse(end);
-    const date = s.getMonth() === e.getMonth()
-      ? `${s.getDate()}–${e.getDate()} ${MONTHS[e.getMonth()]} ${e.getFullYear()}`
-      : `${s.getDate()} ${MONTHS[s.getMonth()]} – ${e.getDate()} ${MONTHS[e.getMonth()]} ${e.getFullYear()}`;
+    // Full Monday-based week, NOT periodDateRange (whose end clamps to today —
+    // mid-week that would misread as "8–10 Jun").
+    const d = parse(p.anchor);
+    const s = new Date(d);
+    s.setDate(d.getDate() - ((d.getDay() + 6) % 7)); // Monday
+    const e = new Date(s);
+    e.setDate(s.getDate() + 6);
+    const date = s.getFullYear() !== e.getFullYear()
+      ? `${s.getDate()} ${MONTHS[s.getMonth()]} ${s.getFullYear()} – ${e.getDate()} ${MONTHS[e.getMonth()]} ${e.getFullYear()}`
+      : s.getMonth() === e.getMonth()
+        ? `${s.getDate()}–${e.getDate()} ${MONTHS[e.getMonth()]} ${e.getFullYear()}`
+        : `${s.getDate()} ${MONTHS[s.getMonth()]} – ${e.getDate()} ${MONTHS[e.getMonth()]} ${e.getFullYear()}`;
     return { scope, date };
   }
   return { scope };
