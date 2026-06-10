@@ -38,7 +38,7 @@ export default function Insights() {
         </p>
       </header>
 
-      <PeriodNavigator />
+      <PeriodNavigator variant="page" />
 
       {cmp.loading && !data && <Spinner label="Comparing tariffs…" />}
       {cmp.error && <p class="insights-error">Couldn't load the comparison: {cmp.error.message}</p>}
