@@ -27,11 +27,11 @@ import { Icon } from "../components/common/Icon";
 import { Spinner } from "../components/common/Spinner";
 import { RefreshCountdown } from "../components/common/RefreshCountdown";
 import { PeriodNavigator } from "../components/shell/PeriodNavigator";
-import { usePeriod, periodFetchOpts } from "../lib/period";
+import { usePeriod, periodFetchOpts, periodScope } from "../lib/period";
 import { LivePowerWidget } from "../components/cockpit/LivePowerWidget";
 import { Hero } from "../components/home/Hero";
 import { HeatingWidget } from "../components/home/HeatingWidget";
-import { PlanWidget } from "../components/home/PlanWidget";
+import { PlanMini } from "../components/home/PlanMini";
 import type { MonthlyEnergy } from "../lib/types";
 import "../components/home/home.css";
 
@@ -159,20 +159,35 @@ export default function Landing() {
     ? new Date(data.now_utc).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })
     : undefined;
 
+  const scope = periodScope(period);
+
   return (
     <div class="home">
       {/* Narrow screens only — wide screens get the chrome variant in the
           sticky TopNav (redesign P4c). Same global signal either way. */}
       <PeriodNavigator variant="page" />
+
+      {/* ── PERIOD-VIEW scope (redesign) — names what the hero is scoped to. */}
+      <div class="scope scope--period">
+        <span class="scope-dot" />
+        {scope.scope} · period view
+        {scope.date && <span class="scope-when">{scope.date}</span>}
+      </div>
+
       <Hero metrics={metrics.data} metricsLoading={metrics.loading} cockpit={data} agile={agile.data} monthly={monthly.data}
             period={periodInsights.data} periodState={period}
             periodLoading={periodInsights.loading} todayCum={todayCum.data}
             weather={weather.data} pv={pvToday.data} />
 
-      {/* ── LIVE band (redesign P4) — split 50/50: live power flow + live heating
-          (gauges + the heating-plan timeline). Wrapped in the accent-wash band
-          so it reads as the always-now, self-driving surface that ignores the
-          period selector above. */}
+      {/* ── LIVE scope + band (redesign) — the always-now, self-driving surface
+          that ignores the period selector above. Live power = the animated
+          flow + rates + battery, with its committed plan as the card foot;
+          Live heating = the plan chart first, gauges demoted beneath it. */}
+      <div class="scope scope--live">
+        <span class="scope-dot" />
+        Live now
+        <span class="scope-when">always now — ignores the period above</span>
+      </div>
       <div class="widget-band live-band">
         <div class="live-band-head">
           <Icon name="power-live" size={13} /> Live · self-driving
@@ -183,36 +198,34 @@ export default function Landing() {
           <Widget title="Live power" icon={<Icon name="power-live" size={14} />} tone="power" size="half"
                   badge={liveTime}
                   action={<RefreshCountdown lastFetchAt={now.lastFetchAt} intervalMs={now.intervalMs} loading={now.loading} onRefresh={() => void now.refresh()} />}>
-            <LivePowerWidget state={s} cockpit={data} timeline={timeline.data} execution={execution.data} agile={agile.data} metrics={metrics.data} dhwSchedule={dhwSched.data?.rows} todayCumulative={todayCum.data} />
+            <LivePowerWidget state={s} cockpit={data} agile={agile.data} metrics={metrics.data} todayCumulative={todayCum.data} />
+            <PlanMini groups={["battery", "appliances"]} timeline={timeline.data}
+                      appliances={appliances.data?.appliances} applianceJobs={applianceJobs.data?.jobs}
+                      applianceSuggestions={applianceSug.data?.suggestions}
+                      nowUtc={data.now_utc} foxMode={foxMode} foxActive={foxActive} />
           </Widget>
 
           <Widget title="Live heating" icon={<Icon name="heating" size={14} />} tone="thermal" size="half">
             <HeatingWidget state={s} daikin={daikin.data} daikinQuota={daikinQuota.data} report={report.data} weather={weather.data} execution={execution.data}
-                           onRefresh={() => { void daikin.refresh(); void daikinQuota.refresh(); }} />
-            <Suspense fallback={<Spinner label="Loading heating plan…" />}>
-              <HeatingPlanWidget plan={heatingPlan.data} loading={heatingPlan.loading} />
-            </Suspense>
+                           onRefresh={() => { void daikin.refresh(); void daikinQuota.refresh(); }}>
+              <Suspense fallback={<Spinner label="Loading heating plan…" />}>
+                <HeatingPlanWidget plan={heatingPlan.data} loading={heatingPlan.loading} />
+              </Suspense>
+            </HeatingWidget>
+            <PlanMini groups={["heating", "tank"]} timeline={timeline.data}
+                      dhwSchedule={dhwSched.data?.rows} heatingPlan={heatingPlan.data}
+                      nowUtc={data.now_utc} />
           </Widget>
         </div>
       </div>
 
-      {/* ── PLAN (full width). Weather moved into the hero (redesign P2). Plan =
-          the committed dispatch (battery + heating LWT + tank + appliances). */}
-      <div class="widget-grid widget-band">
-        <Widget title="Plan" icon={<Icon name="schedule" size={14} />} tone="plan" size="wide">
-          <PlanWidget timeline={timeline.data} dhwSchedule={dhwSched.data?.rows} heatingPlan={heatingPlan.data}
-                      appliances={appliances.data?.appliances} applianceJobs={applianceJobs.data?.jobs}
-                      applianceSuggestions={applianceSug.data?.suggestions}
-                      nowUtc={data.now_utc} foxMode={foxMode} foxActive={foxActive} />
-        </Widget>
-      </div>
-
       {/* ── PERIOD scope divider (redesign P4) — everything below follows the
-          day/week/month/year selector at the top, in contrast to the live band. */}
+          day/week/month/year selector in the chrome, in contrast to the live
+          band. */}
       <div class="scope scope--period">
         <span class="scope-dot" />
-        Period · energy
-        <span class="scope-when">follows the selector above</span>
+        {scope.scope} · energy
+        <span class="scope-when">follows the {period.gran} selector</span>
       </div>
 
       {/* ── TIMELINES — Generation + Consumption, synced to the period navigator.

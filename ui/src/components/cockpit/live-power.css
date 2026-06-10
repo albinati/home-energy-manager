@@ -1,346 +1,89 @@
-/* Live-power instrument panel — hero net-power → action → flow → battery/fox.
- * Chrome disappears: sections separated by negative space, one hairline before
- * the secondary Fox strip. Domain colour only on the flow + focal-value tints. */
+/* Live-power tile (redesign): the animated power-flow IS the surface, with a
+ * quiet rates row beneath (Import / Export read-outs + compact battery SoC)
+ * and the PlanMini "Planned dispatch" foot composed by the route. Domain
+ * colour only on the flow, the rate values (band/domain) and the SoC mode. */
 
 .livepower {
   display: flex;
   flex-direction: column;
-  gap: var(--space-5);
-}
-
-/* Hero — the one focal number of this surface (live net grid power) */
-.livepower-hero {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-height: 88px;
-}
-.livepower-hero-eyebrow {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  font-size: var(--font-2xs);
-  font-weight: 600;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--text-mute);
-}
-.livepower-hero-icon { display: inline-flex; color: var(--text-dim); }
-.livepower-hero-dot {
-  width: 6px; height: 6px; border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 8px var(--accent);
-}
-.livepower-hero-num {
-  font-size: var(--font-hero);
-  font-weight: 700;
-  line-height: 0.95;
-  letter-spacing: -0.03em;
-  font-variant-numeric: tabular-nums;
-  /* Lock-in settle: ~2% overshoot ~300ms after the card rises. */
-  animation: livepower-lock 500ms var(--ease-lock) 300ms both;
-}
-@keyframes livepower-lock {
-  from { transform: scale(0.96); }
-  to   { transform: scale(1); }
-}
-.livepower-hero-unit {
-  font-size: 0.5em;
-  font-weight: 500;
-  color: var(--text-dim);
-  letter-spacing: 0.02em;
-  margin-left: 0.3em;
-}
-
-/* Quiet action verb — supporting copy */
-.livepower-action {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-}
-.livepower-action-icon {
-  width: 36px;
-  height: 36px;
-  border-radius: var(--radius-sm);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--bg-card-2);
-  color: var(--text-dim);
-  flex-shrink: 0;
-}
-.livepower-action-text { min-width: 0; }
-.livepower-action-title {
-  font-size: var(--font-sm);
-  font-weight: 600;
-  color: var(--text);
-  line-height: 1.2;
-}
-.livepower-action-sub {
-  font-size: var(--font-xs);
-  color: var(--text-mute);
-  font-variant-numeric: tabular-nums;
-  margin-top: 1px;
-}
-
-/* Body: flow centerpiece + battery panel */
-.livepower-body {
-  display: grid;
-  grid-template-columns: 1fr auto;
   gap: var(--space-4);
-  align-items: start;
 }
-@media (max-width: 760px) {
-  .livepower-body { grid-template-columns: 1fr; }
-}
-.livepower-flow { min-width: 0; min-height: 200px; }
 
-.livepower-batt {
+.livepower-flow {
+  min-width: 0;
+  min-height: 200px;
   display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  min-width: 140px;
-  padding-left: var(--space-4);
-}
-@media (max-width: 760px) {
-  .livepower-batt {
-    padding-left: 0;
-    padding-top: var(--space-3);
-    border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
-  }
+  justify-content: center;
 }
 
-.livepower-batt-cell {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  grid-template-rows: auto auto;
-  grid-template-areas: "svg pct" "svg kwh";
-  gap: 0 var(--space-2);
-  align-items: center;
-}
-.livepower-batt-svg { grid-area: svg; }
-.livepower-batt-pct {
-  grid-area: pct;
-  font-size: var(--font-lg);
-  font-weight: 600;
-  letter-spacing: -0.015em;
-  line-height: 1;
-  font-variant-numeric: tabular-nums;
-  color: var(--batt);
-}
-.livepower-batt-kwh {
-  grid-area: kwh;
-  font-size: var(--font-xs);
-  color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
-}
-
-.livepower-batt-dir {
+/* ── rate read-outs row: Import · Export · (spacer) · battery ─────────── */
+.rates {
   display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  font-size: var(--font-sm);
-  font-variant-numeric: tabular-nums;
+  gap: var(--space-6);
+  align-items: flex-start;
+  flex-wrap: wrap;
 }
-.livepower-batt-dir-icon { display: inline-flex; line-height: 1; }
-.livepower-batt-dir-kw { font-weight: 700; }
-
-.livepower-batt-meta {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding-top: var(--space-2);
-  border-top: 1px dashed color-mix(in srgb, var(--border) 55%, transparent);
-}
-.livepower-batt-meta-row {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: var(--space-2);
-  font-size: var(--font-xs);
-  font-variant-numeric: tabular-nums;
-}
-.livepower-batt-meta-label {
-  color: var(--text-mute);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-.livepower-batt-meta-value {
-  font-weight: 600;
-  text-align: right;
-}
-
-/* Secondary Fox strip — separated by one hairline + space. Monochrome-first:
- * colour only on the rate VALUE and the leading mode dot, never a flooded
- * pill/chip surface. */
-.livepower-fox {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-  padding-top: var(--space-4);
-  border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
-}
-
-.livepower-fox-rates {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--space-2);
-}
-.livepower-fox-rate {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  align-items: baseline;
-  gap: var(--space-2);
-  padding: 6px 10px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-card-2);
-}
-.livepower-fox-rate-label {
+.rates .grow { flex: 1; }
+/* lp- prefixed: hero.css already owns global .rate-k/.rate-sub names. */
+.lp-rate-k {
   font-size: var(--font-2xs);
   color: var(--text-mute);
-  letter-spacing: 0.06em;
   text-transform: uppercase;
-  font-weight: 700;
+  letter-spacing: 0.05em;
+  font-weight: 600;
 }
-.livepower-fox-rate-value {
-  font-size: var(--font-lg);
+.lp-rate-v {
+  font-size: var(--font-xl);
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.015em;
-  text-align: right;
   color: var(--text);
 }
-/* Import value tints by band; export value is green (income). */
+/* No live export price — quiet, smaller, never reads as a live green value. */
+.lp-rate-v--none {
+  color: var(--text-mute);
+  font-size: var(--font-sm);
+  font-weight: 600;
+  line-height: 2;
+}
+.lp-rate-sub {
+  font-size: var(--font-xs);
+  color: var(--text-mute);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Import value tints by tariff band; export value is green (income). */
 .livepower-rate--band-negative { color: var(--neg-price); }
 .livepower-rate--band-cheap    { color: var(--cheap); }
+.livepower-rate--band-standard { color: var(--import); }
 .livepower-rate--band-peak     { color: var(--peak); }
 .livepower-rate--export        { color: var(--export); }
-/* No live export price — quiet, smaller, never reads as a live green value. */
-.livepower-fox-rate-value--none {
-  color: var(--text-mute);
-  font-size: var(--font-sm);
-  font-weight: 600;
-}
-/* "X.X kWh today · £Y" line under each live rate — day-to-now grid traffic. */
-.livepower-fox-rate-sub {
-  display: block;
-  margin-top: 2px;
-  font-size: var(--font-2xs);
-  color: var(--text-mute);
-  font-variant-numeric: tabular-nums;
-}
 .livepower-credit { color: var(--ok); font-weight: 600; }
 
-.livepower-fox-row {
+/* ── compact battery state-of-charge block ────────────────────────────── */
+.batt-soc {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  flex-wrap: wrap;
-  font-size: var(--font-xs);
 }
-.livepower-fox-label {
-  color: var(--text-mute);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+.batt-glyph { width: 30px; height: auto; flex: none; }
+.batt-tx { line-height: 1.18; }
+.batt-pct {
+  font-size: var(--font-lg);
   font-weight: 700;
-  font-size: var(--font-2xs);
-}
-.livepower-fox-mode {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px var(--space-2);
-  border-radius: var(--radius-pill);
-  font-weight: 600;
-  font-size: var(--font-xs);
-  letter-spacing: 0.02em;
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--text-dim);
-}
-.livepower-fox-mode-dot {
-  width: 6px; height: 6px; border-radius: 50%;
-  background: var(--text-mute);
-  flex-shrink: 0;
-}
-.livepower-fox-mode--selfuse      .livepower-fox-mode-dot { background: var(--accent); }
-.livepower-fox-mode--forcecharge  .livepower-fox-mode-dot,
-.livepower-fox-mode--feedin       .livepower-fox-mode-dot { background: var(--ok); }
-.livepower-fox-mode--forcedischarge .livepower-fox-mode-dot,
-.livepower-fox-mode--peakexport   .livepower-fox-mode-dot { background: var(--peak-export); }
-.livepower-fox-mode--backup       .livepower-fox-mode-dot { background: var(--warn); }
-
-.livepower-fox-windows {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  flex-wrap: wrap;
-}
-.livepower-fox-window {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  padding: 2px 6px;
-  border-radius: var(--radius-sm);
-  font-size: var(--font-2xs);
   font-variant-numeric: tabular-nums;
-  background: var(--bg-card-2);
-  color: var(--text-dim);
 }
-.livepower-fox-window-icon { display: inline-flex; color: var(--text-mute); }
-/* Future-day events — LP plan only, not yet uploaded to Fox. */
-.livepower-fox-window--future {
-  opacity: 0.72;
-  border: 1px dashed var(--border);
-  background: transparent;
-}
-
-.livepower-fox-debug {
+.batt-kwh {
   font-size: var(--font-2xs);
   color: var(--text-mute);
   font-variant-numeric: tabular-nums;
-  letter-spacing: 0.02em;
 }
-.livepower-fox-debug strong { color: var(--text-dim); font-weight: 700; }
-
-:root.hem-reduce-motion .livepower-hero-num { animation: none; transform: none; }
-
-/* Caption under the net-grid hero number — explains what the kW figure means. */
-.livepower-hero-cap {
-  margin-top: 2px;
-  font-size: var(--font-xs);
-  color: var(--text-mute);
-}
-
-/* "Next" action summary — soonest battery + tank actions, one quiet line. */
-.livepower-next {
-  margin-top: var(--space-2);
+.batt-status {
+  font-size: var(--font-2xs);
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: var(--space-1) var(--space-3);
-  font-size: var(--font-xs);
+  gap: 5px;
   font-variant-numeric: tabular-nums;
+  margin-top: 2px;
 }
-.livepower-next-label {
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  font-size: var(--font-2xs);
-  font-weight: 600;
-  color: var(--text-mute);
-}
-.livepower-next-item {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  font-weight: 600;
-}
-.livepower-next-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  flex: none;
-}
-.livepower-next-when {
-  color: var(--text-dim);
-  font-weight: 500;
-}
+.batt-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex: none; }

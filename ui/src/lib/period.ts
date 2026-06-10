@@ -136,3 +136,31 @@ export function periodLabel(p: PeriodState): string {
 export function periodNoun(p: PeriodState): string {
   return periodLabel(p);
 }
+
+/** Chrome-stepper / scope-divider form (redesign): a scope word plus, when it
+ * adds information, the concrete date — "Today · 8 Jun 2026",
+ * "This week · 9–15 Jun 2026". Month/year labels already ARE the date. */
+export function periodScope(p: PeriodState): { scope: string; date?: string } {
+  const scope = periodLabel(p);
+  if (p.gran === "day") {
+    const d = parse(p.anchor);
+    const date = `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
+    return isCurrentPeriod(p) ? { scope, date } : { scope };
+  }
+  if (p.gran === "week") {
+    // Full Monday-based week, NOT periodDateRange (whose end clamps to today —
+    // mid-week that would misread as "8–10 Jun").
+    const d = parse(p.anchor);
+    const s = new Date(d);
+    s.setDate(d.getDate() - ((d.getDay() + 6) % 7)); // Monday
+    const e = new Date(s);
+    e.setDate(s.getDate() + 6);
+    const date = s.getFullYear() !== e.getFullYear()
+      ? `${s.getDate()} ${MONTHS[s.getMonth()]} ${s.getFullYear()} – ${e.getDate()} ${MONTHS[e.getMonth()]} ${e.getFullYear()}`
+      : s.getMonth() === e.getMonth()
+        ? `${s.getDate()}–${e.getDate()} ${MONTHS[e.getMonth()]} ${e.getFullYear()}`
+        : `${s.getDate()} ${MONTHS[s.getMonth()]} – ${e.getDate()} ${MONTHS[e.getMonth()]} ${e.getFullYear()}`;
+    return { scope, date };
+  }
+  return { scope };
+}
