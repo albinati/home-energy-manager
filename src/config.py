@@ -903,6 +903,28 @@ class Config:
     DHW_NEGATIVE_PRICE_BOOST_C: float = float(
         os.getenv("DHW_NEGATIVE_PRICE_BOOST_C", "60")
     )
+    # --- DHW forecast auto-scale (#534) ---
+    # The per-slot draw constants in forecast_dhw_load_per_slot are static and
+    # drift seasonally (May 2026 measured ~3.0 kWh/day vs ~2.4 in June: warmer
+    # inlet water + lower standing loss). The auto-scale multiplies the
+    # schedule constants by clamp(median(measured kwh_dhw, window) / nominal
+    # mode total). Median is robust to negative-price boost days. Kill switch
+    # = false → factor 1.0 (raw constants).
+    DHW_FORECAST_AUTOSCALE_ENABLED: bool = os.getenv(
+        "DHW_FORECAST_AUTOSCALE_ENABLED", "true"
+    ).lower() in ("true", "1", "yes")
+    DHW_FORECAST_AUTOSCALE_WINDOW_DAYS: int = int(
+        os.getenv("DHW_FORECAST_AUTOSCALE_WINDOW_DAYS", "14")
+    )
+    DHW_FORECAST_AUTOSCALE_MIN_DAYS: int = int(
+        os.getenv("DHW_FORECAST_AUTOSCALE_MIN_DAYS", "5")
+    )
+    DHW_FORECAST_AUTOSCALE_MIN: float = float(
+        os.getenv("DHW_FORECAST_AUTOSCALE_MIN", "0.5")
+    )
+    DHW_FORECAST_AUTOSCALE_MAX: float = float(
+        os.getenv("DHW_FORECAST_AUTOSCALE_MAX", "1.6")
+    )
     # --- Legionella thermal-shock STAND-OFF (2026-06-07) ---
     # The Onecta firmware owns the DHW tank during its weekly thermal-shock
     # cycle. Any tank PATCH HEM sends in that window is arbitrated/overridden by
