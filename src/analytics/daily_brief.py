@@ -549,6 +549,9 @@ def _format_pnl_block(pnl: dict[str, Any], *, day: date, tz: ZoneInfo) -> list[s
     audit_line = _fox_vs_meter_audit_line(day)
     if audit_line:
         out.append(audit_line)
+    stale_line = _meter_staleness_line(day)
+    if stale_line:
+        out.append(stale_line)
     skill_line = _forecast_skill_line(day)
     if skill_line:
         out.append(skill_line)
@@ -656,6 +659,34 @@ def _fox_vs_meter_audit_line(day: date) -> str | None:
     if exp:
         parts.append(f"export {exp}")
     return f"- Audit (Fox vs meter): {' | '.join(parts)}"
+
+
+def _meter_staleness_line(day: date) -> str | None:
+    """Warn when the newest cached Octopus daily-meter row lags ``day`` by
+    more than ``CONSUMPTION_METER_STALE_DAYS`` (#533).
+
+    Per-day "_not yet published_" notes look like routine publish lag, so a
+    month-long meter outage previously produced no alarm at all — the PnL
+    silently degraded to Fox CT-clamp data. This line only appears in the
+    failure mode, stays silent when the meter feed is healthy.
+    """
+    stale_days = int(getattr(config, "CONSUMPTION_METER_STALE_DAYS", 3))
+    if stale_days <= 0:
+        return None
+    last = db.get_octopus_meter_last_day()
+    if last is None:
+        return "- ⚠️ Meter audit: no Octopus smart-meter day cached yet — PnL is Fox-only"
+    try:
+        lag = (day - date.fromisoformat(last)).days
+    except ValueError:
+        return None
+    if lag <= stale_days:
+        return None
+    return (
+        f"- ⚠️ Meter audit: last metered day is {last} ({lag} days ago) — "
+        "PnL has been running on Fox CT-clamp data since; check the smart "
+        "meter / Octopus feed"
+    )
 
 
 def _mtd_summary(day: date) -> dict[str, Any] | None:

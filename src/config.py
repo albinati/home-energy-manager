@@ -384,6 +384,23 @@ class Config:
     # consumption data lands ~24 h after the slot; 04:00 local is safe.
     CONSUMPTION_BACKFILL_HOUR: int = int(os.getenv("CONSUMPTION_BACKFILL_HOUR", "4"))
     CONSUMPTION_BACKFILL_MINUTE: int = int(os.getenv("CONSUMPTION_BACKFILL_MINUTE", "0"))
+    # Octopus regularly publishes later than the ~24 h the single-shot design
+    # assumed (observed 2026-05/06: whole weeks landed days late after a
+    # meter-comms outage). The cron therefore sweeps a trailing window and
+    # re-attempts any local day that still lacks a daily-meter row or whose
+    # execution_log metered coverage is below the slot floor. Re-runs are
+    # idempotent (update_execution_log_metered upserts by half-hour bucket).
+    CONSUMPTION_BACKFILL_SWEEP_DAYS: int = int(
+        os.getenv("CONSUMPTION_BACKFILL_SWEEP_DAYS", "7")
+    )
+    CONSUMPTION_BACKFILL_MIN_METERED_SLOTS: int = int(
+        os.getenv("CONSUMPTION_BACKFILL_MIN_METERED_SLOTS", "40")
+    )
+    # Daily-brief warning when the newest plausible metered day is older than
+    # this — silence here previously hid a month of Fox-only PnL (#533).
+    CONSUMPTION_METER_STALE_DAYS: int = int(
+        os.getenv("CONSUMPTION_METER_STALE_DAYS", "3")
+    )
     BULLETPROOF_TIMEZONE: str = (os.getenv("BULLETPROOF_TIMEZONE") or "Europe/London").strip()
 
     # ── SmartThings smart-appliance scheduling — OAuth 2.0 (mirrors Daikin) ──
