@@ -5243,6 +5243,18 @@ def rebuild_forecast_skill_log_for_date(date_utc: str) -> int:
     cal_hour = get_pv_calibration_hourly()
     cal_3d = get_pv_calibration_3d()
     flat_cal = compute_pv_calibration_factor() if not cal_cloud and not cal_hour else 1.0
+    # #486 follow-up — the LP weather builder applies the adaptive recent-bias
+    # factor ON TOP of the calibration chain (see the matching block in
+    # ``weather.build_*``). The audit must measure the SAME forecast the
+    # planner uses, or the skill log shows a phantom pre-correction residual —
+    # the exact skew class the PR L3 comment above fixed for the 3D table.
+    # Keep this gate identical to the weather-builder gate.
+    recent_bias: dict[int, float] = {}
+    if getattr(config, "PV_RECENT_BIAS_ENABLED", False):
+        try:
+            recent_bias = get_pv_recent_bias()
+        except sqlite3.OperationalError:
+            recent_bias = {}
 
     for row in history_rows:
         slot_time = str(row.get("slot_time") or "")
@@ -5280,7 +5292,8 @@ def rebuild_forecast_skill_log_for_date(date_utc: str) -> int:
                 flat=flat_cal,
                 table_3d=cal_3d,
                 slot_utc=slot_utc_dt,
-            ),
+            )
+            * (recent_bias.get(hour_utc, 1.0) if recent_bias else 1.0),
         }
 
     for row in load_rows:
