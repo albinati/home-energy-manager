@@ -50,3 +50,25 @@ def test_warns_when_no_meter_rows_at_all():
 def test_disabled_by_zero_threshold(monkeypatch):
     monkeypatch.setattr(app_config, "CONSUMPTION_METER_STALE_DAYS", 0, raising=False)
     assert daily_brief._meter_staleness_line(date(2026, 6, 11)) is None
+
+
+def test_null_and_garbage_rows_do_not_mute_the_alarm():
+    """During an outage Octopus can yield NULL-import or near-zero rows;
+    those must not advance the freshness anchor (review HIGH-2 on #535)."""
+    from src import db
+    db.upsert_octopus_daily_meter("2026-05-25", import_kwh=9.0, export_kwh=1.0)
+    # Outage artefacts AFTER the last good day:
+    db.upsert_octopus_daily_meter("2026-06-09", import_kwh=None, export_kwh=None)
+    db.upsert_octopus_daily_meter("2026-06-10", import_kwh=0.03, export_kwh=0.0)
+    assert db.get_octopus_meter_last_day() == "2026-05-25"
+    line = daily_brief._meter_staleness_line(date(2026, 6, 11))
+    assert line is not None and "2026-05-25" in line
+
+
+def test_alarm_rides_the_night_brief_surface():
+    """The line must reach a DELIVERED surface (review HIGH-1 on #535):
+    _format_pnl_block has no production callers, so the night brief carries
+    it. Empty DB → 'no Octopus day cached yet' variant must render."""
+    payload = daily_brief.build_night_payload()
+    assert "Meter audit" in payload
+    assert "Fox-only" in payload

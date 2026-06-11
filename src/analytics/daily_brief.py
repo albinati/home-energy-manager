@@ -440,6 +440,14 @@ def build_night_payload() -> str:
     except Exception:
         _section_logger.exception("night brief PnL line failed")
 
+    # ── Meter-staleness alarm (#533) — must live on a DELIVERED surface.
+    # _format_pnl_block also carries it, but that helper has had no
+    # production callers since the 2026-05-21 brief redesign; the night
+    # brief is the daily eyeball on actuals, so the alarm rides here.
+    stale_line = _safe_call("meter_staleness", _meter_staleness_line, today)
+    if isinstance(stale_line, str) and "Meter audit" in stale_line:
+        lines.extend(["", stale_line])
+
     # ── Tomorrow heads-up: peaks ────────────────────────────────────────
     peaks = _safe_call(
         "tomorrow_peaks", _tariff_peak_windows_summary,

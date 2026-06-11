@@ -3924,16 +3924,24 @@ def get_octopus_daily_meter(date_str: str) -> dict[str, Any] | None:
 
 
 def get_octopus_meter_last_day() -> str | None:
-    """Most recent local date with a cached Octopus daily-meter row, or None.
+    """Most recent local date with a PLAUSIBLE cached Octopus daily-meter
+    row (import ≥ 0.5 kWh), or None.
 
     Drives the brief's meter-staleness warning (#533): when this lags today
     by more than ``CONSUMPTION_METER_STALE_DAYS`` the PnL has silently been
-    running on Fox CT-clamp data alone.
+    running on Fox CT-clamp data alone. The plausibility filter matters:
+    during a meter outage Octopus can yield NULL-import rows (empty fetch)
+    or near-zero garbage rows (pre-floor legacy data, e.g. 2026-05-09..20) —
+    counting those would advance MAX(date) daily and mute the alarm in
+    exactly the failure mode it exists for. 0.5 kWh mirrors
+    PUBLISHED_FLOOR_KWH in the backfill.
     """
     with _lock:
         conn = get_connection()
         try:
-            cur = conn.execute("SELECT MAX(date) AS d FROM octopus_daily_meter")
+            cur = conn.execute(
+                "SELECT MAX(date) AS d FROM octopus_daily_meter WHERE import_kwh >= 0.5"
+            )
             r = cur.fetchone()
             return r["d"] if r and r["d"] else None
         finally:

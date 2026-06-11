@@ -171,11 +171,17 @@ def backfill_for_date(target_local_date: date) -> BackfillResult:
     # less than ~0.5 kWh/day, so a sum under that floor is the "no data yet"
     # signal — skip the upsert and let the next backfill run re-attempt.
     PUBLISHED_FLOOR_KWH = 0.5
-    if import_total is not None and import_total < PUBLISHED_FLOOR_KWH:
+    if import_total is None or import_total < PUBLISHED_FLOOR_KWH:
+        # ``None`` (empty fetch — meter comms down / nothing published) must
+        # be skipped too: writing a NULL-import row every night would advance
+        # MAX(date) and mute the staleness alarm (#533) in exactly the
+        # outage scenario it exists for.
         logger.info(
-            "consumption_backfill: date=%s import_total=%.3f kWh below "
+            "consumption_backfill: date=%s import_total=%s kWh below "
             "%.1f kWh floor — Octopus not yet published; skipping daily-meter upsert",
-            iso, import_total, PUBLISHED_FLOOR_KWH,
+            iso,
+            "none" if import_total is None else f"{import_total:.3f}",
+            PUBLISHED_FLOOR_KWH,
         )
     else:
         try:

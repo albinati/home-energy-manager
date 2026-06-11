@@ -413,3 +413,26 @@ def test_sweep_window_size_from_config(monkeypatch):
     monkeypatch.setattr(_config.config, "CONSUMPTION_BACKFILL_SWEEP_DAYS", 2, raising=False)
     consumption_backfill.backfill_sweep()
     assert len(captured) == 2
+
+
+def test_empty_fetch_skips_daily_meter_upsert(monkeypatch):
+    """Octopus returning ZERO slots (meter comms down) must not write a
+    NULL-import daily row — that would advance MAX(date) nightly and mute
+    the #533 staleness alarm during the exact outage it guards against."""
+    from src import db
+    from src.scheduler import consumption_backfill
+
+    fake_roles = MagicMock(
+        import_mpan="2000000000000", import_serial="ABC123",
+        export_mpan=None, export_serial=None,
+    )
+    monkeypatch.setattr(consumption_backfill, "_octopus_credentials_ready", lambda: True)
+    fake_octopus = MagicMock()
+    fake_octopus.get_mpan_roles.return_value = fake_roles
+    fake_octopus.fetch_consumption.return_value = []
+    monkeypatch.setitem(__import__("sys").modules, "src.energy.octopus_client", fake_octopus)
+
+    result = consumption_backfill.backfill_for_date(date(2026, 6, 9))
+    assert result.slots_fetched == 0
+    assert result.error is None
+    assert db.get_octopus_daily_meter("2026-06-09") is None
