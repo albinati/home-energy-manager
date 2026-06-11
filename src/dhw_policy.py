@@ -389,7 +389,7 @@ _GUESTS_MORNING_SHOWER_END_H = 9  # exclusive
 
 # 6 h TTL cache for the auto-scale factor — one cheap DB read per LP-solve
 # burst instead of per call. Keyed by (mode, window_days).
-_autoscale_cache: dict[tuple[str, int], tuple[float, float]] = {}
+_autoscale_cache: dict[tuple[str, int, str], tuple[float, float]] = {}
 _AUTOSCALE_TTL_SECONDS = 6 * 3600
 
 
@@ -439,7 +439,9 @@ def _dhw_autoscale_factor(mode: str) -> float:
     if not bool(getattr(config, "DHW_FORECAST_AUTOSCALE_ENABLED", True)):
         return 1.0
     window_days = int(getattr(config, "DHW_FORECAST_AUTOSCALE_WINDOW_DAYS", 14))
-    key = (mode, window_days)
+    # DB_PATH in the key: tests swap databases under one process, and prod
+    # never changes it — costs nothing, prevents cross-DB cache bleed.
+    key = (mode, window_days, str(getattr(config, "DB_PATH", "")))
     cached = _autoscale_cache.get(key)
     now = _time.time()
     if cached is not None and now - cached[1] < _AUTOSCALE_TTL_SECONDS:
