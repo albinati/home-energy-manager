@@ -670,8 +670,10 @@ class Config:
     # capacity PV_CAPACITY_KWP); the L3 calibration absorbs the residual.
     QUARTZ_OPEN_PLANES: str = (os.getenv("QUARTZ_OPEN_PLANES") or "").strip()
     QUARTZ_OPEN_TIMEOUT_SECONDS: int = int(os.getenv("QUARTZ_OPEN_TIMEOUT_SECONDS", "60"))
-    # Send recent measured generation with the request (the hosted twin uses
-    # it for nowcast anchoring; the sidecar accepts-and-ignores it today).
+    # Send recent measured generation with the request. NOTE (#544 review):
+    # today BOTH the sidecar and the hosted twin accept-and-ignore it (the
+    # upstream model only anchors on live data via its inverter
+    # integrations) — kept on as future-proof plumbing, harmless either way.
     QUARTZ_OPEN_SEND_LIVE: bool = os.getenv(
         "QUARTZ_OPEN_SEND_LIVE", "true"
     ).lower() in ("true", "1", "yes")

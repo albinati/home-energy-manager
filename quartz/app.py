@@ -98,6 +98,10 @@ def forecast(req: ForecastRequest) -> dict:
     ts = req.timestamp or datetime.now(UTC)
     if ts.tzinfo is not None:
         ts = ts.astimezone(UTC).replace(tzinfo=None)  # package expects naive UTC
+    # Defense-in-depth (#544 review): the model anchors its 15-min prediction
+    # grid at this ts. Floor it so multi-plane callers always get identical,
+    # quarter-aligned grids even if they forget to send a shared timestamp.
+    ts = ts.replace(minute=(ts.minute // 15) * 15, second=0, microsecond=0)
 
     site = PVSite(
         latitude=req.site.latitude,

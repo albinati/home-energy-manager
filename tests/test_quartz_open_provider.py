@@ -190,10 +190,14 @@ def test_planes_sum_despite_per_request_microsecond_offsets(monkeypatch):
     )
     start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
     call_n = {"n": 0}
+    bodies: list[dict] = []
 
     def fake_urlopen(req, timeout=0):  # noqa: ANN001
         call_n["n"] += 1
-        jitter = timedelta(microseconds=123456 * call_n["n"])  # differs per call
+        bodies.append(json.loads(req.data.decode()))
+        # Real grids anchor at per-request now(): SECONDS and microseconds
+        # both differ between the two plane calls (review #544 finding 1).
+        jitter = timedelta(seconds=3 * call_n["n"], microseconds=123456 * call_n["n"])
         jittered = start + jitter
         return _Resp(_open_payload(jittered, [1.0, 1.0, 1.0, 1.0]))
 
@@ -205,3 +209,8 @@ def test_planes_sum_despite_per_request_microsecond_offsets(monkeypatch):
     # Each plane contributes 1.0 kW per quarter → the SUM is 2.0 kW, not the
     # 1.0 kW a non-colliding average would produce.
     assert by_time[start].estimated_pv_kw == pytest.approx(2.0)
+    # And both plane requests carry the SAME quarter-floored timestamp so the
+    # server-side grids can't drift in the first place.
+    assert bodies[0]["timestamp"] == bodies[1]["timestamp"]
+    ts0 = datetime.fromisoformat(bodies[0]["timestamp"])
+    assert ts0.minute % 15 == 0 and ts0.second == 0 and ts0.microsecond == 0

@@ -730,6 +730,15 @@ def _fetch_quartz_open_forecast(
     timeout = int(getattr(config, "QUARTZ_OPEN_TIMEOUT_SECONDS", 60))
     live = _quartz_open_live_generation()
 
+    # One SHARED, quarter-floored timestamp for every plane request: the
+    # server anchors its 15-min prediction grid at the request ts (review
+    # #544 finding 1 — per-request now() gave each plane a drifted grid, and
+    # the merge averaged planes instead of summing). Floored client-side so
+    # plane calls can't straddle a quarter boundary either.
+    now_q = datetime.now(UTC).replace(second=0, microsecond=0)
+    shared_ts = now_q.replace(minute=(now_q.minute // 15) * 15)
+    shared_ts_iso = shared_ts.replace(tzinfo=None).isoformat()
+
     # kW summed across planes per raw model timestamp.
     kw_by_ts: dict[datetime, float] = {}
     planes = _quartz_open_planes()
@@ -742,6 +751,7 @@ def _fetch_quartz_open_forecast(
                 "tilt": plane["tilt"],
                 "orientation": plane["orientation"],
             },
+            "timestamp": shared_ts_iso,
         }
         if live:
             body["live_generation"] = live
