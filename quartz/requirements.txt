@@ -4,9 +4,11 @@
 quartz-solar-forecast>=1.2,<2
 fastapi>=0.111,<1
 uvicorn>=0.30,<1
-# Upstream pins requests-cache==1.2.0, whose attrs models forward-reference
-# RequestsCookieJar under TYPE_CHECKING only; cattrs >=24 resolves type
-# hints eagerly and explodes with NameError at the first cached request
-# (prod boot 2026-06-12). Constrain cattrs to the era requests-cache 1.2.0
-# was built against.
+# Upstream pins requests-cache==1.2.0 but leaves `requests` free, and
+# requests 2.34 breaks 1.2.0's response serialization (NameError:
+# RequestsCookieJar at the first cached NWP request — reproduced in
+# isolation 2026-06-12: 2.34.2 fails, 2.33.0 works; requests-cache only
+# gained 2.34 compat in its own 1.3.2). Era-pin the serialization cluster
+# to match the upstream pin.
+requests<2.34
 cattrs<24
