@@ -1,0 +1,6 @@
+# Pinned loosely on purpose: the model API (run_forecast/PVSite) is stable
+# across 1.x; security/bug fixes flow in on image rebuilds. xgboost +
+# pyresample publish manylinux aarch64 wheels (prod host is ARM64/CAX11).
+quartz-solar-forecast>=1.2,<2
+fastapi>=0.111,<1
+uvicorn>=0.30,<1

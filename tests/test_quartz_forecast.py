@@ -64,6 +64,9 @@ def test_quartz_fetch_merges_direct_pv_with_open_meteo_weather(monkeypatch: pyte
         raise AssertionError(f"unexpected url {url}")
 
     monkeypatch.setattr(app_config, "FORECAST_SOURCE", "quartz", raising=False)
+    # These tests exercise the LEGACY hosted national/GSP client, kept for
+    # rollback while the commercial token lives (#542) — pin the provider.
+    monkeypatch.setattr(app_config, "QUARTZ_PROVIDER", "hosted", raising=False)
     monkeypatch.setattr(app_config, "QUARTZ_USERNAME", "user", raising=False)
     monkeypatch.setattr(app_config, "QUARTZ_PASSWORD", "pass", raising=False)
     monkeypatch.setattr(app_config, "QUARTZ_CLIENT_ID", "test-client-id", raising=False)
@@ -166,6 +169,9 @@ def test_quartz_national_metadata_capacity_can_downscale_site_kw(monkeypatch: py
         raise AssertionError(f"unexpected url {url}")
 
     monkeypatch.setattr(app_config, "FORECAST_SOURCE", "quartz", raising=False)
+    # These tests exercise the LEGACY hosted national/GSP client, kept for
+    # rollback while the commercial token lives (#542) — pin the provider.
+    monkeypatch.setattr(app_config, "QUARTZ_PROVIDER", "hosted", raising=False)
     monkeypatch.setattr(app_config, "QUARTZ_USERNAME", "user", raising=False)
     monkeypatch.setattr(app_config, "QUARTZ_PASSWORD", "pass", raising=False)
     monkeypatch.setattr(app_config, "QUARTZ_CLIENT_ID", "test-client-id", raising=False)
@@ -289,6 +295,9 @@ def test_quartz_half_hour_slot_interpolates_open_meteo_temp(monkeypatch: pytest.
         raise AssertionError(f"unexpected url {url}")
 
     monkeypatch.setattr(app_config, "FORECAST_SOURCE", "quartz", raising=False)
+    # These tests exercise the LEGACY hosted national/GSP client, kept for
+    # rollback while the commercial token lives (#542) — pin the provider.
+    monkeypatch.setattr(app_config, "QUARTZ_PROVIDER", "hosted", raising=False)
     monkeypatch.setattr(app_config, "QUARTZ_USERNAME", "user", raising=False)
     monkeypatch.setattr(app_config, "QUARTZ_PASSWORD", "pass", raising=False)
     monkeypatch.setattr(app_config, "QUARTZ_CLIENT_ID", "test-client-id", raising=False)

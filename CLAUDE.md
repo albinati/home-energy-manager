@@ -582,6 +582,10 @@ ui/                        # Epic 13b — SPA container (nginx + static assets)
   src/{js,css}/            # vanilla JS + CSS, served by nginx; bearer injected by _api.js
   ui-entrypoint.sh         # writes /config.js with bearer + apiBase at container boot
 .github/workflows/ui-publish.yml  # builds + pushes ghcr.io/<owner>/home-energy-manager-ui on push to main (paths-scoped)
+quartz/                    # #542 — self-hosted Quartz solar-forecast sidecar (hem-quartz service)
+  Dockerfile               # python:3.12-slim + quartz-solar-forecast (xgboost site-level model, MIT)
+  app.py                   # FastAPI mirroring open.quartz.solar POST /forecast/ schema; lazy model warm-up
+.github/workflows/quartz-publish.yml  # builds + pushes ghcr.io/<owner>/home-energy-manager-quartz (paths-scoped)
 src/
   cli/__main__.py          # entrypoint: `python -m src.cli serve` (PID 1 in the container, behind tini)
   api/main.py              # FastAPI app + lifespan (token bootstrap, MCP session manager, scheduler) — JSON API only since B5
