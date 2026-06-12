@@ -38,6 +38,10 @@ import type {
   ApplianceSuggestionsResponse,
   ApplianceJobsResponse,
   AppliancesResponse,
+  StatusAlertsResponse,
+  StatusFeedbackResponse,
+  RecentTriggersResponse,
+  LpScorecardResponse,
 } from "./types";
 
 /* ----- Real-time / cockpit ----- */
@@ -69,6 +73,19 @@ export const getDhwSchedule = () => getJson<DhwScheduleResponse>("/daikin/dhw-sc
 // Per-slot heating-plan timeline (D-1/D/D+1): outdoor temp + LWT offset + tank
 // + heating-on, deterministically recomputed. Zero Daikin quota.
 export const getHeatingPlan = () => getJson<HeatingPlanResponse>("/daikin/heating-plan");
+
+/* ----- Ops status (alert strip + self-check, PR 3) -----
+   Both endpoints are server-side TTL-cached (60s / 300s) with sub-caches on
+   anything that costs vendor quota — polling them from every open tab can
+   never amplify into live Fox/Daikin calls. Viewer-readable. */
+
+export const getStatusAlerts = () => getJson<StatusAlertsResponse>("/status/alerts");
+export const getStatusFeedback = () => getJson<StatusFeedbackResponse>("/status/feedback");
+// Admin-only read (middleware admin_read_prefixes) — callers must role-gate.
+export const getRecentTriggers = (limit = 6) =>
+  getJson<RecentTriggersResponse>(`/recent-triggers?limit=${limit}`);
+export const getLpScorecard = (date: string) =>
+  getJson<LpScorecardResponse>(`/lp/scorecard/${encodeURIComponent(date)}`);
 
 /* ----- Daikin controls (writes — require DAIKIN_CONTROL_MODE=active) -----
    The UI shows its own confirm dialog, then sends skip_confirmation:true so

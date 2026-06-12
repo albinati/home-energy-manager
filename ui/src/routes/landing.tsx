@@ -32,6 +32,8 @@ import { LivePowerWidget } from "../components/cockpit/LivePowerWidget";
 import { Hero } from "../components/home/Hero";
 import { HeatingWidget } from "../components/home/HeatingWidget";
 import { PlanMini } from "../components/home/PlanMini";
+import { FeedbackPanel } from "../components/home/FeedbackPanel";
+import { publishFreshness } from "../lib/freshness";
 import type { MonthlyEnergy } from "../lib/types";
 import "../components/home/home.css";
 
@@ -136,6 +138,15 @@ export default function Landing() {
     () => getEnergyPeriod(period.gran, periodFetchOpts(period)),
     [period.gran, period.anchor],
   );
+
+  // Publish the cockpit's per-source freshness map so the shell-level
+  // AlertStrip can flag stale live data WITHOUT its own /cockpit/now poll.
+  // Cleared on unmount — off this route the poll stops, and a frozen map
+  // would let a "stale data" chip linger past its 2-min relevance window.
+  useEffect(() => {
+    publishFreshness(now.data?.freshness);
+  }, [now.data]);
+  useEffect(() => () => publishFreshness(null), []);
 
   if (now.loading && !now.data) {
     return <div class="home"><Spinner label="Loading dashboard…" /></div>;
@@ -245,6 +256,12 @@ export default function Landing() {
           </Suspense>
         </Widget>
       </div>
+
+      {/* ── SELF-CHECK — is the system doing what we shipped it to do?
+          Forecast provenance, PV accuracy, DHW budget vs measured, LWT gate;
+          admins also get the recent-actions feed. The panel renders its own
+          widget band — and nothing at all against an older API image. */}
+      <FeedbackPanel pv={pvToday.data} />
     </div>
   );
 }

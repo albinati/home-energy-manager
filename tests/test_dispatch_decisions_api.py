@@ -191,3 +191,79 @@ def test_scenarios_endpoint_returns_empty_when_no_scenarios_logged():
     body = resp.json()
     assert body["scenarios"] == []
     assert "note" in body
+
+
+def test_schedule_diff_fingerprint_ignores_vendor_default_echo(monkeypatch):
+    """Real prod shapes captured 2026-06-12: Fox echoes max_soc=100 where the
+    upload recorded None, and returns stale fd_* values on Backup groups —
+    the naive fingerprint reported 16 phantom diffs on identical schedules,
+    which would have made the alert strip's drift chip permanent noise."""
+    from src import db
+    from src.config import config as app_config
+    from fastapi.testclient import TestClient
+
+    db.init_db()
+
+    def rec(sh, sm, eh, em, mode, min_soc=10, fd_soc=None, fd_pwr=None, max_soc=None):
+        # fox_schedule_state.groups_json / to_api_dict shape
+        return {"startHour": sh, "startMinute": sm, "endHour": eh, "endMinute": em,
+                "workMode": mode,
+                "extraParam": {"minSocOnGrid": min_soc, "fdSoc": fd_soc,
+                               "fdPwr": fd_pwr, "maxSoc": max_soc}}
+
+    class LiveGroup:  # SchedulerGroup-like (attributes, NOT a dict)
+        def __init__(self, sh, sm, eh, em, mode, min_soc=10,
+                     fd_soc=None, fd_pwr=None, max_soc=None):
+            self.start_hour, self.start_minute = sh, sm
+            self.end_hour, self.end_minute = eh, em
+            self.work_mode = mode
+            self.min_soc_on_grid = min_soc
+            self.fd_soc, self.fd_pwr, self.max_soc = fd_soc, fd_pwr, max_soc
+
+    recorded = [
+        rec(21, 0, 22, 30, "ForceDischarge", fd_soc=15, fd_pwr=3680, max_soc=None),
+        rec(7, 0, 10, 59, "Backup", fd_soc=None, fd_pwr=None, max_soc=10),
+        rec(11, 0, 11, 30, "ForceCharge", fd_soc=31, fd_pwr=3500, max_soc=None),
+    ]
+    live = [
+        LiveGroup(21, 0, 22, 30, "ForceDischarge", fd_soc=15.0, fd_pwr=3680.0, max_soc=100.0),
+        # Backup echoes STALE fd_* values the upload never set:
+        LiveGroup(7, 0, 10, 59, "Backup", fd_soc=91.0, fd_pwr=2850.0, max_soc=10.0),
+        LiveGroup(11, 0, 11, 30, "ForceCharge", fd_soc=31.0, fd_pwr=3500.0, max_soc=100.0),
+    ]
+
+    import src.api.routers.dispatch as dispatch_mod
+    monkeypatch.setattr(db, "get_latest_fox_schedule_state",
+                        lambda: {"groups": recorded})
+
+    class _FakeState:
+        groups = live
+
+    class _FakeFox:
+        def __init__(self, **_kw): ...
+        def get_scheduler_v3(self):
+            return _FakeState()
+
+    monkeypatch.setattr(dispatch_mod, "FoxESSClient", _FakeFox)
+    # foxess_client_kwargs() validates FOXESS_DEVICE_SN and raises in the test
+    # env, which would short-circuit into the live_error path before the fake
+    # client is ever constructed. Patch the CLASS, not the instance — undoing
+    # an instance patch writes the bound method into the singleton's __dict__,
+    # permanently shadowing any later class-level patch.
+    monkeypatch.setattr(type(dispatch_mod.config), "foxess_client_kwargs", lambda self: {})
+    monkeypatch.setattr(app_config, "HEM_UI_AUTH_REQUIRED", False, raising=False)
+    from src.api.main import app
+    client = TestClient(app)
+    body = client.get("/api/v1/foxess/schedule_diff").json()
+    assert body["ok"] is True, body.get("live_error")
+    assert body["any_drift"] is False, body["diffs"]
+    assert body["diffs"]["only_live"] == []
+    assert body["diffs"]["only_recorded"] == []
+
+    # Counter-case: a REAL fd_soc change on a ForceDischarge group must still
+    # register as drift — canonicalisation only forgives vendor default echo.
+    live[0].fd_soc = 50.0
+    body = client.get("/api/v1/foxess/schedule_diff").json()
+    assert body["any_drift"] is True
+    assert len(body["diffs"]["only_live"]) == 1
+    assert len(body["diffs"]["only_recorded"]) == 1

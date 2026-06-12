@@ -4,6 +4,7 @@ import { lazy, Suspense } from "preact/compat";
 import { useEffect } from "preact/hooks";
 import type { ComponentType } from "preact";
 import { TopNav } from "./components/shell/TopNav";
+import { AlertStrip } from "./components/shell/AlertStrip";
 import { Footer } from "./components/shell/Footer";
 import { ToastHost } from "./components/common/Toast";
 import { Spinner } from "./components/common/Spinner";
@@ -35,6 +36,7 @@ export function App() {
   return (
     <div class="shell">
       <TopNav />
+      <AlertStrip />
       <main class="shell-main">
         <Suspense fallback={<div class="page-padded"><Spinner label="Loading…" /></div>}>
           <Switch>

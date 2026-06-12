@@ -273,14 +273,24 @@ async def get_foxess_schedule_diff() -> dict[str, Any]:
 
     rec_norm = [_normalise_group(g) for g in recorded_groups]
 
-    # Compare on a fingerprint of (start, end, work_mode, min_soc_on_grid, fd_soc, fd_pwr, max_soc).
+    # Compare on a MODE-AWARE fingerprint. Naive field-by-field comparison
+    # produced permanent false drift on the very first consumer (the status
+    # alert strip, 2026-06-12): Fox echoes vendor DEFAULTS for fields the
+    # upload omitted — max_soc None comes back as 100, and Backup/SelfUse
+    # groups return whatever fd_soc/fd_pwr were last set even though those
+    # fields are meaningless outside ForceDischarge. Canonicalise both
+    # sides: fd_* compared only on ForceDischarge; absent max_soc == the
+    # vendor default 100.
     def _fp(g: dict[str, Any]) -> tuple:
+        mode = g.get("work_mode")
+        fd_relevant = mode == "ForceDischarge"
+        max_soc = g.get("max_soc")
         return (
-            g.get("start"), g.get("end"), g.get("work_mode"),
+            g.get("start"), g.get("end"), mode,
             g.get("min_soc_on_grid"),
-            None if g.get("fd_soc") is None else float(g["fd_soc"]),
-            None if g.get("fd_pwr") is None else float(g["fd_pwr"]),
-            None if g.get("max_soc") is None else float(g["max_soc"]),
+            float(g["fd_soc"]) if fd_relevant and g.get("fd_soc") is not None else None,
+            float(g["fd_pwr"]) if fd_relevant and g.get("fd_pwr") is not None else None,
+            100.0 if max_soc is None else float(max_soc),
         )
 
     live_fps = {_fp(g) for g in live_groups}

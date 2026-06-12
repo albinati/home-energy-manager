@@ -1,0 +1,108 @@
+/* Self-check panel — "are the changes working" facts + (admin) recent actions. */
+
+.selfcheck-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: var(--space-3);
+}
+
+.selfcheck-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.selfcheck-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--text-mute);
+}
+
+.selfcheck-dot { display: inline-flex; }
+.selfcheck-dot.is-ok { color: var(--ok); }
+.selfcheck-dot.is-warn { color: var(--warn); }
+
+.selfcheck-value {
+  font-size: 0.85rem;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.selfcheck-bar {
+  display: block;
+  height: 4px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-card-3);
+  overflow: hidden;
+}
+
+.selfcheck-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+}
+
+/* ── Recent actions (admin) ─────────────────────────────────────────── */
+
+.triggers-feed {
+  margin-top: var(--space-4);
+}
+
+.triggers-feed-head {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--text-mute);
+  margin-bottom: var(--space-2);
+}
+
+.triggers-feed-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.triggers-feed-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: 0.8rem;
+  min-width: 0;
+}
+
+.triggers-feed-time {
+  color: var(--text-mute);
+  font-variant-numeric: tabular-nums;
+  flex: 0 0 auto;
+}
+
+.triggers-feed-status { flex: 0 0 auto; align-self: center; display: inline-flex; }
+.triggers-feed-status.is-ok { color: var(--ok); }
+.triggers-feed-status.is-warn { color: var(--warn); }
+
+.triggers-feed-what {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.triggers-feed-meta {
+  color: var(--text-mute);
+  flex: 0 0 auto;
+  font-size: 0.74rem;
+}
