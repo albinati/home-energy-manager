@@ -33,7 +33,9 @@ import { Hero } from "../components/home/Hero";
 import { HeatingWidget } from "../components/home/HeatingWidget";
 import { PlanMini } from "../components/home/PlanMini";
 import { FeedbackPanel } from "../components/home/FeedbackPanel";
+import { OperateCard } from "../components/home/OperateCard";
 import { publishFreshness } from "../lib/freshness";
+import { role } from "../lib/auth";
 import type { MonthlyEnergy } from "../lib/types";
 import "../components/home/home.css";
 
@@ -205,6 +207,21 @@ export default function Landing() {
           <span class="grow" />
           <span class="when">read-only · updates automatically{liveTime ? ` · ${liveTime}` : ""}</span>
         </div>
+
+        {/* Admin control cluster. Mount-gated on role so viewers never fire
+            its admin-only GET /settings; role is a signal, so the unlock
+            re-renders this route and mounts the card. */}
+        {role.value === "admin" && <OperateCard
+          appliances={appliances.data?.appliances}
+          applianceJobs={applianceJobs.data?.jobs}
+          onChanged={() => {
+            void timeline.refresh();
+            void heatingPlan.refresh();
+            void applianceJobs.refresh();
+            void applianceSug.refresh();
+            void now.refresh();
+          }}
+        />}
         <div class="widget-grid">
           <Widget title="Live power" icon={<Icon name="power-live" size={14} />} tone="power" size="half"
                   badge={liveTime}

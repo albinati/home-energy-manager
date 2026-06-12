@@ -109,15 +109,18 @@ export default function Settings() {
     if (!simResult) return;
     setBusy(true);
     try {
-      const changes = simResult.diffs.map((d) => ({ key: d.key, value: d.proposed }));
+      // Re-derive {KEY: proposed} from the simulated sub_actions (per-key
+      // after is a single-entry {KEY: value} object).
+      const changes = Object.fromEntries(simResult.sub_actions.map((s) => [s.key, s.after[s.key]]));
       const result = await applyBatch(simResult.simulation_id, changes);
-      if (result.errors && result.errors.length > 0) {
+      const failed = result.results.filter((r) => !r.ok);
+      if (failed.length > 0) {
         toast.error(
-          `${result.errors.length} key${result.errors.length === 1 ? "" : "s"} failed`,
-          result.errors.map((e) => `${e.key}: ${e.error}`).join("\n"),
+          `${failed.length} key${failed.length === 1 ? "" : "s"} failed`,
+          failed.map((f) => `${f.key}: ${f.error}`).join("\n"),
         );
       } else {
-        toast.success(`Applied ${result.applied.length} setting${result.applied.length === 1 ? "" : "s"}`);
+        toast.success(`Applied ${result.results.length} setting${result.results.length === 1 ? "" : "s"}`);
         setPending({});
       }
       setSimOpen(false);
@@ -223,7 +226,7 @@ export default function Settings() {
               Cancel
             </button>
             <button class="btn btn--primary" onClick={onApply} disabled={busy}>
-              {busy ? "Applying…" : `Apply ${simResult?.diffs.length || 0} change${(simResult?.diffs.length || 0) === 1 ? "" : "s"}`}
+              {busy ? "Applying…" : `Apply ${simResult?.sub_actions.length || 0} change${(simResult?.sub_actions.length || 0) === 1 ? "" : "s"}`}
             </button>
           </>
         }
@@ -238,17 +241,17 @@ export default function Settings() {
                 </tr>
               </thead>
               <tbody>
-                {simResult.diffs.map((d) => (
+                {simResult.sub_actions.map((d) => (
                   <tr key={d.key}>
                     <td>
                       <div>{labelFor(d.key)}</div>
                       <div class="muted"><code>{d.key}</code></div>
                     </td>
                     <td>
-                      <code class="from">{String(d.current)}</code>
+                      <code class="from">{String(d.before[d.key])}</code>
                       <span class="arrow"><Icon name="chevron" size={12} /></span>
-                      <code class="to">{String(d.proposed)}</code>
-                      {d.cron_reload && (
+                      <code class="to">{String(d.after[d.key])}</code>
+                      {specByKey.get(d.key)?.cron_reload && (
                         <div class="muted">Hot-reloads scheduler</div>
                       )}
                     </td>
@@ -256,11 +259,11 @@ export default function Settings() {
                 ))}
               </tbody>
             </table>
-            {simResult.warnings && simResult.warnings.length > 0 && (
+            {simResult.safety_flags.length > 0 && (
               <div class="sim-warnings">
                 <strong>Warnings:</strong>
                 <ul>
-                  {simResult.warnings.map((w, i) => <li key={i}>{w}</li>)}
+                  {simResult.safety_flags.map((w, i) => <li key={i}>{w}</li>)}
                 </ul>
               </div>
             )}

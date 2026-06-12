@@ -22,20 +22,36 @@ export interface SettingsList {
   settings: SettingSpec[];
 }
 
-export interface SimulateBatchResponse {
-  simulation_id: string;
-  diffs: Array<{
-    key: string;
-    current: unknown;
-    proposed: unknown;
-    cron_reload?: boolean;
-  }>;
-  warnings: string[];
+// POST /settings/batch/simulate returns an ActionDiff (src/api/simulation.py)
+// whose sub_actions carry one per-key diff each: before/after are single-entry
+// objects keyed by the setting ({KEY: current} / {KEY: proposed}).
+// (The previous {diffs, warnings} shape here never matched the backend — the
+// Settings simulate modal crashed on it; review HIGH on #555.)
+export interface BatchSubAction {
+  key: string;
+  action: string;                    // "setting.<KEY>"
+  before: Record<string, unknown>;
+  after: Record<string, unknown>;
+  safety_flags: string[];
+  human_summary: string;
 }
 
+export interface SimulateBatchResponse {
+  action: string;                    // "settings.batch"
+  before: Record<string, unknown>;
+  after: Record<string, unknown>;
+  safety_flags: string[];
+  human_summary: string;
+  simulation_id: string;
+  expires_at_epoch: number;
+  sub_actions: BatchSubAction[];
+}
+
+// POST /settings/batch → {ok, results}; a mid-batch failure raises 409
+// BatchPartialFailure instead (after best-effort rollback).
 export interface ApplyBatchResponse {
-  applied: Array<{ key: string; value: unknown }>;
-  errors?: Array<{ key: string; error: string }>;
+  ok: boolean;
+  results: Array<{ key: string; ok: boolean; value?: unknown; error?: string }>;
 }
 
 /* ----- /cockpit/now ----- */
@@ -965,4 +981,39 @@ export interface LpScorecard {
 export interface LpScorecardResponse {
   ok: boolean;
   scorecard: LpScorecard;
+}
+
+/* ----- Operate card (PR 4): scheduler status + ActionDiff simulate flow ----- */
+
+export interface SchedulerStatus {
+  enabled: boolean;
+  paused: boolean;
+  current_price_pence?: number | null;
+  next_cheap_from?: string | null;
+  next_cheap_to?: string | null;
+  planned_lwt_adjustment?: number;
+  tariff_code?: string | null;
+}
+
+// Shape of every POST /…/simulate response (src/api/simulation.py ActionDiff).
+export interface ActionDiffResponse {
+  action: string;
+  before: Record<string, unknown>;
+  after: Record<string, unknown>;
+  affected_slots: string[];
+  cost_delta_pence: number | null;
+  soc_path_change: number[];
+  safety_flags: string[];
+  human_summary: string;
+  simulation_id: string;
+  expires_at_epoch: number;
+  sub_actions: Array<Record<string, unknown>>;
+}
+
+export interface ProposePlanResponse {
+  plan_id: string;
+  proposed_at: string;
+  expires_at?: string | null;
+  status: string;
+  summary?: string | null;
 }

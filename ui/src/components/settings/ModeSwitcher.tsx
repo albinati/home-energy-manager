@@ -6,7 +6,9 @@ import "./settings.css";
 // segmented control is the page's single most consequential control — the
 // one sanctioned full-accent surface.
 
-const MODE_META: Record<string, { label: string; sub: string; icon: IconName }> = {
+// Exported: the Operate card (cockpit) renders the same modes and must show
+// the exact same labels/consequences — one source of truth for the copy.
+export const MODE_META: Record<string, { label: string; sub: string; icon: IconName }> = {
   normal: {
     label: "Normal",
     sub: "Day-to-day. 4 showers/evening, standard arbitrage, DHW pinned to fixed schedule.",
