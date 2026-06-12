@@ -3806,6 +3806,19 @@ def get_nonzero_lwt_offset_windows(
     gate must observe the firmware's NATURAL behaviour, not HEM's own echo —
     the June-2026 incident showed offsets waking the compressor and the
     calibration then learning from the heating they caused.
+
+    Status filter covers the REAL lifecycle (pending → active →
+    completed/failed; review H1 on #541 — 'in_flight' is never stored):
+    'active' matters most, because a multi-hour window is live exactly when
+    overlapping re-plans evaluate the gate. 'failed' is included
+    conservatively (may have half-applied). 'pending' never fired → clean.
+
+    The plan ``date`` left edge is padded by one day (review H2): a rolling
+    plan written in the evening carries windows that SPILL past midnight
+    under the previous plan_date; filtering strictly by date made those
+    windows invisible to a lookback starting the next day, re-counting their
+    heating as natural demand (every-other-day gate oscillation). The pad
+    only over-fetches — actual exclusion is keyed off start/end timestamps.
     """
     with _lock:
         conn = get_connection()
@@ -3813,8 +3826,8 @@ def get_nonzero_lwt_offset_windows(
             cur = conn.execute(
                 """SELECT start_time, end_time, params FROM action_schedule
                    WHERE device = 'daikin' AND action_type = 'lwt_preheat'
-                     AND date >= ? AND date <= ?
-                     AND status IN ('completed', 'in_flight')""",
+                     AND date >= date(?, '-1 day') AND date <= ?
+                     AND status IN ('completed', 'active', 'failed')""",
                 (start_date, end_date),
             )
             out: list[tuple[str, str]] = []
@@ -3850,7 +3863,25 @@ def measured_space_heating_kwh_excluding_offset_windows(
 
     rows = get_daikin_consumption_2hourly_range(start_date, end_date)
     if not rows:
-        # No 2-hourly split cached — fall back to the daily totals.
+        # No 2-hourly split cached. The daily totals CANNOT be decontaminated
+        # (no intra-day resolution), so falling back to them while offset
+        # windows exist would count HEM-induced heating as natural demand and
+        # latch the gate open exactly when its primary signal is broken
+        # (review M1 on #541) — return 0 (gate-closed direction) instead.
+        # With no offsets in range, the daily totals are clean and usable.
+        if get_nonzero_lwt_offset_windows(start_date, end_date):
+            logger.warning(
+                "measured_space_heating: 2-hourly split missing %s..%s while "
+                "offset windows exist — cannot decontaminate daily totals; "
+                "returning 0 (demand-gate-closed direction)",
+                start_date, end_date,
+            )
+            return 0.0
+        logger.warning(
+            "measured_space_heating: 2-hourly split missing %s..%s — falling "
+            "back to whole-day daily totals (coarser than the %dh lookback)",
+            start_date, end_date, lookback_hours,
+        )
         daily = get_daikin_consumption_daily_range(start_date, end_date)
         return float(sum(r.get("kwh_heating") or 0.0 for r in daily))
 

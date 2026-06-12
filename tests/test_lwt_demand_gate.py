@@ -152,3 +152,70 @@ def test_k_regression_skips_hem_offset_days(monkeypatch):
     assert result["status"] == "ok", result
     assert result["skipped_hem_offset"] == 3
     assert result["samples"] <= 7  # 10 seeded − 3 contaminated
+
+
+# ---------------------------------------------------------------------------
+# Review regressions (#541): H1 active-status windows, H2 plan-date spill,
+# M1 contaminated daily fallback
+# ---------------------------------------------------------------------------
+
+def test_active_window_is_excluded_h1():
+    """A window that is LIVE right now sits at status='active' — exactly when
+    overlapping re-plans evaluate the gate. It must be excluded ('in_flight'
+    is never a stored status; lifecycle is pending→active→completed/failed)."""
+    from src import db
+    y = _yesterday_local()
+    _seed_2h(y.date().isoformat(), 4, 1.5)
+    start_utc = y.replace(hour=8).astimezone(UTC)
+    db.upsert_action(
+        plan_date=y.date().isoformat(),
+        start_time=start_utc.isoformat().replace("+00:00", "Z"),
+        end_time=(start_utc + timedelta(hours=2)).isoformat().replace("+00:00", "Z"),
+        device="daikin", action_type="lwt_preheat",
+        params={"lwt_offset": 3}, status="active",
+    )
+    assert db.measured_space_heating_kwh_excluding_offset_windows(48) == 0.0
+
+
+def test_midnight_spill_window_is_excluded_h2():
+    """A rolling plan written in the evening files midnight-spilling windows
+    under the PREVIOUS plan_date. A lookback whose start date is after that
+    plan_date must still see the window (left-edge pad), or its heating
+    re-counts as natural demand → every-other-day gate oscillation."""
+    from src import db
+    y = _yesterday_local()                       # lookback covers yesterday+today
+    plan_day = (y - timedelta(days=1)).date()    # filed under the day BEFORE lookback start
+    _seed_2h(y.date().isoformat(), 0, 2.0)       # 00-02 local yesterday
+    start_utc = y.replace(hour=0).astimezone(UTC)
+    db.upsert_action(
+        plan_date=plan_day.isoformat(),
+        start_time=start_utc.isoformat().replace("+00:00", "Z"),
+        end_time=(start_utc + timedelta(hours=2)).isoformat().replace("+00:00", "Z"),
+        device="daikin", action_type="lwt_preheat",
+        params={"lwt_offset": 3}, status="completed",
+    )
+    assert db.measured_space_heating_kwh_excluding_offset_windows(48) == 0.0
+
+
+def test_daily_fallback_refuses_contaminated_data_m1():
+    """2-hourly split missing + offset windows present → daily totals cannot
+    be decontaminated; must return 0 (gate-closed direction), never the
+    offset-induced daily heating."""
+    from src import db
+    y = _yesterday_local()
+    db.upsert_daikin_consumption_daily(
+        date=y.date().isoformat(), kwh_total=6.0, kwh_heating=6.0, source="onecta",
+    )
+    _seed_offset_action(y.replace(hour=2), 2.0, 3)
+    assert db.measured_space_heating_kwh_excluding_offset_windows(48) == 0.0
+
+
+def test_daily_fallback_clean_data_still_counts():
+    """2-hourly missing but NO offsets in range → daily totals are clean and
+    keep the gate responsive (winter cold-start case)."""
+    from src import db
+    y = _yesterday_local()
+    db.upsert_daikin_consumption_daily(
+        date=y.date().isoformat(), kwh_total=6.0, kwh_heating=6.0, source="onecta",
+    )
+    assert db.measured_space_heating_kwh_excluding_offset_windows(48) == pytest.approx(6.0)
