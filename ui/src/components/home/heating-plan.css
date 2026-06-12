@@ -34,6 +34,18 @@
   color: var(--text-dim);
   padding: 2px 4px 0;
 }
+@media (max-width: 640px) {
+  /* One scrollable row instead of a 3-line wrap that pushes the gauges down. */
+  .hpl-legend {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    padding-bottom: 4px;
+  }
+  .hpl-legend::-webkit-scrollbar { display: none; }
+  .hpl-legend .hpl-tok, .hpl-legend .hpl-hint { flex: none; white-space: nowrap; }
+}
 .hpl-tok {
   display: inline-flex;
   align-items: center;

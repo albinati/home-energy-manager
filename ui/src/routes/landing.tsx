@@ -1,4 +1,4 @@
-import { useEffect, useState } from "preact/hooks";
+import { useEffect } from "preact/hooks";
 import { lazy, Suspense } from "preact/compat";
 import { usePoll, useFetch, useAfterPaint } from "../lib/poll";
 import {
@@ -9,7 +9,6 @@ import {
   getSchedulerTimeline,
   getExecutionToday,
   getEnergyReport,
-  getEnergyMonthly,
   getEnergyPeriod,
   getDaikinStatus,
   getDaikinQuota,
@@ -34,9 +33,9 @@ import { HeatingWidget } from "../components/home/HeatingWidget";
 import { PlanMini } from "../components/home/PlanMini";
 import { FeedbackPanel } from "../components/home/FeedbackPanel";
 import { OperateCard } from "../components/home/OperateCard";
+import { LifetimeStrip } from "../components/home/LifetimeStrip";
 import { publishFreshness } from "../lib/freshness";
 import { role } from "../lib/auth";
-import type { MonthlyEnergy } from "../lib/types";
 import "../components/home/home.css";
 
 // The four timeline widgets (Solar / Grid / Load / Heating) each own echarts
@@ -58,33 +57,6 @@ const EnergyChartWidget = lazy(() =>
 const HeatingPlanWidget = lazy(() =>
   import("../components/home/HeatingPlanWidget").then((m) => ({ default: m.HeatingPlanWidget })),
 );
-
-function lastMonths(n: number): string[] {
-  const now = new Date();
-  const out: string[] = [];
-  for (let i = n - 1; i >= 0; i--) {
-    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-    out.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
-  }
-  return out;
-}
-
-function useMonthlyHistory(n: number, enabled = true) {
-  const [data, setData] = useState<MonthlyEnergy[]>([]);
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    if (!enabled) return;
-    let alive = true;
-    setLoading(true);
-    Promise.all(lastMonths(n).map((m) => getEnergyMonthly(m).catch(() => null))).then((r) => {
-      if (!alive) return;
-      setData(r.filter((x): x is MonthlyEnergy => !!x));
-      setLoading(false);
-    });
-    return () => { alive = false; };
-  }, [n, enabled]);
-  return { data, loading };
-}
 
 // Home dashboard, grouped into three semantic bands so the eye can skim:
 //   1. LIVE   — what's happening right now (Live power, Heating)
@@ -112,9 +84,6 @@ export default function Landing() {
   const weather = useFetch(getWeather, []);
   const execution = useFetch(getExecutionToday, []);
   const report = useFetch(() => getEnergyReport(new Date().toISOString().slice(0, 10)), []);
-  // Lifetime rollup = 6 sequential /energy/monthly calls — deferred (it's a
-  // small stats strip low in the hero, not the headline).
-  const monthly = useMonthlyHistory(6, deferred);
   // Export opportunity (SEG-vs-Agile money left on the table) — deferred, slow.
   const exportOppy = useFetch(() => (deferred ? getExportOpportunity(60) : Promise.resolve(null)), [deferred]);
   // Daikin cached read — no refresh=true, so no live cloud call (30-min cache TTL).
@@ -187,7 +156,7 @@ export default function Landing() {
         {scope.date && <span class="scope-when">{scope.date}</span>}
       </div>
 
-      <Hero metrics={metrics.data} metricsLoading={metrics.loading} cockpit={data} agile={agile.data} monthly={monthly.data}
+      <Hero metrics={metrics.data} metricsLoading={metrics.loading} cockpit={data} agile={agile.data}
             period={periodInsights.data} periodState={period}
             periodLoading={periodInsights.loading} todayCum={todayCum.data}
             weather={weather.data} pv={pvToday.data} />
@@ -279,6 +248,10 @@ export default function Landing() {
           admins also get the recent-actions feed. The panel renders its own
           widget band — and nothing at all against an older API image. */}
       <FeedbackPanel pv={pvToday.data} />
+
+      {/* Lifetime-on-Agile closing line (moved out of the hero — today-first).
+          Self-defers its 6 monthly fetches until the browser is idle. */}
+      <LifetimeStrip />
     </div>
   );
 }

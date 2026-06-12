@@ -1,5 +1,5 @@
 import type {
-  MetricsResponse, CockpitNow, AgileTodayResponse, MonthlyEnergy,
+  MetricsResponse, CockpitNow, AgileTodayResponse,
   PeriodInsightsResponse, TodayCumulativeResponse, WeatherResponse, PvTodayResponse,
 } from "../../lib/types";
 import { gbp, kwh } from "../../lib/format";
@@ -14,7 +14,6 @@ interface HeroProps {
   metricsLoading: boolean;
   cockpit: CockpitNow | null;
   agile: AgileTodayResponse | null;
-  monthly: MonthlyEnergy[];
   period: PeriodInsightsResponse | null;
   periodState: PeriodState;
   periodLoading: boolean;
@@ -24,10 +23,11 @@ interface HeroProps {
 }
 
 // The redesign hero (Claude Design handoff): the period's net bill + an
-// Agile-vs-fixed verdict + cost bars on the LEFT, the live weather panel on the
-// RIGHT, a lifetime strip below. Money figures follow the period navigator; the
-// today-only extras (break-even target, money paid in) show only on "today".
-export function Hero({ metrics, monthly, period, periodState, periodLoading, todayCum, weather, pv }: HeroProps) {
+// Agile-vs-fixed verdict + cost bars on the LEFT, the live weather panel on
+// the RIGHT. Money figures follow the period navigator; the today-only extras
+// (break-even target, money paid in) show only on "today". The lifetime strip
+// moved to the foot of the cockpit (LifetimeStrip) — the hero is today-first.
+export function Hero({ metrics, period, periodState, periodLoading, todayCum, weather, pv }: HeroProps) {
   const isNow = isCurrentPeriod(periodState);
   const label = periodLabel(periodState);
   const fixedLabel = todayCum?.fixed_tariff_label || metrics?.fixed_tariff?.label || "British Gas Fixed";
@@ -60,15 +60,6 @@ export function Hero({ metrics, monthly, period, periodState, periodLoading, tod
   const negCredit = isNow ? todayCum?.negative_import_credit_gbp ?? null : null;
   const exportRev = isNow ? todayCum?.export_revenue_gbp ?? null : null;
   const showEarnings = (earnings ?? 0) > 0.005;
-
-  // --- Lifetime totals on Agile. ---
-  const active = monthly.filter((m) => (m.cost?.net_cost_pounds ?? 0) !== 0 || (m.energy?.export_kwh ?? 0) > 0);
-  const lifetime = active.length > 0 ? {
-    months: active.length,
-    solar_kwh: active.reduce((s, m) => s + (m.energy?.solar_kwh ?? 0), 0),
-    export_kwh: active.reduce((s, m) => s + (m.energy?.export_kwh ?? 0), 0),
-    saved_vs_fixed: active.reduce((s, m) => s + (m.cost?.delta_vs_fixed_real_pounds ?? 0), 0),
-  } : null;
 
   const billA = useAnimatedNumber(bill);
   const max = Math.max(bill ?? 0, fixedShadow ?? 0) * 1.12 || 1;
@@ -157,18 +148,6 @@ export function Hero({ metrics, monthly, period, periodState, periodLoading, tod
         {/* ── RIGHT: live weather ───────────────────────────────────── */}
         <div class="hero-right"><HeroWeather weather={weather} pv={pv} /></div>
       </div>
-
-      {/* ── lifetime strip ──────────────────────────────────────────── */}
-      {lifetime && (
-        <div class="lifetime" title={`Sums across ${lifetime.months} active months on Agile`}>
-          <div class="stat"><div class="stat-v">{kwh(lifetime.solar_kwh, 0)}</div><div class="stat-l">Solar produced · {lifetime.months} mo</div></div>
-          <div class="stat"><div class="stat-v">{kwh(lifetime.export_kwh, 0)}</div><div class="stat-l">Exported</div></div>
-          <div class="stat">
-            <div class={`stat-v ${lifetime.saved_vs_fixed >= 0 ? "pos" : "neg"}`}>{gbp(Math.abs(lifetime.saved_vs_fixed))}</div>
-            <div class="stat-l">{lifetime.saved_vs_fixed >= 0 ? "Saved vs fixed" : "Extra vs fixed"}</div>
-          </div>
-        </div>
-      )}
     </section>
   );
 }
@@ -203,23 +182,6 @@ function HeroWeather({ weather, pv }: { weather?: WeatherResponse | null; pv?: P
   const lo = temps.length ? Math.min(...temps) : null;
   const markPct = hi != null && lo != null && hi > lo
     ? Math.max(6, Math.min(94, ((outdoor - lo) / (hi - lo)) * 100)) : 50;
-
-  // Daily forecast (up to 4 days) from the hourly slots.
-  const byDay = new Map<string, { temps: number[]; clouds: number[]; date: Date }>();
-  for (const s of fc) {
-    const d = new Date(s.time);
-    const k = d.toDateString();
-    if (!byDay.has(k)) byDay.set(k, { temps: [], clouds: [], date: d });
-    const e = byDay.get(k)!;
-    e.temps.push(s.temp_c);
-    if (s.cloud_cover_pct != null) e.clouds.push(s.cloud_cover_pct);
-  }
-  const days = [...byDay.values()].slice(0, 4).map((e, i) => ({
-    label: i === 0 ? "Today" : e.date.toLocaleDateString([], { weekday: "short" }),
-    hi: Math.round(Math.max(...e.temps)),
-    lo: Math.round(Math.min(...e.temps)),
-    cond: condOf(e.clouds.length ? e.clouds.reduce((a, b) => a + b, 0) / e.clouds.length : null),
-  }));
 
   // Solar today: generated so far (actual) toward the DAY total (locked actuals
   // for elapsed slots + forecast for the rest). Using the day total — not the
@@ -262,18 +224,6 @@ function HeroWeather({ weather, pv }: { weather?: WeatherResponse | null; pv?: P
             <span class="dim small">today's range</span>
             <span class="t-hi">H {Math.round(hi)}°</span>
           </div>
-        </div>
-      )}
-
-      {days.length > 1 && (
-        <div class="forecast" style={{ gridTemplateColumns: `repeat(${days.length}, 1fr)` }}>
-          {days.map((f) => (
-            <div class="fc-day" key={f.label}>
-              <span class="fc-d">{f.label}</span>
-              <WxIcon cond={f.cond} size={22} />
-              <div class="fc-hl"><span class="fc-hi">{f.hi}°</span><span class="fc-lo">{f.lo}°</span></div>
-            </div>
-          ))}
         </div>
       )}
 
