@@ -20,6 +20,15 @@ RUN apt-get update \
 RUN python -m venv /opt/venv
 ENV PATH=/opt/venv/bin:$PATH
 
+# numcodecs (pulled via pv-site-prediction → ocf-blosc2) has no aarch64
+# wheel for any version compatible with the pinned numpy 1.23.5, and its
+# sdist hardcodes -msse2/-mavx2 unless these flags are set (third build
+# failure: "gcc: error: unrecognized command-line option '-msse2'"). With
+# them, the C codecs compile as generic portable code — the documented
+# non-x86 build path in numcodecs' own setup.py.
+ENV DISABLE_NUMCODECS_SSE2=1 \
+    DISABLE_NUMCODECS_AVX2=1
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
