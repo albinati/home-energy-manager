@@ -1,0 +1,144 @@
+/* Operate — admin control cluster at the top of the live band. Mirrors the
+ * HeatingControls lockbar posture: locked by default, controls dim until the
+ * operator takes control, every write goes simulate → diff modal → confirm. */
+
+.operate {
+  background: var(--bg-card);
+  border-radius: var(--radius);
+  padding: var(--space-3) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.operate-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.operate-head .grow { flex: 1; }
+
+.operate-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--text-mute);
+}
+
+.operate-paused-pill {
+  padding: 2px 10px;
+  border-radius: var(--radius-pill);
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
+}
+
+.operate-body {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-5);
+  transition: opacity 160ms ease;
+}
+.operate-body.is-locked { opacity: 0.55; }
+
+.operate-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.operate-label {
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--text-mute);
+}
+
+/* mode segment */
+.operate-modes {
+  display: inline-flex;
+  gap: 4px;
+  background: var(--bg-card-2);
+  border-radius: var(--radius-pill);
+  padding: 3px;
+}
+.operate-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  min-height: 32px;
+}
+.operate-mode:disabled { cursor: default; }
+.operate-mode.is-active {
+  background: var(--bg-card-3);
+  color: var(--text);
+}
+.operate-mode:not(:disabled):not(.is-active):hover { color: var(--text); }
+
+.operate-btnrow {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.operate-resume { color: var(--warn); }
+
+.operate-hint {
+  font-size: 0.74rem;
+  color: var(--accent);
+}
+
+/* scheduled appliance jobs */
+.operate-jobs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.operate-job {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: 0.82rem;
+}
+.operate-job-what { color: var(--text); }
+.operate-job-when { color: var(--text-mute); font-size: 0.76rem; }
+
+/* confirm modal bits */
+.operate-diff {
+  margin: 0 0 var(--space-2);
+  padding-left: 1.1rem;
+  font-size: 0.85rem;
+}
+.operate-warnings {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--warn);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+@media (max-width: 640px) {
+  .operate-body { gap: var(--space-4); }
+  /* ≥44px tap targets on phones */
+  .operate-mode { min-height: 44px; padding: 8px 14px; }
+  .operate .btn--sm { min-height: 44px; }
+}

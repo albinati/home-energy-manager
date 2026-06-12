@@ -966,3 +966,38 @@ export interface LpScorecardResponse {
   ok: boolean;
   scorecard: LpScorecard;
 }
+
+/* ----- Operate card (PR 4): scheduler status + ActionDiff simulate flow ----- */
+
+export interface SchedulerStatus {
+  enabled: boolean;
+  paused: boolean;
+  current_price_pence?: number | null;
+  next_cheap_from?: string | null;
+  next_cheap_to?: string | null;
+  planned_lwt_adjustment?: number;
+  tariff_code?: string | null;
+}
+
+// Shape of every POST /…/simulate response (src/api/simulation.py ActionDiff).
+export interface ActionDiffResponse {
+  action: string;
+  before: Record<string, unknown>;
+  after: Record<string, unknown>;
+  affected_slots: string[];
+  cost_delta_pence: number | null;
+  soc_path_change: number[];
+  safety_flags: string[];
+  human_summary: string;
+  simulation_id: string;
+  expires_at_epoch: number;
+  sub_actions: Array<Record<string, unknown>>;
+}
+
+export interface ProposePlanResponse {
+  plan_id: string;
+  proposed_at: string;
+  expires_at?: string | null;
+  status: string;
+  summary?: string | null;
+}

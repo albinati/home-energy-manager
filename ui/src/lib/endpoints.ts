@@ -42,6 +42,9 @@ import type {
   StatusFeedbackResponse,
   RecentTriggersResponse,
   LpScorecardResponse,
+  SchedulerStatus,
+  ActionDiffResponse,
+  ProposePlanResponse,
 } from "./types";
 
 /* ----- Real-time / cockpit ----- */
@@ -191,6 +194,36 @@ export const getFairCompare = (
   getJson<FairCompareResponse>(
     `/tariffs/fair-compare?period=${gran}&anchor=${encodeURIComponent(anchor)}&max_tariffs=${maxTariffs}`,
   );
+
+/* ----- Operate card (PR 4) — simulate→confirm control surface -----
+   Every write here is paired with a /simulate that returns an ActionDiff
+   (simulation_id + human_summary); the real call carries X-Simulation-Id.
+   REQUIRE_SIMULATION_ID is ON in prod, so skipping simulate gets a 409. */
+
+export const getSchedulerStatus = () => getJson<SchedulerStatus>("/scheduler/status");
+
+const postWithSimId = <T,>(path: string, simulationId: string) =>
+  postJson<T>(path, {}, { headers: { "X-Simulation-Id": simulationId } });
+
+export const simulateProposeOptimization = () =>
+  postJson<ActionDiffResponse>("/optimization/propose/simulate", {});
+export const proposeOptimization = (simulationId: string) =>
+  postWithSimId<ProposePlanResponse>("/optimization/propose", simulationId);
+
+export const simulateSchedulerPause = () =>
+  postJson<ActionDiffResponse>("/scheduler/pause/simulate", {});
+export const pauseScheduler = (simulationId: string) =>
+  postWithSimId<{ status: string }>("/scheduler/pause", simulationId);
+export const simulateSchedulerResume = () =>
+  postJson<ActionDiffResponse>("/scheduler/resume/simulate", {});
+export const resumeScheduler = (simulationId: string) =>
+  postWithSimId<{ status: string }>("/scheduler/resume", simulationId);
+
+// Cancelling a scheduled appliance run is already a two-step consent (the
+// job only exists because the user armed the appliance physically) — no
+// simulate pair exists for it.
+export const cancelApplianceJob = (jobId: number) =>
+  postJson<{ id: number; status: string }>(`/appliances/jobs/${jobId}/cancel`, {});
 
 /* ----- Settings ----- */
 
