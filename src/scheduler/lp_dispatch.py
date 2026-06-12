@@ -950,6 +950,26 @@ def _apply_write_budget(
     return keep, dropped
 
 
+def _space_heating_demand_present() -> bool:
+    """True when the trailing window shows real measured space-heating demand.
+
+    Reads ``db.measured_space_heating_kwh_excluding_offset_windows`` — the
+    exclusion matters: counting offset-induced heating would let the gate
+    feed on its own output and never close (June 2026). Fail-open on errors:
+    a broken telemetry read must not silently disable winter pre-heat.
+    """
+    floor = float(getattr(config, "DAIKIN_LWT_PREHEAT_MIN_TRAILING_HEATING_KWH", 0.5))
+    if floor <= 0:
+        return True  # gate disabled
+    lookback = int(getattr(config, "DAIKIN_LWT_PREHEAT_DEMAND_LOOKBACK_HOURS", 48))
+    try:
+        measured = db.measured_space_heating_kwh_excluding_offset_windows(lookback)
+    except Exception:  # pragma: no cover — gate must never break dispatch
+        logger.exception("LWT pre-heat demand gate read failed — failing open")
+        return True
+    return measured >= floor
+
+
 def _write_lwt_preheat_actions(
     plan_date: str,
     plan: LpPlan,
@@ -969,6 +989,23 @@ def _write_lwt_preheat_actions(
     quota headroom here, dropping trailing pairs so we can never exceed budget.
     """
     if not config.DAIKIN_LWT_PREHEAT_ENABLED:
+        return 0
+
+    # Demand gate (#540 quick win): no pre-heat offsets without measured
+    # space-heating demand in the trailing window. A positive offset can WAKE
+    # the compressor the firmware would have left off (June 2026: heating went
+    # 0 → 3-8 kWh/day within days of enabling pre-heat, with the LP budgeting
+    # ~0.2). Pre-heating thermal mass the house isn't draining buys nothing;
+    # when a cold snap starts, firmware heats naturally within hours and the
+    # gate opens on the next plan. Negative (setback) offsets are gated too:
+    # with the compressor off they are pure quota churn.
+    if not _space_heating_demand_present():
+        logger.info(
+            "LWT pre-heat: skipped — no measured space-heating demand in the "
+            "trailing %dh window (floor %.1f kWh)",
+            int(getattr(config, "DAIKIN_LWT_PREHEAT_DEMAND_LOOKBACK_HOURS", 48)),
+            float(getattr(config, "DAIKIN_LWT_PREHEAT_MIN_TRAILING_HEATING_KWH", 0.5)),
+        )
         return 0
 
     # Sensor-ready hook: read the latest LIVE indoor temperature if any exists.
