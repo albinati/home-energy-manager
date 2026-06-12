@@ -5,8 +5,25 @@
 #
 # Python 3.11, NOT 3.12: quartz-solar-forecast → pv-site-prediction==0.1.19
 # declares requires-python <3.12 (first arm64 build failed ResolutionImpossible
-# on 3.12). Its pinned numpy 1.23.5 / scikit-learn 1.1.3 ship cp311 manylinux
-# aarch64 wheels, so 3.11 resolves cleanly.
+# on 3.12).
+#
+# Multi-stage (same pattern as the main HEM Dockerfile): the dependency tree
+# contains sdists with C extensions and no aarch64 wheels (numcodecs via
+# ocf-blosc2 — second build failure), so the builder stage carries gcc and the
+# runtime stage stays slim.
+FROM python:3.11-slim AS builder
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python -m venv /opt/venv
+ENV PATH=/opt/venv/bin:$PATH
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# ── runtime ────────────────────────────────────────────────────────────────
 FROM python:3.11-slim
 
 # Model/weights caches live OUTSIDE the read-only rootfs — compose mounts a
@@ -14,13 +31,12 @@ FROM python:3.11-slim
 # restarts and redeploys.
 ENV HF_HOME=/cache/hf \
     XDG_CACHE_HOME=/cache/xdg \
+    PATH=/opt/venv/bin:$PATH \
     PYTHONUNBUFFERED=1
 
+COPY --from=builder /opt/venv /opt/venv
+
 WORKDIR /app
-
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
 COPY app.py .
 
 ARG BUILD_SHA=unknown
