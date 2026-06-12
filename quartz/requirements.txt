@@ -4,3 +4,9 @@
 quartz-solar-forecast>=1.2,<2
 fastapi>=0.111,<1
 uvicorn>=0.30,<1
+# Upstream pins requests-cache==1.2.0, whose attrs models forward-reference
+# RequestsCookieJar under TYPE_CHECKING only; cattrs >=24 resolves type
+# hints eagerly and explodes with NameError at the first cached request
+# (prod boot 2026-06-12). Constrain cattrs to the era requests-cache 1.2.0
+# was built against.
+cattrs<24
