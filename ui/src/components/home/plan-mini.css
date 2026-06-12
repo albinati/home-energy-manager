@@ -39,19 +39,37 @@
   font-style: italic;
 }
 
-.chips { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+/* Equal-width chip grid: ragged flex rows made the dispatch plan read as
+ * noise — a grid ranks the chips into tidy columns and truncates long labels
+ * (full text stays in the title tooltip). */
+.chips {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+  gap: var(--space-2);
+}
+/* block, not flex: text-overflow only ellipsizes the inline content of a
+ * block container — on a flex container it's a no-op and long chips would
+ * hard-clip mid-glyph. All chip children are inline, so block works. */
 .chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
+  display: block;
   font-size: var(--font-xs);
   padding: 4px 9px;
   border-radius: var(--radius-sm);
   background: var(--bg-card-2);
   white-space: nowrap;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .chip b { font-variant-numeric: tabular-nums; }
 .chip .when { color: var(--text-mute); font-variant-numeric: tabular-nums; }
 .chip .note { color: var(--text-mute); font-variant-numeric: tabular-nums; }
 .chip--faded { opacity: 0.72; }
-.cdot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.cdot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: 1px;
+}

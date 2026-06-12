@@ -14,6 +14,9 @@
   min-height: 200px;
   display: flex;
   justify-content: center;
+  /* The flow is the card's centerpiece — let it take the full card width
+   * (the svg scales by its viewBox aspect, so width drives height too). */
+  width: 100%;
 }
 
 /* ── rate read-outs row: Import · Export · (spacer) · battery ─────────── */

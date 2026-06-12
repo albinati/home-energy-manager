@@ -1,6 +1,6 @@
 /* Hero — redesign (Claude Design handoff): the period's net bill + Agile-vs-fixed
- * verdict + cost bars on the left, the live weather panel on the right, a
- * lifetime strip below. Surface tokens come from tokens.css; this is layout. */
+ * verdict + cost bars on the left, the live weather panel on the right.
+ * Surface tokens come from tokens.css; this is layout. */
 
 .hero {
   position: relative;
@@ -67,7 +67,7 @@
 .hero-note-pair { white-space: nowrap; }
 .hero-note-pair svg { display: inline-block; vertical-align: -1px; }
 
-/* ── lifetime strip ─────────────────────────────────────────────────── */
+/* ── lifetime strip (LifetimeStrip.tsx — cockpit foot, today-first pass) ── */
 .lifetime { display: flex; gap: var(--space-5); flex-wrap: wrap; padding-top: var(--space-4); margin-top: var(--space-4); border-top: 1px dashed var(--border); position: relative; }
 .lifetime .stat-v { font-size: var(--font-md); }
 
@@ -84,13 +84,6 @@
 .thermo-row { display: flex; justify-content: space-between; align-items: baseline; margin-top: 6px; font-size: var(--font-xs); }
 .t-lo { color: var(--grid); font-weight: 700; font-variant-numeric: tabular-nums; }
 .t-hi { color: var(--import); font-weight: 700; font-variant-numeric: tabular-nums; }
-
-.forecast { display: grid; gap: var(--space-2); }
-.fc-day { display: flex; flex-direction: column; align-items: center; gap: 5px; padding: var(--space-2) 0; border-radius: var(--radius-sm); background: var(--bg-card-2); }
-.fc-d { font-size: var(--font-2xs); text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600; color: var(--text-mute); }
-.fc-hl { font-size: var(--font-xs); font-variant-numeric: tabular-nums; display: flex; gap: 6px; }
-.fc-hi { color: var(--import); font-weight: 700; }
-.fc-lo { color: var(--grid); }
 
 .solar-prog { margin-top: auto; }
 .solar-prog-head { margin-bottom: 6px; }

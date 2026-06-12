@@ -137,14 +137,15 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather, exe
     <div class="heating">
       <div class="heating-header">
         {freshLabel && (
-          <span class="heating-freshness" title={`Daikin cache last refreshed ${freshLabel}`}>
-            Cache · {freshLabel}
+          <span class="heating-freshness"
+                title={`These readings come from the heat pump's last automatic refresh (${freshLabel}); the planner re-reads it about every 30 minutes.`}>
+            Data from {freshLabel}
           </span>
         )}
         {quotaBudget != null && (
           <Pill tone={quotaTone === "ok" ? "ok" : quotaTone === "warn" ? "warn" : quotaTone === "bad" ? "bad" : "dim"}
-                title={`Daikin API — ${quotaUsed}/${quotaBudget} calls in the last 24h (Daikin enforces ~200/day, resets midnight UTC)`}>
-            {quotaUsed}/{quotaBudget} · 24h
+                title={`Daikin API — ${quotaUsed} of ${quotaBudget} calls used in the last 24h (Daikin enforces ~200/day, resets midnight UTC). A manual refresh costs 1 call.`}>
+            {quotaUsed}/{quotaBudget} calls
           </Pill>
         )}
         <RefreshCountdown
@@ -153,7 +154,7 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather, exe
           loading={refreshing}
           disabled={onCooldown}
           onRefresh={() => setConfirmingRefresh(true)}
-          label={onCooldown ? undefined : "Live"} />
+          label={onCooldown ? undefined : "Refresh · 1 call"} />
       </div>
 
       {/* Heating-plan timeline — the hero of this card (redesign). */}
