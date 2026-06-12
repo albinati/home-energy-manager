@@ -2,7 +2,12 @@
 # Self-hosts Open Climate Fix's open-source site-level PV model so HEM has no
 # external forecast-API dependency (the hosted token expired; open.quartz.solar
 # remains the drop-in fallback because this container mirrors its schema).
-FROM python:3.12-slim
+#
+# Python 3.11, NOT 3.12: quartz-solar-forecast → pv-site-prediction==0.1.19
+# declares requires-python <3.12 (first arm64 build failed ResolutionImpossible
+# on 3.12). Its pinned numpy 1.23.5 / scikit-learn 1.1.3 ship cp311 manylinux
+# aarch64 wheels, so 3.11 resolves cleanly.
+FROM python:3.11-slim
 
 # Model/weights caches live OUTSIDE the read-only rootfs — compose mounts a
 # named volume at /cache so the one-time Hugging Face download survives
