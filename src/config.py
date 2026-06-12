@@ -648,6 +648,35 @@ class Config:
     QUARTZ_INSTALLED_CAPACITY_MW: float = float(
         os.getenv("QUARTZ_INSTALLED_CAPACITY_MW", "0") or "0"
     )
+    # --- #542 — site-level open Quartz provider --------------------------
+    # The hosted api.quartz.solar token is the COMMERCIAL national/GSP
+    # product (access expiring); the open-source SITE-level model is free in
+    # two interchangeable forms behind the same schema:
+    #   * the hem-quartz sidecar container (deploy/compose.yaml) at
+    #     http://hem-quartz:8000 — self-hosted, no external dependency;
+    #   * the hosted twin https://open.quartz.solar — unauthenticated.
+    # QUARTZ_PROVIDER selects the client: "open" (new default) talks the
+    # open schema at QUARTZ_OPEN_URL; "hosted" preserves the legacy
+    # token-based national/GSP client for rollback while the token lives.
+    QUARTZ_PROVIDER: str = (os.getenv("QUARTZ_PROVIDER") or "open").strip().lower()
+    QUARTZ_OPEN_URL: str = (
+        os.getenv("QUARTZ_OPEN_URL") or "https://open.quartz.solar"
+    ).strip().rstrip("/")
+    # JSON list of panel planes, e.g. (this house: 6 SW-pitched + 6 flat-rack
+    # south — see project_quartz_site_level_killed for the sweep evidence):
+    #   [{"tilt": 35, "orientation": 225, "capacity_kwp": 2.25},
+    #    {"tilt": 10, "orientation": 180, "capacity_kwp": 2.25}]
+    # Empty → single aggregate plane (tilt 30, orientation 200,
+    # capacity PV_CAPACITY_KWP); the L3 calibration absorbs the residual.
+    QUARTZ_OPEN_PLANES: str = (os.getenv("QUARTZ_OPEN_PLANES") or "").strip()
+    QUARTZ_OPEN_TIMEOUT_SECONDS: int = int(os.getenv("QUARTZ_OPEN_TIMEOUT_SECONDS", "60"))
+    # Send recent measured generation with the request. NOTE (#544 review):
+    # today BOTH the sidecar and the hosted twin accept-and-ignore it (the
+    # upstream model only anchors on live data via its inverter
+    # integrations) — kept on as future-proof plumbing, harmless either way.
+    QUARTZ_OPEN_SEND_LIVE: bool = os.getenv(
+        "QUARTZ_OPEN_SEND_LIVE", "true"
+    ).lower() in ("true", "1", "yes")
     # PR L1 (2026-05-24) — apply the per-hour + per-(hour, cloud) calibration
     # tables on top of Quartz's direct PV output. Previously SKIPPED (PR #279)
     # under the assumption "Quartz self-calibrates", but observed AM 0.65 /

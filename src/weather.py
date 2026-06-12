@@ -453,7 +453,13 @@ def fetch_forecast_snapshot(
     source = (getattr(config, "FORECAST_SOURCE", "open_meteo") or "open_meteo").strip().lower()
     if source in ("quartz", "quartz_solar"):
         base = _fetch_open_meteo_forecast(lat=lat, lon=lon, hours=hours)
-        quartz = _fetch_quartz_forecast(hours=hours, base_weather=base)
+        provider = (getattr(config, "QUARTZ_PROVIDER", "open") or "open").strip().lower()
+        if provider == "open":
+            quartz = _fetch_quartz_open_forecast(
+                hours=hours, base_weather=base, lat=lat, lon=lon
+            )
+        else:
+            quartz = _fetch_quartz_forecast(hours=hours, base_weather=base)
         if quartz.forecast:
             return quartz
         logger.warning("Quartz forecast unavailable; falling back to Open-Meteo")
@@ -629,6 +635,217 @@ def _quartz_site_kw(
         return None
     frac = mw / capacity_mw
     return max(0.0, frac * float(config.PV_CAPACITY_KWP))
+
+
+def _quartz_open_planes() -> list[dict[str, float]]:
+    """Panel planes for the site-level open Quartz model (#542).
+
+    ``QUARTZ_OPEN_PLANES`` JSON when set; otherwise a single aggregate plane
+    (tilt 30, orientation 200 = the measured SSW aggregate of this split
+    array, capacity ``PV_CAPACITY_KWP``). Bad JSON → aggregate fallback with
+    a warning, never a crash (forecast fetch must degrade gracefully).
+    """
+    raw = (getattr(config, "QUARTZ_OPEN_PLANES", "") or "").strip()
+    fallback = [{
+        "tilt": 30.0,
+        "orientation": 200.0,
+        "capacity_kwp": float(getattr(config, "PV_CAPACITY_KWP", 4.5)),
+    }]
+    if not raw:
+        return fallback
+    try:
+        planes = json.loads(raw)
+        ok = [
+            {
+                "tilt": float(p.get("tilt", 30)),
+                "orientation": float(p.get("orientation", 200)),
+                "capacity_kwp": float(p["capacity_kwp"]),
+            }
+            for p in planes
+            if isinstance(p, dict) and p.get("capacity_kwp")
+        ]
+        if ok:
+            return ok
+    except (json.JSONDecodeError, TypeError, ValueError, KeyError) as e:
+        logger.warning("QUARTZ_OPEN_PLANES unparseable (%s) — using aggregate plane", e)
+    return fallback
+
+
+def _quartz_open_live_generation() -> list[dict[str, Any]]:
+    """Recent measured generation samples for nowcast anchoring (#542).
+
+    The hosted open.quartz.solar twin uses these to anchor the first forecast
+    hours to reality; the local sidecar accepts-and-ignores. Best-effort —
+    any DB trouble returns [] and the request goes out without them.
+    """
+    if not bool(getattr(config, "QUARTZ_OPEN_SEND_LIVE", True)):
+        return []
+    try:
+        from . import db as _db
+        conn = _db.get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT captured_at, solar_power_kw FROM pv_realtime_history
+                   WHERE solar_power_kw IS NOT NULL
+                     AND captured_at >= datetime('now', '-2 hours')
+                   ORDER BY captured_at DESC LIMIT 8"""
+            )
+            rows = cur.fetchall()
+        finally:
+            conn.close()
+        out = []
+        for r in rows:
+            ts = str(r["captured_at"])
+            if not ts.endswith("Z") and "+" not in ts:
+                ts = ts + "Z"
+            out.append({"timestamp": ts, "generation": float(r["solar_power_kw"])})
+        return out
+    except Exception:  # pragma: no cover — live anchor is optional sugar
+        logger.debug("quartz-open: live-generation read failed", exc_info=True)
+        return []
+
+
+def _fetch_quartz_open_forecast(
+    *,
+    hours: int,
+    base_weather: list[HourlyForecast],
+    lat: str | None = None,
+    lon: str | None = None,
+) -> ForecastFetchResult:
+    """Site-level PV forecast via the open Quartz schema (#542).
+
+    Talks ``POST {QUARTZ_OPEN_URL}/forecast/`` — served either by the
+    hem-quartz sidecar container or by the hosted open.quartz.solar twin
+    (identical schema, no auth). One call per configured panel plane; the
+    per-timestamp kW are summed, the 15-min cadence is averaged into
+    half-hour slot starts, and the result is merged with Open-Meteo weather
+    context exactly like the legacy hosted client so everything downstream
+    (calibration chain, snapshots, pv_error_log) is provider-agnostic.
+    """
+    lat_s = (lat or config.WEATHER_LAT or "").strip()
+    lon_s = (lon or config.WEATHER_LON or "").strip()
+    if not lat_s or not lon_s:
+        return ForecastFetchResult(forecast=[], source="quartz-open")
+    base_url = (getattr(config, "QUARTZ_OPEN_URL", "https://open.quartz.solar") or "").rstrip("/")
+    timeout = int(getattr(config, "QUARTZ_OPEN_TIMEOUT_SECONDS", 60))
+    live = _quartz_open_live_generation()
+
+    # One SHARED, quarter-floored timestamp for every plane request: the
+    # server anchors its 15-min prediction grid at the request ts (review
+    # #544 finding 1 — per-request now() gave each plane a drifted grid, and
+    # the merge averaged planes instead of summing). Floored client-side so
+    # plane calls can't straddle a quarter boundary either.
+    now_q = datetime.now(UTC).replace(second=0, microsecond=0)
+    shared_ts = now_q.replace(minute=(now_q.minute // 15) * 15)
+    shared_ts_iso = shared_ts.replace(tzinfo=None).isoformat()
+
+    # kW summed across planes per raw model timestamp.
+    kw_by_ts: dict[datetime, float] = {}
+    planes = _quartz_open_planes()
+    for plane in planes:
+        body = {
+            "site": {
+                "latitude": float(lat_s),
+                "longitude": float(lon_s),
+                "capacity_kwp": plane["capacity_kwp"],
+                "tilt": plane["tilt"],
+                "orientation": plane["orientation"],
+            },
+            "timestamp": shared_ts_iso,
+        }
+        if live:
+            body["live_generation"] = live
+        req = urllib.request.Request(
+            f"{base_url}/forecast/",
+            data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                payload = json.loads(resp.read().decode())
+            preds = (payload.get("predictions") or {}).get("power_kw") or {}
+        except (urllib.error.URLError, json.JSONDecodeError, AttributeError, TypeError) as e:
+            logger.warning(
+                "quartz-open fetch failed for plane %s@%s°: %s",
+                plane["orientation"], plane["tilt"], e,
+            )
+            return ForecastFetchResult(forecast=[], source="quartz-open")
+        for ts_raw, kw in preds.items():
+            try:
+                ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                continue
+            # Model timestamps are naive UTC with per-REQUEST sub-minute
+            # offsets (live probe: '09:45:00.533720', different on every
+            # call). Floor to the 15-min grid so the planes' keys COLLIDE —
+            # without this, plane A and plane B land on disjoint keys and the
+            # half-hour bucket averages the planes instead of summing them
+            # (half the real forecast for a 2-plane site).
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            ts = ts.replace(minute=(ts.minute // 15) * 15, second=0, microsecond=0)
+            try:
+                kw_by_ts[ts] = kw_by_ts.get(ts, 0.0) + max(0.0, float(kw))
+            except (TypeError, ValueError):
+                continue
+
+    if not kw_by_ts:
+        return ForecastFetchResult(forecast=[], source="quartz-open")
+
+    # 15-min cadence → half-hour slot starts (mean kW inside each bucket).
+    bucket_sum: dict[datetime, float] = {}
+    bucket_n: dict[datetime, int] = {}
+    for ts, kw in kw_by_ts.items():
+        slot = ts.replace(minute=(ts.minute // 30) * 30, second=0)
+        bucket_sum[slot] = bucket_sum.get(slot, 0.0) + kw
+        bucket_n[slot] = bucket_n.get(slot, 0) + 1
+
+    quartz_rows: list[HourlyForecast] = []
+    horizon_end = datetime.now(UTC) + timedelta(hours=max(1, hours))
+    for slot in sorted(bucket_sum):
+        if slot > horizon_end:
+            continue
+        site_kw = bucket_sum[slot] / max(1, bucket_n[slot])
+        if base_weather:
+            temp_c = _interp_hourly_scalar(base_weather, slot, "temperature_c", 10.0)
+            cloud_pct = _interp_hourly_scalar(base_weather, slot, "cloud_cover_pct", 50.0)
+        else:
+            temp_c = 10.0
+            cloud_pct = 50.0
+        equivalent_rad = site_kw / max(0.001, float(config.PV_CAPACITY_KWP) * float(config.PV_SYSTEM_EFFICIENCY)) * 1000.0
+        quartz_rows.append(
+            HourlyForecast(
+                time_utc=slot,
+                temperature_c=temp_c,
+                cloud_cover_pct=cloud_pct,
+                shortwave_radiation_wm2=max(0.0, equivalent_rad),
+                estimated_pv_kw=site_kw,
+                heating_demand_factor=compute_heating_demand_factor(temp_c),
+                pv_direct=True,
+            )
+        )
+
+    quartz_by_time = {f.time_utc for f in quartz_rows}
+    first_q = min(quartz_by_time)
+    last_q = max(quartz_by_time)
+    merged = list(quartz_rows)
+    for f in base_weather:
+        if first_q <= f.time_utc <= last_q:
+            continue
+        merged.append(f)
+    merged.sort(key=lambda f: f.time_utc)
+    compact = json.dumps(
+        {"planes": planes, "n_points": len(kw_by_ts), "url": base_url},
+        separators=(",", ":"),
+    )
+    return ForecastFetchResult(
+        forecast=merged[: max(hours, len(quartz_rows))],
+        source="quartz",
+        model_name="quartz-open-site",
+        model_version=None,
+        raw_payload_json=compact,
+    )
 
 
 def _fetch_quartz_forecast(

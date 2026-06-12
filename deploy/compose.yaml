@@ -143,6 +143,56 @@ services:
     networks:
       - hem-net
 
+  # ── #542 — self-hosted Quartz solar-forecast sidecar ─────────────────────
+  # Open Climate Fix's open-source site-level PV model (xgboost), wrapped in
+  # a thin FastAPI that mirrors the hosted open.quartz.solar schema. HEM
+  # reaches it ONLY on the internal bridge (http://hem-quartz:8000 — no host
+  # ports). The model pulls its NWP from Open-Meteo itself: no API keys.
+  # Weights download once into the quartz-cache volume (~/cache survives
+  # redeploys). Rollback: set QUARTZ_OPEN_URL=https://open.quartz.solar in
+  # /srv/hem/.env (hosted twin, same schema) or QUARTZ_PROVIDER=hosted.
+  hem-quartz:
+    image: ghcr.io/albinati/home-energy-manager-quartz:${HEM_QUARTZ_IMAGE_TAG:-main}
+    container_name: hem-quartz
+    pull_policy: always
+    restart: unless-stopped
+
+    environment:
+      TZ: Europe/London
+
+    read_only: true
+    tmpfs:
+      - /tmp:rw,size=128m,mode=1777
+    volumes:
+      - quartz-cache:/cache
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 100
+    # xgboost + pandas + NWP frames; box has 4 GB with ~2.7 free (2026-06-12).
+    mem_limit: 1g
+    mem_reservation: 256m
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+    logging:
+      driver: journald
+      options:
+        tag: hem-quartz
+
+    networks:
+      - hem-net
+
+volumes:
+  # One-time Hugging Face model-weights download for hem-quartz; keeping it
+  # off the read-only rootfs and out of tmpfs means no re-download per boot.
+  quartz-cache:
+
 # Pin a known subnet so the bridge gateway IP (172.30.0.1) is stable. The
 # container resolves openclaw.host -> 172.30.0.1 (extra_hosts above) and
 # reaches OpenClaw on the host. Without this, compose picks the next free
