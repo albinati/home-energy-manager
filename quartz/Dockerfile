@@ -56,4 +56,11 @@ RUN useradd --uid 1001 --no-create-home quartz \
 USER 1001
 
 EXPOSE 8000
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run with CWD on the tmpfs: upstream quartz_solar_forecast.data builds a
+# requests_cache CachedSession with a CWD-RELATIVE sqlite path, which
+# explodes on the read-only rootfs ("unable to open database file" on the
+# first prod boot). /tmp is the compose tmpfs; the HTTP cache is ephemeral
+# by design (NWP responses, 1 h TTL upstream). --app-dir keeps the import
+# path at /app.
+WORKDIR /tmp
+CMD ["uvicorn", "--app-dir", "/app", "app:app", "--host", "0.0.0.0", "--port", "8000"]
