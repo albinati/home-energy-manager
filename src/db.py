@@ -5152,6 +5152,32 @@ def upsert_pv_recent_bias(
     return n
 
 
+def get_latest_forecast_snapshot_meta() -> dict[str, Any] | None:
+    """Metadata of the most recent canonical forecast fetch, or None.
+
+    Returns ``{forecast_fetch_at_utc, source, model_name, model_version}``
+    from the snapshot pointed at by ``meteo_forecast_latest_state``. Powers
+    the cockpit's forecast-provenance chip (#542): after the Quartz sidecar
+    migration the healthy value is ``model_name='quartz-open-site'``;
+    anything else means the fetch degraded to a fallback.
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT s.forecast_fetch_at_utc, s.source, s.model_name,
+                          s.model_version
+                   FROM meteo_forecast_snapshot s
+                   JOIN meteo_forecast_latest_state ls
+                     ON ls.forecast_fetch_at_utc = s.forecast_fetch_at_utc
+                   WHERE ls.id = 1"""
+            )
+            r = cur.fetchone()
+            return dict(r) if r else None
+        finally:
+            conn.close()
+
+
 def get_pv_recent_bias() -> dict[int, float]:
     """Return cached per-hour adaptive PV bias factors, or ``{}`` when empty."""
     with _lock:

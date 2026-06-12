@@ -955,6 +955,32 @@ def _space_heating_demand_present() -> bool:
     return measured >= floor
 
 
+def space_heating_gate_state() -> dict[str, Any]:
+    """Public snapshot of the LWT pre-heat demand gate (#540 quick win) for
+    the status API: the INPUTS, not just the verdict, so the cockpit can
+    explain WHY pre-heat is suppressed or allowed right now.
+    """
+    floor = float(getattr(config, "DAIKIN_LWT_PREHEAT_MIN_TRAILING_HEATING_KWH", 0.5))
+    lookback = int(getattr(config, "DAIKIN_LWT_PREHEAT_DEMAND_LOOKBACK_HOURS", 48))
+    measured: float | None = None
+    try:
+        measured = round(db.measured_space_heating_kwh_excluding_offset_windows(lookback), 2)
+    except Exception:  # pragma: no cover - defensive: status read must not fail
+        logger.debug("space_heating_gate_state: measured read failed", exc_info=True)
+    demand_present = _space_heating_demand_present()
+    preheat_enabled = bool(getattr(config, "DAIKIN_LWT_PREHEAT_ENABLED", False))
+    return {
+        "preheat_enabled": preheat_enabled,
+        "gate_enabled": floor > 0,
+        "demand_present": demand_present,
+        "measured_window_kwh": measured,
+        "threshold_kwh": floor,
+        "lookback_hours": lookback,
+        # The one-line story the chip renders:
+        "preheat_suppressed": preheat_enabled and floor > 0 and not demand_present,
+    }
+
+
 def _write_lwt_preheat_actions(
     plan_date: str,
     plan: LpPlan,

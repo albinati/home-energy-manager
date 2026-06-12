@@ -115,6 +115,7 @@ from .routers import appliances as appliances_router
 from .routers import dispatch as dispatch_router
 from .routers import energy_providers as energy_providers_router
 from .routers import pv as pv_router
+from .routers import status as status_router
 from .routers import workbench as workbench_router
 
 
@@ -300,6 +301,8 @@ _CACHE_CONTROL_MAX_AGE: dict[str, int] = {
     "/api/v1/daikin/status": 120,
     "/api/v1/daikin/heating-plan": 120,
     "/api/v1/scheduler/timeline": 120,
+    "/api/v1/status/alerts": 30,
+    "/api/v1/status/feedback": 120,
 }
 
 
@@ -321,6 +324,7 @@ app.include_router(workbench_router.router)
 app.include_router(dispatch_router.router)
 app.include_router(appliances_router.router)
 app.include_router(pv_router.router)
+app.include_router(status_router.router)
 
 # Mount the FastMCP streamable-HTTP transport at /mcp, guarded by a bearer
 # token. Replaces the legacy stdio subprocess (`bin/mcp`) for OpenClaw in
@@ -3823,6 +3827,14 @@ def _resolve_period_range(period: str, anchor: str):
     return start, end
 
 
+# Fair-compare replays the whole period's half-hourly usage against every
+# tariff's rate card — measured 9.6s for a month×14 tariffs in prod, which
+# the Insights page paid on EVERY visit. Same in-process TTL pattern as
+# _period_insights_cache; the anchor key keeps a stale "today" view bounded
+# by the TTL while past periods are effectively immutable anyway.
+_fair_compare_cache: dict[tuple, tuple[float, dict]] = {}
+
+
 @app.get("/api/v1/tariffs/fair-compare", response_model=FairCompareResponse)
 async def tariffs_fair_compare(period: str = "month", anchor: str = "", max_tariffs: int = 14):
     """Fair per-slot tariff comparison for the selected navigator period.
@@ -3834,11 +3846,22 @@ async def tariffs_fair_compare(period: str = "month", anchor: str = "", max_tari
     if period not in ("day", "week", "month", "year"):
         raise HTTPException(status_code=400, detail="period must be day|week|month|year")
     start, end = _resolve_period_range(period, anchor)
+
+    import time as _t
+    ttl = int(getattr(config, "FAIR_COMPARE_CACHE_TTL_SECONDS", 900))
+    key = (period, str(start), str(end), int(max_tariffs))
+    if ttl > 0:
+        hit = _fair_compare_cache.get(key)
+        if hit and (_t.monotonic() - hit[0]) < ttl:
+            return FairCompareResponse(**hit[1])
+
     from ..analytics.fair_compare import compute_fair_comparison
 
     data = await asyncio.to_thread(
         compute_fair_comparison, start, end, max_tariffs=max_tariffs
     )
+    if ttl > 0 and data is not None:
+        _fair_compare_cache[key] = (_t.monotonic(), data)
     return FairCompareResponse(**data)
 
 

@@ -480,6 +480,49 @@ def _dhw_autoscale_factor(mode: str) -> float:
     return factor
 
 
+def dhw_budget_state(mode: str | None = None) -> dict[str, Any]:
+    """Public snapshot of the DHW budget feedback loop (#534) for the API.
+
+    The status endpoints must not import underscore-private internals, so
+    this composes them here: nominal mode total × trailing measured/nominal
+    auto-scale = the daily electric budget the LP actually pins, plus the
+    measured Onecta dhw figures it is being compared against.
+    """
+    if mode is None:
+        mode = (config.OPTIMIZATION_PRESET or "normal").strip().lower()
+    nominal = _nominal_daily_total_kwh(mode)
+    factor = _dhw_autoscale_factor(mode)
+
+    measured_today: float | None = None
+    measured_7d_avg: float | None = None
+    try:
+        tz = _tz_local()
+        today = datetime.now(tz).date()
+        start = today - timedelta(days=7)
+        rows = db.get_daikin_consumption_daily_range(start.isoformat(), today.isoformat())
+        vals = [
+            float(r["kwh_dhw"]) for r in rows
+            if r.get("kwh_dhw") is not None and str(r["date"]) != today.isoformat()
+        ]
+        if vals:
+            measured_7d_avg = round(sum(vals) / len(vals), 2)
+        for r in rows:
+            if str(r["date"]) == today.isoformat() and r.get("kwh_dhw") is not None:
+                measured_today = float(r["kwh_dhw"])
+    except Exception:  # pragma: no cover - defensive: status read must not fail
+        logger.debug("dhw_budget_state: measured read failed", exc_info=True)
+
+    return {
+        "mode": mode,
+        "nominal_kwh": round(nominal, 2),
+        "autoscale_factor": round(factor, 3),
+        "autoscale_enabled": bool(getattr(config, "DHW_FORECAST_AUTOSCALE_ENABLED", True)),
+        "effective_budget_kwh": round(nominal * factor, 2),
+        "measured_today_kwh": measured_today,
+        "measured_7d_avg_kwh": measured_7d_avg,
+    }
+
+
 def forecast_dhw_load_per_slot(
     slot_starts_utc: list[datetime],
     *,
