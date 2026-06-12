@@ -100,9 +100,9 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
       ? optionForDay(execution, pv ?? null, grid)
       : optionForPeriod(period, daikin, granularity);
     chart.setOption(option, true);
-    const ro = new ResizeObserver(() => chart.resize());
-    ro.observe(elRef.current);
-    return () => ro.disconnect();
+    // Resize handling now lives centrally in makeChart (rAF-debounced
+    // ResizeObserver) — the per-effect observer this widget carried would
+    // double every resize() call.
   }, [granularity, period, daikin, grid, execution, pv, isToday]);
 
   useEffect(() => () => {

@@ -204,12 +204,29 @@
     margin-right: 0;
     gap: 2px;
   }
-  .nav-link {
+  /* Scoped to the TOPNAV — bare .nav-link is reused by the 404 page links,
+   * which must keep their labels (review L on #552). */
+  .topnav .nav-link {
     font-size: 0;
     gap: 0;
     padding: 10px;
     min-width: 40px;
     min-height: 40px;
     justify-content: center;
+  }
+  /* Wrong-secret message must not widen the single row — float it under
+   * the bar instead (the unlock form already crowds 375px). */
+  .admin-unlock { position: relative; }
+  .admin-unlock-input { width: 100px; }
+  .admin-unlock-msg {
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 0;
+    white-space: nowrap;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 2px 8px;
+    z-index: 41;
   }
 }

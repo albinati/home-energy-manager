@@ -37,8 +37,12 @@ export function Hero({ metrics, monthly, period, periodState, periodLoading, tod
   // (slower) period aggregate is still loading or failed — the £ headline is
   // the first thing the eye looks for and must never sit on a skeleton when a
   // 60s-polled number already knows the answer (mobile showed exactly that).
+  // Day-granularity ONLY: todayCum is a single day's figure — labelling it
+  // as the current week/month/year while the aggregate loads (or after it
+  // fails) would put a mislabelled £ on a money display (review M on #552).
+  const isTodayView = periodState.gran === "day" && isNow;
   const bill = period?.cost?.net_cost_pounds
-    ?? (isNow ? todayCum?.realised_net_cost_gbp ?? null : null);
+    ?? (isTodayView ? todayCum?.realised_net_cost_gbp ?? null : null);
   const savedVsBG = period?.cost?.delta_vs_fixed_real_pounds
     ?? (isNow ? todayCum?.delta_vs_fixed_tariff_real_gbp : null) ?? null;
   const grid = period?.energy?.import_kwh ?? (isNow ? todayCum?.import_kwh : null) ?? null;
