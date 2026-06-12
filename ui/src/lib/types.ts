@@ -826,3 +826,143 @@ export interface WorkbenchPromoteResult {
   promoted: Array<{ key: string; ok: boolean; value?: unknown; error?: string }>;
   profile_name?: string | null;
 }
+
+/* ----- /status/alerts + /status/feedback — ops health (PR 3, #553) ----- */
+
+export interface StatusMeterBlock {
+  last_day: string | null;
+  age_days: number | null;
+  stale: boolean;
+}
+
+export interface StatusLpBlock {
+  failures_24h: number;
+  last_failure: {
+    run_at_utc?: string | null;
+    error_class?: string | null;
+    plan_date?: string | null;
+  } | null;
+}
+
+export interface StatusForecastBlock {
+  model_name: string | null;
+  source: string | null;
+  fetched_at_utc: string | null;
+  age_s: number | null;
+  sidecar_ok: boolean | null;
+  degraded: boolean;
+}
+
+export interface StatusFoxDriftBlock {
+  checked_at_utc: string;
+  in_sync: boolean | null;   // null = live read failed (unknown, NOT drift)
+  diff_count: number | null;
+  error: string | null;
+}
+
+export interface StatusQuotaEntry {
+  used: number | null;
+  budget: number | null;
+  blocked: boolean;
+}
+
+export interface StatusAlertsResponse {
+  now_utc: string;
+  meter: StatusMeterBlock;
+  lp: StatusLpBlock;
+  forecast: StatusForecastBlock;
+  fox_drift: StatusFoxDriftBlock;
+  quota: { fox: StatusQuotaEntry | null; daikin: StatusQuotaEntry | null };
+}
+
+export interface DhwBudgetState {
+  mode: string;
+  nominal_kwh: number | null;
+  autoscale_factor: number | null;
+  autoscale_enabled: boolean;
+  effective_budget_kwh: number | null;
+  measured_today_kwh: number | null;
+  measured_7d_avg_kwh: number | null;
+}
+
+export interface LwtGateState {
+  preheat_enabled: boolean;
+  gate_enabled: boolean;
+  demand_present: boolean;
+  measured_window_kwh: number | null;
+  threshold_kwh: number;
+  lookback_hours: number;
+  preheat_suppressed: boolean;
+}
+
+export interface StatusFeedbackResponse {
+  now_utc: string;
+  dhw: DhwBudgetState;
+  lwt_gate: LwtGateState;
+  forecast: StatusForecastBlock;
+}
+
+/* ----- /recent-triggers (admin-only read) ----- */
+
+export interface TriggerRow {
+  id: number;
+  timestamp: string;
+  device: string | null;
+  action: string | null;
+  params: string | null;
+  result: string | null;
+  error_msg: string | null;
+  trigger: string | null;
+  slot_kind: string | null;
+  agile_price_at_time: number | null;
+  started_at: string | null;
+  completed_at: string | null;
+  duration_ms: number | null;
+  actor: string | null;
+}
+
+export interface RecentTriggersResponse {
+  rows: TriggerRow[];
+  count: number;
+}
+
+/* ----- /lp/scorecard/{date} ----- */
+
+export interface LpScorecard {
+  day: string;
+  forecast_accuracy: {
+    available?: boolean;
+    n_hours?: number;
+    pv_kwh_mae?: number;
+    pv_kwh_bias?: number;       // positive = over-forecast
+    outdoor_temp_c_mae?: number;
+    outdoor_temp_c_bias?: number;
+    load_kwh_mae?: number;
+    load_kwh_bias?: number;
+  } | null;
+  dispatch_accuracy: {
+    n_slots_with_plan?: number;
+    n_slots_with_real?: number;
+    import_planned_kwh?: number;
+    import_real_kwh?: number;
+    import_accuracy_pct?: number | null;
+    export_planned_kwh?: number;
+    export_real_kwh?: number;
+    export_accuracy_pct?: number | null;
+    charge_planned_kwh?: number;
+    charge_real_kwh?: number;
+    charge_accuracy_pct?: number | null;
+  } | null;
+  economic_value: {
+    lp_realised_cost_p?: number;
+    naive_self_use_shadow_p?: number;
+    lp_avoided_cost_p?: number;    // positive = LP saved money vs naive
+    comparison_basis?: string;
+  } | null;
+  grade: string | null;
+}
+
+export interface LpScorecardResponse {
+  ok: boolean;
+  scorecard: LpScorecard;
+}
