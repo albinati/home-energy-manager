@@ -1905,6 +1905,13 @@ class Config:
     ENERGY_PERIOD_CACHE_TTL_SECONDS: int = int(
         os.getenv("ENERGY_PERIOD_CACHE_TTL_SECONDS", "1200")
     )
+    # In-process TTL cache for /tariffs/fair-compare — the per-slot replay of
+    # the whole period against every tariff card took ~9.6 s uncached in prod
+    # (month × 14 tariffs) and the Insights page paid it on every visit.
+    # 0 disables (always recompute).
+    FAIR_COMPARE_CACHE_TTL_SECONDS: int = int(
+        os.getenv("FAIR_COMPARE_CACHE_TTL_SECONDS", "900")
+    )
     # Minimum interval between user-initiated "force refresh" calls
     FOX_FORCE_REFRESH_MIN_INTERVAL_SECONDS: int = int(
         os.getenv("FOX_FORCE_REFRESH_MIN_INTERVAL_SECONDS", "60")
