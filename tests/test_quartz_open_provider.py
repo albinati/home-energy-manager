@@ -173,3 +173,35 @@ def test_bad_planes_json_falls_back_to_aggregate(monkeypatch):
     planes = weather._quartz_open_planes()
     assert len(planes) == 1
     assert planes[0]["orientation"] == pytest.approx(200.0)
+
+
+def test_planes_sum_despite_per_request_microsecond_offsets(monkeypatch):
+    """The live API stamps timestamps with per-REQUEST microsecond offsets
+    ('09:45:00.533720', different on every call). Plane keys must be floored
+    to the 15-min grid so they collide and SUM — otherwise a 2-plane site
+    forecasts at half its real output (caught during #544 self-review)."""
+    from src import weather
+
+    monkeypatch.setattr(
+        app_config, "QUARTZ_OPEN_PLANES",
+        '[{"tilt": 35, "orientation": 225, "capacity_kwp": 2.25},'
+        ' {"tilt": 10, "orientation": 180, "capacity_kwp": 2.25}]',
+        raising=False,
+    )
+    start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    call_n = {"n": 0}
+
+    def fake_urlopen(req, timeout=0):  # noqa: ANN001
+        call_n["n"] += 1
+        jitter = timedelta(microseconds=123456 * call_n["n"])  # differs per call
+        jittered = start + jitter
+        return _Resp(_open_payload(jittered, [1.0, 1.0, 1.0, 1.0]))
+
+    monkeypatch.setattr(weather.urllib.request, "urlopen", fake_urlopen)
+    res = weather._fetch_quartz_open_forecast(
+        hours=48, base_weather=_base_weather(start), lat="51.4927", lon="-0.2628"
+    )
+    by_time = {f.time_utc: f for f in res.forecast if f.pv_direct}
+    # Each plane contributes 1.0 kW per quarter → the SUM is 2.0 kW, not the
+    # 1.0 kW a non-colliding average would produce.
+    assert by_time[start].estimated_pv_kw == pytest.approx(2.0)

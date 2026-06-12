@@ -766,10 +766,15 @@ def _fetch_quartz_open_forecast(
                 ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
             except (TypeError, ValueError):
                 continue
-            # Model timestamps are naive UTC (sometimes with stray microseconds).
+            # Model timestamps are naive UTC with per-REQUEST sub-minute
+            # offsets (live probe: '09:45:00.533720', different on every
+            # call). Floor to the 15-min grid so the planes' keys COLLIDE —
+            # without this, plane A and plane B land on disjoint keys and the
+            # half-hour bucket averages the planes instead of summing them
+            # (half the real forecast for a 2-plane site).
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=UTC)
-            ts = ts.replace(microsecond=0)
+            ts = ts.replace(minute=(ts.minute // 15) * 15, second=0, microsecond=0)
             try:
                 kw_by_ts[ts] = kw_by_ts.get(ts, 0.0) + max(0.0, float(kw))
             except (TypeError, ValueError):
