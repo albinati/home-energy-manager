@@ -1,5 +1,5 @@
 import { useState } from "preact/hooks";
-import { useFetch, usePoll } from "../../lib/poll";
+import { useFetch } from "../../lib/poll";
 import {
   getSettings,
   getSchedulerStatus,
@@ -58,7 +58,10 @@ export function OperateCard({ appliances, applianceJobs, onChanged }: OperateCar
   // them. The route also gates the mount on role — that's what keeps a
   // viewer from ever firing the admin-only GET /settings below.
   const settings = useFetch(getSettings, []);
-  const sched = usePoll(getSchedulerStatus, 60_000);
+  // Fetch-once, NOT a poll: GET /scheduler/status fires a live Octopus rates
+  // fetch server-side on every call (review M on #555) — once per admin visit
+  // is plenty, and pause/resume below refresh it explicitly.
+  const sched = useFetch(getSchedulerStatus, []);
 
   const [unlocked, setUnlocked] = useState(false);
   const [confirmingUnlock, setConfirmingUnlock] = useState(false);
@@ -83,11 +86,22 @@ export function OperateCard({ appliances, applianceJobs, onChanged }: OperateCar
     setBusy(true);
     return fn()
       .catch((e) => {
-        toast.error("Operate action failed", e instanceof Error ? e.message : String(e));
+        // HemApiError.message is just "hem-api 409 Conflict" — the actionable
+        // detail (e.g. "job N is in status running") lives in .body.
+        const detail = e instanceof HemApiError ? (e.body || e.message)
+          : e instanceof Error ? e.message : String(e);
+        toast.error("Operate action failed", detail);
         return null;
       })
       .finally(() => setBusy(false));
   };
+
+  // Discriminate sim-id lifecycle errors from other 409s (e.g. the batch
+  // apply's 409 BatchPartialFailure) — status alone is ambiguous.
+  const isSimIdError = (e: unknown): e is HemApiError =>
+    e instanceof HemApiError &&
+    (e.status === 409 || e.status === 410) &&
+    /Simulation(Expired|IdRequired|IdMismatch)/.test(e.body || "");
 
   // ── mode (settings batch — same flow as the Settings page) ──────────────
   const chooseMode = (m: string) => {
@@ -100,15 +114,23 @@ export function OperateCard({ appliances, applianceJobs, onChanged }: OperateCar
 
   const confirmMode = (c: Extract<Confirm, { kind: "mode" }>) =>
     void guard(async () => {
-      const res = await applyBatch(c.sim.simulation_id, [{ key: MODE_KEY, value: c.mode }]);
-      if (res.errors?.length) {
-        toast.error("Mode change failed", res.errors.map((e) => e.error).join("; "));
-      } else {
-        toast.success(`Household mode → ${c.mode}`);
-        setReplanSuggested(true);
-        void settings.refresh();
-        onChanged();
+      try {
+        await applyBatch(c.sim.simulation_id, { [MODE_KEY]: c.mode });
+      } catch (e) {
+        // Modal sat open past the 5-min sim TTL → re-simulate once and ask
+        // again on the fresh diff. Other failures (409 BatchPartialFailure
+        // etc.) fall through to guard()'s toast.
+        if (isSimIdError(e)) {
+          setConfirm({ kind: "mode", mode: c.mode, sim: await simulateBatch({ [MODE_KEY]: c.mode }) });
+          toast.error("Simulation expired", "Review the refreshed diff and confirm again.");
+          return;
+        }
+        throw e;
       }
+      toast.success(`Household mode → ${c.mode}`);
+      setReplanSuggested(true);
+      void settings.refresh();
+      onChanged();
       setConfirm(null);
     });
 
@@ -135,7 +157,7 @@ export function OperateCard({ appliances, applianceJobs, onChanged }: OperateCar
       } catch (e) {
         // Expired/consumed sim-id → re-simulate ONCE and re-ask on the fresh
         // diff (the state may have changed since the stale one was rendered).
-        if (e instanceof HemApiError && (e.status === 409 || e.status === 410)) {
+        if (isSimIdError(e)) {
           const sim =
             c.kind === "replan" ? simulateProposeOptimization
             : c.kind === "pause" ? simulateSchedulerPause
@@ -311,14 +333,14 @@ export function OperateCard({ appliances, applianceJobs, onChanged }: OperateCar
         {confirm?.kind === "mode" && (
           <>
             <ul class="operate-diff">
-              {confirm.sim.diffs.map((d) => (
+              {confirm.sim.sub_actions.map((d) => (
                 <li key={d.key}>
-                  <code>{d.key}</code>: <strong>{String(d.current)}</strong> → <strong>{String(d.proposed)}</strong>
+                  <code>{d.key}</code>: <strong>{String(d.before[d.key])}</strong> → <strong>{String(d.after[d.key])}</strong>
                 </li>
               ))}
             </ul>
-            {confirm.sim.warnings.length > 0 && (
-              <p class="operate-warnings"><Icon name="warn" size={12} /> {confirm.sim.warnings.join(" · ")}</p>
+            {confirm.sim.safety_flags.length > 0 && (
+              <p class="operate-warnings"><Icon name="warn" size={12} /> {confirm.sim.safety_flags.join(" · ")}</p>
             )}
             <p class="muted">{MODE_META[confirm.mode]?.sub}</p>
           </>

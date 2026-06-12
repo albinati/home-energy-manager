@@ -232,14 +232,17 @@ export const getSettings = () => getJson<SettingsList>("/settings");
 export const simulateBatch = (changes: Record<string, unknown>) =>
   postJson<SimulateBatchResponse>("/settings/batch/simulate", { changes });
 
+// The apply body is {changes: {KEY: value}} — the same shape simulate takes.
+// (A bare array used to be sent here, which 422'd on the backend's dict body;
+// review HIGH on #555.)
 export async function applyBatch(
   simulationId: string,
-  changes: Array<{ key: string; value: unknown }>,
+  changes: Record<string, unknown>,
 ): Promise<ApplyBatchResponse> {
   const headers = new Headers({ "Content-Type": "application/json", "X-Simulation-Id": simulationId });
   const r = await hemFetch("/settings/batch", {
     method: "POST",
-    body: JSON.stringify(changes),
+    body: JSON.stringify({ changes }),
     headers,
   });
   return r.json() as Promise<ApplyBatchResponse>;

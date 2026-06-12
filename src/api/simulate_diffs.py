@@ -245,13 +245,24 @@ def diff_foxess_charge_period(periods: list[Any]) -> ActionDiff:
 # ---------------------------------------------------------------------------
 
 def diff_optimization_propose() -> ActionDiff:
-    """Force re-solve and propose a new plan. Doesn't apply yet (next-step approve does)."""
+    """Force re-solve and apply a new plan.
+
+    Bulletproof applies on propose — POST /optimization/propose persists the
+    plan, uploads Fox V3 and writes the Daikin action schedule in one step.
+    The old summary claimed it "does not auto-apply"; that predated
+    Bulletproof and contradicted what the confirm button actually did.
+    """
     return ActionDiff(
         action="optimization.propose",
         before={"description": "current active plan (if any)"},
-        after={"description": "fresh LP solve will be proposed for review"},
-        safety_flags=[],
-        human_summary="Re-run LP optimizer and propose a new plan (does not auto-apply unless PLAN_AUTO_APPROVE=true)",
+        after={"description": "fresh LP solve, applied immediately"},
+        safety_flags=["dispatches_to_fox"] + (
+            [] if config.DAIKIN_CONTROL_MODE == "passive" else ["dispatches_to_daikin"]
+        ),
+        human_summary=(
+            "Re-run the LP optimizer now. The new plan applies immediately: "
+            "Fox V3 schedule upload + Daikin action rows."
+        ),
     )
 
 

@@ -3251,7 +3251,10 @@ async def energy_insights():
 @app.get("/api/v1/scheduler/status", response_model=SchedulerStatusResponse)
 async def scheduler_status():
     """Current Agile price, next cheap window, planned ASHP LWT adjustment, paused state."""
-    raw = get_scheduler_status()
+    # Off the event loop: get_scheduler_status() performs a synchronous Octopus
+    # rates fetch (urllib, up to 10s timeout) — inline it would stall every
+    # in-flight request while waiting on the vendor (review M on #555).
+    raw = await asyncio.to_thread(get_scheduler_status)
     return SchedulerStatusResponse(
         enabled=raw["enabled"],
         paused=raw["paused"],

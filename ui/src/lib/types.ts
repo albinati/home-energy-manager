@@ -22,20 +22,36 @@ export interface SettingsList {
   settings: SettingSpec[];
 }
 
-export interface SimulateBatchResponse {
-  simulation_id: string;
-  diffs: Array<{
-    key: string;
-    current: unknown;
-    proposed: unknown;
-    cron_reload?: boolean;
-  }>;
-  warnings: string[];
+// POST /settings/batch/simulate returns an ActionDiff (src/api/simulation.py)
+// whose sub_actions carry one per-key diff each: before/after are single-entry
+// objects keyed by the setting ({KEY: current} / {KEY: proposed}).
+// (The previous {diffs, warnings} shape here never matched the backend — the
+// Settings simulate modal crashed on it; review HIGH on #555.)
+export interface BatchSubAction {
+  key: string;
+  action: string;                    // "setting.<KEY>"
+  before: Record<string, unknown>;
+  after: Record<string, unknown>;
+  safety_flags: string[];
+  human_summary: string;
 }
 
+export interface SimulateBatchResponse {
+  action: string;                    // "settings.batch"
+  before: Record<string, unknown>;
+  after: Record<string, unknown>;
+  safety_flags: string[];
+  human_summary: string;
+  simulation_id: string;
+  expires_at_epoch: number;
+  sub_actions: BatchSubAction[];
+}
+
+// POST /settings/batch → {ok, results}; a mid-batch failure raises 409
+// BatchPartialFailure instead (after best-effort rollback).
 export interface ApplyBatchResponse {
-  applied: Array<{ key: string; value: unknown }>;
-  errors?: Array<{ key: string; error: string }>;
+  ok: boolean;
+  results: Array<{ key: string; ok: boolean; value?: unknown; error?: string }>;
 }
 
 /* ----- /cockpit/now ----- */
