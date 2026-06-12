@@ -285,20 +285,14 @@ def _overnight_tank_idle_enabled() -> bool:
     return val not in ("false", "0", "no", "off")
 
 
-def _lwt_offset_from_plan(i: int, plan: LpPlan) -> float:
-    """Return the LP-derived LWT offset for slot *i*.
-
-    Uses the back-computed ``plan.lwt_offset_c`` list (filled by ``solve_lp`` via
-    ``lwt_offset_from_space_kw``).  This translates the solver's continuous ``e_space[i]``
-    decision — bounded by the physical climate curve — into the exact Daikin offset command
-    needed to deliver that energy draw.
-
-    PR Phase B: indoor-temp fallback removed (no plan.indoor_temp_c). When
-    ``plan.lwt_offset_c`` is empty (heuristic / legacy path), default to 0.
-    """
-    if plan.lwt_offset_c and i < len(plan.lwt_offset_c):
-        return float(plan.lwt_offset_c[i])
-    return 0.0
+# NOTE: the LP-derived per-slot LWT offset (`plan.lwt_offset_c`) is recorded in
+# lp_solution_snapshot for audit but is deliberately NOT dispatched from the
+# per-window loop below — Daikin window actions are TANK-ONLY (see the comment
+# block inside daikin_dispatch_preview). The only offset writer is
+# _write_lwt_preheat_actions, behind DAIKIN_LWT_PREHEAT_ENABLED and the
+# measured demand gate (#540). The old `_lwt_offset_from_plan` helper was dead
+# (computed, never written) and was removed in #541 review cleanup to keep the
+# tank-only invariant grep-provable.
 
 
 def _preheat_lwt_offset(
@@ -349,8 +343,10 @@ def _preheat_lwt_offset(
     if price_p < 0:
         # PAID to import — push space heating to the TOP of the operating range
         # (clamped below) to bank the most thermal mass while we're paid for it,
-        # not the modest cheap-slot nudge. Heating-cutoff gate above already
-        # ensures this only fires when the firmware is actually heating.
+        # not the modest cheap-slot nudge. The old outdoor-temp cutoff was
+        # removed; what keeps this from firing on a non-heating house is the
+        # measured DEMAND GATE in _write_lwt_preheat_actions (#540 — a
+        # positive offset can WAKE the compressor, June 2026).
         off = neg_boost
         # Comfort guard (sensor-ready): don't over-heat an already-warm room.
         if indoor_c is not None and indoor_c >= setpoint + band:
@@ -623,11 +619,6 @@ def daikin_dispatch_preview(
             "tank_idle_overnight": "tank_idle_overnight",
         }.get(kind, "normal")
 
-        mid = start_utc + timedelta(minutes=15)
-        fc = get_forecast_for_slot(mid, forecast)
-        outdoor = fc.temperature_c if fc else (plan.temp_outdoor_c[i0] if i0 < len(plan.temp_outdoor_c) else 0.0)
-        peak_frost = kind == "peak" and outdoor < float(config.WEATHER_FROST_THRESHOLD_C)
-
         # The merge in _merge_half_hour_slots_for_daikin groups slots by KIND
         # (battery state), not by heat-pump activity. For solar_charge, the LP
         # can plan e_dhw > 0 in just one slot inside a long merged window
@@ -662,12 +653,6 @@ def daikin_dispatch_preview(
         ed = ed_max
         es = es_max
         tt = tt_max
-        # LP-derived LWT offset: continuous value back-computed from e_space[j] via the
-        # inverse climate curve.  This replaces the old fixed-tier overrides so the solver's
-        # energy decision directly controls the radiator temperature rather than a lookup table.
-        lwt = _lwt_offset_from_plan(j, plan)
-        if peak_frost:
-            lwt = max(-2.0, float(config.OPTIMIZATION_LWT_OFFSET_MIN))
         tank_pow = ed > EPS
         tank_powful = ed >= max_b - 1e-3
         # Powerful boost is enabled on negative *and* solar_preheat slots —
@@ -950,6 +935,26 @@ def _apply_write_budget(
     return keep, dropped
 
 
+def _space_heating_demand_present() -> bool:
+    """True when the trailing window shows real measured space-heating demand.
+
+    Reads ``db.measured_space_heating_kwh_excluding_offset_windows`` — the
+    exclusion matters: counting offset-induced heating would let the gate
+    feed on its own output and never close (June 2026). Fail-open on errors:
+    a broken telemetry read must not silently disable winter pre-heat.
+    """
+    floor = float(getattr(config, "DAIKIN_LWT_PREHEAT_MIN_TRAILING_HEATING_KWH", 0.5))
+    if floor <= 0:
+        return True  # gate disabled
+    lookback = int(getattr(config, "DAIKIN_LWT_PREHEAT_DEMAND_LOOKBACK_HOURS", 48))
+    try:
+        measured = db.measured_space_heating_kwh_excluding_offset_windows(lookback)
+    except Exception:  # pragma: no cover — gate must never break dispatch
+        logger.exception("LWT pre-heat demand gate read failed — failing open")
+        return True
+    return measured >= floor
+
+
 def _write_lwt_preheat_actions(
     plan_date: str,
     plan: LpPlan,
@@ -969,6 +974,25 @@ def _write_lwt_preheat_actions(
     quota headroom here, dropping trailing pairs so we can never exceed budget.
     """
     if not config.DAIKIN_LWT_PREHEAT_ENABLED:
+        return 0
+
+    # Demand gate (#540 quick win): no pre-heat offsets without measured
+    # space-heating demand in the trailing window. A positive offset can WAKE
+    # the compressor the firmware would have left off (June 2026: heating went
+    # 0 → 3-8 kWh/day within days of enabling pre-heat, with the LP budgeting
+    # ~0.2). Pre-heating thermal mass the house isn't draining buys nothing;
+    # when a cold snap starts, the firmware heats naturally and the gate opens
+    # once that shows in the 2-hourly split — up to ~24 h (02:35 UTC rollup).
+    # Comfort-safe: the firmware heats regardless; only HEM's price-shaping is
+    # delayed. Negative (setback) offsets are gated too: with the compressor
+    # off they are pure quota churn.
+    if not _space_heating_demand_present():
+        logger.info(
+            "LWT pre-heat: skipped — no measured space-heating demand in the "
+            "trailing %dh window (floor %.1f kWh)",
+            int(getattr(config, "DAIKIN_LWT_PREHEAT_DEMAND_LOOKBACK_HOURS", 48)),
+            float(getattr(config, "DAIKIN_LWT_PREHEAT_MIN_TRAILING_HEATING_KWH", 0.5)),
+        )
         return 0
 
     # Sensor-ready hook: read the latest LIVE indoor temperature if any exists.

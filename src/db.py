@@ -3795,6 +3795,125 @@ def upsert_daikin_consumption_2hourly(
             conn.close()
 
 
+def get_nonzero_lwt_offset_windows(
+    start_date: str, end_date: str
+) -> list[tuple[str, str]]:
+    """``(start_time, end_time)`` UTC-ISO pairs of every ``lwt_preheat`` action
+    with a non-zero offset whose plan ``date`` falls in the inclusive range.
+
+    Used to EXCLUDE HEM-commanded offset windows from measured-heating
+    signals (#540): both the k_per_degc regression and the pre-heat demand
+    gate must observe the firmware's NATURAL behaviour, not HEM's own echo —
+    the June-2026 incident showed offsets waking the compressor and the
+    calibration then learning from the heating they caused.
+
+    Status filter covers the REAL lifecycle (pending → active →
+    completed/failed; review H1 on #541 — 'in_flight' is never stored):
+    'active' matters most, because a multi-hour window is live exactly when
+    overlapping re-plans evaluate the gate. 'failed' is included
+    conservatively (may have half-applied). 'pending' never fired → clean.
+
+    The plan ``date`` left edge is padded by one day (review H2): a rolling
+    plan written in the evening carries windows that SPILL past midnight
+    under the previous plan_date; filtering strictly by date made those
+    windows invisible to a lookback starting the next day, re-counting their
+    heating as natural demand (every-other-day gate oscillation). The pad
+    only over-fetches — actual exclusion is keyed off start/end timestamps.
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT start_time, end_time, params FROM action_schedule
+                   WHERE device = 'daikin' AND action_type = 'lwt_preheat'
+                     AND date >= date(?, '-1 day') AND date <= ?
+                     AND status IN ('completed', 'active', 'failed')""",
+                (start_date, end_date),
+            )
+            out: list[tuple[str, str]] = []
+            for r in cur.fetchall():
+                try:
+                    off = json.loads(r["params"] or "{}").get("lwt_offset", 0)
+                except (json.JSONDecodeError, TypeError):
+                    off = 1  # unparseable → treat as contaminated (conservative)
+                if off:
+                    out.append((str(r["start_time"]), str(r["end_time"])))
+            return out
+        finally:
+            conn.close()
+
+
+def measured_space_heating_kwh_excluding_offset_windows(
+    lookback_hours: int = 48,
+) -> float:
+    """Trailing measured space-heating kWh from ``daikin_consumption_2hourly``,
+    EXCLUDING 2-hour buckets overlapped by a HEM ``lwt_preheat`` window.
+
+    Powers the pre-heat demand gate (#540): without the exclusion the gate
+    would feed on offset-induced heating and hold itself open forever. With
+    it, June converges shut within a day or two of residual decay, while a
+    real winter day still shows natural heating in the non-offset buckets.
+    Bucket grid is local-date × 2 h (bucket_idx 0-11, hour//2).
+    """
+    tz = ZoneInfo(getattr(config, "BULLETPROOF_TIMEZONE", "Europe/London"))
+    now_local = datetime.now(tz)
+    start_local = now_local - timedelta(hours=lookback_hours)
+    start_date = start_local.date().isoformat()
+    end_date = now_local.date().isoformat()
+
+    rows = get_daikin_consumption_2hourly_range(start_date, end_date)
+    if not rows:
+        # No 2-hourly split cached. The daily totals CANNOT be decontaminated
+        # (no intra-day resolution), so falling back to them while offset
+        # windows exist would count HEM-induced heating as natural demand and
+        # latch the gate open exactly when its primary signal is broken
+        # (review M1 on #541) — return 0 (gate-closed direction) instead.
+        # With no offsets in range, the daily totals are clean and usable.
+        if get_nonzero_lwt_offset_windows(start_date, end_date):
+            logger.warning(
+                "measured_space_heating: 2-hourly split missing %s..%s while "
+                "offset windows exist — cannot decontaminate daily totals; "
+                "returning 0 (demand-gate-closed direction)",
+                start_date, end_date,
+            )
+            return 0.0
+        logger.warning(
+            "measured_space_heating: 2-hourly split missing %s..%s — falling "
+            "back to whole-day daily totals (coarser than the %dh lookback)",
+            start_date, end_date, lookback_hours,
+        )
+        daily = get_daikin_consumption_daily_range(start_date, end_date)
+        return float(sum(r.get("kwh_heating") or 0.0 for r in daily))
+
+    excluded: set[tuple[str, int]] = set()
+    for s_iso, e_iso in get_nonzero_lwt_offset_windows(start_date, end_date):
+        try:
+            s = datetime.fromisoformat(s_iso.replace("Z", "+00:00")).astimezone(tz)
+            e = datetime.fromisoformat(e_iso.replace("Z", "+00:00")).astimezone(tz)
+        except (ValueError, TypeError):
+            continue
+        cur = s.replace(minute=0, second=0, microsecond=0)
+        cur = cur.replace(hour=(cur.hour // 2) * 2)
+        while cur < e:
+            excluded.add((cur.date().isoformat(), cur.hour // 2))
+            cur += timedelta(hours=2)
+
+    total = 0.0
+    for r in rows:
+        # Only buckets inside the trailing window count.
+        bucket_start = datetime.combine(
+            date.fromisoformat(str(r["date"])),
+            datetime.min.time(),
+            tzinfo=tz,
+        ) + timedelta(hours=2 * int(r["bucket_idx"]))
+        if bucket_start < start_local or bucket_start >= now_local:
+            continue
+        if (str(r["date"]), int(r["bucket_idx"])) in excluded:
+            continue
+        total += float(r.get("kwh_heating") or 0.0)
+    return total
+
+
 def get_daikin_consumption_2hourly_range(
     start_date: str, end_date: str
 ) -> list[dict[str, Any]]:
@@ -6581,14 +6700,33 @@ def compute_daikin_lwt_kw_calibration(
     # of the day — earlier versions correlated on the day, which collapsed
     # to whichever single snapshot had the latest fetch with any slot in
     # that day, dropping coverage to a handful of hours for older days.
+    # Decontamination (#540): days where HEM itself commanded a non-zero LWT
+    # offset must not train k. X_day is computed from the NATURAL curve while
+    # y_day (measured heating) includes the offset-induced draw, so offset
+    # days bias k upward — observed June 2026: k drifted 0.033 → 0.067
+    # learning from the very heating the offsets caused.
+    contaminated_days: set[str] = set()
+    try:
+        for s_iso, e_iso in get_nonzero_lwt_offset_windows(
+            start_day.isoformat(), end_day.isoformat()
+        ):
+            contaminated_days.add(s_iso[:10])
+            contaminated_days.add(e_iso[:10])  # midnight-crossing windows
+    except Exception:  # pragma: no cover — decontamination is best-effort
+        logger.exception("lwt k-calibration: offset-window lookup failed")
+
     pairs: list[tuple[float, float, str]] = []  # (X_day, y_day, date)
     skipped_no_meteo: list[str] = []
     skipped_outlier: list[str] = []
+    skipped_hem_offset: list[str] = []
     with _lock:
         conn = get_connection()
         try:
             for row in obs_rows:
                 d = str(row["date"])
+                if d in contaminated_days:
+                    skipped_hem_offset.append(d)
+                    continue
                 kwh_heating = float(row["kwh_heating"])
                 cur = conn.execute(
                     """SELECT slot_time, temp_c FROM (
@@ -6693,6 +6831,7 @@ def compute_daikin_lwt_kw_calibration(
         "raw_pairs": len(pairs),
         "skipped_no_meteo": len(skipped_no_meteo),
         "skipped_outlier_pre": len(skipped_outlier),
+        "skipped_hem_offset": len(skipped_hem_offset),
         "outliers_filtered": len(pairs) - len(anchored),
     }
 

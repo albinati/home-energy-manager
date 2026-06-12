@@ -1124,6 +1124,20 @@ class Config:
     DAIKIN_LWT_PREHEAT_MIN_BLOCK_SLOTS: int = int(
         os.getenv("DAIKIN_LWT_PREHEAT_MIN_BLOCK_SLOTS", "4")
     )
+    # Demand gate (#540 quick win, June-2026 incident): a positive LWT offset
+    # can WAKE the compressor the firmware would have left off — measured
+    # space heating went 0 → 3-8 kWh/day in June within days of enabling the
+    # pre-heat. There is no point pre-heating thermal mass the house is not
+    # draining, so offset action rows are only written when the trailing
+    # window shows real measured space-heating demand (Onecta split). When a
+    # cold snap starts, the firmware heats naturally within hours and the
+    # gate opens on the next plan. Set the kWh floor to 0 to disable.
+    DAIKIN_LWT_PREHEAT_MIN_TRAILING_HEATING_KWH: float = float(
+        os.getenv("DAIKIN_LWT_PREHEAT_MIN_TRAILING_HEATING_KWH", "0.5")
+    )
+    DAIKIN_LWT_PREHEAT_DEMAND_LOOKBACK_HOURS: int = int(
+        os.getenv("DAIKIN_LWT_PREHEAT_DEMAND_LOOKBACK_HOURS", "48")
+    )
     OPTIMIZATION_DISABLE_WEATHER_REGULATION: bool = os.getenv(
         "OPTIMIZATION_DISABLE_WEATHER_REGULATION", "false"
     ).lower() in ("true", "1", "yes")
@@ -1254,11 +1268,17 @@ class Config:
     LP_COP_SPACE_LWT_CEILING_C: float = float(os.getenv("LP_COP_SPACE_LWT_CEILING_C", "50.0"))
     DHW_TANK_LITRES: float = float(os.getenv("DHW_TANK_LITRES", "200"))
     DHW_WATER_CP: float = float(os.getenv("DHW_WATER_CP", "4186"))  # J/(kg·K)
-    # CALIBRATION REQUIRED — building envelope + thermal mass for the LP single-zone model.
-    # Tune from bills / heat-loss survey / co-heating test; defaults are placeholders.
-    BUILDING_UA_W_PER_K: float = float(os.getenv("BUILDING_UA_W_PER_K", "180"))
-    # CALIBRATION REQUIRED — effective thermal inertia (kWh/K) driving indoor temperature dynamics.
-    BUILDING_THERMAL_MASS_KWH_PER_K: float = float(os.getenv("BUILDING_THERMAL_MASS_KWH_PER_K", "8.0"))
+    # Building envelope + thermal mass for the single-zone model (estimator
+    # fallback today; the LP t_in restore in #540 will consume these too).
+    # MEASURED 2026-06-12 (docs/WINTER_THERMAL_MODEL.md §2.1): 120-day
+    # regression of fox daily load vs heating degree-days gives
+    # UA_eff ≈ 520-730 W/K (≈630 @ COP 3, R²=0.66). The old 180 W/K
+    # placeholder made the estimator ~3.5× too optimistic about heat
+    # retention. Thermal mass 12 kWh/K encodes a τ ≈ 20 h prior for UK
+    # masonry at this UA; both get replaced by the W2 thermal learner once
+    # the indoor sensors land (#540).
+    BUILDING_UA_W_PER_K: float = float(os.getenv("BUILDING_UA_W_PER_K", "600"))
+    BUILDING_THERMAL_MASS_KWH_PER_K: float = float(os.getenv("BUILDING_THERMAL_MASS_KWH_PER_K", "12.0"))
     # INDOOR_SETPOINT_C is runtime-tunable via /api/v1/settings (#52) — see @property below.
     INDOOR_COMFORT_BAND_C: float = float(os.getenv("INDOOR_COMFORT_BAND_C", "1.5"))
     RADIATOR_MAX_KW: float = float(os.getenv("RADIATOR_MAX_KW", "6.0"))
