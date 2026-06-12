@@ -171,11 +171,17 @@ def backfill_for_date(target_local_date: date) -> BackfillResult:
     # less than ~0.5 kWh/day, so a sum under that floor is the "no data yet"
     # signal — skip the upsert and let the next backfill run re-attempt.
     PUBLISHED_FLOOR_KWH = 0.5
-    if import_total is not None and import_total < PUBLISHED_FLOOR_KWH:
+    if import_total is None or import_total < PUBLISHED_FLOOR_KWH:
+        # ``None`` (empty fetch — meter comms down / nothing published) must
+        # be skipped too: writing a NULL-import row every night would advance
+        # MAX(date) and mute the staleness alarm (#533) in exactly the
+        # outage scenario it exists for.
         logger.info(
-            "consumption_backfill: date=%s import_total=%.3f kWh below "
+            "consumption_backfill: date=%s import_total=%s kWh below "
             "%.1f kWh floor — Octopus not yet published; skipping daily-meter upsert",
-            iso, import_total, PUBLISHED_FLOOR_KWH,
+            iso,
+            "none" if import_total is None else f"{import_total:.3f}",
+            PUBLISHED_FLOOR_KWH,
         )
     else:
         try:
@@ -194,7 +200,49 @@ def backfill_for_date(target_local_date: date) -> BackfillResult:
 
 
 def backfill_yesterday() -> BackfillResult:
-    """Default cron entry point — backfill the local-date that is 1 day before now."""
+    """Backfill the local-date that is 1 day before now (single-day helper)."""
     tz = ZoneInfo(getattr(config, "BULLETPROOF_TIMEZONE", "Europe/London"))
     target = (datetime.now(tz) - timedelta(days=1)).date()
     return backfill_for_date(target)
+
+
+def _day_needs_backfill(target_local_date: date, tz: ZoneInfo) -> bool:
+    """A past local day still needs a backfill attempt when either signal of
+    completed reconciliation is missing:
+
+    * no ``octopus_daily_meter`` row (the day's totals were never cached —
+      includes the ``PUBLISHED_FLOOR_KWH`` "not yet published" skip), or
+    * fewer than ``CONSUMPTION_BACKFILL_MIN_METERED_SLOTS`` execution_log
+      rows carry metered truth (a partial publish was caught mid-flight).
+    """
+    if db.get_octopus_daily_meter(target_local_date.isoformat()) is None:
+        return True
+    period_from, period_to = _local_day_window_utc(target_local_date, tz)
+    min_slots = int(getattr(config, "CONSUMPTION_BACKFILL_MIN_METERED_SLOTS", 40))
+    n = db.count_metered_execution_slots(
+        period_from.isoformat(), period_to.isoformat()
+    )
+    return n < min_slots
+
+
+def backfill_sweep(window_days: int | None = None) -> list[BackfillResult]:
+    """Cron entry point (#533) — re-attempt every unreconciled day in the
+    trailing window, newest first.
+
+    The previous yesterday-only design permanently lost any day Octopus
+    published later than ~28 h (routine — and catastrophic across the May
+    2026 meter-comms outage backlog: a month of PnL silently ran Fox-only).
+    Re-runs are idempotent, days already reconciled are skipped without an
+    API call, so the steady-state cost is the same single fetch per day.
+    """
+    if window_days is None:
+        window_days = int(getattr(config, "CONSUMPTION_BACKFILL_SWEEP_DAYS", 7))
+    tz = ZoneInfo(getattr(config, "BULLETPROOF_TIMEZONE", "Europe/London"))
+    today_local = datetime.now(tz).date()
+    results: list[BackfillResult] = []
+    for back in range(1, max(1, window_days) + 1):
+        target = today_local - timedelta(days=back)
+        if not _day_needs_backfill(target, tz):
+            continue
+        results.append(backfill_for_date(target))
+    return results

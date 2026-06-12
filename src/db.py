@@ -3923,6 +3923,51 @@ def get_octopus_daily_meter(date_str: str) -> dict[str, Any] | None:
             conn.close()
 
 
+def get_octopus_meter_last_day() -> str | None:
+    """Most recent local date with a PLAUSIBLE cached Octopus daily-meter
+    row (import ≥ 0.5 kWh), or None.
+
+    Drives the brief's meter-staleness warning (#533): when this lags today
+    by more than ``CONSUMPTION_METER_STALE_DAYS`` the PnL has silently been
+    running on Fox CT-clamp data alone. The plausibility filter matters:
+    during a meter outage Octopus can yield NULL-import rows (empty fetch)
+    or near-zero garbage rows (pre-floor legacy data, e.g. 2026-05-09..20) —
+    counting those would advance MAX(date) daily and mute the alarm in
+    exactly the failure mode it exists for. 0.5 kWh mirrors
+    PUBLISHED_FLOOR_KWH in the backfill.
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT MAX(date) AS d FROM octopus_daily_meter WHERE import_kwh >= 0.5"
+            )
+            r = cur.fetchone()
+            return r["d"] if r and r["d"] else None
+        finally:
+            conn.close()
+
+
+def count_metered_execution_slots(start_utc_iso: str, end_utc_iso: str) -> int:
+    """Count ``execution_log`` rows already rewritten to metered truth in
+    ``[start, end)``. Includes ``metered_synthetic`` (issue #199 fallback
+    rows) — both mean Octopus data landed for the slot. Used by the backfill
+    sweep (#533) to decide whether a past day still needs a re-attempt.
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT COUNT(*) AS n FROM execution_log
+                   WHERE timestamp >= ? AND timestamp < ?
+                     AND source LIKE 'metered%'""",
+                (start_utc_iso, end_utc_iso),
+            )
+            return int(cur.fetchone()["n"])
+        finally:
+            conn.close()
+
+
 def get_fox_energy_dates_for_month(year: int, month: int) -> set[str]:
     """Set of ``YYYY-MM-DD`` already cached for the given calendar month.
 

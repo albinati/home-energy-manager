@@ -675,18 +675,22 @@ def bulletproof_consumption_backfill_job() -> None:
     instead of single-sample × 0.5 h extrapolations. See
     ``src/scheduler/consumption_backfill.py`` for design details.
 
-    Fires at ``CONSUMPTION_BACKFILL_HOUR:MINUTE`` local (default 04:00) —
-    Octopus consumption data lands ~24 h after the slot, so 04:00 the
-    NEXT day reliably has yesterday's full set."""
-    from .consumption_backfill import backfill_yesterday
+    Fires at ``CONSUMPTION_BACKFILL_HOUR:MINUTE`` local (default 04:00) and
+    sweeps the trailing ``CONSUMPTION_BACKFILL_SWEEP_DAYS`` window (#533) —
+    Octopus routinely publishes later than 24 h, and the old yesterday-only
+    single attempt permanently lost those days."""
+    from .consumption_backfill import backfill_sweep
 
     try:
-        result = backfill_yesterday()
-        logger.info(
-            "consumption_backfill cron: date=%s fetched=%d updated=%d missing=%d error=%s",
-            result.target_date, result.slots_fetched, result.slots_updated,
-            result.slots_missing, result.error or "none",
-        )
+        results = backfill_sweep()
+        if not results:
+            logger.info("consumption_backfill cron: window fully reconciled, nothing to do")
+        for result in results:
+            logger.info(
+                "consumption_backfill cron: date=%s fetched=%d updated=%d missing=%d error=%s",
+                result.target_date, result.slots_fetched, result.slots_updated,
+                result.slots_missing, result.error or "none",
+            )
     except Exception as e:
         logger.warning("Consumption backfill failed (non-fatal): %s", e)
 

@@ -322,3 +322,117 @@ def test_backfill_yesterday_picks_local_yesterday(monkeypatch):
     # when the test runs, but it's bound by ±1 day from UTC today.
     today = datetime.now(UTC).date()
     assert captured[0] in (today - timedelta(days=1), today, today - timedelta(days=2))
+
+
+# ----------------------------------------------------------------------
+# backfill_sweep (#533) — trailing-window re-attempts for late publishes
+# ----------------------------------------------------------------------
+
+def _sweep_setup(monkeypatch):
+    """Patch backfill_for_date to record calls; return the captured list."""
+    from src.scheduler import consumption_backfill
+
+    captured: list[date] = []
+
+    def _fake_for_date(d: date):
+        captured.append(d)
+        return consumption_backfill.BackfillResult(
+            target_date=d.isoformat(),
+            slots_fetched=48, slots_updated=48, slots_missing=0,
+        )
+
+    monkeypatch.setattr(consumption_backfill, "backfill_for_date", _fake_for_date)
+    return captured
+
+
+def test_sweep_attempts_every_unreconciled_day(monkeypatch):
+    """No daily-meter rows at all → every day in the window is attempted."""
+    from src.scheduler import consumption_backfill
+
+    captured = _sweep_setup(monkeypatch)
+    results = consumption_backfill.backfill_sweep(window_days=5)
+    assert len(captured) == 5
+    assert len(results) == 5
+    # Newest first, contiguous trailing window.
+    assert captured == sorted(captured, reverse=True)
+
+
+def test_sweep_skips_fully_reconciled_days(monkeypatch):
+    """A day with a daily-meter row AND enough metered slots is skipped
+    without an API attempt."""
+    from src import db
+    from src.scheduler import consumption_backfill
+
+    captured = _sweep_setup(monkeypatch)
+
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo("Europe/London")
+    done_day = (datetime.now(tz) - timedelta(days=2)).date()
+    db.upsert_octopus_daily_meter(done_day.isoformat(), import_kwh=9.5, export_kwh=1.0)
+    # Seed >= MIN_METERED_SLOTS metered rows inside that local day.
+    from src.scheduler.consumption_backfill import _local_day_window_utc
+    start, _ = _local_day_window_utc(done_day, tz)
+    for i in range(41):
+        _seed_execution_row(
+            (start + timedelta(minutes=30 * i)).isoformat(), source="metered"
+        )
+
+    consumption_backfill.backfill_sweep(window_days=4)
+    assert done_day not in captured
+    assert len(captured) == 3
+
+
+def test_sweep_retries_day_with_meter_row_but_thin_slot_coverage(monkeypatch):
+    """A daily-meter row alone is not enough — partial publishes (3/48 slot
+    coverage, the observed May-2026 failure) must be re-attempted."""
+    from src import db
+    from src.scheduler import consumption_backfill
+
+    captured = _sweep_setup(monkeypatch)
+
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo("Europe/London")
+    thin_day = (datetime.now(tz) - timedelta(days=3)).date()
+    db.upsert_octopus_daily_meter(thin_day.isoformat(), import_kwh=9.5, export_kwh=None)
+    from src.scheduler.consumption_backfill import _local_day_window_utc
+    start, _ = _local_day_window_utc(thin_day, tz)
+    for i in range(3):
+        _seed_execution_row(
+            (start + timedelta(minutes=30 * i)).isoformat(), source="metered"
+        )
+
+    consumption_backfill.backfill_sweep(window_days=4)
+    assert thin_day in captured
+
+
+def test_sweep_window_size_from_config(monkeypatch):
+    from src import config as _config
+    from src.scheduler import consumption_backfill
+
+    captured = _sweep_setup(monkeypatch)
+    monkeypatch.setattr(_config.config, "CONSUMPTION_BACKFILL_SWEEP_DAYS", 2, raising=False)
+    consumption_backfill.backfill_sweep()
+    assert len(captured) == 2
+
+
+def test_empty_fetch_skips_daily_meter_upsert(monkeypatch):
+    """Octopus returning ZERO slots (meter comms down) must not write a
+    NULL-import daily row — that would advance MAX(date) nightly and mute
+    the #533 staleness alarm during the exact outage it guards against."""
+    from src import db
+    from src.scheduler import consumption_backfill
+
+    fake_roles = MagicMock(
+        import_mpan="2000000000000", import_serial="ABC123",
+        export_mpan=None, export_serial=None,
+    )
+    monkeypatch.setattr(consumption_backfill, "_octopus_credentials_ready", lambda: True)
+    fake_octopus = MagicMock()
+    fake_octopus.get_mpan_roles.return_value = fake_roles
+    fake_octopus.fetch_consumption.return_value = []
+    monkeypatch.setitem(__import__("sys").modules, "src.energy.octopus_client", fake_octopus)
+
+    result = consumption_backfill.backfill_for_date(date(2026, 6, 9))
+    assert result.slots_fetched == 0
+    assert result.error is None
+    assert db.get_octopus_daily_meter("2026-06-09") is None
