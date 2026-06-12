@@ -43,14 +43,11 @@ SIDECAR_TTL_S = 300
 FOX_DRIFT_TTL_S = 1800  # live Fox read costs quota — 48/day worst case, ~4% of budget
 
 
-def _cached(key: str, ttl: float, compute):
-    hit = _cache.get(key)
-    now = time.time()
-    if hit and now - hit[0] < ttl:
-        return hit[1]
-    out = compute()
-    _cache[key] = (now, out)
-    return out
+# Single-flight guard for the quota-costing computes: without it, N requests
+# arriving on a cold cache would EACH fire a live vendor read before the
+# first writes the cache (review L on #553) — the lock makes the "client
+# count can never amplify into vendor calls" guarantee real.
+_compute_locks: dict[str, asyncio.Lock] = {}
 
 
 async def _cached_async(key: str, ttl: float, compute):
@@ -58,9 +55,16 @@ async def _cached_async(key: str, ttl: float, compute):
     now = time.time()
     if hit and now - hit[0] < ttl:
         return hit[1]
-    out = await compute()
-    _cache[key] = (now, out)
-    return out
+    lock = _compute_locks.setdefault(key, asyncio.Lock())
+    async with lock:
+        # Re-check under the lock — a concurrent waiter may have filled it.
+        hit = _cache.get(key)
+        now = time.time()
+        if hit and now - hit[0] < ttl:
+            return hit[1]
+        out = await compute()
+        _cache[key] = (now, out)
+        return out
 
 
 # ── building blocks ──────────────────────────────────────────────────────────
@@ -165,11 +169,20 @@ async def _fox_drift_block() -> dict[str, Any]:
         try:
             from .dispatch import get_foxess_schedule_diff
             diff = await get_foxess_schedule_diff()
+            # Contract: schedule_diff returns {"diffs": {"only_live": [...],
+            # "only_recorded": [...]}} — review HIGH on #553 caught this
+            # reading a nonexistent "differences" key (count was always 0).
+            diffs = diff.get("diffs") or {}
+            n_diff = len(diffs.get("only_live") or []) + len(diffs.get("only_recorded") or [])
+            live_error = diff.get("live_error")
+            # A failed live read makes the structural comparison meaningless
+            # (empty live vs recorded reads as "drift") — report UNKNOWN
+            # rather than caching a false alarm for 30 minutes.
             return {
                 "checked_at_utc": datetime.now(UTC).isoformat(),
-                "in_sync": not bool(diff.get("any_drift")),
-                "diff_count": len(diff.get("differences") or []),
-                "error": diff.get("live_error"),
+                "in_sync": None if live_error else not bool(diff.get("any_drift")),
+                "diff_count": None if live_error else n_diff,
+                "error": live_error,
             }
         except Exception as e:  # pragma: no cover — defensive: strip must render
             logger.warning("status/alerts: fox drift check failed: %s", e)
@@ -217,16 +230,20 @@ async def status_alerts() -> dict[str, Any]:
         return hit[1]
 
     sidecar = await _sidecar_ok()
-    meter, lp, quota = await asyncio.gather(
+    # Every sqlite reader goes through to_thread — _forecast_block included:
+    # it takes db._lock, and holding that on the event loop during a large
+    # scheduler write would stall every in-flight request (review M on #553).
+    meter, lp, quota, forecast = await asyncio.gather(
         asyncio.to_thread(_meter_block),
         asyncio.to_thread(_lp_block),
         asyncio.to_thread(_quota_block),
+        asyncio.to_thread(_forecast_block, sidecar),
     )
     out = {
         "now_utc": datetime.now(UTC).isoformat(),
         "meter": meter,
         "lp": lp,
-        "forecast": _forecast_block(sidecar),
+        "forecast": forecast,
         "fox_drift": await _fox_drift_block(),
         "quota": quota,
     }
@@ -256,7 +273,8 @@ async def status_feedback() -> dict[str, Any]:
             "lwt_gate": space_heating_gate_state(),
         }
 
+    sidecar = await _sidecar_ok()
     out = await asyncio.to_thread(compute)
-    out["forecast"] = _forecast_block(await _sidecar_ok())
+    out["forecast"] = await asyncio.to_thread(_forecast_block, sidecar)
     _cache["feedback"] = (now, out)
     return out

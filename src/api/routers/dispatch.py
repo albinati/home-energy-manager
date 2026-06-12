@@ -13,6 +13,7 @@ the matching MCP tool (see :mod:`src.mcp_server`).
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import UTC, datetime
@@ -260,7 +261,11 @@ async def get_foxess_schedule_diff() -> dict[str, Any]:
     live_error: str | None = None
     try:
         fox = FoxESSClient(**config.foxess_client_kwargs())
-        live_state = fox.get_scheduler_v3()
+        # Off the event loop: this is a synchronous vendor HTTP call that can
+        # hang for seconds on a Fox timeout — and since the status alert
+        # strip started polling this on a 30-min cadence (#553), a blocking
+        # call here would stall EVERY in-flight request, not one page view.
+        live_state = await asyncio.to_thread(fox.get_scheduler_v3)
         live_groups = [_normalise_group(g) for g in live_state.groups]
     except Exception as e:
         live_error = str(e)

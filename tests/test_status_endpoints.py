@@ -128,14 +128,21 @@ def test_fox_drift_subcache_blocks_repeat_live_reads(monkeypatch):
 
     async def fake_diff():
         calls["n"] += 1
-        return {"any_drift": False, "differences": [], "live_error": None}
+        # The REAL endpoint contract (review HIGH on #553: a fake with a
+        # nonexistent "differences" key masked the wrong-key bug).
+        return {"any_drift": True,
+                "diffs": {"only_live": [{"g": 1}], "only_recorded": []},
+                "live_error": None}
 
     import src.api.routers.dispatch as dispatch_router
     monkeypatch.setattr(dispatch_router, "get_foxess_schedule_diff", fake_diff)
     import asyncio
-    asyncio.run(status_router._fox_drift_block())
+    first = asyncio.run(status_router._fox_drift_block())
     asyncio.run(status_router._fox_drift_block())
     assert calls["n"] == 1, "second call within TTL must hit the sub-cache"
+    # And the real-contract keys flow through: drift visible with a count.
+    assert first["in_sync"] is False
+    assert first["diff_count"] == 1
 
 
 # ── /status/feedback ─────────────────────────────────────────────────────────

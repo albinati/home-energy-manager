@@ -973,7 +973,7 @@ def space_heating_gate_state() -> dict[str, Any]:
         "preheat_enabled": preheat_enabled,
         "gate_enabled": floor > 0,
         "demand_present": demand_present,
-        "measured_kwh_48h": measured,
+        "measured_window_kwh": measured,
         "threshold_kwh": floor,
         "lookback_hours": lookback,
         # The one-line story the chip renders:
