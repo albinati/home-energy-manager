@@ -29,11 +29,11 @@ export function TopNav() {
         {periodRoutes.includes(path) && <PeriodNavigator variant="chrome" />}
         <span class="topnav-spacer" />
         <nav class="topnav-tabs" aria-label="Primary">
-          <Link href="/insights" class={`nav-link${path === "/insights" ? " active" : ""}`}>
+          <Link href="/insights" title="Insights" class={`nav-link${path === "/insights" ? " active" : ""}`}>
             <Icon name="trend" size={15} />Insights
           </Link>
           {isAdmin && (
-            <Link href="/report" class={`nav-link${path === "/report" ? " active" : ""}`}>
+            <Link href="/report" title="Journal" class={`nav-link${path === "/report" ? " active" : ""}`}>
               <Icon name="schedule" size={15} />Journal
             </Link>
           )}

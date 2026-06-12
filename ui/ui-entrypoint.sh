@@ -38,13 +38,22 @@ else
   BEARER_LITERAL="null"
 fi
 
+# Write null (not "unknown") when the env is absent/placeholder so the SPA's
+# buildSha() falls through to the Vite-baked __BUILD_SHA__ — a truthy
+# "unknown" here used to mask the perfectly good baked value.
+if [ -n "${BUILD_SHA:-}" ] && [ "${BUILD_SHA}" != "unknown" ]; then
+  SHA_LITERAL="\"$BUILD_SHA\""
+else
+  SHA_LITERAL="null"
+fi
+
 cat > "$CONFIG_PATH" <<EOF
 // Generated at container start by ui-entrypoint.sh — DO NOT EDIT.
 // Cached:no-store via nginx config.
 window.__HEM_CONFIG__ = {
   apiBase: "/api/v1",
   bearer:  $BEARER_LITERAL,
-  buildSha: "${BUILD_SHA:-unknown}"
+  buildSha: $SHA_LITERAL
 };
 EOF
 

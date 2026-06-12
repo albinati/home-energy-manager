@@ -95,7 +95,7 @@ export function GenerationWidget({ period, periodData, periodLoading, agile, opp
         <div class="tlw-summary">
           <span class="tlw-summary-value">{genTotal.toFixed(1)}<span class="tlw-summary-unit"> kWh solar</span></span>
           <span class="tlw-summary-value tlw-pos">{exportedTotal.toFixed(1)}<span class="tlw-summary-unit"> kWh export</span></span>
-          <span class="tlw-summary-label">esperado hoje{segRate != null ? ` · export pago a ${segRate.toFixed(1)}p/kWh (SEG flat)` : ""}</span>
+          <span class="tlw-summary-label">expected today{segRate != null ? ` · export paid at ${segRate.toFixed(1)}p/kWh (SEG flat)` : ""}</span>
         </div>
         <OppyLine o={opportunity} />
         {/* Export price line (green, right axis) mirrors Consumption's import

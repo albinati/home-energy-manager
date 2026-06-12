@@ -33,7 +33,16 @@ export function Hero({ metrics, monthly, period, periodState, periodLoading, tod
   const fixedLabel = todayCum?.fixed_tariff_label || metrics?.fixed_tariff?.label || "British Gas Fixed";
 
   // --- Money story for the SELECTED period (period-aware; today == todayCum). ---
-  const bill = period?.cost?.net_cost_pounds ?? null;
+  // On the CURRENT period, fall back to todayCum's running net bill while the
+  // (slower) period aggregate is still loading or failed — the £ headline is
+  // the first thing the eye looks for and must never sit on a skeleton when a
+  // 60s-polled number already knows the answer (mobile showed exactly that).
+  // Day-granularity ONLY: todayCum is a single day's figure — labelling it
+  // as the current week/month/year while the aggregate loads (or after it
+  // fails) would put a mislabelled £ on a money display (review M on #552).
+  const isTodayView = periodState.gran === "day" && isNow;
+  const bill = period?.cost?.net_cost_pounds
+    ?? (isTodayView ? todayCum?.realised_net_cost_gbp ?? null : null);
   const savedVsBG = period?.cost?.delta_vs_fixed_real_pounds
     ?? (isNow ? todayCum?.delta_vs_fixed_tariff_real_gbp : null) ?? null;
   const grid = period?.energy?.import_kwh ?? (isNow ? todayCum?.import_kwh : null) ?? null;
@@ -125,8 +134,14 @@ export function Hero({ metrics, monthly, period, periodState, periodLoading, tod
           {/* today-only quiet notes (kept from earlier asks) */}
           {breakevenP != null && (
             <div class="hero-note" title={`To beat ${fixedLabel}, keep the average import price ≤ ${breakevenP.toFixed(1)}p/kWh — Agile's higher standing must be won back on the unit rate.`}>
-              Target: import avg ≤ <strong>{breakevenP.toFixed(1)}p</strong>
-              {realisedAvgP != null && <> · now <strong class={beatingTarget ? "pos" : "neg"}>{realisedAvgP.toFixed(1)}p {beatingTarget ? "✓" : "✗"}</strong></>}
+              <span class="hero-note-pair">Target: import avg ≤ <strong>{breakevenP.toFixed(1)}p</strong></span>
+              {realisedAvgP != null && (
+                <span class="hero-note-pair"> · now{" "}
+                  <strong class={beatingTarget ? "pos" : "neg"}>
+                    {realisedAvgP.toFixed(1)}p <Icon name={beatingTarget ? "check" : "cross"} size={11} />
+                  </strong>
+                </span>
+              )}
             </div>
           )}
           {showEarnings && earnings != null && (

@@ -1,4 +1,5 @@
 import type { ComponentChildren } from "preact";
+import { Icon } from "./Icon";
 import { useErrorBoundary } from "preact/hooks";
 import "./widget-boundary.css";
 
@@ -16,7 +17,7 @@ export function WidgetBoundary({ label, children }: WidgetBoundaryProps) {
   if (error) {
     return (
       <div class="widget-boundary-error" role="alert">
-        <div class="widget-boundary-error-icon" aria-hidden="true">⚠</div>
+        <div class="widget-boundary-error-icon" aria-hidden="true"><Icon name="warn" size={18} /></div>
         <div class="widget-boundary-error-body">
           <div class="widget-boundary-error-title">
             {label ? `${label} couldn't render` : "This widget couldn't render"}

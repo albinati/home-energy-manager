@@ -1,4 +1,5 @@
 import type { ApplianceSuggestion, ApplianceJob, Appliance } from "../../lib/types";
+import { Icon } from "../common/Icon";
 import "./appliance.css";
 
 interface ApplianceWidgetProps {
@@ -27,8 +28,8 @@ export function ApplianceWidget({ suggestions, jobs, appliances }: ApplianceWidg
   if (enabled.length === 0) {
     return (
       <div class="appliance appliance--empty">
-        <p class="muted">Nenhum eletrodoméstico registrado.</p>
-        <p class="appliance-hint">Registre a máquina (SmartThings) para agendar lavagens nas janelas baratas.</p>
+        <p class="muted">No appliance registered.</p>
+        <p class="appliance-hint">Register the machine (SmartThings) to schedule runs into cheap windows.</p>
       </div>
     );
   }
@@ -44,14 +45,14 @@ export function ApplianceWidget({ suggestions, jobs, appliances }: ApplianceWidg
         const sug = sugByApp.get(a.id);
         return (
           <div class="appliance-row" key={a.id}>
-            <div class="appliance-name">🧺 {a.name}</div>
+            <div class="appliance-name"><Icon name="appliance" size={14} /> {a.name}</div>
 
             {job ? (
               job.status === "running" ? (
-                <div class="appliance-state appliance-state--run">Rodando agora</div>
+                <div class="appliance-state appliance-state--run">Running now</div>
               ) : (
                 <div class="appliance-state appliance-state--sched">
-                  Programado <strong>{fmtLocal(job.planned_start_utc)}–{fmtLocal(job.planned_end_utc)}</strong>
+                  Scheduled <strong>{fmtLocal(job.planned_start_utc)}–{fmtLocal(job.planned_end_utc)}</strong>
                   {job.avg_price_pence != null && (
                     <span class="appliance-price"> · {job.avg_price_pence.toFixed(1)}p/kWh</span>
                   )}
@@ -62,24 +63,24 @@ export function ApplianceWidget({ suggestions, jobs, appliances }: ApplianceWidg
                 {sug.meets_threshold === false ? (
                   // No cheap window ahead → still show the NEXT/cheapest available.
                   <>
-                    <span class="appliance-tag appliance-tag--next">próxima</span>
+                    <span class="appliance-tag appliance-tag--next">next</span>
                     <strong>{fmtLocal(sug.recommended_start_utc)}–{fmtLocal(sug.recommended_end_utc)}</strong>
-                    <span class="appliance-price"> · {sug.avg_price_pence.toFixed(1)}p (sem janela barata)</span>
-                    <div class="appliance-cta">Carregue + Smart Control até {sug.deadline_local}</div>
+                    <span class="appliance-price"> · {sug.avg_price_pence.toFixed(1)}p (no cheap window)</span>
+                    <div class="appliance-cta">Load + Smart Control by {sug.deadline_local}</div>
                   </>
                 ) : (
                   <>
                     <span class={sug.is_negative ? "appliance-tag appliance-tag--paid" : "appliance-tag appliance-tag--cheap"}>
-                      {sug.is_negative ? "janela paga" : "janela barata"}
+                      {sug.is_negative ? "paid window" : "cheap window"}
                     </span>
                     <strong>{fmtLocal(sug.recommended_start_utc)}–{fmtLocal(sug.recommended_end_utc)}</strong>
                     <span class="appliance-price"> · {sug.avg_price_pence.toFixed(1)}p</span>
-                    <div class="appliance-cta">Carregue + Smart Control até {sug.deadline_local}</div>
+                    <div class="appliance-cta">Load + Smart Control by {sug.deadline_local}</div>
                   </>
                 )}
               </div>
             ) : (
-              <div class="appliance-state appliance-state--none muted">Sem janela disponível antes do prazo</div>
+              <div class="appliance-state appliance-state--none muted">No window available before the deadline</div>
             )}
           </div>
         );

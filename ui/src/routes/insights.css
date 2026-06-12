@@ -112,3 +112,22 @@
   font-size: var(--font-2xs);
   margin-top: var(--space-2);
 }
+
+/* ── fair-compare loading skeleton ─────────────────────────────────────
+ * Self-contained (insights doesn't import home.css where .skel-text lives).
+ * Ghost rows mirror the real table's rhythm so the eventual swap is calm. */
+.skel-table { display: flex; flex-direction: column; gap: 10px; padding: var(--space-3) 0; }
+.skel-table-head { display: flex; gap: var(--space-4); margin-bottom: 2px; }
+.skel-table-row { display: flex; gap: var(--space-4); align-items: center; }
+.skel-table .skel-text {
+  display: inline-block;
+  height: 0.85em;
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--bg-card-2), var(--bg-card-3), var(--bg-card-2));
+  background-size: 200% 100%;
+  animation: insights-skel 1.3s ease-in-out infinite;
+}
+@keyframes insights-skel {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}

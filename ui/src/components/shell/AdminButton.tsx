@@ -1,8 +1,9 @@
 import { useState } from "preact/hooks";
+import { Icon } from "../common/Icon";
 import { role, adminConfigured, unlock, lock } from "../../lib/auth";
 
 /** Lock/unlock control in the top nav.
- *  Viewer → a 🔒 button that reveals an inline password field to enter the
+ *  Viewer → a lock button that reveals an inline password field to enter the
  *  admin secret. Admin → an "Admin" badge + Unlock(lock) button. */
 export function AdminButton() {
   const [open, setOpen] = useState(false);
@@ -56,7 +57,7 @@ export function AdminButton() {
         title="Unlock admin to change settings"
         onClick={() => setOpen(true)}
       >
-        <span class="admin-lock" aria-hidden="true">🔒</span> Admin
+        <span class="admin-lock" aria-hidden="true"><Icon name="lock" size={13} /></span> Admin
       </button>
     );
   }
