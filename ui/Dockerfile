@@ -38,6 +38,13 @@ RUN npm run build
 # --- Stage 2: runtime nginx -------------------------------------------------
 FROM nginx:1.27-alpine
 
+# ARG scope is per-stage: without re-declaring here the runtime stage has no
+# BUILD_SHA env, so ui-entrypoint.sh wrote buildSha:"unknown" into config.js —
+# and "unknown" being truthy also masked the baked __BUILD_SHA__ fallback.
+# (The footer showed "HEM build unknown" in prod because of this.)
+ARG BUILD_SHA=unknown
+ENV BUILD_SHA=$BUILD_SHA
+
 # gettext provides `envsubst` for the entrypoint
 RUN apk add --no-cache gettext
 

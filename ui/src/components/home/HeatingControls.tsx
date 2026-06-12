@@ -39,7 +39,7 @@ export function HeatingControls({ dev, controlMode, onChanged }: HeatingControls
             class="heating-controls-passive"
             title="Heat-pump controls are admin-only. Use the Admin button in the top bar to unlock."
           >
-            🔒 admin
+            <Icon name="lock" size={12} /> admin
           </span>
         </div>
         <p class="muted heating-controls-hint">
@@ -101,7 +101,7 @@ export function HeatingControls({ dev, controlMode, onChanged }: HeatingControls
 
       {active && (
         <div class={`hc-lockbar${unlocked ? " hc-lockbar--open" : ""}`}>
-          <span class="hc-lockbar-icon" aria-hidden="true">{unlocked ? "🔓" : "🔒"}</span>
+          <span class="hc-lockbar-icon" aria-hidden="true"><Icon name={unlocked ? "unlock" : "lock"} size={14} /></span>
           <span class="hc-lockbar-text">
             {unlocked
               ? "Manual control on — what you apply is written to the heat pump."

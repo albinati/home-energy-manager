@@ -27,6 +27,10 @@ export type IconName =
   | "appliance"
   | "chevron"
   | "check"
+  | "cross"
+  | "lock"
+  | "unlock"
+  | "warn"
   | "revert"
   | "moon";
 
@@ -146,6 +150,26 @@ const PATHS: Record<IconName, JSX.Element> = {
   ),
   chevron: <path d="M9 6 L15 12 L9 18" />,
   check: <path d="M5 12.5 L10 17 L19 7" />,
+  cross: <path d="M6 6 L18 18 M18 6 L6 18" />,
+  lock: (
+    <>
+      <rect x="5.5" y="11" width="13" height="9" rx="2" />
+      <path d="M8.5 11 V8 A3.5 3.5 0 0 1 15.5 8 V11" />
+    </>
+  ),
+  unlock: (
+    <>
+      <rect x="5.5" y="11" width="13" height="9" rx="2" />
+      <path d="M8.5 11 V8 A3.5 3.5 0 0 1 15.2 7.2" />
+    </>
+  ),
+  warn: (
+    <>
+      <path d="M12 4 L21 19.5 H3 Z" stroke-linejoin="round" />
+      <path d="M12 10 V14.5" />
+      <circle cx="12" cy="17" r="0.9" fill="currentColor" stroke="none" />
+    </>
+  ),
   revert: (
     <>
       <path d="M5 12 A7 7 0 1 1 8 17.5" />

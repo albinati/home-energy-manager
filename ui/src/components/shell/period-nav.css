@@ -106,3 +106,16 @@
 
 @media (max-width: 960px) { .pnav--chrome { display: none; } }
 @media (min-width: 961px) { .pnav--page { display: none; } }
+
+/* Phone: the page variant must cost ONE compact row, not two — together
+ * with the single-row topnav this keeps total chrome under ~96px so the
+ * hero £ is inside the first fold. */
+@media (max-width: 640px) {
+  .pnav--page {
+    flex-wrap: nowrap;
+    margin-bottom: var(--space-2);
+  }
+  .pnav--page .pnav-label { min-width: 7ch; font-size: var(--font-sm); }
+  .pnav--page .pnav-gran { padding: 5px 9px; font-size: var(--font-xs); }
+  .pnav--page .pnav-arrow { width: 28px; height: 28px; font-size: 16px; }
+}

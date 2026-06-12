@@ -3,7 +3,6 @@ import { useFetch } from "../lib/poll";
 import { getFairCompare } from "../lib/endpoints";
 import { usePeriod, periodLabel } from "../lib/period";
 import { PeriodNavigator } from "../components/shell/PeriodNavigator";
-import { Spinner } from "../components/common/Spinner";
 import { Pill } from "../components/common/Pill";
 import { gbp, gbpSigned, kwh } from "../lib/format";
 import { makeChart, baseOption, chartTheme, barGradient, withAlpha, type EChartsType } from "../lib/charts";
@@ -40,7 +39,26 @@ export default function Insights() {
 
       <PeriodNavigator variant="page" />
 
-      {cmp.loading && !data && <Spinner label="Comparing tariffs…" />}
+      {/* The first compare for a period is a heavy server-side replay (can
+          take seconds before the TTL cache warms). A ghost table reads as
+          progress; a lone spinner reads as "stuck". */}
+      {cmp.loading && !data && (
+        <div class="skel-table" aria-label="Comparing tariffs" role="status">
+          <div class="skel-table-head">
+            <span class="skel-text" style={{ width: "9rem" }} />
+            <span class="skel-text" style={{ width: "5rem" }} />
+          </div>
+          {Array.from({ length: 8 }, (_, i) => (
+            <div class="skel-table-row" key={i}>
+              <span class="skel-text" style={{ width: `${11 - (i % 3)}rem` }} />
+              <span class="skel-text" style={{ width: "3.5rem" }} />
+              <span class="skel-text" style={{ width: "3rem" }} />
+              <span class="skel-text" style={{ width: "4rem" }} />
+            </div>
+          ))}
+          <p class="muted small">Comparing tariffs on your metered usage…</p>
+        </div>
+      )}
       {cmp.error && <p class="insights-error">Couldn't load the comparison: {cmp.error.message}</p>}
 
       {data && rows.length === 0 && (

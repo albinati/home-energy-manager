@@ -10,6 +10,11 @@ import {
   BarChart,
   PieChart,
   EffectScatterChart,
+  // HeatmapChart powers the Insights load-pattern card. It MUST be
+  // registered here: the tree-shaken echarts/core build silently renders
+  // nothing for unregistered series types (the heatmap shipped empty in
+  // prod for weeks because this import was missing — no console error).
+  HeatmapChart,
 } from "echarts/charts";
 import {
   GridComponent,
@@ -20,6 +25,8 @@ import {
   MarkLineComponent,
   TitleComponent,
   DataZoomComponent,
+  // Required by HeatmapChart (colour scale). Same silent-failure trap.
+  VisualMapComponent,
 } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
 import type { EChartsType } from "echarts/core";
@@ -29,6 +36,7 @@ echarts.use([
   BarChart,
   PieChart,
   EffectScatterChart,
+  HeatmapChart,
   GridComponent,
   TooltipComponent,
   LegendComponent,
@@ -37,6 +45,7 @@ echarts.use([
   MarkLineComponent,
   TitleComponent,
   DataZoomComponent,
+  VisualMapComponent,
   CanvasRenderer,
 ]);
 
@@ -162,6 +171,27 @@ export function baseOption(): Record<string, unknown> {
 
 export function makeChart(el: HTMLDivElement): EChartsType {
   const chart = echarts.init(el, undefined, { renderer: "canvas" });
+  // Central resize handling: ECharts snapshots the container size at init
+  // and never re-measures. A container that is 0-width at init (mobile
+  // stacked layout, lazy/Suspense mount, display:none tab) stays BLANK
+  // forever — the exact prod bug on the Live-heating card at 375px.
+  // Observe the container (not the canvas), debounce via rAF so layout
+  // thrash can't loop, and tear down with the chart.
+  let raf = 0;
+  const ro = new ResizeObserver(() => {
+    cancelAnimationFrame(raf);
+    raf = requestAnimationFrame(() => {
+      if (!chart.isDisposed()) chart.resize();
+    });
+  });
+  ro.observe(el);
+  const origDispose = chart.dispose.bind(chart);
+  // Wrap dispose so every existing call site cleans the observer for free.
+  (chart as unknown as { dispose: () => void }).dispose = () => {
+    ro.disconnect();
+    cancelAnimationFrame(raf);
+    origDispose();
+  };
   return chart;
 }
 

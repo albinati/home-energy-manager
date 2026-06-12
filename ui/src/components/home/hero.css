@@ -62,6 +62,10 @@
 .standing-note { margin-top: var(--space-3); font-size: var(--font-xs); color: var(--text-mute); display: flex; align-items: center; gap: var(--space-2); }
 .hero-note { margin-top: var(--space-2); font-size: var(--font-xs); color: var(--text-dim); font-variant-numeric: tabular-nums; }
 .hero-note strong { font-variant-numeric: tabular-nums; }
+/* Value+verdict pairs never split across lines (the "now 5.9p ✓" orphan on
+ * 375px); the inline check/cross icon rides the text baseline. */
+.hero-note-pair { white-space: nowrap; }
+.hero-note-pair svg { display: inline-block; vertical-align: -1px; }
 
 /* ── lifetime strip ─────────────────────────────────────────────────── */
 .lifetime { display: flex; gap: var(--space-5); flex-wrap: wrap; padding-top: var(--space-4); margin-top: var(--space-4); border-top: 1px dashed var(--border); position: relative; }

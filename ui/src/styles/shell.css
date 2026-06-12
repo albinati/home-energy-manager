@@ -186,21 +186,30 @@
   .topnav .brand-name { display: none; }
 }
 
-/* Mobile-ish */
+/* Mobile-ish — ONE compact row, never a stack. The previous column layout
+ * burned ~170px of a 375px-wide phone's first fold on chrome alone (brand
+ * row + tabs row + admin row + theme row) before any data was visible; on
+ * the PWA that's the whole reaction-time budget. Brand keeps only the mark;
+ * nav links keep only their icons (label collapsed via font-size:0 — the
+ * svg has its own size, padding preserves the ≥40px touch target, and
+ * aria-label/title still announce the route). */
 @media (max-width: 640px) {
   .topnav-inner {
-    flex-direction: column;
-    align-items: flex-start;
+    padding: var(--space-2) var(--space-3);
     gap: var(--space-2);
   }
-  .topnav-spacer { display: none; }
+  .topnav .brand-name { display: none; }
+  .topnav-spacer { flex: 1; }
   .topnav-tabs {
-    margin-left: 0;
-    width: 100%;
-    overflow-x: auto;
-    flex-wrap: nowrap;
+    margin-right: 0;
+    gap: 2px;
   }
   .nav-link {
-    white-space: nowrap;
+    font-size: 0;
+    gap: 0;
+    padding: 10px;
+    min-width: 40px;
+    min-height: 40px;
+    justify-content: center;
   }
 }

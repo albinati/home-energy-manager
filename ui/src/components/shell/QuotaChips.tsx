@@ -1,4 +1,5 @@
 import { useFetch } from "../../lib/poll";
+import { Icon } from "../common/Icon";
 import { getDaikinQuota, getFoxQuota } from "../../lib/endpoints";
 import type { ApiQuotaResponse } from "../../lib/types";
 import "./quota-chips.css";
@@ -46,7 +47,7 @@ function QuotaChip({ label, data }: { label: string; data: ApiQuotaResponse | nu
     <span class={`quota-chip quota-chip--${tone}`} title={tooltipParts.join(" · ")}>
       <span class="quota-chip-label">{label}</span>
       <span class="quota-chip-value">{used}/{budget}</span>
-      {failed > 0 && <span class="quota-chip-fail" title={`${failed} failed calls in last 24h`}>⚠{failed}</span>}
+      {failed > 0 && <span class="quota-chip-fail" title={`${failed} failed calls in last 24h`}><Icon name="warn" size={11} />{failed}</span>}
     </span>
   );
 }
