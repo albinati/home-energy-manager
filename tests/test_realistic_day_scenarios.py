@@ -274,8 +274,11 @@ def test_scenario_vacation_no_dhw_but_lp_still_optimises(monkeypatch):
 
 
 def test_scenario_guests_mode_forecasts_morning_reheat(monkeypatch):
-    """Guests preset includes morning shower window (07-09 BST). The
-    forecast should attribute ~0.5 kWh/slot to those windows."""
+    """Guests preset includes morning shower window (07-09 BST). Recalibrated
+    2026-06 (#534): measured Onecta 2-hourly splits show the firmware's
+    hysteresis draws only ~0.12 kWh/slot during shower windows (the heat is
+    repaid at the next warmup), so the window must still out-weigh adjacent
+    maintenance slots but no longer carries ~0.5 kWh/slot."""
     monkeypatch.setattr(config, "OPTIMIZATION_PRESET", "guests", raising=False)
     # Slots covering 06:00 - 11:00 BST (= 05:00-10:00 UTC in summer)
     base_local = datetime(2026, 6, 1, 6, 0, tzinfo=TZ_LOCAL)
@@ -285,8 +288,8 @@ def test_scenario_guests_mode_forecasts_morning_reheat(monkeypatch):
     # Slot 2-5 = 07:00-09:00 BST → shower window
     shower_load = sum(e_dhw[2:6])
     other_load = sum(e_dhw[0:2]) + sum(e_dhw[6:])
-    assert shower_load > 1.0, (
-        f"Guests morning shower window should attribute ≥1 kWh; got {shower_load:.2f}"
+    assert shower_load == pytest.approx(4 * 0.12, abs=0.01), (
+        f"Guests morning shower window should attribute ~0.48 kWh; got {shower_load:.2f}"
     )
     assert shower_load > other_load, (
         f"Shower window should dominate; shower={shower_load:.2f} other={other_load:.2f}"

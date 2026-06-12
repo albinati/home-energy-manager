@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import json
 import logging
+import statistics
+import time as _time
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -363,6 +365,121 @@ def generate_daily_tank_schedule(
     return rows
 
 
+# --- Per-slot electric draws (kWh / 30 min), schedule phases ---------------
+# Recalibrated 2026-06 (#534) against measured Onecta 2-hourly splits: almost
+# all DHW electric lands in the 12:00-16:00 warmup window (~1.4-1.8 kWh);
+# evening shower slots only draw ~0.35-0.45 kWh TOTAL because the firmware's
+# hysteresis lets the tank ride through the draws and repays the heat at the
+# NEXT day's warmup. The old shape (0.50/slot in shower windows) reserved
+# ~2 kWh of battery for a phantom evening load and under-credited the real
+# PV-window load.
+_WARMUP_TRANSITION_KWH = 0.45   # × 2 slots (13:00 + 13:30) = deferred reheat + lift
+_WARMUP_MAINTENANCE_KWH = 0.06
+_SHOWER_REHEAT_KWH = 0.12       # per slot during shower window
+_SETBACK_MAINTENANCE_KWH = 0.03
+_BOOST_KWH = 0.80               # physics-bound (max heating), NOT auto-scaled
+_VACATION_KWH = 0.00            # firmware-only; legionella cycle excluded from LP horizon
+
+# Shower windows (local hours, slot-start basis). 20:00→22:00 covers the
+# household's "after-dinner shower" pattern; guests adds 07:00→09:00.
+_EVENING_SHOWER_START_H = 20
+_EVENING_SHOWER_END_H = 22  # exclusive
+_GUESTS_MORNING_SHOWER_START_H = 7
+_GUESTS_MORNING_SHOWER_END_H = 9  # exclusive
+
+# 6 h TTL cache for the auto-scale factor — one cheap DB read per LP-solve
+# burst instead of per call. Keyed by (mode, window_days).
+_autoscale_cache: dict[tuple[str, int, str], tuple[float, float]] = {}
+_AUTOSCALE_TTL_SECONDS = 6 * 3600
+
+
+def _nominal_daily_total_kwh(mode: str) -> float:
+    """Un-scaled kWh/day the schedule constants imply for ``mode``.
+
+    Walks a generic 48-slot local day through the same phase rules as
+    :func:`forecast_dhw_load_per_slot` (no boost, no warm credit) so the
+    auto-scale denominator can never drift from the forecast shape.
+    """
+    if mode == "vacation":
+        return 0.0
+    warmup_hour = int(getattr(config, "DHW_WARMUP_START_HOUR_LOCAL", 13))
+    setback_hour = int(getattr(config, "DHW_SETBACK_START_HOUR_LOCAL", 22))
+    total = 0.0
+    for half_slot in range(48):
+        h = half_slot // 2
+        if _EVENING_SHOWER_START_H <= h < _EVENING_SHOWER_END_H or (
+            mode == "guests"
+            and _GUESTS_MORNING_SHOWER_START_H <= h < _GUESTS_MORNING_SHOWER_END_H
+        ):
+            total += _SHOWER_REHEAT_KWH
+        elif mode == "guests":
+            total += _WARMUP_MAINTENANCE_KWH
+        elif warmup_hour <= h < setback_hour:
+            # Both half-slots of the warmup hour are transition slots —
+            # mirrors _phase_for_slot.
+            total += (
+                _WARMUP_TRANSITION_KWH if h == warmup_hour else _WARMUP_MAINTENANCE_KWH
+            )
+        else:
+            total += _SETBACK_MAINTENANCE_KWH
+    return total
+
+
+def _dhw_autoscale_factor(mode: str) -> float:
+    """Trailing measured-vs-nominal scale for the schedule constants (#534).
+
+    ``clamp(median(daikin_consumption_daily.kwh_dhw over the window) /
+    nominal_mode_total)``. Median is robust to negative-boost outlier days
+    (e.g. 7 kWh on 2026-06-07) and to Onecta's integer-kWh rounding. Returns
+    1.0 when disabled, in vacation mode, or with fewer than
+    ``DHW_FORECAST_AUTOSCALE_MIN_DAYS`` measured days.
+    """
+    if mode == "vacation":
+        return 1.0
+    if not bool(getattr(config, "DHW_FORECAST_AUTOSCALE_ENABLED", True)):
+        return 1.0
+    window_days = int(getattr(config, "DHW_FORECAST_AUTOSCALE_WINDOW_DAYS", 14))
+    # DB_PATH in the key: tests swap databases under one process, and prod
+    # never changes it — costs nothing, prevents cross-DB cache bleed.
+    key = (mode, window_days, str(getattr(config, "DB_PATH", "")))
+    cached = _autoscale_cache.get(key)
+    now = _time.time()
+    if cached is not None and now - cached[1] < _AUTOSCALE_TTL_SECONDS:
+        return cached[0]
+
+    factor = 1.0
+    try:
+        tz = _tz_local()
+        end = (datetime.now(tz) - timedelta(days=1)).date()
+        start = end - timedelta(days=window_days - 1)
+        rows = db.get_daikin_consumption_daily_range(start.isoformat(), end.isoformat())
+        vals = [float(r["kwh_dhw"]) for r in rows if r.get("kwh_dhw") is not None]
+        min_days = int(getattr(config, "DHW_FORECAST_AUTOSCALE_MIN_DAYS", 5))
+        nominal = _nominal_daily_total_kwh(mode)
+        if len(vals) >= min_days and nominal > 0:
+            lo = float(getattr(config, "DHW_FORECAST_AUTOSCALE_MIN", 0.5))
+            hi = float(getattr(config, "DHW_FORECAST_AUTOSCALE_MAX", 1.6))
+            factor = max(lo, min(hi, statistics.median(vals) / nominal))
+            # The numerator is mode-blind (measured days don't say which mode
+            # they ran in) while the denominator is mode-aware. Right after a
+            # normal→guests flip the median still reflects normal-mode days
+            # and would scale the (higher) guests nominal DOWN — under-pinning
+            # DHW exactly when the house is fullest. Guests is comfort-
+            # critical: never scale it below the unscaled constants.
+            if mode == "guests":
+                factor = max(factor, 1.0)
+            logger.debug(
+                "dhw_policy autoscale: mode=%s median=%.2f nominal=%.2f factor=%.3f (n=%d)",
+                mode, statistics.median(vals), nominal, factor, len(vals),
+            )
+    except Exception as exc:  # pragma: no cover - defensive: forecast must not fail
+        logger.debug("dhw_policy autoscale failed, using 1.0: %s", exc)
+        factor = 1.0
+
+    _autoscale_cache[key] = (factor, now)
+    return factor
+
+
 def forecast_dhw_load_per_slot(
     slot_starts_utc: list[datetime],
     *,
@@ -385,24 +502,25 @@ def forecast_dhw_load_per_slot(
     dhw_policy schedule. Used by the LP solver to pin its tank/e_dhw
     decision variables instead of letting it drift from reality.
 
-    Energy model (typical 200 L tank, COP ~3.0, ~50 W standing loss):
-        * Warmup transition (first slot of warmup window): heat from
-          SETBACK→NORMAL = ~0.4 kWh electric (~1.5 kWh thermal)
-        * Steady-state warmup at NORMAL, no draws: ~0.04 kWh electric
-          per slot (standing-loss replacement only)
-        * Evening shower window slots: ~0.5 kWh electric per slot —
-          tank reheats the heat lost to taps. ~4 showers × 35 L × ΔT37 °C
-          ≈ 6 kWh thermal ≈ 2 kWh electric over ~4 evening slots.
-        * Guests-mode morning shower window: same ~0.5 kWh per slot.
-        * Setback at 37 °C, no draws: ~0.02 kWh electric per slot
-          (smaller standing loss than at 45 °C).
-        * Negative-price boost slot: ~0.8 kWh electric (max heating)
+    Energy model (typical 200 L tank, COP ~3.0; recalibrated 2026-06 #534
+    against measured Onecta 2-hourly splits):
+        * Warmup transition (both half-slots of the warmup hour): the
+          SETBACK→NORMAL lift PLUS the previous evening's deferred shower
+          reheat — measured 12:00-16:00 local carries ~1.4-1.8 kWh, the
+          dominant load. 2 × 0.45 kWh electric.
+        * Steady-state warmup at NORMAL, no draws: ~0.06 kWh/slot.
+        * Shower window slots: ~0.12 kWh/slot — firmware hysteresis lets
+          the tank ride through the draws (measured 20:00-22:00 total is
+          only ~0.35-0.45 kWh); the heat is repaid at the next warmup.
+        * Setback at 37 °C: ~0.03 kWh/slot.
+        * Negative-price boost slot: ~0.8 kWh electric (max heating).
         * Vacation: 0 kWh (firmware-only; legionella out of horizon).
 
-    Daily total under normal mode: ~3.7-4 kWh, matching prod Daikin
-    telemetry. Without the shower term we under-forecast by ~2 kWh
-    (LP would think PV is 2 kWh more available than reality → over-
-    aggressive battery arbitrage).
+    Daily total: ~3.0 kWh normal / ~3.4 guests before auto-scale. The
+    schedule constants are further multiplied by the trailing
+    measured/nominal auto-scale (:func:`_dhw_autoscale_factor`) so the
+    pinned forecast tracks seasonal drift (May 2026 measured ~3.0,
+    June ~2.0-2.4) instead of going stale.
     """
     if mode is None:
         mode = (config.OPTIMIZATION_PRESET or "normal").strip().lower()
@@ -418,22 +536,22 @@ def forecast_dhw_load_per_slot(
     setback_c = float(getattr(config, "DHW_TEMP_SETBACK_C", 37.0))
     boost_c = float(getattr(config, "DHW_NEGATIVE_PRICE_BOOST_C", 60.0))
 
-    # Per-slot electric draws (kWh / 30 min). Calibrated to ~3.7-4 kWh
-    # daily total which matches prod Daikin telemetry.
-    WARMUP_TRANSITION_KWH = 0.40
-    WARMUP_MAINTENANCE_KWH = 0.04
-    SHOWER_REHEAT_KWH = 0.50            # per slot during shower window
-    SETBACK_MAINTENANCE_KWH = 0.02
-    BOOST_KWH = 0.80
-    VACATION_KWH = 0.00  # firmware-only; legionella cycle excluded from LP horizon
+    # Schedule constants × trailing measured/nominal auto-scale (#534). The
+    # scaled values feed every phase INCLUDING the pre-cool/boost caps below
+    # so the whole trajectory stays internally consistent. BOOST stays
+    # physics-bound (max heating) — see _BOOST_KWH.
+    _scale = _dhw_autoscale_factor(mode)
+    WARMUP_TRANSITION_KWH = _WARMUP_TRANSITION_KWH * _scale
+    WARMUP_MAINTENANCE_KWH = _WARMUP_MAINTENANCE_KWH * _scale
+    SHOWER_REHEAT_KWH = _SHOWER_REHEAT_KWH * _scale
+    SETBACK_MAINTENANCE_KWH = _SETBACK_MAINTENANCE_KWH * _scale
+    BOOST_KWH = _BOOST_KWH
+    VACATION_KWH = _VACATION_KWH
 
-    # Typical evening shower window (local hours, slot-start basis).
-    # 20:00→22:00 BST covers the household's "after-dinner shower" pattern.
-    # Guests mode adds a morning window 07:00→08:30.
-    EVENING_SHOWER_START_H = 20
-    EVENING_SHOWER_END_H = 22  # exclusive
-    GUESTS_MORNING_SHOWER_START_H = 7
-    GUESTS_MORNING_SHOWER_END_H = 9  # exclusive
+    EVENING_SHOWER_START_H = _EVENING_SHOWER_START_H
+    EVENING_SHOWER_END_H = _EVENING_SHOWER_END_H
+    GUESTS_MORNING_SHOWER_START_H = _GUESTS_MORNING_SHOWER_START_H
+    GUESTS_MORNING_SHOWER_END_H = _GUESTS_MORNING_SHOWER_END_H
 
     def _phase_for_slot(slot_utc: datetime) -> str:
         """Return one of: 'vacation', 'warmup_transition', 'shower_reheat',
@@ -457,7 +575,9 @@ def forecast_dhw_load_per_slot(
 
         # Normal mode: warmup window [warmup_hour, setback_hour), setback otherwise.
         if warmup_hour <= h < setback_hour:
-            if h == warmup_hour and slot_local.minute < 30:
+            # Both half-slots of the warmup hour are transition (#534): the
+            # measured lift + deferred-reheat load spans ~1 h, not 30 min.
+            if h == warmup_hour:
                 return "warmup_transition"
             return "warmup_maintenance"
         return "setback"
@@ -477,6 +597,15 @@ def forecast_dhw_load_per_slot(
             e_dhw.append(WARMUP_MAINTENANCE_KWH)
         else:  # setback
             e_dhw.append(SETBACK_MAINTENANCE_KWH)
+
+    # The LP pins ``e_dhw[i] == forecast[i]`` as a hard equality against a
+    # variable whose upBound is the heater's per-slot electric capacity
+    # (``DAIKIN_MAX_HP_KW × 0.5``). A scaled-up transition slot
+    # (0.45 × autoscale-max 1.6 = 0.72 kWh) must never exceed that bound or
+    # every solve goes Infeasible on small-heater configs. The boost ramp
+    # below clamps itself; the plain schedule values are clamped here.
+    _max_hp_kwh = max(0.05, float(getattr(config, "DAIKIN_MAX_HP_KW", 2.0)) * 0.5)
+    e_dhw = [min(v, _max_hp_kwh) for v in e_dhw]
 
     # ----- Initial-tank "warm credit" adjustment ---------------------------
     # If the tank arrives at the LP horizon ABOVE its scheduled target, the
