@@ -28,7 +28,10 @@ export function SystemHealthCard() {
   const disp = sc.dispatch_accuracy;
   const econ = sc.economic_value;
   const fc = sc.forecast_accuracy;
-  const hasAnything = !!(sc.grade || disp?.n_slots_with_plan || econ?.lp_realised_cost_p != null);
+  // The backend grades a data-less day "N/A" (a string, never null) — treat
+  // it as no-grade so an empty day renders nothing instead of a hollow card.
+  const grade = sc.grade && sc.grade !== "N/A" ? sc.grade : null;
+  const hasAnything = !!(grade || disp?.n_slots_with_plan || econ?.lp_realised_cost_p != null);
   if (!hasAnything) return null;
 
   const avoided = econ?.lp_avoided_cost_p;
@@ -38,7 +41,7 @@ export function SystemHealthCard() {
       <header class="syshealth-head">
         <h2>System health</h2>
         <span class="muted">LP scorecard · {sc.day}</span>
-        {sc.grade && <span class={`syshealth-grade syshealth-grade--${sc.grade.toLowerCase()}`}>{sc.grade}</span>}
+        {grade && <span class={`syshealth-grade syshealth-grade--${grade.toLowerCase()}`}>{grade}</span>}
       </header>
 
       <div class="syshealth-grid">

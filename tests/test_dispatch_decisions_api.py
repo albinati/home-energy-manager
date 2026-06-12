@@ -247,8 +247,10 @@ def test_schedule_diff_fingerprint_ignores_vendor_default_echo(monkeypatch):
     monkeypatch.setattr(dispatch_mod, "FoxESSClient", _FakeFox)
     # foxess_client_kwargs() validates FOXESS_DEVICE_SN and raises in the test
     # env, which would short-circuit into the live_error path before the fake
-    # client is ever constructed.
-    monkeypatch.setattr(dispatch_mod.config, "foxess_client_kwargs", lambda: {})
+    # client is ever constructed. Patch the CLASS, not the instance — undoing
+    # an instance patch writes the bound method into the singleton's __dict__,
+    # permanently shadowing any later class-level patch.
+    monkeypatch.setattr(type(dispatch_mod.config), "foxess_client_kwargs", lambda self: {})
     monkeypatch.setattr(app_config, "HEM_UI_AUTH_REQUIRED", False, raising=False)
     from src.api.main import app
     client = TestClient(app)

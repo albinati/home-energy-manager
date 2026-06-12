@@ -130,7 +130,7 @@ export function AlertStrip() {
   if (chips.length === 0) return null;
 
   return (
-    <div class="alert-strip" role="alert" aria-live="polite">
+    <div class="alert-strip" role="status">
       {chips.map((c) => (
         <span key={c.key} class={`alert-chip alert-chip--${c.tone}`} title={c.detail}>
           <Icon name="warn" size={12} />

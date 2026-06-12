@@ -141,9 +141,12 @@ export default function Landing() {
 
   // Publish the cockpit's per-source freshness map so the shell-level
   // AlertStrip can flag stale live data WITHOUT its own /cockpit/now poll.
+  // Cleared on unmount — off this route the poll stops, and a frozen map
+  // would let a "stale data" chip linger past its 2-min relevance window.
   useEffect(() => {
     publishFreshness(now.data?.freshness);
   }, [now.data]);
+  useEffect(() => () => publishFreshness(null), []);
 
   if (now.loading && !now.data) {
     return <div class="home"><Spinner label="Loading dashboard…" /></div>;
