@@ -277,14 +277,16 @@ DHW_TEMP_PV_ABUNDANCE_TARGET_C=45               # tank target during solar_charg
                                                  # after Daikin telemetry showed overnight DHW reheat = 0 even at 45.
 
 # --- Forecast night bias (issue #324, minimal) ---
-FORECAST_NIGHT_TEMP_BIAS_C=-3.0                 # subtract this from Open Meteo's `temperature_c` when the LP
-                                                 # reads forecast slots inside the configured night window. The
-                                                 # ~10 km grid Open Meteo runs on tends to under-estimate how cold
-                                                 # the W4 1DZ microclimate gets overnight (observed 2026-05-12:
-                                                 # forecast 8 °C vs Daikin sensor 5 °C). Daikin's weather curve
-                                                 # still reacts to its OWN sensor — this is a planning-side
-                                                 # correction so the LP budgets heat-pump electric demand
-                                                 # realistically. Zero = disable.
+FORECAST_NIGHT_TEMP_BIAS_C=0                    # subtract this from Open Meteo's `temperature_c` when the LP
+                                                 # reads forecast slots inside the configured night window.
+                                                 # SET TO 0 ON 2026-06-12: the learned per-hour microclimate
+                                                 # offset (get_micro_climate_offset_by_hour_c, fed by
+                                                 # forecast_skill_log) already corrects sensor-vs-forecast gaps
+                                                 # adaptively, so the static -3 double-corrected — skill data
+                                                 # showed the raw night residual was only +0.2..+0.7 °C by June
+                                                 # (the -3 was calibrated on one cold 2026-05-12 observation).
+                                                 # Keep at 0 unless the learned offset is disabled; the LP would
+                                                 # otherwise budget nights ~3 °C colder than reality all winter.
 FORECAST_NIGHT_START_HOUR_UTC=21                # bias active from (inclusive)
 FORECAST_NIGHT_END_HOUR_UTC=6                   # bias active until (exclusive); wraps midnight when start > end
 
