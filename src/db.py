@@ -3727,6 +3727,12 @@ def upsert_daikin_consumption_daily(
 
     ``source`` is the provenance flag: ``onecta`` | ``telemetry_integral`` |
     ``unknown``. Lets the cockpit show "from cloud" vs "estimated locally".
+
+    NULL never clobbers a known split: ``sync_daikin_daily`` (the on-demand
+    insights path) upserts with ``kwh_dhw=None``/``cop_daily=None``, which
+    used to overwrite the nightly rollup's real heating/DHW split — silently
+    starving the DHW forecast auto-scale (#534) of its input. COALESCE keeps
+    the best-known value per column.
     """
     now = datetime.now(UTC).isoformat()
     with _lock:
@@ -3737,10 +3743,10 @@ def upsert_daikin_consumption_daily(
                    (date, kwh_total, kwh_heating, kwh_dhw, cop_daily, source, fetched_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(date) DO UPDATE SET
-                     kwh_total=excluded.kwh_total,
-                     kwh_heating=excluded.kwh_heating,
-                     kwh_dhw=excluded.kwh_dhw,
-                     cop_daily=excluded.cop_daily,
+                     kwh_total=COALESCE(excluded.kwh_total, kwh_total),
+                     kwh_heating=COALESCE(excluded.kwh_heating, kwh_heating),
+                     kwh_dhw=COALESCE(excluded.kwh_dhw, kwh_dhw),
+                     cop_daily=COALESCE(excluded.cop_daily, cop_daily),
                      source=excluded.source,
                      fetched_at=excluded.fetched_at""",
                 (date, kwh_total, kwh_heating, kwh_dhw, cop_daily, source, now),

@@ -460,6 +460,14 @@ def _dhw_autoscale_factor(mode: str) -> float:
             lo = float(getattr(config, "DHW_FORECAST_AUTOSCALE_MIN", 0.5))
             hi = float(getattr(config, "DHW_FORECAST_AUTOSCALE_MAX", 1.6))
             factor = max(lo, min(hi, statistics.median(vals) / nominal))
+            # The numerator is mode-blind (measured days don't say which mode
+            # they ran in) while the denominator is mode-aware. Right after a
+            # normal→guests flip the median still reflects normal-mode days
+            # and would scale the (higher) guests nominal DOWN — under-pinning
+            # DHW exactly when the house is fullest. Guests is comfort-
+            # critical: never scale it below the unscaled constants.
+            if mode == "guests":
+                factor = max(factor, 1.0)
             logger.debug(
                 "dhw_policy autoscale: mode=%s median=%.2f nominal=%.2f factor=%.3f (n=%d)",
                 mode, statistics.median(vals), nominal, factor, len(vals),
@@ -589,6 +597,15 @@ def forecast_dhw_load_per_slot(
             e_dhw.append(WARMUP_MAINTENANCE_KWH)
         else:  # setback
             e_dhw.append(SETBACK_MAINTENANCE_KWH)
+
+    # The LP pins ``e_dhw[i] == forecast[i]`` as a hard equality against a
+    # variable whose upBound is the heater's per-slot electric capacity
+    # (``DAIKIN_MAX_HP_KW × 0.5``). A scaled-up transition slot
+    # (0.45 × autoscale-max 1.6 = 0.72 kWh) must never exceed that bound or
+    # every solve goes Infeasible on small-heater configs. The boost ramp
+    # below clamps itself; the plain schedule values are clamped here.
+    _max_hp_kwh = max(0.05, float(getattr(config, "DAIKIN_MAX_HP_KW", 2.0)) * 0.5)
+    e_dhw = [min(v, _max_hp_kwh) for v in e_dhw]
 
     # ----- Initial-tank "warm credit" adjustment ---------------------------
     # If the tank arrives at the LP horizon ABOVE its scheduled target, the

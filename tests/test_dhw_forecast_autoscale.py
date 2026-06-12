@@ -145,3 +145,50 @@ def test_nominal_matches_forecast_shape():
         assert sum(e_dhw) == pytest.approx(
             dhw_policy._nominal_daily_total_kwh(mode), abs=1e-6
         )
+
+
+# ---------------------------------------------------------------------------
+# Review fixes (#536)
+# ---------------------------------------------------------------------------
+
+def test_guests_factor_never_scales_below_one():
+    """Mode-blind numerator: right after a normal→guests flip the median
+    still reflects normal-mode days. Guests is comfort-critical — the
+    factor floors at 1.0 there (review MED-1)."""
+    from src import dhw_policy
+    _seed_measured_dhw([2.0] * 10)  # normal-mode history, median 2.0
+    assert dhw_policy._dhw_autoscale_factor("guests") == 1.0
+    dhw_policy._autoscale_cache.clear()
+    # Scaling UP still allowed in guests.
+    _seed_measured_dhw([6.0] * 10)
+    assert dhw_policy._dhw_autoscale_factor("guests") > 1.0
+
+
+def test_pinned_e_dhw_never_exceeds_heater_capacity(monkeypatch):
+    """LP pins e_dhw == forecast against a variable bounded by
+    DAIKIN_MAX_HP_KW × 0.5; a scaled-up transition slot must clamp or the
+    solve goes Infeasible on small-heater configs (review MED-2)."""
+    from src import dhw_policy
+    monkeypatch.setattr(app_config, "DAIKIN_MAX_HP_KW", 0.8, raising=False)  # 0.4 kWh/slot
+    _seed_measured_dhw([4.8] * 10)  # pushes factor to the 1.6 clamp
+    e_dhw, _ = dhw_policy.forecast_dhw_load_per_slot(_day_slots(), mode="normal")
+    cap = 0.8 * 0.5
+    assert max(e_dhw) <= cap + 1e-9
+
+
+def test_null_upsert_does_not_clobber_dhw_split():
+    """sync_daikin_daily upserts kwh_dhw=None; that must not erase the
+    nightly rollup's real split the auto-scale feeds on (review LOW-3)."""
+    from src import db, dhw_policy
+    tz = dhw_policy._tz_local()
+    day = (datetime.now(tz) - timedelta(days=1)).date().isoformat()
+    db.upsert_daikin_consumption_daily(
+        date=day, kwh_total=5.0, kwh_heating=3.0, kwh_dhw=2.0, source="onecta",
+    )
+    db.upsert_daikin_consumption_daily(
+        date=day, kwh_total=5.5, kwh_heating=5.5, kwh_dhw=None, cop_daily=None,
+        source="telemetry_integral",
+    )
+    row = db.get_daikin_consumption_daily_by_date(day)
+    assert row["kwh_dhw"] == 2.0
+    assert row["kwh_total"] == 5.5
