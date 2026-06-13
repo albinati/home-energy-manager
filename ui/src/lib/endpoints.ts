@@ -12,6 +12,7 @@ import type {
   AttributionDay,
   EnergyReport,
   MonthlyEnergy,
+  EnergyLifetimeResponse,
   SettingsList,
   SimulateBatchResponse,
   ApplyBatchResponse,
@@ -145,6 +146,11 @@ export const getEnergyReport = (date?: string, period: "day" | "month" = "day") 
   );
 export const getEnergyMonthly = (month: string) =>
   getJson<MonthlyEnergy>(`/energy/monthly?month=${encodeURIComponent(month)}`);
+// Pre-summed lifetime-on-Agile totals for the cockpit footer — one cached
+// call replacing the old six-month /energy/monthly fan-out (each of which
+// re-ran an uncached ~1-2.7s PnL replay; 2026-06-13 perf audit).
+export const getEnergyLifetime = (months = 6) =>
+  getJson<EnergyLifetimeResponse>(`/energy/lifetime?months=${months}`);
 export const getEnergyTodayCumulative = () =>
   getJson<TodayCumulativeResponse>("/energy/today-cumulative");
 export const getApplianceSuggestions = () =>
