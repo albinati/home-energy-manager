@@ -444,6 +444,16 @@ export interface MonthlyEnergy {
   gas_comparison_ahead_pounds?: number | null;
 }
 
+// GET /energy/lifetime — pre-summed lifetime-on-Agile totals for the cockpit
+// footer strip (replaces the six-call /energy/monthly fan-out). saved >= 0 =
+// Agile beat the configured fixed tariff over the active months.
+export interface EnergyLifetimeResponse {
+  months: number;
+  solar_kwh: number;
+  export_kwh: number;
+  saved_vs_fixed_pounds: number;
+}
+
 /* ----- /energy/period — drill-down (day/week/month/year) ----- */
 
 // Same chart_data point shape across all granularities — granularity is

@@ -9,7 +9,7 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -303,6 +303,7 @@ _CACHE_CONTROL_MAX_AGE: dict[str, int] = {
     "/api/v1/scheduler/timeline": 120,
     "/api/v1/status/alerts": 30,
     "/api/v1/status/feedback": 120,
+    "/api/v1/energy/lifetime": 1800,
 }
 
 
@@ -363,9 +364,21 @@ def _require_active_daikin() -> None:
 
 
 
-@app.get("/api/v1/metrics")
-async def api_v1_metrics():
-    """Bulletproof: PnL, VWAP, SLA, battery SoC (JSON)."""
+# /metrics runs ~1 s of synchronous PnL replay (daily+weekly+monthly +
+# VWAP/slippage/SLA). It used to run inline on the event loop with no result
+# cache, so a single page load — where it fires alongside ~11 other requests —
+# blocked the whole app for that second and serialised against everything else
+# (2026-06-13 perf audit). Now it computes off the loop (to_thread) behind a
+# short TTL cache: the figures barely move within a minute, the SPA polls it
+# every 5 min, and N concurrent first-loads / tabs collapse to one compute.
+# Live battery SoC is carried separately by /cockpit/now (20 s poll), so a
+# ~minute-stale SoC here is harmless.
+_metrics_cache: tuple[float, dict] | None = None
+
+
+def _compute_metrics() -> dict:
+    """The synchronous body of /metrics. Pure read over SQLite + cached realtime;
+    no vendor HTTP. Called via to_thread behind ``_metrics_cache``."""
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
@@ -429,6 +442,22 @@ async def api_v1_metrics():
             "standing_pence_per_day": config.FIXED_TARIFF_STANDING_PENCE_PER_DAY or None,
         },
     }
+
+
+@app.get("/api/v1/metrics")
+async def api_v1_metrics():
+    """Bulletproof: PnL, VWAP, SLA, battery SoC (JSON). TTL-cached + off-loop."""
+    global _metrics_cache
+    import time as _t
+
+    ttl = int(getattr(config, "METRICS_CACHE_TTL_SECONDS", 60))
+    now = _t.monotonic()
+    if _metrics_cache is not None and ttl > 0 and (now - _metrics_cache[0]) < ttl:
+        return _metrics_cache[1]
+    out = await asyncio.to_thread(_compute_metrics)
+    if ttl > 0:
+        _metrics_cache = (now, out)
+    return out
 
 
 @app.get("/api/v1/schedule")
@@ -2821,6 +2850,103 @@ async def energy_monthly(month: str):
         equivalent_gas_cost_pounds=insights.equivalent_gas_cost_pounds,
         gas_comparison_ahead_pounds=insights.gas_comparison_ahead_pounds,
     )
+
+
+# Lifetime-on-Agile rollup for the cockpit footer strip. The strip used to fire
+# SIX /energy/monthly calls client-side and sum them — and each of those re-runs
+# an UNCACHED compute_monthly_pnl (0.8–2.7 s of SQLite replay), so a single page
+# load cost ~10 s of repeated server compute that serialised against every other
+# request (2026-06-13 perf audit). This aggregate computes the rollup ONCE and
+# caches it: the figures are historical (they only move on the nightly PnL
+# backfill), so an hour-long TTL is plenty and N tabs collapse to one compute.
+_lifetime_cache: dict[tuple, tuple[float, dict]] = {}
+
+
+def _last_n_month_anchors(today: date, n: int) -> list[tuple[int, int]]:
+    """(year, month) for the n calendar months ending with ``today``'s month."""
+    out: list[tuple[int, int]] = []
+    y, m = today.year, today.month
+    for _ in range(n):
+        out.append((y, m))
+        m -= 1
+        if m == 0:
+            m = 12
+            y -= 1
+    return list(reversed(out))
+
+
+def _compute_lifetime(n_months: int, today: date) -> dict:
+    """Sum solar / export / saved-vs-fixed across the active on-Agile months.
+
+    "Active" mirrors the old client-side filter exactly so the displayed totals
+    don't move: a month counts when its net cost is non-zero OR it exported
+    anything. Mirrors :func:`energy_monthly`'s two reads per month
+    (``get_monthly_insights`` for energy, ``compute_monthly_pnl`` for the
+    authoritative BG-real delta) — but once, server-side, behind the cache.
+    """
+    from ..analytics.pnl import compute_monthly_pnl
+
+    months = 0
+    solar = 0.0
+    export = 0.0
+    saved = 0.0
+    for year, month in _last_n_month_anchors(today, n_months):
+        try:
+            insights = get_monthly_insights(year, month)
+        except Exception as e:  # pragma: no cover - a bad month must not 500 the strip
+            logger.debug("lifetime: monthly insights failed for %d-%02d: %s", year, month, e)
+            continue
+        if insights is None:
+            continue
+        e_solar = float(insights.energy.solar_kwh or 0.0)
+        e_export = float(insights.energy.export_kwh or 0.0)
+        net_pounds = float(insights.cost.net_cost_pounds or 0.0)
+        if net_pounds == 0.0 and e_export <= 0.0:
+            continue  # inactive month — excluded, same as the UI filter
+        months += 1
+        solar += e_solar
+        export += e_export
+        try:
+            mpnl = compute_monthly_pnl(date(year, month, 15))
+            saved += float(mpnl.get("delta_vs_fixed_tariff_real_gbp") or 0.0)
+        except Exception as e:  # pragma: no cover - non-critical lifetime stat
+            logger.debug("lifetime: BG-real delta failed for %d-%02d: %s", year, month, e)
+    return {
+        "months": months,
+        "solar_kwh": round(solar, 1),
+        "export_kwh": round(export, 1),
+        "saved_vs_fixed_pounds": round(saved, 2),
+    }
+
+
+@app.get("/api/v1/energy/lifetime")
+async def energy_lifetime(months: int = 6):
+    """Aggregated lifetime-on-Agile totals for the cockpit footer (one call).
+
+    Replaces the six-request ``/energy/monthly`` fan-out the strip used to do.
+    TTL-cached (``LIFETIME_CACHE_TTL_SECONDS``, default 3600) and computed off
+    the event loop — historical figures, so a stale hour is harmless.
+    """
+    if not _foxess_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Fox ESS not configured. Set FOXESS_API_KEY or FOXESS_USERNAME+FOXESS_PASSWORD and FOXESS_DEVICE_SN.",
+        )
+    n = max(1, min(36, int(months)))
+    import time as _t
+    from zoneinfo import ZoneInfo
+
+    today = datetime.now(ZoneInfo(config.BULLETPROOF_TIMEZONE)).date()
+    ttl = int(getattr(config, "LIFETIME_CACHE_TTL_SECONDS", 3600))
+    key = (n, today.isoformat())
+    now = _t.monotonic()
+    hit = _lifetime_cache.get(key)
+    if hit and ttl > 0 and (now - hit[0]) < ttl:
+        return hit[1]
+    out = await asyncio.to_thread(_compute_lifetime, n, today)
+    if ttl > 0:
+        _lifetime_cache[key] = (now, out)
+    return out
 
 
 # In-process TTL cache for day/week period insights (Fox ESS HTTP). Month already
