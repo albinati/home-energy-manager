@@ -113,15 +113,38 @@ Also shipped with it: `_prime_lifetime_cache` warms `_lifetime_cache` ~5 s after
 boot (delayed, guarded, quota-neutral) so the first post-restart visitor skips
 the ~14 s cold rollup.
 
-## What's left (ranked by leverage)
+## Where we landed (post Camada 1+2+3) — measured 2026-06-13
 
-- **Camada 4 — reduce first-paint fan-out.** ~30 requests, ~12 hitting hem at
-  t=0. Push more below-the-fold fetches behind `useAfterPaint` + idle, and/or
-  add a single `/cockpit/bootstrap` aggregate the server assembles from warm
-  caches so the first paint needs one round-trip, not a dozen.
-- **Camada 5 — bundle.** `echarts` (~208 KB gzip) is the heaviest asset; already
-  lazy + immutable-cached 7 d. Low priority; ensure hashed assets carry
-  `Cache-Control: immutable` so repeat visits skip revalidation.
+Headless full-page load against the funnel, after all three layers deployed
+(`b3b70cd`): **25 API requests, all completing inside a 233 ms window**
+(slowest single request 134 ms), hero £ populated. The original ~8.5 s wall is
+gone — a **~36× improvement**. Each above-the-fold endpoint is <150 ms and the
+fan-out runs in ~4 browser concurrency waves.
+
+## What's left — evaluated and DEFERRED (don't over-build the small box)
+
+- **Camada 4 — `/cockpit/bootstrap` aggregate: NOT worth building right now.**
+  The rationale was "collapse the ~12-request first-paint fan-out into one
+  round-trip." But the bottleneck was never the request *count* — it was the
+  serialised synchronous compute, which Camada 1+2 fixed. With that gone, the
+  25 requests already finish in 233 ms in parallel; a bootstrap endpoint would
+  shave maybe one round-trip while adding a new backend surface (assembly,
+  coupling, a cache to invalidate) to a 2-vCPU box we're deliberately keeping
+  lean. Revisit only if a future page genuinely needs a single-payload first
+  paint, or if mobile/high-latency testing shows the wave count hurting.
+  - The *cheap* version, if ever wanted: gate the below-the-fold `useFetch`
+    calls in `landing.tsx` (heating gauges, appliances, quotas) behind the
+    existing `useAfterPaint` so the critical above-fold set goes out first.
+    Zero new endpoints — but marginal now that every endpoint is <150 ms and
+    the micro-cache absorbs repeats.
+- **Camada 5 — bundle: low value, deferred.** `echarts` (~208 KB gzip) is the
+  heaviest asset but is lazy-loaded + immutable-cached 7 d, and the page is
+  already fast. Not worth a chart-library swap.
+
+**Bottom line:** the cockpit-perf work is effectively complete. The serialised
+compute (the real cause) is fixed, repeats are edge-cached, and the cold strip
+is primed. Further layers would be optimising a 233 ms load — over-engineering
+the very box we set out to protect.
 
 ## Guard rails
 
