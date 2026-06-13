@@ -1,0 +1,21 @@
+# HTTP-context directive for the API micro-cache (Camada 3, 2026-06-13 perf).
+#
+# Lives in its own template because proxy_cache_path is only valid in the
+# http{} context — conf.d/*.conf files are included there, so this loads as a
+# bare http-level directive (envsubst leaves it untouched: no ${VARS} here).
+#
+# Purpose: collapse repeated VIEWER GET /api/v1/* requests (no Authorization
+# header) to ONE hem hit per short window. The single hem process serialises
+# synchronous compute, so N open tabs / aggressive polls otherwise multiply
+# into N backend hits; this caps that at the edge regardless of client count.
+# The actual caching policy (auth bypass, 10s TTL, single-flight) lives in the
+# /api/ location block in default.conf.template.
+#
+# /var/cache/nginx is writable (hem-ui runs read_only:false). 4 MB keys_zone
+# holds ~32k entries — far more than the handful of distinct viewer GETs.
+proxy_cache_path /var/cache/nginx/api
+    levels=1:2
+    keys_zone=api_cache:4m
+    max_size=24m
+    inactive=30s
+    use_temp_path=off;

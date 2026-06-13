@@ -51,8 +51,11 @@ RUN apk add --no-cache gettext
 # Built SPA → nginx html root
 COPY --from=build /app/dist/  /usr/share/nginx/html/
 
-# nginx config — single template; entrypoint envsubsts HEM_API_URL into it
-COPY conf/nginx.conf.template  /etc/nginx/templates/default.conf.template
+# nginx config — entrypoint envsubsts ${HEM_API_URL} into the server template.
+# api-cache.conf.template carries the http-context proxy_cache_path (no vars);
+# both land in /etc/nginx/conf.d/ via the official envsubst-on-templates step.
+COPY conf/nginx.conf.template     /etc/nginx/templates/default.conf.template
+COPY conf/api-cache.conf.template /etc/nginx/templates/api-cache.conf.template
 
 # Runtime config — entrypoint writes /usr/share/nginx/html/config.js with
 # the bearer token + API base so the SPA can read window.__HEM_CONFIG__.
