@@ -369,10 +369,12 @@ def _require_active_daikin() -> None:
 # cache, so a single page load — where it fires alongside ~11 other requests —
 # blocked the whole app for that second and serialised against everything else
 # (2026-06-13 perf audit). Now it computes off the loop (to_thread) behind a
-# short TTL cache: the figures barely move within a minute, the SPA polls it
-# every 5 min, and N concurrent first-loads / tabs collapse to one compute.
-# Live battery SoC is carried separately by /cockpit/now (20 s poll), so a
-# ~minute-stale SoC here is harmless.
+# short TTL cache: the figures barely move within a minute and the SPA polls
+# it every 5 min, so repeated requests across the TTL window (other tabs, the
+# poll itself) serve the cache instead of recomputing. (No single-flight lock —
+# a burst arriving on a cold cache can still double-compute; the TTL is the
+# cheap win, not request coalescing.) Live battery SoC is carried separately by
+# /cockpit/now (20 s poll), so a ~minute-stale SoC here is harmless.
 _metrics_cache: tuple[float, dict] | None = None
 
 
@@ -2858,7 +2860,8 @@ async def energy_monthly(month: str):
 # load cost ~10 s of repeated server compute that serialised against every other
 # request (2026-06-13 perf audit). This aggregate computes the rollup ONCE and
 # caches it: the figures are historical (they only move on the nightly PnL
-# backfill), so an hour-long TTL is plenty and N tabs collapse to one compute.
+# backfill), so an hour-long TTL is plenty and repeated loads across that
+# window serve the cache rather than re-running six PnL replays.
 _lifetime_cache: dict[tuple, tuple[float, dict]] = {}
 
 

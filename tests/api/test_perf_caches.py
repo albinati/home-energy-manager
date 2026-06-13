@@ -98,6 +98,19 @@ def test_lifetime_serves_cache_hit_without_recompute(client, monkeypatch):
     assert calls["n"] == 1  # second request hit the cache
 
 
+def test_last_n_month_anchors_walks_back_across_year_boundary():
+    """Current month + previous n-1, oldest first; crosses the year edge."""
+    from datetime import date as _date
+
+    assert main_mod._last_n_month_anchors(_date(2026, 6, 13), 6) == [
+        (2026, 1), (2026, 2), (2026, 3), (2026, 4), (2026, 5), (2026, 6),
+    ]
+    # February anchor reaching back into the prior year.
+    assert main_mod._last_n_month_anchors(_date(2026, 2, 1), 3) == [
+        (2025, 12), (2026, 1), (2026, 2),
+    ]
+
+
 # ── /metrics ─────────────────────────────────────────────────────────────────
 
 def test_metrics_serves_cache_hit_without_recompute(client, monkeypatch):
