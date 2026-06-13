@@ -56,6 +56,31 @@ server {
         proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
         proxy_set_header   X-Forwarded-Proto $scheme;
         proxy_read_timeout 60s;
+
+        # ── Viewer micro-cache (Camada 3) ──────────────────────────────────
+        # Collapse repeated no-auth GETs to one hem hit per 10s window so open
+        # tabs / polls can't multiply load on the single-process backend. Only
+        # GET/HEAD are cacheable (writes are POST → never cached). ADMIN
+        # requests carry an Authorization header → fully bypassed (never served
+        # from cache, never stored), so writes and per-admin reads stay live.
+        proxy_cache            api_cache;
+        proxy_cache_methods    GET HEAD;
+        proxy_cache_key        "$request_method$request_uri";
+        proxy_cache_valid      200 10s;
+        proxy_cache_bypass     $http_authorization;
+        proxy_no_cache         $http_authorization;
+        # The backend marks cockpit reads `Cache-Control: private` (a per-user
+        # browser hint) with varying max-ages; for this shared edge we want a
+        # uniform short TTL on the public viewer responses, so ignore the
+        # upstream caching hints and let proxy_cache_valid govern. Mutating
+        # routes are POST and excluded above, so this can't cache a write.
+        proxy_ignore_headers   Cache-Control Expires Set-Cookie Vary;
+        # Single-flight: on a cold/expired key ONE request fills the cache and
+        # concurrent identical ones wait for it — a first-load burst becomes one
+        # backend hit, not N. Backend is now <150ms so holders never stall.
+        proxy_cache_lock       on;
+        proxy_cache_use_stale  updating error timeout;
+        add_header             X-Cache-Status $upstream_cache_status always;
     }
 
     # Static assets — long cache since SPA filenames are versioned by the CI

@@ -89,16 +89,32 @@ burst can still double-compute; the TTL is the cheap win. If a handler ever
 costs a *live vendor call*, use the single-flight `_cached_async` pattern in
 `src/api/routers/status.py` instead, so client count can't amplify into quota.
 
+## Camada 3 — nginx viewer micro-cache (PR #558, done)
+
+`hem-ui` nginx now `proxy_cache`s viewer GET `/api/v1/*` for 10 s
+(`ui/conf/api-cache.conf.template` http-context zone + the `/api/` location
+policy). N open tabs / aggressive polls collapse to **one hem hit per window**.
+Correctness guarantees worth remembering before you touch it:
+
+- **Admin never cached, either direction.** Admin requests carry
+  `Authorization: Bearer` → `proxy_cache_bypass` + `proxy_no_cache
+  $http_authorization` (never served from cache, never stored).
+- **Admin data can't leak to viewers.** A viewer (no token) hitting an
+  `admin_read_prefixes` path gets a **401** from `ApiV1RoleAuth`, and
+  `proxy_cache_valid 200 10s` caches **only 200s** — so a forbidden response
+  never enters the cache. (If you ever make a viewer-forbidden path return
+  200-with-error-body, this breaks — keep them 401.)
+- **GET/HEAD only** (writes are POST → never cached). `proxy_cache_lock on` =
+  single-flight so a cold-cache burst is one fill. Upstream `Cache-Control`
+  is ignored on this shared edge (uniform 10 s TTL governs the anonymous,
+  identical viewer responses). `X-Cache-Status` header exposes HIT/MISS/BYPASS.
+
+Also shipped with it: `_prime_lifetime_cache` warms `_lifetime_cache` ~5 s after
+boot (delayed, guarded, quota-neutral) so the first post-restart visitor skips
+the ~14 s cold rollup.
+
 ## What's left (ranked by leverage)
 
-- **Camada 3 — nginx micro-cache for viewer GETs.** `hem-ui` nginx currently
-  does gzip + static `expires` but does **not** `proxy_cache` the API. A short
-  (5–15 s) `proxy_cache` on `/api/v1/*`, **keyed to bypass when an
-  `Authorization` header is present** (admin never cached) and respecting the
-  per-endpoint `Cache-Control` (`_CACHE_CONTROL_MAX_AGE` in `main.py`), would
-  collapse N tabs/clients to one backend hit per window — the real protection
-  against "many open dashboards" on the small box. Costs a few MB in the 64 MB
-  nginx container.
 - **Camada 4 — reduce first-paint fan-out.** ~30 requests, ~12 hitting hem at
   t=0. Push more below-the-fold fetches behind `useAfterPaint` + idle, and/or
   add a single `/cockpit/bootstrap` aggregate the server assembles from warm

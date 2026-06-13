@@ -190,6 +190,11 @@ _mcp_instance = build_mcp()
 _mcp_http_app = _mcp_instance.streamable_http_app()
 
 
+# Strong refs to fire-and-forget background tasks so the loop doesn't GC them
+# mid-flight (asyncio only holds a weak ref).
+_background_tasks: set = set()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _bootstrap_openclaw_token()
@@ -224,6 +229,14 @@ async def lifespan(app: FastAPI):
         await asyncio.to_thread(appliance_dispatch.rehydrate_crons)
     except Exception:
         logger.warning("appliance rehydrate_crons failed at startup", exc_info=True)
+    # Warm the lifetime rollup in the background, OFF the boot-critical path —
+    # the strip is deferred + below the fold, but priming spares the first
+    # post-restart visitor the ~14 s cold compute. Fire-and-forget + fully
+    # guarded: a failure here can never affect startup. Quota-neutral (it does
+    # the same Fox month reads the first visitor would otherwise trigger).
+    _prime = asyncio.create_task(_prime_lifetime_cache())
+    _background_tasks.add(_prime)
+    _prime.add_done_callback(_background_tasks.discard)
     async with _mcp_instance.session_manager.run():
         yield
     try:
@@ -2950,6 +2963,28 @@ async def energy_lifetime(months: int = 6):
     if ttl > 0:
         _lifetime_cache[key] = (now, out)
     return out
+
+
+async def _prime_lifetime_cache() -> None:
+    """Background warm of ``_lifetime_cache`` for the default 6-month window.
+
+    Best-effort and delayed so it can't contend with the boot-critical Fox/
+    Daikin recovery. Skips silently when Fox isn't configured; per-month errors
+    are swallowed inside ``_compute_lifetime``."""
+    try:
+        await asyncio.sleep(float(getattr(config, "LIFETIME_PRIME_DELAY_SECONDS", 5)))
+        if not _foxess_configured():
+            return
+        import time as _t
+        from zoneinfo import ZoneInfo
+
+        today = datetime.now(ZoneInfo(config.BULLETPROOF_TIMEZONE)).date()
+        n = 6
+        out = await asyncio.to_thread(_compute_lifetime, n, today)
+        _lifetime_cache[(n, today.isoformat())] = (_t.monotonic(), out)
+        logger.info("lifetime cache primed: %s", out)
+    except Exception:  # pragma: no cover - best-effort warm; never fatal
+        logger.debug("lifetime cache prime skipped", exc_info=True)
 
 
 # In-process TTL cache for day/week period insights (Fox ESS HTTP). Month already
