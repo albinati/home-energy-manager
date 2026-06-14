@@ -401,6 +401,14 @@ class Config:
     CONSUMPTION_METER_STALE_DAYS: int = int(
         os.getenv("CONSUMPTION_METER_STALE_DAYS", "3")
     )
+    # Actuation-health alert (2026-06-14). A healthy system uploads the Fox V3
+    # schedule (00:05 plan push + price-driven re-solves) and fires tank rows
+    # (dhw_policy warmup+setback) at least daily, so >~30h without one means
+    # actuation is wedged. LWT is demand-gated (summer-dormant) → failure-count
+    # only. Set the *_STALE_HOURS to 0 to disable that age check.
+    FOX_UPLOAD_STALE_HOURS: float = float(os.getenv("FOX_UPLOAD_STALE_HOURS", "30"))
+    DAIKIN_TANK_STALE_HOURS: float = float(os.getenv("DAIKIN_TANK_STALE_HOURS", "30"))
+    DAIKIN_FAILED_ALERT_THRESHOLD: int = int(os.getenv("DAIKIN_FAILED_ALERT_THRESHOLD", "3"))
     BULLETPROOF_TIMEZONE: str = (os.getenv("BULLETPROOF_TIMEZONE") or "Europe/London").strip()
 
     # ── SmartThings smart-appliance scheduling — OAuth 2.0 (mirrors Daikin) ──

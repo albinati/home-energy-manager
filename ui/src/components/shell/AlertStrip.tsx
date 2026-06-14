@@ -86,6 +86,47 @@ function buildChips(a: StatusAlertsResponse): Chip[] {
     }
   }
 
+  // Actuation freshness — the plan not reaching the hardware. This is the gap
+  // the 2026-06-14 ~41h Fox-upload wedge slipped through (drift was "in sync"
+  // because live and stored were both stale).
+  const act = a.actuation;
+  if (act) {
+    const hrs = (h: number | null | undefined) =>
+      h == null ? "" : h >= 1 ? ` (${Math.round(h)}h)` : "";
+    if (act.fox?.stale) {
+      chips.push({
+        key: "fox-stale",
+        tone: "bad",
+        label: `Fox plan not uploading${hrs(act.fox.age_hours)}`,
+        detail: `No successful Fox V3 upload since ${act.fox.last_upload_at ?? "?"}. The inverter may be running an obsolete schedule.`,
+      });
+    }
+    if (act.daikin_tank?.stale) {
+      chips.push({
+        key: "tank-stale",
+        tone: "bad",
+        label: `Tank not actuating${hrs(act.daikin_tank.age_hours)}`,
+        detail: `No tank action has fired since ${act.daikin_tank.last_at ?? "?"} (normally ~2×/day). The DHW schedule may not be reaching the heat pump.`,
+      });
+    }
+    if (act.daikin_tank?.failing) {
+      chips.push({
+        key: "tank-failing",
+        tone: "warn",
+        label: `Tank writes failing (${act.daikin_tank.failed_24h})`,
+        detail: "Daikin rejected this many tank writes in 24h (READ_ONLY / rate-limit / clamp).",
+      });
+    }
+    if (act.daikin_lwt?.failing) {
+      chips.push({
+        key: "lwt-failing",
+        tone: "warn",
+        label: `LWT writes failing (${act.daikin_lwt.failed_24h})`,
+        detail: "Daikin rejected this many leaving-water-temp writes in 24h.",
+      });
+    }
+  }
+
   return chips;
 }
 
