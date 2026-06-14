@@ -19,6 +19,7 @@ from .daikin_bulletproof import (
     user_gesture_still_in_effect,
 )
 from .foxess.client import FoxESSClient, FoxESSError, scheduler_groups_from_stored_json
+from .foxess.models import _group_fingerprint
 from .notifier import notify_critical, notify_risk, notify_user_override
 
 logger = logging.getLogger(__name__)
@@ -99,32 +100,33 @@ def _parse_utc(s: str) -> datetime:
 
 
 def _schedule_signature(groups: list[Any]) -> str:
-    """Comparable fingerprint for Fox V3 groups (hardware vs SQLite)."""
+    """Comparable, MODE-AWARE fingerprint for Fox V3 groups (hardware vs SQLite).
+
+    Uses the shared canonical fingerprint so a live device read compares equal
+    to what we uploaded. A raw field-by-field signature treated the inverter's
+    stale fdSoc/fdPwr echo on SelfUse/Backup groups (and its vendor-default
+    maxSoc fill) as drift, so the heartbeat re-uploaded forever and wedged Fox
+    dispatch for ~41 h on 2026-06-14 — the same vendor-echo class fixed for the
+    schedule_diff endpoint in #554.
+    """
     payload = []
     for g in groups:
         if hasattr(g, "start_hour"):
             payload.append(
-                (
-                    g.start_hour,
-                    g.start_minute,
-                    g.end_hour,
-                    g.end_minute,
-                    g.work_mode,
-                    g.fd_soc,
-                    g.fd_pwr,
+                _group_fingerprint(
+                    g.start_hour, g.start_minute, g.end_hour, g.end_minute,
+                    g.work_mode, getattr(g, "min_soc_on_grid", None),
+                    g.fd_soc, g.fd_pwr, getattr(g, "max_soc", None),
                 )
             )
         elif isinstance(g, dict):
             ep = g.get("extraParam") or g.get("extra_param") or {}
             payload.append(
-                (
-                    g.get("startHour"),
-                    g.get("startMinute"),
-                    g.get("endHour"),
-                    g.get("endMinute"),
-                    g.get("workMode"),
-                    ep.get("fdSoc"),
-                    ep.get("fdPwr"),
+                _group_fingerprint(
+                    g.get("startHour"), g.get("startMinute"),
+                    g.get("endHour"), g.get("endMinute"), g.get("workMode"),
+                    ep.get("minSocOnGrid"), ep.get("fdSoc"), ep.get("fdPwr"),
+                    ep.get("maxSoc"),
                 )
             )
     return json.dumps(payload, sort_keys=True, default=str)

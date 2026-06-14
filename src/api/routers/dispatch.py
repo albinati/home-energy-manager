@@ -283,7 +283,9 @@ async def get_foxess_schedule_diff() -> dict[str, Any]:
     # vendor default 100.
     def _fp(g: dict[str, Any]) -> tuple:
         mode = g.get("work_mode")
-        fd_relevant = mode == "ForceDischarge"
+        # fdSoc/fdPwr are used by ForceCharge AND ForceDischarge — #554 only
+        # kept ForceDischarge, which would miss a real ForceCharge target change.
+        fd_relevant = mode in ("ForceCharge", "ForceDischarge")
         max_soc = g.get("max_soc")
         return (
             g.get("start"), g.get("end"), mode,
