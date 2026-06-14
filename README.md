@@ -4,7 +4,7 @@
 
 **A solver-driven planning brain for a UK home on Octopus Agile + Fox ESS battery + Daikin Altherma heat pump.**
 
-Solves a 24–48 h MILP every few minutes, uploads a Fox ESS Scheduler V3, drives Daikin via Onecta, and exposes a 75-tool MCP surface for Claude.
+Solves a 24–48 h MILP every few minutes, uploads a Fox ESS Scheduler V3, drives Daikin via Onecta, ships a self-hosting Preact cockpit, and exposes an 80-tool MCP surface for Claude.
 
 [![Tests](https://github.com/albinati/home-energy-manager/actions/workflows/tests.yml/badge.svg)](https://github.com/albinati/home-energy-manager/actions/workflows/tests.yml)
 [![Latest release](https://img.shields.io/github/v/release/albinati/home-energy-manager)](https://github.com/albinati/home-energy-manager/releases)
@@ -17,7 +17,7 @@ Solves a 24–48 h MILP every few minutes, uploads a Fox ESS Scheduler V3, drive
 [![Daikin Altherma](https://img.shields.io/badge/Daikin-Onecta-0093D0?logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0iI2ZmZiI+PHBhdGggZD0iTTEyIDJDNi40OCAyIDIgNi40OCAyIDEyczQuNDggMTAgMTAgMTAgMTAtNC40OCAxMC0xMFMxNy41MiAyIDEyIDJ6Ii8+PC9zdmc+)](https://daikin-cdc.com/)
 [![SmartThings](https://img.shields.io/badge/Samsung-SmartThings-1428A0?logo=samsung&logoColor=white)](https://www.smartthings.com/)
 [![PuLP MILP](https://img.shields.io/badge/MILP-PuLP%20%2F%20CBC-FFB000)](https://coin-or.github.io/pulp/)
-[![Model Context Protocol](https://img.shields.io/badge/MCP-75_tools-D97757)](https://modelcontextprotocol.io/)
+[![Model Context Protocol](https://img.shields.io/badge/MCP-80_tools-D97757)](https://modelcontextprotocol.io/)
 [![Topic](https://img.shields.io/badge/topic-smart--home-3DDC84)](#)
 [![Topic](https://img.shields.io/badge/topic-energy--optimization-22C55E)](#)
 [![Topic](https://img.shields.io/badge/topic-solar--PV-FACC15)](#)
@@ -38,8 +38,12 @@ Solves a 24–48 h MILP every few minutes, uploads a Fox ESS Scheduler V3, drive
 - 🚿 **Soft shower-window tank floor (v12).** `tank ≥ 45 °C` on shower-window slots is a soft constraint with a heavy 50 p/K-slot penalty — heats as fast as physics allows, surfaces the unavoidable deficit as a quantified slack instead of returning Infeasible. Closes the residual-class Infeasibility surface that the 60-day audit identified.
 - 🔁 **Replayable Infeasibles (v12).** When the LP can't solve, the inputs are still snapshotted (`lp_inputs_snapshot.lp_status='Infeasible'`); `lp_replay.replay_run()` can reload + reproduce any past Infeasible offline against any code version.
 - 📋 **Closed-loop regression gate.** Every LP solve is a frozen replayable snapshot. `scripts/check_lp_regression.py --vs-ref=<ref> --mode=both` gives clean per-PR cost deltas; `--refresh-baseline` re-pins the frozen JSON when an accepted strategy shift improves the optimum.
-- 🔌 **75-tool MCP surface.** Bearer-guarded HTTP transport. Claude / OpenClaw read state, request plan changes, replay past days, and explain dispatch decisions.
+- 🔌 **80-tool MCP surface.** Bearer-guarded HTTP transport. Claude / OpenClaw read state, request plan changes, replay past days, and explain dispatch decisions.
 - 📲 **Direct Telegram notifications.** Optional bypass of the OpenClaw `/hooks/agent` LLM-shaping path; HEM POSTs straight to `api.telegram.org` when configured. Keeps free pings out of LLM loops.
+- 🖥️ **Web cockpit (Preact SPA).** A separate nginx-served container (`hem-ui`): live power-flow, the committed plan vs. actuals, tariff league table, heating timeline, and an ops "self-check" that surfaces whether the recent accuracy work is actually holding. Viewer-by-default (shareable, read-only); admin unlocks controls with a token. An anomaly strip flags meter staleness / forecast degradation / schedule drift at a glance.
+- ☀️ **Self-hosted PV forecast.** Open Climate Fix's open-source site-level model runs as a sidecar (`hem-quartz`) pulling its own NWP from Open-Meteo — **zero forecast API keys**. The hosted Quartz endpoint and raw Open-Meteo remain drop-in fallbacks.
+- 🔥 **Active heat-pump modulation.** Drives the Daikin leaving-water-temperature offset by price tier (boost on cheap slots, set back on peak) — gated on measured trailing heating demand so it never nudges a pump that isn't running.
+- ⚡ **Lean by design.** Runs on a 2-vCPU / 4 GB ARM box alongside other services. Per-endpoint TTL caches + an nginx viewer micro-cache keep the single backend process from being multiplied by open tabs; the cockpit's above-the-fold load is ~0.2 s.
 
 ---
 
@@ -48,13 +52,13 @@ Solves a 24–48 h MILP every few minutes, uploads a Fox ESS Scheduler V3, drive
 ```
                 ┌─────────────────────────────┐
   Octopus Agile ──→  half-hourly tariff       │
-  Quartz / Open-Meteo ─→ PV nowcast + weather │
+  Quartz sidecar / Open-Meteo ─→ PV + weather │
   Fox ESS       ──→  load, PV, SoC, schedule  │
   Daikin Onecta ──→  tank, indoor, outdoor    │     PuLP MILP
   SmartThings   ──→  appliance state          │ ──→ 24–48h plan ──→  Fox V3 schedule
                 │                             │                      Daikin action_schedule
   Past data     ──→  PV calibration table     │                      Telegram / OpenClaw notify
-                ──→  load profile             │
+                ──→  load profile             │                      Preact cockpit (hem-ui)
                 ──→  Daikin physics priors    │
                 └─────────────────────────────┘
                             ↑                                 ↓
@@ -80,16 +84,17 @@ For decisions about peak-export robustness, see [docs/DISPATCH_DECISIONS.md](doc
 ## 📦 What it does
 
 - **Octopus Agile fetch** every 30 min. Stores import + Outgoing Agile rates in SQLite for the next ~36 h.
-- **Quartz forecast source** — preferred PV nowcast for the UK site. Auth via env, direct PV is snapshotted per fetch, and Open-Meteo remains the weather fallback/context source.
+- **Self-hosted Quartz PV forecast** — OCF's open-source site-level model in a sidecar container (`hem-quartz`), no forecast API keys; the hosted Quartz endpoint and Open-Meteo are drop-in fallbacks. Direct PV is snapshotted per fetch.
+- **Web cockpit** — a Preact SPA (`hem-ui` nginx container): live power-flow animation, committed-plan vs. actuals, a fair per-tariff league table replayed on your metered usage, the heating timeline, and a self-check panel that reports whether DHW budget, the PV forecast source, and the LWT demand gate are behaving. Viewer/admin role split; an anomaly strip surfaces drift.
 - **Open-Meteo forecast** — temperature, cloud cover, irradiance. Snapshotted per fetch for replay and used as fallback when Quartz is unavailable.
 - **PV forecast calibration** — three-tier resolver: cloud-aware `(hour, cloud bucket)` table → per-hour-of-day table → flat factor. Quartz direct PV and irradiance-based PV both pass through the same site calibration chain. Today-aware OCF Quartz-style adjuster on top.
 - **Load forecast accuracy evaluator** — per-slot MAE/RMSE/bias broken down by local hour, plus a daily Daikin physics check against Onecta-measured kWh. Captures the biases the LP hasn't yet learned.
 - **MILP solver (PuLP)** — 96-slot horizon, soft penalties for cycling/comfort/inverter stress, scenario LP for peak-export robustness, twice-daily and tier-boundary MPC.
 - **Fox ESS Scheduler V3** — single daily upload of the optimised charge/discharge windows. Heuristic fallback if the LP fails.
-- **Daikin Onecta** — `action_schedule` rows that the heartbeat applies; LWT offset, tank target, weather regulation toggles. OAuth2 with auto-refresh.
+- **Daikin Onecta** — `action_schedule` rows that the heartbeat applies; price-tier LWT offset (active space-heating modulation, gated on measured heating demand), tank target, weather regulation toggles. OAuth2 with auto-refresh.
 - **SmartThings appliance dispatch** — washer/dryer/dishwasher start times picked by the LP given a deadline; physical Smart Control button is the consent gate.
 - **Notifications** — direct Telegram Bot API (preferred when `TELEGRAM_BOT_TOKEN` is set), with the OpenClaw `/hooks/agent` LLM-shaping path as fallback. Twice-daily digest, plan-revision pings, negative-price alerts, appliance lifecycle.
-- **75-tool MCP surface** — Fox, Daikin, Octopus, optimization, replay, dispatch decisions. Bearer-guarded HTTP transport.
+- **80-tool MCP surface** — Fox, Daikin, Octopus, optimization, replay, dispatch decisions. Bearer-guarded HTTP transport.
 - **Closed-loop replay + regression gate** — every LP solve is a frozen, replayable snapshot; `scripts/check_lp_regression.py --mode=both` blocks merges when aggregate cost is worse on comparable baseline dates.
 
 ---
@@ -109,11 +114,14 @@ cp .env.example .env
 # Edit .env — at minimum set OPENCLAW_READ_ONLY=true so nothing dials out.
 # To switch PV nowcasting, set FORECAST_SOURCE=quartz and fill the Quartz auth vars.
 
-pytest                                    # 1100+ tests, ~3 min on a laptop
+pytest                                    # 1600+ tests, ~3 min on a laptop
 python -m src.cli serve                   # FastAPI on :8000, MCP at /mcp
+
+# Optional — the cockpit SPA (separate from the API):
+cd ui && npm ci && npm run dev            # Vite dev server, proxies /api → :8000
 ```
 
-Web UI at `http://localhost:8000/`, OpenAPI docs at `/docs`, MCP transport at `/mcp` (bearer-guarded; token at `data/.openclaw-token`).
+OpenAPI docs at `:8000/docs`, MCP transport at `:8000/mcp` (bearer-guarded; token at `data/.openclaw-token`). The web cockpit is the Preact SPA under `ui/`, served by the `hem-ui` nginx container in production and by Vite in dev.
 
 ---
 
@@ -143,7 +151,7 @@ OAuth bootstrap (Daikin + SmartThings) uses one-shot containers documented in [`
 | Vendor | What we use | Auth |
 |---|---|---|
 | **Octopus Energy** | Agile import + Outgoing Agile export rates, optional consumption backfill | API key (read-only) |
-| **Quartz Solar** | PV nowcast source for the LP; direct site PV when configured | Auth0 bearer token via env |
+| **Quartz Solar (OCF)** | Site-level PV nowcast for the LP — self-hosted open-source sidecar (default) or the hosted endpoint | None (sidecar) / bearer token (hosted) |
 | **Open-Meteo** | Hourly weather forecast and fallback PV context (temp, radiation, cloud cover) | None — public |
 | **Fox ESS** | SoC, PV, load, grid, Scheduler V3 upload | Open API key + signature |
 | **Daikin Altherma** | Status read + LWT/tank writes via Onecta | OAuth2 (auto-refresh) |
@@ -169,19 +177,20 @@ Everything is parameterised via `.env`. Adapting it to a different setup is feas
 
 ## 🗺️ Roadmap
 
-**v12.0.0** (2026-05-20) shipped the LP residual-class Infeasibility fix stack — see [CHANGELOG.md](CHANGELOG.md) for the eight PRs and the −£1.09/14d honest-mode regression delta.
+Recent shipped work (see [CHANGELOG.md](CHANGELOG.md) for the per-PR detail):
 
-V11 epic (accuracy via past-data integration) — open stories:
+- **Active heat-pump modulation** — price-tier LWT offset gated on measured heating demand (first active space-heating control).
+- **Web cockpit → ops console** — the Preact SPA, an anomaly alert strip, a "self-check" panel, and an admin control cluster (mode / replan / scheduler / appliance jobs) over a simulate→confirm flow.
+- **Self-hosted Quartz** — OCF's open-source PV model as a sidecar; zero forecast API keys.
+- **Cockpit performance** — the above-the-fold load went from ~8.5 s to ~0.2 s via TTL-cached aggregates + an nginx viewer micro-cache, deliberately keeping the small box lean (see [docs/COCKPIT_PERF.md](docs/COCKPIT_PERF.md)).
+- **DHW simplification** — LP-pinned deterministic tank schedule, calibrated from lived experience, trading marginal arbitrage for zero tank surprises.
 
-| | Story | Status |
-|---|---|---|
-| ✅ | V11-A — Cloud-cover & full-input snapshot capture | shipped (#240) |
-| ✅ | V11-E — Adaptive PV calibration trigger | shipped (#198) |
-| 🟡 | V11-B — Quantile-based scenario perturbations | pending |
-| 🟡 | V11-C — DHW draw learning (rolling 14-day prior) | pending |
-| 🟡 | V11-D — Occupancy & variable-load inference | pending |
+Open / in progress:
 
-Other open work: [Daikin observation strategy](https://github.com/albinati/home-energy-manager/issues/267), [Daikin physics calibration via 2-hourly Onecta consumption](https://github.com/albinati/home-energy-manager/issues/238), [Travel-period aware load profile](https://github.com/albinati/home-energy-manager/issues/161), [Daikin tank reheat anomaly detection](https://github.com/albinati/home-energy-manager/issues/184).
+- 🟡 **Winter thermal model (#540)** — measured house UA ≈ 630 W/K; a sensor-first plan (indoor-temp ingest → RC learner → comfort-banded LP) to balance comfort vs. savings without over-heating on cold mornings. Awaiting the indoor-temperature sensor feed. ([docs/WINTER_THERMAL_MODEL.md](docs/WINTER_THERMAL_MODEL.md))
+- 🟡 **DHW draw learning** — rolling-14-day prior to replace the static demand model.
+- 🟡 **Daikin COP auto-calibration (#238)** — learn the physics estimator from 2-hourly Onecta consumption, reusing the closed-loop PV-corrector pattern.
+- 🟡 **Quantile-based scenario perturbations** — data-driven optimistic/pessimistic spreads.
 
 The full backlog is on the [issues board](https://github.com/albinati/home-energy-manager/issues).
 
