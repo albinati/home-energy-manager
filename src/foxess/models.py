@@ -2,6 +2,39 @@
 from dataclasses import dataclass, field
 from typing import Any
 
+# Modes that actually use fdSoc/fdPwr. On every other mode the inverter still
+# ECHOES whatever fd_* last occupied that clock window — stale leftovers that
+# must be ignored when comparing a live read against what we uploaded.
+_FD_MODES = ("ForceCharge", "ForceDischarge")
+
+
+def _group_fingerprint(
+    start_hour: int, start_minute: int, end_hour: int, end_minute: int,
+    work_mode: str | None, min_soc_on_grid: Any,
+    fd_soc: Any, fd_pwr: Any, max_soc: Any,
+    import_limit: Any = None, export_limit: Any = None,
+) -> tuple:
+    """Canonical, mode-aware fingerprint of one Scheduler V3 group.
+
+    Shared by ``SchedulerGroup.fingerprint`` and the heartbeat drift check so
+    both agree with the inverter's echo. See ``SchedulerGroup.fingerprint`` for
+    the why (2026-06-14 ~41 h Fox-upload wedge; vendor-echo class of #554).
+    """
+    def _f(v: Any) -> float | None:
+        return None if v is None else float(v)
+
+    fd_relevant = work_mode in _FD_MODES
+    return (
+        start_hour, start_minute, end_hour, end_minute, work_mode,
+        int(min_soc_on_grid) if min_soc_on_grid is not None else None,
+        _f(fd_soc) if fd_relevant else None,
+        _f(fd_pwr) if fd_relevant else None,
+        # Absent maxSoc == the vendor default 100 (Fox fills it on read-back).
+        100.0 if max_soc is None else _f(max_soc),
+        _f(import_limit),
+        _f(export_limit),
+    )
+
 
 @dataclass
 class RealTimeData:
@@ -73,20 +106,27 @@ class SchedulerGroup:
         }
 
     def fingerprint(self) -> tuple:
-        """Stable hashable representation for skip-when-unchanged guard (#38).
+        """Stable, MODE-AWARE representation for the skip-when-unchanged guard
+        (#38) and live-vs-stored drift checks.
 
-        Built from ``to_api_dict()`` so it tracks exactly the fields we write.
-        Sorted tuple of ``extraParam`` items keeps dict-order out of equality.
+        Canonicalised so a re-read of the SAME schedule from the inverter
+        compares equal to what we uploaded. Fox echoes back STALE ``fdSoc`` /
+        ``fdPwr`` on SelfUse/Backup/Feedin groups (leftovers from whatever
+        ForceCharge/ForceDischarge once occupied that clock window) and fills an
+        absent ``maxSoc`` with the vendor default 100 — both of which made a raw
+        fingerprint perpetually disagree with the device, wedging Fox uploads
+        for ~41 h on 2026-06-14 (the same vendor-echo class fixed for the
+        ``schedule_diff`` endpoint in #554; this is the comparator that drives
+        ``set_scheduler_v3(skip_if_equal=...)`` and the heartbeat re-upload).
+
+        Rules: ``fdSoc``/``fdPwr`` count only for ForceCharge/ForceDischarge
+        (the only modes that use them); absent ``maxSoc`` == 100; numerics
+        coerced to float so ``31`` and ``31.0`` match.
         """
-        d = self.to_api_dict()
-        ep = tuple(sorted(d["extraParam"].items()))
-        return (
-            d["startHour"],
-            d["startMinute"],
-            d["endHour"],
-            d["endMinute"],
-            d["workMode"],
-            ep,
+        return _group_fingerprint(
+            self.start_hour, self.start_minute, self.end_hour, self.end_minute,
+            self.work_mode, self.min_soc_on_grid, self.fd_soc, self.fd_pwr,
+            self.max_soc, self.import_limit, self.export_limit,
         )
 
 

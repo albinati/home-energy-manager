@@ -1639,10 +1639,20 @@ def _prepend_inflight_group(
     slot_start_min = (now_min // 30) * 30          # floor to half-hour
     slot_end_min = slot_start_min + 30             # exclusive end = next boundary
 
+    # Only bridge a genuine GAP: if ANY plan group already covers the current
+    # minute, the plan has explicitly decided this slot — re-asserting the old
+    # mode would both fight that decision and OVERLAP that group. Checking every
+    # group (not just groups[0]) is the fix for the 2026-06-14 wedge: a later
+    # group spanning the live slot let a stale ForceCharge bridge overlap it,
+    # the overlap guard refused the whole upload, and the inverter ran an
+    # obsolete (grid-force-charging) schedule for ~41 h.
+    for g in groups:
+        gs = g.start_hour * 60 + g.start_minute
+        ge = g.end_hour * 60 + g.end_minute
+        if gs <= now_min < ge:
+            return groups
     g0 = groups[0]
     first_start_min = g0.start_hour * 60 + g0.start_minute
-    if first_start_min <= now_min:
-        return groups                              # first group already covers now
     if first_start_min < slot_end_min:
         return groups                              # would overlap the current slot
     try:
@@ -1690,7 +1700,20 @@ def _prepend_inflight_group(
 def upload_fox_if_operational(fox: FoxESSClient | None, groups: list[SchedulerGroup]) -> bool:
     fox_ok = False
     if fox and fox.api_key and not config.OPENCLAW_READ_ONLY:
-        groups = _prepend_inflight_group(groups)
+        plan = groups                              # the LP/heuristic plan, no bridge
+        candidate = _prepend_inflight_group(plan)
+        if _detect_overlapping_groups(candidate) and candidate is not plan:
+            # The in-flight bridge collides with a plan group. DROP THE BRIDGE
+            # and upload the plan as-is rather than refuse the whole upload — a
+            # refusal leaves the STALE schedule live, which is exactly what
+            # wedged Fox dispatch (grid-force-charging on an obsolete plan) for
+            # ~41 h on 2026-06-14. The plan itself is still overlap-checked below.
+            logger.warning(
+                "Fox upload: in-flight bridge overlaps the plan — dropping the "
+                "bridge and uploading the plan as-is (avoids the stale-schedule wedge)",
+            )
+            candidate = plan
+        groups = candidate
         overlaps = _detect_overlapping_groups(groups)
         if overlaps:
             for i, j in overlaps:
