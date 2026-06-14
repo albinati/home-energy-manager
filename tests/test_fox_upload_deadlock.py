@@ -58,6 +58,16 @@ def test_fingerprint_int_float_equivalent():
             == SchedulerGroup(0, 0, 1, 0, "ForceCharge", fd_soc=31.0, fd_pwr=3800.0).fingerprint())
 
 
+def test_fingerprint_ignores_echoed_import_export_limits():
+    """import/export limits are never LP-set, so an echoed value on read-back
+    must not register as drift (review HIGH on #561 — they were initially
+    included in the fingerprint and would re-open the churn)."""
+    live = SchedulerGroup(9, 0, 9, 30, "SelfUse", min_soc_on_grid=100, max_soc=100,
+                          import_limit=8000, export_limit=3680)
+    uploaded = SchedulerGroup(9, 0, 9, 30, "SelfUse", min_soc_on_grid=100, max_soc=100)
+    assert live.fingerprint() == uploaded.fingerprint()
+
+
 def test_schedule_signature_live_attr_equals_stored_dict():
     """The heartbeat compares a live read (attribute objects, with fd_* echo)
     against the stored plan (dicts, no fd_*). They must match for an unchanged
@@ -97,6 +107,22 @@ def test_no_bridge_when_a_later_plan_group_covers_now(monkeypatch):
     plan = [SchedulerGroup(11, 30, 15, 59, "SelfUse", min_soc_on_grid=100, max_soc=100)]
     out = lpd._prepend_inflight_group(list(plan), now_local=_NOW)
     assert len(out) == len(plan)               # no bridge added
+    assert lpd._detect_overlapping_groups(out) == []
+
+
+def test_no_bridge_when_a_LATER_indexed_group_covers_now(monkeypatch):
+    """The real incident shape: groups[0] starts AFTER now (so the old
+    groups[0]-only guard would add a bridge), but a LATER group in the list
+    covers the live slot. The all-groups guard must still suppress the bridge.
+    (This is the case that FAILS against main — the single-group test above
+    passes on main and doesn't actually guard the fix.)"""
+    _stale_forcecharge_prev(monkeypatch)
+    plan = [
+        SchedulerGroup(13, 0, 15, 59, "Backup", min_soc_on_grid=10, max_soc=10),   # groups[0] — after now
+        SchedulerGroup(11, 30, 12, 59, "SelfUse", min_soc_on_grid=100, max_soc=100),  # covers now (12:15)
+    ]
+    out = lpd._prepend_inflight_group(list(plan), now_local=_NOW)
+    assert len(out) == len(plan)               # no bridge despite groups[0] being after now
     assert lpd._detect_overlapping_groups(out) == []
 
 

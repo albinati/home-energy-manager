@@ -12,13 +12,17 @@ def _group_fingerprint(
     start_hour: int, start_minute: int, end_hour: int, end_minute: int,
     work_mode: str | None, min_soc_on_grid: Any,
     fd_soc: Any, fd_pwr: Any, max_soc: Any,
-    import_limit: Any = None, export_limit: Any = None,
 ) -> tuple:
     """Canonical, mode-aware fingerprint of one Scheduler V3 group.
 
     Shared by ``SchedulerGroup.fingerprint`` and the heartbeat drift check so
     both agree with the inverter's echo. See ``SchedulerGroup.fingerprint`` for
     the why (2026-06-14 ~41 h Fox-upload wedge; vendor-echo class of #554).
+
+    Deliberately EXCLUDES import/export limits: the LP/heuristic never sets them
+    (always None), so they'd only ever carry a vendor echo on read-back — the
+    exact phantom-drift class this fixes. The proven #554 comparator excludes
+    them too. If they ever become LP-driven, canonicalise them here first.
     """
     def _f(v: Any) -> float | None:
         return None if v is None else float(v)
@@ -31,8 +35,6 @@ def _group_fingerprint(
         _f(fd_pwr) if fd_relevant else None,
         # Absent maxSoc == the vendor default 100 (Fox fills it on read-back).
         100.0 if max_soc is None else _f(max_soc),
-        _f(import_limit),
-        _f(export_limit),
     )
 
 
@@ -126,7 +128,7 @@ class SchedulerGroup:
         return _group_fingerprint(
             self.start_hour, self.start_minute, self.end_hour, self.end_minute,
             self.work_mode, self.min_soc_on_grid, self.fd_soc, self.fd_pwr,
-            self.max_soc, self.import_limit, self.export_limit,
+            self.max_soc,
         )
 
 

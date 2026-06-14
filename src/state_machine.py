@@ -117,7 +117,6 @@ def _schedule_signature(groups: list[Any]) -> str:
                     g.start_hour, g.start_minute, g.end_hour, g.end_minute,
                     g.work_mode, getattr(g, "min_soc_on_grid", None),
                     g.fd_soc, g.fd_pwr, getattr(g, "max_soc", None),
-                    getattr(g, "import_limit", None), getattr(g, "export_limit", None),
                 )
             )
         elif isinstance(g, dict):
@@ -127,7 +126,7 @@ def _schedule_signature(groups: list[Any]) -> str:
                     g.get("startHour"), g.get("startMinute"),
                     g.get("endHour"), g.get("endMinute"), g.get("workMode"),
                     ep.get("minSocOnGrid"), ep.get("fdSoc"), ep.get("fdPwr"),
-                    ep.get("maxSoc"), ep.get("importLimit"), ep.get("exportLimit"),
+                    ep.get("maxSoc"),
                 )
             )
     return json.dumps(payload, sort_keys=True, default=str)
