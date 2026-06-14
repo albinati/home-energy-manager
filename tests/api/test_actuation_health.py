@@ -62,6 +62,28 @@ def test_tank_stale_when_no_recent_actuation(monkeypatch):
     assert b["daikin_tank"]["stale"] is True
 
 
+def test_vacation_mode_suppresses_tank_stale_but_not_failures(monkeypatch):
+    """Vacation mode writes ZERO tank rows by design, so an old tank_last_at is
+    NOT a fault — the age alarm must stay quiet (the alert-noise the user hates).
+    A rejected write is still meaningful, so `failing` stays live."""
+    monkeypatch.setattr(st.config, "OPTIMIZATION_PRESET", "vacation", raising=False)
+    _patch_raw(monkeypatch, fox_upload_at=_iso(1), tank_last_at=_iso(99),
+               tank_failed_24h=3)
+    b = st._actuation_block()
+    assert b["daikin_tank"]["stale"] is False     # suppressed in vacation
+    assert b["daikin_tank"]["failing"] is True     # failures still surface
+
+
+def test_failed_threshold_zero_clamps_to_one(monkeypatch):
+    """A misconfigured threshold of 0 must NOT make everything 'failing'."""
+    monkeypatch.setattr(st.config, "DAIKIN_FAILED_ALERT_THRESHOLD", 0, raising=False)
+    _patch_raw(monkeypatch, fox_upload_at=_iso(1), tank_last_at=_iso(1),
+               tank_failed_24h=0, lwt_failed_24h=0)
+    b = st._actuation_block()
+    assert b["daikin_tank"]["failing"] is False
+    assert b["daikin_lwt"]["failing"] is False
+
+
 def test_failed_writes_flag_failing_at_threshold(monkeypatch):
     _patch_raw(monkeypatch, fox_upload_at=_iso(1), tank_last_at=_iso(1),
                tank_failed_24h=3, lwt_failed_24h=4)

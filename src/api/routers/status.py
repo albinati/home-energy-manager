@@ -247,12 +247,19 @@ def _actuation_block() -> dict[str, Any]:
 
     fox_stale_h = float(getattr(config, "FOX_UPLOAD_STALE_HOURS", 30) or 0)
     tank_stale_h = float(getattr(config, "DAIKIN_TANK_STALE_HOURS", 30) or 0)
-    fail_thr = int(getattr(config, "DAIKIN_FAILED_ALERT_THRESHOLD", 3))
+    fail_thr = max(1, int(getattr(config, "DAIKIN_FAILED_ALERT_THRESHOLD", 3) or 3))
 
     fox_age = _age_hours(raw.get("fox_upload_at"), now)
     tank_age = _age_hours(raw.get("tank_last_at"), now)
     tank_fail = int(raw.get("tank_failed_24h") or 0)
     lwt_fail = int(raw.get("lwt_failed_24h") or 0)
+
+    # In vacation mode dhw_policy writes ZERO tank rows by design, so the tank
+    # naturally goes "stale" with no fault — suppress the age alarm using the
+    # SAME source dhw_policy reads, so the two can never disagree. (Failures
+    # stay live: a rejected write is meaningful in any mode.)
+    dhw_mode = (getattr(config, "OPTIMIZATION_PRESET", "normal") or "normal").strip().lower()
+    tank_age_alarm = tank_stale_h > 0 and dhw_mode != "vacation"
 
     return {
         "fox": {
@@ -264,7 +271,7 @@ def _actuation_block() -> dict[str, Any]:
             "last_at": raw.get("tank_last_at"),
             "age_hours": None if tank_age is None else round(tank_age, 1),
             "failed_24h": tank_fail,
-            "stale": tank_stale_h > 0 and (tank_age is None or tank_age > tank_stale_h),
+            "stale": tank_age_alarm and (tank_age is None or tank_age > tank_stale_h),
             "failing": tank_fail >= fail_thr,
         },
         "daikin_lwt": {

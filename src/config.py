@@ -401,11 +401,15 @@ class Config:
     CONSUMPTION_METER_STALE_DAYS: int = int(
         os.getenv("CONSUMPTION_METER_STALE_DAYS", "3")
     )
-    # Actuation-health alert (2026-06-14). A healthy system uploads the Fox V3
-    # schedule (00:05 plan push + price-driven re-solves) and fires tank rows
-    # (dhw_policy warmup+setback) at least daily, so >~30h without one means
-    # actuation is wedged. LWT is demand-gated (summer-dormant) → failure-count
-    # only. Set the *_STALE_HOURS to 0 to disable that age check.
+    # Actuation-health alert (2026-06-14). A healthy system refreshes the Fox V3
+    # upload timestamp at least daily — the 00:05 plan push always re-uploads
+    # (an unchanged schedule still saves state via skip_if_equal), plus the
+    # force-write triggers (drift / forecast_revision / octopus_fetch /
+    # tier_boundary) — and fires tank rows (dhw_policy warmup+setback) ~2×/day,
+    # so >~30h without one means actuation is wedged. Tank age is suppressed in
+    # vacation mode (no tank rows by design). LWT is demand-gated (summer-
+    # dormant) → failure-count only. Set *_STALE_HOURS to 0 to disable the age
+    # check; the failed-count threshold clamps to ≥1.
     FOX_UPLOAD_STALE_HOURS: float = float(os.getenv("FOX_UPLOAD_STALE_HOURS", "30"))
     DAIKIN_TANK_STALE_HOURS: float = float(os.getenv("DAIKIN_TANK_STALE_HOURS", "30"))
     DAIKIN_FAILED_ALERT_THRESHOLD: int = int(os.getenv("DAIKIN_FAILED_ALERT_THRESHOLD", "3"))
