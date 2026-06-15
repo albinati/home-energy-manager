@@ -92,6 +92,30 @@ export function periodDateRange(p: PeriodState): { start: string; end: string } 
   return { start: startISO, end: endISO > t ? t : endISO };
 }
 
+/** Trailing window + end anchor for the load HEATMAP, which needs several weeks
+ * of samples for a meaningful day-of-week × hour grid. The window ends at the
+ * navigator's period end and spans at least a per-granularity floor so day/week
+ * still render a sensible pattern while month/year cover their full span. */
+export function periodWindow(p: PeriodState): { windowDays: number; endDate: string } {
+  const { start, end } = periodDateRange(p);
+  const span = Math.round((parse(end).getTime() - parse(start).getTime()) / 86_400_000) + 1;
+  const floor = p.gran === "day" || p.gran === "week" ? 28 : span;
+  return { windowDays: Math.max(span, floor), endDate: end };
+}
+
+/** The last COMPLETE local day within the selected period — what the LP
+ * scorecard (plan-vs-realised) should show. For the current period that's
+ * yesterday; for a past period it's the period's end (already clamped to today
+ * by periodDateRange). */
+export function periodLastCompleteDay(p: PeriodState): string {
+  const { end } = periodDateRange(p);
+  const t = todayISO();
+  if (end < t) return end;            // wholly past period → its last day is complete
+  const d = parse(t);
+  d.setDate(d.getDate() - 1);         // current period → yesterday
+  return isoOf(d);
+}
+
 /** Query params for getEnergyPeriod(). */
 export function periodFetchOpts(p: PeriodState): { date?: string; month?: string; year?: number } {
   if (p.gran === "month") return { month: p.anchor.slice(0, 7) };

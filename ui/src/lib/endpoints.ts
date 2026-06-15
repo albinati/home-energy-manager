@@ -287,14 +287,21 @@ export interface ResidualProfile {
   hp_dhw_by_dow?: Record<string, ResidualProfileSlot[]>;
   hp_space_by_dow?: Record<string, ResidualProfileSlot[]>;
   all: ResidualProfileSlot[];
+  window_days?: number | null;
+  end_date?: string | null;
   flat: number;
   away_days: string[];
   day_counts: { weekday?: number; weekend?: number; away_excluded?: number; negative_excluded?: number; total?: number };
   calibrated_days: number;
   physics_only_days: number;
 }
-export const getResidualProfile = () =>
-  getJson<ResidualProfile>("/load/residual-profile");
+export const getResidualProfile = (opts: { windowDays?: number; endDate?: string } = {}) => {
+  const q = new URLSearchParams();
+  if (opts.windowDays != null) q.set("window_days", String(opts.windowDays));
+  if (opts.endDate) q.set("end_date", opts.endDate);
+  const qs = q.toString();
+  return getJson<ResidualProfile>(`/load/residual-profile${qs ? `?${qs}` : ""}`);
+};
 
 export interface LoadErrorStats {
   n: number;
@@ -309,5 +316,10 @@ export interface LoadErrorLog {
   overall: LoadErrorStats;
   per_hour_local: Record<string, LoadErrorStats>;
 }
-export const getLoadErrorLog = (windowDays = 30) =>
-  getJson<LoadErrorLog>(`/load/error-log?window_days=${windowDays}`);
+export const getLoadErrorLog = (
+  arg: number | { startDate: string; endDate: string } = 30,
+) => {
+  if (typeof arg === "number") return getJson<LoadErrorLog>(`/load/error-log?window_days=${arg}`);
+  const q = new URLSearchParams({ start_date: arg.startDate, end_date: arg.endDate });
+  return getJson<LoadErrorLog>(`/load/error-log?${q.toString()}`);
+};

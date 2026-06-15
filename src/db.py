@@ -1992,6 +1992,7 @@ def clear_residual_profile_cache() -> None:
 def residual_load_profile_v2(
     *,
     window_days: int | None = None,
+    end_date: str | None = None,
     min_samples_per_bucket: int = 4,
     use_cache: bool = True,
 ) -> dict[str, Any]:
@@ -2048,7 +2049,7 @@ def residual_load_profile_v2(
     # as new telemetry / the nightly Daikin sync land, so a 4-min TTL is safe and
     # collapses the per-solve cost to one rebuild. Keyed by DB_PATH so isolated
     # test DBs never share an entry.
-    cache_key = (config.DB_PATH, window_days, min_samples_per_bucket, _v2, exclude_neg)
+    cache_key = (config.DB_PATH, window_days, end_date, min_samples_per_bucket, _v2, exclude_neg)
     if use_cache:
         ent = _RESIDUAL_V2_CACHE.get(cache_key)
         if ent is not None and ent[0] > time.monotonic():
@@ -2061,7 +2062,22 @@ def residual_load_profile_v2(
 
     cop_curve = config.DAIKIN_COP_CURVE
     tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
-    cutoff_iso = (datetime.now(UTC) - timedelta(days=window_days)).isoformat().replace("+00:00", "Z")
+    # The window ENDS at end_date (local, inclusive) when given — so the Insights
+    # navigator can scope the heatmap to a past period — else at now. The lower
+    # bound is end − window_days. end_iso is None for the live (now) case so the
+    # query keeps its original single-bound form.
+    end_iso: str | None = None
+    if end_date:
+        try:
+            end_local = datetime.fromisoformat(str(end_date)).replace(tzinfo=tz)
+            anchor = (end_local + timedelta(days=1)).astimezone(UTC)  # exclusive upper bound
+            end_iso = anchor.isoformat().replace("+00:00", "Z")
+        except (ValueError, TypeError):
+            end_iso = None
+    anchor_utc = (
+        datetime.fromisoformat(end_iso.replace("Z", "+00:00")) if end_iso else datetime.now(UTC)
+    )
+    cutoff_iso = (anchor_utc - timedelta(days=window_days)).isoformat().replace("+00:00", "Z")
 
     with _lock:
         conn = get_connection()
@@ -2083,8 +2099,9 @@ def residual_load_profile_v2(
                            WHERE substr(mv.slot_time, 1, 13) = substr(pv.captured_at, 1, 13)
                            LIMIT 1) AS outdoor_latest_c
                    FROM pv_realtime_history pv
-                   WHERE pv.captured_at > ? AND pv.load_power_kw IS NOT NULL""",
-                (cutoff_iso,),
+                   WHERE pv.captured_at > ? AND pv.load_power_kw IS NOT NULL"""
+                + (" AND pv.captured_at < ?" if end_iso else ""),
+                (cutoff_iso, end_iso) if end_iso else (cutoff_iso,),
             )
             rows = cur.fetchall()
             # Negative-price slots over the window (same source the LP priced
@@ -2094,8 +2111,9 @@ def residual_load_profile_v2(
             if exclude_neg:
                 ncur = conn.execute(
                     """SELECT DISTINCT timestamp FROM execution_log
-                       WHERE timestamp > ? AND agile_price_pence < 0""",
-                    (cutoff_iso,),
+                       WHERE timestamp > ? AND agile_price_pence < 0"""
+                    + (" AND timestamp < ?" if end_iso else ""),
+                    (cutoff_iso, end_iso) if end_iso else (cutoff_iso,),
                 )
                 for nr in ncur.fetchall():
                     try:

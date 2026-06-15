@@ -1,14 +1,19 @@
 import { useEffect, useRef } from "preact/hooks";
 import { useFetch } from "../../lib/poll";
 import { getLoadErrorLog, type LoadErrorLog } from "../../lib/endpoints";
+import { periodDateRange, periodLabel, type PeriodState } from "../../lib/period";
 import { makeChart, chartTheme, type EChartsType } from "../../lib/charts";
 import { Spinner } from "../common/Spinner";
 
 /** How well the household LOAD forecast the LP plans against matched reality,
  *  by local hour. Complements LoadPatternCard (when we spend) with how well we
  *  predict it. Surfaces the load_error_log measurement (Phase 1). Read-only. */
-export function LoadForecastAccuracyCard() {
-  const res = useFetch<LoadErrorLog>(() => getLoadErrorLog(30), []);
+export function LoadForecastAccuracyCard({ period }: { period: PeriodState }) {
+  const { start, end } = periodDateRange(period);
+  const res = useFetch<LoadErrorLog>(
+    () => getLoadErrorLog({ startDate: start, endDate: end }),
+    [start, end],
+  );
   const data = res.data;
   const elRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<EChartsType | null>(null);
@@ -114,7 +119,7 @@ export function LoadForecastAccuracyCard() {
         </>
       )}
       {data && (!o || o.n === 0) && (
-        <p class="muted insights-empty">No load forecast-vs-actual data yet.</p>
+        <p class="muted insights-empty">No load forecast-vs-actual data for {periodLabel(period)} yet.</p>
       )}
     </section>
   );

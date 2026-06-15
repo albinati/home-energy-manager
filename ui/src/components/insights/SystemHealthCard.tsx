@@ -1,38 +1,45 @@
 import { useFetch } from "../../lib/poll";
 import { getLpScorecard } from "../../lib/endpoints";
+import { periodLastCompleteDay, type PeriodState } from "../../lib/period";
 import type { LpScorecard } from "../../lib/types";
 
-// "System health" — yesterday's LP scorecard (the last COMPLETE day, so the
-// plan-vs-realised comparison isn't half-empty). Three slices: did the plan
-// match reality (dispatch accuracy), did optimising pay (vs a naive self-use
-// shadow), and how good were the forecasts the LP planned on. Renders nothing
-// when the scorecard endpoint or its data isn't there — this card is a
-// diagnostic, not a load-bearing surface.
-
-function yesterdayIso(): string {
-  const d = new Date();
-  d.setDate(d.getDate() - 1);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
+// "System health" — the LP scorecard for the last COMPLETE day of the selected
+// period (so the plan-vs-realised comparison isn't half-empty). Follows the
+// navigator: a past period shows its final day, the current period shows
+// yesterday. Three slices: did the plan match reality (dispatch accuracy), did
+// optimising pay (vs a naive self-use shadow), and how good were the forecasts
+// the LP planned on.
 
 const pct = (v: number | null | undefined) => (v == null ? "—" : `${Math.round(v)}%`);
 const pence = (v: number | null | undefined) =>
   v == null ? "—" : `${v >= 0 ? "" : "−"}£${Math.abs(v / 100).toFixed(2)}`;
 
-export function SystemHealthCard() {
-  const day = yesterdayIso();
+export function SystemHealthCard({ period }: { period: PeriodState }) {
+  const day = periodLastCompleteDay(period);
   const res = useFetch(() => getLpScorecard(day), [day]);
   const sc: LpScorecard | undefined = res.data?.scorecard;
-  if (!sc) return null;
 
-  const disp = sc.dispatch_accuracy;
-  const econ = sc.economic_value;
-  const fc = sc.forecast_accuracy;
   // The backend grades a data-less day "N/A" (a string, never null) — treat
-  // it as no-grade so an empty day renders nothing instead of a hollow card.
-  const grade = sc.grade && sc.grade !== "N/A" ? sc.grade : null;
+  // it as no-grade.
+  const grade = sc?.grade && sc.grade !== "N/A" ? sc.grade : null;
+  const disp = sc?.dispatch_accuracy;
+  const econ = sc?.economic_value;
+  const fc = sc?.forecast_accuracy;
   const hasAnything = !!(grade || disp?.n_slots_with_plan || econ?.lp_realised_cost_p != null);
-  if (!hasAnything) return null;
+
+  if (!sc || !hasAnything) {
+    // A diagnostic, not a load-bearing surface — but a quiet placeholder reads
+    // better than a blank page bottom on a data-thin day.
+    return (
+      <section class="syshealth">
+        <header class="syshealth-head">
+          <h2>System health</h2>
+          <span class="muted">LP scorecard · {day}</span>
+        </header>
+        <p class="muted insights-empty">No scorecard for {day} yet.</p>
+      </section>
+    );
+  }
 
   const avoided = econ?.lp_avoided_cost_p;
 
