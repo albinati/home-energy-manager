@@ -32,37 +32,65 @@ from .config import config
 logger = logging.getLogger(__name__)
 
 
-def _local_hour_bias(window_days: int) -> tuple[dict[int, list[float]], ZoneInfo]:
-    """Recency-weighted accumulator per local hour: {hour: [sum_w_err, sum_w, n]}."""
+def _is_low_daikin(forecast_total: float | None, forecast_base: float | None, max_daikin: float) -> bool:
+    """True when the committed heat-pump load (total − base) is below ``max_daikin``,
+    so on this slot total ≈ base and the measured error isolates the base bias.
+    Requires both columns present (can't confirm low-Daikin otherwise → exclude)."""
+    if forecast_total is None or forecast_base is None:
+        return False
+    return (float(forecast_total) - float(forecast_base)) <= max_daikin
+
+
+def _local_hour_bias(window_days: int, rows: list | None = None) -> tuple[dict[int, dict], ZoneInfo]:
+    """Recency-weighted accumulator per local hour, LEARNED ONLY from low-Daikin
+    slots so it isolates the base-load bias. Returns
+    ``{hour: {"sw":.., "w":.., "n":.., "days": set()}}``. ``rows`` overridable for
+    the backtest holdout."""
     from . import db as _db
 
     half_life = float(getattr(config, "LOAD_RECENT_BIAS_HALFLIFE_DAYS", 7))
     min_kwh = float(getattr(config, "LOAD_RECENT_BIAS_MIN_KWH", 0.05))
+    max_daikin = float(getattr(config, "LOAD_RECENT_BIAS_MAX_DAIKIN_KWH", 0.1))
     tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
 
     now = datetime.now(UTC)
-    start = now - timedelta(days=window_days)
-    rows = _db.get_load_error_log_range(
-        start.strftime("%Y-%m-%dT%H:%M:%SZ"), now.strftime("%Y-%m-%dT%H:%M:%SZ")
-    )
-    acc: dict[int, list[float]] = {}
+    if rows is None:
+        start = now - timedelta(days=window_days)
+        rows = _db.get_load_error_log_range(
+            start.strftime("%Y-%m-%dT%H:%M:%SZ"), now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        )
+    acc: dict[int, dict] = {}
     for r in rows:
         f = r.get("forecast_kwh")
         a = r.get("actual_kwh")
         if f is None or a is None or f < min_kwh or a < min_kwh:
             continue
+        if not _is_low_daikin(f, r.get("forecast_base_kwh"), max_daikin):
+            continue  # heat-pump-heavy slot — its error isn't the base's, skip
         try:
             ts = datetime.fromisoformat(str(r["slot_time_utc"]).replace("Z", "+00:00"))
         except (ValueError, TypeError, KeyError):
             continue
-        lh = ts.astimezone(tz).hour
+        local = ts.astimezone(tz)
+        lh = local.hour
         age_days = max(0.0, (now - ts).total_seconds() / 86400.0)
         w = 0.5 ** (age_days / half_life) if half_life > 0 else 1.0
-        d = acc.setdefault(lh, [0.0, 0.0, 0.0])
-        d[0] += w * (float(a) - float(f))  # additive error (actual − forecast)
-        d[1] += w
-        d[2] += 1
+        d = acc.setdefault(lh, {"sw": 0.0, "w": 0.0, "n": 0, "days": set()})
+        d["sw"] += w * (float(a) - float(f))  # additive base error (low-Daikin → total≈base)
+        d["w"] += w
+        d["n"] += 1
+        d["days"].add(local.date())
     return acc, tz
+
+
+def _bias_from_acc(acc: dict[int, dict], *, max_kwh: float, min_days: int) -> dict[int, float]:
+    """Clamp + min-DISTINCT-DAYS gate over a low-Daikin accumulator → {hour: bias}."""
+    out: dict[int, float] = {}
+    for h, d in acc.items():
+        if d["w"] <= 0 or len(d["days"]) < min_days:
+            continue
+        out[h] = max(-max_kwh, min(max_kwh, d["sw"] / d["w"]))
+    return out
 
 
 def compute_load_recent_bias_by_hour_local() -> tuple[dict[int, float], dict[int, float], dict[int, int], dict[str, Any]]:
@@ -74,7 +102,7 @@ def compute_load_recent_bias_by_hour_local() -> tuple[dict[int, float], dict[int
     window = int(getattr(config, "LOAD_RECENT_BIAS_WINDOW_DAYS", 21))
     damping = float(getattr(config, "LOAD_RECENT_BIAS_DAMPING", 0.5))
     max_kwh = float(getattr(config, "LOAD_RECENT_BIAS_MAX_KWH", 0.3))
-    min_samples = int(getattr(config, "LOAD_RECENT_BIAS_MIN_SAMPLES", 3))
+    min_days = int(getattr(config, "LOAD_RECENT_BIAS_MIN_SAMPLES", 3))
 
     try:
         prev = _db.get_load_recent_bias()
@@ -82,13 +110,11 @@ def compute_load_recent_bias_by_hour_local() -> tuple[dict[int, float], dict[int
         prev = {}
 
     acc, _tz = _local_hour_bias(window)
+    raw_map = _bias_from_acc(acc, max_kwh=max_kwh, min_days=min_days)
     applied: dict[int, float] = {}
     raw: dict[int, float] = {}
     samples: dict[int, int] = {}
-    for h, (sw, w, n) in acc.items():
-        if w <= 0 or n < min_samples:
-            continue
-        raw_bias = sw / w
+    for h, raw_bias in raw_map.items():
         if h in prev:
             # Accumulate on the previous correction by the RESIDUAL error of the
             # already-corrected forecast → ramps to full, settles at raw_bias≈0.
@@ -98,9 +124,10 @@ def compute_load_recent_bias_by_hour_local() -> tuple[dict[int, float], dict[int
         new_bias = max(-max_kwh, min(max_kwh, new_bias))
         raw[h] = round(raw_bias, 4)
         applied[h] = round(new_bias, 4)
-        samples[h] = int(n)
+        samples[h] = int(acc[h]["n"])
     diag = {"window_days": window, "damping": damping, "clamp_kwh": max_kwh,
-            "min_samples": min_samples, "n_hours": len(applied)}
+            "min_days": min_days, "n_hours": len(applied),
+            "learned_from": "low_Daikin_slots"}
     return applied, raw, samples, diag
 
 
@@ -122,32 +149,9 @@ def refresh_load_recent_bias() -> int:
     return n
 
 
-def backtest_load_recent_bias(window_days: int | None = None) -> dict[str, Any]:
-    """Offline what-if: would the additive corrector have reduced the error over
-    the persisted load_error_log? Computes the per-local-hour correction from the
-    window, replays ``corrected = max(0, forecast + bias[hour])`` per slot, and
-    reports MAE/bias BEFORE vs AFTER. Read-only — never writes, never touches the
-    LP. This is the gate for deciding whether to enable the corrector.
-    """
-    from . import db as _db
-
-    window = int(window_days or getattr(config, "LOAD_RECENT_BIAS_WINDOW_DAYS", 21))
-    min_kwh = float(getattr(config, "LOAD_RECENT_BIAS_MIN_KWH", 0.05))
-    # Compute the correction map from a clean (no-prev) run so the backtest reflects
-    # the warm-start correction the loop converges to, not a half-ramped state.
-    acc, tz = _local_hour_bias(window)
-    max_kwh = float(getattr(config, "LOAD_RECENT_BIAS_MAX_KWH", 0.3))
-    min_samples = int(getattr(config, "LOAD_RECENT_BIAS_MIN_SAMPLES", 3))
-    bias = {}
-    for h, (sw, w, n) in acc.items():
-        if w > 0 and n >= min_samples:
-            bias[h] = max(-max_kwh, min(max_kwh, sw / w))
-
-    now = datetime.now(UTC)
-    start = now - timedelta(days=window)
-    rows = _db.get_load_error_log_range(
-        start.strftime("%Y-%m-%dT%H:%M:%SZ"), now.strftime("%Y-%m-%dT%H:%M:%SZ")
-    )
+def _evaluate(rows: list, bias: dict[int, float], tz: ZoneInfo, min_kwh: float) -> dict[str, Any] | None:
+    """Replay ``corrected = max(0, forecast + bias[local_hour])`` over ``rows``;
+    MAE/bias before vs after. Evaluated on TOTAL forecast (what the LP provisions)."""
     before_abs = before_sum = after_abs = after_sum = 0.0
     n = 0
     for r in rows:
@@ -161,21 +165,70 @@ def backtest_load_recent_bias(window_days: int | None = None) -> dict[str, Any]:
             continue
         lh = ts.astimezone(tz).hour
         corrected = max(0.0, float(f) + bias.get(lh, 0.0))
-        e0 = float(a) - float(f)
-        e1 = float(a) - corrected
+        e0, e1 = float(a) - float(f), float(a) - corrected
         before_abs += abs(e0); before_sum += e0
         after_abs += abs(e1); after_sum += e1
         n += 1
     if n == 0:
-        return {"n": 0, "note": "no paired slots in window"}
+        return None
     mae0, mae1 = before_abs / n, after_abs / n
     return {
-        "window_days": window,
         "n_slots": n,
-        "n_hours_corrected": len(bias),
         "before": {"mae_kwh": round(mae0, 4), "bias_kwh": round(before_sum / n, 4)},
         "after": {"mae_kwh": round(mae1, 4), "bias_kwh": round(after_sum / n, 4)},
         "mae_reduction_kwh": round(mae0 - mae1, 4),
         "mae_reduction_pct": round((mae0 - mae1) / mae0 * 100, 2) if mae0 > 0 else 0.0,
-        "correction_by_hour_local": {str(h): round(bias[h], 4) for h in sorted(bias)},
+    }
+
+
+def backtest_load_recent_bias(window_days: int | None = None) -> dict[str, Any]:
+    """Offline what-if for the corrector — the gate for enabling it. Reports BOTH:
+
+    * ``in_sample`` — correction fit on the whole window, evaluated on the same
+      slots (optimistic; structured bias always looks good).
+    * ``out_of_sample`` — correction fit on the OLDER half, evaluated on the
+      RECENT half (honest; this is the number to decide on).
+
+    Read-only — never writes, never touches the LP. The correction is learned only
+    from low-Daikin slots (isolates base bias) but EVALUATED on the total forecast
+    (what the LP must provision).
+    """
+    from . import db as _db
+
+    window = int(window_days or getattr(config, "LOAD_RECENT_BIAS_WINDOW_DAYS", 21))
+    min_kwh = float(getattr(config, "LOAD_RECENT_BIAS_MIN_KWH", 0.05))
+    max_kwh = float(getattr(config, "LOAD_RECENT_BIAS_MAX_KWH", 0.3))
+    min_days = int(getattr(config, "LOAD_RECENT_BIAS_MIN_SAMPLES", 3))
+
+    now = datetime.now(UTC)
+    start = now - timedelta(days=window)
+    rows = _db.get_load_error_log_range(
+        start.strftime("%Y-%m-%dT%H:%M:%SZ"), now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    )
+    if not rows:
+        return {"n_slots": 0, "note": "no paired slots in window"}
+
+    # In-sample: fit on all, evaluate on all.
+    acc_all, tz = _local_hour_bias(window, rows=rows)
+    bias_all = _bias_from_acc(acc_all, max_kwh=max_kwh, min_days=min_days)
+    in_sample = _evaluate(rows, bias_all, tz, min_kwh)
+
+    # Out-of-sample: split by time at the window midpoint; fit older, eval recent.
+    mid = (now - timedelta(days=window / 2.0)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    older = [r for r in rows if str(r["slot_time_utc"]) < mid]
+    recent = [r for r in rows if str(r["slot_time_utc"]) >= mid]
+    out_of_sample = None
+    if older and recent:
+        acc_old, _tz = _local_hour_bias(window, rows=older)
+        bias_old = _bias_from_acc(acc_old, max_kwh=max_kwh, min_days=max(1, min_days // 2))
+        out_of_sample = _evaluate(recent, bias_old, tz, min_kwh)
+
+    return {
+        "window_days": window,
+        "learned_from": "low_Daikin_slots",
+        "evaluated_on": "total_forecast",
+        "n_hours_corrected": len(bias_all),
+        "in_sample": in_sample,
+        "out_of_sample": out_of_sample,
+        "correction_by_hour_local": {str(h): round(bias_all[h], 4) for h in sorted(bias_all)},
     }

@@ -753,7 +753,16 @@ class Config:
     LOAD_RECENT_BIAS_MAX_KWH: float = float(os.getenv("LOAD_RECENT_BIAS_MAX_KWH", "0.3"))
     # A slot needs at least this forecast+actual kWh to contribute (drop noise).
     LOAD_RECENT_BIAS_MIN_KWH: float = float(os.getenv("LOAD_RECENT_BIAS_MIN_KWH", "0.05"))
+    # Min DISTINCT DAYS of evidence for a local hour before it gets a correction.
     LOAD_RECENT_BIAS_MIN_SAMPLES: int = int(os.getenv("LOAD_RECENT_BIAS_MIN_SAMPLES", "3"))
+    # Per-slot we can only measure TOTAL load (no per-slot Daikin meter). To
+    # isolate the BASE (residual) bias — the only thing this corrector should
+    # touch — we only LEARN from slots where the committed heat-pump load
+    # (forecast_kwh − forecast_base_kwh) is below this, so on the learning slots
+    # total ≈ base and the heat-pump timing error doesn't pollute the base
+    # correction. Hours that are always heat-pump-heavy (e.g. the 13–14h warmup)
+    # get no clean sample → no correction, which is the honest outcome.
+    LOAD_RECENT_BIAS_MAX_DAIKIN_KWH: float = float(os.getenv("LOAD_RECENT_BIAS_MAX_DAIKIN_KWH", "0.1"))
 
     # Agile scheduler (Daikin ASHP by price)
     SCHEDULER_ENABLED: bool = os.getenv("SCHEDULER_ENABLED", "false").lower() in ("true", "1", "yes")
