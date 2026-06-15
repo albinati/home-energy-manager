@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "preact/hooks";
 import { useFetch } from "../lib/poll";
 import { getFairCompare } from "../lib/endpoints";
-import { usePeriod, periodLabel } from "../lib/period";
+import { usePeriod, periodLabel, isCurrentPeriod } from "../lib/period";
 import { PeriodNavigator } from "../components/shell/PeriodNavigator";
 import { Pill } from "../components/common/Pill";
 import { gbp, gbpSigned, kwh } from "../lib/format";
@@ -22,6 +22,7 @@ export default function Insights() {
   const cmp = useFetch(
     () => getFairCompare(period.gran, period.anchor),
     [period.gran, period.anchor],
+    { cacheKey: `fair:${period.gran}:${period.anchor}`, immutable: !isCurrentPeriod(period) },
   );
   const data = cmp.data;
   const rows = data?.tariffs ?? [];

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { useFetch } from "../../lib/poll";
 import { getResidualProfile, type ResidualProfile, type ResidualProfileSlot } from "../../lib/endpoints";
-import { periodWindow, periodLabel, type PeriodState } from "../../lib/period";
+import { periodWindow, periodLabel, isCurrentPeriod, type PeriodState } from "../../lib/period";
 import { makeChart, chartTheme, type EChartsType } from "../../lib/charts";
 import { Spinner } from "../common/Spinner";
 
@@ -24,9 +24,15 @@ const VIEW_DESC: Record<View, string> = {
  *  (tank/DHW) vs space heating from the measured Onecta meters (#574). */
 export function LoadPatternCard({ period }: { period: PeriodState }) {
   const { windowDays, endDate } = periodWindow(period);
+  // Anchored (month/year) past windows are immutable; the live recent window
+  // (day/week, no endDate) keeps refreshing.
   const res = useFetch<ResidualProfile>(
     () => getResidualProfile({ windowDays, endDate }),
     [windowDays, endDate],
+    {
+      cacheKey: `residual:${windowDays}:${endDate ?? "live"}`,
+      immutable: !!endDate && !isCurrentPeriod(period),
+    },
   );
   const data = res.data;
   const hasHp = !!data?.hp_by_dow;
@@ -103,7 +109,7 @@ export function LoadPatternCard({ period }: { period: PeriodState }) {
         emphasis: { itemStyle: { borderColor: t.text, borderWidth: 1 } },
         progressive: 0,
       }],
-    });
+    }, { notMerge: true });
     chartRef.current.resize();
   }, [data, view]);
 

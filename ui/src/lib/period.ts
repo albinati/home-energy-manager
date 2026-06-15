@@ -52,6 +52,12 @@ export function setGranularity(gran: Granularity): void {
   selectedPeriod.value = { gran, anchor: cur > t ? t : cur };
 }
 
+/** Jump straight to the current period, keeping the chosen granularity — the
+ * "Today" affordance. Snaps the anchor to today so isCurrentPeriod() is true. */
+export function goToNow(): void {
+  selectedPeriod.value = { gran: selectedPeriod.value.gran, anchor: todayISO() };
+}
+
 /** Step the anchor backward (-1) or forward (+1) by one unit of the granularity. */
 export function stepPeriod(dir: -1 | 1): void {
   const { gran, anchor } = selectedPeriod.value;

@@ -2,6 +2,7 @@ import {
   usePeriod,
   setGranularity,
   stepPeriod,
+  goToNow,
   isCurrentPeriod,
   periodLabel,
   periodScope,
@@ -42,6 +43,9 @@ export function PeriodNavigator({ variant = "page" }: { variant?: "page" | "chro
         <span class="pnav-label" aria-live="polite">{label}</span>
         <button class="pnav-arrow" onClick={() => stepPeriod(1)} disabled={atNow}
                 aria-label="Next period" title={atNow ? "Already at the current period" : undefined}>›</button>
+        <button class="pnav-today" onClick={goToNow} disabled={atNow}
+                aria-label="Jump to the current period"
+                title={atNow ? "Already at the current period" : "Jump to now"}>Today</button>
       </div>
       <div class="pnav-grans" role="tablist" aria-label="Granularity">
         {GRANS.map((g) => (

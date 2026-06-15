@@ -1,6 +1,6 @@
 import { useFetch } from "../../lib/poll";
 import { getLpScorecard } from "../../lib/endpoints";
-import { periodLastCompleteDay, type PeriodState } from "../../lib/period";
+import { periodLastCompleteDay, isCurrentPeriod, type PeriodState } from "../../lib/period";
 import type { LpScorecard } from "../../lib/types";
 
 // "System health" — the LP scorecard for the last COMPLETE day of the selected
@@ -16,7 +16,13 @@ const pence = (v: number | null | undefined) =>
 
 export function SystemHealthCard({ period }: { period: PeriodState }) {
   const day = periodLastCompleteDay(period);
-  const res = useFetch(() => getLpScorecard(day), [day]);
+  // Past periods are immutable; the current period's day is yesterday, whose
+  // scorecard can still change after the ~04:00 consumption backfill, so leave
+  // it live (refetch on revisit).
+  const res = useFetch(() => getLpScorecard(day), [day], {
+    cacheKey: `scorecard:${day}`,
+    immutable: !isCurrentPeriod(period),
+  });
   const sc: LpScorecard | undefined = res.data?.scorecard;
 
   // The backend grades a data-less day "N/A" (a string, never null) — treat

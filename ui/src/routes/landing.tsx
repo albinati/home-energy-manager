@@ -26,7 +26,7 @@ import { Icon } from "../components/common/Icon";
 import { Spinner } from "../components/common/Spinner";
 import { RefreshCountdown } from "../components/common/RefreshCountdown";
 import { PeriodNavigator } from "../components/shell/PeriodNavigator";
-import { usePeriod, periodFetchOpts, periodScope } from "../lib/period";
+import { usePeriod, periodFetchOpts, periodScope, isCurrentPeriod } from "../lib/period";
 import { LivePowerWidget } from "../components/cockpit/LivePowerWidget";
 import { Hero } from "../components/home/Hero";
 import { HeatingWidget } from "../components/home/HeatingWidget";
@@ -108,6 +108,7 @@ export default function Landing() {
   const periodInsights = useFetch(
     () => getEnergyPeriod(period.gran, periodFetchOpts(period)),
     [period.gran, period.anchor],
+    { cacheKey: `energy:${period.gran}:${period.anchor}`, immutable: !isCurrentPeriod(period) },
   );
 
   // Publish the cockpit's per-source freshness map so the shell-level

@@ -32,6 +32,24 @@
 .pnav-arrow:hover { background: var(--bg-card-2); }
 .pnav-arrow:disabled { opacity: 0.35; cursor: default; }
 
+/* "Today" quick-reset — sits after the next arrow; disabled (and visually
+ * recessed) once the selected period already contains today. */
+.pnav-today {
+  height: 32px;
+  padding: 0 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text-dim);
+  font-size: var(--font-sm);
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease, opacity 140ms ease;
+}
+.pnav-today:hover { background: var(--bg-card-2); color: var(--text); }
+.pnav-today:disabled { opacity: 0.35; cursor: default; }
+
 .pnav-label {
   min-width: 9ch;
   text-align: center;
@@ -103,6 +121,16 @@
   color: var(--text-dim);
   white-space: nowrap;
 }
+.pnav--chrome .pnav-today {
+  height: 28px;
+  padding: 0 10px;
+  font-size: var(--font-xs);
+  border: none;
+  background: var(--bg-card-2);
+  color: var(--text-dim);
+}
+.pnav--chrome .pnav-today:hover { background: var(--bg-card-3); color: var(--text); }
+.pnav--chrome .pnav-today:disabled:hover { background: var(--bg-card-2); color: var(--text-dim); }
 
 @media (max-width: 960px) { .pnav--chrome { display: none; } }
 @media (min-width: 961px) { .pnav--page { display: none; } }
@@ -118,4 +146,5 @@
   .pnav--page .pnav-label { min-width: 7ch; font-size: var(--font-sm); }
   .pnav--page .pnav-gran { padding: 5px 9px; font-size: var(--font-xs); }
   .pnav--page .pnav-arrow { width: 28px; height: 28px; font-size: 16px; }
+  .pnav--page .pnav-today { height: 28px; padding: 0 9px; font-size: var(--font-xs); }
 }
