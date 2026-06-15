@@ -2094,7 +2094,7 @@ def residual_load_profile_v2(
             flat = mean_consumption_kwh_from_execution_logs(limit=2016)
         return _finish({
             "profile": {(h, m): flat for h in range(24) for m in (0, 30)},
-            "spread": {}, "flat": flat, "away_days": [],
+            "hp_profile": {}, "spread": {}, "flat": flat, "away_days": [],
             "day_counts": {"weekday": 0, "weekend": 0, "away_excluded": 0,
                            "negative_excluded": dropped_negative, "total": 0},
             "calibrated_days": 0, "physics_only_days": 0,
@@ -2137,12 +2137,15 @@ def residual_load_profile_v2(
         return 1.0
 
     # Pass 2 — calibrated residual per sample, grouped by date for away detection.
+    # ``hp`` is the calibrated heat-pump (Daikin) slot energy we subtracted — kept
+    # so we can publish its own per-(dow,hour) profile for the heat-pump heatmap.
     by_date_daytime: dict[str, list[float]] = {}
-    residual_samples: list[tuple[datetime, str, float]] = []  # (local, date_iso, residual)
+    residual_samples: list[tuple[datetime, str, float, float]] = []  # (local, date_iso, residual, hp)
     for local, date_iso, b, load_slot, physics_slot in samples:
         k = _calib(date_iso, b)
-        residual = max(0.0, load_slot - physics_slot * k)
-        residual_samples.append((local, date_iso, residual))
+        hp = physics_slot * k
+        residual = max(0.0, load_slot - hp)
+        residual_samples.append((local, date_iso, residual, hp))
         if 9 <= local.hour < 21:
             by_date_daytime.setdefault(date_iso, []).append(residual)
 
@@ -2157,11 +2160,13 @@ def residual_load_profile_v2(
         threshold = away_fraction * pop_median
         away_days = {d for d, sig in day_signatures.items() if sig < threshold}
 
-    # Aggregation (away days removed) into the three tiers.
+    # Aggregation (away days removed) into the three tiers. ``hp_tiers`` mirrors
+    # ``tiers`` for the heat-pump split so both heatmaps share the same buckets.
     tiers: dict[Any, list[float]] = {}
+    hp_tiers: dict[Any, list[float]] = {}
     weekday_days: set[str] = set()
     weekend_days: set[str] = set()
-    for local, date_iso, residual in residual_samples:
+    for local, date_iso, residual, hp in residual_samples:
         if date_iso in away_days:
             continue
         dow = local.weekday()
@@ -2172,14 +2177,17 @@ def residual_load_profile_v2(
         if _v2:  # day-of-week + weekday/weekend tiers (kill-switch off → (h,m) only)
             tiers.setdefault((dow, h, m), []).append(residual)
             tiers.setdefault((group, h, m), []).append(residual)
+            hp_tiers.setdefault((dow, h, m), []).append(hp)
+            hp_tiers.setdefault((group, h, m), []).append(hp)
         tiers.setdefault((h, m), []).append(residual)
+        hp_tiers.setdefault((h, m), []).append(hp)
 
     def _p75(vs: list[float]) -> float:
         if len(vs) < 2:
             return vs[0] if vs else 0.0
         return _quantiles(vs, n=4)[2]
 
-    retained = [r for (_l, d, r) in residual_samples if d not in away_days]
+    retained = [r for (_l, d, r, _hp) in residual_samples if d not in away_days]
     flat = _median(retained) if retained else (
         mean_fox_load_kwh_per_slot(limit=60) or mean_consumption_kwh_from_execution_logs(limit=2016)
     )
@@ -2190,6 +2198,14 @@ def residual_load_profile_v2(
         if len(vs) >= min_samples_per_bucket:
             profile[key] = _median(vs)
             spread[key] = _p75(vs)
+
+    # Heat-pump profile — same tier structure, median per bucket. Unfilled buckets
+    # mean "no heat-pump signal learned there" → the lookup falls back to 0, which
+    # is the honest reading (the heat pump genuinely idles in many slots).
+    hp_profile: dict[Any, float] = {}
+    for key, vs in hp_tiers.items():
+        if len(vs) >= min_samples_per_bucket:
+            hp_profile[key] = _median(vs)
 
     # Always fill all 48 (h, m) buckets (hour-aware fallback) so the lookup chain
     # has a guaranteed leaf below the dow/group tiers.
@@ -2225,6 +2241,7 @@ def residual_load_profile_v2(
     )
     return _finish({
         "profile": profile,
+        "hp_profile": hp_profile,
         "spread": spread,
         "flat": float(flat),
         "away_days": sorted(away_days),
@@ -2251,6 +2268,20 @@ def lookup_residual_kwh(profile_obj: dict[str, Any], dow: int, h: int, m: int) -
         if v is not None:
             return float(v)
     return float(profile_obj.get("flat", 0.0))
+
+
+def lookup_hp_kwh(profile_obj: dict[str, Any], dow: int, h: int, m: int) -> float:
+    """Resolve the heat-pump (Daikin) kWh for a slot from a
+    :func:`residual_load_profile_v2` object, same fallback hierarchy as
+    :func:`lookup_residual_kwh` but over ``hp_profile``. Returns 0.0 when no
+    heat-pump signal was learned for the slot (honest — the pump idles often)."""
+    hp = profile_obj.get("hp_profile", {})
+    group = "weekend" if dow >= 5 else "weekday"
+    for key in ((dow, h, m), (group, h, m), (h, m)):
+        v = hp.get(key)
+        if v is not None:
+            return float(v)
+    return 0.0
 
 
 def lookup_residual_spread_kwh(profile_obj: dict[str, Any], dow: int, h: int, m: int) -> float:
