@@ -129,6 +129,23 @@
   margin-top: var(--space-2);
 }
 
+/* Load forecast accuracy card */
+.load-accuracy {
+  margin-top: var(--space-5);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border);
+}
+.la-key { font-weight: 700; }
+.la-key.la-over { color: var(--pv, #38bdf8); }
+.la-key.la-under { color: var(--bad); }
+.la-stats {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: var(--space-3); margin: var(--space-3) 0 var(--space-2);
+}
+.la-stat { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.la-stat-val { font-size: var(--font-lg); font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
+.la-stat-lbl { font-size: var(--font-2xs); color: var(--text-mute); }
+
 /* ── fair-compare loading skeleton ─────────────────────────────────────
  * Self-contained (insights doesn't import home.css where .skel-text lives).
  * Ghost rows mirror the real table's rhythm so the eventual swap is calm. */

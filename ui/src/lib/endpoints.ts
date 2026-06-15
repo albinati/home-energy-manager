@@ -293,3 +293,19 @@ export interface ResidualProfile {
 }
 export const getResidualProfile = () =>
   getJson<ResidualProfile>("/load/residual-profile");
+
+export interface LoadErrorStats {
+  n: number;
+  mae_kwh: number;
+  bias_kwh: number;
+  mean_forecast_kwh: number;
+  mean_actual_kwh: number;
+}
+export interface LoadErrorLog {
+  window_days: number;
+  n_slots_logged: number;
+  overall: LoadErrorStats;
+  per_hour_local: Record<string, LoadErrorStats>;
+}
+export const getLoadErrorLog = (windowDays = 30) =>
+  getJson<LoadErrorLog>(`/load/error-log?window_days=${windowDays}`);
