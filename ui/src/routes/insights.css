@@ -46,6 +46,8 @@
 .insights-export { color: var(--ok); }
 .insights-cheaper { color: var(--ok); font-weight: 600; }
 .insights-dearer { color: var(--bad); }
+/* A dearer alternative is reassuring, not a loss — muted "+£X", never red. */
+.insights-costlier { color: var(--text-mute); }
 
 .insights-note { margin-top: var(--space-3); font-size: var(--font-2xs); max-width: 70ch; }
 .insights-legend-approx { color: var(--warn); font-weight: 700; }
