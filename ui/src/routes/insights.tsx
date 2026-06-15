@@ -8,6 +8,7 @@ import { gbp, gbpSigned, kwh } from "../lib/format";
 import { makeChart, baseOption, chartTheme, barGradient, withAlpha, type EChartsType } from "../lib/charts";
 import type { FairTariffRow } from "../lib/types";
 import { LoadPatternCard } from "../components/insights/LoadPatternCard";
+import { LoadForecastAccuracyCard } from "../components/insights/LoadForecastAccuracyCard";
 import { SystemHealthCard } from "../components/insights/SystemHealthCard";
 import "./insights.css";
 
@@ -173,6 +174,7 @@ export default function Insights() {
       )}
 
       <LoadPatternCard />
+      <LoadForecastAccuracyCard />
       <SystemHealthCard />
     </div>
   );
