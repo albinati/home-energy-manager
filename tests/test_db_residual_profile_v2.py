@@ -132,6 +132,52 @@ def test_calibration_fallback_equals_pure_physics() -> None:
     assert db.lookup_residual_kwh(prof, 4, 8, 0) == pytest.approx(legacy[(8, 0)], abs=0.05)
 
 
+def _seed_negative_exec(d: date, hour: int, minute: int = 0) -> None:
+    """Mark the half-hour slot at LOCAL (hour:minute) on date d as negative-price
+    in execution_log (the same source residual_load_profile_v2 reads)."""
+    t_utc = datetime(d.year, d.month, d.day, hour, minute, tzinfo=LON).astimezone(UTC)
+    db.log_execution({
+        "timestamp": t_utc.isoformat().replace("+00:00", "Z"),
+        "agile_price_pence": -4.0,
+        "consumption_kwh": 1.0,
+    })
+
+
+def test_negative_price_slots_excluded_by_default() -> None:
+    """Plunge slots carry deliberately-boosted load — they must be dropped so the
+    profile reflects the organic at-home pattern, not price-driven consumption."""
+    tues = _recent_days_of_weekday(1, 6)
+    for d in tues:
+        # 02:00 plunge — boosted high load AND negative price → must be excluded.
+        _seed_local(d, 2, 0, load_kw=3.0)
+        _seed_negative_exec(d, 2, 0)
+        # 19:00 organic evening — normal load, positive price → retained.
+        _seed_local(d, 19, 0, load_kw=0.6)
+
+    prof = db.residual_load_profile_v2(window_days=120)
+    assert prof["day_counts"]["negative_excluded"] >= 6
+    # The boosted plunge bucket is gone → lookup falls back well below 1.5 kWh.
+    assert db.lookup_residual_kwh(prof, 1, 2, 0) < 1.0
+    # The organic bucket survives untouched.
+    assert prof["profile"][(1, 19, 0)] == pytest.approx(0.3, abs=0.1)
+
+
+def test_negative_price_slots_kept_when_killswitch_off(monkeypatch) -> None:
+    """LP_LOAD_EXCLUDE_NEGATIVE_SLOTS=false → legacy behaviour (slots retained)."""
+    from src.config import config as cfg
+    monkeypatch.setattr(cfg, "LP_LOAD_EXCLUDE_NEGATIVE_SLOTS", False, raising=False)
+
+    tues = _recent_days_of_weekday(1, 6)
+    for d in tues:
+        _seed_local(d, 2, 0, load_kw=3.0)
+        _seed_negative_exec(d, 2, 0)
+
+    prof = db.residual_load_profile_v2(window_days=120, use_cache=False)
+    assert prof["day_counts"]["negative_excluded"] == 0
+    # Boosted slots retained → bucket median = 3.0 kW × 0.5 h = 1.5 kWh.
+    assert prof["profile"][(1, 2, 0)] == pytest.approx(1.5, abs=0.1)
+
+
 def test_fallback_hierarchy_and_min_samples() -> None:
     """A (dow,h,m) bucket below min_samples is dropped; lookup falls to (h,m).
     Every (h,m) leaf is always present."""
