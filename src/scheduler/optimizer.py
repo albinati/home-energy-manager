@@ -1139,19 +1139,32 @@ def _persist_lp_snapshots(
         ),
     }
 
+    # #540 W1 — freshest room-sensor reading (None until sensors push / when stale).
+    _w1_indoor_initial_c: float | None = None
+    try:
+        _s = db.get_latest_indoor_reading(
+            max_age_minutes=int(getattr(config, "INDOOR_SENSOR_STALE_MINUTES", 30))
+        )
+        if _s is not None:
+            _w1_indoor_initial_c = float(_s["temp_c"])
+    except Exception:  # pragma: no cover — must never break a solve
+        _w1_indoor_initial_c = None
+
     inputs_row = {
         "run_at_utc": run_at_iso,
         "plan_date": plan_date,
         "horizon_hours": int(config.LP_HORIZON_HOURS),
         "soc_initial_kwh": float(initial.soc_kwh),
         "tank_initial_c": float(initial.tank_temp_c),
-        # PR Phase B: indoor_initial_c retained as schema column for back-compat
-        # but now written as None — the LP no longer carries an indoor-temp
-        # state variable (Daikin Altherma has no room sensor here).
-        "indoor_initial_c": None,
+        # Phase B dropped the LP indoor-temp STATE variable (no room sensor here).
+        # #540 W1: now that room sensors push into room_temperature_history, record
+        # the freshest reading on the snapshot (source="sensor") so it's captured
+        # for the W2 learner + audits. The LP doesn't re-gain t_in until W3; this
+        # is observation-only for now.
+        "indoor_initial_c": _w1_indoor_initial_c,
         "soc_source": getattr(initial, "soc_source", "unknown"),
         "tank_source": getattr(initial, "tank_source", "unknown"),
-        "indoor_source": "removed_phase_b",
+        "indoor_source": ("sensor" if _w1_indoor_initial_c is not None else "removed_phase_b"),
         "base_load_json": json.dumps([round(float(x), 4) for x in base_load]),
         "micro_climate_offset_c": float(micro_climate_offset or 0.0),
         "forecast_fetch_at_utc": forecast_fetch_at_utc,

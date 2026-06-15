@@ -1364,6 +1364,10 @@ class Config:
     BUILDING_THERMAL_MASS_KWH_PER_K: float = float(os.getenv("BUILDING_THERMAL_MASS_KWH_PER_K", "12.0"))
     # INDOOR_SETPOINT_C is runtime-tunable via /api/v1/settings (#52) — see @property below.
     INDOOR_COMFORT_BAND_C: float = float(os.getenv("INDOOR_COMFORT_BAND_C", "1.5"))
+    # #540 W1 — a room-sensor reading older than this is treated as ABSENT (the
+    # comfort guard / LP fall back to the estimator), so a dead sensor can't
+    # freeze the LP on a stale indoor temperature.
+    INDOOR_SENSOR_STALE_MINUTES: int = int(os.getenv("INDOOR_SENSOR_STALE_MINUTES", "30"))
     RADIATOR_MAX_KW: float = float(os.getenv("RADIATOR_MAX_KW", "6.0"))
     # Physical climate (weather-compensation) curve from the Daikin panel.
     # Maps outdoor temperature to leaving-water temperature (LWT) via a straight line through

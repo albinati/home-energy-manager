@@ -888,6 +888,26 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         )"""
     )
 
+    # Winter thermal #540 W1 — indoor temperature ingestion. The Altherma has no
+    # room stat (daikin_room_temp is 100% NULL), so the house's indoor temp has
+    # never been measured. This is the pipe the user's room sensors push into;
+    # multi-room from day one. Idempotent on (captured_at, room). Read by the LP
+    # initial state + the dispatch comfort guard (no-op until fresh rows arrive)
+    # and, later, the W2 thermal learner.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS room_temperature_history (
+            captured_at TEXT NOT NULL,
+            room        TEXT NOT NULL DEFAULT 'home',
+            temp_c      REAL NOT NULL,
+            source      TEXT,
+            quality     TEXT,
+            PRIMARY KEY (captured_at, room)
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_room_temp_captured ON room_temperature_history(captured_at)"
+    )
+
     # V14: presence_periods — manually-flagged periods of household presence
     # (home / travel / guests) so future load-pattern analyses + LP calibration
     # can de-bias the rolling load profile by occupancy. Read by analytics
@@ -4215,6 +4235,89 @@ def get_fox_energy_dates_for_month(year: int, month: int) -> set[str]:
                 (f"{prefix}%",),
             )
             return {r["date"] for r in cur.fetchall()}
+        finally:
+            conn.close()
+
+
+def save_indoor_readings(readings: list[dict[str, Any]]) -> int:
+    """Batch-insert indoor temperature readings (#540 W1). Each dict:
+    ``{captured_at, temp_c, room?, source?, quality?}``. Idempotent on
+    (captured_at, room) so re-pushes don't double-count. Returns rows written.
+
+    ``captured_at`` is normalised to canonical UTC Z form so a getter keyed on
+    ISO string ordering is correct regardless of the pusher's offset format.
+    """
+    written = 0
+    with _lock:
+        conn = get_connection()
+        try:
+            for r in readings:
+                ts = _parse_iso_utc(r.get("captured_at"))
+                temp = r.get("temp_c")
+                if ts is None or temp is None:
+                    continue
+                key = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+                cur = conn.execute(
+                    """INSERT OR IGNORE INTO room_temperature_history
+                       (captured_at, room, temp_c, source, quality)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (key, str(r.get("room") or "home"), float(temp),
+                     r.get("source"), r.get("quality")),
+                )
+                written += cur.rowcount
+            conn.commit()
+        finally:
+            conn.close()
+    return written
+
+
+def get_latest_indoor_reading(max_age_minutes: int = 30) -> dict[str, Any] | None:
+    """Freshest house indoor temperature (#540 W1), or None when no reading is
+    within ``max_age_minutes`` (→ caller falls back to the estimator).
+
+    Multi-room aware: returns the MEAN of the latest reading per room (within the
+    staleness window), plus the newest ``captured_at`` and the room list, so the
+    comfort guard / LP get one representative house temperature."""
+    cutoff = (datetime.now(UTC) - timedelta(minutes=max_age_minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT room, temp_c, captured_at FROM room_temperature_history r
+                   WHERE captured_at >= ?
+                     AND captured_at = (
+                       SELECT MAX(captured_at) FROM room_temperature_history
+                       WHERE room = r.room AND captured_at >= ?)""",
+                (cutoff, cutoff),
+            )
+            rows = cur.fetchall()
+        finally:
+            conn.close()
+    if not rows:
+        return None
+    temps = [float(r["temp_c"]) for r in rows]
+    return {
+        "temp_c": round(sum(temps) / len(temps), 2),
+        "captured_at": max(str(r["captured_at"]) for r in rows),
+        "rooms": sorted({str(r["room"]) for r in rows}),
+        "n_rooms": len(rows),
+    }
+
+
+def get_indoor_readings_range(start_utc_iso: str, end_utc_iso: str) -> list[dict[str, Any]]:
+    """Per-reading rows in ``[start, end)`` (all rooms), oldest first. For the
+    cockpit chart + the W2 thermal learner."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT captured_at, room, temp_c, source, quality
+                   FROM room_temperature_history
+                   WHERE captured_at >= ? AND captured_at < ?
+                   ORDER BY captured_at""",
+                (start_utc_iso, end_utc_iso),
+            )
+            return [dict(r) for r in cur.fetchall()]
         finally:
             conn.close()
 
