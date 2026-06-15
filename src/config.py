@@ -1221,6 +1221,30 @@ class Config:
     DAIKIN_LWT_PREHEAT_DEMAND_LOOKBACK_HOURS: int = int(
         os.getenv("DAIKIN_LWT_PREHEAT_DEMAND_LOOKBACK_HOURS", "48")
     )
+    # Outdoor-temperature cutoff for POSITIVE LWT offsets (Tracked by #540).
+    # The demand gate above is endogenous (trailing measured heating) and can
+    # be fooled by its own output: a positive offset (cheap +BOOST or
+    # negative-price +NEGATIVE_BOOST) WAKES the compressor, and some of that
+    # HEM-induced heat bleeds into 2-h buckets just AFTER the offset window
+    # (thermal lag) → counted as natural demand → gate latches open (the live
+    # June-2026 self-loop: heating 0 → ~4.6 kWh/day once active LWT was on).
+    # Outdoor temperature is an EXOGENOUS signal the loop cannot fake: above a
+    # heating-degree-day base (~15.5 °C, CIBSE) a UK heat-pump house needs
+    # little/no space heat, so positive offsets are suppressed PER SLOT against
+    # the micro-climate-calibrated forecast temp. The NEGATIVE peak setback
+    # (-2) is never cut — it cannot wake the compressor. Default 15 sits just
+    # below the firmware's own 18 °C ambient heating cutoff
+    # (DAIKIN_WEATHER_CURVE_HIGH_C) on purpose. Set high (e.g. 99) to disable.
+    DAIKIN_LWT_PREHEAT_OUTDOOR_CUTOFF_C: float = float(
+        os.getenv("DAIKIN_LWT_PREHEAT_OUTDOOR_CUTOFF_C", "15.0")
+    )
+    # Thermal-lag tail exclusion for the demand-gate decontamination: also drop
+    # this many 2-h buckets AFTER each offset window from the measured-heating
+    # read, so offset-induced heat that bleeds past the window close cannot
+    # re-open the gate during convergence. Default 1 (~2 h). 0 = old behaviour.
+    DAIKIN_LWT_PREHEAT_DECONTAM_TAIL_BUCKETS: int = int(
+        os.getenv("DAIKIN_LWT_PREHEAT_DECONTAM_TAIL_BUCKETS", "1")
+    )
     OPTIMIZATION_DISABLE_WEATHER_REGULATION: bool = os.getenv(
         "OPTIMIZATION_DISABLE_WEATHER_REGULATION", "false"
     ).lower() in ("true", "1", "yes")
