@@ -3612,17 +3612,19 @@ def _half_hourly_grid_kwh_for_day(
 ) -> dict[str, float]:
     """Shared trapezoidal-integration over ``pv_realtime_history.<column>`` for
     ``day``, keyed by ISO half-hour slot start (UTC). ``column`` must be one of
-    ``grid_export_kw`` / ``grid_import_kw`` / ``solar_power_kw`` (caller-vetted).
+    ``grid_export_kw`` / ``grid_import_kw`` / ``solar_power_kw`` /
+    ``battery_discharge_kw`` / ``load_power_kw`` (caller-vetted).
 
     Each sample-pair's energy is assigned to the bucket containing the EARLIER
-    sample (matching :func:`compute_fox_energy_daily_from_realtime`). Slots with
-    no telemetry get no key — caller decides whether to treat missing as zero
-    or fall back to a daily total.
+    sample (matching :func:`compute_fox_energy_daily_from_realtime`). The
+    ``max_gap_seconds`` cap means a telemetry outage doesn't smear a stale value
+    across the gap. Slots with no telemetry get no key — caller decides whether
+    to treat missing as zero or fall back to a daily total.
     """
     from collections import defaultdict
     from datetime import datetime as _dt
 
-    if column not in ("grid_export_kw", "grid_import_kw", "solar_power_kw", "battery_discharge_kw"):
+    if column not in ("grid_export_kw", "grid_import_kw", "solar_power_kw", "battery_discharge_kw", "load_power_kw"):
         raise ValueError(f"unsupported column: {column}")
 
     day_iso = day.isoformat()
@@ -5024,33 +5026,6 @@ def committed_load_forecast_by_slot(day: date) -> dict[str, tuple[float, float]]
     return {k: (v[1], v[2]) for k, v in best.items()}
 
 
-def _actual_load_kwh_by_slot(day: date) -> dict[str, float]:
-    """Realised total household load per half-hour slot for ``day``: mean
-    ``pv_realtime_history.load_power_kw`` in the slot × 0.5 h. Z-form slot keys."""
-    out: dict[str, list[float]] = {}
-    with _lock:
-        conn = get_connection()
-        try:
-            cur = conn.execute(
-                """SELECT captured_at, load_power_kw
-                   FROM pv_realtime_history
-                   WHERE substr(captured_at, 1, 10) = ?
-                     AND load_power_kw IS NOT NULL""",
-                (day.isoformat(),),
-            )
-            samples = cur.fetchall()
-        finally:
-            conn.close()
-    for row in samples:
-        ts = _parse_iso_utc(row["captured_at"])
-        if ts is None:
-            continue
-        slot = ts.replace(minute=0 if ts.minute < 30 else 30, second=0, microsecond=0)
-        key = slot.strftime("%Y-%m-%dT%H:%M:%SZ")
-        out.setdefault(key, []).append(float(row["load_power_kw"]))
-    return {k: (sum(v) / len(v)) * 0.5 for k, v in out.items() if v}
-
-
 def rebuild_load_error_log_for_date(day: date) -> int:
     """Persist per-slot committed-LOAD-forecast-vs-actual rows for ``day``.
 
@@ -5061,7 +5036,9 @@ def rebuild_load_error_log_for_date(day: date) -> int:
     """
     forecast = committed_load_forecast_by_slot(day)
     try:
-        actual = _actual_load_kwh_by_slot(day)
+        # Trapezoidal integration with the shared gap-guarded helper (same actual
+        # path as PV/grid) — an outage can't smear a stale value across the gap.
+        actual = _half_hourly_grid_kwh_for_day(day, "load_power_kw")
     except Exception as e:  # pragma: no cover - defensive
         logger.warning("rebuild_load_error_log: actual roll-up failed for %s: %s", day, e)
         actual = {}
