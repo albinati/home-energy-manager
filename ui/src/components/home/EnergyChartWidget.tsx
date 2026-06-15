@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import { getEnergyPeriod, getDaikinConsumption, getGridToday } from "../../lib/endpoints";
+import { getEnergyPeriod, getDaikinConsumption, getGridToday, getExecutionToday, getPvToday } from "../../lib/endpoints";
 import { usePeriod, setGranularity, selectedPeriod, isCurrentPeriod } from "../../lib/period";
 import { getImmutableCache, setImmutableCache } from "../../lib/poll";
 import { makeChart, baseOption, chartTheme, barGradient, areaGradient, withAlpha, type EChartsType } from "../../lib/charts";
@@ -16,6 +16,13 @@ import type {
 import "./energy-chart.css";
 
 type Granularity = "day" | "week" | "month" | "year";
+
+interface DayPastData {
+  exec: ExecutionTodayResponse | null;
+  pv: PvTodayResponse | null;
+  grid: GridTodayResponse | null;
+  daikin: DaikinConsumptionResponse | null;
+}
 
 // Local-date ISO (matches lib/period.ts) — avoids the UTC drift that
 // `toISOString().slice(0,10)` causes near the day boundary.
@@ -57,6 +64,10 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
   const [daikin, setDaikin] = useState<DaikinConsumptionResponse | null>(null);
   // Day view: per-slot grid import + battery discharge — for the "by source" stack.
   const [grid, setGrid] = useState<GridTodayResponse | null>(null);
+  // Past day: the same per-slot data the live "today" view uses, fetched for the
+  // selected date (the today endpoints all accept ?date=). Lets a past day render
+  // the real intraday chart instead of a single daily-total bar.
+  const [dayData, setDayData] = useState<DayPastData | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const elRef = useRef<HTMLDivElement | null>(null);
@@ -70,6 +81,41 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
     // serve it from the immutable cache (instant, no flash) and skip the fetch.
     const isPast = !isCurrentPeriod({ gran: granularity, anchor });
     const cacheKey = `energychart:${granularity}:${anchor}`;
+
+    // PAST DAY → fetch the same per-slot data the live "today" view uses, for
+    // that date (the today endpoints all accept ?date=), and render the real
+    // intraday chart. Per-slot history IS captured (execution_log etc.), so the
+    // old single-bar fallback (#424) is no longer needed.
+    if (granularity === "day" && !isToday) {
+      const cachedDay = getImmutableCache<DayPastData>(cacheKey);
+      if (cachedDay) {
+        setDayData(cachedDay);
+        setLoading(false);
+        return () => { alive = false; };
+      }
+      setLoading(true);
+      setDayData(null);
+      setPeriod(null);
+      setDaikin(null);
+      setGrid(null);
+      Promise.all([
+        getExecutionToday(anchor).catch(() => null),
+        getPvToday(anchor).catch(() => null),
+        getGridToday(anchor).catch(() => null),
+        getDaikinConsumption("day", { date: anchor }).catch(() => null),
+      ]).then(([e, p, g, dk]) => {
+        if (!alive) return;
+        const v: DayPastData = { exec: e, pv: p, grid: g, daikin: dk };
+        setDayData(v);
+        setLoading(false);
+        setImmutableCache(cacheKey, v); // past day → immutable
+      });
+      return () => { alive = false; };
+    }
+
+    // Non-past-day path uses the period/daikin state — clear any past-day data.
+    setDayData(null);
+
     type Cached = {
       period: PeriodInsightsResponse | null;
       daikin: DaikinConsumptionResponse | null;
@@ -124,14 +170,19 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
     if (!elRef.current) return;
     if (!chartRef.current) chartRef.current = makeChart(elRef.current);
     const chart = chartRef.current;
-    const option = granularity === "day" && isToday
-      ? optionForDay(execution, pv ?? null, grid)
+    const pastDayView = granularity === "day" && !isToday;
+    const option = granularity === "day"
+      ? optionForDay(
+          pastDayView ? dayData?.exec ?? null : execution,
+          pastDayView ? dayData?.pv ?? null : (pv ?? null),
+          pastDayView ? dayData?.grid ?? null : grid,
+        )
       : optionForPeriod(period, daikin, granularity);
     chart.setOption(option, true);
     // Resize handling now lives centrally in makeChart (rAF-debounced
     // ResizeObserver) — the per-effect observer this widget carried would
     // double every resize() call.
-  }, [granularity, period, daikin, grid, execution, pv, isToday]);
+  }, [granularity, period, daikin, grid, dayData, execution, pv, isToday]);
 
   useEffect(() => () => {
     if (chartRef.current) {
@@ -160,15 +211,19 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
     return () => { c.off("click", handler); };
   }, [granularity]);
 
-  const dayHasSlots = granularity === "day" && isToday && !!execution?.slots?.length;
-  const isPastDay = granularity === "day" && !isToday;
+  // Per-slot data for the day view — props for today, the date-fetched set for
+  // a past day (so both render the same intraday chart).
+  const pastDayView = granularity === "day" && !isToday;
+  const effExec = pastDayView ? dayData?.exec ?? null : execution;
+  const effDaikin = pastDayView ? dayData?.daikin ?? null : daikin;
+  const dayHasSlots = granularity === "day" && !!effExec?.slots?.length;
   // Foot summary — LOAD totals only (grid/solar moved to Insights).
   const summary = period ? { load: period.energy.load_kwh } : null;
-  const daikinTotals = daikin?.totals;
-  const todayTotals = granularity === "day" && isToday && execution?.totals
+  const daikinTotals = effDaikin?.totals;
+  const dayTotals = granularity === "day" && effExec?.totals
     ? {
-        load: execution.totals.load_kwh ?? null,
-        residual: execution.totals.residual_kwh_est ?? null,
+        load: effExec.totals.load_kwh ?? null,
+        residual: effExec.totals.residual_kwh_est ?? null,
       }
     : null;
 
@@ -191,16 +246,10 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
         {error && <div class="echart-state echart-state--err">{error}</div>}
       </div>
 
-      {granularity === "day" && isToday && !dayHasSlots && (
+      {granularity === "day" && !dayHasSlots && !loading && (
         <div class="echart-flag">
           <span class="echart-flag-icon"><Icon name="schedule" size={14} /></span>
-          No execution data for today yet — switch to Week.
-        </div>
-      )}
-      {isPastDay && (
-        <div class="echart-flag">
-          <span class="echart-flag-icon"><Icon name="schedule" size={14} /></span>
-          Daily totals shown — per-slot history for past days isn't captured yet (#424).
+          {isToday ? "No execution data for today yet — switch to Week." : "No per-slot data recorded for this day."}
         </div>
       )}
       {granularity === "day" && dayHasSlots && (
@@ -235,13 +284,13 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
           )}
         </div>
       )}
-      {todayTotals && (
+      {dayTotals && (
         <div class="echart-foot">
           <span class="echart-foot-grp">
-            <strong>Today so far</strong>&nbsp;
-            {todayTotals.residual != null && <span class="echart-tok echart-tok-resid">{fmt(todayTotals.residual)} residual load</span>}
-            {todayTotals.load != null && (
-              <>{" · "}<span class="echart-tok echart-tok-load">{fmt(todayTotals.load)} total demand</span></>
+            <strong>{isToday ? "Today so far" : "Total"}</strong>&nbsp;
+            {dayTotals.residual != null && <span class="echart-tok echart-tok-resid">{fmt(dayTotals.residual)} residual load</span>}
+            {dayTotals.load != null && (
+              <>{" · "}<span class="echart-tok echart-tok-load">{fmt(dayTotals.load)} total demand</span></>
             )}
             {daikinTotals && (daikinTotals.kwh_total || 0) > 0 && (
               <>
