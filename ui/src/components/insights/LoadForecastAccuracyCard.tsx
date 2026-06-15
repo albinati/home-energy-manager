@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "preact/hooks";
 import { useFetch } from "../../lib/poll";
 import { getLoadErrorLog, type LoadErrorLog } from "../../lib/endpoints";
-import { periodDateRange, periodLabel, type PeriodState } from "../../lib/period";
+import { periodDateRange, periodLabel, isCurrentPeriod, type PeriodState } from "../../lib/period";
 import { makeChart, chartTheme, type EChartsType } from "../../lib/charts";
 import { Spinner } from "../common/Spinner";
 
@@ -13,6 +13,7 @@ export function LoadForecastAccuracyCard({ period }: { period: PeriodState }) {
   const res = useFetch<LoadErrorLog>(
     () => getLoadErrorLog({ startDate: start, endDate: end }),
     [start, end],
+    { cacheKey: `load-err:${start}:${end}`, immutable: !isCurrentPeriod(period) },
   );
   const data = res.data;
   const elRef = useRef<HTMLDivElement | null>(null);
@@ -71,7 +72,7 @@ export function LoadForecastAccuracyCard({ period }: { period: PeriodState }) {
           label: { show: false },
         },
       }],
-    });
+    }, { notMerge: true });
     chartRef.current.resize();
   }, [data]);
 

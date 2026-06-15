@@ -85,16 +85,52 @@ export function usePoll<T>(
   return { data, error, loading, refresh, lastFetchAt, intervalMs };
 }
 
-// Fetch-once hook for endpoints we don't poll.
+// Immutable response cache for COMPLETED past periods. "Past is past" — a
+// period that doesn't contain today never changes, so once fetched we keep it
+// forever (module-level Map → survives the unmount/remount that route changes
+// cause). The CURRENT period is never cached (callers pass immutable=false when
+// isCurrentPeriod), so live data always refreshes. Keyed by a caller-supplied
+// (endpoint, gran, anchor) string.
+const _immutableCache = new Map<string, unknown>();
+
+/** Read a value the caller previously stored via {@link setImmutableCache}.
+ * Used by hand-rolled fetch effects (e.g. EnergyChartWidget) that can't use
+ * the useFetch cache path. */
+export function getImmutableCache<T>(key: string | null | undefined): T | undefined {
+  return key ? (_immutableCache.get(key) as T | undefined) : undefined;
+}
+
+/** Store a value for a completed past period. No-op for a null key. */
+export function setImmutableCache(key: string | null | undefined, value: unknown): void {
+  if (key) _immutableCache.set(key, value);
+}
+
+export interface FetchOpts {
+  // Stable key for the immutable cache, e.g. `fair:${gran}:${anchor}`.
+  cacheKey?: string | null;
+  // Only cache + serve-from-cache when true (caller passes !isCurrentPeriod so
+  // the live current period always refetches).
+  immutable?: boolean;
+}
+
+// Fetch-once hook for endpoints we don't poll. With `opts.immutable` + a
+// `cacheKey` it serves a completed past period instantly from the module cache
+// and never refetches it (see _immutableCache).
 export function useFetch<T>(
   fn: () => Promise<T>,
   deps: ReadonlyArray<unknown> = [],
+  opts: FetchOpts = {},
 ): PollState<T> {
-  const [data, setData] = useState<T | null>(null);
+  const cacheKey = opts.immutable ? (opts.cacheKey ?? null) : null;
+  const initial = cacheKey != null ? (_immutableCache.get(cacheKey) as T | undefined) : undefined;
+
+  const [data, setData] = useState<T | null>(initial ?? null);
   const [error, setError] = useState<Error | null>(null);
-  const [loading, setLoading] = useState<boolean>(true);
+  const [loading, setLoading] = useState<boolean>(initial === undefined);
   const fnRef = useRef(fn);
   fnRef.current = fn;
+  const keyRef = useRef(cacheKey);
+  keyRef.current = cacheKey;
 
   const mountedRef = useRef(true);
   useEffect(() => {
@@ -105,12 +141,22 @@ export function useFetch<T>(
   }, []);
 
   const refresh = useRef(async () => {
+    // Immutable cache hit (past period already fetched) → serve instantly.
+    const k = keyRef.current;
+    if (k != null && _immutableCache.has(k)) {
+      if (!mountedRef.current) return;
+      setData(_immutableCache.get(k) as T);
+      setError(null);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     try {
       const next = await fnRef.current();
       if (!mountedRef.current) return;
       setData(next);
       setError(null);
+      if (keyRef.current != null) _immutableCache.set(keyRef.current, next);
     } catch (e) {
       if (!mountedRef.current) return;
       setError(e instanceof Error ? e : new Error(String(e)));

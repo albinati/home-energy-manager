@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { getEnergyPeriod, getDaikinConsumption, getGridToday } from "../../lib/endpoints";
-import { usePeriod, setGranularity, selectedPeriod } from "../../lib/period";
+import { usePeriod, setGranularity, selectedPeriod, isCurrentPeriod } from "../../lib/period";
+import { getImmutableCache, setImmutableCache } from "../../lib/poll";
 import { makeChart, baseOption, chartTheme, barGradient, areaGradient, withAlpha, type EChartsType } from "../../lib/charts";
 import { Icon } from "../common/Icon";
 import type {
@@ -63,8 +64,34 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
 
   useEffect(() => {
     let alive = true;
-    setLoading(true);
     setError(null);
+
+    // "Past is past": a period that doesn't contain today never changes, so
+    // serve it from the immutable cache (instant, no flash) and skip the fetch.
+    const isPast = !isCurrentPeriod({ gran: granularity, anchor });
+    const cacheKey = `energychart:${granularity}:${anchor}`;
+    type Cached = {
+      period: PeriodInsightsResponse | null;
+      daikin: DaikinConsumptionResponse | null;
+      grid: GridTodayResponse | null;
+    };
+    const cached = isPast ? getImmutableCache<Cached>(cacheKey) : undefined;
+    if (cached) {
+      setPeriod(cached.period);
+      setDaikin(cached.daikin);
+      setGrid(cached.grid);
+      setLoading(false);
+      return () => { alive = false; };
+    }
+
+    // Clear the previous period's data BEFORE the async fetch so the render
+    // effect can't paint a stale chart while the new data is in flight (the
+    // "chart doesn't update when navigating back" bug).
+    setLoading(true);
+    setPeriod(null);
+    setDaikin(null);
+    setGrid(null);
+
     const opts: { date?: string; month?: string; year?: number } = {};
     if (granularity === "week") opts.date = anchor;
     else if (granularity === "month") opts.month = anchor.slice(0, 7);
@@ -88,6 +115,7 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
       setDaikin(d);
       setGrid(g);
       setLoading(false);
+      if (isPast) setImmutableCache(cacheKey, { period: p, daikin: d, grid: g });
     });
     return () => { alive = false; };
   }, [granularity, anchor]);
