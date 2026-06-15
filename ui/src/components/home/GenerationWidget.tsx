@@ -56,8 +56,11 @@ export function GenerationWidget({ period, periodData, periodLoading, agile, opp
     if (!slots.length) return <p class="muted">No generation data for this day yet.</p>;
     const labels = slots.map((s) => localHM(s.slot_utc));
     const nowIdx = nowIndexOf(slots, pv?.now_utc);
-    const solarPlan = slots.map((s, i) =>
-      nowIdx >= 0 && i > nowIdx ? round2(s.pv_forecast_kwh) : round2(s.pv_planned_kwh ?? s.pv_forecast_kwh));
+    // "Solar plan" = the COMMITTED LP forecast across the WHOLE day (frozen at
+    // solve time), not the live forward forecast for future slots — otherwise
+    // the dashed "plan" line silently became the weather model's latest revision
+    // past `now`. Fall back to the live forecast only where uncommitted.
+    const solarPlan = slots.map((s) => round2(s.pv_planned_kwh ?? s.pv_forecast_kwh));
     const solarActual = slots.map((s) => (s.pv_actual_kwh == null ? null : round2(s.pv_actual_kwh)));
     // Grid export realised, aligned to the pv axis by slot_utc.
     const expBy = new Map<string, number>();
@@ -84,11 +87,10 @@ export function GenerationWidget({ period, periodData, periodLoading, agile, opp
       { name: "Export", color: t.exportColor, data: exportActual, width: 1.75 },
       ...(onSeg ? [{ name: "Outgoing Agile", color: t.warn, data: agileExportPrice, dashed: true, isPrice: true } as TimelineLine] : []),
     ];
-    const nowMs = pv?.now_utc ? new Date(pv.now_utc).getTime() : Date.now();
-    const genTotal = slots.reduce((sum, s) => {
-      const elapsed = new Date(s.slot_utc).getTime() + 30 * 60_000 <= nowMs;
-      return sum + ((elapsed ? (s.pv_actual_kwh ?? s.pv_forecast_kwh) : s.pv_forecast_kwh) ?? 0);
-    }, 0);
+    // "expected today" = the COMMITTED full-day forecast (pv_planned_kwh),
+    // matching the label — not actual(past)+forecast(future), which converges to
+    // the day's actual by evening and so stops being an "expectation".
+    const genTotal = slots.reduce((sum, s) => sum + ((s.pv_planned_kwh ?? s.pv_forecast_kwh) ?? 0), 0);
     const exportedTotal = grid?.totals?.export_actual_kwh ?? 0;
     return (
       <div class="tlw">
