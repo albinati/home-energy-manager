@@ -847,6 +847,17 @@ class Config:
     LP_LOAD_EXCLUDE_NEGATIVE_SLOTS: bool = os.getenv(
         "LP_LOAD_EXCLUDE_NEGATIVE_SLOTS", "true"
     ).lower() in ("true", "1", "yes")
+    # Drop half-hour slots inside a HEM nonzero LWT-offset window (+ the
+    # thermal-lag tail) from the residual load-profile sample (Tracked by #540).
+    # A positive LWT offset can WAKE the compressor (the June-2026 phantom-heat
+    # self-loop) — that heat is HEM-induced, not the household's organic load,
+    # so learning the residual / heat-pump heatmaps from it pollutes them (and
+    # the Insights Heating heatmap). Same rationale as the negative-slot drop
+    # above. Tail length reuses DAIKIN_LWT_PREHEAT_DECONTAM_TAIL_BUCKETS. Set
+    # false to roll back to the old behaviour (include them).
+    LP_LOAD_EXCLUDE_LWT_OFFSET_SLOTS: bool = os.getenv(
+        "LP_LOAD_EXCLUDE_LWT_OFFSET_SLOTS", "true"
+    ).lower() in ("true", "1", "yes")
     LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH: float = float(
         os.getenv("LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH", "0.30")
     )
