@@ -92,15 +92,25 @@ export function periodDateRange(p: PeriodState): { start: string; end: string } 
   return { start: startISO, end: endISO > t ? t : endISO };
 }
 
-/** Trailing window + end anchor for the load HEATMAP, which needs several weeks
- * of samples for a meaningful day-of-week × hour grid. The window ends at the
- * navigator's period end and spans at least a per-granularity floor so day/week
- * still render a sensible pattern while month/year cover their full span. */
-export function periodWindow(p: PeriodState): { windowDays: number; endDate: string } {
+/** Maximum heatmap lookback. The day-of-week × hour grid is a multi-week
+ * behavioural pattern, so a longer window adds little but each distinct window
+ * is an uncached ~2s server-side physics rebuild that serialises on the DB lock
+ * — capping bounds the worst case. Also the default the live profile is cached
+ * under, so day/week reuse the always-warm entry. */
+const HEATMAP_MAX_WINDOW_DAYS = 120;
+
+/** Trailing window + optional end anchor for the load HEATMAP.
+ *
+ * day/week → NO anchor: the heatmap is a multi-week pattern, not a per-day
+ * figure, so stepping day-by-day reuses the always-warm live 120-day profile
+ * (no cold rebuild, no DB-lock pile-up — the cause of the navigation 504s).
+ * month/year → anchored at the period end with a capped window; few distinct
+ * anchors, so the 4-min TTL cache absorbs repeat views. */
+export function periodWindow(p: PeriodState): { windowDays: number; endDate?: string } {
+  if (p.gran === "day" || p.gran === "week") return { windowDays: HEATMAP_MAX_WINDOW_DAYS };
   const { start, end } = periodDateRange(p);
   const span = Math.round((parse(end).getTime() - parse(start).getTime()) / 86_400_000) + 1;
-  const floor = p.gran === "day" || p.gran === "week" ? 28 : span;
-  return { windowDays: Math.max(span, floor), endDate: end };
+  return { windowDays: Math.min(Math.max(span, 28), HEATMAP_MAX_WINDOW_DAYS), endDate: end };
 }
 
 /** The last COMPLETE local day within the selected period — what the LP
