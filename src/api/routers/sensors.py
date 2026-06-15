@@ -25,7 +25,7 @@ router = APIRouter(tags=["sensors"])
 
 class IndoorReading(BaseModel):
     captured_at: str = Field(..., description="ISO-8601 UTC timestamp")
-    temp_c: float = Field(..., ge=-20, le=50)
+    temp_c: float = Field(..., ge=-20, le=45)  # indoor room; tight ceiling catches F/C slips
     room: str = "home"
     source: str | None = None
     quality: str | None = None
