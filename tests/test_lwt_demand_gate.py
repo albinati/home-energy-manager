@@ -219,3 +219,147 @@ def test_daily_fallback_clean_data_still_counts():
         date=y.date().isoformat(), kwh_total=6.0, kwh_heating=6.0, source="onecta",
     )
     assert db.measured_space_heating_kwh_excluding_offset_windows(48) == pytest.approx(6.0)
+
+
+# ---------------------------------------------------------------------------
+# Outdoor cutoff on POSITIVE offsets (Tracked by #540) — the exogenous gate
+# the measured-demand self-loop cannot fool (June-2026 phantom heating).
+# ---------------------------------------------------------------------------
+
+_THR = dict(cheap_thr=8.0, peak_thr=30.0)
+
+
+@pytest.fixture
+def _preheat_cfg(monkeypatch):
+    monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_ENABLED", True, raising=False)
+    monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_BOOST_C", 3, raising=False)
+    monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_NEGATIVE_BOOST_C", 10, raising=False)
+    monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_PEAK_SETBACK_C", -2, raising=False)
+    monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_COMFORT_BAND_C", 1.0, raising=False)
+    monkeypatch.setattr(app_config, "OPTIMIZATION_LWT_OFFSET_MIN", -10, raising=False)
+    monkeypatch.setattr(app_config, "OPTIMIZATION_LWT_OFFSET_MAX", 10, raising=False)
+    monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_OUTDOOR_CUTOFF_C", 15.0, raising=False)
+
+
+def test_positive_boost_suppressed_when_warm(_preheat_cfg):
+    from src.scheduler.lp_dispatch import _preheat_lwt_offset as f
+    assert f(2.0, 19.0, **_THR) == 0
+
+
+def test_positive_boost_allowed_when_cold(_preheat_cfg):
+    from src.scheduler.lp_dispatch import _preheat_lwt_offset as f
+    assert f(2.0, 5.0, **_THR) == 3
+
+
+def test_negprice_boost_suppressed_when_warm(_preheat_cfg):
+    from src.scheduler.lp_dispatch import _preheat_lwt_offset as f
+    assert f(-2.0, 19.0, **_THR) == 0
+
+
+def test_negprice_boost_allowed_when_cold(_preheat_cfg):
+    from src.scheduler.lp_dispatch import _preheat_lwt_offset as f
+    assert f(-2.0, 2.0, **_THR) == 10
+
+
+def test_peak_setback_allowed_when_warm(_preheat_cfg):
+    """The −2 setback can only let the unit coast — never cut by the cutoff."""
+    from src.scheduler.lp_dispatch import _preheat_lwt_offset as f
+    assert f(35.0, 25.0, **_THR) == -2
+
+
+def test_peak_setback_allowed_when_cold(_preheat_cfg):
+    from src.scheduler.lp_dispatch import _preheat_lwt_offset as f
+    assert f(35.0, 0.0, **_THR) == -2
+
+
+def test_cutoff_boundary_is_inclusive(_preheat_cfg):
+    """outdoor == cutoff suppresses (>=)."""
+    from src.scheduler.lp_dispatch import _preheat_lwt_offset as f
+    assert f(2.0, 15.0, **_THR) == 0
+
+
+def test_cutoff_disabled_high_value(_preheat_cfg, monkeypatch):
+    monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_OUTDOOR_CUTOFF_C", 99.0, raising=False)
+    from src.scheduler.lp_dispatch import _preheat_lwt_offset as f
+    assert f(2.0, 30.0, **_THR) == 3
+
+
+def test_pairs_no_positive_window_when_warm(_preheat_cfg, monkeypatch):
+    """Integration: a warm forecast yields NO positive lwt_preheat windows even
+    when prices are cheap — closes the self-loop at the source."""
+    monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_MIN_BLOCK_SLOTS", 4, raising=False)
+    from src.scheduler import lp_dispatch
+    from src.scheduler.lp_optimizer import LpPlan
+    starts = [datetime(2026, 6, 12, 9, tzinfo=UTC) + i * timedelta(minutes=30) for i in range(6)]
+    warm = LpPlan(
+        ok=True, status="Optimal", objective_pence=0.0, slot_starts_utc=starts,
+        price_pence=[2.0] * 6, temp_outdoor_c=[19.0] * 6,
+        cheap_threshold_pence=8.0, peak_threshold_pence=30.0,
+    )
+    assert lp_dispatch._lwt_preheat_pairs(warm, []) == []
+    cold = LpPlan(
+        ok=True, status="Optimal", objective_pence=0.0, slot_starts_utc=starts,
+        price_pence=[2.0] * 6, temp_outdoor_c=[4.0] * 6,
+        cheap_threshold_pence=8.0, peak_threshold_pence=30.0,
+    )
+    assert len(lp_dispatch._lwt_preheat_pairs(cold, [])) == 1  # one boost window
+
+
+# ---------------------------------------------------------------------------
+# Thermal-lag tail exclusion in the decontamination
+# ---------------------------------------------------------------------------
+
+def test_decontam_excludes_tail_bucket(monkeypatch):
+    """Heat bleeding into the bucket AFTER an offset window closes must not
+    count as natural demand (default tail = 1 bucket)."""
+    monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_DECONTAM_TAIL_BUCKETS", 1, raising=False)
+    from src import db
+    y = _yesterday_local()
+    _seed_2h(y.date().isoformat(), 5, 1.5)          # 10-12 local — just after window
+    _seed_offset_action(y.replace(hour=8), 2.0, 3)  # window 08-10 (bucket 4)
+    assert db.measured_space_heating_kwh_excluding_offset_windows(48) == 0.0
+
+
+def test_decontam_tail_zero_keeps_old_behaviour(monkeypatch):
+    monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_DECONTAM_TAIL_BUCKETS", 0, raising=False)
+    from src import db
+    y = _yesterday_local()
+    _seed_2h(y.date().isoformat(), 5, 1.5)
+    _seed_offset_action(y.replace(hour=8), 2.0, 3)
+    assert db.measured_space_heating_kwh_excluding_offset_windows(48) == pytest.approx(1.5)
+
+
+# ---------------------------------------------------------------------------
+# space_heating_gate_state surfaces the outdoor cutoff
+# ---------------------------------------------------------------------------
+
+def test_gate_state_reports_outdoor_cutoff(monkeypatch):
+    """Demand gate OPEN (natural heat seeded) but warm outside → POSITIVE offsets
+    are flagged suppressed-by-outdoor, while preheat_suppressed stays scoped to
+    the demand gate (the −2 setback still fires, so it is NOT 'all off')."""
+    from src import db
+    from src.scheduler import lp_dispatch
+    monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_ENABLED", True, raising=False)
+    monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_OUTDOOR_CUTOFF_C", 15.0, raising=False)
+    y = _yesterday_local()
+    _seed_2h(y.date().isoformat(), 4, 1.5)  # natural demand → demand gate open
+    monkeypatch.setattr(db, "get_latest_daikin_telemetry", lambda *, source=None: {"outdoor_temp_c": 19.0})
+    st = lp_dispatch.space_heating_gate_state()
+    assert st["demand_present"] is True
+    assert st["outdoor_cutoff_c"] == 15.0
+    assert st["current_outdoor_c"] == 19.0
+    assert st["positive_offset_suppressed_by_outdoor"] is True
+    # Demand gate is OPEN → not "all off"; the setback still fires.
+    assert st["preheat_suppressed"] is False
+
+
+def test_gate_state_preheat_suppressed_when_demand_absent(monkeypatch):
+    """No measured demand → preheat_suppressed True (the demand gate shuts ALL
+    offset rows, setback included)."""
+    from src import db
+    from src.scheduler import lp_dispatch
+    monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_ENABLED", True, raising=False)
+    monkeypatch.setattr(db, "get_latest_daikin_telemetry", lambda *, source=None: {"outdoor_temp_c": 5.0})
+    st = lp_dispatch.space_heating_gate_state()
+    assert st["demand_present"] is False
+    assert st["preheat_suppressed"] is True

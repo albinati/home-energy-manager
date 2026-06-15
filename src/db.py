@@ -4086,6 +4086,10 @@ def measured_space_heating_kwh_excluding_offset_windows(
         daily = get_daikin_consumption_daily_range(start_date, end_date)
         return float(sum(r.get("kwh_heating") or 0.0 for r in daily))
 
+    # Thermal-lag tail: HEM-induced heat bleeds into the 2-h bucket(s) AFTER an
+    # offset window closes (the live June self-loop counted those as natural
+    # demand and latched the gate open). Exclude this many trailing buckets too.
+    tail_buckets = max(0, int(getattr(config, "DAIKIN_LWT_PREHEAT_DECONTAM_TAIL_BUCKETS", 1)))
     excluded: set[tuple[str, int]] = set()
     for s_iso, e_iso in get_nonzero_lwt_offset_windows(start_date, end_date):
         try:
@@ -4093,9 +4097,10 @@ def measured_space_heating_kwh_excluding_offset_windows(
             e = datetime.fromisoformat(e_iso.replace("Z", "+00:00")).astimezone(tz)
         except (ValueError, TypeError):
             continue
+        e_padded = e + timedelta(hours=2 * tail_buckets)
         cur = s.replace(minute=0, second=0, microsecond=0)
         cur = cur.replace(hour=(cur.hour // 2) * 2)
-        while cur < e:
+        while cur < e_padded:
             excluded.add((cur.date().isoformat(), cur.hour // 2))
             cur += timedelta(hours=2)
 

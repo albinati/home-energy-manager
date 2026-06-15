@@ -2,10 +2,15 @@
 
 Open-loop price-tier offset: boost the leaving-water temperature in cheap
 slots, set it back in peak slots, neutral otherwise. Offset is an INTEGER in
-the device range, only emitted while the firmware is plausibly heating
-(outdoor < curve high anchor), and clamped so we can never exceed the Daikin
-quota at the dispatch boundary. A sensor-ready comfort hook is wired but
-no-op until a room sensor exists.
+the device range, clamped so we can never exceed the Daikin quota at the
+dispatch boundary. A sensor-ready comfort hook is wired but no-op until a
+room sensor exists.
+
+POSITIVE offsets are gated by an outdoor-temperature cutoff
+(``DAIKIN_LWT_PREHEAT_OUTDOOR_CUTOFF_C``, Tracked by #540): above it the house
+needs no space heat, so a positive offset would only wake the compressor for
+nothing (the June-2026 phantom-heating self-loop). The NEGATIVE peak setback
+is never cut — it can only let the unit coast.
 """
 from __future__ import annotations
 
@@ -57,8 +62,8 @@ def test_smooth_preserves_none():
 # Tiers used throughout: cheap ≤ 12, peak ≥ 25 (the prod defaults).
 CHEAP = 12.0
 PEAK = 25.0
-COLD = 5.0   # outdoor < DAIKIN_WEATHER_CURVE_HIGH_C (18) → heating active
-WARM = 20.0  # outdoor ≥ 18 → firmware idle
+COLD = 5.0   # outdoor < DAIKIN_LWT_PREHEAT_OUTDOOR_CUTOFF_C (15) → positives allowed
+WARM = 20.0  # outdoor ≥ 15 → positive offsets suppressed (setback still allowed)
 
 
 @pytest.fixture
@@ -71,6 +76,7 @@ def enabled(monkeypatch):
     monkeypatch.setattr(config, "OPTIMIZATION_LWT_OFFSET_MIN", -10.0)
     monkeypatch.setattr(config, "OPTIMIZATION_LWT_OFFSET_MAX", 5.0)
     monkeypatch.setattr(config, "DAIKIN_WEATHER_CURVE_HIGH_C", 18.0)
+    monkeypatch.setattr(config, "DAIKIN_LWT_PREHEAT_OUTDOOR_CUTOFF_C", 15.0)
     monkeypatch.setattr(config, "INDOOR_SETPOINT_C", 21.0)
     # Disable thermal-coherence smoothing for the per-slot windowing tests so a
     # short test sequence isn't collapsed; smoothing is exercised separately.
@@ -89,11 +95,12 @@ def test_disabled_returns_none(monkeypatch):
     assert _off(5.0, COLD) is None
 
 
-def test_warm_day_still_emits_offset(enabled):
-    # No outdoor cutoff: the offset is emitted regardless of outdoor temp; the
-    # Daikin firmware (its own weather curve) decides whether to actually heat.
-    assert _off(5.0, WARM) == 3       # cheap → +3 (firmware ignores if too warm)
-    assert _off(30.0, WARM) == -2     # peak → setback
+def test_warm_day_suppresses_boost_keeps_setback(enabled):
+    # Outdoor cutoff (#540): a cheap+warm slot would only wake the compressor
+    # for nothing → suppressed to 0. The peak setback can only coast → still
+    # emitted regardless of outdoor temp.
+    assert _off(5.0, WARM) == 0        # cheap+warm → suppressed
+    assert _off(30.0, WARM) == -2      # peak → setback (never cut)
 
 
 def test_cheap_slot_boosts(enabled):
@@ -113,10 +120,10 @@ def test_negative_boost_clamped_to_offset_max(enabled, monkeypatch):
     assert _off(-3.0, COLD) == 5  # clamp at MAX=5
 
 
-def test_negative_warm_day_still_boosts(enabled):
-    # Paid window: push the offset to max regardless of outdoor temp — the
-    # firmware decides whether to heat (cutoff removed).
-    assert _off(-3.0, WARM) == 5  # fixture clamp MAX=5
+def test_negative_warm_day_suppressed(enabled):
+    # Even a PAID (negative-price) slot must not boost when it's warm — a
+    # positive offset wakes the compressor for phantom heat (#540). Suppressed.
+    assert _off(-3.0, WARM) == 0
 
 
 def test_peak_slot_sets_back(enabled):
@@ -204,13 +211,11 @@ def test_neutral_slots_emit_nothing(enabled):
     assert _lwt_preheat_pairs(plan, []) == []
 
 
-def test_warm_slots_still_emit(enabled):
-    # Cutoff removed: cheap+warm slots still emit the offset (the firmware
-    # decides whether to heat). One +3 boost window over the three slots.
+def test_warm_slots_suppress_boost(enabled):
+    # Outdoor cutoff (#540): cheap+warm slots emit NO positive window — closes
+    # the summer phantom-heat self-loop at the source.
     plan = _plan([5, 5, 5], [WARM] * 3)
-    pairs = _lwt_preheat_pairs(plan, [])
-    assert len(pairs) == 1
-    assert pairs[0][1]["params"]["lwt_offset"] == 3
+    assert _lwt_preheat_pairs(plan, []) == []
 
 
 def test_restore_returns_offset_to_zero(enabled):

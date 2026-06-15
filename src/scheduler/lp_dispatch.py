@@ -309,16 +309,23 @@ def _preheat_lwt_offset(
     temperature in cheap slots (pre-heat the house, store heat in the thermal
     mass) and set it back in peak slots (coast). Returns:
 
-    * ``None`` when the feature is disabled, or when ``outdoor_c`` is at/above
-      ``DAIKIN_WEATHER_CURVE_HIGH_C`` — the firmware won't be running the
-      compressor, so we emit nothing and stay climate-hands-off on warm days
-      (which also keeps the Daikin daily quota untouched).
+    * ``None`` when the feature is disabled.
     * an ``int`` offset otherwise: ``+BOOST`` (price ≤ cheap tier),
       ``PEAK_SETBACK`` (price ≥ peak tier), else ``0`` (neutral — let the
       firmware's natural weather curve run).
 
     The offset is the only thing HEM writes; the firmware curve still decides
     *when* to heat — we only nudge the water temperature when it already is.
+
+    **Outdoor cutoff (Tracked by #540):** ``outdoor_c`` (the micro-climate-
+    calibrated forecast temperature for the slot) gates the POSITIVE offsets
+    only. At/above ``DAIKIN_LWT_PREHEAT_OUTDOOR_CUTOFF_C`` a heat-pump house
+    needs little/no space heat, so a positive offset would only WAKE the
+    compressor for nothing (the June-2026 phantom-heating self-loop). This is
+    an EXOGENOUS gate the measured-demand gate's own output cannot fool. The
+    NEGATIVE peak setback is NEVER cut — it can only let the unit coast, never
+    wake it. (PR #496 had removed the old blunt cutoff because it also killed
+    the setback mid-paid-window; this version cuts positives only.)
 
     ``indoor_c`` is a forward-looking hook for a future room sensor. While no
     sensor exists it is ``None`` and the comfort guard is a no-op. Once wired,
@@ -327,32 +334,29 @@ def _preheat_lwt_offset(
     """
     if not config.DAIKIN_LWT_PREHEAT_ENABLED:
         return None
-    # No outdoor cutoff: the Daikin firmware applies the offset relative to its
-    # OWN weather curve and decides whether to run the compressor, so emitting
-    # the offset when it's mild doesn't force pointless heating — the firmware
-    # ignores it above its own heating ambient threshold. We just set the offset;
-    # the unit owns the on/off. (Was previously gated at DAIKIN_WEATHER_CURVE_
-    # HIGH_C, which cut the offset mid-paid-window — the user's call to remove.)
 
     boost = int(config.DAIKIN_LWT_PREHEAT_BOOST_C)
     neg_boost = int(getattr(config, "DAIKIN_LWT_PREHEAT_NEGATIVE_BOOST_C", boost))
     setback = int(config.DAIKIN_LWT_PREHEAT_PEAK_SETBACK_C)
     band = float(config.DAIKIN_LWT_PREHEAT_COMFORT_BAND_C)
     setpoint = float(config.INDOOR_SETPOINT_C)
+    # Exogenous outdoor cutoff — suppresses POSITIVE offsets only (see docstring).
+    # A non-finite temp (sensor/forecast glitch) fails SAFE → suppress, since the
+    # cutoff IS the anti-phantom-heat guard; a transient self-corrects next plan.
+    cutoff = float(getattr(config, "DAIKIN_LWT_PREHEAT_OUTDOOR_CUTOFF_C", 15.0))
+    too_warm_for_heat = (not math.isfinite(outdoor_c)) or outdoor_c >= cutoff
 
     if price_p < 0:
         # PAID to import — push space heating to the TOP of the operating range
         # (clamped below) to bank the most thermal mass while we're paid for it,
-        # not the modest cheap-slot nudge. The old outdoor-temp cutoff was
-        # removed; what keeps this from firing on a non-heating house is the
-        # measured DEMAND GATE in _write_lwt_preheat_actions (#540 — a
-        # positive offset can WAKE the compressor, June 2026).
-        off = neg_boost
+        # not the modest cheap-slot nudge. Suppressed when it's warm enough that
+        # the compressor would only wake to waste it (#540 phantom-heat guard).
+        off = 0 if too_warm_for_heat else neg_boost
         # Comfort guard (sensor-ready): don't over-heat an already-warm room.
         if indoor_c is not None and indoor_c >= setpoint + band:
             off = 0
     elif price_p <= cheap_thr:
-        off = boost
+        off = 0 if too_warm_for_heat else boost
         # Comfort guard (sensor-ready): don't pre-heat an already-warm room.
         if indoor_c is not None and indoor_c >= setpoint + band:
             off = 0
@@ -456,8 +460,14 @@ def _lwt_preheat_pairs(
     for i in range(n):
         mid = plan.slot_starts_utc[i] + timedelta(minutes=15)
         fc = get_forecast_for_slot(mid, forecast)
-        outdoor = fc.temperature_c if fc else (
-            plan.temp_outdoor_c[i] if i < len(plan.temp_outdoor_c) else 0.0
+        # Prefer the LP's micro-climate-CALIBRATED outdoor temp (what the house
+        # feels) over the raw Open-Meteo forecast — the outdoor cutoff in
+        # _preheat_lwt_offset is evaluated against this. Fall back to the raw
+        # forecast, then 0.0. (The price tiers are price-based, so this choice
+        # only affects the cutoff comparison, never the boost/setback tiering.)
+        outdoor = (
+            plan.temp_outdoor_c[i] if i < len(plan.temp_outdoor_c)
+            else (fc.temperature_c if fc else 0.0)
         )
         price = plan.price_pence[i] if i < len(plan.price_pence) else 0.0
         offsets.append(_preheat_lwt_offset(
@@ -969,6 +979,20 @@ def space_heating_gate_state() -> dict[str, Any]:
         logger.debug("space_heating_gate_state: measured read failed", exc_info=True)
     demand_present = _space_heating_demand_present()
     preheat_enabled = bool(getattr(config, "DAIKIN_LWT_PREHEAT_ENABLED", False))
+
+    # Exogenous outdoor cutoff (#540): the chip should explain a warm-day
+    # suppression even when the (possibly self-fed) demand gate is open. Read
+    # the freshest live outdoor temp; None when telemetry is absent.
+    cutoff = float(getattr(config, "DAIKIN_LWT_PREHEAT_OUTDOOR_CUTOFF_C", 15.0))
+    current_outdoor: float | None = None
+    try:
+        tel = db.get_latest_daikin_telemetry(source="live")
+        if tel and tel.get("outdoor_temp_c") is not None:
+            current_outdoor = round(float(tel["outdoor_temp_c"]), 1)
+    except Exception:  # pragma: no cover - status read must not fail
+        logger.debug("space_heating_gate_state: outdoor telemetry read failed", exc_info=True)
+    suppressed_by_outdoor = current_outdoor is not None and current_outdoor >= cutoff
+
     return {
         "preheat_enabled": preheat_enabled,
         "gate_enabled": floor > 0,
@@ -976,7 +1000,15 @@ def space_heating_gate_state() -> dict[str, Any]:
         "measured_window_kwh": measured,
         "threshold_kwh": floor,
         "lookback_hours": lookback,
-        # The one-line story the chip renders:
+        "outdoor_cutoff_c": cutoff,
+        "current_outdoor_c": current_outdoor,
+        # Positive offsets (boost / neg-boost) are cut when warm REGARDLESS of
+        # the demand gate; the −2 peak setback still fires (it can only coast).
+        "positive_offset_suppressed_by_outdoor": suppressed_by_outdoor,
+        # Demand-gate verdict: when shut, _write_lwt_preheat_actions writes NO
+        # rows at all (setback included). Kept scoped to the demand gate so the
+        # chip can distinguish "all LWT off" (this) from "positives off, setback
+        # still active" (positive_offset_suppressed_by_outdoor) on a warm day.
         "preheat_suppressed": preheat_enabled and floor > 0 and not demand_present,
     }
 

@@ -178,7 +178,21 @@ and no calibration that can eat its own output.*
     peak setback −2 °C can stay as interim until W3 lands).
 11. **Demand gate now** (independent of sensors): no positive LWT offset when
     trailing-48 h measured `kwh_heating ≈ 0` — stops the June waste pattern
-    permanently, regardless of season.
+    permanently, regardless of season. **(Shipped #541.)**
+11b. **Outdoor cutoff + thermal-lag tail (SHIPPED — `fix/lwt-outdoor-cutoff-…`).**
+    The #541 demand gate alone proved foolable in prod: positive offsets woke
+    the compressor (heating 0.0 → ~4.6 kWh/day from Jun 5, 2026), and the
+    HEM-induced heat bled into the 2-h bucket *after* each offset window —
+    counted as natural demand, latching the gate open (`measured_window_kwh`
+    sat at 1.0 just over the 0.5 floor). Two fixes: (a) an **exogenous outdoor
+    cutoff** (`DAIKIN_LWT_PREHEAT_OUTDOOR_CUTOFF_C`, default 15 °C) suppresses
+    POSITIVE offsets per-slot — the self-loop can't fake the weather; the −2
+    setback is never cut. (b) the decontamination excludes
+    `DAIKIN_LWT_PREHEAT_DECONTAM_TAIL_BUCKETS` (default 1) trailing buckets per
+    window. Verified on the prod DB: `measured_window_kwh` 1.0 → 0.0 (demand
+    gate now reads closed) and `positive_offset_suppressed_by_outdoor` → true at
+    20 °C. (`space_heating_gate_state` keeps `preheat_suppressed` scoped to the
+    demand gate — "all LWT off" — distinct from the warm-day positive-only flag.)
 
 **Phase W4 — validate before the heating season peaks**
 12. Replay scorecard: simulated winter days, plan-vs-actual indoor trajectory
@@ -191,8 +205,10 @@ and no calibration that can eat its own output.*
 - `BUILDING_UA_W_PER_K` 180 → ~600 (measured) and
   `BUILDING_THERMAL_MASS_KWH_PER_K` 8 → ~12 (τ ≈ 20 h prior) so the existing
   estimator fallback stops being 3.5× optimistic.
-- The W3-item-11 demand gate (small PR, kills the active June waste).
-- `k_per_degc` decontamination filter (small PR).
+- The W3-item-11 demand gate (small PR, kills the active June waste). **DONE #541.**
+- Outdoor cutoff on positive offsets + thermal-lag tail exclusion (closes the
+  residual self-loop #541 left open). **DONE — see item 11b.**
+- `k_per_degc` decontamination filter (small PR). **DONE #541.**
 
 ---
 
