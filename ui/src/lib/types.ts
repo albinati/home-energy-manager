@@ -892,6 +892,17 @@ export interface StatusQuotaEntry {
   blocked: boolean;
 }
 
+// Is the plan actually reaching the hardware? (the ~41h Fox-upload wedge of
+// 2026-06-14 ran silently because nothing watched actuation freshness).
+export interface StatusActuationBlock {
+  fox: { last_upload_at: string | null; age_hours: number | null; stale: boolean } | null;
+  daikin_tank: {
+    last_at: string | null; age_hours: number | null;
+    failed_24h: number; stale: boolean; failing: boolean;
+  } | null;
+  daikin_lwt: { failed_24h: number; failing: boolean } | null;
+}
+
 export interface StatusAlertsResponse {
   now_utc: string;
   meter: StatusMeterBlock;
@@ -899,6 +910,7 @@ export interface StatusAlertsResponse {
   forecast: StatusForecastBlock;
   fox_drift: StatusFoxDriftBlock;
   quota: { fox: StatusQuotaEntry | null; daikin: StatusQuotaEntry | null };
+  actuation?: StatusActuationBlock;
 }
 
 export interface DhwBudgetState {

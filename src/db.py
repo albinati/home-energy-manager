@@ -5013,6 +5013,54 @@ def list_recent_lp_failures(limit: int = 10) -> list[dict[str, Any]]:
             conn.close()
 
 
+def get_actuation_health(failed_since_iso: str) -> dict[str, Any]:
+    """Raw signals for the actuation-health alert (2026-06-14, after the ~41h
+    Fox-upload wedge that nothing alerted on).
+
+    * ``fox_upload_at`` — last SUCCESSFUL Fox V3 upload (``save_fox_schedule_state``
+      only runs on success), so a stale value means uploads are failing/wedged.
+    * ``tank_last_at`` — last tank action that actually RAN (``completed``,
+      incl. the benign ``noop`` skip which still proves the reconciler is
+      firing, or ``active``). Tank fires ~2×/day under dhw_policy, so a stale
+      value is a robust "reconciler stopped actuating the tank" signal.
+    * ``{tank,lwt}_failed_24h`` — Daikin rows the device REJECTED (``failed``
+      status) since ``failed_since_iso``. LWT has no age signal — it's
+      demand-gated and legitimately dormant in summer — so failures are its
+      only meaningful actuation-health signal.
+
+    ISO timestamps compare lexicographically (all 'YYYY-MM-DDTHH:MM:SS...').
+    """
+    out: dict[str, Any] = {
+        "fox_upload_at": None, "tank_last_at": None,
+        "tank_failed_24h": 0, "lwt_failed_24h": 0,
+    }
+    with _lock:
+        conn = get_connection()
+        try:
+            r = conn.execute(
+                "SELECT uploaded_at FROM fox_schedule_state ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if r:
+                out["fox_upload_at"] = r["uploaded_at"]
+            r = conn.execute(
+                "SELECT MAX(COALESCE(executed_at, created_at)) AS t FROM action_schedule "
+                "WHERE device='daikin' AND action_type LIKE 'tank%' "
+                "AND status IN ('completed', 'active')"
+            ).fetchone()
+            out["tank_last_at"] = r["t"] if r else None
+            for dom, like in (("tank", "tank%"), ("lwt", "lwt%")):
+                r = conn.execute(
+                    "SELECT COUNT(*) AS n FROM action_schedule "
+                    "WHERE device='daikin' AND action_type LIKE ? AND status='failed' "
+                    "AND COALESCE(executed_at, created_at) >= ?",
+                    (like, failed_since_iso),
+                ).fetchone()
+                out[f"{dom}_failed_24h"] = int(r["n"]) if r else 0
+            return out
+        finally:
+            conn.close()
+
+
 def find_run_for_time(when_utc: str) -> int | None:
     """Return the most recent optimizer_log.id whose run_at <= when_utc.
 
