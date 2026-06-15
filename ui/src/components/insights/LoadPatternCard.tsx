@@ -1,16 +1,21 @@
-import { useEffect, useRef } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { useFetch } from "../../lib/poll";
-import { getResidualProfile, type ResidualProfile } from "../../lib/endpoints";
+import { getResidualProfile, type ResidualProfile, type ResidualProfileSlot } from "../../lib/endpoints";
 import { makeChart, chartTheme, type EChartsType } from "../../lib/charts";
 import { Spinner } from "../common/Spinner";
 
 const DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
-/** Per-(day-of-week × hour) median residual household load — "when we spend the
- *  most while at home". The same profile the LP plans against (#477). */
+type View = "home" | "hp";
+
+/** Per-(day-of-week × hour) median load heatmap. Two views: the residual
+ *  household load (heat pump excluded — the profile the LP plans against, #477)
+ *  and the heat-pump (Daikin) split it subtracts. */
 export function LoadPatternCard() {
   const res = useFetch<ResidualProfile>(getResidualProfile, []);
   const data = res.data;
+  const hasHp = !!data?.hp_by_dow;
+  const [view, setView] = useState<View>("home");
   const elRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<EChartsType | null>(null);
 
@@ -19,11 +24,14 @@ export function LoadPatternCard() {
     if (!chartRef.current) chartRef.current = makeChart(elRef.current);
     const t = chartTheme();
 
+    const source: Record<string, ResidualProfileSlot[]> =
+      (view === "hp" && data.hp_by_dow) ? data.hp_by_dow : data.by_dow;
+
     // 7 dow × 24 hours; value = mean of the two half-hour medians in the hour.
     const cells: [number, number, number][] = [];
     let max = 0;
     for (let d = 0; d < 7; d++) {
-      const slots = data.by_dow[String(d)] || [];
+      const slots = source[String(d)] || [];
       for (let h = 0; h < 24; h++) {
         const a = slots[h * 2]?.median ?? 0;
         const b = slots[h * 2 + 1]?.median ?? 0;
@@ -32,6 +40,12 @@ export function LoadPatternCard() {
         cells.push([h, d, Number(v.toFixed(3))]);
       }
     }
+
+    // Heat-pump view gets a distinct (cool→warm) ramp so the two reads don't
+    // get confused; residual keeps the established amber→red.
+    const ramp = view === "hp"
+      ? [t.bg ?? "#1b1f27", "#38bdf8", "#ef4444"]
+      : [t.bg ?? "#1b1f27", t.pv ?? "#fbbf24", t.importColor ?? "#ef4444"];
 
     chartRef.current.setOption({
       backgroundColor: "transparent",
@@ -57,7 +71,7 @@ export function LoadPatternCard() {
       },
       visualMap: {
         min: 0, max: Math.max(0.4, max), calculable: false, show: false,
-        inRange: { color: [t.bg ?? "#1b1f27", t.pv ?? "#fbbf24", t.importColor ?? "#ef4444"] },
+        inRange: { color: ramp },
       },
       series: [{
         type: "heatmap", data: cells,
@@ -67,7 +81,7 @@ export function LoadPatternCard() {
       }],
     });
     chartRef.current.resize();
-  }, [data]);
+  }, [data, view]);
 
   useEffect(() => () => { chartRef.current?.dispose(); chartRef.current = null; }, []);
 
@@ -75,10 +89,27 @@ export function LoadPatternCard() {
   return (
     <section class="insights-card load-pattern">
       <header class="load-pattern-head">
-        <h2>When you spend the most</h2>
+        <div class="load-pattern-titlerow">
+          <h2>When you spend the most</h2>
+          {hasHp && (
+            <div class="load-pattern-toggle" role="group" aria-label="Load view">
+              <button
+                class={view === "home" ? "is-active" : ""}
+                onClick={() => setView("home")}
+                type="button"
+              >Home</button>
+              <button
+                class={view === "hp" ? "is-active" : ""}
+                onClick={() => setView("hp")}
+                type="button"
+              >Heat pump</button>
+            </div>
+          )}
+        </div>
         <p class="muted">
-          Median household load (heat pump excluded) by day-of-week and hour — the typical
-          at-home pattern the optimizer plans against.
+          {view === "hp"
+            ? "Median heat-pump (Daikin) load by day-of-week and hour — the split subtracted from the household total."
+            : "Median household load (heat pump excluded) by day-of-week and hour — the typical at-home pattern the optimizer plans against."}
         </p>
       </header>
       {res.loading && !data && <Spinner label="Loading load pattern…" />}
@@ -90,6 +121,7 @@ export function LoadPatternCard() {
             {(dc.weekday ?? 0) + (dc.weekend ?? 0)} days learned
             ({dc.weekday ?? 0} weekday / {dc.weekend ?? 0} weekend)
             {(dc.away_excluded ?? 0) > 0 && <> · {dc.away_excluded} away day(s) excluded</>}
+            {(dc.negative_excluded ?? 0) > 0 && <> · {dc.negative_excluded} negative-price slot(s) excluded</>}
             {" · "}
             {data.calibrated_days}/{data.calibrated_days + data.physics_only_days} days calibrated
             to the measured heat-pump split

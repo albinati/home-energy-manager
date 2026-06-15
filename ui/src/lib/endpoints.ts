@@ -280,13 +280,14 @@ export async function promoteWorkbench(
 
 // --- Residual load profile (#477) — the learned household demand the LP plans
 //     against (day-of-week median + p75 spread, measured-split calibrated).
-export interface ResidualProfileSlot { h: number; m: number; median: number; p75: number; }
+export interface ResidualProfileSlot { h: number; m: number; median: number; p75?: number; }
 export interface ResidualProfile {
   by_dow: Record<string, ResidualProfileSlot[]>;
+  hp_by_dow?: Record<string, ResidualProfileSlot[]>;
   all: ResidualProfileSlot[];
   flat: number;
   away_days: string[];
-  day_counts: { weekday?: number; weekend?: number; away_excluded?: number; total?: number };
+  day_counts: { weekday?: number; weekend?: number; away_excluded?: number; negative_excluded?: number; total?: number };
   calibrated_days: number;
   physics_only_days: number;
 }
