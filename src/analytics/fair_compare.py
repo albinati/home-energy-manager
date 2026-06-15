@@ -178,6 +178,25 @@ def _empty(requested_start: date, end_day: date, agile_start: date) -> dict[str,
     }
 
 
+def _current_standing_per_day(candidates: list, current_code: str) -> float:
+    """Standing charge (pence/day) to price the household's CURRENT tariff with.
+
+    Prefer the LIVE Octopus catalogue value for the actual product — it
+    auto-corrects and never drifts. The hand-set ``MANUAL_STANDING_CHARGE``
+    config silently goes stale (it sat at 59.26p while the live AGILE-24-10-01
+    standing was 62.22p, so every comparison flattered Agile by ~3p/day). Fall
+    back to MANUAL only when the catalogue is offline or the current product
+    isn't in it (standing must be > 0 to count as a real catalogue value).
+    """
+    for t in candidates:
+        if getattr(t, "product_code", None) == current_code:
+            sc = float(getattr(t.rates, "standing_charge_pence_per_day", 0) or 0)
+            if sc > 0:
+                return sc
+            break
+    return float(config.MANUAL_STANDING_CHARGE_PENCE_PER_DAY or 0)
+
+
 def compute_fair_comparison(
     start_day: date, end_day: date, *, max_tariffs: int = 14
 ) -> dict[str, Any]:
@@ -303,7 +322,7 @@ def compute_fair_comparison(
     rows: list[dict[str, Any]] = []
 
     # Current Agile (realised) — its own standing + realised Outgoing export.
-    cur_standing = float(config.MANUAL_STANDING_CHARGE_PENCE_PER_DAY or 0) * n_days
+    cur_standing = _current_standing_per_day(candidates, current_code) * n_days
     cur_net = cur["import_cost"] + cur_standing - cur["export_credit"]
     rows.append({
         "product_code": current_code,

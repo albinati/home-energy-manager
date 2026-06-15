@@ -27,6 +27,9 @@ export default function Insights() {
   const current = rows.find((r) => r.is_current) ?? null;
   const winner = rows.find((r) => r.product_code === data?.winner_product_code) ?? null;
   const winnerIsCurrent = winner?.is_current ?? false;
+  // The household's previous fixed tariff (synthetic "FIXED" row), for the
+  // "saving £X vs <old tariff>" line — mirrors the cockpit header framing.
+  const fixedRow = rows.find((r) => r.product_code === "FIXED") ?? null;
 
   return (
     <div class="page-padded insights">
@@ -82,7 +85,12 @@ export default function Insights() {
           ) : (
             <div class={`insights-winner${winnerIsCurrent ? " is-current-best" : ""}`}>
               {winnerIsCurrent ? (
-                <span>You're on the cheapest tariff for {periodLabel(period)} — <strong>{winner?.display_name}</strong>.</span>
+                <span>
+                  You're on the cheapest tariff for {periodLabel(period)} — <strong>{winner?.display_name}</strong>.
+                  {fixedRow && current && fixedRow.net_pence > current.net_pence && (
+                    <> Saving <strong>{gbp((fixedRow.net_pence - current.net_pence) / 100)}</strong> vs {fixedRow.display_name}.</>
+                  )}
+                </span>
               ) : (
                 <span>
                   Cheapest for {periodLabel(period)}: <strong>{winner?.display_name}</strong> —
@@ -145,7 +153,7 @@ export default function Insights() {
                   <th class="num">Standing</th>
                   <th class="num">Export</th>
                   <th class="num">Net</th>
-                  <th class="num">vs yours</th>
+                  <th class="num">If you switch</th>
                 </tr>
               </thead>
               <tbody>
@@ -171,7 +179,13 @@ export default function Insights() {
 }
 
 function Row({ r, curNet }: { r: FairTariffRow; curNet: number }) {
-  const delta = (curNet - r.net_pence) / 100; // >0 → cheaper than yours
+  // How YOUR bill would change if you switched TO this tariff.
+  //   + (costs more) → staying on yours is right → muted, not alarming.
+  //   − (cheaper)    → a genuine opportunity → highlighted green.
+  // (Earlier this showed every dearer alternative as a red negative — a table of
+  //  red "−£38" next to the "you're cheapest" banner read as if we were losing.)
+  const billChange = (r.net_pence - curNet) / 100;
+  const cheaper = billChange < -0.005;
   return (
     <tr class={r.is_current ? "is-current" : ""}>
       <td class="insights-name">
@@ -189,7 +203,12 @@ function Row({ r, curNet }: { r: FairTariffRow; curNet: number }) {
       <td class="num insights-net">{p2(r.net_pence)}</td>
       <td class="num">
         {r.is_current ? "—" : (
-          <span class={delta >= 0 ? "insights-cheaper" : "insights-dearer"}>{gbpSigned(delta)}</span>
+          <span
+            class={cheaper ? "insights-cheaper" : "insights-costlier"}
+            title={cheaper ? "Cheaper than your tariff on this usage" : "You'd pay this much more on this tariff"}
+          >
+            {gbpSigned(billChange)}
+          </span>
         )}
       </td>
     </tr>
