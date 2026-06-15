@@ -243,12 +243,42 @@ def test_residual_profile_endpoint_shape() -> None:
         _seed_local(d, 19, 0, load_kw=2.0)
         _seed_local(d, 19, 10, load_kw=2.0)
     resp = asyncio.run(pv_router.get_residual_load_profile(window_days=120))
-    assert set(resp.keys()) >= {"by_dow", "all", "flat", "away_days", "day_counts",
-                                "calibrated_days", "physics_only_days"}
+    assert set(resp.keys()) >= {"by_dow", "hp_by_dow", "all", "flat", "away_days",
+                                "day_counts", "calibrated_days", "physics_only_days"}
     assert len(resp["by_dow"]) == 7
+    assert len(resp["hp_by_dow"]) == 7
     assert len(resp["all"]) == 48
+    assert len(resp["hp_by_dow"]["5"]) == 48
     sat19 = next(s for s in resp["by_dow"]["5"] if s["h"] == 19 and s["m"] == 0)
     assert sat19["median"] == pytest.approx(1.0, abs=0.1)
     # JSON-serialisable (no tuple keys leaked).
     import json
     json.dumps(resp)
+
+
+def test_heat_pump_profile_present_on_cold_days() -> None:
+    """hp_profile carries the heat-pump (Daikin) split; cold slots → non-zero."""
+    days = _recent_days_of_weekday(3, 6)   # Thursdays, cold so physics > 0
+    for d in days:
+        _seed_local(d, 8, 0, load_kw=1.5, temp_c=2.0)
+        _seed_local(d, 8, 10, load_kw=1.5, temp_c=2.0)
+    prof = db.residual_load_profile_v2(window_days=120, use_cache=False)
+    assert (3, 8, 0) in prof["hp_profile"]
+    assert db.lookup_hp_kwh(prof, 3, 8, 0) > 0.0
+
+
+def test_heat_pump_profile_zero_when_warm() -> None:
+    """Warm slots → physics heat-pump estimate ≈ 0, so the hp profile is ~0."""
+    for d in _recent_days_of_weekday(2, 6):   # Wednesdays, warm
+        _seed_local(d, 14, 0, load_kw=0.6, temp_c=25.0)
+        _seed_local(d, 14, 10, load_kw=0.6, temp_c=25.0)
+    prof = db.residual_load_profile_v2(window_days=120, use_cache=False)
+    assert db.lookup_hp_kwh(prof, 2, 14, 0) == pytest.approx(0.0, abs=0.05)
+
+
+def test_lookup_hp_kwh_falls_back_to_zero_for_unknown_slot() -> None:
+    for d in _recent_days_of_weekday(0, 6):   # Mondays only
+        _seed_local(d, 8, 0, load_kw=1.0, temp_c=2.0)
+    prof = db.residual_load_profile_v2(window_days=120)
+    # Sunday 03:00 was never observed → honest 0.0 (heat pump idles).
+    assert db.lookup_hp_kwh(prof, 6, 3, 0) == 0.0
