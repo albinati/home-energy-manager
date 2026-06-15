@@ -465,3 +465,17 @@ async def get_load_error_log(window_days: int = 30) -> dict[str, Any]:
         "overall": _stats(paired),
         "per_hour_local": {str(h): _stats(per_hour[h]) for h in sorted(per_hour)},
     }
+
+
+@router.get("/api/v1/load/error-log/backtest")
+async def get_load_bias_backtest(window_days: int | None = None) -> dict[str, Any]:
+    """Offline what-if for the Phase-2 load-bias corrector: would the additive
+    per-local-hour correction have reduced the error over the persisted
+    load_error_log? Returns MAE/bias before vs after + per-hour corrections.
+    Read-only — never writes, never touches the LP. The gate for enabling.
+    """
+    from ... import load_bias
+
+    if window_days is not None:
+        window_days = max(1, min(int(window_days), 365))
+    return await asyncio.to_thread(load_bias.backtest_load_recent_bias, window_days)

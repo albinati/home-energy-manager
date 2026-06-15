@@ -58,11 +58,22 @@ def _build_load_profile(slot_starts_utc: list[datetime]) -> list[float]:
     prof = db.residual_load_profile_v2()
     load_scale = float(getattr(config, "LP_LOAD_SCALE_FACTOR", 1.0))
     tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+    # Mirror the optimizer's Phase-2 bias correction so Simulate can't diverge
+    # from the real LP. Gated — empty (no-op) unless LOAD_RECENT_BIAS_ENABLED.
+    load_bias: dict[int, float] = {}
+    if getattr(config, "LOAD_RECENT_BIAS_ENABLED", False):
+        try:
+            load_bias = db.get_load_recent_bias()
+        except Exception:
+            load_bias = {}
     out: list[float] = []
     for s in slot_starts_utc:
         local = s.astimezone(tz)
         m = 30 if local.minute >= 30 else 0
-        out.append(db.lookup_residual_kwh(prof, local.weekday(), local.hour, m) * load_scale)
+        v = db.lookup_residual_kwh(prof, local.weekday(), local.hour, m) * load_scale
+        if load_bias:
+            v = max(0.0, v + load_bias.get(local.hour, 0.0))
+        out.append(v)
     return out
 
 

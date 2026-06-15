@@ -874,6 +874,20 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         )"""
     )
 
+    # Phase-2 load corrector — ADDITIVE per-LOCAL-hour correction (kWh/slot) on
+    # the residual base-load forecast, from the damped recency-weighted mean
+    # (actual − committed_forecast) in load_error_log. Refreshed nightly; only
+    # APPLIED to the LP when LOAD_RECENT_BIAS_ENABLED.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS load_recent_bias (
+            hour_local      INTEGER PRIMARY KEY CHECK(hour_local >= 0 AND hour_local < 24),
+            bias_kwh        REAL NOT NULL,
+            raw_bias_kwh    REAL,
+            samples         INTEGER NOT NULL,
+            computed_at     TEXT NOT NULL
+        )"""
+    )
+
     # V14: presence_periods — manually-flagged periods of household presence
     # (home / travel / guests) so future load-pattern analyses + LP calibration
     # can de-bias the rolling load profile by occupancy. Read by analytics
@@ -5498,6 +5512,45 @@ def get_pv_recent_bias() -> dict[int, float]:
         conn = get_connection()
         try:
             cur = conn.execute("SELECT hour_utc, factor FROM pv_recent_bias")
+            return {int(r[0]): float(r[1]) for r in cur.fetchall()}
+        finally:
+            conn.close()
+
+
+def upsert_load_recent_bias(
+    biases: dict[int, float],
+    raw_biases: dict[int, float],
+    samples: dict[int, int],
+    computed_at: str,
+) -> int:
+    """Replace the ``load_recent_bias`` table with freshly-computed per-local-hour
+    additive corrections (Phase 2)."""
+    n = 0
+    with _lock:
+        conn = get_connection()
+        try:
+            conn.execute("DELETE FROM load_recent_bias")
+            for h, b in biases.items():
+                conn.execute(
+                    """INSERT OR REPLACE INTO load_recent_bias
+                       (hour_local, bias_kwh, raw_bias_kwh, samples, computed_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (int(h), float(b), float(raw_biases.get(h, b)), int(samples.get(h, 0)), computed_at),
+                )
+                n += 1
+            conn.commit()
+        finally:
+            conn.close()
+    return n
+
+
+def get_load_recent_bias() -> dict[int, float]:
+    """Return cached per-LOCAL-hour additive load-bias corrections (kWh/slot), or
+    ``{}`` when empty. The optimizer reads this only when LOAD_RECENT_BIAS_ENABLED."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute("SELECT hour_local, bias_kwh FROM load_recent_bias")
             return {int(r[0]): float(r[1]) for r in cur.fetchall()}
         finally:
             conn.close()

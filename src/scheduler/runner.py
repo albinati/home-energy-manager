@@ -740,7 +740,7 @@ def bulletproof_load_error_log_job() -> None:
 
     Phase-1 measurement for load calibration (load analog of the PV error log).
     Runs nightly just after the PV error log so the prior UTC day has its fullest
-    load samples. Measurement only — does not touch the LP. Best-effort.
+    load samples. Measurement only — the Phase-2 refresh below is gated. Best-effort.
     """
     target_day = datetime.now(UTC).date() - timedelta(days=1)
     try:
@@ -748,6 +748,13 @@ def bulletproof_load_error_log_job() -> None:
         logger.info("load_error_log rebuild: date_utc=%s rows=%d", target_day.isoformat(), rows)
     except Exception as e:
         logger.warning("load_error_log rebuild failed (non-fatal): %s", e)
+    # Phase 2 — refresh the adaptive load-bias table from the just-rebuilt error
+    # log. Cheap + observable; NO LP effect unless LOAD_RECENT_BIAS_ENABLED.
+    try:
+        from ..load_bias import refresh_load_recent_bias
+        refresh_load_recent_bias()
+    except Exception as e:
+        logger.warning("load_recent_bias refresh failed (non-fatal): %s", e)
 
 
 def bulletproof_export_opportunity_job() -> None:
