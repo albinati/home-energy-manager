@@ -26,6 +26,38 @@ from .models import ChargePeriod, DeviceInfo, RealTimeData, SchedulerGroup, Sche
 
 logger = logging.getLogger(__name__)
 
+
+def _warn_if_pv_tracks_generation(pv_val: object, summary_raw: dict) -> None:
+    """Runtime guard for the generation-vs-PVEnergyTotal class of regression.
+
+    Fox ``generation`` = inverter AC output (PV + battery discharge);
+    ``PVEnergyTotal`` = true panel-side PV. We map PV from PVEnergyTotal, so the
+    parsed ``pv_val`` must track PVEnergyTotal, NOT generation. If a future edit
+    reverts the mapping (or Fox renames a variable), ``pv_val`` will land closer
+    to generation than to PVEnergyTotal whenever the two diverge (i.e. whenever
+    the battery discharged). Log loudly so the regression screams in prod logs,
+    not just in CI. No-op when either variable is absent or they barely differ.
+    """
+    try:
+        gen = summary_raw.get("generation")
+        pvt = summary_raw.get("PVEnergyTotal")
+        if gen is None or pvt is None or pv_val is None:
+            return
+        gen_f, pvt_f, pv_f = float(gen), float(pvt), float(pv_val)
+        # Only meaningful when generation and true PV diverge (battery active).
+        if abs(gen_f - pvt_f) <= 1.0:
+            return
+        if abs(pv_f - gen_f) < abs(pv_f - pvt_f):
+            logger.warning(
+                "Fox PV sanity: parsed PV %.1f kWh tracks generation (%.1f, AC output incl. "
+                "discharge) instead of PVEnergyTotal (%.1f, panel side) — likely a "
+                "field-mapping regression",
+                pv_f, gen_f, pvt_f,
+            )
+    except (TypeError, ValueError):
+        pass
+
+
 # Known work mode strings (set_work_mode accepts these)
 WORK_MODE_VALID = frozenset({"Self Use", "Feed-in Priority", "Back Up", "Force charge", "Force discharge"})
 # Numeric code → label (Fox API may return code instead of string)
@@ -591,6 +623,7 @@ class FoxESSClient:
         pv_val = summary_raw.get("PVEnergyTotal")
         if pv_val is None:
             pv_val = summary_raw.get("generation") or summary_raw.get("generationPower") or 0
+        _warn_if_pv_tracks_generation(pv_val, summary_raw)
         loads_val = summary_raw.get("loads") or summary_raw.get("load") or 0
         feedin_val = summary_raw.get("feedin", 0)
         grid_val = summary_raw.get("gridConsumption", 0)
@@ -650,6 +683,7 @@ class FoxESSClient:
         pv_val = summary_raw.get("PVEnergyTotal")
         if pv_val is None:
             pv_val = summary_raw.get("generation") or summary_raw.get("generationPower") or 0
+        _warn_if_pv_tracks_generation(pv_val, summary_raw)
         loads_val = summary_raw.get("loads") or summary_raw.get("load") or 0
         feedin_val = summary_raw.get("feedin", 0)
         grid_val = summary_raw.get("gridConsumption", 0)
@@ -712,6 +746,12 @@ class FoxESSClient:
         pv_arr = by_var.get("PVEnergyTotal")
         if not pv_arr:
             pv_arr = by_var.get("generation", [])
+        # Same regression guard as the scalar paths, on the monthly sums.
+        _warn_if_pv_tracks_generation(
+            sum(pv_arr),
+            {"generation": sum(by_var.get("generation", [])),
+             "PVEnergyTotal": sum(by_var["PVEnergyTotal"]) if by_var.get("PVEnergyTotal") else None},
+        )
         feedin_arr = by_var.get("feedin", [])
         grid_arr = by_var.get("gridConsumption", [])
         loads_arr = by_var.get("loads", []) or by_var.get("load", [])
