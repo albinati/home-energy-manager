@@ -1066,6 +1066,29 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_pv_error_log_slot ON pv_error_log(slot_time_utc)"
     )
+
+    # load_error_log — per-slot committed LOAD forecast vs realised total load
+    # (the load analog of pv_error_log; Phase-1 measurement for load calibration).
+    # ``forecast_kwh`` = committed total (base_load + dhw + space); ``forecast_base_kwh``
+    # = the LP's exogenous residual-load input alone (what the load profile forecasts
+    # and a future recent-bias corrector would target). ``actual_kwh`` = measured
+    # total household load (pv_realtime_history.load_power_kw mean × 0.5 h). Per-slot
+    # we can only measure TOTAL (no per-slot Daikin meter); the Daikin daily check
+    # separates the heat-pump component. One row per slot; rebuilt nightly,
+    # idempotent on slot_time_utc.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS load_error_log (
+            slot_time_utc    TEXT PRIMARY KEY,
+            forecast_kwh     REAL,
+            forecast_base_kwh REAL,
+            actual_kwh       REAL,
+            error_kwh        REAL,
+            built_at_utc     TEXT NOT NULL
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_load_error_log_slot ON load_error_log(slot_time_utc)"
+    )
     # Daily export opportunity cost: what the day's export earned on the current
     # flat SEG tariff vs what it WOULD have earned on Outgoing Agile. The running
     # tally of money left on the table by not being on Agile export — ammunition
@@ -3589,17 +3612,19 @@ def _half_hourly_grid_kwh_for_day(
 ) -> dict[str, float]:
     """Shared trapezoidal-integration over ``pv_realtime_history.<column>`` for
     ``day``, keyed by ISO half-hour slot start (UTC). ``column`` must be one of
-    ``grid_export_kw`` / ``grid_import_kw`` / ``solar_power_kw`` (caller-vetted).
+    ``grid_export_kw`` / ``grid_import_kw`` / ``solar_power_kw`` /
+    ``battery_discharge_kw`` / ``load_power_kw`` (caller-vetted).
 
     Each sample-pair's energy is assigned to the bucket containing the EARLIER
-    sample (matching :func:`compute_fox_energy_daily_from_realtime`). Slots with
-    no telemetry get no key — caller decides whether to treat missing as zero
-    or fall back to a daily total.
+    sample (matching :func:`compute_fox_energy_daily_from_realtime`). The
+    ``max_gap_seconds`` cap means a telemetry outage doesn't smear a stale value
+    across the gap. Slots with no telemetry get no key — caller decides whether
+    to treat missing as zero or fall back to a daily total.
     """
     from collections import defaultdict
     from datetime import datetime as _dt
 
-    if column not in ("grid_export_kw", "grid_import_kw", "solar_power_kw", "battery_discharge_kw"):
+    if column not in ("grid_export_kw", "grid_import_kw", "solar_power_kw", "battery_discharge_kw", "load_power_kw"):
         raise ValueError(f"unsupported column: {column}")
 
     day_iso = day.isoformat()
@@ -4924,6 +4949,179 @@ def rebuild_pv_error_log_for_date(day: date) -> int:
     return written
 
 
+def committed_load_forecast_by_slot(day: date) -> dict[str, tuple[float, float]]:
+    """Per-slot committed (total, base) LOAD forecast for ``day``.
+
+    ``total`` = ``base_load_json[slot_index] + dhw_kwh + space_kwh`` (the full
+    household load the LP committed to). ``base`` = ``base_load_json[slot_index]``
+    alone — the LP's exogenous residual-load input, i.e. the quantity the load
+    profile forecasts and a future recent-bias corrector would target.
+
+    Stitched per slot the same way as :func:`committed_lp_field_by_slot` and the
+    PV path: for each slot, use the most recent solve whose ``run_at <= slot_start``
+    (the plan as known when the slot began); if none qualifies, the earliest solve
+    that covered it. Returns ``{slot_time_utc (stored form): (total, base)}``.
+    Empty on error.
+    """
+    day_start = datetime(day.year, day.month, day.day, tzinfo=UTC)
+    day_end = day_start + timedelta(days=1)
+    with _lock:
+        conn = get_connection()
+        try:
+            rows = conn.execute(
+                """SELECT s.slot_time_utc, s.slot_index, s.run_id,
+                          s.dhw_kwh, s.space_kwh, i.base_load_json, i.run_at_utc
+                   FROM lp_solution_snapshot s
+                   JOIN lp_inputs_snapshot i ON i.run_id = s.run_id
+                   WHERE s.slot_time_utc >= ? AND s.slot_time_utc < ?
+                     AND i.base_load_json IS NOT NULL""",
+                (day_start.isoformat(), day_end.isoformat()),
+            ).fetchall()
+        except sqlite3.Error as e:
+            logger.warning("committed_load_forecast_by_slot query failed: %s", e)
+            return {}
+        finally:
+            conn.close()
+
+    arr_cache: dict[int, list] = {}
+    # slot -> (run_dt, total, base, eligible)
+    best: dict[str, tuple[datetime, float, float, bool]] = {}
+    for slot_iso, slot_idx, run_id, dhw, space, base_json, run_at in rows:
+        slot_dt = _parse_iso_utc(slot_iso)
+        run_dt = _parse_iso_utc(run_at)
+        if slot_dt is None or run_dt is None:
+            continue
+        arr = arr_cache.get(run_id)
+        if arr is None:
+            try:
+                arr = json.loads(base_json or "[]")
+            except (TypeError, ValueError):
+                arr = []
+            arr_cache[run_id] = arr
+        try:
+            idx = int(slot_idx)
+        except (TypeError, ValueError):
+            continue
+        if idx < 0 or idx >= len(arr):
+            continue
+        try:
+            base = float(arr[idx])
+        except (TypeError, ValueError):
+            continue
+        total = base + float(dhw or 0.0) + float(space or 0.0)
+        eligible = run_dt <= slot_dt
+        cur = best.get(slot_iso)
+        if cur is None:
+            best[slot_iso] = (run_dt, total, base, eligible)
+            continue
+        c_run, _c_t, _c_b, c_elig = cur
+        if eligible and not c_elig:
+            best[slot_iso] = (run_dt, total, base, True)
+        elif eligible and c_elig:
+            if run_dt > c_run:
+                best[slot_iso] = (run_dt, total, base, True)
+        elif (not eligible) and (not c_elig):
+            if run_dt < c_run:
+                best[slot_iso] = (run_dt, total, base, False)
+    return {k: (v[1], v[2]) for k, v in best.items()}
+
+
+def rebuild_load_error_log_for_date(day: date) -> int:
+    """Persist per-slot committed-LOAD-forecast-vs-actual rows for ``day``.
+
+    Joins the stitched committed forecast (:func:`committed_load_forecast_by_slot`)
+    with the realised half-hour total-load roll-up. One row per slot that has a
+    forecast and/or an actual; idempotent on ``slot_time_utc``. Returns rows
+    written. Best-effort: the nightly cron swallows exceptions.
+    """
+    forecast = committed_load_forecast_by_slot(day)
+    try:
+        # Trapezoidal integration with the shared gap-guarded helper (same actual
+        # path as PV/grid) — an outage can't smear a stale value across the gap.
+        actual = _half_hourly_grid_kwh_for_day(day, "load_power_kw")
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("rebuild_load_error_log: actual roll-up failed for %s: %s", day, e)
+        actual = {}
+
+    def _z(s: str) -> str:
+        dt = _parse_iso_utc(s)
+        return dt.strftime("%Y-%m-%dT%H:%M:%SZ") if dt else s
+
+    f_by_z = {_z(k): v for k, v in forecast.items()}
+    a_by_z = actual  # already Z-form
+    built_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    written = 0
+    with _lock:
+        conn = get_connection()
+        try:
+            for slot_z in sorted(set(f_by_z) | set(a_by_z)):
+                fv = f_by_z.get(slot_z)
+                total = fv[0] if fv else None
+                base = fv[1] if fv else None
+                a = a_by_z.get(slot_z)
+                err = (a - total) if (a is not None and total is not None) else None
+                conn.execute(
+                    """INSERT INTO load_error_log
+                         (slot_time_utc, forecast_kwh, forecast_base_kwh, actual_kwh, error_kwh, built_at_utc)
+                       VALUES (?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(slot_time_utc) DO UPDATE SET
+                         forecast_kwh=excluded.forecast_kwh,
+                         forecast_base_kwh=excluded.forecast_base_kwh,
+                         actual_kwh=excluded.actual_kwh,
+                         error_kwh=excluded.error_kwh,
+                         built_at_utc=excluded.built_at_utc""",
+                    (slot_z, total, base, a, err, built_at),
+                )
+                written += 1
+            conn.commit()
+        except sqlite3.Error as e:
+            logger.warning("rebuild_load_error_log write failed for %s: %s", day, e)
+        finally:
+            conn.close()
+    return written
+
+
+def backfill_load_error_log(start_day: date, end_day: date) -> dict[str, int]:
+    """Rebuild load_error_log for every day in [start_day, end_day] (inclusive).
+
+    Used for the one-time history backfill so the log is populated immediately
+    rather than accruing one day per nightly cron run. Returns
+    ``{"days": N, "rows": total_rows_written}``.
+    """
+    days = 0
+    rows = 0
+    d = start_day
+    while d <= end_day:
+        rows += rebuild_load_error_log_for_date(d)
+        days += 1
+        d += timedelta(days=1)
+    return {"days": days, "rows": rows}
+
+
+def get_load_error_log_range(start_utc_iso: str, end_utc_iso: str) -> list[dict[str, Any]]:
+    """Per-slot forecast/actual/error rows in ``[start, end)`` for load calibration."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT slot_time_utc, forecast_kwh, forecast_base_kwh, actual_kwh, error_kwh
+                   FROM load_error_log
+                   WHERE slot_time_utc >= ? AND slot_time_utc < ?
+                   ORDER BY slot_time_utc""",
+                (start_utc_iso, end_utc_iso),
+            )
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
+def get_load_error_log_for_date(day: date) -> list[dict[str, Any]]:
+    """Persisted per-slot forecast/actual/error rows for ``day``."""
+    ds = datetime(day.year, day.month, day.day, tzinfo=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    de = (datetime(day.year, day.month, day.day, tzinfo=UTC) + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return get_load_error_log_range(ds, de)
+
+
 def upsert_export_opportunity(
     day: date, export_kwh: float, seg_pence: float, agile_pence: float
 ) -> None:
@@ -5878,6 +6076,7 @@ def prune_history_tables() -> dict[str, int]:
         ("meteo_forecast_history", "forecast_fetch_at_utc", _config.METEO_FORECAST_HISTORY_RETENTION_DAYS, False),
         ("forecast_skill_log", "built_at_utc", _config.METEO_FORECAST_HISTORY_RETENTION_DAYS, False),
         ("pv_error_log", "slot_time_utc", _config.METEO_FORECAST_HISTORY_RETENTION_DAYS, False),
+        ("load_error_log", "slot_time_utc", _config.METEO_FORECAST_HISTORY_RETENTION_DAYS, False),
         ("lp_solution_snapshot", "slot_time_utc", _config.LP_SNAPSHOT_RETENTION_DAYS, False),
         ("lp_inputs_snapshot", "run_at_utc", _config.LP_SNAPSHOT_RETENTION_DAYS, False),
         ("config_audit", "changed_at_utc", _config.CONFIG_AUDIT_RETENTION_DAYS, False),

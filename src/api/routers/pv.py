@@ -415,3 +415,53 @@ async def get_residual_load_profile(window_days: int | None = None) -> dict[str,
         "calibrated_days": prof.get("calibrated_days", 0),
         "physics_only_days": prof.get("physics_only_days", 0),
     }
+
+
+@router.get("/api/v1/load/error-log")
+async def get_load_error_log(window_days: int = 30) -> dict[str, Any]:
+    """Committed LOAD-forecast-vs-actual summary from the persisted load_error_log
+    (Phase-1 measurement). Overall MAE/bias + per-LOCAL-hour bias (load is
+    occupancy-driven, so local hour is the meaningful axis — and the axis a
+    future recent-bias corrector would act on). Read-only, viewer-safe.
+    """
+    window_days = max(1, min(int(window_days), 365))
+    now = datetime.now(UTC)
+    start = (now - timedelta(days=window_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    end = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    rows = await asyncio.to_thread(db.get_load_error_log_range, start, end)
+    tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+
+    paired: list[tuple[float, float]] = []  # (forecast_total, actual)
+    per_hour: dict[int, list[tuple[float, float]]] = {}
+    for r in rows:
+        f = r.get("forecast_kwh")
+        a = r.get("actual_kwh")
+        if f is None or a is None:
+            continue
+        try:
+            ts = datetime.fromisoformat(str(r["slot_time_utc"]).replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            continue
+        lh = ts.astimezone(tz).hour
+        paired.append((float(f), float(a)))
+        per_hour.setdefault(lh, []).append((float(f), float(a)))
+
+    def _stats(pairs: list[tuple[float, float]]) -> dict[str, Any]:
+        n = len(pairs)
+        if n == 0:
+            return {"n": 0, "mae_kwh": 0.0, "bias_kwh": 0.0, "mean_forecast_kwh": 0.0, "mean_actual_kwh": 0.0}
+        errs = [a - f for f, a in pairs]
+        return {
+            "n": n,
+            "mae_kwh": round(sum(abs(e) for e in errs) / n, 4),
+            "bias_kwh": round(sum(errs) / n, 4),  # +ve = actual > forecast (under-forecast)
+            "mean_forecast_kwh": round(sum(f for f, _ in pairs) / n, 4),
+            "mean_actual_kwh": round(sum(a for _, a in pairs) / n, 4),
+        }
+
+    return {
+        "window_days": window_days,
+        "n_slots_logged": len(rows),
+        "overall": _stats(paired),
+        "per_hour_local": {str(h): _stats(per_hour[h]) for h in sorted(per_hour)},
+    }

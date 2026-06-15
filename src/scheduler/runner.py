@@ -735,6 +735,21 @@ def bulletproof_pv_error_log_job() -> None:
         logger.warning("pv_recent_bias refresh failed (non-fatal): %s", e)
 
 
+def bulletproof_load_error_log_job() -> None:
+    """Persist yesterday's per-slot committed-LOAD-forecast-vs-actual rows.
+
+    Phase-1 measurement for load calibration (load analog of the PV error log).
+    Runs nightly just after the PV error log so the prior UTC day has its fullest
+    load samples. Measurement only — does not touch the LP. Best-effort.
+    """
+    target_day = datetime.now(UTC).date() - timedelta(days=1)
+    try:
+        rows = db.rebuild_load_error_log_for_date(target_day)
+        logger.info("load_error_log rebuild: date_utc=%s rows=%d", target_day.isoformat(), rows)
+    except Exception as e:
+        logger.warning("load_error_log rebuild failed (non-fatal): %s", e)
+
+
 def bulletproof_export_opportunity_job() -> None:
     """Persist yesterday's export opportunity cost (Outgoing Agile − flat SEG).
 
@@ -1917,6 +1932,14 @@ def start_background_scheduler() -> None:
                 id="bulletproof_pv_error_log",
             )
             logger.info("PV error-log rebuild cron scheduled (04:20 UTC daily)")
+            # Per-slot LOAD forecast-error log (Phase-1 load calibration). 04:22
+            # UTC — just after the PV error log; measurement only, no LP impact.
+            _background_scheduler.add_job(
+                bulletproof_load_error_log_job,
+                CronTrigger(hour=4, minute=22, timezone=ZoneInfo("UTC")),
+                id="bulletproof_load_error_log",
+            )
+            logger.info("Load error-log rebuild cron scheduled (04:22 UTC daily)")
             # Daily export opportunity cost (Agile vs SEG). 04:25 UTC — after the
             # Fox/PV roll-ups (02:30) so the prior day's export is complete.
             _background_scheduler.add_job(
