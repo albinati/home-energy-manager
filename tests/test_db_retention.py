@@ -143,6 +143,8 @@ def test_prune_history_tables_returns_per_table_counts():
         "forecast_skill_log",
         # Per-slot PV forecast-error log (#462) rides on the meteo retention.
         "pv_error_log",
+        # Per-slot LOAD forecast-error log (Phase-1 load calibration) — same horizon.
+        "load_error_log",
         "lp_solution_snapshot",
         "lp_inputs_snapshot",
         "config_audit",
