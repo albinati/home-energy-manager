@@ -85,6 +85,23 @@ def test_current_import_standing_caches_within_ttl(monkeypatch):
     assert calls["n"] == 1  # second call served from cache, no second fetch
 
 
+def test_current_import_standing_refetches_after_ttl_expiry(monkeypatch):
+    monkeypatch.setattr(config, "OCTOPUS_TARIFF_CODE", "E-1R-AGILE-24-10-01-A", raising=False)
+    calls = {"n": 0}
+
+    def _fetch(**_):
+        calls["n"] += 1
+        return [_product("AGILE-24-10-01", 62.22)]
+
+    monkeypatch.setattr("src.energy.octopus_products.get_available_tariffs", _fetch)
+    assert fc.current_import_standing_pence() == pytest.approx(62.22)
+    assert calls["n"] == 1
+    # Age the cached entry past the TTL → next call re-fetches.
+    fc._STANDING_CACHE["ts"] -= fc.STANDING_CACHE_TTL_SECONDS + 1
+    assert fc.current_import_standing_pence() == pytest.approx(62.22)
+    assert calls["n"] == 2
+
+
 def test_current_import_standing_offline_falls_back_without_caching(monkeypatch):
     monkeypatch.setattr(config, "OCTOPUS_TARIFF_CODE", "E-1R-AGILE-24-10-01-A", raising=False)
     monkeypatch.setattr(config, "MANUAL_STANDING_CHARGE_PENCE_PER_DAY", 59.26, raising=False)
