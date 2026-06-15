@@ -397,6 +397,13 @@ async def get_residual_load_profile(window_days: int | None = None) -> dict[str,
             for h in range(24) for m in (0, 30)
         ]
 
+    def _hp_component_series(dow: int, component: str) -> list[dict[str, Any]]:
+        return [
+            {"h": h, "m": m,
+             "median": round(db.lookup_hp_component_kwh(prof, dow, h, m, component=component), 4)}
+            for h in range(24) for m in (0, 30)
+        ]
+
     p = prof.get("profile", {})
     all_series = [
         {"h": h, "m": m,
@@ -408,6 +415,10 @@ async def get_residual_load_profile(window_days: int | None = None) -> dict[str,
         "by_dow": {str(d): _series(d) for d in range(7)},
         # Heat-pump (Daikin) split — the load the residual profile subtracts.
         "hp_by_dow": {str(d): _hp_series(d) for d in range(7)},
+        # TANK (DHW) vs HEATING (space) breakdown of the heat-pump load, from the
+        # measured Onecta meters (#574 item 2).
+        "hp_dhw_by_dow": {str(d): _hp_component_series(d, "hp_dhw_profile") for d in range(7)},
+        "hp_space_by_dow": {str(d): _hp_component_series(d, "hp_space_profile") for d in range(7)},
         "all": all_series,
         "flat": round(float(prof.get("flat", 0.0)), 4),
         "away_days": prof.get("away_days", []),
