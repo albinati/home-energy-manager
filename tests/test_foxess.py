@@ -239,5 +239,100 @@ class TestFoxESSStatusEndpoint(unittest.TestCase):
         mock_get_cached.assert_called_once()
 
 
+class TestFoxEnergyPvMapping(unittest.TestCase):
+    """PV vs generation regression (Fox `generation` = AC output incl. battery
+    discharge; `PVEnergyTotal` = true panel-side PV). The energy report path
+    must map PV from PVEnergyTotal, not generation, or the "solar produced" /
+    self-sufficiency figures inflate (~8x in winter) and the load-balance
+    estimate double-counts discharge.
+    """
+
+    def setUp(self):
+        self.client = FoxESSClient(api_key="test_key", device_sn="TEST_SN")
+
+    @staticmethod
+    def _report(generation, pv, *, feedin=0.5, grid=100.0, charge=50.0, discharge=45.0):
+        items = [
+            {"variable": "feedin", "values": [feedin]},
+            {"variable": "gridConsumption", "values": [grid]},
+            {"variable": "chargeEnergyToTal", "values": [charge]},
+            {"variable": "dischargeEnergyToTal", "values": [discharge]},
+        ]
+        if generation is not None:
+            items.append({"variable": "generation", "values": [generation]})
+        if pv is not None:
+            items.append({"variable": "PVEnergyTotal", "values": [pv]})
+        return items
+
+    @patch.object(FoxESSClient, "_open_post")
+    def test_month_report_requests_pvenergytotal(self, mock_post):
+        mock_post.return_value = self._report(256.0, 32.1)
+        self.client._get_energy_month_report(2026, 1)
+        _, body = mock_post.call_args.args
+        self.assertIn("PVEnergyTotal", body["variables"])
+
+    @patch.object(FoxESSClient, "_open_post")
+    def test_month_report_pv_from_pvenergytotal_not_generation(self, mock_post):
+        mock_post.return_value = self._report(256.0, 32.1)
+        out = self.client._get_energy_month_report(2026, 1)
+        self.assertAlmostEqual(out["pvEnergyToday"], 32.1)
+        self.assertNotAlmostEqual(out["pvEnergyToday"], 256.0)
+
+    @patch.object(FoxESSClient, "_open_post")
+    def test_month_report_zero_pv_day_stays_zero(self, mock_post):
+        # A legitimate zero-PV winter day must NOT fall through to generation.
+        mock_post.return_value = self._report(200.0, 0.0)
+        out = self.client._get_energy_month_report(2026, 1)
+        self.assertEqual(out["pvEnergyToday"], 0.0)
+
+    @patch.object(FoxESSClient, "_open_post")
+    def test_month_report_falls_back_to_generation_when_pv_absent(self, mock_post):
+        # Older firmware / cloud variant that doesn't return PVEnergyTotal.
+        mock_post.return_value = self._report(180.0, None)
+        out = self.client._get_energy_month_report(2026, 1)
+        self.assertAlmostEqual(out["pvEnergyToday"], 180.0)
+
+    @patch.object(FoxESSClient, "_open_post")
+    def test_month_report_load_balance_no_discharge_double_count(self, mock_post):
+        # load = grid + PV + discharge - feedin - charge, with TRUE pv.
+        mock_post.return_value = self._report(
+            256.0, 32.1, feedin=0.5, grid=100.0, charge=50.0, discharge=45.0
+        )
+        out = self.client._get_energy_month_report(2026, 1)
+        expected = 100.0 + 32.1 + 45.0 - 0.5 - 50.0
+        self.assertAlmostEqual(out["loadEnergyToday"], round(expected, 2))
+
+    @patch.object(FoxESSClient, "_open_post")
+    def test_daily_breakdown_solar_from_pvenergytotal(self, mock_post):
+        mock_post.return_value = [
+            {"variable": "generation", "values": [8.0, 9.0]},
+            {"variable": "PVEnergyTotal", "values": [1.0, 1.2]},
+            {"variable": "feedin", "values": [0.0, 0.0]},
+            {"variable": "gridConsumption", "values": [5.0, 6.0]},
+            {"variable": "chargeEnergyToTal", "values": [3.0, 3.0]},
+            {"variable": "dischargeEnergyToTal", "values": [7.0, 7.5]},
+        ]
+        _, daily = self.client.get_energy_month_daily_breakdown(2026, 1)
+        self.assertAlmostEqual(daily[0]["solar_kwh"], 1.0)
+        self.assertAlmostEqual(daily[1]["solar_kwh"], 1.2)
+        self.assertIn("PVEnergyTotal", mock_post.call_args.args[1]["variables"])
+        # Per-row load balance uses true PV → no discharge double-count.
+        # load = import + PV + discharge - export - charge (loads absent).
+        self.assertAlmostEqual(daily[0]["load_kwh"], round(5.0 + 1.0 + 7.0 - 0.0 - 3.0, 2))
+        self.assertAlmostEqual(daily[1]["load_kwh"], round(6.0 + 1.2 + 7.5 - 0.0 - 3.0, 2))
+
+    @patch.object(FoxESSClient, "_open_post")
+    def test_daily_breakdown_empty_pv_array_falls_back_to_generation(self, mock_post):
+        # API anomaly: PVEnergyTotal present but empty → must not zero the month.
+        mock_post.return_value = [
+            {"variable": "generation", "values": [8.0, 9.0]},
+            {"variable": "PVEnergyTotal", "values": []},
+            {"variable": "gridConsumption", "values": [5.0, 6.0]},
+        ]
+        _, daily = self.client.get_energy_month_daily_breakdown(2026, 1)
+        self.assertAlmostEqual(daily[0]["solar_kwh"], 8.0)
+        self.assertAlmostEqual(daily[1]["solar_kwh"], 9.0)
+
+
 if __name__ == "__main__":
     unittest.main()
