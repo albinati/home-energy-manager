@@ -731,6 +731,30 @@ class Config:
     # A slot needs at least this forecast+actual kWh to contribute (drop noise).
     PV_RECENT_BIAS_MIN_KWH: float = float(os.getenv("PV_RECENT_BIAS_MIN_KWH", "0.05"))
 
+    # --- Load recent-bias corrector (Phase 2; analog of the PV one) -----------
+    # ADDITIVE per-LOCAL-hour correction on the residual base-load forecast.
+    # Load is occupancy-driven (local hour) and the bias is a level offset from
+    # seasonal/occupancy regime shift (the 120d median lags), so it's ADDITIVE,
+    # not multiplicative like PV. Closed loop: ``new = old + damping·raw_bias``
+    # where raw_bias is the recency-weighted mean (actual − committed_forecast)
+    # — i.e. the RESIDUAL error of the already-corrected forecast — so it ramps
+    # to full correction and settles at raw_bias≈0. DEFAULT OFF — the table is
+    # still refreshed nightly (cheap, observable) but never touches the LP until
+    # this is flipped on after the backtest confirms it helps.
+    LOAD_RECENT_BIAS_ENABLED: bool = (
+        os.getenv("LOAD_RECENT_BIAS_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
+    )
+    LOAD_RECENT_BIAS_WINDOW_DAYS: int = int(os.getenv("LOAD_RECENT_BIAS_WINDOW_DAYS", "21"))
+    LOAD_RECENT_BIAS_HALFLIFE_DAYS: float = float(os.getenv("LOAD_RECENT_BIAS_HALFLIFE_DAYS", "7"))
+    LOAD_RECENT_BIAS_DAMPING: float = float(os.getenv("LOAD_RECENT_BIAS_DAMPING", "0.5"))
+    # Hard safety rail on the |additive correction| (kWh/slot). The observed
+    # diurnal swing is ~0.35 kWh/slot; 0.3 covers it without letting a noisy
+    # hour run away.
+    LOAD_RECENT_BIAS_MAX_KWH: float = float(os.getenv("LOAD_RECENT_BIAS_MAX_KWH", "0.3"))
+    # A slot needs at least this forecast+actual kWh to contribute (drop noise).
+    LOAD_RECENT_BIAS_MIN_KWH: float = float(os.getenv("LOAD_RECENT_BIAS_MIN_KWH", "0.05"))
+    LOAD_RECENT_BIAS_MIN_SAMPLES: int = int(os.getenv("LOAD_RECENT_BIAS_MIN_SAMPLES", "3"))
+
     # Agile scheduler (Daikin ASHP by price)
     SCHEDULER_ENABLED: bool = os.getenv("SCHEDULER_ENABLED", "false").lower() in ("true", "1", "yes")
     OCTOPUS_TARIFF_CODE: str = (os.getenv("OCTOPUS_TARIFF_CODE") or "").strip()

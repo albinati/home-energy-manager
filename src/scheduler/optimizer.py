@@ -1381,6 +1381,15 @@ def _run_optimizer_lp(
     # dispatch loads (below) are added at their true kWh. ``base_load_spread`` is
     # the per-slot p75 spread used by the scenario LP (#477 Stage 2).
     _load_scale = float(getattr(config, "LP_LOAD_SCALE_FACTOR", 1.0))
+    # Phase-2 additive per-local-hour bias correction — applied to the residual
+    # base load (so the committed base_load_json the error log measures includes
+    # it → the loop closes). OFF unless LOAD_RECENT_BIAS_ENABLED; empty otherwise.
+    _load_bias: dict[int, float] = {}
+    if getattr(config, "LOAD_RECENT_BIAS_ENABLED", False):
+        try:
+            _load_bias = db.get_load_recent_bias()
+        except Exception:
+            _load_bias = {}
     base_load = []
     base_load_spread = []
     for s in slots:
@@ -1388,10 +1397,15 @@ def _run_optimizer_lp(
         _dow = _local.weekday()
         _h = _local.hour
         _m = 30 if _local.minute >= 30 else 0
-        base_load.append(db.lookup_residual_kwh(_prof, _dow, _h, _m) * _load_scale)
+        _b = db.lookup_residual_kwh(_prof, _dow, _h, _m) * _load_scale
+        if _load_bias:
+            _b = max(0.0, _b + _load_bias.get(_h, 0.0))
+        base_load.append(_b)
         base_load_spread.append(db.lookup_residual_spread_kwh(_prof, _dow, _h, _m) * _load_scale)
     if _load_scale != 1.0:
         logger.info("LP base_load: operator load scale %.2f applied to residual profile", _load_scale)
+    if _load_bias:
+        logger.info("LP base_load: recent-bias correction applied to %d local hour(s)", len(_load_bias))
     residual_base_load = list(base_load)
     appliance_profile_kwh = [0.0] * len(base_load)
 
