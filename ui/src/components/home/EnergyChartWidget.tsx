@@ -56,10 +56,18 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
   // Granularity + anchor come from the shared period navigator so the chart
   // re-scopes together with the Hero + cost breakdown.
   const { gran: granularity, anchor } = usePeriod();
-  // Local "today" (matches period.ts) — the per-slot day chart only has data
-  // for today (historical per-slot capture is #424).
+  // Local "today" (matches period.ts).
   const todayLocalISO = localTodayISO();
   const isToday = anchor === todayLocalISO;
+  // Yesterday's per-slot consumption_kwh is still "settling": the nightly
+  // consumption backfill (~04:00 local) rewrites the noisy heartbeat estimate
+  // with the metered reading. So only days STRICTLY older than yesterday are
+  // safe to cache immutably; yesterday is refetched on each visit.
+  const yesterdayLocalISO = (() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 1);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  })();
   const [period, setPeriod] = useState<PeriodInsightsResponse | null>(null);
   const [daikin, setDaikin] = useState<DaikinConsumptionResponse | null>(null);
   // Day view: per-slot grid import + battery discharge — for the "by source" stack.
@@ -87,7 +95,8 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
     // intraday chart. Per-slot history IS captured (execution_log etc.), so the
     // old single-bar fallback (#424) is no longer needed.
     if (granularity === "day" && !isToday) {
-      const cachedDay = getImmutableCache<DayPastData>(cacheKey);
+      const settled = anchor < yesterdayLocalISO; // consumption backfill done
+      const cachedDay = settled ? getImmutableCache<DayPastData>(cacheKey) : undefined;
       if (cachedDay) {
         setDayData(cachedDay);
         setLoading(false);
@@ -108,7 +117,7 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
         const v: DayPastData = { exec: e, pv: p, grid: g, daikin: dk };
         setDayData(v);
         setLoading(false);
-        setImmutableCache(cacheKey, v); // past day → immutable
+        if (settled) setImmutableCache(cacheKey, v); // only fully-settled past days
       });
       return () => { alive = false; };
     }
