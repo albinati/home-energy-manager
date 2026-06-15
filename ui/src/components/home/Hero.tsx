@@ -183,15 +183,18 @@ function HeroWeather({ weather, pv }: { weather?: WeatherResponse | null; pv?: P
   const markPct = hi != null && lo != null && hi > lo
     ? Math.max(6, Math.min(94, ((outdoor - lo) / (hi - lo)) * 100)) : 50;
 
-  // Solar today: generated so far (actual) toward the DAY total (locked actuals
-  // for elapsed slots + forecast for the rest). Using the day total — not the
-  // forward-only forecast — so it stays meaningful in the evening (forecast → 0).
+  // Solar today: generated so far (actual) vs the day-ahead FORECAST. The total
+  // is the COMMITTED full-day forecast (pv_planned_kwh, frozen at solve time) —
+  // not a blend of actual(past)+live-forward-forecast(future), which collapses
+  // to the actual total in the evening (showing a meaningless 18.3/18.3, always
+  // 100%) and hides the real forecast. pv_planned is full-day so it stays
+  // meaningful all evening; fall back to the live forecast where uncommitted.
   const pvNowMs = pv?.now_utc ? new Date(pv.now_utc).getTime() : nowMs;
   const slots = pv?.slots ?? [];
   const elapsedOf = (s: { slot_utc: string }) => new Date(s.slot_utc).getTime() + 30 * 60_000 <= pvNowMs;
   const solarDone = slots.reduce((a, s) => a + (s.pv_actual_kwh ?? 0), 0);
   const solarTotal = slots.length
-    ? slots.reduce((a, s) => a + ((elapsedOf(s) ? (s.pv_actual_kwh ?? s.pv_forecast_kwh) : s.pv_forecast_kwh) ?? 0), 0)
+    ? slots.reduce((a, s) => a + ((s.pv_planned_kwh ?? s.pv_forecast_kwh) ?? 0), 0)
     : (pv?.forecast_kwh_day_total ?? 0);
   const solarToGo = slots.reduce((a, s) => (!elapsedOf(s) ? a + (s.pv_forecast_kwh ?? 0) : a), 0);
   const solarPct = solarTotal > 0 ? Math.min(100, Math.round((solarDone / solarTotal) * 100)) : 0;
