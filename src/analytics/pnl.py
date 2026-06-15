@@ -314,7 +314,14 @@ def compute_daily_pnl(day: date) -> dict[str, Any]:
     )
     export_kwh = export_both["export_kwh"]
     real_import_cost, import_kwh = _realised_import_pence(day)
-    standing_p = float(config.MANUAL_STANDING_CHARGE_PENCE_PER_DAY or 0)
+    # Single source of truth with fair_compare: price Agile's daily fee with the
+    # LIVE Octopus catalogue standing (TTL-cached), not the stale MANUAL config.
+    # Keeps the cockpit's "beating fixed" verdict consistent with the Insights
+    # tariff table (the 2026-06-15 cockpit-vs-Insights contradiction). Falls back
+    # to MANUAL_STANDING_CHARGE when the catalogue is offline.
+    from .fair_compare import current_import_standing_pence
+
+    standing_p = current_import_standing_pence()
     # Per-tariff fairness (matches src/analytics/fair_compare): SVT uses its own
     # standing; non-Agile shadows don't earn the Outgoing Agile export revenue —
     # they'd be on the same flat SEG the household is actually on (EXPORT_SEG_RATE_PENCE).

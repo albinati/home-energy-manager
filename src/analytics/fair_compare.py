@@ -178,6 +178,19 @@ def _empty(requested_start: date, end_day: date, agile_start: date) -> dict[str,
     }
 
 
+def _catalogue_standing_pence(candidates: list, current_code: str) -> float:
+    """The LIVE catalogue standing (pence/day) for ``current_code`` within
+    ``candidates``, or 0.0 if the product isn't present / has no positive
+    standing. Pure lookup — no fallback, no network."""
+    for t in candidates:
+        if getattr(t, "product_code", None) == current_code:
+            sc = float(getattr(t.rates, "standing_charge_pence_per_day", 0) or 0)
+            if sc > 0:
+                return sc
+            break
+    return 0.0
+
+
 def _current_standing_per_day(candidates: list, current_code: str) -> float:
     """Standing charge (pence/day) to price the household's CURRENT tariff with.
 
@@ -188,12 +201,48 @@ def _current_standing_per_day(candidates: list, current_code: str) -> float:
     back to MANUAL only when the catalogue is offline or the current product
     isn't in it (standing must be > 0 to count as a real catalogue value).
     """
-    for t in candidates:
-        if getattr(t, "product_code", None) == current_code:
-            sc = float(getattr(t.rates, "standing_charge_pence_per_day", 0) or 0)
-            if sc > 0:
-                return sc
-            break
+    sc = _catalogue_standing_pence(candidates, current_code)
+    return sc if sc > 0 else float(config.MANUAL_STANDING_CHARGE_PENCE_PER_DAY or 0)
+
+
+# --- single source of truth for the household's current standing -----------
+#
+# Both this module (per fair-compare request) and pnl.compute_daily_pnl price
+# the Agile/realised side with the SAME standing charge, so the cockpit and the
+# Insights tariff table can never disagree on Agile's daily fee (the 2026-06-15
+# "winning on cockpit, losing to British Gas in Insights" contradiction was
+# exactly this: pnl used the stale 59.26p MANUAL value while fair-compare used
+# the live 62.22p catalogue value). pnl runs per-day over long periods, so the
+# network fetch is TTL-cached here; fair-compare already fetches the full
+# catalogue per request and reuses that list directly.
+_STANDING_CACHE: dict[str, float] = {"value": 0.0, "ts": 0.0}
+STANDING_CACHE_TTL_SECONDS = 6 * 3600
+
+
+def current_import_standing_pence() -> float:
+    """Live Octopus standing charge (pence/day) for the household's CURRENT
+    import product, TTL-cached, with a MANUAL fallback when the catalogue is
+    offline. The single source of truth shared by pnl and fair-compare."""
+    import time
+
+    now = time.time()
+    cached = float(_STANDING_CACHE.get("value") or 0.0)
+    if cached > 0 and (now - float(_STANDING_CACHE.get("ts") or 0.0)) < STANDING_CACHE_TTL_SECONDS:
+        return cached
+    val = 0.0
+    try:
+        from ..energy.octopus_products import get_available_tariffs
+
+        candidates = get_available_tariffs(max_products=15)
+        val = _catalogue_standing_pence(candidates, _current_product_code())
+    except Exception:  # noqa: BLE001 — offline catalogue must never break pnl
+        logger.debug("current_import_standing_pence: catalogue fetch failed", exc_info=True)
+        val = 0.0
+    if val > 0:
+        _STANDING_CACHE["value"] = val
+        _STANDING_CACHE["ts"] = now
+        return val
+    # Don't cache the fallback — retry the catalogue on the next call.
     return float(config.MANUAL_STANDING_CHARGE_PENCE_PER_DAY or 0)
 
 
