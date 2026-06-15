@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "preact/hooks";
-import { useFetch } from "../lib/poll";
+import { useFetch, useInflight } from "../lib/poll";
 import { getFairCompare } from "../lib/endpoints";
 import { usePeriod, periodLabel, isCurrentPeriod } from "../lib/period";
 import { PeriodNavigator } from "../components/shell/PeriodNavigator";
@@ -19,10 +19,11 @@ const p2 = (p: number) => gbp(p / 100);
 // imports credit the bill). Scoped by the shared day/week/month/year navigator.
 export default function Insights() {
   const period = usePeriod();
+  const inflight = useInflight();
   const cmp = useFetch(
     () => getFairCompare(period.gran, period.anchor),
     [period.gran, period.anchor],
-    { cacheKey: `fair:${period.gran}:${period.anchor}`, immutable: !isCurrentPeriod(period) },
+    { cacheKey: `fair:${period.gran}:${period.anchor}`, immutable: !isCurrentPeriod(period), track: true },
   );
   const data = cmp.data;
   const rows = data?.tariffs ?? [];
@@ -44,6 +45,15 @@ export default function Insights() {
       </header>
 
       <PeriodNavigator variant="page" />
+
+      {/* One shared cue for the whole period-scoped page: the cards below fetch
+          independently with very different latencies (the fair-compare replay +
+          heatmap rebuild take seconds; the rest are instant), so without this
+          the page updates piecemeal and looks half-stale on navigation. */}
+      <div class={`insights-updating${inflight > 0 ? " is-on" : ""}`} role="status" aria-live="polite">
+        <span class="insights-updating-bar" />
+        <span class="insights-updating-label">Updating {periodLabel(period)}…</span>
+      </div>
 
       {/* The first compare for a period is a heavy server-side replay (can
           take seconds before the TTL cache warms). A ghost table reads as
@@ -74,7 +84,7 @@ export default function Insights() {
       )}
 
       {data && rows.length > 0 && (
-        <>
+        <div class={`insights-compare${cmp.loading ? " is-updating" : ""}`}>
           {/* Winner banner — suppressed when there's too little metered usage to
               compare meaningfully (otherwise "you're cheapest" reads trivially). */}
           {data.basis.import_kwh < 1 ? (
@@ -171,7 +181,7 @@ export default function Insights() {
             yours, priced by proxy (its per-slot rates aren't published). Export valued at each
             tariff's own rate (0 where it offers none; SVT/fixed assume a standard SEG).
           </p>
-        </>
+        </div>
       )}
 
       <LoadPatternCard period={period} />

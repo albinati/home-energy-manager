@@ -32,6 +32,7 @@ export function LoadPatternCard({ period }: { period: PeriodState }) {
     {
       cacheKey: `residual:${windowDays}:${endDate ?? "live"}`,
       immutable: !!endDate && !isCurrentPeriod(period),
+      track: true,
     },
   );
   const data = res.data;
@@ -117,7 +118,7 @@ export function LoadPatternCard({ period }: { period: PeriodState }) {
 
   const dc = data?.day_counts ?? {};
   return (
-    <section class="insights-card load-pattern">
+    <section class={`insights-card load-pattern${res.loading && data ? " is-updating" : ""}`}>
       <header class="load-pattern-head">
         <div class="load-pattern-titlerow">
           <h2>When you spend the most</h2>

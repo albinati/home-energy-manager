@@ -207,7 +207,9 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
       const lbl = params?.name;
       if (!lbl) return;
       if (granularity === "week" || granularity === "month") {
-        const today = new Date().toISOString().slice(0, 10);
+        // LOCAL today — the bar labels are built from local dates, so a UTC date
+        // here failed the match in the 00:00–01:00 BST window (drill-down dead).
+        const today = localTodayISO();
         if (lbl === today) setGranularity("day");
       } else if (granularity === "year") {
         if (/^\d{4}-\d{2}$/.test(lbl)) {

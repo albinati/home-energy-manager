@@ -22,6 +22,7 @@ export function SystemHealthCard({ period }: { period: PeriodState }) {
   const res = useFetch(() => getLpScorecard(day), [day], {
     cacheKey: `scorecard:${day}`,
     immutable: !isCurrentPeriod(period),
+    track: true,
   });
   const sc: LpScorecard | undefined = res.data?.scorecard;
 
@@ -50,7 +51,7 @@ export function SystemHealthCard({ period }: { period: PeriodState }) {
   const avoided = econ?.lp_avoided_cost_p;
 
   return (
-    <section class="syshealth">
+    <section class={`syshealth${res.loading && res.data ? " is-updating" : ""}`}>
       <header class="syshealth-head">
         <h2>System health</h2>
         <span class="muted">LP scorecard · {sc.day}</span>

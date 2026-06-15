@@ -1,4 +1,17 @@
 import { useEffect, useRef, useState } from "preact/hooks";
+import { signal } from "@preact/signals-core";
+import { useComputed } from "@preact/signals";
+
+// Count of in-flight tracked fetches (opts.track). A page can render ONE shared
+// "updating…" affordance off this so independent per-card fetches with very
+// different latencies read as a single coordinated refresh instead of a
+// piecemeal, half-stale page (the Insights navigation jank).
+const _inflight = signal(0);
+
+/** Reactive count of tracked fetches currently in flight. */
+export function useInflight(): number {
+  return useComputed(() => _inflight.value).value;
+}
 
 // usePoll runs `fn` every `intervalMs` while the document is visible.
 // It pauses on visibilitychange → hidden and resumes on visible.
@@ -111,6 +124,9 @@ export interface FetchOpts {
   // Only cache + serve-from-cache when true (caller passes !isCurrentPeriod so
   // the live current period always refetches).
   immutable?: boolean;
+  // Count this fetch in the shared in-flight tally (useInflight) so the page can
+  // show one coordinated "updating…" cue. A cache hit never counts (no fetch).
+  track?: boolean;
 }
 
 // Fetch-once hook for endpoints we don't poll. With `opts.immutable` + a
@@ -131,6 +147,8 @@ export function useFetch<T>(
   fnRef.current = fn;
   const keyRef = useRef(cacheKey);
   keyRef.current = cacheKey;
+  const trackRef = useRef(!!opts.track);
+  trackRef.current = !!opts.track;
 
   const mountedRef = useRef(true);
   useEffect(() => {
@@ -141,7 +159,8 @@ export function useFetch<T>(
   }, []);
 
   const refresh = useRef(async () => {
-    // Immutable cache hit (past period already fetched) → serve instantly.
+    // Immutable cache hit (past period already fetched) → serve instantly. No
+    // network → never counts toward the in-flight tally.
     const k = keyRef.current;
     if (k != null && _immutableCache.has(k)) {
       if (!mountedRef.current) return;
@@ -151,6 +170,8 @@ export function useFetch<T>(
       return;
     }
     setLoading(true);
+    const tracked = trackRef.current;
+    if (tracked) _inflight.value++;
     try {
       const next = await fnRef.current();
       if (!mountedRef.current) return;
@@ -161,6 +182,8 @@ export function useFetch<T>(
       if (!mountedRef.current) return;
       setError(e instanceof Error ? e : new Error(String(e)));
     } finally {
+      // Always balances the increment, even if the component unmounted mid-fetch.
+      if (tracked) _inflight.value--;
       if (mountedRef.current) setLoading(false);
     }
   }).current;
