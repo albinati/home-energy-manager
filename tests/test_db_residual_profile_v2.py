@@ -234,6 +234,37 @@ def test_cache_returns_same_object_until_cleared() -> None:
     assert d2 is not a  # cleared → rebuilt
 
 
+def test_end_date_anchors_window_to_past_period() -> None:
+    """end_date scopes the trailing window to a past anchor: a load spike AFTER
+    the anchor is excluded, one before it is included (#574 item 3)."""
+    # A recent Saturday with a high-load slot, and an OLDER Saturday with a low one.
+    sats = _recent_days_of_weekday(5, 6, start_ago=4)
+    recent, older = sats[0], sats[-1]
+    _seed_local(recent, 19, 0, load_kw=3.0)
+    _seed_local(recent, 19, 10, load_kw=3.0)
+    _seed_local(older, 19, 0, load_kw=0.6)
+    _seed_local(older, 19, 10, load_kw=0.6)
+
+    # Anchor the window to END the day before the recent spike → it's excluded,
+    # so the Saturday 19:00 median reflects only the older low-load day.
+    anchor = (recent - timedelta(days=1)).isoformat()
+    prof = db.residual_load_profile_v2(window_days=120, end_date=anchor, use_cache=False)
+    assert db.lookup_residual_kwh(prof, 5, 19, 0) == pytest.approx(0.3, abs=0.12)
+
+    # Without the anchor the recent high-load day pulls the median up.
+    full = db.residual_load_profile_v2(window_days=120, use_cache=False)
+    assert db.lookup_residual_kwh(full, 5, 19, 0) > db.lookup_residual_kwh(prof, 5, 19, 0) + 0.3
+
+
+def test_end_date_is_part_of_cache_key() -> None:
+    """Different end_date anchors don't collide in the TTL cache."""
+    for d in _recent_days_of_weekday(5, 4):
+        _seed_local(d, 19, 0, load_kw=1.0)
+    a = db.residual_load_profile_v2(window_days=120)
+    b = db.residual_load_profile_v2(window_days=120, end_date="2026-01-01")
+    assert a is not b
+
+
 def test_residual_profile_endpoint_shape() -> None:
     """GET /api/v1/load/residual-profile returns JSON-serialisable per-dow series."""
     import asyncio

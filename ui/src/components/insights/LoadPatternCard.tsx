@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { useFetch } from "../../lib/poll";
 import { getResidualProfile, type ResidualProfile, type ResidualProfileSlot } from "../../lib/endpoints";
+import { periodWindow, periodLabel, type PeriodState } from "../../lib/period";
 import { makeChart, chartTheme, type EChartsType } from "../../lib/charts";
 import { Spinner } from "../common/Spinner";
 
@@ -21,8 +22,12 @@ const VIEW_DESC: Record<View, string> = {
  *  (heat pump excluded — the profile the LP plans against, #477), the combined
  *  heat-pump (Daikin) split it subtracts, and that split broken into hot-water
  *  (tank/DHW) vs space heating from the measured Onecta meters (#574). */
-export function LoadPatternCard() {
-  const res = useFetch<ResidualProfile>(getResidualProfile, []);
+export function LoadPatternCard({ period }: { period: PeriodState }) {
+  const { windowDays, endDate } = periodWindow(period);
+  const res = useFetch<ResidualProfile>(
+    () => getResidualProfile({ windowDays, endDate }),
+    [windowDays, endDate],
+  );
   const data = res.data;
   const hasHp = !!data?.hp_by_dow;
   // Tank/Heating need the measured split series specifically — an older backend
@@ -135,6 +140,8 @@ export function LoadPatternCard() {
         <>
           <div ref={elRef} class="load-pattern-chart" />
           <p class="muted load-pattern-meta">
+            {windowDays}-day pattern to {periodLabel(period)}
+            {" · "}
             {(dc.weekday ?? 0) + (dc.weekend ?? 0)} days learned
             ({dc.weekday ?? 0} weekday / {dc.weekend ?? 0} weekend)
             {(dc.away_excluded ?? 0) > 0 && <> · {dc.away_excluded} away day(s) excluded</>}

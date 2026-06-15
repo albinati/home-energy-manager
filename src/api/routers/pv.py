@@ -366,19 +366,27 @@ def _date_from_iso(s: str) -> date:
 
 
 @router.get("/api/v1/load/residual-profile")
-async def get_residual_load_profile(window_days: int | None = None) -> dict[str, Any]:
+async def get_residual_load_profile(
+    window_days: int | None = None, end_date: str | None = None
+) -> dict[str, Any]:
     """The learned household residual-load profile the LP plans against (#477).
 
     Returns the per-(day-of-week, half-hour) median + p75 spread (resolved
     through the same fallback hierarchy the LP uses), the plain (h,m) baseline,
     the excluded "away" days, and coverage stats (how many days were calibrated
     against the measured Daikin split). Read-only, viewer-safe.
+
+    ``end_date`` (YYYY-MM-DD, local, inclusive) anchors the trailing window at a
+    past day so the Insights navigator can scope the heatmap to an earlier
+    period; omitted → the window ends now (#574 item 3).
     """
     # Clamp the caller-supplied window so a bad/huge value can't trigger a
     # full-table scan; None uses the configured default (the LP's window).
     if window_days is not None:
         window_days = max(1, min(int(window_days), 365))
-    prof = await asyncio.to_thread(db.residual_load_profile_v2, window_days=window_days)
+    prof = await asyncio.to_thread(
+        db.residual_load_profile_v2, window_days=window_days, end_date=end_date
+    )
 
     def _series(dow: int) -> list[dict[str, Any]]:
         out = []
@@ -420,6 +428,8 @@ async def get_residual_load_profile(window_days: int | None = None) -> dict[str,
         "hp_dhw_by_dow": {str(d): _hp_component_series(d, "hp_dhw_profile") for d in range(7)},
         "hp_space_by_dow": {str(d): _hp_component_series(d, "hp_space_profile") for d in range(7)},
         "all": all_series,
+        "window_days": window_days,
+        "end_date": end_date,
         "flat": round(float(prof.get("flat", 0.0)), 4),
         "away_days": prof.get("away_days", []),
         "day_counts": prof.get("day_counts", {}),
@@ -429,18 +439,34 @@ async def get_residual_load_profile(window_days: int | None = None) -> dict[str,
 
 
 @router.get("/api/v1/load/error-log")
-async def get_load_error_log(window_days: int = 30) -> dict[str, Any]:
+async def get_load_error_log(
+    window_days: int = 30, start_date: str | None = None, end_date: str | None = None
+) -> dict[str, Any]:
     """Committed LOAD-forecast-vs-actual summary from the persisted load_error_log
     (Phase-1 measurement). Overall MAE/bias + per-LOCAL-hour bias (load is
     occupancy-driven, so local hour is the meaningful axis — and the axis a
     future recent-bias corrector would act on). Read-only, viewer-safe.
+
+    With ``start_date``/``end_date`` (YYYY-MM-DD, local, inclusive) the summary is
+    scoped to that exact range so the Insights navigator can step day/week/month/
+    year (#574 item 3); otherwise it's the trailing ``window_days`` from now.
     """
-    window_days = max(1, min(int(window_days), 365))
-    now = datetime.now(UTC)
-    start = (now - timedelta(days=window_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    end = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-    rows = await asyncio.to_thread(db.get_load_error_log_range, start, end)
     tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+    if start_date and end_date:
+        try:
+            s_local = datetime.fromisoformat(str(start_date)).replace(tzinfo=tz)
+            e_local = datetime.fromisoformat(str(end_date)).replace(tzinfo=tz) + timedelta(days=1)
+            start = s_local.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+            end = e_local.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+            window_days = max(1, (e_local.date() - s_local.date()).days)
+        except (ValueError, TypeError):
+            start_date = end_date = None
+    if not (start_date and end_date):
+        window_days = max(1, min(int(window_days), 365))
+        now = datetime.now(UTC)
+        start = (now - timedelta(days=window_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        end = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    rows = await asyncio.to_thread(db.get_load_error_log_range, start, end)
 
     paired: list[tuple[float, float]] = []  # (forecast_total, actual)
     per_hour: dict[int, list[tuple[float, float]]] = {}

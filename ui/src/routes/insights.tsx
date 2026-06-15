@@ -173,9 +173,9 @@ export default function Insights() {
         </>
       )}
 
-      <LoadPatternCard />
-      <LoadForecastAccuracyCard />
-      <SystemHealthCard />
+      <LoadPatternCard period={period} />
+      <LoadForecastAccuracyCard period={period} />
+      <SystemHealthCard period={period} />
     </div>
   );
 }
