@@ -26,6 +26,38 @@ from .models import ChargePeriod, DeviceInfo, RealTimeData, SchedulerGroup, Sche
 
 logger = logging.getLogger(__name__)
 
+
+def _warn_if_pv_tracks_generation(pv_val: object, summary_raw: dict) -> None:
+    """Runtime guard for the generation-vs-PVEnergyTotal class of regression.
+
+    Fox ``generation`` = inverter AC output (PV + battery discharge);
+    ``PVEnergyTotal`` = true panel-side PV. We map PV from PVEnergyTotal, so the
+    parsed ``pv_val`` must track PVEnergyTotal, NOT generation. If a future edit
+    reverts the mapping (or Fox renames a variable), ``pv_val`` will land closer
+    to generation than to PVEnergyTotal whenever the two diverge (i.e. whenever
+    the battery discharged). Log loudly so the regression screams in prod logs,
+    not just in CI. No-op when either variable is absent or they barely differ.
+    """
+    try:
+        gen = summary_raw.get("generation")
+        pvt = summary_raw.get("PVEnergyTotal")
+        if gen is None or pvt is None or pv_val is None:
+            return
+        gen_f, pvt_f, pv_f = float(gen), float(pvt), float(pv_val)
+        # Only meaningful when generation and true PV diverge (battery active).
+        if abs(gen_f - pvt_f) <= 1.0:
+            return
+        if abs(pv_f - gen_f) < abs(pv_f - pvt_f):
+            logger.warning(
+                "Fox PV sanity: parsed PV %.1f kWh tracks generation (%.1f, AC output incl. "
+                "discharge) instead of PVEnergyTotal (%.1f, panel side) — likely a "
+                "field-mapping regression",
+                pv_f, gen_f, pvt_f,
+            )
+    except (TypeError, ValueError):
+        pass
+
+
 # Known work mode strings (set_work_mode accepts these)
 WORK_MODE_VALID = frozenset({"Self Use", "Feed-in Priority", "Back Up", "Force charge", "Force discharge"})
 # Numeric code → label (Fox API may return code instead of string)
@@ -509,7 +541,7 @@ class FoxESSClient:
             summary[key] = round(sum(v.get("value", 0) or 0 for v in values), 2)
         # Map possible response keys to get_energy_today-style keys (support various namings)
         return {
-            "pvEnergyToday": summary.get("pvEnergyToday") or summary.get("generation") or summary.get("todayYield") or 0,
+            "pvEnergyToday": summary.get("pvEnergyToday") or summary.get("PVEnergyTotal") or summary.get("generation") or summary.get("todayYield") or 0,
             "feedinEnergyToday": summary.get("feedinEnergyToday") or summary.get("feedin") or 0,
             "gridConsumptionEnergyToday": summary.get("gridConsumptionEnergyToday") or summary.get("gridConsumption") or 0,
             "chargeEnergyToday": summary.get("chargeEnergyToday") or summary.get("chargeEnergyToTal") or summary.get("chargeEnergyTotal") or 0,
@@ -538,9 +570,14 @@ class FoxESSClient:
         """Monthly totals via report/query. Uses exact parameter names from Open API doc."""
         # Doc example: dimension "day" with day; for "month" use year+month only (no day).
         # Variable names per doc: chargeEnergyToTal, dischargeEnergyToTal (capital T).
-        # Only variables accepted by report/query per Open API doc (40257 if unknown vars sent)
+        # Only variables accepted by report/query per Open API doc (40257 if unknown vars sent).
+        # ``PVEnergyTotal`` = true PV (panel side); ``generation`` = inverter AC
+        # output which INCLUDES battery discharge (verified empirically: Jan
+        # generation 256 kWh vs PVEnergyTotal 32 kWh ≈ PV + 247 kWh discharge).
+        # Both accepted by report/query; we request both and map PV from the
+        # former, keeping the latter as a fallback only.
         variables = [
-            "generation", "feedin", "gridConsumption",
+            "generation", "PVEnergyTotal", "feedin", "gridConsumption",
             "chargeEnergyToTal", "dischargeEnergyToTal",
         ]
         body = {
@@ -581,12 +618,19 @@ class FoxESSClient:
         # Map to same keys as get_energy_today (support alternate names if API returns them)
         charge = summary_raw.get("chargeEnergyToTal") or summary_raw.get("chargeEnergyTotal") or 0
         discharge = summary_raw.get("dischargeEnergyToTal") or summary_raw.get("dischargeEnergyTotal") or 0
-        pv_val = summary_raw.get("generation") or summary_raw.get("generationPower") or 0
+        # True PV (panel side). Explicit None check — a legitimate zero-PV winter
+        # day must NOT fall through to the discharge-inflated ``generation``.
+        pv_val = summary_raw.get("PVEnergyTotal")
+        if pv_val is None:
+            pv_val = summary_raw.get("generation") or summary_raw.get("generationPower") or 0
+        _warn_if_pv_tracks_generation(pv_val, summary_raw)
         loads_val = summary_raw.get("loads") or summary_raw.get("load") or 0
         feedin_val = summary_raw.get("feedin", 0)
         grid_val = summary_raw.get("gridConsumption", 0)
         if not loads_val and (pv_val or grid_val or discharge or feedin_val or charge):
-            # Estimate load from balance: consumption = import + solar + discharge - export - charge
+            # Balance: consumption = import + PV + discharge - export - charge.
+            # Now that pv_val is true PV (not generation, which already bundles
+            # discharge) this no longer double-counts battery discharge.
             loads_val = max(0.0, float(grid_val) + float(pv_val) + float(discharge) - float(feedin_val) - float(charge))
         return {
             "pvEnergyToday": pv_val,
@@ -599,8 +643,9 @@ class FoxESSClient:
 
     def get_energy_day(self, year: int, month: int, day: int) -> dict:
         """Get energy summary (kWh) for a single day via report/query dimension=day."""
+        # PVEnergyTotal = true PV; generation = inverter AC output (incl. discharge).
         variables = [
-            "generation", "feedin", "gridConsumption",
+            "generation", "PVEnergyTotal", "feedin", "gridConsumption",
             "chargeEnergyToTal", "dischargeEnergyToTal",
         ]
         body = {
@@ -634,7 +679,11 @@ class FoxESSClient:
             summary_raw[key] = round(total, 2)
         charge = summary_raw.get("chargeEnergyToTal") or summary_raw.get("chargeEnergyTotal") or 0
         discharge = summary_raw.get("dischargeEnergyToTal") or summary_raw.get("dischargeEnergyTotal") or 0
-        pv_val = summary_raw.get("generation") or summary_raw.get("generationPower") or 0
+        # True PV (panel side). Explicit None check so a zero-PV day stays zero.
+        pv_val = summary_raw.get("PVEnergyTotal")
+        if pv_val is None:
+            pv_val = summary_raw.get("generation") or summary_raw.get("generationPower") or 0
+        _warn_if_pv_tracks_generation(pv_val, summary_raw)
         loads_val = summary_raw.get("loads") or summary_raw.get("load") or 0
         feedin_val = summary_raw.get("feedin", 0)
         grid_val = summary_raw.get("gridConsumption", 0)
@@ -655,8 +704,12 @@ class FoxESSClient:
         """
         from calendar import monthrange
         _, ndays = monthrange(year, month)
+        # PVEnergyTotal = true PV (panel side); generation = inverter AC output
+        # which includes battery discharge. This per-day breakdown feeds
+        # fox_energy_daily.solar_kwh (and thus PV calibration), so PV must be the
+        # panel-side figure, not the discharge-inflated generation.
         variables = [
-            "generation", "feedin", "gridConsumption",
+            "generation", "PVEnergyTotal", "feedin", "gridConsumption",
             "chargeEnergyToTal", "dischargeEnergyToTal",
         ]
         body = {
@@ -686,19 +739,31 @@ class FoxESSClient:
                 by_var[key] = [float(v) if isinstance(v, (int, float)) else float(v.get("value", 0) or 0) if isinstance(v, dict) else 0 for v in vals]
             else:
                 by_var[key] = []
-        gen_arr = by_var.get("generation", [])
+        # True per-day PV (panel side); fall back to generation when the key is
+        # absent OR an empty array (older firmware / API anomaly). A real month
+        # always has some PV, so an empty PVEnergyTotal is an anomaly, not a
+        # genuine all-zero month — don't let it zero out the whole breakdown.
+        pv_arr = by_var.get("PVEnergyTotal")
+        if not pv_arr:
+            pv_arr = by_var.get("generation", [])
+        # Same regression guard as the scalar paths, on the monthly sums.
+        _warn_if_pv_tracks_generation(
+            sum(pv_arr),
+            {"generation": sum(by_var.get("generation", [])),
+             "PVEnergyTotal": sum(by_var["PVEnergyTotal"]) if by_var.get("PVEnergyTotal") else None},
+        )
         feedin_arr = by_var.get("feedin", [])
         grid_arr = by_var.get("gridConsumption", [])
         loads_arr = by_var.get("loads", []) or by_var.get("load", [])
         charge_arr = by_var.get("chargeEnergyToTal", []) or by_var.get("chargeEnergyTotal", [])
         discharge_arr = by_var.get("dischargeEnergyToTal", []) or by_var.get("dischargeEnergyTotal", [])
-        max_len = max(len(gen_arr), len(feedin_arr), len(grid_arr), len(loads_arr), len(charge_arr), len(discharge_arr), ndays)
+        max_len = max(len(pv_arr), len(feedin_arr), len(grid_arr), len(loads_arr), len(charge_arr), len(discharge_arr), ndays)
         daily = []
         for idx in range(min(ndays, max_len)):
             d = idx + 1
             imp = round(grid_arr[idx], 2) if idx < len(grid_arr) else 0
             exp = round(feedin_arr[idx], 2) if idx < len(feedin_arr) else 0
-            sol = round(gen_arr[idx], 2) if idx < len(gen_arr) else 0
+            sol = round(pv_arr[idx], 2) if idx < len(pv_arr) else 0
             ch = round(charge_arr[idx], 2) if idx < len(charge_arr) else 0
             dis = round(discharge_arr[idx], 2) if idx < len(discharge_arr) else 0
             load_val = round(loads_arr[idx], 2) if idx < len(loads_arr) else 0
