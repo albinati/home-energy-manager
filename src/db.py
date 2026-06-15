@@ -1977,6 +1977,13 @@ def residual_load_profile_v2(
     # physics, no away exclusion) so the LP plan can be rolled back live (#477).
     _v2 = bool(getattr(config, "LP_RESIDUAL_PROFILE_V2", True))
     away_fraction = float(getattr(config, "LP_AWAY_DAY_FRACTION", 0.4) or 0.0) if _v2 else 0.0
+    # During negative-price windows the system DELIBERATELY boosts consumption
+    # (battery charge, appliance dispatch, tank to 65 °C). Those slots aren't the
+    # household's organic at-home pattern — including them biases the load profile
+    # (and thus the LP base-load forecast) upward for whichever (dow,hour) the
+    # plunge happened to land on. Drop them from the sample. Kill-switch via
+    # LP_LOAD_EXCLUDE_NEGATIVE_SLOTS=false.
+    exclude_neg = bool(getattr(config, "LP_LOAD_EXCLUDE_NEGATIVE_SLOTS", True))
 
     # Short-TTL cache — this 120-day rebuild runs the physics estimator over
     # ~thousands of pv samples and is called multiple times per optimizer solve
@@ -1984,7 +1991,7 @@ def residual_load_profile_v2(
     # as new telemetry / the nightly Daikin sync land, so a 4-min TTL is safe and
     # collapses the per-solve cost to one rebuild. Keyed by DB_PATH so isolated
     # test DBs never share an entry.
-    cache_key = (config.DB_PATH, window_days, min_samples_per_bucket, _v2)
+    cache_key = (config.DB_PATH, window_days, min_samples_per_bucket, _v2, exclude_neg)
     if use_cache:
         ent = _RESIDUAL_V2_CACHE.get(cache_key)
         if ent is not None and ent[0] > time.monotonic():
@@ -2023,6 +2030,26 @@ def residual_load_profile_v2(
                 (cutoff_iso,),
             )
             rows = cur.fetchall()
+            # Negative-price slots over the window (same source the LP priced
+            # against: execution_log.agile_price_pence), keyed by half-hour UTC
+            # slot start so Pass 1 can drop the deliberately-boosted samples.
+            neg_slots: set[str] = set()
+            if exclude_neg:
+                ncur = conn.execute(
+                    """SELECT DISTINCT timestamp FROM execution_log
+                       WHERE timestamp > ? AND agile_price_pence < 0""",
+                    (cutoff_iso,),
+                )
+                for nr in ncur.fetchall():
+                    try:
+                        nt = datetime.fromisoformat(str(nr["timestamp"]).replace("Z", "+00:00"))
+                    except (ValueError, TypeError):
+                        continue
+                    nsm = (nt.minute // 30) * 30
+                    neg_slots.add(
+                        nt.replace(minute=nsm, second=0, microsecond=0)
+                        .astimezone(UTC).isoformat().replace("+00:00", "Z")
+                    )
         finally:
             conn.close()
 
@@ -2033,6 +2060,7 @@ def residual_load_profile_v2(
     physics_bucket: dict[tuple[str, int], float] = {}
     physics_day: dict[str, float] = {}
     dropped_no_meteo = 0
+    dropped_negative = 0
     for row in rows:
         outdoor = row["outdoor_history_c"]
         if outdoor is None:
@@ -2045,6 +2073,13 @@ def residual_load_profile_v2(
             local = ts.astimezone(tz)
         except (ValueError, TypeError):
             continue
+        if exclude_neg and neg_slots:
+            sm = (ts.minute // 30) * 30
+            skey = (ts.replace(minute=sm, second=0, microsecond=0)
+                    .astimezone(UTC).isoformat().replace("+00:00", "Z"))
+            if skey in neg_slots:
+                dropped_negative += 1
+                continue
         load_slot = float(row["load_power_kw"]) * 0.5
         physics_slot = _physics_daikin_slot_kwh(float(outdoor), cop_curve)
         date_iso = local.date().isoformat()
@@ -2060,7 +2095,8 @@ def residual_load_profile_v2(
         return _finish({
             "profile": {(h, m): flat for h in range(24) for m in (0, 30)},
             "spread": {}, "flat": flat, "away_days": [],
-            "day_counts": {"weekday": 0, "weekend": 0, "away_excluded": 0, "total": 0},
+            "day_counts": {"weekday": 0, "weekend": 0, "away_excluded": 0,
+                           "negative_excluded": dropped_negative, "total": 0},
             "calibrated_days": 0, "physics_only_days": 0,
         })
 
@@ -2180,10 +2216,10 @@ def residual_load_profile_v2(
     calibrated_days = len(calibrated_dates - away_days)
     physics_only_days = len(set(dates) - calibrated_dates - away_days)
     logger.info(
-        "residual_profile_v2: %d samples (%d no-meteo), window=%dd; "
+        "residual_profile_v2: %d samples (%d no-meteo, %d negative-price), window=%dd; "
         "%d weekday / %d weekend days, %d away excluded; "
         "%d calibrated / %d physics-only days",
-        len(samples), dropped_no_meteo, window_days,
+        len(samples), dropped_no_meteo, dropped_negative, window_days,
         len(weekday_days), len(weekend_days), len(away_days),
         calibrated_days, physics_only_days,
     )
@@ -2196,6 +2232,7 @@ def residual_load_profile_v2(
             "weekday": len(weekday_days),
             "weekend": len(weekend_days),
             "away_excluded": len(away_days),
+            "negative_excluded": dropped_negative,
             "total": len(set(dates)),
         },
         "calibrated_days": calibrated_days,

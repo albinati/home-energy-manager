@@ -805,6 +805,15 @@ class Config:
     LP_RESIDUAL_PROFILE_V2: bool = os.getenv(
         "LP_RESIDUAL_PROFILE_V2", "true"
     ).lower() in ("true", "1", "yes")
+    # Drop negative-price half-hour slots from the residual load-profile sample.
+    # During plunges the system DELIBERATELY boosts consumption (battery charge,
+    # appliance dispatch, tank to 65 °C), so those slots aren't the organic
+    # at-home pattern — keeping them biases the LP base-load forecast upward for
+    # whichever (dow,hour) the plunge landed on. Set false to roll back to the
+    # old behaviour (include them).
+    LP_LOAD_EXCLUDE_NEGATIVE_SLOTS: bool = os.getenv(
+        "LP_LOAD_EXCLUDE_NEGATIVE_SLOTS", "true"
+    ).lower() in ("true", "1", "yes")
     LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH: float = float(
         os.getenv("LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH", "0.30")
     )
