@@ -25,6 +25,10 @@ export function LoadPatternCard() {
   const res = useFetch<ResidualProfile>(getResidualProfile, []);
   const data = res.data;
   const hasHp = !!data?.hp_by_dow;
+  // Tank/Heating need the measured split series specifically — an older backend
+  // image can return hp_by_dow without them; gating on hp_dhw_by_dow stops the
+  // toggle from mislabelling Home data as Tank/Heating via the fallback.
+  const hasSplit = !!data?.hp_dhw_by_dow;
   const [view, setView] = useState<View>("home");
   const elRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<EChartsType | null>(null);
@@ -111,8 +115,7 @@ export function LoadPatternCard() {
               {([
                 ["home", "Home"],
                 ["hp", "Heat pump"],
-                ["tank", "Tank"],
-                ["heating", "Heating"],
+                ...(hasSplit ? ([["tank", "Tank"], ["heating", "Heating"]] as [View, string][]) : []),
               ] as [View, string][]).map(([v, label]) => (
                 <button
                   key={v}
