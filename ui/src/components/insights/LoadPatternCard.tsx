@@ -140,7 +140,7 @@ export function LoadPatternCard({ period }: { period: PeriodState }) {
         <>
           <div ref={elRef} class="load-pattern-chart" />
           <p class="muted load-pattern-meta">
-            {windowDays}-day pattern to {periodLabel(period)}
+            {endDate ? `${windowDays}-day pattern to ${periodLabel(period)}` : `recent ${windowDays}-day pattern`}
             {" · "}
             {(dc.weekday ?? 0) + (dc.weekend ?? 0)} days learned
             ({dc.weekday ?? 0} weekday / {dc.weekend ?? 0} weekend)
