@@ -276,6 +276,43 @@ def test_heat_pump_profile_zero_when_warm() -> None:
     assert db.lookup_hp_kwh(prof, 2, 14, 0) == pytest.approx(0.0, abs=0.05)
 
 
+def test_hp_split_tank_vs_heating_from_measured_ratio() -> None:
+    """The combined hp profile splits into TANK (DHW) + HEATING (space) using the
+    measured Onecta ratio. A bucket measured 75% DHW / 25% heating splits the
+    calibrated heat-pump energy in that proportion, and the two components sum to
+    roughly the combined hp (#574 item 2)."""
+    days = _recent_days_of_weekday(3, 6)   # Thursdays, cold so physics > 0
+    for d in days:
+        _seed_local(d, 8, 0, load_kw=1.5, temp_c=2.0)
+        _seed_local(d, 8, 10, load_kw=1.5, temp_c=2.0)
+        # local 08:00 → bucket_idx 4; measured 0.6 DHW + 0.2 heating (75% tank).
+        _seed_daikin_2h(d, 4, heating=0.2, dhw=0.6)
+
+    prof = db.residual_load_profile_v2(window_days=120, use_cache=False)
+    combined = db.lookup_hp_kwh(prof, 3, 8, 0)
+    tank = db.lookup_hp_component_kwh(prof, 3, 8, 0, component="hp_dhw_profile")
+    heating = db.lookup_hp_component_kwh(prof, 3, 8, 0, component="hp_space_profile")
+
+    assert combined > 0.0
+    assert tank > heating          # 75% DHW
+    assert tank + heating == pytest.approx(combined, abs=0.02)
+    assert tank == pytest.approx(0.75 * combined, abs=0.02)
+
+
+def test_hp_split_defaults_to_heating_without_measured_dhw() -> None:
+    """No measured DHW for the slot → the whole heat-pump estimate is attributed
+    to HEATING (the physics term is space-heating-shaped). Tank ≈ 0."""
+    days = _recent_days_of_weekday(2, 6)   # Wednesdays, cold; no daikin split seeded
+    for d in days:
+        _seed_local(d, 8, 0, load_kw=1.5, temp_c=2.0)
+        _seed_local(d, 8, 10, load_kw=1.5, temp_c=2.0)
+    prof = db.residual_load_profile_v2(window_days=120, use_cache=False)
+    combined = db.lookup_hp_kwh(prof, 2, 8, 0)
+    assert combined > 0.0
+    assert db.lookup_hp_component_kwh(prof, 2, 8, 0, component="hp_dhw_profile") == pytest.approx(0.0, abs=1e-6)
+    assert db.lookup_hp_component_kwh(prof, 2, 8, 0, component="hp_space_profile") == pytest.approx(combined, abs=0.02)
+
+
 def test_lookup_hp_kwh_falls_back_to_zero_for_unknown_slot() -> None:
     for d in _recent_days_of_weekday(0, 6):   # Mondays only
         _seed_local(d, 8, 0, load_kw=1.0, temp_c=2.0)

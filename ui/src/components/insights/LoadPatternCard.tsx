@@ -6,15 +6,29 @@ import { Spinner } from "../common/Spinner";
 
 const DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
-type View = "home" | "hp";
+type View = "home" | "hp" | "tank" | "heating";
 
-/** Per-(day-of-week × hour) median load heatmap. Two views: the residual
- *  household load (heat pump excluded — the profile the LP plans against, #477)
- *  and the heat-pump (Daikin) split it subtracts. */
+const HP_VIEWS = new Set<View>(["hp", "tank", "heating"]);
+
+const VIEW_DESC: Record<View, string> = {
+  home: "Median household load (heat pump excluded) by day-of-week and hour — the typical at-home pattern the optimizer plans against.",
+  hp: "Median heat-pump (Daikin) load by day-of-week and hour — the split subtracted from the household total.",
+  tank: "Median hot-water (DHW tank) heat-pump load by day-of-week and hour — measured from the Onecta meters.",
+  heating: "Median space-heating heat-pump load by day-of-week and hour — measured from the Onecta meters.",
+};
+
+/** Per-(day-of-week × hour) median load heatmap. Views: residual household load
+ *  (heat pump excluded — the profile the LP plans against, #477), the combined
+ *  heat-pump (Daikin) split it subtracts, and that split broken into hot-water
+ *  (tank/DHW) vs space heating from the measured Onecta meters (#574). */
 export function LoadPatternCard() {
   const res = useFetch<ResidualProfile>(getResidualProfile, []);
   const data = res.data;
   const hasHp = !!data?.hp_by_dow;
+  // Tank/Heating need the measured split series specifically — an older backend
+  // image can return hp_by_dow without them; gating on hp_dhw_by_dow stops the
+  // toggle from mislabelling Home data as Tank/Heating via the fallback.
+  const hasSplit = !!data?.hp_dhw_by_dow;
   const [view, setView] = useState<View>("home");
   const elRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<EChartsType | null>(null);
@@ -24,8 +38,13 @@ export function LoadPatternCard() {
     if (!chartRef.current) chartRef.current = makeChart(elRef.current);
     const t = chartTheme();
 
-    const source: Record<string, ResidualProfileSlot[]> =
-      (view === "hp" && data.hp_by_dow) ? data.hp_by_dow : data.by_dow;
+    const hpSource: Record<View, Record<string, ResidualProfileSlot[]> | undefined> = {
+      home: data.by_dow,
+      hp: data.hp_by_dow,
+      tank: data.hp_dhw_by_dow,
+      heating: data.hp_space_by_dow,
+    };
+    const source: Record<string, ResidualProfileSlot[]> = hpSource[view] ?? data.by_dow;
 
     // 7 dow × 24 hours; value = mean of the two half-hour medians in the hour.
     const cells: [number, number, number][] = [];
@@ -43,7 +62,7 @@ export function LoadPatternCard() {
 
     // Heat-pump view gets a distinct (cool→warm) ramp so the two reads don't
     // get confused; residual keeps the established amber→red.
-    const ramp = view === "hp"
+    const ramp = HP_VIEWS.has(view)
       ? [t.bg ?? "#1b1f27", "#38bdf8", "#ef4444"]
       : [t.bg ?? "#1b1f27", t.pv ?? "#fbbf24", t.importColor ?? "#ef4444"];
 
@@ -93,24 +112,22 @@ export function LoadPatternCard() {
           <h2>When you spend the most</h2>
           {hasHp && (
             <div class="load-pattern-toggle" role="group" aria-label="Load view">
-              <button
-                class={view === "home" ? "is-active" : ""}
-                onClick={() => setView("home")}
-                type="button"
-              >Home</button>
-              <button
-                class={view === "hp" ? "is-active" : ""}
-                onClick={() => setView("hp")}
-                type="button"
-              >Heat pump</button>
+              {([
+                ["home", "Home"],
+                ["hp", "Heat pump"],
+                ...(hasSplit ? ([["tank", "Tank"], ["heating", "Heating"]] as [View, string][]) : []),
+              ] as [View, string][]).map(([v, label]) => (
+                <button
+                  key={v}
+                  class={view === v ? "is-active" : ""}
+                  onClick={() => setView(v)}
+                  type="button"
+                >{label}</button>
+              ))}
             </div>
           )}
         </div>
-        <p class="muted">
-          {view === "hp"
-            ? "Median heat-pump (Daikin) load by day-of-week and hour — the split subtracted from the household total."
-            : "Median household load (heat pump excluded) by day-of-week and hour — the typical at-home pattern the optimizer plans against."}
-        </p>
+        <p class="muted">{VIEW_DESC[view]}</p>
       </header>
       {res.loading && !data && <Spinner label="Loading load pattern…" />}
       {res.error && <p class="insights-error">Couldn't load the pattern: {res.error.message}</p>}

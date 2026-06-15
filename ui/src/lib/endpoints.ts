@@ -284,6 +284,8 @@ export interface ResidualProfileSlot { h: number; m: number; median: number; p75
 export interface ResidualProfile {
   by_dow: Record<string, ResidualProfileSlot[]>;
   hp_by_dow?: Record<string, ResidualProfileSlot[]>;
+  hp_dhw_by_dow?: Record<string, ResidualProfileSlot[]>;
+  hp_space_by_dow?: Record<string, ResidualProfileSlot[]>;
   all: ResidualProfileSlot[];
   flat: number;
   away_days: string[];
