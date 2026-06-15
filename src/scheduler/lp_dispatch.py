@@ -1021,14 +1021,21 @@ def _write_lwt_preheat_actions(
         )
         return 0
 
-    # Sensor-ready hook: read the latest LIVE indoor temperature if any exists.
-    # Currently null in ~all rows → the comfort guard is a no-op until a room
-    # sensor lands. One clean seam; no rework when the sensor arrives.
+    # Indoor temperature for the comfort guard: prefer a FRESH room-sensor reading
+    # (#540 W1); fall back to live Daikin telemetry (NULL on this Altherma); else
+    # None → guard is a no-op. A stale sensor is treated as absent (staleness
+    # window) so a dead sensor can't wedge the guard on an old value.
     indoor_c: float | None = None
     try:
-        tel = db.get_latest_daikin_telemetry(source="live")
-        if tel and tel.get("indoor_temp_c") is not None:
-            indoor_c = float(tel["indoor_temp_c"])
+        s = db.get_latest_indoor_reading(
+            max_age_minutes=int(getattr(config, "INDOOR_SENSOR_STALE_MINUTES", 30))
+        )
+        if s is not None:
+            indoor_c = float(s["temp_c"])
+        else:
+            tel = db.get_latest_daikin_telemetry(source="live")
+            if tel and tel.get("indoor_temp_c") is not None:
+                indoor_c = float(tel["indoor_temp_c"])
     except Exception:  # pragma: no cover — telemetry read must never break dispatch
         indoor_c = None
 

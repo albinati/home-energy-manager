@@ -519,6 +519,33 @@ def build_mcp() -> FastMCP:
         }
 
     @mcp.tool(
+        name="save_indoor_temperature",
+        description=(
+            "Record an indoor room temperature reading (#540 W1). Feeds the LP "
+            "initial state + the dispatch comfort guard (freshest fresh reading) "
+            "and the winter thermal learner. captured_at defaults to now (UTC); "
+            "pass an ISO-8601 UTC string to backfill. room defaults to 'home'. "
+            "Idempotent on (captured_at, room)."
+        ),
+    )
+    def save_indoor_temperature(
+        temp_c: float,
+        room: str = "home",
+        captured_at: str | None = None,
+        source: str | None = "mcp",
+    ) -> dict[str, Any]:
+        from datetime import UTC, datetime
+
+        ts = captured_at or datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        try:
+            written = db.save_indoor_readings([
+                {"captured_at": ts, "temp_c": float(temp_c), "room": room, "source": source}
+            ])
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        return {"ok": True, "written": written, "captured_at": ts, "room": room}
+
+    @mcp.tool(
         name="set_inverter_mode",
         description=(
             "Set Fox ESS inverter work mode. Valid modes: Self Use, Feed-in Priority, "

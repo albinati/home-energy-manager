@@ -115,6 +115,7 @@ from .routers import appliances as appliances_router
 from .routers import dispatch as dispatch_router
 from .routers import energy_providers as energy_providers_router
 from .routers import pv as pv_router
+from .routers import sensors as sensors_router
 from .routers import status as status_router
 from .routers import workbench as workbench_router
 
@@ -338,6 +339,7 @@ app.include_router(workbench_router.router)
 app.include_router(dispatch_router.router)
 app.include_router(appliances_router.router)
 app.include_router(pv_router.router)
+app.include_router(sensors_router.router)
 app.include_router(status_router.router)
 
 # Mount the FastMCP streamable-HTTP transport at /mcp, guarded by a bearer
