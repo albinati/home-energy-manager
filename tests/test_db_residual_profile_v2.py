@@ -178,6 +178,54 @@ def test_negative_price_slots_kept_when_killswitch_off(monkeypatch) -> None:
     assert prof["profile"][(1, 2, 0)] == pytest.approx(1.5, abs=0.1)
 
 
+def _seed_lwt_offset(d: date, hour: int, hours: float, offset: int = 3) -> None:
+    """Seed a nonzero HEM lwt_preheat offset window starting LOCAL (hour:00) on d."""
+    start_utc = datetime(d.year, d.month, d.day, hour, 0, tzinfo=LON).astimezone(UTC)
+    db.upsert_action(
+        plan_date=d.isoformat(),
+        start_time=start_utc.isoformat().replace("+00:00", "Z"),
+        end_time=(start_utc + timedelta(hours=hours)).isoformat().replace("+00:00", "Z"),
+        device="daikin", action_type="lwt_preheat",
+        params={"lwt_offset": offset, "lp_optimizer": True}, status="completed",
+    )
+
+
+def test_lwt_offset_slots_excluded_by_default() -> None:
+    """A positive LWT offset wakes the compressor (June phantom-heat self-loop);
+    that HEM-induced load must be dropped so the learned profile / heat-pump
+    heatmaps reflect organic demand, not HEM's own echo (Tracked by #540)."""
+    tues = _recent_days_of_weekday(1, 6)
+    for d in tues:
+        # 14:00 inside a HEM offset window — phantom-boosted load → excluded.
+        _seed_local(d, 14, 0, load_kw=3.0)
+        _seed_lwt_offset(d, 14, 1.0, offset=3)   # 14:00–15:00 window (+ tail)
+        # 19:00 organic evening, no offset, beyond the tail → retained.
+        _seed_local(d, 19, 0, load_kw=0.6)
+
+    prof = db.residual_load_profile_v2(window_days=120, use_cache=False)
+    assert prof["day_counts"]["lwt_offset_excluded"] >= 6
+    # The boosted offset-window bucket is gone → lookup falls well below 1.5 kWh.
+    assert db.lookup_residual_kwh(prof, 1, 14, 0) < 1.0
+    # The organic bucket survives untouched.
+    assert prof["profile"][(1, 19, 0)] == pytest.approx(0.3, abs=0.1)
+
+
+def test_lwt_offset_slots_kept_when_killswitch_off(monkeypatch) -> None:
+    """LP_LOAD_EXCLUDE_LWT_OFFSET_SLOTS=false → legacy behaviour (slots retained)."""
+    from src.config import config as cfg
+    monkeypatch.setattr(cfg, "LP_LOAD_EXCLUDE_LWT_OFFSET_SLOTS", False, raising=False)
+
+    tues = _recent_days_of_weekday(1, 6)
+    for d in tues:
+        _seed_local(d, 14, 0, load_kw=3.0)
+        _seed_lwt_offset(d, 14, 1.0, offset=3)
+
+    prof = db.residual_load_profile_v2(window_days=120, use_cache=False)
+    assert prof["day_counts"]["lwt_offset_excluded"] == 0
+    # Boosted offset-window slots retained → bucket median = 3.0 kW × 0.5 h = 1.5 kWh.
+    assert prof["profile"][(1, 14, 0)] == pytest.approx(1.5, abs=0.1)
+
+
 def test_fallback_hierarchy_and_min_samples() -> None:
     """A (dow,h,m) bucket below min_samples is dropped; lookup falls to (h,m).
     Every (h,m) leaf is always present."""

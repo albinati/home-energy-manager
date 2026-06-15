@@ -2042,6 +2042,10 @@ def residual_load_profile_v2(
     # plunge happened to land on. Drop them from the sample. Kill-switch via
     # LP_LOAD_EXCLUDE_NEGATIVE_SLOTS=false.
     exclude_neg = bool(getattr(config, "LP_LOAD_EXCLUDE_NEGATIVE_SLOTS", True))
+    # Drop HEM-commanded LWT-offset windows (+ thermal-lag tail) too — a positive
+    # offset wakes the compressor (June phantom-heat self-loop), so that heat is
+    # HEM-induced, not organic load. Same treatment as the negative-price boost.
+    exclude_lwt = bool(getattr(config, "LP_LOAD_EXCLUDE_LWT_OFFSET_SLOTS", True))
 
     # Short-TTL cache — this 120-day rebuild runs the physics estimator over
     # ~thousands of pv samples and is called multiple times per optimizer solve
@@ -2049,7 +2053,7 @@ def residual_load_profile_v2(
     # as new telemetry / the nightly Daikin sync land, so a 4-min TTL is safe and
     # collapses the per-solve cost to one rebuild. Keyed by DB_PATH so isolated
     # test DBs never share an entry.
-    cache_key = (config.DB_PATH, window_days, end_date, min_samples_per_bucket, _v2, exclude_neg)
+    cache_key = (config.DB_PATH, window_days, end_date, min_samples_per_bucket, _v2, exclude_neg, exclude_lwt)
     if use_cache:
         ent = _RESIDUAL_V2_CACHE.get(cache_key)
         if ent is not None and ent[0] > time.monotonic():
@@ -2128,6 +2132,26 @@ def residual_load_profile_v2(
         finally:
             conn.close()
 
+    # HEM LWT-offset windows over the same span (Tracked by #540). Built OUTSIDE
+    # the lock above — get_nonzero_lwt_offset_windows takes _lock itself. Expand
+    # each window [start, end + thermal-lag tail) into half-hour UTC slot keys so
+    # Pass 1 can drop the HEM-induced (phantom) heating the same way it drops the
+    # negative-price boost. The tail mirrors the demand-gate decontamination.
+    lwt_offset_slots: set[str] = set()
+    if exclude_lwt:
+        tail_h = 2 * max(0, int(getattr(config, "DAIKIN_LWT_PREHEAT_DECONTAM_TAIL_BUCKETS", 1)))
+        for s_iso, e_iso in get_nonzero_lwt_offset_windows(cutoff_iso[:10], anchor_utc.date().isoformat()):
+            try:
+                s_w = datetime.fromisoformat(s_iso.replace("Z", "+00:00")).astimezone(UTC)
+                e_w = (datetime.fromisoformat(e_iso.replace("Z", "+00:00")).astimezone(UTC)
+                       + timedelta(hours=tail_h))
+            except (ValueError, TypeError):
+                continue
+            cur_t = s_w.replace(minute=(s_w.minute // 30) * 30, second=0, microsecond=0)
+            while cur_t < e_w:
+                lwt_offset_slots.add(cur_t.isoformat().replace("+00:00", "Z"))
+                cur_t += timedelta(minutes=30)
+
     # Pass 1 — parse, compute the pure-physics Daikin estimate per sample, and
     # accumulate physics totals per (local_date, 2h-bucket) for calibration.
     from datetime import datetime as _dt
@@ -2136,6 +2160,7 @@ def residual_load_profile_v2(
     physics_day: dict[str, float] = {}
     dropped_no_meteo = 0
     dropped_negative = 0
+    dropped_lwt_offset = 0
     for row in rows:
         outdoor = row["outdoor_history_c"]
         if outdoor is None:
@@ -2148,12 +2173,15 @@ def residual_load_profile_v2(
             local = ts.astimezone(tz)
         except (ValueError, TypeError):
             continue
-        if exclude_neg and neg_slots:
+        if (exclude_neg and neg_slots) or lwt_offset_slots:
             sm = (ts.minute // 30) * 30
             skey = (ts.replace(minute=sm, second=0, microsecond=0)
                     .astimezone(UTC).isoformat().replace("+00:00", "Z"))
-            if skey in neg_slots:
+            if exclude_neg and skey in neg_slots:
                 dropped_negative += 1
+                continue
+            if skey in lwt_offset_slots:
+                dropped_lwt_offset += 1
                 continue
         load_slot = float(row["load_power_kw"]) * 0.5
         physics_slot = _physics_daikin_slot_kwh(float(outdoor), cop_curve)
@@ -2172,7 +2200,8 @@ def residual_load_profile_v2(
             "hp_profile": {}, "hp_dhw_profile": {}, "hp_space_profile": {},
             "spread": {}, "flat": flat, "away_days": [],
             "day_counts": {"weekday": 0, "weekend": 0, "away_excluded": 0,
-                           "negative_excluded": dropped_negative, "total": 0},
+                           "negative_excluded": dropped_negative,
+                           "lwt_offset_excluded": dropped_lwt_offset, "total": 0},
             "calibrated_days": 0, "physics_only_days": 0,
         })
 
@@ -2371,6 +2400,7 @@ def residual_load_profile_v2(
             "weekend": len(weekend_days),
             "away_excluded": len(away_days),
             "negative_excluded": dropped_negative,
+            "lwt_offset_excluded": dropped_lwt_offset,
             "total": len(set(dates)),
         },
         "calibrated_days": calibrated_days,
