@@ -76,7 +76,11 @@ export function GenerationWidget({ period, periodData, periodLoading, agile, opp
     // the gap between them is the opportunity. On Outgoing Agile the green line
     // IS the curve and there's no separate comparison.
     const segRate = agile?.export_seg_rate_p ?? null;
-    const onSeg = segRate != null;
+    // On flat SEG we draw SEG as the actual line + Agile as the dashed "what
+    // you'd earn" overlay. On Outgoing Agile the Agile curve IS the actual
+    // export price, so no SEG framing. Prefer the authoritative export_mode;
+    // fall back to the segRate heuristic until /export/opportunity resolves.
+    const onSeg = opportunity ? opportunity.export_mode === "seg_flat" : segRate != null;
     const expPriceBy = new Map<string, number>();
     for (const es of agile?.export_slots ?? []) expPriceBy.set(normZ(es.valid_from), es.p);
     const agileExportPrice = slots.map((s) => expPriceBy.get(normZ(s.slot_utc)) ?? null);
@@ -97,7 +101,7 @@ export function GenerationWidget({ period, periodData, periodLoading, agile, opp
         <div class="tlw-summary">
           <span class="tlw-summary-value">{genTotal.toFixed(1)}<span class="tlw-summary-unit"> kWh solar</span></span>
           <span class="tlw-summary-value tlw-pos">{exportedTotal.toFixed(1)}<span class="tlw-summary-unit"> kWh export</span></span>
-          <span class="tlw-summary-label">expected today{segRate != null ? ` · export paid at ${segRate.toFixed(1)}p/kWh (SEG flat)` : ""}</span>
+          <span class="tlw-summary-label">expected today{onSeg && segRate != null ? ` · export paid at ${segRate.toFixed(1)}p/kWh (SEG flat)` : ""}</span>
         </div>
         <OppyLine o={opportunity} />
         {/* Export price line (green, right axis) mirrors Consumption's import
@@ -110,7 +114,7 @@ export function GenerationWidget({ period, periodData, periodLoading, agile, opp
           <span><i style={`border-color:${t.pv}`} /> solar actual</span>
           <span><i class="dashed" style={`border-color:${withAlpha(t.pv, 0.6)}`} /> solar plan</span>
           <span><i style={`border-color:${t.exportColor}`} /> export kWh</span>
-          <span><i class="dashed" style={`border-color:${t.exportColor}`} /> export {onSeg ? `${segRate.toFixed(1)}p SEG` : "price"}</span>
+          <span><i class="dashed" style={`border-color:${t.exportColor}`} /> export {onSeg && segRate != null ? `${segRate.toFixed(1)}p SEG` : "price"}</span>
           {onSeg && <span><i class="dashed" style={`border-color:${t.warn}`} /> Outgoing Agile (alvo)</span>}
           <span>◉ now</span>
         </div>

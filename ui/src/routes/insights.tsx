@@ -134,26 +134,38 @@ export default function Insights() {
             </div>
           )}
 
-          {/* Export side-by-side: actual SEG vs the Outgoing Agile alternative */}
+          {/* Export valuation — on Outgoing Agile show the actual Agile earnings;
+              only on the old flat SEG show the SEG-vs-Agile switch opportunity. */}
           {data.export && data.export.export_kwh > 0.05 && (
             <div class="insights-export-panel">
               <span class="insights-export-title">Export</span>
-              <span>
-                <strong>{kwh(data.export.export_kwh)}</strong> exported · paid
-                {" "}<strong>{p2(data.export.seg_revenue_pence)}</strong> at SEG {data.export.seg_rate_p.toFixed(2)}p
-                {data.export.mode === "seg_flat" ? " (current)" : ""}
-              </span>
-              <span class="insights-export-alt">
-                would earn <strong>{p2(data.export.agile_revenue_pence)}</strong> on Outgoing Agile
-                (~{data.export.agile_avg_p.toFixed(1)}p avg)
-                {data.export.uplift_if_switch_pence > 1 && (
-                  <span class="insights-export-uplift"> → +{p2(data.export.uplift_if_switch_pence)} if you switch</span>
-                )}
-              </span>
+              {data.export.mode === "outgoing_agile" ? (
+                <span>
+                  <strong>{kwh(data.export.export_kwh)}</strong> exported · earned
+                  {" "}<strong>{p2(data.export.agile_revenue_pence)}</strong> on Outgoing Agile
+                  (~{data.export.agile_avg_p.toFixed(1)}p avg)
+                </span>
+              ) : (
+                <>
+                  <span>
+                    <strong>{kwh(data.export.export_kwh)}</strong> exported · paid
+                    {" "}<strong>{p2(data.export.seg_revenue_pence)}</strong> at SEG {data.export.seg_rate_p.toFixed(2)}p (current)
+                  </span>
+                  <span class="insights-export-alt">
+                    would earn <strong>{p2(data.export.agile_revenue_pence)}</strong> on Outgoing Agile
+                    (~{data.export.agile_avg_p.toFixed(1)}p avg)
+                    {data.export.uplift_if_switch_pence > 1 && (
+                      <span class="insights-export-uplift"> → +{p2(data.export.uplift_if_switch_pence)} if you switch</span>
+                    )}
+                  </span>
+                </>
+              )}
             </div>
           )}
 
-          <ComparisonChart rows={rows} />
+          {/* Standing-charges-only state (import_kwh < 1) shows the table only;
+              a comparison chart there would imply a real comparison. */}
+          {data.basis.import_kwh >= 1 && <ComparisonChart rows={rows} />}
 
           {/* Table */}
           <div class="insights-table-wrap">
