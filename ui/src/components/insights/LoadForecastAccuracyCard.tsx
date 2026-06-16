@@ -13,7 +13,7 @@ export function LoadForecastAccuracyCard({ period }: { period: PeriodState }) {
   const res = useFetch<LoadErrorLog>(
     () => getLoadErrorLog({ startDate: start, endDate: end }),
     [start, end],
-    { cacheKey: `load-err:${start}:${end}`, immutable: !isCurrentPeriod(period) },
+    { cacheKey: `load-err:${start}:${end}`, immutable: !isCurrentPeriod(period), track: true },
   );
   const data = res.data;
   const elRef = useRef<HTMLDivElement | null>(null);
@@ -80,7 +80,7 @@ export function LoadForecastAccuracyCard({ period }: { period: PeriodState }) {
 
   const o = data?.overall;
   return (
-    <section class="insights-card load-accuracy">
+    <section class={`insights-card load-accuracy${res.loading && data ? " is-updating" : ""}`}>
       <header class="load-pattern-head">
         <h2>Load forecast accuracy</h2>
         <p class="muted">
