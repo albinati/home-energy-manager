@@ -150,12 +150,13 @@ export default function Landing() {
           sticky TopNav (redesign P4c). Same global signal either way. */}
       <PeriodNavigator variant="page" />
 
-      {/* ── PERIOD-VIEW scope (redesign) — names what the hero is scoped to. */}
-      <div class="scope scope--period">
-        <span class="scope-dot" />
+      {/* ── PERIOD-VIEW scope (redesign) — names what the hero is scoped to.
+          <h2> so the cockpit has a real document outline (period section). */}
+      <h2 class="scope scope--period">
+        <span class="scope-dot" aria-hidden="true" />
         {scope.scope} · period view
         {scope.date && <span class="scope-when">{scope.date}</span>}
-      </div>
+      </h2>
 
       <Hero metrics={metrics.data} metricsLoading={metrics.loading} cockpit={data} agile={agile.data}
             period={periodInsights.data} periodState={period}
@@ -166,11 +167,11 @@ export default function Landing() {
           that ignores the period selector above. Live power = the animated
           flow + rates + battery, with its committed plan as the card foot;
           Live heating = the plan chart first, gauges demoted beneath it. */}
-      <div class="scope scope--live">
-        <span class="scope-dot" />
+      <h2 class="scope scope--live">
+        <span class="scope-dot" aria-hidden="true" />
         Live now
         <span class="scope-when">always now — ignores the period above</span>
-      </div>
+      </h2>
       <div class="widget-band live-band">
         <div class="live-band-head">
           <Icon name="power-live" size={13} /> Live · self-driving
