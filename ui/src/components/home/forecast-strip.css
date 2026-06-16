@@ -1,31 +1,24 @@
-/* Multi-day forecast strip — a borderless card (matching the widget surface)
- * holding 4 evenly-split day columns. Collapses to 2-per-row on phones. */
+/* Next-3-days forecast — rendered INLINE inside the hero weather panel (no card
+ * chrome of its own; it already sits inside the hero card). margin-top: auto
+ * pairs with .solar-prog's margin-top: auto so the free space in the column
+ * splits above and below, centring the strip in the gap between the range and
+ * the solar progress. */
 .fcstrip {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
   gap: var(--space-2);
-  padding: var(--space-3) var(--space-4);
-  background-color: var(--bg-card);
-  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0) 42%);
-  border: 1px solid rgba(255, 255, 255, 0.045);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow), inset 0 1px 0 rgba(255, 255, 255, 0.06);
-}
-:root.theme-light .fcstrip {
-  background-image: none;
-  border: 1px solid rgba(15, 23, 42, 0.06);
-  box-shadow: var(--shadow);
+  margin-top: auto;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
 }
 
 .fcstrip-day {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 2px;
+  gap: 1px;
   min-width: 0;
   text-align: center;
 }
-/* Divider between days (not before the first). */
 .fcstrip-day + .fcstrip-day {
   border-left: 1px solid var(--border);
   padding-left: var(--space-2);
@@ -38,7 +31,7 @@
   text-transform: uppercase;
   color: var(--text-dim);
 }
-.fcstrip-icon { margin: 2px 0; }
+.fcstrip-icon { margin: 1px 0; }
 .fcstrip-cond {
   font-size: var(--font-2xs);
   color: var(--text-mute);
@@ -61,9 +54,3 @@
   font-variant-numeric: tabular-nums;
 }
 .fcstrip-pv-unit { color: var(--text-mute); font-weight: 400; }
-
-@media (max-width: 560px) {
-  .fcstrip { grid-template-columns: repeat(2, 1fr); row-gap: var(--space-3); }
-  /* In a 2-col layout the left-divider only makes sense on the right column. */
-  .fcstrip-day:nth-child(odd) { border-left: none; padding-left: 0; }
-}

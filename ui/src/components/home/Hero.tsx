@@ -6,6 +6,7 @@ import { gbp, kwh } from "../../lib/format";
 import { useAnimatedNumber } from "../../lib/useAnimatedNumber";
 import { isCurrentPeriod, periodLabel, type PeriodState } from "../../lib/period";
 import { Icon } from "../common/Icon";
+import { ForecastStrip } from "./ForecastStrip";
 import { Link } from "wouter-preact";
 import "./hero.css";
 
@@ -233,6 +234,9 @@ function HeroWeather({ weather, pv }: { weather?: WeatherResponse | null; pv?: P
         </div>
       )}
 
+      {/* Next 3 days — fills the gap between the range and the solar progress. */}
+      <ForecastStrip weather={weather} />
+
       {solarTotal > 0 && (
         <div class="solar-prog">
           <div class="flex between items-baseline solar-prog-head">
@@ -241,7 +245,7 @@ function HeroWeather({ weather, pv }: { weather?: WeatherResponse | null; pv?: P
           </div>
           <div class="solar-prog-track"><div class="solar-prog-fill" style={{ width: `${solarPct}%` }} /></div>
           <div class="thermo-row">
-            <span class="dim small">{solarPct}% generated</span>
+            <span class="dim small">{solarDone - solarTotal > 0.3 ? `beat forecast +${(solarDone - solarTotal).toFixed(1)} kWh` : `${solarPct}% generated`}</span>
             <span class="dim small">{solarToGo > 0.05 ? `${solarToGo.toFixed(1)} kWh to go` : "done for today"}{peakLabel ? ` · peak ${peakLabel}` : ""}</span>
           </div>
         </div>
