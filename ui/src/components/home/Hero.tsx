@@ -174,12 +174,15 @@ function HeroWeather({ weather, pv }: { weather?: WeatherResponse | null; pv?: P
   const outdoor = weather?.daikin?.outdoor_temp ?? cur.temp_c;
   const cond = condOf(cur.cloud_cover_pct);
 
-  // Today's hi/lo + a now-marker on the range.
-  const todayKey = new Date().toDateString();
-  const todaySlots = fc.filter((s) => new Date(s.time).toDateString() === todayKey);
-  const temps = todaySlots.map((s) => s.temp_c);
-  const hi = temps.length ? Math.max(...temps) : null;
-  const lo = temps.length ? Math.min(...temps) : null;
+  // Hi/lo over a rolling next-24h window + the current reading. "Today's
+  // remaining hours" collapses to a flat range in the evening (e.g. L19 H19)
+  // and the live outdoor temp can sit outside it — including the current
+  // reading and a full 24h of forecast keeps the range real and the now-marker
+  // always in bounds.
+  const next24 = fc.slice(curIdx, curIdx + 24).map((s) => s.temp_c);
+  const rangeTemps = [outdoor, ...next24].filter((t) => Number.isFinite(t));
+  const hi = rangeTemps.length ? Math.max(...rangeTemps) : null;
+  const lo = rangeTemps.length ? Math.min(...rangeTemps) : null;
   const markPct = hi != null && lo != null && hi > lo
     ? Math.max(6, Math.min(94, ((outdoor - lo) / (hi - lo)) * 100)) : 50;
 
@@ -224,7 +227,7 @@ function HeroWeather({ weather, pv }: { weather?: WeatherResponse | null; pv?: P
           <div class="thermo-track"><span class="thermo-mark" style={{ left: `${markPct}%` }} /></div>
           <div class="thermo-row">
             <span class="t-lo">L {Math.round(lo)}°</span>
-            <span class="dim small">today's range</span>
+            <span class="dim small">next 24h</span>
             <span class="t-hi">H {Math.round(hi)}°</span>
           </div>
         </div>
