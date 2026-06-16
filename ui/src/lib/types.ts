@@ -245,6 +245,8 @@ export interface WeatherSlot {
   pv_kw: number;
   cloud_cover_pct?: number | null;
   irradiance_wm2?: number | null;
+  precipitation_mm?: number | null;
+  weather_code?: number | null;   // WMO code (0 clear … 61-67 rain … 95-99 storm)
 }
 
 export interface WeatherResponse {
