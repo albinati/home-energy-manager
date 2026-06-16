@@ -4,6 +4,7 @@ import { usePeriod, setGranularity, selectedPeriod, isCurrentPeriod } from "../.
 import { getImmutableCache, setImmutableCache } from "../../lib/poll";
 import { makeChart, baseOption, chartTheme, barGradient, areaGradient, withAlpha, type EChartsType } from "../../lib/charts";
 import { Icon } from "../common/Icon";
+import { NowDot } from "../common/NowDot";
 import type {
   PeriodInsightsResponse,
   PeriodChartPoint,
@@ -271,7 +272,7 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
           <span class="echart-l2"><span class="echart-l2-line" style="border-top-color:var(--import)" /> Grid</span>
           <span class="echart-l2"><span class="echart-l2-line" style="border-top-color:var(--batt)" /> Battery</span>
           <span class="echart-l2"><span class="echart-l2-line" style="border-top-color:var(--accent);border-top-style:dashed" /> SoC %</span>
-          <span class="echart-l2-hint">stack = load by use · grid/battery = how it was sourced · SoC right · ◉ now</span>
+          <span class="echart-l2-hint">stack = load by use · grid/battery = how it was sourced · SoC right · <NowDot /> now</span>
         </div>
       )}
 

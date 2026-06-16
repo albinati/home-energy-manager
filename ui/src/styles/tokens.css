@@ -3,6 +3,8 @@
  * Tariff/energy/chart colours stay the same in both themes for legibility. */
 
 :root, :root.theme-dark {
+  /* Native form controls / scrollbars match the dark theme. */
+  color-scheme: dark;
   /* surfaces — redesign (Claude Design handoff): richer, cooler near-black with
    * more elevation separation. */
   --bg: #090b11;
@@ -96,6 +98,7 @@
 
 /* Light theme — applied when src/lib/theme.ts sets .theme-light on <html>. */
 :root.theme-light {
+  color-scheme: light;
   --bg: #f5f6f8;
   --bg-card: #ffffff;
   --bg-card-2: #f1f5f9;
@@ -135,6 +138,7 @@
  * which overrides this. */
 @media (prefers-color-scheme: light) {
   :root:not(.theme-dark):not(.theme-light) {
+    color-scheme: light;
     --bg: #f8fafc;
     --bg-card: #ffffff;
     --bg-card-2: #f1f5f9;

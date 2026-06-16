@@ -3,6 +3,7 @@ import { makeChart, baseOption, chartTheme, areaGradient, withAlpha, type EChart
 import { useResolvedTheme } from "../../lib/theme";
 import { reducedMotion } from "../../lib/motion";
 import type { HeatingPlanResponse } from "../../lib/types";
+import { NowDot } from "../common/NowDot";
 import "./heating-plan.css";
 
 interface Props {
@@ -166,7 +167,7 @@ export function HeatingPlanWidget({ plan, loading }: Props) {
           <span class="hpl-tok"><span class="hpl-line" style="border-top:1.5px dashed var(--import)" /> import p</span>
           <span class="hpl-tok"><span class="hpl-sw hpl-sw--heat" /> heating</span>
           <span class="hpl-tok"><span class="hpl-sw hpl-sw--neg" /> paid to import</span>
-          <span class="hpl-hint">◉ now · hover for detail</span>
+          <span class="hpl-hint"><NowDot /> now · hover for detail</span>
         </div>
       ) : null}
       {!plan?.slots?.length && !loading && <p class="muted">No heating plan available yet.</p>}
