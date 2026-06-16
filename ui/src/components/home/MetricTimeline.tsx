@@ -217,7 +217,22 @@ export function MetricTimeline({
     }, { notMerge: true });
   }, [labels, lines, prices, nowIdx, cheapAt, peakAt, barMode, theme, unit]);
 
-  return <div ref={ref} style={{ width: "100%", height: `${height}px` }} />;
+  // Text alternative for screen readers — the canvas itself is opaque to AT,
+  // so name the series + unit (and the price overlay when present).
+  const hasPrice = !!prices && prices.some((p) => p != null);
+  const chartLabel =
+    `${barMode ? "Bar chart" : "Time-series chart"} in ${unit}: ` +
+    `${lines.map((l) => l.name).join(", ")}` +
+    `${hasPrice ? `, with ${priceLabel} overlay` : ""}`;
+
+  return (
+    <div
+      ref={ref}
+      role="img"
+      aria-label={chartLabel}
+      style={{ width: "100%", height: `${height}px` }}
+    />
+  );
 }
 
 export function localHM(iso: string): string {

@@ -252,7 +252,7 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
       {/* Host wrap — loading state overlays (position:absolute) so it never
           displaces the chart, killing load-jump. */}
       <div class="echart-host-wrap">
-        <div class="echart-host" ref={elRef} aria-label="Load details chart" />
+        <div class="echart-host" ref={elRef} role="img" aria-label="Load details chart" />
         {loading && <div class="echart-state">Loading…</div>}
         {error && <div class="echart-state echart-state--err">{error}</div>}
       </div>
