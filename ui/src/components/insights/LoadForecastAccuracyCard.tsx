@@ -5,6 +5,16 @@ import { periodDateRange, periodLabel, isCurrentPeriod, type PeriodState } from 
 import { makeChart, chartTheme, type EChartsType } from "../../lib/charts";
 import { Spinner } from "../common/Spinner";
 
+// A single past day's load_error_log is rebuilt by the 04:22 UTC nightly cron,
+// so between midnight and the rebuild "yesterday" has no rows of its own — the
+// only slots in its London window are the 2 carried over from the previous UTC
+// day's tail (local hour 0). Treat a day-granularity view with fewer than this
+// many slots as "not computed yet" rather than rendering a misleading lone bar.
+// A fully rebuilt day has ~48; the carry-over case is ~2.
+const DAY_READY_MIN_SLOTS = 12;
+const dayIsThin = (gran: string, n: number): boolean =>
+  gran === "day" && n > 0 && n < DAY_READY_MIN_SLOTS;
+
 /** How well the household LOAD forecast the LP plans against matched reality,
  *  by local hour. Complements LoadPatternCard (when we spend) with how well we
  *  predict it. Surfaces the load_error_log measurement (Phase 1). Read-only. */
@@ -25,8 +35,9 @@ export function LoadForecastAccuracyCard({ period }: { period: PeriodState }) {
     // outlives empty periods. On a no-data period clear it but keep the
     // instance bound to the live node — otherwise navigating back rebound a
     // fresh <div> against a stale instance and the chart rendered blank.
-    const hasData = !!(data && data.overall && data.overall.n > 0);
-    if (!hasData) { chartRef.current?.clear(); return; }
+    const oa = data?.overall;
+    const showChart = !!(oa && oa.n > 0 && !dayIsThin(period.gran, oa.n));
+    if (!showChart) { chartRef.current?.clear(); return; }
     if (!chartRef.current) chartRef.current = makeChart(elRef.current);
     const t = chartTheme();
 
@@ -80,11 +91,13 @@ export function LoadForecastAccuracyCard({ period }: { period: PeriodState }) {
       }],
     }, { notMerge: true });
     chartRef.current.resize();
-  }, [data]);
+  }, [data, period.gran]);
 
   useEffect(() => () => { chartRef.current?.dispose(); chartRef.current = null; }, []);
 
   const o = data?.overall;
+  const dayNotReady = !!(o && dayIsThin(period.gran, o.n));
+  const showChart = !!(o && o.n > 0) && !dayNotReady;
   return (
     <section class={`insights-card load-accuracy${res.loading && data ? " is-updating" : ""}`}>
       <header class="load-pattern-head">
@@ -98,7 +111,7 @@ export function LoadForecastAccuracyCard({ period }: { period: PeriodState }) {
       </header>
       {res.loading && !data && <Spinner label="Loading load accuracy…" />}
       {res.error && <p class="insights-error">Couldn't load accuracy: {res.error.message}</p>}
-      {data && o && o.n > 0 && (
+      {showChart && (
         <div class="la-stats">
           <div class="la-stat">
             <span class="la-stat-val">{o.mae_kwh.toFixed(2)}</span>
@@ -121,11 +134,17 @@ export function LoadForecastAccuracyCard({ period }: { period: PeriodState }) {
       {/* ALWAYS mounted so the ECharts instance survives empty-period navigation
           (a conditionally-rendered chart div left the instance bound to a
           detached node → blank chart on the way back). Hidden when no data. */}
-      <div ref={elRef} class="load-pattern-chart" hidden={!(data && o && o.n > 0)} />
-      {data && o && o.n > 0 && (
+      <div ref={elRef} class="load-pattern-chart" hidden={!showChart} />
+      {showChart && (
         <p class="muted load-pattern-meta">
           Net bias near zero overall can still hide a diurnal pattern (the bars) —
           measured against the committed plan, total household load (heat pump included).
+        </p>
+      )}
+      {dayNotReady && (
+        <p class="muted insights-empty">
+          {periodLabel(period)}'s accuracy isn't computed yet — it's built after the
+          overnight backfill (~04:30 UTC). Try the week view or an earlier day.
         </p>
       )}
       {data && (!o || o.n === 0) && (
