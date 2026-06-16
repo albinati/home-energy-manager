@@ -29,7 +29,6 @@ import { PeriodNavigator } from "../components/shell/PeriodNavigator";
 import { usePeriod, periodFetchOpts, periodScope, isCurrentPeriod } from "../lib/period";
 import { LivePowerWidget } from "../components/cockpit/LivePowerWidget";
 import { Hero } from "../components/home/Hero";
-import { ForecastStrip } from "../components/home/ForecastStrip";
 import { HeatingWidget } from "../components/home/HeatingWidget";
 import { PlanMini } from "../components/home/PlanMini";
 import { FeedbackPanel } from "../components/home/FeedbackPanel";
@@ -163,9 +162,6 @@ export default function Landing() {
             period={periodInsights.data} periodState={period}
             periodLoading={periodInsights.loading} todayCum={todayCum.data}
             weather={weather.data} pv={pvToday.data} />
-
-      {/* Days ahead — 4-day weather + solar outlook (temp, rain, PV kWh/day). */}
-      <ForecastStrip weather={weather.data} />
 
       {/* ── LIVE scope + band (redesign) — the always-now, self-driving surface
           that ignores the period selector above. Live power = the animated

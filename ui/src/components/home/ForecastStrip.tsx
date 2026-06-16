@@ -1,15 +1,17 @@
 import type { WeatherResponse, WeatherSlot } from "../../lib/types";
 import "./forecast-strip.css";
 
-// Multi-day (4-day) weather + solar outlook for the cockpit. Aggregates the
-// hourly /weather forecast (96 h) into per-day buckets: hi/lo temp, a condition
-// (rain from the WMO weather_code / precipitation, else cloud cover), and the
-// estimated PV kWh for the day. SVG glyphs only (no emoji).
+// Next-3-days weather + solar outlook, rendered inline inside the hero weather
+// panel (today is already the "now" block above, so today is skipped).
+// Aggregates the hourly /weather forecast (96 h) into per-day buckets: hi/lo
+// temp, a condition (rain from the WMO weather_code / precipitation, else cloud
+// cover), and the estimated PV kWh for the day. SVG glyphs only (no emoji).
 type Cond = "sun" | "sun-cloud" | "cloud" | "rain";
 
 interface DayAgg {
   key: string;
   label: string;
+  isToday: boolean;
   hi: number;
   lo: number;
   pvKwh: number;
@@ -61,15 +63,18 @@ export function ForecastStrip({ weather }: { weather?: WeatherResponse | null })
     days.push({
       key,
       label: isToday ? "Today" : new Date(key).toLocaleDateString([], { weekday: "short" }),
+      isToday,
       hi, lo, pvKwh, cond, condLabel: label,
     });
   }
 
-  const shown = days.slice(0, 4);
-  if (shown.length < 2) return null;
+  // Today is the "now" block in the hero — show the next 3 days only.
+  const shown = days.filter((d) => !d.isToday).slice(0, 3);
+  if (!shown.length) return null;
 
   return (
-    <div class="fcstrip" role="group" aria-label="Multi-day weather and solar forecast">
+    <div class="fcstrip" role="group" aria-label="Next 3 days weather and solar forecast"
+         style={{ gridTemplateColumns: `repeat(${shown.length}, 1fr)` }}>
       {shown.map((d) => (
         <div class="fcstrip-day" key={d.key}>
           <span class="fcstrip-label">{d.label}</span>
