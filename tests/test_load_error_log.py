@@ -156,14 +156,18 @@ def test_error_log_endpoint_shape() -> None:
     import asyncio
     from src.api.routers import pv as pv_router
 
-    today = datetime.now(UTC).date()
-    slots = _slots(today, 3)
-    _seed_lp_run(run_at=datetime(today.year, today.month, today.day, 0, 0, tzinfo=UTC),
+    # Seed YESTERDAY, not today: _slots() places samples at 08:00 UTC, and the
+    # endpoint's default window ends at `now`, so "today's" 08:00 slots sit in
+    # the future and fall outside the window every day from 00:00–08:00 UTC
+    # (n=0 → flake). Yesterday's 08:00 is always within the trailing window.
+    day = datetime.now(UTC).date() - timedelta(days=1)
+    slots = _slots(day, 3)
+    _seed_lp_run(run_at=datetime(day.year, day.month, day.day, 0, 0, tzinfo=UTC),
                  slot_starts=slots, base_loads=[0.3, 0.4, 0.5],
                  dhw_kwhs=[0.0, 0.0, 0.0], space_kwhs=[0.0, 0.0, 0.0])
     for s in slots:
         _seed_load_samples(s, 1.2)  # actual 0.6/slot → under-forecast (positive bias)
-    db.rebuild_load_error_log_for_date(today)
+    db.rebuild_load_error_log_for_date(day)
 
     resp = asyncio.run(pv_router.get_load_error_log(window_days=7))
     assert set(resp.keys()) == {"window_days", "n_slots_logged", "overall", "per_hour_local"}
