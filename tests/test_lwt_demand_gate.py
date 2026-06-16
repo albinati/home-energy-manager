@@ -132,7 +132,11 @@ def test_k_regression_skips_hem_offset_days(monkeypatch):
     from src import db
 
     # Seed 10 days of heating + meteo coverage; mark 3 as offset days.
-    today = datetime.now(TZ).date()
+    # Anchor to the SAME date basis the function uses (compute_daikin_lwt_kw_
+    # calibration windows off date.today(), system-local) — not Europe/London —
+    # else at the UTC↔BST day boundary the most-recent offset day lands a day
+    # outside the calibration window and skipped_hem_offset reads 2 not 3 (flake).
+    today = datetime.now().date()
     for back in range(1, 11):
         d = today - timedelta(days=back)
         db.upsert_daikin_consumption_daily(
