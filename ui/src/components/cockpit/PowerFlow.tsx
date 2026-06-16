@@ -83,8 +83,16 @@ export function PowerFlow({ state }: PowerFlowProps) {
   const pvToBatt = "M 110 112 C 80 150 80 180 110 198";
   const gridToBatt = "M 338 230 C 280 240 200 240 142 230";
 
+  // Text alternative for screen readers — the animated SVG is aria-hidden, so
+  // summarise the live flows in kW with direction.
+  const kw = (v: number) => `${Math.abs(v).toFixed(1)} kW`;
+  const flowSummary =
+    `Live power flow: solar ${kw(s.solar_kw)}, home ${kw(s.load_kw)}, ` +
+    `battery ${battCharging ? `charging ${kw(s.battery_kw)}` : battDischarging ? `discharging ${kw(s.battery_kw)}` : "idle"}, ` +
+    `grid ${gridImporting ? `importing ${kw(s.grid_kw)}` : gridExporting ? `exporting ${kw(s.grid_kw)}` : "idle"}`;
+
   return (
-    <div class="powerflow" aria-label="Live power flow">
+    <div class="powerflow" role="img" aria-label={flowSummary}>
       <svg viewBox="0 0 480 310" class="powerflow-svg" aria-hidden="true">
         <defs>
           <filter id="pf-glow" x="-50%" y="-50%" width="200%" height="200%">

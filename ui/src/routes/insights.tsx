@@ -286,5 +286,5 @@ function ComparisonChart({ rows }: { rows: FairTariffRow[] }) {
     }, { notMerge: true });
   }, [rows]);
 
-  return <div ref={ref} class="insights-chart" />;
+  return <div ref={ref} class="insights-chart" role="img" aria-label="Tariff cost comparison — your usage priced on each tariff" />;
 }
