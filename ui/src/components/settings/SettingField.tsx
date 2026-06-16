@@ -51,7 +51,7 @@ export function SettingField({ spec, pending, onChange, onRevert }: SettingField
               step={stepFor(spec)}
               unit={unit}
               defaultValue={spec.default as number}
-              ariaLabel={spec.key}
+              ariaLabel={labelFor(spec.key)}
               onChange={(n) => onChange(spec.key, n)}
             />
           );
@@ -63,7 +63,7 @@ export function SettingField({ spec, pending, onChange, onRevert }: SettingField
               min={spec.min ?? null}
               max={spec.max ?? null}
               step={stepFor(spec)}
-              ariaLabel={spec.key}
+              ariaLabel={labelFor(spec.key)}
               onChange={(n) => onChange(spec.key, n)}
             />
             {unit && <span class="setting-input-unit">{unit}</span>}
@@ -73,7 +73,7 @@ export function SettingField({ spec, pending, onChange, onRevert }: SettingField
         return (
           <Toggle
             value={!!value}
-            ariaLabel={spec.key}
+            ariaLabel={labelFor(spec.key)}
             onChange={(v) => onChange(spec.key, v)}
           />
         );
@@ -82,7 +82,7 @@ export function SettingField({ spec, pending, onChange, onRevert }: SettingField
           <Select
             value={String(value)}
             options={spec.enum || []}
-            ariaLabel={spec.key}
+            ariaLabel={labelFor(spec.key)}
             onChange={(v) => onChange(spec.key, v)}
           />
         );
@@ -90,7 +90,7 @@ export function SettingField({ spec, pending, onChange, onRevert }: SettingField
         return (
           <TextInput
             value={String(value)}
-            ariaLabel={spec.key}
+            ariaLabel={labelFor(spec.key)}
             onChange={(v) => onChange(spec.key, v)}
           />
         );
