@@ -40,6 +40,7 @@ export function RefreshCountdown({ lastFetchAt, intervalMs, loading, disabled, o
 
   return (
     <button class="refresh-cd" onClick={onRefresh}
+            aria-label={disabled ? `Just refreshed — available again in ${leftS}s` : "Refresh now"}
             title={disabled
               ? `Just refreshed — available again in ${leftS}s`
               : `Auto-refreshes every ${Math.round(intervalMs / 1000)}s — click to refresh now`}

@@ -3,6 +3,8 @@ import { makeChart, baseOption, chartTheme, areaGradient, withAlpha, type EChart
 import { useResolvedTheme } from "../../lib/theme";
 import { reducedMotion } from "../../lib/motion";
 import type { PvTodayResponse, ExecutionTodayResponse } from "../../lib/types";
+import { Icon } from "../common/Icon";
+import { NowDot } from "../common/NowDot";
 import "./today-plan.css";
 
 interface TodayPlanWidgetProps {
@@ -295,7 +297,7 @@ export function TodayPlanWidget({ pv, loading, execution, cheapThresholdP, peakT
     <div class="today-plan">
       {dayTotal != null && (
         <div class="today-plan-summary">
-          <span class="today-plan-summary-icon" aria-hidden="true">☀</span>
+          <span class="today-plan-summary-icon" aria-hidden="true"><Icon name="solar" size={14} /></span>
           <span class="today-plan-summary-value">{dayTotal.toFixed(1)}<span class="today-plan-summary-unit"> kWh</span></span>
           <span class="today-plan-summary-label">solar expected today (generated + forecast)</span>
         </div>
@@ -332,7 +334,7 @@ export function TodayPlanWidget({ pv, loading, execution, cheapThresholdP, peakT
             <span class="tpl-tok"><span class="tpl-sw tpl-sw--cheap" aria-hidden="true" /> cheap</span>
             <span class="tpl-tok"><span class="tpl-sw tpl-sw--peak" aria-hidden="true" /> peak</span>
           </span>
-          <span class="tpl-hint">◉ now · hover a slot for detail</span>
+          <span class="tpl-hint"><NowDot /> now · hover a slot for detail</span>
         </div>
       ) : null}
       {!pv?.slots?.length && !loading && <p class="muted">No plan data for today yet.</p>}

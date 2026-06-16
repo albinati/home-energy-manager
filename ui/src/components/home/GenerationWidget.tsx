@@ -3,6 +3,7 @@ import { useFetch } from "../../lib/poll";
 import { getPvToday, getGridToday } from "../../lib/endpoints";
 import { MetricTimeline, localHM, nowIndexOf, periodPointLabel, type TimelineLine } from "./MetricTimeline";
 import { Spinner } from "../common/Spinner";
+import { NowDot } from "../common/NowDot";
 import { gbp } from "../../lib/format";
 import type { PeriodInsightsResponse, PvTodayResponse, GridTodayResponse, AgileTodayResponse, ExportOpportunityResponse } from "../../lib/types";
 import { isCurrentPeriod, type PeriodState } from "../../lib/period";
@@ -116,7 +117,7 @@ export function GenerationWidget({ period, periodData, periodLoading, agile, opp
           <span><i style={`border-color:${t.exportColor}`} /> export kWh</span>
           <span><i class="dashed" style={`border-color:${t.exportColor}`} /> export {onSeg && segRate != null ? `${segRate.toFixed(1)}p SEG` : "price"}</span>
           {onSeg && <span><i class="dashed" style={`border-color:${t.warn}`} /> Outgoing Agile (alvo)</span>}
-          <span>◉ now</span>
+          <span><NowDot /> now</span>
         </div>
       </div>
     );
