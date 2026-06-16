@@ -20,7 +20,7 @@
   font-size: 0.65rem;
 }
 .heating-refresh-error {
-  color: var(--danger, #ef4444);
+  color: var(--bad);
   font-size: var(--font-sm);
   margin-top: var(--space-2);
 }

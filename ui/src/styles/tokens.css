@@ -12,10 +12,11 @@
   --border: #2b3340;
   --border-strong: #3a4350;
 
-  /* text */
+  /* text — --text-mute lightened from #6b7280 (≈3.63:1 on --bg-card, below
+   * WCAG AA for small labels) to ≈5.1:1 while staying dimmer than --text-dim. */
   --text: #f3f4f6;
   --text-dim: #9ca3af;
-  --text-mute: #6b7280;
+  --text-mute: #838b98;
 
   /* brand + state */
   --accent: #3b82f6;
@@ -29,6 +30,11 @@
   --standard: #6b7280;
   --peak: #f59e0b;
   --peak-export: #ef4444;
+  /* paid-to-import / negative band on the price timeline + appliance chips.
+   * Was a never-defined var(--neg, …) fallback in several files — now a real
+   * token (same colour, no longer a silent literal). Distinct from
+   * --neg-price (the deeper tariff-band blue). */
+  --neg: #38bdf8;
 
   /* energy-flow domains (charts + power-flow svg) */
   --pv: #fbbf24;
@@ -37,6 +43,9 @@
   --house: #c084fc;
   --import: #ef4444;
   --export: #10b981;
+  /* heating/tank thermal line on the heating-plan chart. Was a never-defined
+   * var(--thermal, …) fallback — now a real token (same colour). */
+  --thermal: #fb923c;
 
   /* spacing scale (4px base) */
   --space-1: 0.25rem;

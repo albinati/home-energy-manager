@@ -35,10 +35,10 @@ export function Widget({
   return (
     <section class={`widget widget--${size} widget--tone-${tone} ${cls}`}>
       <header class="widget-header">
-        <div class="widget-header-title">
+        <h3 class="widget-header-title">
           {icon && <span class="widget-header-icon" aria-hidden="true">{icon}</span>}
           {title}
-        </div>
+        </h3>
         <div class="widget-header-meta">
           {badge && <span class="widget-header-badge">{badge}</span>}
           {action}
