@@ -528,9 +528,10 @@ async def api_v1_weather():
 def _api_v1_weather_sync():
     from ..weather import fetch_weather_panel_forecast_cached
 
-    # 96 h = a 4-day forecast for the redesign hero weather panel. Open-meteo
-    # direct (not the Quartz-merged planning fetch, which caps at the ~2-day PV
-    # horizon) — the panel only needs temp/cloud.
+    # 96 h = a 4-day forecast for the cockpit weather panel + multi-day strip.
+    # Open-meteo direct (not the Quartz-merged planning fetch, which caps at the
+    # ~2-day PV horizon). temp/cloud/pv + precipitation + WMO weather_code so the
+    # strip can show rain, not just cloud cover.
     fc = fetch_weather_panel_forecast_cached(hours=96)
     out = [{
         "time": f.time_utc.isoformat(),
@@ -538,6 +539,8 @@ def _api_v1_weather_sync():
         "pv_kw": f.estimated_pv_kw,
         "cloud_cover_pct": f.cloud_cover_pct,
         "irradiance_wm2": f.shortwave_radiation_wm2,
+        "precipitation_mm": f.precipitation_mm,
+        "weather_code": f.weather_code,
     } for f in fc]
     daikin = None
     try:
@@ -554,7 +557,10 @@ def _api_v1_weather_sync():
             }
     except Exception as e:
         daikin = {"error": str(e)}
-    return {"forecast": out[:48], "daikin": daikin}
+    # Return the full horizon (up to 96 h / 4 days) — the multi-day strip needs
+    # days 3-4. Was truncated to out[:48] (a 2-day leftover) which silently
+    # dropped half the fetched forecast.
+    return {"forecast": out, "daikin": daikin}
 
 
 @app.get("/api/v1/health")

@@ -234,6 +234,8 @@ class HourlyForecast:
     estimated_pv_kw: float        # estimated PV generation for 4.5kWp system
     heating_demand_factor: float  # 0-1: how much heating is needed relative to base temp
     pv_direct: bool = False       # True when provider supplies site PV directly.
+    precipitation_mm: float = 0.0  # hourly precipitation total (mm); 0 outside Open-Meteo
+    weather_code: int = 0          # WMO weather code (0 clear … 61-67 rain … 95-99 storm)
 
 
 @dataclass
@@ -491,7 +493,7 @@ def _fetch_open_meteo_forecast(
         url = (
             "https://api.open-meteo.com/v1/forecast?"
             f"latitude={lat}&longitude={lon}"
-            "&hourly=temperature_2m,cloud_cover,shortwave_radiation_instant"
+            "&hourly=temperature_2m,cloud_cover,shortwave_radiation_instant,precipitation,weather_code"
             f"&forecast_days={max(2, (hours // 24) + 1)}"
             "&timezone=UTC"
         )
@@ -506,6 +508,8 @@ def _fetch_open_meteo_forecast(
     temps = hourly.get("temperature_2m") or []
     clouds = hourly.get("cloud_cover") or []
     radiation = hourly.get("shortwave_radiation_instant") or []
+    precip = hourly.get("precipitation") or []
+    wcodes = hourly.get("weather_code") or []
 
     now = datetime.now(UTC)
     result: list[HourlyForecast] = []
@@ -521,6 +525,8 @@ def _fetch_open_meteo_forecast(
             temp_c = float(temps[i]) if i < len(temps) and temps[i] is not None else 10.0
             cloud_pct = float(clouds[i]) if i < len(clouds) and clouds[i] is not None else 50.0
             rad_wm2 = float(radiation[i]) if i < len(radiation) and radiation[i] is not None else 0.0
+            precip_mm = float(precip[i]) if i < len(precip) and precip[i] is not None else 0.0
+            wcode = int(wcodes[i]) if i < len(wcodes) and wcodes[i] is not None else 0
             result.append(
                 HourlyForecast(
                     time_utc=dt,
@@ -529,6 +535,8 @@ def _fetch_open_meteo_forecast(
                     shortwave_radiation_wm2=rad_wm2,
                     estimated_pv_kw=estimate_pv_kw(rad_wm2),
                     heating_demand_factor=compute_heating_demand_factor(temp_c),
+                    precipitation_mm=precip_mm,
+                    weather_code=wcode,
                 )
             )
         except (ValueError, IndexError, TypeError):
