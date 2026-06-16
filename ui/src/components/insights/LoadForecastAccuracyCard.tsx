@@ -20,7 +20,13 @@ export function LoadForecastAccuracyCard({ period }: { period: PeriodState }) {
   const chartRef = useRef<EChartsType | null>(null);
 
   useEffect(() => {
-    if (!elRef.current || !data) return;
+    if (!elRef.current) return;
+    // The chart <div> is ALWAYS mounted (see render), so the ECharts instance
+    // outlives empty periods. On a no-data period clear it but keep the
+    // instance bound to the live node — otherwise navigating back rebound a
+    // fresh <div> against a stale instance and the chart rendered blank.
+    const hasData = !!(data && data.overall && data.overall.n > 0);
+    if (!hasData) { chartRef.current?.clear(); return; }
     if (!chartRef.current) chartRef.current = makeChart(elRef.current);
     const t = chartTheme();
 
@@ -93,31 +99,34 @@ export function LoadForecastAccuracyCard({ period }: { period: PeriodState }) {
       {res.loading && !data && <Spinner label="Loading load accuracy…" />}
       {res.error && <p class="insights-error">Couldn't load accuracy: {res.error.message}</p>}
       {data && o && o.n > 0 && (
-        <>
-          <div class="la-stats">
-            <div class="la-stat">
-              <span class="la-stat-val">{o.mae_kwh.toFixed(2)}</span>
-              <span class="la-stat-lbl">kWh/slot MAE</span>
-            </div>
-            <div class="la-stat">
-              <span class="la-stat-val">{o.bias_kwh >= 0 ? "+" : ""}{o.bias_kwh.toFixed(3)}</span>
-              <span class="la-stat-lbl">net bias (kWh/slot)</span>
-            </div>
-            <div class="la-stat">
-              <span class="la-stat-val">{o.mean_actual_kwh.toFixed(2)}</span>
-              <span class="la-stat-lbl">mean actual</span>
-            </div>
-            <div class="la-stat">
-              <span class="la-stat-val">{o.n}</span>
-              <span class="la-stat-lbl">slots ({data.window_days}d)</span>
-            </div>
+        <div class="la-stats">
+          <div class="la-stat">
+            <span class="la-stat-val">{o.mae_kwh.toFixed(2)}</span>
+            <span class="la-stat-lbl">kWh/slot MAE</span>
           </div>
-          <div ref={elRef} class="load-pattern-chart" />
-          <p class="muted load-pattern-meta">
-            Net bias near zero overall can still hide a diurnal pattern (the bars) —
-            measured against the committed plan, total household load (heat pump included).
-          </p>
-        </>
+          <div class="la-stat">
+            <span class="la-stat-val">{o.bias_kwh >= 0 ? "+" : ""}{o.bias_kwh.toFixed(3)}</span>
+            <span class="la-stat-lbl">net bias (kWh/slot)</span>
+          </div>
+          <div class="la-stat">
+            <span class="la-stat-val">{o.mean_actual_kwh.toFixed(2)}</span>
+            <span class="la-stat-lbl">mean actual</span>
+          </div>
+          <div class="la-stat">
+            <span class="la-stat-val">{o.n}</span>
+            <span class="la-stat-lbl">slots ({data.window_days}d)</span>
+          </div>
+        </div>
+      )}
+      {/* ALWAYS mounted so the ECharts instance survives empty-period navigation
+          (a conditionally-rendered chart div left the instance bound to a
+          detached node → blank chart on the way back). Hidden when no data. */}
+      <div ref={elRef} class="load-pattern-chart" hidden={!(data && o && o.n > 0)} />
+      {data && o && o.n > 0 && (
+        <p class="muted load-pattern-meta">
+          Net bias near zero overall can still hide a diurnal pattern (the bars) —
+          measured against the committed plan, total household load (heat pump included).
+        </p>
       )}
       {data && (!o || o.n === 0) && (
         <p class="muted insights-empty">No load forecast-vs-actual data for {periodLabel(period)} yet.</p>
