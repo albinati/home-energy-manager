@@ -730,6 +730,17 @@ class Config:
     PV_RECENT_BIAS_MAX: float = float(os.getenv("PV_RECENT_BIAS_MAX", "2.5"))
     # A slot needs at least this forecast+actual kWh to contribute (drop noise).
     PV_RECENT_BIAS_MIN_KWH: float = float(os.getenv("PV_RECENT_BIAS_MIN_KWH", "0.05"))
+    # Slot-CENTRE forecast sampling. A 30-min slot's energy is `kw × 0.5h`; the
+    # honest representative power is the value at the slot CENTRE (start+15min),
+    # not the start instant. Sampling at the start systematically attributed each
+    # slot's energy ~15 min too late versus the realised (trapezoidal) PV — a
+    # deterministic +15 min lag confirmed on 21 days of prod data
+    # (scripts/diag/pv_time_lag.py). True → interpolate the weather drivers at the
+    # slot centre. Set false to restore the legacy slot-start sampling.
+    PV_FORECAST_SLOT_CENTRE_SAMPLING: bool = (
+        os.getenv("PV_FORECAST_SLOT_CENTRE_SAMPLING", "true").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
 
     # --- Load recent-bias corrector (Phase 2; analog of the PV one) -----------
     # ADDITIVE per-LOCAL-hour correction on the residual base-load forecast.

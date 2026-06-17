@@ -290,6 +290,28 @@ FORECAST_NIGHT_TEMP_BIAS_C=0                    # subtract this from Open Meteo'
 FORECAST_NIGHT_START_HOUR_UTC=21                # bias active from (inclusive)
 FORECAST_NIGHT_END_HOUR_UTC=6                   # bias active until (exclusive); wraps midnight when start > end
 
+# --- Slot-centre forecast sampling (2026-06-17) ---
+PV_FORECAST_SLOT_CENTRE_SAMPLING=true           # a 30-min slot's energy is `kw × 0.5h`; the honest
+                                                 # representative power is the value at the slot CENTRE
+                                                 # (start+15min), not the start instant. Sampling at the
+                                                 # start attributed each slot's PV energy ~15 min too LATE
+                                                 # vs the realised trapezoidal roll-up — a deterministic
+                                                 # +15 min lag confirmed over 21 prod days
+                                                 # (scripts/diag/pv_time_lag.py; the chart "offset" the user
+                                                 # spotted, NOT a UTC/BST bug — timezones audited clean).
+                                                 # true → interpolate the weather drivers (temp/rad/cloud/
+                                                 # Quartz estimated_pv_kw) at the slot centre in
+                                                 # forecast_to_lp_inputs. Calibration/night-bias/scale stay
+                                                 # keyed to the slot-START hour (a slot belongs to its start
+                                                 # hour; centre never crosses the hour for :00/:30 starts), so
+                                                 # the calibration tables are UNAFFECTED — no recompute needed.
+                                                 # ROLLBACK: set false in /srv/hem/.env + `systemctl restart
+                                                 # hem` for INSTANT rollback to legacy slot-start sampling (no
+                                                 # redeploy); or git-revert the PR. NB this leaves the variable
+                                                 # forecast-SKILL residual (−57..+65 min, regime-dependent)
+                                                 # untouched — that's a separate Quartz/Open-Meteo calibration
+                                                 # story, revisit via pv_time_lag.py on post-#564 realised data.
+
 # --- Scenario LP for peak-export robustness (see docs/DISPATCH_DECISIONS.md) ---
 LP_SCENARIO_OPTIMISTIC_TEMP_DELTA_C=1.0          # +°C applied to outdoor forecast
 LP_SCENARIO_OPTIMISTIC_LOAD_FACTOR=0.90          # multiplier on base-load profile
