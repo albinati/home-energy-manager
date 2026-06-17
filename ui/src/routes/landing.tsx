@@ -146,6 +146,11 @@ export default function Landing() {
 
   return (
     <div class="home">
+      {/* Top-level page title for the document outline (visually hidden — the
+          glanceable hero is the visual anchor, no on-screen <h1> needed). The
+          scope <h2> below then sits under a real h1. */}
+      <h1 class="sr-only">Cockpit</h1>
+
       {/* Narrow screens only — wide screens get the chrome variant in the
           sticky TopNav (redesign P4c). Same global signal either way. */}
       <PeriodNavigator variant="page" />
