@@ -1,0 +1,11 @@
+# Dev-only ML/research dependencies — used by scripts/research/* feasibility
+# studies that run LOCALLY against a copy of the prod DB. These are DELIBERATELY
+# kept out of requirements.txt and the immutable prod image (which ships only
+# pulp + APScheduler + the app). Install into the dev venv on demand:
+#
+#     .venv/bin/pip install -r requirements-research.txt
+#
+# scikit-learn's HistGradientBoostingRegressor is the GBM (no xgboost build
+# pain on ARM/WSL); numpy is already a runtime dep.
+scikit-learn>=1.4
+pandas>=2.0
