@@ -629,3 +629,13 @@ data/                      # state (DB + tokens). On the host: bind-mounted at /
 Kept here for rollback context only. The 2026-04-25 work pulls back from this:
 the issue with native-on-host was OpenClaw having read/write access to the
 running code — security regression.
+
+---
+
+## Design System
+
+Read `DESIGN.md` (repo root) before any visual or UI change. It is the source of
+truth for color, typography, spacing, layout, motion, and the cockpit's
+non-negotiables (deep-dark, borderless, no-emoji, semantic color, system fonts,
+~0.2s perf budget). Token values are authoritative in `ui/src/styles/tokens.css`;
+DESIGN.md is the rules + rationale. In QA, flag any UI code that deviates from it.
