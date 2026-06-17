@@ -2487,13 +2487,26 @@ def forecast_to_lp_inputs(
             return h >= _night_start or h < _night_end
         return _night_start <= h < _night_end
 
+    # Sample the weather drivers at the slot CENTRE (start+15min) so each slot's
+    # `kw × 0.5h` energy is the midpoint-rule integral of the half-hour, not the
+    # start-instant value scaled up. Sampling at the start attributed PV energy
+    # ~15 min too late vs the realised trapezoidal roll-up — a deterministic
+    # +15 min lag measured over 21 prod days (scripts/diag/pv_time_lag.py).
+    # Calibration / night-bias / scale stay keyed to the slot-START hour: a slot
+    # belongs to its start hour, and centre never crosses the hour for :00/:30
+    # starts, so the table lookups are unchanged.
+    _centre = timedelta(minutes=15) if getattr(
+        config, "PV_FORECAST_SLOT_CENTRE_SAMPLING", True
+    ) else timedelta(0)
+
     for i in range(n):
         st = slot_starts_utc[i]
-        temp_c = _interp_hourly_scalar(forecast, st, "temperature_c", 10.0)
+        sp = st + _centre  # driver sampling point (slot centre, or start when disabled)
+        temp_c = _interp_hourly_scalar(forecast, sp, "temperature_c", 10.0)
         if _night_bias != 0.0 and _is_night_hour(st.hour):
             temp_c += _night_bias
-        rad_wm2 = _interp_hourly_scalar(forecast, st, "shortwave_radiation_wm2", 0.0)
-        cloud_pct = _interp_hourly_scalar(forecast, st, "cloud_cover_pct", 50.0)
+        rad_wm2 = _interp_hourly_scalar(forecast, sp, "shortwave_radiation_wm2", 0.0)
+        cloud_pct = _interp_hourly_scalar(forecast, sp, "cloud_cover_pct", 50.0)
         nearest = get_forecast_for_slot(st, forecast)
         direct_pv = bool(nearest and nearest.pv_direct)
         if direct_pv:
@@ -2526,7 +2539,7 @@ def forecast_to_lp_inputs(
             st.hour,
             rad_wm2,
             cloud_pct,
-            direct_pv_kw=_interp_hourly_scalar(forecast, st, "estimated_pv_kw", 0.0) if direct_pv else None,
+            direct_pv_kw=_interp_hourly_scalar(forecast, sp, "estimated_pv_kw", 0.0) if direct_pv else None,
             cloud_table=cal_cloud,
             hourly_table=cal_hourly,
             flat=flat_cal,
