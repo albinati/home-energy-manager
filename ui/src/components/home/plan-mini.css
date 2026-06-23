@@ -39,31 +39,46 @@
   font-style: italic;
 }
 
-/* Equal-width chip grid: ragged flex rows made the dispatch plan read as
- * noise — a grid ranks the chips into tidy columns and truncates long labels
- * (full text stays in the title tooltip). */
+/* Single-column schedule list: a half-width card has plenty of horizontal
+ * room but little vertical, so each chip is a full-width row — dot · label ·
+ * amount on the left, time (and note) pushed to the right edge. This stops
+ * the old 2-col grid cropping "Setback 22:00 37°" / "Washing machine" mid-word
+ * and fills the card's height honestly instead of truncating to fit. */
 .chips {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+  display: flex;
+  flex-direction: column;
   gap: var(--space-2);
 }
-/* block, not flex: text-overflow only ellipsizes the inline content of a
- * block container — on a flex container it's a no-op and long chips would
- * hard-clip mid-glyph. All chip children are inline, so block works. */
 .chip {
-  display: block;
+  display: flex;
+  align-items: center;
   font-size: var(--font-xs);
   padding: 4px 9px;
   border-radius: var(--radius-sm);
   background: var(--bg-card-2);
-  white-space: nowrap;
+}
+/* Label is the only flexible part — it ellipsizes only as a last resort
+ * (full width rarely forces it); the full text stays in the title tooltip. */
+.chip .lbl {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .chip b { font-variant-numeric: tabular-nums; }
-.chip .when { color: var(--text-mute); font-variant-numeric: tabular-nums; }
-.chip .note { color: var(--text-mute); font-variant-numeric: tabular-nums; }
+.chip .when {
+  margin-left: auto;
+  padding-left: var(--space-3);
+  white-space: nowrap;
+  color: var(--text-mute);
+  font-variant-numeric: tabular-nums;
+}
+.chip .note {
+  padding-left: 4px;
+  white-space: nowrap;
+  color: var(--text-mute);
+  font-variant-numeric: tabular-nums;
+}
 .chip--faded { opacity: 0.72; }
 .cdot {
   display: inline-block;
@@ -71,5 +86,5 @@
   height: 7px;
   border-radius: 50%;
   margin-right: 6px;
-  vertical-align: 1px;
+  flex: none;
 }

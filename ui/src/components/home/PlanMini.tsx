@@ -204,8 +204,9 @@ export function PlanMini(props: PlanMiniProps) {
               {s.chips.map((c, i) => (
                 <span key={i} class={`chip${c.faded ? " chip--faded" : ""}`} title={c.title}>
                   <span class="cdot" style={{ background: c.tone }} />
-                  {c.label}{c.amt && <b> {c.amt}</b>} <span class="when">{c.when}</span>
-                  {c.note && <span class="note"> {c.note}</span>}
+                  <span class="lbl">{c.label}{c.amt && <b> {c.amt}</b>}</span>
+                  <span class="when">{c.when}</span>
+                  {c.note && <span class="note">{c.note}</span>}
                 </span>
               ))}
             </div>
