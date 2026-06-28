@@ -1038,6 +1038,22 @@ class Config:
     DHW_NEGATIVE_PRICE_BOOST_C: float = float(
         os.getenv("DHW_NEGATIVE_PRICE_BOOST_C", "60")
     )
+    # Sustain DHW "Powerful" through a negative-price boost window (2026-06-28).
+    # Daikin Powerful is a one-shot the firmware auto-clears (timeout / on
+    # reaching setpoint), so the once-at-window-start boost write leaves the
+    # tank coasting for the rest of a multi-hour negative window — confirmed in
+    # prod: tank 51 °C, target 60, powerful=off during −2..−5 p slots. We're
+    # PAID to import then, so a heartbeat backstop (_check_negative_boost_powerful)
+    # re-asserts Powerful on a bounded cadence while a tank_negative_boost slot
+    # is active and the tank is still below target. Min-interval bounds the
+    # Daikin 200/day quota cost (~one write per interval on negative-window days).
+    DHW_NEGATIVE_BOOST_POWERFUL_REASSERT_ENABLED: bool = (
+        os.getenv("DHW_NEGATIVE_BOOST_POWERFUL_REASSERT_ENABLED", "true").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+    DHW_NEGATIVE_BOOST_POWERFUL_REASSERT_MIN_INTERVAL_MINUTES: int = int(
+        os.getenv("DHW_NEGATIVE_BOOST_POWERFUL_REASSERT_MIN_INTERVAL_MINUTES", "15")
+    )
     # --- DHW forecast auto-scale (#534) ---
     # The per-slot draw constants in forecast_dhw_load_per_slot are static and
     # drift seasonally (May 2026 measured ~3.0 kWh/day vs ~2.4 in June: warmer
