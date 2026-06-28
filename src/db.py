@@ -993,6 +993,21 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     if "actual_kwh" not in aj_cols:
         conn.execute("ALTER TABLE appliance_jobs ADD COLUMN actual_kwh REAL")
 
+    # Re-arm latch (2026-06-28). Some washer firmwares leave
+    # ``remoteControlEnabled`` ON after a cycle finishes, so reconcile would
+    # re-arm and re-run the SAME load on the next LP solve. This boolean
+    # latches True when a cycle reaches a terminal state and is only cleared
+    # once Smart Control is observed OFF — so a fresh manual arm (off→on) is
+    # required before the appliance runs again. Persisted (not in-process) so
+    # a restart can't bypass it.
+    cur = conn.execute("PRAGMA table_info(appliances)")
+    ap_cols = {str(r[1]) for r in cur.fetchall()}
+    if "rearm_block_until_off" not in ap_cols:
+        conn.execute(
+            "ALTER TABLE appliances ADD COLUMN "
+            "rearm_block_until_off INTEGER NOT NULL DEFAULT 0"
+        )
+
     # V11-A (#194): closed-loop replay needs cloud cover at solve-time.
     # Without this column, lp_replay._reconstruct_weather passes 0.0 to
     # HourlyForecast and skips cloud attenuation, so replay PV is marginally
@@ -7001,6 +7016,40 @@ def update_appliance(appliance_id: int, **fields: Any) -> bool:
             )
             conn.commit()
             return cur.rowcount > 0
+        finally:
+            conn.close()
+
+
+def set_appliance_rearm_block(appliance_id: int, blocked: bool) -> None:
+    """Set/clear the re-arm latch (see the ``rearm_block_until_off`` migration).
+
+    True after a cycle reaches a terminal state with Smart Control still on;
+    cleared the moment Smart Control is observed off, so a fresh off→on manual
+    arm is required before the appliance runs the same load again.
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            conn.execute(
+                "UPDATE appliances SET rearm_block_until_off = ? WHERE id = ?",
+                (1 if blocked else 0, appliance_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def is_appliance_rearm_blocked(appliance_id: int) -> bool:
+    """True when the appliance must see a fresh off→on toggle before re-arming."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT rearm_block_until_off FROM appliances WHERE id = ?",
+                (appliance_id,),
+            )
+            r = cur.fetchone()
+            return bool(r[0]) if r else False
         finally:
             conn.close()
 

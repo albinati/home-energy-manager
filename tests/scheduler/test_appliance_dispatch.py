@@ -592,6 +592,102 @@ class TestPendingArmChange:
 
 
 # ---------------------------------------------------------------------------
+# Re-arm latch — never re-run the same load after a cycle finishes
+# ---------------------------------------------------------------------------
+
+class TestRearmLatch:
+    def test_db_helper_round_trip(self, appliance_id):
+        assert db.is_appliance_rearm_blocked(appliance_id) is False
+        db.set_appliance_rearm_block(appliance_id, True)
+        assert db.is_appliance_rearm_blocked(appliance_id) is True
+        db.set_appliance_rearm_block(appliance_id, False)
+        assert db.is_appliance_rearm_blocked(appliance_id) is False
+
+    def test_completion_sets_latch(self, monkeypatch, appliance_id, patch_st):
+        """A finished cycle must latch re-arm so it can't auto-run again."""
+        # One running job for the poller to complete.
+        job_id = db.create_appliance_job(
+            appliance_id=appliance_id, status="running",
+            armed_at_utc=datetime.now(UTC).isoformat(),
+            deadline_utc=(datetime.now(UTC) + timedelta(hours=4)).isoformat(),
+            duration_minutes=120,
+            planned_start_utc=datetime.now(UTC).isoformat(),
+            planned_end_utc=(datetime.now(UTC) + timedelta(hours=2)).isoformat(),
+            avg_price_pence=5.0,
+            last_replan_at_utc=datetime.now(UTC).isoformat(),
+        )
+        patch_st.get_machine_state = MagicMock(return_value=("stop", None))
+        patch_st.get_power_consumption_energy_wh = MagicMock(return_value=None)
+        with patch("src.notifier._dispatch"):
+            appliance_dispatch._poll_running_jobs()
+        assert db.get_appliance_job(job_id)["status"] == "completed"
+        assert db.is_appliance_rearm_blocked(appliance_id) is True
+
+    def test_reconcile_does_not_rearm_while_latched(
+        self, monkeypatch, appliance_id, fake_scheduler, patch_st
+    ):
+        """Smart Control still on after a cycle + latch set → reconcile must
+        NOT arm a new job (the user's core requirement)."""
+        monkeypatch.setattr(config, "OCTOPUS_TARIFF_CODE", "TEST-AGILE")
+        now = datetime.now(UTC)
+        seed_start = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        _seed_agile_rates(seed_start, [10.0, 5.0, 5.0, 5.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0])
+        db.set_appliance_rearm_block(appliance_id, True)
+        patch_st.get_remote_control_enabled.return_value = True
+        appliance_dispatch.reconcile()
+        assert db.get_active_appliance_job(appliance_id) is None
+        assert fake_scheduler.add_calls == []
+
+    def test_toggle_off_then_on_clears_latch_and_rearms(
+        self, monkeypatch, appliance_id, fake_scheduler, patch_st
+    ):
+        """The supported recovery: turn Smart Control off (clears latch) then
+        on (a fresh manual arm) → a new job is armed."""
+        monkeypatch.setattr(config, "OCTOPUS_TARIFF_CODE", "TEST-AGILE")
+        now = datetime.now(UTC)
+        seed_start = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        _seed_agile_rates(seed_start, [10.0, 5.0, 5.0, 5.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0])
+        db.set_appliance_rearm_block(appliance_id, True)
+
+        # Off → reconcile clears the latch, no job armed.
+        patch_st.get_remote_control_enabled.return_value = False
+        appliance_dispatch.reconcile()
+        assert db.is_appliance_rearm_blocked(appliance_id) is False
+        assert db.get_active_appliance_job(appliance_id) is None
+
+        # On → fresh manual arm → job created.
+        patch_st.get_remote_control_enabled.return_value = True
+        appliance_dispatch.reconcile()
+        assert db.get_active_appliance_job(appliance_id) is not None
+
+    def test_pending_arm_change_clears_latch_on_off(self, appliance_id, patch_st):
+        db.set_appliance_rearm_block(appliance_id, True)
+        patch_st.get_remote_control_enabled.return_value = False
+        appliance_dispatch.pending_arm_change()
+        assert db.is_appliance_rearm_blocked(appliance_id) is False
+
+    def test_fire_failure_sets_latch(self, monkeypatch, appliance_id, patch_st):
+        """A failed fire must latch too, so it can't re-fire in a loop."""
+        monkeypatch.setattr(config, "OPENCLAW_READ_ONLY", False)
+        patch_st.get_remote_control_enabled.return_value = True
+        patch_st.start_cycle.side_effect = SmartThingsError("http_error", "500")
+        job_id = db.create_appliance_job(
+            appliance_id=appliance_id, status="scheduled",
+            armed_at_utc=datetime.now(UTC).isoformat(),
+            deadline_utc=(datetime.now(UTC) + timedelta(hours=4)).isoformat(),
+            duration_minutes=120,
+            planned_start_utc=datetime.now(UTC).isoformat(),
+            planned_end_utc=(datetime.now(UTC) + timedelta(hours=2)).isoformat(),
+            avg_price_pence=5.0,
+            last_replan_at_utc=datetime.now(UTC).isoformat(),
+        )
+        with patch.object(appliance_dispatch, "notify_risk"):
+            appliance_dispatch._fire_cron(job_id)
+        assert db.get_appliance_job(job_id)["status"] == "failed"
+        assert db.is_appliance_rearm_blocked(appliance_id) is True
+
+
+# ---------------------------------------------------------------------------
 # appliance_load_profile_kw — what the LP sees
 # ---------------------------------------------------------------------------
 

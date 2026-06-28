@@ -1297,10 +1297,12 @@ def pending_arm_change() -> bool:
     that first ~heartbeat window are still caught by the next regular solve's
     ``reconcile()``.
 
-    Best-effort and side-effect-free (apart from the last-seen cache): never
-    records reconcile errors, never raises. SmartThings unavailability →
-    returns False and leaves the cache untouched (no phantom edge on
-    recovery); the real solve's ``reconcile()`` owns error accounting.
+    Best-effort: never records reconcile errors, never raises. Side effects
+    are limited to the last-seen cache and releasing the re-arm latch when
+    Smart Control is observed off (so a fresh off→on is honoured promptly).
+    SmartThings unavailability → returns False and leaves the cache untouched
+    (no phantom edge on recovery); the real solve's ``reconcile()`` owns error
+    accounting.
     """
     if not config.APPLIANCE_DISPATCH_ENABLED:
         return False
@@ -1324,6 +1326,11 @@ def pending_arm_change() -> bool:
             continue
         prev = _last_remote_mode.get(appliance_id)
         _last_remote_mode[appliance_id] = remote_mode
+        if not remote_mode and db.is_appliance_rearm_blocked(appliance_id):
+            # Smart Control off → release the re-arm latch promptly (within one
+            # heartbeat) so the user's next off→on is honoured as a fresh arm,
+            # without waiting for a regular solve's reconcile.
+            db.set_appliance_rearm_block(appliance_id, False)
         if prev is None or prev == remote_mode:
             # First observation (seed only) or no toggle → never fire.
             continue
@@ -1420,6 +1427,10 @@ def _poll_running_jobs() -> None:
                 int(job["id"]), status="completed", completed_at_utc=ended_at,
                 actual_kwh=actual_kwh,
             )
+            # Latch re-arm: some firmwares leave remoteControlEnabled on after
+            # a cycle. Block re-arming until Smart Control is toggled off/on so
+            # we never re-run the same load automatically.
+            db.set_appliance_rearm_block(int(job["appliance_id"]), True)
         except Exception:
             logger.exception("poll_running: DB update_appliance_job failed for %s", job.get("id"))
             continue
@@ -1506,11 +1517,30 @@ def _reconcile_one(appliance: dict[str, Any]) -> None:
     job = db.get_active_appliance_job(appliance_id)
     job_status = job.get("status") if job else None
 
-    if remote_mode and job_status != "running":
-        _arm_or_replan(appliance, job)
-    elif (not remote_mode) and job and job_status == "scheduled":
-        _cancel(appliance_id, job, reason="remote_mode_dropped")
-    # else: running → leave alone; or no job + remote_mode false → no-op.
+    if not remote_mode:
+        # Smart Control off → this episode is over. Clear the re-arm latch so
+        # the next off→on is treated as a genuine new manual arm, and cancel
+        # any still-scheduled job.
+        if db.is_appliance_rearm_blocked(appliance_id):
+            db.set_appliance_rearm_block(appliance_id, False)
+        if job and job_status == "scheduled":
+            _cancel(appliance_id, job, reason="remote_mode_dropped")
+        return
+
+    # remote_mode is True from here.
+    if job_status == "running":
+        return
+    if job is None and db.is_appliance_rearm_blocked(appliance_id):
+        # A cycle already ran (or failed) on this remote-on episode and Smart
+        # Control was never toggled off. Do NOT re-arm — re-running the same
+        # load would be a surprise. Wait for a fresh off→on manual arm.
+        logger.info(
+            "appliance #%d: re-arm blocked — toggle Smart Control off then on "
+            "to run again (cycle already ran this episode)",
+            appliance_id,
+        )
+        return
+    _arm_or_replan(appliance, job)
 
 
 def _arm_or_replan(
@@ -1823,6 +1853,7 @@ def _fire_cron(job_id: int) -> None:
             error_msg=f"safety_check_failed:{e.code}",
             actual_start_utc=actual_start,
         )
+        db.set_appliance_rearm_block(int(job["appliance_id"]), True)
         notify_risk(
             f"Wash didn't fire — SmartThings PAT unavailable ({e.code}).",
             extra={"job_id": int(job_id), "code": e.code},
@@ -1846,6 +1877,7 @@ def _fire_cron(job_id: int) -> None:
             error_msg=f"safety_check_failed:{e.code}",
             actual_start_utc=actual_start,
         )
+        db.set_appliance_rearm_block(int(job["appliance_id"]), True)
         notify_risk(
             f"Wash didn't fire — couldn't verify remote-start state ({e.code}).",
             extra={"job_id": int(job_id), "code": e.code},
@@ -1859,6 +1891,7 @@ def _fire_cron(job_id: int) -> None:
             int(job_id), status="failed", error_msg=str(e),
             actual_start_utc=actual_start,
         )
+        db.set_appliance_rearm_block(int(job["appliance_id"]), True)
         notify_risk(
             f"Wash failed to start: {e}.",
             extra={"job_id": int(job_id), "code": e.code},
