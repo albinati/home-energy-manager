@@ -603,11 +603,12 @@ class Config:
     # Fox Scheduler V3 power limits (Watts). Real values live in .env (immutable
     # hardware constraints). Defaults below match the deployed Fox H1-5.0-E-G2 +
     # G98 1φ install — see .env for the SNs and DNO ref.
-    # FOX_FORCE_CHARGE_MAX_PWR: AC import ceiling for ForceCharge slots. Used by
-    #   the LP as ``fuse_kwh`` source AND by the dispatcher as the per-group
-    #   fdPwr clamp. Set to the inverter's nameplate AC rating, NOT the FoxESS
-    #   app's configurable range (the app shows the H1 family's full range and
-    #   the inverter clamps silently to the model's spec).
+    # FOX_FORCE_CHARGE_MAX_PWR: the dispatcher's per-group ForceCharge fdPwr clamp
+    #   = the inverter's BATTERY-charge-from-grid rate. Set to the inverter's
+    #   nameplate AC rating, NOT the FoxESS app's configurable range (the app
+    #   shows the H1 family's full range and the inverter clamps silently to the
+    #   model's spec). 2026-06-29: this NO LONGER feeds the LP's total grid-import
+    #   cap — see LP_GRID_IMPORT_MAX_KW below.
     # FOX_FORCE_CHARGE_NORMAL_PWR: fallback for the HEURISTIC backend only (LP
     #   path derives per-slot fdPwr from the MILP grid-import solution).
     # FOX_EXPORT_MAX_PWR: battery → grid ceiling for ForceDischarge slots. Bound
@@ -618,6 +619,23 @@ class Config:
     FOX_FORCE_CHARGE_MAX_PWR: int = int(os.getenv("FOX_FORCE_CHARGE_MAX_PWR", "5000"))
     FOX_FORCE_CHARGE_NORMAL_PWR: int = int(os.getenv("FOX_FORCE_CHARGE_NORMAL_PWR", "3000"))
     FOX_EXPORT_MAX_PWR: int = int(os.getenv("FOX_EXPORT_MAX_PWR", "3680"))
+    # LP_GRID_IMPORT_MAX_KW (2026-06-29): the LP's cap on TOTAL grid import per
+    # slot (load + battery charge + heat-pump), i.e. what the house MAIN SERVICE
+    # FUSE can carry — NOT the inverter rating. Previously the LP derived this
+    # from FOX_FORCE_CHARGE_MAX_PWR (5 kW), conflating "total import" with the
+    # inverter's battery-charge rate. But total import = direct AC load (heat
+    # pump / DHW boost, fed straight from the grid) + battery charge (via the
+    # inverter, ≤ MAX_INVERTER_KW). Prod actuals show ~7.5 kW import in deep
+    # ForceCharge slots (≈ 5 kW charge + ~2.5 kW load) — above the old 5 kW cap.
+    # The old cap artificially stopped the LP from planning battery-charge AND a
+    # concurrent grid-fed load at the paid negative price (relevant in winter when
+    # the heat pump runs through negative windows). There is no fuse-trip risk
+    # from raising this: the LP can never plan import beyond (forecast load +
+    # chg≤MAX_INVERTER_KW + e_hp), so a higher cap only removes an artificial
+    # limit. Default 10 kW comfortably covers battery(5) + heat pump(~3) + base,
+    # and sits below any plausible heat-pump-home main fuse (≥60 A ≈ 13.8 kW).
+    # Set to the install's real main-fuse rating in .env when known.
+    LP_GRID_IMPORT_MAX_KW: float = float(os.getenv("LP_GRID_IMPORT_MAX_KW", "10.0"))
     # 2026-06-07: pin maxSoc to the reserve floor on `negative_hold` (Backup)
     # slots so SOLAR can't trickle-charge the battery during the hold — preserving
     # headroom for the PAID force-charge later in a negative window (surplus PV

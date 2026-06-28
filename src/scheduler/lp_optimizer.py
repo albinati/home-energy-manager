@@ -393,9 +393,14 @@ def solve_lp(
     # PR Phase B: ua_bld / c_bld / q_int_j / sg removed — building thermal
     # dynamics no longer modelled in the LP (no indoor temp state variable).
 
-    # Grid import cap per slot, derived from the inverter's AC import rating
-    # (FoxESS app: "max charge from grid"). 10500 W → 5.25 kWh per 30 min slot.
-    fuse_kwh = float(config.FOX_FORCE_CHARGE_MAX_PWR) / 2_000.0
+    # Total grid-import cap per slot = the house MAIN SERVICE FUSE (load + battery
+    # charge + heat-pump can all draw at once), NOT the inverter rating. The
+    # battery charge is separately capped by ``max_batt_kwh`` (MAX_INVERTER_KW)
+    # and the dispatched ForceCharge fdPwr by FOX_FORCE_CHARGE_MAX_PWR; this cap
+    # only bounds the SUM. Decoupled 2026-06-29 (was FOX_FORCE_CHARGE_MAX_PWR/2000
+    # = 5 kW, which wrongly stopped the LP planning battery-charge + a concurrent
+    # grid-fed load at the paid negative price). See config.LP_GRID_IMPORT_MAX_KW.
+    fuse_kwh = float(config.LP_GRID_IMPORT_MAX_KW) * slot_h
     # G98 single-phase export cap = 16 A × 230 V ≈ 3.68 kW → 1.84 kWh per 30 min slot.
     # Matches FOX_EXPORT_MAX_PWR; raise if on G99 or G98 multi-phase.
     export_cap_kwh = float(config.FOX_EXPORT_MAX_PWR) / 2_000.0
