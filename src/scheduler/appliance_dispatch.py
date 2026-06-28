@@ -40,6 +40,12 @@ logger = logging.getLogger(__name__)
 _reconcile_errors: dict[int, int] = {}
 _pat_invalid_notified: bool = False
 
+# Per-process last-observed SmartThings remoteControlEnabled per appliance,
+# used by ``pending_arm_change`` to fire the heartbeat re-plan trigger on the
+# EDGE (toggle) only — never on a steady state. Seeded without firing on the
+# first observation after start, so a restart can't auto-arm a leftover state.
+_last_remote_mode: dict[int, bool] = {}
+
 
 def _record_reconcile_error(appliance_id: int, err: Exception) -> None:
     """Bump the consecutive-error counter for this appliance. Pings via
@@ -1260,6 +1266,85 @@ def reconcile() -> None:
         logger.exception("appliance reconcile: _poll_running_jobs failed (non-fatal)")
 
 
+def pending_arm_change() -> bool:
+    """Edge-triggered detector for the heartbeat: did the user just TOGGLE an
+    appliance's Smart Control in a way the current DB jobs don't reflect?
+
+    Returns True when a re-solve is warranted so the next LP solve's
+    ``reconcile()`` actually arms/cancels and notifies — bounding the
+    arm → plan latency to one heartbeat instead of waiting for an unrelated
+    LP-solve trigger (tier boundary / drift / octopus fetch).
+
+    EDGE-triggered, not level-triggered — this is the load-bearing safety
+    property. It fires only when the live ``remoteControlEnabled`` *changed*
+    since the last observation AND the new state implies work:
+
+      - rising edge (off → on) with no scheduled/running job → arm needed
+      - falling edge (on → off) with a job still scheduled → cancel needed
+
+    Because ``_last_remote_mode`` is updated on every observation, a steady
+    state never re-fires. This matters: ``reconcile()`` can legitimately
+    DECLINE to arm (e.g. armed within the deadline-minus-duration band, or an
+    infeasible window), leaving no job. A level-triggered detector would then
+    see "remote on + no job" forever and re-fire a forced solve every
+    heartbeat (the trigger bypasses the MPC cooldown) — a quota/actuation
+    storm. Edge-triggering makes that impossible: the decline is observed
+    once and the state seeds, so the next heartbeat sees no transition.
+
+    The first observation per process seeds without firing, so a restart
+    can't auto-arm a leftover Smart-Control-on state (a completed cycle the
+    user never switched off would otherwise re-run). Arms that happen during
+    that first ~heartbeat window are still caught by the next regular solve's
+    ``reconcile()``.
+
+    Best-effort: never records reconcile errors, never raises. Side effects
+    are limited to the last-seen cache and releasing the re-arm latch when
+    Smart Control is observed off (so a fresh off→on is honoured promptly).
+    SmartThings unavailability → returns False and leaves the cache untouched
+    (no phantom edge on recovery); the real solve's ``reconcile()`` owns error
+    accounting.
+    """
+    if not config.APPLIANCE_DISPATCH_ENABLED:
+        return False
+    try:
+        appliances = db.list_appliances(enabled_only=True)
+    except Exception:
+        return False
+    try:
+        client = _get_st_client()
+    except SmartThingsError:
+        return False
+    fire = False
+    for appliance in appliances:
+        if appliance.get("vendor") != "smartthings":
+            continue
+        appliance_id = int(appliance["id"])
+        try:
+            remote_mode = client.get_remote_control_enabled(appliance["vendor_device_id"])
+        except SmartThingsError:
+            # Leave the cache untouched so recovery isn't read as an edge.
+            continue
+        prev = _last_remote_mode.get(appliance_id)
+        _last_remote_mode[appliance_id] = remote_mode
+        if not remote_mode and db.is_appliance_rearm_blocked(appliance_id):
+            # Smart Control off → release the re-arm latch promptly (within one
+            # heartbeat) so the user's next off→on is honoured as a fresh arm,
+            # without waiting for a regular solve's reconcile.
+            db.set_appliance_rearm_block(appliance_id, False)
+        if prev is None or prev == remote_mode:
+            # First observation (seed only) or no toggle → never fire.
+            continue
+        job = db.get_active_appliance_job(appliance_id)
+        job_status = job.get("status") if job else None
+        # Rising edge → arm needed (no scheduled/running job yet).
+        if remote_mode and job_status not in ("scheduled", "running"):
+            fire = True
+        # Falling edge → cancel needed (job still armed).
+        elif (not remote_mode) and job_status == "scheduled":
+            fire = True
+    return fire
+
+
 def _poll_running_jobs() -> None:
     """Detect cycle completion on every running job and fire the finished hook.
 
@@ -1342,6 +1427,10 @@ def _poll_running_jobs() -> None:
                 int(job["id"]), status="completed", completed_at_utc=ended_at,
                 actual_kwh=actual_kwh,
             )
+            # Latch re-arm: some firmwares leave remoteControlEnabled on after
+            # a cycle. Block re-arming until Smart Control is toggled off/on so
+            # we never re-run the same load automatically.
+            db.set_appliance_rearm_block(int(job["appliance_id"]), True)
         except Exception:
             logger.exception("poll_running: DB update_appliance_job failed for %s", job.get("id"))
             continue
@@ -1428,11 +1517,30 @@ def _reconcile_one(appliance: dict[str, Any]) -> None:
     job = db.get_active_appliance_job(appliance_id)
     job_status = job.get("status") if job else None
 
-    if remote_mode and job_status != "running":
-        _arm_or_replan(appliance, job)
-    elif (not remote_mode) and job and job_status == "scheduled":
-        _cancel(appliance_id, job, reason="remote_mode_dropped")
-    # else: running → leave alone; or no job + remote_mode false → no-op.
+    if not remote_mode:
+        # Smart Control off → this episode is over. Clear the re-arm latch so
+        # the next off→on is treated as a genuine new manual arm, and cancel
+        # any still-scheduled job.
+        if db.is_appliance_rearm_blocked(appliance_id):
+            db.set_appliance_rearm_block(appliance_id, False)
+        if job and job_status == "scheduled":
+            _cancel(appliance_id, job, reason="remote_mode_dropped")
+        return
+
+    # remote_mode is True from here.
+    if job_status == "running":
+        return
+    if job is None and db.is_appliance_rearm_blocked(appliance_id):
+        # A cycle already ran (or failed) on this remote-on episode and Smart
+        # Control was never toggled off. Do NOT re-arm — re-running the same
+        # load would be a surprise. Wait for a fresh off→on manual arm.
+        logger.info(
+            "appliance #%d: re-arm blocked — toggle Smart Control off then on "
+            "to run again (cycle already ran this episode)",
+            appliance_id,
+        )
+        return
+    _arm_or_replan(appliance, job)
 
 
 def _arm_or_replan(
@@ -1573,7 +1681,11 @@ def _arm_or_replan(
         "appliance #%d re-planned: job=%d new_start=%s avg_price=%.2fp",
         appliance_id, existing_job["id"], start_utc.isoformat(), avg_price,
     )
-    _notify_armed(appliance, start_utc, end_utc, deadline_utc, duration, avg_price, replan=True)
+    # Re-arm (window shifted) ping is muted by default (pull-based policy) —
+    # the user only wants the first-arm confirmation + the finished summary.
+    # Flip APPLIANCE_NOTIFY_REPLAN=true to observe window revisions again.
+    if config.APPLIANCE_NOTIFY_REPLAN:
+        _notify_armed(appliance, start_utc, end_utc, deadline_utc, duration, avg_price, replan=True)
 
 
 def _notify_armed(
@@ -1741,6 +1853,7 @@ def _fire_cron(job_id: int) -> None:
             error_msg=f"safety_check_failed:{e.code}",
             actual_start_utc=actual_start,
         )
+        db.set_appliance_rearm_block(int(job["appliance_id"]), True)
         notify_risk(
             f"Wash didn't fire — SmartThings PAT unavailable ({e.code}).",
             extra={"job_id": int(job_id), "code": e.code},
@@ -1764,6 +1877,7 @@ def _fire_cron(job_id: int) -> None:
             error_msg=f"safety_check_failed:{e.code}",
             actual_start_utc=actual_start,
         )
+        db.set_appliance_rearm_block(int(job["appliance_id"]), True)
         notify_risk(
             f"Wash didn't fire — couldn't verify remote-start state ({e.code}).",
             extra={"job_id": int(job_id), "code": e.code},
@@ -1777,6 +1891,7 @@ def _fire_cron(job_id: int) -> None:
             int(job_id), status="failed", error_msg=str(e),
             actual_start_utc=actual_start,
         )
+        db.set_appliance_rearm_block(int(job["appliance_id"]), True)
         notify_risk(
             f"Wash failed to start: {e}.",
             extra={"job_id": int(job_id), "code": e.code},
@@ -1804,7 +1919,13 @@ def _fire_cron(job_id: int) -> None:
     )
 
     # PR #234: notify the family that laundry is starting.
+    # Muted by default (2026-06-28, pull-based policy) — the arm confirmation
+    # already told the user when it auto-starts, so this ping is redundant.
+    # Failure paths above still ping via notify_risk. Flip
+    # APPLIANCE_NOTIFY_STARTING=true to restore the start ping.
     # Best-effort — never let a notification failure block the dispatch path.
+    if not config.APPLIANCE_NOTIFY_STARTING:
+        return
     try:
         from ..notifier import notify_appliance_starting
         tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
