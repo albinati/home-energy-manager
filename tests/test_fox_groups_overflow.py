@@ -347,7 +347,8 @@ def test_compression_fallback_degenerate_all_force_discharge_does_not_crash() ->
     # alternating peak_export and peak with peak_export_discharge=True. Both
     # produce ForceDischarge keys. To force them to be NON-mergeable (different
     # keys) we'd need to vary fd_soc/fd_pwr — but they're constants. Easier:
-    # interleave with negative_hold which produces "Backup" keys.
+    # interleave with negative_hold which (2026-06-28) produces "ForceCharge"
+    # keys — a non-ForceDischarge mode that won't merge with the FD neighbours.
     # Goal: every ADJACENT pair has at least one ForceDischarge — so that the
     # back-bias scan fails to find any non-FD pair.
     slots: list[HalfHourSlot] = []
