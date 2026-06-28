@@ -72,6 +72,22 @@ def test_bulletproof_mpc_job_skipped_during_cooldown(monkeypatch, caplog):
     assert any("MPC skipped (cooldown" in r.message for r in caplog.records)
 
 
+def test_bypass_cooldown_runs_inside_cooldown_window(monkeypatch):
+    """A discrete user gesture (appliance_armed) sets bypass_cooldown=True and
+    must run even though a solve ran seconds ago — the cooldown is for
+    self-driven thrash, not user actions."""
+    from src.scheduler import runner
+
+    monkeypatch.setattr(runner, "_last_mpc_run_at", datetime.now(UTC) - timedelta(seconds=10))
+    called = MagicMock(return_value={"ok": True, "lp_status": "Optimal", "lp_objective_pence": 100})
+    with patch.dict("sys.modules", {"src.scheduler.optimizer": MagicMock(run_optimizer=called)}), \
+         patch.object(runner, "_try_fox", return_value=None), \
+         patch.object(runner, "get_cached_realtime", side_effect=Exception("no live SoC")), \
+         patch("src.db.find_run_for_time", return_value=None):
+        runner.bulletproof_mpc_job(trigger_reason="appliance_armed", bypass_cooldown=True)
+    called.assert_called_once()
+
+
 # -------------------- Cron skips when Octopus fetch will run --------------------
 
 

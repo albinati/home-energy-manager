@@ -40,6 +40,12 @@ logger = logging.getLogger(__name__)
 _reconcile_errors: dict[int, int] = {}
 _pat_invalid_notified: bool = False
 
+# Per-process last-observed SmartThings remoteControlEnabled per appliance,
+# used by ``pending_arm_change`` to fire the heartbeat re-plan trigger on the
+# EDGE (toggle) only — never on a steady state. Seeded without firing on the
+# first observation after start, so a restart can't auto-arm a leftover state.
+_last_remote_mode: dict[int, bool] = {}
+
 
 def _record_reconcile_error(appliance_id: int, err: Exception) -> None:
     """Bump the consecutive-error counter for this appliance. Pings via
@@ -1261,25 +1267,40 @@ def reconcile() -> None:
 
 
 def pending_arm_change() -> bool:
-    """Lightweight detector for the heartbeat: does any appliance's live
-    Smart-Control state imply an arm/cancel that the current DB jobs don't
-    yet reflect?
+    """Edge-triggered detector for the heartbeat: did the user just TOGGLE an
+    appliance's Smart Control in a way the current DB jobs don't reflect?
 
     Returns True when a re-solve is warranted so the next LP solve's
     ``reconcile()`` actually arms/cancels and notifies — bounding the
     arm → plan latency to one heartbeat instead of waiting for an unrelated
     LP-solve trigger (tier boundary / drift / octopus fetch).
 
-    Deliberately narrower than ``reconcile()``'s logic: it fires only on a
-    *transition* (Smart Control on with no scheduled/running job → arm
-    needed; Smart Control off with a job still scheduled → cancel needed). It
-    does NOT fire for a mere window re-plan of an already-armed job, so an
-    armed-and-idle appliance won't re-trigger a solve every heartbeat — those
-    re-plans still ride the normal solve triggers.
+    EDGE-triggered, not level-triggered — this is the load-bearing safety
+    property. It fires only when the live ``remoteControlEnabled`` *changed*
+    since the last observation AND the new state implies work:
 
-    Best-effort and side-effect-free: never records reconcile errors, never
-    raises. SmartThings unavailability → returns False (the real solve's
-    ``reconcile()`` owns error accounting).
+      - rising edge (off → on) with no scheduled/running job → arm needed
+      - falling edge (on → off) with a job still scheduled → cancel needed
+
+    Because ``_last_remote_mode`` is updated on every observation, a steady
+    state never re-fires. This matters: ``reconcile()`` can legitimately
+    DECLINE to arm (e.g. armed within the deadline-minus-duration band, or an
+    infeasible window), leaving no job. A level-triggered detector would then
+    see "remote on + no job" forever and re-fire a forced solve every
+    heartbeat (the trigger bypasses the MPC cooldown) — a quota/actuation
+    storm. Edge-triggering makes that impossible: the decline is observed
+    once and the state seeds, so the next heartbeat sees no transition.
+
+    The first observation per process seeds without firing, so a restart
+    can't auto-arm a leftover Smart-Control-on state (a completed cycle the
+    user never switched off would otherwise re-run). Arms that happen during
+    that first ~heartbeat window are still caught by the next regular solve's
+    ``reconcile()``.
+
+    Best-effort and side-effect-free (apart from the last-seen cache): never
+    records reconcile errors, never raises. SmartThings unavailability →
+    returns False and leaves the cache untouched (no phantom edge on
+    recovery); the real solve's ``reconcile()`` owns error accounting.
     """
     if not config.APPLIANCE_DISPATCH_ENABLED:
         return False
@@ -1291,22 +1312,30 @@ def pending_arm_change() -> bool:
         client = _get_st_client()
     except SmartThingsError:
         return False
+    fire = False
     for appliance in appliances:
         if appliance.get("vendor") != "smartthings":
             continue
+        appliance_id = int(appliance["id"])
         try:
             remote_mode = client.get_remote_control_enabled(appliance["vendor_device_id"])
         except SmartThingsError:
+            # Leave the cache untouched so recovery isn't read as an edge.
             continue
-        job = db.get_active_appliance_job(int(appliance["id"]))
+        prev = _last_remote_mode.get(appliance_id)
+        _last_remote_mode[appliance_id] = remote_mode
+        if prev is None or prev == remote_mode:
+            # First observation (seed only) or no toggle → never fire.
+            continue
+        job = db.get_active_appliance_job(appliance_id)
         job_status = job.get("status") if job else None
-        # Arm needed: Smart Control on, but no scheduled/running job yet.
+        # Rising edge → arm needed (no scheduled/running job yet).
         if remote_mode and job_status not in ("scheduled", "running"):
-            return True
-        # Cancel needed: Smart Control off, but a scheduled job is still armed.
-        if (not remote_mode) and job_status == "scheduled":
-            return True
-    return False
+            fire = True
+        # Falling edge → cancel needed (job still armed).
+        elif (not remote_mode) and job_status == "scheduled":
+            fire = True
+    return fire
 
 
 def _poll_running_jobs() -> None:

@@ -480,50 +480,110 @@ class TestFireCron:
 
 
 # ---------------------------------------------------------------------------
-# pending_arm_change — the heartbeat's lightweight transition detector
+# pending_arm_change — the heartbeat's EDGE-triggered transition detector
 # ---------------------------------------------------------------------------
 
-class TestPendingArmChange:
-    def test_true_when_remote_on_and_no_job(self, appliance_id, patch_st):
-        patch_st.get_remote_control_enabled.return_value = True
-        assert appliance_dispatch.pending_arm_change() is True
+@pytest.fixture(autouse=True)
+def _reset_remote_mode_cache():
+    """Each test starts with a clean last-seen cache so edge detection is
+    deterministic regardless of test order."""
+    appliance_dispatch._last_remote_mode.clear()
+    yield
+    appliance_dispatch._last_remote_mode.clear()
 
-    def test_false_when_remote_off_and_no_job(self, appliance_id, patch_st):
-        patch_st.get_remote_control_enabled.return_value = False
+
+class TestPendingArmChange:
+    def test_first_observation_seeds_without_firing(self, appliance_id, patch_st):
+        """Restart safety: the first observation never fires, even with Smart
+        Control already on — otherwise a restart would auto-arm a leftover
+        state (e.g. a finished cycle the user never switched off)."""
+        patch_st.get_remote_control_enabled.return_value = True
         assert appliance_dispatch.pending_arm_change() is False
 
-    def test_false_when_remote_on_and_already_scheduled(
+    def test_rising_edge_fires_when_no_job(self, appliance_id, patch_st):
+        patch_st.get_remote_control_enabled.return_value = False
+        assert appliance_dispatch.pending_arm_change() is False  # seed off
+        patch_st.get_remote_control_enabled.return_value = True
+        assert appliance_dispatch.pending_arm_change() is True   # off → on
+
+    def test_steady_on_never_refires(self, appliance_id, patch_st):
+        patch_st.get_remote_control_enabled.return_value = False
+        appliance_dispatch.pending_arm_change()                  # seed off
+        patch_st.get_remote_control_enabled.return_value = True
+        assert appliance_dispatch.pending_arm_change() is True   # edge
+        # Steady-on across subsequent heartbeats → no re-fire (storm guard).
+        assert appliance_dispatch.pending_arm_change() is False
+        assert appliance_dispatch.pending_arm_change() is False
+
+    def test_declined_arm_does_not_storm(
+        self, monkeypatch, appliance_id, patch_st
+    ):
+        """Rising edge with NO room before the deadline: reconcile would
+        decline to create a job. The detector must still go quiet on the next
+        heartbeat (edge already consumed) — no forced-solve storm."""
+        monkeypatch.setattr(config, "OCTOPUS_TARIFF_CODE", "TEST-AGILE")
+        patch_st.get_remote_control_enabled.return_value = False
+        appliance_dispatch.pending_arm_change()                  # seed off
+        patch_st.get_remote_control_enabled.return_value = True
+        # First edge fires (caller then runs reconcile, which may decline).
+        assert appliance_dispatch.pending_arm_change() is True
+        # No job got created (simulate the decline) — but no transition now.
+        assert db.get_active_appliance_job(appliance_id) is None
+        assert appliance_dispatch.pending_arm_change() is False
+        assert appliance_dispatch.pending_arm_change() is False
+
+    def test_no_rerun_after_completed_cycle_with_remote_left_on(
         self, monkeypatch, appliance_id, fake_scheduler, patch_st
     ):
-        """Armed-and-idle must NOT keep re-firing the heartbeat trigger."""
+        """A finished cycle leaves no active job; if the user never switched
+        Smart Control off there is no new edge, so the heartbeat must NOT
+        auto-arm a second wash."""
         monkeypatch.setattr(config, "OCTOPUS_TARIFF_CODE", "TEST-AGILE")
         now = datetime.now(UTC)
         seed_start = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
         _seed_agile_rates(seed_start, [10.0, 5.0, 5.0, 5.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0])
+        # Seed off, then rising edge arms a job.
+        patch_st.get_remote_control_enabled.return_value = False
+        appliance_dispatch.pending_arm_change()
         patch_st.get_remote_control_enabled.return_value = True
+        assert appliance_dispatch.pending_arm_change() is True
+        appliance_dispatch.reconcile()
+        job = db.get_active_appliance_job(appliance_id)
+        assert job is not None
+        # Cycle completes; remote stays on (no toggle).
+        db.update_appliance_job(int(job["id"]), status="completed")
+        assert db.get_active_appliance_job(appliance_id) is None
+        assert appliance_dispatch.pending_arm_change() is False
+        assert appliance_dispatch.pending_arm_change() is False
+
+    def test_falling_edge_fires_when_job_still_scheduled(
+        self, monkeypatch, appliance_id, fake_scheduler, patch_st
+    ):
+        monkeypatch.setattr(config, "OCTOPUS_TARIFF_CODE", "TEST-AGILE")
+        now = datetime.now(UTC)
+        seed_start = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        _seed_agile_rates(seed_start, [10.0, 5.0, 5.0, 5.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0])
+        patch_st.get_remote_control_enabled.return_value = False
+        appliance_dispatch.pending_arm_change()
+        patch_st.get_remote_control_enabled.return_value = True
+        appliance_dispatch.pending_arm_change()
         appliance_dispatch.reconcile()
         assert db.get_active_appliance_job(appliance_id) is not None
-        # Still armed, job already scheduled → no further re-solve needed.
-        assert appliance_dispatch.pending_arm_change() is False
-
-    def test_true_when_remote_off_but_job_still_scheduled(
-        self, monkeypatch, appliance_id, fake_scheduler, patch_st
-    ):
-        monkeypatch.setattr(config, "OCTOPUS_TARIFF_CODE", "TEST-AGILE")
-        now = datetime.now(UTC)
-        seed_start = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-        _seed_agile_rates(seed_start, [10.0, 5.0, 5.0, 5.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0])
-        patch_st.get_remote_control_enabled.return_value = True
-        appliance_dispatch.reconcile()
-        # User cancelled on the unit → cancel transition pending.
+        # User cancels on the unit → falling edge with a job still scheduled.
         patch_st.get_remote_control_enabled.return_value = False
         assert appliance_dispatch.pending_arm_change() is True
 
-    def test_false_on_smartthings_error(self, appliance_id, patch_st):
+    def test_smartthings_error_leaves_cache_untouched(self, appliance_id, patch_st):
+        patch_st.get_remote_control_enabled.return_value = False
+        appliance_dispatch.pending_arm_change()                  # seed off
         patch_st.get_remote_control_enabled.side_effect = SmartThingsError(
             "transport", "boom"
         )
         assert appliance_dispatch.pending_arm_change() is False
+        # Recovery to 'on' must read as a real off→on edge, not a phantom one.
+        patch_st.get_remote_control_enabled.side_effect = None
+        patch_st.get_remote_control_enabled.return_value = True
+        assert appliance_dispatch.pending_arm_change() is True
 
     def test_false_when_dispatch_disabled(self, monkeypatch, appliance_id, patch_st):
         monkeypatch.setattr(config, "APPLIANCE_DISPATCH_ENABLED", False)
