@@ -59,8 +59,10 @@ def test_slot_fox_tuple_force_charge_uses_target_and_reserve() -> None:
 
 
 def test_slot_fox_tuple_negative_hold_pins_maxsoc_to_floor(monkeypatch) -> None:
-    """2026-06-07: negative_hold (Backup) pins maxSoc = reserve floor so solar
-    can't trickle-charge the battery during the hold (when enabled)."""
+    """Legacy Backup path (LP_NEGATIVE_HOLD_NO_DISCHARGE off): 2026-06-07
+    negative_hold (Backup) pins maxSoc = reserve floor so solar can't
+    trickle-charge the battery during the hold (when the pin is enabled)."""
+    monkeypatch.setattr(config, "LP_NEGATIVE_HOLD_NO_DISCHARGE", False, raising=False)
     monkeypatch.setattr(config, "LP_NEGATIVE_HOLD_PIN_MAXSOC", True, raising=False)
     t0 = datetime(2026, 6, 1, 11, 0, tzinfo=UTC)
     s = HalfHourSlot(
@@ -74,7 +76,8 @@ def test_slot_fox_tuple_negative_hold_pins_maxsoc_to_floor(monkeypatch) -> None:
 
 
 def test_slot_fox_tuple_negative_hold_maxsoc_none_when_disabled(monkeypatch) -> None:
-    """Kill-switch: maxSoc stays None (legacy Backup) when the pin is off."""
+    """Legacy Backup kill-switch: maxSoc stays None when the pin is off."""
+    monkeypatch.setattr(config, "LP_NEGATIVE_HOLD_NO_DISCHARGE", False, raising=False)
     monkeypatch.setattr(config, "LP_NEGATIVE_HOLD_PIN_MAXSOC", False, raising=False)
     t0 = datetime(2026, 6, 1, 11, 0, tzinfo=UTC)
     s = HalfHourSlot(
@@ -84,6 +87,43 @@ def test_slot_fox_tuple_negative_hold_maxsoc_none_when_disabled(monkeypatch) -> 
     wm, fds, pwr, msg, max_soc = _slot_fox_tuple(s)
     assert wm == "Backup"
     assert max_soc is None
+
+
+def test_slot_fox_tuple_negative_hold_forcecharge_holds_at_target(monkeypatch) -> None:
+    """Default (LP_NEGATIVE_HOLD_NO_DISCHARGE on): negative_hold dispatches as
+    ForceCharge-to-the-LP-target so the battery NEVER discharges to power the
+    concurrent load (e.g. the negative-price DHW boost) — load is grid-fed at the
+    paid negative rate. The actual charge still concentrates in `negative` slots
+    (target rises to 100); during the hold the target is ~reserve, so ForceCharge
+    just holds + grid-feeds load."""
+    monkeypatch.setattr(config, "LP_NEGATIVE_HOLD_NO_DISCHARGE", True, raising=False)
+    t0 = datetime(2026, 6, 1, 11, 0, tzinfo=UTC)
+    s = HalfHourSlot(
+        start_utc=t0, end_utc=t0 + timedelta(minutes=30),
+        price_pence=-4.0, kind="negative_hold",
+        target_soc_pct=_min_r(),
+    )
+    wm, fds, pwr, msg, max_soc = _slot_fox_tuple(s)
+    assert wm == "ForceCharge", "negative_hold must NEVER discharge → ForceCharge"
+    assert fds == _min_r()  # hold at the LP's planned target (~reserve)
+    assert pwr == config.FOX_FORCE_CHARGE_MAX_PWR  # no per-slot import → max fallback
+    assert msg == _min_r()
+    assert max_soc is None
+
+
+def test_slot_fox_tuple_negative_hold_forcecharge_uses_lp_import_power(monkeypatch) -> None:
+    """When the LP provides a per-slot import power it is used as fdPwr."""
+    monkeypatch.setattr(config, "LP_NEGATIVE_HOLD_NO_DISCHARGE", True, raising=False)
+    t0 = datetime(2026, 6, 1, 11, 0, tzinfo=UTC)
+    s = HalfHourSlot(
+        start_utc=t0, end_utc=t0 + timedelta(minutes=30),
+        price_pence=-4.0, kind="negative_hold",
+        lp_grid_import_w=1800, target_soc_pct=40,
+    )
+    wm, fds, pwr, msg, max_soc = _slot_fox_tuple(s)
+    assert wm == "ForceCharge"
+    assert fds == 40
+    assert pwr == 1800
 
 
 def test_slot_fox_tuple_cheap_fallback_when_no_target() -> None:
@@ -266,15 +306,16 @@ def test_negative_hold_kind_when_battery_full_and_price_negative() -> None:
         assert s.kind == "negative_hold", (
             f"slot {i} (price={plan.price_pence[i]}p, chg=0, full SoC): kind={s.kind!r}"
         )
+    # Default: negative_hold dispatches ForceCharge (never discharges) — load is
+    # grid-fed at the paid negative rate; the battery (already full here) just holds.
     wm, fds, pwr, _, _ = _slot_fox_tuple(slots[0])
-    assert wm == "Backup", f"negative_hold must map to Fox Backup mode, got {wm!r}"
-    assert fds is None
-    assert pwr is None
+    assert wm == "ForceCharge", f"negative_hold must NOT discharge, got {wm!r}"
+    assert fds == 100  # soc_kwh == cap → target 100
 
 
 def test_negative_hold_merges_adjacent_with_same_params() -> None:
-    """Adjacent negative_hold slots must collapse into one Backup group so the
-    Fox schedule stays within the 8-group limit during long plunge windows.
+    """Adjacent negative_hold slots must collapse into one group so the Fox
+    schedule stays within the 8-group limit during long plunge windows.
     """
     t0 = datetime(2026, 4, 23, 12, 0, tzinfo=UTC)
     slots = [
@@ -283,9 +324,46 @@ def test_negative_hold_merges_adjacent_with_same_params() -> None:
             end_utc=t0 + timedelta(minutes=30 * (i + 1)),
             price_pence=-1.0,
             kind="negative_hold",
+            target_soc_pct=_min_r(),
         )
         for i in range(4)
     ]
     groups = _merge_fox_groups(slots)
     assert len(groups) == 1
-    assert groups[0].work_mode == "Backup"
+    assert groups[0].work_mode == "ForceCharge"
+
+
+def test_no_negative_slot_maps_to_discharge_capable_mode(monkeypatch) -> None:
+    """Regression (2026-06-28): across a negative window mixing shallow holds
+    (chg≈0 → negative_hold) and deep charge slots (chg>0 → negative) plus a heavy
+    DHW load, NO slot with price<=0 may map to a mode that can discharge the
+    battery (Backup/SelfUse/ForceDischarge). Otherwise the battery self-supplies
+    the load instead of the PAID grid. Also assert the negative period collapses
+    to at most 2 ForceCharge windows (hold@reserve + charge@100) — well under the
+    8-group Fox V3 cap."""
+    monkeypatch.setattr(config, "LP_NEGATIVE_HOLD_NO_DISCHARGE", True, raising=False)
+    DISCHARGE_CAPABLE = {"Backup", "SelfUse", "ForceDischarge"}
+    # shallow-neg holds, then deep-neg charge slots (battery fills here)
+    kinds = ["negative_hold", "negative_hold", "negative", "negative"]
+    targets = [_min_r(), _min_r(), 70, 100]
+    t0 = datetime(2026, 6, 28, 8, 30, tzinfo=UTC)
+    slots = [
+        HalfHourSlot(
+            start_utc=t0 + timedelta(minutes=30 * i),
+            end_utc=t0 + timedelta(minutes=30 * (i + 1)),
+            price_pence=-3.0,
+            kind=kinds[i],
+            lp_grid_import_w=2500 if kinds[i] == "negative" else None,
+            target_soc_pct=targets[i],
+        )
+        for i in range(len(kinds))
+    ]
+    for s in slots:
+        wm, *_ = _slot_fox_tuple(s)
+        assert wm not in DISCHARGE_CAPABLE, (
+            f"price<=0 slot kind={s.kind!r} mapped to discharge-capable {wm!r}"
+        )
+        assert wm == "ForceCharge"
+    groups = _merge_fox_groups(slots)
+    assert len(groups) <= 2, f"expected ≤2 ForceCharge windows, got {len(groups)}"
+    assert all(g.work_mode == "ForceCharge" for g in groups)

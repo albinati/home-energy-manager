@@ -630,6 +630,25 @@ class Config:
         os.getenv("LP_NEGATIVE_HOLD_PIN_MAXSOC", "true").strip().lower()
         in ("1", "true", "yes", "on")
     )
+    # 2026-06-28: on `negative_hold` slots (price <= 0, LP deferred the battery
+    # grid-charge to the deepest-negative slots so chg ~= 0 here), dispatch the
+    # Fox inverter as ForceCharge-to-the-LP-target instead of Backup. Backup was
+    # observed to DISCHARGE the battery above the reserve floor to self-supply a
+    # heavy concurrent load (the negative-price DHW Powerful boost ~3.5 kW on
+    # 2026-06-28), draining the battery we were being PAID to fill and forgoing
+    # paid grid import. ForceCharge never discharges regardless of fdPwr, so the
+    # load is grid-fed (paid) while the battery holds at the LP's planned target
+    # (~reserve during the hold) — the actual charge still concentrates in the
+    # `negative` slots, preserving the LP's deferral and the -5p premium. Default
+    # on; set false to roll back to the legacy Backup path (which keeps the
+    # LP_NEGATIVE_HOLD_PIN_MAXSOC maxSoc pin). Under ForceCharge-hold, surplus PV
+    # can still trickle-charge the battery for free (PV -> battery is always
+    # allowed) — that is acceptable and removes the dependency on the
+    # undocumented "maxSoc clips PV in Backup" behaviour.
+    LP_NEGATIVE_HOLD_NO_DISCHARGE: bool = (
+        os.getenv("LP_NEGATIVE_HOLD_NO_DISCHARGE", "true").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
 
     LWT_OFFSET_MAX: float = float(os.getenv("LWT_OFFSET_MAX", "5"))
     LWT_OFFSET_MIN: float = float(os.getenv("LWT_OFFSET_MIN", "-5"))
