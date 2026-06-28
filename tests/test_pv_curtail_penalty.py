@@ -106,7 +106,14 @@ def test_penalty_value_reduces_curtailment_under_chg_cap(monkeypatch):
     """The realistic prod scenario: deep negatives + PV peak + chg cap binding.
     The penalty pushes the LP to lower imp and route PV through the battery
     rather than curtailing.
+
+    NB (2026-06-29): the default ``LP_NEG_SLOT_NO_CURTAIL_PENALTY`` now EXEMPTS
+    negative slots from the penalty (curtailing PV to capture the paid import is
+    correct there — see tests/test_lp_neg_slot_curtail_penalty.py). This test
+    pins the legacy uniform-penalty path (exemption OFF) to keep validating the
+    penalty machinery itself.
     """
+    monkeypatch.setattr(app_config, "LP_NEG_SLOT_NO_CURTAIL_PENALTY", False, raising=False)
     monkeypatch.setattr(app_config, "LP_PV_CURTAIL_PENALTY_PENCE_PER_KWH", 15.0)
 
     base = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)

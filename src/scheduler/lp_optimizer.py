@@ -1271,9 +1271,25 @@ def solve_lp(
     # 74% of one day's PV (6.34 kWh, ~£0.95) curtailed under the legacy zero-penalty
     # objective. Set ``LP_PV_CURTAIL_PENALTY_PENCE_PER_KWH=0`` to revert.
     pv_curt_pen = float(getattr(config, "LP_PV_CURTAIL_PENALTY_PENCE_PER_KWH", 0.0))
-    obj_pv_curt = (
-        pv_curt_pen * pulp.lpSum(pv_curt[i] for i in range(n)) if pv_curt_pen > 0 else 0
-    )
+    # 2026-06-29: the curtailment penalty models PV's export opportunity cost
+    # ("would have exported at EXPORT_RATE_PENCE"). During NEGATIVE-price slots
+    # that premise is false: we're in import mode being PAID to import, export is
+    # impossible (per-slot import/export mutual exclusion), and grid→battery EARNS
+    # the negative price while pv→battery earns nothing. So the 15p penalty wrongly
+    # discourages curtailing PV, making the LP self-consume PV instead of importing
+    # from the paid grid (prod 2026-06-12: ~£0.38 of paid import forgone in one
+    # −8.79p window). Exempt negative-price slots from the penalty so the LP can
+    # curtail PV and capture the paid import. In export-mode negative slots the
+    # export-revenue term still incentivises using PV, so this is safe.
+    neg_exempt = bool(getattr(config, "LP_NEG_SLOT_NO_CURTAIL_PENALTY", True))
+    if pv_curt_pen > 0:
+        obj_pv_curt = pv_curt_pen * pulp.lpSum(
+            pv_curt[i]
+            for i in range(n)
+            if not (neg_exempt and price_line[i] < 0)
+        )
+    else:
+        obj_pv_curt = 0
     objective = (
         obj_grid + obj_cycle + obj_comfort + obj_tank_hi
         + obj_pv_curt + obj_pv_abundance_dhw + obj_shower_lo

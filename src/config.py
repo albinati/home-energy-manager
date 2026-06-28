@@ -1356,6 +1356,23 @@ class Config:
     LP_PV_CURTAIL_PENALTY_PENCE_PER_KWH: float = float(
         os.getenv("LP_PV_CURTAIL_PENALTY_PENCE_PER_KWH", os.getenv("EXPORT_RATE_PENCE", "15.0"))
     )
+    # 2026-06-29: exempt NEGATIVE-price slots from the curtailment penalty. The
+    # penalty models PV's export opportunity cost ("would have exported at
+    # EXPORT_RATE_PENCE"), but during negative-import slots that premise is false:
+    # we're in import mode being PAID to import, export is impossible (per-slot
+    # import/export mutual exclusion), and grid→battery EARNS the negative price
+    # while pv→battery earns nothing. With the flat 15p penalty the LP never
+    # curtails PV during negatives (15p > any realistic |neg price|), so it
+    # self-consumes PV instead of importing from the paid grid — economically
+    # wrong (solver A/B: paid-import £0.25→£0.70, objective −167→−196p on a 6h
+    # −8p window, same battery outcome). NB the within-slot PV/grid split is
+    # largely set by the inverter (Fox prioritises PV→battery), so the real-world
+    # gain is mostly better ForceCharge timing + an honest negative-window model,
+    # not a large £/yr. Set false to revert to the uniform penalty.
+    LP_NEG_SLOT_NO_CURTAIL_PENALTY: bool = (
+        os.getenv("LP_NEG_SLOT_NO_CURTAIL_PENALTY", "true").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
     # Pre-plunge discipline lookahead (hours): when a negative-price slot is
     # within this window AHEAD of a positive-price slot, forbid grid→battery
     # charge on that positive slot (PV→battery still allowed). Reserves
