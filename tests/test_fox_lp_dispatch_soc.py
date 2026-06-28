@@ -93,9 +93,9 @@ def test_slot_fox_tuple_negative_hold_forcecharge_holds_at_target(monkeypatch) -
     """Default (LP_NEGATIVE_HOLD_NO_DISCHARGE on): negative_hold dispatches as
     ForceCharge-to-the-LP-target so the battery NEVER discharges to power the
     concurrent load (e.g. the negative-price DHW boost) — load is grid-fed at the
-    paid negative rate. The actual charge still concentrates in `negative` slots
-    (target rises to 100); during the hold the target is ~reserve, so ForceCharge
-    just holds + grid-feeds load."""
+    paid negative rate. The per-slot tuple carries fdSoc = target (~reserve for an
+    isolated hold); when adjacent to a `negative` charge slot the group-merge
+    promotes fdSoc to the window max (see _merge_adjacent_force_charge_rows)."""
     monkeypatch.setattr(config, "LP_NEGATIVE_HOLD_NO_DISCHARGE", True, raising=False)
     t0 = datetime(2026, 6, 1, 11, 0, tzinfo=UTC)
     s = HalfHourSlot(
@@ -367,3 +367,9 @@ def test_no_negative_slot_maps_to_discharge_capable_mode(monkeypatch) -> None:
     groups = _merge_fox_groups(slots)
     assert len(groups) <= 2, f"expected ≤2 ForceCharge windows, got {len(groups)}"
     assert all(g.work_mode == "ForceCharge" for g in groups)
+    # Option A (documented): the group-merge takes fdSoc = MAX of the run, so the
+    # window that contains the `negative` charge slots fills the battery to 100 —
+    # i.e. it fills early from the paid grid rather than deferring. Lock that in.
+    assert max(g.fd_soc for g in groups) == 100, (
+        f"merged ForceCharge must reach fdSoc=100, got {[g.fd_soc for g in groups]}"
+    )

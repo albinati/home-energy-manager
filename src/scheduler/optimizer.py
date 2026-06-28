@@ -372,11 +372,21 @@ def _slot_fox_tuple(
         # battery above the reserve floor to self-supply a heavy concurrent load —
         # the negative-price DHW Powerful boost (~3.5 kW) was powered by the
         # battery instead of the PAID grid, draining the battery the LP was trying
-        # to fill. ForceCharge never discharges (regardless of fdPwr), so the load
-        # is grid-fed (paid) and the battery holds at the LP's planned per-slot
-        # target (~reserve during the hold, since chg ~= 0 here). The real charge
-        # still concentrates in the `negative` slots where target rises to 100,
-        # so the LP's deferral to the deepest-negative slots is preserved.
+        # to fill. ForceCharge never discharges (regardless of fdPwr; see
+        # docs/FOXESS/WORK_MODES_AND_SOC.md), so the load is grid-fed at the paid
+        # negative rate.
+        #
+        # fdSoc is the LP's planned per-slot target (~reserve during the hold,
+        # since chg ~= 0 here). NOTE: _merge_adjacent_force_charge_rows collapses
+        # this with the adjacent `negative` charge slots and takes fdSoc = MAX of
+        # the run, so when a charge IS planned later in the window the merged
+        # ForceCharge group fills the battery to 100 across the WHOLE window
+        # (Fox front-loads ForceCharge up to fdSoc). i.e. the battery fills early
+        # from the paid grid rather than strictly deferring to the deepest slots —
+        # the small deep-slot premium (~£1-3/yr) is forgone in exchange for never
+        # sitting at reserve while a heavy load self-discharges the battery, and
+        # without touching the central merge logic. An isolated negative_hold with
+        # no adjacent charge keeps fdSoc = target → just holds + grid-feeds load.
         # Surplus PV may still trickle-charge for free under ForceCharge — that is
         # fine and avoids relying on the undocumented Backup maxSoc-clips-PV path.
         if getattr(config, "LP_NEGATIVE_HOLD_NO_DISCHARGE", True):
