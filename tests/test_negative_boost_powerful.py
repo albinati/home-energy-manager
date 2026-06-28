@@ -3,7 +3,9 @@
 Daikin Powerful is a one-shot the firmware auto-clears, so the once-at-window
 boost write leaves the tank coasting for the rest of a paid negative window.
 ``_check_negative_boost_powerful`` re-asserts Powerful on a bounded cadence
-while a ``tank_negative_boost`` slot is active and the tank is below target.
+while a ``tank_negative_boost`` window covers now and the tank is below the
+boost target. It targets ``completed`` boost rows because the #386 pre-fire
+idempotency marks the boost row completed at window start — that's the gap.
 """
 from __future__ import annotations
 
@@ -52,32 +54,42 @@ def _iso(dt: datetime) -> str:
     return dt.isoformat().replace("+00:00", "Z")
 
 
-def _boost_row(now: datetime, *, status: str = "active") -> dict:
+def _boost_row(now: datetime, *, status: str = "completed", target: int = 60) -> dict:
     return {
         "id": 1,
         "start_time": _iso(now - timedelta(hours=1)),
         "end_time": _iso(now + timedelta(hours=2)),
         "status": status,
         "action_type": "tank_negative_boost",
-        "params": {"tank_power": True, "tank_temp": 60, "tank_powerful": True},
+        "params": {"tank_power": True, "tank_temp": target, "tank_powerful": True},
     }
 
 
 NOW = datetime(2026, 6, 28, 11, 0, tzinfo=UTC)
 
 
-def test_reasserts_powerful_in_active_boost_below_target():
-    dev = _FakeDev(tank_temperature=51.0, tank_target=60.0, tank_powerful=False)
+def test_reasserts_powerful_for_completed_boost_below_target():
+    """The prod scenario: boost row completed (pre-fire noop'd), tank 51 < 60,
+    Powerful off → re-assert."""
+    dev = _FakeDev(tank_temperature=51.0, tank_powerful=False)
     client = MagicMock()
     sm._check_negative_boost_powerful([_boost_row(NOW)], client, dev, NOW, trigger="hb")
     client.set_tank_powerful.assert_called_once_with(dev, True)
     assert dev.tank_powerful is True
 
 
-def test_noop_when_no_boost_slot_active():
+def test_active_boost_row_left_to_per_row_loop():
+    """An active (still-firing) boost row is owned by the per-row apply loop;
+    the backstop must NOT double-write."""
     dev = _FakeDev(tank_temperature=51.0, tank_powerful=False)
     client = MagicMock()
-    # A non-boost row (warmup) → no re-assert.
+    sm._check_negative_boost_powerful([_boost_row(NOW, status="active")], client, dev, NOW, trigger="hb")
+    client.set_tank_powerful.assert_not_called()
+
+
+def test_noop_when_no_boost_slot():
+    dev = _FakeDev(tank_temperature=51.0, tank_powerful=False)
+    client = MagicMock()
     row = _boost_row(NOW)
     row["action_type"] = "tank_warmup"
     row["params"] = {"tank_power": True, "tank_temp": 45, "tank_powerful": False}
@@ -85,10 +97,30 @@ def test_noop_when_no_boost_slot_active():
     client.set_tank_powerful.assert_not_called()
 
 
-def test_noop_when_tank_at_target():
-    dev = _FakeDev(tank_temperature=60.0, tank_target=60.0, tank_powerful=False)
+def test_solar_charge_row_not_treated_as_negative_boost():
+    """solar_charge rows also carry tank_powerful=True but are PV-abundance, not
+    paid import — must be excluded by the action_type filter."""
+    dev = _FakeDev(tank_temperature=51.0, tank_powerful=False)
     client = MagicMock()
-    sm._check_negative_boost_powerful([_boost_row(NOW)], client, dev, NOW, trigger="hb")
+    row = _boost_row(NOW)
+    row["action_type"] = "solar_charge"
+    sm._check_negative_boost_powerful([row], client, dev, NOW, trigger="hb")
+    client.set_tank_powerful.assert_not_called()
+
+
+def test_uses_boost_row_target_not_live_device_target():
+    """An overlapping tank_setback pulls live dev.tank_target to 45; the
+    headroom check must use the boost row's own 60 °C target."""
+    dev = _FakeDev(tank_temperature=51.0, tank_target=45.0, tank_powerful=False)
+    client = MagicMock()
+    sm._check_negative_boost_powerful([_boost_row(NOW, target=60)], client, dev, NOW, trigger="hb")
+    client.set_tank_powerful.assert_called_once_with(dev, True)
+
+
+def test_noop_when_tank_at_boost_target():
+    dev = _FakeDev(tank_temperature=60.0, tank_target=45.0, tank_powerful=False)
+    client = MagicMock()
+    sm._check_negative_boost_powerful([_boost_row(NOW, target=60)], client, dev, NOW, trigger="hb")
     client.set_tank_powerful.assert_not_called()
 
 
@@ -134,35 +166,46 @@ def test_cadence_gate_blocks_then_allows():
     dev = _FakeDev(tank_temperature=51.0, tank_powerful=False)
     client = MagicMock()
     sm._check_negative_boost_powerful([_boost_row(NOW)], client, dev, NOW, trigger="hb")
-    # 10 min later → still within 15-min interval → no second write.
     sm._check_negative_boost_powerful(
         [_boost_row(NOW + timedelta(minutes=10))], client, dev, NOW + timedelta(minutes=10), trigger="hb"
     )
-    assert client.set_tank_powerful.call_count == 1
-    # 16 min after the first → interval elapsed → re-assert again.
+    assert client.set_tank_powerful.call_count == 1  # within 15-min interval
     sm._check_negative_boost_powerful(
         [_boost_row(NOW + timedelta(minutes=16))], client, dev, NOW + timedelta(minutes=16), trigger="hb"
     )
-    assert client.set_tank_powerful.call_count == 2
+    assert client.set_tank_powerful.call_count == 2  # interval elapsed
+
+
+def test_failure_is_rate_limited_not_retried_every_tick():
+    """H2: a failing PATCH must still advance the cadence gate so it's not
+    retried (and re-charged quota) every heartbeat."""
+    from src.daikin.client import DaikinError
+    dev = _FakeDev(tank_temperature=51.0, tank_powerful=False)
+    client = MagicMock()
+    client.set_tank_powerful.side_effect = DaikinError("read_only", "boom")
+    sm._check_negative_boost_powerful([_boost_row(NOW)], client, dev, NOW, trigger="hb")
+    # 5 min later (within interval) → must NOT retry despite the failure.
+    sm._check_negative_boost_powerful(
+        [_boost_row(NOW + timedelta(minutes=5))], client, dev, NOW + timedelta(minutes=5), trigger="hb"
+    )
+    assert client.set_tank_powerful.call_count == 1
 
 
 def test_respects_user_override(monkeypatch):
     dev = _FakeDev(tank_temperature=51.0, tank_powerful=False)
     client = MagicMock()
-    monkeypatch.setattr(
-        db, "find_recent_user_override",
-        lambda **kw: {"params": {"tank_power": False}},
-    )
+    monkeypatch.setattr(db, "find_recent_user_override", lambda **kw: {"params": {"tank_power": False}})
     monkeypatch.setattr(sm, "user_gesture_still_in_effect", lambda dev, p: True)
     sm._check_negative_boost_powerful([_boost_row(NOW)], client, dev, NOW, trigger="hb")
     client.set_tank_powerful.assert_not_called()
 
 
-def test_failure_is_logged_not_raised(monkeypatch):
-    from src.daikin.client import DaikinError
+def test_audit_row_written():
     dev = _FakeDev(tank_temperature=51.0, tank_powerful=False)
     client = MagicMock()
-    client.set_tank_powerful.side_effect = DaikinError("read_only", "boom")
-    # Must not raise.
     sm._check_negative_boost_powerful([_boost_row(NOW)], client, dev, NOW, trigger="hb")
-    client.set_tank_powerful.assert_called_once()
+    rows = db.get_connection().execute(
+        "SELECT result FROM action_log WHERE action='negative_boost_powerful_reassert'"
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0][0] == "success"

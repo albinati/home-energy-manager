@@ -689,7 +689,7 @@ def _check_negative_boost_powerful(
     *,
     trigger: str,
 ) -> None:
-    """Sustain DHW Powerful through an active negative-price boost window.
+    """Sustain DHW Powerful through a negative-price boost window.
 
     The ``tank_negative_boost`` row sets ``tank_powerful=True`` once at window
     start, but Daikin Powerful is a one-shot the firmware auto-clears (timeout
@@ -699,13 +699,23 @@ def _check_negative_boost_powerful(
     headroom. This backstop re-asserts Powerful on a bounded cadence so the
     boost is sustained across the whole window.
 
+    Targets ``status='completed'`` boost rows (review of #606): the #386
+    pre-fire idempotency marks the boost row *completed* at window start (live
+    setpoint already 60), so for the rest of the window the row is completed
+    and the per-row apply loop never revisits it — exactly when Powerful auto-
+    clears. Active rows (still firing) are owned by that loop; this backstop
+    owns the post-completion gap, which avoids a double-write in the same pass.
+    The ``action_type`` filter is required so we don't re-assert Powerful for
+    ``solar_charge`` (PV-abundance, no paid import) or user ``pre_heat`` rows
+    that also carry ``tank_powerful=True``.
+
     Bails (fail-safe — a missed re-assert is cheap, a wrong write isn't):
     * feature flag off / read-only / not active control / vacation preset;
-    * no active+pending slot covering ``now`` that wants ``tank_powerful``;
-    * live tank state unknown, tank off, or already at/above target
+    * no completed ``tank_negative_boost`` slot covering ``now``;
+    * live tank state unknown, tank off, or already at the boost target
       (Powerful would just expire again — nothing to gain);
     * a user gesture (tank off / override) is still in effect;
-    * within the min re-assert interval since the last assertion.
+    * within the min re-assert interval since the last attempt.
     """
     global _NEG_BOOST_POWERFUL_LAST_UTC
 
@@ -716,9 +726,17 @@ def _check_negative_boost_powerful(
     if (config.OPTIMIZATION_PRESET or "normal").strip().lower() == "vacation":
         return
 
-    # Is a boost slot that wants Powerful active right now?
-    boost_active = False
+    # Find the negative-boost row whose window covers now. Use the row's own
+    # intended target (M4): an overlapping tank_setback row can pull the live
+    # ``dev.tank_target`` down to ~45, which would mask the real 60 °C headroom.
+    boost_target: float | None = None
     for act in actions:
+        if (act.get("action_type") or "") != "tank_negative_boost":
+            continue
+        if (act.get("status") or "") != "completed":
+            continue
+        if act.get("overridden_by_user_at"):
+            continue
         try:
             start = _parse_utc(act["start_time"])
             end = _parse_utc(act["end_time"])
@@ -726,30 +744,29 @@ def _check_negative_boost_powerful(
             continue
         if not (start <= now_utc < end):
             continue
-        if (act.get("status") or "") not in ("pending", "active"):
-            continue
-        if act.get("overridden_by_user_at"):
-            continue
         params = act.get("params") or {}
         if isinstance(params, str):
             try:
                 params = json.loads(params)
             except (json.JSONDecodeError, TypeError):
                 params = {}
-        if bool(params.get("tank_powerful")):
-            boost_active = True
-            break
-    if not boost_active:
+        if not bool(params.get("tank_powerful")):
+            continue
+        try:
+            boost_target = float(params["tank_temp"])
+        except (KeyError, TypeError, ValueError):
+            boost_target = None
+        break
+    if boost_target is None:
         return
 
-    # Need the tank ON and below target to have anything to gain.
+    # Need the tank ON and below the boost target to have anything to gain.
     if not getattr(dev, "tank_on", False):
         return
     tank_t = getattr(dev, "tank_temperature", None)
-    tank_tgt = getattr(dev, "tank_target", None)
-    if tank_t is None or tank_tgt is None:
+    if tank_t is None:
         return
-    if float(tank_t) >= float(tank_tgt) - 0.6:
+    if float(tank_t) >= boost_target - 0.6:
         return  # already at target — re-asserting Powerful would just expire
 
     # Respect a user gesture that's still in effect (mirror tank-power drift).
@@ -784,26 +801,29 @@ def _check_negative_boost_powerful(
         if (now_utc - _NEG_BOOST_POWERFUL_LAST_UTC).total_seconds() < interval_s:
             return
 
+    # Stamp the cadence gate up-front (H2): a persistently-failing PATCH (e.g.
+    # READ_ONLY when Powerful isn't settable) must be rate-limited to the
+    # interval, not retried every heartbeat — failed calls still cost quota.
+    _NEG_BOOST_POWERFUL_LAST_UTC = now_utc
     try:
         client.set_tank_powerful(dev, True)
         dev.tank_powerful = True
-        _NEG_BOOST_POWERFUL_LAST_UTC = now_utc
         db.log_action(
             device="daikin",
             action="negative_boost_powerful_reassert",
-            params={"tank_temp": float(tank_t), "tank_target": float(tank_tgt)},
+            params={"tank_temp": float(tank_t), "tank_target": float(boost_target)},
             result="success",
             trigger=trigger,
         )
         logger.info(
             "neg-boost: re-asserted DHW Powerful (tank %.0f < target %.0f °C, trigger=%s)",
-            float(tank_t), float(tank_tgt), trigger,
+            float(tank_t), float(boost_target), trigger,
         )
     except (DaikinError, ValueError) as e:
         db.log_action(
             device="daikin",
             action="negative_boost_powerful_reassert",
-            params={"tank_temp": float(tank_t), "tank_target": float(tank_tgt)},
+            params={"tank_temp": float(tank_t), "tank_target": float(boost_target)},
             result="failure",
             error_msg=str(e),
             trigger=trigger,
