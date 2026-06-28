@@ -1260,6 +1260,55 @@ def reconcile() -> None:
         logger.exception("appliance reconcile: _poll_running_jobs failed (non-fatal)")
 
 
+def pending_arm_change() -> bool:
+    """Lightweight detector for the heartbeat: does any appliance's live
+    Smart-Control state imply an arm/cancel that the current DB jobs don't
+    yet reflect?
+
+    Returns True when a re-solve is warranted so the next LP solve's
+    ``reconcile()`` actually arms/cancels and notifies — bounding the
+    arm → plan latency to one heartbeat instead of waiting for an unrelated
+    LP-solve trigger (tier boundary / drift / octopus fetch).
+
+    Deliberately narrower than ``reconcile()``'s logic: it fires only on a
+    *transition* (Smart Control on with no scheduled/running job → arm
+    needed; Smart Control off with a job still scheduled → cancel needed). It
+    does NOT fire for a mere window re-plan of an already-armed job, so an
+    armed-and-idle appliance won't re-trigger a solve every heartbeat — those
+    re-plans still ride the normal solve triggers.
+
+    Best-effort and side-effect-free: never records reconcile errors, never
+    raises. SmartThings unavailability → returns False (the real solve's
+    ``reconcile()`` owns error accounting).
+    """
+    if not config.APPLIANCE_DISPATCH_ENABLED:
+        return False
+    try:
+        appliances = db.list_appliances(enabled_only=True)
+    except Exception:
+        return False
+    try:
+        client = _get_st_client()
+    except SmartThingsError:
+        return False
+    for appliance in appliances:
+        if appliance.get("vendor") != "smartthings":
+            continue
+        try:
+            remote_mode = client.get_remote_control_enabled(appliance["vendor_device_id"])
+        except SmartThingsError:
+            continue
+        job = db.get_active_appliance_job(int(appliance["id"]))
+        job_status = job.get("status") if job else None
+        # Arm needed: Smart Control on, but no scheduled/running job yet.
+        if remote_mode and job_status not in ("scheduled", "running"):
+            return True
+        # Cancel needed: Smart Control off, but a scheduled job is still armed.
+        if (not remote_mode) and job_status == "scheduled":
+            return True
+    return False
+
+
 def _poll_running_jobs() -> None:
     """Detect cycle completion on every running job and fire the finished hook.
 
@@ -1573,7 +1622,11 @@ def _arm_or_replan(
         "appliance #%d re-planned: job=%d new_start=%s avg_price=%.2fp",
         appliance_id, existing_job["id"], start_utc.isoformat(), avg_price,
     )
-    _notify_armed(appliance, start_utc, end_utc, deadline_utc, duration, avg_price, replan=True)
+    # Re-arm (window shifted) ping is muted by default (pull-based policy) —
+    # the user only wants the first-arm confirmation + the finished summary.
+    # Flip APPLIANCE_NOTIFY_REPLAN=true to observe window revisions again.
+    if config.APPLIANCE_NOTIFY_REPLAN:
+        _notify_armed(appliance, start_utc, end_utc, deadline_utc, duration, avg_price, replan=True)
 
 
 def _notify_armed(
@@ -1804,7 +1857,13 @@ def _fire_cron(job_id: int) -> None:
     )
 
     # PR #234: notify the family that laundry is starting.
+    # Muted by default (2026-06-28, pull-based policy) — the arm confirmation
+    # already told the user when it auto-starts, so this ping is redundant.
+    # Failure paths above still ping via notify_risk. Flip
+    # APPLIANCE_NOTIFY_STARTING=true to restore the start ping.
     # Best-effort — never let a notification failure block the dispatch path.
+    if not config.APPLIANCE_NOTIFY_STARTING:
+        return
     try:
         from ..notifier import notify_appliance_starting
         tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)

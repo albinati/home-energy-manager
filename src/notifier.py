@@ -699,16 +699,18 @@ def notify_appliance_armed(
     """🧺 LP picked a window for this appliance and armed the cron.
 
     Fires when ``appliance_dispatch.reconcile()`` writes a new ``appliance_jobs``
-    row OR when an existing job's planned window shifted via re-plan
-    (``replan=True``). Kept on the Telegram path during the appliance-dispatch
-    testing phase so the user can observe how often the LP shifts windows
-    in production — to decide whether to mute it later.
+    row. The ``replan=True`` window-shift ping is muted by default (gated by
+    ``APPLIANCE_NOTIFY_REPLAN`` at the call site) under the pull-based
+    notification policy — the user wants only the first-arm confirmation and
+    the finished summary; window revisions are pulled via the UI/MCP.
     """
     verb = "re-armed" if replan else "armed"
-    body = "\n".join([
-        f"{planned_start_local} → {planned_end_local} ({duration_minutes} min)",
-        f"avg {avg_price_pence:.1f}p/kWh · deadline {deadline_local}",
-    ])
+    # One-line confirmation (short by request, 2026-06-28): window · duration ·
+    # price · deadline. Appliance name + verb live in the Telegram header.
+    body = (
+        f"{planned_start_local}→{planned_end_local} · "
+        f"{duration_minutes} min · {avg_price_pence:.1f}p/kWh · by {deadline_local}"
+    )
     extra = {
         "appliance": appliance_name,
         "planned_start_local": planned_start_local,

@@ -842,6 +842,7 @@ def bulletproof_mpc_job(
     *,
     force_write_devices: bool = False,
     trigger_reason: str = "manual",
+    bypass_cooldown: bool = False,
 ) -> None:
     """Intra-day MPC re-optimise: refresh forecast + live SoC + live PV, re-upload Fox/Daikin.
 
@@ -857,7 +858,13 @@ def bulletproof_mpc_job(
     ``trigger_reason`` (default "manual"): tags the run for observability. Known reasons:
     ``octopus_fetch``, ``tier_boundary``, ``soc_drift``, ``forecast_revision``,
     ``pv_upside``, ``pv_downside``, ``load_upside``, ``dynamic_replan``,
-    ``plan_push``, ``manual``. The legacy ``cron`` value is gone (V12).
+    ``plan_push``, ``appliance_armed``, ``manual``. The legacy ``cron`` value
+    is gone (V12).
+
+    ``bypass_cooldown`` (default False): skip the ``MPC_COOLDOWN_SECONDS``
+    gate. Reserved for discrete user gestures (e.g. ``appliance_armed``) that
+    fire only on a real state transition and so can't thrash — the user
+    deserves prompt feedback rather than waiting out the drift cooldown.
     """
     global _last_mpc_run_at
 
@@ -869,7 +876,7 @@ def bulletproof_mpc_job(
     if backend != "lp":
         logger.debug("MPC skipped: OPTIMIZER_BACKEND=%s", backend)
         return
-    if not _can_run_mpc_now():
+    if not bypass_cooldown and not _can_run_mpc_now():
         logger.info(
             "MPC skipped (cooldown, trigger=%s): last run %.0fs ago < %ds",
             trigger_reason,
@@ -1602,6 +1609,33 @@ def bulletproof_heartbeat_tick() -> None:
                 bulletproof_mpc_job(force_write_devices=True, trigger_reason="load_upside")
         except Exception as e:
             logger.debug("live-deviation trigger check failed (non-fatal): %s", e)
+
+    # Event-driven MPC: appliance arm/cancel trigger (Smart-Control gesture).
+    # SmartThings has no polling-free push for device events without a public
+    # webhook ingress — which our loopback + Tailscale deployment deliberately
+    # avoids — so we detect the user's Smart-Control toggle here on the
+    # heartbeat instead. This bounds the arm → plan → notify latency to one
+    # heartbeat, rather than waiting for an unrelated LP-solve trigger (tier
+    # boundary / drift / octopus fetch) to happen to fire. The detector only
+    # returns True on a genuine transition (Smart Control on with no job, or
+    # off with a job still armed); once reconcile() creates/cancels the job the
+    # next heartbeat sees it and won't re-fire, so the cooldown bypass is safe.
+    if config.MPC_EVENT_DRIVEN_ENABLED and config.APPLIANCE_DISPATCH_ENABLED:
+        try:
+            from . import appliance_dispatch
+
+            if appliance_dispatch.pending_arm_change():
+                logger.info(
+                    "MPC appliance trigger: Smart-Control state change detected "
+                    "— re-planning to arm/cancel the cycle"
+                )
+                bulletproof_mpc_job(
+                    force_write_devices=True,
+                    trigger_reason="appliance_armed",
+                    bypass_cooldown=True,
+                )
+        except Exception as e:
+            logger.debug("appliance-arm trigger check failed (non-fatal): %s", e)
 
     room_t: float | None = None
     outdoor_t: float | None = None

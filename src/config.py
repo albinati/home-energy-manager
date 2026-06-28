@@ -464,6 +464,19 @@ class Config:
     APPLIANCE_RECONCILE_ERROR_PING_THRESHOLD: int = int(
         os.getenv("APPLIANCE_RECONCILE_ERROR_PING_THRESHOLD", "3")
     )
+    # Notification verbosity (2026-06-28). The user wants only two pings per
+    # cycle: the arm confirmation (the LP picked a window) and the finished
+    # summary. The "starting" and "re-armed (window shifted)" pings are noise
+    # under the pull-based notification policy — default OFF, flip to true to
+    # observe them again. Failure pings (notify_risk) are never gated by these.
+    APPLIANCE_NOTIFY_STARTING: bool = (
+        os.getenv("APPLIANCE_NOTIFY_STARTING", "false").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+    APPLIANCE_NOTIFY_REPLAN: bool = (
+        os.getenv("APPLIANCE_NOTIFY_REPLAN", "false").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
 
     # ------------------------------------------------------------------
     # PR K3 (2026-05-23) — battery-aware appliance scheduling.

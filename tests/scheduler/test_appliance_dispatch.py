@@ -243,6 +243,62 @@ class TestReconcile:
         assert kwargs["extra"]["replan"] is False
         assert kwargs["extra"]["appliance"]  # name populated
 
+    def test_replan_ping_muted_by_default(
+        self, monkeypatch, appliance_id, fake_scheduler, patch_st
+    ):
+        """Window-shift re-plan must NOT ping by default (pull-based policy) —
+        only the first arm and the finished summary reach the user."""
+        monkeypatch.setattr(config, "OCTOPUS_TARIFF_CODE", "TEST-AGILE")
+        monkeypatch.setattr(config, "APPLIANCE_NOTIFY_REPLAN", False)
+        patch_st.get_remote_control_enabled.return_value = True
+        now = datetime.now(UTC).replace(second=0, microsecond=0)
+        base = now.replace(minute=0 if now.minute < 30 else 30) + timedelta(hours=1)
+        w1 = (base, base + timedelta(hours=2), 5.0)
+        w2 = (base + timedelta(hours=1), base + timedelta(hours=3), 4.0)
+        with patch.object(
+            appliance_dispatch, "find_battery_aware_window", side_effect=[w1, w2]
+        ):
+            appliance_dispatch.reconcile()  # first arm → w1
+            assert db.get_active_appliance_job(appliance_id)[
+                "planned_start_utc"
+            ] == appliance_dispatch._iso(w1[0])
+            with patch("src.notifier._dispatch") as mock_dispatch:
+                appliance_dispatch.reconcile()  # re-plan → w2
+        from src.notifier import AlertType
+        armed = [
+            c for c in mock_dispatch.call_args_list
+            if c.args and c.args[0] == AlertType.APPLIANCE_ARMED
+        ]
+        assert armed == [], "re-plan must be silent by default"
+        # The window still shifted — only the ping was suppressed.
+        assert db.get_active_appliance_job(appliance_id)[
+            "planned_start_utc"
+        ] == appliance_dispatch._iso(w2[0])
+
+    def test_replan_ping_fires_when_enabled(
+        self, monkeypatch, appliance_id, fake_scheduler, patch_st
+    ):
+        monkeypatch.setattr(config, "OCTOPUS_TARIFF_CODE", "TEST-AGILE")
+        monkeypatch.setattr(config, "APPLIANCE_NOTIFY_REPLAN", True)
+        patch_st.get_remote_control_enabled.return_value = True
+        now = datetime.now(UTC).replace(second=0, microsecond=0)
+        base = now.replace(minute=0 if now.minute < 30 else 30) + timedelta(hours=1)
+        w1 = (base, base + timedelta(hours=2), 5.0)
+        w2 = (base + timedelta(hours=1), base + timedelta(hours=3), 4.0)
+        with patch.object(
+            appliance_dispatch, "find_battery_aware_window", side_effect=[w1, w2]
+        ):
+            appliance_dispatch.reconcile()
+            with patch("src.notifier._dispatch") as mock_dispatch:
+                appliance_dispatch.reconcile()
+        from src.notifier import AlertType
+        armed = [
+            c for c in mock_dispatch.call_args_list
+            if c.args and c.args[0] == AlertType.APPLIANCE_ARMED
+        ]
+        assert len(armed) == 1
+        assert armed[0].kwargs["extra"]["replan"] is True
+
     def test_cancel_fires_cancelled_hook(
         self, monkeypatch, appliance_id, fake_scheduler, patch_st
     ):
@@ -385,6 +441,94 @@ class TestFireCron:
             appliance_dispatch._fire_cron(job_id)
         row = db.get_appliance_job(job_id)
         assert row["status"] == "failed"
+
+    def test_starting_ping_muted_by_default(
+        self, monkeypatch, appliance_id, patch_st
+    ):
+        """Default (APPLIANCE_NOTIFY_STARTING=False): the fire path marks the
+        job running but sends NO starting ping — only arm + finished pings
+        reach the user."""
+        monkeypatch.setattr(config, "OPENCLAW_READ_ONLY", False)
+        monkeypatch.setattr(config, "APPLIANCE_NOTIFY_STARTING", False)
+        patch_st.get_remote_control_enabled.return_value = True
+        job_id = self._make_armed_job(appliance_id, datetime.now(UTC))
+        with patch("src.notifier._dispatch") as mock_dispatch:
+            appliance_dispatch._fire_cron(job_id)
+        from src.notifier import AlertType
+        starting = [
+            c for c in mock_dispatch.call_args_list
+            if c.args and c.args[0] == AlertType.APPLIANCE_STARTING
+        ]
+        assert starting == []
+        assert db.get_appliance_job(job_id)["status"] == "running"
+
+    def test_starting_ping_fires_when_enabled(
+        self, monkeypatch, appliance_id, patch_st
+    ):
+        monkeypatch.setattr(config, "OPENCLAW_READ_ONLY", False)
+        monkeypatch.setattr(config, "APPLIANCE_NOTIFY_STARTING", True)
+        patch_st.get_remote_control_enabled.return_value = True
+        job_id = self._make_armed_job(appliance_id, datetime.now(UTC))
+        with patch("src.notifier._dispatch") as mock_dispatch:
+            appliance_dispatch._fire_cron(job_id)
+        from src.notifier import AlertType
+        starting = [
+            c for c in mock_dispatch.call_args_list
+            if c.args and c.args[0] == AlertType.APPLIANCE_STARTING
+        ]
+        assert len(starting) == 1
+
+
+# ---------------------------------------------------------------------------
+# pending_arm_change — the heartbeat's lightweight transition detector
+# ---------------------------------------------------------------------------
+
+class TestPendingArmChange:
+    def test_true_when_remote_on_and_no_job(self, appliance_id, patch_st):
+        patch_st.get_remote_control_enabled.return_value = True
+        assert appliance_dispatch.pending_arm_change() is True
+
+    def test_false_when_remote_off_and_no_job(self, appliance_id, patch_st):
+        patch_st.get_remote_control_enabled.return_value = False
+        assert appliance_dispatch.pending_arm_change() is False
+
+    def test_false_when_remote_on_and_already_scheduled(
+        self, monkeypatch, appliance_id, fake_scheduler, patch_st
+    ):
+        """Armed-and-idle must NOT keep re-firing the heartbeat trigger."""
+        monkeypatch.setattr(config, "OCTOPUS_TARIFF_CODE", "TEST-AGILE")
+        now = datetime.now(UTC)
+        seed_start = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        _seed_agile_rates(seed_start, [10.0, 5.0, 5.0, 5.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0])
+        patch_st.get_remote_control_enabled.return_value = True
+        appliance_dispatch.reconcile()
+        assert db.get_active_appliance_job(appliance_id) is not None
+        # Still armed, job already scheduled → no further re-solve needed.
+        assert appliance_dispatch.pending_arm_change() is False
+
+    def test_true_when_remote_off_but_job_still_scheduled(
+        self, monkeypatch, appliance_id, fake_scheduler, patch_st
+    ):
+        monkeypatch.setattr(config, "OCTOPUS_TARIFF_CODE", "TEST-AGILE")
+        now = datetime.now(UTC)
+        seed_start = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        _seed_agile_rates(seed_start, [10.0, 5.0, 5.0, 5.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0])
+        patch_st.get_remote_control_enabled.return_value = True
+        appliance_dispatch.reconcile()
+        # User cancelled on the unit → cancel transition pending.
+        patch_st.get_remote_control_enabled.return_value = False
+        assert appliance_dispatch.pending_arm_change() is True
+
+    def test_false_on_smartthings_error(self, appliance_id, patch_st):
+        patch_st.get_remote_control_enabled.side_effect = SmartThingsError(
+            "transport", "boom"
+        )
+        assert appliance_dispatch.pending_arm_change() is False
+
+    def test_false_when_dispatch_disabled(self, monkeypatch, appliance_id, patch_st):
+        monkeypatch.setattr(config, "APPLIANCE_DISPATCH_ENABLED", False)
+        patch_st.get_remote_control_enabled.return_value = True
+        assert appliance_dispatch.pending_arm_change() is False
 
 
 # ---------------------------------------------------------------------------
