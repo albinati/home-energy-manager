@@ -1271,9 +1271,36 @@ def solve_lp(
     # 74% of one day's PV (6.34 kWh, ~£0.95) curtailed under the legacy zero-penalty
     # objective. Set ``LP_PV_CURTAIL_PENALTY_PENCE_PER_KWH=0`` to revert.
     pv_curt_pen = float(getattr(config, "LP_PV_CURTAIL_PENALTY_PENCE_PER_KWH", 0.0))
-    obj_pv_curt = (
-        pv_curt_pen * pulp.lpSum(pv_curt[i] for i in range(n)) if pv_curt_pen > 0 else 0
-    )
+    # 2026-06-29: the curtailment penalty models PV's export opportunity cost. The
+    # flat EXPORT_RATE_PENCE (15p) is wrong on NEGATIVE-import slots: there the LP
+    # is PAID to import, and the deep-negative windows usually coincide with a
+    # zero/negative Outgoing rate (solar oversupply), so the "would have exported
+    # at 15p" premise is false. With the flat penalty (15p > any |neg price|) the
+    # LP never curtails PV in negatives — it self-consumes PV instead of importing
+    # from the PAID grid (prod 2026-06-12: ~£0.38 of paid import forgone in one
+    # −8.79p window).
+    #
+    # Fix: on negative-import slots replace the flat penalty with PV's REAL per-slot
+    # export opportunity, max(0, Outgoing rate):
+    #   * Outgoing <= 0 (the usual oversupply case): penalty → 0, so the LP freely
+    #     curtails PV and grid-charges at the paid negative price.
+    #   * Outgoing > 0: penalty = that rate, so curtailing genuinely valuable PV
+    #     "costs" what it would have earned — the LP then prefers to EXPORT the PV
+    #     (only grid-charging + curtailing when the paid import actually beats the
+    #     export). This is what stops the exemption from throwing away
+    #     profitably-exportable PV in a negative-import + high-Outgoing slot
+    #     (caught by tests/test_lp_neg_slot_curtail_penalty adversarial cases).
+    # Positive-price slots keep the flat penalty unchanged. Set
+    # LP_NEG_SLOT_NO_CURTAIL_PENALTY=false to revert to the uniform flat penalty.
+    neg_exempt = bool(getattr(config, "LP_NEG_SLOT_NO_CURTAIL_PENALTY", True))
+    if pv_curt_pen > 0:
+        def _curt_pen(idx: int) -> float:
+            if neg_exempt and price_line[idx] < 0:
+                return max(0.0, float(export_rate_line[idx]))
+            return pv_curt_pen
+        obj_pv_curt = pulp.lpSum(_curt_pen(i) * pv_curt[i] for i in range(n))
+    else:
+        obj_pv_curt = 0
     objective = (
         obj_grid + obj_cycle + obj_comfort + obj_tank_hi
         + obj_pv_curt + obj_pv_abundance_dhw + obj_shower_lo
