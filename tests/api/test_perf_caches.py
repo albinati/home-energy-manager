@@ -54,10 +54,16 @@ def test_lifetime_shape_and_active_filter(client, monkeypatch):
             self.cost = _Cost(net)
 
     # Three months: one active-by-cost, one active-by-export, one INACTIVE.
+    # Seed RELATIVE to the current month (via the same anchor logic the endpoint
+    # uses) so the test is stable across month/year boundaries — a hardcoded
+    # (2026,4/5/6) reddened CI every July run when the rolling window shifted off
+    # April (date-relative flake class).
+    from datetime import date as _date
+    _anchors = main_mod._last_n_month_anchors(_date.today(), 3)  # oldest → current
     table = {
-        (2026, 4): _Insights(100.0, 40.0, 12.5),   # active (net != 0)
-        (2026, 5): _Insights(120.0, 50.0, 0.0),    # active (export > 0)
-        (2026, 6): _Insights(0.0, 0.0, 0.0),       # inactive — excluded
+        _anchors[0]: _Insights(100.0, 40.0, 12.5),   # active (net != 0)
+        _anchors[1]: _Insights(120.0, 50.0, 0.0),    # active (export > 0)
+        _anchors[2]: _Insights(0.0, 0.0, 0.0),       # inactive — excluded
     }
 
     def fake_insights(year, month):
