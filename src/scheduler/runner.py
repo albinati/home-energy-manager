@@ -757,6 +757,104 @@ def bulletproof_load_error_log_job() -> None:
         logger.warning("load_recent_bias refresh failed (non-fatal): %s", e)
 
 
+def _evaluate_guests_signal(
+    daily: list[tuple[float, float]],
+    *,
+    window_days: int,
+    ratio_thr: float,
+    min_days: int,
+    day_over: float,
+    rearm_ratio: float,
+) -> dict[str, Any]:
+    """Pure decision logic for the guests-elevation detector.
+
+    ``daily`` = list of (actual_kwh, forecast_kwh) per day, oldest→newest. Uses
+    only the trailing ``window_days``. Returns ratio, days_over, and two flags:
+    ``elevated`` (sustained above thresholds → suggest guests) and ``normalized``
+    (signal back to ~normal → re-arm). Both False when there isn't enough data.
+    """
+    win = [d for d in daily if d[1] > 0][-window_days:]
+    if len(win) < window_days:
+        return {"ratio": 0.0, "days_over": 0, "elevated": False, "normalized": False,
+                "n": len(win), "avg_actual": 0.0, "avg_forecast": 0.0}
+    sa = sum(a for a, _ in win)
+    sf = sum(f for _, f in win)
+    ratio = sa / sf if sf > 0 else 0.0
+    days_over = sum(1 for a, f in win if f > 0 and a > f * day_over)
+    elevated = ratio > ratio_thr and days_over >= min_days
+    normalized = ratio < rearm_ratio
+    return {"ratio": ratio, "days_over": days_over, "elevated": elevated,
+            "normalized": normalized, "n": len(win), "avg_actual": sa / len(win),
+            "avg_forecast": sf / len(win)}
+
+
+def bulletproof_guests_detector_job() -> None:
+    """Nightly: detect SUSTAINED base-load elevation (possible guests) and PROMPT
+    the user to enable the guests preset. Never auto-applies — the household knows
+    if there are visitors; auto-applying would chase the noisy load (the rejected
+    recency corrector's failure mode). One-shot per episode via a runtime 'armed'
+    flag that only re-arms once the signal falls back to ~normal. Best-effort.
+    """
+    if not getattr(config, "GUESTS_DETECT_ENABLED", True):
+        return
+    try:
+        from ..presets import OperationPreset
+        already_guests = OperationPreset(
+            (config.OPTIMIZATION_PRESET or "normal").strip().lower()
+        ) == OperationPreset.GUESTS
+    except (ValueError, AttributeError):
+        already_guests = False
+    try:
+        window = int(config.GUESTS_DETECT_WINDOW_DAYS)
+        now = datetime.now(UTC)
+        start = now - timedelta(days=window + 1)
+        rows = db.get_load_error_log_range(
+            start.strftime("%Y-%m-%dT%H:%M:%SZ"), now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        )
+        by_day: dict[str, list[float]] = {}
+        for r in rows:
+            d = str(r.get("slot_time_utc") or "")[:10]
+            a = r.get("actual_kwh"); f = r.get("forecast_kwh")
+            if not d or a is None or f is None:
+                continue
+            agg = by_day.setdefault(d, [0.0, 0.0])
+            agg[0] += float(a); agg[1] += float(f)
+        daily = [(by_day[d][0], by_day[d][1]) for d in sorted(by_day)]
+        sig = _evaluate_guests_signal(
+            daily, window_days=window,
+            ratio_thr=float(config.GUESTS_DETECT_RATIO),
+            min_days=int(config.GUESTS_DETECT_MIN_DAYS),
+            day_over=float(config.GUESTS_DETECT_DAY_OVER),
+            rearm_ratio=float(config.GUESTS_DETECT_REARM_RATIO),
+        )
+        armed = (db.get_runtime_setting("guests_suggestion_armed") or "true").lower() != "false"
+        # Re-arm once the signal normalises (also resets after guests turned on).
+        if sig["normalized"] or already_guests:
+            if not armed:
+                db.set_runtime_setting("guests_suggestion_armed", "true")
+            return
+        if sig["elevated"] and armed:
+            pct = (sig["ratio"] - 1.0) * 100.0
+            from .. import notifier
+            notifier.notify_guests_mode_suggested(
+                pct_above=pct, days=int(sig["days_over"]),
+                avg_actual_kwh=float(sig["avg_actual"]),
+                avg_forecast_kwh=float(sig["avg_forecast"]),
+            )
+            db.set_runtime_setting("guests_suggestion_armed", "false")
+            logger.info(
+                "guests detector: SUGGESTED (ratio=%.2f days_over=%d) — prompted user",
+                sig["ratio"], sig["days_over"],
+            )
+        else:
+            logger.info(
+                "guests detector: ratio=%.2f days_over=%d elevated=%s armed=%s (no prompt)",
+                sig["ratio"], sig["days_over"], sig["elevated"], armed,
+            )
+    except Exception as e:
+        logger.warning("guests detector job failed (non-fatal): %s", e)
+
+
 def bulletproof_export_opportunity_job() -> None:
     """Persist yesterday's export opportunity cost (Outgoing Agile − flat SEG).
 
@@ -1989,6 +2087,25 @@ def start_background_scheduler() -> None:
                 id="bulletproof_export_opportunity",
             )
             logger.info("Export-opportunity cron scheduled (04:25 UTC daily)")
+            # Guests-elevation detector — after the load_error_log rebuild (04:22
+            # UTC) so yesterday's actual-vs-forecast is fresh. Fires in the local
+            # morning (default 08:30) so the prompt lands at a sensible hour. It
+            # never auto-applies; it only suggests the guests preset.
+            if getattr(config, "GUESTS_DETECT_ENABLED", True):
+                _background_scheduler.add_job(
+                    bulletproof_guests_detector_job,
+                    CronTrigger(
+                        hour=int(config.GUESTS_SUGGESTION_HOUR),
+                        minute=int(config.GUESTS_SUGGESTION_MINUTE),
+                        timezone=ZoneInfo(config.BULLETPROOF_TIMEZONE),
+                    ),
+                    id="bulletproof_guests_detector",
+                )
+                logger.info(
+                    "Guests-elevation detector cron scheduled (%02d:%02d %s daily)",
+                    int(config.GUESTS_SUGGESTION_HOUR), int(config.GUESTS_SUGGESTION_MINUTE),
+                    config.BULLETPROOF_TIMEZONE,
+                )
             # PV calibration refresh — keeps pv_calibration_hourly +
             # pv_calibration_hourly_cloud current. Runs at 04:30 UTC, after
             # skill-log rebuild (04:15) and Fox/Daikin rollups (02:30 / 02:35)

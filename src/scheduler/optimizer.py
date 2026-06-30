@@ -423,6 +423,24 @@ def _optimization_preset_away_like() -> bool:
         return False
 
 
+def _guests_base_load_scale() -> float:
+    """Multiplier on the residual base-load forecast when mode=guests.
+
+    Visitors raise BASE load (cooking, lights, devices), not just DHW showers —
+    so the battery must be provisioned for the higher consumption. Returns 1.0
+    (bit-identical no-op) for normal/vacation, so only the guests preset shifts
+    the demand assumption. Mirrors the documented 'guests -> 1.3' intent
+    (config.LP_GUESTS_BASE_LOAD_SCALE, runtime-tunable). Auto-reverts when the
+    operator switches back to normal — no persistent change, no backtest needed.
+    """
+    try:
+        if OperationPreset((config.OPTIMIZATION_PRESET or "normal").strip().lower()) == OperationPreset.GUESTS:
+            return float(getattr(config, "LP_GUESTS_BASE_LOAD_SCALE", 1.0))
+    except (ValueError, AttributeError):
+        pass
+    return 1.0
+
+
 def _count_midnight_crossings(
     merged: list[tuple[datetime, datetime, tuple]],
     tz: ZoneInfo,
@@ -1419,6 +1437,9 @@ def _run_optimizer_lp(
     # dispatch loads (below) are added at their true kWh. ``base_load_spread`` is
     # the per-slot p75 spread used by the scenario LP (#477 Stage 2).
     _load_scale = float(getattr(config, "LP_LOAD_SCALE_FACTOR", 1.0))
+    # guests preset lifts the residual base load (visitors raise base load, not
+    # just DHW) — 1.0 no-op for normal/vacation. Applied on top of _load_scale.
+    _guests_scale = _guests_base_load_scale()
     # Phase-2 additive per-local-hour bias correction — applied to the residual
     # base load (so the committed base_load_json the error log measures includes
     # it → the loop closes). OFF unless LOAD_RECENT_BIAS_ENABLED; empty otherwise.
@@ -1435,13 +1456,17 @@ def _run_optimizer_lp(
         _dow = _local.weekday()
         _h = _local.hour
         _m = 30 if _local.minute >= 30 else 0
-        _b = db.lookup_residual_kwh(_prof, _dow, _h, _m) * _load_scale
+        _b = db.lookup_residual_kwh(_prof, _dow, _h, _m) * _load_scale * _guests_scale
         if _load_bias:
             _b = max(0.0, _b + _load_bias.get(_h, 0.0))
         base_load.append(_b)
-        base_load_spread.append(db.lookup_residual_spread_kwh(_prof, _dow, _h, _m) * _load_scale)
+        base_load_spread.append(
+            db.lookup_residual_spread_kwh(_prof, _dow, _h, _m) * _load_scale * _guests_scale
+        )
     if _load_scale != 1.0:
         logger.info("LP base_load: operator load scale %.2f applied to residual profile", _load_scale)
+    if _guests_scale != 1.0:
+        logger.info("LP base_load: guests preset base-load scale %.2f applied to residual profile", _guests_scale)
     if _load_bias:
         logger.info("LP base_load: recent-bias correction applied to %d local hour(s)", len(_load_bias))
     residual_base_load = list(base_load)

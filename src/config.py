@@ -384,6 +384,24 @@ class Config:
     # consumption data lands ~24 h after the slot; 04:00 local is safe.
     CONSUMPTION_BACKFILL_HOUR: int = int(os.getenv("CONSUMPTION_BACKFILL_HOUR", "4"))
     CONSUMPTION_BACKFILL_MINUTE: int = int(os.getenv("CONSUMPTION_BACKFILL_MINUTE", "0"))
+
+    # --- Guests-mode suggestion (2026-06-30) ---
+    # A nightly detector flags SUSTAINED base-load elevation (possible visitors)
+    # and PROMPTS the user to enable the guests preset (never auto-applies — the
+    # household knows if there are guests; auto-applying would chase the noisy
+    # load like the rejected recency corrector). Fires at most once per episode.
+    GUESTS_DETECT_ENABLED: bool = os.getenv(
+        "GUESTS_DETECT_ENABLED", "true"
+    ).strip().lower() in ("1", "true", "yes", "on")
+    GUESTS_DETECT_WINDOW_DAYS: int = int(os.getenv("GUESTS_DETECT_WINDOW_DAYS", "4"))
+    GUESTS_DETECT_RATIO: float = float(os.getenv("GUESTS_DETECT_RATIO", "1.15"))
+    GUESTS_DETECT_MIN_DAYS: int = int(os.getenv("GUESTS_DETECT_MIN_DAYS", "3"))
+    GUESTS_DETECT_DAY_OVER: float = float(os.getenv("GUESTS_DETECT_DAY_OVER", "1.10"))
+    # Re-arm only after the signal falls back to ~normal (ratio < this) — stops
+    # nightly re-prompts during the same elevated episode.
+    GUESTS_DETECT_REARM_RATIO: float = float(os.getenv("GUESTS_DETECT_REARM_RATIO", "1.05"))
+    GUESTS_SUGGESTION_HOUR: int = int(os.getenv("GUESTS_SUGGESTION_HOUR", "8"))
+    GUESTS_SUGGESTION_MINUTE: int = int(os.getenv("GUESTS_SUGGESTION_MINUTE", "30"))
     # Octopus regularly publishes later than the ~24 h the single-shot design
     # assumed (observed 2026-05/06: whole weeks landed days late after a
     # meter-comms outage). The cron therefore sweeps a trailing window and
@@ -1740,6 +1758,14 @@ class Config:
     @LP_SOC_FINAL_KWH.setter
     def LP_SOC_FINAL_KWH(self, value: float) -> None:
         self._rt_set("LP_SOC_FINAL_KWH", float(value))
+
+    @property
+    def LP_GUESTS_BASE_LOAD_SCALE(self) -> float:
+        return float(self._rt_get("LP_GUESTS_BASE_LOAD_SCALE"))
+
+    @LP_GUESTS_BASE_LOAD_SCALE.setter
+    def LP_GUESTS_BASE_LOAD_SCALE(self, value: float) -> None:
+        self._rt_set("LP_GUESTS_BASE_LOAD_SCALE", float(value))
 
     @property
     def LP_LOAD_SCALE_FACTOR(self) -> float:
