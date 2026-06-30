@@ -450,6 +450,21 @@ SCHEMA: dict[str, SettingSpec] = {
             "unaffected."
         ),
     ),
+    "LP_GUESTS_BASE_LOAD_SCALE": SettingSpec(
+        key="LP_GUESTS_BASE_LOAD_SCALE",
+        type_name="float",
+        env_default=_float_env("LP_GUESTS_BASE_LOAD_SCALE", "1.3"),
+        min_value=1.0,
+        max_value=1.6,
+        description=(
+            "Multiplier applied to the residual house-load forecast ONLY when "
+            "mode=guests (on top of LP_LOAD_SCALE_FACTOR). Visitors raise base "
+            "load (cooking, lights, devices), not just DHW showers, so the "
+            "battery must be provisioned for it. 1.0 = guests changes DHW only "
+            "(legacy). Default 1.3 mirrors the documented 'guests -> 1.3' intent. "
+            "Auto-reverts to no-op when mode returns to normal."
+        ),
+    ),
     # Legionella thermal-shock awareness. The Daikin Onecta firmware fires the
     # cycle autonomously on a user-configured day/hour (set in the Onecta app);
     # the LP cannot command it. These knobs let the LP *predict* the resulting

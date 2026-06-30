@@ -57,6 +57,17 @@ def _build_load_profile(slot_starts_utc: list[datetime]) -> list[float]:
     """
     prof = db.residual_load_profile_v2()
     load_scale = float(getattr(config, "LP_LOAD_SCALE_FACTOR", 1.0))
+    # Mirror optimizer._guests_base_load_scale() — guests preset lifts the
+    # residual base load (1.0 no-op for normal/vacation). Inlined to avoid a
+    # scheduler-module import cycle; keep in sync with optimizer.py.
+    guests_scale = 1.0
+    try:
+        from ..presets import OperationPreset
+        if OperationPreset((config.OPTIMIZATION_PRESET or "normal").strip().lower()) == OperationPreset.GUESTS:
+            guests_scale = float(getattr(config, "LP_GUESTS_BASE_LOAD_SCALE", 1.0))
+    except (ValueError, AttributeError):
+        guests_scale = 1.0
+    load_scale = load_scale * guests_scale
     tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
     # Mirror the optimizer's Phase-2 bias correction so Simulate can't diverge
     # from the real LP. Gated — empty (no-op) unless LOAD_RECENT_BIAS_ENABLED.

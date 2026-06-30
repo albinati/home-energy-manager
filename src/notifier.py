@@ -63,6 +63,11 @@ class AlertType(str, Enum):
     # ``severity=critical`` so it bypasses the morning-brief mute; rate-limited
     # by hash so a recurring failure across MPC re-solves only pages once.
     LP_FAILURE = "lp_failure"
+    # 2026-06-30 — sustained base-load elevation detected (possible guests). An
+    # ACTIONABLE prompt: "consumption is up — visitors? enable guests mode?". The
+    # system never auto-applies (that would chase the noisy load); the human
+    # confirms. One-shot per episode (deduped in the detector job).
+    GUESTS_MODE_SUGGESTED = "guests_mode_suggested"
 
 
 # OpenClaw hook payload ``name`` field (one stable label per alert key)
@@ -837,6 +842,41 @@ def push_negative_window_start(
     if price_pence is not None:
         payload["price_pence"] = price_pence
     push_alert(AlertType.NEGATIVE_WINDOW_START.value, payload)
+
+
+def notify_guests_mode_suggested(
+    *,
+    pct_above: float,
+    days: int,
+    avg_actual_kwh: float,
+    avg_forecast_kwh: float,
+) -> None:
+    """🏠 Sustained base-load elevation detected — prompt the user to enable the
+    guests preset (which provisions the battery for higher consumption).
+
+    NEVER auto-applies — the household knows if there are visitors; the system
+    only reminds. pt-BR body; one-shot per episode (deduped by the detector job).
+    """
+    body = "\n".join([
+        f"Consumo ~{pct_above:.0f}% acima do normal há {days} dias "
+        f"(~{avg_actual_kwh:.0f} vs ~{avg_forecast_kwh:.0f} kWh/dia).",
+        "Visitas em casa? O modo guests provisiona a bateria pro consumo maior "
+        "(cobre a noite sem importar no pico).",
+        "Para ligar: Settings → preset → guests, ou MCP `set_optimization_preset guests`. "
+        "Desligue quando a visita sair.",
+    ])
+    extra = {
+        "pct_above": round(float(pct_above), 1),
+        "days": int(days),
+        "avg_actual_kwh": round(float(avg_actual_kwh), 1),
+        "avg_forecast_kwh": round(float(avg_forecast_kwh), 1),
+        "suggestedPreset": "guests",
+        "applyTool": "set_optimization_preset",
+    }
+    _dispatch(
+        AlertType.GUESTS_MODE_SUGGESTED, body, urgent=False, extra=extra,
+        telegram_header_override="🏠 Consumo elevado — visitas?",
+    )
 
 
 def notify_risk(message: str, extra: dict[str, Any] | None = None) -> None:
