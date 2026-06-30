@@ -402,6 +402,25 @@ class Config:
     GUESTS_DETECT_REARM_RATIO: float = float(os.getenv("GUESTS_DETECT_REARM_RATIO", "1.05"))
     GUESTS_SUGGESTION_HOUR: int = int(os.getenv("GUESTS_SUGGESTION_HOUR", "8"))
     GUESTS_SUGGESTION_MINUTE: int = int(os.getenv("GUESTS_SUGGESTION_MINUTE", "30"))
+
+    # --- LP health monitor (2026-06-30) ---
+    # A nightly self-check that flags PERFORMANCE REGRESSIONS from recent dispatch
+    # changes (#607/#608/#609/#610) and alerts via Telegram — ONLY on regression
+    # (silent when healthy). Lives in HEM (has the data); a cloud routine can't
+    # reach the Tailscale-only prod box. Checks: (1) LP infeasible spike in the
+    # last 24h; (2) on a day that HAD negative-price slots, did the battery
+    # DISCHARGE during them (the #607 Backup-discharge bug regressing → it must be
+    # ForceCharge/hold, discharge ≈ 0). Deduped one alert per signature per day.
+    LP_HEALTH_MONITOR_ENABLED: bool = os.getenv(
+        "LP_HEALTH_MONITOR_ENABLED", "true"
+    ).strip().lower() in ("1", "true", "yes", "on")
+    # infeasibles/24h above this = regression (historical rate ~0.8/day; recent 0).
+    LP_HEALTH_MAX_INFEASIBLE_24H: int = int(os.getenv("LP_HEALTH_MAX_INFEASIBLE_24H", "5"))
+    # battery discharge (kWh) summed over negative-price slots above this = the
+    # #607 bug regressed (battery should hold/charge, not self-discharge into load).
+    LP_HEALTH_NEG_DISCHARGE_KWH: float = float(os.getenv("LP_HEALTH_NEG_DISCHARGE_KWH", "0.5"))
+    LP_HEALTH_MONITOR_HOUR: int = int(os.getenv("LP_HEALTH_MONITOR_HOUR", "9"))
+    LP_HEALTH_MONITOR_MINUTE: int = int(os.getenv("LP_HEALTH_MONITOR_MINUTE", "0"))
     # Octopus regularly publishes later than the ~24 h the single-shot design
     # assumed (observed 2026-05/06: whole weeks landed days late after a
     # meter-comms outage). The cron therefore sweeps a trailing window and
