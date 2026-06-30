@@ -855,6 +855,88 @@ def bulletproof_guests_detector_job() -> None:
         logger.warning("guests detector job failed (non-fatal): %s", e)
 
 
+def _evaluate_lp_health(
+    *,
+    infeasible_24h: int,
+    neg_slot_count: int,
+    neg_discharge_kwh: float,
+    max_infeasible: int,
+    neg_discharge_thr: float,
+) -> list[str]:
+    """Pure regression check for the LP health monitor. Returns a list of issue
+    strings (empty = healthy). Covers an LP-infeasible spike and the #607
+    Backup-discharge bug regressing (battery discharging during negative prices)."""
+    issues: list[str] = []
+    if infeasible_24h > max_infeasible:
+        issues.append(
+            f"LP infeasible {infeasible_24h}x nas últimas 24h (limite {max_infeasible})"
+        )
+    if neg_slot_count > 0 and neg_discharge_kwh > neg_discharge_thr:
+        issues.append(
+            f"bateria descarregou {neg_discharge_kwh:.2f} kWh durante {neg_slot_count} "
+            f"slots de preço NEGATIVO (deveria ser ~0 — regressão do #607)"
+        )
+    return issues
+
+
+def bulletproof_lp_health_monitor_job() -> None:
+    """Nightly self-check for performance regressions from the recent dispatch
+    changes (#607/#608/#609/#610). Alerts via Telegram ONLY on regression
+    (silent when healthy). Deduped one alert per signature per day. Best-effort.
+    """
+    if not getattr(config, "LP_HEALTH_MONITOR_ENABLED", True):
+        return
+    try:
+        import hashlib
+        now = datetime.now(UTC)
+        since = (now - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%S")
+        with db._lock:  # noqa: SLF001 — read-only counts
+            conn = db.get_connection()
+            infeasible_24h = conn.execute(
+                "SELECT COUNT(*) FROM optimizer_log WHERE run_at >= ? "
+                "AND lower(coalesce(strategy_summary,'')) LIKE '%infeasible%'",
+                (since,),
+            ).fetchone()[0]
+            yday = (now.date() - timedelta(days=1)).isoformat()
+            neg_slots = {
+                str(r[0])[11:16]
+                for r in conn.execute(
+                    "SELECT valid_from FROM agile_rates "
+                    "WHERE substr(valid_from,1,10)=? AND value_inc_vat < 0",
+                    (yday,),
+                ).fetchall()
+            }
+        neg_discharge = 0.0
+        if neg_slots:
+            disch = db.half_hourly_battery_discharge_kwh_for_day(now.date() - timedelta(days=1))
+            for slot_iso, kwh in disch.items():
+                if str(slot_iso)[11:16] in neg_slots:
+                    neg_discharge += float(kwh or 0.0)
+        issues = _evaluate_lp_health(
+            infeasible_24h=int(infeasible_24h),
+            neg_slot_count=len(neg_slots),
+            neg_discharge_kwh=neg_discharge,
+            max_infeasible=int(config.LP_HEALTH_MAX_INFEASIBLE_24H),
+            neg_discharge_thr=float(config.LP_HEALTH_NEG_DISCHARGE_KWH),
+        )
+        if not issues:
+            logger.info(
+                "LP health monitor: OK (infeasible_24h=%d neg_slots=%d neg_discharge=%.2f)",
+                infeasible_24h, len(neg_slots), neg_discharge,
+            )
+            return
+        sig = hashlib.sha1((yday + "|" + "|".join(issues)).encode()).hexdigest()[:12]
+        if (db.get_runtime_setting("lp_health_last_alert_sig") or "") == sig:
+            logger.info("LP health monitor: regression already alerted today (sig=%s)", sig)
+            return
+        from .. import notifier
+        notifier.notify_lp_health_regression(issues)
+        db.set_runtime_setting("lp_health_last_alert_sig", sig)
+        logger.warning("LP health monitor: REGRESSION alerted — %s", "; ".join(issues))
+    except Exception as e:
+        logger.warning("LP health monitor job failed (non-fatal): %s", e)
+
+
 def bulletproof_export_opportunity_job() -> None:
     """Persist yesterday's export opportunity cost (Outgoing Agile − flat SEG).
 
@@ -2104,6 +2186,24 @@ def start_background_scheduler() -> None:
                 logger.info(
                     "Guests-elevation detector cron scheduled (%02d:%02d %s daily)",
                     int(config.GUESTS_SUGGESTION_HOUR), int(config.GUESTS_SUGGESTION_MINUTE),
+                    config.BULLETPROOF_TIMEZONE,
+                )
+            # LP health monitor — nightly regression self-check (#607-#610).
+            # Fires after the negative window has fully passed + nightly rebuilds.
+            # Alerts only on regression.
+            if getattr(config, "LP_HEALTH_MONITOR_ENABLED", True):
+                _background_scheduler.add_job(
+                    bulletproof_lp_health_monitor_job,
+                    CronTrigger(
+                        hour=int(config.LP_HEALTH_MONITOR_HOUR),
+                        minute=int(config.LP_HEALTH_MONITOR_MINUTE),
+                        timezone=ZoneInfo(config.BULLETPROOF_TIMEZONE),
+                    ),
+                    id="bulletproof_lp_health_monitor",
+                )
+                logger.info(
+                    "LP health monitor cron scheduled (%02d:%02d %s daily)",
+                    int(config.LP_HEALTH_MONITOR_HOUR), int(config.LP_HEALTH_MONITOR_MINUTE),
                     config.BULLETPROOF_TIMEZONE,
                 )
             # PV calibration refresh — keeps pv_calibration_hourly +

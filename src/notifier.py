@@ -68,6 +68,10 @@ class AlertType(str, Enum):
     # system never auto-applies (that would chase the noisy load); the human
     # confirms. One-shot per episode (deduped in the detector job).
     GUESTS_MODE_SUGGESTED = "guests_mode_suggested"
+    # 2026-06-30 — LP health monitor: a dispatch-change regression was detected
+    # (infeasible spike, or battery discharging during negative-price slots).
+    # Fires only on regression; deduped one per signature per day.
+    LP_HEALTH_REGRESSION = "lp_health_regression"
 
 
 # OpenClaw hook payload ``name`` field (one stable label per alert key)
@@ -876,6 +880,19 @@ def notify_guests_mode_suggested(
     _dispatch(
         AlertType.GUESTS_MODE_SUGGESTED, body, urgent=False, extra=extra,
         telegram_header_override="🏠 Consumo elevado — visitas?",
+    )
+
+
+def notify_lp_health_regression(issues: list[str]) -> None:
+    """⚠️ LP health monitor caught a dispatch-change regression. Fires only when
+    something is actually wrong (infeasible spike / battery discharging during
+    negative prices). pt-BR; deduped one per signature per day by the caller.
+    """
+    body = "\n".join(["⚠️ Monitor do LP — possível regressão de performance:", *[f"• {i}" for i in issues]])
+    _dispatch(
+        AlertType.LP_HEALTH_REGRESSION, body, urgent=True,
+        extra={"issues": list(issues)},
+        telegram_header_override="⚠️ LP regressão",
     )
 
 
