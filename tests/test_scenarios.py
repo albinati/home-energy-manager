@@ -116,6 +116,72 @@ def test_perturbation_for_unknown_raises():
         scenarios._perturbation_for("paranoid")  # type: ignore[arg-type]
 
 
+# --- PV perturbation (2026-07-02 LP audit) ---
+
+def test_perturb_weather_pv_factor_scales_pv_only():
+    w = _weather_fixture()
+    p = scenarios.perturb_weather(w, temp_delta_c=0.0, pv_factor=0.85)
+    assert p is not w
+    assert p.pv_kwh_per_slot == pytest.approx([0.5 * 0.85] * 4)
+    # temperature + COP untouched by a pure PV perturbation
+    assert p.temperature_outdoor_c == w.temperature_outdoor_c
+    assert p.cop_space == w.cop_space
+    assert p.cop_dhw == w.cop_dhw
+
+
+def test_perturb_weather_combined_temp_and_pv():
+    w = _weather_fixture()
+    p = scenarios.perturb_weather(w, temp_delta_c=-1.5, pv_factor=0.85)
+    assert all(t == 8.5 for t in p.temperature_outdoor_c)
+    assert p.pv_kwh_per_slot == pytest.approx([0.5 * 0.85] * 4)
+
+
+def test_perturb_weather_identity_when_both_neutral():
+    w = _weather_fixture()
+    assert scenarios.perturb_weather(w, temp_delta_c=0.0, pv_factor=1.0) is w
+
+
+def test_perturb_weather_negative_pv_factor_clamped():
+    w = _weather_fixture()
+    p = scenarios.perturb_weather(w, temp_delta_c=0.0, pv_factor=-0.5)
+    assert p.pv_kwh_per_slot == [0.0] * 4
+
+
+def test_perturbation_for_includes_pv_factor(monkeypatch):
+    monkeypatch.setattr(config, "LP_SCENARIO_PESSIMISTIC_PV_FACTOR", 0.85, raising=False)
+    monkeypatch.setattr(config, "LP_SCENARIO_OPTIMISTIC_PV_FACTOR", 1.05, raising=False)
+    assert scenarios._perturbation_for("pessimistic").pv_factor == 0.85
+    assert scenarios._perturbation_for("optimistic").pv_factor == 1.05
+    assert scenarios._perturbation_for("nominal").pv_factor == 1.0
+
+
+def test_solve_one_scenario_result_carries_pv_factor(monkeypatch):
+    """The pv_factor must reach ScenarioSolveResult so scenario_solve_log stays auditable."""
+    monkeypatch.setattr(config, "LP_SCENARIO_PESSIMISTIC_PV_FACTOR", 0.85, raising=False)
+    captured = {}
+
+    def fake_solve_lp(**kw):
+        captured["pv"] = list(kw["weather"].pv_kwh_per_slot)
+        from src.scheduler.lp_optimizer import LpPlan
+        return LpPlan(ok=True, status="Optimal", objective_pence=0.0)
+
+    monkeypatch.setattr(scenarios, "solve_lp", fake_solve_lp)
+    w = _weather_fixture()
+    res = scenarios._solve_one_scenario(
+        "pessimistic",
+        slot_starts_utc=w.slot_starts_utc,
+        price_pence=[10.0] * 4,
+        base_load_kwh=[0.4] * 4,
+        weather=w,
+        initial=None,
+        tz=None,
+        micro_climate_offset_c=0.0,
+        export_price_pence=None,
+    )
+    assert res.pv_factor == 0.85
+    assert captured["pv"] == pytest.approx([0.5 * 0.85] * 4)
+
+
 def test_trigger_runs_scenarios_default_includes_canonical_triggers():
     # V12 default LP_SCENARIOS_ON_TRIGGER_REASONS = "plan_push,octopus_fetch,tier_boundary"
     # (legacy "cron" removed when the fixed-hour MPC cron was deleted).

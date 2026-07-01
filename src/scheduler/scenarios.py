@@ -52,6 +52,7 @@ class ScenarioSolveResult:
     load_factor: float
     duration_ms: int
     error: str | None = None
+    pv_factor: float = 1.0
 
 
 @dataclass
@@ -60,47 +61,68 @@ class _Perturbation:
 
     temp_delta_c: float
     load_factor: float
+    pv_factor: float = 1.0
 
 
 def _perturbation_for(scenario: Scenario) -> _Perturbation:
     if scenario == "nominal":
-        return _Perturbation(0.0, 1.0)
+        return _Perturbation(0.0, 1.0, 1.0)
     if scenario == "optimistic":
         return _Perturbation(
             float(config.LP_SCENARIO_OPTIMISTIC_TEMP_DELTA_C),
             float(config.LP_SCENARIO_OPTIMISTIC_LOAD_FACTOR),
+            float(getattr(config, "LP_SCENARIO_OPTIMISTIC_PV_FACTOR", 1.0)),
         )
     if scenario == "pessimistic":
         return _Perturbation(
             float(config.LP_SCENARIO_PESSIMISTIC_TEMP_DELTA_C),
             float(config.LP_SCENARIO_PESSIMISTIC_LOAD_FACTOR),
+            float(getattr(config, "LP_SCENARIO_PESSIMISTIC_PV_FACTOR", 1.0)),
         )
     raise ValueError(f"Unknown scenario: {scenario!r}")
 
 
-def perturb_weather(weather: WeatherLpSeries, temp_delta_c: float) -> WeatherLpSeries:
-    """Return a new ``WeatherLpSeries`` with shifted outdoor temp + recomputed COP.
+def perturb_weather(
+    weather: WeatherLpSeries, temp_delta_c: float, pv_factor: float = 1.0
+) -> WeatherLpSeries:
+    """Return a new ``WeatherLpSeries`` with shifted outdoor temp + recomputed
+    COP, and PV scaled by ``pv_factor``.
 
-    PV (irradiance-driven) and cloud cover are NOT shifted by temperature; air
-    temperature is decoupled from solar generation in the model. Heat-pump COP
-    is recomputed via ``cop_at_temperature`` so cold-snap perturbations also
-    capture efficiency loss, not just heating-demand growth.
+    Temperature and PV are perturbed INDEPENDENTLY: temperature adjusts
+    heating-energy bounds AND heat-pump COP (recomputed via
+    ``cop_at_temperature`` so cold-snap perturbations also capture efficiency
+    loss); ``pv_factor`` scales ``pv_kwh_per_slot`` to model a cloud surprise.
+    Before the 2026-07-02 LP audit the pessimistic scenario kept NOMINAL PV,
+    so an overcast day could breach the very floor the robustness gates trust.
+    Radiation/cloud series are not consumed by the LP for energy; they stay
+    unchanged.
     """
-    if temp_delta_c == 0.0:
+    if temp_delta_c == 0.0 and pv_factor == 1.0:
         return weather
 
-    curve = config.DAIKIN_COP_CURVE
-    dhw_pen = float(config.COP_DHW_PENALTY)
-    new_t = [t + temp_delta_c for t in weather.temperature_outdoor_c]
-    new_cop_space = [max(1.0, cop_at_temperature(curve, t)) for t in new_t]
-    new_cop_dhw = [max(1.0, c - dhw_pen) for c in new_cop_space]
+    if temp_delta_c != 0.0:
+        curve = config.DAIKIN_COP_CURVE
+        dhw_pen = float(config.COP_DHW_PENALTY)
+        new_t = [t + temp_delta_c for t in weather.temperature_outdoor_c]
+        new_cop_space = [max(1.0, cop_at_temperature(curve, t)) for t in new_t]
+        new_cop_dhw = [max(1.0, c - dhw_pen) for c in new_cop_space]
+    else:
+        # PV-only perturbation: keep the caller's temperature AND its COP series
+        # untouched — the nominal COP may come from a calibrated pipeline, not
+        # cop_at_temperature; recomputing it here would silently change heating
+        # economics in a scenario that only meant to stress PV.
+        new_t = list(weather.temperature_outdoor_c)
+        new_cop_space = list(weather.cop_space)
+        new_cop_dhw = list(weather.cop_dhw)
+    pv_f = max(0.0, float(pv_factor))
+    new_pv = [max(0.0, kwh * pv_f) for kwh in weather.pv_kwh_per_slot]
 
     return WeatherLpSeries(
         slot_starts_utc=list(weather.slot_starts_utc),
         temperature_outdoor_c=new_t,
         shortwave_radiation_wm2=list(weather.shortwave_radiation_wm2),
         cloud_cover_pct=list(weather.cloud_cover_pct),
-        pv_kwh_per_slot=list(weather.pv_kwh_per_slot),
+        pv_kwh_per_slot=new_pv,
         cop_space=new_cop_space,
         cop_dhw=new_cop_dhw,
     )
@@ -160,7 +182,7 @@ def _solve_one_scenario(
     collide on solver state.
     """
     p = _perturbation_for(scenario)
-    w = perturb_weather(weather, p.temp_delta_c)
+    w = perturb_weather(weather, p.temp_delta_c, p.pv_factor)
     bl = perturb_base_load(base_load_kwh, p.load_factor, spread=base_load_spread)
     t0 = time.monotonic()
     try:
@@ -176,9 +198,9 @@ def _solve_one_scenario(
         )
         duration_ms = int((time.monotonic() - t0) * 1000)
         logger.info(
-            "scenario %s: status=%s objective=%.0fp Δt=%+.1f load×%.2f duration=%dms",
+            "scenario %s: status=%s objective=%.0fp Δt=%+.1f load×%.2f pv×%.2f duration=%dms",
             scenario, plan.status, plan.objective_pence,
-            p.temp_delta_c, p.load_factor, duration_ms,
+            p.temp_delta_c, p.load_factor, p.pv_factor, duration_ms,
         )
         return ScenarioSolveResult(
             scenario=scenario,
@@ -186,6 +208,7 @@ def _solve_one_scenario(
             temp_delta_c=p.temp_delta_c,
             load_factor=p.load_factor,
             duration_ms=duration_ms,
+            pv_factor=p.pv_factor,
         )
     except Exception as e:
         duration_ms = int((time.monotonic() - t0) * 1000)
@@ -200,6 +223,7 @@ def _solve_one_scenario(
             load_factor=p.load_factor,
             duration_ms=duration_ms,
             error=str(e),
+            pv_factor=p.pv_factor,
         )
 
 
@@ -267,6 +291,7 @@ def solve_scenarios(
                     load_factor=p.load_factor,
                     duration_ms=0,
                     error=str(e),
+                    pv_factor=p.pv_factor,
                 )
     return out
 

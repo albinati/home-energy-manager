@@ -317,6 +317,11 @@ LP_SCENARIO_OPTIMISTIC_TEMP_DELTA_C=1.0          # +°C applied to outdoor forec
 LP_SCENARIO_OPTIMISTIC_LOAD_FACTOR=0.90          # multiplier on base-load profile
 LP_SCENARIO_PESSIMISTIC_TEMP_DELTA_C=-1.5        # −°C; pessimistic case for cold-night protection
 LP_SCENARIO_PESSIMISTIC_LOAD_FACTOR=1.15         # 15 % uplift on base load
+LP_SCENARIO_OPTIMISTIC_PV_FACTOR=1.05            # ×PV in the optimistic solve (2026-07-02 LP audit)
+LP_SCENARIO_PESSIMISTIC_PV_FACTOR=0.85           # ×PV in the pessimistic solve — models a cloud
+                                                 # surprise; calibrated from 27d of pv_error_log
+                                                 # (daily Σactual/Σforecast p25=0.883). 1.0 = legacy
+                                                 # (no PV perturbation, pessimistic kept nominal PV)
 LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH=0.30        # commit peak_export only when pessimistic exports ≥ this
 LP_SCENARIOS_ON_TRIGGER_REASONS=cron,plan_push,octopus_fetch,tier_boundary
                                                  # which triggers run the 3-pass solve

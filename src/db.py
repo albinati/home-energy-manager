@@ -279,6 +279,7 @@ CREATE TABLE IF NOT EXISTS scenario_solve_log (
     objective_pence REAL,
     perturbation_temp_delta_c REAL NOT NULL,
     perturbation_load_factor REAL NOT NULL,
+    perturbation_pv_factor REAL,          -- NULL on pre-2026-07 rows (= 1.0, no PV perturbation)
     peak_export_slot_count INTEGER,
     duration_ms INTEGER,
     error TEXT,
@@ -340,6 +341,12 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE octopus_fetch_state ADD COLUMN failure_streak_started_at TEXT"
         )
+
+    # 2026-07-02 LP audit — side scenarios now perturb PV too; record the factor
+    # so scenario_solve_log rows stay auditable. NULL on pre-migration rows = 1.0.
+    ssl_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(scenario_solve_log)")}
+    if ssl_cols and "perturbation_pv_factor" not in ssl_cols:
+        conn.execute("ALTER TABLE scenario_solve_log ADD COLUMN perturbation_pv_factor REAL")
 
     # Phase 4.3: user-override marker on action_schedule rows.
     cur = conn.execute("PRAGMA table_info(action_schedule)")
@@ -6810,6 +6817,7 @@ def upsert_scenario_solve_log(
     objective_pence: float | None,
     perturbation_temp_delta_c: float,
     perturbation_load_factor: float,
+    perturbation_pv_factor: float = 1.0,
     peak_export_slot_count: int | None = None,
     duration_ms: int | None = None,
     error: str | None = None,
@@ -6829,15 +6837,16 @@ def upsert_scenario_solve_log(
                 """INSERT INTO scenario_solve_log
                    (batch_id, nominal_run_id, scenario_kind, lp_status,
                     objective_pence, perturbation_temp_delta_c,
-                    perturbation_load_factor, peak_export_slot_count,
-                    duration_ms, error, solved_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    perturbation_load_factor, perturbation_pv_factor,
+                    peak_export_slot_count, duration_ms, error, solved_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(batch_id, scenario_kind) DO UPDATE SET
                      nominal_run_id=excluded.nominal_run_id,
                      lp_status=excluded.lp_status,
                      objective_pence=excluded.objective_pence,
                      perturbation_temp_delta_c=excluded.perturbation_temp_delta_c,
                      perturbation_load_factor=excluded.perturbation_load_factor,
+                     perturbation_pv_factor=excluded.perturbation_pv_factor,
                      peak_export_slot_count=excluded.peak_export_slot_count,
                      duration_ms=excluded.duration_ms,
                      error=excluded.error,
@@ -6845,8 +6854,8 @@ def upsert_scenario_solve_log(
                 (
                     batch_id, nominal_run_id, scenario_kind, lp_status,
                     objective_pence, perturbation_temp_delta_c,
-                    perturbation_load_factor, peak_export_slot_count,
-                    duration_ms, error, now_iso,
+                    perturbation_load_factor, perturbation_pv_factor,
+                    peak_export_slot_count, duration_ms, error, now_iso,
                 ),
             )
             conn.commit()
