@@ -933,6 +933,34 @@ class Config:
     LP_SCENARIO_PESSIMISTIC_PV_FACTOR: float = float(
         os.getenv("LP_SCENARIO_PESSIMISTIC_PV_FACTOR", "0.85")
     )
+    # 2026-07-02 LP audit (PR B) — pessimistic-scenario charge floor. The June
+    # hindsight audit measured 14 evenings where the battery hit empty at
+    # above-median prices (£2.36/mo; winter amplifies): the LP sizes overnight/
+    # pre-peak charge for the MEDIAN load while the cost of under-charging
+    # (peak import ~30p) dwarfs over-charging (cheap ~7p) — the newsvendor
+    # asymmetry says charge for a high quantile, and the pessimistic scenario
+    # (p75 load, −1.5°C, PV ×0.85) IS that quantile, already solved and then
+    # discarded. When enabled, scenario-bearing triggers re-solve the nominal
+    # plan with a SOFT floor at the pessimistic SoC trajectory; the floored
+    # plan is committed. Instant rollback: set false (no redeploy via .env).
+    LP_PESS_CHARGE_FLOOR_ENABLED: bool = os.getenv(
+        "LP_PESS_CHARGE_FLOOR_ENABLED", "true"
+    ).strip().lower() in ("1", "true", "yes", "on")
+    # Subtracted from the pessimistic SoC before flooring — keeps the floor
+    # from binding on noise-level differences (kWh).
+    LP_PESS_CHARGE_FLOOR_TOLERANCE_KWH: float = float(
+        os.getenv("LP_PESS_CHARGE_FLOOR_TOLERANCE_KWH", "0.2")
+    )
+    # Floor only the first N hours of the horizon — the far half is replanned
+    # many times before it executes; flooring it would just re-anchor noise.
+    LP_PESS_CHARGE_FLOOR_HOURS: float = float(
+        os.getenv("LP_PESS_CHARGE_FLOOR_HOURS", "24")
+    )
+    # Penalty per kWh of slack below the floor. Far above any realistic price
+    # spread so the floor behaves hard, but can never make the solve Infeasible.
+    LP_PESS_CHARGE_FLOOR_SLACK_PENALTY_PENCE: float = float(
+        os.getenv("LP_PESS_CHARGE_FLOOR_SLACK_PENALTY_PENCE", "50.0")
+    )
     # #477 Stage 2 — when true, the scenario LP perturbs base load per-slot by
     # the LEARNED p75 spread (median ± (p75−median)) from residual_load_profile_v2
     # instead of the flat factors above. Sharper protection where the variance is

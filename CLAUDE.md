@@ -322,6 +322,17 @@ LP_SCENARIO_PESSIMISTIC_PV_FACTOR=0.85           # ×PV in the pessimistic solve
                                                  # surprise; calibrated from 27d of pv_error_log
                                                  # (daily Σactual/Σforecast p25=0.883). 1.0 = legacy
                                                  # (no PV perturbation, pessimistic kept nominal PV)
+LP_PESS_CHARGE_FLOOR_ENABLED=true                # PR B (2026-07-02 audit) — newsvendor charge floor:
+                                                 # scenario-bearing triggers re-solve the committed plan
+                                                 # with a SOFT floor at the pessimistic solve's SoC
+                                                 # trajectory (under-charging for the evening peak costs
+                                                 # ~4× over-charging; June backtest: cost-neutral,
+                                                 # empty-at-peak slots 4→1). Since PR B scenarios run on
+                                                 # those triggers even without peak_export slots.
+                                                 # false = instant rollback to median-sized charging.
+LP_PESS_CHARGE_FLOOR_TOLERANCE_KWH=0.2           # subtracted from the pessimistic SoC before flooring
+LP_PESS_CHARGE_FLOOR_HOURS=24                    # floor only the first N horizon hours (rest is replanned)
+LP_PESS_CHARGE_FLOOR_SLACK_PENALTY_PENCE=50.0    # slack penalty — floor behaves hard, can't go Infeasible
 LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH=0.30        # commit peak_export only when pessimistic exports ≥ this
 LP_SCENARIOS_ON_TRIGGER_REASONS=cron,plan_push,octopus_fetch,tier_boundary
                                                  # which triggers run the 3-pass solve

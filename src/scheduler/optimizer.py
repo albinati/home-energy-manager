@@ -1335,6 +1335,80 @@ def _build_export_price_line(slot_starts_utc: list[datetime]) -> list[float] | N
     return out
 
 
+def _apply_pessimistic_charge_floor(
+    plan: Any,
+    scenarios_dict: dict[str, Any],
+    *,
+    solve_kwargs: dict[str, Any],
+    exogenous_snapshot: dict[str, Any],
+) -> Any:
+    """Re-solve the committed plan with a soft floor at the pessimistic SoC.
+
+    PR B of the 2026-07-02 LP audit (newsvendor): the June hindsight audit
+    measured 14 evenings with the battery empty at above-median prices — the
+    LP sizes pre-peak charge for the MEDIAN load while under-charging costs
+    ~4× over-charging. The pessimistic solve (p75 load, −1.5 °C, PV ×0.85)
+    already computes the right-quantile SoC trajectory; this floors the
+    committed plan at it (soft — slack + steep penalty, so odd inputs degrade
+    to "floor ignored + logged", never an Infeasible). Returns the floored
+    plan, or the original on any failure / when the floor doesn't bind.
+    """
+    from .lp_optimizer import solve_lp as _solve_lp
+
+    try:
+        pess = scenarios_dict.get("pessimistic")
+        pess_plan = getattr(pess, "plan", None)
+        if pess_plan is None or not pess_plan.ok or not pess_plan.soc_kwh:
+            return plan
+        n = len(plan.slot_starts_utc)
+        if len(pess_plan.soc_kwh) != n + 1 or len(plan.soc_kwh) != n + 1:
+            return plan
+        tol = float(getattr(config, "LP_PESS_CHARGE_FLOOR_TOLERANCE_KWH", 0.2))
+        hours = float(getattr(config, "LP_PESS_CHARGE_FLOOR_HOURS", 24))
+        max_slots = int(hours * 2)
+        floor = [0.0] * n
+        binding = 0
+        for i in range(min(n, max_slots)):
+            f = max(0.0, float(pess_plan.soc_kwh[i + 1]) - tol)
+            floor[i] = f
+            if f > float(plan.soc_kwh[i + 1]) + 1e-6:
+                binding += 1
+        if binding == 0:
+            logger.info(
+                "pess charge floor: nominal already ≥ pessimistic SoC — no re-solve"
+            )
+            return plan
+        floored = _solve_lp(**solve_kwargs, soc_floor_kwh=floor)
+        if not floored.ok:
+            logger.warning(
+                "pess charge floor re-solve returned %s — keeping nominal plan",
+                floored.status,
+            )
+            return plan
+        slack = float(getattr(floored, "soc_floor_slack_kwh", 0.0))
+        if slack > 0.05:
+            logger.warning(
+                "pess charge floor: %.2f kWh slack below floor (floor should be "
+                "reachable by construction — check inputs)", slack,
+            )
+        insurance_p = float(floored.objective_pence) - float(plan.objective_pence)
+        logger.info(
+            "pess charge floor APPLIED: %d binding slot(s), insurance ~%.1fp, slack %.2f kWh",
+            binding, insurance_p, slack,
+        )
+        exogenous_snapshot["pess_charge_floor"] = {
+            "binding_slots": binding,
+            "insurance_cost_pence": round(insurance_p, 2),
+            "slack_kwh": round(slack, 3),
+            "tolerance_kwh": tol,
+            "hours": hours,
+        }
+        return floored
+    except Exception:
+        logger.exception("pess charge floor failed (non-fatal) — keeping nominal plan")
+        return plan
+
+
 def _run_optimizer_lp(
     fox: FoxESSClient | None,
     daikin: Any | None = None,
@@ -1897,6 +1971,61 @@ def _run_optimizer_lp(
             "optimizer_backend": "lp",
         }
 
+    # ------------------------------------------------------------------
+    # Scenario LP + pessimistic charge floor (PR B, 2026-07-02 LP audit).
+    # Hoisted ABOVE slot derivation/logging so the FLOORED plan is the plan
+    # of record everywhere downstream (slots, snapshots, Fox, Daikin).
+    # Scenarios previously ran only when the plan had peak_export slots; the
+    # charge floor needs them on every scenario-bearing trigger — the measured
+    # empty-battery evenings happen on plain self-use days.
+    # ------------------------------------------------------------------
+    scenarios_dict: dict[str, Any] | None = None
+    if trigger_runs_scenarios(trigger_reason):
+        _floor_on = bool(getattr(config, "LP_PESS_CHARGE_FLOOR_ENABLED", True))
+        _plan_has_peak_export = any(
+            float(e) > float(pu) + 1e-6
+            for e, pu in zip(plan.export_kwh or [], plan.pv_use_kwh or [])
+        )
+        if _floor_on or _plan_has_peak_export:
+            try:
+                scenarios_dict = dict(
+                    solve_scenarios_with_nominal(
+                        nominal=plan,
+                        slot_starts_utc=starts,
+                        price_pence=prices,
+                        base_load_kwh=base_load,
+                        weather=weather,
+                        initial=initial,
+                        tz=tz,
+                        micro_climate_offset_c=micro_climate_offset,
+                        export_price_pence=export_prices,
+                        base_load_spread=base_load_spread,  # #477 Stage 2 — per-slot p75 spread
+                    )
+                )
+            except Exception as e:
+                logger.warning(
+                    "Scenario LP failed (trigger=%s): %s — committing nominal plan as-is",
+                    trigger_reason, e,
+                )
+                scenarios_dict = None
+        if _floor_on and scenarios_dict:
+            plan = _apply_pessimistic_charge_floor(
+                plan,
+                scenarios_dict,
+                solve_kwargs=dict(
+                    slot_starts_utc=starts,
+                    price_pence=prices,
+                    base_load_kwh=base_load,
+                    weather=weather,
+                    initial=initial,
+                    tz=tz,
+                    micro_climate_offset_c=micro_climate_offset,
+                    micro_climate_offset_by_hour_c=micro_climate_offset_by_hour,
+                    export_price_pence=export_prices,
+                ),
+                exogenous_snapshot=exogenous_snapshot,
+            )
+
     # Fold the PV-sufficiency guard rail audit into the exogenous snapshot
     # (decided inside solve_lp; persisted alongside the inputs for the
     # History view + replay). Defensive: pre-incident plans may not have it.
@@ -1961,35 +2090,11 @@ def _run_optimizer_lp(
         }
     )
 
-    # Scenario LP — run a 3-pass robustness check on peak-export commits when
-    # the trigger reason warrants it (cron, plan_push by default). Skipped on
-    # fast-path triggers (drift, forecast_revision, dynamic_replan, manual)
-    # to keep MPC re-plan latency low; those committed plans inherit "trust
-    # the LP" semantics. Decisions get persisted alongside the run_id below.
-    has_peak_export = any(s.kind == "peak_export" for s in lp_slots)
-    scenarios_dict: dict[str, Any] | None = None
-    if has_peak_export and trigger_runs_scenarios(trigger_reason):
-        try:
-            scenarios_dict = dict(
-                solve_scenarios_with_nominal(
-                    nominal=plan,
-                    slot_starts_utc=starts,
-                    price_pence=prices,
-                    base_load_kwh=base_load,
-                    weather=weather,
-                    initial=initial,
-                    tz=tz,
-                    micro_climate_offset_c=micro_climate_offset,
-                    export_price_pence=export_prices,
-                    base_load_spread=base_load_spread,  # #477 Stage 2 — per-slot p75 spread
-                )
-            )
-        except Exception as e:
-            logger.warning(
-                "Scenario LP failed (trigger=%s): %s — committing nominal plan as-is",
-                trigger_reason, e,
-            )
-            scenarios_dict = None
+    # Scenario LP — solved UPSTREAM (before slot derivation) since PR B so the
+    # pessimistic charge floor can shape the committed plan; ``scenarios_dict``
+    # flows here into the peak-export robustness filter + scenario_solve_log.
+    # NB the "nominal" entry records the PRE-floor nominal solve; the floor
+    # diagnostics live in exogenous_snapshot["pess_charge_floor"].
 
     # Run the filter once to capture decisions (they reference the new run_id
     # written below). build_fox_groups_from_lp re-runs the filter internally,
