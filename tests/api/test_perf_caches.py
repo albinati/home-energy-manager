@@ -54,12 +54,17 @@ def test_lifetime_shape_and_active_filter(client, monkeypatch):
             self.cost = _Cost(net)
 
     # Three months: one active-by-cost, one active-by-export, one INACTIVE.
-    # Seed RELATIVE to the current month (via the same anchor logic the endpoint
-    # uses) so the test is stable across month/year boundaries — a hardcoded
-    # (2026,4/5/6) reddened CI every July run when the rolling window shifted off
-    # April (date-relative flake class).
-    from datetime import date as _date
-    _anchors = main_mod._last_n_month_anchors(_date.today(), 3)  # oldest → current
+    # Seed RELATIVE to the current month using the EXACT same reference the
+    # endpoint uses — datetime.now(BULLETPROOF_TIMEZONE).date() — so the test is
+    # stable across month/year boundaries. A hardcoded (2026,4/5/6) reddened CI
+    # every July run; and `date.today()` (system-UTC in CI) disagreed with the
+    # endpoint's LOCAL-tz `today` across the UTC/BST midnight (23:56 UTC = 00:56
+    # BST = next month) — both are date-relative flakes.
+    from datetime import datetime as _datetime
+    from zoneinfo import ZoneInfo as _ZoneInfo
+    from src.config import config as _config
+    _today = _datetime.now(_ZoneInfo(_config.BULLETPROOF_TIMEZONE)).date()
+    _anchors = main_mod._last_n_month_anchors(_today, 3)  # oldest → current
     table = {
         _anchors[0]: _Insights(100.0, 40.0, 12.5),   # active (net != 0)
         _anchors[1]: _Insights(120.0, 50.0, 0.0),    # active (export > 0)
