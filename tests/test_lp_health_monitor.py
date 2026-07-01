@@ -56,11 +56,15 @@ class _FakeConn:
             def __init__(self, rows): self._rows = rows
             def fetchone(self): return self._rows[0]
             def fetchall(self): return self._rows
-        if "count(*)" in s:
+        # #611 review follow-up: the infeasible count keys off the STRUCTURED
+        # lp_inputs_snapshot.lp_status, not the strategy_summary display text.
+        if "lp_inputs_snapshot" in s and "lp_status" in s:
             return _R([(self._inf,)])
         if "agile_rates" in s:
             return _R([(f"2026-06-28T{t}:00Z",) for t in self._neg])
         return _R([])
+    def close(self):  # closing(conn) in the job — no-op for the fake
+        pass
 
 
 class _FakeDB:
