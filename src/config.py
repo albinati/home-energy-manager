@@ -920,6 +920,19 @@ class Config:
     LP_SCENARIO_PESSIMISTIC_LOAD_FACTOR: float = float(
         os.getenv("LP_SCENARIO_PESSIMISTIC_LOAD_FACTOR", "1.15")
     )
+    # 2026-07-02 LP audit — the pessimistic scenario perturbed load + temperature
+    # but kept NOMINAL PV, so a cloud surprise could breach the very floor the
+    # peak-export gate (and the PR-B charge floor) trusts. These scale
+    # pv_kwh_per_slot in the side scenarios. Defaults calibrated from 27 days of
+    # pv_error_log daily Σactual/Σforecast ratios: p25 = 0.883, p10 = 0.758 →
+    # pessimistic 0.85; p75 = 1.04 → optimistic 1.05. 1.0 = legacy behaviour
+    # (no PV perturbation); nominal is always 1.0.
+    LP_SCENARIO_OPTIMISTIC_PV_FACTOR: float = float(
+        os.getenv("LP_SCENARIO_OPTIMISTIC_PV_FACTOR", "1.05")
+    )
+    LP_SCENARIO_PESSIMISTIC_PV_FACTOR: float = float(
+        os.getenv("LP_SCENARIO_PESSIMISTIC_PV_FACTOR", "0.85")
+    )
     # #477 Stage 2 — when true, the scenario LP perturbs base load per-slot by
     # the LEARNED p75 spread (median ± (p75−median)) from residual_load_profile_v2
     # instead of the flat factors above. Sharper protection where the variance is

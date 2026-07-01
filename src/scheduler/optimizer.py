@@ -2086,12 +2086,14 @@ def _run_optimizer_lp(
                     plan_obj = result.plan
                     temp_delta = float(result.temp_delta_c)
                     load_factor = float(result.load_factor)
+                    pv_factor = float(getattr(result, "pv_factor", 1.0))
                     duration_ms = int(result.duration_ms)
                     error = result.error
                 else:  # pragma: no cover — production always uses ScenarioSolveResult
                     plan_obj = result
                     temp_delta = 0.0
                     load_factor = 1.0
+                    pv_factor = 1.0
                     duration_ms = None
                     error = None
                 pe_count = sum(
@@ -2106,6 +2108,7 @@ def _run_optimizer_lp(
                     objective_pence=float(plan_obj.objective_pence) if plan_obj.ok else None,
                     perturbation_temp_delta_c=temp_delta,
                     perturbation_load_factor=load_factor,
+                    perturbation_pv_factor=pv_factor,
                     peak_export_slot_count=pe_count,
                     duration_ms=duration_ms,
                     error=error,
