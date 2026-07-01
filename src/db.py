@@ -481,6 +481,15 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         ("daily_pnl",           "reports",  0),
         ("strategy_update",     "reports",  1),
         ("action_confirmation", "reports",  1),
+        # 2026-07-01 (#611 review follow-up): seed rows for types that predated
+        # this list or were added without one. Without a row the env fallback
+        # still DELIVERS, but severity defaults to 'reports' (wrong channel if
+        # a critical target override is ever configured) and the type can't be
+        # muted/routed via notification_routes. INSERT OR IGNORE → any user
+        # overrides survive.
+        ("lp_failure",            "critical", 0),
+        ("lp_health_regression",  "critical", 0),
+        ("guests_mode_suggested", "reports",  0),
     ]
     for _at, _sev, _sil in _NOTIFICATION_DEFAULTS:
         conn.execute(

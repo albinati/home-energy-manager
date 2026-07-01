@@ -91,6 +91,8 @@ _HOOK_PAYLOAD_NAMES: dict[str, str] = {
     "appliance_cancelled": "EnergyApplianceCancelled",
     "appliance_window_nudge": "EnergyApplianceNudge",
     "lp_failure": "EnergyLPFailure",
+    "guests_mode_suggested": "EnergyGuestsSuggested",
+    "lp_health_regression": "EnergyLPHealthRegression",
 }
 
 

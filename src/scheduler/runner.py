@@ -888,13 +888,19 @@ def bulletproof_lp_health_monitor_job() -> None:
         return
     try:
         import hashlib
+        from contextlib import closing
         now = datetime.now(UTC)
         since = (now - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%S")
-        with db._lock:  # noqa: SLF001 — read-only counts
-            conn = db.get_connection()
+        with db._lock, closing(db.get_connection()) as conn:  # noqa: SLF001 — read-only counts
+            # Count failed solves via the STRUCTURED status column (review of
+            # #611): lp_inputs_snapshot.lp_status is written for every solve
+            # ('Optimal' / 'Infeasible' / …; NULL only on pre-migration rows).
+            # The previous string-match on the human-readable strategy_summary
+            # would silently stop watching if the summary wording ever changed —
+            # the worst failure mode for a watchdog.
             infeasible_24h = conn.execute(
-                "SELECT COUNT(*) FROM optimizer_log WHERE run_at >= ? "
-                "AND lower(coalesce(strategy_summary,'')) LIKE '%infeasible%'",
+                "SELECT COUNT(*) FROM lp_inputs_snapshot WHERE run_at_utc >= ? "
+                "AND lp_status IS NOT NULL AND lp_status != 'Optimal'",
                 (since,),
             ).fetchone()[0]
             yday = (now.date() - timedelta(days=1)).isoformat()
