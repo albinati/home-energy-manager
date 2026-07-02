@@ -46,8 +46,12 @@ def _isolated_db(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "USER_OVERRIDE_RESPECT_UNTIL_WINDOW_END", True, raising=False)
     db.init_db()
     sm._NEG_BOOST_POWERFUL_LAST_UTC = None
+    sm._NEG_BOOST_STALL_COUNT = 0
+    sm._NEG_BOOST_LAST_TEMP = None
     yield
     sm._NEG_BOOST_POWERFUL_LAST_UTC = None
+    sm._NEG_BOOST_STALL_COUNT = 0
+    sm._NEG_BOOST_LAST_TEMP = None
 
 
 def _iso(dt: datetime) -> str:
@@ -198,6 +202,61 @@ def test_respects_user_override(monkeypatch):
     monkeypatch.setattr(sm, "user_gesture_still_in_effect", lambda dev, p: True)
     sm._check_negative_boost_powerful([_boost_row(NOW)], client, dev, NOW, trigger="hb")
     client.set_tank_powerful.assert_not_called()
+
+
+def _tick(client, dev, at, temp):
+    dev.tank_temperature = temp
+    sm._check_negative_boost_powerful([_boost_row(at)], client, dev, at, trigger="hb")
+
+
+def test_stall_backoff_stretches_interval(monkeypatch):
+    """2026-07-02: tank pinned at 50-51 °C for 5h while Powerful was re-written
+    every 15 min (24 writes, zero gain). After STALL_LIMIT no-progress
+    re-asserts the cadence must stretch ×STALL_BACKOFF."""
+    monkeypatch.setattr(config, "DHW_NEGATIVE_BOOST_REASSERT_STALL_LIMIT", 3, raising=False)
+    monkeypatch.setattr(config, "DHW_NEGATIVE_BOOST_REASSERT_STALL_BACKOFF", 4.0, raising=False)
+    dev = _FakeDev(tank_powerful=False)
+    client = MagicMock()
+    # 3 stalled re-asserts at the base 15-min cadence (temp frozen at 51).
+    for k in range(3):
+        _tick(client, dev, NOW + timedelta(minutes=16 * k), 51.0)
+    assert client.set_tank_powerful.call_count == 3
+    assert sm._NEG_BOOST_STALL_COUNT == 3
+    # Next base-interval attempt is now blocked (backoff = 60 min)...
+    _tick(client, dev, NOW + timedelta(minutes=16 * 3), 51.0)
+    assert client.set_tank_powerful.call_count == 3
+    # ...but allowed once the stretched interval elapses.
+    _tick(client, dev, NOW + timedelta(minutes=16 * 2 + 61), 51.0)
+    assert client.set_tank_powerful.call_count == 4
+
+
+def test_progress_resets_stall_count():
+    dev = _FakeDev(tank_powerful=False)
+    client = MagicMock()
+    _tick(client, dev, NOW, 45.0)
+    assert sm._NEG_BOOST_STALL_COUNT == 1  # first tick: no baseline yet
+    _tick(client, dev, NOW + timedelta(minutes=16), 47.0)  # +2 °C → progress
+    assert sm._NEG_BOOST_STALL_COUNT == 0
+    assert client.set_tank_powerful.call_count == 2
+
+
+def test_new_episode_resets_stall_state(monkeypatch):
+    """A clearly colder tank (fresh window after the overnight setback) must
+    not inherit yesterday's stall verdict."""
+    monkeypatch.setattr(config, "DHW_NEGATIVE_BOOST_REASSERT_STALL_LIMIT", 2, raising=False)
+    monkeypatch.setattr(config, "DHW_NEGATIVE_BOOST_REASSERT_STALL_BACKOFF", 8.0, raising=False)
+    dev = _FakeDev(tank_powerful=False)
+    client = MagicMock()
+    for k in range(2):
+        _tick(client, dev, NOW + timedelta(minutes=16 * k), 51.0)
+    assert sm._NEG_BOOST_STALL_COUNT == 2  # stalled
+    # Next day, tank restarts from 39 °C — 16 min after the (stale) last write
+    # would be blocked under backoff, but the colder tank resets the episode…
+    later = NOW + timedelta(hours=20)
+    _tick(client, dev, later, 39.0)
+    # …and the 6h gap alone would too; either way the write goes through.
+    assert client.set_tank_powerful.call_count == 3
+    assert sm._NEG_BOOST_STALL_COUNT <= 1
 
 
 def test_audit_row_written():

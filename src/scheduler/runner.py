@@ -99,6 +99,46 @@ def _lp_predicted_soc_pct_at(when_utc: datetime) -> float | None:
         return None
 
 
+def _lp_predicted_soc_max_pct_within(when_utc: datetime, hours: float) -> float | None:
+    """Max SoC % the committed plan reaches in ``[when_utc, when_utc + hours]``.
+
+    Used by the directional drift gate: when live SoC runs AHEAD of the
+    prediction but the plan itself reaches that level within the look-ahead,
+    the deviation is early arrival on the planned trajectory (Fox ForceCharge
+    fills faster than the LP's gentle per-slot taper), not drift.
+    """
+    try:
+        run_id = db.find_run_for_time(when_utc.isoformat())
+        if not run_id:
+            return None
+        slots = db.get_lp_solution_slots(run_id)
+        if not slots:
+            return None
+        cap = float(config.BATTERY_CAPACITY_KWH)
+        if cap <= 0:
+            return None
+        end_utc = when_utc + timedelta(hours=float(hours))
+        best: float | None = None
+        for s in slots:
+            st_raw = s.get("slot_time_utc")
+            soc_kwh = s.get("soc_kwh")
+            if not st_raw or soc_kwh is None:
+                continue
+            try:
+                st = datetime.fromisoformat(st_raw.replace("Z", "+00:00"))
+            except (ValueError, AttributeError):
+                continue
+            if st < when_utc or st > end_utc:
+                continue
+            pct = float(soc_kwh) / cap * 100.0
+            if best is None or pct > best:
+                best = pct
+        return best
+    except Exception as e:
+        logger.debug("_lp_predicted_soc_max_pct_within failed: %s", e)
+        return None
+
+
 def _log_plan_delta_after_trigger(prev_run_id: int | None, new_run_id: int | None, trigger_reason: str) -> dict[str, float] | None:
     """Log how much the freshly-solved LP diverges from the previous one.
 
@@ -1723,6 +1763,30 @@ def bulletproof_heartbeat_tick() -> None:
             if predicted_pct is not None:
                 drift_pct = abs(float(soc) - predicted_pct)
                 threshold = float(config.MPC_DRIFT_SOC_THRESHOLD_PERCENT)
+                # Directional gate (2026-07-02 window audit): SoC AHEAD of the
+                # prediction is early arrival, not drift, when the plan itself
+                # reaches the live level within the look-ahead — Fox executes
+                # ForceCharge staging faster than the LP's per-slot taper, and
+                # re-solving every heartbeat produced 5-min upload bursts whose
+                # group swaps caused mid-fill glitches (battery discharging at
+                # negative prices). SoC BELOW prediction always counts.
+                if (
+                    config.MPC_DRIFT_AHEAD_SUPPRESS_ENABLED
+                    and drift_pct >= threshold
+                    and float(soc) > predicted_pct
+                ):
+                    plan_max = _lp_predicted_soc_max_pct_within(
+                        now_utc, float(config.MPC_DRIFT_AHEAD_LOOKAHEAD_HOURS)
+                    )
+                    if plan_max is not None and plan_max >= float(soc) - threshold:
+                        logger.debug(
+                            "MPC drift suppressed (ahead-of-plan): real=%.1f%% "
+                            "predicted=%.1f%% plan reaches %.1f%% within %.1fh",
+                            soc, predicted_pct, plan_max,
+                            float(config.MPC_DRIFT_AHEAD_LOOKAHEAD_HOURS),
+                        )
+                        _consecutive_drift_ticks = 0
+                        drift_pct = 0.0
                 if drift_pct >= threshold:
                     _consecutive_drift_ticks += 1
                     if _consecutive_drift_ticks >= int(config.MPC_DRIFT_HYSTERESIS_TICKS):

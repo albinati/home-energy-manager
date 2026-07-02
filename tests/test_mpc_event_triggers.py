@@ -147,6 +147,18 @@ def _heartbeat_drift_tick(runner_module, *, real_soc: float, predicted_pct: floa
         return False
     drift_pct = abs(float(real_soc) - predicted_pct)
     threshold = float(runner_module.config.MPC_DRIFT_SOC_THRESHOLD_PERCENT)
+    # Directional gate — mirror of the ahead-of-plan suppression in runner.py.
+    if (
+        runner_module.config.MPC_DRIFT_AHEAD_SUPPRESS_ENABLED
+        and drift_pct >= threshold
+        and float(real_soc) > predicted_pct
+    ):
+        plan_max = runner_module._lp_predicted_soc_max_pct_within(
+            datetime.now(UTC), float(runner_module.config.MPC_DRIFT_AHEAD_LOOKAHEAD_HOURS)
+        )
+        if plan_max is not None and plan_max >= float(real_soc) - threshold:
+            runner_module._consecutive_drift_ticks = 0
+            drift_pct = 0.0
     if drift_pct >= threshold:
         runner_module._consecutive_drift_ticks += 1
         if runner_module._consecutive_drift_ticks >= int(runner_module.config.MPC_DRIFT_HYSTERESIS_TICKS):
@@ -199,6 +211,62 @@ def test_drift_no_lp_run_skips_silently(monkeypatch):
     assert runner._consecutive_drift_ticks == 0
 
 
+# -------------------- Directional drift gate (2026-07-02 window audit) -----
+
+
+def test_drift_ahead_of_plan_suppressed_when_plan_reaches_level(monkeypatch):
+    """Fox ForceCharge fills faster than the LP taper: SoC 90% vs predicted
+    60%, but the plan reaches 100% within the look-ahead → early arrival,
+    no re-solve."""
+    from src.scheduler import runner
+
+    monkeypatch.setattr(runner.config, "MPC_DRIFT_AHEAD_SUPPRESS_ENABLED", True)
+    monkeypatch.setattr(runner, "_lp_predicted_soc_max_pct_within", lambda *_a, **_k: 100.0)
+    runner._consecutive_drift_ticks = 0
+    fired = _heartbeat_drift_tick(runner, real_soc=90.0, predicted_pct=60.0)
+    assert fired is False
+    assert runner._consecutive_drift_ticks == 0
+
+
+def test_drift_ahead_fires_when_plan_never_reaches_level(monkeypatch):
+    """SoC ahead of a plan that stays flat (load collapse, unexpected charge)
+    is genuine drift — the trajectory is not just time-shifted."""
+    from src.scheduler import runner
+
+    monkeypatch.setattr(runner.config, "MPC_DRIFT_AHEAD_SUPPRESS_ENABLED", True)
+    monkeypatch.setattr(runner.config, "MPC_DRIFT_HYSTERESIS_TICKS", 1)
+    monkeypatch.setattr(runner, "_lp_predicted_soc_max_pct_within", lambda *_a, **_k: 62.0)
+    runner._consecutive_drift_ticks = 0
+    fired = _heartbeat_drift_tick(runner, real_soc=90.0, predicted_pct=60.0)
+    assert fired is True
+
+
+def test_drift_behind_plan_always_fires(monkeypatch):
+    """SoC BELOW prediction is under-delivery — the gate must not touch it."""
+    from src.scheduler import runner
+
+    monkeypatch.setattr(runner.config, "MPC_DRIFT_AHEAD_SUPPRESS_ENABLED", True)
+    monkeypatch.setattr(runner.config, "MPC_DRIFT_HYSTERESIS_TICKS", 1)
+    monkeypatch.setattr(
+        runner, "_lp_predicted_soc_max_pct_within",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("gate must not run")),
+    )
+    runner._consecutive_drift_ticks = 0
+    fired = _heartbeat_drift_tick(runner, real_soc=30.0, predicted_pct=60.0)
+    assert fired is True
+
+
+def test_drift_ahead_gate_disabled_by_kill_switch(monkeypatch):
+    from src.scheduler import runner
+
+    monkeypatch.setattr(runner.config, "MPC_DRIFT_AHEAD_SUPPRESS_ENABLED", False)
+    monkeypatch.setattr(runner.config, "MPC_DRIFT_HYSTERESIS_TICKS", 1)
+    monkeypatch.setattr(runner, "_lp_predicted_soc_max_pct_within", lambda *_a, **_k: 100.0)
+    runner._consecutive_drift_ticks = 0
+    fired = _heartbeat_drift_tick(runner, real_soc=90.0, predicted_pct=60.0)
+    assert fired is True
+
+
 def test_drift_no_realtime_skips_silently(monkeypatch):
     from src.scheduler import runner
 
@@ -233,6 +301,26 @@ def test_lp_predicted_soc_pct_at_returns_pct_for_matching_slot(monkeypatch):
     pct = runner._lp_predicted_soc_pct_at(base + timedelta(minutes=45))
     assert pct is not None
     assert pct == pytest.approx(5.1 / 10.0 * 100.0, abs=0.01)  # cap=10kWh
+
+
+def test_lp_predicted_soc_max_pct_within_takes_window_max(monkeypatch):
+    from src.scheduler import runner
+
+    base = datetime(2026, 6, 1, 10, 0, tzinfo=UTC)
+    monkeypatch.setattr("src.db.find_run_for_time", lambda when_utc_iso: 99)
+    monkeypatch.setattr(
+        "src.db.get_lp_solution_slots",
+        lambda run_id: [
+            {"slot_time_utc": (base + timedelta(minutes=i * 30)).isoformat(), "soc_kwh": s}
+            for i, s in enumerate([5.0, 6.0, 8.5, 7.0, 9.9, 4.0])
+        ],
+    )
+    # 2h look-ahead from 10:00 covers slots 0-4 → max soc 9.9 kWh
+    pct = runner._lp_predicted_soc_max_pct_within(base, 2.0)
+    assert pct == pytest.approx(99.0, abs=0.01)
+    # 1h look-ahead covers slots 0-2 → max 8.5
+    pct = runner._lp_predicted_soc_max_pct_within(base, 1.0)
+    assert pct == pytest.approx(85.0, abs=0.01)
 
 
 def test_lp_predicted_load_kw_at_derives_expected_load_from_solution_slot(monkeypatch):

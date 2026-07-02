@@ -155,7 +155,15 @@ def evaluate_pv_sufficiency_guard(
 
     pre_peak_today = [
         i for i in today_idx
-        if first_peak is None or i < first_peak
+        if (first_peak is None or i < first_peak)
+        # Negative-price slots are exempt: the guard's premise ("grid-charging
+        # is wasteful when PV will fill the battery anyway") inverts when the
+        # grid PAYS for import. On the 2026-07-02 window this blocked
+        # grid→battery across 15 negative slots, forcing the plan into
+        # chg==pv_use + curtailment while the paid-import credit went
+        # uncollected. Mirrors the pre-plunge rule's ``price_line[i] >= 0``
+        # gate in lp_optimizer.
+        and price_line[i] >= 0.0
     ]
     diag.pre_peak_slot_indices = pre_peak_today
 

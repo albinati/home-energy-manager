@@ -140,6 +140,29 @@ def test_guard_excludes_peak_and_post_peak_slots():
     assert diag.pre_peak_slot_indices == [0, 1, 2]
 
 
+def test_guard_exempts_negative_price_slots():
+    """2026-07-02 window audit: the guard's premise inverts when the grid PAYS
+    for import — negative slots must stay grid-chargeable even on a
+    PV-sufficient day (the guard blocked grid→battery across a 15-slot
+    negative window, forcing chg==pv_use + curtailment)."""
+    starts = _slot_starts(6, datetime(2026, 7, 2, 8, 0, tzinfo=UTC))
+    prices = [15.0, -1.9, -4.4, 15.0, 30.0, 30.0]
+    diag = evaluate_pv_sufficiency_guard(
+        slot_starts_utc=starts,
+        pv_avail=[2.0] * 6,
+        base_load_kwh=[0.5] * 6,
+        price_line=prices,
+        peak_threshold_p=25.0,
+        initial_soc_kwh=0.0,
+        soc_max_kwh=4.0,
+        strict_savings=True,
+        enabled=True,
+    )
+    assert diag.applied
+    # slots 1-2 (negative) are exempt; slots 4-5 (peak+) excluded as before
+    assert diag.pre_peak_slot_indices == [0, 3]
+
+
 def test_guard_excludes_tomorrows_slots():
     """Today = 2026-05-15. Slot 4+ is tomorrow → only first 4 considered."""
     starts = _slot_starts(8, datetime(2026, 5, 15, 22, 0, tzinfo=UTC))
@@ -231,6 +254,42 @@ def test_e2e_guard_blocks_grid_charging_when_pv_sufficient(monkeypatch):
 
 # PR C — `test_e2e_guard_inactive_under_savings_first` removed.
 # strict_savings/savings_first is gone; the guard is always-on when enabled.
+
+
+def test_e2e_guard_allows_grid_charge_in_negative_slots(monkeypatch):
+    """The 2026-07-02 production failure in miniature: PV-sufficient day +
+    negative-price window + empty battery. The LP must grid-charge in the
+    negative slots (paid import) instead of being pinned to chg==pv_use."""
+    monkeypatch.setattr(config, "LP_PV_SUFFICIENCY_GUARD", True)
+    monkeypatch.setattr(config, "LP_PV_SUFFICIENCY_MARGIN", 1.0)
+    monkeypatch.setattr(config, "DAIKIN_CONTROL_MODE", "passive")
+
+    weather = _minimal_weather(n=8)
+    prices = [10.0, -4.4, -4.4, -3.0, 40.0, 40.0, 40.0, 40.0]
+    base_load = [0.3] * 8
+
+    plan = solve_lp(
+        slot_starts_utc=weather.slot_starts_utc,
+        price_pence=prices,
+        base_load_kwh=base_load,
+        weather=weather,
+        initial=LpInitialState(soc_kwh=1.0, tank_temp_c=45.0),
+        tz=ZoneInfo("Europe/London"),
+        export_price_pence=[0.6] * 8,
+    )
+    assert plan.ok, f"LP failed: {plan.status}"
+    assert plan.pv_sufficiency_guard is not None and plan.pv_sufficiency_guard.applied
+    neg = [1, 2, 3]
+    for i in neg:
+        assert i not in plan.pv_sufficiency_guard.pre_peak_slot_indices
+    grid_charge_neg = sum(
+        max(0.0, plan.battery_charge_kwh[i] - plan.pv_use_kwh[i]) for i in neg
+    )
+    assert grid_charge_neg > 0.5, (
+        f"LP should grid-charge in the paid window; "
+        f"chg={[round(plan.battery_charge_kwh[i], 2) for i in neg]} "
+        f"pv_use={[round(plan.pv_use_kwh[i], 2) for i in neg]}"
+    )
 
 
 def test_e2e_guard_skipped_when_pv_low(monkeypatch):
