@@ -419,6 +419,15 @@ class Config:
     # battery discharge (kWh) summed over negative-price slots above this = the
     # #607 bug regressed (battery should hold/charge, not self-discharge into load).
     LP_HEALTH_NEG_DISCHARGE_KWH: float = float(os.getenv("LP_HEALTH_NEG_DISCHARGE_KWH", "0.5"))
+    # PR B floor observability: alert when the pessimistic charge floor costs
+    # more insurance than plausible savings in 24h, or when its slack shows the
+    # floor is unreachable (pess/nominal inputs diverging).
+    LP_HEALTH_FLOOR_INSURANCE_24H_PENCE: float = float(
+        os.getenv("LP_HEALTH_FLOOR_INSURANCE_24H_PENCE", "150.0")
+    )
+    LP_HEALTH_FLOOR_SLACK_KWH: float = float(
+        os.getenv("LP_HEALTH_FLOOR_SLACK_KWH", "0.3")
+    )
     LP_HEALTH_MONITOR_HOUR: int = int(os.getenv("LP_HEALTH_MONITOR_HOUR", "9"))
     LP_HEALTH_MONITOR_MINUTE: int = int(os.getenv("LP_HEALTH_MONITOR_MINUTE", "0"))
     # Octopus regularly publishes later than the ~24 h the single-shot design

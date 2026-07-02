@@ -862,10 +862,16 @@ def _evaluate_lp_health(
     neg_discharge_kwh: float,
     max_infeasible: int,
     neg_discharge_thr: float,
+    floor_insurance_24h_pence: float = 0.0,
+    floor_slack_max_kwh: float = 0.0,
+    floor_insurance_thr_pence: float = 150.0,
+    floor_slack_thr_kwh: float = 0.3,
 ) -> list[str]:
     """Pure regression check for the LP health monitor. Returns a list of issue
-    strings (empty = healthy). Covers an LP-infeasible spike and the #607
-    Backup-discharge bug regressing (battery discharging during negative prices)."""
+    strings (empty = healthy). Covers an LP-infeasible spike, the #607
+    Backup-discharge bug regressing (battery discharging during negative
+    prices), and — since PR B (pessimistic charge floor) — the floor costing
+    more insurance than it plausibly saves, or going unreachable (slack)."""
     issues: list[str] = []
     if infeasible_24h > max_infeasible:
         issues.append(
@@ -875,6 +881,16 @@ def _evaluate_lp_health(
         issues.append(
             f"bateria descarregou {neg_discharge_kwh:.2f} kWh durante {neg_slot_count} "
             f"slots de preço NEGATIVO (deveria ser ~0 — regressão do #607)"
+        )
+    if floor_insurance_24h_pence > floor_insurance_thr_pence:
+        issues.append(
+            f"charge floor pessimista custou {floor_insurance_24h_pence:.0f}p de seguro em 24h "
+            f"(limite {floor_insurance_thr_pence:.0f}p) — avaliar LP_PESS_CHARGE_FLOOR_ENABLED=false"
+        )
+    if floor_slack_max_kwh > floor_slack_thr_kwh:
+        issues.append(
+            f"charge floor pessimista com slack máx {floor_slack_max_kwh:.2f} kWh em 24h "
+            f"(limite {floor_slack_thr_kwh:.2f}) — floor inatingível, inputs pess/nominal divergindo"
         )
     return issues
 
@@ -912,6 +928,21 @@ def bulletproof_lp_health_monitor_job() -> None:
                     (yday,),
                 ).fetchall()
             }
+            # PR B (pessimistic charge floor) observability: aggregate the
+            # per-solve insurance cost + slack from the persisted exogenous
+            # snapshots so a floor that costs more than it saves (or goes
+            # unreachable) pages instead of bleeding silently.
+            floor_row = conn.execute(
+                "SELECT COALESCE(SUM(json_extract(exogenous_snapshot_json,"
+                " '$.pess_charge_floor.insurance_cost_pence')), 0),"
+                " COALESCE(MAX(json_extract(exogenous_snapshot_json,"
+                " '$.pess_charge_floor.slack_kwh')), 0)"
+                " FROM lp_inputs_snapshot WHERE run_at_utc >= ?"
+                " AND exogenous_snapshot_json LIKE '%pess_charge_floor%'",
+                (since,),
+            ).fetchone()
+            floor_insurance_24h = float(floor_row[0] or 0.0)
+            floor_slack_max = float(floor_row[1] or 0.0)
         neg_discharge = 0.0
         if neg_slots:
             disch = db.half_hourly_battery_discharge_kwh_for_day(now.date() - timedelta(days=1))
@@ -924,6 +955,14 @@ def bulletproof_lp_health_monitor_job() -> None:
             neg_discharge_kwh=neg_discharge,
             max_infeasible=int(config.LP_HEALTH_MAX_INFEASIBLE_24H),
             neg_discharge_thr=float(config.LP_HEALTH_NEG_DISCHARGE_KWH),
+            floor_insurance_24h_pence=floor_insurance_24h,
+            floor_slack_max_kwh=floor_slack_max,
+            floor_insurance_thr_pence=float(
+                getattr(config, "LP_HEALTH_FLOOR_INSURANCE_24H_PENCE", 150.0)
+            ),
+            floor_slack_thr_kwh=float(
+                getattr(config, "LP_HEALTH_FLOOR_SLACK_KWH", 0.3)
+            ),
         )
         if not issues:
             logger.info(

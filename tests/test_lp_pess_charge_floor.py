@@ -148,6 +148,25 @@ def test_helper_keeps_nominal_when_pessimistic_failed(monkeypatch):
     assert out is nominal
 
 
+def test_helper_exempts_pre_negative_and_negative_slots(monkeypatch):
+    """The pre-negative drain WANTS low SoC; flooring it would block the
+    profitable export→refill choreography. Negative-price slots likewise."""
+    nominal = _fake_plan([2.0, 2.0, 2.0, 2.0, 2.0])
+    nominal.pre_negative_export_slots = [0, 1]
+    nominal.price_pence = [10.0, 10.0, -5.0, -5.0]  # slots 2-3 negative
+    pess = _fake_plan([2.0, 6.0, 6.0, 6.0, 6.0])
+    called = []
+    monkeypatch.setattr(
+        "src.scheduler.lp_optimizer.solve_lp", lambda **kw: called.append(1)
+    )
+    out = opt_mod._apply_pessimistic_charge_floor(
+        nominal, {"pessimistic": SimpleNamespace(plan=pess)},
+        solve_kwargs={}, exogenous_snapshot={},
+    )
+    # every slot exempt (0,1 = pre-neg drain; 2,3 = negative price) → no re-solve
+    assert out is nominal and not called
+
+
 def test_helper_keeps_nominal_when_resolve_fails(monkeypatch):
     nominal = _fake_plan([2.0, 2.0, 2.0, 2.0, 2.0])
     pess = _fake_plan([2.0, 6.0, 6.0, 6.0, 6.0])

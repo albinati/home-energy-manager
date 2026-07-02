@@ -1366,9 +1366,20 @@ def _apply_pessimistic_charge_floor(
         tol = float(getattr(config, "LP_PESS_CHARGE_FLOOR_TOLERANCE_KWH", 0.2))
         hours = float(getattr(config, "LP_PESS_CHARGE_FLOOR_HOURS", 24))
         max_slots = int(hours * 2)
+        # Exemptions (2026-07-02 review): the pre-negative drain WANTS low SoC
+        # (export now, refill at the paid negative price) — flooring those
+        # slots would block the profitable drain. Negative-price slots are
+        # exempt for the same reason: the LP charges there anyway and any
+        # residual floor could only fight the drain/refill choreography.
+        _skip = set(getattr(plan, "pre_negative_export_slots", []) or []) | set(
+            getattr(pess_plan, "pre_negative_export_slots", []) or []
+        )
+        _prices = list(getattr(plan, "price_pence", []) or [])
         floor = [0.0] * n
         binding = 0
         for i in range(min(n, max_slots)):
+            if i in _skip or (i < len(_prices) and float(_prices[i]) < 0.0):
+                continue
             f = max(0.0, float(pess_plan.soc_kwh[i + 1]) - tol)
             floor[i] = f
             if f > float(plan.soc_kwh[i + 1]) + 1e-6:
@@ -1982,9 +1993,19 @@ def _run_optimizer_lp(
     scenarios_dict: dict[str, Any] | None = None
     if trigger_runs_scenarios(trigger_reason):
         _floor_on = bool(getattr(config, "LP_PESS_CHARGE_FLOOR_ENABLED", True))
+        # Mirror lp_plan_to_slots' peak_export condition EXACTLY (dis>EPS AND
+        # exp>pv+EPS AND not a pre_negative_export drain slot) so the
+        # floor-disabled rollback preserves legacy scenario gating bit-for-bit.
+        _pre_neg = set(getattr(plan, "pre_negative_export_slots", []) or [])
         _plan_has_peak_export = any(
-            float(e) > float(pu) + 1e-6
-            for e, pu in zip(plan.export_kwh or [], plan.pv_use_kwh or [])
+            float(d) > 1e-6 and float(e) > float(pu) + 1e-6 and i not in _pre_neg
+            for i, (d, e, pu) in enumerate(
+                zip(
+                    plan.battery_discharge_kwh or [],
+                    plan.export_kwh or [],
+                    plan.pv_use_kwh or [],
+                )
+            )
         )
         if _floor_on or _plan_has_peak_export:
             try:
@@ -1998,6 +2019,11 @@ def _run_optimizer_lp(
                         initial=initial,
                         tz=tz,
                         micro_climate_offset_c=micro_climate_offset,
+                        # PR B review: side scenarios must share the nominal
+                        # solve's thermal inputs (perturbations on top), or the
+                        # pessimistic SoC floor is derived under different
+                        # heating economics than the re-solve that enforces it.
+                        micro_climate_offset_by_hour_c=micro_climate_offset_by_hour,
                         export_price_pence=export_prices,
                         base_load_spread=base_load_spread,  # #477 Stage 2 — per-slot p75 spread
                     )

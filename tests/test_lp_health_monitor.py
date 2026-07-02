@@ -44,6 +44,19 @@ def test_negative_discharge_ignored_without_negative_slots():
     assert _ev(neg_slot_count=0, neg_discharge_kwh=5.0) == []
 
 
+def test_floor_insurance_breach_flagged():
+    issues = _ev(floor_insurance_24h_pence=300.0)
+    assert len(issues) == 1 and "seguro" in issues[0]
+    # below threshold → healthy
+    assert _ev(floor_insurance_24h_pence=80.0) == []
+
+
+def test_floor_slack_breach_flagged():
+    issues = _ev(floor_slack_max_kwh=0.6)
+    assert len(issues) == 1 and "slack" in issues[0]
+    assert _ev(floor_slack_max_kwh=0.1) == []
+
+
 # --- job-level: alerts once, dedup, silent when healthy ---
 
 class _FakeConn:
@@ -60,6 +73,9 @@ class _FakeConn:
         # lp_inputs_snapshot.lp_status, not the strategy_summary display text.
         if "lp_inputs_snapshot" in s and "lp_status" in s:
             return _R([(self._inf,)])
+        # PR B: pessimistic-charge-floor insurance/slack aggregation
+        if "pess_charge_floor" in s:
+            return _R([(0.0, 0.0)])
         if "agile_rates" in s:
             return _R([(f"2026-06-28T{t}:00Z",) for t in self._neg])
         return _R([])
