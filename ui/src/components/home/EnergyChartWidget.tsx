@@ -43,8 +43,8 @@ interface EnergyChartWidgetProps {
 
 // LOAD DETAILS chart — household demand only (no grid import/export/solar; the
 // flow/source-sink view moved to Insights). Two modes:
-//   * Today → 30-min forecast-vs-actual for the household (residual) load:
-//     the LP's load forecast (base_load_kwh from /pv/today) vs the measured
+//   * Today → 30-min forecast-vs-actual for the household load: the LP's
+//     committed load forecast (load_forecast_kwh from /pv/today) vs the measured
 //     residual (consumption − Daikin), mirroring the Today's-plan treatment,
 //     with the Daikin (heat-pump) actual as a context line + tariff bands.
 //   * Week / Month / Year → /energy/period: Load (total demand) + the two
@@ -485,7 +485,14 @@ function optionForDay(
   const applianceActual = axis.map((iso) => { const e = execBy.get(iso); return e?.appliance_kwh_est == null ? null : round2(e.appliance_kwh_est); });
   const daikinActual = axis.map((iso) => { const e = execBy.get(iso); return e?.daikin_kwh_est == null ? null : round2(e.daikin_kwh_est); });
   const hasAppliance = applianceActual.some((v) => (v ?? 0) > 0);
-  const loadForecast = axis.map((iso) => { const v = (pvSlots.find((p) => p.slot_utc === iso)?.base_load_kwh) ?? null; return v == null ? null : round2(v); });
+  // Committed TOTAL household load (load_forecast_kwh, frozen at solve time)
+  // so the dashed line is comparable to the total-demand stack below it —
+  // base_load_kwh (residual only) is the fallback for slots no solve covered.
+  const loadForecast = axis.map((iso) => {
+    const s = pvSlots.find((p) => p.slot_utc === iso);
+    const v = s?.load_forecast_kwh ?? s?.base_load_kwh ?? null;
+    return v == null ? null : round2(v);
+  });
 
   // --- Tariff-tier background bands (paid / cheap / peak) — same context wash
   // as the Today's-plan chart. Mid-priced slots get a faint neutral fill.
