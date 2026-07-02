@@ -132,7 +132,8 @@ export interface PvTodaySlot {
   pv_planned_kwh?: number | null;     // committed plan (frozen since last LP solve)
   pv_actual_kwh: number | null;
   import_price_p?: number | null;
-  base_load_kwh?: number | null;
+  base_load_kwh?: number | null;      // committed residual forecast (profile fallback where no solve covered the slot)
+  load_forecast_kwh?: number | null;  // committed TOTAL household load (base + dhw + space), frozen at solve time
   kind?: string | null;
 }
 

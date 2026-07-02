@@ -123,6 +123,20 @@ async def get_pv_today(date: str | None = None) -> dict[str, Any]:
         load_prof = db.residual_load_profile_v2()
     except Exception as e:
         logger.warning("pv/today: load profile failed (%s)", e)
+
+    # Committed-plan LOAD: the per-slot household-load forecast the LP actually
+    # committed to, stitched across the day's solves exactly like the PV path
+    # below. ``total`` = base + dhw + space (comparable to the measured
+    # total-demand stack); ``base`` = the LP's exogenous residual input. Without
+    # this, past days rendered TODAY's static dow×hour profile as "Forecast" —
+    # a shape that never matches what was planned on that day (the "forecast
+    # history disappears when navigating back" report).
+    committed_load_by: dict[str, tuple[float, float]] = {}
+    try:
+        for stu, (lt, lb) in db.committed_load_forecast_by_slot(d).items():
+            committed_load_by[_norm_z(stu)] = (float(lt), float(lb))
+    except Exception as e:
+        logger.warning("pv/today: committed-plan load lookup failed (%s)", e)
     try:
         tz = ZoneInfo(getattr(config, "BULLETPROOF_TIMEZONE", "Europe/London"))
     except Exception:
@@ -183,10 +197,17 @@ async def get_pv_today(date: str | None = None) -> dict[str, Any]:
         a_raw = actual_map.get(key)
         a: float | None = round(float(a_raw), 4) if (elapsed and a_raw is not None) else None
         local = st.astimezone(tz)
-        bl = (
-            db.lookup_residual_kwh(load_prof, local.weekday(), local.hour, 30 if local.minute >= 30 else 0)
-            if load_prof is not None else None
-        )
+        committed = committed_load_by.get(key)
+        # base_load_kwh: prefer the committed residual for this slot (true
+        # history, frozen at solve time); fall back to the live profile only
+        # where no solve covered the slot (pre-logging days, gaps).
+        if committed is not None:
+            bl: float | None = committed[1]
+        else:
+            bl = (
+                db.lookup_residual_kwh(load_prof, local.weekday(), local.hour, 30 if local.minute >= 30 else 0)
+                if load_prof is not None else None
+            )
         slots_out.append({
             "slot_utc": key,
             "pv_forecast_kwh": f,  # live forecast (revises through the day)
@@ -194,6 +215,10 @@ async def get_pv_today(date: str | None = None) -> dict[str, Any]:
             "pv_actual_kwh": a,
             "import_price_p": price_by_start.get(key),
             "base_load_kwh": round(float(bl), 4) if bl is not None else None,
+            # committed TOTAL household load (base + dhw + space) — what the
+            # Consumption chart's "Forecast" line should draw against the
+            # total-demand stack. Null where no solve covered the slot.
+            "load_forecast_kwh": round(committed[0], 4) if committed is not None else None,
             "kind": kind_by.get(key),
         })
         if elapsed and a is not None:
