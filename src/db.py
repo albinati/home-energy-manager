@@ -1154,6 +1154,21 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_load_error_log_slot ON load_error_log(slot_time_utc)"
     )
+    # dhw_error_log — committed LP DHW forecast vs realised Daikin DHW energy,
+    # per LOCAL 2-hour bucket (the Daikin consumption API's native resolution;
+    # honest granularity beats fabricated 30-min splits). PR C, 2026-07-02 LP
+    # audit: DHW was the largest unmonitored forecast stream.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS dhw_error_log (
+            day          TEXT NOT NULL,
+            bucket_idx   INTEGER NOT NULL CHECK (bucket_idx BETWEEN 0 AND 11),
+            forecast_kwh REAL,
+            actual_kwh   REAL,
+            error_kwh    REAL,
+            built_at_utc TEXT NOT NULL,
+            PRIMARY KEY (day, bucket_idx)
+        )"""
+    )
     # Daily export opportunity cost: what the day's export earned on the current
     # flat SEG tariff vs what it WOULD have earned on Outgoing Agile. The running
     # tally of money left on the table by not being on Agile export — ammunition
@@ -5201,6 +5216,110 @@ def rebuild_pv_error_log_for_date(day: date) -> int:
             conn.commit()
         except sqlite3.Error as e:
             logger.warning("rebuild_pv_error_log write failed for %s: %s", day, e)
+        finally:
+            conn.close()
+    return written
+
+
+def committed_dhw_forecast_by_bucket(day: date) -> dict[int, float]:
+    """Committed LP DHW forecast for LOCAL ``day``, summed into 2-hour buckets.
+
+    2026-07-02 LP audit (PR C): DHW was the largest UNMONITORED forecast stream
+    (load_error_log + pv_error_log exist; DHW didn't). Granularity is the 2-hour
+    bucket because that is what the Daikin consumption API provides. Stitch rule
+    per slot mirrors :func:`committed_load_forecast_by_slot`: most recent solve
+    whose ``run_at <= slot_start``; else the earliest that covered it.
+    Returns ``{bucket_idx 0..11: kwh}``; empty on error.
+    """
+    tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+    day_start_local = datetime(day.year, day.month, day.day, tzinfo=tz)
+    day_end_local = day_start_local + timedelta(days=1)
+    q_from = day_start_local.astimezone(UTC).isoformat()
+    q_to = day_end_local.astimezone(UTC).isoformat()
+    with _lock:
+        conn = get_connection()
+        try:
+            rows = conn.execute(
+                """SELECT s.slot_time_utc, s.dhw_kwh, i.run_at_utc
+                   FROM lp_solution_snapshot s
+                   JOIN lp_inputs_snapshot i ON i.run_id = s.run_id
+                   WHERE s.slot_time_utc >= ? AND s.slot_time_utc < ?
+                     AND s.dhw_kwh IS NOT NULL""",
+                (q_from, q_to),
+            ).fetchall()
+        except sqlite3.Error as e:
+            logger.warning("committed_dhw_forecast_by_bucket query failed: %s", e)
+            return {}
+        finally:
+            conn.close()
+
+    # slot -> (eligible, run_dt, kwh); eligible = run_at <= slot_start
+    best: dict[str, tuple[bool, datetime, float]] = {}
+    for slot_iso, dhw, run_at in rows:
+        slot_dt = _parse_iso_utc(slot_iso)
+        run_dt = _parse_iso_utc(run_at)
+        if slot_dt is None or run_dt is None:
+            continue
+        eligible = run_dt <= slot_dt
+        cur = best.get(slot_iso)
+        cand = (eligible, run_dt, float(dhw or 0.0))
+        if cur is None:
+            best[slot_iso] = cand
+        elif eligible and (not cur[0] or run_dt > cur[1]):
+            best[slot_iso] = cand           # latest eligible wins
+        elif not eligible and not cur[0] and run_dt < cur[1]:
+            best[slot_iso] = cand           # else earliest covering solve
+
+    out: dict[int, float] = {}
+    for slot_iso, (_e, _r, kwh) in best.items():
+        slot_dt = _parse_iso_utc(slot_iso)
+        if slot_dt is None:
+            continue
+        loc = slot_dt.astimezone(tz)
+        if loc.date() != day:
+            continue
+        out[loc.hour // 2] = out.get(loc.hour // 2, 0.0) + kwh
+    return out
+
+
+def rebuild_dhw_error_log_for_date(day: date) -> int:
+    """Persist per-2h-bucket committed-DHW-forecast-vs-actual rows for LOCAL
+    ``day``. Actuals come from ``daikin_consumption_2hourly.kwh_dhw`` (written
+    by the 02:35 UTC rollup). Idempotent on ``(day, bucket_idx)``; returns rows
+    written. Best-effort: the nightly cron swallows exceptions.
+    """
+    forecast = committed_dhw_forecast_by_bucket(day)
+    built_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    written = 0
+    with _lock:
+        conn = get_connection()
+        try:
+            actual = {
+                int(b): float(k or 0.0)
+                for b, k in conn.execute(
+                    "SELECT bucket_idx, kwh_dhw FROM daikin_consumption_2hourly WHERE date=?",
+                    (day.isoformat(),),
+                ).fetchall()
+            }
+            for b in sorted(set(forecast) | set(actual)):
+                f = forecast.get(b)
+                a = actual.get(b)
+                err = (a - f) if (a is not None and f is not None) else None
+                conn.execute(
+                    """INSERT INTO dhw_error_log
+                         (day, bucket_idx, forecast_kwh, actual_kwh, error_kwh, built_at_utc)
+                       VALUES (?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(day, bucket_idx) DO UPDATE SET
+                         forecast_kwh=excluded.forecast_kwh,
+                         actual_kwh=excluded.actual_kwh,
+                         error_kwh=excluded.error_kwh,
+                         built_at_utc=excluded.built_at_utc""",
+                    (day.isoformat(), b, f, a, err, built_at),
+                )
+                written += 1
+            conn.commit()
+        except sqlite3.Error as e:
+            logger.warning("rebuild_dhw_error_log(%s) failed: %s", day, e)
         finally:
             conn.close()
     return written

@@ -735,6 +735,20 @@ def bulletproof_pv_error_log_job() -> None:
         logger.warning("pv_recent_bias refresh failed (non-fatal): %s", e)
 
 
+def bulletproof_dhw_error_log_job() -> None:
+    """Nightly rebuild of dhw_error_log for YESTERDAY (local) — committed LP
+    DHW forecast vs realised Daikin DHW energy per 2h bucket (PR C, 2026-07-02
+    LP audit: DHW was the largest unmonitored forecast stream). Runs after the
+    02:35 UTC Daikin consumption rollup. Best-effort.
+    """
+    try:
+        target_day = (datetime.now(ZoneInfo(config.BULLETPROOF_TIMEZONE)) - timedelta(days=1)).date()
+        rows = db.rebuild_dhw_error_log_for_date(target_day)
+        logger.info("dhw_error_log rebuild: day_local=%s rows=%d", target_day.isoformat(), rows)
+    except Exception as e:
+        logger.warning("dhw_error_log rebuild failed (non-fatal): %s", e)
+
+
 def bulletproof_load_error_log_job() -> None:
     """Persist yesterday's per-slot committed-LOAD-forecast-vs-actual rows.
 
@@ -2206,6 +2220,14 @@ def start_background_scheduler() -> None:
                 id="bulletproof_load_error_log",
             )
             logger.info("Load error-log rebuild cron scheduled (04:22 UTC daily)")
+            # Per-bucket DHW forecast-error log (PR C). 04:24 UTC — after the
+            # 02:35 UTC Daikin consumption rollup; measurement only.
+            _background_scheduler.add_job(
+                bulletproof_dhw_error_log_job,
+                CronTrigger(hour=4, minute=24, timezone=ZoneInfo("UTC")),
+                id="bulletproof_dhw_error_log",
+            )
+            logger.info("DHW error-log rebuild cron scheduled (04:24 UTC daily)")
             # Daily export opportunity cost (Agile vs SEG). 04:25 UTC — after the
             # Fox/PV roll-ups (02:30) so the prior day's export is complete.
             _background_scheduler.add_job(
