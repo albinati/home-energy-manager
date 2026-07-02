@@ -150,6 +150,28 @@ Smoke do OpenClaw: pergunte ao agent "qual é meu SoC agora?" e confirme que ele
 
 Não rode o cleanup imediato. Deixe `/root/home-energy-manager/` e `home-energy-manager.service.bak` no lugar pelo menos 7 dias após cutover sem incidente. Isso garante rollback rápido se aparecer regressão.
 
+## 7b. Deploys do dia-a-dia (pós-cutover): `rollout.sh`
+
+Depois do cutover, o deploy padrão de uma nova imagem é UM comando no host:
+
+```bash
+# instala/atualiza o script (repo é a fonte da verdade):
+scp deploy/rollout.sh root@<hem-host>:/srv/hem/rollout.sh && ssh root@<hem-host> chmod +x /srv/hem/rollout.sh
+
+# deploy de um SHA já buildado pelo CI (docker-publish.yml verde para ESTE commit):
+ssh root@<hem-host> /srv/hem/rollout.sh <full-git-sha>
+```
+
+O script encadeia as salvaguardas que antes eram manuais:
+1. **manifest-guard** — nunca pinna uma tag impullável (pull em pipe sob `set -e`
+   mascara falha → outage);
+2. pin de `HEM_IMAGE_TAG` em `/srv/hem/.compose.env` (com `.bak`) + `systemctl restart hem`;
+3. **health-verify** — espera `/api/v1/health` reportar a revisão NOVA; se não
+   vier em ~3 min, **auto-rollback** para a tag anterior;
+4. **prune** — remove imagens antigas do app mantendo exatamente a atual + a
+   anterior (2026-07-02: deploys nunca removiam imagens de 534 MB; o disco
+   cruzou 85% após uma sessão multi-PR). UI/quartz não são tocadas.
+
 ## 8. Rollback (caso algo dê errado)
 
 ```bash
