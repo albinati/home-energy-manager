@@ -2,7 +2,7 @@
 .heating-plan-chart {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-1);
 }
 
 /* Day band labels above the chart — three equal thirds matching the day
@@ -16,7 +16,7 @@
   text-align: center;
 }
 .hpl-day {
-  padding: 2px 0;
+  padding: var(--space-0) 0;
   border-left: 1px solid var(--border);
 }
 .hpl-day:first-child { border-left: none; }
@@ -29,10 +29,10 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: var(--space-3);
   font-size: var(--font-2xs);
   color: var(--text-dim);
-  padding: 2px 4px 0;
+  padding: var(--space-0) 4px 0;
 }
 @media (max-width: 640px) {
   /* One scrollable row instead of a 3-line wrap that pushes the gauges down. */
@@ -49,7 +49,7 @@
 .hpl-tok {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: var(--space-1);
 }
 .hpl-line {
   display: inline-block;

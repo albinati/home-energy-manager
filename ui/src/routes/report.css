@@ -17,12 +17,12 @@
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text-dim);
-  padding: 5px 12px;
+  padding: var(--space-1) 12px;
   border-radius: var(--radius-pill, 999px);
   font-size: var(--font-xs);
   font-weight: 600;
   cursor: pointer;
-  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+  transition: background var(--dur-fast) ease, color var(--dur-fast) ease, border-color var(--dur-fast) ease;
 }
 .report-tab:hover { color: var(--text); border-color: var(--border-strong); }
 .report-tab.active {

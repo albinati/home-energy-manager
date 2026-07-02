@@ -2,7 +2,7 @@
 
 html {
   /* Dark↔light cross-fades instead of snapping (Apple-grade theme switch). */
-  transition: background-color 220ms ease, color 220ms ease;
+  transition: background-color var(--dur-med) ease, color var(--dur-med) ease;
 }
 html,
 body {
@@ -58,7 +58,7 @@ body > * { position: relative; z-index: 1; }
   50%      { opacity: 0.4; }
 }
 .live-pulse {
-  animation: live-pulse 1600ms ease-in-out infinite;
+  animation: live-pulse 1.4s ease-in-out infinite;
 }
 
 a {

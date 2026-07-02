@@ -24,10 +24,10 @@
   border: 1px solid var(--border);
   background: var(--bg-card);
   color: var(--text);
-  font-size: 18px;
+  font-size: var(--font-lg);
   line-height: 1;
   cursor: pointer;
-  transition: background 140ms ease, color 140ms ease, opacity 140ms ease;
+  transition: background var(--dur-fast) ease, color var(--dur-fast) ease, opacity var(--dur-fast) ease;
 }
 .pnav-arrow:hover { background: var(--bg-card-2); }
 .pnav-arrow:disabled { opacity: 0.35; cursor: default; }
@@ -45,7 +45,7 @@
   font-weight: 500;
   line-height: 1;
   cursor: pointer;
-  transition: background 140ms ease, color 140ms ease, opacity 140ms ease;
+  transition: background var(--dur-fast) ease, color var(--dur-fast) ease, opacity var(--dur-fast) ease;
 }
 .pnav-today:hover { background: var(--bg-card-2); color: var(--text); }
 .pnav-today:disabled { opacity: 0.35; cursor: default; }
@@ -64,15 +64,15 @@
  * an accent-filled active segment (matches the cockpit chrome control). */
 .pnav-grans {
   display: inline-flex;
-  gap: 2px;
+  gap: var(--space-0);
   background: var(--bg-card-2);
   border: none;
   border-radius: var(--radius-pill);
-  padding: 3px;
+  padding: var(--space-0);
 }
 .pnav-gran {
   position: relative;
-  padding: 5px 14px;
+  padding: var(--space-1) var(--space-4);
   border-radius: var(--radius-pill);
   font-size: var(--font-sm);
   font-weight: 500;
@@ -81,7 +81,7 @@
   border: none;
   cursor: pointer;
   white-space: nowrap;
-  transition: background 140ms ease, color 140ms ease;
+  transition: background var(--dur-fast) ease, color var(--dur-fast) ease;
 }
 .pnav-gran:hover { color: var(--text); }
 .pnav-gran.is-active {
@@ -108,7 +108,7 @@
 .pnav--chrome .pnav-arrow {
   width: 28px;
   height: 28px;
-  font-size: 16px;
+  font-size: var(--font-md);
   border: none;
   background: var(--bg-card-2);
   color: var(--text-dim);
@@ -123,7 +123,7 @@
 }
 .pnav--chrome .pnav-today {
   height: 28px;
-  padding: 0 10px;
+  padding: 0 var(--space-3);
   font-size: var(--font-xs);
   border: none;
   background: var(--bg-card-2);
@@ -145,7 +145,7 @@
   }
   .pnav--page .pnav-label { min-width: 7ch; font-size: var(--font-sm); }
   .pnav--page .pnav-gran { padding: 5px 9px; font-size: var(--font-xs); }
-  .pnav--page .pnav-arrow { width: 28px; height: 28px; font-size: 16px; }
+  .pnav--page .pnav-arrow { width: 28px; height: 28px; font-size: var(--font-md); }
   .pnav--page .pnav-today { height: 28px; padding: 0 9px; font-size: var(--font-xs); }
 }
 

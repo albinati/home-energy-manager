@@ -30,14 +30,14 @@
   font-size: var(--font-xs);
   color: var(--warn);
   font-variant-numeric: tabular-nums;
-  padding: 3px 8px;
+  padding: var(--space-0) 8px;
   border-radius: 8px;
   background: color-mix(in srgb, var(--warn) 12%, transparent);
 }
 .tlw-oppy strong { color: var(--warn); font-weight: 700; }
 /* The "week/month/year shows actuals only" note — quiet, italic. */
 .tlw-mode-note {
-  font-size: 10px;
+  font-size: var(--font-2xs);
   font-style: italic;
   color: var(--text-mute);
 }
@@ -45,10 +45,10 @@
   display: flex;
   gap: var(--space-3);
   flex-wrap: wrap;
-  font-size: 10px;
+  font-size: var(--font-2xs);
   color: var(--text-mute);
 }
-.tlw-legend span { display: inline-flex; align-items: center; gap: 4px; }
+.tlw-legend span { display: inline-flex; align-items: center; gap: var(--space-1); }
 .tlw-legend i {
   width: 14px;
   height: 0;
