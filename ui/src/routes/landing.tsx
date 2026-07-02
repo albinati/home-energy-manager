@@ -225,12 +225,13 @@ export default function Landing() {
 
       {/* ── PERIOD scope divider (redesign P4) — everything below follows the
           day/week/month/year selector in the chrome, in contrast to the live
-          band. */}
-      <div class="scope scope--period">
-        <span class="scope-dot" />
+          band. <h2> like its two sibling scopes so the document outline holds
+          (a bare <div> here orphaned the period-energy section for SRs). */}
+      <h2 class="scope scope--period">
+        <span class="scope-dot" aria-hidden="true" />
         {scope.scope} · energy
         <span class="scope-when">follows the {period.gran} selector</span>
-      </div>
+      </h2>
 
       {/* ── TIMELINES — Generation + Consumption, synced to the period navigator.
           Stacked full-width so a given time reads straight down the screen. ── */}

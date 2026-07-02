@@ -58,18 +58,18 @@
   border-top-width: 2.5px;
   border-top-style: solid;
 }
-.hpl-line--outdoor { border-top-color: var(--grid, #60a5fa); }
-.hpl-line--tank    { border-top-style: dashed; border-top-color: var(--thermal, #fb923c); }
-.hpl-line--lwt     { border-top-width: 3px; border-top-color: var(--house, #c084fc); }
-.hpl-line--curve   { border-top-style: dotted; border-top-color: color-mix(in srgb, var(--house, #c084fc) 55%, transparent); }
+.hpl-line--outdoor { border-top-color: var(--grid); }
+.hpl-line--tank    { border-top-style: dashed; border-top-color: var(--thermal); }
+.hpl-line--lwt     { border-top-width: 3px; border-top-color: var(--house); }
+.hpl-line--curve   { border-top-style: dotted; border-top-color: color-mix(in srgb, var(--house) 55%, transparent); }
 .hpl-sw {
   display: inline-block;
   width: 11px;
   height: 11px;
   border-radius: 3px;
 }
-.hpl-sw--heat { background: color-mix(in srgb, var(--warn, #f59e0b) 22%, transparent); }
-.hpl-sw--neg  { background: color-mix(in srgb, var(--neg-price, #2563eb) 30%, transparent); border: 1px solid var(--neg-price, #2563eb); }
+.hpl-sw--heat { background: color-mix(in srgb, var(--warn) 22%, transparent); }
+.hpl-sw--neg  { background: color-mix(in srgb, var(--neg-price) 30%, transparent); border: 1px solid var(--neg-price); }
 .hpl-hint {
   margin-left: auto;
   color: var(--text-mute);

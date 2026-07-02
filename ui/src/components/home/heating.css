@@ -233,9 +233,9 @@
   font-variant-numeric: tabular-nums;
 }
 .heating-plan-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; background: var(--text-mute); }
-.heating-plan-row--warmup .heating-plan-dot { background: var(--pv, #fbbf24); }
+.heating-plan-row--warmup .heating-plan-dot { background: var(--pv); }
 .heating-plan-row--setback .heating-plan-dot { background: var(--text-mute); }
-.heating-plan-row--boost .heating-plan-dot { background: var(--neg-price, #2563eb); }
+.heating-plan-row--boost .heating-plan-dot { background: var(--neg-price); }
 .heating-plan-when { color: var(--text); min-width: 3rem; }
 .heating-plan-label { color: var(--text-dim); flex: 1; }
 .heating-plan-temp { font-weight: 700; color: var(--text); }

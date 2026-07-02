@@ -158,9 +158,9 @@
 .btn--primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: white;
+  color: var(--text-on-accent);
 }
-.btn--primary:hover { background: #2563eb; }
+.btn--primary:hover { background: color-mix(in srgb, var(--accent) 85%, black); }
 .btn--ghost {
   background: transparent;
 }

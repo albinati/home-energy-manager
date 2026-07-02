@@ -156,3 +156,24 @@ code, pre {
 :root.hem-reduce-motion .widget:hover { transform: translateY(-1px); }
 :root.hem-reduce-motion body::before { animation: none !important; }
 :root.hem-reduce-motion .live-pulse { animation: none !important; opacity: 1 !important; }
+
+/* Touch targets (WCAG 2.5.5/2.5.8) — the compact chrome controls (28–32px
+ * period arrows / Today / granularity pills, 32px icon buttons) keep their
+ * visual size (density + the ≤640px "one compact row under ~96px chrome"
+ * budget), but on touch devices an invisible centred overlay extends each
+ * hit box to ≥44px. Adjacent halos may overlap a few px in the gutter —
+ * the later element in the DOM wins there, which is the standard trade. */
+@media (pointer: coarse) {
+  .pnav-arrow, .pnav-today, .pnav-gran, .icon-btn {
+    position: relative;
+  }
+  .pnav-arrow::after, .pnav-today::after, .pnav-gran::after, .icon-btn::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: max(100%, 44px);
+    height: max(100%, 44px);
+    transform: translate(-50%, -50%);
+  }
+}

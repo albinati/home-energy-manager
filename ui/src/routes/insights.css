@@ -136,7 +136,7 @@
   border-top: 1px solid var(--border);
 }
 .la-key { font-weight: 700; }
-.la-key.la-over { color: var(--pv, #38bdf8); }
+.la-key.la-over { color: var(--cool); }
 .la-key.la-under { color: var(--bad); }
 .la-stats {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
