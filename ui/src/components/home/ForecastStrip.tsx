@@ -89,9 +89,9 @@ export function ForecastStrip({ weather }: { weather?: WeatherResponse | null })
 }
 
 function CondGlyph({ cond }: { cond: Cond }) {
-  const pv = "var(--pv, #fbbf24)";
-  const mute = "var(--text-mute, #9ca3af)";
-  const rain = "var(--grid, #60a5fa)";
+  const pv = "var(--pv)";
+  const mute = "var(--text-mute)";
+  const rain = "var(--grid)";
   if (cond === "sun") {
     return (
       <svg class="fcstrip-icon" width="24" height="24" viewBox="0 0 24 24" aria-hidden="true">

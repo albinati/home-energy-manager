@@ -78,6 +78,8 @@ export function chartTheme() {
     house: cssVar("--house", "#c084fc"),
     importColor: cssVar("--import", "#ef4444"),
     exportColor: cssVar("--export", "#10b981"),
+    // cool end of diverging/intensity ramps — NOT the paid-to-import band.
+    cool: cssVar("--cool", "#38bdf8"),
   };
 }
 

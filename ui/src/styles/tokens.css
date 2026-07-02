@@ -1,6 +1,7 @@
 /* Design tokens — dark by default, light variant under .theme-light.
  * Selection is driven by src/lib/theme.ts which toggles a class on <html>.
- * Tariff/energy/chart colours stay the same in both themes for legibility. */
+ * Tariff/energy/chart colours are re-tuned darker in the light theme so they
+ * hold contrast on white — same hue, same meaning. */
 
 :root, :root.theme-dark {
   /* Native form controls / scrollbars match the dark theme. */
@@ -25,6 +26,10 @@
   --ok: #10b981;
   --warn: #f59e0b;
   --bad: #ef4444;
+  /* text sitting ON an accent/state-filled control (active pill, primary
+   * button, count badge) — white in BOTH themes; var(--text) would flip dark
+   * on the light theme and vanish against the blue fill. */
+  --text-on-accent: #fff;
 
   /* tariff bands */
   --neg-price: #2563eb;
@@ -37,6 +42,10 @@
    * token (same colour, no longer a silent literal). Distinct from
    * --neg-price (the deeper tariff-band blue). */
   --neg: #38bdf8;
+  /* cool end of diverging / intensity chart ramps (forecast-error "blue",
+   * heat-pump heatmap). Same value as --neg but a separate name on purpose:
+   * --neg MEANS paid-to-import; ramps must not borrow a tariff semantic. */
+  --cool: #38bdf8;
 
   /* energy-flow domains (charts + power-flow svg) */
   --pv: #fbbf24;
@@ -120,6 +129,8 @@
   --standard: #94a3b8;
   --peak: #d97706;
   --peak-export: #dc2626;
+  --neg: #0284c7;
+  --cool: #0284c7;
 
   --pv: #d97706;
   --batt: #059669;
@@ -127,6 +138,7 @@
   --house: #9333ea;
   --import: #dc2626;
   --export: #059669;
+  --thermal: #ea580c;
 
   --shadow: 0 1px 2px rgba(15, 23, 42, 0.06), 0 8px 24px rgba(15, 23, 42, 0.08);
   --shadow-lg: 0 2px 4px rgba(15, 23, 42, 0.08), 0 18px 48px rgba(15, 23, 42, 0.14);

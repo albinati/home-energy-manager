@@ -75,8 +75,8 @@ export function LoadPatternCard({ period }: { period: PeriodState }) {
     // Heat-pump view gets a distinct (cool→warm) ramp so the two reads don't
     // get confused; residual keeps the established amber→red.
     const ramp = HP_VIEWS.has(view)
-      ? [t.bg ?? "#1b1f27", "#38bdf8", "#ef4444"]
-      : [t.bg ?? "#1b1f27", t.pv ?? "#fbbf24", t.importColor ?? "#ef4444"];
+      ? [t.bg, t.cool, t.importColor]
+      : [t.bg, t.pv, t.importColor];
 
     chartRef.current.setOption({
       backgroundColor: "transparent",

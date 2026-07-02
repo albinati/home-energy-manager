@@ -86,7 +86,7 @@
 .pnav-gran:hover { color: var(--text); }
 .pnav-gran.is-active {
   background: var(--accent);
-  color: #fff;
+  color: var(--text-on-accent);
 }
 
 /* ── chrome variant (redesign P4c) — compact form living inside the sticky

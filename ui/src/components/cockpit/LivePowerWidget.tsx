@@ -14,8 +14,6 @@ interface LivePowerWidgetProps {
   todayCumulative?: TodayCumulativeResponse | null;
 }
 
-const RM = reducedMotion();
-
 // Redesign form: the animated power-flow IS the surface (no separate focal
 // number — the node field carries the watts), with a quiet rates row beneath
 // it (Import / Export p + today's kWh·£) and the compact battery SoC block on
@@ -84,6 +82,10 @@ function classifyBand(p: number | null | undefined, cheapAt?: number, peakAt?: n
 // amber / idle mute), with %, kWh and a status line. The fill springs from 0
 // to the live SoC on mount (skipped under reduced motion).
 function BatterySOC({ soc, kwhVal, mode, kw }: { soc: number; kwhVal: number | null | undefined; mode: "charging" | "discharging" | "idle"; kw: number }) {
+  // Read per render, not at module load — the in-app motion toggle
+  // (lib/motion.ts) can change at runtime and a module-level const would
+  // pin this widget to the boot-time preference until a full reload.
+  const RM = reducedMotion();
   const fill = Math.max(0, Math.min(1, soc / 100));
   const color = mode === "charging" ? "var(--ok)" : mode === "discharging" ? "var(--peak)" : "var(--text-mute)";
   const innerH = 48;

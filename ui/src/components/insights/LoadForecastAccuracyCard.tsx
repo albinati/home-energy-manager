@@ -49,7 +49,9 @@ export function LoadForecastAccuracyCard({ period }: { period: PeriodState }) {
       const b = s ? s.bias_kwh : 0;
       bars.push({
         value: Number(b.toFixed(3)),
-        itemStyle: { color: b >= 0 ? (t.importColor ?? "#ef4444") : (t.pv ?? "#38bdf8") },
+        // under-forecast (+) = red, over-forecast (−) = the cool blue the
+        // legend copy promises. Was t.pv (solar AMBER) — a --pv/--neg mixup.
+        itemStyle: { color: b >= 0 ? t.importColor : t.cool },
       });
     }
 

@@ -23,18 +23,18 @@
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
 }
-.tlw-pos { color: var(--ok, #36d399); }
-.tlw-neg { color: var(--bad, #f87171); }
+.tlw-pos { color: var(--ok); }
+.tlw-neg { color: var(--bad); }
 /* "Money left on the table" — export £ lost on flat SEG vs Outgoing Agile. */
 .tlw-oppy {
   font-size: var(--font-xs);
-  color: var(--warn, #f59e0b);
+  color: var(--warn);
   font-variant-numeric: tabular-nums;
   padding: 3px 8px;
   border-radius: 8px;
-  background: color-mix(in srgb, var(--warn, #f59e0b) 12%, transparent);
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
 }
-.tlw-oppy strong { color: var(--warn, #f59e0b); font-weight: 700; }
+.tlw-oppy strong { color: var(--warn); font-weight: 700; }
 /* The "week/month/year shows actuals only" note — quiet, italic. */
 .tlw-mode-note {
   font-size: 10px;
