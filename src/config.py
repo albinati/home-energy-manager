@@ -970,6 +970,16 @@ class Config:
     LP_PESS_CHARGE_FLOOR_SLACK_PENALTY_PENCE: float = float(
         os.getenv("LP_PESS_CHARGE_FLOOR_SLACK_PENALTY_PENCE", "50.0")
     )
+    # PR D (2026-07-02 audit) — adjacent ForceCharge Fox rows merge only within
+    # the same intent class: HOLD (fdSoc <= this threshold, i.e. "hold at
+    # reserve, don't fill") vs FILL (higher targets). A negative_hold merged
+    # into a negative used to take max(fdSoc)=100 for the whole window → Fox
+    # front-loaded the fill at the shallow price instead of the deepest slots.
+    # Tapered fill runs (70→100) still merge into one group. -1 = legacy
+    # always-merge rollback.
+    LP_FC_MERGE_HOLD_FDSOC_MAX: float = float(
+        os.getenv("LP_FC_MERGE_HOLD_FDSOC_MAX", "35.0")
+    )
     # #477 Stage 2 — when true, the scenario LP perturbs base load per-slot by
     # the LEARNED p75 spread (median ± (p75−median)) from residual_load_profile_v2
     # instead of the flat factors above. Sharper protection where the variance is

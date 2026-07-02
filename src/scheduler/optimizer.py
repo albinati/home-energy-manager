@@ -672,13 +672,32 @@ def _merge_adjacent_force_charge_rows(
 
     fd_soc still uses max so the merged block charges to the highest target
     in the run, and min_soc_on_grid uses max for the same reason.
+
+    PR D (2026-07-02 LP audit): HOLD rows and FILL rows are no longer merged
+    into each other. A negative_hold (fdSoc ≈ reserve — "hold, don't fill")
+    merged into a negative (fdSoc 100 — "fill at the paid price") took
+    max(fdSoc)=100 across the whole window, so Fox front-loaded the fill into
+    the shallow-priced hold period instead of the deepest-negative slots (June
+    audit: part of the £3.46 left across 5 negative days). Classification is by
+    ``fdSoc <= LP_FC_MERGE_HOLD_FDSOC_MAX`` (default 35 — comfortably above the
+    10-15% reserve targets, far below any fill target): hold+hold still merge,
+    fill+fill still merge (a tapered 70→100 run stays ONE group, so the 8-group
+    cap pressure is unchanged); only hold↔fill transitions produce a boundary.
+    Rollback: set the knob to -1 (nothing classifies as hold → legacy
+    always-merge).
     """
+    hold_max = float(getattr(config, "LP_FC_MERGE_HOLD_FDSOC_MAX", 35.0))
+
+    def _is_hold(fd) -> bool:
+        return float(fd or 0) <= hold_max
+
     out: list[tuple[datetime, datetime, tuple]] = []
     for a, b, k in merged:
         if (
             out
             and out[-1][2][0] == "ForceCharge"
             and k[0] == "ForceCharge"
+            and _is_hold(out[-1][2][1]) == _is_hold(k[1])
         ):
             a0, end0, k0 = out[-1]
             dur0_s = max(0.0, (end0 - a0).total_seconds())
