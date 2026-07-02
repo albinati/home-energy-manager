@@ -91,6 +91,14 @@ class LpPlan:
     """Audit data for the strict_savings PV-sufficiency guard rail. ``None``
     when the rail was not evaluated (legacy callers / pre-#incident-2026-05-15
     snapshots)."""
+    soc_floor_applied: bool = False
+    """True when a pessimistic-scenario charge floor was passed in (PR B,
+    2026-07-02 LP audit) — the committed plan holds at least the pessimistic
+    solve's SoC trajectory (soft; see ``soc_floor_slack_kwh``)."""
+    soc_floor_slack_kwh: float = 0.0
+    """Total slack the solver needed below the pessimistic charge floor.
+    ~0 in normal operation (the floor is reachable by construction); >0 means
+    an unexpected input made the floor bind against physics — logged upstream."""
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +269,7 @@ def solve_lp(
     micro_climate_offset_c: float = 0.0,
     micro_climate_offset_by_hour_c: dict[int, float] | None = None,
     export_price_pence: list[float] | None = None,
+    soc_floor_kwh: list[float] | None = None,
 ) -> LpPlan:
     """Build and solve the MILP. Raises ``ValueError`` on dimension mismatch.
 
@@ -286,6 +295,8 @@ def solve_lp(
         raise ValueError("LP: price/base_load length mismatch")
     if export_price_pence is not None and len(export_price_pence) != n:
         raise ValueError("LP: export_price_pence length mismatch")
+    if soc_floor_kwh is not None and len(soc_floor_kwh) != n:
+        raise ValueError("LP: soc_floor_kwh length mismatch")
     if len(weather.pv_kwh_per_slot) != n:
         raise ValueError("LP: weather horizon mismatch")
 
@@ -1112,6 +1123,26 @@ def solve_lp(
         if export_rate_line[i] < 0:
             prob += exp[i] == 0
 
+    # Pessimistic-scenario charge floor (2026-07-02 LP audit, newsvendor).
+    # ``soc_floor_kwh[i]`` is the pessimistic solve's end-of-slot-i SoC: the
+    # charge level an optimal plan holds when load lands at p75, temp −1.5 °C
+    # and PV ×0.85. Enforcing it SOFT (slack + steep penalty) on the committed
+    # plan buys insurance against the measured empty-battery-at-peak evenings
+    # (14 nights in June 2026) while never risking an Infeasible — the floor
+    # is reachable by construction (the pessimistic trajectory starts from the
+    # same initial state under strictly worse inputs), but odd runtime inputs
+    # must degrade to "floor ignored + logged", not a failed solve.
+    socfloor_slack: dict[int, Any] = {}
+    if soc_floor_kwh is not None:
+        floor_pen = float(getattr(config, "LP_PESS_CHARGE_FLOOR_SLACK_PENALTY_PENCE", 50.0))
+        for i in range(n):
+            f = min(float(soc_floor_kwh[i]), soc_max)
+            if f <= soc_min + 1e-9:
+                continue
+            sl = pulp.LpVariable(f"s_socfloor_{i}", lowBound=0)
+            socfloor_slack[i] = sl
+            prob += soc[i + 1] + sl >= f
+
     # -----------------------------------------------------------------------
     # Terminal constraints
     # -----------------------------------------------------------------------
@@ -1341,6 +1372,11 @@ def solve_lp(
     if soc_terminal_value > 0:
         objective -= soc_terminal_value * soc[n]
 
+    if socfloor_slack:
+        objective += float(getattr(config, "LP_PESS_CHARGE_FLOOR_SLACK_PENALTY_PENCE", 50.0)) * pulp.lpSum(
+            socfloor_slack.values()
+        )
+
     prob += objective
 
     # -----------------------------------------------------------------------
@@ -1358,6 +1394,11 @@ def solve_lp(
         cheap_threshold_pence=cheap_thr,
         pre_negative_export_slots=[i for i in range(n) if pre_neg_export[i]],
         pv_sufficiency_guard=pv_guard_diag,
+        soc_floor_applied=soc_floor_kwh is not None,
+        soc_floor_slack_kwh=(
+            float(sum((pulp.value(v) or 0.0) for v in socfloor_slack.values()))
+            if socfloor_slack else 0.0
+        ),
     )
     plan.slot_starts_utc = list(slot_starts_utc)
     plan.price_pence = list(price_pence)

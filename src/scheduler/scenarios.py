@@ -173,6 +173,7 @@ def _solve_one_scenario(
     micro_climate_offset_c: float,
     export_price_pence: list[float] | None,
     base_load_spread: list[float] | None = None,
+    micro_climate_offset_by_hour_c: dict[int, float] | None = None,
 ) -> ScenarioSolveResult:
     """Solve one perturbed scenario; capture wall-clock duration + error.
 
@@ -194,6 +195,7 @@ def _solve_one_scenario(
             initial=initial,
             tz=tz,
             micro_climate_offset_c=micro_climate_offset_c,
+            micro_climate_offset_by_hour_c=micro_climate_offset_by_hour_c,
             export_price_pence=export_price_pence,
         )
         duration_ms = int((time.monotonic() - t0) * 1000)
@@ -239,6 +241,7 @@ def solve_scenarios(
     export_price_pence: list[float] | None = None,
     scenarios: tuple[Scenario, ...] = SCENARIOS,
     base_load_spread: list[float] | None = None,
+    micro_climate_offset_by_hour_c: dict[int, float] | None = None,
 ) -> dict[Scenario, ScenarioSolveResult]:
     """Solve the LP under each scenario in parallel; return scenario → result.
 
@@ -271,6 +274,7 @@ def solve_scenarios(
                 micro_climate_offset_c=micro_climate_offset_c,
                 export_price_pence=export_price_pence,
                 base_load_spread=base_load_spread,
+                micro_climate_offset_by_hour_c=micro_climate_offset_by_hour_c,
             ): s
             for s in scenarios
         }
@@ -308,6 +312,7 @@ def solve_scenarios_with_nominal(
     micro_climate_offset_c: float = 0.0,
     export_price_pence: list[float] | None = None,
     base_load_spread: list[float] | None = None,
+    micro_climate_offset_by_hour_c: dict[int, float] | None = None,
 ) -> dict[Scenario, ScenarioSolveResult]:
     """Same as ``solve_scenarios`` but reuses an already-computed nominal plan.
 
@@ -326,6 +331,7 @@ def solve_scenarios_with_nominal(
         export_price_pence=export_price_pence,
         scenarios=("optimistic", "pessimistic"),
         base_load_spread=base_load_spread,
+        micro_climate_offset_by_hour_c=micro_climate_offset_by_hour_c,
     )
     extras["nominal"] = ScenarioSolveResult(
         scenario="nominal",
