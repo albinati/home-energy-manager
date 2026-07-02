@@ -82,7 +82,9 @@ export default function Landing() {
   // Fetch-once endpoints — refresh on tab return, otherwise no churn.
   const agile = useFetch(getAgileToday, []);
   const weather = useFetch(getWeather, []);
-  const execution = useFetch(getExecutionToday, []);
+  // Polled (was a one-shot useFetch): the Consumption today-view reads this
+  // prop, and a page left open served hours-stale execution data.
+  const execution = usePoll(getExecutionToday, 5 * 60_000);
   const report = useFetch(() => getEnergyReport(new Date().toISOString().slice(0, 10)), []);
   // Export opportunity (SEG-vs-Agile money left on the table) — deferred, slow.
   const exportOppy = useFetch(() => (deferred ? getExportOpportunity(60) : Promise.resolve(null)), [deferred]);
