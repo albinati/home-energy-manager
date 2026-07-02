@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -38,6 +39,32 @@ def _norm_z(iso: str) -> str:
         return _iso_z(datetime.fromisoformat(iso.replace("Z", "+00:00")))
     except (ValueError, TypeError):
         return iso
+
+
+# In-process TTL cache for the committed-load stitch: /pv/today is polled every
+# 5 min by the cockpit and the stitch joins the day's lp snapshots per request.
+# A past UTC day's snapshots are immutable → long TTL; today keeps a short TTL
+# so a fresh solve surfaces within a poll cycle. Keyed by DB_PATH so isolated
+# test databases never share entries.
+_LOAD_STITCH_TTL_TODAY_S = 240.0
+_LOAD_STITCH_TTL_PAST_S = 3600.0
+_load_stitch_cache: dict[str, tuple[float, dict[str, tuple[float, float]]]] = {}
+
+
+def _committed_load_by_slot_cached(d: date, today: date) -> dict[str, tuple[float, float]]:
+    key = f"{config.DB_PATH}:{d.isoformat()}"
+    ttl = _LOAD_STITCH_TTL_PAST_S if d < today else _LOAD_STITCH_TTL_TODAY_S
+    hit = _load_stitch_cache.get(key)
+    mono = time.monotonic()
+    if hit is not None and mono - hit[0] < ttl:
+        return hit[1]
+    out: dict[str, tuple[float, float]] = {}
+    for stu, (lt, lb) in db.committed_load_forecast_by_slot(d).items():
+        out[_norm_z(stu)] = (float(lt), float(lb))
+    if len(_load_stitch_cache) > 64:  # bound: one entry per viewed day
+        _load_stitch_cache.clear()
+    _load_stitch_cache[key] = (mono, out)
+    return out
 
 
 @router.get("/api/v1/pv/today")
@@ -127,14 +154,19 @@ async def get_pv_today(date: str | None = None) -> dict[str, Any]:
     # Committed-plan LOAD: the per-slot household-load forecast the LP actually
     # committed to, stitched across the day's solves exactly like the PV path
     # below. ``total`` = base + dhw + space (comparable to the measured
-    # total-demand stack); ``base`` = the LP's exogenous residual input. Without
-    # this, past days rendered TODAY's static dow×hour profile as "Forecast" —
-    # a shape that never matches what was planned on that day (the "forecast
-    # history disappears when navigating back" report).
+    # total-demand stack); ``base`` = the LP's base_load_json input — the
+    # residual forecast PLUS planned appliance dispatch and any scale/bias
+    # correctors (optimizer.py folds appliance kWh in before persisting), so
+    # don't build residual-error math on it. Without this block, past days
+    # rendered TODAY's static dow×hour profile as "Forecast" — a shape that
+    # never matches what was planned on that day (the "forecast history
+    # disappears when navigating back" report). TTL-cached + off the event
+    # loop: the cockpit polls this endpoint every 5 min.
     committed_load_by: dict[str, tuple[float, float]] = {}
     try:
-        for stu, (lt, lb) in db.committed_load_forecast_by_slot(d).items():
-            committed_load_by[_norm_z(stu)] = (float(lt), float(lb))
+        committed_load_by = await asyncio.to_thread(
+            _committed_load_by_slot_cached, d, now.date()
+        )
     except Exception as e:
         logger.warning("pv/today: committed-plan load lookup failed (%s)", e)
     try:

@@ -36,7 +36,7 @@ interface EnergyChartWidgetProps {
   // Execution slots used for the *day* view (30-min granularity) — same
   // source as the Today's bill widget so we don't duplicate the fetch.
   execution: ExecutionTodayResponse | null;
-  // /pv/today — supplies the per-slot LOAD FORECAST (base_load_kwh) and price
+  // /pv/today — supplies the per-slot committed LOAD FORECAST (load_forecast_kwh) and price
   // for the day-view forecast-vs-actual comparison + tariff bands.
   pv?: PvTodayResponse | null;
 }
@@ -44,7 +44,9 @@ interface EnergyChartWidgetProps {
 // LOAD DETAILS chart — household demand only (no grid import/export/solar; the
 // flow/source-sink view moved to Insights). Two modes:
 //   * Today → 30-min forecast-vs-actual for the household load: the LP's
-//     committed load forecast (load_forecast_kwh from /pv/today) vs the measured
+//     committed TOTAL load forecast (load_forecast_kwh from /pv/today, base +
+//     dhw + space) vs the measured total-demand stack — same units both sides
+//     — plus the measured
 //     residual (consumption − Daikin), mirroring the Today's-plan treatment,
 //     with the Daikin (heat-pump) actual as a context line + tariff bands.
 //   * Week / Month / Year → /energy/period: Load (total demand) + the two
@@ -486,11 +488,17 @@ function optionForDay(
   const daikinActual = axis.map((iso) => { const e = execBy.get(iso); return e?.daikin_kwh_est == null ? null : round2(e.daikin_kwh_est); });
   const hasAppliance = applianceActual.some((v) => (v ?? 0) > 0);
   // Committed TOTAL household load (load_forecast_kwh, frozen at solve time)
-  // so the dashed line is comparable to the total-demand stack below it —
-  // base_load_kwh (residual only) is the fallback for slots no solve covered.
+  // so the dashed line is comparable to the total-demand stack below it.
+  // Slots no solve covered stay null ON PURPOSE — falling back to the
+  // residual profile would splice residual-only values into a total-load
+  // line (a fake step at every coverage boundary); connectNulls:false
+  // renders the gap honestly instead.
+  const loadForecastBy = new Map<string, number>();
+  for (const s of pvSlots) {
+    if (s.slot_utc && s.load_forecast_kwh != null) loadForecastBy.set(s.slot_utc, s.load_forecast_kwh);
+  }
   const loadForecast = axis.map((iso) => {
-    const s = pvSlots.find((p) => p.slot_utc === iso);
-    const v = s?.load_forecast_kwh ?? s?.base_load_kwh ?? null;
+    const v = loadForecastBy.get(iso);
     return v == null ? null : round2(v);
   });
 
