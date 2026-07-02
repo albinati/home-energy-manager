@@ -367,9 +367,10 @@ def test_no_negative_slot_maps_to_discharge_capable_mode(monkeypatch) -> None:
     groups = _merge_fox_groups(slots)
     assert len(groups) <= 2, f"expected ≤2 ForceCharge windows, got {len(groups)}"
     assert all(g.work_mode == "ForceCharge" for g in groups)
-    # Option A (documented): the group-merge takes fdSoc = MAX of the run, so the
-    # window that contains the `negative` charge slots fills the battery to 100 —
-    # i.e. it fills early from the paid grid rather than deferring. Lock that in.
+    # PR D (2026-07-02) superseded the old "Option A" front-load: hold and fill
+    # rows no longer merge into each other, so the fill-to-100 now lands on the
+    # FILL window (deepest-negative slots), not the whole period. The fill
+    # group must still reach fdSoc=100.
     assert max(g.fd_soc for g in groups) == 100, (
-        f"merged ForceCharge must reach fdSoc=100, got {[g.fd_soc for g in groups]}"
+        f"fill ForceCharge group must reach fdSoc=100, got {[g.fd_soc for g in groups]}"
     )
