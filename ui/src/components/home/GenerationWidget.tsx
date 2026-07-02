@@ -6,7 +6,7 @@ import { Spinner } from "../common/Spinner";
 import { NowDot } from "../common/NowDot";
 import { gbp } from "../../lib/format";
 import type { PeriodInsightsResponse, PvTodayResponse, GridTodayResponse, AgileTodayResponse, ExportOpportunityResponse } from "../../lib/types";
-import { isCurrentPeriod, periodDateRange, type PeriodState } from "../../lib/period";
+import { isCurrentPeriod, periodDateRange, utcTodayISO, type PeriodState } from "../../lib/period";
 import "./timeline-widget.css";
 
 interface Props {
@@ -39,7 +39,10 @@ function OppyLine({ o }: { o?: ExportOpportunityResponse | null }) {
 // the canonical tariff context). Week/month/year → daily solar + export bars.
 export function GenerationWidget({ period, periodData, periodLoading, agile, opportunity }: Props) {
   const isDay = period.gran === "day";
-  const dayArg = isCurrentPeriod(period) ? undefined : period.anchor;
+  // No-date (= server UTC "today") only when the anchor IS that UTC day —
+  // in the 00:00–00:59 BST hour the new local day fetches by date instead,
+  // showing its committed plan rather than yesterday's data (see period.ts).
+  const dayArg = isCurrentPeriod(period) && period.anchor === utcTodayISO() ? undefined : period.anchor;
   const day = useFetch(
     () => (isDay
       ? Promise.all([getPvToday(dayArg), getGridToday(dayArg)])

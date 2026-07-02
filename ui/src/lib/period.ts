@@ -40,6 +40,32 @@ function parse(anchor: string): Date {
 // having to step down from a coarser granularity.
 export const selectedPeriod = signal<PeriodState>({ gran: "day", anchor: todayISO() });
 
+/** The UTC calendar date — the day the "today" endpoints (/execution/today,
+ * /pv/today, /grid/today) actually serve. In BST this lags the local date by
+ * one hour after local midnight (00:00–00:59 local is still yesterday's UTC
+ * day); in GMT the two always coincide. */
+export function utcTodayISO(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+// Midnight rollover: the anchor is initialized once per page load, so a tab
+// left open across local midnight stayed pinned on yesterday as "today"
+// forever (until a manual reload). Re-anchor ONLY when the user was sitting
+// on the old today — a deliberately-navigated past date must not jump under
+// them. setInterval fires (throttled) in background tabs too, so a tab
+// revisited in the morning has already rolled.
+let _rolloverToday = todayISO();
+if (typeof window !== "undefined") {
+  setInterval(() => {
+    const t = todayISO();
+    if (t === _rolloverToday) return;
+    const prev = _rolloverToday;
+    _rolloverToday = t;
+    const cur = selectedPeriod.value;
+    if (cur.anchor === prev) selectedPeriod.value = { ...cur, anchor: t };
+  }, 60_000);
+}
+
 /** Subscribe to the selected period inside a component (re-renders on change). */
 export function usePeriod(): PeriodState {
   return useComputed(() => selectedPeriod.value).value;

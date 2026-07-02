@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { getEnergyPeriod, getDaikinConsumption, getGridToday, getExecutionToday, getPvToday, getForecastDaily } from "../../lib/endpoints";
-import { usePeriod, setGranularity, selectedPeriod, isCurrentPeriod, periodDateRange } from "../../lib/period";
+import { usePeriod, setGranularity, selectedPeriod, isCurrentPeriod, periodDateRange, utcTodayISO } from "../../lib/period";
 import { getImmutableCache, setImmutableCache } from "../../lib/poll";
 import { makeChart, baseOption, chartTheme, barGradient, areaGradient, withAlpha, type EChartsType } from "../../lib/charts";
 import { Icon } from "../common/Icon";
@@ -59,9 +59,14 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
   // Granularity + anchor come from the shared period navigator so the chart
   // re-scopes together with the Hero + cost breakdown.
   const { gran: granularity, anchor } = usePeriod();
-  // Local "today" (matches period.ts).
+  // Local "today" (matches period.ts). The today-path (polled, no ?date=)
+  // additionally requires the LOCAL and UTC dates to agree: in the 00:00–00:59
+  // BST hour the server's "today" is still yesterday's UTC day, so treating
+  // the new local day as "today" would render yesterday's data under the new
+  // date. The date-fetch path serves that hour honestly instead (the new
+  // day's committed plan, no actuals yet).
   const todayLocalISO = localTodayISO();
-  const isToday = anchor === todayLocalISO;
+  const isToday = anchor === todayLocalISO && anchor === utcTodayISO();
   // Yesterday's per-slot consumption_kwh is still "settling": the nightly
   // consumption backfill (~04:00 local) rewrites the noisy heartbeat estimate
   // with the metered reading. So only days STRICTLY older than yesterday are
@@ -247,7 +252,11 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
   const pastDayView = granularity === "day" && !isToday;
   const effExec = pastDayView ? dayData?.exec ?? null : execution;
   const effDaikin = pastDayView ? dayData?.daikin ?? null : daikin;
-  const dayHasSlots = granularity === "day" && !!effExec?.slots?.length;
+  const effPv = pastDayView ? dayData?.pv ?? null : (pv ?? null);
+  // A day with NO execution slots can still render — /pv/today always carries
+  // the 48-slot committed plan, so a just-rolled-over day shows its forecast
+  // lines with empty actuals instead of a blank "no data" message.
+  const dayHasSlots = granularity === "day" && (!!effExec?.slots?.length || !!effPv?.slots?.length);
   // Foot summary — LOAD totals only (grid/solar moved to Insights).
   const summary = period ? { load: period.energy.load_kwh } : null;
   const daikinTotals = effDaikin?.totals;
