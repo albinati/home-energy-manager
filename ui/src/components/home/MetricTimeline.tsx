@@ -13,13 +13,16 @@ import { reducedMotion } from "../../lib/motion";
 //     import-price reference on the right axis, cheap/peak/negative tariff
 //     background bands, and a pulsing "now" marker. For the "day" granularity.
 //   * PERIOD (barMode=true): one bar group per point (day-of-week / day-of-month
-//     / month) — actuals only, since historical intraday forecast isn't kept.
+//     / month). Lines with `line: true` still render as lines — the committed
+//     daily forecast IS kept (load_error_log / pv_error_log, #624) and rides
+//     the bars as a dashed overlay.
 
 export interface TimelineLine {
   name: string;
   color: string;
   data: (number | null)[];
   dashed?: boolean;      // forecast/plan styling
+  line?: boolean;        // force a LINE even in barMode (forecast overlay on daily bars)
   width?: number;
   area?: boolean;        // gradient fill (the one bold "actual" line)
   step?: boolean;        // price reference
@@ -133,7 +136,7 @@ export function MetricTimeline({
     }
 
     const kwhSeries = lines.map((ln) => {
-      if (barMode) {
+      if (barMode && !ln.line) {
         return {
           name: ln.name, type: "bar", data: ln.data, color: ln.color,
           itemStyle: { color: barGradient(ln.color), borderRadius: [3, 3, 0, 0] },

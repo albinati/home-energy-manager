@@ -495,6 +495,68 @@ async def get_residual_load_profile(
     }
 
 
+@router.get("/api/v1/forecast/daily")
+async def get_forecast_daily(start_date: str, end_date: str) -> dict[str, Any]:
+    """Per-LOCAL-day committed forecast vs actual sums for load AND solar,
+    from the persisted error logs (load_error_log / pv_error_log, both rebuilt
+    by the ~04:2x UTC nightly crons). Powers the forecast overlay on the
+    week/month/year Consumption + Generation charts — the aggregated views
+    used to render actuals only (#624 item 1). A day missing from a log
+    (pre-logging history, or today before the rebuild) simply has nulls for
+    that side. Read-only, viewer-safe.
+
+    ``start_date``/``end_date`` — YYYY-MM-DD, LOCAL (Europe/London), inclusive.
+    """
+    tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+    try:
+        s_local = datetime.fromisoformat(str(start_date)).replace(tzinfo=tz)
+        e_local = datetime.fromisoformat(str(end_date)).replace(tzinfo=tz) + timedelta(days=1)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="start_date/end_date must be YYYY-MM-DD")
+    n_days = (e_local.date() - s_local.date()).days
+    if n_days < 1 or n_days > 400:
+        raise HTTPException(status_code=400, detail="range must be 1..400 days")
+    start = s_local.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    end = e_local.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    load_rows = await asyncio.to_thread(db.get_load_error_log_range, start, end)
+    pv_rows = await asyncio.to_thread(db.get_pv_error_log_range, start, end)
+
+    def _bucket(rows: list[dict[str, Any]], f_key: str, a_key: str,
+                days: dict[str, dict[str, Any]], prefix: str) -> None:
+        for r in rows:
+            try:
+                ts = datetime.fromisoformat(str(r["slot_time_utc"]).replace("Z", "+00:00"))
+            except (ValueError, TypeError):
+                continue
+            dloc = ts.astimezone(tz).date().isoformat()
+            d = days.setdefault(dloc, {})
+            f, a = r.get(f_key), r.get(a_key)
+            if f is not None:
+                d[f"{prefix}_forecast_kwh"] = d.get(f"{prefix}_forecast_kwh", 0.0) + float(f)
+                d[f"{prefix}_n"] = d.get(f"{prefix}_n", 0) + 1
+            if a is not None:
+                d[f"{prefix}_actual_kwh"] = d.get(f"{prefix}_actual_kwh", 0.0) + float(a)
+
+    days: dict[str, dict[str, Any]] = {}
+    _bucket(load_rows, "forecast_kwh", "actual_kwh", days, "load")
+    _bucket(pv_rows, "forecast_kwh", "actual_kwh", days, "pv")
+
+    out = []
+    for dloc in sorted(days):
+        d = days[dloc]
+        out.append({
+            "date": dloc,
+            "load_forecast_kwh": round(d["load_forecast_kwh"], 3) if "load_forecast_kwh" in d else None,
+            "load_actual_kwh": round(d["load_actual_kwh"], 3) if "load_actual_kwh" in d else None,
+            "load_n_slots": d.get("load_n", 0),
+            "pv_forecast_kwh": round(d["pv_forecast_kwh"], 3) if "pv_forecast_kwh" in d else None,
+            "pv_actual_kwh": round(d["pv_actual_kwh"], 3) if "pv_actual_kwh" in d else None,
+            "pv_n_slots": d.get("pv_n", 0),
+        })
+    return {"start_date": str(start_date), "end_date": str(end_date), "days": out}
+
+
 @router.get("/api/v1/load/error-log")
 async def get_load_error_log(
     window_days: int = 30, start_date: str | None = None, end_date: str | None = None

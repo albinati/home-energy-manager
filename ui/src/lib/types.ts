@@ -198,6 +198,24 @@ export interface GridTodayResponse {
   plan_run_id?: number | null;
 }
 
+/* ----- /forecast/daily ----- */
+
+export interface ForecastDailyDay {
+  date: string;                       // local YYYY-MM-DD
+  load_forecast_kwh: number | null;   // committed total-load forecast sum (load_error_log)
+  load_actual_kwh: number | null;
+  load_n_slots: number;
+  pv_forecast_kwh: number | null;     // committed PV forecast sum (pv_error_log)
+  pv_actual_kwh: number | null;
+  pv_n_slots: number;
+}
+
+export interface ForecastDailyResponse {
+  start_date: string;
+  end_date: string;
+  days: ForecastDailyDay[];
+}
+
 /* ----- /optimization/inputs ----- */
 
 export interface OptimizationInputSlot {
