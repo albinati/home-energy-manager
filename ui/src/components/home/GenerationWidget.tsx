@@ -1,12 +1,12 @@
 import { chartTheme, withAlpha } from "../../lib/charts";
 import { useFetch } from "../../lib/poll";
-import { getPvToday, getGridToday } from "../../lib/endpoints";
+import { getPvToday, getGridToday, getForecastDaily } from "../../lib/endpoints";
 import { MetricTimeline, localHM, nowIndexOf, periodPointLabel, type TimelineLine } from "./MetricTimeline";
 import { Spinner } from "../common/Spinner";
 import { NowDot } from "../common/NowDot";
 import { gbp } from "../../lib/format";
 import type { PeriodInsightsResponse, PvTodayResponse, GridTodayResponse, AgileTodayResponse, ExportOpportunityResponse } from "../../lib/types";
-import { isCurrentPeriod, type PeriodState } from "../../lib/period";
+import { isCurrentPeriod, periodDateRange, type PeriodState } from "../../lib/period";
 import "./timeline-widget.css";
 
 interface Props {
@@ -47,6 +47,17 @@ export function GenerationWidget({ period, periodData, periodLoading, agile, opp
       : Promise.resolve(null)),
     [isDay, dayArg],
   );
+  // Committed daily PV forecast for the aggregated views (#624) — week/month
+  // only; a year view's partially-logged months would fake under-forecast.
+  const { start: fcStart, end: fcEnd } = periodDateRange(period);
+  const wantFc = !isDay && period.gran !== "year";
+  const fcDaily = useFetch(
+    () => (wantFc ? getForecastDaily(fcStart, fcEnd) : Promise.resolve(null)),
+    [wantFc, fcStart, fcEnd],
+    // No cacheKey when fc isn't wanted — caching null under a real-looking
+    // key would poison the fcdaily: scheme for future consumers.
+    wantFc ? { cacheKey: `fcdaily:${fcStart}:${fcEnd}`, immutable: !isCurrentPeriod(period) } : {},
+  );
   const t = chartTheme();
 
   if (isDay) {
@@ -60,8 +71,16 @@ export function GenerationWidget({ period, periodData, periodLoading, agile, opp
     // "Solar plan" = the COMMITTED LP forecast across the WHOLE day (frozen at
     // solve time), not the live forward forecast for future slots — otherwise
     // the dashed "plan" line silently became the weather model's latest revision
-    // past `now`. Fall back to the live forecast only where uncommitted.
-    const solarPlan = slots.map((s) => round2(s.pv_planned_kwh ?? s.pv_forecast_kwh));
+    // past `now`. TODAY falls back to the live forecast where uncommitted; a
+    // PAST day does not — pre-logging days (< #462) have no committed history
+    // and the live value there is a present-model hindcast wearing the plan's
+    // label (#624 item 2). No committed slots → no plan line at all.
+    const hasCommitted = slots.some((s) => s.pv_planned_kwh != null);
+    const solarPlan = slots.map((s) => {
+      const v = dayArg ? s.pv_planned_kwh : (s.pv_planned_kwh ?? s.pv_forecast_kwh);
+      return v == null ? null : round2(v);
+    });
+    const showPlan = !dayArg || hasCommitted;
     const solarActual = slots.map((s) => (s.pv_actual_kwh == null ? null : round2(s.pv_actual_kwh)));
     // Grid export realised, aligned to the pv axis by slot_utc.
     const expBy = new Map<string, number>();
@@ -87,7 +106,7 @@ export function GenerationWidget({ period, periodData, periodLoading, agile, opp
     const agileExportPrice = slots.map((s) => expPriceBy.get(normZ(s.slot_utc)) ?? null);
     const exportPrice = onSeg ? slots.map(() => segRate) : agileExportPrice;
     const lines: TimelineLine[] = [
-      { name: "Solar plan", color: withAlpha(t.pv, 0.5), data: solarPlan, dashed: true },
+      ...(showPlan ? [{ name: "Solar plan", color: withAlpha(t.pv, 0.5), data: solarPlan, dashed: true } as TimelineLine] : []),
       { name: "Solar", color: t.pv, data: solarActual, area: true, width: 3 },
       { name: "Export", color: t.exportColor, data: exportActual, width: 1.75 },
       ...(onSeg ? [{ name: "Outgoing Agile", color: t.warn, data: agileExportPrice, dashed: true, isPrice: true } as TimelineLine] : []),
@@ -113,7 +132,7 @@ export function GenerationWidget({ period, periodData, periodLoading, agile, opp
                         nowIdx={nowIdx} height={270} />
         <div class="tlw-legend">
           <span><i style={`border-color:${t.pv}`} /> solar actual</span>
-          <span><i class="dashed" style={`border-color:${withAlpha(t.pv, 0.6)}`} /> solar plan</span>
+          {showPlan && <span><i class="dashed" style={`border-color:${withAlpha(t.pv, 0.6)}`} /> solar plan</span>}
           <span><i style={`border-color:${t.exportColor}`} /> export kWh</span>
           <span><i class="dashed" style={`border-color:${t.exportColor}`} /> export {onSeg && segRate != null ? `${segRate.toFixed(1)}p SEG` : "price"}</span>
           {onSeg && <span><i class="dashed" style={`border-color:${t.warn}`} /> Outgoing Agile (alvo)</span>}
@@ -128,9 +147,20 @@ export function GenerationWidget({ period, periodData, periodLoading, agile, opp
   if (periodLoading && !pts.length) return <Spinner label="Loading generation…" />;
   if (!pts.length) return <p class="muted">No generation data for this period.</p>;
   const labels = pts.map((p) => periodPointLabel(p.date, period.gran));
+  const fcBy = new Map<string, number>();
+  for (const d of fcDaily.data?.days ?? []) {
+    if (d.pv_forecast_kwh != null) fcBy.set(d.date, d.pv_forecast_kwh);
+  }
+  const planDaily = pts.map((p) => {
+    const v = fcBy.get(p.date.slice(0, 10));
+    return v == null ? null : round2(v);
+  });
   const lines: TimelineLine[] = [
     { name: "Solar", color: t.pv, data: pts.map((p) => round2(p.solar_kwh)), area: true },
     { name: "Export", color: t.exportColor, data: pts.map((p) => round2(p.export_kwh)) },
+    ...(planDaily.some((v) => v != null)
+      ? [{ name: "Solar plan", color: withAlpha(t.pv, 0.6), data: planDaily, dashed: true, line: true } as TimelineLine]
+      : []),
   ];
   const solarTot = pts.reduce((s, p) => s + (p.solar_kwh ?? 0), 0);
   const expTot = pts.reduce((s, p) => s + (p.export_kwh ?? 0), 0);
@@ -139,10 +169,17 @@ export function GenerationWidget({ period, periodData, periodLoading, agile, opp
       <div class="tlw-summary">
         <span class="tlw-summary-value">{solarTot.toFixed(0)}<span class="tlw-summary-unit"> kWh solar</span></span>
         <span class="tlw-summary-value tlw-pos">{expTot.toFixed(0)}<span class="tlw-summary-unit"> kWh export</span></span>
-        <span class="tlw-summary-label">geração · {periodData?.period_label}</span>
+        <span class="tlw-summary-label">generation · {periodData?.period_label}</span>
       </div>
       <OppyLine o={opportunity} />
       <MetricTimeline labels={labels} lines={lines} barMode height={240} />
+      <div class="tlw-legend">
+        <span><i style={`border-color:${t.pv}`} /> solar</span>
+        <span><i style={`border-color:${t.exportColor}`} /> export</span>
+        {planDaily.some((v) => v != null) && (
+          <span><i class="dashed" style={`border-color:${withAlpha(t.pv, 0.6)}`} /> solar plan</span>
+        )}
+      </div>
     </div>
   );
 }

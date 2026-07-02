@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import { getEnergyPeriod, getDaikinConsumption, getGridToday, getExecutionToday, getPvToday } from "../../lib/endpoints";
-import { usePeriod, setGranularity, selectedPeriod, isCurrentPeriod } from "../../lib/period";
+import { getEnergyPeriod, getDaikinConsumption, getGridToday, getExecutionToday, getPvToday, getForecastDaily } from "../../lib/endpoints";
+import { usePeriod, setGranularity, selectedPeriod, isCurrentPeriod, periodDateRange } from "../../lib/period";
 import { getImmutableCache, setImmutableCache } from "../../lib/poll";
 import { makeChart, baseOption, chartTheme, barGradient, areaGradient, withAlpha, type EChartsType } from "../../lib/charts";
 import { Icon } from "../common/Icon";
 import { NowDot } from "../common/NowDot";
 import type {
-  PeriodInsightsResponse,
+  PeriodInsightsResponse, ForecastDailyResponse,
   PeriodChartPoint,
   ExecutionTodayResponse,
   ExecutionSlot,
@@ -72,6 +72,7 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   })();
   const [period, setPeriod] = useState<PeriodInsightsResponse | null>(null);
+  const [fcDaily, setFcDaily] = useState<ForecastDailyResponse | null>(null);
   const [daikin, setDaikin] = useState<DaikinConsumptionResponse | null>(null);
   // Day view: per-slot grid import + battery discharge — for the "by source" stack.
   const [grid, setGrid] = useState<GridTodayResponse | null>(null);
@@ -132,12 +133,14 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
       period: PeriodInsightsResponse | null;
       daikin: DaikinConsumptionResponse | null;
       grid: GridTodayResponse | null;
-    };
+      fc: ForecastDailyResponse | null;
+};
     const cached = isPast ? getImmutableCache<Cached>(cacheKey) : undefined;
     if (cached) {
       setPeriod(cached.period);
       setDaikin(cached.daikin);
       setGrid(cached.grid);
+      setFcDaily(cached.fc ?? null);
       setLoading(false);
       return () => { alive = false; };
     }
@@ -149,6 +152,7 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
     setPeriod(null);
     setDaikin(null);
     setGrid(null);
+    setFcDaily(null);
 
     const opts: { date?: string; month?: string; year?: number } = {};
     if (granularity === "week") opts.date = anchor;
@@ -162,18 +166,31 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
       ? Promise.resolve(null)
       : getEnergyPeriod(granularity, opts).catch(() => null);
     const daikinPromise = getDaikinConsumption(granularity, opts).catch(() => null);
+    // Committed daily forecast overlay (#624) — week/month only; a year view's
+    // partially-logged months would read as fake under-forecast.
+    const range = periodDateRange({ gran: granularity, anchor });
+    // `undefined` = fetch FAILED (transient) — distinct from null (not
+    // requested) so a blip never gets frozen into the immutable cache as
+    // "no forecast data for this period".
+    const fcPromise: Promise<ForecastDailyResponse | null | undefined> =
+      granularity === "week" || granularity === "month"
+        ? getForecastDaily(range.start, range.end).catch(() => undefined)
+        : Promise.resolve(null);
     // Grid import + battery discharge per slot for the day source-stack.
     const gridPromise = granularity === "day" && isToday
       ? getGridToday().catch(() => null)
       : Promise.resolve(null);
 
-    Promise.all([periodPromise, daikinPromise, gridPromise]).then(([p, d, g]) => {
+    Promise.all([periodPromise, daikinPromise, gridPromise, fcPromise]).then(([p, d, g, fc]) => {
       if (!alive) return;
       setPeriod(p);
       setDaikin(d);
       setGrid(g);
+      setFcDaily(fc ?? null);
       setLoading(false);
-      if (isPast) setImmutableCache(cacheKey, { period: p, daikin: d, grid: g });
+      // Don't cache a bundle whose fc fetch FAILED — retry next visit instead
+      // of silently losing the overlay for the whole session (review MED).
+      if (isPast && fc !== undefined) setImmutableCache(cacheKey, { period: p, daikin: d, grid: g, fc });
     });
     return () => { alive = false; };
   }, [granularity, anchor]);
@@ -189,12 +206,12 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
           pastDayView ? dayData?.pv ?? null : (pv ?? null),
           pastDayView ? dayData?.grid ?? null : grid,
         )
-      : optionForPeriod(period, daikin, granularity);
+      : optionForPeriod(period, daikin, granularity, fcDaily);
     chart.setOption(option, true);
     // Resize handling now lives centrally in makeChart (rAF-debounced
     // ResizeObserver) — the per-effect observer this widget carried would
     // double every resize() call.
-  }, [granularity, period, daikin, grid, dayData, execution, pv, isToday]);
+  }, [granularity, period, daikin, grid, fcDaily, dayData, execution, pv, isToday]);
 
   useEffect(() => () => {
     if (chartRef.current) {
@@ -329,6 +346,7 @@ function optionForPeriod(
   period: PeriodInsightsResponse | null,
   daikin: DaikinConsumptionResponse | null,
   gran: Granularity,
+  fcDaily: ForecastDailyResponse | null,
 ): Record<string, unknown> {
   const t = chartTheme();
   const base = baseOption();
@@ -359,13 +377,27 @@ function optionForPeriod(
     return d ? round1(d.dhw) : null;
   });
 
+  // Committed daily load forecast (#624) — dashed grey line over the bars,
+  // same treatment as the day view's Forecast line. Days missing from
+  // load_error_log (pre-logging, or today before the ~04:22 rebuild) stay
+  // null — honest gap, no profile splice.
+  const fcBy = new Map<string, number>();
+  for (const d of fcDaily?.days ?? []) {
+    if (d.load_forecast_kwh != null) fcBy.set(d.date, d.load_forecast_kwh);
+  }
+  const forecastLine = points.map((p) => {
+    const v = fcBy.get(p.date.slice(0, 10));
+    return v == null ? null : round1(v);
+  });
+  const hasForecast = forecastLine.some((v) => v != null);
+
   return {
     ...base,
     legend: {
       ...(base.legend as object),
       // Load details: total demand as the bar, with the two Daikin (heat-pump)
       // slices overlaid. Grid import/export + solar live on the Insights tab.
-      data: ["Load", "Daikin heating", "Daikin tank"],
+      data: ["Load", ...(hasForecast ? ["Forecast"] : []), "Daikin heating", "Daikin tank"],
     },
     xAxis: { ...(base.xAxis as object), data: labels },
     yAxis: [{ ...(base.yAxis as object), name: "kWh", nameTextStyle: { color: t.textMute, fontSize: 10 } }],
@@ -374,6 +406,17 @@ function optionForPeriod(
         ...seriesBar("Load", points.map((p) => round1(p.load_kwh)), t.house, "load"),
         itemStyle: { color: barGradient(t.house, 0.85, 0.4), borderRadius: [4, 4, 0, 0] },
       },
+      ...(hasForecast ? [{
+        name: "Forecast",
+        type: "line",
+        data: forecastLine,
+        smooth: 0.3,
+        symbol: "none",
+        connectNulls: false,
+        z: 12,
+        lineStyle: { color: withAlpha(t.textMute, 0.85), width: 1.25, type: "dashed", cap: "round" },
+        emphasis: { focus: "series" },
+      }] : []),
       // Daikin overlays — quiet secondary lines (dashed = heating, sparse
       // dotted = DHW estimate). No fills; they ride above the bar.
       {

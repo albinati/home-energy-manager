@@ -46,6 +46,7 @@ import type {
   SchedulerStatus,
   ActionDiffResponse,
   ProposePlanResponse,
+  ForecastDailyResponse,
 } from "./types";
 
 /* ----- Real-time / cockpit ----- */
@@ -316,6 +317,11 @@ export interface LoadErrorLog {
   overall: LoadErrorStats;
   per_hour_local: Record<string, LoadErrorStats>;
 }
+export const getForecastDaily = (startDate: string, endDate: string) => {
+  const q = new URLSearchParams({ start_date: startDate, end_date: endDate });
+  return getJson<ForecastDailyResponse>(`/forecast/daily?${q.toString()}`);
+};
+
 export const getLoadErrorLog = (
   arg: number | { startDate: string; endDate: string } = 30,
 ) => {
