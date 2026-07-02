@@ -212,32 +212,52 @@ def _tick(client, dev, at, temp):
 def test_stall_backoff_stretches_interval(monkeypatch):
     """2026-07-02: tank pinned at 50-51 °C for 5h while Powerful was re-written
     every 15 min (24 writes, zero gain). After STALL_LIMIT no-progress
-    re-asserts the cadence must stretch ×STALL_BACKOFF."""
+    re-asserts (past the baseline write) the cadence must stretch
+    ×STALL_BACKOFF."""
     monkeypatch.setattr(config, "DHW_NEGATIVE_BOOST_REASSERT_STALL_LIMIT", 3, raising=False)
     monkeypatch.setattr(config, "DHW_NEGATIVE_BOOST_REASSERT_STALL_BACKOFF", 4.0, raising=False)
     dev = _FakeDev(tank_powerful=False)
     client = MagicMock()
-    # 3 stalled re-asserts at the base 15-min cadence (temp frozen at 51).
-    for k in range(3):
+    # Baseline write + 3 stalled re-asserts at the base 15-min cadence.
+    for k in range(4):
         _tick(client, dev, NOW + timedelta(minutes=16 * k), 51.0)
-    assert client.set_tank_powerful.call_count == 3
+    assert client.set_tank_powerful.call_count == 4
     assert sm._NEG_BOOST_STALL_COUNT == 3
     # Next base-interval attempt is now blocked (backoff = 60 min)...
-    _tick(client, dev, NOW + timedelta(minutes=16 * 3), 51.0)
-    assert client.set_tank_powerful.call_count == 3
-    # ...but allowed once the stretched interval elapses.
-    _tick(client, dev, NOW + timedelta(minutes=16 * 2 + 61), 51.0)
+    blocked_at = NOW + timedelta(minutes=16 * 4)
+    _tick(client, dev, blocked_at, 51.0)
     assert client.set_tank_powerful.call_count == 4
+    assert sm._NEG_BOOST_STALL_COUNT == 3  # gated tick must not double-count
+    # ...but allowed once the stretched interval elapses.
+    _tick(client, dev, NOW + timedelta(minutes=16 * 3 + 61), 51.0)
+    assert client.set_tank_powerful.call_count == 5
 
 
 def test_progress_resets_stall_count():
     dev = _FakeDev(tank_powerful=False)
     client = MagicMock()
     _tick(client, dev, NOW, 45.0)
-    assert sm._NEG_BOOST_STALL_COUNT == 1  # first tick: no baseline yet
-    _tick(client, dev, NOW + timedelta(minutes=16), 47.0)  # +2 °C → progress
+    assert sm._NEG_BOOST_STALL_COUNT == 0  # baseline write, not a stall
+    _tick(client, dev, NOW + timedelta(minutes=16), 45.2)  # +0.2 °C: stalled
+    assert sm._NEG_BOOST_STALL_COUNT == 1
+    # Baseline holds at the last PROGRESS point (45.0): slow cumulative
+    # heating (+0.3 → 45.5 total) still counts as progress.
+    _tick(client, dev, NOW + timedelta(minutes=32), 45.5)
     assert sm._NEG_BOOST_STALL_COUNT == 0
-    assert client.set_tank_powerful.call_count == 2
+    assert client.set_tank_powerful.call_count == 3
+
+
+def test_failure_does_not_count_as_stall():
+    """Review P4: a failed PATCH never reached the unit, so it says nothing
+    about thermal arbitration — only successful writes feed the counter."""
+    from src.daikin.client import DaikinError
+    dev = _FakeDev(tank_powerful=False)
+    client = MagicMock()
+    client.set_tank_powerful.side_effect = DaikinError("read_only", "boom")
+    for k in range(3):
+        _tick(client, dev, NOW + timedelta(minutes=16 * k), 51.0)
+    assert client.set_tank_powerful.call_count == 3
+    assert sm._NEG_BOOST_STALL_COUNT == 0
 
 
 def test_new_episode_resets_stall_state(monkeypatch):
@@ -247,16 +267,15 @@ def test_new_episode_resets_stall_state(monkeypatch):
     monkeypatch.setattr(config, "DHW_NEGATIVE_BOOST_REASSERT_STALL_BACKOFF", 8.0, raising=False)
     dev = _FakeDev(tank_powerful=False)
     client = MagicMock()
-    for k in range(2):
+    for k in range(3):
         _tick(client, dev, NOW + timedelta(minutes=16 * k), 51.0)
     assert sm._NEG_BOOST_STALL_COUNT == 2  # stalled
-    # Next day, tank restarts from 39 °C — 16 min after the (stale) last write
-    # would be blocked under backoff, but the colder tank resets the episode…
+    # Next day, tank restarts from 39 °C — the colder tank (and the 6h gap)
+    # resets the episode, so the write goes through at the base cadence.
     later = NOW + timedelta(hours=20)
     _tick(client, dev, later, 39.0)
-    # …and the 6h gap alone would too; either way the write goes through.
-    assert client.set_tank_powerful.call_count == 3
-    assert sm._NEG_BOOST_STALL_COUNT <= 1
+    assert client.set_tank_powerful.call_count == 4
+    assert sm._NEG_BOOST_STALL_COUNT == 0  # fresh baseline write
 
 
 def test_audit_row_written():

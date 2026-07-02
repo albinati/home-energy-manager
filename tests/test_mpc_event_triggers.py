@@ -156,9 +156,17 @@ def _heartbeat_drift_tick(runner_module, *, real_soc: float, predicted_pct: floa
         plan_max = runner_module._lp_predicted_soc_max_pct_within(
             datetime.now(UTC), float(runner_module.config.MPC_DRIFT_AHEAD_LOOKAHEAD_HOURS)
         )
-        if plan_max is not None and plan_max >= float(real_soc) - threshold:
+        if (
+            plan_max is not None
+            and plan_max >= float(real_soc) - threshold
+            and runner_module._consecutive_ahead_suppressed
+            < int(runner_module.config.MPC_DRIFT_AHEAD_MAX_SUPPRESSED_TICKS)
+        ):
+            runner_module._consecutive_ahead_suppressed += 1
             runner_module._consecutive_drift_ticks = 0
             drift_pct = 0.0
+    else:
+        runner_module._consecutive_ahead_suppressed = 0
     if drift_pct >= threshold:
         runner_module._consecutive_drift_ticks += 1
         if runner_module._consecutive_drift_ticks >= int(runner_module.config.MPC_DRIFT_HYSTERESIS_TICKS):
@@ -223,6 +231,7 @@ def test_drift_ahead_of_plan_suppressed_when_plan_reaches_level(monkeypatch):
     monkeypatch.setattr(runner.config, "MPC_DRIFT_AHEAD_SUPPRESS_ENABLED", True)
     monkeypatch.setattr(runner, "_lp_predicted_soc_max_pct_within", lambda *_a, **_k: 100.0)
     runner._consecutive_drift_ticks = 0
+    runner._consecutive_ahead_suppressed = 0
     fired = _heartbeat_drift_tick(runner, real_soc=90.0, predicted_pct=60.0)
     assert fired is False
     assert runner._consecutive_drift_ticks == 0
@@ -265,6 +274,41 @@ def test_drift_ahead_gate_disabled_by_kill_switch(monkeypatch):
     runner._consecutive_drift_ticks = 0
     fired = _heartbeat_drift_tick(runner, real_soc=90.0, predicted_pct=60.0)
     assert fired is True
+
+
+def test_drift_ahead_suppressed_at_exact_boundary(monkeypatch):
+    """Review P1: plan_max == soc − threshold must still suppress (>=), but
+    only up to the staleness cap."""
+    from src.scheduler import runner
+
+    monkeypatch.setattr(runner.config, "MPC_DRIFT_AHEAD_SUPPRESS_ENABLED", True)
+    monkeypatch.setattr(runner.config, "MPC_DRIFT_HYSTERESIS_TICKS", 1)
+    monkeypatch.setattr(runner.config, "MPC_DRIFT_SOC_THRESHOLD_PERCENT", 15.0)
+    monkeypatch.setattr(runner, "_lp_predicted_soc_max_pct_within", lambda *_a, **_k: 85.0)
+    runner._consecutive_drift_ticks = 0
+    runner._consecutive_ahead_suppressed = 0
+    fired = _heartbeat_drift_tick(runner, real_soc=100.0, predicted_pct=80.0)
+    assert fired is False  # 85 >= 100 − 15 → suppressed
+
+
+def test_drift_ahead_suppression_capped(monkeypatch):
+    """A plateauing plan can't hold the suppression forever — past
+    MPC_DRIFT_AHEAD_MAX_SUPPRESSED_TICKS consecutive heartbeats, drift fires."""
+    from src.scheduler import runner
+
+    monkeypatch.setattr(runner.config, "MPC_DRIFT_AHEAD_SUPPRESS_ENABLED", True)
+    monkeypatch.setattr(runner.config, "MPC_DRIFT_HYSTERESIS_TICKS", 1)
+    monkeypatch.setattr(runner.config, "MPC_DRIFT_AHEAD_MAX_SUPPRESSED_TICKS", 3)
+    monkeypatch.setattr(runner, "_lp_predicted_soc_max_pct_within", lambda *_a, **_k: 100.0)
+    runner._consecutive_drift_ticks = 0
+    runner._consecutive_ahead_suppressed = 0
+    for _ in range(3):
+        assert _heartbeat_drift_tick(runner, real_soc=90.0, predicted_pct=60.0) is False
+    fired = _heartbeat_drift_tick(runner, real_soc=90.0, predicted_pct=60.0)
+    assert fired is True  # cap exhausted
+    # A healthy tick (below threshold) re-arms the gate.
+    _heartbeat_drift_tick(runner, real_soc=61.0, predicted_pct=60.0)
+    assert runner._consecutive_ahead_suppressed == 0
 
 
 def test_drift_no_realtime_skips_silently(monkeypatch):

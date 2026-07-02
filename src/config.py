@@ -1724,6 +1724,12 @@ class Config:
     MPC_DRIFT_AHEAD_LOOKAHEAD_HOURS: float = float(
         os.getenv("MPC_DRIFT_AHEAD_LOOKAHEAD_HOURS", "3.0")
     )
+    # Staleness bound: max consecutive heartbeats the ahead gate may suppress
+    # (24 × 300 s ≈ 2 h) — a plan plateauing at exactly soc − threshold can
+    # otherwise hold the suppression indefinitely; past the cap drift fires.
+    MPC_DRIFT_AHEAD_MAX_SUPPRESSED_TICKS: int = int(
+        os.getenv("MPC_DRIFT_AHEAD_MAX_SUPPRESSED_TICKS", "24")
+    )
     # Plan-delta observability: how many hours of overlap between previous and new plan to
     # measure when logging the post-trigger delta. 6 h captures the immediate horizon.
     MPC_PLAN_DELTA_LOOKAHEAD_HOURS: int = int(os.getenv("MPC_PLAN_DELTA_LOOKAHEAD_HOURS", "6"))

@@ -101,8 +101,13 @@ Best-effort: failures are logged, the LP keeps the previous table contents.
 In `strict_savings` mode, when
 `Σ forecast PV today × LP_PV_SUFFICIENCY_MARGIN ≥ (battery headroom + Σ daytime load)`,
 the LP adds `chg[i] ≤ pv_use[i]` to every today-slot strictly before the
-first peak-tariff slot. Mirrors the existing pre-plunge constraint pattern
-at `lp_optimizer.py:794`. PV→battery stays allowed; grid→battery gets
+first peak-tariff slot, **excluding negative-price slots** (2026-07-02
+window audit: the guard's premise — grid-charging is wasteful when PV
+covers demand — inverts when the grid pays for import, and the guard had
+pinned the plan to PV-only charging + curtailment across a 15-slot paid
+window). Mirrors the existing pre-plunge constraint pattern
+at `lp_optimizer.py:794`, which carries the same `price ≥ 0` gate.
+PV→battery stays allowed; grid→battery gets
 blocked on the days the guard fires.
 
 Defaults to ON in `strict_savings`, inert under `savings_first`.

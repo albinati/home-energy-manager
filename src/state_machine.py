@@ -818,16 +818,14 @@ def _check_negative_boost_powerful(
         _NEG_BOOST_LAST_TEMP = None
     stall_limit = max(1, int(config.DHW_NEGATIVE_BOOST_REASSERT_STALL_LIMIT))
     if _NEG_BOOST_STALL_COUNT >= stall_limit:
-        interval_s = int(interval_s * float(config.DHW_NEGATIVE_BOOST_REASSERT_STALL_BACKOFF))
+        # Clamp ≥1: a mis-set backoff of 0 would turn "stalled" into a write
+        # on every heartbeat — worse than the incident this fixes.
+        interval_s = int(
+            interval_s * max(1.0, float(config.DHW_NEGATIVE_BOOST_REASSERT_STALL_BACKOFF))
+        )
     if _NEG_BOOST_POWERFUL_LAST_UTC is not None:
         if (now_utc - _NEG_BOOST_POWERFUL_LAST_UTC).total_seconds() < interval_s:
             return
-    if _NEG_BOOST_LAST_TEMP is not None and float(tank_t) >= _NEG_BOOST_LAST_TEMP + 0.5:
-        _NEG_BOOST_STALL_COUNT = 0
-    else:
-        _NEG_BOOST_STALL_COUNT += 1
-    _NEG_BOOST_LAST_TEMP = float(tank_t)
-
     # Stamp the cadence gate up-front (H2): a persistently-failing PATCH (e.g.
     # READ_ONLY when Powerful isn't settable) must be rate-limited to the
     # interval, not retried every heartbeat — failed calls still cost quota.
@@ -835,6 +833,21 @@ def _check_negative_boost_powerful(
     try:
         client.set_tank_powerful(dev, True)
         dev.tank_powerful = True
+        # Stall accounting — successful writes only (a failed PATCH never
+        # reached the unit, so "no thermal progress" says nothing about the
+        # unit arbitrating Powerful away; the H2 stamp above already rate-
+        # limits failures to the base interval). The baseline is the last
+        # PROGRESS point, not the last observation — a slow-but-real ramp
+        # (e.g. +0.3 °C/interval) accumulates to +0.5 and resets instead of
+        # being re-baselined into looking permanently stalled.
+        if _NEG_BOOST_LAST_TEMP is None:
+            # First write of an episode: no baseline yet — stamp only.
+            _NEG_BOOST_LAST_TEMP = float(tank_t)
+        elif float(tank_t) >= _NEG_BOOST_LAST_TEMP + 0.5:
+            _NEG_BOOST_STALL_COUNT = 0
+            _NEG_BOOST_LAST_TEMP = float(tank_t)
+        else:
+            _NEG_BOOST_STALL_COUNT += 1
         db.log_action(
             device="daikin",
             action="negative_boost_powerful_reassert",

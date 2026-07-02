@@ -49,6 +49,10 @@ _last_mpc_run_at: datetime | None = None
 # Hysteresis on the SoC drift trigger: count consecutive heartbeat ticks above
 # threshold; only fire when we cross MPC_DRIFT_HYSTERESIS_TICKS. Resets on recovery.
 _consecutive_drift_ticks: int = 0
+# Consecutive heartbeats the ahead-of-plan gate has suppressed. Bounds how
+# long an at-the-boundary suppression can hold (review P1: plan plateaus at
+# exactly soc − threshold → suppressed forever); past the cap the drift fires.
+_consecutive_ahead_suppressed: int = 0
 _consecutive_pv_up_ticks: int = 0
 _consecutive_pv_down_ticks: int = 0
 _consecutive_load_up_ticks: int = 0
@@ -128,7 +132,10 @@ def _lp_predicted_soc_max_pct_within(when_utc: datetime, hours: float) -> float 
                 st = datetime.fromisoformat(st_raw.replace("Z", "+00:00"))
             except (ValueError, AttributeError):
                 continue
-            if st < when_utc or st > end_utc:
+            # Include the slot CONTAINING when_utc: soc_kwh is end-of-slot SoC
+            # keyed by slot start, so the trajectory 0-30 min ahead lives on
+            # the slot that started up to 30 min ago.
+            if st < when_utc - timedelta(minutes=30) or st > end_utc:
                 continue
             pct = float(soc_kwh) / cap * 100.0
             if best is None or pct > best:
@@ -1770,6 +1777,7 @@ def bulletproof_heartbeat_tick() -> None:
                 # re-solving every heartbeat produced 5-min upload bursts whose
                 # group swaps caused mid-fill glitches (battery discharging at
                 # negative prices). SoC BELOW prediction always counts.
+                global _consecutive_ahead_suppressed
                 if (
                     config.MPC_DRIFT_AHEAD_SUPPRESS_ENABLED
                     and drift_pct >= threshold
@@ -1778,15 +1786,25 @@ def bulletproof_heartbeat_tick() -> None:
                     plan_max = _lp_predicted_soc_max_pct_within(
                         now_utc, float(config.MPC_DRIFT_AHEAD_LOOKAHEAD_HOURS)
                     )
-                    if plan_max is not None and plan_max >= float(soc) - threshold:
+                    if (
+                        plan_max is not None
+                        and plan_max >= float(soc) - threshold
+                        and _consecutive_ahead_suppressed
+                        < int(config.MPC_DRIFT_AHEAD_MAX_SUPPRESSED_TICKS)
+                    ):
+                        _consecutive_ahead_suppressed += 1
                         logger.debug(
-                            "MPC drift suppressed (ahead-of-plan): real=%.1f%% "
+                            "MPC drift suppressed (ahead-of-plan %d/%d): real=%.1f%% "
                             "predicted=%.1f%% plan reaches %.1f%% within %.1fh",
+                            _consecutive_ahead_suppressed,
+                            int(config.MPC_DRIFT_AHEAD_MAX_SUPPRESSED_TICKS),
                             soc, predicted_pct, plan_max,
                             float(config.MPC_DRIFT_AHEAD_LOOKAHEAD_HOURS),
                         )
                         _consecutive_drift_ticks = 0
                         drift_pct = 0.0
+                else:
+                    _consecutive_ahead_suppressed = 0
                 if drift_pct >= threshold:
                     _consecutive_drift_ticks += 1
                     if _consecutive_drift_ticks >= int(config.MPC_DRIFT_HYSTERESIS_TICKS):

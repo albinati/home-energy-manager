@@ -97,7 +97,9 @@ def evaluate_pv_sufficiency_guard(
     Then the guard fires iff ``strict_savings == True`` and ``enabled == True``
     and ``Pv × margin ≥ D``. When it fires, the targeted slots are every
     today-slot strictly before the first today-slot where
-    ``price_line[i] >= peak_threshold_p``.
+    ``price_line[i] >= peak_threshold_p``, EXCLUDING slots where
+    ``price_line[i] < 0`` (2026-07-02: the guard's premise inverts when the
+    grid pays for import — negative slots must stay grid-chargeable).
 
     Why "today-slots before first peak" rather than "all today-slots":
     - Slots IN the peak window are typically discharge slots; the LP wouldn't
