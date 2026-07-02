@@ -83,3 +83,23 @@ def test_invalid_range_rejected():
         asyncio.run(pv_router.get_forecast_daily("2026-06-25", "2026-06-24"))  # end < start
     with pytest.raises(HTTPException):
         asyncio.run(pv_router.get_forecast_daily("2020-01-01", "2026-06-25"))  # > 400 days
+
+
+def test_dst_fall_back_day_buckets_all_50_slots_to_the_day():
+    # 2026-10-25 = clocks-back day in Europe/London (25 local hours, 50 slots).
+    # The 00:30Z slot (01:30 BST) and the 23:30Z slot (23:30 GMT) both belong
+    # to the 25th; the 24T23:30Z slot (00:30 BST on the 25th) does too.
+    _insert("load_error_log", "2026-10-24T23:30:00Z", 0.1, 0.1)
+    _insert("load_error_log", "2026-10-25T00:30:00Z", 0.2, 0.2)
+    _insert("load_error_log", "2026-10-25T23:30:00Z", 0.4, 0.4)
+    resp = asyncio.run(pv_router.get_forecast_daily("2026-10-25", "2026-10-25"))
+    assert len(resp["days"]) == 1
+    d = resp["days"][0]
+    assert d["date"] == "2026-10-25"
+    assert d["load_forecast_kwh"] == pytest.approx(0.7)
+    assert d["load_n_slots"] == 3
+
+
+def test_datetime_string_rejected_not_silently_shifted():
+    with pytest.raises(HTTPException):
+        asyncio.run(pv_router.get_forecast_daily("2026-06-25T18:00:00", "2026-06-26"))

@@ -152,6 +152,7 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
     setPeriod(null);
     setDaikin(null);
     setGrid(null);
+    setFcDaily(null);
 
     const opts: { date?: string; month?: string; year?: number } = {};
     if (granularity === "week") opts.date = anchor;
@@ -168,9 +169,13 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
     // Committed daily forecast overlay (#624) — week/month only; a year view's
     // partially-logged months would read as fake under-forecast.
     const range = periodDateRange({ gran: granularity, anchor });
-    const fcPromise = granularity === "week" || granularity === "month"
-      ? getForecastDaily(range.start, range.end).catch(() => null)
-      : Promise.resolve(null);
+    // `undefined` = fetch FAILED (transient) — distinct from null (not
+    // requested) so a blip never gets frozen into the immutable cache as
+    // "no forecast data for this period".
+    const fcPromise: Promise<ForecastDailyResponse | null | undefined> =
+      granularity === "week" || granularity === "month"
+        ? getForecastDaily(range.start, range.end).catch(() => undefined)
+        : Promise.resolve(null);
     // Grid import + battery discharge per slot for the day source-stack.
     const gridPromise = granularity === "day" && isToday
       ? getGridToday().catch(() => null)
@@ -181,9 +186,11 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
       setPeriod(p);
       setDaikin(d);
       setGrid(g);
-      setFcDaily(fc);
+      setFcDaily(fc ?? null);
       setLoading(false);
-      if (isPast) setImmutableCache(cacheKey, { period: p, daikin: d, grid: g, fc });
+      // Don't cache a bundle whose fc fetch FAILED — retry next visit instead
+      // of silently losing the overlay for the whole session (review MED).
+      if (isPast && fc !== undefined) setImmutableCache(cacheKey, { period: p, daikin: d, grid: g, fc });
     });
     return () => { alive = false; };
   }, [granularity, anchor]);
@@ -204,7 +211,7 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
     // Resize handling now lives centrally in makeChart (rAF-debounced
     // ResizeObserver) — the per-effect observer this widget carried would
     // double every resize() call.
-  }, [granularity, period, daikin, grid, dayData, execution, pv, isToday]);
+  }, [granularity, period, daikin, grid, fcDaily, dayData, execution, pv, isToday]);
 
   useEffect(() => () => {
     if (chartRef.current) {

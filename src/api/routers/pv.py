@@ -509,8 +509,14 @@ async def get_forecast_daily(start_date: str, end_date: str) -> dict[str, Any]:
     """
     tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
     try:
-        s_local = datetime.fromisoformat(str(start_date)).replace(tzinfo=tz)
-        e_local = datetime.fromisoformat(str(end_date)).replace(tzinfo=tz) + timedelta(days=1)
+        # date.fromisoformat (not datetime) — rejects datetime strings that
+        # would silently shift the window (review: '2026-06-25T18:00' parsed).
+        d_start = date.fromisoformat(str(start_date))
+        d_end = date.fromisoformat(str(end_date))
+        if len(str(start_date)) != 10 or len(str(end_date)) != 10:
+            raise ValueError("compact form")
+        s_local = datetime(d_start.year, d_start.month, d_start.day, tzinfo=tz)
+        e_local = datetime(d_end.year, d_end.month, d_end.day, tzinfo=tz) + timedelta(days=1)
     except (ValueError, TypeError):
         raise HTTPException(status_code=400, detail="start_date/end_date must be YYYY-MM-DD")
     n_days = (e_local.date() - s_local.date()).days

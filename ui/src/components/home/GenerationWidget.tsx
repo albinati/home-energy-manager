@@ -54,7 +54,9 @@ export function GenerationWidget({ period, periodData, periodLoading, agile, opp
   const fcDaily = useFetch(
     () => (wantFc ? getForecastDaily(fcStart, fcEnd) : Promise.resolve(null)),
     [wantFc, fcStart, fcEnd],
-    { cacheKey: `fcdaily:${fcStart}:${fcEnd}`, immutable: !isCurrentPeriod(period) },
+    // No cacheKey when fc isn't wanted — caching null under a real-looking
+    // key would poison the fcdaily: scheme for future consumers.
+    wantFc ? { cacheKey: `fcdaily:${fcStart}:${fcEnd}`, immutable: !isCurrentPeriod(period) } : {},
   );
   const t = chartTheme();
 
@@ -171,6 +173,13 @@ export function GenerationWidget({ period, periodData, periodLoading, agile, opp
       </div>
       <OppyLine o={opportunity} />
       <MetricTimeline labels={labels} lines={lines} barMode height={240} />
+      <div class="tlw-legend">
+        <span><i style={`border-color:${t.pv}`} /> solar</span>
+        <span><i style={`border-color:${t.exportColor}`} /> export</span>
+        {planDaily.some((v) => v != null) && (
+          <span><i class="dashed" style={`border-color:${withAlpha(t.pv, 0.6)}`} /> solar plan</span>
+        )}
+      </div>
     </div>
   );
 }
