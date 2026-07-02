@@ -6,6 +6,25 @@ Major versions track significant LP / dispatch architecture iterations. Minor ve
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [13.0.0] — 2026-07-02
+
+**Headline: measure, then trust.** v13 is a month of instrument-building and
+the corrections those instruments forced. The measurement-integrity audit found
+(and fixed) the Fox client inflating winter solar ~8×, the DHW forecast running
++45% with the wrong shape, a deterministic +15-min PV attribution lag, and an
+LWT offset that had been phantom-heating the house all June. On top of the
+now-trustworthy numbers sits the winter-readiness LP stack: scenario solves
+that perturb PV (calibrated from 27 days of measured error), a
+newsvendor-style pessimistic charge floor on every committed plan
+(under-charging for the evening peak costs ~4× over-charging), and a live
+negative-window audit whose fixes let the LP finally collect paid imports at
+full depth. The system now watches itself — nightly LP health self-check,
+actuation-freshness alerts, a guests-elevation detector that *asks* instead of
+guessing — and deploys collapsed to one command with auto-rollback. The
+cockpit finished its redesign into an ops console that loads in 233 ms.
+
 **Theme (2026-06-06): active space-heating control + a self-correcting solar
 forecast + a UI that explains itself.** HEM now (optionally) drives the Daikin
 leaving-water-temperature offset to pre-heat the house off cheap power and coast
@@ -215,6 +234,154 @@ two control-side features ship **off by default** (`DAIKIN_LWT_PREHEAT_ENABLED`,
   (review-caught, PR #484): the full-span setback row matched before the boost
   sub-interval. Boost windows are now preferred.
 
+### Added — cockpit redesign → ops console, at 233 ms (2026-06-09 → 06-13)
+- **Redesign phases 1–5** (#524–#531): Claude-Design handoff ported — visual
+  foundation, Hero + Weather, consumption by-source + SoC, live band + radial
+  tank gauge + chrome period control, fidelity pass. Non-negotiables held:
+  deep-dark, borderless, no-emoji, semantic color (`DESIGN.md` added as the
+  design-system source of truth, #600).
+- **Ops console** (#552–#556): AlertStrip (caught a real Fox schedule drift on
+  day one), Self-check panel, System-health card, Operate card (admin cluster:
+  mode, replan, scheduler pause, appliance cancel), full-width power flow;
+  ops-status endpoints + fair-compare TTL cache (#553); mode-aware
+  `schedule_diff` fingerprint.
+- **Performance** (#557–#559): the 8.5 s cockpit wall was the single-threaded
+  event loop serializing synchronous PnL — not the server being busy. Lifetime
+  aggregate endpoint + `/metrics` TTL cache + nginx viewer micro-cache (10 s,
+  admin bypass) → **233 ms measured**. Layers 4–5 recorded as over-engineering
+  and deferred (`docs/COCKPIT_PERF.md`).
+- **June UI batch** (#580–#604): period-nav immutable past-period cache + Today
+  button; real intraday consumption chart for past days; committed forecast vs
+  actual-blend labelling; heatmap cold-rebuild 504 stampede fix; a11y HIGH
+  fixes (chart text alternatives, modal focus trap, h1 outline); stale
+  lazy-chunk auto-recover after deploys; hero weather 24 h range + 3-day
+  forecast; Outgoing-Agile export framing; live-card polish.
+
+### Added — self-hosted Quartz solar forecast (2026-06-12)
+- **`hem-quartz` sidecar** (#542, PRs #544–#551): the expiring api.quartz.solar
+  token turned out to be the commercial product; the site-level model is free.
+  New container (python 3.11, xgboost site-level `quartz-solar-forecast`)
+  mirrors the open API schema; provider falls back Quartz→Open-Meteo. Seven
+  build fixes to get there on ARM64 (native runner — QEMU poisons numcodecs'
+  SIMD probe; multi-stage build; cattrs/requests pins; tmpfs CWD cache).
+
+### Fixed — measurement integrity (the mid-June audit)
+- **Fox PV was `generation`, not PV** (#563, PR #564): the Fox client mapped
+  AC output *including battery discharge* to `solar_kwh`, inflating winter
+  solar/self-sufficiency ~8×. Now `PVEnergyTotal`. £/PnL unaffected (meter-
+  based); Daikin/Octopus/Quartz audited clean of the same class.
+- **Fox V3 uploads wedged for 41 h** (#561): two composing bugs — drift
+  comparators not mode-aware (stale `fd_*` echo on SelfUse groups) and the
+  in-flight bridge refusing whole uploads on overlap — let a stale schedule
+  grid-force-charge at +13–15 p for ~41 h. Shared `_group_fingerprint` +
+  all-groups bridge guard + drop-bridge-on-overlap. Plus **actuation-health
+  alerts** (#562): `/status/alerts` gains an `actuation` block (Fox upload age,
+  Daikin tank write age/fails, LWT fails; vacation-gated) → AlertStrip — the
+  gap that let it run silent is closed.
+- **DHW forecast recalibrated** (#536): was +45% with the wrong shape; new
+  measured shape + trailing measured/nominal auto-scale. **Backfill trailing-
+  window sweep** (#535) recovered a lost month of metered data + staleness
+  alarm in the brief. **forecast_skill_log coherence** (#537): the skill log
+  now measures the same PV forecast the LP consumes. `FORECAST_NIGHT_TEMP_BIAS_C`
+  → 0 (the learned per-hour microclimate offset already corrects it; the
+  static −3 double-corrected).
+- **PV slot-centre sampling** (#602): a 30-min slot's honest representative
+  power is the slot *centre*, not the start — start-sampling attributed PV
+  ~15 min late, a deterministic lag confirmed over 21 prod days (the chart
+  "offset" was not a timezone bug; tz audited clean end-to-end).
+- **Tariff plumbing**: single source of truth for the Agile standing charge
+  (#573); consistent tariff framing + live standing charge in Insights (#565).
+
+### Fixed — LWT phantom heating (June)
+- **The active LWT offset was waking the compressor in summer**: 0→4.6 kWh/day
+  of phantom space heat since Jun 5. Outdoor-temperature cutoff on positive
+  offsets + thermal-lag tail decontamination (#583); Insights residual/HP
+  profiles decontaminated retroactively (#585); LWT demand gate + calibration-k
+  decontamination + measured thermal constants (#541).
+
+### Added — winter thermal groundwork (epic #540)
+- **Winter thermal model** (docs, PR #539): measured UA ≈ 630 W/K via HDD
+  regression, gap analysis, sensor-first W1–W4 build plan
+  (`docs/WINTER_THERMAL_MODEL.md`). **W1 indoor-temperature ingestion pipe**
+  shipped (#572).
+
+### Added — load-forecast measurement loop
+- **Per-slot `load_error_log`** (#569) + gated recent-bias corrector (default
+  OFF, #570) + Insights load-accuracy card (#571) + negative-price slots
+  excluded from the residual sample (#566) + heat-pump heatmap breakdown, Tank
+  vs Heating (#568, #575). **ML feasibility study verdict: don't build** —
+  6–9% OOS gain is marginal; the real lever is heat-pump *timing* (#603,
+  read-only study).
+
+### Fixed — negative-window dispatch (late June)
+- **Powerful sustained through boost windows** (#606): Daikin auto-clears
+  Powerful; a bounded-cadence backstop re-asserts it while a negative boost
+  window covers now.
+- **ForceCharge on `negative_hold`** (#607): SelfUse holds let the battery
+  self-discharge into house load during paid-import slots.
+- **Export-aware curtailment penalty** (#608) and **grid-import cap decoupled
+  from the inverter rating** (#609, main fuse is the real limit).
+
+### Added — the system watches itself
+- **Nightly LP health self-check** (#611, review hardening #613): objective
+  drift vs a rolling baseline, Infeasible count, scenario-spread sanity, floor
+  insurance/slack — alerts only on regression, silent when healthy.
+- **Guests base-load scaling + elevation detector that ASKS** (#610): the
+  guests preset finally scales base load (×`LP_GUESTS_BASE_LOAD_SCALE`, 1.3);
+  a nightly detector on sustained load elevation (ratio > 1.15, ≥3/4 days)
+  prompts "visitas em casa?" via Telegram instead of auto-applying — the human
+  knows, the system remembers.
+- **One-command deploys** (`deploy/rollout.sh`, #617): manifest guard → tag pin
+  → health-verify with auto-rollback → image prune (keep current + previous).
+
+### Added — winter-readiness LP stack (2026-07-02 adversarial audit)
+- The audit measured the LP capturing **68% of perfect-knowledge value** (June:
+  realised £6.07 vs no-battery £38.75; policy-compatible recoverable gap only
+  ~£5/mo). Four improvements followed:
+- **Scenarios perturb PV** (#614): pessimistic ×0.85 / optimistic ×1.05,
+  calibrated from 27 days of `pv_error_log` daily ratios (p25 = 0.883); PV-only
+  perturbation preserves the calibrated COP series.
+- **Pessimistic charge floor** (#615): scenario triggers re-solve the committed
+  plan with a SOFT floor (slack + 50 p/kWh) at the pessimistic SoC trajectory —
+  the newsvendor answer to "under-charging for the evening peak costs ~4×
+  over-charging". June backtest: cost-neutral, empty-at-peak slots 4→1.
+  Pre-negative-export and negative-price slots exempt. Floor insurance/slack
+  feed the LP health monitor. Kill switch `LP_PESS_CHARGE_FLOOR_ENABLED`.
+- **`dhw_error_log`** (#616): committed DHW forecast vs realised Daikin energy
+  per local 2-h bucket (cron 04:24 UTC) — first prod day immediately surfaced
+  the warmup bucket ~4× under-forecast. Plus **hold/fill class-aware
+  ForceCharge merge**: `negative_hold` no longer swallowed by fill-to-100
+  groups, so the fill defers to the deepest-priced slots.
+
+### Fixed — live negative-window audit (2026-07-02, #618 → #619)
+- Audited the running 15-slot window (−1.5..−4.4 p) against realised telemetry:
+  captured well (+£0.30 net credit, battery 10→100% in-window, washer
+  auto-scheduled at −0.53 p effective) — with three structural defects fixed
+  same-day:
+- **PV-sufficiency guard now exempts negative-price slots**: its premise
+  ("grid-charging is wasteful when PV covers demand") inverts when the grid
+  *pays* for import — it had pinned the plan to PV-only charge + curtailment
+  across the whole paid window.
+- **Directional MPC drift gate**: SoC running ahead of prediction while the
+  plan reaches that level within 3 h is early arrival (Fox fills faster than
+  the LP taper), not drift — kills the 5-min re-solve bursts whose group swaps
+  glitched the battery into discharging at −3.3 p. Staleness-capped;
+  below-prediction always fires.
+- **Powerful stall backoff**: the tank's compressor-only DHW ceiling (~51 °C on
+  hot days — manual Powerful via the app doesn't move it either) had HEM
+  re-writing Powerful every 15 min for 5 h (24 writes ≈ 12% of the Daikin
+  quota, zero gain). After 4 no-progress successful writes the cadence
+  stretches ×4; progress, a colder tank, or a 6 h gap resets.
+
+### Added — appliance UX (late June)
+- **Prompt arm detection + quieter pings** (#605): arm-confirm and finished
+  notifications only; the play-by-play is gone (pull-based preference).
+
+### Maintenance
+- Date-relative test flakes killed (#588, #612 — seed relative to the current
+  clock, not July); README refresh for the public repo (#560); QA a11y
+  ISSUE-001 (#601).
+
 ## [12.0.0] — 2026-05-20
 
 **Headline: residual-class LP-Infeasibility surface closed.** The 60-day audit of `optimizer_log` found that 8 of 9 above-reserve Infeasible events clustered at the 21:00–21:25 BST tier-boundary fire — slot 0 of the new horizon falling inside the 21:30 BST evening shower window from a cold tank, physically un-liftable to 45 °C in a single 30-min slot. v12 ships the soft-floor fix plus a defensive layer for the remaining classes, snapshot-based diagnostics for any future Infeasibles, and a 200+ binary MILP cleanup.
@@ -326,7 +493,8 @@ Initial heuristic dispatcher + the early Octopus + Fox + Daikin glue. The LP did
 
 ---
 
-[Unreleased]: https://github.com/albinati/home-energy-manager/compare/v12.0.0...main
+[Unreleased]: https://github.com/albinati/home-energy-manager/compare/v13.0.0...main
+[13.0.0]: https://github.com/albinati/home-energy-manager/compare/v12.0.0...v13.0.0
 [12.0.0]: https://github.com/albinati/home-energy-manager/compare/v11.0.0...v12.0.0
 [11.0.0]: https://github.com/albinati/home-energy-manager/compare/v10.3.0...v11.0.0
 [10.3.0]: https://github.com/albinati/home-energy-manager/compare/v10.0.1...v10.3.0
