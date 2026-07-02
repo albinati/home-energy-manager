@@ -1189,6 +1189,16 @@ class Config:
     DHW_NEGATIVE_BOOST_POWERFUL_REASSERT_MIN_INTERVAL_MINUTES: int = int(
         os.getenv("DHW_NEGATIVE_BOOST_POWERFUL_REASSERT_MIN_INTERVAL_MINUTES", "15")
     )
+    # No-progress backoff (2026-07-02): after STALL_LIMIT consecutive
+    # re-asserts without the tank rising ≥0.5 °C (unit arbitrating Powerful
+    # away — e.g. compressor DHW ceiling on hot days), stretch the interval
+    # ×STALL_BACKOFF. Progress or a new episode (colder tank / 6h gap) resets.
+    DHW_NEGATIVE_BOOST_REASSERT_STALL_LIMIT: int = int(
+        os.getenv("DHW_NEGATIVE_BOOST_REASSERT_STALL_LIMIT", "4")
+    )
+    DHW_NEGATIVE_BOOST_REASSERT_STALL_BACKOFF: float = float(
+        os.getenv("DHW_NEGATIVE_BOOST_REASSERT_STALL_BACKOFF", "4.0")
+    )
     # --- DHW forecast auto-scale (#534) ---
     # The per-slot draw constants in forecast_dhw_load_per_slot are static and
     # drift seasonally (May 2026 measured ~3.0 kWh/day vs ~2.4 in June: warmer
@@ -1702,6 +1712,24 @@ class Config:
     # tier-boundary trigger does most of the catching now, this is just the
     # belt-and-braces for ramps that happen MID-window.
     MPC_DRIFT_HYSTERESIS_TICKS: int = int(os.getenv("MPC_DRIFT_HYSTERESIS_TICKS", "1"))
+    # Directional gate (2026-07-02 window audit): live SoC running AHEAD of
+    # the prediction while the committed plan reaches that level within the
+    # look-ahead is early arrival on the planned trajectory (Fox ForceCharge
+    # fills faster than the LP taper), not drift — re-solving produced 5-min
+    # upload bursts mid-fill. SoC BELOW prediction always fires.
+    MPC_DRIFT_AHEAD_SUPPRESS_ENABLED: bool = (
+        os.getenv("MPC_DRIFT_AHEAD_SUPPRESS_ENABLED", "true").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+    MPC_DRIFT_AHEAD_LOOKAHEAD_HOURS: float = float(
+        os.getenv("MPC_DRIFT_AHEAD_LOOKAHEAD_HOURS", "3.0")
+    )
+    # Staleness bound: max consecutive heartbeats the ahead gate may suppress
+    # (24 × 300 s ≈ 2 h) — a plan plateauing at exactly soc − threshold can
+    # otherwise hold the suppression indefinitely; past the cap drift fires.
+    MPC_DRIFT_AHEAD_MAX_SUPPRESSED_TICKS: int = int(
+        os.getenv("MPC_DRIFT_AHEAD_MAX_SUPPRESSED_TICKS", "24")
+    )
     # Plan-delta observability: how many hours of overlap between previous and new plan to
     # measure when logging the post-trigger delta. 6 h captures the immediate horizon.
     MPC_PLAN_DELTA_LOOKAHEAD_HOURS: int = int(os.getenv("MPC_PLAN_DELTA_LOOKAHEAD_HOURS", "6"))

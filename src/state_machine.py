@@ -53,6 +53,8 @@ _USER_OVERRIDE_INHERITED_NOTIFIED: set[int] = set()
 _TANK_DRIFT_NOTIFIED: bool = False
 # Last time the negative-boost backstop re-asserted DHW Powerful (cadence gate).
 _NEG_BOOST_POWERFUL_LAST_UTC: datetime | None = None
+_NEG_BOOST_STALL_COUNT: int = 0
+_NEG_BOOST_LAST_TEMP: float | None = None
 # #461 — dedup for the LWT-offset drift backstop (same one-page-per-episode
 # semantics as the tank flag above). Cleared when the offset is back at 0.
 _LWT_DRIFT_NOTIFIED: bool = False
@@ -797,10 +799,33 @@ def _check_negative_boost_powerful(
     # on the unit; the headroom gate above makes the writes taper to zero as
     # the tank nears target.
     interval_s = max(60, int(config.DHW_NEGATIVE_BOOST_POWERFUL_REASSERT_MIN_INTERVAL_MINUTES) * 60)
+    # No-progress backoff (2026-07-02 window): the unit can arbitrate Powerful
+    # away silently (compressor DHW ceiling on hot days) — the tank sat at
+    # 50-51 °C for 5 h while we re-wrote Powerful every 15 min (24 writes,
+    # ~12% of the Daikin daily quota, zero thermal gain). If the tank hasn't
+    # risen ≥0.5 °C over STALL_LIMIT consecutive re-asserts, stretch the
+    # interval by STALL_BACKOFF (progress resets both).
+    global _NEG_BOOST_STALL_COUNT, _NEG_BOOST_LAST_TEMP
+    # New-episode reset: a clearly colder tank (fresh window after a setback)
+    # or a long quiet gap means the old stall verdict no longer applies.
+    if _NEG_BOOST_LAST_TEMP is not None and float(tank_t) < _NEG_BOOST_LAST_TEMP - 2.0:
+        _NEG_BOOST_STALL_COUNT = 0
+        _NEG_BOOST_LAST_TEMP = None
+    if _NEG_BOOST_POWERFUL_LAST_UTC is not None and (
+        now_utc - _NEG_BOOST_POWERFUL_LAST_UTC
+    ).total_seconds() > 6 * 3600:
+        _NEG_BOOST_STALL_COUNT = 0
+        _NEG_BOOST_LAST_TEMP = None
+    stall_limit = max(1, int(config.DHW_NEGATIVE_BOOST_REASSERT_STALL_LIMIT))
+    if _NEG_BOOST_STALL_COUNT >= stall_limit:
+        # Clamp ≥1: a mis-set backoff of 0 would turn "stalled" into a write
+        # on every heartbeat — worse than the incident this fixes.
+        interval_s = int(
+            interval_s * max(1.0, float(config.DHW_NEGATIVE_BOOST_REASSERT_STALL_BACKOFF))
+        )
     if _NEG_BOOST_POWERFUL_LAST_UTC is not None:
         if (now_utc - _NEG_BOOST_POWERFUL_LAST_UTC).total_seconds() < interval_s:
             return
-
     # Stamp the cadence gate up-front (H2): a persistently-failing PATCH (e.g.
     # READ_ONLY when Powerful isn't settable) must be rate-limited to the
     # interval, not retried every heartbeat — failed calls still cost quota.
@@ -808,6 +833,21 @@ def _check_negative_boost_powerful(
     try:
         client.set_tank_powerful(dev, True)
         dev.tank_powerful = True
+        # Stall accounting — successful writes only (a failed PATCH never
+        # reached the unit, so "no thermal progress" says nothing about the
+        # unit arbitrating Powerful away; the H2 stamp above already rate-
+        # limits failures to the base interval). The baseline is the last
+        # PROGRESS point, not the last observation — a slow-but-real ramp
+        # (e.g. +0.3 °C/interval) accumulates to +0.5 and resets instead of
+        # being re-baselined into looking permanently stalled.
+        if _NEG_BOOST_LAST_TEMP is None:
+            # First write of an episode: no baseline yet — stamp only.
+            _NEG_BOOST_LAST_TEMP = float(tank_t)
+        elif float(tank_t) >= _NEG_BOOST_LAST_TEMP + 0.5:
+            _NEG_BOOST_STALL_COUNT = 0
+            _NEG_BOOST_LAST_TEMP = float(tank_t)
+        else:
+            _NEG_BOOST_STALL_COUNT += 1
         db.log_action(
             device="daikin",
             action="negative_boost_powerful_reassert",
