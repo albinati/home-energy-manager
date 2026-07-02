@@ -19,7 +19,7 @@
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  transition: transform 160ms ease-out, box-shadow 160ms ease-out;
+  transition: transform var(--dur-fast) ease-out, box-shadow var(--dur-fast) ease-out;
   grid-column: span 12;
   min-width: 0;
   box-shadow: var(--shadow), inset 0 1px 0 rgba(255, 255, 255, 0.06);
@@ -91,7 +91,7 @@
   /* rendered as an <h3> for document outline — neutralise default heading
      margin so the header layout is unchanged. */
   margin: 0;
-  font-size: 0.7rem;
+  font-size: var(--font-xs);
   font-weight: 700;
   color: var(--text-dim);
   letter-spacing: 0.12em;

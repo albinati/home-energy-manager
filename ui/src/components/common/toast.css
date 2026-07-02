@@ -23,7 +23,7 @@
     "msg close"
     "detail close";
   gap: var(--space-1) var(--space-3);
-  animation: toast-slide-in 180ms ease-out;
+  animation: toast-slide-in var(--dur-med) ease-out;
 }
 @keyframes toast-slide-in {
   from { transform: translateY(8px); opacity: 0; }
@@ -46,7 +46,7 @@
 .toast-close {
   grid-area: close;
   align-self: start;
-  font-size: 1.2rem;
+  font-size: var(--font-lg);
   line-height: 1;
   color: var(--text-mute);
 }

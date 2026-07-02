@@ -1,12 +1,12 @@
 .refresh-cd {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: var(--space-1);
   position: relative;
   background: none;
   border: none;
   cursor: pointer;
-  padding: 2px;
+  padding: var(--space-0);
   color: var(--text-mute);
   font-variant-numeric: tabular-nums;
 }
@@ -26,7 +26,7 @@
 .refresh-cd--plain .refresh-cd-glyph { font-size: var(--font-md); }
 
 @keyframes refresh-cd-spin { to { transform: rotate(360deg); } }
-.refresh-cd .spin, .refresh-cd-glyph.spin { animation: refresh-cd-spin 0.8s linear infinite; }
+.refresh-cd .spin, .refresh-cd-glyph.spin { animation: refresh-cd-spin var(--dur-slow) linear infinite; }
 @media (prefers-reduced-motion: reduce) {
   .refresh-cd .spin, .refresh-cd-glyph.spin { animation: none; }
 }

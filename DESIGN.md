@@ -66,10 +66,13 @@ rationale + the rules. When they disagree, fix the drift, don't fork the values.
 
 ## Spacing
 - **Base unit:** 4px. Tokens `--space-1 4px` … `--space-7 48px`
-  (4, 8, 12, 16, 24, 32, 48). Used 240+ times — keep it that way.
+  (4, 8, 12, 16, 24, 32, 48), plus `--space-0 2px` — the deliberate half-step
+  for chip/badge vertical rhythm (added 2026-07-02; below it is a hairline,
+  not spacing). Used 240+ times — keep it that way.
 - **Density:** comfortable-to-compact; this is a dashboard, not a landing page.
-- **Rule:** no sub-4px ad-hoc spacing. The audit found ~110 such literals — do not
-  add more; consolidate when touched.
+- **Rule:** no ad-hoc spacing literals. The 2026-06-16 audit found ~110; the
+  2026-07-02 consolidation routed them through the tokens (gaps + paddings) —
+  the survivors are optical alignment values annotated in place.
 
 ## Layout
 - **Approach:** grid-disciplined. 12-column widget grid, `gap var(--space-3)` (12px).
@@ -90,14 +93,17 @@ rationale + the rules. When they disagree, fix the drift, don't fork the values.
 ## Motion
 - **Approach:** intentional, choreographed from shared tokens. Default ON, with an
   in-app reduce-motion toggle that overrides the OS (`--*` collapse to 0.001ms).
-- **Tokens:** `--dur-enter 420ms`, `--stagger-step 40ms`,
+- **Tokens:** `--dur-enter 420ms`, `--stagger-step 40ms`, and the sub-scale
+  `--dur-fast 140ms` (hovers, colour flips) / `--dur-med 220ms` (small moves,
+  fades) / `--dur-slow 700ms` (focal-number settles, big fills);
   `--ease-entrance cubic-bezier(0.22,1,0.36,1)` (card rise),
   `--ease-lock cubic-bezier(0.34,1.3,0.64,1)` (~2% focal-number settle overshoot).
 - **Signature motions:** `widget-rise` (staggered entrance), `live-pulse` (the one
   continuous loop — live dots), modal/toast/backdrop entrances, ambient
   `body-bg-drift` (60s), skeleton shimmer.
-- **Rule:** prefer the tokens over ad-hoc durations. The audit found 25/30
-  transitions on ad-hoc values — converge on the scale when touching them.
+- **Rule:** durations come from the token scale. The 2026-07-02 consolidation
+  converted ~52 ad-hoc values; the only literals left are the ambient loops
+  (`body-bg-drift 60s`, skeleton shimmer 1.4s, live-pulse) — keep it that way.
 
 ## Effects
 - `--shadow: 0 1px 1px /50%, 0 12px 32px /50%` (dark); `--shadow-lg` larger.
@@ -124,21 +130,23 @@ rationale + the rules. When they disagree, fix the drift, don't fork the values.
 | 2026-06-16 | `--thermal`, `--neg` promoted from `var(--x, literal)` fallbacks to real tokens | Kill silent hardcoded colors / fallback drift |
 | 2026-06-17 | System-ui font stack kept (audit AI-tell flag overruled) | Perf + native feel on 2-vCPU box for a glanceable ops console |
 | 2026-06-17 | DESIGN.md adopted as canonical spec | Stop token/scale drift; give QA something to check against |
+| 2026-07-02 | `--cool` (chart-ramp cool end) + `--text-on-accent` tokens; every `var(--x, #literal)` fallback stripped (#621) | 7 fallbacks carried WRONG colors (amber/cyan mixups); light theme gained missing `--neg`/`--thermal`/`--cool` |
+| 2026-07-02 | Motion sub-scale `--dur-fast/med/slow`; `--space-0 2px`; breakpoint scale documented (#595) | Converge the 52 ad-hoc durations + chip micro-spacing on tokens |
 
-## Open Gaps (from 2026-06-16 audit — verify current status vs PRs #591/#592/#594 before fixing)
-- **A11y headings:** cockpit section titles are styled divs, not `<h1>`–`<h6>`
-  (F-001). Screen-reader outline missing.
-- **Touch targets < 44px:** period arrows 28px, granularity pills 26px, icon
-  buttons 32px, refresh 24px (F-008).
-- **Settings aria-labels** carry raw env keys (`DHW_TEMP_NORMAL_C`) not human
-  labels (F-007).
-- **Off-scale literals:** ~51 `font-size` + ~110 sub-4px spacing literals; no
-  2px/3px token (F-011). Consolidate when touched.
-- **Ad-hoc breakpoints:** 11 distinct `@media` widths (F-010). Define a breakpoint
-  scale.
-- **Ad-hoc motion durations:** 25/30 transitions off the token scale (F-009).
-- **Stray emoji/glyphs:** sun glyph + `◉ now` markers in source breach the
-  no-emoji rule (F-012).
-- (Likely closed by #591/#592/#594: chart alt-text F-002, modal focus trap F-004,
-  mobile overflow F-003, phantom tokens F-005, contrast F-006, color-scheme F-014
-  — confirm during any follow-up.)
+## Gap status (2026-07-02 re-audit — was "Open Gaps", 2026-06-16)
+All gaps re-verified against source on 2026-07-02 (4-sweep conformity audit):
+- **CLOSED** F-001 headings (#601 + #621 — cockpit outline h1→h2→h3 complete),
+  F-002 chart alt-text, F-003 mobile overflow, F-004 modal focus trap,
+  F-005 phantom tokens, F-006 contrast, F-007 settings aria-labels,
+  F-014 color-scheme (#591/#592/#594), F-012 emoji purge (verified clean).
+- **CLOSED** F-008 touch targets (#621): compact chrome controls keep their
+  visual size; a `pointer: coarse` centred overlay extends every hit box to
+  ≥44px (see base.css).
+- **CLOSED** F-009 motion + F-011 literals (#595 consolidation, 2026-07-02):
+  durations/fonts/gaps/paddings/radius routed through tokens (~170
+  conversions). Residual literals are deliberate: em-relative sizes, ambient
+  loop timings, hairlines, optical chart alignment, and a handful of
+  sub-token badge sizes (8–9px, 27px) awaiting a design decision.
+- **DOCUMENTED** F-010 breakpoints: canonical scale recorded in tokens.css
+  (430 / 640 / 720 / 960·961 pair / 1024 / 1180); off-scale @media widths are
+  exceptions that must justify themselves at the site.

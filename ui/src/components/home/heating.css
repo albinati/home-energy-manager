@@ -11,13 +11,13 @@
   flex-wrap: wrap;
 }
 .heating-freshness {
-  font-size: 0.65rem;
+  font-size: var(--font-2xs);
   color: var(--text-mute);
   font-variant-numeric: tabular-nums;
 }
 .heating-refresh {
-  padding: 2px 8px;
-  font-size: 0.65rem;
+  padding: var(--space-0) 8px;
+  font-size: var(--font-2xs);
 }
 .heating-refresh-error {
   color: var(--bad);
@@ -125,14 +125,14 @@
 .hc-lockbar .btn { flex: none; }
 
 /* Slider control (replaces the −/+ stepper) */
-.hc-slider { display: flex; flex-direction: column; gap: 4px; width: 100%; }
+.hc-slider { display: flex; flex-direction: column; gap: var(--space-1); width: 100%; }
 .hc-slider-rail { position: relative; height: 22px; display: flex; align-items: center; }
 .hc-slider-rail::before {
   content: ""; position: absolute; left: 0; right: 0; height: 5px;
-  border-radius: 999px; background: var(--bg-card-3, var(--border));
+  border-radius: var(--radius-pill); background: var(--bg-card-3, var(--border));
 }
 .hc-slider-fill {
-  position: absolute; left: 0; height: 5px; border-radius: 999px; pointer-events: none;
+  position: absolute; left: 0; height: 5px; border-radius: var(--radius-pill); pointer-events: none;
 }
 .hc-slider--thermal .hc-slider-fill { background: linear-gradient(90deg, var(--pv), var(--warn)); }
 .hc-slider--cool .hc-slider-fill { background: linear-gradient(90deg, var(--grid), var(--accent)); }
@@ -224,7 +224,7 @@
   text-transform: uppercase;
   margin-bottom: var(--space-2);
 }
-.heating-plan-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.heating-plan-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-1); }
 .heating-plan-row {
   display: flex;
   align-items: center;

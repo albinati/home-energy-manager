@@ -8,7 +8,7 @@
   border: 1px solid color-mix(in srgb, var(--bad) 30%, transparent);
 }
 .widget-boundary-error-icon {
-  font-size: 1.2rem;
+  font-size: var(--font-lg);
   line-height: 1;
   color: var(--bad);
   flex-shrink: 0;
@@ -22,7 +22,7 @@
 .widget-boundary-error-detail {
   font-size: var(--font-xs);
   color: var(--text-dim);
-  margin-top: 2px;
+  margin-top: var(--space-0);
   word-break: break-word;
   font-variant-numeric: tabular-nums;
 }

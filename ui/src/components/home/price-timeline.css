@@ -29,13 +29,13 @@
 .price-tl-legend {
   display: flex;
   gap: var(--space-3);
-  font-size: 10px;
+  font-size: var(--font-2xs);
   color: var(--text-mute);
 }
 .price-tl-legend span {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-1);
 }
 .price-tl-legend i {
   width: 8px;

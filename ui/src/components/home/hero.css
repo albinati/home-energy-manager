@@ -35,28 +35,28 @@
 
 /* ── verdict ────────────────────────────────────────────────────────── */
 .verdict-wrap { display: flex; flex-direction: column; gap: var(--space-2); align-items: flex-start; margin-top: 4px; }
-.verdict { display: inline-flex; align-items: center; gap: var(--space-2); padding: 5px 12px; border-radius: var(--radius-pill); font-size: var(--font-sm); font-weight: 600; }
+.verdict { display: inline-flex; align-items: center; gap: var(--space-2); padding: var(--space-1) 12px; border-radius: var(--radius-pill); font-size: var(--font-sm); font-weight: 600; }
 .verdict--win { color: var(--ok); background: rgba(16, 185, 129, 0.10); }
 .verdict--behind { color: var(--bad); background: rgba(239, 68, 68, 0.10); }
 .verdict-sub { color: var(--text-mute); font-weight: 400; }
-.league-note { display: inline-flex; align-items: center; gap: 4px; font-size: var(--font-xs); color: var(--text-dim); padding: 3px 4px; border-radius: var(--radius-sm); }
+.league-note { display: inline-flex; align-items: center; gap: var(--space-1); font-size: var(--font-xs); color: var(--text-dim); padding: var(--space-0) 4px; border-radius: var(--radius-sm); }
 .league-note:hover { color: var(--text); }
 .league-note .ln-cta { display: inline-flex; align-items: center; color: var(--accent); font-weight: 600; }
 
 /* ── stat line ──────────────────────────────────────────────────────── */
 .statline { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-5); margin-top: var(--space-4); }
-.stat { display: flex; flex-direction: column; gap: 2px; }
+.stat { display: flex; flex-direction: column; gap: var(--space-0); }
 .stat-v { font-size: var(--font-lg); font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
 .stat-l { font-size: var(--font-2xs); color: var(--text-mute); letter-spacing: 0.03em; text-transform: uppercase; font-weight: 600; }
 
 /* ── cost vs fixed bars ─────────────────────────────────────────────── */
 .vsfixed { margin-top: var(--space-4); }
 .vsfixed-head { margin-bottom: 8px; }
-.vf-bars { display: flex; flex-direction: column; gap: 6px; }
+.vf-bars { display: flex; flex-direction: column; gap: var(--space-2); }
 .vf-row { display: grid; grid-template-columns: 44px 1fr auto; align-items: center; gap: var(--space-2); }
 .vf-k { font-size: var(--font-2xs); color: var(--text-mute); text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600; }
 .vf-track { height: 10px; border-radius: 5px; background: var(--bg-card-3); overflow: hidden; }
-.vf-fill { height: 100%; border-radius: 5px; transition: width 400ms var(--ease-entrance); }
+.vf-fill { height: 100%; border-radius: 5px; transition: width var(--dur-enter) var(--ease-entrance); }
 .vf-v { font-size: var(--font-sm); font-weight: 700; font-variant-numeric: tabular-nums; }
 
 .standing-note { margin-top: var(--space-3); font-size: var(--font-xs); color: var(--text-mute); display: flex; align-items: center; gap: var(--space-2); }
@@ -75,22 +75,22 @@
 .hw { display: flex; flex-direction: column; gap: var(--space-4); height: 100%; }
 .weather-eyebrow { color: var(--text-mute); }
 .hw-now { display: flex; align-items: center; gap: var(--space-4); }
-.weather-temp { font-size: 3.4rem; font-weight: 250; letter-spacing: -0.02em; line-height: 0.9; font-variant-numeric: tabular-nums; }
+.weather-temp { font-size: var(--font-display); font-weight: 250; letter-spacing: -0.02em; line-height: 0.9; font-variant-numeric: tabular-nums; }
 .hw-cond { display: flex; align-items: center; gap: var(--space-2); color: var(--text); }
 .hw-cond-label { font-weight: 600; }
 
 .thermo-track { height: 6px; border-radius: 3px; position: relative; background: linear-gradient(90deg, var(--grid), var(--pv) 58%, var(--import)); }
 .thermo-mark { position: absolute; top: 50%; width: 13px; height: 13px; border-radius: 50%; background: var(--text); border: 2px solid var(--bg-card); transform: translate(-50%, -50%); box-shadow: 0 1px 4px rgba(0, 0, 0, 0.55); }
-.thermo-row { display: flex; justify-content: space-between; align-items: baseline; margin-top: 6px; font-size: var(--font-xs); }
+.thermo-row { display: flex; justify-content: space-between; align-items: baseline; margin-top: var(--space-2); font-size: var(--font-xs); }
 .t-lo { color: var(--grid); font-weight: 700; font-variant-numeric: tabular-nums; }
 .t-hi { color: var(--import); font-weight: 700; font-variant-numeric: tabular-nums; }
 
 .solar-prog { margin-top: auto; }
-.solar-prog-head { margin-bottom: 6px; }
+.solar-prog-head { margin-bottom: var(--space-2); }
 .solar-prog-track { height: 8px; border-radius: 4px; background: var(--bg-card-3); overflow: hidden; }
-.solar-prog-fill { height: 100%; background: linear-gradient(90deg, var(--pv), color-mix(in srgb, var(--pv) 55%, white)); border-radius: 4px; transition: width 400ms var(--ease-entrance); }
+.solar-prog-fill { height: 100%; background: linear-gradient(90deg, var(--pv), color-mix(in srgb, var(--pv) 55%, white)); border-radius: 4px; transition: width var(--dur-enter) var(--ease-entrance); }
 .solar-done { color: var(--pv); font-size: var(--font-md); }
-.rate-k { font-size: var(--font-2xs); color: var(--text-mute); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
+.rate-k { font-size: var(--font-2xs); color: var(--text-mute); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; display: inline-flex; align-items: center; gap: var(--space-2); }
 .rate-sub { font-size: var(--font-xs); color: var(--text-mute); font-variant-numeric: tabular-nums; }
 
 /* utilities used in the hero markup */
@@ -98,5 +98,5 @@
 .items-center { align-items: center; } .items-baseline { align-items: baseline; }
 .dim { color: var(--text-dim); } .small { font-size: var(--font-xs); }
 .pos { color: var(--ok); } .neg { color: var(--bad); }
-.skel-text { display: inline-block; border-radius: 6px; background: linear-gradient(90deg, var(--bg-card-2), var(--bg-card-3), var(--bg-card-2)); background-size: 200% 100%; animation: skel 1.3s ease-in-out infinite; }
+.skel-text { display: inline-block; border-radius: 6px; background: linear-gradient(90deg, var(--bg-card-2), var(--bg-card-3), var(--bg-card-2)); background-size: 200% 100%; animation: skel 1.4s ease-in-out infinite; }
 @keyframes skel { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }

@@ -6,10 +6,10 @@
 .quota-chip {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-1);
   padding: 2px var(--space-2);
   border-radius: var(--radius-pill);
-  font-size: 0.7rem;
+  font-size: var(--font-xs);
   font-variant-numeric: tabular-nums;
   border: 1px solid var(--border);
   background: var(--bg-card);
@@ -25,10 +25,10 @@
   font-weight: 600;
 }
 .quota-chip-fail {
-  margin-left: 2px;
+  margin-left: var(--space-0);
   font-weight: 800;
   color: var(--warn);
-  font-size: 0.7rem;
+  font-size: var(--font-xs);
 }
 .quota-chip--ok   .quota-chip-value { color: var(--ok); }
 .quota-chip--warn .quota-chip-value { color: var(--warn); }

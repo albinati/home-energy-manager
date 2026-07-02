@@ -65,7 +65,7 @@
   margin-top: var(--space-2);
   font-size: var(--font-sm);
   max-width: 56ch;
-  animation: mode-consequence-in 180ms ease both;
+  animation: mode-consequence-in var(--dur-med) ease both;
 }
 @keyframes mode-consequence-in {
   from { opacity: 0; transform: translateY(4px); }
@@ -104,7 +104,7 @@
   background: var(--accent);
   box-shadow: 0 2px 8px color-mix(in srgb, var(--accent) 45%, transparent);
   transform: translateX(calc(var(--seg-idx, 0) * 100%));
-  transition: transform 420ms var(--ease-lock);
+  transition: transform var(--dur-enter) var(--ease-lock);
 }
 .mode-segment-btn {
   position: relative;
@@ -120,7 +120,7 @@
   color: var(--text-dim);
   font-size: var(--font-sm);
   font-weight: 600;
-  transition: color 200ms ease;
+  transition: color var(--dur-med) ease;
 }
 .mode-segment-btn:hover { color: var(--text); }
 .mode-segment-btn.is-active { color: var(--text-on-accent); }
@@ -131,7 +131,7 @@
 .mode-switcher-footnote {
   display: flex;
   align-items: flex-start;
-  gap: 6px;
+  gap: var(--space-2);
   margin-top: var(--space-3);
   font-size: var(--font-2xs);
   line-height: 1.5;
@@ -164,7 +164,7 @@
   grid-area: caret;
   font-size: var(--font-sm);
   color: var(--text-mute);
-  transition: transform 120ms;
+  transition: transform var(--dur-fast);
 }
 .setting-group-head.is-open .setting-group-caret { transform: rotate(90deg); }
 .setting-group-title {
@@ -243,7 +243,7 @@
   align-items: center;
   font-size: var(--font-xs);
   color: var(--text-mute);
-  margin-top: 2px;
+  margin-top: var(--space-0);
 }
 .setting-field-key code {
   background: var(--bg);
@@ -311,7 +311,7 @@
   font-weight: 500;
   cursor: pointer;
   white-space: nowrap;
-  transition: background 140ms ease, color 140ms ease;
+  transition: background var(--dur-fast) ease, color var(--dur-fast) ease;
 }
 .settings-tab:hover {
   background: var(--bg);
@@ -345,8 +345,8 @@
   justify-content: center;
   min-width: 18px;
   height: 18px;
-  padding: 0 5px;
-  border-radius: 9px;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius);
   background: var(--warn);
   color: var(--text-on-accent);
   font-size: var(--font-2xs);
@@ -390,7 +390,7 @@
 }
 .setting-field-revert {
   color: var(--text-mute);
-  font-size: 1rem;
+  font-size: var(--font-md);
   padding: 4px 8px;
   border-radius: var(--radius-sm);
 }
@@ -445,7 +445,7 @@
   align-items: center;
   gap: var(--space-2);
   opacity: 0.45;
-  transition: opacity 120ms;
+  transition: opacity var(--dur-fast);
 }
 .batch-stage.is-active { opacity: 1; }
 .batch-stage.is-done { opacity: 0.85; }

@@ -77,7 +77,7 @@
 .insights-export-panel {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--space-0);
   padding: var(--space-2) var(--space-3);
   margin-bottom: var(--space-3);
   border: 1px solid var(--border);
@@ -109,9 +109,9 @@
   display: flex; align-items: center; justify-content: space-between;
   gap: var(--space-2); flex-wrap: wrap;
 }
-.load-pattern-toggle { display: inline-flex; gap: 2px; }
+.load-pattern-toggle { display: inline-flex; gap: var(--space-0); }
 .load-pattern-toggle button {
-  font-size: var(--font-2xs); padding: 3px 10px; cursor: pointer;
+  font-size: var(--font-2xs); padding: var(--space-0) var(--space-3); cursor: pointer;
   background: transparent; color: var(--text-mute);
   border: 1px solid var(--border); border-radius: var(--radius-pill, 999px);
 }
@@ -142,15 +142,15 @@
   display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
   gap: var(--space-3); margin: var(--space-3) 0 var(--space-2);
 }
-.la-stat { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.la-stat { display: flex; flex-direction: column; gap: var(--space-0); min-width: 0; }
 .la-stat-val { font-size: var(--font-lg); font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
 .la-stat-lbl { font-size: var(--font-2xs); color: var(--text-mute); }
 
 /* ── fair-compare loading skeleton ─────────────────────────────────────
  * Self-contained (insights doesn't import home.css where .skel-text lives).
  * Ghost rows mirror the real table's rhythm so the eventual swap is calm. */
-.skel-table { display: flex; flex-direction: column; gap: 10px; padding: var(--space-3) 0; }
-.skel-table-head { display: flex; gap: var(--space-4); margin-bottom: 2px; }
+.skel-table { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-3) 0; }
+.skel-table-head { display: flex; gap: var(--space-4); margin-bottom: var(--space-0); }
 .skel-table-row { display: flex; gap: var(--space-4); align-items: center; }
 .skel-table .skel-text {
   display: inline-block;
@@ -158,7 +158,7 @@
   border-radius: 6px;
   background: linear-gradient(90deg, var(--bg-card-2), var(--bg-card-3), var(--bg-card-2));
   background-size: 200% 100%;
-  animation: insights-skel 1.3s ease-in-out infinite;
+  animation: insights-skel 1.4s ease-in-out infinite;
 }
 @keyframes insights-skel {
   0% { background-position: 200% 0; }
@@ -182,10 +182,10 @@
 }
 .syshealth-grade {
   margin-left: auto;
-  padding: 2px 10px;
+  padding: var(--space-0) var(--space-3);
   border-radius: var(--radius-pill);
   font-weight: 700;
-  font-size: 0.85rem;
+  font-size: var(--font-sm);
 }
 .syshealth-grade--a { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
 .syshealth-grade--b { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
@@ -200,18 +200,18 @@
 .syshealth-cell {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: var(--space-1);
   min-width: 0;
 }
 .syshealth-label {
-  font-size: 0.7rem;
+  font-size: var(--font-xs);
   font-weight: 600;
   letter-spacing: var(--tracking-eyebrow);
   text-transform: uppercase;
   color: var(--text-mute);
 }
-.syshealth-value { font-size: 0.88rem; color: var(--text); }
-.syshealth-sub { font-size: 0.74rem; color: var(--text-dim); }
+.syshealth-value { font-size: var(--font-sm); color: var(--text); }
+.syshealth-sub { font-size: var(--font-xs); color: var(--text-dim); }
 
 /* --- Navigation loading coordination ---
    ONE shared "updating…" strip for the whole period-scoped page (driven by the
@@ -226,7 +226,7 @@
   height: 2px;
   margin: 0 0 0.5rem;
   opacity: 0;
-  transition: opacity 0.18s ease;
+  transition: opacity var(--dur-med) ease;
 }
 .insights-updating.is-on { opacity: 1; }
 .insights-updating-bar {
@@ -247,7 +247,7 @@
   animation: insights-updating-slide 1.1s ease-in-out infinite;
 }
 .insights-updating-label {
-  font-size: 0.72rem;
+  font-size: var(--font-xs);
   color: var(--text-mute);
   white-space: nowrap;
 }
@@ -261,7 +261,7 @@
 .insights-card.is-updating,
 .syshealth.is-updating {
   opacity: 0.5;
-  transition: opacity 0.15s ease;
+  transition: opacity var(--dur-fast) ease;
   pointer-events: none;
 }
 @media (prefers-reduced-motion: reduce) {

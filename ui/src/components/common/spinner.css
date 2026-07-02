@@ -11,7 +11,7 @@
   border-radius: 50%;
   border: 2px solid var(--border);
   border-top-color: var(--accent);
-  animation: spin 700ms linear infinite;
+  animation: spin var(--dur-slow) linear infinite;
 }
 .spinner--sm .spinner-ring { width: 10px; height: 10px; border-width: 1.5px; }
 .spinner-label { letter-spacing: 0.02em; }

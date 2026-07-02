@@ -93,8 +93,8 @@
   font-size: var(--font-2xs);
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: var(--space-1);
   font-variant-numeric: tabular-nums;
-  margin-top: 2px;
+  margin-top: var(--space-0);
 }
 .batt-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex: none; }

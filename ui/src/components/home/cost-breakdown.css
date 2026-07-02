@@ -1,7 +1,7 @@
 .cbd {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-2);
 }
 .cbd-skel {
   height: 178px;
@@ -23,7 +23,7 @@
 .cbd-legend-item {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-1);
   text-transform: uppercase;
   font-weight: 600;
 }
