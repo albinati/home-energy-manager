@@ -6,7 +6,10 @@ import { Spinner } from "../common/Spinner";
 import { NowDot } from "../common/NowDot";
 import { gbp } from "../../lib/format";
 import type { PeriodInsightsResponse, PvTodayResponse, GridTodayResponse, AgileTodayResponse, ExportOpportunityResponse } from "../../lib/types";
-import { isCurrentPeriod, periodDateRange, utcTodayISO, type PeriodState } from "../../lib/period";
+import { isCurrentPeriod, periodDateRange, utcTodayISO, stepPeriod, type PeriodState } from "../../lib/period";
+import { fetchDayBundle } from "../../lib/dayCache";
+import { useStepSlide, useSwipe } from "../../lib/navMotion";
+import { useRef } from "preact/hooks";
 import "./timeline-widget.css";
 
 interface Props {
@@ -44,10 +47,17 @@ export function GenerationWidget({ period, periodData, periodLoading, agile, opp
   // showing its committed plan rather than yesterday's data (see period.ts).
   const dayArg = isCurrentPeriod(period) && period.anchor === utcTodayISO() ? undefined : period.anchor;
   const day = useFetch(
-    () => (isDay
-      ? Promise.all([getPvToday(dayArg), getGridToday(dayArg)])
-          .then(([p, g]) => ({ p, g }) as { p: PvTodayResponse; g: GridTodayResponse })
-      : Promise.resolve(null)),
+    () => {
+      if (!isDay) return Promise.resolve(null);
+      // Past day → the shared day bundle (immutable/TTL-cached + prefetched
+      // by the Consumption widget), so stepping is instant here too. Today →
+      // the live no-date endpoints as before.
+      if (dayArg) {
+        return fetchDayBundle(dayArg).then((b) => ({ p: b.pv, g: b.grid }) as { p: PvTodayResponse; g: GridTodayResponse });
+      }
+      return Promise.all([getPvToday(undefined), getGridToday(undefined)])
+        .then(([p, g]) => ({ p, g }) as { p: PvTodayResponse; g: GridTodayResponse });
+    },
     [isDay, dayArg],
   );
   // Committed daily PV forecast for the aggregated views (#624) — week/month
@@ -62,6 +72,10 @@ export function GenerationWidget({ period, periodData, periodLoading, agile, opp
     wantFc ? { cacheKey: `fcdaily:${fcStart}:${fcEnd}`, immutable: !isCurrentPeriod(period) } : {},
   );
   const t = chartTheme();
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const slideCls = useStepSlide(period.anchor);
+  useSwipe(rootRef, () => stepPeriod(1), () => stepPeriod(-1));
+  const rootCls = `tlw${slideCls ? ` ${slideCls}` : ""}`;
 
   if (isDay) {
     const pv = day.data?.p;
@@ -120,7 +134,7 @@ export function GenerationWidget({ period, periodData, periodLoading, agile, opp
     const genTotal = slots.reduce((sum, s) => sum + ((s.pv_planned_kwh ?? s.pv_forecast_kwh) ?? 0), 0);
     const exportedTotal = grid?.totals?.export_actual_kwh ?? 0;
     return (
-      <div class="tlw">
+      <div class={rootCls} ref={rootRef}>
         <div class="tlw-summary">
           <span class="tlw-summary-value">{genTotal.toFixed(1)}<span class="tlw-summary-unit"> kWh solar</span></span>
           <span class="tlw-summary-value tlw-pos">{exportedTotal.toFixed(1)}<span class="tlw-summary-unit"> kWh export</span></span>
@@ -168,7 +182,7 @@ export function GenerationWidget({ period, periodData, periodLoading, agile, opp
   const solarTot = pts.reduce((s, p) => s + (p.solar_kwh ?? 0), 0);
   const expTot = pts.reduce((s, p) => s + (p.export_kwh ?? 0), 0);
   return (
-    <div class="tlw">
+    <div class={rootCls} ref={rootRef}>
       <div class="tlw-summary">
         <span class="tlw-summary-value">{solarTot.toFixed(0)}<span class="tlw-summary-unit"> kWh solar</span></span>
         <span class="tlw-summary-value tlw-pos">{expTot.toFixed(0)}<span class="tlw-summary-unit"> kWh export</span></span>

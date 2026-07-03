@@ -61,6 +61,7 @@ export function MetricTimeline({
 }: MetricTimelineProps) {
   const ref = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<EChartsType | null>(null);
+  const sigRef = useRef<string>("");
   const theme = useResolvedTheme();
 
   useEffect(() => {
@@ -166,6 +167,10 @@ export function MetricTimeline({
       });
     }
 
+    // Same line/bar structure as the previous render → MERGE so ECharts
+    // tweens the series to the new day's data (sliding-day morph); any
+    // structural change (series added/removed, bar↔line) → full rebuild.
+    const sig = `${barMode}|${hasPrice}|${hasBands}|` + lines.map((l) => `${l.name}:${l.line ? "l" : ""}${l.dashed ? "d" : ""}`).join(",");
     chartRef.current.setOption({
       ...base,
       grid: { left: 16, right: hasPrice ? 44 : 16, top: 16, bottom: 24, containLabel: true },
@@ -217,7 +222,8 @@ export function MetricTimeline({
           data: [[nowIdx, 0]],
         }] : []),
       ],
-    }, { notMerge: true });
+    }, { notMerge: sig !== sigRef.current });
+    sigRef.current = sig;
   }, [labels, lines, prices, nowIdx, cheapAt, peakAt, barMode, theme, unit]);
 
   // Text alternative for screen readers — the canvas itself is opaque to AT,

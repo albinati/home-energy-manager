@@ -177,3 +177,12 @@ code, pre {
     transform: translate(-50%, -50%);
   }
 }
+
+/* Sliding day navigation — short directional entrance when the period
+ * stepper moves (lib/navMotion.ts). Content arrives from the side being
+ * stepped toward: back (older) slides in from the left, forward from the
+ * right. Collapsed by the .hem-reduce-motion rules above like all motion. */
+.step-slide-left { animation: step-slide-l var(--dur-med) var(--ease-entrance); }
+.step-slide-right { animation: step-slide-r var(--dur-med) var(--ease-entrance); }
+@keyframes step-slide-l { from { transform: translateX(-12px); opacity: 0.6; } }
+@keyframes step-slide-r { from { transform: translateX(12px); opacity: 0.6; } }

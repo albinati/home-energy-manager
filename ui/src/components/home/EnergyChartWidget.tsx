@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import { getEnergyPeriod, getDaikinConsumption, getGridToday, getExecutionToday, getPvToday, getForecastDaily } from "../../lib/endpoints";
+import { getEnergyPeriod, getDaikinConsumption, getGridToday, getForecastDaily } from "../../lib/endpoints";
 import { usePeriod, setGranularity, selectedPeriod, isCurrentPeriod, periodDateRange, utcTodayISO } from "../../lib/period";
 import { getImmutableCache, setImmutableCache } from "../../lib/poll";
+import { fetchDayBundle, getCachedDay, prefetchNeighbourDays } from "../../lib/dayCache";
+import { useStepSlide, useSwipe } from "../../lib/navMotion";
+import { stepPeriod } from "../../lib/period";
 import { makeChart, baseOption, chartTheme, barGradient, areaGradient, withAlpha, type EChartsType } from "../../lib/charts";
 import { Icon } from "../common/Icon";
 import { NowDot } from "../common/NowDot";
@@ -67,15 +70,8 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
   // day's committed plan, no actuals yet).
   const todayLocalISO = localTodayISO();
   const isToday = anchor === todayLocalISO && anchor === utcTodayISO();
-  // Yesterday's per-slot consumption_kwh is still "settling": the nightly
-  // consumption backfill (~04:00 local) rewrites the noisy heartbeat estimate
-  // with the metered reading. So only days STRICTLY older than yesterday are
-  // safe to cache immutably; yesterday is refetched on each visit.
-  const yesterdayLocalISO = (() => {
-    const d = new Date();
-    d.setDate(d.getDate() - 1);
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  })();
+  // NB the settled-vs-recent caching rule (yesterday keeps "settling" until
+  // the ~04:00 consumption backfill) now lives in lib/dayCache.ts.
   const [period, setPeriod] = useState<PeriodInsightsResponse | null>(null);
   const [fcDaily, setFcDaily] = useState<ForecastDailyResponse | null>(null);
   const [daikin, setDaikin] = useState<DaikinConsumptionResponse | null>(null);
@@ -89,6 +85,12 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
   const [error, setError] = useState<string | null>(null);
   const elRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<EChartsType | null>(null);
+  const seriesSigRef = useRef<string>("");
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const slideCls = useStepSlide(anchor);
+  // Touch: swipe left = forward one period, right = back (clamped to today
+  // inside stepPeriod). Passive listeners — tooltips/scroll unaffected.
+  useSwipe(rootRef, () => stepPeriod(1), () => stepPeriod(-1));
 
   useEffect(() => {
     let alive = true;
@@ -104,8 +106,10 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
     // intraday chart. Per-slot history IS captured (execution_log etc.), so the
     // old single-bar fallback (#424) is no longer needed.
     if (granularity === "day" && !isToday) {
-      const settled = anchor < yesterdayLocalISO; // consumption backfill done
-      const cachedDay = settled ? getImmutableCache<DayPastData>(cacheKey) : undefined;
+      // dayCache serves settled days from the immutable cache, recent days
+      // from a short-TTL map (warmed by the neighbour prefetch below), and
+      // shares in-flight requests — an already-warm step renders instantly.
+      const cachedDay = getCachedDay(anchor);
       if (cachedDay) {
         setDayData(cachedDay);
         setLoading(false);
@@ -116,17 +120,10 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
       setPeriod(null);
       setDaikin(null);
       setGrid(null);
-      Promise.all([
-        getExecutionToday(anchor).catch(() => null),
-        getPvToday(anchor).catch(() => null),
-        getGridToday(anchor).catch(() => null),
-        getDaikinConsumption("day", { date: anchor }).catch(() => null),
-      ]).then(([e, p, g, dk]) => {
+      fetchDayBundle(anchor).then((v) => {
         if (!alive) return;
-        const v: DayPastData = { exec: e, pv: p, grid: g, daikin: dk };
         setDayData(v);
         setLoading(false);
-        if (settled) setImmutableCache(cacheKey, v); // only fully-settled past days
       });
       return () => { alive = false; };
     }
@@ -200,6 +197,13 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
     return () => { alive = false; };
   }, [granularity, anchor]);
 
+  // Warm the adjacent days while idle so the next arrow press (or swipe)
+  // renders from cache with no fetch pause.
+  useEffect(() => {
+    if (granularity !== "day") return;
+    return prefetchNeighbourDays(anchor);
+  }, [granularity, anchor]);
+
   useEffect(() => {
     if (!elRef.current) return;
     if (!chartRef.current) chartRef.current = makeChart(elRef.current);
@@ -212,7 +216,14 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
           pastDayView ? dayData?.grid ?? null : grid,
         )
       : optionForPeriod(period, daikin, granularity, fcDaily);
-    chart.setOption(option, true);
+    // Same series structure (day→day step, or a data refresh) → MERGE, so
+    // ECharts tweens lines/bars to the new day's values (the "shifting"
+    // feel; animationDurationUpdate in baseOption drives it). Structure
+    // changed (day↔period, a conditional series toggled) → full rebuild.
+    const sig = `${granularity}|` + ((option.series as { name?: string; type?: string }[] | undefined) ?? [])
+      .map((sr) => `${sr.name}:${sr.type}`).join(",");
+    chart.setOption(option, sig !== seriesSigRef.current);
+    seriesSigRef.current = sig;
     // Resize handling now lives centrally in makeChart (rAF-debounced
     // ResizeObserver) — the per-effect observer this widget carried would
     // double every resize() call.
@@ -268,7 +279,7 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
     : null;
 
   return (
-    <div class="echart">
+    <div class={`echart${slideCls ? ` ${slideCls}` : ""}`} ref={rootRef}>
       <div class="echart-toolbar">
         <span class="echart-id-icon"><Icon name={granularity === "day" ? "schedule" : "chart-bars"} size={18} /></span>
         {/* Granularity + stepping live in the shared PeriodNavigator at the top

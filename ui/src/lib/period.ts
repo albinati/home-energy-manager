@@ -81,8 +81,14 @@ export function setGranularity(gran: Granularity): void {
 /** Jump straight to the current period, keeping the chosen granularity — the
  * "Today" affordance. Snaps the anchor to today so isCurrentPeriod() is true. */
 export function goToNow(): void {
+  lastStepDir.value = 0;
   selectedPeriod.value = { gran: selectedPeriod.value.gran, anchor: todayISO() };
 }
+
+/** Direction of the most recent navigator step — drives the charts' slide
+ * entrance (see lib/navMotion.ts). 0 = jump (Today button, granularity swap,
+ * midnight rollover), which renders without a directional slide. */
+export const lastStepDir = signal<-1 | 0 | 1>(0);
 
 /** Step the anchor backward (-1) or forward (+1) by one unit of the granularity. */
 export function stepPeriod(dir: -1 | 1): void {
@@ -95,6 +101,7 @@ export function stepPeriod(dir: -1 | 1): void {
   // Never step into the future.
   const next = isoOf(d);
   if (dir === 1 && next > todayISO()) return;
+  lastStepDir.value = dir;
   selectedPeriod.value = { gran, anchor: next };
 }
 
