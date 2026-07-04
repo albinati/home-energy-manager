@@ -146,10 +146,12 @@ def lp_plan_to_slots(plan: LpPlan) -> list[HalfHourSlot]:
                 # firmware does NOT honour that floor as a discharge freeze:
                 # observed 06-28 and again 07-04, the battery discharged
                 # 1.6-2.8 kW into the (HEM-scheduled) DHW boost instead of
-                # the PAID grid. `negative` → ForceCharge (fdPwr ≈ LP import,
-                # fdSoc = LP target): never discharges, house is grid-fed at
-                # the paid rate, PV still trickle-charges toward fdSoc.
-                kind = "negative"
+                # the PAID grid. `negative` (→ ForceCharge fill) only when the
+                # LP planned real grid import; a PV-only charge is a HOLD from
+                # the grid's perspective → `negative_hold` (→ Backup since
+                # 2026-07-04): never discharges, house grid-fed at the paid
+                # rate, PV/grid top-up toward full is free/paid money.
+                kind = "negative" if grid_import >= EPS else "negative_hold"
             elif grid_import < EPS:
                 kind = "solar_charge"  # PV-only charging — use SelfUse, not ForceCharge
             elif price <= 0:
@@ -159,8 +161,8 @@ def lp_plan_to_slots(plan: LpPlan) -> list[HalfHourSlot]:
         elif price <= 0:
             # Negative price + LP chose chg ≈ 0 (battery saturated or PV alone
             # suffices). LP hard-forbids dis during negatives — encode that on
-            # hardware via ForceCharge at ~zero power, which never discharges
-            # (PR #607; see _slot_fox_tuple).
+            # hardware via Backup (LP_NEGATIVE_HOLD_FOX_MODE, 2026-07-04),
+            # which never discharges to loads; see _slot_fox_tuple.
             kind = "negative_hold"
         elif dis > EPS and exp > pv + EPS:
             # PR D — peak_export only when battery actively dumps to grid
@@ -1615,7 +1617,25 @@ def build_fox_groups_from_lp(
     """
     slots, _decisions = filter_robust_peak_export(plan, scenarios, export_price_pence=export_price_pence)
     if slots:
-        cutoff = slots[0].start_utc + timedelta(hours=24)
+        # < 24 h — the daily-cyclic collision fix (2026-07-04, the TRUE root
+        # cause of the 06-28 + 07-04 negative-window leaks). Fox V3 groups
+        # carry only hour:minute and repeat every day, so a full-24 h
+        # horizon's LAST slot is tomorrow's slot at the SAME hour-of-day as
+        # the current in-flight slot. When tomorrow's slot is solar_charge
+        # (SelfUse) and today's in-flight slot is a negative-window fill/hold,
+        # the inverter applies tomorrow's SelfUse group TODAY, mid-window —
+        # and _prepend_inflight_group sees "a plan group covers the current
+        # minute" and declines to bridge. Trimming the horizon leaves the
+        # current hour-of-day uncovered so the in-flight bridge re-asserts
+        # the previous schedule's FC/FD/Backup group. 23.5 h drops exactly
+        # the one colliding slot; the default 23.0 h adds a spare slot of
+        # margin (also covers the DST fall-back day, where the hour-of-day
+        # mapping shifts by 1 h). Dropped D+1 slots cost nothing — re-solves
+        # re-dispatch them dozens of times before they matter, and choice
+        # variance shrinks as the window approaches.
+        horizon_h = float(getattr(config, "FOX_DISPATCH_HORIZON_HOURS", 23.0))
+        horizon_h = min(23.5, max(1.0, horizon_h))
+        cutoff = slots[0].start_utc + timedelta(hours=horizon_h)
         slots = [s for s in slots if s.start_utc < cutoff]
     # peak_export_discharge=False: kind="peak_export" already maps to
     # ForceDischarge inside _slot_fox_tuple unconditionally; the flag here only

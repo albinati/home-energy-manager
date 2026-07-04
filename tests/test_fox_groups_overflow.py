@@ -347,7 +347,7 @@ def test_compression_fallback_degenerate_all_force_discharge_does_not_crash() ->
     # alternating peak_export and peak with peak_export_discharge=True. Both
     # produce ForceDischarge keys. To force them to be NON-mergeable (different
     # keys) we'd need to vary fd_soc/fd_pwr — but they're constants. Easier:
-    # interleave with negative_hold which (2026-06-28) produces "ForceCharge"
+    # interleave with negative_hold which (since 2026-07-04) produces "Backup"
     # keys — a non-ForceDischarge mode that won't merge with the FD neighbours.
     # Goal: every ADJACENT pair has at least one ForceDischarge — so that the
     # back-bias scan fails to find any non-FD pair.
@@ -360,3 +360,58 @@ def test_compression_fallback_degenerate_all_force_discharge_does_not_crash() ->
     # Should not raise; fallback exits via tail squash. Final count <= 8.
     groups = _merge_fox_groups(slots, max_groups=8)
     assert len(groups) <= 8
+
+# --- Camada 3 hardenings for Backup holds (2026-07-04) ----------------------
+
+
+def test_brutal_squash_pair_containing_backup_stays_backup_pinned() -> None:
+    """Over-cap brutal squash of a (Backup hold, SelfUse) pair must yield a
+    BACKUP group (discharge-proof — SelfUse would re-open the 06-28/07-04
+    battery-leak class) with maxSoc PINNED to the floor: the squashed span can
+    extend beyond the negative window, where an unpinned Backup would grid-
+    top-up at positive prices."""
+    base = datetime(2026, 6, 1, 6, 0, tzinfo=UTC)
+    # 9 distinct windows > 8-group cap; the ONLY FD-free adjacent pair is
+    # (negative_hold, solar_charge) so the back-bias squash must land on it.
+    kinds = ["peak_export", "negative_hold", "solar_charge",
+             "peak_export", "cheap", "peak_export", "cheap", "peak_export", "cheap"]
+    slots = [
+        _slot(base + timedelta(minutes=30 * i), kind=k,
+              lp_grid_import_w=2000 if k == "cheap" else None,
+              target_soc_pct=80 if k == "cheap" else None)
+        for i, k in enumerate(kinds)
+    ]
+    groups = _merge_fox_groups(slots, max_groups=8)
+    assert len(groups) <= 8
+    backups = [g for g in groups if g.work_mode == "Backup"]
+    assert len(backups) == 1, f"expected the squashed Backup group, got {backups}"
+    floor = int(app_config.MIN_SOC_RESERVE_PERCENT)
+    assert backups[0].max_soc == floor, "squashed Backup must pin maxSoc to the floor"
+    assert not any(g.work_mode == "SelfUse" for g in groups), (
+        "squash must never degrade a Backup hold to SelfUse"
+    )
+
+
+def test_camada3_same_key_merge_requires_time_adjacency(monkeypatch) -> None:
+    """Backup hold tuples are byte-identical, so two holds separated by a
+    dropped trivial-SelfUse window become LIST-adjacent. Without the time-
+    adjacency gate the same-key merge fuses them into one Backup group
+    spanning the positive-price gap (unconditional paid top-up outside the
+    negative window)."""
+    monkeypatch.setattr(app_config, "FOX_SKIP_TRIVIAL_SELFUSE_GROUPS", True)
+    base = datetime(2026, 6, 1, 6, 0, tzinfo=UTC)
+    kinds = ["negative_hold", "standard", "negative_hold",  # std dropped → B|B list-adjacent, 30-min time gap
+             "peak_export", "cheap", "peak_export", "cheap", "peak_export", "cheap",
+             "solar_charge"]  # tail (cheap, solar_charge) = the FD-free squash victim
+    slots = [
+        _slot(base + timedelta(minutes=30 * i), kind=k,
+              lp_grid_import_w=2000 if k == "cheap" else None,
+              target_soc_pct=80 if k == "cheap" else None)
+        for i, k in enumerate(kinds)
+    ]
+    groups = _merge_fox_groups(slots, max_groups=8)
+    assert len(groups) <= 8
+    backups = [g for g in groups if g.work_mode == "Backup"]
+    assert len(backups) == 2, (
+        f"the two holds must NOT merge across the time gap: {[(g.start_hour, g.start_minute, g.end_hour, g.end_minute) for g in backups]}"
+    )

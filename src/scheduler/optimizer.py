@@ -365,42 +365,32 @@ def _slot_fox_tuple(
             None,
         )
     if s.kind == "negative_hold":
-        # 2026-06-28: dispatch as ForceCharge-to-the-LP-target, NOT Backup.
+        # 2026-07-04 (owner decision): negative-window holds dispatch as
+        # **Backup** — Fox's native "reserve the battery" mode. Empirically
+        # validated on OUR H1 (35 d / 15,232 samples, see
+        # docs/FOXESS/WORK_MODES_AND_SOC.md truth table): Backup never
+        # discharged to loads in 413 samples, and with maxSoc unset it tops
+        # the battery up from the grid — which during a negative window is
+        # PAID import, exactly the "maximize grid usage" policy. The house
+        # load is grid-fed throughout.
         #
-        # CORRECTED DIAGNOSIS (2026-07-04, refined same day): the original
-        # 06-28 audit blamed Fox "Backup" mode for discharging the battery
-        # into a heavy load (~3.5 kW DHW Powerful boost) during the negative
-        # window. fox_schedule_state archaeology showed NO Backup group was
-        # ever active during the observed discharges — the uploads covering
-        # 11:00-12:59 UTC that day said SelfUse(minSocOnGrid=100, maxSoc=100),
-        # i.e. the `solar_charge` mapping: the labeller (lp_dispatch.py)
-        # classified negative-price slots whose planned charge was PV-sourced
-        # (grid_import ~= 0) as solar_charge BEFORE checking price, and the
-        # H1 firmware does not honour minSocOnGrid=100 as a discharge freeze
-        # (recurred live 07-04; fixed via LP_NEGATIVE_BEATS_SOLAR_CHARGE).
-        # Backup's documented semantics (reserve battery for outage, charge
-        # from grid, no discharge to loads — confirmed live 07-04: manual
-        # Backup imported from grid with min/max SoC pinned 100) were never
-        # actually contradicted. The ForceCharge dispatch below remains the
-        # right fix regardless: it can never discharge, it grid-feeds the load
-        # at the paid negative rate, it doesn't depend on a SoC-floor the
-        # firmware may ignore, and it can't be folded into a SelfUse group by
-        # the schedule merge.
-        #
-        # fdSoc is the LP's planned per-slot target (~reserve during the hold,
-        # since chg ~= 0 here). NOTE: _merge_adjacent_force_charge_rows collapses
-        # this with the adjacent `negative` charge slots and takes fdSoc = MAX of
-        # the run, so when a charge IS planned later in the window the merged
-        # ForceCharge group fills the battery to 100 across the WHOLE window
-        # (Fox front-loads ForceCharge up to fdSoc). i.e. the battery fills early
-        # from the paid grid rather than strictly deferring to the deepest slots —
-        # the small deep-slot premium (~£1-3/yr) is forgone in exchange for never
-        # sitting at reserve while a heavy load self-discharges the battery, and
-        # without touching the central merge logic. An isolated negative_hold with
-        # no adjacent charge keeps fdSoc = target → just holds + grid-feeds load.
-        # Surplus PV may still trickle-charge for free under ForceCharge — that is
-        # fine and avoids relying on the undocumented Backup maxSoc-clips-PV path.
-        if getattr(config, "LP_NEGATIVE_HOLD_NO_DISCHARGE", True):
+        # History of this branch (three diagnoses deep — full story in the
+        # doc + memory): the 2026-06-28 "Backup discharges" finding was a
+        # misdiagnosis (the leaking windows were `solar_charge` SelfUse
+        # groups with a minSocOnGrid=100 floor the firmware ignores; fixed
+        # at the labeller via LP_NEGATIVE_BEATS_SOLAR_CHARGE). The interim
+        # #607/#630 ForceCharge-as-hold (fdPwr~=200 W) also never discharges
+        # (354 samples) and remains available as the fallback mode below —
+        # but Backup is the semantically-honest primitive, and it keeps
+        # holds structurally outside the ForceCharge merge so fills stay
+        # anchored to the deepest-priced slots.
+        mode = str(getattr(config, "LP_NEGATIVE_HOLD_FOX_MODE", "backup")).strip().lower()
+        if mode not in ("backup", "forcecharge"):
+            logger.warning(
+                "LP_NEGATIVE_HOLD_FOX_MODE=%r not recognised — using 'backup'", mode
+            )
+            mode = "backup"
+        if mode == "forcecharge":
             fds = s.target_soc_pct if s.target_soc_pct is not None else min_r
             pwr = (
                 s.lp_grid_import_w
@@ -408,9 +398,9 @@ def _slot_fox_tuple(
                 else config.FOX_FORCE_CHARGE_MAX_PWR
             )
             return ("ForceCharge", fds, pwr, min_r, None)
-        # Legacy kill-switch path: Backup with the 2026-06-07 maxSoc pin (so
-        # solar can't trickle-charge the battery during the hold). Unverified on
-        # the H1 that maxSoc actually clips PV in Backup.
+        # Backup (default). maxSoc pin (2026-06-07 experiment) kept honored:
+        # pinning maxSoc to the reserve blocks the paid grid top-up — only
+        # useful if the top-up ever misbehaves. Default unpinned.
         hold_max = (
             int(min_r)
             if getattr(config, "LP_NEGATIVE_HOLD_PIN_MAXSOC", False)
@@ -595,9 +585,13 @@ def _merge_fox_groups(
         if len(merged) + _count_midnight_crossings(merged, tz) <= max_groups:
             break
         # Same-key adjacent merge, scanning back-to-front so late-day pairs go first.
+        # Adjacency in TIME is required: Backup hold tuples are byte-identical
+        # (("Backup", None, None, min_r, None)), so two holds hours apart would
+        # otherwise merge into one group spanning the positive-price gap —
+        # unconditional paid top-up outside the negative window.
         merged_pair = False
         for j in range(len(merged) - 2, -1, -1):
-            if merged[j][2] == merged[j + 1][2]:
+            if merged[j][2] == merged[j + 1][2] and merged[j][1] == merged[j + 1][0]:
                 a, _, k = merged[j]
                 _, d, _ = merged[j + 1]
                 merged[j] = (a, d, k)
@@ -631,6 +625,21 @@ def _merge_fox_groups(
                 max(ka[3], kb[3]),
                 _max_optional(ka_max, kb_max),
             )
+        elif "Backup" in (ka[0], kb[0]):
+            # A pair containing a negative-window hold must stay
+            # discharge-proof: squashing Backup+X to SelfUse would re-open
+            # the 06-28/07-04 battery-leak incident class. Backup wins —
+            # but as the PINNED shape (minSoc = maxSoc = reserve, the benign
+            # 2026-06-07 form — 316 prod samples): the squashed span can
+            # extend beyond the negative window, and an unpinned Backup
+            # there would grid-top-up at POSITIVE prices (18-30p). Taking
+            # max() of the pair's floors would inherit a SelfUse hold's
+            # min=100 and with it maxSoc=100 = unpinned again; the partner's
+            # no-discharge intent is already guaranteed by Backup itself.
+            # Pinning forgoes the in-window paid top-up only in this rare
+            # over-cap fallback; the normal (unsquashed) hold stays unpinned.
+            reserve = int(config.MIN_SOC_RESERVE_PERCENT)
+            nk = ("Backup", None, None, reserve, reserve)
         else:
             nk = ("SelfUse", None, None, int(config.MIN_SOC_RESERVE_PERCENT), None)
         merged[victim] = (a, d, nk)
