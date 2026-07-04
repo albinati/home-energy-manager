@@ -24,6 +24,37 @@ Keep this living — update when a new shape shows up.
 | `Force charge` | `ForceCharge` | **Charge battery from the grid** at the specified `fdPwr` until `fdSoc` is reached. Respects `minSocOnGrid` as a lower bound but `fdSoc` is the target ceiling for this window. | Negative-price slots + cheap-price slots ahead of a forecasted peak. |
 | `Force discharge` | `ForceDischarge` | **Discharge battery to grid** (peak-export) until `fdSoc` is reached or battery hits `minSocOnGrid`. | `peak_export` / `pre_negative_export` slot kinds (LP plans discharge AND export exceeds PV-alone), filtered for robustness by the scenario LP. (`ENERGY_STRATEGY_MODE` + `EXPORT_DISCHARGE_MIN_SOC_PERCENT` were removed — mode collapse #392-394.) |
 
+### Empirical mode truth table (OUR H1, 35 days of prod telemetry, 2026-07-04)
+
+15,232 3-min samples from `pv_realtime_history` joined against the V3 group
+active at each instant (`fox_schedule_state`). Regenerate with
+`fox_mode_truth_table.py` (scp to `/srv/hem/data/`, `docker exec hem python`).
+This table — not vendor prose — is the authority for dispatch decisions:
+
+| Regime (as uploaded) | n | % samples discharging >0.1 kW | % charging | Verdict |
+|---|---|---|---|---|
+| `Backup` (minSoc=10, maxSoc=10 or None) | 413 | **0.0 %** | 28-36 % (PV trickle; grid ~1.2 kW avg when maxSoc unset) | TRUE hold: never discharges to loads; tops up toward full when maxSoc allows. |
+| `ForceCharge`, SoC ≥ fdSoc | 354 | **0.0 %** | ~5 % | TRUE hold after target — equivalent to Backup, plus target/power control. |
+| `ForceCharge`, SoC < fdSoc | 749 | 0.6-1.2 % (slot-boundary noise) | 96-97 % @ ~2.5-3.9 kW | Charges from grid at fdPwr as documented. |
+| `ForceDischarge` | 177 | 88 % @ 3.5 kW | — | As documented. |
+| `SelfUse(minSocOnGrid=100, maxSoc=100)` (the `solar_charge` shape) | 4,011 | **31.5 % @ 0.69 kW avg** | 53 % | **The floor is NOT honoured as a discharge freeze.** Never use a SelfUse floor as a hold primitive (2026-06-28 + 07-04 incidents). |
+| No group covering the instant (global work mode = Self Use) | 9,497 | 66 % | 8 % | Plain self-use outside scheduled windows — desired at positive prices. |
+
+Consequences for the dispatcher:
+- The two proven zero-discharge hold primitives are **Backup** and
+  **ForceCharge with fdSoc ≤ current SoC**. The dispatcher uses ForceCharge
+  (fdSoc = LP per-slot target, fdPwr = LP import floored at 200 W) because it
+  adds target + power control and merges cleanly with adjacent fill groups
+  (#607/#616/#630); Backup is redundant with less control (it tops toward
+  full whenever maxSoc allows, regardless of plan — a bonus in negative
+  windows, a cost anywhere else).
+- Negative windows must never contain SelfUse groups — enforced at the
+  labeller since #630 (`LP_NEGATIVE_BEATS_SOLAR_CHARGE`).
+- Known residual transition artifact: when a re-plan shifts the horizon past
+  the in-flight slot, past windows are reconstructed from the PREVIOUS plan's
+  labels (only in-flight ForceCharge is re-asserted). Self-heals one slot
+  after any labelling change.
+
 ### Group `extraParam` fields (V3)
 
 `SchedulerGroup.to_api_dict()` (`models.py:53-73`) packs these into `extraParam`:
