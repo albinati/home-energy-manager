@@ -146,10 +146,12 @@ def lp_plan_to_slots(plan: LpPlan) -> list[HalfHourSlot]:
                 # firmware does NOT honour that floor as a discharge freeze:
                 # observed 06-28 and again 07-04, the battery discharged
                 # 1.6-2.8 kW into the (HEM-scheduled) DHW boost instead of
-                # the PAID grid. `negative` → ForceCharge (fdPwr ≈ LP import,
-                # fdSoc = LP target): never discharges, house is grid-fed at
-                # the paid rate, PV still trickle-charges toward fdSoc.
-                kind = "negative"
+                # the PAID grid. `negative` (→ ForceCharge fill) only when the
+                # LP planned real grid import; a PV-only charge is a HOLD from
+                # the grid's perspective → `negative_hold` (→ Backup since
+                # 2026-07-04): never discharges, house grid-fed at the paid
+                # rate, PV/grid top-up toward full is free/paid money.
+                kind = "negative" if grid_import >= EPS else "negative_hold"
             elif grid_import < EPS:
                 kind = "solar_charge"  # PV-only charging — use SelfUse, not ForceCharge
             elif price <= 0:
@@ -159,8 +161,8 @@ def lp_plan_to_slots(plan: LpPlan) -> list[HalfHourSlot]:
         elif price <= 0:
             # Negative price + LP chose chg ≈ 0 (battery saturated or PV alone
             # suffices). LP hard-forbids dis during negatives — encode that on
-            # hardware via ForceCharge at ~zero power, which never discharges
-            # (PR #607; see _slot_fox_tuple).
+            # hardware via Backup (LP_NEGATIVE_HOLD_FOX_MODE, 2026-07-04),
+            # which never discharges to loads; see _slot_fox_tuple.
             kind = "negative_hold"
         elif dis > EPS and exp > pv + EPS:
             # PR D — peak_export only when battery actively dumps to grid

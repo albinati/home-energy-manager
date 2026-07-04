@@ -683,15 +683,16 @@ class Config:
     # Set to the install's real main-fuse rating in .env when known.
     LP_GRID_IMPORT_MAX_KW: float = float(os.getenv("LP_GRID_IMPORT_MAX_KW", "10.0"))
     # 2026-06-07: pin maxSoc to the reserve floor on `negative_hold` (Backup)
-    # slots so SOLAR can't trickle-charge the battery during the hold — preserving
-    # headroom for the PAID force-charge later in a negative window (surplus PV
-    # exports @ SEG instead of being banked for free, which forgoes the paid
-    # import). Live data 2026-06-07 showed Backup with maxSoc=None let PV creep
-    # the battery 10→21% mid-negative-window. The Fox wiki says Backup normally
-    # lets PV charge, and the maxSoc-pin is UNDOCUMENTED → verify on the H1 that
-    # it actually clips PV in Backup before trusting it. Kill-switch = false.
+    # slots so charging is blocked during the hold. DEFAULT FLIPPED to false on
+    # 2026-07-04 (owner decision): during a negative window every kWh the
+    # firmware tops up — from PV or from the PAID grid (Backup with maxSoc
+    # unset imported ~1.2 kW avg in prod samples) — is free/paid money, and
+    # "maximize grid usage inside the negative window" is the household
+    # policy. The old concern (PV creep eating headroom for the deep-slot
+    # paid fill) predates the hold/fill class-aware merge (#616) that keeps
+    # fills anchored to the deepest slots. Set true to restore the pin.
     LP_NEGATIVE_HOLD_PIN_MAXSOC: bool = (
-        os.getenv("LP_NEGATIVE_HOLD_PIN_MAXSOC", "true").strip().lower()
+        os.getenv("LP_NEGATIVE_HOLD_PIN_MAXSOC", "false").strip().lower()
         in ("1", "true", "yes", "on")
     )
     # 2026-06-28: on `negative_hold` slots (price <= 0, LP set chg ~= 0 here),
@@ -710,9 +711,19 @@ class Config:
     # still trickle-charge the battery for free (PV -> battery is always allowed)
     # — acceptable, and it removes the dependency on the undocumented "maxSoc
     # clips PV in Backup" behaviour.
-    LP_NEGATIVE_HOLD_NO_DISCHARGE: bool = (
-        os.getenv("LP_NEGATIVE_HOLD_NO_DISCHARGE", "true").strip().lower()
-        in ("1", "true", "yes", "on")
+    # 2026-07-04 (owner decision) — Fox mode for `negative_hold` slots:
+    #   "backup"      (default) Fox's native reserve mode. Empirically 0
+    #                 discharges in 413 prod samples; with maxSoc unset it
+    #                 also tops the battery up from the PAID grid during the
+    #                 window. Holds stay outside the ForceCharge merge, so
+    #                 fills remain anchored to the deepest-priced slots.
+    #   "forcecharge" the #607/#630 interim: ForceCharge at ~LP-import power
+    #                 (~200 W) with fdSoc = LP target. Also 0 discharges in
+    #                 354 samples. Kept as fallback.
+    # (Replaces the boolean LP_NEGATIVE_HOLD_NO_DISCHARGE, which chose
+    # between forcecharge and a maxSoc-pinned Backup.)
+    LP_NEGATIVE_HOLD_FOX_MODE: str = (
+        os.getenv("LP_NEGATIVE_HOLD_FOX_MODE", "backup").strip().lower()
     )
 
     # 2026-07-04 — in the slot labeller, `price <= 0` outranks the PV-only

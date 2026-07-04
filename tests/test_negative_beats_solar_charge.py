@@ -48,15 +48,23 @@ def _normal_preset(monkeypatch):
     monkeypatch.setattr(config, "LP_NEGATIVE_BEATS_SOLAR_CHARGE", True, raising=False)
 
 
-def test_negative_price_pv_charge_labelled_negative():
-    # price < 0, chg > 0, grid_import ~= 0 — the incident shape.
+def test_negative_price_pv_charge_labelled_negative_hold():
+    # price < 0, chg > 0, grid_import ~= 0 — the incident shape. No grid fill
+    # planned → it is a HOLD slot → Backup (owner decision 2026-07-04).
     slots = lp_plan_to_slots(_plan(price=-4.0, chg=0.8, imp=0.0))
-    assert [s.kind for s in slots] == ["negative", "negative"]
-    # And the dispatch is the discharge-proof mode with the anti-"0=unlimited"
-    # power floor, never SelfUse.
+    assert [s.kind for s in slots] == ["negative_hold", "negative_hold"]
+    wm, fds, pwr, msg, max_soc = _slot_fox_tuple(slots[0])
+    assert wm == "Backup"
+    assert msg == int(config.MIN_SOC_RESERVE_PERCENT)
+    assert max_soc is None  # unpinned → firmware may top up from the paid grid
+
+
+def test_negative_hold_forcecharge_fallback_mode(monkeypatch):
+    monkeypatch.setattr(config, "LP_NEGATIVE_HOLD_FOX_MODE", "forcecharge", raising=False)
+    slots = lp_plan_to_slots(_plan(price=-4.0, chg=0.8, imp=0.0))
+    assert [s.kind for s in slots] == ["negative_hold", "negative_hold"]
     wm, fds, pwr, _, _ = _slot_fox_tuple(slots[0])
     assert wm == "ForceCharge"
-    assert pwr == 200  # min_pwr_w floor (LP import ~= 0)
     assert fds == slots[0].target_soc_pct
 
 

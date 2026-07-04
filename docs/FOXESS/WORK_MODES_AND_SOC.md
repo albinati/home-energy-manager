@@ -20,7 +20,7 @@ Keep this living — update when a new shape shows up.
 |---|---|---|---|
 | `Self Use` | `SelfUse` | Default. Use PV first, charge battery from surplus, import from grid to cover load shortfall. Never force-exports. **Firmware caveat:** a group `minSocOnGrid=100` does NOT reliably freeze discharge — observed 2026-06-28 and 2026-07-04 (battery discharged into a heavy load with SoC 20-27 % under SelfUse(100,100)). Do not use a SelfUse floor as a hold primitive; use ForceCharge. | Standard slots + `solar_charge` (PV-only charging; since 2026-07-04 negative-price slots outrank solar_charge — `LP_NEGATIVE_BEATS_SOLAR_CHARGE`). |
 | `Feed-in Priority` | `Feedin` | Send PV **directly to grid** at full capacity; battery only covers load shortfall. | Not currently used by the LP dispatcher (would need Outgoing Agile + surplus). |
-| `Back Up` | `Backup` | Reserve the battery for outage/EPS: does **not** discharge to household loads, and charges from grid toward full (observed live 2026-07-04: manual Backup → grid import with min/max SoC pinned at 100 %). | Legacy only (`LP_NEGATIVE_HOLD_NO_DISCHARGE=false`). Negative holds use ForceCharge since PR #607. NB the 2026-06-28 "Backup discharges into load" finding was a **misdiagnosis** — fox_schedule_state archaeology (2026-07-04) showed the discharge windows were covered by SelfUse groups (zero-charge `negative` slots fell through to the SelfUse mapping); no Backup group was ever active during an observed discharge. |
+| `Back Up` | `Backup` | Reserve the battery for outage/EPS: does **not** discharge to household loads, and charges from grid toward full (observed live 2026-07-04: manual Backup → grid import with min/max SoC pinned at 100 %). | **Default for `negative_hold` since 2026-07-04** (`LP_NEGATIVE_HOLD_FOX_MODE=backup`; `forcecharge` = the #607/#630 interim, kept as fallback). NB the 2026-06-28 "Backup discharges into load" finding was a **misdiagnosis** — fox_schedule_state archaeology (2026-07-04) showed the discharge windows were covered by SelfUse groups (zero-charge `negative` slots fell through to the SelfUse mapping); no Backup group was ever active during an observed discharge. |
 | `Force charge` | `ForceCharge` | **Charge battery from the grid** at the specified `fdPwr` until `fdSoc` is reached. Respects `minSocOnGrid` as a lower bound but `fdSoc` is the target ceiling for this window. | Negative-price slots + cheap-price slots ahead of a forecasted peak. |
 | `Force discharge` | `ForceDischarge` | **Discharge battery to grid** (peak-export) until `fdSoc` is reached or battery hits `minSocOnGrid`. | `peak_export` / `pre_negative_export` slot kinds (LP plans discharge AND export exceeds PV-alone), filtered for robustness by the scenario LP. (`ENERGY_STRATEGY_MODE` + `EXPORT_DISCHARGE_MIN_SOC_PERCENT` were removed — mode collapse #392-394.) |
 
@@ -42,12 +42,17 @@ This table — not vendor prose — is the authority for dispatch decisions:
 
 Consequences for the dispatcher:
 - The two proven zero-discharge hold primitives are **Backup** and
-  **ForceCharge with fdSoc ≤ current SoC**. The dispatcher uses ForceCharge
-  (fdSoc = LP per-slot target, fdPwr = LP import floored at 200 W) because it
-  adds target + power control and merges cleanly with adjacent fill groups
-  (#607/#616/#630); Backup is redundant with less control (it tops toward
-  full whenever maxSoc allows, regardless of plan — a bonus in negative
-  windows, a cost anywhere else).
+  **ForceCharge with fdSoc ≤ current SoC**. Since 2026-07-04 (owner decision)
+  the dispatcher holds negative windows via **Backup** — the semantically
+  native reserve mode; with maxSoc unpinned the firmware also tops the
+  battery up from the PAID grid inside the window (~1.2 kW avg observed),
+  which is exactly the household policy (maximize grid usage during
+  negatives). Backup holds also sit structurally outside the ForceCharge
+  merge, so paid fills stay anchored to the deepest-priced slots.
+  `LP_NEGATIVE_HOLD_FOX_MODE=forcecharge` restores the #607/#630 interim
+  (FC at fdPwr ≈ LP import, fdSoc = target — equally discharge-proof).
+  Backup is only used INSIDE negative windows: anywhere else its
+  unconditional top-up would buy energy the plan didn't ask for.
 - Negative windows must never contain SelfUse groups — enforced at the
   labeller since #630 (`LP_NEGATIVE_BEATS_SOLAR_CHARGE`).
 - Known residual transition artifact: when a re-plan shifts the horizon past
