@@ -591,7 +591,13 @@ function optionForDay(
   let runTier: DayTier = null;
   const flush = (endIdx: number) => {
     if (runStart < 0 || runTier == null) return;
-    bands.push([{ xAxis: runStart - 0.5, itemStyle: tierFill(runTier) }, { xAxis: endIdx + 0.5 }]);
+    // Interval-true geometry (2026-07-04): category position i = the slot's
+    // START instant, so the slot's half-hour spans [i, i+1] — NOT the cell
+    // [i-0.5, i+0.5], which drew every band 15 min early vs the wall clock
+    // (the "grid shifted from the window" report). Clamp the final edge to
+    // the axis extent so ECharts doesn't drop the out-of-range coordinate.
+    const rightEdge = Math.min(endIdx + 1, axis.length - 0.5);
+    bands.push([{ xAxis: runStart, itemStyle: tierFill(runTier) }, { xAxis: rightEdge }]);
   };
   axis.forEach((_, i) => {
     const cur = tierOf(price[i]);
@@ -606,12 +612,15 @@ function optionForDay(
   // "Now" marker.
   const nowMs = pv?.now_utc ? new Date(pv.now_utc).getTime() : Date.now();
   let nowIdx = -1;
+  let nowPos = -1; // fractional axis position (interval-true, for the markLine)
   if (axis.length) {
     const firstMs = new Date(axis[0]).getTime();
     const lastMs = new Date(axis[axis.length - 1]).getTime() + 30 * 60_000;
     if (nowMs >= firstMs && nowMs < lastMs) {
       const idx = axis.findIndex((iso) => new Date(iso).getTime() > nowMs);
       nowIdx = idx <= 0 ? axis.length - 1 : idx - 1;
+      const slotStartMs = new Date(axis[nowIdx]).getTime();
+      nowPos = nowIdx + Math.max(0, Math.min(1, (nowMs - slotStartMs) / (30 * 60_000)));
     }
   }
 
@@ -673,7 +682,7 @@ function optionForDay(
         markLine: nowIdx >= 0 ? {
           silent: true, symbol: "none",
           lineStyle: { color: t.text, width: 1.5, type: "solid", opacity: 0.5 },
-          label: { show: false }, data: [{ xAxis: nowIdx }],
+          label: { show: false }, data: [{ xAxis: nowPos }],
         } : undefined,
         z: 0,
       },
@@ -699,11 +708,11 @@ function optionForDay(
       // SOURCE overlay — how that load was covered: grid import + battery
       // discharge as thin stepped lines (kWh, left axis), riding over the stack.
       {
-        name: "Grid", type: "line", step: "middle", showSymbol: false, connectNulls: false,
+        name: "Grid", type: "line", step: "start", showSymbol: false, connectNulls: false,
         data: gridImp, lineStyle: { color: t.importColor, width: 1.5, type: "solid", cap: "round" }, z: 5,
       },
       {
-        name: "Battery", type: "line", step: "middle", showSymbol: false, connectNulls: false,
+        name: "Battery", type: "line", step: "start", showSymbol: false, connectNulls: false,
         data: battDis, lineStyle: { color: t.batt, width: 1.5, type: "solid", cap: "round" }, z: 5,
       },
       // Battery SoC → dashed line on the right axis (is there spare charge?).
