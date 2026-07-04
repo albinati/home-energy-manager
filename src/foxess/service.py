@@ -9,6 +9,7 @@ The 24-h refresh counter uses api_quota.record_call() so it persists across
 restarts and counts *all* Fox HTTP types, not just realtime reads.
 """
 import logging
+import threading
 import time
 
 from ..api_quota import get_quota_status, record_call, should_block
@@ -22,6 +23,13 @@ logger = logging.getLogger(__name__)
 _last_realtime: RealTimeData | None = None
 _last_realtime_updated_monotonic: float | None = None
 _last_realtime_wallclock: float | None = None  # epoch seconds
+
+# Single-flight guard for the realtime fetch. Two interval jobs share this
+# cache on coinciding grids (the 30 s viewer boost and the PV telemetry tick),
+# and the unlocked check-then-fetch let both see "stale" and both spend a Fox
+# call. Concurrent callers now queue here and the loser gets the winner's
+# fresh cache instead of a second HTTP roundtrip.
+_realtime_fetch_lock = threading.Lock()
 
 # Legacy: in-memory 24h window kept for backward-compat with get_refresh_stats()
 # (api_quota now persists to DB, but we keep this so callers don't break)
@@ -128,28 +136,43 @@ def get_cached_realtime(max_age_seconds: int | None = None) -> RealTimeData:
         )
         return _last_realtime
 
-    # Cache miss or expired — check quota before hitting the cloud
-    if should_block("fox"):
-        _last_blocked_at = time.time()
-        if _last_realtime is not None:
-            logger.warning(
-                "Fox ESS daily quota exhausted; returning stale realtime cache"
+    with _realtime_fetch_lock:
+        # Re-check under the lock — a concurrent caller may have just fetched
+        # while we waited, and their fresh result should be our answer.
+        now = time.monotonic()
+        if (
+            _last_realtime is not None
+            and _last_realtime_updated_monotonic is not None
+            and (now - _last_realtime_updated_monotonic) < max_age_seconds
+        ):
+            logger.debug(
+                "Fox ESS realtime: cache hit after fetch-lock (age %.1fs)",
+                now - _last_realtime_updated_monotonic,
             )
             return _last_realtime
-        # No cache AND quota exhausted — this is a cold-start problem, try anyway
-        logger.warning("Fox ESS quota exhausted and no cache; attempting cold fetch")
 
-    logger.info("Fox ESS realtime: fetching from API (cache miss or expired)")
-    client = _get_client()
-    data = client.get_realtime()
-    _last_realtime = data
-    _last_realtime_updated_monotonic = now
-    _record_realtime_refresh()
-    logger.debug(
-        "Fox ESS realtime: soc=%.1f solar=%.2f grid=%.2f",
-        data.soc, data.solar_power, data.grid_power,
-    )
-    return data
+        # Cache miss or expired — check quota before hitting the cloud
+        if should_block("fox"):
+            _last_blocked_at = time.time()
+            if _last_realtime is not None:
+                logger.warning(
+                    "Fox ESS daily quota exhausted; returning stale realtime cache"
+                )
+                return _last_realtime
+            # No cache AND quota exhausted — this is a cold-start problem, try anyway
+            logger.warning("Fox ESS quota exhausted and no cache; attempting cold fetch")
+
+        logger.info("Fox ESS realtime: fetching from API (cache miss or expired)")
+        client = _get_client()
+        data = client.get_realtime()
+        _last_realtime = data
+        _last_realtime_updated_monotonic = now
+        _record_realtime_refresh()
+        logger.debug(
+            "Fox ESS realtime: soc=%.1f solar=%.2f grid=%.2f",
+            data.soc, data.solar_power, data.grid_power,
+        )
+        return data
 
 
 def force_refresh_realtime(actor: str = "api") -> RealTimeData:

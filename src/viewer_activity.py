@@ -11,6 +11,12 @@ snapshot would be seen by anyone.
 Monotonic clock only — wall-clock jumps (NTP, suspend) must not fake or
 kill activity. Module-level state, same singleton pattern as the vendor
 service caches; a bare float write/read is atomic under the GIL so no lock.
+
+TOPOLOGY ASSUMPTION: the API handler (writer) and the APScheduler boost job
+(reader) share one process — true today (single uvicorn worker, scheduler
+started in-process by the API lifespan). If the app ever moves to multiple
+workers or an external scheduler process, this signal splits brain and the
+boost silently stops firing; it would need to move to SQLite/runtime_settings.
 """
 from __future__ import annotations
 

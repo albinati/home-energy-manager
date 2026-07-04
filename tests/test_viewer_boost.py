@@ -26,9 +26,27 @@ def _reset_activity(monkeypatch):
 
 
 class _Calls:
+    """Counts vendor-cache interactions. The job probes the Daikin cache age
+    with allow_refresh=False before spending quota, so only allow_refresh=True
+    calls are recorded as refreshes."""
+
     def __init__(self):
         self.fox: list[int] = []
         self.daikin: list[dict] = []
+        self.daikin_age_probes: int = 0
+        self.daikin_cache_age: float = float("inf")
+
+    def get_cached_devices(self, *, allow_refresh=False, max_age_seconds=None, actor=""):
+        from types import SimpleNamespace
+        if allow_refresh:
+            self.daikin.append({
+                "allow_refresh": allow_refresh,
+                "max_age_seconds": max_age_seconds,
+                "actor": actor,
+            })
+            return SimpleNamespace(age_seconds=0.0, devices=[], stale=False)
+        self.daikin_age_probes += 1
+        return SimpleNamespace(age_seconds=self.daikin_cache_age, devices=[], stale=True)
 
 
 @pytest.fixture
@@ -39,8 +57,7 @@ def calls(monkeypatch):
         lambda max_age_seconds=None: c.fox.append(max_age_seconds),
     )
     monkeypatch.setattr(
-        runner.daikin_service, "get_cached_devices",
-        lambda **kw: c.daikin.append(kw),
+        runner.daikin_service, "get_cached_devices", c.get_cached_devices
     )
     return c
 
@@ -138,3 +155,62 @@ def test_vendor_failure_does_not_block_the_other(monkeypatch, calls):
     viewer_activity.mark_viewer_active()
     runner.bulletproof_viewer_boost_job()  # must not raise
     assert len(calls.daikin) == 1
+
+
+def test_daikin_age_gate_ignores_write_invalidation(monkeypatch, calls):
+    # A young cache (age < target) must NOT be refreshed even though the
+    # service marks it stale after a control write — otherwise every
+    # reconciler write becomes an extra boost read within 30 s.
+    _quota(monkeypatch)
+    calls.daikin_cache_age = 120.0  # young; _Calls reports stale=True
+    viewer_activity.mark_viewer_active()
+    runner.bulletproof_viewer_boost_job()
+    assert calls.daikin == []
+    assert calls.daikin_age_probes == 1
+
+    # Past the age target the refresh fires.
+    calls.daikin_cache_age = 601.0
+    runner.bulletproof_viewer_boost_job()
+    assert len(calls.daikin) == 1
+
+
+# --- fox realtime single-flight -------------------------------------------------
+
+def test_fox_realtime_fetch_is_single_flight(monkeypatch):
+    """Two threads racing an expired cache must produce ONE Fox HTTP call —
+    the coinciding 30 s boost tick + PV telemetry tick used to double-spend."""
+    import threading
+
+    from src.foxess import service as fox_service
+
+    monkeypatch.setattr(fox_service, "_last_realtime", None)
+    monkeypatch.setattr(fox_service, "_last_realtime_updated_monotonic", None)
+    monkeypatch.setattr(fox_service, "should_block", lambda vendor: False)
+    monkeypatch.setattr(fox_service, "_record_realtime_refresh", lambda: None)
+
+    fetches = []
+    entered = threading.Barrier(2, timeout=5)
+
+    class _Client:
+        def get_realtime(self):
+            fetches.append(1)
+            time.sleep(0.05)  # hold the fetch so the loser is waiting on the lock
+            from types import SimpleNamespace
+            return SimpleNamespace(soc=50.0, solar_power=1.0, grid_power=0.0)
+
+    monkeypatch.setattr(fox_service, "_get_client", lambda: _Client())
+
+    results = []
+
+    def _race():
+        entered.wait()
+        results.append(fox_service.get_cached_realtime(max_age_seconds=60))
+
+    threads = [threading.Thread(target=_race) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert len(fetches) == 1
+    assert len(results) == 2 and results[0] is results[1]

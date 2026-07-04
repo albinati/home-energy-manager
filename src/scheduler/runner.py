@@ -1583,11 +1583,22 @@ def bulletproof_viewer_boost_job() -> None:
     if daikin_target > 0:
         try:
             if quota_remaining("daikin") > int(config.DAIKIN_VIEWER_QUOTA_RESERVE):
-                daikin_service.get_cached_devices(
-                    allow_refresh=True,
-                    max_age_seconds=daikin_target,
-                    actor="viewer_boost",
+                # Gate on cache AGE, not on the service's freshness verdict:
+                # every control write sets the stale flag
+                # (invalidate_after_write), and an allow_refresh=True call
+                # would refetch on the next 30 s tick regardless of
+                # max_age_seconds — turning each reconciler write into an
+                # extra read. The boost only ever pays for age; the
+                # reconciler's own reads handle post-write coherence.
+                cached = daikin_service.get_cached_devices(
+                    allow_refresh=False, actor="viewer_boost"
                 )
+                if cached.age_seconds > daikin_target:
+                    daikin_service.get_cached_devices(
+                        allow_refresh=True,
+                        max_age_seconds=daikin_target,
+                        actor="viewer_boost",
+                    )
         except Exception as e:
             logger.debug("viewer boost: daikin refresh failed (non-fatal): %s", e)
 

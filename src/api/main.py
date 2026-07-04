@@ -632,8 +632,11 @@ async def system_timezone():
 async def cockpit_now():
     """One-call aggregator for the cockpit's "where are we now?" hero panel.
 
-    Never issues cloud calls — reads from in-memory caches, SQLite, and
-    runtime_settings only. Replaces four parallel GETs previously fanned out by
+    Cloud-call-free in steady state — reads in-memory caches, SQLite, and
+    runtime_settings; the Fox read can fall through to a live fetch only when
+    the background refreshers are down (>300 s cache), and both vendor cache
+    reads run via to_thread so even that path never blocks the event loop.
+    Replaces four parallel GETs previously fanned out by
     cockpit.js (foxess/status + daikin/status + agile/today +
     optimization/status) so the hero panel renders from a single coherent
     snapshot instead of four independently-timed fetches.
@@ -721,7 +724,11 @@ async def cockpit_now():
     }
     fox_fresh: dict[str, Any] = {"fetched_at_utc": None, "age_s": None, "stale": None}
     try:
-        rt = get_cached_realtime()
+        # Off the event loop: normally a pure in-memory read, but past the
+        # 300 s TTL (scheduler paused / telemetry job down) this can fall
+        # through to a blocking Fox HTTP fetch — that safety net must not
+        # freeze the loop for every other request.
+        rt = await asyncio.to_thread(get_cached_realtime)
         fox_block.update({
             "soc_pct": float(rt.soc),
             "soc_kwh": round(float(config.BATTERY_CAPACITY_KWH) * float(rt.soc) / 100.0, 3),
@@ -757,7 +764,14 @@ async def cockpit_now():
     }
     dk_fresh: dict[str, Any] = {"fetched_at_utc": None, "age_s": None, "stale": None}
     try:
-        cached = daikin_service.get_cached_devices(allow_refresh=False, actor="cockpit_now")
+        # Off the event loop: allow_refresh=False never does HTTP itself, but
+        # it takes the Daikin service RLock — which the viewer-boost job holds
+        # ACROSS its refresh roundtrip (up to ~15 s on a slow vendor call),
+        # precisely while viewers are polling this endpoint. Waiting for the
+        # lock in a thread keeps the rest of the API responsive.
+        cached = await asyncio.to_thread(
+            daikin_service.get_cached_devices, allow_refresh=False, actor="cockpit_now"
+        )
         if cached.devices:
             d = cached.devices[0]
             tank = getattr(d, "tank_temperature", None)
