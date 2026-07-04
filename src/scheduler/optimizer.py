@@ -628,8 +628,18 @@ def _merge_fox_groups(
         elif "Backup" in (ka[0], kb[0]):
             # A pair containing a negative-window hold must stay
             # discharge-proof: squashing Backup+X to SelfUse would re-open
-            # the 06-28/07-04 battery-leak incident class. Backup wins.
-            nk = ("Backup", None, None, max(ka[3], kb[3]), _max_optional(ka_max, kb_max))
+            # the 06-28/07-04 battery-leak incident class. Backup wins —
+            # but as the PINNED shape (minSoc = maxSoc = reserve, the benign
+            # 2026-06-07 form — 316 prod samples): the squashed span can
+            # extend beyond the negative window, and an unpinned Backup
+            # there would grid-top-up at POSITIVE prices (18-30p). Taking
+            # max() of the pair's floors would inherit a SelfUse hold's
+            # min=100 and with it maxSoc=100 = unpinned again; the partner's
+            # no-discharge intent is already guaranteed by Backup itself.
+            # Pinning forgoes the in-window paid top-up only in this rare
+            # over-cap fallback; the normal (unsquashed) hold stays unpinned.
+            reserve = int(config.MIN_SOC_RESERVE_PERCENT)
+            nk = ("Backup", None, None, reserve, reserve)
         else:
             nk = ("SelfUse", None, None, int(config.MIN_SOC_RESERVE_PERCENT), None)
         merged[victim] = (a, d, nk)

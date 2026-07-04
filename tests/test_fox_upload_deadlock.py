@@ -38,6 +38,17 @@ def test_fingerprint_ignores_stale_fd_echo_on_selfuse():
     assert live.fingerprint() == uploaded.fingerprint()
 
 
+def test_fingerprint_ignores_stale_fd_echo_on_backup_hold():
+    """New default negative-hold shape (2026-07-04): uploaded Backup carries no
+    fd_* and maxSoc=None; the inverter echoes stale fd_* + vendor maxSoc=100.
+    Must compare equal or the heartbeat re-uploads on every tick of every
+    negative-price day."""
+    live = SchedulerGroup(13, 0, 14, 30, "Backup", min_soc_on_grid=10,
+                          fd_soc=91.0, fd_pwr=2850.0, max_soc=100.0)
+    uploaded = SchedulerGroup(13, 0, 14, 30, "Backup", min_soc_on_grid=10, max_soc=None)
+    assert live.fingerprint() == uploaded.fingerprint()
+
+
 def test_fingerprint_absent_maxsoc_equals_vendor_default_100():
     live = SchedulerGroup(8, 0, 9, 0, "SelfUse", min_soc_on_grid=100, max_soc=100.0)
     uploaded = SchedulerGroup(8, 0, 9, 0, "SelfUse", min_soc_on_grid=100, max_soc=None)

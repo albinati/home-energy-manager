@@ -89,3 +89,25 @@ def test_vacation_preset_unaffected(monkeypatch):
     monkeypatch.setattr(config, "OPTIMIZATION_PRESET", "vacation", raising=False)
     slots = lp_plan_to_slots(_plan(price=-4.0, chg=0.8, imp=0.0))
     assert [s.kind for s in slots] == ["solar_charge", "solar_charge"]
+
+def test_vacation_negative_price_with_grid_import_stays_solar_charge(monkeypatch):
+    # Guards the vacation-before-price ordering: reordering would make
+    # vacation plans grid-charge against the vacation LP model.
+    monkeypatch.setattr(config, "OPTIMIZATION_PRESET", "vacation", raising=False)
+    slots = lp_plan_to_slots(_plan(price=-4.0, chg=0.8, imp=1.5))
+    assert [s.kind for s in slots] == ["solar_charge", "solar_charge"]
+
+
+def test_kill_switch_negative_grid_charge_still_negative(monkeypatch):
+    # The kill-switch only restores the legacy solar_charge mislabel for
+    # PV-only slots — a real paid grid fill must stay `negative`.
+    monkeypatch.setattr(config, "LP_NEGATIVE_BEATS_SOLAR_CHARGE", False, raising=False)
+    slots = lp_plan_to_slots(_plan(price=-4.0, chg=0.8, imp=1.5))
+    assert [s.kind for s in slots] == ["negative", "negative"]
+
+
+def test_zero_price_counts_as_negative_window():
+    # price == 0 boundary: `<=` means a 0p slot is inside the negative window.
+    slots = lp_plan_to_slots(_plan(price=0.0, chg=0.8, imp=0.0))
+    assert [s.kind for s in slots] == ["negative_hold", "negative_hold"]
+

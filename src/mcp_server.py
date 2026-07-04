@@ -3289,12 +3289,21 @@ def build_mcp() -> FastMCP:
             rec_norm = [_norm(g) for g in recorded]
 
             def _fp(g: dict[str, Any]) -> tuple:
+                # Mode-aware canonicalisation — mirrors the REST schedule_diff
+                # _fp (src/api/routers/dispatch.py): the inverter echoes stale
+                # fdSoc/fdPwr on SelfUse/Backup groups and fills absent maxSoc
+                # with the vendor default 100. Raw comparison reported phantom
+                # drift for every default-shape Backup hold (maxSoc=None,
+                # 2026-07-04) and stale-echo SelfUse group.
+                mode = g.get("work_mode")
+                fd_relevant = mode in ("ForceCharge", "ForceDischarge")
+                max_soc = g.get("max_soc")
                 return (
-                    g.get("start"), g.get("end"), g.get("work_mode"),
+                    g.get("start"), g.get("end"), mode,
                     g.get("min_soc_on_grid"),
-                    None if g.get("fd_soc") is None else float(g["fd_soc"]),
-                    None if g.get("fd_pwr") is None else float(g["fd_pwr"]),
-                    None if g.get("max_soc") is None else float(g["max_soc"]),
+                    float(g["fd_soc"]) if fd_relevant and g.get("fd_soc") is not None else None,
+                    float(g["fd_pwr"]) if fd_relevant and g.get("fd_pwr") is not None else None,
+                    100.0 if max_soc is None else float(max_soc),
                 )
 
             live_fps = {_fp(g) for g in live}
