@@ -1544,6 +1544,54 @@ def bulletproof_pv_telemetry_job() -> None:
         logger.debug("pv telemetry: save failed (non-fatal): %s", e)
 
 
+def bulletproof_viewer_boost_job() -> None:
+    """Every 30 s: while someone is watching the cockpit, keep the Fox/Daikin
+    caches fresher than their idle baselines — without ever competing with
+    control traffic for quota.
+
+    * Viewer signal: /cockpit/now hits (SPA polls 20 s, pauses hidden tabs) —
+      see ``src/viewer_activity.py``. No viewer → immediate no-op, so the idle
+      cost of this job is a monotonic-clock comparison.
+    * Fox: refresh when the realtime cache is older than
+      FOX_VIEWER_REFRESH_SECONDS (idle baseline = PV telemetry cadence, 3 min).
+    * Daikin: refresh when the device cache is older than
+      DAIKIN_VIEWER_REFRESH_SECONDS (idle baseline = opportunistic only, so
+      the cockpit's tank/indoor temps could sit 30-60+ min stale).
+    * Both gated on quota_remaining > *_VIEWER_QUOTA_RESERVE: when the day's
+      budget runs low the boost stops first, and plan pushes / reconciler
+      writes / LP reads keep their headroom. Cache-warm calls cost nothing —
+      get_cached_realtime/get_cached_devices only hit the wire past max_age.
+    """
+    if not getattr(config, "VIEWER_BOOST_ENABLED", True):
+        return
+    if get_scheduler_paused():
+        return
+    from ..viewer_activity import viewer_active
+    if not viewer_active(float(config.VIEWER_ACTIVE_WINDOW_SECONDS)):
+        return
+    from ..api_quota import quota_remaining
+
+    fox_target = int(config.FOX_VIEWER_REFRESH_SECONDS)
+    if fox_target > 0:
+        try:
+            if quota_remaining("fox") > int(config.FOX_VIEWER_QUOTA_RESERVE):
+                get_cached_realtime(max_age_seconds=fox_target)
+        except Exception as e:
+            logger.debug("viewer boost: fox refresh failed (non-fatal): %s", e)
+
+    daikin_target = int(config.DAIKIN_VIEWER_REFRESH_SECONDS)
+    if daikin_target > 0:
+        try:
+            if quota_remaining("daikin") > int(config.DAIKIN_VIEWER_QUOTA_RESERVE):
+                daikin_service.get_cached_devices(
+                    allow_refresh=True,
+                    max_age_seconds=daikin_target,
+                    actor="viewer_boost",
+                )
+        except Exception as e:
+            logger.debug("viewer boost: daikin refresh failed (non-fatal): %s", e)
+
+
 def _hhmm_to_minutes(s: str) -> int:
     parts = (s or "00:00").strip().split(":")
     h = int(parts[0]) if parts else 0
@@ -2431,6 +2479,23 @@ def start_background_scheduler() -> None:
                 "PV telemetry cron scheduled every %d min",
                 int(config.PV_TELEMETRY_INTERVAL_MINUTES),
             )
+            # Viewer-aware freshness boost: while the cockpit is open, keep the
+            # Fox/Daikin caches fresher than their idle baselines (quota-guarded).
+            # No viewer → the 30 s tick is a monotonic comparison and returns.
+            if getattr(config, "VIEWER_BOOST_ENABLED", True):
+                _background_scheduler.add_job(
+                    bulletproof_viewer_boost_job,
+                    IntervalTrigger(seconds=30),
+                    id="bulletproof_viewer_boost",
+                )
+                logger.info(
+                    "Viewer freshness boost scheduled (30 s tick; fox<=%ds daikin<=%ds "
+                    "while viewing, reserves fox>%d daikin>%d)",
+                    int(config.FOX_VIEWER_REFRESH_SECONDS),
+                    int(config.DAIKIN_VIEWER_REFRESH_SECONDS),
+                    int(config.FOX_VIEWER_QUOTA_RESERVE),
+                    int(config.DAIKIN_VIEWER_QUOTA_RESERVE),
+                )
             # Nightly plan push: dispatch Fox + Daikin just after the Daikin daily quota
             # rollover (midnight UTC). Anchored to UTC regardless of BULLETPROOF_TIMEZONE
             # so the push always lands on a fresh quota day.

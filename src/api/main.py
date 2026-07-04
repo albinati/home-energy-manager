@@ -646,6 +646,13 @@ async def cockpit_now():
     from datetime import timedelta as _td
     from zoneinfo import ZoneInfo
 
+    # Viewer signal for the freshness boost (runner.bulletproof_viewer_boost_job):
+    # this endpoint is polled every ~20 s only while a cockpit tab is visible,
+    # so each hit marks "someone is watching" and the background job keeps the
+    # Fox/Daikin caches fresher. The handler itself stays cloud-call-free.
+    from ..viewer_activity import mark_viewer_active
+    mark_viewer_active()
+
     now = _dt.now(_UTC)
 
     def _age(iso: str | None) -> float | None:
