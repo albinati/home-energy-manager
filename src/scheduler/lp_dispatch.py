@@ -1617,7 +1617,20 @@ def build_fox_groups_from_lp(
     """
     slots, _decisions = filter_robust_peak_export(plan, scenarios, export_price_pence=export_price_pence)
     if slots:
-        cutoff = slots[0].start_utc + timedelta(hours=24)
+        # 23.5 h, NOT 24 h — the daily-cyclic collision fix (2026-07-04, the
+        # TRUE root cause of the 06-28 + 07-04 negative-window leaks). Fox V3
+        # groups carry only hour:minute and repeat every day, so a full-24 h
+        # horizon's LAST slot is tomorrow's slot at the SAME hour-of-day as
+        # the current in-flight slot. When tomorrow's slot is solar_charge
+        # (SelfUse) and today's in-flight slot is a negative-window fill/hold,
+        # the inverter applies tomorrow's SelfUse group TODAY, mid-window —
+        # and _prepend_inflight_group sees "a plan group covers the current
+        # minute" and declines to bridge. Dropping that one D+1 slot leaves
+        # the current hour-of-day uncovered so the in-flight bridge re-asserts
+        # the previous schedule's FC/FD/Backup group. The dropped slot is
+        # re-dispatched by any of tomorrow's dozens of re-solves long before
+        # it matters.
+        cutoff = slots[0].start_utc + timedelta(hours=23, minutes=30)
         slots = [s for s in slots if s.start_utc < cutoff]
     # peak_export_discharge=False: kind="peak_export" already maps to
     # ForceDischarge inside _slot_fox_tuple unconditionally; the flag here only

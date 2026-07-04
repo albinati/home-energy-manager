@@ -55,12 +55,18 @@ Consequences for the dispatcher:
   unconditional top-up would buy energy the plan didn't ask for.
 - Negative windows must never contain SelfUse groups — enforced at the
   labeller since #630 (`LP_NEGATIVE_BEATS_SOLAR_CHARGE`).
-- Known residual transition artifact: when a re-plan shifts the horizon past
-  the in-flight slot, past windows are reconstructed from the PREVIOUS plan's
-  labels. The in-flight bridge re-asserts ForceCharge, ForceDischarge AND
-  Backup groups (`_prepend_inflight_group`, lp_dispatch.py — SelfUse is the
-  only mode left to the artifact). Self-heals one slot after any labelling
-  change.
+- **The daily-cyclic collision (the TRUE 06-28 + 07-04 root cause, fixed
+  2026-07-04):** V3 groups carry only hour:minute and repeat every day. A
+  full-24h dispatch horizon's LAST slot is TOMORROW's slot at the same
+  hour-of-day as the current in-flight slot — when tomorrow's slot is
+  solar_charge (SelfUse) and today's is a negative-window fill/hold, the
+  inverter applies tomorrow's SelfUse group TODAY mid-window, and the
+  in-flight bridge (`_prepend_inflight_group`) declines because "a plan
+  group covers the current minute". Fix: the dispatch horizon is 23.5 h
+  (`build_fox_groups_from_lp`), leaving the current hour-of-day uncovered
+  so the bridge re-asserts the previous schedule's FC/FD/Backup group.
+  Groups earlier in D+1's morning are harmless today (their hour-of-day is
+  already past) and correct tomorrow.
 
 ### Group `extraParam` fields (V3)
 
