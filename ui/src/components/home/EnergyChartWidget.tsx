@@ -708,11 +708,11 @@ function optionForDay(
       // SOURCE overlay — how that load was covered: grid import + battery
       // discharge as thin stepped lines (kWh, left axis), riding over the stack.
       {
-        name: "Grid", type: "line", step: "start", showSymbol: false, connectNulls: false,
+        name: "Grid", type: "line", step: "end", showSymbol: false, connectNulls: false,
         data: gridImp, lineStyle: { color: t.importColor, width: 1.5, type: "solid", cap: "round" }, z: 5,
       },
       {
-        name: "Battery", type: "line", step: "start", showSymbol: false, connectNulls: false,
+        name: "Battery", type: "line", step: "end", showSymbol: false, connectNulls: false,
         data: battDis, lineStyle: { color: t.batt, width: 1.5, type: "solid", cap: "round" }, z: 5,
       },
       // Battery SoC → dashed line on the right axis (is there spare charge?).

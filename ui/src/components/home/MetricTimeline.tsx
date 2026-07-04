@@ -149,7 +149,7 @@ export function MetricTimeline({
       return {
         name: ln.name, type: "line", smooth: true, showSymbol: false, connectNulls: false,
         color: ln.color, data: ln.data, yAxisIndex: ln.isPrice ? 1 : (ln.yAxis ?? 0),
-        step: ln.step || ln.isPrice ? "start" : undefined,
+        step: ln.step || ln.isPrice ? "end" : undefined,
         lineStyle: {
           color: ln.color, width: ln.width ?? (ln.dashed ? 1.25 : 2.5),
           type: ln.dashed ? "dashed" : "solid", opacity: ln.dashed ? 0.8 : 1,
@@ -212,7 +212,7 @@ export function MetricTimeline({
         // Price → dashed step on the right axis (intraday only). Named per the
         // widget (export on generation, import on consumption).
         ...(hasPrice ? [{
-          name: priceLabel, type: "line", step: "start", showSymbol: false, color: priceColor ?? t.importColor,
+          name: priceLabel, type: "line", step: "end", showSymbol: false, color: priceColor ?? t.importColor,
           yAxisIndex: 1, data: prices, lineStyle: { color: priceColor ?? t.importColor, width: 1.5, opacity: 0.85, type: "dashed" }, z: 1,
         }] : []),
         // Pulsing "now" ripple at the current slot.
