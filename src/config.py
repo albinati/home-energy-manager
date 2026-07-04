@@ -719,6 +719,15 @@ class Config:
     # `negative` -> ForceCharge, the discharge-proof mode. Vacation preset is
     # unaffected (its LP forbids grid->battery entirely). false = legacy
     # labelling for instant rollback.
+    # Fox dispatch surface in hours (< 24). V3 groups are daily-cyclic
+    # (hour:minute only), so a 24 h surface's tail slot lands on TODAY's
+    # in-flight hour-of-day — the 06-28/07-04 leak class. Hard-capped at
+    # 23.5; default 23.0 keeps a spare slot of margin + covers the DST
+    # fall-back day. Re-solves re-dispatch the dropped tail continuously.
+    FOX_DISPATCH_HORIZON_HOURS: float = float(
+        os.getenv("FOX_DISPATCH_HORIZON_HOURS", "23.0")
+    )
+
     LP_NEGATIVE_BEATS_SOLAR_CHARGE: bool = (
         os.getenv("LP_NEGATIVE_BEATS_SOLAR_CHARGE", "true").strip().lower()
         in ("1", "true", "yes", "on")
