@@ -1200,6 +1200,15 @@ class Config:
     # re-asserts Powerful on a bounded cadence while a tank_negative_boost slot
     # is active and the tank is still below target. Min-interval bounds the
     # Daikin 200/day quota cost (~one write per interval on negative-window days).
+    # 2026-07-04 — apply the LWT outdoor cutoff to the PEAK SETBACK too (the
+    # positive-boost cutoff is #540). Summer peak windows wrote a -2 offset +
+    # restore daily with the heat pump not space-heating at all. false =
+    # pre-2026-07-04 behaviour (setback year-round).
+    DAIKIN_LWT_SETBACK_OUTDOOR_GATE: bool = (
+        os.getenv("DAIKIN_LWT_SETBACK_OUTDOOR_GATE", "true").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+
     DHW_NEGATIVE_BOOST_POWERFUL_REASSERT_ENABLED: bool = (
         os.getenv("DHW_NEGATIVE_BOOST_POWERFUL_REASSERT_ENABLED", "true").strip().lower()
         in ("1", "true", "yes", "on")
