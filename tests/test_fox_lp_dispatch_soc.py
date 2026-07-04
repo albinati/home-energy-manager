@@ -373,3 +373,54 @@ def test_no_negative_slot_maps_to_discharge_capable_mode(monkeypatch) -> None:
     assert max(g.fd_soc for g in groups) == 100, (
         f"fill ForceCharge group must reach fdSoc=100, got {[g.fd_soc for g in groups]}"
     )
+
+
+def test_default_backup_mode_negative_window_end_to_end(monkeypatch) -> None:
+    """DEFAULT-mode mirror of the invariant above (2026-07-04, Backup holds):
+    a realistic plunge-day window (hold, hold, fill, fill) through the FULL
+    _merge_fox_groups pipeline must produce ONLY Backup (holds) + ForceCharge
+    (fills) groups — never SelfUse or ForceDischarge inside price<=0 — and
+    collapse to ≤2 groups (adjacent Backup holds merge; fills merge). This is
+    the test that catches any future merge/labeller regression re-mapping a
+    default-mode negative window to SelfUse (the 06-28/07-04 incident class).
+    """
+    monkeypatch.setattr(config, "LP_NEGATIVE_HOLD_FOX_MODE", "backup", raising=False)
+    kinds = ["negative_hold", "negative_hold", "negative", "negative"]
+    targets = [_min_r(), _min_r(), 70, 100]
+    t0 = datetime(2026, 6, 28, 8, 30, tzinfo=UTC)
+    slots = [
+        HalfHourSlot(
+            start_utc=t0 + timedelta(minutes=30 * i),
+            end_utc=t0 + timedelta(minutes=30 * (i + 1)),
+            price_pence=-3.0,
+            kind=kinds[i],
+            lp_grid_import_w=2500 if kinds[i] == "negative" else None,
+            target_soc_pct=targets[i],
+        )
+        for i in range(len(kinds))
+    ]
+    for s in slots:
+        wm, *_ = _slot_fox_tuple(s)
+        assert wm in ("Backup", "ForceCharge"), (
+            f"price<=0 slot kind={s.kind!r} mapped to {wm!r}"
+        )
+    groups = _merge_fox_groups(slots)
+    assert len(groups) <= 2, f"expected ≤2 groups (Backup hold + FC fill), got {len(groups)}"
+    modes = [g.work_mode for g in groups]
+    assert "SelfUse" not in modes and "ForceDischarge" not in modes
+    assert modes.count("Backup") == 1  # both holds collapsed into one group
+    fc = [g for g in groups if g.work_mode == "ForceCharge"]
+    assert fc and max(g.fd_soc for g in fc) == 100
+
+
+def test_unknown_hold_mode_falls_back_to_backup(monkeypatch) -> None:
+    """A typo'd LP_NEGATIVE_HOLD_FOX_MODE must fail SAFE (Backup, the
+    discharge-proof default) rather than silently doing something else."""
+    monkeypatch.setattr(config, "LP_NEGATIVE_HOLD_FOX_MODE", "force_charge", raising=False)
+    t0 = datetime(2026, 6, 1, 11, 0, tzinfo=UTC)
+    s = HalfHourSlot(
+        start_utc=t0, end_utc=t0 + timedelta(minutes=30),
+        price_pence=-4.0, kind="negative_hold",
+    )
+    wm, *_ = _slot_fox_tuple(s)
+    assert wm == "Backup"

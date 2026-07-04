@@ -385,6 +385,11 @@ def _slot_fox_tuple(
         # holds structurally outside the ForceCharge merge so fills stay
         # anchored to the deepest-priced slots.
         mode = str(getattr(config, "LP_NEGATIVE_HOLD_FOX_MODE", "backup")).strip().lower()
+        if mode not in ("backup", "forcecharge"):
+            logger.warning(
+                "LP_NEGATIVE_HOLD_FOX_MODE=%r not recognised — using 'backup'", mode
+            )
+            mode = "backup"
         if mode == "forcecharge":
             fds = s.target_soc_pct if s.target_soc_pct is not None else min_r
             pwr = (
@@ -580,9 +585,13 @@ def _merge_fox_groups(
         if len(merged) + _count_midnight_crossings(merged, tz) <= max_groups:
             break
         # Same-key adjacent merge, scanning back-to-front so late-day pairs go first.
+        # Adjacency in TIME is required: Backup hold tuples are byte-identical
+        # (("Backup", None, None, min_r, None)), so two holds hours apart would
+        # otherwise merge into one group spanning the positive-price gap —
+        # unconditional paid top-up outside the negative window.
         merged_pair = False
         for j in range(len(merged) - 2, -1, -1):
-            if merged[j][2] == merged[j + 1][2]:
+            if merged[j][2] == merged[j + 1][2] and merged[j][1] == merged[j + 1][0]:
                 a, _, k = merged[j]
                 _, d, _ = merged[j + 1]
                 merged[j] = (a, d, k)
@@ -616,6 +625,11 @@ def _merge_fox_groups(
                 max(ka[3], kb[3]),
                 _max_optional(ka_max, kb_max),
             )
+        elif "Backup" in (ka[0], kb[0]):
+            # A pair containing a negative-window hold must stay
+            # discharge-proof: squashing Backup+X to SelfUse would re-open
+            # the 06-28/07-04 battery-leak incident class. Backup wins.
+            nk = ("Backup", None, None, max(ka[3], kb[3]), _max_optional(ka_max, kb_max))
         else:
             nk = ("SelfUse", None, None, int(config.MIN_SOC_RESERVE_PERCENT), None)
         merged[victim] = (a, d, nk)

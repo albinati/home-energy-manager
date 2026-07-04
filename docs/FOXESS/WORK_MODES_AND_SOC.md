@@ -57,8 +57,10 @@ Consequences for the dispatcher:
   labeller since #630 (`LP_NEGATIVE_BEATS_SOLAR_CHARGE`).
 - Known residual transition artifact: when a re-plan shifts the horizon past
   the in-flight slot, past windows are reconstructed from the PREVIOUS plan's
-  labels (only in-flight ForceCharge is re-asserted). Self-heals one slot
-  after any labelling change.
+  labels. The in-flight bridge re-asserts ForceCharge, ForceDischarge AND
+  Backup groups (`_prepend_inflight_group`, lp_dispatch.py — SelfUse is the
+  only mode left to the artifact). Self-heals one slot after any labelling
+  change.
 
 ### Group `extraParam` fields (V3)
 
