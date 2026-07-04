@@ -137,6 +137,19 @@ def lp_plan_to_slots(plan: LpPlan) -> list[HalfHourSlot]:
                 _vacation = False
             if _vacation:
                 kind = "solar_charge"
+            elif price <= 0 and getattr(config, "LP_NEGATIVE_BEATS_SOLAR_CHARGE", True):
+                # 2026-07-04 (the REAL 06-28 root cause; recurred live today):
+                # price must outrank the PV-only check. A negative-price slot
+                # whose planned charge is PV-sourced (grid_import ≈ 0, e.g.
+                # the PV-sufficiency guard blocked grid→battery) was labelled
+                # solar_charge → SelfUse(minSocOnGrid=100), and the H1
+                # firmware does NOT honour that floor as a discharge freeze:
+                # observed 06-28 and again 07-04, the battery discharged
+                # 1.6-2.8 kW into the (HEM-scheduled) DHW boost instead of
+                # the PAID grid. `negative` → ForceCharge (fdPwr ≈ LP import,
+                # fdSoc = LP target): never discharges, house is grid-fed at
+                # the paid rate, PV still trickle-charges toward fdSoc.
+                kind = "negative"
             elif grid_import < EPS:
                 kind = "solar_charge"  # PV-only charging — use SelfUse, not ForceCharge
             elif price <= 0:
@@ -146,7 +159,8 @@ def lp_plan_to_slots(plan: LpPlan) -> list[HalfHourSlot]:
         elif price <= 0:
             # Negative price + LP chose chg ≈ 0 (battery saturated or PV alone
             # suffices). LP hard-forbids dis during negatives — encode that on
-            # hardware via Fox's native "Backup" mode (see _slot_fox_tuple).
+            # hardware via ForceCharge at ~zero power, which never discharges
+            # (PR #607; see _slot_fox_tuple).
             kind = "negative_hold"
         elif dis > EPS and exp > pv + EPS:
             # PR D — peak_export only when battery actively dumps to grid

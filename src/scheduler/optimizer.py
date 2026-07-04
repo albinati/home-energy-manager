@@ -367,19 +367,25 @@ def _slot_fox_tuple(
     if s.kind == "negative_hold":
         # 2026-06-28: dispatch as ForceCharge-to-the-LP-target, NOT Backup.
         #
-        # CORRECTED DIAGNOSIS (2026-07-04): the original 06-28 audit blamed Fox
-        # "Backup" mode for discharging the battery into a heavy load (~3.5 kW
-        # DHW Powerful boost) during the negative window. fox_schedule_state
-        # archaeology later showed NO Backup group was ever active during the
-        # observed discharges — the uploads covering 11:00-12:59 UTC that day
-        # said **SelfUse** (zero-charge `negative` slots fell through to the
-        # trailing SelfUse mapping below), and the SoC sawtooth at the 20 %
-        # floor is textbook SelfUse behaviour. Backup's documented semantics
-        # (reserve battery for outage, no discharge to loads) were never
+        # CORRECTED DIAGNOSIS (2026-07-04, refined same day): the original
+        # 06-28 audit blamed Fox "Backup" mode for discharging the battery
+        # into a heavy load (~3.5 kW DHW Powerful boost) during the negative
+        # window. fox_schedule_state archaeology showed NO Backup group was
+        # ever active during the observed discharges — the uploads covering
+        # 11:00-12:59 UTC that day said SelfUse(minSocOnGrid=100, maxSoc=100),
+        # i.e. the `solar_charge` mapping: the labeller (lp_dispatch.py)
+        # classified negative-price slots whose planned charge was PV-sourced
+        # (grid_import ~= 0) as solar_charge BEFORE checking price, and the
+        # H1 firmware does not honour minSocOnGrid=100 as a discharge freeze
+        # (recurred live 07-04; fixed via LP_NEGATIVE_BEATS_SOLAR_CHARGE).
+        # Backup's documented semantics (reserve battery for outage, charge
+        # from grid, no discharge to loads — confirmed live 07-04: manual
+        # Backup imported from grid with min/max SoC pinned 100) were never
         # actually contradicted. The ForceCharge dispatch below remains the
         # right fix regardless: it can never discharge, it grid-feeds the load
-        # at the paid negative rate, and — unlike a hold mode — it can't be
-        # folded into a SelfUse group by the schedule merge.
+        # at the paid negative rate, it doesn't depend on a SoC-floor the
+        # firmware may ignore, and it can't be folded into a SelfUse group by
+        # the schedule merge.
         #
         # fdSoc is the LP's planned per-slot target (~reserve during the hold,
         # since chg ~= 0 here). NOTE: _merge_adjacent_force_charge_rows collapses
