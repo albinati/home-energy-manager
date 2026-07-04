@@ -338,10 +338,12 @@ def _preheat_lwt_offset(
     only. At/above ``DAIKIN_LWT_PREHEAT_OUTDOOR_CUTOFF_C`` a heat-pump house
     needs little/no space heat, so a positive offset would only WAKE the
     compressor for nothing (the June-2026 phantom-heating self-loop). This is
-    an EXOGENOUS gate the measured-demand gate's own output cannot fool. The
-    NEGATIVE peak setback is NEVER cut — it can only let the unit coast, never
-    wake it. (PR #496 had removed the old blunt cutoff because it also killed
-    the setback mid-paid-window; this version cuts positives only.)
+    an EXOGENOUS gate the measured-demand gate's own output cannot fool. Since
+    2026-07-04 the NEGATIVE peak setback is ALSO cut when too warm to heat
+    (DAIKIN_LWT_SETBACK_OUTDOOR_GATE, default true): a setback can only let
+    the unit coast, but with no space heating running it is a pure waste of
+    Daikin writes (2 per window) and heating-plan noise. Below the cutoff
+    (real winter) the setback is untouched.
 
     ``indoor_c`` is a forward-looking hook for a future room sensor. While no
     sensor exists it is ``None`` and the comfort guard is a no-op. Once wired,
@@ -377,7 +379,17 @@ def _preheat_lwt_offset(
         if indoor_c is not None and indoor_c >= setpoint + band:
             off = 0
     elif price_p >= peak_thr:
-        off = setback
+        # 2026-07-04 (owner report): the setback used to be exempt from the
+        # outdoor cutoff ("can only let the unit coast, never wake it") — true
+        # thermally, but in summer the unit isn't space-heating at all, so
+        # every peak window still burned 2 Daikin writes (offset + restore)
+        # for zero effect and cluttered the heating plan. Gate it on the same
+        # cutoff: no expected heating → no offset writes of either sign.
+        # DAIKIN_LWT_SETBACK_OUTDOOR_GATE=false restores the old behaviour.
+        if too_warm_for_heat and getattr(config, "DAIKIN_LWT_SETBACK_OUTDOOR_GATE", True):
+            off = 0
+        else:
+            off = setback
         # Comfort guard (sensor-ready): don't set back an already-cold room.
         if indoor_c is not None and indoor_c <= setpoint - band:
             off = 0

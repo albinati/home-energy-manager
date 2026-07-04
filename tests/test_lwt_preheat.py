@@ -97,10 +97,12 @@ def test_disabled_returns_none(monkeypatch):
 
 def test_warm_day_suppresses_boost_keeps_setback(enabled):
     # Outdoor cutoff (#540): a cheap+warm slot would only wake the compressor
-    # for nothing → suppressed to 0. The peak setback can only coast → still
-    # emitted regardless of outdoor temp.
+    # for nothing → suppressed to 0. Since 2026-07-04 the peak setback is also
+    # suppressed when too warm to heat (no space heating running → offset
+    # writes are pure quota waste); DAIKIN_LWT_SETBACK_OUTDOOR_GATE=false
+    # restores the year-round setback.
     assert _off(5.0, WARM) == 0        # cheap+warm → suppressed
-    assert _off(30.0, WARM) == -2      # peak → setback (never cut)
+    assert _off(30.0, WARM) == 0       # peak+warm → suppressed (2026-07-04)
 
 
 def test_cheap_slot_boosts(enabled):

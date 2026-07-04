@@ -55,6 +55,47 @@ _TANK_DRIFT_NOTIFIED: bool = False
 _NEG_BOOST_POWERFUL_LAST_UTC: datetime | None = None
 _NEG_BOOST_STALL_COUNT: int = 0
 _NEG_BOOST_LAST_TEMP: float | None = None
+# 2026-07-04: the stall/cadence state must survive restarts — three same-day
+# deploys each reset these in-memory globals, so a 4 h no-progress plateau
+# (tank pinned at the hot-day compressor ceiling) never accumulated enough
+# consecutive stalls to engage the backoff: ~16 futile Powerful writes.
+_NEG_BOOST_STATE_LOADED: bool = False
+_NEG_BOOST_STATE_KEY = "neg_boost_stall_state"
+
+
+def _load_neg_boost_state() -> None:
+    """Rehydrate stall/cadence state from runtime_settings (once per boot)."""
+    global _NEG_BOOST_POWERFUL_LAST_UTC, _NEG_BOOST_STALL_COUNT
+    global _NEG_BOOST_LAST_TEMP, _NEG_BOOST_STATE_LOADED
+    if _NEG_BOOST_STATE_LOADED:
+        return
+    _NEG_BOOST_STATE_LOADED = True
+    try:
+        raw = db.get_runtime_setting(_NEG_BOOST_STATE_KEY)
+        if not raw:
+            return
+        d = json.loads(raw)
+        ts = d.get("last_utc")
+        _NEG_BOOST_POWERFUL_LAST_UTC = datetime.fromisoformat(ts) if ts else None
+        _NEG_BOOST_STALL_COUNT = int(d.get("stall_count", 0))
+        lt = d.get("last_temp")
+        _NEG_BOOST_LAST_TEMP = float(lt) if lt is not None else None
+    except Exception as e:  # never block the heartbeat on state hydration
+        logger.debug("neg-boost state load failed (non-fatal): %s", e)
+
+
+def _save_neg_boost_state() -> None:
+    try:
+        db.set_runtime_setting(_NEG_BOOST_STATE_KEY, json.dumps({
+            "last_utc": (
+                _NEG_BOOST_POWERFUL_LAST_UTC.isoformat()
+                if _NEG_BOOST_POWERFUL_LAST_UTC else None
+            ),
+            "stall_count": _NEG_BOOST_STALL_COUNT,
+            "last_temp": _NEG_BOOST_LAST_TEMP,
+        }))
+    except Exception as e:
+        logger.debug("neg-boost state save failed (non-fatal): %s", e)
 # #461 — dedup for the LWT-offset drift backstop (same one-page-per-episode
 # semantics as the tank flag above). Cleared when the offset is back at 0.
 _LWT_DRIFT_NOTIFIED: bool = False
@@ -723,6 +764,7 @@ def _check_negative_boost_powerful(
 
     if not config.DHW_NEGATIVE_BOOST_POWERFUL_REASSERT_ENABLED:
         return
+    _load_neg_boost_state()
     if config.OPENCLAW_READ_ONLY or config.DAIKIN_CONTROL_MODE != "active":
         return
     if (config.OPTIMIZATION_PRESET or "normal").strip().lower() == "vacation":
@@ -830,6 +872,7 @@ def _check_negative_boost_powerful(
     # READ_ONLY when Powerful isn't settable) must be rate-limited to the
     # interval, not retried every heartbeat — failed calls still cost quota.
     _NEG_BOOST_POWERFUL_LAST_UTC = now_utc
+    _save_neg_boost_state()
     try:
         client.set_tank_powerful(dev, True)
         dev.tank_powerful = True
@@ -848,6 +891,7 @@ def _check_negative_boost_powerful(
             _NEG_BOOST_LAST_TEMP = float(tank_t)
         else:
             _NEG_BOOST_STALL_COUNT += 1
+        _save_neg_boost_state()
         db.log_action(
             device="daikin",
             action="negative_boost_powerful_reassert",

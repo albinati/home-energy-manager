@@ -48,10 +48,12 @@ def _isolated_db(monkeypatch, tmp_path):
     sm._NEG_BOOST_POWERFUL_LAST_UTC = None
     sm._NEG_BOOST_STALL_COUNT = 0
     sm._NEG_BOOST_LAST_TEMP = None
+    sm._NEG_BOOST_STATE_LOADED = True  # tests drive the globals directly
     yield
     sm._NEG_BOOST_POWERFUL_LAST_UTC = None
     sm._NEG_BOOST_STALL_COUNT = 0
     sm._NEG_BOOST_LAST_TEMP = None
+    sm._NEG_BOOST_STATE_LOADED = True
 
 
 def _iso(dt: datetime) -> str:
@@ -287,3 +289,29 @@ def test_audit_row_written():
     ).fetchall()
     assert len(rows) == 1
     assert rows[0][0] == "success"
+
+
+def test_stall_state_survives_restart(monkeypatch):
+    """2026-07-04: three same-day deploys reset the in-memory stall counters,
+    so a 4h no-progress plateau never engaged the backoff (~16 futile writes).
+    The state is now persisted in runtime_settings and rehydrated on boot."""
+    monkeypatch.setattr(config, "DHW_NEGATIVE_BOOST_REASSERT_STALL_LIMIT", 3, raising=False)
+    monkeypatch.setattr(config, "DHW_NEGATIVE_BOOST_REASSERT_STALL_BACKOFF", 4.0, raising=False)
+    dev = _FakeDev(tank_powerful=False)
+    client = MagicMock()
+    for k in range(4):
+        _tick(client, dev, NOW + timedelta(minutes=16 * k), 51.0)
+    assert sm._NEG_BOOST_STALL_COUNT == 3  # backoff engaged (interval now 60min)
+
+    # Simulate a deploy restart: all in-memory state gone.
+    sm._NEG_BOOST_POWERFUL_LAST_UTC = None
+    sm._NEG_BOOST_STALL_COUNT = 0
+    sm._NEG_BOOST_LAST_TEMP = None
+    sm._NEG_BOOST_STATE_LOADED = False
+
+    # Pre-fix, the reset counters allowed an immediate base-cadence write.
+    # With rehydration the stretched interval still gates it.
+    _tick(client, dev, NOW + timedelta(minutes=16 * 4), 51.0)
+    assert client.set_tank_powerful.call_count == 4, "restart must not reset the stall backoff"
+    assert sm._NEG_BOOST_STALL_COUNT == 3  # rehydrated
+

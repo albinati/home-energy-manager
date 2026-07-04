@@ -265,9 +265,17 @@ def test_negprice_boost_allowed_when_cold(_preheat_cfg):
     assert f(-2.0, 2.0, **_THR) == 10
 
 
-def test_peak_setback_allowed_when_warm(_preheat_cfg):
-    """The −2 setback can only let the unit coast — never cut by the cutoff."""
+def test_peak_setback_suppressed_when_warm(_preheat_cfg):
+    """2026-07-04: with no space heating expected (outdoor >= cutoff), the
+    setback is a pure waste of Daikin writes — suppressed by default."""
     from src.scheduler.lp_dispatch import _preheat_lwt_offset as f
+    assert f(35.0, 25.0, **_THR) == 0
+
+
+def test_peak_setback_kill_switch_restores_legacy(_preheat_cfg, monkeypatch):
+    from src.config import config
+    from src.scheduler.lp_dispatch import _preheat_lwt_offset as f
+    monkeypatch.setattr(config, "DAIKIN_LWT_SETBACK_OUTDOOR_GATE", False, raising=False)
     assert f(35.0, 25.0, **_THR) == -2
 
 
