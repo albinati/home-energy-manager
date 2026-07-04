@@ -715,6 +715,20 @@ class Config:
         in ("1", "true", "yes", "on")
     )
 
+    # 2026-07-04 — in the slot labeller, `price <= 0` outranks the PV-only
+    # (grid_import ~= 0) solar_charge check. Negative-price slots with a
+    # PV-sourced planned charge used to be labelled solar_charge ->
+    # SelfUse(minSocOnGrid=100), and the H1 firmware does not honour that
+    # floor as a discharge freeze (battery discharged into the DHW boost on
+    # 06-28 and 07-04 instead of the paid grid). With this on they become
+    # `negative` -> ForceCharge, the discharge-proof mode. Vacation preset is
+    # unaffected (its LP forbids grid->battery entirely). false = legacy
+    # labelling for instant rollback.
+    LP_NEGATIVE_BEATS_SOLAR_CHARGE: bool = (
+        os.getenv("LP_NEGATIVE_BEATS_SOLAR_CHARGE", "true").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+
     LWT_OFFSET_MAX: float = float(os.getenv("LWT_OFFSET_MAX", "5"))
     LWT_OFFSET_MIN: float = float(os.getenv("LWT_OFFSET_MIN", "-5"))
     LWT_OFFSET_PREHEAT_BOOST: float = float(
