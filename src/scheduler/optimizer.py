@@ -367,14 +367,19 @@ def _slot_fox_tuple(
     if s.kind == "negative_hold":
         # 2026-06-28: dispatch as ForceCharge-to-the-LP-target, NOT Backup.
         #
-        # Backup was assumed to mean "hold battery: no discharge, no grid charge",
-        # but live data (2026-06-28 negative window) showed Backup DISCHARGES the
-        # battery above the reserve floor to self-supply a heavy concurrent load —
-        # the negative-price DHW Powerful boost (~3.5 kW) was powered by the
-        # battery instead of the PAID grid, draining the battery the LP was trying
-        # to fill. ForceCharge never discharges (regardless of fdPwr; see
-        # docs/FOXESS/WORK_MODES_AND_SOC.md), so the load is grid-fed at the paid
-        # negative rate.
+        # CORRECTED DIAGNOSIS (2026-07-04): the original 06-28 audit blamed Fox
+        # "Backup" mode for discharging the battery into a heavy load (~3.5 kW
+        # DHW Powerful boost) during the negative window. fox_schedule_state
+        # archaeology later showed NO Backup group was ever active during the
+        # observed discharges — the uploads covering 11:00-12:59 UTC that day
+        # said **SelfUse** (zero-charge `negative` slots fell through to the
+        # trailing SelfUse mapping below), and the SoC sawtooth at the 20 %
+        # floor is textbook SelfUse behaviour. Backup's documented semantics
+        # (reserve battery for outage, no discharge to loads) were never
+        # actually contradicted. The ForceCharge dispatch below remains the
+        # right fix regardless: it can never discharge, it grid-feeds the load
+        # at the paid negative rate, and — unlike a hold mode — it can't be
+        # folded into a SelfUse group by the schedule merge.
         #
         # fdSoc is the LP's planned per-slot target (~reserve during the hold,
         # since chg ~= 0 here). NOTE: _merge_adjacent_force_charge_rows collapses
