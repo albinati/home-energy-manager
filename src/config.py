@@ -2217,6 +2217,46 @@ class Config:
     FOX_SNAPSHOT_REFRESH_MAX_AGE_SECONDS: int = int(
         os.getenv("FOX_SNAPSHOT_REFRESH_MAX_AGE_SECONDS", "60")
     )
+    # --- Viewer-aware freshness boost -------------------------------------
+    # While someone has the cockpit open (detected via the /cockpit/now poll
+    # stream), a 30 s background job refreshes the Fox/Daikin caches faster
+    # than their idle baselines (Fox: PV_TELEMETRY_INTERVAL_MINUTES; Daikin:
+    # opportunistic only). Both vendors keep a quota reserve so the boost can
+    # never starve control writes / LP reads — when quota_remaining drops
+    # below the reserve, the boost silently stops and the baselines take over.
+    VIEWER_BOOST_ENABLED: bool = (
+        os.getenv("VIEWER_BOOST_ENABLED", "true").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+    # How long after the last /cockpit/now hit a viewer counts as "watching".
+    # Must comfortably exceed the SPA's 20 s poll so one missed tick doesn't
+    # flap the boost off.
+    VIEWER_ACTIVE_WINDOW_SECONDS: int = int(
+        os.getenv("VIEWER_ACTIVE_WINDOW_SECONDS", "90")
+    )
+    # Target Fox realtime staleness while a viewer is watching (idle baseline
+    # is the PV telemetry cadence, default 3 min). 0 disables the Fox boost.
+    FOX_VIEWER_REFRESH_SECONDS: int = int(
+        os.getenv("FOX_VIEWER_REFRESH_SECONDS", "60")
+    )
+    # Don't boost Fox when fewer than this many calls remain of the daily
+    # budget — plan pushes, MPC reads and the telemetry baseline come first.
+    FOX_VIEWER_QUOTA_RESERVE: int = int(
+        os.getenv("FOX_VIEWER_QUOTA_RESERVE", "300")
+    )
+    # Target Daikin device-cache staleness while a viewer is watching (idle
+    # baseline: refreshed only opportunistically by LP/reconciler reads, so
+    # tank/indoor temps could previously sit 30-60+ min stale on the cockpit).
+    # 0 disables the Daikin boost. The DAIKIN_REFRESH_MIN_INTERVAL_SECONDS
+    # anti-burst floor still applies underneath.
+    DAIKIN_VIEWER_REFRESH_SECONDS: int = int(
+        os.getenv("DAIKIN_VIEWER_REFRESH_SECONDS", "600")
+    )
+    # Daikin quota reserve (of DAIKIN_DAILY_BUDGET=180): reconciler writes and
+    # LP-init reads must never queue behind cosmetic freshness.
+    DAIKIN_VIEWER_QUOTA_RESERVE: int = int(
+        os.getenv("DAIKIN_VIEWER_QUOTA_RESERVE", "80")
+    )
     # In-process TTL cache for the Open-Meteo forecast fetch (shared by /weather +
     # /pv/today). Open-Meteo is hourly-deterministic, so a short cache turns the
     # 0.5–2 s blocking HTTP call into ~0 ms for the cockpit. 0 disables.

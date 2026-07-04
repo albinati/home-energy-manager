@@ -176,7 +176,9 @@ class TestFoxESSCache(unittest.TestCase):
         mock_get_client.return_value = mock_client
 
         with patch("src.foxess.service.time") as mock_time:
-            mock_time.monotonic.side_effect = [0, 10]  # first call 0, second call 10 (< 30)
+            # First call reads monotonic twice (fast path + re-check under the
+            # single-flight fetch lock); the warm second call reads it once.
+            mock_time.monotonic.side_effect = [0, 0, 10]  # second call sees 10 (< 30)
             mock_time.time.side_effect = [1000.0, 1010.0]  # one per get_cached_realtime -> _record_realtime_refresh
             first = foxess_service.get_cached_realtime(max_age_seconds=30)
             second = foxess_service.get_cached_realtime(max_age_seconds=30)
@@ -194,7 +196,9 @@ class TestFoxESSCache(unittest.TestCase):
         mock_get_client.return_value = mock_client
 
         with patch("src.foxess.service.time") as mock_time:
-            mock_time.monotonic.side_effect = [0, 100]  # second call sees 100 > 30
+            # Each fetching call reads monotonic twice (fast path + re-check
+            # under the single-flight fetch lock).
+            mock_time.monotonic.side_effect = [0, 0, 100, 100]  # second call sees 100 > 30
             mock_time.time.side_effect = [1000.0, 1100.0]  # two refreshes
             first = foxess_service.get_cached_realtime(max_age_seconds=30)
             second = foxess_service.get_cached_realtime(max_age_seconds=30)
