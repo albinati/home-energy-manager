@@ -293,7 +293,8 @@ export interface WeatherSlot {
 export interface WeatherResponse {
   forecast: WeatherSlot[];
   daikin?: {
-    room_temp: number | null;
+    // No room_temp — the Altherma has no room stat. Indoor comes from the
+    // house sensors via /cockpit/now (state.indoor), not the weather panel.
     outdoor_temp: number | null;
     lwt: number | null;
     tank_temp: number | null;

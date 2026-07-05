@@ -559,8 +559,9 @@ def _api_v1_weather_sync():
             dev = cached.devices[0]
             c = get_daikin_client()
             s = c.get_status(dev)
+            # No room_temp — the Altherma has no room stat (always null). Indoor
+            # temperature comes from the house sensors via /cockpit/now, not here.
             daikin = {
-                "room_temp": s.room_temp,
                 "outdoor_temp": s.outdoor_temp,
                 "lwt": s.lwt,
                 "tank_temp": s.tank_temp,
@@ -1130,10 +1131,14 @@ async def cockpit_at(when: str):
         "battery_kw": None,
         "fox_mode": realised.get("fox_mode"),
         "tank_c": realised.get("daikin_tank_temp"),
-        "indoor_c": realised.get("daikin_room_temp"),
+        # indoor_c is NOT from Daikin (no room stat — that was always null). The
+        # historical room-sensor reconstruction isn't wired yet, so leave it null
+        # here; the live /cockpit/now carries the sensor snapshot.
+        "indoor_c": None,
         "outdoor_c": realised.get("daikin_outdoor_temp"),
         "lwt_c": realised.get("daikin_lwt"),
         "daikin_mode": None,
+        "indoor": None,
     }
 
     # --- LP plan for the slot containing `when` ------------------------------

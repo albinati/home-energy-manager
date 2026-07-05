@@ -1081,10 +1081,11 @@ def _write_lwt_preheat_actions(
         )
         return 0
 
-    # Indoor temperature for the comfort guard: prefer a FRESH room-sensor reading
-    # (#540 W1); fall back to live Daikin telemetry (NULL on this Altherma); else
-    # None → guard is a no-op. A stale sensor is treated as absent (staleness
-    # window) so a dead sensor can't wedge the guard on an old value.
+    # Indoor temperature for the comfort guard: the house room sensors are the
+    # ONLY source (#540 W1). Daikin is NOT consulted — the Altherma has no room
+    # stat, so its "room temperature" is always null (that was a bug). A stale
+    # sensor is treated as absent (staleness window) so a dead sensor can't wedge
+    # the guard on an old value; None → guard is a no-op.
     indoor_c: float | None = None
     try:
         s = db.get_latest_indoor_reading(
@@ -1092,10 +1093,6 @@ def _write_lwt_preheat_actions(
         )
         if s is not None:
             indoor_c = float(s["temp_c"])
-        else:
-            tel = db.get_latest_daikin_telemetry(source="live")
-            if tel and tel.get("indoor_temp_c") is not None:
-                indoor_c = float(tel["indoor_temp_c"])
     except Exception:  # pragma: no cover — telemetry read must never break dispatch
         indoor_c = None
 
