@@ -296,11 +296,17 @@ echo "Token do sensor (guarda pro YAML do ESPHome): $INGEST_TOK"
 # 2. Restart do hem pra ler o token novo do .env (nada mais muda no deploy).
 systemctl restart hem
 
-# 3. Smoke test pelo funnel que JÁ existe (do teu laptop, mesmo fora do tailnet):
+# 3. Smoke test pelo funnel que JÁ existe (do teu laptop, mesmo fora do tailnet).
+#    O payload pode carregar tudo que o sensor mede — temp alimenta o modelo
+#    térmico; mac/humidade/pressão/extras vão pro log lossless por-device (W1c).
 curl -sS -X POST https://<host>.ts.net:8443/api/v1/sensors/indoor \
   -H "Authorization: Bearer $INGEST_TOK" -H "Content-Type: application/json" \
-  -d '{"readings":[{"captured_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","temp_c":21.3,"room":"sala"}]}'
-# Esperado: {"received":1,"written":1}
+  -d '{"readings":[{"captured_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","temp_c":21.3,"humidity_pct":55.0,"pressure_hpa":1013.2,"room":"sala","mac":"70:4B:CA:26:EA:B4","device_id":"hem-temp-sensor"}]}'
+# Esperado: {"received":1,"written":1,"logged":1}
+
+# 3b. Vê o que foi logado por-device:
+curl -sS "https://<host>.ts.net:8443/api/v1/sensors/devices"           # 1 linha/device
+curl -sS "https://<host>.ts.net:8443/api/v1/sensors/device-log?hours=1"  # linhas cruas c/ payload
 
 # 4. Confere que o token NÃO destrava mais nada (escopo):
 curl -s -o /dev/null -w "%{http_code}\n" https://<host>.ts.net:8443/api/v1/settings \
@@ -309,6 +315,12 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST \
   https://<host>.ts.net:8443/api/v1/optimization/propose \
   -H "Authorization: Bearer $INGEST_TOK" -d '{}'               # → 401
 ```
+
+**Campos aceitos por leitura** (`readings[]`): `captured_at` (obrigatório, UTC),
+`temp_c` (opcional; só entra no modelo térmico se −20..45), `humidity_pct`,
+`pressure_hpa`, `room` (único por nó — chave de storage), `source`, `device_id`,
+`mac`, + **qualquer campo extra** (preservado no `payload_json` do log). Nada que
+o sensor manda é descartado.
 
 **Config do ESPHome** (sensor manda a cada N minutos; use o `http_request` +
 `time` pra carimbar UTC). O `captured_at` precisa ser ISO-8601 **UTC** (`...Z`):
@@ -324,31 +336,42 @@ http_request:
   timeout: 10s
   verify_ssl: true      # funnel tem cert válido — mantenha ligado
 
-# Envia a leitura corrente do sensor de temperatura (id: temp_interna).
+# Cabeçalho via substitutions (texto substituído em compile-time — evita o
+# gotcha de !secret dentro de !lambda). Muda `room`/`node_name` por nó.
+substitutions:
+  node_name: hem-temp-sensor-sala
+  room: sala
+  ingest_token: "<o token do passo 1>"
+
 interval:
-  - interval: 5min
+  - interval: 60s
     then:
-      - http_request.post:
-          url: https://<host>.ts.net:8443/api/v1/sensors/indoor
-          headers:
-            Content-Type: application/json
-            Authorization: !lambda |-
-              return ("Bearer " + std::string("!secret hem_ingest_token")).c_str();
-          body: !lambda |-
-            char ts[24];
-            time_t now = id(sntp_time).now().timestamp;
-            strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", gmtime(&now));
-            char buf[192];
-            snprintf(buf, sizeof(buf),
-              "{\"readings\":[{\"captured_at\":\"%s\",\"temp_c\":%.1f,\"room\":\"sala\",\"source\":\"esphome\"}]}",
-              ts, id(temp_interna).state);
-            return std::string(buf);
+      - if:
+          condition:
+            lambda: 'return id(sntp_time).now().is_valid() && !isnan(id(temp_aht20).state);'
+          then:
+            - http_request.post:
+                url: https://<host>.ts.net:8443/api/v1/sensors/indoor
+                headers:
+                  Content-Type: application/json
+                  Authorization: "Bearer ${ingest_token}"
+                body: !lambda |-
+                  char ts[24];
+                  time_t now = id(sntp_time).now().timestamp;
+                  strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", gmtime(&now));
+                  char buf[256];
+                  snprintf(buf, sizeof(buf),
+                    "{\"readings\":[{\"captured_at\":\"%s\",\"temp_c\":%.2f,"
+                    "\"humidity_pct\":%.1f,\"pressure_hpa\":%.1f,"
+                    "\"room\":\"${room}\",\"device_id\":\"${node_name}\",\"mac\":\"%s\"}]}",
+                    ts, id(temp_aht20).state, id(hum_aht20).state,
+                    id(press_bmp280).state, get_mac_address().c_str());
+                  return std::string(buf);
 ```
 
-> Nota: no ESPHome, `!secret` dentro de `!lambda` não expande — coloque o token
-> via `substitutions:` ou concatene de um `globals`/template text sensor. O
-> exemplo acima é o esqueleto; ajuste ao teu firmware (a outra sessão que está
-> codando o sensor).
+> Troque `temp_aht20`/`hum_aht20`/`press_bmp280` pelos `id`s dos sensores de
+> vocês. `temp_c` vem do **AHT20**. Campos extras (2ª temperatura, RSSI…) podem
+> ser adicionados ao JSON — o HEM preserva todos no log por-device.
 
 Rollback / desligar: `sed -i '/^HEM_SENSOR_INGEST_TOKEN=/d' /srv/hem/.env &&
 systemctl restart hem` — sem o token, a rota volta a ser admin-only e o sensor
