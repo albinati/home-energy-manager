@@ -20,6 +20,7 @@ import {
   getApplianceSuggestions,
   getApplianceJobs,
   getAppliances,
+  getSensorDevices,
 } from "../lib/endpoints";
 import { Widget } from "../components/common/Widget";
 import { Icon } from "../components/common/Icon";
@@ -28,6 +29,7 @@ import { RefreshCountdown } from "../components/common/RefreshCountdown";
 import { PeriodNavigator } from "../components/shell/PeriodNavigator";
 import { usePeriod, periodFetchOpts, periodScope, isCurrentPeriod } from "../lib/period";
 import { LivePowerWidget } from "../components/cockpit/LivePowerWidget";
+import { IndoorClimateWidget } from "../components/cockpit/IndoorClimateWidget";
 import { Hero } from "../components/home/Hero";
 import { HeatingWidget } from "../components/home/HeatingWidget";
 import { PlanMini } from "../components/home/PlanMini";
@@ -96,6 +98,9 @@ export default function Landing() {
   // Heating-plan timeline (yesterday/today/tomorrow): outdoor temp + LWT offset
   // + tank + heating-on, recomputed per slot. Cache-only, poll while visible.
   const heatingPlan = usePoll(getHeatingPlan, 5 * 60_000);
+  // Indoor climate sensors (ESPHome room nodes, #540 W1). Viewer-readable, cheap
+  // SQLite read — poll while visible so the freshness dot stays honest.
+  const indoor = usePoll(getSensorDevices, 60_000);
   // Today's grid import/export so far (kWh + real £, credit on negative slots).
   const todayCum = usePoll(getEnergyTodayCumulative, 60_000);
   // Appliance status: registered list (once) + active jobs + cheapest-window
@@ -222,6 +227,16 @@ export default function Landing() {
                       dhwSchedule={dhwSched.data?.rows} heatingPlan={heatingPlan.data}
                       nowUtc={data.now_utc} />
           </Widget>
+
+          {/* Indoor climate — the house's own room sensors (#540 W1). Sits by
+              Live heating (thermal neighbours); the mean feeds the eye the same
+              way outdoor temp does in the Hero. Hidden until a sensor reports so
+              it never shows an empty card on households without nodes. */}
+          {(indoor.data?.devices?.length ?? 0) > 0 && (
+            <Widget title="Indoor climate" icon={<Icon name="thermometer" size={14} />} tone="thermal" size="half">
+              <IndoorClimateWidget devices={indoor.data?.devices} loading={indoor.loading} />
+            </Widget>
+          )}
         </div>
       </div>
 

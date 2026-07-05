@@ -1060,3 +1060,30 @@ export interface ProposePlanResponse {
   status: string;
   summary?: string | null;
 }
+
+// Indoor climate sensors (#540 W1) — one entry per device from
+// GET /api/v1/sensors/devices, with the latest reading's metrics attached.
+export interface SensorDeviceLatest {
+  temp_c: number | null;
+  humidity_pct: number | null;
+  pressure_hpa: number | null;
+  captured_at: string | null;
+  received_at: string | null;
+}
+
+export interface SensorDevice {
+  device_key: string;
+  device_id: string | null;
+  mac: string | null;
+  room: string | null;
+  source: string | null;
+  n_readings: number;
+  first_seen: string | null;
+  last_seen: string | null;
+  latest: SensorDeviceLatest | null;
+}
+
+export interface SensorDevicesResponse {
+  n_devices: number;
+  devices: SensorDevice[];
+}
