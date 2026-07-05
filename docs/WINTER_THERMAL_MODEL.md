@@ -157,6 +157,16 @@ and no calibration that can eat its own output.*
    `building_thermal_calibration` table with R², n, window — same shape as
    `daikin_lwt_kw_calibration`. Quality gate: only trust below documented
    residual thresholds; estimator + LP read learned values with env fallback.
+   **(SHIPPED 2026-07-05, code-ready pre-sensors.)** Pure fitters tested
+   against synthetic decay curves; contamination = heating buckets + LWT
+   offset windows + a `THERMAL_TAU_SETTLE_HOURS` (2 h) margin for
+   radiator/hydronic after-emission; ΔT ≥ 5 °C physics gate. τ-first design:
+   the UA HDD re-fit gates itself on ≥ 20 heating-season days and stays
+   `skipped` through summer. Cron 05:30 UTC; estimator consumes the bounded
+   readers; night brief gains a thermal line;
+   `GET /api/v1/sensors/thermal-calibration` shows learned + effective values.
+   Kill switches: `THERMAL_LEARNING_ENABLED` (cron),
+   `THERMAL_LEARNED_VALUES_ENABLED` (readers → env fallback).
 6. **Decontaminate `k_per_degc`**: exclude slots inside HEM-commanded offset
    windows from the regression sample (it must learn the firmware's natural
    behaviour, not HEM's own echo).

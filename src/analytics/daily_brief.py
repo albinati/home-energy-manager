@@ -187,6 +187,11 @@ def _overnight_plan_vs_actual_lines(today: date, tz: ZoneInfo) -> list[str]:
     if k_bullet:
         bullets.append(k_bullet)
 
+    # ── W2 building thermal calibration (#540) ──────────────────────────
+    thermal_bullet = _thermal_calibration_line()
+    if thermal_bullet:
+        bullets.append(thermal_bullet)
+
     return bullets
 
 
@@ -370,6 +375,36 @@ def _calibration_k_status_line() -> str | None:
     delta_pct = (k - default) / default * 100.0
     samples = int(row.get("samples") or 0)
     return f"- Calibration k: {k:.5f} kW/°C ({delta_pct:+.1f} % vs default, {samples} d)"
+
+
+def _thermal_calibration_line() -> str | None:
+    """Surface the W2-learned building thermal constants (#540). Silent
+    (None) while the calibration table is empty — i.e. until the indoor
+    sensors have produced enough clean decay nights."""
+    try:
+        row = db.get_building_thermal_calibration()
+    except Exception:
+        return None
+    if row is None or row.get("tau_hours") is None:
+        return None
+    tau = float(row["tau_hours"])
+    eps = int(row.get("tau_episodes") or 0)
+    r2 = float(row.get("tau_r2_median") or 0.0)
+    ua = row.get("ua_w_per_k")
+    ua_txt = f"{float(ua):.0f} W/K" if ua is not None else "env 600 W/K"
+    c = row.get("c_kwh_per_k")
+    c_txt = f" → C≈{float(c):.1f} kWh/K" if c is not None else ""
+    # τ age: merge semantics let a good τ persist through skipped refreshes
+    # (by design), so surface how old the component actually is.
+    age_txt = ""
+    try:
+        tau_at = datetime.fromisoformat(str(row.get("tau_computed_at")))
+        age_d = (datetime.now(UTC) - tau_at).days
+        if age_d >= 2:
+            age_txt = f", {age_d}d old"
+    except (ValueError, TypeError):
+        pass
+    return f"- Thermal: τ={tau:.1f} h ({eps} nights, R² {r2:.2f}{age_txt}) · UA={ua_txt}{c_txt}"
 
 
 # --------------------------------------------------------------------------

@@ -69,3 +69,34 @@ async def get_indoor_readings(hours: int = 24) -> dict[str, Any]:
         "stale_minutes": stale_min,
         "configured": bool(rows),
     }
+
+
+@router.get("/api/v1/sensors/thermal-calibration")
+async def get_thermal_calibration() -> dict[str, Any]:
+    """W2 building thermal calibration (#540): the learned row (or null before
+    the sensors have produced enough clean decay nights) plus the EFFECTIVE
+    values the estimator resolves through the bounded readers — so the UI can
+    always show what the system is actually using and where it came from."""
+    from ...analytics import thermal_learning as tl
+
+    row = None
+    try:
+        row = db.get_building_thermal_calibration()
+    except Exception:
+        logger.debug("thermal-calibration read failed", exc_info=True)
+    learned_tau = row is not None and row.get("tau_hours") is not None
+    return {
+        "calibration": row,  # null until the learner's quality gates pass
+        "effective": {
+            "tau_hours": round(tl.get_building_tau_hours(), 2),
+            "ua_w_per_k": round(tl.get_building_ua_w_per_k(), 1),
+            "c_kwh_per_k": round(tl.get_building_thermal_mass_kwh_per_k(), 2),
+            "source": "learned" if (
+                learned_tau and bool(getattr(config, "THERMAL_LEARNED_VALUES_ENABLED", True))
+            ) else "env",
+        },
+        "learning_enabled": bool(getattr(config, "THERMAL_LEARNING_ENABLED", True)),
+        "learned_values_enabled": bool(
+            getattr(config, "THERMAL_LEARNED_VALUES_ENABLED", True)
+        ),
+    }
