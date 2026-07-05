@@ -794,6 +794,13 @@ def bulletproof_dhw_error_log_job() -> None:
         logger.info("dhw_error_log rebuild: day_local=%s rows=%d", target_day.isoformat(), rows)
     except Exception as e:
         logger.warning("dhw_error_log rebuild failed (non-fatal): %s", e)
+    # Refresh the per-bucket bias corrector from the just-rebuilt error log.
+    # Cheap + observable; NO forecast effect unless DHW_BUCKET_BIAS_ENABLED.
+    try:
+        from ..dhw_bias import refresh_dhw_bucket_bias
+        refresh_dhw_bucket_bias()
+    except Exception as e:
+        logger.warning("dhw_bucket_bias refresh failed (non-fatal): %s", e)
 
 
 def bulletproof_load_error_log_job() -> None:

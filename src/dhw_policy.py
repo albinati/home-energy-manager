@@ -425,6 +425,40 @@ def _nominal_daily_total_kwh(mode: str) -> float:
     return total
 
 
+def _nominal_bucket_shares(mode: str) -> dict[int, float]:
+    """Nominal energy fraction per LOCAL 2h bucket (0-11) for ``mode`` — the
+    same 48-slot walk as :func:`_nominal_daily_total_kwh`, aggregated by
+    ``hour // 2`` (the ``dhw_error_log`` bucketing). Used by the bucket-bias
+    corrector to normalize its factors so applying them preserves the daily
+    total: the auto-scale owns the LEVEL and is open-loop w.r.t. the committed
+    forecast, so an un-normalized shape corrector would double-correct the
+    level, permanently. Returns ``{}`` for vacation (nominal total is 0)."""
+    if mode == "vacation":
+        return {}
+    warmup_hour = int(getattr(config, "DHW_WARMUP_START_HOUR_LOCAL", 13))
+    setback_hour = int(getattr(config, "DHW_SETBACK_START_HOUR_LOCAL", 22))
+    per_bucket: dict[int, float] = {b: 0.0 for b in range(12)}
+    total = 0.0
+    for half_slot in range(48):
+        h = half_slot // 2
+        if _EVENING_SHOWER_START_H <= h < _EVENING_SHOWER_END_H or (
+            mode == "guests"
+            and _GUESTS_MORNING_SHOWER_START_H <= h < _GUESTS_MORNING_SHOWER_END_H
+        ):
+            kwh = _SHOWER_REHEAT_KWH
+        elif mode == "guests":
+            kwh = _WARMUP_MAINTENANCE_KWH
+        elif warmup_hour <= h < setback_hour:
+            kwh = _WARMUP_TRANSITION_KWH if h == warmup_hour else _WARMUP_MAINTENANCE_KWH
+        else:
+            kwh = _SETBACK_MAINTENANCE_KWH
+        per_bucket[h // 2] += kwh
+        total += kwh
+    if total <= 0:
+        return {}
+    return {b: v / total for b, v in per_bucket.items()}
+
+
 def _dhw_autoscale_factor(mode: str) -> float:
     """Trailing measured-vs-nominal scale for the schedule constants (#534).
 
@@ -512,6 +546,18 @@ def dhw_budget_state(mode: str | None = None) -> dict[str, Any]:
     except Exception:  # pragma: no cover - defensive: status read must not fail
         logger.debug("dhw_budget_state: measured read failed", exc_info=True)
 
+    bias_factors: dict[str, float] = {}
+    bias_normalized: dict[str, float] = {}
+    try:
+        from .dhw_bias import normalized_factors
+        raw = db.get_dhw_bucket_bias()
+        bias_factors = {str(b): round(f, 3) for b, f in sorted(raw.items())}
+        bias_normalized = {
+            str(b): round(f, 3) for b, f in sorted(normalized_factors(raw, mode).items())
+        }
+    except Exception:  # pragma: no cover - defensive: status read must not fail
+        logger.debug("dhw_budget_state: bucket-bias read failed", exc_info=True)
+
     return {
         "mode": mode,
         "nominal_kwh": round(nominal, 2),
@@ -520,6 +566,9 @@ def dhw_budget_state(mode: str | None = None) -> dict[str, Any]:
         "effective_budget_kwh": round(nominal * factor, 2),
         "measured_today_kwh": measured_today,
         "measured_7d_avg_kwh": measured_7d_avg,
+        "bucket_bias_enabled": bool(getattr(config, "DHW_BUCKET_BIAS_ENABLED", False)),
+        "bucket_bias_factors": bias_factors,
+        "bucket_bias_normalized": bias_normalized,
     }
 
 
@@ -640,6 +689,29 @@ def forecast_dhw_load_per_slot(
             e_dhw.append(WARMUP_MAINTENANCE_KWH)
         else:  # setback
             e_dhw.append(SETBACK_MAINTENANCE_KWH)
+
+    # ----- Per-bucket shape correction (dhw_bucket_bias) -------------------
+    # Learned nightly from dhw_error_log; normalized here against THIS mode's
+    # nominal bucket shares so the daily total is untouched (the auto-scale
+    # above owns the level — an un-normalized shape factor would double-
+    # correct it; see src/dhw_bias.py). Deliberately BEFORE the _max_hp_kwh
+    # clamp below: the LP pins these values as hard equalities, so a boosted
+    # bucket must still be capped at the heater's per-slot capacity. The
+    # negative-price boost ramp further down OVERWRITES its slots after this
+    # point, so boost energy is never scaled. Bucket factors intentionally
+    # absorb warmup/decay TIMING error (tank thermal inertia spills the ramp
+    # across buckets) — that's the point, not a bug.
+    if mode != "vacation" and bool(getattr(config, "DHW_BUCKET_BIAS_ENABLED", False)):
+        try:
+            from .dhw_bias import normalized_factors
+            _bias = normalized_factors(db.get_dhw_bucket_bias(), mode)
+            if _bias:
+                e_dhw = [
+                    v * _bias.get(slot.astimezone(tz).hour // 2, 1.0)
+                    for v, slot in zip(e_dhw, slot_starts_utc)
+                ]
+        except Exception as _exc:  # pragma: no cover - forecast must not fail
+            logger.debug("dhw_policy: bucket-bias apply failed, using 1.0: %s", _exc)
 
     # The LP pins ``e_dhw[i] == forecast[i]`` as a hard equality against a
     # variable whose upBound is the heater's per-slot electric capacity

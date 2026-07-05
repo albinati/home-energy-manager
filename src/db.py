@@ -904,6 +904,23 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         )"""
     )
 
+    # DHW bucket-bias corrector — MULTIPLICATIVE per-LOCAL-2h-bucket factor on
+    # the pinned DHW forecast, from the damped recency-weighted ratio-of-sums
+    # (actual/forecast) in dhw_error_log. Shape-only: application normalizes by
+    # the mode's nominal bucket shares so the daily total (the auto-scale's
+    # job) is preserved. Refreshed nightly; only APPLIED to the forecast when
+    # DHW_BUCKET_BIAS_ENABLED.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS dhw_bucket_bias (
+            bucket_idx      INTEGER PRIMARY KEY CHECK(bucket_idx BETWEEN 0 AND 11),
+            factor          REAL NOT NULL,
+            raw_ratio       REAL,
+            samples         INTEGER NOT NULL,
+            days            INTEGER,
+            computed_at     TEXT NOT NULL
+        )"""
+    )
+
     # Winter thermal #540 W1 — indoor temperature ingestion. The Altherma has no
     # room stat (daikin_room_temp is 100% NULL), so the house's indoor temp has
     # never been measured. This is the pipe the user's room sensors push into;
@@ -4120,6 +4137,31 @@ def get_nonzero_lwt_offset_windows(
             conn.close()
 
 
+def get_dhw_boost_windows(start_date: str, end_date: str) -> list[tuple[str, str]]:
+    """``(start_time, end_time)`` UTC-ISO pairs of every ``tank_negative_boost``
+    action whose plan ``date`` falls in the inclusive range.
+
+    Used to EXCLUDE deliberate boost windows from the dhw_bucket_bias learning
+    sample: the boost is max-heating the forecast budgets separately (the
+    :737-764 ramp in dhw_policy), so its measured energy says nothing about the
+    ordinary schedule constants. Same status + date-pad rationale as
+    :func:`get_nonzero_lwt_offset_windows`.
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT start_time, end_time FROM action_schedule
+                   WHERE device = 'daikin' AND action_type = 'tank_negative_boost'
+                     AND date >= date(?, '-1 day') AND date <= ?
+                     AND status IN ('completed', 'active', 'failed')""",
+                (start_date, end_date),
+            )
+            return [(str(r["start_time"]), str(r["end_time"])) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
 def measured_space_heating_kwh_excluding_offset_windows(
     lookback_hours: int = 48,
 ) -> float:
@@ -5325,6 +5367,24 @@ def rebuild_dhw_error_log_for_date(day: date) -> int:
     return written
 
 
+def get_dhw_error_log_range(start_day_iso: str, end_day_iso: str) -> list[dict[str, Any]]:
+    """Per-(day, bucket) forecast/actual/error rows with ``day`` in the
+    inclusive local-date range, for the dhw_bucket_bias corrector."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT day, bucket_idx, forecast_kwh, actual_kwh, error_kwh
+                   FROM dhw_error_log
+                   WHERE day >= ? AND day <= ?
+                   ORDER BY day, bucket_idx""",
+                (start_day_iso, end_day_iso),
+            )
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
 def committed_load_forecast_by_slot(day: date) -> dict[str, tuple[float, float]]:
     """Per-slot committed (total, base) LOAD forecast for ``day``.
 
@@ -5913,6 +5973,47 @@ def get_load_recent_bias() -> dict[int, float]:
         conn = get_connection()
         try:
             cur = conn.execute("SELECT hour_local, bias_kwh FROM load_recent_bias")
+            return {int(r[0]): float(r[1]) for r in cur.fetchall()}
+        finally:
+            conn.close()
+
+
+def upsert_dhw_bucket_bias(
+    factors: dict[int, float],
+    raw_ratios: dict[int, float],
+    samples: dict[int, int],
+    computed_at: str,
+    days: dict[int, int] | None = None,
+) -> int:
+    """Replace the ``dhw_bucket_bias`` table with freshly-computed per-bucket
+    multiplicative factors."""
+    n = 0
+    with _lock:
+        conn = get_connection()
+        try:
+            conn.execute("DELETE FROM dhw_bucket_bias")
+            for b, f in factors.items():
+                conn.execute(
+                    """INSERT OR REPLACE INTO dhw_bucket_bias
+                       (bucket_idx, factor, raw_ratio, samples, days, computed_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (int(b), float(f), float(raw_ratios.get(b, f)),
+                     int(samples.get(b, 0)), int((days or {}).get(b, 0)), computed_at),
+                )
+                n += 1
+            conn.commit()
+        finally:
+            conn.close()
+    return n
+
+
+def get_dhw_bucket_bias() -> dict[int, float]:
+    """Return cached per-local-2h-bucket multiplicative DHW factors, or ``{}``
+    when empty. The forecast applies them only when DHW_BUCKET_BIAS_ENABLED."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute("SELECT bucket_idx, factor FROM dhw_bucket_bias")
             return {int(r[0]): float(r[1]) for r in cur.fetchall()}
         finally:
             conn.close()

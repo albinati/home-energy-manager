@@ -1248,6 +1248,42 @@ class Config:
     DHW_FORECAST_AUTOSCALE_MAX: float = float(
         os.getenv("DHW_FORECAST_AUTOSCALE_MAX", "1.6")
     )
+    # --- DHW bucket-bias shape corrector ---
+    # Multiplicative per-LOCAL-2h-bucket factor on the pinned DHW forecast,
+    # learned nightly from dhw_error_log (damped recency-weighted
+    # ratio-of-sums, clone of the PV/load recent-bias pattern). SHAPE-only:
+    # application normalizes against the mode's nominal bucket shares so the
+    # daily total is preserved — the auto-scale above owns the level and is
+    # open-loop w.r.t. the committed forecast (it would never back off a
+    # level shift made here). Default OFF (house convention for correctors
+    # feeding the LP; here the value becomes a HARD K2 equality): the table
+    # refreshes and is observable regardless; enable after the backtest
+    # endpoint (/api/v1/dhw/error-log/backtest) shows out-of-sample MAE
+    # reduction over ~7 days.
+    DHW_BUCKET_BIAS_ENABLED: bool = os.getenv(
+        "DHW_BUCKET_BIAS_ENABLED", "false"
+    ).lower() in ("true", "1", "yes")
+    DHW_BUCKET_BIAS_WINDOW_DAYS: int = int(
+        os.getenv("DHW_BUCKET_BIAS_WINDOW_DAYS", "14")
+    )
+    DHW_BUCKET_BIAS_HALFLIFE_DAYS: float = float(
+        os.getenv("DHW_BUCKET_BIAS_HALFLIFE_DAYS", "5")
+    )
+    DHW_BUCKET_BIAS_DAMPING: float = float(
+        os.getenv("DHW_BUCKET_BIAS_DAMPING", "0.5")
+    )
+    # Clamp: daytime summer over-forecast needs ~0.25-0.33; the observed 4x
+    # warmup under-forecast is mostly the flip side inside a total-preserving
+    # shape (shrinking daytime buckets boosts warmup via normalization), so
+    # 3.0 suffices pre-normalization — any residual accumulates over days.
+    DHW_BUCKET_BIAS_MIN: float = float(os.getenv("DHW_BUCKET_BIAS_MIN", "0.25"))
+    DHW_BUCKET_BIAS_MAX: float = float(os.getenv("DHW_BUCKET_BIAS_MAX", "3.0"))
+    # Forecast-side-only floor (ratio denominator). Asymmetric on purpose:
+    # low/zero ACTUAL rows are kept — they ARE the over-forecast signal.
+    DHW_BUCKET_BIAS_MIN_FORECAST_KWH: float = float(
+        os.getenv("DHW_BUCKET_BIAS_MIN_FORECAST_KWH", "0.05")
+    )
+    DHW_BUCKET_BIAS_MIN_DAYS: int = int(os.getenv("DHW_BUCKET_BIAS_MIN_DAYS", "3"))
     # --- Legionella thermal-shock STAND-OFF (2026-06-07) ---
     # The Onecta firmware owns the DHW tank during its weekly thermal-shock
     # cycle. Any tank PATCH HEM sends in that window is arbitrated/overridden by
