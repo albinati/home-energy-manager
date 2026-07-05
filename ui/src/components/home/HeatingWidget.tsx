@@ -35,7 +35,7 @@ interface HeatingWidgetProps {
 // Outdoor temp + LWT now prefer /execution/today (logged Daikin readings,
 // no live API call) over the cached /daikin/status — same data freshness,
 // zero quota cost.
-export function HeatingWidget({ state, daikin, daikinQuota, report, weather, execution, onRefresh, children }: HeatingWidgetProps) {
+export function HeatingWidget({ state, daikin, daikinQuota, report, execution, onRefresh, children }: HeatingWidgetProps) {
   const dev = daikin && daikin.length > 0 ? daikin[0] : null;
   // Explicit, confirmed LIVE read. Everything on this widget normally renders
   // the cache the LP/scheduler already refreshed (~30 min cadence) — we only
@@ -94,28 +94,6 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather, exe
   const lwtFromExec = latestExecValue(execution, (s) => s.daikin_lwt_c);
   const lwt = lwtFromExec ?? state.lwt_c ?? dev?.lwt ?? null;
 
-  // Outdoor: 1) execution_today logged Daikin sensor (fresh, free)
-  //          2) cached Daikin device sensor
-  //          3) Daikin echo in /weather
-  //          4) Open-Meteo forecast slot closest to now
-  let outdoorTemp = latestExecValue(execution, (s) => s.daikin_outdoor_c);
-  let outdoorSource: "execution" | "daikin" | "openmeteo" = "execution";
-  if (outdoorTemp == null) {
-    outdoorTemp = dev?.outdoor_temp ?? weather?.daikin?.outdoor_temp ?? null;
-    outdoorSource = "daikin";
-  }
-  if (outdoorTemp == null && weather?.forecast && weather.forecast.length > 0) {
-    const nowTs = Date.now();
-    let closest = weather.forecast[0];
-    let closestDist = Math.abs(Date.parse(closest.time) - nowTs);
-    for (const f of weather.forecast) {
-      const d = Math.abs(Date.parse(f.time) - nowTs);
-      if (d < closestDist) { closest = f; closestDist = d; }
-    }
-    outdoorTemp = closest.temp_c ?? null;
-    outdoorSource = "openmeteo";
-  }
-
   // /energy/report?period=day doesn't carry a DHW vs space heating split —
   // only a single heating_estimate_kwh total. Show that when present.
   const totalHeatingKwh = report?.heating_estimate_kwh ?? null;
@@ -163,19 +141,9 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather, exe
       {/* Gauges demote to a thin accessory row beneath the chart: three radial
           dials, domain-coloured — outdoor (cool blue) · tank (amber heat) ·
           LWT (house/radiators). */}
+      {/* Water temps only — the heating actuations. Air temps (indoor/outdoor)
+          now live in the hero climate header, so they're not duplicated here. */}
       <div class="heat-gauges">
-        {state.indoor_c != null && (
-          <div title={`House room sensors — mean of ${state.indoor?.n_rooms ?? 1} room(s)`}>
-            <RadialGauge label="Indoor" value={state.indoor_c} min={10} max={30}
-                         color="var(--thermal)" sub={cAndF(state.indoor_c)} />
-          </div>
-        )}
-        <div title={outdoorSource === "execution" ? "Daikin sensor (logged)"
-                    : outdoorSource === "daikin" ? "Daikin sensor (live)"
-                    : "Open-Meteo forecast"}>
-          <RadialGauge label="Outdoor" value={outdoorTemp} min={-5} max={35}
-                       color="var(--grid)" sub={cAndF(outdoorTemp)} />
-        </div>
         <RadialGauge label={`Tank${tankPower != null ? (tankPower ? " · on" : " · off") : ""}`}
                      value={tankTemp} min={20} max={65} target={tankTarget} color="var(--peak)"
                      sub={tankTarget != null ? `set ${Math.round(tankTarget)}°` : undefined} />
