@@ -175,8 +175,28 @@ function HeroWeather({ weather, pv, indoor }: {
   let curIdx = 0;
   for (let i = 0; i < fc.length; i++) { if (new Date(fc[i].time).getTime() <= nowMs) curIdx = i; else break; }
   const cur = fc[curIdx];
-  const outdoor = weather?.daikin?.outdoor_temp ?? cur.temp_c;
+  // Outdoor REAL (Daikin sensor) vs ESTIMATED (Open-Meteo forecast at now). The
+  // hero shows the measured value big + the forecast as a "vs est" comparison;
+  // when there's no sensor the forecast IS the number (no separate est line).
+  const outdoorReal = weather?.daikin?.outdoor_temp ?? null;
+  const outdoorEst = cur.temp_c ?? null;
+  const outdoor = outdoorReal ?? outdoorEst ?? 0;
+  const showEst = outdoorReal != null && outdoorEst != null;
   const cond = condOf(cur.cloud_cover_pct);
+
+  // Indoor (house room sensors) — the peer of Outside in the two-column head.
+  const inRooms = indoor?.rooms ?? [];
+  const inWithTemp = inRooms.filter((r) => r.temp_c != null);
+  const indoorMean = indoor?.mean_c ?? (inWithTemp.length
+    ? inWithTemp.reduce((s, r) => s + (r.temp_c as number), 0) / inWithTemp.length : null);
+  const indoorStale = !!indoor?.stale;
+  const indoorRoom = (indoor?.n_rooms ?? 0) === 1 ? (inRooms[0]?.room ?? "inside") : `${indoor?.n_rooms} rooms`;
+  const indoorHum = indoor?.humidity_pct ?? null;
+  const indoorIso = indoor?.newest_received_at ?? indoor?.newest_captured_at ?? null;
+  const indoorRefresh = indoorIso
+    ? new Date(indoorIso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })
+    : null;
+  const hasIndoor = (indoor?.n_rooms ?? 0) > 0;
 
   // Hi/lo over a rolling next-24h window + the current reading. "Today's
   // remaining hours" collapses to a flat range in the evening (e.g. L19 H19)
@@ -213,35 +233,57 @@ function HeroWeather({ weather, pv, indoor }: {
   return (
     <div class="hw">
       <div class="flex between items-center">
-        <div class="eyebrow weather-eyebrow"><WxIcon cond={cond} size={13} />Weather · now</div>
+        <div class="eyebrow weather-eyebrow"><WxIcon cond={cond} size={13} />Climate · now</div>
+        {hasIndoor && indoorRefresh && (
+          <span class="dim small hw-refresh" title="Last indoor sensor reading">
+            <span class={`hw-indoor-dot ${indoorStale ? "is-stale" : "live-pulse"}`} aria-hidden="true" />{indoorRefresh}
+          </span>
+        )}
       </div>
-      <div class="hw-now">
-        <div class="weather-temp">{Math.round(outdoor)}°</div>
-        <div class="hw-cond">
-          <WxIcon cond={cond} size={26} />
-          <div>
-            <div class="hw-cond-label">{condLabel(cond)}</div>
-            {cur.cloud_cover_pct != null && <div class="dim small">{Math.round(cur.cloud_cover_pct)}% cloud</div>}
+
+      {/* Outside vs Inside — peers. Outside = measured (big) vs forecast (est);
+          Inside = the house room sensors (#540 W1). */}
+      <div class="hw-head">
+        <div class="hw-col hw-col--out">
+          <div class="eyebrow hw-col-label">Outside</div>
+          <div class="hw-col-now">
+            <span class="hw-col-temp">{Math.round(outdoor)}°</span>
+            <WxIcon cond={cond} size={22} />
           </div>
+          <div class="dim small hw-col-sub">
+            {condLabel(cond)}
+            {showEst && <> · est {Math.round(outdoorEst as number)}°</>}
+            {cur.cloud_cover_pct != null && <> · {Math.round(cur.cloud_cover_pct)}%</>}
+          </div>
+        </div>
+
+        <div class={`hw-col hw-col--in ${indoorStale ? "is-stale" : ""}`}>
+          <div class="eyebrow hw-col-label">Inside</div>
+          {hasIndoor ? (
+            <>
+              <div class="hw-col-now">
+                <span class="hw-col-temp">{indoorMean != null ? indoorMean.toFixed(1) : "—"}°</span>
+              </div>
+              <div class="dim small hw-col-sub">
+                {indoorRoom}{indoorHum != null && <> · {Math.round(indoorHum)}% humidity</>}
+              </div>
+            </>
+          ) : (
+            <div class="dim small hw-col-sub hw-col-sub--empty">no sensor</div>
+          )}
         </div>
       </div>
 
-      {/* The day's outdoor range (L→H) and the indoor climate sit side by side,
-          above the multi-day forecast. Indoor is the house's own room sensors
-          (#540 W1) — read from the same /cockpit/now snapshot as the rest. */}
-      <div class="hw-mid">
-        {hi != null && lo != null && (
-          <div class="thermo">
-            <div class="thermo-track"><span class="thermo-mark" style={{ left: `${markPct}%` }} /></div>
-            <div class="thermo-row">
-              <span class="t-lo">L {Math.round(lo)}°</span>
-              <span class="dim small">next 24h</span>
-              <span class="t-hi">H {Math.round(hi)}°</span>
-            </div>
+      {hi != null && lo != null && (
+        <div class="thermo">
+          <div class="thermo-track"><span class="thermo-mark" style={{ left: `${markPct}%` }} /></div>
+          <div class="thermo-row">
+            <span class="t-lo">L {Math.round(lo)}°</span>
+            <span class="dim small">next 24h</span>
+            <span class="t-hi">H {Math.round(hi)}°</span>
           </div>
-        )}
-        <HeroIndoor indoor={indoor} />
-      </div>
+        </div>
+      )}
 
       {/* Next 3 days — fills the gap between the range and the solar progress. */}
       <ForecastStrip weather={weather} />
@@ -259,38 +301,6 @@ function HeroWeather({ weather, pv, indoor }: {
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-// Indoor climate mini-panel — sits beside the outdoor L→H range in the hero.
-// House mean temperature + room + humidity + the last-refresh clock time.
-function HeroIndoor({ indoor }: { indoor?: IndoorSummary | null }) {
-  if (!indoor || indoor.n_rooms < 1) return null;
-  const rooms = indoor.rooms ?? [];
-  const withTemp = rooms.filter((r) => r.temp_c != null);
-  const meanTemp = indoor.mean_c ?? (withTemp.length
-    ? withTemp.reduce((s, r) => s + (r.temp_c as number), 0) / withTemp.length : null);
-  const stale = !!indoor.stale;
-  const roomLabel = indoor.n_rooms === 1 ? (rooms[0]?.room ?? "inside") : `${indoor.n_rooms} rooms`;
-  // "horario do ultimo refresh" — the newest reading's local clock time.
-  const iso = indoor.newest_received_at ?? indoor.newest_captured_at;
-  const refresh = iso
-    ? new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })
-    : null;
-  return (
-    <div class={`hw-indoor ${stale ? "is-stale" : ""}`}>
-      <div class="flex between items-center">
-        <div class="eyebrow weather-eyebrow">
-          <span class={`hw-indoor-dot ${stale ? "" : "live-pulse"}`} aria-hidden="true" />Inside
-        </div>
-        {refresh && <span class="dim small hw-indoor-fresh">{stale ? "stale " : ""}{refresh}</span>}
-      </div>
-      <div class="hw-indoor-temp">{meanTemp != null ? meanTemp.toFixed(1) : "—"}°</div>
-      <div class="dim small hw-indoor-sub">
-        {roomLabel}
-        {indoor.humidity_pct != null && <> · {Math.round(indoor.humidity_pct)}% humidity</>}
-      </div>
     </div>
   );
 }
