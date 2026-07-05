@@ -272,6 +272,89 @@ sed -i '/^HEM_UI_AUTH_REQUIRED=/d' /srv/hem/.env
 systemctl restart hem
 ```
 
+## 12. Ingestão do sensor ESPHome de temperatura interna (#540 W1)
+
+O HEM aceita leituras de temperatura interna em `POST /api/v1/sensors/indoor`
+(batch, idempotente em `(captured_at, room)`). Um sensor ESPHome **na LAN de
+casa** alcança o HEM **no Hetzner** reusando o **funnel Tailscale do `hem-ui`
+(`:8443`)**, que já expõe `/api/` publicamente com TLS válido (e **não** expõe
+`/mcp`). Nenhum proxy/porta/funnel novo — só o token **escopado**
+`HEM_SENSOR_INGEST_TOKEN`, que destrava **apenas** essa rota (nunca o admin).
+
+O que protege, em camadas: o funnel termina TLS (bearer nunca trafega em claro);
+`ApiV1RoleAuth` deixa o token de ingestão satisfazer **só** um write em
+`/api/v1/sensors/indoor` — 401 em qualquer outra escrita e em toda leitura
+admin (Settings/Journal). Um vazamento do firmware só consegue postar
+temperatura falsa nessa rota; rotacione o token pra revogar o device.
+
+```bash
+# 1. Gera o token escopado e adiciona no .env do HEM.
+INGEST_TOK=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+echo "HEM_SENSOR_INGEST_TOKEN=$INGEST_TOK" >> /srv/hem/.env
+echo "Token do sensor (guarda pro YAML do ESPHome): $INGEST_TOK"
+
+# 2. Restart do hem pra ler o token novo do .env (nada mais muda no deploy).
+systemctl restart hem
+
+# 3. Smoke test pelo funnel que JÁ existe (do teu laptop, mesmo fora do tailnet):
+curl -sS -X POST https://<host>.ts.net:8443/api/v1/sensors/indoor \
+  -H "Authorization: Bearer $INGEST_TOK" -H "Content-Type: application/json" \
+  -d '{"readings":[{"captured_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","temp_c":21.3,"room":"sala"}]}'
+# Esperado: {"received":1,"written":1}
+
+# 4. Confere que o token NÃO destrava mais nada (escopo):
+curl -s -o /dev/null -w "%{http_code}\n" https://<host>.ts.net:8443/api/v1/settings \
+  -H "Authorization: Bearer $INGEST_TOK"                       # → 401
+curl -s -o /dev/null -w "%{http_code}\n" -X POST \
+  https://<host>.ts.net:8443/api/v1/optimization/propose \
+  -H "Authorization: Bearer $INGEST_TOK" -d '{}'               # → 401
+```
+
+**Config do ESPHome** (sensor manda a cada N minutos; use o `http_request` +
+`time` pra carimbar UTC). O `captured_at` precisa ser ISO-8601 **UTC** (`...Z`):
+
+```yaml
+# secrets.yaml → hem_ingest_token: "<o token do passo 1>"
+time:
+  - platform: sntp
+    id: sntp_time
+
+http_request:
+  useragent: esphome-hem-sensor
+  timeout: 10s
+  verify_ssl: true      # funnel tem cert válido — mantenha ligado
+
+# Envia a leitura corrente do sensor de temperatura (id: temp_interna).
+interval:
+  - interval: 5min
+    then:
+      - http_request.post:
+          url: https://<host>.ts.net:8443/api/v1/sensors/indoor
+          headers:
+            Content-Type: application/json
+            Authorization: !lambda |-
+              return ("Bearer " + std::string("!secret hem_ingest_token")).c_str();
+          body: !lambda |-
+            char ts[24];
+            time_t now = id(sntp_time).now().timestamp;
+            strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", gmtime(&now));
+            char buf[192];
+            snprintf(buf, sizeof(buf),
+              "{\"readings\":[{\"captured_at\":\"%s\",\"temp_c\":%.1f,\"room\":\"sala\",\"source\":\"esphome\"}]}",
+              ts, id(temp_interna).state);
+            return std::string(buf);
+```
+
+> Nota: no ESPHome, `!secret` dentro de `!lambda` não expande — coloque o token
+> via `substitutions:` ou concatene de um `globals`/template text sensor. O
+> exemplo acima é o esqueleto; ajuste ao teu firmware (a outra sessão que está
+> codando o sensor).
+
+Rollback / desligar: `sed -i '/^HEM_SENSOR_INGEST_TOKEN=/d' /srv/hem/.env &&
+systemctl restart hem` — sem o token, a rota volta a ser admin-only e o sensor
+passa a levar 401 (nada mais no deploy muda). Revogar/rotacionar um device:
+troca o valor do `HEM_SENSOR_INGEST_TOKEN` + restart + atualiza o YAML.
+
 ## Troubleshooting
 
 | Sintoma | Causa provável | Ação |

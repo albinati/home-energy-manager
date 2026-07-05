@@ -204,6 +204,8 @@ class ApiV1RoleAuth:
             "/api/v1/integrations",   # SmartThings credentials / OAuth
             "/api/v1/workbench",      # LP override sandbox (admin tool, in Settings)
         ),
+        ingest_tokens: Iterable[TokenLike] = (),
+        ingest_write_routes: Iterable[str] = ("/api/v1/sensors/indoor",),
     ) -> None:
         self.app = app
         self._admin_tokens = list(admin_tokens)
@@ -211,11 +213,28 @@ class ApiV1RoleAuth:
         self._prefix = prefix
         self._public_paths = frozenset(public_paths)
         self._admin_read_prefixes = tuple(admin_read_prefixes)
+        # Scoped, non-admin write credential(s). A match satisfies ONLY an EXACT
+        # `POST <route>` from this allowlist — never an admin read, never another
+        # verb, never a sibling/sub path. This is the token an internet-exposed
+        # device (an ESPHome room sensor pushing to /sensors/indoor via the
+        # hem-ui Tailscale funnel) carries, so a firmware leak can't hand over
+        # admin. Exact match (not prefix): a future route like
+        # `/sensors/indoor/purge` must NOT ride this token silently.
+        self._ingest_tokens = list(ingest_tokens)
+        self._ingest_write_routes = frozenset(ingest_write_routes)
 
     def _needs_admin(self, method: str, path: str) -> bool:
         if method.upper() not in SAFE_METHODS:
             return True
         return any(path.startswith(p) for p in self._admin_read_prefixes)
+
+    def _ingest_allowed(self, method: str, path: str) -> bool:
+        """True only for an EXACT `POST <allowlisted route>` — the sole surface a
+        scoped ingest token unlocks. Any other verb (PUT/DELETE/GET), or any
+        other path (including a sibling like `/sensors/indoorX` or a sub-path
+        `/sensors/indoor/foo`), returns False, so the scoped token is useless
+        everywhere except its one endpoint."""
+        return method.upper() == "POST" and path in self._ingest_write_routes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -244,11 +263,19 @@ class ApiV1RoleAuth:
         if not presented:
             await _reject(send, 401, "admin token required", realm="hem-api")
             return
-        if not token_matches_any(presented, self._admin_tokens):
-            await _reject(send, 401, "invalid admin token", realm="hem-api")
+        if token_matches_any(presented, self._admin_tokens):
+            await self.app(scope, receive, send)
             return
-
-        await self.app(scope, receive, send)
+        # A scoped ingest token unlocks its whitelisted write routes ONLY.
+        if (
+            self._ingest_tokens
+            and self._ingest_allowed(scope.get("method", "GET"), path)
+            and token_matches_any(presented, self._ingest_tokens)
+        ):
+            await self.app(scope, receive, send)
+            return
+        await _reject(send, 401, "invalid admin token", realm="hem-api")
+        return
 
 
 async def _reject(send: Send, status: int, message: str, *, realm: str = "hem-mcp") -> None:

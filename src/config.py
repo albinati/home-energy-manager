@@ -247,6 +247,15 @@ class Config:
     # config.js (readable by any viewer), so granting it write power would
     # defeat the model. Only HEM_ADMIN_TOKEN + HEM_OPENCLAW_TOKEN are admin.
     HEM_ADMIN_TOKEN: str = os.getenv("HEM_ADMIN_TOKEN", "").strip()
+    # ── Scoped sensor-ingest token (#540 W1) ────────────────────────────────
+    # A NON-admin write credential that unlocks ONLY an exact POST to
+    # /api/v1/sensors/indoor (see ApiV1RoleAuth.ingest_tokens / _ingest_allowed).
+    # This is what an internet-exposed device (an ESPHome room sensor, pushing
+    # through the existing hem-ui Tailscale funnel at :8443) carries — so a
+    # firmware/network leak can only post fake temperatures to that one route,
+    # never touch admin. Empty → feature off (only admin tokens work, as
+    # before). Rotate to revoke a device.
+    HEM_SENSOR_INGEST_TOKEN: str = os.getenv("HEM_SENSOR_INGEST_TOKEN", "").strip()
     # Default False — middleware is a no-op (dev: everything open). When True,
     # the role model is enforced: safe reads open to viewers, writes +
     # Settings/Journal gated on an admin token. Set True in prod.
