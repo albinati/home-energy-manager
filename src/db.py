@@ -942,6 +942,36 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_room_temp_captured ON room_temperature_history(captured_at)"
     )
 
+    # #540 W1c — full per-device sensor log. room_temperature_history keeps ONLY
+    # temp_c (what the LP/thermal model needs); this table is the lossless audit
+    # of EVERYTHING a device sends (humidity, pressure, a 2nd temperature, MAC,
+    # device_id, …). Typed columns for the known/queryable metrics + payload_json
+    # for anything else, so a new sensor field is preserved with no migration.
+    # Append-per-distinct-reading: idempotent on (device_key, captured_at) so a
+    # retry storm doesn't duplicate, where device_key = mac|device_id|source|room.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS device_reading_log (
+            received_at  TEXT NOT NULL,   -- server receipt (UTC), always set
+            captured_at  TEXT,            -- device timestamp (UTC) if sent
+            device_key   TEXT NOT NULL,   -- mac|device_id|source|room, for dedup + grouping
+            device_id    TEXT,
+            mac          TEXT,
+            room         TEXT,
+            source       TEXT,
+            temp_c       REAL,
+            humidity_pct REAL,
+            pressure_hpa REAL,
+            payload_json TEXT NOT NULL,   -- the FULL raw reading, lossless
+            PRIMARY KEY (device_key, captured_at)
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_device_log_device ON device_reading_log(device_key, captured_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_device_log_received ON device_reading_log(received_at)"
+    )
+
     # V14: presence_periods — manually-flagged periods of household presence
     # (home / travel / guests) so future load-pattern analyses + LP calibration
     # can de-bias the rolling load profile by occupancy. Read by analytics
@@ -4561,6 +4591,137 @@ def get_indoor_readings_range(start_utc_iso: str, end_utc_iso: str) -> list[dict
                 (start_utc_iso, end_utc_iso),
             )
             return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
+def _device_key(r: dict[str, Any]) -> str:
+    """Stable per-device identity for the log: prefer MAC (globally unique +
+    stable across DHCP/rename), then device_id, then source, then room."""
+    for k in ("mac", "device_id", "source", "room"):
+        v = r.get(k)
+        if v is not None and str(v).strip():
+            return str(v).strip()
+    return "unknown"
+
+
+def save_device_reading_log(readings: list[dict[str, Any]]) -> int:
+    """Lossless per-device log of EVERYTHING a sensor sends (#540 W1c). Typed
+    columns for the known metrics (temp/humidity/pressure/mac/device_id) plus
+    ``payload_json`` holding the full raw reading, so any extra field survives
+    with no migration. Idempotent on (device_key, captured_at) — a retry doesn't
+    duplicate. ``received_at`` is the server clock (always set, even if the
+    device sent no timestamp). Returns rows written."""
+    written = 0
+    received = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with _lock:
+        conn = get_connection()
+        try:
+            for r in readings:
+                ts = _parse_iso_utc(r.get("captured_at"))
+                key = ts.strftime("%Y-%m-%dT%H:%M:%SZ") if ts else received
+                dev = _device_key(r)
+
+                def _num(field: str) -> float | None:
+                    v = r.get(field)
+                    try:
+                        return float(v) if v is not None else None
+                    except (TypeError, ValueError):
+                        return None
+
+                cur = conn.execute(
+                    """INSERT OR IGNORE INTO device_reading_log
+                       (received_at, captured_at, device_key, device_id, mac,
+                        room, source, temp_c, humidity_pct, pressure_hpa, payload_json)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        received,
+                        key if ts else None,
+                        dev,
+                        (str(r["device_id"]).strip() if r.get("device_id") else None),
+                        (str(r["mac"]).strip() if r.get("mac") else None),
+                        (str(r["room"]) if r.get("room") else None),
+                        (str(r["source"]) if r.get("source") else None),
+                        _num("temp_c"),
+                        _num("humidity_pct"),
+                        _num("pressure_hpa"),
+                        json.dumps(r, default=str, sort_keys=True),
+                    ),
+                )
+                written += cur.rowcount
+            conn.commit()
+        finally:
+            conn.close()
+    return written
+
+
+def get_device_reading_log(
+    device_key: str | None = None, hours: int = 24, limit: int = 5000
+) -> list[dict[str, Any]]:
+    """Recent raw device-log rows, newest first. Optionally filter to one
+    device_key. ``payload_json`` is parsed back into a ``payload`` dict."""
+    start = (datetime.now(UTC) - timedelta(hours=max(1, hours))).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with _lock:
+        conn = get_connection()
+        try:
+            if device_key:
+                cur = conn.execute(
+                    """SELECT * FROM device_reading_log
+                       WHERE received_at >= ? AND device_key = ?
+                       ORDER BY received_at DESC LIMIT ?""",
+                    (start, device_key, int(limit)),
+                )
+            else:
+                cur = conn.execute(
+                    """SELECT * FROM device_reading_log
+                       WHERE received_at >= ?
+                       ORDER BY received_at DESC LIMIT ?""",
+                    (start, int(limit)),
+                )
+            rows = []
+            for r in cur.fetchall():
+                d = dict(r)
+                raw = d.pop("payload_json", None)
+                try:
+                    d["payload"] = json.loads(raw) if raw else None
+                except (TypeError, ValueError):
+                    d["payload"] = None
+                rows.append(d)
+            return rows
+        finally:
+            conn.close()
+
+
+def list_sensor_devices() -> list[dict[str, Any]]:
+    """One row per device ever seen: identity + last-seen + count + the latest
+    value of each known metric. Powers a 'devices' overview (viewer)."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT device_key,
+                          MAX(device_id)   AS device_id,
+                          MAX(mac)          AS mac,
+                          MAX(room)         AS room,
+                          MAX(source)       AS source,
+                          COUNT(*)          AS n_readings,
+                          MIN(received_at)  AS first_seen,
+                          MAX(received_at)  AS last_seen
+                   FROM device_reading_log
+                   GROUP BY device_key
+                   ORDER BY last_seen DESC"""
+            )
+            devices = [dict(r) for r in cur.fetchall()]
+            # Attach the latest reading's metrics per device (freshest row).
+            for d in devices:
+                latest = conn.execute(
+                    """SELECT temp_c, humidity_pct, pressure_hpa, captured_at, received_at
+                       FROM device_reading_log WHERE device_key = ?
+                       ORDER BY received_at DESC LIMIT 1""",
+                    (d["device_key"],),
+                ).fetchone()
+                d["latest"] = dict(latest) if latest else None
+            return devices
         finally:
             conn.close()
 

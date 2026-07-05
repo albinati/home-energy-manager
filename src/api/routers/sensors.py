@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from ... import db
 from ...config import config
@@ -22,12 +22,29 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["sensors"])
 
+# The LP / thermal model only trusts an indoor temperature inside this band; a
+# reading outside it (F/C slip, sensor fault) is still LOGGED per-device but is
+# NOT routed into room_temperature_history where the solver would read it.
+_TEMP_LP_MIN_C = -20.0
+_TEMP_LP_MAX_C = 45.0
+
 
 class IndoorReading(BaseModel):
+    # extra="allow" — any field a device sends that isn't named here (a 2nd
+    # temperature, a battery level, RSSI, …) is preserved and lands in the raw
+    # per-device log (#540 W1c). Nothing a sensor reports is dropped.
+    model_config = ConfigDict(extra="allow")
+
     captured_at: str = Field(..., description="ISO-8601 UTC timestamp")
-    temp_c: float = Field(..., ge=-20, le=45)  # indoor room; tight ceiling catches F/C slips
+    # temp_c is optional now: a humidity/pressure-only device can still log. When
+    # present AND in-band it feeds the thermal model; otherwise it's log-only.
+    temp_c: float | None = None
+    humidity_pct: float | None = Field(default=None, ge=0, le=100)
+    pressure_hpa: float | None = Field(default=None, ge=250, le=1200)
     room: str = "home"
     source: str | None = None
+    device_id: str | None = None
+    mac: str | None = None
     quality: str | None = None
 
 
@@ -37,11 +54,45 @@ class IndoorReadingsBody(BaseModel):
 
 @router.post("/api/v1/sensors/indoor")
 async def post_indoor_readings(body: IndoorReadingsBody) -> dict[str, Any]:
-    """Ingest one or more indoor temperature readings (admin). Idempotent on
-    (captured_at, room). Returns how many new rows were written."""
-    written = db.save_indoor_readings([r.model_dump() for r in body.readings])
-    logger.info("indoor sensors: ingested %d/%d new readings", written, len(body.readings))
-    return {"received": len(body.readings), "written": written}
+    """Ingest sensor readings (admin / scoped ingest token). TWO sinks:
+
+    * ``device_reading_log`` — the FULL raw payload of every reading, per device
+      (temp, humidity, pressure, MAC, device_id, and any extra field). Lossless.
+    * ``room_temperature_history`` — only the in-band ``temp_c`` values, which
+      the LP + thermal model read.
+
+    Both are idempotent on their keys, so a retry doesn't double-count. Returns
+    the received count plus rows written to each sink."""
+    raw = [r.model_dump() for r in body.readings]
+    logged = db.save_device_reading_log(raw)
+    temp_rows = [
+        r for r in raw
+        if r.get("temp_c") is not None and _TEMP_LP_MIN_C <= r["temp_c"] <= _TEMP_LP_MAX_C
+    ]
+    written = db.save_indoor_readings(temp_rows)
+    logger.info(
+        "sensors: %d readings → %d device-log rows, %d indoor temp rows (%d out-of-band skipped)",
+        len(raw), logged, written, sum(1 for r in raw if r.get("temp_c") is not None) - len(temp_rows),
+    )
+    return {"received": len(raw), "written": written, "logged": logged}
+
+
+@router.get("/api/v1/sensors/devices")
+async def get_sensor_devices() -> dict[str, Any]:
+    """One row per device ever seen (viewer): identity (device_key/mac/device_id/
+    room), first/last-seen, reading count, and the latest metric values."""
+    devices = db.list_sensor_devices()
+    return {"n_devices": len(devices), "devices": devices}
+
+
+@router.get("/api/v1/sensors/device-log")
+async def get_sensor_device_log(device: str | None = None, hours: int = 24) -> dict[str, Any]:
+    """Recent raw per-device readings, newest first (viewer). ``device`` filters
+    to one device_key; ``hours`` bounds the window (1..168). Each row carries the
+    full original ``payload``."""
+    hours = max(1, min(int(hours), 168))
+    rows = db.get_device_reading_log(device_key=device, hours=hours)
+    return {"device": device, "hours": hours, "n_rows": len(rows), "rows": rows}
 
 
 @router.get("/api/v1/sensors/indoor")
