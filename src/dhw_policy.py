@@ -837,6 +837,44 @@ def forecast_dhw_load_per_slot(
                 cur = new_temp
                 tank_temps[k + 1] = cur
 
+    # ----- Legionella heat-up budget (#643) ---------------------------------
+    # The Onecta firmware runs the weekly thermal-shock cycle on its own
+    # (the DHW_LEGIONELLA_STANDOFF_* window); HEM never commands it, but the
+    # house DOES draw the energy. 2026-07-05 audit: the forecast budgeted
+    # ~0.5 kWh for a cycle that drew ~3-3.5 (37→60 °C on 200 L + hold, at the
+    # poor COP of a 60 °C lift), so the LP let the battery discharge into the
+    # window and hit the SoC floor mid-cycle; actual import ran ~3 kWh over
+    # plan. Budget the measured electric cost evenly across the window slots.
+    # ENERGY only — tank_temps stay the schedule's comfort targets (the K2 pin
+    # skips tank thermodynamics; the firmware owns the real trajectory).
+    # Applied after bias/clamp/boost on purpose: a deterministic firmware
+    # event is never scaled by the shape corrector (whose learner also
+    # EXCLUDES this window), and where it overlaps a negative-price boost we
+    # take max, not sum. Applies in ALL modes incl. vacation — the firmware
+    # fires regardless of the preset.
+    if bool(getattr(config, "DHW_LEGIONELLA_BUDGET_ENABLED", True)):
+        _budget = float(getattr(config, "DHW_LEGIONELLA_BUDGET_KWH", 3.5))
+        if _budget > 0 and bool(getattr(config, "DHW_LEGIONELLA_STANDOFF_ENABLED", True)):
+            _dow = int(getattr(config, "DHW_LEGIONELLA_STANDOFF_DOW", 6))
+            _h0 = int(getattr(config, "DHW_LEGIONELLA_STANDOFF_START_HOUR_UTC", 11))
+            _m0 = int(getattr(config, "DHW_LEGIONELLA_STANDOFF_START_MINUTE_UTC", 0))
+            _dur = int(getattr(config, "DHW_LEGIONELLA_STANDOFF_DURATION_MINUTES", 120))
+            _cap = max(0.05, float(getattr(config, "DAIKIN_MAX_HP_KW", 2.0)) * 0.5)
+            _idxs: list[int] = []
+            for _i, _slot in enumerate(slot_starts_utc):
+                _su = _slot.astimezone(UTC)
+                if _su.weekday() != _dow:
+                    continue
+                _ws = _su.replace(hour=_h0, minute=_m0, second=0, microsecond=0)
+                # Window is defined not to cross midnight (config contract),
+                # so slot and window share the UTC date.
+                if _ws <= _su < _ws + timedelta(minutes=_dur):
+                    _idxs.append(_i)
+            if _idxs:
+                _per_slot = min(_cap, _budget / len(_idxs))
+                for _i in _idxs:
+                    e_dhw[_i] = min(_cap, max(e_dhw[_i], _per_slot))
+
     return e_dhw, tank_temps
 
 

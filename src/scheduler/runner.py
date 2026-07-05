@@ -2516,6 +2516,23 @@ def start_background_scheduler() -> None:
                 id="bulletproof_daikin_consumption_rollup",
             )
             logger.info("daikin_consumption_daily rollup cron scheduled (02:35 UTC daily)")
+            # Intraday partial rollups (2026-07-05): the Onecta `d` array
+            # carries TODAY's partial 2h buckets (future = None; the upsert's
+            # later-polls-overwrite contract was built for exactly this), so
+            # running the same job midday gives the Consumption panel its
+            # heat-pump split same-day instead of "everything is Base until
+            # tomorrow 02:35" (the legionella-Sunday complaint). Each run
+            # costs ONE /gateway-devices read — 3 fixed times ≈ 3/200 of the
+            # daily quota; the read path fails fast under the quota soft-cap.
+            if getattr(config, "DAIKIN_CONSUMPTION_INTRADAY_ENABLED", True):
+                _background_scheduler.add_job(
+                    bulletproof_daikin_consumption_rollup_job,
+                    CronTrigger(hour="10,14,18", minute=5, timezone=ZoneInfo("UTC")),
+                    id="bulletproof_daikin_consumption_intraday",
+                )
+                logger.info(
+                    "daikin consumption intraday rollup scheduled (10:05/14:05/18:05 UTC)"
+                )
             # PV realtime telemetry (Solar Sponge analysis): persist Fox cached realtime
             # to pv_realtime_history. Zero Fox quota cost (heartbeat-cached). Used by
             # offline PV calibration analysis.
