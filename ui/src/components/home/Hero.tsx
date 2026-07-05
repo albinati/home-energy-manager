@@ -245,20 +245,22 @@ function HeroWeather({ weather, pv, indoor }: {
           Inside = the house room sensors (#540 W1). */}
       <div class="hw-head">
         <div class="hw-col hw-col--out">
-          <div class="eyebrow hw-col-label">Outside</div>
+          <div class="eyebrow hw-col-label">Outdoor</div>
           <div class="hw-col-now">
-            <span class="hw-col-temp">{Math.round(outdoor)}°</span>
+            <span class="hw-col-temp">
+              {Math.round(outdoor)}°
+              {showEst && <sup class="hw-col-est" title="Open-Meteo forecast for now">est {Math.round(outdoorEst as number)}°</sup>}
+            </span>
             <WxIcon cond={cond} size={22} />
           </div>
           <div class="dim small hw-col-sub">
             {condLabel(cond)}
-            {showEst && <> · est {Math.round(outdoorEst as number)}°</>}
             {cur.cloud_cover_pct != null && <> · {Math.round(cur.cloud_cover_pct)}%</>}
           </div>
         </div>
 
         <div class={`hw-col hw-col--in ${indoorStale ? "is-stale" : ""}`}>
-          <div class="eyebrow hw-col-label">Inside</div>
+          <div class="eyebrow hw-col-label">Indoor</div>
           {hasIndoor ? (
             <>
               <div class="hw-col-now">

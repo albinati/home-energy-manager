@@ -89,6 +89,8 @@
 .hw-col-now { display: flex; align-items: center; gap: var(--space-2); }
 .hw-col-temp { font-size: var(--font-2xl); font-weight: 250; line-height: 1; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; color: var(--text); }
 .hw-col--in.is-stale .hw-col-temp { color: var(--text-mute); }
+/* Estimated (forecast) as a superscript on the measured outdoor temp. */
+.hw-col-est { font-size: var(--font-2xs); font-weight: 600; color: var(--text-mute); margin-left: var(--space-1); letter-spacing: 0; vertical-align: super; font-variant-numeric: tabular-nums; }
 .hw-col-sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .hw-col-sub--empty { color: var(--text-mute); }
 
