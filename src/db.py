@@ -5362,9 +5362,18 @@ def rebuild_dhw_error_log_for_date(day: date) -> int:
     forecast = committed_dhw_forecast_by_bucket(day)
     built_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     mode = (getattr(config, "OPTIMIZATION_PRESET", None) or "normal").strip().lower()
+    # The current in-force factors describe "now-ish" only. A catch-up
+    # rebuild of an OLDER day must stamp 1.0: those days were committed
+    # under whatever table was live back then (usually none — the corrector
+    # ships disabled), and stamping today's factors would make the learner
+    # de-bias raw history by a factor that was never applied (round-2
+    # finding: enable + multi-day catch-up would poison a full window).
+    in_force: dict[int, float] = {}
     try:
-        from .dhw_bias import factors_in_force
-        in_force = factors_in_force(mode)
+        tz_local = ZoneInfo(getattr(config, "BULLETPROOF_TIMEZONE", "Europe/London"))
+        if day >= datetime.now(tz_local).date() - timedelta(days=1):
+            from .dhw_bias import factors_in_force
+            in_force = factors_in_force(mode)
     except Exception:  # pragma: no cover - defensive
         in_force = {}
     written = 0

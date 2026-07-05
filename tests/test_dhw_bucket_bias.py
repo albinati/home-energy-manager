@@ -440,18 +440,22 @@ def test_k2_pin_optimal_with_active_space_floor(tmp_db, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_rebuild_stamps_applied_factor_and_mode(tmp_db, monkeypatch):
-    """The error-log rebuild records the factor in force (1.0 while disabled)
-    + mode, and never overwrites an existing stamp on re-run."""
-    day = date(2026, 1, 20)
-    conn = sqlite3.connect(tmp_db)
+def _seed_consumption(path, day, bucket=6, kwh=0.5):
+    conn = sqlite3.connect(path)
     conn.execute(
         "INSERT INTO daikin_consumption_2hourly (date, bucket_idx, kwh_dhw, source, fetched_at)"
-        " VALUES (?, 6, 0.5, 'test', '2026-01-01T00:00:00Z')",
-        (day.isoformat(),),
+        " VALUES (?, ?, ?, 'test', '2026-01-01T00:00:00Z')",
+        (day.isoformat(), bucket, kwh),
     )
     conn.commit()
     conn.close()
+
+
+def test_rebuild_stamps_applied_factor_and_mode(tmp_db, monkeypatch):
+    """The error-log rebuild records the factor in force (1.0 while disabled)
+    + mode, and never overwrites an existing stamp on re-run."""
+    day = datetime.now(UTC).date() - timedelta(days=1)  # the cron's regime
+    _seed_consumption(tmp_db, day)
     monkeypatch.setattr(config, "OPTIMIZATION_PRESET", "normal", raising=False)
     assert db.rebuild_dhw_error_log_for_date(day) == 1
     rows = db.get_dhw_error_log_range(day.isoformat(), day.isoformat())
@@ -464,6 +468,35 @@ def test_rebuild_stamps_applied_factor_and_mode(tmp_db, monkeypatch):
     assert db.rebuild_dhw_error_log_for_date(day) == 1
     rows = db.get_dhw_error_log_range(day.isoformat(), day.isoformat())
     assert rows[0]["applied_factor"] == pytest.approx(1.0)  # COALESCE kept it
+
+
+def test_rebuild_enabled_stamps_in_force_for_yesterday(tmp_db, monkeypatch):
+    """With the corrector enabled, yesterday's rebuild stamps the normalized
+    in-force factor — the value the learner will de-bias by."""
+    day = datetime.now(UTC).date() - timedelta(days=1)
+    _seed_consumption(tmp_db, day)
+    _seed_factors(tmp_db, {6: 0.5})
+    monkeypatch.setattr(config, "OPTIMIZATION_PRESET", "normal", raising=False)
+    monkeypatch.setattr(config, "DHW_BUCKET_BIAS_ENABLED", True, raising=False)
+    assert db.rebuild_dhw_error_log_for_date(day) == 1
+    rows = db.get_dhw_error_log_range(day.isoformat(), day.isoformat())
+    expected = dhw_bias.normalized_factors({6: 0.5}, "normal")[6]
+    assert rows[0]["applied_factor"] == pytest.approx(expected)
+
+
+def test_rebuild_old_day_backfill_stamps_neutral(tmp_db, monkeypatch):
+    """Round-2 guard: a catch-up rebuild of an OLDER day must stamp 1.0 even
+    with the corrector enabled — today's factors were never applied to that
+    day's committed forecast, and de-biasing history by them would poison a
+    full learning window."""
+    day = datetime.now(UTC).date() - timedelta(days=5)
+    _seed_consumption(tmp_db, day)
+    _seed_factors(tmp_db, {6: 0.5})
+    monkeypatch.setattr(config, "OPTIMIZATION_PRESET", "normal", raising=False)
+    monkeypatch.setattr(config, "DHW_BUCKET_BIAS_ENABLED", True, raising=False)
+    assert db.rebuild_dhw_error_log_for_date(day) == 1
+    rows = db.get_dhw_error_log_range(day.isoformat(), day.isoformat())
+    assert rows[0]["applied_factor"] == pytest.approx(1.0)
 
 
 def test_rebuild_preserves_null_actual(tmp_db):
