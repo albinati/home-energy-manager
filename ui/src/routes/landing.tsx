@@ -28,6 +28,7 @@ import { RefreshCountdown } from "../components/common/RefreshCountdown";
 import { PeriodNavigator } from "../components/shell/PeriodNavigator";
 import { usePeriod, periodFetchOpts, periodScope, isCurrentPeriod } from "../lib/period";
 import { LivePowerWidget } from "../components/cockpit/LivePowerWidget";
+import { IndoorClimateWidget } from "../components/cockpit/IndoorClimateWidget";
 import { Hero } from "../components/home/Hero";
 import { HeatingWidget } from "../components/home/HeatingWidget";
 import { PlanMini } from "../components/home/PlanMini";
@@ -222,6 +223,16 @@ export default function Landing() {
                       dhwSchedule={dhwSched.data?.rows} heatingPlan={heatingPlan.data}
                       nowUtc={data.now_utc} />
           </Widget>
+
+          {/* Indoor climate — the house's own room sensors (#540 W1), read from
+              the consolidated /cockpit/now snapshot (same path as Fox + tank, no
+              separate poll). Sits by Live heating (thermal neighbours). Hidden
+              until a sensor reports so it never shows an empty card. */}
+          {(data.state.indoor?.n_rooms ?? 0) > 0 && (
+            <Widget title="Indoor climate" icon={<Icon name="thermometer" size={14} />} tone="thermal" size="half">
+              <IndoorClimateWidget summary={data.state.indoor} />
+            </Widget>
+          )}
         </div>
       </div>
 

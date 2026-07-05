@@ -47,6 +47,7 @@ import type {
   ActionDiffResponse,
   ProposePlanResponse,
   ForecastDailyResponse,
+  SensorDevicesResponse,
 } from "./types";
 
 /* ----- Real-time / cockpit ----- */
@@ -124,6 +125,8 @@ export const getDaikinConsumption = (
 /* ----- Forecast vs actuals ----- */
 
 export const getWeather = () => getJson<WeatherResponse>("/weather");
+// Indoor climate sensors (#540 W1) — viewer-readable, one row per device.
+export const getSensorDevices = () => getJson<SensorDevicesResponse>("/sensors/devices");
 export const getExecutionToday = (date?: string) =>
   getJson<ExecutionTodayResponse>(`/execution/today${date ? `?date=${encodeURIComponent(date)}` : ""}`);
 export const getAgileToday = () => getJson<AgileTodayResponse>("/agile/today");

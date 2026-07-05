@@ -32,7 +32,9 @@ export type IconName =
   | "unlock"
   | "warn"
   | "revert"
-  | "moon";
+  | "moon"
+  | "thermometer"
+  | "droplet";
 
 interface IconProps {
   name: IconName;
@@ -177,6 +179,13 @@ const PATHS: Record<IconName, JSX.Element> = {
     </>
   ),
   moon: <path d="M20 13.5 A8.5 8.5 0 1 1 10.5 4 A7 7 0 0 0 20 13.5 Z" />,
+  thermometer: (
+    <>
+      <path d="M10 13.5 V6 a2 2 0 0 1 4 0 V13.5 a3.5 3.5 0 1 1 -4 0 Z" />
+      <circle cx="12" cy="16.5" r="1.3" fill="currentColor" stroke="none" />
+    </>
+  ),
+  droplet: <path d="M12 4 C12 4 6.5 10.5 6.5 14.5 A5.5 5.5 0 0 0 17.5 14.5 C17.5 10.5 12 4 12 4 Z" />,
 };
 
 export function Icon({ name, size = 18, class: cls = "", title, style }: IconProps) {

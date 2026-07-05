@@ -4774,6 +4774,75 @@ def list_sensor_devices() -> list[dict[str, Any]]:
             conn.close()
 
 
+def get_indoor_summary(stale_minutes: int = 30, lookback_hours: int = 24) -> dict[str, Any]:
+    """Compact latest-per-room indoor snapshot for the cockpit's consolidated
+    /cockpit/now read (#540 W1). ONE window-function query → the freshest row per
+    device within the lookback; freshness is computed per row (age > stale_minutes
+    → stale). The mean is over FRESH rooms only (matches the LP). Cheap enough to
+    ride the 20 s cockpit poll — it returns one row per device, not the history."""
+    now = datetime.now(UTC)
+    cutoff = (now - timedelta(hours=max(1, lookback_hours))).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT room, device_key, temp_c, humidity_pct, captured_at, received_at
+                   FROM (
+                     SELECT room, device_key, temp_c, humidity_pct, captured_at, received_at,
+                            ROW_NUMBER() OVER (
+                              PARTITION BY device_key
+                              ORDER BY COALESCE(captured_at, received_at) DESC, received_at DESC
+                            ) AS rn
+                     FROM device_reading_log
+                     WHERE received_at >= ?
+                   ) WHERE rn = 1""",
+                (cutoff,),
+            )
+            latest = [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+    rooms: list[dict[str, Any]] = []
+    fresh_temps: list[float] = []
+    fresh_hums: list[float] = []
+    newest_cap: str | None = None
+    newest_rec: str | None = None
+    for r in latest:
+        ref = r.get("captured_at") or r.get("received_at")
+        t = _parse_iso_utc(ref) if ref else None
+        age_min = (now - t).total_seconds() / 60.0 if t is not None else None
+        stale = age_min is None or age_min > stale_minutes
+        rooms.append({
+            "room": r.get("room") or r.get("device_key"),
+            "temp_c": r.get("temp_c"),
+            "humidity_pct": r.get("humidity_pct"),
+            "stale": stale,
+            "age_min": round(age_min, 1) if age_min is not None else None,
+        })
+        if not stale and r.get("temp_c") is not None:
+            fresh_temps.append(float(r["temp_c"]))
+            if r.get("humidity_pct") is not None:
+                fresh_hums.append(float(r["humidity_pct"]))
+        if r.get("received_at") and (newest_rec is None or r["received_at"] > newest_rec):
+            newest_rec = r["received_at"]
+        if r.get("captured_at") and (newest_cap is None or r["captured_at"] > newest_cap):
+            newest_cap = r["captured_at"]
+
+    rooms.sort(key=lambda x: (x["room"] or ""))
+    mean_c = sum(fresh_temps) / len(fresh_temps) if fresh_temps else None
+    hum = sum(fresh_hums) / len(fresh_hums) if fresh_hums else None
+    return {
+        "mean_c": round(mean_c, 1) if mean_c is not None else None,
+        "humidity_pct": round(hum, 1) if hum is not None else None,
+        "n_rooms": len(rooms),
+        "n_fresh": len(fresh_temps),
+        "stale": len(fresh_temps) == 0,
+        "newest_captured_at": newest_cap,
+        "newest_received_at": newest_rec,
+        "rooms": rooms,
+    }
+
+
 def mean_fox_load_kwh_per_slot(limit: int = 60) -> float | None:
     """Mean half-hourly load kWh from Fox daily data (load_kwh / 48).
 

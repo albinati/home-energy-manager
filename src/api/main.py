@@ -559,8 +559,9 @@ def _api_v1_weather_sync():
             dev = cached.devices[0]
             c = get_daikin_client()
             s = c.get_status(dev)
+            # No room_temp — the Altherma has no room stat (always null). Indoor
+            # temperature comes from the house sensors via /cockpit/now, not here.
             daikin = {
-                "room_temp": s.room_temp,
                 "outdoor_temp": s.outdoor_temp,
                 "lwt": s.lwt,
                 "tank_temp": s.tank_temp,
@@ -785,13 +786,13 @@ async def cockpit_now():
         if cached.devices:
             d = cached.devices[0]
             tank = getattr(d, "tank_temperature", None)
-            room = getattr(getattr(d, "temperature", None), "room_temperature", None)
+            # NOTE: indoor_c is NOT sourced from Daikin — the Altherma has no room
+            # stat, so its room_temperature is always null (that wiring was a bug).
+            # indoor_c is populated purely from the house room sensors below.
             outdoor = getattr(d, "outdoor_temperature", None)
             lwt = getattr(d, "leaving_water_temperature", None)
             if tank is not None:
                 dk_block["tank_c"] = float(tank)
-            if room is not None:
-                dk_block["indoor_c"] = float(room)
             if outdoor is not None:
                 dk_block["outdoor_c"] = float(outdoor)
             if lwt is not None:
@@ -803,6 +804,31 @@ async def cockpit_now():
                 "fetched_at_utc": iso,
                 "age_s": _age(iso),
                 "stale": bool(cached.stale),
+            }
+    except Exception:
+        pass
+
+    # --- Indoor sensors (SQLite only; #540 W1) -------------------------------
+    # The house's own room sensors ARE the indoor temperature — Daikin's
+    # room_temp is always null (no room stat). Fold the freshest snapshot into
+    # this consolidated read so it rides the fast path with Fox/Daikin and plugs
+    # into the per-source freshness map, instead of a separate /sensors poll.
+    indoor_block: dict[str, Any] | None = None
+    indoor_fresh: dict[str, Any] = {"fetched_at_utc": None, "age_s": None, "stale": None}
+    try:
+        summ = await asyncio.to_thread(
+            db.get_indoor_summary, int(getattr(config, "INDOOR_SENSOR_STALE_MINUTES", 30))
+        )
+        if summ.get("n_rooms", 0) > 0:
+            indoor_block = summ
+            # Give the existing state.indoor_c a real value from the sensor mean.
+            if summ.get("mean_c") is not None:
+                dk_block["indoor_c"] = summ["mean_c"]
+            newest = summ.get("newest_received_at")
+            indoor_fresh = {
+                "fetched_at_utc": newest,
+                "age_s": _age(newest),
+                "stale": bool(summ.get("stale")),
             }
     except Exception:
         pass
@@ -906,6 +932,8 @@ async def cockpit_now():
                 "outdoor_c": dk_block["outdoor_c"],
                 "lwt_c": dk_block["lwt_c"],
                 "daikin_mode": dk_block["mode"],
+                # Rich indoor-sensor snapshot (null when no sensor has reported).
+                "indoor": indoor_block,
             },
         },
         "freshness": {
@@ -917,6 +945,7 @@ async def cockpit_now():
             "fox": fox_fresh,
             "daikin": dk_fresh,
             "plan": plan_fresh,
+            "indoor": indoor_fresh,
         },
         "thresholds": thresholds,
         "modes": {
@@ -941,7 +970,7 @@ async def cockpit_now():
             "price_import_p": "Octopus Agile import rate, p/kWh (incl VAT)",
             "price_export_p": "Octopus Outgoing rate, p/kWh (incl VAT). Null when no export tariff configured.",
             "tank_c": "DHW tank current temperature, °C. Null when DHW zone reports no telemetry.",
-            "indoor_c": "indoor (room) temperature, °C. Null when climate zone is idle / room sensor reports null.",
+            "indoor_c": "house indoor temperature, °C — mean of the fresh room sensors (#540 W1). Null until a sensor reports. NOT from Daikin (no room stat).",
             "outdoor_c": "outdoor air temperature, °C (from Daikin gateway sensor)",
             "lwt_c": "leaving water temperature, °C",
             "fox_mode": "Fox inverter work mode (e.g. SelfUse, ForceCharge, ForceDischarge)",
@@ -1102,10 +1131,14 @@ async def cockpit_at(when: str):
         "battery_kw": None,
         "fox_mode": realised.get("fox_mode"),
         "tank_c": realised.get("daikin_tank_temp"),
-        "indoor_c": realised.get("daikin_room_temp"),
+        # indoor_c is NOT from Daikin (no room stat — that was always null). The
+        # historical room-sensor reconstruction isn't wired yet, so leave it null
+        # here; the live /cockpit/now carries the sensor snapshot.
+        "indoor_c": None,
         "outdoor_c": realised.get("daikin_outdoor_temp"),
         "lwt_c": realised.get("daikin_lwt"),
         "daikin_mode": None,
+        "indoor": None,
     }
 
     # --- LP plan for the slot containing `when` ------------------------------
