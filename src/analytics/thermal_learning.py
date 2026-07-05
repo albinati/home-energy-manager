@@ -91,7 +91,7 @@ class DecayEpisode:
 
 
 def _resample_house_mean(
-    readings: list[dict[str, Any]], *, bin_minutes: int = 10
+    readings: list[dict[str, Any]], *, bin_minutes: int = 30
 ) -> list[tuple[datetime, float, frozenset[str]]]:
     """Collapse multi-room readings into one house series: (bin centre, mean,
     ROOM SET) per time bin.
@@ -101,6 +101,12 @@ def _resample_house_mean(
     H2): a sensor dying or joining mid-night shifts the mean by the rooms'
     temperature spread — a fake decay/rise the fit gates can't see — so the
     selector splits episodes whenever the composition changes.
+
+    Bin width 30 min (round-2 verification): with 10-min bins, two rooms on
+    MIXED report cadences (10 vs 15 min) flickered the composition every
+    other bin and shattered a clean 9 h night into zero usable episodes.
+    30 min absorbs any cadence ≥ one report per half hour; τ ≈ 20 h loses
+    nothing at that resolution.
     """
     bins: dict[int, dict[str, list[float]]] = {}
     for r in readings:
@@ -221,7 +227,7 @@ def select_decay_episodes(
     max_rise_c: float = 0.3,
     heating_contam_kwh: float = 0.1,
     dhw_contam_kwh: float = 0.8,
-    bin_minutes: int = 10,
+    bin_minutes: int = 30,
 ) -> list[DecayEpisode]:
     """PURE selector: overnight, gap-free, composition-stable, heating-free
     (with settle tail), cool-enough decay segments from raw sensor readings.
@@ -616,7 +622,10 @@ def _outdoor_series(start_day: date, end_day: date) -> list[tuple[datetime, floa
                 ts = ts.replace(tzinfo=UTC)
         except (ValueError, TypeError):
             continue
-        out.append((ts, float(temp) + float(micro.get(ts.hour, 0.0))))
+        # Clamp the offset: a badly-seeded skill-log day must not be able to
+        # push ΔT across the episode gate systematically (round-2 hardening).
+        off = max(-3.0, min(3.0, float(micro.get(ts.hour, 0.0))))
+        out.append((ts, float(temp) + off))
     return sorted(out)
 
 

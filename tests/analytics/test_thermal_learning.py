@@ -210,6 +210,18 @@ def test_room_dropout_or_join_splits_episode(review_ref="H2"):
             assert fit[0] == pytest.approx(20.0, rel=0.08)
 
 
+def test_mixed_cadence_rooms_do_not_shatter_episodes():
+    """Round-2 regression: two healthy rooms on different report cadences
+    (10 vs 15 min) must NOT flicker the bin-level composition into splitting
+    a clean night to nothing — the 30-min bin absorbs cadence jitter."""
+    night = date(2026, 11, 2)
+    a = _decay_night(night, t0=22.0, room="living", cadence_min=10)
+    b = _decay_night(night, t0=20.0, room="bedroom", cadence_min=15)
+    eps = _select(a + b)
+    assert len(eps) == 1
+    assert (eps[0].end_utc - eps[0].start_utc) >= timedelta(hours=8)
+
+
 def test_varying_outdoor_per_point_fit(review_ref="M2"):
     """A falling night (12→2 °C) biased the mean-T_out fit ~+10%; the
     per-point fit must stay within ±8% of the true τ. Simulated with the real
@@ -286,7 +298,8 @@ def test_multi_room_mean():
     b = _decay_night(night, t0=20.0, room="bedroom")
     eps = _select(a + b)
     assert len(eps) == 1
-    assert eps[0].t_in_start_c == pytest.approx(21.0, abs=0.05)
+    # 30-min bin mean of the first half hour of decay, not the instant t0
+    assert eps[0].t_in_start_c == pytest.approx(21.0, abs=0.15)
 
 
 # ---------------------------------------------------------------------------
