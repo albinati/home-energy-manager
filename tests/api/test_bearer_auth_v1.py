@@ -150,6 +150,28 @@ def test_ingest_token_cannot_write_other_routes(monkeypatch) -> None:
     assert resp.status_code == 401
 
 
+@pytest.mark.parametrize("method", ["put", "patch", "delete"])
+def test_ingest_token_is_post_only_on_its_route(monkeypatch, method) -> None:
+    """The scope is EXACT `POST <route>` — no other WRITE verb rides the token.
+    (GET on this route is a viewer-open read, gated separately, so it's not
+    tested here — a token is irrelevant to public reads.)"""
+    _set_tokens(monkeypatch, required=True)
+    resp = getattr(_client(), method)(_SENSOR, headers=_auth("ingest-tok"))
+    assert resp.status_code == 401, f"{method.upper()} {_SENSOR} must not pass ingest auth"
+
+
+@pytest.mark.parametrize("path", [
+    "/api/v1/sensors/indoorX",       # sibling sharing the prefix
+    "/api/v1/sensors/indoor-purge",  # a plausible future admin op
+    "/api/v1/sensors/indoor/clear",  # a sub-path
+])
+def test_ingest_token_is_exact_path_not_prefix(monkeypatch, path) -> None:
+    """A POST to a sibling/sub path of the ingest route must NOT be unlocked —
+    exact-path match, so a future route under the prefix can't ride the token."""
+    _set_tokens(monkeypatch, required=True)
+    assert _client().post(path, json={}, headers=_auth("ingest-tok")).status_code == 401
+
+
 def test_ingest_token_cannot_read_admin_surfaces(monkeypatch) -> None:
     """A write credential must not unlock admin READS (Settings/Journal)."""
     _set_tokens(monkeypatch, required=True)

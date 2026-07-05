@@ -287,9 +287,11 @@ _ADMIN_TOKEN_GETTERS = [
     lambda: config.HEM_OPENCLAW_TOKEN,
 ]
 
-# Scoped, non-admin credential(s) — unlock ONLY the sensor-ingest write route
-# (#540 W1). Carried by an internet-exposed ESPHome sensor via the locked-down
-# `hem-ingest` proxy; a leak can't reach admin. Empty getter list → feature off.
+# Scoped, non-admin credential(s) — unlock ONLY an exact POST to the
+# sensor-ingest route (#540 W1). Carried by an internet-exposed ESPHome sensor
+# via the existing hem-ui Tailscale funnel; a leak can't reach admin. The
+# off-switch is an EMPTY token value (HEM_SENSOR_INGEST_TOKEN=""), not an empty
+# list: token_matches_any skips empty expected tokens, so nothing matches.
 _INGEST_TOKEN_GETTERS = [
     lambda: config.HEM_SENSOR_INGEST_TOKEN,
 ]

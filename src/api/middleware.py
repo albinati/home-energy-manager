@@ -205,7 +205,7 @@ class ApiV1RoleAuth:
             "/api/v1/workbench",      # LP override sandbox (admin tool, in Settings)
         ),
         ingest_tokens: Iterable[TokenLike] = (),
-        ingest_write_prefixes: Iterable[str] = ("/api/v1/sensors/indoor",),
+        ingest_write_routes: Iterable[str] = ("/api/v1/sensors/indoor",),
     ) -> None:
         self.app = app
         self._admin_tokens = list(admin_tokens)
@@ -213,13 +213,15 @@ class ApiV1RoleAuth:
         self._prefix = prefix
         self._public_paths = frozenset(public_paths)
         self._admin_read_prefixes = tuple(admin_read_prefixes)
-        # Scoped, non-admin write credential(s). A match satisfies ONLY a write
-        # (non-safe method) to a whitelisted ingest prefix — never an admin read
-        # or any other write. This is the token an internet-exposed device (e.g.
-        # an ESPHome room sensor pushing to /sensors/indoor via a locked-down
-        # proxy) carries, so a firmware leak can't hand over admin.
+        # Scoped, non-admin write credential(s). A match satisfies ONLY an EXACT
+        # `POST <route>` from this allowlist — never an admin read, never another
+        # verb, never a sibling/sub path. This is the token an internet-exposed
+        # device (an ESPHome room sensor pushing to /sensors/indoor via the
+        # hem-ui Tailscale funnel) carries, so a firmware leak can't hand over
+        # admin. Exact match (not prefix): a future route like
+        # `/sensors/indoor/purge` must NOT ride this token silently.
         self._ingest_tokens = list(ingest_tokens)
-        self._ingest_write_prefixes = tuple(ingest_write_prefixes)
+        self._ingest_write_routes = frozenset(ingest_write_routes)
 
     def _needs_admin(self, method: str, path: str) -> bool:
         if method.upper() not in SAFE_METHODS:
@@ -227,13 +229,12 @@ class ApiV1RoleAuth:
         return any(path.startswith(p) for p in self._admin_read_prefixes)
 
     def _ingest_allowed(self, method: str, path: str) -> bool:
-        """True only for a *write* to a whitelisted ingest route — the sole
-        surface a scoped ingest token unlocks. A safe method (GET on an
-        admin_read_prefix) or any non-ingest write returns False, so the
-        scoped token is useless everywhere except its one endpoint."""
-        if method.upper() in SAFE_METHODS:
-            return False
-        return any(path.startswith(p) for p in self._ingest_write_prefixes)
+        """True only for an EXACT `POST <allowlisted route>` — the sole surface a
+        scoped ingest token unlocks. Any other verb (PUT/DELETE/GET), or any
+        other path (including a sibling like `/sensors/indoorX` or a sub-path
+        `/sensors/indoor/foo`), returns False, so the scoped token is useless
+        everywhere except its one endpoint."""
+        return method.upper() == "POST" and path in self._ingest_write_routes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
