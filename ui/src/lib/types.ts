@@ -56,6 +56,27 @@ export interface ApplyBatchResponse {
 
 /* ----- /cockpit/now ----- */
 
+// Per-room indoor sensor reading, folded into /cockpit/now (#540 W1).
+export interface IndoorRoom {
+  room: string;
+  temp_c: number | null;
+  humidity_pct: number | null;
+  stale: boolean;
+  age_min: number | null;
+}
+
+// Compact house indoor-climate snapshot carried in the live cockpit state.
+export interface IndoorSummary {
+  mean_c: number | null;        // mean over FRESH rooms (null when all stale)
+  humidity_pct: number | null;  // mean humidity over fresh rooms
+  n_rooms: number;
+  n_fresh: number;
+  stale: boolean;               // true when nothing is within the fresh window
+  newest_captured_at: string | null;
+  newest_received_at: string | null;
+  rooms: IndoorRoom[];
+}
+
 export interface CockpitState {
   soc_pct: number;
   soc_kwh: number;
@@ -64,9 +85,10 @@ export interface CockpitState {
   grid_kw: number;       // positive = importing; negative = exporting
   battery_kw: number;    // positive = charging
   tank_c: number | null;
-  indoor_c: number | null;
+  indoor_c: number | null;   // house mean from room sensors (null until one reports)
   lwt_c: number | null;
   daikin_mode: string | null;
+  indoor?: IndoorSummary | null;   // rich per-room snapshot (null when no sensor)
 }
 
 export interface CockpitSlot {

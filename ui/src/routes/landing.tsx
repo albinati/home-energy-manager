@@ -20,7 +20,6 @@ import {
   getApplianceSuggestions,
   getApplianceJobs,
   getAppliances,
-  getSensorDevices,
 } from "../lib/endpoints";
 import { Widget } from "../components/common/Widget";
 import { Icon } from "../components/common/Icon";
@@ -98,9 +97,6 @@ export default function Landing() {
   // Heating-plan timeline (yesterday/today/tomorrow): outdoor temp + LWT offset
   // + tank + heating-on, recomputed per slot. Cache-only, poll while visible.
   const heatingPlan = usePoll(getHeatingPlan, 5 * 60_000);
-  // Indoor climate sensors (ESPHome room nodes, #540 W1). Viewer-readable, cheap
-  // SQLite read — poll while visible so the freshness dot stays honest.
-  const indoor = usePoll(getSensorDevices, 60_000);
   // Today's grid import/export so far (kWh + real £, credit on negative slots).
   const todayCum = usePoll(getEnergyTodayCumulative, 60_000);
   // Appliance status: registered list (once) + active jobs + cheapest-window
@@ -228,13 +224,13 @@ export default function Landing() {
                       nowUtc={data.now_utc} />
           </Widget>
 
-          {/* Indoor climate — the house's own room sensors (#540 W1). Sits by
-              Live heating (thermal neighbours); the mean feeds the eye the same
-              way outdoor temp does in the Hero. Hidden until a sensor reports so
-              it never shows an empty card on households without nodes. */}
-          {(indoor.data?.devices?.length ?? 0) > 0 && (
+          {/* Indoor climate — the house's own room sensors (#540 W1), read from
+              the consolidated /cockpit/now snapshot (same path as Fox + tank, no
+              separate poll). Sits by Live heating (thermal neighbours). Hidden
+              until a sensor reports so it never shows an empty card. */}
+          {(data.state.indoor?.n_rooms ?? 0) > 0 && (
             <Widget title="Indoor climate" icon={<Icon name="thermometer" size={14} />} tone="thermal" size="half">
-              <IndoorClimateWidget devices={indoor.data?.devices} loading={indoor.loading} />
+              <IndoorClimateWidget summary={data.state.indoor} />
             </Widget>
           )}
         </div>

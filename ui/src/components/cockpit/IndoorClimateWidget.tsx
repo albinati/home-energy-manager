@@ -1,29 +1,10 @@
-import type { SensorDevice } from "../../lib/types";
+import type { IndoorSummary } from "../../lib/types";
 import { Icon } from "../common/Icon";
 import "./indoorClimate.css";
 
-// A reading older than this (minutes) is treated as absent — mirrors the
-// backend's INDOOR_SENSOR_STALE_MINUTES so the LP and the UI agree on "fresh".
-const STALE_MIN = 30;
-
-interface RoomRow {
-  key: string;
-  name: string;
-  temp: number | null;
-  hum: number | null;
-  ageMin: number;
-  stale: boolean;
-}
-
-function ageMinutes(iso: string | null | undefined): number {
-  if (!iso) return Infinity;
-  const t = Date.parse(iso);
-  return Number.isNaN(t) ? Infinity : (Date.now() - t) / 60_000;
-}
-
 // "just now" / "3m" / "2h" / "1d" — compact freshness, no seconds.
-function relAge(min: number): string {
-  if (!Number.isFinite(min)) return "—";
+function relAge(min: number | null): string {
+  if (min == null || !Number.isFinite(min)) return "—";
   if (min < 1) return "now";
   if (min < 60) return `${Math.round(min)}m`;
   if (min < 1440) return `${Math.round(min / 60)}h`;
@@ -31,47 +12,30 @@ function relAge(min: number): string {
 }
 
 interface Props {
-  devices?: SensorDevice[];
-  loading?: boolean;
+  // The indoor snapshot folded into /cockpit/now — same source path as Fox +
+  // tank, no separate poll.
+  summary?: IndoorSummary | null;
 }
 
-export function IndoorClimateWidget({ devices, loading }: Props) {
-  const list = devices ?? [];
-
-  if (!list.length) {
-    return (
-      <div class="ic-empty">
-        {loading ? "Loading sensors…" : "No indoor sensors reporting yet."}
-      </div>
-    );
+export function IndoorClimateWidget({ summary }: Props) {
+  const rooms = summary?.rooms ?? [];
+  if (!rooms.length) {
+    return <div class="ic-empty">No indoor sensors reporting yet.</div>;
   }
 
-  const rows: RoomRow[] = list
-    .map((d) => {
-      const lr = d.latest;
-      const ageMin = ageMinutes(lr?.received_at);
-      return {
-        key: d.device_key,
-        name: d.room || d.device_id || d.mac || "sensor",
-        temp: lr?.temp_c ?? null,
-        hum: lr?.humidity_pct ?? null,
-        ageMin,
-        stale: ageMin > STALE_MIN,
-      };
-    })
-    .sort((a, b) => a.name.localeCompare(b.name));
-
-  const withTemp = rows.filter((r) => r.temp != null);
-  const freshWithTemp = withTemp.filter((r) => !r.stale);
-  // Mean over fresh sensors (matches the LP); fall back to last-known when all
-  // stale so the glance still shows a number, dimmed + flagged.
-  const basis = freshWithTemp.length ? freshWithTemp : withTemp;
-  const meanTemp = basis.length
-    ? basis.reduce((s, r) => s + (r.temp as number), 0) / basis.length
+  const allStale = !!summary?.stale;
+  // Prefer the server's fresh mean; fall back to a mean over any room with a
+  // reading so the glance still shows a (dimmed) number when all are stale.
+  const withTemp = rooms.filter((r) => r.temp_c != null);
+  const fallbackMean = withTemp.length
+    ? withTemp.reduce((s, r) => s + (r.temp_c as number), 0) / withTemp.length
     : null;
-  const allStale = freshWithTemp.length === 0;
-  const newestAge = Math.min(...rows.map((r) => r.ageMin));
-  const single = rows.length === 1;
+  const meanTemp = summary?.mean_c ?? fallbackMean;
+  const newestAge = rooms.reduce<number | null>((min, r) => {
+    if (r.age_min == null) return min;
+    return min == null ? r.age_min : Math.min(min, r.age_min);
+  }, null);
+  const single = rooms.length === 1;
 
   return (
     <div class="ic">
@@ -84,11 +48,11 @@ export function IndoorClimateWidget({ devices, loading }: Props) {
           <span class={`ic-dot ${allStale ? "is-stale" : "is-live live-pulse"}`} aria-hidden="true" />
           {single ? (
             <>
-              {rows[0].name}
-              {rows[0].hum != null && <> · {Math.round(rows[0].hum)}% humidity</>}
+              {rooms[0].room}
+              {rooms[0].humidity_pct != null && <> · {Math.round(rooms[0].humidity_pct)}% humidity</>}
             </>
           ) : (
-            <>inside · {rows.length} rooms</>
+            <>inside · {rooms.length} rooms</>
           )}
           {allStale && <> · stale {relAge(newestAge)}</>}
         </div>
@@ -96,16 +60,16 @@ export function IndoorClimateWidget({ devices, loading }: Props) {
 
       {!single && (
         <div class="ic-rooms">
-          {rows.map((r) => (
-            <div key={r.key} class={`ic-room ${r.stale ? "is-stale" : ""}`}>
+          {rooms.map((r) => (
+            <div key={r.room} class={`ic-room ${r.stale ? "is-stale" : ""}`}>
               <span class="ic-room-name">
-                <Icon name="thermometer" size={13} /> {r.name}
+                <Icon name="thermometer" size={13} /> {r.room}
               </span>
-              <span class="ic-room-temp">{r.temp != null ? `${r.temp.toFixed(1)}°` : "—"}</span>
+              <span class="ic-room-temp">{r.temp_c != null ? `${r.temp_c.toFixed(1)}°` : "—"}</span>
               <span class="ic-room-hum">
-                {r.hum != null ? (
+                {r.humidity_pct != null ? (
                   <>
-                    <Icon name="droplet" size={12} /> {Math.round(r.hum)}%
+                    <Icon name="droplet" size={12} /> {Math.round(r.humidity_pct)}%
                   </>
                 ) : (
                   ""

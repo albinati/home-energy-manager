@@ -49,14 +49,15 @@ def test_cockpit_now_shape(client):
         "t_utc", "t_end_utc", "price_import_p", "price_export_p", "fox_mode",
     }
 
-    # state has the 12 fields the hero panel reads.
+    # state has the fields the hero panel reads (indoor = rich sensor snapshot).
     assert set(body["state"].keys()) == {
         "soc_pct", "soc_kwh", "solar_kw", "load_kw", "grid_kw", "battery_kw",
         "fox_mode", "tank_c", "indoor_c", "outdoor_c", "lwt_c", "daikin_mode",
+        "indoor",
     }
 
-    # freshness — one block per source.
-    assert set(body["freshness"].keys()) == {"agile", "fox", "daikin", "plan"}
+    # freshness — one block per source (indoor sensors #540 W1).
+    assert set(body["freshness"].keys()) == {"agile", "fox", "daikin", "plan", "indoor"}
     for block in body["freshness"].values():
         assert set(block.keys()) == {"fetched_at_utc", "age_s", "stale"}
 
@@ -98,3 +99,27 @@ def test_cockpit_now_never_triggers_cloud_calls(client):
     assert r.status_code == 200
     # Cold call should be well under a second — no network waits allowed.
     assert elapsed < 1.5, f"endpoint took {elapsed:.2f}s — possible cloud call leak"
+
+
+def test_cockpit_now_indoor_from_sensor(monkeypatch, tmp_path):
+    """#540 W1 — the freshest room-sensor reading is folded into the consolidated
+    snapshot (same path as Fox/tank) and drives state.indoor_c. Daikin never
+    sourced indoor (no room stat)."""
+    from datetime import UTC, datetime
+
+    from src.config import config as _cfg
+
+    monkeypatch.setattr(_cfg, "DB_PATH", str(tmp_path / "cn.db"), raising=False)
+    db.init_db()
+    z = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    db.save_device_reading_log([
+        {"captured_at": z, "temp_c": 23.5, "humidity_pct": 61, "mac": "AA", "room": "sala"},
+    ])
+
+    body = TestClient(app).get("/api/v1/cockpit/now").json()
+    ind = body["state"]["indoor"]
+    assert ind is not None and ind["n_rooms"] == 1
+    assert ind["mean_c"] == 23.5
+    assert ind["rooms"][0]["room"] == "sala"
+    assert body["state"]["indoor_c"] == 23.5          # sensor drives indoor_c
+    assert body["freshness"]["indoor"]["stale"] is False
