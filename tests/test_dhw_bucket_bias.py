@@ -546,6 +546,54 @@ def test_backtest_shape_and_honesty(tmp_db):
         assert live[int(b_str)] == pytest.approx(f, abs=1e-3)
 
 
+def test_enable_gate_ping_one_shot(tmp_db, monkeypatch):
+    """maybe_suggest_enable: fires once when >= min days + OOS improvement,
+    dedups forever via the runtime setting, and never fires when enabled."""
+    from src import notifier
+
+    calls = []
+    monkeypatch.setattr(
+        notifier, "notify_dhw_bias_enable_ready",
+        lambda **kw: calls.append(kw), raising=False,
+    )
+    monkeypatch.setattr(config, "DHW_BUCKET_BIAS_SUGGEST_MIN_DAYS", 7, raising=False)
+    # 12 days so the OOS fit half (days older than window/2) carries >= 3
+    # distinct days — the anti-"1-day-fit" review gate.
+    days = _recent_days(12)
+    _seed_error_rows(tmp_db, [(d, 6, 2.0, 0.5) for d in days])  # consistent signal
+
+    assert dhw_bias.maybe_suggest_enable() is True
+    assert len(calls) == 1
+    assert calls[0]["days"] == 12
+    assert db.get_runtime_setting("dhw_bias_enable_suggested_at")
+    # dedup: never twice
+    assert dhw_bias.maybe_suggest_enable() is False
+    assert len(calls) == 1
+
+
+def test_enable_gate_holds_below_min_days_and_when_enabled(tmp_db, monkeypatch):
+    from src import notifier
+
+    calls = []
+    monkeypatch.setattr(
+        notifier, "notify_dhw_bias_enable_ready",
+        lambda **kw: calls.append(kw), raising=False,
+    )
+    monkeypatch.setattr(config, "DHW_BUCKET_BIAS_SUGGEST_MIN_DAYS", 7, raising=False)
+    days = _recent_days(4)  # below min
+    _seed_error_rows(tmp_db, [(d, 6, 2.0, 0.5) for d in days])
+    assert dhw_bias.maybe_suggest_enable() is False
+    # 8 days clears n_days but the OOS fit half has only 1 distinct day →
+    # still held back (anti-"1-day-fit" gate)
+    _seed_error_rows(tmp_db, [(d, 6, 2.0, 0.5) for d in _recent_days(8)])
+    assert dhw_bias.maybe_suggest_enable() is False
+    # already enabled → the ping is moot
+    _seed_error_rows(tmp_db, [(d, 6, 2.0, 0.5) for d in _recent_days(12)])
+    monkeypatch.setattr(config, "DHW_BUCKET_BIAS_ENABLED", True, raising=False)
+    assert dhw_bias.maybe_suggest_enable() is False
+    assert calls == []
+
+
 def test_budget_state_surfaces_bias(tmp_db, monkeypatch):
     _seed_factors(tmp_db, {6: 0.3})
     monkeypatch.setattr(config, "DHW_BUCKET_BIAS_ENABLED", True, raising=False)

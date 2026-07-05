@@ -801,6 +801,13 @@ def bulletproof_dhw_error_log_job() -> None:
         refresh_dhw_bucket_bias()
     except Exception as e:
         logger.warning("dhw_bucket_bias refresh failed (non-fatal): %s", e)
+    # One-shot actionable ping when the enable gate (>= N days + out-of-sample
+    # MAE improvement) is met. Never auto-enables; deduped via runtime setting.
+    try:
+        from ..dhw_bias import maybe_suggest_enable
+        maybe_suggest_enable()
+    except Exception as e:
+        logger.warning("dhw_bias enable-gate check failed (non-fatal): %s", e)
 
 
 def bulletproof_thermal_learning_job() -> None:

@@ -497,6 +497,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         ("lp_failure",            "critical", 0),
         ("lp_health_regression",  "critical", 0),
         ("guests_mode_suggested", "reports",  0),
+        ("dhw_bias_enable_ready", "reports",  0),
     ]
     for _at, _sev, _sil in _NOTIFICATION_DEFAULTS:
         conn.execute(

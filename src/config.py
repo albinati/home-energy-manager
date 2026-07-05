@@ -1293,6 +1293,22 @@ class Config:
     DHW_BUCKET_BIAS_MAX_AGE_DAYS: int = int(
         os.getenv("DHW_BUCKET_BIAS_MAX_AGE_DAYS", "7")
     )
+    # One-shot Telegram ping when the enable gate is met (still disabled +
+    # >= MIN_DAYS distinct usable days + out-of-sample MAE improvement).
+    # Never auto-enables; re-arm by clearing the `dhw_bias_enable_suggested_at`
+    # runtime setting.
+    DHW_BUCKET_BIAS_SUGGEST_ENABLED: bool = os.getenv(
+        "DHW_BUCKET_BIAS_SUGGEST_ENABLED", "true"
+    ).lower() in ("true", "1", "yes")
+    DHW_BUCKET_BIAS_SUGGEST_MIN_DAYS: int = int(
+        os.getenv("DHW_BUCKET_BIAS_SUGGEST_MIN_DAYS", "7")
+    )
+    # Out-of-sample MAE improvement must clear this % (and 0.01 kWh absolute)
+    # before the ping fires — a one-shot prompt burned on a rounding artefact
+    # never re-arms.
+    DHW_BUCKET_BIAS_SUGGEST_MIN_PCT: float = float(
+        os.getenv("DHW_BUCKET_BIAS_SUGGEST_MIN_PCT", "5.0")
+    )
     # --- Legionella thermal-shock STAND-OFF (2026-06-07) ---
     # The Onecta firmware owns the DHW tank during its weekly thermal-shock
     # cycle. Any tank PATCH HEM sends in that window is arbitrated/overridden by
