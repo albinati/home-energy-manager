@@ -572,13 +572,20 @@ def _in_daikin_calibration_window(
     return False
 
 
-def bulletproof_daikin_consumption_rollup_job() -> None:
+def bulletproof_daikin_consumption_rollup_job(*, two_hourly_only: bool = False) -> None:
     """Roll daily Daikin consumption from the cached gateway-devices payload (S10.12 / #178).
 
     Daikin Onecta exposes ``consumptionData.value.electrical.<mode>.w`` — a 14-day
     array (last week + this week per management point). We parse it from the
     already-cached devices payload (zero extra API quota) and upsert per-day rows
     into ``daikin_consumption_daily``.
+
+    ``two_hourly_only`` (intraday cron, 2026-07-05): refresh ONLY the 2-hourly
+    table + its telemetry-integral, skipping the daily rollup. The daily table
+    already carries a partial "today" row from the nightly run and its
+    consumers deliberately end at yesterday (autoscale, k-calibration); there's
+    no reason to churn it midday for the Consumption panel, which reads the
+    2-hourly split. Keeps the intraday surface to the one table that benefits.
     """
     from .. import db
 
@@ -589,24 +596,25 @@ def bulletproof_daikin_consumption_rollup_job() -> None:
         logger.warning("daikin rollup: client init failed: %s", e)
         return
 
-    try:
-        per_day = client.get_daily_consumption_from_cache()
-        if not per_day:
-            logger.info("daikin rollup: no consumption data in cached payload — skipped")
-        else:
-            n = 0
-            for day, b in per_day.items():
-                db.upsert_daikin_consumption_daily(
-                    date=day,
-                    kwh_total=b.get("total_kwh"),
-                    kwh_heating=b.get("heating_kwh"),
-                    kwh_dhw=b.get("dhw_kwh"),
-                    source="onecta_cache",
-                )
-                n += 1
-            logger.info("daikin_consumption_daily rollup: %d days written from cache", n)
-    except Exception as e:
-        logger.warning("daikin rollup failed (non-fatal): %s", e)
+    if not two_hourly_only:
+        try:
+            per_day = client.get_daily_consumption_from_cache()
+            if not per_day:
+                logger.info("daikin rollup: no consumption data in cached payload — skipped")
+            else:
+                n = 0
+                for day, b in per_day.items():
+                    db.upsert_daikin_consumption_daily(
+                        date=day,
+                        kwh_total=b.get("total_kwh"),
+                        kwh_heating=b.get("heating_kwh"),
+                        kwh_dhw=b.get("dhw_kwh"),
+                        source="onecta_cache",
+                    )
+                    n += 1
+                logger.info("daikin_consumption_daily rollup: %d days written from cache", n)
+        except Exception as e:
+            logger.warning("daikin rollup failed (non-fatal): %s", e)
 
     # 2-hourly rollup (#238) — feeds the future Daikin physics calibration.
     # Same cached payload, different array (``d`` vs ``w``). Independent
@@ -2529,6 +2537,7 @@ def start_background_scheduler() -> None:
                     bulletproof_daikin_consumption_rollup_job,
                     CronTrigger(hour="10,14,18", minute=5, timezone=ZoneInfo("UTC")),
                     id="bulletproof_daikin_consumption_intraday",
+                    kwargs={"two_hourly_only": True},
                 )
                 logger.info(
                     "daikin consumption intraday rollup scheduled (10:05/14:05/18:05 UTC)"
