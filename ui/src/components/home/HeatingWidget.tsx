@@ -164,6 +164,12 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, weather, exe
           dials, domain-coloured — outdoor (cool blue) · tank (amber heat) ·
           LWT (house/radiators). */}
       <div class="heat-gauges">
+        {state.indoor_c != null && (
+          <div title={`House room sensors — mean of ${state.indoor?.n_rooms ?? 1} room(s)`}>
+            <RadialGauge label="Indoor" value={state.indoor_c} min={10} max={30}
+                         color="var(--thermal)" sub={cAndF(state.indoor_c)} />
+          </div>
+        )}
         <div title={outdoorSource === "execution" ? "Daikin sensor (logged)"
                     : outdoorSource === "daikin" ? "Daikin sensor (live)"
                     : "Open-Meteo forecast"}>

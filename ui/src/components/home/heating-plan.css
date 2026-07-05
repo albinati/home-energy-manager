@@ -58,10 +58,11 @@
   border-top-width: 2.5px;
   border-top-style: solid;
 }
-.hpl-line--outdoor { border-top-color: var(--grid); }
-.hpl-line--tank    { border-top-style: dashed; border-top-color: var(--thermal); }
-.hpl-line--lwt     { border-top-width: 3px; border-top-color: var(--house); }
-.hpl-line--curve   { border-top-style: dotted; border-top-color: color-mix(in srgb, var(--house) 55%, transparent); }
+.hpl-line--outdoor  { border-top-width: 1px; border-top-color: color-mix(in srgb, var(--grid) 45%, transparent); }
+.hpl-line--tank     { border-top-style: dashed; border-top-color: var(--thermal); }
+.hpl-line--realised { border-top-width: 3px; border-top-color: var(--house); }
+.hpl-line--planned  { border-top-style: dotted; border-top-width: 2px; border-top-color: var(--house); }
+.hpl-line--curve    { border-top-style: dotted; border-top-color: color-mix(in srgb, var(--text-mute) 55%, transparent); }
 .hpl-sw {
   display: inline-block;
   width: 11px;

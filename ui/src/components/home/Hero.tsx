@@ -1,6 +1,7 @@
 import type {
   MetricsResponse, CockpitNow, AgileTodayResponse,
   PeriodInsightsResponse, TodayCumulativeResponse, WeatherResponse, PvTodayResponse,
+  IndoorSummary,
 } from "../../lib/types";
 import { gbp, kwh } from "../../lib/format";
 import { useAnimatedNumber } from "../../lib/useAnimatedNumber";
@@ -28,7 +29,7 @@ interface HeroProps {
 // the RIGHT. Money figures follow the period navigator; the today-only extras
 // (break-even target, money paid in) show only on "today". The lifetime strip
 // moved to the foot of the cockpit (LifetimeStrip) — the hero is today-first.
-export function Hero({ metrics, period, periodState, periodLoading, todayCum, weather, pv }: HeroProps) {
+export function Hero({ metrics, cockpit, period, periodState, periodLoading, todayCum, weather, pv }: HeroProps) {
   const isNow = isCurrentPeriod(periodState);
   const label = periodLabel(periodState);
   const fixedLabel = todayCum?.fixed_tariff_label || metrics?.fixed_tariff?.label || "British Gas Fixed";
@@ -147,7 +148,7 @@ export function Hero({ metrics, period, periodState, periodLoading, todayCum, we
         </div>
 
         {/* ── RIGHT: live weather ───────────────────────────────────── */}
-        <div class="hero-right"><HeroWeather weather={weather} pv={pv} /></div>
+        <div class="hero-right"><HeroWeather weather={weather} pv={pv} indoor={cockpit?.state?.indoor ?? null} /></div>
       </div>
     </section>
   );
@@ -165,7 +166,9 @@ function condLabel(c: Cond): string {
   return c === "clear" ? "Clear" : c === "partly" ? "Partly cloudy" : c === "rain" ? "Rain" : "Cloudy";
 }
 
-function HeroWeather({ weather, pv }: { weather?: WeatherResponse | null; pv?: PvTodayResponse | null }) {
+function HeroWeather({ weather, pv, indoor }: {
+  weather?: WeatherResponse | null; pv?: PvTodayResponse | null; indoor?: IndoorSummary | null;
+}) {
   const fc = weather?.forecast ?? [];
   if (!fc.length) return <div class="hw"><span class="muted">Weather unavailable.</span></div>;
   const nowMs = Date.now();
@@ -223,16 +226,22 @@ function HeroWeather({ weather, pv }: { weather?: WeatherResponse | null; pv?: P
         </div>
       </div>
 
-      {hi != null && lo != null && (
-        <div class="thermo">
-          <div class="thermo-track"><span class="thermo-mark" style={{ left: `${markPct}%` }} /></div>
-          <div class="thermo-row">
-            <span class="t-lo">L {Math.round(lo)}°</span>
-            <span class="dim small">next 24h</span>
-            <span class="t-hi">H {Math.round(hi)}°</span>
+      {/* The day's outdoor range (L→H) and the indoor climate sit side by side,
+          above the multi-day forecast. Indoor is the house's own room sensors
+          (#540 W1) — read from the same /cockpit/now snapshot as the rest. */}
+      <div class="hw-mid">
+        {hi != null && lo != null && (
+          <div class="thermo">
+            <div class="thermo-track"><span class="thermo-mark" style={{ left: `${markPct}%` }} /></div>
+            <div class="thermo-row">
+              <span class="t-lo">L {Math.round(lo)}°</span>
+              <span class="dim small">next 24h</span>
+              <span class="t-hi">H {Math.round(hi)}°</span>
+            </div>
           </div>
-        </div>
-      )}
+        )}
+        <HeroIndoor indoor={indoor} />
+      </div>
 
       {/* Next 3 days — fills the gap between the range and the solar progress. */}
       <ForecastStrip weather={weather} />
@@ -250,6 +259,38 @@ function HeroWeather({ weather, pv }: { weather?: WeatherResponse | null; pv?: P
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// Indoor climate mini-panel — sits beside the outdoor L→H range in the hero.
+// House mean temperature + room + humidity + the last-refresh clock time.
+function HeroIndoor({ indoor }: { indoor?: IndoorSummary | null }) {
+  if (!indoor || indoor.n_rooms < 1) return null;
+  const rooms = indoor.rooms ?? [];
+  const withTemp = rooms.filter((r) => r.temp_c != null);
+  const meanTemp = indoor.mean_c ?? (withTemp.length
+    ? withTemp.reduce((s, r) => s + (r.temp_c as number), 0) / withTemp.length : null);
+  const stale = !!indoor.stale;
+  const roomLabel = indoor.n_rooms === 1 ? (rooms[0]?.room ?? "inside") : `${indoor.n_rooms} rooms`;
+  // "horario do ultimo refresh" — the newest reading's local clock time.
+  const iso = indoor.newest_received_at ?? indoor.newest_captured_at;
+  const refresh = iso
+    ? new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })
+    : null;
+  return (
+    <div class={`hw-indoor ${stale ? "is-stale" : ""}`}>
+      <div class="flex between items-center">
+        <div class="eyebrow weather-eyebrow">
+          <span class={`hw-indoor-dot ${stale ? "" : "live-pulse"}`} aria-hidden="true" />Inside
+        </div>
+        {refresh && <span class="dim small hw-indoor-fresh">{stale ? "stale " : ""}{refresh}</span>}
+      </div>
+      <div class="hw-indoor-temp">{meanTemp != null ? meanTemp.toFixed(1) : "—"}°</div>
+      <div class="dim small hw-indoor-sub">
+        {roomLabel}
+        {indoor.humidity_pct != null && <> · {Math.round(indoor.humidity_pct)}% humidity</>}
+      </div>
     </div>
   );
 }
