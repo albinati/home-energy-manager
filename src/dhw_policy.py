@@ -547,13 +547,13 @@ def dhw_budget_state(mode: str | None = None) -> dict[str, Any]:
         logger.debug("dhw_budget_state: measured read failed", exc_info=True)
 
     bias_factors: dict[str, float] = {}
-    bias_normalized: dict[str, float] = {}
+    bias_in_force: dict[str, float] = {}
     try:
-        from .dhw_bias import normalized_factors
+        from .dhw_bias import factors_in_force
         raw = db.get_dhw_bucket_bias()
         bias_factors = {str(b): round(f, 3) for b, f in sorted(raw.items())}
-        bias_normalized = {
-            str(b): round(f, 3) for b, f in sorted(normalized_factors(raw, mode).items())
+        bias_in_force = {
+            str(b): round(f, 3) for b, f in sorted(factors_in_force(mode).items())
         }
     except Exception:  # pragma: no cover - defensive: status read must not fail
         logger.debug("dhw_budget_state: bucket-bias read failed", exc_info=True)
@@ -568,7 +568,7 @@ def dhw_budget_state(mode: str | None = None) -> dict[str, Any]:
         "measured_7d_avg_kwh": measured_7d_avg,
         "bucket_bias_enabled": bool(getattr(config, "DHW_BUCKET_BIAS_ENABLED", False)),
         "bucket_bias_factors": bias_factors,
-        "bucket_bias_normalized": bias_normalized,
+        "bucket_bias_in_force": bias_in_force,  # {} unless enabled+normal+fresh
     }
 
 
@@ -691,27 +691,29 @@ def forecast_dhw_load_per_slot(
             e_dhw.append(SETBACK_MAINTENANCE_KWH)
 
     # ----- Per-bucket shape correction (dhw_bucket_bias) -------------------
-    # Learned nightly from dhw_error_log; normalized here against THIS mode's
-    # nominal bucket shares so the daily total is untouched (the auto-scale
-    # above owns the level — an un-normalized shape factor would double-
-    # correct it; see src/dhw_bias.py). Deliberately BEFORE the _max_hp_kwh
-    # clamp below: the LP pins these values as hard equalities, so a boosted
-    # bucket must still be capped at the heater's per-slot capacity. The
-    # negative-price boost ramp further down OVERWRITES its slots after this
-    # point, so boost energy is never scaled. Bucket factors intentionally
-    # absorb warmup/decay TIMING error (tank thermal inertia spills the ramp
-    # across buckets) — that's the point, not a bug.
-    if mode != "vacation" and bool(getattr(config, "DHW_BUCKET_BIAS_ENABLED", False)):
-        try:
-            from .dhw_bias import normalized_factors
-            _bias = normalized_factors(db.get_dhw_bucket_bias(), mode)
-            if _bias:
-                e_dhw = [
-                    v * _bias.get(slot.astimezone(tz).hour // 2, 1.0)
-                    for v, slot in zip(e_dhw, slot_starts_utc)
-                ]
-        except Exception as _exc:  # pragma: no cover - forecast must not fail
-            logger.debug("dhw_policy: bucket-bias apply failed, using 1.0: %s", _exc)
+    # Open-loop factors learned nightly from dhw_error_log; normalized so the
+    # daily total is untouched (the auto-scale above owns the level — an
+    # un-normalized shape factor would double-correct it; see src/dhw_bias.py).
+    # factors_in_force gates on enabled + mode == "normal" + table freshness —
+    # guests is comfort-critical (a summer-learned factor would shrink the
+    # morning-shower budget) and vacation forecasts ~0, so both stay raw.
+    # Deliberately BEFORE the _max_hp_kwh clamp below: the LP pins these
+    # values as hard equalities, so a boosted bucket must still be capped at
+    # the heater's per-slot capacity. The negative-price boost ramp further
+    # down OVERWRITES its slots after this point, so boost energy is never
+    # scaled. Bucket factors intentionally absorb warmup/decay TIMING error
+    # (tank thermal inertia spills the ramp across buckets) — that's the
+    # point, not a bug.
+    try:
+        from .dhw_bias import factors_in_force
+        _bias = factors_in_force(mode)
+        if _bias:
+            e_dhw = [
+                v * _bias.get(slot.astimezone(tz).hour // 2, 1.0)
+                for v, slot in zip(e_dhw, slot_starts_utc)
+            ]
+    except Exception as _exc:  # pragma: no cover - forecast must not fail
+        logger.debug("dhw_policy: bucket-bias apply failed, using 1.0: %s", _exc)
 
     # The LP pins ``e_dhw[i] == forecast[i]`` as a hard equality against a
     # variable whose upBound is the heater's per-slot electric capacity

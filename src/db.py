@@ -1183,9 +1183,21 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             actual_kwh   REAL,
             error_kwh    REAL,
             built_at_utc TEXT NOT NULL,
+            applied_factor REAL,
+            mode         TEXT,
             PRIMARY KEY (day, bucket_idx)
         )"""
     )
+    # dhw_bucket_bias open-loop learning needs the factor that was IN FORCE
+    # when each row's forecast was committed (1.0/NULL while disabled) plus the
+    # optimization mode, so the learner can de-bias (raw = forecast/factor) and
+    # filter to normal-mode rows. NULL on pre-migration rows = factor 1.0,
+    # mode unknown→treated as normal (prod has only ever logged normal days).
+    del_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(dhw_error_log)")}
+    if del_cols and "applied_factor" not in del_cols:
+        conn.execute("ALTER TABLE dhw_error_log ADD COLUMN applied_factor REAL")
+    if del_cols and "mode" not in del_cols:
+        conn.execute("ALTER TABLE dhw_error_log ADD COLUMN mode TEXT")
     # Daily export opportunity cost: what the day's export earned on the current
     # flat SEG tariff vs what it WOULD have earned on Outgoing Agile. The running
     # tally of money left on the table by not being on Agile export — ammunition
@@ -4138,23 +4150,32 @@ def get_nonzero_lwt_offset_windows(
 
 
 def get_dhw_boost_windows(start_date: str, end_date: str) -> list[tuple[str, str]]:
-    """``(start_time, end_time)`` UTC-ISO pairs of every ``tank_negative_boost``
-    action whose plan ``date`` falls in the inclusive range.
+    """``(start_time, end_time)`` UTC-ISO pairs of tank windows whose measured
+    DHW energy is NOT the ordinary schedule's doing, for dhw_bucket_bias
+    decontamination:
 
-    Used to EXCLUDE deliberate boost windows from the dhw_bucket_bias learning
-    sample: the boost is max-heating the forecast budgets separately (the
-    :737-764 ramp in dhw_policy), so its measured energy says nothing about the
-    ordinary schedule constants. Same status + date-pad rationale as
-    :func:`get_nonzero_lwt_offset_windows`.
+    * every ``tank_negative_boost`` action — deliberate max-heating the
+      forecast budgets separately (the boost ramp in dhw_policy). ``skipped``
+      is included: a skipped boost leaves boost-sized COMMITTED forecast
+      against ordinary actuals, poisoning the ratio the other way.
+    * any tank action a user manually overrode (``overridden_by_user_at``) —
+      hand-set tank state produces energy the schedule never predicted.
+
+    Same date-pad rationale as :func:`get_nonzero_lwt_offset_windows`.
     """
     with _lock:
         conn = get_connection()
         try:
             cur = conn.execute(
                 """SELECT start_time, end_time FROM action_schedule
-                   WHERE device = 'daikin' AND action_type = 'tank_negative_boost'
+                   WHERE device = 'daikin'
                      AND date >= date(?, '-1 day') AND date <= ?
-                     AND status IN ('completed', 'active', 'failed')""",
+                     AND (
+                       (action_type = 'tank_negative_boost'
+                        AND status IN ('completed', 'active', 'failed', 'skipped'))
+                       OR (action_type LIKE 'tank_%'
+                           AND overridden_by_user_at IS NOT NULL)
+                     )""",
                 (start_date, end_date),
             )
             return [(str(r["start_time"]), str(r["end_time"])) for r in cur.fetchall()]
@@ -5327,17 +5348,31 @@ def committed_dhw_forecast_by_bucket(day: date) -> dict[int, float]:
 def rebuild_dhw_error_log_for_date(day: date) -> int:
     """Persist per-2h-bucket committed-DHW-forecast-vs-actual rows for LOCAL
     ``day``. Actuals come from ``daikin_consumption_2hourly.kwh_dhw`` (written
-    by the 02:35 UTC rollup). Idempotent on ``(day, bucket_idx)``; returns rows
-    written. Best-effort: the nightly cron swallows exceptions.
+    by the 02:35 UTC rollup); a NULL split stays NULL (missing ≠ zero — the
+    bias learner must not read an absent Daikin split as "measured 0").
+    Idempotent on ``(day, bucket_idx)``; returns rows written. Best-effort:
+    the nightly cron swallows exceptions.
+
+    Also stamps ``applied_factor`` (the dhw_bucket_bias normalized factor in
+    force for the day's forecasts — 1.0 while disabled) and ``mode``. The
+    stamp MUST happen before the same cron's bias refresh moves the table,
+    and a re-run never overwrites an existing stamp (COALESCE): the factor in
+    force at commit time is a historical fact, not a recomputable one.
     """
     forecast = committed_dhw_forecast_by_bucket(day)
     built_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    mode = (getattr(config, "OPTIMIZATION_PRESET", None) or "normal").strip().lower()
+    try:
+        from .dhw_bias import factors_in_force
+        in_force = factors_in_force(mode)
+    except Exception:  # pragma: no cover - defensive
+        in_force = {}
     written = 0
     with _lock:
         conn = get_connection()
         try:
             actual = {
-                int(b): float(k or 0.0)
+                int(b): (float(k) if k is not None else None)
                 for b, k in conn.execute(
                     "SELECT bucket_idx, kwh_dhw FROM daikin_consumption_2hourly WHERE date=?",
                     (day.isoformat(),),
@@ -5349,14 +5384,19 @@ def rebuild_dhw_error_log_for_date(day: date) -> int:
                 err = (a - f) if (a is not None and f is not None) else None
                 conn.execute(
                     """INSERT INTO dhw_error_log
-                         (day, bucket_idx, forecast_kwh, actual_kwh, error_kwh, built_at_utc)
-                       VALUES (?, ?, ?, ?, ?, ?)
+                         (day, bucket_idx, forecast_kwh, actual_kwh, error_kwh,
+                          built_at_utc, applied_factor, mode)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(day, bucket_idx) DO UPDATE SET
                          forecast_kwh=excluded.forecast_kwh,
                          actual_kwh=excluded.actual_kwh,
                          error_kwh=excluded.error_kwh,
-                         built_at_utc=excluded.built_at_utc""",
-                    (day.isoformat(), b, f, a, err, built_at),
+                         built_at_utc=excluded.built_at_utc,
+                         applied_factor=COALESCE(dhw_error_log.applied_factor,
+                                                 excluded.applied_factor),
+                         mode=COALESCE(dhw_error_log.mode, excluded.mode)""",
+                    (day.isoformat(), b, f, a, err, built_at,
+                     float(in_force.get(b, 1.0)), mode),
                 )
                 written += 1
             conn.commit()
@@ -5369,12 +5409,14 @@ def rebuild_dhw_error_log_for_date(day: date) -> int:
 
 def get_dhw_error_log_range(start_day_iso: str, end_day_iso: str) -> list[dict[str, Any]]:
     """Per-(day, bucket) forecast/actual/error rows with ``day`` in the
-    inclusive local-date range, for the dhw_bucket_bias corrector."""
+    inclusive local-date range, for the dhw_bucket_bias corrector.
+    ``applied_factor``/``mode`` may be NULL on pre-migration rows."""
     with _lock:
         conn = get_connection()
         try:
             cur = conn.execute(
-                """SELECT day, bucket_idx, forecast_kwh, actual_kwh, error_kwh
+                """SELECT day, bucket_idx, forecast_kwh, actual_kwh, error_kwh,
+                          applied_factor, mode
                    FROM dhw_error_log
                    WHERE day >= ? AND day <= ?
                    ORDER BY day, bucket_idx""",
@@ -6007,16 +6049,30 @@ def upsert_dhw_bucket_bias(
     return n
 
 
-def get_dhw_bucket_bias() -> dict[int, float]:
+def get_dhw_bucket_bias(max_age_days: int | None = None) -> dict[int, float]:
     """Return cached per-local-2h-bucket multiplicative DHW factors, or ``{}``
-    when empty. The forecast applies them only when DHW_BUCKET_BIAS_ENABLED."""
+    when empty — or when ``max_age_days`` is given and the table is staler
+    than that (a vacation / Daikin outage must not leave a fossil correction
+    applying silently forever). The forecast applies them only when
+    DHW_BUCKET_BIAS_ENABLED."""
     with _lock:
         conn = get_connection()
         try:
-            cur = conn.execute("SELECT bucket_idx, factor FROM dhw_bucket_bias")
-            return {int(r[0]): float(r[1]) for r in cur.fetchall()}
+            cur = conn.execute("SELECT bucket_idx, factor, computed_at FROM dhw_bucket_bias")
+            rows = cur.fetchall()
         finally:
             conn.close()
+    if not rows:
+        return {}
+    if max_age_days is not None:
+        try:
+            newest = max(str(r[2]) for r in rows)
+            ts = datetime.fromisoformat(newest.replace("Z", "+00:00"))
+            if datetime.now(UTC) - ts > timedelta(days=int(max_age_days)):
+                return {}
+        except (ValueError, TypeError):
+            return {}
+    return {int(r[0]): float(r[1]) for r in rows}
 
 
 def upsert_pv_calibration_hourly_cloud(
