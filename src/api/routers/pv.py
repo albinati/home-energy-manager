@@ -641,3 +641,61 @@ async def get_load_bias_backtest(window_days: int | None = None) -> dict[str, An
     if window_days is not None:
         window_days = max(1, min(int(window_days), 365))
     return await asyncio.to_thread(load_bias.backtest_load_recent_bias, window_days)
+
+
+@router.get("/api/v1/dhw/error-log")
+async def get_dhw_error_log(window_days: int = 30) -> dict[str, Any]:
+    """Committed DHW-forecast-vs-actual summary from the persisted
+    dhw_error_log, per LOCAL 2h bucket (the Daikin consumption API's native
+    resolution and the axis the bucket-bias corrector acts on). Read-only,
+    viewer-safe.
+    """
+    window_days = max(1, min(int(window_days), 365))
+    end_day = datetime.now(ZoneInfo(config.BULLETPROOF_TIMEZONE)).date()
+    start_day = end_day - timedelta(days=window_days)
+    rows = await asyncio.to_thread(
+        db.get_dhw_error_log_range, start_day.isoformat(), end_day.isoformat()
+    )
+
+    per_bucket: dict[int, list[tuple[float, float]]] = {}
+    for r in rows:
+        f, a = r.get("forecast_kwh"), r.get("actual_kwh")
+        if f is None or a is None:
+            continue
+        per_bucket.setdefault(int(r["bucket_idx"]), []).append((float(f), float(a)))
+
+    def _stats(pairs: list[tuple[float, float]]) -> dict[str, Any]:
+        n = len(pairs)
+        if n == 0:
+            return {"n": 0, "mae_kwh": 0.0, "bias_kwh": 0.0,
+                    "mean_forecast_kwh": 0.0, "mean_actual_kwh": 0.0}
+        errs = [a - f for f, a in pairs]
+        return {
+            "n": n,
+            "mae_kwh": round(sum(abs(e) for e in errs) / n, 4),
+            "bias_kwh": round(sum(errs) / n, 4),  # +ve = under-forecast
+            "mean_forecast_kwh": round(sum(f for f, _ in pairs) / n, 4),
+            "mean_actual_kwh": round(sum(a for _, a in pairs) / n, 4),
+        }
+
+    all_pairs = [p for pairs in per_bucket.values() for p in pairs]
+    return {
+        "window_days": window_days,
+        "n_rows_logged": len(rows),
+        "overall": _stats(all_pairs),
+        "per_bucket": {str(b): _stats(per_bucket[b]) for b in sorted(per_bucket)},
+    }
+
+
+@router.get("/api/v1/dhw/error-log/backtest")
+async def get_dhw_bias_backtest(window_days: int | None = None) -> dict[str, Any]:
+    """Offline what-if for the DHW bucket-bias corrector: would the normalized
+    per-bucket factors have reduced the error over the persisted dhw_error_log?
+    Read-only — never writes, never touches the LP. The gate for enabling
+    DHW_BUCKET_BIAS_ENABLED (decide on ``out_of_sample``).
+    """
+    from ... import dhw_bias
+
+    if window_days is not None:
+        window_days = max(1, min(int(window_days), 365))
+    return await asyncio.to_thread(dhw_bias.backtest_dhw_bucket_bias, window_days)
