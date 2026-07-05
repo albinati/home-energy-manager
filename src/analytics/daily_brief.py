@@ -394,7 +394,17 @@ def _thermal_calibration_line() -> str | None:
     ua_txt = f"{float(ua):.0f} W/K" if ua is not None else "env 600 W/K"
     c = row.get("c_kwh_per_k")
     c_txt = f" → C≈{float(c):.1f} kWh/K" if c is not None else ""
-    return f"- Thermal: τ={tau:.1f} h ({eps} nights, R² {r2:.2f}) · UA={ua_txt}{c_txt}"
+    # τ age: merge semantics let a good τ persist through skipped refreshes
+    # (by design), so surface how old the component actually is.
+    age_txt = ""
+    try:
+        tau_at = datetime.fromisoformat(str(row.get("tau_computed_at")))
+        age_d = (datetime.now(UTC) - tau_at).days
+        if age_d >= 2:
+            age_txt = f", {age_d}d old"
+    except (ValueError, TypeError):
+        pass
+    return f"- Thermal: τ={tau:.1f} h ({eps} nights, R² {r2:.2f}{age_txt}) · UA={ua_txt}{c_txt}"
 
 
 # --------------------------------------------------------------------------

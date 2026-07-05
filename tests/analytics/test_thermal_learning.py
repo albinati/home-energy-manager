@@ -154,25 +154,93 @@ def test_offset_window_rejects_episode():
 
 
 def test_settle_margin_trims_after_heating():
-    """Heating ends 22:00 (bucket 11 = 22:00-24:00... use bucket 10 20:00-22:00);
-    with settle 2 h the episode may only start at 24:00 — points before that
-    are trimmed, the fit still succeeds on the remaining stretch."""
+    """Heating in bucket 10 (20:00-22:00) + 2 h settle blocks until 24:00 —
+    the episode may only start at 00:00; the fit still succeeds on the
+    remaining stretch."""
     night = date(2026, 11, 2)
     readings = _decay_night(night, start_hour=22, end_hour=7)
     consumption = [_bucket(night, 10, heating=1.0)]  # 20:00-22:00 local
     eps = _select(readings, consumption)
     assert len(eps) == 1
-    # trimmed start: 22:00 bucket end + 2h settle = 00:00 next day
+    # blocked until: 22:00 bucket end + 2h settle = 00:00 next day
     assert eps[0].start_utc >= datetime(2026, 11, 3, 0, 0, tzinfo=UTC)
 
 
-def test_settle_margin_rejects_too_short_remainder():
-    """Heating ends 02:00 → settle until 04:00 → only 3 h left before 07:00
-    < min 4 h → rejected."""
+def test_settle_margin_rejects_too_short_remainders():
+    """Heating 00-02 blocks (with settle) until 04:00: the 22:00-00:00 head
+    (2 h) and the 04:00-07:00 tail (3 h) are both < min 4 h → no episodes."""
     night = date(2026, 11, 2)
     readings = _decay_night(night, start_hour=22, end_hour=7)
     consumption = [_bucket(night + timedelta(days=1), 0, heating=1.0)]  # 00-02
     assert _select(readings, consumption) == []
+
+
+def test_pre_dawn_warmup_keeps_the_clean_head(review_ref="M3"):
+    """Winter pattern: HEM's cheap-slot warmup runs 04:00-06:00. The clean
+    22:00-04:00 decay BEFORE it must survive as its own episode — the first
+    cut rejected the whole night and would have starved τ all winter."""
+    night = date(2026, 11, 2)
+    readings = _decay_night(night, start_hour=22, end_hour=7)
+    consumption = [_bucket(night + timedelta(days=1), 2, heating=1.5)]  # 04-06
+    eps = _select(readings, consumption)
+    assert len(eps) == 1
+    assert eps[0].end_utc <= datetime(2026, 11, 3, 4, 0, tzinfo=UTC)
+    fit = tl.fit_tau_for_episode(eps[0])
+    assert fit is not None
+    assert fit[0] == pytest.approx(20.0, rel=0.05)
+
+
+def test_room_dropout_or_join_splits_episode(review_ref="H2"):
+    """A sensor dying (or joining) mid-night shifts the house mean and fakes
+    a decay/rise the gates can't see — the composition change must split the
+    episode so no fit spans it."""
+    night = date(2026, 11, 2)
+    a = _decay_night(night, t0=22.0, room="living")
+    b = _decay_night(night, t0=20.0, room="bedroom")
+    # bedroom sensor dies at 02:00
+    cutoff = datetime(2026, 11, 3, 2, 0, tzinfo=UTC)
+    b = [r for r in b if datetime.fromisoformat(r["captured_at"].replace("Z", "+00:00")) < cutoff]
+    eps = _select(a + b)
+    for ep in eps:
+        assert not (ep.start_utc < cutoff < ep.end_utc)  # nothing spans the change
+    # surviving episodes still recover the true τ
+    for ep in eps:
+        fit = tl.fit_tau_for_episode(ep)
+        if fit is not None:
+            assert fit[0] == pytest.approx(20.0, rel=0.08)
+
+
+def test_varying_outdoor_per_point_fit(review_ref="M2"):
+    """A falling night (12→2 °C) biased the mean-T_out fit ~+10%; the
+    per-point fit must stay within ±8% of the true τ. Simulated with the real
+    ODE (Euler, 5-min steps), not the constant-ambient closed form."""
+    tau_true = 20.0
+    start = datetime(2026, 11, 2, 22, 0, tzinfo=UTC)
+    end = datetime(2026, 11, 3, 7, 0, tzinfo=UTC)
+    total_h = (end - start).total_seconds() / 3600.0
+
+    def t_out_at(t_h: float) -> float:
+        return 12.0 - 10.0 * (t_h / total_h)  # linear 12 → 2 °C
+
+    readings = []
+    outdoor = []
+    temp = 21.0
+    step_min = 5
+    for minutes in range(0, int(total_h * 60) + 1, step_min):
+        t_h = minutes / 60.0
+        ts = start + timedelta(minutes=minutes)
+        if minutes % 10 == 0:  # sensor reports every 10 min
+            readings.append({
+                "captured_at": ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "room": "living", "temp_c": round(temp, 3),
+            })
+        outdoor.append((ts, t_out_at(t_h)))
+        temp += -(temp - t_out_at(t_h)) / tau_true * (step_min / 60.0)
+    eps = _select(readings, outdoor=outdoor)
+    assert len(eps) == 1
+    fit = tl.fit_tau_for_episode(eps[0])
+    assert fit is not None
+    assert fit[0] == pytest.approx(tau_true, rel=0.08)
 
 
 def test_dhw_boost_rejects_but_normal_dhw_kept():
@@ -310,6 +378,28 @@ def test_estimator_uses_learned_constants(tmp_db):
     _seed_calibration(tau=8.0, ua=1200.0, c=9.6)
     leaky = estimate_state(last_live, now)
     assert leaky.indoor_temp_c < base.indoor_temp_c
+
+
+def test_meteo_temps_range_freshest_per_slot(tmp_db):
+    """H1 companion: the range query returns the freshest value per slot
+    across BOTH meteo tables, over the whole range in one call."""
+    conn = sqlite3.connect(tmp_db)
+    conn.execute(
+        "INSERT INTO meteo_forecast_history (slot_time, forecast_fetch_at_utc, temp_c)"
+        " VALUES ('2026-11-02T10:00:00Z', '2026-11-01T00:00:00Z', 5.0)"
+    )
+    conn.execute(
+        "INSERT INTO meteo_forecast_value (slot_time, forecast_fetch_at_utc, temp_c)"
+        " VALUES ('2026-11-02T10:00:00Z', '2026-11-02T00:00:00Z', 7.0)"  # fresher
+    )
+    conn.execute(
+        "INSERT INTO meteo_forecast_value (slot_time, forecast_fetch_at_utc, temp_c)"
+        " VALUES ('2026-11-03T10:00:00Z', '2026-11-02T00:00:00Z', 9.0)"
+    )
+    conn.commit()
+    conn.close()
+    rows = db.get_meteo_temps_range("2026-11-02", "2026-11-03")
+    assert dict(rows) == {"2026-11-02T10:00:00Z": 7.0, "2026-11-03T10:00:00Z": 9.0}
 
 
 # ---------------------------------------------------------------------------

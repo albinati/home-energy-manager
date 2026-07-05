@@ -1667,7 +1667,12 @@ class Config:
     # boosts leak meaningful heat into the envelope).
     THERMAL_HEATING_CONTAM_KWH: float = float(os.getenv("THERMAL_HEATING_CONTAM_KWH", "0.1"))
     THERMAL_DHW_CONTAM_KWH: float = float(os.getenv("THERMAL_DHW_CONTAM_KWH", "0.8"))
-    THERMAL_UA_WINDOW_DAYS: int = int(os.getenv("THERMAL_UA_WINDOW_DAYS", "120"))
+    # Bounded by the meteo retention (METEO_FORECAST_HISTORY_RETENTION_DAYS,
+    # ~30): a larger window would silently fit on whatever subset has outdoor
+    # coverage while recording the configured window as provenance. 30 winter
+    # days with HDD spread satisfy the min-days gate; the doc's 120-day
+    # regression remains the offline reference.
+    THERMAL_UA_WINDOW_DAYS: int = int(os.getenv("THERMAL_UA_WINDOW_DAYS", "30"))
     THERMAL_UA_MIN_HDD_DAYS: int = int(os.getenv("THERMAL_UA_MIN_HDD_DAYS", "20"))
     THERMAL_UA_ASSUMED_COP: float = float(os.getenv("THERMAL_UA_ASSUMED_COP", "3.0"))
     THERMAL_UA_MIN_R2: float = float(os.getenv("THERMAL_UA_MIN_R2", "0.5"))

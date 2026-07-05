@@ -7694,42 +7694,34 @@ def upsert_building_thermal_calibration(fields: dict[str, Any]) -> None:
             conn.close()
 
 
-def get_meteo_temps_for_day(day_iso: str) -> list[tuple[str, float]]:
-    """Freshest outdoor ``(slot_time, temp_c)`` per slot for a UTC day, from
-    the ``meteo_forecast_value ∪ meteo_forecast_history`` union (same source
-    + freshest-per-slot rule as :func:`compute_daikin_lwt_kw_calibration`,
-    extracted for the W2 thermal learner's outdoor series)."""
+def get_meteo_temps_range(start_day_iso: str, end_day_iso: str) -> list[tuple[str, float]]:
+    """Freshest outdoor ``(slot_time, temp_c)`` per slot over an inclusive
+    UTC-day range, from the ``meteo_forecast_value ∪ meteo_forecast_history``
+    union (same freshest-per-slot rule as
+    :func:`compute_daikin_lwt_kw_calibration`, for the W2 thermal learner's
+    outdoor series). ONE range scan + a Python last-wins pass — the per-day
+    correlated-subquery variant cost ~0.4 s/day under the global lock, which
+    would have made a 30-day nightly refresh a multi-second lock hold."""
+    start = start_day_iso
+    end_excl = (date.fromisoformat(end_day_iso) + timedelta(days=1)).isoformat()
     with _lock:
         conn = get_connection()
         try:
             cur = conn.execute(
-                """SELECT slot_time, temp_c FROM (
-                       SELECT slot_time, temp_c, forecast_fetch_at_utc
-                         FROM meteo_forecast_history
-                        WHERE substr(slot_time, 1, 10) = ?
-                          AND temp_c IS NOT NULL
-                       UNION ALL
-                       SELECT slot_time, temp_c, forecast_fetch_at_utc
-                         FROM meteo_forecast_value
-                        WHERE substr(slot_time, 1, 10) = ?
-                          AND temp_c IS NOT NULL
-                   ) AS u
-                   WHERE forecast_fetch_at_utc = (
-                       SELECT MAX(f) FROM (
-                           SELECT forecast_fetch_at_utc AS f
-                             FROM meteo_forecast_history
-                            WHERE slot_time = u.slot_time AND temp_c IS NOT NULL
-                           UNION ALL
-                           SELECT forecast_fetch_at_utc AS f
-                             FROM meteo_forecast_value
-                            WHERE slot_time = u.slot_time AND temp_c IS NOT NULL
-                       )
-                   )
-                   GROUP BY slot_time
-                   ORDER BY slot_time""",
-                (day_iso, day_iso),
+                """SELECT slot_time, temp_c, forecast_fetch_at_utc
+                     FROM meteo_forecast_history
+                    WHERE slot_time >= ? AND slot_time < ? AND temp_c IS NOT NULL
+                   UNION ALL
+                   SELECT slot_time, temp_c, forecast_fetch_at_utc
+                     FROM meteo_forecast_value
+                    WHERE slot_time >= ? AND slot_time < ? AND temp_c IS NOT NULL
+                   ORDER BY slot_time, forecast_fetch_at_utc""",
+                (start, end_excl, start, end_excl),
             )
-            return [(str(r["slot_time"]), float(r["temp_c"])) for r in cur.fetchall()]
+            freshest: dict[str, float] = {}
+            for r in cur.fetchall():
+                freshest[str(r["slot_time"])] = float(r["temp_c"])  # last = freshest
+            return sorted(freshest.items())
         finally:
             conn.close()
 

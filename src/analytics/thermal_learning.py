@@ -21,19 +21,32 @@ counts, physical bounds. Graceful no-op while the sensor table is empty —
 every consumer falls back to the env constants through the bounded readers
 at the bottom of this module.
 
-Decay-episode DECONTAMINATION (the part the physics can't forgive):
+Decay-episode DECONTAMINATION (the parts the physics can't forgive — several
+added by adversarial review):
 
 * any overlapping 2h bucket with ``kwh_heating`` above a floor → the decay
-  isn't natural;
+  isn't natural. Activity BLOCKS only its own span plus a
+  ``THERMAL_TAU_SETTLE_HOURS`` tail (radiators and the hydronic loop keep
+  emitting after the compressor stops — owner-flagged inertia); the CLEAN
+  stretch BEFORE a mid-night heating burst is kept and fit separately, so
+  winter's pre-dawn cheap-slot warmups don't starve the learner of the
+  22:00-04:00 decay it needs most;
 * HEM-commanded LWT offset windows (``get_nonzero_lwt_offset_windows``) —
   the k_per_degc lesson: never learn from your own echo;
-* a **settle margin** after the last heating activity — radiators and the
-  hydronic loop keep emitting after the compressor stops (owner-flagged
-  inertia), so an episode may only START ``THERMAL_TAU_SETTLE_HOURS`` after
-  heating ends (the segment is trimmed forward, then re-gated on length);
+* **room-composition changes split the episode**: the house mean jumps when a
+  sensor dies or joins mid-night, faking a decay/rise that R² cannot catch
+  (verified ±25% τ error in review) — the resampler tracks the room set per
+  bin and the selector treats a composition change like a gap;
 * DHW-only activity is KEPT (separate circuit; the tank sits in the utility
   space) except heavy boosts (``kwh_dhw`` above a threshold — a 60 °C
   negative-price boost leaks real heat into the envelope).
+
+Outdoor-temperature honesty (review M1/M2): the series is the freshest
+forecast per slot CORRECTED by the learned per-hour microclimate offset
+(``get_micro_climate_offset_by_hour_c`` — the same sensor-vs-forecast
+residual the LP uses), and the fit uses PER-POINT outdoor temps rather than
+the episode mean (a falling night — the common case — biased τ high ~10%
+with a mean; systematic, so the median never washed it out).
 
 The fitters are PURE functions (data in → fit out) so tests drive them with
 synthetic decay curves of known τ — the whole point of shipping this before
@@ -45,7 +58,7 @@ gentle-recovery cap). This module only feeds the estimator and the readers.
 from __future__ import annotations
 
 import logging
-import math
+from bisect import bisect_left
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
@@ -65,8 +78,9 @@ logger = logging.getLogger(__name__)
 class DecayEpisode:
     start_utc: datetime
     end_utc: datetime
-    # (hours since episode start, house mean temp °C), time-ordered
-    points: list[tuple[float, float]]
+    # (hours since episode start, house mean temp °C, outdoor °C at that
+    # point) — per-point outdoor, not the episode mean (review M2)
+    points: list[tuple[float, float, float]]
     t_out_mean_c: float
     t_in_start_c: float
 
@@ -78,27 +92,32 @@ class DecayEpisode:
 
 def _resample_house_mean(
     readings: list[dict[str, Any]], *, bin_minutes: int = 10
-) -> list[tuple[datetime, float]]:
-    """Collapse multi-room readings into one house series: mean per time bin.
+) -> list[tuple[datetime, float, frozenset[str]]]:
+    """Collapse multi-room readings into one house series: (bin centre, mean,
+    ROOM SET) per time bin.
 
     Mirrors ``get_latest_indoor_reading``'s mean-across-rooms semantics
-    (per-room learning is future work). Binning absorbs rooms reporting at
-    slightly different instants so the series doesn't jitter with room mix.
+    (per-room learning is future work). The room set is load-bearing (review
+    H2): a sensor dying or joining mid-night shifts the mean by the rooms'
+    temperature spread — a fake decay/rise the fit gates can't see — so the
+    selector splits episodes whenever the composition changes.
     """
-    bins: dict[int, list[float]] = {}
+    bins: dict[int, dict[str, list[float]]] = {}
     for r in readings:
         try:
             ts = datetime.fromisoformat(str(r["captured_at"]).replace("Z", "+00:00"))
             t = float(r["temp_c"])
         except (ValueError, TypeError, KeyError):
             continue
+        room = str(r.get("room") or "home")
         key = int(ts.timestamp()) // (bin_minutes * 60)
-        bins.setdefault(key, []).append(t)
-    out: list[tuple[datetime, float]] = []
+        bins.setdefault(key, {}).setdefault(room, []).append(t)
+    out: list[tuple[datetime, float, frozenset[str]]] = []
     for key in sorted(bins):
         centre = datetime.fromtimestamp(key * bin_minutes * 60 + bin_minutes * 30, tz=UTC)
-        vals = bins[key]
-        out.append((centre, sum(vals) / len(vals)))
+        per_room = bins[key]
+        room_means = [sum(v) / len(v) for v in per_room.values()]
+        out.append((centre, sum(room_means) / len(room_means), frozenset(per_room)))
     return out
 
 
@@ -108,17 +127,25 @@ def _bucket_window_utc(day_local: date, bucket_idx: int, tz: ZoneInfo) -> tuple[
     return start.astimezone(UTC), (start + timedelta(hours=2)).astimezone(UTC)
 
 
-def _activity_windows_utc(
+def _blocked_intervals(
     consumption_rows: list[dict[str, Any]],
     offset_windows: list[tuple[str, str]],
     tz: ZoneInfo,
     *,
     heating_contam_kwh: float,
     dhw_contam_kwh: float,
+    settle_hours: float,
 ) -> list[tuple[datetime, datetime]]:
-    """UTC spans during which the heat pump was putting heat into the envelope
-    (space heating above the floor, heavy DHW boosts, or HEM LWT offsets)."""
+    """UTC spans during which (or shortly after which) the heat pump was
+    putting heat into the envelope. Each activity window blocks its own span
+    PLUS ``settle_hours`` of tail — emitters keep radiating after the
+    compressor stops. Time BEFORE an activity window is clean by definition
+    (the decay was natural up to the moment heating started), which is what
+    lets the selector keep the pre-warmup stretch of a winter night (review
+    M3: the first cut rejected the whole night when heating ran at 04:00,
+    starving τ of exactly the deep-winter decay it exists to measure)."""
     windows: list[tuple[datetime, datetime]] = []
+    tail = timedelta(hours=settle_hours)
     for r in consumption_rows:
         try:
             d = date.fromisoformat(str(r["date"]))
@@ -128,15 +155,44 @@ def _activity_windows_utc(
         heating = float(r.get("kwh_heating") or 0.0)
         dhw = float(r.get("kwh_dhw") or 0.0)
         if heating > heating_contam_kwh or dhw > dhw_contam_kwh:
-            windows.append(_bucket_window_utc(d, b, tz))
+            ws, we = _bucket_window_utc(d, b, tz)
+            windows.append((ws, we + tail))
     for s, e in offset_windows:
         try:
             ws = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
             we = datetime.fromisoformat(str(e).replace("Z", "+00:00"))
         except (ValueError, TypeError):
             continue
-        windows.append((ws, we))
+        windows.append((ws, we + tail))
     return sorted(windows)
+
+
+def _in_blocked(ts: datetime, blocked: list[tuple[datetime, datetime]]) -> bool:
+    return any(ws <= ts < we for ws, we in blocked)
+
+
+def _outdoor_at(
+    outdoor_series: list[tuple[datetime, float]],
+    outdoor_times: list[datetime],
+    ts: datetime,
+    fallback: float,
+    *,
+    max_gap_hours: float = 2.0,
+) -> float:
+    """Nearest outdoor sample to ``ts`` (within ``max_gap_hours``), else the
+    fallback (episode mean). ``outdoor_times`` = pre-extracted sorted keys."""
+    if not outdoor_series:
+        return fallback
+    i = bisect_left(outdoor_times, ts)
+    best: tuple[float, float] | None = None
+    for j in (i - 1, i):
+        if 0 <= j < len(outdoor_series):
+            dt_h = abs((outdoor_series[j][0] - ts).total_seconds()) / 3600.0
+            if best is None or dt_h < best[0]:
+                best = (dt_h, outdoor_series[j][1])
+    if best is None or best[0] > max_gap_hours:
+        return fallback
+    return best[1]
 
 
 def _mean_outdoor_in_span(
@@ -167,15 +223,19 @@ def select_decay_episodes(
     dhw_contam_kwh: float = 0.8,
     bin_minutes: int = 10,
 ) -> list[DecayEpisode]:
-    """PURE selector: overnight, gap-free, heating-free, settled, cool-enough
-    decay segments from raw sensor readings. All data passed in — no DB."""
+    """PURE selector: overnight, gap-free, composition-stable, heating-free
+    (with settle tail), cool-enough decay segments from raw sensor readings.
+    All data passed in — no DB."""
     series = _resample_house_mean(readings, bin_minutes=bin_minutes)
     if not series:
         return []
-    activity = _activity_windows_utc(
+    blocked = _blocked_intervals(
         consumption_rows, offset_windows, tz,
         heating_contam_kwh=heating_contam_kwh, dhw_contam_kwh=dhw_contam_kwh,
+        settle_hours=settle_hours,
     )
+    outdoor_series = sorted(outdoor_series)
+    outdoor_times = [ts for ts, _ in outdoor_series]
 
     def _in_night(ts: datetime) -> bool:
         h = ts.astimezone(tz).hour
@@ -183,26 +243,28 @@ def select_decay_episodes(
             return h >= night_start_hour_local or h < night_end_hour_local
         return night_start_hour_local <= h < night_end_hour_local
 
-    def _last_activity_end_before(ts: datetime) -> datetime | None:
-        ends = [we for _ws, we in activity if we <= ts]
-        return max(ends) if ends else None
-
-    def _overlaps_activity(start: datetime, end: datetime) -> bool:
-        return any(ws < end and we > start for ws, we in activity)
-
-    # 1. contiguous night segments (split on gaps / non-night points)
+    # Split into candidate segments. A new segment starts on: leaving the
+    # night window, a data gap, an activity-blocked stretch (heating + settle
+    # tail — the CLEAN run before a mid-night warmup survives as its own
+    # segment), or a room-composition change (H2).
     segments: list[list[tuple[datetime, float]]] = []
     cur: list[tuple[datetime, float]] = []
-    for ts, v in series:
-        if not _in_night(ts):
+    prev_rooms: frozenset[str] | None = None
+    for ts, v, rooms in series:
+        if not _in_night(ts) or _in_blocked(ts, blocked):
             if cur:
                 segments.append(cur)
                 cur = []
+            prev_rooms = None
             continue
-        if cur and (ts - cur[-1][0]) > timedelta(minutes=max_gap_minutes):
+        if cur and (
+            (ts - cur[-1][0]) > timedelta(minutes=max_gap_minutes)
+            or (prev_rooms is not None and rooms != prev_rooms)
+        ):
             segments.append(cur)
             cur = []
         cur.append((ts, v))
+        prev_rooms = rooms
     if cur:
         segments.append(cur)
 
@@ -211,24 +273,11 @@ def select_decay_episodes(
         if len(seg) < 2:
             continue
         start, end = seg[0][0], seg[-1][0]
-        # 2. settle margin: trim the segment start to settle_hours after the
-        #    last heating activity (radiator/hydronic after-emission).
-        last_end = _last_activity_end_before(end)
-        if last_end is not None:
-            earliest = last_end + timedelta(hours=settle_hours)
-            if earliest > start:
-                seg = [(ts, v) for ts, v in seg if ts >= earliest]
-                if len(seg) < 2:
-                    continue
-                start = seg[0][0]
-        # 3. any remaining activity overlap → not a natural decay
-        if _overlaps_activity(start, end):
-            continue
-        # 4. length / density gates
+        # length / density gates
         dur_h = (end - start).total_seconds() / 3600.0
         if dur_h < min_episode_hours or len(seg) < min_points:
             continue
-        # 5. physics gates
+        # physics gates
         t_out = _mean_outdoor_in_span(outdoor_series, start, end)
         if t_out is None:
             continue
@@ -240,7 +289,14 @@ def select_decay_episodes(
         episodes.append(DecayEpisode(
             start_utc=start,
             end_utc=end,
-            points=[((ts - start).total_seconds() / 3600.0, v) for ts, v in seg],
+            points=[
+                (
+                    (ts - start).total_seconds() / 3600.0,
+                    v,
+                    _outdoor_at(outdoor_series, outdoor_times, ts, t_out),
+                )
+                for ts, v in seg
+            ],
             t_out_mean_c=float(t_out),
             t_in_start_c=float(t0),
         ))
@@ -248,30 +304,45 @@ def select_decay_episodes(
 
 
 def fit_tau_for_episode(ep: DecayEpisode) -> tuple[float, float] | None:
-    """PURE fit of one episode: linearized ``ln((T−T_out)/(T0−T_out)) = −t/τ``
-    least squares through the origin. Returns ``(tau_hours, r_squared)`` or
-    None when the episode degenerates (division/log guards)."""
-    t_out = ep.t_out_mean_c
-    denom = ep.t_in_start_c - t_out
-    if denom <= 0.5:
+    """PURE fit of one episode via the INTEGRAL form of the RC equation:
+
+        T_0 − T_i = (1/τ) · ∫₀^{t_i} (T(s) − T_out(s)) ds
+
+    (trapezoidal integral over the measured points). Exact for a
+    time-varying outdoor temperature — review M2 showed the constant-ambient
+    log-linearization biases τ ~+10% on an ordinary falling night, and the
+    per-point ratio variant breaks outright when T_out falls faster than the
+    house (the ratio exceeds 1). For constant T_out this reduces to the
+    exponential solution exactly. Least squares through the origin on
+    ``Y = X/τ``; R² on that regression. Returns ``(tau_hours, r_squared)``
+    or None when the episode degenerates."""
+    if len(ep.points) < 3:
         return None
+    t0 = ep.points[0][1]
+    if (t0 - ep.points[0][2]) <= 0.5:
+        return None
+    # X_i = ∫ (T − T_out) ds  (trapezoid, °C·h);  Y_i = T_0 − T_i  (°C)
     pts: list[tuple[float, float]] = []
-    for t_h, temp in ep.points:
-        ratio = (temp - t_out) / denom
-        if ratio <= 0.05:  # deep into the noise floor near T_out
-            continue
-        pts.append((t_h, math.log(ratio)))
+    x = 0.0
+    prev_t, prev_gap = ep.points[0][0], ep.points[0][1] - ep.points[0][2]
+    for t_h, temp, tout in ep.points[1:]:
+        gap = temp - tout
+        x += 0.5 * (prev_gap + gap) * (t_h - prev_t)
+        prev_t, prev_gap = t_h, gap
+        if x <= 0:
+            continue  # house at/below outdoor — no signal in this stretch
+        pts.append((x, t0 - temp))
     if len(pts) < 3:
         return None
-    sxx = sum(t * t for t, _ in pts)
-    sxy = sum(t * y for t, y in pts)
-    if sxx <= 0 or sxy >= 0:  # non-negative slope → not a decay
+    sxx = sum(xv * xv for xv, _ in pts)
+    sxy = sum(xv * yv for xv, yv in pts)
+    if sxx <= 0 or sxy <= 0:  # non-positive slope → not a decay
         return None
-    slope = sxy / sxx  # < 0
-    tau_h = -1.0 / slope
-    y_mean = sum(y for _, y in pts) / len(pts)
-    ss_tot = sum((y - y_mean) ** 2 for _, y in pts)
-    ss_res = sum((y - slope * t) ** 2 for t, y in pts)
+    slope = sxy / sxx  # = 1/τ
+    tau_h = 1.0 / slope
+    y_mean = sum(yv for _, yv in pts) / len(pts)
+    ss_tot = sum((yv - y_mean) ** 2 for _, yv in pts)
+    ss_res = sum((yv - slope * xv) ** 2 for xv, yv in pts)
     r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
     return tau_h, r2
 
@@ -331,7 +402,11 @@ def fit_ua_hdd(
     day. ``HDD_day = max(0, indoor − outdoor)`` (°C·day); linear fit
     ``load = a + b·HDD``; ``UA[W/K] = b · COP / 24 · 1000``. Reports
     ``skipped`` until enough heating-season days exist — by design this
-    learner stays quiet through summer.
+    learner stays quiet through summer. Honest caveats live with the result:
+    load is whole-house electric (occupancy correlates with cold, inflating
+    the slope beyond what the intercept absorbs) and UA scales linearly with
+    the assumed COP — both recorded in the row (``ua_assumed_cop``), both
+    reasons the consumers stay advisory until W4's replay validation.
     """
     pts = [
         (max(0.0, t_in - t_out), load)
@@ -394,7 +469,7 @@ def refresh_building_thermal_calibration() -> dict[str, Any]:
     tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
     now = datetime.now(UTC)
     tau_window = int(getattr(config, "THERMAL_TAU_WINDOW_DAYS", 21))
-    ua_window = int(getattr(config, "THERMAL_UA_WINDOW_DAYS", 120))
+    ua_window = int(getattr(config, "THERMAL_UA_WINDOW_DAYS", 30))
 
     start = now - timedelta(days=max(tau_window, ua_window))
     try:
@@ -408,24 +483,29 @@ def refresh_building_thermal_calibration() -> dict[str, Any]:
         # The pre-sensor steady state — one quiet skip, no table writes.
         return {"status": "skipped", "reason": "no indoor sensor data yet"}
 
-    start_day = (now - timedelta(days=tau_window)).date()
+    # Outdoor series over the FULL learner window (review H1: the first cut
+    # covered only the τ window, silently starving the UA fit and recording
+    # false provenance), one range query, microclimate-corrected.
+    start_day = (now - timedelta(days=max(tau_window, ua_window))).date()
     end_day = now.date()
+    outdoor = _outdoor_series(start_day, end_day)
+
+    tau_start_day = (now - timedelta(days=tau_window)).date()
     try:
         consumption = db.get_daikin_consumption_2hourly_range(
-            start_day.isoformat(), end_day.isoformat()
+            tau_start_day.isoformat(), end_day.isoformat()
         )
     except Exception:
         consumption = []
     try:
-        offsets = db.get_nonzero_lwt_offset_windows(start_day.isoformat(), end_day.isoformat())
+        offsets = db.get_nonzero_lwt_offset_windows(
+            tau_start_day.isoformat(), end_day.isoformat()
+        )
     except Exception:
         offsets = []
-    outdoor = _outdoor_series(start_day, end_day)
 
-    tau_readings = [
-        r for r in readings
-        if str(r.get("captured_at", "")) >= (now - timedelta(days=tau_window)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    ]
+    tau_cutoff = (now - timedelta(days=tau_window)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    tau_readings = [r for r in readings if str(r.get("captured_at", "")) >= tau_cutoff]
     episodes = select_decay_episodes(
         tau_readings, consumption, offsets, outdoor,
         tz=tz,
@@ -510,25 +590,33 @@ def _fmt(v: Any) -> str:
 
 
 def _outdoor_series(start_day: date, end_day: date) -> list[tuple[datetime, float]]:
-    """Freshest outdoor temp per slot over the range, from the meteo value ∪
-    history union (the compute_daikin_lwt_kw_calibration source)."""
+    """Freshest outdoor temp per slot over the WHOLE range (one range query —
+    review H1/L3: the per-day correlated-subquery loop cost ~0.4 s × N days
+    under the global DB lock), corrected by the learned per-UTC-hour
+    microclimate offset (review M1: raw forecast temps carry a systematic
+    night residual; at ΔT near the gate, ±1 °C of outdoor bias is ∓20% of τ).
+    Coverage is bounded by METEO_FORECAST_HISTORY_RETENTION_DAYS (~30) —
+    THERMAL_UA_WINDOW_DAYS defaults accordingly."""
     from .. import db
 
+    try:
+        rows = db.get_meteo_temps_range(start_day.isoformat(), end_day.isoformat())
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("thermal_learning: meteo range read failed", exc_info=True)
+        return []
+    try:
+        micro = db.get_micro_climate_offset_by_hour_c()
+    except Exception:  # noqa: BLE001 — offset is a refinement, not a dependency
+        micro = {}
     out: list[tuple[datetime, float]] = []
-    d = start_day
-    while d <= end_day:
+    for slot_iso, temp in rows:
         try:
-            for slot_iso, temp in db.get_meteo_temps_for_day(d.isoformat()):
-                try:
-                    ts = datetime.fromisoformat(str(slot_iso).replace("Z", "+00:00"))
-                    if ts.tzinfo is None:
-                        ts = ts.replace(tzinfo=UTC)
-                except (ValueError, TypeError):
-                    continue
-                out.append((ts, float(temp)))
-        except Exception:  # pragma: no cover - defensive per-day
-            logger.debug("thermal_learning: meteo read failed for %s", d, exc_info=True)
-        d += timedelta(days=1)
+            ts = datetime.fromisoformat(str(slot_iso).replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+        except (ValueError, TypeError):
+            continue
+        out.append((ts, float(temp) + float(micro.get(ts.hour, 0.0))))
     return sorted(out)
 
 
@@ -539,7 +627,10 @@ def _ua_fit_from_db(
     ua_window: int,
 ) -> dict[str, Any]:
     """Assemble (load, indoor_mean, outdoor_mean) day rows and run the pure
-    UA fit. Days need Fox load + ≥ 12 indoor readings + outdoor coverage."""
+    UA fit. A day needs Fox load, outdoor coverage, and ≥ 12 indoor readings
+    SPREAD across ≥ 4 distinct hours (review M4: "≥12 readings" alone is
+    satisfiable by 2 h of one morning — an unrepresentative mean paired with
+    a full-day load is a leverage point)."""
     from .. import db
 
     tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
@@ -550,12 +641,13 @@ def _ua_fit_from_db(
     except Exception:
         return {"status": "skipped", "reason": "fox daily read failed", "samples": 0}
 
-    indoor_by_day: dict[str, list[float]] = {}
+    indoor_by_day: dict[str, list[tuple[int, float]]] = {}
     for r in readings:
         try:
             ts = datetime.fromisoformat(str(r["captured_at"]).replace("Z", "+00:00"))
-            indoor_by_day.setdefault(ts.astimezone(tz).date().isoformat(), []).append(
-                float(r["temp_c"])
+            loc = ts.astimezone(tz)
+            indoor_by_day.setdefault(loc.date().isoformat(), []).append(
+                (loc.hour, float(r["temp_c"]))
             )
         except (ValueError, TypeError, KeyError):
             continue
@@ -569,9 +661,14 @@ def _ua_fit_from_db(
         load = row.get("load_kwh")
         ins = indoor_by_day.get(d) or []
         outs = outdoor_by_day.get(d) or []
-        if load is None or len(ins) < 12 or not outs:
+        hours_covered = {h for h, _ in ins}
+        if load is None or len(ins) < 12 or len(hours_covered) < 4 or not outs:
             continue
-        daily_rows.append((float(load), sum(ins) / len(ins), sum(outs) / len(outs)))
+        daily_rows.append((
+            float(load),
+            sum(t for _, t in ins) / len(ins),
+            sum(outs) / len(outs),
+        ))
     return fit_ua_hdd(
         daily_rows,
         assumed_cop=float(getattr(config, "THERMAL_UA_ASSUMED_COP", 3.0)),
