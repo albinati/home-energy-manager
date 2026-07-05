@@ -155,3 +155,52 @@ def test_db_rejects_out_of_range_bucket() -> None:
         db.upsert_daikin_consumption_2hourly(
             date="2026-05-01", bucket_idx=-1, kwh_total=0.0,
         )
+
+
+def test_intraday_two_hourly_only_skips_daily_table(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The intraday cron (two_hourly_only=True) refreshes the 2-hourly table
+    but must NOT touch daikin_consumption_daily — its consumers deliberately
+    end at yesterday, so churning a partial today-row midday buys nothing."""
+    import sys
+    import types
+
+    from src.scheduler import runner
+
+    daily_calls: list[dict] = []
+    twohr_calls: list[dict] = []
+    monkeypatch.setattr(
+        db, "upsert_daikin_consumption_daily",
+        lambda **kw: daily_calls.append(kw), raising=True,
+    )
+    monkeypatch.setattr(
+        db, "upsert_daikin_consumption_2hourly",
+        lambda **kw: twohr_calls.append(kw), raising=True,
+    )
+
+    class _Client:
+        def get_daily_consumption_from_cache(self):
+            return {"2026-05-01": {"total_kwh": 5.0, "heating_kwh": 3.0, "dhw_kwh": 2.0}}
+
+        def get_2hourly_consumption_from_cache(self):
+            return {"2026-05-01": {3: {"total_kwh": 0.5, "heating_kwh": 0.5, "dhw_kwh": 0.0}}}
+
+    # Stub api.main.get_daikin_client (imported inside the job) + the
+    # telemetry-integral sync (irrelevant to this assertion).
+    fake_main = types.ModuleType("src.api.main")
+    fake_main.get_daikin_client = lambda: _Client()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "src.api.main", fake_main)
+    monkeypatch.setattr(
+        "src.daikin.service.sync_daikin_2hourly_telemetry",
+        lambda d: {"written": 0}, raising=False,
+    )
+
+    runner.bulletproof_daikin_consumption_rollup_job(two_hourly_only=True)
+    assert daily_calls == []          # daily table untouched
+    assert len(twohr_calls) == 1      # 2-hourly refreshed
+    assert twohr_calls[0]["bucket_idx"] == 3
+
+    # And the nightly path (default) DOES write the daily table.
+    daily_calls.clear(); twohr_calls.clear()
+    runner.bulletproof_daikin_consumption_rollup_job()
+    assert len(daily_calls) == 1
+    assert len(twohr_calls) == 1

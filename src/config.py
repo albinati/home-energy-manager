@@ -1309,6 +1309,25 @@ class Config:
     DHW_BUCKET_BIAS_SUGGEST_MIN_PCT: float = float(
         os.getenv("DHW_BUCKET_BIAS_SUGGEST_MIN_PCT", "5.0")
     )
+    # --- Legionella heat-up BUDGET (#643, 2026-07-05) ---
+    # The firmware's weekly thermal-shock cycle draws real energy the LP must
+    # plan for (measured ~3-3.5 kWh electric: 37→60 °C on 200 L + hold at the
+    # poor COP of a 60 °C lift). Budgeted evenly across the standoff window in
+    # forecast_dhw_load_per_slot; 0 (or the flag) disables and restores the
+    # pre-#643 behavior where the battery discharged into the un-budgeted
+    # cycle and hit the SoC floor mid-heat-up.
+    DHW_LEGIONELLA_BUDGET_ENABLED: bool = os.getenv(
+        "DHW_LEGIONELLA_BUDGET_ENABLED", "true"
+    ).lower() in ("true", "1", "yes")
+    DHW_LEGIONELLA_BUDGET_KWH: float = float(
+        os.getenv("DHW_LEGIONELLA_BUDGET_KWH", "3.5")
+    )
+    # Intraday Daikin consumption rollups (10:05/14:05/18:05 UTC) so today's
+    # heat-pump split reaches the Consumption panel same-day. 1 quota call per
+    # run (3/day); false = nightly-only (pre-2026-07-05 behavior).
+    DAIKIN_CONSUMPTION_INTRADAY_ENABLED: bool = os.getenv(
+        "DAIKIN_CONSUMPTION_INTRADAY_ENABLED", "true"
+    ).lower() in ("true", "1", "yes")
     # --- Legionella thermal-shock STAND-OFF (2026-06-07) ---
     # The Onecta firmware owns the DHW tank during its weekly thermal-shock
     # cycle. Any tank PATCH HEM sends in that window is arbitrated/overridden by
