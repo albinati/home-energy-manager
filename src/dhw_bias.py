@@ -238,6 +238,68 @@ def refresh_dhw_bucket_bias() -> int:
     return n
 
 
+def maybe_suggest_enable() -> bool:
+    """One-shot ACTIONABLE ping when the enable gate is met: corrector still
+    disabled, ≥ ``DHW_BUCKET_BIAS_SUGGEST_MIN_DAYS`` distinct usable days in
+    the window, and the honest (out-of-sample) backtest shows a MAE
+    improvement. Never auto-enables — the corrected forecast is a hard LP
+    equality, so the human flips the env after a look at the backtest.
+    Deduped forever via the ``dhw_bias_enable_suggested_at`` runtime setting
+    (re-arm by clearing it). Returns True when the ping fired."""
+    from . import db as _db
+
+    if bool(getattr(config, "DHW_BUCKET_BIAS_ENABLED", False)):
+        return False
+    if not bool(getattr(config, "DHW_BUCKET_BIAS_SUGGEST_ENABLED", True)):
+        return False
+    if _db.get_runtime_setting("dhw_bias_enable_suggested_at"):
+        return False  # already pinged once — the human decides from here
+
+    min_days = int(getattr(config, "DHW_BUCKET_BIAS_SUGGEST_MIN_DAYS", 7))
+    window = int(getattr(config, "DHW_BUCKET_BIAS_WINDOW_DAYS", 14))
+    usable, today = _usable_rows(window)
+    n_days = len({r["day"] for r in usable})
+    if n_days < min_days:
+        return False
+    # The OOS split fits on the OLDER half — at the earliest eligibility that
+    # half can hold a single day, which is no evidence at all (review finding:
+    # the one-shot ping must not burn itself on a 1-day fit). Require the fit
+    # half to carry at least the per-bucket min-days by itself.
+    mid = today - timedelta(days=window // 2)
+    older_days = len({r["day"] for r in usable if r["day"] < mid})
+    if older_days < int(getattr(config, "DHW_BUCKET_BIAS_MIN_DAYS", 3)):
+        return False
+    bt = backtest_dhw_bucket_bias(window)
+    oos = bt.get("out_of_sample")
+    if not oos:
+        return False
+    # Magnitude floor: >0 passes at a rounding artefact (0.0001 kWh) and the
+    # ping renders "−0%". Require an improvement worth a human's attention.
+    min_pct = float(getattr(config, "DHW_BUCKET_BIAS_SUGGEST_MIN_PCT", 5.0))
+    if (
+        float(oos.get("mae_reduction_kwh") or 0.0) < 0.01
+        or float(oos.get("mae_reduction_pct") or 0.0) < min_pct
+    ):
+        return False
+
+    from . import notifier
+    notifier.notify_dhw_bias_enable_ready(
+        days=n_days,
+        mae_before_kwh=float(oos["before"]["mae_kwh"]),
+        mae_after_kwh=float(oos["after"]["mae_kwh"]),
+        reduction_pct=float(oos.get("mae_reduction_pct") or 0.0),
+    )
+    _db.set_runtime_setting(
+        "dhw_bias_enable_suggested_at",
+        datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+    logger.info(
+        "dhw_bucket_bias: enable gate met (days=%d oos_mae %.3f->%.3f) — user pinged",
+        n_days, float(oos["before"]["mae_kwh"]), float(oos["after"]["mae_kwh"]),
+    )
+    return True
+
+
 def normalized_factors(factors: dict[int, float], mode: str) -> dict[int, float]:
     """Shape-only view of ``factors`` for ``mode``: divided by the nominal
     energy-share-weighted mean so applying them preserves the forecast's daily

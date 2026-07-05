@@ -72,6 +72,11 @@ class AlertType(str, Enum):
     # (infeasible spike, or battery discharging during negative-price slots).
     # Fires only on regression; deduped one per signature per day.
     LP_HEALTH_REGRESSION = "lp_health_regression"
+    # 2026-07-05 — the DHW bucket-bias corrector's enable gate was met (enough
+    # days of factors + out-of-sample MAE improvement in the backtest). An
+    # ACTIONABLE prompt: never auto-enables (the corrected value feeds a hard
+    # LP equality — a human flips the env). One-shot (runtime-setting dedup).
+    DHW_BIAS_ENABLE_READY = "dhw_bias_enable_ready"
 
 
 # OpenClaw hook payload ``name`` field (one stable label per alert key)
@@ -93,6 +98,7 @@ _HOOK_PAYLOAD_NAMES: dict[str, str] = {
     "lp_failure": "EnergyLPFailure",
     "guests_mode_suggested": "EnergyGuestsSuggested",
     "lp_health_regression": "EnergyLPHealthRegression",
+    "dhw_bias_enable_ready": "EnergyDhwBiasEnableReady",
 }
 
 
@@ -882,6 +888,41 @@ def notify_guests_mode_suggested(
     _dispatch(
         AlertType.GUESTS_MODE_SUGGESTED, body, urgent=False, extra=extra,
         telegram_header_override="🏠 Consumo elevado — visitas?",
+    )
+
+
+def notify_dhw_bias_enable_ready(
+    *,
+    days: int,
+    mae_before_kwh: float,
+    mae_after_kwh: float,
+    reduction_pct: float,
+) -> None:
+    """✅ The DHW bucket-bias backtest gate is met — prompt the user to enable.
+
+    NEVER auto-enables: the corrected forecast is pinned into the LP as a hard
+    equality, so a human flips ``DHW_BUCKET_BIAS_ENABLED=true`` after a look at
+    ``/api/v1/dhw/error-log/backtest``. pt-BR body; one-shot (caller dedups via
+    a runtime setting)."""
+    body = "\n".join([
+        f"O corretor de shape do DHW acumulou {days} dias de fatores e o backtest "
+        f"out-of-sample melhora o erro: MAE {mae_before_kwh:.2f} → {mae_after_kwh:.2f} "
+        f"kWh/bucket (−{reduction_pct:.0f}%).",
+        "Confira em `/api/v1/dhw/error-log/backtest` e, se estiver de acordo, ligue com:",
+        "`DHW_BUCKET_BIAS_ENABLED=true` em `/srv/hem/.env` + `systemctl restart hem`.",
+        "Rollback: remover a linha + restart (efeito no solve seguinte).",
+    ])
+    extra = {
+        "days": int(days),
+        "mae_before_kwh": round(float(mae_before_kwh), 4),
+        "mae_after_kwh": round(float(mae_after_kwh), 4),
+        "reduction_pct": round(float(reduction_pct), 1),
+        "envVar": "DHW_BUCKET_BIAS_ENABLED",
+        "gateEndpoint": "/api/v1/dhw/error-log/backtest",
+    }
+    _dispatch(
+        AlertType.DHW_BIAS_ENABLE_READY, body, urgent=False, extra=extra,
+        telegram_header_override="✅ Corretor DHW pronto pra ligar",
     )
 
 
