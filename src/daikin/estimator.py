@@ -55,7 +55,27 @@ def _c_tank_j_per_k() -> float:
 
 
 def _c_bld_j_per_k() -> float:
-    return float(config.BUILDING_THERMAL_MASS_KWH_PER_K) * 3.6e6
+    return _building_mass_kwh_per_k() * 3.6e6
+
+
+def _building_ua_w_per_k() -> float:
+    """W2-learned UA when the calibration has a quality row; env otherwise.
+    Lazy import + broad fallback: the estimator is itself a fallback path
+    (quota exhaustion) and must never fail on a calibration hiccup."""
+    try:
+        from ..analytics.thermal_learning import get_building_ua_w_per_k
+        return get_building_ua_w_per_k()
+    except Exception:  # noqa: BLE001
+        return float(config.BUILDING_UA_W_PER_K)
+
+
+def _building_mass_kwh_per_k() -> float:
+    """W2-learned C = τ·UA when present; env otherwise (see _building_ua_w_per_k)."""
+    try:
+        from ..analytics.thermal_learning import get_building_thermal_mass_kwh_per_k
+        return get_building_thermal_mass_kwh_per_k()
+    except Exception:  # noqa: BLE001
+        return float(config.BUILDING_THERMAL_MASS_KWH_PER_K)
 
 
 def _mean_outdoor(
@@ -109,7 +129,7 @@ def estimate_state(
     outdoor = _mean_outdoor(meteo_rows, fallback=default_outdoor_c)
 
     ua_tank = float(config.DHW_TANK_UA_W_PER_K)
-    ua_bld = float(config.BUILDING_UA_W_PER_K)
+    ua_bld = _building_ua_w_per_k()
     c_tank = _c_tank_j_per_k()
     c_bld = _c_bld_j_per_k()
 

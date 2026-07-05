@@ -1195,6 +1195,30 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             computed_at TEXT NOT NULL
         )"""
     )
+    # W2 thermal learner (#540) — building τ / UA / C learned from indoor
+    # sensor decay + the measured-indoor HDD regression. Single row, same
+    # pattern as daikin_lwt_kw_calibration. τ and UA carry separate quality
+    # fields so τ (any cool night) can land months before UA (needs winter).
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS building_thermal_calibration (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            tau_hours REAL,
+            tau_r2_median REAL,
+            tau_episodes INTEGER,
+            tau_window_days INTEGER,
+            tau_computed_at TEXT,
+            ua_w_per_k REAL,
+            ua_r2 REAL,
+            ua_samples INTEGER,
+            ua_window_days INTEGER,
+            ua_assumed_cop REAL,
+            ua_source TEXT,
+            ua_computed_at TEXT,
+            c_kwh_per_k REAL,
+            c_source TEXT,
+            computed_at TEXT NOT NULL
+        )"""
+    )
     # Read-only view that exposes daikin_telemetry.fetched_at as ISO 8601
     # alongside the raw float-epoch column. Productive code paths (estimator,
     # service.py rate calcs) consume the float directly for sub-second math —
@@ -7626,6 +7650,88 @@ def compute_daikin_lwt_kw_calibration(
         "skipped_hem_offset": len(skipped_hem_offset),
         "outliers_filtered": len(pairs) - len(anchored),
     }
+
+
+def get_building_thermal_calibration() -> dict[str, Any] | None:
+    """Latest W2 building thermal calibration row, or ``None`` when empty.
+    Single-row PK seek — cheap enough for the estimator's per-call readers."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM building_thermal_calibration WHERE id = 1"
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+
+_THERMAL_CAL_COLS = (
+    "tau_hours", "tau_r2_median", "tau_episodes", "tau_window_days",
+    "tau_computed_at", "ua_w_per_k", "ua_r2", "ua_samples", "ua_window_days",
+    "ua_assumed_cop", "ua_source", "ua_computed_at", "c_kwh_per_k", "c_source",
+)
+
+
+def upsert_building_thermal_calibration(fields: dict[str, Any]) -> None:
+    """Replace the single ``building_thermal_calibration`` row. ``fields`` may
+    carry any subset of the columns (the W2 refresh merges skipped components
+    from the prior row before calling); unknown keys are ignored."""
+    from datetime import UTC as _UTC, datetime as _dt
+    vals = [fields.get(c) for c in _THERMAL_CAL_COLS]
+    with _lock:
+        conn = get_connection()
+        try:
+            conn.execute(
+                f"""INSERT OR REPLACE INTO building_thermal_calibration
+                    (id, {', '.join(_THERMAL_CAL_COLS)}, computed_at)
+                    VALUES (1, {', '.join('?' * len(_THERMAL_CAL_COLS))}, ?)""",
+                (*vals, _dt.now(_UTC).isoformat()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def get_meteo_temps_for_day(day_iso: str) -> list[tuple[str, float]]:
+    """Freshest outdoor ``(slot_time, temp_c)`` per slot for a UTC day, from
+    the ``meteo_forecast_value ∪ meteo_forecast_history`` union (same source
+    + freshest-per-slot rule as :func:`compute_daikin_lwt_kw_calibration`,
+    extracted for the W2 thermal learner's outdoor series)."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT slot_time, temp_c FROM (
+                       SELECT slot_time, temp_c, forecast_fetch_at_utc
+                         FROM meteo_forecast_history
+                        WHERE substr(slot_time, 1, 10) = ?
+                          AND temp_c IS NOT NULL
+                       UNION ALL
+                       SELECT slot_time, temp_c, forecast_fetch_at_utc
+                         FROM meteo_forecast_value
+                        WHERE substr(slot_time, 1, 10) = ?
+                          AND temp_c IS NOT NULL
+                   ) AS u
+                   WHERE forecast_fetch_at_utc = (
+                       SELECT MAX(f) FROM (
+                           SELECT forecast_fetch_at_utc AS f
+                             FROM meteo_forecast_history
+                            WHERE slot_time = u.slot_time AND temp_c IS NOT NULL
+                           UNION ALL
+                           SELECT forecast_fetch_at_utc AS f
+                             FROM meteo_forecast_value
+                            WHERE slot_time = u.slot_time AND temp_c IS NOT NULL
+                       )
+                   )
+                   GROUP BY slot_time
+                   ORDER BY slot_time""",
+                (day_iso, day_iso),
+            )
+            return [(str(r["slot_time"]), float(r["temp_c"])) for r in cur.fetchall()]
+        finally:
+            conn.close()
 
 
 def refresh_daikin_lwt_kw_calibration(*, log_min_delta_pct: float = 1.0) -> dict[str, Any]:

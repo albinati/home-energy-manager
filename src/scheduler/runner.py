@@ -796,6 +796,19 @@ def bulletproof_dhw_error_log_job() -> None:
         logger.warning("dhw_error_log rebuild failed (non-fatal): %s", e)
 
 
+def bulletproof_thermal_learning_job() -> None:
+    """Nightly W2 thermal-learner refresh (#540): τ from unheated overnight
+    indoor decay + UA HDD re-fit + C = τ·UA into building_thermal_calibration.
+    Quality-gated no-op until room sensors push data. Best-effort.
+    """
+    try:
+        from ..analytics.thermal_learning import refresh_building_thermal_calibration
+        result = refresh_building_thermal_calibration()
+        logger.info("thermal learning refresh: status=%s", result.get("status"))
+    except Exception as e:
+        logger.warning("thermal learning refresh failed (non-fatal): %s", e)
+
+
 def bulletproof_load_error_log_job() -> None:
     """Persist yesterday's per-slot committed-LOAD-forecast-vs-actual rows.
 
@@ -2377,6 +2390,17 @@ def start_background_scheduler() -> None:
                 id="bulletproof_export_opportunity",
             )
             logger.info("Export-opportunity cron scheduled (04:25 UTC daily)")
+            # W2 thermal learner (#540). 05:30 UTC — after the 02:35 Daikin
+            # rollup + 04:00 consumption backfill so decay-episode
+            # decontamination sees the fullest heating splits. Quiet no-op
+            # until indoor sensor data exists.
+            if getattr(config, "THERMAL_LEARNING_ENABLED", True):
+                _background_scheduler.add_job(
+                    bulletproof_thermal_learning_job,
+                    CronTrigger(hour=5, minute=30, timezone=ZoneInfo("UTC")),
+                    id="bulletproof_thermal_learning",
+                )
+                logger.info("Thermal-learning cron scheduled (05:30 UTC daily)")
             # Guests-elevation detector — after the load_error_log rebuild (04:22
             # UTC) so yesterday's actual-vs-forecast is fresh. Fires in the local
             # morning (default 08:30) so the prompt lands at a sensible hour. It

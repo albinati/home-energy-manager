@@ -1628,6 +1628,49 @@ class Config:
     # the indoor sensors land (#540).
     BUILDING_UA_W_PER_K: float = float(os.getenv("BUILDING_UA_W_PER_K", "600"))
     BUILDING_THERMAL_MASS_KWH_PER_K: float = float(os.getenv("BUILDING_THERMAL_MASS_KWH_PER_K", "12.0"))
+    # --- W2 thermal learner (#540) ---
+    # Learns τ from unheated overnight indoor decay + re-fits UA from the HDD
+    # regression with MEASURED indoor daily means; C = τ·UA. No-op (quality
+    # gates report 'skipped') while room_temperature_history is empty.
+    # THERMAL_LEARNING_ENABLED stops the 05:30 UTC cron;
+    # THERMAL_LEARNED_VALUES_ENABLED=false makes every reader fall back to the
+    # env constants above instantly (the consumer-side kill switch).
+    THERMAL_LEARNING_ENABLED: bool = os.getenv(
+        "THERMAL_LEARNING_ENABLED", "true"
+    ).lower() in ("true", "1", "yes")
+    THERMAL_LEARNED_VALUES_ENABLED: bool = os.getenv(
+        "THERMAL_LEARNED_VALUES_ENABLED", "true"
+    ).lower() in ("true", "1", "yes")
+    THERMAL_TAU_WINDOW_DAYS: int = int(os.getenv("THERMAL_TAU_WINDOW_DAYS", "21"))
+    THERMAL_TAU_MIN_EPISODES: int = int(os.getenv("THERMAL_TAU_MIN_EPISODES", "5"))
+    THERMAL_TAU_MIN_EPISODE_HOURS: float = float(
+        os.getenv("THERMAL_TAU_MIN_EPISODE_HOURS", "4")
+    )
+    # Radiators + the hydronic loop keep emitting after the compressor stops
+    # (thermal inertia of the emitters/pipework) — a decay episode may only
+    # START this many hours after the last heating activity.
+    THERMAL_TAU_SETTLE_HOURS: float = float(os.getenv("THERMAL_TAU_SETTLE_HOURS", "2.0"))
+    # ΔT(indoor − outdoor) below this makes τ unidentifiable (decay signal
+    # drowns in sensor noise) — warm summer nights are skipped honestly.
+    THERMAL_TAU_MIN_DELTA_T_C: float = float(os.getenv("THERMAL_TAU_MIN_DELTA_T_C", "5.0"))
+    THERMAL_TAU_MIN_R2: float = float(os.getenv("THERMAL_TAU_MIN_R2", "0.8"))
+    THERMAL_TAU_MIN_HOURS: float = float(os.getenv("THERMAL_TAU_MIN_HOURS", "5"))
+    THERMAL_TAU_MAX_HOURS: float = float(os.getenv("THERMAL_TAU_MAX_HOURS", "100"))
+    THERMAL_TAU_NIGHT_START_HOUR_LOCAL: int = int(
+        os.getenv("THERMAL_TAU_NIGHT_START_HOUR_LOCAL", "21")
+    )
+    THERMAL_TAU_NIGHT_END_HOUR_LOCAL: int = int(
+        os.getenv("THERMAL_TAU_NIGHT_END_HOUR_LOCAL", "8")
+    )
+    # A 2h bucket with measured space heating above this contaminates a decay
+    # episode; DHW gets a much higher floor (separate circuit — only heavy
+    # boosts leak meaningful heat into the envelope).
+    THERMAL_HEATING_CONTAM_KWH: float = float(os.getenv("THERMAL_HEATING_CONTAM_KWH", "0.1"))
+    THERMAL_DHW_CONTAM_KWH: float = float(os.getenv("THERMAL_DHW_CONTAM_KWH", "0.8"))
+    THERMAL_UA_WINDOW_DAYS: int = int(os.getenv("THERMAL_UA_WINDOW_DAYS", "120"))
+    THERMAL_UA_MIN_HDD_DAYS: int = int(os.getenv("THERMAL_UA_MIN_HDD_DAYS", "20"))
+    THERMAL_UA_ASSUMED_COP: float = float(os.getenv("THERMAL_UA_ASSUMED_COP", "3.0"))
+    THERMAL_UA_MIN_R2: float = float(os.getenv("THERMAL_UA_MIN_R2", "0.5"))
     # INDOOR_SETPOINT_C is runtime-tunable via /api/v1/settings (#52) — see @property below.
     INDOOR_COMFORT_BAND_C: float = float(os.getenv("INDOOR_COMFORT_BAND_C", "1.5"))
     # #540 W1 — a room-sensor reading older than this is treated as ABSENT (the
