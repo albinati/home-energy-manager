@@ -243,6 +243,37 @@ the wash more than necessary. `GET /api/v1/appliances` surfaces
 
 ---
 
+## Indoor temperature sensor ingestion (#540 W1)
+
+The Altherma has no room stat, so the house's indoor temperature was never
+measured — the winter thermal model (#540) needs it. An ESPHome room sensor
+pushes readings to **`POST /api/v1/sensors/indoor`** (`src/api/routers/sensors.py`):
+batch (1–2000 readings), idempotent on `(captured_at, room)`, stored in
+`room_temperature_history`. Downstream: LP initial state + dispatch comfort
+guard read the freshest reading (`INDOOR_SENSOR_STALE_MINUTES=30`); the W2
+thermal learner reads the history. Read back via `GET /api/v1/sensors/indoor`
+and `GET /api/v1/sensors/thermal-calibration`.
+
+**Network path (sensor at home → HEM on Hetzner).** The sensor is on the house
+LAN; the HEM is a cloud box behind Tailscale — ESPHome can't join the tailnet.
+It reuses the **existing `hem-ui` Tailscale funnel (`:8443`)**, which already
+publishes `/api/` with valid TLS (and does NOT expose `/mcp`) — no new proxy,
+port, or funnel. The sensor POSTs to
+`https://<host>.ts.net:8443/api/v1/sensors/indoor` carrying a **scoped**
+`HEM_SENSOR_INGEST_TOKEN` — NOT admin. (The funnel is a dumb TLS tunnel to one
+local port with no path ACL, so route-level containment is done entirely by the
+scoped token in the middleware, below — not by the funnel.)
+
+**Scoped token (`ApiV1RoleAuth.ingest_tokens`).** `middleware.py:_ingest_allowed`
+lets this token satisfy ONLY a *write* to `/api/v1/sensors/indoor` — never an
+admin read (Settings/Journal) or any other write. So a firmware/network leak can
+only post fake temperatures to that one endpoint; rotate the token to revoke a
+device. Empty `HEM_SENSOR_INGEST_TOKEN` → feature off (admin-only, as before).
+
+Full deploy (token mint + smoke test) + ESPHome YAML skeleton: `deploy/README.md` §12.
+
+---
+
 ## Key `.env` settings to know
 
 ```

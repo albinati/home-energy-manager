@@ -287,6 +287,13 @@ _ADMIN_TOKEN_GETTERS = [
     lambda: config.HEM_OPENCLAW_TOKEN,
 ]
 
+# Scoped, non-admin credential(s) — unlock ONLY the sensor-ingest write route
+# (#540 W1). Carried by an internet-exposed ESPHome sensor via the locked-down
+# `hem-ingest` proxy; a leak can't reach admin. Empty getter list → feature off.
+_INGEST_TOKEN_GETTERS = [
+    lambda: config.HEM_SENSOR_INGEST_TOKEN,
+]
+
 
 def _request_is_admin(request: Request) -> bool:
     """True when the request carries a valid admin bearer. Used by the few
@@ -298,6 +305,7 @@ def _request_is_admin(request: Request) -> bool:
 app.add_middleware(
     ApiV1RoleAuth,
     admin_tokens=_ADMIN_TOKEN_GETTERS,
+    ingest_tokens=_INGEST_TOKEN_GETTERS,
     enabled=lambda: bool(config.HEM_UI_AUTH_REQUIRED),
 )
 

@@ -38,11 +38,13 @@ def _isolated_db(monkeypatch, tmp_path):
     yield
 
 
-def _set_tokens(monkeypatch, *, ui="ui-tok", admin="admin-tok", openclaw="oc-tok", required=True) -> None:
+def _set_tokens(monkeypatch, *, ui="ui-tok", admin="admin-tok", openclaw="oc-tok",
+                ingest="ingest-tok", required=True) -> None:
     from src import config as _config
     monkeypatch.setattr(_config.config, "HEM_UI_TOKEN", ui, raising=False)
     monkeypatch.setattr(_config.config, "HEM_ADMIN_TOKEN", admin, raising=False)
     monkeypatch.setattr(_config.config, "HEM_OPENCLAW_TOKEN", openclaw, raising=False)
+    monkeypatch.setattr(_config.config, "HEM_SENSOR_INGEST_TOKEN", ingest, raising=False)
     monkeypatch.setattr(_config.config, "HEM_UI_AUTH_REQUIRED", required, raising=False)
 
 
@@ -108,6 +110,64 @@ def test_write_passes_auth_with_openclaw_token(monkeypatch) -> None:
     _set_tokens(monkeypatch, required=True)
     resp = _client().post("/api/v1/optimization/propose", json={}, headers=_auth("oc-tok"))
     assert resp.status_code != 401
+
+
+# ── Scoped sensor-ingest token (#540 W1) ────────────────────────────────────
+# A non-admin credential that unlocks ONLY POST /api/v1/sensors/indoor — the
+# token an internet-exposed ESPHome sensor carries.
+
+_SENSOR = "/api/v1/sensors/indoor"
+
+
+def test_ingest_token_can_post_its_own_route(monkeypatch) -> None:
+    _set_tokens(monkeypatch, required=True)
+    from datetime import UTC, datetime
+    body = {"readings": [{
+        "captured_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "temp_c": 21.0, "room": "living",
+    }]}
+    resp = _client().post(_SENSOR, json=body, headers=_auth("ingest-tok"))
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["written"] == 1
+
+
+def test_ingest_route_still_open_to_admin(monkeypatch) -> None:
+    _set_tokens(monkeypatch, required=True)
+    resp = _client().post(_SENSOR, json={"readings": []}, headers=_auth("admin-tok"))
+    # 422 (empty batch fails min_length) is fine — past the auth layer.
+    assert resp.status_code != 401
+
+
+def test_ingest_route_rejects_no_token(monkeypatch) -> None:
+    _set_tokens(monkeypatch, required=True)
+    assert _client().post(_SENSOR, json={"readings": []}).status_code == 401
+
+
+def test_ingest_token_cannot_write_other_routes(monkeypatch) -> None:
+    """The scoped token must be useless anywhere but its one endpoint."""
+    _set_tokens(monkeypatch, required=True)
+    resp = _client().post("/api/v1/optimization/propose", json={}, headers=_auth("ingest-tok"))
+    assert resp.status_code == 401
+
+
+def test_ingest_token_cannot_read_admin_surfaces(monkeypatch) -> None:
+    """A write credential must not unlock admin READS (Settings/Journal)."""
+    _set_tokens(monkeypatch, required=True)
+    c = _client()
+    assert c.get("/api/v1/settings", headers=_auth("ingest-tok")).status_code == 401
+    assert c.get("/api/v1/action-log", headers=_auth("ingest-tok")).status_code == 401
+
+
+def test_ingest_token_is_not_admin_on_whoami(monkeypatch) -> None:
+    _set_tokens(monkeypatch, required=True)
+    assert _client().get("/api/v1/whoami", headers=_auth("ingest-tok")).json()["role"] == "viewer"
+
+
+def test_ingest_disabled_when_token_unset(monkeypatch) -> None:
+    """Empty HEM_SENSOR_INGEST_TOKEN → feature off; the would-be token is just
+    an invalid bearer, so the sensor route falls back to admin-only."""
+    _set_tokens(monkeypatch, ingest="", required=True)
+    assert _client().post(_SENSOR, json={"readings": []}, headers=_auth("ingest-tok")).status_code == 401
 
 
 # ── Settings + Journal reads require ADMIN ──────────────────────────────────

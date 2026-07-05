@@ -204,6 +204,8 @@ class ApiV1RoleAuth:
             "/api/v1/integrations",   # SmartThings credentials / OAuth
             "/api/v1/workbench",      # LP override sandbox (admin tool, in Settings)
         ),
+        ingest_tokens: Iterable[TokenLike] = (),
+        ingest_write_prefixes: Iterable[str] = ("/api/v1/sensors/indoor",),
     ) -> None:
         self.app = app
         self._admin_tokens = list(admin_tokens)
@@ -211,11 +213,27 @@ class ApiV1RoleAuth:
         self._prefix = prefix
         self._public_paths = frozenset(public_paths)
         self._admin_read_prefixes = tuple(admin_read_prefixes)
+        # Scoped, non-admin write credential(s). A match satisfies ONLY a write
+        # (non-safe method) to a whitelisted ingest prefix — never an admin read
+        # or any other write. This is the token an internet-exposed device (e.g.
+        # an ESPHome room sensor pushing to /sensors/indoor via a locked-down
+        # proxy) carries, so a firmware leak can't hand over admin.
+        self._ingest_tokens = list(ingest_tokens)
+        self._ingest_write_prefixes = tuple(ingest_write_prefixes)
 
     def _needs_admin(self, method: str, path: str) -> bool:
         if method.upper() not in SAFE_METHODS:
             return True
         return any(path.startswith(p) for p in self._admin_read_prefixes)
+
+    def _ingest_allowed(self, method: str, path: str) -> bool:
+        """True only for a *write* to a whitelisted ingest route — the sole
+        surface a scoped ingest token unlocks. A safe method (GET on an
+        admin_read_prefix) or any non-ingest write returns False, so the
+        scoped token is useless everywhere except its one endpoint."""
+        if method.upper() in SAFE_METHODS:
+            return False
+        return any(path.startswith(p) for p in self._ingest_write_prefixes)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -244,11 +262,19 @@ class ApiV1RoleAuth:
         if not presented:
             await _reject(send, 401, "admin token required", realm="hem-api")
             return
-        if not token_matches_any(presented, self._admin_tokens):
-            await _reject(send, 401, "invalid admin token", realm="hem-api")
+        if token_matches_any(presented, self._admin_tokens):
+            await self.app(scope, receive, send)
             return
-
-        await self.app(scope, receive, send)
+        # A scoped ingest token unlocks its whitelisted write routes ONLY.
+        if (
+            self._ingest_tokens
+            and self._ingest_allowed(scope.get("method", "GET"), path)
+            and token_matches_any(presented, self._ingest_tokens)
+        ):
+            await self.app(scope, receive, send)
+            return
+        await _reject(send, 401, "invalid admin token", realm="hem-api")
+        return
 
 
 async def _reject(send: Send, status: int, message: str, *, realm: str = "hem-mcp") -> None:
