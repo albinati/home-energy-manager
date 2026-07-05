@@ -142,6 +142,60 @@ def test_device_log_idempotent_on_device_and_time() -> None:
     assert db.save_device_reading_log([{**r, "mac": "CC:DD"}]) == 1
 
 
+def test_device_log_null_captured_at_still_dedups() -> None:
+    """A reading with an unparseable/missing timestamp is still logged, and two
+    such readings from the same device in one batch collapse (dedup_key falls
+    back to the server clock — NOT a NULL that SQLite treats as always-distinct)."""
+    r = {"captured_at": "not-a-timestamp", "temp_c": 20.0, "mac": "AA:BB", "room": "sala"}
+    # Same batch, same device, both timestamp-less → one row (deduped).
+    assert db.save_device_reading_log([r, dict(r)]) == 1
+    rows = db.get_device_reading_log()
+    assert len(rows) == 1
+    assert rows[0]["captured_at"] is None       # honest: device gave no time
+    assert rows[0]["payload"]["temp_c"] == pytest.approx(20.0)
+
+
+def test_device_log_rejects_non_finite_temp() -> None:
+    """NaN/Inf must never reach the log — they serialize as the invalid-JSON
+    token `NaN` and would poison every reader of the feed."""
+    now = datetime.now(UTC)
+    assert db.save_device_reading_log([
+        {"captured_at": _z(now), "temp_c": float("nan"), "humidity_pct": 55.0,
+         "mac": "AA:BB", "room": "sala"},
+    ]) == 1
+    rows = db.get_device_reading_log()
+    assert rows[0]["temp_c"] is None                     # coerced out of the column
+    assert rows[0]["payload"]["temp_c"] is None          # and out of the raw blob
+    assert rows[0]["payload"]["humidity_pct"] == pytest.approx(55.0)  # sibling intact
+    import json
+    json.dumps(rows)   # the whole response is valid JSON (would raise on NaN)
+
+
+def test_device_log_batch_latest_is_freshest_capture() -> None:
+    """When a device pushes several readings in ONE batch (same received_at),
+    the 'latest' overview must be the freshest captured_at, not an arbitrary tie."""
+    now = datetime.now(UTC)
+    db.save_device_reading_log([
+        {"captured_at": _z(now - timedelta(minutes=5)), "temp_c": 18.0, "mac": "AA:BB", "room": "sala"},
+        {"captured_at": _z(now), "temp_c": 21.0, "mac": "AA:BB", "room": "sala"},  # freshest
+    ])
+    devs = db.list_sensor_devices()
+    assert devs[0]["latest"]["temp_c"] == pytest.approx(21.0)
+
+
+def test_device_log_oversized_payload_truncated() -> None:
+    now = datetime.now(UTC)
+    big = "x" * 9000   # blows past the 4 KB per-reading ceiling
+    db.save_device_reading_log([
+        {"captured_at": _z(now), "temp_c": 20.0, "mac": "AA:BB", "room": "sala", "junk": big},
+    ])
+    row = db.get_device_reading_log()[0]
+    assert row["payload"].get("_truncated") is True
+    assert "junk" not in row["payload"]                 # extra dropped
+    assert row["payload"]["temp_c"] == pytest.approx(20.0)  # known field kept
+    assert row["temp_c"] == pytest.approx(20.0)          # typed column unaffected
+
+
 def test_out_of_band_temp_logged_but_not_in_thermal_history() -> None:
     """An 85 °C sensor fault must be logged per-device but must NOT poison the
     LP's room_temperature_history."""

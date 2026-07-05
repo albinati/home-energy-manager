@@ -7,6 +7,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import math
 import sqlite3
 import threading
 import time
@@ -952,7 +953,13 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         """CREATE TABLE IF NOT EXISTS device_reading_log (
             received_at  TEXT NOT NULL,   -- server receipt (UTC), always set
-            captured_at  TEXT,            -- device timestamp (UTC) if sent
+            captured_at  TEXT,            -- device timestamp (UTC) if sent, else NULL
+            dedup_key    TEXT NOT NULL,   -- captured_at, or received_at when the
+                                          -- device sent no/unparseable timestamp.
+                                          -- NEVER NULL, so the PK actually dedups
+                                          -- (SQLite treats NULLs in a PK as all
+                                          -- distinct → a NULL captured_at would
+                                          -- never collapse retries).
             device_key   TEXT NOT NULL,   -- mac|device_id|source|room, for dedup + grouping
             device_id    TEXT,
             mac          TEXT,
@@ -962,11 +969,11 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             humidity_pct REAL,
             pressure_hpa REAL,
             payload_json TEXT NOT NULL,   -- the FULL raw reading, lossless
-            PRIMARY KEY (device_key, captured_at)
+            PRIMARY KEY (device_key, dedup_key)
         )"""
     )
     conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_device_log_device ON device_reading_log(device_key, captured_at)"
+        "CREATE INDEX IF NOT EXISTS idx_device_log_device ON device_reading_log(device_key, dedup_key)"
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_device_log_received ON device_reading_log(received_at)"
@@ -4605,13 +4612,53 @@ def _device_key(r: dict[str, Any]) -> str:
     return "unknown"
 
 
+# Per-reading serialized payload ceiling. Legitimate sensor readings are a few
+# hundred bytes; this only trips on abuse (the ingest token is on an internet-
+# exposed device, #646) — extras are then dropped, known fields kept, so one
+# bad device can't amplify storage without bound.
+_DEVICE_LOG_MAX_PAYLOAD_BYTES = 4096
+
+_DEVICE_LOG_KNOWN_FIELDS = (
+    "captured_at", "temp_c", "humidity_pct", "pressure_hpa",
+    "room", "source", "device_id", "mac", "quality",
+)
+
+
+def _finite_or_none(v: Any) -> float | None:
+    """Coerce to float, dropping non-finite (NaN/Inf) — those serialize as the
+    invalid-JSON token ``NaN`` and would poison every reader of the log."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def _sanitize_payload(r: dict[str, Any]) -> dict[str, Any]:
+    """A JSON-safe copy of a raw reading: non-finite floats → None (so the
+    dumped payload is always valid JSON), and if the whole thing is oversized,
+    keep only the known fields + a ``_truncated`` marker."""
+    clean: dict[str, Any] = {}
+    for k, v in r.items():
+        if isinstance(v, float) and not math.isfinite(v):
+            clean[k] = None
+        else:
+            clean[k] = v
+    blob = json.dumps(clean, default=str, sort_keys=True)
+    if len(blob.encode("utf-8")) > _DEVICE_LOG_MAX_PAYLOAD_BYTES:
+        clean = {k: clean.get(k) for k in _DEVICE_LOG_KNOWN_FIELDS if k in clean}
+        clean["_truncated"] = True
+    return clean
+
+
 def save_device_reading_log(readings: list[dict[str, Any]]) -> int:
     """Lossless per-device log of EVERYTHING a sensor sends (#540 W1c). Typed
     columns for the known metrics (temp/humidity/pressure/mac/device_id) plus
     ``payload_json`` holding the full raw reading, so any extra field survives
-    with no migration. Idempotent on (device_key, captured_at) — a retry doesn't
-    duplicate. ``received_at`` is the server clock (always set, even if the
-    device sent no timestamp). Returns rows written."""
+    with no migration. Idempotent on (device_key, dedup_key) where dedup_key is
+    the device timestamp (or the server clock when the device sent none) — so a
+    retry doesn't duplicate even for a timestamp-less device. ``received_at`` is
+    always the server clock. Returns rows written."""
     written = 0
     received = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     with _lock:
@@ -4619,33 +4666,28 @@ def save_device_reading_log(readings: list[dict[str, Any]]) -> int:
         try:
             for r in readings:
                 ts = _parse_iso_utc(r.get("captured_at"))
-                key = ts.strftime("%Y-%m-%dT%H:%M:%SZ") if ts else received
+                captured = ts.strftime("%Y-%m-%dT%H:%M:%SZ") if ts else None
+                dedup = captured or received  # NEVER NULL → the PK actually dedups
                 dev = _device_key(r)
-
-                def _num(field: str) -> float | None:
-                    v = r.get(field)
-                    try:
-                        return float(v) if v is not None else None
-                    except (TypeError, ValueError):
-                        return None
-
+                payload = _sanitize_payload(r)
                 cur = conn.execute(
                     """INSERT OR IGNORE INTO device_reading_log
-                       (received_at, captured_at, device_key, device_id, mac,
-                        room, source, temp_c, humidity_pct, pressure_hpa, payload_json)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       (received_at, captured_at, dedup_key, device_key, device_id,
+                        mac, room, source, temp_c, humidity_pct, pressure_hpa, payload_json)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         received,
-                        key if ts else None,
+                        captured,
+                        dedup,
                         dev,
                         (str(r["device_id"]).strip() if r.get("device_id") else None),
                         (str(r["mac"]).strip() if r.get("mac") else None),
                         (str(r["room"]) if r.get("room") else None),
                         (str(r["source"]) if r.get("source") else None),
-                        _num("temp_c"),
-                        _num("humidity_pct"),
-                        _num("pressure_hpa"),
-                        json.dumps(r, default=str, sort_keys=True),
+                        _finite_or_none(r.get("temp_c")) if r.get("temp_c") is not None else None,
+                        _finite_or_none(r.get("humidity_pct")) if r.get("humidity_pct") is not None else None,
+                        _finite_or_none(r.get("pressure_hpa")) if r.get("pressure_hpa") is not None else None,
+                        json.dumps(payload, default=str, sort_keys=True),
                     ),
                 )
                 written += cur.rowcount
@@ -4664,23 +4706,28 @@ def get_device_reading_log(
     with _lock:
         conn = get_connection()
         try:
+            # Newest by capture time (received_at ties within a batch); the
+            # device timestamp is the honest ordering, server clock the fallback.
             if device_key:
                 cur = conn.execute(
                     """SELECT * FROM device_reading_log
                        WHERE received_at >= ? AND device_key = ?
-                       ORDER BY received_at DESC LIMIT ?""",
+                       ORDER BY COALESCE(captured_at, received_at) DESC, received_at DESC
+                       LIMIT ?""",
                     (start, device_key, int(limit)),
                 )
             else:
                 cur = conn.execute(
                     """SELECT * FROM device_reading_log
                        WHERE received_at >= ?
-                       ORDER BY received_at DESC LIMIT ?""",
+                       ORDER BY COALESCE(captured_at, received_at) DESC, received_at DESC
+                       LIMIT ?""",
                     (start, int(limit)),
                 )
             rows = []
             for r in cur.fetchall():
                 d = dict(r)
+                d.pop("dedup_key", None)   # internal dedup column, not for callers
                 raw = d.pop("payload_json", None)
                 try:
                     d["payload"] = json.loads(raw) if raw else None
@@ -4717,7 +4764,8 @@ def list_sensor_devices() -> list[dict[str, Any]]:
                 latest = conn.execute(
                     """SELECT temp_c, humidity_pct, pressure_hpa, captured_at, received_at
                        FROM device_reading_log WHERE device_key = ?
-                       ORDER BY received_at DESC LIMIT 1""",
+                       ORDER BY COALESCE(captured_at, received_at) DESC, received_at DESC
+                       LIMIT 1""",
                     (d["device_key"],),
                 ).fetchone()
                 d["latest"] = dict(latest) if latest else None
