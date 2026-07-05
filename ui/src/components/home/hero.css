@@ -85,6 +85,22 @@
 .t-lo { color: var(--grid); font-weight: 700; font-variant-numeric: tabular-nums; }
 .t-hi { color: var(--import); font-weight: 700; font-variant-numeric: tabular-nums; }
 
+/* Outdoor L→H range + indoor climate, side by side above the forecast strip. */
+.hw-mid { display: flex; gap: var(--space-5); align-items: center; }
+.hw-mid > .thermo { flex: 1 1 0; min-width: 0; }
+.hw-indoor { flex: 0 0 auto; min-width: 42%; display: flex; flex-direction: column; gap: var(--space-1); }
+.hw-indoor .weather-eyebrow { display: inline-flex; align-items: center; gap: 5px; }
+.hw-indoor-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+.hw-indoor.is-stale .hw-indoor-dot { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
+.hw-indoor-fresh { font-variant-numeric: tabular-nums; }
+.hw-indoor-temp { font-size: var(--font-2xl); font-weight: 250; line-height: 1; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; color: var(--text); }
+.hw-indoor.is-stale .hw-indoor-temp { color: var(--text-mute); }
+
+@media (max-width: 720px) {
+  .hw-mid { flex-direction: column; align-items: stretch; gap: var(--space-3); }
+  .hw-indoor { min-width: 0; }
+}
+
 .solar-prog { margin-top: auto; }
 .solar-prog-head { margin-bottom: var(--space-2); }
 .solar-prog-track { height: 8px; border-radius: 4px; background: var(--bg-card-3); overflow: hidden; }

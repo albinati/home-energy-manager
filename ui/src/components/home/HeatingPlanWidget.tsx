@@ -2,26 +2,29 @@ import { useEffect, useRef } from "preact/hooks";
 import { makeChart, baseOption, chartTheme, areaGradient, withAlpha, type EChartsType } from "../../lib/charts";
 import { useResolvedTheme } from "../../lib/theme";
 import { reducedMotion } from "../../lib/motion";
-import type { HeatingPlanResponse } from "../../lib/types";
+import type { HeatingPlanResponse, ExecutionTodayResponse } from "../../lib/types";
 import { NowDot } from "../common/NowDot";
 import "./heating-plan.css";
 
 interface Props {
   plan: HeatingPlanResponse | null;
   loading: boolean;
+  // Realised Daikin telemetry per slot (logged LWT / outdoor) — overlays the
+  // solid "what actually happened" against the dotted committed plan.
+  execution?: ExecutionTodayResponse | null;
 }
 
 function localHM(iso: string): string {
   return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
 }
 
-// Heating-plan timeline (yesterday · today · tomorrow). The story it tells, in
-// one temperature axis: the OUTDOOR forecast drives the weather-curve LWT (the
-// natural radiator water temp), and HEM nudges that into the actual RADIATOR
-// setpoint = curve + offset — boosting ahead of expensive periods, setting back
-// through them. The gap between the faint curve line and the bold radiator line
-// IS the offset. Tank target rides alongside; warm wash = heating, blue = paid.
-export function HeatingPlanWidget({ plan, loading }: Props) {
+// Heating-plan timeline (today). The story, on one temperature axis: HEM's
+// committed radiator-LWT command (PLANNED, dotted) vs what the heat pump actually
+// did (REALISED, solid — the Daikin's logged LWT). The gap between them is the
+// actuation error (arbitration / drift / quota). Outdoor + the weather-curve
+// baseline sit behind as faint REFERENCE. Tank target rides alongside (planned
+// only — no logged tank telemetry). Warm wash = heating, blue band = paid.
+export function HeatingPlanWidget({ plan, loading, execution }: Props) {
   const ref = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<EChartsType | null>(null);
   const theme = useResolvedTheme();
@@ -56,6 +59,18 @@ export function HeatingPlanWidget({ plan, loading }: Props) {
     const lwtSet = slots.map((s) => (s.lwt_setpoint_c == null ? null : s.lwt_setpoint_c));
     const tank = slots.map((s) => (s.tank_temp_c == null ? null : s.tank_temp_c));
     const animate = !reducedMotion();
+
+    // REALISED radiator LWT — the Daikin's logged leaving-water temp per slot
+    // (execution_today), aligned to the plan slots by 30-min bucket. Only past
+    // slots have it, so the solid line naturally stops at "now" and any gap to
+    // the dotted plan is where the command didn't land (arbitration / drift).
+    const SLOT_MS = 30 * 60_000;
+    const bucket = (iso: string) => Math.floor(new Date(iso).getTime() / SLOT_MS);
+    const lwtRealByBucket = new Map<number, number>();
+    for (const e of execution?.slots ?? []) {
+      if (e.slot_utc && e.daikin_lwt_c != null) lwtRealByBucket.set(bucket(e.slot_utc), e.daikin_lwt_c);
+    }
+    const lwtReal = slots.map((s) => lwtRealByBucket.get(bucket(s.slot_utc)) ?? null);
 
     // Background bands: heating-on warm wash + a stronger blue band on
     // negative-price ("paid to import") slots.
@@ -127,20 +142,26 @@ export function HeatingPlanWidget({ plan, loading }: Props) {
         { name: "_bg", type: "line", data: slots.map(() => null), silent: true, z: 0,
           markArea: bands.length ? { silent: true, data: bands } : undefined,
           markLine: (dayLines.length || nowLine.length) ? { silent: true, symbol: "none", data: [...dayLines, ...nowLine] } : undefined },
-        // Outdoor — the cause (cool blue, soft fill, sits low).
+        // Outdoor — REFERENCE only (the weather that drives the curve). Thin +
+        // faint + no fill so it sits behind the actuation lines, not competing.
         { name: "Outdoor", type: "line", smooth: true, showSymbol: false, connectNulls: true,
-          data: outdoor, lineStyle: { color: t.grid, width: 2, cap: "round" },
-          areaStyle: { color: areaGradient(t.grid, 0.14, 0.0) }, z: 2 },
-        // Weather-curve LWT (offset 0) — faint dotted reference.
+          data: outdoor, lineStyle: { color: t.grid, width: 1, opacity: 0.4, cap: "round" }, z: 1 },
+        // Weather-curve LWT (offset 0) — REFERENCE baseline, recoloured grey so it
+        // reads as context, not an actuation.
         { name: "Curve LWT", type: "line", smooth: true, showSymbol: false, connectNulls: false,
-          data: lwtBase, lineStyle: { color: withAlpha(t.house, 0.45), width: 1, type: "dotted" }, z: 3 },
-        // Radiator LWT (curve + offset) — the hero: what HEM actually commands.
-        { name: "Radiator LWT", type: "line", smooth: true, showSymbol: false, connectNulls: false,
-          data: lwtSet, lineStyle: { color: t.house, width: 2.75, cap: "round" },
+          data: lwtBase, lineStyle: { color: withAlpha(t.textMute, 0.5), width: 1, type: "dotted" }, z: 2 },
+        // Radiator LWT — PLANNED (committed command): DOTTED, house colour. The
+        // intent, spanning the whole day.
+        { name: "LWT planned", type: "line", smooth: true, showSymbol: false, connectNulls: false,
+          data: lwtSet, lineStyle: { color: t.house, width: 2, type: "dotted", cap: "round" }, z: 4 },
+        // Radiator LWT — REALISED (Daikin logged): SOLID + fill, past only. What
+        // actually happened; the gap to the dotted plan is the actuation error.
+        { name: "LWT realised", type: "line", smooth: true, showSymbol: false, connectNulls: false,
+          data: lwtReal, lineStyle: { color: t.house, width: 3, cap: "round" },
           areaStyle: { color: areaGradient(t.house, 0.12, 0.0) }, z: 5 },
-        // Tank target — orange step.
+        // Tank target — planned only (no logged tank telemetry to realise against).
         { name: "Tank", type: "line", step: "middle", showSymbol: false, connectNulls: false,
-          data: tank, lineStyle: { color: t.thermal, width: 1.5, type: "dashed", cap: "round" }, z: 4 },
+          data: tank, lineStyle: { color: t.thermal, width: 1.5, type: "dashed", cap: "round" }, z: 3 },
         // Import price on the right axis (faint) — the signal HEM offsets against.
         { name: "Import price", type: "line", step: "middle", showSymbol: false, yAxisIndex: 1,
           data: price, lineStyle: { color: t.importColor, width: 1.25, opacity: 0.7, type: "dashed" }, z: 1 },
@@ -149,7 +170,7 @@ export function HeatingPlanWidget({ plan, loading }: Props) {
           symbolSize: 8, z: 6, showEffectOn: "render",
           rippleEffect: { period: animate ? 2.4 : 0, scale: animate ? 3.0 : 1, brushType: "stroke" },
           itemStyle: { color: t.accent, shadowBlur: 8, shadowColor: t.accent },
-          data: [[nowIdx, lwtSet[nowIdx] ?? outdoor[nowIdx] ?? 20]],
+          data: [[nowIdx, lwtReal[nowIdx] ?? lwtSet[nowIdx] ?? outdoor[nowIdx] ?? 20]],
         }] : []),
       ],
     }, { notMerge: true });
@@ -160,10 +181,11 @@ export function HeatingPlanWidget({ plan, loading }: Props) {
       <div ref={ref} style={{ width: "100%", height: "300px" }} />
       {plan?.slots?.length ? (
         <div class="hpl-legend" role="note" aria-label="Chart legend">
-          <span class="hpl-tok"><span class="hpl-line hpl-line--outdoor" /> outdoor</span>
-          <span class="hpl-tok"><span class="hpl-line hpl-line--lwt" /> radiator LWT</span>
-          <span class="hpl-tok"><span class="hpl-line hpl-line--curve" /> curve (no offset)</span>
-          <span class="hpl-tok"><span class="hpl-line hpl-line--tank" /> tank</span>
+          <span class="hpl-tok"><span class="hpl-line hpl-line--realised" /> LWT realised</span>
+          <span class="hpl-tok"><span class="hpl-line hpl-line--planned" /> LWT planned</span>
+          <span class="hpl-tok"><span class="hpl-line hpl-line--tank" /> tank (plan)</span>
+          <span class="hpl-tok"><span class="hpl-line hpl-line--outdoor" /> outdoor (ref)</span>
+          <span class="hpl-tok"><span class="hpl-line hpl-line--curve" /> curve (ref)</span>
           <span class="hpl-tok"><span class="hpl-line" style="border-top:1.5px dashed var(--import)" /> import p</span>
           <span class="hpl-tok"><span class="hpl-sw hpl-sw--heat" /> heating</span>
           <span class="hpl-tok"><span class="hpl-sw hpl-sw--neg" /> paid to import</span>
