@@ -2,9 +2,11 @@
 
 # 🏠⚡ home-energy-manager
 
-**A solver-driven planning brain for a UK home on Octopus Agile + Fox ESS battery + Daikin Altherma heat pump.**
+**An AI runs a real UK house — battery, heat pump, hot-water tank, and washing machine — against half-hourly electricity prices, and beats a fixed tariff by ~£250/yr. Every decision is live and explainable.**
 
-Solves a 24–48 h MILP every few minutes, uploads a Fox ESS Scheduler V3, drives Daikin via Onecta, ships a self-hosting Preact cockpit, and exposes an 80-tool MCP surface for Claude.
+![The home-energy-manager cockpit — a live, self-driving home-energy dashboard](docs/media/cockpit.gif)
+
+A from-scratch MILP solver re-plans the next 24–48 h every few minutes: it charges the Fox ESS battery when power is cheap, drives a Daikin Altherma heat pump (space heating **and** the hot-water tank) in the same optimisation, times the washing machine, and exports to the grid only when it genuinely pays. An 80-tool MCP surface lets Claude read the state, request changes, and explain any dispatch decision in plain English.
 
 [![Tests](https://github.com/albinati/home-energy-manager/actions/workflows/tests.yml/badge.svg)](https://github.com/albinati/home-energy-manager/actions/workflows/tests.yml)
 [![Latest release](https://img.shields.io/github/v/release/albinati/home-energy-manager)](https://github.com/albinati/home-energy-manager/releases)
@@ -22,9 +24,34 @@ Solves a 24–48 h MILP every few minutes, uploads a Fox ESS Scheduler V3, drive
 [![Topic](https://img.shields.io/badge/topic-energy--optimization-22C55E)](#)
 [![Topic](https://img.shields.io/badge/topic-solar--PV-FACC15)](#)
 
+**[Why this exists](#-why-this-exists--and-how-its-different)** · [How it works](#️-how-it-works) · [Highlights](#-highlights) · [Quick start](#-quick-start-local-sim-box) · [vs Predbat / EMHASS](#compared-to-the-popular-open-source-battery-planners)
+
 </div>
 
-> Most home-battery controllers run hand-coded rules per appliance. Multi-vendor optimisation against half-hourly Agile prices, weather-dependent heat-pump demand, and DHW pre-heat windows is the sort of thing rules get wrong. So this is a real solver — `PuLP` over a 96-slot horizon — that minimises grid cost while respecting battery efficiency, heat-pump COP curves, scenario-robust peak export, and negative-price plunges. Every solve is snapshotted to SQLite so any past day's plan can be re-run under today's code.
+## 💡 Why this exists — and how it's different
+
+Most home-battery tools optimise **one** thing (the battery) and assume you run **Home Assistant**. This started as a personal build for a house where the biggest, messiest load is a **heat pump** — so it co-optimises the battery, the Daikin (space heating **and** the hot-water tank), and the appliances as a **single** MILP, runs **standalone** (one Docker container, no Home Assistant required), and is wired for an **LLM to operate and explain it** end-to-end.
+
+It is **not** a turn-key product. It runs 24/7 on one UK site and is tuned to that hardware. It's public so the architecture, the accuracy work, and the LP decisions are open to read, copy, and pick apart.
+
+### Compared to the popular open-source battery planners
+
+*(Best-effort, as we understand them — corrections very welcome via an [issue](https://github.com/albinati/home-energy-manager/issues).)*
+
+| | **home-energy-manager** | **Predbat** | **EMHASS** |
+|---|---|---|---|
+| Optimiser | MILP (PuLP/CBC), 96-slot horizon | Predictive charge planner / search | LP/MILP (PuLP) |
+| Runs on | Standalone Docker — **no Home Assistant** | Home Assistant (AppDaemon add-on) | Home Assistant add-on or standalone |
+| Battery | ✅ Fox ESS Scheduler V3 | ✅ many inverters (GivEnergy, …) | ✅ generic via HA |
+| Heat pump | ✅ **co-optimised** — Daikin LWT offset + DHW tank in the same solve | ➖ battery-focused | ➖ deferrable loads, not HP-native |
+| Appliances | ✅ washer / dryer / dishwasher via SmartThings | ➖ | ✅ deferrable loads |
+| PV forecast | Self-hosted OCF Quartz sidecar — **no API key** | Solcast (API key) | Solcast / others |
+| LLM / agent control | ✅ **80-tool MCP** — Claude drives + explains decisions | ➖ | ➖ |
+| Replay + CI cost-regression gate | ✅ every solve frozen & replayable | ➖ | ➖ |
+| Turn-key setup | ➖ **bespoke to one site** | ✅ large community, well-documented | ✅ configurable |
+| Community | 👋 just starting | ⭐ large | ⭐ large |
+
+**Where Predbat and EMHASS win:** they're mature, well-documented, Home-Assistant-native, and have real communities. If you want something running on *your* house this weekend, start there. **Where this project is interesting:** the heat-pump-first, multi-vendor, single-solver design, the closed-loop replay/regression discipline, and the LLM-native operations surface.
 
 ---
 
