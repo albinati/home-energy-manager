@@ -98,7 +98,7 @@ Required env vars at container start:
 | Var | Purpose |
 |---|---|
 | `HEM_API_URL` | Upstream HEM, e.g. `http://hem:8000`. Substituted into the nginx `proxy_pass`. |
-| `HEM_UI_TOKEN` *or* `HEM_UI_TOKEN_FILE` | Bearer token. The entrypoint writes it into `/usr/share/nginx/html/config.js` at boot — never baked into the image. `HEM_UI_TOKEN_FILE` points at a Docker secret mount (e.g. `/run/secrets/hem-ui-token`). |
+| `HEM_UI_TOKEN` *or* `HEM_UI_TOKEN_FILE` | **No longer consumed by the SPA.** The entrypoint ships `bearer: null` in `config.js` — no token reaches the browser (config.js is world-readable on the public funnel). Viewer reads are open; admin actions use a separate runtime token pasted in the UI. Left here because `HEM_UI_TOKEN` is still accepted server-side by `ApiV1BearerAuth` for server-to-server callers. |
 
 ```bash
 docker run --rm -p 8080:80 \
