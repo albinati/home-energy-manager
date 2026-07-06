@@ -58,10 +58,10 @@ export function OperateCard({ appliances, applianceJobs, onChanged }: OperateCar
   // them. The route also gates the mount on role — that's what keeps a
   // viewer from ever firing the admin-only GET /settings below.
   const settings = useFetch(getSettings, []);
-  // Fetch-once, NOT a poll: GET /scheduler/status fires a live Octopus rates
-  // fetch server-side on every call (review M on #555) — once per admin visit
-  // is plenty, and pause/resume below refresh it explicitly.
-  const sched = useFetch(getSchedulerStatus, []);
+  // Fetch-once, NOT a poll, and NOT refetched on tab return: GET /scheduler/status
+  // fires a live Octopus rates fetch server-side on every call (review M on #555)
+  // — once per admin visit is plenty, and pause/resume below refresh it explicitly.
+  const sched = useFetch(getSchedulerStatus, [], { refetchOnVisible: false });
 
   const [unlocked, setUnlocked] = useState(false);
   const [confirmingUnlock, setConfirmingUnlock] = useState(false);

@@ -80,20 +80,21 @@ export default function Landing() {
   // competing with the above-the-fold hero / live-power / plan data.
   const deferred = useAfterPaint();
 
-  // Fetch-once endpoints — refresh on tab return, otherwise no churn.
-  const agile = useFetch(getAgileToday, []);
-  const weather = useFetch(getWeather, []);
-  // Polled (was a one-shot useFetch): the Consumption today-view reads this
-  // prop, and a page left open served hours-stale execution data.
+  // Live cache-only reads — poll while visible (usePoll auto-pauses on hidden,
+  // refreshes on return). All read SQLite/memory; the Daikin one is the CACHED
+  // read (no ?refresh), so no cloud call / quota burn. Were one-shot useFetch,
+  // which left an open page frozen until a manual reload (the "stale numbers"
+  // complaint).
+  const agile = usePoll(getAgileToday, 10 * 60_000);
+  const weather = usePoll(getWeather, 5 * 60_000);
   const execution = usePoll(getExecutionToday, 5 * 60_000);
-  const report = useFetch(() => getEnergyReport(new Date().toISOString().slice(0, 10)), []);
+  const report = usePoll(() => getEnergyReport(new Date().toISOString().slice(0, 10)), 5 * 60_000);
   // Export opportunity (SEG-vs-Agile money left on the table) — deferred, slow.
-  const exportOppy = useFetch(() => (deferred ? getExportOpportunity(60) : Promise.resolve(null)), [deferred]);
-  // Daikin cached read — no refresh=true, so no live cloud call (30-min cache TTL).
-  const daikin = useFetch(getDaikinStatus, []);
-  const daikinQuota = useFetch(getDaikinQuota, []);
+  const exportOppy = usePoll(() => (deferred ? getExportOpportunity(60) : Promise.resolve(null)), 5 * 60_000, [deferred]);
+  const daikin = usePoll(getDaikinStatus, 2 * 60_000);
+  const daikinQuota = usePoll(getDaikinQuota, 5 * 60_000);
   // DHW tank plan (today+tomorrow) — used by the Live-power tank badges.
-  const dhwSched = useFetch(getDhwSchedule, []);
+  const dhwSched = usePoll(getDhwSchedule, 5 * 60_000);
   // Heating-plan timeline (yesterday/today/tomorrow): outdoor temp + LWT offset
   // + tank + heating-on, recomputed per slot. Cache-only, poll while visible.
   const heatingPlan = usePoll(getHeatingPlan, 5 * 60_000);
@@ -104,7 +105,7 @@ export default function Landing() {
   // Appliance status: registered list (once) + active jobs + cheapest-window
   // suggestions for idle machines. All optional/best-effort (SmartThings may be
   // unconfigured → the widget shows an empty/register hint).
-  const appliances = useFetch(getAppliances, []);
+  const appliances = usePoll(getAppliances, 5 * 60_000);
   const applianceJobs = usePoll(() => getApplianceJobs({ limit: 20 }), 5 * 60_000);
   const applianceSug = usePoll(getApplianceSuggestions, 5 * 60_000);
   // The shared period navigator drives the Hero headline + cost breakdown +

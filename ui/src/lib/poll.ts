@@ -127,6 +127,10 @@ export interface FetchOpts {
   // Count this fetch in the shared in-flight tally (useInflight) so the page can
   // show one coordinated "updating…" cue. A cache hit never counts (no fetch).
   track?: boolean;
+  // Refetch when the tab becomes visible again (default true). Set false for a
+  // costly / side-effecting endpoint that should fire once per visit, not on
+  // every tab return (e.g. GET /scheduler/status triggers a live Octopus fetch).
+  refetchOnVisible?: boolean;
 }
 
 // Fetch-once hook for endpoints we don't poll. With `opts.immutable` + a
@@ -188,8 +192,20 @@ export function useFetch<T>(
     }
   }).current;
 
+  const onVisibleRefetch = opts.refetchOnVisible !== false;
   useEffect(() => {
     refresh();
+    // Refresh when the tab becomes visible again, so a page left open doesn't
+    // show stale numbers on return. An immutable past-period cache hit inside
+    // refresh() serves from memory (no network), so this never churns history —
+    // only live (current-period / uncached) fetches actually re-hit the API.
+    // Opt out (refetchOnVisible: false) for costly/side-effecting endpoints.
+    if (!onVisibleRefetch) return;
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);
 
