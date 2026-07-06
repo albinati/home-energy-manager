@@ -1286,6 +1286,16 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             computed_at TEXT NOT NULL
         )"""
     )
+    # W2 observability (#540): the learner's LAST run summary — episodes/HDD-days
+    # collected + skip reasons — so the UI can show "learning in progress, N/5
+    # decay nights" even while the calibration itself is still on env defaults.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS thermal_learning_progress (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            updated_at TEXT NOT NULL,
+            result_json TEXT NOT NULL
+        )"""
+    )
     # Read-only view that exposes daikin_telemetry.fetched_at as ISO 8601
     # alongside the raw float-epoch column. Productive code paths (estimator,
     # service.py rate calcs) consume the float directly for sub-second math —
@@ -8117,6 +8127,40 @@ _THERMAL_CAL_COLS = (
     "tau_computed_at", "ua_w_per_k", "ua_r2", "ua_samples", "ua_window_days",
     "ua_assumed_cop", "ua_source", "ua_computed_at", "c_kwh_per_k", "c_source",
 )
+
+
+def set_thermal_learning_progress(result: dict[str, Any]) -> None:
+    """Persist the learner's last-run summary (W2 observability, #540)."""
+    with _lock:
+        conn = get_connection()
+        try:
+            conn.execute(
+                """INSERT OR REPLACE INTO thermal_learning_progress
+                   (id, updated_at, result_json) VALUES (1, ?, ?)""",
+                (datetime.now(UTC).isoformat(), json.dumps(result, default=str)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def get_thermal_learning_progress() -> dict[str, Any] | None:
+    """The learner's last-run summary + when it ran (None before the first run)."""
+    with _lock:
+        conn = get_connection()
+        try:
+            r = conn.execute(
+                "SELECT updated_at, result_json FROM thermal_learning_progress WHERE id = 1"
+            ).fetchone()
+            if not r:
+                return None
+            try:
+                res = json.loads(r["result_json"])
+            except (TypeError, ValueError):
+                res = None
+            return {"updated_at": r["updated_at"], "result": res}
+        finally:
+            conn.close()
 
 
 def upsert_building_thermal_calibration(fields: dict[str, Any]) -> None:

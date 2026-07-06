@@ -15,6 +15,7 @@ import { Pill } from "../common/Pill";
 import { RadialGauge } from "../common/RadialGauge";
 import { Modal } from "../common/Modal";
 import { RefreshCountdown } from "../common/RefreshCountdown";
+import { ThermalModelStatus } from "./ThermalModelStatus";
 import "./heating.css";
 
 interface HeatingWidgetProps {
@@ -160,6 +161,10 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, execution, o
           </div>
         </div>
       )}
+
+      {/* W2 (#540) — the thermal model behind the heating plan + how far the
+          learner has got (env defaults through summer, self-activates as it cools). */}
+      <ThermalModelStatus />
 
       <Modal open={confirmingRefresh} onClose={() => { setConfirmingRefresh(false); setRefreshError(null); }} width="sm"
              title="Fetch live heat-pump data?"
