@@ -58,7 +58,6 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
     const n = slots.length;
     const labels = slots.map((s) => localHM(s.slot_utc));
 
-    const outdoor = slots.map((s) => (s.outdoor_c == null ? null : s.outdoor_c));
     const tank = slots.map((s) => (s.tank_temp_c == null ? null : s.tank_temp_c));
     const animate = !reducedMotion();
 
@@ -95,12 +94,6 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
       if (e.slot_utc && e.daikin_tank_c != null) tankRealByBucket.set(bucket(e.slot_utc), e.daikin_tank_c);
     }
     const tankReal = slots.map((s) => tankRealByBucket.get(bucket(s.slot_utc)) ?? null);
-
-    // Radiator LWT is only meaningful while space-heating is ON — otherwise the
-    // "plan" is just the curve floor and the realised reading is idle/DHW water,
-    // which read as noise. Gate both plan + realised to heating_on slots.
-    const lwtPlan = slots.map((s) => (s.heating_on && s.lwt_setpoint_c != null ? s.lwt_setpoint_c : null));
-    const lwtRealG = slots.map((s, i) => (s.heating_on ? lwtReal[i] : null));
 
     // Background bands: tariff tiers (same context wash as the Consumption chart)
     // — cheap green, peak amber, negative blue. Replaces the price LINE.
@@ -149,13 +142,7 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
           if (!s) return "";
           const rows: string[] = [`<strong>${labels[i]}</strong>${s.heating_on ? " · heating" : " · idle"}`];
           if (indoorReal[i] != null) rows.push(`Indoor <strong>${(indoorReal[i] as number).toFixed(1)}°C</strong> · realised`);
-          if (s.outdoor_c != null) rows.push(`Outdoor <strong>${s.outdoor_c.toFixed(1)}°C</strong> · forecast`);
-          if (s.heating_on && s.lwt_setpoint_c != null) {
-            const off = s.lwt_offset || 0;
-            const offTxt = off ? ` (curve ${s.lwt_base_c?.toFixed(0)} ${off > 0 ? "+" : "−"}${Math.abs(off)})` : "";
-            rows.push(`LWT plan <strong>${s.lwt_setpoint_c.toFixed(0)}°C</strong>${offTxt}`);
-            if (lwtRealG[i] != null) rows.push(`LWT real <strong>${(lwtRealG[i] as number).toFixed(0)}°C</strong>`);
-          }
+          if (lwtReal[i] != null) rows.push(`LWT real <strong>${(lwtReal[i] as number).toFixed(0)}°C</strong>`);
           if (s.tank_temp_c != null) rows.push(`Tank plan <strong>${s.tank_temp_c}°C</strong>${s.tank_kind ? ` · ${s.tank_kind}` : ""}`);
           if (tankReal[i] != null) rows.push(`Tank real <strong>${(tankReal[i] as number).toFixed(0)}°C</strong>`);
           if (s.price_p != null) rows.push(`<span style="color:${t.textMute}">${s.price_p.toFixed(1)}p${s.tier ? ` · ${s.tier}` : ""}</span>`);
@@ -173,10 +160,8 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
         { name: "_bg", type: "line", data: slots.map(() => null), silent: true, z: 0,
           markArea: bands.length ? { silent: true, data: bands } : undefined,
           markLine: (dayLines.length || nowLine.length) ? { silent: true, symbol: "none", data: [...dayLines, ...nowLine] } : undefined },
-        // ── REFERENCE air temps. Indoor = realised (cyan solid), outdoor =
-        //    estimate (grey dotted, de-emphasised so it never blends with indoor).
-        { name: "Outdoor", type: "line", smooth: true, showSymbol: false, connectNulls: true,
-          data: outdoor, lineStyle: { color: withAlpha(t.textMute, 0.55), width: 1.5, type: "dotted", cap: "round" }, z: 2 },
+        // ── REFERENCE — indoor room temp, REALISED (cyan solid). Outdoor
+        //    removed per request. ──
         { name: "Indoor", type: "line", smooth: true, showSymbol: false, connectNulls: false,
           data: indoorReal, lineStyle: { color: t.cool, width: 2.5, cap: "round" }, z: 4 },
         // ── TANK / DHW (orange). Planned target (dashed) vs realised (solid). ──
@@ -184,20 +169,17 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
           data: tank, lineStyle: { color: t.thermal, width: 1.5, type: "dashed", cap: "round" }, z: 3 },
         { name: "Tank realised", type: "line", step: "middle", showSymbol: false, connectNulls: false,
           data: tankReal, lineStyle: { color: t.thermal, width: 2.5, cap: "round" }, z: 4 },
-        // ── HEATING / radiator LWT (purple). Only while space-heating is ON —
-        //    otherwise it's the curve floor / idle water (noise). Planned dotted,
-        //    realised solid + fill.
-        { name: "LWT planned", type: "line", smooth: true, showSymbol: false, connectNulls: false,
-          data: lwtPlan, lineStyle: { color: t.house, width: 2, type: "dotted", cap: "round" }, z: 4 },
+        // ── HEATING / radiator LWT (purple) — REALISED only (the Daikin's logged
+        //    leaving-water temp across the day). Plan line dropped per request.
         { name: "LWT realised", type: "line", smooth: true, showSymbol: false, connectNulls: false,
-          data: lwtRealG, lineStyle: { color: t.house, width: 3, cap: "round" },
+          data: lwtReal, lineStyle: { color: t.house, width: 3, cap: "round" },
           areaStyle: { color: areaGradient(t.house, 0.12, 0.0) }, z: 5 },
         ...(nowIdx >= 0 ? [{
           name: "_now", type: "effectScatter", silent: true, coordinateSystem: "cartesian2d",
           symbolSize: 8, z: 6, showEffectOn: "render",
           rippleEffect: { period: animate ? 2.4 : 0, scale: animate ? 3.0 : 1, brushType: "stroke" },
           itemStyle: { color: t.accent, shadowBlur: 8, shadowColor: t.accent },
-          data: [[nowIdx, indoorReal[nowIdx] ?? lwtRealG[nowIdx] ?? outdoor[nowIdx] ?? 20]],
+          data: [[nowIdx, indoorReal[nowIdx] ?? lwtReal[nowIdx] ?? tankReal[nowIdx] ?? 20]],
         }] : []),
       ],
     }, { notMerge: true });
@@ -208,15 +190,12 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
       <div ref={ref} style={{ width: "100%", height: "300px" }} />
       {plan?.slots?.length ? (
         <div class="hpl-legend" role="note" aria-label="Chart legend">
-          <span class="hpl-legend-grp">reference</span>
           <span class="hpl-tok"><span class="hpl-line hpl-line--indoor" /> indoor (real)</span>
-          <span class="hpl-tok"><span class="hpl-line hpl-line--outdoor" /> outdoor (est)</span>
           <span class="hpl-legend-grp">DHW</span>
           <span class="hpl-tok"><span class="hpl-line hpl-line--tank-real" /> tank real</span>
           <span class="hpl-tok"><span class="hpl-line hpl-line--tank" /> tank plan</span>
           <span class="hpl-legend-grp">heating</span>
           <span class="hpl-tok"><span class="hpl-line hpl-line--realised" /> LWT real</span>
-          <span class="hpl-tok"><span class="hpl-line hpl-line--planned" /> LWT plan</span>
           <span class="hpl-legend-grp">tariff</span>
           <span class="hpl-tok"><span class="hpl-sw hpl-sw--cheap" /> cheap</span>
           <span class="hpl-tok"><span class="hpl-sw hpl-sw--peak" /> peak</span>
