@@ -51,6 +51,9 @@ class LpInitialState:
 
     soc_kwh: float
     tank_temp_c: float
+    # W3 (#540): the freshest room-sensor reading, or None when no fresh sensor.
+    # Seeds t_in[0] when LP_W3_TIN_ENABLED; None → W3 stays off for this solve.
+    indoor_temp_c: float | None = None
     # Provenance strings ("fox_realtime_cache", "db_realtime_snapshot",
     # "daikin_live", "daikin_cache", "daikin_estimate", "execution_log",
     # "default"). Persisted to lp_inputs_snapshot so the History view can show
@@ -80,6 +83,7 @@ class LpPlan:
     lwt_offset_c: list[float] = field(default_factory=list)  # back-computed per slot
     tank_temp_c: list[float] = field(default_factory=list)   # len N+1
     soc_kwh: list[float] = field(default_factory=list)       # len N+1
+    indoor_temp_c: list[float] = field(default_factory=list)  # len N+1; W3 (#540), empty when off
     temp_outdoor_c: list[float] = field(default_factory=list)
     peak_threshold_pence: float = 0.0
     cheap_threshold_pence: float = 0.0
@@ -452,6 +456,39 @@ def solve_lp(
     else:
         passive_e_space = passive_e_dhw = []
 
+    # ── W3 (#540) — indoor-temperature state + comfort optimisation ─────────
+    # Enabled only with the flag AND a fresh sensor seed AND active mode
+    # (passive = the firmware owns comfort under its own weather curve).
+    w3 = (
+        bool(getattr(config, "LP_W3_TIN_ENABLED", False))
+        and getattr(initial, "indoor_temp_c", None) is not None
+        and not passive_daikin
+    )
+    if w3:
+        from ..analytics.thermal_learning import (
+            get_building_thermal_mass_kwh_per_k,
+            get_building_tau_hours,
+            get_building_ua_w_per_k,
+        )
+        ua_bld = get_building_ua_w_per_k()          # W/K (learned or env 600)
+        tau_h = get_building_tau_hours()            # hours (learned or 20)
+        # Keep the RC triple internally consistent: prefer C = τ·UA so the
+        # discretisation matches the decay the τ reader implies (the three
+        # readers can each fall back to env independently).
+        c_bld_kwh = max(get_building_thermal_mass_kwh_per_k(), tau_h * ua_bld / 1000.0)
+        c_bld = c_bld_kwh * j_per_kwh               # J/K
+        w3_night_floor = float(getattr(config, "LP_W3_NIGHT_FLOOR_C", 17.5))
+        w3_day_sp = float(config.INDOOR_SETPOINT_C)
+        w3_ns = int(getattr(config, "LP_W3_NIGHT_START_HOUR_LOCAL", 22))
+        w3_ne = int(getattr(config, "LP_W3_NIGHT_END_HOUR_LOCAL", 7))
+        w3_recov = float(getattr(config, "LP_W3_MAX_RECOVERY_C_PER_SLOT", 0.5))
+        w3_pen = float(getattr(config, "LP_W3_COMFORT_PEN_PENCE_PER_DEGC_SLOT", 15.0))
+
+        def _w3_floor(st: datetime) -> float:
+            h = (st + timedelta(minutes=15)).astimezone(tz).hour
+            night = (h >= w3_ns or h < w3_ne) if w3_ns > w3_ne else (w3_ns <= h < w3_ne)
+            return w3_night_floor if night else w3_day_sp
+
     # Minimum HP ON duration (anti short-cycling)
     hp_min_on = int(getattr(config, "LP_HP_MIN_ON_SLOTS", 2))
 
@@ -506,9 +543,18 @@ def solve_lp(
     soc = pulp.LpVariable.dicts("soc", range(n + 1), lowBound=soc_min, upBound=soc_max)
     soc[0].lowBound = 0.0
     tank = pulp.LpVariable.dicts("tank", range(n + 1), lowBound=tank_lo, upBound=tank_hi)
-    # PR Phase B: t_in / s_lo / s_hi removed. Heating demand is now bounded by
-    # space_floor_kwh / space_ceil_kwh (physics from get_daikin_heating_kw),
-    # not by indoor-temp tracking against a phantom room sensor.
+    # PR Phase B removed t_in / s_lo / s_hi (no room sensor). W3 (#540) restores
+    # them behind ``w3`` now that the sensor exists: t_in is the indoor state,
+    # s_lo the SOFT comfort-floor slack (never Infeasible). Wide bounds so the
+    # hard variable bound never binds — the soft floor governs.
+    if w3:
+        # VERY wide bounds so the hard variable bound NEVER binds — a leaky house
+        # in extreme cold can numerically cool well below any "comfort" number,
+        # and a binding lowBound against the RC EQUALITY would make the LP
+        # Infeasible (regression-tested). The SOFT comfort floor governs warmth.
+        t_in = pulp.LpVariable.dicts("indoor", range(n + 1), lowBound=-30.0, upBound=45.0)
+        s_lo = pulp.LpVariable.dicts("comfort_slack_lo", range(n), lowBound=0)
+        prob += t_in[0] == float(initial.indoor_temp_c)
 
     # Piecewise stress auxiliary variables (one per battery power slot)
     stress_aux: dict[int, pulp.LpVariable] = {}
@@ -777,8 +823,31 @@ def solve_lp(
             # Climate-curve floor: the Daikin compressor draws at least this much when
             # climate control is running. Prevents the LP from scheduling zero space heating
             # on cold overnight slots (which the heuristic can't fix after the fact).
-            if space_floor_kwh[i] > 0:
+            # W3 SUPERSEDES this: the soft comfort floor + RC dynamics keep the house
+            # warm enough, and forcing a per-slot minimum would BLOCK the coast-through-
+            # peak arbitrage (a big LWT setback can legitimately drop heat below the
+            # curve floor). So skip the floor when W3 owns comfort.
+            if space_floor_kwh[i] > 0 and not w3:
                 prob += e_space[i] + e_dhw[i] >= space_floor_kwh[i]
+
+        # ── W3 (#540): building RC dynamics + soft comfort + gentle recovery ──
+        # C·dT/dt = q_heat − UA·(T_in − T_out), discretised to a 30-min slot.
+        # q_heat = e_space·COP (electrical kWh → thermal J). The e_space corridor
+        # (floor/ceil above) still bounds the physical draw; this only READS it,
+        # so no new equality on e_space → no over-constraint.
+        if w3:
+            q_heat_space = e_space[i] * cop_space[i] * j_per_kwh
+            loss_bld_j = ua_bld * (t_in[i] - t_out[i]) * dt_s
+            prob += t_in[i + 1] == t_in[i] + (q_heat_space - loss_bld_j) / c_bld
+            # Soft comfort floor — slack-penalised, so the LP is NEVER Infeasible.
+            prob += t_in[i + 1] + s_lo[i] >= _w3_floor(slot_starts_utc[i])
+            # Gentle-recovery cap — bound the HEATING-driven rise (the pump's own
+            # contribution), NOT the net delta. Capping the net delta conflicts
+            # with the RC equality on a warm slot where passive conductive GAIN
+            # (t_out > t_in) alone rises > cap → Infeasible (no cooling variable;
+            # adversarial review). Bounding q_heat only ever limits e_space (≥ 0)
+            # → always feasible, and still forbids a pump blast.
+            prob += q_heat_space / c_bld <= w3_recov
 
         # Piecewise-linear inverter stress cost
         if use_stress:
@@ -1234,8 +1303,8 @@ def solve_lp(
             if top_q_indices:
                 obj_grid -= rank_bonus_p * pulp.lpSum(exp[i] for i in top_q_indices)
     obj_cycle = cycle_pen * pulp.lpSum(chg[i] + dis[i] for i in range(n))
-    # PR Phase B: obj_comfort removed (no s_lo / s_hi slack variables).
-    obj_comfort = 0.0
+    # W3 (#540): comfort-floor slack penalty (0 when W3 off → objective unchanged).
+    obj_comfort = (w3_pen * pulp.lpSum(s_lo[i] for i in range(n))) if w3 else 0.0
     # DHW overshoot above the comfort ceiling is not a comfort issue — it's just stored
     # hot water that will drift back naturally via tank losses. A *tiny* penalty
     # (default 0.01 p/°C-slot, configurable via ``LP_TANK_HI_SLACK_PENCE_PER_DEGC_SLOT``;
@@ -1428,5 +1497,7 @@ def solve_lp(
     for i in range(n + 1):
         plan.soc_kwh.append(_v(soc[i]))
         plan.tank_temp_c.append(_v(tank[i]))
+        if w3:
+            plan.indoor_temp_c.append(_v(t_in[i]))
 
     return plan

@@ -1784,6 +1784,29 @@ class Config:
     # Raising this above the default 16 °C creates pre-heat pressure during cheap overnight
     # slots so the LP warms the thermal mass before morning occupancy begins.
     LP_OVERNIGHT_COMFORT_FLOOR_C: float = float(os.getenv("LP_OVERNIGHT_COMFORT_FLOOR_C", "18.0"))
+
+    # ── W3 (#540) — LP indoor-temperature state + comfort optimisation ──────
+    # Restores the t_in decision variable + RC dynamics (τ/UA/C from the W2
+    # learner or env fallback) so the LP can pre-heat in cheap slots and coast
+    # through peaks while holding a comfort floor. OFF by default → the solver
+    # is byte-identical to today; flip true only after the regression replay
+    # (scripts/check_lp_regression.py) confirms it doesn't worsen cost.
+    LP_W3_TIN_ENABLED: bool = os.getenv("LP_W3_TIN_ENABLED", "false").lower() in ("true", "1", "yes")
+    # Comfort floor: night value (blankets OK) vs the day setpoint
+    # (INDOOR_SETPOINT_C). Night window is local hours [start, end).
+    LP_W3_NIGHT_FLOOR_C: float = float(os.getenv("LP_W3_NIGHT_FLOOR_C", "17.5"))
+    LP_W3_NIGHT_START_HOUR_LOCAL: int = int(os.getenv("LP_W3_NIGHT_START_HOUR_LOCAL", "22"))
+    LP_W3_NIGHT_END_HOUR_LOCAL: int = int(os.getenv("LP_W3_NIGHT_END_HOUR_LOCAL", "7"))
+    # Anti-heat-pump-spike: cap the modelled indoor rise per 30-min slot so the
+    # LP never plans an unrealistic morning blast (the user's "no cold-morning
+    # recovery delta" preference).
+    LP_W3_MAX_RECOVERY_C_PER_SLOT: float = float(os.getenv("LP_W3_MAX_RECOVERY_C_PER_SLOT", "0.5"))
+    # Comfort-floor slack penalty (p per °C-slot below floor). Deliberately LOW
+    # so comfort only nudges the plan — the regression gate defends cost.
+    LP_W3_COMFORT_PEN_PENCE_PER_DEGC_SLOT: float = float(
+        os.getenv("LP_W3_COMFORT_PEN_PENCE_PER_DEGC_SLOT", "15")
+    )
+
     # Number of recent execution_log rows used to compute the micro-climate offset
     # (mean difference between Daikin outdoor sensor and Open-Meteo forecast).
     DAIKIN_MICRO_CLIMATE_LOOKBACK: int = int(os.getenv("DAIKIN_MICRO_CLIMATE_LOOKBACK", "96"))

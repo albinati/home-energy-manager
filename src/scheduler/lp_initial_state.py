@@ -85,9 +85,22 @@ def read_lp_initial_state(
     except Exception as e:
         logger.debug("LP Daikin telemetry fallback: %s", e)
 
+    # W3 (#540): freshest room-sensor reading → t_in[0] seed. None when no fresh
+    # sensor (staleness enforced by get_latest_indoor_reading); W3 stays off then.
+    indoor_c: float | None = None
+    try:
+        s = db.get_latest_indoor_reading(
+            max_age_minutes=int(getattr(config, "INDOOR_SENSOR_STALE_MINUTES", 30))
+        )
+        if s is not None and s.get("temp_c") is not None:
+            indoor_c = float(s["temp_c"])
+    except Exception as e:  # pragma: no cover — never break the solve
+        logger.debug("LP initial indoor read failed: %s", e)
+
     return LpInitialState(
         soc_kwh=soc_kwh,
         tank_temp_c=tank,
+        indoor_temp_c=indoor_c,
         soc_source=soc_source,
         tank_source=tank_source,
     )
