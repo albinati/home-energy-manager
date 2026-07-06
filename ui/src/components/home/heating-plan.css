@@ -58,11 +58,21 @@
   border-top-width: 2.5px;
   border-top-style: solid;
 }
-.hpl-line--outdoor  { border-top-width: 1px; border-top-color: color-mix(in srgb, var(--grid) 45%, transparent); }
+/* Reference air temps (cool): indoor realised solid, outdoor estimate dotted. */
+.hpl-line--indoor   { border-top-width: 3px; border-top-color: var(--cool); }
+.hpl-line--outdoor  { border-top-style: dotted; border-top-width: 2px; border-top-color: var(--grid); }
+/* DHW tank (orange). */
 .hpl-line--tank     { border-top-style: dashed; border-top-color: var(--thermal); }
+/* Heating / radiator LWT (purple): realised solid, planned dotted. */
 .hpl-line--realised { border-top-width: 3px; border-top-color: var(--house); }
 .hpl-line--planned  { border-top-style: dotted; border-top-width: 2px; border-top-color: var(--house); }
-.hpl-line--curve    { border-top-style: dotted; border-top-color: color-mix(in srgb, var(--text-mute) 55%, transparent); }
+.hpl-line--import   { border-top-color: color-mix(in srgb, var(--import) 55%, transparent); }
+/* Domain group labels in the legend. */
+.hpl-legend-grp {
+  font-size: var(--font-2xs); font-weight: 700; text-transform: uppercase;
+  letter-spacing: var(--tracking-eyebrow); color: var(--text-mute); margin-left: var(--space-1);
+}
+.hpl-legend-grp:first-child { margin-left: 0; }
 .hpl-sw {
   display: inline-block;
   width: 11px;

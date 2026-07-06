@@ -1110,3 +1110,21 @@ export interface SensorDevicesResponse {
   n_devices: number;
   devices: SensorDevice[];
 }
+
+// GET /sensors/indoor?hours=N — recent per-reading rows (all rooms), for the
+// heating chart's realised indoor-temp line.
+export interface IndoorReadingRow {
+  captured_at: string;
+  room: string;
+  temp_c: number;
+  source?: string | null;
+  quality?: string | null;
+}
+export interface IndoorReadingsResponse {
+  hours: number;
+  n_readings: number;
+  readings: IndoorReadingRow[];
+  newest_at: string | null;
+  stale_minutes: number;
+  configured: boolean;
+}
