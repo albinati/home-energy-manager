@@ -603,6 +603,7 @@ export interface HeatingPlanSlot {
   heating_on?: boolean;
   tank_temp_c?: number | null;
   tank_kind?: "warmup" | "setback" | "boost" | null;
+  indoor_planned_c?: number | null;  // W3 committed indoor plan; null when W3 off
 }
 export interface HeatingPlanDay {
   date: string;
@@ -1152,6 +1153,7 @@ export interface ThermalCalibration {
     tau: ThermalProgressPart;
     ua: ThermalProgressPart;
   } | null;
+  w3_enabled: boolean;   // W3: LP comfort-optimising vs weather curve
   learning_enabled: boolean;
   learned_values_enabled: boolean;
 }

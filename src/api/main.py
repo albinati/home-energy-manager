@@ -1765,6 +1765,23 @@ async def daikin_heating_plan():
             return "peak"
         return "standard"
 
+    # W3 (#540): the committed LP plan's indoor-temperature trajectory, keyed by
+    # slot minute, so the chart can draw "indoor planned" alongside the realised
+    # sensor line. Empty when W3 is off (the snapshot's indoor_temp_c is NULL),
+    # so the line simply doesn't appear until the flag is enabled.
+    indoor_planned_by_slot: dict[str, float] = {}
+    try:
+        _run = db.find_latest_optimizer_run_id()
+        if _run is not None:
+            for sr in db.get_lp_solution_slots(_run):
+                v = sr.get("indoor_temp_c")
+                st = sr.get("slot_time_utc")
+                if v is not None and st:
+                    key = str(st).replace("Z", "").replace("+00:00", "")[:16]
+                    indoor_planned_by_slot[key] = round(float(v), 2)
+    except Exception as e:
+        logger.debug("heating-plan: indoor-planned read failed: %s", e)
+
     slots_out: list[dict] = []
     raw_offsets: list[int | None] = []
     cur = win_start_utc
@@ -1793,6 +1810,10 @@ async def daikin_heating_plan():
             "heating_on": heating_on,
             "tank_temp_c": tank_temp,
             "tank_kind": tank_kind,
+            # W3: planned indoor temp (LP committed); null when W3 off / past slot.
+            "indoor_planned_c": indoor_planned_by_slot.get(
+                cur.isoformat().replace("+00:00", "")[:16]
+            ),
         })
         cur = cur + _td(minutes=30)
 

@@ -36,3 +36,15 @@
 .tm-vals b { color: var(--text); font-weight: 600; }
 
 .tm-prog { font-variant-numeric: tabular-nums; }
+
+.tm-strat {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-sm);
+  margin-top: var(--space-1);
+}
+.tm-strat-k { color: var(--text-mute); }
+.tm-strat-v { font-weight: 600; }
+.tm-strat-v--off { color: var(--text-dim); }
+.tm-strat-v--on { color: var(--cool, #38bdf8); }

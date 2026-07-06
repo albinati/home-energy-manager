@@ -1298,8 +1298,13 @@ def _persist_lp_snapshots(
             "space_kwh": float(plan.space_electric_kwh[i]) if i < len(plan.space_electric_kwh) else None,
             "soc_kwh": float(plan.soc_kwh[i + 1]) if (i + 1) < len(plan.soc_kwh) else None,
             "tank_temp_c": float(plan.tank_temp_c[i + 1]) if (i + 1) < len(plan.tank_temp_c) else None,
-            # PR Phase B: indoor_temp_c column retained, value now always None.
-            "indoor_temp_c": None,
+            # W3 (#540): the planned indoor trajectory (slot END temp) when W3 is
+            # on; empty list → None (Phase-B behaviour) when off. Feeds the UI's
+            # "indoor planned vs realised" line.
+            "indoor_temp_c": (
+                float(plan.indoor_temp_c[i + 1])
+                if (i + 1) < len(plan.indoor_temp_c) else None
+            ),
             "outdoor_temp_c": float(plan.temp_outdoor_c[i]) if i < len(plan.temp_outdoor_c) else None,
             "lwt_offset_c": float(plan.lwt_offset_c[i]) if i < len(plan.lwt_offset_c) else None,
         })

@@ -87,6 +87,10 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
       const c = inSum.get(bucket(s.slot_utc));
       return c && c.n > 0 ? Math.round((c.sum / c.n) * 10) / 10 : null;
     });
+    // PLANNED indoor — the LP's committed t_in trajectory (W3). All null until
+    // W3 is enabled, so the dashed line simply doesn't render before then.
+    const indoorPlanned = slots.map((s) => s.indoor_planned_c ?? null);
+    const hasIndoorPlan = indoorPlanned.some((v) => v != null);
 
     // REALISED tank temp — the Daikin's logged tank temperature per slot.
     const tankRealByBucket = new Map<number, number>();
@@ -142,6 +146,7 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
           if (!s) return "";
           const rows: string[] = [`<strong>${labels[i]}</strong>${s.heating_on ? " · heating" : " · idle"}`];
           if (indoorReal[i] != null) rows.push(`Indoor <strong>${(indoorReal[i] as number).toFixed(1)}°C</strong> · realised`);
+          if (indoorPlanned[i] != null) rows.push(`Indoor <strong>${(indoorPlanned[i] as number).toFixed(1)}°C</strong> · planned`);
           if (lwtReal[i] != null) rows.push(`LWT real <strong>${(lwtReal[i] as number).toFixed(0)}°C</strong>`);
           if (s.tank_temp_c != null) rows.push(`Tank plan <strong>${s.tank_temp_c}°C</strong>${s.tank_kind ? ` · ${s.tank_kind}` : ""}`);
           if (tankReal[i] != null) rows.push(`Tank real <strong>${(tankReal[i] as number).toFixed(0)}°C</strong>`);
@@ -164,6 +169,12 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
         //    removed per request. ──
         { name: "Indoor", type: "line", smooth: true, showSymbol: false, connectNulls: false,
           data: indoorReal, lineStyle: { color: t.cool, width: 2.5, cap: "round" }, z: 4 },
+        // W3: planned indoor (LP committed) — dashed cyan, only when W3 is on.
+        ...(hasIndoorPlan ? [{
+          name: "Indoor planned", type: "line" as const, smooth: true, showSymbol: false,
+          connectNulls: false, data: indoorPlanned,
+          lineStyle: { color: t.cool, width: 1.5, type: "dashed" as const, cap: "round" as const, opacity: 0.8 }, z: 3,
+        }] : []),
         // ── TANK / DHW (orange). Planned target (dashed) vs realised (solid). ──
         { name: "Tank planned", type: "line", step: "middle", showSymbol: false, connectNulls: false,
           data: tank, lineStyle: { color: t.thermal, width: 1.5, type: "dashed", cap: "round" }, z: 3 },
