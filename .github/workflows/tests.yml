@@ -10,6 +10,9 @@ on:
 jobs:
   pytest:
     runs-on: ubuntu-24.04
+    # Safety net: without this the GitHub default is 360 min, so a single hung
+    # test (or a stuck runner) pins the job for hours. Fail fast instead.
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -24,11 +27,17 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest
+          pip install pytest pytest-timeout
 
       - name: Run pytest
+        # Per-test timeout (pytest-timeout): a test that hangs (e.g. an
+        # un-mocked network call) is killed at 120 s and reports a full
+        # thread-stack traceback pointing at the culprit — instead of hanging
+        # the whole suite silently. `thread` method dumps every thread's stack,
+        # which is what you want for a hang in a blocking C/socket call.
         run: |
-          python -m pytest tests/ --tb=short -q
+          python -m pytest tests/ --tb=short -q \
+            --timeout=120 --timeout-method=thread
 
   lint-imports:
     runs-on: ubuntu-24.04
