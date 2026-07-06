@@ -2,11 +2,11 @@
 
 # 🏠⚡ home-energy-manager
 
-**An AI runs a real UK house — battery, heat pump, hot-water tank, and washing machine — against half-hourly electricity prices, and beats a fixed tariff by ~£250/yr. Every decision is live and explainable.**
+**A self-hosted optimiser that runs a real UK house on half-hourly electricity prices — battery, heat pump, hot-water tank, and washing machine — and beats a fixed tariff by ~£250/yr. A MILP solver makes the calls; you can ask an LLM to explain every one.**
 
 ![The home-energy-manager cockpit — a live, self-driving home-energy dashboard](docs/media/cockpit.gif)
 
-A from-scratch MILP solver re-plans the next 24–48 h every few minutes: it charges the Fox ESS battery when power is cheap, drives a Daikin Altherma heat pump (space heating **and** the hot-water tank) in the same optimisation, times the washing machine, and exports to the grid only when it genuinely pays. An 80-tool MCP surface lets Claude read the state, request changes, and explain any dispatch decision in plain English.
+A from-scratch MILP solver re-plans the next 24–48 h every few minutes: it charges the Fox ESS battery when power is cheap, drives a Daikin Altherma heat pump (space heating **and** the hot-water tank) in the same optimisation, times the washing machine, and exports to the grid only when it genuinely pays. It runs autonomously — the solver and scheduler drive the hardware with no human in the loop. A bearer-guarded 80-tool MCP surface lets Claude read state, **explain any dispatch decision** in plain English, and (with auto-approve off) review plans before they apply. The LLM is an observability + copilot layer, **not** the controller.
 
 [![Tests](https://github.com/albinati/home-energy-manager/actions/workflows/tests.yml/badge.svg)](https://github.com/albinati/home-energy-manager/actions/workflows/tests.yml)
 [![Latest release](https://img.shields.io/github/v/release/albinati/home-energy-manager)](https://github.com/albinati/home-energy-manager/releases)
@@ -30,7 +30,7 @@ A from-scratch MILP solver re-plans the next 24–48 h every few minutes: it cha
 
 ## 💡 Why this exists — and how it's different
 
-Most home-battery tools optimise **one** thing (the battery) and assume you run **Home Assistant**. This started as a personal build for a house where the biggest, messiest load is a **heat pump** — so it co-optimises the battery, the Daikin (space heating **and** the hot-water tank), and the appliances as a **single** MILP, runs **standalone** (one Docker container, no Home Assistant required), and is wired for an **LLM to operate and explain it** end-to-end.
+Most home-battery tools optimise **one** thing (the battery) and assume you run **Home Assistant**. This started as a personal build for a house where the biggest, messiest load is a **heat pump** — so it co-optimises the battery, the Daikin (space heating **and** the hot-water tank), and the appliances as a **single** MILP, runs **standalone** (one Docker container, no Home Assistant required), and is wired for an **LLM to inspect, explain, and (optionally) approve** its decisions — never to drive the hardware itself.
 
 It is **not** a turn-key product. It runs 24/7 on one UK site and is tuned to that hardware. It's public so the architecture, the accuracy work, and the LP decisions are open to read, copy, and pick apart.
 
@@ -46,12 +46,12 @@ It is **not** a turn-key product. It runs 24/7 on one UK site and is tuned to th
 | Heat pump | ✅ **co-optimised** — Daikin LWT offset + DHW tank in the same solve | ➖ battery-focused | ➖ deferrable loads, not HP-native |
 | Appliances | ✅ washer / dryer / dishwasher via SmartThings | ➖ | ✅ deferrable loads |
 | PV forecast | Self-hosted OCF Quartz sidecar — **no API key** | Solcast (API key) | Solcast / others |
-| LLM / agent control | ✅ **80-tool MCP** — Claude drives + explains decisions | ➖ | ➖ |
+| LLM / agent interface | ✅ **80-tool MCP** — Claude queries state + explains decisions (not in the control loop) | ➖ | ➖ |
 | Replay + CI cost-regression gate | ✅ every solve frozen & replayable | ➖ | ➖ |
 | Turn-key setup | ➖ **bespoke to one site** | ✅ large community, well-documented | ✅ configurable |
 | Community | 👋 just starting | ⭐ large | ⭐ large |
 
-**Where Predbat and EMHASS win:** they're mature, well-documented, Home-Assistant-native, and have real communities. If you want something running on *your* house this weekend, start there. **Where this project is interesting:** the heat-pump-first, multi-vendor, single-solver design, the closed-loop replay/regression discipline, and the LLM-native operations surface.
+**Where Predbat and EMHASS win:** they're mature, well-documented, Home-Assistant-native, and have real communities. If you want something running on *your* house this weekend, start there. **Where this project is interesting:** the heat-pump-first, multi-vendor, single-solver design, the closed-loop replay/regression discipline, and an **MCP interface that lets an LLM inspect and explain every decision** — without putting it in the control loop.
 
 ---
 
