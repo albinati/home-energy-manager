@@ -323,6 +323,7 @@ export interface ExecutionSlot {
   fox_mode?: string | null;
   daikin_outdoor_c?: number | null;
   daikin_lwt_c?: number | null;
+  daikin_tank_c?: number | null;
 }
 
 export interface ExecutionTodayResponse {

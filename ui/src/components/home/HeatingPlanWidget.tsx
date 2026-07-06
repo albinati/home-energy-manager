@@ -59,8 +59,6 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
     const labels = slots.map((s) => localHM(s.slot_utc));
 
     const outdoor = slots.map((s) => (s.outdoor_c == null ? null : s.outdoor_c));
-    const price = slots.map((s) => (s.price_p == null ? null : s.price_p));
-    const lwtSet = slots.map((s) => (s.lwt_setpoint_c == null ? null : s.lwt_setpoint_c));
     const tank = slots.map((s) => (s.tank_temp_c == null ? null : s.tank_temp_c));
     const animate = !reducedMotion();
 
@@ -91,8 +89,21 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
       return c && c.n > 0 ? Math.round((c.sum / c.n) * 10) / 10 : null;
     });
 
-    // Background bands: heating-on warm wash + a stronger blue band on
-    // negative-price ("paid to import") slots.
+    // REALISED tank temp — the Daikin's logged tank temperature per slot.
+    const tankRealByBucket = new Map<number, number>();
+    for (const e of execution?.slots ?? []) {
+      if (e.slot_utc && e.daikin_tank_c != null) tankRealByBucket.set(bucket(e.slot_utc), e.daikin_tank_c);
+    }
+    const tankReal = slots.map((s) => tankRealByBucket.get(bucket(s.slot_utc)) ?? null);
+
+    // Radiator LWT is only meaningful while space-heating is ON — otherwise the
+    // "plan" is just the curve floor and the realised reading is idle/DHW water,
+    // which read as noise. Gate both plan + realised to heating_on slots.
+    const lwtPlan = slots.map((s) => (s.heating_on && s.lwt_setpoint_c != null ? s.lwt_setpoint_c : null));
+    const lwtRealG = slots.map((s, i) => (s.heating_on ? lwtReal[i] : null));
+
+    // Background bands: tariff tiers (same context wash as the Consumption chart)
+    // — cheap green, peak amber, negative blue. Replaces the price LINE.
     type BandItem = [{ xAxis: number; itemStyle: object }, { xAxis: number }];
     const bands: BandItem[] = [];
     const runs = (pred: (i: number) => boolean, fill: object) => {
@@ -103,8 +114,9 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
         if (!on && start >= 0) { bands.push([{ xAxis: start - 0.5, itemStyle: fill }, { xAxis: i - 1 + 0.5 }]); start = -1; }
       }
     };
-    runs((i) => !!slots[i].heating_on, { color: withAlpha(t.warn, 0.06) });
-    runs((i) => slots[i].tier === "negative", { color: withAlpha(t.neg, 0.2), borderColor: withAlpha(t.neg, 0.75), borderWidth: 1 });
+    runs((i) => slots[i].tier === "cheap", { color: withAlpha(t.cheap, 0.09) });
+    runs((i) => slots[i].tier === "peak", { color: withAlpha(t.peak, 0.10) });
+    runs((i) => slots[i].tier === "negative", { color: withAlpha(t.neg, 0.22), borderColor: withAlpha(t.neg, 0.85), borderWidth: 1 });
 
     const dayStartIdx = (plan.days || []).map((d) => slots.findIndex((s) => s.slot_utc >= d.start_utc)).filter((i) => i > 0);
     const nowMs = plan.now_utc ? new Date(plan.now_utc).getTime() : Date.now();
@@ -138,55 +150,54 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
           const rows: string[] = [`<strong>${labels[i]}</strong>${s.heating_on ? " · heating" : " · idle"}`];
           if (indoorReal[i] != null) rows.push(`Indoor <strong>${(indoorReal[i] as number).toFixed(1)}°C</strong> · realised`);
           if (s.outdoor_c != null) rows.push(`Outdoor <strong>${s.outdoor_c.toFixed(1)}°C</strong> · forecast`);
-          if (s.lwt_setpoint_c != null) {
+          if (s.heating_on && s.lwt_setpoint_c != null) {
             const off = s.lwt_offset || 0;
             const offTxt = off ? ` (curve ${s.lwt_base_c?.toFixed(0)} ${off > 0 ? "+" : "−"}${Math.abs(off)})` : "";
-            rows.push(`Radiator LWT <strong>${s.lwt_setpoint_c.toFixed(0)}°C</strong>${offTxt}`);
+            rows.push(`LWT plan <strong>${s.lwt_setpoint_c.toFixed(0)}°C</strong>${offTxt}`);
+            if (lwtRealG[i] != null) rows.push(`LWT real <strong>${(lwtRealG[i] as number).toFixed(0)}°C</strong>`);
           }
-          if (s.tank_temp_c != null) rows.push(`Tank <strong>${s.tank_temp_c}°C</strong>${s.tank_kind ? ` · ${s.tank_kind}` : ""}`);
+          if (s.tank_temp_c != null) rows.push(`Tank plan <strong>${s.tank_temp_c}°C</strong>${s.tank_kind ? ` · ${s.tank_kind}` : ""}`);
+          if (tankReal[i] != null) rows.push(`Tank real <strong>${(tankReal[i] as number).toFixed(0)}°C</strong>`);
           if (s.price_p != null) rows.push(`<span style="color:${t.textMute}">${s.price_p.toFixed(1)}p${s.tier ? ` · ${s.tier}` : ""}</span>`);
           return rows.join("<br/>");
         },
       },
       xAxis: { ...(base.xAxis as object), data: labels, axisLabel: { color: t.textMute, fontSize: 10, interval: 5 } },
+      // Single °C axis (price is now conveyed by the tariff bands, not a line).
+      // grid.right kept so the plot box still lines up with Generation/Consumption.
       yAxis: [
         { ...(base.yAxis as object), name: "°C", nameTextStyle: { color: t.textMute, fontSize: 10 },
           axisLabel: { color: t.textMute, fontSize: 10, formatter: "{value}" } },
-        // Right import-price axis — mirrors Generation/Consumption so all three
-        // intraday charts share the same plot box + the heating plan reads
-        // against the price it's responding to (boost cheap / setback peak).
-        { ...(base.yAxis as object), position: "right", splitLine: { show: false },
-          axisLabel: { color: t.textMute, fontSize: 10, formatter: "{value}p" } },
       ],
       series: [
         { name: "_bg", type: "line", data: slots.map(() => null), silent: true, z: 0,
           markArea: bands.length ? { silent: true, data: bands } : undefined,
           markLine: (dayLines.length || nowLine.length) ? { silent: true, symbol: "none", data: [...dayLines, ...nowLine] } : undefined },
-        // ── REFERENCE air temps (cool). Solid = realised, dotted = estimate. ──
-        // Outdoor — Open-Meteo forecast/ESTIMATE. Dotted, blue.
+        // ── REFERENCE air temps. Indoor = realised (cyan solid), outdoor =
+        //    estimate (grey dotted, de-emphasised so it never blends with indoor).
         { name: "Outdoor", type: "line", smooth: true, showSymbol: false, connectNulls: true,
-          data: outdoor, lineStyle: { color: t.grid, width: 1.5, opacity: 0.7, type: "dotted", cap: "round" }, z: 2 },
-        // Indoor — the house room sensors, REALISED. Solid, cyan.
+          data: outdoor, lineStyle: { color: withAlpha(t.textMute, 0.55), width: 1.5, type: "dotted", cap: "round" }, z: 2 },
         { name: "Indoor", type: "line", smooth: true, showSymbol: false, connectNulls: false,
-          data: indoorReal, lineStyle: { color: t.cool, width: 2.5, cap: "round" }, z: 3 },
-        // ── TANK / DHW (orange). Planned target only (no logged tank telemetry). ──
-        { name: "Tank", type: "line", step: "middle", showSymbol: false, connectNulls: false,
-          data: tank, lineStyle: { color: t.thermal, width: 2, type: "dashed", cap: "round" }, z: 3 },
-        // ── HEATING / radiator LWT (purple). Planned (dotted) vs realised (solid). ──
+          data: indoorReal, lineStyle: { color: t.cool, width: 2.5, cap: "round" }, z: 4 },
+        // ── TANK / DHW (orange). Planned target (dashed) vs realised (solid). ──
+        { name: "Tank planned", type: "line", step: "middle", showSymbol: false, connectNulls: false,
+          data: tank, lineStyle: { color: t.thermal, width: 1.5, type: "dashed", cap: "round" }, z: 3 },
+        { name: "Tank realised", type: "line", step: "middle", showSymbol: false, connectNulls: false,
+          data: tankReal, lineStyle: { color: t.thermal, width: 2.5, cap: "round" }, z: 4 },
+        // ── HEATING / radiator LWT (purple). Only while space-heating is ON —
+        //    otherwise it's the curve floor / idle water (noise). Planned dotted,
+        //    realised solid + fill.
         { name: "LWT planned", type: "line", smooth: true, showSymbol: false, connectNulls: false,
-          data: lwtSet, lineStyle: { color: t.house, width: 2, type: "dotted", cap: "round" }, z: 4 },
+          data: lwtPlan, lineStyle: { color: t.house, width: 2, type: "dotted", cap: "round" }, z: 4 },
         { name: "LWT realised", type: "line", smooth: true, showSymbol: false, connectNulls: false,
-          data: lwtReal, lineStyle: { color: t.house, width: 3, cap: "round" },
+          data: lwtRealG, lineStyle: { color: t.house, width: 3, cap: "round" },
           areaStyle: { color: areaGradient(t.house, 0.12, 0.0) }, z: 5 },
-        // Import price on the right axis — thin solid (dotted removed).
-        { name: "Import price", type: "line", step: "middle", showSymbol: false, yAxisIndex: 1,
-          data: price, lineStyle: { color: t.importColor, width: 1.25, opacity: 0.55, cap: "round" }, z: 1 },
         ...(nowIdx >= 0 ? [{
           name: "_now", type: "effectScatter", silent: true, coordinateSystem: "cartesian2d",
           symbolSize: 8, z: 6, showEffectOn: "render",
           rippleEffect: { period: animate ? 2.4 : 0, scale: animate ? 3.0 : 1, brushType: "stroke" },
           itemStyle: { color: t.accent, shadowBlur: 8, shadowColor: t.accent },
-          data: [[nowIdx, lwtReal[nowIdx] ?? lwtSet[nowIdx] ?? outdoor[nowIdx] ?? 20]],
+          data: [[nowIdx, indoorReal[nowIdx] ?? lwtRealG[nowIdx] ?? outdoor[nowIdx] ?? 20]],
         }] : []),
       ],
     }, { notMerge: true });
@@ -201,12 +212,14 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
           <span class="hpl-tok"><span class="hpl-line hpl-line--indoor" /> indoor (real)</span>
           <span class="hpl-tok"><span class="hpl-line hpl-line--outdoor" /> outdoor (est)</span>
           <span class="hpl-legend-grp">DHW</span>
-          <span class="hpl-tok"><span class="hpl-line hpl-line--tank" /> tank</span>
+          <span class="hpl-tok"><span class="hpl-line hpl-line--tank-real" /> tank real</span>
+          <span class="hpl-tok"><span class="hpl-line hpl-line--tank" /> tank plan</span>
           <span class="hpl-legend-grp">heating</span>
           <span class="hpl-tok"><span class="hpl-line hpl-line--realised" /> LWT real</span>
           <span class="hpl-tok"><span class="hpl-line hpl-line--planned" /> LWT plan</span>
-          <span class="hpl-tok"><span class="hpl-line hpl-line--import" /> import p</span>
-          <span class="hpl-tok"><span class="hpl-sw hpl-sw--heat" /> heating on</span>
+          <span class="hpl-legend-grp">tariff</span>
+          <span class="hpl-tok"><span class="hpl-sw hpl-sw--cheap" /> cheap</span>
+          <span class="hpl-tok"><span class="hpl-sw hpl-sw--peak" /> peak</span>
           <span class="hpl-tok"><span class="hpl-sw hpl-sw--neg" /> paid to import</span>
           <span class="hpl-hint"><NowDot /> now · hover for detail</span>
         </div>
