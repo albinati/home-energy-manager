@@ -1,6 +1,17 @@
 # nginx config for the HEM SPA container.
 # Runs through `envsubst` at boot — only ${HEM_API_URL} is substituted; other
 # `$variable` references (nginx variables) are NOT in the substitution list.
+
+# DoS insurance for the reverse-proxied API. This origin is reachable over the
+# public Tailscale funnel (the room sensor posts to it), and the HEM API shares
+# its event loop with the APScheduler that drives real hardware — so a request
+# flood must never starve the control loop. Behind the funnel all traffic shares
+# one source address, so this acts as a global-ish ceiling on funnel /api
+# throughput; direct tailnet clients keep their own per-IP bucket. The rate is
+# generous enough that a real viewer/admin never trips it (the cockpit's cold
+# load is a short burst, then slow polls) and tight enough to blunt a flood.
+limit_req_zone $binary_remote_addr zone=hem_api:10m rate=40r/s;
+
 server {
     listen 80;
     server_name _;
@@ -49,6 +60,12 @@ server {
     # Reverse-proxy /api → HEM. The browser sees same-origin, no CORS needed.
     # The bearer header is injected client-side by the SPA's fetch wrapper.
     location /api/ {
+        # Rate-limit before proxying (see limit_req_zone above). burst absorbs
+        # the cockpit's cold-load fan-out; nodelay serves the burst immediately
+        # rather than queueing it. Over-limit → 429 (not the default 503).
+        limit_req        zone=hem_api burst=80 nodelay;
+        limit_req_status 429;
+
         proxy_pass         ${HEM_API_URL};
         proxy_http_version 1.1;
         proxy_set_header   Host              $host;
