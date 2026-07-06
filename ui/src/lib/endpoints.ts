@@ -50,6 +50,7 @@ import type {
   SensorDevicesResponse,
   IndoorReadingsResponse,
   ThermalCalibration,
+  IndoorRollupResponse,
 } from "./types";
 
 /* ----- Real-time / cockpit ----- */
@@ -136,6 +137,9 @@ export const getIndoorReadings = (hours = 24) =>
 // W2 thermal model state + learning progress (viewer).
 export const getThermalCalibration = () =>
   getJson<ThermalCalibration>("/sensors/thermal-calibration");
+// WARM-tier long-term indoor rollup (viewer).
+export const getIndoorRollup = (days = 30) =>
+  getJson<IndoorRollupResponse>(`/sensors/indoor-rollup?days=${days}`);
 export const getExecutionToday = (date?: string) =>
   getJson<ExecutionTodayResponse>(`/execution/today${date ? `?date=${encodeURIComponent(date)}` : ""}`);
 export const getAgileToday = () => getJson<AgileTodayResponse>("/agile/today");

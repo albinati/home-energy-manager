@@ -1131,6 +1131,22 @@ export interface IndoorReadingsResponse {
   configured: boolean;
 }
 
+// GET /sensors/indoor-rollup — WARM-tier 15-min indoor rollup (long-term trend).
+export interface IndoorRollupBucket {
+  bucket_utc: string;
+  room: string;
+  mean_c: number;
+  min_c: number;
+  max_c: number;
+  n: number;
+}
+export interface IndoorRollupResponse {
+  days: number;
+  room: string | null;
+  n_buckets: number;
+  buckets: IndoorRollupBucket[];
+}
+
 // GET /sensors/thermal-calibration — W2 thermal model state + learning progress.
 export interface ThermalProgressPart {
   status: string | null;
