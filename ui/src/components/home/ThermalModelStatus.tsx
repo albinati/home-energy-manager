@@ -35,6 +35,15 @@ export function ThermalModelStatus() {
           learning · {tauN ?? "—"}/{tauNeed} cold-decay nights · {uaN ?? "—"}/{uaNeed} heating days
         </div>
       )}
+      <div class="tm-strat"
+           title={d.w3_enabled
+             ? "W3 on: the optimiser tracks indoor temperature, holds a comfort floor, and times heating to cheap slots."
+             : "W3 off: the heat pump follows its weather curve, blind to price and indoor comfort. Enable LP_W3_TIN_ENABLED once the regression replay passes."}>
+        <span class="tm-strat-k">Heating</span>
+        <span class={`tm-strat-v tm-strat-v--${d.w3_enabled ? "on" : "off"}`}>
+          {d.w3_enabled ? "comfort-optimised" : "weather curve"}
+        </span>
+      </div>
     </div>
   );
 }

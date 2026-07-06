@@ -177,6 +177,8 @@ async def get_thermal_calibration() -> dict[str, Any]:
             ) else "env",
         },
         "progress": progress,   # null before the first learner run
+        # W3 (#540): is the LP using t_in + comfort optimisation, or the weather curve?
+        "w3_enabled": bool(getattr(config, "LP_W3_TIN_ENABLED", False)),
         "learning_enabled": bool(getattr(config, "THERMAL_LEARNING_ENABLED", True)),
         "learned_values_enabled": bool(
             getattr(config, "THERMAL_LEARNED_VALUES_ENABLED", True)
