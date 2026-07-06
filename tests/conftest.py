@@ -51,6 +51,26 @@ def _isolate_db_path(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _block_octopus_live_fetch(monkeypatch):
+    """No unit test should reach the live Octopus product catalogue. It made the
+    suite hang intermittently on slow CI network: ``get_available_tariffs`` fans
+    out to dozens of sequential HTTPS calls (product list + per-product rate
+    endpoints), each a blocking ``urllib`` read. On a slow runner that stacks to
+    minutes and pins the whole job.
+
+    Every caller already wraps these fetches in ``try/except`` and falls back to
+    config/cache (e.g. ``current_import_standing_pence`` →
+    ``MANUAL_STANDING_CHARGE_PENCE_PER_DAY``), so raising here keeps tests
+    network-free WITHOUT changing observable behaviour. Tests that genuinely
+    exercise the catalogue mock ``_get_json`` themselves — their patch is applied
+    after this autouse fixture and so wins for that test.
+    """
+    def _blocked(*_a, **_k):  # noqa: ANN002, ANN003
+        raise RuntimeError("octopus live fetch disabled in tests (see conftest)")
+    monkeypatch.setattr("src.energy.octopus_products._get_json", _blocked, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _default_daikin_active_for_tests(monkeypatch):
     """v10: production default for DAIKIN_CONTROL_MODE is 'passive'. Most tests
     were written before passive mode existed and assume the LP/dispatch can
