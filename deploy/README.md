@@ -251,7 +251,7 @@ cd /srv/hem && docker compose up -d hem-ui
 curl -sS http://127.0.0.1:8080/healthz
 # Esperado: "ok"
 
-# 4. Abrir http://openclaw-overbot.tail0dbf20.ts.net:8080/ no navegador.
+# 4. Abrir http://<hem-host>.ts.net:8080/ no navegador.
 #    Cockpit, history, forecast, insights, workbench, settings devem
 #    funcionar idênticos à UI inline (que segue rodando na :8000).
 #    Inspect Network: as chamadas /api/v1/* devem ter Authorization: Bearer.
