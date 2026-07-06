@@ -4910,6 +4910,7 @@ async def execution_today(date: str | None = None):
                 """SELECT timestamp, consumption_kwh, agile_price_pence,
                           svt_shadow_price_pence,
                           soc_percent, fox_mode, daikin_lwt, daikin_outdoor_temp,
+                          daikin_tank_temp,
                           slot_kind
                    FROM execution_log
                    WHERE timestamp >= ? AND timestamp <= ?
