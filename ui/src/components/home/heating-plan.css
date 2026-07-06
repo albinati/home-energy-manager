@@ -58,15 +58,16 @@
   border-top-width: 2.5px;
   border-top-style: solid;
 }
-/* Reference air temps (cool): indoor realised solid, outdoor estimate dotted. */
-.hpl-line--indoor   { border-top-width: 3px; border-top-color: var(--cool); }
-.hpl-line--outdoor  { border-top-style: dotted; border-top-width: 2px; border-top-color: var(--grid); }
-/* DHW tank (orange). */
-.hpl-line--tank     { border-top-style: dashed; border-top-color: var(--thermal); }
+/* Reference air temps: indoor realised solid (cyan), outdoor estimate dotted
+   (grey, de-emphasised so it never blends with the indoor line). */
+.hpl-line--indoor    { border-top-width: 3px; border-top-color: var(--cool); }
+.hpl-line--outdoor   { border-top-style: dotted; border-top-width: 2px; border-top-color: color-mix(in srgb, var(--text-mute) 60%, transparent); }
+/* DHW tank (orange): realised solid, planned dashed. */
+.hpl-line--tank-real { border-top-width: 3px; border-top-color: var(--thermal); }
+.hpl-line--tank      { border-top-style: dashed; border-top-color: var(--thermal); }
 /* Heating / radiator LWT (purple): realised solid, planned dotted. */
-.hpl-line--realised { border-top-width: 3px; border-top-color: var(--house); }
-.hpl-line--planned  { border-top-style: dotted; border-top-width: 2px; border-top-color: var(--house); }
-.hpl-line--import   { border-top-color: color-mix(in srgb, var(--import) 55%, transparent); }
+.hpl-line--realised  { border-top-width: 3px; border-top-color: var(--house); }
+.hpl-line--planned   { border-top-style: dotted; border-top-width: 2px; border-top-color: var(--house); }
 /* Domain group labels in the legend. */
 .hpl-legend-grp {
   font-size: var(--font-2xs); font-weight: 700; text-transform: uppercase;
@@ -79,8 +80,9 @@
   height: 11px;
   border-radius: 3px;
 }
-.hpl-sw--heat { background: color-mix(in srgb, var(--warn) 22%, transparent); }
-.hpl-sw--neg  { background: color-mix(in srgb, var(--neg-price) 30%, transparent); border: 1px solid var(--neg-price); }
+.hpl-sw--cheap { background: color-mix(in srgb, var(--cheap) 20%, transparent); }
+.hpl-sw--peak  { background: color-mix(in srgb, var(--peak) 22%, transparent); }
+.hpl-sw--neg   { background: color-mix(in srgb, var(--neg-price) 30%, transparent); border: 1px solid var(--neg-price); }
 .hpl-hint {
   margin-left: auto;
   color: var(--text-mute);

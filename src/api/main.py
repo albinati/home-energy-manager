@@ -5060,6 +5060,7 @@ async def execution_today(date: str | None = None):
             "fox_mode": last.get("fox_mode"),
             "daikin_outdoor_c": outdoor,
             "daikin_lwt_c": last.get("daikin_lwt"),
+            "daikin_tank_c": last.get("daikin_tank_temp"),
             "daikin_source": daikin_source,
             "_tick_count": len(ticks),
         })

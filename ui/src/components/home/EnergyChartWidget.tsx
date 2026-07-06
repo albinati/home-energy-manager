@@ -311,7 +311,8 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
           <span class="echart-l2"><span class="echart-l2-line" style="border-top-color:var(--import)" /> Grid</span>
           <span class="echart-l2"><span class="echart-l2-line" style="border-top-color:var(--batt)" /> Battery</span>
           <span class="echart-l2"><span class="echart-l2-line" style="border-top-color:var(--accent);border-top-style:dashed" /> SoC %</span>
-          <span class="echart-l2-hint">stack = load by use · grid/battery = how it was sourced · SoC right · <NowDot /> now</span>
+          <span class="echart-l2"><span class="echart-l2-line" style="border-top-color:var(--import);border-top-style:dashed" /> import p</span>
+          <span class="echart-l2-hint">stack = load by use · grid/battery = how it was sourced · SoC/price right · <NowDot /> now</span>
         </div>
       )}
 
@@ -662,7 +663,7 @@ function optionForDay(
           socRow;
       },
     },
-    grid: { left: 16, right: 44, top: 16, bottom: 24, containLabel: true },
+    grid: { left: 16, right: 78, top: 16, bottom: 24, containLabel: true },
     xAxis: { ...(base.xAxis as object), data: labels, axisLabel: { color: t.textMute, fontSize: 10, interval: 5 } },
     yAxis: [
       { ...(base.yAxis as object), name: "kWh", position: "left" },
@@ -672,6 +673,12 @@ function optionForDay(
       {
         ...(base.yAxis as object), position: "right", min: 0, max: 100, splitLine: { show: false },
         axisLabel: { color: t.textMute, fontSize: 10, formatter: "{value}%" },
+      },
+      // Second right axis: import price (p/kWh) for the dashed price line —
+      // the tariff the load is being sourced against.
+      {
+        ...(base.yAxis as object), position: "right", offset: 36, splitLine: { show: false },
+        axisLabel: { color: withAlpha(t.importColor, 0.8), fontSize: 10, formatter: "{value}p" },
       },
     ],
     series: [
@@ -720,6 +727,14 @@ function optionForDay(
         name: "SoC", type: "line", smooth: true, showSymbol: false, connectNulls: true,
         yAxisIndex: 1, data: soc,
         lineStyle: { color: t.accent, width: 1.5, type: "dashed", cap: "round" }, z: 6,
+      },
+      // Import price → red dashed line on the 2nd right axis (p/kWh). The tariff
+      // the load is metered against; tier bands shade the background, this reads
+      // the exact price.
+      {
+        name: "Import price", type: "line", step: "middle", showSymbol: false, connectNulls: true,
+        yAxisIndex: 2, data: price,
+        lineStyle: { color: t.importColor, width: 1.25, type: "dashed", cap: "round", opacity: 0.75 }, z: 5,
       },
       // Pulsing "now".
       ...(nowIdx >= 0 ? [{
