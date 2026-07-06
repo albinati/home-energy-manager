@@ -122,6 +122,19 @@ async def get_indoor_readings(hours: int = 24) -> dict[str, Any]:
     }
 
 
+@router.get("/api/v1/sensors/indoor-rollup")
+async def get_indoor_rollup(days: int = 30, room: str | None = None) -> dict[str, Any]:
+    """WARM-tier 15-min indoor rollup (#540) — mean/min/max/count per bucket,
+    kept permanently even after the raw is archived + pruned. For long-term
+    indoor-trend charts without touching the cold gzip archive. Viewer."""
+    days = max(1, min(int(days), 400))
+    now = datetime.now(UTC)
+    start = (now - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    end = (now + timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    rows = db.get_indoor_rollup_15min(start, end, room=room)
+    return {"days": days, "room": room, "n_buckets": len(rows), "buckets": rows}
+
+
 @router.get("/api/v1/sensors/thermal-calibration")
 async def get_thermal_calibration() -> dict[str, Any]:
     """W2 building thermal calibration (#540): the learned row (or null before
