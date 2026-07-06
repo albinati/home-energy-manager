@@ -90,7 +90,7 @@ Required for any PR matching the LP-touching criteria below:
 
 ```bash
 # 1. Pull a recent prod DB snapshot
-scp root@openclaw-overbot.tail0dbf20.ts.net:/srv/hem/data/energy_state.db /tmp/prod.db
+scp root@<hem-host>.ts.net:/srv/hem/data/energy_state.db /tmp/prod.db
 
 # 2. Run the gate on your branch vs main
 DB_PATH=/tmp/prod.db .venv/bin/python scripts/check_lp_regression.py \

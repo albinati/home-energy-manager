@@ -42,14 +42,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import ssl
 import statistics as st
 import urllib.request
 from datetime import UTC, datetime, timedelta
 
-# Default to the Tailscale UI origin (nginx reverse-proxies /api → hem). On the
-# prod host, pass --base http://127.0.0.1:8000 to hit the API directly.
-DEFAULT_BASE = "https://openclaw-overbot.tail0dbf20.ts.net:8443"
+# Base API origin. Set HEM_BASE_URL (e.g. your Tailscale UI origin, which
+# reverse-proxies /api → hem) or pass --base. On the prod host, use
+# --base http://127.0.0.1:8000 to hit the API directly.
+DEFAULT_BASE = os.environ.get("HEM_BASE_URL", "http://127.0.0.1:8000")
 
 SLOT_MIN = 30          # half-hour slots
 FLOOR_KWH = 0.02       # per-slot dawn/dusk noise floor

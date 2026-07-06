@@ -24,10 +24,10 @@ the prod host. To publish a new version:
 ```bash
 # From a checkout of home-energy-manager on a machine with prod SSH access:
 scp docs/openclaw-skill/SKILL.md \
-    root@openclaw-overbot.tail0dbf20.ts.net:/root/.openclaw/skills/home-energy-manager/SKILL.md
+    root@<hem-host>.ts.net:/root/.openclaw/skills/home-energy-manager/SKILL.md
 
 # Optionally back up the old one first:
-ssh root@openclaw-overbot.tail0dbf20.ts.net \
+ssh root@<hem-host>.ts.net \
     'cp /root/.openclaw/skills/home-energy-manager/SKILL.md{,.bak-$(date +%Y-%m-%d)}'
 ```
 
