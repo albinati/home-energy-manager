@@ -1737,6 +1737,16 @@ def _daily_history_prune_job() -> None:
     except Exception:
         logger.warning("daily history prune failed", exc_info=True)
 
+    # Sensor-data lifecycle (#540): WARM rollup + COLD archive-before-prune for
+    # the room-sensor tables (they have no retention in prune_history_tables —
+    # they're tiered here so the full-res raw is gzip-archived before deletion).
+    try:
+        from ..analytics.data_archival import run_sensor_data_lifecycle
+        lc = run_sensor_data_lifecycle()
+        logger.info("sensor data lifecycle: %s", lc)
+    except Exception:
+        logger.warning("sensor data lifecycle failed", exc_info=True)
+
 
 def bulletproof_calendar_publish_job() -> None:
     """Publish Octopus rate windows to the family Google Calendar.

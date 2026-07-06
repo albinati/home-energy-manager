@@ -942,6 +942,20 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_room_temp_captured ON room_temperature_history(captured_at)"
     )
+    # WARM tier (#540): permanent 15-min rollup of indoor readings. Tiny
+    # (~4/h/room forever), kept after the raw is pruned, so the UI can draw
+    # long-term indoor trends without unzipping the cold archive.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS room_temperature_rollup_15min (
+            bucket_utc TEXT NOT NULL,
+            room       TEXT NOT NULL DEFAULT 'home',
+            mean_c     REAL NOT NULL,
+            min_c      REAL NOT NULL,
+            max_c      REAL NOT NULL,
+            n          INTEGER NOT NULL,
+            PRIMARY KEY (bucket_utc, room)
+        )"""
+    )
 
     # #540 W1c — full per-device sensor log. room_temperature_history keeps ONLY
     # temp_c (what the LP/thermal model needs); this table is the lossless audit
@@ -6951,6 +6965,112 @@ def prune_old_rows(
             )
             conn.commit()
             return int(cur.rowcount or 0)
+        finally:
+            conn.close()
+
+
+# Whitelist for the archive helpers below — the table/column names are
+# interpolated into SQL, so only these known-safe sensor tables are allowed.
+_ARCHIVABLE_TABLES: dict[str, set[str]] = {
+    "room_temperature_history": {"captured_at"},
+    "device_reading_log": {"received_at", "captured_at"},
+}
+
+
+def fetch_rows_older_than(table: str, ts_col: str, cutoff_iso: str) -> list[dict[str, Any]]:
+    """Return full rows (as dicts) from a whitelisted sensor table whose
+    ``ts_col`` is strictly before ``cutoff_iso`` — for archival before pruning."""
+    if ts_col not in _ARCHIVABLE_TABLES.get(table, set()):
+        raise ValueError(f"not archivable: {table}.{ts_col}")
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                f"SELECT * FROM {table} WHERE {ts_col} < ? ORDER BY {ts_col}",
+                (cutoff_iso,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
+def delete_rows_older_than(table: str, ts_col: str, cutoff_iso: str) -> int:
+    """Delete rows from a whitelisted sensor table older than ``cutoff_iso``.
+    Returns the row count. Paired with :func:`fetch_rows_older_than`."""
+    if ts_col not in _ARCHIVABLE_TABLES.get(table, set()):
+        raise ValueError(f"not archivable: {table}.{ts_col}")
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(f"DELETE FROM {table} WHERE {ts_col} < ?", (cutoff_iso,))
+            conn.commit()
+            return int(cur.rowcount or 0)
+        finally:
+            conn.close()
+
+
+def _floor_15min(ts_iso: str) -> str | None:
+    """Floor an ISO timestamp to its 15-min bucket start (UTC, ``...:00Z``)."""
+    try:
+        dt = datetime.fromisoformat(str(ts_iso).replace("Z", "+00:00")).astimezone(UTC)
+    except (ValueError, TypeError):
+        return None
+    dt = dt.replace(minute=(dt.minute // 15) * 15, second=0, microsecond=0)
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def refresh_indoor_rollup_15min(lookback_days: int = 3) -> int:
+    """Recompute the 15-min indoor rollup for the recent window and upsert it.
+
+    Recomputes only the last ``lookback_days`` of buckets each run (cheap, and
+    buckets finalise long before the raw's retention). Returns buckets written.
+    """
+    start = (datetime.now(UTC) - timedelta(days=max(1, lookback_days))).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    with _lock:
+        conn = get_connection()
+        try:
+            rows = conn.execute(
+                "SELECT captured_at, room, temp_c FROM room_temperature_history "
+                "WHERE captured_at >= ?",
+                (start,),
+            ).fetchall()
+            agg: dict[tuple[str, str], list[float]] = {}
+            for r in rows:
+                b = _floor_15min(r["captured_at"])
+                if b is None or r["temp_c"] is None:
+                    continue
+                agg.setdefault((b, r["room"] or "home"), []).append(float(r["temp_c"]))
+            for (bucket, room), temps in agg.items():
+                conn.execute(
+                    """INSERT INTO room_temperature_rollup_15min
+                         (bucket_utc, room, mean_c, min_c, max_c, n)
+                       VALUES (?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(bucket_utc, room) DO UPDATE SET
+                         mean_c=excluded.mean_c, min_c=excluded.min_c,
+                         max_c=excluded.max_c, n=excluded.n""",
+                    (bucket, room, sum(temps) / len(temps), min(temps), max(temps), len(temps)),
+                )
+            conn.commit()
+            return len(agg)
+        finally:
+            conn.close()
+
+
+def get_indoor_rollup_15min(start_iso: str, end_iso: str, room: str | None = None) -> list[dict[str, Any]]:
+    """WARM-tier 15-min indoor rollup rows in a range (viewer / long-term UI)."""
+    with _lock:
+        conn = get_connection()
+        try:
+            q = ("SELECT bucket_utc, room, mean_c, min_c, max_c, n "
+                 "FROM room_temperature_rollup_15min WHERE bucket_utc >= ? AND bucket_utc < ?")
+            args: list[Any] = [start_iso, end_iso]
+            if room:
+                q += " AND room = ?"
+                args.append(room)
+            q += " ORDER BY bucket_utc"
+            return [dict(r) for r in conn.execute(q, args).fetchall()]
         finally:
             conn.close()
 

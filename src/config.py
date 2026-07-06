@@ -2494,6 +2494,24 @@ class Config:
         os.getenv("ACKNOWLEDGED_WARNINGS_RETENTION_DAYS", "30")
     )
 
+    # ── Sensor data lifecycle (#540) — tiered hot/cold, never lose data ──────
+    # The room-sensor tables (room_temperature_history, device_reading_log) are
+    # append-only and would grow unbounded on the storage-constrained box. We
+    # keep a RECENT raw window hot in SQLite (LP + W2 read it), roll it up to a
+    # permanent tiny 15-min table for long-term UI, and ARCHIVE the full-res raw
+    # to monthly gzip files before pruning — nothing is deleted without a
+    # compressed copy first (kept for future ML training).
+    INDOOR_SENSOR_RAW_RETENTION_DAYS: int = int(
+        os.getenv("INDOOR_SENSOR_RAW_RETENTION_DAYS", "90")
+    )
+    DEVICE_LOG_RETENTION_DAYS: int = int(os.getenv("DEVICE_LOG_RETENTION_DAYS", "30"))
+    DATA_ARCHIVE_ENABLED: bool = os.getenv("DATA_ARCHIVE_ENABLED", "true").lower() in (
+        "true", "1", "yes",
+    )
+    # Empty → derived as <dir of DB_PATH>/archive. Absolute path inside the
+    # container (state volume) so archives survive image swaps.
+    DATA_ARCHIVE_DIR: str = os.getenv("DATA_ARCHIVE_DIR", "")
+
     def foxess_client_kwargs(self) -> dict:
         """Return the right kwargs for FoxESSClient based on what's configured."""
         if not self.FOXESS_DEVICE_SN:
