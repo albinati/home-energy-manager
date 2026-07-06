@@ -8,6 +8,97 @@ Major versions track significant LP / dispatch architecture iterations. Minor ve
 
 _Nothing yet._
 
+## [14.0.0] — 2026-07-06
+
+**Headline: the house learns to feel itself.** For its whole life the HEM
+optimised a house it could not feel — the Altherma exposes no room stat, so
+indoor temperature was never measured and heating rode a blind weather curve.
+v14 closes that loop end to end: **measure → learn → use → keep.** An ESPHome
+room sensor now streams the indoor temperature in; the W2 learner distils the
+building's own thermal physics (τ / UA / C) from how it cools at night; the LP
+regains the indoor-temperature state variable it lost in Phase B, so it can
+pre-heat off cheap power and coast the peaks while holding a comfort floor; and
+a tiered data lifecycle keeps every reading — full-resolution and ML-ready —
+without ever growing the storage-constrained box. The thermal machinery ships
+dormant-by-design (summer offers no signal to learn from and no heating to
+optimise) with the whole state made watchable, so it self-activates as the
+weather turns.
+
+### W1 — the house gets a thermometer
+
+- **Indoor ingestion, internet-exposed but contained.** An ESPHome sensor
+  POSTs to `POST /api/v1/sensors/indoor` through the existing hem-ui Tailscale
+  funnel (`:8443`), carrying a **scoped `HEM_SENSOR_INGEST_TOKEN`** that unlocks
+  that one write route and nothing else — never an admin read, never another
+  endpoint. A firmware/network leak can only post fake temperatures to one path;
+  rotate the token to revoke a device. (#646)
+- **Lossless per-device logging.** Two sinks: `room_temperature_history` keeps
+  only the in-band temperature the model reads, while `device_reading_log` is a
+  lossless audit of *everything* a device sends (temp / humidity / pressure /
+  MAC / and any extra field via a `payload_json` blob), so no future signal is
+  dropped for want of a migration. (#647)
+- **Read like tank/Fox, not polled.** The freshest reading folds into
+  `/cockpit/now` (dropping the fictional Daikin room-temp read that never
+  worked), and the cockpit grew an Outside | Inside climate hero, an indoor
+  climate card, and a heating chart that draws the realised indoor line beside
+  the plan. (#648–#653, #655)
+
+### W2 — the house learns its own physics
+
+- **Thermal learner.** τ from the overnight indoor-decay curve (integral ODE
+  fit), UA re-fit against heating-degree days using the *measured* indoor
+  baseline, and `C = τ·UA` — a single `building_thermal_calibration` row,
+  refreshed nightly, gated behind quality thresholds so it only trusts clean
+  signal. (#641)
+- **Made observable.** A "Thermal model" card surfaces the effective τ / UA / C,
+  a `defaults | learned` badge, and the convergence toward activation
+  (`0/5 cold-decay nights · 1/20 heating days`) — honest about the summer
+  dormancy rather than forcing garbage. (#656)
+
+### W3 — the house heats to comfort, timed to price
+
+- **`t_in` restored to the LP.** The indoor-temperature decision variable +
+  RC thermal dynamics that Phase B removed (there was no sensor then) are back
+  behind `LP_W3_TIN_ENABLED` (default **off** → byte-identical to today). When
+  on: a soft comfort floor (night 17.5 °C / day setpoint) that can never go
+  Infeasible, a gentle-recovery cap on the pump's own contribution (no morning
+  blast), and the per-slot heating floor superseded so the LP can front-load
+  heat into cheap slots and coast peaks. An adversarial review caught — and this
+  release fixes — a warm-weather infeasibility where the recovery cap fought the
+  RC equality. (#657)
+- **Surfaced in the UI.** The thermal card shows the active strategy
+  (`weather curve` → `comfort-optimised`), and the heating chart carries the
+  LP's committed indoor plan as a dashed line beside the realised sensor line.
+  Both dormant until the flag flips. (#658)
+
+### Data — keep everything, grow nothing
+
+- **Tiered sensor-data lifecycle.** The append-only sensor tables had no
+  retention. Rather than delete history (valuable for future ML), it is tiered:
+  **HOT** raw in SQLite (90 d indoor / 30 d device-log); **WARM** a permanent
+  15-min rollup for long-term trends; **COLD** the full-resolution raw *and* a
+  wide, 15-min-aligned ML-ready join (indoor / outdoor / LWT / tank / SoC / heat
+  / price / tier) gzip-archived to monthly files **before** anything is pruned.
+  ~15× smaller than raw SQLite, nothing deleted without a compressed copy
+  landing first. (#659)
+- **Long-term indoor-trend card** on Insights (mean + min/max band, 30 d / 90 d /
+  1 y), reading the permanent rollup so it outlives the raw. (#660)
+
+### Also in this release
+
+- **Negative-window holds use Fox Backup mode** — an owner decision validated
+  against 35 days of prod work-mode telemetry; the slot labeller now ranks
+  negative price above solar_charge (the real 2026-06-28 root cause). (#630,
+  #631, #632, #635)
+- **DHW forecast: per-bucket shape corrector** + a one-shot Telegram ping when
+  the enable gate is met, and the firmware legionella cycle is now budgeted in
+  the LP. (#640, #642, #643, #645)
+- **CI no longer hangs** — `pytest-timeout` + a job cap + a conftest guard that
+  blocks a test from fanning out live Octopus calls. (#654)
+- **UI hardening** — interval-true chart geometry, committed-forecast overlays
+  on week/month charts, sliding day navigation, and a design-token conformity
+  pass. (#621–#628, #636, #637)
+
 ## [13.0.0] — 2026-07-02
 
 **Headline: measure, then trust.** v13 is a month of instrument-building and
