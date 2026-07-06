@@ -20,6 +20,7 @@ import {
   getApplianceSuggestions,
   getApplianceJobs,
   getAppliances,
+  getIndoorReadings,
 } from "../lib/endpoints";
 import { Widget } from "../components/common/Widget";
 import { Icon } from "../components/common/Icon";
@@ -96,6 +97,8 @@ export default function Landing() {
   // Heating-plan timeline (yesterday/today/tomorrow): outdoor temp + LWT offset
   // + tank + heating-on, recomputed per slot. Cache-only, poll while visible.
   const heatingPlan = usePoll(getHeatingPlan, 5 * 60_000);
+  // Indoor sensor history (today) for the heating chart's realised indoor line.
+  const indoorHistory = usePoll(() => getIndoorReadings(24), 5 * 60_000);
   // Today's grid import/export so far (kWh + real £, credit on negative slots).
   const todayCum = usePoll(getEnergyTodayCumulative, 60_000);
   // Appliance status: registered list (once) + active jobs + cheapest-window
@@ -201,7 +204,7 @@ export default function Landing() {
           }}
         />}
         <div class="widget-grid">
-          <Widget title="Live power" icon={<Icon name="power-live" size={14} />} tone="power" size="half"
+          <Widget title="Live power" icon={<Icon name="power-live" size={14} />} tone="power" size="wide"
                   badge={liveTime}
                   action={<RefreshCountdown lastFetchAt={now.lastFetchAt} intervalMs={now.intervalMs} loading={now.loading} onRefresh={() => void now.refresh()} />}>
             <LivePowerWidget state={s} cockpit={data} agile={agile.data} metrics={metrics.data} todayCumulative={todayCum.data} />
@@ -211,12 +214,12 @@ export default function Landing() {
                       nowUtc={data.now_utc} foxMode={foxMode} foxActive={foxActive} />
           </Widget>
 
-          <Widget title="Live heating" icon={<Icon name="heating" size={14} />} tone="thermal" size="half">
+          <Widget title="Live heating" icon={<Icon name="heating" size={14} />} tone="thermal" size="wide">
             <HeatingWidget state={s} daikin={daikin.data} daikinQuota={daikinQuota.data} report={report.data} weather={weather.data} execution={execution.data}
                            onRefresh={() => { void daikin.refresh(); void daikinQuota.refresh(); }}>
               <Suspense fallback={<Spinner label="Loading heating plan…" />}>
                 <HeatingPlanWidget plan={heatingPlan.data} loading={heatingPlan.loading}
-                                   execution={execution.data} />
+                                   execution={execution.data} indoor={indoorHistory.data} />
               </Suspense>
             </HeatingWidget>
             <PlanMini groups={["heating", "tank"]} timeline={timeline.data}
