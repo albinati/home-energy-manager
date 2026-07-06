@@ -138,6 +138,19 @@
 .la-key { font-weight: 700; }
 .la-key.la-over { color: var(--cool); }
 .la-key.la-under { color: var(--bad); }
+
+/* Indoor-history window toggle (30/90/365d) — mirrors .load-pattern-toggle. */
+.ih-windows { display: inline-flex; gap: var(--space-0); margin-top: var(--space-2); }
+.ih-win {
+  font-size: var(--font-2xs); padding: var(--space-0) var(--space-3); cursor: pointer;
+  background: transparent; color: var(--text-mute);
+  border: 1px solid var(--border); border-radius: var(--radius-pill, 999px);
+}
+.ih-win.is-on {
+  color: var(--text); border-color: color-mix(in srgb, var(--cool) 50%, transparent);
+  background: color-mix(in srgb, var(--cool) 12%, transparent);
+}
+.ih-key { color: var(--cool); font-weight: 600; }
 .la-stats {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
   gap: var(--space-3); margin: var(--space-3) 0 var(--space-2);
