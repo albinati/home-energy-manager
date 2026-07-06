@@ -1129,3 +1129,29 @@ export interface IndoorReadingsResponse {
   stale_minutes: number;
   configured: boolean;
 }
+
+// GET /sensors/thermal-calibration — W2 thermal model state + learning progress.
+export interface ThermalProgressPart {
+  status: string | null;
+  needed: number;
+  reason: string | null;
+  episodes?: number | null;   // τ side
+  hdd_days?: number | null;   // UA side
+}
+export interface ThermalCalibration {
+  calibration: Record<string, unknown> | null;
+  effective: {
+    tau_hours: number;
+    ua_w_per_k: number;
+    c_kwh_per_k: number;
+    source: "env" | "learned";
+  };
+  progress: {
+    last_run_utc: string | null;
+    status: string | null;
+    tau: ThermalProgressPart;
+    ua: ThermalProgressPart;
+  } | null;
+  learning_enabled: boolean;
+  learned_values_enabled: boolean;
+}

@@ -136,6 +136,36 @@ async def get_thermal_calibration() -> dict[str, Any]:
     except Exception:
         logger.debug("thermal-calibration read failed", exc_info=True)
     learned_tau = row is not None and row.get("tau_hours") is not None
+
+    # W2 learning progress (#540) — the last cron run's episode/HDD-day tallies
+    # so the UI can show "learning: 0/5 decay nights, 1/20 heating days" while
+    # the model is still on env defaults (summer = no thermal signal, by design).
+    progress = None
+    try:
+        raw = db.get_thermal_learning_progress()
+    except Exception:
+        raw = None
+    if raw and isinstance(raw.get("result"), dict):
+        res = raw["result"]
+        rtau = res.get("tau") or {}
+        rua = res.get("ua") or {}
+        progress = {
+            "last_run_utc": raw.get("updated_at"),
+            "status": res.get("status"),
+            "tau": {
+                "status": rtau.get("status"),
+                "episodes": rtau.get("episodes"),
+                "needed": int(getattr(config, "THERMAL_TAU_MIN_EPISODES", 5)),
+                "reason": rtau.get("reason"),
+            },
+            "ua": {
+                "status": rua.get("status"),
+                "hdd_days": rua.get("samples"),
+                "needed": int(getattr(config, "THERMAL_UA_MIN_HDD_DAYS", 20)),
+                "reason": rua.get("reason"),
+            },
+        }
+
     return {
         "calibration": row,  # null until the learner's quality gates pass
         "effective": {
@@ -146,6 +176,7 @@ async def get_thermal_calibration() -> dict[str, Any]:
                 learned_tau and bool(getattr(config, "THERMAL_LEARNED_VALUES_ENABLED", True))
             ) else "env",
         },
+        "progress": progress,   # null before the first learner run
         "learning_enabled": bool(getattr(config, "THERMAL_LEARNING_ENABLED", True)),
         "learned_values_enabled": bool(
             getattr(config, "THERMAL_LEARNED_VALUES_ENABLED", True)

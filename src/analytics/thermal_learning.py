@@ -472,6 +472,14 @@ def refresh_building_thermal_calibration() -> dict[str, Any]:
     """
     from .. import db
 
+    def _done(result: dict[str, Any]) -> dict[str, Any]:
+        """Persist the run summary for the W2 progress UI, then return it."""
+        try:
+            db.set_thermal_learning_progress(result)
+        except Exception:  # pragma: no cover — observability must never break the cron
+            logger.debug("thermal_learning: progress persist failed", exc_info=True)
+        return result
+
     tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
     now = datetime.now(UTC)
     tau_window = int(getattr(config, "THERMAL_TAU_WINDOW_DAYS", 21))
@@ -484,10 +492,10 @@ def refresh_building_thermal_calibration() -> dict[str, Any]:
         )
     except Exception:  # pragma: no cover - defensive
         logger.exception("thermal_learning: indoor read failed")
-        return {"status": "error", "reason": "indoor read failed"}
+        return _done({"status": "error", "reason": "indoor read failed"})
     if not readings:
         # The pre-sensor steady state — one quiet skip, no table writes.
-        return {"status": "skipped", "reason": "no indoor sensor data yet"}
+        return _done({"status": "skipped", "reason": "no indoor sensor data yet"})
 
     # Outdoor series over the FULL learner window (review H1: the first cut
     # covered only the τ window, silently starving the UA fit and recording
@@ -545,7 +553,7 @@ def refresh_building_thermal_calibration() -> dict[str, Any]:
                 "constants until enough clean data accumulates",
                 tau_fit.get("reason"), ua_fit.get("reason"),
             )
-        return {"status": "skipped", "tau": tau_fit, "ua": ua_fit}
+        return _done({"status": "skipped", "tau": tau_fit, "ua": ua_fit})
 
     # Merge with the previous row: skipped components keep their prior values.
     row: dict[str, Any] = dict(prev or {})
@@ -581,14 +589,14 @@ def refresh_building_thermal_calibration() -> dict[str, Any]:
         db.upsert_building_thermal_calibration(row)
     except Exception:  # pragma: no cover
         logger.exception("thermal_learning: upsert failed")
-        return {"status": "error", "reason": "upsert failed"}
+        return _done({"status": "error", "reason": "upsert failed"})
     logger.info(
         "thermal_learning: tau=%s h (eps=%s r2=%s) ua=%s W/K (src=%s) c=%s kWh/K",
         _fmt(row.get("tau_hours")), row.get("tau_episodes"),
         _fmt(row.get("tau_r2_median")), _fmt(row.get("ua_w_per_k")),
         row.get("ua_source") or "env", _fmt(row.get("c_kwh_per_k")),
     )
-    return {"status": "ok", "tau": tau_fit, "ua": ua_fit, "row": row}
+    return _done({"status": "ok", "tau": tau_fit, "ua": ua_fit, "row": row})
 
 
 def _fmt(v: Any) -> str:
