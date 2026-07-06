@@ -1,5 +1,5 @@
 import type { ComponentChildren } from "preact";
-import { useFetch } from "../../lib/poll";
+import { usePoll } from "../../lib/poll";
 import { getStatusFeedback } from "../../lib/endpoints";
 import { Icon } from "../common/Icon";
 import { Widget } from "../common/Widget";
@@ -28,7 +28,7 @@ function ageLabel(ageS: number | null | undefined): string {
 }
 
 export function FeedbackPanel({ pv }: { pv: PvTodayResponse | null }) {
-  const fb = useFetch(getStatusFeedback, []);
+  const fb = usePoll(getStatusFeedback, 5 * 60_000);
   const d = fb.data;
 
   // Older hem image (404), transient error, or still loading → render nothing

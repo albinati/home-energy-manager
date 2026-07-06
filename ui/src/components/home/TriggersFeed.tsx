@@ -1,4 +1,4 @@
-import { useFetch } from "../../lib/poll";
+import { usePoll } from "../../lib/poll";
 import { getRecentTriggers } from "../../lib/endpoints";
 import { Icon } from "../common/Icon";
 import "./feedback.css";
@@ -20,7 +20,7 @@ function timeLabel(ts: string): string {
 }
 
 export function TriggersFeed() {
-  const triggers = useFetch(() => getRecentTriggers(6), []);
+  const triggers = usePoll(() => getRecentTriggers(6), 60_000);
   const rows = triggers.data?.rows ?? [];
   if (triggers.error || rows.length === 0) return null;
 
