@@ -90,7 +90,8 @@ def test_half_hour_boundary_slot_attributed_to_successor_group() -> None:
     slots = [_slot(0, "solar_charge"), _slot(1, "cheap"), _slot(2, "cheap")]
     groups = _merge_fox_groups(slots, max_groups=8)
     # Preconditions: the REAL builder kept both windows, back-to-back at :30.
-    assert [g.work_mode for g in groups] == ["SelfUse", "ForceCharge"]
+    # #679: solar_charge now maps to Backup (was SelfUse Solar-Sponge).
+    assert [g.work_mode for g in groups] == ["Backup", "ForceCharge"]
     assert (groups[0].end_hour, groups[0].end_minute) == (
         groups[1].start_hour, groups[1].start_minute,
     ), "predecessor must end exactly where the successor starts (:30 exclusive)"

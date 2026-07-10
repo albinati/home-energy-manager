@@ -37,7 +37,7 @@ This table — not vendor prose — is the authority for dispatch decisions:
 | `ForceCharge`, SoC ≥ fdSoc | 354 | **0.0 %** | ~5 % | TRUE hold after target — equivalent to Backup, plus target/power control. |
 | `ForceCharge`, SoC < fdSoc | 749 | 0.6-1.2 % (slot-boundary noise) | 96-97 % @ ~2.5-3.9 kW | Charges from grid at fdPwr as documented. |
 | `ForceDischarge` | 177 | 88 % @ 3.5 kW | — | As documented. |
-| `SelfUse(minSocOnGrid=100, maxSoc=100)` (the `solar_charge` shape) | 4,011 | **31.5 % @ 0.69 kW avg** | 53 % | **The floor is NOT honoured as a discharge freeze.** Never use a SelfUse floor as a hold primitive (2026-06-28 + 07-04 incidents). |
+| `SelfUse(minSocOnGrid=100, maxSoc=100)` (the *former* `solar_charge` shape) | 4,011 | **31.5 % @ 0.69 kW avg** | 53 % | **The floor is NOT honoured as a discharge freeze.** Never use a SelfUse floor as a hold primitive (2026-06-28 + 07-04 + 07-10 incidents). **RETIRED from the dispatcher (#679, 2026-07-10):** `solar_charge` now maps to pinned Backup and A0 confirmed this shape leaks; the tuple is no longer emittable anywhere in the code. Row kept only as the historical incident record. |
 | No group covering the instant (global work mode = Self Use) | 9,497 | 66 % | 8 % | Plain self-use outside scheduled windows — desired at positive prices. |
 
 Consequences for the dispatcher:
@@ -51,8 +51,31 @@ Consequences for the dispatcher:
   merge, so paid fills stay anchored to the deepest-priced slots.
   `LP_NEGATIVE_HOLD_FOX_MODE=forcecharge` restores the #607/#630 interim
   (FC at fdPwr ≈ LP import, fdSoc = target — equally discharge-proof).
-  Backup is only used INSIDE negative windows: anywhere else its
-  unconditional top-up would buy energy the plan didn't ask for.
+- **Backup is now the universal hold primitive (not negative-only) — #679,
+  2026-07-10.** The 2026-07-10 incident showed positive-price holds and
+  `solar_charge` slots leaking through SelfUse(minSoc=100) exactly like the
+  negative case. Two uses were added, both mapping to **PINNED Backup**
+  (`maxSoc ≈ the LP's planned SoC`, so there is NO unconditional top-up — it
+  only fills up to plan):
+    - **A1 positive-price hold** — when the LP covers a slot's load from grid
+      (dis=0, chg=0, imp>0) and holds the battery for a later forecast peak
+      (pessimistic charge floor #673), `_slot_fox_tuple` maps it to pinned
+      Backup instead of SelfUse(reserve). Gated by `LP_POSITIVE_HOLD_ENABLED`;
+      contiguous holds coalesce and only the top `LP_POSITIVE_HOLD_MAX_GROUPS`
+      runs are kept (8-group cap).
+    - **A2 `solar_charge`** — now maps to pinned Backup at the planned
+      end-of-window SoC (`LP_SOLAR_CHARGE_FOX_MODE=backup`, default). The
+      unpinned-Backup wording above ("only used INSIDE negative windows")
+      applies to the *unpinned* form; A1/A2 use the pinned form so the
+      cross-window paid-top-up concern does not arise.
+    - **Summer caveat (A2, ship-and-observe).** In winter the Backup grid
+      top-up (~1.2 kW backfilling a PV shortfall) is cheap afternoon import and
+      strictly better than the evening peak. In summer, PV surplus that would
+      otherwise EXPORT could instead be partly consumed by the top-up toward
+      the maxSoc pin — a near-zero effect while PV covers the pin, but revisit
+      before April: if telemetry shows the pin suppressing profitable exports,
+      set `LP_SOLAR_CHARGE_FOX_MODE=selfuse` (plain SelfUse at reserve — the
+      escape hatch, which does NOT hold) for the sunny months.
 - Negative windows must never contain SelfUse groups — enforced at the
   labeller since #630 (`LP_NEGATIVE_BEATS_SOLAR_CHARGE`).
 - **The daily-cyclic collision (the TRUE 06-28 + 07-04 root cause, fixed

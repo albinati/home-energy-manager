@@ -208,6 +208,16 @@ class HalfHourSlot:
     # LP planned battery SoC (%) at end of this slot — used as fd_soc for ForceCharge.
     # None: heuristic plans / missing soc_kwh — fall back to legacy 95 (cheap) / 100 (negative).
     target_soc_pct: int | None = None
+    # Positive-price battery HOLD floor (%), #679 (A1). Set by lp_plan_to_slots
+    # on a standard/peak/tank_idle_overnight slot where the LP covers load from
+    # grid (dis=0, chg=0, imp>0) while holding the battery for a forecast peak.
+    # When set, _slot_fox_tuple maps the slot to pinned Backup — the ONLY proven
+    # 0%-discharge hold on the H1 (the per-group SelfUse floor is ignored, A0
+    # finding). None = no hold (byte-identical to legacy). Deliberately NOT a
+    # new `kind` string: a new kind leaks into the Daikin dispatcher
+    # (`daikin_dispatch_preview` `.get(kind,"normal")`) and the tank_idle
+    # overlay only matches kind=="standard" — an orthogonal field is correct.
+    soc_floor_pct: int | None = None
 
 
 def _parse_ts(s: str) -> datetime:
@@ -322,21 +332,44 @@ def _slot_fox_tuple(
 
     For ForceCharge slots the ``fdPwr`` (W) is taken from ``s.lp_grid_import_w`` when set
     (LP path), or falls back to the configured ``FOX_FORCE_CHARGE_*_PWR`` constants.
-    For solar_charge slots (LP import≈0, battery charges from PV) we use SelfUse with an
-    elevated minSocOnGrid so the battery is held at the LP's target level without forcing
-    any grid import — PV handles the charging naturally. We ALSO set ``maxSoc=100`` to
-    explicitly give the firmware the "Solar Sponge" cue: PV-only fill up to 100 % cap.
+    For solar_charge slots the battery is held via **pinned Backup** at the LP's
+    planned end-of-window SoC (#679, A2) — the only proven 0%-discharge hold on
+    the H1. The old SelfUse(minSocOnGrid=100, maxSoc=100) "Solar Sponge" shape is
+    **RETIRED**: the A0 finding (40,369 prod samples) showed that floor discharged
+    below reserve 40.6% of the time — it was the 2026-07-10 leak, not a hold. It
+    is no longer emittable anywhere in the dispatcher.
     """
     min_r = int(config.MIN_SOC_RESERVE_PERCENT)
     if s.kind == "solar_charge":
-        # 100%: hold battery fully so PV fills it without the inverter pulling any grid.
-        # SelfUse mode forbids active grid import regardless of minSocOnGrid — this only
-        # blocks discharge, letting excess PV accumulate. MPC at 06:00/12:00 corrects
-        # for cloud shortfalls by switching to ForceCharge if SoC lags the target.
-        # maxSoc=100 is the canonical Fox V3 "Solar Sponge" cue (per TonyM1958/FoxESS-Cloud
-        # wiki) — explicit cap so the firmware never tries to top via grid past 100 %.
-        min_soc = int(getattr(config, "FOX_SOLAR_CHARGE_MIN_SOC_PERCENT", 100))
-        return ("SelfUse", None, None, min_soc, 100)
+        # A2 (#679): solar_charge (LP import≈0, battery fills from PV) holds via
+        # pinned Backup — Fox's native reserve mode, 0.0% discharge in 441 prod
+        # samples. maxSoc = the LP's planned end-of-window SoC, so the ~1.2 kW
+        # Backup grid top-up backfills any PV shortfall at the current (cheap
+        # afternoon) price rather than the evening peak, and never charges past
+        # plan.
+        #
+        # LP_SOLAR_CHARGE_FOX_MODE escape hatch:
+        #   "backup"  (default) — the hold above.
+        #   "selfuse" — PLAIN SelfUse at the reserve floor (min=reserve,
+        #               maxSoc=None). This does NOT hold: it discharges to
+        #               reserve like normal self-use. It exists only for the
+        #               summer PV-export caveat (accept no hold so PV surplus
+        #               exports instead of a paid Backup top-up). It is NOT a
+        #               rollback to the 100,100 shape — that shape is the bug
+        #               (A0), so it can never be re-emitted.
+        # Vacation preset: its LP forbids grid->battery, and Backup's top-up
+        # would violate that — force plain SelfUse(reserve) regardless of mode.
+        mode = str(getattr(config, "LP_SOLAR_CHARGE_FOX_MODE", "backup")).strip().lower()
+        if mode not in ("backup", "selfuse"):
+            logger.warning(
+                "LP_SOLAR_CHARGE_FOX_MODE=%r not recognised — using 'backup'", mode
+            )
+            mode = "backup"
+        if mode == "backup" and not _optimization_preset_away_like():
+            tgt = int(s.target_soc_pct) if s.target_soc_pct is not None else 100
+            return ("Backup", None, None, min_r, max(min_r, tgt))
+        # "selfuse" escape hatch OR vacation — plain honest self-use at reserve.
+        return ("SelfUse", None, None, min_r, None)
     if s.kind == "negative":
         pwr = s.lp_grid_import_w if s.lp_grid_import_w is not None else config.FOX_FORCE_CHARGE_MAX_PWR
         fds = s.target_soc_pct if s.target_soc_pct is not None else 100
@@ -407,6 +440,17 @@ def _slot_fox_tuple(
             else None
         )
         return ("Backup", None, None, min_r, hold_max)
+    if s.soc_floor_pct is not None and s.kind in ("standard", "peak", "tank_idle_overnight"):
+        # A1 (#679) — positive-price battery HOLD. The LP planned to cover this
+        # slot's load from the grid (dis=0, chg=0, imp>0) and hold the battery
+        # for a later forecast peak (driven by the pessimistic charge floor
+        # #673). Legacy mapping fell through to SelfUse(reserve) and the battery
+        # discharged into any load spike — the 2026-07-10 incident. Pin Backup,
+        # the ONLY proven 0%-discharge hold on the H1 (A0: SelfUse floors are
+        # ignored). maxSoc = the planned SoC so there is no top-up above plan.
+        # soc_floor_pct is only ever set when LP_POSITIVE_HOLD_ENABLED (in
+        # lp_plan_to_slots), so this branch is inert when the feature is off.
+        return ("Backup", None, None, min_r, max(min_r, int(s.soc_floor_pct)))
     return ("SelfUse", None, None, min_r, None)
 
 
@@ -525,9 +569,13 @@ def _merge_fox_groups(
     merged = _merge_adjacent_force_charge_rows(merged)
 
     # Camada 1: eager SelfUse-variant merge — collapses adjacent SelfUse blocks
-    # whose only difference is minSocOnGrid (e.g. solar_charge=100 next to
-    # standard=10). Promotes from overflow-only to always-on so the window count
-    # is minimised before any compression decisions.
+    # whose only difference is minSocOnGrid. The #480 same-floor guard inside
+    # _coarse_merge_fox stays: two SelfUse windows only merge when their floors
+    # match, so an elevated-floor SelfUse never silently absorbs a reserve one.
+    # (The original motivating case — a solar_charge SelfUse(minSoc=100) next to
+    # a standard SelfUse(10) — no longer arises: solar_charge is now Backup, a
+    # different workMode that structurally cannot merge with SelfUse. The guard
+    # is kept for any other SelfUse-floor variants.)
     merged = _coarse_merge_fox(merged)
 
     # Camada 0: drop trivial SelfUse windows (work_mode=SelfUse AND
@@ -535,8 +583,10 @@ def _merge_fox_groups(
     # back to the inverter's "Remaining Time Work Mode" (Self-use) outside
     # any scheduler group, with the global minSocOnGrid floor — so an explicit
     # group with the same parameters is wasted budget against the 8-group cap.
-    # Solar-charge holds (SelfUse minSoc=100) and any other elevated floor are
-    # preserved because they DO deviate from the global default.
+    # Any SelfUse window with an elevated floor (> reserve) is preserved because
+    # it DOES deviate from the global default. (Solar-charge no longer produces
+    # such a window — it is now Backup; its "selfuse" escape hatch is plain
+    # SelfUse at reserve, correctly treated as trivial and dropped here.)
     if config.FOX_SKIP_TRIVIAL_SELFUSE_GROUPS:
         reserve = int(config.MIN_SOC_RESERVE_PERCENT)
         filtered = [
@@ -626,18 +676,18 @@ def _merge_fox_groups(
                 _max_optional(ka_max, kb_max),
             )
         elif "Backup" in (ka[0], kb[0]):
-            # A pair containing a negative-window hold must stay
-            # discharge-proof: squashing Backup+X to SelfUse would re-open
-            # the 06-28/07-04 battery-leak incident class. Backup wins —
-            # but as the PINNED shape (minSoc = maxSoc = reserve, the benign
-            # 2026-06-07 form — 316 prod samples): the squashed span can
-            # extend beyond the negative window, and an unpinned Backup
-            # there would grid-top-up at POSITIVE prices (18-30p). Taking
-            # max() of the pair's floors would inherit a SelfUse hold's
-            # min=100 and with it maxSoc=100 = unpinned again; the partner's
-            # no-discharge intent is already guaranteed by Backup itself.
-            # Pinning forgoes the in-window paid top-up only in this rare
-            # over-cap fallback; the normal (unsquashed) hold stays unpinned.
+            # A pair containing a hold (negative-window OR #679 positive-price)
+            # must stay discharge-proof: squashing Backup+X to SelfUse would
+            # re-open the 06-28/07-04/07-10 battery-leak incident class. Backup
+            # wins — but as the PINNED shape (minSoc = maxSoc = reserve, the
+            # benign 2026-06-07 form — 316 prod samples): the squashed span can
+            # extend beyond the hold's own window, and an unpinned Backup there
+            # would grid-top-up at POSITIVE prices (18-30p). Pinning to reserve
+            # keeps the merged span a pure no-discharge hold with no top-up; the
+            # partner's no-discharge intent is already guaranteed by Backup
+            # itself. Pinning forgoes any in-window paid top-up only in this rare
+            # over-cap fallback; the normal (unsquashed) hold keeps its own
+            # maxSoc.
             reserve = int(config.MIN_SOC_RESERVE_PERCENT)
             nk = ("Backup", None, None, reserve, reserve)
         else:

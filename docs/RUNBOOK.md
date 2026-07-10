@@ -79,7 +79,8 @@ The script: backs up DB → git pull → pip install → DB migration → restar
 | `QUARTZ_MODEL_NAME` | `blend` | Quartz model selector for hosted API |
 | `QUARTZ_TREND_ADJUSTER_ON` | `true` | Quartz trend-adjuster toggle |
 | `QUARTZ_INSTALLED_CAPACITY_MW` | `0` | Optional downscale hint when Quartz returns capacity metadata |
-| `FOX_SOLAR_CHARGE_MIN_SOC_PERCENT` | `100` | `minSocOnGrid` for `solar_charge` SelfUse windows (blocks discharge, lets PV fill) |
+| `LP_SOLAR_CHARGE_FOX_MODE` | `backup` | Fox mode for `solar_charge` holds. `backup` (default) = pinned Backup at planned SoC (the proven 0%-discharge hold, #679); `selfuse` = plain SelfUse at reserve (summer PV-export escape hatch, does NOT hold). The retired SelfUse(minSoc=100,maxSoc=100) shape is no longer emittable — the H1 discharged through it (A0). |
+| `LP_POSITIVE_HOLD_ENABLED` | `true` | Honour LP battery-hold decisions at positive prices via pinned Backup (#679). `false` = byte-identical legacy. |
 | `OPENCLAW_HOOKS_URL` | required if notifications on | Full URL, e.g. `http://127.0.0.1:18789/hooks/agent` |
 | `OPENCLAW_HOOKS_TOKEN` | required if notifications on | Same secret as Gateway `hooks.token` |
 | `OPENCLAW_INTERNAL_API_BASE_URL` | `http://127.0.0.1:8000` | Inserted into hook payload so the agent can `GET /api/v1/optimization/plan` |

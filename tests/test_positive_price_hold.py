@@ -1,0 +1,268 @@
+"""#679 — honour LP battery-hold decisions at positive prices (Backup, not the
+ignored SelfUse floor), plus solar_charge → Backup (A2).
+
+Incident (prod 2026-07-10 UTC): PV under-delivered; the battery hit the 10%
+floor at 08:01 then discharged ~1 kWh into a midday load spike at 18.1p while
+the 33-39p evening peak was minutes away — because those slots dispatched as
+SelfUse(minSoc=100) and the H1 IGNORES a per-group SelfUse floor as a discharge
+freeze (A0 finding: 40.6% of samples discharged below floor; Backup 0.0%).
+"""
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+
+import pytest
+
+from src.config import config
+from src.scheduler.lp_dispatch import lp_plan_to_slots
+from src.scheduler.lp_optimizer import LpPlan
+from src.scheduler.optimizer import _merge_fox_groups, _slot_fox_tuple
+
+T0 = datetime(2026, 7, 10, 12, 0, tzinfo=UTC)
+CAP = 10.36  # matches config default BATTERY_CAPACITY_KWH
+
+
+def _plan(
+    prices: list[float],
+    imps: list[float],
+    *,
+    chgs: list[float] | None = None,
+    diss: list[float] | None = None,
+    soc_pct: float = 77.0,
+    peak_thr: float = 30.0,
+) -> LpPlan:
+    n = len(prices)
+    chgs = chgs if chgs is not None else [0.0] * n
+    diss = diss if diss is not None else [0.0] * n
+    soc = round(soc_pct / 100.0 * CAP, 3)
+    return LpPlan(
+        ok=True,
+        status="Optimal",
+        objective_pence=0.0,
+        slot_starts_utc=[T0 + timedelta(minutes=30 * i) for i in range(n)],
+        price_pence=list(prices),
+        import_kwh=list(imps),
+        export_kwh=[0.0] * n,
+        battery_charge_kwh=list(chgs),
+        battery_discharge_kwh=list(diss),
+        pv_use_kwh=[0.0] * n,
+        pv_curtail_kwh=[0.0] * n,
+        dhw_electric_kwh=[0.0] * n,
+        space_electric_kwh=[0.0] * n,
+        soc_kwh=[soc] * (n + 1),
+        peak_threshold_pence=peak_thr,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _normal_preset_hold_on(monkeypatch):
+    monkeypatch.setattr(config, "OPTIMIZATION_PRESET", "normal", raising=False)
+    monkeypatch.setattr(config, "BATTERY_CAPACITY_KWH", CAP, raising=False)
+    monkeypatch.setattr(config, "MIN_SOC_RESERVE_PERCENT", 15.0, raising=False)
+    monkeypatch.setattr(config, "LP_POSITIVE_HOLD_ENABLED", True, raising=False)
+    monkeypatch.setattr(config, "LP_POSITIVE_HOLD_MIN_UPLIFT_PENCE", 5.0, raising=False)
+    monkeypatch.setattr(config, "LP_POSITIVE_HOLD_MAX_GROUPS", 2, raising=False)
+    monkeypatch.setattr(config, "LP_POSITIVE_HOLD_MIN_SOC_MARGIN_PCT", 2.0, raising=False)
+    monkeypatch.setattr(config, "LP_SOLAR_CHARGE_FOX_MODE", "backup", raising=False)
+    # Keep slot KINDS deterministic — the post-shower tank_idle overlay would
+    # otherwise relabel `standard` slots as `tank_idle_overnight` depending on
+    # the wall clock (still valid holds, but noisy for these assertions).
+    monkeypatch.setattr(config, "DHW_TANK_OVERNIGHT_IDLE_ENABLED", "false", raising=False)
+
+
+# Two contiguous holds (imp>0), two non-import fillers, then a peak.
+_HOLD_PRICES = [18.0, 18.0, 18.0, 18.0, 35.0]
+_HOLD_IMPS = [0.5, 0.5, 0.0, 0.0, 0.0]
+
+
+def test_hold_slot_gets_soc_floor():
+    slots = lp_plan_to_slots(_plan(_HOLD_PRICES, _HOLD_IMPS))
+    # Slots 0,1 are the dis=0/chg=0/imp>0/price>0 holds ahead of the peak.
+    assert slots[0].kind == "standard" and slots[1].kind == "standard"
+    assert slots[0].soc_floor_pct == 80  # ceil(77.2/5)*5
+    assert slots[1].soc_floor_pct == 80
+    # Non-import fillers are NOT holds (imp==0).
+    assert slots[2].soc_floor_pct is None
+    assert slots[3].soc_floor_pct is None
+    # The peak slot itself is not a hold (no later peak with uplift).
+    assert slots[4].kind == "peak"
+    assert slots[4].soc_floor_pct is None
+
+
+def test_tank_idle_overnight_kind_is_a_valid_hold():
+    # A tank_idle_overnight slot carrying a soc_floor_pct maps to pinned Backup
+    # too (it is in the hold set) — the overlay and the hold are orthogonal.
+    from src.scheduler.optimizer import HalfHourSlot
+    s = HalfHourSlot(
+        start_utc=T0, end_utc=T0 + timedelta(minutes=30),
+        price_pence=18.0, kind="tank_idle_overnight", soc_floor_pct=75,
+    )
+    wm, _, _, msg, max_soc = _slot_fox_tuple(s)
+    assert wm == "Backup" and msg == int(config.MIN_SOC_RESERVE_PERCENT) and max_soc == 75
+
+
+def test_hold_maps_to_pinned_backup():
+    slots = lp_plan_to_slots(_plan(_HOLD_PRICES, _HOLD_IMPS))
+    wm, fds, pwr, msg, max_soc = _slot_fox_tuple(slots[0])
+    assert wm == "Backup"
+    assert fds is None and pwr is None
+    assert msg == int(config.MIN_SOC_RESERVE_PERCENT)
+    assert max_soc == 80  # pinned at the planned SoC — no top-up above plan
+
+
+def test_no_hold_without_a_future_peak():
+    # All prices flat + positive, no slot clears peak_threshold → no hold.
+    slots = lp_plan_to_slots(_plan([18.0] * 5, [0.5] * 5))
+    assert all(s.soc_floor_pct is None for s in slots)
+
+
+def test_no_hold_when_uplift_below_threshold():
+    # A future peak exists (35 >= 30) but the hold price is 31 → uplift 4 < 5.
+    prices = [31.0, 31.0, 31.0, 31.0, 35.0]
+    slots = lp_plan_to_slots(_plan(prices, _HOLD_IMPS))
+    assert all(s.soc_floor_pct is None for s in slots)
+
+
+def test_no_hold_at_negative_price():
+    # price <= 0 slots are negative_hold, never positive holds.
+    prices = [-2.0, -2.0, 18.0, 18.0, 35.0]
+    imps = [0.5, 0.5, 0.0, 0.0, 0.0]
+    slots = lp_plan_to_slots(_plan(prices, imps))
+    assert slots[0].kind in ("negative", "negative_hold")
+    assert slots[0].soc_floor_pct is None
+    assert slots[1].soc_floor_pct is None
+
+
+def test_no_hold_at_soc_near_reserve():
+    # Planned SoC just at reserve+margin → nothing worth protecting.
+    slots = lp_plan_to_slots(_plan(_HOLD_PRICES, _HOLD_IMPS, soc_pct=16.0))
+    assert all(s.soc_floor_pct is None for s in slots)
+
+
+def test_disabled_flag_never_sets_floor(monkeypatch):
+    monkeypatch.setattr(config, "LP_POSITIVE_HOLD_ENABLED", False, raising=False)
+    slots = lp_plan_to_slots(_plan(_HOLD_PRICES, _HOLD_IMPS))
+    assert all(s.soc_floor_pct is None for s in slots)
+    # ...and mapping is byte-identical to legacy SelfUse(reserve).
+    wm, _, _, msg, max_soc = _slot_fox_tuple(slots[0])
+    assert wm == "SelfUse" and msg == int(config.MIN_SOC_RESERVE_PERCENT) and max_soc is None
+
+
+def test_vacation_never_holds(monkeypatch):
+    monkeypatch.setattr(config, "OPTIMIZATION_PRESET", "vacation", raising=False)
+    slots = lp_plan_to_slots(_plan(_HOLD_PRICES, _HOLD_IMPS))
+    assert all(s.soc_floor_pct is None for s in slots)
+
+
+def test_max_groups_caps_number_of_holds(monkeypatch):
+    monkeypatch.setattr(config, "LP_POSITIVE_HOLD_MAX_GROUPS", 1, raising=False)
+    # Two separate hold runs (0-1 @ 18p and 4-5 @ 25p), peak 35p at index 7.
+    # Score = (peak_max - price) * protectable_kwh: run 0-1 has the bigger
+    # spread (17p vs 10p) → higher protected value → kept; run 4-5 cleared.
+    prices = [18.0, 18.0, 20.0, 20.0, 25.0, 25.0, 22.0, 35.0]
+    imps = [0.5, 0.5, 0.0, 0.0, 0.5, 0.5, 0.0, 0.0]
+    slots = lp_plan_to_slots(_plan(prices, imps))
+    flagged_runs = [
+        i for i in range(len(slots))
+        if slots[i].soc_floor_pct is not None
+    ]
+    # Exactly one run kept (2 contiguous slots) — the higher-spread one.
+    assert flagged_runs == [0, 1]
+
+
+# --- A2: solar_charge → Backup / escape hatch / vacation -------------------
+
+
+def _solar_slot(target_soc_pct: int | None = 90):
+    from src.scheduler.optimizer import HalfHourSlot
+    return HalfHourSlot(
+        start_utc=T0,
+        end_utc=T0 + timedelta(minutes=30),
+        price_pence=12.0,
+        kind="solar_charge",
+        target_soc_pct=target_soc_pct,
+    )
+
+
+def test_solar_charge_default_is_backup():
+    wm, fds, pwr, msg, max_soc = _slot_fox_tuple(_solar_slot(90))
+    assert wm == "Backup"
+    assert msg == int(config.MIN_SOC_RESERVE_PERCENT)
+    assert max_soc == 90  # pinned at planned end-of-window SoC
+
+
+def test_solar_charge_selfuse_escape_hatch_is_plain_reserve(monkeypatch):
+    monkeypatch.setattr(config, "LP_SOLAR_CHARGE_FOX_MODE", "selfuse", raising=False)
+    wm, fds, pwr, msg, max_soc = _slot_fox_tuple(_solar_slot(90))
+    assert wm == "SelfUse"
+    assert msg == int(config.MIN_SOC_RESERVE_PERCENT)
+    assert max_soc is None  # plain self-use at reserve — NOT the 100,100 shape
+
+
+def test_solar_charge_vacation_is_plain_selfuse(monkeypatch):
+    monkeypatch.setattr(config, "OPTIMIZATION_PRESET", "vacation", raising=False)
+    wm, _, _, msg, max_soc = _slot_fox_tuple(_solar_slot(90))
+    assert wm == "SelfUse"
+    assert msg == int(config.MIN_SOC_RESERVE_PERCENT)
+    assert max_soc is None
+
+
+@pytest.mark.parametrize("mode", ["backup", "selfuse"])
+@pytest.mark.parametrize("preset", ["normal", "vacation", "guests"])
+def test_solar_charge_never_emits_hundred_hundred(monkeypatch, mode, preset):
+    monkeypatch.setattr(config, "LP_SOLAR_CHARGE_FOX_MODE", mode, raising=False)
+    monkeypatch.setattr(config, "OPTIMIZATION_PRESET", preset, raising=False)
+    for tgt in (None, 50, 90, 100):
+        wm, _, _, msg, max_soc = _slot_fox_tuple(_solar_slot(tgt))
+        assert not (wm == "SelfUse" and msg == 100 and max_soc == 100), (
+            f"the retired SelfUse(100,100) shape must never be emitted "
+            f"(mode={mode}, preset={preset}, target={tgt})"
+        )
+
+
+# --- Merge / cap interactions ---------------------------------------------
+
+
+def test_two_hold_runs_hours_apart_stay_two_groups(monkeypatch):
+    monkeypatch.setattr(config, "BULLETPROOF_TIMEZONE", "Europe/London", raising=False)
+    slots = lp_plan_to_slots(_plan(_HOLD_PRICES, _HOLD_IMPS))
+    # Build a second identical hold run 3h later so both floors are 80 (same
+    # byte-identical Backup tuple). The #480 merge must NOT bridge the gap.
+    hold_a = [s for s in slots if s.soc_floor_pct is not None]
+    assert len(hold_a) == 2
+    later = []
+    base2 = T0 + timedelta(hours=3)
+    from src.scheduler.optimizer import HalfHourSlot
+    for i in range(2):
+        later.append(
+            HalfHourSlot(
+                start_utc=base2 + timedelta(minutes=30 * i),
+                end_utc=base2 + timedelta(minutes=30 * (i + 1)),
+                price_pence=18.0,
+                kind="standard",
+                soc_floor_pct=80,
+            )
+        )
+    groups = _merge_fox_groups(hold_a + later)
+    backups = [g for g in groups if g.work_mode == "Backup"]
+    assert len(backups) == 2, "byte-identical holds 3h apart must stay two groups"
+
+
+def test_hold_does_not_change_daikin_output(monkeypatch):
+    # soc_floor_pct is orthogonal to Daikin (which dispatches by KIND). The tank
+    # rows must be byte-identical whether or not positive holds are flagged.
+    from src.scheduler.lp_dispatch import daikin_dispatch_preview
+
+    plan = _plan(_HOLD_PRICES, _HOLD_IMPS)
+
+    monkeypatch.setattr(config, "LP_POSITIVE_HOLD_ENABLED", True, raising=False)
+    slots_on = lp_plan_to_slots(plan)
+    assert any(s.soc_floor_pct is not None for s in slots_on)  # holds ARE flagged
+    pairs_on = daikin_dispatch_preview(plan, [])
+
+    monkeypatch.setattr(config, "LP_POSITIVE_HOLD_ENABLED", False, raising=False)
+    slots_off = lp_plan_to_slots(plan)
+    assert all(s.soc_floor_pct is None for s in slots_off)  # none flagged
+    pairs_off = daikin_dispatch_preview(plan, [])
+
+    assert pairs_on == pairs_off, "positive holds must not perturb Daikin rows"

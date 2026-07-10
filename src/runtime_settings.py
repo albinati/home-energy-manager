@@ -465,6 +465,84 @@ SCHEMA: dict[str, SettingSpec] = {
             "Auto-reverts to no-op when mode returns to normal."
         ),
     ),
+    # --- Positive-price battery hold + solar_charge Fox mode (#679) ---------
+    # Incident (prod 2026-07-10 UTC): PV under-delivered; battery hit the 10%
+    # floor at 08:01, then at 14:01-14:32 discharged ~1 kWh into a midday load
+    # spike at 18.1p while the 33-39p evening peak was minutes away — because
+    # those slots dispatched as SelfUse(minSoc=100) and the H1 IGNORES a
+    # per-group minSoc floor as a discharge freeze. A0 finding (40,369 prod
+    # samples): SelfUse(min=100) discharged below floor in 40.6% of samples;
+    # Backup 0.0% in 441 samples. So the ONLY reliable hold primitive is
+    # Backup — not an elevated SelfUse floor. These knobs make the dispatcher
+    # honour the LP's "hold the battery for the peak" decision at positive
+    # prices (A1) and move solar_charge off the broken SelfUse(100,100) (A2).
+    # Instant rollback: PUT /api/v1/settings (no restart).
+    "LP_POSITIVE_HOLD_ENABLED": SettingSpec(
+        key="LP_POSITIVE_HOLD_ENABLED",
+        type_name="str",  # "true" / "false" — kept as str so PUT payloads stay simple
+        env_default=_str_env("LP_POSITIVE_HOLD_ENABLED", "true"),
+        enum=("true", "false"),
+        description=(
+            "A1 (#679): when 'true', a positive-price slot where the LP holds "
+            "the battery (dis=0, chg=0, imp>0) ahead of a forecast peak maps to "
+            "pinned Backup (the proven 0%-discharge hold) instead of SelfUse "
+            "(whose floor the H1 ignores — the 2026-07-10 incident). 'false' = "
+            "byte-identical to legacy (soc_floor_pct never set)."
+        ),
+    ),
+    "LP_POSITIVE_HOLD_MIN_UPLIFT_PENCE": SettingSpec(
+        key="LP_POSITIVE_HOLD_MIN_UPLIFT_PENCE",
+        type_name="float",
+        env_default=_float_env("LP_POSITIVE_HOLD_MIN_UPLIFT_PENCE", "5.0"),
+        min_value=0.0,
+        max_value=50.0,
+        description=(
+            "A1 (#679): minimum price uplift (pence) between a hold slot and the "
+            "highest later slot in the horizon before the hold is worth "
+            "protecting. Below this the battery may as well cover the current "
+            "load. Default 5.0p."
+        ),
+    ),
+    "LP_POSITIVE_HOLD_MAX_GROUPS": SettingSpec(
+        key="LP_POSITIVE_HOLD_MAX_GROUPS",
+        type_name="int",
+        env_default=_int_env("LP_POSITIVE_HOLD_MAX_GROUPS", "2"),
+        min_value=0,
+        max_value=6,
+        description=(
+            "A1 (#679): keep at most this many contiguous hold RUNS (each merges "
+            "to one Fox V3 group), ranked by protected value. Protects the "
+            "8-group scheduler cap. Default 2; 0 disables A1 holds."
+        ),
+    ),
+    "LP_POSITIVE_HOLD_MIN_SOC_MARGIN_PCT": SettingSpec(
+        key="LP_POSITIVE_HOLD_MIN_SOC_MARGIN_PCT",
+        type_name="float",
+        env_default=_float_env("LP_POSITIVE_HOLD_MIN_SOC_MARGIN_PCT", "2.0"),
+        min_value=0.0,
+        max_value=50.0,
+        description=(
+            "A1 (#679): a hold is only labelled when the planned end-of-slot "
+            "SoC exceeds MIN_SOC_RESERVE_PERCENT + this margin (%). Near the "
+            "reserve there is nothing to protect (Backup would just track the "
+            "floor). Default 2.0%."
+        ),
+    ),
+    "LP_SOLAR_CHARGE_FOX_MODE": SettingSpec(
+        key="LP_SOLAR_CHARGE_FOX_MODE",
+        type_name="str",
+        env_default=_str_env("LP_SOLAR_CHARGE_FOX_MODE", "backup"),
+        enum=("backup", "selfuse"),
+        description=(
+            "A2 (#679): Fox mode for solar_charge slots. 'backup' (default) = "
+            "pinned Backup at the planned end-of-window SoC — eliminates the "
+            "2026-07-10 SelfUse(100,100) discharge leak; the ~1.2 kW Backup grid "
+            "top-up backfills any PV shortfall at the current (cheap afternoon) "
+            "price instead of the evening peak. 'selfuse' = legacy SelfUse(100,"
+            "100) for instant rollback. Vacation preset always keeps SelfUse "
+            "(its LP forbids grid->battery, which Backup's top-up would violate)."
+        ),
+    ),
     # Legionella thermal-shock awareness. The Daikin Onecta firmware fires the
     # cycle autonomously on a user-configured day/hour (set in the Onecta app);
     # the LP cannot command it. These knobs let the LP *predict* the resulting

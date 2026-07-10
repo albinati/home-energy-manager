@@ -41,3 +41,34 @@ def test_two_normal_selfuse_stay_at_reserve():
     merged = _coarse_merge_fox([_w(0, 3, 10), _w(3, 6, 10)])
     assert len(merged) == 1
     assert merged[0][2][3] == 10
+
+
+# --- #679: solar_charge is now Backup, a different workMode. The #480 same-floor
+# SelfUse guard is unchanged; it just no longer needs to handle a solar_charge
+# SelfUse(100) — that shape is retired. Backup structurally cannot merge with
+# SelfUse (workMode differs), so an elevated hold can never absorb a discharge
+# window through this path. -------------------------------------------------
+
+
+def _backup(h0: int, h1: int, max_soc=None):
+    return (_T0 + timedelta(hours=h0), _T0 + timedelta(hours=h1),
+            ("Backup", None, None, 10, max_soc))
+
+
+def test_backup_solar_charge_does_not_merge_into_selfuse():
+    # A Backup hold (the new solar_charge shape) adjacent to a normal SelfUse
+    # discharge window must NOT collapse — different workMode.
+    merged = _coarse_merge_fox([_backup(0, 3, 90), _w(3, 8, 10, None)])
+    assert len(merged) == 2
+    assert merged[0][2][0] == "Backup"
+    assert merged[1][2][0] == "SelfUse" and merged[1][2][3] == 10
+
+
+def test_480_same_floor_guard_still_separates_elevated_selfuse():
+    # The general #480 guard is intact: two SelfUse windows only merge when
+    # their minSoc floors match, so an elevated floor never absorbs a reserve
+    # one (regression guard for other SelfUse-floor variants).
+    merged = _coarse_merge_fox([_w(0, 3, 50, None), _w(3, 6, 10, None)])
+    assert len(merged) == 2
+    assert merged[0][2][3] == 50
+    assert merged[1][2][3] == 10

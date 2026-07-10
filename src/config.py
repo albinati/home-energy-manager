@@ -2229,6 +2229,54 @@ class Config:
     def LP_PLAN_PUSH_MINUTE(self, value: int) -> None:
         self._rt_set("LP_PLAN_PUSH_MINUTE", int(value))
 
+    # --- Positive-price battery hold + solar_charge Fox mode (#679) ---------
+    # Runtime-tunable (DB-backed); see SCHEMA in runtime_settings.py for the
+    # 2026-07-10 incident + A0 finding that motivated these.
+    @property
+    def LP_POSITIVE_HOLD_ENABLED(self) -> bool:
+        return str(self._rt_get("LP_POSITIVE_HOLD_ENABLED")).strip().lower() in (
+            "1", "true", "yes", "on"
+        )
+
+    @LP_POSITIVE_HOLD_ENABLED.setter
+    def LP_POSITIVE_HOLD_ENABLED(self, value: Any) -> None:
+        self._rt_set(
+            "LP_POSITIVE_HOLD_ENABLED",
+            "true" if (value is True or str(value).strip().lower() in ("1", "true", "yes", "on")) else "false",
+        )
+
+    @property
+    def LP_POSITIVE_HOLD_MIN_UPLIFT_PENCE(self) -> float:
+        return float(self._rt_get("LP_POSITIVE_HOLD_MIN_UPLIFT_PENCE"))
+
+    @LP_POSITIVE_HOLD_MIN_UPLIFT_PENCE.setter
+    def LP_POSITIVE_HOLD_MIN_UPLIFT_PENCE(self, value: float) -> None:
+        self._rt_set("LP_POSITIVE_HOLD_MIN_UPLIFT_PENCE", float(value))
+
+    @property
+    def LP_POSITIVE_HOLD_MAX_GROUPS(self) -> int:
+        return int(self._rt_get("LP_POSITIVE_HOLD_MAX_GROUPS"))
+
+    @LP_POSITIVE_HOLD_MAX_GROUPS.setter
+    def LP_POSITIVE_HOLD_MAX_GROUPS(self, value: int) -> None:
+        self._rt_set("LP_POSITIVE_HOLD_MAX_GROUPS", int(value))
+
+    @property
+    def LP_POSITIVE_HOLD_MIN_SOC_MARGIN_PCT(self) -> float:
+        return float(self._rt_get("LP_POSITIVE_HOLD_MIN_SOC_MARGIN_PCT"))
+
+    @LP_POSITIVE_HOLD_MIN_SOC_MARGIN_PCT.setter
+    def LP_POSITIVE_HOLD_MIN_SOC_MARGIN_PCT(self, value: float) -> None:
+        self._rt_set("LP_POSITIVE_HOLD_MIN_SOC_MARGIN_PCT", float(value))
+
+    @property
+    def LP_SOLAR_CHARGE_FOX_MODE(self) -> str:
+        return str(self._rt_get("LP_SOLAR_CHARGE_FOX_MODE")).strip().lower()
+
+    @LP_SOLAR_CHARGE_FOX_MODE.setter
+    def LP_SOLAR_CHARGE_FOX_MODE(self, value: str) -> None:
+        self._rt_set("LP_SOLAR_CHARGE_FOX_MODE", str(value).strip().lower())
+
     # Directory for config snapshots (JSON). Snapshots are saved before any mode transition.
     CONFIG_SNAPSHOT_DIR: str = (os.getenv("CONFIG_SNAPSHOT_DIR") or "data/config_snapshots").strip()
 
