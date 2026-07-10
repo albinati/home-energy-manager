@@ -177,3 +177,132 @@ def test_helper_keeps_nominal_when_resolve_fails(monkeypatch):
         solve_kwargs={}, exogenous_snapshot={},
     )
     assert out is nominal
+
+
+# --- integration: optimizer gate on event-driven triggers (#668) -----------
+#
+# The unit tests above exercise trigger_runs_scenarios and the floor helper in
+# isolation. This drives the REAL ``_run_optimizer_lp`` gate (the
+# ``trigger_runs_scenarios(...)`` block in optimizer.py) end-to-end with
+# trigger_reason="soc_drift": scenarios must run, the pessimistic charge floor
+# must be applied (exogenous_snapshot["pess_charge_floor"] populated + a
+# floored re-solve issued), and the same pipeline under trigger_reason="manual"
+# must stay nominal-only. ``solve_lp`` is stubbed (as in
+# test_lp_appliance_real_solver.py) so CBC never runs — the subject here is
+# the gating/orchestration, not the solver.
+
+_GATE_TARIFF = "E-1R-AGILE-TEST-PESS-FLOOR-GATE"
+
+
+def _iso(dt):
+    return dt.isoformat().replace("+00:00", "Z")
+
+
+def _seed_cheap_to_peak_day(start):
+    from src import db
+
+    rows = []
+    vf = start
+    for _ in range(48):
+        price = 35.0 if 16 <= vf.hour < 19 else 10.0  # all positive: no floor exemptions
+        vt = vf + timedelta(minutes=30)
+        rows.append({"valid_from": _iso(vf), "valid_to": _iso(vt), "value_inc_vat": price})
+        vf = vt
+    db.save_agile_rates(rows, _GATE_TARIFF)
+
+
+def _stub_plan(slot_starts_utc, price_pence, *, soc, obj):
+    from src.scheduler.lp_optimizer import LpPlan
+
+    n = len(slot_starts_utc)
+    plan = LpPlan(ok=True, status="Optimal", objective_pence=obj)
+    plan.slot_starts_utc = list(slot_starts_utc)
+    plan.price_pence = list(price_pence)
+    plan.temp_outdoor_c = [12.0] * n
+    plan.import_kwh = [0.0] * n
+    plan.export_kwh = [0.0] * n
+    plan.battery_charge_kwh = [0.0] * n
+    plan.battery_discharge_kwh = [0.0] * n
+    plan.pv_use_kwh = [0.0] * n
+    plan.pv_curtail_kwh = [0.0] * n
+    plan.dhw_electric_kwh = [0.0] * n
+    plan.space_electric_kwh = [0.0] * n
+    plan.lwt_offset_c = [0.0] * n
+    plan.tank_temp_c = [45.0] * (n + 1)
+    plan.soc_kwh = [soc] * (n + 1)
+    plan.soc_floor_slack_kwh = 0.0
+    return plan
+
+
+def test_soc_drift_trigger_runs_scenarios_and_charge_floor_but_manual_does_not(
+    monkeypatch,
+):
+    from src import db
+    from src.scheduler import optimizer
+
+    db.init_db()
+    monkeypatch.setattr(config, "BULLETPROOF_TIMEZONE", "Europe/London")
+    monkeypatch.setattr(config, "OCTOPUS_TARIFF_CODE", _GATE_TARIFF)
+    monkeypatch.setattr(config, "OPTIMIZER_BACKEND", "lp")
+    monkeypatch.setattr(config, "OPENCLAW_READ_ONLY", True)
+    monkeypatch.setattr(config, "LP_PESS_CHARGE_FLOOR_ENABLED", True)
+
+    now = datetime(2026, 5, 20, 13, 0, tzinfo=UTC)
+    monkeypatch.setattr(optimizer, "_now_utc", lambda: now)
+    _seed_cheap_to_peak_day(datetime(2026, 5, 20, 0, 0, tzinfo=UTC))
+    _seed_cheap_to_peak_day(datetime(2026, 5, 21, 0, 0, tzinfo=UTC))
+
+    # Nominal solve holds SoC flat at 2.0; a floor re-solve (soc_floor_kwh
+    # passed) is recorded and returns the pessimistic-level trajectory.
+    floor_resolves = []
+
+    def _fake_nominal_solve(*, slot_starts_utc, price_pence, soc_floor_kwh=None, **kw):
+        if soc_floor_kwh is not None:
+            floor_resolves.append(max(soc_floor_kwh))
+            return _stub_plan(slot_starts_utc, price_pence, soc=6.0, obj=110.0)
+        return _stub_plan(slot_starts_utc, price_pence, soc=2.0, obj=100.0)
+
+    monkeypatch.setattr("src.scheduler.lp_optimizer.solve_lp", _fake_nominal_solve)
+    # scenarios.py binds solve_lp at import time — patch its module attribute
+    # so the 2 side solves (optimistic/pessimistic) want SoC 6.0 > nominal 2.0.
+    monkeypatch.setattr(
+        "src.scheduler.scenarios.solve_lp",
+        lambda *, slot_starts_utc, price_pence, **kw: _stub_plan(
+            slot_starts_utc, price_pence, soc=6.0, obj=105.0
+        ),
+    )
+
+    # Spy on the real floor helper to observe the snapshot it populates.
+    real_floor = optimizer._apply_pessimistic_charge_floor
+    floor_seen = {}
+
+    def _spy(plan, scenarios_dict, *, solve_kwargs, exogenous_snapshot):
+        out = real_floor(
+            plan, scenarios_dict,
+            solve_kwargs=solve_kwargs, exogenous_snapshot=exogenous_snapshot,
+        )
+        floor_seen["scenarios"] = set(scenarios_dict)
+        floor_seen["snapshot"] = exogenous_snapshot
+        return out
+
+    monkeypatch.setattr(optimizer, "_apply_pessimistic_charge_floor", _spy)
+
+    result = optimizer.run_optimizer(fox=None, daikin=None, trigger_reason="soc_drift")
+    assert result["ok"] is True, result
+    assert result["scenarios_run"] is True
+    assert {"nominal", "optimistic", "pessimistic"} <= floor_seen["scenarios"]
+    pcf = floor_seen["snapshot"]["pess_charge_floor"]
+    assert pcf["binding_slots"] >= 1
+    assert pcf["insurance_cost_pence"] == pytest.approx(10.0)
+    tol = float(config.LP_PESS_CHARGE_FLOOR_TOLERANCE_KWH)
+    assert floor_resolves == [pytest.approx(6.0 - tol)]
+
+    # Contrast: `manual` stays nominal-only — no scenarios, no floor.
+    floor_seen.clear()
+    floor_resolves.clear()
+    result_manual = optimizer.run_optimizer(
+        fox=None, daikin=None, trigger_reason="manual"
+    )
+    assert result_manual["ok"] is True, result_manual
+    assert result_manual["scenarios_run"] is False
+    assert not floor_seen and not floor_resolves
