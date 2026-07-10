@@ -38,8 +38,10 @@ def _slot(i: int, kind: str, price: float = 10.0) -> HalfHourSlot:
 
 
 def _fc_group_for(slot: HalfHourSlot) -> SchedulerGroup:
+    # Production convention: half-hour ends are stored :30 = EXCLUSIVE
+    # (_merge_fox_groups only rewrites on-the-hour ends to :59 inclusive).
     ls = slot.start_utc.astimezone(TZ())
-    le = ls + timedelta(minutes=29)
+    le = ls + timedelta(minutes=30)
     return SchedulerGroup(
         start_hour=ls.hour, start_minute=ls.minute,
         end_hour=le.hour, end_minute=le.minute,
@@ -76,6 +78,26 @@ def test_squashed_force_charge_tail_is_severe() -> None:
     assert summary["mismatches"] == [
         {"expected": "ForceCharge", "actual": "SelfUse", "reason": "group_cap_compression", "count": 2},
     ]
+
+
+def test_half_hour_boundary_slot_attributed_to_successor_group() -> None:
+    """Regression (#675 review): _merge_fox_groups stores half-hour group ends
+    as :30 = EXCLUSIVE (only on-the-hour ends become :59 inclusive). A
+    non-SelfUse group ending :30 with a different-mode successor starting :30
+    must NOT swallow the successor's first slot — an inclusive lookup produced
+    recurring false group_cap_compression mismatches and occasional false
+    SEVERE (e.g. solar_charge hold ending, ForceCharge/Discharge starting)."""
+    slots = [_slot(0, "solar_charge"), _slot(1, "cheap"), _slot(2, "cheap")]
+    groups = _merge_fox_groups(slots, max_groups=8)
+    # Preconditions: the REAL builder kept both windows, back-to-back at :30.
+    assert [g.work_mode for g in groups] == ["SelfUse", "ForceCharge"]
+    assert (groups[0].end_hour, groups[0].end_minute) == (
+        groups[1].start_hour, groups[1].start_minute,
+    ), "predecessor must end exactly where the successor starts (:30 exclusive)"
+    summary = summarize_plan_dispatch_coherence(slots, groups)
+    assert summary["mismatched"] == 0, summary["mismatches"]
+    assert summary["severe_count"] == 0
+    assert summary["matched"] == 3
 
 
 def test_horizon_trimmed_slots_counted_not_severe(monkeypatch) -> None:

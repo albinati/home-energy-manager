@@ -1623,9 +1623,15 @@ def summarize_plan_dispatch_coherence(
     behaviour-neutral by design.
 
     ``severe`` flags planned ForceCharge/ForceDischarge that ended up
-    SelfUse/absent inside the dispatched horizon — planned grid-charge or
-    export silently lost. Horizon-trimmed and cap-truncated tails are never
-    severe: the scheduled MPC re-solve re-dispatches them.
+    SelfUse/absent/Backup inside the dispatched horizon — planned grid-charge
+    or export silently lost. Backup counts because the Camada-3 Backup-pin
+    squash (see ``_merge_fox_groups``) neither grid-charges (pinned
+    minSoc=maxSoc=reserve) nor discharges, so an FC fill or FD export under
+    it is lost just like under SelfUse. (Rare benign flag: a
+    ``LP_NEGATIVE_HOLD_FOX_MODE=forcecharge`` hold squashed into a Backup
+    hold — non-default config AND over-cap, hold behaviour preserved.)
+    Horizon-trimmed and cap-truncated tails are never severe: the scheduled
+    MPC re-solve re-dispatches them.
     """
     tz = TZ()
     reserve = int(config.MIN_SOC_RESERVE_PERCENT)
@@ -1654,9 +1660,13 @@ def summarize_plan_dispatch_coherence(
             continue
         ls = s.start_utc.astimezone(tz)
         minute = ls.hour * 60 + ls.minute
-        actual = next(  # group end minute is INCLUSIVE (:59 convention)
-            (wm for gs, ge, wm in spans if gs <= minute <= ge), None
-        )
+        # Group ends carry TWO conventions: _merge_fox_groups only rewrites
+        # on-the-hour ends to :59 (inclusive); half-hour ends stay :30, i.e.
+        # EXCLUSIVE (same as _prepend_inflight_group's plan-group check).
+        # Strict `< ge` is correct for BOTH: it keeps the :30 boundary slot
+        # out of the predecessor group, and a :59-adjusted end still covers
+        # its last real slot minute (slot minutes are multiples of 30).
+        actual = next((wm for gs, ge, wm in spans if gs <= minute < ge), None)
         if actual == expected:
             matched += 1
             continue
@@ -1676,7 +1686,7 @@ def summarize_plan_dispatch_coherence(
         mismatches[k] = mismatches.get(k, 0) + 1
         if (
             expected in ("ForceCharge", "ForceDischarge")
-            and actual in ("SelfUse", "absent")
+            and actual in ("SelfUse", "absent", "Backup")
             and reason in ("group_cap_compression", "other")
         ):
             severe.append(
@@ -1694,6 +1704,9 @@ def summarize_plan_dispatch_coherence(
         "matched": matched,
         "mismatched": len(slots) - matched,
         "trivial_selfuse_drops": trivial_drops,
+        # Pre-bridge count: _prepend_inflight_group may add ONE group at
+        # upload time for the in-flight slot (before the plan window, so
+        # plan-slot coverage above is unaffected).
         "groups_uploaded": len(groups),
         "severe_count": len(severe),
         "severe": severe[:12],
