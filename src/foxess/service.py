@@ -11,6 +11,8 @@ restarts and counts *all* Fox HTTP types, not just realtime reads.
 import logging
 import threading
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from ..api_quota import get_quota_status, record_call, should_block
 from ..config import config
@@ -173,6 +175,81 @@ def get_cached_realtime(max_age_seconds: int | None = None) -> RealTimeData:
             data.soc, data.solar_power, data.grid_power,
         )
         return data
+
+
+def derive_fox_mode_from_schedule(now_local: datetime | None = None) -> str:
+    """Best-effort current inverter work mode, derived LOCALLY (no Fox API call).
+
+    Why this exists (#669): the Fox Open API realtime query
+    (``/device/real/query``) does not return a ``workMode`` variable for the
+    H1 series — it is a device *setting*, not a realtime variable — so
+    ``RealTimeData.work_mode`` parsed out to ``"unknown"`` on 100 % of prod
+    heartbeats. Instead of burning quota on an extra device-setting read every
+    5 minutes, derive the mode from the schedule HEM itself last uploaded
+    (``fox_schedule_state``, written by ``upload_fox_if_operational`` on every
+    successful Scheduler V3 push).
+
+    Scheduler V3 groups are daily-cyclic HH:MM windows in the inverter's local
+    clock (``BULLETPROOF_TIMEZONE``), end-minute inclusive (the ``:59``
+    convention — same comparator as ``_prepend_inflight_group``). Midnight-
+    crossing groups (start > end) wrap. At a shared boundary minute (a ``:30``
+    end is stored as-is, back-to-back with the next group's ``:30`` start),
+    the INCOMING group wins — that is the minute the inverter switches.
+
+    Returns (short, stable strings for querying):
+
+    - ``"schedule:<WorkMode>"`` — a persisted group covers *now*
+      (e.g. ``schedule:ForceCharge``). The ``schedule:`` prefix keeps the
+      column honest: this is what the uploaded plan says the inverter is
+      doing, not a device read-back.
+    - ``"schedule:SelfUse"`` — schedule state exists but no group covers now
+      (SelfUse is the inverter's global default when no group applies), or
+      the scheduler flag was disabled at last upload.
+    - ``"unknown"`` — genuine failure to determine (no persisted schedule
+      state at all, or the DB read failed).
+    """
+    from .. import db as _db
+
+    try:
+        state = _db.get_latest_fox_schedule_state()
+    except Exception as e:  # never let observability break the heartbeat
+        logger.debug("Fox mode derivation: schedule-state read failed: %s", e)
+        return "unknown"
+    if not state:
+        return "unknown"
+    if not state.get("enabled"):
+        # Scheduler flag off → groups not in force; firmware runs its global
+        # default work mode.
+        return "schedule:SelfUse"
+    if now_local is None:
+        now_local = datetime.now(ZoneInfo(config.BULLETPROOF_TIMEZONE))
+    now_min = now_local.hour * 60 + now_local.minute
+    fallback: str | None = None
+    for g in state.get("groups") or []:
+        try:
+            gs = int(g["startHour"]) * 60 + int(g["startMinute"])
+            ge = int(g["endHour"]) * 60 + int(g["endMinute"])  # inclusive :59
+        except (KeyError, TypeError, ValueError):
+            continue
+        covered = (gs <= now_min <= ge) if gs <= ge else (now_min >= gs or now_min <= ge)
+        if not covered:
+            continue
+        wm = str(g.get("workMode") or "").strip()
+        if not wm:
+            continue
+        # Shared-boundary tie-break: only ends landing on :00 get the :59
+        # adjustment in _merge_fox_groups — a half-hour end is stored as :30,
+        # back-to-back with the next group's :30 start (declared clean
+        # adjacency by _detect_overlapping_groups). At that exact shared
+        # minute the inverter has already switched to the INCOMING group, so
+        # a group STARTING at now_min beats one merely spanning/ending on it.
+        if gs == now_min:
+            return f"schedule:{wm}"
+        if fallback is None:
+            fallback = wm
+    if fallback is not None:
+        return f"schedule:{fallback}"
+    return "schedule:SelfUse"
 
 
 def force_refresh_realtime(actor: str = "api") -> RealTimeData:
