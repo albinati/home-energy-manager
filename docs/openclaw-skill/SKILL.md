@@ -264,7 +264,7 @@ Preset changes are runtime-only — they don't survive a service restart. For a 
      → confirm the change is logged with actor="mcp".
 ```
 
-The dry-run is intentional — show the user the canonical value before committing, especially for schedule keys (LP_PLAN_PUSH_HOUR, LP_MPC_HOURS) that re-register cron jobs.
+The dry-run is intentional — show the user the canonical value before committing, especially for schedule keys (LP_PLAN_PUSH_HOUR, LP_PLAN_PUSH_MINUTE) that re-register cron jobs.
 
 ---
 
@@ -457,7 +457,7 @@ jobs in-process, no service restart needed.
 | `set_setting(key, value, confirmed=true)` | Persists the change; if `cron_reload` is true, re-registers the relevant cron job. |
 | `get_config_audit(key?)` | Append-only log of every `set_setting` (and delete) with actor — explains why a past plan looked the way it did. |
 
-Examples worth knowing: `LP_PLAN_PUSH_HOUR` / `LP_PLAN_PUSH_MINUTE` (UTC anchor for the nightly Daikin push), `LP_MPC_HOURS` (intra-day re-solve cadence), `LP_CHEAP_PRICE_PENCE` / `LP_PEAK_PRICE_PENCE` (slot-kind thresholds), `DHW_TEMP_NORMAL_C`, `TARGET_DHW_TEMP_MIN_GUESTS_C`. Always check `list_settings` for the live set — schema can drift.
+Examples worth knowing: `LP_PLAN_PUSH_HOUR` / `LP_PLAN_PUSH_MINUTE` (UTC anchor for the nightly Daikin push), `LP_CHEAP_PRICE_PENCE` / `LP_PEAK_PRICE_PENCE` (slot-kind thresholds), `DHW_TEMP_NORMAL_C`, `TARGET_DHW_TEMP_MIN_GUESTS_C`. Always check `list_settings` for the live set — schema can drift.
 
 For permanent changes (surviving container restart), the user must edit
 `/srv/hem/.env` on the host and `systemctl restart hem`. That is a sysadmin

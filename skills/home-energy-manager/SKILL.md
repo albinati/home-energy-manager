@@ -318,7 +318,7 @@ Preset changes are runtime-only — they don't survive a service restart. For a 
      → confirm the change is logged with actor="mcp".
 ```
 
-The dry-run is intentional — show the user the canonical value before committing, especially for schedule keys (LP_PLAN_PUSH_HOUR, LP_MPC_HOURS) that re-register cron jobs.
+The dry-run is intentional — show the user the canonical value before committing, especially for schedule keys (LP_PLAN_PUSH_HOUR, LP_PLAN_PUSH_MINUTE) that re-register cron jobs.
 
 ---
 
@@ -512,7 +512,7 @@ And the nightly canonical commitment:
 
 6. **`plan_push`** at 00:05 UTC — pushes the next day's full plan to Fox + Daikin.
 
-**The fixed-hour cron is intentionally empty by default** (`LP_MPC_HOURS=`). The clock hours `5,9,12,15,20` etc. were arbitrary — they didn't correspond to anything in the optimization problem. The six event-driven triggers above cover every moment when re-thinking the plan is actually warranted. Set `LP_MPC_HOURS=6,12,21` only as belt-and-braces — those fires won't change decisions, just produce redundant solves.
+**The fixed-hour MPC cron was removed entirely** (post-V12; `LP_MPC_HOURS` is no longer a config attribute — setting it in `.env` is a silent no-op). The clock hours `5,9,12,15,20` etc. were arbitrary — they didn't correspond to anything in the optimization problem. The six event-driven triggers above cover every moment when re-thinking the plan is actually warranted.
 
 **Why this matters operationally:** the previous fixed-hour cron left a 9 h overnight gap (20:00 → 05:00 local) that allowed a real loss on 2026-04-28 23:00: heating ramped, battery dropped fast in a cheap window, no event triggered a re-plan, the household entered the next expensive window flat. Tier-boundary triggers close that gap by re-planning when the price actually changes, not on an arbitrary clock.
 
@@ -677,7 +677,7 @@ jobs in-process, no service restart needed.
 | `set_setting(key, value, confirmed=true)` | Persists the change; if `cron_reload` is true, re-registers the relevant cron job. |
 | `get_config_audit(key?)` | Append-only log of every `set_setting` (and delete) with actor — explains why a past plan looked the way it did. |
 
-Examples worth knowing: `LP_PLAN_PUSH_HOUR` / `LP_PLAN_PUSH_MINUTE` (UTC anchor for the nightly Daikin push), `LP_MPC_HOURS` (intra-day re-solve cadence), `LP_CHEAP_PRICE_PENCE` / `LP_PEAK_PRICE_PENCE` (slot-kind thresholds), `DHW_TEMP_NORMAL_C`, `TARGET_DHW_TEMP_MIN_GUESTS_C`. Always check `list_settings` for the live set — schema can drift.
+Examples worth knowing: `LP_PLAN_PUSH_HOUR` / `LP_PLAN_PUSH_MINUTE` (UTC anchor for the nightly Daikin push), `LP_CHEAP_PRICE_PENCE` / `LP_PEAK_PRICE_PENCE` (slot-kind thresholds), `DHW_TEMP_NORMAL_C`, `TARGET_DHW_TEMP_MIN_GUESTS_C`. Always check `list_settings` for the live set — schema can drift.
 
 For permanent changes (surviving container restart), the user must edit
 `/srv/hem/.env` on the host and `systemctl restart hem`. That is a sysadmin

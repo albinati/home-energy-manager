@@ -71,8 +71,7 @@ The script: backs up DB → git pull → pip install → DB migration → restar
 | `DAIKIN_DAILY_BUDGET` | `180` | Hard cap below Daikin's 200/day limit |
 | `DAIKIN_CALIBRATION_WINDOWS_LOCAL` | `06:00-08:00,14:30-16:30` | Local windows where stale Daikin cache may refresh for temperature calibration |
 | `FOX_DAILY_BUDGET` | `1200` | Conservative cap below Fox's 1440/day |
-| `LP_MPC_HOURS` | `6,9,12,15` | Intra-day MPC re-plan hours (BST/local). See MPC schedule below. |
-| `LP_MPC_WRITE_DEVICES` | `true` | MPC and Octopus-fetch re-plans push updated Fox/Daikin schedule to hardware |
+| `LP_MPC_WRITE_DEVICES` | `false` | Force device writes on *manual* re-plans too; event triggers (drift, tier boundary, Octopus fetch…) always push to hardware regardless |
 | `FORECAST_SOURCE` | `open_meteo` | Set to `quartz` to use Quartz PV nowcasts; Open-Meteo remains weather fallback/context |
 | `QUARTZ_USERNAME` / `QUARTZ_PASSWORD` | required for Quartz | Auth0 login used to fetch the Quartz bearer token |
 | `QUARTZ_CLIENT_ID` / `QUARTZ_AUDIENCE` | defaults in code | Quartz Auth0 client settings |
@@ -280,16 +279,17 @@ The Fox V3 `fdPwr` parameter tells the inverter how many Watts to draw from the 
 
 ### MPC re-plan schedule
 
-| Time (BST) | Trigger | Purpose |
-|---|---|---|
-| 06:00 | `LP_MPC_HOURS` cron | Morning anchor: live SoC after overnight ForceCharge |
-| 09:00 | `LP_MPC_HOURS` cron | Solar window start: correct overnight discharge shortfall |
-| 12:00 | `LP_MPC_HOURS` cron | Mid-day: add ForceCharge if solar underdelivered |
-| 15:00 | `LP_MPC_HOURS` cron | Pre-peak: last cheap window before 16:00–19:00 peak |
-| ~16:05 | Octopus fetch job | **Critical**: tomorrow's rates arrive → LP replans full 36h horizon, adjusting tonight's discharge and overnight cheap strategy |
-| 23:00 | Nightly push | Full next-day plan with final Agile rates |
+Re-planning is **event-driven** (the fixed-hour `LP_MPC_HOURS` cron was removed in V12):
 
-Each MPC checkpoint pushes the revised Fox V3 schedule to hardware (`LP_MPC_WRITE_DEVICES=true`).
+| Trigger | When | Purpose |
+|---|---|---|
+| Octopus fetch job | ~16:05 local | **Critical**: tomorrow's rates arrive → LP replans the full horizon, adjusting tonight's discharge and overnight cheap strategy |
+| `tier_boundary` | `TIER_BOUNDARY_LEAD_MINUTES` (5 min) before each tariff tier transition | Re-plan exactly when the price regime changes |
+| `soc_drift` / `import_overshoot` / `pv_upside` / `pv_downside` / `load_upside` / `forecast_revision` | 5-min heartbeat / forecast refresh, threshold-gated | Live state or forecast diverged from the committed plan |
+| `dynamic_replan` | one-shot when the plan was truncated to the Fox 8-group cap | Re-plan the truncated tail |
+| Nightly push | 00:05 UTC (`LP_PLAN_PUSH_HOUR:MINUTE`) | Full next-day plan with final Agile rates |
+
+Each re-plan pushes the revised Fox V3 schedule to hardware; identical schedules are skipped at the client layer.
 
 ### Fox V3 schedule structure (example from 2026-04-20)
 

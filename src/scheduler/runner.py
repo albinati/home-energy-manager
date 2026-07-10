@@ -1810,7 +1810,7 @@ def bulletproof_plan_push_job() -> None:
 
 
 def bulletproof_heartbeat_tick() -> None:
-    """2-minute monitor: Daikin schedule execution, telemetry, Fox flag check."""
+    """Heartbeat monitor (every HEARTBEAT_INTERVAL_SECONDS, default 5 min): Daikin schedule execution, telemetry, Fox flag check."""
     global _last_exec_halfhour_key, _last_fox_verify_monotonic, _last_room_temp, _last_room_wall_utc, _last_notified_slot_kind, _last_notified_slot_kind_loaded
     import time
 
