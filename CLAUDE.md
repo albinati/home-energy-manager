@@ -378,8 +378,11 @@ LP_PESS_CHARGE_FLOOR_TOLERANCE_KWH=0.2           # subtracted from the pessimist
 LP_PESS_CHARGE_FLOOR_HOURS=24                    # floor only the first N horizon hours (rest is replanned)
 LP_PESS_CHARGE_FLOOR_SLACK_PENALTY_PENCE=50.0    # slack penalty — floor behaves hard, can't go Infeasible
 LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH=0.30        # commit peak_export only when pessimistic exports ≥ this
-LP_SCENARIOS_ON_TRIGGER_REASONS=cron,plan_push,octopus_fetch,tier_boundary
-                                                 # which triggers run the 3-pass solve
+LP_SCENARIOS_ON_TRIGGER_REASONS=plan_push,octopus_fetch,tier_boundary,soc_drift,import_overshoot,pv_upside,pv_downside,load_upside,forecast_revision,dynamic_replan,appliance_armed
+                                                 # which triggers run the 3-pass solve. #668 added the
+                                                 # event-driven re-solve reasons so the pessimistic charge
+                                                 # floor also covers mid-day replans; `manual` stays out
+                                                 # (interactive latency, not a drift context)
 LP_PLUNGE_PREP_HOURS=12                          # PR #218 — bound the pre-plunge constraint
                                                  # to N hours ahead. With the unbounded default
                                                  # (whole 48 h horizon, pre-#218), days where the

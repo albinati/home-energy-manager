@@ -346,10 +346,15 @@ def solve_scenarios_with_nominal(
 def trigger_runs_scenarios(trigger_reason: str) -> bool:
     """True when the configured allow-list includes this trigger reason.
 
-    ``LP_SCENARIOS_ON_TRIGGER_REASONS`` (default ``cron,plan_push``) controls
-    which optimizer invocations get the full 3-pass scenario solve. Triggers
-    not in the list (drift, forecast_revision, dynamic_replan, …) keep using
-    only the nominal solve so re-plan latency stays low.
+    ``LP_SCENARIOS_ON_TRIGGER_REASONS`` controls which optimizer invocations
+    get the full 3-pass scenario solve. The default (see ``src/config.py``)
+    covers the scheduled fires (``plan_push``, ``octopus_fetch``,
+    ``tier_boundary``) AND, since #668, the event-driven re-solves
+    (``soc_drift``, ``import_overshoot``, ``pv_upside``, ``pv_downside``,
+    ``load_upside``, ``forecast_revision``, ``dynamic_replan``,
+    ``appliance_armed``) so the pessimistic charge floor also protects
+    mid-day replans. ``manual`` stays out of the default: interactive
+    latency matters there and it is not a drift context.
     """
     raw = (config.LP_SCENARIOS_ON_TRIGGER_REASONS or "").strip()
     if not raw:

@@ -1424,9 +1424,8 @@ class Config:
     LP_SHOWER_LO_PENALTY_PENCE_PER_DEGC_SLOT: float = float(
         os.getenv("LP_SHOWER_LO_PENALTY_PENCE_PER_DEGC_SLOT", "50.0")
     )
-    # Comma-separated trigger reasons for which scenario LP runs. Other
-    # triggers (drift, forecast_revision, hourly cron not in this list)
-    # use only the nominal solve to keep latency low.
+    # Comma-separated trigger reasons for which scenario LP runs. Triggers
+    # not in this list use only the nominal solve.
     # ``octopus_fetch`` is the natural pre-peak fire (default 16:05 local,
     # right after Octopus publishes the next-day rates). Including it here
     # means the run that sees fresh prices ALSO does the 3-pass scenario
@@ -1436,9 +1435,23 @@ class Config:
     # decisions where the scenario robustness check earns its keep.
     # The legacy ``cron`` trigger reason was removed in V12 (fixed-hour
     # cron is gone); the system is fully event-driven.
+    # #668: all mid-day event-driven re-solves (soc_drift, import_overshoot,
+    # pv_upside/pv_downside, load_upside, forecast_revision, dynamic_replan,
+    # appliance_armed) are included by default too — otherwise a drift-
+    # triggered afternoon replan ran a single nominal solve with NO
+    # pessimistic charge floor and could under-charge vs what the overnight
+    # plan guaranteed for the evening peak (under-charging costs ~4× over-
+    # charging per the 2026-07 LP audit). Scenario solves are cheap (3
+    # parallel CBC solves, ms-range) and event triggers are cooldown-gated
+    # at 300s, so solver load stays bounded.
+    # ``manual`` is deliberately EXCLUDED: it is an interactive request
+    # (MCP/web propose) where latency matters, not a drift context where
+    # the charge floor earns its keep.
     LP_SCENARIOS_ON_TRIGGER_REASONS: str = os.getenv(
         "LP_SCENARIOS_ON_TRIGGER_REASONS",
-        "plan_push,octopus_fetch,tier_boundary",
+        "plan_push,octopus_fetch,tier_boundary,"
+        "soc_drift,import_overshoot,pv_upside,pv_downside,load_upside,"
+        "forecast_revision,dynamic_replan,appliance_armed",
     )
     TARGET_ROOM_TEMP_MIN_C: float = float(os.getenv("TARGET_ROOM_TEMP_MIN_C", "18.0"))
     TARGET_ROOM_TEMP_MAX_C: float = float(os.getenv("TARGET_ROOM_TEMP_MAX_C", "23.0"))

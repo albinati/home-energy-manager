@@ -431,14 +431,18 @@ slot is dropped regardless of scenarios. Use it when a user explicitly says
    ```
 4. If the user wants to override, the answer is `set_setting("ENERGY_STRATEGY_MODE", "savings_first")` is already the default; the only knob to relax robustness is `LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH` (lower = less conservative). Don't recommend this casually.
 
-**Triggers that get the 3-pass scenario solve** (default `LP_SCENARIOS_ON_TRIGGER_REASONS=cron,plan_push,octopus_fetch`):
+**Triggers that get the 3-pass scenario solve** (default `LP_SCENARIOS_ON_TRIGGER_REASONS=plan_push,octopus_fetch,tier_boundary,soc_drift,import_overshoot,pv_upside,pv_downside,load_upside,forecast_revision,dynamic_replan,appliance_armed`):
 - Nightly plan push (00:05 UTC)
-- Hourly cron MPC fires (`LP_MPC_HOURS_LIST`)
 - The Octopus fetch trigger (~16:05 local) — the natural pre-peak moment
+- Tier-boundary MPC fires (V12, `TIER_BOUNDARY_LEAD_MINUTES` before each transition)
+- Event-driven re-solves (#668): `soc_drift`, `import_overshoot`, `pv_upside`,
+  `pv_downside`, `load_upside`, `forecast_revision`, `dynamic_replan`,
+  `appliance_armed` — so the pessimistic charge floor also protects mid-day
+  replans against under-charging for the evening peak
 
-Other triggers (`soc_drift`, `forecast_revision`, `dynamic_replan`, `manual`) run
-the nominal solve only to keep MPC re-plan latency low. They commit
-`peak_export` slots verbatim with `reason=no_scenarios_run`.
+Only `manual` (interactive MCP/web propose) runs the nominal solve alone, to
+keep interactive latency low. It commits `peak_export` slots verbatim with
+`reason=no_scenarios_run`.
 
 ---
 

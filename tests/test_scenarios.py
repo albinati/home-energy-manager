@@ -183,15 +183,27 @@ def test_solve_one_scenario_result_carries_pv_factor(monkeypatch):
 
 
 def test_trigger_runs_scenarios_default_includes_canonical_triggers():
-    # V12 default LP_SCENARIOS_ON_TRIGGER_REASONS = "plan_push,octopus_fetch,tier_boundary"
+    # Default LP_SCENARIOS_ON_TRIGGER_REASONS covers the scheduled fires
     # (legacy "cron" removed when the fixed-hour MPC cron was deleted).
     assert scenarios.trigger_runs_scenarios("plan_push")
     assert scenarios.trigger_runs_scenarios("octopus_fetch")
     assert scenarios.trigger_runs_scenarios("tier_boundary")
     assert not scenarios.trigger_runs_scenarios("cron")  # legacy reason no longer in default
-    assert not scenarios.trigger_runs_scenarios("soc_drift")
-    assert not scenarios.trigger_runs_scenarios("forecast_revision")
-    assert not scenarios.trigger_runs_scenarios("dynamic_replan")
+
+
+def test_trigger_runs_scenarios_default_includes_event_driven_triggers():
+    # #668: event-driven mid-day re-solves run scenarios too, so the
+    # pessimistic charge floor protects afternoon replans against
+    # under-charging for the evening peak. "manual" stays excluded
+    # (interactive latency; not a drift context).
+    assert scenarios.trigger_runs_scenarios("soc_drift")
+    assert scenarios.trigger_runs_scenarios("import_overshoot")
+    assert scenarios.trigger_runs_scenarios("pv_upside")
+    assert scenarios.trigger_runs_scenarios("pv_downside")
+    assert scenarios.trigger_runs_scenarios("load_upside")
+    assert scenarios.trigger_runs_scenarios("forecast_revision")
+    assert scenarios.trigger_runs_scenarios("dynamic_replan")
+    assert scenarios.trigger_runs_scenarios("appliance_armed")
     assert not scenarios.trigger_runs_scenarios("manual")
 
 
