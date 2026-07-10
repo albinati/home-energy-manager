@@ -1482,6 +1482,7 @@ def _run_optimizer_lp(
         build_fox_groups_from_lp,
         filter_robust_peak_export,
         lp_plan_to_slots,
+        summarize_plan_dispatch_coherence,
         upload_fox_if_operational,
         write_daikin_from_lp_plan,
     )
@@ -2177,6 +2178,35 @@ def _run_optimizer_lp(
         plan, scenarios=scenarios_dict, export_price_pence=export_prices,
     )
     fox_ok = upload_fox_if_operational(fox, groups)
+
+    # #670 — audit the lossy-but-legitimate LP→Fox translations (8-group
+    # compression, trivial-SelfUse drop, horizon trim) that dispatch_decisions
+    # never covered. One action_log event per upload; log-only (pull-based
+    # household policy) — severe divergences surface via /status/feedback.
+    try:
+        coherence = summarize_plan_dispatch_coherence(
+            _filtered_slots, groups, replan_at_utc=replan_at,
+        )
+        coherence["fox_uploaded"] = fox_ok
+        db.log_action(
+            device="foxess",
+            action="plan_dispatch_coherence",
+            params=coherence,
+            result="divergent" if coherence["severe_count"] else "success",
+            trigger=trigger_reason,
+        )
+        if coherence["severe_count"]:
+            logger.warning(
+                "plan_dispatch_coherence: %d planned ForceCharge/ForceDischarge "
+                "slot(s) lost in Fox translation (matched %d/%d): %s",
+                coherence["severe_count"],
+                coherence["matched"],
+                coherence["total_slots"],
+                coherence["severe"],
+            )
+    except Exception as e:
+        logger.warning("plan_dispatch_coherence audit failed (non-fatal): %s", e)
+
     if replan_at is not None:
         try:
             from .runner import schedule_dynamic_mpc_replan

@@ -19,6 +19,7 @@ from .optimizer import (
     HalfHourSlot,
     _merge_fox_groups,
     _optimization_preset_away_like,
+    _slot_fox_tuple,
 )
 
 if TYPE_CHECKING:
@@ -1596,6 +1597,126 @@ def filter_robust_peak_export(
     return out_slots, decisions
 
 
+def _dispatch_horizon_cutoff(slots: list[HalfHourSlot]) -> datetime:
+    """UTC cutoff of the daily-cyclic dispatch horizon (see build_fox_groups_from_lp)."""
+    horizon_h = float(getattr(config, "FOX_DISPATCH_HORIZON_HOURS", 23.0))
+    horizon_h = min(23.5, max(1.0, horizon_h))
+    return slots[0].start_utc + timedelta(hours=horizon_h)
+
+
+def summarize_plan_dispatch_coherence(
+    slots: list[HalfHourSlot],
+    groups: list[SchedulerGroup],
+    *,
+    replan_at_utc: datetime | None = None,
+) -> dict[str, Any]:
+    """Per-slot audit of LP plan vs the FINAL Fox V3 group list (issue #670).
+
+    ``dispatch_decisions`` only covers the peak-export robustness filter; the
+    lossy-but-legitimate translations (8-group compression squash, trivial
+    SelfUse drop, 23 h D+1 horizon trim) were invisible. For every LP slot in
+    ``slots`` (the post-robustness-filter, PRE-trim list) compare the work mode
+    its kind implies (:func:`_slot_fox_tuple`) against the work mode of the
+    final group covering its local minute-of-day (no group → firmware SelfUse
+    default). Trivial SelfUse slots (mode SelfUse at the global reserve floor)
+    count as MATCHES when no group covers them — dropping those groups is
+    behaviour-neutral by design.
+
+    ``severe`` flags planned ForceCharge/ForceDischarge that ended up
+    SelfUse/absent/Backup inside the dispatched horizon — planned grid-charge
+    or export silently lost. Backup counts because the Camada-3 Backup-pin
+    squash (see ``_merge_fox_groups``) neither grid-charges (pinned
+    minSoc=maxSoc=reserve) nor discharges, so an FC fill or FD export under
+    it is lost just like under SelfUse. (Rare benign flag: a
+    ``LP_NEGATIVE_HOLD_FOX_MODE=forcecharge`` hold squashed into a Backup
+    hold — non-default config AND over-cap, hold behaviour preserved.)
+    Horizon-trimmed and cap-truncated tails are never severe: the scheduled
+    MPC re-solve re-dispatches them.
+    """
+    tz = TZ()
+    reserve = int(config.MIN_SOC_RESERVE_PERCENT)
+    cutoff = _dispatch_horizon_cutoff(slots) if slots else None
+    spans = [
+        (g.start_hour * 60 + g.start_minute, g.end_hour * 60 + g.end_minute, g.work_mode)
+        for g in groups
+    ]
+    matched = 0
+    trivial_drops = 0
+    mismatches: dict[tuple[str, str, str], int] = {}
+    severe: list[dict[str, Any]] = []
+    for s in slots:
+        key = _slot_fox_tuple(s, peak_export_discharge=False)
+        expected = key[0]
+        trivial = expected == "SelfUse" and int(key[3]) == reserve
+        # Slots past the horizon cutoff never reached _merge_fox_groups; their
+        # minute-of-day may coincide with a D0 group (daily-cyclic clock), so
+        # classify them FIRST rather than trusting a group lookup hit.
+        if cutoff is not None and s.start_utc >= cutoff:
+            if trivial:
+                matched += 1
+            else:
+                k = (expected, "absent", "horizon_trim")
+                mismatches[k] = mismatches.get(k, 0) + 1
+            continue
+        ls = s.start_utc.astimezone(tz)
+        minute = ls.hour * 60 + ls.minute
+        # Group ends carry TWO conventions: _merge_fox_groups only rewrites
+        # on-the-hour ends to :59 (inclusive); half-hour ends stay :30, i.e.
+        # EXCLUSIVE (same as _prepend_inflight_group's plan-group check).
+        # Strict `< ge` is correct for BOTH: it keeps the :30 boundary slot
+        # out of the predecessor group, and a :59-adjusted end still covers
+        # its last real slot minute (slot minutes are multiples of 30).
+        actual = next((wm for gs, ge, wm in spans if gs <= minute < ge), None)
+        if actual == expected:
+            matched += 1
+            continue
+        if actual is None:
+            if trivial:
+                matched += 1  # trivial-SelfUse drop: firmware default == plan
+                trivial_drops += 1
+                continue
+            if replan_at_utc is not None and s.start_utc >= replan_at_utc:
+                reason = "group_cap_truncation"  # replan already scheduled — not severe
+            else:
+                reason = "other"
+            actual = "absent"
+        else:
+            reason = "group_cap_compression"
+        k = (expected, actual, reason)
+        mismatches[k] = mismatches.get(k, 0) + 1
+        if (
+            expected in ("ForceCharge", "ForceDischarge")
+            and actual in ("SelfUse", "absent", "Backup")
+            and reason in ("group_cap_compression", "other")
+        ):
+            severe.append(
+                {
+                    "slot_start_utc": s.start_utc.isoformat(),
+                    "kind": s.kind,
+                    "expected": expected,
+                    "actual": actual,
+                    "reason": reason,
+                    "price_pence": s.price_pence,
+                }
+            )
+    return {
+        "total_slots": len(slots),
+        "matched": matched,
+        "mismatched": len(slots) - matched,
+        "trivial_selfuse_drops": trivial_drops,
+        # Pre-bridge count: _prepend_inflight_group may add ONE group at
+        # upload time for the in-flight slot (before the plan window, so
+        # plan-slot coverage above is unaffected).
+        "groups_uploaded": len(groups),
+        "severe_count": len(severe),
+        "severe": severe[:12],
+        "mismatches": [
+            {"expected": e, "actual": a, "reason": r, "count": c}
+            for (e, a, r), c in sorted(mismatches.items())
+        ],
+    }
+
+
 def build_fox_groups_from_lp(
     plan: LpPlan,
     scenarios: dict[str, LpPlan] | None = None,
@@ -1642,9 +1763,7 @@ def build_fox_groups_from_lp(
         # mapping shifts by 1 h). Dropped D+1 slots cost nothing — re-solves
         # re-dispatch them dozens of times before they matter, and choice
         # variance shrinks as the window approaches.
-        horizon_h = float(getattr(config, "FOX_DISPATCH_HORIZON_HOURS", 23.0))
-        horizon_h = min(23.5, max(1.0, horizon_h))
-        cutoff = slots[0].start_utc + timedelta(hours=horizon_h)
+        cutoff = _dispatch_horizon_cutoff(slots)
         slots = [s for s in slots if s.start_utc < cutoff]
     # peak_export_discharge=False: kind="peak_export" already maps to
     # ForceDischarge inside _slot_fox_tuple unconditionally; the flag here only

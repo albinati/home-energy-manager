@@ -3046,6 +3046,7 @@ def get_action_logs(
     trigger: str | None = None,
     limit: int = 200,
     since: str | None = None,
+    action: str | None = None,
 ) -> list[dict[str, Any]]:
     with _lock:
         conn = get_connection()
@@ -3058,6 +3059,9 @@ def get_action_logs(
             if trigger:
                 q += " AND trigger = ?"
                 args.append(trigger)
+            if action:
+                q += " AND action = ?"
+                args.append(action)
             if since:
                 q += " AND timestamp >= ?"
                 args.append(since)
