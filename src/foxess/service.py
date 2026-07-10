@@ -192,7 +192,9 @@ def derive_fox_mode_from_schedule(now_local: datetime | None = None) -> str:
     Scheduler V3 groups are daily-cyclic HH:MM windows in the inverter's local
     clock (``BULLETPROOF_TIMEZONE``), end-minute inclusive (the ``:59``
     convention — same comparator as ``_prepend_inflight_group``). Midnight-
-    crossing groups (start > end) wrap.
+    crossing groups (start > end) wrap. At a shared boundary minute (a ``:30``
+    end is stored as-is, back-to-back with the next group's ``:30`` start),
+    the INCOMING group wins — that is the minute the inverter switches.
 
     Returns (short, stable strings for querying):
 
@@ -222,6 +224,7 @@ def derive_fox_mode_from_schedule(now_local: datetime | None = None) -> str:
     if now_local is None:
         now_local = datetime.now(ZoneInfo(config.BULLETPROOF_TIMEZONE))
     now_min = now_local.hour * 60 + now_local.minute
+    fallback: str | None = None
     for g in state.get("groups") or []:
         try:
             gs = int(g["startHour"]) * 60 + int(g["startMinute"])
@@ -229,10 +232,23 @@ def derive_fox_mode_from_schedule(now_local: datetime | None = None) -> str:
         except (KeyError, TypeError, ValueError):
             continue
         covered = (gs <= now_min <= ge) if gs <= ge else (now_min >= gs or now_min <= ge)
-        if covered:
-            wm = str(g.get("workMode") or "").strip()
-            if wm:
-                return f"schedule:{wm}"
+        if not covered:
+            continue
+        wm = str(g.get("workMode") or "").strip()
+        if not wm:
+            continue
+        # Shared-boundary tie-break: only ends landing on :00 get the :59
+        # adjustment in _merge_fox_groups — a half-hour end is stored as :30,
+        # back-to-back with the next group's :30 start (declared clean
+        # adjacency by _detect_overlapping_groups). At that exact shared
+        # minute the inverter has already switched to the INCOMING group, so
+        # a group STARTING at now_min beats one merely spanning/ending on it.
+        if gs == now_min:
+            return f"schedule:{wm}"
+        if fallback is None:
+            fallback = wm
+    if fallback is not None:
+        return f"schedule:{fallback}"
     return "schedule:SelfUse"
 
 

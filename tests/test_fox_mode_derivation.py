@@ -149,3 +149,107 @@ def test_blank_workmode_in_covering_group_falls_through(monkeypatch, blank_mode)
     monkeypatch.setattr(db, "get_latest_fox_schedule_state", lambda: _state([g]))
     now = datetime(2026, 7, 8, 13, 34, tzinfo=TZ)
     assert derive_fox_mode_from_schedule(now) == "schedule:SelfUse"
+
+
+@pytest.mark.parametrize("order", ["outgoing_first", "incoming_first"])
+def test_shared_half_hour_boundary_prefers_incoming_group(monkeypatch, order):
+    """PR #672 review finding 1: only :00 ends get the :59 adjustment in
+    _merge_fox_groups — a half-hour end is stored as :30, back-to-back with
+    the next group's :30 start. At exactly HH:30 the inverter has switched to
+    the incoming group, so the derivation must prefer the group STARTING at
+    now over the one merely ending on it — regardless of list order."""
+    outgoing = _g(13, 0, 13, 30, "ForceCharge")     # :30 end stored as-is
+    incoming = _g(13, 30, 13, 59, "ForceDischarge")
+    groups = [outgoing, incoming] if order == "outgoing_first" else [incoming, outgoing]
+    monkeypatch.setattr(db, "get_latest_fox_schedule_state", lambda: _state(groups))
+    now = datetime(2026, 7, 8, 13, 30, tzinfo=TZ)
+    assert derive_fox_mode_from_schedule(now) == "schedule:ForceDischarge"
+    # One minute earlier the outgoing group still owns the slot.
+    now = datetime(2026, 7, 8, 13, 29, tzinfo=TZ)
+    assert derive_fox_mode_from_schedule(now) == "schedule:ForceCharge"
+
+
+def test_shared_boundary_without_incoming_group_keeps_outgoing(monkeypatch):
+    """A :30 end with NOTHING starting at :30 — the spanning group is all we
+    have; keep its mode rather than jump to SelfUse a minute early."""
+    monkeypatch.setattr(
+        db, "get_latest_fox_schedule_state",
+        lambda: _state([_g(13, 0, 13, 30, "ForceCharge")]),
+    )
+    now = datetime(2026, 7, 8, 13, 30, tzinfo=TZ)
+    assert derive_fox_mode_from_schedule(now) == "schedule:ForceCharge"
+
+
+# ---------------------------------------------------------------------------
+# PR #672 review finding 2: the REAL scheduler-off events (survival mode,
+# apply_safe_defaults) must persist the disabled state so the derivation stops
+# walking stale groups and reports schedule:SelfUse for those windows.
+# ---------------------------------------------------------------------------
+
+
+class _RecordingFox:
+    api_key = "test-key"
+
+    def __init__(self) -> None:
+        self.set_scheduler_flag_calls: list[bool] = []
+        self.set_work_mode_calls: list[str] = []
+        self.set_min_soc_calls: list[int] = []
+
+    def set_scheduler_flag(self, flag: bool) -> None:
+        self.set_scheduler_flag_calls.append(flag)
+
+    def set_work_mode(self, mode: str) -> None:
+        self.set_work_mode_calls.append(mode)
+
+    def set_min_soc(self, value: int) -> None:
+        self.set_min_soc_calls.append(int(value))
+
+
+@pytest.fixture()
+def _tmp_db(monkeypatch, tmp_path):
+    monkeypatch.setattr("src.config.config.DB_PATH", str(tmp_path / "t.db"))
+    monkeypatch.setattr("src.config.config.OPENCLAW_READ_ONLY", False)
+    db.init_db()
+
+
+def test_apply_safe_defaults_persists_scheduler_off(monkeypatch, _tmp_db):
+    """apply_safe_defaults disables the hardware scheduler flag — the stale
+    uploaded groups are no longer in force, so the derivation must report
+    schedule:SelfUse, not e.g. schedule:ForceCharge from the old plan."""
+    from src.state_machine import apply_safe_defaults
+
+    db.save_fox_schedule_state([_g(0, 0, 23, 59, "ForceCharge")], enabled=True)
+    now = datetime(2026, 7, 8, 13, 34, tzinfo=TZ)
+    assert derive_fox_mode_from_schedule(now) == "schedule:ForceCharge"
+
+    fox = _RecordingFox()
+    apply_safe_defaults(fox, daikin=None, trigger="test")
+
+    assert fox.set_scheduler_flag_calls == [False]
+    state = db.get_latest_fox_schedule_state()
+    assert state is not None and not state["enabled"]
+    assert derive_fox_mode_from_schedule(now) == "schedule:SelfUse"
+
+
+def test_survival_mode_persists_scheduler_off(monkeypatch, _tmp_db):
+    """Survival mode (24h without Agile rates) disables the scheduler flag and
+    locks Self Use — the derivation must follow."""
+    from datetime import UTC, timedelta
+
+    from src.scheduler import octopus_fetch as of
+
+    db.save_fox_schedule_state([_g(0, 0, 23, 59, "ForceDischarge")], enabled=True)
+    now_local = datetime(2026, 7, 8, 13, 34, tzinfo=TZ)
+    assert derive_fox_mode_from_schedule(now_local) == "schedule:ForceDischarge"
+
+    monkeypatch.setattr(of, "notify_critical", lambda *a, **k: None)
+    fox = _RecordingFox()
+    now_utc = datetime(2026, 7, 8, 12, 34, tzinfo=UTC)
+    streak_start = (now_utc - timedelta(hours=25)).isoformat()
+    of._maybe_survival_mode(fox, 5, streak_start, now_utc)
+
+    assert fox.set_scheduler_flag_calls == [False]
+    assert fox.set_work_mode_calls == ["Self Use"]
+    state = db.get_latest_fox_schedule_state()
+    assert state is not None and not state["enabled"]
+    assert derive_fox_mode_from_schedule(now_local) == "schedule:SelfUse"

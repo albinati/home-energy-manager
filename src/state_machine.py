@@ -208,6 +208,15 @@ def apply_safe_defaults(
                 failures[name] = str(e)
                 logger.warning("Fox safe-default step %s failed: %s", name, e)
 
+        if fox.api_key and "scheduler_flag" in applied:
+            # Persist the scheduler-off state so local derivations (e.g. the
+            # heartbeat's execution_log fox_mode, #669) stop walking the last
+            # uploaded groups — they are no longer in force on the inverter.
+            try:
+                db.save_fox_schedule_state([], enabled=False)
+            except Exception as e:
+                logger.warning("Safe defaults: could not persist scheduler-off state: %s", e)
+
         if failures:
             db.log_action(
                 device="foxess",

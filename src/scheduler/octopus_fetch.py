@@ -162,6 +162,10 @@ def _maybe_survival_mode(
     try:
         if fox.api_key:
             fox.set_scheduler_flag(False)
+            # Persist the scheduler-off state so local derivations (e.g. the
+            # heartbeat's execution_log fox_mode, #669) stop walking the last
+            # uploaded groups — they are no longer in force on the inverter.
+            db.save_fox_schedule_state([], enabled=False)
         fox.set_work_mode("Self Use")
         fox.set_min_soc(10)
         db.log_action(
