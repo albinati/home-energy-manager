@@ -11,7 +11,7 @@ from .. import db
 from ..config import config
 from ..daikin import service as daikin_service
 from ..foxess.client import FoxESSClient
-from ..foxess.service import get_cached_realtime
+from ..foxess.service import derive_fox_mode_from_schedule, get_cached_realtime
 from ..notifier import (
     notify_risk,
     push_cheap_window_start,
@@ -1861,6 +1861,12 @@ def bulletproof_heartbeat_tick() -> None:
         rt_load_kw = float(rt.load_power) if rt.load_power is not None else None
     except Exception:
         pass
+    if not fox_mode or fox_mode == "unknown":
+        # #669: Fox's realtime query never returns a workMode variable for the
+        # H1 series, so rt.work_mode is ALWAYS "unknown". Derive the mode from
+        # the persisted uploaded schedule instead (local DB read, zero quota) —
+        # labelled "schedule:<mode>" to stay honest about the source.
+        fox_mode = derive_fox_mode_from_schedule(now_local)
 
     # Event-driven MPC: SoC drift trigger (Epic #73 — story #106).
     # Fire bulletproof_mpc_job when live SoC diverges from the LP-predicted trajectory
