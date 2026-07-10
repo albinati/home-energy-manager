@@ -93,21 +93,28 @@ def test_tank_idle_overnight_kind_is_a_valid_hold():
     # A tank_idle_overnight slot carrying a soc_floor_pct maps to pinned Backup
     # too (it is in the hold set) — the overlay and the hold are orthogonal.
     from src.scheduler.optimizer import HalfHourSlot
+    reserve = int(config.MIN_SOC_RESERVE_PERCENT)
     s = HalfHourSlot(
         start_utc=T0, end_utc=T0 + timedelta(minutes=30),
         price_pence=18.0, kind="tank_idle_overnight", soc_floor_pct=75,
     )
     wm, _, _, msg, max_soc = _slot_fox_tuple(s)
-    assert wm == "Backup" and msg == int(config.MIN_SOC_RESERVE_PERCENT) and max_soc == 75
+    # Pure-hold pin: maxSoc = reserve (no top-up), regardless of soc_floor_pct.
+    assert wm == "Backup" and msg == reserve and max_soc == reserve
 
 
 def test_hold_maps_to_pinned_backup():
     slots = lp_plan_to_slots(_plan(_HOLD_PRICES, _HOLD_IMPS))
+    reserve = int(config.MIN_SOC_RESERVE_PERCENT)
+    # soc_floor_pct is carried for telemetry, but the EMITTED pure-hold pin is
+    # Backup(reserve, reserve): no discharge (Backup) AND no charge (SoC already
+    # above maxSoc) — the proven benign form, no grid top-up.
+    assert slots[0].soc_floor_pct == 80
     wm, fds, pwr, msg, max_soc = _slot_fox_tuple(slots[0])
     assert wm == "Backup"
     assert fds is None and pwr is None
-    assert msg == int(config.MIN_SOC_RESERVE_PERCENT)
-    assert max_soc == 80  # pinned at the planned SoC — no top-up above plan
+    assert msg == reserve
+    assert max_soc == reserve
 
 
 def test_no_hold_without_a_future_peak():
@@ -150,6 +157,18 @@ def test_disabled_flag_never_sets_floor(monkeypatch):
 
 def test_vacation_never_holds(monkeypatch):
     monkeypatch.setattr(config, "OPTIMIZATION_PRESET", "vacation", raising=False)
+    slots = lp_plan_to_slots(_plan(_HOLD_PRICES, _HOLD_IMPS))
+    assert all(s.soc_floor_pct is None for s in slots)
+
+
+@pytest.mark.parametrize("messy", ["  VACATION ", "Vacation", "travel", "AWAY"])
+def test_messy_or_alias_vacation_preset_blocks_holds(monkeypatch, messy):
+    # A raw un-normalized preset (whitespace/mixed-case, or a legacy alias like
+    # 'travel'/'away') stored directly in the override dict — bypassing the
+    # setter's strip/lower. The labeller must still recognise it as vacation via
+    # _optimization_preset_away_like's defensive normalization + alias handling,
+    # so no A1 hold can leak into vacation.
+    monkeypatch.setitem(config._overrides, "OPTIMIZATION_PRESET", messy)
     slots = lp_plan_to_slots(_plan(_HOLD_PRICES, _HOLD_IMPS))
     assert all(s.soc_floor_pct is None for s in slots)
 

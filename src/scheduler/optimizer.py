@@ -442,15 +442,26 @@ def _slot_fox_tuple(
         return ("Backup", None, None, min_r, hold_max)
     if s.soc_floor_pct is not None and s.kind in ("standard", "peak", "tank_idle_overnight"):
         # A1 (#679) — positive-price battery HOLD. The LP planned to cover this
-        # slot's load from the grid (dis=0, chg=0, imp>0) and hold the battery
+        # slot's load from the grid (dis≈0, chg≈0, imp>0) and hold the battery
         # for a later forecast peak (driven by the pessimistic charge floor
         # #673). Legacy mapping fell through to SelfUse(reserve) and the battery
         # discharged into any load spike — the 2026-07-10 incident. Pin Backup,
         # the ONLY proven 0%-discharge hold on the H1 (A0: SelfUse floors are
-        # ignored). maxSoc = the planned SoC so there is no top-up above plan.
+        # ignored).
+        #
+        # maxSoc = reserve (NOT the planned SoC): the slot is a pure hold — the
+        # battery must NEITHER discharge (Backup's nature) NOR charge. With live
+        # SoC already above the reserve maxSoc, Backup(reserve,reserve) charges
+        # nothing (the benign 2026-06-07 form, 316 prod samples) — exactly the
+        # hold intent, and no ~0.3-0.5 kWh grid top-up. Pinning maxSoc to the
+        # planned SoC (≈ live+5% after quantize) would instead sit in the
+        # intermediate-maxSoc regime the truth table has NEVER validated. The
+        # planned floor is still carried on the slot (soc_floor_pct) for
+        # telemetry/labelling; only the emitted maxSoc is reserve.
+        #
         # soc_floor_pct is only ever set when LP_POSITIVE_HOLD_ENABLED (in
         # lp_plan_to_slots), so this branch is inert when the feature is off.
-        return ("Backup", None, None, min_r, max(min_r, int(s.soc_floor_pct)))
+        return ("Backup", None, None, min_r, min_r)
     return ("SelfUse", None, None, min_r, None)
 
 

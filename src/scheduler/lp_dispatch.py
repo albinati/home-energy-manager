@@ -329,12 +329,13 @@ def _label_positive_price_holds(plan: LpPlan, slots: list[HalfHourSlot]) -> None
     n = len(slots)
     if n == 0:
         return
-    try:
-        from ..presets import OperationPreset
-        if OperationPreset(config.OPTIMIZATION_PRESET) == OperationPreset.VACATION:
-            return
-    except (ValueError, AttributeError):
-        pass
+    # Vacation: LP forbids grid->battery; a hold there is moot and Backup would
+    # mis-map. Use the SAME defensive normalization as the A2 solar_charge guard
+    # (_optimization_preset_away_like → .strip().lower() + legacy alias handling
+    # via OperationPreset._missing_) so a whitespace/mixed-case/"travel" preset
+    # cannot leak A1 holds into vacation.
+    if _optimization_preset_away_like():
+        return
 
     cap = float(config.BATTERY_CAPACITY_KWH)
     if cap <= 0:
@@ -1801,7 +1802,19 @@ def summarize_plan_dispatch_coherence(
             reason = "group_cap_compression"
         k = (expected, actual, reason)
         mismatches[k] = mismatches.get(k, 0) + 1
-        if (
+        # A planned HOLD (expected Backup — positive-price A1 hold, negative_hold,
+        # or solar_charge) that degrades to SelfUse or absent is the exact
+        # 2026-07-10 / daily-cyclic-V3-collision incident signature: the hold's
+        # discharge-freeze is silently lost and the battery drains into load. It
+        # MUST alarm, so Backup→SelfUse/absent is severe alongside the FC/FD
+        # grid-charge/export losses. (Backup→ForceCharge is NOT severe — an FC
+        # with fdSoc≤SoC also holds; and horizon-trim/truncation stay benign.)
+        _hold_lost = (
+            expected == "Backup"
+            and actual in ("SelfUse", "absent")
+            and reason in ("group_cap_compression", "other")
+        )
+        if _hold_lost or (
             expected in ("ForceCharge", "ForceDischarge")
             and actual in ("SelfUse", "absent", "Backup")
             and reason in ("group_cap_compression", "other")
