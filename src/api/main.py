@@ -39,6 +39,7 @@ from ..config_snapshots import list_snapshots, restore_snapshot, rollback_latest
 from ..scheduler.optimizer import run_optimizer
 from ..scheduler.runner import (
     get_scheduler_status,
+    optimizer_dispatch_lock,
     pause_scheduler,
     reregister_cron_jobs,
     resume_scheduler,
@@ -3710,6 +3711,21 @@ async def optimization_refresh():
     }
 
 
+def _run_optimizer_serialized(fox, daikin=None, **kwargs):
+    """Run the optimizer while holding the scheduler's solve+dispatch mutex (#676).
+
+    The manual API paths (propose / fetch-and-plan) reach ``run_optimizer``
+    WITHOUT going through the scheduler job wrappers, so they must acquire the
+    same ``optimizer_dispatch_lock`` themselves — otherwise a manual propose
+    could interleave its Fox V3 upload with an in-flight event-driven solve.
+    Blocking acquire: this runs inside ``asyncio.to_thread`` (a worker thread,
+    not the event loop), and the user asked for a plan — waiting out an
+    in-flight solve (bounded ~100s since #673) beats silently skipping.
+    """
+    with optimizer_dispatch_lock:
+        return run_optimizer(fox, daikin, **kwargs)
+
+
 @app.post("/api/v1/optimization/fetch-and-plan")
 async def optimization_fetch_and_plan():
     """Fetch latest Agile rates and immediately run the full optimizer.
@@ -3742,7 +3758,7 @@ async def optimization_fetch_and_plan():
         fox = FoxESSClient(**config.foxess_client_kwargs())
     except Exception:
         pass
-    result = await asyncio.to_thread(run_optimizer, fox, None)
+    result = await asyncio.to_thread(_run_optimizer_serialized, fox, None)
 
     now = datetime.now(UTC)
     plan_id = f"bp-{uuid4().hex[:12]}"
@@ -3774,7 +3790,7 @@ async def optimization_propose(include_plan: bool = False, x_simulation_id: str 
         fox = FoxESSClient(**config.foxess_client_kwargs())
     except Exception:
         pass
-    result = await asyncio.to_thread(run_optimizer, fox, None)
+    result = await asyncio.to_thread(_run_optimizer_serialized, fox, None)
     if not result.get("ok"):
         raise HTTPException(status_code=500, detail=result.get("error", "optimizer failed"))
     now = datetime.now(UTC)

@@ -1123,13 +1123,27 @@ def build_mcp() -> FastMCP:
         # because it lives inside the worker thread.
         def _run_bg() -> None:
             from . import db as _db
+            # #676 — this worker thread reaches run_optimizer without going
+            # through the scheduler job wrappers, so it must hold the same
+            # solve+dispatch mutex they do (blocking: the user asked for a
+            # plan, so wait out any in-flight event solve rather than skip).
+            # Scope: under the PROD transport (FastMCP mounted at /mcp inside
+            # the same FastAPI process as the scheduler — 2026-04-25 Docker
+            # cutover) this import resolves to the SAME lock instance the
+            # jobs hold, so serialization is guaranteed. The legacy stdio
+            # transport (`bin/mcp` / `python -m src.mcp_server`, dev-local
+            # only) is a separate process with its own lock — cross-process
+            # solves are unguarded there by design (dev boxes run
+            # OPENCLAW_READ_ONLY=true and no scheduler).
+            from .scheduler.runner import optimizer_dispatch_lock
             try:
                 with _db.log_action_timed(
                     device="system", action="propose_optimization_plan",
                     params={"plan_date": plan_date, "plan_id": plan_id},
                     trigger="mcp", actor="mcp",
                 ):
-                    run_optimizer(fox, None)
+                    with optimizer_dispatch_lock:
+                        run_optimizer(fox, None)
             except Exception as exc:
                 logger.warning("Background optimizer error: %s", exc)
 
