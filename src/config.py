@@ -2038,6 +2038,44 @@ class Config:
     def DHW_TEMP_PV_ABUNDANCE_TARGET_C(self, value: float) -> None:
         self._rt_set("DHW_TEMP_PV_ABUNDANCE_TARGET_C", float(value))
 
+    # --- Price-aware DHW warmup start hour (#681, 2026-07-10) -----------------
+    # Default OFF + shadow-log first (observe the deltas ~1 week before
+    # enabling). When enabled, dhw_policy.resolve_warmup_hour_local picks the
+    # cheapest warmup start within [WINDOW_START, WINDOW_END) once per plan-date
+    # and persists it (runtime_settings ``dhw_warmup_hour_<date>``). Setback
+    # stays fixed at DHW_SETBACK_START_HOUR_LOCAL (the restore covenant).
+    @property
+    def DHW_WARMUP_PRICE_AWARE_ENABLED(self) -> bool:
+        v = self._rt_get("DHW_WARMUP_PRICE_AWARE_ENABLED")
+        if isinstance(v, bool):
+            return v
+        return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+    @DHW_WARMUP_PRICE_AWARE_ENABLED.setter
+    def DHW_WARMUP_PRICE_AWARE_ENABLED(self, value: Any) -> None:
+        if isinstance(value, bool):
+            self._rt_set("DHW_WARMUP_PRICE_AWARE_ENABLED", "true" if value else "false")
+        else:
+            self._rt_set(
+                "DHW_WARMUP_PRICE_AWARE_ENABLED", str(value).strip().lower()
+            )
+
+    @property
+    def DHW_WARMUP_WINDOW_START_LOCAL(self) -> int:
+        return int(self._rt_get("DHW_WARMUP_WINDOW_START_LOCAL"))
+
+    @DHW_WARMUP_WINDOW_START_LOCAL.setter
+    def DHW_WARMUP_WINDOW_START_LOCAL(self, value: int) -> None:
+        self._rt_set("DHW_WARMUP_WINDOW_START_LOCAL", int(value))
+
+    @property
+    def DHW_WARMUP_WINDOW_END_LOCAL(self) -> int:
+        return int(self._rt_get("DHW_WARMUP_WINDOW_END_LOCAL"))
+
+    @DHW_WARMUP_WINDOW_END_LOCAL.setter
+    def DHW_WARMUP_WINDOW_END_LOCAL(self, value: int) -> None:
+        self._rt_set("DHW_WARMUP_WINDOW_END_LOCAL", int(value))
+
     @property
     def INDOOR_SETPOINT_C(self) -> float:
         return float(self._rt_get("INDOOR_SETPOINT_C"))

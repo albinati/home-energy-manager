@@ -153,6 +153,214 @@ def _detect_negative_windows(
     return windows
 
 
+# --- Price-aware warmup start hour (#681) ----------------------------------
+# The warmup START hour is chosen once per plan-date to minimise the mean
+# Agile IMPORT price of its two 30-min transition slots, within the bounded
+# window [DHW_WARMUP_WINDOW_START_LOCAL, DHW_WARMUP_WINDOW_END_LOCAL). The
+# choice is PERSISTED (runtime_settings ``dhw_warmup_hour_<YYYY-MM-DD>``) the
+# first time it is resolved for a date and returned verbatim thereafter —
+# "persist-once" — so re-plans at different wall-clock times keep the K2 pin
+# (forecast_dhw_load_per_slot) coherent with the fired warmup row and never
+# thrash the restore covenant. Default OFF: when disabled the resolver returns
+# the static DHW_WARMUP_START_HOUR_LOCAL byte-for-byte and only SHADOW-LOGS the
+# would-pick delta so the deltas can be observed before enabling (#640 pattern).
+#
+# ONE source of truth per (date): resolve_warmup_hour_local() is the resolver
+# (writes the persist-once value); _read_warmup_hour() is the read-only accessor
+# (persisted-or-static, never resolves). Both are consumed by all of
+# generate_daily_tank_schedule, forecast_dhw_load_per_slot / _phase_for_slot,
+# _nominal_daily_total_kwh and _nominal_bucket_shares.
+
+# Shadow-log dedupe — one INFO line per (date, static, chosen) per process.
+_warmup_shadow_logged: set[tuple[str, int, int]] = set()
+
+
+def _price_aware_enabled() -> bool:
+    return bool(getattr(config, "DHW_WARMUP_PRICE_AWARE_ENABLED", False))
+
+
+def _static_warmup_hour() -> int:
+    return int(getattr(config, "DHW_WARMUP_START_HOUR_LOCAL", 13))
+
+
+def _warmup_window_bounds() -> tuple[int, int]:
+    lo = int(getattr(config, "DHW_WARMUP_WINDOW_START_LOCAL", 11))
+    hi = int(getattr(config, "DHW_WARMUP_WINDOW_END_LOCAL", 16))
+    return lo, hi
+
+
+def _warmup_setting_key(d: date) -> str:
+    return f"dhw_warmup_hour_{d.isoformat()}"
+
+
+def _persisted_warmup_hour(d: date) -> int | None:
+    """The persist-once value for *d*, or None. Reads the ``runtime_settings``
+    kv table directly (schema-free free-form key) — the same generic per-key
+    store used by e.g. ``dhw_bias_enable_suggested_at``, so no new table."""
+    try:
+        raw = db.get_runtime_setting(_warmup_setting_key(d))
+    except Exception:  # pragma: no cover - defensive: resolver must not fail
+        return None
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _persist_warmup_hour(d: date, hour: int) -> None:
+    try:
+        db.set_runtime_setting(_warmup_setting_key(d), str(int(hour)))
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("dhw_policy: persist warmup hour failed for %s", d, exc_info=True)
+
+
+def _read_warmup_hour(d: date) -> int:
+    """Read-only warmup hour for local date *d*: persisted-or-static.
+
+    NEVER resolves or persists. When price-aware is disabled this ALWAYS
+    returns the static hour (ignoring any stale persisted value), so the
+    whole schedule/forecast/nominal stack is byte-identical to legacy.
+    """
+    if not _price_aware_enabled():
+        return _static_warmup_hour()
+    persisted = _persisted_warmup_hour(d)
+    return persisted if persisted is not None else _static_warmup_hour()
+
+
+def _import_price_map(
+    agile_rates: list[dict[str, Any]] | None,
+    import_price_by_slot_utc: dict[datetime, float] | None,
+) -> dict[datetime, float]:
+    """Unify the two price shapes into ``{slot_start_utc: import_pence}``.
+
+    ``generate_daily_tank_schedule`` has agile_rates dicts; the LP forecast
+    path has a per-slot import price line already keyed by UTC slot start.
+    """
+    if import_price_by_slot_utc:
+        return import_price_by_slot_utc
+    out: dict[datetime, float] = {}
+    if not agile_rates:
+        return out
+    for r in agile_rates:
+        ts_raw = r.get("valid_from") or r.get("slot_time_utc")
+        if not ts_raw:
+            continue
+        val = r.get("value_inc_vat")
+        if val is None:
+            val = r.get("rate_p")
+        if val is None:
+            continue
+        try:
+            ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+            out[ts.astimezone(UTC)] = float(val)
+        except (ValueError, TypeError):
+            continue
+    return out
+
+
+def _price_aware_pick(
+    target_date_local: date,
+    price_map: dict[datetime, float],
+    static_hour: int,
+) -> tuple[int | None, float | None]:
+    """Cheapest candidate warmup hour + its saving vs the static hour.
+
+    Returns ``(chosen_hour, delta_p_per_slot)``; ``(None, None)`` when no
+    candidate hour has usable price data. ``delta`` = static mean − chosen mean
+    (positive = price-aware is cheaper), or None when the static hour itself
+    has no price. Tie-break: EARLIEST hour wins (we iterate ascending and only
+    replace on a strictly-cheaper mean). The warmer-COP tie-break the issue
+    mentions is deliberately NOT wired — dhw_policy exposes no cheap outdoor
+    forecast accessor, so earliest-hour is the documented deterministic rule.
+    """
+    if not price_map:
+        return None, None
+    lo, hi = _warmup_window_bounds()
+    if hi <= lo:
+        return None, None
+    tz = _tz_local()
+    priced: dict[int, float] = {}
+    best_hour: int | None = None
+    best_price: float | None = None
+    for h in range(lo, hi):
+        # DST-safe anchor (same pattern as generate_daily_tank_schedule).
+        s0 = datetime(
+            target_date_local.year, target_date_local.month, target_date_local.day,
+            h, 0, tzinfo=tz,
+        ).astimezone(UTC)
+        s1 = datetime(
+            target_date_local.year, target_date_local.month, target_date_local.day,
+            h, 30, tzinfo=tz,
+        ).astimezone(UTC)
+        vals = [price_map[s] for s in (s0, s1) if s in price_map]
+        if not vals:
+            continue
+        mean_p = sum(vals) / len(vals)
+        priced[h] = mean_p
+        if best_price is None or mean_p < best_price - 1e-9:
+            best_price, best_hour = mean_p, h
+    if best_hour is None:
+        return None, None
+    static_p = priced.get(static_hour)
+    delta = (static_p - best_price) if static_p is not None else None
+    return best_hour, delta
+
+
+def _shadow_log_warmup(
+    target_date_local: date, static_hour: int, chosen: int | None, delta: float | None
+) -> None:
+    if chosen is None:
+        return
+    token = (target_date_local.isoformat(), static_hour, chosen)
+    if token in _warmup_shadow_logged:
+        return
+    _warmup_shadow_logged.add(token)
+    verb = "ENABLED, applying" if _price_aware_enabled() else "shadow (disabled)"
+    delta_str = f"Δ≈{delta:+.2f}p/slot" if delta is not None else "Δ≈n/a"
+    logger.info(
+        "DHW warmup price-aware %s: date=%s static=%02d:00 price-aware=%02d:00 %s",
+        verb, target_date_local.isoformat(), static_hour, chosen, delta_str,
+    )
+
+
+def resolve_warmup_hour_local(
+    target_date_local: date,
+    agile_rates: list[dict[str, Any]] | None = None,
+    *,
+    import_price_by_slot_utc: dict[datetime, float] | None = None,
+) -> int:
+    """Resolve the LOCAL warmup START hour for ``target_date_local`` (#681).
+
+    * Disabled → static ``DHW_WARMUP_START_HOUR_LOCAL`` (legacy, unchanged),
+      after a one-shot shadow-log of what price-aware *would* pick.
+    * Enabled, already persisted for this date → the persisted value verbatim
+      (persist-once: stability preserves the restore covenant + K2 pin
+      coherence across re-plans at different wall-clock times).
+    * Enabled, resolvable → cheapest candidate in
+      ``[WINDOW_START, WINDOW_END)``, persisted then returned.
+    * Enabled, no usable price data for this date (e.g. tomorrow's Agile not
+      published yet) → static fallback, NOT persisted, so a later call once
+      the rates land can still resolve.
+    """
+    static_hour = _static_warmup_hour()
+
+    if _price_aware_enabled():
+        persisted = _persisted_warmup_hour(target_date_local)
+        if persisted is not None:
+            return persisted
+
+    price_map = _import_price_map(agile_rates, import_price_by_slot_utc)
+    chosen, delta = _price_aware_pick(target_date_local, price_map, static_hour)
+    _shadow_log_warmup(target_date_local, static_hour, chosen, delta)
+
+    if not _price_aware_enabled() or chosen is None:
+        return static_hour
+    _persist_warmup_hour(target_date_local, chosen)
+    return chosen
+
+
 def generate_daily_tank_schedule(
     target_date_local: date,
     *,
@@ -215,7 +423,10 @@ def generate_daily_tank_schedule(
         return []
 
     tz = _tz_local()
-    warmup_hour = int(getattr(config, "DHW_WARMUP_START_HOUR_LOCAL", 13))
+    # Price-aware warmup start (#681) — persist-once per plan-date; static when
+    # disabled. next_day resolves independently so the setback END aligns with
+    # tomorrow's (possibly different) warmup start when its rates are known.
+    warmup_hour = resolve_warmup_hour_local(target_date_local, agile_rates)
     setback_hour = int(getattr(config, "DHW_SETBACK_START_HOUR_LOCAL", 22))
     normal_c = int(round(float(config.DHW_TEMP_NORMAL_C)))
     setback_c = int(round(float(getattr(config, "DHW_TEMP_SETBACK_C", 37))))
@@ -232,6 +443,7 @@ def generate_daily_tank_schedule(
     # ``timedelta`` is offset-blind and ``.replace`` keeps the source
     # tzinfo even when DST has flipped between the two times.
     next_day = target_date_local + timedelta(days=1)
+    next_warmup_hour = resolve_warmup_hour_local(next_day, agile_rates)
     warmup_start = datetime(
         target_date_local.year, target_date_local.month, target_date_local.day,
         warmup_hour, 0, tzinfo=tz,
@@ -242,7 +454,7 @@ def generate_daily_tank_schedule(
     )
     next_warmup = datetime(
         next_day.year, next_day.month, next_day.day,
-        warmup_hour, 0, tzinfo=tz,
+        next_warmup_hour, 0, tzinfo=tz,
     )
 
     # Negative-price boost windows are the sole permitted exception to the fixed
@@ -389,20 +601,27 @@ _GUESTS_MORNING_SHOWER_END_H = 9  # exclusive
 
 # 6 h TTL cache for the auto-scale factor — one cheap DB read per LP-solve
 # burst instead of per call. Keyed by (mode, window_days).
-_autoscale_cache: dict[tuple[str, int, str], tuple[float, float]] = {}
+_autoscale_cache: dict[tuple[str, int, str, int], tuple[float, float]] = {}
 _AUTOSCALE_TTL_SECONDS = 6 * 3600
 
 
-def _nominal_daily_total_kwh(mode: str) -> float:
+def _nominal_daily_total_kwh(mode: str, warmup_hour: int | None = None) -> float:
     """Un-scaled kWh/day the schedule constants imply for ``mode``.
 
     Walks a generic 48-slot local day through the same phase rules as
     :func:`forecast_dhw_load_per_slot` (no boost, no warm credit) so the
     auto-scale denominator can never drift from the forecast shape.
+
+    ``warmup_hour`` defaults to TODAY's resolved warmup hour (#681) so the
+    auto-scale denominator tracks the price-aware start; when price-aware is
+    disabled this is the static hour and the total is byte-identical to legacy.
+    Moving the warmup earlier lengthens the warmup window (more maintenance
+    slots), so the nominal total MUST use the same hour the forecast does.
     """
     if mode == "vacation":
         return 0.0
-    warmup_hour = int(getattr(config, "DHW_WARMUP_START_HOUR_LOCAL", 13))
+    if warmup_hour is None:
+        warmup_hour = _read_warmup_hour(datetime.now(_tz_local()).date())
     setback_hour = int(getattr(config, "DHW_SETBACK_START_HOUR_LOCAL", 22))
     total = 0.0
     for half_slot in range(48):
@@ -425,17 +644,22 @@ def _nominal_daily_total_kwh(mode: str) -> float:
     return total
 
 
-def _nominal_bucket_shares(mode: str) -> dict[int, float]:
+def _nominal_bucket_shares(mode: str, warmup_hour: int | None = None) -> dict[int, float]:
     """Nominal energy fraction per LOCAL 2h bucket (0-11) for ``mode`` — the
     same 48-slot walk as :func:`_nominal_daily_total_kwh`, aggregated by
     ``hour // 2`` (the ``dhw_error_log`` bucketing). Used by the bucket-bias
     corrector to normalize its factors so applying them preserves the daily
     total: the auto-scale owns the LEVEL and is open-loop w.r.t. the committed
     forecast, so an un-normalized shape corrector would double-correct the
-    level, permanently. Returns ``{}`` for vacation (nominal total is 0)."""
+    level, permanently. Returns ``{}`` for vacation (nominal total is 0).
+
+    ``warmup_hour`` defaults to TODAY's resolved warmup hour (#681) — the SAME
+    hour the auto-scale denominator uses — so the bias-normalizer and the
+    auto-scale never disagree on where the warmup window sits."""
     if mode == "vacation":
         return {}
-    warmup_hour = int(getattr(config, "DHW_WARMUP_START_HOUR_LOCAL", 13))
+    if warmup_hour is None:
+        warmup_hour = _read_warmup_hour(datetime.now(_tz_local()).date())
     setback_hour = int(getattr(config, "DHW_SETBACK_START_HOUR_LOCAL", 22))
     per_bucket: dict[int, float] = {b: 0.0 for b in range(12)}
     total = 0.0
@@ -473,9 +697,14 @@ def _dhw_autoscale_factor(mode: str) -> float:
     if not bool(getattr(config, "DHW_FORECAST_AUTOSCALE_ENABLED", True)):
         return 1.0
     window_days = int(getattr(config, "DHW_FORECAST_AUTOSCALE_WINDOW_DAYS", 14))
+    # The denominator (nominal) depends on the resolved warmup hour (#681) —
+    # a price-aware move changes the warmup-window slot count. Read TODAY's
+    # hour and key the cache on it so a mid-day change re-computes; disabled →
+    # static hour → identical key/nominal to legacy.
+    warmup_hour = _read_warmup_hour(datetime.now(_tz_local()).date())
     # DB_PATH in the key: tests swap databases under one process, and prod
     # never changes it — costs nothing, prevents cross-DB cache bleed.
-    key = (mode, window_days, str(getattr(config, "DB_PATH", "")))
+    key = (mode, window_days, str(getattr(config, "DB_PATH", "")), warmup_hour)
     cached = _autoscale_cache.get(key)
     now = _time.time()
     if cached is not None and now - cached[1] < _AUTOSCALE_TTL_SECONDS:
@@ -489,7 +718,7 @@ def _dhw_autoscale_factor(mode: str) -> float:
         rows = db.get_daikin_consumption_daily_range(start.isoformat(), end.isoformat())
         vals = [float(r["kwh_dhw"]) for r in rows if r.get("kwh_dhw") is not None]
         min_days = int(getattr(config, "DHW_FORECAST_AUTOSCALE_MIN_DAYS", 5))
-        nominal = _nominal_daily_total_kwh(mode)
+        nominal = _nominal_daily_total_kwh(mode, warmup_hour)
         if len(vals) >= min_days and nominal > 0:
             lo = float(getattr(config, "DHW_FORECAST_AUTOSCALE_MIN", 0.5))
             hi = float(getattr(config, "DHW_FORECAST_AUTOSCALE_MAX", 1.6))
@@ -622,8 +851,31 @@ def forecast_dhw_load_per_slot(
         return [], []
 
     tz = _tz_local()
-    warmup_hour = int(getattr(config, "DHW_WARMUP_START_HOUR_LOCAL", 13))
     setback_hour = int(getattr(config, "DHW_SETBACK_START_HOUR_LOCAL", 22))
+    # Price-aware warmup start (#681). The horizon spans ~2 local days, each of
+    # which may resolve to a different warmup hour, so resolve ONCE PER LOCAL
+    # DATE and look the hour up per slot. Feeding the LP import price_line as the
+    # price source means the pin's transition slots land on exactly the hour the
+    # fired warmup row uses (persist-once makes the two agree even across
+    # re-plans). Disabled → static hour for every date (byte-identical).
+    _price_map: dict[datetime, float] = {}
+    if price_line is not None and len(price_line) == n:
+        for _s, _p in zip(slot_starts_utc, price_line):
+            try:
+                _price_map[_s.astimezone(UTC)] = float(_p)
+            except (TypeError, ValueError):
+                continue
+    _warmup_by_date: dict[date, int] = {}
+    for _s in slot_starts_utc:
+        _d = _s.astimezone(tz).date()
+        if _d not in _warmup_by_date:
+            _warmup_by_date[_d] = resolve_warmup_hour_local(
+                _d, import_price_by_slot_utc=_price_map or None
+            )
+
+    def _warmup_hour_for(slot_local: datetime) -> int:
+        return _warmup_by_date.get(slot_local.date(), _static_warmup_hour())
+
     normal_c = float(config.DHW_TEMP_NORMAL_C)
     setback_c = float(getattr(config, "DHW_TEMP_SETBACK_C", 37.0))
     boost_c = float(getattr(config, "DHW_NEGATIVE_PRICE_BOOST_C", 60.0))
@@ -665,7 +917,10 @@ def forecast_dhw_load_per_slot(
             # warmup-level maintenance.
             return "warmup_maintenance"
 
-        # Normal mode: warmup window [warmup_hour, setback_hour), setback otherwise.
+        # Normal mode: warmup window [warmup_hour, setback_hour), setback
+        # otherwise. warmup_hour is the price-aware pick for THIS slot's local
+        # date (#681) so the pin follows the fired warmup row exactly.
+        warmup_hour = _warmup_hour_for(slot_local)
         if warmup_hour <= h < setback_hour:
             # Both half-slots of the warmup hour are transition (#534): the
             # measured lift + deferred-reheat load spans ~1 h, not 30 min.
@@ -771,7 +1026,7 @@ def forecast_dhw_load_per_slot(
             tank_temps.append(setback_c)  # firmware-owned; setback as proxy
         elif mode == "guests":
             tank_temps.append(normal_c)
-        elif warmup_hour <= h < setback_hour:
+        elif _warmup_hour_for(slot_local) <= h < setback_hour:
             tank_temps.append(normal_c)
         else:
             tank_temps.append(setback_c)

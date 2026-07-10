@@ -384,3 +384,155 @@ def test_lp_pinning_guests_with_last_slot_in_shower_window_is_feasible(monkeypat
         "LP must be feasible under guests+pinning with the last slot in the "
         f"shower window (terminal floor must defer to the pin); got {plan.status}"
     )
+
+
+# ---------------------------------------------------------------------------
+# #681 — price-aware warmup hour + K2 pin lockstep
+# ---------------------------------------------------------------------------
+
+
+def _winter_prices(day, cheap_hour, n=48):
+    """Agile-rate dicts for a full local day, cheap at ``cheap_hour`` local."""
+    base = datetime(day.year, day.month, day.day, 0, 0, tzinfo=TZ_LOCAL).astimezone(UTC)
+    rates = []
+    for i in range(n):
+        ts = base + timedelta(minutes=30 * i)
+        local_h = ts.astimezone(TZ_LOCAL).hour
+        val = 4.0 if local_h == cheap_hour else 28.0
+        rates.append({"valid_from": ts.isoformat().replace("+00:00", "Z"),
+                      "value_inc_vat": val})
+    return rates
+
+
+def _price_line_from_rates(slots, rates):
+    """Align an agile-rate dict list to a per-slot import price line."""
+    from datetime import datetime as _dt
+    m = {}
+    for r in rates:
+        ts = _dt.fromisoformat(str(r["valid_from"]).replace("Z", "+00:00"))
+        m[ts.astimezone(UTC)] = float(r["value_inc_vat"])
+    return [m.get(s.astimezone(UTC), 28.0) for s in slots]
+
+
+@pytest.fixture
+def _dhw_db():
+    """Fresh runtime_settings table for persist-once assertions."""
+    from src import db
+    db.init_db()
+    from src import dhw_policy as _dp
+    _dp._autoscale_cache.clear()
+    _dp._warmup_shadow_logged.clear()
+    yield db
+    _dp._autoscale_cache.clear()
+    _dp._warmup_shadow_logged.clear()
+
+
+def test_price_aware_disabled_is_byte_identical(monkeypatch, _dhw_db):
+    """Flag OFF (default): forecast + schedule are identical to the static
+    13:00 warmup — the whole point of shipping shadow-first."""
+    from datetime import date
+    monkeypatch.setattr(config, "DHW_WARMUP_PRICE_AWARE_ENABLED", False, raising=False)
+    day = date(2026, 1, 15)  # GMT winter
+    base = datetime(day.year, day.month, day.day, 10, 0, tzinfo=TZ_LOCAL).astimezone(UTC)
+    n = 28
+    slots = [base + timedelta(minutes=30 * i) for i in range(n)]
+    rates = _winter_prices(day, cheap_hour=15)
+    price_line = _price_line_from_rates(slots, rates)
+
+    e_off, tank_off = dhw_policy.forecast_dhw_load_per_slot(
+        slots, mode="normal", price_line=price_line)
+    # Static reference — no price signal at all.
+    e_static, tank_static = dhw_policy.forecast_dhw_load_per_slot(slots, mode="normal")
+    assert e_off == e_static
+    assert tank_off == tank_static
+    # No persisted value while disabled.
+    assert dhw_policy._persisted_warmup_hour(day) is None
+    # Warmup still fires at the static 13:00.
+    rows = dhw_policy.generate_daily_tank_schedule(day, agile_rates=rates, allow_past=True)
+    warmup = [r for r in rows if r["action_type"] == "tank_warmup"][0]
+    assert warmup["start_time"] == "2026-01-15T13:00:00Z"
+
+
+def test_price_aware_moves_warmup_and_pins_in_lockstep(monkeypatch, _dhw_db):
+    """K2 divergence guard (#1): resolve at one wall-clock, generate the
+    schedule at another — the pinned e_dhw transition slots must land on the
+    SAME hour as the upserted warmup row (persist-once makes them agree)."""
+    from datetime import date
+    monkeypatch.setattr(config, "DHW_WARMUP_PRICE_AWARE_ENABLED", True, raising=False)
+    monkeypatch.setattr(config, "OPTIMIZATION_PRESET", "normal", raising=False)
+    day = date(2026, 1, 15)
+    rates = _winter_prices(day, cheap_hour=15)  # cheapest at 15:00 local
+
+    # (a) First resolve happens via the LP forecast path (persist-once fires).
+    base = datetime(day.year, day.month, day.day, 10, 0, tzinfo=TZ_LOCAL).astimezone(UTC)
+    n = 28  # 10:00 → 24:00 local
+    slots = [base + timedelta(minutes=30 * i) for i in range(n)]
+    price_line = _price_line_from_rates(slots, rates)
+    e_dhw, _ = dhw_policy.forecast_dhw_load_per_slot(
+        slots, mode="normal", price_line=price_line)
+    assert dhw_policy._persisted_warmup_hour(day) == 15
+
+    # The transition pulse (2 × WARMUP_TRANSITION) must be at 15:00/15:30 local.
+    def _slot_local_hour(i):
+        return slots[i].astimezone(TZ_LOCAL).hour
+    transition_idx = [i for i, v in enumerate(e_dhw) if v > 0.3]
+    assert transition_idx, "expected a warmup-transition pulse"
+    assert all(_slot_local_hour(i) == 15 for i in transition_idx), (
+        f"transition slots at local hours "
+        f"{[_slot_local_hour(i) for i in transition_idx]}, expected 15"
+    )
+
+    # (b) Now generate the fired schedule (a later re-plan) — even if we hand it
+    # DIFFERENT prices, persist-once keeps the warmup row on 15:00.
+    rates_shifted = _winter_prices(day, cheap_hour=11)  # would-be cheapest at 11
+    rows = dhw_policy.generate_daily_tank_schedule(
+        day, agile_rates=rates_shifted, allow_past=True)
+    warmup = [r for r in rows if r["action_type"] == "tank_warmup"][0]
+    assert warmup["start_time"] == "2026-01-15T15:00:00Z", (
+        "persist-once must hold the warmup at the first-resolved hour across "
+        "re-plans so the fired row and the K2 pin never diverge"
+    )
+    # Setback UNMOVED — the restore covenant.
+    setback = [r for r in rows if r["action_type"] == "tank_setback"][0]
+    assert setback["start_time"] == "2026-01-15T22:00:00Z"
+
+
+def test_price_aware_warmup_at_window_edges_stays_feasible(monkeypatch, _dhw_db):
+    """#422/shower/tank-thermo floor skips stay intact when the warmup moves to
+    the window edges (11:00 and 15:30 via 15:00): no Infeasible."""
+    from datetime import date
+    monkeypatch.setattr(config, "DHW_WARMUP_PRICE_AWARE_ENABLED", True, raising=False)
+    monkeypatch.setattr(config, "OPTIMIZATION_PRESET", "normal", raising=False)
+    for cheap_hour, day in ((11, date(2026, 1, 16)), (15, date(2026, 1, 17))):
+        dhw_policy._warmup_shadow_logged.clear()
+        rates = _winter_prices(day, cheap_hour=cheap_hour)
+        base = datetime(day.year, day.month, day.day, 10, 0,
+                        tzinfo=TZ_LOCAL).astimezone(UTC)
+        n = 24
+        slots = [base + timedelta(minutes=30 * i) for i in range(n)]
+        prices = _price_line_from_rates(slots, rates)
+        plan = _solve(
+            slots=slots, prices=prices, pv=[0.5] * n,
+            base_load=[0.3] * n, init_soc=6.0, init_tank=40.0,
+        )
+        assert plan.ok, (
+            f"warmup moved to {cheap_hour}:00 must stay feasible; got {plan.status}"
+        )
+        assert dhw_policy._persisted_warmup_hour(day) == cheap_hour
+
+
+def test_price_aware_tomorrow_falls_back_when_rates_absent(monkeypatch, _dhw_db):
+    """Horizon covers ~2 local days; tomorrow resolves only when its Agile
+    rates exist, else deterministic static fallback (NOT persisted)."""
+    from datetime import date
+    monkeypatch.setattr(config, "DHW_WARMUP_PRICE_AWARE_ENABLED", True, raising=False)
+    today = date(2026, 1, 15)
+    tomorrow = date(2026, 1, 16)
+    # Only today's rates are present.
+    rates = _winter_prices(today, cheap_hour=15)
+    assert dhw_policy.resolve_warmup_hour_local(today, rates) == 15
+    # Tomorrow: no price data → static, and NOT persisted (so it can resolve
+    # once tomorrow's rates publish ~16:00).
+    assert dhw_policy.resolve_warmup_hour_local(tomorrow, agile_rates=None) == \
+        dhw_policy._static_warmup_hour()
+    assert dhw_policy._persisted_warmup_hour(tomorrow) is None
