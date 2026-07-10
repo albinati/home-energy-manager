@@ -108,6 +108,7 @@ def test_plan_push_waits_for_inflight_solve_then_runs():
         return dict(OK_RESULT)
 
     p1, p2, p3, p4 = _job_patches(runner, solve)
+    t_push: threading.Thread | None = None
     with p1, p2, p3, p4:
         t_mpc = threading.Thread(
             target=runner.bulletproof_mpc_job, kwargs={"trigger_reason": "soc_drift"}
@@ -118,15 +119,21 @@ def test_plan_push_waits_for_inflight_solve_then_runs():
             t_push = threading.Thread(target=runner.bulletproof_plan_push_job)
             t_push.start()
             # Blocking semantics: plan_push must be parked on the lock, NOT
-            # skipped and NOT solving concurrently.
-            time.sleep(0.3)
-            assert t_push.is_alive(), "plan_push should be blocked on the dispatch lock"
-            assert calls == ["soc_drift"], "plan_push must not solve while MPC holds the lock"
+            # skipped and NOT solving concurrently. Poll over a sustained
+            # window (rather than one grace sleep): the thread must stay
+            # alive WITHOUT solving for the whole window, i.e. it got past
+            # its entry gates and is waiting at the blocking acquire.
+            deadline = time.monotonic() + 0.5
+            while time.monotonic() < deadline:
+                assert t_push.is_alive(), "plan_push must block on the dispatch lock, not skip"
+                assert calls == ["soc_drift"], "plan_push must not solve while MPC holds the lock"
+                time.sleep(0.02)
         finally:
             hold.set()
             t_mpc.join(timeout=10)
-        t_push.join(timeout=10)
-        assert not t_push.is_alive()
+        if t_push is not None:
+            t_push.join(timeout=10)
+            assert not t_push.is_alive()
 
     assert calls == ["soc_drift", "plan_push"], "plan_push must run after the in-flight solve"
     assert not runner.optimizer_dispatch_lock.locked()
@@ -162,3 +169,29 @@ def test_plan_push_releases_lock_when_solve_raises():
         runner.bulletproof_plan_push_job()  # must not raise
     boom.assert_called_once()
     assert not runner.optimizer_dispatch_lock.locked()
+
+
+# -------------------- (4) plan_push wedge guard --------------------
+
+
+def test_plan_push_wedge_guard_times_out_proceeds_and_does_not_steal_lock(monkeypatch, caplog):
+    """If an in-flight solve is wedged past the acquire timeout, plan_push must
+    still run (the nightly commitment is never lost) — WITHOUT releasing the
+    lock it never acquired."""
+    from src.scheduler import runner
+
+    monkeypatch.setattr(runner, "PLAN_PUSH_LOCK_TIMEOUT_SECONDS", 0.05)
+    ok = MagicMock(return_value=dict(OK_RESULT))
+    p1, p2, p3, p4 = _job_patches(runner, ok)
+    assert runner.optimizer_dispatch_lock.acquire(blocking=False)  # simulate the wedged solve
+    try:
+        with p1, p2, p3, p4, caplog.at_level("WARNING", logger="src.scheduler.runner"):
+            runner.bulletproof_plan_push_job()
+        ok.assert_called_once()  # proceeded unserialized
+        assert any(
+            "WITHOUT the dispatch lock" in r.message for r in caplog.records
+        ), "wedge-guard WARNING must be logged"
+        # The wedged solve still owns the lock — plan_push must not have released it.
+        assert runner.optimizer_dispatch_lock.locked()
+    finally:
+        runner.optimizer_dispatch_lock.release()

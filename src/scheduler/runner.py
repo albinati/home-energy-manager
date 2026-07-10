@@ -60,6 +60,10 @@ _last_mpc_run_at: datetime | None = None
 # holding the lock, so putting it inside `run_optimizer` too would deadlock.
 # One consistent level: whoever calls `run_optimizer` acquires this first.
 optimizer_dispatch_lock = threading.Lock()
+# Wedge guard for the nightly plan push's BLOCKING acquire: solves are bounded
+# ~100s (#673), so a 600s wait means the in-flight solve is wedged — the push
+# then proceeds unserialized rather than losing the canonical commitment.
+PLAN_PUSH_LOCK_TIMEOUT_SECONDS: float = 600.0
 # Hysteresis on the SoC drift trigger: count consecutive heartbeat ticks above
 # threshold; only fire when we cross MPC_DRIFT_HYSTERESIS_TICKS. Resets on recovery.
 _consecutive_drift_ticks: int = 0
@@ -1814,8 +1818,18 @@ def bulletproof_plan_push_job() -> None:
     # #676 — BLOCKING acquire, deliberately asymmetric with bulletproof_mpc_job:
     # the nightly plan push is the canonical commitment of tomorrow's plan and
     # must never be silently skipped. If an event-driven solve is in flight we
-    # wait for it to finish (bounded ~100s since #673), then run.
-    with optimizer_dispatch_lock:
+    # wait for it to finish (bounded ~100s since #673), then run. The timeout
+    # is a wedge guard: if the lock is still held after 600s the in-flight
+    # solve is stuck, and proceeding unserialized is the lesser evil vs losing
+    # the nightly commitment.
+    acquired = optimizer_dispatch_lock.acquire(timeout=float(PLAN_PUSH_LOCK_TIMEOUT_SECONDS))
+    if not acquired:
+        logger.warning(
+            "plan_push proceeding WITHOUT the dispatch lock after %.0fs wait — "
+            "in-flight solve appears wedged",
+            float(PLAN_PUSH_LOCK_TIMEOUT_SECONDS),
+        )
+    try:
         try:
             from .optimizer import run_optimizer
 
@@ -1839,6 +1853,11 @@ def bulletproof_plan_push_job() -> None:
             )
         except Exception as e:
             logger.warning("Plan push job failed: %s", e)
+    finally:
+        # Release ONLY if we actually acquired — after a wedge-guard timeout
+        # the lock still belongs to the stuck solve.
+        if acquired:
+            optimizer_dispatch_lock.release()
 
 
 def bulletproof_heartbeat_tick() -> None:
