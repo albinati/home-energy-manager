@@ -282,6 +282,23 @@ def _actuation_block() -> dict[str, Any]:
     }
 
 
+def _dispatch_coherence_block() -> dict[str, Any] | None:
+    """Latest plan-vs-uploaded-schedule coherence summary (#670) — the
+    ``plan_dispatch_coherence`` action_log event written at each Fox upload.
+    Log-only telemetry (pull-based policy); ``None`` when no event exists yet."""
+    try:
+        rows = db.get_action_logs(
+            device="foxess", action="plan_dispatch_coherence", limit=1
+        )
+    except Exception:  # pragma: no cover — panel must still render
+        logger.debug("status/feedback: coherence read failed", exc_info=True)
+        return None
+    if not rows:
+        return None
+    r = rows[0]
+    return {"at": r.get("timestamp"), "result": r.get("result"), **(r.get("params") or {})}
+
+
 # ── endpoints ────────────────────────────────────────────────────────────────
 
 @router.get("/api/v1/status/alerts")
@@ -339,6 +356,7 @@ async def status_feedback() -> dict[str, Any]:
             "now_utc": datetime.now(UTC).isoformat(),
             "dhw": dhw_budget_state(),
             "lwt_gate": space_heating_gate_state(),
+            "dispatch_coherence": _dispatch_coherence_block(),
         }
 
     sidecar = await _sidecar_ok()
