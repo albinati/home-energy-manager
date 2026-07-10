@@ -11,6 +11,7 @@ import os
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -22,7 +23,12 @@ from ..daikin.client import DaikinClient, DaikinError
 from ..energy.monthly import get_monthly_insights, get_period_insights
 from ..foxess.client import FoxESSClient, FoxESSError
 from ..foxess.models import ChargePeriod
-from ..foxess.service import get_cached_realtime, get_refresh_stats, get_refresh_stats_extended
+from ..foxess.service import (
+    derive_fox_mode_from_schedule,
+    get_cached_realtime,
+    get_refresh_stats,
+    get_refresh_stats_extended,
+)
 from ..state_machine import apply_safe_defaults, recover_on_boot
 
 logger = logging.getLogger(__name__)
@@ -639,6 +645,74 @@ async def system_timezone():
     }
 
 
+def _fox_plan_fields(now_utc: datetime) -> dict[str, Any]:
+    """Current + next Fox work mode from the last uploaded Scheduler V3 state.
+
+    Scheduler V3 groups are daily-cyclic HH:MM windows in the inverter's
+    LOCAL clock (``BULLETPROOF_TIMEZONE``) — the group builder
+    (``scheduler/optimizer.py``) writes local wall-clock, not UTC. This block
+    used to match the groups against UTC "now", so during BST the reported
+    mode ran one hour behind the inverter (#674; coincidentally correct in
+    winter). The current mode now delegates to the shared derivation from
+    #672 (``foxess.service.derive_fox_mode_from_schedule`` — local-time,
+    ``:59``-inclusive ends, midnight wrap, incoming-group boundary
+    tie-break). Its ``schedule:`` prefix is stripped at this API boundary so
+    ``current_slot.fox_mode`` keeps returning the bare workMode strings the
+    SPA string-matches on ("SelfUse", "ForceCharge", ...); the helper's
+    ``unknown`` (no schedule state ever uploaded / DB read failed) maps back
+    to ``None``, exactly as before.
+
+    Returns ``current_fox_mode``, ``next_fox_mode``, ``next_transition_utc``
+    (all nullable) plus ``uploaded_at`` for the freshness block.
+    """
+    from zoneinfo import ZoneInfo
+
+    fields: dict[str, Any] = {
+        "current_fox_mode": None,
+        "next_fox_mode": None,
+        "next_transition_utc": None,
+        "uploaded_at": None,
+    }
+    try:
+        tz = ZoneInfo(config.BULLETPROOF_TIMEZONE or "Europe/London")
+    except Exception:
+        tz = UTC
+    now_local = now_utc.astimezone(tz)
+
+    derived = derive_fox_mode_from_schedule(now_local)
+    if derived != "unknown":
+        fields["current_fox_mode"] = derived.removeprefix("schedule:")
+
+    # Next transition: earliest group starting later in the local day (same
+    # local wall-clock convention), reported as UTC ISO. Only meaningful when
+    # the scheduler flag was enabled at last upload — disabled groups are not
+    # in force, so advertising their next start would be a lie.
+    try:
+        fox_state = db.get_latest_fox_schedule_state() or {}
+        fields["uploaded_at"] = fox_state.get("uploaded_at")
+        if fox_state.get("enabled"):
+            now_hm = (now_local.hour, now_local.minute)
+
+            def _start(g: dict) -> tuple[int, int]:
+                return int(g.get("startHour", 0)), int(g.get("startMinute", 0))
+
+            upcoming = sorted(
+                (g for g in fox_state.get("groups") or [] if _start(g) > now_hm),
+                key=_start,
+            )
+            if upcoming:
+                nxt = upcoming[0]
+                fields["next_fox_mode"] = nxt.get("workMode")
+                h, m = _start(nxt)
+                nxt_local = now_local.replace(hour=h, minute=m, second=0, microsecond=0)
+                fields["next_transition_utc"] = (
+                    nxt_local.astimezone(UTC).isoformat().replace("+00:00", "Z")
+                )
+    except Exception:
+        pass
+    return fields
+
+
 @app.get("/api/v1/cockpit/now")
 async def cockpit_now():
     """One-call aggregator for the cockpit's "where are we now?" hero panel.
@@ -844,35 +918,13 @@ async def cockpit_now():
     }
     plan_fresh: dict[str, Any] = {"fetched_at_utc": None, "age_s": None, "stale": None}
     try:
-        fox_state = db.get_latest_fox_schedule_state() or {}
-        groups_json = fox_state.get("groups_json") or "[]"
-        import json as _json
-        groups = _json.loads(groups_json) if groups_json else []
-        # Fox groups are HH:MM cycles in UTC (Fox hardware clock). Match "now".
-        now_hm = (now.hour, now.minute)
-        def _start(g: dict) -> tuple[int, int]:
-            return int(g.get("startHour", 0)), int(g.get("startMinute", 0))
-        def _end(g: dict) -> tuple[int, int]:
-            return int(g.get("endHour", 0)), int(g.get("endMinute", 0))
-        cur = next(
-            (g for g in groups
-             if _start(g) <= now_hm < _end(g)
-             or (_start(g) > _end(g) and (now_hm >= _start(g) or now_hm < _end(g)))),
-            None,
-        )
-        upcoming = sorted(
-            (g for g in groups if _start(g) > now_hm),
-            key=lambda g: _start(g),
-        )
-        if cur:
-            plan_block["current_fox_mode"] = cur.get("workMode")
-        if upcoming:
-            nxt = upcoming[0]
-            plan_block["next_fox_mode"] = nxt.get("workMode")
-            plan_block["next_transition_utc"] = now.replace(
-                hour=_start(nxt)[0], minute=_start(nxt)[1], second=0, microsecond=0
-            ).isoformat().replace("+00:00", "Z")
-        uploaded_at = fox_state.get("uploaded_at")
+        # Scheduler V3 groups are local-wall-clock windows, NOT UTC — the
+        # shared #672 derivation handles the timezone + boundary rules (#674).
+        fox_fields = _fox_plan_fields(now)
+        plan_block["current_fox_mode"] = fox_fields["current_fox_mode"]
+        plan_block["next_fox_mode"] = fox_fields["next_fox_mode"]
+        plan_block["next_transition_utc"] = fox_fields["next_transition_utc"]
+        uploaded_at = fox_fields["uploaded_at"]
         if uploaded_at:
             plan_fresh = {
                 "fetched_at_utc": uploaded_at,
