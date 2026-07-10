@@ -204,9 +204,18 @@ Configured by `LP_SCENARIOS_ON_TRIGGER_REASONS` (default
   afternoon replan could under-charge vs what the overnight plan had
   guaranteed for the evening peak — exactly the empty-at-peak failure mode
   the floor exists to prevent (under-charging costs ~4× over-charging per
-  the 2026-07 LP audit). Scenario solves are cheap (3 parallel CBC solves,
-  ms-range) and event triggers are cooldown-gated at 300 s, so solver load
-  stays bounded.
+  the 2026-07 LP audit). Cost (see the Parallelism section above):
+  `solve_scenarios_with_nominal` reuses the nominal plan and runs only the
+  2 side scenarios in parallel worker threads (~one extra solve of
+  wall-clock, 3–4 s typical), plus a possible charge-floor re-solve — a
+  `soc_drift` replan goes from ~4 s to ~10 s typical; worst case
+  ~90–100 s, bounded by `LP_CBC_TIME_LIMIT_SECONDS=30` per solve (nominal
+  ≤30 s + parallel sides ≤30 s wall + floor re-solve ≤30 s). This runs on
+  the heartbeat thread / APScheduler workers — never the asyncio event
+  loop — and stays under the drift triggers' `MPC_COOLDOWN_SECONDS=300`
+  (stamped at solve completion, so slower solves can't cause replan
+  thrash). `appliance_armed` bypasses that cooldown and is instead
+  rate-bounded by the heartbeat's remote-mode transition detector.
 
 The one nominal-only exception is `manual` (MCP/web propose): it is an
 interactive request where latency matters, not a drift context. Plans it
