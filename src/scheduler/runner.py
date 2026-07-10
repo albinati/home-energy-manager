@@ -46,6 +46,20 @@ _comfort_morning_logged: set[str] = set()
 # Cooldown gate: any MPC run (cron / event / dynamic_replan) stamps this; the next
 # `bulletproof_mpc_job` call within MPC_COOLDOWN_SECONDS is short-circuited.
 _last_mpc_run_at: datetime | None = None
+# Solve+dispatch mutex (#676). The cooldown above is check-at-entry /
+# stamp-at-completion, so it does NOT exclude overlap: a heartbeat-thread
+# trigger (soc_drift, pv_*, load_upside) and an APScheduler worker-thread
+# trigger (tier_boundary, dynamic_replan, forecast_revision, plan_push,
+# octopus_fetch) can both pass the gate and interleave two `run_optimizer`
+# executions — and with them two Fox V3 uploads (group swaps mid-fill).
+# Solves take ~10s typical / ~100s bounded since #673, so the window is real.
+#
+# Lock LEVEL (do not change without re-reading this): the lock is held by the
+# JOB WRAPPERS + the direct API/MCP `run_optimizer` call sites — never inside
+# `run_optimizer` itself. `bulletproof_mpc_job` calls `run_optimizer` while
+# holding the lock, so putting it inside `run_optimizer` too would deadlock.
+# One consistent level: whoever calls `run_optimizer` acquires this first.
+optimizer_dispatch_lock = threading.Lock()
 # Hysteresis on the SoC drift trigger: count consecutive heartbeat ticks above
 # threshold; only fire when we cross MPC_DRIFT_HYSTERESIS_TICKS. Resets on recovery.
 _consecutive_drift_ticks: int = 0
@@ -1206,87 +1220,100 @@ def bulletproof_mpc_job(
         )
         return
 
-    write_devices = bool(config.LP_MPC_WRITE_DEVICES) or force_write_devices
-    # Snapshot the previous LP run id BEFORE the new solve so we can compute the plan delta.
-    prev_run_id: int | None = None
+    # #676 — serialize with any in-flight solve+dispatch. Non-blocking: an
+    # event trigger arriving while another solve is mid-flight is redundant
+    # (the in-flight solve already reads the freshest state), so skip —
+    # mirroring the cooldown-skip semantics above.
+    if not optimizer_dispatch_lock.acquire(blocking=False):
+        logger.info(
+            "MPC skipped (already running, trigger=%s): another optimizer run holds the dispatch lock",
+            trigger_reason,
+        )
+        return
     try:
-        prev_run_id = db.find_run_for_time(datetime.now(UTC).isoformat())
-    except Exception as e:
-        logger.debug("plan-delta: prev_run_id lookup failed: %s", e)
-
-    try:
-        from .optimizer import run_optimizer
-
-        fox = _try_fox()
-        daikin = None
-        if config.DAIKIN_CLIENT_ID and config.DAIKIN_CLIENT_SECRET:
-            try:
-                from ..daikin.client import DaikinClient
-
-                daikin = DaikinClient()
-            except Exception as e:
-                logger.debug("MPC: Daikin client unavailable: %s", e)        # --- Read live Fox realtime: SoC, solar_power_kw, load_power_kw ---
-        rt_soc_pct: float | None = None
-        rt_solar_kw: float | None = None
-        rt_load_kw: float | None = None
+        write_devices = bool(config.LP_MPC_WRITE_DEVICES) or force_write_devices
+        # Snapshot the previous LP run id BEFORE the new solve so we can compute the plan delta.
+        prev_run_id: int | None = None
         try:
-            rt = get_cached_realtime()
-            rt_soc_pct = float(rt.soc) if rt.soc is not None else None
-            rt_solar_kw = float(rt.solar_power) if rt.solar_power is not None else None
-            rt_load_kw = float(rt.load_power) if rt.load_power is not None else None
-            logger.info(
-                "MPC live snapshot: SoC=%.1f%% solar=%.2fkW load=%.2fkW",
-                rt_soc_pct or 0,
-                rt_solar_kw or 0,
-                rt_load_kw or 0,
-            )
+            prev_run_id = db.find_run_for_time(datetime.now(UTC).isoformat())
         except Exception as e:
-            logger.debug("MPC: Fox realtime unavailable (will use DB state): %s", e)
+            logger.debug("plan-delta: prev_run_id lookup failed: %s", e)
 
-        # Store live snapshot in DB so the LP initial state reader picks it up
-        if rt_soc_pct is not None:
+        try:
+            from .optimizer import run_optimizer
+
+            fox = _try_fox()
+            daikin = None
+            if config.DAIKIN_CLIENT_ID and config.DAIKIN_CLIENT_SECRET:
+                try:
+                    from ..daikin.client import DaikinClient
+
+                    daikin = DaikinClient()
+                except Exception as e:
+                    logger.debug("MPC: Daikin client unavailable: %s", e)        # --- Read live Fox realtime: SoC, solar_power_kw, load_power_kw ---
+            rt_soc_pct: float | None = None
+            rt_solar_kw: float | None = None
+            rt_load_kw: float | None = None
             try:
-                from .. import db as _db
-
-                _db.upsert_fox_realtime_snapshot(
-                    {
-                        "captured_at": datetime.now(UTC).isoformat(),
-                        "soc_pct": rt_soc_pct,
-                        "solar_power_kw": rt_solar_kw,
-                        "load_power_kw": rt_load_kw,
-                    }
+                rt = get_cached_realtime()
+                rt_soc_pct = float(rt.soc) if rt.soc is not None else None
+                rt_solar_kw = float(rt.solar_power) if rt.solar_power is not None else None
+                rt_load_kw = float(rt.load_power) if rt.load_power is not None else None
+                logger.info(
+                    "MPC live snapshot: SoC=%.1f%% solar=%.2fkW load=%.2fkW",
+                    rt_soc_pct or 0,
+                    rt_solar_kw or 0,
+                    rt_load_kw or 0,
                 )
             except Exception as e:
-                logger.debug("MPC: snapshot upsert failed (non-fatal): %s", e)
+                logger.debug("MPC: Fox realtime unavailable (will use DB state): %s", e)
 
-        result = run_optimizer(
-            fox if write_devices else None,
-            daikin if write_devices else None,
-            trigger_reason=trigger_reason,
-        )
-        logger.info(
-            "MPC re-optimise: trigger=%s ok=%s lp_status=%s objective=%.0fp soc=%.1f%% solar=%.2fkW write_devices=%s",
-            trigger_reason,
-            result.get("ok"),
-            result.get("lp_status"),
-            result.get("lp_objective_pence", 0),
-            rt_soc_pct or 0,
-            rt_solar_kw or 0,
-            write_devices,
-        )
-        # Stamp the cooldown only on a successful solve so transient errors don't lock us out.
-        if result.get("ok"):
-            _last_mpc_run_at = datetime.now(UTC)
-            # Plan-delta observability for event-driven runs (logged only —
-            # the user-facing ping is the digest pair + nightly plan_proposed;
-            # in-day deltas are pulled via get_plan_timeline / dispatch_decisions).
-            try:
-                new_run_id = db.find_run_for_time(_last_mpc_run_at.isoformat())
-                _log_plan_delta_after_trigger(prev_run_id, new_run_id, trigger_reason)
-            except Exception as e:
-                logger.debug("plan-delta post-run hook failed: %s", e)
-    except Exception as e:
-        logger.warning("MPC job failed (trigger=%s): %s", trigger_reason, e)
+            # Store live snapshot in DB so the LP initial state reader picks it up
+            if rt_soc_pct is not None:
+                try:
+                    from .. import db as _db
+
+                    _db.upsert_fox_realtime_snapshot(
+                        {
+                            "captured_at": datetime.now(UTC).isoformat(),
+                            "soc_pct": rt_soc_pct,
+                            "solar_power_kw": rt_solar_kw,
+                            "load_power_kw": rt_load_kw,
+                        }
+                    )
+                except Exception as e:
+                    logger.debug("MPC: snapshot upsert failed (non-fatal): %s", e)
+
+            result = run_optimizer(
+                fox if write_devices else None,
+                daikin if write_devices else None,
+                trigger_reason=trigger_reason,
+            )
+            logger.info(
+                "MPC re-optimise: trigger=%s ok=%s lp_status=%s objective=%.0fp soc=%.1f%% solar=%.2fkW write_devices=%s",
+                trigger_reason,
+                result.get("ok"),
+                result.get("lp_status"),
+                result.get("lp_objective_pence", 0),
+                rt_soc_pct or 0,
+                rt_solar_kw or 0,
+                write_devices,
+            )
+            # Stamp the cooldown only on a successful solve so transient errors don't lock us out.
+            if result.get("ok"):
+                _last_mpc_run_at = datetime.now(UTC)
+                # Plan-delta observability for event-driven runs (logged only —
+                # the user-facing ping is the digest pair + nightly plan_proposed;
+                # in-day deltas are pulled via get_plan_timeline / dispatch_decisions).
+                try:
+                    new_run_id = db.find_run_for_time(_last_mpc_run_at.isoformat())
+                    _log_plan_delta_after_trigger(prev_run_id, new_run_id, trigger_reason)
+                except Exception as e:
+                    logger.debug("plan-delta post-run hook failed: %s", e)
+        except Exception as e:
+            logger.warning("MPC job failed (trigger=%s): %s", trigger_reason, e)
+    finally:
+        optimizer_dispatch_lock.release()
 
 
 def _register_tier_boundary_triggers() -> dict[str, Any]:
@@ -1784,29 +1811,34 @@ def bulletproof_plan_push_job() -> None:
     if backend != "lp":
         logger.info("Plan push skipped: OPTIMIZER_BACKEND=%s (LP only)", backend)
         return
-    try:
-        from .optimizer import run_optimizer
+    # #676 — BLOCKING acquire, deliberately asymmetric with bulletproof_mpc_job:
+    # the nightly plan push is the canonical commitment of tomorrow's plan and
+    # must never be silently skipped. If an event-driven solve is in flight we
+    # wait for it to finish (bounded ~100s since #673), then run.
+    with optimizer_dispatch_lock:
+        try:
+            from .optimizer import run_optimizer
 
-        fox = _try_fox()
-        daikin = None
-        if config.DAIKIN_CLIENT_ID and config.DAIKIN_CLIENT_SECRET:
-            try:
-                from ..daikin.client import DaikinClient
-                daikin = DaikinClient()
-            except Exception as e:
-                logger.debug("Plan push: Daikin client unavailable: %s", e)
+            fox = _try_fox()
+            daikin = None
+            if config.DAIKIN_CLIENT_ID and config.DAIKIN_CLIENT_SECRET:
+                try:
+                    from ..daikin.client import DaikinClient
+                    daikin = DaikinClient()
+                except Exception as e:
+                    logger.debug("Plan push: Daikin client unavailable: %s", e)
 
-        result = run_optimizer(fox, daikin, trigger_reason="plan_push")
-        logger.info(
-            "Plan push: ok=%s lp_status=%s objective=%.0fp fox_uploaded=%s daikin_actions=%s",
-            result.get("ok"),
-            result.get("lp_status"),
-            result.get("lp_objective_pence", 0),
-            result.get("fox_uploaded"),
-            result.get("daikin_actions"),
-        )
-    except Exception as e:
-        logger.warning("Plan push job failed: %s", e)
+            result = run_optimizer(fox, daikin, trigger_reason="plan_push")
+            logger.info(
+                "Plan push: ok=%s lp_status=%s objective=%.0fp fox_uploaded=%s daikin_actions=%s",
+                result.get("ok"),
+                result.get("lp_status"),
+                result.get("lp_objective_pence", 0),
+                result.get("fox_uploaded"),
+                result.get("daikin_actions"),
+            )
+        except Exception as e:
+            logger.warning("Plan push job failed: %s", e)
 
 
 def bulletproof_heartbeat_tick() -> None:

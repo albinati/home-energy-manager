@@ -1123,13 +1123,19 @@ def build_mcp() -> FastMCP:
         # because it lives inside the worker thread.
         def _run_bg() -> None:
             from . import db as _db
+            # #676 — this worker thread reaches run_optimizer without going
+            # through the scheduler job wrappers, so it must hold the same
+            # solve+dispatch mutex they do (blocking: the user asked for a
+            # plan, so wait out any in-flight event solve rather than skip).
+            from .scheduler.runner import optimizer_dispatch_lock
             try:
                 with _db.log_action_timed(
                     device="system", action="propose_optimization_plan",
                     params={"plan_date": plan_date, "plan_id": plan_id},
                     trigger="mcp", actor="mcp",
                 ):
-                    run_optimizer(fox, None)
+                    with optimizer_dispatch_lock:
+                        run_optimizer(fox, None)
             except Exception as exc:
                 logger.warning("Background optimizer error: %s", exc)
 
