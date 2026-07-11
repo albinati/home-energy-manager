@@ -1177,6 +1177,33 @@ class Config:
     DHW_TEMP_SETBACK_C: float = float(
         os.getenv("DHW_TEMP_SETBACK_C", "37")
     )
+    # Early setback on evening shower drawdown: when the tank drops ≥
+    # TRIGGER_DELTA_C below its evening peak inside the armed window
+    # ([ARM_HOUR, DHW_SETBACK_START_HOUR_LOCAL) local), pull the setback
+    # forward to NOW instead of letting the firmware reheat the freshly-
+    # drawn tank at peak price from the battery (measured ~1.0-1.6 kWh on
+    # shower-heavy evenings, e.g. 38→45 °C finishing 21:53 on 2026-07-10 —
+    # 7 min before the static 22:00 setback). The K2 pin already models the
+    # reheat as deferred to the next warmup, so this aligns hardware with
+    # the plan. Fires at most once per day (persist-once runtime_settings
+    # key); heartbeat detector in state_machine._check_dhw_shower_drawdown.
+    # False = instant rollback to the static setback hour only.
+    DHW_EARLY_SETBACK_ENABLED: bool = (
+        os.getenv("DHW_EARLY_SETBACK_ENABLED", "true").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+    # Drop below the evening running max that counts as "the showers
+    # happened" (°C). Standing loss is ~0.5 °C/h, so a fast ≥4 °C drop is
+    # unambiguously a draw; sink/kitchen draws measure <2 °C.
+    DHW_EARLY_SETBACK_TRIGGER_DELTA_C: float = float(
+        os.getenv("DHW_EARLY_SETBACK_TRIGGER_DELTA_C", "4.0")
+    )
+    # Local hour the detector arms (default = evening shower window start).
+    # Before this hour a drawdown is ignored — an early-evening bath must
+    # not cancel the pre-shower hold.
+    DHW_EARLY_SETBACK_ARM_HOUR_LOCAL: int = int(
+        os.getenv("DHW_EARLY_SETBACK_ARM_HOUR_LOCAL", "20")
+    )
     # Pre-cool the tank toward the device minimum during the setback that runs
     # INTO a negative-price window, so the paid boost (cold → 60 °C) absorbs the
     # most kWh while we're paid — and zero positive-price reheat happens just

@@ -5297,6 +5297,31 @@ def insert_daikin_telemetry(row: dict[str, Any]) -> None:
             conn.close()
 
 
+def get_tank_temps_since(since_epoch: float) -> list[tuple[float, float]]:
+    """``(fetched_at, tank_temp_c)`` LIVE rows with a non-null tank temperature
+    at or after *since_epoch*, ascending. Feeds the evening shower-drawdown
+    detector (state_machine._check_dhw_shower_drawdown): the window max is the
+    pre-shower hold temperature and the newest rows confirm the drop.
+
+    ``source='live'`` ONLY — the physics-estimator rows (``source='estimate'``,
+    written when the Daikin quota is exhausted) model smooth standing-loss
+    decay from a seed and by construction cannot see a shower draw; letting
+    one into the confirmation pair would veto genuine detections."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT fetched_at, tank_temp_c FROM daikin_telemetry "
+                "WHERE fetched_at >= ? AND tank_temp_c IS NOT NULL "
+                "AND source = 'live' "
+                "ORDER BY fetched_at ASC",
+                (since_epoch,),
+            )
+            return [(float(r[0]), float(r[1])) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
 def get_latest_daikin_telemetry(
     *, source: str | None = None
 ) -> dict[str, Any] | None:

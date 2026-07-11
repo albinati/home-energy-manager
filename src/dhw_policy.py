@@ -237,15 +237,20 @@ _WARMUP_KEY_TTL_DAYS = 7
 
 
 def _sweep_stale_warmup_keys(today: date) -> None:
-    """Finding 4 (review #683): drop ``dhw_warmup_hour_<date>`` (K2 pin) AND
-    ``dhw_warmup_shadow_<date>`` (observational would-pick) rows older than
-    ~7 days so the kv table can't accrue forever. Cheap + best-effort — a single
+    """Finding 4 (review #683): drop ``dhw_warmup_hour_<date>`` (K2 pin),
+    ``dhw_warmup_shadow_<date>`` (observational would-pick) AND
+    ``dhw_early_setback_<date>`` (drawdown fire time) rows older than ~7 days
+    so the kv table can't accrue forever. Cheap + best-effort — a single
     ``list_runtime_settings`` scan on the once-a-day persist, never fatal."""
     try:
         cutoff = today - timedelta(days=_WARMUP_KEY_TTL_DAYS)
         for row in db.list_runtime_settings():
             key = str(row.get("key", ""))
-            for prefix in (_WARMUP_KEY_PREFIX, _WARMUP_SHADOW_KEY_PREFIX):
+            for prefix in (
+                _WARMUP_KEY_PREFIX,
+                _WARMUP_SHADOW_KEY_PREFIX,
+                _EARLY_SETBACK_KEY_PREFIX,
+            ):
                 if not key.startswith(prefix):
                     continue
                 try:
@@ -324,6 +329,106 @@ def read_warmup_shadow(d: date) -> dict[str, Any] | None:
     except (TypeError, ValueError):
         return None
     return data if isinstance(data, dict) else None
+
+
+# --- Early setback on evening shower drawdown -------------------------------
+# When the household's showers drain the tank (a fast ≥N °C drop during the
+# evening window), holding the warmup target until the static 22:00 setback
+# makes the Onecta firmware reheat the freshly-drawn tank IMMEDIATELY — at
+# peak price, from the battery (~1.0-1.6 kWh measured, e.g. 2026-07-10:
+# 38→45 °C finishing at 21:53, seven minutes before the setback). The K2 pin
+# already models that reheat as DEFERRED to the next day's warmup
+# (SHOWER_REHEAT slots are ~0.12 kWh; the warmup transition carries the
+# deferred load), so pulling the setback forward to the detected drawdown
+# aligns the firmware's behaviour with what the LP already budgets.
+#
+# Same persist-once discipline as the warmup hour above: the heartbeat
+# detector (state_machine._check_dhw_shower_drawdown) persists
+# ``dhw_early_setback_<YYYY-MM-DD>`` = fire time (UTC ISO) exactly once per
+# local date; every re-plan then regenerates the cycle with the
+# warmup→setback boundary moved up to it, and the K2 pin
+# (forecast_dhw_load_per_slot) reads the same key — schedule, forecast and
+# fired rows can never disagree. Keys are swept with the warmup keys (~7 d).
+_EARLY_SETBACK_KEY_PREFIX = "dhw_early_setback_"
+
+
+def _early_setback_key(d: date) -> str:
+    return f"{_EARLY_SETBACK_KEY_PREFIX}{d.isoformat()}"
+
+
+def read_early_setback(d: date) -> datetime | None:
+    """The persisted early-setback fire time (UTC) for local date *d*, or None.
+
+    Pure reader — never persists. Malformed or naive stored values are
+    treated as absent (fail-safe: the static setback still fires at
+    ``DHW_SETBACK_START_HOUR_LOCAL``)."""
+    try:
+        raw = db.get_runtime_setting(_early_setback_key(d))
+    except Exception:  # pragma: no cover - defensive: reader must not fail
+        return None
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        return None
+    return ts.astimezone(UTC)
+
+
+def persist_early_setback(d: date, fired_at_utc: datetime) -> bool:
+    """Persist the early-setback fire time for local date *d* — first write
+    wins (re-checks the key so two heartbeat ticks can't both claim the
+    fire). Returns True iff THIS call persisted the value."""
+    if read_early_setback(d) is not None:
+        return False
+    try:
+        db.set_runtime_setting(_early_setback_key(d), _iso_z(fired_at_utc))
+        return True
+    except Exception:  # pragma: no cover - defensive
+        logger.debug(
+            "dhw_policy: persist early setback failed for %s", d, exc_info=True,
+        )
+        return False
+
+
+def build_early_setback_row(
+    target_date_local: date, start_utc: datetime,
+) -> dict[str, Any]:
+    """The immediate ``tank_setback`` row the drawdown detector upserts so the
+    setback fires on the NEXT heartbeat tick instead of waiting for a re-plan.
+
+    Same shape and end boundary (next day's warmup start, DST-safe) as the row
+    ``generate_daily_tank_schedule`` emits for this cycle once the persist-once
+    key is set — so a later re-plan upserts onto this very row (identical
+    natural key ``(daikin, tank_setback, start_time)``) instead of duplicating
+    it. Plain ``DHW_TEMP_SETBACK_C`` target: the detector never fires when a
+    negative-price boost overlaps the evening, so the pre-cool variant can't
+    apply here.
+
+    KNOWN LIMITATION (accepted): the end boundary freezes D+1's warmup hour
+    as read AT FIRE TIME. If the price-aware resolver later persists a
+    DIFFERENT hour for D+1 (rates land after ~16:00), this row's end is never
+    refreshed (``upsert_action`` won't touch an in-flight/completed row), so
+    it can overlap tomorrow's earlier warmup row. Harmless under the default
+    ``PREFIRE_STATE_MATCH_ENABLED=true`` — this row goes terminal within a
+    tick or two of firing, long before tomorrow's warmup — but if state-match
+    is ever disabled, revisit (a live 37 °C row overlapping the warmup would
+    thrash against it)."""
+    tz = _tz_local()
+    setback_c = int(round(float(getattr(config, "DHW_TEMP_SETBACK_C", 37))))
+    next_day = target_date_local + timedelta(days=1)
+    next_warmup = datetime(
+        next_day.year, next_day.month, next_day.day,
+        _read_warmup_hour(next_day), 0, tzinfo=tz,
+    )
+    return _make_action(
+        action_type="tank_setback",
+        start_utc=start_utc,
+        end_utc=next_warmup.astimezone(UTC),
+        tank_temp_c=setback_c,
+    )
 
 
 def _read_warmup_hour(d: date) -> int:
@@ -630,6 +735,20 @@ def generate_daily_tank_schedule(
     warmup_start_utc = warmup_start.astimezone(UTC)
     setback_start_utc = setback_start.astimezone(UTC)
     next_warmup_utc = next_warmup.astimezone(UTC)
+
+    # Early setback on shower drawdown: once the heartbeat detector persisted a
+    # fire time for this cycle, the warmup→setback boundary moves up to it on
+    # EVERY regeneration (re-plans included), so the fired early row and the
+    # regenerated schedule share the same boundary and upsert key. Clamped
+    # strictly inside (warmup_start, setback_start): a bogus/foreign key can
+    # only ever SHORTEN the warmup, never invert the cycle or extend it.
+    # Guests mode ignores the key entirely (no setback concept — morning
+    # showers possible).
+    if mode != "guests":
+        _early_ts = read_early_setback(target_date_local)
+        if _early_ts is not None and warmup_start_utc < _early_ts < setback_start_utc:
+            setback_start_utc = _early_ts
+
     neg_windows = _detect_negative_windows(agile_rates, warmup_start_utc, next_warmup_utc)
 
     # Boosts-only recovery path: emit just the negative-boost rows of this
@@ -1039,6 +1158,41 @@ def forecast_dhw_load_per_slot(
     def _warmup_hour_for(slot_local: datetime) -> int:
         return _warmup_by_date.get(slot_local.date(), _static_warmup_hour())
 
+    # Early setback on shower drawdown — READER ONLY, same lockstep rule as the
+    # warmup hour above: once the detector persisted a fire time for a local
+    # date, every slot of that date at/after it is a SETBACK slot (including
+    # the remaining shower-window slots — the showers already happened; that's
+    # what the detector detected), so the pin matches the pulled-forward
+    # setback row instead of budgeting a phantom evening reheat. Per-date
+    # cache: the horizon spans ~2 local dates → ≤2 kv reads per call. Only
+    # normal mode — guests keeps its 24 h warmup, vacation forecasts ~0.
+    # SAME CLAMP as the generator: a key outside that date's
+    # (warmup_start, setback_start) window is ignored — otherwise a bogus/
+    # foreign key rejected by K1 (schedule keeps the tank at NORMAL) would
+    # still de-budget the whole day here, and the pin would starve the real
+    # warmup of battery. K1 and K2 must reject in lockstep too.
+    _early_by_date: dict[date, datetime | None] = {}
+    if mode == "normal":
+        for _s in slot_starts_utc:
+            _d = _s.astimezone(tz).date()
+            if _d in _early_by_date:
+                continue
+            _ts = read_early_setback(_d)
+            if _ts is not None:
+                _w_start = datetime(
+                    _d.year, _d.month, _d.day, _warmup_by_date[_d], 0, tzinfo=tz,
+                ).astimezone(UTC)
+                _s_start = datetime(
+                    _d.year, _d.month, _d.day, setback_hour, 0, tzinfo=tz,
+                ).astimezone(UTC)
+                if not (_w_start < _ts < _s_start):
+                    _ts = None
+            _early_by_date[_d] = _ts
+
+    def _early_setback_active(slot_utc: datetime, slot_local: datetime) -> bool:
+        _ts = _early_by_date.get(slot_local.date())
+        return _ts is not None and slot_utc >= _ts
+
     normal_c = float(config.DHW_TEMP_NORMAL_C)
     setback_c = float(getattr(config, "DHW_TEMP_SETBACK_C", 37.0))
     boost_c = float(getattr(config, "DHW_NEGATIVE_PRICE_BOOST_C", 60.0))
@@ -1067,6 +1221,12 @@ def forecast_dhw_load_per_slot(
             return "vacation"
         slot_local = slot_utc.astimezone(tz)
         h = slot_local.hour
+
+        # Early setback beats even the shower window: the drawdown the
+        # detector saw IS the evening's showers, so the rest of this local
+        # date is setback (mirrors the pulled-forward tank_setback row).
+        if _early_setback_active(slot_utc, slot_local):
+            return "setback"
 
         # Shower windows take priority — biggest load contributor.
         if EVENING_SHOWER_START_H <= h < EVENING_SHOWER_END_H:
@@ -1189,6 +1349,8 @@ def forecast_dhw_load_per_slot(
             tank_temps.append(setback_c)  # firmware-owned; setback as proxy
         elif mode == "guests":
             tank_temps.append(normal_c)
+        elif _early_setback_active(slot, slot_local):
+            tank_temps.append(setback_c)
         elif _warmup_hour_for(slot_local) <= h < setback_hour:
             tank_temps.append(normal_c)
         else:
