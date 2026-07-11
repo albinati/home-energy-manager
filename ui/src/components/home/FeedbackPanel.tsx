@@ -68,6 +68,26 @@ export function FeedbackPanel({ pv }: { pv: PvTodayResponse | null }) {
 
   const acc = pv?.accuracy ?? null;
 
+  // Observational: the price-aware warmup resolver is OFF by default; this row
+  // shows what it WOULD pick vs the static hour so the delta can be watched
+  // toward a winter enable-decision. Tone is neutral (ok=null) — no verdict.
+  const warmup = d.dhw_warmup_shadow;
+  const hh = (h: number) => `${String(h).padStart(2, "0")}:00`;
+  const warmupValue = warmup
+    ? warmup.static_hour === warmup.would_pick_hour
+      ? `${hh(warmup.static_hour)} · no change`
+      : `${hh(warmup.static_hour)} → would pick ${hh(warmup.would_pick_hour)}${
+          warmup.delta_pence != null
+            ? ` · Δ ${warmup.delta_pence >= 0 ? "+" : ""}${warmup.delta_pence.toFixed(1)}p/slot`
+            : ""
+        }`
+    : "not yet resolved today";
+  const warmupTip = warmup
+    ? `shadow of the price-aware warmup resolver (${warmup.enabled ? "ENABLED" : "off — observational"}); resolved ${ageLabel(
+        (Date.now() - Date.parse(warmup.resolved_at)) / 1000,
+      )}`
+    : "price-aware warmup would-pick lands once the Agile window is fully published";
+
   return (
     <div class="widget-grid widget-band">
       <Widget title="Self-check" icon={<Icon name="check" size={14} />} tone="plan" size="wide">
@@ -98,6 +118,7 @@ export function FeedbackPanel({ pv }: { pv: PvTodayResponse | null }) {
               )}
             </SelfCheckItem>
             <SelfCheckItem ok={gateOk} label="Heating pre-heat" value={gateLabel} tip={gateTip} />
+            <SelfCheckItem ok={null} label="DHW warmup (shadow)" value={warmupValue} tip={warmupTip} />
           </div>
           {role.value === "admin" && <TriggersFeed />}
         </div>
