@@ -528,47 +528,47 @@ SCHEMA: dict[str, SettingSpec] = {
             "floor). Default 2.0%."
         ),
     ),
-    # A2 (#679) — final owner decision 2026-07-11, resolved by community research
-    # (Predbat + TonyM1958 + Fox firmware release notes) + our live probe:
-    #   * Backup is a STRICT no-discharge hold — Fox fixed the discharge-in-Backup
-    #     bug in master V1.39 and we run 1.51, so Backup never leaks into load
-    #     (the correct 2026-07-10 incident fix). Predbat implements its own Fox
-    #     hold via Backup + reserve pinned to minSocOnGrid — the same primitive,
-    #     external validation.
-    #   * Grid-charge in Backup is minSocOnGrid-DRIVEN: the inverter imports from
-    #     the grid ONLY to reach the minSoc floor when SoC < floor. maxSoc is a
-    #     PV-charge ceiling, not a grid target. So Backup(minSoc=reserve,
-    #     maxSoc=target) with SoC >= reserve does NOT grid-charge — it lets PV
-    #     fill toward the LP target while holding (no discharge, no autonomous
-    #     grid import), which is exactly solar_charge's purpose and respects the
-    #     "charging = the LP's decision" principle.
-    # DEFAULT is therefore 'backup_fill': 'backup_hold' (maxSoc=reserve) would
-    # BLOCK the PV fill and export midday surplus instead of stockpiling it for
-    # the evening, defeating solar_charge. The maxSoc-fill behaviour is confirmed
-    # at the MECHANISM level (grid-charge is minSoc-driven — our probe measured
-    # it); the exact fill curve is CONFIRMED by prod telemetry on the first sunny
-    # day via fox_mode_truth_table.py — instant runtime rollback to backup_hold
-    # or selfuse if a grid-import surprise appears (summer/cheap, behind this
-    # runtime flag). See #685.
+    # A2 (#679) — final owner decision 2026-07-11, CORRECTED after adversarial
+    # verification against our OWN 35-day truth table (docs/FOXESS/
+    # WORK_MODES_AND_SOC.md). The earlier "backup_fill is safe" reasoning was
+    # WRONG. Established facts on our H1 firmware 1.51:
+    #   * Backup is a STRICT no-discharge hold (Fox fixed discharge-in-Backup in
+    #     master V1.39; we run 1.51) — that part holds, and it is why A1 pre-peak
+    #     holds use Backup(reserve, reserve).
+    #   * BUT Backup grid-import is driven by **maxSoc** (the ceiling), NOT
+    #     minSoc. Truth-table row `Backup(minSoc=10, maxSoc unset/high)` shows
+    #     ~1.2 kW grid top-up even with SoC ABOVE the minSoc floor. The "won't
+    #     import from grid" behaviour is a v1.55 fix; we are on 1.51. So
+    #     `backup_fill = Backup(minSoc=reserve, maxSoc=LP_target)` with
+    #     target > current SoC would GRID-IMPORT at ~18p and curtail PV on sunny
+    #     solar_charge slots — the exact footgun.
+    # DEFAULT is therefore 'selfuse': plain SelfUse(reserve) lets PV fill and
+    # NEVER auto-imports (respects "charging = the LP's decision"); the rare
+    # discharge leak is accepted (empty-at-peak ~1/30 days, handled at the LP
+    # level). 'backup_fill' is retained as a NON-default, FIRMWARE-GATED option
+    # (safe only on fw >= 1.55). A structural guard (_guard_nonneg_backup_maxsoc)
+    # additionally clamps any Backup maxSoc > live SoC at a positive price, so
+    # the footgun cannot be armed by a mode mistake.
     "LP_SOLAR_CHARGE_FOX_MODE": SettingSpec(
         key="LP_SOLAR_CHARGE_FOX_MODE",
         type_name="str",
-        env_default=_str_env("LP_SOLAR_CHARGE_FOX_MODE", "backup_fill"),
-        enum=("backup_hold", "backup_fill", "selfuse"),
+        env_default=_str_env("LP_SOLAR_CHARGE_FOX_MODE", "selfuse"),
+        enum=("selfuse", "backup_hold", "backup_fill"),
         description=(
-            "A2 (#679): Fox mode for solar_charge slots. 'backup_fill' (DEFAULT) "
-            "= Backup(minSoc=reserve, maxSoc=planned-SoC): a strict no-discharge "
-            "hold that lets PV fill toward the LP target WITHOUT grid-charging "
-            "(grid-charge in Backup is minSoc-driven, and minSoc=reserve <= "
-            "current SoC) — the ideal PV-stockpile behaviour, community-confirmed "
-            "(Predbat/Fox 1.39+ release notes) + our 2026-07-11 probe; the fill "
-            "curve is verified in prod on the first sunny day via #685. "
-            "'backup_hold' = Backup(reserve, reserve): a pure hold that BLOCKS "
-            "the PV fill (exports midday surplus) — rollback if backup_fill ever "
-            "grid-imports. 'selfuse' = plain SelfUse at reserve (discharges to "
-            "reserve, does NOT hold) — the summer PV-export escape hatch. The "
-            "retired SelfUse(100,100) shape is never emittable. Vacation preset "
-            "always keeps plain SelfUse (its LP forbids grid->battery)."
+            "A2 (#679): Fox mode for solar_charge slots. 'selfuse' (DEFAULT) = "
+            "plain SelfUse at reserve — PV fills the battery and the inverter "
+            "NEVER auto-imports from grid (respects 'charging = the LP's "
+            "decision'); the rare discharge leak is accepted (empty-at-peak "
+            "~1/30 days, handled at the LP level). 'backup_hold' = "
+            "Backup(reserve, reserve): a strict no-discharge hold that also "
+            "BLOCKS the PV fill (exports midday surplus) — same tuple as A1 "
+            "pre-peak holds. 'backup_fill' = Backup(minSoc=reserve, "
+            "maxSoc=planned-SoC): lets PV fill toward the LP target BUT "
+            "**grid-imports toward maxSoc on firmware < 1.55 (our H1 is 1.51) — "
+            "do NOT enable until firmware >= 1.55 is confirmed** (the "
+            "_guard_nonneg_backup_maxsoc guard will clamp it to reserve at "
+            "positive prices meanwhile). The retired SelfUse(100,100) shape is "
+            "never emittable. Vacation preset always keeps plain SelfUse."
         ),
     ),
     # Legionella thermal-shock awareness. The Daikin Onecta firmware fires the

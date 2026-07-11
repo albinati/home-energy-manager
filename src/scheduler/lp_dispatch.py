@@ -1895,6 +1895,15 @@ def build_fox_groups_from_lp(
         # variance shrinks as the window approaches.
         cutoff = _dispatch_horizon_cutoff(slots)
         slots = [s for s in slots if s.start_utc < cutoff]
+    # Live SoC (%) the LP was seeded with at solve time — the best available
+    # "current SoC" for the no-import-hold invariant (#679): a Backup group at a
+    # positive price must not have maxSoc above it, else fw<1.55 grid-imports
+    # toward the ceiling. plan.soc_kwh[0] is the initial-state SoC.
+    live_soc_pct: float | None = None
+    cap = float(config.BATTERY_CAPACITY_KWH)
+    if plan.soc_kwh and cap > 0:
+        live_soc_pct = plan.soc_kwh[0] / cap * 100.0
+
     # peak_export_discharge=False: kind="peak_export" already maps to
     # ForceDischarge inside _slot_fox_tuple unconditionally; the flag here only
     # controls whether kind="peak" (no LP-planned export) is upgraded to
@@ -1905,6 +1914,7 @@ def build_fox_groups_from_lp(
         max_groups=8,
         peak_export_discharge=False,
         truncate_horizon=True,
+        live_soc_pct=live_soc_pct,
     )
 
 

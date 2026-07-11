@@ -80,17 +80,20 @@ def test_squashed_force_charge_tail_is_severe() -> None:
     ]
 
 
-def test_half_hour_boundary_slot_attributed_to_successor_group() -> None:
+def test_half_hour_boundary_slot_attributed_to_successor_group(monkeypatch) -> None:
     """Regression (#675 review): _merge_fox_groups stores half-hour group ends
     as :30 = EXCLUSIVE (only on-the-hour ends become :59 inclusive). A
     non-SelfUse group ending :30 with a different-mode successor starting :30
     must NOT swallow the successor's first slot — an inclusive lookup produced
     recurring false group_cap_compression mismatches and occasional false
     SEVERE (e.g. solar_charge hold ending, ForceCharge/Discharge starting)."""
+    # Use backup_hold so solar_charge yields a non-SelfUse predecessor group that
+    # survives the trivial-SelfUse drop (the default `selfuse` mode would be
+    # dropped, removing the boundary this test needs). #679.
+    monkeypatch.setattr(config, "LP_SOLAR_CHARGE_FOX_MODE", "backup_hold", raising=False)
     slots = [_slot(0, "solar_charge"), _slot(1, "cheap"), _slot(2, "cheap")]
     groups = _merge_fox_groups(slots, max_groups=8)
     # Preconditions: the REAL builder kept both windows, back-to-back at :30.
-    # #679: solar_charge now maps to Backup (was SelfUse Solar-Sponge).
     assert [g.work_mode for g in groups] == ["Backup", "ForceCharge"]
     assert (groups[0].end_hour, groups[0].end_minute) == (
         groups[1].start_hour, groups[1].start_minute,

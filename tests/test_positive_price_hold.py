@@ -63,7 +63,7 @@ def _normal_preset_hold_on(monkeypatch):
     monkeypatch.setattr(config, "LP_POSITIVE_HOLD_MIN_UPLIFT_PENCE", 5.0, raising=False)
     monkeypatch.setattr(config, "LP_POSITIVE_HOLD_MAX_GROUPS", 2, raising=False)
     monkeypatch.setattr(config, "LP_POSITIVE_HOLD_MIN_SOC_MARGIN_PCT", 2.0, raising=False)
-    monkeypatch.setattr(config, "LP_SOLAR_CHARGE_FOX_MODE", "backup_fill", raising=False)
+    monkeypatch.setattr(config, "LP_SOLAR_CHARGE_FOX_MODE", "selfuse", raising=False)
     # Keep slot KINDS deterministic — the post-shower tank_idle overlay would
     # otherwise relabel `standard` slots as `tank_idle_overnight` depending on
     # the wall clock (still valid holds, but noisy for these assertions).
@@ -203,23 +203,20 @@ def _solar_slot(target_soc_pct: int | None = 90):
     )
 
 
-def test_solar_charge_default_is_backup_fill_at_target():
-    # Final A2 default (backup_fill, 2026-07-11): strict no-discharge Backup that
-    # lets PV fill toward the LP target — minSoc=reserve (no grid-charge, since
-    # SoC >= reserve), maxSoc = the planned SoC (PV-charge ceiling).
+def test_solar_charge_default_is_plain_selfuse():
+    # Final A2 default (selfuse, 2026-07-11 CORRECTED): plain SelfUse at reserve
+    # — PV fills, the inverter never auto-imports. NOT the retired 100,100 shape.
     reserve = int(config.MIN_SOC_RESERVE_PERCENT)
     wm, fds, pwr, msg, max_soc = _slot_fox_tuple(_solar_slot(90))
-    assert wm == "Backup"
+    assert wm == "SelfUse"
     assert fds is None and pwr is None
-    assert msg == reserve  # minSoc <= current SoC → no autonomous grid import
-    assert max_soc == 90  # PV fills toward the planned end-of-window SoC
-    # No target → fill toward full.
-    _, _, _, _, max_soc_full = _slot_fox_tuple(_solar_slot(None))
-    assert max_soc_full == 100
+    assert msg == reserve
+    assert max_soc is None
 
 
 def test_solar_charge_backup_hold_pins_reserve(monkeypatch):
-    # backup_hold rollback: pure hold, maxSoc = reserve (blocks the PV fill).
+    # backup_hold: strict no-discharge hold, maxSoc = reserve (blocks PV fill,
+    # no grid-import). Same tuple A1 emits.
     monkeypatch.setattr(config, "LP_SOLAR_CHARGE_FOX_MODE", "backup_hold", raising=False)
     reserve = int(config.MIN_SOC_RESERVE_PERCENT)
     wm, _, _, msg, max_soc = _slot_fox_tuple(_solar_slot(90))
@@ -228,12 +225,19 @@ def test_solar_charge_backup_hold_pins_reserve(monkeypatch):
     assert max_soc == reserve  # pure hold — no PV fill above reserve
 
 
-def test_solar_charge_selfuse_escape_hatch_is_plain_reserve(monkeypatch):
-    monkeypatch.setattr(config, "LP_SOLAR_CHARGE_FOX_MODE", "selfuse", raising=False)
-    wm, fds, pwr, msg, max_soc = _slot_fox_tuple(_solar_slot(90))
-    assert wm == "SelfUse"
-    assert msg == int(config.MIN_SOC_RESERVE_PERCENT)
-    assert max_soc is None  # plain self-use at reserve — NOT the 100,100 shape
+def test_solar_charge_backup_fill_is_selectable_but_firmware_gated(monkeypatch):
+    # backup_fill emits Backup(reserve, target). It is FIRMWARE-GATED (fw<1.55
+    # grid-imports toward maxSoc) — still selectable for post-upgrade use. Note:
+    # _slot_fox_tuple alone does NOT clamp; the no-import guard clamps at merge
+    # time when a live SoC is known (tested separately).
+    monkeypatch.setattr(config, "LP_SOLAR_CHARGE_FOX_MODE", "backup_fill", raising=False)
+    reserve = int(config.MIN_SOC_RESERVE_PERCENT)
+    wm, _, _, msg, max_soc = _slot_fox_tuple(_solar_slot(90))
+    assert wm == "Backup"
+    assert msg == reserve
+    assert max_soc == 90
+    _, _, _, _, max_soc_full = _slot_fox_tuple(_solar_slot(None))
+    assert max_soc_full == 100
 
 
 @pytest.mark.parametrize("mode", ["backup_hold", "backup_fill", "selfuse"])
@@ -247,12 +251,12 @@ def test_solar_charge_vacation_is_plain_selfuse(monkeypatch, mode):
     assert max_soc is None
 
 
-def test_unknown_solar_mode_falls_back_to_backup_fill(monkeypatch):
+def test_unknown_solar_mode_falls_back_to_selfuse(monkeypatch):
     monkeypatch.setattr(config, "LP_SOLAR_CHARGE_FOX_MODE", "bogus", raising=False)
     reserve = int(config.MIN_SOC_RESERVE_PERCENT)
     wm, _, _, msg, max_soc = _slot_fox_tuple(_solar_slot(90))
-    # Fallback is the default backup_fill → maxSoc = target (90), not reserve.
-    assert wm == "Backup" and msg == reserve and max_soc == 90
+    # Fallback is the default 'selfuse' → plain SelfUse(reserve, None).
+    assert wm == "SelfUse" and msg == reserve and max_soc is None
 
 
 @pytest.mark.parametrize("mode", ["backup_hold", "backup_fill", "selfuse"])
@@ -266,6 +270,69 @@ def test_solar_charge_never_emits_hundred_hundred(monkeypatch, mode, preset):
             f"the retired SelfUse(100,100) shape must never be emitted "
             f"(mode={mode}, preset={preset}, target={tgt})"
         )
+
+
+# --- No-import-hold invariant guard (_guard_nonneg_backup_maxsoc) ----------
+
+
+def test_guard_clamps_positive_price_backup_maxsoc_above_soc():
+    from src.scheduler.optimizer import _guard_nonneg_backup_maxsoc
+    reserve = int(config.MIN_SOC_RESERVE_PERCENT)
+    # backup_fill shape at a POSITIVE price with maxSoc (90) way above live SoC
+    # (40) → clamp maxSoc to reserve (would grid-import on fw<1.55 otherwise).
+    key = ("Backup", None, None, reserve, 90)
+    out = _guard_nonneg_backup_maxsoc(key, price_pence=18.0, live_soc_pct=40.0)
+    assert out == ("Backup", None, None, reserve, reserve)
+
+
+def test_guard_allows_backup_maxsoc_at_or_below_soc():
+    from src.scheduler.optimizer import _guard_nonneg_backup_maxsoc
+    reserve = int(config.MIN_SOC_RESERVE_PERCENT)
+    # maxSoc (60) <= live SoC (65) → no import possible → untouched.
+    key = ("Backup", None, None, reserve, 60)
+    assert _guard_nonneg_backup_maxsoc(key, 18.0, 65.0) == key
+    # A1 pure hold (maxSoc = reserve) is always safe → untouched.
+    a1 = ("Backup", None, None, reserve, reserve)
+    assert _guard_nonneg_backup_maxsoc(a1, 18.0, 20.0) == a1
+
+
+def test_guard_exempts_negative_price_and_unpinned():
+    from src.scheduler.optimizer import _guard_nonneg_backup_maxsoc
+    reserve = int(config.MIN_SOC_RESERVE_PERCENT)
+    # negative_hold window: price <= 0 → paid top-up intended → untouched even
+    # with a high maxSoc.
+    key = ("Backup", None, None, reserve, 100)
+    assert _guard_nonneg_backup_maxsoc(key, -3.0, 20.0) == key
+    # Unpinned Backup (maxSoc=None, negative_hold default) → untouched.
+    unp = ("Backup", None, None, reserve, None)
+    assert _guard_nonneg_backup_maxsoc(unp, -3.0, 20.0) == unp
+    # None live SoC (no reading) → guard disabled → untouched.
+    fill = ("Backup", None, None, reserve, 90)
+    assert _guard_nonneg_backup_maxsoc(fill, 18.0, None) == fill
+    # Non-Backup tuples pass through.
+    su = ("SelfUse", None, None, reserve, None)
+    assert _guard_nonneg_backup_maxsoc(su, 18.0, 20.0) == su
+
+
+def test_guard_integrates_via_merge_backup_fill(monkeypatch):
+    # End-to-end: backup_fill solar_charge at a positive price with low live SoC
+    # → the merged Fox group is clamped to a reserve-pinned Backup (no import).
+    from src.scheduler.optimizer import HalfHourSlot, _merge_fox_groups
+    monkeypatch.setattr(config, "LP_SOLAR_CHARGE_FOX_MODE", "backup_fill", raising=False)
+    monkeypatch.setattr(config, "BULLETPROOF_TIMEZONE", "Europe/London", raising=False)
+    reserve = int(config.MIN_SOC_RESERVE_PERCENT)
+    s = HalfHourSlot(
+        start_utc=T0, end_utc=T0 + timedelta(minutes=30),
+        price_pence=18.0, kind="solar_charge", target_soc_pct=90,
+    )
+    # live SoC 40% << maxSoc 90 → guard clamps.
+    groups = _merge_fox_groups([s], live_soc_pct=40.0)
+    assert len(groups) == 1
+    assert groups[0].work_mode == "Backup"
+    assert groups[0].max_soc == reserve
+    # Without a live SoC the guard is inert (unit-test/back-compat path).
+    groups_noguard = _merge_fox_groups([s])
+    assert groups_noguard[0].max_soc == 90
 
 
 # --- Merge / cap interactions ---------------------------------------------

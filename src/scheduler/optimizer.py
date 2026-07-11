@@ -332,54 +332,49 @@ def _slot_fox_tuple(
 
     For ForceCharge slots the ``fdPwr`` (W) is taken from ``s.lp_grid_import_w`` when set
     (LP path), or falls back to the configured ``FOX_FORCE_CHARGE_*_PWR`` constants.
-    For solar_charge slots the battery is held via **Backup** that lets PV fill
-    toward the LP target without grid-charging (#679, A2, ``backup_fill``
-    default) — Backup is a strict no-discharge hold on the H1. The old
-    SelfUse(minSocOnGrid=100, maxSoc=100) "Solar Sponge" shape is **RETIRED**:
-    the A0 finding (40,369 prod samples) showed that floor discharged below
-    reserve 40.6% of the time — it was the 2026-07-10 leak, not a hold. It is no
-    longer emittable anywhere.
+    For solar_charge slots the battery uses **plain SelfUse at reserve** (#679,
+    A2, ``selfuse`` default): PV fills the battery and the inverter never
+    auto-imports. The old SelfUse(minSocOnGrid=100, maxSoc=100) "Solar Sponge"
+    shape is **RETIRED**: the A0 finding (40,369 prod samples) showed that floor
+    discharged below reserve 40.6% of the time — it was the 2026-07-10 leak, not
+    a hold. It is no longer emittable anywhere.
     """
     min_r = int(config.MIN_SOC_RESERVE_PERCENT)
     if s.kind == "solar_charge":
-        # A2 (#679) — final owner decision (2026-07-11), resolved by community
-        # research (Predbat + TonyM1958 + Fox firmware release notes) + our live
-        # probe. Established facts:
-        #   * Backup = STRICT no-discharge hold. Fox fixed the discharge-in-Backup
-        #     bug in master V1.39; we run 1.51, so Backup never leaks into load —
-        #     the correct 07-10 incident fix. (Predbat holds Fox the same way:
-        #     Backup + reserve pinned to minSocOnGrid.)
-        #   * Grid-charge in Backup is minSocOnGrid-DRIVEN — the inverter imports
-        #     ONLY to reach the minSoc floor when SoC < floor. maxSoc is a
-        #     PV-charge ceiling, NOT a grid target. So Backup(minSoc=reserve,
-        #     maxSoc=tgt) with SoC >= reserve does NOT grid-charge; it just lets
-        #     PV fill toward the LP target while holding (no discharge, no
-        #     autonomous grid import) — exactly solar_charge's purpose.
+        # A2 (#679) — final decision (2026-07-11), CORRECTED after adversarial
+        # verification against our 35-day truth table (an earlier "backup_fill is
+        # safe" reasoning was WRONG). Facts on our H1 firmware 1.51:
+        #   * Backup = STRICT no-discharge hold (Fox fixed discharge-in-Backup in
+        #     master V1.39; we run 1.51). This is why A1 pre-peak holds use
+        #     Backup(reserve, reserve).
+        #   * BUT Backup grid-import is driven by **maxSoc** (the ceiling), NOT
+        #     minSoc: truth-table row Backup(minSoc=10, maxSoc unset/high) shows
+        #     ~1.2 kW grid top-up even with SoC ABOVE the minSoc floor. The
+        #     "won't grid-import" behaviour is the v1.55 fix; we are on 1.51.
+        #     So Backup(minSoc=reserve, maxSoc=tgt) with tgt > SoC would
+        #     GRID-IMPORT at ~18p and curtail PV — the footgun.
         # LP_SOLAR_CHARGE_FOX_MODE ∈
-        #   "backup_fill" (DEFAULT) — ("Backup", None, None, reserve,
-        #       max(reserve, tgt)). PV fills toward the LP target (tgt = planned
-        #       end-of-window SoC, else 100) while holding; no grid-charge. The
-        #       ideal PV-stockpile behaviour. Mechanism confirmed by the probe;
-        #       the exact fill curve is verified in prod on the first sunny day
-        #       via fox_mode_truth_table.py (#685) — instant runtime rollback to
-        #       backup_hold/selfuse if a grid-import surprise appears (summer/
-        #       cheap, behind this flag).
-        #   "backup_hold" — ("Backup", None, None, reserve, reserve). A pure
-        #       hold that BLOCKS the PV fill (maxSoc=reserve) and exports midday
-        #       surplus instead of stockpiling. Rollback for backup_fill; also
-        #       the exact tuple A1 pre-peak holds emit (where NOT charging is the
-        #       intent).
-        #   "selfuse" — ("SelfUse", None, None, reserve, None). Plain honest
-        #       self-use: discharges to reserve, does NOT hold. Summer PV-export
-        #       escape hatch. NOT the retired 100,100 shape (the A0 bug).
+        #   "selfuse" (DEFAULT) — ("SelfUse", None, None, reserve, None). Plain
+        #       self-use: PV fills, the inverter NEVER auto-imports (respects
+        #       "charging = the LP's decision"). Rare discharge leak accepted
+        #       (empty-at-peak ~1/30 days, handled at the LP level). NOT the
+        #       retired 100,100 shape (the A0 bug).
+        #   "backup_hold" — ("Backup", None, None, reserve, reserve). A strict
+        #       no-discharge hold that also BLOCKS the PV fill (maxSoc=reserve,
+        #       no grid-import); same tuple A1 pre-peak holds emit.
+        #   "backup_fill" — ("Backup", None, None, reserve, max(reserve, tgt)).
+        #       PV fills toward the LP target BUT grid-imports toward maxSoc on
+        #       fw < 1.55 (our H1 is 1.51). FIRMWARE-GATED: do NOT use until
+        #       fw >= 1.55. The _guard_nonneg_backup_maxsoc guard clamps it to
+        #       reserve at positive prices meanwhile.
         # Vacation preset: its LP forbids grid->battery — force plain
         # SelfUse(reserve) regardless of mode.
-        mode = str(getattr(config, "LP_SOLAR_CHARGE_FOX_MODE", "backup_fill")).strip().lower()
-        if mode not in ("backup_hold", "backup_fill", "selfuse"):
+        mode = str(getattr(config, "LP_SOLAR_CHARGE_FOX_MODE", "selfuse")).strip().lower()
+        if mode not in ("selfuse", "backup_hold", "backup_fill"):
             logger.warning(
-                "LP_SOLAR_CHARGE_FOX_MODE=%r not recognised — using 'backup_fill'", mode
+                "LP_SOLAR_CHARGE_FOX_MODE=%r not recognised — using 'selfuse'", mode
             )
-            mode = "backup_fill"
+            mode = "selfuse"
         if _optimization_preset_away_like():
             # Vacation — plain self-use at reserve (no grid->battery).
             return ("SelfUse", None, None, min_r, None)
@@ -388,7 +383,7 @@ def _slot_fox_tuple(
         if mode == "backup_fill":
             tgt = int(s.target_soc_pct) if s.target_soc_pct is not None else 100
             return ("Backup", None, None, min_r, max(min_r, tgt))
-        # "selfuse" escape hatch — plain honest self-use at reserve.
+        # "selfuse" (default) — plain honest self-use at reserve.
         return ("SelfUse", None, None, min_r, None)
     if s.kind == "negative":
         pwr = s.lp_grid_import_w if s.lp_grid_import_w is not None else config.FOX_FORCE_CHARGE_MAX_PWR
@@ -485,6 +480,57 @@ def _slot_fox_tuple(
     return ("SelfUse", None, None, min_r, None)
 
 
+# Small tolerance so a Backup maxSoc pinned exactly at (or a hair above) the
+# live SoC — where no meaningful grid-import happens — isn't needlessly clamped.
+_BACKUP_MAXSOC_SOC_MARGIN_PCT = 2.0
+
+
+def _guard_nonneg_backup_maxsoc(
+    key: tuple,
+    price_pence: float,
+    live_soc_pct: float | None,
+) -> tuple:
+    """Structural safety invariant (#679): a Backup group emitted at a
+    **positive** price must be a NO-IMPORT hold — its ``maxSoc`` must not exceed
+    the live SoC.
+
+    On our H1 firmware 1.51, Backup grid-import is driven by ``maxSoc`` (the
+    ceiling), NOT ``minSoc``: the inverter tops the battery up from the grid
+    toward ``maxSoc`` even when SoC is already above the ``minSoc`` floor (the
+    "won't grid-import" behaviour is the v1.55 fix). So a Backup group with
+    ``maxSoc`` above the live SoC at a positive price would import at ~18p and
+    curtail PV — the 2026-07-10 footgun class. This guard clamps such a
+    ``maxSoc`` down to the reserve floor (a pure hold) and warns, so the footgun
+    cannot be armed regardless of which ``LP_SOLAR_CHARGE_FOX_MODE`` is chosen or
+    what a future mode emits.
+
+    ``negative_hold`` is exempt by construction: it fires only at ``price <= 0``
+    where the in-window paid top-up is intended, and this guard triggers only at
+    ``price > 0``. Non-Backup tuples, ``maxSoc is None`` (unpinned — charge to
+    full is the intent, only reachable at negative prices here), and the
+    ``live_soc_pct is None`` case (caller has no live reading → no clamp) all
+    pass through unchanged.
+    """
+    if live_soc_pct is None:
+        return key
+    wm = key[0]
+    max_soc = key[4] if len(key) > 4 else None
+    if wm != "Backup" or max_soc is None:
+        return key
+    if price_pence <= 0:
+        return key  # negative window — paid top-up is intended
+    if max_soc > live_soc_pct + _BACKUP_MAXSOC_SOC_MARGIN_PCT:
+        reserve = int(config.MIN_SOC_RESERVE_PERCENT)
+        logger.warning(
+            "Backup maxSoc=%s%% > live SoC=%.0f%% (+%.0f margin) at price=%.2fp — "
+            "clamping maxSoc to reserve=%s%% to prevent fw<1.55 grid-import "
+            "(#679 no-import-hold invariant)",
+            max_soc, live_soc_pct, _BACKUP_MAXSOC_SOC_MARGIN_PCT, price_pence, reserve,
+        )
+        return (wm, key[1], key[2], key[3], reserve)
+    return key
+
+
 def _optimization_preset_away_like() -> bool:
     """True when household preset is vacation (hibernate / export-friendly).
 
@@ -567,6 +613,7 @@ def _merge_fox_groups(
     *,
     peak_export_discharge: bool = False,
     truncate_horizon: bool = False,
+    live_soc_pct: float | None = None,
 ) -> list[SchedulerGroup] | tuple[list[SchedulerGroup], datetime | None]:
     """Build Fox V3 SchedulerGroup list from per-slot LP output, capped at ``max_groups``.
 
@@ -578,16 +625,26 @@ def _merge_fox_groups(
     ``replan_at_utc`` is the UTC end-time of the last surviving window (the caller
     should schedule a one-shot MPC re-plan slightly before this); ``None`` if no
     truncation was needed.
+
+    ``live_soc_pct``: when provided, the ``_guard_nonneg_backup_maxsoc`` invariant
+    clamps any Backup group whose ``maxSoc`` exceeds the live SoC at a positive
+    price (the fw<1.55 grid-import footgun, #679). ``None`` disables the guard
+    (back-compat for callers without a live reading — e.g. unit tests).
     """
     if not slots:
         return ([], None) if truncate_horizon else []
     tz = TZ()
+
+    def _key_for(s: HalfHourSlot) -> tuple:
+        k = _slot_fox_tuple(s, peak_export_discharge=peak_export_discharge)
+        return _guard_nonneg_backup_maxsoc(k, s.price_pence, live_soc_pct)
+
     merged: list[tuple[datetime, datetime, tuple]] = []
     cur_start = slots[0].start_utc
     cur_end = slots[0].end_utc
-    cur_key = _slot_fox_tuple(slots[0], peak_export_discharge=peak_export_discharge)
+    cur_key = _key_for(slots[0])
     for s in slots[1:]:
-        k = _slot_fox_tuple(s, peak_export_discharge=peak_export_discharge)
+        k = _key_for(s)
         if k == cur_key and s.start_utc == cur_end:
             cur_end = s.end_utc
         else:
@@ -604,9 +661,10 @@ def _merge_fox_groups(
     # _coarse_merge_fox stays: two SelfUse windows only merge when their floors
     # match, so an elevated-floor SelfUse never silently absorbs a reserve one.
     # (The original motivating case — a solar_charge SelfUse(minSoc=100) next to
-    # a standard SelfUse(10) — no longer arises: solar_charge is now Backup, a
-    # different workMode that structurally cannot merge with SelfUse. The guard
-    # is kept for any other SelfUse-floor variants.)
+    # a standard SelfUse(10) — no longer arises: the retired 100,100 shape is
+    # gone; solar_charge's default is plain SelfUse(reserve), the same floor as
+    # a standard slot, so they merge cleanly. The guard is kept for any other
+    # SelfUse-floor variants.)
     merged = _coarse_merge_fox(merged)
 
     # Camada 0: drop trivial SelfUse windows (work_mode=SelfUse AND

@@ -232,11 +232,11 @@ def test_slot_fox_tuple_standard_selfuse_uses_reserve_min_soc() -> None:
     assert msg == _min_r()
 
 
-def test_solar_charge_emits_backup_fill_at_target() -> None:
-    """#679 A2 (final, 2026-07-11): a solar_charge slot emits Backup that lets PV
-    fill toward the LP target (backup_fill default) — minSoc=reserve (no
-    grid-charge, since SoC >= reserve) and maxSoc = planned SoC (PV-charge
-    ceiling). Backup is a strict no-discharge hold; this is NOT the retired
+def test_solar_charge_emits_plain_selfuse_by_default() -> None:
+    """#679 A2 (final, 2026-07-11 CORRECTED): a solar_charge slot uses plain
+    SelfUse at reserve by default — PV fills, the inverter never auto-imports.
+    On fw 1.51 Backup grid-import is maxSoc-driven, so a Backup fill would
+    grid-import; SelfUse is the safe default. This is NOT the retired
     SelfUse(minSoc=100, maxSoc=100) 'Solar Sponge' shape (H1 discharged through
     it, A0)."""
     t0 = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
@@ -248,18 +248,13 @@ def test_solar_charge_emits_backup_fill_at_target() -> None:
         target_soc_pct=88,
     )
     wm, fds, pwr, msg, max_soc = _slot_fox_tuple(s)
-    assert wm == "Backup"
+    assert wm == "SelfUse"
     assert fds is None
     assert pwr is None
     assert msg == _min_r()
-    assert max_soc == 88  # PV fills toward the planned SoC
+    assert max_soc is None  # plain self-use at reserve
     # The retired 100,100 SelfUse shape must never be produced.
     assert not (wm == "SelfUse" and msg == 100 and max_soc == 100)
-    # Confirm propagation through the merge pipeline + into the API payload.
-    groups = _merge_fox_groups([s])
-    assert len(groups) == 1
-    assert groups[0].work_mode == "Backup"
-    assert groups[0].max_soc == 88
 
 
 def test_non_solar_charge_kinds_have_no_max_soc() -> None:
