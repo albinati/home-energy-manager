@@ -506,23 +506,27 @@ def _guard_nonneg_backup_maxsoc(
 
     ``negative_hold`` is exempt by construction: it fires only at ``price <= 0``
     where the in-window paid top-up is intended, and this guard triggers only at
-    ``price > 0``. Non-Backup tuples, ``maxSoc is None`` (unpinned — charge to
-    full is the intent, only reachable at negative prices here), and the
-    ``live_soc_pct is None`` case (caller has no live reading → no clamp) all
-    pass through unchanged.
+    ``price > 0``. At a positive price, ``maxSoc is None`` is treated as an
+    over-limit ceiling too — on our fw an unpinned Backup means "charge to full
+    (~100)", the MAXIMAL grid-import footgun — so it is clamped like any other
+    over-limit maxSoc. Non-Backup tuples and the ``live_soc_pct is None`` case
+    (caller has no live reading → no clamp) pass through unchanged.
     """
     if live_soc_pct is None:
         return key
     wm = key[0]
-    max_soc = key[4] if len(key) > 4 else None
-    if wm != "Backup" or max_soc is None:
+    if wm != "Backup":
         return key
     if price_pence <= 0:
         return key  # negative window — paid top-up is intended
-    if max_soc > live_soc_pct + _BACKUP_MAXSOC_SOC_MARGIN_PCT:
+    max_soc = key[4] if len(key) > 4 else None
+    # At a positive price, maxSoc=None ("charge to full ~100") is the maximal
+    # footgun → treat it as over-limit. Otherwise clamp only when the numeric
+    # ceiling exceeds live SoC (+ margin).
+    if max_soc is None or max_soc > live_soc_pct + _BACKUP_MAXSOC_SOC_MARGIN_PCT:
         reserve = int(config.MIN_SOC_RESERVE_PERCENT)
         logger.warning(
-            "Backup maxSoc=%s%% > live SoC=%.0f%% (+%.0f margin) at price=%.2fp — "
+            "Backup maxSoc=%s > live SoC=%.0f%% (+%.0f margin) at price=%.2fp — "
             "clamping maxSoc to reserve=%s%% to prevent fw<1.55 grid-import "
             "(#679 no-import-hold invariant)",
             max_soc, live_soc_pct, _BACKUP_MAXSOC_SOC_MARGIN_PCT, price_pence, reserve,

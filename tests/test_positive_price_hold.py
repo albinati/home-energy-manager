@@ -296,14 +296,14 @@ def test_guard_allows_backup_maxsoc_at_or_below_soc():
     assert _guard_nonneg_backup_maxsoc(a1, 18.0, 20.0) == a1
 
 
-def test_guard_exempts_negative_price_and_unpinned():
+def test_guard_exempts_negative_price_and_disabled_cases():
     from src.scheduler.optimizer import _guard_nonneg_backup_maxsoc
     reserve = int(config.MIN_SOC_RESERVE_PERCENT)
     # negative_hold window: price <= 0 → paid top-up intended → untouched even
     # with a high maxSoc.
     key = ("Backup", None, None, reserve, 100)
     assert _guard_nonneg_backup_maxsoc(key, -3.0, 20.0) == key
-    # Unpinned Backup (maxSoc=None, negative_hold default) → untouched.
+    # Unpinned Backup (maxSoc=None) at price <= 0 → paid top-up intended → untouched.
     unp = ("Backup", None, None, reserve, None)
     assert _guard_nonneg_backup_maxsoc(unp, -3.0, 20.0) == unp
     # None live SoC (no reading) → guard disabled → untouched.
@@ -312,6 +312,17 @@ def test_guard_exempts_negative_price_and_unpinned():
     # Non-Backup tuples pass through.
     su = ("SelfUse", None, None, reserve, None)
     assert _guard_nonneg_backup_maxsoc(su, 18.0, 20.0) == su
+
+
+def test_guard_clamps_positive_price_unpinned_backup():
+    from src.scheduler.optimizer import _guard_nonneg_backup_maxsoc
+    reserve = int(config.MIN_SOC_RESERVE_PERCENT)
+    # maxSoc=None at a POSITIVE price = "charge to full ~100" = the maximal
+    # grid-import footgun on fw<1.55 → must clamp to reserve (not reachable
+    # today, but the guard is mode-agnostic by design).
+    unpinned = ("Backup", None, None, reserve, None)
+    out = _guard_nonneg_backup_maxsoc(unpinned, price_pence=18.0, live_soc_pct=40.0)
+    assert out == ("Backup", None, None, reserve, reserve)
 
 
 def test_guard_integrates_via_merge_backup_fill(monkeypatch):
