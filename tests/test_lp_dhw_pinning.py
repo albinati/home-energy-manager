@@ -454,25 +454,26 @@ def test_price_aware_disabled_is_byte_identical(monkeypatch, _dhw_db):
 
 
 def test_price_aware_moves_warmup_and_pins_in_lockstep(monkeypatch, _dhw_db):
-    """K2 divergence guard (#1): resolve at one wall-clock, generate the
-    schedule at another — the pinned e_dhw transition slots must land on the
-    SAME hour as the upserted warmup row (persist-once makes them agree)."""
+    """K2 divergence guard (#1): the single writer resolves+persists once; the
+    K2 pin (forecast) and the fired warmup row (generate) then BOTH read that
+    frozen hour — they can never diverge, at any wall-clock, under any later
+    (perturbed) prices."""
     from datetime import date
     monkeypatch.setattr(config, "DHW_WARMUP_PRICE_AWARE_ENABLED", True, raising=False)
     monkeypatch.setattr(config, "OPTIMIZATION_PRESET", "normal", raising=False)
     day = date(2026, 1, 15)
     rates = _winter_prices(day, cheap_hour=15)  # cheapest at 15:00 local
 
-    # (a) First resolve happens via the LP forecast path (persist-once fires).
+    # The WRITER runs once (this is the LP-solve path's job in prod).
+    assert dhw_policy.resolve_warmup_hour_local(day, rates) == 15
+    assert dhw_policy._persisted_warmup_hour(day) == 15
+
+    # (a) The K2 pin (forecast, a READER) puts the transition pulse at 15:00.
     base = datetime(day.year, day.month, day.day, 10, 0, tzinfo=TZ_LOCAL).astimezone(UTC)
     n = 28  # 10:00 → 24:00 local
     slots = [base + timedelta(minutes=30 * i) for i in range(n)]
-    price_line = _price_line_from_rates(slots, rates)
-    e_dhw, _ = dhw_policy.forecast_dhw_load_per_slot(
-        slots, mode="normal", price_line=price_line)
-    assert dhw_policy._persisted_warmup_hour(day) == 15
+    e_dhw, _ = dhw_policy.forecast_dhw_load_per_slot(slots, mode="normal")
 
-    # The transition pulse (2 × WARMUP_TRANSITION) must be at 15:00/15:30 local.
     def _slot_local_hour(i):
         return slots[i].astimezone(TZ_LOCAL).hour
     transition_idx = [i for i, v in enumerate(e_dhw) if v > 0.3]
@@ -482,15 +483,15 @@ def test_price_aware_moves_warmup_and_pins_in_lockstep(monkeypatch, _dhw_db):
         f"{[_slot_local_hour(i) for i in transition_idx]}, expected 15"
     )
 
-    # (b) Now generate the fired schedule (a later re-plan) — even if we hand it
-    # DIFFERENT prices, persist-once keeps the warmup row on 15:00.
+    # (b) The fired schedule (generate, a READER) — even handed DIFFERENT
+    # prices, it reads the persisted 15:00 and never re-picks.
     rates_shifted = _winter_prices(day, cheap_hour=11)  # would-be cheapest at 11
     rows = dhw_policy.generate_daily_tank_schedule(
         day, agile_rates=rates_shifted, allow_past=True)
     warmup = [r for r in rows if r["action_type"] == "tank_warmup"][0]
     assert warmup["start_time"] == "2026-01-15T15:00:00Z", (
-        "persist-once must hold the warmup at the first-resolved hour across "
-        "re-plans so the fired row and the K2 pin never diverge"
+        "reader must hold the warmup at the persisted hour so the fired row "
+        "and the K2 pin never diverge"
     )
     # Setback UNMOVED — the restore covenant.
     setback = [r for r in rows if r["action_type"] == "tank_setback"][0]
@@ -499,13 +500,16 @@ def test_price_aware_moves_warmup_and_pins_in_lockstep(monkeypatch, _dhw_db):
 
 def test_price_aware_warmup_at_window_edges_stays_feasible(monkeypatch, _dhw_db):
     """#422/shower/tank-thermo floor skips stay intact when the warmup moves to
-    the window edges (11:00 and 15:30 via 15:00): no Infeasible."""
+    the window edges (11:00 and 15:00): no Infeasible. The writer persists the
+    hour first; the solve's K2 pin reads it."""
     from datetime import date
     monkeypatch.setattr(config, "DHW_WARMUP_PRICE_AWARE_ENABLED", True, raising=False)
     monkeypatch.setattr(config, "OPTIMIZATION_PRESET", "normal", raising=False)
     for cheap_hour, day in ((11, date(2026, 1, 16)), (15, date(2026, 1, 17))):
         dhw_policy._warmup_shadow_logged.clear()
         rates = _winter_prices(day, cheap_hour=cheap_hour)
+        assert dhw_policy.resolve_warmup_hour_local(day, rates) == cheap_hour
+        assert dhw_policy._persisted_warmup_hour(day) == cheap_hour
         base = datetime(day.year, day.month, day.day, 10, 0,
                         tzinfo=TZ_LOCAL).astimezone(UTC)
         n = 24
@@ -518,21 +522,122 @@ def test_price_aware_warmup_at_window_edges_stays_feasible(monkeypatch, _dhw_db)
         assert plan.ok, (
             f"warmup moved to {cheap_hour}:00 must stay feasible; got {plan.status}"
         )
-        assert dhw_policy._persisted_warmup_hour(day) == cheap_hour
 
 
-def test_price_aware_tomorrow_falls_back_when_rates_absent(monkeypatch, _dhw_db):
-    """Horizon covers ~2 local days; tomorrow resolves only when its Agile
-    rates exist, else deterministic static fallback (NOT persisted)."""
+def test_price_aware_display_reader_never_persists(monkeypatch, _dhw_db):
+    """Finding 2: a generate call BEFORE any solve (dashboard hit / boundary
+    dispatch) is a pure READER — it must NOT persist, even handed a full,
+    real, in-window rate set. Only the LP-solve writer freezes an hour."""
+    from datetime import date
+    monkeypatch.setattr(config, "DHW_WARMUP_PRICE_AWARE_ENABLED", True, raising=False)
+    monkeypatch.setattr(config, "OPTIMIZATION_PRESET", "normal", raising=False)
+    day = date(2026, 1, 18)
+    rates = _winter_prices(day, cheap_hour=11)
+    rows = dhw_policy.generate_daily_tank_schedule(
+        day, agile_rates=rates, allow_past=True)
+    warmup = [r for r in rows if r["action_type"] == "tank_warmup"][0]
+    # Nothing persisted → reader fell back to the static 13:00.
+    assert dhw_policy._persisted_warmup_hour(day) is None
+    assert warmup["start_time"] == "2026-01-18T13:00:00Z"
+
+
+def test_price_aware_tomorrow_not_frozen_from_priors(monkeypatch, _dhw_db):
+    """Finding 1: when D+1's Agile isn't published, the horizon-extender fills
+    the tail with synthetic ``fetched_at="prior"`` rows. The writer must NOT
+    freeze tomorrow from those priors — it resolves+persists only once REAL
+    rates cover the whole window."""
     from datetime import date
     monkeypatch.setattr(config, "DHW_WARMUP_PRICE_AWARE_ENABLED", True, raising=False)
     today = date(2026, 1, 15)
     tomorrow = date(2026, 1, 16)
-    # Only today's rates are present.
-    rates = _winter_prices(today, cheap_hour=15)
-    assert dhw_policy.resolve_warmup_hour_local(today, rates) == 15
-    # Tomorrow: no price data → static, and NOT persisted (so it can resolve
-    # once tomorrow's rates publish ~16:00).
-    assert dhw_policy.resolve_warmup_hour_local(tomorrow, agile_rates=None) == \
+
+    # Today real (cheapest 15). Tomorrow only as SYNTHETIC priors (cheapest 11).
+    real_today = _winter_prices(today, cheap_hour=15)
+    prior_tomorrow = _winter_prices(tomorrow, cheap_hour=11)
+    for r in prior_tomorrow:
+        r["fetched_at"] = "prior"
+    mixed = real_today + prior_tomorrow
+
+    assert dhw_policy.resolve_warmup_hour_local(today, mixed) == 15
+    assert dhw_policy._persisted_warmup_hour(today) == 15
+    # Tomorrow window is all priors → static fallback, NOT persisted.
+    assert dhw_policy.resolve_warmup_hour_local(tomorrow, mixed) == \
         dhw_policy._static_warmup_hour()
     assert dhw_policy._persisted_warmup_hour(tomorrow) is None
+
+    # Real D+1 rates land (cheapest 12) → now it resolves+persists from REAL.
+    real_tomorrow = _winter_prices(tomorrow, cheap_hour=12)
+    assert dhw_policy.resolve_warmup_hour_local(tomorrow, real_today + real_tomorrow) == 12
+    assert dhw_policy._persisted_warmup_hour(tomorrow) == 12
+
+
+def test_price_aware_real_optimizer_prior_extension_not_frozen(monkeypatch, _dhw_db):
+    """Finding 1, end-to-end: drive the REAL horizon extender
+    (``_resolve_plan_window`` synthesising ``fetched_at="prior"`` D+1 rows when
+    tomorrow's Agile is unpublished), feed its ``window.rates`` to the single
+    writer, and assert tomorrow is NOT frozen from priors — then IS resolved +
+    persisted once real D+1 rates land."""
+    from datetime import UTC as _UTC, datetime as _dt, timedelta as _td
+    from src import db
+    from src.config import config as app_config
+    from src.scheduler import optimizer as _opt
+
+    TARIFF = "E-1R-AGILE-DHW681-A"
+    monkeypatch.setattr(app_config, "DHW_WARMUP_PRICE_AWARE_ENABLED", True, raising=False)
+    monkeypatch.setattr(app_config, "BULLETPROOF_TIMEZONE", "Europe/London", raising=False)
+    monkeypatch.setattr(app_config, "OCTOPUS_TARIFF_CODE", TARIFF, raising=False)
+    monkeypatch.setattr(app_config, "LP_HORIZON_HOURS", 48, raising=False)
+
+    # Anchor to REAL today @ 09:00 UTC: get_half_hourly_agile_priors' cutoff is
+    # the real wall clock (now-28d), so the seeded history must be real-recent.
+    # Pinning hour=9 avoids the UTC-midnight date-relative flake.
+    now = _dt.now(_UTC).replace(hour=9, minute=0, second=0, microsecond=0)
+    monkeypatch.setattr(_opt, "_now_utc", lambda: now)
+    today = now.astimezone(dhw_policy._tz_local()).date()
+    tomorrow = today + _td(days=1)
+
+    def _seed(vf, count, price_fn):
+        rows = []
+        t = vf
+        for _ in range(count):
+            te = t + _td(minutes=30)
+            rows.append({
+                "valid_from": t.isoformat().replace("+00:00", "Z"),
+                "valid_to": te.isoformat().replace("+00:00", "Z"),
+                "value_inc_vat": float(price_fn(t)),
+            })
+            t = te
+        db.save_agile_rates(rows, TARIFF)
+
+    # 28 d of FLAT history → non-empty, flat priors (so a prior-frozen tomorrow
+    # would tie and pick the earliest window hour, 11 — a wrong freeze to catch).
+    day0 = _dt(now.year, now.month, now.day, tzinfo=_UTC) - _td(days=28)
+    _seed(day0, 28 * 48, lambda t: 20.0)
+    # TODAY only, real, cheapest at 15:00 local.
+    today_start = _dt(now.year, now.month, now.day, tzinfo=_UTC)
+    _seed(today_start, 48,
+          lambda t: 3.0 if t.astimezone(dhw_policy._tz_local()).hour == 15 else 25.0)
+
+    window = _opt._resolve_plan_window(TARIFF)
+    assert window is not None
+    # Prove the extender actually synthesised priors for the D+1 tail.
+    assert any(str(r.get("fetched_at")) == "prior" for r in window.rates)
+    starts = [s.start_utc for s in _opt._build_half_hour_slots(
+        window.rates, window.day_start, window.horizon_end)]
+
+    resolved = dhw_policy.resolve_warmup_hours_for_horizon(starts, window.rates)
+    # Today is real-covered → persisted at its real cheapest hour (15).
+    assert dhw_policy._persisted_warmup_hour(today) == 15
+    assert resolved.get(today) == 15
+    # Tomorrow's window is priors → NOT persisted (would be 11 if the bug lived).
+    assert dhw_policy._persisted_warmup_hour(tomorrow) is None
+
+    # Real D+1 publishes (cheapest 12) → seed + re-resolve → now persisted.
+    tomorrow_start = today_start + _td(days=1)
+    _seed(tomorrow_start, 48,
+          lambda t: 3.0 if t.astimezone(dhw_policy._tz_local()).hour == 12 else 25.0)
+    window2 = _opt._resolve_plan_window(TARIFF)
+    starts2 = [s.start_utc for s in _opt._build_half_hour_slots(
+        window2.rates, window2.day_start, window2.horizon_end)]
+    dhw_policy.resolve_warmup_hours_for_horizon(starts2, window2.rates)
+    assert dhw_policy._persisted_warmup_hour(tomorrow) == 12

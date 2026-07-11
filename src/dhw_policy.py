@@ -165,13 +165,29 @@ def _detect_negative_windows(
 # the static DHW_WARMUP_START_HOUR_LOCAL byte-for-byte and only SHADOW-LOGS the
 # would-pick delta so the deltas can be observed before enabling (#640 pattern).
 #
-# ONE source of truth per (date): resolve_warmup_hour_local() is the resolver
-# (writes the persist-once value); _read_warmup_hour() is the read-only accessor
-# (persisted-or-static, never resolves). Both are consumed by all of
-# generate_daily_tank_schedule, forecast_dhw_load_per_slot / _phase_for_slot,
-# _nominal_daily_total_kwh and _nominal_bucket_shares.
+# SINGLE WRITER (review #683). ``resolve_warmup_hour_local`` (and the
+# horizon convenience ``resolve_warmup_hours_for_horizon``) is the ONLY thing
+# that persists a hour, and it is called ONLY from the LP-solve path
+# (``optimizer._run_optimizer_lp``), which holds the raw rate rows and can tell
+# REAL Agile from the horizon-extender's synthetic priors (``fetched_at ==
+# "prior"``). Two guards protect the observation itself:
+#   1. A date is only picked/persisted when its WHOLE candidate window
+#      [START, END) is covered by REAL rates. So D+1 (whose Agile publishes
+#      ~16:00 local — the horizon tail is priors before then) is NOT frozen
+#      from median priors; it resolves cleanly once the real rates land.
+#   2. A truncated price range (a display/dispatch caller fetching only
+#      [13, setback)) leaves the [11,13) slots absent → window not real-covered
+#      → static fallback, no persist. Belt-and-suspenders with the single-writer
+#      rule below.
+# Everything else — ``generate_daily_tank_schedule`` (dispatch/display),
+# ``forecast_dhw_load_per_slot`` (the K2 pin), ``_nominal_daily_total_kwh`` and
+# ``_nominal_bucket_shares`` — is a pure READER via ``_read_warmup_hour``
+# (persisted-or-static, never resolves, never persists).
 
 # Shadow-log dedupe — one INFO line per (date, static, chosen) per process.
+# NB: this set (and the ``dhw_warmup_hour_<date>`` kv rows) accrue one entry per
+# plan-date; both are tiny (a date string / one SQLite row per day) and the kv
+# rows are swept lazily in ``_persist_warmup_hour`` (keys older than ~7 days).
 _warmup_shadow_logged: set[tuple[str, int, int]] = set()
 
 
@@ -209,9 +225,34 @@ def _persisted_warmup_hour(d: date) -> int | None:
         return None
 
 
+_WARMUP_KEY_PREFIX = "dhw_warmup_hour_"
+_WARMUP_KEY_TTL_DAYS = 7
+
+
+def _sweep_stale_warmup_keys(today: date) -> None:
+    """Finding 4 (review #683): drop ``dhw_warmup_hour_<date>`` rows older than
+    ~7 days so the kv table can't accrue forever. Cheap + best-effort — a single
+    ``list_runtime_settings`` scan on the once-a-day persist, never fatal."""
+    try:
+        cutoff = today - timedelta(days=_WARMUP_KEY_TTL_DAYS)
+        for row in db.list_runtime_settings():
+            key = str(row.get("key", ""))
+            if not key.startswith(_WARMUP_KEY_PREFIX):
+                continue
+            try:
+                d = date.fromisoformat(key[len(_WARMUP_KEY_PREFIX):])
+            except ValueError:
+                continue
+            if d < cutoff:
+                db.delete_runtime_setting(key)
+    except Exception:  # pragma: no cover - defensive: sweep must not fail persist
+        logger.debug("dhw_policy: stale warmup-key sweep failed", exc_info=True)
+
+
 def _persist_warmup_hour(d: date, hour: int) -> None:
     try:
         db.set_runtime_setting(_warmup_setting_key(d), str(int(hour)))
+        _sweep_stale_warmup_keys(d)
     except Exception:  # pragma: no cover - defensive
         logger.debug("dhw_policy: persist warmup hour failed for %s", d, exc_info=True)
 
@@ -229,20 +270,21 @@ def _read_warmup_hour(d: date) -> int:
     return persisted if persisted is not None else _static_warmup_hour()
 
 
-def _import_price_map(
+def _price_and_real_maps(
     agile_rates: list[dict[str, Any]] | None,
-    import_price_by_slot_utc: dict[datetime, float] | None,
-) -> dict[datetime, float]:
-    """Unify the two price shapes into ``{slot_start_utc: import_pence}``.
+) -> tuple[dict[datetime, float], set[datetime]]:
+    """``agile_rates`` dicts → (``{slot_start_utc: import_pence}``, set of the
+    slot starts that came from REAL Agile, not the horizon-extender's priors).
 
-    ``generate_daily_tank_schedule`` has agile_rates dicts; the LP forecast
-    path has a per-slot import price line already keyed by UTC slot start.
+    A row is synthetic iff ``fetched_at == "prior"`` (the sentinel stamped by
+    ``optimizer._resolve_plan_window``). Both real and prior prices go into the
+    price map (so a shadow pick can still be computed), but only real slots
+    enter ``real_slots`` — the persist gate keys off that set.
     """
-    if import_price_by_slot_utc:
-        return import_price_by_slot_utc
-    out: dict[datetime, float] = {}
+    price_map: dict[datetime, float] = {}
+    real_slots: set[datetime] = set()
     if not agile_rates:
-        return out
+        return price_map, real_slots
     for r in agile_rates:
         ts_raw = r.get("valid_from") or r.get("slot_time_utc")
         if not ts_raw:
@@ -253,11 +295,34 @@ def _import_price_map(
         if val is None:
             continue
         try:
-            ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
-            out[ts.astimezone(UTC)] = float(val)
+            ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00")).astimezone(UTC)
+            price_map[ts] = float(val)
         except (ValueError, TypeError):
             continue
-    return out
+        if str(r.get("fetched_at")) != "prior":
+            real_slots.add(ts)
+    return price_map, real_slots
+
+
+def _window_fully_real(target_date_local: date, real_slots: set[datetime]) -> bool:
+    """True iff every 30-min slot of the candidate window [START, END) on
+    ``target_date_local`` is covered by REAL Agile. This is the persist gate:
+    a hour is only picked/frozen when the whole window it was chosen from is
+    real — never from synthetic priors (Finding 1) or a truncated range
+    (Finding 2)."""
+    lo, hi = _warmup_window_bounds()
+    if hi <= lo:
+        return False
+    tz = _tz_local()
+    for h in range(lo, hi):
+        for minute in (0, 30):
+            s = datetime(
+                target_date_local.year, target_date_local.month,
+                target_date_local.day, h, minute, tzinfo=tz,
+            ).astimezone(UTC)
+            if s not in real_slots:
+                return False
+    return True
 
 
 def _price_aware_pick(
@@ -328,21 +393,20 @@ def _shadow_log_warmup(
 def resolve_warmup_hour_local(
     target_date_local: date,
     agile_rates: list[dict[str, Any]] | None = None,
-    *,
-    import_price_by_slot_utc: dict[datetime, float] | None = None,
 ) -> int:
-    """Resolve the LOCAL warmup START hour for ``target_date_local`` (#681).
+    """Resolve + (when appropriate) persist the LOCAL warmup START hour for
+    ``target_date_local`` (#681). THE WRITER — call only from the LP-solve path.
 
-    * Disabled → static ``DHW_WARMUP_START_HOUR_LOCAL`` (legacy, unchanged),
-      after a one-shot shadow-log of what price-aware *would* pick.
-    * Enabled, already persisted for this date → the persisted value verbatim
+    * Already persisted for this date → the persisted value verbatim
       (persist-once: stability preserves the restore covenant + K2 pin
       coherence across re-plans at different wall-clock times).
-    * Enabled, resolvable → cheapest candidate in
-      ``[WINDOW_START, WINDOW_END)``, persisted then returned.
-    * Enabled, no usable price data for this date (e.g. tomorrow's Agile not
-      published yet) → static fallback, NOT persisted, so a later call once
-      the rates land can still resolve.
+    * The candidate window [START, END) is NOT fully covered by REAL Agile
+      (D+1 tail is still priors, or a truncated price range) → static fallback,
+      NOT persisted and NOT shadow-logged, so the resolve re-runs (and can then
+      freeze from real rates) once the real rates arrive.
+    * Window fully real-covered → cheapest candidate hour; shadow-logged; then
+      persisted+returned when the feature is ENABLED, or the static hour
+      (byte-identical) when disabled.
     """
     static_hour = _static_warmup_hour()
 
@@ -351,7 +415,12 @@ def resolve_warmup_hour_local(
         if persisted is not None:
             return persisted
 
-    price_map = _import_price_map(agile_rates, import_price_by_slot_utc)
+    price_map, real_slots = _price_and_real_maps(agile_rates)
+    # Persist gate: only trust (and freeze) a pick drawn from a window that is
+    # ENTIRELY real Agile. Priors / truncated ranges → static, no persist.
+    if not _window_fully_real(target_date_local, real_slots):
+        return static_hour
+
     chosen, delta = _price_aware_pick(target_date_local, price_map, static_hour)
     _shadow_log_warmup(target_date_local, static_hour, chosen, delta)
 
@@ -359,6 +428,26 @@ def resolve_warmup_hour_local(
         return static_hour
     _persist_warmup_hour(target_date_local, chosen)
     return chosen
+
+
+def resolve_warmup_hours_for_horizon(
+    slot_starts_utc: list[datetime],
+    agile_rates: list[dict[str, Any]] | None,
+) -> dict[date, int]:
+    """Resolve+persist the warmup hour for every LOCAL date spanned by the LP
+    horizon (the single-writer entry point called by ``_run_optimizer_lp``).
+    Returns ``{local_date: resolved_hour}`` for diagnostics/tests. Idempotent
+    via persist-once; a no-op (all static) when the feature is disabled."""
+    tz = _tz_local()
+    out: dict[date, int] = {}
+    seen: set[date] = set()
+    for s in slot_starts_utc:
+        d = s.astimezone(tz).date()
+        if d in seen:
+            continue
+        seen.add(d)
+        out[d] = resolve_warmup_hour_local(d, agile_rates)
+    return out
 
 
 def generate_daily_tank_schedule(
@@ -423,10 +512,12 @@ def generate_daily_tank_schedule(
         return []
 
     tz = _tz_local()
-    # Price-aware warmup start (#681) — persist-once per plan-date; static when
-    # disabled. next_day resolves independently so the setback END aligns with
-    # tomorrow's (possibly different) warmup start when its rates are known.
-    warmup_hour = resolve_warmup_hour_local(target_date_local, agile_rates)
+    # Price-aware warmup start (#681) — READER ONLY (persisted-or-static).
+    # Persistence happens exclusively in the LP-solve path (single writer,
+    # review #683); a dispatch/display caller must never freeze an hour from
+    # its own (static-anchored, possibly truncated) rate fetch. next_day is
+    # read independently so the setback END aligns with tomorrow's warmup start.
+    warmup_hour = _read_warmup_hour(target_date_local)
     setback_hour = int(getattr(config, "DHW_SETBACK_START_HOUR_LOCAL", 22))
     normal_c = int(round(float(config.DHW_TEMP_NORMAL_C)))
     setback_c = int(round(float(getattr(config, "DHW_TEMP_SETBACK_C", 37))))
@@ -443,7 +534,7 @@ def generate_daily_tank_schedule(
     # ``timedelta`` is offset-blind and ``.replace`` keeps the source
     # tzinfo even when DST has flipped between the two times.
     next_day = target_date_local + timedelta(days=1)
-    next_warmup_hour = resolve_warmup_hour_local(next_day, agile_rates)
+    next_warmup_hour = _read_warmup_hour(next_day)
     warmup_start = datetime(
         target_date_local.year, target_date_local.month, target_date_local.day,
         warmup_hour, 0, tzinfo=tz,
@@ -701,6 +792,11 @@ def _dhw_autoscale_factor(mode: str) -> float:
     # a price-aware move changes the warmup-window slot count. Read TODAY's
     # hour and key the cache on it so a mid-day change re-computes; disabled →
     # static hour → identical key/nominal to legacy.
+    # Finding 3 (review #683, accepted): this uses TODAY's hour even for the
+    # slice of the horizon that is tomorrow (which may resolve to a different
+    # hour). The drift is a scalar level nudge, bounded by the autoscale clamp
+    # [0.5, 1.6] — it can never make the LP Infeasible and self-corrects the
+    # next day, so it is left as-is rather than made per-date.
     warmup_hour = _read_warmup_hour(datetime.now(_tz_local()).date())
     # DB_PATH in the key: tests swap databases under one process, and prod
     # never changes it — costs nothing, prevents cross-DB cache bleed.
@@ -852,26 +948,18 @@ def forecast_dhw_load_per_slot(
 
     tz = _tz_local()
     setback_hour = int(getattr(config, "DHW_SETBACK_START_HOUR_LOCAL", 22))
-    # Price-aware warmup start (#681). The horizon spans ~2 local days, each of
-    # which may resolve to a different warmup hour, so resolve ONCE PER LOCAL
-    # DATE and look the hour up per slot. Feeding the LP import price_line as the
-    # price source means the pin's transition slots land on exactly the hour the
-    # fired warmup row uses (persist-once makes the two agree even across
-    # re-plans). Disabled → static hour for every date (byte-identical).
-    _price_map: dict[datetime, float] = {}
-    if price_line is not None and len(price_line) == n:
-        for _s, _p in zip(slot_starts_utc, price_line):
-            try:
-                _price_map[_s.astimezone(UTC)] = float(_p)
-            except (TypeError, ValueError):
-                continue
+    # Price-aware warmup start (#681) — READER ONLY. The K2 pin must agree with
+    # the fired warmup row, so it reads exactly the persist-once value the
+    # single writer (optimizer._run_optimizer_lp) froze for each local date.
+    # The horizon spans ~2 local days that can carry different warmup hours, so
+    # look the hour up per slot's LOCAL date. Disabled → static for every date
+    # (byte-identical). NO resolve/persist here (a scenario solve must not race
+    # a fresh persist from a perturbed price line).
     _warmup_by_date: dict[date, int] = {}
     for _s in slot_starts_utc:
         _d = _s.astimezone(tz).date()
         if _d not in _warmup_by_date:
-            _warmup_by_date[_d] = resolve_warmup_hour_local(
-                _d, import_price_by_slot_utc=_price_map or None
-            )
+            _warmup_by_date[_d] = _read_warmup_hour(_d)
 
     def _warmup_hour_for(slot_local: datetime) -> int:
         return _warmup_by_date.get(slot_local.date(), _static_warmup_hour())

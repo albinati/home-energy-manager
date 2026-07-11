@@ -1847,6 +1847,18 @@ def _run_optimizer_lp(
         },
     }
 
+    # Price-aware DHW warmup hour (#681) — SINGLE WRITER. Resolve + persist-once
+    # here, the ONLY place with the raw rate rows (so it can tell real Agile
+    # from the horizon-extender's `fetched_at="prior"` synth tail) BEFORE
+    # solve_lp's K2 pin and the later dispatch both READ the frozen value. A
+    # date whose whole candidate window isn't real-covered (D+1 before ~16:00)
+    # is left unresolved and re-runs next solve. No-op when the feature is off.
+    try:
+        from .. import dhw_policy as _dhw_pol
+        _dhw_pol.resolve_warmup_hours_for_horizon(starts, rates)
+    except Exception:  # pragma: no cover - defensive: never break the solve
+        logger.debug("dhw warmup hour resolve failed (non-fatal)", exc_info=True)
+
     plan = solve_lp(
         slot_starts_utc=starts,
         price_pence=prices,

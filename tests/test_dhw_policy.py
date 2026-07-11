@@ -785,6 +785,8 @@ def test_price_aware_setback_stays_fixed_at_22(monkeypatch):
     monkeypatch.setattr(config, "DHW_WARMUP_PRICE_AWARE_ENABLED", True, raising=False)
     day = date(2026, 6, 1)
     rates = _rates_for_day(day, {11: 1.0})
+    # Writer (LP-solve path) resolves+persists first; generate is a pure reader.
+    assert dhw_policy.resolve_warmup_hour_local(day, rates) == 11
     rows = dhw_policy.generate_daily_tank_schedule(day, agile_rates=rates, mode="normal")
     warmup = next(r for r in rows if r["action_type"] == "tank_warmup")
     setback = next(r for r in rows if r["action_type"] == "tank_setback")
