@@ -110,6 +110,70 @@ def test_alerts_forecast_provenance_healthy(monkeypatch):
     assert body["forecast"]["degraded"] is False
 
 
+def _insert_coherence(ts_iso: str, params: dict) -> None:
+    """action_log always stamps NOW(), so insert directly when the test needs
+    a controlled timestamp (mirrors the lp_failure_log test above)."""
+    import json as _json
+    conn = db.get_connection()
+    try:
+        conn.execute(
+            """INSERT INTO action_log (timestamp, device, action, params, result, trigger)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (ts_iso, "scheduler", "plan_dispatch_coherence", _json.dumps(params), "success", "cron"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_alerts_coherence_quiet_when_no_audit(monkeypatch):
+    _quiet_upstreams(monkeypatch)
+    client = _client(monkeypatch)
+    body = client.get("/api/v1/status/alerts").json()
+    assert "coherence" in body
+    assert body["coherence"]["severe_count"] == 0
+    assert body["coherence"]["severe"] == []
+    assert body["coherence"]["result"] is None
+
+
+def test_alerts_coherence_surfaces_latest_severe(monkeypatch):
+    _quiet_upstreams(monkeypatch)
+    now = datetime.now(UTC)
+    # An older clean audit and a newer severe one — the block reflects the
+    # newest event only.
+    _insert_coherence(
+        (now - timedelta(hours=6)).isoformat(),
+        {"total_slots": 48, "matched": 48, "mismatched": 0,
+         "severe_count": 0, "severe": [], "result": "ok"},
+    )
+    _insert_coherence(
+        (now - timedelta(minutes=30)).isoformat(),
+        {"total_slots": 48, "matched": 46, "mismatched": 2,
+         "severe_count": 2, "result": "severe_divergence",
+         "severe": [
+             {"slot_time_utc": "2026-07-10T18:00:00Z", "planned": "hold", "actual": "selfuse"},
+             {"slot_time_utc": "2026-07-10T18:30:00Z", "planned": "hold", "actual": "absent"},
+         ]},
+    )
+    client = _client(monkeypatch)
+    coh = client.get("/api/v1/status/alerts").json()["coherence"]
+    assert coh["severe_count"] == 2
+    assert coh["result"] == "severe_divergence"
+    assert len(coh["severe"]) == 2
+    assert coh["severe"][0]["planned"] == "hold"
+
+
+def test_alerts_coherence_ignores_events_older_than_24h(monkeypatch):
+    _quiet_upstreams(monkeypatch)
+    _insert_coherence(
+        (datetime.now(UTC) - timedelta(hours=30)).isoformat(),
+        {"severe_count": 3, "result": "severe_divergence", "severe": []},
+    )
+    client = _client(monkeypatch)
+    coh = client.get("/api/v1/status/alerts").json()["coherence"]
+    assert coh["severe_count"] == 0
+
+
 def test_alerts_ttl_serves_cached(monkeypatch):
     _quiet_upstreams(monkeypatch)
     client = _client(monkeypatch)

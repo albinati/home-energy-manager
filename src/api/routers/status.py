@@ -299,6 +299,41 @@ def _dispatch_coherence_block() -> dict[str, Any] | None:
     return {"at": r.get("timestamp"), "result": r.get("result"), **(r.get("params") or {})}
 
 
+def _coherence_block() -> dict[str, Any]:
+    """Latest plan-vs-dispatch coherence audit (last 24h): did the committed
+    plan actually execute, or did a planned battery hold silently degrade to
+    SelfUse/absent? The severe divergences are the 2026-07-10 incident
+    signature. Quiet (severe_count 0) when there is no recent audit event —
+    the writer (optimizer) is the source of truth; this only reads.
+
+    One indexed action_log query (timestamp range + LIMIT 1)."""
+    now = datetime.now(UTC)
+    since = (now - timedelta(hours=24)).isoformat()
+    quiet = {"result": None, "severe_count": 0, "severe": [], "ts": None}
+    try:
+        rows = db.get_action_logs(action="plan_dispatch_coherence", since=since, limit=1)
+    except Exception:  # pragma: no cover — strip must still render
+        logger.debug("status/alerts: coherence read failed", exc_info=True)
+        return quiet
+    if not rows:
+        return quiet
+    p = rows[0].get("params") or {}
+    severe = p.get("severe")
+    if not isinstance(severe, list):
+        severe = []
+    return {
+        "result": p.get("result"),
+        "severe_count": int(p.get("severe_count") or 0),
+        # Cap the embedded slot list — the strip only needs a preview for the
+        # tooltip, not the whole divergence set.
+        "severe": severe[:5],
+        "matched": p.get("matched"),
+        "mismatched": p.get("mismatched"),
+        "total_slots": p.get("total_slots"),
+        "ts": rows[0].get("timestamp"),
+    }
+
+
 # ── endpoints ────────────────────────────────────────────────────────────────
 
 @router.get("/api/v1/status/alerts")
@@ -316,12 +351,13 @@ async def status_alerts() -> dict[str, Any]:
     # Every sqlite reader goes through to_thread — _forecast_block included:
     # it takes db._lock, and holding that on the event loop during a large
     # scheduler write would stall every in-flight request (review M on #553).
-    meter, lp, quota, forecast, actuation = await asyncio.gather(
+    meter, lp, quota, forecast, actuation, coherence = await asyncio.gather(
         asyncio.to_thread(_meter_block),
         asyncio.to_thread(_lp_block),
         asyncio.to_thread(_quota_block),
         asyncio.to_thread(_forecast_block, sidecar),
         asyncio.to_thread(_actuation_block),
+        asyncio.to_thread(_coherence_block),
     )
     out = {
         "now_utc": datetime.now(UTC).isoformat(),
@@ -331,6 +367,7 @@ async def status_alerts() -> dict[str, Any]:
         "fox_drift": await _fox_drift_block(),
         "quota": quota,
         "actuation": actuation,
+        "coherence": coherence,
     }
     _cache["alerts"] = (now, out)
     return out

@@ -23,6 +23,35 @@ interface Chip {
   detail?: string;
 }
 
+// The severe[] entries come straight from the audit's params JSON, so the
+// shape is loose. Defensively pull a slot time + planned→actual kinds when
+// present, otherwise fall back to a compact JSON — never crash the strip.
+function formatSevereSlots(severe: Array<Record<string, unknown>>): string {
+  const str = (v: unknown) => (v == null ? undefined : String(v));
+  const timeOf = (s: Record<string, unknown>) => {
+    const t = str(s.slot_time_utc ?? s.slot ?? s.slot_utc ?? s.t);
+    if (!t) return undefined;
+    // Show HH:MM when it parses as a timestamp; else the raw token.
+    const ms = Date.parse(t);
+    return Number.isFinite(ms)
+      ? new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })
+      : t;
+  };
+  return severe
+    .slice(0, 5)
+    .map((s) => {
+      const when = timeOf(s);
+      const planned = str(s.planned ?? s.lp_kind ?? s.expected);
+      const actual = str(s.actual ?? s.dispatched_kind ?? s.got);
+      const kinds = planned || actual ? `${planned ?? "?"}→${actual ?? "absent"}` : undefined;
+      if (when && kinds) return `${when} ${kinds}`;
+      if (when) return when;
+      if (kinds) return kinds;
+      try { return JSON.stringify(s); } catch { return "?"; }
+    })
+    .join(", ");
+}
+
 function buildChips(a: StatusAlertsResponse): Chip[] {
   const chips: Chip[] = [];
 
@@ -69,6 +98,23 @@ function buildChips(a: StatusAlertsResponse): Chip[] {
       tone: "warn",
       label: `Fox schedule drift${a.fox_drift.diff_count != null ? ` (${a.fox_drift.diff_count})` : ""}`,
       detail: "Live inverter schedule differs from the last LP upload — manual app edit or failed upload. Checked every 30 min.",
+    });
+  }
+
+  // Plan-vs-dispatch coherence: a planned battery hold that silently became
+  // SelfUse/absent (the 2026-07-10 incident). Only surfaced when the latest
+  // audit (last 24h) counts one or more SEVERE divergences.
+  const coh = a.coherence;
+  if ((coh?.severe_count ?? 0) > 0) {
+    const slots = formatSevereSlots(coh!.severe);
+    chips.push({
+      key: "coherence",
+      tone: "bad",
+      label: `Dispatch divergence: ${coh!.severe_count} severe`,
+      detail:
+        `Committed plan diverged from execution${coh!.result ? ` (${coh!.result})` : ""}.` +
+        (slots ? ` Severe slots: ${slots}.` : "") +
+        (coh!.ts ? ` Checked ${coh!.ts}.` : ""),
     });
   }
 

@@ -1,0 +1,22 @@
+/* "Why now" — the single-sentence live-state explainer under the power flow.
+ * Borderless, quiet: a semantic tint dot + dimmed text, no card of its own. */
+.why-now {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  padding-top: var(--space-2);
+  font-size: var(--font-sm);
+  color: var(--text-dim);
+}
+.why-now-dot {
+  flex: none;
+  width: 7px;   /* matches the sibling plan-mini .cdot in the same card */
+  height: 7px;
+  border-radius: var(--radius-pill);
+  transition: background var(--dur-fast) ease;
+}
+.why-now-txt {
+  font-weight: 500;
+  color: var(--text);
+}
