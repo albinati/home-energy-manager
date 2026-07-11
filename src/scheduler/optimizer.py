@@ -332,47 +332,54 @@ def _slot_fox_tuple(
 
     For ForceCharge slots the ``fdPwr`` (W) is taken from ``s.lp_grid_import_w`` when set
     (LP path), or falls back to the configured ``FOX_FORCE_CHARGE_*_PWR`` constants.
-    For solar_charge slots the battery is held via **pinned Backup** at the
-    reserve floor (#679, A2, ``backup_hold`` default) — the only proven
-    0%-discharge hold on the H1. The old SelfUse(minSocOnGrid=100, maxSoc=100)
-    "Solar Sponge" shape is **RETIRED**: the A0 finding (40,369 prod samples)
-    showed that floor discharged below reserve 40.6% of the time — it was the
-    2026-07-10 leak, not a hold. It is no longer emittable anywhere.
+    For solar_charge slots the battery is held via **Backup** that lets PV fill
+    toward the LP target without grid-charging (#679, A2, ``backup_fill``
+    default) — Backup is a strict no-discharge hold on the H1. The old
+    SelfUse(minSocOnGrid=100, maxSoc=100) "Solar Sponge" shape is **RETIRED**:
+    the A0 finding (40,369 prod samples) showed that floor discharged below
+    reserve 40.6% of the time — it was the 2026-07-10 leak, not a hold. It is no
+    longer emittable anywhere.
     """
     min_r = int(config.MIN_SOC_RESERVE_PERCENT)
     if s.kind == "solar_charge":
-        # A2 (#679) — final owner decision (2026-07-11): three modes, SAFE
-        # hold is the default. LP_SOLAR_CHARGE_FOX_MODE ∈
-        #   "backup_hold" (DEFAULT) — ("Backup", None, None, reserve, reserve).
-        #       The proven pure hold: 0/441 discharge samples, no grid top-up,
-        #       no summer footgun. With live SoC above the reserve maxSoc,
-        #       Backup charges nothing AND never discharges — exactly the hold.
-        #       Fixes the 07-10 leak NOW. Same tuple A1 emits, so solar_charge
-        #       and positive-price holds are consistent. Accepted tradeoff: on
-        #       strong-PV days this EXPORTS surplus instead of storing it —
-        #       the safe winter default; see backup_fill for the aspirational
-        #       store-the-surplus behaviour (summer-probe-gated).
-        #   "backup_fill" — ("Backup", None, None, reserve, max(reserve, tgt)).
-        #       Lets PV fill toward the LP target (tgt = planned end-of-window
-        #       SoC, else 100). ASPIRATIONAL / NOT default: the intermediate
-        #       maxSoc CEILING is UNVALIDATED on the H1 — the #682 review's
-        #       HIGH finding is that the firmware may grid-charge PAST it (the
-        #       truth table only has maxSoc=None→charge-to-full and
-        #       maxSoc=reserve→no-charge). Gated behind the summer probe (#685);
-        #       promote to default only after prod telemetry confirms the H1
-        #       honours the ceiling.
+        # A2 (#679) — final owner decision (2026-07-11), resolved by community
+        # research (Predbat + TonyM1958 + Fox firmware release notes) + our live
+        # probe. Established facts:
+        #   * Backup = STRICT no-discharge hold. Fox fixed the discharge-in-Backup
+        #     bug in master V1.39; we run 1.51, so Backup never leaks into load —
+        #     the correct 07-10 incident fix. (Predbat holds Fox the same way:
+        #     Backup + reserve pinned to minSocOnGrid.)
+        #   * Grid-charge in Backup is minSocOnGrid-DRIVEN — the inverter imports
+        #     ONLY to reach the minSoc floor when SoC < floor. maxSoc is a
+        #     PV-charge ceiling, NOT a grid target. So Backup(minSoc=reserve,
+        #     maxSoc=tgt) with SoC >= reserve does NOT grid-charge; it just lets
+        #     PV fill toward the LP target while holding (no discharge, no
+        #     autonomous grid import) — exactly solar_charge's purpose.
+        # LP_SOLAR_CHARGE_FOX_MODE ∈
+        #   "backup_fill" (DEFAULT) — ("Backup", None, None, reserve,
+        #       max(reserve, tgt)). PV fills toward the LP target (tgt = planned
+        #       end-of-window SoC, else 100) while holding; no grid-charge. The
+        #       ideal PV-stockpile behaviour. Mechanism confirmed by the probe;
+        #       the exact fill curve is verified in prod on the first sunny day
+        #       via fox_mode_truth_table.py (#685) — instant runtime rollback to
+        #       backup_hold/selfuse if a grid-import surprise appears (summer/
+        #       cheap, behind this flag).
+        #   "backup_hold" — ("Backup", None, None, reserve, reserve). A pure
+        #       hold that BLOCKS the PV fill (maxSoc=reserve) and exports midday
+        #       surplus instead of stockpiling. Rollback for backup_fill; also
+        #       the exact tuple A1 pre-peak holds emit (where NOT charging is the
+        #       intent).
         #   "selfuse" — ("SelfUse", None, None, reserve, None). Plain honest
-        #       self-use: discharges to reserve, does NOT hold. The summer
-        #       PV-export escape hatch. NOT the retired 100,100 shape — that
-        #       is the bug (A0) and can never be re-emitted.
-        # Vacation preset: its LP forbids grid->battery, and any Backup top-up
-        # would violate that — force plain SelfUse(reserve) regardless of mode.
-        mode = str(getattr(config, "LP_SOLAR_CHARGE_FOX_MODE", "backup_hold")).strip().lower()
+        #       self-use: discharges to reserve, does NOT hold. Summer PV-export
+        #       escape hatch. NOT the retired 100,100 shape (the A0 bug).
+        # Vacation preset: its LP forbids grid->battery — force plain
+        # SelfUse(reserve) regardless of mode.
+        mode = str(getattr(config, "LP_SOLAR_CHARGE_FOX_MODE", "backup_fill")).strip().lower()
         if mode not in ("backup_hold", "backup_fill", "selfuse"):
             logger.warning(
-                "LP_SOLAR_CHARGE_FOX_MODE=%r not recognised — using 'backup_hold'", mode
+                "LP_SOLAR_CHARGE_FOX_MODE=%r not recognised — using 'backup_fill'", mode
             )
-            mode = "backup_hold"
+            mode = "backup_fill"
         if _optimization_preset_away_like():
             # Vacation — plain self-use at reserve (no grid->battery).
             return ("SelfUse", None, None, min_r, None)

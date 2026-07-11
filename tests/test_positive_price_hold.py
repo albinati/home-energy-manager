@@ -63,7 +63,7 @@ def _normal_preset_hold_on(monkeypatch):
     monkeypatch.setattr(config, "LP_POSITIVE_HOLD_MIN_UPLIFT_PENCE", 5.0, raising=False)
     monkeypatch.setattr(config, "LP_POSITIVE_HOLD_MAX_GROUPS", 2, raising=False)
     monkeypatch.setattr(config, "LP_POSITIVE_HOLD_MIN_SOC_MARGIN_PCT", 2.0, raising=False)
-    monkeypatch.setattr(config, "LP_SOLAR_CHARGE_FOX_MODE", "backup_hold", raising=False)
+    monkeypatch.setattr(config, "LP_SOLAR_CHARGE_FOX_MODE", "backup_fill", raising=False)
     # Keep slot KINDS deterministic — the post-shower tank_idle overlay would
     # otherwise relabel `standard` slots as `tank_idle_overnight` depending on
     # the wall clock (still valid holds, but noisy for these assertions).
@@ -203,28 +203,29 @@ def _solar_slot(target_soc_pct: int | None = 90):
     )
 
 
-def test_solar_charge_default_is_backup_hold_at_reserve():
-    # Final A2 default (backup_hold): the pure proven hold, maxSoc = reserve
-    # (NOT the planned SoC). Same tuple A1 emits.
+def test_solar_charge_default_is_backup_fill_at_target():
+    # Final A2 default (backup_fill, 2026-07-11): strict no-discharge Backup that
+    # lets PV fill toward the LP target — minSoc=reserve (no grid-charge, since
+    # SoC >= reserve), maxSoc = the planned SoC (PV-charge ceiling).
     reserve = int(config.MIN_SOC_RESERVE_PERCENT)
     wm, fds, pwr, msg, max_soc = _slot_fox_tuple(_solar_slot(90))
     assert wm == "Backup"
     assert fds is None and pwr is None
-    assert msg == reserve
-    assert max_soc == reserve  # pure hold — no top-up above reserve
+    assert msg == reserve  # minSoc <= current SoC → no autonomous grid import
+    assert max_soc == 90  # PV fills toward the planned end-of-window SoC
+    # No target → fill toward full.
+    _, _, _, _, max_soc_full = _slot_fox_tuple(_solar_slot(None))
+    assert max_soc_full == 100
 
 
-def test_solar_charge_backup_fill_pins_planned_soc(monkeypatch):
-    # backup_fill (aspirational, summer-probe-gated #685): maxSoc = LP target.
-    monkeypatch.setattr(config, "LP_SOLAR_CHARGE_FOX_MODE", "backup_fill", raising=False)
+def test_solar_charge_backup_hold_pins_reserve(monkeypatch):
+    # backup_hold rollback: pure hold, maxSoc = reserve (blocks the PV fill).
+    monkeypatch.setattr(config, "LP_SOLAR_CHARGE_FOX_MODE", "backup_hold", raising=False)
     reserve = int(config.MIN_SOC_RESERVE_PERCENT)
     wm, _, _, msg, max_soc = _slot_fox_tuple(_solar_slot(90))
     assert wm == "Backup"
     assert msg == reserve
-    assert max_soc == 90  # fills toward the planned SoC
-    # No target → fill toward full.
-    _, _, _, _, max_soc_full = _slot_fox_tuple(_solar_slot(None))
-    assert max_soc_full == 100
+    assert max_soc == reserve  # pure hold — no PV fill above reserve
 
 
 def test_solar_charge_selfuse_escape_hatch_is_plain_reserve(monkeypatch):
@@ -246,11 +247,12 @@ def test_solar_charge_vacation_is_plain_selfuse(monkeypatch, mode):
     assert max_soc is None
 
 
-def test_unknown_solar_mode_falls_back_to_backup_hold(monkeypatch):
+def test_unknown_solar_mode_falls_back_to_backup_fill(monkeypatch):
     monkeypatch.setattr(config, "LP_SOLAR_CHARGE_FOX_MODE", "bogus", raising=False)
     reserve = int(config.MIN_SOC_RESERVE_PERCENT)
     wm, _, _, msg, max_soc = _slot_fox_tuple(_solar_slot(90))
-    assert wm == "Backup" and msg == reserve and max_soc == reserve
+    # Fallback is the default backup_fill → maxSoc = target (90), not reserve.
+    assert wm == "Backup" and msg == reserve and max_soc == 90
 
 
 @pytest.mark.parametrize("mode", ["backup_hold", "backup_fill", "selfuse"])

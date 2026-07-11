@@ -232,12 +232,13 @@ def test_slot_fox_tuple_standard_selfuse_uses_reserve_min_soc() -> None:
     assert msg == _min_r()
 
 
-def test_solar_charge_emits_backup_hold_at_reserve() -> None:
-    """#679 A2 (final, 2026-07-11): a solar_charge slot emits the pure-hold
-    Backup at the RESERVE floor (backup_hold default) — NOT the retired
+def test_solar_charge_emits_backup_fill_at_target() -> None:
+    """#679 A2 (final, 2026-07-11): a solar_charge slot emits Backup that lets PV
+    fill toward the LP target (backup_fill default) — minSoc=reserve (no
+    grid-charge, since SoC >= reserve) and maxSoc = planned SoC (PV-charge
+    ceiling). Backup is a strict no-discharge hold; this is NOT the retired
     SelfUse(minSoc=100, maxSoc=100) 'Solar Sponge' shape (H1 discharged through
-    it, A0) and NOT an intermediate maxSoc ceiling (unvalidated). Backup is the
-    only proven 0%-discharge hold; maxSoc=reserve = no discharge AND no top-up."""
+    it, A0)."""
     t0 = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
     s = HalfHourSlot(
         start_utc=t0,
@@ -251,14 +252,14 @@ def test_solar_charge_emits_backup_hold_at_reserve() -> None:
     assert fds is None
     assert pwr is None
     assert msg == _min_r()
-    assert max_soc == _min_r()  # pure hold — pinned at reserve, no top-up
+    assert max_soc == 88  # PV fills toward the planned SoC
     # The retired 100,100 SelfUse shape must never be produced.
     assert not (wm == "SelfUse" and msg == 100 and max_soc == 100)
     # Confirm propagation through the merge pipeline + into the API payload.
     groups = _merge_fox_groups([s])
     assert len(groups) == 1
     assert groups[0].work_mode == "Backup"
-    assert groups[0].max_soc == _min_r()
+    assert groups[0].max_soc == 88
 
 
 def test_non_solar_charge_kinds_have_no_max_soc() -> None:
