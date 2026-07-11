@@ -190,7 +190,23 @@ function HeroWeather({ weather, pv, indoor }: {
   const indoorMean = indoor?.mean_c ?? (inWithTemp.length
     ? inWithTemp.reduce((s, r) => s + (r.temp_c as number), 0) / inWithTemp.length : null);
   const indoorStale = !!indoor?.stale;
-  const indoorRoom = (indoor?.n_rooms ?? 0) === 1 ? (inRooms[0]?.room ?? "inside") : `${indoor?.n_rooms} rooms`;
+  // Per-room breakdown instead of a bare "N rooms": the mean is honest but hides
+  // an outlier sensor (a hallway probe self-heating to 39° next to a 30° kitchen
+  // pulls the mean to 35° and looks like a bug). Listing each room makes the
+  // spread — and a misplaced/faulty sensor — obvious at a glance. Sorted by
+  // name so the chips hold still across the 30s polls (API order isn't stable).
+  const roomChips = inWithTemp
+    .map((r) => ({
+      room: (r.room ?? "inside").replace(/_/g, " "),
+      temp: r.temp_c as number,
+      stale: r.stale,
+    }))
+    .sort((a, b) => a.room.localeCompare(b.room));
+  // Rooms exist but none carries a temperature right now (humidity-only or all
+  // null) — fall back to the old count label rather than an empty row.
+  const roomFallback = (indoor?.n_rooms ?? 0) === 1
+    ? (inRooms[0]?.room ?? "inside").replace(/_/g, " ")
+    : `${indoor?.n_rooms} rooms`;
   const indoorHum = indoor?.humidity_pct ?? null;
   const indoorIso = indoor?.newest_received_at ?? indoor?.newest_captured_at ?? null;
   const indoorRefresh = indoorIso
@@ -266,8 +282,14 @@ function HeroWeather({ weather, pv, indoor }: {
               <div class="hw-col-now">
                 <span class="hw-col-temp">{indoorMean != null ? indoorMean.toFixed(1) : "—"}°</span>
               </div>
-              <div class="dim small hw-col-sub">
-                {indoorRoom}{indoorHum != null && <> · {Math.round(indoorHum)}% humidity</>}
+              <div class="dim small hw-col-sub hw-col-sub--rooms">
+                {roomChips.length ? roomChips.map((c, i) => (
+                  <span key={c.room} class={`hw-room ${c.stale ? "is-stale" : ""}`}>
+                    {i > 0 && <span class="hw-room-sep"> · </span>}
+                    {c.room} {c.temp.toFixed(1)}°
+                  </span>
+                )) : roomFallback}
+                {indoorHum != null && <span class="hw-room-sep"> · {Math.round(indoorHum)}% humidity</span>}
               </div>
             </>
           ) : (

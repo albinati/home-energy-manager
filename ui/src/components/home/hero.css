@@ -93,6 +93,12 @@
 .hw-col-est { font-size: var(--font-2xs); font-weight: 600; color: var(--text-mute); margin-left: var(--space-1); letter-spacing: 0; vertical-align: super; font-variant-numeric: tabular-nums; }
 .hw-col-sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .hw-col-sub--empty { color: var(--text-mute); }
+/* Per-room breakdown wraps (it can't hide behind an ellipsis — the whole point
+   is that every room, including an outlier, is visible). Temps use tabular
+   nums so the column stays aligned; a stale room is muted. */
+.hw-col-sub--rooms { white-space: normal; overflow: visible; text-overflow: clip; font-variant-numeric: tabular-nums; }
+.hw-room.is-stale { color: var(--text-mute); }
+.hw-room-sep { color: var(--text-mute); }
 
 /* Panel-level freshness (last indoor reading) + its live dot. */
 .hw-refresh { display: inline-flex; align-items: center; gap: 5px; font-variant-numeric: tabular-nums; }
