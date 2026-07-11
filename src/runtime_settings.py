@@ -245,6 +245,52 @@ SCHEMA: dict[str, SettingSpec] = {
             "demand."
         ),
     ),
+    # --- Price-aware DHW warmup start hour (#681, 2026-07-10) ----------------
+    # Default OFF + shadow-log first: dhw_policy shadow-logs the price-aware
+    # pick vs the static 13:00 warmup for ~1 week so the deltas can be observed
+    # before flipping this on. When true, the warmup START hour is chosen once
+    # per plan-date within [START, END) to minimise the mean Agile import price
+    # of its two 30-min transition slots, then persisted verbatim
+    # (runtime_settings ``dhw_warmup_hour_<date>``) so re-plans stay coherent
+    # with the K2 pin + the restore covenant. Setback stays fixed at 22:00.
+    "DHW_WARMUP_PRICE_AWARE_ENABLED": SettingSpec(
+        key="DHW_WARMUP_PRICE_AWARE_ENABLED",
+        type_name="str",  # "true" / "false" — mirrors REQUIRE_SIMULATION_ID
+        env_default=_str_env("DHW_WARMUP_PRICE_AWARE_ENABLED", "false"),
+        enum=("true", "false"),
+        description=(
+            "Price-aware DHW warmup start hour (#681). false (default) = fixed "
+            "DHW_WARMUP_START_HOUR_LOCAL (13:00), byte-identical to legacy but "
+            "with a shadow-log of the would-pick delta. true = pick the cheapest "
+            "warmup start within [DHW_WARMUP_WINDOW_START_LOCAL, "
+            "DHW_WARMUP_WINDOW_END_LOCAL) once per plan-date and persist it. "
+            "Setback stays fixed at DHW_SETBACK_START_HOUR_LOCAL."
+        ),
+    ),
+    "DHW_WARMUP_WINDOW_START_LOCAL": SettingSpec(
+        key="DHW_WARMUP_WINDOW_START_LOCAL",
+        type_name="int",
+        env_default=_int_env("DHW_WARMUP_WINDOW_START_LOCAL", "11"),
+        min_value=0,
+        max_value=23,
+        description=(
+            "Earliest LOCAL hour the price-aware warmup may start (inclusive). "
+            "Only used when DHW_WARMUP_PRICE_AWARE_ENABLED=true. Bounded so the "
+            "tank is still warm before evening showers."
+        ),
+    ),
+    "DHW_WARMUP_WINDOW_END_LOCAL": SettingSpec(
+        key="DHW_WARMUP_WINDOW_END_LOCAL",
+        type_name="int",
+        env_default=_int_env("DHW_WARMUP_WINDOW_END_LOCAL", "16"),
+        min_value=1,
+        max_value=24,
+        description=(
+            "Exclusive upper bound (LOCAL hour) for the price-aware warmup "
+            "start window. Candidates are [START, END). Only used when "
+            "DHW_WARMUP_PRICE_AWARE_ENABLED=true; must be > START."
+        ),
+    ),
     "DHW_TANK_USABLE_FRACTION": SettingSpec(
         key="DHW_TANK_USABLE_FRACTION",
         type_name="float",

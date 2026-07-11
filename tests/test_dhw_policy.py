@@ -719,3 +719,123 @@ def test_no_precool_when_shower_in_span(monkeypatch):
     rows = dhw_policy.generate_daily_tank_schedule(date(2026, 6, 1), mode="normal", agile_rates=rates)
     setback = [r for r in rows if r["action_type"] == "tank_setback"][0]
     assert setback["params"]["tank_temp"] == int(round(float(config.DHW_TEMP_SETBACK_C)))
+
+
+# ---------------------------------------------------------------------------
+# #681 — price-aware warmup start hour resolver
+# ---------------------------------------------------------------------------
+
+
+def _rates_for_day(day, price_by_local_hour, default=28.0):
+    """Agile-rate dicts for a full local day; ``price_by_local_hour`` maps a
+    local hour (both its :00 and :30 slots) to a price."""
+    base = datetime(day.year, day.month, day.day, 0, 0, tzinfo=TZ_LOCAL).astimezone(UTC)
+    rates = []
+    for i in range(48):
+        ts = base + timedelta(minutes=30 * i)
+        lh = ts.astimezone(TZ_LOCAL).hour
+        rates.append({
+            "valid_from": ts.isoformat().replace("+00:00", "Z"),
+            "value_inc_vat": float(price_by_local_hour.get(lh, default)),
+        })
+    return rates
+
+
+def test_resolver_disabled_returns_static(monkeypatch):
+    monkeypatch.setattr(config, "DHW_WARMUP_PRICE_AWARE_ENABLED", False, raising=False)
+    day = date(2026, 6, 1)
+    rates = _rates_for_day(day, {15: 2.0})
+    assert dhw_policy.resolve_warmup_hour_local(day, rates) == 13
+    assert dhw_policy._persisted_warmup_hour(day) is None
+
+
+def test_resolver_picks_cheapest_within_window(monkeypatch):
+    monkeypatch.setattr(config, "DHW_WARMUP_PRICE_AWARE_ENABLED", True, raising=False)
+    day = date(2026, 6, 1)
+    # 15:00 cheapest; 09:00 is even cheaper but OUTSIDE the [11,16) window.
+    rates = _rates_for_day(day, {9: 0.1, 15: 2.0, 14: 5.0})
+    assert dhw_policy.resolve_warmup_hour_local(day, rates) == 15
+
+
+def test_resolver_tie_break_prefers_earliest(monkeypatch):
+    monkeypatch.setattr(config, "DHW_WARMUP_PRICE_AWARE_ENABLED", True, raising=False)
+    day = date(2026, 6, 1)
+    # 12:00 and 14:00 tie at the minimum → earliest (12) wins.
+    rates = _rates_for_day(day, {12: 3.0, 14: 3.0})
+    assert dhw_policy.resolve_warmup_hour_local(day, rates) == 12
+
+
+def test_resolver_persist_once_ignores_later_prices(monkeypatch):
+    monkeypatch.setattr(config, "DHW_WARMUP_PRICE_AWARE_ENABLED", True, raising=False)
+    day = date(2026, 6, 1)
+    assert dhw_policy.resolve_warmup_hour_local(day, _rates_for_day(day, {14: 2.0})) == 14
+    # A later re-plan with different prices must NOT re-choose.
+    assert dhw_policy.resolve_warmup_hour_local(day, _rates_for_day(day, {11: 0.5})) == 14
+
+
+def test_resolver_no_price_data_static_and_not_persisted(monkeypatch):
+    monkeypatch.setattr(config, "DHW_WARMUP_PRICE_AWARE_ENABLED", True, raising=False)
+    day = date(2026, 6, 1)
+    assert dhw_policy.resolve_warmup_hour_local(day, agile_rates=None) == 13
+    assert dhw_policy._persisted_warmup_hour(day) is None
+
+
+def test_price_aware_setback_stays_fixed_at_22(monkeypatch):
+    """The restore covenant: moving the warmup must never move the setback."""
+    monkeypatch.setattr(config, "DHW_WARMUP_PRICE_AWARE_ENABLED", True, raising=False)
+    day = date(2026, 6, 1)
+    rates = _rates_for_day(day, {11: 1.0})
+    # Writer (LP-solve path) resolves+persists first; generate is a pure reader.
+    assert dhw_policy.resolve_warmup_hour_local(day, rates) == 11
+    rows = dhw_policy.generate_daily_tank_schedule(day, agile_rates=rates, mode="normal")
+    warmup = next(r for r in rows if r["action_type"] == "tank_warmup")
+    setback = next(r for r in rows if r["action_type"] == "tank_setback")
+    assert warmup["start_time"].endswith("T10:00:00Z")   # 11:00 BST = 10:00 UTC
+    assert setback["start_time"].endswith("T21:00:00Z")   # 22:00 BST = 21:00 UTC (FIXED)
+
+
+def test_price_aware_negative_defer_operates_on_resolved_hour(monkeypatch):
+    """The negative-boost defer (dhw_policy:293-324) must key off the RESOLVED
+    warmup start, not the static one: a negative window opening at the resolved
+    warmup hour still defers the warmup past it."""
+    monkeypatch.setattr(config, "DHW_WARMUP_PRICE_AWARE_ENABLED", True, raising=False)
+    monkeypatch.setattr(config, "LP_PRE_NEGATIVE_PRECOOL_HOURS", 3.0, raising=False)
+    day = date(2026, 6, 1)
+    # Make 15:00 the cheapest AND negative for its :00 slot so warmup resolves
+    # to 15:00 and a negative window opens exactly there.
+    base = datetime(day.year, day.month, day.day, 0, 0, tzinfo=TZ_LOCAL).astimezone(UTC)
+    rates = []
+    for i in range(48):
+        ts = base + timedelta(minutes=30 * i)
+        lh = ts.astimezone(TZ_LOCAL).hour
+        lm = ts.astimezone(TZ_LOCAL).minute
+        if lh == 15 and lm == 0:
+            val = -5.0            # negative window slot → cheapest by far
+        elif lh == 15:
+            val = 3.0
+        else:
+            val = 28.0
+        rates.append({"valid_from": ts.isoformat().replace("+00:00", "Z"),
+                      "value_inc_vat": val})
+    assert dhw_policy.resolve_warmup_hour_local(day, rates) == 15
+    rows = dhw_policy.generate_daily_tank_schedule(day, agile_rates=rates, mode="normal")
+    warmup = next(r for r in rows if r["action_type"] == "tank_warmup")
+    # Warmup deferred past the negative window end (15:30 BST = 14:30 UTC).
+    assert warmup["start_time"] == "2026-06-01T14:30:00Z"
+    # And a boost row for the negative slot exists.
+    assert any(r["action_type"] == "tank_negative_boost" for r in rows)
+
+
+def test_price_aware_dst_day_local_hour_correct(monkeypatch):
+    """DST anchoring: on the BST-start day (2026-03-29) the resolved warmup
+    lands at the intended LOCAL hour with the correct UTC offset."""
+    monkeypatch.setattr(config, "DHW_WARMUP_PRICE_AWARE_ENABLED", True, raising=False)
+    day = date(2026, 3, 29)  # clocks jump 01:00→02:00; afternoon is BST (UTC+1)
+    rates = _rates_for_day(day, {14: 1.5})
+    assert dhw_policy.resolve_warmup_hour_local(day, rates) == 14
+    rows = dhw_policy.generate_daily_tank_schedule(
+        day, agile_rates=rates, mode="normal", allow_past=True)
+    warmup = next(r for r in rows if r["action_type"] == "tank_warmup")
+    start = datetime.fromisoformat(warmup["start_time"].replace("Z", "+00:00"))
+    assert start.astimezone(TZ_LOCAL).hour == 14   # local hour honoured
+    assert warmup["start_time"] == "2026-03-29T13:00:00Z"  # 14:00 BST = 13:00 UTC

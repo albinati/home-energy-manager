@@ -192,3 +192,49 @@ def test_null_upsert_does_not_clobber_dhw_split():
     row = db.get_daikin_consumption_daily_by_date(day)
     assert row["kwh_dhw"] == 2.0
     assert row["kwh_total"] == 5.5
+
+
+# ---------------------------------------------------------------------------
+# #681 — price-aware warmup hour: autoscale denominator consistency
+# ---------------------------------------------------------------------------
+
+def test_nominal_total_shifts_with_resolved_warmup_hour():
+    """Moving the warmup earlier lengthens the warmup window (setback slots
+    become warmup-maintenance), so the nominal denominator MUST change with the
+    resolved hour — else the autoscale drifts."""
+    from src import dhw_policy
+    n13 = dhw_policy._nominal_daily_total_kwh("normal", 13)
+    n11 = dhw_policy._nominal_daily_total_kwh("normal", 11)
+    # 11:00 start adds two extra warmup hours (was setback) → strictly larger.
+    assert n11 > n13
+
+
+def test_autoscale_and_bias_normalizer_use_same_resolved_hour(monkeypatch):
+    """The autoscale denominator and the bucket-bias normalizer must read the
+    SAME resolved warmup hour — else the level double-corrects (issue #681).
+    With price-aware ON and a persisted 11:00, both nominal paths key off 11."""
+    from datetime import datetime
+    from src import db, dhw_policy
+    from src.config import config as app_config
+    from src.dhw_bias import normalized_factors
+
+    monkeypatch.setattr(app_config, "DHW_WARMUP_PRICE_AWARE_ENABLED", True, raising=False)
+    today = datetime.now(dhw_policy._tz_local()).date()
+    db.set_runtime_setting(dhw_policy._warmup_setting_key(today), "11")
+    dhw_policy._autoscale_cache.clear()
+
+    # Autoscale reads today's resolved hour (11) for its denominator.
+    _seed_measured_dhw([3.0] * 10)
+    nominal_11 = dhw_policy._nominal_daily_total_kwh("normal", 11)
+    factor = dhw_policy._dhw_autoscale_factor("normal")
+    assert factor == pytest.approx(min(1.6, max(0.5, 3.0 / nominal_11)), abs=1e-6)
+
+    # The bias normalizer divides by the SAME nominal shares (resolved hour 11).
+    shares_default = dhw_policy._nominal_bucket_shares("normal")  # → today's = 11
+    shares_11 = dhw_policy._nominal_bucket_shares("normal", 11)
+    assert shares_default == shares_11
+    # normalized_factors consumes _nominal_bucket_shares(mode) with no explicit
+    # hour, so it too tracks the resolved 11:00 — sanity that it returns a
+    # complete 12-bucket dict without error.
+    norm = normalized_factors({5: 2.0}, "normal")
+    assert len(norm) == 12
