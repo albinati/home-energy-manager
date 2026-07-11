@@ -995,9 +995,22 @@ export interface LwtGateState {
   preheat_suppressed: boolean;
 }
 
+/** Observational price-aware DHW warmup would-pick (#683 shadow). The feature
+ * is OFF by default; this row just records what the price-aware resolver WOULD
+ * have picked vs the static hour, so the delta can be watched toward a winter
+ * enable-decision. null until today's (or D+1's) Agile window is fully real. */
+export interface DhwWarmupShadow {
+  static_hour: number;
+  would_pick_hour: number;
+  delta_pence: number | null;
+  enabled: boolean;
+  resolved_at: string;
+}
+
 export interface StatusFeedbackResponse {
   now_utc: string;
   dhw: DhwBudgetState;
+  dhw_warmup_shadow: DhwWarmupShadow | null;
   lwt_gate: LwtGateState;
   forecast: StatusForecastBlock;
 }

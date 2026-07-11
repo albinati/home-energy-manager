@@ -839,3 +839,81 @@ def test_price_aware_dst_day_local_hour_correct(monkeypatch):
     start = datetime.fromisoformat(warmup["start_time"].replace("Z", "+00:00"))
     assert start.astimezone(TZ_LOCAL).hour == 14   # local hour honoured
     assert warmup["start_time"] == "2026-03-29T13:00:00Z"  # 14:00 BST = 13:00 UTC
+
+
+# ---------------------------------------------------------------------------
+# #683 follow-up — observational price-aware warmup SHADOW (persisted, queryable)
+# ---------------------------------------------------------------------------
+
+
+def test_shadow_persisted_even_when_feature_disabled(monkeypatch):
+    """The whole point: accumulate the static→would-pick delta while the
+    price-aware feature is OFF. Resolver still returns the static hour, but the
+    shadow row is written with the would-pick + delta + enabled flag."""
+    monkeypatch.setattr(config, "DHW_WARMUP_PRICE_AWARE_ENABLED", False, raising=False)
+    day = date(2026, 6, 1)
+    rates = _rates_for_day(day, {15: 2.0}, default=28.0)
+    # Disabled → resolver returns the static hour, and does NOT persist the K2 pin.
+    assert dhw_policy.resolve_warmup_hour_local(day, rates) == 13
+    assert dhw_policy._persisted_warmup_hour(day) is None
+    # …but the observational shadow IS written.
+    shadow = dhw_policy.read_warmup_shadow(day)
+    assert shadow is not None
+    assert shadow["static_hour"] == 13
+    assert shadow["would_pick_hour"] == 15
+    assert shadow["enabled"] is False
+    # static 28.0 − chosen 2.0 = 26.0 p/slot cheaper.
+    assert shadow["delta_pence"] == pytest.approx(26.0)
+    assert "resolved_at" in shadow
+
+
+def test_shadow_key_distinct_from_k2_pin_key(monkeypatch):
+    """K2 SAFETY: the shadow key must use a DISTINCT prefix so the warmup-hour
+    pin readers never see it. Writing ONLY the shadow must leave the pin
+    readers returning static (no persisted pin), and vice-versa."""
+    monkeypatch.setattr(config, "DHW_WARMUP_PRICE_AWARE_ENABLED", True, raising=False)
+    day = date(2026, 6, 1)
+    # Keys are genuinely distinct and non-overlapping as prefixes.
+    assert dhw_policy._warmup_shadow_key(day) != dhw_policy._warmup_setting_key(day)
+    assert dhw_policy._warmup_shadow_key(day).startswith("dhw_warmup_shadow_")
+    assert dhw_policy._warmup_setting_key(day).startswith("dhw_warmup_hour_")
+    assert not dhw_policy._warmup_shadow_key(day).startswith(dhw_policy._WARMUP_KEY_PREFIX)
+    # Write ONLY a shadow row (no pin). The K2 pin readers must NOT pick it up.
+    dhw_policy._persist_warmup_shadow(day, static_hour=13, chosen_hour=15, delta_pence=1.0)
+    assert dhw_policy._persisted_warmup_hour(day) is None
+    # When enabled with no persisted pin, _read_warmup_hour falls back to static
+    # — proving the shadow row never leaks into the pin path.
+    assert dhw_policy._read_warmup_hour(day) == 13
+
+
+def test_shadow_refreshes_on_resolve_no_process_dedup(monkeypatch):
+    """Idempotent upsert: a later real-window solve refreshes the shadow row
+    (unlike the once-per-process INFO log dedup)."""
+    monkeypatch.setattr(config, "DHW_WARMUP_PRICE_AWARE_ENABLED", False, raising=False)
+    day = date(2026, 6, 1)
+    dhw_policy.resolve_warmup_hour_local(day, _rates_for_day(day, {15: 2.0}))
+    assert dhw_policy.read_warmup_shadow(day)["would_pick_hour"] == 15
+    # Different cheapest hour on a later solve → shadow row moves with it.
+    dhw_policy.resolve_warmup_hour_local(day, _rates_for_day(day, {12: 1.0}))
+    assert dhw_policy.read_warmup_shadow(day)["would_pick_hour"] == 12
+
+
+def test_shadow_not_persisted_when_window_not_fully_real(monkeypatch):
+    """The persist gate (fully-real Agile window) also protects the shadow:
+    a truncated price range → no shadow row."""
+    monkeypatch.setattr(config, "DHW_WARMUP_PRICE_AWARE_ENABLED", False, raising=False)
+    day = date(2026, 6, 1)
+    assert dhw_policy.resolve_warmup_hour_local(day, agile_rates=None) == 13
+    assert dhw_policy.read_warmup_shadow(day) is None
+
+
+def test_sweep_drops_stale_shadow_keys(monkeypatch):
+    """The stale-key sweep drops old ``dhw_warmup_shadow_`` rows on the same
+    7-day TTL, keeping recent ones."""
+    old = date(2026, 5, 1)        # >7 days before the frozen 2026-06-01 today
+    recent = date(2026, 5, 30)    # within 7 days
+    dhw_policy._persist_warmup_shadow(old, 13, 15, 1.0)
+    dhw_policy._persist_warmup_shadow(recent, 13, 14, 0.5)
+    dhw_policy._sweep_stale_warmup_keys(date(2026, 6, 1))
+    assert dhw_policy.read_warmup_shadow(old) is None
+    assert dhw_policy.read_warmup_shadow(recent) is not None

@@ -226,25 +226,35 @@ def _persisted_warmup_hour(d: date) -> int | None:
 
 
 _WARMUP_KEY_PREFIX = "dhw_warmup_hour_"
+# DISTINCT prefix from the K2 pin key above (``dhw_warmup_hour_``): the pin
+# readers (``_read_warmup_hour`` / ``_persisted_warmup_hour``) match the
+# ``dhw_warmup_hour_`` prefix EXACTLY and can NEVER see a ``dhw_warmup_shadow_``
+# row, so persisting the observational would-pick delta is zero-risk to the LP
+# pin / fired warmup hour. Read only by ``read_warmup_shadow`` (the
+# /status/feedback surface). "hour_" and "shadow_" share no prefix relationship.
+_WARMUP_SHADOW_KEY_PREFIX = "dhw_warmup_shadow_"
 _WARMUP_KEY_TTL_DAYS = 7
 
 
 def _sweep_stale_warmup_keys(today: date) -> None:
-    """Finding 4 (review #683): drop ``dhw_warmup_hour_<date>`` rows older than
+    """Finding 4 (review #683): drop ``dhw_warmup_hour_<date>`` (K2 pin) AND
+    ``dhw_warmup_shadow_<date>`` (observational would-pick) rows older than
     ~7 days so the kv table can't accrue forever. Cheap + best-effort — a single
     ``list_runtime_settings`` scan on the once-a-day persist, never fatal."""
     try:
         cutoff = today - timedelta(days=_WARMUP_KEY_TTL_DAYS)
         for row in db.list_runtime_settings():
             key = str(row.get("key", ""))
-            if not key.startswith(_WARMUP_KEY_PREFIX):
-                continue
-            try:
-                d = date.fromisoformat(key[len(_WARMUP_KEY_PREFIX):])
-            except ValueError:
-                continue
-            if d < cutoff:
-                db.delete_runtime_setting(key)
+            for prefix in (_WARMUP_KEY_PREFIX, _WARMUP_SHADOW_KEY_PREFIX):
+                if not key.startswith(prefix):
+                    continue
+                try:
+                    d = date.fromisoformat(key[len(prefix):])
+                except ValueError:
+                    break
+                if d < cutoff:
+                    db.delete_runtime_setting(key)
+                break
     except Exception:  # pragma: no cover - defensive: sweep must not fail persist
         logger.debug("dhw_policy: stale warmup-key sweep failed", exc_info=True)
 
@@ -255,6 +265,65 @@ def _persist_warmup_hour(d: date, hour: int) -> None:
         _sweep_stale_warmup_keys(d)
     except Exception:  # pragma: no cover - defensive
         logger.debug("dhw_policy: persist warmup hour failed for %s", d, exc_info=True)
+
+
+def _warmup_shadow_key(d: date) -> str:
+    """Runtime-settings key for the OBSERVATIONAL price-aware would-pick row.
+
+    Uses ``_WARMUP_SHADOW_KEY_PREFIX`` — deliberately DISTINCT from the K2 pin
+    key (``dhw_warmup_hour_``) so ``_read_warmup_hour``/``_persisted_warmup_hour``
+    (which match ``dhw_warmup_hour_`` exactly) never read it. Write-only from the
+    resolver; read only by ``read_warmup_shadow``."""
+    return f"{_WARMUP_SHADOW_KEY_PREFIX}{d.isoformat()}"
+
+
+def _persist_warmup_shadow(
+    d: date,
+    static_hour: int,
+    chosen_hour: int,
+    delta_pence: float | None,
+    resolved_at: datetime | None = None,
+) -> None:
+    """Persist the observational would-pick row for local date *d* (idempotent
+    upsert, no in-process dedup) so late/real-window re-solves refresh it.
+
+    Written UNCONDITIONAL of ``_price_aware_enabled`` — the whole point is to
+    accumulate the static→would-pick delta *while the feature is OFF*, toward a
+    winter enable-decision. Never read by the K2 warmup-hour pin path (distinct
+    key prefix), so it can never move the fired warmup hour or the LP pin."""
+    when = (resolved_at or datetime.now(UTC)).astimezone(UTC)
+    try:
+        db.set_runtime_setting(
+            _warmup_shadow_key(d),
+            json.dumps({
+                "static_hour": int(static_hour),
+                "would_pick_hour": int(chosen_hour),
+                "delta_pence": (
+                    round(float(delta_pence), 3) if delta_pence is not None else None
+                ),
+                "enabled": _price_aware_enabled(),
+                "resolved_at": when.isoformat().replace("+00:00", "Z"),
+            }),
+        )
+    except Exception:  # pragma: no cover - defensive: shadow must not fail resolve
+        logger.debug("dhw_policy: persist warmup shadow failed for %s", d, exc_info=True)
+
+
+def read_warmup_shadow(d: date) -> dict[str, Any] | None:
+    """The observational would-pick row for local date *d*, or None. Cheap kv
+    read for the /status/feedback self-check surface. Shape:
+    ``{static_hour, would_pick_hour, delta_pence, enabled, resolved_at}``."""
+    try:
+        raw = db.get_runtime_setting(_warmup_shadow_key(d))
+    except Exception:  # pragma: no cover - defensive
+        return None
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def _read_warmup_hour(d: date) -> int:
@@ -423,6 +492,12 @@ def resolve_warmup_hour_local(
 
     chosen, delta = _price_aware_pick(target_date_local, price_map, static_hour)
     _shadow_log_warmup(target_date_local, static_hour, chosen, delta)
+    # Persist the observational would-pick row — UNCONDITIONAL of the enable
+    # flag (still inside the fully-real window gate) so the static→would-pick
+    # delta accrues toward a winter enable-decision. Distinct key prefix keeps
+    # it invisible to the K2 pin path; idempotent upsert refreshes on re-solve.
+    if chosen is not None:
+        _persist_warmup_shadow(target_date_local, static_hour, chosen, delta)
 
     if not _price_aware_enabled() or chosen is None:
         return static_hour

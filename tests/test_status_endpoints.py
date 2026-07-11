@@ -231,6 +231,36 @@ def test_feedback_shape_and_gate_story(monkeypatch):
     assert gate["preheat_suppressed"] is True
     assert gate["threshold_kwh"] == pytest.approx(0.5)
     assert "forecast" in body
+    # Observational DHW warmup shadow is present (null until a shadow row exists).
+    assert "dhw_warmup_shadow" in body
+    assert body["dhw_warmup_shadow"] is None
+
+
+def test_feedback_surfaces_warmup_shadow(monkeypatch):
+    """A persisted observational would-pick row is surfaced on /status/feedback,
+    with today's row preferred and D+1 as the fallback."""
+    _quiet_upstreams(monkeypatch)
+    monkeypatch.setattr(config, "BULLETPROOF_TIMEZONE", "Europe/London", raising=False)
+    from zoneinfo import ZoneInfo
+
+    from src import dhw_policy
+    today = datetime.now(ZoneInfo("Europe/London")).date()
+    tomorrow = today + timedelta(days=1)
+    # Only a D+1 row exists → the endpoint falls back to it.
+    dhw_policy._persist_warmup_shadow(tomorrow, static_hour=13, chosen_hour=14, delta_pence=0.37)
+    client = _client(monkeypatch)
+    ws = client.get("/api/v1/status/feedback").json()["dhw_warmup_shadow"]
+    assert ws is not None
+    assert ws["static_hour"] == 13
+    assert ws["would_pick_hour"] == 14
+    assert ws["delta_pence"] == pytest.approx(0.37)
+    assert ws["enabled"] is False
+    # Today's row now lands → it takes precedence over the D+1 fallback.
+    from src.api.routers import status as status_router
+    status_router._cache.clear()
+    dhw_policy._persist_warmup_shadow(today, static_hour=13, chosen_hour=12, delta_pence=1.1)
+    ws2 = client.get("/api/v1/status/feedback").json()["dhw_warmup_shadow"]
+    assert ws2["would_pick_hour"] == 12
 
 
 # ── fair-compare TTL cache ───────────────────────────────────────────────────

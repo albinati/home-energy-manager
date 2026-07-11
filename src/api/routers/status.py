@@ -387,11 +387,25 @@ async def status_feedback() -> dict[str, Any]:
         return hit[1]
 
     def compute() -> dict[str, Any]:
-        from ...dhw_policy import dhw_budget_state
+        from zoneinfo import ZoneInfo
+
+        from ...dhw_policy import dhw_budget_state, read_warmup_shadow
         from ...scheduler.lp_dispatch import space_heating_gate_state
+
+        # Observational price-aware warmup would-pick (#683 shadow). Feature is
+        # OFF by default; this row just accumulates the static→would-pick delta
+        # toward an enable-decision. Today's row lands once today's window is
+        # fully-real Agile; fall back to the reliable D+1 row (written at the
+        # ~16:00 octopus_fetch solve). Cheap kv reads only.
+        tz = ZoneInfo(getattr(config, "BULLETPROOF_TIMEZONE", "Europe/London"))
+        today_local = datetime.now(tz).date()
+        warmup_shadow = read_warmup_shadow(today_local) or read_warmup_shadow(
+            today_local + timedelta(days=1)
+        )
         return {
             "now_utc": datetime.now(UTC).isoformat(),
             "dhw": dhw_budget_state(),
+            "dhw_warmup_shadow": warmup_shadow,
             "lwt_gate": space_heating_gate_state(),
             "dispatch_coherence": _dispatch_coherence_block(),
         }
