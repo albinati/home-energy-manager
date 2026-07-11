@@ -405,7 +405,17 @@ def build_early_setback_row(
     natural key ``(daikin, tank_setback, start_time)``) instead of duplicating
     it. Plain ``DHW_TEMP_SETBACK_C`` target: the detector never fires when a
     negative-price boost overlaps the evening, so the pre-cool variant can't
-    apply here."""
+    apply here.
+
+    KNOWN LIMITATION (accepted): the end boundary freezes D+1's warmup hour
+    as read AT FIRE TIME. If the price-aware resolver later persists a
+    DIFFERENT hour for D+1 (rates land after ~16:00), this row's end is never
+    refreshed (``upsert_action`` won't touch an in-flight/completed row), so
+    it can overlap tomorrow's earlier warmup row. Harmless under the default
+    ``PREFIRE_STATE_MATCH_ENABLED=true`` — this row goes terminal within a
+    tick or two of firing, long before tomorrow's warmup — but if state-match
+    is ever disabled, revisit (a live 37 °C row overlapping the warmup would
+    thrash against it)."""
     tz = _tz_local()
     setback_c = int(round(float(getattr(config, "DHW_TEMP_SETBACK_C", 37))))
     next_day = target_date_local + timedelta(days=1)
@@ -1156,12 +1166,28 @@ def forecast_dhw_load_per_slot(
     # setback row instead of budgeting a phantom evening reheat. Per-date
     # cache: the horizon spans ~2 local dates → ≤2 kv reads per call. Only
     # normal mode — guests keeps its 24 h warmup, vacation forecasts ~0.
+    # SAME CLAMP as the generator: a key outside that date's
+    # (warmup_start, setback_start) window is ignored — otherwise a bogus/
+    # foreign key rejected by K1 (schedule keeps the tank at NORMAL) would
+    # still de-budget the whole day here, and the pin would starve the real
+    # warmup of battery. K1 and K2 must reject in lockstep too.
     _early_by_date: dict[date, datetime | None] = {}
     if mode == "normal":
         for _s in slot_starts_utc:
             _d = _s.astimezone(tz).date()
-            if _d not in _early_by_date:
-                _early_by_date[_d] = read_early_setback(_d)
+            if _d in _early_by_date:
+                continue
+            _ts = read_early_setback(_d)
+            if _ts is not None:
+                _w_start = datetime(
+                    _d.year, _d.month, _d.day, _warmup_by_date[_d], 0, tzinfo=tz,
+                ).astimezone(UTC)
+                _s_start = datetime(
+                    _d.year, _d.month, _d.day, setback_hour, 0, tzinfo=tz,
+                ).astimezone(UTC)
+                if not (_w_start < _ts < _s_start):
+                    _ts = None
+            _early_by_date[_d] = _ts
 
     def _early_setback_active(slot_utc: datetime, slot_local: datetime) -> bool:
         _ts = _early_by_date.get(slot_local.date())

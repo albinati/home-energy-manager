@@ -229,6 +229,21 @@ def test_forecast_without_key_keeps_shower_budget():
     assert e_dhw[idx_2100] == pytest.approx(dhw_policy._SHOWER_REHEAT_KWH)
 
 
+def test_forecast_rejects_key_outside_cycle_window():
+    """K2 must reject an out-of-window key in LOCKSTEP with K1 — otherwise a
+    bogus 09:00 key de-budgets the whole day in the LP while the schedule
+    (which clamps it away) still holds the tank at NORMAL."""
+    dhw_policy.persist_early_setback(ANCHOR, _local(9, 0).astimezone(UTC))
+    slots = _evening_slots()
+    e_dhw, tank_temps = dhw_policy.forecast_dhw_load_per_slot(slots, mode="normal")
+    idx_2100 = next(
+        i for i, s in enumerate(slots)
+        if s.astimezone(TZ_LOCAL).hour == 21 and s.astimezone(TZ_LOCAL).minute == 0
+    )
+    assert e_dhw[idx_2100] == pytest.approx(dhw_policy._SHOWER_REHEAT_KWH)
+    assert tank_temps[idx_2100] == pytest.approx(45.0)
+
+
 def test_forecast_guests_ignores_key():
     fire = _local(20, 40).astimezone(UTC)
     dhw_policy.persist_early_setback(ANCHOR, fire)
@@ -253,8 +268,15 @@ def _mk_dev(tank_temp=38.0, tank_target=45.0):
     )
 
 
-def _seed_warmup_row() -> int:
-    """A dhw_policy warmup row covering NOW_UTC, as the plan writer creates it."""
+def _seed_warmup_row(status: str = "completed") -> int:
+    """A dhw_policy warmup row covering NOW_UTC.
+
+    Defaults to ``completed`` — the REAL evening state in prod: the #386
+    pre-fire idempotency marks every dhw_policy row terminal ("noop (state
+    matched pre-fire)") within a tick or two of its 13:00 fire, so by 20:40
+    the covering warmup row is never pending/active. (The first review of
+    this PR caught exactly this: a detector that filtered on
+    pending/active could never fire in production.)"""
     return _db.upsert_action(
         plan_date=str(ANCHOR),
         start_time=_utc_iso(_local(13, 0)),
@@ -263,7 +285,7 @@ def _seed_warmup_row() -> int:
         action_type="tank_warmup",
         params={"tank_power": True, "tank_temp": 45, "tank_powerful": False,
                 "dhw_policy": True},
-        status="active",
+        status=status,
     )
 
 
@@ -288,16 +310,17 @@ def _run_detector(dev, actions):
     )
 
 
-def test_detector_fires_on_drawdown():
-    aid = _seed_warmup_row()
+def test_detector_fires_on_drawdown_completed_warmup_row():
+    """The PRODUCTION path: the covering warmup row is already 'completed'
+    (pre-fire idempotency) by the time the showers happen — the detector
+    must still recognise policy ownership and fire."""
+    aid = _seed_warmup_row(status="completed")
     _seed_telemetry([45.0, 45.0, 44.0, 38.5, 38.0])
     dev = _mk_dev(tank_temp=38.0)
     _run_detector(dev, [_action_row(aid)])
 
     fired = dhw_policy.read_early_setback(ANCHOR)
     assert fired == NOW_UTC
-    # Warmup row completed so the reconciler stops asserting NORMAL.
-    assert _action_row(aid)["status"] == "completed"
     # Pulled-forward setback row exists, pending, starting at the fire time.
     rows = _db.get_actions_for_plan_date(str(ANCHOR))
     setbacks = [r for r in rows if r["action_type"] == "tank_setback"]
@@ -308,6 +331,16 @@ def test_detector_fires_on_drawdown():
     sb = next(r for r in setbacks if r["start_time"] == _utc_iso(NOW_UTC))
     params = json.loads(sb["params"]) if isinstance(sb["params"], str) else sb["params"]
     assert params["tank_temp"] == 37
+
+
+def test_detector_fires_and_closes_active_warmup_row():
+    """When the warmup row is still live (state-match disabled or slow), the
+    detector closes it so this reconciler stops asserting NORMAL."""
+    aid = _seed_warmup_row(status="active")
+    _seed_telemetry([45.0, 45.0, 44.0, 38.5, 38.0])
+    _run_detector(_mk_dev(tank_temp=38.0), [_action_row(aid)])
+    assert dhw_policy.read_early_setback(ANCHOR) == NOW_UTC
+    assert _action_row(aid)["status"] == "completed"
 
 
 def test_detector_idempotent_second_tick():
@@ -361,7 +394,13 @@ def test_detector_requires_covering_warmup_row():
     assert dhw_policy.read_early_setback(ANCHOR) is None
 
 
-def test_detector_skips_when_boost_overlaps_evening():
+@pytest.mark.parametrize("boost_status", ["pending", "active", "completed"])
+def test_detector_skips_when_boost_overlaps_evening(boost_status):
+    """Any boost row touching the remaining evening bails — INCLUDING
+    'completed': the #386 state-match marks a boost row completed at window
+    START while the paid window is still running (that's why
+    _check_negative_boost_powerful exists). Cutting it short would drop the
+    target to 37 while we're being paid to heat."""
     aid = _seed_warmup_row()
     _db.upsert_action(
         plan_date=str(ANCHOR),
@@ -371,12 +410,63 @@ def test_detector_skips_when_boost_overlaps_evening():
         action_type="tank_negative_boost",
         params={"tank_power": True, "tank_temp": 60, "tank_powerful": True,
                 "dhw_policy": True},
-        status="pending",
+        status=boost_status,
     )
     _seed_telemetry([45.0, 45.0, 38.5, 38.0])
     actions = _db.get_actions_for_plan_date(str(ANCHOR))
     _run_detector(_mk_dev(), actions)
     assert dhw_policy.read_early_setback(ANCHOR) is None
+
+
+def test_detector_failed_warmup_row_no_fire():
+    """A failed warmup row never asserted NORMAL — no policy ownership."""
+    aid = _seed_warmup_row(status="failed")
+    _seed_telemetry([45.0, 45.0, 38.5, 38.0])
+    _run_detector(_mk_dev(tank_temp=38.0), [_action_row(aid)])
+    assert dhw_policy.read_early_setback(ANCHOR) is None
+
+
+def test_detector_ignores_estimate_telemetry():
+    """Physics-estimator rows (source='estimate', written on Daikin quota
+    exhaustion) model smooth decay and cannot see a draw — they must not
+    veto a genuine detection confirmed by live rows."""
+    aid = _seed_warmup_row()
+    _seed_telemetry([45.0, 45.0, 44.0, 38.5, 38.0])
+    # A rogue estimate row NEWER than the live confirmations, still 'hot'.
+    _db.insert_daikin_telemetry({
+        "fetched_at": (NOW_UTC - timedelta(minutes=1)).timestamp(),
+        "source": "estimate",
+        "tank_temp_c": 44.8,
+    })
+    _run_detector(_mk_dev(tank_temp=38.0), [_action_row(aid)])
+    assert dhw_policy.read_early_setback(ANCHOR) == NOW_UTC
+
+
+def test_detector_glitched_high_sample_no_false_fire():
+    """A single glitched-HIGH sample must not manufacture a phantom drawdown:
+    window max is clamped to the warmup target + tolerance, so a normal
+    45 °C tank stays above threshold."""
+    aid = _seed_warmup_row()
+    _seed_telemetry([45.0, 49.5, 45.0, 45.0, 45.0])  # 49.5 = glitch
+    _run_detector(_mk_dev(tank_temp=45.0), [_action_row(aid)])
+    assert dhw_policy.read_early_setback(ANCHOR) is None
+
+
+def test_detector_draw_straddling_arm_boundary_fires():
+    """Shower 19:50→20:10: the armed window alone only sees already-dropped
+    values (max ~41 → Δ3 < 4). The reference window reaches 1 h before the
+    arm hour, so the true 45 °C pre-shower hold is the max and the fire
+    happens."""
+    aid = _seed_warmup_row()
+    base = NOW_UTC  # 20:40 local
+    for minutes_ago, temp in [(95, 45.0), (85, 45.0), (35, 41.0), (10, 38.5), (5, 38.0)]:
+        _db.insert_daikin_telemetry({
+            "fetched_at": (base - timedelta(minutes=minutes_ago)).timestamp(),
+            "source": "live",
+            "tank_temp_c": temp,
+        })
+    _run_detector(_mk_dev(tank_temp=38.0), [_action_row(aid)])
+    assert dhw_policy.read_early_setback(ANCHOR) == NOW_UTC
 
 
 def test_detector_below_threshold_no_fire():

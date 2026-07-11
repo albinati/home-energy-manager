@@ -685,11 +685,19 @@ def _check_dhw_shower_drawdown(
 
     # The policy must own the tank right now: an un-overridden dhw_policy
     # warmup row covering now is the thing we'd be pulling forward FROM.
+    # COMPLETED rows count — under the #386 pre-fire idempotency (default on)
+    # every dhw_policy row goes terminal ("noop (state matched pre-fire)")
+    # within a tick or two of firing, so by the evening the covering warmup
+    # row is ALWAYS 'completed' (same lifecycle reality that makes
+    # _check_negative_boost_powerful target completed rows). Only 'failed'
+    # and user-overridden rows don't establish policy ownership; the live-
+    # target sanity check below independently confirms the device still
+    # holds the row's target.
     warmup_row: dict[str, Any] | None = None
     for act in actions:
         if act.get("action_type") != "tank_warmup":
             continue
-        if (act.get("status") or "") not in ("pending", "active"):
+        if (act.get("status") or "") not in ("pending", "active", "completed"):
             continue
         if act.get("overridden_by_user_at"):
             continue
@@ -715,10 +723,12 @@ def _check_dhw_shower_drawdown(
 
     # Never cut a paid window short: any negative-price boost row touching
     # the remaining evening (now → static setback) wins over the detector.
+    # NO status filter — the #386 state-match marks a boost row 'completed'
+    # at window start (see _check_negative_boost_powerful), and even a
+    # 'failed' or user-overridden boost means someone/something else owns
+    # the tank tonight. Fail-safe direction: any boost row → bail.
     for act in actions:
         if act.get("action_type") != "tank_negative_boost":
-            continue
-        if (act.get("status") or "") not in ("pending", "active"):
             continue
         try:
             b_start = _parse_utc(act["start_time"])
@@ -764,22 +774,30 @@ def _check_dhw_shower_drawdown(
         return
 
     # Drawdown signature: tank standing loss is ~0.5 °C/h, so a drop of
-    # TRIGGER_DELTA below the armed window's running max is a draw, not decay.
-    # Require the TWO newest telemetry samples below the threshold as well as
-    # the live reading — a single glitchy sample must not fire.
+    # TRIGGER_DELTA below the running max is a draw, not decay. The reference
+    # window starts ONE HOUR BEFORE the arm hour (still deep inside the
+    # warmup hold) so a draw straddling the arm boundary — shower 19:50→20:10
+    # — is measured against the true pre-shower hold, not against already-
+    # dropped values. The max is clamped to the warmup target + tolerance so
+    # a single glitched-HIGH sample can't manufacture a phantom drawdown and
+    # drop the tank before anyone showered (fires must be conservative both
+    # ways: the TWO newest samples below threshold guard the low side, the
+    # clamp guards the high side).
     delta_c = float(getattr(config, "DHW_EARLY_SETBACK_TRIGGER_DELTA_C", 4.0))
     arm_utc = datetime(
         today_local.year, today_local.month, today_local.day,
         arm_hour, 0, tzinfo=tz,
     ).astimezone(UTC)
     try:
-        samples = db.get_tank_temps_since(arm_utc.timestamp())
+        samples = db.get_tank_temps_since((arm_utc - timedelta(hours=1)).timestamp())
     except Exception as _exc:
         logger.debug("early-setback telemetry read failed (non-fatal): %s", _exc)
         return
     if len(samples) < 2:
         return
     window_max = max([t for _, t in samples] + [tank_now])
+    if row_target is not None:
+        window_max = min(window_max, float(row_target) + 1.0)
     threshold = window_max - delta_c
     recent = [t for _, t in samples[-2:]]
     if tank_now > threshold or any(t > threshold for t in recent):
@@ -789,10 +807,13 @@ def _check_dhw_shower_drawdown(
     if not dhw_policy.persist_early_setback(today_local, now_utc):
         return
     minutes_early = max(0, int((setback_start_utc - now_utc).total_seconds() // 60))
-    db.mark_action(
-        int(warmup_row["id"]), "completed",
-        error_msg="early_setback: shower drawdown detected",
-    )
+    if (warmup_row.get("status") or "") in ("pending", "active"):
+        # Terminal rows stay as they are — only a still-live warmup row needs
+        # closing so this reconciler stops asserting NORMAL.
+        db.mark_action(
+            int(warmup_row["id"]), "completed",
+            error_msg="early_setback: shower drawdown detected",
+        )
     early_row = dhw_policy.build_early_setback_row(today_local, now_utc)
     db.upsert_action(
         device=early_row["device"],
