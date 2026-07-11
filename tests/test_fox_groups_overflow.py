@@ -43,23 +43,46 @@ def _slot(
 # --- Camada 1: eager _coarse_merge_fox merges adjacent SelfUse variants ----
 
 
-def test_eager_merge_collapses_solar_charge_next_to_standard_selfuse() -> None:
-    """A solar_charge slot (SelfUse minSoc=100) adjacent to a standard slot
-    (SelfUse minSoc=MIN_SOC_RESERVE) must merge into one SelfUse window with
-    the higher minSoc — no overflow needed to trigger the merge.
-    """
+def test_solar_charge_default_selfuse_never_hundred(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#679 A2 (CORRECTED default = selfuse): solar_charge maps to plain
+    SelfUse(reserve) — NOT the retired SelfUse(minSoc=100, maxSoc=100) shape
+    (which the H1 discharges through, A0). Next to a standard slot it merges
+    into one SelfUse(reserve) window (same floor), which is trivial and dropped,
+    leaving one well-formed group. The 100,100 tuple is never produced."""
+    monkeypatch.setattr(app_config, "LP_SOLAR_CHARGE_FOX_MODE", "selfuse", raising=False)
+    monkeypatch.setattr(app_config, "FOX_SKIP_TRIVIAL_SELFUSE_GROUPS", True)
     base = datetime(2026, 6, 1, 11, 0, tzinfo=UTC)  # noon BST → all-daylight, no midnight cross
     slots = [
-        _slot(base, kind="solar_charge"),
+        _slot(base, kind="solar_charge", target_soc_pct=90),
+        _slot(base + timedelta(minutes=30), kind="standard"),
+    ]
+    groups = _merge_fox_groups(slots)
+    reserve = int(app_config.MIN_SOC_RESERVE_PERCENT)
+    assert len(groups) == 1
+    assert groups[0].work_mode == "SelfUse"
+    assert groups[0].min_soc_on_grid == reserve
+    # The retired 100/100 shape must never appear.
+    assert not (groups[0].min_soc_on_grid == 100 and groups[0].max_soc == 100)
+
+
+def test_solar_charge_backup_hold_mode_is_backup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With LP_SOLAR_CHARGE_FOX_MODE=backup_hold, solar_charge → Backup
+    (a different workMode from the adjacent standard SelfUse, which is trivial
+    and dropped) → exactly one Backup group."""
+    monkeypatch.setattr(app_config, "LP_SOLAR_CHARGE_FOX_MODE", "backup_hold", raising=False)
+    monkeypatch.setattr(app_config, "FOX_SKIP_TRIVIAL_SELFUSE_GROUPS", True)
+    base = datetime(2026, 6, 1, 11, 0, tzinfo=UTC)
+    slots = [
+        _slot(base, kind="solar_charge", target_soc_pct=90),
         _slot(base + timedelta(minutes=30), kind="standard"),
     ]
     groups = _merge_fox_groups(slots)
     assert len(groups) == 1
-    assert groups[0].work_mode == "SelfUse"
-    # The solar_charge minSoc (100) wins over the standard minSoc (MIN_SOC_RESERVE).
-    assert groups[0].min_soc_on_grid == int(
-        getattr(app_config, "FOX_SOLAR_CHARGE_MIN_SOC_PERCENT", 100)
-    )
+    assert groups[0].work_mode == "Backup"
 
 
 # --- Camada 2: truncate_horizon=True returns (groups, replan_at_utc) ------
@@ -229,27 +252,26 @@ def test_trivial_selfuse_groups_are_filtered_when_flag_default(
     assert len(groups) == 4
 
 
-def test_solar_charge_selfuse_with_elevated_min_soc_is_preserved(
+def test_solar_charge_backup_hold_is_preserved(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A solar_charge slot maps to SelfUse minSoc=100 — not the global default —
-    so the filter must KEEP it. Otherwise the battery wouldn't be held at 100%
-    during PV-stockpile windows.
+    """Under LP_SOLAR_CHARGE_FOX_MODE=backup_hold, a solar_charge slot maps to
+    Backup — a non-SelfUse workMode, so the trivial-SelfUse filter never touches
+    it. Trivial SelfUse(reserve) gaps on either side are stripped; only the
+    Backup hold remains.
     """
+    monkeypatch.setattr(app_config, "LP_SOLAR_CHARGE_FOX_MODE", "backup_hold", raising=False)
     monkeypatch.setattr(app_config, "FOX_SKIP_TRIVIAL_SELFUSE_GROUPS", True)
     base = datetime(2026, 6, 1, 8, 0, tzinfo=UTC)
     slots = [
         _trivial_selfuse_slot(base),
-        _slot(base + timedelta(minutes=30), kind="solar_charge"),
+        _slot(base + timedelta(minutes=30), kind="solar_charge", target_soc_pct=85),
         _trivial_selfuse_slot(base + timedelta(hours=1)),
     ]
     groups = _merge_fox_groups(slots, max_groups=8)
-    # Trivial SelfUse stripped on both sides; only the elevated-floor SelfUse remains.
+    # Trivial SelfUse stripped on both sides; only the Backup hold remains.
     assert len(groups) == 1
-    assert groups[0].work_mode == "SelfUse"
-    assert groups[0].min_soc_on_grid == int(
-        getattr(app_config, "FOX_SOLAR_CHARGE_MIN_SOC_PERCENT", 100)
-    )
+    assert groups[0].work_mode == "Backup"
 
 
 def test_filter_disabled_keeps_legacy_behaviour(
@@ -364,12 +386,15 @@ def test_compression_fallback_degenerate_all_force_discharge_does_not_crash() ->
 # --- Camada 3 hardenings for Backup holds (2026-07-04) ----------------------
 
 
-def test_brutal_squash_pair_containing_backup_stays_backup_pinned() -> None:
-    """Over-cap brutal squash of a (Backup hold, SelfUse) pair must yield a
+def test_brutal_squash_pair_containing_backup_stays_backup_pinned(monkeypatch) -> None:
+    """Over-cap brutal squash of a pair containing a Backup hold must yield a
     BACKUP group (discharge-proof — SelfUse would re-open the 06-28/07-04
     battery-leak class) with maxSoc PINNED to the floor: the squashed span can
     extend beyond the negative window, where an unpinned Backup would grid-
     top-up at positive prices."""
+    # backup_hold so solar_charge is a Backup (a non-trivial FD-free victim);
+    # under the default `selfuse` it would be a trivial SelfUse that gets dropped.
+    monkeypatch.setattr(app_config, "LP_SOLAR_CHARGE_FOX_MODE", "backup_hold", raising=False)
     base = datetime(2026, 6, 1, 6, 0, tzinfo=UTC)
     # 9 distinct windows > 8-group cap; the ONLY FD-free adjacent pair is
     # (negative_hold, solar_charge) so the back-bias squash must land on it.
@@ -400,13 +425,21 @@ def test_camada3_same_key_merge_requires_time_adjacency(monkeypatch) -> None:
     negative window)."""
     monkeypatch.setattr(app_config, "FOX_SKIP_TRIVIAL_SELFUSE_GROUPS", True)
     base = datetime(2026, 6, 1, 6, 0, tzinfo=UTC)
-    kinds = ["negative_hold", "standard", "negative_hold",  # std dropped → B|B list-adjacent, 30-min time gap
-             "peak_export", "cheap", "peak_export", "cheap", "peak_export", "cheap",
-             "solar_charge"]  # tail (cheap, solar_charge) = the FD-free squash victim
+    # Two negative_hold Backups with a `standard` between them (dropped as
+    # trivial SelfUse → the two Backups become LIST-adjacent, 30-min time gap).
+    # The tail is a fill-FC (fdSoc 80) then a hold-FC (fdSoc 30): different
+    # hold-class so they do NOT pre-merge — a non-Backup, FD-free victim pair
+    # the over-cap compressor sacrifices instead of bridging the two holds.
+    # (#679: the old tail used a solar_charge SelfUse(100) as the victim; that
+    # shape is retired — solar_charge is now Backup — so we use FC/FC here.)
+    kinds = ["negative_hold", "standard", "negative_hold",
+             "peak_export", "cheap", "peak_export", "cheap", "peak_export",
+             "cheap", "cheap"]
+    targets = {4: 80, 6: 80, 8: 80, 9: 30}  # 9 = hold-class FC → no merge with 8
     slots = [
         _slot(base + timedelta(minutes=30 * i), kind=k,
               lp_grid_import_w=2000 if k == "cheap" else None,
-              target_soc_pct=80 if k == "cheap" else None)
+              target_soc_pct=targets.get(i))
         for i, k in enumerate(kinds)
     ]
     groups = _merge_fox_groups(slots, max_groups=8)

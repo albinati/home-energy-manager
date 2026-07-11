@@ -80,17 +80,21 @@ def test_squashed_force_charge_tail_is_severe() -> None:
     ]
 
 
-def test_half_hour_boundary_slot_attributed_to_successor_group() -> None:
+def test_half_hour_boundary_slot_attributed_to_successor_group(monkeypatch) -> None:
     """Regression (#675 review): _merge_fox_groups stores half-hour group ends
     as :30 = EXCLUSIVE (only on-the-hour ends become :59 inclusive). A
     non-SelfUse group ending :30 with a different-mode successor starting :30
     must NOT swallow the successor's first slot — an inclusive lookup produced
     recurring false group_cap_compression mismatches and occasional false
     SEVERE (e.g. solar_charge hold ending, ForceCharge/Discharge starting)."""
+    # Use backup_hold so solar_charge yields a non-SelfUse predecessor group that
+    # survives the trivial-SelfUse drop (the default `selfuse` mode would be
+    # dropped, removing the boundary this test needs). #679.
+    monkeypatch.setattr(config, "LP_SOLAR_CHARGE_FOX_MODE", "backup_hold", raising=False)
     slots = [_slot(0, "solar_charge"), _slot(1, "cheap"), _slot(2, "cheap")]
     groups = _merge_fox_groups(slots, max_groups=8)
     # Preconditions: the REAL builder kept both windows, back-to-back at :30.
-    assert [g.work_mode for g in groups] == ["SelfUse", "ForceCharge"]
+    assert [g.work_mode for g in groups] == ["Backup", "ForceCharge"]
     assert (groups[0].end_hour, groups[0].end_minute) == (
         groups[1].start_hour, groups[1].start_minute,
     ), "predecessor must end exactly where the successor starts (:30 exclusive)"
@@ -98,6 +102,49 @@ def test_half_hour_boundary_slot_attributed_to_successor_group() -> None:
     assert summary["mismatched"] == 0, summary["mismatches"]
     assert summary["severe_count"] == 0
     assert summary["matched"] == 3
+
+
+def test_lost_backup_hold_is_severe() -> None:
+    """#679: a planned HOLD (expected Backup — here an A1 positive-price hold
+    carrying soc_floor_pct) that a SelfUse group ends up covering is the exact
+    2026-07-10 / daily-cyclic-V3-collision incident signature: the hold's
+    discharge-freeze is silently lost and the battery drains into load. It MUST
+    be flagged severe, not swallowed as a benign mismatch."""
+    hold = HalfHourSlot(
+        start_utc=T0, end_utc=T0 + timedelta(minutes=30),
+        price_pence=18.0, kind="standard", soc_floor_pct=80,
+    )
+    assert optimizer._slot_fox_tuple(hold)[0] == "Backup"  # precondition
+    ls = T0.astimezone(TZ())
+    groups = [SchedulerGroup(ls.hour, ls.minute, 23, 59,
+                             work_mode="SelfUse", min_soc_on_grid=RESERVE)]
+    summary = summarize_plan_dispatch_coherence([hold], groups)
+    assert summary["severe_count"] == 1
+    assert summary["severe"][0]["expected"] == "Backup"
+    assert summary["severe"][0]["actual"] == "SelfUse"
+
+
+def test_lost_negative_hold_backup_is_severe() -> None:
+    """The same severe gate covers negative_hold (also expected Backup) → SelfUse."""
+    s = _slot(0, "negative_hold", price=-3.0)
+    assert optimizer._slot_fox_tuple(s)[0] == "Backup"
+    ls = T0.astimezone(TZ())
+    groups = [SchedulerGroup(ls.hour, ls.minute, 23, 59,
+                             work_mode="SelfUse", min_soc_on_grid=RESERVE)]
+    summary = summarize_plan_dispatch_coherence([s], groups)
+    assert summary["severe_count"] == 1
+
+
+def test_backup_hold_covered_by_backup_is_not_severe() -> None:
+    """A hold that stays Backup on upload is coherent — no false alarm."""
+    hold = HalfHourSlot(
+        start_utc=T0, end_utc=T0 + timedelta(minutes=30),
+        price_pence=18.0, kind="standard", soc_floor_pct=80,
+    )
+    groups = _merge_fox_groups([hold], max_groups=8)
+    summary = summarize_plan_dispatch_coherence([hold], groups)
+    assert summary["severe_count"] == 0
+    assert summary["matched"] == 1
 
 
 def test_horizon_trimmed_slots_counted_not_severe(monkeypatch) -> None:

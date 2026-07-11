@@ -287,8 +287,126 @@ def lp_plan_to_slots(plan: LpPlan) -> list[HalfHourSlot]:
                     kind="tank_idle_overnight",
                     lp_grid_import_w=out[i].lp_grid_import_w,
                     target_soc_pct=out[i].target_soc_pct,
+                    soc_floor_pct=out[i].soc_floor_pct,
                 )
+    # Third pass (A1, #679): flag positive-price battery-hold slots. Runs AFTER
+    # the tank_idle overlay so tank_idle_overnight slots are eligible holds too.
+    # Vacation is guarded inside the helper (and the early-return above already
+    # short-circuits the tank_idle-enabled vacation case).
+    _label_positive_price_holds(plan, out)
     return out
+
+
+def _label_positive_price_holds(plan: LpPlan, slots: list[HalfHourSlot]) -> None:
+    """A1 (#679): set ``soc_floor_pct`` on positive-price battery-hold slots.
+
+    The LP already emits ``dis=0 / chg=0 / imp>0`` "cover load from grid, hold
+    the battery for the evening peak" flows (driven by the pessimistic charge
+    floor, #673). Legacy dispatch fell those to SelfUse(reserve) and the battery
+    discharged into any load spike — the 2026-07-10 incident. Here we mark such
+    slots so :func:`_slot_fox_tuple` maps them to pinned Backup, the only proven
+    0%-discharge hold on the H1 (A0 finding: the per-group SelfUse floor is
+    ignored by the firmware).
+
+    A slot is flagged when ALL hold: kind in {standard, peak,
+    tank_idle_overnight}; ``dis<EPS and chg<EPS and imp>EPS and price>0``;
+    planned end-of-slot SoC% > reserve + margin; and a later slot in the horizon
+    is a genuine peak (``price >= peak_threshold``) with future-max uplift over
+    the current price >= the uplift threshold.
+
+    Contiguous flagged slots form a RUN; the whole run shares its MINIMUM
+    quantized (up to a multiple of 5) floor so it maps to one byte-identical
+    Backup tuple and merges to a single Fox V3 group. Only the top
+    ``LP_POSITIVE_HOLD_MAX_GROUPS`` runs (by protected value) are kept — the
+    rest are cleared, protecting the 8-group scheduler cap.
+
+    No-op when ``LP_POSITIVE_HOLD_ENABLED`` is false (mapping stays byte-
+    identical to legacy) or in the vacation preset (its LP forbids
+    grid->battery, so a hold there is moot).
+    """
+    if not config.LP_POSITIVE_HOLD_ENABLED:
+        return
+    n = len(slots)
+    if n == 0:
+        return
+    # Vacation: LP forbids grid->battery; a hold there is moot and Backup would
+    # mis-map. Use the SAME defensive normalization as the A2 solar_charge guard
+    # (_optimization_preset_away_like → .strip().lower() + legacy alias handling
+    # via OperationPreset._missing_) so a whitespace/mixed-case/"travel" preset
+    # cannot leak A1 holds into vacation.
+    if _optimization_preset_away_like():
+        return
+
+    cap = float(config.BATTERY_CAPACITY_KWH)
+    if cap <= 0:
+        return
+    soc = plan.soc_kwh or []
+    if len(soc) < n + 1:
+        return  # heuristic plan without a full SoC trajectory — no hold
+    prices = plan.price_pence
+    chg = plan.battery_charge_kwh
+    dis = plan.battery_discharge_kwh
+    imp = plan.import_kwh or []
+    peak_thr = plan.peak_threshold_pence
+
+    reserve_pct = float(config.MIN_SOC_RESERVE_PERCENT)
+    margin = float(config.LP_POSITIVE_HOLD_MIN_SOC_MARGIN_PCT)
+    uplift_thr = float(config.LP_POSITIVE_HOLD_MIN_UPLIFT_PENCE)
+    max_groups = int(config.LP_POSITIVE_HOLD_MAX_GROUPS)
+    reserve_kwh = reserve_pct / 100.0 * cap
+    hold_set = ("standard", "peak", "tank_idle_overnight")
+
+    # Suffix stats over j > i: max future price and whether any future peak.
+    suffix_max = [float("-inf")] * (n + 1)
+    suffix_has_peak = [False] * (n + 1)
+    for i in range(n - 1, -1, -1):
+        suffix_max[i] = max(suffix_max[i + 1], prices[i])
+        suffix_has_peak[i] = suffix_has_peak[i + 1] or (prices[i] >= peak_thr)
+
+    candidate = [False] * n
+    quant_floor = [0] * n
+    future_max = [0.0] * n
+    for i in range(n):
+        if slots[i].kind not in hold_set:
+            continue
+        imp_i = imp[i] if i < len(imp) else 0.0
+        if not (dis[i] < EPS and chg[i] < EPS and imp_i > EPS and prices[i] > 0):
+            continue
+        end_soc_pct = soc[i + 1] / cap * 100.0
+        if end_soc_pct <= reserve_pct + margin:
+            continue
+        fmax = suffix_max[i + 1]
+        if not (suffix_has_peak[i + 1] and (fmax - prices[i]) >= uplift_thr):
+            continue
+        candidate[i] = True
+        quant_floor[i] = min(100, int(math.ceil(end_soc_pct / 5.0) * 5))
+        future_max[i] = fmax
+
+    # Coalesce contiguous candidate runs; keep the top-value ones.
+    runs: list[tuple[int, int, int, float]] = []  # (start, end_excl, floor, score)
+    i = 0
+    while i < n:
+        if not candidate[i]:
+            i += 1
+            continue
+        j = i
+        while j < n and candidate[j]:
+            j += 1
+        run_floor = min(quant_floor[k] for k in range(i, j))
+        score = sum(
+            (future_max[k] - prices[k]) * max(0.0, soc[k + 1] - reserve_kwh)
+            for k in range(i, j)
+        )
+        runs.append((i, j, run_floor, score))
+        i = j
+
+    if not runs or max_groups <= 0:
+        return
+    for (start, end_excl, run_floor, _score) in sorted(
+        runs, key=lambda r: r[3], reverse=True
+    )[:max_groups]:
+        for k in range(start, end_excl):
+            slots[k].soc_floor_pct = run_floor
 
 
 def _overnight_tank_idle_enabled() -> bool:
@@ -1684,7 +1802,19 @@ def summarize_plan_dispatch_coherence(
             reason = "group_cap_compression"
         k = (expected, actual, reason)
         mismatches[k] = mismatches.get(k, 0) + 1
-        if (
+        # A planned HOLD (expected Backup — positive-price A1 hold, negative_hold,
+        # or solar_charge) that degrades to SelfUse or absent is the exact
+        # 2026-07-10 / daily-cyclic-V3-collision incident signature: the hold's
+        # discharge-freeze is silently lost and the battery drains into load. It
+        # MUST alarm, so Backup→SelfUse/absent is severe alongside the FC/FD
+        # grid-charge/export losses. (Backup→ForceCharge is NOT severe — an FC
+        # with fdSoc≤SoC also holds; and horizon-trim/truncation stay benign.)
+        _hold_lost = (
+            expected == "Backup"
+            and actual in ("SelfUse", "absent")
+            and reason in ("group_cap_compression", "other")
+        )
+        if _hold_lost or (
             expected in ("ForceCharge", "ForceDischarge")
             and actual in ("SelfUse", "absent", "Backup")
             and reason in ("group_cap_compression", "other")
@@ -1765,6 +1895,15 @@ def build_fox_groups_from_lp(
         # variance shrinks as the window approaches.
         cutoff = _dispatch_horizon_cutoff(slots)
         slots = [s for s in slots if s.start_utc < cutoff]
+    # Live SoC (%) the LP was seeded with at solve time — the best available
+    # "current SoC" for the no-import-hold invariant (#679): a Backup group at a
+    # positive price must not have maxSoc above it, else fw<1.55 grid-imports
+    # toward the ceiling. plan.soc_kwh[0] is the initial-state SoC.
+    live_soc_pct: float | None = None
+    cap = float(config.BATTERY_CAPACITY_KWH)
+    if plan.soc_kwh and cap > 0:
+        live_soc_pct = plan.soc_kwh[0] / cap * 100.0
+
     # peak_export_discharge=False: kind="peak_export" already maps to
     # ForceDischarge inside _slot_fox_tuple unconditionally; the flag here only
     # controls whether kind="peak" (no LP-planned export) is upgraded to
@@ -1775,6 +1914,7 @@ def build_fox_groups_from_lp(
         max_groups=8,
         peak_export_discharge=False,
         truncate_horizon=True,
+        live_soc_pct=live_soc_pct,
     )
 
 

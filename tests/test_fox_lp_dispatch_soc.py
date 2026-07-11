@@ -232,27 +232,29 @@ def test_slot_fox_tuple_standard_selfuse_uses_reserve_min_soc() -> None:
     assert msg == _min_r()
 
 
-def test_solar_charge_emits_solar_sponge_max_soc_100() -> None:
-    """A solar_charge slot must emit SelfUse + minSoc=100 + maxSoc=100 — the
-    canonical Fox V3 'Solar Sponge' shape so the firmware never tops via grid past 100 %."""
+def test_solar_charge_emits_plain_selfuse_by_default() -> None:
+    """#679 A2 (final, 2026-07-11 CORRECTED): a solar_charge slot uses plain
+    SelfUse at reserve by default — PV fills, the inverter never auto-imports.
+    On fw 1.51 Backup grid-import is maxSoc-driven, so a Backup fill would
+    grid-import; SelfUse is the safe default. This is NOT the retired
+    SelfUse(minSoc=100, maxSoc=100) 'Solar Sponge' shape (H1 discharged through
+    it, A0)."""
     t0 = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
     s = HalfHourSlot(
         start_utc=t0,
         end_utc=t0 + timedelta(minutes=30),
         price_pence=10.0,
         kind="solar_charge",
+        target_soc_pct=88,
     )
     wm, fds, pwr, msg, max_soc = _slot_fox_tuple(s)
     assert wm == "SelfUse"
     assert fds is None
     assert pwr is None
-    assert msg == 100
-    assert max_soc == 100
-    # Confirm propagation through the merge pipeline + into the API payload.
-    groups = _merge_fox_groups([s])
-    assert len(groups) == 1
-    assert groups[0].max_soc == 100
-    assert groups[0].to_api_dict()["extraParam"]["maxSoc"] == 100
+    assert msg == _min_r()
+    assert max_soc is None  # plain self-use at reserve
+    # The retired 100,100 SelfUse shape must never be produced.
+    assert not (wm == "SelfUse" and msg == 100 and max_soc == 100)
 
 
 def test_non_solar_charge_kinds_have_no_max_soc() -> None:
