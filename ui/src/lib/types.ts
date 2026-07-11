@@ -132,6 +132,8 @@ export interface TimelineSlot {
   soc_percent?: number | null;
   consumption_kwh?: number | null;
   reason?: string | null;
+  decision_reason?: string | null;   // dispatch_decisions.reason for this slot
+  committed?: boolean | null;        // did the decision make it onto Fox V3
 }
 
 export interface SchedulerTimeline {
@@ -949,6 +951,19 @@ export interface StatusActuationBlock {
   daikin_lwt: { failed_24h: number; failing: boolean } | null;
 }
 
+// Latest plan-vs-dispatch coherence audit — a planned battery hold that ended
+// up SelfUse/absent is the 2026-07-10 incident signature. severe_count 0 =
+// quiet (no recent audit, or the plan executed as committed).
+export interface StatusCoherenceBlock {
+  result: string | null;
+  severe_count: number;
+  severe: Array<Record<string, unknown>>;   // preview of the diverged slots
+  matched?: number | null;
+  mismatched?: number | null;
+  total_slots?: number | null;
+  ts: string | null;
+}
+
 export interface StatusAlertsResponse {
   now_utc: string;
   meter: StatusMeterBlock;
@@ -957,6 +972,7 @@ export interface StatusAlertsResponse {
   fox_drift: StatusFoxDriftBlock;
   quota: { fox: StatusQuotaEntry | null; daikin: StatusQuotaEntry | null };
   actuation?: StatusActuationBlock;
+  coherence?: StatusCoherenceBlock;
 }
 
 export interface DhwBudgetState {

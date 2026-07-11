@@ -32,6 +32,7 @@ import { LivePowerWidget } from "../components/cockpit/LivePowerWidget";
 import { Hero } from "../components/home/Hero";
 import { HeatingWidget } from "../components/home/HeatingWidget";
 import { PlanMini } from "../components/home/PlanMini";
+import { WhyNowLine } from "../components/home/WhyNowLine";
 import { FeedbackPanel } from "../components/home/FeedbackPanel";
 import { OperateCard } from "../components/home/OperateCard";
 import { LifetimeStrip } from "../components/home/LifetimeStrip";
@@ -209,6 +210,7 @@ export default function Landing() {
                   badge={liveTime}
                   action={<RefreshCountdown lastFetchAt={now.lastFetchAt} intervalMs={now.intervalMs} loading={now.loading} onRefresh={() => void now.refresh()} />}>
             <LivePowerWidget state={s} cockpit={data} agile={agile.data} metrics={metrics.data} todayCumulative={todayCum.data} />
+            <WhyNowLine ongoing={timeline.data?.ongoing} foxMode={foxMode} />
             <PlanMini groups={["battery", "appliances"]} timeline={timeline.data}
                       appliances={appliances.data?.appliances} applianceJobs={applianceJobs.data?.jobs}
                       applianceSuggestions={applianceSug.data?.suggestions}
