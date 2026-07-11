@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from . import db
+from . import db, dhw_policy
 from .config import config
 from .daikin.client import DaikinClient, DaikinError
 from .daikin_bulletproof import (
@@ -598,11 +598,231 @@ def _reconcile_daikin_actions(
     # The boost row fires once at window start; Daikin auto-clears Powerful,
     # leaving the tank coasting for the rest of a paid window. Re-assert it.
     _check_negative_boost_powerful(actions, client, dev, now_utc, trigger=trigger)
+    # Early setback on evening shower drawdown — once the household's showers
+    # drain the tank, pull the setback forward so the firmware doesn't reheat
+    # the freshly-drawn tank at peak price from the battery. Persist-once per
+    # day; dhw_policy regenerations honour the same key (K1+K2 lockstep).
+    _check_dhw_shower_drawdown(actions, dev, now_utc, trigger=trigger)
     # PR J diverter removed 2026-05-23 (K2-cleanup) — superseded by K1's
     # dhw_policy fixed schedule. The diverter's "lift tank during PV
     # abundance" goal is now redundant: tank lives at NORMAL=45 °C via
     # dhw_policy, and PV excess goes to the battery (where it has the
     # higher economic value anyway).
+
+
+def _check_dhw_shower_drawdown(
+    actions: list[dict[str, Any]],
+    dev: Any,
+    now_utc: datetime,
+    *,
+    trigger: str,
+) -> None:
+    """Early tank setback on evening shower drawdown.
+
+    When the household's evening showers drain the tank (a fast drop of
+    ``DHW_EARLY_SETBACK_TRIGGER_DELTA_C`` below the evening's running max),
+    holding the warmup target until the static setback hour makes the Onecta
+    firmware reheat the freshly-drawn tank IMMEDIATELY — at peak price, from
+    the battery (~1.0-1.6 kWh measured; 2026-07-10 finished a 38→45 °C reheat
+    at 21:53, seven minutes before the 22:00 setback). The K2 pin already
+    models that reheat as deferred to the next day's warmup, so firing the
+    setback at the drawdown aligns the hardware with the plan.
+
+    Mechanism (no direct Daikin write from here):
+      1. persist the fire time (``dhw_policy.persist_early_setback``, first
+         write wins) — every schedule regeneration honours it from then on;
+      2. mark the covering warmup row completed so this reconciler stops
+         asserting NORMAL (and can't misread the new state as a user
+         override);
+      3. upsert the pulled-forward ``tank_setback`` row — the NEXT heartbeat
+         tick dispatches it through the standard pre-fire guards
+         (idempotency, override inheritance, legionella stand-off).
+
+    Fail-safe bails (silence is OK, a wrong early setback is not):
+      * feature off / fixed schedule off / read-only / passive control;
+      * mode ≠ normal (guests keeps its 24 h warmup — morning showers);
+      * outside the armed local window [ARM_HOUR, setback_hour);
+      * already fired today (persist-once key present);
+      * no live tank temperature;
+      * no active dhw_policy warmup row covering now (boost superseded it,
+        vacation, or the tank isn't policy-owned right now);
+      * a negative-price boost row overlaps the rest of the evening —
+        we're being PAID to heat; never cut that short;
+      * a user override is in effect, or the live target diverges from the
+        warmup row's target (someone hand-set the tank — respect it);
+      * fewer than two confirming telemetry samples below the threshold
+        (one glitchy reading must not drop the tank for the night).
+    """
+    if not getattr(config, "DHW_EARLY_SETBACK_ENABLED", False):
+        return
+    if not getattr(config, "DHW_FIXED_SCHEDULE_ENABLED", True):
+        return
+    if config.OPENCLAW_READ_ONLY or config.DAIKIN_CONTROL_MODE != "active":
+        return
+    mode = (config.OPTIMIZATION_PRESET or "normal").strip().lower()
+    if mode != "normal":
+        return
+
+    tz = ZoneInfo(getattr(config, "BULLETPROOF_TIMEZONE", "Europe/London"))
+    now_local = now_utc.astimezone(tz)
+    arm_hour = int(getattr(config, "DHW_EARLY_SETBACK_ARM_HOUR_LOCAL", 20))
+    setback_hour = int(getattr(config, "DHW_SETBACK_START_HOUR_LOCAL", 22))
+    if not (arm_hour <= now_local.hour < setback_hour):
+        return
+    today_local = now_local.date()
+    if dhw_policy.read_early_setback(today_local) is not None:
+        return  # already fired today
+
+    tank_now = getattr(dev, "tank_temperature", None)
+    if tank_now is None:
+        return
+    tank_now = float(tank_now)
+
+    setback_start_utc = datetime(
+        today_local.year, today_local.month, today_local.day,
+        setback_hour, 0, tzinfo=tz,
+    ).astimezone(UTC)
+
+    # The policy must own the tank right now: an un-overridden dhw_policy
+    # warmup row covering now is the thing we'd be pulling forward FROM.
+    warmup_row: dict[str, Any] | None = None
+    for act in actions:
+        if act.get("action_type") != "tank_warmup":
+            continue
+        if (act.get("status") or "") not in ("pending", "active"):
+            continue
+        if act.get("overridden_by_user_at"):
+            continue
+        try:
+            start = _parse_utc(act["start_time"])
+            end = _parse_utc(act["end_time"])
+        except (ValueError, KeyError, TypeError):
+            continue
+        if not (start <= now_utc < end):
+            continue
+        params = act.get("params") or {}
+        if isinstance(params, str):
+            try:
+                params = json.loads(params)
+            except (json.JSONDecodeError, TypeError):
+                params = {}
+        if not params.get("dhw_policy"):
+            continue
+        warmup_row = {**act, "params": params}
+        break
+    if warmup_row is None:
+        return
+
+    # Never cut a paid window short: any negative-price boost row touching
+    # the remaining evening (now → static setback) wins over the detector.
+    for act in actions:
+        if act.get("action_type") != "tank_negative_boost":
+            continue
+        if (act.get("status") or "") not in ("pending", "active"):
+            continue
+        try:
+            b_start = _parse_utc(act["start_time"])
+            b_end = _parse_utc(act["end_time"])
+        except (ValueError, KeyError, TypeError):
+            continue
+        if b_end > now_utc and b_start < setback_start_utc:
+            return
+
+    # Respect a user gesture that's still in effect (same rule as the
+    # tank-power drift backstop).
+    try:
+        src = db.find_recent_user_override(
+            device="daikin",
+            within_hours=float(config.USER_OVERRIDE_RESPECT_HOURS),
+            now_utc=now_utc,
+            respect_until_window_end=bool(
+                config.USER_OVERRIDE_RESPECT_UNTIL_WINDOW_END
+            ),
+        )
+        if src is not None:
+            src_params = src.get("params") or {}
+            if isinstance(src_params, str):
+                try:
+                    src_params = json.loads(src_params)
+                except (json.JSONDecodeError, TypeError):
+                    src_params = {}
+            if user_gesture_still_in_effect(dev, src_params):
+                return
+    except Exception as _exc:
+        logger.debug("early-setback override lookup failed (non-fatal): %s", _exc)
+
+    # Live-target sanity: if the device target diverges from the warmup row's
+    # (user cranked it via the app without tripping the override detector yet),
+    # leave the tank alone.
+    live_target = getattr(dev, "tank_target", None)
+    row_target = warmup_row["params"].get("tank_temp")
+    if (
+        live_target is not None
+        and row_target is not None
+        and abs(float(live_target) - float(row_target)) > 1.5
+    ):
+        return
+
+    # Drawdown signature: tank standing loss is ~0.5 °C/h, so a drop of
+    # TRIGGER_DELTA below the armed window's running max is a draw, not decay.
+    # Require the TWO newest telemetry samples below the threshold as well as
+    # the live reading — a single glitchy sample must not fire.
+    delta_c = float(getattr(config, "DHW_EARLY_SETBACK_TRIGGER_DELTA_C", 4.0))
+    arm_utc = datetime(
+        today_local.year, today_local.month, today_local.day,
+        arm_hour, 0, tzinfo=tz,
+    ).astimezone(UTC)
+    try:
+        samples = db.get_tank_temps_since(arm_utc.timestamp())
+    except Exception as _exc:
+        logger.debug("early-setback telemetry read failed (non-fatal): %s", _exc)
+        return
+    if len(samples) < 2:
+        return
+    window_max = max([t for _, t in samples] + [tank_now])
+    threshold = window_max - delta_c
+    recent = [t for _, t in samples[-2:]]
+    if tank_now > threshold or any(t > threshold for t in recent):
+        return
+
+    # Fire — persist first (the lockstep key), first write wins.
+    if not dhw_policy.persist_early_setback(today_local, now_utc):
+        return
+    minutes_early = max(0, int((setback_start_utc - now_utc).total_seconds() // 60))
+    db.mark_action(
+        int(warmup_row["id"]), "completed",
+        error_msg="early_setback: shower drawdown detected",
+    )
+    early_row = dhw_policy.build_early_setback_row(today_local, now_utc)
+    db.upsert_action(
+        device=early_row["device"],
+        action_type=early_row["action_type"],
+        start_time=early_row["start_time"],
+        end_time=early_row["end_time"],
+        params=early_row["params"],
+        plan_date=str(today_local),
+        status="pending",
+    )
+    db.log_action(
+        device="daikin",
+        action="dhw_early_setback",
+        params={
+            "window_max_c": round(window_max, 1),
+            "tank_now_c": round(tank_now, 1),
+            "delta_c": round(window_max - tank_now, 1),
+            "trigger_delta_c": delta_c,
+            "minutes_before_static_setback": minutes_early,
+            "warmup_row_id": int(warmup_row["id"]),
+        },
+        result="applied",
+        trigger=trigger,
+    )
+    logger.info(
+        "dhw_early_setback: tank %.1f→%.1f °C (Δ%.1f ≥ %.1f) at %s — setback "
+        "pulled forward %d min; warmup row %s completed",
+        window_max, tank_now, window_max - tank_now, delta_c,
+        now_local.strftime("%H:%M"), minutes_early, warmup_row["id"],
+    )
 
 
 def _check_tank_power_drift(
