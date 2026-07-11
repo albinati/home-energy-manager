@@ -63,19 +63,27 @@ Consequences for the dispatcher:
       Backup instead of SelfUse(reserve). Gated by `LP_POSITIVE_HOLD_ENABLED`;
       contiguous holds coalesce and only the top `LP_POSITIVE_HOLD_MAX_GROUPS`
       runs are kept (8-group cap).
-    - **A2 `solar_charge`** — now maps to pinned Backup at the planned
-      end-of-window SoC (`LP_SOLAR_CHARGE_FOX_MODE=backup`, default). The
-      unpinned-Backup wording above ("only used INSIDE negative windows")
-      applies to the *unpinned* form; A1/A2 use the pinned form so the
-      cross-window paid-top-up concern does not arise.
-    - **Summer caveat (A2, ship-and-observe).** In winter the Backup grid
-      top-up (~1.2 kW backfilling a PV shortfall) is cheap afternoon import and
-      strictly better than the evening peak. In summer, PV surplus that would
-      otherwise EXPORT could instead be partly consumed by the top-up toward
-      the maxSoc pin — a near-zero effect while PV covers the pin, but revisit
-      before April: if telemetry shows the pin suppressing profitable exports,
-      set `LP_SOLAR_CHARGE_FOX_MODE=selfuse` (plain SelfUse at reserve — the
-      escape hatch, which does NOT hold) for the sunny months.
+    - **A2 `solar_charge`** — `LP_SOLAR_CHARGE_FOX_MODE`, **final owner decision
+      2026-07-11**, three modes with the SAFE hold as the default:
+        - `backup_hold` (**DEFAULT**) → `("Backup", None, None, reserve,
+          reserve)` — the pure proven hold (0/441 discharge), identical to the
+          tuple A1 emits, so solar_charge and positive-price holds are
+          consistent. Fixes the 07-10 leak now, no grid top-up, no summer
+          footgun. **Accepted tradeoff:** on strong-PV days it EXPORTS surplus
+          instead of storing it — the safe winter default.
+        - `backup_fill` → `("Backup", None, None, reserve, max(reserve,
+          target_soc_pct or 100))` — lets PV fill toward the LP target.
+          **ASPIRATIONAL, not the default.** The intermediate maxSoc ceiling is
+          **unvalidated** on the H1 (the truth table only has
+          maxSoc=None→charge-to-full and maxSoc=reserve→no-charge; the firmware
+          may grid-charge *past* an intermediate ceiling — the #682 review's
+          HIGH finding). Gated by the summer probe (#685); promote to default
+          only after prod telemetry confirms the H1 honours the ceiling.
+        - `selfuse` → `("SelfUse", None, None, reserve, None)` — plain honest
+          self-use (discharges to reserve, does NOT hold), the summer PV-export
+          escape hatch. NOT the retired 100,100 shape.
+      Vacation preset forces plain `SelfUse(reserve)` regardless of the mode (its
+      LP forbids grid→battery, which any Backup top-up would violate).
 - Negative windows must never contain SelfUse groups — enforced at the
   labeller since #630 (`LP_NEGATIVE_BEATS_SOLAR_CHARGE`).
 - **The daily-cyclic collision (the TRUE 06-28 + 07-04 root cause, fixed

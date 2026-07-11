@@ -332,43 +332,56 @@ def _slot_fox_tuple(
 
     For ForceCharge slots the ``fdPwr`` (W) is taken from ``s.lp_grid_import_w`` when set
     (LP path), or falls back to the configured ``FOX_FORCE_CHARGE_*_PWR`` constants.
-    For solar_charge slots the battery is held via **pinned Backup** at the LP's
-    planned end-of-window SoC (#679, A2) — the only proven 0%-discharge hold on
-    the H1. The old SelfUse(minSocOnGrid=100, maxSoc=100) "Solar Sponge" shape is
-    **RETIRED**: the A0 finding (40,369 prod samples) showed that floor discharged
-    below reserve 40.6% of the time — it was the 2026-07-10 leak, not a hold. It
-    is no longer emittable anywhere in the dispatcher.
+    For solar_charge slots the battery is held via **pinned Backup** at the
+    reserve floor (#679, A2, ``backup_hold`` default) — the only proven
+    0%-discharge hold on the H1. The old SelfUse(minSocOnGrid=100, maxSoc=100)
+    "Solar Sponge" shape is **RETIRED**: the A0 finding (40,369 prod samples)
+    showed that floor discharged below reserve 40.6% of the time — it was the
+    2026-07-10 leak, not a hold. It is no longer emittable anywhere.
     """
     min_r = int(config.MIN_SOC_RESERVE_PERCENT)
     if s.kind == "solar_charge":
-        # A2 (#679): solar_charge (LP import≈0, battery fills from PV) holds via
-        # pinned Backup — Fox's native reserve mode, 0.0% discharge in 441 prod
-        # samples. maxSoc = the LP's planned end-of-window SoC, so the ~1.2 kW
-        # Backup grid top-up backfills any PV shortfall at the current (cheap
-        # afternoon) price rather than the evening peak, and never charges past
-        # plan.
-        #
-        # LP_SOLAR_CHARGE_FOX_MODE escape hatch:
-        #   "backup"  (default) — the hold above.
-        #   "selfuse" — PLAIN SelfUse at the reserve floor (min=reserve,
-        #               maxSoc=None). This does NOT hold: it discharges to
-        #               reserve like normal self-use. It exists only for the
-        #               summer PV-export caveat (accept no hold so PV surplus
-        #               exports instead of a paid Backup top-up). It is NOT a
-        #               rollback to the 100,100 shape — that shape is the bug
-        #               (A0), so it can never be re-emitted.
-        # Vacation preset: its LP forbids grid->battery, and Backup's top-up
+        # A2 (#679) — final owner decision (2026-07-11): three modes, SAFE
+        # hold is the default. LP_SOLAR_CHARGE_FOX_MODE ∈
+        #   "backup_hold" (DEFAULT) — ("Backup", None, None, reserve, reserve).
+        #       The proven pure hold: 0/441 discharge samples, no grid top-up,
+        #       no summer footgun. With live SoC above the reserve maxSoc,
+        #       Backup charges nothing AND never discharges — exactly the hold.
+        #       Fixes the 07-10 leak NOW. Same tuple A1 emits, so solar_charge
+        #       and positive-price holds are consistent. Accepted tradeoff: on
+        #       strong-PV days this EXPORTS surplus instead of storing it —
+        #       the safe winter default; see backup_fill for the aspirational
+        #       store-the-surplus behaviour (summer-probe-gated).
+        #   "backup_fill" — ("Backup", None, None, reserve, max(reserve, tgt)).
+        #       Lets PV fill toward the LP target (tgt = planned end-of-window
+        #       SoC, else 100). ASPIRATIONAL / NOT default: the intermediate
+        #       maxSoc CEILING is UNVALIDATED on the H1 — the #682 review's
+        #       HIGH finding is that the firmware may grid-charge PAST it (the
+        #       truth table only has maxSoc=None→charge-to-full and
+        #       maxSoc=reserve→no-charge). Gated behind the summer probe (#685);
+        #       promote to default only after prod telemetry confirms the H1
+        #       honours the ceiling.
+        #   "selfuse" — ("SelfUse", None, None, reserve, None). Plain honest
+        #       self-use: discharges to reserve, does NOT hold. The summer
+        #       PV-export escape hatch. NOT the retired 100,100 shape — that
+        #       is the bug (A0) and can never be re-emitted.
+        # Vacation preset: its LP forbids grid->battery, and any Backup top-up
         # would violate that — force plain SelfUse(reserve) regardless of mode.
-        mode = str(getattr(config, "LP_SOLAR_CHARGE_FOX_MODE", "backup")).strip().lower()
-        if mode not in ("backup", "selfuse"):
+        mode = str(getattr(config, "LP_SOLAR_CHARGE_FOX_MODE", "backup_hold")).strip().lower()
+        if mode not in ("backup_hold", "backup_fill", "selfuse"):
             logger.warning(
-                "LP_SOLAR_CHARGE_FOX_MODE=%r not recognised — using 'backup'", mode
+                "LP_SOLAR_CHARGE_FOX_MODE=%r not recognised — using 'backup_hold'", mode
             )
-            mode = "backup"
-        if mode == "backup" and not _optimization_preset_away_like():
+            mode = "backup_hold"
+        if _optimization_preset_away_like():
+            # Vacation — plain self-use at reserve (no grid->battery).
+            return ("SelfUse", None, None, min_r, None)
+        if mode == "backup_hold":
+            return ("Backup", None, None, min_r, min_r)
+        if mode == "backup_fill":
             tgt = int(s.target_soc_pct) if s.target_soc_pct is not None else 100
             return ("Backup", None, None, min_r, max(min_r, tgt))
-        # "selfuse" escape hatch OR vacation — plain honest self-use at reserve.
+        # "selfuse" escape hatch — plain honest self-use at reserve.
         return ("SelfUse", None, None, min_r, None)
     if s.kind == "negative":
         pwr = s.lp_grid_import_w if s.lp_grid_import_w is not None else config.FOX_FORCE_CHARGE_MAX_PWR
