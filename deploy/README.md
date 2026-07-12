@@ -322,8 +322,20 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST \
 `mac`, + **qualquer campo extra** (preservado no `payload_json` do log). Nada que
 o sensor manda é descartado.
 
-**Config do ESPHome** (sensor manda a cada N minutos; use o `http_request` +
-`time` pra carimbar UTC). O `captured_at` precisa ser ISO-8601 **UTC** (`...Z`):
+**Cadência de envio (recomendação 2026-07-12): a cada 10 min.** Os
+consumidores não usam mais resolução que isso: o LP/guard de conforto só exigem
+leitura mais fresca que `INDOOR_SENSOR_STALE_MINUTES=30` (10 min ⇒ 3 leituras na
+janela, tolera 2 perdas de Wi-Fi), o learner W2 reamostra em bins de **30 min**
+(gap >45 min quebra o episódio de decaimento — não passe de 15 min de intervalo)
+e o rollup WARM é de 15 min. Amostre o sensor localmente a cada 30–60 s com um
+filtro (`median`/`sliding_window_moving_average`) e reporte o valor filtrado —
+sinal limpo melhora o fit de τ mais que frequência alta. **Mantenha a MESMA
+cadência em todos os nós**: cadências mistas fazem a composição do house-mean
+oscilar entre bins do W2 (ver comentário em
+`src/analytics/thermal_learning.py:_resample_house_mean`).
+
+**Config do ESPHome** (use o `http_request` + `time` pra carimbar UTC). O
+`captured_at` precisa ser ISO-8601 **UTC** (`...Z`):
 
 ```yaml
 # secrets.yaml → hem_ingest_token: "<o token do passo 1>"
@@ -344,7 +356,7 @@ substitutions:
   ingest_token: "<o token do passo 1>"
 
 interval:
-  - interval: 60s
+  - interval: 600s   # 10 min — ver "Cadência de envio" acima; igual em todos os nós
     then:
       - if:
           condition:
@@ -371,7 +383,10 @@ interval:
 
 > Troque `temp_aht20`/`hum_aht20`/`press_bmp280` pelos `id`s dos sensores de
 > vocês. `temp_c` vem do **AHT20**. Campos extras (2ª temperatura, RSSI…) podem
-> ser adicionados ao JSON — o HEM preserva todos no log por-device.
+> ser adicionados ao JSON — o HEM preserva todos no log por-device e a UI mostra
+> como hint no Journal → Sensors. Vale adicionar o sensor `wifi_signal` do
+> ESPHome ao payload: distingue "Wi-Fi fraco" de "sensor travado" ao diagnosticar
+> gaps de leitura.
 
 Rollback / desligar: `sed -i '/^HEM_SENSOR_INGEST_TOKEN=/d' /srv/hem/.env &&
 systemctl restart hem` — sem o token, a rota volta a ser admin-only e o sensor
