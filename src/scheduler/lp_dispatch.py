@@ -1964,16 +1964,27 @@ def _prepend_inflight_group(
     SelfUse for its remainder — silently stopping force-charge during a paid
     negative-price slot (observed 2026-06-04, upload left 13:34–14:00 BST bare).
 
-    We bridge ``[slot_start, next_boundary)`` with the work mode the PREVIOUSLY
-    uploaded schedule had for *now*, so whatever was decided for the live slot
-    survives the re-upload. Only active modes are carried (SelfUse is the
-    firmware default anyway). Issue #458 follow-up; ``FOX_PRESERVE_INFLIGHT_GROUP``
+    We bridge ``[slot_start, next_boundary)`` with the work mode the schedule
+    IN FORCE at the slot's start had for *now*, so whatever was decided for the
+    live slot survives the re-upload. Only active modes are carried (SelfUse is
+    the firmware default anyway). Issue #458 follow-up; ``FOX_PRESERVE_INFLIGHT_GROUP``
     set false to roll back.
+
+    #693 additions: (1) the in-force lookup walks past a boot-time safe-defaults
+    wipe (disabled/empty state row saved WITHIN the current slot) to the schedule
+    it replaced — `apply_safe_defaults` on recovery used to starve the bridge and
+    leave up to 29 min of firmware SelfUse during a paid negative slot (observed
+    2026-07-12). (2) When NO authoritative schedule exists at all
+    (``FOX_INFLIGHT_EXTEND_FIRST_GROUP``), a bridge is synthesized from the
+    plan's first group ONLY when that group starts exactly at the next boundary
+    with a ForceCharge/Backup mode AND the current slot's import price is
+    NEGATIVE — the one regime where blind charging/holding strictly beats the
+    SelfUse default. At positive prices the LP never evaluated the current
+    slot, and e.g. extending a cheap-window ForceCharge back into a peak slot
+    could cost ~80p in 29 min; SelfUse is the least-bad blind default there.
     """
     if not groups or not getattr(config, "FOX_PRESERVE_INFLIGHT_GROUP", True):
         return groups
-    if len(groups) >= 8:
-        return groups  # no room under the Fox V3 8-group cap
     tz = TZ()
     now_local = now_local or datetime.now(tz)
     now_min = now_local.hour * 60 + now_local.minute
@@ -1987,53 +1998,140 @@ def _prepend_inflight_group(
     # group spanning the live slot let a stale ForceCharge bridge overlap it,
     # the overlap guard refused the whole upload, and the inverter ran an
     # obsolete (grid-force-charging) schedule for ~41 h.
+    # Bail if ANY plan group INTERSECTS the current slot window — the plan has
+    # decided (part of) this slot, and a bridge spanning the slot would both
+    # fight that decision and OVERLAP the group (2026-06-14 wedge: the overlap
+    # guard then refused the whole upload → 41 h stale schedule). Intersection
+    # (not just covers-now) also makes the check midnight-correct: in the
+    # 23:30–00:00 slot a group starting 00:00 (= tomorrow's first slot) does
+    # NOT intersect, so the last slot of the day is no longer a dead zone.
+    # Group ends: :00/:30 are exclusive, anything else (:29/:59) inclusive.
     for g in groups:
         gs = g.start_hour * 60 + g.start_minute
         ge = g.end_hour * 60 + g.end_minute
-        if gs <= now_min < ge:
+        ge_excl = ge if ge % 30 == 0 else ge + 1
+        if gs < slot_end_min and slot_start_min < ge_excl:
             return groups
-    g0 = groups[0]
-    first_start_min = g0.start_hour * 60 + g0.start_minute
-    if first_start_min < slot_end_min:
-        return groups                              # would overlap the current slot
+
+    # #693 — find the schedule IN FORCE at the current slot's start, looking back
+    # past a boot-time safe-defaults wipe (a disabled/empty row saved WITHIN the
+    # current slot). A disabled row saved BEFORE the slot start means the
+    # scheduler was genuinely off when the slot began — nothing to re-assert.
+    slot_start_local = now_local.replace(
+        hour=slot_start_min // 60, minute=slot_start_min % 60, second=0, microsecond=0
+    )
+    # NB the enabled row that becomes in_force has no age bound ON PURPOSE:
+    # even after days of downtime (crash, no shutdown wipe), the inverter was
+    # physically executing that schedule until the boot wipe seconds ago —
+    # re-asserting its mode for <=29 min preserves hardware continuity, and the
+    # next-boundary re-plan supersedes it. Upload staleness itself is alarmed
+    # separately (actuation-health, #562).
+    in_force: dict[str, Any] | None = None
     try:
-        prev = db.get_latest_fox_schedule_state()
+        rows = db.get_recent_fox_schedule_states(limit=12)
+        verdict_reached = not rows
+        for row in rows:
+            if row.get("enabled"):
+                in_force = row
+                verdict_reached = True
+                break
+            try:
+                wiped_at = datetime.fromisoformat(str(row.get("uploaded_at")))
+                stale_wipe = wiped_at < slot_start_local.astimezone(wiped_at.tzinfo)
+            except (ValueError, TypeError):
+                verdict_reached = True             # unparseable — stop, treat as no authority
+                break
+            if stale_wipe:
+                verdict_reached = True             # off since before this slot started
+                break
+            # wipe within the current slot (e.g. boot recovery) — keep looking back
+        if not verdict_reached:
+            logger.warning(
+                "Fox in-flight preserve: %d state rows exhausted without a verdict "
+                "(restart flapping?) — treating as no in-force schedule", len(rows),
+            )
     except Exception as e:                          # never block an upload on this read
         logger.debug("Fox in-flight preserve: prev-schedule read failed: %s", e)
         return groups
-    if not prev or not prev.get("groups"):
-        return groups
-    carry = None
-    for pg in prev["groups"]:
-        try:
-            ps = int(pg["startHour"]) * 60 + int(pg["startMinute"])
-            pe = int(pg["endHour"]) * 60 + int(pg["endMinute"])  # inclusive :59
-        except (KeyError, TypeError, ValueError):
-            continue
-        if ps <= now_min <= pe:
-            carry = pg
-            break
-    if carry is None:
-        return groups
-    wm = carry.get("workMode")
-    if wm not in ("ForceCharge", "ForceDischarge", "Backup"):
-        return groups                              # SelfUse is the default — nothing to preserve
-    extra = carry.get("extraParam") or {}
+
     sh, sm = divmod(slot_start_min, 60)
     eh, em = divmod(slot_end_min - 1, 60)          # :59 inclusive-minute convention
-    bridge = SchedulerGroup(
-        start_hour=sh, start_minute=sm,
-        end_hour=eh, end_minute=em,
-        work_mode=wm,
-        min_soc_on_grid=int(extra.get("minSocOnGrid", config.MIN_SOC_RESERVE_PERCENT)),
-        fd_soc=extra.get("fdSoc"),
-        fd_pwr=extra.get("fdPwr"),
-        max_soc=extra.get("maxSoc"),
+
+    if in_force is not None:
+        carry = None
+        for pg in in_force.get("groups") or []:
+            try:
+                ps = int(pg["startHour"]) * 60 + int(pg["startMinute"])
+                pe = int(pg["endHour"]) * 60 + int(pg["endMinute"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            # Dual end conventions (see reference above): :00/:30 exclusive,
+            # :29/:59 inclusive. An upload landing IN the boundary minute must
+            # not carry the group that just ENDED at that boundary.
+            pe_excl = pe if pe % 30 == 0 else pe + 1
+            if ps <= now_min < pe_excl:
+                carry = pg
+                break
+        if carry is None:
+            # In-force schedule has no group for the current slot — a DELIBERATE
+            # SelfUse gap (FOX_SKIP_TRIVIAL_SELFUSE_GROUPS elides SelfUse
+            # windows); leave it bare.
+            return groups
+        wm = carry.get("workMode")
+        if wm not in ("ForceCharge", "ForceDischarge", "Backup"):
+            return groups                          # SelfUse is the default — nothing to preserve
+        if len(groups) >= 8:
+            return groups                          # no room under the Fox V3 8-group cap
+        extra = carry.get("extraParam") or {}
+        bridge = SchedulerGroup(
+            start_hour=sh, start_minute=sm,
+            end_hour=eh, end_minute=em,
+            work_mode=wm,
+            min_soc_on_grid=int(extra.get("minSocOnGrid", config.MIN_SOC_RESERVE_PERCENT)),
+            fd_soc=extra.get("fdSoc"),
+            fd_pwr=extra.get("fdPwr"),
+            max_soc=extra.get("maxSoc"),
+        )
+        logger.info(
+            "Fox upload: re-asserting in-flight %s for current slot %02d:%02d-%02d:%02d "
+            "— prevents mid-slot SelfUse gap",
+            wm, sh, sm, eh, em,
+        )
+        return [bridge] + groups
+
+    # #693 no-authority fallback — nothing was in force at the slot start (fresh
+    # install, or scheduler off since before the slot began). Synthesize a bridge
+    # from the plan's first-boundary group ONLY when it is ForceCharge/Backup AND
+    # the current slot's import price is NEGATIVE: there, importing/holding
+    # strictly beats the SelfUse default (which discharges the battery to avoid
+    # PAID import). At positive prices the LP never priced this slot — extending
+    # a cheap-window ForceCharge back into a peak slot could cost ~80p in 29 min
+    # — so SelfUse stays the blind default. ForceDischarge is never synthesized
+    # (its value depends on the export rate, unknown here).
+    if not getattr(config, "FOX_INFLIGHT_EXTEND_FIRST_GROUP", True):
+        return groups
+    if len(groups) >= 8:
+        return groups
+    next_boundary_min = slot_end_min % 1440        # 23:30 slot → tomorrow 00:00
+    g0 = next(
+        (g for g in groups
+         if g.start_hour * 60 + g.start_minute == next_boundary_min),
+        None,
     )
+    if g0 is None or g0.work_mode not in ("ForceCharge", "Backup"):
+        return groups
+    try:
+        price_p = db.get_agile_rate_at(slot_start_local)
+    except Exception as e:
+        logger.debug("Fox in-flight preserve: price lookup failed: %s", e)
+        return groups
+    if price_p is None or price_p >= 0:
+        return groups
+    bridge = dataclasses.replace(g0, start_hour=sh, start_minute=sm, end_hour=eh, end_minute=em)
     logger.info(
-        "Fox upload: re-asserting in-flight %s for current slot %02d:%02d-%02d:%02d "
-        "(horizon starts %02d:%02d) — prevents mid-slot SelfUse gap",
-        wm, sh, sm, eh, em, g0.start_hour, g0.start_minute,
+        "Fox upload: no in-force schedule and current slot is negative (%.2fp) — "
+        "bridging %02d:%02d-%02d:%02d with the plan's next-boundary %s",
+        price_p, sh, sm, eh, em, g0.work_mode,
     )
     return [bridge] + groups
 

@@ -1483,6 +1483,33 @@ def get_agile_export_rates_in_range(
             conn.close()
 
 
+def get_agile_rate_at(ts_utc: datetime) -> float | None:
+    """Import price (p/kWh, inc VAT) of the Agile slot covering *ts_utc*, or None.
+
+    Used by the in-flight bridge's no-authority fallback (#693) to gate a
+    blind ForceCharge/Backup bridge on the current slot being negative-priced.
+    """
+    from .config import config as _config
+
+    tariff = (_config.OCTOPUS_TARIFF_CODE or "").strip()
+    if not tariff:
+        return None
+    ts_z = ts_utc.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT value_inc_vat FROM agile_rates
+                   WHERE tariff_code = ? AND valid_from <= ? AND valid_to > ?
+                   ORDER BY valid_from DESC LIMIT 1""",
+                (tariff, ts_z, ts_z),
+            )
+            r = cur.fetchone()
+            return float(r["value_inc_vat"]) if r else None
+        finally:
+            conn.close()
+
+
 def get_agile_rates_coverage_max(
     table: str = "agile_rates",
     tariff_code: str | None = None,
@@ -3135,6 +3162,33 @@ def save_fox_schedule_state(groups: list[dict[str, Any]], enabled: bool = True) 
                 (now, json.dumps(groups), 1 if enabled else 0, now),
             )
             conn.commit()
+        finally:
+            conn.close()
+
+
+def get_recent_fox_schedule_states(limit: int = 6) -> list[dict[str, Any]]:
+    """Last *limit* schedule-state rows, newest first, with parsed ``groups``.
+
+    The in-flight bridge (#693) walks these to find the schedule that was in
+    force at the current slot's start — looking back past a boot-time
+    safe-defaults wipe row (disabled/empty) that postdates the slot start.
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM fox_schedule_state ORDER BY id DESC LIMIT ?",
+                (int(limit),),
+            )
+            out = []
+            for r in cur.fetchall():
+                d = dict(r)
+                try:
+                    d["groups"] = json.loads(d["groups_json"])
+                except json.JSONDecodeError:
+                    d["groups"] = []
+                out.append(d)
+            return out
         finally:
             conn.close()
 

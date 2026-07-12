@@ -1931,6 +1931,21 @@ class Config:
     # slot. Set false to roll back to the bare next-boundary schedule.
     FOX_PRESERVE_INFLIGHT_GROUP: bool = os.getenv("FOX_PRESERVE_INFLIGHT_GROUP", "true").lower() in ("1", "true", "yes")
 
+    # #693 — the in-flight bridge sees through a boot-time safe-defaults wipe
+    # (schedule state saved as disabled/empty WITHIN the current slot) to the
+    # schedule that was actually in force at the slot's start. When NO
+    # authoritative schedule exists at all (fresh install, or scheduler off
+    # since before the slot started), a bridge is synthesized from the plan's
+    # next-boundary group ONLY when it is ForceCharge/Backup AND the current
+    # slot's Agile import price is NEGATIVE — the one regime where blind
+    # charging/holding strictly beats the firmware SelfUse default (which
+    # discharges to avoid PAID import). At positive prices SelfUse stays the
+    # blind default (the LP never priced the current slot; extending a
+    # cheap-window ForceCharge into a peak slot could cost ~80p in 29 min).
+    # Set false to disable this no-authority fallback only;
+    # FOX_PRESERVE_INFLIGHT_GROUP=false disables bridge + fallback together.
+    FOX_INFLIGHT_EXTEND_FIRST_GROUP: bool = os.getenv("FOX_INFLIGHT_EXTEND_FIRST_GROUP", "true").lower() in ("1", "true", "yes")
+
     # Event-driven MPC ("Waze recalculating") — see Epic #73.
     # Kill switch: setting this False disables drift + forecast triggers (cron MPC continues).
     MPC_EVENT_DRIVEN_ENABLED: bool = os.getenv("MPC_EVENT_DRIVEN_ENABLED", "true").lower() in ("1", "true", "yes")
