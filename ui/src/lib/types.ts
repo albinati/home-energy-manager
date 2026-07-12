@@ -993,6 +993,11 @@ export interface LwtGateState {
   threshold_kwh: number;
   lookback_hours: number;
   preheat_suppressed: boolean;
+  // Exogenous warm-day cutoff (#540) — optional so an older hem image (which
+  // doesn't send them) degrades to the demand-gate-only label.
+  outdoor_cutoff_c?: number;
+  current_outdoor_c?: number | null;
+  positive_offset_suppressed_by_outdoor?: boolean;
 }
 
 /** Observational price-aware DHW warmup would-pick (#683 shadow). The feature

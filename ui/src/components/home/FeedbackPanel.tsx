@@ -61,10 +61,19 @@ export function FeedbackPanel({ pv }: { pv: PvTodayResponse | null }) {
     gateOk = false; // gate disabled = offsets can fire with zero heating demand
   } else if (gate.preheat_suppressed) {
     gateLabel = "Pre-heat gated — no heating demand";
+  } else if (gate.positive_offset_suppressed_by_outdoor) {
+    // Demand gate is open but the warm-day cutoff vetoes every boost anyway
+    // (only the −2 peak setback can still fire). "Active" here read as "about
+    // to spend energy" — say idle and show why.
+    gateLabel = `Pre-heat idle — warm day (${gate.current_outdoor_c != null ? `${gate.current_outdoor_c.toFixed(0)}°` : "outdoor"} ≥ ${gate.outdoor_cutoff_c?.toFixed(0)}° cutoff)`;
   } else {
-    gateLabel = `Pre-heat active — ${fmtKwh(gate.measured_window_kwh)} heating in ${gate.lookback_hours}h`;
+    // Past-tense wording: this is MEASURED trailing heating (the gate input),
+    // not a forecast of upcoming consumption.
+    gateLabel = `Pre-heat active — ${fmtKwh(gate.measured_window_kwh)} heated in last ${gate.lookback_hours}h`;
   }
-  const gateTip = `measured space heating ${fmtKwh(gate.measured_window_kwh, 2)} over ${gate.lookback_hours}h vs ${fmtKwh(gate.threshold_kwh, 2)} threshold (HEM's own offset windows excluded)`;
+  const gateTip = `measured space heating ${fmtKwh(gate.measured_window_kwh, 2)} over the last ${gate.lookback_hours}h vs ${fmtKwh(gate.threshold_kwh, 2)} threshold (HEM's own offset windows excluded)${
+    gate.positive_offset_suppressed_by_outdoor ? " · boosts vetoed while outdoor ≥ cutoff; the peak setback still fires" : ""
+  }`;
 
   const acc = pv?.accuracy ?? null;
 
