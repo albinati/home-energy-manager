@@ -3,13 +3,23 @@ import { useFetch } from "../lib/poll";
 import { getActionLog } from "../lib/endpoints";
 import { Spinner } from "../components/common/Spinner";
 import { Pill } from "../components/common/Pill";
-import { hhmm } from "../lib/format";
-import type { ActionLogEntry } from "../lib/types";
+import { SensorJournal } from "../components/report/SensorJournal";
+import { groupByDay, hhmm } from "../lib/format";
 import "./report.css";
 
 // Execution journal — what the system ACTUALLY did (tank / battery / appliances),
 // read straight from action_log. This is the audit trail: every fired, skipped
 // or failed action with its trigger, tariff context and result.
+// A second view (Sensors) shows the lossless room-sensor ingest audit
+// (device_reading_log, #540 W1c) — everything each device POSTed.
+
+type JournalView = "actions" | "sensors";
+const VIEWS: { key: JournalView; label: string; blurb: string }[] = [
+  { key: "actions", label: "Actions",
+    blurb: "Everything the system actually did — tank, battery and appliances — with its trigger and result." },
+  { key: "sensors", label: "Sensors",
+    blurb: "Everything the room sensors sent — every reading per device, exactly as received." },
+];
 
 type DeviceFilter = "all" | "daikin" | "foxess" | "appliance";
 const DEVICE_TABS: { key: DeviceFilter; label: string }[] = [
@@ -67,12 +77,6 @@ function resultTone(r: string): "ok" | "bad" | "dim" {
   return "dim";
 }
 
-function localDay(iso: string): string {
-  try {
-    return new Date(iso).toLocaleDateString([], { weekday: "short", day: "2-digit", month: "short" });
-  } catch { return iso.slice(0, 10); }
-}
-
 // Pick the most informative param to show inline (temp, offset, power, soc).
 function paramHint(p: Record<string, unknown>): string | null {
   const bits: string[] = [];
@@ -85,8 +89,50 @@ function paramHint(p: Record<string, unknown>): string | null {
 }
 
 export default function Report() {
-  const [device, setDevice] = useState<DeviceFilter>("all");
-  const [days, setDays] = useState(7);
+  const [view, setView] = useState<JournalView>("actions");
+  // Filter state for BOTH views lives here so switching tabs (which unmounts
+  // the inactive view) doesn't reset the filters mid-audit.
+  const [actionDevice, setActionDevice] = useState<DeviceFilter>("all");
+  const [actionDays, setActionDays] = useState(7);
+  const [sensorDevice, setSensorDevice] = useState<string | null>(null);
+  const [sensorHours, setSensorHours] = useState(24);
+  const blurb = VIEWS.find((v) => v.key === view)!.blurb;
+
+  return (
+    <div class="page-padded report">
+      <header class="report-head">
+        <div class="report-title-row">
+          <h1>Activity journal</h1>
+          <div class="report-tabs" role="tablist" aria-label="Journal view">
+            {VIEWS.map((v) => (
+              <button key={v.key} role="tab" aria-selected={view === v.key}
+                      class={`report-tab${view === v.key ? " active" : ""}`}
+                      onClick={() => setView(v.key)}>{v.label}</button>
+            ))}
+          </div>
+        </div>
+        <p class="muted">{blurb}</p>
+      </header>
+
+      {view === "actions" ? (
+        <ActionsJournal device={actionDevice} setDevice={setActionDevice}
+                        days={actionDays} setDays={setActionDays} />
+      ) : (
+        <SensorJournal device={sensorDevice} setDevice={setSensorDevice}
+                       hours={sensorHours} setHours={setSensorHours} />
+      )}
+    </div>
+  );
+}
+
+interface ActionsJournalProps {
+  device: DeviceFilter;
+  setDevice: (d: DeviceFilter) => void;
+  days: number;
+  setDays: (d: number) => void;
+}
+
+function ActionsJournal({ device, setDevice, days, setDays }: ActionsJournalProps) {
   const log = useFetch(
     () => getActionLog({ device: device === "all" ? undefined : device, days, limit: 300 }),
     [device, days],
@@ -94,21 +140,10 @@ export default function Report() {
 
   const entries = log.data?.entries ?? [];
   // Group by local day, preserving the DESC order the API returns.
-  const groups: { day: string; items: ActionLogEntry[] }[] = [];
-  for (const e of entries) {
-    const day = localDay(e.timestamp);
-    const last = groups[groups.length - 1];
-    if (last && last.day === day) last.items.push(e);
-    else groups.push({ day, items: [e] });
-  }
+  const groups = groupByDay(entries, (e) => e.timestamp);
 
   return (
-    <div class="page-padded report">
-      <header class="report-head">
-        <h1>Activity journal</h1>
-        <p class="muted">Everything the system actually did — tank, battery and appliances — with its trigger and result.</p>
-      </header>
-
+    <>
       <div class="report-filters">
         <div class="report-tabs" role="tablist" aria-label="Device">
           {DEVICE_TABS.map((t) => (
@@ -163,6 +198,6 @@ export default function Report() {
           </ul>
         </section>
       ))}
-    </div>
+    </>
   );
 }

@@ -162,33 +162,41 @@ export function useFetch<T>(
     };
   }, []);
 
+  // Monotonic request generation: when deps change (or a visibility refetch
+  // fires) while an older request is still in flight, the older response must
+  // NOT overwrite the newer one — only the latest generation may commit state.
+  const genRef = useRef(0);
+
   const refresh = useRef(async () => {
     // Immutable cache hit (past period already fetched) → serve instantly. No
     // network → never counts toward the in-flight tally.
     const k = keyRef.current;
     if (k != null && _immutableCache.has(k)) {
       if (!mountedRef.current) return;
+      genRef.current++; // invalidate any slower in-flight fetch
       setData(_immutableCache.get(k) as T);
       setError(null);
       setLoading(false);
       return;
     }
+    const gen = ++genRef.current;
     setLoading(true);
     const tracked = trackRef.current;
     if (tracked) _inflight.value++;
     try {
       const next = await fnRef.current();
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || gen !== genRef.current) return;
       setData(next);
       setError(null);
       if (keyRef.current != null) _immutableCache.set(keyRef.current, next);
     } catch (e) {
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || gen !== genRef.current) return;
       setError(e instanceof Error ? e : new Error(String(e)));
     } finally {
       // Always balances the increment, even if the component unmounted mid-fetch.
       if (tracked) _inflight.value--;
-      if (mountedRef.current) setLoading(false);
+      // A stale generation must not clear the newer request's loading state.
+      if (mountedRef.current && gen === genRef.current) setLoading(false);
     }
   }).current;
 

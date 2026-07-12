@@ -86,6 +86,86 @@
 .report-error { color: var(--bad); }
 .report-empty { padding: var(--space-4) 0; }
 
+/* --- Journal view switcher (Actions | Sensors) --- */
+.report-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-1);
+}
+.report-title-row h1 { margin: 0; }
+
+/* --- Sensors view --- */
+.sensor-devices {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+}
+.sensor-device {
+  appearance: none;
+  text-align: left;
+  /* Canonical borderless card surface (DESIGN.md / .widget): specular sheen +
+   * faint hairline + inset highlight + two-layer shadow, card radius. */
+  background-color: var(--bg-card);
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0) 42%);
+  border: 1px solid rgba(255, 255, 255, 0.045);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  padding: var(--space-2) var(--space-3);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-0);
+  color: var(--text);
+  transition: transform var(--dur-fast) ease-out, box-shadow var(--dur-fast) ease-out,
+              background-color var(--dur-fast) ease-out;
+}
+:root.theme-light .sensor-device {
+  background-image: none;
+  border: 1px solid rgba(15, 23, 42, 0.06);
+  box-shadow: var(--shadow);
+}
+.sensor-device:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-lg), inset 0 1px 0 rgba(255, 255, 255, 0.07);
+}
+:root.theme-light .sensor-device:hover { box-shadow: var(--shadow-lg); }
+.sensor-device.active {
+  background-color: var(--bg-card-2);
+  box-shadow: var(--shadow-lg), var(--glow-accent), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+:root.theme-light .sensor-device.active { box-shadow: var(--shadow-lg), var(--glow-accent); }
+.sensor-device-room {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-weight: 600;
+  font-size: var(--font-sm);
+  text-transform: capitalize;
+}
+.sensor-device-metrics {
+  font-size: var(--font-sm);
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.sensor-device-meta {
+  font-size: var(--font-2xs);
+  color: var(--text-mute);
+  font-variant-numeric: tabular-nums;
+}
+.sensor-dot--ok { background: var(--ok); }
+.sensor-dot--warn { background: var(--warn); }
+.sensor-dot--bad { background: var(--bad); }
+.sensor-dot--log { background: var(--text-mute); }
+.sensor-count { margin: 0; align-self: center; font-size: var(--font-xs); }
+.sensor-truncated { margin: 0 0 var(--space-3); font-size: var(--font-xs); color: var(--warn); }
+/* Room names ("living room") need more than the action view's 5rem device column. */
+.report-row.sensor-row { grid-template-columns: 3.2rem 10px 8rem 1fr auto; }
+.sensor-row .report-device { text-transform: capitalize; }
+
 @media (max-width: 640px) {
   .report-row {
     grid-template-columns: 3rem 8px 1fr;
@@ -98,4 +178,14 @@
   .report-device { display: none; }
   .report-action { grid-area: action; }
   .report-meta { grid-area: meta; justify-self: start; }
+
+  /* Sensor rows: the room IS the identity — keep it, stacked above the metrics. */
+  .report-row.sensor-row {
+    grid-template-columns: 3rem 8px 1fr;
+    grid-template-areas:
+      "time dot device"
+      ".    .   action"
+      ".    .   meta";
+  }
+  .sensor-row .report-device { display: block; grid-area: device; }
 }

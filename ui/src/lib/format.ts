@@ -48,12 +48,32 @@ export function gbpSigned(n: number | null | undefined, digits = 2): string {
 
 export function hhmm(iso: string | null | undefined): string {
   if (!iso) return "—";
-  try {
-    const d = new Date(iso);
-    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
-  } catch {
-    return iso;
+  // new Date(bad) never throws — it yields an Invalid Date whose toLocale*
+  // renders "Invalid Date". Guard on the time value instead of try/catch.
+  const d = new Date(iso);
+  if (!Number.isFinite(d.getTime())) return iso;
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+}
+
+/** Local day header for journal-style day grouping, e.g. "Sun, 12 Jul".
+ *  Falls back to the raw date part for an unparseable timestamp. */
+export function localDay(iso: string): string {
+  const d = new Date(iso);
+  if (!Number.isFinite(d.getTime())) return iso.slice(0, 10);
+  return d.toLocaleDateString([], { weekday: "short", day: "2-digit", month: "short" });
+}
+
+/** Group already-sorted rows into consecutive local-day buckets (journal lists).
+ *  Preserves the input order; a day that reappears later starts a new group. */
+export function groupByDay<T>(items: T[], getIso: (item: T) => string): { day: string; items: T[] }[] {
+  const groups: { day: string; items: T[] }[] = [];
+  for (const item of items) {
+    const day = localDay(getIso(item));
+    const last = groups[groups.length - 1];
+    if (last && last.day === day) last.items.push(item);
+    else groups.push({ day, items: [item] });
   }
+  return groups;
 }
 
 export function relTime(iso: string | null | undefined): string {
