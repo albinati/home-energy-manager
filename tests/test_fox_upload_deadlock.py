@@ -17,7 +17,7 @@ schedule for ~41 h:
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -104,11 +104,13 @@ _NOW = datetime(2026, 6, 14, 12, 15, tzinfo=ZoneInfo("Europe/London"))
 
 def _stale_forcecharge_prev(monkeypatch):
     """The inverter's live schedule has a ForceCharge active across 'now'."""
-    monkeypatch.setattr(lpd.db, "get_latest_fox_schedule_state", lambda: {
+    monkeypatch.setattr(lpd.db, "get_recent_fox_schedule_states", lambda limit=6: [{
+        "enabled": 1,
+        "uploaded_at": (_NOW - timedelta(hours=1)).isoformat(),
         "groups": [{"startHour": 12, "startMinute": 0, "endHour": 13, "endMinute": 30,
                     "workMode": "ForceCharge",
                     "extraParam": {"minSocOnGrid": 10, "fdSoc": 100, "fdPwr": 3133}}],
-    })
+    }])
 
 
 def test_no_bridge_when_a_later_plan_group_covers_now(monkeypatch):
