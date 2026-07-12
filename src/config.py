@@ -2567,15 +2567,18 @@ class Config:
         in ("1", "true", "yes", "on")
     )
     # How long after the last /cockpit/now hit a viewer counts as "watching".
-    # Must comfortably exceed the SPA's 20 s poll so one missed tick doesn't
+    # Must comfortably exceed the SPA's 10 s poll so one missed tick doesn't
     # flap the boost off.
     VIEWER_ACTIVE_WINDOW_SECONDS: int = int(
         os.getenv("VIEWER_ACTIVE_WINDOW_SECONDS", "90")
     )
     # Target Fox realtime staleness while a viewer is watching (idle baseline
     # is the PV telemetry cadence, default 3 min). 0 disables the Fox boost.
+    # 30 s is the effective floor — the boost job itself ticks every 30 s, so a
+    # smaller target just refreshes on every tick. Quota: ≤120 Fox calls/hour
+    # of watching (budget 1200/day, reserve FOX_VIEWER_QUOTA_RESERVE).
     FOX_VIEWER_REFRESH_SECONDS: int = int(
-        os.getenv("FOX_VIEWER_REFRESH_SECONDS", "60")
+        os.getenv("FOX_VIEWER_REFRESH_SECONDS", "30")
     )
     # Don't boost Fox when fewer than this many calls remain of the daily
     # budget — plan pushes, MPC reads and the telemetry baseline come first.

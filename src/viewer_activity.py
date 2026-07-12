@@ -1,7 +1,7 @@
 """Viewer-activity tracker for the freshness boost (see runner.py's
 ``bulletproof_viewer_boost_job``).
 
-The cockpit SPA polls ``/api/v1/cockpit/now`` every ~20 s while a tab is
+The cockpit SPA polls ``/api/v1/cockpit/now`` every ~10 s while a tab is
 visible (usePoll pauses hidden tabs), so that request stream is a reliable
 "someone is actually looking" signal. The handler calls
 :func:`mark_viewer_active` on every hit; the background boost job asks

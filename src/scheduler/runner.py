@@ -1636,7 +1636,7 @@ def bulletproof_viewer_boost_job() -> None:
     caches fresher than their idle baselines — without ever competing with
     control traffic for quota.
 
-    * Viewer signal: /cockpit/now hits (SPA polls 20 s, pauses hidden tabs) —
+    * Viewer signal: /cockpit/now hits (SPA polls 10 s, pauses hidden tabs) —
       see ``src/viewer_activity.py``. No viewer → immediate no-op, so the idle
       cost of this job is a monotonic-clock comparison.
     * Fox: refresh when the realtime cache is older than
