@@ -4,8 +4,7 @@ import { getActionLog } from "../lib/endpoints";
 import { Spinner } from "../components/common/Spinner";
 import { Pill } from "../components/common/Pill";
 import { SensorJournal } from "../components/report/SensorJournal";
-import { hhmm } from "../lib/format";
-import type { ActionLogEntry } from "../lib/types";
+import { groupByDay, hhmm } from "../lib/format";
 import "./report.css";
 
 // Execution journal — what the system ACTUALLY did (tank / battery / appliances),
@@ -78,12 +77,6 @@ function resultTone(r: string): "ok" | "bad" | "dim" {
   return "dim";
 }
 
-function localDay(iso: string): string {
-  try {
-    return new Date(iso).toLocaleDateString([], { weekday: "short", day: "2-digit", month: "short" });
-  } catch { return iso.slice(0, 10); }
-}
-
 // Pick the most informative param to show inline (temp, offset, power, soc).
 function paramHint(p: Record<string, unknown>): string | null {
   const bits: string[] = [];
@@ -97,6 +90,12 @@ function paramHint(p: Record<string, unknown>): string | null {
 
 export default function Report() {
   const [view, setView] = useState<JournalView>("actions");
+  // Filter state for BOTH views lives here so switching tabs (which unmounts
+  // the inactive view) doesn't reset the filters mid-audit.
+  const [actionDevice, setActionDevice] = useState<DeviceFilter>("all");
+  const [actionDays, setActionDays] = useState(7);
+  const [sensorDevice, setSensorDevice] = useState<string | null>(null);
+  const [sensorHours, setSensorHours] = useState(24);
   const blurb = VIEWS.find((v) => v.key === view)!.blurb;
 
   return (
@@ -115,14 +114,25 @@ export default function Report() {
         <p class="muted">{blurb}</p>
       </header>
 
-      {view === "actions" ? <ActionsJournal /> : <SensorJournal />}
+      {view === "actions" ? (
+        <ActionsJournal device={actionDevice} setDevice={setActionDevice}
+                        days={actionDays} setDays={setActionDays} />
+      ) : (
+        <SensorJournal device={sensorDevice} setDevice={setSensorDevice}
+                       hours={sensorHours} setHours={setSensorHours} />
+      )}
     </div>
   );
 }
 
-function ActionsJournal() {
-  const [device, setDevice] = useState<DeviceFilter>("all");
-  const [days, setDays] = useState(7);
+interface ActionsJournalProps {
+  device: DeviceFilter;
+  setDevice: (d: DeviceFilter) => void;
+  days: number;
+  setDays: (d: number) => void;
+}
+
+function ActionsJournal({ device, setDevice, days, setDays }: ActionsJournalProps) {
   const log = useFetch(
     () => getActionLog({ device: device === "all" ? undefined : device, days, limit: 300 }),
     [device, days],
@@ -130,13 +140,7 @@ function ActionsJournal() {
 
   const entries = log.data?.entries ?? [];
   // Group by local day, preserving the DESC order the API returns.
-  const groups: { day: string; items: ActionLogEntry[] }[] = [];
-  for (const e of entries) {
-    const day = localDay(e.timestamp);
-    const last = groups[groups.length - 1];
-    if (last && last.day === day) last.items.push(e);
-    else groups.push({ day, items: [e] });
-  }
+  const groups = groupByDay(entries, (e) => e.timestamp);
 
   return (
     <>

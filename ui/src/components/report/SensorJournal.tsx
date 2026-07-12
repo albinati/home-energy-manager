@@ -1,9 +1,8 @@
-import { useState } from "preact/hooks";
 import { useFetch } from "../../lib/poll";
 import { getSensorDeviceLog, getSensorDevices } from "../../lib/endpoints";
 import { Spinner } from "../common/Spinner";
-import { hhmm, relTime } from "../../lib/format";
-import type { DeviceLogRow, SensorDevice } from "../../lib/types";
+import { Pill } from "../common/Pill";
+import { groupByDay, hhmm, relTime } from "../../lib/format";
 
 // Sensor journal — the lossless per-device audit (#540 W1c): every reading a
 // room sensor POSTed, straight from device_reading_log, plus a per-device
@@ -16,9 +15,14 @@ const RANGES = [
   { hours: 168, label: "7 days" },
 ];
 
-// Payload fields already rendered as columns — anything ELSE a device sent
-// (RSSI, battery, a 2nd temperature…) surfaces as an inline hint so nothing
-// in the lossless log is invisible.
+// db.get_device_reading_log caps every response at this many newest rows; a
+// full response means the window was cut short and the UI must say so.
+const LOG_ROW_CAP = 5000;
+
+// Payload fields already rendered elsewhere in the row (metrics columns,
+// quality pill, identity) — anything ELSE a device sent (RSSI, battery, a 2nd
+// temperature…) surfaces as an inline hint so nothing in the lossless log is
+// invisible.
 const KNOWN_FIELDS = new Set([
   "captured_at", "temp_c", "humidity_pct", "pressure_hpa",
   "room", "source", "device_id", "mac", "quality",
@@ -26,10 +30,24 @@ const KNOWN_FIELDS = new Set([
 
 function extraHint(payload: Record<string, unknown> | null): string | null {
   if (!payload) return null;
+  const show = (v: unknown): string => {
+    if (typeof v === "number") return String(Math.round(v * 100) / 100);
+    if (typeof v === "object") {
+      try { return JSON.stringify(v); } catch { return String(v); }
+    }
+    return String(v);
+  };
   const bits = Object.entries(payload)
     .filter(([k, v]) => !KNOWN_FIELDS.has(k) && v != null)
-    .map(([k, v]) => `${k}=${typeof v === "number" ? Math.round(v * 100) / 100 : String(v)}`);
+    .map(([k, v]) => `${k}=${show(v)}`);
   return bits.length ? bits.join(" · ") : null;
+}
+
+// A device's own quality flag; surfaced as a warning pill unless it says fine.
+function qualityFlag(payload: Record<string, unknown> | null): string | null {
+  const q = payload?.quality;
+  if (typeof q !== "string" || !q) return null;
+  return ["good", "ok"].includes(q.toLowerCase()) ? null : q;
 }
 
 // Freshness tone off the device timestamp: green within the LP's ~30-min
@@ -41,14 +59,8 @@ function ageTone(iso: string | null | undefined): "ok" | "warn" | "bad" {
   return ageMin <= 30 ? "ok" : "warn";
 }
 
-function deviceTitle(d: SensorDevice): string {
+function deviceTitle(d: { room: string | null; device_id: string | null; device_key: string }): string {
   return d.room || d.device_id || d.device_key;
-}
-
-function localDay(iso: string): string {
-  try {
-    return new Date(iso).toLocaleDateString([], { weekday: "short", day: "2-digit", month: "short" });
-  } catch { return iso.slice(0, 10); }
 }
 
 function metricBits(r: {
@@ -61,10 +73,14 @@ function metricBits(r: {
   return bits;
 }
 
-export function SensorJournal() {
-  const [device, setDevice] = useState<string | null>(null);
-  const [hours, setHours] = useState(24);
+interface SensorJournalProps {
+  device: string | null;
+  setDevice: (d: string | null) => void;
+  hours: number;
+  setHours: (h: number) => void;
+}
 
+export function SensorJournal({ device, setDevice, hours, setHours }: SensorJournalProps) {
   const devices = useFetch(() => getSensorDevices(), []);
   const log = useFetch(
     () => getSensorDeviceLog(device ?? undefined, hours),
@@ -73,17 +89,12 @@ export function SensorJournal() {
 
   const deviceList = devices.data?.devices ?? [];
   const rows = log.data?.rows ?? [];
+  const truncated = (log.data?.n_rows ?? 0) >= LOG_ROW_CAP;
+  // Only claim "no sensor has ever reported" when the devices fetch has
+  // actually succeeded with zero devices — not while loading or on error.
+  const noDeviceEver = !!devices.data && devices.data.n_devices === 0;
 
-  // Group by local day of the device timestamp (server receipt as fallback),
-  // preserving the DESC order the API returns.
-  const groups: { day: string; items: DeviceLogRow[] }[] = [];
-  for (const r of rows) {
-    const day = localDay(r.captured_at ?? r.received_at);
-    const last = groups[groups.length - 1];
-    if (last && last.day === day) last.items.push(r);
-    else groups.push({ day, items: [r] });
-  }
-
+  const groups = groupByDay(rows, (r) => r.captured_at ?? r.received_at);
   const manyDevices = deviceList.length > 1;
 
   return (
@@ -124,7 +135,7 @@ export function SensorJournal() {
 
       <div class="report-filters">
         <p class="muted sensor-count">
-          {log.data ? `${log.data.n_rows.toLocaleString()} readings` : " "}
+          {log.data ? `${log.data.n_rows.toLocaleString()} readings` : " "}
           {device ? " · filtered" : ""}
         </p>
         <div class="report-range">
@@ -135,11 +146,19 @@ export function SensorJournal() {
         </div>
       </div>
 
+      {truncated && (
+        <p class="muted sensor-truncated">
+          Showing the newest {LOG_ROW_CAP.toLocaleString()} readings — older rows
+          in this window are cut off. Narrow the range or filter to one device
+          for full coverage.
+        </p>
+      )}
+
       {log.loading && !log.data && <Spinner label="Loading sensor readings…" />}
       {log.error && <p class="report-error">Couldn't load the sensor log: {log.error.message}</p>}
       {!log.loading && !log.error && rows.length === 0 && (
         <p class="muted report-empty">
-          {deviceList.length === 0
+          {noDeviceEver
             ? "No sensor has reported yet — readings appear here as soon as a device POSTs to /api/v1/sensors/indoor."
             : "No readings in this window."}
         </p>
@@ -151,16 +170,22 @@ export function SensorJournal() {
           <ul class="report-list">
             {g.items.map((r) => {
               const extras = extraHint(r.payload);
+              const quality = qualityFlag(r.payload);
               return (
                 <li key={`${r.device_key}|${r.captured_at ?? r.received_at}`} class="report-row sensor-row">
                   <span class="report-time">{hhmm(r.captured_at ?? r.received_at)}</span>
                   <span class="report-dot sensor-dot--log" />
-                  <span class="report-device">{r.room || r.device_id || r.device_key}</span>
+                  <span class="report-device">{deviceTitle(r)}</span>
                   <span class="report-action">
                     {metricBits(r).join(" · ") || "no metrics"}
                     {extras && <span class="report-hint"> · {extras}</span>}
                   </span>
                   <span class="report-meta">
+                    {quality && (
+                      <Pill tone="warn" title="Quality flag reported by the device itself">
+                        {quality}
+                      </Pill>
+                    )}
                     {!r.captured_at && (
                       <span class="report-trigger" title="Device sent no timestamp; showing server receipt time">
                         server time
