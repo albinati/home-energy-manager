@@ -1483,6 +1483,37 @@ def get_agile_export_rates_in_range(
             conn.close()
 
 
+def get_agile_rates_coverage_max(
+    table: str = "agile_rates",
+    tariff_code: str | None = None,
+) -> str | None:
+    """MAX(valid_from) in ``agile_rates`` or ``agile_export_rates`` (ISO Z string).
+
+    Both tables normalise ``valid_from`` to UTC Z on save, so the strings are
+    lexicographically comparable — the export-gap check (#691) relies on that.
+    Pass ``tariff_code`` to scope coverage to the currently configured tariff:
+    both tables are upsert-only, so rows from a previously configured code
+    would otherwise mask a real gap after a tariff switch.
+    Returns ``None`` when no matching rows exist.
+    """
+    if table not in ("agile_rates", "agile_export_rates"):
+        raise ValueError(f"unsupported rates table: {table}")
+    with _lock:
+        conn = get_connection()
+        try:
+            if tariff_code:
+                cur = conn.execute(
+                    f"SELECT MAX(valid_from) AS mx FROM {table} WHERE tariff_code = ?",  # noqa: S608 — table validated above
+                    (tariff_code,),
+                )
+            else:
+                cur = conn.execute(f"SELECT MAX(valid_from) AS mx FROM {table}")  # noqa: S608 — table validated above
+            r = cur.fetchone()
+            return r["mx"] if r else None
+        finally:
+            conn.close()
+
+
 def get_agile_rates_slots_for_local_day(
     tariff_code: str,
     local_date,  # datetime.date

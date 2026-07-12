@@ -77,6 +77,35 @@ def test_build_export_price_line_returns_none_when_table_empty(monkeypatch):
     assert _build_export_price_line(slots) is None
 
 
+def test_build_export_price_line_priors_when_no_rows_in_window(monkeypatch):
+    """#691 — a fetch gap (rows exist, but none in the planning window) must fall
+    through to the per-hour priors, not to the flat 15p constant."""
+    from src.scheduler.optimizer import _build_export_price_line
+    monkeypatch.setattr(config, "EXPORT_TARIFF_MODE", "outgoing_agile")
+    monkeypatch.setattr(config, "OCTOPUS_EXPORT_TARIFF_CODE", "X")
+    monkeypatch.setattr(config, "EXPORT_RATE_PENCE", 15.0)
+    # Seed yesterday's rates (inside the 28-day prior window, outside the plan window).
+    y = (datetime.now(UTC) - timedelta(days=1)).replace(hour=12, minute=0, second=0, microsecond=0)
+    db.save_agile_export_rates(
+        [
+            {"valid_from": y.isoformat(), "valid_to": (y + timedelta(minutes=30)).isoformat(), "value_inc_vat": 3.0},
+            {
+                "valid_from": (y + timedelta(minutes=30)).isoformat(),
+                "valid_to": (y + timedelta(hours=1)).isoformat(),
+                "value_inc_vat": 5.0,
+            },
+        ],
+        "X",
+    )
+    t = y + timedelta(days=1)
+    slots = [
+        t,  # 12:00 bucket → prior 3.0
+        t + timedelta(minutes=30),  # 12:30 bucket → prior 5.0
+        t + timedelta(hours=8),  # 20:00 bucket unseeded → flat 15.0
+    ]
+    assert _build_export_price_line(slots) == [3.0, 5.0, 15.0]
+
+
 def test_build_export_price_line_matches_per_slot_rows(monkeypatch):
     from src.scheduler.optimizer import _build_export_price_line
     monkeypatch.setattr(config, "EXPORT_TARIFF_MODE", "outgoing_agile")

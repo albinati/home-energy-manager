@@ -717,15 +717,28 @@ def bulletproof_octopus_fetch_job() -> None:
 
 
 def bulletproof_octopus_retry_job() -> None:
-    from .octopus_fetch import fetch_and_store_rates, should_run_retry_fetch
+    from .octopus_fetch import (
+        fetch_and_store_rates,
+        retry_export_rates_if_gap,
+        should_run_retry_fetch,
+    )
 
-    if not should_run_retry_fetch():
+    if should_run_retry_fetch():
+        fetch_and_store_rates(_try_fox())
+        try:
+            _register_tier_boundary_triggers()
+        except Exception as e:  # pragma: no cover
+            logger.debug("tier_boundary re-register after retry failed: %s", e)
         return
-    fetch_and_store_rates(_try_fox())
+    # #691 — the import fetch can succeed while the Outgoing publication lags
+    # by a few minutes (race at the daily fetch), leaving export coverage a
+    # whole day behind with no failure streak to trigger the full retry above.
+    # Keep re-fetching export-only until coverage catches up; the gap close
+    # re-solves via the standard octopus_fetch trigger.
     try:
-        _register_tier_boundary_triggers()
-    except Exception as e:  # pragma: no cover
-        logger.debug("tier_boundary re-register after retry failed: %s", e)
+        retry_export_rates_if_gap()
+    except Exception as e:
+        logger.warning("export-rates gap retry failed (non-fatal): %s", e)
 
 
 def bulletproof_morning_brief_job() -> None:
@@ -1182,8 +1195,13 @@ def bulletproof_mpc_job(
     force_write_devices: bool = False,
     trigger_reason: str = "manual",
     bypass_cooldown: bool = False,
-) -> None:
+) -> bool:
     """Intra-day MPC re-optimise: refresh forecast + live SoC + live PV, re-upload Fox/Daikin.
+
+    Returns True only when a solve actually completed (``result.ok``); False on
+    every skip path (engine off, paused, cooldown, dispatch lock) and on solve
+    failure — callers that must not lose a re-plan (#691 export-gap retry) use
+    this to keep the trigger armed instead of assuming the call did work.
 
     Reads Fox realtime (SoC%, solar_power_kw, load_power_kw) and passes them into the LP
     initial state so the re-optimisation reflects the actual current energy state rather than
@@ -1208,13 +1226,13 @@ def bulletproof_mpc_job(
     global _last_mpc_run_at
 
     if not config.USE_BULLETPROOF_ENGINE:
-        return
+        return False
     if get_scheduler_paused():
-        return
+        return False
     backend = (config.OPTIMIZER_BACKEND or "lp").strip().lower()
     if backend != "lp":
         logger.debug("MPC skipped: OPTIMIZER_BACKEND=%s", backend)
-        return
+        return False
     if not bypass_cooldown and not _can_run_mpc_now():
         logger.info(
             "MPC skipped (cooldown, trigger=%s): last run %.0fs ago < %ds",
@@ -1222,7 +1240,7 @@ def bulletproof_mpc_job(
             (datetime.now(UTC) - _last_mpc_run_at).total_seconds() if _last_mpc_run_at else 0,
             int(config.MPC_COOLDOWN_SECONDS),
         )
-        return
+        return False
 
     # #676 — serialize with any in-flight solve+dispatch. Non-blocking: an
     # event trigger arriving while another solve is mid-flight is redundant
@@ -1233,7 +1251,8 @@ def bulletproof_mpc_job(
             "MPC skipped (already running, trigger=%s): another optimizer run holds the dispatch lock",
             trigger_reason,
         )
-        return
+        return False
+    solved = False
     try:
         write_devices = bool(config.LP_MPC_WRITE_DEVICES) or force_write_devices
         # Snapshot the previous LP run id BEFORE the new solve so we can compute the plan delta.
@@ -1305,6 +1324,7 @@ def bulletproof_mpc_job(
             )
             # Stamp the cooldown only on a successful solve so transient errors don't lock us out.
             if result.get("ok"):
+                solved = True
                 _last_mpc_run_at = datetime.now(UTC)
                 # Plan-delta observability for event-driven runs (logged only —
                 # the user-facing ping is the digest pair + nightly plan_proposed;
@@ -1318,6 +1338,7 @@ def bulletproof_mpc_job(
             logger.warning("MPC job failed (trigger=%s): %s", trigger_reason, e)
     finally:
         optimizer_dispatch_lock.release()
+    return solved
 
 
 def _register_tier_boundary_triggers() -> dict[str, Any]:

@@ -66,7 +66,11 @@ def fetch_and_store_rates(fox: FoxESSClient | None = None) -> dict[str, Any]:
     # Fetch + persist Octopus Outgoing (export) rates when configured. Stored separately
     # in agile_export_rates so the LP can use a per-slot export price (Outgoing Agile
     # varies ±20p/kWh half-hourly, just like the import side). Failure here is non-fatal —
-    # the LP falls back to the flat EXPORT_RATE_PENCE constant when the table is empty.
+    # the LP falls back to per-hour priors (or the flat EXPORT_RATE_PENCE constant) when
+    # the table has no rows in the planning window — but a coverage gap left standing
+    # mis-prices every export the LP plans (#691: the 2026-07-12 plunge day solved at
+    # 15p flat vs a true 1.4–3.5p), so the 10-min retry job keeps re-fetching until
+    # export coverage catches up with import coverage.
     export_n = 0
     export_code = (config.OCTOPUS_EXPORT_TARIFF_CODE or "").strip()
     if export_code:
@@ -76,6 +80,13 @@ def fetch_and_store_rates(fox: FoxESSClient | None = None) -> dict[str, Any]:
                 export_n = db.save_agile_export_rates(export_rates, export_code)
         except Exception as e:
             logger.warning("Octopus export-rates fetch failed (non-fatal): %s", e)
+        if export_rates_coverage_gap():
+            logger.warning(
+                "Outgoing export rates lag import coverage after fetch "
+                "(export_rows=%d) — likely the Outgoing publication trailing the "
+                "import side; the 10-min retry job will keep re-fetching (#691)",
+                export_n,
+            )
 
     # Refresh the per-hour-of-day + cloud-aware PV calibration tables.
     # PR L1.1 (2026-05-24) — tables are now Quartz-trained (actual /
@@ -177,6 +188,132 @@ def _maybe_survival_mode(
         )
     except FoxESSError as e:
         logger.warning("Survival mode Fox fallback failed: %s", e)
+
+
+# #691 export-gap retry state (in-process; a restart re-solves on boot anyway).
+# _export_resolve_pending survives cooldown/lock skips of the MPC job: fresh
+# export rates demand a re-solve until one actually RUNS, not until one was
+# merely attempted.
+_export_resolve_pending = False
+_export_gap_last_warn_at: datetime | None = None
+
+
+def export_rates_coverage_gap() -> bool:
+    """True when Outgoing Agile pricing is in use and ``agile_export_rates``
+    coverage (MAX ``valid_from`` for the configured tariff) lags ``agile_rates``
+    coverage for the configured import tariff.
+
+    #691: Octopus publishes the Outgoing day-ahead rates minutes after the
+    import side. When the daily fetch lands in that window it stores tomorrow's
+    import rates but misses the export rates, and nothing retried — the LP then
+    priced a whole day's exports at the flat fallback. Import slots the export
+    table doesn't cover yet are exactly the gap this detects.
+
+    ``seg_flat`` mode returns False: the LP prices exports at the flat SEG rate
+    there, so a stale Outgoing table must not force device-writing re-solves.
+    Coverage is scoped to the configured tariff codes — both tables are
+    upsert-only, so rows from a previously configured code would otherwise mask
+    a real gap after a tariff switch.
+    """
+    if config.EXPORT_TARIFF_MODE != "outgoing_agile":
+        return False
+    export_code = (config.OCTOPUS_EXPORT_TARIFF_CODE or "").strip()
+    if not export_code:
+        return False
+    import_code = (config.OCTOPUS_TARIFF_CODE or "").strip() or None
+    import_max = db.get_agile_rates_coverage_max("agile_rates", tariff_code=import_code)
+    if not import_max:
+        return False
+    export_max = db.get_agile_rates_coverage_max("agile_export_rates", tariff_code=export_code)
+    return export_max is None or export_max < import_max
+
+
+def retry_export_rates_if_gap() -> dict[str, Any]:
+    """Re-fetch Outgoing rates while their coverage lags import coverage (#691).
+
+    Called from the 10-min retry job. Import-side state (failure streaks,
+    survival mode) is untouched — a missing export curve degrades pricing, it
+    doesn't threaten planning itself.
+
+    Whenever fresh coverage lands (even partial — real rates in the DB beat
+    priors immediately), a re-solve through the same ``octopus_fetch`` trigger
+    as the daily fetch is marked pending. Pending is cleared only when
+    ``bulletproof_mpc_job`` reports an actual solve — a cooldown or
+    dispatch-lock skip leaves it armed for the next tick, so the corrected
+    prices can't be silently dropped. While a structural gap persists the
+    retry keeps running (one cheap GET per tick) but warns at most hourly.
+    """
+    global _export_resolve_pending, _export_gap_last_warn_at
+    gap = export_rates_coverage_gap()
+    export_n = 0
+    if gap:
+        export_code = (config.OCTOPUS_EXPORT_TARIFF_CODE or "").strip()
+        before_max = db.get_agile_rates_coverage_max(
+            "agile_export_rates", tariff_code=export_code
+        )
+        try:
+            export_rates = fetch_agile_export_rates(export_tariff_code=export_code)
+            if export_rates:
+                export_n = db.save_agile_export_rates(export_rates, export_code)
+        except Exception as e:
+            logger.warning("Octopus export-rates gap retry failed (non-fatal): %s", e)
+        after_max = db.get_agile_rates_coverage_max(
+            "agile_export_rates", tariff_code=export_code
+        )
+        if after_max is not None and (before_max is None or after_max > before_max):
+            # Fresh coverage landed. The committed plan was solved on the
+            # priors/flat fallback — a re-solve is due even if the export tail
+            # is still short of import coverage.
+            _export_resolve_pending = True
+        gap = export_rates_coverage_gap()
+        if gap:
+            now = datetime.now(UTC)
+            if (
+                _export_gap_last_warn_at is None
+                or now - _export_gap_last_warn_at >= timedelta(hours=1)
+            ):
+                _export_gap_last_warn_at = now
+                logger.warning(
+                    "Outgoing export rates still lag import coverage after retry "
+                    "(saved %d rows, coverage %s) — retrying every tick, warning "
+                    "hourly (#691)",
+                    export_n,
+                    after_max,
+                )
+            else:
+                logger.debug(
+                    "Outgoing export coverage still lags (saved %d rows)", export_n
+                )
+        else:
+            _export_gap_last_warn_at = None
+            logger.info(
+                "Outgoing export coverage gap closed (+%d rows) — re-solving so "
+                "the plan prices exports on the published curve",
+                export_n,
+            )
+    if _export_resolve_pending and _resolve_after_export_rates():
+        _export_resolve_pending = False
+    return {
+        "ok": not gap,
+        "gap": gap,
+        "export_rows": export_n,
+        "resolve_pending": _export_resolve_pending,
+    }
+
+
+def _resolve_after_export_rates() -> bool:
+    """Run the standard octopus_fetch re-solve; True only if a solve completed."""
+    if not config.USE_BULLETPROOF_ENGINE:
+        return True  # nothing to re-solve; don't hold pending forever
+    try:
+        from .runner import bulletproof_mpc_job
+
+        return bool(
+            bulletproof_mpc_job(force_write_devices=True, trigger_reason="octopus_fetch")
+        )
+    except Exception as e:
+        logger.exception("Re-solve after export rates landed failed: %s", e)
+        return False
 
 
 def next_retry_seconds(failures: int) -> int:
