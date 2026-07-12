@@ -71,7 +71,10 @@ const HeatingPlanWidget = lazy(() =>
 export default function Landing() {
   // Cache-only endpoints — poll while the tab is visible (usePoll auto-pauses
   // via visibilitychange). All of these read SQLite/memory, no cloud calls.
-  const now = usePoll(getCockpitNow, 20_000);
+  // 10 s matches the nginx viewer micro-cache TTL, so a faster poll would only
+  // re-read the edge cache; freshness upstream is the viewer boost
+  // (FOX_VIEWER_REFRESH_SECONDS) refreshing the Fox snapshot while watching.
+  const now = usePoll(getCockpitNow, 10_000);
   const metrics = usePoll(getMetrics, 5 * 60_000);
   const timeline = usePoll(getSchedulerTimeline, 5 * 60_000);
   const pvToday = usePoll(getPvToday, 5 * 60_000);

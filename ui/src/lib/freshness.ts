@@ -1,6 +1,6 @@
 // Shared data-freshness signal.
 //
-// Landing already polls /cockpit/now every 20s and that payload carries a
+// Landing already polls /cockpit/now every 10s and that payload carries a
 // per-source freshness map (fox/daikin/agile/...). The AlertStrip lives in
 // the app shell (all routes) and wants the same staleness info — publishing
 // the latest map through a signal lets it read freshness WITHOUT a duplicate
