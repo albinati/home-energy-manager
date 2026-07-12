@@ -48,6 +48,7 @@ import type {
   ProposePlanResponse,
   ForecastDailyResponse,
   SensorDevicesResponse,
+  DeviceLogResponse,
   IndoorReadingsResponse,
   ThermalCalibration,
   IndoorRollupResponse,
@@ -130,6 +131,13 @@ export const getDaikinConsumption = (
 export const getWeather = () => getJson<WeatherResponse>("/weather");
 // Indoor climate sensors (#540 W1) — viewer-readable, one row per device.
 export const getSensorDevices = () => getJson<SensorDevicesResponse>("/sensors/devices");
+// Raw per-device reading log (#540 W1c) — the lossless audit of everything a
+// sensor sent, newest first. Powers the Journal's sensor view.
+export const getSensorDeviceLog = (device?: string, hours = 24) => {
+  const qs = new URLSearchParams({ hours: String(hours) });
+  if (device) qs.set("device", device);
+  return getJson<DeviceLogResponse>(`/sensors/device-log?${qs.toString()}`);
+};
 // Indoor sensor history (all rooms) for the last N hours — the realised
 // indoor-temp line on the heating chart.
 export const getIndoorReadings = (hours = 24) =>

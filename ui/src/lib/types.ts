@@ -1147,6 +1147,28 @@ export interface SensorDevicesResponse {
   devices: SensorDevice[];
 }
 
+// GET /sensors/device-log — the lossless per-device audit (#540 W1c): every
+// reading a sensor POSTed, with the full original `payload` attached.
+export interface DeviceLogRow {
+  received_at: string;
+  captured_at: string | null;
+  device_key: string;
+  device_id: string | null;
+  mac: string | null;
+  room: string | null;
+  source: string | null;
+  temp_c: number | null;
+  humidity_pct: number | null;
+  pressure_hpa: number | null;
+  payload: Record<string, unknown> | null;
+}
+export interface DeviceLogResponse {
+  device: string | null;
+  hours: number;
+  n_rows: number;
+  rows: DeviceLogRow[];
+}
+
 // GET /sensors/indoor?hours=N — recent per-reading rows (all rooms), for the
 // heating chart's realised indoor-temp line.
 export interface IndoorReadingRow {

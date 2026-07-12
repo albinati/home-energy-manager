@@ -3,6 +3,7 @@ import { useFetch } from "../lib/poll";
 import { getActionLog } from "../lib/endpoints";
 import { Spinner } from "../components/common/Spinner";
 import { Pill } from "../components/common/Pill";
+import { SensorJournal } from "../components/report/SensorJournal";
 import { hhmm } from "../lib/format";
 import type { ActionLogEntry } from "../lib/types";
 import "./report.css";
@@ -10,6 +11,16 @@ import "./report.css";
 // Execution journal — what the system ACTUALLY did (tank / battery / appliances),
 // read straight from action_log. This is the audit trail: every fired, skipped
 // or failed action with its trigger, tariff context and result.
+// A second view (Sensors) shows the lossless room-sensor ingest audit
+// (device_reading_log, #540 W1c) — everything each device POSTed.
+
+type JournalView = "actions" | "sensors";
+const VIEWS: { key: JournalView; label: string; blurb: string }[] = [
+  { key: "actions", label: "Actions",
+    blurb: "Everything the system actually did — tank, battery and appliances — with its trigger and result." },
+  { key: "sensors", label: "Sensors",
+    blurb: "Everything the room sensors sent — every reading per device, exactly as received." },
+];
 
 type DeviceFilter = "all" | "daikin" | "foxess" | "appliance";
 const DEVICE_TABS: { key: DeviceFilter; label: string }[] = [
@@ -85,6 +96,31 @@ function paramHint(p: Record<string, unknown>): string | null {
 }
 
 export default function Report() {
+  const [view, setView] = useState<JournalView>("actions");
+  const blurb = VIEWS.find((v) => v.key === view)!.blurb;
+
+  return (
+    <div class="page-padded report">
+      <header class="report-head">
+        <div class="report-title-row">
+          <h1>Activity journal</h1>
+          <div class="report-tabs" role="tablist" aria-label="Journal view">
+            {VIEWS.map((v) => (
+              <button key={v.key} role="tab" aria-selected={view === v.key}
+                      class={`report-tab${view === v.key ? " active" : ""}`}
+                      onClick={() => setView(v.key)}>{v.label}</button>
+            ))}
+          </div>
+        </div>
+        <p class="muted">{blurb}</p>
+      </header>
+
+      {view === "actions" ? <ActionsJournal /> : <SensorJournal />}
+    </div>
+  );
+}
+
+function ActionsJournal() {
   const [device, setDevice] = useState<DeviceFilter>("all");
   const [days, setDays] = useState(7);
   const log = useFetch(
@@ -103,12 +139,7 @@ export default function Report() {
   }
 
   return (
-    <div class="page-padded report">
-      <header class="report-head">
-        <h1>Activity journal</h1>
-        <p class="muted">Everything the system actually did — tank, battery and appliances — with its trigger and result.</p>
-      </header>
-
+    <>
       <div class="report-filters">
         <div class="report-tabs" role="tablist" aria-label="Device">
           {DEVICE_TABS.map((t) => (
@@ -163,6 +194,6 @@ export default function Report() {
           </ul>
         </section>
       ))}
-    </div>
+    </>
   );
 }
