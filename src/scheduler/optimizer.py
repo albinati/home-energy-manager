@@ -1475,9 +1475,10 @@ def _build_export_price_line(slot_starts_utc: list[datetime]) -> list[float] | N
         return None
     period_from = slot_starts_utc[0].isoformat()
     period_to = (slot_starts_utc[-1] + timedelta(minutes=30)).isoformat()
+    # No early return on empty rows (#691): a fetch gap must fall through to the
+    # per-hour priors below, not to the flat constant — the flat default (15p)
+    # priced a whole plunge day's exports ~5–10× over the real Outgoing curve.
     rows = db.get_agile_export_rates_in_range(period_from, period_to)
-    if not rows:
-        return None
     by_start: dict[str, float] = {}
     for r in rows:
         try:
@@ -1513,12 +1514,20 @@ def _build_export_price_line(slot_starts_utc: list[datetime]) -> list[float] | N
             out.append(flat)
     if n_matched == 0 and n_prior == 0:
         return None  # nothing matched — let caller use flat path entirely
-    logger.info(
-        "Export prices: matched %d/%d slots from agile_export_rates "
-        "(+%d from prior, rest %d use flat %.2fp)",
-        n_matched, len(slot_starts_utc), n_prior,
-        len(slot_starts_utc) - n_matched - n_prior, flat,
-    )
+    if n_matched == 0:
+        logger.warning(
+            "Export prices: 0/%d slots matched agile_export_rates — solving on "
+            "%d prior + %d flat values. Outgoing fetch gap? The retry job should "
+            "close it within minutes (#691)",
+            len(slot_starts_utc), n_prior, len(slot_starts_utc) - n_prior,
+        )
+    else:
+        logger.info(
+            "Export prices: matched %d/%d slots from agile_export_rates "
+            "(+%d from prior, rest %d use flat %.2fp)",
+            n_matched, len(slot_starts_utc), n_prior,
+            len(slot_starts_utc) - n_matched - n_prior, flat,
+        )
     return out
 
 
