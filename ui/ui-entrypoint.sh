@@ -22,9 +22,10 @@ CONFIG_PATH=/usr/share/nginx/html/config.js
 # and gates every admin action behind a SEPARATE admin token the user pastes at
 # runtime (held in localStorage, never baked here) — see ui/src/lib/api.ts,
 # which already ignores this field. So baking HEM_UI_TOKEN into the browser
-# bought nothing and was a standing footgun. Ship null. (HEM_UI_TOKEN is still
-# accepted server-side by ApiV1BearerAuth for any server-to-server caller; it
-# just no longer travels to the browser.)
+# bought nothing and was a standing footgun. Ship null.
+# (NB: HEM_UI_TOKEN is NOT accepted server-side. The middleware actually mounted
+# is ApiV1RoleAuth (src/api/main.py); ApiV1BearerAuth is dead code and is never
+# installed. Read routes are viewer-open; writes need HEM_ADMIN_TOKEN.)
 BEARER_LITERAL="null"
 
 # Write null (not "unknown") when the env is absent/placeholder so the SPA's

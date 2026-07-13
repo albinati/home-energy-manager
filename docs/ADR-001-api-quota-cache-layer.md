@@ -145,7 +145,7 @@ landed are listed in the status block at the top.
 | `src/config.py` | All quota / cache tuning constants |
 | `src/db.py` | `api_call_log` (V5), `daikin_telemetry` (V9) tables |
 | `src/api/main.py` | `/api/v1/{daikin,foxess}/quota` endpoints |
-| `scripts/deploy_hetzner.sh` | Post-deploy Fox ESS Self Use safety reset |
+| ~~`scripts/deploy_hetzner.sh`~~ | **RETIRED** — the native-systemd deployer. Prod is the immutable container; deploy pins `HEM_IMAGE_TAG` in `/srv/hem/.compose.env` (see `deploy/README.md`). |
 | `tests/test_api_quota.py` | Quota tracker unit tests |
 | `tests/test_daikin_service.py` | Cache / throttle / stale tests |
 | `tests/test_daikin_estimator.py` | Estimator closed-form accuracy (#55) |

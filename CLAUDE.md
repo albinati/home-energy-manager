@@ -332,9 +332,10 @@ FORECAST_NIGHT_TEMP_BIAS_C=0                    # subtract this from Open Meteo'
                                                  # (the -3 was calibrated on one cold 2026-05-12 observation).
                                                  # Keep at 0 unless the learned offset is disabled; the LP would
                                                  # otherwise budget nights ~3 °C colder than reality all winter.
-                                                 # NB the CODE default in src/config.py is still -3.0, so this line
-                                                 # MUST be present in /srv/hem/.env (PR #702 flips the code default
-                                                 # to 0.0; update this note once it lands).
+                                                 # The CODE default is 0.0 since #702 (it was -3.0 for weeks after
+                                                 # prod pinned 0, so every dev/test/fresh deploy silently ran the
+                                                 # double-correction). This .env line is now belt-and-braces, not
+                                                 # load-bearing; `.env.example` pins it too.
 FORECAST_NIGHT_START_HOUR_UTC=21                # bias active from (inclusive)
 FORECAST_NIGHT_END_HOUR_UTC=6                   # bias active until (exclusive); wraps midnight when start > end
 
@@ -476,10 +477,23 @@ source of stale-status questions. Use these terms exactly:
 ### Scenario LP for peak-export robustness
 
 **Where `peak_export` can even come from.** In the `normal` and `guests`
-presets the LP constrains `exp <= pv_use` — the battery is never allowed to
-dump to the grid, so `peak_export` simply doesn't emerge. It is a
-**`vacation`-preset** behaviour (nobody home → max arbitrage). This is the
-first and strongest gate, and it lives in the LP constraint, not in a flag.
+presets the LP constrains `exp <= pv_use`, so `peak_export` (battery→grid
+price arbitrage) simply doesn't emerge. It is a **`vacation`-preset**
+behaviour (nobody home → max arbitrage). This is the first and strongest
+gate, and it lives in the LP constraint, not in a flag.
+
+**The one exception — `pre_negative_export`.** The `exp <= pv_use` cap is
+relaxed to `exp <= pv_use + dis` on positive-price slots inside the
+plunge-prep window (`LP_PRE_NEGATIVE_PREP_ENABLED`, default true;
+`LP_PLUNGE_PREP_HOURS`), so the battery is deliberately drained to the grid
+ahead of a negative-price window — sell high, refill at the paid negative
+price. That branch is gated on `not vacation`, i.e. it fires **only in
+`normal`/`guests`**, and `_slot_fox_tuple` maps those slots to the same
+hardware action as `peak_export`: **ForceDischarge**. They are labelled
+`pre_negative_export` precisely so they BYPASS the robustness filter below.
+So "the battery never dumps to the grid outside vacation" is false — the
+accurate statement is that `peak_export` (price arbitrage) never emerges
+outside vacation.
 
 When the LP *does* plan `peak_export`, three solves run under perturbed
 forecasts (optimistic / nominal / pessimistic). A `peak_export` slot only

@@ -250,9 +250,11 @@ Estado atual (o que você deve encontrar num host saudável):
   `try_files $uri /index.html`.
 - Publicado no tailnet via Tailscale funnel em `:8443` (TLS válido; é também o
   caminho que o sensor ESPHome usa — §12). `/mcp` **não** é exposto ali.
-- O bearer vai pro browser via `/config.js` (escrito pelo `ui-entrypoint.sh` no
-  boot do container) e é **viewer-only** — o `HEM_ADMIN_TOKEN` nunca vai pro
-  browser.
+- **Nenhum bearer vai pro browser.** O `ui-entrypoint.sh` escreve `/config.js`
+  no boot do container com `bearer: null` — literalmente, sempre (`BEARER_LITERAL="null"`).
+  As rotas de leitura da API são viewer (sem token); o `HEM_ADMIN_TOKEN` nunca
+  sai do servidor. Um token no `config.js` seria world-readable e não compraria
+  nada — ver `ui/README.md`.
 
 ```bash
 # Deploy de uma nova versão da SPA (sem derrubar o loop de controle):

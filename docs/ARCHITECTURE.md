@@ -40,7 +40,7 @@ The older consent-driven **solver + dispatcher** (`src/optimization/`) was remov
 - **Daikin temperature calibration** — the LP compares forecast vs actual outdoor temperature through `forecast_skill_log`, which is rebuilt from canonical forecast rows plus Daikin telemetry. The solve uses an hour-of-day offset map so early mornings and afternoons can react to local conditions without extra API calls.
 - **Runtime-tunable knobs** (comfort / strategy / MPC thresholds) — live via `PUT /api/v1/settings/{key}` → `runtime_settings` SQLite table → `config.*` property (30 s TTL + version counter). Schedule-class keys (`LP_PLAN_PUSH_HOUR/MINUTE`) hot-reload APScheduler cron jobs without a restart (#52 / PR #63). See `src/runtime_settings.py`.
 - **`OPENCLAW_READ_ONLY`** — remote execute path respects read-only for safety.
-- **Grid export (force discharge)** — the presets are **`normal | guests | vacation`** (`OPTIMIZATION_PRESET`; the old `travel` / `away` names are gone). In `normal` and `guests` the LP constrains `exp <= pv_use`, so the battery is **never** allowed to dump to the grid and `peak_export` cannot even be planned. Battery→grid arbitrage is a **`vacation`**-only behaviour, and each `peak_export` slot must additionally survive the scenario-LP filter (pessimistic export floor + economic margin) in `filter_robust_peak_export` before it reaches Scheduler V3 — see [DISPATCH_DECISIONS.md](DISPATCH_DECISIONS.md). **`ENERGY_STRATEGY_MODE`** (`savings_first` / `strict_savings`) and **`EXPORT_DISCHARGE_MIN_SOC_PERCENT`** were both **removed**; setting them does nothing. (`EXPORT_DISCHARGE_FLOOR_SOC_PERCENT` is unrelated and still live — it is the `fdSoc` target sent to Fox.)
+- **Grid export (force discharge)** — the presets are **`normal | guests | vacation`** (`OPTIMIZATION_PRESET`; the old `travel` / `away` names are gone). In `normal` and `guests` the LP constrains `exp <= pv_use`, so `peak_export` (battery→grid price arbitrage) cannot even be planned — it is a **`vacation`**-only behaviour. (**Exception:** the pre-negative drain relaxes that cap to `exp <= pv_use + dis` inside the plunge-prep window and fires **only** in `normal`/`guests`; those slots are labelled `pre_negative_export`, map to **ForceDischarge**, and deliberately bypass the robustness filter. So the battery *does* dump to the grid outside vacation — just not for price arbitrage.) and each `peak_export` slot must additionally survive the scenario-LP filter (pessimistic export floor + economic margin) in `filter_robust_peak_export` before it reaches Scheduler V3 — see [DISPATCH_DECISIONS.md](DISPATCH_DECISIONS.md). **`ENERGY_STRATEGY_MODE`** (`savings_first` / `strict_savings`) and **`EXPORT_DISCHARGE_MIN_SOC_PERCENT`** were both **removed**; setting them does nothing. (`EXPORT_DISCHARGE_FLOOR_SOC_PERCENT` is unrelated and still live — it is the `fdSoc` target sent to Fox.)
 - **Daikin (vacation)** — SQLite actions skip **cheap** and **negative** preheat windows; only **peak** setback (+ short **restore**) is written so the heat pump does not add load while Fox may export. At **normal** / **guests**, Daikin still follows the full cheap/peak/negative schedule. The API does **not** switch Onecta **operationMode** (heating/auto); adaptation is via **LWT offset, DHW tank, climate/tank power** on the heartbeat.
 
 ```mermaid
@@ -97,9 +97,13 @@ After solving, each half-hour slot is classified by `lp_plan_to_slots()`:
 > battery discharge". **It does not: the H1 firmware ignores the SelfUse group's
 > `minSocOnGrid` and discharges straight through it** — 40.6 % of samples across a
 > 40,369-sample prod audit were below-floor discharge. Only the *global* reserve
-> is a real floor, and the only proven no-discharge hold primitive on this
-> hardware is **`Backup`** (used for `negative_hold` and for LP positive-price
-> holds). `solar_charge` therefore maps to plain `SelfUse` at reserve
+> is a real floor. Two primitives are *proven* zero-discharge on this hardware —
+> **`Backup`** and **`ForceCharge` with `fdSoc <= SoC`** (413 and 354 samples
+> respectively at 0.0 % discharge; see `docs/FOXESS/WORK_MODES_AND_SOC.md`).
+> `Backup` is the one the dispatcher uses (for `negative_hold` and LP
+> positive-price holds); `ForceCharge`-as-hold is kept as the fallback
+> (`LP_NEGATIVE_HOLD_FOX_MODE=forcecharge`). A SelfUse floor is **not** one of
+> them. `solar_charge` therefore maps to plain `SelfUse` at reserve
 > (`LP_SOLAR_CHARGE_FOX_MODE=selfuse`, the default) — see `_slot_fox_tuple` in
 > `src/scheduler/optimizer.py`. The distinction from V8 still holds: "charge from
 > PV, no grid import" maps to `SelfUse`, not `ForceCharge`.

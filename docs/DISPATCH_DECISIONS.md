@@ -67,10 +67,22 @@ legacy no-PV-perturbation behaviour.
 ## Gate 0 — the preset
 
 `peak_export` cannot even be *planned* outside the `vacation` preset: in
-`normal` and `guests` the LP constrains `exp <= pv_use`, so the battery is
-never allowed to dump to the grid (only surplus PV is). The scenario filter
+`normal` and `guests` the LP constrains `exp <= pv_use`. The scenario filter
 below therefore only ever has work to do on a `vacation` plan. This is a
 constraint in `src/scheduler/lp_optimizer.py`, not a flag.
+
+**The one exception — `pre_negative_export`.** The `exp <= pv_use` cap is
+relaxed to `exp <= pv_use + dis` on positive-price slots inside the
+plunge-prep window (`LP_PRE_NEGATIVE_PREP_ENABLED`, default true;
+`LP_PLUNGE_PREP_HOURS`), so the battery is deliberately drained to the grid
+ahead of a negative-price window — sell high, refill at the paid negative
+price. That branch is gated on `not vacation`, i.e. it fires **only in
+`normal`/`guests`**, and `_slot_fox_tuple` maps those slots to the same
+hardware action as `peak_export`: **ForceDischarge**. They are labelled
+`pre_negative_export` precisely so they BYPASS the robustness filter below.
+So "the battery never dumps to the grid outside vacation" is false — the
+accurate statement is that `peak_export` (price arbitrage) never emerges
+outside vacation.
 
 **There is no `peak_export` kill-switch env var.** `ENERGY_STRATEGY_MODE`
 (`strict_savings` / `savings_first`) was **removed** in PR C of the

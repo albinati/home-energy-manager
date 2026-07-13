@@ -407,16 +407,23 @@ loss.
 Rather than disabling arbitrage (overcautious) or trusting the forecast blindly
 (overconfident), HEM runs the LP **three times** at high-stakes triggers:
 
-| Scenario | Outdoor temp | Base load | Purpose |
-|---|---|---|---|
-| Optimistic | forecast + 1.0 °C | × 0.90 | Upper-bound view; informational only. |
-| Nominal | forecast as-is | × 1.00 | The canonical solve — what a single-pass LP would have done. |
-| Pessimistic | forecast − 1.5 °C | × 1.15 | Stressed forecast; gates the commit. |
+| Scenario | Outdoor temp | Base load | PV | Purpose |
+|---|---|---|---|---|
+| Optimistic | forecast + 1.0 °C | × 0.90 | × 1.05 | Upper-bound view; informational only. |
+| Nominal | forecast as-is | × 1.00 | × 1.00 | The canonical solve — what a single-pass LP would have done. |
+| Pessimistic | forecast − 1.5 °C | × 1.15 | × 0.85 | Stressed forecast; gates the commit. |
 
-**Decision rule (V1 — maximin):** A `peak_export` slot is uploaded to Fox V3
-**only if the pessimistic scenario also exports ≥ `LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH`
-(default 0.30 kWh) at that slot.** Otherwise the slot is downgraded to standard
-SelfUse and the inverter discharges only to cover load (no grid feed).
+**Decision rule.** A `peak_export` slot reaches Fox V3 only if it clears **two**
+gates in `filter_robust_peak_export`:
+1. **Pessimistic floor** — the pessimistic scenario must also export
+   ≥ `LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH` (default 0.30 kWh) at that slot;
+2. **Economic margin** — export price minus the refill shadow price minus battery
+   wear must clear `LP_PEAK_EXPORT_MIN_MARGIN_PENCE_PER_KWH`.
+
+Otherwise the slot is downgraded to standard SelfUse (battery still covers load,
+no grid feed). The `reason` on the dispatch decision tells you WHICH gate dropped
+it — `pessimistic_disagrees` vs `economic_margin` — so quote that rather than
+assuming the floor.
 
 **There is no kill switch env var** — `ENERGY_STRATEGY_MODE` was REMOVED (PR C,
 mode-collapse stack). Never suggest setting it. Battery→grid export is gated by

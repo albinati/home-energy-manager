@@ -107,7 +107,7 @@ window audit: the guard's premise — grid-charging is wasteful when PV
 covers demand — inverts when the grid pays for import, and the guard had
 pinned the plan to PV-only charging + curtailment across a 15-slot paid
 window). Mirrors the existing pre-plunge constraint pattern
-at `lp_optimizer.py:794`, which carries the same `price ≥ 0` gate.
+at `lp_optimizer.py` (the `chg <= pv_use` constraints), which carries the same `price ≥ 0` gate.
 PV→battery stays allowed; grid→battery gets
 blocked on the days the guard fires.
 

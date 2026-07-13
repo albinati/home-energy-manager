@@ -67,7 +67,7 @@ Deploy = **pin a new image tag and restart**. Never `git pull` on the host.
 docker manifest inspect ghcr.io/albinati/home-energy-manager:sha-<sha> >/dev/null
 
 # 3. Pin the tag and restart.
-sed -i "s|^HEM_IMAGE_TAG=.*|HEM_IMAGE_TAG=sha-<sha>|" /srv/hem/.compose.env
+sed -i "s|^HEM_IMAGE_TAG=.*|HEM_IMAGE_TAG=sha-<FULL 40-char sha>   # docker-publish.yml uses type=sha,format=long — a SHORT sha will not resolve|" /srv/hem/.compose.env
 systemctl restart hem
 ```
 
@@ -389,10 +389,24 @@ Each re-plan pushes the revised Fox V3 schedule to hardware; identical schedules
 ]
 ```
 
-Group end-minutes are **`:59` inclusive** for a full hour and **`:30` exclusive**
-for a half-hour; any "which group covers minute *X*" logic must use
-`gs <= m < ge` on local wall-clock — reuse `derive_fox_mode_from_schedule`
-rather than re-deriving it.
+Group end-minutes carry **two conventions at once**: an end landing on `:00` is
+stored decremented to `:59` (so the stored end is **inclusive**), while an end
+landing on `:30` is stored as-is (**exclusive** — a `00:00–00:30` group followed
+by `00:30–…` is clean back-to-back, not an overlap).
+
+**So you cannot just pick one comparator.** Applying `gs <= m < ge` to the *raw*
+stored end drops minute `:59` — the group's own last real minute. The two live
+implementations each handle it correctly, by different routes:
+
+| site | approach |
+|---|---|
+| `_prepend_inflight_group` (`src/scheduler/lp_dispatch.py`) | **normalise first**: `pe_excl = pe if pe % 30 == 0 else pe + 1`, then `ps <= m < pe_excl` |
+| `derive_fox_mode_from_schedule` (`src/foxess/service.py`) | **inclusive as stored**: `gs <= m <= ge`, plus a **start-wins tie-break** at a shared `:30` minute (the inverter has already switched to the incoming group) |
+
+Always compare in **local wall-clock minutes, never UTC** — and prefer reusing
+`derive_fox_mode_from_schedule` over writing a third implementation. This
+convention has already bitten four independent implementations (#672, #675, the
+`/status` derivation fixed by #678, and an earlier draft of *this paragraph*).
 
 > ⚠️ **`SelfUse minSocOnGrid=100` is RETIRED — never emit it.** It used to be
 > the `solar_charge` shape ("battery holds charge, PV fills it"). **The H1
