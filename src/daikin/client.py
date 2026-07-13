@@ -392,7 +392,9 @@ class DaikinClient:
         return None
 
     def get_daily_consumption_from_cache(
-        self, today_utc: "_datetime.date | None" = None
+        self,
+        today_utc: "_datetime.date | None" = None,
+        devices: list[DaikinDevice] | None = None,
     ) -> dict[str, dict[str, float]]:
         """Parse the cached ``/gateway-devices`` payload's per-day consumption arrays.
 
@@ -406,7 +408,14 @@ class DaikinClient:
         Returns ``{date_iso: {"heating_kwh": x, "dhw_kwh": y, "total_kwh": z}}``.
 
         ``today_utc`` is injectable for tests; defaults to ``date.today()`` (UTC).
-        Zero extra Daikin API quota — read-only over an already-cached payload.
+
+        QUOTA: "from_cache" means it parses the arrays already embedded in the
+        ``/gateway-devices`` payload rather than hitting the separate
+        consumption endpoints — it does NOT mean free. Fetching that payload
+        costs ONE ``/gateway-devices`` read against the 200/day cap. Pass
+        ``devices`` to reuse a payload you already have (the sibling
+        ``get_*_consumption`` methods take the same arg); the rollup job fetches
+        once and shares it across both parsers.
         """
         from datetime import date as _date, timedelta as _td
 
@@ -417,10 +426,11 @@ class DaikinClient:
         this_week_monday = today_utc - _td(days=today_utc.weekday())
 
         out: dict[str, dict[str, float]] = {}
-        try:
-            devices = self.get_devices()
-        except Exception:
-            return out
+        if devices is None:
+            try:
+                devices = self.get_devices()
+            except Exception:
+                return out
 
         for device in devices:
             for mp in device.raw.get("managementPoints", []):
@@ -469,7 +479,9 @@ class DaikinClient:
         return out
 
     def get_2hourly_consumption_from_cache(
-        self, today_local: "_datetime.date | None" = None
+        self,
+        today_local: "_datetime.date | None" = None,
+        devices: list[DaikinDevice] | None = None,
     ) -> dict[str, dict[int, dict[str, float]]]:
         """Parse 2-hourly consumption from the cached ``/gateway-devices`` payload (#238).
 
@@ -488,7 +500,10 @@ class DaikinClient:
         materialises.
 
         ``today_local`` is injectable for tests; defaults to ``date.today()``.
-        Zero extra Daikin API quota — read-only over an already-cached payload.
+
+        QUOTA: see ``get_daily_consumption_from_cache`` — "from_cache" means it
+        parses arrays embedded in the ``/gateway-devices`` payload, NOT that the
+        payload is free. Pass ``devices`` to reuse one you already have.
         """
         from datetime import date as _date, timedelta as _td
 
@@ -497,10 +512,11 @@ class DaikinClient:
         yesterday_local = today_local - _td(days=1)
 
         out: dict[str, dict[int, dict[str, float]]] = {}
-        try:
-            devices = self.get_devices()
-        except Exception:
-            return out
+        if devices is None:
+            try:
+                devices = self.get_devices()
+            except Exception:
+                return out
 
         def _bucket(date_iso: str, idx: int) -> dict[str, float]:
             day_buckets = out.setdefault(date_iso, {})
