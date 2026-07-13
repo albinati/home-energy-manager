@@ -834,18 +834,35 @@ def push_negative_window_start(
     Telegram and the calendar — household members can run laundry / dishwasher /
     EV charge during the window.
     """
+    # The tank advice DEPENDS ON THE CONTROL MODE — it is not a constant.
+    #
+    # ACTIVE (prod): HEM writes the tank itself and, since #458, pre-positions it
+    #   to 65 °C for negative windows. Telling the user to boost from the Onecta
+    #   app is worse than redundant: a manual gesture stamps
+    #   ``overridden_by_user_at`` (#386), and the pre-fire reconciler INHERITS
+    #   that override and suppresses HEM's own tank rows for up to the window's
+    #   end. The advice would sabotage the plan it is trying to help.
+    #
+    # PASSIVE: ``write_daikin_from_lp_plan`` returns early and HEM writes NOTHING
+    #   to the heat pump. A manual boost is then the ONLY way the tank gets
+    #   heated while we're being paid to import — the original advice was right,
+    #   and there is no HEM row for it to override.
+    if (getattr(config, "DAIKIN_CONTROL_MODE", "active") or "").strip().lower() == "passive":
+        body = (
+            "Octopus is paying us to consume right now. HEM is charging the "
+            "battery, but it does NOT control the heat pump in passive mode — "
+            "good moment to boost the hot-water tank from the Daikin app and "
+            "run heavy appliances (laundry, dishwasher, EV charge)."
+        )
+    else:
+        body = (
+            "Octopus is paying us to consume right now. HEM is already "
+            "boosting the hot-water tank and charging the battery — good "
+            "moment to run heavy appliances (laundry, dishwasher, EV charge)."
+        )
     payload: dict[str, Any] = {
         "title": "🔵 PAID to use — negative-price window started",
-        # Body suggests boosting the DHW tank manually via the Daikin app —
-        # because we deliberately keep DAIKIN_CONTROL_MODE=passive (we only
-        # observe / forecast Daikin via the heating-curve function, not
-        # control it). Negative-price slots are the one moment a manual
-        # tank boost is high-value — the user gets paid to reheat.
-        "body": (
-            "Octopus is paying us to consume right now. Good moment to "
-            "boost the hot-water tank from the Daikin app and run heavy "
-            "appliances (laundry, dishwasher, EV charge)."
-        ),
+        "body": body,
     }
     if soc is not None:
         payload["soc_pct"] = soc

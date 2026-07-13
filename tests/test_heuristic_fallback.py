@@ -190,14 +190,6 @@ def _seed_cheap_peak_only_day(start: datetime) -> None:
     db.save_agile_rates(rows, TARIFF)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Heuristic emits ForceCharge[fdPwr=3000, fdSoc=95] defaults because it has "
-    "no LP-derived per-slot hints (see PR #338 + project_heuristic_fox_dispatch_bug "
-    "memory). Tracked as follow-up: either rewire heuristic to Self-Use-only on the "
-    "Fox surface, or compute LP-aware fdPwr/fdSoc inside the heuristic. When fixed, "
-    "remove this xfail and the test should pass.",
-)
 def test_heuristic_does_not_ship_dangerous_force_charge_defaults(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -247,4 +239,13 @@ def test_heuristic_does_not_ship_dangerous_force_charge_defaults(
         f"fdSoc={_HEURISTIC_DANGEROUS_FDSOC_PCT} %). Fox would grid-charge at "
         f"full power until 95 % SoC on every cycle, ignoring LP economics. "
         f"Offending groups: {dangerous}"
+    )
+
+    # Assert POSITIVELY, not just "no dangerous defaults": the heuristic has no
+    # LP-derived per-slot hints, so it must not emit ANY forced mode. A negative
+    # assertion would still pass if it shipped ForceCharge with some *other*
+    # fdPwr/fdSoc pair.
+    modes = {getattr(g, "work_mode", None) for g in captured_groups}
+    assert modes == {"SelfUse"}, (
+        f"the heuristic's Fox surface must be SelfUse-only; got work modes {modes}"
     )
