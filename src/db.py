@@ -7436,15 +7436,22 @@ def get_committed_peak_export_in_range(
             conn.close()
 
 
-def list_strict_savings_forgone_export_for_day(date_iso: str) -> list[dict[str, Any]]:
-    """Per-slot export the LP would have committed had strict_savings been off.
+def list_forgone_peak_export_for_day(date_iso: str) -> list[dict[str, Any]]:
+    """Per-slot battery export the LP planned but the robustness filter blocked.
 
     For each local-day slot, picks the LATEST dispatch_decisions row (most
-    recent run_id) where ``lp_solution_snapshot.export_kwh > 0`` but
-    ``dispatched_kind != 'peak_export'`` — i.e. the strict_savings classifier
-    or the scenario-LP robustness filter downgraded the LP's preferred
-    export. Returns one row per affected slot with the kWh + export price,
-    so the brief can render the forgone revenue counterfactual.
+    recent run_id) where the LP itself chose ``lp_kind = 'peak_export'``
+    (battery → grid arbitrage) but it did NOT ship as one — i.e. the
+    scenario-LP filter (``filter_robust_peak_export``) judged the export unsafe
+    under the pessimistic forecast. That is the only forgone revenue there is.
+
+    The ``lp_kind`` filter is load-bearing. Without it the query matched any
+    slot with ``export_kwh > 0``, and in the normal/guests presets the LP
+    constrains ``exp <= pv_use`` — so ``export_kwh`` there is PV SURPLUS, which
+    Fox V3 SelfUse exports passively and which already earns money. Every sunny
+    day therefore reported a large phantom "forgone" loss. (Pre-PR-C fossil:
+    this used to measure what the removed ``ENERGY_STRATEGY_MODE=strict_savings``
+    policy declined to sell.)
 
     ``date_iso`` is a local-calendar-day string (``YYYY-MM-DD``); the helper
     converts to a half-open UTC slot range matching the LP's slot grid.
@@ -7479,6 +7486,7 @@ def list_strict_savings_forgone_export_for_day(date_iso: str) -> list[dict[str, 
                     AND ls.slot_time_utc = dd.slot_time_utc
                    WHERE dd.slot_time_utc >= ? AND dd.slot_time_utc < ?
                      AND ls.export_kwh > 0
+                     AND dd.lp_kind = 'peak_export'
                      AND dd.dispatched_kind != 'peak_export'
                      AND dd.run_id = (
                          SELECT MAX(run_id) FROM dispatch_decisions d2
