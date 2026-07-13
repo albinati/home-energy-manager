@@ -618,6 +618,7 @@ def _merge_fox_groups(
     peak_export_discharge: bool = False,
     truncate_horizon: bool = False,
     live_soc_pct: float | None = None,
+    self_use_only: bool = False,
 ) -> list[SchedulerGroup] | tuple[list[SchedulerGroup], datetime | None]:
     """Build Fox V3 SchedulerGroup list from per-slot LP output, capped at ``max_groups``.
 
@@ -634,12 +635,22 @@ def _merge_fox_groups(
     clamps any Backup group whose ``maxSoc`` exceeds the live SoC at a positive
     price (the fw<1.55 grid-import footgun, #679). ``None`` disables the guard
     (back-compat for callers without a live reading — e.g. unit tests).
+
+    ``self_use_only``: map EVERY slot to plain ``SelfUse`` at the reserve floor —
+    no ForceCharge, no ForceDischarge. For callers that have no LP-derived
+    per-slot hints. ``_slot_fox_tuple`` defaults a hint-less ``cheap`` slot to
+    ``ForceCharge(fdPwr=FOX_FORCE_CHARGE_NORMAL_PWR, fdSoc=95)``, i.e. grid-charge
+    at 3 kW to 95 % SoC — measured at +£0.35–1.30/day vs the LP on 2026-05-18.
+    The heuristic backend is exactly such a caller (see ``_run_optimizer_heuristic``).
     """
     if not slots:
         return ([], None) if truncate_horizon else []
     tz = TZ()
 
     def _key_for(s: HalfHourSlot) -> tuple:
+        if self_use_only:
+            min_r = int(config.MIN_SOC_RESERVE_PERCENT)
+            return ("SelfUse", None, None, min_r, None)
         k = _slot_fox_tuple(s, peak_export_discharge=peak_export_discharge)
         return _guard_nonneg_backup_maxsoc(k, s.price_pence, live_soc_pct)
 
@@ -1260,7 +1271,30 @@ def _run_optimizer_heuristic(
         cutoff = fox_slots[0].start_utc + timedelta(hours=24)
         fox_slots = [s for s in fox_slots if s.start_utc < cutoff]
     fox_ok = False
-    groups = _merge_fox_groups(fox_slots, max_groups=8, peak_export_discharge=False)
+    # SELF-USE ONLY — and this makes the heuristic's Fox surface DELIBERATELY
+    # INERT. Be honest about the trade:
+    #
+    # The heuristic produces slots with no LP-derived ``lp_grid_import_w`` /
+    # ``target_soc_pct``, so ``_slot_fox_tuple`` defaulted every ``cheap`` slot
+    # to ForceCharge(fdPwr=3000 W, fdSoc=95) — grid-charge at full power to 95 %
+    # SoC regardless of price. The 2026-05-18 audit measured +£0.35–1.30/day vs
+    # the LP objective. PR #338 closed the *automatic* fallback, but
+    # ``OPTIMIZER_BACKEND`` stayed runtime-flippable (MCP `set_optimizer_backend`,
+    # `POST /api/v1/optimization/backend`, and a config-snapshot restore), so the
+    # destructive shape was one flag away — reachable by an agent.
+    #
+    # With self-use only, this backend can no longer grid-charge AT ALL. In
+    # winter that could cost MORE than the bug it removes (the £0.35–1.30/day was
+    # measured against the LP, not against doing nothing). That is an acceptable
+    # trade ONLY because nothing legitimately selects this backend: the default is
+    # `lp`, and the LP-failure path explicitly refuses to fall back here. A
+    # backend that cannot size a charge window has no honest way to emit one.
+    #
+    # The real answer is to DELETE this backend — tracked separately. Until then,
+    # inert beats destructive.
+    groups = _merge_fox_groups(
+        fox_slots, max_groups=8, peak_export_discharge=False, self_use_only=True,
+    )
     fox_ok = upload_fox_if_operational(fox, groups)
 
     daikin_n = _write_daikin_schedule(plan_date, slots, forecast)
