@@ -1,5 +1,18 @@
 # UI ↔ API inventory (Epic 13b / Story B2)
 
+> **SUPERSEDED — ARCHIVED 2026-07-13. Describes a UI that no longer exists.**
+>
+> This was the migration-planning artifact for Epic 13b. **The migration is
+> done.** Story B5 removed **all** HTML from the API: there is no Jinja2, no
+> `src/api/templates/`, no `static/`, no `_layout_context()`, no `/legacy` route
+> — the API serves JSON only. The six Jinja-served pages catalogued below are
+> gone.
+>
+> The live UI is the **Preact + TypeScript + Vite SPA** in `ui/`, served by the
+> `hem-ui` nginx container, with **four** routes: `/`, `/insights`, `/report`,
+> `/settings` (`ui/src/routes/`). For the current API surface, use the OpenAPI
+> docs at `:8000/docs`. Kept only as a record of what the pre-SPA UI consumed.
+
 Catalogues every `/api/v1/*` endpoint each web UI page consumes, plus every
 server-side Jinja2 template variable the page depends on. Output of
 Story B2 (#357) — feeds Story B3 (SPA container scaffold) and Story B4

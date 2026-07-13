@@ -24,6 +24,16 @@ Hardware writes are additionally gated by `OPENCLAW_READ_ONLY` (default: `true`)
 
 Grouped by side-effect class. "Hardware write" tools require `confirmed=True` **and** `OPENCLAW_READ_ONLY=false`. "Planner write" tools mutate SQLite (plans, consents, settings) but never dial out to Fox or Daikin.
 
+> The tables below are **representative, not exhaustive** — `build_mcp()`
+> registers 81 tools today. `src/mcp_server.py` is the source of truth; run
+> `list_tools()` on the built app for the current surface.
+
+Occupancy is **not** an MCP surface of its own: household shape is expressed
+through `OPTIMIZATION_PRESET` (`normal｜guests｜vacation`) plus the `DHW_GUEST_COUNT`
+/ shower-count keys, all via `set_setting` / `set_optimization_preset`. (Earlier
+revisions of this doc listed `get_occupancy_mcp` / `set_occupancy_mcp` — those
+tools do not exist.)
+
 ### Read-only (no side effects, no quota burn)
 
 | Tool | Returns |
@@ -45,7 +55,6 @@ Grouped by side-effect class. "Hardware write" tools require `confirmed=True` **
 | `list_available_tariffs` | Octopus catalogue |
 | `get_octopus_account` | Current Octopus account config |
 | `auto_detect_octopus_setup` | Account probe (read) |
-| `get_occupancy_mcp` | Occupancy settings |
 | `simulate_plan` | Read-only "what-if" LP solve (Phase 4.4 — zero hardware, zero quota) |
 
 ### Planner write (SQLite only, no hardware dial-out)
@@ -58,7 +67,6 @@ Grouped by side-effect class. "Hardware write" tools require `confirmed=True` **
 | `set_optimization_preset` | Writes `OPTIMIZATION_PRESET` at runtime |
 | `set_optimizer_backend` | Writes `OPTIMIZER_BACKEND` at runtime |
 | `set_auto_approve` | Toggles `PLAN_AUTO_APPROVE` |
-| `set_occupancy_mcp` | Upserts occupancy settings in SQLite |
 | `set_notification_route` | Upserts notification_routes row |
 | `list_settings` / `get_setting` | Read-only (listed here because they pair with `set_setting`) |
 | `set_setting` | Writes a key in `runtime_settings` (#52 / PR #63); dry-run unless `confirmed=True`. Schedule-class keys also trigger APScheduler cron re-registration. |
@@ -82,11 +90,11 @@ Grouped by side-effect class. "Hardware write" tools require `confirmed=True` **
 
 These paths are NOT exposed as tools and must never be. If OpenClaw needs a new capability, add an MCP tool with its own confirmation/quota/caching; do not relax these bounds.
 
-- Editing `.env`, `pyproject.toml`, `src/`, `tests/`, `docs/`, or any file on this host.
+- Editing `/srv/hem/.env`, `/srv/hem/data/`, or any file on this host.
 - Running any shell command (including read-only ones like `sqlite3`, `cat`, `systemctl status`).
 - Git operations (`git push`, `git commit`, `gh pr`, etc.).
 - Direct HTTP calls to `api.onecta.daikineurope.com` or `foxesscloud.com` (use MCP tools; they route through the quota-tracked service layer).
-- Direct SQL queries against `data/energy_state.db` (use MCP tools).
+- Direct SQL queries against `/srv/hem/data/energy_state.db` (use MCP tools).
 - Reading the Daikin OAuth token file, Fox API key, Octopus API key, or any credential from disk.
 
 ---
@@ -95,10 +103,15 @@ These paths are NOT exposed as tools and must never be. If OpenClaw needs a new 
 
 Inside this repo:
 - **Boot-time tool audit** (`src/mcp_server.py::audit_mcp_tool_surface`) warns when any hardware-write tool regresses on the `confirmed` gate.
-- **`OPENCLAW_READ_ONLY` gate** (`src/api/safeguards.py::audit_log` + each tool's `_daikin_write_preamble` / `_foxess_write_preamble`) blocks all hardware writes when set.
+- **`OPENCLAW_READ_ONLY` gate.** For Daikin writes it lives in
+  `src/mcp_server.py::_daikin_write_preamble` (which also enforces
+  `DAIKIN_CONTROL_MODE=passive` and the rate limit); for Fox writes it is an
+  inline `if config.OPENCLAW_READ_ONLY:` check at the top of `set_inverter_mode`
+  (there is no `_foxess_write_preamble`). `src/api/safeguards.py::audit_log` is
+  the *audit sink* these paths call on a block — it does **not** itself gate.
 - **Quota layer** (`src/api_quota.py`, `src/daikin/service.py`) limits calls per vendor and serves from cache when possible.
 
 Outside this repo (in OpenClaw's own config):
-- **OpenClaw must be configured without filesystem or shell access to `/root/home-energy-manager/`.** The MCP transport is the only sanctioned channel. Specifically: no `bash` tool binding, no `Edit`/`Write` binding targeting this directory, no `git` binding.
+- **OpenClaw must be configured without filesystem or shell access to `/srv/hem/`** (the host state dir — DB, tokens, `.env`). Since the 2026-04-25 immutable-Docker cutover the application code lives only inside the container image and is not on the host at all; OpenClaw runs as uid 2000, is not in the `docker` group, and has no write access to `/srv/hem/`. The MCP transport (bearer-guarded HTTP at `http://127.0.0.1:8000/mcp`) is the only sanctioned channel. Specifically: no `bash` tool binding, no `Edit`/`Write` binding targeting these paths, no `git` binding.
 
 See `skills/home-energy-manager/SKILL.md` for the OpenClaw-facing documentation.

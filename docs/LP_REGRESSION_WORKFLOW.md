@@ -107,7 +107,7 @@ PR-touching criteria (when to run):
 - Any change to the dispatch translation in `src/scheduler/lp_dispatch.py`
 - Any change to `pv_calibration_hourly*` cron timing or window
 - Any change to config defaults that the LP reads (`LP_*` env vars,
-  `OPTIMIZATION_PRESET`, `ENERGY_STRATEGY_MODE`)
+  `OPTIMIZATION_PRESET`, the `DHW_*` policy knobs)
 
 ### When the verdict is FAIL
 
@@ -131,14 +131,15 @@ awareness of the cost). For a FAIL on `--vs-ref=main`:
 
 Two cases:
 
-1. **CI gate** — the GitHub Actions check runs without `--vs-ref` for
-   stability (so it has a deterministic comparison even if `main` is in
-   motion). The frozen JSON gives that stability.
-2. **Strategy shift acceptance** — after a deliberate strategy change
-   (e.g. switching from `savings_first` to `strict_savings` as the
-   default), run `--refresh-baseline` to capture the new known-good
-   state. Commit the updated JSON in a clearly-titled `chore(lp):
-   refresh regression baseline` PR (precedent: #332).
+1. **Stable comparison point** — running without `--vs-ref` compares against the
+   frozen JSON, which is deterministic even while `main` is in motion. (This was
+   originally described as "the CI gate" — see *CI integration* below: it is
+   **not** wired into CI.)
+2. **Strategy shift acceptance** — after a deliberate strategy change (e.g.
+   changing the default `OPTIMIZATION_PRESET` behaviour, or retuning the scenario
+   perturbations), run `--refresh-baseline` to capture the new known-good state.
+   Commit the updated JSON in a clearly-titled `chore(lp): refresh regression
+   baseline` PR (precedent: #332).
 
 ## Traceability — patterns over time
 
@@ -167,15 +168,20 @@ All three modes can stack with `--vs-ref`.
 
 ## CI integration (current state)
 
-CI runs the legacy frozen-baseline path automatically on every PR via
-the `pytest` job. **It does NOT run `--vs-ref=main`** — that requires
-a prod DB snapshot which CI doesn't have. So:
+**CI does not run the LP regression gate at all — not the frozen-baseline
+replay, not `--vs-ref=main`.** `.github/workflows/tests.yml` runs plain
+`pytest tests/` plus an import-lint job, and nothing invokes
+`scripts/check_lp_regression.py`. The replay needs a **prod DB snapshot**, which
+CI does not have (and shouldn't).
 
-- CI's pass/fail is informational, NOT authoritative
-- The `--vs-ref=main` run on your local machine + the pasted result in
-  the PR description IS the authoritative check
+So the gate is **entirely manual**:
+
+- Run `--vs-ref=main` on your own machine against a recent prod snapshot and
+  paste the verdict into the PR description. That IS the authoritative check —
+  `.github/pull_request_template.md` has a checklist row asking for it.
 - After merge, the next PR's `--vs-ref=main` will include your PR's
-  impact in its "ref" side — chained traceability
+  impact in its "ref" side — chained traceability.
+- A green CI run says **nothing** about LP cost. Do not read it as one.
 
 Future work: a GHA cron that runs `--vs-ref=HEAD^` daily against a
 DB snapshot stored in S3 (or similar), publishing the JSON to a

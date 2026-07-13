@@ -38,33 +38,76 @@ additional pessimism inside the LP.
 What's new: the LP runs **three times** at high-stakes triggers under
 perturbed forecast inputs.
 
-| Scenario | Outdoor temp | Base load | Purpose |
-|---|---|---|---|
-| Optimistic | forecast + 1.0 °C | × 0.90 | Upper-bound view; informational only. |
-| Nominal | forecast as-is | × 1.00 | The canonical solve — what a single-pass LP would have done. Always the plan that's logged + dispatched (subject to filtering below). |
-| Pessimistic | forecast − 1.5 °C | × 1.15 | Stressed forecast; gates the commit. |
+| Scenario | Outdoor temp | Base load | PV | Purpose |
+|---|---|---|---|---|
+| Optimistic | forecast + 1.0 °C | × 0.90 | × 1.05 | Upper-bound view; informational only. |
+| Nominal | forecast as-is | × 1.00 | × 1.00 | The canonical solve — what a single-pass LP would have done. Always the plan that's logged + dispatched (subject to filtering below). |
+| Pessimistic | forecast − 1.5 °C | × 1.15 | × 0.85 | Stressed forecast; gates the commit. |
 
 Each scenario solve uses the same `solve_lp` function; perturbations apply at
-the **input** layer (`src/scheduler/scenarios.py:apply_scenario` shifts
-`temperature_outdoor_c`, recomputes COP via `cop_at_temperature`, scales
-`base_load_kwh`). PV irradiance is decoupled from air temperature so the
-optimistic/pessimistic axes don't double-stress through the solar channel.
+the **input** layer, in `src/scheduler/scenarios.py`:
 
-## The decision rule (V1 — maximin)
+* `perturb_weather(weather, temp_delta_c, pv_factor)` — shifts
+  `temperature_outdoor_c`, recomputes COP via `cop_at_temperature` (so a
+  cold-snap perturbation also captures efficiency loss), and scales
+  `pv_kwh_per_slot` by `pv_factor`.
+* `perturb_base_load(base_load_kwh, factor, spread=...)` — flat multiply by
+  `factor`, or (when `LP_SCENARIO_USE_SPREAD` is on and a `residual_load_profile_v2`
+  p75 spread is available) shift each slot by its *learned* `(p75 − median)` gap.
 
-For each slot where the canonical (nominal) plan emits `kind="peak_export"`:
+Temperature and PV are perturbed **independently** — air temp does not drive
+irradiance in the perturbation, so the optimistic/pessimistic axes don't
+double-stress through the solar channel. PV scaling was added in the 2026-07-02
+LP audit: before it, the pessimistic scenario kept NOMINAL PV, so an overcast
+day could breach the very floor the robustness gate trusts. The
+`LP_SCENARIO_*_PV_FACTOR` values are calibrated from 27 days of `pv_error_log`
+(daily Σactual/Σforecast p25 = 0.883). Setting both to `1.0` restores the
+legacy no-PV-perturbation behaviour.
 
-1. **Strict savings kill switch** — if `ENERGY_STRATEGY_MODE=strict_savings`,
-   drop the slot. `dispatched_kind=standard`, `reason=strict_savings`.
-2. **No scenarios run** — if the trigger reason is not in
+## Gate 0 — the preset
+
+`peak_export` cannot even be *planned* outside the `vacation` preset: in
+`normal` and `guests` the LP constrains `exp <= pv_use`, so the battery is
+never allowed to dump to the grid (only surplus PV is). The scenario filter
+below therefore only ever has work to do on a `vacation` plan. This is a
+constraint in `src/scheduler/lp_optimizer.py`, not a flag.
+
+**There is no `peak_export` kill-switch env var.** `ENERGY_STRATEGY_MODE`
+(`strict_savings` / `savings_first`) was **removed** in PR C of the
+mode-collapse stack — the household never wanted `strict_savings`, and
+`vacation` goes the opposite way (max arbitrage). `/api/v1/settings` still
+reports the key as `"removed"` for back-compat; setting it in `.env` is a
+silent no-op.
+
+## The decision rule (V1 — maximin + economic margin)
+
+Implemented in `filter_robust_peak_export`
+(`src/scheduler/lp_dispatch.py`). For each slot where the canonical (nominal)
+plan emits `kind="peak_export"`, in priority order:
+
+1. **No scenarios run** — if the trigger reason is not in
    `LP_SCENARIOS_ON_TRIGGER_REASONS` (so we only have the nominal solve),
    commit the slot. `dispatched_kind=peak_export`, `reason=no_scenarios_run`.
-3. **Pessimistic solve failed** — if scenarios ran but the pessimistic LP
+2. **Pessimistic solve failed** — if scenarios ran but the pessimistic LP
    solve returned `ok=False`, commit (degraded mode — better to ship the
    nominal plan than nothing). `reason=pessimistic_failed`.
-4. **Robust** — if `pessimistic.export_kwh[i] >= LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH`
+3. **Robust** — if `pessimistic.export_kwh[i] >= LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH`
    (default 0.30 kWh; small floor to allow rounding noise without false
-   rejection), commit. `reason=robust`.
+   rejection) **and** the economic margin clears
+   `LP_PEAK_EXPORT_MIN_MARGIN_PENCE_PER_KWH`, commit. `reason=robust`.
+4. **Economic margin** — the pessimistic scenario agrees, but the margin does
+   not clear the bar → drop. `dispatched_kind=standard`,
+   `reason=economic_margin`. The margin is
+
+   ```
+   margin_p = export_price_p
+            − max(LP_SOC_TERMINAL_VALUE_PENCE_PER_KWH, min(future prices) / η)   # refill shadow
+            − (1 + 1/η) × LP_BATTERY_WEAR_COST_PENCE_PER_KWH                      # wear shadow
+   ```
+
+   i.e. "selling now must beat buying the kWh back later, plus the round-trip
+   wear". `export_price_p_kwh`, `refill_price_p_kwh` and
+   `economic_margin_p_kwh` are all persisted per slot.
 5. **Otherwise drop** — `dispatched_kind=standard`, `reason=pessimistic_disagrees`.
    The battery still self-uses (covers house load) but does not export to grid.
 
@@ -170,8 +213,10 @@ whether to relax the floor.
 
 The two side scenarios (optimistic, pessimistic) run **in parallel** via a
 `ThreadPoolExecutor` with three workers. Each `solve_lp` invocation builds a
-fresh `LpProblem` and a fresh HiGHS solver instance, so the threads don't
-fight for shared solver state; the GIL releases during the C-extension solve,
+fresh `LpProblem` and a fresh CBC solver process (`PULP_CBC_CMD`; CBC is the
+only supported solver — the HiGHS branch was removed and `LP_SOLVER` values
+other than `cbc` log an info line and fall back), so the threads don't
+fight for shared solver state; the GIL releases during the solver subprocess,
 giving real wall-clock speedup. Total latency drops from ~3 × single-solve
 (sequential) to ~1 × single-solve (parallel) plus thread-pool overhead — typically
 3–4 s instead of 9–12 s.
@@ -226,17 +271,26 @@ the fixed-hour MPC cron was deleted.)
 ## Configuration knobs
 
 ```
+OPTIMIZATION_PRESET                   = normal    # gate 0: peak_export only emerges under `vacation`
 LP_SCENARIO_OPTIMISTIC_TEMP_DELTA_C   = +1.0      # forecast Δ for optimistic
 LP_SCENARIO_OPTIMISTIC_LOAD_FACTOR    = 0.90      # base-load × this for optimistic
+LP_SCENARIO_OPTIMISTIC_PV_FACTOR      = 1.05      # PV × this for optimistic
 LP_SCENARIO_PESSIMISTIC_TEMP_DELTA_C  = -1.5      # forecast Δ for pessimistic (cold-snap proxy)
 LP_SCENARIO_PESSIMISTIC_LOAD_FACTOR   = 1.15      # base-load × this for pessimistic
+LP_SCENARIO_PESSIMISTIC_PV_FACTOR     = 0.85      # PV × this for pessimistic (cloud surprise; 1.0 = legacy)
+LP_SCENARIO_USE_SPREAD                = true      # use the learned p75−median load spread instead of the flat factor
 LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH  = 0.30      # commit threshold on pessimistic export
+LP_PEAK_EXPORT_MIN_MARGIN_PENCE_PER_KWH = 0.0     # economic-margin bar (rule 4)
+LP_BATTERY_WEAR_COST_PENCE_PER_KWH    = 0.0       # feeds the wear shadow in the margin
+LP_SOC_TERMINAL_VALUE_PENCE_PER_KWH   = ...       # runtime-tunable; floors the refill shadow
 LP_SCENARIOS_ON_TRIGGER_REASONS       = plan_push,octopus_fetch,tier_boundary,soc_drift,import_overshoot,pv_upside,pv_downside,load_upside,forecast_revision,dynamic_replan,appliance_armed
                                                   # #668: event-driven re-solves included; `manual` excluded (interactive latency)
 TIER_BOUNDARY_LEAD_MINUTES            = 5         # MPC fires this far before each transition (V12)
-ENERGY_STRATEGY_MODE                  = savings_first    # set to strict_savings to disable arbitrage entirely
-LOG_LEVEL                             = INFO     # raise to DEBUG for deep-dive
+LOG_LEVEL                             = INFO      # raise to DEBUG for deep-dive
 ```
+
+`ENERGY_STRATEGY_MODE` was **removed** (PR C, mode-collapse stack) — see
+"Gate 0 — the preset" above. There is no arbitrage kill-switch env var.
 
 `EXPORT_DISCHARGE_MIN_SOC_PERCENT` was **removed** in this work
 (`feat/forecast-robust-dispatch`). The unrelated

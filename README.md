@@ -6,7 +6,7 @@
 
 ![The home-energy-manager cockpit — a live, self-driving home-energy dashboard](docs/media/cockpit.gif)
 
-A from-scratch MILP solver re-plans the next 24–48 h every few minutes: it charges the Fox ESS battery when power is cheap, drives a Daikin Altherma heat pump (space heating **and** the hot-water tank) in the same optimisation, times the washing machine, and exports to the grid only when it genuinely pays. It runs autonomously — the solver and scheduler drive the hardware with no human in the loop. A bearer-guarded 80-tool MCP surface lets Claude read state, **explain any dispatch decision** in plain English, and (with auto-approve off) review plans before they apply. The LLM is an observability + copilot layer, **not** the controller.
+A from-scratch MILP solver re-plans the next 24–48 h every few minutes: it charges the Fox ESS battery when power is cheap, drives a Daikin Altherma heat pump (space heating **and** the hot-water tank) in the same optimisation, times the washing machine, and exports to the grid only when it genuinely pays. It runs autonomously — the solver and scheduler drive the hardware with no human in the loop. A bearer-guarded 81-tool MCP surface lets Claude read state, **explain any dispatch decision** in plain English, and (with auto-approve off) review plans before they apply. The LLM is an observability + copilot layer, **not** the controller.
 
 [![Tests](https://github.com/albinati/home-energy-manager/actions/workflows/tests.yml/badge.svg)](https://github.com/albinati/home-energy-manager/actions/workflows/tests.yml)
 [![Latest release](https://img.shields.io/github/v/release/albinati/home-energy-manager)](https://github.com/albinati/home-energy-manager/releases)
@@ -19,7 +19,7 @@ A from-scratch MILP solver re-plans the next 24–48 h every few minutes: it cha
 [![Daikin Altherma](https://img.shields.io/badge/Daikin-Onecta-0093D0?logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0iI2ZmZiI+PHBhdGggZD0iTTEyIDJDNi40OCAyIDIgNi40OCAyIDEyczQuNDggMTAgMTAgMTAgMTAtNC40OCAxMC0xMFMxNy41MiAyIDEyIDJ6Ii8+PC9zdmc+)](https://daikin-cdc.com/)
 [![SmartThings](https://img.shields.io/badge/Samsung-SmartThings-1428A0?logo=samsung&logoColor=white)](https://www.smartthings.com/)
 [![PuLP MILP](https://img.shields.io/badge/MILP-PuLP%20%2F%20CBC-FFB000)](https://coin-or.github.io/pulp/)
-[![Model Context Protocol](https://img.shields.io/badge/MCP-80_tools-D97757)](https://modelcontextprotocol.io/)
+[![Model Context Protocol](https://img.shields.io/badge/MCP-81_tools-D97757)](https://modelcontextprotocol.io/)
 [![Topic](https://img.shields.io/badge/topic-smart--home-3DDC84)](#)
 [![Topic](https://img.shields.io/badge/topic-energy--optimization-22C55E)](#)
 [![Topic](https://img.shields.io/badge/topic-solar--PV-FACC15)](#)
@@ -46,7 +46,7 @@ It is **not** a turn-key product. It runs 24/7 on one UK site and is tuned to th
 | Heat pump | ✅ **co-optimised** — Daikin LWT offset + DHW tank in the same solve | ➖ battery-focused | ➖ deferrable loads, not HP-native |
 | Appliances | ✅ washer / dryer / dishwasher via SmartThings | ➖ | ✅ deferrable loads |
 | PV forecast | Self-hosted OCF Quartz sidecar — **no API key** | Solcast (API key) | Solcast / others |
-| LLM / agent interface | ✅ **80-tool MCP** — Claude queries state + explains decisions (not in the control loop) | ➖ | ➖ |
+| LLM / agent interface | ✅ **81-tool MCP** — Claude queries state + explains decisions (not in the control loop) | ➖ | ➖ |
 | Replay + CI cost-regression gate | ✅ every solve frozen & replayable | ➖ | ➖ |
 | Turn-key setup | ➖ **bespoke to one site** | ✅ large community, well-documented | ✅ configurable |
 | Community | 👋 just starting | ⭐ large | ⭐ large |
@@ -65,7 +65,7 @@ It is **not** a turn-key product. It runs 24/7 on one UK site and is tuned to th
 - 🚿 **Soft shower-window tank floor (v12).** `tank ≥ 45 °C` on shower-window slots is a soft constraint with a heavy 50 p/K-slot penalty — heats as fast as physics allows, surfaces the unavoidable deficit as a quantified slack instead of returning Infeasible. Closes the residual-class Infeasibility surface that the 60-day audit identified.
 - 🔁 **Replayable Infeasibles (v12).** When the LP can't solve, the inputs are still snapshotted (`lp_inputs_snapshot.lp_status='Infeasible'`); `lp_replay.replay_run()` can reload + reproduce any past Infeasible offline against any code version.
 - 📋 **Closed-loop regression gate.** Every LP solve is a frozen replayable snapshot. `scripts/check_lp_regression.py --vs-ref=<ref> --mode=both` gives clean per-PR cost deltas; `--refresh-baseline` re-pins the frozen JSON when an accepted strategy shift improves the optimum.
-- 🔌 **80-tool MCP surface.** Bearer-guarded HTTP transport. Claude / OpenClaw read state, request plan changes, replay past days, and explain dispatch decisions.
+- 🔌 **81-tool MCP surface.** Bearer-guarded HTTP transport. Claude / OpenClaw read state, request plan changes, replay past days, and explain dispatch decisions.
 - 📲 **Direct Telegram notifications.** Optional bypass of the OpenClaw `/hooks/agent` LLM-shaping path; HEM POSTs straight to `api.telegram.org` when configured. Keeps free pings out of LLM loops.
 - 🖥️ **Web cockpit (Preact SPA).** A separate nginx-served container (`hem-ui`): live power-flow, the committed plan vs. actuals, tariff league table, heating timeline, and an ops "self-check" that surfaces whether the recent accuracy work is actually holding. Viewer-by-default (shareable, read-only); admin unlocks controls with a token. An anomaly strip flags meter staleness / forecast degradation / schedule drift at a glance.
 - ☀️ **Self-hosted PV forecast.** Open Climate Fix's open-source site-level model runs as a sidecar (`hem-quartz`) pulling its own NWP from Open-Meteo — **zero forecast API keys**. The hosted Quartz endpoint and raw Open-Meteo remain drop-in fallbacks.
@@ -121,7 +121,7 @@ For decisions about peak-export robustness, see [docs/DISPATCH_DECISIONS.md](doc
 - **Daikin Onecta** — `action_schedule` rows that the heartbeat applies; price-tier LWT offset (active space-heating modulation, gated on measured heating demand), tank target, weather regulation toggles. OAuth2 with auto-refresh.
 - **SmartThings appliance dispatch** — washer/dryer/dishwasher start times picked by the LP given a deadline; physical Smart Control button is the consent gate.
 - **Notifications** — direct Telegram Bot API (preferred when `TELEGRAM_BOT_TOKEN` is set), with the OpenClaw `/hooks/agent` LLM-shaping path as fallback. Twice-daily digest, plan-revision pings, negative-price alerts, appliance lifecycle.
-- **80-tool MCP surface** — Fox, Daikin, Octopus, optimization, replay, dispatch decisions. Bearer-guarded HTTP transport.
+- **81-tool MCP surface** — Fox, Daikin, Octopus, optimization, replay, dispatch decisions. Bearer-guarded HTTP transport.
 - **Closed-loop replay + regression gate** — every LP solve is a frozen, replayable snapshot; `scripts/check_lp_regression.py --mode=both` blocks merges when aggregate cost is worse on comparable baseline dates.
 
 ---

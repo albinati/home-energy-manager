@@ -41,10 +41,12 @@ DaikinService (module-level singleton)
 | `DAIKIN_DAILY_BUDGET` | 180 | Stop at 90% of real 200 limit |
 | `DAIKIN_DEVICES_CACHE_TTL_SECONDS` | 1800 | 30-min cache; matches one Octopus slot |
 | `DAIKIN_FORCE_REFRESH_MIN_INTERVAL_SECONDS` | 1800 | Throttle UI/agent "refresh" clicks |
-| `DAIKIN_SLOT_TRANSITION_WINDOW_SECONDS` | 300 | Width of pre-slot auto-refresh window |
+| `DAIKIN_SLOT_TRANSITION_WINDOW_SECONDS` | 300 | Width of the pre-slot auto-refresh window — **inert**, see §4 |
 
-**Effective Daikin call rate after this change:**  
-2 auto-refreshes/hour × 24h = **48 calls/day** maximum (well under 180 budget). Manual/agent force-refreshes add at most 1 per 30 min = 48 more → still safely under 180.
+**Effective Daikin call rate as designed:** 2 auto-refreshes/hour × 24 h = 48
+calls/day maximum, plus at most 1 force-refresh per 30 min. **Actual rate today
+is lower still:** the heartbeat auto-refresh was removed entirely (§4), so the
+only Daikin reads are plan dispatch, the two daily briefs, and manual/MCP calls.
 
 ### 3 — Fox ESS quota extension (`src/foxess/service.py`)
 
@@ -54,16 +56,22 @@ DaikinService (module-level singleton)
 - Stale fallback: if `should_block("foxess")` → return last cached value with `stale=True` rather than raising an exception.
 - `get_refresh_stats_extended()` — exposes `quota_used_24h`, `quota_remaining_24h`, `daily_budget`, `blocked`, `cache_age_seconds`, `stale` for the status endpoint.
 
-### 4 — Octopus pre-slot window gate (`src/scheduler/runner.py`)
+### 4 — Octopus pre-slot window gate (`src/scheduler/runner.py`) — ⚠️ SUPERSEDED
 
-```python
-def _in_octopus_pre_slot_window(now, lead_seconds=300) -> bool:
-    """True in [HH:25, HH:30) and [HH:55, HH:00) — 5 min before each Agile boundary."""
-```
+As designed, the heartbeat called
+`get_cached_devices(allow_refresh=_in_octopus_pre_slot_window())`, allowing one
+Daikin refresh in `[HH:25, HH:30)` / `[HH:55, HH:00)`.
 
-The heartbeat calls `get_cached_devices(allow_refresh=_in_octopus_pre_slot_window())`:  
-- **Outside window**: reads from cache only (zero HTTP calls).  
-- **Inside window**: one refresh allowed if cache is stale and quota permits, giving the LP replanner fresh Daikin state before the rate changes.
+**This no longer happens.** Phase A (#306 follow-up) made the heartbeat pass
+**`allow_refresh=False` unconditionally** — the 200-call/day Onecta quota is too
+tight to spend any of it on the monitoring path. `_in_octopus_pre_slot_window`
+and `_in_daikin_calibration_window` still exist in `runner.py` but **nothing
+calls them**, and `DAIKIN_CALIBRATION_WINDOWS_LOCAL` is inert.
+
+The device cache is now warmed only by: plan dispatch (LP → Daikin writes), the
+twice-daily briefs (08:00 / 22:00 local), and manual/MCP calls. The LP's
+resilience to a stale cache comes from ADR-004's physics estimator, not from a
+pre-slot refresh.
 
 ### 5 — Stale-data contract
 

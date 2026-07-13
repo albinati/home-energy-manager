@@ -98,7 +98,7 @@ Required env vars at container start:
 | Var | Purpose |
 |---|---|
 | `HEM_API_URL` | Upstream HEM, e.g. `http://hem:8000`. Substituted into the nginx `proxy_pass`. |
-| `HEM_UI_TOKEN` *or* `HEM_UI_TOKEN_FILE` | **No longer consumed by the SPA.** The entrypoint ships `bearer: null` in `config.js` — no token reaches the browser (config.js is world-readable on the public funnel). Viewer reads are open; admin actions use a separate runtime token pasted in the UI. Left here because `HEM_UI_TOKEN` is still accepted server-side by `ApiV1BearerAuth` for server-to-server callers. |
+| `HEM_UI_TOKEN` *or* `HEM_UI_TOKEN_FILE` | **Dead — consumed by nothing.** The entrypoint ships `bearer: null` in `config.js`, so no token reaches the browser (config.js is world-readable on the public funnel). Viewer reads are open; admin actions use a separate runtime token pasted in the UI. It is **not** an admin credential server-side either: the mounted middleware is `ApiV1RoleAuth`, whose admin tokens are `HEM_ADMIN_TOKEN` / `HEM_OPENCLAW_TOKEN` only. (`ApiV1BearerAuth` exists in `src/api/middleware.py` but is never mounted.) |
 
 ```bash
 docker run --rm -p 8080:80 \

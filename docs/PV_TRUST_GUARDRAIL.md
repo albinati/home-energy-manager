@@ -67,8 +67,9 @@ sun azimuth ~270°, elevation ~21°).
 
 Even with a perfectly calibrated forecast, the LP's economic objective will
 still grid-charge in cheap morning slots when peak prices later are high
-enough. The household policy is `strict_savings` (peak_export OFF, prefer
-self-consumption to arbitrage), but nothing in the LP encoded:
+enough. The household policy at the time was `strict_savings` (peak_export
+OFF, prefer self-consumption to arbitrage — that mode has since been removed;
+see the note in §3 Part B), but nothing in the LP encoded:
 > "If today's PV is forecast to fill the battery anyway, don't grid-charge."
 
 That makes the LP susceptible to the 2026-05-15 incident pattern *even with
@@ -98,7 +99,7 @@ Best-effort: failures are logged, the LP keeps the previous table contents.
 
 ### Part B — Hard PV-sufficiency guard rail in `solve_lp`
 
-In `strict_savings` mode, when
+When
 `Σ forecast PV today × LP_PV_SUFFICIENCY_MARGIN ≥ (battery headroom + Σ daytime load)`,
 the LP adds `chg[i] ≤ pv_use[i]` to every today-slot strictly before the
 first peak-tariff slot, **excluding negative-price slots** (2026-07-02
@@ -110,7 +111,15 @@ at `lp_optimizer.py:794`, which carries the same `price ≥ 0` gate.
 PV→battery stays allowed; grid→battery gets
 blocked on the days the guard fires.
 
-Defaults to ON in `strict_savings`, inert under `savings_first`.
+**Mode gating is gone (PR C, mode-collapse stack).** The guard was originally
+scoped to `strict_savings`; `ENERGY_STRATEGY_MODE` has since been **removed
+from the codebase**. The guard is now **evaluated on every solve whenever it is
+enabled** (`src/scheduler/pv_trust.py` — `enabled_eff` is the only gate; the
+diag's `strict_savings` field is hard-coded `False` for schema back-compat).
+The economic argument holds in any mode: when forecast PV would already fill
+the battery, grid-charging before the first peak slot is wasteful.
+
+The single switch is `LP_PV_SUFFICIENCY_GUARD` (default `true`).
 
 ### What was dropped — Option B (P75 PV-trust upward bias)
 
@@ -179,12 +188,15 @@ with the most recent observations.
 
 ## 5. Rollback
 
-Set in `.env`:
+The **only** switch. Set in `/srv/hem/.env` and `systemctl restart hem`:
 ```
 LP_PV_SUFFICIENCY_GUARD=false
 ```
-Or flip `ENERGY_STRATEGY_MODE=savings_first` via MCP — the guard is inert
-in that mode regardless.
+
+> ⚠️ An earlier revision of this doc offered "flip `ENERGY_STRATEGY_MODE=savings_first`"
+> as an alternative rollback. That is a **no-op**: `ENERGY_STRATEGY_MODE` was
+> removed from the codebase (PR C) and the guard no longer consults any mode.
+> `LP_PV_SUFFICIENCY_GUARD=false` is the rollback.
 
 For the cron, comment out the `add_job` for `bulletproof_pv_calibration_refresh`
 in `runner.py` and restart `hem.service`. The previous fortnightly
@@ -194,7 +206,9 @@ manual via the analytics script) keeps working.
 ## 6. Open questions (resolved)
 
 1. ✅ Should the guard rail also trigger under `savings_first`?
-   NO — `strict_savings` only, matches household policy.
+   Answered "no, `strict_savings` only" at design time — **now moot**:
+   `ENERGY_STRATEGY_MODE` was removed (PR C) and the guard is evaluated on
+   every solve while `LP_PV_SUFFICIENCY_GUARD=true`.
 2. ✅ Per-hour vs flat upward bias?
    Per-hour is the right granularity; the existing `pv_calibration_hourly`
    already provides it. Drop Option B entirely.
