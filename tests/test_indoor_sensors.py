@@ -235,3 +235,35 @@ def test_devices_overview_and_device_log_endpoints() -> None:
     assert log["rows"][0]["payload"]["device_id"] == "node-sala"
     import json
     json.dumps(devs); json.dumps(log)   # JSON-serialisable for the API
+
+
+def test_renamed_device_shows_its_CURRENT_room_not_the_alphabetical_max() -> None:
+    """A renamed sensor must display the room it reports NOW.
+
+    Regression: the overview took ``MAX(room)`` per device, i.e. the
+    alphabetically-largest label the device EVER sent. A sensor renamed
+    ``sala`` → ``corredor`` kept showing "sala" forever ('s' > 'c'), and one
+    renamed ``cozinha`` → ``quarto_roof`` → ``cozinha`` showed "quarto_roof".
+    Same trap for ``device_id`` ('hem-temp-sensor' > 'hem-sensor-01').
+    """
+    now = datetime.now(UTC)
+    mac = "70:4B:CA:26:EA:B4"
+    # Oldest label sorts ABOVE the newest one on both room and device_id, so a
+    # MAX() aggregate would pick the retired names.
+    db.save_device_reading_log([
+        {"captured_at": _z(now - timedelta(hours=2)), "temp_c": 20.0, "mac": mac,
+         "room": "sala", "device_id": "hem-temp-sensor"},
+        {"captured_at": _z(now - timedelta(hours=1)), "temp_c": 21.0, "mac": mac,
+         "room": "corredor_quartos", "device_id": "hem-sensor-01"},
+        {"captured_at": _z(now), "temp_c": 22.0, "mac": mac,
+         "room": "corredor", "device_id": "hem-sensor-01"},
+    ])
+
+    devs = db.list_sensor_devices()
+    assert len(devs) == 1                      # one physical device, not three
+    d = devs[0]
+    assert d["device_key"] == mac
+    assert d["n_readings"] == 3                # the count stays cumulative
+    assert d["room"] == "corredor"             # NOT "sala"
+    assert d["device_id"] == "hem-sensor-01"   # NOT "hem-temp-sensor"
+    assert d["latest"]["temp_c"] == pytest.approx(22.0)

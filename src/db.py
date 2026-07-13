@@ -4854,16 +4854,22 @@ def get_device_reading_log(
 
 def list_sensor_devices() -> list[dict[str, Any]]:
     """One row per device ever seen: identity + last-seen + count + the latest
-    value of each known metric. Powers a 'devices' overview (viewer)."""
+    value of each known metric. Powers a 'devices' overview (viewer).
+
+    ``room``/``device_id``/``source`` are mutable labels — a device can be
+    renamed in the ESPHome UI at runtime, and the same physical sensor then
+    reports under a new ``room``. They therefore come from the device's LATEST
+    reading, not ``MAX()``: an aggregate picks the alphabetically-largest label
+    the device EVER sent, which froze the card at a retired name (a sensor
+    renamed ``sala`` → ``corredor`` still displayed "sala", because 's' > 'c').
+    ``mac`` is stable, so an aggregate is fine there.
+    """
     with _lock:
         conn = get_connection()
         try:
             cur = conn.execute(
                 """SELECT device_key,
-                          MAX(device_id)   AS device_id,
                           MAX(mac)          AS mac,
-                          MAX(room)         AS room,
-                          MAX(source)       AS source,
                           COUNT(*)          AS n_readings,
                           MIN(received_at)  AS first_seen,
                           MAX(received_at)  AS last_seen
@@ -4872,16 +4878,29 @@ def list_sensor_devices() -> list[dict[str, Any]]:
                    ORDER BY last_seen DESC"""
             )
             devices = [dict(r) for r in cur.fetchall()]
-            # Attach the latest reading's metrics per device (freshest row).
+            # Attach the latest reading's labels + metrics per device (freshest row).
             for d in devices:
                 latest = conn.execute(
-                    """SELECT temp_c, humidity_pct, pressure_hpa, captured_at, received_at
+                    """SELECT device_id, room, source,
+                              temp_c, humidity_pct, pressure_hpa, captured_at, received_at
                        FROM device_reading_log WHERE device_key = ?
                        ORDER BY COALESCE(captured_at, received_at) DESC, received_at DESC
                        LIMIT 1""",
                     (d["device_key"],),
                 ).fetchone()
-                d["latest"] = dict(latest) if latest else None
+                row = dict(latest) if latest else {}
+                d["device_id"] = row.get("device_id")
+                d["room"] = row.get("room")
+                d["source"] = row.get("source")
+                d["latest"] = (
+                    {
+                        k: row[k]
+                        for k in ("temp_c", "humidity_pct", "pressure_hpa",
+                                  "captured_at", "received_at")
+                    }
+                    if latest
+                    else None
+                )
             return devices
         finally:
             conn.close()
