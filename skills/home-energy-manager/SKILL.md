@@ -217,7 +217,7 @@ Use these to explain past decisions in the user's terms (price + temps + SoC), n
 1. hem__get_brief_kpis()                 # defaults to yesterday
      → structured KPI fields shown in the brief: realised_net_cost_gbp,
        import_kwh, mean_import_rate_p_per_kwh, mtd context (avg/day,
-       weighted rate), strict_savings_forgone, lp_scorecard grade.
+       weighted rate), forgone_export, lp_scorecard grade.
        Lets you compose custom narratives without parsing the markdown.
 2. hem__get_energy_metrics()
      → daily/weekly/monthly delta vs SVT shadow + fixed-tariff shadow,
@@ -241,40 +241,44 @@ Use these to explain past decisions in the user's terms (price + temps + SoC), n
 2. hem__get_audit_report(window_hours=24)
      → held-schedule events (LP infeasibilities caught by PR #338's
        fallback) + plan-vs-execution disparities (top-N slots by
-       absolute cost delta) + strict_savings_forgone totals.
+       absolute cost delta) + forgone_export totals.
        Same data the 07:30 UTC Telegram cron uses.
 3. hem__explain_dispatch_decisions(run_id="latest")
      → per-slot lp_kind → dispatched_kind classification and the reason
-       string (e.g. "scenario_filter_downgrade", "strict_savings_hold").
+       string (e.g. "pessimistic_disagrees", "economic_margin", "robust").
 ```
 
 Use these together when the user asks "is the LP working?" — the
 scorecard's grade is the headline, the audit explains the held-schedule
 events, and `explain_dispatch_decisions` answers per-slot "why" questions.
 
-### "What is strict_savings costing us this month?"
+### "What is the robustness filter costing us this month?"
 
 ```
-1. hem__get_strict_savings_forgone_export(
+1. hem__get_forgone_peak_export(
         start_date="2026-05-01",        # 1st of current month
         end_date="2026-05-20",          # today
    )
-     → totals.pounds = revenue NOT realised over the month because the
-       scenario filter / strict_savings policy held LP-preferred
-       peak_export slots; per-day breakdown shows when it bit.
+     → totals.pounds = battery-export revenue NOT realised because the
+       scenario filter downgraded a peak_export slot the LP had chosen
+       (pessimistic scenario disagreed, or the economic margin was too
+       thin); per-day breakdown shows when it bit.
 2. hem__get_tariff_comparison(period="mtd")
      → fair per-slot cost vs SVT + Fixed + catalogue for the same window;
        compose with #1 to extrapolate annual cost of the strategy.
-3. (if the gap is large and sustained)
-   hem__list_settings()   # ENERGY_STRATEGY_MODE row
-     → flip to "savings_first" via set_setting() if the user wants
-       to realise the missed revenue (overrides the user's
-       near-zero-grid-cost preference — confirm first).
 ```
 
-The user prefers `strict_savings` for the near-zero grid-cost policy.
-Surface the forgone tally as a *trade-off* number, not a recommendation
-to switch — battery for overnight self-use is the explicit policy.
+**This is NOT "PV you failed to sell".** Plain PV surplus is exported
+passively by Fox SelfUse and already earns — it never appears here.
+Expect this tally to be **zero** most of the time: in the `normal` and
+`guests` presets the LP cannot even plan a battery→grid export (it
+constrains `exp <= pv_use`), so there is nothing for the filter to drop.
+A non-zero number means the household was in `vacation` preset.
+
+Surface it as a *trade-off* number, not a recommendation to relax the
+filter — battery for overnight self-use is the explicit policy. The only
+knob that relaxes robustness is `LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH`
+(lower = less conservative); don't recommend it casually.
 
 ### "Mute the daily PnL alert until I'm back from holiday"
 
@@ -414,9 +418,16 @@ Rather than disabling arbitrage (overcautious) or trusting the forecast blindly
 (default 0.30 kWh) at that slot.** Otherwise the slot is downgraded to standard
 SelfUse and the inverter discharges only to cover load (no grid feed).
 
-The kill switch is `ENERGY_STRATEGY_MODE=strict_savings`: every `peak_export`
-slot is dropped regardless of scenarios. Use it when a user explicitly says
-"never export to grid" — but warn them of the missed arbitrage £.
+**There is no kill switch env var** — `ENERGY_STRATEGY_MODE` was REMOVED (PR C,
+mode-collapse stack). Never suggest setting it. Battery→grid export is gated by
+the PRESET instead: in `normal` and `guests` the LP constrains `exp <= pv_use`,
+so a `peak_export` slot **cannot be planned at all**. It only emerges in the
+`vacation` preset. If a user says "never export to grid", they are already there
+by default; the scenario filter is the only additional gate.
+
+(Battery→grid can still fire in normal/guests as `pre_negative_export` — a
+deliberate drain ahead of a negative-price window, sold high and refilled at the
+paid negative price. That is by design and bypasses the robustness filter.)
 
 **When OpenClaw is asked "why is there no ForceDischarge tomorrow at 18:00?":**
 1. Call `explain_dispatch_decisions()` for the latest run.
@@ -429,7 +440,7 @@ slot is dropped regardless of scenarios. Use it when a user explicitly says
    the LP wouldn't choose to export this slot. The dispatch dropped it; the
    battery will still discharge to cover house load via SelfUse.
    ```
-4. If the user wants to override, the answer is `set_setting("ENERGY_STRATEGY_MODE", "savings_first")` is already the default; the only knob to relax robustness is `LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH` (lower = less conservative). Don't recommend this casually.
+4. If the user wants to override: the only knob that relaxes robustness is `LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH` (lower = less conservative). Don't recommend it casually. Do NOT suggest `ENERGY_STRATEGY_MODE` — that variable no longer exists.
 
 **Triggers that get the 3-pass scenario solve** (default `LP_SCENARIOS_ON_TRIGGER_REASONS=plan_push,octopus_fetch,tier_boundary,soc_drift,import_overshoot,pv_upside,pv_downside,load_upside,forecast_revision,dynamic_replan,appliance_armed`):
 - Nightly plan push (00:05 UTC)

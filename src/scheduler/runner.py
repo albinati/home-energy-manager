@@ -594,9 +594,16 @@ def bulletproof_daikin_consumption_rollup_job(*, two_hourly_only: bool = False) 
     """Roll daily Daikin consumption from the cached gateway-devices payload (S10.12 / #178).
 
     Daikin Onecta exposes ``consumptionData.value.electrical.<mode>.w`` — a 14-day
-    array (last week + this week per management point). We parse it from the
-    already-cached devices payload (zero extra API quota) and upsert per-day rows
-    into ``daikin_consumption_daily``.
+    array (last week + this week per management point). We read the gateway-devices
+    payload through ``daikin_service.get_cached_devices`` (30-min TTL) and upsert
+    per-day rows into ``daikin_consumption_daily``.
+
+    QUOTA: zero reads on a warm cache — which is the common case, since the
+    heartbeat keeps the service cache warm and this job runs a few minutes after
+    the 2h-aligned refresh. A cold cache costs ONE ``/gateway-devices`` read,
+    shared by both parsers. (It previously claimed "zero extra API quota" while
+    each parser independently hit the wire: two reads of the 200/day cap, every
+    run.)
 
     ``two_hourly_only`` (intraday cron, 2026-07-05): refresh ONLY the 2-hourly
     table + its telemetry-integral, skipping the daily rollup. The daily table
@@ -614,9 +621,43 @@ def bulletproof_daikin_consumption_rollup_job(*, two_hourly_only: bool = False) 
         logger.warning("daikin rollup: client init failed: %s", e)
         return
 
+    # Read the device payload through the SERVICE cache, not the client.
+    #
+    # The `*_from_cache` parsers each called `client.get_devices()` internally —
+    # a real /gateway-devices wire call — despite docstrings promising "zero
+    # extra Daikin API quota". This job calls both, so it burned TWO reads of the
+    # 200/day cap every run. (Quota starvation is #309.)
+    #
+    # But 2 -> 1 is not the fix: `get_daikin_client()` is documented "for write
+    # operations only. For reads, use daikin_service". The service layer has the
+    # 30-min TTL cache + the 90 s anti-burst floor, and the scheduler shares its
+    # process with the API, so the heartbeat already keeps it warm — the intraday
+    # runs land a few minutes after the 2h-aligned refresh and hit a WARM CACHE
+    # for ZERO reads. Going through the client also threw the payload away
+    # instead of seeding the cache for the next caller. Same anti-pattern already
+    # fixed twice (mcp_server, service.heating_consumption_kwh).
+    #
+    # `allow_refresh=True` lets a cold cache do one read; when quota is exhausted
+    # `get_cached_devices` degrades to a STALE payload instead of raising — which
+    # is exactly right here, since the consumption arrays are historical data and
+    # a 40-min-stale payload rolls up perfectly well.
+    from ..daikin import service as daikin_service
+
+    try:
+        _cached = daikin_service.get_cached_devices(
+            allow_refresh=True, actor="daikin_rollup",
+        )
+        shared_devices = _cached.devices
+    except Exception as e:
+        logger.warning("daikin rollup: device fetch failed (non-fatal): %s", e)
+        return
+    if not shared_devices:
+        logger.warning("daikin rollup: 0 devices available — skipped")
+        return
+
     if not two_hourly_only:
         try:
-            per_day = client.get_daily_consumption_from_cache()
+            per_day = client.get_daily_consumption_from_cache(devices=shared_devices)
             if not per_day:
                 logger.info("daikin rollup: no consumption data in cached payload — skipped")
             else:
@@ -638,7 +679,7 @@ def bulletproof_daikin_consumption_rollup_job(*, two_hourly_only: bool = False) 
     # Same cached payload, different array (``d`` vs ``w``). Independent
     # try/except so a parse failure here doesn't drop the daily rollup above.
     try:
-        per_2h = client.get_2hourly_consumption_from_cache()
+        per_2h = client.get_2hourly_consumption_from_cache(devices=shared_devices)
         if not per_2h:
             logger.info("daikin 2h rollup: no consumption data in cached payload — skipped")
             return
@@ -2605,7 +2646,8 @@ def start_background_scheduler() -> None:
 
             # S10.12 (#178): daily Daikin consumption rollup from cached payload.
             # Runs 02:35 UTC, 5 min after Fox so we don't burst all rollups at once.
-            # Reads /gateway-devices cache — no extra Daikin quota.
+            # Reads the gateway-devices payload via the service cache (30-min
+            # TTL) — zero Daikin quota on a warm cache, one read when cold.
             _background_scheduler.add_job(
                 bulletproof_daikin_consumption_rollup_job,
                 CronTrigger(hour=2, minute=35, timezone=ZoneInfo("UTC")),

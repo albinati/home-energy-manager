@@ -178,17 +178,32 @@ def test_intraday_two_hourly_only_skips_daily_table(monkeypatch: pytest.MonkeyPa
     )
 
     class _Client:
-        def get_daily_consumption_from_cache(self):
+        # The job reads the gateway-devices payload ONCE via the SERVICE cache
+        # (30-min TTL) and passes it to both parsers. They used to each call
+        # client.get_devices() internally — burning 2 of the 200/day Daikin quota
+        # while claiming "zero extra quota".
+        def get_daily_consumption_from_cache(self, devices=None):
             return {"2026-05-01": {"total_kwh": 5.0, "heating_kwh": 3.0, "dhw_kwh": 2.0}}
 
-        def get_2hourly_consumption_from_cache(self):
+        def get_2hourly_consumption_from_cache(self, devices=None):
             return {"2026-05-01": {3: {"total_kwh": 0.5, "heating_kwh": 0.5, "dhw_kwh": 0.0}}}
 
-    # Stub api.main.get_daikin_client (imported inside the job) + the
-    # telemetry-integral sync (irrelevant to this assertion).
+    # Stub api.main.get_daikin_client (imported inside the job), the SERVICE-level
+    # device cache the job now reads through, + the telemetry-integral sync
+    # (irrelevant to this assertion).
     fake_main = types.ModuleType("src.api.main")
     fake_main.get_daikin_client = lambda: _Client()  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "src.api.main", fake_main)
+
+    from src.daikin.service import CachedDevices
+    monkeypatch.setattr(
+        "src.daikin.service.get_cached_devices",
+        lambda **kw: CachedDevices(
+            devices=[object()], fetched_at_wall=0.0, age_seconds=5.0,
+            stale=False, source="cache",
+        ),
+        raising=True,
+    )
     monkeypatch.setattr(
         "src.daikin.service.sync_daikin_2hourly_telemetry",
         lambda d: {"written": 0}, raising=False,

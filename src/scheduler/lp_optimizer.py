@@ -542,7 +542,25 @@ def solve_lp(
     # battery, 15 % reserve = 1.55 kWh, realtime down to 1.04 kWh).
     soc = pulp.LpVariable.dicts("soc", range(n + 1), lowBound=soc_min, upBound=soc_max)
     soc[0].lowBound = 0.0
-    tank = pulp.LpVariable.dicts("tank", range(n + 1), lowBound=tank_lo, upBound=tank_hi)
+    # Mirror the ``soc[0].lowBound = 0.0`` relaxation, and for the same reason:
+    # slot 0 is a MEASUREMENT, not a decision (`tank[0] == initial.tank_temp_c`
+    # is a hard equality below). A live tank ABOVE DHW_TEMP_MAX_C is routine —
+    # right after the firmware's own legionella cycle, or a PV-abundance lift
+    # plus solar gain — and it would otherwise collide with the hard upBound and
+    # make EVERY solve Infeasible until the tank cooled.
+    #
+    # Widening tank[0] alone is not enough: the tank does not shed a whole degree
+    # in one 30-min slot, so tank[1] would still hit the ceiling. The hard bounds
+    # must admit the measured reality across the decay path. Planning above the
+    # ceiling is still discouraged — that is what the SOFT ceiling
+    # (``tank[i+1] <= tank_hi_slot[i] + s_tank_hi[i]``, penalised in the
+    # objective) is for. Hard bounds gate what is REPRESENTABLE; the soft ceiling
+    # gates what is DESIRABLE.
+    tank_var_hi = max(float(tank_hi), float(initial.tank_temp_c))
+    tank_var_lo = min(float(tank_lo), float(initial.tank_temp_c))
+    tank = pulp.LpVariable.dicts(
+        "tank", range(n + 1), lowBound=tank_var_lo, upBound=tank_var_hi,
+    )
     # PR Phase B removed t_in / s_lo / s_hi (no room sensor). W3 (#540) restores
     # them behind ``w3`` now that the sensor exists: t_in is the indoor state,
     # s_lo the SOFT comfort-floor slack (never Infeasible). Wide bounds so the
@@ -579,7 +597,15 @@ def solve_lp(
     # and pin tank[i] to the policy's target trajectory for audit honesty.
     # The tank-thermodynamic constraint below is conditionally skipped so
     # the pinned values don't over-constrain the LP into infeasibility.
-    _dhw_pinned = bool(getattr(config, "DHW_FIXED_SCHEDULE_ENABLED", False))
+    #
+    # NOT in passive mode (#639). In passive, HEM writes no Daikin setpoints and
+    # ``e_dhw`` is already hard-pinned to the physics prediction
+    # (``e_dhw[i] == passive_e_dhw[i]``, below). Pinning it a SECOND time to the
+    # dhw_policy forecast puts two hard equalities on one variable, and the two
+    # vectors differ in essentially every slot → **Infeasible on every solve**.
+    # Since `DHW_FIXED_SCHEDULE_ENABLED` defaults true and .env.example ships
+    # `DAIKIN_CONTROL_MODE=passive`, a fresh clone used to get a dead LP.
+    _dhw_pinned = bool(getattr(config, "DHW_FIXED_SCHEDULE_ENABLED", False)) and not passive_daikin
     _pinned_e_dhw: list[float] = []
     _pinned_tank: list[float] = []
     if _dhw_pinned:
@@ -1036,7 +1062,12 @@ def solve_lp(
         # infeasibility (pinned 0.04 < floor 0.5). Daikin firmware still
         # runs the cycle autonomously; the slight LP under-estimate of
         # Sunday-afternoon DHW load is a known acceptable cost (~£0.05/week).
-        if 0 <= _leg_day <= 6 and not _dhw_pinned:
+        # `not passive_daikin` matches the shower floor + terminal DHW floor
+        # guards. In passive mode `e_dhw` is already a hard equality against the
+        # physics prediction (which carries its own legionella uplift), so this
+        # floor is redundant at best — and if the two formulas ever drift, it
+        # makes passive Infeasible on legionella day.
+        if 0 <= _leg_day <= 6 and not _dhw_pinned and not passive_daikin:
             try:
                 _leg_hour = int(_rts.get_setting("DHW_LEGIONELLA_HOUR_LOCAL"))
                 _leg_minutes = int(_rts.get_setting("DHW_LEGIONELLA_DURATION_MIN"))
