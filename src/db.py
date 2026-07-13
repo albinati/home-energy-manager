@@ -4862,7 +4862,20 @@ def list_sensor_devices() -> list[dict[str, Any]]:
     reading, not ``MAX()``: an aggregate picks the alphabetically-largest label
     the device EVER sent, which froze the card at a retired name (a sensor
     renamed ``sala`` → ``corredor`` still displayed "sala", because 's' > 'c').
-    ``mac`` is stable, so an aggregate is fine there.
+
+    "Latest" is ordered by ``received_at`` (server clock), NOT by the
+    device-supplied ``captured_at``: a node whose SNTP hasn't synced can post a
+    reading dated years ahead, and ordering on that would pin the card to
+    whatever label it carried FOREVER — the same frozen-label bug, just with a
+    rarer trigger. Ties (a batch shares one ``received_at``) fall through to
+    ``captured_at`` so the freshest capture within a batch still wins.
+
+    ``mac`` is aggregated only because it is degenerate within a group: when a
+    device reports a MAC it IS the ``device_key`` (see ``_device_key``), so every
+    row in the group carries the same one; when it doesn't, every row is NULL.
+    CAVEAT: a device that sends NO mac is keyed on ``device_id``/``room``
+    instead, so renaming THAT still splits it into a second group (and a second
+    card). Only MAC-bearing devices are rename-proof.
     """
     with _lock:
         conn = get_connection()
@@ -4884,23 +4897,21 @@ def list_sensor_devices() -> list[dict[str, Any]]:
                     """SELECT device_id, room, source,
                               temp_c, humidity_pct, pressure_hpa, captured_at, received_at
                        FROM device_reading_log WHERE device_key = ?
-                       ORDER BY COALESCE(captured_at, received_at) DESC, received_at DESC
+                       ORDER BY received_at DESC, COALESCE(captured_at, received_at) DESC
                        LIMIT 1""",
                     (d["device_key"],),
                 ).fetchone()
-                row = dict(latest) if latest else {}
-                d["device_id"] = row.get("device_id")
-                d["room"] = row.get("room")
-                d["source"] = row.get("source")
-                d["latest"] = (
-                    {
-                        k: row[k]
-                        for k in ("temp_c", "humidity_pct", "pressure_hpa",
-                                  "captured_at", "received_at")
-                    }
-                    if latest
-                    else None
-                )
+                # device_key came from a GROUP BY over this same table on this
+                # same connection, so a row always exists.
+                row = dict(latest)
+                d["device_id"] = row["device_id"]
+                d["room"] = row["room"]
+                d["source"] = row["source"]
+                d["latest"] = {
+                    k: row[k]
+                    for k in ("temp_c", "humidity_pct", "pressure_hpa",
+                              "captured_at", "received_at")
+                }
             return devices
         finally:
             conn.close()

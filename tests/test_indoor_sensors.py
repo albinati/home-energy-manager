@@ -267,3 +267,40 @@ def test_renamed_device_shows_its_CURRENT_room_not_the_alphabetical_max() -> Non
     assert d["room"] == "corredor"             # NOT "sala"
     assert d["device_id"] == "hem-sensor-01"   # NOT "hem-temp-sensor"
     assert d["latest"]["temp_c"] == pytest.approx(22.0)
+
+
+def test_unsynced_device_clock_cannot_freeze_the_label() -> None:
+    """A future `captured_at` must not pin the card to a retired label forever.
+
+    An ESPHome node whose SNTP hasn't synced posts a reading dated years ahead.
+    If "latest" ordered by the device-supplied `captured_at`, that row would win
+    `LIMIT 1` for good — so a rename after it would never show, which is the very
+    frozen-label bug this overview is meant to fix. Order by `received_at` (the
+    server clock) instead: the label follows what the server heard LAST.
+    """
+    now = datetime.now(UTC)
+    mac = "AA:BB:CC:DD:EE:FF"
+    # Sent while still called "sala", but with a badly-skewed device clock.
+    db.save_device_reading_log([
+        {"captured_at": _z(now + timedelta(days=3650)), "temp_c": 20.0, "mac": mac,
+         "room": "sala", "device_id": "node-old"},
+    ])
+    # It really arrived yesterday — back-date the server receipt to say so, so
+    # the two rows don't tie on a same-second received_at.
+    conn = db.get_connection()
+    conn.execute("UPDATE device_reading_log SET received_at = ? WHERE room = 'sala'",
+                 (_z(now - timedelta(days=1)),))
+    conn.commit()
+    conn.close()
+
+    # Then the device is renamed and reports normally, with an honest clock.
+    db.save_device_reading_log([
+        {"captured_at": _z(now), "temp_c": 22.0, "mac": mac,
+         "room": "corredor", "device_id": "node-new"},
+    ])
+
+    d = db.list_sensor_devices()[0]
+    assert d["n_readings"] == 2
+    assert d["room"] == "corredor"            # not frozen at "sala" by the 2035 row
+    assert d["device_id"] == "node-new"
+    assert d["latest"]["temp_c"] == pytest.approx(22.0)
