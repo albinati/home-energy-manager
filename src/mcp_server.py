@@ -2011,7 +2011,7 @@ def build_mcp() -> FastMCP:
             "(was the LP's INPUT data accurate?)\n"
             "  * dispatch_accuracy — per-channel planned vs realised import / export "
             "/ charge kWh + per-channel accuracy_pct (did the OUTPUTS happen as "
-            "planned? — accounts for strict_savings filter downgrades)\n"
+            "planned? — accounts for robustness-filter downgrades)\n"
             "  * economic_value — lp_realised_cost_p (what HEM actually paid) vs "
             "naive_self_use_shadow_p (what plain SelfUse + no LP would have cost), "
             "with lp_avoided_cost_p as the difference\n"
@@ -2078,7 +2078,7 @@ def build_mcp() -> FastMCP:
         name="get_audit_report",
         description=(
             "Daily audit — held-schedule events + plan-vs-execution + "
-            "strict_savings forgone-export, all over a configurable trailing "
+            "robustness-filtered forgone export, all over a configurable trailing "
             "window. Returns the same structured dict the prod 07:30 UTC cron "
             "consumes to decide whether to push to Telegram. Three sections:\n"
             "  * held_schedule — LP infeasibilities caught by PR #338's "
@@ -2088,9 +2088,10 @@ def build_mcp() -> FastMCP:
             "  * plan_vs_execution — LP-run → Fox-upload coverage %, totals "
             "(import + export kWh, cost in pence), top-N per-slot disparities "
             "by absolute cost delta\n"
-            "  * strict_savings_forgone — kWh + pence the household didn't "
-            "earn because the scenario filter / strict_savings policy "
-            "downgraded LP-preferred peak_export slots\n"
+            "  * forgone_export — kWh + pence the household didn't earn because "
+            "the pessimistic scenario filter downgraded a peak_export slot the "
+            "LP had chosen. NOT plain PV surplus export (that ships anyway via "
+            "Fox SelfUse and already earns).\n"
             "Pure read over DB; no Daikin API, no LP solve. Safe to call "
             "mid-day. Default window = 24h."
         ),
@@ -2112,24 +2113,25 @@ def build_mcp() -> FastMCP:
         return {"ok": True, "report": report}
 
     @mcp.tool(
-        name="get_strict_savings_forgone_export",
+        name="get_forgone_peak_export",
         description=(
-            "Counterfactual revenue NOT realised because the strict_savings "
-            "policy / scenario filter downgraded LP-preferred peak_export "
-            "slots to standard. For each day in [start_date, end_date] "
+            "Battery-export revenue NOT realised because the pessimistic scenario "
+            "filter downgraded a peak_export slot the LP had chosen. This is NOT "
+            "plain PV-surplus export — that ships anyway via Fox SelfUse and "
+            "already earns. For each day in [start_date, end_date] "
             "(inclusive, YYYY-MM-DD local), returns per-slot detail + a "
             "totals roll-up:\n"
             "  - kwh: total forgone export kWh\n"
             "  - pence / pounds: total forgone revenue\n"
             "  - slot_count: number of downgraded slots\n"
             "  - daily: list of {date, kwh, pence, slot_count}\n"
-            "Lets OpenClaw answer 'what is strict_savings costing us this "
+            "Lets OpenClaw answer 'what is the robustness filter costing us this "
             "month?' composably (set start_date=YYYY-MM-01, end_date=today). "
             "Pure read; no Daikin / Fox / Octopus calls. Range capped at "
             "367 days."
         ),
     )
-    def get_strict_savings_forgone_export(
+    def get_forgone_peak_export(
         start_date: str,
         end_date: str,
     ) -> dict[str, Any]:
@@ -2154,7 +2156,7 @@ def build_mcp() -> FastMCP:
             daily: list[dict[str, Any]] = []
             d = start_d
             while d <= end_d:
-                rows = _db.list_strict_savings_forgone_export_for_day(d.isoformat())
+                rows = _db.list_forgone_peak_export_for_day(d.isoformat())
                 day_kwh = sum(float(r.get("export_kwh") or 0) for r in rows)
                 day_p = sum(
                     float(r.get("export_kwh") or 0)
@@ -2172,7 +2174,7 @@ def build_mcp() -> FastMCP:
                 total_slots += len(rows)
                 d += _td(days=1)
         except Exception as e:
-            logger.exception("get_strict_savings_forgone_export failed")
+            logger.exception("get_forgone_peak_export failed")
             return {"ok": False, "error": str(e)}
 
         return {
@@ -2203,7 +2205,8 @@ def build_mcp() -> FastMCP:
             "today (NOT 24h-time-average — what we actually paid per kWh)\n"
             "  * mtd: {n_days, avg_per_day_gbp, mean_import_rate_p_per_kwh} — "
             "month-to-date context (EXCLUDES today)\n"
-            "  * strict_savings_forgone: {kwh, pence, slot_count} for today\n"
+            "  * forgone_export: {kwh, pence, slot_count} for today — peak_export "
+            "slots the robustness filter downgraded (NOT PV surplus)\n"
             "  * lp_scorecard: {grade, lp_avoided_cost_p, dispatch_accuracy_pct}\n"
             "Pure read; no Daikin API call."
         ),
@@ -2274,7 +2277,7 @@ def build_mcp() -> FastMCP:
             else None
         )
 
-        forgone_rows = _db.list_strict_savings_forgone_export_for_day(target.isoformat())
+        forgone_rows = _db.list_forgone_peak_export_for_day(target.isoformat())
         forgone_kwh = sum(float(r.get("export_kwh") or 0) for r in forgone_rows)
         forgone_p = sum(
             float(r.get("export_kwh") or 0) * float(r.get("export_price_p_kwh") or 0)
@@ -2324,7 +2327,7 @@ def build_mcp() -> FastMCP:
                 round(today_mean_p, 2) if today_mean_p is not None else None
             ),
             "mtd": mtd_block,
-            "strict_savings_forgone": {
+            "forgone_export": {
                 "kwh": round(forgone_kwh, 3),
                 "pence": round(forgone_p, 1),
                 "slot_count": len(forgone_rows),

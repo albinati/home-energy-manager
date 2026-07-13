@@ -138,8 +138,8 @@ def test_build_audit_report_returns_complete_shape_on_empty_db(tmp_path: Path) -
     assert pve["cost_delta_p"] == 0.0
     assert pve["disparities"] == []
 
-    forgone = report["strict_savings_forgone"]
-    assert forgone == {"kwh": 0.0, "pence": 0.0, "slot_count": 0}
+    forgone = report["forgone_export"]
+    assert forgone == {"kwh": 0.0, "pence": 0.0, "slot_count": 0, "reasons": {}}
 
 
 def test_empty_audit_renders_silent(tmp_path: Path) -> None:
@@ -253,6 +253,7 @@ def _seed_lp_pair(
     plan_import_kwh: float = 0.0,
     plan_export_kwh: float = 0.0,
     dispatched_kind: str = "standard",
+    lp_kind: str = "standard",
 ) -> None:
     db = sqlite3.connect(str(db_path))
     db.execute(
@@ -268,7 +269,7 @@ def _seed_lp_pair(
     db.execute(
         "INSERT INTO dispatch_decisions (run_id, slot_time_utc, lp_kind, dispatched_kind) "
         "VALUES (?, ?, ?, ?)",
-        (run_id, slot_time_utc, "standard", dispatched_kind),
+        (run_id, slot_time_utc, lp_kind, dispatched_kind),
     )
     db.commit()
     db.close()
@@ -324,22 +325,42 @@ def test_disparity_surfaces_when_real_imports_above_plan(tmp_path: Path) -> None
     assert d["real_import_kwh"] == 1.0
 
 
-def test_strict_savings_forgone_export_counted(tmp_path: Path) -> None:
-    """LP wanted to export 1 kWh @ 25p but dispatched_kind=standard
-    (strict_savings policy held the battery) → forgone tally captures it."""
+def test_blocked_peak_export_counted_as_forgone(tmp_path: Path) -> None:
+    """LP chose peak_export (battery→grid) for 1 kWh @ 25p, but the pessimistic
+    scenario filter downgraded it to standard → that IS forgone revenue."""
     db = _make_db(tmp_path)
     slot = _ago(21)
     _seed_lp_pair(
         db, run_id=1, run_at_utc=_ago(21.2), slot_time_utc=slot,
-        plan_import_kwh=0.0, plan_export_kwh=1.0, dispatched_kind="standard",
+        plan_import_kwh=0.0, plan_export_kwh=1.0,
+        lp_kind="peak_export", dispatched_kind="standard",
     )
     _seed_rate(db, valid_from=slot, import_p=15.0, export_p=25.0)
 
     report = audit_report.build_audit_report(now_utc=_now(), db_path=db)
-    forgone = report["strict_savings_forgone"]
+    forgone = report["forgone_export"]
     assert forgone["slot_count"] == 1
     assert forgone["kwh"] == 1.0
     assert forgone["pence"] == pytest.approx(25.0, abs=0.5)
+
+
+def test_pv_surplus_export_is_not_forgone(tmp_path: Path) -> None:
+    """The phantom-loss regression. In normal/guests the LP constrains
+    ``exp <= pv_use``, so export_kwh on a non-peak_export slot is PV SURPLUS —
+    it ships via Fox SelfUse and already earns. It must NOT be reported as a
+    loss. (Prod: 220 slots / 97.9 kWh of phantom "forgone" over 14 days.)"""
+    db = _make_db(tmp_path)
+    slot = _ago(21)
+    _seed_lp_pair(
+        db, run_id=1, run_at_utc=_ago(21.2), slot_time_utc=slot,
+        plan_import_kwh=0.0, plan_export_kwh=1.0,
+        lp_kind="solar_charge", dispatched_kind="solar_charge",
+    )
+    _seed_rate(db, valid_from=slot, import_p=15.0, export_p=25.0)
+
+    report = audit_report.build_audit_report(now_utc=_now(), db_path=db)
+    assert report["forgone_export"]["slot_count"] == 0
+    assert report["forgone_export"]["kwh"] == 0.0
 
 
 def test_peak_export_dispatch_does_not_count_as_forgone(tmp_path: Path) -> None:
@@ -353,12 +374,12 @@ def test_peak_export_dispatch_does_not_count_as_forgone(tmp_path: Path) -> None:
     _seed_rate(db, valid_from=slot, import_p=15.0, export_p=25.0)
 
     report = audit_report.build_audit_report(now_utc=_now(), db_path=db)
-    assert report["strict_savings_forgone"]["slot_count"] == 0
+    assert report["forgone_export"]["slot_count"] == 0
     # And plan_kwh.export_effective DOES include this 1 kWh (it shipped).
     assert report["plan_vs_execution"]["plan_kwh"]["export_effective"] == 1.0
 
 
-def test_strict_savings_downgrade_excluded_from_effective_plan_export(tmp_path: Path) -> None:
+def test_robustness_downgrade_excluded_from_effective_plan_export(tmp_path: Path) -> None:
     """Same LP export, but downgraded to standard → effective plan export = 0,
     so it can NOT contribute a false-positive disparity vs zero real export."""
     db = _make_db(tmp_path)
@@ -371,7 +392,7 @@ def test_strict_savings_downgrade_excluded_from_effective_plan_export(tmp_path: 
 
     report = audit_report.build_audit_report(now_utc=_now(), db_path=db)
     assert report["plan_vs_execution"]["plan_kwh"]["export_effective"] == 0.0
-    # The strict_savings downgrade should not generate a disparity row by
+    # The robustness-filter downgrade should not generate a disparity row by
     # itself — real export is 0, effective plan export is 0, Δ = 0.
     no_export_disp = [
         d for d in report["plan_vs_execution"]["disparities"]

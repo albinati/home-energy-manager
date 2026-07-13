@@ -1,7 +1,7 @@
 """Tests for the three audit MCP tools added in Story A2 of Epic 13a:
 
 * ``get_audit_report``                — thin wrapper over build_audit_report
-* ``get_strict_savings_forgone_export`` — multi-day forgone-export aggregate
+* ``get_forgone_peak_export`` — multi-day forgone-export aggregate
 * ``get_brief_kpis``                  — structured KPI fields from the brief
 
 Tests exercise each tool via ``mcp.call_tool(...)`` (the same path OpenClaw
@@ -104,7 +104,7 @@ class TestGetAuditReport(unittest.IsolatedAsyncioTestCase):
         assert rep["window_hours"] == 24
         assert rep["held_schedule"]["total"] == 0
         assert rep["plan_vs_execution"]["lp_runs"] == 0
-        assert rep["strict_savings_forgone"]["slot_count"] == 0
+        assert rep["forgone_export"]["slot_count"] == 0
 
     async def test_rejects_out_of_range_window(self) -> None:
         from src.mcp_server import build_mcp
@@ -133,7 +133,7 @@ class TestGetAuditReport(unittest.IsolatedAsyncioTestCase):
 
 
 class TestGetStrictSavingsForgoneExport(unittest.IsolatedAsyncioTestCase):
-    """Exercise ``get_strict_savings_forgone_export`` for a small range."""
+    """Exercise ``get_forgone_peak_export`` for a small range."""
 
     async def asyncSetUp(self) -> None:
         from src import db as _db
@@ -144,7 +144,7 @@ class TestGetStrictSavingsForgoneExport(unittest.IsolatedAsyncioTestCase):
 
         mcp = build_mcp()
         _blocks, out = await mcp.call_tool(
-            "get_strict_savings_forgone_export",
+            "get_forgone_peak_export",
             {"start_date": "2026-05-01", "end_date": "2026-05-03"},
         )
         assert out["ok"] is True
@@ -164,7 +164,7 @@ class TestGetStrictSavingsForgoneExport(unittest.IsolatedAsyncioTestCase):
 
         mcp = build_mcp()
         _blocks, out = await mcp.call_tool(
-            "get_strict_savings_forgone_export",
+            "get_forgone_peak_export",
             {"start_date": "not-a-date", "end_date": "2026-05-01"},
         )
         assert out["ok"] is False
@@ -175,7 +175,7 @@ class TestGetStrictSavingsForgoneExport(unittest.IsolatedAsyncioTestCase):
 
         mcp = build_mcp()
         _blocks, out = await mcp.call_tool(
-            "get_strict_savings_forgone_export",
+            "get_forgone_peak_export",
             {"start_date": "2026-05-10", "end_date": "2026-05-01"},
         )
         assert out["ok"] is False
@@ -186,7 +186,7 @@ class TestGetStrictSavingsForgoneExport(unittest.IsolatedAsyncioTestCase):
 
         mcp = build_mcp()
         _blocks, out = await mcp.call_tool(
-            "get_strict_savings_forgone_export",
+            "get_forgone_peak_export",
             {"start_date": "2024-01-01", "end_date": "2026-01-02"},
         )
         assert out["ok"] is False
@@ -220,7 +220,7 @@ class TestGetStrictSavingsForgoneExport(unittest.IsolatedAsyncioTestCase):
                     "(run_id, slot_time_utc, lp_kind, dispatched_kind, "
                     "committed, reason, export_price_p_kwh, created_at) "
                     "VALUES (?, ?, 'peak_export', 'standard', 1, "
-                    "'strict_savings_downgrade', ?, ?)",
+                    "'pessimistic_disagrees', ?, ?)",
                     (int(day.replace("-", "")), slot_iso, export_p, slot_iso),
                 )
             conn.commit()
@@ -230,7 +230,7 @@ class TestGetStrictSavingsForgoneExport(unittest.IsolatedAsyncioTestCase):
         from src.mcp_server import build_mcp
         mcp = build_mcp()
         _blocks, out = await mcp.call_tool(
-            "get_strict_savings_forgone_export",
+            "get_forgone_peak_export",
             {"start_date": "2026-05-01", "end_date": "2026-05-02"},
         )
         assert out["ok"] is True
@@ -261,7 +261,7 @@ class TestGetBriefKpis(unittest.IsolatedAsyncioTestCase):
         # MTD requires day > 1 — 2026-05-15 qualifies but DB is empty
         # so the block may be present but with zeros / Nones, or None.
         assert "mtd" in out
-        assert out["strict_savings_forgone"] == {
+        assert out["forgone_export"] == {
             "kwh": 0.0, "pence": 0.0, "slot_count": 0,
         }
         # Scorecard on empty DB renders N/A grade
@@ -300,5 +300,5 @@ class TestNewToolsRegistered(unittest.IsolatedAsyncioTestCase):
         tools = await mcp.list_tools()
         names = {t.name for t in tools}
         assert "get_audit_report" in names
-        assert "get_strict_savings_forgone_export" in names
+        assert "get_forgone_peak_export" in names
         assert "get_brief_kpis" in names

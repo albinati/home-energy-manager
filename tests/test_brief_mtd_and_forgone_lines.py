@@ -99,8 +99,12 @@ def test_mean_rate_line_with_mtd_compares() -> None:
     assert "↓" in line
 
 
-# K2-cleanup 2026-05-23 — `_strict_savings_forgone_line` deleted (was
-# already a no-op since PR C removed ENERGY_STRATEGY_MODE). The MCP
-# tool `get_strict_savings_forgone_export` and the underlying DB helper
-# remain for historical audit queries against legacy `dispatch_decisions`
-# rows but no new rows are written.
+# K2-cleanup 2026-05-23 — `_strict_savings_forgone_line` deleted from the brief
+# (already a no-op once PR C removed ENERGY_STRATEGY_MODE).
+#
+# The note that used to sit here claimed the surviving MCP tool + DB helper were
+# harmless because "no new rows are written". That was FALSE — dispatch_decisions
+# is written on every solve — and it is what let the phantom-loss bug live: they
+# counted PV-surplus export as forgone revenue (prod: 220 slots / 97.9 kWh over
+# 14 days). Fixed by gating on lp_kind='peak_export'; see
+# tests/test_forgone_export_not_phantom.py.
