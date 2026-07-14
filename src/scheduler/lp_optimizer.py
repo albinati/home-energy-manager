@@ -625,6 +625,29 @@ def solve_lp(
         # absence just means winter losses are modelled flat, not wrongly.
         _dhw_ambient = [float(_tank_p.ambient_c)] * n
         _dhw_days = [st.astimezone(tz).date().toordinal() for st in slot_starts_utc]
+
+        # Legionella: the firmware runs its Sunday 60 °C cycle on the resistance
+        # heater regardless of the LP; budget the electricity (COP 1) across the
+        # stand-off window so the battery is not planned to discharge into it (#643).
+        # UTC-anchored — the firmware clock is UTC (see CLAUDE.md).
+        _leg_dow = int(getattr(config, "DHW_LEGIONELLA_STANDOFF_DOW", 6))
+        _leg_h = int(getattr(config, "DHW_LEGIONELLA_STANDOFF_START_HOUR_UTC", 11))
+        _leg_m = int(getattr(config, "DHW_LEGIONELLA_STANDOFF_START_MINUTE_UTC", 0))
+        _leg_dur = int(getattr(config, "DHW_LEGIONELLA_STANDOFF_DURATION_MINUTES", 120))
+        _leg_budget = float(getattr(config, "DHW_LEGIONELLA_BUDGET_KWH", 3.5))
+        _leg_start_min = _leg_h * 60 + _leg_m
+        _leg_members = [
+            i for i, st in enumerate(slot_starts_utc)
+            if st.weekday() == _leg_dow
+            and _leg_start_min <= (st.hour * 60 + st.minute) < _leg_start_min + _leg_dur
+        ]
+        _dhw_legionella = [0.0] * n
+        if _leg_members and _leg_budget > 0 and bool(
+            getattr(config, "DHW_LEGIONELLA_STANDOFF_ENABLED", True)
+        ):
+            _per = _leg_budget / len(_leg_members)
+            for i in _leg_members:
+                _dhw_legionella[i] = _per
         _dhw_block = build_dhw_block(
             prob,
             slot_starts_utc=list(slot_starts_utc),
@@ -644,6 +667,7 @@ def solve_lp(
                 slot_hours=slot_h,
             ),
             day_index_by_slot=_dhw_days,
+            legionella_kwh_by_slot=_dhw_legionella,
         )
 
     # PR K2 (2026-05-23) — DHW pinning. When the deterministic schedule
@@ -1374,10 +1398,16 @@ def solve_lp(
                 prob += tv_dis[i] >= dis[i] - dis[i - 1]
                 prob += tv_dis[i] >= dis[i - 1] - dis[i]
         if w_hp_tv > 0:
+            # The compressor smoothing must see the DHW draw that is actually planned.
+            # In the LP-owned regime that is the block's heat-pump electricity (e_dhw
+            # is pinned to 0), so use it here — otherwise only e_space is smoothed and
+            # the DHW heat pump is free to saw slot-to-slot inside a run (the min-dwell
+            # and slice cap bound the number of runs, not the modulation within one).
+            _hp_e = _dhw_block.e_hp if _lp_owned else [e_dhw[i] for i in range(n)]
             for i in range(1, n):
                 tv_hp[i] = pulp.LpVariable(f"hp_tv_{i}", lowBound=0)
-                prob += tv_hp[i] >= (e_dhw[i] + e_space[i]) - (e_dhw[i - 1] + e_space[i - 1])
-                prob += tv_hp[i] >= (e_dhw[i - 1] + e_space[i - 1]) - (e_dhw[i] + e_space[i])
+                prob += tv_hp[i] >= (_hp_e[i] + e_space[i]) - (_hp_e[i - 1] + e_space[i - 1])
+                prob += tv_hp[i] >= (_hp_e[i - 1] + e_space[i - 1]) - (_hp_e[i] + e_space[i])
         if w_imp_tv > 0:
             for i in range(1, n):
                 tv_imp[i] = pulp.LpVariable(f"imp_tv_{i}", lowBound=0)

@@ -106,6 +106,7 @@ def build_dhw_block(
     p: TankParams,
     cfg: DhwLpConfig | None = None,
     day_index_by_slot: list[int] | None = None,
+    legionella_kwh_by_slot: list[float] | None = None,
 ) -> DhwBlock:
     """Add the LP-owned DHW variables and constraints to ``prob``.
 
@@ -133,10 +134,18 @@ def build_dhw_block(
     # Ceiling slack. The ceiling must be SOFT, not a hard bound: a tank that starts
     # ABOVE it (the firmware just ran its 60 °C legionella cycle, or the user boosted
     # it by hand) cannot shed a whole degree in one 30-min slot, so a hard cap would
-    # make the first slots Infeasible. Penalising the slack instead lets an
-    # over-temperature tank coast back down naturally while still forbidding the LP
-    # from HEATING above the ceiling voluntarily — heating up there costs a big COP-1
-    # bill AND this penalty, so it never happens unless the price is negative.
+    # make the first slots Infeasible. The slack lets an over-temperature tank coast
+    # back down.
+    #
+    # What stops the LP from HEATING above the ceiling on a positive-price slot is NOT
+    # a resistance penalty — there is no resistance here (e_res == 0 when price ≥ 0),
+    # so the heat pump itself could in principle push past 50 °C paying only this
+    # slack. It does not, because NOTHING in the model rewards a hot tank: the comfort
+    # floors are capped at t_hp_max_c, and there is no PV-abundance bonus. With no
+    # upside, spending electricity plus the slack penalty to overheat is strictly
+    # dominated. The safety therefore rests on "no reward for a hot tank", and any
+    # future feature that gives one MUST re-impose a hard heating cap here — not lean
+    # on this slack.
     ceil_slack = pulp.LpVariable.dicts("dhw_ceiling_slack", range(n), lowBound=0)
 
     prob += tank[0] == tank0_c
@@ -148,11 +157,13 @@ def build_dhw_block(
         prob += e_hp[i] <= hp_max_kwh * dhw_on[i]
         prob += e_hp[i] >= cfg.min_run_kwh * dhw_on[i]
 
-        # The resistance is available ONLY on a slot the grid pays us to import.
-        # Everywhere else the tank is capped below the cliff, so no immersion heater
-        # can ever run "because PV was free".
-        negative_price = price_by_slot[i] < 0
-        if negative_price:
+        # The resistance is available on a slot the grid PAYS us to import (a negative
+        # price, where filling the tank to 60 °C soaks up paid energy) OR a slot the
+        # firmware runs its own legionella cycle (which HEM does not control but must
+        # budget for). Everywhere else e_res is zero and the tank is capped below the
+        # cliff, so no immersion heater can ever run "because PV was free".
+        legionella = legionella_kwh_by_slot is not None and legionella_kwh_by_slot[i] > 0
+        if price_by_slot[i] < 0 or legionella:
             b_res = pulp.LpVariable(f"dhw_b_res_{i}", cat="Binary")
             prob += e_res[i] <= res_max_kwh * b_res
             # Only a resistance slot may lift the tank above the heat-pump ceiling.
@@ -161,6 +172,9 @@ def build_dhw_block(
                 + (cfg.tank_max_c - cfg.tank_ceiling_c) * b_res
                 + ceil_slack[i]
             )
+            if legionella:
+                prob += e_res[i] >= legionella_kwh_by_slot[i]  # firmware draw, budgeted
+                prob += b_res == 1
         else:
             prob += e_res[i] == 0
             prob += tank[i + 1] <= cfg.tank_ceiling_c + ceil_slack[i]

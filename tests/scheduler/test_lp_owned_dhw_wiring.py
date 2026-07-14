@@ -129,18 +129,23 @@ def test_it_moves_the_heat_out_of_the_expensive_evening():
     )
     assert peak < 0.05, f"heated the tank through the peak: {peak:.3f} kWh"
 
-    # Comfort is delivered: the tank clears the floor at the START of the 20:00
-    # window (tank_temp_c[i] is the boundary entering slot i — where the floor
-    # applies — so pair it with the slot's own start).
-    entering_20 = [
-        t for st, t in zip(plan.slot_starts_utc, plan.tank_temp_c[:-1], strict=True)
-        if st.hour == 20
-    ]
-    assert entering_20 and min(entering_20) >= 44.0
+    # Comfort is delivered by ENTERING the window hot, not by heating during it. The
+    # tank clears the floor at the first 20:00 slot (tank_temp_c[i] is the boundary
+    # entering slot i, where the entry floor applies)...
+    starts = list(plan.slot_starts_utc)
+    entry_idx = next(i for i, st in enumerate(starts) if st.hour == 20)
+    assert plan.tank_temp_c[entry_idx] >= 44.0
 
-    # And the heat that got it there was bought in the cheap slots, not the peak.
+    # ...and it does NOT reheat during the showers — the owner's explicit ask. The
+    # heat that got it there was bought earlier, in the cheap slots, not in the peak
+    # and not in the shower window itself.
+    in_window = sum(
+        e for st, e in zip(starts, plan.dhw_electric_kwh, strict=False)
+        if 20 <= st.hour < 21
+    )
+    assert in_window < 0.05, f"reheated during the showers: {in_window:.3f} kWh"
     cheap = sum(
-        e for st, e in zip(plan.slot_starts_utc, plan.dhw_electric_kwh, strict=False)
+        e for st, e in zip(starts, plan.dhw_electric_kwh, strict=False)
         if not (16 <= st.hour < 19)
     )
     assert cheap > peak

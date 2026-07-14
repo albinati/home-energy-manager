@@ -178,21 +178,47 @@ def comfort_floors_for_slots(
     spec: ShowerSpec | None = None,
     guest_count: int = 2,
 ) -> list[float | None]:
-    """Per-slot shower-comfort floors, aligned to the LP's horizon.
+    """Shower-comfort floors, aligned to the LP's horizon — one per window, at ENTRY.
 
-    Applied to the tank temperature at the START of the slot (``tank[i]``, not
-    ``tank[i+1]``). This is not a detail: flooring the END of the slot lets the LP
-    satisfy comfort by heating *during* the shower — the "top it up while they're in
-    there" behaviour the owner explicitly does not want, and which the tank's own
-    physics says is unnecessary anyway.
+    The floor is placed on the slot the household ENTERS the shower window on, not on
+    every slot within it. This is the correction that makes the declared comfort and
+    the modelled draw agree. The tank must be hot ENOUGH when the first person steps
+    in; after that the showers draw it down, and — because the cylinder is stratified
+    (the sensor reads the hot top, ``model.py``) — the second and third showers still
+    run warm off that stored heat. A tank at the entry floor holds several showers'
+    worth (the mixer arithmetic in :func:`~src.dhw.draw.required_tank_temp_for` puts
+    three well inside 45 °C).
+
+    Flooring EVERY slot of the window instead would fight the modelled draw: the
+    single-node ODE drops the average temperature ~7 °C per shower slot, so a
+    per-slot floor would force the heat pump to run DURING the showers to hold it up —
+    exactly the "top it up while they're in there" behaviour the owner rejected, and
+    exactly what a stratified tank does not actually need. Entry-only is what keeps
+    the promise.
+
+    Applied at the START of the entry slot (``tank[i]``), so the heat is already
+    stored — the LP cannot satisfy it by heating into the window.
     """
     windows = shower_windows(preset=preset, p=p, spec=spec, guest_count=guest_count)
+
+    def _floor_at(hour: float) -> float | None:
+        fs = [w.floor_c for w in windows if w.start_hour <= hour < w.end_hour]
+        return max(fs) if fs else None
+
     out: list[float | None] = []
+    prev_floor: float | None = None
     for st in slot_starts_utc:
         local = st.astimezone(tz)
         hour = local.hour + local.minute / 60.0
-        floors = [w.floor_c for w in windows if w.start_hour <= hour < w.end_hour]
-        out.append(max(floors) if floors else None)
+        floor = _floor_at(hour)
+        # Emit the floor only on ENTRY — the transition from outside a window (or a
+        # lower one) into it. A horizon that starts mid-window still floors its first
+        # slot (prev_floor is None), which is what a 20:30 re-plan needs.
+        if floor is not None and (prev_floor is None or floor > prev_floor):
+            out.append(floor)
+        else:
+            out.append(None)
+        prev_floor = floor
     return out
 
 

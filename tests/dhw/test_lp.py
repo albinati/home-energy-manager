@@ -28,6 +28,7 @@ def _solve(
     t_out=7.0,
     ambient=22.0,
     cfg=None,
+    legionella=None,
     import_price_weight=True,
 ):
     """Build a self-contained LP: buy grid electricity to run the DHW block, minimise
@@ -50,6 +51,7 @@ def _solve(
         p=P,
         cfg=cfg,
         day_index_by_slot=[0] * n,
+        legionella_kwh_by_slot=legionella,
     )
     # Import to cover the DHW electricity, priced at the tariff.
     imp = pulp.LpVariable.dicts("imp", range(n), lowBound=0)
@@ -191,6 +193,25 @@ def test_an_impossible_floor_shows_up_as_a_penalty_not_a_crash():
 # ---------------------------------------------------------------------------
 # Quota: few runs
 # ---------------------------------------------------------------------------
+
+
+def test_the_legionella_cycle_is_budgeted_as_resistance():
+    """The firmware runs its Sunday 60 °C cycle on the immersion heater regardless of
+    the LP. If the LP does not budget that draw, the battery gets planned to discharge
+    straight into it (#643). The block must carry it as resistance electricity (COP 1)
+    on the flagged slots — even though the price is positive, where e_res is normally
+    zero."""
+    n = 8
+    prices = [10.0] * n  # positive — resistance would normally be forbidden
+    floors = [None] * n
+    leg = [0.0, 0.0, 1.5, 1.5, 0.0, 0.0, 0.0, 0.0]  # 3 kWh cycle over slots 2-3
+    r = _solve(prices=prices, floors=floors, tank0=45.0, legionella=leg)
+    assert r["status"] == "Optimal"
+    # The budgeted electricity shows up on exactly those slots...
+    assert r["e_total"][2] >= 1.5 - 1e-3
+    assert r["e_total"][3] >= 1.5 - 1e-3
+    # ...and the tank rises past the cliff, because the firmware drives it to 60.
+    assert max(r["tank"]) > 50.0
 
 
 def test_the_slice_cap_bounds_the_number_of_runs():

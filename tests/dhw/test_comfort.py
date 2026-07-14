@@ -150,6 +150,38 @@ def test_a_broken_settings_store_never_cools_the_showers(monkeypatch):
     assert c.comfort_floor_c(20.5, preset="normal") == c.DEFAULT_EVENING_FLOOR_C
 
 
+def test_the_floor_is_at_window_ENTRY_only_not_every_slot():
+    """The correction that makes comfort and the modelled draw agree. The tank must be
+    hot when the household ENTERS the shower window; after that the showers draw it
+    down and — the cylinder being stratified — still run warm off the stored heat.
+
+    Flooring every slot instead would force the heat pump to run DURING the showers to
+    hold the average temperature up (the single-node ODE drops it ~7 °C per shower
+    slot) — the 'top it up while they're in there' behaviour the owner rejected. So
+    the floor lands on the ENTRY slot and nowhere else inside the window."""
+    # 18:00-22:00 BST (17:00-21:00 UTC) — the 20:00 window is two slots (20:00, 20:30).
+    starts = [
+        datetime(2026, 7, 8, 17, 0, tzinfo=UTC) + i * timedelta(minutes=30)
+        for i in range(8)
+    ]
+    floors = comfort_floors_for_slots(starts, LONDON, preset="normal")
+    hot_slots = [(st.astimezone(LONDON).strftime("%H:%M"), f)
+                 for st, f in zip(starts, floors, strict=True) if f is not None]
+    assert hot_slots == [("20:00", 45.0)], hot_slots  # ONLY the entry slot
+
+
+def test_a_mid_window_replan_still_floors_its_first_slot():
+    """A re-plan at 20:30 starts the horizon inside the window. There is no 'entry'
+    transition to see, so the first slot must carry the floor anyway — otherwise a
+    re-plan mid-shower would drop comfort entirely."""
+    starts = [
+        datetime(2026, 7, 8, 19, 30, tzinfo=UTC) + i * timedelta(minutes=30)  # 20:30 BST
+        for i in range(3)
+    ]
+    floors = comfort_floors_for_slots(starts, LONDON, preset="normal")
+    assert floors[0] == 45.0  # 20:30 local, mid-window, still floored
+
+
 def test_the_backstop_reads_nothing_learned():
     """The floor that survives a calibration bug.
 
