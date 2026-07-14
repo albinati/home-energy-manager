@@ -190,15 +190,16 @@ function HeroWeather({ weather, pv, indoor }: {
   const indoorMean = indoor?.mean_c ?? (inWithTemp.length
     ? inWithTemp.reduce((s, r) => s + (r.temp_c as number), 0) / inWithTemp.length : null);
   const indoorStale = !!indoor?.stale;
-  // Per-room breakdown instead of a bare "N rooms": the mean is honest but hides
+  // Per-room mini-cards instead of a bare "N rooms": the mean is honest but hides
   // an outlier sensor (a hallway probe self-heating to 39° next to a 30° kitchen
-  // pulls the mean to 35° and looks like a bug). Listing each room makes the
+  // pulls the mean to 35° and looks like a bug). One card per room makes the
   // spread — and a misplaced/faulty sensor — obvious at a glance. Sorted by
-  // name so the chips hold still across the 30s polls (API order isn't stable).
-  const roomChips = inWithTemp
+  // name so the cards hold still across polls (API order isn't stable).
+  const roomCards = inWithTemp
     .map((r) => ({
       room: (r.room ?? "inside").replace(/_/g, " "),
       temp: r.temp_c as number,
+      hum: r.humidity_pct,
       stale: r.stale,
     }))
     .sort((a, b) => a.room.localeCompare(b.room));
@@ -281,16 +282,26 @@ function HeroWeather({ weather, pv, indoor }: {
             <>
               <div class="hw-col-now">
                 <span class="hw-col-temp">{indoorMean != null ? indoorMean.toFixed(1) : "—"}°</span>
+                <span class="dim small hw-col-meta">
+                  house avg{indoor?.n_rooms ? ` · ${indoor.n_rooms} ${indoor.n_rooms === 1 ? "room" : "rooms"}` : ""}
+                </span>
               </div>
-              <div class="dim small hw-col-sub hw-col-sub--rooms">
-                {roomChips.length ? roomChips.map((c, i) => (
-                  <span key={c.room} class={`hw-room ${c.stale ? "is-stale" : ""}`}>
-                    {i > 0 && <span class="hw-room-sep"> · </span>}
-                    {c.room} {c.temp.toFixed(1)}°
-                  </span>
-                )) : roomFallback}
-                {indoorHum != null && <span class="hw-room-sep"> · {Math.round(indoorHum)}% humidity</span>}
-              </div>
+              {roomCards.length ? (
+                <div class="hw-rooms">
+                  {roomCards.map((c) => (
+                    <div key={c.room} class={`hw-room-card ${c.stale ? "is-stale" : ""}`}>
+                      <div class="hw-room-card-head">
+                        <span class="hw-room-card-name" title={c.room}>{c.room}</span>
+                        <span class={`hw-room-dot ${c.stale ? "is-stale" : "live-pulse"}`} aria-hidden="true" />
+                      </div>
+                      <span class="hw-room-card-temp">{c.temp.toFixed(1)}°</span>
+                      {c.hum != null && <span class="dim hw-room-card-hum">{Math.round(c.hum)}% RH</span>}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div class="dim small hw-col-sub hw-col-sub--empty">{roomFallback}{indoorHum != null ? ` · ${Math.round(indoorHum)}% RH` : ""}</div>
+              )}
             </>
           ) : (
             <div class="dim small hw-col-sub hw-col-sub--empty">no sensor</div>

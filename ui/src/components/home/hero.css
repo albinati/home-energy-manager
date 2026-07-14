@@ -86,19 +86,45 @@
 .hw-col { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
 .hw-col--in { border-left: 1px solid var(--border); padding-left: var(--space-4); }
 .hw-col-label { color: var(--text-mute); }
-.hw-col-now { display: flex; align-items: center; gap: var(--space-2); }
+.hw-col-now { display: flex; align-items: baseline; gap: var(--space-2); flex-wrap: wrap; }
 .hw-col-temp { font-size: var(--font-2xl); font-weight: 250; line-height: 1; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; color: var(--text); }
 .hw-col--in.is-stale .hw-col-temp { color: var(--text-mute); }
+/* "house avg · N rooms" caption beside the mean. */
+.hw-col-meta { color: var(--text-mute); }
 /* Estimated (forecast) as a superscript on the measured outdoor temp. */
 .hw-col-est { font-size: var(--font-2xs); font-weight: 600; color: var(--text-mute); margin-left: var(--space-1); letter-spacing: 0; vertical-align: super; font-variant-numeric: tabular-nums; }
 .hw-col-sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .hw-col-sub--empty { color: var(--text-mute); }
-/* Per-room breakdown wraps (it can't hide behind an ellipsis — the whole point
-   is that every room, including an outlier, is visible). Temps use tabular
-   nums so the column stays aligned; a stale room is muted. */
-.hw-col-sub--rooms { white-space: normal; overflow: visible; text-overflow: clip; font-variant-numeric: tabular-nums; }
-.hw-room.is-stale { color: var(--text-mute); }
-.hw-room-sep { color: var(--text-mute); }
+
+/* Per-room mini-cards — the real-time sensor read, one tile per room. Borderless
+   (DESIGN.md): depth from a one-step elevation lift (--bg-card-2) + a faint inset
+   hairline, never a grey frame or a coloured edge. auto-fit so 2 rooms sit side
+   by side and more wrap; the whole point is every room (incl. an outlier) shows. */
+.hw-rooms { display: grid; grid-template-columns: repeat(auto-fit, minmax(76px, 1fr)); gap: var(--space-2); margin-top: var(--space-1); }
+.hw-room-card {
+  display: flex; flex-direction: column; gap: var(--space-0); min-width: 0;
+  padding: var(--space-2);
+  border-radius: var(--radius);
+  background: var(--bg-card-2);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.045);
+}
+/* Light theme: the white inset hairline is invisible on a light --bg-card-2, so
+   the tile loses its edge. Use the DESIGN.md light hairline (matches .hero /
+   .widget, which both ship this override). */
+:root.theme-light .hw-room-card { box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.06); }
+.hw-room-card-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-1); }
+.hw-room-card-name {
+  font-size: var(--font-2xs); font-weight: 700; text-transform: uppercase; letter-spacing: var(--tracking-eyebrow);
+  color: var(--text-mute);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
+}
+.hw-room-card-temp { font-size: var(--font-lg); font-weight: 300; line-height: 1.1; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; color: var(--text); }
+.hw-room-card-hum { font-size: var(--font-2xs); color: var(--text-mute); font-variant-numeric: tabular-nums; }
+.hw-room-card.is-stale .hw-room-card-temp,
+.hw-room-card.is-stale .hw-room-card-name { color: var(--text-mute); }
+/* Per-room freshness dot (mirrors the panel-level .hw-indoor-dot). */
+.hw-room-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--ok); box-shadow: 0 0 7px var(--ok); }
+.hw-room-dot.is-stale { background: var(--warn); box-shadow: 0 0 7px var(--warn); }
 
 /* Panel-level freshness (last indoor reading) + its live dot. */
 .hw-refresh { display: inline-flex; align-items: center; gap: 5px; font-variant-numeric: tabular-nums; }
