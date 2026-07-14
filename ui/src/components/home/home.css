@@ -96,6 +96,11 @@
 }
 /* The live row inside the band drops its own top-margin (the band owns spacing). */
 .live-band .widget-grid { margin: 0; }
+/* Status cards size to their own content instead of stretching to the taller
+ * card's height — Live heating (gauges + thermal + dispatch) is shorter than
+ * Live power (flow diagram), and equal-height stretch left it with a hollow gap.
+ * Top-aligned + content-height reads compact and intentional. */
+.live-band .widget-grid { align-items: start; }
 
 /* Skeleton text — shown while a slow field loads */
 .skel-text {
