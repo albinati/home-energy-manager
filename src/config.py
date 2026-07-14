@@ -1901,6 +1901,27 @@ class Config:
     # learner has measured to be ~2× optimistic for DHW, so seeding from it would
     # inflate the draw by the very error we are trying to correct.
     DHW_MEASURED_COP_FALLBACK: float = float(os.getenv("DHW_MEASURED_COP_FALLBACK", "2.5"))
+    # --- LP-owned DHW timing (#714) ---
+    # The LP times the tank itself instead of following dhw_policy's fixed clock
+    # (warmup 13:00 → 45 °C, setback 22:00 → 37 °C). Ships OFF: it must first be
+    # PROVEN better economically by the shadow log, on identical inputs, with zero
+    # comfort slack. Precedence is passive > LP-owned > the K1 fixed schedule, and
+    # dhw_policy stays intact as both fallback and instant kill-switch — flip this
+    # back to false and the next re-plan restores the fixed schedule exactly.
+    DHW_LP_OWNED_ENABLED: bool = os.getenv(
+        "DHW_LP_OWNED_ENABLED", "false"
+    ).lower() == "true"
+    # Comfort, in the LP-owned regime, is physical: hot water must still reach the
+    # tap while it is being drawn. The tank is floored at the mixer temperature
+    # plus a margin across every drawing slot (soft, with slack — never Infeasible;
+    # lessons #344/#422), and the tank ODE forces the LP to have stored enough
+    # beforehand. Default = DHW_SHOWER_MIXER_TEMP_C (38) + 4.
+    DHW_LP_DELIVERY_FLOOR_C: float = float(os.getenv("DHW_LP_DELIVERY_FLOOR_C", "42.0"))
+    # A 2h bucket drawing less than this is quantisation noise (1 °C ≈ 0.23 kWh on
+    # a 200 L tank), not a shower — flooring the tank for it would heat for nobody.
+    DHW_LP_DRAW_COMFORT_FLOOR_KWH: float = float(
+        os.getenv("DHW_LP_DRAW_COMFORT_FLOOR_KWH", "0.25")
+    )
     DHW_TANK_LEARN_DRAW_WINDOW_DAYS: int = int(
         os.getenv("DHW_TANK_LEARN_DRAW_WINDOW_DAYS", "14")
     )

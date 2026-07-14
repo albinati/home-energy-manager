@@ -85,6 +85,14 @@ class LpPlan:
     soc_kwh: list[float] = field(default_factory=list)       # len N+1
     indoor_temp_c: list[float] = field(default_factory=list)  # len N+1; W3 (#540), empty when off
     temp_outdoor_c: list[float] = field(default_factory=list)
+    dhw_lp_owned: bool = False
+    """True when the LP timed the tank on this solve (#714) rather than following
+    dhw_policy's fixed clock. The dispatch layer gates on THIS, not on config, so
+    a shadow solve can never be mistaken for a committed one — and the snapshot
+    records which regime actually produced the plan."""
+    dhw_measured_draw: bool = False
+    """True when the tank ODE was driven by the MEASURED draw profile rather than
+    dhw_demand's shower model (normal mode + a learned profile)."""
     peak_threshold_pence: float = 0.0
     cheap_threshold_pence: float = 0.0
     pre_negative_export_slots: list[int] = field(default_factory=list)
@@ -274,8 +282,15 @@ def solve_lp(
     micro_climate_offset_by_hour_c: dict[int, float] | None = None,
     export_price_pence: list[float] | None = None,
     soc_floor_kwh: list[float] | None = None,
+    force_dhw_lp_owned: bool = False,
 ) -> LpPlan:
     """Build and solve the MILP. Raises ``ValueError`` on dimension mismatch.
+
+    ``force_dhw_lp_owned`` (default False) runs THIS solve with the LP owning the
+    tank even while ``DHW_LP_OWNED_ENABLED`` is off in config. It exists for the
+    economic shadow (#714 part C), which must compare both regimes on identical
+    inputs without mutating global config — and for the replay backtest. It never
+    reaches hardware: only the committed solve writes actions.
 
     ``micro_climate_offset_c`` (default 0.0) and the optional per-hour
     ``micro_climate_offset_by_hour_c`` map are interpreted as
@@ -319,6 +334,27 @@ def solve_lp(
     offset_default = float(micro_climate_offset_c or 0.0)
     curve = config.DAIKIN_COP_CURVE
     dhw_pen = float(config.COP_DHW_PENALTY)
+
+    # #714 — is the LP timing the tank on this solve? Resolved HERE, before the
+    # COP curve and the tank constants are built, because both change when it is.
+    # Precedence: passive > lp_owned > the K1 pin. Forced off in passive for the
+    # same reason the pin is (#639) — e_dhw is already pinned to the physics
+    # prediction there, and two owners of one variable means Infeasible.
+    passive_daikin = config.DAIKIN_CONTROL_MODE == "passive"
+    _lp_owned = (
+        bool(force_dhw_lp_owned) or bool(getattr(config, "DHW_LP_OWNED_ENABLED", False))
+    ) and not passive_daikin
+    # The measured tank physics (#714 part A) — the ONLY consumer of these
+    # readers. Flag off ⇒ the env constants, byte-for-byte the previous behaviour.
+    _cop_dhw_mult = 1.0
+    if _lp_owned:
+        from ..analytics.tank_thermal_learning import get_dhw_cop_multiplier
+        # Measured DHW COP is 2.55-2.62 against the ~4.70 this curve claims: it is
+        # a SPACE-heating curve, and the lift penalty meant to correct it for DHW's
+        # much higher supply temperature is 0 in prod. Left uncorrected, the LP
+        # would time the tank believing its heat costs half what it does — the
+        # single most decision-relevant error in this regime.
+        _cop_dhw_mult = float(get_dhw_cop_multiplier())
     lift_pen = float(getattr(config, "LP_COP_LIFT_PENALTY_PER_KELVIN", 0.0))
     lwt_off_max_for_cop = float(getattr(config, "OPTIMIZATION_LWT_OFFSET_MAX", 10.0))
     lwt_ceiling = float(getattr(config, "LP_COP_SPACE_LWT_CEILING_C", 50.0))
@@ -360,7 +396,7 @@ def solve_lp(
             cop_s = base_cop
             cop_d = max(1.0, cop_s - dhw_pen)
         cop_space.append(cop_s)
-        cop_dhw.append(cop_d)
+        cop_dhw.append(max(1.0, cop_d * _cop_dhw_mult))
 
     slot_h = 0.5  # 30-minute slots
     max_hp_kwh_per_slot = float(getattr(config, "DAIKIN_MAX_HP_KW", 2.0)) * slot_h
@@ -404,6 +440,14 @@ def solve_lp(
     sqrt_eta = math.sqrt(max(0.01, min(1.0, eta)))
     c_tank = float(config.DHW_TANK_LITRES) * float(config.DHW_WATER_CP)  # J/K
     ua_tank = float(config.DHW_TANK_UA_W_PER_K)
+    if _lp_owned:
+        # Measured: 2.0 W/K (τ ≈ 114 h). The tank coasts at 0.1-0.5 °C/h — nearly
+        # a thermos, which is exactly what makes LP-owned timing worth doing: heat
+        # when it's cheap, then hold almost for free. This number decides how long
+        # the LP believes it can coast through the peak, so it must be the measured
+        # one and not the assumption.
+        from ..analytics.tank_thermal_learning import get_tank_ua_w_per_k
+        ua_tank = float(get_tank_ua_w_per_k())
     j_per_kwh = 3.6e6
     # PR Phase B: ua_bld / c_bld / q_int_j / sg removed — building thermal
     # dynamics no longer modelled in the LP (no indoor temp state variable).
@@ -444,7 +488,8 @@ def solve_lp(
     # is autonomous. We predict the per-slot autonomous draw and clamp e_dhw and
     # e_space to that vector below, so the LP correctly attributes the thermal
     # load when allocating PV/battery/grid. Active mode keeps v9 free variables.
-    passive_daikin = config.DAIKIN_CONTROL_MODE == "passive"
+    # (``passive_daikin`` itself is resolved above, with the COP curve, because
+    # the LP-owned gate needs it.)
     if passive_daikin:
         passive_e_space, passive_e_dhw = predict_passive_daikin_load(
             t_out, cop_dhw, cop_space,
@@ -605,7 +650,16 @@ def solve_lp(
     # vectors differ in essentially every slot → **Infeasible on every solve**.
     # Since `DHW_FIXED_SCHEDULE_ENABLED` defaults true and .env.example ships
     # `DAIKIN_CONTROL_MODE=passive`, a fresh clone used to get a dead LP.
-    _dhw_pinned = bool(getattr(config, "DHW_FIXED_SCHEDULE_ENABLED", False)) and not passive_daikin
+    #
+    # #714 — the LP-OWNED regime (resolved above, with the COP curve) SUPERSEDES
+    # the pin: the LP times the tank itself, so the thermodynamic constraint below
+    # comes back to life and ``e_dhw``/``tank`` are free variables again, bounded
+    # by the comfort floors.
+    _dhw_pinned = (
+        bool(getattr(config, "DHW_FIXED_SCHEDULE_ENABLED", False))
+        and not passive_daikin
+        and not _lp_owned
+    )
     _pinned_e_dhw: list[float] = []
     _pinned_tank: list[float] = []
     if _dhw_pinned:
@@ -710,6 +764,50 @@ def solve_lp(
         return hot_litres * float(config.DHW_WATER_CP) * (t_min_dhw - cold_inlet_c)
 
     shower_draw_j: list[float] = [_draw_j_for_slot(i) for i in range(n)]
+
+    # #714 — MEASURED draw replaces the modelled one when the LP owns the tank.
+    #
+    # The model above is `dhw_demand`'s: N showers × litres × mixer temp, laid
+    # over configured shower WINDOWS. Prod telemetry says the windows are wrong
+    # for this household — the tank visibly falls 41 → 37 °C around 09:00 while
+    # most evenings barely move it, i.e. the water goes in the MORNING, not across
+    # four evening showers. A tank timed against the wrong hours is worse than one
+    # on a fixed clock, so the LP-owned regime uses the measured per-2h-bucket
+    # profile: p75, because under-sizing a draw shows up as a cold shower while
+    # over-sizing costs pence.
+    #
+    # NORMAL mode only. `guests` (more people, unmeasured) and `vacation` (nobody
+    # home) have no measured history to stand on, so they keep the model — the
+    # same normal-only discipline the DHW bias corrector uses.
+    # Delivery floor: the tank must stay above the temperature at which the tap
+    # still runs hot (the mixer temp plus a margin) FOR AS LONG AS water is being
+    # drawn. Comfort in the LP-owned regime is this, plus the ODE — not a nominal
+    # setpoint. Any bucket drawing at least ``_draw_comfort_floor_kwh`` counts as
+    # a real draw and gets the floor; below that it's quantisation noise
+    # (1 °C ≈ 0.23 kWh on this tank) and flooring it would heat for nobody.
+    _delivery_floor_c = float(
+        getattr(config, "DHW_LP_DELIVERY_FLOOR_C", use_temp_c + 4.0)
+    )
+    _draw_comfort_floor_kwh = float(
+        getattr(config, "DHW_LP_DRAW_COMFORT_FLOOR_KWH", 0.25)
+    )
+    _measured_draw = False
+    if _lp_owned and _preset_enum == OperationPreset.NORMAL:
+        from ..analytics.tank_thermal_learning import get_draw_profile_kwh_thermal
+        _profile = get_draw_profile_kwh_thermal(percentile="p75")
+        if _profile:
+            _measured_draw = True
+            _slots_per_bucket = 4  # a 2h bucket holds four 30-min slots
+            for i, st in enumerate(slot_starts_utc):
+                local = st.astimezone(tz)
+                bucket = local.hour // 2
+                kwh = _profile[bucket] / _slots_per_bucket
+                shower_draw_j[i] = kwh * 3.6e6
+                # Comfort is enforced wherever water is ACTUALLY drawn, not where
+                # the windows say it should be. Without re-deriving the mask the
+                # LP would let the tank coast cold into a 09:00 draw it can see in
+                # the physics but has no floor against.
+                shower_mask[i] = kwh * _slots_per_bucket >= _draw_comfort_floor_kwh
 
     # PR C — Vacation: bateria carrega SÓ a partir de PV usada localmente
     # (chg ≤ pv_use). Ninguém em casa → LP nunca importa pra carregar a
@@ -995,11 +1093,20 @@ def solve_lp(
     if not passive_daikin and not _vacation_mode and not _dhw_pinned:
         for i in range(n):
             if shower_mask[i]:
-                kind = _slot_window_kind(slot_starts_utc[i])
-                if kind == "morning":
-                    floor_c = morning_floor_c
+                if _measured_draw:
+                    # With a MEASURED draw the comfort question is physical, not
+                    # nominal: hot water has to still come out of the tap while the
+                    # water is being drawn. So the floor is the delivery
+                    # temperature (mixer temp + margin) held across the draw, and
+                    # the tank ODE — which now subtracts the measured draw — forces
+                    # the LP to have stored enough beforehand. Using the model's
+                    # per-window setpoints here instead would floor the tank at
+                    # hours the household doesn't actually use, and leave the hours
+                    # it does use unprotected.
+                    floor_c = _delivery_floor_c
                 else:
-                    floor_c = evening_floor_c
+                    kind = _slot_window_kind(slot_starts_utc[i])
+                    floor_c = morning_floor_c if kind == "morning" else evening_floor_c
                 s_shower_lo[i] = pulp.LpVariable(f"shower_lo_slack_{i}", lowBound=0)
                 prob += tank[i + 1] + s_shower_lo[i] >= floor_c
 
@@ -1494,6 +1601,8 @@ def solve_lp(
         cheap_threshold_pence=cheap_thr,
         pre_negative_export_slots=[i for i in range(n) if pre_neg_export[i]],
         pv_sufficiency_guard=pv_guard_diag,
+        dhw_lp_owned=_lp_owned,
+        dhw_measured_draw=_measured_draw,
         soc_floor_applied=soc_floor_kwh is not None,
         soc_floor_slack_kwh=(
             float(sum((pulp.value(v) or 0.0) for v in socfloor_slack.values()))
