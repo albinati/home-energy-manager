@@ -1,5 +1,7 @@
 import { useEffect, useRef } from "preact/hooks";
-import { makeChart, baseOption, chartTheme, areaGradient, withAlpha, type EChartsType } from "../../lib/charts";
+import { makeChart, baseOption, chartTheme, areaGradient, withAlpha, timeAxis, insideZoom, forecastWash, isCoarsePointer, SLOT_MS as LW_SLOT_MS, type EChartsType } from "../../lib/charts";
+import { liveWindow, centerWindow, useLiveWindow, type LiveWindowBounds } from "../../lib/liveWindow";
+import { useChartPan } from "../../lib/navMotion";
 import { useResolvedTheme } from "../../lib/theme";
 import { reducedMotion } from "../../lib/motion";
 import type { HeatingPlanResponse, ExecutionTodayResponse, IndoorReadingsResponse } from "../../lib/types";
@@ -32,7 +34,13 @@ function localHM(iso: string): string {
 export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
   const ref = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<EChartsType | null>(null);
+  const boundsRef = useRef<LiveWindowBounds | null>(null);
   const theme = useResolvedTheme();
+  // Shares the live window with the Consumption chart (they pan/follow together,
+  // vertically aligned). The single "● now" chip lives on Consumption and
+  // re-follows all three, so this chart needs no chip of its own.
+  useLiveWindow(chartRef, boundsRef);
+  useChartPan(ref, boundsRef);
 
   useEffect(() => {
     if (!ref.current) return;
@@ -57,6 +65,17 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
     if (!slots.length) return;
     const n = slots.length;
     const labels = slots.map((s) => localHM(s.slot_utc));
+    // TIME AXIS — slot START instants; interval-true bands become literal.
+    const axisMs = slots.map((s) => new Date(s.slot_utc).getTime());
+    const dayStartMs = axisMs[0];
+    const dayEndMs = axisMs[n - 1] + LW_SLOT_MS;
+    const pair = (arr: Array<number | null>): Array<[number, number | null]> =>
+      arr.map((v, i) => [axisMs[i], v]);
+    boundsRef.current = {
+      dayStartMs, dayEndMs,
+      nowMs: plan.now_utc ? new Date(plan.now_utc).getTime() : Date.now(),
+    };
+    const coarse = isCoarsePointer();
 
     const tank = slots.map((s) => (s.tank_temp_c == null ? null : s.tank_temp_c));
     const animate = !reducedMotion();
@@ -101,6 +120,10 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
 
     // Background bands: tariff tiers (same context wash as the Consumption chart)
     // — cheap green, peak amber, negative blue. Replaces the price LINE.
+    // Interval-true tier bands on the time axis: a run [start..end] spans
+    // [axisMs[start], axisMs[end] + SLOT_MS] — the run's first slot START to the
+    // last slot's END. Unifies the band geometry with the Consumption chart (this
+    // widget's old `[start-0.5, end+0.5]` convention was the third variant).
     type BandItem = [{ xAxis: number; itemStyle: object }, { xAxis: number }];
     const bands: BandItem[] = [];
     const runs = (pred: (i: number) => boolean, fill: object) => {
@@ -108,28 +131,36 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
       for (let i = 0; i <= n; i++) {
         const on = i < n && pred(i);
         if (on && start < 0) start = i;
-        if (!on && start >= 0) { bands.push([{ xAxis: start - 0.5, itemStyle: fill }, { xAxis: i - 1 + 0.5 }]); start = -1; }
+        if (!on && start >= 0) { bands.push([{ xAxis: axisMs[start], itemStyle: fill }, { xAxis: axisMs[i - 1] + LW_SLOT_MS }]); start = -1; }
       }
     };
     runs((i) => slots[i].tier === "cheap", { color: withAlpha(t.cheap, 0.09) });
     runs((i) => slots[i].tier === "peak", { color: withAlpha(t.peak, 0.10) });
     runs((i) => slots[i].tier === "negative", { color: withAlpha(t.neg, 0.22), borderColor: withAlpha(t.neg, 0.85), borderWidth: 1 });
 
-    const dayStartIdx = (plan.days || []).map((d) => slots.findIndex((s) => s.slot_utc >= d.start_utc)).filter((i) => i > 0);
     const nowMs = plan.now_utc ? new Date(plan.now_utc).getTime() : Date.now();
-    const firstMs = new Date(slots[0].slot_utc).getTime();
-    const lastMs = new Date(slots[n - 1].slot_utc).getTime() + 30 * 60_000;
-    let nowIdx = -1;
-    if (nowMs >= firstMs && nowMs < lastMs) {
-      const idx = slots.findIndex((s) => new Date(s.slot_utc).getTime() > nowMs);
-      nowIdx = idx <= 0 ? n - 1 : idx - 1;
-    }
-    const dayLines = dayStartIdx.map((i) => ({
-      xAxis: i, lineStyle: { color: withAlpha(t.textMute, 0.35), width: 1, type: "solid" as const }, label: { show: false },
-    }));
-    const nowLine = nowIdx >= 0
-      ? [{ xAxis: nowIdx, lineStyle: { color: t.text, width: 1.5, opacity: 0.5 }, label: { show: false } }]
+    const nowInRange = nowMs >= dayStartMs && nowMs < dayEndMs;
+    // Day boundary lines → real timestamps.
+    const dayLines = (plan.days || [])
+      .map((d) => new Date(d.start_utc).getTime())
+      .filter((ms) => ms > dayStartMs && ms < dayEndMs)
+      .map((ms) => ({ xAxis: ms, lineStyle: { color: withAlpha(t.textMute, 0.35), width: 1, type: "solid" as const }, label: { show: false } }));
+    const nowLine = nowInRange
+      ? [{ xAxis: nowMs, lineStyle: { color: t.text, width: 1.5, opacity: 0.5 }, label: { show: false } }]
       : [];
+    const washArea = nowInRange ? forecastWash(nowMs, dayEndMs) : [];
+    // Initial window (same follow/browse-preserving read as the Consumption chart).
+    const lw = liveWindow.value;
+    const win = (lw.startMs && lw.endMs && !lw.follow)
+      ? { startMs: lw.startMs, endMs: lw.endMs }
+      : centerWindow(nowMs, dayStartMs, dayEndMs);
+    // Y value at now for the pulse (nearest slot's realised temp).
+    const nowY = (() => {
+      if (!nowInRange) return 20;
+      let idx = axisMs.findIndex((ms) => ms > nowMs);
+      idx = idx <= 0 ? n - 1 : idx - 1;
+      return indoorReal[idx] ?? lwtReal[idx] ?? tankReal[idx] ?? 20;
+    })();
 
     chartRef.current.setOption({
       ...base,
@@ -154,7 +185,12 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
           return rows.join("<br/>");
         },
       },
-      xAxis: { ...(base.xAxis as object), data: labels, axisLabel: { color: t.textMute, fontSize: 10, interval: 5 } },
+      // Live window (see Consumption chart): desktop = full-day axis + inside
+      // dataZoom; touch = window as axis min/max + useChartPan.
+      xAxis: coarse
+        ? { ...timeAxis(win.startMs, win.endMs), axisLabel: { color: t.textMute, fontSize: 10, hideOverlap: true, formatter: "{HH}:{mm}" } }
+        : { ...timeAxis(dayStartMs, dayEndMs), axisLabel: { color: t.textMute, fontSize: 10, hideOverlap: true, formatter: "{HH}:{mm}" } },
+      ...(coarse ? {} : { dataZoom: [insideZoom(win.startMs, win.endMs)] }),
       // Single °C axis (price is now conveyed by the tariff bands, not a line).
       // grid.right kept so the plot box still lines up with Generation/Consumption.
       yAxis: [
@@ -162,35 +198,35 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
           axisLabel: { color: t.textMute, fontSize: 10, formatter: "{value}" } },
       ],
       series: [
-        { name: "_bg", type: "line", data: slots.map(() => null), silent: true, z: 0,
-          markArea: bands.length ? { silent: true, data: bands } : undefined,
+        { name: "_bg", type: "line", data: axisMs.map((ms) => [ms, null]), silent: true, z: 0,
+          markArea: (bands.length || washArea.length) ? { silent: true, data: [...washArea, ...bands] } : undefined,
           markLine: (dayLines.length || nowLine.length) ? { silent: true, symbol: "none", data: [...dayLines, ...nowLine] } : undefined },
         // ── REFERENCE — indoor room temp, REALISED (cyan solid). Outdoor
         //    removed per request. ──
         { name: "Indoor", type: "line", smooth: true, showSymbol: false, connectNulls: false,
-          data: indoorReal, lineStyle: { color: t.cool, width: 2.5, cap: "round" }, z: 4 },
+          data: pair(indoorReal), lineStyle: { color: t.cool, width: 2.5, cap: "round" }, z: 4 },
         // W3: planned indoor (LP committed) — dashed cyan, only when W3 is on.
         ...(hasIndoorPlan ? [{
           name: "Indoor planned", type: "line" as const, smooth: true, showSymbol: false,
-          connectNulls: false, data: indoorPlanned,
+          connectNulls: false, data: pair(indoorPlanned),
           lineStyle: { color: t.cool, width: 1.5, type: "dashed" as const, cap: "round" as const, opacity: 0.8 }, z: 3,
         }] : []),
         // ── TANK / DHW (orange). Planned target (dashed) vs realised (solid). ──
         { name: "Tank planned", type: "line", step: "middle", showSymbol: false, connectNulls: false,
-          data: tank, lineStyle: { color: t.thermal, width: 1.5, type: "dashed", cap: "round" }, z: 3 },
+          data: pair(tank), lineStyle: { color: t.thermal, width: 1.5, type: "dashed", cap: "round" }, z: 3 },
         { name: "Tank realised", type: "line", step: "middle", showSymbol: false, connectNulls: false,
-          data: tankReal, lineStyle: { color: t.thermal, width: 2.5, cap: "round" }, z: 4 },
+          data: pair(tankReal), lineStyle: { color: t.thermal, width: 2.5, cap: "round" }, z: 4 },
         // ── HEATING / radiator LWT (purple) — REALISED only (the Daikin's logged
         //    leaving-water temp across the day). Plan line dropped per request.
         { name: "LWT realised", type: "line", smooth: true, showSymbol: false, connectNulls: false,
-          data: lwtReal, lineStyle: { color: t.house, width: 3, cap: "round" },
+          data: pair(lwtReal), lineStyle: { color: t.house, width: 3, cap: "round" },
           areaStyle: { color: areaGradient(t.house, 0.12, 0.0) }, z: 5 },
-        ...(nowIdx >= 0 ? [{
-          name: "_now", type: "effectScatter", silent: true, coordinateSystem: "cartesian2d",
+        ...(nowInRange ? [{
+          name: "_now", type: "effectScatter", silent: true,
           symbolSize: 8, z: 6, showEffectOn: "render",
           rippleEffect: { period: animate ? 2.4 : 0, scale: animate ? 3.0 : 1, brushType: "stroke" },
           itemStyle: { color: t.accent, shadowBlur: 8, shadowColor: t.accent },
-          data: [[nowIdx, indoorReal[nowIdx] ?? lwtReal[nowIdx] ?? tankReal[nowIdx] ?? 20]],
+          data: [[nowMs, nowY]],
         }] : []),
       ],
     }, { notMerge: true });

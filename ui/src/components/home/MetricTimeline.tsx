@@ -1,7 +1,9 @@
 import { useEffect, useRef } from "preact/hooks";
-import { makeChart, baseOption, chartTheme, areaGradient, withAlpha, barGradient, type EChartsType } from "../../lib/charts";
+import { makeChart, baseOption, chartTheme, areaGradient, withAlpha, barGradient, timeAxis, insideZoom, forecastWash, isCoarsePointer, SLOT_MS, type EChartsType } from "../../lib/charts";
 import { useResolvedTheme } from "../../lib/theme";
 import { reducedMotion } from "../../lib/motion";
+import { liveWindow, centerWindow, useLiveWindow, type LiveWindowBounds } from "../../lib/liveWindow";
+import { useChartPan } from "../../lib/navMotion";
 
 // One reusable timeline chart shared by the Solar / Grid / Load widgets so the
 // three read identically (the user's "4 widgets, same forecast-vs-actual line"
@@ -45,6 +47,11 @@ interface MetricTimelineProps {
   priceColor?: string;          // right-axis line colour (import red / export green)
   /** Slot index of "now" (intraday only); -1 / undefined to hide. */
   nowIdx?: number;
+  /** Live-window mode (intraday day view): per-slot START timestamps + the day
+   *  bounds. When present (and not barMode), the chart switches to a real time
+   *  axis with the NOW-centred rolling window (shared with the other cockpit
+   *  charts). Absent → the legacy category axis + integer nowIdx. */
+  live?: { axisMs: number[]; dayStartMs: number; dayEndMs: number; nowMs: number };
   cheapAt?: number | null;
   peakAt?: number | null;
   /** Render `lines` as grouped bars (period mode) instead of an intraday chart. */
@@ -57,12 +64,16 @@ type Tier = "negative" | "cheap" | "standard" | "peak" | null;
 
 export function MetricTimeline({
   labels, lines, prices, bandPrices, priceLabel = "Import price", priceColor,
-  nowIdx = -1, cheapAt, peakAt, barMode = false, height = 260, unit = "kWh",
+  nowIdx = -1, live, cheapAt, peakAt, barMode = false, height = 260, unit = "kWh",
 }: MetricTimelineProps) {
   const ref = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<EChartsType | null>(null);
   const sigRef = useRef<string>("");
+  const boundsRef = useRef<LiveWindowBounds | null>(null);
   const theme = useResolvedTheme();
+  // Live window (shared with the other cockpit charts) — only in intraday mode.
+  useLiveWindow(chartRef, boundsRef);
+  useChartPan(ref, boundsRef);
 
   useEffect(() => {
     if (!ref.current) return;
@@ -82,6 +93,21 @@ export function MetricTimeline({
     const t = chartTheme();
     const base = baseOption();
     const animate = !reducedMotion();
+    // Live-window mode: real time axis + rolling window (intraday day view only).
+    const lv = !barMode && live && live.axisMs.length === labels.length ? live : null;
+    boundsRef.current = lv ? { dayStartMs: lv.dayStartMs, dayEndMs: lv.dayEndMs, nowMs: lv.nowMs } : null;
+    const coarse = lv ? isCoarsePointer() : false;
+    // In live mode, series data become [ts, value]; the tariff bands + now marker
+    // use real timestamps (interval-true becomes literal).
+    const pair = (arr: (number | null)[]): Array<[number, number | null]> | (number | null)[] =>
+      lv ? arr.map((v, i): [number, number | null] => [lv.axisMs[i], v]) : arr;
+    const nowInRange = !!lv && lv.nowMs >= lv.dayStartMs && lv.nowMs < lv.dayEndMs;
+    const win = lv
+      ? ((liveWindow.value.startMs && liveWindow.value.endMs && !liveWindow.value.follow)
+          ? { startMs: liveWindow.value.startMs, endMs: liveWindow.value.endMs }
+          : centerWindow(lv.nowMs, lv.dayStartMs, lv.dayEndMs))
+      : { startMs: 0, endMs: 0 };
+    const washArea = nowInRange ? forecastWash(lv!.nowMs, lv!.dayEndMs) : [];
     // Right p-axis exists when there's a `prices` series OR any isPrice line.
     const hasPriceLines = lines.some((l) => l.isPrice);
     const hasPrice = !barMode && ((prices?.some((p) => p != null) ?? false) || hasPriceLines);
@@ -123,9 +149,14 @@ export function MetricTimeline({
       let runTier: Tier = null;
       const flush = (endIdx: number) => {
         if (runStart < 0 || runTier == null) return;
-        // Interval-true: category i = slot START; the slot spans [i, i+1]
-        // (see EnergyChartWidget — the old cell-centred band drew 15 min early).
-        bands.push([{ xAxis: runStart, itemStyle: tierFill(runTier) }, { xAxis: Math.min(endIdx + 1, labels.length - 0.5) }]);
+        // Interval-true: slot i spans [start, end]. Live mode uses real
+        // timestamps ([axisMs[start], axisMs[end]+SLOT_MS]); category mode keeps
+        // the fractional index the old cell-centred fix required.
+        if (lv) {
+          bands.push([{ xAxis: lv.axisMs[runStart], itemStyle: tierFill(runTier) }, { xAxis: lv.axisMs[endIdx] + SLOT_MS }]);
+        } else {
+          bands.push([{ xAxis: runStart, itemStyle: tierFill(runTier) }, { xAxis: Math.min(endIdx + 1, labels.length - 0.5) }]);
+        }
       };
       labels.forEach((_, i) => {
         const cur = tierOf(prices[i] ?? null);
@@ -148,7 +179,7 @@ export function MetricTimeline({
       }
       return {
         name: ln.name, type: "line", smooth: true, showSymbol: false, connectNulls: false,
-        color: ln.color, data: ln.data, yAxisIndex: ln.isPrice ? 1 : (ln.yAxis ?? 0),
+        color: ln.color, data: pair(ln.data), yAxisIndex: ln.isPrice ? 1 : (ln.yAxis ?? 0),
         step: ln.step || ln.isPrice ? "end" : undefined,
         lineStyle: {
           color: ln.color, width: ln.width ?? (ln.dashed ? 1.25 : 2.5),
@@ -172,7 +203,8 @@ export function MetricTimeline({
     // Same line/bar structure as the previous render → MERGE so ECharts
     // tweens the series to the new day's data (sliding-day morph); any
     // structural change (series added/removed, bar↔line) → full rebuild.
-    const sig = `${barMode}|${hasPrice}|${hasBands}|` + lines.map((l) => `${l.name}:${l.line ? "l" : ""}${l.dashed ? "d" : ""}`).join(",");
+    // `lv` toggles the axis type → force a full rebuild when it flips (category↔time).
+    const sig = `${barMode}|${!!lv}|${coarse}|${hasPrice}|${hasBands}|` + lines.map((l) => `${l.name}:${l.line ? "l" : ""}${l.dashed ? "d" : ""}`).join(",");
     chartRef.current.setOption({
       ...base,
       grid: { left: 16, right: hasPrice ? 44 : 16, top: 16, bottom: 24, containLabel: true },
@@ -196,16 +228,23 @@ export function MetricTimeline({
           return `<strong>${arr[0].axisValue ?? ""}</strong>${rows}`;
         },
       },
-      xAxis: {
-        ...(base.xAxis as object), data: labels,
-        axisLabel: { color: t.textMute, fontSize: 10, interval: barMode ? "auto" : 5 },
-      },
+      // Live mode → time axis (window via dataZoom on desktop, axis min/max on
+      // touch); else the legacy category axis.
+      xAxis: lv
+        ? (coarse
+            ? { ...timeAxis(win.startMs, win.endMs), axisLabel: { color: t.textMute, fontSize: 10, hideOverlap: true, formatter: "{HH}:{mm}" } }
+            : { ...timeAxis(lv.dayStartMs, lv.dayEndMs), axisLabel: { color: t.textMute, fontSize: 10, hideOverlap: true, formatter: "{HH}:{mm}" } })
+        : { ...(base.xAxis as object), data: labels, axisLabel: { color: t.textMute, fontSize: 10, interval: barMode ? "auto" : 5 } },
+      ...(lv && !coarse ? { dataZoom: [insideZoom(win.startMs, win.endMs)] } : {}),
       yAxis: yAxes,
       series: [
-        // Silent baseline carries the tariff bands + now marker (intraday only).
+        // Silent baseline carries the tariff bands + forecast wash + now marker.
         ...(!barMode ? [{
-          name: "_bands", type: "line", data: labels.map(() => null), silent: true,
-          markArea: bands.length ? { silent: true, data: bands } : undefined,
+          name: "_bands", type: "line", data: lv ? lv.axisMs.map((ms) => [ms, null]) : labels.map(() => null), silent: true,
+          markArea: (bands.length || washArea.length) ? { silent: true, data: [...washArea, ...bands] } : undefined,
+          markLine: nowInRange ? { silent: true, symbol: "none",
+            lineStyle: { color: t.text, width: 1.5, type: "solid", opacity: 0.5 },
+            label: { show: false }, data: [{ xAxis: lv!.nowMs }] } : undefined,
           z: 0,
         }] : []),
         ...kwhSeries,
@@ -213,20 +252,20 @@ export function MetricTimeline({
         // widget (export on generation, import on consumption).
         ...(hasPrice ? [{
           name: priceLabel, type: "line", step: "end", showSymbol: false, color: priceColor ?? t.importColor,
-          yAxisIndex: 1, data: prices, lineStyle: { color: priceColor ?? t.importColor, width: 1.5, opacity: 0.85, type: "dashed" }, z: 1,
+          yAxisIndex: 1, data: pair(prices ?? []), lineStyle: { color: priceColor ?? t.importColor, width: 1.5, opacity: 0.85, type: "dashed" }, z: 1,
         }] : []),
-        // Pulsing "now" ripple at the current slot.
-        ...(!barMode && nowIdx >= 0 ? [{
-          name: "_now", type: "effectScatter", silent: true, coordinateSystem: "cartesian2d",
+        // Pulsing "now": a real timestamp in live mode, else the integer slot.
+        ...(!barMode && (lv ? nowInRange : nowIdx >= 0) ? [{
+          name: "_now", type: "effectScatter", silent: true,
           symbolSize: 9, z: 6, showEffectOn: "render",
           rippleEffect: { period: animate ? 2.4 : 0, scale: animate ? 3 : 1, brushType: "stroke" },
           itemStyle: { color: t.accent, shadowBlur: 8, shadowColor: t.accent },
-          data: [[nowIdx, 0]],
+          data: [[lv ? lv.nowMs : nowIdx, 0]],
         }] : []),
       ],
     }, { notMerge: sig !== sigRef.current });
     sigRef.current = sig;
-  }, [labels, lines, prices, nowIdx, cheapAt, peakAt, barMode, theme, unit]);
+  }, [labels, lines, prices, nowIdx, live, cheapAt, peakAt, barMode, theme, unit]);
 
   // Text alternative for screen readers — the canvas itself is opaque to AT,
   // so name the series + unit (and the price overlay when present).

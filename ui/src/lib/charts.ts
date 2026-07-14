@@ -171,6 +171,81 @@ export function baseOption(): Record<string, unknown> {
   };
 }
 
+// --- Live-window (time-axis) factories ------------------------------------
+//
+// The cockpit intraday charts move from a category axis (integer slot index) to
+// a real `time` axis so NOW is a continuous position and a rolling window is
+// expressible. On a time axis, interval-true bands become LITERAL — a 30-min
+// slot spans [slotStartMs, slotStartMs + SLOT_MS] — instead of the fractional
+// `±0.5` index arithmetic that misplaced bands by 15 min twice (#636/#637).
+
+export const SLOT_MS = 30 * 60_000;
+
+/** Touch-primary device? Drives the live-window interaction split: fine pointers
+ *  (desktop) get ECharts `inside` dataZoom (mouse drag + wheel); coarse pointers
+ *  (touch) express the window as the axis min/max and pan via our own
+ *  horizontal-only gesture, so a vertical finger-drag still scrolls the page
+ *  (ECharts' inside touch-roam would eat it). */
+export function isCoarsePointer(): boolean {
+  if (typeof window === "undefined" || !window.matchMedia) return false;
+  return window.matchMedia("(pointer: coarse)").matches;
+}
+
+/** A time x-axis bounded to [min, max] (typically today's local midnight..+24h).
+ *  Bounding means zoom-out reveals exactly the day and pan can't run into empty
+ *  space beyond it. */
+export function timeAxis(min: number, max: number): Record<string, unknown> {
+  const t = chartTheme();
+  return {
+    type: "time",
+    min,
+    max,
+    axisLine: { show: false },
+    axisTick: { show: false },
+    axisLabel: {
+      color: t.textMute,
+      fontSize: 11,
+      hideOverlap: true,
+      formatter: "{HH}:{mm}",
+    },
+  };
+}
+
+/** An `inside` dataZoom windowed to [startValue, endValue] (timestamps).
+ *  `filterMode:"none"` so panning/zooming never drops points or rescales y.
+ *  Desktop: wheel zooms, mouse-drag pans. Touch pan is driven by our own
+ *  passive gesture (see useLiveWindow) so a vertical finger-drag still scrolls
+ *  the page — ECharts' `inside` would otherwise eat it. */
+export function insideZoom(startValue: number, endValue: number): Record<string, unknown> {
+  return {
+    type: "inside",
+    xAxisIndex: 0,
+    startValue,
+    endValue,
+    filterMode: "none",
+    zoomLock: false,
+    zoomOnMouseWheel: true,
+    moveOnMouseWheel: false,
+    moveOnMouseMove: true,
+    // Touch: two-finger pinch to zoom is fine (can't be confused with scroll);
+    // single-finger pan is handled by useLiveWindow's passive gesture, not here.
+    preventDefaultMouseMove: true,
+  };
+}
+
+/** A whisper-quiet wash over [nowMs, dayEndMs] — "everything to the right is
+ *  forecast/plan, not yet real". Sits under the tariff bands (caller gives it a
+ *  lower z). Its left edge advances as now moves, so the tinted region shrinks
+ *  through the day. */
+export function forecastWash(nowMs: number, dayEndMs: number): Array<Array<Record<string, unknown>>> {
+  const t = chartTheme();
+  if (nowMs >= dayEndMs) return [];
+  return [[
+    { xAxis: nowMs, itemStyle: { color: withAlpha(t.textMute, 0.05) } },
+    { xAxis: dayEndMs },
+  ]];
+}
+
 export function makeChart(el: HTMLDivElement): EChartsType {
   const chart = echarts.init(el, undefined, { renderer: "canvas" });
   // Central resize handling: ECharts snapshots the container size at init
