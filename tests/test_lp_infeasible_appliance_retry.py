@@ -143,7 +143,20 @@ class _TwoPhaseSolver:
         return plan
 
 
-@pytest.mark.skip(reason="Pre-existing failure tracked in #383 — appliance-drop retry not triggering")
+def _today_utc() -> datetime:
+    """Midnight UTC of the REAL current day.
+
+    #383: these fixtures were pinned to 2026-04-22, but the horizon extender's
+    priors query (``db.get_half_hourly_agile_priors``) cuts off at
+    ``datetime.now(UTC) - 28d`` on the REAL clock. Once the pinned date aged out,
+    the priors came back EMPTY, the horizon truncated to ~5 h, and the seeded
+    D+1 appliance at 01:30 fell OUTSIDE it — so ``appliance_kwh_total`` was zero,
+    the retry guard never fired, and the test saw 1 solve instead of 2.
+    The retry code was correct all along.
+    """
+    return datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+
+
 def test_lp_infeasible_with_appliance_retries_without_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -152,12 +165,13 @@ def test_lp_infeasible_with_appliance_retries_without_it(
     The optimizer must then proceed down the Optimal path (no held-schedule
     return) and the strategy_summary must surface the appliance exclusion.
     """
-    now = datetime(2026, 4, 22, 18, 0, tzinfo=UTC)
+    today = _today_utc()
+    now = today + timedelta(hours=18)
     monkeypatch.setattr(optimizer, "_now_utc", lambda: now)
-    _seed_realistic_day(datetime(2026, 4, 22, 0, 0, tzinfo=UTC))
+    _seed_realistic_day(today)
     # Place the washer inside the LP horizon (next 48 h from now=18:00 UTC).
     _seed_armed_washer(
-        planned_start=datetime(2026, 4, 23, 1, 30, tzinfo=UTC),
+        planned_start=today + timedelta(days=1, hours=1, minutes=30),
         duration_min=90,
     )
 
@@ -187,9 +201,9 @@ def test_lp_infeasible_with_appliance_retries_without_it(
     )
 
     # The strategy_summary on the daily_target row must note the exclusion.
-    target = db.get_daily_target("2026-04-23")
+    target = db.get_daily_target((today + timedelta(days=1)).date().isoformat())
     if target is None:
-        target = db.get_daily_target("2026-04-22")
+        target = db.get_daily_target(today.date().isoformat())
     assert target is not None, "no daily_target row written after retry"
     assert "appliance" in (target.get("strategy_summary") or "").lower(), (
         f"strategy_summary missing appliance-exclusion note: "
@@ -197,7 +211,6 @@ def test_lp_infeasible_with_appliance_retries_without_it(
     )
 
 
-@pytest.mark.skip(reason="Pre-existing failure tracked in #383 — appliance-drop retry not triggering")
 def test_lp_infeasible_with_appliance_double_fail_falls_through_to_hold(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -206,11 +219,12 @@ def test_lp_infeasible_with_appliance_double_fail_falls_through_to_hold(
     (no Fox upload) and the audit row must mention that the appliance retry
     was also Infeasible. This is the "appliance isn't the cause" branch.
     """
-    now = datetime(2026, 4, 22, 18, 0, tzinfo=UTC)
+    today = _today_utc()
+    now = today + timedelta(hours=18)
     monkeypatch.setattr(optimizer, "_now_utc", lambda: now)
-    _seed_realistic_day(datetime(2026, 4, 22, 0, 0, tzinfo=UTC))
+    _seed_realistic_day(today)
     _seed_armed_washer(
-        planned_start=datetime(2026, 4, 23, 1, 30, tzinfo=UTC),
+        planned_start=today + timedelta(days=1, hours=1, minutes=30),
         duration_min=90,
     )
 
@@ -270,9 +284,10 @@ def test_lp_infeasible_without_appliance_does_not_retry(
     intervention for appliance-induced infeasibility, not a generic re-try
     loop.
     """
-    now = datetime(2026, 4, 22, 18, 0, tzinfo=UTC)
+    today = _today_utc()
+    now = today + timedelta(hours=18)
     monkeypatch.setattr(optimizer, "_now_utc", lambda: now)
-    _seed_realistic_day(datetime(2026, 4, 22, 0, 0, tzinfo=UTC))
+    _seed_realistic_day(today)
     # No appliance seeded — appliance_load_profile_kw returns {}.
 
     calls: list[int] = []
