@@ -581,6 +581,97 @@ def _api_v1_weather_sync():
     return {"forecast": out, "daikin": daikin}
 
 
+@app.get("/api/v1/weather/now")
+async def api_v1_weather_now():
+    """Tiny current-conditions payload for the ESPHome room sensors (~120 bytes).
+
+    ``/api/v1/weather`` returns a 96 h forecast — ~15 KB of JSON. An ESP32 CAN
+    parse that (``http_request`` + ``json``), but the whole body lands in RAM with
+    the parsed document on top, on a heap that also pays a ~2 s TLS handshake.
+    Over weeks that fragments. The server already holds the data, so it does the
+    work.
+
+    "Current" conditions are the NEAREST forecast hour. The upstream fetch
+    (``weather._fetch...``) drops every hour already past, so the freshest hour it
+    returns is the next top-of-hour — within ~1 h of now (and the 900 s cache can
+    add up to ~15 min). Good enough for a room display; the sensor is not steering
+    anything on this.
+
+    ``rain_in_h`` is the reason this is not just a client-side slice: it needs the
+    WHOLE forecast to answer "how many hours until the next rain" — which is
+    exactly the thing the sensor cannot afford to fetch. It scans STRICTLY AFTER
+    the reported hour, so a wet current hour never reads as "rain in 0 h". ``null``
+    = no rain in the horizon.
+
+    AUTH: **not** part of the token-free viewer surface. The sensor sits on the
+    house LAN and reaches HEM through the PUBLIC Tailscale funnel, so a
+    token-free route here is a route the whole internet can read. It takes the
+    same scoped ``HEM_SENSOR_INGEST_TOKEN`` the sensor already carries to POST
+    ``/sensors/indoor`` (see ``ApiV1RoleAuth.ingest_read_routes``), or an admin
+    token. Everyone else: 401.
+    """
+    return await asyncio.to_thread(_api_v1_weather_now_sync)
+
+
+# Rain: WMO codes 51+ are drizzle/rain/snow/showers/thunder. 0-3 clear→overcast,
+# 45/48 fog. See https://open-meteo.com/en/docs (weather_code).
+_WMO_RAIN_MIN = 51
+_RAIN_MM_EPS = 0.05          # below this, "precipitation" is numerical noise
+
+
+def _api_v1_weather_now_sync():
+    from datetime import UTC as _UTC, datetime as _dt
+
+    from ..weather import fetch_weather_panel_forecast_cached
+
+    fc = fetch_weather_panel_forecast_cached(hours=96)   # same 900 s cache as /weather
+    if not fc:
+        raise HTTPException(status_code=503, detail="no forecast available")
+
+    now = _dt.now(_UTC)
+    # The upstream fetch already dropped every past hour, so the freshest hour it
+    # returns (fc[0]) is the nearest one to now. Pick the last hour that is <= now
+    # if one is present (belt-and-braces for a source that ever includes the
+    # current hour), else fall back to that nearest future hour — NOT a
+    # hours-ahead one, because there is no `else: break` bug to skip past it here.
+    cur = fc[0]
+    for f in fc:
+        if f.time_utc <= now:
+            cur = f
+        else:
+            break
+
+    def _is_rain(f) -> bool:
+        code = f.weather_code
+        if code is not None and int(code) >= _WMO_RAIN_MIN:
+            return True
+        return (f.precipitation_mm or 0.0) >= _RAIN_MM_EPS
+
+    # Scan STRICTLY AFTER the reported hour so a wet current hour is never counted
+    # as future rain (which would give the contradictory "raining now AND in 0 h").
+    rain_in_h = None
+    for f in fc:
+        if f.time_utc <= cur.time_utc:
+            continue
+        if _is_rain(f):
+            # Hours from the reported hour, rounded to the nearest whole hour but
+            # floored at 1 — "next rain" is always at least the next hour, never 0.
+            delta_h = (f.time_utc - cur.time_utc).total_seconds() / 3600.0
+            rain_in_h = max(1, round(delta_h))
+            break
+
+    def _r(v, n=1):
+        return None if v is None else round(float(v), n)
+
+    return {
+        "temp_c": _r(cur.temperature_c),
+        "weather_code": None if cur.weather_code is None else int(cur.weather_code),
+        "precipitation_mm": _r(cur.precipitation_mm),
+        "rain_in_h": rain_in_h,
+        "pv_now_kw": _r(cur.estimated_pv_kw, 2),
+    }
+
+
 @app.get("/api/v1/health")
 async def health():
     """Lightweight health check for gateways and process managers."""

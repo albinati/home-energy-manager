@@ -277,10 +277,36 @@ casa** alcança o HEM **no Hetzner** reusando o **funnel Tailscale do `hem-ui`
 `HEM_SENSOR_INGEST_TOKEN`, que destrava **apenas** essa rota (nunca o admin).
 
 O que protege, em camadas: o funnel termina TLS (bearer nunca trafega em claro);
-`ApiV1RoleAuth` deixa o token de ingestão satisfazer **só** um write em
-`/api/v1/sensors/indoor` — 401 em qualquer outra escrita e em toda leitura
-admin (Settings/Journal). Um vazamento do firmware só consegue postar
-temperatura falsa nessa rota; rotacione o token pra revogar o device.
+`ApiV1RoleAuth` deixa o token de ingestão satisfazer **só duas rotas exatas** —
+um `POST /api/v1/sensors/indoor` e um `GET /api/v1/weather/now`. 401 em qualquer
+outra escrita e em toda leitura admin (Settings/Journal), e os verbos não cruzam
+entre as duas listas. É um chaveiro de duas chaves, não uma credencial de viewer.
+Um vazamento do firmware só consegue postar temperatura falsa numa rota e ler o
+tempo na outra; rotacione o token pra revogar o device.
+
+### `GET /api/v1/weather/now` — o payload enxuto do sensor (~120 bytes)
+
+`GET /api/v1/weather` devolve 96 h de previsão — **~15 KB de JSON**. Um ESP32
+consegue parsear isso, mas o corpo inteiro vai pra RAM com o documento parseado
+por cima, num heap que já paga um handshake TLS de ~2 s. Ao longo de semanas isso
+fragmenta. O servidor já tem os dados na mão, então ele faz o trabalho:
+
+```json
+{"temp_c":21.2,"weather_code":3,"precipitation_mm":0.0,"rain_in_h":6,"pv_now_kw":1.32}
+```
+
+`weather_code` é o padrão WMO/Open-Meteo (0 = limpo, 1–3 nublado progressivo,
+45/48 neblina, 51+ garoa/chuva/neve/pancada/trovoada) — direto pra escolher ícone.
+
+`rain_in_h` é a razão de isso não ser só um slice do lado do cliente: ele precisa
+da previsão **inteira** pra responder "daqui a quantas horas chove" — justamente o
+que o sensor não pode se dar ao luxo de baixar. `null` = sem chuva no horizonte.
+Chuva **atual** não conta como chuva futura.
+
+⚠️ **Esta rota NÃO é viewer-open**, ao contrário do `/api/v1/weather`. O sensor
+fala com o HEM pelo funnel **público**, então uma rota sem token aqui é uma rota
+que a internet inteira lê. Ela exige o mesmo `HEM_SENSOR_INGEST_TOKEN` que o
+sensor já carrega (ou o admin).
 
 ```bash
 # 1. Gera o token escopado e adiciona no .env do HEM.

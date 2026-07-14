@@ -203,9 +203,23 @@ class ApiV1RoleAuth:
             "/api/v1/recent-triggers",
             "/api/v1/integrations",   # SmartThings credentials / OAuth
             "/api/v1/workbench",      # LP override sandbox (admin tool, in Settings)
+            # NOT viewer-open: the ESPHome sensor reaches this through the PUBLIC
+            # Tailscale funnel, so a token-free weather route is one the whole
+            # internet can read. The scoped ingest token unlocks it
+            # (``ingest_read_routes``); everyone else gets 401.
+            "/api/v1/weather/now",
         ),
         ingest_tokens: Iterable[TokenLike] = (),
         ingest_write_routes: Iterable[str] = ("/api/v1/sensors/indoor",),
+        # Reads the scoped ingest token unlocks. Kept SEPARATE from the write
+        # routes and matched EXACTLY, so the token stays a two-key keyring, not a
+        # viewer credential: it can post to one endpoint and read one endpoint.
+        #
+        # ``/weather/now`` is also in ``admin_read_prefixes`` below — i.e. it is
+        # NOT part of the token-free viewer surface. A device on the house LAN
+        # reaches HEM through the public Tailscale funnel, so an unauthenticated
+        # weather route there is a route the whole internet can read.
+        ingest_read_routes: Iterable[str] = ("/api/v1/weather/now",),
     ) -> None:
         self.app = app
         self._admin_tokens = list(admin_tokens)
@@ -222,6 +236,7 @@ class ApiV1RoleAuth:
         # `/sensors/indoor/purge` must NOT ride this token silently.
         self._ingest_tokens = list(ingest_tokens)
         self._ingest_write_routes = frozenset(ingest_write_routes)
+        self._ingest_read_routes = frozenset(ingest_read_routes)
 
     def _needs_admin(self, method: str, path: str) -> bool:
         if method.upper() not in SAFE_METHODS:
@@ -229,12 +244,23 @@ class ApiV1RoleAuth:
         return any(path.startswith(p) for p in self._admin_read_prefixes)
 
     def _ingest_allowed(self, method: str, path: str) -> bool:
-        """True only for an EXACT `POST <allowlisted route>` — the sole surface a
-        scoped ingest token unlocks. Any other verb (PUT/DELETE/GET), or any
-        other path (including a sibling like `/sensors/indoorX` or a sub-path
-        `/sensors/indoor/foo`), returns False, so the scoped token is useless
-        everywhere except its one endpoint."""
-        return method.upper() == "POST" and path in self._ingest_write_routes
+        """True only for an EXACT `POST <write route>` or `GET <read route>`.
+
+        These are the ONLY two surfaces the scoped ingest token unlocks. Both
+        lists are matched EXACTLY — a sibling (`/sensors/indoorX`) or a sub-path
+        (`/sensors/indoor/foo`) does not match — and each verb is pinned to its
+        own list, so the token cannot POST to the read route or GET the write
+        route. It is a two-key keyring, not a viewer credential: it grants no
+        admin read (Settings / Journal) and no other write. A firmware or network
+        leak can only post fake temperatures to one endpoint and read the weather
+        from another; rotating the token revokes the device.
+        """
+        m = method.upper()
+        if m == "POST":
+            return path in self._ingest_write_routes
+        if m == "GET":
+            return path in self._ingest_read_routes
+        return False
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
