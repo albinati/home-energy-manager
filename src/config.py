@@ -1776,6 +1776,14 @@ class Config:
     DHW_CALIBRATION_MAX_AGE_DAYS: float = float(
         os.getenv("DHW_CALIBRATION_MAX_AGE_DAYS", "45")
     )
+    # The LP times the tank itself (src/dhw), instead of following dhw_policy's fixed
+    # 13:00→45 / 22:00→37 clock. Ships OFF: it must first be PROVEN better by the
+    # economic shadow. Precedence passive > LP-owned > K1 pin; flag off is
+    # byte-identical, and flipping it back restores the fixed schedule on the next
+    # re-plan (dhw_policy stays intact as the kill switch).
+    DHW_LP_OWNED_ENABLED: bool = os.getenv(
+        "DHW_LP_OWNED_ENABLED", "false"
+    ).lower() == "true"
     DHW_WATER_CP: float = float(os.getenv("DHW_WATER_CP", "4186"))  # J/(kg·K)
     # Building envelope + thermal mass for the single-zone model (estimator
     # fallback today; the LP t_in restore in #540 will consume these too).

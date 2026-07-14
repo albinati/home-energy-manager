@@ -63,6 +63,10 @@ class DhwBlock:
     #: Total DHW electricity per slot (heat pump + resistance), kWh — goes into the
     #: caller's energy balance exactly where the old ``e_dhw`` did.
     e_total: list[pulp.LpVariable]
+    #: Heat-pump electricity ALONE, kWh. The resistance is a separate immersion
+    #: element, not the compressor — so the caller's compressor cap (which DHW shares
+    #: with space heating) is on this, not on e_total.
+    e_hp: list[pulp.LpVariable]
     #: Tank temperature at each slot boundary (len n+1), for the plan snapshot.
     tank: list[pulp.LpVariable]
     #: The term to ADD to the caller's objective (penalised comfort slack, pence).
@@ -83,6 +87,9 @@ class DhwLpConfig:
     max_slices_per_day: int = 12        # contiguous runs are bounded → so are Daikin rows
     min_dwell_slots: int = 2            # once on, stay on ≥ this many slots
     comfort_penalty_pence_per_degc: float = 50.0
+    #: Soft over-temperature allowance (see build). Small: it must not deter the LP
+    #: from meeting comfort, only from voluntarily heating above the ceiling.
+    ceiling_penalty_pence_per_degc: float = 2.0
     slot_hours: float = 0.5
 
 
@@ -123,6 +130,14 @@ def build_dhw_block(
         "dhw_tank", range(n + 1), lowBound=cfg.tank_floor_c, upBound=cfg.tank_max_c
     )
     slack = pulp.LpVariable.dicts("dhw_comfort_slack", range(n + 1), lowBound=0)
+    # Ceiling slack. The ceiling must be SOFT, not a hard bound: a tank that starts
+    # ABOVE it (the firmware just ran its 60 °C legionella cycle, or the user boosted
+    # it by hand) cannot shed a whole degree in one 30-min slot, so a hard cap would
+    # make the first slots Infeasible. Penalising the slack instead lets an
+    # over-temperature tank coast back down naturally while still forbidding the LP
+    # from HEATING above the ceiling voluntarily — heating up there costs a big COP-1
+    # bill AND this penalty, so it never happens unless the price is negative.
+    ceil_slack = pulp.LpVariable.dicts("dhw_ceiling_slack", range(n), lowBound=0)
 
     prob += tank[0] == tank0_c
 
@@ -141,10 +156,14 @@ def build_dhw_block(
             b_res = pulp.LpVariable(f"dhw_b_res_{i}", cat="Binary")
             prob += e_res[i] <= res_max_kwh * b_res
             # Only a resistance slot may lift the tank above the heat-pump ceiling.
-            prob += tank[i + 1] <= cfg.tank_ceiling_c + (cfg.tank_max_c - cfg.tank_ceiling_c) * b_res
+            prob += tank[i + 1] <= (
+                cfg.tank_ceiling_c
+                + (cfg.tank_max_c - cfg.tank_ceiling_c) * b_res
+                + ceil_slack[i]
+            )
         else:
             prob += e_res[i] == 0
-            prob += tank[i + 1] <= cfg.tank_ceiling_c
+            prob += tank[i + 1] <= cfg.tank_ceiling_c + ceil_slack[i]
 
         # Tank energy balance. Heat pump heat at the certified COP; resistance heat at
         # COP 1; standing loss against the MEASURED, per-slot ambient; the declared
@@ -179,8 +198,18 @@ def build_dhw_block(
             prob += pulp.lpSum(dhw_on[i] for i in slots) <= cfg.max_slices_per_day
 
     e_total = [e_hp[i] + e_res[i] for i in range(n)]
-    comfort_penalty = cfg.comfort_penalty_pence_per_degc * pulp.lpSum(
-        slack[i] for i in range(n + 1)
+    # Comfort slack is the expensive one (a cold shower). Ceiling slack is a soft
+    # over-temperature allowance for the coast-down; penalise it enough that the LP
+    # never HEATS above the ceiling, but far below the comfort penalty so it never
+    # trades a warm shower to avoid a transient over-temperature it did not choose.
+    comfort_penalty = (
+        cfg.comfort_penalty_pence_per_degc * pulp.lpSum(slack[i] for i in range(n + 1))
+        + cfg.ceiling_penalty_pence_per_degc * pulp.lpSum(ceil_slack[i] for i in range(n))
     )
-    return DhwBlock(e_total=e_total, tank=list(tank.values()),
-                    comfort_penalty=comfort_penalty, dhw_on=list(dhw_on.values()))
+    return DhwBlock(
+        e_total=e_total,
+        e_hp=[e_hp[i] for i in range(n)],
+        tank=list(tank.values()),
+        comfort_penalty=comfort_penalty,
+        dhw_on=list(dhw_on.values()),
+    )

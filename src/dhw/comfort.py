@@ -196,6 +196,72 @@ def comfort_floors_for_slots(
     return out
 
 
+def declared_draw_kwh_for_slots(
+    slot_starts_utc: list[datetime],
+    tz: ZoneInfo,
+    *,
+    preset: str,
+    spec: ShowerSpec | None = None,
+    n_evening: int = 3,
+    n_morning: int = 1,
+    guest_count: int = 2,
+) -> list[float]:
+    """Declared hot-water draw per slot (kWh thermal), spread across the comfort
+    windows. DECLARED, not measured — the tank sensor cannot see an evening draw
+    (the firmware reheats through it), so the demand comes from the household's own
+    account of who showers when, priced by the mixer arithmetic in :mod:`src.dhw.draw`.
+
+    Three evening showers and one occasional morning one, by default; guests add to
+    the count. The energy is split evenly across the slots of each window — the LP
+    does not need it slot-accurate within the hour, only in the right window with the
+    right total.
+    """
+    from .draw import draw_kwh_thermal
+
+    spec = spec or ShowerSpec()
+    preset = (preset or "normal").strip().lower()
+    if preset == "vacation":
+        return [0.0] * len(slot_starts_utc)
+
+    ev_n, mo_n = n_evening, n_morning
+    if preset == "guests":
+        ev_n = 3 + max(0, guest_count) + GUESTS_EXTRA_SHOWERS
+        mo_n = 2
+
+    windows = shower_windows(preset=preset, guest_count=guest_count)
+    # Map each window label to its shower count and its member slots.
+    ev_total = draw_kwh_thermal(ev_n, spec)
+    mo_total = draw_kwh_thermal(mo_n, spec)
+
+    out = [0.0] * len(slot_starts_utc)
+    for w, total in ((_evening_window(windows), ev_total), (_morning_window(windows), mo_total)):
+        if w is None or total <= 0:
+            continue
+        members = [
+            i for i, st in enumerate(slot_starts_utc)
+            if _in_window(st.astimezone(tz), w)
+        ]
+        if not members:
+            continue
+        per = total / len(members)
+        for i in members:
+            out[i] = per
+    return out
+
+
+def _evening_window(windows: tuple[ShowerComfortWindow, ...]) -> ShowerComfortWindow | None:
+    return next((w for w in windows if w.label.startswith("evening")), None)
+
+
+def _morning_window(windows: tuple[ShowerComfortWindow, ...]) -> ShowerComfortWindow | None:
+    return next((w for w in windows if w.label.startswith("morning")), None)
+
+
+def _in_window(local: datetime, w: ShowerComfortWindow) -> bool:
+    h = local.hour + local.minute / 60.0
+    return w.start_hour <= h < w.end_hour
+
+
 def backstop_floor_c(preset: str) -> float | None:
     """The floor DISPATCH enforces regardless of what the LP planned.
 

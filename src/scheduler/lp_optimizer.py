@@ -85,6 +85,10 @@ class LpPlan:
     soc_kwh: list[float] = field(default_factory=list)       # len N+1
     indoor_temp_c: list[float] = field(default_factory=list)  # len N+1; W3 (#540), empty when off
     temp_outdoor_c: list[float] = field(default_factory=list)
+    dhw_lp_owned: bool = False
+    """True when the LP timed the tank itself (#714) rather than following the K1
+    fixed schedule. Dispatch gates on THIS, not on config, so a shadow solve can never
+    be mistaken for a committed one and the snapshot records which regime ran."""
     peak_threshold_pence: float = 0.0
     cheap_threshold_pence: float = 0.0
     pre_negative_export_slots: list[int] = field(default_factory=list)
@@ -274,8 +278,14 @@ def solve_lp(
     micro_climate_offset_by_hour_c: dict[int, float] | None = None,
     export_price_pence: list[float] | None = None,
     soc_floor_kwh: list[float] | None = None,
+    force_dhw_lp_owned: bool = False,
 ) -> LpPlan:
     """Build and solve the MILP. Raises ``ValueError`` on dimension mismatch.
+
+    ``force_dhw_lp_owned`` runs THIS solve with the LP owning the tank even while the
+    config flag is off — for the economic shadow (#714), which compares both regimes
+    on identical inputs, and the replay backtest. It never reaches hardware; only the
+    committed solve writes actions.
 
     ``micro_climate_offset_c`` (default 0.0) and the optional per-hour
     ``micro_climate_offset_by_hour_c`` map are interpreted as
@@ -445,6 +455,12 @@ def solve_lp(
     # e_space to that vector below, so the LP correctly attributes the thermal
     # load when allocating PV/battery/grid. Active mode keeps v9 free variables.
     passive_daikin = config.DAIKIN_CONTROL_MODE == "passive"
+    # #714 — LP-owned DHW gate, resolved here so the block can be built before the
+    # per-slot loop. Precedence passive > lp_owned > K1 pin (the pin is computed at
+    # its own site, gated on ``not _lp_owned``). Forced off in passive (#639).
+    _lp_owned = (
+        bool(force_dhw_lp_owned) or bool(getattr(config, "DHW_LP_OWNED_ENABLED", False))
+    ) and not passive_daikin
     if passive_daikin:
         passive_e_space, passive_e_dhw = predict_passive_daikin_load(
             t_out, cop_dhw, cop_space,
@@ -585,6 +601,51 @@ def solve_lp(
     prob += soc[0] == initial.soc_kwh
     prob += tank[0] == initial.tank_temp_c
 
+    # #714 — LP-owned DHW block. Builds its own tank variables + constraints from the
+    # measured physics; the old ``e_dhw``/``tank`` vars above are pinned to 0 / left
+    # unused below so this block is the sole owner of the tank sub-problem.
+    _dhw_block = None
+    if _lp_owned:
+        from ..dhw import comfort as _dhw_comfort
+        from ..dhw.lp import DhwLpConfig, build_dhw_block
+        from ..dhw.params import resolve_tank_params
+
+        _preset_str = (config.OPTIMIZATION_PRESET or "normal").strip().lower()
+        _tank_p = resolve_tank_params()
+        _dhw_floors = _dhw_comfort.comfort_floors_for_slots(
+            list(slot_starts_utc), tz, preset=_preset_str,
+            guest_count=int(getattr(config, "DHW_GUEST_COUNT", 2)),
+        )
+        _dhw_draw = _dhw_comfort.declared_draw_kwh_for_slots(
+            list(slot_starts_utc), tz, preset=_preset_str,
+            guest_count=int(getattr(config, "DHW_GUEST_COUNT", 2)),
+        )
+        # Ambient is a per-slot PARAMETER. Constant for now (the measured effective
+        # cupboard ambient); the indoor-sensor coupling is a later refinement and its
+        # absence just means winter losses are modelled flat, not wrongly.
+        _dhw_ambient = [float(_tank_p.ambient_c)] * n
+        _dhw_days = [st.astimezone(tz).date().toordinal() for st in slot_starts_utc]
+        _dhw_block = build_dhw_block(
+            prob,
+            slot_starts_utc=list(slot_starts_utc),
+            tank0_c=float(initial.tank_temp_c),
+            t_out_by_slot=list(t_out),
+            ambient_by_slot=_dhw_ambient,
+            draw_kwh_by_slot=list(_dhw_draw),
+            comfort_floor_by_slot=list(_dhw_floors),
+            price_by_slot=list(price_pence),
+            p=_tank_p,
+            cfg=DhwLpConfig(
+                tank_ceiling_c=float(getattr(config, "DHW_LP_TANK_CEILING_C", 50.0)),
+                tank_max_c=float(config.DHW_TEMP_MAX_C),
+                comfort_penalty_pence_per_degc=float(
+                    getattr(config, "DHW_LP_COMFORT_PENALTY_PENCE", 50.0)
+                ),
+                slot_hours=slot_h,
+            ),
+            day_index_by_slot=_dhw_days,
+        )
+
     # PR K2 (2026-05-23) — DHW pinning. When the deterministic schedule
     # from dhw_policy owns the tank, the LP must NOT optimize e_dhw or
     # tank_temp as free variables. Otherwise the LP's planned PV
@@ -605,7 +666,13 @@ def solve_lp(
     # vectors differ in essentially every slot → **Infeasible on every solve**.
     # Since `DHW_FIXED_SCHEDULE_ENABLED` defaults true and .env.example ships
     # `DAIKIN_CONTROL_MODE=passive`, a fresh clone used to get a dead LP.
-    _dhw_pinned = bool(getattr(config, "DHW_FIXED_SCHEDULE_ENABLED", False)) and not passive_daikin
+    # #714 — the LP-OWNED regime (resolved above) supersedes the K1 pin: the LP times
+    # the tank itself via the src/dhw block, so the pin is disabled when it is on.
+    _dhw_pinned = (
+        bool(getattr(config, "DHW_FIXED_SCHEDULE_ENABLED", False))
+        and not passive_daikin
+        and not _lp_owned
+    )
     _pinned_e_dhw: list[float] = []
     _pinned_tank: list[float] = []
     if _dhw_pinned:
@@ -749,7 +816,13 @@ def solve_lp(
                     pre_neg_export[i] = True
 
     for i in range(n):
-        e_hp_i = e_dhw[i] + e_space[i]
+        # In the LP-owned regime the DHW electricity comes from the block, not the
+        # old e_dhw var (which is pinned to 0 below). The compressor cap that DHW
+        # shares with space heating is on the heat-pump part only — the resistance is
+        # a separate immersion element.
+        _dhw_e_balance = _dhw_block.e_total[i] if _lp_owned else e_dhw[i]
+        _dhw_e_compressor = _dhw_block.e_hp[i] if _lp_owned else e_dhw[i]
+        e_hp_i = _dhw_e_balance + e_space[i]
 
         # PV split
         prob += pv_use[i] + pv_curt[i] == pv_avail[i]
@@ -809,8 +882,10 @@ def solve_lp(
             # in the same slot, matching the Altherma firmware. e_dhw is capped
             # by ``max_hp_kwh`` via its LpVariable upper bound; e_space is
             # additionally capped by the climate-curve physics ceiling.
-            prob += e_dhw[i] + e_space[i] <= max_hp_kwh * hp_on[i]
+            prob += _dhw_e_compressor + e_space[i] <= max_hp_kwh * hp_on[i]
             prob += e_space[i] <= space_ceil_kwh[i]
+            if _lp_owned:
+                prob += e_dhw[i] == 0  # the block owns DHW; retire the old var
 
         # DHW tank thermodynamics — PR Phase B: indoor temp is no longer a
         # state variable. Tank loss uses INDOOR_SETPOINT_C as the constant
@@ -834,7 +909,9 @@ def solve_lp(
         # constrain the system (LP cannot satisfy both pinned values AND
         # the physics-derived relation, since the forecast is a simple
         # phase-based model, not a thermal sim).
-        if not _dhw_pinned:
+        # The LP-owned block runs its own tank ODE on the measured physics; the old
+        # var trajectory is left free and unused (the plan reads the block's tank).
+        if not _dhw_pinned and not _lp_owned:
             prob += tank[i + 1] == tank[i] + (q_heat_dhw - loss_tank_j - draw_j_i) / c_tank
 
         # PR Phase B: building thermodynamics + comfort constraints removed.
@@ -992,7 +1069,7 @@ def solve_lp(
     # against the pinned tank trajectory (37 °C overnight < typical
     # evening floor of 40+ °C). Tank temp is fully owned by dhw_policy
     # now; this floor is irrelevant.
-    if not passive_daikin and not _vacation_mode and not _dhw_pinned:
+    if not passive_daikin and not _vacation_mode and not _dhw_pinned and not _lp_owned:
         for i in range(n):
             if shower_mask[i]:
                 kind = _slot_window_kind(slot_starts_utc[i])
@@ -1067,7 +1144,7 @@ def solve_lp(
         # physics prediction (which carries its own legionella uplift), so this
         # floor is redundant at best — and if the two formulas ever drift, it
         # makes passive Infeasible on legionella day.
-        if 0 <= _leg_day <= 6 and not _dhw_pinned and not passive_daikin:
+        if 0 <= _leg_day <= 6 and not _dhw_pinned and not passive_daikin and not _lp_owned:
             try:
                 _leg_hour = int(_rts.get_setting("DHW_LEGIONELLA_HOUR_LOCAL"))
                 _leg_minutes = int(_rts.get_setting("DHW_LEGIONELLA_DURATION_MIN"))
@@ -1149,8 +1226,9 @@ def solve_lp(
         for i in range(n)
     ]
     s_tank_hi = pulp.LpVariable.dicts("tank_hi_slack", range(n), lowBound=0)
-    for i in range(n):
-        prob += tank[i + 1] <= tank_hi_slot[i] + s_tank_hi[i]
+    if not _lp_owned:  # the block owns the tank ceiling (and the resistance cliff)
+        for i in range(n):
+            prob += tank[i + 1] <= tank_hi_slot[i] + s_tank_hi[i]
 
     # Pre-plunge discipline: when a negative slot is in the upcoming
     # ``LP_PLUNGE_PREP_HOURS`` window, disallow grid→battery flow during
@@ -1261,7 +1339,7 @@ def solve_lp(
     # so an additional ``tank[n] >= terminal_dhw_floor`` floor can directly
     # contradict the pin (guests mode + last slot in a shower window → pinned
     # 45 °C vs a 53 °C floor → Infeasible). The pin governs the tank entirely.
-    if not passive_daikin and not _dhw_pinned:
+    if not passive_daikin and not _dhw_pinned and not _lp_owned:
         # PR 4 of plan: when the last slot lands inside a shower window, keep
         # the tight terminal floor so the LP must finish with a hot tank for
         # in-progress showers. When it lands OUTSIDE shower windows (e.g. a
@@ -1477,6 +1555,9 @@ def solve_lp(
             socfloor_slack.values()
         )
 
+    if _lp_owned and _dhw_block is not None:
+        objective += _dhw_block.comfort_penalty
+
     prob += objective
 
     # -----------------------------------------------------------------------
@@ -1520,15 +1601,21 @@ def solve_lp(
         plan.battery_discharge_kwh.append(_v(dis[i]))
         plan.pv_use_kwh.append(_v(pv_use[i]))
         plan.pv_curtail_kwh.append(_v(pv_curt[i]))
-        plan.dhw_electric_kwh.append(_v(e_dhw[i]))
+        plan.dhw_electric_kwh.append(
+            _v(_dhw_block.e_total[i]) if _lp_owned else _v(e_dhw[i])
+        )
         es_val = _v(e_space[i])
         plan.space_electric_kwh.append(es_val)
         # Back-compute the LWT offset the Daikin must apply to deliver this energy draw.
         plan.lwt_offset_c.append(lwt_offset_from_space_kw(es_val / slot_h, t_out[i]))
     for i in range(n + 1):
         plan.soc_kwh.append(_v(soc[i]))
-        plan.tank_temp_c.append(_v(tank[i]))
+        plan.tank_temp_c.append(
+            _v(_dhw_block.tank[i]) if _lp_owned else _v(tank[i])
+        )
         if w3:
             plan.indoor_temp_c.append(_v(t_in[i]))
+
+    plan.dhw_lp_owned = _lp_owned
 
     return plan
