@@ -51,22 +51,31 @@ def _forecast(now: datetime, rain_at_h: int | None = None, *, include_past: bool
     return out
 
 
-def _call(monkeypatch: pytest.MonkeyPatch, fc: list[_F]) -> dict:
+def _stable_now() -> datetime:
+    """Today at 12:00 UTC — deterministic time-of-day so the local-day window and
+    "hours remaining today" never depend on when CI runs (the #707 lesson)."""
+    return datetime.now(UTC).replace(hour=12, minute=0, second=0, microsecond=0)
+
+
+def _call(monkeypatch: pytest.MonkeyPatch, fc: list[_F], now: datetime | None = None) -> dict:
     from src.api import main as api_main
     monkeypatch.setattr(
         "src.weather.fetch_weather_panel_forecast_cached",
         lambda hours=96: fc, raising=True,
     )
-    return asyncio.run(api_main.api_v1_weather_now())
+    # Pin the endpoint's clock so the today-window is deterministic.
+    return api_main._api_v1_weather_now_sync(now=now or _stable_now())
 
 
 def test_payload_is_small_and_flat(monkeypatch: pytest.MonkeyPatch) -> None:
     import json
 
-    now = datetime.now(UTC)
+    now = _stable_now()
     out = _call(monkeypatch, _forecast(now))
 
-    assert set(out) == {"temp_c", "weather_code", "precipitation_mm", "rain_in_h", "pv_now_kw"}
+    assert set(out) == {"temp_c", "temp_max_c", "temp_min_c", "weather_code",
+                        "precipitation_mm", "rain_in_h"}
+    assert "pv_now_kw" not in out, "PV was dropped from the sensor payload"
     assert all(not isinstance(v, (dict, list)) for v in out.values()), "must stay flat for the ESP32"
     # The whole point: the 96 h /weather payload is ~15 KB. This must not be.
     assert len(json.dumps(out)) < 200, f"payload too big for an ESP32 heap: {out}"
@@ -74,7 +83,7 @@ def test_payload_is_small_and_flat(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_reports_the_nearest_hour_production_shape(monkeypatch: pytest.MonkeyPatch) -> None:
     """Production forecast is future-only; the nearest hour is fc[0]."""
-    now = datetime.now(UTC)
+    now = _stable_now()
     fc = _forecast(now)                       # future-only, as prod
     fc[0].temperature_c = 27.5
     fc[1].temperature_c = 99.9                # an hour ahead — must NOT be picked
@@ -84,7 +93,7 @@ def test_reports_the_nearest_hour_production_shape(monkeypatch: pytest.MonkeyPat
 
 def test_prefers_the_current_hour_if_the_source_ever_includes_it(monkeypatch: pytest.MonkeyPatch) -> None:
     """Belt-and-braces: if the source ever DOES include the started hour, use it."""
-    now = datetime.now(UTC)
+    now = _stable_now()
     fc = _forecast(now, include_past=True)    # fc[0]=prev hour, fc[1]=current started hour
     # Mark whichever hour is the last one <= now (the "current" hour).
     current = [f for f in fc if f.time_utc <= now][-1]
@@ -94,19 +103,19 @@ def test_prefers_the_current_hour_if_the_source_ever_includes_it(monkeypatch: py
 
 
 def test_rain_in_h_counts_hours_to_the_next_rain(monkeypatch: pytest.MonkeyPatch) -> None:
-    now = datetime.now(UTC)
+    now = _stable_now()
     out = _call(monkeypatch, _forecast(now, rain_at_h=6))
     assert out["rain_in_h"] == 6
 
 
 def test_rain_in_h_is_null_when_the_horizon_is_dry(monkeypatch: pytest.MonkeyPatch) -> None:
-    out = _call(monkeypatch, _forecast(datetime.now(UTC)))
+    out = _call(monkeypatch, _forecast(_stable_now()))
     assert out["rain_in_h"] is None
 
 
 def test_rain_in_h_ignores_current_rain(monkeypatch: pytest.MonkeyPatch) -> None:
     """It answers "when does it NEXT rain", so a wet *reported* hour is not future rain."""
-    now = datetime.now(UTC)
+    now = _stable_now()
     fc = _forecast(now)          # future-only
     fc[0].weather_code = 61      # the reported hour is wet...
     fc[0].precipitation_mm = 2.0
@@ -118,10 +127,59 @@ def test_rain_in_h_ignores_current_rain(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_rain_next_hour_is_1_not_0(monkeypatch: pytest.MonkeyPatch) -> None:
     """Rain in the very next hour reads as 1 h, never 0 (which would mean 'now')."""
-    now = datetime.now(UTC)
+    now = _stable_now()
     out = _call(monkeypatch, _forecast(now, rain_at_h=1))   # index 1 = one hour after reported
     assert out["rain_in_h"] == 1
     assert out["precipitation_mm"] == pytest.approx(0.0), "reported (dry) hour, not the rain hour"
+
+
+def test_today_high_low_over_the_local_day(monkeypatch: pytest.MonkeyPatch) -> None:
+    """temp_max_c / temp_min_c are the high/low of the LOCAL calendar day.
+
+    The clock is PINNED to local midday (via _call), so there are always many
+    "today" hours ahead and the test never conditionally skips — unlike the first
+    draft, which reintroduced the #707 wall-clock/skip anti-pattern.
+    """
+    from zoneinfo import ZoneInfo
+    from src.config import config
+    tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+
+    now = _stable_now()
+    fc = _forecast(now)                     # future-only, hourly
+    today = now.astimezone(tz).date()
+    todays = [f for f in fc if f.time_utc.astimezone(tz).date() == today]
+    assert len(todays) >= 2                  # guaranteed by the midday pin
+    todays[0].temperature_c = 15.0          # today's low
+    todays[-1].temperature_c = 24.0         # today's high
+    # a tomorrow hour with a wild value that must NOT leak into today's high/low
+    for f in fc:
+        if f.time_utc.astimezone(tz).date() != today:
+            f.temperature_c = 99.0
+            break
+
+    out = _call(monkeypatch, fc, now=now)
+    assert out["temp_max_c"] == pytest.approx(24.0), "tomorrow's 99C must be excluded"
+    assert out["temp_min_c"] == pytest.approx(15.0)
+
+
+def test_high_low_fall_back_to_current_hour_when_no_today_hours(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Right at local midnight the remaining hours can all be tomorrow; the fields
+    must not be null — fall back to the reported hour."""
+    from zoneinfo import ZoneInfo
+    from src.config import config
+    tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+
+    now = _stable_now()
+    today = now.astimezone(tz).date()
+    # keep only future hours that are NOT today (the last-hour-before-midnight edge)
+    fc = [f for f in _forecast(now) if f.time_utc.astimezone(tz).date() != today]
+    assert fc, "fixture must have tomorrow hours"
+    fc[0].temperature_c = 12.3
+
+    out = _call(monkeypatch, fc, now=now)
+    # cur is fc[0]; with no today-hours, high==low==cur
+    assert out["temp_max_c"] == pytest.approx(12.3)
+    assert out["temp_min_c"] == pytest.approx(12.3)
 
 
 # ---------------------------------------------------------------------------
