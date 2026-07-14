@@ -1762,6 +1762,20 @@ class Config:
     # Max leaving-water temp used when estimating space COP lift (aligns with physics LWT cap).
     LP_COP_SPACE_LWT_CEILING_C: float = float(os.getenv("LP_COP_SPACE_LWT_CEILING_C", "50.0"))
     DHW_TANK_LITRES: float = float(os.getenv("DHW_TANK_LITRES", "200"))
+    # --- DHW calibration (#714 rewrite) -------------------------------------
+    # The tank's UA and effective ambient, learned from the THERMOMETER only
+    # (never the energy counter — that is quantised and half-synthesised, #719).
+    # false → every solve uses the databook TankParams; instant rollback of the
+    # learned values without touching the nightly fit.
+    DHW_CALIBRATION_ENABLED: bool = os.getenv(
+        "DHW_CALIBRATION_ENABLED", "true"
+    ).lower() == "true"
+    DHW_CALIBRATION_WINDOW_DAYS: int = int(os.getenv("DHW_CALIBRATION_WINDOW_DAYS", "21"))
+    # A summer-fitted ambient must not steer a winter plan: past this age the reader
+    # falls back to the databook and logs it.
+    DHW_CALIBRATION_MAX_AGE_DAYS: float = float(
+        os.getenv("DHW_CALIBRATION_MAX_AGE_DAYS", "45")
+    )
     DHW_WATER_CP: float = float(os.getenv("DHW_WATER_CP", "4186"))  # J/(kg·K)
     # Building envelope + thermal mass for the single-zone model (estimator
     # fallback today; the LP t_in restore in #540 will consume these too).
