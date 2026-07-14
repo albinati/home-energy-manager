@@ -86,6 +86,77 @@ def _lp_soc_final_kwh_default() -> float:
 
 
 SCHEMA: dict[str, SettingSpec] = {
+    # --- SHOWER comfort (#714) — the household's own dials -------------------
+    #
+    # These are NOT house comfort. Space heating has instruments (the indoor
+    # sensors, #540) and a thermal model that can reason about what the house
+    # needs; that target takes SENSOR input and lives on the LWT/radiator side.
+    #
+    # Shower comfort has no instrument and never will — the only sensor is whether
+    # the family felt the water was warm enough. So these are DECLARED, and they are
+    # meant to be TUNED by hand as the household learns what it actually needs
+    # ("45 was fine all winter, try 44"). Turning the evening floor DOWN is the
+    # cheapest saving in the system; the LP simply hits whatever number it is given.
+    #
+    # A calibration bug may make the LP FAIL to reach these (visibly — as penalised
+    # slack, and as a dispatch backstop that fires). It may never MOVE them.
+    "DHW_SHOWER_COMFORT_C": SettingSpec(
+        key="DHW_SHOWER_COMFORT_C",
+        type_name="float",
+        env_default=_float_env("DHW_SHOWER_COMFORT_C", "45"),
+        min_value=38.0,
+        max_value=50.0,  # never into the resistance heater — comfort is not worth COP 1
+        description=(
+            "Tank floor during the evening shower window (°C). Owner's lived "
+            "experience: 45 covers four-plus people. The mixer arithmetic agrees "
+            "(three 5-minute showers need ~43 at the start of the run). Tune it down "
+            "if nobody notices."
+        ),
+    ),
+    "DHW_SHOWER_EVENING_START_HOUR": SettingSpec(
+        key="DHW_SHOWER_EVENING_START_HOUR",
+        type_name="float",
+        env_default=_float_env("DHW_SHOWER_EVENING_START_HOUR", "20"),
+        min_value=0.0,
+        max_value=24.0,
+        description="Local hour the evening showers start (household: 20:00).",
+    ),
+    "DHW_SHOWER_EVENING_END_HOUR": SettingSpec(
+        key="DHW_SHOWER_EVENING_END_HOUR",
+        type_name="float",
+        env_default=_float_env("DHW_SHOWER_EVENING_END_HOUR", "21"),
+        min_value=0.0,
+        max_value=24.0,
+        description="Local hour the evening showers end (household: 21:00).",
+    ),
+    "DHW_MORNING_RESERVE_C": SettingSpec(
+        key="DHW_MORNING_RESERVE_C",
+        type_name="float",
+        env_default=_float_env("DHW_MORNING_RESERVE_C", "40"),
+        min_value=30.0,
+        max_value=50.0,
+        description=(
+            "Tank floor during the morning window (°C). Deliberately modest: this is "
+            "ONE occasional shower, not the family's. Holding the tank hot all night "
+            "for a shower that may not happen is pure standing loss."
+        ),
+    ),
+    "DHW_MORNING_RESERVE_START_HOUR": SettingSpec(
+        key="DHW_MORNING_RESERVE_START_HOUR",
+        type_name="float",
+        env_default=_float_env("DHW_MORNING_RESERVE_START_HOUR", "7"),
+        min_value=0.0,
+        max_value=24.0,
+        description="Local hour the morning reserve window starts.",
+    ),
+    "DHW_MORNING_RESERVE_END_HOUR": SettingSpec(
+        key="DHW_MORNING_RESERVE_END_HOUR",
+        type_name="float",
+        env_default=_float_env("DHW_MORNING_RESERVE_END_HOUR", "9"),
+        min_value=0.0,
+        max_value=24.0,
+        description="Local hour the morning reserve window ends.",
+    ),
     # DHW comfort knobs — user-tunable per season / presence.
     "DHW_TEMP_COMFORT_C": SettingSpec(
         key="DHW_TEMP_COMFORT_C",
