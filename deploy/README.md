@@ -292,16 +292,21 @@ por cima, num heap que já paga um handshake TLS de ~2 s. Ao longo de semanas is
 fragmenta. O servidor já tem os dados na mão, então ele faz o trabalho:
 
 ```json
-{"temp_c":21.2,"weather_code":3,"precipitation_mm":0.0,"rain_in_h":6,"pv_now_kw":1.32}
+{"temp_c":21.2,"temp_max_c":24.1,"temp_min_c":16.8,"weather_code":3,"precipitation_mm":0.0,"rain_in_h":6}
 ```
 
 `weather_code` é o padrão WMO/Open-Meteo (0 = limpo, 1–3 nublado progressivo,
 45/48 neblina, 51+ garoa/chuva/neve/pancada/trovoada) — direto pra escolher ícone.
 
+`temp_max_c`/`temp_min_c` são a máx/mín de **hoje** (dia-calendário local). Como a
+previsão é future-only, uma vez iniciado o dia isso é sobre as horas que **restam**
+hoje — a figura honesta pra um display, não uma alegação sobre o dia inteiro.
+
 `rain_in_h` é a razão de isso não ser só um slice do lado do cliente: ele precisa
 da previsão **inteira** pra responder "daqui a quantas horas chove" — justamente o
 que o sensor não pode se dar ao luxo de baixar. `null` = sem chuva no horizonte.
-Chuva **atual** não conta como chuva futura.
+Chuva **atual** não conta como chuva futura. (`pv_now_kw` foi removido em
+2026-07-14 — o display parou de mostrar PV.)
 
 ⚠️ **Esta rota NÃO é viewer-open**, ao contrário do `/api/v1/weather`. O sensor
 fala com o HEM pelo funnel **público**, então uma rota sem token aqui é uma rota

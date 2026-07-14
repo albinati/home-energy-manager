@@ -597,11 +597,19 @@ async def api_v1_weather_now():
     add up to ~15 min). Good enough for a room display; the sensor is not steering
     anything on this.
 
+    ``temp_max_c`` / ``temp_min_c`` are today's high/low over the LOCAL calendar
+    day. Since the forecast is future-only, once the day is under way this is the
+    max/min over the hours that REMAIN today — the honest figure for a room
+    display, not a whole-day claim.
+
     ``rain_in_h`` is the reason this is not just a client-side slice: it needs the
     WHOLE forecast to answer "how many hours until the next rain" — which is
     exactly the thing the sensor cannot afford to fetch. It scans STRICTLY AFTER
     the reported hour, so a wet current hour never reads as "rain in 0 h". ``null``
     = no rain in the horizon.
+
+    ``pv_now_kw`` was dropped (2026-07-14): the sensor display stopped showing PV.
+    Re-add from ``cur.estimated_pv_kw`` if a client needs it again.
 
     AUTH: **not** part of the token-free viewer surface. The sensor sits on the
     house LAN and reaches HEM through the PUBLIC Tailscale funnel, so a
@@ -619,8 +627,9 @@ _WMO_RAIN_MIN = 51
 _RAIN_MM_EPS = 0.05          # below this, "precipitation" is numerical noise
 
 
-def _api_v1_weather_now_sync():
+def _api_v1_weather_now_sync(now=None):
     from datetime import UTC as _UTC, datetime as _dt
+    from zoneinfo import ZoneInfo as _ZI
 
     from ..weather import fetch_weather_panel_forecast_cached
 
@@ -628,7 +637,9 @@ def _api_v1_weather_now_sync():
     if not fc:
         raise HTTPException(status_code=503, detail="no forecast available")
 
-    now = _dt.now(_UTC)
+    # ``now`` is injectable so tests can pin the clock (the local-day window and
+    # "hours remaining today" both depend on it); production passes nothing.
+    now = now or _dt.now(_UTC)
     # The upstream fetch already dropped every past hour, so the freshest hour it
     # returns (fc[0]) is the nearest one to now. Pick the last hour that is <= now
     # if one is present (belt-and-braces for a source that ever includes the
@@ -660,15 +671,36 @@ def _api_v1_weather_now_sync():
             rain_in_h = max(1, round(delta_h))
             break
 
+    # Today's high/low over the LOCAL calendar day. The forecast is future-only,
+    # so once the day is under way this is the max/min across the hours that
+    # REMAIN today (past hours were dropped upstream) — the honest available
+    # figure for a room display, not a claim about the whole day. In the last
+    # partial hour before local midnight every remaining top-of-hour slot is
+    # already tomorrow, so fall back to the reported hour and the fields are never
+    # unexpectedly null.
+    try:
+        _local = _ZI(config.BULLETPROOF_TIMEZONE)
+    except Exception:
+        _local = _UTC
+    today_local = now.astimezone(_local).date()
+    today_temps = [
+        f.temperature_c for f in fc
+        if f.temperature_c is not None
+        and f.time_utc.astimezone(_local).date() == today_local
+    ]
+    if not today_temps and cur.temperature_c is not None:
+        today_temps = [cur.temperature_c]
+
     def _r(v, n=1):
         return None if v is None else round(float(v), n)
 
     return {
         "temp_c": _r(cur.temperature_c),
+        "temp_max_c": _r(max(today_temps)) if today_temps else None,
+        "temp_min_c": _r(min(today_temps)) if today_temps else None,
         "weather_code": None if cur.weather_code is None else int(cur.weather_code),
         "precipitation_mm": _r(cur.precipitation_mm),
         "rain_in_h": rain_in_h,
-        "pv_now_kw": _r(cur.estimated_pv_kw, 2),
     }
 
 
