@@ -792,6 +792,7 @@ def estimate_draw_profile(
     min_days: int = 7,
     max_draw_kwh: float = 8.0,
     edge_tolerance_minutes: float = 60.0,
+    legionella: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """PURE energy-balance estimate of hot-water draw, per LOCAL 2 h bucket.
 
@@ -847,25 +848,72 @@ def estimate_draw_profile(
         by_day.setdefault(ts.astimezone(tz).date(), []).append((ts, v))
 
     def _temp_at_boundary(ts: datetime) -> float | None:
-        """Tank temperature at a bucket edge — nearest sample within tolerance.
-        Symmetric (unlike the COP fit's edges): both ends of a CLOSED balance are
-        plain state readings, and an error at either enters ΔT linearly rather
-        than truncating a rise."""
-        near = [(abs((t - ts).total_seconds()) / 60.0, v) for t, v in series]
-        if not near:
-            return None
-        gap, val = min(near)
-        return val if gap <= edge_tolerance_minutes else None
+        """Tank temperature at a bucket edge, INTERPOLATED between the samples
+        that bracket it.
+
+        A nearest-neighbour lookup is not good enough at a boundary that both
+        neighbouring buckets share: prod's samples land at ~:50 past the hour, so
+        the nearest sample to a bucket edge is systematically the one BEFORE it,
+        and the last minutes of a reheat get charged to the next bucket's draw
+        every single time. (It also tie-breaks on temperature when the gaps are
+        equal, which biases ΔT in opposite directions at the two ends.)
+        Interpolating costs four lines and removes both."""
+        before = [(t, v) for t, v in series if t <= ts]
+        after = [(t, v) for t, v in series if t >= ts]
+        near_before = (
+            before[-1]
+            if before and (ts - before[-1][0]).total_seconds() / 60.0 <= edge_tolerance_minutes
+            else None
+        )
+        near_after = (
+            after[0]
+            if after and (after[0][0] - ts).total_seconds() / 60.0 <= edge_tolerance_minutes
+            else None
+        )
+        if near_before and near_after:
+            (t0, v0), (t1, v1) = near_before, near_after
+            span = (t1 - t0).total_seconds()
+            if span <= 0:
+                return v0
+            return v0 + (v1 - v0) * ((ts - t0).total_seconds() / span)
+        # Only one side within reach — the overnight polling hole leaves several
+        # boundaries un-bracketed every night. Requiring both would throw away most
+        # of the day's buckets (measured: coverage collapsed from ~20 samples per
+        # bucket to 1). Fall back to the single sample rather than the whole day.
+        if near_before:
+            return near_before[1]
+        if near_after:
+            return near_after[1]
+        return None
 
     per_bucket: dict[int, list[float]] = {b: [] for b in range(12)}
+    per_bucket_sensitivity: dict[int, list[float]] = {b: [] for b in range(12)}
     per_day_total: dict[date, float] = {}
     per_day_buckets: dict[date, int] = {}
     days_seen: set[date] = set()
     buckets_skipped = 0
+    leg = legionella or {}
     for day in sorted(by_day):
         for b in range(12):
             b_start, b_end = _bucket_window_utc(day, b, tz)
             if any(ws < b_end and b_start < we for ws, we in boosts):
+                buckets_skipped += 1
+                continue
+            # The Sunday thermal shock: the firmware drives the tank to 60 °C at a
+            # poor COP of its own choosing. That is the worst case for an inferred
+            # draw (large energy, atypical efficiency), and it is not the
+            # household drawing water. The decay and COP fits already exclude it;
+            # so must this one.
+            if leg and any(
+                in_legionella_window(
+                    b_start + timedelta(minutes=m),
+                    dow=int(leg.get("dow", 6)),
+                    start_hour_utc=int(leg.get("start_hour_utc", 11)),
+                    start_minute_utc=int(leg.get("start_minute_utc", 0)),
+                    duration_minutes=int(leg.get("duration_minutes", 120)),
+                )
+                for m in range(0, int((b_end - b_start).total_seconds() // 60) + 1, 30)
+            ):
                 buckets_skipped += 1
                 continue
             k = kwh_by_key.get((day.isoformat(), b), "missing")
@@ -897,10 +945,23 @@ def estimate_draw_profile(
             if q_draw_kwh > max_draw_kwh:
                 buckets_skipped += 1  # not a draw — something unmodelled happened
                 continue
-            draw = max(0.0, q_draw_kwh)
-            per_bucket[b].append(draw)
-            per_day_total[day] = per_day_total.get(day, 0.0) + draw
+            # Store the residual UNCLAMPED. Clamping each observation at zero
+            # rectifies the noise: a bucket where the COP ran below the median
+            # (or whose reheat spilled its heat over the edge) reports a phantom
+            # positive draw, while the neighbouring bucket that should carry the
+            # compensating negative gets clipped to zero — so the errors stop
+            # cancelling and the profile inflates. Clamp once, at publication.
+            per_bucket[b].append(q_draw_kwh)
+            per_day_total[day] = per_day_total.get(day, 0.0) + q_draw_kwh
             per_day_buckets[day] = per_day_buckets.get(day, 0) + 1
+            # How much this bucket's answer MOVES if the assumed COP is wrong:
+            # d(draw)/d(COP) = kWh_electric. In a bucket with no reheat the draw
+            # is read straight off the tank's fall and is COP-invariant (the
+            # morning draw is of this kind — it is observed). In a reheat-heavy
+            # bucket the draw is INFERRED from an assumed COP, and it is only as
+            # trustworthy as that COP. Consumers must be able to tell the two
+            # apart, so the sensitivity is published alongside the number.
+            per_bucket_sensitivity[b].append(float(k))
             days_seen.add(day)
 
     if len(days_seen) < min_days:
@@ -917,19 +978,31 @@ def estimate_draw_profile(
         s = sorted(vals)
         return float(s[min(len(s) - 1, int(round(q * (len(s) - 1))))])
 
-    median = [_pct(per_bucket[b], 0.5) for b in range(12)]
-    p75 = [_pct(per_bucket[b], 0.75) for b in range(12)]
+    # Clamp ONCE, here — the residuals aggregated above are unclamped so that
+    # spill between adjacent buckets cancels rather than rectifies.
+    median = [max(0.0, _pct(per_bucket[b], 0.5)) for b in range(12)]
+    p75 = [max(0.0, _pct(per_bucket[b], 0.75)) for b in range(12)]
+    # Per-bucket COP sensitivity: how many kWh the answer moves per unit of COP
+    # error. Zero means the draw was READ off the tank's fall (COP-invariant,
+    # trustworthy); large means it was INFERRED from the assumed COP inside a
+    # reheat, and is only as good as that COP. In this household the morning peak
+    # is the former and the evening one is largely the latter — a distinction the
+    # profile alone cannot show, and consumers must not have to guess at.
+    sensitivity = [_pct(per_bucket_sensitivity[b], 0.5) for b in range(12)]
     # The daily figures come from per-DAY totals, not from summing the per-bucket
     # percentiles. Σ p75(bucket) is an upper bound on the p75 of the daily total,
     # not an estimate of it — no single day is simultaneously at its 75th
     # percentile in all twelve buckets. (Measured here: Σp75 = 3.5 kWh against a
     # true daily p75 nearer 2.) Only whole days are comparable, so days missing
     # buckets are excluded from the daily stat while still feeding the shape.
-    full_days = [t for d, t in per_day_total.items() if per_day_buckets.get(d) == 12]
+    full_days = [
+        max(0.0, t) for d, t in per_day_total.items() if per_day_buckets.get(d) == 12
+    ]
     return {
         "status": "ok",
         "profile_kwh_median": median,
         "profile_kwh_p75": p75,
+        "profile_cop_sensitivity_kwh": sensitivity,
         "samples_per_bucket": [len(per_bucket[b]) for b in range(12)],
         "daily_kwh_median": _pct(full_days, 0.5),
         "daily_kwh_p75": _pct(full_days, 0.75),
@@ -1125,6 +1198,7 @@ def refresh_tank_thermal_calibration() -> dict[str, Any]:
         t_ambient_c=t_ambient,
         cop_dhw=cop_for_draw,
         min_days=int(getattr(config, "DHW_TANK_LEARN_DRAW_MIN_DAYS", 7)),
+        legionella=leg,
     )
 
     row: dict[str, Any] = dict(prev or {})
@@ -1156,6 +1230,9 @@ def refresh_tank_thermal_calibration() -> dict[str, Any]:
         row.update(
             draw_profile_median_json=json.dumps(draw_fit["profile_kwh_median"]),
             draw_profile_p75_json=json.dumps(draw_fit["profile_kwh_p75"]),
+            draw_cop_sensitivity_json=json.dumps(
+                draw_fit["profile_cop_sensitivity_kwh"]
+            ),
             draw_days=int(draw_fit["days"]),
             draw_window_days=draw_window,
             draw_computed_at=now_iso,
@@ -1186,7 +1263,7 @@ def refresh_tank_thermal_calibration() -> dict[str, Any]:
         "tank_thermal: ua=%s W/K (eps=%s) cop=%s (mult=%s, n=%s) draw_p75=%s kWh — %s",
         _fmt(row.get("ua_w_per_k")), row.get("ua_episodes"),
         _fmt(row.get("cop_dhw_median")), _fmt(row.get("cop_mult")), row.get("cop_samples"),
-        _fmt(row.get("draw_evening_kwh_p75")), result["status"],
+        _fmt(row.get("draw_daily_kwh_p75")), result["status"],
     )
     return _persist(result, row)
 
@@ -1212,37 +1289,85 @@ def _fmt(v: Any) -> str:
 
 _UA_BOUNDS = (0.5, 15.0)
 _COP_MULT_BOUNDS = (0.5, 1.5)
-_DRAW_BOUNDS = (0.2, 8.0)
+# Per-BUCKET plausibility (one 2h slice of a 200 L tank) and the DAILY total are
+# different scales and need different ceilings: one bucket at the per-bucket cap
+# would already saturate a shared bound, and the real daily p75 measured 8.7 kWh
+# against a shared 8.0 ceiling — the reader that "sizes comfort" was silently
+# returning None on the first real dataset it saw.
+_DRAW_BUCKET_BOUNDS = (0.0, 8.0)
+_DRAW_DAILY_BOUNDS = (0.2, 16.0)
 
 
-def _calibration_row() -> dict[str, Any] | None:
+def _calibration_row(*, component: str | None = None) -> dict[str, Any] | None:
+    """The calibration row, or None when disabled/absent/STALE.
+
+    Staleness is the price of a merge-preserving upsert: a component that never
+    re-fits keeps its last value forever. That is right for a quiet week and wrong
+    for a quiet season — a ``cop_mult`` measured in July, at outdoor temperatures
+    of 21-33 °C, must not still be steering a January LP if the COP fit has found
+    no clean event since. Each component's ``*_computed_at`` is checked against a
+    max age; past it, the reader falls back to the env constant and says so.
+    """
     if not bool(getattr(config, "DHW_TANK_LEARNED_VALUES_ENABLED", True)):
         return None
     from .. import db
 
     try:
-        return db.get_dhw_tank_calibration()
+        row = db.get_dhw_tank_calibration()
     except Exception:  # noqa: BLE001 — calibration must never break a consumer
         return None
+    if row is None or component is None:
+        return row
+    stamped = row.get(f"{component}_computed_at")
+    if not stamped:
+        return row  # never fitted → the component's own None check handles it
+    max_age = float(getattr(config, "DHW_TANK_LEARN_MAX_AGE_DAYS", 45))
+    try:
+        computed = datetime.fromisoformat(str(stamped).replace("Z", "+00:00"))
+        if computed.tzinfo is None:
+            computed = computed.replace(tzinfo=UTC)
+    except (TypeError, ValueError):
+        return row
+    age_days = (datetime.now(UTC) - computed).total_seconds() / 86400.0
+    if age_days > max_age:
+        logger.warning(
+            "tank_thermal: %s calibration is %.0f days old (max %.0f) — falling back "
+            "to the env constant rather than steering on a stale season",
+            component, age_days, max_age,
+        )
+        return None
+    return row
 
 
 def get_tank_ua_w_per_k() -> float:
     """Learned tank UA when present + in bounds; ``DHW_TANK_UA_W_PER_K`` otherwise."""
     fallback = float(config.DHW_TANK_UA_W_PER_K)
-    row = _calibration_row()
+    row = _calibration_row(component="ua")
     if row is None or row.get("ua_w_per_k") is None:
         return fallback
     ua = float(row["ua_w_per_k"])
-    return ua if _UA_BOUNDS[0] <= ua <= _UA_BOUNDS[1] else fallback
+    if not (_UA_BOUNDS[0] <= ua <= _UA_BOUNDS[1]):
+        logger.warning(
+            "tank_thermal: learned UA %.2f W/K is outside %s — using the env "
+            "constant %.2f", ua, _UA_BOUNDS, fallback,
+        )
+        return fallback
+    return ua
 
 
 def get_dhw_cop_multiplier() -> float:
     """Learned level correction on the DHW COP curve; 1.0 (neutral) otherwise."""
-    row = _calibration_row()
+    row = _calibration_row(component="cop")
     if row is None or row.get("cop_mult") is None:
         return 1.0
     mult = float(row["cop_mult"])
-    return mult if _COP_MULT_BOUNDS[0] <= mult <= _COP_MULT_BOUNDS[1] else 1.0
+    if not (_COP_MULT_BOUNDS[0] <= mult <= _COP_MULT_BOUNDS[1]):
+        logger.warning(
+            "tank_thermal: learned COP multiplier %.2f is outside %s — using 1.0 "
+            "(the curve, uncorrected)", mult, _COP_MULT_BOUNDS,
+        )
+        return 1.0
+    return mult
 
 
 def get_draw_profile_kwh_thermal(*, percentile: str = "p75") -> list[float] | None:
@@ -1255,7 +1380,7 @@ def get_draw_profile_kwh_thermal(*, percentile: str = "p75") -> list[float] | No
     total: this household draws its hot water in the MORNING, which is not what
     ``dhw_demand``'s four-evening-showers model assumes.
     """
-    row = _calibration_row()
+    row = _calibration_row(component="draw")
     if row is None:
         return None
     key = "draw_profile_p75_json" if percentile == "p75" else "draw_profile_median_json"
@@ -1268,8 +1393,33 @@ def get_draw_profile_kwh_thermal(*, percentile: str = "p75") -> list[float] | No
         return None
     if len(profile) != 12 or any(v < 0 for v in profile):
         return None
-    total = sum(profile)
-    return profile if _DRAW_BOUNDS[0] <= total <= _DRAW_BOUNDS[1] else None
+    if any(v > _DRAW_BUCKET_BOUNDS[1] for v in profile):
+        logger.warning(
+            "tank_thermal: learned draw profile has a bucket above %.1f kWh — "
+            "falling back to the shower model", _DRAW_BUCKET_BOUNDS[1],
+        )
+        return None
+    return profile
+
+
+def get_draw_cop_sensitivity_kwh() -> list[float] | None:
+    """How many kWh each bucket's draw estimate MOVES per unit of COP error.
+
+    Zero means the draw was read straight off the tank's fall — COP-invariant,
+    and as trustworthy as the thermometer. Large means it was inferred from an
+    assumed COP inside a reheat, and inherits that COP's uncertainty. In this
+    household the morning peak is the former; a good part of the evening one is
+    the latter. A consumer that treats the two alike will over-heat for water
+    nobody drew.
+    """
+    row = _calibration_row(component="draw")
+    if row is None or not row.get("draw_cop_sensitivity_json"):
+        return None
+    try:
+        sens = [float(v) for v in json.loads(row["draw_cop_sensitivity_json"])]
+    except (TypeError, ValueError):
+        return None
+    return sens if len(sens) == 12 else None
 
 
 def get_daily_draw_kwh_thermal(*, percentile: str = "p75") -> float | None:
@@ -1279,7 +1429,7 @@ def get_daily_draw_kwh_thermal(*, percentile: str = "p75") -> float | None:
     sum of per-bucket p75s is an upper bound on a day's p75, not an estimate of
     it: no day sits at its 75th percentile in all twelve buckets at once.
     """
-    row = _calibration_row()
+    row = _calibration_row(component="draw")
     if row is None:
         return None
     key = "draw_daily_kwh_p75" if percentile == "p75" else "draw_daily_kwh_median"
@@ -1287,4 +1437,10 @@ def get_daily_draw_kwh_thermal(*, percentile: str = "p75") -> float | None:
     if val is None:
         return None
     draw = float(val)
-    return draw if _DRAW_BOUNDS[0] <= draw <= _DRAW_BOUNDS[1] else None
+    if not (_DRAW_DAILY_BOUNDS[0] <= draw <= _DRAW_DAILY_BOUNDS[1]):
+        logger.warning(
+            "tank_thermal: learned daily draw %.2f kWh is outside %s — ignoring",
+            draw, _DRAW_DAILY_BOUNDS,
+        )
+        return None
+    return draw

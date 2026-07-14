@@ -1339,6 +1339,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             cop_computed_at TEXT,
             draw_profile_median_json TEXT,
             draw_profile_p75_json TEXT,
+            draw_cop_sensitivity_json TEXT,
             draw_daily_kwh_median REAL,
             draw_daily_kwh_p75 REAL,
             draw_full_days INTEGER,
@@ -8523,7 +8524,8 @@ _TANK_CAL_COLS = (
     "ua_computed_at", "cop_dhw_median", "cop_dhw_p25", "cop_dhw_p75", "cop_mult",
     "cop_mult_raw", "cop_t_outdoor_median", "cop_t_outdoor_min",
     "cop_t_outdoor_max", "cop_samples", "cop_window_days", "cop_computed_at",
-    "draw_profile_median_json", "draw_profile_p75_json", "draw_daily_kwh_median",
+    "draw_profile_median_json", "draw_profile_p75_json",
+    "draw_cop_sensitivity_json", "draw_daily_kwh_median",
     "draw_daily_kwh_p75", "draw_full_days", "draw_days", "draw_window_days",
     "draw_computed_at", "last_run_json",
 )

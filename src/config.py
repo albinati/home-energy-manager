@@ -1905,6 +1905,14 @@ class Config:
         os.getenv("DHW_TANK_LEARN_DRAW_WINDOW_DAYS", "14")
     )
     DHW_TANK_LEARN_DRAW_MIN_DAYS: int = int(os.getenv("DHW_TANK_LEARN_DRAW_MIN_DAYS", "7"))
+    # A merge-preserving upsert means a component that never re-fits keeps its
+    # value forever. Right for a quiet week, wrong for a quiet season: a cop_mult
+    # measured in July (outdoor 21-33 °C) must not still steer a January LP if no
+    # clean event has been seen since. Past this age a reader falls back to the
+    # env constant and logs it.
+    DHW_TANK_LEARN_MAX_AGE_DAYS: float = float(
+        os.getenv("DHW_TANK_LEARN_MAX_AGE_DAYS", "45")
+    )
     # INDOOR_SETPOINT_C is runtime-tunable via /api/v1/settings (#52) — see @property below.
     INDOOR_COMFORT_BAND_C: float = float(os.getenv("INDOOR_COMFORT_BAND_C", "1.5"))
     # #540 W1 — a room-sensor reading older than this is treated as ABSENT (the

@@ -450,56 +450,100 @@ def test_heat_event_with_a_mid_reheat_draw_is_rejected():
 # ---------------------------------------------------------------------------
 
 
-def _full_day_rows(day: date, temps_by_hour: dict[int, float], base: float) -> list[tuple[float, float]]:
-    """Hourly tank samples across a whole local day (= UTC in these tests)."""
-    rows = []
+def _closed_days(
+    n_days: int,
+    *,
+    base: float = 50.0,
+    drops_for_day=lambda k: {},
+    reheat_hour: int = 13,   # ODD: lands INSIDE bucket 6, not on its 12:00 edge
+    ua_w_per_k: float = 2.0,
+    cop: float = 2.5,
+    start_day: date = date(2026, 7, 6),
+    extra_rise: dict[int, float] | None = None,
+) -> tuple[list[tuple[float, float]], list[dict]]:
+    """A CONTINUOUS, energy-closed multi-day tank series + its 2h energy buckets.
+
+    Every joule is accounted: the tank coasts at ``ua_w_per_k``, loses ``drops``
+    °C to draws, and is topped back up to ``base`` once a day by a reheat whose
+    electricity is booked into the matching bucket at ``cop``.
+
+    ``reheat_hour`` must be the SECOND hour of its 2h bucket: a rise applied on a
+    bucket boundary is invisible inside that bucket (its start sample already
+    carries it) and shows up as a rise-without-energy in the bucket before.
+
+    Getting this right is the difference between testing the estimator and testing
+    the fixture. A per-day builder that restarts each morning at ``base`` quietly
+    lifts the tank with no energy behind it, and the balance — correctly — books
+    that phantom heat as a negative residual, which then cancels the very draws
+    the test is asserting. The estimator was right; the fixture was lying.
+    """
+    rows: list[tuple[float, float]] = []
+    cons: list[dict] = []
+    extra_rise = extra_rise or {}
     cur = base
-    for h in range(25):
-        cur = temps_by_hour.get(h, cur)
-        ts = datetime(day.year, day.month, day.day, 0, 0, tzinfo=UTC) + timedelta(hours=h)
-        rows.append((ts.timestamp(), cur))
-    return rows
+
+    def _ts(day: date, hour: int) -> float:
+        return (
+            datetime(day.year, day.month, day.day, 0, 0, tzinfo=UTC)
+            + timedelta(hours=hour)
+        ).timestamp()
+
+    for k in range(n_days):
+        day = start_day + timedelta(days=k)
+        drops = drops_for_day(k)
+        reheat_kwh = 0.0
+        for h in range(24):
+            if h:
+                cur += -(ua_w_per_k * (cur - AMBIENT) * 3600.0) / C_TANK  # coast 1 h
+            cur -= drops.get(h, 0.0)
+            if h in extra_rise:
+                cur += extra_rise[h]
+            if h == reheat_hour:
+                rise = max(0.0, base - cur)
+                cur += rise
+                reheat_kwh = (rise * C_TANK / 3.6e6) / cop
+            rows.append((_ts(day, h), cur))
+        booked = dict.fromkeys(range(12), 0.0)
+        booked[reheat_hour // 2] = reheat_kwh
+        for h, r in extra_rise.items():
+            booked[h // 2] = booked.get(h // 2, 0.0) + (r * C_TANK / 3.6e6) / cop
+        cons += [bucket_row(day, b, booked[b]) for b in range(12)]
+    rows.append((_ts(start_day + timedelta(days=n_days), 0), cur))
+    return rows, cons
 
 
 def test_draw_profile_adds_back_the_mid_drawdown_reheat():
     """The tank's temperature drop UNDERSTATES the draw whenever the firmware
-    reheats mid-shower — and that reheat (prod: the 20:00–22:00 bucket, at peak
+    reheats mid-shower — and that reheat (prod: the 20:00-22:00 bucket, at peak
     price) is exactly the prize the LP is being asked to move. The energy balance
     must recover the full draw, not the visible drop."""
-    ua, cop = 2.0, 2.5
-    reheat_kwh = 0.4
-    rows: list[tuple[float, float]] = []
-    cons: list[dict] = []
-    for k in range(8):
-        day = date(2026, 7, 6) + timedelta(days=k)
-        # Flat at 45 all day; the 20:00-22:00 bucket drops 4 °C AND takes a reheat.
-        rows += _full_day_rows(day, {20: 45.0, 21: 43.0, 22: 41.0}, 45.0)
-        cons += quiet_buckets(day, {10: reheat_kwh})
+    cop = 2.5
+    extra_reheat_c = 4.0  # the firmware tops the tank up DURING the drawdown
+    rows, cons = _closed_days(
+        8,
+        drops_for_day=lambda k: {21: 8.0},
+        extra_rise={21: extra_reheat_c},
+        cop=cop,
+    )
     fit = ttl.estimate_draw_profile(
-        rows, cons, [], tz=TZ, c_tank_j_per_k=C_TANK, ua_w_per_k=ua,
+        rows, cons, [], tz=TZ, c_tank_j_per_k=C_TANK, ua_w_per_k=2.0,
         t_ambient_c=AMBIENT, cop_dhw=cop, min_days=5,
     )
     assert fit["status"] == "ok"
-    visible_drop_kwh = C_TANK * 4.0 / 3.6e6
     evening = fit["profile_kwh_median"][10]
-    # The draw exceeds the visible drop by roughly the reheat's thermal output.
-    assert evening > visible_drop_kwh
-    assert evening == pytest.approx(visible_drop_kwh + reheat_kwh * cop, abs=0.15)
-    # Quiet buckets stay quiet — the balance doesn't invent draw out of standing loss.
-    assert fit["profile_kwh_median"][2] == pytest.approx(0.0, abs=0.05)
+    visible_drop_kwh = C_TANK * (8.0 - extra_reheat_c) / 3.6e6
+    assert evening > visible_drop_kwh  # the reheat is added back
+    assert evening == pytest.approx(C_TANK * 8.0 / 3.6e6, abs=0.2)  # the FULL draw
+    # A quiet bucket stays quiet — standing loss is not mistaken for demand.
+    assert fit["profile_kwh_median"][2] == pytest.approx(0.0, abs=0.06)
 
 
 def test_draw_profile_finds_a_morning_draw_an_evening_window_would_miss():
-    """This household's tank visibly drops around 08:30–09:30 while most evenings
+    """This household's tank visibly drops around 08:30-09:30 while most evenings
     barely move it. An evening-window estimator would measure a small number and
     call it the answer; the per-bucket profile puts the draw where it happens —
     which is what the LP needs in order to time the tank at all."""
-    rows: list[tuple[float, float]] = []
-    cons: list[dict] = []
-    for k in range(8):
-        day = date(2026, 7, 6) + timedelta(days=k)
-        rows += _full_day_rows(day, {8: 44.0, 9: 40.0, 10: 38.0}, 44.0)
-        cons += quiet_buckets(day, {})
+    rows, cons = _closed_days(8, drops_for_day=lambda k: {9: 6.0})
     fit = ttl.estimate_draw_profile(
         rows, cons, [], tz=TZ, c_tank_j_per_k=C_TANK, ua_w_per_k=2.0,
         t_ambient_c=AMBIENT, cop_dhw=2.5, min_days=5,
@@ -507,31 +551,22 @@ def test_draw_profile_finds_a_morning_draw_an_evening_window_would_miss():
     assert fit["status"] == "ok"
     profile = fit["profile_kwh_median"]
     assert profile[4] == pytest.approx(C_TANK * 6.0 / 3.6e6, abs=0.2)  # 08:00-10:00
-    assert profile[10] == pytest.approx(0.0, abs=0.05)  # evening: nothing
+    assert profile[10] == pytest.approx(0.0, abs=0.06)  # evening: nothing
     assert profile.index(max(profile)) == 4
 
 
 def test_daily_total_is_not_the_sum_of_bucket_percentiles():
-    """Σ p75(bucket) is an UPPER BOUND on a day's p75, not an estimate of it — no
-    day sits at its 75th percentile in all twelve buckets at once. The daily stat
-    must come from whole-day totals, and must not publish at all off a thin run
-    of complete days."""
-    rows: list[tuple[float, float]] = []
-    cons: list[dict] = []
-    for k in range(8):
-        day = date(2026, 7, 6) + timedelta(days=k)
-        # Every day draws morning AND evening, but ANTI-CORRELATED: a big-shower
-        # morning is followed by a light evening and vice versa. So each bucket
-        # has a high 75th percentile, yet NO day is high in both at once — which
-        # is exactly the situation where summing the percentiles overshoots.
-        morning = 8.0 if k % 2 else 2.0
-        evening = 2.0 if k % 2 else 8.0
-        rows += _full_day_rows(
-            day,
-            {8: 55.0, 9: 55.0 - morning, 20: 55.0 - morning, 21: 55.0 - morning - evening},
-            55.0,
-        )
-        cons += quiet_buckets(day, {})
+    """Sum of per-bucket p75s is an UPPER BOUND on a day's p75, not an estimate of
+    it — no day sits at its 75th percentile in all twelve buckets at once. The
+    daily stat must come from whole-day totals."""
+    # Anti-correlated: a big-shower morning is followed by a light evening. Each
+    # bucket has a high p75, yet no day is high in both — exactly where summing
+    # the percentiles overshoots.
+    rows, cons = _closed_days(
+        8,
+        base=55.0,
+        drops_for_day=lambda k: {9: 8.0 if k % 2 else 2.0, 21: 2.0 if k % 2 else 8.0},
+    )
     fit = ttl.estimate_draw_profile(
         rows, cons, [], tz=TZ, c_tank_j_per_k=C_TANK, ua_w_per_k=2.0,
         t_ambient_c=AMBIENT, cop_dhw=2.5, min_days=5,
@@ -539,36 +574,120 @@ def test_daily_total_is_not_the_sum_of_bucket_percentiles():
     assert fit["status"] == "ok"
     assert fit["daily_full_days"] == 8
     sum_of_p75 = sum(fit["profile_kwh_p75"])
-    assert sum_of_p75 > 0
-    # Every day drew the same TOTAL (8 + 2), so the daily p75 is that total —
-    # while Σ p75(bucket) claims 8 + 8. The bound is loose, and publishing it as
-    # the daily figure would over-size the tank's demand by ~60%.
-    assert fit["daily_kwh_p75"] < sum_of_p75
+    # Every day drew the same TOTAL (8 + 2 degrees), so the daily p75 is that
+    # total — while the summed percentiles claim 8 + 8.
     assert fit["daily_kwh_p75"] == pytest.approx(C_TANK * 10.0 / 3.6e6, abs=0.35)
+    assert fit["daily_kwh_p75"] < sum_of_p75
+
+
+def test_a_pure_reheat_reports_no_draw_and_flags_its_cop_dependence():
+    """A bucket whose entire temperature RISE is explained by its own reheat drew
+    no water — and the estimator must say so rather than booking the reheat as
+    demand. But that answer is only as good as the assumed COP: get the COP wrong
+    and the same bucket reports a phantom draw. The dependence is real and
+    unavoidable at 2 h resolution, so it is PUBLISHED (`profile_cop_sensitivity_kwh`
+    = kWh the answer moves per unit of COP error) rather than hidden inside a
+    number that looks as solid as the morning draw — which is read straight off the
+    tank's fall and is COP-invariant."""
+    cop = 2.5
+    rows, cons = _closed_days(8, drops_for_day=lambda k: {9: 6.0}, cop=cop)
+    fit = ttl.estimate_draw_profile(
+        rows, cons, [], tz=TZ, c_tank_j_per_k=C_TANK, ua_w_per_k=2.0,
+        t_ambient_c=AMBIENT, cop_dhw=cop, min_days=5,
+    )
+    assert fit["status"] == "ok"
+    # Bucket 6 (12:00-14:00) is pure reheat: no draw is booked against it.
+    assert fit["profile_kwh_median"][6] == pytest.approx(0.0, abs=0.1)
+    # ...and its answer is the COP-dependent one; the morning draw's is not.
+    assert fit["profile_cop_sensitivity_kwh"][6] > 0.2
+    assert fit["profile_cop_sensitivity_kwh"][4] == pytest.approx(0.0, abs=0.01)
+
+    # Prove the dependence is real: assume a COP 40% too high and the SAME data
+    # reports a reheat-bucket draw that never happened, while the morning draw
+    # barely moves. This asymmetry is why the sensitivity ships.
+    inflated = ttl.estimate_draw_profile(
+        rows, cons, [], tz=TZ, c_tank_j_per_k=C_TANK, ua_w_per_k=2.0,
+        t_ambient_c=AMBIENT, cop_dhw=cop * 1.4, min_days=5,
+    )
+    assert inflated["profile_kwh_median"][6] > 0.3
+    assert inflated["profile_kwh_median"][4] == pytest.approx(
+        fit["profile_kwh_median"][4], abs=0.06
+    )
+
+
+def test_negative_residuals_are_not_rectified_into_phantom_draw():
+    """A reheat's heat can land just after the bucket edge: the bucket holding the
+    energy shows no rise (positive residual) while its neighbour shows a rise with
+    no energy (negative residual). Clamping EACH observation at zero would keep the
+    phantom and throw the correction away, inflating the profile. Clamp once, at
+    publication — the errors have to be allowed to cancel first."""
+    cop = 2.5
+    # Reheat happens at 15:00 (bucket 7) but the counter books it to bucket 6.
+    # Nobody drew any water all day.
+    rows, cons = _closed_days(8, reheat_hour=15, cop=cop)
+    spilled = {
+        r["date"]: r["kwh_dhw"] for r in cons if r["bucket_idx"] == 7
+    }
+    for row in cons:
+        if row["bucket_idx"] == 6:
+            row["kwh_dhw"] = spilled[row["date"]]
+        elif row["bucket_idx"] == 7:
+            row["kwh_dhw"] = 0.0
+
+    fit = ttl.estimate_draw_profile(
+        rows, cons, [], tz=TZ, c_tank_j_per_k=C_TANK, ua_w_per_k=2.0,
+        t_ambient_c=AMBIENT, cop_dhw=cop, min_days=5,
+    )
+    assert fit["status"] == "ok"
+    # Bucket 6 books a phantom (energy, no rise); bucket 7 carries the compensating
+    # negative (rise, no energy). Across the DAY they must net to ~zero.
+    assert fit["profile_kwh_median"][6] > 0.3   # the phantom is real, unclamped
+    assert fit["daily_kwh_median"] == pytest.approx(0.0, abs=0.35)
+
+
+def test_stale_calibration_falls_back_rather_than_steering_a_new_season(tmp_db, monkeypatch):
+    """The merge-preserving upsert keeps a component forever if it never re-fits.
+    A cop_mult measured in July, at 21-33 °C outdoors, must not still be steering
+    a January LP because no clean heat event has been seen since."""
+    old = (datetime.now(UTC) - timedelta(days=120)).isoformat()
+    db.upsert_dhw_tank_calibration({
+        "ua_w_per_k": 2.04, "ua_computed_at": old,
+        "cop_mult": 0.55, "cop_computed_at": old,
+    })
+    monkeypatch.setattr(config, "DHW_TANK_LEARN_MAX_AGE_DAYS", 45.0, raising=False)
+    assert ttl.get_tank_ua_w_per_k() == pytest.approx(2.5)   # env constant
+    assert ttl.get_dhw_cop_multiplier() == pytest.approx(1.0)  # the curve, uncorrected
+
+    # Fresh again → the learned values come straight back.
+    db.upsert_dhw_tank_calibration({
+        "ua_computed_at": datetime.now(UTC).isoformat(),
+        "cop_computed_at": datetime.now(UTC).isoformat(),
+    })
+    assert ttl.get_tank_ua_w_per_k() == pytest.approx(2.04)
+    assert ttl.get_dhw_cop_multiplier() == pytest.approx(0.55)
 
 
 def test_draw_profile_gates_on_days_and_skips_null_buckets():
-    day = date(2026, 7, 8)
-    flat = _full_day_rows(day, {}, 45.0)
+    """Too little data → skip, don't guess. And a NULL counter is UNKNOWN, not
+    zero: that bucket contributes nothing and its day is not a whole day."""
+    rows, cons = _closed_days(2)  # only 2 days
     fit = ttl.estimate_draw_profile(
-        flat, quiet_buckets(day, {}), [], tz=TZ, c_tank_j_per_k=C_TANK,
-        ua_w_per_k=2.0, t_ambient_c=AMBIENT, cop_dhw=2.5, min_days=5,
+        rows, cons, [], tz=TZ, c_tank_j_per_k=C_TANK, ua_w_per_k=2.0,
+        t_ambient_c=AMBIENT, cop_dhw=2.5, min_days=5,
     )
     assert fit["status"] == "skipped"
 
-    # A NULL counter is unknown, not zero — that bucket contributes nothing.
-    rows, cons = [], []
-    for k in range(8):
-        d = date(2026, 7, 6) + timedelta(days=k)
-        rows += _full_day_rows(d, {}, 45.0)
-        cons += quiet_buckets(d, {5: None})
+    rows, cons = _closed_days(8)
+    for row in cons:
+        if row["bucket_idx"] == 5:
+            row["kwh_dhw"] = None
     fit = ttl.estimate_draw_profile(
         rows, cons, [], tz=TZ, c_tank_j_per_k=C_TANK, ua_w_per_k=2.0,
         t_ambient_c=AMBIENT, cop_dhw=2.5, min_days=5,
     )
     assert fit["status"] == "ok"
     assert fit["samples_per_bucket"][5] == 0
-    assert fit["daily_full_days"] == 0  # no day is whole → no daily figure published
+    assert fit["daily_full_days"] == 0  # no whole day → no daily figure published
 
 
 # ---------------------------------------------------------------------------
