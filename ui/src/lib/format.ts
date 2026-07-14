@@ -1,5 +1,6 @@
 // Display formatters. Keep all locale-y / unit-y logic here so pages stay
 // declarative. Numbers null/undefined → "—" so missing data renders cleanly.
+import { agoLabel } from "./freshness";
 
 const nbsp = " ";
 
@@ -81,11 +82,9 @@ export function relTime(iso: string | null | undefined): string {
   try {
     const d = new Date(iso).getTime();
     if (!Number.isFinite(d)) return iso;
-    const diffS = (Date.now() - d) / 1000;
-    if (diffS < 60) return "just now";
-    if (diffS < 3600) return Math.round(diffS / 60) + "m ago";
-    if (diffS < 86400) return Math.round(diffS / 3600) + "h ago";
-    return Math.round(diffS / 86400) + "d ago";
+    // Single-sourced wording + thresholds (freshness.ts) so every "N ago" in the
+    // app agrees (the audit found four different "now/fresh" cutoffs).
+    return agoLabel(Math.max(0, Date.now() - d));
   } catch {
     return iso;
   }

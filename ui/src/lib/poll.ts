@@ -25,6 +25,19 @@ export interface PollState<T> {
   // Epoch ms of the last successful fetch (for "next refresh in Ns" UIs).
   lastFetchAt: number | null;
   intervalMs: number;
+  // Consecutive failures since the last success (0 when healthy). Lets a widget
+  // (or a page-level cue) show "reconnecting…" and, with lastFetchAt, decide the
+  // on-screen data is stale.
+  failCount: number;
+}
+
+// Error backoff: a hard-down endpoint must not be hammered at full rate forever.
+// On each consecutive failure the next attempt is delayed by
+// interval·2^fails, capped, with jitter to de-sync many failing polls.
+const MAX_BACKOFF_MS = 120_000;
+function backoffDelay(intervalMs: number, fails: number): number {
+  const base = Math.min(intervalMs * 2 ** fails, MAX_BACKOFF_MS);
+  return base + Math.floor(Math.random() * Math.min(1000, base * 0.25));
 }
 
 export function usePoll<T>(
@@ -36,8 +49,12 @@ export function usePoll<T>(
   const [error, setError] = useState<Error | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [lastFetchAt, setLastFetchAt] = useState<number | null>(null);
+  const [failCount, setFailCount] = useState<number>(0);
   const fnRef = useRef(fn);
   fnRef.current = fn;
+  // Live count read by tick() for the backoff delay (state is snapshotted in the
+  // closure, so keep the authoritative value in a ref).
+  const failRef = useRef(0);
 
   const mountedRef = useRef(true);
   useEffect(() => {
@@ -47,16 +64,23 @@ export function usePoll<T>(
     };
   }, []);
 
-  const refresh = useRef(async () => {
+  // Returns true on success — tick() uses it to pick the next delay.
+  const refresh = useRef(async (): Promise<boolean> => {
     try {
       const next = await fnRef.current();
-      if (!mountedRef.current) return;
+      if (!mountedRef.current) return true;
       setData(next);
       setLastFetchAt(Date.now());
       setError(null);
+      failRef.current = 0;
+      setFailCount(0);
+      return true;
     } catch (e) {
-      if (!mountedRef.current) return;
+      if (!mountedRef.current) return false;
       setError(e instanceof Error ? e : new Error(String(e)));
+      failRef.current += 1;
+      setFailCount(failRef.current);
+      return false;
     } finally {
       if (mountedRef.current) setLoading(false);
     }
@@ -68,9 +92,13 @@ export function usePoll<T>(
 
     const tick = async () => {
       if (stopped) return;
-      await refresh();
+      const ok = await refresh();
       if (stopped) return;
-      timer = window.setTimeout(tick, intervalMs);
+      // Healthy → the configured cadence; failing → exponential backoff so a
+      // dead endpoint isn't hammered (the last good data stays on screen and
+      // failCount lets the consumer flag it stale).
+      const delay = ok ? intervalMs : backoffDelay(intervalMs, failRef.current);
+      timer = window.setTimeout(tick, delay);
     };
 
     const onVisibility = () => {
@@ -95,7 +123,10 @@ export function usePoll<T>(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [intervalMs, ...deps]);
 
-  return { data, error, loading, refresh, lastFetchAt, intervalMs };
+  const refreshVoid = useRef(async () => {
+    await refresh();
+  }).current;
+  return { data, error, loading, refresh: refreshVoid, lastFetchAt, intervalMs, failCount };
 }
 
 // Immutable response cache for COMPLETED past periods. "Past is past" — a
@@ -217,7 +248,7 @@ export function useFetch<T>(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);
 
-  return { data, error, loading, refresh, lastFetchAt: null, intervalMs: 0 };
+  return { data, error, loading, refresh, lastFetchAt: null, intervalMs: 0, failCount: 0 };
 }
 
 // useAfterPaint returns false on first render, then flips true once the browser

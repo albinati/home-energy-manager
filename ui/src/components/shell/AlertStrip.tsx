@@ -1,6 +1,6 @@
 import { usePoll } from "../../lib/poll";
 import { getStatusAlerts } from "../../lib/endpoints";
-import { cockpitFreshness, cockpitFreshnessAt } from "../../lib/freshness";
+import { cockpitFreshness, cockpitFreshnessAt, cockpitConn, ageMs, agoLabel } from "../../lib/freshness";
 import { Icon } from "../common/Icon";
 import type { StatusAlertsResponse } from "../../lib/types";
 import "./alert-strip.css";
@@ -176,6 +176,23 @@ function buildChips(a: StatusAlertsResponse): Chip[] {
   return chips;
 }
 
+/** The fast cockpit poll is failing — no fresh data is arriving at all. This is
+ *  the page-level cue for the audit's "silent stale on error": rather than
+ *  frozen numbers with no warning, say we're reconnecting and how old the last
+ *  good read is. Only fires after ≥2 consecutive failures (one transient blip
+ *  shouldn't alarm). */
+function connectionChip(): Chip | null {
+  const c = cockpitConn.value;
+  if (!c || c.failCount < 2) return null;
+  const age = ageMs(c.lastFetchAt);
+  return {
+    key: "conn",
+    tone: "warn",
+    label: "Reconnecting — live data paused",
+    detail: `last update ${agoLabel(age)} · ${c.failCount} failed attempts`,
+  };
+}
+
 /** Staleness chip from the cockpit's own /cockpit/now poll, via the shared
  *  freshness signal — only meaningful while that poll is actually running
  *  (i.e. the user is on the cockpit and the map was published recently). */
@@ -210,6 +227,10 @@ export function AlertStrip() {
   let chips: Chip[] = debug ? DEBUG_CHIPS : [];
   if (!debug && alerts.data && !alerts.error) {
     chips = buildChips(alerts.data);
+    // Connection first (it explains why the freshness map may be missing), then
+    // per-source staleness. Only one of them usually fires.
+    const cc = connectionChip();
+    if (cc) chips.push(cc);
     const fc = freshnessChip();
     if (fc) chips.push(fc);
   }

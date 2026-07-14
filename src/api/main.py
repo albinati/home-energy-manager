@@ -1085,6 +1085,18 @@ async def cockpit_now():
         "peak_p": (tgt or {}).get("peak_threshold"),
     }
 
+    # Staleness for the two sources that were hardcoded never-stale (so the UI's
+    # freshness chip could never flag a stalled fetch/push). Thresholds are a
+    # generous multiple of the expected refresh cadence — they fire only on a
+    # genuine pipeline failure, not on normal quiet operation.
+    def _stale_after(iso: str | None, max_age_s: float) -> bool | None:
+        a = _age(iso)
+        return None if a is None else a > max_age_s
+
+    agile_stale = _stale_after(agile_cache_fetched_at, 18 * 3600)   # daily fetch
+    if plan_fresh.get("fetched_at_utc"):
+        plan_fresh["stale"] = _stale_after(plan_fresh.get("fetched_at_utc"), 26 * 3600)  # nightly push + intraday replans
+
     # --- Compose ------------------------------------------------------------
     return {
         "now_utc": now.isoformat().replace("+00:00", "Z"),
@@ -1116,7 +1128,7 @@ async def cockpit_now():
             "agile": {
                 "fetched_at_utc": agile_cache_fetched_at,
                 "age_s": _age(agile_cache_fetched_at),
-                "stale": None,
+                "stale": agile_stale,
             },
             "fox": fox_fresh,
             "daikin": dk_fresh,

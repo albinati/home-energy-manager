@@ -36,7 +36,7 @@ import { WhyNowLine } from "../components/home/WhyNowLine";
 import { FeedbackPanel } from "../components/home/FeedbackPanel";
 import { OperateCard } from "../components/home/OperateCard";
 import { LifetimeStrip } from "../components/home/LifetimeStrip";
-import { publishFreshness } from "../lib/freshness";
+import { publishFreshness, publishCockpitConn } from "../lib/freshness";
 import { role } from "../lib/auth";
 import "../components/home/home.css";
 
@@ -128,7 +128,13 @@ export default function Landing() {
   useEffect(() => {
     publishFreshness(now.data?.freshness);
   }, [now.data]);
-  useEffect(() => () => publishFreshness(null), []);
+  useEffect(() => {
+    publishCockpitConn({ failCount: now.failCount, lastFetchAt: now.lastFetchAt });
+  }, [now.failCount, now.lastFetchAt]);
+  useEffect(() => () => {
+    publishFreshness(null);
+    publishCockpitConn(null);
+  }, []);
 
   if (now.loading && !now.data) {
     return <div class="home"><Spinner label="Loading dashboard…" /></div>;
