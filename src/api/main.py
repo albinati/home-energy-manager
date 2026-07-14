@@ -1093,9 +1093,16 @@ async def cockpit_now():
         a = _age(iso)
         return None if a is None else a > max_age_s
 
-    agile_stale = _stale_after(agile_cache_fetched_at, 18 * 3600)   # daily fetch
+    # Agile is fetched ONCE a day (octopus_fetch cron, ~16:00 UTC), so in normal
+    # steady state the fetch age climbs to ~24h just before the next fetch — an
+    # 18h threshold would cry "stale" every morning 10:00–16:00 on perfectly good
+    # rates. 30h means "more than a full day since the last success", i.e. the
+    # daily fetch actually MISSED — which is when we do want to alarm. (This
+    # measures fetch age, not rate-coverage age; coverage is a separate concern.)
+    agile_stale = _stale_after(agile_cache_fetched_at, 30 * 3600)
     if plan_fresh.get("fetched_at_utc"):
-        plan_fresh["stale"] = _stale_after(plan_fresh.get("fetched_at_utc"), 26 * 3600)  # nightly push + intraday replans
+        # Nightly push (00:05 UTC) + intraday replans → >26h means the push missed.
+        plan_fresh["stale"] = _stale_after(plan_fresh.get("fetched_at_utc"), 26 * 3600)
 
     # --- Compose ------------------------------------------------------------
     return {
