@@ -1822,6 +1822,69 @@ class Config:
     THERMAL_UA_MIN_HDD_DAYS: int = int(os.getenv("THERMAL_UA_MIN_HDD_DAYS", "20"))
     THERMAL_UA_ASSUMED_COP: float = float(os.getenv("THERMAL_UA_ASSUMED_COP", "3.0"))
     THERMAL_UA_MIN_R2: float = float(os.getenv("THERMAL_UA_MIN_R2", "0.5"))
+    # --- DHW tank thermal learner (src/analytics/tank_thermal_learning.py) ---
+    # Measures the TANK's own UA (overnight decay), the DHW COP level (quiet-
+    # bounded heat events), and the evening shower draw. These constants stop
+    # being cosmetic the moment the LP owns tank timing. First fit over 21 days
+    # of prod telemetry: UA ≈ 2.0 W/K (the assumed 2.5 was close), but measured
+    # DHW COP ≈ 2.6 against the 4.7 the LP's curve assumes — the LP has been
+    # costing tank heat at roughly half price.
+    # false → every reader falls back to the env constants (instant rollback of
+    # the learned values without touching the cron).
+    DHW_TANK_LEARNED_VALUES_ENABLED: bool = os.getenv(
+        "DHW_TANK_LEARNED_VALUES_ENABLED", "true"
+    ).lower() == "true"
+    DHW_TANK_LEARN_WINDOW_DAYS: int = int(os.getenv("DHW_TANK_LEARN_WINDOW_DAYS", "21"))
+    DHW_TANK_LEARN_MIN_EPISODES: int = int(os.getenv("DHW_TANK_LEARN_MIN_EPISODES", "5"))
+    DHW_TANK_LEARN_MIN_EPISODE_HOURS: float = float(
+        os.getenv("DHW_TANK_LEARN_MIN_EPISODE_HOURS", "4")
+    )
+    DHW_TANK_LEARN_MIN_R2: float = float(os.getenv("DHW_TANK_LEARN_MIN_R2", "0.8"))
+    # The decay window opens an hour past the 22:00 setback (transient settle)
+    # and closes before the earliest price-aware warmup (window starts 11:00),
+    # so an episode is unheated by construction as well as by the bucket blocks.
+    DHW_TANK_LEARN_NIGHT_START_HOUR_LOCAL: int = int(
+        os.getenv("DHW_TANK_LEARN_NIGHT_START_HOUR_LOCAL", "23")
+    )
+    DHW_TANK_LEARN_NIGHT_END_HOUR_LOCAL: int = int(
+        os.getenv("DHW_TANK_LEARN_NIGHT_END_HOUR_LOCAL", "10")
+    )
+    DHW_TANK_LEARN_SETTLE_HOURS: float = float(os.getenv("DHW_TANK_LEARN_SETTLE_HOURS", "1.0"))
+    # ΔT(tank − room) below this makes UA unidentifiable (the tank has already
+    # coasted to near room temperature — no signal left in the curve).
+    DHW_TANK_LEARN_MIN_DELTA_T_C: float = float(
+        os.getenv("DHW_TANK_LEARN_MIN_DELTA_T_C", "8.0")
+    )
+    # A fall that is BOTH real (>= _DROP_C) and steep (> _DROP_RATE) is a DRAW,
+    # not standing loss: it ends the episode (the clean stretch before it
+    # survives — the W2 lesson). Both gates matter: telemetry is quantised to
+    # 1 °C, so an absolute-only test fires on noise; the overnight polling hole
+    # (~6 h, quota conservation) means a rate-only test fires on honest decay.
+    DHW_TANK_LEARN_DRAW_DROP_C: float = float(os.getenv("DHW_TANK_LEARN_DRAW_DROP_C", "2.0"))
+    DHW_TANK_LEARN_DRAW_DROP_RATE_C_PER_H: float = float(
+        os.getenv("DHW_TANK_LEARN_DRAW_DROP_RATE_C_PER_H", "2.0")
+    )
+    # Tolerate the overnight Daikin polling hole (the heartbeat stops asking
+    # Onecta ~00:30–05:00 to protect the 200-call quota). Safe ONLY because the
+    # tank's time constant is tens of hours (the trapezoid across the gap costs
+    # <1%) and the 2h energy buckets tile the gap, so a reheat hiding inside it
+    # still blocks the episode.
+    DHW_TANK_LEARN_MAX_GAP_MINUTES: float = float(
+        os.getenv("DHW_TANK_LEARN_MAX_GAP_MINUTES", "420")
+    )
+    DHW_TANK_LEARN_COP_MIN_BUCKET_KWH: float = float(
+        os.getenv("DHW_TANK_LEARN_COP_MIN_BUCKET_KWH", "0.15")
+    )
+    DHW_TANK_LEARN_COP_MIN_RISE_C: float = float(
+        os.getenv("DHW_TANK_LEARN_COP_MIN_RISE_C", "4.0")
+    )
+    DHW_TANK_LEARN_COP_MIN_SAMPLES: int = int(
+        os.getenv("DHW_TANK_LEARN_COP_MIN_SAMPLES", "8")
+    )
+    DHW_TANK_LEARN_DRAW_WINDOW_DAYS: int = int(
+        os.getenv("DHW_TANK_LEARN_DRAW_WINDOW_DAYS", "14")
+    )
+    DHW_TANK_LEARN_DRAW_MIN_DAYS: int = int(os.getenv("DHW_TANK_LEARN_DRAW_MIN_DAYS", "7"))
     # INDOOR_SETPOINT_C is runtime-tunable via /api/v1/settings (#52) — see @property below.
     INDOOR_COMFORT_BAND_C: float = float(os.getenv("INDOOR_COMFORT_BAND_C", "1.5"))
     # #540 W1 — a room-sensor reading older than this is treated as ABSENT (the

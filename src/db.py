@@ -1310,6 +1310,35 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             result_json TEXT NOT NULL
         )"""
     )
+    # DHW tank thermal calibration — the TANK's own UA / COP / shower draw,
+    # measured (src/analytics/tank_thermal_learning.py). Single row, same
+    # pattern as building_thermal_calibration. The three components carry
+    # separate quality + provenance fields because they land on different
+    # schedules: UA needs clean overnight decay (any season), COP needs
+    # quiet-bounded heat events, the draw needs evenings with a real shower.
+    # ``last_run_json`` doubles as the progress surface (no second table).
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS dhw_tank_calibration (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            ua_w_per_k REAL,
+            tau_hours REAL,
+            ua_r2_median REAL,
+            ua_episodes INTEGER,
+            ua_window_days INTEGER,
+            ua_computed_at TEXT,
+            cop_dhw_median REAL,
+            cop_mult REAL,
+            cop_samples INTEGER,
+            cop_computed_at TEXT,
+            draw_evening_kwh_median REAL,
+            draw_evening_kwh_p75 REAL,
+            draw_days INTEGER,
+            draw_window_days INTEGER,
+            draw_computed_at TEXT,
+            last_run_json TEXT,
+            computed_at TEXT NOT NULL
+        )"""
+    )
     # Read-only view that exposes daikin_telemetry.fetched_at as ISO 8601
     # alongside the raw float-epoch column. Productive code paths (estimator,
     # service.py rate calcs) consume the float directly for sub-second math —
@@ -4449,6 +4478,30 @@ def get_daikin_consumption_2hourly_range(
                 (start_date, end_date),
             )
             return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
+def get_tank_temps_range(start_epoch: float, end_epoch: float) -> list[tuple[float, float]]:
+    """``(fetched_at, tank_temp_c)`` LIVE rows inside ``[start, end)``, ascending.
+
+    Range form of :func:`get_tank_temps_since` for the tank thermal learner,
+    which fits over a bounded historical window rather than "everything since".
+    ``source='live'`` only, for the same reason: the physics-estimator rows
+    (written when the Daikin quota runs out) MODEL smooth decay from the very
+    constants this feeds, so admitting them would teach the learner its own
+    assumptions."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT fetched_at, tank_temp_c FROM daikin_telemetry "
+                "WHERE fetched_at >= ? AND fetched_at < ? AND tank_temp_c IS NOT NULL "
+                "AND source = 'live' "
+                "ORDER BY fetched_at ASC",
+                (start_epoch, end_epoch),
+            )
+            return [(float(r[0]), float(r[1])) for r in cur.fetchall()]
         finally:
             conn.close()
 
@@ -8449,6 +8502,62 @@ def upsert_building_thermal_calibration(fields: dict[str, Any]) -> None:
                     (id, {', '.join(_THERMAL_CAL_COLS)}, computed_at)
                     VALUES (1, {', '.join('?' * len(_THERMAL_CAL_COLS))}, ?)""",
                 (*vals, _dt.now(_UTC).isoformat()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+_TANK_CAL_COLS = (
+    "ua_w_per_k", "tau_hours", "ua_r2_median", "ua_episodes", "ua_window_days",
+    "ua_computed_at", "cop_dhw_median", "cop_mult", "cop_samples",
+    "cop_computed_at", "draw_evening_kwh_median", "draw_evening_kwh_p75",
+    "draw_days", "draw_window_days", "draw_computed_at", "last_run_json",
+)
+
+
+def get_dhw_tank_calibration() -> dict[str, Any] | None:
+    """Latest measured tank calibration (UA / COP / evening draw), or ``None``
+    before the learner's first run. Single-row PK seek — cheap enough for the
+    LP's per-solve readers."""
+    with _lock:
+        conn = get_connection()
+        try:
+            row = conn.execute(
+                "SELECT * FROM dhw_tank_calibration WHERE id = 1"
+            ).fetchone()
+            if not row:
+                return None
+            out = dict(row)
+            raw = out.get("last_run_json")
+            if raw:
+                try:
+                    out["last_run"] = json.loads(raw)
+                except (TypeError, ValueError):
+                    out["last_run"] = None
+            return out
+        finally:
+            conn.close()
+
+
+def upsert_dhw_tank_calibration(fields: dict[str, Any]) -> None:
+    """Replace the single ``dhw_tank_calibration`` row. ``fields`` may carry any
+    subset of the columns (the learner merges skipped components from the prior
+    row before calling); unknown keys are ignored. ``last_run_json`` accepts a
+    dict and is serialised here."""
+    payload = dict(fields)
+    last_run = payload.get("last_run_json")
+    if isinstance(last_run, dict):
+        payload["last_run_json"] = json.dumps(last_run, default=str)
+    vals = [payload.get(c) for c in _TANK_CAL_COLS]
+    with _lock:
+        conn = get_connection()
+        try:
+            conn.execute(
+                f"""INSERT OR REPLACE INTO dhw_tank_calibration
+                    (id, {', '.join(_TANK_CAL_COLS)}, computed_at)
+                    VALUES (1, {', '.join('?' * len(_TANK_CAL_COLS))}, ?)""",
+                (*vals, datetime.now(UTC).isoformat()),
             )
             conn.commit()
         finally:

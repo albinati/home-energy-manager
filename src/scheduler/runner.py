@@ -901,6 +901,15 @@ def bulletproof_thermal_learning_job() -> None:
         logger.info("thermal learning refresh: status=%s", result.get("status"))
     except Exception as e:
         logger.warning("thermal learning refresh failed (non-fatal): %s", e)
+    # The TANK's own physics (UA / COP level / evening draw) — same nightly beat,
+    # independent failure. Feeds the LP once it owns tank timing; until then it
+    # just measures, and the readers keep falling back to the env constants.
+    try:
+        from ..analytics.tank_thermal_learning import refresh_tank_thermal_calibration
+        tank = refresh_tank_thermal_calibration()
+        logger.info("tank thermal refresh: status=%s", tank.get("status"))
+    except Exception as e:
+        logger.warning("tank thermal refresh failed (non-fatal): %s", e)
 
 
 def bulletproof_load_error_log_job() -> None:
