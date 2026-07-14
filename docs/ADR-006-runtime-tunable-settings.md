@@ -8,8 +8,8 @@
 ## Context
 
 Every tunable knob was an env var baked in at process start: `DHW_TEMP_COMFORT_C`,
-`OPTIMIZATION_PRESET`, `LP_MPC_HOURS`, etc. Tuning DHW ceilings or MPC cadence
-meant editing `/root/home-energy-manager/.env` and `systemctl restart` —
+`OPTIMIZATION_PRESET`, the MPC cadence, etc. Tuning DHW ceilings or MPC cadence
+meant editing the `.env` file and `systemctl restart` —
 friction that kept operators from iterating, and made OpenClaw agents unable to
 retune comfort on the user's behalf.
 
@@ -29,11 +29,24 @@ coercion per the schema.
 
 ### Schema (`src/runtime_settings.py::SCHEMA`)
 
-| Group | Keys | `cron_reload` |
+The schema has grown well past the original three groups (DHW physics, LP
+tuning, legionella, Fox hold modes…). The shape, illustrated:
+
+| Group | Example keys | `cron_reload` |
 |---|---|---|
 | Comfort | `DHW_TEMP_COMFORT_C`, `DHW_TEMP_NORMAL_C`, `INDOOR_SETPOINT_C` | — |
-| Strategy | `OPTIMIZATION_PRESET`, `ENERGY_STRATEGY_MODE` | — |
-| Schedule | `LP_PLAN_PUSH_HOUR`, `LP_PLAN_PUSH_MINUTE`, `LP_MPC_HOURS` | ✅ |
+| Strategy | `OPTIMIZATION_PRESET` (`normal｜guests｜vacation`) | — |
+| Schedule | `LP_PLAN_PUSH_HOUR`, `LP_PLAN_PUSH_MINUTE`, `MPC_FORECAST_REFRESH_INTERVAL_MINUTES` | ✅ |
+
+Read `src/runtime_settings.py::SCHEMA` for the live list — it is the source of
+truth, and `GET /api/v1/settings` returns it.
+
+> Two keys named in the original version of this ADR are **gone from the
+> codebase** and are not tunable (or settable) anywhere:
+> **`ENERGY_STRATEGY_MODE`** (removed in PR C of the mode-collapse stack; the
+> settings endpoint reports it as `"removed"` for back-compat) and
+> **`LP_MPC_HOURS`** (removed in V12 when the fixed-hour MPC cron was deleted in
+> favour of event-driven re-solves).
 
 Each spec carries type, range (`min_value`/`max_value`) or enum, an `env_default`
 lambda, and a `cron_reload` flag. Unknown keys are rejected — schema-driven, not
@@ -81,9 +94,9 @@ updated key has `cron_reload=True`. Previously the author's fallback-plan was
 ### Good
 - `curl -X PUT .../settings/DHW_TEMP_COMFORT_C -d '{"value": 52}'` takes effect
   within 30 s in the next LP solve — no restart, no downtime.
-- Cron cadence changes (`LP_MPC_HOURS=[4,10,15]`) re-register live — the new
-  trigger fires on its next scheduled time, the old one stops firing
-  immediately.
+- Cron cadence changes (`LP_PLAN_PUSH_HOUR`, `MPC_FORECAST_REFRESH_INTERVAL_MINUTES`)
+  re-register live — the new trigger fires on its next scheduled time, the old
+  one stops firing immediately.
 - **Zero-risk rollback**: delete the row
   (`DELETE /api/v1/settings/{key}`) and the env default reasserts on next read.
   Migration from env-only → DB-backed is implicit (DB empty = env semantics).

@@ -2,16 +2,12 @@
 
 ## Deployment (Docker, immutable image)
 
-> **Cutover status (2026-04-25):** branch `feat/docker-immutable-deploy` brings
-> Docker back as an *immutable* deployment. Until the cutover runs against
-> Hetzner, the live server may still match the older "native systemd" layout —
-> `git log main` is authoritative for what is actually serving traffic.
-> Cutover runbook lives at `deploy/README.md`.
-
-The HEM runs as a single container pulled from GHCR. **Code is never editable
-on the host** after cutover — only `/srv/hem/data/` (state) and
-`/srv/hem/.env` (secrets). This puts the application code out of OpenClaw's
-reach.
+The HEM runs as a single container pulled from GHCR (the immutable-Docker
+cutover completed on 2026-04-25). **Code is never editable on the host** —
+only `/srv/hem/data/` (state) and `/srv/hem/.env` (secrets). This puts the
+application code out of OpenClaw's reach. Deploy/rollback runbook lives at
+`deploy/README.md`; the image tag in use is pinned by `HEM_IMAGE_TAG` in
+`/srv/hem/.compose.env` (systemd `EnvironmentFile`).
 
 | Thing | Path / value |
 |---|---|
@@ -45,10 +41,6 @@ the running container:
 docker exec hem python -m src.cli <subcommand>
 ```
 
-### BOOT.md is outdated — ignore it
-Refers to `venv/` and `daemon start`. Neither applies in either dev (`.venv/`
-+ `src.cli serve`) or prod (containerised).
-
 ---
 
 ## Daikin Onecta — token management
@@ -76,9 +68,9 @@ systemctl restart hem
 
 ### Full re-auth (refresh_token expired or 401 after refresh)
 
-The auth flow starts a callback server on **port 8080** (the previous CLAUDE.md
-said 18080 — that was wrong; the code at `src/daikin/auth.py:328` always bound
-8080). Use the one-shot compose file:
+The auth flow starts a callback server on **port 8080** (an older CLAUDE.md said
+18080 — that was wrong; both `HTTPServer(...)` binds in `src/daikin/auth.py`
+hard-code 8080). Use the one-shot compose file:
 
 ```bash
 # 1. From your laptop, tunnel :8080:
@@ -300,7 +292,9 @@ API_HOST=0.0.0.0                                # bind inside the namespace; com
 PLAN_AUTO_APPROVE=true                          # default: simulate → auto-apply; set false for explicit consent
 PLAN_APPROVAL_TIMEOUT_SECONDS=300               # grace window advertised to OpenClaw for Telegram/Discord buttons
 DHW_TEMP_NORMAL_C=45.0                          # restore/safe-default tank target (45 °C = sufficient for normal use)
-TARGET_DHW_TEMP_MIN_GUESTS_C=55.0              # guest-mode LP floor (multiple showers at 20:30–22:00)
+TARGET_DHW_TEMP_MIN_GUESTS_C=48.0              # guest-mode LP floor (multiple showers at 20:30–22:00).
+                                                 # Code default = 48.0 (src/config.py) — calibrated in PR G
+                                                 # (2026-05-23) from empirical tank physics: 48 °C ≈ 6 showers.
 # DHW_PEAK_TANK_STRATEGY was REMOVED 2026-05-21 (Epic 14, #386). The dispatch
 # layer always uses the IDLE behaviour (tank_power=True, tank_temp=DHW_TEMP_NORMAL_C)
 # during peak / peak_export windows. Prod telemetry (30d, 8 completed peak
@@ -308,17 +302,24 @@ TARGET_DHW_TEMP_MIN_GUESTS_C=55.0              # guest-mode LP floor (multiple s
 # perfectly even when held warm — and SHUTDOWN attempts failed 27% of the time
 # with READ_ONLY_CHARACTERISTIC errors. Leaving the env line in /srv/hem/.env
 # is harmless; remove on next .env touch.
-# IMPORTANT: tank pre-charge above 45 °C only happens when there's
-# an economic reason — `negative` (paid to import → 65 °C max),
-# `solar_charge` (free PV → DHW_TEMP_PV_ABUNDANCE_TARGET_C, default
-# 45 → runtime-tunable per household occupancy), `cheap` (modest
-# → 48 °C). Peak avoidance does NOT trigger pre-charging — see
-# issue #322 for conditional shutdown commit.
-DHW_TEMP_PV_ABUNDANCE_TARGET_C=45               # tank target during solar_charge / solar_preheat slots. Runtime-
-                                                 # tunable via runtime_settings (PUT /api/v1/settings or MCP
-                                                 # `set_setting`). Raise per household: single ~42, family of 4
-                                                 # ~50, larger ~55. Default lowered from 55 → 45 (#325, 2026-05-12)
-                                                 # after Daikin telemetry showed overnight DHW reheat = 0 even at 45.
+# IMPORTANT: tank pre-charge above DHW_TEMP_NORMAL_C only happens when there's
+# an economic reason. The dispatch layer (src/scheduler/lp_dispatch.py, the
+# `elif tank_pow:` branch) always FLOORS the setpoint at DHW_TEMP_COMFORT_C
+# (48 °C) and picks the CEILING from the slot kind:
+#   `solar_charge` → DHW_TEMP_PV_ABUNDANCE_TARGET_C (free PV; storage ceiling)
+#   everything else (`negative`, `cheap`) → DHW_TEMP_MAX_C
+# There is no separate "cheap → 48 °C" rule: 48 is the FLOOR, and a cheap slot
+# rides the LP's own target up to DHW_TEMP_MAX_C. Peak avoidance does NOT
+# trigger pre-charging — see issue #322 for conditional shutdown commit.
+DHW_TEMP_MAX_C=60                               # hard tank ceiling (code default 60 °C in src/config.py)
+DHW_TEMP_COMFORT_C=48                           # tank floor whenever the LP plans DHW heat (runtime-tunable)
+DHW_TEMP_PV_ABUNDANCE_TARGET_C=60               # tank ceiling during solar_charge / solar_preheat slots. Code
+                                                 # default = 60 (src/runtime_settings.py); runtime-tunable via
+                                                 # PUT /api/v1/settings or MCP `set_setting`.
+                                                 # NOT a comfort target — PR H (#399) reframed it as the STORAGE
+                                                 # CEILING for free PV: the LP's dynamic per-slot reward decides
+                                                 # how much heat actually lands (priority battery → tank → export),
+                                                 # so raising it does not force the tank to 60 °C.
 
 # --- Forecast night bias (issue #324, minimal) ---
 FORECAST_NIGHT_TEMP_BIAS_C=0                    # subtract this from Open Meteo's `temperature_c` when the LP
@@ -331,6 +332,10 @@ FORECAST_NIGHT_TEMP_BIAS_C=0                    # subtract this from Open Meteo'
                                                  # (the -3 was calibrated on one cold 2026-05-12 observation).
                                                  # Keep at 0 unless the learned offset is disabled; the LP would
                                                  # otherwise budget nights ~3 °C colder than reality all winter.
+                                                 # The CODE default is 0.0 since #702 (it was -3.0 for weeks after
+                                                 # prod pinned 0, so every dev/test/fresh deploy silently ran the
+                                                 # double-correction). This .env line is now belt-and-braces, not
+                                                 # load-bearing; `.env.example` pins it too.
 FORECAST_NIGHT_START_HOUR_UTC=21                # bias active from (inclusive)
 FORECAST_NIGHT_END_HOUR_UTC=6                   # bias active until (exclusive); wraps midnight when start > end
 
@@ -400,9 +405,10 @@ BRIEF_NIGHT_MINUTE=0
 NOTIFY_TARIFF_TRANSITIONS=false                  # mute heartbeat cheap/peak pings
                                                  # (negative-price 🔵 always pings regardless)
 TIER_BOUNDARY_LEAD_MINUTES=5                     # MPC fires this far before each tier transition
-PLAN_REVISION_MIN_SOC_DELTA_PERCENT=10.0         # PLAN_REVISION ping threshold (any one is enough)
-PLAN_REVISION_MIN_GRID_DELTA_KWH=1.0
 MPC_DRIFT_HYSTERESIS_TICKS=1                     # bumped down 2→1 (V12) — catches heating ramp faster
+# PLAN_REVISION_MIN_SOC_DELTA_PERCENT / PLAN_REVISION_MIN_GRID_DELTA_KWH were
+# REMOVED with the PLAN_REVISION ping itself — neither is a config attribute
+# any more; setting them in .env is a silent no-op.
 # LP_MPC_HOURS was REMOVED post-V12 — the fixed-hour MPC cron is gone entirely
 # (no longer a config attribute; setting it in .env is a silent no-op). The
 # event-driven model (tier_boundary + octopus_fetch + drift + forecast_revision
@@ -470,20 +476,45 @@ source of stale-status questions. Use these terms exactly:
 
 ### Scenario LP for peak-export robustness
 
-When the LP plans `peak_export` (battery → grid arbitrage), three solves run
-under perturbed forecasts (optimistic / nominal / pessimistic). A
-`peak_export` slot only makes it onto Fox V3 when the **pessimistic** scenario
-also exports ≥ `LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH` (default 0.30 kWh) at
-that slot. Otherwise it's downgraded to standard SelfUse (battery still
-covers load, no grid feed). Decisions are persisted to `dispatch_decisions`
-with the per-scenario kWh values for full auditability.
+**Where `peak_export` can even come from.** In the `normal` and `guests`
+presets the LP constrains `exp <= pv_use`, so `peak_export` (battery→grid
+price arbitrage) simply doesn't emerge. It is a **`vacation`-preset**
+behaviour (nobody home → max arbitrage). This is the first and strongest
+gate, and it lives in the LP constraint, not in a flag.
 
-`ENERGY_STRATEGY_MODE=strict_savings` is the kill switch — drops every
-`peak_export` regardless of scenarios. Default is `savings_first` which
-trusts the LP + scenario filter. The legacy `EXPORT_DISCHARGE_MIN_SOC_PERCENT`
-live-SoC global gate is **gone** (caused the 2026-04-28 incident where
-tomorrow's profitable peak-export disappeared during a re-plan after today's
-discharge had drawn the battery below 95 %).
+**The one exception — `pre_negative_export`.** The `exp <= pv_use` cap is
+relaxed to `exp <= pv_use + dis` on positive-price slots inside the
+plunge-prep window (`LP_PRE_NEGATIVE_PREP_ENABLED`, default true;
+`LP_PLUNGE_PREP_HOURS`), so the battery is deliberately drained to the grid
+ahead of a negative-price window — sell high, refill at the paid negative
+price. That branch is gated on `not vacation`, i.e. it fires **only in
+`normal`/`guests`**, and `_slot_fox_tuple` maps those slots to the same
+hardware action as `peak_export`: **ForceDischarge**. They are labelled
+`pre_negative_export` precisely so they BYPASS the robustness filter below.
+So "the battery never dumps to the grid outside vacation" is false — the
+accurate statement is that `peak_export` (price arbitrage) never emerges
+outside vacation.
+
+When the LP *does* plan `peak_export`, three solves run under perturbed
+forecasts (optimistic / nominal / pessimistic). A `peak_export` slot only
+makes it onto Fox V3 when the **pessimistic** scenario also exports ≥
+`LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH` (default 0.30 kWh) at that slot **and**
+the economic margin (export price − future-refill shadow − battery wear)
+clears `LP_PEAK_EXPORT_MIN_MARGIN_PENCE_PER_KWH`. Otherwise it's downgraded to
+standard SelfUse (battery still covers load, no grid feed). Decisions are
+persisted to `dispatch_decisions` with the per-scenario kWh values and the
+margin components for full auditability.
+
+**There is no `peak_export` kill switch env var.** `ENERGY_STRATEGY_MODE`
+(`strict_savings` / `savings_first`) was **REMOVED** in PR C (mode-collapse
+stack); `/api/v1/settings` still reports it as `"removed"` for back-compat and
+setting it in `.env` is a silent no-op. The preset (`OPTIMIZATION_PRESET`) plus
+the scenario filter (`filter_robust_peak_export` in
+`src/scheduler/lp_dispatch.py`) are the only gates. The legacy
+`EXPORT_DISCHARGE_MIN_SOC_PERCENT` live-SoC global gate is **also gone** (it
+caused the 2026-04-28 incident where tomorrow's profitable peak-export
+disappeared during a re-plan after today's discharge had drawn the battery
+below 95 %).
 
 See `docs/DISPATCH_DECISIONS.md` for the design rationale and decision rule.
 
@@ -620,7 +651,7 @@ OpenClaw (running at `http://127.0.0.1:18789`) connects to this project via two 
 
 1. **MCP HTTP transport** — the FastMCP server is mounted by
    `src/api/main.py` under `/mcp`, guarded by a bearer token
-   (`src/api/middleware.py:BearerAuthMiddleware`). The 75 tools (Fox ESS,
+   (`src/api/middleware.py:BearerAuthMiddleware`). The 81 tools (Fox ESS,
    Daikin, Octopus tariffs, optimization) live in `src/mcp_server.py:build_mcp`
    and are unchanged by the transport switch.
 
@@ -660,11 +691,14 @@ deploy/
   hem.service              # systemd wrapper around `docker compose up`
   compose.daikin-auth.yaml # one-shot OAuth re-enrollment container
   README.md                # cutover runbook (install, enroll, rollback, SPA cutover at §11)
-ui/                        # Epic 13b — SPA container (nginx + static assets)
-  Dockerfile               # nginx:alpine + envsubst for runtime config
-  conf/nginx.conf.template # reverse-proxies /api → hem; SPA fallback to cockpit.html
-  html/                    # one HTML page per route (cockpit, history, forecast, insights, workbench, settings)
-  src/{js,css}/            # vanilla JS + CSS, served by nginx; bearer injected by _api.js
+ui/                        # SPA container (nginx serving a Vite build)
+  Dockerfile               # node build stage → nginx:alpine + envsubst for runtime config
+  conf/nginx.conf.template # reverse-proxies /api → hem; SPA fallback `try_files $uri /index.html`
+  index.html               # single Vite entry — wouter resolves all routes client-side
+  src/routes/              # Preact + TypeScript route components: landing.tsx (`/`),
+                           #   insights.tsx (`/insights`), report.tsx (`/report`),
+                           #   settings.tsx (`/settings`) — four routes, no per-route HTML page
+  src/components|styles/   # Preact components + CSS tokens (see DESIGN.md)
   ui-entrypoint.sh         # writes /config.js with bearer + apiBase at container boot
 .github/workflows/ui-publish.yml  # builds + pushes ghcr.io/<owner>/home-energy-manager-ui on push to main (paths-scoped)
 quartz/                    # #542 — self-hosted Quartz solar-forecast sidecar (hem-quartz service)
@@ -674,7 +708,9 @@ quartz/                    # #542 — self-hosted Quartz solar-forecast sidecar 
 src/
   cli/__main__.py          # entrypoint: `python -m src.cli serve` (PID 1 in the container, behind tini)
   api/main.py              # FastAPI app + lifespan (token bootstrap, MCP session manager, scheduler) — JSON API only since B5
-  api/middleware.py        # BearerAuthMiddleware (/mcp) + ApiV1BearerAuth (/api/v1/*, gated by HEM_UI_AUTH_REQUIRED)
+  api/middleware.py        # BearerAuthMiddleware (/mcp) + ApiV1RoleAuth (/api/v1/*: viewer-open reads,
+                           #   admin-gated writes + scoped sensor-ingest token; gated by HEM_UI_AUTH_REQUIRED).
+                           #   NB ApiV1BearerAuth also lives in this file but is NOT mounted — dead code.
   daikin/
     auth.py                # OAuth2 flow + token refresh (port 8080)
     client.py              # DaikinClient (wraps Onecta API)
@@ -685,7 +721,8 @@ src/
     runner.py              # heartbeat tick, slot-kind notification debounce
     optimizer.py           # run_optimizer, _write_plan_consent (hash-gated notifications)
   state_machine.py         # recover_on_boot, apply_safe_defaults
-  notifier.py              # OpenClaw hooks delivery — all notifications via POST /hooks/agent
+  notifier.py              # notification delivery — direct Telegram preferred (telegram_transport.py);
+                           #   OpenClaw POST /hooks/agent only as fallback when Telegram is unconfigured
   config.py                # all env-var config (Config dataclass)
   physics.py               # DHW setpoint calculations
   mcp_server.py            # FastMCP `build_mcp()` (HTTP in prod, stdio for dev)

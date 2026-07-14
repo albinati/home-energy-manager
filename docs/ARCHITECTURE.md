@@ -2,7 +2,7 @@
 
 Home Energy Manager is designed as the **single planning brain** for the site: it **captures tariffs**, **fuses them with weather and observed energy behaviour**, **estimates needs**, and **emits concrete schedules** for Fox ESS and Daikin. OpenClaw, the REST API, and dashboards are **interfaces** to that brain; they do not replace it.
 
-**Runtime shape (as of 2026-04-22):** native Python 3.12 service under systemd (`home-energy-manager.service`, `/root/home-energy-manager/.venv`), SQLite at `data/energy_state.db`. Docker was removed on 2026-04-18 — see [RUNBOOK.md](RUNBOOK.md) for the live ops contract.
+**Runtime shape (since the 2026-04-25 cutover):** an **immutable Docker container** (`hem`, uid 1001, read-only rootfs) pulled from GHCR and run by `hem.service` via `docker compose`. Host state lives in `/srv/hem/` — `data/` (SQLite at `/srv/hem/data/energy_state.db`, tokens) and `.env`; the code is never editable on the host. Python 3.12 inside the image. A short-lived native-systemd deployment (2026-04-18 → 2026-04-25) has been reversed. See [RUNBOOK.md](RUNBOOK.md) for the live ops contract and `deploy/README.md` for install/rollback.
 
 ## Data the brain uses
 
@@ -36,12 +36,12 @@ The older consent-driven **solver + dispatcher** (`src/optimization/`) was remov
 ## Design constraints
 
 - **Fox Open API ~1440 calls/day soft budget (hard ~1440)** — realtime cache TTL 300 s; one V3 upload per optimizer run **and now skipped when the groups-list fingerprint is unchanged** (#38 / PR #61); all Fox HTTP calls tracked in `api_call_log` (see ADR-001).
-- **Daikin Onecta ~200 calls/day** — device cache TTL 1800 s; live refresh is allowed in the 5-min Octopus pre-slot window and in the local early-morning / afternoon calibration windows (`DAIKIN_CALIBRATION_WINDOWS_LOCAL`); quota tracked persistently in SQLite (see ADR-001). **When exhausted**, `daikin_service.get_lp_state_cached_or_estimated` walks a physics estimator (`src/daikin/estimator.py`) forward from the last `source='live'` row in `daikin_telemetry` so the LP keeps planning (#55 / PR #62).
+- **Daikin Onecta ~200 calls/day** — device cache TTL 1800 s; the **heartbeat never refreshes** (it passes `allow_refresh=False` unconditionally, Phase A / #306), so the cache is warmed only by plan dispatch, the twice-daily briefs, and manual/MCP calls. (`DAIKIN_CALIBRATION_WINDOWS_LOCAL` and the Octopus pre-slot refresh window are **dead**: the gate functions survive in `runner.py` but nothing calls them.) Quota tracked persistently in SQLite (see ADR-001). **When exhausted**, `daikin_service.get_lp_state_cached_or_estimated` walks a physics estimator (`src/daikin/estimator.py`) forward from the last `source='live'` row in `daikin_telemetry` so the LP keeps planning (#55 / PR #62).
 - **Daikin temperature calibration** — the LP compares forecast vs actual outdoor temperature through `forecast_skill_log`, which is rebuilt from canonical forecast rows plus Daikin telemetry. The solve uses an hour-of-day offset map so early mornings and afternoons can react to local conditions without extra API calls.
 - **Runtime-tunable knobs** (comfort / strategy / MPC thresholds) — live via `PUT /api/v1/settings/{key}` → `runtime_settings` SQLite table → `config.*` property (30 s TTL + version counter). Schedule-class keys (`LP_PLAN_PUSH_HOUR/MINUTE`) hot-reload APScheduler cron jobs without a restart (#52 / PR #63). See `src/runtime_settings.py`.
 - **`OPENCLAW_READ_ONLY`** — remote execute path respects read-only for safety.
-- **Grid export (force discharge)** — default **`ENERGY_STRATEGY_MODE=savings_first`**: prioritise self-use and import savings; Scheduler V3 may use **ForceDischarge** on **peak** slots only when **`OPTIMIZATION_PRESET`** is **travel** or **away** *and* cached battery SoC ≥ **`EXPORT_DISCHARGE_MIN_SOC_PERCENT`** (default 95). Set **`strict_savings`** to disable peak export discharge entirely.
-- **Daikin (travel/away)** — SQLite actions skip **cheap** and **negative** preheat windows; only **peak** setback (+ short **restore**) is written so the heat pump does not add load while Fox may export. At **normal** preset, Daikin still follows full cheap/peak/negative schedule. The API does **not** switch Onecta **operationMode** (heating/auto); adaptation is via **LWT offset, DHW tank, climate/tank power** on the heartbeat.
+- **Grid export (force discharge)** — the presets are **`normal | guests | vacation`** (`OPTIMIZATION_PRESET`; the old `travel` / `away` names are gone). In `normal` and `guests` the LP constrains `exp <= pv_use`, so `peak_export` (battery→grid price arbitrage) cannot even be planned — it is a **`vacation`**-only behaviour. (**Exception:** the pre-negative drain relaxes that cap to `exp <= pv_use + dis` inside the plunge-prep window and fires **only** in `normal`/`guests`; those slots are labelled `pre_negative_export`, map to **ForceDischarge**, and deliberately bypass the robustness filter. So the battery *does* dump to the grid outside vacation — just not for price arbitrage.) and each `peak_export` slot must additionally survive the scenario-LP filter (pessimistic export floor + economic margin) in `filter_robust_peak_export` before it reaches Scheduler V3 — see [DISPATCH_DECISIONS.md](DISPATCH_DECISIONS.md). **`ENERGY_STRATEGY_MODE`** (`savings_first` / `strict_savings`) and **`EXPORT_DISCHARGE_MIN_SOC_PERCENT`** were both **removed**; setting them does nothing. (`EXPORT_DISCHARGE_FLOOR_SOC_PERCENT` is unrelated and still live — it is the `fdSoc` target sent to Fox.)
+- **Daikin (vacation)** — SQLite actions skip **cheap** and **negative** preheat windows; only **peak** setback (+ short **restore**) is written so the heat pump does not add load while Fox may export. At **normal** / **guests**, Daikin still follows the full cheap/peak/negative schedule. The API does **not** switch Onecta **operationMode** (heating/auto); adaptation is via **LWT offset, DHW tank, climate/tank power** on the heartbeat.
 
 ```mermaid
 flowchart LR
@@ -86,12 +86,27 @@ After solving, each half-hour slot is classified by `lp_plan_to_slots()`:
 |---|---|---|
 | `negative` | charge > 0 **and** grid_import > 0 **and** price ≤ 0 | `ForceCharge` fdSoc=100% |
 | `cheap` | charge > 0 **and** grid_import > 0 | `ForceCharge` fdSoc=95% with LP-derived `fdPwr` |
-| `solar_charge` | charge > 0 **and** grid_import ≈ 0 | `SelfUse` **minSocOnGrid=100%** — holds battery, PV fills it |
-| `peak` | no HP, price ≥ peak threshold | `SelfUse` minSocOnGrid=10% |
-| `peak_export` | discharge + export, travel/away preset | `ForceDischarge` |
-| `standard` | all other | `SelfUse` minSocOnGrid=10% |
+| `solar_charge` | charge > 0 **and** grid_import ≈ 0 | `SelfUse` at `MIN_SOC_RESERVE_PERCENT` — PV fills the battery, inverter never auto-imports |
+| `negative_hold` | price ≤ 0 **and** no LP-planned grid charge | `Backup` — strict no-discharge hold; house is grid-fed at the paid rate |
+| `peak` | no HP, price ≥ peak threshold | `SelfUse` at reserve (or pinned `Backup` when the LP wants a hold) |
+| `peak_export` | discharge + export beyond PV — **`vacation` preset only**, and only if the scenario filter commits it | `ForceDischarge` |
+| `standard` | all other | `SelfUse` at reserve |
 
-`solar_charge` is the key distinction from V8: the LP saying "charge from PV, no grid import" now maps to `SelfUse` instead of `ForceCharge`. FoxESS `SelfUse` mode never actively imports from grid — `minSocOnGrid=100%` only blocks battery discharge, allowing excess PV to accumulate freely.
+> ⚠️ **`SelfUse minSocOnGrid=100` is retired and never emitted.** It used to be
+> the `solar_charge` shape, on the belief that a SelfUse group floor "only blocks
+> battery discharge". **It does not: the H1 firmware ignores the SelfUse group's
+> `minSocOnGrid` and discharges straight through it** — 40.6 % of samples across a
+> 40,369-sample prod audit were below-floor discharge. Only the *global* reserve
+> is a real floor. Two primitives are *proven* zero-discharge on this hardware —
+> **`Backup`** and **`ForceCharge` with `fdSoc <= SoC`** (413 and 354 samples
+> respectively at 0.0 % discharge; see `docs/FOXESS/WORK_MODES_AND_SOC.md`).
+> `Backup` is the one the dispatcher uses (for `negative_hold` and LP
+> positive-price holds); `ForceCharge`-as-hold is kept as the fallback
+> (`LP_NEGATIVE_HOLD_FOX_MODE=forcecharge`). A SelfUse floor is **not** one of
+> them. `solar_charge` therefore maps to plain `SelfUse` at reserve
+> (`LP_SOLAR_CHARGE_FOX_MODE=selfuse`, the default) — see `_slot_fox_tuple` in
+> `src/scheduler/optimizer.py`. The distinction from V8 still holds: "charge from
+> PV, no grid import" maps to `SelfUse`, not `ForceCharge`.
 
 ### MPC loop (Model Predictive Control)
 

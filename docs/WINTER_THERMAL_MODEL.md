@@ -6,6 +6,14 @@ cold, blankets acceptable overnight — using overnight setbacks WITHOUT a large
 morning recovery delta (large deltas force high LWT, which collapses heat-pump
 COP and defeats the point).*
 
+> **Status (2026-07-13).** The study below is unchanged; the build plan has
+> moved. **W1 (sensor ingestion) is SHIPPED** — see the "Indoor temperature
+> sensor ingestion" section of `CLAUDE.md`. **W2 (thermal learner) is SHIPPED**
+> (#641). **W3 (LP regains `t_in`) is SHIPPED but OFF by default** behind
+> `LP_W3_TIN_ENABLED=false` (#657). The RC-fallback defaults are **no longer
+> placeholders** (`BUILDING_UA_W_PER_K=600`, `BUILDING_THERMAL_MASS_KWH_PER_K=12.0`).
+> W4 (validation) is the remaining phase. Per-item status is marked inline below.
+
 ---
 
 ## 1. Physics: the model HEM needs
@@ -109,9 +117,13 @@ heating from **0 → 3–8 kWh/day in June** (~34 kWh in week 1) because:
 
 - the LP gives `e_space` **no objective cost and no modeled benefit** — it is
   a sink for cheap energy bounded by the weather-curve corridor;
-- the pre-heat "benefit" (store heat now, need less later) is **asserted, not
-  modeled** — there is no `t_in` state to store it in (removed in Phase B
-  #310, correctly, because there was nothing to measure it against);
+- the pre-heat "benefit" (store heat now, need less later) was **asserted, not
+  modeled** — there was no `t_in` state to store it in (removed in Phase B
+  #310, correctly, because there was nothing to measure it against). *W3 (#657)
+  has since restored `t_in` with the RC dynamics constraint, seeded by the
+  sensor — but it is gated behind `LP_W3_TIN_ENABLED`, default `false`, so the
+  "no thermal state" critique still applies to every solve until that flag is
+  flipped on;*
 - the summer guard had been removed, and a positive offset *wakes* the
   compressor that the firmware would have left off;
 - the `k_per_degc` calibration then **learned from the heating the offsets
@@ -132,15 +144,22 @@ and no calibration that can eat its own output.*
 | `k_per_degc` LWT→kW calibration + table | physics.py:25, db `daikin_lwt_kw_calibration` | live (needs decontamination, §3.3) |
 | LWT offset dispatch + restore rows + drift backstop | lp_dispatch.py:432–525, #492 | live |
 | `smooth_lwt_offsets` anti-chatter (min 2 h blocks) | lp_dispatch.py:376 | live |
-| **Sensor-ready comfort guard** (suppress boost/setback by `indoor_c`) | lp_dispatch.py:329–373 | live but **no-op** (`indoor_c=None`) — activates the day a sensor reports |
-| `INDOOR_SETPOINT_C` (runtime-tunable), `INDOOR_COMFORT_BAND_C` | config.py:1468, 1263 | live |
-| Estimator RC fallback (`BUILDING_UA_W_PER_K`, `BUILDING_THERMAL_MASS_KWH_PER_K`) | estimator.py:72–133, config.py:1259–1261 | live, **placeholder UA=180 W/K is ~3.5× below measured** |
-| Phase B removed `t_in[i]`/comfort-slack LP code | `git show daa5beb` | recoverable reference implementation |
+| Comfort guard (suppress boost/setback by `indoor_c`) | lp_dispatch.py | **ACTIVE** — W1 shipped, the ESPHome sensor reports and the guard reads the freshest in-band value (`INDOOR_SENSOR_STALE_MINUTES=30`) |
+| `INDOOR_SETPOINT_C` (runtime-tunable), `INDOOR_COMFORT_BAND_C` | config.py | live |
+| Estimator RC fallback (`BUILDING_UA_W_PER_K`, `BUILDING_THERMAL_MASS_KWH_PER_K`) | estimator.py, config.py | live, **defaults now match measurement: UA = 600 W/K, C = 12.0 kWh/K** (the 180 / 8 placeholders are gone — §3.3) |
+| Indoor sensor ingestion (`POST /api/v1/sensors/indoor`, `room_temperature_history`, `device_reading_log`) | api/routers/sensors.py | **live (W1)** |
+| Thermal learner (`analytics/thermal_learning.py`, `building_thermal_calibration`) | 05:30 UTC cron | **live (W2, #641)** |
+| LP indoor state `t_in[i]` + comfort slack | lp_optimizer.py | **shipped (W3, #657) but OFF** — `LP_W3_TIN_ENABLED=false` by default |
 | Calibration-loop house pattern (PV recent-bias #486, DHW auto-scale #534) | — | the template the thermal learner should follow |
 
 ### 3.2 To build (the winter epic)
 
-**Phase W1 — sensor ingestion (do first; everything downstream feeds on it)**
+**Phase W1 — sensor ingestion — ✅ SHIPPED.** Delivered as specified, plus a
+lossless per-device audit sink (`device_reading_log`) and a scoped
+`HEM_SENSOR_INGEST_TOKEN` so the internet-exposed ESPHome sensor can only POST
+to the one route. Read-back: `GET /api/v1/sensors/indoor|devices|device-log`.
+See CLAUDE.md §"Indoor temperature sensor ingestion" and `deploy/README.md` §12.
+Original spec, for the record:
 1. Table `room_temperature_history(captured_at PK, temp_c, room, source, quality)` —
    multi-room from day one (cheap now, painful later).
 2. `POST /api/v1/sensors/indoor` (admin bearer; batch-friendly payload) +
@@ -171,7 +190,12 @@ and no calibration that can eat its own output.*
    windows from the regression sample (it must learn the firmware's natural
    behaviour, not HEM's own echo).
 
-**Phase W3 — LP re-gains a thermal state (the real prize)**
+**Phase W3 — LP re-gains a thermal state (the real prize) — ✅ SHIPPED (#657),
+but DEFAULT-OFF behind `LP_W3_TIN_ENABLED=false`.** Items 7–10 are implemented
+(`t_in[i]` RC dynamics, night comfort floor `LP_W3_NIGHT_FLOOR_C=17.5`,
+gentle-recovery cap `LP_W3_MAX_RECOVERY_C_PER_SLOT=0.5`, comfort penalty
+`LP_W3_COMFORT_PEN_PENCE_PER_DEGC_SLOT=15`). Flip the flag on before the heating
+season and validate with W4.
 7. Restore `t_in[i]` with the RC dynamics constraint (reference: Phase B
    removal commit), driven by learned UA/C, seeded by the sensor.
 8. **Time-varying comfort band** — the "blanket schedule":
@@ -210,11 +234,12 @@ and no calibration that can eat its own output.*
 13. Insulation audit view: monthly UA slope re-fit + trend — measures both
     insulation work and the model's honesty.
 
-### 3.3 Quick wins shippable immediately
+### 3.3 Quick wins shippable immediately — all DONE
 
 - `BUILDING_UA_W_PER_K` 180 → ~600 (measured) and
   `BUILDING_THERMAL_MASS_KWH_PER_K` 8 → ~12 (τ ≈ 20 h prior) so the existing
-  estimator fallback stops being 3.5× optimistic.
+  estimator fallback stops being 3.5× optimistic. **DONE — these are the code
+  defaults in `src/config.py` now (600 / 12.0).**
 - The W3-item-11 demand gate (small PR, kills the active June waste). **DONE #541.**
 - Outdoor cutoff on positive offsets + thermal-lag tail exclusion (closes the
   residual self-loop #541 left open). **DONE — see item 11b.**

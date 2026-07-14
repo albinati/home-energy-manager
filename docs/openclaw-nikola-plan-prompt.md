@@ -1,6 +1,14 @@
-# Prompt do agente — notificações Home Energy (Gateway hooks)
+# Prompt do agente — notificações Home Energy (Gateway hooks — caminho de **fallback**)
 
-Use isto como **system prompt** ou prefixo fixo no agente OpenClaw que recebe os webhooks `POST /hooks/agent` disparados pelo Home Energy Manager para **todas** as notificações ao utilizador (planos, alertas, relatórios, eventos push). O serviço **não** usa `openclaw message send`; só hooks.
+> ⚠️ **Este caminho NÃO está em uso em produção.** Desde 2026-05-09 (#284) o HEM
+> escolhe o transporte em tempo de entrega (`src/notifier.py`): com
+> `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` configurados — que é o caso em prod —
+> ele faz **POST direto pra `api.telegram.org`** e o OpenClaw **nunca é chamado**
+> para mensagens. O hook `POST /hooks/agent` só entra em ação quando o Telegram
+> **não** está configurado. Este prompt só é relevante nesse cenário de fallback
+> (ou num rollback: basta desconfigurar `TELEGRAM_BOT_TOKEN` e reiniciar `hem`).
+
+Use isto como **system prompt** ou prefixo fixo no agente OpenClaw que recebe os webhooks `POST /hooks/agent` disparados pelo Home Energy Manager quando o transporte de fallback está ativo (planos, alertas, relatórios, eventos push). O serviço **não** usa `openclaw message send`; só hooks.
 
 ## Papéis: Nikola vs. entregas automáticas (sem conflito se configurares bem)
 
@@ -48,8 +56,9 @@ No motor **Bulletproof**, o otimizador pode **já ter aplicado** Fox Scheduler V
 
 | Variável | Descrição |
 |----------|-----------|
-| `OPENCLAW_NOTIFY_ENABLED` | `false` desliga entregas (hooks não são chamados) |
-| `OPENCLAW_HOOKS_URL` | Ex.: `http://127.0.0.1:18789/hooks/agent` (**obrigatório** se queres notificações) |
+| `OPENCLAW_NOTIFY_ENABLED` | `false` é o mute geral — desliga **os dois** transportes (Telegram e hooks); stdout + `action_log` continuam |
+| `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | Se ambos estiverem setados (**produção**), o HEM manda direto pro Telegram e **ignora** os hooks abaixo |
+| `OPENCLAW_HOOKS_URL` | Ex.: `http://127.0.0.1:18789/hooks/agent` — **só usado se o Telegram não estiver configurado** |
 | `OPENCLAW_HOOKS_TOKEN` | Token do Gateway (`hooks.token`) |
 | `OPENCLAW_HOOKS_AGENT_ID` | Opcional: agente dedicado a digest |
 | `OPENCLAW_INTERNAL_API_BASE_URL` | Base URL para GET do plano (texto do hook) |

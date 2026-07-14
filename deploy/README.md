@@ -89,7 +89,7 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
   http://127.0.0.1:8000/mcp/ -X POST \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | jq '.result.tools | length'
-# Esperado: 80 (76 originais + 3 audit tools do Epic 13a + lp_scorecard)
+# Esperado: 81 (contagem verificada em 2026-07-13 via build_mcp().list_tools())
 
 # Epic 13b/B1 — token da UI container é gerado no boot junto com o do OpenClaw.
 ls -la /srv/hem/data/.hem-ui-token
@@ -233,43 +233,38 @@ systemctl daemon-reload
 
 A partir desse ponto o código vive **só** na imagem em `ghcr.io/albinati/home-energy-manager` e no Git. OpenClaw, mesmo se for comprometido, não tem caminho de escrita pra alterar comportamento da próxima invocação.
 
-## 11. Cutover do SPA container (Epic 13b / B6)
+## 11. SPA container (`hem-ui`) — ✅ CUTOVER CONCLUÍDO (histórico)
 
-A partir do PR #356 (B1) o token UI já é gerado no boot do HEM em
-`/srv/hem/data/.hem-ui-token`. O B6 só liga o container `hem-ui` no
-compose e (uma vez que a SPA estiver verificada) flipa o gate flag.
+> **Este passo já foi executado.** O cutover do SPA terminou: o B5 **removeu
+> toda a UI inline do container HEM** (não existe mais Jinja, `templates/` nem
+> `static/` — a API só serve JSON), e `HEM_UI_AUTH_REQUIRED=true` já está no
+> `.env`. Não há mais "UI legacy na :8000" pra comparar nem pra voltar.
+> Mantido aqui só como registro do que foi feito.
+
+Estado atual (o que você deve encontrar num host saudável):
+
+- `hem-ui` roda como serviço no `compose.yaml`, nginx servindo o build Vite e
+  fazendo reverse-proxy de `/api` → `hem`.
+- SPA em Preact/TypeScript com **4 rotas** (`/`, `/insights`, `/report`,
+  `/settings`) — o `wouter` resolve tudo client-side; o nginx faz
+  `try_files $uri /index.html`.
+- Publicado no tailnet via Tailscale funnel em `:8443` (TLS válido; é também o
+  caminho que o sensor ESPHome usa — §12). `/mcp` **não** é exposto ali.
+- **Nenhum bearer vai pro browser.** O `ui-entrypoint.sh` escreve `/config.js`
+  no boot do container com `bearer: null` — literalmente, sempre (`BEARER_LITERAL="null"`).
+  As rotas de leitura da API são viewer (sem token); o `HEM_ADMIN_TOKEN` nunca
+  sai do servidor. Um token no `config.js` seria world-readable e não compraria
+  nada — ver `ui/README.md`.
 
 ```bash
-# 1. Garante que o image SPA está publicado (após B3/B4 baterem em main).
-docker pull ghcr.io/albinati/home-energy-manager-ui:main
+# Deploy de uma nova versão da SPA (sem derrubar o loop de controle):
+docker manifest inspect ghcr.io/albinati/home-energy-manager-ui:sha-<sha> >/dev/null
+sed -i "s|^HEM_UI_IMAGE_TAG=.*|HEM_UI_IMAGE_TAG=sha-<sha>|" /srv/hem/.compose.env
+cd /srv/hem && docker compose up -d --no-deps hem-ui
 
-# 2. Sobe o serviço hem-ui (já está em compose.yaml; o pull_policy=always
-#    cuida do refresh). HEM continua servindo a UI legacy em paralelo.
-cd /srv/hem && docker compose up -d hem-ui
-
-# 3. Smoke test do SPA na porta 8080 (loopback + Tailnet).
-curl -sS http://127.0.0.1:8080/healthz
-# Esperado: "ok"
-
-# 4. Abrir http://<hem-host>.ts.net:8080/ no navegador.
-#    Cockpit, history, forecast, insights, workbench, settings devem
-#    funcionar idênticos à UI inline (que segue rodando na :8000).
-#    Inspect Network: as chamadas /api/v1/* devem ter Authorization: Bearer.
-
-# 5. Quando confiar que está OK, flipa o gate flag pra exigir bearer em
-#    /api/v1/* — depois disso a UI inline em :8000 NÃO funciona mais
-#    (não envia bearer). Só faz esse passo depois de verificar :8080.
-echo 'HEM_UI_AUTH_REQUIRED=true' >> /srv/hem/.env
-chmod 640 /srv/hem/.env   # perms importam — ver feedback_flag_before_env_overwrite
-systemctl restart hem
-sleep 8
-curl -sS http://127.0.0.1:8000/api/v1/health   # health stays public
-# A UI legacy em :8000 vai responder 401 sem header — esperado.
-# B5 remove ela do container HEM no PR seguinte.
-
-# 6. Rollback (se o SPA tiver bug): tira o flag + restart, UI legacy volta.
-sed -i '/^HEM_UI_AUTH_REQUIRED=/d' /srv/hem/.env
-systemctl restart hem
+# Smoke test
+curl -sS http://127.0.0.1:8080/healthz          # "ok"
+curl -sS http://127.0.0.1:8000/api/v1/health    # health segue público
 ```
 
 ## 12. Ingestão do sensor ESPHome de temperatura interna (#540 W1)
@@ -402,4 +397,4 @@ troca o valor do `HEM_SENSOR_INGEST_TOKEN` + restart + atualiza o YAML.
 | OpenClaw retorna `Connection closed` | Token errado, ou OpenClaw apontando pro stdio antigo | `cat /home/openclaw/.openclaw/hem-token` deve bater com `cat /srv/hem/data/.openclaw-token` |
 | LP solver Infeasible recorrente | Problema de modelagem (não migração) | Ver `project_lp_infeasibles` no contexto — fora deste escopo |
 | Container reinicia em loop | OOM (mem_limit 400m) ou erro no startup | `docker logs hem --tail 100`, considera elevar `mem_limit` |
-| Daikin 429 daily-limit | Quota 200 req/dia esgotada | `DAIKIN_HTTP_429_MAX_RETRIES=0` em `.env` (já é o default) — espera 24h ou ajusta `HEARTBEAT_INTERVAL_SECONDS` |
+| Daikin 429 daily-limit | Quota 200 req/dia esgotada | **`DAIKIN_HTTP_429_MAX_RETRIES=0` PRECISA estar no `.env`** — o default no código é `3` (`src/config.py`), e o Daikin manda `Retry-After: ~86400` quando estoura o limite diário, então um cliente que faz retry trava horas no startup. Depois disso, espera 24 h ou ajusta `HEARTBEAT_INTERVAL_SECONDS` |
