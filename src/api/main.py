@@ -591,10 +591,17 @@ async def api_v1_weather_now():
     Over weeks that fragments. The server already holds the data, so it does the
     work.
 
+    "Current" conditions are the NEAREST forecast hour. The upstream fetch
+    (``weather._fetch...``) drops every hour already past, so the freshest hour it
+    returns is the next top-of-hour — within ~1 h of now (and the 900 s cache can
+    add up to ~15 min). Good enough for a room display; the sensor is not steering
+    anything on this.
+
     ``rain_in_h`` is the reason this is not just a client-side slice: it needs the
     WHOLE forecast to answer "how many hours until the next rain" — which is
-    exactly the thing the sensor cannot afford to fetch. ``null`` = no rain in the
-    horizon.
+    exactly the thing the sensor cannot afford to fetch. It scans STRICTLY AFTER
+    the reported hour, so a wet current hour never reads as "rain in 0 h". ``null``
+    = no rain in the horizon.
 
     AUTH: **not** part of the token-free viewer surface. The sensor sits on the
     house LAN and reaches HEM through the PUBLIC Tailscale funnel, so a
@@ -622,8 +629,11 @@ def _api_v1_weather_now_sync():
         raise HTTPException(status_code=503, detail="no forecast available")
 
     now = _dt.now(_UTC)
-    # The forecast is hourly; "now" is the last hour that has already started.
-    # Never pick a future hour — the sensor wants current conditions.
+    # The upstream fetch already dropped every past hour, so the freshest hour it
+    # returns (fc[0]) is the nearest one to now. Pick the last hour that is <= now
+    # if one is present (belt-and-braces for a source that ever includes the
+    # current hour), else fall back to that nearest future hour — NOT a
+    # hours-ahead one, because there is no `else: break` bug to skip past it here.
     cur = fc[0]
     for f in fc:
         if f.time_utc <= now:
@@ -637,12 +647,17 @@ def _api_v1_weather_now_sync():
             return True
         return (f.precipitation_mm or 0.0) >= _RAIN_MM_EPS
 
+    # Scan STRICTLY AFTER the reported hour so a wet current hour is never counted
+    # as future rain (which would give the contradictory "raining now AND in 0 h").
     rain_in_h = None
     for f in fc:
-        if f.time_utc <= now:
+        if f.time_utc <= cur.time_utc:
             continue
         if _is_rain(f):
-            rain_in_h = max(0, round((f.time_utc - now).total_seconds() / 3600.0))
+            # Hours from the reported hour, rounded to the nearest whole hour but
+            # floored at 1 — "next rain" is always at least the next hour, never 0.
+            delta_h = (f.time_utc - cur.time_utc).total_seconds() / 3600.0
+            rain_in_h = max(1, round(delta_h))
             break
 
     def _r(v, n=1):
