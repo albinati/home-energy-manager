@@ -213,7 +213,7 @@ export function MetricTimeline({
         ...(base.tooltip as object),
         // Hide the silent helper series (_bands / _now) and format the price
         // series in pence, everything else in the energy unit.
-        formatter: (params: Array<{ axisValue?: string; seriesName?: string; value?: number | null; marker?: string }>) => {
+        formatter: (params: Array<{ axisValue?: string; axisValueLabel?: string; seriesName?: string; value?: number | null; marker?: string }>) => {
           const arr = Array.isArray(params) ? params : [params];
           if (!arr.length) return "";
           const rows = arr
@@ -225,7 +225,9 @@ export function MetricTimeline({
               return `<div>${p.marker ?? ""} ${p.seriesName}: <strong>${txt}</strong></div>`;
             })
             .join("");
-          return `<strong>${arr[0].axisValue ?? ""}</strong>${rows}`;
+          // On the time axis `axisValue` is a raw epoch-ms number; `axisValueLabel`
+          // is the formatted HH:mm. Category mode only has axisValue (the label).
+          return `<strong>${arr[0].axisValueLabel ?? arr[0].axisValue ?? ""}</strong>${rows}`;
         },
       },
       // Live mode → time axis (window via dataZoom on desktop, axis min/max on

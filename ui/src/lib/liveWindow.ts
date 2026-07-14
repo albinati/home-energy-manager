@@ -74,6 +74,30 @@ export interface LiveWindowBounds {
   nowMs: number;
 }
 
+/** Read the chart's current visible x-window (timestamps). Prefers the inside
+ *  dataZoom's startValue/endValue; falls back to the x-axis scale extent, which
+ *  stays correct even if ECharts tracks a user roam as start/end percent and
+ *  leaves startValue/endValue unpopulated. Returns null if neither is readable. */
+function readChartWindow(chart: EChartsType): { startMs: number; endMs: number } | null {
+  const opt = chart.getOption() as { dataZoom?: Array<{ startValue?: number; endValue?: number }> };
+  const dz = opt.dataZoom?.[0];
+  if (dz && dz.startValue != null && dz.endValue != null) {
+    return { startMs: dz.startValue, endMs: dz.endValue };
+  }
+  try {
+    const model = (chart as unknown as {
+      getModel?: () => {
+        getComponent?: (t: string, i: number) => { axis?: { scale?: { getExtent?: () => [number, number] } } };
+      };
+    }).getModel?.();
+    const ext = model?.getComponent?.("xAxis", 0)?.axis?.scale?.getExtent?.();
+    if (ext && Number.isFinite(ext[0]) && Number.isFinite(ext[1])) {
+      return { startMs: ext[0], endMs: ext[1] };
+    }
+  } catch { /* internal API shape changed — fall through */ }
+  return null;
+}
+
 /**
  * Per-chart adapter. Drives the chart's dataZoom window from the shared signal,
  * ticks it forward while following, and writes user gestures back into the
@@ -89,6 +113,11 @@ export function useLiveWindow(
   // True while WE are calling dispatchAction, so the dataZoom listener can tell
   // a programmatic pan from a user pan.
   const programmatic = useRef(false);
+  // The last window WE applied. A value-match backup for the microtask guard: if
+  // ECharts emits the datazoom event on a later tick (guard already cleared), the
+  // echo still matches this and is ignored — so a follow recentre can't be
+  // misread as a user pan (which would wrongly drop follow).
+  const lastApplied = useRef<{ startMs: number; endMs: number } | null>(null);
 
   // Apply a window to this chart. Desktop uses the inside dataZoom (cheap
   // dispatchAction, no series rebuild); touch has no dataZoom so the window is
@@ -97,6 +126,7 @@ export function useLiveWindow(
     const chart = chartRef.current;
     if (!chart) return;
     programmatic.current = true;
+    lastApplied.current = { startMs, endMs };
     const opt = chart.getOption() as { dataZoom?: unknown[] };
     if (Array.isArray(opt.dataZoom) && opt.dataZoom.length > 0) {
       chart.dispatchAction({ type: "dataZoom", startValue: startMs, endValue: endMs });
@@ -108,10 +138,12 @@ export function useLiveWindow(
   };
 
   // React to shared-signal changes (another chart panned, or backToNow fired).
+  // Only live-mode charts (boundsRef set) apply the window — a bar-mode chart on
+  // a category axis must never receive epoch-ms min/max.
   useEffect(() => {
     return liveWindow.subscribe((s) => {
       follow.value = s.follow;
-      if (s.startMs && s.endMs) applyWindow(s.startMs, s.endMs);
+      if (boundsRef.current && s.startMs && s.endMs) applyWindow(s.startMs, s.endMs);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -121,15 +153,27 @@ export function useLiveWindow(
     let timer: number | null = null;
     let stopped = false;
 
+    let seedAttempts = 0;
     const tick = () => {
       if (stopped) return;
       const b = boundsRef.current;
+      // The widget populates boundsRef in an effect that runs AFTER this hook's,
+      // so on mount it's still null. Retry fast (150ms) for the first ~2s so the
+      // window seeds promptly once bounds land — otherwise the signal stays
+      // {0,0} for up to 10s (touch pan dead, charts unaligned). A bar-mode chart
+      // never gets bounds, so cap the fast phase and relax to 10s rather than
+      // busy-loop forever.
+      if (!b) {
+        seedAttempts++;
+        timer = window.setTimeout(tick, seedAttempts < 15 ? 150 : 10_000);
+        return;
+      }
       const s = liveWindow.value;
-      if (b && s.follow) {
-        const w = centerWindow(b.nowMs, b.dayStartMs, b.dayEndMs);
-        if (w.startMs !== s.startMs || w.endMs !== s.endMs) {
-          liveWindow.value = { ...w, follow: true };
-        }
+      const w = centerWindow(b.nowMs, b.dayStartMs, b.dayEndMs);
+      if (!s.startMs) {
+        liveWindow.value = { ...w, follow: s.follow };            // initial seed
+      } else if (s.follow && (w.startMs !== s.startMs || w.endMs !== s.endMs)) {
+        liveWindow.value = { ...w, follow: true };                // advance while following
       }
       timer = window.setTimeout(tick, 10_000);
     };
@@ -144,11 +188,8 @@ export function useLiveWindow(
       }
     };
 
-    // Seed the window on first mount if it's still empty.
-    const b0 = boundsRef.current;
-    if (b0 && !liveWindow.value.startMs) {
-      liveWindow.value = { ...centerWindow(b0.nowMs, b0.dayStartMs, b0.dayEndMs), follow: true };
-    }
+    // (Initial seed is handled by tick()'s !s.startMs branch as soon as bounds
+    // land — see above.)
     // Re-fit the window on resize/rotation: the half-width shrinks continuously
     // with viewport, so this tightens the view as the user drags the edge — but
     // only while following, so a resize never yanks someone browsing the past.
@@ -179,20 +220,39 @@ export function useLiveWindow(
 
   // Listen for USER dataZoom (drag/wheel/pinch) → drop out of follow, remember
   // the window. Ignore our own dispatched pans (programmatic guard).
+  //
+  // The chart is created imperatively in a LATER widget effect, so it's null when
+  // this effect first runs. A `[chartRef.current]` dep can't fix that (a ref
+  // mutation doesn't re-run effects), and would leave the listener unattached
+  // until an unrelated re-render — so a desktop pan before the next poll would be
+  // silently discarded. Instead retry-attach until the chart exists, once.
   useEffect(() => {
-    const chart = chartRef.current;
-    if (!chart) return;
+    let attached: EChartsType | null = null;
+    let retry: number | null = null;
     const onZoom = () => {
       if (programmatic.current) return;
-      const opt = chart.getOption() as { dataZoom?: Array<{ startValue?: number; endValue?: number }> };
-      const dz = opt.dataZoom?.[0];
-      if (dz?.startValue == null || dz?.endValue == null) return;
-      liveWindow.value = { startMs: dz.startValue, endMs: dz.endValue, follow: false };
+      const chart = chartRef.current;
+      if (!chart) return;
+      const w = readChartWindow(chart);
+      if (!w) return;
+      // Value-match backup for the microtask guard (see lastApplied): a follow
+      // recentre's echo matches within snap error → not a user pan.
+      const la = lastApplied.current;
+      if (la && Math.abs(w.startMs - la.startMs) < 5_000 && Math.abs(w.endMs - la.endMs) < 5_000) return;
+      liveWindow.value = { startMs: w.startMs, endMs: w.endMs, follow: false };
     };
-    chart.on("datazoom", onZoom);
-    return () => { chart.off("datazoom", onZoom); };
+    const attach = () => {
+      const chart = chartRef.current;
+      if (chart) { chart.on("datazoom", onZoom); attached = chart; return; }
+      retry = window.setTimeout(attach, 100);
+    };
+    attach();
+    return () => {
+      if (retry != null) window.clearTimeout(retry);
+      if (attached) attached.off("datazoom", onZoom);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chartRef.current]);
+  }, []);
 
   return { follow: follow.value };
 }
