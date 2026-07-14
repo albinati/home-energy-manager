@@ -185,9 +185,12 @@ export default function Landing() {
             weather={weather.data} pv={pvToday.data} />
 
       {/* ── LIVE scope + band (redesign) — the always-now, self-driving surface
-          that ignores the period selector above. Live power = the animated
-          flow + rates + battery, with its committed plan as the card foot;
-          Live heating = the plan chart first, gauges demoted beneath it. */}
+          that ignores the period selector above. The status row splits 50/50:
+          Live power (animated flow + rates + battery, committed plan as foot)
+          beside Live heating (live gauges + thermal model + dispatch). The
+          heating-plan timeline drops to its own full-width row below, so all
+          three live-window timelines (heating / generation / consumption) stack
+          and read straight down the screen. */}
       <h2 class="scope scope--live">
         <span class="scope-dot" aria-hidden="true" />
         Live now
@@ -215,7 +218,7 @@ export default function Landing() {
           }}
         />}
         <div class="widget-grid">
-          <Widget title="Live power" icon={<Icon name="power-live" size={14} />} tone="power" size="wide"
+          <Widget title="Live power" icon={<Icon name="power-live" size={14} />} tone="power" size="half"
                   badge={liveTime}
                   action={<RefreshCountdown lastFetchAt={now.lastFetchAt} intervalMs={now.intervalMs} loading={now.loading} onRefresh={() => void now.refresh()} />}>
             <LivePowerWidget state={s} cockpit={data} agile={agile.data} metrics={metrics.data} todayCumulative={todayCum.data} />
@@ -226,17 +229,27 @@ export default function Landing() {
                       nowUtc={data.now_utc} foxMode={foxMode} foxActive={foxActive} />
           </Widget>
 
-          <Widget title="Live heating" icon={<Icon name="heating" size={14} />} tone="thermal" size="wide">
+          <Widget title="Live heating" icon={<Icon name="heating" size={14} />} tone="thermal" size="half">
             <HeatingWidget state={s} daikin={daikin.data} daikinQuota={daikinQuota.data} report={report.data} weather={weather.data} execution={execution.data}
-                           onRefresh={() => { void daikin.refresh(); void daikinQuota.refresh(); }}>
-              <Suspense fallback={<Spinner label="Loading heating plan…" />}>
-                <HeatingPlanWidget plan={heatingPlan.data} loading={heatingPlan.loading}
-                                   execution={execution.data} indoor={indoorHistory.data} />
-              </Suspense>
-            </HeatingWidget>
+                           onRefresh={() => { void daikin.refresh(); void daikinQuota.refresh(); }} />
             <PlanMini groups={["heating", "tank"]} timeline={timeline.data}
                       dhwSchedule={dhwSched.data?.rows} heatingPlan={heatingPlan.data}
                       nowUtc={data.now_utc} />
+          </Widget>
+        </div>
+
+        {/* Heating-plan timeline — its own full-width row so it stacks with the
+            Generation/Consumption timelines below (same live-window scroll, so a
+            given clock time reads straight down all three). Stays in the LIVE
+            band (always D-1/D/D+1, ignores the period selector) rather than the
+            period band, so week/month views don't sandwich a day timeline
+            between period bar charts. */}
+        <div class="widget-grid">
+          <Widget title="Heating plan" icon={<Icon name="heating" size={14} />} tone="thermal" size="wide">
+            <Suspense fallback={<Spinner label="Loading heating plan…" />}>
+              <HeatingPlanWidget plan={heatingPlan.data} loading={heatingPlan.loading}
+                                 execution={execution.data} indoor={indoorHistory.data} />
+            </Suspense>
           </Widget>
         </div>
       </div>

@@ -7,7 +7,6 @@ import type {
   ExecutionTodayResponse,
   ExecutionSlot,
 } from "../../lib/types";
-import type { ComponentChildren } from "preact";
 import { useState, useEffect } from "preact/hooks";
 import { kwh, relTime } from "../../lib/format";
 import { forceRefreshDaikin } from "../../lib/endpoints";
@@ -27,16 +26,13 @@ interface HeatingWidgetProps {
   execution: ExecutionTodayResponse | null;
   // Re-fetch Daikin status + quota after a manual control write.
   onRefresh?: () => void;
-  // The heating-plan timeline slot — redesign order puts the plan chart first
-  // (it's the hero of this card); the gauges demote to a row beneath it.
-  children?: ComponentChildren;
 }
 
 // Tank / outdoor / LWT + Daikin mode + cache freshness + quota.
 // Outdoor temp + LWT now prefer /execution/today (logged Daikin readings,
 // no live API call) over the cached /daikin/status — same data freshness,
 // zero quota cost.
-export function HeatingWidget({ state, daikin, daikinQuota, report, execution, onRefresh, children }: HeatingWidgetProps) {
+export function HeatingWidget({ state, daikin, daikinQuota, report, execution, onRefresh }: HeatingWidgetProps) {
   const dev = daikin && daikin.length > 0 ? daikin[0] : null;
   // Explicit, confirmed LIVE read. Everything on this widget normally renders
   // the cache the LP/scheduler already refreshed (~30 min cadence) — we only
@@ -136,14 +132,10 @@ export function HeatingWidget({ state, daikin, daikinQuota, report, execution, o
           label={onCooldown ? undefined : "Refresh · 1 call"} />
       </div>
 
-      {/* Heating-plan timeline — the hero of this card (redesign). */}
-      {children}
-
-      {/* Gauges demote to a thin accessory row beneath the chart: three radial
-          dials, domain-coloured — outdoor (cool blue) · tank (amber heat) ·
-          LWT (house/radiators). */}
-      {/* Water temps only — the heating actuations. Air temps (indoor/outdoor)
-          now live in the hero climate header, so they're not duplicated here. */}
+      {/* Live gauges are this card's focus now — the heating-plan timeline moved
+          to its own full-width row. Water temps only (the heating actuations):
+          tank (amber heat) · LWT (house/radiators). Air temps (indoor/outdoor)
+          live in the hero climate header, so they're not duplicated here. */}
       <div class="heat-gauges">
         <RadialGauge label={`Tank${tankPower != null ? (tankPower ? " · on" : " · off") : ""}`}
                      value={tankTemp} min={20} max={65} target={tankTarget} color="var(--peak)"
