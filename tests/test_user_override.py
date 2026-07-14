@@ -154,7 +154,7 @@ def test_mark_action_user_overridden_sets_column(monkeypatch):
         monkeypatch.setattr("src.config.config.DB_PATH", str(path))
         db.init_db()
         # Seed an action row
-        now_iso = datetime.now(UTC).isoformat()
+        now_iso = _stable_now().isoformat()
         conn = db.get_connection()
         try:
             conn.execute(
@@ -177,9 +177,23 @@ def test_mark_action_user_overridden_sets_column(monkeypatch):
 
 # ── Reconciler integration ─────────────────────────────────────────────────────
 
-def _seed_active_row(conn, *, start_offset_seconds: int, params: dict) -> int:
+def _stable_now() -> datetime:
+    """Today at 12:00 UTC.
+
+    #383 class (date-relative flake): these tests seed a row keyed on
+    ``now.date()``, then advance the clock by a couple of minutes and look the row
+    up again by ``t.date()``. On the REAL clock, in the last minutes before UTC
+    midnight, that rolls to the NEXT day, the lookup returns nothing, the
+    reconciler does nothing, and the test fails — reliably, every night, on main.
+    Nothing in these tests depends on the actual time of day, so pin it to midday.
+    """
+    return datetime.now(UTC).replace(hour=12, minute=0, second=0, microsecond=0)
+
+
+def _seed_active_row(conn, *, start_offset_seconds: int, params: dict,
+                     now: datetime | None = None) -> int:
     """Insert an active Daikin row that started ``start_offset_seconds`` ago."""
-    now = datetime.now(UTC)
+    now = now or _stable_now()
     start = (now - timedelta(seconds=start_offset_seconds)).isoformat()
     end = (now + timedelta(seconds=1800)).isoformat()
     conn.execute(
@@ -206,13 +220,13 @@ def test_reconcile_marks_overridden_row_completed_past_end(monkeypatch):
         conn = db.get_connection()
         try:
             # Seed an overridden row whose end_time is in the past.
-            past_start = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
-            past_end = (datetime.now(UTC) - timedelta(minutes=30)).isoformat()
+            past_start = (_stable_now() - timedelta(hours=2)).isoformat()
+            past_end = (_stable_now() - timedelta(minutes=30)).isoformat()
             conn.execute(
                 """INSERT INTO action_schedule
                    (date, start_time, end_time, device, action_type, params, status, created_at)
                    VALUES (?, ?, ?, 'daikin', 'pre_heat', '{}', 'active', ?)""",
-                (datetime.now(UTC).date().isoformat(), past_start, past_end, datetime.now(UTC).isoformat()),
+                (_stable_now().date().isoformat(), past_start, past_end, _stable_now().isoformat()),
             )
             rid = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
             conn.commit()
@@ -223,9 +237,9 @@ def test_reconcile_marks_overridden_row_completed_past_end(monkeypatch):
 
         dev = DaikinDevice(id="gw", name="x", tank_target=55.0)
         client = MagicMock()
-        _reconcile_daikin_actions([], client, dev, datetime.now(UTC), trigger="test")  # warm path
-        rows = db.get_actions_for_plan_date(datetime.now(UTC).date().isoformat(), device="daikin")
-        _reconcile_daikin_actions(rows, client, dev, datetime.now(UTC), trigger="test")
+        _reconcile_daikin_actions([], client, dev, _stable_now(), trigger="test")  # warm path
+        rows = db.get_actions_for_plan_date(_stable_now().date().isoformat(), device="daikin")
+        _reconcile_daikin_actions(rows, client, dev, _stable_now(), trigger="test")
 
         row = db.get_action_by_id(rid)
         assert row is not None
@@ -251,7 +265,7 @@ def test_reconcile_skips_already_overridden_row(monkeypatch):
 
         dev = DaikinDevice(id="gw", name="x", tank_target=55.0)  # diverged live
         client = MagicMock()
-        now_utc = datetime.now(UTC)
+        now_utc = _stable_now()
 
         rows = db.get_actions_for_plan_date(now_utc.date().isoformat(), device="daikin")
         _reconcile_daikin_actions(rows, client, dev, now_utc, trigger="test")
@@ -305,7 +319,7 @@ def test_reconcile_detects_override_marks_row_and_notifies(monkeypatch):
             conn.close()
 
         client = MagicMock()
-        t1 = datetime.now(UTC)
+        t1 = _stable_now()
         # Tick 1: live state matches plan — no override, but seeds _FIRST_APPLIED_SESSION.
         dev_matching = DaikinDevice(id="gw", name="x", tank_target=45.0)
         rows = db.get_actions_for_plan_date(t1.date().isoformat(), device="daikin")
@@ -365,7 +379,7 @@ def test_boot_recovery_does_not_false_flag_override_on_first_tick(monkeypatch):
         # Live state diverges — cloud hasn't received our write yet (fresh process).
         dev = DaikinDevice(id="gw", name="x", tank_target=55.0)
         client = MagicMock()
-        now_utc = datetime.now(UTC)
+        now_utc = _stable_now()
 
         rows = db.get_actions_for_plan_date(now_utc.date().isoformat(), device="daikin")
         sm._reconcile_daikin_actions(rows, client, dev, now_utc, trigger="boot_recovery")
@@ -392,7 +406,7 @@ def test_find_recent_user_override_returns_recent(monkeypatch):
         db.init_db()
         conn = db.get_connection()
         try:
-            now = datetime.now(UTC)
+            now = _stable_now()
             rid = _seed_active_row(
                 conn, start_offset_seconds=3600, params={"tank_power": True, "tank_temp": 45},
             )
@@ -418,7 +432,7 @@ def test_find_recent_user_override_outside_window_returns_none(monkeypatch):
         db.init_db()
         conn = db.get_connection()
         try:
-            now = datetime.now(UTC)
+            now = _stable_now()
             rid = _seed_active_row(
                 conn, start_offset_seconds=3600 * 10, params={"tank_power": True},
             )
@@ -442,7 +456,7 @@ def test_find_recent_user_override_filters_by_device(monkeypatch):
         monkeypatch.setattr("src.config.config.DB_PATH", str(path))
         db.init_db()
         # Seed a Fox-side overridden row — must not match a daikin query.
-        now = datetime.now(UTC)
+        now = _stable_now()
         conn = db.get_connection()
         try:
             start = (now - timedelta(seconds=3600)).isoformat()
@@ -477,7 +491,7 @@ def test_find_recent_user_override_filters_by_device(monkeypatch):
 def _seed_row_window(conn, *, start_offset_seconds: int, end_offset_seconds: int,
                      params: dict) -> int:
     """Insert a daikin row with explicit start/end offsets (seconds, signed)."""
-    now = datetime.now(UTC)
+    now = _stable_now()
     start = (now + timedelta(seconds=start_offset_seconds)).isoformat()
     end = (now + timedelta(seconds=end_offset_seconds)).isoformat()
     conn.execute(
@@ -499,7 +513,7 @@ def test_respect_until_window_end_keeps_override_past_fixed_grace(monkeypatch):
         path = Path(td) / "t.db"
         monkeypatch.setattr("src.config.config.DB_PATH", str(path))
         db.init_db()
-        now = datetime.now(UTC)
+        now = _stable_now()
         conn = db.get_connection()
         try:
             # 11h boost window: started 8h ago, ends in 3h.
@@ -531,7 +545,7 @@ def test_respect_until_window_end_releases_after_window_closes(monkeypatch):
         path = Path(td) / "t.db"
         monkeypatch.setattr("src.config.config.DB_PATH", str(path))
         db.init_db()
-        now = datetime.now(UTC)
+        now = _stable_now()
         conn = db.get_connection()
         try:
             # Window ended 1h ago.
@@ -599,7 +613,7 @@ def test_inherited_override_suppresses_new_row(monkeypatch):
         path = Path(td) / "t.db"
         monkeypatch.setattr("src.config.config.DB_PATH", str(path))
         db.init_db()
-        now_utc = datetime.now(UTC)
+        now_utc = _stable_now()
         conn = db.get_connection()
         try:
             # Row A — historical overridden row (past end_time).
@@ -673,7 +687,7 @@ def test_inherited_override_releases_when_user_reverts(monkeypatch):
         path = Path(td) / "t.db"
         monkeypatch.setattr("src.config.config.DB_PATH", str(path))
         db.init_db()
-        now_utc = datetime.now(UTC)
+        now_utc = _stable_now()
         conn = db.get_connection()
         try:
             start_a = (now_utc - timedelta(minutes=90)).isoformat()
@@ -737,7 +751,7 @@ def test_inherited_override_does_not_suppress_restore(monkeypatch):
         path = Path(td) / "t.db"
         monkeypatch.setattr("src.config.config.DB_PATH", str(path))
         db.init_db()
-        now_utc = datetime.now(UTC)
+        now_utc = _stable_now()
         conn = db.get_connection()
         try:
             start_a = (now_utc - timedelta(minutes=90)).isoformat()

@@ -39,20 +39,35 @@ def _seed_rates(valid_from: datetime, count: int, price: float = 10.0) -> None:
     db.save_agile_rates(rows, TARIFF)
 
 
+def _today_utc() -> datetime:
+    """Midnight UTC of the REAL current day.
+
+    #383: these fixtures used to be pinned to 2026-04-22. But
+    ``db.get_half_hourly_agile_priors`` computes its cutoff from the REAL wall
+    clock (``datetime.now(UTC) - window_days``), not from the monkeypatched
+    ``optimizer._now_utc`` — so once the pinned date aged past 28 days the priors
+    query returned EMPTY and the horizon extender truncated instead of
+    synthesising. The tests were skipped as "pre-existing failures"; the
+    production code was fine all along. Anchor to the real today and they pass.
+    """
+    n = datetime.now(UTC)
+    return n.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
 def test_rolling_24h_when_full_tomorrow_available(monkeypatch: pytest.MonkeyPatch) -> None:
     """At 18:00 UTC with tomorrow fully published, window is 18:30 UTC today → 18:30 UTC tomorrow."""
-    now = datetime(2026, 4, 22, 18, 0, tzinfo=UTC)
+    today = _today_utc()
+    now = today + timedelta(hours=18)
     monkeypatch.setattr(optimizer, "_now_utc", lambda: now)
-    _seed_rates(datetime(2026, 4, 22, 0, 0, tzinfo=UTC), 96)
+    _seed_rates(today, 96)
 
     w = _resolve_plan_window(TARIFF)
     assert w is not None
-    assert w.day_start == datetime(2026, 4, 22, 18, 30, tzinfo=UTC)
-    assert w.horizon_end == datetime(2026, 4, 23, 18, 30, tzinfo=UTC)
+    assert w.day_start == today + timedelta(hours=18, minutes=30)
+    assert w.horizon_end == today + timedelta(days=1, hours=18, minutes=30)
     assert w.horizon_hours == pytest.approx(24.0)
 
 
-@pytest.mark.skip(reason="Pre-existing failure tracked in #383 — priors-fill horizon extension")
 def test_rolling_extends_with_priors_when_tomorrow_not_published(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -61,18 +76,20 @@ def test_rolling_extends_with_priors_when_tomorrow_not_published(
     24 h horizon and 23 h of seeded rates ending at 23:00 UTC, the window
     should still cover 9:30 → 9:30 next day (24 h) using priors for the gap.
     """
-    now = datetime(2026, 4, 22, 9, 0, tzinfo=UTC)
+    today = _today_utc()
+    now = today + timedelta(hours=9)
     monkeypatch.setattr(optimizer, "_now_utc", lambda: now)
-    # Seed enough historical rates that priors are non-empty (28 d before today)
-    _seed_rates(datetime(2026, 4, 1, 0, 0, tzinfo=UTC), 1000, price=12.0)
+    # History INSIDE the priors window (cutoff = real now - 28 d), so the priors
+    # query is non-empty. This is the bit the pinned-April fixture broke.
+    _seed_rates(today - timedelta(days=20), 20 * 48, price=12.0)
     # Plus today's 23 h that the LP would normally use
-    _seed_rates(datetime(2026, 4, 22, 0, 0, tzinfo=UTC), 46, price=10.0)
+    _seed_rates(today, 46, price=10.0)
 
     w = _resolve_plan_window(TARIFF)
     assert w is not None
-    assert w.day_start == datetime(2026, 4, 22, 9, 30, tzinfo=UTC)
+    assert w.day_start == today + timedelta(hours=9, minutes=30)
     # Horizon now extends to full 24h via priors instead of truncating at 23:00
-    assert w.horizon_end == datetime(2026, 4, 23, 9, 30, tzinfo=UTC)
+    assert w.horizon_end == today + timedelta(days=1, hours=9, minutes=30)
     assert w.horizon_hours == pytest.approx(24.0)
     # Confirm at least one synthesised "prior" row is present in rates
     prior_rows = [r for r in w.rates if r.get("fetched_at") == "prior"]
@@ -83,10 +100,11 @@ def test_rolling_truncates_when_no_priors_available(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No history → can't synthesise; legacy truncation behaviour applies."""
-    now = datetime(2026, 4, 22, 9, 0, tzinfo=UTC)
+    today = _today_utc()
+    now = today + timedelta(hours=9)
     monkeypatch.setattr(optimizer, "_now_utc", lambda: now)
-    # Only today's data; no history older than 28 d ago for priors
-    _seed_rates(datetime(2026, 4, 22, 0, 0, tzinfo=UTC), 46)
+    # Only today's data; no history for priors
+    _seed_rates(today, 46)
 
     # Force priors to be empty by querying with no historical data
     monkeypatch.setattr(
@@ -96,8 +114,8 @@ def test_rolling_truncates_when_no_priors_available(
 
     w = _resolve_plan_window(TARIFF)
     assert w is not None
-    assert w.day_start == datetime(2026, 4, 22, 9, 30, tzinfo=UTC)
-    assert w.horizon_end == datetime(2026, 4, 22, 23, 0, tzinfo=UTC)
+    assert w.day_start == today + timedelta(hours=9, minutes=30)
+    assert w.horizon_end == today + timedelta(hours=23)
     assert w.horizon_hours == pytest.approx(13.5)
 
 
