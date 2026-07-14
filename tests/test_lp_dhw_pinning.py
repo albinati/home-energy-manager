@@ -52,14 +52,23 @@ def _solve(slots, prices, pv, base_load, init_soc=8.0, init_tank=40.0,
 
 @pytest.fixture(autouse=True)
 def _pin_enabled(monkeypatch):
-    """Default: pinning enabled. Individual tests opt out via monkeypatch."""
+    """Default: pinning enabled. Individual tests opt out via monkeypatch.
+
+    ``DAIKIN_CONTROL_MODE`` / ``OPTIMIZATION_PRESET`` are runtime-settings
+    PROPERTIES. A bare ``setattr`` on them routes through the property setter →
+    ``Config._rt_set`` → the CLASS-LEVEL ``_overrides`` dict, which monkeypatch
+    cannot undo — it leaks into every later test and beats even ``setenv``.
+    (That leak is why ``test_lp_solves_in_passive_mode`` below could not set
+    passive at all.) Use ``monkeypatch.setitem(config._overrides, ...)``, which
+    restores properly.
+    """
     monkeypatch.setattr(config, "DHW_FIXED_SCHEDULE_ENABLED", True, raising=False)
     monkeypatch.setattr(config, "DHW_WARMUP_START_HOUR_LOCAL", 13, raising=False)
     monkeypatch.setattr(config, "DHW_SETBACK_START_HOUR_LOCAL", 22, raising=False)
-    monkeypatch.setattr(config, "DHW_TEMP_NORMAL_C", 45.0, raising=False)
+    monkeypatch.setitem(config._overrides, "DHW_TEMP_NORMAL_C", 45.0)
     monkeypatch.setattr(config, "DHW_TEMP_SETBACK_C", 37.0, raising=False)
-    monkeypatch.setattr(config, "DAIKIN_CONTROL_MODE", "active", raising=False)
-    monkeypatch.setattr(config, "OPTIMIZATION_PRESET", "normal", raising=False)
+    monkeypatch.setitem(config._overrides, "DAIKIN_CONTROL_MODE", "active")
+    monkeypatch.setitem(config._overrides, "OPTIMIZATION_PRESET", "normal")
     yield
 
 
@@ -340,25 +349,73 @@ def test_lp_pinning_with_warm_initial_tank_reduces_e_dhw(monkeypatch):
     )
 
 
-def test_lp_pinning_passive_mode_unaffected(monkeypatch):
-    """In passive mode, ``passive_e_dhw[i]`` constraint already pins
-    e_dhw to firmware predictions — confirm K2 pinning doesn't double-pin
-    and break the passive path."""
-    monkeypatch.setattr(config, "DAIKIN_CONTROL_MODE", "passive", raising=False)
+def test_lp_solves_in_passive_mode(monkeypatch):
+    """#639 regression: passive mode must SOLVE, not return Infeasible.
+
+    In passive mode ``e_dhw`` is already hard-pinned to the physics prediction
+    (``e_dhw[i] == passive_e_dhw[i]``). The K2 pin adds a SECOND hard equality
+    (``e_dhw[i] == pinned_e_dhw[i]``, from the dhw_policy forecast) on the same
+    variable, and the two vectors differ in essentially every slot → Infeasible
+    on EVERY solve. Fix: ``_dhw_pinned`` is now gated on ``not passive_daikin``.
+
+    This test previously asserted only ``plan is not None`` and its own comment
+    said "either outcome is acceptable" — so it passed for months while the mode
+    was completely dead. It now asserts the real contract.
+    """
+    # Runtime-settings property → override via _overrides (setitem restores; a
+    # bare setattr would leak class-level). See the _pin_enabled docstring.
+    monkeypatch.setitem(config._overrides, "DAIKIN_CONTROL_MODE", "passive")
+    assert config.DAIKIN_CONTROL_MODE == "passive"
+
     base = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
-    n = 4
+    n = 8
     slots = [base + timedelta(minutes=30 * i) for i in range(n)]
     plan = _solve(
         slots=slots, prices=[15.0] * n, pv=[2.0] * n,
         base_load=[0.3] * n, init_soc=5.0, init_tank=40.0,
     )
-    # In passive mode the passive_e_dhw values from predict_passive_daikin_load
-    # determine e_dhw. Our K2 pinning would conflict (two equality constraints
-    # on the same variable). Confirm LP doesn't crash but check the actual
-    # behaviour by inspection: at minimum the solver should produce an answer.
-    # Passive mode + pinning could be infeasible — LP returns ok=False if so.
-    # Either outcome is acceptable as long as it doesn't crash.
     assert plan is not None
+    assert plan.ok, f"passive-mode LP must be feasible, got status={plan.status}"
+
+    # e_dhw follows the PASSIVE physics prediction (standing loss), NOT the
+    # dhw_policy pin — the whole point of the guard. The policy pin would put a
+    # warmup/setback shape here; passive is a small flat standing-loss draw.
+    assert len(plan.dhw_electric_kwh) == n
+    assert all(v < 0.15 for v in plan.dhw_electric_kwh), (
+        f"passive e_dhw should be the small standing-loss prediction, got "
+        f"{plan.dhw_electric_kwh} — looks like the dhw_policy pin leaked back in"
+    )
+
+
+def test_lp_solves_with_a_tank_hotter_than_the_ceiling(monkeypatch):
+    """A live tank above DHW_TEMP_MAX_C must not make the LP Infeasible.
+
+    `tank[0] == initial.tank_temp_c` is a hard equality, and `tank` was bounded
+    at `[20, DHW_TEMP_MAX_C]` (default 60 °C) — so a real tank above that ceiling
+    (routine right after the firmware's own legionella cycle, or a PV-abundance
+    lift plus solar gain) collided with the upBound and killed EVERY solve until
+    the tank cooled.
+    Slot 0 is a MEASUREMENT, not a decision; `soc[0]` already had exactly this
+    relaxation and `tank[0]` did not.
+    """
+    hot = float(config.DHW_TEMP_MAX_C) + 1.0
+    base = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    n = 8
+    slots = [base + timedelta(minutes=30 * i) for i in range(n)]
+    plan = _solve(
+        slots=slots, prices=[15.0] * n, pv=[2.0] * n,
+        base_load=[0.3] * n, init_soc=5.0, init_tank=hot,
+    )
+    assert plan.ok, f"hot tank ({hot} C) must still solve, got status={plan.status}"
+    assert plan.tank_temp_c[0] == pytest.approx(hot)
+
+    # ...and the same in passive mode, where the tank has zero LP freedom.
+    monkeypatch.setitem(config._overrides, "DAIKIN_CONTROL_MODE", "passive")
+    plan_p = _solve(
+        slots=slots, prices=[15.0] * n, pv=[2.0] * n,
+        base_load=[0.3] * n, init_soc=5.0, init_tank=hot,
+    )
+    assert plan_p.ok, f"passive + hot tank must solve, got status={plan_p.status}"
 
 
 def test_lp_pinning_guests_with_last_slot_in_shower_window_is_feasible(monkeypatch):

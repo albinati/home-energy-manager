@@ -561,16 +561,18 @@ knows the YTD figure isn't the full calendar year.
 
 ### PV-sufficiency guard rail (PR #331, 2026-05-15)
 
-When `ENERGY_STRATEGY_MODE=strict_savings` (the user's default), the LP
-blocks `chg[i] ≤ pv_use[i]` on pre-peak slots when forecast PV will fill
-the battery anyway. Audit field in `get_optimization_inputs.exogenous.pv_sufficiency_guard`:
+The LP blocks `chg[i] ≤ pv_use[i]` on pre-peak slots when forecast PV will fill
+the battery anyway — the economic argument holds in every mode, so the guard is
+**always evaluated when enabled** (`LP_PV_SUFFICIENCY_GUARD`). It is NOT tied to
+a strategy mode: `ENERGY_STRATEGY_MODE` was removed in PR C. Audit field in
+`get_optimization_inputs.exogenous.pv_sufficiency_guard`:
 
 ```json
 {
   "enabled": true,
-  "strict_savings": true,
+  "strict_savings": false,          // vestigial — always false since PR C
   "applied": true,                  // ← rail fired
-  "reason": "sufficient_pv",        // or insufficient_pv / no_pre_peak_slots / disabled / not_strict_savings
+  "reason": "sufficient_pv",        // or insufficient_pv / no_pre_peak_slots / disabled
   "forecast_pv_today_kwh": 17.06,
   "demand_kwh": 16.38,
   "margin": 1.0,
@@ -583,7 +585,9 @@ When user asks "did the LP avoid grid-charging today?" → check
 `reason`. When `applied=true` the user can expect less cheap-window grid
 import on that day's plan.
 
-The rail is **inert under `savings_first` mode** (`reason: not_strict_savings`).
+**The only kill switch is `LP_PV_SUFFICIENCY_GUARD=false`.** Do NOT suggest
+flipping `ENERGY_STRATEGY_MODE` to disable it — that variable no longer exists,
+so the "rollback" would silently do nothing.
 
 ### Daily PV calibration refresh (PR #331)
 
@@ -617,12 +621,13 @@ abundance, cheap window) — peak avoidance does NOT trigger pre-charging.
 * `DHW_TEMP_PV_ABUNDANCE_TARGET_C` (default 45 °C) — tank target during
   solar_charge / solar_preheat slots. Runtime-tunable via `set_setting`.
   Per household occupancy: single ~42, family of 4 ~50, larger ~55.
-* `FORECAST_NIGHT_TEMP_BIAS_C` (default `-3.0`) — Open Meteo's
+* `FORECAST_NIGHT_TEMP_BIAS_C` (default `0.0` = OFF) — Open Meteo's
   `temperature_c` is offset by this many degrees during the configured
   night window (`FORECAST_NIGHT_START_HOUR_UTC` to `FORECAST_NIGHT_END_HOUR_UTC`).
-  Corrects the ~10 km grid forecast's tendency to under-estimate W4 1DZ
-  microclimate cold nights. Daikin's own sensor still drives its weather
-  curve — this is planning-side only.
+  **Leave at 0.** The learned per-hour microclimate offset already corrects the
+  forecast-vs-sensor gap adaptively, so a static bias DOUBLE-corrects and makes
+  the LP budget every night ~3 °C colder than reality. Disabled on prod
+  2026-06-12; the code default followed in PR #702.
 
 ### Notifications: Telegram direct (PR #284, 2026-05-09)
 

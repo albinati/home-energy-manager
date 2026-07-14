@@ -25,8 +25,8 @@ B) **Plan vs execution** — for every 30 min slot in the trailing window:
    the slot started) vs the realised pv_realtime per-slot binning. The
    audit reports coverage (LP runs → Fox uploads), totals (kWh + cost),
    and the top-N per-slot disparities by absolute cost delta. A
-   strict_savings forgone-export sub-section tallies what the household
-   would have earned by selling instead of holding battery for self-use.
+   robustness-filtered-export sub-section tallies battery export the LP
+   planned as peak_export but the pessimistic scenario filter downgraded.
 """
 from __future__ import annotations
 
@@ -42,6 +42,11 @@ from ..config import config
 DISPARITY_TOP_N = 4
 DISPARITY_MIN_PENCE = 5.0
 COVERAGE_MIN_PCT = 90.0
+
+# Slot kinds that ship battery energy TO THE GRID (Fox ForceDischarge). Both map
+# to the same hardware action in ``optimizer._slot_fox_tuple``. PV-surplus export
+# is NOT here: it leaves passively via SelfUse and needs no discharge group.
+_BATTERY_EXPORT_KINDS = frozenset({"peak_export", "pre_negative_export"})
 HELD_BASELINE_PER_DAY = 110.0 / 30.0  # ≈3.67/day pre-PR #338 measured rate
 
 
@@ -76,8 +81,8 @@ def _operative_plan_for_window(
     solution whose parent run was *before* the slot start — that's the plan
     actually live when the slot was dispatched. Joined to
     ``dispatch_decisions`` so callers can distinguish the LP variable's raw
-    ``export_kwh`` from the EFFECTIVE export the strict_savings classifier
-    + scenario filter actually allowed onto Fox V3."""
+    ``export_kwh`` from the EFFECTIVE export the scenario robustness filter
+    actually allowed onto Fox V3."""
     out: dict[dt.datetime, dict[str, Any]] = {}
     t = start_utc
     while t < end_utc:
@@ -102,22 +107,75 @@ def _operative_plan_for_window(
 
 
 def _effective_plan_export_kwh(plan_slot: dict[str, Any]) -> float:
-    """Export kWh that ACTUALLY shipped to Fox V3 — 0 if the slot was
-    classified ``standard`` (strict_savings policy or scenario filter
-    downgrade). The raw ``export_kwh`` column is the LP variable's value,
-    not the dispatched amount."""
-    if (plan_slot.get("dispatched_kind") or "").strip() == "peak_export":
+    """Battery export kWh that ACTUALLY shipped to Fox V3 as a ForceDischarge.
+
+    BOTH battery→grid kinds count: ``peak_export`` (arbitrage, vacation preset)
+    and ``pre_negative_export`` (drain ahead of a negative window, live in
+    normal/guests). ``_slot_fox_tuple`` maps them to the SAME hardware action —
+    ``ForceDischarge`` to the export SoC floor — so counting only the former
+    under-reported the export credit and turned every pre-negative drain into a
+    phantom top-N "disparity" row in the 07:30 audit.
+
+    The raw ``export_kwh`` column is the LP variable's value, not the dispatched
+    amount. PV surplus export is deliberately NOT counted: it leaves via Fox
+    SelfUse passively, not via a discharge group.
+    """
+    if (plan_slot.get("dispatched_kind") or "").strip() in _BATTERY_EXPORT_KINDS:
         return float(plan_slot.get("export_kwh") or 0)
     return 0.0
 
 
 def _forgone_export_kwh(plan_slot: dict[str, Any]) -> float:
-    """How much the LP would have exported had strict_savings / scenario
-    filter not downgraded the slot. Zero on slots that shipped as
-    peak_export (no forgone revenue) or where the LP didn't plan export."""
+    """Battery export the LP planned but the robustness filter downgraded.
+
+    ONLY counts slots the LP itself labelled ``peak_export`` (battery → grid
+    arbitrage) that did not ship as one — i.e. ``filter_robust_peak_export``
+    dropped it, either because the pessimistic scenario disagreed or because the
+    economic margin was too thin. That is the only forgone revenue in the CURRENT
+    dispatch path. (Pre-PR-C rows are not recoverable this way: under the old
+    ``strict_savings`` policy the labeller itself suppressed the kind, so those
+    slots carry ``lp_kind='standard'`` and read as zero here.)
+
+    ``pre_negative_export`` is never forgone: it is labelled distinctly precisely
+    to bypass the robustness filter, so it always ships.
+
+    It must NOT count a slot's ``export_kwh`` just because the slot isn't
+    ``peak_export``. In the normal/guests presets the LP constrains
+    ``exp <= pv_use`` (lp_optimizer), so ``export_kwh`` there is PV SURPLUS —
+    which Fox V3 SelfUse exports passively and which already earns money in
+    ``export_revenue_gbp``. Counting it as "forgone" reported a phantom loss on
+    every sunny day. (Pre-PR-C fossil: this used to measure what the removed
+    ``ENERGY_STRATEGY_MODE=strict_savings`` policy declined to sell.)
+    """
+    if (plan_slot.get("lp_kind") or "").strip() != "peak_export":
+        return 0.0
     if (plan_slot.get("dispatched_kind") or "").strip() == "peak_export":
         return 0.0
     return float(plan_slot.get("export_kwh") or 0)
+
+
+_FORGONE_REASON_KNOB = {
+    # filter_robust_peak_export's two real drop reasons → the knob that governs
+    # each. Telling the user "the pessimistic scenario disagreed" when the drop
+    # was actually an economic-margin call points them at the wrong dial.
+    "pessimistic_disagrees": "pessimistic scenario disagreed "
+                             "(<code>LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH</code>)",
+    "economic_margin": "margin too thin "
+                       "(<code>LP_PEAK_EXPORT_MIN_MARGIN_PENCE_PER_KWH</code>)",
+    "pessimistic_failed": "pessimistic solve failed",
+    "no_scenarios_run": "no scenarios ran for this solve",
+}
+
+
+def _forgone_reason_text(reasons: dict[str, int]) -> str:
+    """Render the drop-reason histogram, most common first."""
+    if not reasons:
+        return "reason not recorded"
+    parts = [
+        f"{_FORGONE_REASON_KNOB.get(k, k)} ×{n}"
+        for k, n in sorted(reasons.items(), key=lambda kv: -kv[1])
+    ]
+    return "; ".join(parts)
 
 
 def _realised_for_window(
@@ -230,7 +288,7 @@ def _build_held_schedule_section(
 
 
 # ---------------------------------------------------------------------------
-# Section B — plan vs execution + strict_savings forgone-export
+# Section B — plan vs execution + robustness-filtered forgone export
 # ---------------------------------------------------------------------------
 
 def _build_plan_vs_execution_section(
@@ -239,7 +297,7 @@ def _build_plan_vs_execution_section(
     now_utc: dt.datetime,
     window_hours: int,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Returns ``(plan_vs_execution_section, strict_savings_forgone_section)``.
+    """Returns ``(plan_vs_execution_section, forgone_export_section)``.
 
     They share the same SQL pass, so we build both at once to avoid a
     duplicate plan-window scan."""
@@ -302,6 +360,11 @@ def _build_plan_vs_execution_section(
     forgone_kwh = 0.0
     forgone_p = 0.0
     forgone_slots = 0
+    # filter_robust_peak_export drops for TWO distinct reasons
+    # (`pessimistic_disagrees` and `economic_margin`) and the reason is already on
+    # the row — report it rather than asserting one and pointing the user at the
+    # wrong knob.
+    forgone_reasons: dict[str, int] = defaultdict(int)
     for t, slot in plan.items():
         f_kwh = _forgone_export_kwh(slot)
         if f_kwh <= 0:
@@ -310,6 +373,7 @@ def _build_plan_vs_execution_section(
         forgone_kwh += f_kwh
         forgone_p += f_kwh * ep
         forgone_slots += 1
+        forgone_reasons[(slot.get("reason") or "unknown").strip()] += 1
 
     disparities: list[dict[str, Any]] = []
     for t in plan:
@@ -365,6 +429,7 @@ def _build_plan_vs_execution_section(
         "kwh": round(forgone_kwh, 2),
         "pence": round(forgone_p, 1),
         "slot_count": forgone_slots,
+        "reasons": dict(forgone_reasons),
     }
     return pve, forgone
 
@@ -384,7 +449,7 @@ def build_audit_report(
     ``now_utc`` defaults to wall-clock UTC; tests inject a fixed timestamp.
     ``db_path`` defaults to ``config.DB_PATH``; tests point at a tmp DB.
     Returns a dict with sections ``held_schedule``, ``plan_vs_execution``,
-    and ``strict_savings_forgone`` — plus ``window_hours`` and ``now_utc``
+    and ``forgone_export`` — plus ``window_hours`` and ``now_utc``
     on the top level so consumers can attribute the snapshot.
     """
     if now_utc is None:
@@ -412,7 +477,7 @@ def build_audit_report(
         "now_utc": now_utc.isoformat(),
         "held_schedule": held,
         "plan_vs_execution": pve,
-        "strict_savings_forgone": forgone,
+        "forgone_export": forgone,
     }
 
 
@@ -435,7 +500,7 @@ def render_audit_markdown(
     """
     held = report["held_schedule"]
     pve = report["plan_vs_execution"]
-    forgone = report["strict_savings_forgone"]
+    forgone = report["forgone_export"]
 
     coverage_warn = pve["coverage_pct"] < pve["coverage_threshold_pct"] and pve["lp_runs"]
     silent_b = (
@@ -491,10 +556,11 @@ def render_audit_markdown(
     )
     if forgone["slot_count"] > 0:
         parts.append(
-            f"  strict_savings forgone export: "
+            f"  robustness-filtered export: "
             f"~£{forgone['pence'] / 100.0:.2f} ({forgone['kwh']:.1f} kWh over "
             f"{forgone['slot_count']} slot{'s' if forgone['slot_count'] != 1 else ''}) "
-            f"— set <code>ENERGY_STRATEGY_MODE=savings_first</code> to realise"
+            f"— the LP planned peak_export; the robustness filter dropped it "
+            f"({_forgone_reason_text(forgone.get('reasons') or {})})"
         )
     if pve["disparities"]:
         parts.append(

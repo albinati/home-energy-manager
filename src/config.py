@@ -1397,16 +1397,23 @@ class Config:
     # forecast (forecast_dhw_load_per_slot) uses to pre-cool. Sharing one knob
     # keeps the fired tank actions and the LP's budgeted DHW import consistent
     # by construction (no separate DHW_WARMUP_BOOST_OVERRIDE_LEAD_MINUTES).
-    # Forecast night-temperature bias (minimal #324 implementation).
-    # Open Meteo's grid coverage (~10 km) over-estimates the W4 1DZ
-    # microclimate's overnight outdoor temperature by ~3 °C in the household's
-    # forecast_skill_log (2026-05-12: pred 8.1 °C / actual 5.0 °C at 23 UTC).
-    # The bias is applied when the LP reads the forecast for slots inside the
-    # configured night window — the Daikin sensor still drives the actual
-    # weather curve, so this only corrects the LP's planning side, no
-    # comfort impact. Set the bias to 0.0 to disable.
+    # Forecast night-temperature bias (#324). DEFAULT 0.0 = OFF — do not arm
+    # this without fresh evidence.
+    #
+    # The original -3.0 was calibrated on ONE cold observation (2026-05-12:
+    # pred 8.1 °C / actual 5.0 °C at 23 UTC). It was disabled on prod
+    # 2026-06-12 because the learned per-hour microclimate offset
+    # (``get_micro_climate_offset_by_hour_c``, fed by ``forecast_skill_log``)
+    # already corrects the sensor-vs-forecast gap ADAPTIVELY — so a static -3
+    # DOUBLE-CORRECTS. By June the raw night residual was only +0.2..+0.7 °C.
+    # A LP that budgets every night ~3 °C colder than reality over-heats all
+    # winter.
+    #
+    # The default stayed -3.0 in code long after prod pinned 0 in .env, so
+    # every dev/test/fresh deploy silently ran the double-correction. Default
+    # is now 0.0: prod behaviour is unchanged, everything else is fixed.
     FORECAST_NIGHT_TEMP_BIAS_C: float = float(
-        os.getenv("FORECAST_NIGHT_TEMP_BIAS_C", "-3.0")
+        os.getenv("FORECAST_NIGHT_TEMP_BIAS_C", "0.0")
     )
     FORECAST_NIGHT_START_HOUR_UTC: int = int(
         os.getenv("FORECAST_NIGHT_START_HOUR_UTC", "21")
