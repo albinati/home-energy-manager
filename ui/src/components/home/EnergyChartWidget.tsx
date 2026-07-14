@@ -3,9 +3,10 @@ import { getEnergyPeriod, getDaikinConsumption, getGridToday, getForecastDaily }
 import { usePeriod, setGranularity, selectedPeriod, isCurrentPeriod, periodDateRange, utcTodayISO } from "../../lib/period";
 import { getImmutableCache, setImmutableCache } from "../../lib/poll";
 import { fetchDayBundle, getCachedDay, prefetchNeighbourDays } from "../../lib/dayCache";
-import { useStepSlide, useSwipe } from "../../lib/navMotion";
+import { useStepSlide, useSwipe, useChartPan } from "../../lib/navMotion";
 import { stepPeriod } from "../../lib/period";
-import { makeChart, baseOption, chartTheme, barGradient, areaGradient, withAlpha, type EChartsType } from "../../lib/charts";
+import { makeChart, baseOption, chartTheme, barGradient, areaGradient, withAlpha, timeAxis, insideZoom, forecastWash, isCoarsePointer, SLOT_MS, type EChartsType } from "../../lib/charts";
+import { liveWindow, centerWindow, useLiveWindow, backToNow, type LiveWindowBounds } from "../../lib/liveWindow";
 import { Icon } from "../common/Icon";
 import { NowDot } from "../common/NowDot";
 import type {
@@ -88,9 +89,22 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
   const seriesSigRef = useRef<string>("");
   const rootRef = useRef<HTMLDivElement | null>(null);
   const slideCls = useStepSlide(anchor);
-  // Touch: swipe left = forward one period, right = back (clamped to today
-  // inside stepPeriod). Passive listeners — tooltips/scroll unaffected.
-  useSwipe(rootRef, () => stepPeriod(1), () => stepPeriod(-1));
+  // Live-window bounds for the day view; null off it (the hook goes inert).
+  const boundsRef = useRef<LiveWindowBounds | null>(null);
+  // Touch: on WEEK/MONTH/YEAR, swipe steps the period. On the DAY view a
+  // horizontal drag now PANS the live window (inside dataZoom), so stepping the
+  // day off a swipe is retired there — the two horizontal gestures can't coexist
+  // and day-crossing already has the PeriodNavigator arrows.
+  useSwipe(
+    rootRef,
+    () => { if (granularity !== "day") stepPeriod(1); },
+    () => { if (granularity !== "day") stepPeriod(-1); },
+  );
+  const { follow } = useLiveWindow(chartRef, boundsRef);
+  // Touch pan (coarse pointers): horizontal drag on the chart host pans the live
+  // window; vertical is left to page scroll. Inert when boundsRef is null (not
+  // the live day view) or on a fine pointer (desktop uses inside dataZoom).
+  useChartPan(elRef, boundsRef);
 
   useEffect(() => {
     let alive = true;
@@ -264,6 +278,23 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
   const effExec = pastDayView ? dayData?.exec ?? null : execution;
   const effDaikin = pastDayView ? dayData?.daikin ?? null : daikin;
   const effPv = pastDayView ? dayData?.pv ?? null : (pv ?? null);
+
+  // Feed the live-window bounds from the day's slots. Only the LIVE today view
+  // follows now; a past day shows the whole static day (bounds null → no tick).
+  useEffect(() => {
+    const slots = effPv?.slots ?? effExec?.slots ?? [];
+    if (granularity !== "day" || !isToday || slots.length === 0) {
+      boundsRef.current = null;
+      return;
+    }
+    const ms = slots.map((s) => new Date(s.slot_utc).getTime()).filter(Number.isFinite);
+    if (!ms.length) { boundsRef.current = null; return; }
+    boundsRef.current = {
+      dayStartMs: Math.min(...ms),
+      dayEndMs: Math.max(...ms) + SLOT_MS,
+      nowMs: effPv?.now_utc ? new Date(effPv.now_utc).getTime() : Date.now(),
+    };
+  }, [granularity, isToday, effPv, effExec]);
   // A day with NO execution slots can still render — /pv/today always carries
   // the 48-slot committed plan, so a just-rolled-over day shows its forecast
   // lines with empty actuals instead of a blank "no data" message.
@@ -287,6 +318,13 @@ export function EnergyChartWidget({ execution, pv }: EnergyChartWidgetProps) {
         <span class="echart-label">
           {period?.period_label ?? (granularity === "day" ? (isToday ? "Today" : anchor) : "")}
         </span>
+        {/* Live-window "back to now" — only while browsing the past on the live
+            day view. Re-enters follow (all stacked charts snap back together). */}
+        {granularity === "day" && isToday && !follow && (
+          <button type="button" class="echart-nowchip" onClick={backToNow} title="Jump back to now">
+            <span class="echart-nowchip-dot" aria-hidden="true" />now
+          </button>
+        )}
       </div>
 
       {/* Host wrap — loading state overlays (position:absolute) so it never
@@ -587,18 +625,30 @@ function optionForDay(
       : k === "standard"
         ? { color: withAlpha(t.textMute, 0.05) }
         : { color: withAlpha(tierColor(k), 0.10) };
+  // TIME AXIS: each slot's START instant in epoch ms — the same instant the old
+  // category index encoded, now a real coordinate. Interval-true bands become
+  // LITERAL (slot spans [startMs, startMs + SLOT_MS]); the fractional ±0.5 index
+  // arithmetic that misplaced bands 15 min twice (#636/#637) is gone.
+  const axisMs = axis.map((iso) => new Date(iso).getTime());
+  const dayStartMs = axisMs.length ? axisMs[0] : 0;
+  const dayEndMs = axisMs.length ? axisMs[axisMs.length - 1] + SLOT_MS : 0;
+  const pair = (arr: Array<number | null>): Array<[number, number | null]> =>
+    arr.map((v, i) => [axisMs[i], v]);
+
   const bands: Array<[{ xAxis: number; itemStyle: object }, { xAxis: number }]> = [];
   let runStart = -1;
   let runTier: DayTier = null;
   const flush = (endIdx: number) => {
     if (runStart < 0 || runTier == null) return;
-    // Interval-true geometry (2026-07-04): category position i = the slot's
-    // START instant, so the slot's half-hour spans [i, i+1] — NOT the cell
-    // [i-0.5, i+0.5], which drew every band 15 min early vs the wall clock
-    // (the "grid shifted from the window" report). Clamp the final edge to
-    // the axis extent so ECharts doesn't drop the out-of-range coordinate.
-    const rightEdge = Math.min(endIdx + 1, axis.length - 0.5);
-    bands.push([{ xAxis: runStart, itemStyle: tierFill(runTier) }, { xAxis: rightEdge }]);
+    // A tier run [runStart..endIdx] spans from the run's first slot START to the
+    // last slot's END = last START + 30 min. On a time axis those are the exact
+    // instants ECharts also uses to place points and gridlines, so a band edge
+    // is pixel-locked to the wall clock by construction — no cell-centring step
+    // left to get wrong.
+    bands.push([
+      { xAxis: axisMs[runStart], itemStyle: tierFill(runTier) },
+      { xAxis: axisMs[endIdx] + SLOT_MS },
+    ]);
   };
   axis.forEach((_, i) => {
     const cur = tierOf(price[i]);
@@ -610,20 +660,25 @@ function optionForDay(
   });
   if (runTier != null) flush(axis.length - 1);
 
-  // "Now" marker.
+  // "Now" marker — a real timestamp; no fractional-index hack.
   const nowMs = pv?.now_utc ? new Date(pv.now_utc).getTime() : Date.now();
-  let nowIdx = -1;
-  let nowPos = -1; // fractional axis position (interval-true, for the markLine)
-  if (axis.length) {
-    const firstMs = new Date(axis[0]).getTime();
-    const lastMs = new Date(axis[axis.length - 1]).getTime() + 30 * 60_000;
-    if (nowMs >= firstMs && nowMs < lastMs) {
-      const idx = axis.findIndex((iso) => new Date(iso).getTime() > nowMs);
-      nowIdx = idx <= 0 ? axis.length - 1 : idx - 1;
-      const slotStartMs = new Date(axis[nowIdx]).getTime();
-      nowPos = nowIdx + Math.max(0, Math.min(1, (nowMs - slotStartMs) / (30 * 60_000)));
-    }
-  }
+  const nowInRange = axisMs.length > 0 && nowMs >= dayStartMs && nowMs < dayEndMs;
+
+  // Forecast wash over [now, dayEnd] under the tariff bands (lower z via a
+  // separate markArea would need a 2nd silent series; instead prepend it to the
+  // same band list — order gives it a lower paint priority, and the tint is
+  // whisper-quiet so tier colours still read on top).
+  const washArea = nowInRange ? forecastWash(nowMs, dayEndMs) : [];
+
+  // Initial dataZoom window: the live window if it's been set (user browsing or
+  // another chart following), else a fresh centred window. useLiveWindow keeps
+  // it in sync after mount; reading the signal here means a 5-min data refresh
+  // preserves the user's current pan instead of yanking back to now.
+  const lw = liveWindow.value;
+  const win = (lw.startMs && lw.endMs && !lw.follow)
+    ? { startMs: lw.startMs, endMs: lw.endMs }
+    : centerWindow(nowMs, dayStartMs, dayEndMs);
+  const coarse = isCoarsePointer();
 
   const stackArea = (color: string, top: number) => ({
     opacity: 1, color: areaGradient(color, top, top * 0.55),
@@ -634,6 +689,8 @@ function optionForDay(
     tooltip: {
       ...(base.tooltip as object),
       formatter: (params: Array<{ dataIndex: number }>) => {
+        // Every per-slot series shares one ordered, equal-length data array, so
+        // dataIndex still maps straight to slot i on the time axis.
         const i = params[0]?.dataIndex ?? 0;
         const tier = tierOf(price[i]);
         const scale = Math.max(0.01, totalActual[i] ?? 0);
@@ -664,7 +721,13 @@ function optionForDay(
       },
     },
     grid: { left: 16, right: 78, top: 16, bottom: 24, containLabel: true },
-    xAxis: { ...(base.xAxis as object), data: labels, axisLabel: { color: t.textMute, fontSize: 10, interval: 5 } },
+    // Live window. DESKTOP: full-day axis + inside dataZoom (mouse drag + wheel).
+    // TOUCH: the window IS the axis min/max (no dataZoom — its touch-roam would
+    // eat vertical page scroll); useChartPan shifts it on a horizontal drag.
+    xAxis: coarse
+      ? { ...timeAxis(win.startMs, win.endMs), axisLabel: { color: t.textMute, fontSize: 10, hideOverlap: true, formatter: "{HH}:{mm}" } }
+      : { ...timeAxis(dayStartMs, dayEndMs), axisLabel: { color: t.textMute, fontSize: 10, hideOverlap: true, formatter: "{HH}:{mm}" } },
+    ...(coarse ? {} : { dataZoom: [insideZoom(win.startMs, win.endMs)] }),
     yAxis: [
       { ...(base.yAxis as object), name: "kWh", position: "left" },
       // Right axis: battery SoC (%). Watching this against the source stack
@@ -682,14 +745,14 @@ function optionForDay(
       },
     ],
     series: [
-      // Tariff bands + now marker on a silent baseline series.
+      // Tariff bands + forecast wash + now marker on a silent baseline series.
       {
-        name: "_bands", type: "line", data: axis.map(() => null), silent: true,
-        markArea: bands.length ? { silent: true, data: bands } : undefined,
-        markLine: nowIdx >= 0 ? {
+        name: "_bands", type: "line", data: axisMs.map((ts) => [ts, null]), silent: true,
+        markArea: (bands.length || washArea.length) ? { silent: true, data: [...washArea, ...bands] } : undefined,
+        markLine: nowInRange ? {
           silent: true, symbol: "none",
           lineStyle: { color: t.text, width: 1.5, type: "solid", opacity: 0.5 },
-          label: { show: false }, data: [{ xAxis: nowPos }],
+          label: { show: false }, data: [{ xAxis: nowMs }],
         } : undefined,
         z: 0,
       },
@@ -697,35 +760,35 @@ function optionForDay(
       // areas. The breakdown the user reads "where the energy went".
       {
         name: "Base", type: "line", stack: "load", smooth: true, showSymbol: false,
-        data: baseActual, lineStyle: { width: 0 }, areaStyle: stackArea(t.house, 0.65), z: 2,
+        data: pair(baseActual), lineStyle: { width: 0 }, areaStyle: stackArea(t.house, 0.65), z: 2,
       },
       ...(hasAppliance ? [{
         name: "Appliances", type: "line", stack: "load", smooth: true, showSymbol: false,
-        data: applianceActual, lineStyle: { width: 0 }, areaStyle: stackArea(t.accent, 0.65), z: 2,
+        data: pair(applianceActual), lineStyle: { width: 0 }, areaStyle: stackArea(t.accent, 0.65), z: 2,
       }] : []),
       {
         name: "Heat pump", type: "line", stack: "load", smooth: true, showSymbol: false,
-        data: daikinActual, lineStyle: { width: 0 }, areaStyle: stackArea(t.warn, 0.7), z: 2,
+        data: pair(daikinActual), lineStyle: { width: 0 }, areaStyle: stackArea(t.warn, 0.7), z: 2,
       },
       // Forecast household demand — dashed grey line over the stack.
       {
         name: "Forecast", type: "line", smooth: true, showSymbol: false, connectNulls: false,
-        data: loadForecast, lineStyle: { color: withAlpha(t.textMute, 0.85), width: 1.25, type: "dashed", cap: "round" }, z: 4,
+        data: pair(loadForecast), lineStyle: { color: withAlpha(t.textMute, 0.85), width: 1.25, type: "dashed", cap: "round" }, z: 4,
       },
       // SOURCE overlay — how that load was covered: grid import + battery
       // discharge as thin stepped lines (kWh, left axis), riding over the stack.
       {
         name: "Grid", type: "line", step: "end", showSymbol: false, connectNulls: false,
-        data: gridImp, lineStyle: { color: t.importColor, width: 1.5, type: "solid", cap: "round" }, z: 5,
+        data: pair(gridImp), lineStyle: { color: t.importColor, width: 1.5, type: "solid", cap: "round" }, z: 5,
       },
       {
         name: "Battery", type: "line", step: "end", showSymbol: false, connectNulls: false,
-        data: battDis, lineStyle: { color: t.batt, width: 1.5, type: "solid", cap: "round" }, z: 5,
+        data: pair(battDis), lineStyle: { color: t.batt, width: 1.5, type: "solid", cap: "round" }, z: 5,
       },
       // Battery SoC → dashed line on the right axis (is there spare charge?).
       {
         name: "SoC", type: "line", smooth: true, showSymbol: false, connectNulls: true,
-        yAxisIndex: 1, data: soc,
+        yAxisIndex: 1, data: pair(soc),
         lineStyle: { color: t.accent, width: 1.5, type: "dashed", cap: "round" }, z: 6,
       },
       // Import price → red dashed line on the 2nd right axis (p/kWh). The tariff
@@ -733,16 +796,16 @@ function optionForDay(
       // the exact price.
       {
         name: "Import price", type: "line", step: "middle", showSymbol: false, connectNulls: true,
-        yAxisIndex: 2, data: price,
+        yAxisIndex: 2, data: pair(price),
         lineStyle: { color: t.importColor, width: 1.25, type: "dashed", cap: "round", opacity: 0.75 }, z: 5,
       },
-      // Pulsing "now".
-      ...(nowIdx >= 0 ? [{
+      // Pulsing "now" — anchored to the real timestamp on the baseline.
+      ...(nowInRange ? [{
         name: "_now", type: "effectScatter", silent: true,
-        coordinateSystem: "cartesian2d", symbolSize: 9, z: 6, showEffectOn: "render",
+        symbolSize: 9, z: 6, showEffectOn: "render",
         rippleEffect: { period: 2.4, scale: 3.0, brushType: "stroke" },
         itemStyle: { color: t.accent, shadowBlur: 8, shadowColor: t.accent },
-        data: [[nowIdx, 0]],
+        data: [[nowMs, 0]],
       }] : []),
     ],
   };

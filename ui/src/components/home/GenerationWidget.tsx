@@ -1,4 +1,4 @@
-import { chartTheme, withAlpha } from "../../lib/charts";
+import { chartTheme, withAlpha, SLOT_MS } from "../../lib/charts";
 import { useFetch } from "../../lib/poll";
 import { getPvToday, getGridToday, getForecastDaily } from "../../lib/endpoints";
 import { MetricTimeline, localHM, nowIndexOf, periodPointLabel, type TimelineLine } from "./MetricTimeline";
@@ -85,6 +85,17 @@ export function GenerationWidget({ period, periodData, periodLoading, agile, opp
     if (!slots.length) return <p class="muted">No generation data for this day yet.</p>;
     const labels = slots.map((s) => localHM(s.slot_utc));
     const nowIdx = nowIndexOf(slots, pv?.now_utc);
+    // Live window (today only — a past day is a static full-day chart). Shares
+    // the rolling NOW-centred window with the Consumption + Heating charts.
+    const axisMs = slots.map((s) => new Date(s.slot_utc).getTime());
+    const live = !dayArg && axisMs.length
+      ? {
+          axisMs,
+          dayStartMs: axisMs[0],
+          dayEndMs: axisMs[axisMs.length - 1] + SLOT_MS,
+          nowMs: pv?.now_utc ? new Date(pv.now_utc).getTime() : Date.now(),
+        }
+      : undefined;
     // "Solar plan" = the COMMITTED LP forecast across the WHOLE day (frozen at
     // solve time), not the live forward forecast for future slots — otherwise
     // the dashed "plan" line silently became the weather model's latest revision
@@ -146,7 +157,7 @@ export function GenerationWidget({ period, periodData, periodLoading, agile, opp
             the import tariff) so the two timelines don't repeat the same bands. */}
         <MetricTimeline labels={labels} lines={lines} prices={exportPrice}
                         priceLabel={onSeg ? "Export (SEG)" : "Export price"} priceColor={t.exportColor}
-                        nowIdx={nowIdx} height={270} />
+                        nowIdx={nowIdx} live={live} height={270} />
         <div class="tlw-legend">
           <span><i style={`border-color:${t.pv}`} /> solar actual</span>
           {showPlan && <span><i class="dashed" style={`border-color:${withAlpha(t.pv, 0.6)}`} /> solar plan</span>}

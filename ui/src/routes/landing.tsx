@@ -185,9 +185,11 @@ export default function Landing() {
             weather={weather.data} pv={pvToday.data} />
 
       {/* ── LIVE scope + band (redesign) — the always-now, self-driving surface
-          that ignores the period selector above. Live power = the animated
-          flow + rates + battery, with its committed plan as the card foot;
-          Live heating = the plan chart first, gauges demoted beneath it. */}
+          that ignores the period selector above. The status row splits 50/50:
+          Live power (animated flow + rates + battery, committed plan as foot)
+          beside Live heating (live gauges + thermal model + dispatch). The
+          heating-plan timeline lives in the period band below, stacked with
+          Generation/Consumption as the third full-width live-window scroller. */}
       <h2 class="scope scope--live">
         <span class="scope-dot" aria-hidden="true" />
         Live now
@@ -215,7 +217,7 @@ export default function Landing() {
           }}
         />}
         <div class="widget-grid">
-          <Widget title="Live power" icon={<Icon name="power-live" size={14} />} tone="power" size="wide"
+          <Widget title="Live power" icon={<Icon name="power-live" size={14} />} tone="power" size="half"
                   badge={liveTime}
                   action={<RefreshCountdown lastFetchAt={now.lastFetchAt} intervalMs={now.intervalMs} loading={now.loading} onRefresh={() => void now.refresh()} />}>
             <LivePowerWidget state={s} cockpit={data} agile={agile.data} metrics={metrics.data} todayCumulative={todayCum.data} />
@@ -226,14 +228,9 @@ export default function Landing() {
                       nowUtc={data.now_utc} foxMode={foxMode} foxActive={foxActive} />
           </Widget>
 
-          <Widget title="Live heating" icon={<Icon name="heating" size={14} />} tone="thermal" size="wide">
+          <Widget title="Live heating" icon={<Icon name="heating" size={14} />} tone="thermal" size="half">
             <HeatingWidget state={s} daikin={daikin.data} daikinQuota={daikinQuota.data} report={report.data} weather={weather.data} execution={execution.data}
-                           onRefresh={() => { void daikin.refresh(); void daikinQuota.refresh(); }}>
-              <Suspense fallback={<Spinner label="Loading heating plan…" />}>
-                <HeatingPlanWidget plan={heatingPlan.data} loading={heatingPlan.loading}
-                                   execution={execution.data} indoor={indoorHistory.data} />
-              </Suspense>
-            </HeatingWidget>
+                           onRefresh={() => { void daikin.refresh(); void daikinQuota.refresh(); }} />
             <PlanMini groups={["heating", "tank"]} timeline={timeline.data}
                       dhwSchedule={dhwSched.data?.rows} heatingPlan={heatingPlan.data}
                       nowUtc={data.now_utc} />
@@ -251,8 +248,10 @@ export default function Landing() {
         <span class="scope-when">follows the {period.gran} selector</span>
       </h2>
 
-      {/* ── TIMELINES — Generation + Consumption, synced to the period navigator.
-          Stacked full-width so a given time reads straight down the screen. ── */}
+      {/* ── TIMELINES — Generation, Consumption, Heating: three full-width live-
+          window scrollers stacked so a given clock time reads straight down all
+          three. Generation/Consumption follow the period navigator; Heating keeps
+          its own D-1/D/D+1 frame (day-level regardless of the selector). ── */}
       <div class="widget-grid widget-band">
         <Widget title="Generation" icon={<Icon name="solar" size={14} />} tone="plan" size="wide">
           <Suspense fallback={<Spinner label="Loading generation…" />}>
@@ -265,6 +264,13 @@ export default function Landing() {
         <Widget title="Consumption" icon={<Icon name="chart-bars" size={14} />} tone="power" size="wide">
           <Suspense fallback={<Spinner label="Loading consumption…" />}>
             <EnergyChartWidget execution={execution.data} pv={pvToday.data} />
+          </Suspense>
+        </Widget>
+
+        <Widget title="Heating" icon={<Icon name="heating" size={14} />} tone="thermal" size="wide">
+          <Suspense fallback={<Spinner label="Loading heating…" />}>
+            <HeatingPlanWidget plan={heatingPlan.data} loading={heatingPlan.loading}
+                               execution={execution.data} indoor={indoorHistory.data} />
           </Suspense>
         </Widget>
       </div>

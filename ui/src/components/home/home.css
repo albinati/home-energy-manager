@@ -96,6 +96,10 @@
 }
 /* The live row inside the band drops its own top-margin (the band owns spacing). */
 .live-band .widget-grid { margin: 0; }
+/* Both status cards share one height (grid stretch). Live power is capped a
+ * touch shorter than Live heating (see .powerflow-svg height) so IT is the one
+ * that stretches — its flow's `flex:1` absorbs the slack by centring the
+ * diagram, whereas a stretched Live heating would open a hollow gap. */
 
 /* Skeleton text — shown while a slow field loads */
 .skel-text {
