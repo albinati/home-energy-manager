@@ -1327,11 +1327,21 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             ua_window_days INTEGER,
             ua_computed_at TEXT,
             cop_dhw_median REAL,
+            cop_dhw_p25 REAL,
+            cop_dhw_p75 REAL,
             cop_mult REAL,
+            cop_mult_raw REAL,
+            cop_t_outdoor_median REAL,
+            cop_t_outdoor_min REAL,
+            cop_t_outdoor_max REAL,
             cop_samples INTEGER,
+            cop_window_days INTEGER,
             cop_computed_at TEXT,
-            draw_evening_kwh_median REAL,
-            draw_evening_kwh_p75 REAL,
+            draw_profile_median_json TEXT,
+            draw_profile_p75_json TEXT,
+            draw_daily_kwh_median REAL,
+            draw_daily_kwh_p75 REAL,
+            draw_full_days INTEGER,
             draw_days INTEGER,
             draw_window_days INTEGER,
             draw_computed_at TEXT,
@@ -8510,9 +8520,12 @@ def upsert_building_thermal_calibration(fields: dict[str, Any]) -> None:
 
 _TANK_CAL_COLS = (
     "ua_w_per_k", "tau_hours", "ua_r2_median", "ua_episodes", "ua_window_days",
-    "ua_computed_at", "cop_dhw_median", "cop_mult", "cop_samples",
-    "cop_computed_at", "draw_evening_kwh_median", "draw_evening_kwh_p75",
-    "draw_days", "draw_window_days", "draw_computed_at", "last_run_json",
+    "ua_computed_at", "cop_dhw_median", "cop_dhw_p25", "cop_dhw_p75", "cop_mult",
+    "cop_mult_raw", "cop_t_outdoor_median", "cop_t_outdoor_min",
+    "cop_t_outdoor_max", "cop_samples", "cop_window_days", "cop_computed_at",
+    "draw_profile_median_json", "draw_profile_p75_json", "draw_daily_kwh_median",
+    "draw_daily_kwh_p75", "draw_full_days", "draw_days", "draw_window_days",
+    "draw_computed_at", "last_run_json",
 )
 
 
@@ -8541,22 +8554,36 @@ def get_dhw_tank_calibration() -> dict[str, Any] | None:
 
 
 def upsert_dhw_tank_calibration(fields: dict[str, Any]) -> None:
-    """Replace the single ``dhw_tank_calibration`` row. ``fields`` may carry any
-    subset of the columns (the learner merges skipped components from the prior
-    row before calling); unknown keys are ignored. ``last_run_json`` accepts a
-    dict and is serialised here."""
+    """Merge ``fields`` into the single ``dhw_tank_calibration`` row.
+
+    A genuine upsert, NOT an ``INSERT OR REPLACE``: a column absent from
+    ``fields`` KEEPS its stored value (``COALESCE(excluded.col, col)``). The
+    learner's three components land on different schedules and any of them can
+    skip for a week, so a partial write must never null out the others — and a
+    run with no telemetry at all (a re-linked Onecta account, an API outage)
+    must not wipe the calibration and silently drop the LP back onto the env
+    constants it was built to replace.
+
+    ``last_run_json`` accepts a dict and is serialised here. Passing an explicit
+    ``None`` for a column is therefore a no-op, not an erase; there is no caller
+    that wants to erase, and if one ever appears it should say so in SQL.
+    """
     payload = dict(fields)
     last_run = payload.get("last_run_json")
     if isinstance(last_run, dict):
         payload["last_run_json"] = json.dumps(last_run, default=str)
     vals = [payload.get(c) for c in _TANK_CAL_COLS]
+    sets = ", ".join(f"{c} = COALESCE(excluded.{c}, dhw_tank_calibration.{c})"
+                     for c in _TANK_CAL_COLS)
     with _lock:
         conn = get_connection()
         try:
             conn.execute(
-                f"""INSERT OR REPLACE INTO dhw_tank_calibration
+                f"""INSERT INTO dhw_tank_calibration
                     (id, {', '.join(_TANK_CAL_COLS)}, computed_at)
-                    VALUES (1, {', '.join('?' * len(_TANK_CAL_COLS))}, ?)""",
+                    VALUES (1, {', '.join('?' * len(_TANK_CAL_COLS))}, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        {sets}, computed_at = excluded.computed_at""",
                 (*vals, datetime.now(UTC).isoformat()),
             )
             conn.commit()

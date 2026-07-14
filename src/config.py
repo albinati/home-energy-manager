@@ -1872,15 +1872,35 @@ class Config:
     DHW_TANK_LEARN_MAX_GAP_MINUTES: float = float(
         os.getenv("DHW_TANK_LEARN_MAX_GAP_MINUTES", "420")
     )
+    # A hidden night-time DRAW is the one contaminant the energy buckets cannot
+    # see (drawing hot water burns no electricity). Across the 6 h polling hole
+    # the rate test is toothless, so a step is also rejected when it exceeds
+    # this multiple of the coast the prior UA predicts (plus quantisation slack).
+    DHW_TANK_LEARN_GAP_DROP_TOLERANCE: float = float(
+        os.getenv("DHW_TANK_LEARN_GAP_DROP_TOLERANCE", "2.0")
+    )
     DHW_TANK_LEARN_COP_MIN_BUCKET_KWH: float = float(
         os.getenv("DHW_TANK_LEARN_COP_MIN_BUCKET_KWH", "0.15")
     )
     DHW_TANK_LEARN_COP_MIN_RISE_C: float = float(
         os.getenv("DHW_TANK_LEARN_COP_MIN_RISE_C", "4.0")
     )
-    DHW_TANK_LEARN_COP_MIN_SAMPLES: int = int(
-        os.getenv("DHW_TANK_LEARN_COP_MIN_SAMPLES", "8")
+    # Clean heat events (a DHW-active bucket run fenced by KNOWN-quiet buckets)
+    # are RARE — prod yields roughly one every five days. So the COP gets its own
+    # long window: at the 21-day τ window a sample gate of 8 could never be met
+    # and the component would be dead code, silently leaving the LP on a curve
+    # measured to be ~2× optimistic. COP also drifts far slower than weather.
+    DHW_TANK_LEARN_COP_WINDOW_DAYS: int = int(
+        os.getenv("DHW_TANK_LEARN_COP_WINDOW_DAYS", "60")
     )
+    DHW_TANK_LEARN_COP_MIN_SAMPLES: int = int(
+        os.getenv("DHW_TANK_LEARN_COP_MIN_SAMPLES", "4")
+    )
+    # Used ONLY to convert reheat kWh back to heat while no COP has been measured
+    # yet. Deliberately NOT the parametric curve: that curve is the thing the
+    # learner has measured to be ~2× optimistic for DHW, so seeding from it would
+    # inflate the draw by the very error we are trying to correct.
+    DHW_MEASURED_COP_FALLBACK: float = float(os.getenv("DHW_MEASURED_COP_FALLBACK", "2.5"))
     DHW_TANK_LEARN_DRAW_WINDOW_DAYS: int = int(
         os.getenv("DHW_TANK_LEARN_DRAW_WINDOW_DAYS", "14")
     )

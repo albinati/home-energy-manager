@@ -16,13 +16,15 @@ rather than differencing endpoints:
 * **UA is roughly as assumed** — 2.0 W/K fitted vs 2.5 assumed (τ ≈ 114 h). The
   tank coasts at 0.1–0.5 °C/h. A crude 22:00→07:00 delta reads much faster only
   because it swallows the setback transient and any late draw.
-* **the DHW COP is badly wrong** — three independent clean warmups measure
-  2.55–2.62 while the LP's curve claims **4.70** at the same outdoor temperature.
-  The LP believes tank heat is nearly twice as cheap as it is. This is the
-  decision-relevant error, and it is invisible today only because the K2 pin
-  makes ``e_dhw`` exogenous.
-* **the evening draw is lumpy** — median ~1.0 kWh thermal, p75 ~3.5. Most
-  evenings barely move the tank; a few take 8–17 °C out of it.
+* **the DHW COP is badly wrong** — the clean warmups measure 2.55–2.62 while the
+  LP's curve claims **4.70** at the same outdoor temperature. The LP believes tank
+  heat is nearly twice as cheap as it is. This is the decision-relevant error, and
+  it is invisible today only because the K2 pin makes ``e_dhw`` exogenous.
+* **the hot water goes in the MORNING**, not the evening. The draw profile peaks
+  in the 08:00–10:00 bucket (the tank visibly falls 41 → 37 °C around 09:00) with a
+  second, smaller peak at 20:00–22:00. ``dhw_demand``'s model — four evening
+  showers, one in the morning — has it backwards, and the fixed schedule warms the
+  tank at 13:00 for showers that largely already happened.
 
 So this module learns, from data the system already collects:
 
@@ -38,11 +40,11 @@ So this module learns, from data the system already collects:
   Persisted as a MULTIPLIER on the existing curve, not a replacement: the
   curve keeps owning the T_out dependence, the multiplier corrects the level
   (same division of labour as the DHW autoscale-vs-bucket-bias split).
-* **Evening draw (kWh thermal)** — how much heat the showers actually remove,
-  from the energy balance over the drawdown window (the tank's temperature
-  drop UNDERSTATES it whenever the firmware reheats mid-draw, so the measured
-  reheat energy is added back). The LP's litres-based model (``dhw_demand``)
-  stays the fallback.
+* **Draw profile (kWh thermal per local 2 h bucket)** — how much heat the
+  household actually takes out, and WHEN, from a closed energy balance over each
+  bucket (the tank's temperature drop UNDERSTATES the draw whenever the firmware
+  reheats mid-draw, so the measured reheat energy is added back). The LP's
+  litres-based model (``dhw_demand``) stays the fallback.
 
 Same shape as :mod:`src.analytics.thermal_learning` (W2, #641): PURE fitters
 (tests drive them with synthetic curves of known UA), quality-gated aggregation
@@ -72,6 +74,7 @@ and exposes readers. The LP wiring is the next PR, behind ``DHW_LP_OWNED_ENABLED
 """
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
@@ -234,6 +237,10 @@ def select_tank_decay_episodes(
     draw_drop_rate_c_per_h: float = 2.0,
     max_rise_c: float = 1.0,
     dhw_contam_kwh: float = 0.1,
+    c_tank_j_per_k: float = 837_200.0,
+    ua_prior_w_per_k: float = 2.5,
+    gap_drop_tolerance: float = 2.0,
+    quantisation_c: float = 1.5,
     legionella: dict[str, int] | None = None,
 ) -> list[TankDecayEpisode]:
     """PURE selector: overnight, heat-free, draw-free decay stretches.
@@ -304,10 +311,25 @@ def select_tank_decay_episodes(
             continue
         if cur:
             gap_min = (ts - cur[-1][0]).total_seconds() / 60.0
+            gap_h = gap_min / 60.0
             drop = cur[-1][1] - temp
-            rate = drop / max(gap_min / 60.0, 1e-6)
+            rate = drop / max(gap_h, 1e-6)
             is_draw = drop >= draw_drop_c and rate > draw_drop_rate_c_per_h
-            if gap_min > max_gap_minutes or is_draw:
+            # A draw hidden INSIDE a long gap is the one contaminant the bucket
+            # blocks cannot see: drawing hot water burns no electricity, so it
+            # leaves no trace in the energy counter. Across a 6 h hole the rate
+            # test alone is toothless (it would need a 12 °C fall to fire) while
+            # the honest decay is only ~3 °C — so a quiet 2-3 °C night-time draw
+            # would sail through and DOUBLE the fitted UA. Gate the step against
+            # what the prior physics says the tank can even lose: more than
+            # ``gap_drop_tolerance`` times the expected coast (plus a degree of
+            # quantisation slack) is not decay, whatever the average rate says.
+            expected = (
+                ua_prior_w_per_k * max(cur[-1][1] - t_ambient_c, 0.0)
+                * gap_h * 3600.0 / max(c_tank_j_per_k, 1e-9)
+            )
+            implausible = drop > gap_drop_tolerance * expected + quantisation_c
+            if gap_min > max_gap_minutes or is_draw or implausible:
                 segments.append(cur)
                 cur = []
         cur.append((ts, temp))
@@ -445,7 +467,8 @@ def select_tank_heat_events(
     min_rise_c: float = 4.0,
     max_drop_c: float = 0.6,
     min_points: int = 3,
-    edge_tolerance_minutes: float = 45.0,
+    edge_tolerance_minutes: float = 60.0,
+    settle_hours: float = 1.0,
     legionella: dict[str, int] | None = None,
 ) -> list[TankHeatEvent]:
     """PURE selector: runs of consecutive DHW-active 2h buckets, bounded by
@@ -487,15 +510,43 @@ def select_tank_heat_events(
             d, b = d + timedelta(days=1), 0
         return by_key.get((d.isoformat(), b), "missing")
 
-    def _temp_at(ts: datetime) -> float | None:
+    def _temp_before(ts: datetime) -> float | None:
+        """Last sample AT OR BEFORE ``ts`` (within tolerance) — the tank's
+        temperature when the run's energy started flowing.
+
+        Direction matters. A nearest-in-any-direction lookup happily returns a
+        sample 40 min INSIDE a 2 h warmup, by which point the tank has already
+        climbed ~2.7 °C: the observed rise shrinks, and the COP it implies falls
+        by a third. That biases the measurement in exactly the direction of this
+        module's headline finding, which is the last place a lazy lookup is
+        acceptable. The preceding bucket is known-quiet, so a sample slightly
+        before the boundary is a safe stand-in for the boundary itself."""
         best: tuple[float, float] | None = None
         for t, v in series:
-            dt_min = abs((t - ts).total_seconds()) / 60.0
-            if best is None or dt_min < best[0]:
-                best = (dt_min, v)
+            if t > ts:
+                break
+            gap_min = (ts - t).total_seconds() / 60.0
+            if best is None or gap_min < best[0]:
+                best = (gap_min, v)
         if best is None or best[0] > edge_tolerance_minutes:
             return None
         return best[1]
+
+    def _peak_after(ts: datetime, settle: timedelta) -> tuple[datetime, float] | None:
+        """PEAK sample in ``[ts, ts + settle]`` — where the run's heat ended up,
+        and when.
+
+        The settle tail is the same physics the decay selector respects: the
+        plate exchanger keeps handing heat to the tank after the compressor
+        stops. Sampling exactly at the bucket edge throws that tail away, and
+        since the NEXT bucket is known-quiet, any rise inside the tail is THIS
+        event's heat. Take the peak, not the nearest sample."""
+        window = [(t, v) for t, v in series if ts <= t <= ts + settle]
+        if not window:
+            return None
+        if (window[0][0] - ts).total_seconds() / 60.0 > edge_tolerance_minutes:
+            return None
+        return max(window, key=lambda p: (p[1], -p[0].timestamp()))
 
     def _outdoor_at(start: datetime, end: datetime) -> float | None:
         vals = [v for ts, v in outdoor_sorted if start <= ts < end]
@@ -555,14 +606,15 @@ def select_tank_heat_events(
         ):
             continue
 
-        t_start = _temp_at(start)
-        t_end = _temp_at(end)
-        if t_start is None or t_end is None:
+        t_start = _temp_before(start)
+        peak = _peak_after(end, timedelta(hours=settle_hours))
+        if t_start is None or peak is None:
             continue
+        peak_ts, t_end = peak
         if (t_end - t_start) < min_rise_c:
             continue
-        inner = [(ts, v) for ts, v in series if start <= ts <= end]
-        pts = [(start, t_start)] + inner + [(end, t_end)]
+        inner = [(ts, v) for ts, v in series if start < ts < peak_ts]
+        pts = [(start, t_start)] + inner + [(peak_ts, t_end)]
         # De-duplicate near-identical edge samples, keep ascending order.
         dedup: list[tuple[datetime, float]] = []
         for ts, v in sorted(pts):
@@ -575,10 +627,10 @@ def select_tank_heat_events(
             continue  # a draw overlapped the reheat
         events.append(TankHeatEvent(
             start_utc=start,
-            end_utc=end,
+            end_utc=peak_ts,
             points=[((ts - start).total_seconds() / 3600.0, v) for ts, v in dedup],
             kwh_dhw=sum(k for _, _, k in run),
-            t_outdoor_c=_outdoor_at(start, end),
+            t_outdoor_c=_outdoor_at(start, peak_ts),
         ))
     return events
 
@@ -652,6 +704,7 @@ def fit_dhw_cop(
     """
     cops: list[float] = []
     ratios: list[float] = []
+    temps: list[float] = []
     rejected = 0
     for ev in events:
         if ev.kwh_dhw <= 0 or len(ev.points) < 2:
@@ -670,6 +723,7 @@ def fit_dhw_cop(
             modelled = modelled_cop_dhw(float(ev.t_outdoor_c))
             if modelled > 0:
                 ratios.append(cop / modelled)
+                temps.append(float(ev.t_outdoor_c))
     if len(cops) < min_samples:
         return {
             "status": "skipped",
@@ -688,11 +742,33 @@ def fit_dhw_cop(
         }
     ratios.sort()
     mult = float(ratios[len(ratios) // 2])
+    clamped = max(mult_min, min(mult_max, mult))
+    if abs(clamped - mult) > 1e-9:
+        # A clamp that binds is a silent symptom, not a fix — say so out loud.
+        logger.warning(
+            "tank_thermal: measured COP ratio %.3f clamped to %.3f (bounds %.2f–%.2f) "
+            "— the curve and reality are further apart than the bounds allow",
+            mult, clamped, mult_min, mult_max,
+        )
+    temps.sort()
     return {
         "status": "ok",
         "cop_median": cop_med,
-        "cop_mult": max(mult_min, min(mult_max, mult)),
+        # Dispersion, persisted: the median of a handful of events is fragile,
+        # and the NEXT reader (the LP) deserves to see the spread rather than
+        # inherit a point estimate with no error bars.
+        "cop_p25": float(cops[max(0, int(round(0.25 * (len(cops) - 1))))]),
+        "cop_p75": float(cops[min(len(cops) - 1, int(round(0.75 * (len(cops) - 1))))]),
+        "cop_mult": clamped,
         "cop_mult_raw": mult,
+        # The outdoor band the multiplier was MEASURED over. A flat multiplier
+        # fitted in July does not necessarily hold in January (the curve's error
+        # is a function of the DHW-vs-space supply-temperature lift, which moves
+        # with T_out), and #540 is a WINTER epic. Recording the band is what lets
+        # the consumer refuse to extrapolate far outside it.
+        "cop_t_outdoor_median": float(temps[len(temps) // 2]),
+        "cop_t_outdoor_min": float(temps[0]),
+        "cop_t_outdoor_max": float(temps[-1]),
         "samples": len(cops),
         "samples_rejected": rejected,
     }
@@ -703,7 +779,7 @@ def fit_dhw_cop(
 # ---------------------------------------------------------------------------
 
 
-def estimate_evening_draws(
+def estimate_draw_profile(
     tank_rows: list[tuple[float, float]],
     consumption_rows: list[dict[str, Any]],
     boost_windows: list[tuple[str, str]],
@@ -713,28 +789,45 @@ def estimate_evening_draws(
     ua_w_per_k: float,
     t_ambient_c: float,
     cop_dhw: float,
-    hold_start_hour_local: int = 19,
-    draw_start_hour_local: int = 20,
-    draw_end_hour_local: int = 23,
     min_days: int = 7,
-    min_draw_kwh: float = 0.2,
     max_draw_kwh: float = 8.0,
+    edge_tolerance_minutes: float = 60.0,
 ) -> dict[str, Any]:
-    """PURE energy-balance estimate of the evening draw, per day.
+    """PURE energy-balance estimate of hot-water draw, per LOCAL 2 h bucket.
 
-        Q_draw = Q_reheat − Q_standing − C·ΔT
+    For each bucket the balance is CLOSED — everything entering or leaving the
+    tank is either measured or modelled, so the draw is what's left:
 
-    where ΔT is the (negative) tank change from the pre-shower hold to the
-    post-shower trough. Reheat energy is ADDED BACK because the firmware often
-    tops the tank up mid-drawdown: on those evenings the temperature drop alone
-    understates the heat actually drawn — which is precisely the reheat the LP
-    is being asked to move out of the peak, so measuring it low would hide the
-    prize.
+        Q_draw = Q_reheat·COP − Q_standing − C·(T_end − T_start)
 
-    Days with a boost or a user override are skipped. Returns the median (the
-    LP's expected-cost input) AND the p75 (the comfort-sizing input): showers
-    are lumpy, and under-sizing the draw shows up as a cold shower while
-    over-sizing costs a few pence.
+    Working per bucket (rather than over one hand-picked "evening" window) is
+    what makes this both correct and useful:
+
+    * **correct** — the energy counter only resolves 2 h buckets, so a balance
+      whose ΔT window doesn't coincide with a bucket edge charges the draw for
+      heat that is already inside ``T_start``. Measuring peak-to-trough did
+      exactly that and inflated the answer several-fold (a 3.5 kWh p75 against a
+      ~1 kWh median). Pinned to bucket edges, every reported kWh belongs to the
+      balance by construction and nothing is attributed sub-bucket.
+    * **useful** — the LP needs to know WHEN the hot water goes, not just how
+      much. And it is not where the model assumes: ``dhw_demand`` is built around
+      4 evening showers, but this household's tank visibly drops around 08:30–
+      09:30 (41 → 37 °C) while most evenings barely move it. A profile finds that;
+      an evening-window estimator would have measured a small number and called
+      it the answer.
+
+    Reheat is ADDED BACK because the firmware routinely tops the tank up DURING a
+    drawdown: the temperature drop alone then understates the heat drawn — and
+    that reheat, when it lands at peak price, is exactly what the LP is being
+    asked to move, so measuring it low would hide the prize.
+
+    Buckets overlapping a boost/override are skipped, as is one whose counter is
+    NULL (missing ≠ zero) or which lacks a temperature sample near either edge.
+    Per bucket, returns the median and p75 across days — the median is the
+    expected-cost input, the p75 sizes comfort (a cold shower costs more than a
+    few pence of heat). Negative residuals are clamped to zero: they are
+    quantisation noise (1 °C ≈ 0.23 kWh on a 200 L tank), not water flowing
+    backwards.
     """
     series = _tank_series(tank_rows)
     if not series:
@@ -753,74 +846,96 @@ def estimate_evening_draws(
     for ts, v in series:
         by_day.setdefault(ts.astimezone(tz).date(), []).append((ts, v))
 
-    draws: list[float] = []
-    skipped = 0
-    for day, pts in sorted(by_day.items()):
-        hold_start = datetime.combine(day, time(hold_start_hour_local, 0), tzinfo=tz)
-        draw_start = datetime.combine(day, time(draw_start_hour_local, 0), tzinfo=tz)
-        draw_end = datetime.combine(day, time(draw_end_hour_local, 0), tzinfo=tz)
-        if any(ws < draw_end.astimezone(UTC) and hold_start.astimezone(UTC) < we
-               for ws, we in boosts):
-            skipped += 1
-            continue
-        hold = [(ts, v) for ts, v in pts if hold_start <= ts.astimezone(tz) < draw_start]
-        drawn = [(ts, v) for ts, v in pts if draw_start <= ts.astimezone(tz) < draw_end]
-        if not hold or len(drawn) < 2:
-            skipped += 1
-            continue
-        t_hold = max(v for _, v in hold)
-        trough_ts, t_trough = min(drawn, key=lambda p: p[1])
-        hold_ts = max(hold, key=lambda p: p[1])[0]
-        if t_trough >= t_hold:
-            skipped += 1  # no drawdown that evening (nobody showered)
-            continue
-        # Reheat energy the firmware put in between the hold peak and the trough.
-        reheat_kwh = 0.0
-        missing = False
-        for b in range(hold_start_hour_local // 2, (draw_end_hour_local + 1) // 2):
+    def _temp_at_boundary(ts: datetime) -> float | None:
+        """Tank temperature at a bucket edge — nearest sample within tolerance.
+        Symmetric (unlike the COP fit's edges): both ends of a CLOSED balance are
+        plain state readings, and an error at either enters ΔT linearly rather
+        than truncating a rise."""
+        near = [(abs((t - ts).total_seconds()) / 60.0, v) for t, v in series]
+        if not near:
+            return None
+        gap, val = min(near)
+        return val if gap <= edge_tolerance_minutes else None
+
+    per_bucket: dict[int, list[float]] = {b: [] for b in range(12)}
+    per_day_total: dict[date, float] = {}
+    per_day_buckets: dict[date, int] = {}
+    days_seen: set[date] = set()
+    buckets_skipped = 0
+    for day in sorted(by_day):
+        for b in range(12):
+            b_start, b_end = _bucket_window_utc(day, b, tz)
+            if any(ws < b_end and b_start < we for ws, we in boosts):
+                buckets_skipped += 1
+                continue
             k = kwh_by_key.get((day.isoformat(), b), "missing")
             if k == "missing" or k is None:
-                missing = True
-                break
-            reheat_kwh += float(k)
-        if missing:
-            skipped += 1
-            continue
-        window = [
-            ((ts - hold_ts).total_seconds() / 3600.0, v)
-            for ts, v in pts
-            if hold_ts <= ts <= trough_ts
-        ]
-        standing_j = _standing_loss_j(
-            window, ua_w_per_k=ua_w_per_k, t_ambient_c=t_ambient_c
-        ) if len(window) >= 2 else 0.0
-        q_draw_j = (
-            reheat_kwh * cop_dhw * _J_PER_KWH
-            - standing_j
-            - c_tank_j_per_k * (t_trough - t_hold)
-        )
-        q_draw_kwh = q_draw_j / _J_PER_KWH
-        if not (min_draw_kwh <= q_draw_kwh <= max_draw_kwh):
-            skipped += 1
-            continue
-        draws.append(q_draw_kwh)
+                buckets_skipped += 1  # missing ≠ zero
+                continue
+            t_start = _temp_at_boundary(b_start)
+            t_end = _temp_at_boundary(b_end)
+            if t_start is None or t_end is None:
+                buckets_skipped += 1
+                continue
+            inner = [
+                ((ts - b_start).total_seconds() / 3600.0, v)
+                for ts, v in series
+                if b_start < ts < b_end
+            ]
+            window = sorted(
+                [(0.0, t_start)] + inner
+                + [((b_end - b_start).total_seconds() / 3600.0, t_end)]
+            )
+            standing_j = _standing_loss_j(
+                window, ua_w_per_k=ua_w_per_k, t_ambient_c=t_ambient_c
+            )
+            q_draw_kwh = (
+                float(k) * cop_dhw * _J_PER_KWH
+                - standing_j
+                - c_tank_j_per_k * (t_end - t_start)
+            ) / _J_PER_KWH
+            if q_draw_kwh > max_draw_kwh:
+                buckets_skipped += 1  # not a draw — something unmodelled happened
+                continue
+            draw = max(0.0, q_draw_kwh)
+            per_bucket[b].append(draw)
+            per_day_total[day] = per_day_total.get(day, 0.0) + draw
+            per_day_buckets[day] = per_day_buckets.get(day, 0) + 1
+            days_seen.add(day)
 
-    if len(draws) < min_days:
+    if len(days_seen) < min_days:
         return {
             "status": "skipped",
-            "reason": f"only {len(draws)} usable evening(s); need >= {min_days}",
-            "days": len(draws),
-            "days_skipped": skipped,
+            "reason": f"only {len(days_seen)} usable day(s); need >= {min_days}",
+            "days": len(days_seen),
+            "buckets_skipped": buckets_skipped,
         }
-    draws.sort()
-    med = draws[len(draws) // 2]
-    p75 = draws[min(len(draws) - 1, int(round(0.75 * (len(draws) - 1))))]
+
+    def _pct(vals: list[float], q: float) -> float:
+        if not vals:
+            return 0.0
+        s = sorted(vals)
+        return float(s[min(len(s) - 1, int(round(q * (len(s) - 1))))])
+
+    median = [_pct(per_bucket[b], 0.5) for b in range(12)]
+    p75 = [_pct(per_bucket[b], 0.75) for b in range(12)]
+    # The daily figures come from per-DAY totals, not from summing the per-bucket
+    # percentiles. Σ p75(bucket) is an upper bound on the p75 of the daily total,
+    # not an estimate of it — no single day is simultaneously at its 75th
+    # percentile in all twelve buckets. (Measured here: Σp75 = 3.5 kWh against a
+    # true daily p75 nearer 2.) Only whole days are comparable, so days missing
+    # buckets are excluded from the daily stat while still feeding the shape.
+    full_days = [t for d, t in per_day_total.items() if per_day_buckets.get(d) == 12]
     return {
         "status": "ok",
-        "draw_kwh_median": float(med),
-        "draw_kwh_p75": float(p75),
-        "days": len(draws),
-        "days_skipped": skipped,
+        "profile_kwh_median": median,
+        "profile_kwh_p75": p75,
+        "samples_per_bucket": [len(per_bucket[b]) for b in range(12)],
+        "daily_kwh_median": _pct(full_days, 0.5),
+        "daily_kwh_p75": _pct(full_days, 0.75),
+        "daily_full_days": len(full_days),
+        "days": len(days_seen),
+        "buckets_skipped": buckets_skipped,
     }
 
 
@@ -882,11 +997,24 @@ def refresh_tank_thermal_calibration() -> dict[str, Any]:
     now = datetime.now(UTC)
     window = int(getattr(config, "DHW_TANK_LEARN_WINDOW_DAYS", 21))
     draw_window = int(getattr(config, "DHW_TANK_LEARN_DRAW_WINDOW_DAYS", 14))
-    start = now - timedelta(days=window)
+    # The COP needs its OWN, much longer window. Clean heat events are rare —
+    # a run of DHW-active buckets fenced by KNOWN-quiet ones — and prod yields
+    # roughly one every five days. At the τ/UA window (21 d) the sample gate
+    # could never be met, so the component would be dead code, silently leaving
+    # the LP on a curve this module has measured to be ~2× optimistic. The COP
+    # also drifts far more slowly than the weather, so a long window is honest.
+    cop_window = int(getattr(config, "DHW_TANK_LEARN_COP_WINDOW_DAYS", 60))
+    start = now - timedelta(days=max(window, cop_window))
     start_day, end_day = start.date(), now.date()
 
     c_tank = float(config.DHW_TANK_LITRES) * float(config.DHW_WATER_CP)
     t_ambient = float(config.INDOOR_SETPOINT_C)
+
+    prev = None
+    try:
+        prev = db.get_dhw_tank_calibration()
+    except Exception:  # pragma: no cover
+        pass
 
     try:
         tank_rows = db.get_tank_temps_range(start.timestamp(), now.timestamp())
@@ -894,7 +1022,11 @@ def refresh_tank_thermal_calibration() -> dict[str, Any]:
         logger.exception("tank_thermal: telemetry read failed")
         return {"status": "error", "reason": "telemetry read failed"}
     if not tank_rows:
-        return _persist({"status": "skipped", "reason": "no live tank telemetry"}, {})
+        # Preserve every learned component. A telemetry outage is not evidence
+        # about the tank's physics, and this row is about to drive the LP.
+        return _persist(
+            {"status": "skipped", "reason": "no live tank telemetry"}, dict(prev or {})
+        )
 
     try:
         consumption = db.get_daikin_consumption_2hourly_range(
@@ -908,9 +1040,11 @@ def refresh_tank_thermal_calibration() -> dict[str, Any]:
         boosts = []
     outdoor = _outdoor_series(start_day, end_day)
     leg = _legionella_cfg()
+    ua_cutoff = (now - timedelta(days=window)).timestamp()
+    ua_rows = [r for r in tank_rows if float(r[0]) >= ua_cutoff]
 
     episodes = select_tank_decay_episodes(
-        tank_rows, consumption, boosts,
+        ua_rows, consumption, boosts,
         tz=tz,
         t_ambient_c=t_ambient,
         night_start_hour_local=int(
@@ -925,6 +1059,14 @@ def refresh_tank_thermal_calibration() -> dict[str, Any]:
         draw_drop_rate_c_per_h=float(
             getattr(config, "DHW_TANK_LEARN_DRAW_DROP_RATE_C_PER_H", 2.0)
         ),
+        c_tank_j_per_k=c_tank,
+        # Bootstrap the plausibility gate from what we already believe: the
+        # previously learned UA if we have one, else the env constant. It only
+        # has to be the right order of magnitude to catch a hidden draw.
+        ua_prior_w_per_k=float(
+            (prev or {}).get("ua_w_per_k") or config.DHW_TANK_UA_W_PER_K
+        ),
+        gap_drop_tolerance=float(getattr(config, "DHW_TANK_LEARN_GAP_DROP_TOLERANCE", 2.0)),
         legionella=leg,
     )
     ua_fit = fit_tank_ua(
@@ -936,11 +1078,6 @@ def refresh_tank_thermal_calibration() -> dict[str, Any]:
         max_ua_w_per_k=_UA_BOUNDS[1],
     )
 
-    prev = None
-    try:
-        prev = db.get_dhw_tank_calibration()
-    except Exception:  # pragma: no cover
-        pass
     # The COP + draw fits need a UA to account for standing losses. Prefer the
     # UA learned THIS run, then the previous row's, then the env constant.
     ua_for_losses = float(
@@ -954,6 +1091,7 @@ def refresh_tank_thermal_calibration() -> dict[str, Any]:
         tz=tz,
         min_bucket_kwh=float(getattr(config, "DHW_TANK_LEARN_COP_MIN_BUCKET_KWH", 0.15)),
         min_rise_c=float(getattr(config, "DHW_TANK_LEARN_COP_MIN_RISE_C", 4.0)),
+        settle_hours=float(getattr(config, "DHW_TANK_LEARN_SETTLE_HOURS", 1.0)),
         legionella=leg,
     )
     cop_fit = fit_dhw_cop(
@@ -961,18 +1099,24 @@ def refresh_tank_thermal_calibration() -> dict[str, Any]:
         c_tank_j_per_k=c_tank,
         ua_w_per_k=ua_for_losses,
         t_ambient_c=t_ambient,
-        min_samples=int(getattr(config, "DHW_TANK_LEARN_COP_MIN_SAMPLES", 8)),
+        min_samples=int(getattr(config, "DHW_TANK_LEARN_COP_MIN_SAMPLES", 4)),
         mult_min=_COP_MULT_BOUNDS[0],
         mult_max=_COP_MULT_BOUNDS[1],
     )
 
+    # Converting the draw window's reheat kWh back to heat needs a COP — and it
+    # must NOT be the parametric curve. That curve is the thing this module has
+    # measured to be ~2× optimistic for DHW, so using it here would inflate every
+    # reheat (and therefore every draw) by the very error we are trying to
+    # correct. Measured (this run, then the stored one), else an explicit
+    # measured-grade constant.
     cop_for_draw = float(
         cop_fit.get("cop_median")
         or (prev or {}).get("cop_dhw_median")
-        or modelled_cop_dhw(10.0)
+        or getattr(config, "DHW_MEASURED_COP_FALLBACK", 2.5)
     )
     draw_cutoff = (now - timedelta(days=draw_window)).timestamp()
-    draw_fit = estimate_evening_draws(
+    draw_fit = estimate_draw_profile(
         [r for r in tank_rows if float(r[0]) >= draw_cutoff],
         consumption, boosts,
         tz=tz,
@@ -997,18 +1141,38 @@ def refresh_tank_thermal_calibration() -> dict[str, Any]:
     if cop_fit.get("status") == "ok":
         row.update(
             cop_dhw_median=float(cop_fit["cop_median"]),
+            cop_dhw_p25=float(cop_fit["cop_p25"]),
+            cop_dhw_p75=float(cop_fit["cop_p75"]),
             cop_mult=float(cop_fit["cop_mult"]),
+            cop_mult_raw=float(cop_fit["cop_mult_raw"]),
+            cop_t_outdoor_median=float(cop_fit["cop_t_outdoor_median"]),
+            cop_t_outdoor_min=float(cop_fit["cop_t_outdoor_min"]),
+            cop_t_outdoor_max=float(cop_fit["cop_t_outdoor_max"]),
             cop_samples=int(cop_fit["samples"]),
+            cop_window_days=cop_window,
             cop_computed_at=now_iso,
         )
     if draw_fit.get("status") == "ok":
         row.update(
-            draw_evening_kwh_median=float(draw_fit["draw_kwh_median"]),
-            draw_evening_kwh_p75=float(draw_fit["draw_kwh_p75"]),
+            draw_profile_median_json=json.dumps(draw_fit["profile_kwh_median"]),
+            draw_profile_p75_json=json.dumps(draw_fit["profile_kwh_p75"]),
             draw_days=int(draw_fit["days"]),
             draw_window_days=draw_window,
             draw_computed_at=now_iso,
         )
+        # The daily TOTAL only publishes off whole days (all 12 buckets present),
+        # and only once there are enough of them. Summing the per-bucket
+        # percentiles instead would be a bound, not an estimate. A thin run of
+        # complete days is worse than none: the shape is what the LP needs, and
+        # it survives partial days perfectly well.
+        if int(draw_fit.get("daily_full_days", 0)) >= int(
+            getattr(config, "DHW_TANK_LEARN_DRAW_MIN_DAYS", 7)
+        ):
+            row.update(
+                draw_daily_kwh_median=float(draw_fit["daily_kwh_median"]),
+                draw_daily_kwh_p75=float(draw_fit["daily_kwh_p75"]),
+                draw_full_days=int(draw_fit["daily_full_days"]),
+            )
 
     result = {
         "status": "ok" if any(
@@ -1081,17 +1245,44 @@ def get_dhw_cop_multiplier() -> float:
     return mult if _COP_MULT_BOUNDS[0] <= mult <= _COP_MULT_BOUNDS[1] else 1.0
 
 
-def get_evening_draw_kwh_thermal(*, percentile: str = "p75") -> float | None:
-    """Measured evening shower draw (kWh thermal), or None when unlearned —
-    the caller then falls back to the litres model in :mod:`src.dhw_demand`.
+def get_draw_profile_kwh_thermal(*, percentile: str = "p75") -> list[float] | None:
+    """Measured hot-water draw per LOCAL 2 h bucket (12 values, kWh thermal), or
+    None when unlearned — the caller then falls back to the litres/showers model
+    in :mod:`src.dhw_demand`.
 
     ``p75`` sizes comfort (a cold shower costs more than a few pence of heat);
-    ``median`` is the honest expected-cost figure.
+    ``median`` is the honest expected-cost figure. Read the SHAPE, not just the
+    total: this household draws its hot water in the MORNING, which is not what
+    ``dhw_demand``'s four-evening-showers model assumes.
     """
     row = _calibration_row()
     if row is None:
         return None
-    key = "draw_evening_kwh_p75" if percentile == "p75" else "draw_evening_kwh_median"
+    key = "draw_profile_p75_json" if percentile == "p75" else "draw_profile_median_json"
+    raw = row.get(key)
+    if not raw:
+        return None
+    try:
+        profile = [float(v) for v in json.loads(raw)]
+    except (TypeError, ValueError):
+        return None
+    if len(profile) != 12 or any(v < 0 for v in profile):
+        return None
+    total = sum(profile)
+    return profile if _DRAW_BOUNDS[0] <= total <= _DRAW_BOUNDS[1] else None
+
+
+def get_daily_draw_kwh_thermal(*, percentile: str = "p75") -> float | None:
+    """Total measured daily draw (kWh thermal), or None when unlearned.
+
+    Read from the stored whole-day statistic — NOT by summing the profile. The
+    sum of per-bucket p75s is an upper bound on a day's p75, not an estimate of
+    it: no day sits at its 75th percentile in all twelve buckets at once.
+    """
+    row = _calibration_row()
+    if row is None:
+        return None
+    key = "draw_daily_kwh_p75" if percentile == "p75" else "draw_daily_kwh_median"
     val = row.get(key)
     if val is None:
         return None
