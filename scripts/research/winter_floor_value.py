@@ -1,8 +1,41 @@
 #!/usr/bin/env python
 """Newsvendor evaluation of the pessimistic charge floor on SIMULATED WINTER days.
 
-Question (#684 follow-up): the floor's summer premium is ~£7.89/yr of which ~£4.93/yr
-is provably un-payable (the battery fills from free PV anyway). Owner: "£5/yr is
+⚠ READ THIS FIRST — WHAT THIS SCRIPT CAN AND CANNOT SHOW
+--------------------------------------------------------
+An earlier run of this script produced the headline "the floor SAVES ~£1.2 per
+winter", and #684 was closed on it. **That claim is RETRACTED.** Adversarial
+review found the estimator biased toward the floor:
+
+  * The settlement replays each plan against realised worlds, but the hardware
+    cannot express the LP's PARTIAL discharge, so the replay greedily discharges
+    to cover the whole realised residual. The floored plan sits in MORE hold
+    slots (that is what the floor does), so it ESCAPES that artefact while the
+    no-floor arm gets drained pre-peak and arrives at the peak emptier.
+    **The distortion is correlated with the treatment.** "Both arms settled under
+    an identical policy ⇒ unbiased" does not follow: the policy is identical, the
+    *exposure* is not.
+  * Δ_settled = cash_premium + (gap_floor − gap_noflo). The original computed
+    ``gap_noflo`` ONLY. Since ``cash_premium`` is POSITIVE (the floor costs), the
+    entire negative headline was carried by the UNMEASURED differential.
+    Both gaps are now computed and E[Δ] is reported NET of the differential.
+  * The demand prior places 20-35 % of mass at ≥ ×1.15 — exactly
+    ``LP_SCENARIO_PESSIMISTIC_LOAD_FACTOR``, the scenario the floor is calibrated
+    against. It has NO empirical basis and no sensitivity run, and demand (not PV)
+    is the dominant winter lever.
+  * The residual-load SHAPE is hand-written (``_EVENING_UPLIFT_KW``), not derived.
+    The per-hour p25 of real telemetry is FLAT (~0.39 kW all day). Since "battery
+    empty at the evening peak" is the entire insured event, the evening shape is
+    the single most load-bearing input — and it is a guess.
+
+**The one robust output is measure (b): ``cash_premium``** — the floored vs
+nominal plans' own cash flows, with no settlement in the loop. In winter that is
+≈ +0.10 p/day, i.e. **the floor is CHEAP**. That, and only that, is what justifies
+leaving it alone. Do not cite E[Δ] as evidence the floor saves money.
+
+Question (#684 follow-up): the floor is cheap in summer too, and the "£4.93/yr
+provably wasted" figure from ``floor_worth_it.py`` was itself inflated (it
+annualised a 48 h LP OBJECTIVE delta as a daily cash premium). Owner: "£5/yr is
 irrelevant — but what about WINTER?" We have no winter prod data (prod starts
 2026-04), so we SIMULATE winter with REAL winter inputs.
 
@@ -219,6 +252,17 @@ def fetch_prices(cache: dict, gsp: str, start: datetime, end: datetime) -> tuple
     if key not in cache:
         imp = _fetch_rates(f"E-1R-AGILE-24-10-01-{gsp}", start, end)
         exp = _fetch_rates(f"E-1R-AGILE-OUTGOING-19-05-13-{gsp}", start, end)
+        # NEVER cache an empty result. ``_fetch_rates`` swallows every exception
+        # and returns [] — so a single transient network blip used to poison this
+        # day PERMANENTLY: every later run hit the cache, got {}, printed
+        # "price gaps" and silently dropped the day. The headline could have been
+        # computed over a fraction of the days it claimed.
+        if not imp or not exp:
+            raise RuntimeError(
+                f"price fetch returned empty for {gsp} {start.date()}..{end.date()} "
+                f"(import={len(imp)}, export={len(exp)}) — refusing to cache a "
+                f"failed fetch. Re-run; if it persists, check the Octopus API."
+            )
         cache[key] = {
             "import": {r["valid_from"]: r["value_inc_vat"] for r in imp},
             "export": {r["valid_from"]: r["value_inc_vat"] for r in exp},
@@ -499,14 +543,30 @@ def run_day(day: str, cache: dict, gsp: str, lat: float, lon: float,
         nominal.import_kwh[i] * imp_p[i] - nominal.export_kwh[i] * exp_p[i]
         for i in range(96)
     )
-    replay_gap = worlds[(1.00, 1.00)]["noflo"]["cost_p"] - plan_cash
-    # The floor's premium measured on the PLANS' OWN cash flows (no settlement in the
-    # loop) — this isolates the true premium from settlement discretisation noise.
     floored_cash = sum(
         floored.import_kwh[i] * imp_p[i] - floored.export_kwh[i] * exp_p[i]
         for i in range(96)
     )
+    # The floor's premium on the PLANS' OWN cash flows — no settlement in the loop.
+    # This is the ONLY robust measure here (see the module docstring).
     cash_premium = floored_cash - plan_cash
+
+    # Replay fidelity, computed for BOTH arms. This is the correction that matters:
+    #
+    #   Δ_settled = cash_premium + (gap_floor − gap_noflo)
+    #
+    # An earlier version computed gap_noflo only. Because cash_premium is POSITIVE
+    # (the floor costs) while Δ_settled came out negative, the entire "winter saves
+    # money" headline was carried by the UNMEASURED differential gap. Worse, the
+    # settlement's distortion is correlated with the treatment: the greedy
+    # full-residual discharge (the hardware cannot express the LP's partial
+    # discharge) drains the NO-FLOOR arm pre-peak, while the floored plan sits in
+    # more hold slots and is protected from it. The artefact penalises the control
+    # arm in exactly the dimension being measured.
+    gap_noflo = worlds[(1.00, 1.00)]["noflo"]["cost_p"] - plan_cash
+    gap_floor = worlds[(1.00, 1.00)]["floor"]["cost_p"] - floored_cash
+    replay_gap = gap_noflo
+    gap_differential = gap_floor - gap_noflo
 
     # "cannot pay off" class: battery ends the PV window full AND PV is still
     # being exported (i.e. the insured shortfall physically cannot happen because
@@ -524,6 +584,9 @@ def run_day(day: str, cache: dict, gsp: str, lat: float, lon: float,
         "floored_obj_p": floored.objective_pence,
         "plan_cash_p": plan_cash,
         "replay_gap_p": replay_gap,
+        "gap_floor_p": gap_floor,
+        "gap_noflo_p": gap_noflo,
+        "gap_differential_p": gap_differential,
         "cash_premium_p": cash_premium,
         "pv_day1_kwh": pv_day_kwh,
         "pv_surplus_day1_kwh": surplus_export,
@@ -536,7 +599,12 @@ def run_day(day: str, cache: dict, gsp: str, lat: float, lon: float,
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=int, default=len(WINTER_DAYS))
-    ap.add_argument("--gsp", default="C", help="Octopus GSP letter (C = London)")
+    ap.add_argument(
+        "--gsp", default=str(getattr(config, "OCTOPUS_GSP", "H")),
+        help="Octopus GSP letter. Defaults to config.OCTOPUS_GSP (prod = H). "
+             "An earlier version hardcoded 'C' (London) — real Agile prices, "
+             "WRONG DNO region, on a signal worth ~0.1-1p/day.",
+    )
     ap.add_argument("--winter-load-scale", type=float, default=1.0)
     ap.add_argument("--soc0-pct", type=float, default=25.0)
     ap.add_argument("--tank0-c", type=float, default=40.0)
@@ -621,9 +689,20 @@ def main() -> None:
         # each horizon is 48 h but the plan is re-solved daily → per-DAY value is
         # the first-24 h share; we conservatively halve the 48 h delta.
         per_day = statistics.mean(ev_days) / 2.0
-        print(f"  {label:<45}: E[Δ] = {per_day:+.2f} p/day  →  "
-              f"{per_day * 120 / 100:+.2f} £/120-day winter  |  {per_day * 365 / 100:+.2f} £/yr if year-round")
-        print(f"      per-day spread: " + " ".join(f"{d/2:+.1f}" for d in ev_days))
+        # NET of the differential replay gap. Δ_settled = cash_premium +
+        # (gap_floor − gap_noflo), and the settlement's greedy discharge distorts
+        # the two arms UNEQUALLY (it drains the no-floor arm pre-peak while the
+        # floored plan sits in protective hold slots). Reporting E[Δ] without
+        # subtracting the differential is how the retracted "winter saves £1.2"
+        # headline happened.
+        mean_gap_diff = statistics.mean(
+            [r["gap_differential_p"] for r in results]) / 2.0
+        net = per_day - mean_gap_diff
+        print(f"  {label:<40}: E[Δ] = {per_day:+.2f} p/day RAW  |  "
+              f"differential replay gap {mean_gap_diff:+.2f}  |  "
+              f"{net:+.2f} p/day NET")
+        print(f"      → NET is the honest figure; |differential| is of the SAME ORDER "
+              f"as the raw effect, so the sign is NOT established.")
 
     # ---- nominal-world premium (what the floor costs when the forecast is right) ----
     prem = [r["worlds"][(1.0, 1.0)]["floor"]["adj_p25"]
@@ -637,9 +716,16 @@ def main() -> None:
     print(f"    c) LP objective delta (insurance_cost_pence): "
           f"{statistics.mean([r['insurance_cost_pence'] for r in results])/2:+.2f} p/day "
           f"(includes non-cash penalties: inverter stress, TV smoothing, cycle)")
-    print(f"    Mean |replay gap| = "
-          f"{statistics.mean([abs(r['replay_gap_p']) for r in results])/2:.2f} p/day — measure (a) is "
-          f"AT OR BELOW this noise floor, so do not read (a) as a real saving.")
+    print(f"    Mean |replay gap| no-floor arm = "
+          f"{statistics.mean([abs(r['replay_gap_p']) for r in results])/2:.2f} p/day")
+    print(f"    Mean |replay gap| floored arm  = "
+          f"{statistics.mean([abs(r['gap_floor_p']) for r in results])/2:.2f} p/day")
+    print(f"    Mean DIFFERENTIAL (floor − noflo) = "
+          f"{statistics.mean([r['gap_differential_p'] for r in results])/2:+.2f} p/day")
+    print(f"    ^^ Measures (a) and E[Δ] are AT OR BELOW this. Only measure (b) is")
+    print(f"       trustworthy. DO NOT read (a) or E[Δ] as a real saving — the")
+    print(f"       settlement favours the floored arm (it sits in more hold slots and")
+    print(f"       escapes the greedy-discharge artefact). See #684.")
 
     # ---- payoff only in the bad worlds ----
     bad = []
@@ -661,10 +747,14 @@ def main() -> None:
           f"— winter PV is 1–3 kWh/day, so PV error is NOT the lever the floor insures")
 
     # ---- 'cannot pay off' class ----
-    n_pv_fill = sum(1 for r in results if r["pv_surplus_day1_kwh"] > 3.0)
-    print(f"\n  'Cannot pay off' class (day-1 PV surplus > 3 kWh, i.e. battery refills free "
-          f"and PV is still exported): {n_pv_fill}/{len(results)} winter days "
-          f"(summer: 8/12).")
+    bound = [r for r in results if r["floor_bound"]]
+    n_pv_fill = sum(1 for r in bound if r["pv_surplus_day1_kwh"] > 3.0)
+    print(f"\n  Days with meaningful day-1 PV surplus (> 3 kWh): "
+          f"{n_pv_fill}/{len(bound)} of the days the floor actually BOUND "
+          f"({len(bound)}/{len(results)} solved days).")
+    print(f"  NB: do NOT compare this to the summer script's '8/12'. That was over")
+    print(f"  BINDING days with an OBSERVED-telemetry metric; this is a forecast-PV")
+    print(f"  integral. Different denominators, different metrics — not a comparison.")
 
 
 if __name__ == "__main__":
