@@ -1085,6 +1085,25 @@ async def cockpit_now():
         "peak_p": (tgt or {}).get("peak_threshold"),
     }
 
+    # Staleness for the two sources that were hardcoded never-stale (so the UI's
+    # freshness chip could never flag a stalled fetch/push). Thresholds are a
+    # generous multiple of the expected refresh cadence — they fire only on a
+    # genuine pipeline failure, not on normal quiet operation.
+    def _stale_after(iso: str | None, max_age_s: float) -> bool | None:
+        a = _age(iso)
+        return None if a is None else a > max_age_s
+
+    # Agile is fetched ONCE a day (octopus_fetch cron, ~16:00 UTC), so in normal
+    # steady state the fetch age climbs to ~24h just before the next fetch — an
+    # 18h threshold would cry "stale" every morning 10:00–16:00 on perfectly good
+    # rates. 30h means "more than a full day since the last success", i.e. the
+    # daily fetch actually MISSED — which is when we do want to alarm. (This
+    # measures fetch age, not rate-coverage age; coverage is a separate concern.)
+    agile_stale = _stale_after(agile_cache_fetched_at, 30 * 3600)
+    if plan_fresh.get("fetched_at_utc"):
+        # Nightly push (00:05 UTC) + intraday replans → >26h means the push missed.
+        plan_fresh["stale"] = _stale_after(plan_fresh.get("fetched_at_utc"), 26 * 3600)
+
     # --- Compose ------------------------------------------------------------
     return {
         "now_utc": now.isoformat().replace("+00:00", "Z"),
@@ -1116,7 +1135,7 @@ async def cockpit_now():
             "agile": {
                 "fetched_at_utc": agile_cache_fetched_at,
                 "age_s": _age(agile_cache_fetched_at),
-                "stale": None,
+                "stale": agile_stale,
             },
             "fox": fox_fresh,
             "daikin": dk_fresh,
