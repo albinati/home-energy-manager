@@ -16,3 +16,14 @@
   max-width: 720px;
   height: auto;
 }
+/* On the side-by-side status row (≥720px) pin the flow to a fixed height so the
+ * Live-power card matches the shorter Live-heating card beside it — width then
+ * follows the viewBox aspect and the diagram sits centred. (An SVG `max-height`
+ * with `width:100%` doesn't clamp — width wins — so drive height explicitly.)
+ * Mobile keeps the full-width, aspect-driven flow. */
+@media (min-width: 720px) {
+  .powerflow-svg {
+    height: 255px;
+    width: auto;
+  }
+}
