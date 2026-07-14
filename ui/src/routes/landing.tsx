@@ -188,9 +188,8 @@ export default function Landing() {
           that ignores the period selector above. The status row splits 50/50:
           Live power (animated flow + rates + battery, committed plan as foot)
           beside Live heating (live gauges + thermal model + dispatch). The
-          heating-plan timeline drops to its own full-width row below, so all
-          three live-window timelines (heating / generation / consumption) stack
-          and read straight down the screen. */}
+          heating-plan timeline lives in the period band below, stacked with
+          Generation/Consumption as the third full-width live-window scroller. */}
       <h2 class="scope scope--live">
         <span class="scope-dot" aria-hidden="true" />
         Live now
@@ -237,21 +236,6 @@ export default function Landing() {
                       nowUtc={data.now_utc} />
           </Widget>
         </div>
-
-        {/* Heating-plan timeline — its own full-width row so it stacks with the
-            Generation/Consumption timelines below (same live-window scroll, so a
-            given clock time reads straight down all three). Stays in the LIVE
-            band (always D-1/D/D+1, ignores the period selector) rather than the
-            period band, so week/month views don't sandwich a day timeline
-            between period bar charts. */}
-        <div class="widget-grid">
-          <Widget title="Heating plan" icon={<Icon name="heating" size={14} />} tone="thermal" size="wide">
-            <Suspense fallback={<Spinner label="Loading heating plan…" />}>
-              <HeatingPlanWidget plan={heatingPlan.data} loading={heatingPlan.loading}
-                                 execution={execution.data} indoor={indoorHistory.data} />
-            </Suspense>
-          </Widget>
-        </div>
       </div>
 
       {/* ── PERIOD scope divider (redesign P4) — everything below follows the
@@ -264,8 +248,10 @@ export default function Landing() {
         <span class="scope-when">follows the {period.gran} selector</span>
       </h2>
 
-      {/* ── TIMELINES — Generation + Consumption, synced to the period navigator.
-          Stacked full-width so a given time reads straight down the screen. ── */}
+      {/* ── TIMELINES — Generation, Consumption, Heating: three full-width live-
+          window scrollers stacked so a given clock time reads straight down all
+          three. Generation/Consumption follow the period navigator; Heating keeps
+          its own D-1/D/D+1 frame (day-level regardless of the selector). ── */}
       <div class="widget-grid widget-band">
         <Widget title="Generation" icon={<Icon name="solar" size={14} />} tone="plan" size="wide">
           <Suspense fallback={<Spinner label="Loading generation…" />}>
@@ -278,6 +264,13 @@ export default function Landing() {
         <Widget title="Consumption" icon={<Icon name="chart-bars" size={14} />} tone="power" size="wide">
           <Suspense fallback={<Spinner label="Loading consumption…" />}>
             <EnergyChartWidget execution={execution.data} pv={pvToday.data} />
+          </Suspense>
+        </Widget>
+
+        <Widget title="Heating" icon={<Icon name="heating" size={14} />} tone="thermal" size="wide">
+          <Suspense fallback={<Spinner label="Loading heating…" />}>
+            <HeatingPlanWidget plan={heatingPlan.data} loading={heatingPlan.loading}
+                               execution={execution.data} indoor={indoorHistory.data} />
           </Suspense>
         </Widget>
       </div>
