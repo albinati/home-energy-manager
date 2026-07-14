@@ -581,6 +581,82 @@ def _api_v1_weather_sync():
     return {"forecast": out, "daikin": daikin}
 
 
+@app.get("/api/v1/weather/now")
+async def api_v1_weather_now():
+    """Tiny current-conditions payload for the ESPHome room sensors (~120 bytes).
+
+    ``/api/v1/weather`` returns a 96 h forecast — ~15 KB of JSON. An ESP32 CAN
+    parse that (``http_request`` + ``json``), but the whole body lands in RAM with
+    the parsed document on top, on a heap that also pays a ~2 s TLS handshake.
+    Over weeks that fragments. The server already holds the data, so it does the
+    work.
+
+    ``rain_in_h`` is the reason this is not just a client-side slice: it needs the
+    WHOLE forecast to answer "how many hours until the next rain" — which is
+    exactly the thing the sensor cannot afford to fetch. ``null`` = no rain in the
+    horizon.
+
+    AUTH: **not** part of the token-free viewer surface. The sensor sits on the
+    house LAN and reaches HEM through the PUBLIC Tailscale funnel, so a
+    token-free route here is a route the whole internet can read. It takes the
+    same scoped ``HEM_SENSOR_INGEST_TOKEN`` the sensor already carries to POST
+    ``/sensors/indoor`` (see ``ApiV1RoleAuth.ingest_read_routes``), or an admin
+    token. Everyone else: 401.
+    """
+    return await asyncio.to_thread(_api_v1_weather_now_sync)
+
+
+# Rain: WMO codes 51+ are drizzle/rain/snow/showers/thunder. 0-3 clear→overcast,
+# 45/48 fog. See https://open-meteo.com/en/docs (weather_code).
+_WMO_RAIN_MIN = 51
+_RAIN_MM_EPS = 0.05          # below this, "precipitation" is numerical noise
+
+
+def _api_v1_weather_now_sync():
+    from datetime import UTC as _UTC, datetime as _dt
+
+    from ..weather import fetch_weather_panel_forecast_cached
+
+    fc = fetch_weather_panel_forecast_cached(hours=96)   # same 900 s cache as /weather
+    if not fc:
+        raise HTTPException(status_code=503, detail="no forecast available")
+
+    now = _dt.now(_UTC)
+    # The forecast is hourly; "now" is the last hour that has already started.
+    # Never pick a future hour — the sensor wants current conditions.
+    cur = fc[0]
+    for f in fc:
+        if f.time_utc <= now:
+            cur = f
+        else:
+            break
+
+    def _is_rain(f) -> bool:
+        code = f.weather_code
+        if code is not None and int(code) >= _WMO_RAIN_MIN:
+            return True
+        return (f.precipitation_mm or 0.0) >= _RAIN_MM_EPS
+
+    rain_in_h = None
+    for f in fc:
+        if f.time_utc <= now:
+            continue
+        if _is_rain(f):
+            rain_in_h = max(0, round((f.time_utc - now).total_seconds() / 3600.0))
+            break
+
+    def _r(v, n=1):
+        return None if v is None else round(float(v), n)
+
+    return {
+        "temp_c": _r(cur.temperature_c),
+        "weather_code": None if cur.weather_code is None else int(cur.weather_code),
+        "precipitation_mm": _r(cur.precipitation_mm),
+        "rain_in_h": rain_in_h,
+        "pv_now_kw": _r(cur.estimated_pv_kw, 2),
+    }
+
+
 @app.get("/api/v1/health")
 async def health():
     """Lightweight health check for gateways and process managers."""
