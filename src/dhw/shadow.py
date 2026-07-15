@@ -205,6 +205,13 @@ def record_shadow(*, solve_kwargs: dict, price_pence: list[float],
             # The real fixed schedule boosts on negative prices; the honest baseline
             # must too, or the LP is credited with an edge the incumbent captures.
             price_pence_by_slot=list(price_pence),
+            # The sim must mirror the incumbent AS CONFIGURED — the windows were
+            # tuned on 2026-07-15 (setback 15:00, target 47) and a baseline frozen
+            # on the old 13/22/45 defaults would stop representing what prod does.
+            warmup_hour_local=float(getattr(config, "DHW_WARMUP_START_HOUR_LOCAL", 13)),
+            setback_hour_local=float(getattr(config, "DHW_SETBACK_START_HOUR_LOCAL", 22)),
+            target_c=float(getattr(config, "DHW_TEMP_NORMAL_C", 45.0)),
+            setback_c=float(getattr(config, "DHW_TEMP_SETBACK_C", 37.0)),
         )
         baseline_plan = solve_lp(**{**solve_kwargs, "pinned_dhw_override": override})
     except Exception:  # noqa: BLE001 — the shadow must never break the committed solve

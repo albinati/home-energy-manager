@@ -303,3 +303,48 @@ def test_a_stalled_shadow_warns_once_and_rearms_on_resume(tmp_db, monkeypatch):
     _seed(_days(2)[-1], delta_p=-5.0)   # a fresh row resumes the shadow
     shadow.maybe_notify_winter_data()   # clears the stall key
     assert _db.get_runtime_setting("dhw_shadow_stall_notified_at") in ("", None)
+
+
+def test_the_baseline_sim_follows_the_configured_windows(tmp_db, monkeypatch):
+    """The incumbent's windows are TUNABLE (tuned 2026-07-15: setback 15:00, target
+    47°C after the chained window study). The shadow's baseline must mirror whatever
+    is configured — a sim frozen on the old 13/22/45 defaults would stop representing
+    what prod actually does, and the winter gate would compare against a ghost."""
+    captured = {}
+
+    import src.dhw.baseline as B
+
+    orig = B.simulate_fixed_schedule
+
+    def _spy(*a, **k):
+        captured.update(k)
+        return orig(*a, **k)
+
+    monkeypatch.setattr(B, "simulate_fixed_schedule", _spy)
+    monkeypatch.setattr(config, "DHW_SETBACK_START_HOUR_LOCAL", 15, raising=False)
+    monkeypatch.setattr(config, "DHW_TEMP_NORMAL_C", 47.0, raising=False)
+    monkeypatch.setattr(config, "DHW_LP_OWNED_SHADOW_ENABLED", True, raising=False)
+    monkeypatch.setattr(config, "DHW_LP_OWNED_ENABLED", False, raising=False)
+    monkeypatch.setattr(config, "DHW_FIXED_SCHEDULE_ENABLED", True, raising=False)
+    monkeypatch.setitem(config._overrides, "DAIKIN_CONTROL_MODE", "active")
+    shadow._ATTEMPTS_BY_DAY.clear()
+
+    from types import SimpleNamespace
+
+    starts = [datetime(2026, 7, 8, 0, 0, tzinfo=UTC) + timedelta(minutes=30 * i)
+              for i in range(8)]
+    weather = SimpleNamespace(temperature_outdoor_c=[15.0] * 8)
+    initial = SimpleNamespace(tank_temp_c=45.0)
+
+    def _fake_solve(**kwargs):
+        raise RuntimeError("stop after the sim ran")
+
+    monkeypatch.setattr("src.scheduler.lp_optimizer.solve_lp", _fake_solve)
+    shadow.record_shadow(
+        solve_kwargs={"slot_starts_utc": starts, "weather": weather,
+                      "initial": initial, "micro_climate_offset_c": 0.0,
+                      "micro_climate_offset_by_hour_c": {}},
+        price_pence=[10.0] * 8, export_price_pence=None)
+
+    assert captured.get("setback_hour_local") == 15.0
+    assert captured.get("target_c") == 47.0
