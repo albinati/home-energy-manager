@@ -226,3 +226,80 @@ def test_the_shadow_throttle_fails_closed(tmp_db, monkeypatch):
     # Only the first `cap` attempts may reach the solver; the rest are throttled by
     # the in-memory counter even though the DB never answered.
     assert len(solves) <= 2
+
+
+# ---------------------------------------------------------------------------
+# Winter watch
+# ---------------------------------------------------------------------------
+
+
+def _seed_outdoor(day: str, temp_c: float):
+    """Live telemetry rows so the day's mean outdoor temp classifies its season."""
+    conn = _db.get_connection()
+    try:
+        base = datetime.fromisoformat(day + "T12:00:00+00:00").timestamp()
+        for k in range(3):
+            conn.execute(
+                "INSERT INTO daikin_telemetry (fetched_at, source, outdoor_temp_c) "
+                "VALUES (?, 'live', ?)", (base + k * 3600, temp_c))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_winter_ping_fires_once_when_enough_cold_days_exist(tmp_db, monkeypatch):
+    """The owner's ask: 'me avisa quando o shadow tiver dados do inverno'. Fourteen
+    scored days below the winter threshold → ONE Telegram message with the
+    winter-only numbers, then silence (re-arm by clearing the runtime setting)."""
+    monkeypatch.setattr(config, "DHW_SHADOW_WINTER_TEMP_C", 12.0, raising=False)
+    monkeypatch.setattr(config, "DHW_SHADOW_WINTER_MIN_DAYS", 14, raising=False)
+    monkeypatch.setitem(config._overrides, "DAIKIN_CONTROL_MODE", "active")
+    for d in _days(15):
+        _seed(d, delta_p=-8.0, horizon_days=2.0)
+        _seed_outdoor(d, 7.0)  # a proper winter day
+
+    sent = []
+    import src.notifier as notifier
+    monkeypatch.setattr(notifier, "notify", lambda *a, **k: sent.append(a[0]), raising=False)
+
+    shadow.maybe_notify_winter_data()
+    shadow.maybe_notify_winter_data()  # second call: already notified → silent
+    assert len(sent) == 1
+    assert "WINTER" in sent[0]
+    assert "14" in sent[0] or "15" in sent[0]
+
+
+def test_summer_days_do_not_trigger_the_winter_ping(tmp_db, monkeypatch):
+    """Twenty scored days at 22 °C outdoors are not winter evidence, however good the
+    deltas look — the whole point is not to declare the thesis answered in July."""
+    monkeypatch.setitem(config._overrides, "DAIKIN_CONTROL_MODE", "active")
+    for d in _days(20):
+        _seed(d, delta_p=-8.0, horizon_days=2.0)
+        _seed_outdoor(d, 22.0)
+    sent = []
+    import src.notifier as notifier
+    monkeypatch.setattr(notifier, "notify", lambda *a, **k: sent.append(a[0]), raising=False)
+    shadow.maybe_notify_winter_data()
+    assert sent == []
+
+
+def test_a_stalled_shadow_warns_once_and_rearms_on_resume(tmp_db, monkeypatch):
+    """Silent stall = discovering in November that October never got measured. No rows
+    for 7+ days while enabled+active → one warning; rows resuming clears the key so a
+    FUTURE stall warns again."""
+    monkeypatch.setattr(config, "DHW_LP_OWNED_SHADOW_ENABLED", True, raising=False)
+    monkeypatch.setattr(config, "DHW_LP_OWNED_ENABLED", False, raising=False)
+    monkeypatch.setitem(config._overrides, "DAIKIN_CONTROL_MODE", "active")
+
+    sent = []
+    import src.notifier as notifier
+    monkeypatch.setattr(notifier, "notify", lambda *a, **k: sent.append(a[0]), raising=False)
+
+    shadow.maybe_notify_winter_data()   # empty log → stall warning
+    shadow.maybe_notify_winter_data()   # still stalled → no second warning
+    assert len(sent) == 1
+    assert "nothing" in sent[0] or "recorded" in sent[0]
+
+    _seed(_days(2)[-1], delta_p=-5.0)   # a fresh row resumes the shadow
+    shadow.maybe_notify_winter_data()   # clears the stall key
+    assert _db.get_runtime_setting("dhw_shadow_stall_notified_at") in ("", None)

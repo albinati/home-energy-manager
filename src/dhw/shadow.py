@@ -380,6 +380,103 @@ def evaluate_gate() -> dict:
     }
 
 
+def maybe_notify_winter_data() -> None:
+    """One-shot Telegram ping when the shadow has accumulated real WINTER evidence.
+
+    The summer verdict is a wash (chained: −0.79 p/day) and the whole open question is
+    winter — no PV abundance, the battery contested by space heating, bigger spreads.
+    The owner asked to be told when that data exists rather than having to remember to
+    look. A winter shadow day = a scored day whose mean outdoor temperature (live
+    telemetry) was below ``DHW_SHADOW_WINTER_TEMP_C``. When enough of them accumulate,
+    send ONE message with the winter-only numbers and go quiet again (deduped via
+    runtime setting; re-arm by clearing ``dhw_shadow_winter_notified_at``).
+
+    Also warns ONCE if the shadow stops recording (no rows for a week while enabled
+    and active) — a silent stall would otherwise mean discovering in November that
+    October never got measured. The stall key self-clears when rows resume, so a
+    future stall warns again.
+    """
+    from .. import db
+    from ..config import config
+
+    tz = ZoneInfo(getattr(config, "BULLETPROOF_TIMEZONE", "Europe/London"))
+    today = datetime.now(UTC).astimezone(tz).date()
+
+    # --- Stall watchdog -----------------------------------------------------------
+    try:
+        recent = db.get_dhw_shadow_rows((today - timedelta(days=8)).isoformat())
+        stall_key = "dhw_shadow_stall_notified_at"
+        if not recent and bool(getattr(config, "DHW_LP_OWNED_SHADOW_ENABLED", True)) \
+                and config.DAIKIN_CONTROL_MODE == "active" \
+                and not bool(getattr(config, "DHW_LP_OWNED_ENABLED", False)):
+            if not db.get_runtime_setting(stall_key):
+                from ..notifier import notify
+
+                notify("DHW shadow has recorded nothing for 7+ days — the winter "
+                       "evidence is not accumulating. Check the optimizer/shadow logs.")
+                db.set_runtime_setting(stall_key, datetime.now(UTC).isoformat())
+        elif recent and db.get_runtime_setting(stall_key):
+            db.set_runtime_setting(stall_key, "")  # resumed — re-arm the watchdog
+    except Exception:  # noqa: BLE001
+        logger.debug("dhw shadow: stall watchdog failed", exc_info=True)
+
+    # --- Winter-data-ready ping ---------------------------------------------------
+    key = "dhw_shadow_winter_notified_at"
+    try:
+        if db.get_runtime_setting(key):
+            return
+    except Exception:  # noqa: BLE001
+        pass
+
+    winter_temp = float(getattr(config, "DHW_SHADOW_WINTER_TEMP_C", 12.0))
+    min_days = int(getattr(config, "DHW_SHADOW_WINTER_MIN_DAYS", 14))
+    try:
+        rows = db.get_dhw_shadow_rows((today - timedelta(days=180)).isoformat())
+        if not rows:
+            return
+        outdoor_by_day = db.get_daily_mean_outdoor_c(
+            (today - timedelta(days=180)).isoformat())
+        by_day: dict[str, list[dict]] = {}
+        for r in rows:
+            by_day.setdefault(r["day"], []).append(r)
+        winter_days = {
+            d: rs for d, rs in by_day.items()
+            if outdoor_by_day.get(d) is not None and outdoor_by_day[d] < winter_temp
+        }
+        if len(winter_days) < min_days:
+            return
+
+        deltas = []
+        breaches = 0
+        for _d, rs in winter_days.items():
+            ds = sorted(
+                x["delta_p"] / max(1.0, float(x.get("horizon_days") or 2.0)) for x in rs)
+            deltas.append(ds[len(ds) // 2])
+            if any(x["comfort_deficit_c"] > 0.5 for x in rs):
+                breaches += 1
+        deltas.sort()
+        median_saving = -deltas[len(deltas) // 2]
+        gate = evaluate_gate()
+
+        from ..notifier import notify
+
+        notify(
+            f"DHW shadow: WINTER data is in — {len(winter_days)} days below "
+            f"{winter_temp:.0f}°C. Median {median_saving:+.1f}p/day for LP-owned, "
+            f"{breaches} comfort-breach days. Gate {'READY' if gate.get('ready') else 'not met'} "
+            f"({gate.get('median_saving_pence', 0):+.1f}p over the full window). "
+            f"Decisive check: backtest_dhw_lp_owned --chain on a winter window."
+        )
+        db.log_action(device="daikin", action="dhw_shadow_winter_data_ready",
+                      params={"winter_days": len(winter_days),
+                              "median_saving_pence": round(median_saving, 2),
+                              "breach_days": breaches, "gate": gate},
+                      result="notified", trigger="shadow_winter_watch")
+        db.set_runtime_setting(key, datetime.now(UTC).isoformat())
+    except Exception:  # noqa: BLE001
+        logger.debug("dhw shadow: winter watch failed", exc_info=True)
+
+
 def maybe_suggest_enable() -> None:
     """Nightly: if the gate is met and we have not already said so, send ONE
     notification. Never enables anything — a human flips the flag."""
