@@ -1807,6 +1807,11 @@ class Config:
         os.getenv("DHW_LP_OWNED_GATE_MIN_SAVING_PENCE", "3.0")
     )
     DHW_LP_OWNED_GATE_MAX_ROWS: int = int(os.getenv("DHW_LP_OWNED_GATE_MAX_ROWS", "6"))
+    # Two MILPs with a 30s time limit differ by a pence or two of solver noise
+    # (alternative optima); per-day deltas inside this band count as zero.
+    DHW_LP_OWNED_GATE_DEADBAND_PENCE: float = float(
+        os.getenv("DHW_LP_OWNED_GATE_DEADBAND_PENCE", "1.0")
+    )
     DHW_WATER_CP: float = float(os.getenv("DHW_WATER_CP", "4186"))  # J/(kg·K)
     # Building envelope + thermal mass for the single-zone model (estimator
     # fallback today; the LP t_in restore in #540 will consume these too).

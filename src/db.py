@@ -343,6 +343,17 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             "ALTER TABLE octopus_fetch_state ADD COLUMN failure_streak_started_at TEXT"
         )
 
+    # #714 units fix (2026-07-15): the shadow's delta covers the whole ~48h horizon;
+    # the gate normalises it per day. The table shipped hours earlier without the
+    # column, so prod needs the ALTER (NULL on old rows → the gate assumes 2.0 days,
+    # the conservative read for a 48h horizon).
+    cur = conn.execute("PRAGMA table_info(dhw_lp_shadow_log)")
+    shadow_cols = {str(r[1]) for r in cur.fetchall()}
+    if shadow_cols and "horizon_days" not in shadow_cols:
+        conn.execute("ALTER TABLE dhw_lp_shadow_log ADD COLUMN horizon_days REAL")
+    if shadow_cols and "terminal_credit_p" not in shadow_cols:
+        conn.execute("ALTER TABLE dhw_lp_shadow_log ADD COLUMN terminal_credit_p REAL")
+
     # 2026-07-02 LP audit — side scenarios now perturb PV too; record the factor
     # so scenario_solve_log rows stay auditable. NULL on pre-migration rows = 1.0.
     ssl_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(scenario_solve_log)")}
@@ -1313,6 +1324,8 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             cost_lp_owned_p REAL NOT NULL,
             delta_p REAL NOT NULL,
             comfort_deficit_c REAL NOT NULL,
+            horizon_days REAL,
+            terminal_credit_p REAL,
             e_dhw_fixed_kwh REAL,
             e_dhw_lp_kwh REAL,
             n_tank_rows INTEGER
@@ -5456,10 +5469,12 @@ def insert_dhw_shadow(row: dict[str, Any]) -> None:
             conn.execute(
                 """INSERT OR REPLACE INTO dhw_lp_shadow_log
                    (run_at_utc, day, cost_pinned_p, cost_lp_owned_p, delta_p,
-                    comfort_deficit_c, e_dhw_fixed_kwh, e_dhw_lp_kwh, n_tank_rows)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    comfort_deficit_c, horizon_days, terminal_credit_p,
+                    e_dhw_fixed_kwh, e_dhw_lp_kwh, n_tank_rows)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (row["run_at_utc"], row["day"], row["cost_pinned_p"],
                  row["cost_lp_owned_p"], row["delta_p"], row["comfort_deficit_c"],
+                 row.get("horizon_days"), row.get("terminal_credit_p"),
                  row.get("e_dhw_fixed_kwh"), row.get("e_dhw_lp_kwh"),
                  row.get("n_tank_rows")),
             )

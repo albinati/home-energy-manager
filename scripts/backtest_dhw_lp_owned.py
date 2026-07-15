@@ -43,6 +43,7 @@ from zoneinfo import ZoneInfo
 
 from src.config import config
 from src.dhw import comfort as dhw_comfort
+from src.dhw.shadow import terminal_value_diff_pence  # noqa: F401 — used by --chain docs
 from src.scheduler.lp_replay import (
     list_run_ids_for_date,
     replay_run,
@@ -83,13 +84,93 @@ def _run_ids_for(date: str, cadence: str) -> list[int]:
     return [rid for rid, _run_at in list_run_ids_for_date(date)]
 
 
+def chained(days: int, mode: str) -> int:
+    """Receding-horizon chain — the decisive comparison, free of boundary effects.
+
+    A single-day replay scores a 48h plan against a finite window, and whichever arm
+    ends that window colder/emptier looks cheaper — it pushed cost past the edge
+    instead of saving it. Crediting the end state helps but the credit's price is an
+    assumption (measured swing: the whole verdict lives inside it). The chain removes
+    the boundary altogether: each arm carries ITS OWN terminal state (tank, SoC at
+    hour 24) into the next day's replay, so heat bought late shows up as tomorrow's
+    cheaper morning, and heat skipped shows up as tomorrow's expensive recovery. Only
+    the chain's two outer ends have boundary effects, negligible over weeks.
+    """
+    from src.scheduler.lp_optimizer import LpInitialState
+    from src.scheduler.lp_replay import _build_export_prices
+
+    def _cost_first_24h(plan) -> float:
+        n = min(48, len(plan.import_kwh))
+        exp = _build_export_prices(list(plan.slot_starts_utc[:n])) or [0.0] * n
+        c = 0.0
+        for i in range(n):
+            c += plan.import_kwh[i] * plan.price_pence[i]
+            if i < len(plan.export_kwh):
+                c -= plan.export_kwh[i] * exp[i]
+        return c
+
+    state: dict[str, LpInitialState | None] = {"base": None, "lp": None}
+    totals = {"base": 0.0, "lp": 0.0}
+    n_days = 0
+    breaches = 0
+    print(f"{'date':12} {'fixed 24h p':>11} {'lp 24h p':>9} {'delta':>7} {'fx tank@24':>10} {'lp tank@24':>10}")
+    for date in sorted(_daterange(days)):
+        rid = resolve_run_id_for_date(date, which="first")
+        if not rid:
+            continue
+        plans = {}
+        ok = True
+        for arm, kw in (("base", {"dhw_fixed_baseline": True}),
+                        ("lp", {"force_dhw_lp_owned": True})):
+            r = replay_run(rid, mode=mode, initial_override=state[arm], **kw)
+            if not r.ok or r._replayed_plan is None:
+                ok = False
+                break
+            plans[arm] = r._replayed_plan
+        if not ok:
+            state = {"base": None, "lp": None}  # broken chain: reset BOTH arms
+            continue
+        if _comfort_deficit_c(plans["lp"]) > 0.5:
+            breaches += 1
+            state = {"base": None, "lp": None}
+            continue
+        cb, cl = _cost_first_24h(plans["base"]), _cost_first_24h(plans["lp"])
+        totals["base"] += cb
+        totals["lp"] += cl
+        n_days += 1
+        for arm in ("base", "lp"):
+            pl = plans[arm]
+            i24 = min(48, len(pl.tank_temp_c) - 1)
+            state[arm] = LpInitialState(
+                soc_kwh=float(pl.soc_kwh[i24]), tank_temp_c=float(pl.tank_temp_c[i24]))
+        print(f"{date:12} {cb:11.1f} {cl:9.1f} {cl - cb:+7.1f} "
+              f"{plans['base'].tank_temp_c[48]:10.1f} {plans['lp'].tank_temp_c[48]:10.1f}")
+
+    if not n_days:
+        print("no chainable days")
+        return 1
+    delta = totals["lp"] - totals["base"]
+    print(f"\nCHAINED over {n_days} days (state carried, no boundary tricks):")
+    print(f"  fixed-sim total {totals['base']:+.1f}p | lp-owned total {totals['lp']:+.1f}p")
+    print(f"  delta {delta:+.1f}p  →  {delta / n_days:+.2f} p/day")
+    if breaches:
+        print(f"  ⚠ {breaches} days dropped for comfort breach (chain reset)")
+    print(f"  extrapolated: £{-delta / n_days * 365 / 100:+.0f}/yr (summer sample; winter differs)")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=int, default=21)
     ap.add_argument("--cadence", choices=["first", "original"], default="first")
     ap.add_argument("--mode", default="honest",
                     help="replay config mode (honest = snapshotted config)")
+    ap.add_argument("--chain", action="store_true",
+                    help="receding-horizon chain: carry each arm's state day to day "
+                         "(the decisive, boundary-free comparison)")
     args = ap.parse_args()
+    if args.chain:
+        return chained(args.days, args.mode)
 
     per_day: dict[str, list[float]] = defaultdict(list)
     comfort_breaches = 0
@@ -106,8 +187,19 @@ def main() -> int:
             if not base.ok or not lp.ok:
                 n_skipped += 1
                 continue
-            # Cost of each plan priced at the actual published rates.
-            delta_p = lp.replayed_cost_at_actual_p - base.replayed_cost_at_actual_p
+            # Cost of each plan priced at the actual published rates — normalised
+            # PER DAY: the horizon is ~48h (two evenings, two warmups), so a raw
+            # delta is ~2 days of saving, and labelling it "day D's delta" would
+            # also double-count D+1's evening when D+1's own run is scored too.
+            n_slots = len(lp._replayed_plan.slot_starts_utc) if lp._replayed_plan else 48
+            horizon_days = max(1.0, n_slots / 48.0)
+            # Raw delta, normalised per day. NOTE the single-day mode has a small
+            # boundary bias (~0.7 p/day pro-LP, measured against the chained mode in
+            # summer): the arm ending the window colder looks slightly cheaper. For
+            # decisions use --chain, which carries state day to day and has no
+            # boundary at all.
+            delta_p = (lp.replayed_cost_at_actual_p
+                       - base.replayed_cost_at_actual_p) / horizon_days
             e_base = sum(base._replayed_plan.dhw_electric_kwh) if base._replayed_plan else 0.0
             e_lp = sum(lp._replayed_plan.dhw_electric_kwh) if lp._replayed_plan else 0.0
             deficit = _comfort_deficit_c(lp._replayed_plan)
@@ -152,7 +244,7 @@ def main() -> int:
             flags += "  ENERGY-DIVERGED"
         print(f"{date:12} {b:9.1f} {l:8.1f} {l - b:+9.1f} {eb:7.2f} {el:7.2f}{flags}")
 
-    print(f"\nper-day delta (lp-owned − pinned), pence:")
+    print(f"\nper-day delta (lp-owned − fixed-sim, normalised by horizon), pence:")
     print(f"  median {median:+.1f}  mean {mean:+.1f}  total {total:+.1f} over {len(day_deltas)} days")
     print(f"  best day {day_deltas[0]:+.1f}  worst day {day_deltas[-1]:+.1f}")
     saved_days = sum(1 for d in day_deltas if d < -0.5)
