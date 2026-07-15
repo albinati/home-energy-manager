@@ -85,13 +85,16 @@ def test_warmup_hour_carries_the_dominant_load():
 # Auto-scale loop
 # ---------------------------------------------------------------------------
 
-def test_autoscale_tracks_measured_median():
+def test_autoscale_tracks_measured_median_with_truncation_correction():
+    """The Onecta daily counter TRUNCATES to whole kWh (a 0.6 reheat reads 0), so a
+    measured median of 2.0 means a true daily of ~2.5. The factor must use the
+    de-biased value (#721) — the raw median would systematically under-scale."""
     from src import dhw_policy
-    _seed_measured_dhw([2.0] * 10)  # June-like reality vs nominal 3.0
+    _seed_measured_dhw([2.0] * 10)  # truncated readings; true ≈ 2.5 vs nominal 3.0
     factor = dhw_policy._dhw_autoscale_factor("normal")
-    assert factor == pytest.approx(2.0 / 3.0, abs=0.01)
+    assert factor == pytest.approx(2.5 / 3.0, abs=0.01)
     e_dhw, _ = dhw_policy.forecast_dhw_load_per_slot(_day_slots(), mode="normal")
-    assert sum(e_dhw) == pytest.approx(2.0, abs=0.1)
+    assert sum(e_dhw) == pytest.approx(2.5, abs=0.1)
 
 
 def test_autoscale_median_is_robust_to_boost_outliers():
@@ -99,7 +102,32 @@ def test_autoscale_median_is_robust_to_boost_outliers():
     from src import dhw_policy
     _seed_measured_dhw([2.0, 2.0, 7.0, 2.0, 2.0, 2.0, 2.0])
     factor = dhw_policy._dhw_autoscale_factor("normal")
-    assert factor == pytest.approx(2.0 / 3.0, abs=0.01)
+    assert factor == pytest.approx(2.5 / 3.0, abs=0.01)
+
+
+def test_the_prod_window_no_longer_depends_on_the_clamp_floor(monkeypatch):
+    """The exact July-2026 prod window that motivated #721. The truncated median
+    (1.0) over nominal 3.0 gives a raw ratio of 0.33, which slammed into the 0.5
+    clamp floor — and 0.5 happened to equal the TRUE ratio ((1.0+0.5)/3.0), so the
+    forecast was right only by coincidence. With the correction, the factor comes
+    out at 0.5 because that is the measurement, not because a bound saved us: prove
+    it by widening the clamp and getting the same answer."""
+    from src import dhw_policy
+    _seed_measured_dhw([0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 3.0, 3.0])
+    factor = dhw_policy._dhw_autoscale_factor("normal")
+    assert factor == pytest.approx(0.5, abs=0.01)
+
+    dhw_policy._autoscale_cache.clear()
+    monkeypatch.setattr(app_config, "DHW_FORECAST_AUTOSCALE_MIN", 0.1, raising=False)
+    unclamped = dhw_policy._dhw_autoscale_factor("normal")
+    assert unclamped == pytest.approx(0.5, abs=0.01)  # same answer, no floor involved
+
+
+def test_truncation_correction_kill_switch(monkeypatch):
+    from src import dhw_policy
+    monkeypatch.setattr(app_config, "DHW_COUNTER_TRUNCATION_KWH", 0.0, raising=False)
+    _seed_measured_dhw([2.0] * 10)
+    assert dhw_policy._dhw_autoscale_factor("normal") == pytest.approx(2.0 / 3.0, abs=0.01)
 
 
 def test_autoscale_clamped():
@@ -227,7 +255,8 @@ def test_autoscale_and_bias_normalizer_use_same_resolved_hour(monkeypatch):
     _seed_measured_dhw([3.0] * 10)
     nominal_11 = dhw_policy._nominal_daily_total_kwh("normal", 11)
     factor = dhw_policy._dhw_autoscale_factor("normal")
-    assert factor == pytest.approx(min(1.6, max(0.5, 3.0 / nominal_11)), abs=1e-6)
+    # Numerator carries the truncation-midpoint correction (+0.5, #721).
+    assert factor == pytest.approx(min(1.6, max(0.5, 3.5 / nominal_11)), abs=1e-6)
 
     # The bias normalizer divides by the SAME nominal shares (resolved hour 11).
     shares_default = dhw_policy._nominal_bucket_shares("normal")  # → today's = 11

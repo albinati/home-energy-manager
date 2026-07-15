@@ -1278,6 +1278,12 @@ class Config:
     DHW_FORECAST_AUTOSCALE_MIN_DAYS: int = int(
         os.getenv("DHW_FORECAST_AUTOSCALE_MIN_DAYS", "5")
     )
+    # The Onecta daily counter's quantisation step (kWh). It TRUNCATES — a 0.6 kWh
+    # reheat reads 0 — so the autoscale numerator adds half this step to de-bias the
+    # median (#721). Set to 0 to disable the correction.
+    DHW_COUNTER_TRUNCATION_KWH: float = float(
+        os.getenv("DHW_COUNTER_TRUNCATION_KWH", "1.0")
+    )
     DHW_FORECAST_AUTOSCALE_MIN: float = float(
         os.getenv("DHW_FORECAST_AUTOSCALE_MIN", "0.5")
     )
