@@ -901,6 +901,22 @@ def bulletproof_thermal_learning_job() -> None:
         logger.info("thermal learning refresh: status=%s", result.get("status"))
     except Exception as e:
         logger.warning("thermal learning refresh failed (non-fatal): %s", e)
+    # DHW tank calibration (#714) — UA + effective ambient from the thermometer,
+    # plus the draw-event shape for observability. Same nightly beat, independent
+    # failure; the LP falls back to the databook tank if it skips.
+    try:
+        from ..dhw.calibration import refresh_dhw_calibration
+        dhw = refresh_dhw_calibration()
+        logger.info("dhw calibration refresh: status=%s", dhw.get("status"))
+    except Exception as e:
+        logger.warning("dhw calibration refresh failed (non-fatal): %s", e)
+    # LP-owned enable gate (#714): a one-shot ping when the shadow proves the regime
+    # cheaper AND comfort-clean over the window. Never auto-enables.
+    try:
+        from ..dhw.shadow import maybe_suggest_enable
+        maybe_suggest_enable()
+    except Exception as e:
+        logger.warning("dhw lp-owned gate check failed (non-fatal): %s", e)
 
 
 def bulletproof_load_error_log_job() -> None:

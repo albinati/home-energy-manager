@@ -1762,6 +1762,45 @@ class Config:
     # Max leaving-water temp used when estimating space COP lift (aligns with physics LWT cap).
     LP_COP_SPACE_LWT_CEILING_C: float = float(os.getenv("LP_COP_SPACE_LWT_CEILING_C", "50.0"))
     DHW_TANK_LITRES: float = float(os.getenv("DHW_TANK_LITRES", "200"))
+    # --- DHW calibration (#714 rewrite) -------------------------------------
+    # The tank's UA and effective ambient, learned from the THERMOMETER only
+    # (never the energy counter — that is quantised and half-synthesised, #719).
+    # false → every solve uses the databook TankParams; instant rollback of the
+    # learned values without touching the nightly fit.
+    DHW_CALIBRATION_ENABLED: bool = os.getenv(
+        "DHW_CALIBRATION_ENABLED", "true"
+    ).lower() == "true"
+    DHW_CALIBRATION_WINDOW_DAYS: int = int(os.getenv("DHW_CALIBRATION_WINDOW_DAYS", "21"))
+    # A summer-fitted ambient must not steer a winter plan: past this age the reader
+    # falls back to the databook and logs it.
+    DHW_CALIBRATION_MAX_AGE_DAYS: float = float(
+        os.getenv("DHW_CALIBRATION_MAX_AGE_DAYS", "45")
+    )
+    # The LP times the tank itself (src/dhw), instead of following dhw_policy's fixed
+    # 13:00→45 / 22:00→37 clock. Ships OFF: it must first be PROVEN better by the
+    # economic shadow. Precedence passive > LP-owned > K1 pin; flag off is
+    # byte-identical, and flipping it back restores the fixed schedule on the next
+    # re-plan (dhw_policy stays intact as the kill switch).
+    DHW_LP_OWNED_ENABLED: bool = os.getenv(
+        "DHW_LP_OWNED_ENABLED", "false"
+    ).lower() == "true"
+    # The economic shadow runs the LP-owned regime on every committed solve (while the
+    # flag above is off) and logs what it WOULD have cost + whether it kept comfort. It
+    # feeds the enable gate; nothing it plans is dispatched. Backtest over 20 real days:
+    # LP-owned cheaper on 18/20, median −10.8 p/day, zero comfort breaches.
+    DHW_LP_OWNED_SHADOW_ENABLED: bool = os.getenv(
+        "DHW_LP_OWNED_SHADOW_ENABLED", "true"
+    ).lower() == "true"
+    DHW_LP_OWNED_SHADOW_MAX_PER_DAY: int = int(
+        os.getenv("DHW_LP_OWNED_SHADOW_MAX_PER_DAY", "4")
+    )
+    # The gate: enable is only SUGGESTED (one-shot ping, never automatic) after this
+    # many shadow days that are BOTH cheaper by the median saving AND comfort-clean.
+    DHW_LP_OWNED_GATE_MIN_DAYS: int = int(os.getenv("DHW_LP_OWNED_GATE_MIN_DAYS", "14"))
+    DHW_LP_OWNED_GATE_MIN_SAVING_PENCE: float = float(
+        os.getenv("DHW_LP_OWNED_GATE_MIN_SAVING_PENCE", "3.0")
+    )
+    DHW_LP_OWNED_GATE_MAX_ROWS: int = int(os.getenv("DHW_LP_OWNED_GATE_MAX_ROWS", "6"))
     DHW_WATER_CP: float = float(os.getenv("DHW_WATER_CP", "4186"))  # J/(kg·K)
     # Building envelope + thermal mass for the single-zone model (estimator
     # fallback today; the LP t_in restore in #540 will consume these too).

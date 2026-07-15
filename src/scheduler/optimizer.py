@@ -2418,6 +2418,32 @@ def _run_optimizer_lp(
             logger.warning("schedule_dynamic_mpc_replan failed (non-fatal): %s", e)
     daikin_n = write_daikin_from_lp_plan(plan_date, plan, forecast)
 
+    # #714 — LP-owned economic shadow. While the tank is still owned by the fixed
+    # schedule, solve the SAME inputs twice more — once pinned to a SIMULATION of what
+    # the fixed schedule actually does (the honest baseline), once with the LP owning
+    # the tank — and record the comparison. Nothing here is dispatched; it feeds the
+    # enable gate. Best-effort, never disturbs the committed plan.
+    try:
+        from ..dhw.shadow import record_shadow
+
+        record_shadow(
+            solve_kwargs={
+                "slot_starts_utc": starts,
+                "price_pence": prices,
+                "base_load_kwh": base_load,
+                "weather": weather,
+                "initial": initial,
+                "tz": tz,
+                "micro_climate_offset_c": micro_climate_offset,
+                "micro_climate_offset_by_hour_c": micro_climate_offset_by_hour,
+                "export_price_pence": export_prices,
+            },
+            price_pence=prices,
+            export_price_pence=export_prices,
+        )
+    except Exception:  # noqa: BLE001 — the shadow must never break a committed solve
+        logger.debug("dhw shadow: record failed", exc_info=True)
+
     run_at_iso = datetime.now(UTC).isoformat()
     run_id = db.log_optimizer_run(
         {

@@ -215,8 +215,20 @@ def replay_run(
     *,
     mode: Mode = "honest",
     initial_override: LpInitialState | None = None,
+    force_dhw_lp_owned: bool = False,
+    dhw_fixed_baseline: bool = False,
 ) -> LpReplayResult:
     """Replay one past optimizer run on its frozen snapshot inputs.
+
+    ``force_dhw_lp_owned`` runs the replay with the LP owning the tank (#714), so a
+    backtest can score the LP-owned regime against the committed (pinned) plan on the
+    SAME frozen inputs — the offline half of the economic gate.
+
+    ``dhw_fixed_baseline`` pins the tank to a SIMULATION of what the fixed schedule
+    actually does under the measured physics (src/dhw/baseline.py) instead of the
+    dhw_policy forecast. That forecast plans ~2.4× the household's real DHW energy, so
+    a comparison against it credits the LP-owned arm with phantom savings; against the
+    simulation, both arms deliver the same heat and the delta is pure timing value.
 
     See module docstring for honest vs forward mode semantics.
     """
@@ -316,6 +328,36 @@ def replay_run(
     # Export prices for the same window — None if outgoing tariff not fetched/configured.
     export_price_pence = _build_export_prices(slot_starts_utc)
 
+    # #714 — honest baseline arm: simulate the fixed schedule under the same physics
+    # and pin the solve to it (see the kwarg docstring).
+    pinned_dhw_override: tuple[list[float], list[float]] | None = None
+    if dhw_fixed_baseline:
+        from zoneinfo import ZoneInfo as _ZI
+
+        from ..dhw import comfort as _dhw_comfort
+        from ..dhw.baseline import legionella_budget_by_slot, simulate_fixed_schedule
+        from ..dhw.params import resolve_tank_params as _rtp
+
+        _tz = _ZI(getattr(config, "BULLETPROOF_TIMEZONE", "Europe/London"))
+        _p = _rtp()
+        _preset = (config.OPTIMIZATION_PRESET or "normal").strip().lower()
+        _draw = _dhw_comfort.declared_draw_kwh_for_slots(
+            slot_starts_utc, _tz, preset=_preset,
+            guest_count=int(getattr(config, "DHW_GUEST_COUNT", 2)),
+        )
+        _leg = legionella_budget_by_slot(
+            slot_starts_utc,
+            budget_kwh=float(getattr(config, "DHW_LEGIONELLA_BUDGET_KWH", 3.5)),
+        ) if bool(getattr(config, "DHW_LEGIONELLA_STANDOFF_ENABLED", True)) else None
+        pinned_dhw_override = simulate_fixed_schedule(
+            slot_starts_utc, _tz,
+            tank0_c=float(initial.tank_temp_c),
+            p=_p,
+            t_out_by_slot=list(weather.temperature_outdoor_c),
+            draw_kwh_by_slot=_draw,
+            legionella_kwh_by_slot=_leg,
+        )
+
     # Micro-climate offset: snapshot value in honest mode, current config in forward.
     micro_climate_offset_by_hour: dict[int, float] = {}
     if mode == "honest":
@@ -367,6 +409,8 @@ def replay_run(
                 micro_climate_offset_c=mco,
                 micro_climate_offset_by_hour_c=micro_climate_offset_by_hour,
                 export_price_pence=export_price_pence,
+                force_dhw_lp_owned=force_dhw_lp_owned,
+                pinned_dhw_override=pinned_dhw_override,
             )
         except Exception as e:  # solver failure — surface, don't crash
             return LpReplayResult(

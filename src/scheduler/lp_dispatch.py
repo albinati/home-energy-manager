@@ -4,7 +4,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import math
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import TYPE_CHECKING, Any
 
@@ -1275,6 +1275,127 @@ def _write_lwt_preheat_actions(
     return count
 
 
+def _legionella_windows_utc(slot_starts_utc: list[datetime]) -> list[tuple[datetime, datetime]]:
+    """The firmware's legionella stand-off windows intersecting the horizon (UTC)."""
+    if not bool(getattr(config, "DHW_LEGIONELLA_STANDOFF_ENABLED", True)):
+        return []
+    dow = int(getattr(config, "DHW_LEGIONELLA_STANDOFF_DOW", 6))
+    hh = int(getattr(config, "DHW_LEGIONELLA_STANDOFF_START_HOUR_UTC", 11))
+    mm = int(getattr(config, "DHW_LEGIONELLA_STANDOFF_START_MINUTE_UTC", 0))
+    dur = int(getattr(config, "DHW_LEGIONELLA_STANDOFF_DURATION_MINUTES", 120))
+    days = {st.date() for st in slot_starts_utc}
+    out = []
+    for d in days:
+        if d.weekday() != dow:
+            continue
+        start = datetime(d.year, d.month, d.day, hh, mm, tzinfo=UTC)
+        out.append((start, start + timedelta(minutes=dur)))
+    return sorted(out)
+
+
+def _trim_rows_around_legionella(rows, slot_starts_utc):
+    """Cut the legionella windows OUT of any overlapping row, keeping the parts
+    outside. Checking only a row's start is not enough: run-length-encoded blocks can
+    span hours, and a setback that starts Saturday night crosses straight through the
+    Sunday window — HEM must not write into a window it declared firmware-owned, but
+    the household still needs a target on both sides of it."""
+    windows = _legionella_windows_utc(list(slot_starts_utc))
+    if not windows:
+        return list(rows)
+    out = []
+    for r in rows:
+        pieces = [(r.start_utc, r.end_utc)]
+        for ws, we in windows:
+            next_pieces = []
+            for ps, pe in pieces:
+                if pe <= ws or ps >= we:
+                    next_pieces.append((ps, pe))  # no overlap
+                    continue
+                if ps < ws:
+                    next_pieces.append((ps, ws))
+                if pe > we:
+                    next_pieces.append((we, pe))
+            pieces = next_pieces
+        for ps, pe in pieces:
+            if (pe - ps) >= timedelta(minutes=30):
+                out.append(type(r)(
+                    action_type=r.action_type, start_utc=ps, end_utc=pe,
+                    tank_temp_c=r.tank_temp_c, tank_powerful=r.tank_powerful,
+                ))
+    return out
+
+
+def _write_lp_owned_tank_schedule(plan_date: str, plan: LpPlan) -> int:
+    """Translate the LP-owned tank trajectory into Daikin rows (#714).
+
+    Clears the tank rows over the plan horizon, compresses the trajectory into a few
+    setpoint rows, lays the comfort backstop over the shower window, drops rows inside
+    the firmware-owned legionella window, and upserts. One batch, one owner.
+    """
+    from ..dhw import comfort as _dhw_comfort
+    from ..dhw import dispatch as _dhw_dispatch
+
+    if not plan.slot_starts_utc:
+        return 0
+    tz = ZoneInfo(getattr(config, "BULLETPROOF_TIMEZONE", "Europe/London"))
+
+    # Clear the tank rows over the whole horizon (in-flight preservation lives in
+    # clear_actions_in_range). Same range the K1 branch clears — mutual exclusion.
+    win_start = plan.slot_starts_utc[0].isoformat().replace("+00:00", "Z")
+    win_end = (plan.slot_starts_utc[-1] + timedelta(minutes=30)).isoformat().replace("+00:00", "Z")
+    db.clear_actions_in_range(win_start, win_end, device="daikin")
+
+    rows = _dhw_dispatch.tank_rows_from_plan(
+        list(plan.slot_starts_utc),
+        list(plan.tank_temp_c),
+        list(plan.dhw_electric_kwh),
+        list(plan.price_pence),
+    )
+
+    # Comfort backstop over the shower window — reads only the declared constant.
+    preset = (config.OPTIMIZATION_PRESET or "normal").strip().lower()
+    backstop = _dhw_comfort.backstop_floor_c(preset)
+    if backstop is not None:
+        windows = _dhw_comfort.shower_windows(preset=preset)
+        evening = next((w for w in windows if w.label.startswith("evening")), None)
+        if evening is not None:
+            before = list(rows)
+            rows = _dhw_dispatch.apply_comfort_backstop(
+                rows, list(plan.slot_starts_utc), tz, backstop_c=backstop,
+                window_start_hour=evening.start_hour, window_end_hour=evening.end_hour,
+            )
+            if rows != before:
+                # A backstop that HAD to act means the plan left the tank cold — the
+                # regime's health alarm (two days running ⇒ turn LP-owned off).
+                try:
+                    db.log_action(device="daikin", action="dhw_comfort_backstop_fired",
+                                  params={"backstop_c": backstop, "preset": preset},
+                                  result="applied", trigger="lp_dispatch")
+                except Exception:  # noqa: BLE001 — telemetry must not break dispatch
+                    pass
+
+    # Trim rows around the firmware-owned legionella stand-off (the firmware drives the
+    # tank there; a HEM write inside is arbitrated/wasted). TRIM, not drop: a long
+    # setback row that merely CROSSES the Sunday window must keep its before/after
+    # parts — dropping it entirely would leave the tank with no target for hours. The
+    # LP already budgeted the cycle's energy.
+    kept = _trim_rows_around_legionella(rows, plan.slot_starts_utc)
+
+    count = 0
+    for r in kept:
+        db.upsert_action(
+            plan_date=plan_date,
+            start_time=r.start_utc.isoformat().replace("+00:00", "Z"),
+            end_time=r.end_utc.isoformat().replace("+00:00", "Z"),
+            device="daikin",
+            action_type=r.action_type,
+            params=r.to_params(),
+            status="pending",
+        )
+        count += 1
+    return count
+
+
 def write_daikin_from_lp_plan(
     plan_date: str,
     plan: LpPlan,
@@ -1314,6 +1435,17 @@ def write_daikin_from_lp_plan(
             db.clear_actions_for_date(plan_date, device="daikin")
         logger.info("write_daikin_from_lp_plan: skipped (DAIKIN_CONTROL_MODE=passive)")
         return 0
+
+    # #714 — LP-OWNED regime. Gated on ``plan.dhw_lp_owned`` (the plan's own record of
+    # which regime produced it), NOT on config: a shadow solve that forced the regime
+    # on must NEVER reach hardware, and the plan flag is what distinguishes a committed
+    # LP-owned solve from a shadow. This branch and the K1 branch below are mutually
+    # exclusive and write to the same cleared range, so the tank has exactly one owner.
+    if getattr(plan, "dhw_lp_owned", False):
+        rows_total = _write_lp_owned_tank_schedule(plan_date, plan)
+        rows_total += _write_lwt_preheat_actions(plan_date, plan, forecast)
+        logger.info("write_daikin_from_lp_plan: LP-owned — wrote %d rows", rows_total)
+        return rows_total
 
     # PR K1 (2026-05-23) — fixed DHW schedule replaces LP-driven tank.
     # LP still solves over the horizon for battery + space-heating

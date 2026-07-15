@@ -1300,6 +1300,42 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             computed_at TEXT NOT NULL
         )"""
     )
+    # DHW LP-owned economic shadow (#714). One row per shadow solve: the committed
+    # (pinned) grid cost vs the LP-owned grid cost on the SAME inputs, plus the comfort
+    # deficit (°C below floor at any shower boundary). The enable gate reads this — the
+    # LP-owned regime is only ever suggested after a run of days where it is BOTH cheaper
+    # AND leaves comfort untouched.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS dhw_lp_shadow_log (
+            run_at_utc TEXT PRIMARY KEY,
+            day TEXT NOT NULL,
+            cost_pinned_p REAL NOT NULL,
+            cost_lp_owned_p REAL NOT NULL,
+            delta_p REAL NOT NULL,
+            comfort_deficit_c REAL NOT NULL,
+            e_dhw_fixed_kwh REAL,
+            e_dhw_lp_kwh REAL,
+            n_tank_rows INTEGER
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dhw_shadow_day ON dhw_lp_shadow_log(day)"
+    )
+    # DHW tank calibration (#714 rewrite). ONE row per component so the UA fit and
+    # the draw-event observability land independently. The rewrite's cardinal rule
+    # — no energy counter, thermometer only — means there is no COP row here: the
+    # COP is the certified databook curve, never a fit (#719).
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS dhw_calibration (
+            component TEXT PRIMARY KEY,
+            fitted_at_utc TEXT NOT NULL,
+            status TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            n_samples INTEGER,
+            r2 REAL,
+            window_days INTEGER
+        )"""
+    )
     # W2 observability (#540): the learner's LAST run summary — episodes/HDD-days
     # collected + skip reasons — so the UI can show "learning in progress, N/5
     # decay nights" even while the calibration itself is still on env defaults.
@@ -5408,6 +5444,115 @@ def insert_daikin_telemetry(row: dict[str, Any]) -> None:
                 ),
             )
             conn.commit()
+        finally:
+            conn.close()
+
+
+def insert_dhw_shadow(row: dict[str, Any]) -> None:
+    """Record one LP-owned economic shadow solve (#714)."""
+    with _lock:
+        conn = get_connection()
+        try:
+            conn.execute(
+                """INSERT OR REPLACE INTO dhw_lp_shadow_log
+                   (run_at_utc, day, cost_pinned_p, cost_lp_owned_p, delta_p,
+                    comfort_deficit_c, e_dhw_fixed_kwh, e_dhw_lp_kwh, n_tank_rows)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (row["run_at_utc"], row["day"], row["cost_pinned_p"],
+                 row["cost_lp_owned_p"], row["delta_p"], row["comfort_deficit_c"],
+                 row.get("e_dhw_fixed_kwh"), row.get("e_dhw_lp_kwh"),
+                 row.get("n_tank_rows")),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def get_dhw_shadow_rows(since_day: str) -> list[dict[str, Any]]:
+    """Shadow rows on or after ``since_day`` (local ISO date), oldest first."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM dhw_lp_shadow_log WHERE day >= ? ORDER BY run_at_utc ASC",
+                (since_day,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
+def upsert_dhw_calibration(component: str, *, status: str, payload: dict[str, Any],
+                           n_samples: int | None = None, r2: float | None = None,
+                           window_days: int | None = None) -> None:
+    """Store one component of the DHW calibration (#714). One row per component,
+    replaced each run — a skipped fit overwrites with ``status='skipped'`` and the
+    reader falls back to the databook, so a stale value can never silently steer."""
+    with _lock:
+        conn = get_connection()
+        try:
+            conn.execute(
+                """INSERT INTO dhw_calibration
+                   (component, fitted_at_utc, status, payload_json, n_samples, r2, window_days)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(component) DO UPDATE SET
+                     fitted_at_utc=excluded.fitted_at_utc, status=excluded.status,
+                     payload_json=excluded.payload_json, n_samples=excluded.n_samples,
+                     r2=excluded.r2, window_days=excluded.window_days""",
+                (component, datetime.now(UTC).isoformat(), status,
+                 json.dumps(payload, default=str), n_samples, r2, window_days),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def get_dhw_calibration(component: str) -> dict[str, Any] | None:
+    """One DHW calibration component, or None if never fitted. ``payload`` is the
+    parsed JSON; ``status``/``fitted_at_utc`` sit alongside it."""
+    with _lock:
+        conn = get_connection()
+        try:
+            r = conn.execute(
+                "SELECT status, fitted_at_utc, payload_json, n_samples, r2, window_days "
+                "FROM dhw_calibration WHERE component = ?", (component,)
+            ).fetchone()
+            if not r:
+                return None
+            try:
+                payload = json.loads(r["payload_json"])
+            except (TypeError, ValueError):
+                payload = {}
+            return {
+                "status": r["status"], "fitted_at_utc": r["fitted_at_utc"],
+                "payload": payload, "n_samples": r["n_samples"], "r2": r["r2"],
+                "window_days": r["window_days"],
+            }
+        finally:
+            conn.close()
+
+
+def get_tank_temps_range(start_epoch: float, end_epoch: float) -> list[tuple[float, float]]:
+    """``(fetched_at, tank_temp_c)`` LIVE rows in ``[start, end)``, ascending.
+
+    Bounded form of :func:`get_tank_temps_since` for the DHW calibration (#714),
+    which fits UA and the tank's ambient over a fixed historical window rather
+    than "everything since". ``source='live'`` only, and for a reason that is the
+    whole point of the rewrite: the physics-estimator rows (``source='estimate'``)
+    are MODELLED from the very constants this feeds, so admitting them would teach
+    the learner its own assumptions — the echo trap that produced two false
+    findings on the first attempt (#719)."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT fetched_at, tank_temp_c FROM daikin_telemetry "
+                "WHERE fetched_at >= ? AND fetched_at < ? AND tank_temp_c IS NOT NULL "
+                "AND source = 'live' "
+                "ORDER BY fetched_at ASC",
+                (start_epoch, end_epoch),
+            )
+            return [(float(r[0]), float(r[1])) for r in cur.fetchall()]
         finally:
             conn.close()
 
