@@ -1300,6 +1300,25 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             computed_at TEXT NOT NULL
         )"""
     )
+    # DHW LP-owned economic shadow (#714). One row per shadow solve: the committed
+    # (pinned) grid cost vs the LP-owned grid cost on the SAME inputs, plus the comfort
+    # deficit (°C below floor at any shower boundary). The enable gate reads this — the
+    # LP-owned regime is only ever suggested after a run of days where it is BOTH cheaper
+    # AND leaves comfort untouched.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS dhw_lp_shadow_log (
+            run_at_utc TEXT PRIMARY KEY,
+            day TEXT NOT NULL,
+            cost_pinned_p REAL NOT NULL,
+            cost_lp_owned_p REAL NOT NULL,
+            delta_p REAL NOT NULL,
+            comfort_deficit_c REAL NOT NULL,
+            n_tank_rows INTEGER
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dhw_shadow_day ON dhw_lp_shadow_log(day)"
+    )
     # DHW tank calibration (#714 rewrite). ONE row per component so the UA fit and
     # the draw-event observability land independently. The rewrite's cardinal rule
     # — no energy counter, thermometer only — means there is no COP row here: the
@@ -5423,6 +5442,39 @@ def insert_daikin_telemetry(row: dict[str, Any]) -> None:
                 ),
             )
             conn.commit()
+        finally:
+            conn.close()
+
+
+def insert_dhw_shadow(row: dict[str, Any]) -> None:
+    """Record one LP-owned economic shadow solve (#714)."""
+    with _lock:
+        conn = get_connection()
+        try:
+            conn.execute(
+                """INSERT OR REPLACE INTO dhw_lp_shadow_log
+                   (run_at_utc, day, cost_pinned_p, cost_lp_owned_p, delta_p,
+                    comfort_deficit_c, n_tank_rows)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (row["run_at_utc"], row["day"], row["cost_pinned_p"],
+                 row["cost_lp_owned_p"], row["delta_p"], row["comfort_deficit_c"],
+                 row.get("n_tank_rows")),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def get_dhw_shadow_rows(since_day: str) -> list[dict[str, Any]]:
+    """Shadow rows on or after ``since_day`` (local ISO date), oldest first."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM dhw_lp_shadow_log WHERE day >= ? ORDER BY run_at_utc ASC",
+                (since_day,),
+            )
+            return [dict(r) for r in cur.fetchall()]
         finally:
             conn.close()
 

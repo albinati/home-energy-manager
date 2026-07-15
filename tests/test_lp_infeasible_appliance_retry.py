@@ -175,6 +175,11 @@ def test_lp_infeasible_with_appliance_retries_without_it(
         duration_min=90,
     )
 
+    # The LP-owned economic shadow (#714) re-solves the committed inputs and would count
+    # as an extra solve_lp call — it is orthogonal to the infeasibility-retry this test
+    # checks, so switch it off here.
+    monkeypatch.setattr(app_config, "DHW_LP_OWNED_SHADOW_ENABLED", False, raising=False)
+
     solver = _TwoPhaseSolver()
     monkeypatch.setattr("src.scheduler.lp_optimizer.solve_lp", solver)
 

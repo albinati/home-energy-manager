@@ -1784,6 +1784,23 @@ class Config:
     DHW_LP_OWNED_ENABLED: bool = os.getenv(
         "DHW_LP_OWNED_ENABLED", "false"
     ).lower() == "true"
+    # The economic shadow runs the LP-owned regime on every committed solve (while the
+    # flag above is off) and logs what it WOULD have cost + whether it kept comfort. It
+    # feeds the enable gate; nothing it plans is dispatched. Backtest over 20 real days:
+    # LP-owned cheaper on 18/20, median −10.8 p/day, zero comfort breaches.
+    DHW_LP_OWNED_SHADOW_ENABLED: bool = os.getenv(
+        "DHW_LP_OWNED_SHADOW_ENABLED", "true"
+    ).lower() == "true"
+    DHW_LP_OWNED_SHADOW_MAX_PER_DAY: int = int(
+        os.getenv("DHW_LP_OWNED_SHADOW_MAX_PER_DAY", "4")
+    )
+    # The gate: enable is only SUGGESTED (one-shot ping, never automatic) after this
+    # many shadow days that are BOTH cheaper by the median saving AND comfort-clean.
+    DHW_LP_OWNED_GATE_MIN_DAYS: int = int(os.getenv("DHW_LP_OWNED_GATE_MIN_DAYS", "14"))
+    DHW_LP_OWNED_GATE_MIN_SAVING_PENCE: float = float(
+        os.getenv("DHW_LP_OWNED_GATE_MIN_SAVING_PENCE", "3.0")
+    )
+    DHW_LP_OWNED_GATE_MAX_ROWS: int = int(os.getenv("DHW_LP_OWNED_GATE_MAX_ROWS", "6"))
     DHW_WATER_CP: float = float(os.getenv("DHW_WATER_CP", "4186"))  # J/(kg·K)
     # Building envelope + thermal mass for the single-zone model (estimator
     # fallback today; the LP t_in restore in #540 will consume these too).

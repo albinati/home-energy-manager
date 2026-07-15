@@ -910,6 +910,13 @@ def bulletproof_thermal_learning_job() -> None:
         logger.info("dhw calibration refresh: status=%s", dhw.get("status"))
     except Exception as e:
         logger.warning("dhw calibration refresh failed (non-fatal): %s", e)
+    # LP-owned enable gate (#714): a one-shot ping when the shadow proves the regime
+    # cheaper AND comfort-clean over the window. Never auto-enables.
+    try:
+        from ..dhw.shadow import maybe_suggest_enable
+        maybe_suggest_enable()
+    except Exception as e:
+        logger.warning("dhw lp-owned gate check failed (non-fatal): %s", e)
 
 
 def bulletproof_load_error_log_job() -> None:
