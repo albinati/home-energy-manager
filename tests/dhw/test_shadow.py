@@ -29,11 +29,13 @@ def tmp_db(tmp_path, monkeypatch):
     return path
 
 
-def _seed(day: str, *, delta_p: float, deficit: float = 0.0, rows: int = 4):
+def _seed(day: str, *, delta_p: float, deficit: float = 0.0, rows: int = 4,
+          horizon_days: float = 1.0):
     _db.insert_dhw_shadow({
         "run_at_utc": f"{day}T12:00:00+00:00",
         "day": day, "cost_pinned_p": 100.0, "cost_lp_owned_p": 100.0 + delta_p,
-        "delta_p": delta_p, "comfort_deficit_c": deficit, "n_tank_rows": rows,
+        "delta_p": delta_p, "comfort_deficit_c": deficit,
+        "horizon_days": horizon_days, "n_tank_rows": rows,
     })
 
 
@@ -82,6 +84,22 @@ def test_gate_opens_on_a_clean_cheaper_run(tmp_db):
     assert gate["ready"] is True
     assert gate["median_saving_pence"] == pytest.approx(10.0)
     assert gate["comfort_breach_days"] == 0
+
+
+def test_deltas_are_normalised_per_day_of_horizon(tmp_db):
+    """The units bug found on deploy day one: a solve's delta covers the whole ~48h
+    horizon (two evenings), so comparing it raw against a per-day threshold doubles
+    the bar. A −8p delta over a 2-day horizon is a 4p/day saving — above the 3p bar —
+    and rows without the column (pre-migration) conservatively assume 2 days."""
+    for d in _days(14):
+        _seed(d, delta_p=-8.0, horizon_days=2.0)
+    gate = shadow.evaluate_gate()
+    assert gate["median_saving_pence"] == pytest.approx(4.0)
+    assert gate["ready"] is True
+
+    # Same raw delta claimed as ONE day would read 8p/day — the normalisation is
+    # what separates the two, not the threshold.
+    _db.get_connection().execute("DELETE FROM dhw_lp_shadow_log").connection.commit()
 
 
 def test_a_single_cold_shower_disqualifies_the_whole_run(tmp_db):

@@ -41,10 +41,12 @@ def simulate_fixed_schedule(
     t_out_by_slot: list[float],
     draw_kwh_by_slot: list[float],
     legionella_kwh_by_slot: list[float] | None = None,
+    price_pence_by_slot: list[float] | None = None,
     warmup_hour_local: float = 13.0,
     setback_hour_local: float = 22.0,
     target_c: float = 45.0,
     setback_c: float = 37.0,
+    negative_boost_target_c: float = 60.0,
     hysteresis_c: float = 1.0,
     slot_hours: float = 0.5,
 ) -> tuple[list[float], list[float]]:
@@ -74,14 +76,23 @@ def simulate_fixed_schedule(
         else:
             target = setback_c
 
+        # Negative-price boost — the REAL fixed schedule does this (dhw_policy writes
+        # tank_negative_boost rows commanding ~60 °C whenever the grid pays to import).
+        # A baseline that omits it is WORSE than the incumbent on negative days, which
+        # would credit the LP-owned arm with an edge the incumbent already captures.
+        boosting = (
+            price_pence_by_slot is not None
+            and i < len(price_pence_by_slot)
+            and price_pence_by_slot[i] < 0
+        )
+        if boosting:
+            target = max(target, negative_boost_target_c)
+
         # Thermostat latch.
         if tank[i] < target - hysteresis_c:
             heating = True
         if tank[i] >= target:
             heating = False
-
-        cop = cop_dhw(t_out_by_slot[i], target, p)
-        cap_thermal = p.hp_max_kw * slot_hours * cop  # kWh thermal per slot
 
         loss = (
             p.ua_w_per_k * (tank[i] - p.ambient_c) * slot_hours * 3600.0 / _J_PER_KWH
@@ -89,16 +100,42 @@ def simulate_fixed_schedule(
         draw = draw_kwh_by_slot[i]
 
         thermal_in = 0.0
+        e_slot = 0.0
         if heating:
             needed = max(0.0, (target - tank[i]) * p.kwh_per_degc + loss + draw)
-            thermal_in = min(needed, cap_thermal)
-        e[i] = thermal_in / cop if cop > 0 else 0.0
+            # Below the resistance cliff the heat pump does the work at the certified
+            # COP; the degrees above it come from the immersion heater at COP 1 —
+            # exactly how the machine splits a boost lift (see dhw.model).
+            hp_target = min(target, p.t_hp_max_c)
+            cop = cop_dhw(t_out_by_slot[i], hp_target, p)
+            hp_needed = max(0.0, min(needed, (hp_target - tank[i]) * p.kwh_per_degc + loss + draw))
+            hp_thermal = min(hp_needed, p.hp_max_kw * slot_hours * cop)
+            res_thermal = 0.0
+            if target > p.t_hp_max_c and tank[i] >= p.t_hp_max_c - hysteresis_c:
+                res_thermal = min(needed - hp_thermal if needed > hp_thermal else 0.0,
+                                  p.resistance_kw * slot_hours)
+            thermal_in = hp_thermal + res_thermal
+            e_slot = (hp_thermal / cop if cop > 0 else 0.0) + res_thermal  # res at COP 1
 
         # Firmware legionella cycle: resistance electricity, thermal 1:1.
         if legionella_kwh_by_slot is not None and legionella_kwh_by_slot[i] > 0:
             leg = legionella_kwh_by_slot[i]
-            e[i] += leg
+            e_slot += leg
             thermal_in += leg
+
+        # SOLVABILITY CAP. This vector is destined for the LP's PINNED arm, whose
+        # e_dhw variable is bounded by the compressor cap (`e_dhw ≤ hp_max × hp_on`)
+        # — a pinned value above it makes the whole solve Infeasible (measured: every
+        # boost day and one Sunday dropped out of the backtest). The real machine can
+        # exceed the cap by stacking the 3 kW booster on the compressor, but the
+        # baseline's job is a fair, SOLVABLE incumbent: cap the slot and let the
+        # boost/cycle spread across more of its window instead. Thermal scales with
+        # the cap so the tank trajectory stays consistent with the energy pinned.
+        cap = p.hp_max_kw * slot_hours
+        if e_slot > cap and e_slot > 0:
+            thermal_in *= cap / e_slot
+            e_slot = cap
+        e[i] = e_slot
 
         tank[i + 1] = tank[i] + (thermal_in - loss - draw) / p.kwh_per_degc
         # The firmware never lets the cylinder exceed its own max.

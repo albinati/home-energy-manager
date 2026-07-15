@@ -328,36 +328,6 @@ def replay_run(
     # Export prices for the same window — None if outgoing tariff not fetched/configured.
     export_price_pence = _build_export_prices(slot_starts_utc)
 
-    # #714 — honest baseline arm: simulate the fixed schedule under the same physics
-    # and pin the solve to it (see the kwarg docstring).
-    pinned_dhw_override: tuple[list[float], list[float]] | None = None
-    if dhw_fixed_baseline:
-        from zoneinfo import ZoneInfo as _ZI
-
-        from ..dhw import comfort as _dhw_comfort
-        from ..dhw.baseline import legionella_budget_by_slot, simulate_fixed_schedule
-        from ..dhw.params import resolve_tank_params as _rtp
-
-        _tz = _ZI(getattr(config, "BULLETPROOF_TIMEZONE", "Europe/London"))
-        _p = _rtp()
-        _preset = (config.OPTIMIZATION_PRESET or "normal").strip().lower()
-        _draw = _dhw_comfort.declared_draw_kwh_for_slots(
-            slot_starts_utc, _tz, preset=_preset,
-            guest_count=int(getattr(config, "DHW_GUEST_COUNT", 2)),
-        )
-        _leg = legionella_budget_by_slot(
-            slot_starts_utc,
-            budget_kwh=float(getattr(config, "DHW_LEGIONELLA_BUDGET_KWH", 3.5)),
-        ) if bool(getattr(config, "DHW_LEGIONELLA_STANDOFF_ENABLED", True)) else None
-        pinned_dhw_override = simulate_fixed_schedule(
-            slot_starts_utc, _tz,
-            tank0_c=float(initial.tank_temp_c),
-            p=_p,
-            t_out_by_slot=list(weather.temperature_outdoor_c),
-            draw_kwh_by_slot=_draw,
-            legionella_kwh_by_slot=_leg,
-        )
-
     # Micro-climate offset: snapshot value in honest mode, current config in forward.
     micro_climate_offset_by_hour: dict[int, float] = {}
     if mode == "honest":
@@ -395,6 +365,47 @@ def replay_run(
             overrides_payload = json.loads(inputs.get("config_snapshot_json") or "{}")
         except (TypeError, ValueError, json.JSONDecodeError):
             overrides_payload = {}
+
+    # #714 — honest baseline arm: simulate the fixed schedule under the same physics
+    # and pin the solve to it (see the kwarg docstring).
+    pinned_dhw_override: tuple[list[float], list[float]] | None = None
+    if dhw_fixed_baseline:
+        from zoneinfo import ZoneInfo as _ZI
+
+        from ..dhw import comfort as _dhw_comfort
+        from ..dhw.baseline import legionella_budget_by_slot, simulate_fixed_schedule
+        from ..dhw.params import resolve_tank_params as _rtp
+
+        _tz = _ZI(getattr(config, "BULLETPROOF_TIMEZONE", "Europe/London"))
+        _p = _rtp()
+        _preset = (config.OPTIMIZATION_PRESET or "normal").strip().lower()
+        _draw = _dhw_comfort.declared_draw_kwh_for_slots(
+            slot_starts_utc, _tz, preset=_preset,
+            guest_count=int(getattr(config, "DHW_GUEST_COUNT", 2)),
+        )
+        _leg = legionella_budget_by_slot(
+            slot_starts_utc,
+            budget_kwh=float(getattr(config, "DHW_LEGIONELLA_BUDGET_KWH", 3.5)),
+        ) if bool(getattr(config, "DHW_LEGIONELLA_STANDOFF_ENABLED", True)) else None
+        # The replayed solve applies the microclimate offsets internally; the sim
+        # must see the SAME calibrated weather or the baseline buys its heat at a
+        # different COP in the same sky.
+        _t_out_cal = [
+            float(t) + max(-5.0, min(5.0, float(
+                micro_climate_offset_by_hour.get(st.hour, mco))))
+            for st, t in zip(slot_starts_utc, weather.temperature_outdoor_c, strict=False)
+        ]
+        pinned_dhw_override = simulate_fixed_schedule(
+            slot_starts_utc, _tz,
+            tank0_c=float(initial.tank_temp_c),
+            p=_p,
+            t_out_by_slot=_t_out_cal,
+            draw_kwh_by_slot=_draw,
+            legionella_kwh_by_slot=_leg,
+            # The real fixed schedule boosts on negative prices; the honest baseline
+            # must too, or the LP is credited with an edge the incumbent captures.
+            price_pence_by_slot=list(price_pence),
+        )
 
     skipped_keys: list[str] = []
     with _config_overrides(overrides_payload, skipped_keys):
