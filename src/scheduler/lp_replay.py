@@ -215,8 +215,13 @@ def replay_run(
     *,
     mode: Mode = "honest",
     initial_override: LpInitialState | None = None,
+    force_dhw_lp_owned: bool = False,
 ) -> LpReplayResult:
     """Replay one past optimizer run on its frozen snapshot inputs.
+
+    ``force_dhw_lp_owned`` runs the replay with the LP owning the tank (#714), so a
+    backtest can score the LP-owned regime against the committed (pinned) plan on the
+    SAME frozen inputs — the offline half of the economic gate.
 
     See module docstring for honest vs forward mode semantics.
     """
@@ -367,6 +372,7 @@ def replay_run(
                 micro_climate_offset_c=mco,
                 micro_climate_offset_by_hour_c=micro_climate_offset_by_hour,
                 export_price_pence=export_price_pence,
+                force_dhw_lp_owned=force_dhw_lp_owned,
             )
         except Exception as e:  # solver failure — surface, don't crash
             return LpReplayResult(
