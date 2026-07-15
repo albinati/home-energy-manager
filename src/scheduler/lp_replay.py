@@ -405,6 +405,12 @@ def replay_run(
             # The real fixed schedule boosts on negative prices; the honest baseline
             # must too, or the LP is credited with an edge the incumbent captures.
             price_pence_by_slot=list(price_pence),
+            # Mirror the incumbent AS CONFIGURED (windows tuned 2026-07-15) — a
+            # baseline frozen on old defaults stops representing what prod does.
+            warmup_hour_local=float(getattr(config, "DHW_WARMUP_START_HOUR_LOCAL", 13)),
+            setback_hour_local=float(getattr(config, "DHW_SETBACK_START_HOUR_LOCAL", 22)),
+            target_c=float(getattr(config, "DHW_TEMP_NORMAL_C", 45.0)),
+            setback_c=float(getattr(config, "DHW_TEMP_SETBACK_C", 37.0)),
         )
 
     skipped_keys: list[str] = []
