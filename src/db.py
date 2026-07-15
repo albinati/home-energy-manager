@@ -1313,6 +1313,8 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             cost_lp_owned_p REAL NOT NULL,
             delta_p REAL NOT NULL,
             comfort_deficit_c REAL NOT NULL,
+            e_dhw_fixed_kwh REAL,
+            e_dhw_lp_kwh REAL,
             n_tank_rows INTEGER
         )"""
     )
@@ -5454,10 +5456,11 @@ def insert_dhw_shadow(row: dict[str, Any]) -> None:
             conn.execute(
                 """INSERT OR REPLACE INTO dhw_lp_shadow_log
                    (run_at_utc, day, cost_pinned_p, cost_lp_owned_p, delta_p,
-                    comfort_deficit_c, n_tank_rows)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    comfort_deficit_c, e_dhw_fixed_kwh, e_dhw_lp_kwh, n_tank_rows)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (row["run_at_utc"], row["day"], row["cost_pinned_p"],
                  row["cost_lp_owned_p"], row["delta_p"], row["comfort_deficit_c"],
+                 row.get("e_dhw_fixed_kwh"), row.get("e_dhw_lp_kwh"),
                  row.get("n_tank_rows")),
             )
             conn.commit()

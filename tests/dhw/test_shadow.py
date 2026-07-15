@@ -140,3 +140,71 @@ def test_no_suggestion_when_already_enabled(tmp_db, monkeypatch):
     monkeypatch.setattr(notifier, "notify", lambda *a, **k: sent.append(a), raising=False)
     shadow.maybe_suggest_enable()
     assert sent == []
+
+
+def test_a_row_crossing_the_legionella_window_is_trimmed_not_dropped(tmp_db, monkeypatch):
+    """A Saturday-night setback block can span straight through the Sunday 11:00 UTC
+    stand-off. HEM must not write into the firmware-owned window — but dropping the
+    whole row would leave the tank with no target for hours either side. The row is
+    CUT AROUND the window instead."""
+    from datetime import UTC, datetime, timedelta
+
+    from src.scheduler.lp_dispatch import _trim_rows_around_legionella
+    from src.dhw.dispatch import TankRow
+
+    monkeypatch.setattr(config, "DHW_LEGIONELLA_STANDOFF_ENABLED", True, raising=False)
+    monkeypatch.setattr(config, "DHW_LEGIONELLA_STANDOFF_DOW", 6, raising=False)
+    monkeypatch.setattr(config, "DHW_LEGIONELLA_STANDOFF_START_HOUR_UTC", 11, raising=False)
+    monkeypatch.setattr(config, "DHW_LEGIONELLA_STANDOFF_DURATION_MINUTES", 120, raising=False)
+
+    # 2026-07-12 is a Sunday; a long setback row 07:00 -> 18:00 UTC crosses 11-13.
+    starts = [datetime(2026, 7, 12, 7, 0, tzinfo=UTC) + i * timedelta(minutes=30)
+              for i in range(22)]
+    row = TankRow(action_type="tank_setback",
+                  start_utc=datetime(2026, 7, 12, 7, 0, tzinfo=UTC),
+                  end_utc=datetime(2026, 7, 12, 18, 0, tzinfo=UTC),
+                  tank_temp_c=37, tank_powerful=False)
+    out = _trim_rows_around_legionella([row], starts)
+    assert len(out) == 2
+    assert out[0].end_utc == datetime(2026, 7, 12, 11, 0, tzinfo=UTC)
+    assert out[1].start_utc == datetime(2026, 7, 12, 13, 0, tzinfo=UTC)
+    # Nothing HEM writes overlaps the firmware-owned window.
+    for r in out:
+        assert r.end_utc <= datetime(2026, 7, 12, 11, 0, tzinfo=UTC) or (
+            r.start_utc >= datetime(2026, 7, 12, 13, 0, tzinfo=UTC))
+
+
+def test_the_shadow_throttle_fails_closed(tmp_db, monkeypatch):
+    """If the shadow-log read/insert is silently failing, counting on the DB would let
+    the shadow run on EVERY optimizer solve for the rest of the day — doubling the LP
+    load in prod. The in-memory attempt counter must trip the cap regardless of DB
+    health."""
+    from src.dhw import shadow as sh
+
+    monkeypatch.setattr(config, "DHW_LP_OWNED_SHADOW_ENABLED", True, raising=False)
+    monkeypatch.setattr(config, "DHW_LP_OWNED_ENABLED", False, raising=False)
+    monkeypatch.setattr(config, "DHW_LP_OWNED_SHADOW_MAX_PER_DAY", 2, raising=False)
+    monkeypatch.setitem(config._overrides, "DAIKIN_CONTROL_MODE", "active")
+    sh._ATTEMPTS_BY_DAY.clear()
+
+    # The DB read explodes every time — the fail-open path of the old code.
+    def _boom(day):
+        raise RuntimeError("db gone")
+
+    monkeypatch.setattr(_db, "get_dhw_shadow_rows", _boom)
+
+    solves = []
+
+    def _fake_solve(**kwargs):
+        solves.append(1)
+        raise RuntimeError("stop here — attempt already counted")
+
+    monkeypatch.setattr("src.scheduler.lp_optimizer.solve_lp", _fake_solve)
+
+    for _ in range(6):
+        sh.record_shadow(solve_kwargs={"slot_starts_utc": [], "weather": None,
+                                       "initial": None},
+                         price_pence=[], export_price_pence=None)
+    # Only the first `cap` attempts may reach the solver; the rest are throttled by
+    # the in-memory counter even though the DB never answered.
+    assert len(solves) <= 2

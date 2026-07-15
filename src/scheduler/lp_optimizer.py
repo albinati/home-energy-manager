@@ -279,6 +279,7 @@ def solve_lp(
     export_price_pence: list[float] | None = None,
     soc_floor_kwh: list[float] | None = None,
     force_dhw_lp_owned: bool = False,
+    pinned_dhw_override: tuple[list[float], list[float]] | None = None,
 ) -> LpPlan:
     """Build and solve the MILP. Raises ``ValueError`` on dimension mismatch.
 
@@ -286,6 +287,14 @@ def solve_lp(
     config flag is off — for the economic shadow (#714), which compares both regimes
     on identical inputs, and the replay backtest. It never reaches hardware; only the
     committed solve writes actions.
+
+    ``pinned_dhw_override`` = ``(e_dhw_per_slot, tank_per_boundary)`` replaces the
+    dhw_policy forecast in the PINNED regime. The economic comparison's baseline arm
+    uses it to pin the tank to a SIMULATION of what the fixed schedule actually does
+    (src/dhw/baseline.py) instead of the policy's forecast — the forecast plans ~2.4×
+    the household's real DHW energy, and comparing against that phantom load would
+    credit the LP-owned arm with savings the incumbent never actually spends. Ignored
+    when the LP-owned regime is active.
 
     ``micro_climate_offset_c`` (default 0.0) and the optional per-hour
     ``micro_climate_offset_by_hour_c`` map are interpreted as
@@ -629,25 +638,24 @@ def solve_lp(
         # Legionella: the firmware runs its Sunday 60 °C cycle on the resistance
         # heater regardless of the LP; budget the electricity (COP 1) across the
         # stand-off window so the battery is not planned to discharge into it (#643).
-        # UTC-anchored — the firmware clock is UTC (see CLAUDE.md).
-        _leg_dow = int(getattr(config, "DHW_LEGIONELLA_STANDOFF_DOW", 6))
-        _leg_h = int(getattr(config, "DHW_LEGIONELLA_STANDOFF_START_HOUR_UTC", 11))
-        _leg_m = int(getattr(config, "DHW_LEGIONELLA_STANDOFF_START_MINUTE_UTC", 0))
-        _leg_dur = int(getattr(config, "DHW_LEGIONELLA_STANDOFF_DURATION_MINUTES", 120))
-        _leg_budget = float(getattr(config, "DHW_LEGIONELLA_BUDGET_KWH", 3.5))
-        _leg_start_min = _leg_h * 60 + _leg_m
-        _leg_members = [
-            i for i, st in enumerate(slot_starts_utc)
-            if st.weekday() == _leg_dow
-            and _leg_start_min <= (st.hour * 60 + st.minute) < _leg_start_min + _leg_dur
-        ]
-        _dhw_legionella = [0.0] * n
-        if _leg_members and _leg_budget > 0 and bool(
-            getattr(config, "DHW_LEGIONELLA_STANDOFF_ENABLED", True)
-        ):
-            _per = _leg_budget / len(_leg_members)
-            for i in _leg_members:
-                _dhw_legionella[i] = _per
+        # Shared builder with the fixed-schedule baseline simulator, so both arms of
+        # the economic comparison budget the identical cycle and it cancels out.
+        from ..dhw.baseline import legionella_budget_by_slot
+
+        _dhw_legionella = (
+            legionella_budget_by_slot(
+                list(slot_starts_utc),
+                dow=int(getattr(config, "DHW_LEGIONELLA_STANDOFF_DOW", 6)),
+                start_hour_utc=int(getattr(config, "DHW_LEGIONELLA_STANDOFF_START_HOUR_UTC", 11)),
+                start_minute_utc=int(getattr(config, "DHW_LEGIONELLA_STANDOFF_START_MINUTE_UTC", 0)),
+                duration_minutes=int(
+                    getattr(config, "DHW_LEGIONELLA_STANDOFF_DURATION_MINUTES", 120)
+                ),
+                budget_kwh=float(getattr(config, "DHW_LEGIONELLA_BUDGET_KWH", 3.5)),
+            )
+            if bool(getattr(config, "DHW_LEGIONELLA_STANDOFF_ENABLED", True))
+            else [0.0] * n
+        )
         _dhw_block = build_dhw_block(
             prob,
             slot_starts_utc=list(slot_starts_utc),
@@ -699,7 +707,11 @@ def solve_lp(
     )
     _pinned_e_dhw: list[float] = []
     _pinned_tank: list[float] = []
-    if _dhw_pinned:
+    if _dhw_pinned and pinned_dhw_override is not None:
+        # #714 — the economic comparison's honest baseline: pin to the SIMULATED fixed
+        # schedule instead of the policy forecast (see the kwarg docstring).
+        _pinned_e_dhw, _pinned_tank = pinned_dhw_override
+    elif _dhw_pinned:
         from .. import dhw_policy as _dhw_pol
         try:
             _mode = (config.OPTIMIZATION_PRESET or "normal").strip().lower()

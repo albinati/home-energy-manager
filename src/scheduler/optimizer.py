@@ -2419,14 +2419,14 @@ def _run_optimizer_lp(
     daikin_n = write_daikin_from_lp_plan(plan_date, plan, forecast)
 
     # #714 — LP-owned economic shadow. While the tank is still owned by the fixed
-    # schedule, re-solve the SAME inputs with the LP owning it and record what it would
-    # have cost + whether it would have kept comfort. Nothing here is dispatched; it
-    # feeds the enable gate. Best-effort, never disturbs the committed plan.
+    # schedule, solve the SAME inputs twice more — once pinned to a SIMULATION of what
+    # the fixed schedule actually does (the honest baseline), once with the LP owning
+    # the tank — and record the comparison. Nothing here is dispatched; it feeds the
+    # enable gate. Best-effort, never disturbs the committed plan.
     try:
         from ..dhw.shadow import record_shadow
 
         record_shadow(
-            plan,
             solve_kwargs={
                 "slot_starts_utc": starts,
                 "price_pence": prices,

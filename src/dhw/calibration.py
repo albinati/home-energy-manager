@@ -370,11 +370,12 @@ def refresh_dhw_calibration() -> dict[str, Any]:
         n_samples=ua_fit.get("episodes"), r2=ua_fit.get("r2"), window_days=window,
     )
 
-    # Draw events — observability only. Fit params from what we just learned (or the
-    # databook), so the standing-loss subtraction uses the best UA available.
     from .params import resolve_tank_params
 
     p = resolve_tank_params()
+
+    # Draw events — observability only. Fit params from what we just learned (or the
+    # databook), so the standing-loss subtraction uses the best UA available.
     events = detect_draw_events(tank_rows, p, tz=tz)
     hours = summarise_draw_hours(events, tz)
     db.upsert_dhw_calibration(

@@ -256,6 +256,15 @@ def declared_draw_kwh_for_slots(
 
     windows = shower_windows(preset=preset, guest_count=guest_count)
     # Map each window label to its shower count and its member slots.
+    #
+    # The magnitude is the DECLARED shower count, deliberately NOT calibrated from the
+    # counter. The Onecta daily total is quantised to whole kWh (measured median 1.0
+    # for a real ~1.6 kWh/day), so calibrating to it UNDER-sizes the draw; and the
+    # thermometer can't see the draw either (concurrent reheat masks it). Ground truth
+    # — three evening showers — is the best size we have, and it checks out: 3 showers
+    # ⇒ ~1.44 kWh electric, which matches the real ~1.2-1.6 kWh/day the counter shows.
+    # (It is the fixed schedule's forecast that is wrong — it plans ~2.9 kWh/day, ~2x
+    # the real draw, which is a dhw_policy over-forecast, not an LP-owned deficit.)
     ev_total = draw_kwh_thermal(ev_n, spec)
     mo_total = draw_kwh_thermal(mo_n, spec)
 

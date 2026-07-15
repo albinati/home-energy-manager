@@ -2,14 +2,29 @@
 """Backtest the LP-owned DHW regime (#714) against the committed pinned plan.
 
 The offline half of the economic gate. For each recent optimizer run we replay the
-committed inputs TWICE on the frozen snapshot — once as it ran (K1 pinned tank) and
-once with the LP owning the tank — and score both against the actual published Agile
-rates. The difference is what the regime would have saved (or cost), on real days, with
-no live experiment required.
+committed inputs TWICE on the frozen snapshot and score both against the actual
+published rates:
 
-This is honest in the way the live shadow is honest: SAME inputs, SAME solver, only the
-DHW regime differs. It is NOT a promise of live savings (the replay re-solves rather
-than re-dispatching), but it is the strongest read we can get before enabling anything.
+* the BASELINE arm pins the tank to a SIMULATION of what the fixed schedule actually
+  does under the measured physics (src/dhw/baseline.py) — NOT the dhw_policy forecast,
+  which plans ~2.4x the household's real DHW energy and would credit the LP-owned arm
+  with phantom savings;
+* the LP-OWNED arm lets the LP time the tank (force_dhw_lp_owned).
+
+Both arms carry the same declared draw, the same physics and the same legionella
+budget, so the delta is pure allocation value: WHEN each regime bought the heat.
+
+It is NOT a promise of live savings (the replay re-solves rather than re-dispatching),
+but it is the strongest read available before enabling anything.
+
+REQUIRED ENVIRONMENT — both of these, or the result silently degrades:
+    DAIKIN_CONTROL_MODE=active          # passive force-disables the LP-owned regime
+                                        # -> every delta reads ~0 (false negative)
+    OCTOPUS_EXPORT_TARIFF_CODE=E-1R-AGILE-OUTGOING-19-05-13-H
+                                        # without it export prices are FLAT and the
+                                        # LP cannot see WHEN exporting pays, which
+                                        # distorts every timing decision
+The script warns when either symptom is detected.
 
 Usage (in the prod container, where the snapshots live):
     docker exec hem python -m scripts.backtest_dhw_lp_owned --days 21 --cadence first
@@ -82,26 +97,30 @@ def main() -> int:
     n_skipped = 0
     both_costs: list[tuple[str, float, float]] = []
 
+    from src.scheduler.lp_replay import _build_export_prices  # noqa: PLC0415
+
     for date in sorted(_daterange(args.days)):
         for rid in _run_ids_for(date, args.cadence):
-            base = replay_run(rid, mode=args.mode)
+            base = replay_run(rid, mode=args.mode, dhw_fixed_baseline=True)
             lp = replay_run(rid, mode=args.mode, force_dhw_lp_owned=True)
             if not base.ok or not lp.ok:
                 n_skipped += 1
                 continue
             # Cost of each plan priced at the actual published rates.
             delta_p = lp.replayed_cost_at_actual_p - base.replayed_cost_at_actual_p
+            e_base = sum(base._replayed_plan.dhw_electric_kwh) if base._replayed_plan else 0.0
+            e_lp = sum(lp._replayed_plan.dhw_electric_kwh) if lp._replayed_plan else 0.0
             deficit = _comfort_deficit_c(lp._replayed_plan)
             # A cheaper plan that skimped on a shower does NOT count. Exclude the day
             # from the £ tally AND flag it — comfort is not for sale.
             if deficit > 0.5:
                 comfort_breaches += 1
                 both_costs.append((date, base.replayed_cost_at_actual_p,
-                                   lp.replayed_cost_at_actual_p, deficit))
+                                   lp.replayed_cost_at_actual_p, deficit, e_base, e_lp))
                 continue
             per_day[date].append(delta_p)
             both_costs.append((date, base.replayed_cost_at_actual_p,
-                               lp.replayed_cost_at_actual_p, 0.0))
+                               lp.replayed_cost_at_actual_p, 0.0, e_base, e_lp))
             n_scored += 1
 
     if not per_day:
@@ -116,14 +135,22 @@ def main() -> int:
 
     print(f"\nDHW LP-owned backtest — {len(day_deltas)} days, {n_scored} runs "
           f"({n_skipped} skipped)\n")
-    print(f"{'date':12} {'pinned p':>10} {'lp-owned p':>11} {'delta p':>9}  comfort")
+    print(f"{'date':12} {'fixed p':>9} {'lp p':>8} {'delta p':>9} {'fx kWh':>7} {'lp kWh':>7}  flags")
     for date in sorted({c[0] for c in both_costs}):
         costs = [c for c in both_costs if c[0] == date]
         b = statistics.mean(c[1] for c in costs)
         l = statistics.mean(c[2] for c in costs)
         worst_def = max(c[3] for c in costs)
-        flag = f"  COLD −{worst_def:.0f}°C (excluded)" if worst_def > 0.5 else ""
-        print(f"{date:12} {b:10.1f} {l:11.1f} {l - b:+9.1f}{flag}")
+        eb = statistics.mean(c[4] for c in costs)
+        el = statistics.mean(c[5] for c in costs)
+        flags = ""
+        if worst_def > 0.5:
+            flags += f"  COLD −{worst_def:.0f}°C (excluded)"
+        # Heat parity: the LP may spend MORE (pre-heat + hold loss is a legitimate
+        # strategy) but a big divergence means the arms are not comparable.
+        if eb > 0.1 and not (0.5 <= (el / eb if eb else 1.0) <= 2.0):
+            flags += "  ENERGY-DIVERGED"
+        print(f"{date:12} {b:9.1f} {l:8.1f} {l - b:+9.1f} {eb:7.2f} {el:7.2f}{flags}")
 
     print(f"\nper-day delta (lp-owned − pinned), pence:")
     print(f"  median {median:+.1f}  mean {mean:+.1f}  total {total:+.1f} over {len(day_deltas)} days")
@@ -136,6 +163,26 @@ def main() -> int:
     annual = -median * 365 / 100.0
     print(f"\n  extrapolated (median × 365): £{annual:+.0f}/yr "
           f"(a rough read — winter differs; the live shadow is the real gate)")
+
+    if abs(median) < 0.5 and abs(mean) < 0.5:
+        print("\n  ⚠ every delta is ~0. Two known causes: DAIKIN_CONTROL_MODE is not "
+              "'active' in the env (the LP-owned regime silently disables in passive), "
+              "or the two arms are identical for another reason. Check the env before "
+              "reading this as 'no value'.")
+    probe = None
+    try:
+        from datetime import datetime as _dt, timedelta as _td
+
+        # Slot-aligned (:00) — export rates key on exact slot starts.
+        base_day = (_dt.now(UTC) - _td(days=3)).replace(
+            minute=0, second=0, microsecond=0)
+        probe = _build_export_prices(
+            [base_day + i * _td(minutes=30) for i in range(8)])
+    except Exception:
+        probe = None
+    if probe is None:
+        print("  ⚠ export prices resolved FLAT (no OCTOPUS_EXPORT_TARIFF_CODE?). "
+              "Timing conclusions are unreliable without per-slot export prices.")
     return 0
 
 

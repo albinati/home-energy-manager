@@ -1,38 +1,55 @@
 """The economic shadow and enable gate for LP-owned DHW (#714).
 
 The LP-owned regime does not get to prove itself in production by being switched on.
-It proves itself in the SHADOW: on every committed solve, while the tank is still owned
-by the fixed schedule, we re-solve the SAME inputs with the LP owning the tank and record
-what it would have cost and whether it would have kept everyone in hot water. Nothing it
-plans is dispatched. After a run of days where the shadow is both cheaper and
-comfort-clean, a one-shot notification SUGGESTS enabling it — a human flips the flag,
-never the code.
+It proves itself in the SHADOW: on every committed solve — while the tank is still owned
+by the fixed schedule — the SAME inputs are solved twice more and compared:
 
-Two numbers per shadow, and both gate:
+* the **baseline arm** pins the tank to a SIMULATION of what the fixed schedule
+  actually does under the measured physics (:mod:`src.dhw.baseline`). Not the
+  dhw_policy forecast: that forecast plans ~2.4× the household's real DHW energy, and
+  a comparison against it credits the LP-owned arm with phantom savings the incumbent
+  never actually spends. Against the simulation, both arms serve the same declared
+  draw with the same physics, and the delta is pure allocation value — WHEN each
+  regime bought the heat.
+* the **LP-owned arm** lets the LP time the tank (``force_dhw_lp_owned``).
 
-* **Δ grid cost** on identical inputs. Same solver, same prices, same weather — only the
-  DHW regime differs, so the difference is exactly what the regime is worth that solve.
-* **Comfort deficit** — how many °C below its floor the LP-owned tank would sit at any
-  shower boundary. Read straight off the plan's own trajectory, not off the objective's
-  slack (which also carries the harmless over-temperature coast-down). A cheaper plan
-  that skimped on a shower is not a saving, and the gate treats a single breach as
-  disqualifying.
+Nothing either arm plans is dispatched. After a run of days where the LP-owned arm is
+both cheaper and comfort-clean, a one-shot notification SUGGESTS enabling it — a human
+flips the flag, never the code.
+
+Three numbers per shadow, and all three gate:
+
+* **Δ grid cost** on identical inputs — same solver, same prices, same weather.
+* **Comfort deficit** — °C below floor at any shower boundary, read off the LP plan's
+  own tank trajectory (not the objective's slack, which also carries the harmless
+  over-temperature coast-down). One cold shower disqualifies the day.
+* **Heat parity** — the two arms' DHW energy totals. The LP may legitimately spend
+  MORE (pre-heat + hold loss is a strategy the owner explicitly blessed) or less
+  (skipping the fixed schedule's needless hold), but a wild divergence means the arms
+  stopped being comparable and the day must not count.
 """
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
+# Fail-CLOSED throttle backstop. The DB is the source of truth for "how many shadows
+# ran today", but if its read or the insert silently fails, counting on it would let
+# the shadow run on EVERY optimizer solve for the rest of the day — doubling the LP
+# load in prod. This in-memory counter increments on every attempt regardless of DB
+# health, so a persistent DB failure throttles the shadow instead of unleashing it.
+# (Resets on process restart, which is fine: it is a backstop, not the ledger.)
+_ATTEMPTS_LOCK = threading.Lock()
+_ATTEMPTS_BY_DAY: dict[str, int] = {}
+
 
 def grid_cost_pence(plan, price_pence: list[float],
                     export_price_pence: list[float] | None) -> float:
-    """Grid cost of a plan on given prices: imports bought minus exports sold. The
-    comparable figure between two plans on the same inputs — the DHW regime only moves
-    import (when it heats) and the battery around it; PV export is the same either way,
-    but include it so a plan that frees headroom to export is credited honestly."""
+    """Grid cost of a plan on given prices: imports bought minus exports sold."""
     n = len(plan.import_kwh)
     exp_price = export_price_pence or [0.0] * n
     cost = 0.0
@@ -44,8 +61,8 @@ def grid_cost_pence(plan, price_pence: list[float],
 
 
 def comfort_deficit_c(plan, tz: ZoneInfo, preset: str) -> float:
-    """°C below floor the LP-owned tank sits at any shower boundary — the honest comfort
-    signal (see module docstring). Zero means every shower was delivered."""
+    """°C below floor the LP-owned tank sits at any shower boundary — the honest
+    comfort signal. Zero means every shower was delivered."""
     from . import comfort as _comfort
 
     if not getattr(plan, "dhw_lp_owned", False) or not plan.slot_starts_utc:
@@ -58,13 +75,13 @@ def comfort_deficit_c(plan, tz: ZoneInfo, preset: str) -> float:
     return worst
 
 
-def record_shadow(committed_plan, *, solve_kwargs: dict, price_pence: list[float],
+def record_shadow(*, solve_kwargs: dict, price_pence: list[float],
                   export_price_pence: list[float] | None) -> dict | None:
-    """Re-solve ``solve_kwargs`` with the LP owning the tank and log the comparison.
+    """Solve both arms of the comparison on ``solve_kwargs`` and log the result.
 
-    ``committed_plan`` is the plan that actually ran (fixed-schedule / pinned). Best
-    effort: any failure returns None and never disturbs the committed solve. Throttled
-    to a few per local day so the shadow never becomes the cost centre.
+    Two extra MILP solves per shadow (baseline + LP-owned), throttled to a few per
+    local day. Best effort: any failure returns None and never disturbs the committed
+    solve. Nothing here is dispatched.
     """
     from .. import db
     from ..config import config
@@ -80,27 +97,70 @@ def record_shadow(committed_plan, *, solve_kwargs: dict, price_pence: list[float
     tz = ZoneInfo(getattr(config, "BULLETPROOF_TIMEZONE", "Europe/London"))
     now = datetime.now(UTC)
     day = now.astimezone(tz).date().isoformat()
+    cap = int(getattr(config, "DHW_LP_OWNED_SHADOW_MAX_PER_DAY", 4))
 
-    # Throttle: a handful of solves a day is plenty to characterise the regime.
-    try:
-        todays = [r for r in db.get_dhw_shadow_rows(day) if r["day"] == day]
-        if len(todays) >= int(getattr(config, "DHW_LP_OWNED_SHADOW_MAX_PER_DAY", 4)):
+    # Throttle, fail-closed: the in-memory attempt counter trips even when the DB
+    # read/insert is failing (see the module constant's comment).
+    with _ATTEMPTS_LOCK:
+        attempts = _ATTEMPTS_BY_DAY.get(day, 0)
+        if attempts >= cap:
             return None
-    except Exception:  # noqa: BLE001 — a read failure must not block the shadow
+        _ATTEMPTS_BY_DAY[day] = attempts + 1
+        # Keep the dict from growing forever.
+        for stale in [d for d in _ATTEMPTS_BY_DAY if d != day]:
+            del _ATTEMPTS_BY_DAY[stale]
+    try:
+        if len([r for r in db.get_dhw_shadow_rows(day) if r["day"] == day]) >= cap:
+            return None
+    except Exception:  # noqa: BLE001 — memory counter above already bounds us
         pass
 
+    # --- Baseline arm: the fixed schedule, simulated honestly -------------------
+    try:
+        from . import comfort as _comfort
+        from .baseline import legionella_budget_by_slot, simulate_fixed_schedule
+        from .params import resolve_tank_params
+
+        starts = list(solve_kwargs["slot_starts_utc"])
+        weather = solve_kwargs["weather"]
+        preset = (config.OPTIMIZATION_PRESET or "normal").strip().lower()
+        p = resolve_tank_params()
+        draw = _comfort.declared_draw_kwh_for_slots(
+            starts, tz, preset=preset,
+            guest_count=int(getattr(config, "DHW_GUEST_COUNT", 2)),
+        )
+        leg = legionella_budget_by_slot(
+            starts, budget_kwh=float(getattr(config, "DHW_LEGIONELLA_BUDGET_KWH", 3.5)),
+        ) if bool(getattr(config, "DHW_LEGIONELLA_STANDOFF_ENABLED", True)) else None
+        override = simulate_fixed_schedule(
+            starts, tz,
+            tank0_c=float(solve_kwargs["initial"].tank_temp_c),
+            p=p,
+            t_out_by_slot=list(weather.temperature_outdoor_c),
+            draw_kwh_by_slot=draw,
+            legionella_kwh_by_slot=leg,
+        )
+        baseline_plan = solve_lp(**{**solve_kwargs, "pinned_dhw_override": override})
+    except Exception:  # noqa: BLE001 — the shadow must never break the committed solve
+        logger.debug("dhw shadow: baseline solve failed", exc_info=True)
+        return None
+    if not baseline_plan.ok:
+        return None
+
+    # --- LP-owned arm -------------------------------------------------------------
     try:
         shadow_plan = solve_lp(**{**solve_kwargs, "force_dhw_lp_owned": True})
-    except Exception:  # noqa: BLE001 — the shadow must never break the committed solve
-        logger.debug("dhw shadow: solve failed", exc_info=True)
+    except Exception:  # noqa: BLE001
+        logger.debug("dhw shadow: lp-owned solve failed", exc_info=True)
         return None
     if not shadow_plan.ok:
         return None
 
-    cost_pinned = grid_cost_pence(committed_plan, price_pence, export_price_pence)
+    cost_fixed = grid_cost_pence(baseline_plan, price_pence, export_price_pence)
     cost_lp = grid_cost_pence(shadow_plan, price_pence, export_price_pence)
-    preset = (config.OPTIMIZATION_PRESET or "normal").strip().lower()
     deficit = comfort_deficit_c(shadow_plan, tz, preset)
+    e_fixed = float(sum(baseline_plan.dhw_electric_kwh))
+    e_lp = float(sum(shadow_plan.dhw_electric_kwh))
 
     n_rows = None
     try:
@@ -115,18 +175,20 @@ def record_shadow(committed_plan, *, solve_kwargs: dict, price_pence: list[float
     row = {
         "run_at_utc": now.isoformat(),
         "day": day,
-        "cost_pinned_p": round(cost_pinned, 3),
+        "cost_pinned_p": round(cost_fixed, 3),
         "cost_lp_owned_p": round(cost_lp, 3),
-        "delta_p": round(cost_lp - cost_pinned, 3),
+        "delta_p": round(cost_lp - cost_fixed, 3),
         "comfort_deficit_c": round(deficit, 3),
+        "e_dhw_fixed_kwh": round(e_fixed, 3),
+        "e_dhw_lp_kwh": round(e_lp, 3),
         "n_tank_rows": n_rows,
     }
     try:
         db.insert_dhw_shadow(row)
     except Exception:  # noqa: BLE001
         logger.debug("dhw shadow: insert failed", exc_info=True)
-    logger.info("dhw shadow: Δ%.1fp comfort_deficit=%.1f°C rows=%s",
-                row["delta_p"], row["comfort_deficit_c"], n_rows)
+    logger.info("dhw shadow: Δ%.1fp comfort=%.1f°C heat fixed/lp %.2f/%.2f kWh rows=%s",
+                row["delta_p"], row["comfort_deficit_c"], e_fixed, e_lp, n_rows)
     return row
 
 
@@ -137,7 +199,9 @@ def evaluate_gate() -> dict:
       * at least ``MIN_DAYS`` distinct days shadowed;
       * the per-day MEDIAN Δ is a saving of at least ``MIN_SAVING_PENCE`` a day;
       * ZERO days with any comfort deficit — comfort is not for sale;
-      * the plan stays within the Daikin quota (p90 tank rows ≤ cap).
+      * heat parity on every day (the arms stayed comparable);
+      * EVERY solve within the Daikin row quota (strict: one over-cap plan blocks —
+        deliberately harsher than a p90, because rows are writes and writes are quota).
     """
     from .. import db
     from ..config import config
@@ -158,14 +222,19 @@ def evaluate_gate() -> dict:
 
     n_days = len(by_day)
     breach_days = [d for d, rs in by_day.items() if any(x["comfort_deficit_c"] > 0.5 for x in rs)]
-    # Per-day median delta (one representative per day = its median row).
     day_deltas = []
-    row_p90_ok = True
+    rows_within_quota = True   # every solve's plan compresses to ≤ max_rows
+    energy_parity_ok = True    # arms stayed comparable (loose band — see docstring)
     for _d, rs in by_day.items():
         ds = sorted(x["delta_p"] for x in rs)
         day_deltas.append(ds[len(ds) // 2])
         if any((x["n_tank_rows"] or 0) > max_rows for x in rs):
-            row_p90_ok = False
+            rows_within_quota = False
+        for x in rs:
+            ef = x.get("e_dhw_fixed_kwh")
+            el = x.get("e_dhw_lp_kwh")
+            if ef and el is not None and ef > 0.2 and not (0.4 <= el / ef <= 2.5):
+                energy_parity_ok = False
     day_deltas.sort()
     median_delta = day_deltas[len(day_deltas) // 2]
     median_saving = -median_delta  # a saving is a negative delta
@@ -174,14 +243,16 @@ def evaluate_gate() -> dict:
         n_days >= min_days
         and not breach_days
         and median_saving >= min_saving
-        and row_p90_ok
+        and rows_within_quota
+        and energy_parity_ok
     )
     return {
         "ready": ready,
         "days": n_days,
         "median_saving_pence": round(median_saving, 2),
         "comfort_breach_days": len(breach_days),
-        "rows_within_quota": row_p90_ok,
+        "rows_within_quota": rows_within_quota,
+        "energy_parity_ok": energy_parity_ok,
         "min_days": min_days,
         "min_saving_pence": min_saving,
     }
@@ -208,8 +279,9 @@ def maybe_suggest_enable() -> None:
 
     msg = (
         f"DHW LP-owned is ready to enable: {gate['days']} shadow days, median "
-        f"{gate['median_saving_pence']:.1f}p/day saved, zero comfort breaches. "
-        f"Set DHW_LP_OWNED_ENABLED=true to hand the tank to the LP (dhw_policy stays "
+        f"{gate['median_saving_pence']:.1f}p/day saved vs the simulated fixed "
+        f"schedule, zero comfort breaches, heat parity held. Set "
+        f"DHW_LP_OWNED_ENABLED=true to hand the tank to the LP (dhw_policy stays "
         f"as the kill switch)."
     )
     try:

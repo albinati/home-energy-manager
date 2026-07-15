@@ -4,7 +4,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import math
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import TYPE_CHECKING, Any
 
@@ -1275,6 +1275,56 @@ def _write_lwt_preheat_actions(
     return count
 
 
+def _legionella_windows_utc(slot_starts_utc: list[datetime]) -> list[tuple[datetime, datetime]]:
+    """The firmware's legionella stand-off windows intersecting the horizon (UTC)."""
+    if not bool(getattr(config, "DHW_LEGIONELLA_STANDOFF_ENABLED", True)):
+        return []
+    dow = int(getattr(config, "DHW_LEGIONELLA_STANDOFF_DOW", 6))
+    hh = int(getattr(config, "DHW_LEGIONELLA_STANDOFF_START_HOUR_UTC", 11))
+    mm = int(getattr(config, "DHW_LEGIONELLA_STANDOFF_START_MINUTE_UTC", 0))
+    dur = int(getattr(config, "DHW_LEGIONELLA_STANDOFF_DURATION_MINUTES", 120))
+    days = {st.date() for st in slot_starts_utc}
+    out = []
+    for d in days:
+        if d.weekday() != dow:
+            continue
+        start = datetime(d.year, d.month, d.day, hh, mm, tzinfo=UTC)
+        out.append((start, start + timedelta(minutes=dur)))
+    return sorted(out)
+
+
+def _trim_rows_around_legionella(rows, slot_starts_utc):
+    """Cut the legionella windows OUT of any overlapping row, keeping the parts
+    outside. Checking only a row's start is not enough: run-length-encoded blocks can
+    span hours, and a setback that starts Saturday night crosses straight through the
+    Sunday window — HEM must not write into a window it declared firmware-owned, but
+    the household still needs a target on both sides of it."""
+    windows = _legionella_windows_utc(list(slot_starts_utc))
+    if not windows:
+        return list(rows)
+    out = []
+    for r in rows:
+        pieces = [(r.start_utc, r.end_utc)]
+        for ws, we in windows:
+            next_pieces = []
+            for ps, pe in pieces:
+                if pe <= ws or ps >= we:
+                    next_pieces.append((ps, pe))  # no overlap
+                    continue
+                if ps < ws:
+                    next_pieces.append((ps, ws))
+                if pe > we:
+                    next_pieces.append((we, pe))
+            pieces = next_pieces
+        for ps, pe in pieces:
+            if (pe - ps) >= timedelta(minutes=30):
+                out.append(type(r)(
+                    action_type=r.action_type, start_utc=ps, end_utc=pe,
+                    tank_temp_c=r.tank_temp_c, tank_powerful=r.tank_powerful,
+                ))
+    return out
+
+
 def _write_lp_owned_tank_schedule(plan_date: str, plan: LpPlan) -> int:
     """Translate the LP-owned tank trajectory into Daikin rows (#714).
 
@@ -1324,11 +1374,12 @@ def _write_lp_owned_tank_schedule(plan_date: str, plan: LpPlan) -> int:
                 except Exception:  # noqa: BLE001 — telemetry must not break dispatch
                     pass
 
-    # Drop rows inside the firmware-owned legionella stand-off (the firmware drives the
-    # tank there; a HEM write is arbitrated/wasted). The LP already budgeted the load.
-    from ..state_machine import in_legionella_standoff
-
-    kept = [r for r in rows if not in_legionella_standoff(r.start_utc)]
+    # Trim rows around the firmware-owned legionella stand-off (the firmware drives the
+    # tank there; a HEM write inside is arbitrated/wasted). TRIM, not drop: a long
+    # setback row that merely CROSSES the Sunday window must keep its before/after
+    # parts — dropping it entirely would leave the tank with no target for hours. The
+    # LP already budgeted the cycle's energy.
+    kept = _trim_rows_around_legionella(rows, plan.slot_starts_utc)
 
     count = 0
     for r in kept:
