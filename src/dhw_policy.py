@@ -1012,7 +1012,17 @@ def _dhw_autoscale_factor(mode: str) -> float:
         if len(vals) >= min_days and nominal > 0:
             lo = float(getattr(config, "DHW_FORECAST_AUTOSCALE_MIN", 0.5))
             hi = float(getattr(config, "DHW_FORECAST_AUTOSCALE_MAX", 1.6))
-            factor = max(lo, min(hi, statistics.median(vals) / nominal))
+            # #721 — truncation-bias correction. The Onecta daily counter TRUNCATES
+            # to whole kWh (a 0.6 kWh reheat reads 0 — see daikin/service.py, #425),
+            # so the median under-reads by half the quantisation step on average.
+            # Uncorrected, the current window's raw ratio (median 1.0 / nominal 3.0
+            # = 0.33) slams into the 0.5 clamp floor — which happens to equal the
+            # TRUE ratio ((1.0+0.5)/3.0 = 0.5), so the forecast was right only by
+            # coincidence, and any drift in nominal (guests, a price-aware warmup
+            # hour changing the slot count) or in usage would silently break it.
+            # Correct the numerator; the clamp goes back to being a safety bound.
+            trunc = float(getattr(config, "DHW_COUNTER_TRUNCATION_KWH", 1.0)) / 2.0
+            factor = max(lo, min(hi, (statistics.median(vals) + trunc) / nominal))
             # The numerator is mode-blind (measured days don't say which mode
             # they ran in) while the denominator is mode-aware. Right after a
             # normal→guests flip the median still reflects normal-mode days
