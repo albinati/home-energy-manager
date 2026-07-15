@@ -1812,6 +1812,11 @@ class Config:
     DHW_LP_OWNED_GATE_DEADBAND_PENCE: float = float(
         os.getenv("DHW_LP_OWNED_GATE_DEADBAND_PENCE", "1.0")
     )
+    # Winter watch: one-shot Telegram ping when the shadow has this many scored days
+    # whose mean outdoor temperature sat below the threshold — the owner's "tell me
+    # when the winter evidence exists" (summer measured a wash; winter is the thesis).
+    DHW_SHADOW_WINTER_TEMP_C: float = float(os.getenv("DHW_SHADOW_WINTER_TEMP_C", "12.0"))
+    DHW_SHADOW_WINTER_MIN_DAYS: int = int(os.getenv("DHW_SHADOW_WINTER_MIN_DAYS", "14"))
     DHW_WATER_CP: float = float(os.getenv("DHW_WATER_CP", "4186"))  # J/(kg·K)
     # Building envelope + thermal mass for the single-zone model (estimator
     # fallback today; the LP t_in restore in #540 will consume these too).

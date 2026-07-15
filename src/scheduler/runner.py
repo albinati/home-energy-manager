@@ -917,6 +917,13 @@ def bulletproof_thermal_learning_job() -> None:
         maybe_suggest_enable()
     except Exception as e:
         logger.warning("dhw lp-owned gate check failed (non-fatal): %s", e)
+    # Winter watch (#714): one-shot Telegram when the shadow has real winter evidence
+    # (the summer verdict was a wash; winter is the open thesis) + a stall watchdog.
+    try:
+        from ..dhw.shadow import maybe_notify_winter_data
+        maybe_notify_winter_data()
+    except Exception as e:
+        logger.warning("dhw winter watch failed (non-fatal): %s", e)
 
 
 def bulletproof_load_error_log_job() -> None:

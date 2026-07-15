@@ -5547,6 +5547,24 @@ def get_dhw_calibration(component: str) -> dict[str, Any] | None:
             conn.close()
 
 
+def get_daily_mean_outdoor_c(since_day_iso: str) -> dict[str, float]:
+    """Mean LIVE outdoor temperature per UTC day since ``since_day_iso`` — the
+    seasonal classifier for the DHW shadow's winter watch (#714). UTC days are fine
+    for a seasonal question; live rows only for the usual echo reason."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT date(fetched_at,'unixepoch') d, AVG(outdoor_temp_c) t "
+                "FROM daikin_telemetry WHERE source='live' AND outdoor_temp_c IS NOT NULL "
+                "AND date(fetched_at,'unixepoch') >= ? GROUP BY d",
+                (since_day_iso,),
+            )
+            return {str(r[0]): float(r[1]) for r in cur.fetchall()}
+        finally:
+            conn.close()
+
+
 def get_tank_temps_range(start_epoch: float, end_epoch: float) -> list[tuple[float, float]]:
     """``(fetched_at, tank_temp_c)`` LIVE rows in ``[start, end)``, ascending.
 
