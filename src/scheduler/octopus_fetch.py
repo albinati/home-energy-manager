@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -16,8 +17,26 @@ logger = logging.getLogger(__name__)
 _RETRY_DELAYS_SEC = [600, 1800, 3600]
 
 
+# The daily cron (16:05 local) and the 10-min retry job are distinct
+# APScheduler jobs sharing a thread pool — per-job max_instances doesn't stop
+# them overlapping. A full fetch runs calibrations + an LP solve (minutes on a
+# slow host), so serialize: the loser skips and lets the winner finish (#726
+# review, finding 4).
+_fetch_in_flight = threading.Lock()
+
+
 def fetch_and_store_rates(fox: FoxESSClient | None = None) -> dict[str, Any]:
     """Fetch Agile rates, store in DB, run optimizer. Updates octopus_fetch_state."""
+    if not _fetch_in_flight.acquire(blocking=False):
+        logger.info("Octopus fetch already in flight — skipping concurrent call")
+        return {"ok": False, "error": "fetch already in flight"}
+    try:
+        return _fetch_and_store_rates_locked(fox)
+    finally:
+        _fetch_in_flight.release()
+
+
+def _fetch_and_store_rates_locked(fox: FoxESSClient | None = None) -> dict[str, Any]:
     tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
     now = datetime.now(UTC)
     db.update_octopus_fetch_state(last_attempt_at=now.isoformat())
@@ -133,8 +152,14 @@ def fetch_and_store_rates(fox: FoxESSClient | None = None) -> dict[str, Any]:
             # write the hardware on this path, regardless of LP_MPC_WRITE_DEVICES.
             from .runner import bulletproof_mpc_job
 
-            bulletproof_mpc_job(force_write_devices=True, trigger_reason="octopus_fetch")
-            summary["optimizer"] = {"ok": True, "trigger": "octopus_fetch"}
+            # bulletproof_mpc_job returns falsy when the cooldown gate or the
+            # dispatch lock skipped the solve — report that honestly so the
+            # #726 gap retry can arm a pending re-solve instead of assuming
+            # the fresh rates were priced into a committed plan.
+            solved = bulletproof_mpc_job(
+                force_write_devices=True, trigger_reason="octopus_fetch"
+            )
+            summary["optimizer"] = {"ok": bool(solved), "trigger": "octopus_fetch"}
         except Exception as e:
             logger.exception("Optimizer after fetch failed: %s", e)
             summary["optimizer_error"] = str(e)
@@ -196,6 +221,140 @@ def _maybe_survival_mode(
 # merely attempted.
 _export_resolve_pending = False
 _export_gap_last_warn_at: datetime | None = None
+
+
+_import_gap_last_attempt_at: datetime | None = None
+_import_gap_last_warn_at: datetime | None = None
+# Mirrors _export_resolve_pending (#691): fresh import coverage must not go
+# unpriced just because the fetch's internal re-solve hit the MPC cooldown or
+# the dispatch lock. Armed when a gap-retry fetch advances coverage but the
+# solve was skipped; cleared only when a solve actually completes.
+_import_resolve_pending = False
+
+
+def import_rates_coverage_gap(now_utc: datetime | None = None) -> bool:
+    """True when ``agile_rates`` coverage is missing rates we should have (#726).
+
+    The daily fetch races Octopus's ~16:00-local publication: a fetch that
+    lands minutes early stores today's curve, records SUCCESS (no failure
+    streak), and nothing retried — tomorrow stayed rateless until the next
+    day's fetch, degrading the nightly plan push AND leaving the family
+    calendar without tomorrow's windows (observed 2026-07-16). This is the
+    import-side twin of ``export_rates_coverage_gap`` (#691).
+
+    Two clauses:
+
+    * coverage short of TODAY ~18:00 local → gap at ANY hour. This is the
+      post-midnight continuation of a day-long publication outage: the
+      missing day becomes "today" at 00:00 and a fetch-due test alone would
+      disarm exactly when the plan is running rateless (review finding).
+    * past the fetch-due moment (fetch hour + 15 min grace; unsupported for
+      fetch hours ≥ ~23:45 local, where fetch-due rolls past midnight) →
+      gap when coverage is short of TOMORROW ~18:00 local. Tomorrow's batch
+      runs to ~23:00 local, so 18:00 is a safe "tomorrow landed" test.
+
+    An empty table is NOT reported here: that's failure-streak territory,
+    handled by ``should_run_retry_fetch``.
+    """
+    tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
+    if not tariff:
+        return False
+    cov = db.get_agile_rates_coverage_max("agile_rates", tariff_code=tariff)
+    if not cov:
+        return False
+    try:
+        cov_dt = datetime.fromisoformat(str(cov).replace("Z", "+00:00"))
+        if cov_dt.tzinfo is None:
+            cov_dt = cov_dt.replace(tzinfo=UTC)
+    except ValueError:
+        return False
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+    now_local = (now_utc or datetime.now(UTC)).astimezone(tz)
+    today_evening = now_local.replace(hour=18, minute=0, second=0, microsecond=0)
+    if cov_dt < today_evening.astimezone(UTC):
+        return True
+    fetch_due = now_local.replace(
+        hour=int(config.OCTOPUS_FETCH_HOUR),
+        minute=int(config.OCTOPUS_FETCH_MINUTE),
+        second=0,
+        microsecond=0,
+    ) + timedelta(minutes=15)
+    if now_local < fetch_due:
+        return False
+    tomorrow_evening = (now_local + timedelta(days=1)).replace(
+        hour=18, minute=0, second=0, microsecond=0
+    )
+    return cov_dt < tomorrow_evening.astimezone(UTC)
+
+
+def retry_import_rates_if_gap(fox: FoxESSClient | None = None) -> dict[str, Any]:
+    """Close an import-rates coverage gap (#726). Called from the 10-min retry job.
+
+    Cheap while Octopus is late: each attempt (≥ 30 min apart) PROBES with one
+    rates GET and compares against current coverage — the full
+    ``fetch_and_store_rates`` path (calibrations, Fox sync, forced re-solve)
+    only runs when the probe shows new coverage to store. Warns at most
+    hourly while the gap persists.
+
+    When the full fetch's internal re-solve is skipped (MPC cooldown /
+    dispatch lock), a pending re-solve is armed and retried every tick until
+    a solve completes — fresh prices must end up in a committed plan
+    (mirrors ``_export_resolve_pending``, #691).
+    """
+    global _import_gap_last_attempt_at, _import_gap_last_warn_at, _import_resolve_pending
+    if _import_resolve_pending and _resolve_after_export_rates():
+        _import_resolve_pending = False
+    if not import_rates_coverage_gap():
+        _import_gap_last_warn_at = None
+        return {"ok": True, "gap": False, "fetched": False,
+                "resolve_pending": _import_resolve_pending}
+    now = datetime.now(UTC)
+    if (
+        _import_gap_last_attempt_at is not None
+        and now - _import_gap_last_attempt_at < timedelta(minutes=30)
+    ):
+        return {"ok": False, "gap": True, "fetched": False, "throttled": True}
+    _import_gap_last_attempt_at = now
+
+    # Probe: one GET, no side effects. Skip the heavyweight path when Octopus
+    # still hasn't published anything newer than what we already hold.
+    tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
+    cov = db.get_agile_rates_coverage_max("agile_rates", tariff_code=tariff)
+    try:
+        probe = fetch_agile_rates(tariff_code=tariff)
+    except Exception as e:
+        logger.warning("import-gap probe failed (non-fatal): %s", e)
+        probe = []
+    probe_max = max((str(r.get("valid_from") or "") for r in probe), default="")
+    if not probe_max or (cov and probe_max <= str(cov)):
+        if (
+            _import_gap_last_warn_at is None
+            or now - _import_gap_last_warn_at >= timedelta(hours=1)
+        ):
+            _import_gap_last_warn_at = now
+            logger.warning(
+                "tomorrow's import rates still unpublished (probe max %s, have %s) "
+                "— Octopus late; probing every 30 min, warning hourly (#726)",
+                probe_max or "none", cov,
+            )
+        return {"ok": False, "gap": True, "fetched": False, "advanced": False}
+
+    result = fetch_and_store_rates(fox)
+    opt_ok = bool((result.get("optimizer") or {}).get("ok")) if result.get("ok") else False
+    if result.get("ok") and not opt_ok:
+        _import_resolve_pending = True
+    still = import_rates_coverage_gap()
+    if not still:
+        _import_gap_last_warn_at = None
+        logger.info(
+            "import-rates gap closed (#726) — new Agile coverage landed via gap "
+            "retry (fetch ok=%s, solved=%s, resolve_pending=%s)",
+            result.get("ok"), opt_ok, _import_resolve_pending,
+        )
+    return {"ok": not still, "gap": still, "fetched": True, "fetch": result,
+            "resolve_pending": _import_resolve_pending}
 
 
 def export_rates_coverage_gap() -> bool:
