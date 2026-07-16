@@ -306,3 +306,114 @@ def test_soc_drift_trigger_runs_scenarios_and_charge_floor_but_manual_does_not(
     assert result_manual["ok"] is True, result_manual
     assert result_manual["scenarios_run"] is False
     assert not floor_seen and not floor_resolves
+
+
+# --- #728: LP_PESS_CHARGE_FLOOR_SCOPE=peak_entry --------------------------------
+
+@pytest.fixture(autouse=True)
+def _pin_tz(monkeypatch):
+    # The peak-entry classifier groups slots by config.BULLETPROOF_TIMEZONE —
+    # pin it so a host env override can't shift the local-day grouping and
+    # move the expected entry indices. January dates → London == UTC.
+    monkeypatch.setattr(config, "BULLETPROOF_TIMEZONE", "Europe/London")
+    yield
+
+
+def _day_plan(soc_flat=2.0, *, peak=range(34, 42), base_p=15.0, peak_p=40.0):
+    """48-slot day from local midnight (January → Europe/London == UTC) with a
+    4 h severe/expensive evening window (40p vs 15p median → ≥1.5× + >30p)."""
+    n = 48
+    plan = SimpleNamespace(
+        ok=True, status="Optimal", objective_pence=100.0,
+        slot_starts_utc=[
+            datetime(2026, 1, 15, 0, 0, tzinfo=UTC) + timedelta(minutes=30 * i)
+            for i in range(n)
+        ],
+        soc_kwh=[soc_flat] * (n + 1),
+        price_pence=[peak_p if i in peak else base_p for i in range(n)],
+    )
+    return plan
+
+
+def test_peak_entry_indices_find_the_evening_window():
+    plan = _day_plan()
+    idx = opt_mod._peak_entry_floor_indices(plan.slot_starts_utc, plan.price_pence)
+    assert idx == [34]
+
+
+def test_peak_entry_scope_floors_only_the_entry_boundary(monkeypatch):
+    monkeypatch.setattr(config, "LP_PESS_CHARGE_FLOOR_SCOPE", "peak_entry")
+    nominal = _day_plan(2.0)
+    pess = _day_plan(2.0)
+    pess.soc_kwh = [6.0] * 49                        # pessimistic wants 6.0 held
+    floored = _day_plan(6.0)
+    floored.objective_pence = 108.0
+    floored.soc_floor_slack_kwh = 0.0
+    captured = {}
+
+    def fake_solve(**kw):
+        captured["floor"] = kw.get("soc_floor_kwh")
+        return floored
+
+    monkeypatch.setattr("src.scheduler.lp_optimizer.solve_lp", fake_solve)
+    snap = {}
+    out = opt_mod._apply_pessimistic_charge_floor(
+        nominal, {"pessimistic": SimpleNamespace(plan=pess)},
+        solve_kwargs={}, exogenous_snapshot=snap,
+    )
+    assert out is floored
+    tol = float(config.LP_PESS_CHARGE_FLOOR_TOLERANCE_KWH)
+    floor = captured["floor"]
+    # ONLY slot 33 — the boundary entering the 17:00 window — carries a floor:
+    # soc[34] (peak-entry SoC) is end-of-slot-33 in constraint indexing.
+    assert floor[33] == pytest.approx(6.0 - tol)
+    assert all(f == 0.0 for i, f in enumerate(floor) if i != 33)
+    assert snap["pess_charge_floor"]["scope"] == "peak_entry"
+    assert snap["pess_charge_floor"]["entry_slots"] == [34]
+    assert snap["pess_charge_floor"]["binding_slots"] == 1
+
+
+def test_peak_entry_scope_no_resolve_when_nominal_covers_entry(monkeypatch):
+    """Nominal already ≥ pess at the peak boundary → no re-solve even though
+    the pessimistic TRAJECTORY is higher elsewhere (the whole point of #728:
+    mid-morning path differences alone must not force a grid charge)."""
+    monkeypatch.setattr(config, "LP_PESS_CHARGE_FLOOR_SCOPE", "peak_entry")
+    nominal = _day_plan(2.0)
+    nominal.soc_kwh = [2.0] * 34 + [6.5] * 15        # fills by the entry, late
+    pess = _day_plan(2.0)
+    pess.soc_kwh = [6.0] * 49                        # higher path ALL day
+    called = []
+    monkeypatch.setattr(
+        "src.scheduler.lp_optimizer.solve_lp", lambda **kw: called.append(1)
+    )
+    out = opt_mod._apply_pessimistic_charge_floor(
+        nominal, {"pessimistic": SimpleNamespace(plan=pess)},
+        solve_kwargs={}, exogenous_snapshot={},
+    )
+    assert out is nominal and not called
+
+
+def test_trajectory_scope_stays_default_and_stamped(monkeypatch):
+    nominal = _fake_plan([2.0, 2.0, 2.0, 2.0, 2.0])
+    pess = _fake_plan([2.0, 4.0, 6.0, 6.0, 5.0])
+    floored = _fake_plan([2.0, 4.0, 6.0, 6.0, 5.0], obj=110.0)
+    floored.soc_floor_slack_kwh = 0.0
+    monkeypatch.setattr("src.scheduler.lp_optimizer.solve_lp", lambda **kw: floored)
+    snap = {}
+    opt_mod._apply_pessimistic_charge_floor(
+        nominal, {"pessimistic": SimpleNamespace(plan=pess)},
+        solve_kwargs={}, exogenous_snapshot=snap,
+    )
+    assert snap["pess_charge_floor"]["scope"] == "trajectory"
+    assert snap["pess_charge_floor"]["entry_slots"] == []
+
+
+def test_peak_entry_merges_contiguous_expensive_and_severe_windows():
+    """An expensive window butted against a severe_peak one is the SAME peak
+    for charging purposes — one entry, not one per tier transition."""
+    plan = _day_plan()
+    # 15:00-17:00 expensive (28p > 25p abs floor), 17:00-21:00 severe (40p)
+    for i in range(30, 34):
+        plan.price_pence[i] = 28.0
+    idx = opt_mod._peak_entry_floor_indices(plan.slot_starts_utc, plan.price_pence)
+    assert idx == [30]

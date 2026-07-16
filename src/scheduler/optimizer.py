@@ -1565,6 +1565,53 @@ def _build_export_price_line(slot_starts_utc: list[datetime]) -> list[float] | N
     return out
 
 
+def _peak_entry_floor_indices(
+    slot_starts_utc: list[datetime], prices: list[float]
+) -> list[int]:
+    """Slot indices where an ``expensive`` / ``severe_peak`` tier window begins.
+
+    Reuses the calendar/tier classifier per LOCAL day (same smoothing, same
+    median) so the "peak" the charge floor protects is word-for-word the one
+    the family calendar shows and the tier_boundary MPC triggers fire for.
+    On a mid-day replan the first local day is partial — the classifier then
+    works on the remaining slots' median, which is the horizon the floor is
+    protecting anyway.
+    """
+    from zoneinfo import ZoneInfo
+
+    from ..google_calendar.tiers import Slot, classify_day
+
+    tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+    n = min(len(slot_starts_utc), len(prices))
+    by_day: dict[Any, list[Slot]] = {}
+    for i in range(n):
+        st = slot_starts_utc[i]
+        by_day.setdefault(st.astimezone(tz).date(), []).append(
+            Slot(
+                start_utc=st,
+                end_utc=st + timedelta(minutes=30),
+                price_p=float(prices[i]),
+            )
+        )
+    start_to_idx = {slot_starts_utc[i]: i for i in range(n)}
+    peak_keys = ("expensive", "severe_peak")
+    out: set[int] = set()
+    for _, slots in sorted(by_day.items()):
+        prev_peak_end = None
+        for w in classify_day(slots):
+            if w.tier.key not in peak_keys:
+                continue
+            # A severe_peak window butted against an expensive one is the SAME
+            # peak for charging purposes — only the entry from a non-peak tier
+            # counts, or the boundary would fragment into several floors.
+            if prev_peak_end != w.start_utc:
+                j = start_to_idx.get(w.start_utc)
+                if j is not None:
+                    out.add(j)
+            prev_peak_end = w.end_utc
+    return sorted(out)
+
+
 def _apply_pessimistic_charge_floor(
     plan: Any,
     scenarios_dict: dict[str, Any],
@@ -1605,9 +1652,39 @@ def _apply_pessimistic_charge_floor(
             getattr(pess_plan, "pre_negative_export_slots", []) or []
         )
         _prices = list(getattr(plan, "price_pence", []) or [])
+        # Scope (#728). ``trajectory`` (default): floor every slot of the first
+        # LP_PESS_CHARGE_FLOOR_HOURS at the pessimistic SoC path — maximally
+        # protective but over-specifies WHEN energy must arrive (measured
+        # 2026-07-16: forced a 16-18p morning grid charge, battery full 2 h
+        # before the peak, then ~4.5 kWh of afternoon PV exported at 10-21p).
+        # ``peak_entry``: floor only the boundary ENTERING each expensive /
+        # severe_peak tier window — the LP re-times charging freely (afternoon
+        # PV fill stays available) while the insured event, "full enough when
+        # the peak starts, under pessimistic assumptions", is unchanged.
+        # Accepted nuance: the shared exemptions below apply to the boundary
+        # slot (j-1), so a peak entered DIRECTLY from a negative-price or
+        # pre-negative-drain slot carries no floor — after a negative window
+        # the battery is full (the LP charges hard on being paid), so the
+        # insured event can't materialise there anyway.
+        scope = (
+            str(getattr(config, "LP_PESS_CHARGE_FLOOR_SCOPE", "trajectory"))
+            .strip()
+            .lower()
+        )
+        entry_slots: list[int] = []
+        if scope == "peak_entry":
+            entry_slots = _peak_entry_floor_indices(plan.slot_starts_utc, _prices)
+            # soc[j] (SoC at the window's first instant) is end-of-slot j-1 in
+            # the constraint indexing; a window starting at slot 0 has no
+            # boundary to floor (initial SoC is fixed).
+            candidates = [j - 1 for j in entry_slots if j >= 1]
+        else:
+            candidates = list(range(min(n, max_slots)))
         floor = [0.0] * n
         binding = 0
-        for i in range(min(n, max_slots)):
+        for i in candidates:
+            if i >= min(n, max_slots):
+                continue
             if i in _skip or (i < len(_prices) and float(_prices[i]) < 0.0):
                 continue
             f = max(0.0, float(pess_plan.soc_kwh[i + 1]) - tol)
@@ -1643,6 +1720,8 @@ def _apply_pessimistic_charge_floor(
             "slack_kwh": round(slack, 3),
             "tolerance_kwh": tol,
             "hours": hours,
+            "scope": scope,
+            "entry_slots": entry_slots,
         }
         return floored
     except Exception:
