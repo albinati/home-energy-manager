@@ -997,6 +997,18 @@ class Config:
     LP_PESS_CHARGE_FLOOR_SLACK_PENALTY_PENCE: float = float(
         os.getenv("LP_PESS_CHARGE_FLOOR_SLACK_PENALTY_PENCE", "50.0")
     )
+    # #728 — WHERE the pessimistic floor applies.
+    #   trajectory (default): every slot of the first LP_PESS_CHARGE_FLOOR_HOURS
+    #     — maximally protective, but over-specifies WHEN energy must arrive
+    #     (2026-07-16: forced morning grid charge at 16-18p, battery full 2 h
+    #     early, afternoon PV exported at 10-21p).
+    #   peak_entry: only the boundary entering each expensive/severe_peak tier
+    #     window (same classifier as the family calendar) — the LP re-times
+    #     charging freely; the insured event ("full enough at peak start under
+    #     pessimistic assumptions") is unchanged.
+    LP_PESS_CHARGE_FLOOR_SCOPE: str = (
+        os.getenv("LP_PESS_CHARGE_FLOOR_SCOPE", "trajectory") or "trajectory"
+    ).strip().lower()
     # PR D (2026-07-02 audit) — adjacent ForceCharge Fox rows merge only within
     # the same intent class: HOLD (fdSoc <= this threshold, i.e. "hold at
     # reserve, don't fill") vs FILL (higher targets). A negative_hold merged
