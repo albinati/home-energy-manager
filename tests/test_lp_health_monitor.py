@@ -45,10 +45,12 @@ def test_negative_discharge_ignored_without_negative_slots():
 
 
 def test_floor_insurance_breach_flagged():
-    issues = _ev(floor_insurance_24h_pence=300.0)
+    # per-solve MAX semantics (#727): one 300p solve pages...
+    issues = _ev(floor_insurance_max_pence=300.0)
     assert len(issues) == 1 and "seguro" in issues[0]
-    # below threshold → healthy
-    assert _ev(floor_insurance_24h_pence=80.0) == []
+    # ...but a sub-threshold worst solve is healthy no matter how many replans
+    # re-priced it (the old SUM would have paged on frequency alone).
+    assert _ev(floor_insurance_max_pence=80.0) == []
 
 
 def test_floor_slack_breach_flagged():

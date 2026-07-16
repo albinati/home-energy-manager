@@ -761,6 +761,7 @@ def bulletproof_octopus_retry_job() -> None:
     from .octopus_fetch import (
         fetch_and_store_rates,
         retry_export_rates_if_gap,
+        retry_import_rates_if_gap,
         should_run_retry_fetch,
     )
 
@@ -771,6 +772,22 @@ def bulletproof_octopus_retry_job() -> None:
         except Exception as e:  # pragma: no cover
             logger.debug("tier_boundary re-register after retry failed: %s", e)
         return
+    # #726 — the daily fetch can also SUCCEED before Octopus publishes
+    # tomorrow's import curve (race at ~16:00 local): no failure streak, yet
+    # tomorrow is rateless — nightly plan push degrades and the family
+    # calendar stays empty. Re-run the full fetch (≥30 min spacing) until
+    # tomorrow's coverage lands; a fetch here also refreshes exports, so the
+    # export-only retry below is skipped this tick.
+    try:
+        res = retry_import_rates_if_gap(_try_fox())
+        if res.get("fetched"):
+            try:
+                _register_tier_boundary_triggers()
+            except Exception as e:  # pragma: no cover
+                logger.debug("tier_boundary re-register after gap retry failed: %s", e)
+            return
+    except Exception as e:
+        logger.warning("import-rates gap retry failed (non-fatal): %s", e)
     # #691 — the import fetch can succeed while the Outgoing publication lags
     # by a few minutes (race at the daily fetch), leaving export coverage a
     # whole day behind with no failure streak to trigger the full retry above.
@@ -1053,7 +1070,7 @@ def _evaluate_lp_health(
     neg_discharge_kwh: float,
     max_infeasible: int,
     neg_discharge_thr: float,
-    floor_insurance_24h_pence: float = 0.0,
+    floor_insurance_max_pence: float = 0.0,
     floor_slack_max_kwh: float = 0.0,
     floor_insurance_thr_pence: float = 150.0,
     floor_slack_thr_kwh: float = 0.3,
@@ -1062,7 +1079,12 @@ def _evaluate_lp_health(
     strings (empty = healthy). Covers an LP-infeasible spike, the #607
     Backup-discharge bug regressing (battery discharging during negative
     prices), and — since PR B (pessimistic charge floor) — the floor costing
-    more insurance than it plausibly saves, or going unreachable (slack)."""
+    more insurance than it plausibly saves, or going unreachable (slack).
+
+    Floor insurance is the MAX per-solve cost in the window, not the sum:
+    drift-heavy days replan every ~5 min and each replan re-prices the SAME
+    structural insurance, so a 24h sum scales with replan frequency instead of
+    severity (#727 — a ~200p floor read as 1663p across ~30 solves)."""
     issues: list[str] = []
     if infeasible_24h > max_infeasible:
         issues.append(
@@ -1073,10 +1095,11 @@ def _evaluate_lp_health(
             f"bateria descarregou {neg_discharge_kwh:.2f} kWh durante {neg_slot_count} "
             f"slots de preço NEGATIVO (deveria ser ~0 — regressão do #607)"
         )
-    if floor_insurance_24h_pence > floor_insurance_thr_pence:
+    if floor_insurance_max_pence > floor_insurance_thr_pence:
         issues.append(
-            f"charge floor pessimista custou {floor_insurance_24h_pence:.0f}p de seguro em 24h "
-            f"(limite {floor_insurance_thr_pence:.0f}p) — avaliar LP_PESS_CHARGE_FLOOR_ENABLED=false"
+            f"charge floor pessimista: pior solve custou {floor_insurance_max_pence:.0f}p de seguro nas 24h "
+            f"(limite {floor_insurance_thr_pence:.0f}p) — revisar regime (#728) antes de tocar "
+            f"LP_PESS_CHARGE_FLOOR_ENABLED"
         )
     if floor_slack_max_kwh > floor_slack_thr_kwh:
         issues.append(
@@ -1119,12 +1142,13 @@ def bulletproof_lp_health_monitor_job() -> None:
                     (yday,),
                 ).fetchall()
             }
-            # PR B (pessimistic charge floor) observability: aggregate the
-            # per-solve insurance cost + slack from the persisted exogenous
-            # snapshots so a floor that costs more than it saves (or goes
-            # unreachable) pages instead of bleeding silently.
+            # PR B (pessimistic charge floor) observability: worst per-solve
+            # insurance cost + slack from the persisted exogenous snapshots so
+            # a floor that costs more than it saves (or goes unreachable)
+            # pages instead of bleeding silently. MAX, not SUM — replans
+            # re-price the same insurance (#727).
             floor_row = conn.execute(
-                "SELECT COALESCE(SUM(json_extract(exogenous_snapshot_json,"
+                "SELECT COALESCE(MAX(json_extract(exogenous_snapshot_json,"
                 " '$.pess_charge_floor.insurance_cost_pence')), 0),"
                 " COALESCE(MAX(json_extract(exogenous_snapshot_json,"
                 " '$.pess_charge_floor.slack_kwh')), 0)"
@@ -1132,7 +1156,7 @@ def bulletproof_lp_health_monitor_job() -> None:
                 " AND exogenous_snapshot_json LIKE '%pess_charge_floor%'",
                 (since,),
             ).fetchone()
-            floor_insurance_24h = float(floor_row[0] or 0.0)
+            floor_insurance_max = float(floor_row[0] or 0.0)
             floor_slack_max = float(floor_row[1] or 0.0)
         neg_discharge = 0.0
         if neg_slots:
@@ -1146,7 +1170,7 @@ def bulletproof_lp_health_monitor_job() -> None:
             neg_discharge_kwh=neg_discharge,
             max_infeasible=int(config.LP_HEALTH_MAX_INFEASIBLE_24H),
             neg_discharge_thr=float(config.LP_HEALTH_NEG_DISCHARGE_KWH),
-            floor_insurance_24h_pence=floor_insurance_24h,
+            floor_insurance_max_pence=floor_insurance_max,
             floor_slack_max_kwh=floor_slack_max,
             floor_insurance_thr_pence=float(
                 getattr(config, "LP_HEALTH_FLOOR_INSURANCE_24H_PENCE", 150.0)
