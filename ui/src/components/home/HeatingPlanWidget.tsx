@@ -1,10 +1,13 @@
-import { useEffect, useRef } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { makeChart, baseOption, chartTheme, areaGradient, withAlpha, timeAxis, insideZoom, forecastWash, isCoarsePointer, SLOT_MS as LW_SLOT_MS, type EChartsType } from "../../lib/charts";
 import { liveWindow, centerWindow, useLiveWindow, type LiveWindowBounds } from "../../lib/liveWindow";
 import { useChartPan } from "../../lib/navMotion";
+import { usePeriod } from "../../lib/period";
+import { fetchDayBundle } from "../../lib/dayCache";
+import { getIndoorReadings } from "../../lib/endpoints";
 import { useResolvedTheme } from "../../lib/theme";
 import { reducedMotion } from "../../lib/motion";
-import type { HeatingPlanResponse, ExecutionTodayResponse, IndoorReadingsResponse } from "../../lib/types";
+import type { HeatingPlanResponse, HeatingPlanSlot, ExecutionTodayResponse, IndoorReadingsResponse } from "../../lib/types";
 import { NowDot } from "../common/NowDot";
 import "./heating-plan.css";
 
@@ -23,6 +26,12 @@ function localHM(iso: string): string {
   return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
 }
 
+// Local-date ISO (matches lib/period.ts — NOT toISOString, which is UTC and
+// drifts across the BST midnight hour).
+function localISO(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
 // Heating-plan timeline (today), on one temperature axis. Colour = domain:
 //   • COOL (cyan/blue) = reference air temps — indoor REALISED (solid, room
 //     sensors) + outdoor forecast/ESTIMATE (dotted, Open-Meteo).
@@ -36,6 +45,38 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
   const chartRef = useRef<EChartsType | null>(null);
   const boundsRef = useRef<LiveWindowBounds | null>(null);
   const theme = useResolvedTheme();
+  // Follow the period navigator's DAY anchor (the widget was pinned to "today"
+  // while its siblings stepped days — the chart looked frozen/blank on
+  // yesterday). Week/month/year keep today: this is an intraday chart.
+  const { gran, anchor } = usePeriod();
+  const todayISO = localISO(new Date());
+  const dayISO = gran === "day" && anchor <= todayISO ? anchor : todayISO;
+  const isTodaySel = dayISO === todayISO;
+  // Past-day realised telemetry: the same day-bundle the Consumption chart
+  // uses (usually already prefetched by its neighbour warmer), plus indoor
+  // history stretched back far enough to cover the day (endpoint is
+  // hours-based, capped at 7 days — older days simply lose the indoor line).
+  const [pastExec, setPastExec] = useState<ExecutionTodayResponse | null>(null);
+  const [pastIndoor, setPastIndoor] = useState<IndoorReadingsResponse | null>(null);
+  useEffect(() => {
+    if (isTodaySel) { setPastExec(null); setPastIndoor(null); return; }
+    let alive = true;
+    setPastExec(null);
+    setPastIndoor(null);
+    void fetchDayBundle(dayISO).then((b) => { if (alive) setPastExec(b.exec); });
+    const daysBack = Math.round(
+      (Date.parse(`${todayISO}T00:00:00`) - Date.parse(`${dayISO}T00:00:00`)) / 86_400_000,
+    );
+    const hours = (daysBack + 1) * 24;
+    if (hours <= 168) {
+      getIndoorReadings(hours)
+        .then((r) => { if (alive) setPastIndoor(r); })
+        .catch(() => {});
+    }
+    return () => { alive = false; };
+  }, [dayISO, isTodaySel, todayISO]);
+  const execSrc = isTodaySel ? execution : pastExec;
+  const indoorSrc = isTodaySel ? indoor : pastIndoor;
   // Shares the live window with the Consumption chart (they pan/follow together,
   // vertically aligned). The single "● now" chip lives on Consumption and
   // re-follows all three, so this chart needs no chip of its own.
@@ -56,13 +97,32 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
   }, []);
 
   useEffect(() => {
-    if (!chartRef.current || !plan?.slots?.length) return;
+    if (!chartRef.current) return;
     const t = chartTheme();
     const base = baseOption();
-    // Today only — yesterday/tomorrow dropped (the user finds today enough).
-    const todayKey = new Date().toDateString();
-    const slots = plan.slots.filter((s) => new Date(s.slot_utc).toDateString() === todayKey);
-    if (!slots.length) return;
+    // Slots for the SELECTED day. The heating-plan API carries D-1/D/D+1, so
+    // yesterday/today keep the planned tank line; older days fall back to the
+    // day-bundle's execution slots (realised-only axis: tier via slot_kind,
+    // price via agile_p, no plan series — an honest historical view).
+    const dayKey = new Date(`${dayISO}T12:00:00`).toDateString();
+    let slots: HeatingPlanSlot[] = (plan?.slots ?? []).filter(
+      (s) => new Date(s.slot_utc).toDateString() === dayKey,
+    );
+    if (!slots.length && execSrc?.slots?.length) {
+      slots = execSrc.slots
+        .filter((e) => e.slot_utc && new Date(e.slot_utc).toDateString() === dayKey)
+        .map((e) => ({
+          slot_utc: e.slot_utc,
+          tier: (e.slot_kind as HeatingPlanSlot["tier"]) ?? null,
+          price_p: e.agile_p ?? null,
+        }));
+    }
+    if (!slots.length) {
+      // Nothing for this day (e.g. before telemetry started) — clear instead of
+      // silently keeping the previous day's chart on screen.
+      chartRef.current.clear();
+      return;
+    }
     const n = slots.length;
     const labels = slots.map((s) => localHM(s.slot_utc));
     // TIME AXIS — slot START instants; interval-true bands become literal.
@@ -71,9 +131,13 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
     const dayEndMs = axisMs[n - 1] + LW_SLOT_MS;
     const pair = (arr: Array<number | null>): Array<[number, number | null]> =>
       arr.map((v, i) => [axisMs[i], v]);
-    boundsRef.current = {
+    // Past day: opt OUT of the shared live window (bounds null → the follow
+    // tick and sibling pans don't reapply TODAY's window here, which ECharts
+    // would clamp to an arbitrary end-of-day crop). Same pattern as the
+    // Consumption chart's past-day view — the day renders whole and static.
+    boundsRef.current = !isTodaySel ? null : {
       dayStartMs, dayEndMs,
-      nowMs: plan.now_utc ? new Date(plan.now_utc).getTime() : Date.now(),
+      nowMs: plan?.now_utc ? new Date(plan.now_utc).getTime() : Date.now(),
     };
     const coarse = isCoarsePointer();
 
@@ -87,7 +151,7 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
     const SLOT_MS = 30 * 60_000;
     const bucket = (iso: string) => Math.floor(new Date(iso).getTime() / SLOT_MS);
     const lwtRealByBucket = new Map<number, number>();
-    for (const e of execution?.slots ?? []) {
+    for (const e of execSrc?.slots ?? []) {
       if (e.slot_utc && e.daikin_lwt_c != null) lwtRealByBucket.set(bucket(e.slot_utc), e.daikin_lwt_c);
     }
     const lwtReal = slots.map((s) => lwtRealByBucket.get(bucket(s.slot_utc)) ?? null);
@@ -96,7 +160,7 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
     // slot (#540 W1). Only slots the sensors covered have a value, so the solid
     // line appears from when the first sensor came online.
     const inSum = new Map<number, { sum: number; n: number }>();
-    for (const r of indoor?.readings ?? []) {
+    for (const r of indoorSrc?.readings ?? []) {
       if (r.captured_at == null || r.temp_c == null) continue;
       const b = bucket(r.captured_at);
       const cur = inSum.get(b) ?? { sum: 0, n: 0 };
@@ -113,7 +177,7 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
 
     // REALISED tank temp — the Daikin's logged tank temperature per slot.
     const tankRealByBucket = new Map<number, number>();
-    for (const e of execution?.slots ?? []) {
+    for (const e of execSrc?.slots ?? []) {
       if (e.slot_utc && e.daikin_tank_c != null) tankRealByBucket.set(bucket(e.slot_utc), e.daikin_tank_c);
     }
     const tankReal = slots.map((s) => tankRealByBucket.get(bucket(s.slot_utc)) ?? null);
@@ -138,10 +202,10 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
     runs((i) => slots[i].tier === "peak", { color: withAlpha(t.peak, 0.10) });
     runs((i) => slots[i].tier === "negative", { color: withAlpha(t.neg, 0.22), borderColor: withAlpha(t.neg, 0.85), borderWidth: 1 });
 
-    const nowMs = plan.now_utc ? new Date(plan.now_utc).getTime() : Date.now();
+    const nowMs = plan?.now_utc ? new Date(plan.now_utc).getTime() : Date.now();
     const nowInRange = nowMs >= dayStartMs && nowMs < dayEndMs;
     // Day boundary lines → real timestamps.
-    const dayLines = (plan.days || [])
+    const dayLines = (plan?.days || [])
       .map((d) => new Date(d.start_utc).getTime())
       .filter((ms) => ms > dayStartMs && ms < dayEndMs)
       .map((ms) => ({ xAxis: ms, lineStyle: { color: withAlpha(t.textMute, 0.35), width: 1, type: "solid" as const }, label: { show: false } }));
@@ -151,9 +215,13 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
     const washArea = nowInRange ? forecastWash(nowMs, dayEndMs) : [];
     // Initial window (same follow/browse-preserving read as the Consumption chart).
     const lw = liveWindow.value;
-    const win = (lw.startMs && lw.endMs && !lw.follow)
-      ? { startMs: lw.startMs, endMs: lw.endMs }
-      : centerWindow(nowMs, dayStartMs, dayEndMs);
+    // Past day: always the full day (there is no "now" to center on, and a
+    // stale live-window from the today view would show an arbitrary crop).
+    const win = !isTodaySel
+      ? { startMs: dayStartMs, endMs: dayEndMs }
+      : (lw.startMs && lw.endMs && !lw.follow)
+        ? { startMs: lw.startMs, endMs: lw.endMs }
+        : centerWindow(nowMs, dayStartMs, dayEndMs);
     // Y value at now for the pulse (nearest slot's realised temp).
     const nowY = (() => {
       if (!nowInRange) return 20;
@@ -175,7 +243,10 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
           const i = params[0]?.dataIndex ?? 0;
           const s = slots[i];
           if (!s) return "";
-          const rows: string[] = [`<strong>${labels[i]}</strong>${s.heating_on ? " · heating" : " · idle"}`];
+          // heating_on only exists on PLAN slots — the exec-fallback axis of an
+          // older day must not claim "idle" for slots it knows nothing about.
+          const heatFlag = s.heating_on == null ? "" : s.heating_on ? " · heating" : " · idle";
+          const rows: string[] = [`<strong>${labels[i]}</strong>${heatFlag}`];
           if (indoorReal[i] != null) rows.push(`Indoor <strong>${(indoorReal[i] as number).toFixed(1)}°C</strong> · realised`);
           if (indoorPlanned[i] != null) rows.push(`Indoor <strong>${(indoorPlanned[i] as number).toFixed(1)}°C</strong> · planned`);
           if (lwtReal[i] != null) rows.push(`LWT real <strong>${(lwtReal[i] as number).toFixed(0)}°C</strong>`);
@@ -230,12 +301,20 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
         }] : []),
       ],
     }, { notMerge: true });
-  }, [plan, execution, indoor, theme]);
+  }, [plan, execSrc, indoorSrc, dayISO, isTodaySel, theme]);
+
+  // Does the SELECTED day have anything to draw? Mirrors the effect's slot
+  // selection so the legend/empty message track the day, not just the plan.
+  const dayKey = new Date(`${dayISO}T12:00:00`).toDateString();
+  const dayHasData =
+    (plan?.slots ?? []).some((s) => new Date(s.slot_utc).toDateString() === dayKey) ||
+    (execSrc?.slots ?? []).some((e) => e.slot_utc && new Date(e.slot_utc).toDateString() === dayKey);
+  const waiting = loading || (!isTodaySel && pastExec === null);
 
   return (
     <div class="heating-plan-chart">
       <div ref={ref} style={{ width: "100%", height: "300px" }} />
-      {plan?.slots?.length ? (
+      {dayHasData ? (
         <div class="hpl-legend" role="note" aria-label="Chart legend">
           <span class="hpl-tok"><span class="hpl-line hpl-line--indoor" /> indoor (real)</span>
           <span class="hpl-legend-grp">DHW</span>
@@ -250,7 +329,11 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
           <span class="hpl-hint"><NowDot /> now · hover for detail</span>
         </div>
       ) : null}
-      {!plan?.slots?.length && !loading && <p class="muted">No heating plan available yet.</p>}
+      {!dayHasData && !waiting && (
+        <p class="muted">
+          {isTodaySel ? "No heating plan available yet." : `No heating data for ${dayISO}.`}
+        </p>
+      )}
     </div>
   );
 }
