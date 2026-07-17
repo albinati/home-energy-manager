@@ -306,6 +306,20 @@ export async function promoteWorkbench(
 // --- Residual load profile (#477) — the learned household demand the LP plans
 //     against (day-of-week median + p75 spread, measured-split calibrated).
 export interface ResidualProfileSlot { h: number; m: number; median: number; p75?: number; }
+export interface PvClearnessDay {
+  date: string;
+  solar_kwh: number | null;
+  envelope_kwh: number | null;
+  clearness: number | null;   // solar / trailing-21d-max; null for today (partial)
+  load_kwh: number | null;
+  import_kwh: number | null;
+  export_kwh: number | null;
+  partial: boolean;
+}
+export interface PvClearnessResponse { window_days: number; days: PvClearnessDay[] }
+export const getPvClearness = (days = 30) =>
+  getJson<PvClearnessResponse>(`/pv/clearness?days=${days}`);
+
 export interface ResidualProfile {
   by_dow: Record<string, ResidualProfileSlot[]>;
   hp_by_dow?: Record<string, ResidualProfileSlot[]>;

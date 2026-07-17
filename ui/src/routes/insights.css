@@ -95,6 +95,14 @@
 .insights-export-alt { color: var(--text-dim); }
 .insights-export-uplift { color: var(--ok); font-weight: 600; }
 
+/* Solar sky check (clearness vs the array's own ceiling) */
+.solar-clearness {
+  margin-top: var(--space-5);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border);
+}
+.solar-clearness-head h2 { font-size: var(--font-lg); }
+
 /* Load pattern heatmap (#477) */
 .load-pattern {
   margin-top: var(--space-5);
