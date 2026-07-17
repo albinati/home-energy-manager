@@ -26,21 +26,60 @@ def _fixed_env(monkeypatch):
     yield
 
 
-def _dev(tank: float):
-    return SimpleNamespace(tank_temperature=tank)
+def _dev(tank: float, target: float | None = None):
+    return SimpleNamespace(tank_temperature=tank, tank_target=target)
 
 
 # 2026-07-17 12:05 UTC = 13:05 BST — the real incident's warmup fire time.
 _FIRE = datetime(2026, 7, 17, 12, 5, tzinfo=UTC)
 
 
-def test_incident_case_forces_powerful():
-    """Tank 42, target 47 (Δ5 ≤ deadband) and ~7 h of coast to the 20:00
-    window → projected ~40.5 < declared 45 → force."""
+def test_incident_case_lifts_the_heat_pump_not_powerful():
+    """Tank 42, target 47 (inside the deadband) and ~7 h coast to the 20:00
+    window → projected < 45. 47 is below the 50 °C cliff, so the heat pump can
+    do the lift: command the cliff, NOT Powerful (#737)."""
     r = _warmup_deadband_force_reason(_dev(42.0), {"tank_temp": 47, "tank_power": True}, _FIRE)
     assert r is not None
     assert r["window"] == "evening_showers"
     assert r["projected_c"] < r["floor_c"]
+    assert r["mechanism"] == "hp_target_lift"
+    # Command the cliff — stable across the heat-up; clears the deadband from
+    # tank 42 (Δ = 50 − 42 = 8 > differential) and stays sub-resistance.
+    assert r["lift_target_c"] == int(r["cliff_c"])
+    assert r["lift_target_c"] - r["tank_c"] > r["differential_c"]
+
+
+def test_powerful_is_the_fallback_only_when_tank_cannot_clear_sub_cliff():
+    """Tank 44: cliff − tank (6) ≤ differential — no sub-cliff target can
+    trigger the heat pump, so resistance (Powerful) is the only way to add
+    heat, and the missed floor demands it."""
+    r = _warmup_deadband_force_reason(_dev(44.0), {"tank_temp": 47, "tank_power": True}, _FIRE)
+    assert r is not None
+    assert r["mechanism"] == "powerful"
+    assert r["lift_target_c"] is None
+
+
+def test_mechanism_stays_hp_mid_lift_when_tank_warms_into_the_powerful_band():
+    """Review #737 finding 3: once the device is lifted to the cliff, a tick
+    where the tank has warmed into the would-be-Powerful band (44) must NOT
+    flip to resistance — the heat pump is already doing the lift. ``already_
+    lifted`` (device target at the cliff) keeps it on the HP."""
+    r = _warmup_deadband_force_reason(
+        _dev(44.0, target=50.0), {"tank_temp": 47, "tank_power": True}, _FIRE)
+    assert r is not None
+    assert r["already_lifted"] is True
+    assert r["mechanism"] == "hp_target_lift"
+    assert r["lift_target_c"] == 50
+
+
+def test_not_yet_lifted_tank_in_powerful_band_still_falls_back():
+    """The same tank 44 but device NOT yet lifted (target 47) is the genuine
+    fallback corner — resistance, since the HP can't be triggered sub-cliff."""
+    r = _warmup_deadband_force_reason(
+        _dev(44.0, target=47.0), {"tank_temp": 47, "tank_power": True}, _FIRE)
+    assert r is not None
+    assert r["already_lifted"] is False
+    assert r["mechanism"] == "powerful"
 
 
 def test_firmware_will_heat_unaided_no_force():

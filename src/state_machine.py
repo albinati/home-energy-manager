@@ -31,6 +31,12 @@ logger = logging.getLogger(__name__)
 # tick (row.start_time would be ancient, but we haven't actually applied yet).
 _FIRST_APPLIED_SESSION: dict[int, datetime] = {}
 
+# #737 — deadband-force HP-trigger guard. The heat pump can be triggered
+# sub-cliff only when ``cliff − tank > differential + GUARD``; the guard
+# absorbs reheat-differential estimator error so a barely-clearing lift
+# doesn't silently fail to fire. The lift itself is always the cliff.
+_WARMUP_FORCE_HP_GUARD_C = 0.5
+
 # V12 — per-episode dedup for the user-override notification. Without this set
 # the heartbeat fires ``notify_user_override`` every 2-min reconcile while the
 # user keeps the manual change in place, drowning Telegram. Cleared when:
@@ -118,14 +124,40 @@ def _is_tank_action(params: dict[str, Any]) -> bool:
 def _warmup_deadband_force_reason(
     dev: Any, apply_params: dict[str, Any], now_utc: datetime
 ) -> dict[str, Any] | None:
-    """Should this warmup fire with Powerful to punch through the firmware
-    reheat deadband? (#735)
+    """Should this warmup be escalated to punch through the firmware reheat
+    deadband, and HOW? (#735, #737)
 
-    Returns a details dict when YES (delta inside the deadband AND the coast
-    projection at the next declared shower window falls short of its floor),
-    None when the plain command suffices — either the firmware will heat on
-    its own (delta beyond the deadband) or the coast still delivers the
-    declared comfort (the skip is deliberate and cheaper).
+    Returns a decision dict when YES (delta inside the deadband AND the coast
+    projection at some declared shower window falls short of its floor), None
+    when the plain command suffices — either the firmware will heat on its own
+    (delta beyond the deadband) or the coast still delivers the declared
+    comfort (the skip is deliberate and cheaper).
+
+    The mechanism matters for cost. The commanded target (e.g. 47) is BELOW
+    the resistance cliff (t_hp_max_c, 50 °C), so the heat pump alone can do
+    the lift at its certified COP (~2.5). The firmware just won't START,
+    because tank − target is inside the deadband. So the cheap fix is to raise
+    the COMMANDED target to the CLIFF (``mechanism='hp_target_lift'``,
+    ``lift_target_c`` = the cliff): the firmware's ordinary thermostat then
+    fires the HEAT PUMP and heats the tank up to the cliff, all sub-resistance.
+
+    Commanding the cliff (not a minimal kick) is deliberate — it makes the
+    escalation STABLE across the ~50-min heat-up (review of #737): the review
+    showed the reconciler completes the row at whatever target the device
+    holds (the idempotency check, not a later "settle" tick), so there is no
+    self-settle back to the goal. The tank therefore ends ~3 °C above the goal
+    at the cliff. That's accepted: it is still ~2.5× cheaper than resistance
+    for the same delivered heat, and buys comfort margin. ``already_lifted``
+    keeps the decision pinned to the HP once the device is at the cliff, so a
+    tick mid-heat-up (tank now in the would-be-Powerful band) can't flip the
+    mechanism and drop COP-1 resistance onto the top few degrees.
+
+    Powerful is the FALLBACK only for the corner where the tank starts so warm
+    that no sub-cliff target can clear the deadband (``cliff − tank ≤
+    differential``): there the immersion heater (COP ~1) is the only way to
+    add heat at all, and comfort requires it. That's ``mechanism='powerful'``.
+    Using Powerful for a plain sub-cliff lift would burn ~2.5× the electricity
+    for the same heat — the wrong instinct on a heat-pump system (#737).
     """
     from .dhw.comfort import shower_windows
     from .dhw.model import coast_to
@@ -187,11 +219,32 @@ def _warmup_deadband_force_reason(
             }
     if worst is None:
         return None  # every declared floor survives the coast — keep the free skip
+
+    # Pick the mechanism. The heat pump can be TRIGGERED sub-cliff only while a
+    # commanded target above the deadband still fits under the cliff, i.e.
+    # ``cliff − tank > differential``. When it can, command the CLIFF (stable
+    # across the heat-up; see docstring) — ``int(cliff)`` floors so a
+    # fractional cliff never rounds up into resistance. ``already_lifted`` pins
+    # the decision to the HP once the device is at the cliff, so warming into
+    # the would-be-Powerful band mid-lift can't flip the mechanism.
+    cliff = float(p.t_hp_max_c)
+    dev_target = getattr(dev, "tank_target", None)
+    already_lifted = dev_target is not None and float(dev_target) >= cliff - 0.6
+    if already_lifted or (cliff - tank > differential + _WARMUP_FORCE_HP_GUARD_C):
+        lift = int(cliff)
+        mechanism = "hp_target_lift"
+    else:
+        lift = None
+        mechanism = "powerful"
     return {
         "tank_c": tank,
         "target_c": target,
         "delta_c": round(delta, 1),
         "differential_c": differential,
+        "cliff_c": cliff,
+        "already_lifted": already_lifted,
+        "mechanism": mechanism,
+        "lift_target_c": lift,
         **worst,
     }
 
@@ -466,15 +519,17 @@ def _reconcile_daikin_actions(
                 apply_params.pop("lwt_offset", None)
             apply_params.pop("climate_on", None)
 
-            # Deadband-aware warmup (#735, follow-up to #732): the firmware only
-            # reheats when tank ≤ target − differential (~6-7 °C measured), so a
-            # warm-tank day makes the commanded warmup a silent no-op — measured
-            # 2026-07-17: commanded 47, tank 42, nothing happened, showers at
-            # ~40.5 °C against the family's DECLARED 45. The declared dial is
-            # the spec: when the firmware would skip AND the coast projection
-            # falls short of the next shower window's floor, force the lift
-            # with Powerful (one-shot; firmware exits at target). When the
-            # coast still clears the floor, the skip stays — it is free money.
+            # Deadband-aware warmup (#735, #737): the firmware only reheats when
+            # tank ≤ target − differential (~6-7 °C measured), so a warm-tank day
+            # makes the commanded warmup a silent no-op — measured 2026-07-17:
+            # commanded 47, tank 42, nothing happened, showers at ~40.5 °C
+            # against the family's DECLARED 45. When the firmware would skip AND
+            # the coast projection falls short of a declared shower floor, escalate
+            # — preferring an HP target-lift (raise the commanded target past the
+            # deadband but under the cliff, so the heat pump does the lift at its
+            # certified COP), with Powerful (COP-1 resistance) only for the corner
+            # where the tank is too warm to clear the deadband sub-cliff (#737).
+            # When the coast still clears the floor, the skip stays — free money.
             _deadband_force: dict[str, Any] | None = None
             if (
                 atype == "tank_warmup"
@@ -487,6 +542,14 @@ def _reconcile_daikin_actions(
                 # "applied" every heartbeat for the whole row window).
                 and not config.OPENCLAW_READ_ONLY
                 and config.DAIKIN_CONTROL_MODE == "active"
+                # Review (#737): the HP-lift commands the CLIFF, so the row's
+                # setpoint diverges from its goal until the idempotency check
+                # completes it. That completion is what keeps the divergence
+                # from later reading as a user override (a spurious 47→50
+                # alert). So the escalation DEPENDS on pre-fire idempotency —
+                # when it's off (the documented rollback lever) don't escalate;
+                # the warm-tank day just reverts to the pre-#735 deadband skip.
+                and config.PREFIRE_STATE_MATCH_ENABLED
             ):
                 try:
                     _deadband_force = _warmup_deadband_force_reason(
@@ -496,7 +559,20 @@ def _reconcile_daikin_actions(
                     _deadband_force = None
                     logger.debug("deadband-force check failed (non-fatal): %s", _exc)
                 if _deadband_force:
-                    apply_params["tank_powerful"] = True
+                    if _deadband_force["mechanism"] == "hp_target_lift":
+                        # Raise the COMMANDED target to the cliff so the
+                        # firmware's own thermostat fires the heat pump. The
+                        # idempotency check completes the row once the device
+                        # reaches the cliff; the firmware then heats the tank to
+                        # the cliff autonomously. The tank ends ~3 °C above the
+                        # goal — accepted (still ~2.5× cheaper than resistance,
+                        # buys comfort margin; #737).
+                        apply_params["tank_temp"] = _deadband_force["lift_target_c"]
+                    else:
+                        # Fallback corner: tank too warm to clear the deadband
+                        # sub-cliff — resistance (Powerful) is the only way to
+                        # add heat, and comfort requires it here.
+                        apply_params["tank_powerful"] = True
                     # Audit row is written AFTER the apply actually attempts
                     # writes (see below) — logging here would claim "applied"
                     # for fires the idempotency check then skips.
