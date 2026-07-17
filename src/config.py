@@ -1803,6 +1803,14 @@ class Config:
     DHW_REHEAT_DIFFERENTIAL_FALLBACK_C: float = float(
         os.getenv("DHW_REHEAT_DIFFERENTIAL_FALLBACK_C", "6.0")
     )
+    # #735 — when a warmup fires inside the firmware's reheat deadband (the
+    # command would be a silent no-op) AND the coast projection falls short of
+    # the next declared shower window's floor, the reconciler escalates the
+    # fire to Powerful (one-shot). When the coast clears the floor, the skip
+    # stays — it's cheaper and the declared comfort is still delivered.
+    DHW_WARMUP_DEADBAND_FORCE_ENABLED: bool = os.getenv(
+        "DHW_WARMUP_DEADBAND_FORCE_ENABLED", "true"
+    ).strip().lower() in ("1", "true", "yes")
     # The LP times the tank itself (src/dhw), instead of following dhw_policy's fixed
     # 13:00→45 / 22:00→37 clock. Ships OFF: it must first be PROVEN better by the
     # economic shadow. Precedence passive > LP-owned > K1 pin; flag off is

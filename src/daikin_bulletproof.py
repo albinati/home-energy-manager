@@ -239,7 +239,14 @@ def apply_scheduled_daikin_params(
 
         # tank_power must be set before tank_temp: Daikin returns READ_ONLY_CHARACTERISTIC
         # for the target temperature when the tank is powered off.
-        tank_turning_on = "tank_power" in p and bool(p["tank_power"])
+        # Per-field same-value skips (#735 review): a deadband-force fire often
+        # differs ONLY in tank_powerful — re-PATCHing power/temperature to the
+        # values the device already holds wastes quota and can 400 with
+        # READ_ONLY_CHARACTERISTIC (bug E), aborting before Powerful is sent.
+        # Unknown live state (None) always PATCHes.
+        tank_turning_on = (
+            "tank_power" in p and bool(p["tank_power"]) and dev.tank_on is not True
+        )
         if tank_turning_on:
             client.set_tank_power(dev, True)
             dev.tank_on = True
@@ -254,8 +261,11 @@ def apply_scheduled_daikin_params(
                 # or stale action_schedule rows that stored a float (e.g. 38.0)
                 # still go through cleanly.
                 _tt = int(round(float(p["tank_temp"])))
-                client.set_tank_temperature(dev, _tt)
-                dev.tank_target = float(_tt)
+                if dev.tank_target is not None and abs(float(dev.tank_target) - _tt) <= 0.6:
+                    pass  # device already holds this target — skip the PATCH
+                else:
+                    client.set_tank_temperature(dev, _tt)
+                    dev.tank_target = float(_tt)
             except DaikinError as exc:
                 if "[read_only]" in str(exc) and tank_turning_on:
                     # Cloud hasn't propagated tank-on yet; heartbeat will retry next tick
@@ -263,11 +273,15 @@ def apply_scheduled_daikin_params(
                 else:
                     raise
         if not tank_turning_on and "tank_power" in p:
-            client.set_tank_power(dev, bool(p["tank_power"]))
-            dev.tank_on = bool(p["tank_power"])
+            _want_power = bool(p["tank_power"])
+            if dev.tank_on is None or bool(dev.tank_on) != _want_power:
+                client.set_tank_power(dev, _want_power)
+                dev.tank_on = _want_power
         if "tank_powerful" in p:
-            client.set_tank_powerful(dev, bool(p["tank_powerful"]))
-            dev.tank_powerful = bool(p["tank_powerful"])
+            _want_pf = bool(p["tank_powerful"])
+            if dev.tank_powerful is None or bool(dev.tank_powerful) != _want_pf:
+                client.set_tank_powerful(dev, _want_pf)
+                dev.tank_powerful = _want_pf
     except (DaikinError, ValueError) as e:
         db.log_action(
             device="daikin",

@@ -115,6 +115,87 @@ def _is_tank_action(params: dict[str, Any]) -> bool:
     return any(k in params for k in ("tank_temp", "tank_power", "tank_powerful"))
 
 
+def _warmup_deadband_force_reason(
+    dev: Any, apply_params: dict[str, Any], now_utc: datetime
+) -> dict[str, Any] | None:
+    """Should this warmup fire with Powerful to punch through the firmware
+    reheat deadband? (#735)
+
+    Returns a details dict when YES (delta inside the deadband AND the coast
+    projection at the next declared shower window falls short of its floor),
+    None when the plain command suffices — either the firmware will heat on
+    its own (delta beyond the deadband) or the coast still delivers the
+    declared comfort (the skip is deliberate and cheaper).
+    """
+    from .dhw.comfort import shower_windows
+    from .dhw.model import coast_to
+    from .dhw.params import resolve_reheat_differential_c, resolve_tank_params
+
+    target = apply_params.get("tank_temp")
+    tank = getattr(dev, "tank_temperature", None)
+    if target is None or tank is None:
+        return None
+    target = float(target)
+    tank = float(tank)
+    delta = target - tank
+    if delta <= 0.25:
+        return None  # already there
+    differential = resolve_reheat_differential_c()
+    if delta > differential:
+        # Beyond the deadband — the firmware heats unaided. No grace band
+        # here (review): with the fallback 6.0 against a measured 6-7 °C
+        # deadband, a grace would leave the uncertain (6, 7] range uncovered
+        # — the exact #735 failure — while forcing inside it is near-free
+        # (Powerful merely accelerates a lift the firmware was doing anyway).
+        return None
+    # Inside the deadband: project the coast to EVERY declared shower window
+    # within the next 24 h (review: judging only the soonest window scored a
+    # cheap-night warmup against the morning 40 °C floor and ignored the
+    # evening 45 °C one; and a row firing INSIDE a window was scored against
+    # tomorrow). A window we are currently inside projects at hours = 0 —
+    # the floor is owed NOW.
+    tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+    now_local = now_utc.astimezone(tz)
+    preset = (config.OPTIMIZATION_PRESET or "normal").strip().lower()
+    p = resolve_tank_params()
+
+    def _at_hour(h: float):
+        return now_local.replace(
+            hour=int(h) % 24, minute=int(round((h % 1) * 60)), second=0, microsecond=0,
+        )
+
+    worst: dict[str, Any] | None = None
+    for w in shower_windows(preset=preset):
+        start = _at_hour(w.start_hour)
+        end = _at_hour(w.end_hour)
+        if start <= now_local < end:
+            hours = 0.0
+        else:
+            entry = start if start > now_local else start + timedelta(days=1)
+            hours = (entry - now_local).total_seconds() / 3600.0
+        projected = coast_to(tank, hours, p)
+        if projected >= float(w.floor_c):
+            continue  # this window's declared floor is still delivered
+        shortfall = float(w.floor_c) - projected
+        if worst is None or shortfall > worst["shortfall_c"]:
+            worst = {
+                "window": w.label,
+                "hours_to_window": round(hours, 1),
+                "projected_c": round(projected, 1),
+                "floor_c": float(w.floor_c),
+                "shortfall_c": round(shortfall, 1),
+            }
+    if worst is None:
+        return None  # every declared floor survives the coast — keep the free skip
+    return {
+        "tank_c": tank,
+        "target_c": target,
+        "delta_c": round(delta, 1),
+        "differential_c": differential,
+        **worst,
+    }
+
+
 def in_legionella_standoff(now_utc: datetime) -> bool:
     """True when ``now_utc`` is inside the configured weekly legionella
     thermal-shock window, during which the Onecta firmware owns the DHW tank
@@ -385,6 +466,41 @@ def _reconcile_daikin_actions(
                 apply_params.pop("lwt_offset", None)
             apply_params.pop("climate_on", None)
 
+            # Deadband-aware warmup (#735, follow-up to #732): the firmware only
+            # reheats when tank ≤ target − differential (~6-7 °C measured), so a
+            # warm-tank day makes the commanded warmup a silent no-op — measured
+            # 2026-07-17: commanded 47, tank 42, nothing happened, showers at
+            # ~40.5 °C against the family's DECLARED 45. The declared dial is
+            # the spec: when the firmware would skip AND the coast projection
+            # falls short of the next shower window's floor, force the lift
+            # with Powerful (one-shot; firmware exits at target). When the
+            # coast still clears the floor, the skip stays — it is free money.
+            _deadband_force: dict[str, Any] | None = None
+            if (
+                atype == "tank_warmup"
+                and apply_params.get("tank_power")
+                and not apply_params.get("tank_powerful")
+                and getattr(config, "DHW_WARMUP_DEADBAND_FORCE_ENABLED", True)
+                # Review (#735): mirror the #619 gate order — never evaluate or
+                # advertise an escalation that passive/read-only mode cannot
+                # write (a passive-soak day would otherwise log a false
+                # "applied" every heartbeat for the whole row window).
+                and not config.OPENCLAW_READ_ONLY
+                and config.DAIKIN_CONTROL_MODE == "active"
+            ):
+                try:
+                    _deadband_force = _warmup_deadband_force_reason(
+                        dev, apply_params, now_utc
+                    )
+                except Exception as _exc:  # noqa: BLE001 — never block a fire
+                    _deadband_force = None
+                    logger.debug("deadband-force check failed (non-fatal): %s", _exc)
+                if _deadband_force:
+                    apply_params["tank_powerful"] = True
+                    # Audit row is written AFTER the apply actually attempts
+                    # writes (see below) — logging here would claim "applied"
+                    # for fires the idempotency check then skips.
+
             # Epic 14 (#386) — pre-fire reconcile.
             #
             # (1) Idempotency: if the live device state already matches the
@@ -564,6 +680,17 @@ def _reconcile_daikin_actions(
                 applied = apply_scheduled_daikin_params(
                     dev, client, apply_params, trigger=trigger,
                 )
+                if applied and _deadband_force:
+                    try:
+                        db.log_action(
+                            device="daikin",
+                            action="warmup_deadband_force",
+                            params={"row_id": aid, **_deadband_force},
+                            result="applied",
+                            trigger=trigger,
+                        )
+                    except Exception as _exc:
+                        logger.debug("deadband-force log failed (non-fatal): %s", _exc)
                 # Mark the row as applied-in-session on the first successful call
                 # (skip_if_matches=True path also counts — match confirms alignment).
                 _FIRST_APPLIED_SESSION.setdefault(aid, now_utc)
