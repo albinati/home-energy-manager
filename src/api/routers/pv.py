@@ -699,3 +699,77 @@ async def get_dhw_bias_backtest(window_days: int | None = None) -> dict[str, Any
     if window_days is not None:
         window_days = max(1, min(int(window_days), 365))
     return await asyncio.to_thread(dhw_bias.backtest_dhw_bucket_bias, window_days)
+
+
+@router.get("/api/v1/pv/clearness")
+async def get_pv_clearness(days: int = 30) -> dict[str, Any]:
+    """Daily PV production vs a rolling clear-sky envelope — sky vs system.
+
+    ``envelope(d)`` = max ``solar_kwh`` over the trailing 21 days ending at
+    ``d``, from the inverter's own daily meter (``fox_energy_daily``, the
+    #564-corrected ``PVEnergyTotal``): the best recent day IS the array's
+    demonstrated clear-sky ceiling for the season — self-calibrating for
+    orientation, shading and panel temperature, no irradiance model needed.
+
+    ``clearness = solar / envelope`` then separates the two stories that look
+    identical in a raw kWh chart: a weak SKY (clearness dips while the
+    envelope holds — e.g. the unforecast haze of 2026-07-15/16, −25 % with no
+    visible cloud) vs a weak SYSTEM (a run of ~1.0 days stepping down
+    together, dragging the envelope with them within a window).
+
+    Read-only; viewer. Today is flagged ``partial`` (its meter row is still
+    accumulating) and excluded from its own envelope.
+    """
+    window = 21
+    days = max(7, min(int(days), 120))
+    # fox_energy_daily is bucketed by UTC date and FINALISED by a once-daily
+    # rollup at ~02:30 UTC — iterate UTC dates to match the source, and treat
+    # a date as partial until its finalising run has happened (before that,
+    # "yesterday" is a near-zero stub and a clearness verdict on it would
+    # confidently read "Sky 0%" every night).
+    now_utc = datetime.now(UTC)
+    today = now_utc.date()
+    finalised_before = (now_utc - timedelta(hours=3)).date()
+    start = today - timedelta(days=days + window)
+    rows = await asyncio.to_thread(
+        db.get_fox_energy_daily_range, start.isoformat(), today.isoformat()
+    )
+    by_date: dict[str, dict[str, Any]] = {str(r["date"]): r for r in rows}
+
+    def _solar(iso: str) -> float | None:
+        r = by_date.get(iso)
+        if r is None or r.get("solar_kwh") is None:
+            return None
+        return float(r["solar_kwh"])
+
+    out: list[dict[str, Any]] = []
+    for i in range(days - 1, -1, -1):
+        d = today - timedelta(days=i)
+        iso = d.isoformat()
+        partial = d >= finalised_before
+        # Envelope over the trailing window, excluding today's accumulating row.
+        env_vals = [
+            v for j in range(window)
+            if (v := _solar((d - timedelta(days=j)).isoformat())) is not None
+            and v > 0.5
+            and not (partial and j == 0)
+        ]
+        envelope = max(env_vals) if env_vals else None
+        solar = _solar(iso)
+        r = by_date.get(iso) or {}
+        clearness = (
+            round(solar / envelope, 3)
+            if solar is not None and envelope and envelope > 0 and not partial
+            else None
+        )
+        out.append({
+            "date": iso,
+            "solar_kwh": round(solar, 2) if solar is not None else None,
+            "envelope_kwh": round(envelope, 2) if envelope is not None else None,
+            "clearness": clearness,
+            "load_kwh": round(float(r["load_kwh"]), 2) if r.get("load_kwh") is not None else None,
+            "import_kwh": round(float(r["import_kwh"]), 2) if r.get("import_kwh") is not None else None,
+            "export_kwh": round(float(r["export_kwh"]), 2) if r.get("export_kwh") is not None else None,
+            "partial": partial,
+        })
+    return {"window_days": window, "days": out}

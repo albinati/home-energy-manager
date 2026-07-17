@@ -11,6 +11,7 @@ import { LoadPatternCard } from "../components/insights/LoadPatternCard";
 import { LoadForecastAccuracyCard } from "../components/insights/LoadForecastAccuracyCard";
 import { SystemHealthCard } from "../components/insights/SystemHealthCard";
 import { IndoorHistoryCard } from "../components/insights/IndoorHistoryCard";
+import { SolarClearnessCard } from "../components/insights/SolarClearnessCard";
 import "./insights.css";
 
 const p2 = (p: number) => gbp(p / 100);
@@ -197,6 +198,7 @@ export default function Insights() {
         </div>
       )}
 
+      <SolarClearnessCard />
       <IndoorHistoryCard />
       <LoadPatternCard period={period} />
       <LoadForecastAccuracyCard period={period} />
