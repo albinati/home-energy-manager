@@ -173,6 +173,7 @@ def record_shadow(*, solve_kwargs: dict, price_pence: list[float],
     try:
         from . import comfort as _comfort
         from .baseline import legionella_budget_by_slot, simulate_fixed_schedule
+        from .params import resolve_reheat_differential_c
         from .params import resolve_tank_params
 
         starts = list(solve_kwargs["slot_starts_utc"])
@@ -212,6 +213,10 @@ def record_shadow(*, solve_kwargs: dict, price_pence: list[float],
             setback_hour_local=float(getattr(config, "DHW_SETBACK_START_HOUR_LOCAL", 22)),
             target_c=float(getattr(config, "DHW_TEMP_NORMAL_C", 45.0)),
             setback_c=float(getattr(config, "DHW_TEMP_SETBACK_C", 37.0)),
+            # #732 — the firmware's measured reheat deadband, not the old 1 degC
+            # guess: the sim must skip the same warm-tank top-ups the real
+            # firmware skips, or the incumbent's cost is overestimated.
+            hysteresis_c=resolve_reheat_differential_c(),
         )
         baseline_plan = solve_lp(**{**solve_kwargs, "pinned_dhw_override": override})
     except Exception:  # noqa: BLE001 — the shadow must never break the committed solve

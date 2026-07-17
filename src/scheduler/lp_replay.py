@@ -374,6 +374,7 @@ def replay_run(
 
         from ..dhw import comfort as _dhw_comfort
         from ..dhw.baseline import legionella_budget_by_slot, simulate_fixed_schedule
+        from ..dhw.params import resolve_reheat_differential_c
         from ..dhw.params import resolve_tank_params as _rtp
 
         _tz = _ZI(getattr(config, "BULLETPROOF_TIMEZONE", "Europe/London"))
@@ -411,6 +412,10 @@ def replay_run(
             setback_hour_local=float(getattr(config, "DHW_SETBACK_START_HOUR_LOCAL", 22)),
             target_c=float(getattr(config, "DHW_TEMP_NORMAL_C", 45.0)),
             setback_c=float(getattr(config, "DHW_TEMP_SETBACK_C", 37.0)),
+            # #732 — the firmware's measured reheat deadband, not the old 1 degC
+            # guess: the sim must skip the same warm-tank top-ups the real
+            # firmware skips, or the incumbent's cost is overestimated.
+            hysteresis_c=resolve_reheat_differential_c(),
         )
 
     skipped_keys: list[str] = []

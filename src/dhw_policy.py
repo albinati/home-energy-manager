@@ -826,12 +826,18 @@ def generate_daily_tank_schedule(
         # Single 24h warmup row — no setback during guest visits because of
         # potential morning showers. Skip entirely if a boost chain has deferred
         # the start past the window end.
+        # Powerful (#732): the firmware's reheat deadband (~5-9 °C measured) can
+        # swallow the whole lift on a warm-tank day — commanded 47, tank 42,
+        # nothing happened. On normal days that skip is free money (the tank
+        # coasts well above the shower floor); on GUEST days the 6-shower margin
+        # is the whole point, so force the lift regardless of the deadband.
         if effective_warmup_start_utc < next_warmup_utc:
             rows.append(_make_action(
                 action_type="tank_warmup",
                 start_utc=effective_warmup_start_utc,
                 end_utc=next_warmup_utc,
                 tank_temp_c=normal_c,
+                tank_powerful=True,
             ))
     else:
         # Normal mode: warmup → setback → next-day warmup pattern. The warmup is

@@ -30,6 +30,9 @@ from zoneinfo import ZoneInfo
 from .model import TankParams, cop_dhw
 
 _J_PER_KWH = 3.6e6
+# Tight band for Powerful-driven boosts (#619 re-assert pulls to ~target−0.6)
+# and for the HP→resistance crossover at the cliff. NOT the reheat deadband.
+_BOOST_BAND_C = 1.0
 
 
 def simulate_fixed_schedule(
@@ -88,8 +91,16 @@ def simulate_fixed_schedule(
         if boosting:
             target = max(target, negative_boost_target_c)
 
-        # Thermostat latch.
-        if tank[i] < target - hysteresis_c:
+        # Thermostat latch. TWO bands (#732 review): the warmup/setback
+        # thermostat uses the firmware's measured reheat deadband
+        # (``hysteresis_c``, ~6 °C — a warm tank inside it is skipped, exactly
+        # like the real machine). A negative-price BOOST is different hardware
+        # behaviour: those rows run Powerful with the #619 re-assert backstop,
+        # which keeps pulling until ~0.6 °C of target — model that with a tight
+        # 1 °C band or the sim strips the incumbent of paid-import revenue it
+        # really captures (anti-conservative for the shadow gate).
+        band = _BOOST_BAND_C if boosting else hysteresis_c
+        if tank[i] < target - band:
             heating = True
         if tank[i] >= target:
             heating = False
@@ -111,7 +122,10 @@ def simulate_fixed_schedule(
             hp_needed = max(0.0, min(needed, (hp_target - tank[i]) * p.kwh_per_degc + loss + draw))
             hp_thermal = min(hp_needed, p.hp_max_kw * slot_hours * cop)
             res_thermal = 0.0
-            if target > p.t_hp_max_c and tank[i] >= p.t_hp_max_c - hysteresis_c:
+            # Resistance crossover band is a PHYSICAL handoff at the cliff, not
+            # the reheat deadband — keep it tight regardless of hysteresis_c
+            # (#732 review: 6 °C here would start COP-1 immersion at 44 °C).
+            if target > p.t_hp_max_c and tank[i] >= p.t_hp_max_c - _BOOST_BAND_C:
                 res_thermal = min(needed - hp_thermal if needed > hp_thermal else 0.0,
                                   p.resistance_kw * slot_hours)
             thermal_in = hp_thermal + res_thermal

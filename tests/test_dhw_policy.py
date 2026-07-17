@@ -101,6 +101,18 @@ def test_guests_mode_emits_single_24h_row():
     end = datetime.fromisoformat(r["end_time"].replace("Z", "+00:00"))
     duration = (end - start).total_seconds() / 3600
     assert abs(duration - 24) < 0.1
+    # #732 — guests force the lift through the firmware's reheat deadband
+    # (~5-9 °C measured): a warm-tank day must not silently skip the warmup
+    # when the 6-shower margin is the whole point of the preset.
+    assert r["params"]["tank_powerful"] is True
+
+
+def test_normal_mode_warmup_is_not_powerful():
+    """#732: on NORMAL days the deadband skip is free money — the warmup must
+    NOT force-heat a tank that is already warm enough to coast to the showers."""
+    rows = dhw_policy.generate_daily_tank_schedule(date(2026, 6, 1), mode="normal")
+    warmups = [r for r in rows if r["action_type"] == "tank_warmup"]
+    assert warmups and all(r["params"]["tank_powerful"] is False for r in warmups)
 
 
 def test_vacation_mode_emits_nothing():

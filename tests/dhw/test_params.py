@@ -92,3 +92,43 @@ def test_a_db_failure_degrades_to_the_databook(tmp_db, monkeypatch):
 
     monkeypatch.setattr(_db, "get_dhw_calibration", _boom)
     assert params.resolve_tank_params().source == "databook"
+
+
+# --- #732: resolve_reheat_differential_c ----------------------------------------
+
+def _store_diff(status="ok", value=6.5, age_days=1.0):
+    payload = {"status": status, "differential_c": value,
+               "threshold_c": value, "n_misclassified": 1, "n_episodes": 6}
+    _db.upsert_dhw_calibration("reheat_differential", status=status, payload=payload,
+                               n_samples=6, window_days=21)
+    if age_days != 1.0:
+        stamp = (datetime.now(UTC) - timedelta(days=age_days)).isoformat()
+        conn = _db.get_connection()
+        try:
+            conn.execute(
+                "UPDATE dhw_calibration SET fitted_at_utc=? WHERE component='reheat_differential'",
+                (stamp,))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def test_reheat_differential_fallback_when_unfitted(tmp_db):
+    from src.dhw.params import resolve_reheat_differential_c
+    assert resolve_reheat_differential_c() == 6.0
+
+
+def test_reheat_differential_uses_measured_value(tmp_db):
+    from src.dhw.params import resolve_reheat_differential_c
+    _store_diff(value=6.5)
+    assert resolve_reheat_differential_c() == 6.5
+
+
+def test_reheat_differential_stale_or_bad_falls_back(tmp_db):
+    from src.dhw.params import resolve_reheat_differential_c
+    _store_diff(value=6.5, age_days=90.0)
+    assert resolve_reheat_differential_c() == 6.0
+    _store_diff(status="inconsistent", value=6.5)
+    assert resolve_reheat_differential_c() == 6.0
+    _store_diff(status="ok", value=15.0)  # out of [2, 12] — re-clamp at the door
+    assert resolve_reheat_differential_c() == 6.0
