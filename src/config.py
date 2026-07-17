@@ -1794,6 +1794,15 @@ class Config:
     DHW_CALIBRATION_MAX_AGE_DAYS: float = float(
         os.getenv("DHW_CALIBRATION_MAX_AGE_DAYS", "45")
     )
+    # #732 — the Altherma's DHW reheat deadband when the calibration hasn't
+    # passed its gates yet. 6.0 = the robust threshold fitted over 45 prod
+    # days (16 target-step episodes, 14/16 explained; Δ≤5 °C never triggers a
+    # reheat, Δ≥7 °C always does). Feeds the baseline simulation's thermostat
+    # hysteresis — the old hard-coded 1 °C simulated daily top-ups the real
+    # firmware skips. The nightly calibration keeps this current.
+    DHW_REHEAT_DIFFERENTIAL_FALLBACK_C: float = float(
+        os.getenv("DHW_REHEAT_DIFFERENTIAL_FALLBACK_C", "6.0")
+    )
     # The LP times the tank itself (src/dhw), instead of following dhw_policy's fixed
     # 13:00→45 / 22:00→37 clock. Ships OFF: it must first be PROVEN better by the
     # economic shadow. Precedence passive > LP-owned > K1 pin; flag off is

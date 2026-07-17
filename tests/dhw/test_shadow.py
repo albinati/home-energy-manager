@@ -348,3 +348,7 @@ def test_the_baseline_sim_follows_the_configured_windows(tmp_db, monkeypatch):
 
     assert captured.get("setback_hour_local") == 15.0
     assert captured.get("target_c") == 47.0
+    # #732 — the sim's thermostat must use the firmware's measured reheat
+    # deadband (fallback 6.0 °C when unfitted), not the old 1 °C guess that
+    # simulated daily top-ups the real firmware skips.
+    assert captured.get("hysteresis_c") == 6.0

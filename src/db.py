@@ -5590,6 +5590,51 @@ def get_tank_temps_range(start_epoch: float, end_epoch: float) -> list[tuple[flo
             conn.close()
 
 
+def get_tank_temp_targets_range(
+    start_epoch: float, end_epoch: float
+) -> list[tuple[float, float, float]]:
+    """``(fetched_at, tank_temp_c, tank_target_c)`` LIVE rows in ``[start, end)``,
+    ascending — rows where BOTH temperatures are present. Feeds the reheat-
+    differential fit (#732): the firmware's deadband is observable exactly at
+    the moments the commanded target steps while the tank temperature is known.
+    ``source='live'`` only, same echo-trap discipline as get_tank_temps_range."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT fetched_at, tank_temp_c, tank_target_c FROM daikin_telemetry "
+                "WHERE fetched_at >= ? AND fetched_at < ? "
+                "AND tank_temp_c IS NOT NULL AND tank_target_c IS NOT NULL "
+                "AND source = 'live' "
+                "ORDER BY fetched_at ASC",
+                (start_epoch, end_epoch),
+            )
+            return [(float(r[0]), float(r[1]), float(r[2])) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
+def get_powerful_action_windows(start_iso: str, end_iso: str) -> list[tuple[str, str]]:
+    """``(start_time, end_time)`` of Daikin action rows commanded with
+    ``tank_powerful`` in the window (#732). Powerful forces a DHW lift at ANY
+    Δ, so the reheat-differential fit must exclude target steps inside these
+    windows — telemetry alone cannot see the flag. Matches boosts, guests-mode
+    warmups and manual overrides alike; status doesn't matter (a cancelled row
+    may still have fired its PATCH before cancellation)."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT start_time, end_time FROM action_schedule "
+                "WHERE device = 'daikin' AND end_time >= ? AND start_time <= ? "
+                "AND params LIKE '%\"tank_powerful\": true%'",
+                (start_iso, end_iso),
+            )
+            return [(str(r[0]), str(r[1])) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
 def get_tank_temps_since(since_epoch: float) -> list[tuple[float, float]]:
     """``(fetched_at, tank_temp_c)`` LIVE rows with a non-null tank temperature
     at or after *since_epoch*, ascending. Feeds the evening shower-drawdown

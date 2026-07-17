@@ -321,6 +321,146 @@ def summarise_draw_hours(events: list[DrawEvent], tz: ZoneInfo) -> dict[int, int
     return hist
 
 
+def fit_reheat_differential(
+    rows: list[tuple[float, float, float]],
+    *,
+    max_warmup_target_c: float = 52.0,
+    heat_rise_c: float = 1.5,
+    draw_drop_c: float = 1.5,
+    observe_minutes: float = 100.0,
+    max_step_gap_minutes: float = 45.0,
+    powerful_windows_utc: list[tuple[datetime, datetime]] | None = None,
+) -> dict[str, Any]:
+    """Bracket the firmware's DHW reheat deadband from target-step episodes (#732).
+
+    The Altherma starts a reheat only when ``tank ≤ target − differential``. That
+    differential is a field setting on the unit we cannot read via Onecta — but the
+    thermometer sees it: every time the commanded target STEPS UP while the tank
+    temperature is known, the firmware either heats (Δ = target − tank was outside
+    the deadband) or doesn't (inside). Observed 2026-07-17: Δ=9 heated, Δ=5 did
+    not — the schedule's warmup silently became a no-op on warm-tank days.
+
+    Method: scan for upward target steps to warmup-class targets (≤
+    ``max_warmup_target_c`` — Powerful boosts to 60 °C force heating regardless of
+    the deadband and would contaminate the heated set with small deltas). For each
+    step, watch ``observe_minutes``: a rise ≥ ``heat_rise_c`` above the step-time
+    tank temp = heated; a drop ≥ ``draw_drop_c`` BEFORE any rise = a shower draw
+    contaminates the episode → discarded (the draw itself may trigger the reheat,
+    so the step-time Δ is no longer what fired it).
+
+    Estimation is a robust threshold sweep ("heats iff Δ ≥ t"), because real
+    telemetry contains unlabellable contamination (a precool day with tank power
+    off reads as "huge Δ, no heat"). status='ok' needs both outcomes present,
+    ≥5 clean episodes and ≤25 % misclassified at the best threshold; outliers
+    are reported in ``misclassified``, never averaged in. The estimate is the
+    best threshold, clamped to [2, 12] °C.
+    """
+    series = [(datetime.fromtimestamp(t, tz=UTC), tank, tgt) for t, tank, tgt in rows]
+    pwin = powerful_windows_utc or []
+    episodes: list[dict[str, Any]] = []
+    discarded = 0
+    for i in range(1, len(series)):
+        (at0, _, tgt0), (at, tank, tgt1) = series[i - 1], series[i]
+        if tgt1 <= tgt0 + 0.5 or tgt1 > max_warmup_target_c:
+            continue
+        # Gap guard (#732 review): the step is only OBSERVED at row i — with a
+        # long polling gap the firmware may have stepped near the gap's start
+        # and part-heated already, so Δ measured here would be against a
+        # mid-heat tank ("true Δ9 recorded as Δ4 heated").
+        if (at - at0).total_seconds() / 60.0 > max_step_gap_minutes:
+            discarded += 1
+            continue
+        # Powerful screen (#732 review): Powerful forces the lift at ANY Δ.
+        # Boosts are excluded by the ≤52 target class, but guests-mode warmups
+        # and manual overrides command warmup-class targets WITH Powerful —
+        # telemetry can't see the flag, so the caller passes HEM's own
+        # commanded-Powerful windows (action_schedule) to exclude.
+        if any(s <= at <= e for s, e in pwin):
+            discarded += 1
+            continue
+        delta = tgt1 - tank
+        if delta <= 0.25:
+            continue  # already at/above target — the deadband is unobservable here
+        heated = False
+        contaminated = False
+        observed_min = 0.0
+        for at2, tank2, tgt2 in series[i + 1:]:
+            elapsed = (at2 - at).total_seconds() / 60.0
+            # Any target RE-step ends the observation — an upward re-step (boost
+            # chain 47→60 + Powerful) would otherwise leak its heat into this
+            # episode and label the smaller Δ "heated" (#732 review).
+            if elapsed > observe_minutes or abs(tgt2 - tgt1) > 0.5:
+                break
+            observed_min = elapsed
+            if tank2 <= tank - draw_drop_c:
+                contaminated = True  # a draw may itself trigger the reheat
+                break
+            if tank2 >= tank + heat_rise_c:
+                heated = True
+                break
+        # A "did not heat" verdict needs a real observation window — the compressor
+        # takes ~10 min to show at the sensor, and a target re-step (boost chain)
+        # can cut the window short.
+        if contaminated or (not heated and observed_min < 30.0):
+            discarded += 1
+            continue
+        episodes.append({"at_utc": at.isoformat(), "delta_c": round(delta, 1), "heated": heated})
+
+    no_heat = [e["delta_c"] for e in episodes if not e["heated"]]
+    heat = [e["delta_c"] for e in episodes if e["heated"]]
+    out: dict[str, Any] = {
+        "n_episodes": len(episodes),
+        "n_heated": len(heat),
+        "n_no_heat": len(no_heat),
+        "n_discarded_draw": discarded,
+        "episodes": episodes[-40:],
+    }
+    if not heat or not no_heat or len(episodes) < 5:
+        out["status"] = "insufficient"
+        return out
+
+    # Robust threshold, not a strict bracket: real telemetry carries episodes the
+    # thermometer cannot label (measured 2026-06-26: tank held at the pre-negative
+    # precool 30 °C with target 45 shown but tank POWER off → "Δ15 didn't heat").
+    # A strict bracket dies on one such day. Sweep candidate thresholds at the
+    # midpoints between adjacent observed deltas and keep the one that
+    # misclassifies fewest episodes ("heats iff Δ ≥ threshold"); accept only if
+    # the survivors are ≤ 25 % — the deadband must EXPLAIN the data, outliers
+    # are reported, never averaged in.
+    deltas = sorted({e["delta_c"] for e in episodes})
+    candidates = [deltas[0] - 0.5] + [
+        (a + b) / 2.0 for a, b in zip(deltas, deltas[1:])
+    ] + [deltas[-1] + 0.5]
+    best_t, best_errors = None, None
+    for t in candidates:
+        errors = sum(
+            1 for e in episodes if (e["delta_c"] >= t) != e["heated"]
+        )
+        # <= : on ties the HIGHEST candidate wins — the conservative direction
+        # for the shadow gate (a lower threshold makes the sim heat more, over-
+        # costing the incumbent in the LP-owned comparison; #732 review).
+        if best_errors is None or errors <= best_errors:
+            best_t, best_errors = t, errors
+    n = len(episodes)
+    out["threshold_c"] = round(float(best_t), 1)
+    out["n_misclassified"] = int(best_errors)
+    out["misclassified"] = [
+        e for e in episodes if (e["delta_c"] >= best_t) != e["heated"]
+    ]
+    if best_errors / n > 0.25:
+        out["status"] = "inconsistent"
+        return out
+    if not (2.0 <= best_t <= 12.0):
+        # A threshold outside the physically plausible range means the data is
+        # telling a different story — refuse rather than clamp it into "ok"
+        # (a clamped value would sail through the reader's own gate unnoticed).
+        out["status"] = "out_of_range"
+        return out
+    out["status"] = "ok"
+    out["differential_c"] = round(float(best_t), 1)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Orchestration (thin, best-effort, never raises to the cron)
 # ---------------------------------------------------------------------------
@@ -383,10 +523,47 @@ def refresh_dhw_calibration() -> dict[str, Any]:
         n_samples=len(events), window_days=window,
     )
 
+    # Reheat differential (#732) — the firmware's deadband, observable at target
+    # steps. Steps are rare (~1 clean episode per day at best), so this fit uses
+    # a LONGER window than the UA fit — 21 days rarely clears the ≥5-episode
+    # gate and each thin night would overwrite a good row with 'insufficient'.
+    diff_window = max(window, 45)
+    diff_start = now - timedelta(days=diff_window)
+    try:
+        tt_rows = db.get_tank_temp_targets_range(diff_start.timestamp(), now.timestamp())
+        pwin_raw = db.get_powerful_action_windows(
+            diff_start.strftime("%Y-%m-%dT%H:%M:%S"), now.strftime("%Y-%m-%dT%H:%M:%S"))
+        pwin = []
+        for s, e in pwin_raw:
+            try:
+                sdt = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+                edt = datetime.fromisoformat(str(e).replace("Z", "+00:00"))
+                if sdt.tzinfo is None:
+                    sdt = sdt.replace(tzinfo=UTC)
+                if edt.tzinfo is None:
+                    edt = edt.replace(tzinfo=UTC)
+                pwin.append((sdt, edt))
+            except ValueError:
+                continue
+        diff_fit = fit_reheat_differential(tt_rows, powerful_windows_utc=pwin)
+        diff_fit["n_powerful_windows"] = len(pwin)
+    except Exception:  # pragma: no cover — defensive; never break the cron
+        logger.exception("dhw.calibration: reheat differential fit failed")
+        diff_fit = {"status": "error"}
+    db.upsert_dhw_calibration(
+        "reheat_differential", status=diff_fit.get("status", "error"), payload=diff_fit,
+        n_samples=diff_fit.get("n_episodes"), window_days=diff_window,
+    )
+
     logger.info(
-        "dhw.calibration: ua_ambient=%s (UA=%.2f ambient=%.1f r2=%.2f) | %d draws, peak hour %s",
+        "dhw.calibration: ua_ambient=%s (UA=%.2f ambient=%.1f r2=%.2f) | %d draws, peak hour %s"
+        " | reheat_diff=%s (%s°C, %s/%s misfit, n=%s)",
         ua_fit["status"], ua_fit.get("ua_w_per_k") or 0.0, ua_fit.get("ambient_c") or 0.0,
         ua_fit.get("r2") or 0.0, len(events),
         max(hours, key=hours.get) if hours else "-",
+        diff_fit.get("status"), diff_fit.get("differential_c"),
+        diff_fit.get("n_misclassified"), diff_fit.get("n_episodes"),
+        diff_fit.get("n_episodes"),
     )
-    return {"status": "ok", "ua_ambient": ua_fit, "draw_hours": hours}
+    return {"status": "ok", "ua_ambient": ua_fit, "draw_hours": hours,
+            "reheat_differential": diff_fit}

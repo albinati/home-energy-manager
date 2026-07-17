@@ -100,3 +100,43 @@ def resolve_tank_params() -> TankParams:
         resistance_kw=databook.resistance_kw,
         source="measured",
     )
+
+
+def resolve_reheat_differential_c() -> float:
+    """The firmware's DHW reheat deadband for simulation/policy use (#732).
+
+    Measured when the calibration passes its gates (status ok, fresh, in
+    [2, 12] °C); otherwise the fallback — 6.0 °C, the robust threshold fitted over
+    45 prod days (14/16 episodes explained; see #732). The old
+    assumption of 1 °C made the baseline simulation top the tank up daily
+    when the real firmware skips warm-tank days entirely.
+    """
+    from .. import db
+
+    fallback = 6.0
+    enabled = True
+    max_age = _MAX_AGE_DAYS_DEFAULT
+    try:
+        from ..config import config
+
+        fallback = float(getattr(config, "DHW_REHEAT_DIFFERENTIAL_FALLBACK_C", 6.0))
+        enabled = bool(getattr(config, "DHW_CALIBRATION_ENABLED", True))
+        max_age = float(getattr(config, "DHW_CALIBRATION_MAX_AGE_DAYS", _MAX_AGE_DAYS_DEFAULT))
+    except Exception:  # noqa: BLE001 — config outage must not break a solve
+        pass
+    if not enabled:
+        return fallback
+    try:
+        row = db.get_dhw_calibration("reheat_differential")
+    except Exception:  # noqa: BLE001
+        return fallback
+    if not row or row.get("status") != "ok" or not _fresh(row.get("fitted_at_utc"), max_age):
+        return fallback
+    value = (row.get("payload") or {}).get("differential_c")
+    if value is None:
+        return fallback
+    value = float(value)
+    if not (2.0 <= value <= 12.0):
+        logger.warning("dhw.params: learned reheat differential %.1f out of range — fallback", value)
+        return fallback
+    return value
