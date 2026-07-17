@@ -58,12 +58,19 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
   // hours-based, capped at 7 days — older days simply lose the indoor line).
   const [pastExec, setPastExec] = useState<ExecutionTodayResponse | null>(null);
   const [pastIndoor, setPastIndoor] = useState<IndoorReadingsResponse | null>(null);
+  // Separate loaded flag: the bundle can resolve with exec === null (fetch
+  // failed and dayCache cached the miss) — that must read as "loaded, no
+  // data" and show the empty message, not "still waiting" forever.
+  const [pastLoaded, setPastLoaded] = useState(false);
   useEffect(() => {
-    if (isTodaySel) { setPastExec(null); setPastIndoor(null); return; }
+    if (isTodaySel) { setPastExec(null); setPastIndoor(null); setPastLoaded(false); return; }
     let alive = true;
     setPastExec(null);
     setPastIndoor(null);
-    void fetchDayBundle(dayISO).then((b) => { if (alive) setPastExec(b.exec); });
+    setPastLoaded(false);
+    void fetchDayBundle(dayISO).then((b) => {
+      if (alive) { setPastExec(b.exec); setPastLoaded(true); }
+    });
     const daysBack = Math.round(
       (Date.parse(`${todayISO}T00:00:00`) - Date.parse(`${dayISO}T00:00:00`)) / 86_400_000,
     );
@@ -119,7 +126,10 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
     }
     if (!slots.length) {
       // Nothing for this day (e.g. before telemetry started) — clear instead of
-      // silently keeping the previous day's chart on screen.
+      // silently keeping the previous day's chart on screen. Bounds must be
+      // nulled FIRST: stale today-bounds would keep the follow tick re-centring
+      // the shared window and re-materialising an axis on the cleared chart.
+      boundsRef.current = null;
       chartRef.current.clear();
       return;
     }
@@ -309,7 +319,7 @@ export function HeatingPlanWidget({ plan, loading, execution, indoor }: Props) {
   const dayHasData =
     (plan?.slots ?? []).some((s) => new Date(s.slot_utc).toDateString() === dayKey) ||
     (execSrc?.slots ?? []).some((e) => e.slot_utc && new Date(e.slot_utc).toDateString() === dayKey);
-  const waiting = loading || (!isTodaySel && pastExec === null);
+  const waiting = loading || (!isTodaySel && !pastLoaded);
 
   return (
     <div class="heating-plan-chart">
