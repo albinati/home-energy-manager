@@ -219,8 +219,26 @@ def _warmup_deadband_force_reason(
 
     worst: dict[str, Any] | None = None
     for w in shower_windows(preset=preset):
+        if float(w.end_hour) == float(w.start_hour):
+            # A zero-length window is a DISABLED window, not "always": the
+            # end <= start normalisation below would otherwise promote it to
+            # a 24 h always-owed floor (review of #748). Only the raw hours
+            # can tell x-x apart from 0.0-24.0 — both map to start == end.
+            continue
         start = _at_hour(w.start_hour)
         end = _at_hour(w.end_hour)
+        if end <= start:
+            # ``end_hour=24.0`` lands on 00:00 (int(24) % 24) and a
+            # cross-midnight window declares end < start — both mean the end
+            # is on the NEXT day. Without this, "inside the window" is
+            # unsatisfiable and a fire inside it projects ~21 h of phantom
+            # coast to tomorrow's start (#748).
+            end += timedelta(days=1)
+        if now_local < end - timedelta(days=1):
+            # Inside the tail of YESTERDAY's instance of a cross-midnight
+            # window (e.g. 22:00-01:00 at 00:30) — judge that instance.
+            start -= timedelta(days=1)
+            end -= timedelta(days=1)
         if start <= now_local < end:
             hours = 0.0
         else:
