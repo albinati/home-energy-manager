@@ -662,14 +662,23 @@ def _reconcile_daikin_actions(
                     # re-PATCHing the stored goal against the cliff. Only
                     # while the device still holds ~the lift — after a boot
                     # overwrite (#740) the fresh re-evaluation owns the row.
-                    _latch = _lift_latch_target(aid, start)
+                    # Cheap guard first (settle precedent): the latch can
+                    # only matter while the device target sits ABOVE the
+                    # row's stored goal, so the ordinary unforced warmup
+                    # tick never pays the audit-log query.
                     _dev_tgt = getattr(dev, "tank_target", None)
+                    _row_goal = apply_params.get("tank_temp")
                     if (
-                        _latch is not None
-                        and _dev_tgt is not None
-                        and float(_dev_tgt) >= float(_latch) - 0.6
+                        _dev_tgt is not None
+                        and _row_goal is not None
+                        and float(_dev_tgt) > float(_row_goal) + 0.6
                     ):
-                        apply_params["tank_temp"] = _latch
+                        _latch = _lift_latch_target(aid, start)
+                        if (
+                            _latch is not None
+                            and float(_dev_tgt) >= float(_latch) - 0.6
+                        ):
+                            apply_params["tank_temp"] = _latch
 
             # Epic 14 (#386) — pre-fire reconcile.
             #
