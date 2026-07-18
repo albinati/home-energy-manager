@@ -267,6 +267,10 @@ def _settle_env(monkeypatch, tmp_path, *, audit_mechanism="hp_target_lift",
     monkeypatch.setattr("src.config.config.DB_PATH", str(path))
     monkeypatch.setitem(config._overrides, "DAIKIN_CONTROL_MODE", "active")
     monkeypatch.setattr("src.config.config.OPENCLAW_READ_ONLY", False)
+    # #743 review — without this the settle tests fail every Sunday
+    # 11:00-13:00 UTC (the legionella stand-off guard, enabled by default).
+    monkeypatch.setattr("src.config.config.DHW_LEGIONELLA_STANDOFF_ENABLED", False)
+    sm._LIFT_SETTLE_ATTEMPTS.clear()
     db.init_db()
     now = datetime.now(UTC)
     actions = [{
@@ -375,3 +379,47 @@ def test_settle_needs_a_row_covering_now(monkeypatch, tmp_path):
     sm._check_warmup_lift_settle(actions, MagicMock(), dev,
                                  now + timedelta(hours=3), trigger="heartbeat")
     assert applied == []
+
+
+def test_settle_runs_once_per_episode_then_respects_the_users_cliff(monkeypatch, tmp_path):
+    """#743 review real-bug: after a successful settle, a cliff-level target
+    re-appearing inside the same window is the USER's gesture — HEM must not
+    revert it (the old row-scoped ownership check clobbered it in a loop)."""
+    from unittest.mock import MagicMock
+
+    sm, db, actions, now, applied = _settle_env(monkeypatch, tmp_path)
+    dev = SimpleNamespace(tank_temperature=47.0, tank_target=50.0, tank_on=True)
+    sm._check_warmup_lift_settle(actions, MagicMock(), dev, now, trigger="heartbeat")
+    assert len(applied) == 1  # first settle fires
+
+    # The user sets the tank back to 50 mid-window; a fresh device read.
+    dev2 = SimpleNamespace(tank_temperature=48.0, tank_target=50.0, tank_on=True)
+    sm._check_warmup_lift_settle(actions, MagicMock(), dev2, now, trigger="heartbeat")
+    assert len(applied) == 1  # respected — no second settle
+
+    # Survives a restart (persistent audit row, not process state).
+    sm._LIFT_SETTLE_ATTEMPTS.clear()
+    sm._check_warmup_lift_settle(actions, MagicMock(), dev2, now, trigger="heartbeat")
+    assert len(applied) == 1
+
+
+def test_settle_gives_up_after_bounded_failed_attempts(monkeypatch, tmp_path):
+    """#743 review risk: if Onecta refuses the lowered setpoint, retry a few
+    times and then fall back to the safe cliff coast — not ~40 writes."""
+    from unittest.mock import MagicMock
+
+    from src.daikin.client import DaikinError
+
+    sm, db, actions, now, applied = _settle_env(monkeypatch, tmp_path)
+    calls: list[int] = []
+
+    def _refuse(d, c, p, trigger):
+        calls.append(1)
+        raise DaikinError("READ_ONLY_CHARACTERISTIC")
+    monkeypatch.setattr("src.state_machine.apply_scheduled_daikin_params", _refuse)
+
+    dev = SimpleNamespace(tank_temperature=47.0, tank_target=50.0, tank_on=True)
+    for _ in range(6):
+        sm._check_warmup_lift_settle(actions, MagicMock(), dev, now, trigger="heartbeat")
+    assert len(calls) == sm._LIFT_SETTLE_MAX_ATTEMPTS
+    assert _settle_logs(db) == []  # no false 'applied' audit rows

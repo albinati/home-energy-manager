@@ -110,6 +110,15 @@ _LWT_DRIFT_NOTIFIED: bool = False
 # row per suppressed action_schedule row per process, not per 5-min tick).
 _LEGIONELLA_STANDOFF_LOGGED: set[int] = set()
 
+# #742 review — settle attempts per lift row in THIS process. Bounds the
+# retry when Onecta refuses the lowered setpoint (unverified firmware corner):
+# without it a persistent READ_ONLY would re-PATCH every ~2-min tick for the
+# rest of the window (~40 writes of quota). 3 attempts, then give up — the
+# fallback is the pre-#742 cliff coast, which is safe. Success is deduped
+# PERSISTENTLY via the warmup_lift_settle audit row, not this dict.
+_LIFT_SETTLE_ATTEMPTS: dict[int, int] = {}
+_LIFT_SETTLE_MAX_ATTEMPTS = 3
+
 # #741 review — rows whose warmup_deadband_force audit row has been written in
 # THIS process. The audit row doubles as the reheat-differential fit's
 # exclusion window (#739), so it must exist whenever Powerful may be live:
@@ -1216,11 +1225,37 @@ def _check_warmup_lift_settle(
     if not ours:
         return
 
+    # #743 review — ownership is per EPISODE, not per row: after one
+    # successful settle, a cliff-level target re-appearing inside the same
+    # window can only be the USER's own gesture (HEM never re-lifts a
+    # completed row) — respect it. The settle audit row is the persistent
+    # proof, so this survives restarts.
+    try:
+        settle_logs = db.get_action_logs(
+            device="daikin", action="warmup_lift_settle", since=since, limit=20,
+        )
+    except Exception as _exc:  # noqa: BLE001
+        logger.debug("lift-settle: settle-log lookup failed (non-fatal): %s", _exc)
+        return
+    if any((log.get("params") or {}).get("row_id") == rid for log in settle_logs):
+        return
+
+    # #743 review — bounded retry: if Onecta refuses the lowered setpoint,
+    # give up after a few attempts; the fallback is the safe cliff coast.
+    attempts = _LIFT_SETTLE_ATTEMPTS.get(rid, 0)
+    if attempts >= _LIFT_SETTLE_MAX_ATTEMPTS:
+        return
+    _LIFT_SETTLE_ATTEMPTS[rid] = attempts + 1
+
     try:
         apply_scheduled_daikin_params(
             dev, client, {"tank_power": True, "tank_temp": goal},
             trigger=f"warmup_lift_settle:{trigger}",
         )
+    except (DaikinError, ValueError) as exc:
+        logger.warning("warmup lift settle failed (non-fatal): %s", exc)
+        return
+    try:
         db.log_action(
             device="daikin",
             action="warmup_lift_settle",
@@ -1233,8 +1268,8 @@ def _check_warmup_lift_settle(
             result="applied",
             trigger=trigger,
         )
-    except (DaikinError, ValueError) as exc:
-        logger.warning("warmup lift settle failed (non-fatal): %s", exc)
+    except Exception as _exc:  # noqa: BLE001 — never block the heartbeat
+        logger.debug("lift-settle log failed (non-fatal): %s", _exc)
 
 
 def _check_tank_power_drift(
