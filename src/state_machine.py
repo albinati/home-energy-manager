@@ -1173,6 +1173,23 @@ def _check_warmup_lift_settle(
     if float(dev_target) < cliff - 0.6:
         return  # not lifted (or already settled)
 
+    # #745 — a negative-price boost window owns the tank. The boost commands
+    # boost_c (60 °C, Powerful): settling DOWN to a warmup goal mid-window
+    # would forfeit the paid import, and nothing would re-raise the target —
+    # the boost row completes via idempotency and the #619 backstop re-asserts
+    # only Powerful. Any status counts: pending is about to fire, completed
+    # already fired, and an overridden boost is still the user's gesture.
+    for act in actions:
+        if act.get("action_type") != "tank_negative_boost":
+            continue
+        try:
+            b_start = _parse_utc(act["start_time"])
+            b_end = _parse_utc(act["end_time"])
+        except (ValueError, KeyError, TypeError):
+            continue
+        if b_start <= now_utc < b_end:
+            return
+
     row = None
     for act in actions:
         if act.get("action_type") != "tank_warmup":
@@ -1217,12 +1234,21 @@ def _check_warmup_lift_settle(
     except Exception as _exc:  # noqa: BLE001
         logger.debug("lift-settle: audit lookup failed (non-fatal): %s", _exc)
         return
-    ours = any(
-        (log.get("params") or {}).get("row_id") == rid
-        and (log.get("params") or {}).get("mechanism") == "hp_target_lift"
-        for log in logs
-    )
-    if not ours:
+    lift_log_params: dict[str, Any] | None = None
+    for log in logs:
+        lp = log.get("params") or {}
+        if lp.get("row_id") == rid and lp.get("mechanism") == "hp_target_lift":
+            lift_log_params = lp
+            break
+    if lift_log_params is None:
+        return
+
+    # #745 — settle only the target WE lifted to. The audit row records the
+    # commanded lift; a device target meaningfully above it (e.g. a 60 °C user
+    # gesture set mid-lift, which the override detector cannot attribute to
+    # this already-completed row) is an intent HEM never commanded — leave it.
+    lift_target = lift_log_params.get("lift_target_c")
+    if lift_target is not None and abs(float(dev_target) - float(lift_target)) > 0.6:
         return
 
     # #743 review — ownership is per EPISODE, not per row: after one

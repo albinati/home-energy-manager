@@ -345,6 +345,40 @@ def test_settle_respects_a_cliff_the_user_set_themselves(monkeypatch, tmp_path):
     assert applied == []
 
 
+def test_settle_bails_inside_a_negative_boost_window(monkeypatch, tmp_path):
+    """#745: a tank_negative_boost row covering now owns the tank — settling
+    down to the warmup goal would forfeit the paid window, and nothing would
+    re-raise the target (the boost row is completed; #619 re-asserts only
+    Powerful). Even with the device still at OUR lift target (50), bail."""
+    import json as _json
+    from datetime import timedelta
+    from unittest.mock import MagicMock
+
+    sm, db, actions, now, applied = _settle_env(monkeypatch, tmp_path)
+    actions.append({
+        "id": 91, "action_type": "tank_negative_boost", "status": "completed",
+        "start_time": (now - timedelta(minutes=10)).isoformat(),
+        "end_time": (now + timedelta(minutes=50)).isoformat(),
+        "params": _json.dumps({"tank_power": True, "tank_temp": 60,
+                               "tank_powerful": True}),
+    })
+    dev = SimpleNamespace(tank_temperature=47.5, tank_target=50.0, tank_on=True)
+    sm._check_warmup_lift_settle(actions, MagicMock(), dev, now, trigger="heartbeat")
+    assert applied == []
+
+
+def test_settle_leaves_a_target_above_our_lift_alone(monkeypatch, tmp_path):
+    """#745: the audit row says we lifted to 50; the device reads 60. That is
+    an intent HEM never commanded (user gesture mid-lift, or a boost the row
+    scan missed) — the old ">= cliff - 0.6" gate would have clobbered it."""
+    from unittest.mock import MagicMock
+
+    sm, db, actions, now, applied = _settle_env(monkeypatch, tmp_path)
+    dev = SimpleNamespace(tank_temperature=47.5, tank_target=60.0, tank_on=True)
+    sm._check_warmup_lift_settle(actions, MagicMock(), dev, now, trigger="heartbeat")
+    assert applied == []
+
+
 def test_settle_skips_cliff_goal_rows(monkeypatch, tmp_path):
     """A PV-abundance row whose GOAL is the cliff wants the cliff — no settle."""
     from unittest.mock import MagicMock
