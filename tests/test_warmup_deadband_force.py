@@ -133,8 +133,47 @@ def test_mid_window_fire_is_judged_against_the_current_floor():
     r = _warmup_deadband_force_reason(_dev(43.0), {"tank_temp": 45, "tank_power": True}, mid)
     assert r is not None
     assert r["window"] == "evening_showers"
+
+
+def _fake_windows(monkeypatch, *windows):
+    from src.dhw.comfort import ShowerComfortWindow
+
+    made = tuple(ShowerComfortWindow(*w) for w in windows)
+    monkeypatch.setattr("src.dhw.comfort.shower_windows", lambda **kw: made)
+
+
+def test_end_hour_24_window_is_inside_not_tomorrow(monkeypatch):
+    """#748: a declared x-24.0 window put its end at 00:00 of the SAME day, so
+    "inside the window" was unsatisfiable and a fire inside it projected the
+    coast to TOMORROW's start (~21 h of phantom cooling → inflated shortfall).
+    Inside the window the floor is owed at hours = 0."""
+    _fake_windows(monkeypatch, (20.0, 24.0, 45.0, "evening_showers"))
+    inside = datetime(2026, 7, 17, 20, 30, tzinfo=UTC)  # 21:30 BST
+    r = _warmup_deadband_force_reason(_dev(43.0), {"tank_temp": 47, "tank_power": True}, inside)
+    assert r is not None
     assert r["hours_to_window"] == 0.0
-    assert r["projected_c"] == pytest.approx(43.0)
+    # projected at hours=0 is the live tank temp, not a phantom overnight coast
+    assert r["projected_c"] == pytest.approx(43.0, abs=0.1)
+
+
+def test_cross_midnight_window_tail_is_judged_as_current(monkeypatch):
+    """#748: at 00:30 inside a 22:00-01:00 window, yesterday's instance is the
+    live one — the floor is owed NOW, not in ~21.5 h."""
+    _fake_windows(monkeypatch, (22.0, 1.0, 45.0, "evening_showers"))
+    tail = datetime(2026, 7, 17, 23, 30, tzinfo=UTC)  # 00:30 BST next day
+    r = _warmup_deadband_force_reason(_dev(43.0), {"tank_temp": 47, "tank_power": True}, tail)
+    assert r is not None
+    assert r["hours_to_window"] == 0.0
+
+
+def test_cross_midnight_window_before_entry_projects_to_tonight(monkeypatch):
+    """#748: outside a cross-midnight window, entry is TONIGHT's start (a few
+    hours out), not treated as an inverted/empty window."""
+    _fake_windows(monkeypatch, (22.0, 1.0, 45.0, "evening_showers"))
+    noon = datetime(2026, 7, 17, 11, 0, tzinfo=UTC)  # 12:00 BST
+    r = _warmup_deadband_force_reason(_dev(42.0), {"tank_temp": 47, "tank_power": True}, noon)
+    assert r is not None
+    assert r["hours_to_window"] == pytest.approx(10.0, abs=0.1)
 
 
 # ---------------------------------------------------------------------------

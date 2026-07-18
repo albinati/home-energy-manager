@@ -221,6 +221,18 @@ def _warmup_deadband_force_reason(
     for w in shower_windows(preset=preset):
         start = _at_hour(w.start_hour)
         end = _at_hour(w.end_hour)
+        if end <= start:
+            # ``end_hour=24.0`` lands on 00:00 (int(24) % 24) and a
+            # cross-midnight window declares end < start — both mean the end
+            # is on the NEXT day. Without this, "inside the window" is
+            # unsatisfiable and a fire inside it projects ~21 h of phantom
+            # coast to tomorrow's start (#748).
+            end += timedelta(days=1)
+        if now_local < end - timedelta(days=1):
+            # Inside the tail of YESTERDAY's instance of a cross-midnight
+            # window (e.g. 22:00-01:00 at 00:30) — judge that instance.
+            start -= timedelta(days=1)
+            end -= timedelta(days=1)
         if start <= now_local < end:
             hours = 0.0
         else:
