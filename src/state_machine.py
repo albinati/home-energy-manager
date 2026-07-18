@@ -288,6 +288,43 @@ def _warmup_deadband_force_reason(
     }
 
 
+def _lift_latch_target(aid: int, row_start: datetime) -> int | None:
+    """The lift target of an ``hp_target_lift`` that already FIRED for this
+    row, or None once a settle ended the episode (#746).
+
+    The force decision's inputs (shower floor, differential fit, window
+    hours) are live values that can change between the lift PATCH and the
+    idempotency completion. Re-evaluating them mid-lift would re-command the
+    row's stored goal against a device at the cliff — lowering a running
+    cycle's setpoint (behaviour the settle deliberately avoids) and, under
+    Onecta echo lag, reading as a user override of HEM's own lift. The audit
+    row is the persistent latch (survives restarts); the settle is the only
+    sanctioned way down.
+    """
+    try:
+        since = (row_start - timedelta(minutes=1)).isoformat()
+        logs = db.get_action_logs(
+            device="daikin", action="warmup_deadband_force", since=since, limit=20,
+        )
+        lift = None
+        for log in logs:
+            lp = log.get("params") or {}
+            if lp.get("row_id") == aid and lp.get("mechanism") == "hp_target_lift":
+                lift = lp.get("lift_target_c")
+                break
+        if lift is None:
+            return None
+        settles = db.get_action_logs(
+            device="daikin", action="warmup_lift_settle", since=since, limit=20,
+        )
+        if any((log.get("params") or {}).get("row_id") == aid for log in settles):
+            return None
+        return int(lift)
+    except Exception:  # noqa: BLE001 — the latch is best-effort, never block a fire
+        logger.debug("lift-latch lookup failed (non-fatal)", exc_info=True)
+        return None
+
+
 def in_legionella_standoff(now_utc: datetime) -> bool:
     """True when ``now_utc`` is inside the configured weekly legionella
     thermal-shock window, during which the Onecta firmware owns the DHW tank
@@ -615,6 +652,33 @@ def _reconcile_daikin_actions(
                     # Audit row is written AFTER the apply actually attempts
                     # writes (see below) — logging here would claim "applied"
                     # for fires the idempotency check then skips.
+                else:
+                    # #746 — latched lift: this row already fired an HP
+                    # target-lift and the device still holds it, but a live
+                    # input changed under the decision (floor re-tuned,
+                    # differential re-fit) and the re-evaluation now says
+                    # "no force". Keep commanding the lifted target so the
+                    # idempotency check completes the row instead of
+                    # re-PATCHing the stored goal against the cliff. Only
+                    # while the device still holds ~the lift — after a boot
+                    # overwrite (#740) the fresh re-evaluation owns the row.
+                    # Cheap guard first (settle precedent): the latch can
+                    # only matter while the device target sits ABOVE the
+                    # row's stored goal, so the ordinary unforced warmup
+                    # tick never pays the audit-log query.
+                    _dev_tgt = getattr(dev, "tank_target", None)
+                    _row_goal = apply_params.get("tank_temp")
+                    if (
+                        _dev_tgt is not None
+                        and _row_goal is not None
+                        and float(_dev_tgt) > float(_row_goal) + 0.6
+                    ):
+                        _latch = _lift_latch_target(aid, start)
+                        if (
+                            _latch is not None
+                            and float(_dev_tgt) >= float(_latch) - 0.6
+                        ):
+                            apply_params["tank_temp"] = _latch
 
             # Epic 14 (#386) — pre-fire reconcile.
             #
