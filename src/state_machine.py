@@ -110,6 +110,15 @@ _LWT_DRIFT_NOTIFIED: bool = False
 # row per suppressed action_schedule row per process, not per 5-min tick).
 _LEGIONELLA_STANDOFF_LOGGED: set[int] = set()
 
+# #742 review — settle attempts per lift row in THIS process. Bounds the
+# retry when Onecta refuses the lowered setpoint (unverified firmware corner):
+# without it a persistent READ_ONLY would re-PATCH every ~2-min tick for the
+# rest of the window (~40 writes of quota). 3 attempts, then give up — the
+# fallback is the pre-#742 cliff coast, which is safe. Success is deduped
+# PERSISTENTLY via the warmup_lift_settle audit row, not this dict.
+_LIFT_SETTLE_ATTEMPTS: dict[int, int] = {}
+_LIFT_SETTLE_MAX_ATTEMPTS = 3
+
 # #741 review — rows whose warmup_deadband_force audit row has been written in
 # THIS process. The audit row doubles as the reheat-differential fit's
 # exclusion window (#739), so it must exist whenever Powerful may be live:
@@ -156,9 +165,10 @@ def _warmup_deadband_force_reason(
     escalation STABLE across the ~50-min heat-up (review of #737): the review
     showed the reconciler completes the row at whatever target the device
     holds (the idempotency check, not a later "settle" tick), so there is no
-    self-settle back to the goal. The tank therefore ends ~3 °C above the goal
-    at the cliff. That's accepted: it is still ~2.5× cheaper than resistance
-    for the same delivered heat, and buys comfort margin. ``already_lifted``
+    self-settle back to the goal. Left alone the tank would therefore end
+    ~3 °C above the goal at the cliff — bounded since #742 by the heartbeat
+    settle (``_check_warmup_lift_settle``), which re-commands the goal once
+    the tank reaches it, so the lift ends at ~goal+0.5 instead. ``already_lifted``
     keeps the decision pinned to the HP once the device is at the cliff, so a
     tick mid-heat-up (tank now in the would-be-Powerful band) can't flip the
     mechanism and drop COP-1 resistance onto the top few degrees.
@@ -845,6 +855,12 @@ def _reconcile_daikin_actions(
     # belt-and-braces backstop for any drift mechanism we haven't yet
     # imagined.
     _check_tank_power_drift(actions, client, dev, now_utc, trigger=trigger)
+    # #742 — finish an HP target-lift (#737) at the row's GOAL, not the cliff:
+    # the cliff command exists only to START the heat pump from inside the
+    # reheat deadband; once the tank reaches the goal, re-command the goal so
+    # the firmware's thermostat stops there instead of paying for the last
+    # ~3 °C of unrequested margin.
+    _check_warmup_lift_settle(actions, client, dev, now_utc, trigger=trigger)
     # #461 — LWT-offset drift: when HEM owns the offset (pre-heat enabled) but
     # the live device holds a non-zero offset no plan slot justifies, reset it
     # to 0 once the user's grace window has passed. Catches a manual offset with
@@ -1100,6 +1116,160 @@ def _check_dhw_shower_drawdown(
         window_max, tank_now, window_max - tank_now, delta_c,
         now_local.strftime("%H:%M"), minutes_early, warmup_row["id"],
     )
+
+
+def _check_warmup_lift_settle(
+    actions: list[dict[str, Any]],
+    client: DaikinClient,
+    dev: Any,
+    now_utc: datetime,
+    *,
+    trigger: str,
+) -> None:
+    """#742 — finish an HP target-lift at the GOAL, not the cliff.
+
+    The #737 escalation commands the resistance cliff (50) because that is the
+    only way to make the firmware's thermostat START the heat pump from inside
+    the reheat deadband — but the owner's spec is the row's goal (47), and left
+    alone the firmware heats all the way to the cliff (measured 2026-07-18:
+    commanded 50, stopped at 51 — +4 °C of paid heat above the goal).
+
+    So once the tank has REACHED the goal, re-command the goal. The firmware
+    stops heating when tank ≥ target — the one semantic we can rely on without
+    assuming anything about how a running cycle reacts to a lowered-but-still-
+    above-tank setpoint (which is why the settle waits for the goal instead of
+    lowering the target mid-lift). Failure is graceful both ways: a missed
+    tick heats a little further toward the cliff (the pre-#742 behaviour); a
+    spurious settle commands what the plan wanted anyway.
+
+    Bails on any of (fail-safe — silence is fine):
+    * kill switch off, read-only, passive mode, legionella stand-off;
+    * live tank temp/target/power unknown, or tank off;
+    * device target below the cliff — nothing to settle. This is also the
+      natural dedup: after one successful settle the device target reads the
+      goal, and after the row window the setback owns the tank;
+    * no ``tank_warmup`` row with a sub-cliff goal covering ``now`` (a
+      cliff-goal row — e.g. PV-abundance storage — WANTS the cliff);
+    * the covering row has no ``hp_target_lift`` audit row — a cliff-level
+      target HEM did not command is the user's own gesture; respect it.
+    """
+    if not getattr(config, "DHW_WARMUP_LIFT_SETTLE_ENABLED", True):
+        return
+    if config.OPENCLAW_READ_ONLY or config.DAIKIN_CONTROL_MODE != "active":
+        return
+    if in_legionella_standoff(now_utc):
+        return
+    tank = getattr(dev, "tank_temperature", None)
+    dev_target = getattr(dev, "tank_target", None)
+    if tank is None or dev_target is None or not getattr(dev, "tank_on", None):
+        return
+    try:
+        from .dhw.params import resolve_tank_params
+
+        cliff = float(resolve_tank_params().t_hp_max_c)
+    except Exception as _exc:  # noqa: BLE001 — never block the heartbeat
+        logger.debug("lift-settle: tank params unavailable (non-fatal): %s", _exc)
+        return
+    if float(dev_target) < cliff - 0.6:
+        return  # not lifted (or already settled)
+
+    row = None
+    for act in actions:
+        if act.get("action_type") != "tank_warmup":
+            continue
+        if (act.get("status") or "") not in ("pending", "active", "completed"):
+            continue  # a lift row is 'completed' via pre-fire idempotency (#386)
+        if act.get("overridden_by_user_at"):
+            continue
+        try:
+            start = _parse_utc(act["start_time"])
+            end = _parse_utc(act["end_time"])
+        except (ValueError, KeyError, TypeError):
+            continue
+        if start <= now_utc < end:
+            row = act
+            row_start = start
+            break
+    if row is None:
+        return
+    params = row.get("params") or {}
+    if isinstance(params, str):
+        try:
+            params = json.loads(params)
+        except (json.JSONDecodeError, TypeError):
+            params = {}
+    goal = params.get("tank_temp")
+    if goal is None:
+        return
+    goal = float(goal)
+    if goal >= cliff - 0.6:
+        return  # the plan itself wants the cliff — not a #737 lift
+    if float(tank) < goal:
+        return  # still lifting — let the heat pump work
+
+    # Only settle a lift WE commanded: the audit row is the ownership proof.
+    rid = row.get("id")
+    try:
+        since = (row_start - timedelta(minutes=1)).isoformat()
+        logs = db.get_action_logs(
+            device="daikin", action="warmup_deadband_force", since=since, limit=20,
+        )
+    except Exception as _exc:  # noqa: BLE001
+        logger.debug("lift-settle: audit lookup failed (non-fatal): %s", _exc)
+        return
+    ours = any(
+        (log.get("params") or {}).get("row_id") == rid
+        and (log.get("params") or {}).get("mechanism") == "hp_target_lift"
+        for log in logs
+    )
+    if not ours:
+        return
+
+    # #743 review — ownership is per EPISODE, not per row: after one
+    # successful settle, a cliff-level target re-appearing inside the same
+    # window can only be the USER's own gesture (HEM never re-lifts a
+    # completed row) — respect it. The settle audit row is the persistent
+    # proof, so this survives restarts.
+    try:
+        settle_logs = db.get_action_logs(
+            device="daikin", action="warmup_lift_settle", since=since, limit=20,
+        )
+    except Exception as _exc:  # noqa: BLE001
+        logger.debug("lift-settle: settle-log lookup failed (non-fatal): %s", _exc)
+        return
+    if any((log.get("params") or {}).get("row_id") == rid for log in settle_logs):
+        return
+
+    # #743 review — bounded retry: if Onecta refuses the lowered setpoint,
+    # give up after a few attempts; the fallback is the safe cliff coast.
+    attempts = _LIFT_SETTLE_ATTEMPTS.get(rid, 0)
+    if attempts >= _LIFT_SETTLE_MAX_ATTEMPTS:
+        return
+    _LIFT_SETTLE_ATTEMPTS[rid] = attempts + 1
+
+    try:
+        apply_scheduled_daikin_params(
+            dev, client, {"tank_power": True, "tank_temp": goal},
+            trigger=f"warmup_lift_settle:{trigger}",
+        )
+    except (DaikinError, ValueError) as exc:
+        logger.warning("warmup lift settle failed (non-fatal): %s", exc)
+        return
+    try:
+        db.log_action(
+            device="daikin",
+            action="warmup_lift_settle",
+            params={
+                "row_id": rid,
+                "tank_c": float(tank),
+                "goal_c": goal,
+                "from_target_c": float(dev_target),
+            },
+            result="applied",
+            trigger=trigger,
+        )
+    except Exception as _exc:  # noqa: BLE001 — never block the heartbeat
+        logger.debug("lift-settle log failed (non-fatal): %s", _exc)
 
 
 def _check_tank_power_drift(

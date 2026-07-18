@@ -1811,6 +1811,14 @@ class Config:
     DHW_WARMUP_DEADBAND_FORCE_ENABLED: bool = os.getenv(
         "DHW_WARMUP_DEADBAND_FORCE_ENABLED", "true"
     ).strip().lower() in ("1", "true", "yes")
+    # #742 — finish the #737 HP target-lift at the row's GOAL, not the cliff:
+    # once the tank reaches the goal, the heartbeat re-commands the goal so the
+    # firmware's thermostat stops there (~47.5 instead of 51). Off = revert to
+    # heat-to-the-cliff (the pre-#742 behaviour; safe, just ~3 °C of paid
+    # comfort margin above the goal).
+    DHW_WARMUP_LIFT_SETTLE_ENABLED: bool = os.getenv(
+        "DHW_WARMUP_LIFT_SETTLE_ENABLED", "true"
+    ).strip().lower() in ("1", "true", "yes")
     # The LP times the tank itself (src/dhw), instead of following dhw_policy's fixed
     # 13:00→45 / 22:00→37 clock. Ships OFF: it must first be PROVEN better by the
     # economic shadow. Precedence passive > LP-owned > K1 pin; flag off is

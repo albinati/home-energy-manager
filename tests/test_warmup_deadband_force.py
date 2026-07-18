@@ -247,3 +247,179 @@ def test_prefire_match_confirms_and_writes_the_audit_row_once(monkeypatch, tmp_p
     assert len(logged) == 1
     assert logged[0][1] == "confirmed"
     assert '"via": "prefire_match"' in logged[0][0]
+
+
+# ---------------------------------------------------------------------------
+# #742 — heartbeat settle: finish the HP lift at the GOAL, not the cliff
+# ---------------------------------------------------------------------------
+
+
+def _settle_env(monkeypatch, tmp_path, *, audit_mechanism="hp_target_lift",
+                row_goal=47, row_status="completed"):
+    """Seed a lifted-warmup world: row covering now + its audit log row."""
+    import json as _json
+    from datetime import timedelta
+
+    import src.state_machine as sm
+    from src import db
+
+    path = tmp_path / "t.db"
+    monkeypatch.setattr("src.config.config.DB_PATH", str(path))
+    monkeypatch.setitem(config._overrides, "DAIKIN_CONTROL_MODE", "active")
+    monkeypatch.setattr("src.config.config.OPENCLAW_READ_ONLY", False)
+    # #743 review — without this the settle tests fail every Sunday
+    # 11:00-13:00 UTC (the legionella stand-off guard, enabled by default).
+    monkeypatch.setattr("src.config.config.DHW_LEGIONELLA_STANDOFF_ENABLED", False)
+    sm._LIFT_SETTLE_ATTEMPTS.clear()
+    db.init_db()
+    now = datetime.now(UTC)
+    actions = [{
+        "id": 90, "action_type": "tank_warmup", "status": row_status,
+        "start_time": (now - timedelta(minutes=40)).isoformat(),
+        "end_time": (now + timedelta(minutes=80)).isoformat(),
+        "params": _json.dumps({"tank_power": True, "tank_temp": row_goal,
+                               "tank_powerful": False}),
+    }]
+    if audit_mechanism:
+        db.log_action(device="daikin", action="warmup_deadband_force",
+                      params={"row_id": 90, "mechanism": audit_mechanism,
+                              "lift_target_c": 50},
+                      result="applied", trigger="test")
+    applied: list[dict] = []
+    monkeypatch.setattr(
+        "src.state_machine.apply_scheduled_daikin_params",
+        lambda d, c, p, trigger: applied.append({"params": p, "trigger": trigger}) or True,
+    )
+    return sm, db, actions, now, applied
+
+
+def _settle_logs(db):
+    conn = db.get_connection()
+    try:
+        return conn.execute(
+            "SELECT params FROM action_log WHERE action='warmup_lift_settle'"
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def test_settle_recommands_the_goal_once_the_tank_reaches_it(monkeypatch, tmp_path):
+    from unittest.mock import MagicMock
+
+    sm, db, actions, now, applied = _settle_env(monkeypatch, tmp_path)
+    dev = SimpleNamespace(tank_temperature=47.0, tank_target=50.0, tank_on=True)
+    sm._check_warmup_lift_settle(actions, MagicMock(), dev, now, trigger="heartbeat")
+    assert len(applied) == 1
+    assert applied[0]["params"] == {"tank_power": True, "tank_temp": 47.0}
+    assert applied[0]["trigger"].startswith("warmup_lift_settle:")
+    assert len(_settle_logs(db)) == 1
+
+
+def test_settle_waits_while_the_pump_is_still_lifting(monkeypatch, tmp_path):
+    from unittest.mock import MagicMock
+
+    sm, db, actions, now, applied = _settle_env(monkeypatch, tmp_path)
+    dev = SimpleNamespace(tank_temperature=45.5, tank_target=50.0, tank_on=True)
+    sm._check_warmup_lift_settle(actions, MagicMock(), dev, now, trigger="heartbeat")
+    assert applied == []
+
+
+def test_settle_noop_after_it_already_settled(monkeypatch, tmp_path):
+    """Natural dedup: once the device target reads the goal, nothing to do."""
+    from unittest.mock import MagicMock
+
+    sm, db, actions, now, applied = _settle_env(monkeypatch, tmp_path)
+    dev = SimpleNamespace(tank_temperature=47.4, tank_target=47.0, tank_on=True)
+    sm._check_warmup_lift_settle(actions, MagicMock(), dev, now, trigger="heartbeat")
+    assert applied == []
+
+
+def test_settle_respects_a_cliff_the_user_set_themselves(monkeypatch, tmp_path):
+    """Device at 50 with NO hp_target_lift audit row = the user's own gesture."""
+    from unittest.mock import MagicMock
+
+    sm, db, actions, now, applied = _settle_env(monkeypatch, tmp_path,
+                                                audit_mechanism=None)
+    dev = SimpleNamespace(tank_temperature=48.0, tank_target=50.0, tank_on=True)
+    sm._check_warmup_lift_settle(actions, MagicMock(), dev, now, trigger="heartbeat")
+    assert applied == []
+
+
+def test_settle_skips_cliff_goal_rows(monkeypatch, tmp_path):
+    """A PV-abundance row whose GOAL is the cliff wants the cliff — no settle."""
+    from unittest.mock import MagicMock
+
+    sm, db, actions, now, applied = _settle_env(monkeypatch, tmp_path, row_goal=50)
+    dev = SimpleNamespace(tank_temperature=50.0, tank_target=50.0, tank_on=True)
+    sm._check_warmup_lift_settle(actions, MagicMock(), dev, now, trigger="heartbeat")
+    assert applied == []
+
+
+def test_settle_kill_switch_and_read_only(monkeypatch, tmp_path):
+    from unittest.mock import MagicMock
+
+    sm, db, actions, now, applied = _settle_env(monkeypatch, tmp_path)
+    dev = SimpleNamespace(tank_temperature=47.0, tank_target=50.0, tank_on=True)
+    monkeypatch.setattr("src.config.config.DHW_WARMUP_LIFT_SETTLE_ENABLED", False)
+    sm._check_warmup_lift_settle(actions, MagicMock(), dev, now, trigger="heartbeat")
+    assert applied == []
+    monkeypatch.setattr("src.config.config.DHW_WARMUP_LIFT_SETTLE_ENABLED", True)
+    monkeypatch.setattr("src.config.config.OPENCLAW_READ_ONLY", True)
+    sm._check_warmup_lift_settle(actions, MagicMock(), dev, now, trigger="heartbeat")
+    assert applied == []
+
+
+def test_settle_needs_a_row_covering_now(monkeypatch, tmp_path):
+    """After the warmup window the setback owns the tank — never settle then."""
+    from unittest.mock import MagicMock
+    from datetime import timedelta
+
+    sm, db, actions, now, applied = _settle_env(monkeypatch, tmp_path)
+    dev = SimpleNamespace(tank_temperature=47.0, tank_target=50.0, tank_on=True)
+    sm._check_warmup_lift_settle(actions, MagicMock(), dev,
+                                 now + timedelta(hours=3), trigger="heartbeat")
+    assert applied == []
+
+
+def test_settle_runs_once_per_episode_then_respects_the_users_cliff(monkeypatch, tmp_path):
+    """#743 review real-bug: after a successful settle, a cliff-level target
+    re-appearing inside the same window is the USER's gesture — HEM must not
+    revert it (the old row-scoped ownership check clobbered it in a loop)."""
+    from unittest.mock import MagicMock
+
+    sm, db, actions, now, applied = _settle_env(monkeypatch, tmp_path)
+    dev = SimpleNamespace(tank_temperature=47.0, tank_target=50.0, tank_on=True)
+    sm._check_warmup_lift_settle(actions, MagicMock(), dev, now, trigger="heartbeat")
+    assert len(applied) == 1  # first settle fires
+
+    # The user sets the tank back to 50 mid-window; a fresh device read.
+    dev2 = SimpleNamespace(tank_temperature=48.0, tank_target=50.0, tank_on=True)
+    sm._check_warmup_lift_settle(actions, MagicMock(), dev2, now, trigger="heartbeat")
+    assert len(applied) == 1  # respected — no second settle
+
+    # Survives a restart (persistent audit row, not process state).
+    sm._LIFT_SETTLE_ATTEMPTS.clear()
+    sm._check_warmup_lift_settle(actions, MagicMock(), dev2, now, trigger="heartbeat")
+    assert len(applied) == 1
+
+
+def test_settle_gives_up_after_bounded_failed_attempts(monkeypatch, tmp_path):
+    """#743 review risk: if Onecta refuses the lowered setpoint, retry a few
+    times and then fall back to the safe cliff coast — not ~40 writes."""
+    from unittest.mock import MagicMock
+
+    from src.daikin.client import DaikinError
+
+    sm, db, actions, now, applied = _settle_env(monkeypatch, tmp_path)
+    calls: list[int] = []
+
+    def _refuse(d, c, p, trigger):
+        calls.append(1)
+        raise DaikinError("READ_ONLY_CHARACTERISTIC")
+    monkeypatch.setattr("src.state_machine.apply_scheduled_daikin_params", _refuse)
+
+    dev = SimpleNamespace(tank_temperature=47.0, tank_target=50.0, tank_on=True)
+    for _ in range(6):
+        sm._check_warmup_lift_settle(actions, MagicMock(), dev, now, trigger="heartbeat")
+    assert len(calls) == sm._LIFT_SETTLE_MAX_ATTEMPTS
+    assert _settle_logs(db) == []  # no false 'applied' audit rows
