@@ -343,3 +343,29 @@ def test_get_deadband_force_powerful_times_matches_only_powerful(tmp_path, monke
 
     times = _db.get_deadband_force_powerful_times("2026-01-01T00:00:00", "2099-01-01T00:00:00")
     assert len(times) == 1
+
+
+def test_delayed_powerful_fallback_fire_is_excluded_via_observation_overlap():
+    """#741 review real-bug: the escalation re-evaluates every heartbeat, so
+    the Powerful fallback can fire up to observe_minutes AFTER the step it
+    contaminates (no new target step — only tank_powerful changes). The
+    exclusion must test overlap with the episode's observation interval,
+    not just the step instant."""
+    from datetime import UTC, datetime, timedelta
+
+    from src.dhw.calibration import fit_reheat_differential
+
+    t0 = datetime(2026, 7, 10, 10, 0, tzinfo=UTC)
+    rows = _step_series(
+        # Step at minute 5 (Δ3); no rise until the delayed Powerful fire at
+        # minute 70 pushes resistance heat in — rise observed at minute 90,
+        # still inside observe_minutes=100 → would read "heated at Δ3".
+        (0, 44, 37), (5, 44, 47), (40, 44, 47), (60, 44, 47), (90, 47, 47),
+        (300, 38, 37), (305, 38, 47), (350, 41, 47),    # Δ9 heats
+        (600, 43, 37), (605, 43, 47), (700, 43, 47),    # Δ4 no heat
+    )
+    fire_at = (t0 + timedelta(minutes=70)).isoformat()
+    pwin = cal.deadband_force_windows([fire_at])
+    fit = fit_reheat_differential(rows, powerful_windows_utc=pwin)
+    deltas = [e["delta_c"] for e in fit["episodes"]]
+    assert 3.0 not in deltas and len(fit["episodes"]) == 2

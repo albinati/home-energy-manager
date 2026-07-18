@@ -110,6 +110,17 @@ _LWT_DRIFT_NOTIFIED: bool = False
 # row per suppressed action_schedule row per process, not per 5-min tick).
 _LEGIONELLA_STANDOFF_LOGGED: set[int] = set()
 
+# #741 review — rows whose warmup_deadband_force audit row has been written in
+# THIS process. The audit row doubles as the reheat-differential fit's
+# exclusion window (#739), so it must exist whenever Powerful may be live:
+# the apply path and the failed-apply path always log (a timeout can leave the
+# PATCH applied cloud-side), and the pre-fire idempotency path logs once per
+# row when the device CONFIRMS the escalation state without us having applied
+# it this session (timeout-then-row-completed, or a user's own Powerful).
+# Only the pre-fire path is gated by this set — a genuine re-fire after the
+# device drifted back must always produce a fresh row.
+_DEADBAND_FORCE_LOGGED: set[int] = set()
+
 
 def _is_tank_action(params: dict[str, Any]) -> bool:
     """True when a row commands the DHW tank (vs. an LWT/space-heating row).
@@ -615,6 +626,27 @@ def _reconcile_daikin_actions(
                             result="skipped",
                             trigger=trigger,
                         )
+                        # #741 review — the device CONFIRMS the escalation
+                        # state is live, but this session never wrote the
+                        # audit row (a set_tank_powerful timeout can apply
+                        # cloud-side and raise here, or the user pressed
+                        # Powerful themselves). The audit row is the #739
+                        # fit-exclusion window, so write it once per row.
+                        if _deadband_force and aid not in _DEADBAND_FORCE_LOGGED:
+                            _DEADBAND_FORCE_LOGGED.add(aid)
+                            try:
+                                db.log_action(
+                                    device="daikin",
+                                    action="warmup_deadband_force",
+                                    params={"row_id": aid, "via": "prefire_match",
+                                            **_deadband_force},
+                                    result="applied",
+                                    trigger=trigger,
+                                )
+                            except Exception as _exc:
+                                logger.debug(
+                                    "deadband-force log failed (non-fatal): %s", _exc,
+                                )
                         _USER_OVERRIDE_NOTIFIED.discard(aid)
                         continue
                 except Exception as _exc:
@@ -757,6 +789,7 @@ def _reconcile_daikin_actions(
                     dev, client, apply_params, trigger=trigger,
                 )
                 if applied and _deadband_force:
+                    _DEADBAND_FORCE_LOGGED.add(aid)
                     try:
                         db.log_action(
                             device="daikin",
@@ -780,6 +813,23 @@ def _reconcile_daikin_actions(
             except (DaikinError, ValueError) as e:
                 logger.warning("Boot Daikin apply %s: %s", aid, e)
                 db.mark_action(aid, "failed", error_msg=str(e))
+                # #741 review — a failed row is never reconciled again, but a
+                # timed-out set_tank_powerful may still have applied cloud-side.
+                # Write the audit row anyway (result='failed') so the #739 fit
+                # exclusion covers the window either way — a spurious exclusion
+                # costs one episode; a missed one poisons the fit.
+                if _deadband_force:
+                    _DEADBAND_FORCE_LOGGED.add(aid)
+                    try:
+                        db.log_action(
+                            device="daikin",
+                            action="warmup_deadband_force",
+                            params={"row_id": aid, **_deadband_force},
+                            result="failed",
+                            trigger=trigger,
+                        )
+                    except Exception as _exc:
+                        logger.debug("deadband-force log failed (non-fatal): %s", _exc)
                 # Even on failure, the attempt was made — wait before the next.
                 _applied_in_this_tick = True
 

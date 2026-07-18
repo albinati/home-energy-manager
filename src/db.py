@@ -5652,6 +5652,10 @@ def get_deadband_force_powerful_times(start_iso: str, end_iso: str) -> list[str]
     with _lock:
         conn = get_connection()
         try:
+            # NB the LIKE pattern is coupled to log_action's json.dumps default
+            # separators (', ', ': '); a move to compact separators would make
+            # this match nothing, silently. test_get_deadband_force_powerful_times
+            # round-trips through log_action to pin that.
             cur = conn.execute(
                 "SELECT timestamp FROM action_log "
                 "WHERE action = 'warmup_deadband_force' "
