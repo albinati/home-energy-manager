@@ -276,3 +276,70 @@ def test_reheat_differential_excludes_commanded_powerful_windows():
     fit = fit_reheat_differential(rows, powerful_windows_utc=pwin)
     deltas = [e["delta_c"] for e in fit["episodes"]]
     assert 5.0 not in deltas and len(fit["episodes"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# #739 — Powerful-fallback deadband-force fires must not poison the fit
+# ---------------------------------------------------------------------------
+
+
+def test_deadband_force_windows_pad_and_parse():
+    """Windows straddle the audit timestamp: the PATCH lands seconds before the
+    log write (pad back), the step is observed at the next poll (pad forward)."""
+    from datetime import UTC, datetime, timedelta
+
+    t = datetime(2026, 7, 18, 12, 2, 30, tzinfo=UTC)
+    wins = cal.deadband_force_windows([t.isoformat(), "not-a-timestamp"])
+    assert len(wins) == 1  # the junk string is skipped, never raises
+    s, e = wins[0]
+    assert s == t - timedelta(minutes=5)
+    assert e == t + timedelta(minutes=60)
+    # Naive timestamps (older rows) are treated as UTC.
+    naive = cal.deadband_force_windows(["2026-07-18T12:02:30"])
+    assert naive[0][0].tzinfo is not None
+
+
+def test_powerful_fallback_fire_is_excluded_from_the_fit():
+    """A mechanism=powerful fire heats at Δ < deadband; via its audit-log
+    timestamp the episode is discarded, so the threshold cannot drift down."""
+    from datetime import UTC, datetime, timedelta
+
+    from src.dhw.calibration import fit_reheat_differential
+
+    t0 = datetime(2026, 7, 10, 10, 0, tzinfo=UTC)
+    rows = _step_series(
+        (0, 44, 37), (5, 44, 47), (40, 47, 47),         # Δ3 "heated" — Powerful fallback
+        (300, 38, 37), (305, 38, 47), (350, 41, 47),    # Δ9 heats
+        (600, 43, 37), (605, 43, 47), (700, 43, 47),    # Δ4 no heat
+    )
+    # Audit row is written seconds after the PATCH that produced the 10:05 step.
+    fire_at = (t0 + timedelta(minutes=5, seconds=20)).isoformat()
+    pwin = cal.deadband_force_windows([fire_at])
+    fit = fit_reheat_differential(rows, powerful_windows_utc=pwin)
+    deltas = [e["delta_c"] for e in fit["episodes"]]
+    assert 3.0 not in deltas and len(fit["episodes"]) == 2
+
+
+def test_get_deadband_force_powerful_times_matches_only_powerful(tmp_path, monkeypatch):
+    """The db accessor returns only mechanism=powerful deadband-force fires —
+    hp_target_lift fires are legitimate thermostat episodes and stay in."""
+    from src import db as _db
+
+    path = tmp_path / "cal.db"
+    monkeypatch.setenv("DB_PATH", str(path))
+    monkeypatch.setattr(_db, "_db_path", lambda: path)
+    _db.init_db()
+
+    common = {"device": "daikin", "result": "applied", "trigger": "heartbeat"}
+    _db.log_action(action="warmup_deadband_force",
+                   params={"row_id": 1, "mechanism": "powerful", "delta_c": 2.5},
+                   **common)
+    _db.log_action(action="warmup_deadband_force",
+                   params={"row_id": 2, "mechanism": "hp_target_lift",
+                           "lift_target_c": 50},
+                   **common)
+    _db.log_action(action="prefire_state_match",
+                   params={"row_id": 3, "mechanism": "powerful"}, **common)
+
+    times = _db.get_deadband_force_powerful_times("2026-01-01T00:00:00", "2099-01-01T00:00:00")
+    assert len(times) == 1
