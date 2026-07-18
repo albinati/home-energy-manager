@@ -166,6 +166,22 @@ def test_cross_midnight_window_tail_is_judged_as_current(monkeypatch):
     assert r["hours_to_window"] == 0.0
 
 
+def test_zero_length_window_is_disabled_not_always(monkeypatch):
+    """#750 review: start == end is the intuitive way to disable a window; the
+    end<=start normalisation must not promote it to a 24 h always-owed floor."""
+    _fake_windows(monkeypatch, (20.0, 20.0, 45.0, "evening_showers"))
+    assert _warmup_deadband_force_reason(
+        _dev(42.0), {"tank_temp": 47, "tank_power": True}, _FIRE) is None
+
+
+def test_all_day_window_is_still_always_inside(monkeypatch):
+    """0.0-24.0 is genuinely all-day (raw hours differ) — floor owed now."""
+    _fake_windows(monkeypatch, (0.0, 24.0, 45.0, "evening_showers"))
+    r = _warmup_deadband_force_reason(_dev(42.0), {"tank_temp": 47, "tank_power": True}, _FIRE)
+    assert r is not None
+    assert r["hours_to_window"] == 0.0
+
+
 def test_cross_midnight_window_before_entry_projects_to_tonight(monkeypatch):
     """#748: outside a cross-midnight window, entry is TONIGHT's start (a few
     hours out), not treated as an inverted/empty window."""

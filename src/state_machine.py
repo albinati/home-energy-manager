@@ -219,6 +219,12 @@ def _warmup_deadband_force_reason(
 
     worst: dict[str, Any] | None = None
     for w in shower_windows(preset=preset):
+        if float(w.end_hour) == float(w.start_hour):
+            # A zero-length window is a DISABLED window, not "always": the
+            # end <= start normalisation below would otherwise promote it to
+            # a 24 h always-owed floor (review of #748). Only the raw hours
+            # can tell x-x apart from 0.0-24.0 — both map to start == end.
+            continue
         start = _at_hour(w.start_hour)
         end = _at_hour(w.end_hour)
         if end <= start:
