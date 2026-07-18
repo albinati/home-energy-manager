@@ -5635,6 +5635,39 @@ def get_powerful_action_windows(start_iso: str, end_iso: str) -> list[tuple[str,
             conn.close()
 
 
+def get_deadband_force_powerful_times(start_iso: str, end_iso: str) -> list[str]:
+    """Timestamps of #735 deadband-force fires that took the Powerful FALLBACK
+    (``mechanism='powerful'``) in the window (#739).
+
+    These fires mutate only the in-memory apply params — the stored
+    action_schedule row deliberately keeps ``tank_powerful: false`` (no
+    crosstalk with the #619 stall backoff or the #386 gesture comparison) — so
+    :func:`get_powerful_action_windows` cannot see them. Without this the
+    reheat-differential fit reads each one as "heated at Δ < deadband" and the
+    threshold drifts down, in exactly the #735 incident direction.
+
+    ``hp_target_lift`` fires are intentionally NOT matched: those heat via the
+    firmware's real thermostat (Δ = cliff − tank cleared the deadband), so they
+    are legitimate, informative episodes for the fit."""
+    with _lock:
+        conn = get_connection()
+        try:
+            # NB the LIKE pattern is coupled to log_action's json.dumps default
+            # separators (', ', ': '); a move to compact separators would make
+            # this match nothing, silently. test_get_deadband_force_powerful_times
+            # round-trips through log_action to pin that.
+            cur = conn.execute(
+                "SELECT timestamp FROM action_log "
+                "WHERE action = 'warmup_deadband_force' "
+                "AND params LIKE '%\"mechanism\": \"powerful\"%' "
+                "AND timestamp >= ? AND timestamp <= ?",
+                (start_iso, end_iso),
+            )
+            return [str(r[0]) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
 def get_tank_temps_since(since_epoch: float) -> list[tuple[float, float]]:
     """``(fetched_at, tank_temp_c)`` LIVE rows with a non-null tank temperature
     at or after *since_epoch*, ascending. Feeds the evening shower-drawdown

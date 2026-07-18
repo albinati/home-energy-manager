@@ -135,3 +135,115 @@ def test_mid_window_fire_is_judged_against_the_current_floor():
     assert r["window"] == "evening_showers"
     assert r["hours_to_window"] == 0.0
     assert r["projected_c"] == pytest.approx(43.0)
+
+
+# ---------------------------------------------------------------------------
+# #741 review — the audit row is the #739 fit-exclusion window, so it must
+# exist whenever Powerful may be live, not only on the happy apply path.
+# ---------------------------------------------------------------------------
+
+
+def _reconcile_env(monkeypatch, tmp_path, *, dev):
+    import src.state_machine as sm
+    from src import db
+
+    path = tmp_path / "t.db"
+    monkeypatch.setattr("src.config.config.DB_PATH", str(path))
+    monkeypatch.setattr("src.config.config.PREFIRE_STATE_MATCH_ENABLED", True)
+    monkeypatch.setitem(config._overrides, "DAIKIN_CONTROL_MODE", "active")
+    monkeypatch.setattr("src.config.config.OPENCLAW_READ_ONLY", False)
+    monkeypatch.setattr("src.config.config.USER_OVERRIDE_RESPECT_HOURS", 4.0)
+    sm._FIRST_APPLIED_SESSION.clear()
+    sm._DEADBAND_FORCE_LOGGED.clear()
+    db.init_db()
+    now = datetime.now(UTC)
+    conn = db.get_connection()
+    try:
+        from datetime import timedelta
+        import json as _json
+        conn.execute(
+            """INSERT INTO action_schedule
+               (date, start_time, end_time, device, action_type, params, status, created_at)
+               VALUES (?, ?, ?, 'daikin', 'tank_warmup', ?, 'active', ?)""",
+            (now.date().isoformat(),
+             (now - timedelta(seconds=60)).isoformat(),
+             (now + timedelta(seconds=1800)).isoformat(),
+             _json.dumps({"tank_power": True, "tank_temp": 47, "tank_powerful": False}),
+             now.isoformat()),
+        )
+        rid = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        conn.commit()
+    finally:
+        conn.close()
+    rows = db.get_actions_for_plan_date(now.date().isoformat(), device="daikin")
+    return sm, db, rows, rid, now
+
+
+def _force_log_rows(db):
+    conn = db.get_connection()
+    try:
+        return conn.execute(
+            "SELECT params, result FROM action_log WHERE action='warmup_deadband_force'"
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def test_failed_apply_still_writes_the_audit_row(monkeypatch, tmp_path):
+    """A timed-out set_tank_powerful can apply cloud-side, and the failed row is
+    never reconciled again — the exclusion window must be written anyway."""
+    from unittest.mock import MagicMock
+
+    from src.daikin.client import DaikinError
+    from src.daikin.models import DaikinDevice
+
+    # Tank 44: Δ3 inside the deadband, cliff − 44 = 6 ≤ 6.5 → Powerful corner;
+    # 44 < the 45 evening floor, so the coast misses at ANY time of day.
+    dev = DaikinDevice(id="gw", name="x", tank_temperature=44.0,
+                       tank_target=37.0, tank_on=True, tank_powerful=False)
+    sm, db, rows, rid, now = _reconcile_env(monkeypatch, tmp_path, dev=dev)
+
+    def _boom(*a, **k):
+        raise DaikinError("timeout")
+    monkeypatch.setattr("src.state_machine.apply_scheduled_daikin_params", _boom)
+
+    sm._reconcile_daikin_actions(rows, MagicMock(), dev, now, trigger="test")
+
+    row = db.get_action_by_id(rid)
+    assert row["status"] == "failed"
+    logged = _force_log_rows(db)
+    assert len(logged) == 1
+    assert logged[0][1] == "failed"
+    assert '"mechanism": "powerful"' in logged[0][0]
+    # And the db accessor (the fit's window source) sees it.
+    times = db.get_deadband_force_powerful_times("2000-01-01T00:00:00", "2099-01-01T00:00:00")
+    assert len(times) == 1
+
+
+def test_prefire_match_confirms_and_writes_the_audit_row_once(monkeypatch, tmp_path):
+    """Device already holds the escalated state (timeout-then-completed, or the
+    user's own Powerful): the idempotency completion must still produce the
+    exclusion window — exactly once."""
+    from unittest.mock import MagicMock
+
+    from src.daikin.models import DaikinDevice
+
+    dev = DaikinDevice(id="gw", name="x", tank_temperature=44.0,
+                       tank_target=47.0, tank_on=True, tank_powerful=True)
+    sm, db, rows, rid, now = _reconcile_env(monkeypatch, tmp_path, dev=dev)
+
+    apply_calls: list[dict] = []
+    monkeypatch.setattr(
+        "src.state_machine.apply_scheduled_daikin_params",
+        lambda d, c, p, trigger: apply_calls.append(p) or True,
+    )
+
+    sm._reconcile_daikin_actions(rows, MagicMock(), dev, now, trigger="test")
+
+    row = db.get_action_by_id(rid)
+    assert row["status"] == "completed"
+    assert len(apply_calls) == 0  # completed via idempotency, no PATCH
+    logged = _force_log_rows(db)
+    assert len(logged) == 1
+    assert logged[0][1] == "confirmed"
+    assert '"via": "prefire_match"' in logged[0][0]

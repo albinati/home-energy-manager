@@ -374,8 +374,16 @@ def fit_reheat_differential(
         # Boosts are excluded by the ≤52 target class, but guests-mode warmups
         # and manual overrides command warmup-class targets WITH Powerful —
         # telemetry can't see the flag, so the caller passes HEM's own
-        # commanded-Powerful windows (action_schedule) to exclude.
-        if any(s <= at <= e for s, e in pwin):
+        # commanded-Powerful windows (action_schedule + #739 deadband-force
+        # audit rows) to exclude. The test is OVERLAP with the episode's whole
+        # observation interval, not just the step instant (#741 review): a
+        # #735 Powerful fallback re-evaluates every heartbeat and can fire up
+        # to ``observe_minutes`` AFTER the step it then contaminates — its
+        # resistance rise would be credited to the step's small Δ. Dropping
+        # the occasional legitimate episode near a Powerful window is the
+        # accepted cost; poisoned episodes are worse than fewer episodes.
+        obs_end = at + timedelta(minutes=observe_minutes)
+        if any(s <= obs_end and e >= at for s, e in pwin):
             discarded += 1
             continue
         delta = tgt1 - tank
@@ -458,6 +466,44 @@ def fit_reheat_differential(
         return out
     out["status"] = "ok"
     out["differential_c"] = round(float(best_t), 1)
+    return out
+
+
+# Exclusion pad around a #735 Powerful-fallback fire (#739). The PATCH lands
+# seconds BEFORE the action_log write (the audit row is only written after the
+# apply attempted writes), so pad slightly backwards; forwards, 60 min covers
+# both a late first-poll observation of the step and the resistance heat-up
+# itself. A fire that lands up to ``observe_minutes`` AFTER the step it
+# contaminates (the escalation re-evaluates every heartbeat) is handled by the
+# fit's overlap test against the episode's observation interval (#741 review),
+# not by widening this pad.
+_FORCE_WIN_PRE_MIN = 5.0
+_FORCE_WIN_POST_MIN = 60.0
+
+
+def deadband_force_windows(times_iso: list[str]) -> list[tuple[datetime, datetime]]:
+    """Exclusion windows for reheat-differential fitting from #735
+    Powerful-fallback fire timestamps (#739).
+
+    Those fires force a lift at Δ < deadband but leave the stored row's
+    ``tank_powerful: false`` (deliberate — no crosstalk with #619/#386), so the
+    action_schedule-based exclusion cannot see them. Left unexcluded, each one
+    reads as "heated at Δ < deadband" and drags the fitted threshold down — the
+    exact #735 incident direction. ``hp_target_lift`` fires stay IN the fit:
+    they heat via the firmware's real thermostat, so they are informative.
+    """
+    out: list[tuple[datetime, datetime]] = []
+    for t in times_iso:
+        try:
+            dt = datetime.fromisoformat(str(t).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        out.append((
+            dt - timedelta(minutes=_FORCE_WIN_PRE_MIN),
+            dt + timedelta(minutes=_FORCE_WIN_POST_MIN),
+        ))
     return out
 
 
@@ -545,8 +591,22 @@ def refresh_dhw_calibration() -> dict[str, Any]:
                 pwin.append((sdt, edt))
             except ValueError:
                 continue
+        # #739 — Powerful-fallback deadband-force fires are invisible to the
+        # action_schedule query above (the stored row keeps powerful=false);
+        # exclude them from the fit via their audit-log timestamps.
+        force_win = deadband_force_windows(
+            db.get_deadband_force_powerful_times(
+                diff_start.strftime("%Y-%m-%dT%H:%M:%S"),
+                now.strftime("%Y-%m-%dT%H:%M:%S"),
+            )
+        )
+        n_schedule_windows = len(pwin)
+        pwin.extend(force_win)
         diff_fit = fit_reheat_differential(tt_rows, powerful_windows_utc=pwin)
-        diff_fit["n_powerful_windows"] = len(pwin)
+        # Keep the pre-existing field's meaning: action_schedule windows only
+        # (#741 review) — the force windows get their own counter.
+        diff_fit["n_powerful_windows"] = n_schedule_windows
+        diff_fit["n_deadband_force_windows"] = len(force_win)
     except Exception:  # pragma: no cover — defensive; never break the cron
         logger.exception("dhw.calibration: reheat differential fit failed")
         diff_fit = {"status": "error"}
