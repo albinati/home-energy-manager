@@ -640,7 +640,10 @@ def _reconcile_daikin_actions(
                                     action="warmup_deadband_force",
                                     params={"row_id": aid, "via": "prefire_match",
                                             **_deadband_force},
-                                    result="applied",
+                                    # Not "applied" — HEM wrote nothing here;
+                                    # the device state confirms the escalation
+                                    # is live (review: honest result values).
+                                    result="confirmed",
                                     trigger=trigger,
                                 )
                             except Exception as _exc:

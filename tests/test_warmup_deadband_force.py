@@ -245,5 +245,5 @@ def test_prefire_match_confirms_and_writes_the_audit_row_once(monkeypatch, tmp_p
     assert len(apply_calls) == 0  # completed via idempotency, no PATCH
     logged = _force_log_rows(db)
     assert len(logged) == 1
-    assert logged[0][1] == "applied"
+    assert logged[0][1] == "confirmed"
     assert '"via": "prefire_match"' in logged[0][0]
