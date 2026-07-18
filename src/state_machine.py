@@ -1247,9 +1247,39 @@ def _check_warmup_lift_settle(
     # commanded lift; a device target meaningfully above it (e.g. a 60 °C user
     # gesture set mid-lift, which the override detector cannot attribute to
     # this already-completed row) is an intent HEM never commanded — leave it.
+    # EXCEPT the residue of HEM's OWN finished boost window (review): a
+    # tank_negative_boost row that already ended commanded exactly this
+    # target, and above the cliff the firmware grinds on at COP-1 resistance
+    # at now-positive prices — settling to the goal halts it (what pre-#745
+    # behaviour did). A user re-asserting the boost target right after its
+    # window is indistinguishable, but "stop paid-window heating when the
+    # window is over" is the household's standing intent.
     lift_target = lift_log_params.get("lift_target_c")
     if lift_target is not None and abs(float(dev_target) - float(lift_target)) > 0.6:
-        return
+        own_boost_residue = False
+        for act in actions:
+            if act.get("action_type") != "tank_negative_boost":
+                continue
+            if act.get("overridden_by_user_at"):
+                continue
+            b_params = act.get("params") or {}
+            if isinstance(b_params, str):
+                try:
+                    b_params = json.loads(b_params)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+            b_temp = b_params.get("tank_temp")
+            if b_temp is None or abs(float(dev_target) - float(b_temp)) > 0.6:
+                continue
+            try:
+                b_end = _parse_utc(act["end_time"])
+            except (ValueError, KeyError, TypeError):
+                continue
+            if b_end <= now_utc:
+                own_boost_residue = True
+                break
+        if not own_boost_residue:
+            return
 
     # #743 review — ownership is per EPISODE, not per row: after one
     # successful settle, a cliff-level target re-appearing inside the same

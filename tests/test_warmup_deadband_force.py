@@ -379,6 +379,29 @@ def test_settle_leaves_a_target_above_our_lift_alone(monkeypatch, tmp_path):
     assert applied == []
 
 
+def test_settle_halts_the_residue_of_our_own_finished_boost(monkeypatch, tmp_path):
+    """#745 review: a FINISHED tank_negative_boost left the device at 60 —
+    that 60 is HEM's own command, not a user gesture, and above the cliff the
+    firmware grinds on at COP-1 resistance at now-positive prices. Settle must
+    fire (pre-#745 behaviour) and re-command the warmup goal."""
+    import json as _json
+    from datetime import timedelta
+    from unittest.mock import MagicMock
+
+    sm, db, actions, now, applied = _settle_env(monkeypatch, tmp_path)
+    actions.append({
+        "id": 91, "action_type": "tank_negative_boost", "status": "completed",
+        "start_time": (now - timedelta(minutes=90)).isoformat(),
+        "end_time": (now - timedelta(minutes=5)).isoformat(),
+        "params": _json.dumps({"tank_power": True, "tank_temp": 60,
+                               "tank_powerful": True}),
+    })
+    dev = SimpleNamespace(tank_temperature=52.0, tank_target=60.0, tank_on=True)
+    sm._check_warmup_lift_settle(actions, MagicMock(), dev, now, trigger="heartbeat")
+    assert len(applied) == 1
+    assert applied[0]["params"] == {"tank_power": True, "tank_temp": 47.0}
+
+
 def test_settle_skips_cliff_goal_rows(monkeypatch, tmp_path):
     """A PV-abundance row whose GOAL is the cliff wants the cliff — no settle."""
     from unittest.mock import MagicMock
