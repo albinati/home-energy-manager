@@ -1191,6 +1191,23 @@ def _check_warmup_lift_settle(
     if float(dev_target) < cliff - 0.6:
         return  # not lifted (or already settled)
 
+    # #745 — a negative-price boost window owns the tank. The boost commands
+    # boost_c (60 °C, Powerful): settling DOWN to a warmup goal mid-window
+    # would forfeit the paid import, and nothing would re-raise the target —
+    # the boost row completes via idempotency and the #619 backstop re-asserts
+    # only Powerful. Any status counts: pending is about to fire, completed
+    # already fired, and an overridden boost is still the user's gesture.
+    for act in actions:
+        if act.get("action_type") != "tank_negative_boost":
+            continue
+        try:
+            b_start = _parse_utc(act["start_time"])
+            b_end = _parse_utc(act["end_time"])
+        except (ValueError, KeyError, TypeError):
+            continue
+        if b_start <= now_utc < b_end:
+            return
+
     row = None
     for act in actions:
         if act.get("action_type") != "tank_warmup":
@@ -1235,13 +1252,52 @@ def _check_warmup_lift_settle(
     except Exception as _exc:  # noqa: BLE001
         logger.debug("lift-settle: audit lookup failed (non-fatal): %s", _exc)
         return
-    ours = any(
-        (log.get("params") or {}).get("row_id") == rid
-        and (log.get("params") or {}).get("mechanism") == "hp_target_lift"
-        for log in logs
-    )
-    if not ours:
+    lift_log_params: dict[str, Any] | None = None
+    for log in logs:
+        lp = log.get("params") or {}
+        if lp.get("row_id") == rid and lp.get("mechanism") == "hp_target_lift":
+            lift_log_params = lp
+            break
+    if lift_log_params is None:
         return
+
+    # #745 — settle only the target WE lifted to. The audit row records the
+    # commanded lift; a device target meaningfully above it (e.g. a 60 °C user
+    # gesture set mid-lift, which the override detector cannot attribute to
+    # this already-completed row) is an intent HEM never commanded — leave it.
+    # EXCEPT the residue of HEM's OWN finished boost window (review): a
+    # tank_negative_boost row that already ended commanded exactly this
+    # target, and above the cliff the firmware grinds on at COP-1 resistance
+    # at now-positive prices — settling to the goal halts it (what pre-#745
+    # behaviour did). A user re-asserting the boost target right after its
+    # window is indistinguishable, but "stop paid-window heating when the
+    # window is over" is the household's standing intent.
+    lift_target = lift_log_params.get("lift_target_c")
+    if lift_target is not None and abs(float(dev_target) - float(lift_target)) > 0.6:
+        own_boost_residue = False
+        for act in actions:
+            if act.get("action_type") != "tank_negative_boost":
+                continue
+            if act.get("overridden_by_user_at"):
+                continue
+            b_params = act.get("params") or {}
+            if isinstance(b_params, str):
+                try:
+                    b_params = json.loads(b_params)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+            b_temp = b_params.get("tank_temp")
+            if b_temp is None or abs(float(dev_target) - float(b_temp)) > 0.6:
+                continue
+            try:
+                b_end = _parse_utc(act["end_time"])
+            except (ValueError, KeyError, TypeError):
+                continue
+            if b_end <= now_utc:
+                own_boost_residue = True
+                break
+        if not own_boost_residue:
+            return
 
     # #743 review — ownership is per EPISODE, not per row: after one
     # successful settle, a cliff-level target re-appearing inside the same
