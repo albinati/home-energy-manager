@@ -396,19 +396,31 @@ def _scheduled_tank_state(now_utc: datetime) -> tuple[dict[str, Any] | None, str
     (~41-42) was outside the reheat deadband — the firmware reheated the tank
     at peak prices, against the plan, until the owner manually reverted it.
 
-    Rows are anchored to their plan date, so a setback spanning midnight lives
-    under YESTERDAY's date — check both. Boost rows supersede the structural
-    warmup/setback rows they overlap (mirrors the display layer's ``_tank_at``).
-    A user-overridden covering row means the user owns the tank right now →
-    ``(None, "user_override")`` so the caller skips the tank leg entirely.
-    ``(None, "none")`` → no covering row; legacy NORMAL_C fallback applies.
+    Rows are anchored to their LOCAL plan date, so a setback spanning midnight
+    lives under YESTERDAY's local date — check both. Boost rows supersede the
+    structural warmup/setback rows they overlap (mirrors the display layer's
+    ``_tank_at``); among the same class the latest-starting row wins (an early
+    setback shares its window with the completed warmup row it replaced).
+    When the row that would own the tank is user-overridden, the user owns the
+    tank right now → ``(None, "user_override")`` so the caller skips the tank
+    leg entirely. ``(None, "none")`` → no covering row; legacy NORMAL_C
+    fallback applies.
     """
     kinds = {"tank_warmup", "tank_setback", "tank_negative_boost"}
     best: dict[str, Any] | None = None
     best_boost = False
-    overridden = False
+    best_start: datetime | None = None
+    best_overridden = False
+    # Rows are filed under their LOCAL plan date (review: recover_on_boot,
+    # dhw_policy and the boost-recovery path all anchor local) — querying UTC
+    # dates left local-today's rows invisible 23:00-00:00Z during BST.
+    try:
+        tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+    except Exception:  # noqa: BLE001 — recovery must survive a bad tz string
+        tz = UTC
+    now_local = now_utc.astimezone(tz)
     for delta in (0, 1):
-        day = (now_utc - timedelta(days=delta)).date().isoformat()
+        day = (now_local - timedelta(days=delta)).date().isoformat()
         try:
             rows = db.get_actions_for_plan_date(day, device="daikin")
         except Exception:  # noqa: BLE001 — a broken read must not block recovery
@@ -424,19 +436,37 @@ def _scheduled_tank_state(now_utc: datetime) -> tuple[dict[str, Any] | None, str
                 continue
             if not (start <= now_utc < end):
                 continue
-            if act.get("overridden_by_user_at"):
-                overridden = True
-                continue
+            row_overridden = bool(act.get("overridden_by_user_at"))
             params = act.get("params") or {}
             if isinstance(params, str):
                 try:
                     params = json.loads(params)
                 except (json.JSONDecodeError, TypeError):
-                    continue
+                    if not row_overridden:
+                        continue  # unusable params can't be applied
+                    params = {}
             is_boost = act.get("action_type") == "tank_negative_boost"
-            if best is None or (is_boost and not best_boost):
+            # Ranking (review): boost supersedes the structural row it
+            # overlaps; among the same class the LATEST start wins — an early
+            # setback (fired on shower drawdown) shares its window with the
+            # completed-but-uncipped warmup row it replaced, and status
+            # cannot disambiguate (prefire idempotency completes mid-window
+            # rows too). Overridden rows still COMPETE — if the row that
+            # would own the tank is the one the user overrode, the user owns
+            # the tank and the whole leg is skipped.
+            if best_boost and not is_boost:
+                continue
+            if (
+                best is None
+                or (is_boost and not best_boost)
+                or (is_boost == best_boost and best_start is not None and start > best_start)
+            ):
                 best = params
                 best_boost = is_boost
+                best_start = start
+                best_overridden = row_overridden
+    if best_overridden:
+        return (None, "user_override")
     if best is not None:
         return (
             {
@@ -446,7 +476,7 @@ def _scheduled_tank_state(now_utc: datetime) -> tuple[dict[str, Any] | None, str
             },
             "schedule",
         )
-    return (None, "user_override" if overridden else "none")
+    return (None, "none")
 
 
 def apply_safe_defaults(
