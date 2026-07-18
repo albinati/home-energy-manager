@@ -304,6 +304,71 @@ def test_prefire_match_confirms_and_writes_the_audit_row_once(monkeypatch, tmp_p
     assert '"via": "prefire_match"' in logged[0][0]
 
 
+def test_mid_lift_input_flip_keeps_the_latched_lift(monkeypatch, tmp_path):
+    """#746: the lift PATCHed 50 on tick N; before the idempotency completion a
+    live input changed (floor re-tuned) and the re-evaluation now says "no
+    force". The loop must NOT re-command the row's stored 47 against the
+    device at 50 — the audit row latches the lift, the tick completes the row
+    via idempotency, and the settle remains the only way down."""
+    from unittest.mock import MagicMock
+
+    from src.daikin.models import DaikinDevice
+
+    # Device mid-lift: target 50 (our lift), tank warming through 45.5.
+    dev = DaikinDevice(id="gw", name="x", tank_temperature=45.5,
+                       tank_target=50.0, tank_on=True, tank_powerful=False)
+    sm, db, rows, rid, now = _reconcile_env(monkeypatch, tmp_path, dev=dev)
+    # The floor was just lowered: the coast now clears it → force says None.
+    _fake_windows(monkeypatch, (19.0, 22.0, 40.0, "evening_showers"))
+    # Ownership: the lift audit row from tick N.
+    db.log_action(device="daikin", action="warmup_deadband_force",
+                  params={"row_id": rid, "mechanism": "hp_target_lift",
+                          "lift_target_c": 50},
+                  result="applied", trigger="test")
+
+    apply_calls: list[dict] = []
+    monkeypatch.setattr(
+        "src.state_machine.apply_scheduled_daikin_params",
+        lambda d, c, p, trigger: apply_calls.append(p) or True,
+    )
+
+    sm._reconcile_daikin_actions(rows, MagicMock(), dev, now, trigger="test")
+
+    row = db.get_action_by_id(rid)
+    assert row["status"] == "completed"      # idempotency, at the LIFTED target
+    assert apply_calls == []                 # no 47 re-command mid-lift
+
+
+def test_boot_overwritten_lift_is_not_re_lifted_by_the_latch(monkeypatch, tmp_path):
+    """#746 scope guard: after a boot overwrite (#740) the device is back at
+    47 — the latch must NOT re-command 50; the fresh re-evaluation owns the
+    row (here: floor clears → plain 47 matches the device → idempotent noop)."""
+    from unittest.mock import MagicMock
+
+    from src.daikin.models import DaikinDevice
+
+    dev = DaikinDevice(id="gw", name="x", tank_temperature=45.5,
+                       tank_target=47.0, tank_on=True, tank_powerful=False)
+    sm, db, rows, rid, now = _reconcile_env(monkeypatch, tmp_path, dev=dev)
+    _fake_windows(monkeypatch, (19.0, 22.0, 40.0, "evening_showers"))
+    db.log_action(device="daikin", action="warmup_deadband_force",
+                  params={"row_id": rid, "mechanism": "hp_target_lift",
+                          "lift_target_c": 50},
+                  result="applied", trigger="test")
+
+    apply_calls: list[dict] = []
+    monkeypatch.setattr(
+        "src.state_machine.apply_scheduled_daikin_params",
+        lambda d, c, p, trigger: apply_calls.append(p) or True,
+    )
+
+    sm._reconcile_daikin_actions(rows, MagicMock(), dev, now, trigger="test")
+
+    row = db.get_action_by_id(rid)
+    assert row["status"] == "completed"
+    assert apply_calls == []                 # matched 47 — and never PATCHed 50
+
+
 # ---------------------------------------------------------------------------
 # #742 — heartbeat settle: finish the HP lift at the GOAL, not the cliff
 # ---------------------------------------------------------------------------
