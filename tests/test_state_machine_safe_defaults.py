@@ -154,3 +154,130 @@ def test_partial_failure_isolates_step_in_action_log(
         # The successful steps must still have happened (not blocked by the failure)
         assert fox.set_scheduler_flag_calls == [False]
         assert fox.set_min_soc_calls == [15]
+
+
+# ---------------------------------------------------------------------------
+# #740 — the schedule IS the safe default: the tank leg honours the row
+# covering now (overnight setback / boost / guests warmup) instead of blindly
+# re-commanding DHW_TEMP_NORMAL_C. Measured 2026-07-18: two deploy restarts
+# re-commanded 47 mid-setback and the post-shower tank reheated at peak.
+# ---------------------------------------------------------------------------
+
+
+def _insert_tank_row(plan_date, action_type, start, end, params,
+                     overridden_at=None):
+    import json as _json
+    conn = db.get_connection()
+    try:
+        conn.execute(
+            """INSERT INTO action_schedule
+               (date, start_time, end_time, device, action_type, params,
+                status, created_at, overridden_by_user_at)
+               VALUES (?, ?, ?, 'daikin', ?, ?, 'completed', ?, ?)""",
+            (plan_date, start.isoformat(), end.isoformat(), action_type,
+             _json.dumps(params), start.isoformat(),
+             overridden_at.isoformat() if overridden_at else None),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+class _RecordingDaikin:
+    def get_devices(self):
+        return [object()]
+
+
+def _run_safe_defaults_with_capture(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    def _fake_apply(dev, client, params, *, trigger, skip_if_matches):
+        captured["params"] = dict(params)
+        captured["skip_if_matches"] = skip_if_matches
+
+    monkeypatch.setattr("src.config.config.MIN_SOC_RESERVE_PERCENT", 15.0)
+    monkeypatch.setattr(
+        "src.state_machine.apply_scheduled_daikin_params", _fake_apply
+    )
+    apply_safe_defaults(_RecordingFox(), daikin=_RecordingDaikin(), trigger="test")
+    return captured
+
+
+def test_safe_defaults_honours_the_covering_setback_row(monkeypatch):
+    """Restart mid-setback must re-command the SETBACK (37), not NORMAL_C (47).
+    The row spans midnight, so it lives under YESTERDAY's plan date."""
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    with tempfile.TemporaryDirectory() as td:
+        _setup_db(monkeypatch, td)
+        yesterday = (now - timedelta(days=1)).date().isoformat()
+        _insert_tank_row(yesterday, "tank_setback",
+                         now - timedelta(hours=8), now + timedelta(hours=12),
+                         {"tank_power": True, "tank_temp": 37,
+                          "tank_powerful": False, "dhw_policy": True})
+        captured = _run_safe_defaults_with_capture(monkeypatch)
+
+    assert captured["params"]["tank_temp"] == 37.0
+    assert captured["params"]["tank_powerful"] is False
+    # Routine restart with the device already in plan state → zero writes.
+    assert captured["skip_if_matches"] is True
+
+
+def test_safe_defaults_boost_row_supersedes_the_setback(monkeypatch):
+    """A negative-price boost window overlapping the setback owns the tank."""
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    with tempfile.TemporaryDirectory() as td:
+        _setup_db(monkeypatch, td)
+        today = now.date().isoformat()
+        _insert_tank_row(today, "tank_setback",
+                         now - timedelta(hours=4), now + timedelta(hours=10),
+                         {"tank_power": True, "tank_temp": 37,
+                          "tank_powerful": False})
+        _insert_tank_row(today, "tank_negative_boost",
+                         now - timedelta(minutes=30), now + timedelta(hours=1),
+                         {"tank_power": True, "tank_temp": 60,
+                          "tank_powerful": True})
+        captured = _run_safe_defaults_with_capture(monkeypatch)
+
+    assert captured["params"]["tank_temp"] == 60.0
+    assert captured["params"]["tank_powerful"] is True
+
+
+def test_safe_defaults_skips_tank_when_covering_row_is_user_overridden(monkeypatch):
+    """The user owns the tank right now — the safe-defaults tank leg must not
+    fight the gesture."""
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    with tempfile.TemporaryDirectory() as td:
+        _setup_db(monkeypatch, td)
+        _insert_tank_row(now.date().isoformat(), "tank_setback",
+                         now - timedelta(hours=2), now + timedelta(hours=10),
+                         {"tank_power": True, "tank_temp": 37},
+                         overridden_at=now - timedelta(minutes=30))
+        captured = _run_safe_defaults_with_capture(monkeypatch)
+
+        rows = list(db.get_connection().execute(
+            "SELECT result, error_msg FROM action_log "
+            "WHERE device='daikin' AND action='apply_safe_defaults'"
+        ))
+
+    assert "params" not in captured          # no tank write at all
+    assert rows and rows[-1][0] == "skipped"
+    assert "user-overridden" in (rows[-1][1] or "")
+
+
+def test_safe_defaults_falls_back_to_normal_c_with_no_covering_row(monkeypatch):
+    """No schedule context (true fault recovery) keeps the original forced
+    NORMAL_C write."""
+    with tempfile.TemporaryDirectory() as td:
+        _setup_db(monkeypatch, td)
+        captured = _run_safe_defaults_with_capture(monkeypatch)
+
+    assert captured["params"]["tank_temp"] == float(
+        __import__("src.config", fromlist=["config"]).config.DHW_TEMP_NORMAL_C
+    )
+    assert captured["skip_if_matches"] is False

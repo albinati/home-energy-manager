@@ -387,6 +387,68 @@ def _schedule_signature(groups: list[Any]) -> str:
     return json.dumps(payload, sort_keys=True, default=str)
 
 
+def _scheduled_tank_state(now_utc: datetime) -> tuple[dict[str, Any] | None, str]:
+    """The tank params of the schedule row covering ``now_utc``, if any (#740).
+
+    The schedule IS the safe default. Commanding ``DHW_TEMP_NORMAL_C`` blindly
+    on shutdown/boot erased the overnight setback: measured 2026-07-18, two
+    deploy restarts re-commanded 47 mid-setback, and the post-shower tank
+    (~41-42) was outside the reheat deadband — the firmware reheated the tank
+    at peak prices, against the plan, until the owner manually reverted it.
+
+    Rows are anchored to their plan date, so a setback spanning midnight lives
+    under YESTERDAY's date — check both. Boost rows supersede the structural
+    warmup/setback rows they overlap (mirrors the display layer's ``_tank_at``).
+    A user-overridden covering row means the user owns the tank right now →
+    ``(None, "user_override")`` so the caller skips the tank leg entirely.
+    ``(None, "none")`` → no covering row; legacy NORMAL_C fallback applies.
+    """
+    kinds = {"tank_warmup", "tank_setback", "tank_negative_boost"}
+    best: dict[str, Any] | None = None
+    best_boost = False
+    overridden = False
+    for delta in (0, 1):
+        day = (now_utc - timedelta(days=delta)).date().isoformat()
+        try:
+            rows = db.get_actions_for_plan_date(day, device="daikin")
+        except Exception:  # noqa: BLE001 — a broken read must not block recovery
+            logger.debug("scheduled-tank-state read failed for %s", day, exc_info=True)
+            continue
+        for act in rows:
+            if act.get("action_type") not in kinds:
+                continue
+            try:
+                start = _parse_utc(act["start_time"])
+                end = _parse_utc(act["end_time"])
+            except (ValueError, KeyError, TypeError):
+                continue
+            if not (start <= now_utc < end):
+                continue
+            if act.get("overridden_by_user_at"):
+                overridden = True
+                continue
+            params = act.get("params") or {}
+            if isinstance(params, str):
+                try:
+                    params = json.loads(params)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+            is_boost = act.get("action_type") == "tank_negative_boost"
+            if best is None or (is_boost and not best_boost):
+                best = params
+                best_boost = is_boost
+    if best is not None:
+        return (
+            {
+                "tank_powerful": bool(best.get("tank_powerful", False)),
+                "tank_temp": float(best.get("tank_temp", config.DHW_TEMP_NORMAL_C)),
+                "tank_power": bool(best.get("tank_power", True)),
+            },
+            "schedule",
+        )
+    return (None, "user_override" if overridden else "none")
+
+
 def apply_safe_defaults(
     fox: FoxESSClient | None,
     daikin: DaikinClient | None,
@@ -470,16 +532,34 @@ def apply_safe_defaults(
                 trigger=trigger,
             )
             return
+        # #740 — plan-aware tank leg: honour the row covering now (the
+        # overnight setback, a boost window, a guests warmup) instead of
+        # blindly re-commanding NORMAL_C. Routine restarts use
+        # skip_if_matches=True so a device already in plan state costs zero
+        # Daikin writes; the no-covering-row fallback keeps the original
+        # forced NORMAL_C (true fault recovery, unknown plan state).
+        tank_params, source = _scheduled_tank_state(datetime.now(UTC))
+        if source == "user_override":
+            db.log_action(
+                device="daikin",
+                action="apply_safe_defaults",
+                params={"skipped": "tank"},
+                result="skipped",
+                trigger=trigger,
+                error_msg="covering tank row is user-overridden",
+            )
+            return
         apply_scheduled_daikin_params(
             dev,
             daikin,
-            {
+            tank_params
+            or {
                 "tank_powerful": False,
                 "tank_temp": float(config.DHW_TEMP_NORMAL_C),
                 "tank_power": True,
             },
             trigger=trigger,
-            skip_if_matches=False,
+            skip_if_matches=tank_params is not None,
         )
     except (DaikinError, ValueError, IndexError) as e:
         db.log_action(
