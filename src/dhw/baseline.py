@@ -24,7 +24,7 @@ Pure function: physics in, electricity out. No DB, no config, no clock.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 from .model import TankParams, cop_dhw
@@ -52,6 +52,8 @@ def simulate_fixed_schedule(
     negative_boost_target_c: float = 60.0,
     hysteresis_c: float = 1.0,
     slot_hours: float = 0.5,
+    setback_hour_by_date: dict[date, float] | None = None,
+    target_by_date: dict[date, float] | None = None,
 ) -> tuple[list[float], list[float]]:
     """The fixed schedule's electricity per slot + tank trajectory (len n+1).
 
@@ -74,8 +76,20 @@ def simulate_fixed_schedule(
     for i in range(n):
         local = slot_starts_utc[i].astimezone(tz)
         hour = local.hour + local.minute / 60.0
-        if warmup_hour_local <= hour < setback_hour_local:
-            target = target_c
+        # #755 — per-date overrides (the deployed dynamic window) win over the
+        # scalars; the scalars remain the fallback so existing callers/tests
+        # are untouched. The incumbent baseline models what the DEPLOYED
+        # system does (precedent #725).
+        day_setback = (
+            setback_hour_by_date.get(local.date(), setback_hour_local)
+            if setback_hour_by_date else setback_hour_local
+        )
+        day_target = (
+            target_by_date.get(local.date(), target_c)
+            if target_by_date else target_c
+        )
+        if warmup_hour_local <= hour < day_setback:
+            target = day_target
         else:
             target = setback_c
 

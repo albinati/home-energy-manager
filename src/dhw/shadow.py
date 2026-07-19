@@ -196,6 +196,7 @@ def record_shadow(*, solve_kwargs: dict, price_pence: list[float],
         leg = legionella_budget_by_slot(
             starts, budget_kwh=float(getattr(config, "DHW_LEGIONELLA_BUDGET_KWH", 3.5)),
         ) if bool(getattr(config, "DHW_LEGIONELLA_STANDOFF_ENABLED", True)) else None
+        from .. import dhw_policy
         override = simulate_fixed_schedule(
             starts, tz,
             tank0_c=float(solve_kwargs["initial"].tank_temp_c),
@@ -211,6 +212,17 @@ def record_shadow(*, solve_kwargs: dict, price_pence: list[float],
             # on the old 13/22/45 defaults would stop representing what prod does.
             warmup_hour_local=float(getattr(config, "DHW_WARMUP_START_HOUR_LOCAL", 13)),
             setback_hour_local=float(getattr(config, "DHW_SETBACK_START_HOUR_LOCAL", 22)),
+            # #755 — the incumbent mirrors the deployed DYNAMIC window: per-date
+            # setback + warmup target from the persisted decision (reader only —
+            # shadow/replay must never persist). Scalars above stay the fallback.
+            setback_hour_by_date={
+                _wd: float(dhw_policy.read_window_decision(_wd).setback_hour_local)
+                for _wd in {_ws.astimezone(tz).date() for _ws in starts}
+            },
+            target_by_date={
+                _wd: float(dhw_policy.read_window_decision(_wd).warmup_target_c)
+                for _wd in {_ws.astimezone(tz).date() for _ws in starts}
+            },
             target_c=float(getattr(config, "DHW_TEMP_NORMAL_C", 45.0)),
             setback_c=float(getattr(config, "DHW_TEMP_SETBACK_C", 37.0)),
             # #732 — the firmware's measured reheat deadband, not the old 1 degC

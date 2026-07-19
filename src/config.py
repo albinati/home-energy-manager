@@ -2235,6 +2235,31 @@ class Config:
     def DHW_SETBACK_START_HOUR_LOCAL(self, value: int) -> None:
         self._rt_set("DHW_SETBACK_START_HOUR_LOCAL", int(value))
 
+    # --- Dynamic DHW window (#755, 2026-07-19) --------------------------------
+    # Per plan-date: derive the setback hour + warmup target from that day's
+    # Agile rates + tank physics (hold-to-peak-edge vs boost-and-coast).
+    @property
+    def DHW_DYNAMIC_WINDOW_ENABLED(self) -> bool:
+        v = self._rt_get("DHW_DYNAMIC_WINDOW_ENABLED")
+        if isinstance(v, bool):
+            return v
+        return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+    @DHW_DYNAMIC_WINDOW_ENABLED.setter
+    def DHW_DYNAMIC_WINDOW_ENABLED(self, value: Any) -> None:
+        if isinstance(value, bool):
+            self._rt_set("DHW_DYNAMIC_WINDOW_ENABLED", "true" if value else "false")
+        else:
+            self._rt_set("DHW_DYNAMIC_WINDOW_ENABLED", str(value).strip().lower())
+
+    @property
+    def DHW_DYNAMIC_BOOST_HOLD_HOURS(self) -> int:
+        return int(self._rt_get("DHW_DYNAMIC_BOOST_HOLD_HOURS"))
+
+    @DHW_DYNAMIC_BOOST_HOLD_HOURS.setter
+    def DHW_DYNAMIC_BOOST_HOLD_HOURS(self, value: int) -> None:
+        self._rt_set("DHW_DYNAMIC_BOOST_HOLD_HOURS", int(value))
+
     @property
     def INDOOR_SETPOINT_C(self) -> float:
         return float(self._rt_get("INDOOR_SETPOINT_C"))

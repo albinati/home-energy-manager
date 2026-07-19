@@ -2120,7 +2120,14 @@ def _run_optimizer_lp(
     # is left unresolved and re-runs next solve. No-op when the feature is off.
     try:
         from .. import dhw_policy as _dhw_pol
-        _dhw_pol.resolve_warmup_hours_for_horizon(starts, rates)
+        # #755 — the dynamic-window resolver (called inside) prices the boost
+        # arm's COP with the first forecast hour's outdoor temp when available.
+        _t_out0 = None
+        try:
+            _t_out0 = float(weather.temperature_outdoor_c[0])
+        except (AttributeError, IndexError, TypeError, ValueError):
+            _t_out0 = None
+        _dhw_pol.resolve_warmup_hours_for_horizon(starts, rates, t_out_c=_t_out0)
     except Exception:  # pragma: no cover - defensive: never break the solve
         logger.debug("dhw warmup hour resolve failed (non-fatal)", exc_info=True)
 
