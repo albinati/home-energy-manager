@@ -52,8 +52,8 @@ def _prod_like_defaults(monkeypatch, tmp_path):
     _db.init_db()
     # K1 — fixed DHW schedule
     monkeypatch.setattr(config, "DHW_FIXED_SCHEDULE_ENABLED", True, raising=False)
-    monkeypatch.setattr(config, "DHW_WARMUP_START_HOUR_LOCAL", 13, raising=False)
-    monkeypatch.setattr(config, "DHW_SETBACK_START_HOUR_LOCAL", 22, raising=False)
+    monkeypatch.setitem(config._overrides, "DHW_WARMUP_START_HOUR_LOCAL", 13)
+    monkeypatch.setitem(config._overrides, "DHW_SETBACK_START_HOUR_LOCAL", 22)
     monkeypatch.setattr(config, "DHW_TEMP_NORMAL_C", 45.0, raising=False)
     monkeypatch.setattr(config, "DHW_TEMP_SETBACK_C", 37.0, raising=False)
     monkeypatch.setattr(config, "DHW_NEGATIVE_PRICE_BOOST_C", 60.0, raising=False)

@@ -280,3 +280,26 @@ def test_cron_reload_is_noop_when_scheduler_inactive(monkeypatch):
     monkeypatch.setattr(runner, "_background_scheduler", None)
     result = runner.reregister_cron_jobs(reason="test")
     assert result["status"] == "inactive"
+
+
+def test_dhw_hour_knobs_are_runtime_tunable(tmp_path, monkeypatch):
+    """2026-07-19: the schedule fallback hours moved off .env — changeable via
+    the settings API without a restart, with 0-23 bounds enforced."""
+    from src import runtime_settings as rt
+    from src.config import config
+
+    monkeypatch.setattr("src.config.config.DB_PATH", str(tmp_path / "t.db"))
+    from src import db
+    db.init_db()
+
+    assert config.DHW_WARMUP_START_HOUR_LOCAL == 13   # env default
+    assert config.DHW_SETBACK_START_HOUR_LOCAL == 22  # env default
+
+    rt.set_setting("DHW_SETBACK_START_HOUR_LOCAL", 16, actor="test")
+    assert config.DHW_SETBACK_START_HOUR_LOCAL == 16
+
+    import pytest as _pytest
+    with _pytest.raises(rt.SettingValidationError):
+        rt.set_setting("DHW_SETBACK_START_HOUR_LOCAL", 24, actor="test")
+    with _pytest.raises(rt.SettingValidationError):
+        rt.set_setting("DHW_WARMUP_START_HOUR_LOCAL", -1, actor="test")

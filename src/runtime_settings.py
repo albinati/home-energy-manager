@@ -362,6 +362,32 @@ SCHEMA: dict[str, SettingSpec] = {
             "DHW_WARMUP_PRICE_AWARE_ENABLED=true; must be > START."
         ),
     ),
+    "DHW_WARMUP_START_HOUR_LOCAL": SettingSpec(
+        key="DHW_WARMUP_START_HOUR_LOCAL",
+        type_name="int",
+        env_default=_int_env("DHW_WARMUP_START_HOUR_LOCAL", "13"),
+        min_value=0,
+        max_value=23,
+        description=(
+            "STATIC fallback LOCAL hour the daily tank warmup starts. Used "
+            "verbatim when the dynamic window / price-aware warmup are off or "
+            "rates are missing. Must be < DHW_SETBACK_START_HOUR_LOCAL (an "
+            "inverted pair degrades to a setback-only day, never crashes)."
+        ),
+    ),
+    "DHW_SETBACK_START_HOUR_LOCAL": SettingSpec(
+        key="DHW_SETBACK_START_HOUR_LOCAL",
+        type_name="int",
+        env_default=_int_env("DHW_SETBACK_START_HOUR_LOCAL", "22"),
+        min_value=0,
+        max_value=23,
+        description=(
+            "STATIC fallback LOCAL hour the daily tank setback starts. Used "
+            "verbatim when the dynamic window is off or rates are missing. "
+            "Empirical peak entry is ~16:00 local (2026-07 Agile data). Must "
+            "be > DHW_WARMUP_START_HOUR_LOCAL."
+        ),
+    ),
     "DHW_TANK_USABLE_FRACTION": SettingSpec(
         key="DHW_TANK_USABLE_FRACTION",
         type_name="float",
