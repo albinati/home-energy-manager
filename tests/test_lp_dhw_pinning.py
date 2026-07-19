@@ -63,8 +63,8 @@ def _pin_enabled(monkeypatch):
     restores properly.
     """
     monkeypatch.setattr(config, "DHW_FIXED_SCHEDULE_ENABLED", True, raising=False)
-    monkeypatch.setattr(config, "DHW_WARMUP_START_HOUR_LOCAL", 13, raising=False)
-    monkeypatch.setattr(config, "DHW_SETBACK_START_HOUR_LOCAL", 22, raising=False)
+    monkeypatch.setitem(config._overrides, "DHW_WARMUP_START_HOUR_LOCAL", 13)
+    monkeypatch.setitem(config._overrides, "DHW_SETBACK_START_HOUR_LOCAL", 22)
     monkeypatch.setitem(config._overrides, "DHW_TEMP_NORMAL_C", 45.0)
     monkeypatch.setattr(config, "DHW_TEMP_SETBACK_C", 37.0, raising=False)
     monkeypatch.setitem(config._overrides, "DAIKIN_CONTROL_MODE", "active")

@@ -1176,14 +1176,11 @@ class Config:
         os.getenv("DHW_FIXED_SCHEDULE_ENABLED", "true").strip().lower()
         in ("1", "true", "yes", "on")
     )
-    # Local-time hour the daily warmup window starts (tank → NORMAL).
-    DHW_WARMUP_START_HOUR_LOCAL: int = int(
-        os.getenv("DHW_WARMUP_START_HOUR_LOCAL", "13")
-    )
-    # Local-time hour the daily setback window starts (tank → SETBACK).
-    DHW_SETBACK_START_HOUR_LOCAL: int = int(
-        os.getenv("DHW_SETBACK_START_HOUR_LOCAL", "22")
-    )
+    # DHW_WARMUP_START_HOUR_LOCAL / DHW_SETBACK_START_HOUR_LOCAL are runtime
+    # settings since the dynamic-window work (2026-07-19) — see the properties
+    # in the runtime section below. They remain the STATIC FALLBACK hours
+    # (used when the dynamic window is disabled or rates are missing) and are
+    # now tunable via PUT /api/v1/settings without a restart.
     # Tank setback temperature during overnight window (°C).
     # 37 °C = enough for emergency morning shower without battery drain.
     DHW_TEMP_SETBACK_C: float = float(
@@ -2216,6 +2213,27 @@ class Config:
     @DHW_WARMUP_WINDOW_END_LOCAL.setter
     def DHW_WARMUP_WINDOW_END_LOCAL(self, value: int) -> None:
         self._rt_set("DHW_WARMUP_WINDOW_END_LOCAL", int(value))
+
+    # --- Static fallback warmup/setback hours (runtime since 2026-07-19) -----
+    # Owner directive: schedule hours must not be .env-locked — tunable via
+    # the settings API/MCP without a restart. These are the STATIC hours the
+    # fixed schedule uses today and the FALLBACK the dynamic-window resolver
+    # degrades to when rates are missing or the feature is disabled.
+    @property
+    def DHW_WARMUP_START_HOUR_LOCAL(self) -> int:
+        return int(self._rt_get("DHW_WARMUP_START_HOUR_LOCAL"))
+
+    @DHW_WARMUP_START_HOUR_LOCAL.setter
+    def DHW_WARMUP_START_HOUR_LOCAL(self, value: int) -> None:
+        self._rt_set("DHW_WARMUP_START_HOUR_LOCAL", int(value))
+
+    @property
+    def DHW_SETBACK_START_HOUR_LOCAL(self) -> int:
+        return int(self._rt_get("DHW_SETBACK_START_HOUR_LOCAL"))
+
+    @DHW_SETBACK_START_HOUR_LOCAL.setter
+    def DHW_SETBACK_START_HOUR_LOCAL(self, value: int) -> None:
+        self._rt_set("DHW_SETBACK_START_HOUR_LOCAL", int(value))
 
     @property
     def INDOOR_SETPOINT_C(self) -> float:

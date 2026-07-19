@@ -321,7 +321,7 @@ def test_the_baseline_sim_follows_the_configured_windows(tmp_db, monkeypatch):
         return orig(*a, **k)
 
     monkeypatch.setattr(B, "simulate_fixed_schedule", _spy)
-    monkeypatch.setattr(config, "DHW_SETBACK_START_HOUR_LOCAL", 15, raising=False)
+    monkeypatch.setitem(config._overrides, "DHW_SETBACK_START_HOUR_LOCAL", 15)
     monkeypatch.setattr(config, "DHW_TEMP_NORMAL_C", 47.0, raising=False)
     monkeypatch.setattr(config, "DHW_LP_OWNED_SHADOW_ENABLED", True, raising=False)
     monkeypatch.setattr(config, "DHW_LP_OWNED_ENABLED", False, raising=False)

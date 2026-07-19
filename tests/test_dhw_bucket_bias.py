@@ -44,8 +44,8 @@ def _bias_config(monkeypatch):
     monkeypatch.setattr(config, "DHW_BUCKET_BIAS_MAX_AGE_DAYS", 7, raising=False)
     monkeypatch.setattr(config, "DHW_FORECAST_AUTOSCALE_ENABLED", False, raising=False)
     monkeypatch.setattr(config, "DHW_LEGIONELLA_STANDOFF_ENABLED", False, raising=False)
-    monkeypatch.setattr(config, "DHW_WARMUP_START_HOUR_LOCAL", 13, raising=False)
-    monkeypatch.setattr(config, "DHW_SETBACK_START_HOUR_LOCAL", 22, raising=False)
+    monkeypatch.setitem(config._overrides, "DHW_WARMUP_START_HOUR_LOCAL", 13)
+    monkeypatch.setitem(config._overrides, "DHW_SETBACK_START_HOUR_LOCAL", 22)
     dhw_policy._autoscale_cache.clear()
     yield
     dhw_policy._autoscale_cache.clear()

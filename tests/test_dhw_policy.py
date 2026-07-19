@@ -41,8 +41,8 @@ def _isolated(monkeypatch, tmp_path):
     monkeypatch.setattr(dhw_policy, "datetime", _FrozenDatetime, raising=False)
     _db.init_db()
     monkeypatch.setattr(config, "DHW_FIXED_SCHEDULE_ENABLED", True, raising=False)
-    monkeypatch.setattr(config, "DHW_WARMUP_START_HOUR_LOCAL", 13, raising=False)
-    monkeypatch.setattr(config, "DHW_SETBACK_START_HOUR_LOCAL", 22, raising=False)
+    monkeypatch.setitem(config._overrides, "DHW_WARMUP_START_HOUR_LOCAL", 13)
+    monkeypatch.setitem(config._overrides, "DHW_SETBACK_START_HOUR_LOCAL", 22)
     monkeypatch.setattr(config, "DHW_TEMP_NORMAL_C", 45.0, raising=False)
     monkeypatch.setattr(config, "DHW_TEMP_SETBACK_C", 37.0, raising=False)
     monkeypatch.setattr(config, "DHW_NEGATIVE_PRICE_BOOST_C", 60.0, raising=False)
@@ -607,7 +607,7 @@ def test_write_with_clear_existing_clears_then_writes():
 
 def test_warmup_hour_runtime_override(monkeypatch):
     """User can change warmup start via env var/runtime setting."""
-    monkeypatch.setattr(config, "DHW_WARMUP_START_HOUR_LOCAL", 15, raising=False)
+    monkeypatch.setitem(config._overrides, "DHW_WARMUP_START_HOUR_LOCAL", 15)
     rows = dhw_policy.generate_daily_tank_schedule(date(2026, 6, 1), mode="normal")
     warmup = next(r for r in rows if r["action_type"] == "tank_warmup")
     start = datetime.fromisoformat(warmup["start_time"].replace("Z", "+00:00"))
@@ -616,7 +616,7 @@ def test_warmup_hour_runtime_override(monkeypatch):
 
 def test_setback_hour_runtime_override(monkeypatch):
     """User can shift setback start time."""
-    monkeypatch.setattr(config, "DHW_SETBACK_START_HOUR_LOCAL", 20, raising=False)
+    monkeypatch.setitem(config._overrides, "DHW_SETBACK_START_HOUR_LOCAL", 20)
     rows = dhw_policy.generate_daily_tank_schedule(date(2026, 6, 1), mode="normal")
     warmup = next(r for r in rows if r["action_type"] == "tank_warmup")
     end = datetime.fromisoformat(warmup["end_time"].replace("Z", "+00:00"))
