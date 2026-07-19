@@ -344,3 +344,27 @@ def test_legionella_standoff_defers_the_warmup(monkeypatch):
     warmups = [r for r in rows if r["action_type"] == "tank_warmup"]
     start = datetime.fromisoformat(warmups[0]["start_time"].replace("Z", "+00:00"))
     assert start == datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
+
+
+def test_tank_trajectory_mirrors_the_legionella_standoff(monkeypatch):
+    """Owner report 2026-07-19: the timeline showed a 47 °C warmup starting
+    under the firmware cycle. Trajectory slots inside the stand-off must read
+    60 (firmware-owned), warmup target only from the DEFERRED start."""
+    sunday = date(2026, 7, 19)
+    monkeypatch.setattr(config, "DHW_LEGIONELLA_STANDOFF_ENABLED", True, raising=False)
+    monkeypatch.setattr(config, "DHW_LEGIONELLA_STANDOFF_DOW", 6, raising=False)
+    monkeypatch.setattr(config, "DHW_LEGIONELLA_STANDOFF_START_HOUR_UTC", 11, raising=False)
+    monkeypatch.setattr(config, "DHW_LEGIONELLA_STANDOFF_START_MINUTE_UTC", 0, raising=False)
+    monkeypatch.setattr(config, "DHW_LEGIONELLA_STANDOFF_DURATION_MINUTES", 120, raising=False)
+
+    starts = [
+        datetime(2026, 7, 19, h, m, tzinfo=TZ).astimezone(UTC)
+        for h in range(24) for m in (0, 30)
+    ]
+    _, tank_temps = dhw_policy.forecast_dhw_load_per_slot(starts)
+    by_hour_local = {s.astimezone(TZ).hour: tank_temps[i] for i, s in enumerate(starts)
+                     if s.astimezone(TZ).minute == 0}
+    assert by_hour_local[12] == pytest.approx(60.0)   # inside cycle (11:00Z)
+    assert by_hour_local[13] == pytest.approx(60.0)   # inside cycle (12:00Z)
+    assert by_hour_local[14] == pytest.approx(47.0)   # deferred warmup start
+    assert by_hour_local[11] == pytest.approx(37.0)   # setback before cycle
