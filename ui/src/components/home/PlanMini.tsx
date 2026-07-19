@@ -126,7 +126,14 @@ export function PlanMini(props: PlanMiniProps) {
     }
     if (g === "tank") {
       const tank = (dhwSchedule || [])
-        .filter((r) => r.start_utc && Date.parse(r.start_utc) > nowMs)
+        .filter((r) => {
+          if (!r.start_utc) return false;
+          // The firmware legionella cycle stays visible while RUNNING —
+          // it's the thing acting on the tank right now, not a past row.
+          if (r.action_type === "legionella_cycle")
+            return Date.parse(r.end_utc ?? r.start_utc) > nowMs;
+          return Date.parse(r.start_utc) > nowMs;
+        })
         .sort((a, b) => Date.parse(a.start_utc!) - Date.parse(b.start_utc!))
         .slice(0, 4);
       return {
@@ -134,10 +141,14 @@ export function PlanMini(props: PlanMiniProps) {
         empty: "no tank changes ahead",
         chips: tank.map((row) => {
           const start = formatRelativeSlot(row.start_utc!, nowUtc);
+          const isLeg = row.action_type === "legionella_cycle";
+          const prefix = start.dayLabel ? start.dayLabel + " " : "";
           return {
-            tone: "var(--warn)",
+            tone: isLeg ? "var(--cool)" : "var(--warn)",
             label: tankLabelOf(row.action_type),
-            when: `${start.dayLabel ? start.dayLabel + " " : ""}${start.timeLabel}`,
+            when: isLeg && row.end_utc
+              ? `${prefix}${start.timeLabel}–${endLabelFor(row.end_utc)}`
+              : `${prefix}${start.timeLabel}`,
             note: row.tank_temp_c != null ? `${row.tank_temp_c}°` : undefined,
             faded: !start.isToday,
             title: row.action_type ?? undefined,
