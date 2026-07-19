@@ -604,7 +604,7 @@ export interface HeatingPlanSlot {
   lwt_setpoint_c?: number | null; // actual radiator target = base + offset
   heating_on?: boolean;
   tank_temp_c?: number | null;
-  tank_kind?: "warmup" | "setback" | "boost" | null;
+  tank_kind?: "warmup" | "setback" | "boost" | "legionella" | null;
   indoor_planned_c?: number | null;  // W3 committed indoor plan; null when W3 off
 }
 export interface HeatingPlanDay {

@@ -696,6 +696,32 @@ class WindowDecision:
     boost_extra_kwh: float | None = None
 
 
+def _legionella_standoff_window_utc(
+    target_date_local: date,
+) -> tuple[datetime, datetime] | None:
+    """The firmware legionella stand-off window overlapping ``target_date_local``
+    (UTC bounds), or None. Defined in UTC on a fixed weekday (see the
+    ``DHW_LEGIONELLA_STANDOFF_*`` knobs; the window never crosses midnight).
+    Local in the UK is UTC or UTC+1, so the local date's own UTC day is the
+    only candidate that can overlap the local afternoon."""
+    if not getattr(config, "DHW_LEGIONELLA_STANDOFF_ENABLED", False):
+        return None
+    try:
+        dow = int(config.DHW_LEGIONELLA_STANDOFF_DOW)
+        start_h = int(config.DHW_LEGIONELLA_STANDOFF_START_HOUR_UTC)
+        start_m = int(getattr(config, "DHW_LEGIONELLA_STANDOFF_START_MINUTE_UTC", 0))
+        dur_min = int(config.DHW_LEGIONELLA_STANDOFF_DURATION_MINUTES)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if target_date_local.weekday() != dow:
+        return None
+    start = datetime(
+        target_date_local.year, target_date_local.month, target_date_local.day,
+        start_h, start_m, tzinfo=UTC,
+    )
+    return start, start + timedelta(minutes=max(1, dur_min))
+
+
 def _dynamic_window_enabled() -> bool:
     return bool(getattr(config, "DHW_DYNAMIC_WINDOW_ENABLED", True))
 
@@ -1167,6 +1193,21 @@ def generate_daily_tank_schedule(
                 effective_warmup_start_utc = max(effective_warmup_start_utc, nw_end)
             else:
                 break
+
+    # Legionella stand-off override (owner directive 2026-07-19): when the
+    # warmup start falls inside the firmware's weekly thermal-shock window,
+    # the CYCLE is the warmup — the firmware owns the tank and leaves it at
+    # ~60 °C. Planning a warmup underneath it only produces rows the
+    # reconciler must skip (and, post-cycle, a pointless 47-command against a
+    # 60 °C tank). Defer the warmup start to the stand-off end: the deferred
+    # row completes as a no-op via idempotency and the coast covers the
+    # evening. Mirrors the negative-boost defer above.
+    leg_window = _legionella_standoff_window_utc(target_date_local)
+    if (
+        leg_window is not None
+        and leg_window[0] <= effective_warmup_start_utc < leg_window[1]
+    ):
+        effective_warmup_start_utc = leg_window[1]
 
     # Tank pre-cool into a negative window: drop the setback target toward the
     # device minimum so the paid boost (cold → boost_c) absorbs the most kWh and

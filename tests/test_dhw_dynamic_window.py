@@ -318,3 +318,29 @@ def test_pin_budgets_the_lift_at_the_decision_cop(monkeypatch):
         assert window_kwh == pytest.approx(plain + cold, abs=0.02)
     finally:
         cfgpatch["DHW_WARMUP_START_HOUR_LOCAL"] = 13
+
+
+def test_legionella_standoff_defers_the_warmup(monkeypatch):
+    """Owner directive 2026-07-19: the firmware cycle IS the warmup on
+    stand-off days — the scheduled warmup defers past the window end (the
+    tank exits ~60 °C; the deferred 47-command no-ops via idempotency)."""
+    sunday = date(2026, 7, 19)  # weekday 6, BST
+    monkeypatch.setattr(config, "DHW_LEGIONELLA_STANDOFF_ENABLED", True, raising=False)
+    monkeypatch.setattr(config, "DHW_LEGIONELLA_STANDOFF_DOW", 6, raising=False)
+    monkeypatch.setattr(config, "DHW_LEGIONELLA_STANDOFF_START_HOUR_UTC", 11, raising=False)
+    monkeypatch.setattr(config, "DHW_LEGIONELLA_STANDOFF_START_MINUTE_UTC", 0, raising=False)
+    monkeypatch.setattr(config, "DHW_LEGIONELLA_STANDOFF_DURATION_MINUTES", 120, raising=False)
+
+    rows = dhw_policy.generate_daily_tank_schedule(sunday, allow_past=True)
+    warmups = [r for r in rows if r["action_type"] == "tank_warmup"]
+    assert len(warmups) == 1
+    start = datetime.fromisoformat(warmups[0]["start_time"].replace("Z", "+00:00"))
+    # Configured start 13:00 local = 12:00Z falls inside 11:00-13:00Z → 13:00Z.
+    assert start == datetime(2026, 7, 19, 13, 0, tzinfo=UTC)
+
+    # A non-stand-off day keeps the configured start (12:00Z in BST).
+    monday = date(2026, 7, 20)
+    rows = dhw_policy.generate_daily_tank_schedule(monday, allow_past=True)
+    warmups = [r for r in rows if r["action_type"] == "tank_warmup"]
+    start = datetime.fromisoformat(warmups[0]["start_time"].replace("Z", "+00:00"))
+    assert start == datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
