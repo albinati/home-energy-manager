@@ -1823,9 +1823,32 @@ async def daikin_dhw_schedule():
                 agile = _db.get_rates_for_period(import_tariff, ds.astimezone(UTC), de.astimezone(UTC))
             except Exception as e:
                 logger.debug("dhw-schedule: import rates unavailable for %s: %s", day, e)
+        # Legionella stand-off day (owner directive 2026-07-19): the cycle is
+        # the ONLY thing that actuates — the deferred warmup no-ops against a
+        # 60 °C tank and the setback is a target-only write. Show the cycle
+        # (start AND end) and omit that day's warmup/setback chips; boost
+        # rows (real paid windows) stay. Normal mode only — a guests 24 h
+        # warmup genuinely actuates around the cycle.
+        leg_window = None
+        if mode == "normal":
+            try:
+                leg_window = dhw_policy._legionella_standoff_window_utc(day)
+            except Exception:
+                leg_window = None
+        if leg_window is not None:
+            rows_out.append({
+                "action_type": "legionella_cycle",
+                "start_utc": leg_window[0].isoformat().replace("+00:00", "Z"),
+                "end_utc": leg_window[1].isoformat().replace("+00:00", "Z"),
+                "tank_temp_c": 60,
+            })
         try:
             rows = dhw_policy.generate_daily_tank_schedule(day, agile_rates=agile)
             for r in rows:
+                if leg_window is not None and r.get("action_type") in (
+                    "tank_warmup", "tank_setback",
+                ):
+                    continue
                 params = r.get("params") or {}
                 rows_out.append({
                     "action_type": r.get("action_type"),
@@ -1835,6 +1858,7 @@ async def daikin_dhw_schedule():
                 })
         except Exception as e:
             logger.warning("dhw-schedule: generation failed for %s (%s)", day, e)
+    rows_out.sort(key=lambda r: str(r.get("start_utc") or ""))
     return {"mode": mode, "rows": rows_out}
 
 

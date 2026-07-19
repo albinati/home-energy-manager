@@ -32,6 +32,7 @@ export function tankLabelOf(action?: string | null): string {
   switch (action) {
     case "tank_setback": return "Setback";
     case "tank_negative_boost": return "Boost (neg)";
+    case "legionella_cycle": return "Legionella (firmware)";
     case "tank_warmup": return "Warmup";
     default: return action || "—";
   }
