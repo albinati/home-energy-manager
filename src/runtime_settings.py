@@ -335,7 +335,7 @@ SCHEMA: dict[str, SettingSpec] = {
             "with a shadow-log of the would-pick delta. true = pick the cheapest "
             "warmup start within [DHW_WARMUP_WINDOW_START_LOCAL, "
             "DHW_WARMUP_WINDOW_END_LOCAL) once per plan-date and persist it. "
-            "Setback stays fixed at DHW_SETBACK_START_HOUR_LOCAL."
+            "The setback hour is owned by the dynamic window (#755) or the static fallback."
         ),
     ),
     "DHW_WARMUP_WINDOW_START_LOCAL": SettingSpec(
@@ -360,6 +360,32 @@ SCHEMA: dict[str, SettingSpec] = {
             "Exclusive upper bound (LOCAL hour) for the price-aware warmup "
             "start window. Candidates are [START, END). Only used when "
             "DHW_WARMUP_PRICE_AWARE_ENABLED=true; must be > START."
+        ),
+    ),
+    "DHW_DYNAMIC_WINDOW_ENABLED": SettingSpec(
+        key="DHW_DYNAMIC_WINDOW_ENABLED",
+        type_name="str",  # "true" / "false" — mirrors DHW_WARMUP_PRICE_AWARE_ENABLED
+        env_default=_str_env("DHW_DYNAMIC_WINDOW_ENABLED", "true"),
+        enum=("true", "false"),
+        description=(
+            "Dynamic DHW window (#755): per plan-date, derive the setback hour "
+            "and warmup target from that day's Agile rates + tank physics — "
+            "hold-to-peak-edge vs boost-and-coast, cheapest arm wins. false = "
+            "static fallback hours (DHW_WARMUP/SETBACK_START_HOUR_LOCAL); "
+            "readers ignore persisted decisions, effective next re-plan."
+        ),
+    ),
+    "DHW_DYNAMIC_BOOST_HOLD_HOURS": SettingSpec(
+        key="DHW_DYNAMIC_BOOST_HOLD_HOURS",
+        type_name="int",
+        env_default=_int_env("DHW_DYNAMIC_BOOST_HOLD_HOURS", "2"),
+        min_value=1,
+        max_value=4,
+        description=(
+            "Hours between warmup start and the boost arm's setback (#755). "
+            "Must fit the deadband-force trigger + ~1 h measured heat-up + "
+            "settle; also the minimum hold the hold arm keeps on an "
+            "early-peak day."
         ),
     ),
     "DHW_WARMUP_START_HOUR_LOCAL": SettingSpec(

@@ -1130,7 +1130,13 @@ def _check_dhw_shower_drawdown(
     tz = ZoneInfo(getattr(config, "BULLETPROOF_TIMEZONE", "Europe/London"))
     now_local = now_utc.astimezone(tz)
     arm_hour = int(getattr(config, "DHW_EARLY_SETBACK_ARM_HOUR_LOCAL", 20))
-    setback_hour = int(getattr(config, "DHW_SETBACK_START_HOUR_LOCAL", 22))
+    # #755 — the setback hour is the per-date dynamic decision. With an
+    # afternoon setback (dynamic or static 15/16) the armed window
+    # [20, setback) is empty and the detector is inert — accepted; it
+    # re-arms on static-fallback days with a late setback (e.g. 22).
+    setback_hour = int(
+        dhw_policy.read_window_decision(now_local.date()).setback_hour_local
+    )
     if not (arm_hour <= now_local.hour < setback_hour):
         return
     today_local = now_local.date()

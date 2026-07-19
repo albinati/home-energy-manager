@@ -27,8 +27,10 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import statistics
 import time as _time
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -250,6 +252,7 @@ def _sweep_stale_warmup_keys(today: date) -> None:
                 _WARMUP_KEY_PREFIX,
                 _WARMUP_SHADOW_KEY_PREFIX,
                 _EARLY_SETBACK_KEY_PREFIX,
+                _WINDOW_DECISION_KEY_PREFIX,
             ):
                 if not key.startswith(prefix):
                     continue
@@ -478,13 +481,22 @@ def _price_and_real_maps(
     return price_map, real_slots
 
 
-def _window_fully_real(target_date_local: date, real_slots: set[datetime]) -> bool:
-    """True iff every 30-min slot of the candidate window [START, END) on
-    ``target_date_local`` is covered by REAL Agile. This is the persist gate:
-    a hour is only picked/frozen when the whole window it was chosen from is
-    real — never from synthetic priors (Finding 1) or a truncated range
-    (Finding 2)."""
-    lo, hi = _warmup_window_bounds()
+def _window_fully_real(
+    target_date_local: date,
+    real_slots: set[datetime],
+    lo: int | None = None,
+    hi: int | None = None,
+) -> bool:
+    """True iff every 30-min slot of [lo, hi) local on ``target_date_local``
+    is covered by REAL Agile. This is the persist gate: a decision is only
+    frozen when the whole window it was drawn from is real — never from
+    synthetic priors (Finding 1) or a truncated range (Finding 2). Defaults
+    to the price-aware warmup search window; the dynamic-window resolver
+    (#755) passes its own wider bounds."""
+    if lo is None or hi is None:
+        w_lo, w_hi = _warmup_window_bounds()
+        lo = w_lo if lo is None else lo
+        hi = w_hi if hi is None else hi
     if hi <= lo:
         return False
     tz = _tz_local()
@@ -613,11 +625,14 @@ def resolve_warmup_hour_local(
 def resolve_warmup_hours_for_horizon(
     slot_starts_utc: list[datetime],
     agile_rates: list[dict[str, Any]] | None,
+    t_out_c: float | None = None,
 ) -> dict[date, int]:
-    """Resolve+persist the warmup hour for every LOCAL date spanned by the LP
-    horizon (the single-writer entry point called by ``_run_optimizer_lp``).
-    Returns ``{local_date: resolved_hour}`` for diagnostics/tests. Idempotent
-    via persist-once; a no-op (all static) when the feature is disabled."""
+    """Resolve+persist the warmup hour AND the dynamic-window decision (#755)
+    for every LOCAL date spanned by the LP horizon (the single-writer entry
+    point called by ``_run_optimizer_lp``). Returns ``{local_date:
+    resolved_hour}`` for diagnostics/tests. Idempotent via persist-once; a
+    no-op (all static) when the features are disabled. The window resolver
+    runs AFTER the warmup hour resolves — the decision depends on it."""
     tz = _tz_local()
     out: dict[date, int] = {}
     seen: set[date] = set()
@@ -627,7 +642,358 @@ def resolve_warmup_hours_for_horizon(
             continue
         seen.add(d)
         out[d] = resolve_warmup_hour_local(d, agile_rates)
+        try:
+            resolve_window_decision_local(d, agile_rates, t_out_c=t_out_c)
+        except Exception:  # pragma: no cover — the LP solve must never die here
+            logger.exception("dynamic-window resolve failed for %s (non-fatal)", d)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Dynamic DHW window (#755) — hold-to-peak-edge vs boost-and-coast
+# ---------------------------------------------------------------------------
+# Owner directive (2026-07-19): the schedule hours must be COMPUTED per day
+# from tariff + tank physics, not hardcoded. Two arms, cheapest wins:
+#   * "hold"  — heat to normal_c in the valley and HOLD until the day's
+#     evening peak entry (price-derived, empirically ~16:00 local).
+#   * "boost" — heat HIGHER (cap: the 50 °C resistance cliff) in the cheap
+#     slots, set back after DHW_DYNAMIC_BOOST_HOLD_HOURS, and let the coast
+#     deliver the SAME temperature the hold arm would at shower time (like-
+#     for-like comfort; the target/floor re-tune stays in #744).
+# Deterministic and persist-once per plan-date (single-writer, review #683):
+# the writer runs only in the LP-solve path; every consumer reads the
+# persisted decision. Missing rates / disabled → the static fallback hours.
+
+_WINDOW_DECISION_KEY_PREFIX = "dhw_window_decision_"
+# ≥1 h contiguous above the threshold to count as the evening peak — a single
+# 30-min spike must not truncate the warmup window.
+_PEAK_MIN_RUN_SLOTS = 2
+# Don't let a lunchtime price blip read as "the evening peak".
+_PEAK_SEARCH_START_HOUR = 14
+# COP fallback when the caller has no outdoor forecast to thread through.
+_DEFAULT_T_OUT_C = 12.0
+# The two arms are costed with the pin's coarse per-slot constants, whose
+# hold-vs-coast asymmetry (0.06 vs 0.03 kWh/slot) can flip a marginal day by
+# pennies of model noise. Only switch to the boost mechanism when it clears a
+# real margin; hold-to-peak-edge is the default bias (no routine near-cliff
+# commands for noise).
+_BOOST_ARM_MARGIN_P = 1.0
+# One INFO line per (date, arm, setback) per process.
+_window_decision_logged: set[tuple[str, str, int]] = set()
+
+
+@dataclass(frozen=True)
+class WindowDecision:
+    """The per-date dynamic-window decision (also the daily telemetry record)."""
+
+    arm: str                    # "hold" | "boost" | "static"
+    setback_hour_local: int
+    warmup_target_c: float      # normal_c, or T_boost for "boost"
+    peak_entry_hour_local: int | None = None
+    cost_hold_p: float | None = None
+    cost_boost_p: float | None = None
+    t_ref_c: float | None = None
+    boost_extra_kwh: float | None = None
+
+
+def _dynamic_window_enabled() -> bool:
+    return bool(getattr(config, "DHW_DYNAMIC_WINDOW_ENABLED", True))
+
+
+def _static_setback_hour() -> int:
+    return int(getattr(config, "DHW_SETBACK_START_HOUR_LOCAL", 22))
+
+
+def _boost_hold_hours() -> int:
+    return max(1, int(getattr(config, "DHW_DYNAMIC_BOOST_HOLD_HOURS", 2)))
+
+
+def _static_window_decision() -> WindowDecision:
+    return WindowDecision(
+        arm="static",
+        setback_hour_local=_static_setback_hour(),
+        warmup_target_c=float(config.DHW_TEMP_NORMAL_C),
+    )
+
+
+def _window_decision_key(d: date) -> str:
+    return f"{_WINDOW_DECISION_KEY_PREFIX}{d.isoformat()}"
+
+
+def _persisted_window_decision(d: date) -> WindowDecision | None:
+    try:
+        raw = db.get_runtime_setting(_window_decision_key(d))
+    except Exception:  # pragma: no cover - defensive: reader must not fail
+        return None
+    if raw is None:
+        return None
+    try:
+        obj = json.loads(raw)
+        return WindowDecision(
+            arm=str(obj["arm"]),
+            setback_hour_local=int(obj["setback_hour_local"]),
+            warmup_target_c=float(obj["warmup_target_c"]),
+            peak_entry_hour_local=(
+                int(obj["peak_entry_hour_local"])
+                if obj.get("peak_entry_hour_local") is not None else None
+            ),
+            cost_hold_p=(
+                float(obj["cost_hold_p"]) if obj.get("cost_hold_p") is not None else None
+            ),
+            cost_boost_p=(
+                float(obj["cost_boost_p"]) if obj.get("cost_boost_p") is not None else None
+            ),
+            t_ref_c=(
+                float(obj["t_ref_c"]) if obj.get("t_ref_c") is not None else None
+            ),
+            boost_extra_kwh=(
+                float(obj["boost_extra_kwh"])
+                if obj.get("boost_extra_kwh") is not None else None
+            ),
+        )
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return None
+
+
+def _persist_window_decision(d: date, decision: WindowDecision) -> None:
+    try:
+        payload = {
+            "arm": decision.arm,
+            "setback_hour_local": decision.setback_hour_local,
+            "warmup_target_c": decision.warmup_target_c,
+            "peak_entry_hour_local": decision.peak_entry_hour_local,
+            "cost_hold_p": decision.cost_hold_p,
+            "cost_boost_p": decision.cost_boost_p,
+            "t_ref_c": decision.t_ref_c,
+            "boost_extra_kwh": decision.boost_extra_kwh,
+            "warmup_hour": _read_warmup_hour(d),
+            "enabled": _dynamic_window_enabled(),
+            "resolved_at": datetime.now(UTC).isoformat(),
+        }
+        db.set_runtime_setting(_window_decision_key(d), json.dumps(payload))
+        _sweep_stale_warmup_keys(d)
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("dhw_policy: persist window decision failed for %s", d, exc_info=True)
+
+
+def _hour_slot_prices(
+    d: date, price_map: dict[datetime, float], h: int
+) -> list[float]:
+    """Prices of hour *h*'s two half-slots on local date *d* (DST-safe)."""
+    tz = _tz_local()
+    out: list[float] = []
+    for minute in (0, 30):
+        s = datetime(d.year, d.month, d.day, h, minute, tzinfo=tz).astimezone(UTC)
+        if s in price_map:
+            out.append(price_map[s])
+    return out
+
+
+def _evening_peak_entry_hour(
+    d: date, price_map: dict[datetime, float]
+) -> int | None:
+    """First LOCAL hour at/after ``_PEAK_SEARCH_START_HOUR`` whose slot starts
+    a run of ≥ ``_PEAK_MIN_RUN_SLOTS`` half-slots above the day's peak
+    threshold. ``None`` on a flat/no-peak day.
+
+    Threshold = ``max(day q75, OPTIMIZATION_PEAK_THRESHOLD_PENCE)`` — a
+    day-scoped twin of ``scheduler.optimizer._classify_slots`` (that one runs
+    over the whole 48 h LP horizon and importing it here would be a cycle;
+    keep the two formulas in sync)."""
+    tz = _tz_local()
+    slots: list[tuple[datetime, float]] = []
+    for h in range(24):
+        for minute in (0, 30):
+            s = datetime(d.year, d.month, d.day, h, minute, tzinfo=tz).astimezone(UTC)
+            if s in price_map:
+                slots.append((s, price_map[s]))
+    if len(slots) < 24:  # less than half a day priced — don't trust a peak call
+        return None
+    prices = sorted(p for _, p in slots)
+    q75 = prices[int(len(prices) * 0.75)]
+    median = prices[len(prices) // 2]
+    peak_thr = max(q75, float(getattr(config, "OPTIMIZATION_PEAK_THRESHOLD_PENCE", 27.0)))
+    if peak_thr <= median + 1e-9:
+        # No contrast between the threshold and the middle of the day — a
+        # flat day (cheap OR uniformly expensive) has no "peak" to avoid.
+        return None
+    # >= (not >): the q75 of a day whose expensive block spans ≥25% of the
+    # slots IS the block's price; the contrast guard above rejects flat days.
+    above = [(s, p >= peak_thr) for s, p in slots]
+    for i, (s, is_peak) in enumerate(above):
+        s_local = s.astimezone(tz)
+        # Scan bound [14, 22): entries at/after 22:00 are outside the resolver's
+        # real-coverage gate AND past the last shower — nothing to protect.
+        if not (_PEAK_SEARCH_START_HOUR <= s_local.hour < 22) or not is_peak:
+            continue
+        run = 1
+        for j in range(i + 1, len(above)):
+            if above[j][1]:
+                run += 1
+            else:
+                break
+        if run >= _PEAK_MIN_RUN_SLOTS:
+            return s_local.hour
+    return None
+
+
+def _log_window_decision(d: date, decision: WindowDecision) -> None:
+    token = (d.isoformat(), decision.arm, decision.setback_hour_local)
+    if token in _window_decision_logged:
+        return
+    _window_decision_logged.add(token)
+    logger.info(
+        "DHW dynamic window: date=%s arm=%s setback=%02d:00 target=%.1f°C "
+        "peak_entry=%s cost_hold=%s cost_boost=%s",
+        d.isoformat(), decision.arm, decision.setback_hour_local,
+        decision.warmup_target_c,
+        decision.peak_entry_hour_local,
+        f"{decision.cost_hold_p:.2f}p" if decision.cost_hold_p is not None else "n/a",
+        f"{decision.cost_boost_p:.2f}p" if decision.cost_boost_p is not None else "n/a",
+    )
+
+
+def resolve_window_decision_local(
+    target_date_local: date,
+    agile_rates: list[dict[str, Any]] | None = None,
+    t_out_c: float | None = None,
+) -> WindowDecision:
+    """Resolve + (when appropriate) persist the dynamic-window decision for
+    ``target_date_local`` (#755). THE WRITER — call only from the LP-solve
+    path (via :func:`resolve_warmup_hours_for_horizon`).
+
+    Mirrors the ``resolve_warmup_hour_local`` contract exactly:
+    * disabled → static decision, nothing persisted;
+    * already persisted → verbatim (persist-once);
+    * rates not fully real over [warmup_hour, 22:00) → static decision, NOT
+      persisted, so the resolve re-runs once real rates land;
+    * fully real → compute both arms, persist the cheaper, return it.
+    """
+    if not _dynamic_window_enabled():
+        return _static_window_decision()
+    persisted = _persisted_window_decision(target_date_local)
+    if persisted is not None:
+        return persisted
+
+    from .dhw.model import coast_to, electric_kwh_to_raise
+    from .dhw.params import resolve_tank_params
+
+    w = _read_warmup_hour(target_date_local)
+    price_map, real_slots = _price_and_real_maps(agile_rates)
+    # Persist gate: the decision reads prices out to the peak entry, so the
+    # whole [w, 22:00) span must be REAL Agile — priors/truncated → static.
+    if not _window_fully_real(target_date_local, real_slots, lo=w, hi=22):
+        return _static_window_decision()
+
+    peak_entry = _evening_peak_entry_hour(target_date_local, price_map)
+    normal_c = float(config.DHW_TEMP_NORMAL_C)
+    if peak_entry is None:
+        decision = WindowDecision(
+            arm="static",
+            setback_hour_local=_static_setback_hour(),
+            warmup_target_c=normal_c,
+            peak_entry_hour_local=None,
+        )
+        _persist_window_decision(target_date_local, decision)
+        _log_window_decision(target_date_local, decision)
+        return decision
+
+    p = resolve_tank_params()
+    scale = _dhw_autoscale_factor("normal")
+    trans_kwh = _WARMUP_TRANSITION_KWH * scale
+    maint_kwh = _WARMUP_MAINTENANCE_KWH * scale
+    setback_kwh = _SETBACK_MAINTENANCE_KWH * scale
+    hold_hours = _boost_hold_hours()
+    b = w + hold_hours
+    # The hold arm never sets back before the boost arm would (the lift +
+    # settle need the same runway on an early-peak day).
+    setback_hold = max(peak_entry, b)
+
+    def _span_cost(lo_h: int, hi_h: int, kwh_per_slot: float) -> float | None:
+        total = 0.0
+        for h in range(lo_h, hi_h):
+            vals = _hour_slot_prices(target_date_local, price_map, h)
+            if len(vals) < 2:
+                return None
+            total += kwh_per_slot * sum(vals)
+        return total
+
+    trans_prices = _hour_slot_prices(target_date_local, price_map, w)
+    if len(trans_prices) < 2:
+        return _static_window_decision()
+    cost_transition = trans_kwh * sum(trans_prices)
+
+    cost_hold_tail = _span_cost(w + 1, setback_hold, maint_kwh)
+    if cost_hold_tail is None:
+        return _static_window_decision()
+    cost_hold = cost_transition + cost_hold_tail
+
+    # Boost arm: coast from the early setback must land at T_ref — what the
+    # hold arm delivers at shower time. Compare like-for-like comfort.
+    shower_h = _EVENING_SHOWER_START_H
+    t_ref = coast_to(normal_c, max(0.0, shower_h - setback_hold), p)
+    amb = p.ambient_c
+    t_boost_raw = amb + (t_ref - amb) * math.exp(max(0.0, shower_h - b) / p.tau_hours)
+    t_boost = min(t_boost_raw, float(p.t_hp_max_c))
+    boost_feasible = coast_to(t_boost, max(0.0, shower_h - b), p) >= t_ref - 0.1
+
+    cost_boost: float | None = None
+    extra_kwh: float | None = None
+    if boost_feasible and b < setback_hold:
+        extra_kwh = electric_kwh_to_raise(
+            normal_c, t_boost, t_out_c if t_out_c is not None else _DEFAULT_T_OUT_C, p
+        )
+        mean_w_price = sum(trans_prices) / len(trans_prices)
+        cost_boost_tail = _span_cost(w + 1, b, maint_kwh)
+        cost_boost_coast = _span_cost(b, setback_hold, setback_kwh)
+        if cost_boost_tail is not None and cost_boost_coast is not None:
+            cost_boost = (
+                cost_transition
+                + extra_kwh * mean_w_price
+                + cost_boost_tail
+                + cost_boost_coast
+            )
+
+    # Rounded at construction so the persisted round-trip is identity.
+    _ch = round(cost_hold, 2)
+    _cb = round(cost_boost, 2) if cost_boost is not None else None
+    if _cb is not None and _cb < _ch - _BOOST_ARM_MARGIN_P:
+        decision = WindowDecision(
+            arm="boost",
+            setback_hour_local=b,
+            warmup_target_c=round(t_boost, 1),
+            peak_entry_hour_local=peak_entry,
+            cost_hold_p=_ch,
+            cost_boost_p=_cb,
+            t_ref_c=round(t_ref, 1),
+            boost_extra_kwh=(
+                round(extra_kwh, 3) if extra_kwh is not None else None
+            ),
+        )
+    else:
+        decision = WindowDecision(
+            arm="hold",
+            setback_hour_local=setback_hold,
+            warmup_target_c=normal_c,
+            peak_entry_hour_local=peak_entry,
+            cost_hold_p=_ch,
+            cost_boost_p=_cb,
+            t_ref_c=round(t_ref, 1),
+        )
+    _persist_window_decision(target_date_local, decision)
+    _log_window_decision(target_date_local, decision)
+    return decision
+
+
+def read_window_decision(d: date) -> WindowDecision:
+    """Read-only decision for local date *d*: persisted-or-static. NEVER
+    resolves or persists. Disabled → ALWAYS the static decision (ignoring any
+    persisted row), so the whole stack is byte-identical to legacy and the
+    kill switch takes effect on the next re-plan."""
+    if not _dynamic_window_enabled():
+        return _static_window_decision()
+    persisted = _persisted_window_decision(d)
+    return persisted if persisted is not None else _static_window_decision()
 
 
 def generate_daily_tank_schedule(
@@ -698,8 +1064,12 @@ def generate_daily_tank_schedule(
     # its own (static-anchored, possibly truncated) rate fetch. next_day is
     # read independently so the setback END aligns with tomorrow's warmup start.
     warmup_hour = _read_warmup_hour(target_date_local)
-    setback_hour = int(getattr(config, "DHW_SETBACK_START_HOUR_LOCAL", 22))
+    # #755 — the setback hour and warmup target come from the per-date dynamic
+    # decision (persisted-or-static). Guests/vacation below never read them.
+    decision = read_window_decision(target_date_local)
+    setback_hour = int(decision.setback_hour_local)
     normal_c = int(round(float(config.DHW_TEMP_NORMAL_C)))
+    warmup_target_c = int(round(float(decision.warmup_target_c)))
     setback_c = int(round(float(getattr(config, "DHW_TEMP_SETBACK_C", 37))))
     # Negative-price boost target → MAX (free money to heat). Clamp to DHW_TEMP_MAX_C.
     boost_c = int(round(min(
@@ -847,7 +1217,9 @@ def generate_daily_tank_schedule(
                 action_type="tank_warmup",
                 start_utc=effective_warmup_start_utc,
                 end_utc=setback_start_utc,
-                tank_temp_c=normal_c,
+                # #755 — the boost arm commands a higher target (≤ the 50 °C
+                # cliff) and coasts; hold/static arms command normal_c.
+                tank_temp_c=warmup_target_c,
             ))
         rows.append(_make_action(
             action_type="tank_setback",
@@ -892,7 +1264,7 @@ _GUESTS_MORNING_SHOWER_END_H = 9  # exclusive
 
 # 6 h TTL cache for the auto-scale factor — one cheap DB read per LP-solve
 # burst instead of per call. Keyed by (mode, window_days).
-_autoscale_cache: dict[tuple[str, int, str, int], tuple[float, float]] = {}
+_autoscale_cache: dict[tuple, tuple[float, float]] = {}
 _AUTOSCALE_TTL_SECONDS = 6 * 3600
 
 
@@ -913,7 +1285,11 @@ def _nominal_daily_total_kwh(mode: str, warmup_hour: int | None = None) -> float
         return 0.0
     if warmup_hour is None:
         warmup_hour = _read_warmup_hour(datetime.now(_tz_local()).date())
-    setback_hour = int(getattr(config, "DHW_SETBACK_START_HOUR_LOCAL", 22))
+    # #755 — the nominal walk mirrors TODAY's dynamic setback hour (same
+    # today-vs-tomorrow drift acceptance as the warmup hour, Finding 3 #683).
+    setback_hour = int(read_window_decision(
+        datetime.now(_tz_local()).date()
+    ).setback_hour_local)
     total = 0.0
     for half_slot in range(48):
         h = half_slot // 2
@@ -951,7 +1327,11 @@ def _nominal_bucket_shares(mode: str, warmup_hour: int | None = None) -> dict[in
         return {}
     if warmup_hour is None:
         warmup_hour = _read_warmup_hour(datetime.now(_tz_local()).date())
-    setback_hour = int(getattr(config, "DHW_SETBACK_START_HOUR_LOCAL", 22))
+    # #755 — the nominal walk mirrors TODAY's dynamic setback hour (same
+    # today-vs-tomorrow drift acceptance as the warmup hour, Finding 3 #683).
+    setback_hour = int(read_window_decision(
+        datetime.now(_tz_local()).date()
+    ).setback_hour_local)
     per_bucket: dict[int, float] = {b: 0.0 for b in range(12)}
     total = 0.0
     for half_slot in range(48):
@@ -987,6 +1367,10 @@ def _dhw_autoscale_factor(mode: str) -> float:
         return 1.0
     if not bool(getattr(config, "DHW_FORECAST_AUTOSCALE_ENABLED", True)):
         return 1.0
+    # #756 review, accepted drift: the nominal denominator excludes the boost
+    # arm's lift energy while measured days include it — a routine boost
+    # regime inflates the factor slightly. Bounded by the [0.5, 1.6] clamp,
+    # the median (boost days are outliers among 14), and the 1p arm margin.
     window_days = int(getattr(config, "DHW_FORECAST_AUTOSCALE_WINDOW_DAYS", 14))
     # The denominator (nominal) depends on the resolved warmup hour (#681) —
     # a price-aware move changes the warmup-window slot count. Read TODAY's
@@ -998,9 +1382,15 @@ def _dhw_autoscale_factor(mode: str) -> float:
     # [0.5, 1.6] — it can never make the LP Infeasible and self-corrects the
     # next day, so it is left as-is rather than made per-date.
     warmup_hour = _read_warmup_hour(datetime.now(_tz_local()).date())
+    _today_dec = read_window_decision(datetime.now(_tz_local()).date())
     # DB_PATH in the key: tests swap databases under one process, and prod
     # never changes it — costs nothing, prevents cross-DB cache bleed.
-    key = (mode, window_days, str(getattr(config, "DB_PATH", "")), warmup_hour)
+    # #755: setback hour + arm in the key so a mid-day decision change
+    # recomputes the factor against the matching nominal denominator.
+    key = (
+        mode, window_days, str(getattr(config, "DB_PATH", "")), warmup_hour,
+        int(_today_dec.setback_hour_local), _today_dec.arm,
+    )
     cached = _autoscale_cache.get(key)
     now = _time.time()
     if cached is not None and now - cached[1] < _AUTOSCALE_TTL_SECONDS:
@@ -1157,7 +1547,6 @@ def forecast_dhw_load_per_slot(
         return [], []
 
     tz = _tz_local()
-    setback_hour = int(getattr(config, "DHW_SETBACK_START_HOUR_LOCAL", 22))
     # Price-aware warmup start (#681) — READER ONLY. The K2 pin must agree with
     # the fired warmup row, so it reads exactly the persist-once value the
     # single writer (optimizer._run_optimizer_lp) froze for each local date.
@@ -1173,6 +1562,19 @@ def forecast_dhw_load_per_slot(
 
     def _warmup_hour_for(slot_local: datetime) -> int:
         return _warmup_by_date.get(slot_local.date(), _static_warmup_hour())
+
+    # #755 — per-date dynamic-window decision (READER ONLY, same lockstep rule
+    # as the warmup hour): the setback hour and warmup target follow the
+    # persisted decision for each local date, so the pin matches the rows.
+    _decision_by_date: dict[date, WindowDecision] = {}
+    for _s in slot_starts_utc:
+        _d = _s.astimezone(tz).date()
+        if _d not in _decision_by_date:
+            _decision_by_date[_d] = read_window_decision(_d)
+
+    def _setback_hour_for(slot_local: datetime) -> int:
+        dec = _decision_by_date.get(slot_local.date())
+        return int(dec.setback_hour_local) if dec is not None else _static_setback_hour()
 
     # Early setback on shower drawdown — READER ONLY, same lockstep rule as the
     # warmup hour above: once the detector persisted a fire time for a local
@@ -1198,8 +1600,11 @@ def forecast_dhw_load_per_slot(
                 _w_start = datetime(
                     _d.year, _d.month, _d.day, _warmup_by_date[_d], 0, tzinfo=tz,
                 ).astimezone(UTC)
+                _sb_h = int(
+                    _decision_by_date.get(_d, _static_window_decision()).setback_hour_local
+                )
                 _s_start = datetime(
-                    _d.year, _d.month, _d.day, setback_hour, 0, tzinfo=tz,
+                    _d.year, _d.month, _d.day, _sb_h, 0, tzinfo=tz,
                 ).astimezone(UTC)
                 if not (_w_start < _ts < _s_start):
                     _ts = None
@@ -1258,9 +1663,10 @@ def forecast_dhw_load_per_slot(
 
         # Normal mode: warmup window [warmup_hour, setback_hour), setback
         # otherwise. warmup_hour is the price-aware pick for THIS slot's local
-        # date (#681) so the pin follows the fired warmup row exactly.
+        # date (#681) and setback_hour is the dynamic-window decision (#755),
+        # so the pin follows the fired rows exactly.
         warmup_hour = _warmup_hour_for(slot_local)
-        if warmup_hour <= h < setback_hour:
+        if warmup_hour <= h < _setback_hour_for(slot_local):
             # Both half-slots of the warmup hour are transition (#534): the
             # measured lift + deferred-reheat load spans ~1 h, not 30 min.
             if h == warmup_hour:
@@ -1318,6 +1724,58 @@ def forecast_dhw_load_per_slot(
     _max_hp_kwh = max(0.05, float(getattr(config, "DAIKIN_MAX_HP_KW", 2.0)) * 0.5)
     e_dhw = [min(v, _max_hp_kwh) for v in e_dhw]
 
+    # ----- #755 boost-arm lift energy (cap-aware) --------------------------
+    # The boost arm heats past normal_c toward the decision's warmup target
+    # during [warmup_hour, setback_hour). Budget the EXTRA lift electric
+    # energy into those slots greedily, respecting the per-slot cap — the LP
+    # pin is a hard equality, so truncation would silently under-budget the
+    # lift and the battery would pay for it at the peak. Spill across the
+    # window; log any residual that cannot fit. AFTER the bias/clamp (like
+    # the negative-boost ramp, boost energy is never shape-scaled) and
+    # BEFORE the warm credit (a warm arrival legitimately offsets the lift).
+    if mode == "normal":
+        try:
+            from .dhw.model import electric_kwh_to_raise
+            from .dhw.params import resolve_tank_params
+            _p_params = resolve_tank_params()
+            for _d, _dec in _decision_by_date.items():
+                if _dec.arm != "boost" or float(_dec.warmup_target_c) <= normal_c:
+                    continue
+                # Budget the SAME electric kWh the decision priced (review
+                # #756: recomputing here with a default outdoor temp would
+                # under-budget the lift by the COP ratio on cold days).
+                extra = (
+                    float(_dec.boost_extra_kwh)
+                    if _dec.boost_extra_kwh is not None
+                    else electric_kwh_to_raise(
+                        normal_c, float(_dec.warmup_target_c), _DEFAULT_T_OUT_C, _p_params
+                    )
+                )
+                if extra <= 0:
+                    continue
+                _w_h = _warmup_by_date.get(_d, _static_warmup_hour())
+                _sb_h = int(_dec.setback_hour_local)
+                for i, s in enumerate(slot_starts_utc):
+                    sl = s.astimezone(tz)
+                    if sl.date() != _d or not (_w_h <= sl.hour < _sb_h):
+                        continue
+                    room = _max_hp_kwh - e_dhw[i]
+                    if room <= 0:
+                        continue
+                    add = min(room, extra)
+                    e_dhw[i] += add
+                    extra -= add
+                    if extra <= 1e-9:
+                        break
+                if extra > 1e-9:
+                    logger.warning(
+                        "dhw_policy: boost lift energy %.2f kWh did not fit the "
+                        "warmup window for %s (per-slot cap) — pin under-budgets",
+                        extra, _d,
+                    )
+        except Exception as _exc:  # pragma: no cover - forecast must not fail
+            logger.debug("dhw_policy: boost-arm energy budget failed: %s", _exc)
+
     # ----- Initial-tank "warm credit" adjustment ---------------------------
     # If the tank arrives at the LP horizon ABOVE its scheduled target, the
     # heat pump doesn't have to lift it — that stored thermal energy is a
@@ -1367,8 +1825,12 @@ def forecast_dhw_load_per_slot(
             tank_temps.append(normal_c)
         elif _early_setback_active(slot, slot_local):
             tank_temps.append(setback_c)
-        elif _warmup_hour_for(slot_local) <= h < setback_hour:
-            tank_temps.append(normal_c)
+        elif _warmup_hour_for(slot_local) <= h < _setback_hour_for(slot_local):
+            # #755 — the boost arm's window targets warmup_target_c (> normal).
+            _dec = _decision_by_date.get(slot_local.date())
+            tank_temps.append(
+                float(_dec.warmup_target_c) if _dec is not None else normal_c
+            )
         else:
             tank_temps.append(setback_c)
     # Boundary N: same as last slot's target (assume flat at end)

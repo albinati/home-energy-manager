@@ -396,6 +396,7 @@ def replay_run(
                 micro_climate_offset_by_hour.get(st.hour, mco))))
             for st, t in zip(slot_starts_utc, weather.temperature_outdoor_c, strict=False)
         ]
+        from .. import dhw_policy
         pinned_dhw_override = simulate_fixed_schedule(
             slot_starts_utc, _tz,
             tank0_c=float(initial.tank_temp_c),
@@ -410,6 +411,21 @@ def replay_run(
             # baseline frozen on old defaults stops representing what prod does.
             warmup_hour_local=float(getattr(config, "DHW_WARMUP_START_HOUR_LOCAL", 13)),
             setback_hour_local=float(getattr(config, "DHW_SETBACK_START_HOUR_LOCAL", 22)),
+            # #755 — the incumbent mirrors the deployed DYNAMIC window: per-date
+            # setback + warmup target from the persisted decision (reader only —
+            # shadow/replay must never persist). Scalars above stay the fallback.
+            setback_hour_by_date={
+                _wd: float(dhw_policy.read_window_decision(_wd).setback_hour_local)
+                for _wd in {_ws.astimezone(_tz).date() for _ws in slot_starts_utc}
+            },
+            target_by_date={
+                _wd: float(dhw_policy.read_window_decision(_wd).warmup_target_c)
+                for _wd in {_ws.astimezone(_tz).date() for _ws in slot_starts_utc}
+            },
+            warmup_hour_by_date={
+                _wd: float(dhw_policy._read_warmup_hour(_wd))
+                for _wd in {_ws.astimezone(_tz).date() for _ws in slot_starts_utc}
+            },
             target_c=float(getattr(config, "DHW_TEMP_NORMAL_C", 45.0)),
             setback_c=float(getattr(config, "DHW_TEMP_SETBACK_C", 37.0)),
             # #732 — the firmware's measured reheat deadband, not the old 1 degC
