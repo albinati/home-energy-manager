@@ -1877,6 +1877,15 @@ def forecast_dhw_load_per_slot(
             tank_temps.append(normal_c)
         elif _early_setback_active(slot, slot_local):
             tank_temps.append(setback_c)
+        elif (
+            (_lw := _leg_window_by_date.get(slot_local.date())) is not None
+            and _lw[0] <= slot < _lw[1]
+        ):
+            # Legionella stand-off: the firmware owns the tank at ~60 °C. The
+            # trajectory must mirror the phase classifier and the heating-plan
+            # band, or the timeline shows a 47 °C warmup starting under the
+            # cycle (owner report 2026-07-19).
+            tank_temps.append(60.0)
         elif _warmup_hour_for(slot_local) <= h < _setback_hour_for(slot_local):
             # #755 — the boost arm's window targets warmup_target_c (> normal).
             _dec = _decision_by_date.get(slot_local.date())
