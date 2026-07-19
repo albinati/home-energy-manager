@@ -40,6 +40,9 @@ class _RecordingFox:
 def _setup_db(monkeypatch: pytest.MonkeyPatch, td: str) -> None:
     monkeypatch.setattr("src.config.config.DB_PATH", str(Path(td) / "t.db"))
     monkeypatch.setattr("src.config.config.OPENCLAW_READ_ONLY", False)
+    # Sunday-CI determinism: the stand-off guard would skip the tank leg
+    # 11:00-13:00Z Sundays (#757); these tests pin it off.
+    monkeypatch.setattr("src.config.config.DHW_LEGIONELLA_STANDOFF_ENABLED", False)
     db.init_db()
 
 

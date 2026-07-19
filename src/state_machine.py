@@ -562,6 +562,21 @@ def apply_safe_defaults(
                 trigger=trigger,
             )
             return
+        # Legionella stand-off: the firmware owns the tank inside the weekly
+        # thermal-shock window — the reconciler and lift-settle already bail
+        # there; the safe-defaults tank leg must too (review #757: a Sunday
+        # restart in the 12:00-13:00Z row gap used to force NORMAL_C into the
+        # firmware-owned cycle).
+        if in_legionella_standoff(datetime.now(UTC)):
+            db.log_action(
+                device="daikin",
+                action="apply_safe_defaults",
+                params={"skipped": "tank"},
+                result="skipped",
+                trigger=trigger,
+                error_msg="legionella stand-off window (firmware owns the tank)",
+            )
+            return
         # #740 — plan-aware tank leg: honour the row covering now (the
         # overnight setback, a boost window, a guests warmup) instead of
         # blindly re-commanding NORMAL_C. Routine restarts use

@@ -1617,6 +1617,10 @@ def forecast_dhw_load_per_slot(
         dec = _decision_by_date.get(slot_local.date())
         return int(dec.setback_hour_local) if dec is not None else _static_setback_hour()
 
+    _leg_window_by_date: dict[date, tuple[datetime, datetime] | None] = {
+        _d: _legionella_standoff_window_utc(_d) for _d in _decision_by_date
+    }
+
     # Early setback on shower drawdown — READER ONLY, same lockstep rule as the
     # warmup hour above: once the detector persisted a fire time for a local
     # date, every slot of that date at/after it is a SETBACK slot (including
@@ -1701,6 +1705,13 @@ def forecast_dhw_load_per_slot(
             # Guests: tank always at NORMAL outside shower windows →
             # warmup-level maintenance.
             return "warmup_maintenance"
+
+        # Legionella stand-off: the schedule defers the warmup past the
+        # window (review #757), so its slots are not warmup phases — the
+        # legionella budget injection below owns their energy (via max()).
+        _lw = _leg_window_by_date.get(slot_local.date())
+        if _lw is not None and _lw[0] <= slot_utc < _lw[1]:
+            return "setback"
 
         # Normal mode: warmup window [warmup_hour, setback_hour), setback
         # otherwise. warmup_hour is the price-aware pick for THIS slot's local
