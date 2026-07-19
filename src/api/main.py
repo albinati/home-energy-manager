@@ -1934,11 +1934,28 @@ async def daikin_heating_plan():
                 continue
             tank_windows.append((ws, we, params.get("tank_temp"), _kind_map.get(r.get("action_type"), "warmup")))
 
+    # Legionella stand-off windows (firmware-owned tank): display them as
+    # their own band so Sundays read honestly — HEM plans nothing under the
+    # cycle (the schedule defers the warmup past it) and the tank exits ~60 °C.
+    leg_windows: list[tuple[datetime, datetime]] = []
+    for anchor in [today_local + _td(days=d) for d in (-1, 0, 1)]:
+        try:
+            lw = _dhw._legionella_standoff_window_utc(anchor)
+        except Exception:
+            lw = None
+        if lw is not None:
+            leg_windows.append(lw)
+
     def _tank_at(slot_dt: datetime) -> tuple[int | None, str | None]:
         # dhw_policy emits full-span warmup/setback rows AND layers
         # negative-price boost rows as sub-intervals on top. Prefer a boost
         # match so the "paid to import" override wins over the setback it sits
         # inside (otherwise the tank line contradicts the blue negative band).
+        # The legionella stand-off outranks everything: the FIRMWARE owns the
+        # tank there (target ~60 °C), whatever rows exist underneath.
+        for lws, lwe in leg_windows:
+            if lws <= slot_dt < lwe:
+                return (60, "legionella")
         match: tuple[int | None, str | None] | None = None
         for ws, we, temp, kind in tank_windows:
             if ws <= slot_dt < we:

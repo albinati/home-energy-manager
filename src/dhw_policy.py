@@ -696,6 +696,32 @@ class WindowDecision:
     boost_extra_kwh: float | None = None
 
 
+def _legionella_standoff_window_utc(
+    target_date_local: date,
+) -> tuple[datetime, datetime] | None:
+    """The firmware legionella stand-off window overlapping ``target_date_local``
+    (UTC bounds), or None. Defined in UTC on a fixed weekday (see the
+    ``DHW_LEGIONELLA_STANDOFF_*`` knobs; the window never crosses midnight).
+    Local in the UK is UTC or UTC+1, so the local date's own UTC day is the
+    only candidate that can overlap the local afternoon."""
+    if not getattr(config, "DHW_LEGIONELLA_STANDOFF_ENABLED", False):
+        return None
+    try:
+        dow = int(config.DHW_LEGIONELLA_STANDOFF_DOW)
+        start_h = int(config.DHW_LEGIONELLA_STANDOFF_START_HOUR_UTC)
+        start_m = int(getattr(config, "DHW_LEGIONELLA_STANDOFF_START_MINUTE_UTC", 0))
+        dur_min = int(config.DHW_LEGIONELLA_STANDOFF_DURATION_MINUTES)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if target_date_local.weekday() != dow:
+        return None
+    start = datetime(
+        target_date_local.year, target_date_local.month, target_date_local.day,
+        start_h, start_m, tzinfo=UTC,
+    )
+    return start, start + timedelta(minutes=max(1, dur_min))
+
+
 def _dynamic_window_enabled() -> bool:
     return bool(getattr(config, "DHW_DYNAMIC_WINDOW_ENABLED", True))
 
@@ -1168,6 +1194,21 @@ def generate_daily_tank_schedule(
             else:
                 break
 
+    # Legionella stand-off override (owner directive 2026-07-19): when the
+    # warmup start falls inside the firmware's weekly thermal-shock window,
+    # the CYCLE is the warmup — the firmware owns the tank and leaves it at
+    # ~60 °C. Planning a warmup underneath it only produces rows the
+    # reconciler must skip (and, post-cycle, a pointless 47-command against a
+    # 60 °C tank). Defer the warmup start to the stand-off end: the deferred
+    # row completes as a no-op via idempotency and the coast covers the
+    # evening. Mirrors the negative-boost defer above.
+    leg_window = _legionella_standoff_window_utc(target_date_local)
+    if (
+        leg_window is not None
+        and leg_window[0] <= effective_warmup_start_utc < leg_window[1]
+    ):
+        effective_warmup_start_utc = leg_window[1]
+
     # Tank pre-cool into a negative window: drop the setback target toward the
     # device minimum so the paid boost (cold → boost_c) absorbs the most kWh and
     # no positive-price reheat fires just before it. Guarded by no shower in the
@@ -1576,6 +1617,10 @@ def forecast_dhw_load_per_slot(
         dec = _decision_by_date.get(slot_local.date())
         return int(dec.setback_hour_local) if dec is not None else _static_setback_hour()
 
+    _leg_window_by_date: dict[date, tuple[datetime, datetime] | None] = {
+        _d: _legionella_standoff_window_utc(_d) for _d in _decision_by_date
+    }
+
     # Early setback on shower drawdown — READER ONLY, same lockstep rule as the
     # warmup hour above: once the detector persisted a fire time for a local
     # date, every slot of that date at/after it is a SETBACK slot (including
@@ -1660,6 +1705,13 @@ def forecast_dhw_load_per_slot(
             # Guests: tank always at NORMAL outside shower windows →
             # warmup-level maintenance.
             return "warmup_maintenance"
+
+        # Legionella stand-off: the schedule defers the warmup past the
+        # window (review #757), so its slots are not warmup phases — the
+        # legionella budget injection below owns their energy (via max()).
+        _lw = _leg_window_by_date.get(slot_local.date())
+        if _lw is not None and _lw[0] <= slot_utc < _lw[1]:
+            return "setback"
 
         # Normal mode: warmup window [warmup_hour, setback_hour), setback
         # otherwise. warmup_hour is the price-aware pick for THIS slot's local
