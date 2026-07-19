@@ -280,3 +280,41 @@ def test_static_decision_when_nothing_persisted():
     assert d.arm == "static"
     assert d.setback_hour_local == 16
     assert d.warmup_target_c == 47.0
+
+
+def test_pin_budgets_the_lift_at_the_decision_cop(monkeypatch):
+    """#756 review: the pin must budget the SAME electric kWh the decision
+    priced (cold-day COP), not recompute at the default outdoor temp."""
+    from src.dhw.model import electric_kwh_to_raise
+    from src.dhw.params import resolve_tank_params
+
+    cfgpatch = config._overrides
+    cfgpatch["DHW_WARMUP_START_HOUR_LOCAL"] = 11
+    try:
+        rates = _rates(DAY, base_p=6.0, peak_p=38.0, peak_start_h=15, peak_end_h=21)
+        for r in rates:
+            h = datetime.fromisoformat(r["valid_from"]).astimezone(TZ).hour
+            if h in (13, 14):
+                r["value_inc_vat"] = 22.0
+        d = dhw_policy.resolve_window_decision_local(DAY, rates, t_out_c=0.0)
+        assert d.arm == "boost"
+        assert d.boost_extra_kwh is not None
+        p = resolve_tank_params()
+        cold = electric_kwh_to_raise(47.0, float(d.warmup_target_c), 0.0, p)
+        warm = electric_kwh_to_raise(
+            47.0, float(d.warmup_target_c), dhw_policy._DEFAULT_T_OUT_C, p)
+        assert d.boost_extra_kwh == pytest.approx(cold, abs=0.005)
+        assert cold > warm  # the COP gap the pin must not lose
+
+        starts = [
+            datetime(DAY.year, DAY.month, DAY.day, h, m, tzinfo=TZ).astimezone(UTC)
+            for h in range(24) for m in (0, 30)
+        ]
+        e_dhw, _ = dhw_policy.forecast_dhw_load_per_slot(starts)
+        idx = [i for i, s in enumerate(starts)
+               if 11 <= s.astimezone(TZ).hour < d.setback_hour_local]
+        window_kwh = sum(e_dhw[i] for i in idx)
+        plain = dhw_policy._WARMUP_TRANSITION_KWH * 2 + dhw_policy._WARMUP_MAINTENANCE_KWH * 2
+        assert window_kwh == pytest.approx(plain + cold, abs=0.02)
+    finally:
+        cfgpatch["DHW_WARMUP_START_HOUR_LOCAL"] = 13

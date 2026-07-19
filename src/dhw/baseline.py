@@ -54,6 +54,7 @@ def simulate_fixed_schedule(
     slot_hours: float = 0.5,
     setback_hour_by_date: dict[date, float] | None = None,
     target_by_date: dict[date, float] | None = None,
+    warmup_hour_by_date: dict[date, float] | None = None,
 ) -> tuple[list[float], list[float]]:
     """The fixed schedule's electricity per slot + tank trajectory (len n+1).
 
@@ -88,7 +89,11 @@ def simulate_fixed_schedule(
             target_by_date.get(local.date(), target_c)
             if target_by_date else target_c
         )
-        if warmup_hour_local <= hour < day_setback:
+        day_warmup = (
+            warmup_hour_by_date.get(local.date(), warmup_hour_local)
+            if warmup_hour_by_date else warmup_hour_local
+        )
+        if day_warmup <= hour < day_setback:
             target = day_target
         else:
             target = setback_c

@@ -223,6 +223,10 @@ def record_shadow(*, solve_kwargs: dict, price_pence: list[float],
                 _wd: float(dhw_policy.read_window_decision(_wd).warmup_target_c)
                 for _wd in {_ws.astimezone(tz).date() for _ws in starts}
             },
+            warmup_hour_by_date={
+                _wd: float(dhw_policy._read_warmup_hour(_wd))
+                for _wd in {_ws.astimezone(tz).date() for _ws in starts}
+            },
             target_c=float(getattr(config, "DHW_TEMP_NORMAL_C", 45.0)),
             setback_c=float(getattr(config, "DHW_TEMP_SETBACK_C", 37.0)),
             # #732 — the firmware's measured reheat deadband, not the old 1 degC

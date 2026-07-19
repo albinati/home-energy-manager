@@ -335,7 +335,7 @@ SCHEMA: dict[str, SettingSpec] = {
             "with a shadow-log of the would-pick delta. true = pick the cheapest "
             "warmup start within [DHW_WARMUP_WINDOW_START_LOCAL, "
             "DHW_WARMUP_WINDOW_END_LOCAL) once per plan-date and persist it. "
-            "Setback stays fixed at DHW_SETBACK_START_HOUR_LOCAL."
+            "The setback hour is owned by the dynamic window (#755) or the static fallback."
         ),
     ),
     "DHW_WARMUP_WINDOW_START_LOCAL": SettingSpec(

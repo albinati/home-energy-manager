@@ -693,6 +693,7 @@ class WindowDecision:
     cost_hold_p: float | None = None
     cost_boost_p: float | None = None
     t_ref_c: float | None = None
+    boost_extra_kwh: float | None = None
 
 
 def _dynamic_window_enabled() -> bool:
@@ -745,6 +746,10 @@ def _persisted_window_decision(d: date) -> WindowDecision | None:
             t_ref_c=(
                 float(obj["t_ref_c"]) if obj.get("t_ref_c") is not None else None
             ),
+            boost_extra_kwh=(
+                float(obj["boost_extra_kwh"])
+                if obj.get("boost_extra_kwh") is not None else None
+            ),
         )
     except (json.JSONDecodeError, KeyError, TypeError, ValueError):
         return None
@@ -760,6 +765,7 @@ def _persist_window_decision(d: date, decision: WindowDecision) -> None:
             "cost_hold_p": decision.cost_hold_p,
             "cost_boost_p": decision.cost_boost_p,
             "t_ref_c": decision.t_ref_c,
+            "boost_extra_kwh": decision.boost_extra_kwh,
             "warmup_hour": _read_warmup_hour(d),
             "enabled": _dynamic_window_enabled(),
             "resolved_at": datetime.now(UTC).isoformat(),
@@ -816,7 +822,9 @@ def _evening_peak_entry_hour(
     above = [(s, p >= peak_thr) for s, p in slots]
     for i, (s, is_peak) in enumerate(above):
         s_local = s.astimezone(tz)
-        if s_local.hour < _PEAK_SEARCH_START_HOUR or not is_peak:
+        # Scan bound [14, 22): entries at/after 22:00 are outside the resolver's
+        # real-coverage gate AND past the last shower — nothing to protect.
+        if not (_PEAK_SEARCH_START_HOUR <= s_local.hour < 22) or not is_peak:
             continue
         run = 1
         for j in range(i + 1, len(above)):
@@ -930,6 +938,7 @@ def resolve_window_decision_local(
     boost_feasible = coast_to(t_boost, max(0.0, shower_h - b), p) >= t_ref - 0.1
 
     cost_boost: float | None = None
+    extra_kwh: float | None = None
     if boost_feasible and b < setback_hold:
         extra_kwh = electric_kwh_to_raise(
             normal_c, t_boost, t_out_c if t_out_c is not None else _DEFAULT_T_OUT_C, p
@@ -957,6 +966,9 @@ def resolve_window_decision_local(
             cost_hold_p=_ch,
             cost_boost_p=_cb,
             t_ref_c=round(t_ref, 1),
+            boost_extra_kwh=(
+                round(extra_kwh, 3) if extra_kwh is not None else None
+            ),
         )
     else:
         decision = WindowDecision(
@@ -1252,7 +1264,7 @@ _GUESTS_MORNING_SHOWER_END_H = 9  # exclusive
 
 # 6 h TTL cache for the auto-scale factor — one cheap DB read per LP-solve
 # burst instead of per call. Keyed by (mode, window_days).
-_autoscale_cache: dict[tuple[str, int, str, int], tuple[float, float]] = {}
+_autoscale_cache: dict[tuple, tuple[float, float]] = {}
 _AUTOSCALE_TTL_SECONDS = 6 * 3600
 
 
@@ -1355,6 +1367,10 @@ def _dhw_autoscale_factor(mode: str) -> float:
         return 1.0
     if not bool(getattr(config, "DHW_FORECAST_AUTOSCALE_ENABLED", True)):
         return 1.0
+    # #756 review, accepted drift: the nominal denominator excludes the boost
+    # arm's lift energy while measured days include it — a routine boost
+    # regime inflates the factor slightly. Bounded by the [0.5, 1.6] clamp,
+    # the median (boost days are outliers among 14), and the 1p arm margin.
     window_days = int(getattr(config, "DHW_FORECAST_AUTOSCALE_WINDOW_DAYS", 14))
     # The denominator (nominal) depends on the resolved warmup hour (#681) —
     # a price-aware move changes the warmup-window slot count. Read TODAY's
@@ -1725,8 +1741,15 @@ def forecast_dhw_load_per_slot(
             for _d, _dec in _decision_by_date.items():
                 if _dec.arm != "boost" or float(_dec.warmup_target_c) <= normal_c:
                     continue
-                extra = electric_kwh_to_raise(
-                    normal_c, float(_dec.warmup_target_c), _DEFAULT_T_OUT_C, _p_params
+                # Budget the SAME electric kWh the decision priced (review
+                # #756: recomputing here with a default outdoor temp would
+                # under-budget the lift by the COP ratio on cold days).
+                extra = (
+                    float(_dec.boost_extra_kwh)
+                    if _dec.boost_extra_kwh is not None
+                    else electric_kwh_to_raise(
+                        normal_c, float(_dec.warmup_target_c), _DEFAULT_T_OUT_C, _p_params
+                    )
                 )
                 if extra <= 0:
                     continue
