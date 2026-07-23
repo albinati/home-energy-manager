@@ -489,11 +489,11 @@ def test_phantom_summer_bucket_zeroed(monkeypatch):
 def test_winter_real_integer_bucket_kept(monkeypatch):
     _patch_curve_kw(monkeypatch, 0.8)  # cold night: 1.6 kWh plausible per bucket
     day = date(2026, 1, 10)
-    rows = [_phantom_row(day, 2, 2.0)]
+    rows = [_phantom_row(day, 2, 1.0)]
     cleaned, n = tl.sanitize_phantom_heating(
         rows, _outdoor_flat(day - timedelta(days=1), 3, temp=2.0), TZ)
     assert n == 0
-    assert cleaned[0]["kwh_heating"] == 2.0
+    assert cleaned[0]["kwh_heating"] == 1.0
 
 
 def test_non_candidates_untouched(monkeypatch):
@@ -503,11 +503,46 @@ def test_non_candidates_untouched(monkeypatch):
         _phantom_row(day, 1, 1.0, source="telemetry_integral"),  # not onecta
         _phantom_row(day, 2, 0.7),  # non-integer → real decimal, not a quantum
         _phantom_row(day, 3, 0.0),  # zero heating
+        _phantom_row(day, 4, 2.0),  # multi-quantum: NEVER a candidate (F1) —
+        _phantom_row(day, 5, 3.0),  # real cold-snap energy must survive even
+                                    # when the capped curve model disagrees
     ]
     cleaned, n = tl.sanitize_phantom_heating(
         rows, _outdoor_flat(day - timedelta(days=1), 3, temp=19.0), TZ)
     assert n == 0
-    assert [r["kwh_heating"] for r in cleaned] == [1.0, 0.7, 0.0]
+    assert [r["kwh_heating"] for r in cleaned] == [1.0, 0.7, 0.0, 2.0, 3.0]
+
+
+def test_real_curve_threshold_geometry(monkeypatch, tmp_db):
+    """F3 from adversarial review — pin the safety property against the REAL
+    prod weather curve (HIGH 18→15, LOW 0→40, k pinned at the physics
+    fallback 0.0333): a 1.0 claim is zeroed only where the curve says the
+    compressor is essentially off (≳14.5 °C outdoor); shoulder and winter
+    claims — any magnitude — keep blocking."""
+    import src.physics as physics
+    monkeypatch.setattr(physics, "get_kw_per_degc_lwt", lambda: 0.0333)
+    monkeypatch.setattr(config, "DAIKIN_WEATHER_CURVE_HIGH_C", 18.0, raising=False)
+    monkeypatch.setattr(config, "DAIKIN_WEATHER_CURVE_HIGH_LWT_C", 15.0, raising=False)
+    monkeypatch.setattr(config, "DAIKIN_WEATHER_CURVE_LOW_C", 0.0, raising=False)
+    monkeypatch.setattr(config, "DAIKIN_WEATHER_CURVE_LOW_LWT_C", 40.0, raising=False)
+    monkeypatch.setattr(config, "DAIKIN_WEATHER_CURVE_OFFSET_C", 0.0, raising=False)
+    day = date(2026, 7, 22)
+
+    def zeroed_at(temp: float, claim: float) -> bool:
+        rows = [_phantom_row(day, 0, claim)]
+        _, n = tl.sanitize_phantom_heating(
+            rows, _outdoor_flat(day - timedelta(days=1), 3, temp=temp), TZ)
+        return n == 1
+
+    # winter / shoulder: real heating keeps blocking, whatever the claim
+    for temp in (0.0, 2.0, 5.0, 12.0):
+        for claim in (1.0, 2.0, 3.0):
+            assert not zeroed_at(temp, claim), (temp, claim)
+    # mild night: only the single-quantum phantom is zeroed
+    assert zeroed_at(19.0, 1.0)
+    assert zeroed_at(15.5, 1.0)  # curve ~0.09 kWh/bucket — compressor off
+    assert not zeroed_at(19.0, 2.0)
+    assert not zeroed_at(19.0, 3.0)
 
 
 def test_no_outdoor_coverage_keeps_row(monkeypatch):

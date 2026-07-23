@@ -1902,17 +1902,20 @@ class Config:
     # boosts leak meaningful heat into the envelope).
     THERMAL_HEATING_CONTAM_KWH: float = float(os.getenv("THERMAL_HEATING_CONTAM_KWH", "0.1"))
     THERMAL_DHW_CONTAM_KWH: float = float(os.getenv("THERMAL_DHW_CONTAM_KWH", "0.8"))
-    # #760 — whole-kWh-quantised onecta_cache kwh_heating buckets (the #749
-    # phantom family) only contaminate an episode when the site's own weather
-    # curve could plausibly deliver a comparable energy at the bucket's
-    # outdoor temperature. Fraction: claim counts as real when
-    # curve_kwh >= fraction × claim (0.5 = the counter's own rounding
-    # threshold — a real 0.5 kWh may display as 1).
+    # #760 — a SINGLE-quantum onecta_cache kwh_heating=1.0 bucket (the #749
+    # phantom signature) stops contaminating a decay episode only when the
+    # site's own weather curve says the compressor was essentially off at the
+    # bucket's outdoor temperature (plausible curve energy below this floor,
+    # kWh per 2h bucket). Claims ≥ 2 kWh are NEVER candidates — adversarial
+    # review showed the curve model is hard-capped (~2.1 kWh/bucket) and
+    # systematically underestimates exactly the buckets that survive
+    # reconciliation, so a claim-proportional trigger would zero real
+    # cold-snap heating.
     THERMAL_PHANTOM_HEATING_GUARD_ENABLED: bool = os.getenv(
         "THERMAL_PHANTOM_HEATING_GUARD_ENABLED", "true"
     ).lower() in ("true", "1", "yes")
-    THERMAL_PHANTOM_PLAUSIBILITY_FRACTION: float = float(
-        os.getenv("THERMAL_PHANTOM_PLAUSIBILITY_FRACTION", "0.5")
+    THERMAL_PHANTOM_MAX_PLAUSIBLE_KWH: float = float(
+        os.getenv("THERMAL_PHANTOM_MAX_PLAUSIBLE_KWH", "0.15")
     )
     # Bounded by the meteo retention (METEO_FORECAST_HISTORY_RETENTION_DAYS,
     # ~30): a larger window would silently fit on whatever subset has outdoor

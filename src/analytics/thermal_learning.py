@@ -138,7 +138,7 @@ def sanitize_phantom_heating(
     outdoor_series: list[tuple[datetime, float]],
     tz: ZoneInfo,
     *,
-    plausibility_fraction: float = 0.5,
+    max_plausible_kwh: float = 0.15,
 ) -> tuple[list[dict[str, Any]], int]:
     """Drop #749-family phantom heating claims from consumption rows (#760).
 
@@ -150,23 +150,31 @@ def sanitize_phantom_heating(
     disagreement keeps Onecta), and ``mode`` telemetry can't corroborate (the
     unit reports ``heating`` year-round).
 
-    The honest, season-agnostic discriminator is the site's own weather
-    curve: an integer ``onecta_cache`` claim is kept only when
-    ``get_daikin_heating_kw(bucket outdoor mean) × 2 h`` reaches
-    ``plausibility_fraction`` of it (0.5 = the counter's own rounding
-    threshold — a real 0.5 kWh may legitimately display as 1). Mild nights
-    plausibly deliver ~0.1 kWh/bucket, so a 1.0 claim is physically
-    inconsistent and the bucket's ``kwh_heating`` is zeroed; deep-winter
-    curve output is 1-3 kWh/bucket, so real Onecta rows keep blocking.
+    A bucket is zeroed only when BOTH hold:
 
-    Deliberately narrow: only ``onecta_cache`` rows with an integer-valued
-    positive ``kwh_heating`` are candidates (``telemetry_integral`` rows are
-    decimals by construction); ``kwh_dhw`` is left untouched (DHW runs in any
-    season and its 0.8 kWh contamination floor already absorbs quantisation);
-    HEM-commanded LWT boosts live in offset windows, which block
-    unconditionally — so the plausibility check uses the BASE curve
-    (``lwt_offset_delta=0``). No outdoor coverage for the bucket → keep the
-    row (conservative). Returns ``(rows, n_zeroed)`` without mutating input.
+    * the claim is EXACTLY 1.0 kWh — the single-quantum #749 signature.
+      Claims ≥ 2 are never touched: adversarial review showed the weather
+      curve model is hard-capped (LWT clamp → ~2.1 kWh/bucket) and, thanks to
+      the reconciliation rule that keeps Onecta on ≥0.5 kWh disagreement, the
+      surviving integer rows are exactly the ones where the curve model
+      already lost against the meter — it must not arbitrate real cold-snap
+      energy (defrost, recovery ramps) out of existence;
+    * the site's own weather curve says the compressor was essentially OFF:
+      ``get_daikin_heating_kw(bucket outdoor mean) × 2 h < max_plausible_kwh``
+      (default 0.15 — under the prod curve that means outdoor ≳ 14.5 °C).
+      In shoulder/winter conditions the curve yields ≥ 0.35 kWh/bucket, so a
+      1.0 claim there keeps blocking — the honest conservative outcome.
+
+    Deliberately narrow: only ``onecta_cache`` rows are candidates
+    (``telemetry_integral`` rows are decimals by construction); ``kwh_dhw``
+    is left untouched (DHW runs in any season and its 0.8 kWh contamination
+    floor already absorbs quantisation); HEM-commanded LWT boosts live in
+    offset windows, which block unconditionally — so the plausibility check
+    uses the BASE curve (``lwt_offset_delta=0``). No outdoor coverage for the
+    bucket → keep the row (conservative). NB a cooling-capable site would see
+    real cooling folded into ``kwh_heating`` (client.py quirk) and zeroed —
+    this installation is heating-only. Returns ``(rows, n_zeroed)`` without
+    mutating input.
     """
     from ..physics import get_daikin_heating_kw
 
@@ -175,11 +183,7 @@ def sanitize_phantom_heating(
     outdoor_series = sorted(outdoor_series)
     for r in consumption_rows:
         heating = float(r.get("kwh_heating") or 0.0)
-        if (
-            str(r.get("source")) != "onecta_cache"
-            or heating <= 0.0
-            or not heating.is_integer()
-        ):
+        if str(r.get("source")) != "onecta_cache" or heating != 1.0:
             out.append(r)
             continue
         try:
@@ -194,7 +198,7 @@ def sanitize_phantom_heating(
             out.append(r)  # no outdoor data — can't judge, keep blocking
             continue
         plausible_kwh = float(get_daikin_heating_kw(float(t_out))) * 2.0
-        if plausible_kwh >= plausibility_fraction * heating:
+        if plausible_kwh >= max_plausible_kwh:
             out.append(r)
             continue
         cleaned = dict(r)
@@ -599,8 +603,8 @@ def refresh_building_thermal_calibration() -> dict[str, Any]:
     if getattr(config, "THERMAL_PHANTOM_HEATING_GUARD_ENABLED", True):
         consumption, n_phantom = sanitize_phantom_heating(
             consumption, outdoor, tz,
-            plausibility_fraction=float(
-                getattr(config, "THERMAL_PHANTOM_PLAUSIBILITY_FRACTION", 0.5)
+            max_plausible_kwh=float(
+                getattr(config, "THERMAL_PHANTOM_MAX_PLAUSIBLE_KWH", 0.15)
             ),
         )
 
@@ -624,8 +628,7 @@ def refresh_building_thermal_calibration() -> dict[str, Any]:
         min_tau_hours=float(getattr(config, "THERMAL_TAU_MIN_HOURS", 5.0)),
         max_tau_hours=float(getattr(config, "THERMAL_TAU_MAX_HOURS", 100.0)),
     )
-    if n_phantom:
-        tau_fit["phantom_heating_zeroed"] = n_phantom
+    tau_fit["phantom_heating_zeroed"] = n_phantom
 
     ua_fit = _ua_fit_from_db(readings, outdoor, now, ua_window)
 
