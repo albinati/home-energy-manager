@@ -170,6 +170,9 @@ async def get_thermal_calibration() -> dict[str, Any]:
                 "episodes": rtau.get("episodes"),
                 "needed": int(getattr(config, "THERMAL_TAU_MIN_EPISODES", 5)),
                 "reason": rtau.get("reason"),
+                # #760 — how many quantised phantom heating buckets the guard
+                # zeroed this run (null on pre-guard progress rows)
+                "phantom_heating_zeroed": rtau.get("phantom_heating_zeroed"),
             },
             "ua": {
                 "status": rua.get("status"),

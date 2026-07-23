@@ -454,3 +454,118 @@ def test_refresh_end_to_end_learns_tau(tmp_db, monkeypatch):
     # second refresh with no new data keeps the row coherent (merge semantics)
     result2 = tl.refresh_building_thermal_calibration()
     assert result2["status"] == "ok"
+
+
+# ---------------------------------------------------------------------------
+# 7. #760 — phantom onecta_cache kwh_heating guard (the #749 family)
+# ---------------------------------------------------------------------------
+
+
+def _phantom_row(day: date, idx: int, heating: float, source: str = "onecta_cache",
+                 dhw: float = 0.0) -> dict:
+    return {"date": day.isoformat(), "bucket_idx": idx, "kwh_heating": heating,
+            "kwh_dhw": dhw, "source": source}
+
+
+def _patch_curve_kw(monkeypatch, kw: float):
+    """Fix the weather-curve model at a constant kW draw."""
+    import src.physics as physics
+    monkeypatch.setattr(physics, "get_daikin_heating_kw",
+                        lambda t, lwt_offset_delta=0.0: kw)
+
+
+def test_phantom_summer_bucket_zeroed(monkeypatch):
+    _patch_curve_kw(monkeypatch, 0.0)  # mild night: curve says compressor off
+    day = date(2026, 7, 22)
+    rows = [_phantom_row(day, 0, 1.0, dhw=0.4)]
+    outdoor = _outdoor_flat(day - timedelta(days=1), 3, temp=19.0)
+    cleaned, n = tl.sanitize_phantom_heating(rows, outdoor, TZ)
+    assert n == 1
+    assert cleaned[0]["kwh_heating"] == 0.0
+    assert cleaned[0]["kwh_dhw"] == 0.4  # DHW untouched
+    assert rows[0]["kwh_heating"] == 1.0  # input not mutated
+
+
+def test_winter_real_integer_bucket_kept(monkeypatch):
+    _patch_curve_kw(monkeypatch, 0.8)  # cold night: 1.6 kWh plausible per bucket
+    day = date(2026, 1, 10)
+    rows = [_phantom_row(day, 2, 1.0)]
+    cleaned, n = tl.sanitize_phantom_heating(
+        rows, _outdoor_flat(day - timedelta(days=1), 3, temp=2.0), TZ)
+    assert n == 0
+    assert cleaned[0]["kwh_heating"] == 1.0
+
+
+def test_non_candidates_untouched(monkeypatch):
+    _patch_curve_kw(monkeypatch, 0.0)
+    day = date(2026, 7, 22)
+    rows = [
+        _phantom_row(day, 1, 1.0, source="telemetry_integral"),  # not onecta
+        _phantom_row(day, 2, 0.7),  # non-integer → real decimal, not a quantum
+        _phantom_row(day, 3, 0.0),  # zero heating
+        _phantom_row(day, 4, 2.0),  # multi-quantum: NEVER a candidate (F1) —
+        _phantom_row(day, 5, 3.0),  # real cold-snap energy must survive even
+                                    # when the capped curve model disagrees
+    ]
+    cleaned, n = tl.sanitize_phantom_heating(
+        rows, _outdoor_flat(day - timedelta(days=1), 3, temp=19.0), TZ)
+    assert n == 0
+    assert [r["kwh_heating"] for r in cleaned] == [1.0, 0.7, 0.0, 2.0, 3.0]
+
+
+def test_real_curve_threshold_geometry(monkeypatch, tmp_db):
+    """F3 from adversarial review — pin the safety property against the REAL
+    prod weather curve (HIGH 18→15, LOW 0→40, k pinned at the physics
+    fallback 0.0333): a 1.0 claim is zeroed only where the curve says the
+    compressor is essentially off (≳14.5 °C outdoor); shoulder and winter
+    claims — any magnitude — keep blocking."""
+    import src.physics as physics
+    monkeypatch.setattr(physics, "get_kw_per_degc_lwt", lambda: 0.0333)
+    monkeypatch.setattr(config, "DAIKIN_WEATHER_CURVE_HIGH_C", 18.0, raising=False)
+    monkeypatch.setattr(config, "DAIKIN_WEATHER_CURVE_HIGH_LWT_C", 15.0, raising=False)
+    monkeypatch.setattr(config, "DAIKIN_WEATHER_CURVE_LOW_C", 0.0, raising=False)
+    monkeypatch.setattr(config, "DAIKIN_WEATHER_CURVE_LOW_LWT_C", 40.0, raising=False)
+    monkeypatch.setattr(config, "DAIKIN_WEATHER_CURVE_OFFSET_C", 0.0, raising=False)
+    day = date(2026, 7, 22)
+
+    def zeroed_at(temp: float, claim: float) -> bool:
+        rows = [_phantom_row(day, 0, claim)]
+        _, n = tl.sanitize_phantom_heating(
+            rows, _outdoor_flat(day - timedelta(days=1), 3, temp=temp), TZ)
+        return n == 1
+
+    # winter / shoulder: real heating keeps blocking, whatever the claim
+    for temp in (0.0, 2.0, 5.0, 12.0):
+        for claim in (1.0, 2.0, 3.0):
+            assert not zeroed_at(temp, claim), (temp, claim)
+    # mild night: only the single-quantum phantom is zeroed
+    assert zeroed_at(19.0, 1.0)
+    assert zeroed_at(15.5, 1.0)  # curve ~0.09 kWh/bucket — compressor off
+    assert not zeroed_at(19.0, 2.0)
+    assert not zeroed_at(19.0, 3.0)
+
+
+def test_no_outdoor_coverage_keeps_row(monkeypatch):
+    _patch_curve_kw(monkeypatch, 0.0)
+    day = date(2026, 7, 22)
+    rows = [_phantom_row(day, 0, 1.0)]
+    cleaned, n = tl.sanitize_phantom_heating(rows, [], TZ)
+    assert n == 0
+    assert cleaned[0]["kwh_heating"] == 1.0
+
+
+def test_phantom_guard_restores_episode_end_to_end(monkeypatch):
+    """The prod starvation shape: a clean decay night + one phantom 1.0 bucket
+    mid-episode. Raw rows kill the episode; sanitized rows restore it."""
+    _patch_curve_kw(monkeypatch, 0.0)
+    night = date(2026, 7, 21)
+    readings = _decay_night(night, tau_h=50.0, t0=28.0, t_out=18.0)
+    outdoor = _outdoor_flat(night - timedelta(days=1), 3, temp=18.0)
+    phantom = [_phantom_row(night + timedelta(days=1), 0, 1.0)]  # 00-02h mid-decay
+    assert _select(readings, phantom, outdoor=outdoor) == []
+    cleaned, n = tl.sanitize_phantom_heating(phantom, outdoor, TZ)
+    assert n == 1
+    eps = _select(readings, cleaned, outdoor=outdoor)
+    assert len(eps) == 1
+    tau, r2 = tl.fit_tau_for_episode(eps[0])
+    assert tau == pytest.approx(50.0, rel=0.05)

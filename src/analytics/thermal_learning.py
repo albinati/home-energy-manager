@@ -133,6 +133,87 @@ def _bucket_window_utc(day_local: date, bucket_idx: int, tz: ZoneInfo) -> tuple[
     return start.astimezone(UTC), (start + timedelta(hours=2)).astimezone(UTC)
 
 
+def sanitize_phantom_heating(
+    consumption_rows: list[dict[str, Any]],
+    outdoor_series: list[tuple[datetime, float]],
+    tz: ZoneInfo,
+    *,
+    max_plausible_kwh: float = 0.15,
+) -> tuple[list[dict[str, Any]], int]:
+    """Drop #749-family phantom heating claims from consumption rows (#760).
+
+    Onecta's ``kwh_heating`` counter is whole-kWh quantised and misattributes
+    (issue #749): summer prod carries ``source=onecta_cache, kwh_heating=1.0``
+    buckets at arbitrary night hours, and every one of them blocked a decay
+    episode — 21 days of clean two-sensor coverage yielded ZERO usable τ
+    episodes. The rows survive telemetry reconciliation by design (a ≥0.5 kWh
+    disagreement keeps Onecta), and ``mode`` telemetry can't corroborate (the
+    unit reports ``heating`` year-round).
+
+    A bucket is zeroed only when BOTH hold:
+
+    * the claim is EXACTLY 1.0 kWh — the single-quantum #749 signature.
+      Claims ≥ 2 are never touched: adversarial review showed the weather
+      curve model is hard-capped (LWT clamp → ~2.1 kWh/bucket) and, thanks to
+      the reconciliation rule that keeps Onecta on ≥0.5 kWh disagreement, the
+      surviving integer rows are exactly the ones where the curve model
+      already lost against the meter — it must not arbitrate real cold-snap
+      energy (defrost, recovery ramps) out of existence;
+    * the site's own weather curve says the compressor was essentially OFF:
+      ``get_daikin_heating_kw(bucket outdoor mean) × 2 h < max_plausible_kwh``
+      (default 0.15 — under the prod curve that means outdoor ≳ 14.5 °C).
+      In shoulder/winter conditions the curve yields ≥ 0.35 kWh/bucket, so a
+      1.0 claim there keeps blocking — the honest conservative outcome.
+
+    Deliberately narrow: only ``onecta_cache`` rows are candidates
+    (``telemetry_integral`` rows are decimals by construction); ``kwh_dhw``
+    is left untouched (DHW runs in any season and its 0.8 kWh contamination
+    floor already absorbs quantisation); HEM-commanded LWT boosts live in
+    offset windows, which block unconditionally — so the plausibility check
+    uses the BASE curve (``lwt_offset_delta=0``). No outdoor coverage for the
+    bucket → keep the row (conservative). NB a cooling-capable site would see
+    real cooling folded into ``kwh_heating`` (client.py quirk) and zeroed —
+    this installation is heating-only. Returns ``(rows, n_zeroed)`` without
+    mutating input.
+    """
+    from ..physics import get_daikin_heating_kw
+
+    out: list[dict[str, Any]] = []
+    n_zeroed = 0
+    outdoor_series = sorted(outdoor_series)
+    for r in consumption_rows:
+        heating = float(r.get("kwh_heating") or 0.0)
+        if str(r.get("source")) != "onecta_cache" or heating != 1.0:
+            out.append(r)
+            continue
+        try:
+            d = date.fromisoformat(str(r["date"]))
+            b = int(r["bucket_idx"])
+        except (ValueError, TypeError, KeyError):
+            out.append(r)
+            continue
+        ws, we = _bucket_window_utc(d, b, tz)
+        t_out = _mean_outdoor_in_span(outdoor_series, ws, we)
+        if t_out is None:
+            out.append(r)  # no outdoor data — can't judge, keep blocking
+            continue
+        plausible_kwh = float(get_daikin_heating_kw(float(t_out))) * 2.0
+        if plausible_kwh >= max_plausible_kwh:
+            out.append(r)
+            continue
+        cleaned = dict(r)
+        cleaned["kwh_heating"] = 0.0
+        out.append(cleaned)
+        n_zeroed += 1
+    if n_zeroed:
+        logger.info(
+            "thermal_learning: zeroed %d phantom onecta_cache kwh_heating "
+            "bucket(s) implausible under the weather curve (#760)",
+            n_zeroed,
+        )
+    return out, n_zeroed
+
+
 def _blocked_intervals(
     consumption_rows: list[dict[str, Any]],
     offset_windows: list[tuple[str, str]],
@@ -518,6 +599,15 @@ def refresh_building_thermal_calibration() -> dict[str, Any]:
     except Exception:
         offsets = []
 
+    n_phantom = 0
+    if getattr(config, "THERMAL_PHANTOM_HEATING_GUARD_ENABLED", True):
+        consumption, n_phantom = sanitize_phantom_heating(
+            consumption, outdoor, tz,
+            max_plausible_kwh=float(
+                getattr(config, "THERMAL_PHANTOM_MAX_PLAUSIBLE_KWH", 0.15)
+            ),
+        )
+
     tau_cutoff = (now - timedelta(days=tau_window)).strftime("%Y-%m-%dT%H:%M:%SZ")
     tau_readings = [r for r in readings if str(r.get("captured_at", "")) >= tau_cutoff]
     episodes = select_decay_episodes(
@@ -538,6 +628,7 @@ def refresh_building_thermal_calibration() -> dict[str, Any]:
         min_tau_hours=float(getattr(config, "THERMAL_TAU_MIN_HOURS", 5.0)),
         max_tau_hours=float(getattr(config, "THERMAL_TAU_MAX_HOURS", 100.0)),
     )
+    tau_fit["phantom_heating_zeroed"] = n_phantom
 
     ua_fit = _ua_fit_from_db(readings, outdoor, now, ua_window)
 
