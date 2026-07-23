@@ -1902,6 +1902,18 @@ class Config:
     # boosts leak meaningful heat into the envelope).
     THERMAL_HEATING_CONTAM_KWH: float = float(os.getenv("THERMAL_HEATING_CONTAM_KWH", "0.1"))
     THERMAL_DHW_CONTAM_KWH: float = float(os.getenv("THERMAL_DHW_CONTAM_KWH", "0.8"))
+    # #760 — whole-kWh-quantised onecta_cache kwh_heating buckets (the #749
+    # phantom family) only contaminate an episode when the site's own weather
+    # curve could plausibly deliver a comparable energy at the bucket's
+    # outdoor temperature. Fraction: claim counts as real when
+    # curve_kwh >= fraction × claim (0.5 = the counter's own rounding
+    # threshold — a real 0.5 kWh may display as 1).
+    THERMAL_PHANTOM_HEATING_GUARD_ENABLED: bool = os.getenv(
+        "THERMAL_PHANTOM_HEATING_GUARD_ENABLED", "true"
+    ).lower() in ("true", "1", "yes")
+    THERMAL_PHANTOM_PLAUSIBILITY_FRACTION: float = float(
+        os.getenv("THERMAL_PHANTOM_PLAUSIBILITY_FRACTION", "0.5")
+    )
     # Bounded by the meteo retention (METEO_FORECAST_HISTORY_RETENTION_DAYS,
     # ~30): a larger window would silently fit on whatever subset has outdoor
     # coverage while recording the configured window as provenance. 30 winter
