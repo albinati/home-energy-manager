@@ -9,31 +9,24 @@ from pathlib import Path
 from src.config import config
 
 
-def _seed(conn, *, hour: int, days_ago: float, forecast: float, actual: float):
+def _seed(conn, *, hour: int, days_ago: float, forecast: float, actual: float,
+          ceiling: float | None = 99.0):
+    """Seed a slot. ``ceiling`` is the rail STAMPED on the row (#762): None
+    reproduces a pre-migration row, which must be excluded from training."""
     ts = (datetime.now(UTC) - timedelta(days=days_ago)).replace(
         hour=hour, minute=0, second=0, microsecond=0
     )
     conn.execute(
         """INSERT OR REPLACE INTO pv_error_log
-           (slot_time_utc, run_id, forecast_kwh, actual_kwh, error_kwh, built_at_utc)
-           VALUES (?, 1, ?, ?, ?, ?)""",
+           (slot_time_utc, run_id, forecast_kwh, actual_kwh, error_kwh, built_at_utc,
+            ceiling_kwh)
+           VALUES (?, 1, ?, ?, ?, ?, ?)""",
         (ts.strftime("%Y-%m-%dT%H:%M:%SZ"), forecast, actual, actual - forecast,
-         datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")),
-    )
-
-
-def _no_ceiling(monkeypatch):
-    """Pin the ceiling above every seeded value so the censored-slot filter is
-    a no-op — these tests exercise the bias maths, not the rail."""
-    from src import weather
-
-    monkeypatch.setattr(
-        weather, "_build_pv_hourly_ceiling", lambda *a, **k: {h: 99.0 for h in range(24)}
+         datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"), ceiling),
     )
 
 
 def _cfg(monkeypatch, **kw):
-    _no_ceiling(monkeypatch)
     defaults = dict(WINDOW_DAYS=14, HALFLIFE_DAYS=5.0, DAMPING=0.5, MIN=0.4, MAX=2.5, MIN_KWH=0.05)
     defaults.update(kw)
     monkeypatch.setattr(config, "PV_RECENT_BIAS_WINDOW_DAYS", defaults["WINDOW_DAYS"], raising=False)
@@ -164,18 +157,14 @@ def test_accumulates_toward_full_correction(monkeypatch):
 
 
 def test_censored_slots_excluded_from_training(monkeypatch):
-    """A forecast sitting at its ceiling is a censored observation: the true
-    forecast was higher, so actual/forecast over-states the correction needed.
-    Training on it is what made this loop ratchet (2026-07-21..23 incident)."""
+    """A forecast sitting at its stamped ceiling is a censored observation: the
+    true forecast was higher, so actual/forecast over-states the correction
+    needed. Training on it is what made this loop ratchet (the 2026-07-21..23
+    incident)."""
     import src.db as db
     from src import weather
 
     _cfg(monkeypatch)
-    # Ceiling at 1.0 for hour 12 — the seeded clipped slots sit exactly there.
-    monkeypatch.setattr(
-        weather, "_build_pv_hourly_ceiling",
-        lambda *a, **k: {h: (1.0 if h == 12 else 99.0) for h in range(24)},
-    )
     with tempfile.TemporaryDirectory() as td:
         monkeypatch.setattr(config, "DB_PATH", str(Path(td) / "t.db"), raising=False)
         db.init_db()
@@ -183,10 +172,10 @@ def test_censored_slots_excluded_from_training(monkeypatch):
         try:
             # Clipped slots that LOOK 2x under-forecast — must be ignored.
             for d in range(1, 5):
-                _seed(conn, hour=12, days_ago=d, forecast=1.0, actual=2.0)
+                _seed(conn, hour=12, days_ago=d, forecast=1.0, actual=2.0, ceiling=1.0)
             # An uncensored hour is still learned normally.
             for d in range(1, 5):
-                _seed(conn, hour=10, days_ago=d, forecast=1.0, actual=1.5)
+                _seed(conn, hour=10, days_ago=d, forecast=1.0, actual=1.5, ceiling=99.0)
             conn.commit()
         finally:
             conn.close()
@@ -195,6 +184,68 @@ def test_censored_slots_excluded_from_training(monkeypatch):
     assert 12 not in factors, "clipped slots must not train the corrector"
     assert round(raw[10], 2) == 1.5, "uncensored hours still learn"
     assert diag["censored_slots_excluded"] == 4
+
+
+def test_unstamped_legacy_rows_excluded(monkeypatch):
+    """Pre-#762 rows carry no ceiling, so we cannot tell whether they were
+    clipped — and they date from the era when the rail bound on 41 % of midday
+    slots. They must be dropped, not trusted.
+
+    Without this the poisoned backlog keeps training the corrector for a full
+    PV_RECENT_BIAS_WINDOW_DAYS after deploy, while the diagnostic reports zero
+    exclusions and looks healthy.
+    """
+    import src.db as db
+    from src import weather
+
+    _cfg(monkeypatch)
+    with tempfile.TemporaryDirectory() as td:
+        monkeypatch.setattr(config, "DB_PATH", str(Path(td) / "t.db"), raising=False)
+        db.init_db()
+        conn = db.get_connection()
+        try:
+            for d in range(1, 5):
+                _seed(conn, hour=12, days_ago=d, forecast=1.0, actual=2.0, ceiling=None)
+            conn.commit()
+        finally:
+            conn.close()
+        factors, _raw, _s, diag = weather.compute_pv_recent_bias_by_hour()
+
+    assert 12 not in factors
+    assert diag["unstamped_slots_excluded"] == 4
+
+
+def test_refresh_clears_stale_factors_when_no_usable_samples(monkeypatch):
+    """No usable evidence must mean NO correction, not "keep yesterday's".
+
+    Returning early left the last-persisted factors in force indefinitely — an
+    absorbing state where a bad correction outlives the data that produced it.
+    """
+    import src.db as db
+    from src import weather
+
+    _cfg(monkeypatch)
+    with tempfile.TemporaryDirectory() as td:
+        monkeypatch.setattr(config, "DB_PATH", str(Path(td) / "t.db"), raising=False)
+        db.init_db()
+        # An inflated factor from the incident era is already persisted...
+        db.upsert_pv_recent_bias({12: 2.5}, {12: 1.1}, {12: 9},
+                                 datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        assert db.get_pv_recent_bias().get(12) == 2.5
+        # ...and the only available rows are untrustworthy legacy ones.
+        conn = db.get_connection()
+        try:
+            for d in range(1, 5):
+                _seed(conn, hour=12, days_ago=d, forecast=1.0, actual=2.0, ceiling=None)
+            conn.commit()
+        finally:
+            conn.close()
+
+        n = weather.refresh_pv_recent_bias()
+        remaining = db.get_pv_recent_bias()
+
+    assert n == 0
+    assert remaining == {}, "stale inflated factors must be cleared, not preserved"
 
 
 def test_apply_path_scales_pv_when_enabled(monkeypatch):

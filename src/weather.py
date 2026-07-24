@@ -119,62 +119,56 @@ def _parse_slot_utc(raw: Any) -> datetime | None:
     return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
 
 
-def _build_pv_hourly_ceiling(limit_days: int | None = None) -> dict[int, float]:
-    """Return the per-hour-of-day (0-23 UTC) PV ceiling in kWh/slot.
+def pv_slot_ceiling_kwh() -> float:
+    """The per-slot PV ceiling in kWh — a flat PHYSICAL bound.
 
-    This is a SAFETY RAIL, not a calibration: it exists to stop an absurd
-    forecast reaching the LP, so its only correct failure mode is being too
-    LOOSE. A ceiling that binds on ordinary days silently truncates the
-    committed forecast and — worse — censors the error signal that
-    :func:`compute_pv_recent_bias_by_hour` trains on.
+    This is a SAFETY RAIL, not a calibration: it exists only to stop an absurd
+    forecast reaching the LP. Its only correct failure mode is being too LOOSE,
+    because a ceiling that binds on real generation silently truncates the
+    committed forecast AND censors the error signal that
+    :func:`compute_pv_recent_bias_by_hour` trains on — see the ratchet analysis
+    there.
 
-    Derived from the MEASURED half-hourly history (``pv_error_log.actual_kwh``):
-    per hour-of-day, the p99 of realised slots × ``PV_CEILING_MARGIN``, capped
-    at the physical bound ``capacity × efficiency × 0.5``. Hours with fewer
-    than ``PV_CEILING_MIN_SAMPLES`` observations fall back to that physical
-    bound (loose, never harmful).
+    ``PV_CAPACITY_KWP × 0.5 h × PV_CEILING_MARGIN``. Array nameplate, NOT
+    derated: ``PV_SYSTEM_EFFICIENCY`` is an expected-yield derate, not a limit,
+    and cold panels under >1000 W/m² beat it. The repo's own reference data
+    (docs/PV_TRUST_GUARDRAIL.md) records a 1.93 kWh slot against a 1.9125
+    derated bound, i.e. the derated figure already binds on the best slot of
+    the year — and prod's largest reported slot is 2.42 kWh, above bare
+    nameplate too. Hence the margin.
 
-    Superseded (2026-07-24) the previous estimator, which distributed Fox
-    DAILY totals across hours with a fixed sinusoid. That shape is far flatter
-    than a real PV curve, so it under-stated the peak hours badly: in prod it
-    produced 1.32-1.43 kWh/slot for 11-13 UTC against a MEDIAN realised
-    1.35-1.45, i.e. the ceiling bound on more than half of ordinary midday
-    slots (41 % of all 09-16 UTC slots over 28 days). See the ratchet analysis
-    in :func:`compute_pv_recent_bias_by_hour`.
+    **Why flat.** Two earlier shaped estimators both failed the same way — by
+    being TIGHT:
+
+    * until 2026-07-24, spreading Fox DAILY totals over a fixed sinusoid. That
+      shape is far flatter than a real PV curve, so it under-stated peak hours:
+      1.32-1.43 kWh/slot for 11-13 UTC against a MEDIAN realised 1.35-1.45. It
+      bound on 41 % of 09-16 UTC slots and caused the 2026-07-21..23 incident.
+    * a per-hour percentile of realised history, rejected in review before it
+      shipped: ``pv_error_log`` is pruned at ``METEO_FORECAST_HISTORY_RETENTION_DAYS``
+      (30), so a trailing window is really "max of the last 30 days" — which in
+      a UK spring lags the clear-sky ramp and re-creates the same clipping
+      seasonally, and collapses entirely after a run of overcast days.
+
+    A rail derived from realised output cannot bound a forecast of output that
+    has not happened yet. Physics can.
     """
-    default_ceil = float(config.PV_CAPACITY_KWP) * float(config.PV_SYSTEM_EFFICIENCY) * 0.5
-    window = int(limit_days if limit_days is not None
-                 else getattr(config, "PV_CEILING_WINDOW_DAYS", 365))
-    min_samples = int(getattr(config, "PV_CEILING_MIN_SAMPLES", 8))
-    margin = float(getattr(config, "PV_CEILING_MARGIN", 1.10))
-    ceiling = {h: default_ceil for h in range(24)}
-    try:
-        from . import db as _db
+    return (
+        float(config.PV_CAPACITY_KWP)
+        * 0.5
+        * float(getattr(config, "PV_CEILING_MARGIN", 1.0))
+    )
 
-        now = datetime.now(UTC)
-        rows = _db.get_pv_error_log_range(
-            (now - timedelta(days=window)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        )
-        by_hour: dict[int, list[float]] = {}
-        for r in rows:
-            a = r.get("actual_kwh")
-            if a is None:
-                continue
-            ts = _parse_slot_utc(r.get("slot_time_utc"))
-            if ts is None:
-                continue
-            by_hour.setdefault(ts.hour, []).append(float(a))
 
-        for h, vals in by_hour.items():
-            if len(vals) < min_samples:
-                continue  # keep the physical bound — too little evidence to shape
-            vals.sort()
-            p99 = vals[min(len(vals) - 1, int(len(vals) * 0.99))]
-            ceiling[h] = min(p99 * margin, default_ceil)
-        return ceiling
-    except Exception:
-        return {h: default_ceil for h in range(24)}
+def _build_pv_hourly_ceiling(limit_days: int | None = None) -> dict[int, float]:
+    """Per-hour-of-day (0-23 UTC) view of :func:`pv_slot_ceiling_kwh`.
+
+    Kept as a dict for the existing call sites; every hour holds the same flat
+    physical bound. ``limit_days`` is accepted and ignored (the rail no longer
+    depends on history).
+    """
+    ceil = pv_slot_ceiling_kwh()
+    return {h: ceil for h in range(24)}
 
 
 def compute_pv_calibration_factor(
@@ -1706,10 +1700,12 @@ def compute_pv_recent_bias_by_hour() -> tuple[dict[int, float], dict[int, float]
         start.strftime("%Y-%m-%dT%H:%M:%SZ"), now.strftime("%Y-%m-%dT%H:%M:%SZ")
     )
     # Censored-slot filter: a forecast clipped at its ceiling carries no usable
-    # error signal (see docstring). Compare against the SAME ceiling the apply
-    # path uses so the two stay consistent by construction.
-    ceiling = _build_pv_hourly_ceiling()
+    # error signal (see docstring). The rail in force is STAMPED on the row
+    # (#762) rather than re-derived — a reconstruction would compare today's
+    # rail against a forecast committed under a different one, and would have
+    # silently passed the entire poisoned backlog through as clean.
     censored = 0
+    unstamped = 0
 
     acc: dict[int, list[float]] = {}  # hour -> [sum_w_ratio, sum_w, n]
     for r in rows:
@@ -1720,7 +1716,14 @@ def compute_pv_recent_bias_by_hour() -> tuple[dict[int, float], dict[int, float]
         ts = _parse_slot_utc(r.get("slot_time_utc"))
         if ts is None:
             continue
-        if f >= ceiling.get(ts.hour, float("inf")) - 1e-6:
+        row_ceiling = r.get("ceiling_kwh")
+        if row_ceiling is None:
+            # Pre-#762 row: we cannot tell whether it was clipped, and it dates
+            # from the era when the rail bound on 41 % of midday slots. Drop it
+            # rather than let an unknown-censored sample train the loop.
+            unstamped += 1
+            continue
+        if f >= float(row_ceiling) - 1e-6:
             censored += 1
             continue
         age_days = max(0.0, (now - ts).total_seconds() / 86400.0)
@@ -1752,7 +1755,8 @@ def compute_pv_recent_bias_by_hour() -> tuple[dict[int, float], dict[int, float]
         samples[h] = int(n)
     diag = {"window_days": window, "half_life_days": half_life, "damping": damping,
             "min_kwh": min_kwh, "clamp": [lo, hi], "n_hours": len(factors),
-            "censored_slots_excluded": censored}
+            "censored_slots_excluded": censored,
+            "unstamped_slots_excluded": unstamped}
     return factors, raw, samples, diag
 
 
@@ -1761,7 +1765,19 @@ def refresh_pv_recent_bias() -> int:
     from . import db as _db
     factors, raw, samples, diag = compute_pv_recent_bias_by_hour()
     if not factors:
-        logger.info("pv_recent_bias: nothing to compute (%s)", diag)
+        # CLEAR rather than return (#762). Returning left whatever was last
+        # persisted in force forever — an absorbing state where a bad factor
+        # outlives the data that produced it. No usable evidence must mean
+        # "no correction" (empty table → apply path falls back to 1.0), not
+        # "keep yesterday's".
+        cleared = _db.clear_pv_recent_bias()
+        if cleared:
+            logger.warning(
+                "pv_recent_bias: no usable samples (%s) — cleared %d stale factor(s); "
+                "PV forecast now runs on the calibration tables alone", diag, cleared,
+            )
+        else:
+            logger.info("pv_recent_bias: nothing to compute (%s)", diag)
         return 0
     ca = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     n = _db.upsert_pv_recent_bias(factors, raw, samples, ca)
@@ -2454,7 +2470,7 @@ def forecast_to_lp_inputs(
       - ``None``: defaults to ``PV_FORECAST_SCALE_FACTOR`` from config.
 
     Half-hour energy = kW × 0.5 h. When forecast is empty, PV and COP use safe defaults.
-    A hard ceiling of ``PV_CAPACITY_KWP × PV_SYSTEM_EFFICIENCY × 0.5`` kWh/slot is enforced.
+    A hard ceiling of :func:`pv_slot_ceiling_kwh` is enforced per slot.
     """
     n = len(slot_starts_utc)
     t_out: list[float] = []
@@ -2510,8 +2526,7 @@ def forecast_to_lp_inputs(
     if isinstance(pv_scale, dict) and pv_scale:
         sorted_vals = sorted(pv_scale.values())
         pv_scale_fallback = sorted_vals[len(sorted_vals) // 2]
-    # Hard ceiling: per-hour-of-day maximum actually observed from Fox history
-    # (falls back to capacity × η × 0.5 kWh/slot if no history available)
+    # Hard ceiling: flat physical rail (array nameplate × 0.5h × margin).
     hourly_ceil = _build_pv_hourly_ceiling()
     # The ceiling is a safety rail; if it binds on ordinary slots it is
     # truncating the committed forecast AND censoring the recent-bias training
@@ -2601,7 +2616,9 @@ def forecast_to_lp_inputs(
         # Apply calibration scale and enforce per-hour physical ceiling
         slot_ceil = hourly_ceil.get(st.hour, cap * eff * 0.5)
         pv_kwh = min(slot_ceil, max(0.0, kw_ac * 0.5))
-        if pv_kwh < max(0.0, kw_ac * 0.5) - 1e-9:
+        # Only a MATERIAL bind is worth reporting: the rail clipping a few Wh
+        # off a dawn slot is noise, and this runs on every cockpit poll.
+        if max(0.0, kw_ac * 0.5) - pv_kwh > 0.05:
             _ceiling_binds += 1
         base_cop = max(1.0, cop_at_temperature(curve, temp_c))
         cop_s = base_cop
@@ -2643,11 +2660,12 @@ def forecast_to_lp_inputs(
 
     if _ceiling_binds:
         logger.warning(
-            "PV ceiling bound on %d/%d slots — the committed forecast is being "
-            "truncated and those slots are excluded from recent-bias training. "
-            "Expect a too-tight ceiling (check _build_pv_hourly_ceiling) or an "
-            "over-inflated calibration stack.",
-            _ceiling_binds, n,
+            "PV ceiling (%.3f kWh/slot) materially bound on %d/%d slots — the "
+            "committed forecast is being truncated. The rail is a flat physical "
+            "bound, so this means the calibration stack is producing a forecast "
+            "above array nameplate: check pv_recent_bias and the calibration "
+            "tables, not the rail.",
+            pv_slot_ceiling_kwh(), _ceiling_binds, n,
         )
 
     return WeatherLpSeries(

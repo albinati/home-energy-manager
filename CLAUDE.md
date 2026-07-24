@@ -361,6 +361,42 @@ PV_FORECAST_SLOT_CENTRE_SAMPLING=true           # a 30-min slot's energy is `kw 
                                                  # untouched — that's a separate Quartz/Open-Meteo calibration
                                                  # story, revisit via pv_time_lag.py on post-#564 realised data.
 
+# --- PV forecast rail + adaptive bias (#762, 2026-07-24) -----------------------
+PV_CEILING_MARGIN=1.15                          # rail = PV_CAPACITY_KWP × 0.5h × margin (≈2.59 kWh/slot).
+                                                 # A SAFETY RAIL, not a calibration: its ONLY correct failure
+                                                 # mode is being too LOOSE. A rail that binds on real
+                                                 # generation truncates the committed forecast AND censors the
+                                                 # error signal the bias corrector trains on.
+                                                 # NOT derated by PV_SYSTEM_EFFICIENCY (that's an expected-yield
+                                                 # derate, not a limit — 1.9125 already sat below the 1.93 kWh
+                                                 # best slot on record) and NOT derived from realised history
+                                                 # (pv_error_log is pruned at METEO_FORECAST_HISTORY_RETENTION_DAYS
+                                                 # =30, so any trailing window is really "max of last 30 days",
+                                                 # which lags the spring clear-sky ramp and collapses after a
+                                                 # run of overcast days).
+PV_RECENT_BIAS_MIN=0.6                          # clamp TIGHTENED from [0.4, 2.5]. This corrector is a NUDGE on
+PV_RECENT_BIAS_MAX=1.4                          # top of the trained calibration tables, never the dominant term.
+# THE 2026-07-21..23 INCIDENT. The old rail spread Fox DAILY totals over a fixed
+# sinusoid — far flatter than a real PV curve — producing 1.32-1.43 kWh/slot at
+# 11-13 UTC against a MEDIAN realised 1.35-1.45. It bound on 41 % of 09-16 UTC
+# slots. Since pv_error_log stores the committed forecast AFTER clipping, every
+# clipped slot read as "under-forecast" and pushed the bias factor UP, while the
+# matching down-correction was masked by the clip — a RATCHET. Midday factors
+# reached 1.72-2.50 against a measured residual of 0.87-0.90. The inflation only
+# bites on CLOUDY days (when the un-inflated forecast would sit below the rail),
+# so PV was over-forecast 24-27 %, the battery ended the day at 33-53 % instead
+# of 93 %+, and daily net cost hit £1.50/£2.06/£2.35 vs a £0.20-1.00 baseline —
+# losing to the old BG fixed tariff for the first time. Raw Quartz was FINE
+# (23 Jul: predicted 12.89 kWh, realised 13.34); the correction stack destroyed
+# a good signal.
+# Two structural guards now: (1) pv_error_log stamps `ceiling_kwh` per slot, so
+# censored rows are a RECORDED FACT — never re-derived from today's rail, which
+# would silently pass the whole poisoned backlog as clean; NULL (pre-migration)
+# rows are excluded as unknown-censored. (2) refresh_pv_recent_bias CLEARS the
+# table when no usable samples remain, so a bad factor can't outlive its data.
+# Telemetry: `censored_slots_excluded` / `unstamped_slots_excluded` in the
+# refresh diag; a WARNING fires if the rail ever materially binds.
+
 # --- Scenario LP for peak-export robustness (see docs/DISPATCH_DECISIONS.md) ---
 LP_SCENARIO_OPTIMISTIC_TEMP_DELTA_C=1.0          # +°C applied to outdoor forecast
 LP_SCENARIO_OPTIMISTIC_LOAD_FACTOR=0.90          # multiplier on base-load profile

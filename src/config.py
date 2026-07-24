@@ -863,14 +863,18 @@ class Config:
     # A slot needs at least this forecast+actual kWh to contribute (drop noise).
     PV_RECENT_BIAS_MIN_KWH: float = float(os.getenv("PV_RECENT_BIAS_MIN_KWH", "0.05"))
     # --- PV forecast ceiling (safety rail, not a calibration) ----------------
-    # Per hour-of-day cap on the committed forecast, derived from the p99 of
-    # MEASURED half-hourly generation × margin, capped at the physical bound
-    # (capacity × efficiency × 0.5). Its only correct failure mode is being too
-    # loose: a ceiling that binds on ordinary days truncates the forecast and
-    # censors the recent-bias training signal. See _build_pv_hourly_ceiling.
-    PV_CEILING_WINDOW_DAYS: int = int(os.getenv("PV_CEILING_WINDOW_DAYS", "365"))
-    PV_CEILING_MIN_SAMPLES: int = int(os.getenv("PV_CEILING_MIN_SAMPLES", "8"))
-    PV_CEILING_MARGIN: float = float(os.getenv("PV_CEILING_MARGIN", "1.10"))
+    # Flat physical bound on a slot's forecast: PV_CAPACITY_KWP × 0.5h × margin.
+    # Its ONLY correct failure mode is being too loose — a ceiling that binds on
+    # real generation truncates the committed forecast and censors the
+    # recent-bias training signal (the 2026-07-21..23 incident). Deliberately
+    # NOT derated by PV_SYSTEM_EFFICIENCY and NOT derived from realised history;
+    # see pv_slot_ceiling_kwh for why both of those were rejected.
+    # Margin 1.15 → 2.59 kWh/slot on a 4.5 kWp array. Bare nameplate (2.25)
+    # would sit BELOW the largest slot the meter has ever reported (2.42 kWh at
+    # 11 UTC — almost certainly a roll-up artifact, but a rail must clear even
+    # those). Still tight enough to catch real absurdity: the ratchet that
+    # caused #762 would have produced ~3.5 kWh/slot at midday.
+    PV_CEILING_MARGIN: float = float(os.getenv("PV_CEILING_MARGIN", "1.15"))
     # Slot-CENTRE forecast sampling. A 30-min slot's energy is `kw × 0.5h`; the
     # honest representative power is the value at the slot CENTRE (start+15min),
     # not the start instant. Sampling at the start systematically attributed each

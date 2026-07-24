@@ -360,6 +360,16 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     if ssl_cols and "perturbation_pv_factor" not in ssl_cols:
         conn.execute("ALTER TABLE scenario_solve_log ADD COLUMN perturbation_pv_factor REAL")
 
+    # 2026-07-24 (#762) — record the PV ceiling in force when the slot was
+    # committed, so `compute_pv_recent_bias_by_hour` can tell a censored
+    # (clipped) forecast from a genuine one instead of reconstructing it from
+    # today's rail. NULL on pre-migration rows means "unknown", and those rows
+    # are excluded from bias training: they span the era when the ceiling bound
+    # on 41 % of midday slots, so their error signal cannot be trusted.
+    pel_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(pv_error_log)")}
+    if pel_cols and "ceiling_kwh" not in pel_cols:
+        conn.execute("ALTER TABLE pv_error_log ADD COLUMN ceiling_kwh REAL")
+
     # Phase 4.3: user-override marker on action_schedule rows.
     cur = conn.execute("PRAGMA table_info(action_schedule)")
     as_cols = {str(r[1]) for r in cur.fetchall()}
@@ -1205,7 +1215,8 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             forecast_kwh    REAL,
             actual_kwh      REAL,
             error_kwh       REAL,
-            built_at_utc    TEXT NOT NULL
+            built_at_utc    TEXT NOT NULL,
+            ceiling_kwh     REAL
         )"""
     )
     conn.execute(
@@ -5983,6 +5994,16 @@ def rebuild_pv_error_log_for_date(day: date) -> int:
     f_by_z = {_z(k): v for k, v in forecast.items()}
     a_by_z = {_z(k): v for k, v in actual.items()}
     built_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Stamp the rail in force so censoring is a recorded fact, not something
+    # the bias learner has to re-derive from a ceiling that may since have
+    # moved (#762). The rail is a flat physical bound, so stamping it at
+    # rebuild time (the day after the slot) is stable.
+    try:
+        from .weather import pv_slot_ceiling_kwh
+
+        ceiling = pv_slot_ceiling_kwh()
+    except Exception:  # pragma: no cover — defensive; NULL reads as "unknown"
+        ceiling = None
     written = 0
     with _lock:
         conn = get_connection()
@@ -5993,14 +6014,16 @@ def rebuild_pv_error_log_for_date(day: date) -> int:
                 err = (a - f) if (a is not None and f is not None) else None
                 conn.execute(
                     """INSERT INTO pv_error_log
-                         (slot_time_utc, run_id, forecast_kwh, actual_kwh, error_kwh, built_at_utc)
-                       VALUES (?, NULL, ?, ?, ?, ?)
+                         (slot_time_utc, run_id, forecast_kwh, actual_kwh, error_kwh,
+                          built_at_utc, ceiling_kwh)
+                       VALUES (?, NULL, ?, ?, ?, ?, ?)
                        ON CONFLICT(slot_time_utc) DO UPDATE SET
                          forecast_kwh=excluded.forecast_kwh,
                          actual_kwh=excluded.actual_kwh,
                          error_kwh=excluded.error_kwh,
-                         built_at_utc=excluded.built_at_utc""",
-                    (slot_z, f, a, err, built_at),
+                         built_at_utc=excluded.built_at_utc,
+                         ceiling_kwh=excluded.ceiling_kwh""",
+                    (slot_z, f, a, err, built_at, ceiling),
                 )
                 written += 1
             conn.commit()
@@ -6399,7 +6422,7 @@ def get_pv_error_log_range(start_utc_iso: str, end_utc_iso: str) -> list[dict[st
         conn = get_connection()
         try:
             cur = conn.execute(
-                """SELECT slot_time_utc, forecast_kwh, actual_kwh
+                """SELECT slot_time_utc, forecast_kwh, actual_kwh, ceiling_kwh
                    FROM pv_error_log
                    WHERE slot_time_utc >= ? AND slot_time_utc < ?
                    ORDER BY slot_time_utc""",
@@ -6678,6 +6701,22 @@ def upsert_pv_recent_bias(
         finally:
             conn.close()
     return n
+
+
+def clear_pv_recent_bias() -> int:
+    """Drop every persisted PV recent-bias factor; return how many were removed.
+
+    Used when a refresh finds no usable samples (#762): leaving stale factors in
+    force lets a bad correction outlive the data that produced it.
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            n = conn.execute("DELETE FROM pv_recent_bias").rowcount
+            conn.commit()
+            return int(n or 0)
+        finally:
+            conn.close()
 
 
 def get_latest_forecast_snapshot_meta() -> dict[str, Any] | None:
