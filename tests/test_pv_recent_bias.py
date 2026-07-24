@@ -22,7 +22,18 @@ def _seed(conn, *, hour: int, days_ago: float, forecast: float, actual: float):
     )
 
 
+def _no_ceiling(monkeypatch):
+    """Pin the ceiling above every seeded value so the censored-slot filter is
+    a no-op — these tests exercise the bias maths, not the rail."""
+    from src import weather
+
+    monkeypatch.setattr(
+        weather, "_build_pv_hourly_ceiling", lambda *a, **k: {h: 99.0 for h in range(24)}
+    )
+
+
 def _cfg(monkeypatch, **kw):
+    _no_ceiling(monkeypatch)
     defaults = dict(WINDOW_DAYS=14, HALFLIFE_DAYS=5.0, DAMPING=0.5, MIN=0.4, MAX=2.5, MIN_KWH=0.05)
     defaults.update(kw)
     monkeypatch.setattr(config, "PV_RECENT_BIAS_WINDOW_DAYS", defaults["WINDOW_DAYS"], raising=False)
@@ -126,6 +137,9 @@ def test_min_samples_excluded(monkeypatch):
 def test_accumulates_toward_full_correction(monkeypatch):
     # With a previous factor of 1.5 and the corrected forecast still 1.33× low,
     # the factor ACCUMULATES upward (toward full correction), not back to ~1.5.
+    # NB accumulation is only sound while the error signal is UNCENSORED —
+    # see test_censored_slots_excluded_from_training for the ratchet it caused
+    # once the ceiling started clipping the forecast it trains on.
     import src.db as db
     from src import weather
 
@@ -147,6 +161,40 @@ def test_accumulates_toward_full_correction(monkeypatch):
     assert round(raw[9], 2) == 1.33
     # old 1.5 × (1 + 0.5*(1.333-1)) = 1.5 × 1.1665 ≈ 1.75 — grew past 1.5.
     assert 1.7 < factors[9] < 1.8
+
+
+def test_censored_slots_excluded_from_training(monkeypatch):
+    """A forecast sitting at its ceiling is a censored observation: the true
+    forecast was higher, so actual/forecast over-states the correction needed.
+    Training on it is what made this loop ratchet (2026-07-21..23 incident)."""
+    import src.db as db
+    from src import weather
+
+    _cfg(monkeypatch)
+    # Ceiling at 1.0 for hour 12 — the seeded clipped slots sit exactly there.
+    monkeypatch.setattr(
+        weather, "_build_pv_hourly_ceiling",
+        lambda *a, **k: {h: (1.0 if h == 12 else 99.0) for h in range(24)},
+    )
+    with tempfile.TemporaryDirectory() as td:
+        monkeypatch.setattr(config, "DB_PATH", str(Path(td) / "t.db"), raising=False)
+        db.init_db()
+        conn = db.get_connection()
+        try:
+            # Clipped slots that LOOK 2x under-forecast — must be ignored.
+            for d in range(1, 5):
+                _seed(conn, hour=12, days_ago=d, forecast=1.0, actual=2.0)
+            # An uncensored hour is still learned normally.
+            for d in range(1, 5):
+                _seed(conn, hour=10, days_ago=d, forecast=1.0, actual=1.5)
+            conn.commit()
+        finally:
+            conn.close()
+        factors, raw, _s, diag = weather.compute_pv_recent_bias_by_hour()
+
+    assert 12 not in factors, "clipped slots must not train the corrector"
+    assert round(raw[10], 2) == 1.5, "uncensored hours still learn"
+    assert diag["censored_slots_excluded"] == 4
 
 
 def test_apply_path_scales_pv_when_enabled(monkeypatch):

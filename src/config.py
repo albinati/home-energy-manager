@@ -850,10 +850,27 @@ class Config:
     # ramp speed. Clamp is a hard safety rail, wide enough to fully correct the
     # observed ~2× morning bias.
     PV_RECENT_BIAS_DAMPING: float = float(os.getenv("PV_RECENT_BIAS_DAMPING", "0.5"))
-    PV_RECENT_BIAS_MIN: float = float(os.getenv("PV_RECENT_BIAS_MIN", "0.4"))
-    PV_RECENT_BIAS_MAX: float = float(os.getenv("PV_RECENT_BIAS_MAX", "2.5"))
+    # Clamp TIGHTENED 2026-07-24 (was [0.4, 2.5]). This corrector is a NUDGE on
+    # top of the trained calibration tables (pv_calibration_hourly / _3d), which
+    # already carry the systematic site bias — it should never be the dominant
+    # term. The old range let a censored error signal ratchet midday factors to
+    # 1.72-2.50 (see compute_pv_recent_bias_by_hour), over-forecasting PV by
+    # 24-27 % on 2026-07-21..23 and leaving the battery at 33-53 % into the
+    # evening peak. The censored-slot filter fixes the cause; this bounds the
+    # blast radius of any future one.
+    PV_RECENT_BIAS_MIN: float = float(os.getenv("PV_RECENT_BIAS_MIN", "0.6"))
+    PV_RECENT_BIAS_MAX: float = float(os.getenv("PV_RECENT_BIAS_MAX", "1.4"))
     # A slot needs at least this forecast+actual kWh to contribute (drop noise).
     PV_RECENT_BIAS_MIN_KWH: float = float(os.getenv("PV_RECENT_BIAS_MIN_KWH", "0.05"))
+    # --- PV forecast ceiling (safety rail, not a calibration) ----------------
+    # Per hour-of-day cap on the committed forecast, derived from the p99 of
+    # MEASURED half-hourly generation × margin, capped at the physical bound
+    # (capacity × efficiency × 0.5). Its only correct failure mode is being too
+    # loose: a ceiling that binds on ordinary days truncates the forecast and
+    # censors the recent-bias training signal. See _build_pv_hourly_ceiling.
+    PV_CEILING_WINDOW_DAYS: int = int(os.getenv("PV_CEILING_WINDOW_DAYS", "365"))
+    PV_CEILING_MIN_SAMPLES: int = int(os.getenv("PV_CEILING_MIN_SAMPLES", "8"))
+    PV_CEILING_MARGIN: float = float(os.getenv("PV_CEILING_MARGIN", "1.10"))
     # Slot-CENTRE forecast sampling. A 30-min slot's energy is `kw × 0.5h`; the
     # honest representative power is the value at the slot CENTRE (start+15min),
     # not the start instant. Sampling at the start systematically attributed each
