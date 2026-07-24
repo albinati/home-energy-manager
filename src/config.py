@@ -850,10 +850,37 @@ class Config:
     # ramp speed. Clamp is a hard safety rail, wide enough to fully correct the
     # observed ~2× morning bias.
     PV_RECENT_BIAS_DAMPING: float = float(os.getenv("PV_RECENT_BIAS_DAMPING", "0.5"))
-    PV_RECENT_BIAS_MIN: float = float(os.getenv("PV_RECENT_BIAS_MIN", "0.4"))
-    PV_RECENT_BIAS_MAX: float = float(os.getenv("PV_RECENT_BIAS_MAX", "2.5"))
+    # Clamp TIGHTENED 2026-07-24 (was [0.4, 2.5]). This corrector is a NUDGE on
+    # top of the trained calibration tables (pv_calibration_hourly / _3d), which
+    # already carry the systematic site bias — it should never be the dominant
+    # term. The old range let a censored error signal ratchet midday factors to
+    # 1.72-2.50 (see compute_pv_recent_bias_by_hour), over-forecasting PV by
+    # 24-27 % on 2026-07-21..23 and leaving the battery at 33-53 % into the
+    # evening peak. The censored-slot filter fixes the cause; this bounds the
+    # blast radius of any future one.
+    PV_RECENT_BIAS_MIN: float = float(os.getenv("PV_RECENT_BIAS_MIN", "0.6"))
+    PV_RECENT_BIAS_MAX: float = float(os.getenv("PV_RECENT_BIAS_MAX", "1.4"))
     # A slot needs at least this forecast+actual kWh to contribute (drop noise).
     PV_RECENT_BIAS_MIN_KWH: float = float(os.getenv("PV_RECENT_BIAS_MIN_KWH", "0.05"))
+    # An hour needs samples spanning at least this many distinct DAYS before it
+    # gets a factor. A half-hour slot yields 2 samples/hour/day, so the old
+    # bare `n >= 2` gate let a SINGLE day's weather set the correction: on the
+    # 96 %-cloud 2026-07-23 that produced factors slammed against both clamps
+    # (0.6 and 1.4). One day is weather, not bias.
+    PV_RECENT_BIAS_MIN_DAYS: int = int(os.getenv("PV_RECENT_BIAS_MIN_DAYS", "3"))
+    # --- PV forecast ceiling (safety rail, not a calibration) ----------------
+    # Flat physical bound on a slot's forecast: PV_CAPACITY_KWP × 0.5h × margin.
+    # Its ONLY correct failure mode is being too loose — a ceiling that binds on
+    # real generation truncates the committed forecast and censors the
+    # recent-bias training signal (the 2026-07-21..23 incident). Deliberately
+    # NOT derated by PV_SYSTEM_EFFICIENCY and NOT derived from realised history;
+    # see pv_slot_ceiling_kwh for why both of those were rejected.
+    # Margin 1.15 → 2.59 kWh/slot on a 4.5 kWp array. Bare nameplate (2.25)
+    # would sit BELOW the largest slot the meter has ever reported (2.42 kWh at
+    # 11 UTC — almost certainly a roll-up artifact, but a rail must clear even
+    # those). Still tight enough to catch real absurdity: the ratchet that
+    # caused #762 would have produced ~3.5 kWh/slot at midday.
+    PV_CEILING_MARGIN: float = float(os.getenv("PV_CEILING_MARGIN", "1.15"))
     # Slot-CENTRE forecast sampling. A 30-min slot's energy is `kw × 0.5h`; the
     # honest representative power is the value at the slot CENTRE (start+15min),
     # not the start instant. Sampling at the start systematically attributed each

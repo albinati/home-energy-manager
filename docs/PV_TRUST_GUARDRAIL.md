@@ -218,6 +218,9 @@ manual via the analytics script) keeps working.
 4. ✅ PV_CAPACITY tuning?
    Skip — calibration tables compensate algebraically. Bumping
    `PV_SYSTEM_EFFICIENCY` from 0.85 to 0.95 would not change LP behaviour.
+   *(Still true since #762, but for a different reason: the forecast rail no
+   longer uses `PV_SYSTEM_EFFICIENCY` at all. Note `PV_CAPACITY_KWP` DOES now
+   move the rail — see §7.)*
 5. ✅ Hour-18 outlier (P50 ratio = 1.61)?
    Real but tiny absolute kWh (~0.1 kWh × 20p = 2p/day). Not worth special
    handling.
@@ -228,15 +231,33 @@ manual via the analytics script) keeps working.
 
 | Metric | Value | Date |
 |---|---:|---|
-| Peak instantaneous kW | **4.47 kW** | 2026-05-14 13:09 UTC |
-| Max 30-min slot kWh | **1.93 kWh** | 2026-05-06 13:00 UTC |
+| Peak instantaneous kW | **4.76 kW** | 2026-06-06 12:00 UTC |
+| Max 30-min slot kWh | **2.42 kWh** | 2026-06-26 11:30 UTC (outlier — next is 1.765) |
 | Max daily kWh | **19.35 kWh** | 2026-05-09 |
-| Configured ceiling | 3.83 kW (1.91 kWh/slot) | `PV_CAPACITY_KWP × η = 4.5 × 0.85` |
+| Configured rail | 5.17 kW (**2.59 kWh/slot**) | `PV_CAPACITY_KWP × 0.5h × PV_CEILING_MARGIN` |
 | Inverter nameplate | 5.0 kW AC | Fox H1-5.0 |
 
 Inverter clipping appears to bind at ~3.9 kW for sustained periods (top-30
-peak observations cluster there). The few 4.1–4.5 kW observations are
+peak observations cluster there). The few 4.1–4.76 kW observations are
 heartbeat samples catching brief overshoots before clipping.
+
+**The rail sits deliberately ABOVE the hardware limit** (5.17 kW against a
+4.5 kWp array behind a 5.0 kW inverter). That is the point: it is an absurdity
+rail, not a model. Its only correct failure mode is being too loose, so the
+margin is sized for metering noise — the 2.42 kWh slot above is almost
+certainly a roll-up artifact, and a rail that binds on an artifact is a rail
+that censors real data.
+
+**Superseded 2026-07-24 (#762).** The old `PV_CAPACITY_KWP × η` figure
+(3.83 kW / 1.91 kWh per slot) already sat *below* the 1.93 kWh best slot in
+this very table — `PV_SYSTEM_EFFICIENCY` is an expected-yield derate, not a
+limit. Worse, the per-hour rail actually in force was built by spreading Fox
+DAILY totals over a fixed sinusoid, which produced 1.32–1.43 kWh/slot at
+11–13 UTC against a **median** realised 1.35–1.45. It bound on 41 % of
+09–16 UTC slots, truncating the committed forecast and censoring the error
+signal `compute_pv_recent_bias_by_hour` trains on — which ratcheted that
+corrector to 1.72–2.50 and over-forecast PV by 24–27 % on cloudy days. See
+§6 note and the incident write-up in issue #762.
 
 ### Per-hour bias (last 30 days)
 
