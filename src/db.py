@@ -5962,6 +5962,14 @@ def committed_lp_field_by_slot(day: date, field: str) -> dict[str, float]:
     return {k: v[1] for k, v in best.items()}
 
 
+# The date the flat physical PV rail took effect (#762). Slots planned before
+# this were committed under the old per-hour sinusoid ceiling, which clipped
+# them at 1.32-1.43 kWh — stamping today's rail onto those rows would present a
+# censored forecast as a clean one. They stay NULL and are excluded from bias
+# training for their remaining retention life.
+PV_FLAT_RAIL_SINCE = date(2026, 7, 24)
+
+
 def committed_pv_forecast_by_slot(day: date) -> dict[str, float]:
     """Per-slot committed PV-generation forecast for ``day`` (issue #462).
 
@@ -5998,12 +6006,28 @@ def rebuild_pv_error_log_for_date(day: date) -> int:
     # the bias learner has to re-derive from a ceiling that may since have
     # moved (#762). The rail is a flat physical bound, so stamping it at
     # rebuild time (the day after the slot) is stable.
-    try:
-        from .weather import pv_slot_ceiling_kwh
-
-        ceiling = pv_slot_ceiling_kwh()
-    except Exception:  # pragma: no cover — defensive; NULL reads as "unknown"
+    #
+    # But ONLY for days actually planned under the flat rail. Rebuilding an
+    # older day would stamp today's rail onto a forecast committed under the
+    # old per-hour sinusoid one — which clipped at 1.32-1.43 — so those rows
+    # would compare clean against 2.59 and silently re-enter training. A
+    # back-rebuild is the obvious response to seeing `unstamped_slots_excluded`
+    # in the logs, so this has to be safe by construction, not by convention.
+    if day < PV_FLAT_RAIL_SINCE:
         ceiling = None
+    else:
+        try:
+            from .weather import pv_slot_ceiling_kwh
+
+            ceiling = pv_slot_ceiling_kwh()
+        except Exception as e:  # pragma: no cover — defensive
+            # NULL reads as "unknown" and permanently excludes the day from
+            # bias training, so this must not be silent.
+            logger.warning(
+                "rebuild_pv_error_log: could not resolve the PV rail for %s (%s); "
+                "rows written unstamped and will be excluded from bias training", day, e,
+            )
+            ceiling = None
     written = 0
     with _lock:
         conn = get_connection()

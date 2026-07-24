@@ -233,6 +233,51 @@ def test_unstamped_legacy_rows_excluded(monkeypatch):
     assert diag["unstamped_slots_excluded"] == 4
 
 
+def test_shipped_defaults_bound_the_corrector():
+    """The suite mostly runs with relaxed knobs to exercise the maths, so pin
+    what PRODUCTION actually ships. A regression reverting these to the
+    pre-#762 values would otherwise pass 100 % green."""
+    assert config.PV_RECENT_BIAS_MIN == 0.6
+    assert config.PV_RECENT_BIAS_MAX == 1.4, "2.5 let the ratchet reach 2.5x"
+    assert config.PV_RECENT_BIAS_MIN_DAYS == 3, "one day is weather, not bias"
+
+
+def test_backfilling_a_pre_rail_day_does_not_stamp_it_clean(monkeypatch):
+    """Rebuilding an OLD day must leave it unstamped.
+
+    Slots before the flat rail were committed under the old sinusoid ceiling
+    (clipping at 1.32-1.43). Stamping today's 2.59 rail onto them would make a
+    censored forecast compare clean and re-enter training — reproducing #762.
+    A back-rebuild is the obvious response to seeing `unstamped_slots_excluded`
+    in the logs, so it has to be safe by construction.
+    """
+    import src.db as db
+
+    with tempfile.TemporaryDirectory() as td:
+        monkeypatch.setattr(config, "DB_PATH", str(Path(td) / "t.db"), raising=False)
+        db.init_db()
+
+        old_day = db.PV_FLAT_RAIL_SINCE - timedelta(days=1)
+        new_day = db.PV_FLAT_RAIL_SINCE
+        monkeypatch.setattr(db, "committed_pv_forecast_by_slot",
+                            lambda d: {f"{d.isoformat()}T12:00:00Z": 1.40})
+        monkeypatch.setattr(db, "half_hourly_solar_kwh_for_day",
+                            lambda d: {f"{d.isoformat()}T12:00:00Z": 0.90})
+
+        db.rebuild_pv_error_log_for_date(old_day)
+        db.rebuild_pv_error_log_for_date(new_day)
+
+        conn = db.get_connection()
+        try:
+            stamps = dict(conn.execute(
+                "SELECT substr(slot_time_utc,1,10), ceiling_kwh FROM pv_error_log"))
+        finally:
+            conn.close()
+
+    assert stamps[old_day.isoformat()] is None, "pre-rail day must stay unstamped"
+    assert stamps[new_day.isoformat()] is not None, "post-rail day must be stamped"
+
+
 def test_single_day_cannot_set_a_factor(monkeypatch):
     """One day's weather is not bias.
 

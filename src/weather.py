@@ -134,8 +134,15 @@ def pv_slot_ceiling_kwh() -> float:
     and cold panels under >1000 W/m² beat it. The repo's own reference data
     (docs/PV_TRUST_GUARDRAIL.md) records a 1.93 kWh slot against a 1.9125
     derated bound, i.e. the derated figure already binds on the best slot of
-    the year — and prod's largest reported slot is 2.42 kWh, above bare
-    nameplate too. Hence the margin.
+    the year.
+
+    The margin puts the rail **deliberately above** the hardware limit (2.59
+    kWh/slot ≈ 5.2 kW, against a 4.5 kWp array behind a 5.0 kW inverter). That
+    is intentional, and the margin's job is metering noise rather than physics:
+    prod's largest reported slot is 2.42 kWh (2026-06-26 11:30), a clear
+    outlier — the next largest is 1.765 — and peak instantaneous is 4.76 kW. A
+    rail that binds on a roll-up artifact is a rail that censors real data.
+    This catches gross absurdity only, which is all it should ever do.
 
     **Why flat.** Two earlier shaped estimators both failed the same way — by
     being TIGHT:
@@ -2626,7 +2633,7 @@ def forecast_to_lp_inputs(
         if recent_bias:
             kw_ac *= recent_bias.get(st.hour, 1.0)
         # Apply calibration scale and enforce per-hour physical ceiling
-        slot_ceil = hourly_ceil.get(st.hour, cap * eff * 0.5)
+        slot_ceil = hourly_ceil.get(st.hour, pv_slot_ceiling_kwh())
         pv_kwh = min(slot_ceil, max(0.0, kw_ac * 0.5))
         # Only a MATERIAL bind is worth reporting: the rail clipping a few Wh
         # off a dawn slot is noise, and this runs on every cockpit poll.

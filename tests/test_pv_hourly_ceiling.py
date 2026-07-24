@@ -41,8 +41,9 @@ def _seed_fox_daily(conn, *, days: int = 30, solar_kwh: float = 23.0):
 def test_ceiling_clears_the_median_day(monkeypatch):
     """The rail must sit above an ORDINARY midday slot.
 
-    Fails on the pre-#762 code, which returned ~1.404 kWh/slot at 12 UTC for
-    these daily totals — below the 1.45 median it was supposed to bound.
+    Fails on the pre-#762 code: for these daily totals the old sinusoid
+    (Σ sin(π(h−5)/16) = 10.153, × 1.20 margin, ÷ 2 slots) returns 1.333 at
+    12 UTC and 1.359 at 13 UTC — below the 1.45 median it was meant to bound.
     """
     import src.db as db
     from src import weather
