@@ -3,7 +3,7 @@ forecast's own error (pv_error_log), damped + clamped + recency-weighted."""
 from __future__ import annotations
 
 import tempfile
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from src.config import config
@@ -276,6 +276,21 @@ def test_backfilling_a_pre_rail_day_does_not_stamp_it_clean(monkeypatch):
 
     assert stamps[old_day.isoformat()] is None, "pre-rail day must stay unstamped"
     assert stamps[new_day.isoformat()] is not None, "post-rail day must be stamped"
+
+
+def test_cutover_excludes_the_mixed_deploy_day():
+    """The cutover must be deploy-day PLUS ONE.
+
+    The rollout landed midday on 2026-07-24, so that day is MIXED: its morning
+    slots were committed under the old rail, and two (11:00, 11:30 UTC) sit
+    pinned at the old 1.322 value. Setting the cutover to the deploy date would
+    stamp those censored slots clean and feed them back into the corrector.
+    """
+    import src.db as db
+
+    assert db.PV_FLAT_RAIL_SINCE > date(2026, 7, 24), (
+        "2026-07-24 is a mixed day — planned under the old rail until midday"
+    )
 
 
 def test_single_day_cannot_set_a_factor(monkeypatch):
