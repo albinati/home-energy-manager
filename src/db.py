@@ -5962,12 +5962,19 @@ def committed_lp_field_by_slot(day: date, field: str) -> dict[str, float]:
     return {k: v[1] for k, v in best.items()}
 
 
-# The date the flat physical PV rail took effect (#762). Slots planned before
-# this were committed under the old per-hour sinusoid ceiling, which clipped
-# them at 1.32-1.43 kWh — stamping today's rail onto those rows would present a
-# censored forecast as a clean one. They stay NULL and are excluded from bias
-# training for their remaining retention life.
-PV_FLAT_RAIL_SINCE = date(2026, 7, 24)
+# The first day planned ENTIRELY under the flat physical PV rail (#762). Slots
+# before this were committed under the old per-hour sinusoid ceiling, which
+# clipped them at 1.32-1.43 kWh — stamping today's rail onto those rows would
+# present a censored forecast as a clean one. They stay NULL and are excluded
+# from bias training for their remaining retention life.
+#
+# NB this is the deploy day PLUS ONE, deliberately. The rollout landed midday on
+# 2026-07-24, so that day is MIXED: its morning slots were committed under the
+# old rail and two of them (11:00, 11:30 UTC) sit pinned at the old 1.322 value.
+# A cutover of the deploy date itself would have stamped those censored slots
+# clean and fed them straight back into the corrector — the very thing the
+# cutover exists to prevent. A partially-old day is an untrustworthy day.
+PV_FLAT_RAIL_SINCE = date(2026, 7, 25)
 
 
 def committed_pv_forecast_by_slot(day: date) -> dict[str, float]:
