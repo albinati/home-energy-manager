@@ -1687,6 +1687,7 @@ def compute_pv_recent_bias_by_hour() -> tuple[dict[int, float], dict[int, float]
     lo = float(getattr(config, "PV_RECENT_BIAS_MIN", 0.4))
     hi = float(getattr(config, "PV_RECENT_BIAS_MAX", 2.5))
     min_kwh = float(getattr(config, "PV_RECENT_BIAS_MIN_KWH", 0.05))
+    min_days = int(getattr(config, "PV_RECENT_BIAS_MIN_DAYS", 3))
     # Accumulate on the previous factor → the loop ramps to FULL correction
     # (measuring residual error against the already-corrected forecast).
     try:
@@ -1708,6 +1709,7 @@ def compute_pv_recent_bias_by_hour() -> tuple[dict[int, float], dict[int, float]
     unstamped = 0
 
     acc: dict[int, list[float]] = {}  # hour -> [sum_w_ratio, sum_w, n]
+    days_seen: dict[int, set[str]] = {}  # hour -> distinct UTC dates contributing
     for r in rows:
         f = r.get("forecast_kwh") or 0.0
         a = r.get("actual_kwh")
@@ -1732,12 +1734,20 @@ def compute_pv_recent_bias_by_hour() -> tuple[dict[int, float], dict[int, float]
         d[0] += w * (a / f)
         d[1] += w
         d[2] += 1
+        days_seen.setdefault(ts.hour, set()).add(ts.date().isoformat())
 
     factors: dict[int, float] = {}
     raw: dict[int, float] = {}
     samples: dict[int, int] = {}
+    thin_days = 0
     for h, (sw, w, n) in acc.items():
         if w <= 0 or n < 2:
+            continue
+        # A half-hour slot yields 2 samples/hour/day, so `n >= 2` alone lets ONE
+        # day's weather set the correction. Require breadth across days: a
+        # single overcast day is weather, not bias.
+        if len(days_seen.get(h, ())) < min_days:
+            thin_days += 1
             continue
         ratio = sw / w
         if h in prev:
@@ -1754,9 +1764,11 @@ def compute_pv_recent_bias_by_hour() -> tuple[dict[int, float], dict[int, float]
         factors[h] = round(applied, 4)
         samples[h] = int(n)
     diag = {"window_days": window, "half_life_days": half_life, "damping": damping,
-            "min_kwh": min_kwh, "clamp": [lo, hi], "n_hours": len(factors),
+            "min_kwh": min_kwh, "min_days": min_days, "clamp": [lo, hi],
+            "n_hours": len(factors),
             "censored_slots_excluded": censored,
-            "unstamped_slots_excluded": unstamped}
+            "unstamped_slots_excluded": unstamped,
+            "hours_below_min_days": thin_days}
     return factors, raw, samples, diag
 
 

@@ -376,6 +376,12 @@ PV_CEILING_MARGIN=1.15                          # rail = PV_CAPACITY_KWP × 0.5h
                                                  # run of overcast days).
 PV_RECENT_BIAS_MIN=0.6                          # clamp TIGHTENED from [0.4, 2.5]. This corrector is a NUDGE on
 PV_RECENT_BIAS_MAX=1.4                          # top of the trained calibration tables, never the dominant term.
+PV_RECENT_BIAS_MIN_DAYS=3                       # an hour needs samples spanning ≥3 distinct DAYS. A half-hour
+                                                 # slot yields 2 samples/hour/day, so the old bare `n>=2` gate
+                                                 # let ONE day's weather set the correction — replayed against
+                                                 # the real prod DB, a single 96 %-cloud day (23/07) produced
+                                                 # factors slammed against BOTH clamps. One day is weather,
+                                                 # not bias.
 # THE 2026-07-21..23 INCIDENT. The old rail spread Fox DAILY totals over a fixed
 # sinusoid — far flatter than a real PV curve — producing 1.32-1.43 kWh/slot at
 # 11-13 UTC against a MEDIAN realised 1.35-1.45. It bound on 41 % of 09-16 UTC

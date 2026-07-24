@@ -862,6 +862,12 @@ class Config:
     PV_RECENT_BIAS_MAX: float = float(os.getenv("PV_RECENT_BIAS_MAX", "1.4"))
     # A slot needs at least this forecast+actual kWh to contribute (drop noise).
     PV_RECENT_BIAS_MIN_KWH: float = float(os.getenv("PV_RECENT_BIAS_MIN_KWH", "0.05"))
+    # An hour needs samples spanning at least this many distinct DAYS before it
+    # gets a factor. A half-hour slot yields 2 samples/hour/day, so the old
+    # bare `n >= 2` gate let a SINGLE day's weather set the correction: on the
+    # 96 %-cloud 2026-07-23 that produced factors slammed against both clamps
+    # (0.6 and 1.4). One day is weather, not bias.
+    PV_RECENT_BIAS_MIN_DAYS: int = int(os.getenv("PV_RECENT_BIAS_MIN_DAYS", "3"))
     # --- PV forecast ceiling (safety rail, not a calibration) ----------------
     # Flat physical bound on a slot's forecast: PV_CAPACITY_KWP × 0.5h × margin.
     # Its ONLY correct failure mode is being too loose — a ceiling that binds on

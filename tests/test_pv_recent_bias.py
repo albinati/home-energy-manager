@@ -26,8 +26,25 @@ def _seed(conn, *, hour: int, days_ago: float, forecast: float, actual: float,
     )
 
 
+def _seed_minute(conn, *, hour: int, minute: int, days_ago: float, forecast: float,
+                 actual: float, ceiling: float | None = 99.0):
+    """Same as :func:`_seed` but for the second half-hour slot of an hour."""
+    ts = (datetime.now(UTC) - timedelta(days=days_ago)).replace(
+        hour=hour, minute=minute, second=0, microsecond=0
+    )
+    conn.execute(
+        """INSERT OR REPLACE INTO pv_error_log
+           (slot_time_utc, run_id, forecast_kwh, actual_kwh, error_kwh, built_at_utc,
+            ceiling_kwh)
+           VALUES (?, 1, ?, ?, ?, ?, ?)""",
+        (ts.strftime("%Y-%m-%dT%H:%M:%SZ"), forecast, actual, actual - forecast,
+         datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"), ceiling),
+    )
+
+
 def _cfg(monkeypatch, **kw):
-    defaults = dict(WINDOW_DAYS=14, HALFLIFE_DAYS=5.0, DAMPING=0.5, MIN=0.4, MAX=2.5, MIN_KWH=0.05)
+    defaults = dict(WINDOW_DAYS=14, HALFLIFE_DAYS=5.0, DAMPING=0.5, MIN=0.4, MAX=2.5,
+                    MIN_KWH=0.05, MIN_DAYS=1)
     defaults.update(kw)
     monkeypatch.setattr(config, "PV_RECENT_BIAS_WINDOW_DAYS", defaults["WINDOW_DAYS"], raising=False)
     monkeypatch.setattr(config, "PV_RECENT_BIAS_HALFLIFE_DAYS", defaults["HALFLIFE_DAYS"], raising=False)
@@ -35,6 +52,7 @@ def _cfg(monkeypatch, **kw):
     monkeypatch.setattr(config, "PV_RECENT_BIAS_MIN", defaults["MIN"], raising=False)
     monkeypatch.setattr(config, "PV_RECENT_BIAS_MAX", defaults["MAX"], raising=False)
     monkeypatch.setattr(config, "PV_RECENT_BIAS_MIN_KWH", defaults["MIN_KWH"], raising=False)
+    monkeypatch.setattr(config, "PV_RECENT_BIAS_MIN_DAYS", defaults["MIN_DAYS"], raising=False)
 
 
 def test_warm_start_full_correction_first_pass(monkeypatch):
@@ -213,6 +231,52 @@ def test_unstamped_legacy_rows_excluded(monkeypatch):
 
     assert 12 not in factors
     assert diag["unstamped_slots_excluded"] == 4
+
+
+def test_single_day_cannot_set_a_factor(monkeypatch):
+    """One day's weather is not bias.
+
+    A half-hour slot yields 2 samples/hour/day, so a bare `n >= 2` gate let a
+    SINGLE day drive the correction. Measured against the real prod DB: with
+    only 2026-07-23 (96 % cloud) stamped, the corrector produced factors
+    slammed against BOTH clamps (0.6 and 1.4) and would have applied them to
+    the next day's plan.
+    """
+    import src.db as db
+    from src import weather
+
+    _cfg(monkeypatch, MIN_DAYS=3)
+    with tempfile.TemporaryDirectory() as td:
+        monkeypatch.setattr(config, "DB_PATH", str(Path(td) / "t.db"), raising=False)
+        db.init_db()
+        conn = db.get_connection()
+        try:
+            # Both half-hour slots of hour 12, but all on ONE day.
+            _seed(conn, hour=12, days_ago=1, forecast=1.0, actual=0.4)
+            _seed_minute(conn, hour=12, minute=30, days_ago=1, forecast=1.0, actual=0.4)
+            conn.commit()
+        finally:
+            conn.close()
+        factors, _raw, _s, diag = weather.compute_pv_recent_bias_by_hour()
+
+    assert 12 not in factors, "one overcast day must not set a correction"
+    assert diag["hours_below_min_days"] == 1
+
+    # Spread the same evidence across 3 days → now it counts.
+    with tempfile.TemporaryDirectory() as td:
+        monkeypatch.setattr(config, "DB_PATH", str(Path(td) / "t.db"), raising=False)
+        db.init_db()
+        conn = db.get_connection()
+        try:
+            for d in (1, 2, 3):
+                _seed(conn, hour=12, days_ago=d, forecast=1.0, actual=0.4)
+            conn.commit()
+        finally:
+            conn.close()
+        factors, _raw, _s, diag = weather.compute_pv_recent_bias_by_hour()
+
+    assert 12 in factors
+    assert diag["hours_below_min_days"] == 0
 
 
 def test_refresh_clears_stale_factors_when_no_usable_samples(monkeypatch):
