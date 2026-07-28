@@ -77,6 +77,15 @@ class AlertType(str, Enum):
     # ACTIONABLE prompt: never auto-enables (the corrected value feeds a hard
     # LP equality — a human flips the env). One-shot (runtime-setting dedup).
     DHW_BIAS_ENABLE_READY = "dhw_bias_enable_ready"
+    # 2026-07-28 — the live tank SETPOINT no longer matches the plan row that
+    # owns this moment. ACTIONABLE: either the user moved it (fine — but they
+    # should know it is still in force) or something else did (not fine).
+    # Never auto-reverted. Deduped per (planned, live) pair by the detector.
+    TANK_TARGET_DIVERGENCE = "tank_target_divergence"
+    # 2026-07-28 — the tank is below the morning reserve floor while there is
+    # still time to react. The plan's own recovery is the afternoon warmup,
+    # which is hours after the morning shower. ACTIONABLE; once per local day.
+    MORNING_TANK_COLD = "morning_tank_cold"
 
 
 # OpenClaw hook payload ``name`` field (one stable label per alert key)
@@ -99,6 +108,8 @@ _HOOK_PAYLOAD_NAMES: dict[str, str] = {
     "guests_mode_suggested": "EnergyGuestsSuggested",
     "lp_health_regression": "EnergyLPHealthRegression",
     "dhw_bias_enable_ready": "EnergyDhwBiasEnableReady",
+    "tank_target_divergence": "EnergyTankTargetDivergence",
+    "morning_tank_cold": "EnergyMorningTankCold",
 }
 
 
@@ -124,6 +135,8 @@ _TELEGRAM_HEADERS: dict[str, str] = {
     "appliance_cancelled": "🚫 Appliance cancelled",
     "appliance_window_nudge": "🧺⚡ Carregue a máquina",
     "lp_failure": "🚨 LP solver failure",
+    "tank_target_divergence": "🌡️ Tanque fora do plano",
+    "morning_tank_cold": "🚿 Tanque frio pro banho",
 }
 
 
@@ -941,6 +954,83 @@ def notify_dhw_bias_enable_ready(
         AlertType.DHW_BIAS_ENABLE_READY, body, urgent=False, extra=extra,
         telegram_header_override="✅ Corretor DHW pronto pra ligar",
     )
+
+
+def notify_tank_target_divergence(
+    *,
+    planned_c: float,
+    live_c: float,
+    since_iso: str | None,
+    hours: float | None,
+    action_type: str | None,
+) -> None:
+    """🌡️ The live tank setpoint disagrees with the plan row that owns now.
+
+    NEVER auto-reverts — a setpoint moved by hand is a legitimate gesture, and
+    undoing it silently is worse than saying so. The point is that the user
+    knows it is *still* in force: on 2026-07-27 a manual 37 → 30 sat unnoticed
+    for 14 h and the household woke to a 31 °C tank. pt-BR body; deduped per
+    (planned, live) pair by the caller."""
+    when = ""
+    if hours is not None:
+        when = f" há ~{hours:.1f} h" if hours >= 1 else f" há ~{hours * 60:.0f} min"
+    # "setpoint", not "o tanque está em" — `live_c` is `dev.tank_target`, the
+    # commanded value, NOT the water temperature. They happened to coincide in
+    # the 2026-07-27 incident (tank 31, setpoint 30); in the ordinary case
+    # (water at 44, setpoint moved to 30) conflating them is simply false and
+    # would prompt the wrong reaction.
+    body = "\n".join([
+        f"O **setpoint** do tanque está em **{live_c:.0f} °C**, mas o plano pede "
+        f"**{planned_c:.0f} °C**{when}"
+        + (f" (linha `{action_type}`)." if action_type else "."),
+        "Se foi você que mudou, tudo bem — só confirmando que ainda está valendo.",
+        "Se não foi, o HEM não vai desfazer sozinho: ajuste no app Onecta ou na "
+        "unidade, ou espere o próximo `tank_warmup` reassumir o controle.",
+    ])
+    extra = {
+        "planned_c": round(float(planned_c), 1),
+        "live_c": round(float(live_c), 1),
+        "delta_c": round(float(live_c) - float(planned_c), 1),
+        "action_type": action_type,
+        "since_utc": since_iso,
+        "hours": round(float(hours), 2) if hours is not None else None,
+        "autoReverted": False,
+    }
+    _dispatch(AlertType.TANK_TARGET_DIVERGENCE, body, urgent=False, extra=extra)
+
+
+def notify_morning_tank_cold(
+    *,
+    tank_c: float,
+    floor_c: float,
+    target_c: float | None,
+    next_warmup_local: str | None,
+) -> None:
+    """🚿 The tank is below the morning reserve floor with time left to react.
+
+    The fixed schedule's only recovery is the afternoon warmup (~13:00 local),
+    hours after the morning shower — so without this the first signal is a cold
+    shower. Alert only; the structural fix is the morning floor. pt-BR body;
+    once per local day (caller dedups via ``acknowledged_warnings``)."""
+    lines = [
+        f"Tanque em **{tank_c:.0f} °C**, abaixo do piso de conforto "
+        f"({floor_c:.0f} °C) — pode não dar banho quente.",
+    ]
+    if target_c is not None:
+        lines.append(f"Setpoint atual: {target_c:.0f} °C.")
+    if next_warmup_local:
+        lines.append(f"O aquecimento planejado só começa às {next_warmup_local}.")
+    lines.append(
+        "Pra ter água quente agora: suba o setpoint no app Onecta (ou ligue o "
+        "Powerful). Custa energia fora da janela barata."
+    )
+    extra = {
+        "tank_c": round(float(tank_c), 1),
+        "floor_c": round(float(floor_c), 1),
+        "target_c": round(float(target_c), 1) if target_c is not None else None,
+        "next_warmup_local": next_warmup_local,
+    }
+    _dispatch(AlertType.MORNING_TANK_COLD, body="\n".join(lines), urgent=False, extra=extra)
 
 
 def notify_lp_health_regression(issues: list[str]) -> None:

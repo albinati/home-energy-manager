@@ -520,6 +520,11 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         ("lp_health_regression",  "critical", 0),
         ("guests_mode_suggested", "reports",  0),
         ("dhw_bias_enable_ready", "reports",  0),
+        # 2026-07-28 — comfort/actuation divergence. Both are ACTIONABLE (the
+        # user has to decide something), so they must not land in the muted
+        # FYI bucket alongside the digests.
+        ("tank_target_divergence", "critical", 0),
+        ("morning_tank_cold",      "critical", 0),
     ]
     for _at, _sev, _sil in _NOTIFICATION_DEFAULTS:
         conn.execute(
