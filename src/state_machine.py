@@ -67,6 +67,10 @@ _TANK_TARGET_DIVERGENCE_NOTIFIED: tuple[int, int] | None = None
 # enter — without it, a 06:00 check would happily page about the 19:00 evening
 # window, which the afternoon warmup is going to fix anyway.
 _MORNING_COLD_LOOKAHEAD_HOURS = 3.0
+# Oldest `daikin_telemetry` reading the cold-tank check will page from when the
+# device snapshot has no tank temperature. The reader returns the newest live
+# row of any age, and after an Onecta quota outage that can be days stale.
+_MORNING_COLD_MAX_TELEMETRY_AGE_S = 2 * 3600.0
 # Last time the negative-boost backstop re-asserted DHW Powerful (cadence gate).
 _NEG_BOOST_POWERFUL_LAST_UTC: datetime | None = None
 _NEG_BOOST_STALL_COUNT: int = 0
@@ -399,14 +403,16 @@ def _schedule_signature(groups: list[Any]) -> str:
 
 def _scheduled_tank_state(
     now_utc: datetime,
-) -> tuple[dict[str, Any] | None, str, str | None]:
+) -> tuple[dict[str, Any] | None, str, dict[str, Any] | None]:
     """The tank params of the schedule row covering ``now_utc``, if any (#740).
 
-    Returns ``(params, source, action_type)``. ``action_type`` names the row the
-    params came from (``tank_warmup`` / ``tank_setback`` / ``tank_negative_boost``)
-    and is ``None`` whenever ``params`` is — it is reporting context only, kept
-    OUT of the params dict because that dict is handed straight to
-    ``apply_scheduled_daikin_params``.
+    Returns ``(params, source, row)``. ``row`` is the winning ``action_schedule``
+    row itself — callers need its ``action_type`` (reporting), ``status`` (has
+    HEM actually written this yet?) and ``start_time`` (how long has it been in
+    force?). It is returned ALONGSIDE the params rather than merged into them
+    because the params dict is handed straight to
+    ``apply_scheduled_daikin_params``; a stray key there would reach the device
+    layer. ``row`` is ``None`` whenever ``params`` is.
 
     The schedule IS the safe default. Commanding ``DHW_TEMP_NORMAL_C`` blindly
     on shutdown/boot erased the overnight setback: measured 2026-07-18, two
@@ -429,7 +435,7 @@ def _scheduled_tank_state(
     best_boost = False
     best_start: datetime | None = None
     best_overridden = False
-    best_kind: str | None = None
+    best_row: dict[str, Any] | None = None
     # Rows are filed under their LOCAL plan date (review: recover_on_boot,
     # dhw_policy and the boost-recovery path all anchor local) — querying UTC
     # dates left local-today's rows invisible 23:00-00:00Z during BST.
@@ -484,7 +490,7 @@ def _scheduled_tank_state(
                 best_boost = is_boost
                 best_start = start
                 best_overridden = row_overridden
-                best_kind = act.get("action_type")
+                best_row = act
     if best_overridden:
         return (None, "user_override", None)
     if best is not None:
@@ -495,7 +501,7 @@ def _scheduled_tank_state(
                 "tank_power": bool(best.get("tank_power", True)),
             },
             "schedule",
-            best_kind,
+            best_row,
         )
     return (None, "none", None)
 
@@ -1745,12 +1751,44 @@ def _check_tank_target_divergence(
     if (config.OPTIMIZATION_PRESET or "normal").strip().lower() == "vacation":
         return
 
-    planned, source, action_type = _scheduled_tank_state(now_utc)
-    if source != "schedule" or planned is None:
+    planned, source, row = _scheduled_tank_state(now_utc)
+    if source != "schedule" or planned is None or row is None:
         return
     if not planned.get("tank_power", True):
         return  # tank deliberately off — the setpoint carries no intent
+    action_type = row.get("action_type")
+
+    # A row HEM has not written yet is not a divergence — the device is still
+    # legitimately holding the previous state. Two live paths reach here with a
+    # covering row in that state, and both would otherwise page the household
+    # about HEM's own decision, seconds after it was made:
+    #
+    #  * the early-setback detector runs immediately before this check and
+    #    upserts a pulled-forward `tank_setback` row starting at *now*, leaving
+    #    the PATCH to the next tick (dhw_policy.build_early_setback_row);
+    #  * the legionella stand-off deliberately `continue`s over tank rows and
+    #    leaves them PENDING so they resume when the window closes — every
+    #    other tank path in this file bails on it, and so must this one.
+    if (row.get("status") or "") == "pending":
+        return
+
     planned_c = float(planned.get("tank_temp", config.DHW_TEMP_NORMAL_C))
+
+    # #737 — a latched HP target-lift deliberately commands the cliff while the
+    # stored row keeps its goal, so the device and the row disagree BY DESIGN
+    # for the duration of the lift. The #737 review called out a spurious
+    # 47 → 50 alert as the thing to avoid; honour the latch as the expected
+    # setpoint instead of paging about it.
+    row_start: datetime | None = None
+    try:
+        row_start = _parse_utc(row["start_time"])
+        latched = _lift_latch_target(int(row["id"]), row_start)
+        if latched is not None:
+            planned_c = float(latched)
+    except (KeyError, TypeError, ValueError):
+        pass
+    except Exception as _exc:  # noqa: BLE001 — a latch read must not page
+        logger.debug("tank-target divergence latch lookup failed: %s", _exc)
 
     live_c = getattr(dev, "tank_target", None)
     if live_c is None:
@@ -1784,13 +1822,22 @@ def _check_tank_target_divergence(
     if not all(abs(float(t) - live_c) <= tol for _, _, t in rows[-2:]):
         return  # not yet confirmed by the device's own history
 
-    # Date the divergence: walk back while the device held this same target.
+    # Date the divergence. Walking back over "the device held this target"
+    # alone measures the wrong interval: it answers "how long has the device
+    # been at 47?", not "how long has it DISAGREED with the plan?". Those
+    # coincide only when the device changed last. In the ordinary case — the
+    # 22:00 setback PATCH fails, and at 22:02 the device is still on the 47 it
+    # has held since 13:00 — that walk-back would claim "há ~9 h" when it has
+    # been two minutes. Clamp to the covering row's start: the plan cannot have
+    # been contradicted before it existed.
     run_start = rows[-1][0]
     for ts, _tank, tgt in reversed(rows):
         if abs(float(tgt) - live_c) > tol:
             break
         run_start = ts
     since = datetime.fromtimestamp(run_start, UTC)
+    if row_start is not None and row_start > since:
+        since = row_start
     since_iso = since.isoformat()
     hours = max(0.0, (now_utc - since).total_seconds() / 3600.0)
 
@@ -1874,9 +1921,17 @@ def _check_morning_tank_cold(
 
     tank_c = getattr(dev, "tank_temperature", None)
     if tank_c is None:
+        # Fallback only — and age-bounded. `get_latest_daikin_telemetry` returns
+        # the newest live row of ANY age, so after a quota outage this could
+        # page off a reading days old (e.g. a stale-cold sample taken before a
+        # boost day). Silence beats a wrong page.
         try:
-            row = db.get_latest_daikin_telemetry(source="live")
-            tank_c = (row or {}).get("tank_temp_c")
+            latest = db.get_latest_daikin_telemetry(source="live")
+            fetched = float((latest or {}).get("fetched_at") or 0.0)
+            if latest and (now_utc.timestamp() - fetched) <= _MORNING_COLD_MAX_TELEMETRY_AGE_S:
+                tank_c = latest.get("tank_temp_c")
+        except (TypeError, ValueError):
+            return
         except Exception as _exc:  # noqa: BLE001
             logger.debug("morning-tank-cold telemetry read failed: %s", _exc)
             return
@@ -1903,7 +1958,15 @@ def _check_morning_tank_cold(
                 preset=(config.OPTIMIZATION_PRESET or "normal"),
                 guest_count=int(getattr(config, "DHW_GUEST_COUNT", 2) or 2),
             )
-            if w.end_hour > now_hour
+            # `start_hour == end_hour` is the established way to DISABLE a
+            # comfort window (#748, `_warmup_deadband_force_reason`), and both
+            # `comfort_floor_c` and `comfort_floors_for_slots` honour it via a
+            # `start <= h < end` test that such a window can never satisfy.
+            # Without this guard the alert would enforce a floor the household
+            # explicitly switched off — the one way this check could disagree
+            # with the constraint it claims to mirror.
+            if w.start_hour < w.end_hour
+            and w.end_hour > now_hour
             and w.start_hour - now_hour <= _MORNING_COLD_LOOKAHEAD_HOURS
         ]
     except Exception as _exc:  # noqa: BLE001 — a settings outage must not page
@@ -1933,11 +1996,6 @@ def _check_morning_tank_cold(
     if best is not None:
         next_warmup_local = best.astimezone(tz).strftime("%H:%M")
 
-    try:
-        db.acknowledge_warning(warning_key)
-    except Exception as _exc:  # noqa: BLE001
-        logger.debug("morning-tank-cold dedup write failed: %s", _exc)
-
     target_c = getattr(dev, "tank_target", None)
     try:
         target_c = float(target_c) if target_c is not None else None
@@ -1958,6 +2016,12 @@ def _check_morning_tank_cold(
         result="alert",
         trigger=trigger,
     )
+    # Notify FIRST, then dedup — the sibling backstop in this file
+    # (`heartbeat_repair_fox_scheduler`) does the same. Acking first would burn
+    # the day's ONLY cold-shower warning on a transient Telegram outage, with
+    # no retry. There is no notification-storm risk in this order: the notify
+    # path swallows delivery failures rather than raising, so a failed send
+    # still falls through to the ack below and stops at one attempt.
     try:
         from .notifier import notify_morning_tank_cold
         notify_morning_tank_cold(
@@ -1968,6 +2032,10 @@ def _check_morning_tank_cold(
         )
     except Exception as _exc:  # noqa: BLE001 — notification is best-effort
         logger.debug("morning-tank-cold notify failed (non-fatal): %s", _exc)
+    try:
+        db.acknowledge_warning(warning_key)
+    except Exception as _exc:  # noqa: BLE001
+        logger.debug("morning-tank-cold dedup write failed: %s", _exc)
 
 
 def _check_negative_boost_powerful(

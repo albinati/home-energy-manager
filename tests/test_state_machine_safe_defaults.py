@@ -364,8 +364,8 @@ def test_scheduled_tank_state_uses_local_plan_dates(monkeypatch):
                          now_utc + timedelta(hours=1),
                          {"tank_power": True, "tank_temp": 60,
                           "tank_powerful": True})
-        params, source, kind = _scheduled_tank_state(now_utc)
-        assert kind == "tank_negative_boost"
+        params, source, row = _scheduled_tank_state(now_utc)
+        assert row is not None and row["action_type"] == "tank_negative_boost"
 
     assert source == "schedule"
     assert params is not None and params["tank_temp"] == 60.0

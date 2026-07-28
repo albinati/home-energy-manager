@@ -141,8 +141,10 @@ def test_divergence_fires_on_the_incident_shape(monkeypatch) -> None:
     assert kw["planned_c"] == 37.0
     assert kw["live_c"] == 30.0
     assert kw["action_type"] == "tank_setback"
-    # Dated from telemetry, so the message can say how long it has been wrong.
-    assert kw["hours"] is not None and kw["hours"] >= 7.0
+    # Dated so the message can say how long it has been wrong — and CLAMPED to
+    # the covering row's start (6 h ago), not the 8 h the device has held 30.
+    # The plan cannot have been contradicted before the row existed.
+    assert kw["hours"] == pytest.approx(6.0, abs=0.2)
 
 
 def test_divergence_silent_within_tolerance(monkeypatch) -> None:
@@ -267,6 +269,69 @@ def test_divergence_silent_when_the_plan_wants_the_tank_off(monkeypatch) -> None
     notify.assert_not_called()
 
 
+def test_divergence_silent_while_the_row_is_still_pending(monkeypatch) -> None:
+    """HEM must not page the household about its OWN decision.
+
+    Two live paths leave a covering row `pending`: the early-setback detector
+    (which runs immediately before this check and defers its PATCH to the next
+    tick) and the legionella stand-off (which deliberately leaves tank rows
+    pending so they resume when the window closes). In both, the device is
+    still legitimately holding the previous state.
+    """
+    now = datetime(2026, 7, 27, 20, 40, tzinfo=UTC)
+    start = now - timedelta(minutes=1)
+    db.upsert_action(
+        plan_date=start.astimezone(UTC).date().isoformat(),
+        start_time=_iso(start),
+        end_time=_iso(now + timedelta(hours=16)),
+        device="daikin",
+        action_type="tank_setback",
+        params={"tank_power": True, "tank_temp": 37, "tank_powerful": False},
+        status="pending",
+    )
+    _seed_telemetry(now, target=47.0, hours=6.0, tank=44.0)
+    notify = MagicMock()
+    monkeypatch.setattr("src.notifier.notify_tank_target_divergence", notify)
+
+    # Device still on the 47 warmup hold — the setback has not been written yet.
+    sm._check_tank_target_divergence(_FakeDev(tank_target=47.0), now, trigger="hb")
+
+    notify.assert_not_called()
+
+
+def test_divergence_honours_a_latched_hp_target_lift(monkeypatch) -> None:
+    """#737 lifts the commanded setpoint to the 50 °C cliff while the stored row
+    keeps its goal — they disagree BY DESIGN. The #737 review named a spurious
+    47 -> 50 alert as the thing to avoid; the latch is the expected setpoint."""
+    now = datetime(2026, 7, 28, 13, 30, tzinfo=UTC)
+    start = now - timedelta(minutes=30)
+    db.upsert_action(
+        plan_date=start.astimezone(UTC).date().isoformat(),
+        start_time=_iso(start),
+        end_time=_iso(now + timedelta(hours=2)),
+        device="daikin",
+        action_type="tank_warmup",
+        params={"tank_power": True, "tank_temp": 47, "tank_powerful": False},
+        status="completed",
+    )
+    rows = db.get_actions_for_plan_date(start.astimezone(UTC).date().isoformat(), device="daikin")
+    aid = int(rows[0]["id"])
+    db.log_action(
+        device="daikin",
+        action="warmup_deadband_force",
+        params={"row_id": aid, "mechanism": "hp_target_lift", "lift_target_c": 50},
+        result="success",
+        trigger="hb",
+    )
+    _seed_telemetry(now, target=50.0, hours=0.5, tank=46.0)
+    notify = MagicMock()
+    monkeypatch.setattr("src.notifier.notify_tank_target_divergence", notify)
+
+    sm._check_tank_target_divergence(_FakeDev(tank_target=50.0), now, trigger="hb")
+
+    notify.assert_not_called()
+
+
 def test_divergence_costs_no_daikin_calls(monkeypatch) -> None:
     """The household's hard constraint: alerting must not spend Onecta quota."""
     now = datetime(2026, 7, 28, 6, 55, tzinfo=UTC)
@@ -358,6 +423,50 @@ def test_cold_morning_falls_back_to_telemetry_when_snapshot_lacks_the_tank(monke
 
     notify.assert_called_once()
     assert notify.call_args.kwargs["tank_c"] == 31.0
+
+
+def test_cold_morning_respects_a_disabled_window(monkeypatch) -> None:
+    """`start_hour == end_hour` is how a comfort window is switched OFF (#748).
+    Enforcing its floor anyway would be the one way this alert could disagree
+    with the constraint it claims to mirror."""
+    from src import runtime_settings as rts
+
+    rts.set_setting("DHW_MORNING_RESERVE_START_HOUR", 7.0)
+    rts.set_setting("DHW_MORNING_RESERVE_END_HOUR", 7.0)
+    now = datetime(2026, 7, 28, 5, 55, tzinfo=UTC)  # 06:55 local
+    notify = MagicMock()
+    monkeypatch.setattr("src.notifier.notify_morning_tank_cold", notify)
+
+    sm._check_morning_tank_cold([], _FakeDev(tank_temperature=31.0), now, trigger="hb")
+
+    notify.assert_not_called()
+
+
+def test_cold_morning_ignores_stale_telemetry(monkeypatch) -> None:
+    """After an Onecta quota outage the newest live row can be days old; paging
+    off it would report a temperature that is no longer true."""
+    now = datetime(2026, 7, 28, 5, 55, tzinfo=UTC)
+    _seed_one(now - timedelta(hours=30), 30.0, tank=31.0)
+    notify = MagicMock()
+    monkeypatch.setattr("src.notifier.notify_morning_tank_cold", notify)
+
+    sm._check_morning_tank_cold([], _FakeDev(tank_temperature=None), now, trigger="hb")
+
+    notify.assert_not_called()
+
+
+def test_cold_morning_still_dedupes_when_delivery_fails(monkeypatch) -> None:
+    """Notify runs BEFORE the ack so a Telegram outage doesn't silently burn
+    the day's only warning — but a raising notifier must still not re-page."""
+    now = datetime(2026, 7, 28, 5, 55, tzinfo=UTC)
+    notify = MagicMock(side_effect=RuntimeError("telegram down"))
+    monkeypatch.setattr("src.notifier.notify_morning_tank_cold", notify)
+    dev = _FakeDev(tank_temperature=31.0)
+
+    sm._check_morning_tank_cold([], dev, now, trigger="hb")
+    sm._check_morning_tank_cold([], dev, now + timedelta(minutes=10), trigger="hb")
+
+    assert notify.call_count == 1
 
 
 def test_cold_morning_costs_no_daikin_calls(monkeypatch) -> None:

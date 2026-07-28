@@ -974,8 +974,13 @@ def notify_tank_target_divergence(
     when = ""
     if hours is not None:
         when = f" há ~{hours:.1f} h" if hours >= 1 else f" há ~{hours * 60:.0f} min"
+    # "setpoint", not "o tanque está em" — `live_c` is `dev.tank_target`, the
+    # commanded value, NOT the water temperature. They happened to coincide in
+    # the 2026-07-27 incident (tank 31, setpoint 30); in the ordinary case
+    # (water at 44, setpoint moved to 30) conflating them is simply false and
+    # would prompt the wrong reaction.
     body = "\n".join([
-        f"O tanque está em **{live_c:.0f} °C**, mas o plano pede "
+        f"O **setpoint** do tanque está em **{live_c:.0f} °C**, mas o plano pede "
         f"**{planned_c:.0f} °C**{when}"
         + (f" (linha `{action_type}`)." if action_type else "."),
         "Se foi você que mudou, tudo bem — só confirmando que ainda está valendo.",
