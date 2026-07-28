@@ -464,3 +464,56 @@ def test_linear_ambient_is_promoted_when_it_genuinely_rescues_the_fit():
     linear = {"status": "ok", "ua_w_per_k": 2.4, "ambient_c": 15.0,
               "ambient_slope_per_c": 0.5, "r2": 0.80}
     assert cal._promote_linear(linear, (1.0, 5.0), (10.0, 28.0), 0.60, 0.6) is not None
+
+
+@pytest.mark.parametrize(
+    ("slope", "expected_constant_failure"),
+    [
+        (0.25, "UA"),        # constant fit -> UA 0.39, out of bounds
+        (0.30, "slope"),     # constant fit -> k <= 0, "non-positive decay slope"
+    ],
+)
+def test_a_seasonal_ambient_is_rescued_whichever_gate_the_constant_fit_trips(
+    slope, expected_constant_failure
+):
+    """The integration test the first cut was missing — and why it shipped broken.
+
+    A constant ambient forced across a seasonal range does not fail one specific
+    bound: it corrupts ``k``, so UA, R² and the ambient go wrong together and the
+    run trips whichever gate happens to come first. The first version only
+    consulted the linear model from the ambient-bounds branch, so on these two
+    inputs it discarded a fit that recovers the truth exactly.
+    """
+    true_ua, base_amb = 2.44, 17.5
+    eps = _episodes(
+        27, ua=true_ua,
+        ambient_of=lambda k: base_amb + slope * ((10.0 + 20.0 * k / 26.0) - 10.0),
+        t_out_of=lambda k: 10.0 + 20.0 * k / 26.0,   # 10 .. 30 °C, spread 20
+    )
+
+    # The constant model really does fail, and on the gate we expect.
+    const_only = cal.fit_ua_and_ambient(
+        [cal.CoastEpisode(e.start_utc, e.end_utc, e.points, None) for e in eps],
+        c_tank_j_per_k=C_TANK,
+    )
+    assert const_only["status"] == "skipped"
+    assert expected_constant_failure in const_only["reason"]
+
+    # With outdoor attached, the linear model is promoted and recovers the truth.
+    out = cal.fit_ua_and_ambient(eps, c_tank_j_per_k=C_TANK)
+    assert out["status"] == "ok", out
+    assert out["ambient_model"] == "linear"
+    assert out["ua_w_per_k"] == pytest.approx(true_ua, rel=0.10)
+    assert out["ambient_slope_per_c"] == pytest.approx(slope, abs=0.08)
+    # The rejected constant fit is still on the record.
+    assert "constant_fit" in out
+
+
+def test_the_linear_fit_is_never_held_to_a_looser_sample_gate():
+    """More parameters need MORE data, not less. With outdoor on only a handful
+    of nights the 3-parameter fit must decline rather than win on a subset."""
+    eps = _episodes(20, ua=2.44, ambient_of=lambda k: 22.0, t_out_of=lambda k: 10.0 + k)
+    for e in eps[:14]:
+        e.t_out_mean_c = None  # only 6 nights carry measured outdoor
+
+    assert cal._fit_linear_ambient(eps, c_tank_j_per_k=C_TANK, min_episodes=8) is None
