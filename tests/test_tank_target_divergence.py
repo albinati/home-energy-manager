@@ -88,6 +88,38 @@ def _seed_setback_row(now: datetime, tank_temp: int = 37) -> None:
     )
 
 
+def _seed_lift_latch(action_id: int, *, at: datetime, lift_c: int = 50) -> None:
+    """An `hp_target_lift` audit row with an EXPLICIT timestamp.
+
+    `db.log_action` stamps `datetime.now(UTC)`, and `_lift_latch_target` filters
+    `timestamp >= row_start - 1min` as a TEXT comparison — so a seeded row is
+    only visible when the real wall clock has passed the test's simulated date.
+    That is precisely the date-relative flake that reddens main near UTC
+    midnight, so write the timestamp directly instead of inheriting `now()`.
+    """
+    conn = db.get_connection()
+    try:
+        conn.execute(
+            "INSERT INTO action_log (timestamp, device, action, params, result, trigger) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                at.isoformat(),
+                "daikin",
+                "warmup_deadband_force",
+                json.dumps({
+                    "row_id": action_id,
+                    "mechanism": "hp_target_lift",
+                    "lift_target_c": lift_c,
+                }),
+                "success",
+                "hb",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _seed_one(at: datetime, target: float, tank: float = 40.0) -> None:
     """A single live telemetry row at an exact instant."""
     db.insert_daikin_telemetry({
@@ -316,18 +348,72 @@ def test_divergence_honours_a_latched_hp_target_lift(monkeypatch) -> None:
     )
     rows = db.get_actions_for_plan_date(start.astimezone(UTC).date().isoformat(), device="daikin")
     aid = int(rows[0]["id"])
-    db.log_action(
-        device="daikin",
-        action="warmup_deadband_force",
-        params={"row_id": aid, "mechanism": "hp_target_lift", "lift_target_c": 50},
-        result="success",
-        trigger="hb",
-    )
+    _seed_lift_latch(aid, at=start)
     _seed_telemetry(now, target=50.0, hours=0.5, tank=46.0)
     notify = MagicMock()
     monkeypatch.setattr("src.notifier.notify_tank_target_divergence", notify)
 
     sm._check_tank_target_divergence(_FakeDev(tank_target=50.0), now, trigger="hb")
+
+    notify.assert_not_called()
+
+
+def test_divergence_pages_when_a_stale_latch_no_longer_matches_the_device(monkeypatch) -> None:
+    """The latch is cleared ONLY by a `warmup_lift_settle` audit row. Any path
+    that returns the device to the row's goal without writing one — a failed
+    settle log, the #740 boot overwrite, the user restoring it by hand — must
+    not leave the check pinned at the cliff, or it would page "o plano pede 50"
+    about a device sitting exactly on the 47 the plan actually says."""
+    now = datetime(2026, 7, 28, 14, 30, tzinfo=UTC)
+    start = now - timedelta(hours=1)
+    db.upsert_action(
+        plan_date=start.astimezone(UTC).date().isoformat(),
+        start_time=_iso(start),
+        end_time=_iso(now + timedelta(hours=1)),
+        device="daikin",
+        action_type="tank_warmup",
+        params={"tank_power": True, "tank_temp": 47, "tank_powerful": False},
+        status="completed",
+    )
+    rows = db.get_actions_for_plan_date(start.astimezone(UTC).date().isoformat(), device="daikin")
+    _seed_lift_latch(int(rows[0]["id"]), at=start)
+    _seed_telemetry(now, target=47.0, hours=0.5, tank=47.0)
+    notify = MagicMock()
+    monkeypatch.setattr("src.notifier.notify_tank_target_divergence", notify)
+
+    # Device is back on the row's own goal: on plan, nothing to say.
+    sm._check_tank_target_divergence(_FakeDev(tank_target=47.0), now, trigger="hb")
+    notify.assert_not_called()
+
+    # ...and a REAL gesture during that same stale-latch window still pages.
+    later = now + timedelta(minutes=30)
+    _seed_one(later - timedelta(minutes=20), 30.0, tank=44.0)
+    _seed_one(later - timedelta(minutes=10), 30.0, tank=44.0)
+    sm._check_tank_target_divergence(_FakeDev(tank_target=30.0), later, trigger="hb")
+    notify.assert_called_once()
+    assert notify.call_args.kwargs["planned_c"] == 47.0
+
+
+def test_divergence_silent_during_the_legionella_standoff(monkeypatch) -> None:
+    """The firmware owns the tank during the weekly thermal shock and holds its
+    own disinfection setpoint — a sustained divergence by design. Under GMT the
+    whole window is covered by the PREVIOUS evening's already-`completed`
+    setback row, so the `pending` guard cannot catch this; it needs the direct
+    stand-off check every other tank path in the file uses."""
+    monkeypatch.setattr(config, "DHW_LEGIONELLA_STANDOFF_ENABLED", True, raising=False)
+    monkeypatch.setattr(config, "DHW_LEGIONELLA_STANDOFF_DOW", 6, raising=False)
+    monkeypatch.setattr(config, "DHW_LEGIONELLA_STANDOFF_START_HOUR_UTC", 11, raising=False)
+    monkeypatch.setattr(config, "DHW_LEGIONELLA_STANDOFF_START_MINUTE_UTC", 0, raising=False)
+    monkeypatch.setattr(config, "DHW_LEGIONELLA_STANDOFF_DURATION_MINUTES", 120, raising=False)
+
+    now = datetime(2026, 7, 26, 11, 30, tzinfo=UTC)  # a Sunday, inside the window
+    assert sm.in_legionella_standoff(now), "fixture must sit inside the stand-off"
+    _seed_setback_row(now, tank_temp=37)
+    _seed_telemetry(now, target=60.0, hours=1.0, tank=58.0)  # firmware's shock setpoint
+    notify = MagicMock()
+    monkeypatch.setattr("src.notifier.notify_tank_target_divergence", notify)
+
+    sm._check_tank_target_divergence(_FakeDev(tank_target=60.0), now, trigger="hb")
 
     notify.assert_not_called()
 

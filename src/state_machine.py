@@ -1750,6 +1750,18 @@ def _check_tank_target_divergence(
         return  # HEM is only observing; the firmware owns the setpoint
     if (config.OPTIMIZATION_PRESET or "normal").strip().lower() == "vacation":
         return
+    # The firmware OWNS the tank during the weekly thermal shock and holds its
+    # own disinfection setpoint, which is by definition a sustained divergence
+    # two telemetry samples will happily confirm. Every other tank path in this
+    # file bails here (`_reconcile_daikin_actions`, `apply_safe_defaults`,
+    # `_check_warmup_lift_settle`) and so must this one.
+    #
+    # The `pending` guard below does NOT cover this: under GMT the whole
+    # stand-off window is owned by the PREVIOUS evening's `tank_setback` row,
+    # which went terminal via pre-fire state match the night before, so no
+    # pending row exists in the window at all.
+    if in_legionella_standoff(now_utc):
+        return
 
     planned, source, row = _scheduled_tank_state(now_utc)
     if source != "schedule" or planned is None or row is None:
@@ -1774,22 +1786,6 @@ def _check_tank_target_divergence(
 
     planned_c = float(planned.get("tank_temp", config.DHW_TEMP_NORMAL_C))
 
-    # #737 — a latched HP target-lift deliberately commands the cliff while the
-    # stored row keeps its goal, so the device and the row disagree BY DESIGN
-    # for the duration of the lift. The #737 review called out a spurious
-    # 47 → 50 alert as the thing to avoid; honour the latch as the expected
-    # setpoint instead of paging about it.
-    row_start: datetime | None = None
-    try:
-        row_start = _parse_utc(row["start_time"])
-        latched = _lift_latch_target(int(row["id"]), row_start)
-        if latched is not None:
-            planned_c = float(latched)
-    except (KeyError, TypeError, ValueError):
-        pass
-    except Exception as _exc:  # noqa: BLE001 — a latch read must not page
-        logger.debug("tank-target divergence latch lookup failed: %s", _exc)
-
     live_c = getattr(dev, "tank_target", None)
     if live_c is None:
         return
@@ -1799,6 +1795,34 @@ def _check_tank_target_divergence(
         return
 
     tol = float(config.TANK_TARGET_DIVERGENCE_TOLERANCE_C)
+
+    # #737 — a latched HP target-lift deliberately commands the cliff while the
+    # stored row keeps its goal, so the device and the row disagree BY DESIGN
+    # for the duration of the lift. The #737 review called out a spurious
+    # 47 → 50 alert as the thing to avoid; honour the latch as the expected
+    # setpoint instead of paging about it.
+    #
+    # But ONLY while the device still holds ~the lift, mirroring the guard the
+    # other `_lift_latch_target` caller uses (#746, `:823`). The latch is
+    # cleared only by a `warmup_lift_settle` audit row, so any path that
+    # returns the device to the row's goal WITHOUT writing one — a failed
+    # settle log, the #740 boot overwrite in `apply_safe_defaults`, or the user
+    # restoring the goal by hand — would otherwise leave `planned_c` pinned at
+    # the cliff and page "o plano pede 50" about a device sitting exactly on
+    # the 47 the plan actually says. Reading `live_c` first is what makes that
+    # check possible; it also keeps the audit-log query off the ordinary tick.
+    row_start: datetime | None = None
+    try:
+        row_start = _parse_utc(row["start_time"])
+        if live_c > planned_c + tol:
+            latched = _lift_latch_target(int(row["id"]), row_start)
+            if latched is not None and live_c >= float(latched) - 0.6:
+                planned_c = float(latched)
+    except (KeyError, TypeError, ValueError):
+        pass
+    except Exception as _exc:  # noqa: BLE001 — a latch read must not page
+        logger.debug("tank-target divergence latch lookup failed: %s", _exc)
+
     if abs(live_c - planned_c) <= tol:
         # Converged — drop the token so a fresh divergence pages again.
         if _TANK_TARGET_DIVERGENCE_NOTIFIED is not None:
@@ -2016,12 +2040,14 @@ def _check_morning_tank_cold(
         result="alert",
         trigger=trigger,
     )
-    # Notify FIRST, then dedup — the sibling backstop in this file
-    # (`heartbeat_repair_fox_scheduler`) does the same. Acking first would burn
-    # the day's ONLY cold-shower warning on a transient Telegram outage, with
-    # no retry. There is no notification-storm risk in this order: the notify
-    # path swallows delivery failures rather than raising, so a failed send
-    # still falls through to the ack below and stops at one attempt.
+    # Notify FIRST, then dedup — matching `heartbeat_repair_fox_scheduler` in
+    # this file. To be precise about what this does and does not buy: the
+    # notify path swallows delivery failures rather than raising, so a Telegram
+    # outage burns the day's warning in EITHER order. The reorder only matters
+    # if the process dies between the two calls. It is still the right order —
+    # ack-last cannot lose a warning that ack-first would have kept — and it
+    # carries no storm risk precisely because a failed send still falls through
+    # to the ack and stops at one attempt.
     try:
         from .notifier import notify_morning_tank_cold
         notify_morning_tank_cold(
