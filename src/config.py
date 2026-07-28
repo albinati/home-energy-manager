@@ -2715,6 +2715,46 @@ class Config:
         os.getenv("TANK_DRIFT_CHECK_ENABLED", "true").strip().lower()
         in ("1", "true", "yes", "on")
     )
+    # 2026-07-28 — tank TARGET divergence backstop. `TANK_DRIFT_CHECK_ENABLED`
+    # above only watches tank_power (on/off); nothing watched the SETPOINT. On
+    # 2026-07-27 the tank target was moved 37 -> 30 from outside HEM (Onecta app
+    # / unit) at 22:32Z and nobody noticed for 14 h — the household woke to a
+    # 31 °C tank. The two existing override mechanisms both missed it: the
+    # covering `tank_setback` row was already `completed` (pre-fire noop), so
+    # the reconciler loop never revisits it, and `detect_user_override` only
+    # arms after a successful apply in the same process.
+    #
+    # This check is deliberately ALERT-ONLY (no auto-revert): a setpoint the
+    # user moved by hand is a legitimate gesture, and silently undoing it is
+    # worse than telling them. Costs ZERO Daikin API calls — it compares the
+    # heartbeat's already-fetched device snapshot against the plan row, and
+    # reads `daikin_telemetry` (written by polls that happen anyway) only to
+    # date the divergence.
+    TANK_TARGET_DIVERGENCE_CHECK_ENABLED: bool = (
+        os.getenv("TANK_TARGET_DIVERGENCE_CHECK_ENABLED", "true").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+    # Tolerance before a target gap counts as divergence. Row params are ints
+    # and `daikin_bulletproof` skips a PATCH within 0.6 °C, so anything at or
+    # under 1.0 is round-trip noise, not a gesture.
+    TANK_TARGET_DIVERGENCE_TOLERANCE_C: float = float(
+        os.getenv("TANK_TARGET_DIVERGENCE_TOLERANCE_C", "1.0")
+    )
+    # 2026-07-28 — pre-shower cold-tank warning. Fires inside a UTC window in
+    # the morning when the tank sits below DHW_MORNING_RESERVE_C, while there
+    # is still time to react (the plan's own recovery is the afternoon warmup,
+    # ~13:00 local — far too late for an 08:00 shower). Alert only; the
+    # structural fix is the morning floor (B2/B3), this is the safety net.
+    MORNING_TANK_COLD_CHECK_ENABLED: bool = (
+        os.getenv("MORNING_TANK_COLD_CHECK_ENABLED", "true").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+    MORNING_TANK_COLD_CHECK_START_HOUR_UTC: int = int(
+        os.getenv("MORNING_TANK_COLD_CHECK_START_HOUR_UTC", "5")
+    )
+    MORNING_TANK_COLD_CHECK_END_HOUR_UTC: int = int(
+        os.getenv("MORNING_TANK_COLD_CHECK_END_HOUR_UTC", "7")
+    )
     # #461 — LWT-offset drift backstop. When HEM owns the offset (pre-heat
     # enabled) and the live offset is non-zero but no active lwt_preheat slot
     # justifies it, reset it to 0 — after the user's grace window

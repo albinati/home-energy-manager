@@ -57,6 +57,16 @@ _USER_OVERRIDE_INHERITED_NOTIFIED: set[int] = set()
 # page Telegram every 2 min for the same condition. Cleared when the heartbeat
 # observes tank_on == True again — a fresh drift episode then re-pings.
 _TANK_DRIFT_NOTIFIED: bool = False
+# 2026-07-28 — tank TARGET divergence dedup. Holds the (planned, live) pair we
+# last paged about, rounded to whole °C, so a sustained divergence pages once
+# but a *different* divergence (user nudges 30 → 32) pages again. Cleared when
+# the live target converges back onto the plan.
+_TANK_TARGET_DIVERGENCE_NOTIFIED: tuple[int, int] | None = None
+# How far ahead the cold-tank check looks for the shower window it is warning
+# about. Bounds the alert to the window the household is genuinely about to
+# enter — without it, a 06:00 check would happily page about the 19:00 evening
+# window, which the afternoon warmup is going to fix anyway.
+_MORNING_COLD_LOOKAHEAD_HOURS = 3.0
 # Last time the negative-boost backstop re-asserted DHW Powerful (cadence gate).
 _NEG_BOOST_POWERFUL_LAST_UTC: datetime | None = None
 _NEG_BOOST_STALL_COUNT: int = 0
@@ -387,8 +397,16 @@ def _schedule_signature(groups: list[Any]) -> str:
     return json.dumps(payload, sort_keys=True, default=str)
 
 
-def _scheduled_tank_state(now_utc: datetime) -> tuple[dict[str, Any] | None, str]:
+def _scheduled_tank_state(
+    now_utc: datetime,
+) -> tuple[dict[str, Any] | None, str, str | None]:
     """The tank params of the schedule row covering ``now_utc``, if any (#740).
+
+    Returns ``(params, source, action_type)``. ``action_type`` names the row the
+    params came from (``tank_warmup`` / ``tank_setback`` / ``tank_negative_boost``)
+    and is ``None`` whenever ``params`` is — it is reporting context only, kept
+    OUT of the params dict because that dict is handed straight to
+    ``apply_scheduled_daikin_params``.
 
     The schedule IS the safe default. Commanding ``DHW_TEMP_NORMAL_C`` blindly
     on shutdown/boot erased the overnight setback: measured 2026-07-18, two
@@ -411,6 +429,7 @@ def _scheduled_tank_state(now_utc: datetime) -> tuple[dict[str, Any] | None, str
     best_boost = False
     best_start: datetime | None = None
     best_overridden = False
+    best_kind: str | None = None
     # Rows are filed under their LOCAL plan date (review: recover_on_boot,
     # dhw_policy and the boost-recovery path all anchor local) — querying UTC
     # dates left local-today's rows invisible 23:00-00:00Z during BST.
@@ -465,8 +484,9 @@ def _scheduled_tank_state(now_utc: datetime) -> tuple[dict[str, Any] | None, str
                 best_boost = is_boost
                 best_start = start
                 best_overridden = row_overridden
+                best_kind = act.get("action_type")
     if best_overridden:
-        return (None, "user_override")
+        return (None, "user_override", None)
     if best is not None:
         return (
             {
@@ -475,8 +495,9 @@ def _scheduled_tank_state(now_utc: datetime) -> tuple[dict[str, Any] | None, str
                 "tank_power": bool(best.get("tank_power", True)),
             },
             "schedule",
+            best_kind,
         )
-    return (None, "none")
+    return (None, "none", None)
 
 
 def apply_safe_defaults(
@@ -583,7 +604,7 @@ def apply_safe_defaults(
         # skip_if_matches=True so a device already in plan state costs zero
         # Daikin writes; the no-covering-row fallback keeps the original
         # forced NORMAL_C (true fault recovery, unknown plan state).
-        tank_params, source = _scheduled_tank_state(datetime.now(UTC))
+        tank_params, source, _kind = _scheduled_tank_state(datetime.now(UTC))
         if source == "user_override":
             db.log_action(
                 device="daikin",
@@ -1082,6 +1103,15 @@ def _reconcile_daikin_actions(
     # the freshly-drawn tank at peak price from the battery. Persist-once per
     # day; dhw_policy regenerations honour the same key (K1+K2 lockstep).
     _check_dhw_shower_drawdown(actions, dev, now_utc, trigger=trigger)
+    # 2026-07-28 — the live tank SETPOINT vs the plan row that owns now. The
+    # drift check above only watches tank_power; a manual 37 → 30 on 2026-07-27
+    # sat unnoticed for 14 h because the covering row was already `completed`
+    # (pre-fire noop) and so the reconciler never revisited it. Alert only.
+    _check_tank_target_divergence(dev, now_utc, trigger=trigger)
+    # 2026-07-28 — pre-shower cold-tank warning. The fixed schedule's only
+    # recovery is the afternoon warmup, hours after the morning shower, so
+    # without this the first signal is a cold shower.
+    _check_morning_tank_cold(actions, dev, now_utc, trigger=trigger)
     # PR J diverter removed 2026-05-23 (K2-cleanup) — superseded by K1's
     # dhw_policy fixed schedule. The diverter's "lift tank during PV
     # abundance" goal is now redundant: tank lives at NORMAL=45 °C via
@@ -1667,6 +1697,277 @@ def _check_tank_power_drift(
             notify_critical(msg) if not recovered else notify_risk(msg)
         except Exception as _exc:
             logger.debug("tank-drift notify failed (non-fatal): %s", _exc)
+
+
+def _check_tank_target_divergence(
+    dev: Any,
+    now_utc: datetime,
+    *,
+    trigger: str,
+) -> None:
+    """2026-07-28 — alert when the live tank SETPOINT disagrees with the plan.
+
+    ``_check_tank_power_drift`` above watches tank_power (on/off) only. Nothing
+    watched the setpoint, and on 2026-07-27 a manual 37 → 30 (Onecta app / unit)
+    at 22:32Z went unnoticed for 14 h; the household woke to a 31 °C tank. Both
+    existing override mechanisms structurally miss this case:
+
+    * the covering ``tank_setback`` row was already ``completed`` (pre-fire
+      noop), and ``_reconcile_daikin_actions`` only revisits pending/active
+      rows — so no comparison ever ran;
+    * ``detect_user_override`` only arms for rows this process has successfully
+      applied (``_FIRST_APPLIED_SESSION``).
+
+    ALERT ONLY, deliberately. A setpoint moved by hand is a legitimate gesture;
+    silently reverting it is worse than reporting it. The value is telling the
+    user it is *still in force*.
+
+    Costs ZERO Daikin API calls: ``dev`` is the heartbeat's already-fetched
+    snapshot, and ``daikin_telemetry`` is written by polls that happen anyway.
+
+    Bails (fail-safe — silence beats a false page):
+    * feature flag off, passive mode, or vacation preset;
+    * no schedule row owns this moment, or the owning row is user-overridden
+      (``_scheduled_tank_state`` already reports that) — the reconciler's own
+      override machinery owns that case and pages separately;
+    * the plan row wants the tank OFF (setpoint is meaningless then);
+    * live setpoint unknown;
+    * gap within tolerance;
+    * the divergence is not confirmed by the two most recent live telemetry
+      samples — a single reading can be caught mid-PATCH.
+    """
+    global _TANK_TARGET_DIVERGENCE_NOTIFIED
+
+    if not config.TANK_TARGET_DIVERGENCE_CHECK_ENABLED:
+        return
+    if (config.DAIKIN_CONTROL_MODE or "").strip().lower() == "passive":
+        return  # HEM is only observing; the firmware owns the setpoint
+    if (config.OPTIMIZATION_PRESET or "normal").strip().lower() == "vacation":
+        return
+
+    planned, source, action_type = _scheduled_tank_state(now_utc)
+    if source != "schedule" or planned is None:
+        return
+    if not planned.get("tank_power", True):
+        return  # tank deliberately off — the setpoint carries no intent
+    planned_c = float(planned.get("tank_temp", config.DHW_TEMP_NORMAL_C))
+
+    live_c = getattr(dev, "tank_target", None)
+    if live_c is None:
+        return
+    try:
+        live_c = float(live_c)
+    except (TypeError, ValueError):
+        return
+
+    tol = float(config.TANK_TARGET_DIVERGENCE_TOLERANCE_C)
+    if abs(live_c - planned_c) <= tol:
+        # Converged — drop the token so a fresh divergence pages again.
+        if _TANK_TARGET_DIVERGENCE_NOTIFIED is not None:
+            _TANK_TARGET_DIVERGENCE_NOTIFIED = None
+        return
+
+    # Confirm against telemetry: the newest live samples must agree that the
+    # device really holds this target. Guards against a snapshot read between
+    # our own PATCH of tank_power and tank_temp.
+    since_iso: str | None = None
+    hours: float | None = None
+    try:
+        rows = db.get_tank_temp_targets_range(
+            (now_utc - timedelta(hours=48)).timestamp(), now_utc.timestamp()
+        )
+    except Exception as _exc:  # noqa: BLE001 — a broken read must not page
+        logger.debug("tank-target divergence telemetry read failed: %s", _exc)
+        return
+    if len(rows) < 2:
+        return
+    if not all(abs(float(t) - live_c) <= tol for _, _, t in rows[-2:]):
+        return  # not yet confirmed by the device's own history
+
+    # Date the divergence: walk back while the device held this same target.
+    run_start = rows[-1][0]
+    for ts, _tank, tgt in reversed(rows):
+        if abs(float(tgt) - live_c) > tol:
+            break
+        run_start = ts
+    since = datetime.fromtimestamp(run_start, UTC)
+    since_iso = since.isoformat()
+    hours = max(0.0, (now_utc - since).total_seconds() / 3600.0)
+
+    sig = (int(round(planned_c)), int(round(live_c)))
+    if _TANK_TARGET_DIVERGENCE_NOTIFIED == sig:
+        return
+    _TANK_TARGET_DIVERGENCE_NOTIFIED = sig
+
+    db.log_action(
+        device="daikin",
+        action="tank_target_divergence",
+        params={
+            "planned_c": planned_c,
+            "live_c": live_c,
+            "delta_c": round(live_c - planned_c, 1),
+            "since_utc": since_iso,
+            "hours": round(hours, 2) if hours is not None else None,
+        },
+        result="alert",
+        trigger=trigger,
+    )
+    try:
+        from .notifier import notify_tank_target_divergence
+        notify_tank_target_divergence(
+            planned_c=planned_c,
+            live_c=live_c,
+            since_iso=since_iso,
+            hours=hours,
+            action_type=action_type,
+        )
+    except Exception as _exc:  # noqa: BLE001 — notification is best-effort
+        logger.debug("tank-target divergence notify failed (non-fatal): %s", _exc)
+
+
+def _check_morning_tank_cold(
+    actions: list[dict[str, Any]],
+    dev: Any,
+    now_utc: datetime,
+    *,
+    trigger: str,
+) -> None:
+    """2026-07-28 — warn when the tank is below the morning floor with time left.
+
+    Under the K1 fixed schedule the only recovery is the afternoon ``tank_warmup``
+    (~13:00 local), which is hours AFTER the morning shower. So without this the
+    first signal a cold tank gives is a cold shower — measured 2/31 mornings
+    below the household's 37 °C bar over 2026-06-28..07-28.
+
+    Alert only; the structural fix is the morning reserve floor. Fires once per
+    local day (``acknowledged_warnings``), inside a UTC window chosen so there
+    is still time to react before the shower.
+
+    Costs ZERO Daikin API calls — ``dev`` is the heartbeat snapshot, with a
+    ``daikin_telemetry`` fallback when the tank reading is missing.
+    """
+    if not config.MORNING_TANK_COLD_CHECK_ENABLED:
+        return
+    if (config.OPTIMIZATION_PRESET or "normal").strip().lower() == "vacation":
+        return
+
+    h = now_utc.hour
+    if not (
+        int(config.MORNING_TANK_COLD_CHECK_START_HOUR_UTC)
+        <= h
+        < int(config.MORNING_TANK_COLD_CHECK_END_HOUR_UTC)
+    ):
+        return
+
+    try:
+        tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+    except Exception:  # noqa: BLE001
+        tz = UTC
+    now_local = now_utc.astimezone(tz)
+    warning_key = f"morning_tank_cold_{now_local.date().isoformat()}"
+    try:
+        if db.is_warning_acknowledged(warning_key):
+            return
+    except Exception as _exc:  # noqa: BLE001
+        logger.debug("morning-tank-cold dedup read failed: %s", _exc)
+        return
+
+    tank_c = getattr(dev, "tank_temperature", None)
+    if tank_c is None:
+        try:
+            row = db.get_latest_daikin_telemetry(source="live")
+            tank_c = (row or {}).get("tank_temp_c")
+        except Exception as _exc:  # noqa: BLE001
+            logger.debug("morning-tank-cold telemetry read failed: %s", _exc)
+            return
+    if tank_c is None:
+        return
+    try:
+        tank_c = float(tank_c)
+    except (TypeError, ValueError):
+        return
+
+    # Reuse the declared comfort windows rather than re-reading the raw setting,
+    # so the alert and the (LP) constraint can never disagree about the floor.
+    #
+    # The floor we care about is the one for the shower window the household is
+    # about to ENTER, not the floor right now: the whole point is to warn while
+    # there is still time to react, which means before the window opens (and
+    # `comfort_floor_c` returns None outside it).
+    now_hour = now_local.hour + now_local.minute / 60.0
+    try:
+        from .dhw.comfort import shower_windows
+        upcoming = [
+            w
+            for w in shower_windows(
+                preset=(config.OPTIMIZATION_PRESET or "normal"),
+                guest_count=int(getattr(config, "DHW_GUEST_COUNT", 2) or 2),
+            )
+            if w.end_hour > now_hour
+            and w.start_hour - now_hour <= _MORNING_COLD_LOOKAHEAD_HOURS
+        ]
+    except Exception as _exc:  # noqa: BLE001 — a settings outage must not page
+        logger.debug("morning-tank-cold window lookup failed: %s", _exc)
+        return
+    if not upcoming:
+        return  # no shower window near enough to warn about
+    window = min(upcoming, key=lambda w: w.start_hour)
+    floor_c = float(window.floor_c)
+    if tank_c >= floor_c:
+        return
+
+    # When is the plan going to fix this on its own?
+    next_warmup_local: str | None = None
+    best: datetime | None = None
+    for act in actions:
+        if act.get("action_type") != "tank_warmup":
+            continue
+        try:
+            start = _parse_utc(act["start_time"])
+        except (ValueError, KeyError, TypeError):
+            continue
+        if start <= now_utc:
+            continue
+        if best is None or start < best:
+            best = start
+    if best is not None:
+        next_warmup_local = best.astimezone(tz).strftime("%H:%M")
+
+    try:
+        db.acknowledge_warning(warning_key)
+    except Exception as _exc:  # noqa: BLE001
+        logger.debug("morning-tank-cold dedup write failed: %s", _exc)
+
+    target_c = getattr(dev, "tank_target", None)
+    try:
+        target_c = float(target_c) if target_c is not None else None
+    except (TypeError, ValueError):
+        target_c = None
+
+    db.log_action(
+        device="daikin",
+        action="morning_tank_cold",
+        params={
+            "tank_c": tank_c,
+            "floor_c": floor_c,
+            "target_c": target_c,
+            "window": window.label,
+            "window_start_hour_local": window.start_hour,
+            "next_warmup_local": next_warmup_local,
+        },
+        result="alert",
+        trigger=trigger,
+    )
+    try:
+        from .notifier import notify_morning_tank_cold
+        notify_morning_tank_cold(
+            tank_c=tank_c,
+            floor_c=floor_c,
+            target_c=target_c,
+            next_warmup_local=next_warmup_local,
+        )
+    except Exception as _exc:  # noqa: BLE001 — notification is best-effort
+        logger.debug("morning-tank-cold notify failed (non-fatal): %s", _exc)
 
 
 def _check_negative_boost_powerful(
