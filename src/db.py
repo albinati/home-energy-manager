@@ -5563,6 +5563,34 @@ def get_dhw_calibration(component: str) -> dict[str, Any] | None:
             conn.close()
 
 
+def get_outdoor_temps_range(
+    start_epoch: float, end_epoch: float
+) -> list[tuple[float, float]]:
+    """``(fetched_at, outdoor_temp_c)`` LIVE rows in ``[start, end)``, ascending.
+
+    Feeds the DHW tank-coast fit's hot/cold stratification: the airing cupboard's
+    effective ambient tracks the house, which tracks outdoors, so pooling a July
+    night and a January night under ONE constant ambient is what pushes that
+    parameter out of its physical bounds.
+
+    MEASURED outdoor, not forecast — the same echo-trap discipline as the tank
+    readers. ``source='live'`` only; the physics-estimator rows carry a modelled
+    outdoor and would feed the model its own output back."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT fetched_at, outdoor_temp_c FROM daikin_telemetry "
+                "WHERE fetched_at >= ? AND fetched_at < ? "
+                "AND outdoor_temp_c IS NOT NULL AND source = 'live' "
+                "ORDER BY fetched_at ASC",
+                (start_epoch, end_epoch),
+            )
+            return [(float(r[0]), float(r[1])) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
 def get_daily_mean_outdoor_c(since_day_iso: str) -> dict[str, float]:
     """Mean LIVE outdoor temperature per UTC day since ``since_day_iso`` — the
     seasonal classifier for the DHW shadow's winter watch (#714). UTC days are fine

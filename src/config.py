@@ -1813,6 +1813,16 @@ class Config:
         "DHW_CALIBRATION_ENABLED", "true"
     ).lower() == "true"
     DHW_CALIBRATION_WINDOW_DAYS: int = int(os.getenv("DHW_CALIBRATION_WINDOW_DAYS", "21"))
+    # The tank UA/ambient fit gets its own, longer window. Coast episodes (an
+    # unheated, draw-free, >=4 h overnight stretch) are rare, and two free
+    # parameters need more than the ~20 that 21 days yields. Measured against
+    # the prod DB on 2026-07-28: 21 d -> 20 episodes -> ambient 0.5 C, REJECTED;
+    # 45 d -> 27 episodes -> ambient 13.2 C, UA 1.96 W/K, tau 114 h, R^2 0.71.
+    # Same data and model — seven more episodes is the whole difference. The
+    # cupboard's UA does not drift month to month, so length costs no staleness.
+    DHW_UA_CALIBRATION_WINDOW_DAYS: int = int(
+        os.getenv("DHW_UA_CALIBRATION_WINDOW_DAYS", "45")
+    )
     # A summer-fitted ambient must not steer a winter plan: past this age the reader
     # falls back to the databook and logs it.
     DHW_CALIBRATION_MAX_AGE_DAYS: float = float(
