@@ -369,3 +369,151 @@ def test_delayed_powerful_fallback_fire_is_excluded_via_observation_overlap():
     fit = fit_reheat_differential(rows, powerful_windows_utc=pwin)
     deltas = [e["delta_c"] for e in fit["episodes"]]
     assert 3.0 not in deltas and len(fit["episodes"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# 2026-07-28 — hot/cold context, observability, and the window that was too short
+# ---------------------------------------------------------------------------
+
+
+def _episodes(n: int, *, ua: float, ambient_of, t_out_of, hours: float = 8.0):
+    """``n`` nightly coasts, each at its own ambient and tagged with its outdoor."""
+    eps = []
+    base = datetime(2026, 5, 1, 22, 0, tzinfo=UTC)
+    for k in range(n):
+        start = base + timedelta(days=k)
+        t_out = t_out_of(k)
+        amb = ambient_of(k)
+        rows = _coast_rows(start, t0=55.0, hours=hours, ua=ua, ambient=amb)
+        eps.extend(cal.select_coast_episodes(
+            rows, [], tz=ZoneInfo("Europe/London"),
+            outdoor_by_utc=[(datetime.fromtimestamp(ts, UTC), t_out) for ts, _ in rows],
+        ))
+    return eps
+
+
+def test_every_skip_path_carries_the_fit_it_rejected():
+    """The old payloads dropped whichever fields the failing gate did not name.
+    Prod could see that a fit was rejected for its ambient but not what UA or R²
+    it had reached, so the obvious next question was unanswerable from the record.
+    """
+    # An ambient well below the physical bound, cleanly fitted.
+    eps = _episodes(12, ua=2.44, ambient_of=lambda k: 2.0, t_out_of=lambda k: 20.0)
+    out = cal.fit_ua_and_ambient(eps, c_tank_j_per_k=C_TANK)
+
+    assert out["status"] == "skipped"
+    assert "ambient" in out["reason"]
+    # The whole fit survives the rejection, not just the field that failed.
+    for key in ("ua_w_per_k", "ambient_c", "tau_hours", "r2", "episodes"):
+        assert key in out, f"{key} missing from the skip payload"
+    assert out["ua_w_per_k"] == pytest.approx(2.44, rel=0.05)
+
+
+def test_episodes_carry_measured_outdoor():
+    eps = _episodes(3, ua=2.44, ambient_of=lambda k: 22.0, t_out_of=lambda k: 10.0 + 5 * k)
+    assert [round(e.t_out_mean_c) for e in eps] == [10, 15, 20]
+
+
+def test_linear_ambient_recovers_a_cupboard_that_tracks_outdoors():
+    """The physical claim: the cupboard's ambient is not a constant, it follows the
+    house. With enough outdoor spread the linear model should recover the slope."""
+    eps = _episodes(
+        14, ua=2.44,
+        ambient_of=lambda k: 14.0 + 0.4 * (k - 7),   # ambient tracks outdoor at 0.4
+        t_out_of=lambda k: float(k - 7),             # -7 .. +6 °C
+    )
+    lin = cal._fit_linear_ambient(eps, c_tank_j_per_k=C_TANK)
+
+    assert lin is not None and lin["status"] == "ok", lin
+    assert lin["ambient_slope_per_c"] == pytest.approx(0.4, abs=0.15)
+    assert lin["ua_w_per_k"] == pytest.approx(2.44, rel=0.10)
+
+
+def test_linear_ambient_refuses_without_outdoor_spread():
+    """A slope fitted through nights that were all the same temperature is a
+    confident-looking number with no information in it. Summer-only data (the
+    real 2026-07 case: 18.4-28.2 °C) must not be allowed to set one."""
+    eps = _episodes(12, ua=2.44, ambient_of=lambda k: 22.0, t_out_of=lambda k: 20.0 + 0.2 * k)
+    lin = cal._fit_linear_ambient(eps, c_tank_j_per_k=C_TANK)
+
+    assert lin is not None and lin["status"] == "skipped"
+    assert "spread" in lin["reason"]
+
+
+@pytest.mark.parametrize(
+    ("linear", "why"),
+    [
+        ({"status": "ok", "ua_w_per_k": 2.4, "ambient_c": 15.0,
+          "ambient_slope_per_c": 6.9, "r2": 0.99}, "slope above 1:1"),
+        ({"status": "ok", "ua_w_per_k": 2.4, "ambient_c": -28.9,
+          "ambient_slope_per_c": 0.5, "r2": 0.99}, "ambient out of bounds"),
+        ({"status": "ok", "ua_w_per_k": 2.4, "ambient_c": 15.0,
+          "ambient_slope_per_c": 0.5, "r2": 0.605}, "R2 barely above the constant"),
+        ({"status": "ok", "ua_w_per_k": 9.9, "ambient_c": 15.0,
+          "ambient_slope_per_c": 0.5, "r2": 0.99}, "UA out of bounds"),
+    ],
+)
+def test_linear_ambient_is_not_promoted_on_a_bad_fit(linear, why):
+    """A third parameter can only ever RAISE in-sample R², so "it fits better" is
+    not evidence on its own. These are the real shapes the prod replay produced:
+    slope 6.9 with intercept -180 °C, i.e. noise wearing a physics costume."""
+    assert cal._promote_linear(linear, (1.0, 5.0), (10.0, 28.0), 0.60, 0.6) is None, why
+
+
+def test_linear_ambient_is_promoted_when_it_genuinely_rescues_the_fit():
+    linear = {"status": "ok", "ua_w_per_k": 2.4, "ambient_c": 15.0,
+              "ambient_slope_per_c": 0.5, "r2": 0.80}
+    assert cal._promote_linear(linear, (1.0, 5.0), (10.0, 28.0), 0.60, 0.6) is not None
+
+
+@pytest.mark.parametrize(
+    ("slope", "expected_constant_failure"),
+    [
+        (0.25, "UA"),        # constant fit -> UA 0.39, out of bounds
+        (0.30, "slope"),     # constant fit -> k <= 0, "non-positive decay slope"
+    ],
+)
+def test_a_seasonal_ambient_is_rescued_whichever_gate_the_constant_fit_trips(
+    slope, expected_constant_failure
+):
+    """The integration test the first cut was missing — and why it shipped broken.
+
+    A constant ambient forced across a seasonal range does not fail one specific
+    bound: it corrupts ``k``, so UA, R² and the ambient go wrong together and the
+    run trips whichever gate happens to come first. The first version only
+    consulted the linear model from the ambient-bounds branch, so on these two
+    inputs it discarded a fit that recovers the truth exactly.
+    """
+    true_ua, base_amb = 2.44, 17.5
+    eps = _episodes(
+        27, ua=true_ua,
+        ambient_of=lambda k: base_amb + slope * ((10.0 + 20.0 * k / 26.0) - 10.0),
+        t_out_of=lambda k: 10.0 + 20.0 * k / 26.0,   # 10 .. 30 °C, spread 20
+    )
+
+    # The constant model really does fail, and on the gate we expect.
+    const_only = cal.fit_ua_and_ambient(
+        [cal.CoastEpisode(e.start_utc, e.end_utc, e.points, None) for e in eps],
+        c_tank_j_per_k=C_TANK,
+    )
+    assert const_only["status"] == "skipped"
+    assert expected_constant_failure in const_only["reason"]
+
+    # With outdoor attached, the linear model is promoted and recovers the truth.
+    out = cal.fit_ua_and_ambient(eps, c_tank_j_per_k=C_TANK)
+    assert out["status"] == "ok", out
+    assert out["ambient_model"] == "linear"
+    assert out["ua_w_per_k"] == pytest.approx(true_ua, rel=0.10)
+    assert out["ambient_slope_per_c"] == pytest.approx(slope, abs=0.08)
+    # The rejected constant fit is still on the record.
+    assert "constant_fit" in out
+
+
+def test_the_linear_fit_is_never_held_to_a_looser_sample_gate():
+    """More parameters need MORE data, not less. With outdoor on only a handful
+    of nights the 3-parameter fit must decline rather than win on a subset."""
+    eps = _episodes(20, ua=2.44, ambient_of=lambda k: 22.0, t_out_of=lambda k: 10.0 + k)
+    for e in eps[:14]:
+        e.t_out_mean_c = None  # only 6 nights carry measured outdoor
+
+    assert cal._fit_linear_ambient(eps, c_tank_j_per_k=C_TANK, min_episodes=8) is None

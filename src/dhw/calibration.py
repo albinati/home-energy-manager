@@ -65,6 +65,11 @@ class CoastEpisode:
     end_utc: datetime
     points: list[tuple[float, float]]
     indoor_mean_c: float | None
+    # MEASURED outdoor mean over the episode. The airing cupboard's effective
+    # ambient tracks the house, which tracks outdoors — so this is what lets a
+    # July night and a January night share one fit instead of fighting over a
+    # single constant. None when no live outdoor telemetry covers the episode.
+    t_out_mean_c: float | None = None
 
 
 @dataclass
@@ -111,6 +116,7 @@ def select_coast_episodes(
     indoor_by_utc: list[tuple[datetime, float]],
     *,
     tz: ZoneInfo,
+    outdoor_by_utc: list[tuple[datetime, float]] | None = None,
     night_start_hour_local: int = 22,
     night_end_hour_local: int = 11,
     min_hours: float = 4.0,
@@ -143,8 +149,14 @@ def select_coast_episodes(
             return h >= night_start_hour_local or h < night_end_hour_local
         return night_start_hour_local <= h < night_end_hour_local
 
+    outdoor = sorted(outdoor_by_utc or [])
+
     def _indoor_mean(a: datetime, b: datetime) -> float | None:
         vals = [v for ts, v in indoor if a <= ts <= b]
+        return sum(vals) / len(vals) if vals else None
+
+    def _outdoor_mean(a: datetime, b: datetime) -> float | None:
+        vals = [v for ts, v in outdoor if a <= ts <= b]
         return sum(vals) / len(vals) if vals else None
 
     segments: list[list[tuple[datetime, float]]] = []
@@ -182,6 +194,7 @@ def select_coast_episodes(
             end_utc=end,
             points=[((ts - start).total_seconds() / 3600.0, v) for ts, v in seg],
             indoor_mean_c=_indoor_mean(start, end),
+            t_out_mean_c=_outdoor_mean(start, end),
         ))
     return episodes
 
@@ -189,6 +202,111 @@ def select_coast_episodes(
 # ---------------------------------------------------------------------------
 # The joint fit (pure)
 # ---------------------------------------------------------------------------
+
+
+def _solve3(m: list[list[float]], rhs: list[float]) -> list[float] | None:
+    """Gaussian elimination with partial pivoting for a 3x3 system.
+
+    Kept local and dependency-free for the same reason the 2x2 below is solved
+    by explicit determinant: this module runs inside a nightly cron in a slim
+    container and must not grow a numeric dependency for nine coefficients.
+    """
+    a = [row[:] + [rhs[i]] for i, row in enumerate(m)]
+    for col in range(3):
+        piv = max(range(col, 3), key=lambda r: abs(a[r][col]))
+        if abs(a[piv][col]) < 1e-12:
+            return None
+        a[col], a[piv] = a[piv], a[col]
+        for r in range(3):
+            if r == col:
+                continue
+            f = a[r][col] / a[col][col]
+            for c in range(col, 4):
+                a[r][c] -= f * a[col][c]
+    return [a[i][3] / a[i][i] for i in range(3)]
+
+
+def _fit_linear_ambient(
+    episodes: list[CoastEpisode], *, c_tank_j_per_k: float, min_episodes: int = 8
+) -> dict[str, Any] | None:
+    """Same ODE, but with the ambient allowed to track outdoors: ``A = a + b·T_out``.
+
+    Substituting into ``T0 − Ti = k·∫T ds − k·A·ti`` gives three linear terms —
+    ``[∫T ds, ti, T_out·ti]`` with coefficients ``[k, −k·a, −k·b]`` — so it is the
+    same regression with one more column, not a different model.
+
+    Returns None (rather than a skip dict) when it cannot be attempted at all:
+    this is the OPTIONAL refinement, and the constant-ambient fit remains the
+    primary. Needs outdoor spread to be identifiable — fitting a slope through
+    three nights that were all 18 °C would produce a confident-looking number
+    with no information in it.
+    """
+    rows: list[tuple[float, float, float, float]] = []  # (∫T ds, ti, T_out·ti, y)
+    t_outs: list[float] = []
+    n_used = 0
+    for ep in episodes:
+        if ep.t_out_mean_c is None or len(ep.points) < 3:
+            continue
+        n_used += 1
+        t_outs.append(float(ep.t_out_mean_c))
+        t0 = ep.points[0][1]
+        integral = 0.0
+        for i in range(1, len(ep.points)):
+            dt_h = ep.points[i][0] - ep.points[i - 1][0]
+            integral += 0.5 * (ep.points[i][1] + ep.points[i - 1][1]) * dt_h
+            ti = ep.points[i][0]
+            rows.append((integral, ti, float(ep.t_out_mean_c) * ti, t0 - ep.points[i][1]))
+
+    # At least as strict as the 2-parameter fit. It was briefly looser (6 vs 8),
+    # which is backwards — more parameters need more data, not less — and it
+    # bit exactly where outdoor coverage is partial: episodes without measured
+    # outdoor are dropped here but counted there, so a 20-episode constant fit
+    # could be compared against a 6-episode linear one and lose. Measured: UA
+    # 2.196 / ambient 20.2 over 20 nights vs UA 2.44 / ambient 26.1 over the
+    # last 6, with the linear R² higher purely because it saw less weather.
+    if n_used < min_episodes or len(rows) < 3 * min_episodes:
+        return None
+    spread = max(t_outs) - min(t_outs)
+    if spread < 5.0:
+        return {"status": "skipped", "reason": f"outdoor spread only {spread:.1f} °C; need >= 5",
+                "episodes": n_used, "t_out_spread_c": spread}
+
+    def s(i: int, j: int) -> float:
+        return sum(r[i] * r[j] for r in rows)
+
+    m = [[s(0, 0), s(0, 1), s(0, 2)],
+         [s(0, 1), s(1, 1), s(1, 2)],
+         [s(0, 2), s(1, 2), s(2, 2)]]
+    sol = _solve3(m, [s(0, 3), s(1, 3), s(2, 3)])
+    if sol is None:
+        return {"status": "skipped", "reason": "degenerate linear-ambient regression",
+                "episodes": n_used}
+    k, c2, c3 = sol
+    if k <= 0:
+        return {"status": "skipped", "reason": "non-positive decay slope (linear ambient)",
+                "episodes": n_used}
+    a_int = -c2 / k
+    b_slope = -c3 / k
+    ua = k * c_tank_j_per_k / 3600.0
+
+    y_mean = sum(r[3] for r in rows) / len(rows)
+    ss_tot = sum((r[3] - y_mean) ** 2 for r in rows)
+    ss_res = sum((r[3] - (k * r[0] + c2 * r[1] + c3 * r[2])) ** 2 for r in rows)
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+
+    t_out_median = sorted(t_outs)[len(t_outs) // 2]
+    return {
+        "status": "ok",
+        "ua_w_per_k": float(ua),
+        "ambient_intercept_c": float(a_int),
+        "ambient_slope_per_c": float(b_slope),
+        "t_out_median_c": float(t_out_median),
+        "t_out_spread_c": float(spread),
+        "ambient_c": float(a_int + b_slope * t_out_median),
+        "tau_hours": float(c_tank_j_per_k / (ua * 3600.0)),
+        "r2": float(r2),
+        "episodes": n_used,
+    }
 
 
 def fit_ua_and_ambient(
@@ -224,12 +342,49 @@ def fit_ua_and_ambient(
             integral += 0.5 * (pts[i][1] + pts[i - 1][1]) * dt
             rows.append((integral, pts[i][0], t0 - pts[i][1]))
 
+    # The linear-ambient alternative is computed ONCE, up front, so every exit
+    # below can consult it. Doing it lazily at the ambient-bounds gate — as the
+    # first cut did — made it unreachable on exactly the failures it exists to
+    # rescue: a constant ambient forced across a seasonal range does not fail
+    # one specific bound, it corrupts `k`, and so UA, R² and the ambient go
+    # together. Measured on synthetic data with a true slope of 0.25 °C/°C, the
+    # constant fit returns UA 0.39 (out of bounds) while the linear one recovers
+    # UA 2.44 / slope 0.25 / R² 1.0 — the right answer, previously discarded
+    # because the run happened to trip the UA gate rather than the ambient one.
+    linear = _fit_linear_ambient(
+        episodes, c_tank_j_per_k=c_tank_j_per_k, min_episodes=min_episodes
+    )
+
+    def _skip(reason: str, **extra: Any) -> dict[str, Any]:
+        """A skip that still carries everything both models produced."""
+        out: dict[str, Any] = {"status": "skipped", "reason": reason,
+                               "episodes": n_used, **extra}
+        if linear is not None:
+            out["linear_ambient"] = linear
+        return out
+
+    def _maybe_linear(reason: str, *, quality_only: bool = False,
+                      **extra: Any) -> dict[str, Any]:
+        """Promote the linear model if it genuinely rescues this failure.
+
+        ``quality_only`` marks the one rejection that leaves the constant fit a
+        credible reference (its parameters were plausible, it just did not
+        explain the data well enough). Every other rejection is physical, and a
+        model claiming an impossible ambient forfeits its standing as a bar to
+        clear — see ``_promote_linear``.
+        """
+        promoted = _promote_linear(
+            linear, ua_bounds, ambient_bounds,
+            constant_r2=float(extra.get("r2") or 0.0), min_r2=min_r2,
+            require_improvement=quality_only,
+        )
+        if promoted is not None:
+            return {"status": "ok", "ambient_model": "linear", **promoted,
+                    "constant_fit": {"reason": reason, "episodes": n_used, **extra}}
+        return _skip(reason, **extra)
+
     if n_used < min_episodes or len(rows) < 3 * min_episodes:
-        return {
-            "status": "skipped",
-            "reason": f"only {n_used} usable episode(s); need >= {min_episodes}",
-            "episodes": n_used,
-        }
+        return _skip(f"only {n_used} usable episode(s); need >= {min_episodes}")
 
     s11 = sum(r[0] * r[0] for r in rows)
     s22 = sum(r[1] * r[1] for r in rows)
@@ -238,12 +393,16 @@ def fit_ua_and_ambient(
     s2y = sum(r[1] * r[2] for r in rows)
     det = s11 * s22 - s12 * s12
     if abs(det) < 1e-9:
-        return {"status": "skipped", "reason": "degenerate regression", "episodes": n_used}
+        return _maybe_linear("degenerate regression")
 
     k = (s22 * s1y - s12 * s2y) / det          # UA/C, per hour
     b2 = (-s12 * s1y + s11 * s2y) / det        # = −k·A
     if k <= 0:
-        return {"status": "skipped", "reason": "non-positive decay slope", "episodes": n_used}
+        # THE seasonal failure mode: an ambient that really tracks outdoors,
+        # pooled under one constant, can drive the decay slope negative. This is
+        # "the constant model is the problem, not the data" in its purest form,
+        # and it used to exit before the linear fit was even computed.
+        return _maybe_linear("non-positive decay slope", k=float(k))
     ambient = -b2 / k
     ua = k * c_tank_j_per_k / 3600.0
 
@@ -252,24 +411,84 @@ def fit_ua_and_ambient(
     ss_res = sum((r[2] - (k * r[0] + b2 * r[1])) ** 2 for r in rows)
     r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
 
-    if r2 < min_r2:
-        return {"status": "skipped", "reason": f"R²={r2:.2f} below {min_r2}",
-                "episodes": n_used, "r2": r2}
-    if not (ua_bounds[0] <= ua <= ua_bounds[1]):
-        return {"status": "skipped", "reason": f"UA {ua:.2f} out of bounds",
-                "episodes": n_used, "ua_w_per_k": ua}
-    if not (ambient_bounds[0] <= ambient <= ambient_bounds[1]):
-        return {"status": "skipped", "reason": f"ambient {ambient:.1f} out of bounds",
-                "episodes": n_used, "ambient_c": ambient}
-
-    return {
-        "status": "ok",
+    # Everything the fit produced, carried on EVERY exit path. The old skip
+    # payloads dropped whichever fields the failing gate did not name — an
+    # out-of-bounds ambient was stored without its UA or R², so prod could see
+    # that the fit was rejected but not how close it came, and the obvious next
+    # question ("was the UA sane?") was unanswerable from the record.
+    fit = {
         "ua_w_per_k": float(ua),
         "ambient_c": float(ambient),
         "tau_hours": float(c_tank_j_per_k / (ua * 3600.0)),
         "r2": float(r2),
         "episodes": n_used,
     }
+
+    if linear is not None:
+        fit["linear_ambient"] = linear
+
+    # Each of these three is the same symptom wearing a different mask: a
+    # constant ambient forced across a seasonal range corrupts k, and so UA, R²
+    # and the ambient fail together. All three therefore get the same chance to
+    # be rescued by letting the ambient track outdoors.
+    if r2 < min_r2:
+        return _maybe_linear(f"R²={r2:.2f} below {min_r2}", quality_only=True, **fit)
+    if not (ua_bounds[0] <= ua <= ua_bounds[1]):
+        return _maybe_linear(f"UA {ua:.2f} out of bounds", **fit)
+    if not (ambient_bounds[0] <= ambient <= ambient_bounds[1]):
+        return _maybe_linear(f"ambient {ambient:.1f} out of bounds", **fit)
+
+    return {"status": "ok", "ambient_model": "constant", **fit}
+
+
+def _promote_linear(
+    linear: dict[str, Any] | None,
+    ua_bounds: tuple[float, float],
+    ambient_bounds: tuple[float, float],
+    constant_r2: float,
+    min_r2: float,
+    *,
+    require_improvement: bool = True,
+) -> dict[str, Any] | None:
+    """The linear-ambient fit, if it is physically sane — and, when the constant
+    model is still a credible reference, genuinely better than it.
+
+    The physical gates are unconditional. A third parameter can only ever raise
+    in-sample R², so the model must also imply a cupboard that responds to
+    outdoors in the right direction and *less than 1:1* — one inside a heated
+    house cannot swing further than the weather. The 2026-07 prod replay
+    produced slope 6.9 with intercept −180 °C; that is noise wearing a physics
+    costume and these bounds are what refuse it.
+
+    ``require_improvement`` is the subtle part. Comparing R² between the two
+    models only means something when the constant fit is a *credible* model. It
+    usually is not: when it is rejected for an impossible ambient or a negative
+    decay slope, it can still carry a high R² — the synthetic seasonal case
+    reaches R² 0.991 while claiming an ambient of −155.9 °C. Demanding the
+    linear model beat *that* by a margin is demanding it beat 1.011, which is
+    unreachable, and it is how the first cut discarded a fit that recovered the
+    truth exactly. So a constant fit rejected on PHYSICAL grounds forfeits its
+    standing as a reference, and the linear model need only clear ``min_r2`` on
+    its own. Only a constant fit rejected purely for fit QUALITY (``r2 <
+    min_r2``, parameters otherwise plausible) still has to be beaten.
+    """
+    if not linear or linear.get("status") != "ok":
+        return None
+    ua = float(linear["ua_w_per_k"])
+    amb = float(linear["ambient_c"])
+    slope = float(linear["ambient_slope_per_c"])
+    r2 = float(linear["r2"])
+    if not (ua_bounds[0] <= ua <= ua_bounds[1]):
+        return None
+    if not (ambient_bounds[0] <= amb <= ambient_bounds[1]):
+        return None
+    if not (0.0 <= slope <= 1.0):
+        return None
+    if r2 < min_r2:
+        return None
+    if require_improvement and r2 < constant_r2 + 0.02:
+        return None
+    return dict(linear)
 
 
 # ---------------------------------------------------------------------------
@@ -521,7 +740,21 @@ def refresh_dhw_calibration() -> dict[str, Any]:
     tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
     now = datetime.now(UTC)
     window = int(getattr(config, "DHW_CALIBRATION_WINDOW_DAYS", 21))
-    start = now - timedelta(days=window)
+
+    # The UA fit needs a LONGER window than 21 days, for the same reason the
+    # reheat-differential fit below does: coast episodes are rare (an unheated,
+    # draw-free, ≥4 h overnight stretch), and two free parameters need more than
+    # the ~20 the short window yields.
+    #
+    # This is measured, not assumed. Replayed against the prod DB on 2026-07-28:
+    #   21 d -> 20 episodes -> ambient  0.5 °C  => REJECTED (out of bounds)
+    #   45 d -> 27 episodes -> ambient 13.2 °C, UA 1.96 W/K, tau 114 h, R² 0.71 => ok
+    # Same data, same model, same outdoor range — seven more episodes is the
+    # whole difference between a rejected fit and a physically sane one. The
+    # airing cupboard's UA does not change month to month, so a longer window
+    # costs nothing in staleness.
+    ua_window = max(window, int(getattr(config, "DHW_UA_CALIBRATION_WINDOW_DAYS", 45)))
+    start = now - timedelta(days=ua_window)
 
     try:
         tank_rows = db.get_tank_temps_range(start.timestamp(), now.timestamp())
@@ -531,7 +764,7 @@ def refresh_dhw_calibration() -> dict[str, Any]:
     if not tank_rows:
         db.upsert_dhw_calibration("ua_ambient", status="skipped",
                                   payload={"reason": "no live tank telemetry"},
-                                  window_days=window)
+                                  window_days=ua_window)
         return {"status": "skipped", "reason": "no live tank telemetry"}
 
     # Indoor sensors (#540) place the ambient's coupling to the house. Absent → the
@@ -548,12 +781,32 @@ def refresh_dhw_calibration() -> dict[str, Any]:
     except Exception:  # noqa: BLE001 — indoor is a refinement, not a dependency
         indoor = []
 
-    c_tank = float(config.DHW_TANK_LITRES) * float(config.DHW_WATER_CP)
-    episodes = select_coast_episodes(tank_rows, indoor, tz=tz)
+    # MEASURED outdoor (#540 W2 discipline): the cupboard's effective ambient
+    # tracks the house, which tracks outdoors. Without it a July night and a
+    # January night have to share one constant ambient, and the fit lands
+    # wherever splits the difference — which is how this returned 2.9 °C for an
+    # airing cupboard and got itself rejected.
+    try:
+        outdoor = [
+            (datetime.fromtimestamp(ts, UTC), float(v))
+            for ts, v in db.get_outdoor_temps_range(start.timestamp(), now.timestamp())
+        ]
+    except Exception:  # noqa: BLE001 — outdoor is a refinement, not a dependency
+        outdoor = []
+
+    # C must be the SAME heat capacity the consumer uses, or every tau derived
+    # downstream is wrong by the ratio. `TankParams.litres` (the databook, 192)
+    # is what `dhw/model.py` integrates with, while this fit used
+    # `config.DHW_TANK_LITRES` (200) — a silent 4 % inflation of every learned
+    # UA. Which litreage is TRUE is a separate question for the tank's spec
+    # plate; consistency is right either way.
+    _p = TankParams()
+    c_tank = float(_p.litres) * float(_p.cp_j_per_kg_k)
+    episodes = select_coast_episodes(tank_rows, indoor, tz=tz, outdoor_by_utc=outdoor)
     ua_fit = fit_ua_and_ambient(episodes, c_tank_j_per_k=c_tank)
     db.upsert_dhw_calibration(
         "ua_ambient", status=ua_fit["status"], payload=ua_fit,
-        n_samples=ua_fit.get("episodes"), r2=ua_fit.get("r2"), window_days=window,
+        n_samples=ua_fit.get("episodes"), r2=ua_fit.get("r2"), window_days=ua_window,
     )
 
     from .params import resolve_tank_params
@@ -566,13 +819,17 @@ def refresh_dhw_calibration() -> dict[str, Any]:
     hours = summarise_draw_hours(events, tz)
     db.upsert_dhw_calibration(
         "draw_events", status="ok", payload={"by_hour": hours, "n_events": len(events)},
-        n_samples=len(events), window_days=window,
+        # `ua_window`, not `window`: detect_draw_events consumes the WIDENED
+        # tank_rows, so recording 21 here made "draws per day" read ~2x high.
+        n_samples=len(events), window_days=ua_window,
     )
 
     # Reheat differential (#732) — the firmware's deadband, observable at target
     # steps. Steps are rare (~1 clean episode per day at best), so this fit uses
     # a LONGER window than the UA fit — 21 days rarely clears the ≥5-episode
     # gate and each thin night would overwrite a good row with 'insufficient'.
+    # NB `window`, not `ua_window`: the reheat fit's 45 days has its own
+    # rationale (target steps are rare), independent of the UA window.
     diff_window = max(window, 45)
     diff_start = now - timedelta(days=diff_window)
     try:
