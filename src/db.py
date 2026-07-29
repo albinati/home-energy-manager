@@ -520,6 +520,8 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         ("lp_health_regression",  "critical", 0),
         ("guests_mode_suggested", "reports",  0),
         ("dhw_bias_enable_ready", "reports",  0),
+        # 2026-07-29 — ACTIONABLE, so not in the muted FYI bucket.
+        ("sensor_silent",         "critical", 0),
         # 2026-07-28 — comfort/actuation divergence. Both are ACTIONABLE (the
         # user has to decide something), so they must not land in the muted
         # FYI bucket alongside the digests.
@@ -5587,6 +5589,40 @@ def get_outdoor_temps_range(
                 (start_epoch, end_epoch),
             )
             return [(float(r[0]), float(r[1])) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
+def get_device_last_seen(max_age_hours: int = 168) -> list[tuple[str, str, str | None]]:
+    """``(device_key, last_received_at, room)`` per sensor device seen inside the
+    window, newest first.
+
+    Ordered and BOUNDED on ``received_at`` — the SERVER's clock — deliberately.
+    A device supplies ``captured_at`` itself, so a unit whose clock drifted or
+    reset could otherwise look fresh while sending nothing, which is the exact
+    failure a silence detector exists to catch (#700 made the same correction).
+
+    The ``received_at`` predicate is what keeps this an index seek on
+    ``idx_device_log_received`` instead of a full scan under the write lock —
+    it runs on every heartbeat. Rows older than the window are retired devices,
+    which the caller discards anyway.
+    """
+    since = (datetime.now(UTC) - timedelta(hours=max(1, max_age_hours))).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT device_key, MAX(received_at) AS last_seen,
+                          room
+                     FROM device_reading_log
+                    WHERE received_at >= ?
+                 GROUP BY device_key
+                 ORDER BY last_seen DESC""",
+                (since,),
+            )
+            return [(str(r[0]), str(r[1]), r[2]) for r in cur.fetchall()]
         finally:
             conn.close()
 

@@ -57,6 +57,9 @@ _USER_OVERRIDE_INHERITED_NOTIFIED: set[int] = set()
 # page Telegram every 2 min for the same condition. Cleared when the heartbeat
 # observes tank_on == True again — a fresh drift episode then re-pings.
 _TANK_DRIFT_NOTIFIED: bool = False
+# Devices already paged about in the current silence episode. Cleared per
+# device the moment it reports again, so a fresh outage pages again.
+_SENSOR_SILENT_NOTIFIED: set[str] = set()
 # 2026-07-28 — tank TARGET divergence dedup. Holds the (planned, live) pair we
 # last paged about, rounded to whole °C, so a sustained divergence pages once
 # but a *different* divergence (user nudges 30 → 32) pages again. Cleared when
@@ -1109,6 +1112,10 @@ def _reconcile_daikin_actions(
     # the freshly-drawn tank at peak price from the battery. Persist-once per
     # day; dhw_policy regenerations honour the same key (K1+K2 lockstep).
     _check_dhw_shower_drawdown(actions, dev, now_utc, trigger=trigger)
+    # 2026-07-29 (#767) — after the evening showers, decide whether the tank
+    # will make the morning on its own and, if not, buy the heat in the
+    # cheapest half-hour rather than wherever the firmware's deadband lands.
+    _check_morning_topup(dev, now_utc, trigger=trigger)
     # 2026-07-28 — the live tank SETPOINT vs the plan row that owns now. The
     # drift check above only watches tank_power; a manual 37 → 30 on 2026-07-27
     # sat unnoticed for 14 h because the covering row was already `completed`
@@ -2062,6 +2069,241 @@ def _check_morning_tank_cold(
         db.acknowledge_warning(warning_key)
     except Exception as _exc:  # noqa: BLE001
         logger.debug("morning-tank-cold dedup write failed: %s", _exc)
+
+
+def _check_morning_topup(dev: Any, now_utc: datetime, *, trigger: str) -> None:
+    """After the evening showers: will the tank make the morning, and if not,
+    where is the cheapest half-hour to fix it? (#767)
+
+    Timing is the whole design. Asked BEFORE the showers, this needs a draw
+    model, and the two available ones disagree by 3x — the declared three
+    showers imply a 15.3 °C fall on this cylinder, while the measured
+    setback-to-morning drop over 28 nights has a median of 5 and a p90 of 10.
+    Guessing high buys COP-1 resistance nine nights in ten; guessing low is the
+    2026-07-28 cold shower. Asked AFTER them, there is nothing to guess: the
+    draw has happened and the thermometer has already answered.
+
+    From there it is a plain coast — no further draws until morning — so the
+    only decision left is economic, and that is what `dhw.topup` solves.
+
+    Writes a plain ``tank_warmup`` row, not a new action type: the reconciler,
+    `_scheduled_tank_state` and the safe-defaults path all already understand
+    that kind, and a type they did not recognise would be invisible to the boot
+    recovery. ``morning_topup`` in params marks it for the audit trail.
+
+    Re-asserted on every tick inside the window rather than written once. The
+    nightly plan push regenerates the tank schedule and `clear_actions_in_range`
+    deletes pending rows, so a write-once row could simply vanish; `upsert_action`
+    is idempotent on ``(device, action_type, start_time)``, so re-asserting is
+    free and survives that.
+    """
+    if not config.DHW_MORNING_TOPUP_ENABLED:
+        return
+    if config.OPENCLAW_READ_ONLY:
+        return
+    if (config.DAIKIN_CONTROL_MODE or "").strip().lower() == "passive":
+        return
+    preset = (config.OPTIMIZATION_PRESET or "normal").strip().lower()
+    if preset == "vacation":
+        return
+    if in_legionella_standoff(now_utc):
+        return
+
+    try:
+        tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+    except Exception:  # noqa: BLE001
+        tz = UTC
+    now_local = now_utc.astimezone(tz)
+
+    arm = int(config.DHW_MORNING_TOPUP_ARM_HOUR_LOCAL)
+    last = int(config.DHW_MORNING_TOPUP_LAST_HOUR_LOCAL)
+    h = now_local.hour
+    in_window = (h >= arm or h < last) if arm > last else (arm <= h < last)
+    if not in_window:
+        return
+
+    tank_c = getattr(dev, "tank_temperature", None)
+    if tank_c is None:
+        return  # unknown live state — fail-safe, buy nothing
+    try:
+        tank_c = float(tank_c)
+    except (TypeError, ValueError):
+        return
+
+    from .dhw.comfort import shower_windows
+    from .dhw.params import resolve_tank_params
+    from .dhw.topup import next_morning_entry_utc, plan_morning_topup
+
+    morning = None
+    for w in shower_windows(preset=preset):
+        if float(w.end_hour) == float(w.start_hour):
+            continue  # disabled (#748)
+        if "morning" in (w.label or ""):
+            morning = w
+            break
+    if morning is None:
+        return  # no declared morning window — nothing is owed
+
+    entry_utc = next_morning_entry_utc(now_local, float(morning.start_hour))
+    p = resolve_tank_params()
+
+    try:
+        rates = db.get_rates_for_period(
+            config.OCTOPUS_TARIFF_CODE, now_utc, entry_utc
+        )
+    except Exception as _exc:  # noqa: BLE001 — no rates means no informed choice
+        logger.debug("morning-topup rate read failed: %s", _exc)
+        return
+    if not rates:
+        return
+
+    plan = plan_morning_topup(
+        tank_c=tank_c,
+        now_utc=now_utc,
+        morning_entry_utc=entry_utc,
+        floor_c=float(morning.floor_c),
+        margin_c=float(config.DHW_MORNING_TOPUP_MARGIN_C),
+        p=p,
+        rates=rates,
+        max_target_c=float(p.t_hp_max_c),
+    )
+    if plan is None:
+        return  # the tank coasts there on its own — the common case
+
+    params = {
+        "tank_power": True,
+        "tank_temp": int(plan.target_c),
+        "tank_powerful": False,
+        "morning_topup": True,
+    }
+    try:
+        db.upsert_action(
+            plan_date=now_local.date().isoformat(),
+            start_time=plan.at_utc.isoformat().replace("+00:00", "Z"),
+            end_time=plan.end_utc.isoformat().replace("+00:00", "Z"),
+            device="daikin",
+            action_type="tank_warmup",
+            params=params,
+            status="pending",
+        )
+    except Exception as _exc:  # noqa: BLE001 — never break the heartbeat
+        logger.warning("morning-topup row write failed: %s", _exc)
+        return
+
+    key = f"morning_topup_{entry_utc.date().isoformat()}"
+    already = False
+    try:
+        already = db.is_warning_acknowledged(key)
+        if not already:
+            db.acknowledge_warning(key)
+    except Exception as _exc:  # noqa: BLE001
+        logger.debug("morning-topup dedup failed: %s", _exc)
+
+    if already:
+        return  # the row is re-asserted every tick; only log/notify once
+
+    db.log_action(
+        device="daikin",
+        action="dhw_morning_topup",
+        params={
+            "at_utc": plan.at_utc.isoformat(),
+            "target_c": plan.target_c,
+            "price_p": plan.price_p,
+            "tank_now_c": tank_c,
+            "projected_without_c": plan.projected_without_c,
+            "projected_with_c": plan.projected_with_c,
+            "floor_c": plan.floor_c,
+            "best_effort": plan.best_effort,
+        },
+        result="scheduled",
+        trigger=trigger,
+    )
+    logger.info(
+        "dhw morning top-up: tank %.1f would reach %.1f by %s (floor %.1f) — "
+        "buying %s at %.2fp, target %d%s",
+        tank_c, plan.projected_without_c, plan.at_utc.strftime("%H:%M"),
+        plan.floor_c, plan.at_utc.strftime("%H:%MZ"), plan.price_p,
+        plan.target_c, " [best effort]" if plan.best_effort else "",
+    )
+
+
+def _check_sensor_silence(now_utc: datetime, *, trigger: str) -> None:
+    """Page when an indoor sensor stops reporting (#767).
+
+    Every other health signal stays green through this failure: containers
+    healthy, API answering, no request errors. The only symptom is a chart that
+    quietly stops. On 2026-07-28 both sensors went silent in the same second —
+    the funnel's public DNS record had vanished — and it took 8 h and a manual
+    investigation to find.
+
+    Called from the heartbeat DIRECTLY, not from the Daikin reconciler: a
+    combined Daikin-plus-sensor outage is exactly the case worth paging about,
+    and the reconciler does not run when the device snapshot is missing.
+
+    Freshness is judged on the SERVER's ``received_at``, never the
+    device-supplied ``captured_at``: a unit whose clock drifted or reset could
+    otherwise look fresh while sending nothing, which is precisely what this
+    exists to catch (#700 made the same correction for the "latest" card).
+    """
+    global _SENSOR_SILENT_NOTIFIED
+
+    if not config.SENSOR_SILENCE_CHECK_ENABLED:
+        return
+    threshold = int(config.SENSOR_SILENCE_ALERT_MINUTES)
+    max_age_h = int(config.SENSOR_SILENCE_MAX_AGE_HOURS)
+
+    try:
+        rows = db.get_device_last_seen(max_age_hours=max_age_h)
+    except Exception as _exc:  # noqa: BLE001 — a broken read must not page
+        logger.debug("sensor-silence read failed (non-fatal): %s", _exc)
+        return
+    if not rows:
+        return  # no sensors reporting in the window — nothing to be silent about
+
+    silent: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    for device_key, last_seen, room in rows:
+        seen_keys.add(device_key)
+        try:
+            ts = datetime.fromisoformat(str(last_seen).replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+        except (TypeError, ValueError):
+            continue
+        mins = (now_utc - ts).total_seconds() / 60.0
+        if mins <= threshold:
+            _SENSOR_SILENT_NOTIFIED.discard(device_key)
+            continue
+        if device_key in _SENSOR_SILENT_NOTIFIED:
+            continue
+        silent.append({
+            "device_key": device_key,
+            "room": room,
+            "silent_min": int(mins),
+            "last_seen": str(last_seen),
+        })
+
+    # Devices that aged out of the window entirely are retired, not silent.
+    _SENSOR_SILENT_NOTIFIED &= seen_keys
+    if not silent:
+        return
+
+    db.log_action(
+        device="sensors",
+        action="sensor_silent",
+        params={"devices": silent, "threshold_min": threshold},
+        result="alert",
+        trigger=trigger,
+    )
+    try:
+        from .notifier import notify_sensor_silent
+        notify_sensor_silent(devices=silent, threshold_min=threshold)
+    except Exception as _exc:  # noqa: BLE001 — notification is best-effort
+        logger.debug("sensor-silence notify failed (non-fatal): %s", _exc)
+    else:
+        # Only suppress once the page actually went out, so a Telegram outage
+        # during the outage does not silence the whole episode.
+        _SENSOR_SILENT_NOTIFIED.update(d["device_key"] for d in silent)
 
 
 def _check_negative_boost_powerful(

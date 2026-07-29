@@ -2195,6 +2195,16 @@ def bulletproof_heartbeat_tick() -> None:
             dev0=dev0,
         )
 
+    # 2026-07-29 (#767) — indoor sensors gone quiet. Deliberately OUTSIDE the
+    # `if dev0:` blocks above: a combined Daikin-plus-sensor outage is exactly
+    # the case worth paging about, and everything gated on the device snapshot
+    # goes quiet precisely then.
+    try:
+        from ..state_machine import _check_sensor_silence
+        _check_sensor_silence(now_utc, trigger="heartbeat")
+    except Exception as e:  # noqa: BLE001 — monitoring must never break the tick
+        logger.debug("sensor-silence check skipped: %s", e)
+
     if mon - _last_fox_verify_monotonic >= 1800 and fox and fox.api_key:
         _last_fox_verify_monotonic = mon
         try:

@@ -2725,6 +2725,54 @@ class Config:
     MORNING_TANK_COLD_CHECK_END_HOUR_UTC: int = int(
         os.getenv("MORNING_TANK_COLD_CHECK_END_HOUR_UTC", "7")
     )
+    # 2026-07-29 (#767) — overnight morning top-up. Checked AFTER the evening
+    # showers, where the tank is MEASURED rather than projected: before them,
+    # "will the morning be warm enough?" needs a draw model, and the two
+    # available ones disagree by 3x (declared 3 showers => 15.3 C on this
+    # cylinder; measured median 5, p90 10 over 28 nights). Waiting removes the
+    # guess. From there it is a plain coast, so the only decision left is which
+    # half-hour to buy the heat in.
+    #
+    # The household's rule is "avoid overnight heating as much as possible",
+    # not "never" — and today the alternative is not "no heating" but "the
+    # firmware picks the hour", which can land in the evening peak.
+    DHW_MORNING_TOPUP_ENABLED: bool = (
+        os.getenv("DHW_MORNING_TOPUP_ENABLED", "true").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+    # Local-hour window in which the decision is taken. Opens after the declared
+    # evening shower window closes, so the draw is already in the thermometer.
+    DHW_MORNING_TOPUP_ARM_HOUR_LOCAL: int = int(
+        os.getenv("DHW_MORNING_TOPUP_ARM_HOUR_LOCAL", "22")
+    )
+    DHW_MORNING_TOPUP_LAST_HOUR_LOCAL: int = int(
+        os.getenv("DHW_MORNING_TOPUP_LAST_HOUR_LOCAL", "4")
+    )
+    # Headroom above the comfort floor, to absorb the 1 C quantisation of the
+    # tank sensor and a little forecast error in the coast.
+    DHW_MORNING_TOPUP_MARGIN_C: float = float(
+        os.getenv("DHW_MORNING_TOPUP_MARGIN_C", "1.5")
+    )
+    # 2026-07-29 — indoor-sensor silence detector. This failure mode is silent
+    # by construction: HEM stays healthy, no request errors, and the only symptom
+    # is a chart that quietly stops moving. Measured on 2026-07-28, both sensors
+    # went quiet at the same second (the funnel's public DNS record vanished) and
+    # it took 8 h and a manual investigation to notice.
+    #
+    # 60 min is ~6x the 10-min posting cadence: long enough that a single missed
+    # batch or a wifi blip is not news, short enough to catch it the same morning.
+    SENSOR_SILENCE_CHECK_ENABLED: bool = (
+        os.getenv("SENSOR_SILENCE_CHECK_ENABLED", "true").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+    SENSOR_SILENCE_ALERT_MINUTES: int = int(
+        os.getenv("SENSOR_SILENCE_ALERT_MINUTES", "60")
+    )
+    # A device quiet for longer than this is treated as retired, not silent —
+    # otherwise a decommissioned sensor pages forever.
+    SENSOR_SILENCE_MAX_AGE_HOURS: int = int(
+        os.getenv("SENSOR_SILENCE_MAX_AGE_HOURS", "168")
+    )
     # #461 — LWT-offset drift backstop. When HEM owns the offset (pre-heat
     # enabled) and the live offset is non-zero but no active lwt_preheat slot
     # justifies it, reset it to 0 — after the user's grace window

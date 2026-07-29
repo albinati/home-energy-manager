@@ -77,6 +77,11 @@ class AlertType(str, Enum):
     # ACTIONABLE prompt: never auto-enables (the corrected value feeds a hard
     # LP equality — a human flips the env). One-shot (runtime-setting dedup).
     DHW_BIAS_ENABLE_READY = "dhw_bias_enable_ready"
+    # 2026-07-29 — an indoor sensor has gone quiet. Silent by construction
+    # otherwise: HEM stays healthy, nothing errors, and the only symptom is a
+    # chart that stops. Measured 2026-07-28: both sensors stopped in the same
+    # second and it went 8 h unnoticed.
+    SENSOR_SILENT = "sensor_silent"
     # 2026-07-28 — the live tank SETPOINT no longer matches the plan row that
     # owns this moment. ACTIONABLE: either the user moved it (fine — but they
     # should know it is still in force) or something else did (not fine).
@@ -1031,6 +1036,29 @@ def notify_morning_tank_cold(
         "next_warmup_local": next_warmup_local,
     }
     _dispatch(AlertType.MORNING_TANK_COLD, body="\n".join(lines), urgent=False, extra=extra)
+
+
+def notify_sensor_silent(*, devices: list[dict[str, object]], threshold_min: int) -> None:
+    """📡 One or more indoor sensors have stopped reporting.
+
+    Silent by construction otherwise: HEM stays healthy, no request errors, and
+    the only symptom is a chart that stops moving. On 2026-07-28 both sensors
+    went quiet in the same second and it took 8 h to notice. pt-BR body;
+    deduped per episode by the detector."""
+    lines = [
+        f"Sem leituras há mais de {threshold_min} min de: "
+        + ", ".join(
+            f"**{d.get('room') or d.get('device_key')}** ({d.get('silent_min')} min)"
+            for d in devices
+        ),
+        "",
+        "O HEM continua saudável — é o caminho até ele que caiu. Na ordem: "
+        "energia/wifi do sensor, internet de casa, e se o nome `ts.net` ainda "
+        "resolve publicamente (já houve um caso em que o DNS do funnel sumiu e "
+        "os dois sensores pararam juntos).",
+    ]
+    extra = {"devices": devices, "threshold_min": int(threshold_min)}
+    _dispatch(AlertType.SENSOR_SILENT, body="\n".join(lines), urgent=False, extra=extra)
 
 
 def notify_lp_health_regression(issues: list[str]) -> None:
