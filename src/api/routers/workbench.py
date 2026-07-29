@@ -29,7 +29,7 @@ from ...config import config
 from ...scheduler import lp_overrides
 from ...scheduler.lp_simulation import run_lp_simulation
 from ..simulate_diffs import diff_settings_batch
-from ..simulation import ActionDiff, get_store
+from ..simulation import get_store
 
 logger = logging.getLogger(__name__)
 

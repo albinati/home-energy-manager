@@ -47,19 +47,6 @@ class ShowerSpec:
         return self.flow_lpm * self.duration_min
 
 
-def hot_litres_for(n_showers: int, tank_c: float, spec: ShowerSpec) -> float:
-    """Litres drawn FROM THE TANK to deliver ``n_showers`` at the mixer.
-
-    A hotter tank delivers the same shower from fewer of its own litres — which is
-    the whole reason a tank can be pre-heated and then coast: it is storing showers,
-    not litres.
-    """
-    if tank_c <= spec.cold_inlet_c + 0.1:
-        return n_showers * spec.mix_litres  # no dilution possible
-    dilution = (spec.mixer_c - spec.cold_inlet_c) / (tank_c - spec.cold_inlet_c)
-    return n_showers * spec.mix_litres * dilution
-
-
 def draw_kwh_thermal(n_showers: int, spec: ShowerSpec) -> float:
     """Heat that leaves the tank for ``n_showers`` (kWh thermal).
 

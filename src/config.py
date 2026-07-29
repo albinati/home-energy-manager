@@ -65,9 +65,11 @@ class Config:
     FOXESS_DEVICE_SN: str = (
         (os.getenv("FOXESS_DEVICE_SN") or os.getenv("INVERTER_SERIAL_NUMBER") or "").strip()
     )
-    # Datalogger / WiFi stick serial (often required as `sn` for Scheduler V3 and scheduler flag Open API).
-    DATALOGGER_SERIAL_NUMBER: str = (os.getenv("DATALOGGER_SERIAL_NUMBER") or "").strip()
-    # Optional override for scheduler endpoints only (defaults to DATALOGGER_SERIAL_NUMBER when set).
+    # Optional override for scheduler endpoints only. NB there is no fallback:
+    # `foxess_client_kwargs` passes it through only when non-empty, otherwise the
+    # client uses FOXESS_DEVICE_SN. (An older comment claimed it defaulted to
+    # DATALOGGER_SERIAL_NUMBER, which was never true and is now doubly wrong —
+    # that attribute had no readers at all and has been removed.)
     FOXESS_SCHEDULER_SN: str = (os.getenv("FOXESS_SCHEDULER_SN") or "").strip()
     FOXESS_ALERT_LOW_SOC: int = int(os.getenv("FOXESS_ALERT_LOW_SOC", "10"))
 
@@ -205,7 +207,6 @@ class Config:
     OCTOPUS_MPAN_EXPORT: str = (os.getenv("OCTOPUS_MPAN_EXPORT") or os.getenv("OCTOPUS_MPAN_2") or "").strip()
     OCTOPUS_METER_SERIAL_IMPORT: str = (os.getenv("OCTOPUS_METER_SERIAL_IMPORT") or os.getenv("OCTOPUS_METER_SN_1") or "").strip()
     OCTOPUS_METER_SERIAL_EXPORT: str = (os.getenv("OCTOPUS_METER_SERIAL_EXPORT") or os.getenv("OCTOPUS_METER_SN_2") or "").strip()
-    BRITISH_GAS_API_KEY: str = os.getenv("BRITISH_GAS_API_KEY", "")
 
     # API server
     # Default 127.0.0.1: in containerised deployments compose maps explicit interfaces
@@ -230,8 +231,11 @@ class Config:
     # The SPA container POSTs to /api/v1/* with `Authorization: Bearer
     # <HEM_UI_TOKEN>`. Same mint pattern as the OpenClaw token: env wins,
     # otherwise the lifespan reads the file or generates a fresh token on
-    # first boot (urlsafe-32). Mounted via `ApiV1BearerAuth` middleware,
-    # gated by HEM_UI_AUTH_REQUIRED below so B1 can land before B6 cutover.
+    # first boot (urlsafe-32); the lifespan bakes it into the SPA's config.js.
+    # It grants NOTHING at the guard: `ApiV1RoleAuth` is constructed with
+    # `admin_tokens` and `ingest_tokens` only, and this is neither — see the
+    # role model directly below. Reads pass because they are viewer-open, not
+    # because of this token.
     HEM_UI_TOKEN_FILE: str = os.getenv(
         "HEM_UI_TOKEN_FILE", "data/.hem-ui-token"
     )
@@ -320,8 +324,6 @@ class Config:
     # nothing breaks when the DB row is absent.
     # Degree-day base temp (°C): heating demand assumed proportional to (base - outdoor_mean)
     WEATHER_DEGREE_DAY_BASE_C: float = float(os.getenv("WEATHER_DEGREE_DAY_BASE_C", "18"))
-    WEATHER_COLD_THRESHOLD_C: float = float(os.getenv("WEATHER_COLD_THRESHOLD_C", "5"))
-    WEATHER_MILD_THRESHOLD_C: float = float(os.getenv("WEATHER_MILD_THRESHOLD_C", "15"))
     WEATHER_FROST_THRESHOLD_C: float = float(os.getenv("WEATHER_FROST_THRESHOLD_C", "2"))
 
     # Bulletproof engine (SQLite + Scheduler V3 + 2-min heartbeat)
@@ -348,11 +350,6 @@ class Config:
     )
     OCTOPUS_FETCH_HOUR: int = int(os.getenv("OCTOPUS_FETCH_HOUR", "16"))
     OCTOPUS_FETCH_MINUTE: int = int(os.getenv("OCTOPUS_FETCH_MINUTE", "5"))
-    # Twice-daily digest (V12). DAILY_BRIEF_* are kept as aliases so existing
-    # /srv/hem/.env files still work without an edit; BRIEF_MORNING_* take
-    # precedence when both are set.
-    DAILY_BRIEF_HOUR: int = int(os.getenv("DAILY_BRIEF_HOUR", "8"))
-    DAILY_BRIEF_MINUTE: int = int(os.getenv("DAILY_BRIEF_MINUTE", "0"))
     BRIEF_MORNING_HOUR: int = int(
         os.getenv("BRIEF_MORNING_HOUR", os.getenv("DAILY_BRIEF_HOUR", "8"))
     )
@@ -644,10 +641,6 @@ class Config:
     # app's "powerful"/immersion button can momentarily push higher, but we
     # never command that. Was 65 → now 60 to match the hardware.
     DHW_TEMP_MAX_C: float = float(os.getenv("DHW_TEMP_MAX_C", "60"))
-    # Plunge-only ceiling (≥ DHW_TEMP_COMFORT_C and ≤ DHW_TEMP_MAX_C is allowed only when price < 0).
-    # DHW_TEMP_COMFORT_C + DHW_TEMP_NORMAL_C are runtime-tunable via
-    # /api/v1/settings (#52) — see the @property definitions below.
-    DHW_TEMP_CHEAP_C: float = float(os.getenv("DHW_TEMP_CHEAP_C", "60"))
     # NOTE: DHW_LEGIONELLA_* env vars removed in v10. The Daikin Onecta firmware
     # runs the weekly thermal-shock cycle autonomously (Sunday ~11:00 local) and
     # the LP/dispatch never enforced these bounds. Stale .env entries are silently
@@ -1564,8 +1557,6 @@ class Config:
     # raise toward 37 °C if cold-spot reheat times become a comfort issue.
     DHW_TEMP_MIN_FLOOR_C: float = float(os.getenv("DHW_TEMP_MIN_FLOOR_C", "30.0"))
     MIN_SOC_RESERVE_PERCENT: float = float(os.getenv("MIN_SOC_RESERVE_PERCENT", "15"))
-    OPTIMIZATION_WATCHDOG_HOUR_LOCAL: int = int(os.getenv("OPTIMIZATION_WATCHDOG_HOUR_LOCAL", "16"))
-    OPTIMIZATION_WATCHDOG_MINUTE_LOCAL: int = int(os.getenv("OPTIMIZATION_WATCHDOG_MINUTE_LOCAL", "0"))
     OPTIMIZATION_TIMEZONE: str = (os.getenv("OPTIMIZATION_TIMEZONE") or "Europe/London").strip()
     OPTIMIZATION_CHEAP_THRESHOLD_PENCE: float = float(
         os.getenv("OPTIMIZATION_CHEAP_THRESHOLD_PENCE", os.getenv("SCHEDULER_CHEAP_THRESHOLD_PENCE", "12"))
@@ -1656,9 +1647,6 @@ class Config:
     DAIKIN_LWT_PREHEAT_DECONTAM_TAIL_BUCKETS: int = int(
         os.getenv("DAIKIN_LWT_PREHEAT_DECONTAM_TAIL_BUCKETS", "1")
     )
-    OPTIMIZATION_DISABLE_WEATHER_REGULATION: bool = os.getenv(
-        "OPTIMIZATION_DISABLE_WEATHER_REGULATION", "false"
-    ).lower() in ("true", "1", "yes")
 
     # PuLP MILP optimizer (V8)
     OPTIMIZER_BACKEND: str = (os.getenv("OPTIMIZER_BACKEND") or "lp").strip().lower()
@@ -1794,7 +1782,6 @@ class Config:
     # Delay between critical Onecta writes (climate power, DHW) so the 3-way valve can settle (#18).
     # 0 = skip sleeps (tests).
     DAIKIN_VALVE_SETTLE_SECONDS: int = int(os.getenv("DAIKIN_VALVE_SETTLE_SECONDS", "10"))
-    SOLAR_GAIN_FRACTION: float = float(os.getenv("SOLAR_GAIN_FRACTION", "0.15"))
     COP_DHW_PENALTY: float = float(os.getenv("COP_DHW_PENALTY", "0.5"))
     # Pre-PuLP COP lift (#29): scale COP_curve(T_out) by mult(LWT_supply − T_out). 0 = disabled.
     LP_COP_LIFT_PENALTY_PER_KELVIN: float = float(os.getenv("LP_COP_LIFT_PENALTY_PER_KELVIN", "0"))
@@ -1963,8 +1950,6 @@ class Config:
     THERMAL_UA_MIN_HDD_DAYS: int = int(os.getenv("THERMAL_UA_MIN_HDD_DAYS", "20"))
     THERMAL_UA_ASSUMED_COP: float = float(os.getenv("THERMAL_UA_ASSUMED_COP", "3.0"))
     THERMAL_UA_MIN_R2: float = float(os.getenv("THERMAL_UA_MIN_R2", "0.5"))
-    # INDOOR_SETPOINT_C is runtime-tunable via /api/v1/settings (#52) — see @property below.
-    INDOOR_COMFORT_BAND_C: float = float(os.getenv("INDOOR_COMFORT_BAND_C", "1.5"))
     # #540 W1 — a room-sensor reading older than this is treated as ABSENT (the
     # comfort guard / LP fall back to the estimator), so a dead sensor can't
     # freeze the LP on a stale indoor temperature.
@@ -1978,10 +1963,6 @@ class Config:
     DAIKIN_WEATHER_CURVE_LOW_C: float = float(os.getenv("DAIKIN_WEATHER_CURVE_LOW_C", "-5.0"))
     DAIKIN_WEATHER_CURVE_LOW_LWT_C: float = float(os.getenv("DAIKIN_WEATHER_CURVE_LOW_LWT_C", "45.0"))
     DAIKIN_WEATHER_CURVE_OFFSET_C: float = float(os.getenv("DAIKIN_WEATHER_CURVE_OFFSET_C", "0.0"))
-    # Overnight (unoccupied) indoor temperature floor for the LP building model.
-    # Raising this above the default 16 °C creates pre-heat pressure during cheap overnight
-    # slots so the LP warms the thermal mass before morning occupancy begins.
-    LP_OVERNIGHT_COMFORT_FLOOR_C: float = float(os.getenv("LP_OVERNIGHT_COMFORT_FLOOR_C", "18.0"))
 
     # ── W3 (#540) — LP indoor-temperature state + comfort optimisation ──────
     # Restores the t_in decision variable + RC dynamics (τ/UA/C from the W2
@@ -2027,8 +2008,6 @@ class Config:
     )
     LP_OCCUPIED_MORNING_START: str = (os.getenv("LP_OCCUPIED_MORNING_START") or "06:30").strip()
     LP_OCCUPIED_MORNING_END: str = (os.getenv("LP_OCCUPIED_MORNING_END") or "08:30").strip()
-    LP_OCCUPIED_EVENING_START: str = (os.getenv("LP_OCCUPIED_EVENING_START") or "17:30").strip()
-    LP_OCCUPIED_EVENING_END: str = (os.getenv("LP_OCCUPIED_EVENING_END") or "22:30").strip()
     # Empty string disables the morning-shower DHW floor entirely (family defaults to
     # evening showers — forcing a 43 °C floor at 07:00 triggers expensive morning heating).
     LP_SHOWER_MORNING_LOCAL: str = (os.getenv("LP_SHOWER_MORNING_LOCAL") or "").strip()
@@ -2628,25 +2607,6 @@ class Config:
     # enough that an operator who genuinely needs fresh state isn't stuck waiting.
     DAIKIN_FORCE_REFRESH_MIN_INTERVAL_SECONDS: int = int(
         os.getenv("DAIKIN_FORCE_REFRESH_MIN_INTERVAL_SECONDS", "300")
-    )
-    # Width of the Octopus pre-slot window that allows automatic device refresh (seconds before HH:30/HH:00)
-    DAIKIN_SLOT_TRANSITION_WINDOW_SECONDS: int = int(
-        os.getenv("DAIKIN_SLOT_TRANSITION_WINDOW_SECONDS", "300")
-    )
-    # Local-time calibration windows where Daikin refreshes are allowed if the cache is stale.
-    # Format: comma-separated HH:MM-HH:MM ranges in BULLETPROOF_TIMEZONE.
-    DAIKIN_CALIBRATION_WINDOWS_LOCAL: str = (
-        os.getenv("DAIKIN_CALIBRATION_WINDOWS_LOCAL", "06:00-08:00,14:30-16:30")
-    )
-    # 2 h-aligned Daikin refresh window. Onecta caches consumption data in
-    # 2-hour buckets that rotate at fixed UTC times (00, 02, …, 22). When
-    # enabled, the heartbeat fires one refresh in the first few minutes
-    # past each even hour UTC, capturing the freshest 2 h bucket as soon
-    # as it lands. 12 calls/day (well under the 200/day Daikin budget).
-    # See issue #267 (Daikin observation strategy epic).
-    DAIKIN_2H_REFRESH_ENABLED: bool = (
-        os.getenv("DAIKIN_2H_REFRESH_ENABLED", "true").strip().lower()
-        in ("1", "true", "yes")
     )
     # #55 — how old a live telemetry row can be before the LP wrapper falls back
     # to the physics estimator instead of returning the stale value.

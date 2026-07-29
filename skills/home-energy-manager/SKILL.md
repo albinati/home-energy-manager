@@ -503,7 +503,6 @@ Telegram pings follow a strict policy. **Anything outside this list is mute by d
 
 **Out-of-digest pings — only when actionable:**
 - **🔵 PAID-to-use window started.** Always pings, regardless of `NOTIFY_TARIFF_TRANSITIONS`. Rare (~1–2/week) and immediately actionable: run laundry / dishwasher / EV charge.
-- **PLAN_REVISION** — when an in-day MPC re-solve materially changed the next-4 h plan (`max_soc_delta_pct ≥ PLAN_REVISION_MIN_SOC_DELTA_PERCENT` OR `sum_grid_delta_kwh ≥ PLAN_REVISION_MIN_GRID_DELTA_KWH`, default 10 % / 1.0 kWh). Suppressed on `cron` and `plan_push` triggers.
 - **Hardware faults** — `notify_risk` on low-SoC + peak (per-day acked), Fox scheduler flag disabled (per-day acked, V12 fix to its previous zero-debounce bug), Daikin auth circuit open (per-circuit cooldown), Octopus survival mode (per-incident).
 - **User-override episodes** — `notify_user_override` fires once when a manual change is detected on a Daikin action, once when it clears. Per-`action_id` dedup (V12 fix to per-heartbeat spam).
 

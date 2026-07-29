@@ -608,11 +608,14 @@ OpenClaw at the tool level — same `get_optimization_inputs` shape. The
 removed `warm_start_from_yesterday_hours` field will now be absent or
 empty in `exogenous_snapshot.weather_adjustment`.
 
-### DHW peak strategy knob (PR #321, 2026-05-11)
+### DHW peak strategy (PR #321, 2026-05-11 — knob REMOVED 2026-05-21)
 
-`DHW_PEAK_TANK_STRATEGY=shutdown` (default) cuts tank power during the
-peak window; `idle` keeps it ON at 45 °C floor (legacy). Validated saving
-~£5/day vs idle. Tunable via `set_setting`. Tank pre-charge above 45 °C
+`DHW_PEAK_TANK_STRATEGY` no longer exists. Dispatch always uses the IDLE
+behaviour during peak / peak_export: 30 days of prod telemetry showed the
+tank coasts essentially perfectly when held warm (median decay 0.00 °C/h)
+while SHUTDOWN attempts failed 27 % of the time with
+`READ_ONLY_CHARACTERISTIC`. Setting the variable is a silent no-op.
+Tank pre-charge above 45 °C
 only happens with an explicit economic reason (negative price, solar
 abundance, cheap window) — peak avoidance does NOT trigger pre-charging.
 

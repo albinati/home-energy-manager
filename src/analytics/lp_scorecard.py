@@ -33,7 +33,6 @@ calls the Daikin API (read-only over DB).
 """
 from __future__ import annotations
 
-import json
 import logging
 import sqlite3
 from dataclasses import dataclass
@@ -46,20 +45,6 @@ from ..config import config
 from .pnl import compute_daily_pnl
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class _SlotKwh:
-    """One slot's planned + realised key kWh + cost (in pence)."""
-    slot_time_utc: str
-    plan_import_kwh: float
-    plan_export_kwh: float
-    plan_charge_kwh: float
-    real_import_kwh: float
-    real_export_kwh: float
-    real_charge_kwh: float
-    import_price_p: float
-    export_price_p: float
 
 
 def _operative_plan_for_window(
