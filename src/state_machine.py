@@ -60,6 +60,12 @@ _TANK_DRIFT_NOTIFIED: bool = False
 # Devices already paged about in the current silence episode. Cleared per
 # device the moment it reports again, so a fresh outage pages again.
 _SENSOR_SILENT_NOTIFIED: set[str] = set()
+# How far back the morning top-up will look for confirming LIVE tank readings.
+# The heartbeat's device snapshot can be up to 30 min stale and there is no
+# scheduled Onecta refresh at 22:00 local, so a lone cached float can easily
+# predate the evening showers — which would collapse the whole "the draw is
+# already in the thermometer" premise, quietly, in the no-top-up direction.
+_TOPUP_TANK_FRESHNESS_MIN = 45.0
 # 2026-07-28 — tank TARGET divergence dedup. Holds the (planned, live) pair we
 # last paged about, rounded to whole °C, so a sustained divergence pages once
 # but a *different* divergence (user nudges 30 → 32) pages again. Cleared when
@@ -2080,22 +2086,20 @@ def _check_morning_topup(dev: Any, now_utc: datetime, *, trigger: str) -> None:
     showers imply a 15.3 °C fall on this cylinder, while the measured
     setback-to-morning drop over 28 nights has a median of 5 and a p90 of 10.
     Guessing high buys COP-1 resistance nine nights in ten; guessing low is the
-    2026-07-28 cold shower. Asked AFTER them, there is nothing to guess: the
-    draw has happened and the thermometer has already answered.
+    2026-07-28 cold shower. Asked AFTER them, there is nothing to guess.
 
-    From there it is a plain coast — no further draws until morning — so the
-    only decision left is economic, and that is what `dhw.topup` solves.
+    The decision is taken ONCE per night and then re-asserted. Re-planning each
+    tick looks equivalent and is not: the planner only considers slots still in
+    the future, so the moment the bought half-hour passes, a fresh plan picks a
+    DIFFERENT one and writes a second row — up to five purchases in a night,
+    with a single log line to show for it.
 
-    Writes a plain ``tank_warmup`` row, not a new action type: the reconciler,
-    `_scheduled_tank_state` and the safe-defaults path all already understand
-    that kind, and a type they did not recognise would be invisible to the boot
-    recovery. ``morning_topup`` in params marks it for the audit trail.
-
-    Re-asserted on every tick inside the window rather than written once. The
-    nightly plan push regenerates the tank schedule and `clear_actions_in_range`
-    deletes pending rows, so a write-once row could simply vanish; `upsert_action`
-    is idempotent on ``(device, action_type, start_time)``, so re-asserting is
-    free and survives that.
+    Writes a plain ``tank_warmup`` row plus a paired ``tank_setback`` restore,
+    not a new action type: the reconciler, ``_scheduled_tank_state`` and the
+    boot recovery all already understand those kinds, and a type they did not
+    recognise would be invisible to them. Every other tank row in this system is
+    paired; an unpaired one would leave the tank commanded high until the 13:00
+    warmup, and would then trip the divergence alert every night.
     """
     if not config.DHW_MORNING_TOPUP_ENABLED:
         return
@@ -2118,20 +2122,11 @@ def _check_morning_topup(dev: Any, now_utc: datetime, *, trigger: str) -> None:
     arm = int(config.DHW_MORNING_TOPUP_ARM_HOUR_LOCAL)
     last = int(config.DHW_MORNING_TOPUP_LAST_HOUR_LOCAL)
     h = now_local.hour
-    in_window = (h >= arm or h < last) if arm > last else (arm <= h < last)
-    if not in_window:
-        return
-
-    tank_c = getattr(dev, "tank_temperature", None)
-    if tank_c is None:
-        return  # unknown live state — fail-safe, buy nothing
-    try:
-        tank_c = float(tank_c)
-    except (TypeError, ValueError):
+    if not ((h >= arm or h < last) if arm > last else (arm <= h < last)):
         return
 
     from .dhw.comfort import shower_windows
-    from .dhw.params import resolve_tank_params
+    from .dhw.params import resolve_reheat_differential_c, resolve_tank_params
     from .dhw.topup import next_morning_entry_utc, plan_morning_topup
 
     morning = None
@@ -2145,12 +2140,42 @@ def _check_morning_topup(dev: Any, now_utc: datetime, *, trigger: str) -> None:
         return  # no declared morning window — nothing is owed
 
     entry_utc = next_morning_entry_utc(now_local, float(morning.start_hour))
-    p = resolve_tank_params()
+    key = f"dhw_morning_topup_{entry_utc.date().isoformat()}"
 
+    # Already decided for tonight? Re-assert that row and stop. `upsert_action`
+    # is idempotent on (device, action_type, start_time), so this is free and it
+    # survives the nightly plan push's `clear_actions_in_range`.
     try:
-        rates = db.get_rates_for_period(
-            config.OCTOPUS_TARIFF_CODE, now_utc, entry_utc
+        stored = db.get_runtime_setting(key)
+    except Exception:  # noqa: BLE001
+        stored = None
+    if stored:
+        try:
+            _write_topup_rows(json.loads(stored), tz)
+        except Exception as _exc:  # noqa: BLE001 — never break the heartbeat
+            logger.debug("morning-topup re-assert failed: %s", _exc)
+        return
+
+    # The premise is a MEASURED tank, so it has to actually be measured. The
+    # heartbeat's device snapshot can be up to 30 min stale and there is no
+    # scheduled refresh at 22:00 local, so a lone read can easily predate the
+    # showers — which would collapse the whole design in the quiet direction
+    # (no top-up, cold shower). Require two confirming LIVE telemetry samples,
+    # the same discipline `_check_dhw_shower_drawdown` uses on this quantity.
+    try:
+        samples = db.get_tank_temps_since(
+            (now_utc - timedelta(minutes=_TOPUP_TANK_FRESHNESS_MIN)).timestamp()
         )
+    except Exception as _exc:  # noqa: BLE001
+        logger.debug("morning-topup telemetry read failed: %s", _exc)
+        return
+    if len(samples) < 2:
+        return  # not enough fresh evidence to spend money on
+    tank_c = float(samples[-1][1])
+
+    p = resolve_tank_params()
+    try:
+        rates = db.get_rates_for_period(config.OCTOPUS_TARIFF_CODE, now_utc, entry_utc)
     except Exception as _exc:  # noqa: BLE001 — no rates means no informed choice
         logger.debug("morning-topup rate read failed: %s", _exc)
         return
@@ -2166,66 +2191,103 @@ def _check_morning_topup(dev: Any, now_utc: datetime, *, trigger: str) -> None:
         p=p,
         rates=rates,
         max_target_c=float(p.t_hp_max_c),
+        differential_c=resolve_reheat_differential_c(),
+        min_shortfall_c=float(config.DHW_MORNING_TOPUP_MIN_SHORTFALL_C),
     )
     if plan is None:
         return  # the tank coasts there on its own — the common case
 
-    params = {
-        "tank_power": True,
-        "tank_temp": int(plan.target_c),
-        "tank_powerful": False,
-        "morning_topup": True,
+    decision = {
+        "at_utc": plan.at_utc.isoformat().replace("+00:00", "Z"),
+        "end_utc": plan.end_utc.isoformat().replace("+00:00", "Z"),
+        "restore_until_utc": entry_utc.isoformat().replace("+00:00", "Z"),
+        "target_c": int(plan.target_c),
+        "setback_c": int(config.DHW_TEMP_SETBACK_C),
+        "price_p": plan.price_p,
+        "tank_now_c": tank_c,
+        "projected_without_c": plan.projected_without_c,
+        "projected_with_c": plan.projected_with_c,
+        "floor_c": plan.floor_c,
+        "best_effort": plan.best_effort,
     }
     try:
-        db.upsert_action(
-            plan_date=now_local.date().isoformat(),
-            start_time=plan.at_utc.isoformat().replace("+00:00", "Z"),
-            end_time=plan.end_utc.isoformat().replace("+00:00", "Z"),
-            device="daikin",
-            action_type="tank_warmup",
-            params=params,
-            status="pending",
-        )
-    except Exception as _exc:  # noqa: BLE001 — never break the heartbeat
+        _write_topup_rows(decision, tz)
+    except Exception as _exc:  # noqa: BLE001
         logger.warning("morning-topup row write failed: %s", _exc)
         return
-
-    key = f"morning_topup_{entry_utc.date().isoformat()}"
-    already = False
     try:
-        already = db.is_warning_acknowledged(key)
-        if not already:
-            db.acknowledge_warning(key)
+        db.set_runtime_setting(key, json.dumps(decision))
     except Exception as _exc:  # noqa: BLE001
-        logger.debug("morning-topup dedup failed: %s", _exc)
-
-    if already:
-        return  # the row is re-asserted every tick; only log/notify once
+        logger.debug("morning-topup persist failed: %s", _exc)
 
     db.log_action(
         device="daikin",
         action="dhw_morning_topup",
-        params={
-            "at_utc": plan.at_utc.isoformat(),
-            "target_c": plan.target_c,
-            "price_p": plan.price_p,
-            "tank_now_c": tank_c,
-            "projected_without_c": plan.projected_without_c,
-            "projected_with_c": plan.projected_with_c,
-            "floor_c": plan.floor_c,
-            "best_effort": plan.best_effort,
-        },
+        params=decision,
         result="scheduled",
         trigger=trigger,
     )
     logger.info(
-        "dhw morning top-up: tank %.1f would reach %.1f by %s (floor %.1f) — "
-        "buying %s at %.2fp, target %d%s",
-        tank_c, plan.projected_without_c, plan.at_utc.strftime("%H:%M"),
-        plan.floor_c, plan.at_utc.strftime("%H:%MZ"), plan.price_p,
-        plan.target_c, " [best effort]" if plan.best_effort else "",
+        "dhw morning top-up: tank %.1f would reach %.1f (floor %.1f) — buying "
+        "%s at %.2fp, target %d, restoring %d after%s",
+        tank_c, plan.projected_without_c, plan.floor_c,
+        plan.at_utc.strftime("%H:%MZ"), plan.price_p, plan.target_c,
+        decision["setback_c"], " [best effort]" if plan.best_effort else "",
     )
+    try:
+        from .notifier import notify_dhw_morning_topup
+        notify_dhw_morning_topup(**{
+            k: decision[k] for k in
+            ("at_utc", "target_c", "price_p", "tank_now_c",
+             "projected_without_c", "floor_c", "best_effort")
+        })
+    except Exception as _exc:  # noqa: BLE001 — notification is best-effort
+        logger.debug("morning-topup notify failed (non-fatal): %s", _exc)
 
+
+def _write_topup_rows(decision: dict[str, Any], tz: Any) -> None:
+    """The top-up row and its paired restore, idempotent on the natural key.
+
+    ``plan_date`` is each row's OWN local date, not the date the decision was
+    taken. The heartbeat selects rows with ``get_actions_for_plan_date(today)``,
+    so a row written at 23:00 local for 01:30 the next morning must be filed
+    under TOMORROW or it is never fired — the documented 2026-06-07 failure
+    where a recovered boost sat pending for its whole window.
+    """
+    start = _parse_utc(decision["at_utc"])
+    end = _parse_utc(decision["end_utc"])
+    until = _parse_utc(decision["restore_until_utc"])
+    z = lambda d: d.isoformat().replace("+00:00", "Z")  # noqa: E731
+
+    db.upsert_action(
+        plan_date=start.astimezone(tz).date().isoformat(),
+        start_time=z(start),
+        end_time=z(end),
+        device="daikin",
+        action_type="tank_warmup",
+        params={
+            "tank_power": True,
+            "tank_temp": int(decision["target_c"]),
+            "tank_powerful": False,
+            "morning_topup": True,
+        },
+        status="pending",
+    )
+    if until > end:
+        db.upsert_action(
+            plan_date=end.astimezone(tz).date().isoformat(),
+            start_time=z(end),
+            end_time=z(until),
+            device="daikin",
+            action_type="tank_setback",
+            params={
+                "tank_power": True,
+                "tank_temp": int(decision["setback_c"]),
+                "tank_powerful": False,
+                "morning_topup_restore": True,
+            },
+            status="pending",
+        )
 
 def _check_sensor_silence(now_utc: datetime, *, trigger: str) -> None:
     """Page when an indoor sensor stops reporting (#767).
@@ -2253,7 +2315,7 @@ def _check_sensor_silence(now_utc: datetime, *, trigger: str) -> None:
     max_age_h = int(config.SENSOR_SILENCE_MAX_AGE_HOURS)
 
     try:
-        rows = db.get_device_last_seen(max_age_hours=max_age_h)
+        rows = db.get_device_last_seen(max_age_hours=max_age_h, now_utc=now_utc)
     except Exception as _exc:  # noqa: BLE001 — a broken read must not page
         logger.debug("sensor-silence read failed (non-fatal): %s", _exc)
         return

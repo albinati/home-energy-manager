@@ -522,6 +522,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         ("dhw_bias_enable_ready", "reports",  0),
         # 2026-07-29 — ACTIONABLE, so not in the muted FYI bucket.
         ("sensor_silent",         "critical", 0),
+        ("dhw_morning_topup",     "reports",  0),
         # 2026-07-28 — comfort/actuation divergence. Both are ACTIONABLE (the
         # user has to decide something), so they must not land in the muted
         # FYI bucket alongside the digests.
@@ -5593,7 +5594,9 @@ def get_outdoor_temps_range(
             conn.close()
 
 
-def get_device_last_seen(max_age_hours: int = 168) -> list[tuple[str, str, str | None]]:
+def get_device_last_seen(
+    max_age_hours: int = 168, *, now_utc: datetime | None = None
+) -> list[tuple[str, str, str | None]]:
     """``(device_key, last_received_at, room)`` per sensor device seen inside the
     window, newest first.
 
@@ -5607,9 +5610,12 @@ def get_device_last_seen(max_age_hours: int = 168) -> list[tuple[str, str, str |
     it runs on every heartbeat. Rows older than the window are retired devices,
     which the caller discards anyway.
     """
-    since = (datetime.now(UTC) - timedelta(hours=max(1, max_age_hours))).strftime(
-        "%Y-%m-%dT%H:%M:%SZ"
-    )
+    # `now_utc` is injectable so callers and tests can pin the window. Reading
+    # the wall clock here while the caller passes its own `now` is how a test
+    # becomes a time bomb: the seeded rows age past the cutoff and the assertion
+    # silently turns vacuous.
+    ref = now_utc or datetime.now(UTC)
+    since = (ref - timedelta(hours=max(1, max_age_hours))).strftime("%Y-%m-%dT%H:%M:%SZ")
     with _lock:
         conn = get_connection()
         try:

@@ -82,27 +82,52 @@ def plan_morning_topup(
     p: TankParams,
     rates: list[dict[str, Any]],
     max_target_c: float,
+    differential_c: float,
+    min_shortfall_c: float,
 ) -> TopUpPlan | None:
     """The cheapest half-hour to buy the morning's comfort, or None if the tank
-    will coast there on its own.
+    will coast there on its own — or if buying would cost more than it is worth.
 
     ``rates`` are Agile import rows (``valid_from`` / ``valid_to`` / ``value_inc_vat``)
     covering the window; only slots strictly between now and the morning entry
-    are eligible.
+    are eligible. Later slots need a lower commanded target — less coasting left
+    — so feasibility is easiest late and cheapness can be anywhere. That trade
+    is the whole reason this searches rather than just picking the last slot.
 
-    Later slots need a lower commanded target — less coasting left — so
-    feasibility is easiest late and cheapness can be anywhere. That trade is the
-    whole reason this searches rather than just picking the last slot.
+    THE DEADBAND IS A HARD PHYSICAL FLOOR ON THE PURCHASE. The firmware only
+    starts heating when the commanded target exceeds the tank by more than its
+    reheat differential (~6 °C measured), and then it heats all the way to that
+    target. So a small top-up is not something this hardware can do: asking for
+    39 °C from a 38 °C tank is a no-op, and the smallest purchase that does
+    anything is ``tank + differential``.
+
+    That makes the top-up inherently coarse, and it is why ``min_shortfall_c``
+    exists. Buying a ~6 °C overshoot to close a 0.5 °C gap is bad value, so a
+    shortfall smaller than that threshold is left alone. Without it this fires
+    on roughly a third of nights — against a household rule of "avoid overnight
+    heating as much as possible", that is the wrong default.
+
+    (The first version of this ignored the deadband and commanded the bare
+    minimum. On the common firing band that command was inside the deadband, so
+    the firmware never started and the only thing that actuated was the
+    deadband guard's escalation — to the 50 °C cliff, i.e. the exact opposite of
+    the "minimum target" the docstring claimed.)
     """
     if morning_entry_utc <= now_utc:
         return None
     hours_total = (morning_entry_utc - now_utc).total_seconds() / 3600.0
 
     projected = coast_to(tank_c, hours_total, p)
-    if projected >= floor_c:
+    shortfall = floor_c - projected
+    if shortfall <= 0:
         return None  # the tank gets there by itself; buy nothing
+    if shortfall < max(0.0, min_shortfall_c):
+        return None  # too small to be worth a deadband-sized overshoot
 
     goal = floor_c + max(0.0, margin_c)
+    # The smallest command that actually starts the heat pump. `+ 0.5` mirrors
+    # the guard `_warmup_deadband_force_reason` uses for the same physics.
+    min_effective = tank_c + differential_c + 0.5
 
     best: TopUpPlan | None = None
     best_feasible_price: float | None = None
@@ -122,8 +147,11 @@ def plan_morning_topup(
 
         hours_after = (morning_entry_utc - start).total_seconds() / 3600.0
         need = required_start_temp_c(goal, hours_after, p, max_target_c=max_target_c)
-        feasible = need <= max_target_c
-        target = int(math.ceil(min(need, max_target_c)))
+        # Whichever is larger: what the floor needs, or what the firmware needs
+        # to move at all.
+        want = max(need, min_effective)
+        feasible = want <= max_target_c
+        target = int(math.ceil(min(want, max_target_c)))
         plan = TopUpPlan(
             at_utc=start,
             end_utc=end,

@@ -77,6 +77,7 @@ def test_a_normal_night_buys_nothing():
         tank_c=44.0, now_utc=now, morning_entry_utc=now + dt.timedelta(hours=8),
         floor_c=37.0, margin_c=1.5, p=P, rates=_rates(now, _NIGHT_PRICES),
         max_target_c=P.t_hp_max_c,
+        differential_c=6.0, min_shortfall_c=2.0,
     )
     assert plan is None
 
@@ -92,6 +93,7 @@ def test_the_2026_07_28_night_buys_the_cheapest_half_hour():
         tank_c=31.0, now_utc=now, morning_entry_utc=morning,
         floor_c=37.0, margin_c=1.5, p=P, rates=_rates(now, _NIGHT_PRICES),
         max_target_c=P.t_hp_max_c,
+        differential_c=6.0, min_shortfall_c=2.0,
     )
 
     assert plan is not None
@@ -102,18 +104,23 @@ def test_the_2026_07_28_night_buys_the_cheapest_half_hour():
     assert not plan.best_effort
 
 
-def test_the_commanded_target_is_the_minimum_that_works_not_the_cliff():
-    """Sizing to the cliff would be the lazy answer and would cost real money
-    every time. The target is the inversion, so it lands just over the floor."""
+def test_the_commanded_target_respects_the_deadband_but_is_not_the_cliff():
+    """Two constraints, and the larger wins. The floor's inversion says ~39;
+    the firmware will not start below `tank + differential`, which says ~37.5.
+    Sizing straight to the 50 C cliff would be the lazy answer and would cost
+    real money every night it fired."""
     now = dt.datetime(2026, 7, 27, 22, 0, tzinfo=UTC)
     plan = plan_morning_topup(
         tank_c=31.0, now_utc=now, morning_entry_utc=now + dt.timedelta(hours=8),
         floor_c=37.0, margin_c=1.5, p=P, rates=_rates(now, _NIGHT_PRICES),
         max_target_c=P.t_hp_max_c,
+        differential_c=6.0, min_shortfall_c=2.0,
     )
     assert plan is not None
-    assert plan.target_c < 45, f"target {plan.target_c} is far above what the floor needs"
-    assert plan.target_c >= 38
+    assert plan.target_c < int(P.t_hp_max_c), "must not just command the cliff"
+    # Whatever it commands MUST clear the deadband, or the firmware never starts
+    # and the row is a physical no-op.
+    assert plan.target_c - 31.0 > 6.0
 
 
 def test_slots_outside_the_window_are_ineligible():
@@ -124,6 +131,7 @@ def test_slots_outside_the_window_are_ineligible():
         tank_c=31.0, now_utc=now, morning_entry_utc=morning,
         floor_c=37.0, margin_c=1.5, p=P, rates=_rates(now, _NIGHT_PRICES),
         max_target_c=P.t_hp_max_c,
+        differential_c=6.0, min_shortfall_c=2.0,
     )
     assert plan is not None
     assert now < plan.at_utc < morning
@@ -140,6 +148,7 @@ def test_an_unreachable_floor_is_flagged_best_effort_not_hidden():
         floor_c=58.0,  # above the 50 C heat-pump cliff even with no coasting
         margin_c=1.5, p=P, rates=_rates(now, _NIGHT_PRICES),
         max_target_c=P.t_hp_max_c,
+        differential_c=6.0, min_shortfall_c=2.0,
     )
     assert plan is not None
     assert plan.best_effort is True
@@ -151,6 +160,7 @@ def test_no_rates_means_no_purchase():
     assert plan_morning_topup(
         tank_c=31.0, now_utc=now, morning_entry_utc=now + dt.timedelta(hours=8),
         floor_c=37.0, margin_c=1.5, p=P, rates=[], max_target_c=P.t_hp_max_c,
+        differential_c=6.0, min_shortfall_c=2.0,
     ) is None
 
 
@@ -185,7 +195,26 @@ def _isolated(monkeypatch, tmp_path):
     db.init_db()
     import src.state_machine as sm
     sm._SENSOR_SILENT_NOTIFIED = set()
+    # These are module-level dicts keyed by action_schedule ROW ID. Row ids
+    # restart at 1 in every isolated test DB, so a leftover entry from another
+    # test collides and arms `detect_user_override` against a row this test just
+    # created — which surfaced here as the restore being suppressed as a "user
+    # override" of HEM's own top-up. Same hazard class as the documented
+    # `Config._overrides` leak: global state keyed by a non-global identifier.
+    sm._FIRST_APPLIED_SESSION.clear()
+    sm._USER_OVERRIDE_NOTIFIED.clear()
+    sm._USER_OVERRIDE_INHERITED_NOTIFIED.clear()
     yield
+
+
+def _seed_tank(at: dt.datetime, temp: float) -> None:
+    """A live tank reading. The hook requires TWO within its freshness window —
+    a lone cached float can predate the showers and collapse the premise."""
+    db.insert_daikin_telemetry({
+        "fetched_at": at.timestamp(), "source": "live", "tank_temp_c": temp,
+        "tank_target_c": 37.0, "outdoor_temp_c": 15.0, "indoor_temp_c": None,
+        "lwt_actual_c": 27.0, "mode": "heating", "weather_regulation": 1,
+    })
 
 
 def _seed_rates(start: dt.datetime, prices: list[float]) -> None:
@@ -210,15 +239,22 @@ def test_hook_writes_a_row_only_when_the_tank_needs_it(_isolated):
     now = dt.datetime(2026, 7, 27, 22, 0, tzinfo=UTC)  # 23:00 BST — inside the window
     _seed_rates(now, _NIGHT_PRICES)
 
+    for i in (20, 10):
+        _seed_tank(now - dt.timedelta(minutes=i), 44.0)
     sm._check_morning_topup(SimpleNamespace(tank_temperature=44.0), now, trigger="hb")
-    assert db.get_actions_for_plan_date("2026-07-27", device="daikin") == []
+    assert db.get_actions_for_plan_date("2026-07-28", device="daikin") == []
 
+    for i in (6, 3):
+        _seed_tank(now - dt.timedelta(minutes=i), 31.0)
     sm._check_morning_topup(SimpleNamespace(tank_temperature=31.0), now, trigger="hb")
-    rows = db.get_actions_for_plan_date("2026-07-27", device="daikin")
-    assert len(rows) == 1
-    assert rows[0]["action_type"] == "tank_warmup", "must be a kind the reconciler knows"
-    assert rows[0]["params"]["morning_topup"] is True
-    assert rows[0]["params"]["tank_powerful"] is False, "never COP-1 resistance"
+
+    # Filed under the row's OWN local date (28 Jul), not the decision date.
+    rows = db.get_actions_for_plan_date("2026-07-28", device="daikin")
+    kinds = {r["action_type"]: r for r in rows}
+    assert set(kinds) == {"tank_warmup", "tank_setback"}, "the top-up must be PAIRED"
+    assert kinds["tank_warmup"]["params"]["morning_topup"] is True
+    assert kinds["tank_warmup"]["params"]["tank_powerful"] is False, "never COP-1 resistance"
+    assert kinds["tank_setback"]["params"]["morning_topup_restore"] is True
 
 
 def test_hook_re_asserts_the_row_after_a_replan_deletes_it(_isolated):
@@ -230,10 +266,12 @@ def test_hook_re_asserts_the_row_after_a_replan_deletes_it(_isolated):
     now = dt.datetime(2026, 7, 27, 22, 0, tzinfo=UTC)
     _seed_rates(now, _NIGHT_PRICES)
     dev = SimpleNamespace(tank_temperature=31.0)
+    for i in (6, 3):
+        _seed_tank(now - dt.timedelta(minutes=i), 31.0)
 
     sm._check_morning_topup(dev, now, trigger="hb")
-    rows = db.get_actions_for_plan_date("2026-07-27", device="daikin")
-    assert len(rows) == 1
+    before = db.get_actions_for_plan_date("2026-07-28", device="daikin")
+    assert len(before) == 2
 
     conn = db.get_connection()
     try:
@@ -243,7 +281,10 @@ def test_hook_re_asserts_the_row_after_a_replan_deletes_it(_isolated):
         conn.close()
 
     sm._check_morning_topup(dev, now + dt.timedelta(minutes=5), trigger="hb")
-    assert len(db.get_actions_for_plan_date("2026-07-27", device="daikin")) == 1
+    after = db.get_actions_for_plan_date("2026-07-28", device="daikin")
+    assert len(after) == 2
+    assert [r["start_time"] for r in after] == [r["start_time"] for r in before], \
+        "re-assert must reuse the SAME slot, never re-plan onto a later one"
 
 
 def test_hook_is_inert_outside_the_evening_window(_isolated):
@@ -254,9 +295,12 @@ def test_hook_is_inert_outside_the_evening_window(_isolated):
     midday = dt.datetime(2026, 7, 27, 12, 0, tzinfo=UTC)  # 13:00 BST
     _seed_rates(midday, _NIGHT_PRICES)
 
+    for i in (6, 3):
+        _seed_tank(midday - dt.timedelta(minutes=i), 31.0)
     sm._check_morning_topup(SimpleNamespace(tank_temperature=31.0), midday, trigger="hb")
 
     assert db.get_actions_for_plan_date("2026-07-27", device="daikin") == []
+    assert db.get_actions_for_plan_date("2026-07-28", device="daikin") == []
 
 
 def test_hook_is_inert_in_read_only_and_vacation(_isolated, monkeypatch):
@@ -265,15 +309,17 @@ def test_hook_is_inert_in_read_only_and_vacation(_isolated, monkeypatch):
     now = dt.datetime(2026, 7, 27, 22, 0, tzinfo=UTC)
     _seed_rates(now, _NIGHT_PRICES)
     dev = SimpleNamespace(tank_temperature=31.0)
+    for i in (6, 3):
+        _seed_tank(now - dt.timedelta(minutes=i), 31.0)
 
     monkeypatch.setattr(config, "OPENCLAW_READ_ONLY", True, raising=False)
     sm._check_morning_topup(dev, now, trigger="hb")
-    assert db.get_actions_for_plan_date("2026-07-27", device="daikin") == []
+    assert db.get_actions_for_plan_date("2026-07-28", device="daikin") == []
 
     monkeypatch.setattr(config, "OPENCLAW_READ_ONLY", False, raising=False)
     monkeypatch.setattr(config, "OPTIMIZATION_PRESET", "vacation", raising=False)
     sm._check_morning_topup(dev, now, trigger="hb")
-    assert db.get_actions_for_plan_date("2026-07-27", device="daikin") == []
+    assert db.get_actions_for_plan_date("2026-07-28", device="daikin") == []
 
 
 def test_hook_logs_once_even_though_the_row_is_re_asserted(_isolated):
@@ -282,6 +328,8 @@ def test_hook_logs_once_even_though_the_row_is_re_asserted(_isolated):
     now = dt.datetime(2026, 7, 27, 22, 0, tzinfo=UTC)
     _seed_rates(now, _NIGHT_PRICES)
     dev = SimpleNamespace(tank_temperature=31.0)
+    for i in (6, 3):
+        _seed_tank(now - dt.timedelta(minutes=i), 31.0)
 
     for i in range(4):
         sm._check_morning_topup(dev, now + dt.timedelta(minutes=5 * i), trigger="hb")
@@ -393,3 +441,64 @@ def test_sensor_silence_judges_server_time_not_the_device_clock(_isolated, monke
 
     sm._check_sensor_silence(now, trigger="hb")
     notify.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# The integration the previous attempt never had
+# ---------------------------------------------------------------------------
+
+
+def test_the_row_fires_at_its_own_target_and_then_restores(_isolated, monkeypatch):
+    """The test whose absence let #773 ship broken: it asserted what was
+    PLANNED and never what was PATCHED.
+
+    Two things have to hold on the wire. The top-up must fire at the target it
+    chose — not get rewritten to the 50 °C cliff by the deadband guard, which is
+    what happened when the command sat inside the reheat differential. And the
+    tank must come back down afterwards, or it sits high until the 13:00 warmup
+    and trips the divergence alert every night.
+    """
+    import src.state_machine as sm
+
+    now = dt.datetime(2026, 7, 27, 22, 0, tzinfo=UTC)
+    _seed_rates(now, _NIGHT_PRICES)
+    for i in (6, 3):
+        _seed_tank(now - dt.timedelta(minutes=i), 31.0)
+    sm._check_morning_topup(SimpleNamespace(tank_temperature=31.0), now, trigger="hb")
+
+    rows = db.get_actions_for_plan_date("2026-07-28", device="daikin")
+    warmup = next(r for r in rows if r["action_type"] == "tank_warmup")
+    restore = next(r for r in rows if r["action_type"] == "tank_setback")
+    chosen = int(warmup["params"]["tank_temp"])
+
+    applied: list[dict] = []
+    monkeypatch.setattr(
+        "src.state_machine.apply_scheduled_daikin_params",
+        lambda d, c, p, trigger: applied.append(dict(p)) or True,
+    )
+    dev = SimpleNamespace(
+        tank_temperature=31.0, tank_target=37.0, tank_on=True,
+        tank_powerful=False, is_on=True, lwt_offset=None, id="d", name="Altherma",
+    )
+
+    fire = dt.datetime.fromisoformat(warmup["start_time"].replace("Z", "+00:00"))
+    sm._reconcile_daikin_actions(rows, MagicMock(), dev, fire, trigger="test")
+
+    assert applied, "the top-up row never fired"
+    assert applied[-1]["tank_temp"] == chosen, (
+        f"fired at {applied[-1]['tank_temp']}, not the chosen {chosen} — "
+        "the deadband guard rewrote it"
+    )
+    assert applied[-1]["tank_temp"] < int(P.t_hp_max_c), "escalated to the cliff"
+    assert applied[-1].get("tank_powerful") is not True, "COP-1 resistance"
+
+    # ...and the paired restore brings it back to the setback.
+    applied.clear()
+    dev.tank_target = float(chosen)
+    dev.tank_temperature = float(chosen)
+    after = dt.datetime.fromisoformat(restore["start_time"].replace("Z", "+00:00"))
+    rows2 = db.get_actions_for_plan_date("2026-07-28", device="daikin")
+    sm._reconcile_daikin_actions(rows2, MagicMock(), dev, after, trigger="test")
+
+    assert applied, "nothing restored the setback"
+    assert applied[-1]["tank_temp"] == int(config.DHW_TEMP_SETBACK_C)

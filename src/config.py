@@ -2753,6 +2753,14 @@ class Config:
     DHW_MORNING_TOPUP_MARGIN_C: float = float(
         os.getenv("DHW_MORNING_TOPUP_MARGIN_C", "1.5")
     )
+    # Smallest shortfall worth buying. The firmware only starts heating when the
+    # command exceeds the tank by more than its ~6 C reheat differential, and
+    # then heats all the way there — so the minimum possible purchase is a ~6 C
+    # overshoot. Spending that to close a 0.5 C gap is bad value, and without
+    # this gate the top-up fires on roughly a third of nights.
+    DHW_MORNING_TOPUP_MIN_SHORTFALL_C: float = float(
+        os.getenv("DHW_MORNING_TOPUP_MIN_SHORTFALL_C", "2.0")
+    )
     # 2026-07-29 — indoor-sensor silence detector. This failure mode is silent
     # by construction: HEM stays healthy, no request errors, and the only symptom
     # is a chart that quietly stops moving. Measured on 2026-07-28, both sensors

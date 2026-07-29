@@ -82,6 +82,11 @@ class AlertType(str, Enum):
     # chart that stops. Measured 2026-07-28: both sensors stopped in the same
     # second and it went 8 h unnoticed.
     SENSOR_SILENT = "sensor_silent"
+    # 2026-07-29 — HEM bought a half-hour of overnight heat to protect the
+    # morning shower. The household's rule is "avoid overnight heating as much
+    # as possible", so the rare time it happens they should be told, with the
+    # arithmetic that justified it.
+    DHW_MORNING_TOPUP = "dhw_morning_topup"
     # 2026-07-28 — the live tank SETPOINT no longer matches the plan row that
     # owns this moment. ACTIONABLE: either the user moved it (fine — but they
     # should know it is still in force) or something else did (not fine).
@@ -1059,6 +1064,40 @@ def notify_sensor_silent(*, devices: list[dict[str, object]], threshold_min: int
     ]
     extra = {"devices": devices, "threshold_min": int(threshold_min)}
     _dispatch(AlertType.SENSOR_SILENT, body="\n".join(lines), urgent=False, extra=extra)
+
+
+def notify_dhw_morning_topup(
+    *, at_utc: str, target_c: int, price_p: float, tank_now_c: float,
+    projected_without_c: float, floor_c: float, best_effort: bool,
+) -> None:
+    """🌙 A half-hour of overnight heat was bought to protect the morning shower.
+
+    The household asked to avoid overnight heating as much as possible, so the
+    rare night it happens is worth saying — with the arithmetic, so they can
+    judge whether the floor is set where they want it. pt-BR; once per night."""
+    hhmm = str(at_utc)[11:16]
+    lines = [
+        f"O tanque está em **{tank_now_c:.0f} °C** e chegaria a "
+        f"~{projected_without_c:.0f} °C de manhã, abaixo do piso de "
+        f"{floor_c:.0f} °C.",
+        f"Comprei **{hhmm}Z a {price_p:.1f}p** (o slot mais barato até o banho), "
+        f"alvo {target_c} °C. Depois volta pro setback sozinho.",
+    ]
+    if best_effort:
+        lines.append(
+            "⚠️ Nem no teto da bomba de calor o piso fecha nesta noite — isto é "
+            "o máximo possível sem resistência elétrica."
+        )
+    lines.append(
+        "Se isso estiver acontecendo demais, o piso matinal "
+        "(`DHW_MORNING_RESERVE_C`) é o botão."
+    )
+    extra = {
+        "at_utc": at_utc, "target_c": int(target_c), "price_p": float(price_p),
+        "tank_now_c": float(tank_now_c), "floor_c": float(floor_c),
+        "best_effort": bool(best_effort),
+    }
+    _dispatch(AlertType.DHW_MORNING_TOPUP, body="\n".join(lines), urgent=False, extra=extra)
 
 
 def notify_lp_health_regression(issues: list[str]) -> None:
