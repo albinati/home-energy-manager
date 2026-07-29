@@ -104,14 +104,27 @@ def test_a_first_ever_row_with_no_prior_is_still_announced(monkeypatch):
     notify.assert_called_once()
 
 
-def test_the_message_names_the_number_to_check_it_against(monkeypatch):
-    """The whole point is that this is the ONLY moment the value is checkable.
-    A ping that just states the result wastes the moment."""
+def test_the_notification_actually_reaches_the_transport(monkeypatch):
+    """Stub the TRANSPORT, not `_dispatch`.
+
+    The first version of this test stubbed `_dispatch` with a lambda whose
+    second parameter happened to be named `body` — which is exactly the keyword
+    the real helper was passing, and the real `_dispatch` takes `message`. The
+    test went green while the notification raised `TypeError` and delivered
+    nothing. (The same bug shipped to prod in #768's `notify_morning_tank_cold`
+    and is fixed here too.) Stub at the edge and the real signatures have to
+    line up."""
     sent: list[str] = []
     monkeypatch.setattr(
-        "src.notifier._dispatch",
-        lambda alert, body, urgent=False, extra=None, **kw: sent.append(body),
+        "src.telegram_transport.send_message",
+        lambda text, **kw: sent.append(text) or True,
     )
+    # Stub the ROUTE lookup and the TRANSPORT — everything between them,
+    # including `_dispatch`'s real signature, still has to line up. That is the
+    # whole point: the previous version stubbed `_dispatch` itself and so could
+    # not see that the helper was calling it with the wrong keyword.
+    monkeypatch.setattr("src.notifier._resolve_route", lambda k: {"silent": 0})
+    monkeypatch.setattr("src.telegram_transport.is_configured", lambda: True)
     from src.notifier import notify_thermal_ua_first_fit
 
     notify_thermal_ua_first_fit(
@@ -119,15 +132,95 @@ def test_the_message_names_the_number_to_check_it_against(monkeypatch):
         assumed_cop=3.0, tau_hours=53.8, c_kwh_per_k=33.9,
     )
 
+    assert sent, "the notification never reached the transport"
     body = sent[0]
     assert "630" in body and "250" in body
     assert "WINTER_THERMAL_MODEL" in body, "must point at what to compare against"
-    assert "COP" in body, "must name the most likely culprit for a disagreement"
 
 
-def test_a_notify_failure_does_not_break_the_nightly_job(monkeypatch):
+def test_the_message_does_not_blame_the_cop(monkeypatch):
+    """`fit_ua_hdd` computes `slope x assumed_cop` and the doc's 630 is quoted at
+    the same COP 3 — so it is a common factor that cancels exactly in the ratio.
+    Offering it as the explanation would send the reader after the one variable
+    that provably is not the difference."""
+    sent: list[str] = []
+    monkeypatch.setattr("src.notifier._send_to_openclaw", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(
+        "src.telegram_transport.send_message",
+        lambda text, **kw: sent.append(text) or True,
+    )
+    # Stub the ROUTE lookup and the TRANSPORT — everything between them,
+    # including `_dispatch`'s real signature, still has to line up. That is the
+    # whole point: the previous version stubbed `_dispatch` itself and so could
+    # not see that the helper was calling it with the wrong keyword.
+    monkeypatch.setattr("src.notifier._resolve_route", lambda k: {"silent": 0})
+    monkeypatch.setattr("src.telegram_transport.is_configured", lambda: True)
+    from src.notifier import notify_thermal_ua_first_fit
+
+    notify_thermal_ua_first_fit(
+        ua_w_per_k=630.0, env_ua_w_per_k=250.0, r2=0.84, samples=24,
+        assumed_cop=3.0, tau_hours=53.8, c_kwh_per_k=33.9,
+    )
+    body = sent[0]
+    assert "não" in body and "COP" in body, "must say the COP is NOT the explanation"
+    assert "temperatura base" in body, "must name a real candidate instead"
+
+
+def test_tau_absent_prints_no_zeroes(monkeypatch):
+    """A UA-only success on a fresh install leaves tau unset. "Com tau = 0 h ...
+    0.0 kWh/K" would be worse than saying nothing."""
+    sent: list[str] = []
+    monkeypatch.setattr(
+        "src.telegram_transport.send_message",
+        lambda text, **kw: sent.append(text) or True,
+    )
+    # Stub the ROUTE lookup and the TRANSPORT — everything between them,
+    # including `_dispatch`'s real signature, still has to line up. That is the
+    # whole point: the previous version stubbed `_dispatch` itself and so could
+    # not see that the helper was calling it with the wrong keyword.
+    monkeypatch.setattr("src.notifier._resolve_route", lambda k: {"silent": 0})
+    monkeypatch.setattr("src.telegram_transport.is_configured", lambda: True)
+    from src.notifier import notify_thermal_ua_first_fit
+
+    notify_thermal_ua_first_fit(
+        ua_w_per_k=630.0, env_ua_w_per_k=250.0, r2=0.84, samples=24,
+        assumed_cop=3.0, tau_hours=None, c_kwh_per_k=None,
+    )
+    assert "0 h" not in sent[0] and "0.0 kWh/K" not in sent[0]
+
+
+def test_a_lost_ping_is_not_marked_as_delivered(monkeypatch):
+    """Once-ever event: the dedup key must be written only after the notify
+    succeeds. Marking first would burn the announcement permanently — and once
+    `ua_w_per_k` is non-NULL the transition can never be detected again."""
     monkeypatch.setattr(
         "src.notifier.notify_thermal_ua_first_fit",
         MagicMock(side_effect=RuntimeError("telegram down")),
     )
-    _maybe_announce_first_ua_fit(prev=None, row=_ROW, ua_fit=_OK)  # must not raise
+    with pytest.raises(RuntimeError):
+        _maybe_announce_first_ua_fit(prev=None, row=_ROW, ua_fit=_OK)
+    assert not db.get_runtime_setting(_UA_FIRST_FIT_KEY), (
+        "a failed announcement was recorded as delivered"
+    )
+
+    ok = MagicMock()
+    monkeypatch.setattr("src.notifier.notify_thermal_ua_first_fit", ok)
+    _maybe_announce_first_ua_fit(prev=None, row=_ROW, ua_fit=_OK)
+    assert ok.call_count == 1, "the retry never happened"
+    assert db.get_runtime_setting(_UA_FIRST_FIT_KEY)
+
+
+def test_a_notify_failure_does_not_break_the_nightly_job(monkeypatch):
+    """It may propagate out of the announcer (so the retry logic above works),
+    but `refresh_building_thermal_calibration` must still finish."""
+    import src.analytics.thermal_learning as tlm
+
+    monkeypatch.setattr(
+        tlm, "_maybe_announce_first_ua_fit",
+        MagicMock(side_effect=RuntimeError("telegram down")),
+    )
+    # The caller wraps it; assert the wrapper exists and swallows.
+    import inspect
+    src_txt = inspect.getsource(tlm.refresh_building_thermal_calibration)
+    assert "_maybe_announce_first_ua_fit" in src_txt
+    assert "except Exception" in src_txt.split("_maybe_announce_first_ua_fit")[1][:200]

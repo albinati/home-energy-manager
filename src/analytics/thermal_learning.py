@@ -687,7 +687,10 @@ def refresh_building_thermal_calibration() -> dict[str, Any]:
         _fmt(row.get("tau_r2_median")), _fmt(row.get("ua_w_per_k")),
         row.get("ua_source") or "env", _fmt(row.get("c_kwh_per_k")),
     )
-    _maybe_announce_first_ua_fit(prev, row, ua_fit)
+    try:
+        _maybe_announce_first_ua_fit(prev, row, ua_fit)
+    except Exception:  # noqa: BLE001 — announcing must never break the nightly job
+        logger.exception("thermal_learning: first-UA-fit announcement failed")
     return _done({"status": "ok", "tau": tau_fit, "ua": ua_fit, "row": row})
 
 
@@ -732,24 +735,26 @@ def _maybe_announce_first_ua_fit(
         env_ua = float(config.BUILDING_UA_W_PER_K)
     except Exception:  # noqa: BLE001
         env_ua = 0.0
+    from ..notifier import notify_thermal_ua_first_fit
+
+    # Notify FIRST, mark second. This is a ONCE-EVER event: a duplicate ping is
+    # free, a lost one is unrecoverable — once `ua_w_per_k` is non-NULL the
+    # transition can never be detected again, even by clearing the key. Mirrors
+    # `dhw_bias.py`'s ordering for the same reason, and is the opposite trade
+    # from the sensor-silence detector, where re-pings would be a storm.
+    notify_thermal_ua_first_fit(
+        ua_w_per_k=ua,
+        env_ua_w_per_k=env_ua,
+        r2=float(row.get("ua_r2") or 0.0),
+        samples=int(row.get("ua_samples") or 0),
+        assumed_cop=float(row.get("ua_assumed_cop") or 0.0),
+        tau_hours=row.get("tau_hours"),
+        c_kwh_per_k=row.get("c_kwh_per_k"),
+    )
     try:
         db.set_runtime_setting(_UA_FIRST_FIT_KEY, datetime.now(UTC).isoformat())
     except Exception:  # noqa: BLE001
         pass
-    try:
-        from ..notifier import notify_thermal_ua_first_fit
-
-        notify_thermal_ua_first_fit(
-            ua_w_per_k=ua,
-            env_ua_w_per_k=env_ua,
-            r2=float(row.get("ua_r2") or 0.0),
-            samples=int(row.get("ua_samples") or 0),
-            assumed_cop=float(row.get("ua_assumed_cop") or 0.0),
-            tau_hours=float(row.get("tau_hours") or 0.0),
-            c_kwh_per_k=float(row.get("c_kwh_per_k") or 0.0),
-        )
-    except Exception as exc:  # noqa: BLE001 — best-effort
-        logger.debug("thermal_learning: first-UA-fit notify failed: %s", exc)
 
 
 def _fmt(v: Any) -> str:

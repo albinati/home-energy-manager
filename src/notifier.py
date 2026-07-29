@@ -116,6 +116,7 @@ _HOOK_PAYLOAD_NAMES: dict[str, str] = {
     "dhw_bias_enable_ready": "EnergyDhwBiasEnableReady",
     "tank_target_divergence": "EnergyTankTargetDivergence",
     "morning_tank_cold": "EnergyMorningTankCold",
+    "thermal_ua_first_fit": "EnergyThermalUaFirstFit",
 }
 
 
@@ -143,6 +144,7 @@ _TELEGRAM_HEADERS: dict[str, str] = {
     "lp_failure": "🚨 LP solver failure",
     "tank_target_divergence": "🌡️ Tanque fora do plano",
     "morning_tank_cold": "🚿 Tanque frio pro banho",
+    "thermal_ua_first_fit": "🏠 UA da casa medido pela 1ª vez",
 }
 
 
@@ -1036,12 +1038,12 @@ def notify_morning_tank_cold(
         "target_c": round(float(target_c), 1) if target_c is not None else None,
         "next_warmup_local": next_warmup_local,
     }
-    _dispatch(AlertType.MORNING_TANK_COLD, body="\n".join(lines), urgent=False, extra=extra)
+    _dispatch(AlertType.MORNING_TANK_COLD, "\n".join(lines), urgent=False, extra=extra)
 
 
 def notify_thermal_ua_first_fit(
     *, ua_w_per_k: float, env_ua_w_per_k: float, r2: float, samples: int,
-    assumed_cop: float, tau_hours: float, c_kwh_per_k: float,
+    assumed_cop: float, tau_hours: float | None, c_kwh_per_k: float | None,
 ) -> None:
     """🏠 The building UA has been MEASURED, for the first time.
 
@@ -1061,13 +1063,22 @@ def notify_thermal_ua_first_fit(
         f"(R² {r2:.2f}, {samples} dias, COP assumido {assumed_cop:.1f}).",
         f"Antes o modelo usava {env_ua_w_per_k:.0f} W/K do `.env` — "
         f"diferença de **{delta_pct:+.0f}%**.",
-        f"Com τ = {tau_hours:.0f} h, a capacidade térmica passa a "
-        f"{c_kwh_per_k:.1f} kWh/K, agora derivada do UA medido.",
+    ]
+    # tau can legitimately be absent (a UA-only success on a fresh install), and
+    # "Com tau = 0 h ... 0.0 kWh/K" would be worse than saying nothing.
+    if tau_hours is not None and c_kwh_per_k is not None:
+        lines.append(
+            f"Com τ = {float(tau_hours):.0f} h, a capacidade térmica passa a "
+            f"{float(c_kwh_per_k):.1f} kWh/K, agora derivada do UA medido."
+        )
+    lines += [
         "",
         "**Vale conferir agora**, enquanto é verificável: `docs/WINTER_THERMAL_MODEL.md` "
-        "estima ~630 W/K a partir de uma inclinação de 5,0 kWh/°C·dia a COP 3. "
-        "Se o ajuste discordar muito, a pergunta é qual dos dois está errado — "
-        "e o COP assumido é o suspeito mais provável.",
+        "estima ~630 W/K a partir de uma inclinação de 5,0 kWh/°C·dia. "
+        "Se discordar muito, o COP **não** é a explicação — ele multiplica os dois "
+        "números igualmente e some na razão. Os suspeitos reais são a temperatura "
+        "base (interna medida aqui vs. 15,5 °C assumidos no doc) e a janela "
+        "(30 dias móveis vs. Jan–Abr do doc).",
     ]
     extra = {
         "ua_w_per_k": round(float(ua_w_per_k), 1),
@@ -1076,11 +1087,11 @@ def notify_thermal_ua_first_fit(
         "r2": round(float(r2), 3),
         "samples": int(samples),
         "assumed_cop": round(float(assumed_cop), 2),
-        "tau_hours": round(float(tau_hours), 1),
-        "c_kwh_per_k": round(float(c_kwh_per_k), 2),
+        "tau_hours": round(float(tau_hours), 1) if tau_hours is not None else None,
+        "c_kwh_per_k": round(float(c_kwh_per_k), 2) if c_kwh_per_k is not None else None,
         "docRef": "docs/WINTER_THERMAL_MODEL.md",
     }
-    _dispatch(AlertType.THERMAL_UA_FIRST_FIT, body="\n".join(lines), urgent=False, extra=extra)
+    _dispatch(AlertType.THERMAL_UA_FIRST_FIT, "\n".join(lines), urgent=False, extra=extra)
 
 
 def notify_lp_health_regression(issues: list[str]) -> None:
