@@ -77,6 +77,12 @@ class AlertType(str, Enum):
     # ACTIONABLE prompt: never auto-enables (the corrected value feeds a hard
     # LP equality — a human flips the env). One-shot (runtime-setting dedup).
     DHW_BIAS_ENABLE_READY = "dhw_bias_enable_ready"
+    # 2026-07-29 — the building UA fit succeeded for the FIRST time. The house
+    # model has been half-measured for months (tau from real decay episodes, UA
+    # falling back to an env constant because `fit_ua_hdd` needs 20 days with
+    # HDD > 1). The transition happens silently one autumn morning, and it is
+    # the only moment the number is checkable against the documented estimate.
+    THERMAL_UA_FIRST_FIT = "thermal_ua_first_fit"
     # 2026-07-28 — the live tank SETPOINT no longer matches the plan row that
     # owns this moment. ACTIONABLE: either the user moved it (fine — but they
     # should know it is still in force) or something else did (not fine).
@@ -110,6 +116,7 @@ _HOOK_PAYLOAD_NAMES: dict[str, str] = {
     "dhw_bias_enable_ready": "EnergyDhwBiasEnableReady",
     "tank_target_divergence": "EnergyTankTargetDivergence",
     "morning_tank_cold": "EnergyMorningTankCold",
+    "thermal_ua_first_fit": "EnergyThermalUaFirstFit",
 }
 
 
@@ -137,6 +144,7 @@ _TELEGRAM_HEADERS: dict[str, str] = {
     "lp_failure": "🚨 LP solver failure",
     "tank_target_divergence": "🌡️ Tanque fora do plano",
     "morning_tank_cold": "🚿 Tanque frio pro banho",
+    "thermal_ua_first_fit": "🏠 UA da casa medido pela 1ª vez",
 }
 
 
@@ -560,12 +568,22 @@ def _dispatch(
     urgent: bool = False,
     extra: dict[str, Any] | None = None,
     telegram_header_override: str | None = None,
-) -> None:
+) -> bool:
+    """Deliver an alert. Returns whether it reached a transport.
+
+    The return value is additive and every existing caller ignores it. It exists
+    for the rare alert that is worth RETRYING — a once-ever announcement, say —
+    because `telegram_transport.send_message` swallows every network failure and
+    returns False, so a caller that relies on exceptions to detect an outage
+    detects nothing. Anything that needs to know must ask.
+
+    False means "not delivered by any transport": the route is disabled, or
+    Telegram declined, or the hook path was queued rather than confirmed."""
     full_msg = _compose_delivery_body(kind, message, urgent=urgent, extra=extra)
     _record_notification(kind, message, urgent=urgent, extra=extra, full_msg=full_msg)
     route = _resolve_route(kind.value)
     if not route:
-        return
+        return False
     silent = bool(route.get("silent"))
 
     # Direct Telegram is preferred when configured — bypasses OpenClaw LLM.
@@ -575,7 +593,7 @@ def _dispatch(
             urgent=urgent, extra=extra,
             header_override=telegram_header_override,
         )
-        telegram_transport.send_message(body, silent=silent)
+        ok = bool(telegram_transport.send_message(body, silent=silent))
         # Appliance lifecycle events fan out to optional secondary chats so
         # household members get the same message (washing-machine armed /
         # starting / finished / cancelled). Failures are swallowed by the
@@ -583,14 +601,14 @@ def _dispatch(
         if kind.value in _APPLIANCE_FANOUT_ALERT_KEYS:
             for cid in _appliance_fanout_chat_ids():
                 telegram_transport.send_message(body, silent=silent, chat_id_override=cid)
-        return
+        return ok
 
     if not _hooks_credentials_configured():
         print(
             "[openclaw hooks] OPENCLAW_HOOKS_URL and OPENCLAW_HOOKS_TOKEN are required "
             f"for user delivery (alert={kind.value}; notification was logged above)."
         )
-        return
+        return False
     payload_name = _payload_name_for_key(kind.value)
     agent_msg = _build_generic_agent_message(
         kind.value,
@@ -600,6 +618,9 @@ def _dispatch(
         extra=extra,
     )
     _enqueue_hooks_delivery(kind.value, payload_name, agent_msg, route)
+    # Queued, not confirmed — the hook path is fire-and-forget, so a caller that
+    # needs certainty must not treat this as delivered.
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -1030,7 +1051,81 @@ def notify_morning_tank_cold(
         "target_c": round(float(target_c), 1) if target_c is not None else None,
         "next_warmup_local": next_warmup_local,
     }
-    _dispatch(AlertType.MORNING_TANK_COLD, body="\n".join(lines), urgent=False, extra=extra)
+    _dispatch(AlertType.MORNING_TANK_COLD, "\n".join(lines), urgent=False, extra=extra)
+
+
+def notify_thermal_ua_first_fit(
+    *, ua_w_per_k: float, env_ua_w_per_k: float, r2: float, samples: int,
+    assumed_cop: float, tau_hours: float | None, c_kwh_per_k: float | None,
+    window_days: int | None = None,
+) -> bool:
+    """🏠 The building UA has been MEASURED, for the first time.
+
+    Until now the house model was half-measured: tau came from real overnight
+    decay episodes, but UA fell back to `BUILDING_UA_W_PER_K` because the HDD
+    regression needs 20 days with HDD > 1 and a British summer supplies none —
+    so C, derived as `tau x UA`, inherited the assumption too.
+
+    This is the one moment the number is checkable. `docs/WINTER_THERMAL_MODEL.md`
+    records ~630 W/K from a 5.0 kWh/degree-day slope at COP 3; if the fit lands
+    somewhere else, the interesting question is which is wrong — and nobody will
+    think to ask it six weeks later when the value is just sitting in a table.
+    pt-BR; fires once, on the transition."""
+    delta_pct = ((ua_w_per_k / env_ua_w_per_k - 1.0) * 100.0) if env_ua_w_per_k else 0.0
+    lines = [
+        f"O UA da casa saiu de suposição pra **medição**: **{ua_w_per_k:.0f} W/K** "
+        f"(R² {r2:.2f}, {samples} dias, COP assumido {assumed_cop:.1f}).",
+        f"Antes o modelo usava {env_ua_w_per_k:.0f} W/K do `.env` — "
+        f"diferença de **{delta_pct:+.0f}%**.",
+    ]
+    # tau can legitimately be absent (a UA-only success on a fresh install), and
+    # "Com tau = 0 h ... 0.0 kWh/K" would be worse than saying nothing.
+    if tau_hours is not None and c_kwh_per_k is not None:
+        lines.append(
+            f"Com τ = {float(tau_hours):.0f} h, a capacidade térmica passa a "
+            f"{float(c_kwh_per_k):.1f} kWh/K, agora derivada do UA medido."
+        )
+    lines += [
+        "",
+        "**Vale conferir agora**, enquanto é verificável: `docs/WINTER_THERMAL_MODEL.md` "
+        "estima ~630 W/K a partir de uma inclinação de 5,0 kWh/°C·dia a COP 3.",
+    ]
+    # The COP cancels ONLY when this fit used the same COP the doc quoted. Say
+    # so when it is true; when it is not, the COP is a genuine candidate and
+    # claiming otherwise would send the reader the wrong way.
+    if abs(float(assumed_cop) - 3.0) < 1e-6:
+        lines.append(
+            "Se discordar muito, o COP **não** é a explicação — este ajuste usa o "
+            "mesmo COP 3 do doc, então ele multiplica os dois números igualmente "
+            "e some na razão."
+        )
+    else:
+        lines.append(
+            f"Atenção: este ajuste usou COP {float(assumed_cop):.1f} e o doc cita "
+            "COP 3, então parte da diferença é só isso."
+        )
+    lines.append(
+        "Outros suspeitos: a temperatura base (interna medida aqui vs. 15,5 °C "
+        "assumidos no doc), a janela ("
+        + (f"{int(window_days)} dias móveis" if window_days else "móvel")
+        + " vs. Jan–Abr do doc), o filtro HDD > 1 que o doc não tem, e o offset "
+        "de microclima aplicado ao outdoor."
+    )
+    extra = {
+        "ua_w_per_k": round(float(ua_w_per_k), 1),
+        "env_ua_w_per_k": round(float(env_ua_w_per_k), 1),
+        "delta_pct": round(delta_pct, 1),
+        "r2": round(float(r2), 3),
+        "samples": int(samples),
+        "assumed_cop": round(float(assumed_cop), 2),
+        "tau_hours": round(float(tau_hours), 1) if tau_hours is not None else None,
+        "c_kwh_per_k": round(float(c_kwh_per_k), 2) if c_kwh_per_k is not None else None,
+        "window_days": int(window_days) if window_days else None,
+        "docRef": "docs/WINTER_THERMAL_MODEL.md",
+    }
+    return _dispatch(
+        AlertType.THERMAL_UA_FIRST_FIT, "\n".join(lines), urgent=False, extra=extra
+    )
 
 
 def notify_lp_health_regression(issues: list[str]) -> None:

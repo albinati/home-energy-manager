@@ -520,6 +520,9 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         ("lp_health_regression",  "critical", 0),
         ("guests_mode_suggested", "reports",  0),
         ("dhw_bias_enable_ready", "reports",  0),
+        # 2026-07-29 — once-ever, and it is the only moment the
+        # measured UA can be sanity-checked against the estimate.
+        ("thermal_ua_first_fit",  "reports",  0),
         # 2026-07-28 — comfort/actuation divergence. Both are ACTIONABLE (the
         # user has to decide something), so they must not land in the muted
         # FYI bucket alongside the digests.
