@@ -35,12 +35,21 @@ _FIRE = datetime(2026, 7, 17, 12, 5, tzinfo=UTC)
 
 
 def test_incident_case_lifts_the_heat_pump_not_powerful():
-    """Tank 42, target 47 (inside the deadband) and ~7 h coast to the 20:00
-    window → projected < 45. 47 is below the 50 °C cliff, so the heat pump can
-    do the lift: command the cliff, NOT Powerful (#737)."""
+    """Tank 42, target 47 (inside the deadband) at the 13:05 warmup fire. 47 is
+    below the 50 °C cliff, so the heat pump can do the lift: command the cliff,
+    NOT Powerful (#737).
+
+    Since #767 the WORST window is the morning reserve rather than the evening
+    one. That is the point of the change, not a regression: the evening is a
+    7 h standing-loss coast (42 → ~41.6, short of the 45 floor by ~3.4), while
+    the morning sits on the far side of three showers and is short by ~12 once
+    the measured setback-to-morning drop is applied instead of a draw-free ODE.
+    The mechanism assertions below are what this test is really about, and they
+    are unchanged."""
     r = _warmup_deadband_force_reason(_dev(42.0), {"tank_temp": 47, "tank_power": True}, _FIRE)
     assert r is not None
-    assert r["window"] == "evening_showers"
+    assert r["window"] == "morning_reserve"
+    assert r["projection_basis"].startswith("measured_overnight_drop")
     assert r["projected_c"] < r["floor_c"]
     assert r["mechanism"] == "hp_target_lift"
     # Command the cliff — stable across the heat-up; clears the deadband from
@@ -88,14 +97,31 @@ def test_firmware_will_heat_unaided_no_force():
         _dev(38.0), {"tank_temp": 47, "tank_power": True}, _FIRE) is None
 
 
-def test_coast_clearing_the_floor_keeps_the_free_skip():
-    """Tank 46 an hour before the window: inside the deadband, but the short
-    coast stays above the 45 floor — the firmware skip is deliberate and
-    cheaper. (At 13:00 the same 46 °C would NOT clear: τ=95 h drops it to
-    ~44.3 by 20:00, which is exactly why the V3 schedule heats to 47.)"""
+def test_evening_floor_is_judged_on_a_draw_free_coast():
+    """Tank 46 an hour before the 20:00 window: the EVENING floor is owed at
+    entry, before anyone has showered, so it is judged on standing loss alone —
+    a short coast that stays above 45. Counting tonight's draw here would make
+    the tank pay for tonight's showers twice.
+
+    The morning window still fires (it is on the far side of that draw), so the
+    old "free skip" assertion of `is None` no longer holds — but the reason it
+    fires is the morning, never the evening."""
     late_fire = datetime(2026, 7, 17, 18, 5, tzinfo=UTC)  # 19:05 BST
-    assert _warmup_deadband_force_reason(
-        _dev(46.0), {"tank_temp": 47, "tank_power": True}, late_fire) is None
+    r = _warmup_deadband_force_reason(
+        _dev(46.0), {"tank_temp": 47, "tank_power": True}, late_fire)
+    assert r is not None
+    assert r["window"] == "morning_reserve"
+    assert r["projection_basis"].startswith("measured_overnight_drop")
+
+
+def test_a_pure_afternoon_projection_still_uses_standing_loss():
+    """No evening draw between the fire and the window → the ODE is the honest
+    model and must not be replaced by the overnight transfer."""
+    from src.state_machine import _crosses_evening_draw
+    from datetime import timedelta as _td
+    noon_local = datetime(2026, 7, 17, 13, 5)  # BST wall clock
+    assert not _crosses_evening_draw(noon_local, 2.0, "normal")   # 13:05 -> 15:05
+    assert _crosses_evening_draw(noon_local, 20.0, "normal")      # crosses 20:00
 
 
 def test_already_at_target_no_force():

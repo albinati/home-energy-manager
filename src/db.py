@@ -525,6 +525,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         # FYI bucket alongside the digests.
         ("tank_target_divergence", "critical", 0),
         ("morning_tank_cold",      "critical", 0),
+        ("sensor_silent",          "critical", 0),
     ]
     for _at, _sev, _sil in _NOTIFICATION_DEFAULTS:
         conn.execute(
@@ -8894,3 +8895,30 @@ def refresh_daikin_lwt_kw_calibration(*, log_min_delta_pct: float = 1.0) -> dict
                 result.get("bias_kwh") or 0.0,
             )
     return result
+
+
+def get_device_last_seen() -> list[tuple[str, str, str | None]]:
+    """``(device_key, last_received_at, room)`` for every sensor device ever seen,
+    newest first.
+
+    Ordered on ``received_at`` — the SERVER's clock — deliberately. A device
+    supplies ``captured_at`` itself, so a unit whose clock has drifted or reset
+    could otherwise look fresh while sending nothing, which is the exact failure
+    a silence detector exists to catch (#700 made the same correction for the
+    "latest reading" card).
+    """
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """SELECT device_key, MAX(received_at) AS last_seen,
+                          (SELECT room FROM device_reading_log d2
+                            WHERE d2.device_key = d1.device_key
+                            ORDER BY received_at DESC LIMIT 1) AS room
+                   FROM device_reading_log d1
+                   GROUP BY device_key
+                   ORDER BY last_seen DESC"""
+            )
+            return [(str(r[0]), str(r[1]), r[2]) for r in cur.fetchall()]
+        finally:
+            conn.close()

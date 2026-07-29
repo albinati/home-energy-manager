@@ -140,3 +140,58 @@ def resolve_reheat_differential_c() -> float:
         logger.warning("dhw.params: learned reheat differential %.1f out of range — fallback", value)
         return fallback
     return value
+
+
+def resolve_overnight_drop_c(percentile: str = "p90_c") -> float:
+    """How far the tank falls between the afternoon setback and the morning
+    shower, MEASURED (#767).
+
+    A comfort guard is a question about the tail, so the default is ``p90_c``:
+    cover nine nights in ten and let the tenth be handled by whatever recovery
+    the plan schedules. ``p50_c`` is available for cost questions, where the
+    typical night is the right quantity.
+
+    The fallback deliberately is NOT the declared-shower model. Three declared
+    evening showers imply ~3.4 kWh thermal, which on this cylinder is a 15.3 °C
+    drop; measured over 28 nights the median is 5 and the p90 is 10. Sizing a
+    daily lift against 15.3 would pay for heat on nine nights out of ten to
+    protect the tenth. So the fallback is the measured p90 that has actually
+    been observed on this tank, and it is documented as such rather than being
+    derived from a model that is known to be 3x high.
+    """
+    from .. import db
+
+    fallback = 10.0  # measured p90 over 28 nights, 2026-06-29..07-28
+    enabled = True
+    max_age = _MAX_AGE_DAYS_DEFAULT
+    try:
+        from ..config import config
+
+        fallback = float(getattr(config, "DHW_OVERNIGHT_DROP_FALLBACK_C", 10.0))
+        enabled = bool(getattr(config, "DHW_CALIBRATION_ENABLED", True))
+        max_age = float(getattr(config, "DHW_CALIBRATION_MAX_AGE_DAYS", _MAX_AGE_DAYS_DEFAULT))
+    except Exception:  # noqa: BLE001 — config outage must not break a solve
+        pass
+    if not enabled:
+        return fallback
+    try:
+        row = db.get_dhw_calibration("overnight_drop")
+    except Exception:  # noqa: BLE001
+        return fallback
+    if not row or row.get("status") != "ok" or not _fresh(row.get("fitted_at_utc"), max_age):
+        return fallback
+    value = (row.get("payload") or {}).get(percentile)
+    if value is None:
+        return fallback
+    value = float(value)
+    # A negative drop means the tank ENDED warmer — a boost night that slipped
+    # the filter. Zero is the floor: a comfort guard may never assume the tank
+    # gains heat overnight. The upper bound is the cylinder's whole usable span;
+    # beyond that the fit is describing something other than a coast.
+    if not (0.0 <= value <= 30.0):
+        logger.warning(
+            "dhw.params: learned overnight drop %.1f out of range — fallback %.1f",
+            value, fallback,
+        )
+        return fallback
+    return value

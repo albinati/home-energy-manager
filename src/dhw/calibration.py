@@ -204,6 +204,101 @@ def select_coast_episodes(
 # ---------------------------------------------------------------------------
 
 
+def fit_overnight_drop(
+    tank_target_rows: list[tuple[float, float, float]],
+    *,
+    tz: ZoneInfo,
+    setback_hour_utc: int = 15,
+    morning_hour_utc: int = 6,
+    tolerance_minutes: float = 90.0,
+    boost_target_c: float = 55.0,
+    min_nights: int = 8,
+) -> dict[str, Any]:
+    """How far the tank ACTUALLY falls between the afternoon setback and the
+    morning shower — measured, per night.
+
+    This exists because the alternative is much worse. The declared draw model
+    (``dhw/comfort.py:declared_draw_kwh_for_slots``, three evening showers) puts
+    the evening at ~3.4 kWh thermal, which on this 192 L cylinder is a **15.3 °C**
+    drop. Measured over 28 non-boost nights the real distribution is::
+
+        min -4  |  p25 3  |  median 5  |  p75 6  |  p90 10  |  max 17   (°C)
+
+    So the declared model overstates a typical night by ~3x. A comfort guard
+    built on it would command a lift almost every night, paying for heat against
+    a drawdown that happens in one night out of ten. Measuring the transfer
+    directly avoids that, and it is a genuinely better quantity anyway: it is
+    end-to-end (standing loss AND draws, whatever the household actually did)
+    rather than a sum of two models each with its own error.
+
+    Nights containing a boost target are excluded — a ``tank_negative_boost``
+    to 60 °C is not a representative starting point, and its recovery would show
+    up as a negative drop that flatters the distribution.
+
+    Returns percentiles rather than a mean: a comfort floor is a question about
+    the TAIL, not the centre. ``status='skipped'`` below the gate; never raises.
+    """
+    by_ts = sorted(
+        (datetime.fromtimestamp(float(ts), UTC), float(tank), float(tgt))
+        for ts, tank, tgt in tank_target_rows
+    )
+    if not by_ts:
+        return {"status": "skipped", "reason": "no tank telemetry", "nights": 0}
+
+    def _nearest(at: datetime) -> tuple[float, datetime] | None:
+        best: tuple[float, float, datetime] | None = None
+        for t, v, _g in by_ts:
+            d = abs((t - at).total_seconds()) / 60.0
+            if d <= tolerance_minutes and (best is None or d < best[0]):
+                best = (d, v, t)
+        return (best[1], best[2]) if best else None
+
+    drops: list[float] = []
+    nights: list[dict[str, Any]] = []
+    day = by_ts[0][0].date()
+    last = by_ts[-1][0].date()
+    while day <= last:
+        a = _nearest(datetime.combine(day, time(setback_hour_utc, 30), tzinfo=UTC))
+        b = _nearest(
+            datetime.combine(day + timedelta(days=1), time(morning_hour_utc, 0), tzinfo=UTC)
+        )
+        day += timedelta(days=1)
+        if a is None or b is None:
+            continue
+        # A boost anywhere in the window makes this night unrepresentative.
+        if any(g >= boost_target_c for t, _v, g in by_ts if a[1] <= t <= b[1]):
+            continue
+        drops.append(a[0] - b[0])
+        nights.append({"night": a[1].date().isoformat(), "drop_c": round(a[0] - b[0], 1)})
+
+    if len(drops) < min_nights:
+        return {
+            "status": "skipped",
+            "reason": f"only {len(drops)} usable night(s); need >= {min_nights}",
+            "nights": len(drops),
+        }
+
+    drops.sort()
+    n = len(drops)
+
+    def _pct(q: float) -> float:
+        return float(drops[min(n - 1, int(q * n))])
+
+    return {
+        "status": "ok",
+        "nights": n,
+        "p25_c": _pct(0.25),
+        "p50_c": _pct(0.50),
+        "p75_c": _pct(0.75),
+        "p90_c": _pct(0.90),
+        "max_c": float(drops[-1]),
+        "min_c": float(drops[0]),
+        "setback_hour_utc": setback_hour_utc,
+        "morning_hour_utc": morning_hour_utc,
+        "recent": nights[-10:],
+    }
+
+
 def _solve3(m: list[list[float]], rhs: list[float]) -> list[float] | None:
     """Gaussian elimination with partial pivoting for a 3x3 system.
 
@@ -872,6 +967,24 @@ def refresh_dhw_calibration() -> dict[str, Any]:
         n_samples=diff_fit.get("n_episodes"), window_days=diff_window,
     )
 
+    # Overnight drop (#767) — the empirical setback-to-morning transfer. Reuses
+    # the reheat fit's rows: same shape, and it wants the same long window
+    # (nights are one sample each, so 21 days is too few to see a p90).
+    try:
+        drop_fit = fit_overnight_drop(tt_rows, tz=tz)
+    except Exception:  # pragma: no cover — defensive; never break the cron
+        logger.exception("dhw.calibration: overnight drop fit failed")
+        drop_fit = {"status": "error"}
+    db.upsert_dhw_calibration(
+        "overnight_drop", status=drop_fit.get("status", "error"), payload=drop_fit,
+        n_samples=drop_fit.get("nights"), window_days=diff_window,
+    )
+
+    logger.info(
+        "dhw.calibration: overnight_drop=%s (p50=%s p75=%s p90=%s max=%s over %s nights)",
+        drop_fit.get("status"), drop_fit.get("p50_c"), drop_fit.get("p75_c"),
+        drop_fit.get("p90_c"), drop_fit.get("max_c"), drop_fit.get("nights"),
+    )
     logger.info(
         "dhw.calibration: ua_ambient=%s (UA=%.2f ambient=%.1f r2=%.2f) | %d draws, peak hour %s"
         " | reheat_diff=%s (%s°C, %s/%s misfit, n=%s)",
@@ -883,4 +996,4 @@ def refresh_dhw_calibration() -> dict[str, Any]:
         diff_fit.get("n_episodes"),
     )
     return {"status": "ok", "ua_ambient": ua_fit, "draw_hours": hours,
-            "reheat_differential": diff_fit}
+            "reheat_differential": diff_fit, "overnight_drop": drop_fit}

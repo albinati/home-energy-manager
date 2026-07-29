@@ -2765,6 +2765,26 @@ class Config:
     MORNING_TANK_COLD_CHECK_END_HOUR_UTC: int = int(
         os.getenv("MORNING_TANK_COLD_CHECK_END_HOUR_UTC", "7")
     )
+    # 2026-07-29 — indoor-sensor silence detector. This failure mode is silent
+    # by construction: HEM stays healthy, no request errors, and the only symptom
+    # is a chart that quietly stops moving. Measured on 2026-07-28, both sensors
+    # went quiet at the same second (the funnel's public DNS record vanished) and
+    # it took 8 h and a manual investigation to notice.
+    #
+    # 60 min is ~6x the 10-min posting cadence: long enough that a single missed
+    # batch or a wifi blip is not news, short enough to catch it the same morning.
+    SENSOR_SILENCE_CHECK_ENABLED: bool = (
+        os.getenv("SENSOR_SILENCE_CHECK_ENABLED", "true").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+    SENSOR_SILENCE_ALERT_MINUTES: int = int(
+        os.getenv("SENSOR_SILENCE_ALERT_MINUTES", "60")
+    )
+    # A device quiet for longer than this is treated as retired, not silent —
+    # otherwise a decommissioned sensor pages forever.
+    SENSOR_SILENCE_MAX_AGE_HOURS: int = int(
+        os.getenv("SENSOR_SILENCE_MAX_AGE_HOURS", "168")
+    )
     # #461 — LWT-offset drift backstop. When HEM owns the offset (pre-heat
     # enabled) and the live offset is non-zero but no active lwt_preheat slot
     # justifies it, reset it to 0 — after the user's grace window

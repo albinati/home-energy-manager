@@ -86,6 +86,11 @@ class AlertType(str, Enum):
     # still time to react. The plan's own recovery is the afternoon warmup,
     # which is hours after the morning shower. ACTIONABLE; once per local day.
     MORNING_TANK_COLD = "morning_tank_cold"
+    # 2026-07-29 — an indoor sensor has gone quiet. Silent by construction
+    # otherwise: HEM stays healthy, nothing errors, and the only symptom is
+    # a chart that quietly stops. Measured 2026-07-28: both sensors stopped
+    # at the same second and it went 8 h unnoticed.
+    SENSOR_SILENT = "sensor_silent"
 
 
 # OpenClaw hook payload ``name`` field (one stable label per alert key)
@@ -110,6 +115,7 @@ _HOOK_PAYLOAD_NAMES: dict[str, str] = {
     "dhw_bias_enable_ready": "EnergyDhwBiasEnableReady",
     "tank_target_divergence": "EnergyTankTargetDivergence",
     "morning_tank_cold": "EnergyMorningTankCold",
+    "sensor_silent": "EnergySensorSilent",
 }
 
 
@@ -137,6 +143,7 @@ _TELEGRAM_HEADERS: dict[str, str] = {
     "lp_failure": "🚨 LP solver failure",
     "tank_target_divergence": "🌡️ Tanque fora do plano",
     "morning_tank_cold": "🚿 Tanque frio pro banho",
+    "sensor_silent": "📡 Sensor mudo",
 }
 
 
@@ -1031,6 +1038,30 @@ def notify_morning_tank_cold(
         "next_warmup_local": next_warmup_local,
     }
     _dispatch(AlertType.MORNING_TANK_COLD, body="\n".join(lines), urgent=False, extra=extra)
+
+
+def notify_sensor_silent(*, devices: list[dict[str, object]], threshold_min: int) -> None:
+    """📡 One or more indoor sensors have stopped reporting.
+
+    This failure is silent by construction: HEM stays healthy, no request
+    errors, and the only symptom is a chart that stops moving. On 2026-07-28
+    both sensors went quiet at the same second and it took 8 h and a manual
+    investigation to notice. pt-BR body; deduped per episode by the caller.
+    """
+    lines = [
+        f"Sem leituras há mais de {threshold_min} min de: "
+        + ", ".join(
+            f"**{d.get('room') or d.get('device_key')}** ({d.get('silent_min')} min)"
+            for d in devices
+        ),
+        "",
+        "O HEM continua saudável — é o caminho até ele que caiu. Vale checar, "
+        "nesta ordem: energia/wifi do sensor, internet de casa, e se o nome "
+        "`ts.net` ainda resolve (já houve um caso em que o DNS público do "
+        "funnel sumiu e os dois sensores pararam juntos).",
+    ]
+    extra = {"devices": devices, "threshold_min": int(threshold_min)}
+    _dispatch(AlertType.SENSOR_SILENT, body="\n".join(lines), urgent=False, extra=extra)
 
 
 def notify_lp_health_regression(issues: list[str]) -> None:

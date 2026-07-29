@@ -67,6 +67,9 @@ _TANK_TARGET_DIVERGENCE_NOTIFIED: tuple[int, int] | None = None
 # enter — without it, a 06:00 check would happily page about the 19:00 evening
 # window, which the afternoon warmup is going to fix anyway.
 _MORNING_COLD_LOOKAHEAD_HOURS = 3.0
+# Devices we have already paged about in this silence episode. Cleared per
+# device the moment it reports again, so a fresh outage pages again.
+_SENSOR_SILENT_NOTIFIED: set[str] = set()
 # Oldest `daikin_telemetry` reading the cold-tank check will page from when the
 # device snapshot has no tank temperature. The reader returns the newest live
 # row of any age, and after an Onecta quota outage that can be days stale.
@@ -196,7 +199,11 @@ def _warmup_deadband_force_reason(
     """
     from .dhw.comfort import shower_windows
     from .dhw.model import coast_to
-    from .dhw.params import resolve_reheat_differential_c, resolve_tank_params
+    from .dhw.params import (
+        resolve_overnight_drop_c,
+        resolve_reheat_differential_c,
+        resolve_tank_params,
+    )
 
     target = apply_params.get("tank_temp")
     tank = getattr(dev, "tank_temperature", None)
@@ -258,7 +265,30 @@ def _warmup_deadband_force_reason(
         else:
             entry = start if start > now_local else start + timedelta(days=1)
             hours = (entry - now_local).total_seconds() / 3600.0
-        projected = coast_to(tank, hours, p)
+
+        # #767 — `coast_to` models STANDING LOSS ONLY. Projecting an afternoon
+        # warmup across the evening to the next morning that way answers the
+        # wrong question: it asks what an untouched tank would read, when what
+        # the household will meet is a tank three showers lighter. Measured on
+        # 2026-07-27 the real transfer was 48 -> 31 (17 °C); the standing-loss
+        # projection said ~45 -> 41 and cleared the 40 floor. That gap is
+        # exactly why nobody was warned before the cold shower.
+        #
+        # The correction is the MEASURED setback-to-morning drop, not the
+        # declared draw model. Three declared showers imply 15.3 °C on this
+        # cylinder, against a measured median of 5 and p90 of 10 — sizing a
+        # daily lift against 15.3 would buy heat on nine nights in ten to cover
+        # the tenth. `resolve_overnight_drop_c` is end-to-end (standing loss AND
+        # draws, whatever actually happened), so it REPLACES the coast here
+        # rather than adding to it; using both would double-count the loss.
+        crosses_night = hours > 0.0 and _crosses_evening_draw(now_local, hours, preset)
+        if crosses_night:
+            drop = resolve_overnight_drop_c()
+            projected = tank - drop
+            basis = f"measured_overnight_drop({drop:.1f}C)"
+        else:
+            projected = coast_to(tank, hours, p)
+            basis = "standing_loss"
         if projected >= float(w.floor_c):
             continue  # this window's declared floor is still delivered
         shortfall = float(w.floor_c) - projected
@@ -269,6 +299,7 @@ def _warmup_deadband_force_reason(
                 "projected_c": round(projected, 1),
                 "floor_c": float(w.floor_c),
                 "shortfall_c": round(shortfall, 1),
+                "projection_basis": basis,
             }
     if worst is None:
         return None  # every declared floor survives the coast — keep the free skip
@@ -300,6 +331,42 @@ def _warmup_deadband_force_reason(
         "lift_target_c": lift,
         **worst,
     }
+
+
+def _crosses_evening_draw(now_local: datetime, hours: float, preset: str) -> bool:
+    """Does a projection of ``hours`` from ``now_local`` pass through an evening
+    shower window? (#767)
+
+    The distinction matters because the two projections answer different
+    questions. Within an afternoon — no draw in between — standing loss is the
+    honest model and the tank's ~90 h time constant makes it accurate. Across
+    the evening it is not: the household removes several showers' worth of heat
+    that the ODE knows nothing about, and the error is one-directional
+    (optimistic), which is the dangerous direction for a comfort guard.
+    """
+    from .dhw.comfort import shower_windows
+
+    end = now_local + timedelta(hours=hours)
+    for w in shower_windows(preset=preset):
+        if float(w.end_hour) == float(w.start_hour):
+            continue  # disabled (#748)
+        if "evening" not in (w.label or ""):
+            continue
+        start = now_local.replace(
+            hour=int(w.start_hour) % 24,
+            minute=int(round((w.start_hour % 1) * 60)),
+            second=0, microsecond=0,
+        )
+        # The window recurs daily; check today's and tomorrow's instance.
+        #
+        # STRICTLY before the horizon: when the projection target IS the evening
+        # window, that window's own draw has not been spent yet — the floor is
+        # owed at ENTRY, to the people about to step in. Counting it would make
+        # a tank judged for tonight's showers pay for tonight's showers twice.
+        for cand in (start - timedelta(days=1), start, start + timedelta(days=1)):
+            if now_local < cand < end:
+                return True
+    return False
 
 
 def _lift_latch_target(aid: int, row_start: datetime) -> int | None:
@@ -1118,6 +1185,10 @@ def _reconcile_daikin_actions(
     # recovery is the afternoon warmup, hours after the morning shower, so
     # without this the first signal is a cold shower.
     _check_morning_tank_cold(actions, dev, now_utc, trigger=trigger)
+    # 2026-07-29 — indoor sensors gone quiet. Costs nothing (a single
+    # grouped read of device_reading_log) and catches the one outage class
+    # that leaves every health check green.
+    _check_sensor_silence(now_utc, trigger=trigger)
     # PR J diverter removed 2026-05-23 (K2-cleanup) — superseded by K1's
     # dhw_policy fixed schedule. The diverter's "lift tank during PV
     # abundance" goal is now redundant: tank lives at NORMAL=45 °C via
@@ -2062,6 +2133,84 @@ def _check_morning_tank_cold(
         db.acknowledge_warning(warning_key)
     except Exception as _exc:  # noqa: BLE001
         logger.debug("morning-tank-cold dedup write failed: %s", _exc)
+
+
+def _check_sensor_silence(now_utc: datetime, *, trigger: str) -> None:
+    """2026-07-29 — page when an indoor sensor stops reporting (#767).
+
+    Every other health signal stays green through this failure: the containers
+    are healthy, the API answers, no request errors are logged. The only symptom
+    is a chart that quietly stops. On 2026-07-28 both sensors went silent at the
+    same second — the funnel's public DNS record had vanished — and it took 8 h
+    and a manual investigation to find.
+
+    Freshness is judged on ``received_at`` (the SERVER's clock), never the
+    device-supplied ``captured_at``: a unit whose clock drifted or reset could
+    otherwise report a fresh timestamp while sending nothing, which is precisely
+    what this exists to catch.
+
+    Devices quiet for longer than ``SENSOR_SILENCE_MAX_AGE_HOURS`` are treated as
+    retired rather than silent — a decommissioned sensor must not page forever.
+    Deduped per device per episode; the token clears the moment it reports again.
+    """
+    global _SENSOR_SILENT_NOTIFIED
+
+    if not config.SENSOR_SILENCE_CHECK_ENABLED:
+        return
+    threshold = int(config.SENSOR_SILENCE_ALERT_MINUTES)
+    max_age_h = int(config.SENSOR_SILENCE_MAX_AGE_HOURS)
+
+    try:
+        rows = db.get_device_last_seen()
+    except Exception as _exc:  # noqa: BLE001 — a broken read must not page
+        logger.debug("sensor-silence read failed (non-fatal): %s", _exc)
+        return
+    if not rows:
+        return  # no sensors registered — nothing to be silent about
+
+    silent: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    for device_key, last_seen, room in rows:
+        seen_keys.add(device_key)
+        try:
+            ts = datetime.fromisoformat(str(last_seen).replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+        except (TypeError, ValueError):
+            continue
+        mins = (now_utc - ts).total_seconds() / 60.0
+        if mins > max_age_h * 60:
+            continue  # retired, not silent
+        if mins <= threshold:
+            _SENSOR_SILENT_NOTIFIED.discard(device_key)
+            continue
+        if device_key in _SENSOR_SILENT_NOTIFIED:
+            continue
+        silent.append({
+            "device_key": device_key,
+            "room": room,
+            "silent_min": int(mins),
+            "last_seen": str(last_seen),
+        })
+
+    # Drop tokens for devices that vanished from the table entirely.
+    _SENSOR_SILENT_NOTIFIED &= seen_keys
+    if not silent:
+        return
+    _SENSOR_SILENT_NOTIFIED.update(d["device_key"] for d in silent)
+
+    db.log_action(
+        device="sensors",
+        action="sensor_silent",
+        params={"devices": silent, "threshold_min": threshold},
+        result="alert",
+        trigger=trigger,
+    )
+    try:
+        from .notifier import notify_sensor_silent
+        notify_sensor_silent(devices=silent, threshold_min=threshold)
+    except Exception as _exc:  # noqa: BLE001 — notification is best-effort
+        logger.debug("sensor-silence notify failed (non-fatal): %s", _exc)
 
 
 def _check_negative_boost_powerful(
