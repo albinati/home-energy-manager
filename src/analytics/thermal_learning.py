@@ -57,6 +57,7 @@ gentle-recovery cap). This module only feeds the estimator and the readers.
 """
 from __future__ import annotations
 
+import json
 import logging
 from bisect import bisect_left
 from dataclasses import dataclass
@@ -694,68 +695,95 @@ def refresh_building_thermal_calibration() -> dict[str, Any]:
     return _done({"status": "ok", "tau": tau_fit, "ua": ua_fit, "row": row})
 
 
-_UA_FIRST_FIT_KEY = "thermal_ua_first_fit_announced"
+_UA_FIRST_FIT_KEY = "thermal_ua_first_fit"
+# Terminal value for the key above. Anything else parseable is a PENDING
+# payload awaiting delivery.
+_UA_ANNOUNCED = "announced"
 
 
 def _maybe_announce_first_ua_fit(
     prev: dict[str, Any] | None, row: dict[str, Any], ua_fit: dict[str, Any]
 ) -> None:
-    """Say something the first time the UA fit actually succeeds.
+    """Say something the first time the UA fit actually succeeds, and keep
+    trying until it is actually delivered.
 
     The house model has been half-measured for months: tau comes from real decay
-    episodes, but UA has never been fitted — `fit_ua_hdd` needs 20 days with
+    episodes, but UA has never been fitted -- `fit_ua_hdd` needs 20 days with
     HDD > 1 and a British summer supplies none, so `ua_source` stays NULL and
     every reader falls back to `BUILDING_UA_W_PER_K`. C is then derived as
     `tau x env_UA`, i.e. it inherits the assumption rather than measuring it.
 
-    So one day in the autumn this silently flips from an assumption to a
-    measurement, and nothing would say so. That matters because it is the ONLY
-    moment the number is checkable: the docs carry a 630 W/K estimate derived
-    from a 5.0 kWh/C-day HDD slope at COP 3, and if the fit lands somewhere else
-    the interesting question is which one is wrong — a question nobody will
-    think to ask six weeks later when the value is just sitting in a table.
+    One autumn morning that flips silently, and it is the ONLY moment the number
+    is checkable against the documented estimate -- so losing the ping to a
+    transient Telegram outage would waste the whole point.
 
-    Fires once, on the transition. Deduped by a runtime setting rather than
-    in-memory state so a redeploy in October cannot re-announce it.
+    Which is exactly what an earlier version did. It relied on the notify
+    RAISING to detect failure, but `telegram_transport.send_message` swallows
+    every network error and returns False, so the failure was invisible and the
+    "delivered" marker went down anyway. And the retry it imagined was
+    unreachable regardless: the calibration row is upserted BEFORE this runs, so
+    by the next nightly pass `prev["ua_w_per_k"]` is already non-NULL and the
+    transition can never be detected a second time.
+
+    So the state lives in `runtime_settings` and carries the PAYLOAD, not just a
+    flag: the transition arms it once, and every subsequent run retries until
+    `_dispatch` confirms a transport took it. The `prev` guard still does its own
+    job -- stopping a false "first fit" on a database where UA was already set
+    when this shipped -- but it is no longer what makes the announcement
+    one-shot.
     """
     from .. import db
-
-    if ua_fit.get("status") != "ok":
-        return
-    if (prev or {}).get("ua_w_per_k") is not None:
-        return  # not the first — this is a refit, and refits are routine
-    try:
-        if db.get_runtime_setting(_UA_FIRST_FIT_KEY):
-            return
-    except Exception:  # noqa: BLE001 — a dedup outage must not block the news
-        pass
-
-    ua = float(row["ua_w_per_k"])
-    try:
-        env_ua = float(config.BUILDING_UA_W_PER_K)
-    except Exception:  # noqa: BLE001
-        env_ua = 0.0
     from ..notifier import notify_thermal_ua_first_fit
 
-    # Notify FIRST, mark second. This is a ONCE-EVER event: a duplicate ping is
-    # free, a lost one is unrecoverable — once `ua_w_per_k` is non-NULL the
-    # transition can never be detected again, even by clearing the key. Mirrors
-    # `dhw_bias.py`'s ordering for the same reason, and is the opposite trade
-    # from the sensor-silence detector, where re-pings would be a storm.
-    notify_thermal_ua_first_fit(
-        ua_w_per_k=ua,
-        env_ua_w_per_k=env_ua,
-        r2=float(row.get("ua_r2") or 0.0),
-        samples=int(row.get("ua_samples") or 0),
-        assumed_cop=float(row.get("ua_assumed_cop") or 0.0),
-        tau_hours=row.get("tau_hours"),
-        c_kwh_per_k=row.get("c_kwh_per_k"),
-    )
+    pending: dict[str, Any] | None = None
     try:
-        db.set_runtime_setting(_UA_FIRST_FIT_KEY, datetime.now(UTC).isoformat())
-    except Exception:  # noqa: BLE001
-        pass
+        raw = db.get_runtime_setting(_UA_FIRST_FIT_KEY)
+    except Exception:  # noqa: BLE001 — a dedup read outage must not lose the news
+        raw = None
+    if raw:
+        if raw == _UA_ANNOUNCED:
+            return  # delivered; nothing more to do, ever
+        try:
+            pending = json.loads(raw)
+        except (TypeError, ValueError):
+            pending = None
 
+    if pending is None:
+        # Not armed yet — is this the transition?
+        if ua_fit.get("status") != "ok":
+            return
+        if (prev or {}).get("ua_w_per_k") is not None:
+            return  # a refit, or UA was already set before this feature shipped
+        try:
+            env_ua = float(config.BUILDING_UA_W_PER_K)
+        except Exception:  # noqa: BLE001
+            env_ua = 0.0
+        pending = {
+            "ua_w_per_k": float(row["ua_w_per_k"]),
+            "env_ua_w_per_k": env_ua,
+            "r2": float(row.get("ua_r2") or 0.0),
+            "samples": int(row.get("ua_samples") or 0),
+            "assumed_cop": float(row.get("ua_assumed_cop") or 0.0),
+            "tau_hours": row.get("tau_hours"),
+            "c_kwh_per_k": row.get("c_kwh_per_k"),
+            "window_days": row.get("ua_window_days"),
+        }
+        try:
+            db.set_runtime_setting(_UA_FIRST_FIT_KEY, json.dumps(pending))
+        except Exception:  # noqa: BLE001 — arming is best-effort; retry next run
+            pass
+
+    delivered = notify_thermal_ua_first_fit(**pending)
+    if delivered:
+        try:
+            db.set_runtime_setting(_UA_FIRST_FIT_KEY, _UA_ANNOUNCED)
+        except Exception:  # noqa: BLE001
+            pass
+    else:
+        logger.info(
+            "thermal_learning: first-UA-fit announcement not delivered — "
+            "will retry on the next run"
+        )
 
 def _fmt(v: Any) -> str:
     return f"{float(v):.1f}" if v is not None else "-"
