@@ -231,8 +231,11 @@ class Config:
     # The SPA container POSTs to /api/v1/* with `Authorization: Bearer
     # <HEM_UI_TOKEN>`. Same mint pattern as the OpenClaw token: env wins,
     # otherwise the lifespan reads the file or generates a fresh token on
-    # first boot (urlsafe-32). Consumed by `ApiV1RoleAuth` (middleware.py) —
-    # viewer-open reads, admin-gated writes — under HEM_UI_AUTH_REQUIRED.
+    # first boot (urlsafe-32); the lifespan bakes it into the SPA's config.js.
+    # It grants NOTHING at the guard: `ApiV1RoleAuth` is constructed with
+    # `admin_tokens` and `ingest_tokens` only, and this is neither — see the
+    # role model directly below. Reads pass because they are viewer-open, not
+    # because of this token.
     HEM_UI_TOKEN_FILE: str = os.getenv(
         "HEM_UI_TOKEN_FILE", "data/.hem-ui-token"
     )
