@@ -77,6 +77,12 @@ class AlertType(str, Enum):
     # ACTIONABLE prompt: never auto-enables (the corrected value feeds a hard
     # LP equality — a human flips the env). One-shot (runtime-setting dedup).
     DHW_BIAS_ENABLE_READY = "dhw_bias_enable_ready"
+    # 2026-07-29 — the building UA fit succeeded for the FIRST time. The house
+    # model has been half-measured for months (tau from real decay episodes, UA
+    # falling back to an env constant because `fit_ua_hdd` needs 20 days with
+    # HDD > 1). The transition happens silently one autumn morning, and it is
+    # the only moment the number is checkable against the documented estimate.
+    THERMAL_UA_FIRST_FIT = "thermal_ua_first_fit"
     # 2026-07-28 — the live tank SETPOINT no longer matches the plan row that
     # owns this moment. ACTIONABLE: either the user moved it (fine — but they
     # should know it is still in force) or something else did (not fine).
@@ -1031,6 +1037,50 @@ def notify_morning_tank_cold(
         "next_warmup_local": next_warmup_local,
     }
     _dispatch(AlertType.MORNING_TANK_COLD, body="\n".join(lines), urgent=False, extra=extra)
+
+
+def notify_thermal_ua_first_fit(
+    *, ua_w_per_k: float, env_ua_w_per_k: float, r2: float, samples: int,
+    assumed_cop: float, tau_hours: float, c_kwh_per_k: float,
+) -> None:
+    """🏠 The building UA has been MEASURED, for the first time.
+
+    Until now the house model was half-measured: tau came from real overnight
+    decay episodes, but UA fell back to `BUILDING_UA_W_PER_K` because the HDD
+    regression needs 20 days with HDD > 1 and a British summer supplies none —
+    so C, derived as `tau x UA`, inherited the assumption too.
+
+    This is the one moment the number is checkable. `docs/WINTER_THERMAL_MODEL.md`
+    records ~630 W/K from a 5.0 kWh/degree-day slope at COP 3; if the fit lands
+    somewhere else, the interesting question is which is wrong — and nobody will
+    think to ask it six weeks later when the value is just sitting in a table.
+    pt-BR; fires once, on the transition."""
+    delta_pct = ((ua_w_per_k / env_ua_w_per_k - 1.0) * 100.0) if env_ua_w_per_k else 0.0
+    lines = [
+        f"O UA da casa saiu de suposição pra **medição**: **{ua_w_per_k:.0f} W/K** "
+        f"(R² {r2:.2f}, {samples} dias, COP assumido {assumed_cop:.1f}).",
+        f"Antes o modelo usava {env_ua_w_per_k:.0f} W/K do `.env` — "
+        f"diferença de **{delta_pct:+.0f}%**.",
+        f"Com τ = {tau_hours:.0f} h, a capacidade térmica passa a "
+        f"{c_kwh_per_k:.1f} kWh/K, agora derivada do UA medido.",
+        "",
+        "**Vale conferir agora**, enquanto é verificável: `docs/WINTER_THERMAL_MODEL.md` "
+        "estima ~630 W/K a partir de uma inclinação de 5,0 kWh/°C·dia a COP 3. "
+        "Se o ajuste discordar muito, a pergunta é qual dos dois está errado — "
+        "e o COP assumido é o suspeito mais provável.",
+    ]
+    extra = {
+        "ua_w_per_k": round(float(ua_w_per_k), 1),
+        "env_ua_w_per_k": round(float(env_ua_w_per_k), 1),
+        "delta_pct": round(delta_pct, 1),
+        "r2": round(float(r2), 3),
+        "samples": int(samples),
+        "assumed_cop": round(float(assumed_cop), 2),
+        "tau_hours": round(float(tau_hours), 1),
+        "c_kwh_per_k": round(float(c_kwh_per_k), 2),
+        "docRef": "docs/WINTER_THERMAL_MODEL.md",
+    }
+    _dispatch(AlertType.THERMAL_UA_FIRST_FIT, body="\n".join(lines), urgent=False, extra=extra)
 
 
 def notify_lp_health_regression(issues: list[str]) -> None:

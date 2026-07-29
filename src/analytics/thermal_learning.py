@@ -687,7 +687,69 @@ def refresh_building_thermal_calibration() -> dict[str, Any]:
         _fmt(row.get("tau_r2_median")), _fmt(row.get("ua_w_per_k")),
         row.get("ua_source") or "env", _fmt(row.get("c_kwh_per_k")),
     )
+    _maybe_announce_first_ua_fit(prev, row, ua_fit)
     return _done({"status": "ok", "tau": tau_fit, "ua": ua_fit, "row": row})
+
+
+_UA_FIRST_FIT_KEY = "thermal_ua_first_fit_announced"
+
+
+def _maybe_announce_first_ua_fit(
+    prev: dict[str, Any] | None, row: dict[str, Any], ua_fit: dict[str, Any]
+) -> None:
+    """Say something the first time the UA fit actually succeeds.
+
+    The house model has been half-measured for months: tau comes from real decay
+    episodes, but UA has never been fitted — `fit_ua_hdd` needs 20 days with
+    HDD > 1 and a British summer supplies none, so `ua_source` stays NULL and
+    every reader falls back to `BUILDING_UA_W_PER_K`. C is then derived as
+    `tau x env_UA`, i.e. it inherits the assumption rather than measuring it.
+
+    So one day in the autumn this silently flips from an assumption to a
+    measurement, and nothing would say so. That matters because it is the ONLY
+    moment the number is checkable: the docs carry a 630 W/K estimate derived
+    from a 5.0 kWh/C-day HDD slope at COP 3, and if the fit lands somewhere else
+    the interesting question is which one is wrong — a question nobody will
+    think to ask six weeks later when the value is just sitting in a table.
+
+    Fires once, on the transition. Deduped by a runtime setting rather than
+    in-memory state so a redeploy in October cannot re-announce it.
+    """
+    from .. import db
+
+    if ua_fit.get("status") != "ok":
+        return
+    if (prev or {}).get("ua_w_per_k") is not None:
+        return  # not the first — this is a refit, and refits are routine
+    try:
+        if db.get_runtime_setting(_UA_FIRST_FIT_KEY):
+            return
+    except Exception:  # noqa: BLE001 — a dedup outage must not block the news
+        pass
+
+    ua = float(row["ua_w_per_k"])
+    try:
+        env_ua = float(config.BUILDING_UA_W_PER_K)
+    except Exception:  # noqa: BLE001
+        env_ua = 0.0
+    try:
+        db.set_runtime_setting(_UA_FIRST_FIT_KEY, datetime.now(UTC).isoformat())
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from ..notifier import notify_thermal_ua_first_fit
+
+        notify_thermal_ua_first_fit(
+            ua_w_per_k=ua,
+            env_ua_w_per_k=env_ua,
+            r2=float(row.get("ua_r2") or 0.0),
+            samples=int(row.get("ua_samples") or 0),
+            assumed_cop=float(row.get("ua_assumed_cop") or 0.0),
+            tau_hours=float(row.get("tau_hours") or 0.0),
+            c_kwh_per_k=float(row.get("c_kwh_per_k") or 0.0),
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort
+        logger.debug("thermal_learning: first-UA-fit notify failed: %s", exc)
 
 
 def _fmt(v: Any) -> str:
