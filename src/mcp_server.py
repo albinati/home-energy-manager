@@ -20,7 +20,6 @@ no longer a "20 zombie children" failure mode to defend against.
 from __future__ import annotations
 
 import logging
-import os
 import signal
 import sys
 from typing import Any

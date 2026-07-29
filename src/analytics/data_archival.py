@@ -19,7 +19,6 @@ from __future__ import annotations
 import gzip
 import json
 import logging
-import os
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path

@@ -40,7 +40,6 @@ What it will NOT learn, and why, so the temptation doesn't come back:
 from __future__ import annotations
 
 import logging
-import math
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
@@ -58,13 +57,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class CoastEpisode:
-    """An unheated stretch of tank cooling, with the outdoor/indoor context needed
-    to place its ambient. ``points`` = (hours since start, tank °C)."""
+    """An unheated stretch of tank cooling, with the outdoor context needed to
+    place its ambient. ``points`` = (hours since start, tank °C)."""
 
     start_utc: datetime
     end_utc: datetime
     points: list[tuple[float, float]]
-    indoor_mean_c: float | None
     # MEASURED outdoor mean over the episode. The airing cupboard's effective
     # ambient tracks the house, which tracks outdoors — so this is what lets a
     # July night and a January night share one fit instead of fighting over a
@@ -113,7 +111,6 @@ def _bucket_window_utc(day_local: date, bucket_idx: int, tz: ZoneInfo) -> tuple[
 
 def select_coast_episodes(
     tank_rows: list[tuple[float, float]],
-    indoor_by_utc: list[tuple[datetime, float]],
     *,
     tz: ZoneInfo,
     outdoor_by_utc: list[tuple[datetime, float]] | None = None,
@@ -141,7 +138,6 @@ def select_coast_episodes(
     series = _to_series(tank_rows)
     if not series:
         return []
-    indoor = sorted(indoor_by_utc)
 
     def _in_night(ts: datetime) -> bool:
         h = ts.astimezone(tz).hour
@@ -150,10 +146,6 @@ def select_coast_episodes(
         return night_start_hour_local <= h < night_end_hour_local
 
     outdoor = sorted(outdoor_by_utc or [])
-
-    def _indoor_mean(a: datetime, b: datetime) -> float | None:
-        vals = [v for ts, v in indoor if a <= ts <= b]
-        return sum(vals) / len(vals) if vals else None
 
     def _outdoor_mean(a: datetime, b: datetime) -> float | None:
         vals = [v for ts, v in outdoor if a <= ts <= b]
@@ -193,7 +185,6 @@ def select_coast_episodes(
             start_utc=start,
             end_utc=end,
             points=[((ts - start).total_seconds() / 3600.0, v) for ts, v in seg],
-            indoor_mean_c=_indoor_mean(start, end),
             t_out_mean_c=_outdoor_mean(start, end),
         ))
     return episodes
@@ -767,20 +758,6 @@ def refresh_dhw_calibration() -> dict[str, Any]:
                                   window_days=ua_window)
         return {"status": "skipped", "reason": "no live tank telemetry"}
 
-    # Indoor sensors (#540) place the ambient's coupling to the house. Absent → the
-    # joint fit still recovers a constant ambient; we just cannot yet learn how it
-    # tracks the house across seasons (that needs winter variation anyway).
-    try:
-        indoor_rows = db.get_indoor_readings_range(
-            start.strftime("%Y-%m-%dT%H:%M:%SZ"), now.strftime("%Y-%m-%dT%H:%M:%SZ"))
-        indoor = [
-            (datetime.fromisoformat(str(r["captured_at"]).replace("Z", "+00:00")).astimezone(UTC),
-             float(r["temp_c"]))
-            for r in indoor_rows if r.get("temp_c") is not None
-        ]
-    except Exception:  # noqa: BLE001 — indoor is a refinement, not a dependency
-        indoor = []
-
     # MEASURED outdoor (#540 W2 discipline): the cupboard's effective ambient
     # tracks the house, which tracks outdoors. Without it a July night and a
     # January night have to share one constant ambient, and the fit lands
@@ -802,7 +779,7 @@ def refresh_dhw_calibration() -> dict[str, Any]:
     # plate; consistency is right either way.
     _p = TankParams()
     c_tank = float(_p.litres) * float(_p.cp_j_per_kg_k)
-    episodes = select_coast_episodes(tank_rows, indoor, tz=tz, outdoor_by_utc=outdoor)
+    episodes = select_coast_episodes(tank_rows, tz=tz, outdoor_by_utc=outdoor)
     ua_fit = fit_ua_and_ambient(episodes, c_tank_j_per_k=c_tank)
     db.upsert_dhw_calibration(
         "ua_ambient", status=ua_fit["status"], payload=ua_fit,

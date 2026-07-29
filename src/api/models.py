@@ -595,56 +595,6 @@ class ListAvailableTariffsResponse(BaseModel):
     gsp: str = ""
 
 
-class TariffDashboardRequest(BaseModel):
-    months_back: int = Field(default=1, ge=1, le=12, description="Months of usage data (used when start_date/end_date are absent)")
-    granularity: str = Field(default="daily", pattern=r"^(daily|weekly|monthly)$")
-    max_tariffs: int = Field(default=10, ge=1, le=20)
-    # Optional explicit usage window (inclusive ISO dates) — when both are set
-    # the comparison replays the catalogue over exactly this window instead of
-    # the trailing months_back. Lets the UI period navigator drive the widget.
-    start_date: str | None = Field(default=None, description="YYYY-MM-DD inclusive start")
-    end_date: str | None = Field(default=None, description="YYYY-MM-DD inclusive end")
-
-
-class TariffPeriodCosts(BaseModel):
-    label: str
-    import_kwh: float
-    export_kwh: float
-    days: int
-    costs: dict[str, float]
-    winner: str | None = None
-
-
-class TariffTotalRow(BaseModel):
-    product_code: str
-    display_name: str
-    pricing: str
-    total_pence: float
-    daily_avg_pence: float
-    annual_pounds: float
-    standing_per_day: float
-    unit_rate_pence: float | None = None
-    contract_type: str
-    contract_months: int | None = None
-    exit_fee_pounds: float = 0.0
-    is_green: bool = False
-    wins: int = 0
-    is_current: bool = False
-    savings_vs_current_pounds: float | None = None
-
-
-class TariffDashboardResponse(BaseModel):
-    ok: bool
-    error: str | None = None
-    granularity: str | None = None
-    periods: list[TariffPeriodCosts] = []
-    totals: list[TariffTotalRow] = []
-    current_product_code: str | None = None
-    current_annual_pounds: float | None = None
-    usage: dict | None = None
-    data_source: str | None = None
-
-
 # ── Fair per-slot tariff comparison (GET /tariffs/compare) ───────────────────
 class FairTariffRow(BaseModel):
     product_code: str

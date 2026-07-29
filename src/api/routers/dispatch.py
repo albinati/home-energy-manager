@@ -14,7 +14,6 @@ the matching MCP tool (see :mod:`src.mcp_server`).
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from datetime import UTC, datetime
 from typing import Any

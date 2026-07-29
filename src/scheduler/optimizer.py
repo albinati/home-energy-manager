@@ -14,7 +14,6 @@ from .. import db
 from ..config import config
 from ..foxess.client import FoxESSClient
 from ..foxess.models import SchedulerGroup
-from ..foxess.service import get_cached_realtime
 from ..physics import build_shower_target_iso, calculate_dhw_setpoint, find_dhw_heat_end_utc
 from ..presets import OperationPreset
 from ..weather import (

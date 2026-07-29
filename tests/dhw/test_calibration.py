@@ -46,7 +46,7 @@ def test_recovers_ua_and_ambient_without_being_told_either(true_ua, true_amb):
     for k in range(10):
         night = datetime(2026, 7, 6, 22, 0, tzinfo=UTC) + timedelta(days=k)
         rows += _coast_rows(night, t0=52.0, hours=9, ua=true_ua, ambient=true_amb)
-    eps = cal.select_coast_episodes(rows, [], tz=TZ)
+    eps = cal.select_coast_episodes(rows, tz=TZ)
     fit = cal.fit_ua_and_ambient(eps, c_tank_j_per_k=C_TANK)
     assert fit["status"] == "ok"
     assert fit["ua_w_per_k"] == pytest.approx(true_ua, rel=0.08)
@@ -61,7 +61,7 @@ def test_assuming_the_wrong_ambient_would_have_biased_ua():
     for k in range(10):
         night = datetime(2026, 7, 6, 22, 0, tzinfo=UTC) + timedelta(days=k)
         rows += _coast_rows(night, t0=50.0, hours=9, ua=2.44, ambient=22.0)
-    eps = cal.select_coast_episodes(rows, [], tz=TZ)
+    eps = cal.select_coast_episodes(rows, tz=TZ)
 
     joint = cal.fit_ua_and_ambient(eps, c_tank_j_per_k=C_TANK)
     assert joint["ua_w_per_k"] == pytest.approx(2.44, rel=0.08)
@@ -71,7 +71,7 @@ def test_assuming_the_wrong_ambient_would_have_biased_ua():
 def test_skips_below_the_episode_gate_rather_than_guessing():
     rows = _coast_rows(datetime(2026, 7, 6, 22, 0, tzinfo=UTC),
                        t0=50.0, hours=9, ua=2.44, ambient=22.0)
-    eps = cal.select_coast_episodes(rows, [], tz=TZ)
+    eps = cal.select_coast_episodes(rows, tz=TZ)
     assert cal.fit_ua_and_ambient(eps, c_tank_j_per_k=C_TANK)["status"] == "skipped"
 
 
@@ -86,7 +86,7 @@ def test_tolerates_the_overnight_polling_hole():
         full = _coast_rows(night, t0=52.0, hours=10, ua=2.44, ambient=22.0, step_min=15)
         rows.append(full[0])
         rows += [r for r in full if 5 <= datetime.fromtimestamp(r[0], tz=UTC).hour < 8]
-    eps = cal.select_coast_episodes(rows, [], tz=TZ)
+    eps = cal.select_coast_episodes(rows, tz=TZ)
     fit = cal.fit_ua_and_ambient(eps, c_tank_j_per_k=C_TANK)
     assert fit["status"] == "ok"
     assert fit["ua_w_per_k"] == pytest.approx(2.44, rel=0.12)
@@ -386,7 +386,7 @@ def _episodes(n: int, *, ua: float, ambient_of, t_out_of, hours: float = 8.0):
         amb = ambient_of(k)
         rows = _coast_rows(start, t0=55.0, hours=hours, ua=ua, ambient=amb)
         eps.extend(cal.select_coast_episodes(
-            rows, [], tz=ZoneInfo("Europe/London"),
+            rows, tz=ZoneInfo("Europe/London"),
             outdoor_by_utc=[(datetime.fromtimestamp(ts, UTC), t_out) for ts, _ in rows],
         ))
     return eps
@@ -493,7 +493,7 @@ def test_a_seasonal_ambient_is_rescued_whichever_gate_the_constant_fit_trips(
 
     # The constant model really does fail, and on the gate we expect.
     const_only = cal.fit_ua_and_ambient(
-        [cal.CoastEpisode(e.start_utc, e.end_utc, e.points, None) for e in eps],
+        [cal.CoastEpisode(e.start_utc, e.end_utc, e.points) for e in eps],
         c_tank_j_per_k=C_TANK,
     )
     assert const_only["status"] == "skipped"
