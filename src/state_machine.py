@@ -66,6 +66,10 @@ _SENSOR_SILENT_NOTIFIED: set[str] = set()
 # predate the evening showers — which would collapse the whole "the draw is
 # already in the thermometer" premise, quietly, in the no-top-up direction.
 _TOPUP_TANK_FRESHNESS_MIN = 45.0
+# Slack on the modelled lift duration before the paired restore takes over. The
+# COP curve and the electrical cap are both approximations, and cutting the heat
+# off one minute early is a cold shower while running one minute long is pennies.
+_TOPUP_LIFT_SAFETY = 1.3
 # 2026-07-28 — tank TARGET divergence dedup. Holds the (planned, live) pair we
 # last paged about, rounded to whole °C, so a sustained divergence pages once
 # but a *different* divergence (user nudges 30 → 32) pages again. Cleared when
@@ -2119,12 +2123,6 @@ def _check_morning_topup(dev: Any, now_utc: datetime, *, trigger: str) -> None:
         tz = UTC
     now_local = now_utc.astimezone(tz)
 
-    arm = int(config.DHW_MORNING_TOPUP_ARM_HOUR_LOCAL)
-    last = int(config.DHW_MORNING_TOPUP_LAST_HOUR_LOCAL)
-    h = now_local.hour
-    if not ((h >= arm or h < last) if arm > last else (arm <= h < last)):
-        return
-
     from .dhw.comfort import shower_windows
     from .dhw.params import resolve_reheat_differential_c, resolve_tank_params
     from .dhw.topup import next_morning_entry_utc, plan_morning_topup
@@ -2150,18 +2148,38 @@ def _check_morning_topup(dev: Any, now_utc: datetime, *, trigger: str) -> None:
     except Exception:  # noqa: BLE001
         stored = None
     if stored:
+        # Re-assert regardless of the arm window. The nightly plan push's
+        # `clear_actions_in_range` deletes pending rows, and these carry no
+        # `restore_action_id` so the in-flight preserver does not shield them —
+        # if re-assertion stopped at the arm hour, every decision whose slot
+        # lands after it would be silently deleted and never fire. Measured on
+        # the prod rates: 45 of 62 nights have their cheapest overnight slot at
+        # or after 03:30 local, i.e. at or past the arm window's close.
         try:
             _write_topup_rows(json.loads(stored), tz)
         except Exception as _exc:  # noqa: BLE001 — never break the heartbeat
             logger.debug("morning-topup re-assert failed: %s", _exc)
         return
 
+    # Only DECIDE inside the arm window — after the evening showers, so the draw
+    # is already in the thermometer.
+    arm = int(config.DHW_MORNING_TOPUP_ARM_HOUR_LOCAL)
+    last = int(config.DHW_MORNING_TOPUP_LAST_HOUR_LOCAL)
+    h = now_local.hour
+    if not ((h >= arm or h < last) if arm > last else (arm <= h < last)):
+        return
+
     # The premise is a MEASURED tank, so it has to actually be measured. The
     # heartbeat's device snapshot can be up to 30 min stale and there is no
-    # scheduled refresh at 22:00 local, so a lone read can easily predate the
-    # showers — which would collapse the whole design in the quiet direction
-    # (no top-up, cold shower). Require two confirming LIVE telemetry samples,
-    # the same discipline `_check_dhw_shower_drawdown` uses on this quantity.
+    # scheduled Onecta refresh at 22:00 local, so the cached float can predate
+    # the showers — which would collapse the design in the quiet direction (no
+    # top-up, cold shower). Read from `daikin_telemetry` bounded to a freshness
+    # window instead: the newest LIVE row inside it is fresh by construction.
+    #
+    # NB an earlier version also demanded two samples in the window, on the
+    # theory that it was "confirmation". It was not — both come from the same
+    # write path and were never compared — and the live-row cadence is sparse
+    # enough overnight that the gate blocked the feature on half the nights.
     try:
         samples = db.get_tank_temps_since(
             (now_utc - timedelta(minutes=_TOPUP_TANK_FRESHNESS_MIN)).timestamp()
@@ -2169,8 +2187,8 @@ def _check_morning_topup(dev: Any, now_utc: datetime, *, trigger: str) -> None:
     except Exception as _exc:  # noqa: BLE001
         logger.debug("morning-topup telemetry read failed: %s", _exc)
         return
-    if len(samples) < 2:
-        return  # not enough fresh evidence to spend money on
+    if not samples:
+        return  # no fresh measurement — never spend money on a stale one
     tank_c = float(samples[-1][1])
 
     p = resolve_tank_params()
@@ -2197,9 +2215,21 @@ def _check_morning_topup(dev: Any, now_utc: datetime, *, trigger: str) -> None:
     if plan is None:
         return  # the tank coasts there on its own — the common case
 
+    # The row must outlast the lift. The planner treats it as instantaneous, but
+    # the heat pump works at a bounded electrical rate; a 30-min window against a
+    # 45-min lift hands back a tank that never reached the target that
+    # `projected_with_c` — and the notification — both quote.
+    lift_end = plan.at_utc + timedelta(
+        hours=max((plan.end_utc - plan.at_utc).total_seconds() / 3600.0,
+                  plan.lift_hours * _TOPUP_LIFT_SAFETY)
+    )
+    lift_end = min(lift_end, entry_utc)
+
     decision = {
         "at_utc": plan.at_utc.isoformat().replace("+00:00", "Z"),
-        "end_utc": plan.end_utc.isoformat().replace("+00:00", "Z"),
+        "end_utc": lift_end.isoformat().replace("+00:00", "Z"),
+        "slot_end_utc": plan.end_utc.isoformat().replace("+00:00", "Z"),
+        "lift_hours": round(plan.lift_hours, 2),
         "restore_until_utc": entry_utc.isoformat().replace("+00:00", "Z"),
         "target_c": int(plan.target_c),
         "setback_c": int(config.DHW_TEMP_SETBACK_C),

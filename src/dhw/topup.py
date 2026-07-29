@@ -46,6 +46,12 @@ class TopUpPlan:
     projected_with_c: float
     floor_c: float
     hours_to_morning: float
+    # How long the heat pump needs to actually make the lift. The row must be at
+    # least this long: the planner models the lift as instantaneous, but the
+    # firmware heats at a bounded electrical rate, and a window that closes
+    # mid-lift hands back a tank that never reached the target `projected_with_c`
+    # assumes.
+    lift_hours: float
     # True when no reachable target clears the floor and this is simply the best
     # the heat pump can do. The caller should say so rather than imply comfort
     # is guaranteed.
@@ -84,6 +90,7 @@ def plan_morning_topup(
     max_target_c: float,
     differential_c: float,
     min_shortfall_c: float,
+    t_out_c: float = 10.0,
 ) -> TopUpPlan | None:
     """The cheapest half-hour to buy the morning's comfort, or None if the tank
     will coast there on its own — or if buying would cost more than it is worth.
@@ -161,6 +168,7 @@ def plan_morning_topup(
             projected_with_c=round(coast_to(float(target), hours_after, p), 1),
             floor_c=floor_c,
             hours_to_morning=round(hours_after, 2),
+            lift_hours=_lift_hours(tank_c, float(target), p, t_out_c=t_out_c),
             best_effort=not feasible,
         )
         if feasible:
@@ -175,6 +183,25 @@ def plan_morning_topup(
                 fallback = plan
 
     return best or fallback
+
+
+def _lift_hours(from_c: float, to_c: float, p: TankParams, *, t_out_c: float) -> float:
+    """Wall-clock hours the heat pump needs for this lift, at its electrical cap.
+
+    The planner treats the lift as instantaneous — it only cares where the tank
+    ENDS UP — but the firmware heats at a bounded rate, so the commanded window
+    has to be long enough to contain it. A 30-minute window against a 45-minute
+    lift hands back a tank that never reached the target, while
+    ``projected_with_c`` and the notification both quote a number that assumes
+    it did.
+    """
+    from .model import electric_kwh_to_raise
+
+    if to_c <= from_c:
+        return 0.0
+    kwh = electric_kwh_to_raise(from_c, to_c, t_out_c, p)
+    cap_kw = max(0.1, float(p.hp_max_kw))
+    return kwh / cap_kw
 
 
 def _parse(raw: Any) -> datetime | None:

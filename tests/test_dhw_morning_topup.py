@@ -502,3 +502,91 @@ def test_the_row_fires_at_its_own_target_and_then_restores(_isolated, monkeypatc
 
     assert applied, "nothing restored the setback"
     assert applied[-1]["tank_temp"] == int(config.DHW_TEMP_SETBACK_C)
+
+
+def test_the_row_outlasts_the_lift_it_commands(_isolated):
+    """The planner treats the lift as instantaneous; the heat pump does not.
+    A window that closes mid-lift hands back a tank that never reached the
+    target — the number `projected_with_c` and the notification both quote."""
+    import src.state_machine as sm
+
+    now = dt.datetime(2026, 7, 27, 22, 0, tzinfo=UTC)
+    _seed_rates(now, _NIGHT_PRICES)
+    for i in (6, 3):
+        _seed_tank(now - dt.timedelta(minutes=i), 26.0)  # a big, slow lift
+    sm._check_morning_topup(SimpleNamespace(tank_temperature=26.0), now, trigger="hb")
+
+    rows = db.get_actions_for_plan_date("2026-07-28", device="daikin")
+    warmup = next(r for r in rows if r["action_type"] == "tank_warmup")
+    start = dt.datetime.fromisoformat(warmup["start_time"].replace("Z", "+00:00"))
+    end = dt.datetime.fromisoformat(warmup["end_time"].replace("Z", "+00:00"))
+
+    p = TankParams()
+    from src.dhw.topup import _lift_hours
+    need_h = _lift_hours(26.0, float(warmup["params"]["tank_temp"]), p, t_out_c=10.0)
+    assert (end - start).total_seconds() / 3600.0 >= need_h, (
+        "the commanded window is shorter than the lift it asks for"
+    )
+
+
+def test_the_decision_is_re_asserted_outside_the_arm_window(_isolated):
+    """The arm window bounds when a decision is TAKEN, never when it is kept
+    alive. The nightly plan push's `clear_actions_in_range` deletes pending
+    rows and these carry no `restore_action_id`, so a re-assert that stopped at
+    the arm hour would silently drop every decision whose slot lands after it —
+    which on the prod rates is most nights."""
+    import src.state_machine as sm
+
+    now = dt.datetime(2026, 7, 27, 22, 0, tzinfo=UTC)   # 23:00 BST, inside arm
+    _seed_rates(now, _NIGHT_PRICES)
+    for i in (6, 3):
+        _seed_tank(now - dt.timedelta(minutes=i), 31.0)
+    dev = SimpleNamespace(tank_temperature=31.0)
+    sm._check_morning_topup(dev, now, trigger="hb")
+    before = db.get_actions_for_plan_date("2026-07-28", device="daikin")
+    assert len(before) == 2
+
+    conn = db.get_connection()
+    try:
+        conn.execute("DELETE FROM action_schedule")
+        conn.commit()
+    finally:
+        conn.close()
+
+    # 05:00 BST — past DHW_MORNING_TOPUP_LAST_HOUR_LOCAL (4).
+    late = dt.datetime(2026, 7, 28, 4, 0, tzinfo=UTC)
+    sm._check_morning_topup(dev, late, trigger="hb")
+
+    after = db.get_actions_for_plan_date("2026-07-28", device="daikin")
+    assert len(after) == 2, "the decision was dropped once the arm window closed"
+    assert [r["start_time"] for r in after] == [r["start_time"] for r in before]
+
+
+def test_a_stale_tank_reading_buys_nothing(_isolated):
+    """The whole premise is a MEASURED tank. If the only reading predates the
+    freshness window it may predate the showers too, and acting on it would be
+    guessing with money."""
+    import src.state_machine as sm
+
+    now = dt.datetime(2026, 7, 27, 22, 0, tzinfo=UTC)
+    _seed_rates(now, _NIGHT_PRICES)
+    _seed_tank(now - dt.timedelta(hours=3), 31.0)  # older than the window
+
+    sm._check_morning_topup(SimpleNamespace(tank_temperature=31.0), now, trigger="hb")
+
+    assert db.get_actions_for_plan_date("2026-07-28", device="daikin") == []
+
+
+def test_one_fresh_reading_is_enough(_isolated):
+    """An earlier version demanded two samples as "confirmation". They come from
+    the same write path and were never compared, so it confirmed nothing — while
+    the sparse overnight cadence let it block the feature on half the nights."""
+    import src.state_machine as sm
+
+    now = dt.datetime(2026, 7, 27, 22, 0, tzinfo=UTC)
+    _seed_rates(now, _NIGHT_PRICES)
+    _seed_tank(now - dt.timedelta(minutes=5), 31.0)  # exactly one, and fresh
+
+    sm._check_morning_topup(SimpleNamespace(tank_temperature=31.0), now, trigger="hb")
+
+    assert len(db.get_actions_for_plan_date("2026-07-28", device="daikin")) == 2
