@@ -7,7 +7,12 @@ openai>=1.12.0
 APScheduler>=3.10.0,<4.0
 tzlocal>=4.2
 anthropic>=0.40.0
-mcp>=1.0.0
+# Cap below 2.0: mcp 2.0.0 removed `mcp.server.fastmcp`, which `build_mcp()` and
+# every API test module import. The unpinned floor let CI and the Docker image
+# builder pull it — main has been red since 2026-07-28 and every image built
+# since then crashes on import. Prod survived only by being pinned to the last
+# green build (2026-07-24). Migrating to the 2.x API is a separate piece of work.
+mcp>=1.0.0,<2
 pulp>=2.8
 google-auth>=2.28
 google-auth-oauthlib>=1.2
