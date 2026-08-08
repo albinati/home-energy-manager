@@ -72,6 +72,13 @@ class AlertType(str, Enum):
     # (infeasible spike, or battery discharging during negative-price slots).
     # Fires only on regression; deduped one per signature per day.
     LP_HEALTH_REGRESSION = "lp_health_regression"
+    # 2026-08-08 — the plan stopped reaching the hardware (#784). Fox uploads
+    # frozen, or the Daikin reconciler silent / being rejected. The signal has
+    # existed since the 2026-06-14 wedge but nothing ever pushed it, so both
+    # that ~41h wedge and the ~37h one on 2026-08-06 were found by a human
+    # happening to open the cockpit. CRITICAL: an inverter running a stale plan
+    # costs money every slot, and silently.
+    ACTUATION_STALE = "actuation_stale"
     # 2026-07-05 — the DHW bucket-bias corrector's enable gate was met (enough
     # days of factors + out-of-sample MAE improvement in the backtest). An
     # ACTIONABLE prompt: never auto-enables (the corrected value feeds a hard
@@ -1043,6 +1050,26 @@ def notify_lp_health_regression(issues: list[str]) -> None:
         AlertType.LP_HEALTH_REGRESSION, body, urgent=True,
         extra={"issues": list(issues)},
         telegram_header_override="⚠️ LP regressão",
+    )
+
+
+def notify_actuation_stale(issues: list[str]) -> None:
+    """The plan is no longer reaching the hardware. Fires only when something is
+    actually wedged; deduped one per signature per day by the caller.
+
+    Names WHAT stopped and FOR HOW LONG — a page that only says "actuation
+    unhealthy" costs a cockpit round-trip at the moment you want to act.
+    """
+    body = "\n".join([
+        "\U0001F6D1 O plano parou de chegar no hardware:",
+        *[f"• {i}" for i in issues],
+        "",
+        "A bateria/tanque estão rodando fora do plano até isto ser resolvido.",
+    ])
+    _dispatch(
+        AlertType.ACTUATION_STALE, body, urgent=True,
+        extra={"issues": list(issues)},
+        telegram_header_override="\U0001F6D1 Atuação parada",
     )
 
 

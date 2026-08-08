@@ -462,6 +462,19 @@ class Config:
     # vacation mode (no tank rows by design). LWT is demand-gated (summer-
     # dormant) → failure-count only. Set *_STALE_HOURS to 0 to disable the age
     # check; the failed-count threshold clamps to ≥1.
+    # Actuation watchdog (#784) — pages when the plan stops reaching the
+    # hardware. The signals below have existed since the 2026-06-14 wedge, but
+    # until now only the status endpoint read them, so nothing warned unless a
+    # human opened the cockpit: that is how a ~41h wedge and then a ~37h one
+    # (2026-08-06) both ran unnoticed. Hourly rather than nightly — the
+    # staleness thresholds are already ~30h, and a nightly check would stack
+    # another day of silence on top of them.
+    ACTUATION_HEALTH_MONITOR_ENABLED: bool = os.getenv(
+        "ACTUATION_HEALTH_MONITOR_ENABLED", "true"
+    ).strip().lower() in ("1", "true", "yes")
+    ACTUATION_HEALTH_MONITOR_INTERVAL_MINUTES: int = int(
+        os.getenv("ACTUATION_HEALTH_MONITOR_INTERVAL_MINUTES", "60")
+    )
     FOX_UPLOAD_STALE_HOURS: float = float(os.getenv("FOX_UPLOAD_STALE_HOURS", "30"))
     DAIKIN_TANK_STALE_HOURS: float = float(os.getenv("DAIKIN_TANK_STALE_HOURS", "30"))
     DAIKIN_FAILED_ALERT_THRESHOLD: int = int(os.getenv("DAIKIN_FAILED_ALERT_THRESHOLD", "3"))
