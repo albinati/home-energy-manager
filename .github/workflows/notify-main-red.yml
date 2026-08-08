@@ -1,0 +1,58 @@
+name: Notify on main going red
+
+# `Tests` was red on main for 11 days — 2026-07-28 to 2026-08-08 — and nobody
+# noticed (#784). Four consecutive failing runs produced no signal anyone acted
+# on. The household gets Telegram pings for tariff transitions and plan
+# revisions, but not for the repo that drives them being broken.
+#
+# This reuses the same bot as the app's own notifications. It is INERT until
+# TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID exist as repository secrets — the
+# step exits 0 with a note rather than failing, so a fresh clone or a fork
+# doesn't get a red X for a missing credential it was never meant to have.
+
+on:
+  workflow_run:
+    workflows: ["Tests", "Build and publish Docker image"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    # Only failures, and only on main — a green run is not news.
+    if: github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Telegram alert
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          WF: ${{ github.event.workflow_run.name }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          URL: ${{ github.event.workflow_run.html_url }}
+          MSG: ${{ github.event.workflow_run.head_commit.message }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TOKEN}" ] || [ -z "${CHAT_ID}" ]; then
+            echo "TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set — alert skipped."
+            echo "Add them as repository secrets to activate (see #784)."
+            exit 0
+          fi
+          # First line of the commit message only; the rest is noise on a phone.
+          subject=$(printf '%s' "${MSG}" | head -1)
+          text=$(printf '🔴 <b>%s failed on main</b>\n<code>%s</code>\n%s\n\n%s' \
+                 "${WF}" "${SHA:0:8}" "${subject}" "${URL}")
+          code=$(curl -s -o /tmp/tg.out -w '%{http_code}' \
+            --max-time 15 \
+            -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${CHAT_ID}" \
+            --data-urlencode "text=${text}" \
+            --data-urlencode "parse_mode=HTML")
+          if [ "${code}" != "200" ]; then
+            echo "Telegram returned HTTP ${code}:" >&2
+            cat /tmp/tg.out >&2
+            exit 1
+          fi
+          echo "alert sent"
