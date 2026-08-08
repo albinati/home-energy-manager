@@ -22,6 +22,28 @@ HEALTH_URL=http://127.0.0.1:8000/api/v1/health
 docker manifest inspect "$IMAGE:sha-$SHA" > /dev/null
 echo "manifest OK: sha-${SHA:0:8}"
 
+# 1b. Boot-guard: a manifest proves the tag EXISTS, not that the image RUNS
+#     (#784). On 2026-08-08 the published image for a merge had a valid manifest
+#     and pulled cleanly, yet died on `import mcp.server.fastmcp` — an unpinned
+#     `mcp>=1.0.0` had let the builder take mcp 2.0.0, which removed that path.
+#     Restarting on it would have taken down the API, the scheduler and the MCP
+#     transport during an active negative-price window. Probe in a throwaway
+#     container BEFORE the tag is pinned, so a bad image costs nothing.
+#     CI gates this at the source now; this is defence in depth for anything
+#     built before that gate existed, or pushed by hand.
+#     NB no pipe on the probe: piping would make the `if` test the exit status
+#     of the pipe's LAST command, which is the masking bug this script's own
+#     manifest-guard comment warns about. Capture, then test.
+docker pull --quiet "$IMAGE:sha-$SHA" > /dev/null
+boot_err=""
+if ! boot_err=$(docker run --rm --entrypoint python "$IMAGE:sha-$SHA" \
+     -c 'import mcp.server.fastmcp, src.api.main, src.mcp_server' 2>&1); then
+  echo "BOOT GUARD FAILED: sha-${SHA:0:8} cannot import the app — NOT deploying" >&2
+  echo "${boot_err}" | tail -5 >&2
+  exit 1
+fi
+echo "boot guard OK: image imports the app"
+
 # 2. Pin the tag (backup first — the .bak is the rollback vehicle).
 prev_tag=$(sed -n 's/^HEM_IMAGE_TAG=//p' "$COMPOSE_ENV")
 cp "$COMPOSE_ENV" "$COMPOSE_ENV.bak"

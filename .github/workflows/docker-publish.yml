@@ -56,7 +56,44 @@ jobs:
             type=ref,event=branch
             type=ref,event=tag
 
-      - name: Build and push
+      # Build LOCALLY first and prove the image boots before anything is
+      # published (#784). A green build says the layers assembled, not that the
+      # app imports: on 2026-07-28 an unpinned `mcp>=1.0.0` let the builder pull
+      # mcp 2.0.0, which removed `mcp.server.fastmcp`. Every image published for
+      # the next 11 days was unbootable and this workflow reported success for
+      # all of them, because building never imports the app. Production survived
+      # only because its tag happened to be pinned to the last good build; the
+      # 2026-08-08 image was caught by a manual probe minutes before a restart.
+      #
+      # The runner is arm64 and we target linux/arm64, so `load: true` gives a
+      # runnable image. The push step below is a cache hit, not a rebuild.
+      - name: Build for smoke test
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/arm64
+          push: false
+          load: true
+          tags: smoke-test:${{ github.sha }}
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test — the image must import the app
+        run: |
+          set -euo pipefail
+          # Imports the FastAPI app, which transitively pulls in the config,
+          # the DB schema and the MCP server build — i.e. everything that runs
+          # before the process can serve a request.
+          docker run --rm --entrypoint python "smoke-test:${{ github.sha }}" -c "
+          import mcp.server.fastmcp
+          import src.api.main
+          import src.mcp_server
+          print('smoke test OK')
+          "
+
+      - name: Push
         uses: docker/build-push-action@v7
         with:
           context: .
