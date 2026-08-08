@@ -28,6 +28,7 @@ from typing import Any
 from fastapi import APIRouter
 
 from ... import db
+from ...analytics.actuation_health import evaluate_actuation_health
 from ...config import config
 
 logger = logging.getLogger(__name__)
@@ -222,27 +223,15 @@ def _quota_block() -> dict[str, Any]:
     return out
 
 
-def _age_hours(ts: str | None, now: datetime) -> float | None:
-    if not ts:
-        return None
-    try:
-        t = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
-        if t.tzinfo is None:
-            t = t.replace(tzinfo=UTC)
-        return max(0.0, (now - t).total_seconds() / 3600.0)
-    except (ValueError, TypeError):
-        return None
-
-
 def _actuation_block() -> dict[str, Any]:
-    """Is the plan actually reaching the hardware? The ~41h Fox-upload wedge of
-    2026-06-14 ran silently because nothing watched actuation freshness (drift
-    detection only compares live-vs-stored, both of which were stale-consistent).
+    """Is the plan actually reaching the hardware?
 
-    Fox: stale when the last SUCCESSFUL upload is older than the daily cadence.
-    Daikin tank: stale when no tank action has fired in that window (~2×/day
-    normally) + a recent device-rejection count. Daikin LWT: rejection count
-    only (demand-gated, legitimately dormant in summer → no age alarm)."""
+    Thin wrapper over ``analytics.actuation_health`` — the SAME evaluator the
+    watchdog cron pages on. Keeping one implementation is deliberate: the
+    2026-08-08 review found the MCP schedule-diff tool had drifted from its REST
+    twin and kept reporting healthy through an outage, and this is the logic
+    that decides whether to wake someone.
+    """
     now = datetime.now(UTC)
     since = (now - timedelta(hours=24)).isoformat()
     try:
@@ -251,41 +240,13 @@ def _actuation_block() -> dict[str, Any]:
         logger.debug("status/alerts: actuation health read failed", exc_info=True)
         return {"fox": None, "daikin_tank": None, "daikin_lwt": None}
 
-    fox_stale_h = float(getattr(config, "FOX_UPLOAD_STALE_HOURS", 30) or 0)
-    tank_stale_h = float(getattr(config, "DAIKIN_TANK_STALE_HOURS", 30) or 0)
-    fail_thr = max(1, int(getattr(config, "DAIKIN_FAILED_ALERT_THRESHOLD", 3) or 3))
-
-    fox_age = _age_hours(raw.get("fox_upload_at"), now)
-    tank_age = _age_hours(raw.get("tank_last_at"), now)
-    tank_fail = int(raw.get("tank_failed_24h") or 0)
-    lwt_fail = int(raw.get("lwt_failed_24h") or 0)
-
-    # In vacation mode dhw_policy writes ZERO tank rows by design, so the tank
-    # naturally goes "stale" with no fault — suppress the age alarm using the
-    # SAME source dhw_policy reads, so the two can never disagree. (Failures
-    # stay live: a rejected write is meaningful in any mode.)
-    dhw_mode = (getattr(config, "OPTIMIZATION_PRESET", "normal") or "normal").strip().lower()
-    tank_age_alarm = tank_stale_h > 0 and dhw_mode != "vacation"
-
-    return {
-        "fox": {
-            "last_upload_at": raw.get("fox_upload_at"),
-            "age_hours": None if fox_age is None else round(fox_age, 1),
-            "stale": fox_stale_h > 0 and (fox_age is None or fox_age > fox_stale_h),
-        },
-        "daikin_tank": {
-            "last_at": raw.get("tank_last_at"),
-            "age_hours": None if tank_age is None else round(tank_age, 1),
-            "failed_24h": tank_fail,
-            "stale": tank_age_alarm and (tank_age is None or tank_age > tank_stale_h),
-            "failing": tank_fail >= fail_thr,
-        },
-        "daikin_lwt": {
-            "failed_24h": lwt_fail,
-            # No age alarm — LWT is demand-gated and dormant in summer.
-            "failing": lwt_fail >= fail_thr,
-        },
-    }
+    return evaluate_actuation_health(
+        raw, now,
+        fox_stale_hours=float(getattr(config, "FOX_UPLOAD_STALE_HOURS", 30) or 0),
+        tank_stale_hours=float(getattr(config, "DAIKIN_TANK_STALE_HOURS", 30) or 0),
+        failed_threshold=int(getattr(config, "DAIKIN_FAILED_ALERT_THRESHOLD", 3) or 3),
+        dhw_mode=getattr(config, "OPTIMIZATION_PRESET", "normal") or "normal",
+    )
 
 
 def _dispatch_coherence_block() -> dict[str, Any] | None:

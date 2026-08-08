@@ -539,6 +539,9 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         # FYI bucket alongside the digests.
         ("tank_target_divergence", "critical", 0),
         ("morning_tank_cold",      "critical", 0),
+        # 2026-08-08 (#784) — actuation wedged. CRITICAL by construction: this is
+        # the alert whose absence let two multi-day outages run unnoticed.
+        ("actuation_stale",        "critical", 0),
     ]
     for _at, _sev, _sil in _NOTIFICATION_DEFAULTS:
         conn.execute(

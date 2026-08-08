@@ -1097,6 +1097,96 @@ def bulletproof_lp_health_monitor_job() -> None:
         logger.warning("LP health monitor job failed (non-fatal): %s", e)
 
 
+def _actuation_interval_minutes() -> int:
+    """Watchdog cadence, floored at 1 minute.
+
+    APScheduler turns a zero-length interval into a 1-second one, so an
+    accidental `ACTUATION_HEALTH_MONITOR_INTERVAL_MINUTES=0` would spin the
+    watchdog rather than switch it off. Disabling is
+    ACTUATION_HEALTH_MONITOR_ENABLED's job.
+    """
+    try:
+        raw = int(getattr(config, "ACTUATION_HEALTH_MONITOR_INTERVAL_MINUTES", 60))
+    except (TypeError, ValueError):
+        raw = 60
+    return max(1, raw)
+
+
+def bulletproof_actuation_health_monitor_job() -> None:
+    """Page when the plan stops reaching the hardware (#784).
+
+    `db.get_actuation_health` has existed since 2026-06-14, added "after the
+    ~41h Fox-upload wedge that nothing alerted on" — but its only caller was the
+    status endpoint, so it warned nobody unless a human opened the cockpit. That
+    is how the ~37 h outage of 2026-08-06 also ran unnoticed: the freshness
+    signal was correct the entire time. This job is the missing wire.
+
+    Runs hourly, not nightly. The thresholds are already ~30 h, so a nightly
+    check adds up to another day of silence on top of them — and an inverter on
+    a stale plan loses money every slot. Hourly costs one cheap SQLite read.
+
+    Alerts only when something is wedged, deduped one alert per signature per
+    day so a multi-day outage pages once a day rather than 24 times. Uses the
+    SAME evaluator as the endpoint — one implementation, deliberately.
+    """
+    if not getattr(config, "ACTUATION_HEALTH_MONITOR_ENABLED", True):
+        return
+    try:
+        from ..analytics.actuation_health import actuation_issues, evaluate_actuation_health
+
+        now = datetime.now(UTC)
+        since = (now - timedelta(hours=24)).isoformat()
+        block = evaluate_actuation_health(
+            db.get_actuation_health(since), now,
+            fox_stale_hours=float(getattr(config, "FOX_UPLOAD_STALE_HOURS", 30) or 0),
+            tank_stale_hours=float(getattr(config, "DAIKIN_TANK_STALE_HOURS", 30) or 0),
+            failed_threshold=int(getattr(config, "DAIKIN_FAILED_ALERT_THRESHOLD", 3) or 3),
+            dhw_mode=getattr(config, "OPTIMIZATION_PRESET", "normal") or "normal",
+        )
+        issues = actuation_issues(block)
+        today = now.date().isoformat()
+        if not issues:
+            # Clear on recovery so a relapse pages again instead of being
+            # swallowed by today's state.
+            if db.get_runtime_setting("actuation_health_alerted"):
+                db.set_runtime_setting("actuation_health_alerted", "")
+            logger.debug("Actuation health: OK")
+            return
+
+        # Dedup PER KIND, accumulating across the day. Two earlier designs both
+        # failed, in opposite directions:
+        #   * one signature over all kinds SILENCED a second, different fault
+        #     that started later the same day (a tank rejection storm after a
+        #     reconciler stall shared a bucket and never paged);
+        #   * storing only the LAST signature let a flapping component
+        #     (tank_failed_24h is a rolling count, so it oscillates across the
+        #     threshold as old failures age out) re-page every hour — the
+        #     fatigue this dedup exists to prevent.
+        # An accumulating set of already-paged kinds, reset by date, does both:
+        # each distinct fault pages once a day, and flapping cannot re-arm it.
+        stored = (db.get_runtime_setting("actuation_health_alerted") or "").strip()
+        stored_day, _, stored_kinds = stored.partition("|")
+        already = set(stored_kinds.split(",")) if stored_day == today and stored_kinds else set()
+
+        fresh = [(kind, msg) for kind, msg in issues if kind not in already]
+        if not fresh:
+            logger.info(
+                "Actuation health: still wedged (%s) — already paged today",
+                ",".join(k for k, _ in issues),
+            )
+            return
+
+        from .. import notifier
+        notifier.notify_actuation_stale([msg for _, msg in fresh])
+        db.set_runtime_setting(
+            "actuation_health_alerted",
+            today + "|" + ",".join(sorted(already | {k for k, _ in fresh})),
+        )
+        logger.error("ACTUATION WEDGED — alerted: %s", "; ".join(m for _, m in fresh))
+    except Exception as e:
+        logger.warning("Actuation health monitor failed (non-fatal): %s", e)
+
+
 def bulletproof_export_opportunity_job() -> None:
     """Persist yesterday's export opportunity cost (Outgoing Agile − flat SEG).
 
@@ -2535,6 +2625,30 @@ def start_background_scheduler() -> None:
                     "LP health monitor cron scheduled (%02d:%02d %s daily)",
                     int(config.LP_HEALTH_MONITOR_HOUR), int(config.LP_HEALTH_MONITOR_MINUTE),
                     config.BULLETPROOF_TIMEZONE,
+                )
+            # Actuation health watchdog (#784) — pages when the plan stops
+            # reaching the hardware. HOURLY, not nightly: the staleness
+            # thresholds are already ~30 h, so a nightly check would add up to
+            # another day of silence on top of them. Two multi-day wedges
+            # (2026-06-14, 2026-08-06) ran unnoticed for want of this.
+            if getattr(config, "ACTUATION_HEALTH_MONITOR_ENABLED", True):
+                # Local import: the module-level name is bound by a LATER block
+                # in this same function, so relying on it here would NameError
+                # depending on which branches ran first.
+                from apscheduler.triggers.interval import (
+                    IntervalTrigger as _IntervalTrigger,
+                )
+                _background_scheduler.add_job(
+                    bulletproof_actuation_health_monitor_job,
+                    # Clamp: APScheduler coerces a zero-length interval to 1s,
+                    # so a stray `=0` in .env would spin the watchdog instead of
+                    # disabling it (use ACTUATION_HEALTH_MONITOR_ENABLED for that).
+                    _IntervalTrigger(minutes=_actuation_interval_minutes()),
+                    id="bulletproof_actuation_health_monitor",
+                )
+                logger.info(
+                    "Actuation health watchdog scheduled (every %d min)",
+                    _actuation_interval_minutes(),
                 )
             # PV calibration refresh — keeps pv_calibration_hourly +
             # pv_calibration_hourly_cloud current. Runs at 04:30 UTC, after
