@@ -26,6 +26,10 @@ from .models import ChargePeriod, DeviceInfo, RealTimeData, SchedulerGroup, Sche
 
 logger = logging.getLogger(__name__)
 
+#: Open API versions that expose a scheduler write. Anything else is a typo,
+#: and typos must not reach the network (#777).
+_SCHEDULER_WRITE_VERSIONS = frozenset({"v0", "v1", "v2", "v3"})
+
 
 def _warn_if_pv_tracks_generation(pv_val: object, summary_raw: dict) -> None:
     """Runtime guard for the generation-vs-PVEnergyTotal class of regression.
@@ -879,7 +883,18 @@ class FoxESSClient:
         """
         from ..config import config as _config
 
-        version = (_config.FOX_SCHEDULER_WRITE_VERSION or "v2").strip().lower()
+        version = (_config.FOX_SCHEDULER_WRITE_VERSION or "").strip().lower()
+        if version not in _SCHEDULER_WRITE_VERSIONS:
+            # A typo in .env must not silently POST to /op/<junk>/..., which
+            # 404s into an opaque `HTTP 404: <html>` that both callers only
+            # log — leaving the previous schedule live. That is precisely the
+            # 37 h failure mode this setting exists to end (#777).
+            logger.warning(
+                "FOX_SCHEDULER_WRITE_VERSION=%r is not one of %s — falling back to v2",
+                _config.FOX_SCHEDULER_WRITE_VERSION,
+                sorted(_SCHEDULER_WRITE_VERSIONS),
+            )
+            version = "v2"
         sn = self._sn_scheduler()
         if version == "v3":
             return version, {
@@ -887,6 +902,12 @@ class FoxESSClient:
                 "isDefault": bool(is_default),
                 "groups": [g.to_api_dict() for g in groups],
             }
+        if is_default:
+            # v0/v1/v2 have no isDefault; say so rather than dropping it mute.
+            logger.warning(
+                "is_default=True ignored on the %s scheduler write (v3-only field)",
+                version,
+            )
         return version, {
             "deviceSN": sn,
             "groups": [{**g.to_api_dict(), "enable": 1} for g in groups],

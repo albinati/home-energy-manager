@@ -52,6 +52,29 @@ def _client() -> FoxESSClient:
     return FoxESSClient(api_key="key", device_sn="SN123")
 
 
+def test_shipped_default_is_v2():
+    """Pin the value that actually ships.
+
+    Every other test in this file monkeypatches the setting, so all of them
+    stay green with `FOX_SCHEDULER_WRITE_VERSION=v3` — i.e. green while prod
+    keeps returning 41200. This is the one assertion that fails if the default
+    regresses or a stray v3 leaks in from the deploy environment.
+    """
+    assert config.FOX_SCHEDULER_WRITE_VERSION == "v2"
+
+
+@pytest.mark.parametrize("bad", ["v4", "V2 ", "3", "vv2", "", None])
+def test_unknown_version_falls_back_to_v2_instead_of_posting_to_junk(wire, monkeypatch, bad):
+    """A typo must not POST to /op/<junk>/... — that 404s into an opaque error
+    both callers merely log, leaving the stale schedule live (the #777 mode)."""
+    monkeypatch.setattr(config, "FOX_SCHEDULER_WRITE_VERSION", bad)
+    _client().set_scheduler_v3(GROUPS, skip_if_equal=False)
+
+    url, body = wire[0]
+    assert url == "https://www.foxesscloud.com/op/v2/device/scheduler/enable"
+    assert [g["enable"] for g in body["groups"]] == [1, 1]
+
+
 def test_default_write_goes_to_v2_with_per_group_enable(wire, monkeypatch):
     monkeypatch.setattr(config, "FOX_SCHEDULER_WRITE_VERSION", "v2")
     _client().set_scheduler_v3(GROUPS, skip_if_equal=False)
