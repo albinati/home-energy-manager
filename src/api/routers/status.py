@@ -180,8 +180,14 @@ async def _fox_drift_block() -> dict[str, Any]:
             # rather than caching a false alarm for 30 minutes.
             return {
                 "checked_at_utc": datetime.now(UTC).isoformat(),
+                # Since #779 `any_drift` is live-vs-CURRENT-PLAN, not
+                # live-vs-last-landed-upload — the latter is tautologically
+                # in sync during a write outage.
                 "in_sync": None if live_error else not bool(diff.get("any_drift")),
                 "diff_count": None if live_error else n_diff,
+                "compared_against": diff.get("compared_against"),
+                "write_landed": diff.get("write_landed"),
+                "write_error": diff.get("write_error"),
                 "error": live_error,
             }
         except Exception as e:  # pragma: no cover — defensive: strip must render

@@ -84,6 +84,14 @@ class SchedulerGroup:
     max_soc: int | None = None
     import_limit: int | None = None
     export_limit: int | None = None
+    enable: int = 1
+    """Slot active flag as reported by the v1/v2 reads (#778).
+
+    The v3 read omits disabled slots and carries no flag, so anything parsed
+    from v3 — and anything we build to upload — is active by construction.
+    Deliberately excluded from ``fingerprint()``: it partitions the slots, it
+    is not part of what a schedule *says*.
+    """
 
     def to_api_dict(self) -> dict[str, Any]:
         """Build group payload for /op/v3/device/scheduler/enable."""
@@ -138,5 +146,23 @@ class SchedulerState:
 
     enabled: bool
     groups: list[SchedulerGroup]
+    """ACTIVE groups only — what the inverter is actually running."""
+
+    all_groups: list[SchedulerGroup] = field(default_factory=list)
+    """Every slot the device holds, including ``enable: 0`` leftovers (#778).
+
+    The v3 read omits disabled groups entirely, so for months this residue was
+    invisible: a live device holding 8 slots reported 1. Three consumers — the
+    ``skip_if_equal`` pre-read, the heartbeat's ``_schedule_signature`` and the
+    ``schedule_diff`` endpoint — compared against that partial view without
+    anyone intending them to. Populated from the v1/v2 reads; on a v3 read it
+    equals ``groups``.
+    """
+
     max_group_count: int = 8
     properties: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def disabled_groups(self) -> list[SchedulerGroup]:
+        """Slots the device holds but is not running — our own upload residue."""
+        return [g for g in self.all_groups if g.enable == 0]

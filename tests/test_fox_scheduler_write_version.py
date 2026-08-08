@@ -125,9 +125,15 @@ def test_signature_path_tracks_the_version_segment(monkeypatch):
     assert signed == ["/op/v2/device/scheduler/enable"]
 
 
-def test_reads_stay_on_v3(wire, monkeypatch):
-    """The v3 read is healthy; this PR must not move it."""
+def test_read_route_is_independent_of_the_write_route(wire, monkeypatch):
+    """Read and write versions are separate knobs.
+
+    The write moved for #777 (v3 rejects it); the read moved for #778 (v3 hides
+    disabled slots). They are different faults with different rollbacks, so a
+    single var must not conflate them.
+    """
     monkeypatch.setattr(config, "FOX_SCHEDULER_WRITE_VERSION", "v2")
+    monkeypatch.setattr(config, "FOX_SCHEDULER_READ_VERSION", "v3")
     _client().get_scheduler_v3()
 
     url, _ = wire[0]

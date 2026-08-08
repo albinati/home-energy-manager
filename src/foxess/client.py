@@ -805,11 +805,27 @@ class FoxESSClient:
     # ── Scheduler V3 + extras (Open API key only where noted) ─────────────────
 
     def get_scheduler_v3(self) -> SchedulerState:
-        """Fetch hardware schedule (v3)."""
-        raw = self._open_post_v3(
-            "/device/scheduler/get", {"deviceSN": self._sn_scheduler()}
+        """Fetch hardware schedule.
+
+        Reads via ``config.FOX_SCHEDULER_READ_VERSION`` (default v2) so disabled
+        slots are visible (#778). ``SchedulerState.groups`` still holds only the
+        ACTIVE groups, so every existing caller sees exactly what the v3 read
+        used to give it; the residue lands in ``all_groups``/``disabled_groups``.
+        """
+        from ..config import config as _config
+
+        version = (_config.FOX_SCHEDULER_READ_VERSION or "v2").strip().lower()
+        raw = self._open_post_versioned(
+            version, "/device/scheduler/get", {"deviceSN": self._sn_scheduler()}
         )
-        return _parse_scheduler_v3_result(raw)
+        state = _parse_scheduler_v3_result(raw)
+        if state.disabled_groups:
+            logger.debug(
+                "Fox scheduler holds %d disabled slot(s) alongside %d active "
+                "(upload residue, invisible on the v3 read — #778)",
+                len(state.disabled_groups), len(state.groups),
+            )
+        return state
 
     def set_scheduler_v3(
         self,
@@ -978,9 +994,22 @@ def _groups_from_api_dicts(groups: list) -> list[SchedulerGroup]:
                 max_soc=ep.get("maxSoc") if ep.get("maxSoc") is not None else ep.get("max_soc"),
                 import_limit=ep.get("importLimit") if ep.get("importLimit") is not None else ep.get("import_limit"),
                 export_limit=ep.get("exportLimit") if ep.get("exportLimit") is not None else ep.get("export_limit"),
+                enable=_parse_enable_flag(g.get("enable")),
             )
         )
     return groups_out
+
+
+def _parse_enable_flag(raw: object) -> int:
+    """Slot active flag from a v1/v2 read; absent (v3, or our own dicts) == active."""
+    if raw is None:
+        return 1
+    if isinstance(raw, bool):
+        return 1 if raw else 0
+    try:
+        return 0 if int(raw) == 0 else 1
+    except (TypeError, ValueError):
+        return 1
 
 
 def scheduler_groups_from_stored_json(groups: list) -> list[SchedulerGroup]:
@@ -996,5 +1025,16 @@ def _parse_scheduler_v3_result(raw: dict) -> SchedulerState:
         enabled = bool(en)
     max_gc = int(raw.get("maxGroupCount", raw.get("max_group_count", 8)) or 8)
     props = raw.get("properties") if isinstance(raw.get("properties"), dict) else {}
-    groups_out = _groups_from_api_dicts(raw.get("groups", []) or [])
-    return SchedulerState(enabled=enabled, groups=groups_out, max_group_count=max_gc, properties=props)
+    # v1/v2 return all 8 slots and mark inactive ones `enable: 0`; v3 returns
+    # only the active ones and carries no flag at all (#778). Split here so
+    # `groups` keeps meaning ACTIVE groups on every route — every existing
+    # consumer was written against the v3 read and assumes exactly that — while
+    # `all_groups` preserves the disabled residue for diagnostics.
+    all_groups = _groups_from_api_dicts(raw.get("groups", []) or [])
+    return SchedulerState(
+        enabled=enabled,
+        groups=[g for g in all_groups if g.enable != 0],
+        all_groups=all_groups,
+        max_group_count=max_gc,
+        properties=props,
+    )

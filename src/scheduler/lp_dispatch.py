@@ -2268,6 +2268,21 @@ def _prepend_inflight_group(
     return [bridge] + groups
 
 
+def _record_fox_intent(
+    intent: list[dict], *, upload_ok: bool, error_msg: str | None = None
+) -> None:
+    """Persist the attempted schedule for the drift check (#779), never fatally.
+
+    This is telemetry on the dispatch hot path: a failing insert must not take
+    down an upload, and above all must not mask the FoxESSError we are in the
+    middle of handling.
+    """
+    try:
+        db.save_fox_schedule_intent(intent, upload_ok=upload_ok, error_msg=error_msg)
+    except Exception as e:
+        logger.warning("Could not record Fox schedule intent: %s", e)
+
+
 def upload_fox_if_operational(fox: FoxESSClient | None, groups: list[SchedulerGroup]) -> bool:
     fox_ok = False
     if fox and fox.api_key and not config.OPENCLAW_READ_ONLY:
@@ -2297,14 +2312,32 @@ def upload_fox_if_operational(fox: FoxESSClient | None, groups: list[SchedulerGr
                     j, gj.work_mode, gj.start_hour, gj.start_minute, gj.end_hour, gj.end_minute,
                 )
             return False
+        intent = [g.to_api_dict() for g in groups]
         try:
             fox.set_scheduler_v3(groups, is_default=False)
             fox.warn_if_scheduler_v3_mismatch(groups)
             fox.set_scheduler_flag(True)
             fox_ok = True
-            db.save_fox_schedule_state([g.to_api_dict() for g in groups], enabled=True)
+            db.save_fox_schedule_state(intent, enabled=True)
+            _record_fox_intent(intent, upload_ok=True)
         except FoxESSError as e:
             logger.warning("Fox Scheduler V3 upload failed: %s", e)
+            # Record the plan we FAILED to push (#779). Without this the drift
+            # check compares the hardware against the last upload that landed,
+            # which the hardware trivially still matches — so it reported
+            # "in sync" through all 37 h of the #777 outage.
+            _record_fox_intent(intent, upload_ok=False, error_msg=str(e))
+        except Exception as e:
+            # Only HTTPError becomes FoxESSError; URLError, socket timeouts and
+            # a malformed JSON body all escape as themselves. Catching just
+            # FoxESSError left a DNS/TLS/timeout outage with NO intent row —
+            # the drift check would then compare against a stale intent the
+            # hardware still matches and report in sync, which is the very bug
+            # #779 exists to close, arriving via a different exception class.
+            # Record and RE-RAISE: swallowing here would change what callers
+            # see for every non-Fox exception, which is a separate decision.
+            _record_fox_intent(intent, upload_ok=False, error_msg=f"{type(e).__name__}: {e}")
+            raise
     elif fox and fox.api_key:
         logger.info("Skipping Fox Scheduler V3 upload (read-only)")
     return fox_ok
