@@ -3271,13 +3271,21 @@ def save_fox_schedule_intent(
 
 
 def get_latest_fox_schedule_intent() -> dict[str, Any] | None:
-    """Most recent upload attempt, with ``groups`` parsed. None before the first."""
+    """Most recent upload attempt, with ``groups`` parsed. None before the first.
+
+    Degrades to ``None`` if the table is absent rather than raising: this feeds
+    the drift endpoint, and a diagnostic surface that 500s during an incident
+    is worse than one that falls back to the older baseline.
+    """
     with _lock:
         conn = get_connection()
         try:
-            cur = conn.execute(
-                "SELECT * FROM fox_schedule_intent ORDER BY id DESC LIMIT 1"
-            )
+            try:
+                cur = conn.execute(
+                    "SELECT * FROM fox_schedule_intent ORDER BY id DESC LIMIT 1"
+                )
+            except sqlite3.OperationalError:
+                return None
             r = cur.fetchone()
             if not r:
                 return None

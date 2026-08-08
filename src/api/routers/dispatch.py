@@ -322,7 +322,13 @@ async def get_foxess_schedule_diff() -> dict[str, Any]:
             "only_live": only_live,
             "only_recorded": only_recorded,
         },
-        "recorded_uploaded_at": (state or {}).get("uploaded_at"),
+        # Timestamp of the baseline `recorded_groups` actually came from —
+        # pairing the landed-upload time with never-landed groups would misread
+        # as "these groups are on the inverter as of then".
+        "recorded_uploaded_at": (baseline or {}).get(
+            "intended_at" if intent is not None else "uploaded_at"
+        ),
+        "last_upload_at": (state or {}).get("uploaded_at"),
         # #779 — the two questions the old shape conflated.
         "compared_against": "intent" if intent is not None else "last_upload",
         "intent_at": (intent or {}).get("intended_at"),

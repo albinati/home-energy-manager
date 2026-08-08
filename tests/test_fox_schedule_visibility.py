@@ -12,10 +12,16 @@ whole 37 h while the inverter ran a two-day-old plan.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+from fastapi.testclient import TestClient
+
 import pytest
 
 from src import db
+from src.api.routers import dispatch as dispatch_router
 from src.foxess.client import _parse_scheduler_v3_result
+from src.foxess.models import SchedulerGroup, SchedulerState
 
 # Shape of a real v1/v2 read taken off the affected prod device on 2026-08-08:
 # one active group plus seven leftovers from earlier uploads.
@@ -128,12 +134,40 @@ def test_failed_upload_is_recorded_as_intent():
     assert latest["groups"][0]["workMode"] == "ForceCharge"
 
 
-def test_intent_diverges_from_the_last_landed_upload_during_an_outage():
-    """The #777 incident, reduced.
+@pytest.fixture
+def live_hardware(monkeypatch):
+    """Pin what the inverter reports, so the endpoint is exercised end to end."""
+    def _set(groups: list[SchedulerGroup]):
+        state = SchedulerState(enabled=True, groups=groups, all_groups=groups)
+        # The test env has no FOXESS_DEVICE_SN, so kwargs building raises before
+        # the client is ever constructed — stub both halves.
+        monkeypatch.setattr(
+            dispatch_router.config, "foxess_client_kwargs", lambda: {}
+        )
+        monkeypatch.setattr(
+            dispatch_router, "FoxESSClient", lambda **kw: SimpleNamespace(
+                get_scheduler_v3=lambda: state
+            )
+        )
+    return _set
 
-    A schedule lands, then every later upload fails. The last *successful*
-    upload still matches the hardware — which is why the old comparison stayed
-    green — but the plan the LP wants has moved on.
+
+def _diff() -> dict:
+    """Hit the real route, so routing and serialisation are covered too."""
+    from src.api.main import app
+
+    resp = TestClient(app).get("/api/v1/foxess/schedule_diff")
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+def test_drift_fires_when_the_plan_never_reached_the_inverter(live_hardware):
+    """The #777 incident, end to end through the endpoint.
+
+    A schedule lands; every later upload fails. The hardware still matches the
+    last *successful* upload — which is exactly why the old comparison reported
+    in sync for 37 h — but the plan the LP wants has moved on and must show as
+    drift.
     """
     landed = [_group(2)]
     db.save_fox_schedule_state(landed, enabled=True)
@@ -143,18 +177,47 @@ def test_intent_diverges_from_the_last_landed_upload_during_an_outage():
     for _ in range(3):
         db.save_fox_schedule_intent(wanted, upload_ok=False, error_msg="API error 41200")
 
-    last_landed = db.get_latest_fox_schedule_state()
-    latest_intent = db.get_latest_fox_schedule_intent()
+    # The inverter is still running only what landed two days ago.
+    live_hardware([SchedulerGroup(2, 0, 3, 59, "Backup", min_soc_on_grid=10, max_soc=10)])
 
-    # The hardware (== last landed upload) trivially agrees with itself...
-    assert len(last_landed["groups"]) == 1
-    # ...while the current plan wants a ForceCharge that never reached it.
-    assert len(latest_intent["groups"]) == 2
-    assert latest_intent["upload_ok"] == 0
-    assert last_landed["groups"] != latest_intent["groups"], (
-        "the baseline the drift check uses must be able to disagree with the "
-        "hardware during a write outage — otherwise it cannot fire"
-    )
+    out = _diff()
+    assert out["any_drift"] is True, "a plan that never reached the inverter is drift"
+    assert out["compared_against"] == "intent"
+    assert out["write_landed"] is False
+    assert "41200" in (out["write_error"] or "")
+    # The missing ForceCharge is the thing an operator needs named.
+    assert [g["work_mode"] for g in out["diffs"]["only_recorded"]] == ["ForceCharge"]
+
+
+def test_no_drift_when_the_hardware_runs_the_current_plan(live_hardware):
+    """The vendor echoes stale fdSoc/fdPwr and fills absent maxSoc with 100.
+
+    The baseline moved to intent in #779; that canonicalisation has to keep
+    applying, or every Backup hold reads as phantom drift.
+    """
+    groups = [_group(2)]
+    db.save_fox_schedule_state(groups, enabled=True)
+    db.save_fox_schedule_intent(groups, upload_ok=True)
+
+    live_hardware([
+        SchedulerGroup(2, 0, 3, 59, "Backup", min_soc_on_grid=10, max_soc=10,
+                       fd_soc=15, fd_pwr=3680),  # vendor echo on a Backup group
+    ])
+
+    out = _diff()
+    assert out["any_drift"] is False
+    assert out["write_landed"] is True
+
+
+def test_falls_back_to_last_upload_before_any_intent_is_recorded(live_hardware):
+    """A DB that predates #779 must behave as it did, not 500."""
+    db.save_fox_schedule_state([_group(2)], enabled=True)
+    live_hardware([SchedulerGroup(2, 0, 3, 59, "Backup", min_soc_on_grid=10, max_soc=10)])
+
+    out = _diff()
+    assert out["compared_against"] == "last_upload"
+    assert out["write_landed"] is None
+    assert out["any_drift"] is False
 
 
 def test_successful_upload_keeps_both_records_in_step():

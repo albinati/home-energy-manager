@@ -3276,65 +3276,26 @@ def build_mcp() -> FastMCP:
     @mcp.tool(
         name="get_fox_schedule_diff",
         description=(
-            "Live Fox V3 scheduler state vs. last recorded HEM upload. "
-            "Returns any_drift=True when the inverter shows groups HEM didn't "
-            "send (Fox-app manual edit, firmware quirk, failed upload). "
-            "Symmetric diff: only_live (groups present on Fox but not in our "
-            "fox_schedule_state record) and only_recorded (groups we tried to "
-            "send but Fox doesn't show). Read-only — no hardware writes."
+            "Live Fox V3 scheduler state vs. the plan the LP wants live. "
+            "Returns any_drift=True when the inverter isn't running the current "
+            "plan (Fox-app manual edit, firmware quirk, failed upload). "
+            "Symmetric diff: only_live (groups present on Fox but not in the "
+            "plan) and only_recorded (groups we tried to send but Fox doesn't "
+            "show). write_landed reports whether our last write reached the "
+            "inverter at all. Read-only — no hardware writes."
         ),
     )
-    def get_fox_schedule_diff_tool() -> dict[str, Any]:
-        from .api.routers.dispatch import (
-            _normalise_group as _norm,
-        )
-        from . import db
-        from .foxess.client import FoxESSClient as _FoxESSClient
+    async def get_fox_schedule_diff_tool() -> dict[str, Any]:
+        # Delegates to the REST implementation rather than restating it. This
+        # tool used to be a near-verbatim copy, and when #779 moved the REST
+        # baseline from "last successful upload" to "current plan" the copy
+        # kept the old one — so the surface an operator reaches for FIRST would
+        # have gone on reporting `any_drift: false` through exactly the outage
+        # it exists to catch, while the endpoint fired correctly.
+        from .api.routers.dispatch import get_foxess_schedule_diff
 
         try:
-            state = db.get_latest_fox_schedule_state()
-            recorded = (state or {}).get("groups", []) or []
-            try:
-                fox = _FoxESSClient(**config.foxess_client_kwargs())
-                live = [_norm(g) for g in fox.get_scheduler_v3().groups]
-                live_error = None
-            except Exception as e:
-                live = []
-                live_error = str(e)
-
-            rec_norm = [_norm(g) for g in recorded]
-
-            def _fp(g: dict[str, Any]) -> tuple:
-                # Mode-aware canonicalisation — mirrors the REST schedule_diff
-                # _fp (src/api/routers/dispatch.py): the inverter echoes stale
-                # fdSoc/fdPwr on SelfUse/Backup groups and fills absent maxSoc
-                # with the vendor default 100. Raw comparison reported phantom
-                # drift for every default-shape Backup hold (maxSoc=None,
-                # 2026-07-04) and stale-echo SelfUse group.
-                mode = g.get("work_mode")
-                fd_relevant = mode in ("ForceCharge", "ForceDischarge")
-                max_soc = g.get("max_soc")
-                return (
-                    g.get("start"), g.get("end"), mode,
-                    g.get("min_soc_on_grid"),
-                    float(g["fd_soc"]) if fd_relevant and g.get("fd_soc") is not None else None,
-                    float(g["fd_pwr"]) if fd_relevant and g.get("fd_pwr") is not None else None,
-                    100.0 if max_soc is None else float(max_soc),
-                )
-
-            live_fps = {_fp(g) for g in live}
-            rec_fps = {_fp(g) for g in rec_norm}
-            only_live = [g for g in live if _fp(g) not in rec_fps]
-            only_recorded = [g for g in rec_norm if _fp(g) not in live_fps]
-            return {
-                "ok": live_error is None,
-                "any_drift": bool(only_live or only_recorded),
-                "live_groups": live,
-                "recorded_groups": rec_norm,
-                "diffs": {"only_live": only_live, "only_recorded": only_recorded},
-                "recorded_uploaded_at": (state or {}).get("uploaded_at"),
-                "live_error": live_error,
-            }
+            return await get_foxess_schedule_diff()
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
