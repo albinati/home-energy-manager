@@ -246,15 +246,27 @@ async def get_scenario_batch(batch_id: str) -> dict[str, Any]:
 
 @router.get("/api/v1/foxess/schedule_diff")
 async def get_foxess_schedule_diff() -> dict[str, Any]:
-    """Compare live Fox V3 scheduler state against the last recorded upload.
+    """Compare live Fox V3 scheduler state against the plan the LP wants live.
 
-    Returns ``any_drift=True`` when the live state differs from what the LP
-    last asked for — symptoms could be: a manual edit via the Fox app, a
-    failed previous upload, or a Fox firmware quirk. The diff is structural
-    (per-group fingerprint comparison), not just count-based.
+    Returns ``any_drift=True`` when the live state differs from the most recent
+    plan the dispatcher tried to push — a manual edit via the Fox app, a failed
+    upload, or a Fox firmware quirk. The diff is structural (per-group
+    fingerprint comparison), not just count-based.
+
+    The baseline is the last upload ATTEMPT (``fox_schedule_intent``), not the
+    last one that landed. Comparing against the last *successful* upload is
+    tautological during a write outage — the hardware still matches it by
+    definition — and that is exactly how this endpoint reported
+    ``any_drift: false, diff_count: 0`` through 37 h of total upload failure in
+    #777. ``write_landed`` keeps the other question answerable: did our last
+    write actually reach the inverter.
     """
+    intent = db.get_latest_fox_schedule_intent()
     state = db.get_latest_fox_schedule_state()
-    recorded_groups = (state or {}).get("groups", []) or []
+    # Fall back to the last landed upload until the first attempt is recorded
+    # (fresh DB, or a deploy that predates #779).
+    baseline = intent if intent is not None else state
+    recorded_groups = (baseline or {}).get("groups", []) or []
 
     live_groups: list[dict[str, Any]] = []
     live_error: str | None = None
@@ -311,5 +323,12 @@ async def get_foxess_schedule_diff() -> dict[str, Any]:
             "only_recorded": only_recorded,
         },
         "recorded_uploaded_at": (state or {}).get("uploaded_at"),
+        # #779 — the two questions the old shape conflated.
+        "compared_against": "intent" if intent is not None else "last_upload",
+        "intent_at": (intent or {}).get("intended_at"),
+        "write_landed": (
+            bool((intent or {}).get("upload_ok")) if intent is not None else None
+        ),
+        "write_error": (intent or {}).get("error_msg"),
         "live_error": live_error,
     }

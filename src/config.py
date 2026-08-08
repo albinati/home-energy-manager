@@ -1661,6 +1661,16 @@ class Config:
         os.getenv("FOX_SCHEDULER_WRITE_VERSION") or "v2"
     ).strip().lower()
 
+    # Which Open API version carries the scheduler READ (#778). The v3 read
+    # silently omits every `enable: 0` slot, so a device holding 8 reported 1 —
+    # and the skip-when-unchanged pre-read, the heartbeat drift signature and
+    # the schedule_diff endpoint all compared against that partial view without
+    # anyone choosing it. v1/v2 return all slots with the flag. `groups` still
+    # exposes only ACTIVE slots on every route, so callers are unaffected.
+    FOX_SCHEDULER_READ_VERSION: str = (
+        os.getenv("FOX_SCHEDULER_READ_VERSION") or "v2"
+    ).strip().lower()
+
     # PuLP MILP optimizer (V8)
     OPTIMIZER_BACKEND: str = (os.getenv("OPTIMIZER_BACKEND") or "lp").strip().lower()
     BATTERY_RT_EFFICIENCY: float = float(os.getenv("BATTERY_RT_EFFICIENCY", "0.92"))

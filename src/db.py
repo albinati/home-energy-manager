@@ -139,6 +139,20 @@ CREATE TABLE IF NOT EXISTS fox_schedule_state (
     verified_at TEXT
 );
 
+-- Every Fox upload ATTEMPT, landed or not (#779). `fox_schedule_state` above
+-- records only successes, so during a write outage it freezes at the last good
+-- upload and the hardware still matches it — the drift check then reports
+-- "in sync" while the inverter runs a stale plan. Prod stayed green that way
+-- through a 37 h outage. This table answers the other question: what does the
+-- LP currently want on the hardware, regardless of whether the write landed.
+CREATE TABLE IF NOT EXISTS fox_schedule_intent (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    intended_at TEXT NOT NULL,
+    groups_json TEXT NOT NULL,
+    upload_ok INTEGER NOT NULL DEFAULT 0,
+    error_msg TEXT
+);
+
 CREATE TABLE IF NOT EXISTS acknowledged_warnings (
     warning_key TEXT PRIMARY KEY,
     acknowledged_at TEXT NOT NULL
@@ -3227,6 +3241,52 @@ def save_fox_schedule_state(groups: list[dict[str, Any]], enabled: bool = True) 
                 (now, json.dumps(groups), 1 if enabled else 0, now),
             )
             conn.commit()
+        finally:
+            conn.close()
+
+
+def save_fox_schedule_intent(
+    groups: list[dict[str, Any]], *, upload_ok: bool, error_msg: str | None = None
+) -> None:
+    """Record what the LP wanted on the hardware, landed or not (#779).
+
+    Called on EVERY upload attempt. ``fox_schedule_state`` deliberately keeps
+    recording successes only — the heartbeat re-upload and the in-flight bridge
+    both read it as "a schedule that is actually applied", and feeding them a
+    never-applied plan would be a different bug.
+    """
+    now = datetime.now(UTC).isoformat()
+    with _lock:
+        conn = get_connection()
+        try:
+            conn.execute(
+                """INSERT INTO fox_schedule_intent
+                   (intended_at, groups_json, upload_ok, error_msg)
+                   VALUES (?, ?, ?, ?)""",
+                (now, json.dumps(groups), 1 if upload_ok else 0, error_msg),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def get_latest_fox_schedule_intent() -> dict[str, Any] | None:
+    """Most recent upload attempt, with ``groups`` parsed. None before the first."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM fox_schedule_intent ORDER BY id DESC LIMIT 1"
+            )
+            r = cur.fetchone()
+            if not r:
+                return None
+            d = dict(r)
+            try:
+                d["groups"] = json.loads(d["groups_json"])
+            except json.JSONDecodeError:
+                d["groups"] = []
+            return d
         finally:
             conn.close()
 
