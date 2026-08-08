@@ -1097,6 +1097,21 @@ def bulletproof_lp_health_monitor_job() -> None:
         logger.warning("LP health monitor job failed (non-fatal): %s", e)
 
 
+def _actuation_interval_minutes() -> int:
+    """Watchdog cadence, floored at 1 minute.
+
+    APScheduler turns a zero-length interval into a 1-second one, so an
+    accidental `ACTUATION_HEALTH_MONITOR_INTERVAL_MINUTES=0` would spin the
+    watchdog rather than switch it off. Disabling is
+    ACTUATION_HEALTH_MONITOR_ENABLED's job.
+    """
+    try:
+        raw = int(getattr(config, "ACTUATION_HEALTH_MONITOR_INTERVAL_MINUTES", 60))
+    except (TypeError, ValueError):
+        raw = 60
+    return max(1, raw)
+
+
 def bulletproof_actuation_health_monitor_job() -> None:
     """Page when the plan stops reaching the hardware (#784).
 
@@ -1117,8 +1132,6 @@ def bulletproof_actuation_health_monitor_job() -> None:
     if not getattr(config, "ACTUATION_HEALTH_MONITOR_ENABLED", True):
         return
     try:
-        import hashlib
-
         from ..analytics.actuation_health import actuation_issues, evaluate_actuation_health
 
         now = datetime.now(UTC)
@@ -1131,26 +1144,45 @@ def bulletproof_actuation_health_monitor_job() -> None:
             dhw_mode=getattr(config, "OPTIMIZATION_PRESET", "normal") or "normal",
         )
         issues = actuation_issues(block)
+        today = now.date().isoformat()
         if not issues:
-            # Clear the dedup key so a recurrence tomorrow pages again rather
-            # than being swallowed by a stale signature from today.
-            if db.get_runtime_setting("actuation_health_last_alert_sig"):
-                db.set_runtime_setting("actuation_health_last_alert_sig", "")
+            # Clear on recovery so a relapse pages again instead of being
+            # swallowed by today's state.
+            if db.get_runtime_setting("actuation_health_alerted"):
+                db.set_runtime_setting("actuation_health_alerted", "")
             logger.debug("Actuation health: OK")
             return
-        # Signature excludes the age (which ticks every hour) so an ongoing
-        # outage keeps ONE signature per day instead of paging hourly.
-        kinds = sorted({i.split(":")[0] for i in issues})
-        sig = hashlib.sha1(
-            (now.date().isoformat() + "|" + "|".join(kinds)).encode()
-        ).hexdigest()[:12]
-        if (db.get_runtime_setting("actuation_health_last_alert_sig") or "") == sig:
-            logger.info("Actuation health: already alerted today (sig=%s)", sig)
+
+        # Dedup PER KIND, accumulating across the day. Two earlier designs both
+        # failed, in opposite directions:
+        #   * one signature over all kinds SILENCED a second, different fault
+        #     that started later the same day (a tank rejection storm after a
+        #     reconciler stall shared a bucket and never paged);
+        #   * storing only the LAST signature let a flapping component
+        #     (tank_failed_24h is a rolling count, so it oscillates across the
+        #     threshold as old failures age out) re-page every hour — the
+        #     fatigue this dedup exists to prevent.
+        # An accumulating set of already-paged kinds, reset by date, does both:
+        # each distinct fault pages once a day, and flapping cannot re-arm it.
+        stored = (db.get_runtime_setting("actuation_health_alerted") or "").strip()
+        stored_day, _, stored_kinds = stored.partition("|")
+        already = set(stored_kinds.split(",")) if stored_day == today and stored_kinds else set()
+
+        fresh = [(kind, msg) for kind, msg in issues if kind not in already]
+        if not fresh:
+            logger.info(
+                "Actuation health: still wedged (%s) — already paged today",
+                ",".join(k for k, _ in issues),
+            )
             return
+
         from .. import notifier
-        notifier.notify_actuation_stale(issues)
-        db.set_runtime_setting("actuation_health_last_alert_sig", sig)
-        logger.error("ACTUATION WEDGED — alerted: %s", "; ".join(issues))
+        notifier.notify_actuation_stale([msg for _, msg in fresh])
+        db.set_runtime_setting(
+            "actuation_health_alerted",
+            today + "|" + ",".join(sorted(already | {k for k, _ in fresh})),
+        )
+        logger.error("ACTUATION WEDGED — alerted: %s", "; ".join(m for _, m in fresh))
     except Exception as e:
         logger.warning("Actuation health monitor failed (non-fatal): %s", e)
 
@@ -2608,16 +2640,15 @@ def start_background_scheduler() -> None:
                 )
                 _background_scheduler.add_job(
                     bulletproof_actuation_health_monitor_job,
-                    _IntervalTrigger(
-                        minutes=int(
-                            getattr(config, "ACTUATION_HEALTH_MONITOR_INTERVAL_MINUTES", 60)
-                        )
-                    ),
+                    # Clamp: APScheduler coerces a zero-length interval to 1s,
+                    # so a stray `=0` in .env would spin the watchdog instead of
+                    # disabling it (use ACTUATION_HEALTH_MONITOR_ENABLED for that).
+                    _IntervalTrigger(minutes=_actuation_interval_minutes()),
                     id="bulletproof_actuation_health_monitor",
                 )
                 logger.info(
                     "Actuation health watchdog scheduled (every %d min)",
-                    int(getattr(config, "ACTUATION_HEALTH_MONITOR_INTERVAL_MINUTES", 60)),
+                    _actuation_interval_minutes(),
                 )
             # PV calibration refresh — keeps pv_calibration_hourly +
             # pv_calibration_hourly_cloud current. Runs at 04:30 UTC, after

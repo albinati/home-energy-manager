@@ -117,6 +117,7 @@ _HOOK_PAYLOAD_NAMES: dict[str, str] = {
     "dhw_bias_enable_ready": "EnergyDhwBiasEnableReady",
     "tank_target_divergence": "EnergyTankTargetDivergence",
     "morning_tank_cold": "EnergyMorningTankCold",
+    "actuation_stale": "EnergyActuationStale",
 }
 
 

@@ -56,9 +56,11 @@ def test_the_2026_08_06_outage_is_flagged():
     assert block["fox"]["stale"] is True
     issues = actuation_issues(block)
     assert len(issues) == 1
+    kind, msg = issues[0]
+    assert kind == "fox_stale"
     # The message must name what stopped and for how long — a page saying only
     # "actuation unhealthy" costs a cockpit round-trip at the worst moment.
-    assert "Fox" in issues[0] and "37h" in issues[0]
+    assert "Fox" in msg and "37h" in msg
 
 
 def test_never_uploaded_counts_as_stale():
@@ -93,9 +95,9 @@ def test_lwt_has_no_age_alarm():
 @pytest.fixture(autouse=True)
 def _clean_dedup():
     db.init_db()
-    db.set_runtime_setting("actuation_health_last_alert_sig", "")
+    db.set_runtime_setting("actuation_health_alerted", "")
     yield
-    db.set_runtime_setting("actuation_health_last_alert_sig", "")
+    db.set_runtime_setting("actuation_health_alerted", "")
 
 
 @pytest.fixture
@@ -140,7 +142,7 @@ def test_recovery_clears_the_dedup_so_a_relapse_pages_again(monkeypatch, paged):
     assert len(paged) == 1
 
     _run_job(monkeypatch, _raw())                      # fixed
-    assert db.get_runtime_setting("actuation_health_last_alert_sig") == ""
+    assert db.get_runtime_setting("actuation_health_alerted") == ""
 
     _run_job(monkeypatch, _raw(fox_age_h=31.0))        # broke again
     assert len(paged) == 2, "a relapse must not be swallowed by a stale signature"
@@ -156,3 +158,61 @@ def test_job_survives_a_db_failure(monkeypatch, paged):
     monkeypatch.setattr(db, "get_actuation_health", boom)
     runner.bulletproof_actuation_health_monitor_job()   # must not raise
     assert paged == []
+
+
+def test_a_second_distinct_fault_still_pages_the_same_day(monkeypatch, paged):
+    """The dedup must not bucket different faults together.
+
+    An earlier design keyed on `message.split(":")[0]`, so "tank reconciler is
+    dead" and "tank writes are being rejected" collapsed into one key — a
+    rejection storm starting after a stall was silently suppressed for the rest
+    of the day. Different faults, different keys.
+    """
+    _run_job(monkeypatch, _raw(tank_age_h=40.0))          # reconciler stalled
+    assert len(paged) == 1 and "reconciler parado" in paged[0][0]
+
+    _run_job(monkeypatch, _raw(tank_age_h=1.0, tank_failed=7))  # recovered, now rejected
+    assert len(paged) == 2, "a different tank fault must page on its own"
+    assert "rejeitadas" in paged[1][0]
+
+
+def test_a_flapping_component_cannot_re_page_hourly(monkeypatch, paged):
+    """`tank_failed_24h` is a ROLLING count, so it oscillates across the
+    threshold as old failures age out. Storing only the last signature let that
+    re-page every hour alongside a persistent Fox wedge."""
+    # Fox is wedged throughout; the tank count crosses the threshold repeatedly.
+    for tank_failed in (0, 5, 0, 5, 0, 5):
+        _run_job(monkeypatch, _raw(fox_age_h=37.0, tank_failed=tank_failed))
+
+    # One page for Fox, one the first time the tank crosses — and nothing for
+    # the three later crossings.
+    assert len(paged) == 2, f"flapping re-paged: {paged}"
+    assert "Fox" in paged[0][0]
+    assert "rejeitadas" in paged[1][0]
+
+
+def test_only_the_new_fault_is_named_in_the_follow_up_page(monkeypatch, paged):
+    """Re-sending the already-known problem would train the reader to skim."""
+    _run_job(monkeypatch, _raw(fox_age_h=37.0))
+    _run_job(monkeypatch, _raw(fox_age_h=38.0, lwt_failed=9))
+
+    assert len(paged) == 2
+    assert all("Fox" not in m for m in paged[1]), "second page must carry only what is new"
+    assert "LWT" in paged[1][0]
+
+
+def test_interval_is_floored_at_one_minute():
+    """APScheduler coerces a zero-length interval to 1s — a stray `=0` would
+    spin the watchdog rather than disable it."""
+    from src.config import config as cfg
+    from src.scheduler.runner import _actuation_interval_minutes
+
+    import pytest as _pytest
+    mp = _pytest.MonkeyPatch()
+    try:
+        mp.setattr(cfg, "ACTUATION_HEALTH_MONITOR_INTERVAL_MINUTES", 0)
+        assert _actuation_interval_minutes() == 1
+        mp.setattr(cfg, "ACTUATION_HEALTH_MONITOR_INTERVAL_MINUTES", 15)
+        assert _actuation_interval_minutes() == 15
+    finally:
+        mp.undo()

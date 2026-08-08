@@ -92,34 +92,51 @@ def evaluate_actuation_health(
     }
 
 
-def actuation_issues(block: dict[str, Any]) -> list[str]:
-    """Human-readable problems worth waking someone for; empty when healthy.
+def actuation_issues(block: dict[str, Any]) -> list[tuple[str, str]]:
+    """``(kind, message)`` per problem worth waking someone for; empty when healthy.
 
-    Phrased so the message alone tells you what stopped and for how long — a
-    page that only says "actuation unhealthy" costs a cockpit round-trip at the
-    exact moment you want to act.
+    The ``kind`` is a stable key, NOT derived from the message text. An earlier
+    version deduped on ``message.split(":")[0]``, which collapsed
+    "tank reconciler is dead" and "tank writes are being rejected" into one
+    bucket — so a rejection storm that started after a reconciler stall was
+    silently suppressed for the rest of the day. Different faults, different
+    keys.
+
+    Messages name WHAT stopped and FOR HOW LONG: a page that only says
+    "actuation unhealthy" costs a cockpit round-trip at the exact moment you
+    want to act.
     """
-    issues: list[str] = []
+    issues: list[tuple[str, str]] = []
 
     fox = block.get("fox") or {}
     if fox.get("stale"):
         age = fox.get("age_hours")
         since = f"há {age:.0f}h" if isinstance(age, (int, float)) else "nunca"
-        issues.append(
+        issues.append((
+            "fox_stale",
             f"Fox: nenhum upload de plano bem-sucedido {since} — o inversor está "
-            "rodando uma schedule velha (bateria fora do plano)"
-        )
+            "rodando uma schedule velha (bateria fora do plano)",
+        ))
 
     tank = block.get("daikin_tank") or {}
     if tank.get("stale"):
         age = tank.get("age_hours")
         since = f"há {age:.0f}h" if isinstance(age, (int, float)) else "nunca"
-        issues.append(f"Daikin tanque: nenhuma ação executada {since} — reconciler parado")
+        issues.append((
+            "tank_stale",
+            f"Daikin tanque: nenhuma ação executada {since} — reconciler parado",
+        ))
     if tank.get("failing"):
-        issues.append(f"Daikin tanque: {tank.get('failed_24h')} escritas rejeitadas em 24h")
+        issues.append((
+            "tank_failing",
+            f"Daikin tanque: {tank.get('failed_24h')} escritas rejeitadas em 24h",
+        ))
 
     lwt = block.get("daikin_lwt") or {}
     if lwt.get("failing"):
-        issues.append(f"Daikin LWT: {lwt.get('failed_24h')} escritas rejeitadas em 24h")
+        issues.append((
+            "lwt_failing",
+            f"Daikin LWT: {lwt.get('failed_24h')} escritas rejeitadas em 24h",
+        ))
 
     return issues

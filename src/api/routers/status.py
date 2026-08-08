@@ -223,18 +223,6 @@ def _quota_block() -> dict[str, Any]:
     return out
 
 
-def _age_hours(ts: str | None, now: datetime) -> float | None:
-    if not ts:
-        return None
-    try:
-        t = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
-        if t.tzinfo is None:
-            t = t.replace(tzinfo=UTC)
-        return max(0.0, (now - t).total_seconds() / 3600.0)
-    except (ValueError, TypeError):
-        return None
-
-
 def _actuation_block() -> dict[str, Any]:
     """Is the plan actually reaching the hardware?
 
