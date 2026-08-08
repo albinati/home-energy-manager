@@ -26,6 +26,10 @@ from .models import ChargePeriod, DeviceInfo, RealTimeData, SchedulerGroup, Sche
 
 logger = logging.getLogger(__name__)
 
+#: Open API versions that expose a scheduler write. Anything else is a typo,
+#: and typos must not reach the network (#777).
+_SCHEDULER_WRITE_VERSIONS = frozenset({"v0", "v1", "v2", "v3"})
+
 
 def _warn_if_pv_tracks_generation(pv_val: object, summary_raw: dict) -> None:
     """Runtime guard for the generation-vs-PVEnergyTotal class of regression.
@@ -235,11 +239,21 @@ class FoxESSClient:
 
     def _open_post_v3(self, path: str, body: dict) -> dict:
         """Open API v3 (API key only). path e.g. '/device/scheduler/get'."""
+        return self._open_post_versioned("v3", path, body)
+
+    def _open_post_versioned(self, version: str, path: str, body: dict) -> dict:
+        """Open API POST against an explicit version segment (v0/v1/v2/v3).
+
+        The scheduler write route is version-switchable since #777 — see
+        ``config.FOX_SCHEDULER_WRITE_VERSION``. Signing is identical across
+        versions (the signed string is just the full path), so only the URL
+        segment changes.
+        """
         if not self.api_key:
             raise FoxESSError("Open API v3 endpoints require FOXESS_API_KEY (Scheduler V3).")
-        url = f"https://www.foxesscloud.com/op/v3{path}"
+        url = f"https://www.foxesscloud.com/op/{version}{path}"
         payload = json.dumps(body).encode()
-        sig_path = f"/op/v3{path}"
+        sig_path = f"/op/{version}{path}"
         req = urllib.request.Request(url, data=payload, headers=self._open_headers(sig_path))
         try:
             resp = self._urlopen_with_429_retry(req, timeout=20, path_for_error=sig_path)
@@ -835,14 +849,53 @@ class FoxESSClient:
                     logger.debug(
                         "Fox scheduler pre-read failed, uploading anyway: %s", e
                     )
-        payload = {
-            "deviceSN": self._sn_scheduler(),
-            "isDefault": bool(is_default),
-            "groups": [g.to_api_dict() for g in groups],
-        }
+        version, payload = self._scheduler_write_request(groups, is_default)
         self._gate_inter_write()
-        self._open_post_v3("/device/scheduler/enable", payload)
+        self._open_post_versioned(version, "/device/scheduler/enable", payload)
         self._stamp_write()
+
+    def _scheduler_write_request(
+        self, groups: list[SchedulerGroup], is_default: bool
+    ) -> tuple[str, dict]:
+        """``(version, payload)`` for the scheduler write (#777).
+
+        v3 takes ``isDefault`` and bare ``extraParam`` groups. v2 takes neither
+        ``isDefault`` nor a bare group — it requires the per-group ``enable``
+        flag, which is also what makes disabled leftovers visible on the v1/v2
+        reads (#778). Everything we upload is by definition an active group, so
+        ``enable`` is always 1 here.
+        """
+        from ..config import config as _config
+
+        version = (_config.FOX_SCHEDULER_WRITE_VERSION or "").strip().lower()
+        if version not in _SCHEDULER_WRITE_VERSIONS:
+            # A typo in .env must not silently POST to /op/<junk>/..., which
+            # 404s into an opaque `HTTP 404: <html>` that both callers only
+            # log — leaving the previous schedule live. That is precisely the
+            # 37 h failure mode this setting exists to end (#777).
+            logger.warning(
+                "FOX_SCHEDULER_WRITE_VERSION=%r is not one of %s — falling back to v2",
+                _config.FOX_SCHEDULER_WRITE_VERSION,
+                sorted(_SCHEDULER_WRITE_VERSIONS),
+            )
+            version = "v2"
+        sn = self._sn_scheduler()
+        if version == "v3":
+            return version, {
+                "deviceSN": sn,
+                "isDefault": bool(is_default),
+                "groups": [g.to_api_dict() for g in groups],
+            }
+        if is_default:
+            # v0/v1/v2 have no isDefault; say so rather than dropping it mute.
+            logger.warning(
+                "is_default=True ignored on the %s scheduler write (v3-only field)",
+                version,
+            )
+        return version, {
+            "deviceSN": sn,
+            "groups": [{**g.to_api_dict(), "enable": 1} for g in groups],
+        }
 
     def warn_if_scheduler_v3_mismatch(self, expected_groups: list[SchedulerGroup]) -> None:
         """After set_scheduler_v3, read hardware state and warn if group counts differ (#23)."""
