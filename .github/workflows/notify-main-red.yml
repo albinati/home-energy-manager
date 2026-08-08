@@ -11,6 +11,10 @@ name: Notify on main going red
 # doesn't get a red X for a missing credential it was never meant to have.
 
 on:
+  # Manually runnable so the wire can be proven without breaking main — the
+  # whole point of this workflow is that it fires on a day nobody is watching,
+  # which is the worst day to discover the credentials were never right.
+  workflow_dispatch:
   workflow_run:
     workflows: ["Tests", "Build and publish Docker image"]
     types: [completed]
@@ -21,18 +25,22 @@ permissions:
 
 jobs:
   notify:
-    # Only failures, and only on main — a green run is not news.
-    if: github.event.workflow_run.conclusion == 'failure'
+    # Real runs: only failures. Manual runs have no workflow_run payload, so
+    # they always proceed — that IS the test.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'failure'
     runs-on: ubuntu-latest
     steps:
       - name: Send Telegram alert
         env:
           TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          WF: ${{ github.event.workflow_run.name }}
-          SHA: ${{ github.event.workflow_run.head_sha }}
-          URL: ${{ github.event.workflow_run.html_url }}
-          MSG: ${{ github.event.workflow_run.head_commit.message }}
+          WF: ${{ github.event.workflow_run.name || 'TESTE MANUAL' }}
+          SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          URL: ${{ github.event.workflow_run.html_url || format('{0}/{1}/actions', github.server_url, github.repository) }}
+          MSG: ${{ github.event.workflow_run.head_commit.message || 'Verificação manual do alerta de CI — nada está quebrado.' }}
+          IS_TEST: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
           set -euo pipefail
           if [ -z "${TOKEN}" ] || [ -z "${CHAT_ID}" ]; then
@@ -42,8 +50,16 @@ jobs:
           fi
           # First line of the commit message only; the rest is noise on a phone.
           subject=$(printf '%s' "${MSG}" | head -1)
-          text=$(printf '🔴 <b>%s failed on main</b>\n<code>%s</code>\n%s\n\n%s' \
-                 "${WF}" "${SHA:0:8}" "${subject}" "${URL}")
+          # A manual run must be unmistakably a drill. Sending a red "failed on
+          # main" for a test would teach the reader to distrust the alert, which
+          # is the same end state as having no alert.
+          if [ "${IS_TEST}" = "true" ]; then
+            headline='🧪 teste do alerta de CI — nada quebrado'
+          else
+            headline="🔴 ${WF} falhou no main"
+          fi
+          text=$(printf '<b>%s</b>\n<code>%s</code>\n%s\n\n%s' \
+                 "${headline}" "${SHA:0:8}" "${subject}" "${URL}")
           code=$(curl -s -o /tmp/tg.out -w '%{http_code}' \
             --max-time 15 \
             -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
