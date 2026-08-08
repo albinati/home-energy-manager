@@ -1648,6 +1648,19 @@ class Config:
         os.getenv("DAIKIN_LWT_PREHEAT_DECONTAM_TAIL_BUCKETS", "1")
     )
 
+    # Which Open API version carries the scheduler WRITE (#777). Fox broke
+    # `/op/v3/device/scheduler/enable` for at least some devices on 2026-08-06:
+    # it returns `41200 Failed to load data` for any payload, including the
+    # byte-identical group set the same device accepted hours earlier, while
+    # v0/v1/v2 accept it and the v3 READ keeps working. Same account, same SN,
+    # same key, same signature — the route itself is the fault. Prod ran a
+    # 2-day-old single-group schedule for ~37 h before this was found.
+    # `v2` (default) sends `extraParam` groups plus the per-group `enable` flag
+    # v2 requires; `v3` restores the legacy route once FoxESS fixes it.
+    FOX_SCHEDULER_WRITE_VERSION: str = (
+        os.getenv("FOX_SCHEDULER_WRITE_VERSION") or "v2"
+    ).strip().lower()
+
     # PuLP MILP optimizer (V8)
     OPTIMIZER_BACKEND: str = (os.getenv("OPTIMIZER_BACKEND") or "lp").strip().lower()
     BATTERY_RT_EFFICIENCY: float = float(os.getenv("BATTERY_RT_EFFICIENCY", "0.92"))

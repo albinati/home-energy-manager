@@ -282,6 +282,25 @@ Full deploy (token mint + smoke test) + ESPHome YAML skeleton: `deploy/README.md
 ## Key `.env` settings to know
 
 ```
+FOX_SCHEDULER_WRITE_VERSION=v2                  # Open API version for the scheduler WRITE (#777).
+                                                 # On 2026-08-06 Fox broke `/op/v3/device/scheduler/enable`
+                                                 # for this device: it returns `41200 Failed to load data`
+                                                 # for EVERY payload — including the byte-identical group
+                                                 # set the same device had accepted hours earlier — while
+                                                 # `/op/v0`, `/op/v1` and `/op/v2` all accept it and the v3
+                                                 # READ keeps working. Same account, SN, key and signature,
+                                                 # so the route itself is the fault; a bogus v3 path returns
+                                                 # HTML/404, not 41200, so the endpoint is reached. Nothing
+                                                 # changed on our side (container up 13 days, 0 restarts).
+                                                 # COST: each failed upload silently leaves the PREVIOUS
+                                                 # schedule live, so prod ran a 2-day-old single-group
+                                                 # schedule for ~37 h and lost a whole negative-price window
+                                                 # (-4.2 p/kWh) with the battery at 16 %.
+                                                 # v2 differs from v3 in the body: no `isDefault`, and a
+                                                 # per-group `enable: 1`. Precedent: Fox broke the same
+                                                 # endpoint with the same errno on 2024-09-13 and fixed it
+                                                 # server-side on 2024-09-18. Set `v3` to go back once they
+                                                 # fix it. Reads + the v0 flag write are untouched.
 DAIKIN_TOKEN_FILE=/app/data/.daikin-tokens.json # absolute inside container; compose pins it
 DAIKIN_HTTP_429_MAX_RETRIES=0                   # fail fast on rate limit — do not remove
 OPENCLAW_READ_ONLY=false                        # the ONLY hardware-write kill switch (true = safe/dev)

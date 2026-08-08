@@ -57,6 +57,7 @@ class _CaptureClient:
     def __init__(self, current: list[SchedulerGroup]):
         self._current = current
         self.post_calls: list[tuple[str, dict]] = []
+        self.post_versions: list[str] = []
 
     def _sn_scheduler(self) -> str:
         return "TEST-SN"
@@ -64,7 +65,12 @@ class _CaptureClient:
     def get_scheduler_v3(self) -> SchedulerState:
         return SchedulerState(enabled=True, groups=list(self._current))
 
-    def _open_post_v3(self, path: str, payload: dict) -> None:
+    # Borrow the real payload/route builder so these idempotency tests keep
+    # exercising the shipped body shape rather than a stub's idea of it (#777).
+    _scheduler_write_request = FoxESSClient._scheduler_write_request
+
+    def _open_post_versioned(self, version: str, path: str, payload: dict) -> None:
+        self.post_versions.append(version)
         self.post_calls.append((path, payload))
 
     # Shims for the inter-write gate added alongside 429 retry — tests don't
