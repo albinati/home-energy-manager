@@ -45,6 +45,22 @@ class BackfillResult:
     error: str | None = None
 
 
+#: #795 — fraction of a local day's half-hour slots that must come back before
+#: the day counts as published. Mirrors ``db.METER_PUBLISHED_COVERAGE_MIN``.
+PUBLISHED_COVERAGE_MIN = 0.9
+
+
+def _expected_slot_count(period_from: datetime, period_to: datetime) -> int:
+    """Half-hour slots in ``[period_from, period_to)``.
+
+    Derived from the window rather than hard-coded to 48, so the DST days
+    (46 and 50 slots) are judged against their own length instead of reading
+    as 96 % and 104 % coverage.
+    """
+    seconds = (period_to - period_from).total_seconds()
+    return max(0, int(round(seconds / 1800.0)))
+
+
 def _octopus_credentials_ready() -> bool:
     return bool(
         getattr(config, "OCTOPUS_API_KEY", None)
@@ -163,30 +179,51 @@ def backfill_for_date(target_local_date: date) -> BackfillResult:
         except Exception as e:
             logger.debug("Octopus export fetch failed (non-fatal): %s", e)
 
-    # Don't cache obviously-not-yet-published days. Octopus sometimes returns
-    # slot rows whose values are all zero (or near-zero) before the meter
-    # readings have propagated through their pipeline. Writing those zeros
-    # to ``octopus_daily_meter`` makes the brief's Fox-vs-meter audit line
-    # render absurd disparities like "+32546%". A real household never uses
-    # less than ~0.5 kWh/day, so a sum under that floor is the "no data yet"
-    # signal — skip the upsert and let the next backfill run re-attempt.
-    PUBLISHED_FLOOR_KWH = 0.5
-    if import_total is None or import_total < PUBLISHED_FLOOR_KWH:
-        # ``None`` (empty fetch — meter comms down / nothing published) must
-        # be skipped too: writing a NULL-import row every night would advance
-        # MAX(date) and mute the staleness alarm (#533) in exactly the
-        # outage scenario it exists for.
+    # Don't cache not-yet-published days. Octopus sometimes returns a partial
+    # day, or slot rows whose values are all zero, before the meter readings
+    # have propagated through their pipeline. Writing those to
+    # ``octopus_daily_meter`` makes the brief's Fox-vs-meter audit line render
+    # absurd disparities like "+32546%", and advances the freshness cursor so
+    # the staleness alarm (#533) goes quiet in exactly the outage it exists
+    # for.
+    #
+    # #795 — judge that by COVERAGE, not by energy. The old rule was
+    # ``import_total >= 0.5 kWh``, on the premise that "a real household never
+    # uses less than ~0.5 kWh/day". False for a solar house with a battery and
+    # nobody home: prod imported 0.257-0.354 kWh/day on 2026-08-19..21 with a
+    # COMPLETE 49-slot fetch each day (Fox independently agreed: 0.18-0.30),
+    # and all three real days were discarded — cockpit read "meter stale, 5
+    # days" and the PnL fell back to CT-clamp estimates. The better the house
+    # performs, the more days that heuristic throws away.
+    #
+    # An unpublished day is short (2026-08-22 came back with 3 slots); a
+    # published day is complete however little energy flowed. The ``> 0``
+    # guard still rejects the all-zeros pre-propagation case.
+    expected_slots = _expected_slot_count(period_from, period_to)
+    coverage = (len(slots) / expected_slots) if expected_slots else 0.0
+    published = (
+        import_total is not None
+        and import_total > 0.0
+        and coverage >= PUBLISHED_COVERAGE_MIN
+    )
+    if not published:
+        # ``None`` (empty fetch — meter comms down / nothing published) lands
+        # here too, and must: writing a NULL-import row every night would
+        # advance MAX(date) and mute the alarm.
         logger.info(
-            "consumption_backfill: date=%s import_total=%s kWh below "
-            "%.1f kWh floor — Octopus not yet published; skipping daily-meter upsert",
+            "consumption_backfill: date=%s not published yet "
+            "(import_total=%s kWh, coverage=%d/%d = %.0f%%, need %.0f%%) — "
+            "skipping daily-meter upsert",
             iso,
             "none" if import_total is None else f"{import_total:.3f}",
-            PUBLISHED_FLOOR_KWH,
+            len(slots), expected_slots, coverage * 100.0,
+            PUBLISHED_COVERAGE_MIN * 100.0,
         )
     else:
         try:
             db.upsert_octopus_daily_meter(
-                iso, import_kwh=import_total, export_kwh=export_total
+                iso, import_kwh=import_total, export_kwh=export_total,
+                slots_fetched=len(slots), slots_expected=expected_slots,
             )
         except Exception as e:
             logger.warning("octopus_daily_meter upsert failed (non-fatal): %s", e)
@@ -211,7 +248,7 @@ def _day_needs_backfill(target_local_date: date, tz: ZoneInfo) -> bool:
     completed reconciliation is missing:
 
     * no ``octopus_daily_meter`` row (the day's totals were never cached —
-      includes the ``PUBLISHED_FLOOR_KWH`` "not yet published" skip), or
+      includes the ``PUBLISHED_COVERAGE_MIN`` "not yet published" skip), or
     * fewer than ``CONSUMPTION_BACKFILL_MIN_METERED_SLOTS`` execution_log
       rows carry metered truth (a partial publish was caught mid-flight).
     """
