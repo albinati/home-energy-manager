@@ -94,3 +94,33 @@ def _default_legionella_standoff_off_for_tests(monkeypatch):
     monkeypatch.setattr(
         "src.config.config.DHW_LEGIONELLA_STANDOFF_ENABLED", False, raising=False,
     )
+
+
+@pytest.hookimpl(hookwrapper=True, trylast=True)
+def pytest_runtest_teardown(item, nextitem):
+    """No test may leak an entry in ``Config._overrides`` (#790).
+
+    ``_overrides`` is CLASS-level state on the config singleton, and
+    ``Config._rt_get`` short-circuits on it before ``runtime_settings`` is ever
+    consulted. A key written there is pinned for the rest of the *process* —
+    which for pytest means the rest of the *session*.
+
+    ``monkeypatch.setattr(config, SOME_RUNTIME_KNOB, ...)`` does not save you:
+    every runtime-tunable knob is a property, so both the set and the undo go
+    through the setter and land in ``_overrides``. The undo restores the value
+    but not the shadow, and every later test reads the pinned value instead of
+    its own env/DB default.
+
+    This is a teardown HOOK rather than an autouse fixture on purpose: a
+    fixture finalises before ``monkeypatch`` undoes, so it would clean up and
+    then be immediately re-poisoned by the undo. A ``trylast`` hookwrapper
+    resumes after all fixture finalisers have run, which is the only point
+    where the dict is actually settled.
+
+    The same failure mode bit production for two days (#790) — this is the
+    test-side half of that fix.
+    """
+    yield
+    from src.config import config
+    for key in list(config.override_items()):
+        config.clear_override(key)

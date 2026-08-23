@@ -321,17 +321,44 @@ def patched_config(overrides: dict[str, Any]) -> Iterator[dict[str, Any]]:
     actually changed. On exit (or exception) every prior value is restored.
     """
     prior: dict[str, Any] = {}
+    # #790 — restoring by ``setattr`` is what poisoned prod for two days.
+    # Every runtime-tunable key is a property whose setter writes into
+    # ``Config._overrides``, and an entry there shadows the DB for the LIFE OF
+    # THE PROCESS. So "put the old value back" pins the key just as hard as
+    # setting a new one: the next UI write lands in SQLite, `get_setting` is
+    # never consulted again, and the running system quietly disagrees with its
+    # own database. (2026-08-21..23: a what-if here left OPTIMIZATION_PRESET
+    # pinned to ``vacation``; the LP ignored the UI's ``normal`` for two days,
+    # drained the battery to 7 %, and tripped the #789 Infeasible cascade.)
+    #
+    # So undo exactly what we did. Not every whitelisted key is a
+    # runtime-tunable property — some are plain dataclass attributes, where
+    # ``setattr`` writes the instance attribute and clearing an override would
+    # leave the PATCHED value in place. Distinguish by checking whether the
+    # write actually landed in ``_overrides``:
+    #   * landed there, and nothing was shadowing it before → clear it, so
+    #     reads fall back to the DB (and future UI writes are seen again);
+    #   * landed there, and something WAS shadowing it → restore that value;
+    #   * plain attribute → restore by assignment, as before.
+    clear_on_exit: set[str] = set()
     try:
         for key, value in overrides.items():
             spec = WHITELIST.get(key)
             if spec is None or not hasattr(config, spec.config_attr):
                 continue
-            prior[spec.config_attr] = getattr(config, spec.config_attr)
-            setattr(config, spec.config_attr, value)
+            attr = spec.config_attr
+            prior[attr] = getattr(config, attr)
+            shadowed_before = config.has_override(attr)
+            setattr(config, attr, value)
+            if config.has_override(attr) and not shadowed_before:
+                clear_on_exit.add(attr)
         yield prior
     finally:
         for attr, val in prior.items():
-            setattr(config, attr, val)
+            if attr in clear_on_exit:
+                config.clear_override(attr)
+            else:
+                setattr(config, attr, val)
 
 
 def schema_for_response() -> list[dict[str, Any]]:

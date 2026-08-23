@@ -2220,6 +2220,33 @@ class Config:
     def _rt_set(self, key: str, value: Any) -> None:
         self._overrides[key] = value
 
+    # -- Override lifecycle (#790) --------------------------------------------
+    # An entry in ``_overrides`` shadows the DB for the LIFE OF THE PROCESS:
+    # ``_rt_get`` short-circuits before ``get_setting`` is ever consulted, so
+    # the 30-sec TTL cache that is supposed to make a UI write land within 30 s
+    # is bypassed entirely. Anything that patches config temporarily MUST clear
+    # the key rather than "restore" it by assignment — re-setting the prior
+    # value pins it just as hard as setting a new one.
+    #
+    # Prod, 2026-08-21..23: a Workbench what-if left OPTIMIZATION_PRESET pinned
+    # to ``vacation``. The UI wrote ``normal``, the DB and .env both said
+    # ``normal``, and the LP solved as ``vacation`` for two days — draining the
+    # battery to 7 % via vacation-only peak_export arbitrage, which then tripped
+    # the #789 Infeasible cascade. Only a restart cleared it.
+
+    def has_override(self, key: str) -> bool:
+        """True when ``key`` is currently shadowed by an in-memory override."""
+        return key in self._overrides
+
+    def clear_override(self, key: str) -> None:
+        """Drop the in-memory override for ``key`` so reads fall back to the
+        DB / env default again. No-op when there is none."""
+        self._overrides.pop(key, None)
+
+    def override_items(self) -> dict[str, Any]:
+        """Snapshot of every in-memory override — for divergence reporting."""
+        return dict(self._overrides)
+
     @property
     def WEATHER_LAT(self) -> str:
         return str(self._rt_get("WEATHER_LAT"))
