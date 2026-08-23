@@ -974,6 +974,7 @@ def _evaluate_lp_health(
     floor_slack_max_kwh: float = 0.0,
     floor_insurance_thr_pence: float = 150.0,
     floor_slack_thr_kwh: float = 0.3,
+    shadowed: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     """Pure regression check for the LP health monitor. Returns a list of issue
     strings (empty = healthy). Covers an LP-infeasible spike, the #607
@@ -1005,6 +1006,16 @@ def _evaluate_lp_health(
         issues.append(
             f"charge floor pessimista com slack máx {floor_slack_max_kwh:.2f} kWh em 24h "
             f"(limite {floor_slack_thr_kwh:.2f}) — floor inatingível, inputs pess/nominal divergindo"
+        )
+    # #790 — an in-memory override shadowing a DIFFERENT persisted value means
+    # the running system is ignoring what the UI/DB says, silently and for the
+    # life of the process. That is how prod solved as `vacation` for two days
+    # after the operator set `normal`. Only a restart clears it.
+    for row in (shadowed or []):
+        issues.append(
+            f"config {row['key']} preso em {row['in_memory']!r} na memória do processo "
+            f"mas o banco diz {row['persisted']!r} — a UI está sendo ignorada; "
+            f"`systemctl restart hem` resolve (#790)"
         )
     return issues
 
@@ -1064,7 +1075,13 @@ def bulletproof_lp_health_monitor_job() -> None:
             for slot_iso, kwh in disch.items():
                 if str(slot_iso)[11:16] in neg_slots:
                     neg_discharge += float(kwh or 0.0)
+        try:
+            from ..runtime_settings import shadowed_settings
+            shadowed = shadowed_settings()
+        except Exception:  # pragma: no cover - defensive: never break the check
+            shadowed = []
         issues = _evaluate_lp_health(
+            shadowed=shadowed,
             infeasible_24h=int(infeasible_24h),
             neg_slot_count=len(neg_slots),
             neg_discharge_kwh=neg_discharge,

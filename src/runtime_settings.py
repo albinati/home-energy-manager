@@ -1079,3 +1079,63 @@ def clear_cache() -> None:
     with _lock:
         _version += 1
         _cache.clear()
+
+
+def shadowed_settings() -> list[dict[str, Any]]:
+    """#790 — runtime keys whose IN-MEMORY override disagrees with the DB.
+
+    ``Config._overrides`` short-circuits ``_rt_get`` before this module is ever
+    consulted, so such a key is frozen for the life of the process: the UI
+    writes SQLite, ``PUT /api/v1/settings`` reports success, and the running
+    system keeps using the stale value with nothing in the logs. That is
+    exactly how prod solved as ``vacation`` for two days after the operator set
+    ``normal`` (2026-08-21..23) — the missing signal, not the missing fix.
+
+    Returns one dict per divergence: ``{key, in_memory, persisted}``. Empty
+    list = every override agrees with what is stored (or there are none).
+    Read-only and defensive — never raises.
+    """
+    from .config import config
+
+    out: list[dict[str, Any]] = []
+    try:
+        overrides = config.override_items()
+    except Exception:  # pragma: no cover - defensive
+        return out
+    for key, in_memory in overrides.items():
+        if key not in SCHEMA:
+            continue
+        try:
+            persisted = _read_persisted_or_default(key)
+        except Exception:  # pragma: no cover - defensive
+            continue
+        if str(in_memory) != str(persisted):
+            out.append({
+                "key": key,
+                "in_memory": in_memory,
+                "persisted": persisted,
+            })
+    return out
+
+
+def _read_persisted_or_default(key: str) -> Any:
+    """The value ``get_setting`` WOULD return if no in-memory override existed.
+
+    Deliberately bypasses both the override dict and the TTL cache — the point
+    is to compare against the source of truth, not against another cache.
+    Mirrors ``get_setting``'s coercion + legacy-value translation so a stored
+    ``travel`` does not read as a divergence from an in-memory ``vacation``.
+    """
+    spec = SCHEMA[key]
+    raw = db.get_runtime_setting(key)
+    if raw is None:
+        value = spec.env_default()
+    else:
+        try:
+            value = _coerce(spec, raw)
+        except Exception:
+            value = spec.env_default()
+    translators = _LEGACY_VALUE_TRANSLATORS.get(key)
+    if translators and isinstance(value, str) and value in translators:
+        value = translators[value]
+    return value
