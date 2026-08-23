@@ -1374,15 +1374,6 @@ def solve_lp(
         if export_rate_line[i] < 0:
             prob += exp[i] == 0
 
-    # Pessimistic-scenario charge floor (2026-07-02 LP audit, newsvendor).
-    # ``soc_floor_kwh[i]`` is the pessimistic solve's end-of-slot-i SoC: the
-    # charge level an optimal plan holds when load lands at p75, temp −1.5 °C
-    # and PV ×0.85. Enforcing it SOFT (slack + steep penalty) on the committed
-    # plan buys insurance against the measured empty-battery-at-peak evenings
-    # (14 nights in June 2026) while never risking an Infeasible — the floor
-    # is reachable by construction (the pessimistic trajectory starts from the
-    # same initial state under strictly worse inputs), but odd runtime inputs
-    # must degrade to "floor ignored + logged", not a failed solve.
     # #789 — soft reserve floor for a below-reserve start (see the
     # ``soc_starts_below_reserve`` comment at the variable declaration).
     # Applied to soc[1..n]: soc[0] is the measurement and stays free.
@@ -1393,6 +1384,15 @@ def solve_lp(
             socreserve_slack[i] = sl
             prob += soc[i] + sl >= soc_min
 
+    # Pessimistic-scenario charge floor (2026-07-02 LP audit, newsvendor).
+    # ``soc_floor_kwh[i]`` is the pessimistic solve's end-of-slot-i SoC: the
+    # charge level an optimal plan holds when load lands at p75, temp −1.5 °C
+    # and PV ×0.85. Enforcing it SOFT (slack + steep penalty) on the committed
+    # plan buys insurance against the measured empty-battery-at-peak evenings
+    # (14 nights in June 2026) while never risking an Infeasible — the floor
+    # is reachable by construction (the pessimistic trajectory starts from the
+    # same initial state under strictly worse inputs), but odd runtime inputs
+    # must degrade to "floor ignored + logged", not a failed solve.
     socfloor_slack: dict[int, Any] = {}
     if soc_floor_kwh is not None:
         floor_pen = float(getattr(config, "LP_PESS_CHARGE_FLOOR_SLACK_PENALTY_PENCE", 50.0))

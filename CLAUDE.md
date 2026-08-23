@@ -443,6 +443,26 @@ LP_PESS_CHARGE_FLOOR_ENABLED=true                # PR B (2026-07-02 audit) — n
 LP_PESS_CHARGE_FLOOR_TOLERANCE_KWH=0.2           # subtracted from the pessimistic SoC before flooring
 LP_PESS_CHARGE_FLOOR_HOURS=24                    # floor only the first N horizon hours (rest is replanned)
 LP_PESS_CHARGE_FLOOR_SLACK_PENALTY_PENCE=50.0    # slack penalty — floor behaves hard, can't go Infeasible
+LP_SOC_RESERVE_RECOVERY_SLACK_PENALTY_PENCE=50.0 # #789 — when realtime SoC starts BELOW
+                                                 # MIN_SOC_RESERVE_PERCENT, the forward reserve floor on
+                                                 # soc[1..n] is solved SOFT at this rate (p per kWh of
+                                                 # shortfall, per slot) instead of as a hard variable bound.
+                                                 # #338/#339 relaxed soc[0] for the hard `soc[0] == measured`
+                                                 # equality but left soc[1..n] hard — so the LP had to lift the
+                                                 # battery over the reserve INSIDE the first 30-min slot, which
+                                                 # the plunge-prep rule and the PV-sufficiency guard both make
+                                                 # impossible at night (`chg[i] <= pv_use[i]`, pv=0). Result:
+                                                 # 9 Infeasibles on 2026-08-22 20:22-23:05 UTC, held schedule
+                                                 # ~3 h. Over 60 days: 0 Infeasible in 1732 solves starting
+                                                 # at/above the reserve, 10 in 26 starting below it.
+                                                 # A solve starting at/above the reserve is BIT-FOR-BIT
+                                                 # unchanged — the relaxation only engages below it, and the
+                                                 # penalty is far above any price spread so the floor still
+                                                 # behaves hard whenever it is reachable. 0 = no penalty (the
+                                                 # relaxation itself is unconditional: an Infeasible solve is
+                                                 # never the safer outcome). Telemetry: `soc_reserve_recovery`
+                                                 # in lp_inputs_snapshot.exogenous_snapshot_json, written ONLY
+                                                 # when it fires, so the key's presence is the query.
 LP_PEAK_EXPORT_PESSIMISTIC_FLOOR_KWH=0.30        # commit peak_export only when pessimistic exports ≥ this
 LP_SCENARIOS_ON_TRIGGER_REASONS=plan_push,octopus_fetch,tier_boundary,soc_drift,import_overshoot,pv_upside,pv_downside,load_upside,forecast_revision,dynamic_replan,appliance_armed
                                                  # which triggers run the 3-pass solve. #668 added the
