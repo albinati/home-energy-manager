@@ -368,6 +368,19 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     if shadow_cols and "terminal_credit_p" not in shadow_cols:
         conn.execute("ALTER TABLE dhw_lp_shadow_log ADD COLUMN terminal_credit_p REAL")
 
+    # #795 (2026-08-23) — record how COMPLETE the Octopus fetch was when the
+    # daily-meter row was written, so "was this day published?" is a recorded
+    # fact instead of a threshold re-applied at read time. The old proxy was
+    # `import_kwh >= 0.5`, which discards genuinely low-import days: prod
+    # imported 0.257-0.354 kWh/day on 2026-08-19..21 (Fox agreed) and three
+    # real days were dropped. NULL on pre-migration rows keeps the legacy
+    # reading, so the 2026-05-09..20 garbage rows stay excluded.
+    odm_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(octopus_daily_meter)")}
+    if odm_cols and "slots_fetched" not in odm_cols:
+        conn.execute("ALTER TABLE octopus_daily_meter ADD COLUMN slots_fetched INTEGER")
+    if odm_cols and "slots_expected" not in odm_cols:
+        conn.execute("ALTER TABLE octopus_daily_meter ADD COLUMN slots_expected INTEGER")
+
     # 2026-07-02 LP audit — side scenarios now perturb PV too; record the factor
     # so scenario_solve_log rows stay auditable. NULL on pre-migration rows = 1.0.
     ssl_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(scenario_solve_log)")}
@@ -437,7 +450,9 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             date TEXT PRIMARY KEY,
             import_kwh REAL,
             export_kwh REAL,
-            fetched_at TEXT NOT NULL
+            fetched_at TEXT NOT NULL,
+            slots_fetched INTEGER,
+            slots_expected INTEGER
         )"""
     )
 
@@ -4660,12 +4675,20 @@ def upsert_octopus_daily_meter(
     *,
     import_kwh: float | None,
     export_kwh: float | None,
+    slots_fetched: int | None = None,
+    slots_expected: int | None = None,
 ) -> None:
     """Cache Octopus smart-meter daily totals (one row per local date).
 
     Both kWh args are nullable — export is None for households without an
     Outgoing tariff. ``fetched_at`` is set to UTC now on every call so
     callers can detect stale rows.
+
+    ``slots_fetched`` / ``slots_expected`` (#795) record how complete the
+    fetch was, so ``get_octopus_meter_last_day`` can ask "was this day
+    published?" instead of inferring it from the energy total — which
+    discards genuinely low-import days. Omit them and the row reads as
+    legacy (NULL), keeping the old energy-based reading.
     """
     now = datetime.now(UTC).isoformat()
     with _lock:
@@ -4673,13 +4696,17 @@ def upsert_octopus_daily_meter(
         try:
             conn.execute(
                 """INSERT INTO octopus_daily_meter
-                   (date, import_kwh, export_kwh, fetched_at)
-                   VALUES (?, ?, ?, ?)
+                   (date, import_kwh, export_kwh, fetched_at,
+                    slots_fetched, slots_expected)
+                   VALUES (?, ?, ?, ?, ?, ?)
                    ON CONFLICT(date) DO UPDATE SET
                      import_kwh = excluded.import_kwh,
                      export_kwh = excluded.export_kwh,
-                     fetched_at = excluded.fetched_at""",
-                (date_str, import_kwh, export_kwh, now),
+                     fetched_at = excluded.fetched_at,
+                     slots_fetched = excluded.slots_fetched,
+                     slots_expected = excluded.slots_expected""",
+                (date_str, import_kwh, export_kwh, now,
+                 slots_fetched, slots_expected),
             )
             conn.commit()
         finally:
@@ -4704,24 +4731,52 @@ def get_octopus_daily_meter(date_str: str) -> dict[str, Any] | None:
             conn.close()
 
 
-def get_octopus_meter_last_day() -> str | None:
-    """Most recent local date with a PLAUSIBLE cached Octopus daily-meter
-    row (import ≥ 0.5 kWh), or None.
+#: #795 — a day counts as published when this fraction of its half-hour slots
+#: came back. Mirrors ``consumption_backfill.PUBLISHED_COVERAGE_MIN``.
+METER_PUBLISHED_COVERAGE_MIN = 0.9
 
-    Drives the brief's meter-staleness warning (#533): when this lags today
-    by more than ``CONSUMPTION_METER_STALE_DAYS`` the PnL has silently been
-    running on Fox CT-clamp data alone. The plausibility filter matters:
-    during a meter outage Octopus can yield NULL-import rows (empty fetch)
-    or near-zero garbage rows (pre-floor legacy data, e.g. 2026-05-09..20) —
-    counting those would advance MAX(date) daily and mute the alarm in
-    exactly the failure mode it exists for. 0.5 kWh mirrors
-    PUBLISHED_FLOOR_KWH in the backfill.
+#: Legacy plausibility floor, applied ONLY to pre-migration rows that carry no
+#: coverage stamp. Kept so the known garbage rows (2026-05-09..20) stay
+#: excluded; never applied to rows written after #795.
+METER_LEGACY_PLAUSIBLE_IMPORT_KWH = 0.5
+
+
+def get_octopus_meter_last_day() -> str | None:
+    """Most recent local date with a PUBLISHED cached Octopus daily-meter row.
+
+    Drives the brief's meter-staleness warning (#533): when this lags today by
+    more than ``CONSUMPTION_METER_STALE_DAYS`` the PnL has silently been
+    running on Fox CT-clamp data alone. So the filter has to exclude days
+    Octopus had not published yet — during a meter outage Octopus yields
+    NULL-import rows (empty fetch) or near-zero garbage, and counting those
+    would advance MAX(date) daily and mute the alarm in exactly the failure
+    mode it exists for.
+
+    #795: that used to be judged by energy (``import_kwh >= 0.5``), on the
+    premise that a real household never uses less than ~0.5 kWh/day. False for
+    a solar house with a battery and nobody home — prod imported 0.257-0.354
+    kWh/day on 2026-08-19..21 (Fox independently agreed), so three complete,
+    real days were discarded and the cockpit read "meter stale, 5 days".
+
+    Coverage is the honest discriminator: an unpublished day comes back with
+    few or no slots, a published one comes back complete however little energy
+    flowed. Rows written since #795 carry that stamp; older rows have no stamp
+    and fall back to the legacy energy floor.
     """
     with _lock:
         conn = get_connection()
         try:
             cur = conn.execute(
-                "SELECT MAX(date) AS d FROM octopus_daily_meter WHERE import_kwh >= 0.5"
+                """SELECT MAX(date) AS d FROM octopus_daily_meter
+                   WHERE (
+                       slots_expected IS NOT NULL AND slots_expected > 0
+                       AND slots_fetched IS NOT NULL
+                       AND (CAST(slots_fetched AS REAL) / slots_expected) >= ?
+                       AND import_kwh IS NOT NULL AND import_kwh > 0
+                   ) OR (
+                       slots_expected IS NULL AND import_kwh >= ?
+                   )""",
+                (METER_PUBLISHED_COVERAGE_MIN, METER_LEGACY_PLAUSIBLE_IMPORT_KWH),
             )
             r = cur.fetchone()
             return r["d"] if r and r["d"] else None
