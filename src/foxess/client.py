@@ -22,7 +22,14 @@ import urllib.error
 import urllib.request
 from datetime import date, datetime
 
-from .models import ChargePeriod, DeviceInfo, RealTimeData, SchedulerGroup, SchedulerState
+from .models import (
+    ChargePeriod,
+    DeviceInfo,
+    RealTimeData,
+    SchedulerGroup,
+    SchedulerState,
+    fingerprints_match,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -855,7 +862,14 @@ class FoxESSClient:
                     current = self.get_scheduler_v3()
                     new_fp = [g.fingerprint() for g in groups]
                     cur_fp = [g.fingerprint() for g in (current.groups or [])]
-                    if new_fp == cur_fp:
+                    # #797 — ``fingerprints_match``, not ``==``: a field we did
+                    # not specify (maxSoc) must not count as a difference just
+                    # because the inverter echoes something back for it. Plain
+                    # equality made this short-circuit UNREACHABLE for any
+                    # ForceCharge group without an explicit maxSoc, so every
+                    # replan re-uploaded — quota burned on the write endpoint
+                    # #777 showed is fragile.
+                    if fingerprints_match(new_fp, cur_fp):
                         logger.info(
                             "Fox scheduler unchanged (%d groups) — skipping upload",
                             len(groups),

@@ -33,9 +33,46 @@ def _group_fingerprint(
         int(min_soc_on_grid) if min_soc_on_grid is not None else None,
         _f(fd_soc) if fd_relevant else None,
         _f(fd_pwr) if fd_relevant else None,
-        # Absent maxSoc == the vendor default 100 (Fox fills it on read-back).
-        100.0 if max_soc is None else _f(max_soc),
+        # #797 — ``None`` means UNSPECIFIED, and stays None. This used to be
+        # canonicalised to 100.0 ("the vendor default Fox fills in on
+        # read-back"), which was a guess about the vendor — and this device
+        # disproves it: it echoes 10 (= minSocOnGrid) on a ForceCharge group
+        # that omitted maxSoc, not 100. Compare with :func:`fingerprints_match`,
+        # which treats an unspecified desired value as a wildcard instead.
+        _f(max_soc),
     )
+
+
+#: Index of the ``maxSoc`` slot in a group fingerprint tuple.
+_FP_MAX_SOC_IDX = 8
+
+
+def fingerprint_matches(desired: tuple, live: tuple) -> bool:
+    """Does the inverter's ``live`` group already satisfy our ``desired`` one?
+
+    Equality on every slot, except that an UNSPECIFIED (``None``) ``maxSoc`` on
+    the DESIRED side is a wildcard: we sent no maxSoc, so whatever the inverter
+    echoes back cannot contradict our intent (#797).
+
+    Deliberately asymmetric — ``desired`` is what we are about to send (or the
+    intent we recorded), ``live`` is what the hardware reports. Passing them
+    the wrong way round would let a *dropped* maxSoc read as a match.
+    """
+    if len(desired) != len(live):
+        return False
+    for i, (d, lv) in enumerate(zip(desired, live, strict=True)):
+        if i == _FP_MAX_SOC_IDX and d is None:
+            continue
+        if d != lv:
+            return False
+    return True
+
+
+def fingerprints_match(desired: list[tuple], live: list[tuple]) -> bool:
+    """Ordered, pairwise :func:`fingerprint_matches` over two group lists."""
+    if len(desired) != len(live):
+        return False
+    return all(fingerprint_matches(d, lv) for d, lv in zip(desired, live, strict=True))
 
 
 @dataclass

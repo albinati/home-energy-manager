@@ -170,11 +170,18 @@ async def _fox_drift_block() -> dict[str, Any]:
         try:
             from .dispatch import get_foxess_schedule_diff
             diff = await get_foxess_schedule_diff()
-            # Contract: schedule_diff returns {"diffs": {"only_live": [...],
-            # "only_recorded": [...]}} — review HIGH on #553 caught this
-            # reading a nonexistent "differences" key (count was always 0).
+            # Contract: schedule_diff returns {"diffs": {"changed": [...],
+            # "only_live": [...], "only_recorded": [...]}} — review HIGH on
+            # #553 caught this reading a nonexistent "differences" key (count
+            # was always 0). #797 added "changed": a group both sides agree
+            # exists whose FIELDS differ. It must be counted here or a real
+            # field drift renders as "in sync" — the #553 bug again, inverted.
             diffs = diff.get("diffs") or {}
-            n_diff = len(diffs.get("only_live") or []) + len(diffs.get("only_recorded") or [])
+            n_diff = (
+                len(diffs.get("only_live") or [])
+                + len(diffs.get("only_recorded") or [])
+                + len(diffs.get("changed") or [])
+            )
             live_error = diff.get("live_error")
             # A failed live read makes the structural comparison meaningless
             # (empty live vs recorded reads as "drift") — report UNKNOWN

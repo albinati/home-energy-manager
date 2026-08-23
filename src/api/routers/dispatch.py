@@ -284,34 +284,70 @@ async def get_foxess_schedule_diff() -> dict[str, Any]:
 
     rec_norm = [_normalise_group(g) for g in recorded_groups]
 
-    # Compare on a MODE-AWARE fingerprint. Naive field-by-field comparison
-    # produced permanent false drift on the very first consumer (the status
-    # alert strip, 2026-06-12): Fox echoes vendor DEFAULTS for fields the
-    # upload omitted — max_soc None comes back as 100, and Backup/SelfUse
-    # groups return whatever fd_soc/fd_pwr were last set even though those
-    # fields are meaningless outside ForceDischarge. Canonicalise both
-    # sides: fd_* compared only on ForceDischarge; absent max_soc == the
-    # vendor default 100.
-    def _fp(g: dict[str, Any]) -> tuple:
+    # Compare MODE-AWARE. Naive field-by-field comparison produced permanent
+    # false drift on the very first consumer (the status alert strip,
+    # 2026-06-12): Fox echoes vendor values for fields the upload omitted —
+    # Backup/SelfUse groups return whatever fd_soc/fd_pwr were last set even
+    # though those fields are meaningless outside Force* modes.
+    #
+    # #797 — and maxSoc is the same class, but the old fix GUESSED the vendor's
+    # default ("absent max_soc == 100"). This device disproves the guess: it
+    # echoes 10 (= minSocOnGrid) on a ForceCharge group that omitted maxSoc.
+    # The result was a permanent false "drift (2)" in the cockpit — one group,
+    # counted once in each direction. Use the invariant we actually control
+    # instead: a field we never specified expresses no intent, so whatever the
+    # inverter reports for it cannot contradict us.
+    def _key(g: dict[str, Any]) -> tuple:
+        """Group identity: the clock window plus the mode."""
+        return (g.get("start"), g.get("end"), g.get("work_mode"))
+
+    def _fields(g: dict[str, Any]) -> dict[str, Any]:
+        """The fields worth comparing, canonicalised. ``None`` = unspecified."""
         mode = g.get("work_mode")
         # fdSoc/fdPwr are used by ForceCharge AND ForceDischarge — #554 only
         # kept ForceDischarge, which would miss a real ForceCharge target change.
         fd_relevant = mode in ("ForceCharge", "ForceDischarge")
-        max_soc = g.get("max_soc")
-        return (
-            g.get("start"), g.get("end"), mode,
-            g.get("min_soc_on_grid"),
-            float(g["fd_soc"]) if fd_relevant and g.get("fd_soc") is not None else None,
-            float(g["fd_pwr"]) if fd_relevant and g.get("fd_pwr") is not None else None,
-            100.0 if max_soc is None else float(max_soc),
-        )
 
-    live_fps = {_fp(g) for g in live_groups}
-    rec_fps = {_fp(g) for g in rec_norm}
-    only_live = [g for g in live_groups if _fp(g) not in rec_fps]
-    only_recorded = [g for g in rec_norm if _fp(g) not in live_fps]
+        def _f(v: Any) -> float | None:
+            return None if v is None else float(v)
 
-    any_drift = bool(only_live or only_recorded)
+        return {
+            "min_soc_on_grid": _f(g.get("min_soc_on_grid")),
+            "fd_soc": _f(g.get("fd_soc")) if fd_relevant else None,
+            "fd_pwr": _f(g.get("fd_pwr")) if fd_relevant else None,
+            "max_soc": _f(g.get("max_soc")),
+        }
+
+    live_by_key = {_key(g): g for g in live_groups}
+    rec_by_key = {_key(g): g for g in rec_norm}
+
+    # Structural drift: a group added, removed, retimed, or mode-changed.
+    only_live = [g for g in live_groups if _key(g) not in rec_by_key]
+    only_recorded = [g for g in rec_norm if _key(g) not in live_by_key]
+
+    # Field drift on a group both sides agree exists. Reported ONCE, naming the
+    # fields — the old set-difference emitted the same group twice, which is
+    # what made the cockpit say "drift (2)" for a single unspecified field.
+    changed: list[dict[str, Any]] = []
+    for key, rec_g in rec_by_key.items():
+        live_g = live_by_key.get(key)
+        if live_g is None:
+            continue
+        rec_f, live_f = _fields(rec_g), _fields(live_g)
+        deltas = {
+            name: {"recorded": rec_f[name], "live": live_f[name]}
+            for name in rec_f
+            # An unspecified value on OUR side is a wildcard: we sent nothing,
+            # so the inverter's echo is not a contradiction.
+            if rec_f[name] is not None and rec_f[name] != live_f[name]
+        }
+        if deltas:
+            changed.append({
+                "start": key[0], "end": key[1], "work_mode": key[2],
+                "fields": deltas,
+            })
+
+    any_drift = bool(only_live or only_recorded or changed)
 
     return {
         "ok": live_error is None,
@@ -319,6 +355,7 @@ async def get_foxess_schedule_diff() -> dict[str, Any]:
         "live_groups": live_groups,
         "recorded_groups": rec_norm,
         "diffs": {
+            "changed": changed,
             "only_live": only_live,
             "only_recorded": only_recorded,
         },
