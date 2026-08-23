@@ -107,6 +107,17 @@ class LpPlan:
     """Total slack the solver needed below the pessimistic charge floor.
     ~0 in normal operation (the floor is reachable by construction); >0 means
     an unexpected input made the floor bind against physics — logged upstream."""
+    soc_reserve_recovery_applied: bool = False
+    """#789 — True when realtime SoC started BELOW ``MIN_SOC_RESERVE_PERCENT``
+    and the forward reserve floor was therefore solved SOFT. Rare by design:
+    the battery should not be under the reserve at all."""
+    soc_reserve_recovery_slack_kwh: float = 0.0
+    """#789 — total kWh-slots the plan spends below the reserve while climbing
+    back. 0 means the LP recovered inside the first slot; >0 sizes how long the
+    battery is planned to sit under the floor (a real operational signal, not a
+    solver artefact)."""
+    soc_reserve_recovery_slots: int = 0
+    """#789 — how many slots carry a non-zero reserve shortfall."""
 
 
 # ---------------------------------------------------------------------------
@@ -567,6 +578,32 @@ def solve_lp(
     # battery, 15 % reserve = 1.55 kWh, realtime down to 1.04 kWh).
     soc = pulp.LpVariable.dicts("soc", range(n + 1), lowBound=soc_min, upBound=soc_max)
     soc[0].lowBound = 0.0
+    # #789 — relaxing slot 0 alone was not enough: it makes the MEASUREMENT
+    # representable but leaves no representable way BACK. With ``soc[1]``
+    # still hard-floored at ``soc_min``, a below-reserve start obliges the LP
+    # to lift the battery over the reserve inside the FIRST 30-min slot — and
+    # any constraint that blocks grid→battery there (the plunge-prep rule and
+    # the PV-sufficiency guard both impose ``chg[i] <= pv_use[i]``, which is
+    # 0 at night) makes the whole solve Infeasible. Prod, 2026-08-22
+    # 20:22-23:05 UTC: 9 Infeasibles at 8-9 % SoC, held schedule for ~3 h.
+    # Measured over 60 days: 0 Infeasible in 1732 solves starting at/above the
+    # reserve, 10 in 26 starting below it — the below-reserve start is a
+    # necessary condition for every Infeasible on record.
+    #
+    # So mirror what ``tank_var_lo`` already does for a below-range tank: drop
+    # the HARD forward bound and re-impose the reserve as a SOFT floor with a
+    # steep per-slot penalty (below, next to the other slack terms). The LP
+    # then climbs back to the reserve as fast as the other constraints allow
+    # and reports the unavoidable shortfall as slack, instead of returning no
+    # plan at all. Hard bounds gate what is REPRESENTABLE; the soft floor
+    # gates what is DESIRABLE — the same split the tank ceiling uses.
+    #
+    # Only engaged on a below-reserve start: a normal solve keeps the hard
+    # bound bit-for-bit, so this cannot perturb the 1732 healthy solves.
+    soc_starts_below_reserve = float(initial.soc_kwh) < soc_min - 1e-9
+    if soc_starts_below_reserve:
+        for _i in range(1, n + 1):
+            soc[_i].lowBound = 0.0
     # Mirror the ``soc[0].lowBound = 0.0`` relaxation, and for the same reason:
     # slot 0 is a MEASUREMENT, not a decision (`tank[0] == initial.tank_temp_c`
     # is a hard equality below). A live tank ABOVE DHW_TEMP_MAX_C is routine —
@@ -1337,6 +1374,16 @@ def solve_lp(
         if export_rate_line[i] < 0:
             prob += exp[i] == 0
 
+    # #789 — soft reserve floor for a below-reserve start (see the
+    # ``soc_starts_below_reserve`` comment at the variable declaration).
+    # Applied to soc[1..n]: soc[0] is the measurement and stays free.
+    socreserve_slack: dict[int, Any] = {}
+    if soc_starts_below_reserve and soc_min > 0:
+        for i in range(1, n + 1):
+            sl = pulp.LpVariable(f"s_socreserve_{i}", lowBound=0)
+            socreserve_slack[i] = sl
+            prob += soc[i] + sl >= soc_min
+
     # Pessimistic-scenario charge floor (2026-07-02 LP audit, newsvendor).
     # ``soc_floor_kwh[i]`` is the pessimistic solve's end-of-slot-i SoC: the
     # charge level an optimal plan holds when load lands at p75, temp −1.5 °C
@@ -1597,6 +1644,15 @@ def solve_lp(
             socfloor_slack.values()
         )
 
+    # #789 — steep penalty on the below-reserve recovery slack. Well above any
+    # realistic import/export spread, so whenever the reserve IS reachable the
+    # LP drives the slack to 0 and the plan is identical to the hard-bound one.
+    reserve_slack_pen = float(
+        getattr(config, "LP_SOC_RESERVE_RECOVERY_SLACK_PENALTY_PENCE", 50.0)
+    )
+    if socreserve_slack and reserve_slack_pen > 0:
+        objective += reserve_slack_pen * pulp.lpSum(socreserve_slack.values())
+
     if _lp_owned and _dhw_block is not None:
         objective += _dhw_block.comfort_penalty
 
@@ -1622,10 +1678,34 @@ def solve_lp(
             float(sum((pulp.value(v) or 0.0) for v in socfloor_slack.values()))
             if socfloor_slack else 0.0
         ),
+        soc_reserve_recovery_applied=soc_starts_below_reserve,
+        soc_reserve_recovery_slack_kwh=(
+            float(sum((pulp.value(v) or 0.0) for v in socreserve_slack.values()))
+            if socreserve_slack else 0.0
+        ),
+        soc_reserve_recovery_slots=(
+            sum(1 for v in socreserve_slack.values() if (pulp.value(v) or 0.0) > 1e-6)
+            if socreserve_slack else 0
+        ),
     )
     plan.slot_starts_utc = list(slot_starts_utc)
     plan.price_pence = list(price_pence)
     plan.temp_outdoor_c = t_out
+
+    if soc_starts_below_reserve:
+        # #789 — surface the rare case loudly. Before this PR the same input
+        # produced an Infeasible + a held schedule; now it produces a plan, so
+        # the operational fact (battery under the reserve) must not go quiet.
+        logger.warning(
+            "LP started BELOW the SoC reserve: %.3f kWh < %.3f kWh (%.1f %%) — "
+            "forward reserve floor solved SOFT; recovery slack %.3f kWh-slots "
+            "across %d slot(s) [status=%s]",
+            float(initial.soc_kwh), soc_min,
+            float(config.MIN_SOC_RESERVE_PERCENT),
+            plan.soc_reserve_recovery_slack_kwh,
+            plan.soc_reserve_recovery_slots,
+            status,
+        )
 
     if status != "Optimal":
         logger.warning("LP solver returned %s", status)

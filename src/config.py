@@ -1030,6 +1030,23 @@ class Config:
     LP_PESS_CHARGE_FLOOR_SLACK_PENALTY_PENCE: float = float(
         os.getenv("LP_PESS_CHARGE_FLOOR_SLACK_PENALTY_PENCE", "50.0")
     )
+    # --- Below-reserve recovery (#789) -----------------------------------
+    # When realtime SoC starts BELOW ``MIN_SOC_RESERVE_PERCENT``, the forward
+    # reserve floor on ``soc[1..n]`` becomes a SOFT constraint penalised at
+    # this rate (pence per kWh of shortfall, per slot) instead of a hard
+    # variable bound. Rationale: the hard floor + the hard ``soc[0] ==
+    # measured`` equality made the whole solve Infeasible whenever the LP
+    # could not lift the battery back over the reserve inside slot 0 — which
+    # is exactly what a PV-only charge window (plunge-prep / PV-sufficiency
+    # guard) forces at night. 9 Infeasibles on 2026-08-22 20:22-23:05 UTC.
+    # Far above any realistic price spread, so the floor still behaves hard
+    # whenever it is reachable — identical plans, superset feasible region.
+    # Set to 0 to disable the penalty (the floor then only bounds, never
+    # costs); the SOFT relaxation itself is unconditional by design — an
+    # Infeasible solve is never the safer outcome.
+    LP_SOC_RESERVE_RECOVERY_SLACK_PENALTY_PENCE: float = float(
+        os.getenv("LP_SOC_RESERVE_RECOVERY_SLACK_PENALTY_PENCE", "50.0")
+    )
     # #728 — WHERE the pessimistic floor applies.
     #   trajectory (default): every slot of the first LP_PESS_CHARGE_FLOOR_HOURS
     #     — maximally protective, but over-specifies WHEN energy must arrive

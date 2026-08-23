@@ -1728,6 +1728,32 @@ def _apply_pessimistic_charge_floor(
         return plan
 
 
+def _soc_reserve_recovery_snapshot(
+    plan: Any, initial: Any,
+) -> dict[str, Any] | None:
+    """#789 audit block for ``exogenous_snapshot``, or ``None`` when the solve
+    started at/above the SoC reserve.
+
+    Before #789 a below-reserve start returned ``Infeasible`` and the only
+    trace was ``lp_failure_log``. Now the solve succeeds, so the operational
+    fact has to be recorded somewhere queryable or it disappears — this is
+    that record. (The 5-minutely ``risk_alert`` for "battery below
+    MIN_SOC_RESERVE_PERCENT during high price" is unchanged and still pages;
+    this block is the per-solve audit trail behind it.)
+    """
+    if not getattr(plan, "soc_reserve_recovery_applied", False):
+        return None
+    return {
+        "initial_soc_kwh": round(float(initial.soc_kwh), 4),
+        "reserve_kwh": round(
+            float(config.BATTERY_CAPACITY_KWH)
+            * float(config.MIN_SOC_RESERVE_PERCENT) / 100.0, 4),
+        "min_soc_reserve_percent": float(config.MIN_SOC_RESERVE_PERCENT),
+        "slack_kwh": round(float(plan.soc_reserve_recovery_slack_kwh), 4),
+        "slack_slots": int(plan.soc_reserve_recovery_slots),
+    }
+
+
 def _run_optimizer_lp(
     fox: FoxESSClient | None,
     daikin: Any | None = None,
@@ -2387,6 +2413,13 @@ def _run_optimizer_lp(
         exogenous_snapshot["pv_sufficiency_guard"] = (
             plan.pv_sufficiency_guard.to_snapshot_dict()
         )
+
+    # #789 — below-reserve recovery audit. Persisted only when it fired, so the
+    # key's PRESENCE in lp_inputs_snapshot is itself the query for "which solves
+    # started under the reserve" — the same shape as pv_sufficiency_guard above.
+    _reserve_audit = _soc_reserve_recovery_snapshot(plan, initial)
+    if _reserve_audit is not None:
+        exogenous_snapshot["soc_reserve_recovery"] = _reserve_audit
 
     lp_slots = lp_plan_to_slots(plan)
     counts = {"negative": 0, "cheap": 0, "solar_charge": 0, "standard": 0, "peak": 0, "peak_export": 0}

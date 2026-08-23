@@ -13,11 +13,17 @@ prod's realtime SoC dipped to 12-15 % (= 1.04-1.55 kWh on a 10.36 kWh
 battery with 15 % reserve = 1.55 kWh).
 
 Fix: relax ``soc[0]`` lowBound to 0 (so the equality with the realtime
-initial value is always satisfiable). Forward slots ``soc[1..n]`` keep the
-hard reserve bound — the LP must plan a path that gets back to reserve in
-slot 1, which is normally feasible (just charge from grid). The residual
-case where pre-plunge or PV-sufficiency guards also block slot-0 charging
-is caught by PR #338's defensive hold-previous-schedule fallback.
+initial value is always satisfiable).
+
+#789 UPDATE — the residual case this file used to hand off to PR #338's
+hold-previous-schedule fallback ("pre-plunge or PV-sufficiency guards also
+block slot-0 charging") is no longer deferred: prod priced it at 9 Infeasibles
+and ~3 h of stale schedule on 2026-08-22 20:22-23:05 UTC. Forward slots
+``soc[1..n]`` now drop the hard reserve bound *on a below-reserve start only*
+and re-impose it as a soft floor with a steep per-slot penalty, so the LP
+always returns a plan and surfaces the unavoidable shortfall as slack. A solve
+starting at/above the reserve is unchanged. See
+``tests/test_lp_below_reserve_recovery.py``.
 """
 from __future__ import annotations
 
