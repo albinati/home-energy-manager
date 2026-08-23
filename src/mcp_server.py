@@ -3279,10 +3279,15 @@ def build_mcp() -> FastMCP:
             "Live Fox V3 scheduler state vs. the plan the LP wants live. "
             "Returns any_drift=True when the inverter isn't running the current "
             "plan (Fox-app manual edit, firmware quirk, failed upload). "
-            "Symmetric diff: only_live (groups present on Fox but not in the "
-            "plan) and only_recorded (groups we tried to send but Fox doesn't "
-            "show). write_landed reports whether our last write reached the "
-            "inverter at all. Read-only — no hardware writes."
+            "Diff has three parts: only_live (groups present on Fox but not "
+            "in the plan), only_recorded (groups we tried to send but Fox "
+            "doesn't show) — both STRUCTURAL, keyed on window+mode — and "
+            "changed (a group both sides agree exists whose fields differ, "
+            "naming each field's recorded vs live value). A field we never "
+            "specified is not a difference: the inverter echoes its own value "
+            "for maxSoc and that cannot contradict an intent we never "
+            "expressed (#797). write_landed reports whether our last write "
+            "reached the inverter at all. Read-only — no hardware writes."
         ),
     )
     async def get_fox_schedule_diff_tool() -> dict[str, Any]:

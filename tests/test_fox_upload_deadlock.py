@@ -22,7 +22,11 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from src.foxess.models import SchedulerGroup
+from src.foxess.models import (
+    SchedulerGroup,
+    fingerprint_matches,
+    fingerprints_match,
+)
 import src.state_machine as sm
 import src.scheduler.lp_dispatch as lpd
 
@@ -40,19 +44,55 @@ def test_fingerprint_ignores_stale_fd_echo_on_selfuse():
 
 def test_fingerprint_ignores_stale_fd_echo_on_backup_hold():
     """New default negative-hold shape (2026-07-04): uploaded Backup carries no
-    fd_* and maxSoc=None; the inverter echoes stale fd_* + vendor maxSoc=100.
+    fd_* and maxSoc=None; the inverter echoes stale fd_* + a vendor maxSoc.
     Must compare equal or the heartbeat re-uploads on every tick of every
     negative-price day."""
     live = SchedulerGroup(13, 0, 14, 30, "Backup", min_soc_on_grid=10,
                           fd_soc=91.0, fd_pwr=2850.0, max_soc=100.0)
     uploaded = SchedulerGroup(13, 0, 14, 30, "Backup", min_soc_on_grid=10, max_soc=None)
-    assert live.fingerprint() == uploaded.fingerprint()
+    assert fingerprint_matches(uploaded.fingerprint(), live.fingerprint())
 
 
-def test_fingerprint_absent_maxsoc_equals_vendor_default_100():
-    live = SchedulerGroup(8, 0, 9, 0, "SelfUse", min_soc_on_grid=100, max_soc=100.0)
-    uploaded = SchedulerGroup(8, 0, 9, 0, "SelfUse", min_soc_on_grid=100, max_soc=None)
-    assert live.fingerprint() == uploaded.fingerprint()
+@pytest.mark.parametrize("echoed_max_soc", [100.0, 10.0, 0.0, 95.0])
+def test_absent_maxsoc_matches_whatever_the_vendor_echoes(echoed_max_soc):
+    """#797 — we used to canonicalise an absent maxSoc to 100, "the vendor
+    default". That was a GUESS about the vendor, and prod disproved it: the H1
+    echoes 10 (= minSocOnGrid) on a ForceCharge group that omitted maxSoc, so
+    the guess made ``skip_if_equal`` unreachable and the cockpit show a
+    permanent false drift.
+
+    The invariant we actually control: a field we never sent expresses no
+    intent, so ANY echo satisfies it."""
+    live = SchedulerGroup(8, 0, 9, 0, "ForceCharge", min_soc_on_grid=10,
+                          fd_soc=33.0, fd_pwr=500.0, max_soc=echoed_max_soc)
+    uploaded = SchedulerGroup(8, 0, 9, 0, "ForceCharge", min_soc_on_grid=10,
+                              fd_soc=33, fd_pwr=500, max_soc=None)
+    assert fingerprint_matches(uploaded.fingerprint(), live.fingerprint())
+
+
+def test_specified_maxsoc_still_tracks_a_real_change():
+    """The wildcard is only for fields we DIDN'T set. Once we set maxSoc, the
+    inverter disagreeing with it is real drift."""
+    live = SchedulerGroup(8, 0, 9, 0, "Backup", min_soc_on_grid=10, max_soc=100.0)
+    uploaded = SchedulerGroup(8, 0, 9, 0, "Backup", min_soc_on_grid=10, max_soc=10)
+    assert not fingerprint_matches(uploaded.fingerprint(), live.fingerprint())
+
+
+def test_maxsoc_wildcard_is_directional():
+    """``fingerprint_matches(desired, live)`` — passing them the wrong way
+    round would let a maxSoc we DID set, and the inverter DROPPED, read as a
+    match. Guard the argument order explicitly."""
+    live = SchedulerGroup(8, 0, 9, 0, "Backup", min_soc_on_grid=10, max_soc=None)
+    uploaded = SchedulerGroup(8, 0, 9, 0, "Backup", min_soc_on_grid=10, max_soc=10)
+    assert not fingerprint_matches(uploaded.fingerprint(), live.fingerprint())
+    # Reversed, it would wrongly pass — which is why the helper is asymmetric.
+    assert fingerprint_matches(live.fingerprint(), uploaded.fingerprint())
+
+
+def test_fingerprints_match_requires_same_group_count():
+    a = SchedulerGroup(8, 0, 9, 0, "SelfUse", min_soc_on_grid=100)
+    assert not fingerprints_match([a.fingerprint()], [])
+    assert fingerprints_match([a.fingerprint()], [a.fingerprint()])
 
 
 @pytest.mark.parametrize("mode", ["ForceCharge", "ForceDischarge"])

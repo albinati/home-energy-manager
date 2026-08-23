@@ -193,6 +193,85 @@ def test_scenarios_endpoint_returns_empty_when_no_scenarios_logged():
     assert "note" in body
 
 
+def test_schedule_diff_no_drift_on_the_2026_08_23_prod_shape(monkeypatch):
+    """#797 — the exact pair that made the cockpit read "Fox schedule drift (2)"
+    while the inverter was faithfully running the plan (battery 9 % → 68 %
+    under this very schedule).
+
+    Every field we set matches. The only difference is maxSoc, which the
+    ForceCharge upload never specified and the H1 echoed back as 10 — not the
+    100 the old canonicalisation assumed. One group, previously counted once
+    in each direction, hence "(2)".
+    """
+    from fastapi.testclient import TestClient
+
+    from src import db
+    from src.config import config as app_config
+
+    db.init_db()
+
+    def rec(sh, sm, eh, em, mode, min_soc=10, fd_soc=None, fd_pwr=None, max_soc=None):
+        return {"startHour": sh, "startMinute": sm, "endHour": eh, "endMinute": em,
+                "workMode": mode,
+                "extraParam": {"minSocOnGrid": min_soc, "fdSoc": fd_soc,
+                               "fdPwr": fd_pwr, "maxSoc": max_soc}}
+
+    class LiveGroup:
+        def __init__(self, sh, sm, eh, em, mode, min_soc=10,
+                     fd_soc=None, fd_pwr=None, max_soc=None):
+            self.start_hour, self.start_minute = sh, sm
+            self.end_hour, self.end_minute = eh, em
+            self.work_mode = mode
+            self.min_soc_on_grid = min_soc
+            self.fd_soc, self.fd_pwr, self.max_soc = fd_soc, fd_pwr, max_soc
+
+    recorded = [
+        rec(2, 30, 3, 59, "Backup", min_soc=10, max_soc=10),
+        rec(13, 0, 13, 30, "ForceCharge", min_soc=10, fd_soc=33, fd_pwr=500, max_soc=None),
+    ]
+    live = [
+        LiveGroup(2, 30, 3, 59, "Backup", min_soc=10,
+                  fd_soc=92.0, fd_pwr=2125.0, max_soc=10.0),
+        LiveGroup(13, 0, 13, 30, "ForceCharge", min_soc=10,
+                  fd_soc=33.0, fd_pwr=500.0, max_soc=10.0),
+    ]
+
+    import src.api.routers.dispatch as dispatch_mod
+    monkeypatch.setattr(db, "get_latest_fox_schedule_intent",
+                        lambda: {"groups": recorded})
+    monkeypatch.setattr(db, "get_latest_fox_schedule_state",
+                        lambda: {"groups": recorded})
+
+    class _FakeState:
+        groups = live
+
+    class _FakeFox:
+        def __init__(self, **_kw): ...
+        def get_scheduler_v3(self):
+            return _FakeState()
+
+    monkeypatch.setattr(dispatch_mod, "FoxESSClient", _FakeFox)
+    monkeypatch.setattr(type(dispatch_mod.config), "foxess_client_kwargs", lambda self: {})
+    monkeypatch.setattr(app_config, "HEM_UI_AUTH_REQUIRED", False, raising=False)
+    from src.api.main import app
+    client = TestClient(app)
+
+    body = client.get("/api/v1/foxess/schedule_diff").json()
+    assert body["ok"] is True, body.get("live_error")
+    assert body["any_drift"] is False, body["diffs"]
+    assert body["diffs"]["changed"] == []
+
+    # And the counter-case on the SAME shape: once we DO specify maxSoc, the
+    # inverter disagreeing with it is real drift the operator must see.
+    recorded[1]["extraParam"]["maxSoc"] = 95
+    body = client.get("/api/v1/foxess/schedule_diff").json()
+    assert body["any_drift"] is True
+    assert body["diffs"]["changed"] == [{
+        "start": "13:00", "end": "13:30", "work_mode": "ForceCharge",
+        "fields": {"max_soc": {"recorded": 95.0, "live": 10.0}},
+    }]
+
+
 def test_schedule_diff_fingerprint_ignores_vendor_default_echo(monkeypatch):
     """Real prod shapes captured 2026-06-12: Fox echoes max_soc=100 where the
     upload recorded None, and returns stale fd_* values on Backup groups —
@@ -261,9 +340,18 @@ def test_schedule_diff_fingerprint_ignores_vendor_default_echo(monkeypatch):
     assert body["diffs"]["only_recorded"] == []
 
     # Counter-case: a REAL fd_soc change on a ForceDischarge group must still
-    # register as drift — canonicalisation only forgives vendor default echo.
+    # register as drift — canonicalisation only forgives fields we never set.
+    #
+    # #797: the group exists on BOTH sides (same window + mode), so this is a
+    # field change, reported ONCE in `changed` naming the field. It used to
+    # surface as one entry in only_live AND one in only_recorded — which is
+    # why a single unspecified field rendered in the cockpit as "drift (2)".
     live[0].fd_soc = 50.0
     body = client.get("/api/v1/foxess/schedule_diff").json()
     assert body["any_drift"] is True
-    assert len(body["diffs"]["only_live"]) == 1
-    assert len(body["diffs"]["only_recorded"]) == 1
+    assert body["diffs"]["only_live"] == []
+    assert body["diffs"]["only_recorded"] == []
+    changed = body["diffs"]["changed"]
+    assert len(changed) == 1
+    assert changed[0]["work_mode"] == "ForceDischarge"
+    assert changed[0]["fields"] == {"fd_soc": {"recorded": 15.0, "live": 50.0}}
