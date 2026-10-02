@@ -145,6 +145,51 @@ def _fetch_day_night_rates(
     return day, night
 
 
+def _fetch_band_profile(product_code: str, tariff_code: str) -> dict[int, float] | None:
+    """Local minute-of-day -> rate for a banded single-register TOU tariff.
+
+    Reads the most recent 24 h of published ``standard-unit-rates`` (one row per
+    band) and maps each half hour to its Europe/London minute-of-day, so the
+    profile follows the clock change the same way Octopus bills it. Returns None
+    when the product publishes a single flat rate (nothing to profile).
+    """
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo
+
+    try:
+        url = f"{OCTOPUS_BASE}/products/{product_code}/electricity-tariffs/{tariff_code}/standard-unit-rates/?page_size=48"
+        results = _get_json(url).get("results") or []
+    except Exception as exc:
+        logger.debug("Band profile fetch failed for %s: %s", tariff_code, exc)
+        return None
+    rows = []
+    for r in results:
+        try:
+            rows.append((
+                datetime.fromisoformat(r["valid_from"].replace("Z", "+00:00")),
+                datetime.fromisoformat(r["valid_to"].replace("Z", "+00:00")) if r.get("valid_to") else None,
+                float(r["value_inc_vat"]),
+            ))
+        except (KeyError, TypeError, ValueError):
+            continue
+    bounded = [r for r in rows if r[1] is not None]
+    if not bounded:
+        return None
+    window_end = max(r[1] for r in bounded)
+    window_start = window_end - timedelta(hours=24)
+    london = ZoneInfo("Europe/London")
+    profile: dict[int, float] = {}
+    for start, end, rate in bounded:
+        t = max(start, window_start)
+        while t < end:
+            loc = t.astimezone(london)
+            profile.setdefault(loc.hour * 60 + (loc.minute // 30) * 30, rate)
+            t += timedelta(minutes=30)
+    if len(profile) < 48 or len(set(profile.values())) < 2:
+        return None
+    return profile
+
+
 # ── Public interface ─────────────────────────────────────────────────────────
 
 def list_octopus_products(
@@ -237,6 +282,14 @@ def get_tariff_product(product_code: str) -> TariffProduct | None:
         if unit_rate is None:
             unit_rate = _fetch_unit_rate(product_code, tariff_code)
 
+    slot_rates_local = None
+    if pricing == PricingStructure.TIME_OF_USE:
+        # The published bands are the truth; the day/night pair + hard-coded
+        # window below can't express Cosy (three cheap windows + a peak) and the
+        # single-register fallback priced the whole day at whichever band row the
+        # API happened to list first.
+        slot_rates_local = _fetch_band_profile(product_code, tariff_code)
+
     # Off-peak windows for known TOU products
     off_peak_start = off_peak_end = None
     code_upper = product_code.upper()
@@ -258,6 +311,7 @@ def get_tariff_product(product_code: str) -> TariffProduct | None:
         night_rate_pence=float(night_rate) if night_rate is not None else None,
         off_peak_start=off_peak_start,
         off_peak_end=off_peak_end,
+        slot_rates_local=slot_rates_local,
         standing_charge_pence_per_day=float(standing) if standing is not None else 0.0,
         export_rate_pence=None,  # populated separately if export tariff is configured
     )

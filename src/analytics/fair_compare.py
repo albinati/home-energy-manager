@@ -139,7 +139,13 @@ def _price_flat_or_tou_day(
     per-slot import. HALF_HOURLY/TRACKER are handled post-loop (approximate)."""
     import_cost = 0.0
     import_kwh = 0.0
-    if t.pricing == PricingStructure.TIME_OF_USE:
+    profile = t.rates.slot_rates_local
+    if t.pricing == PricingStructure.TIME_OF_USE and profile:
+        for slot, kwh in import_bucket.items():
+            m = _local_minute_of_day(slot)
+            import_cost += kwh * profile[(m // 30) * 30]
+            import_kwh += kwh
+    elif t.pricing == PricingStructure.TIME_OF_USE:
         day_r = t.rates.day_rate_pence or t.rates.unit_rate_pence or 0.0
         night_r = t.rates.night_rate_pence if t.rates.night_rate_pence is not None else day_r
         has_window = bool(t.rates.off_peak_start and t.rates.off_peak_end)
@@ -373,10 +379,11 @@ def compute_fair_comparison(
     # Current Agile (realised) — its own standing + realised Outgoing export.
     cur_standing = _current_standing_per_day(candidates, current_code) * n_days
     cur_net = cur["import_cost"] + cur_standing - cur["export_credit"]
+    cur_product = next((t for t in candidates if t.product_code == current_code), None)
     rows.append({
         "product_code": current_code,
-        "display_name": "Octopus Agile (your tariff)",
-        "pricing": "half_hourly",
+        "display_name": f"{cur_product.display_name if cur_product else 'Octopus Agile'} (your tariff)",
+        "pricing": cur_product.pricing.value if cur_product else "half_hourly",
         "is_current": True,
         "approximate": False,
         "import_cost_pence": round(cur["import_cost"], 2),
