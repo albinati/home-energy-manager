@@ -55,6 +55,10 @@ class RateSchedule:
     off_peak_end: str | None = None                # e.g. "05:30"
     standing_charge_pence_per_day: float = 0.0        # inc VAT
     export_rate_pence: float | None = None         # SEG / export payment (p/kWh)
+    # Multi-band TOU (Cosy: 3 cheap windows + a peak) can't be expressed as one
+    # day/night pair. Local minute-of-day (0, 30, … 1410) -> p/kWh, read from the
+    # product's published single-register bands. Takes precedence when present.
+    slot_rates_local: dict[int, float] | None = None
 
 
 @dataclass

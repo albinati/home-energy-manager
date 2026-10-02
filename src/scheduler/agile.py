@@ -49,13 +49,61 @@ def utc_instant_in_scheduler_peak(
 
 
 def _tariff_to_product(tariff_code: str) -> str:
-    """Derive product code from full tariff code (e.g. E-1R-AGILE-24-10-01-C -> AGILE-24-10-01)."""
-    parts = tariff_code.split("-")
-    try:
-        idx = next(i for i, p in enumerate(parts) if p == "AGILE")
-        return "-".join(parts[idx : -1])
-    except StopIteration:
-        return "AGILE-24-10-01"
+    """Derive product code from full tariff code (e.g. E-1R-AGILE-24-10-01-C -> AGILE-24-10-01).
+
+    Product-agnostic: strips the ``E-<n>R-`` register prefix and the ``-<GSP>``
+    suffix, so a time-of-use import (E-1R-COSY-22-12-08-H -> COSY-22-12-08) hits its
+    own product URL instead of silently fetching Agile prices.
+    """
+    m = re.match(r"^E-\d+R-(.+)-[A-P]$", tariff_code.strip())
+    if m:
+        return m.group(1)
+    logger.warning("Unrecognised tariff code %r — falling back to AGILE-24-10-01", tariff_code)
+    return "AGILE-24-10-01"
+
+
+_SLOT = timedelta(minutes=30)
+
+
+def _parse_api_iso(s: str) -> datetime:
+    return datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(UTC)
+
+
+def _iso_z(dt: datetime) -> str:
+    return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _split_into_slots(
+    rows: list[dict], period_from: datetime, period_to: datetime
+) -> list[dict]:
+    """Expand multi-slot rate rows into one row per 30-min slot.
+
+    Agile publishes one row per half hour, but time-of-use products (Cosy, Go,
+    Flux) publish one row per BAND (e.g. a 3 h Cosy window) and flat tariffs an
+    open-ended row (``valid_to=None``). Everything downstream keys prices by the
+    exact slot ``valid_from``, so a 3 h row would price only its first half hour.
+    Open-ended / out-of-window rows are clipped to ``[period_from, period_to)``.
+    """
+    out: list[dict] = []
+    for r in rows:
+        try:
+            start = _parse_api_iso(str(r["valid_from"]))
+            end = _parse_api_iso(str(r["valid_to"])) if r.get("valid_to") else period_to
+        except (KeyError, TypeError, ValueError):
+            continue
+        if end - start <= _SLOT:
+            out.append(r)
+            continue
+        t = max(start, period_from.astimezone(UTC).replace(second=0, microsecond=0))
+        if t.minute % 30:
+            t = t.replace(minute=(t.minute // 30) * 30)
+        t = max(t, start)
+        stop = min(end, period_to.astimezone(UTC))
+        while t < stop:
+            out.append({"value_inc_vat": r["value_inc_vat"],
+                        "valid_from": _iso_z(t), "valid_to": _iso_z(t + _SLOT)})
+            t += _SLOT
+    return out
 
 
 def _fetch_rates(tariff_code: str, period_from: datetime, period_to: datetime) -> list[dict]:
@@ -76,7 +124,7 @@ def _fetch_rates(tariff_code: str, period_from: datetime, period_to: datetime) -
         return []
 
     results = data.get("results") or []
-    return [
+    rows = [
         {
             "value_inc_vat": r.get("value_inc_vat"),
             "valid_from": r.get("valid_from"),
@@ -85,6 +133,7 @@ def _fetch_rates(tariff_code: str, period_from: datetime, period_to: datetime) -
         for r in results
         if r.get("value_inc_vat") is not None
     ]
+    return _split_into_slots(rows, period_from, period_to)
 
 
 def fetch_agile_rates(
