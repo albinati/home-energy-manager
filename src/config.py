@@ -935,6 +935,11 @@ class Config:
     # Agile scheduler (Daikin ASHP by price)
     SCHEDULER_ENABLED: bool = os.getenv("SCHEDULER_ENABLED", "false").lower() in ("true", "1", "yes")
     OCTOPUS_TARIFF_CODE: str = (os.getenv("OCTOPUS_TARIFF_CODE") or "").strip()
+    # LWT pre-heat demand gate: drop phantom single-quantum onecta_cache
+    # buckets (the #760 learner guard) before summing trailing heating (#749/#807).
+    DAIKIN_LWT_PREHEAT_DEMAND_GATE_PHANTOM_FILTER: bool = os.getenv(
+        "DAIKIN_LWT_PREHEAT_DEMAND_GATE_PHANTOM_FILTER", "true"
+    ).lower() in ("true", "1", "yes")
     # --- Tariff structure (#803/#804, Cosy switch 2026-10) -----------------
     # "auto" detects a BANDED tariff (≤ TARIFF_BANDED_MAX_LEVELS distinct price
     # levels in the horizon, e.g. Cosy's 3) and derives cheap/peak thresholds as

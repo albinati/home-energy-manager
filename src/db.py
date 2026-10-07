@@ -11,6 +11,7 @@ import math
 import sqlite3
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -4511,6 +4512,8 @@ def get_dhw_boost_windows(start_date: str, end_date: str) -> list[tuple[str, str
 
 def measured_space_heating_kwh_excluding_offset_windows(
     lookback_hours: int = 48,
+    *,
+    rows_filter: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = None,
 ) -> float:
     """Trailing measured space-heating kWh from ``daikin_consumption_2hourly``,
     EXCLUDING 2-hour buckets overlapped by a HEM ``lwt_preheat`` window.
@@ -4528,6 +4531,11 @@ def measured_space_heating_kwh_excluding_offset_windows(
     end_date = now_local.date().isoformat()
 
     rows = get_daikin_consumption_2hourly_range(start_date, end_date)
+    if rows and rows_filter is not None:
+        # #749/#807: let the caller drop phantom single-quantum onecta_cache
+        # buckets (the #760 learner guard) BEFORE the sum — the gate used to
+        # count them as demand and arm summer boosts off counter blips.
+        rows = rows_filter(rows)
     if not rows:
         # No 2-hourly split cached. The daily totals CANNOT be decontaminated
         # (no intra-day resolution), so falling back to them while offset

@@ -1105,11 +1105,50 @@ def _space_heating_demand_present() -> bool:
         return True  # gate disabled
     lookback = int(getattr(config, "DAIKIN_LWT_PREHEAT_DEMAND_LOOKBACK_HOURS", 48))
     try:
-        measured = db.measured_space_heating_kwh_excluding_offset_windows(lookback)
+        measured = db.measured_space_heating_kwh_excluding_offset_windows(
+            lookback, rows_filter=_demand_gate_rows_filter(lookback),
+        )
     except Exception:  # pragma: no cover — gate must never break dispatch
         logger.exception("LWT pre-heat demand gate read failed — failing open")
         return True
     return measured >= floor
+
+
+def _demand_gate_rows_filter(lookback_hours: int):
+    """Phantom filter for the demand gate's 2-hourly rows (#749 → #807).
+
+    Onecta's ``kwh_heating`` counter is whole-kWh quantised and misattributes:
+    summer prod carried ``source=onecta_cache, kwh_heating=1.0`` buckets at
+    arbitrary night hours, and six of them opened the gate and armed +3 °C
+    radiator boosts in July. The thermal learner already drops exactly those
+    claims when the site's weather curve says the compressor was essentially
+    OFF (``thermal_learning.sanitize_phantom_heating``, #760); the gate now
+    applies the same guard. Returns ``None`` (no filtering) when disabled or
+    when the outdoor series cannot be built — fail-open, as before.
+    """
+    if not bool(getattr(config, "DAIKIN_LWT_PREHEAT_DEMAND_GATE_PHANTOM_FILTER", True)):
+        return None
+    try:
+        from ..analytics.thermal_learning import _outdoor_series, sanitize_phantom_heating
+    except Exception:  # pragma: no cover — import guard
+        return None
+    tz = ZoneInfo(getattr(config, "BULLETPROOF_TIMEZONE", "Europe/London"))
+    now_local = datetime.now(tz)
+    start_day = (now_local - timedelta(hours=int(lookback_hours))).date()
+    end_day = now_local.date()
+
+    def _filter(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        try:
+            outdoor = _outdoor_series(start_day, end_day)
+            cleaned, n_phantom = sanitize_phantom_heating(rows, outdoor, tz)
+        except Exception:  # pragma: no cover — filter must never break the gate
+            logger.debug("demand-gate phantom filter failed; using raw rows", exc_info=True)
+            return rows
+        if n_phantom:
+            logger.info("LWT demand gate: dropped %d phantom onecta_cache 1.0 kWh bucket(s) (#749)", n_phantom)
+        return cleaned
+
+    return _filter
 
 
 def space_heating_gate_state() -> dict[str, Any]:
@@ -1121,7 +1160,9 @@ def space_heating_gate_state() -> dict[str, Any]:
     lookback = int(getattr(config, "DAIKIN_LWT_PREHEAT_DEMAND_LOOKBACK_HOURS", 48))
     measured: float | None = None
     try:
-        measured = round(db.measured_space_heating_kwh_excluding_offset_windows(lookback), 2)
+        measured = round(db.measured_space_heating_kwh_excluding_offset_windows(
+            lookback, rows_filter=_demand_gate_rows_filter(lookback),
+        ), 2)
     except Exception:  # pragma: no cover - defensive: status read must not fail
         logger.debug("space_heating_gate_state: measured read failed", exc_info=True)
     demand_present = _space_heating_demand_present()
