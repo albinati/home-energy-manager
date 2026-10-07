@@ -1902,9 +1902,12 @@ async def daikin_heating_plan():
     # q25/q75 on Agile) over the static pence cut-offs — the static 12p/25p
     # put Cosy's cheap band (12.49p) in "standard" and its day band (25.45p)
     # in "peak".
+    # Gated to banded tariffs so the Agile heating-plan view keeps its static
+    # 12p/25p tiers bit-for-bit (review H2).
+    from ..energy.tariff_structure import prefer_plan_thresholds as _prefer_plan_thr
     try:
-        _tgt = db.get_daily_target(today_local.isoformat()) or {}
-        if _tgt.get("cheap_threshold") is not None and _tgt.get("peak_threshold") is not None:
+        _tgt = db.get_daily_target(today_local.isoformat()) if _prefer_plan_thr() else None
+        if _tgt and _tgt.get("cheap_threshold") is not None and _tgt.get("peak_threshold") is not None:
             cheap_thr = float(_tgt["cheap_threshold"])
             peak_thr = float(_tgt["peak_threshold"])
     except Exception:

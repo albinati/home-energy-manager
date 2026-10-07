@@ -163,70 +163,94 @@ def detect(
     if n < _min_slots() and mode != "banded":
         return _dynamic(px, f"short:{n}<{_min_slots()}", dynamic_rule)
 
-    positive = sorted({_quantise(p, quantum) for p in px if p > 0.0})
+    positive_prices = [p for p in px if p > 0.0]
+    if len(positive_prices) < _min_slots() and mode != "banded":
+        # An Agile plunge day with a handful of positive prices must not read
+        # as "banded" just because the positives happen to be few (review M3).
+        return _dynamic(px, f"short_positive:{len(positive_prices)}<{_min_slots()}", dynamic_rule)
+    positive = sorted({_quantise(p, quantum) for p in positive_prices})
     if not positive:
         return _dynamic(px, "no_positive_prices", dynamic_rule)
-    if len(positive) > _max_levels() and mode != "banded":
-        return _dynamic(px, f"levels:{len(positive)}>{_max_levels()}", dynamic_rule)
-    if len(positive) > _max_levels():
-        # forced banded on a dynamic-looking series: collapse to quartile
-        # levels so the caller still gets *some* banding — but say so loudly.
+    # Primary gate: the RAW distinct-level count. An Agile day has ~48 distinct
+    # prices whatever its spread (a flat 20-24p Agile day must stay dynamic so
+    # its quartiles still split cheap/peak as on main); a banded tariff has a
+    # handful, at most 2× the band count across one reprice.
+    max_raw = _max_levels() * 2
+    if len(positive) > max_raw and mode != "banded":
+        return _dynamic(px, f"levels:{len(positive)}>{max_raw}", dynamic_rule)
+    ratio = _contrast_ratio()
+    # Then cluster quantised levels whose whole SPAN stays within the contrast
+    # ratio into ONE band (review M1): a horizon spanning an Octopus reprice
+    # (Cosy 12.49→12.99, 25.45→26.5, 38.17→39.7) is six raw levels but three
+    # bands; without this it fell back to the percentile misread for two days
+    # and starved the band filler for a week. Span-based (not chained) so a
+    # continuum can never collapse into one cluster.
+    clusters: list[list[float]] = []
+    for lv in positive:
+        if clusters and lv < clusters[-1][0] * ratio:
+            clusters[-1].append(lv)
+        else:
+            clusters.append([lv])
+    if len(clusters) > _max_levels() and mode != "banded":
+        return _dynamic(px, f"levels:{len(clusters)}>{_max_levels()}", dynamic_rule)
+    if len(clusters) > _max_levels():
         logger.warning(
-            "OCTOPUS_TARIFF_STRUCTURE=banded forced on %d distinct levels; "
-            "falling back to dynamic thresholds", len(positive),
+            "OCTOPUS_TARIFF_STRUCTURE=banded forced on %d distinct bands; "
+            "falling back to dynamic thresholds", len(clusters),
         )
-        return _dynamic(px, f"forced_banded_but_levels:{len(positive)}", dynamic_rule)
+        return _dynamic(px, f"forced_banded_but_levels:{len(clusters)}", dynamic_rule)
 
     levels = tuple(positive)
+    band_lo = [c[0] for c in clusters]          # cheapest raw level of each band
+    band_hi = [c[-1] for c in clusters]         # dearest raw level of each band
+    band_mean = [sum(c) / len(c) for c in clusters]
     cheap_level: float | None = None
     peak_level: float | None = None
-    ratio = _contrast_ratio()
-    if len(levels) == 1:
+    cheap_idx: int | None = None
+    peak_idx: int | None = None
+    if len(clusters) == 1:
         pass  # flat tariff: no cheap, no peak
-    elif len(levels) == 2:
-        # Two levels: the MAJORITY level is the day's "standard" rate; the
+    elif len(clusters) == 2:
+        # Two bands: the MAJORITY band is the day's "standard" rate; the
         # minority is cheap if it sits below it (Go / Economy-7: a 4-7 h
         # off-peak), or a peak if it sits above it (a flat day with one
-        # expensive evening block). Tie → the lower level is cheap.
-        counts = {lv: 0 for lv in levels}
-        for p in px:
-            if p > 0.0:
-                q = _quantise(p, quantum)
-                if q in counts:
-                    counts[q] += 1
-        lo, hi = levels
-        if counts[hi] > counts[lo]:
-            if lo <= hi / ratio:
-                cheap_level = lo
+        # expensive evening block). Tie → the HIGHER band is the peak (never
+        # import at the dear level by mistake; review M2 pins this).
+        counts = [0, 0]
+        for p in positive_prices:
+            q = _quantise(p, quantum)
+            counts[0 if q <= band_hi[0] else 1] += 1
+        if counts[1] > counts[0]:
+            if band_mean[0] <= band_mean[1] / ratio:
+                cheap_level, cheap_idx = band_lo[0], 0
         else:
-            if hi >= lo * ratio:
-                peak_level = hi
+            if band_mean[1] >= band_mean[0] * ratio:
+                peak_level, peak_idx = band_hi[1], 1
     else:
-        middle = levels[1:-1]
-        mid_ref = sum(middle) / len(middle)
-        if levels[0] <= mid_ref / ratio:
-            cheap_level = levels[0]
-        if levels[-1] >= mid_ref * ratio:
-            peak_level = levels[-1]
+        mid_ref = sum(band_mean[1:-1]) / len(band_mean[1:-1])
+        if band_mean[0] <= mid_ref / ratio:
+            cheap_level, cheap_idx = band_lo[0], 0
+        if band_mean[-1] >= mid_ref * ratio:
+            peak_level, peak_idx = band_hi[-1], len(clusters) - 1
 
-    # Midpoint thresholds (see module docstring). When a side has no band,
-    # push the threshold OUTSIDE the price range so no comparison can match.
-    if cheap_level is not None:
-        nxt = levels[levels.index(cheap_level) + 1]
-        cheap_thr = (cheap_level + nxt) / 2.0
+    # Midpoint thresholds (see module docstring), between the dearest level of
+    # the cheap band and the cheapest level of the next band (and vice versa
+    # for the peak). When a side has no band, push the threshold OUTSIDE the
+    # price range so no comparison can match.
+    if cheap_idx is not None:
+        cheap_thr = (band_hi[cheap_idx] + band_lo[cheap_idx + 1]) / 2.0
     else:
         cheap_thr = levels[0] - 1.0
-    if peak_level is not None:
-        prv = levels[levels.index(peak_level) - 1]
-        peak_thr = (prv + peak_level) / 2.0
+    if peak_idx is not None:
+        peak_thr = (band_hi[peak_idx - 1] + band_lo[peak_idx]) / 2.0
     else:
         peak_thr = levels[-1] + 1.0
 
     band_by_level: dict[float, Band] = {}
     for lv in levels:
-        if cheap_level is not None and lv == cheap_level:
+        if cheap_idx is not None and lv <= band_hi[cheap_idx]:
             band_by_level[lv] = "cheap"
-        elif peak_level is not None and lv == peak_level:
+        elif peak_idx is not None and lv >= band_lo[peak_idx]:
             band_by_level[lv] = "peak"
         else:
             band_by_level[lv] = "standard"
@@ -234,7 +258,7 @@ def detect(
     return TariffStructure(
         kind="banded", levels=levels, cheap_level=cheap_level, peak_level=peak_level,
         cheap_thr=round(cheap_thr, 4), peak_thr=round(peak_thr, 4),
-        n_slots=n, reason=f"levels:{len(levels)}", band_by_level=band_by_level,
+        n_slots=n, reason=f"levels:{len(levels)}/bands:{len(clusters)}", band_by_level=band_by_level,
     )
 
 
@@ -322,7 +346,7 @@ def band_profile_local(
     now = now_utc or datetime.now(UTC)
     rows = db.get_rates_for_period(code, now - timedelta(days=days), now + timedelta(days=3)) or []
     prices: list[float] = []
-    buckets: dict[tuple[int, int], dict[float, int]] = {}
+    latest: dict[tuple[int, int], tuple[datetime, float]] = {}
     for r in rows:
         try:
             vf = datetime.fromisoformat(str(r["valid_from"]).replace("Z", "+00:00"))
@@ -334,18 +358,30 @@ def band_profile_local(
         prices.append(p)
         loc = vf.astimezone(tz)
         key = (loc.hour, 30 if loc.minute >= 30 else 0)
-        q = _quantise(p, 0.01)
-        buckets.setdefault(key, {})
-        buckets[key][q] = buckets[key].get(q, 0) + 1
+        # The MOST RECENT published row wins per bucket (not the mode): after
+        # an Octopus reprice the new band price is the truth for the tail of
+        # the horizon, and the stored price is used as-is (no quantisation).
+        if key not in latest or vf > latest[key][0]:
+            latest[key] = (vf, p)
     s = detect(prices)
     if not s.is_banded:
         return {}
-    out: dict[tuple[int, int], float] = {}
-    for key, hist in buckets.items():
-        # mode per bucket; ties → the cheaper level (never over-price a slot)
-        best = sorted(hist.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
-        out[key] = best
-    return out
+    return {key: p for key, (_, p) in latest.items()}
+
+
+def prefer_plan_thresholds(tariff_code: str | None = None) -> bool:
+    """Should a consumer with a STATIC pence cut-off (heartbeat low-SoC alert,
+    heating-plan tiers, status next-cheap) switch to the plan's stored
+    thresholds? Only on a banded (TOU-family) tariff, where the static 12p/25p
+    cut-offs misread the bands. On Agile the historical static behaviour is
+    kept bit-for-bit (review H1/H2)."""
+    mode = _mode()
+    if mode == "dynamic":
+        return False
+    if mode == "banded":
+        return True
+    code = tariff_code if tariff_code is not None else getattr(config, "OCTOPUS_TARIFF_CODE", "")
+    return is_tou_family(code)
 
 
 def is_tou_family(tariff_code: str | None) -> bool:

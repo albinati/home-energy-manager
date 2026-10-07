@@ -432,7 +432,7 @@ def _print_vs_ref_report(report: VsRefReport) -> None:
     print("=" * 84)
     print(
         f"  {'date':>12}  {'recalcs':>7}  "
-        f"{'ref £':>+10}  {'current £':>+10}  {'Δ £':>+8}  class"
+        f"{'ref £':>10}  {'current £':>10}  {'Δ £':>8}  class"
     )
     print("  " + "-" * 78)
     for r in report.rows:
@@ -440,7 +440,7 @@ def _print_vs_ref_report(report: VsRefReport) -> None:
             print(
                 f"  {r.date:>12}  {r.recalc_count:>7}  "
                 f"{r.ref_cost_p/100:>+9.2f}  {r.current_cost_p/100:>+9.2f}  "
-                f"{'—':>+8}  {r.classification}"
+                f"{'—':>8}  {r.classification}"
             )
             continue
         print(

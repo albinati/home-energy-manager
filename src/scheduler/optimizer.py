@@ -138,7 +138,7 @@ def _resolve_plan_window(tariff: str) -> PlanWindow | None:
         # daily, so its stored rows bucketed by local (hour, minute) are an
         # EXACT filler (and survive the BST→GMT change). ``{}`` on a dynamic
         # tariff → the UTC-keyed 28-day Agile median priors, as before.
-        band_profile = tariff_structure.band_profile_local(tariff)
+        band_profile = tariff_structure.band_profile_local(tariff, now_utc=now_utc)
         priors = band_profile or db.get_half_hourly_agile_priors(tariff, window_days=28)
         prior_kind = "prior_band" if band_profile else "prior"
         if priors:
