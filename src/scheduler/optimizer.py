@@ -1380,6 +1380,14 @@ def _persist_lp_snapshots(
     # Config snapshot — everything the LP meaningfully conditioned on. Keep
     # compact; dashboards read this directly from the JSON.
     cfg_snap = {
+        # #808: thermal-control knobs so a replay can reproduce the source/clamp/UA.
+        "DAIKIN_LWT_SOURCE": str(getattr(config, "DAIKIN_LWT_SOURCE", "tier")),
+        "LP_W3_TIN_ENABLED": bool(getattr(config, "LP_W3_TIN_ENABLED", False)),
+        "LP_W3_PEAK_COAST_DELTA_C": float(getattr(config, "LP_W3_PEAK_COAST_DELTA_C", 1.0)),
+        "DAIKIN_LWT_LP_OFFSET_MIN": float(getattr(config, "DAIKIN_LWT_LP_OFFSET_MIN", -5)),
+        "DAIKIN_LWT_LP_OFFSET_MAX": float(getattr(config, "DAIKIN_LWT_LP_OFFSET_MAX", 5)),
+        "BUILDING_UA_W_PER_K": float(getattr(config, "BUILDING_UA_W_PER_K", 600)),
+        "BUILDING_THERMAL_MASS_KWH_PER_K": float(getattr(config, "BUILDING_THERMAL_MASS_KWH_PER_K", 12)),
         "LP_HORIZON_HOURS": int(config.LP_HORIZON_HOURS),
         "BATTERY_CAPACITY_KWH": float(config.BATTERY_CAPACITY_KWH),
         "MIN_SOC_RESERVE_PERCENT": float(config.MIN_SOC_RESERVE_PERCENT),
