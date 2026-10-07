@@ -3065,6 +3065,19 @@ def start_background_scheduler() -> None:
                 CronTrigger(hour=3, minute=15, timezone=ZoneInfo("UTC")),
                 id="daily_history_prune",
             )
+            # Weekly fine-tuning review (#832): SUGGESTIONS ONLY, never applies.
+            if config.TUNING_REVIEW_ENABLED:
+                from ..tuning_review import weekly_review_job
+                _background_scheduler.add_job(
+                    weekly_review_job,
+                    CronTrigger(
+                        day_of_week=int(config.TUNING_REVIEW_DOW),
+                        hour=int(config.TUNING_REVIEW_HOUR_LOCAL),
+                        minute=0,
+                        timezone=tz,
+                    ),
+                    id="tuning_review_weekly",
+                )
 
             # #833 — comfort feedback: weekly summary + Telegram inbound short-poll.
             _background_scheduler.add_job(

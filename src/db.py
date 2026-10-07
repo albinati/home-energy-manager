@@ -335,6 +335,21 @@ CREATE TABLE IF NOT EXISTS daikin_lwt_kw_calibration (
     bias_kwh REAL,
     computed_at TEXT NOT NULL
 );
+
+-- #832 weekly fine-tuning review: SUGGESTIONS ONLY (nothing here is ever applied).
+CREATE TABLE IF NOT EXISTS tuning_suggestions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    built_at_utc TEXT NOT NULL,
+    week_start TEXT NOT NULL,
+    key TEXT NOT NULL,
+    current_value TEXT,
+    suggested_value TEXT,
+    delta_pence_per_week REAL,
+    delta_comfort_hours REAL,
+    verdict TEXT NOT NULL,
+    payload_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_tuning_suggestions_week ON tuning_suggestions(week_start, built_at_utc);
 """
 
 
@@ -550,6 +565,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         ("lp_health_regression",  "critical", 0),
         ("guests_mode_suggested", "reports",  0),
         ("dhw_bias_enable_ready", "reports",  0),
+        ("tuning_review",         "reports",  1),  # silent push (pull-first)
         # 2026-07-28 — comfort/actuation divergence. Both are ACTIONABLE (the
         # user has to decide something), so they must not land in the muted
         # FYI bucket alongside the digests.
@@ -9575,3 +9591,61 @@ def get_comfort_feedback(days: int = 30, *, since_utc: str | None = None,
             return [_comfort_row(r) for r in conn.execute(q, args).fetchall()]
         finally:
             conn.close()
+
+# --- #832 tuning suggestions -------------------------------------------------
+
+def save_tuning_suggestions(rows: list[dict]) -> int:
+    """Persist suggestion rows (each: week_start, key, current_value, suggested_value,
+    delta_pence_per_week, delta_comfort_hours, verdict, payload dict). Returns count."""
+    import json as _json
+    from datetime import UTC, datetime
+    built = datetime.now(UTC).isoformat()
+    with _lock:
+        conn = get_connection()
+        try:
+            for r in rows:
+                conn.execute(
+                    """INSERT INTO tuning_suggestions
+                       (built_at_utc, week_start, key, current_value, suggested_value,
+                        delta_pence_per_week, delta_comfort_hours, verdict, payload_json)
+                       VALUES (?,?,?,?,?,?,?,?,?)""",
+                    (built, r["week_start"], r["key"], str(r.get("current_value")),
+                     str(r.get("suggested_value")), r.get("delta_pence_per_week"),
+                     r.get("delta_comfort_hours"), r["verdict"],
+                     _json.dumps(r.get("payload") or {}, default=str)),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+    return len(rows)
+
+
+def list_tuning_suggestions(weeks: int = 4) -> list[dict]:
+    """Rows for the last ``weeks`` distinct week_start values, newest first."""
+    import json as _json
+    with _lock:
+        conn = get_connection()
+        try:
+            weeks_rows = conn.execute(
+                "SELECT DISTINCT week_start FROM tuning_suggestions ORDER BY week_start DESC LIMIT ?",
+                (max(1, int(weeks)),),
+            ).fetchall()
+            if not weeks_rows:
+                return []
+            ws = [r[0] for r in weeks_rows]
+            q = ",".join("?" * len(ws))
+            rows = conn.execute(
+                f"SELECT * FROM tuning_suggestions WHERE week_start IN ({q}) "
+                "ORDER BY week_start DESC, built_at_utc DESC, id ASC", ws,
+            ).fetchall()
+        finally:
+            conn.close()
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["payload"] = _json.loads(d.pop("payload_json") or "{}")
+        except Exception:
+            d["payload"] = {}
+        out.append(d)
+    return out

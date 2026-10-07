@@ -597,9 +597,36 @@ per condition per date (dedupe via `acknowledge_warning`, keys `cosy_*_<date>`):
 entry, any write-verify mismatch, Daikin calls > `COSY_SCORECARD_QUOTA_ALERT` (150).
 `COSY_SCORECARD_ENABLED=false` switches the job off.
 
+### Weekly fine-tuning review (#832) — suggestions only
+
+`src/tuning_review.py`, APScheduler job `tuning_review_weekly` (Sunday 09:00 local:
+`TUNING_REVIEW_ENABLED=true`, `TUNING_REVIEW_DOW=6`, `TUNING_REVIEW_HOUR_LOCAL=9`).
+Replays the last 7 complete local days (`replay_day`, forward mode, live DB,
+`TUNING_REVIEW_CADENCE=stride:4` recalcs per day) with the control and each knob
+at +/-1 step (`LP_W3_NIGHT_FLOOR_C` 0.5, `LP_W3_PEAK_COAST_DELTA_C` 0.5,
+`INDOOR_SETPOINT_C` 0.5, `DHW_TEMP_NORMAL_C` 1,
+`LP_LOAD_EXPENSIVE_BAND_QUANTILE` p75<->p90 — now a runtime setting), via
+`lp_overrides.patched_config` (in-memory, restored; **it never calls
+`set_setting`**). Cost = replayed plan cost under actual prices; comfort = hours
+the predicted indoor trajectory is below the CONTROL's night floor / peak floor
+plus the tank shortfall at 20:00 vs `shower_windows`. Verdicts: `recommended`
+(saves >= 5 p/week, hours-below +<=0.5, no extra shower-shortfall day),
+`trade-off` (saves but costs comfort), `comfort-first` (cheapest zero-hours variant
+when the control has hours-below > 0); the rest is dropped. Rows land in
+`tuning_suggestions` with a PUT-ready payload (`PUT /api/v1/settings/{key}/simulate`
+then `PUT /api/v1/settings/{key}` + `X-Simulation-Id`, body `{"value": ...}`).
+`GET /api/v1/tuning/suggestions?weeks=4` (viewer), `POST /api/v1/tuning/run`
+(admin, single-flight 10 min, 409 when busy). One Telegram summary (top 3), muted
+when nothing is recommended. Insights card `TuningSuggestionsCard` (admin Apply =
+the Settings simulate->confirm->apply flow). Story-3 plug point:
+`external_comfort_signal(week_start)` (returns None today; the dict is stored in
+`payload.external_comfort`, ranking untouched). Skips when < `TUNING_REVIEW_MIN_DAYS`
+(3) replayable days, or when `DAIKIN_CONTROL_MODE=passive` / `LP_W3_TIN_ENABLED=false` (W3 knobs would be inert; forward mode uses the LIVE process config, recorded as `payload.context`). `DHW_DYNAMIC_BOOST_HOLD_HOURS` is NOT swept (its only reader is the persisted nightly window decision, never re-resolved by a replay). Replays seed W3 from `lp_inputs_snapshot.indoor_initial_c` and chain `plan.indoor_temp_c`. Single-flight has no TTL (variants share `config._overrides`); the per-day budget (~9 min) stops the run (status `partial`, persisted in the payload).
+
 ## Key `.env` settings to know
 
 ```
+TUNING_REVIEW_ENABLED=true                      # #832 — weekly suggestions-only review (Sun 09:00 local; see its subsection)
 OCTOPUS_TARIFF_STRUCTURE=auto                   # #804 — auto|banded|dynamic (dynamic = kill switch)
 FOX_SCHEDULER_WRITE_VERSION=v2                  # Open API version for the scheduler WRITE (#777).
                                                  # On 2026-08-06 Fox broke `/op/v3/device/scheduler/enable`

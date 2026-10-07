@@ -8,6 +8,7 @@ import { gbp, gbpSigned, kwh } from "../lib/format";
 import { makeChart, baseOption, chartTheme, barGradient, withAlpha, type EChartsType } from "../lib/charts";
 import type { FairTariffRow } from "../lib/types";
 import { LoadPatternCard } from "../components/insights/LoadPatternCard";
+import { TuningSuggestionsCard } from "../components/insights/TuningSuggestionsCard";
 import { LoadForecastAccuracyCard } from "../components/insights/LoadForecastAccuracyCard";
 import { SystemHealthCard } from "../components/insights/SystemHealthCard";
 import { CosyScorecardCard } from "../components/insights/CosyScorecardCard";
@@ -202,6 +203,7 @@ export default function Insights() {
       <SolarClearnessCard />
       <IndoorHistoryCard />
       <LoadPatternCard period={period} />
+      <TuningSuggestionsCard />
       <LoadForecastAccuracyCard period={period} />
       <SystemHealthCard period={period} />
       <CosyScorecardCard />
