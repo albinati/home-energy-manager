@@ -305,6 +305,33 @@ place that decides `banded` vs `dynamic` and derives thresholds:
   (`dhw_policy._evening_peak_entry_hour`, brief `_tariff_peak_windows_summary`).
 - Kill switch: `OCTOPUS_TARIFF_STRUCTURE=dynamic` → pre-#804 behaviour everywhere.
 
+## Battery policy on Cosy — battery-only arbitrage, no grid at peak (#806)
+
+Household policy for autumn/winter: **the battery never discharges to the grid
+and the 16–19 peak band is never bought from the grid.**
+
+- `LP_BATTERY_EXPORT_ENABLED=false` (prod; code default `true`): `exp <= pv_use`
+  in EVERY preset (vacation included), the pre-negative drain relaxation and
+  the export rank bonus are off, and `build_fox_groups_from_lp` downgrades any
+  `peak_export` / `pre_negative_export` slot to `standard` (`action_log`
+  `export_slot_suppressed`) — **no ForceDischarge group can be uploaded**.
+  Incidental PV surplus still exports (curtailing it earns nothing).
+- `LP_PEAK_IMPORT_PENALTY_PENCE_PER_KWH=100` (prod; default 0): soft cost on
+  `imp` inside the PEAK band (`plan.price_band == "peak"`, banded tariffs only;
+  `LP_PEAK_IMPORT_PENALTY_APPLY_DYNAMIC=true` extends it to Agile via
+  `price >= peak_thr`). A cost, never a constraint → a genuine shortfall still
+  imports instead of going Infeasible. `plan.peak_import_kwh` records what the
+  committed plan still buys at peak (target 0). The scenario solves share the
+  term, so the pessimistic SoC floor at 16:00 (`LP_PESS_CHARGE_FLOOR_SCOPE=
+  peak_entry`) already covers the whole peak under p75 load / PV×0.85.
+- Fox shape 16–19 = **SelfUse(reserve)**: the battery serves the house. Not
+  Backup (never discharges to loads → house grid-fed at 38p).
+- Heartbeat **peak-import guard** (`PEAK_IMPORT_GUARD_*`): in the PEAK band,
+  grid import ≥ 0.3 kW for 2 consecutive ticks → ONE `notify_risk` per peak
+  window (`warning_key=peak_import_<date>_<HHMM>`) + `action_log`
+  `peak_import_guard` + `PEAK_IMPORT_GUARD_ACTION=replan` (MPC re-solve,
+  `trigger_reason=peak_import`, runs the scenario stack). `none` = alert only.
+
 ## Key `.env` settings to know
 
 ```

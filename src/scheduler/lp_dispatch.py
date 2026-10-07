@@ -2053,6 +2053,23 @@ def build_fox_groups_from_lp(
     alongside the run_id.
     """
     slots, _decisions = filter_robust_peak_export(plan, scenarios, export_price_pence=export_price_pence)
+    # #806 structural invariant: with battery export disabled NO slot may map
+    # to ForceDischarge, whatever the LP produced (belt and braces over the LP
+    # constraint — a stale plan, a replay or a future relaxation can't leak).
+    if not bool(getattr(config, "LP_BATTERY_EXPORT_ENABLED", True)):
+        suppressed = [s for s in slots if s.kind in ("peak_export", "pre_negative_export")]
+        for s in suppressed:
+            s.kind = "standard"
+        if suppressed:
+            try:
+                db.log_action(
+                    device="fox", action="export_slot_suppressed",
+                    params={"n_slots": len(suppressed),
+                            "first_slot_utc": suppressed[0].start_utc.isoformat()},
+                    result="ok", trigger="dispatch",
+                )
+            except Exception as e:  # pragma: no cover — audit only
+                logger.debug("export_slot_suppressed log failed: %s", e)
     if slots:
         # < 24 h — the daily-cyclic collision fix (2026-07-04, the TRUE root
         # cause of the 06-28 + 07-04 negative-window leaks). Fox V3 groups
