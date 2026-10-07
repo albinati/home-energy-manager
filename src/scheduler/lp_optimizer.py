@@ -37,6 +37,22 @@ from .pv_trust import PvSufficiencyGuardDiag, evaluate_pv_sufficiency_guard
 logger = logging.getLogger(__name__)
 
 
+def dhw_block_ambient_c(initial: Any) -> float | None:
+    """#819 — the house temperature the LP-owned tank block coasts toward:
+    the initial state's ``indoor_temp_c`` when the caller set one (sensor seed
+    or a replay's historical value), else the live reading, else None (the
+    fit's mean indoor / databook decide)."""
+    v = getattr(initial, "indoor_temp_c", None)
+    if v is not None:
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            pass
+    from ..dhw.params import live_indoor_ambient_c
+
+    return live_indoor_ambient_c()
+
+
 @dataclass
 class LpInitialState:
     """Physical state at the start of slot 0.
@@ -697,12 +713,10 @@ def solve_lp(
 
         _preset_str = (config.OPTIMIZATION_PRESET or "normal").strip().lower()
         # #819 — the tank coasts toward the HOUSE temperature: seed the ambient
-        # from the LP's own indoor initial state (the sensor), else the live
-        # reading. Only an indoor-fitted UA honours it (see resolve_tank_params).
-        _indoor_amb = getattr(initial, "indoor_c", None)
-        if _indoor_amb is None:
-            _indoor_amb = live_indoor_ambient_c()
-        _tank_p = resolve_tank_params(ambient_c=_indoor_amb)
+        # from the LP's own indoor initial state (the sensor; a replay passes
+        # the historical value), else the live reading. Only an indoor-fitted
+        # UA honours it (see resolve_tank_params).
+        _tank_p = resolve_tank_params(ambient_c=dhw_block_ambient_c(initial))
         _dhw_floors = _dhw_comfort.comfort_floors_for_slots(
             list(slot_starts_utc), tz, preset=_preset_str,
             guest_count=int(getattr(config, "DHW_GUEST_COUNT", 2)),

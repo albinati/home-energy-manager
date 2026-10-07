@@ -107,8 +107,6 @@ def resolve_tank_params(*, ambient_c: float | None = None) -> TankParams:
     if ua is None or ambient is None:
         return databook
     indoor_fit = str(payload.get("ambient_model") or "") == "indoor_measured"
-    if indoor_fit and ambient_c is not None and 5.0 <= float(ambient_c) <= 35.0:
-        ambient = float(ambient_c)
 
     # The fit's own bounds already ran, but re-clamp at the door: the value about to
     # steer a real heat pump gets one last sanity check, independent of whoever wrote
@@ -120,10 +118,24 @@ def resolve_tank_params(*, ambient_c: float | None = None) -> TankParams:
     # ambient: prod 2026-10 ≈ 3.7 W/K) and a cold winter house can read below
     # 10 °C overnight only if the heating failed — keep that bound.
     ua_max = 6.0 if indoor_fit else 5.0
-    if not (1.0 <= ua <= ua_max) or not (10.0 <= ambient <= 30.0):
+    amb_max = 30.0 if indoor_fit else 28.0
+    if not (1.0 <= ua <= ua_max) or not (10.0 <= ambient <= amb_max):
         logger.warning("dhw.params: learned UA=%.2f ambient=%.1f out of range — databook",
                        ua, ambient)
         return databook
+    # The LIVE house temperature replaces the fit's mean indoor — CLAMPED, never
+    # rejected (review: a 30.5 °C summer house or a 9.5 °C heating-fault house
+    # used to flip every consumer back to the databook pair at the very moment
+    # the coast matters most). Clamp to the fitted range ±3 °C, within [8, 32].
+    if indoor_fit and ambient_c is not None:
+        try:
+            live = float(ambient_c)
+        except (TypeError, ValueError):
+            live = None
+        if live is not None and live == live:  # not NaN
+            lo = max(8.0, float(payload.get("ambient_min_c", ambient)) - 3.0)
+            hi = min(32.0, float(payload.get("ambient_max_c", ambient)) + 3.0)
+            ambient = min(hi, max(lo, live))
 
     logger.info("dhw.params: using MEASURED tank — UA=%.2f W/K, ambient=%.1f °C (r2=%.2f, n=%s)",
                 ua, ambient, row.get("r2") or 0.0, row.get("n_samples"))

@@ -184,8 +184,17 @@ tank ran on the databook pair (2.44 W/K, 22.4 °C effective) — which predicts
 - **Coast check telemetry**: nightly `dhw_calibration` component `coast_check`
   (+ `action_log` `tank_coast_check`): last episode's measured vs model °C/h at
   the episode's indoor, and `ratio_median_recent` over the last 7 episodes
-  (one night is ±30 % with 1 °C quantisation). Surfaced in
+  (one night is ±30 % with 1 °C quantisation). The model side is the params
+  that were STEERING before tonight's refit (read before the upsert), so it is
+  an out-of-sample check, not the fit's own residual. Surfaced in
   `/api/v1/status/feedback` → `dhw.tank_model`.
+- Live-ambient semantics: `resolve_tank_params(ambient_c=live)` CLAMPS the
+  live reading to the fitted indoor range ±3 °C (within 8–32) — never rejects
+  it (a 30.5 °C summer house or a 9.5 °C heating-fault house must not flip
+  the planner back to the databook pair). The indoor join in the fit is an
+  equal-weight mean across rooms of each room's episode mean (same definition
+  as `get_latest_indoor_reading`), needing ≥ 3 distinct timestamps spanning
+  ≥ 50 % of the episode.
 - NOT done here (decision 2026-10-07): `DHW_LP_OWNED_ENABLED` stays off — the
   shadow gate read median **−6.4 p/day** (LP-owned dearer) over 20 days with
   the mis-specified coast on both arms. Re-read `evaluate_gate()` after ≥ 7
