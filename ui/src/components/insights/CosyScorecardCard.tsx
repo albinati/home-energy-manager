@@ -2,7 +2,7 @@ import { useFetch } from "../../lib/poll";
 import { getCosyScorecard } from "../../lib/endpoints";
 import type { CosyScoreRow } from "../../lib/types";
 
-// "Cosy scorecard" — the nightly (07:30) server-side score of each day: did the
+// "Cosy scorecard" — the nightly server-side score of each day: did the
 // house buy at the cheap band and stay off the peak, was the load forecast
 // right, was it comfortable, did the hardware behave. Read-only; one row per
 // local day, newest first. Details per band live in the row tooltip.
@@ -35,7 +35,7 @@ export function CosyScorecardCard() {
     <section class={`cosyscore${res.loading && res.data ? " is-updating" : ""}`}>
       <header class="cosyscore-head">
         <h2>Cosy scorecard</h2>
-        <span class="muted">last {rows.length || 14} days · scored 07:30</span>
+        <span class="muted">last {rows.length || 14} days{rows[0]?.scheduled_at_local ? ` · scored ${rows[0].scheduled_at_local}` : ""}</span>
       </header>
       {rows.length === 0 ? (
         <p class="muted insights-empty">No scored days yet.</p>

@@ -1519,6 +1519,8 @@ export interface CosyScoreRow {
   ideal_avg_import_p: number | null;
   net_cost_gbp: number | null;
   built_at_utc: string;
+  scored_at_local?: string | null;
+  scheduled_at_local?: string | null;
   bands?: CosyScoreBand[] | null;
   peak_under_forecast?: boolean | null;
   battery?: { cycles?: number | null; pess_floor?: { floor_binding_slots?: number | null } } | null;

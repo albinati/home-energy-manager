@@ -5069,8 +5069,11 @@ def save_indoor_readings(readings: list[dict[str, Any]]) -> int:
 def get_soc_pct_at(ts_utc: datetime, max_gap_minutes: int = 20) -> float | None:
     """Battery SoC (%) of the ``pv_realtime_history`` sample nearest to
     ``ts_utc`` within ±``max_gap_minutes``, else None (#831)."""
-    lo = (ts_utc - timedelta(minutes=max_gap_minutes)).astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    hi = (ts_utc + timedelta(minutes=max_gap_minutes)).astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Stored forms are both ``...Z`` and ``...+00:00``: pad the SQL range by 1 s
+    # (they differ at that character) and apply the exact gap in Python.
+    pad = timedelta(seconds=1)
+    lo = (ts_utc - timedelta(minutes=max_gap_minutes) - pad).astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    hi = (ts_utc + timedelta(minutes=max_gap_minutes) + pad).astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     with _lock:
         conn = get_connection()
         try:
@@ -5087,6 +5090,8 @@ def get_soc_pct_at(ts_utc: datetime, max_gap_minutes: int = 20) -> float | None:
         if t is None:
             continue
         gap = abs((t - ts_utc).total_seconds())
+        if gap > max_gap_minutes * 60:
+            continue
         if best is None or gap < best[0]:
             best = (gap, float(r["soc_pct"]))
     return None if best is None else best[1]

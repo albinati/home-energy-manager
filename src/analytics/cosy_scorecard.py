@@ -7,14 +7,15 @@ It never changes a setting. Every section is independently guarded so a
 missing input degrades that section to ``None`` rather than losing the day.
 
 Alerts (one ``notify_risk`` each, deduped per date with
-``db.acknowledge_warning``): 3 consecutive days of peak-band load
-under-forecast; tank below a shower-window floor at entry; any
-``daikin_write_verify`` mismatch; Daikin quota above
+``db.acknowledge_warning``; a final ``daikin_write_verify`` failure is NOT
+re-alerted here — the verifier notifies once itself): 3 consecutive days of peak-band load
+under-forecast; tank below a shower-window floor at entry; Daikin quota above
 ``COSY_SCORECARD_QUOTA_ALERT``.
 """
 from __future__ import annotations
 
 import logging
+import time
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -122,7 +123,9 @@ def _soc(day: date, tz: ZoneInfo) -> dict[str, Any]:
     edges = []
     for label, d, h in (("07:00", day, 7), ("16:00", day, 16), ("00:00", day + timedelta(days=1), 0)):
         t = datetime(d.year, d.month, d.day, h, tzinfo=tz).astimezone(UTC)
-        planned = committed.get(t)
+        # soc_kwh of an LP slot is the END-of-slot SoC, so the at-instant plan
+        # value for an edge is the slot that ENDS there (starts 30 min earlier).
+        planned = committed.get(t - timedelta(minutes=30))
         pct = db.get_soc_pct_at(t)
         real_kwh = (pct / 100.0 * cap) if (pct is not None and cap) else None
         edges.append({
@@ -262,13 +265,19 @@ def _lwt(day: date, tz: ZoneInfo, a: datetime, b: datetime) -> dict[str, Any]:
                 n_pre += 1
             else:
                 n_restore += 1
-    verify = {"success": 0, "unverified": 0, "mismatch": 0}
+    # "mismatch" counts only FINAL failures (attempt >= 2 — the verifier already
+    # notified once for those); a first-attempt failure is a retry, informational.
+    verify = {"success": 0, "unverified": 0, "mismatch": 0, "retried": 0}
     for r in db.get_action_logs(device="daikin", action="daikin_write_verify", since=a.isoformat(), limit=1000):
         t = _parse(r.get("timestamp"))
         if t is None or t >= b:
             continue
         res = str(r.get("result") or "")
-        verify["success" if res == "success" else ("mismatch" if res == "failure" else "unverified")] += 1
+        if res == "failure":
+            final = int((r.get("params") or {}).get("attempt") or 1) >= 2
+            verify["mismatch" if final else "retried"] += 1
+        else:
+            verify["success" if res == "success" else "unverified"] += 1
     diff: dict[str, Any] = {}
     for r in db.get_action_logs(device="daikin", action="lwt_source_diff", since=a.isoformat(), limit=200):
         t = _parse(r.get("timestamp"))
@@ -283,16 +292,70 @@ def _lwt(day: date, tz: ZoneInfo, a: datetime, b: datetime) -> dict[str, Any]:
 def _ops(a: datetime, b: datetime) -> dict[str, Any]:
     from .. import api_quota
 
-    out: dict[str, Any] = {"daikin_calls": api_quota.count_calls_between("daikin", a.timestamp(), b.timestamp())}
+    # api_call_log keeps 48 h: an older day would read as a false 0.
+    retained = a.timestamp() >= time.time() - 48 * 3600
+    out: dict[str, Any] = {
+        "daikin_calls": api_quota.count_calls_between("daikin", a.timestamp(), b.timestamp()) if retained else None
+    }
     out["daikin_budget"] = int(getattr(config, "DAIKIN_DAILY_BUDGET", 180))
     fails = 0
-    for r in db.get_action_logs(device="fox", since=a.isoformat(), limit=2000):
+    for r in db.get_action_logs(device="foxess", since=a.isoformat(), limit=2000):
         t = _parse(r.get("timestamp"))
         if t is None or t >= b:
             continue
         if str(r.get("result") or "").lower() in ("failure", "failed", "error"):
             fails += 1
     out["fox_failures"] = fails
+    return out
+
+
+def _spend(day: date, windows: list[Any], tz: ZoneInfo, a: datetime, b: datetime) -> dict[str, Any]:
+    """REALISED import kWh / £ / avg p / peak kWh / score from the Fox grid-import
+    roll-up × per-slot prices. DB-only (no PnL, no HTTP) and always realised for
+    a completed day, whatever the import volume."""
+    from ..energy.tariff_structure import detect, is_tou_family
+    from . import plan_fronts as pf
+
+    code = str(getattr(config, "OCTOPUS_TARIFF_CODE", "") or "")
+    prices = pf.day_prices(day, windows, tz)
+    out: dict[str, Any] = {
+        "has_telemetry": False, "import_kwh": None, "import_cost_gbp": None, "avg_import_p": None,
+        "peak_import_kwh": None, "ideal_avg_import_p": None, "score": None,
+        "score_thresholds": {"ideal_max_p": None, "above_min_p": None},
+    }
+    roll = db.half_hourly_kwh_for_utc_range(a, b, "grid_import_kw")
+    out["has_telemetry"] = bool(roll)
+    if not prices:
+        return out
+    struct = detect(list(prices.values()), short_ok=is_tou_family(code))
+    mean_price = sum(prices.values()) / len(prices)
+    kwh = cost_p = peak = 0.0
+    for iso, v in roll.items():
+        t = _parse(iso)
+        if t is None:
+            continue
+        price = prices.get(t, mean_price)
+        kwh += float(v)
+        cost_p += float(v) * price
+        if struct.peak_thr > 0 and price >= struct.peak_thr:
+            peak += float(v)
+    if not roll:
+        return out
+    banded = bool(struct.is_banded)
+    if banded and struct.cheap_level is not None:
+        ideal, above = float(struct.cheap_level), float(struct.cheap_thr)
+    else:
+        ideal = float(struct.cheap_thr)
+        vs = sorted(prices.values())
+        above = vs[len(vs) // 2]
+    ratio = float(getattr(config, "SPEND_SCORE_IDEAL_RATIO", 1.15))
+    avg = (cost_p / kwh) if kwh > 0 else None
+    out.update({
+        "import_kwh": _r(kwh, 3), "import_cost_gbp": _r(cost_p / 100.0, 3),
+        "avg_import_p": _r(avg), "peak_import_kwh": _r(peak, 3), "ideal_avg_import_p": _r(ideal),
+        "score_thresholds": {"ideal_max_p": _r(ideal * ratio), "above_min_p": _r(above)},
+        "score": pf.spend_score(avg, peak, ideal, above, ratio, banded=banded),
+    })
     return out
 
 
@@ -308,10 +371,10 @@ def build_scorecard(day: date, *, tz: ZoneInfo | None = None) -> dict[str, Any]:
     windows, structure = band_windows_for_day(day, tz)
     payload: dict[str, Any] = {"structure": structure, "tz": str(tz.key)}
 
-    spend = _section("spend", pf.spend_section, day, windows, datetime.now(UTC), tz)
-    spend = dict(spend) if isinstance(spend, dict) else {}
-    spend.pop("period", None)
+    spend = _section("spend", _spend, day, windows, tz, a, b)
+    spend = spend if isinstance(spend, dict) else {}
     payload["spend"] = spend
+    payload["has_telemetry"] = bool(spend.get("has_telemetry"))
 
     bands = _section("bands", _bands, day, windows, tz, a, b)
     payload["bands"] = bands.get("bands") if isinstance(bands, dict) else bands
@@ -335,7 +398,7 @@ def build_scorecard(day: date, *, tz: ZoneInfo | None = None) -> dict[str, Any]:
 
     money: dict[str, Any] = {}
     try:
-        p = pnl.compute_daily_pnl(day)
+        p = pnl.compute_daily_pnl(day, standing_source="manual")  # ONCE; DB-only
         money = {
             "realised_net_cost_gbp": _r(p.get("realised_net_cost_gbp"), 4),
             "delta_vs_fixed_tariff_real_gbp": _r(p.get("delta_vs_fixed_tariff_real_gbp"), 4),
@@ -350,15 +413,13 @@ def build_scorecard(day: date, *, tz: ZoneInfo | None = None) -> dict[str, Any]:
     payload["money"] = money
 
     peak_kwh = spend.get("peak_import_kwh")
-    if peak_kwh is None and peak_bands:
-        peak_kwh = sum(x.get("import_kwh") or 0.0 for x in peak_bands)
     return {
         "date": day.isoformat(),
         "score": spend.get("score"),
         "peak_import_kwh": _r(peak_kwh, 3),
-        "import_kwh": spend.get("realised_import_kwh"),
-        "import_cost_gbp": spend.get("realised_import_cost_gbp"),
-        "avg_import_p": spend.get("realised_avg_import_p"),
+        "import_kwh": spend.get("import_kwh"),
+        "import_cost_gbp": spend.get("import_cost_gbp"),
+        "avg_import_p": spend.get("avg_import_p"),
         "ideal_avg_import_p": spend.get("ideal_avg_import_p"),
         "net_cost_gbp": money.get("realised_net_cost_gbp"),
         "payload": payload,
@@ -389,15 +450,12 @@ def evaluate_alerts(row: dict[str, Any]) -> list[tuple[str, str]]:
             for i in (1, 2)
         )
         if streak:
-            out.append((f"cosy_peak_underforecast_{day}",
+            out.append((f"cosy_peak_underforecast_{(d - timedelta(days=2)).isoformat()}",
                         f"Peak-band load under-forecast 3 days running (to {day}) - the battery may be sized too small for the peak."))
     low = [s for s in ((p.get("tank") or {}).get("showers") or []) if s.get("below_floor")]
     if low:
         txt = ", ".join(f"{s['label']} {s['tank_c']}C < {s['floor_c']}C at {s['entry_local']}" for s in low)
         out.append((f"cosy_tank_floor_{day}", f"Tank below the shower floor on {day}: {txt}."))
-    mism = int(((p.get("lwt") or {}).get("write_verify") or {}).get("mismatch") or 0)
-    if mism > 0:
-        out.append((f"cosy_verify_mismatch_{day}", f"{mism} Daikin write(s) failed verification on {day}."))
     calls = (p.get("ops") or {}).get("daikin_calls")
     lim = int(getattr(config, "COSY_SCORECARD_QUOTA_ALERT", 150))
     if calls is not None and int(calls) > lim:
@@ -431,21 +489,39 @@ def run_for_day(day: date) -> dict[str, Any]:
 
 
 def backfill_missing(*, days: int = 7, today: date | None = None) -> list[str]:
-    """Score every missing local day in the last ``days`` (yesterday back).
-    Alerts are NOT fired for backfilled days older than yesterday."""
+    """Score every missing day of the last ``days`` (yesterday back) and re-score
+    rows built within 48 h of their day (late Octopus/Fox data corrects them).
+    Yesterday goes through ``run_for_day`` (with alerts, deduped); older days are
+    build+persist only. Days with no grid telemetry are skipped."""
     tz = _tz()
     today = today or datetime.now(tz).date()
-    have = {r["date"] for r in db.get_cosy_scorecards(days + 2)}
+    have = {r["date"]: r for r in db.get_cosy_scorecards(days + 2)}
     done: list[str] = []
     for i in range(1, days + 1):
         d = today - timedelta(days=i)
-        if d.isoformat() in have or d < _start_clamp():
+        if d < _start_clamp():
             continue
+        existing = have.get(d.isoformat())
+        if existing is not None:
+            built = _parse(existing.get("built_at_utc"))
+            day_end = datetime(d.year, d.month, d.day, tzinfo=tz).astimezone(UTC) + timedelta(days=1)
+            if built is None or built - day_end >= timedelta(hours=48):
+                continue  # settled
         try:
-            row = build_scorecard(d)
-            if row.get("import_kwh") is None and row.get("score") is None:
-                continue  # nothing measured for that day yet
-            persist_scorecard(row)
+            if d == today - timedelta(days=1):
+                row = build_scorecard(d)
+                if not row["payload"].get("has_telemetry"):
+                    continue
+                persist_scorecard(row)
+                try:
+                    fire_alerts(row)
+                except Exception:  # noqa: BLE001
+                    logger.warning("cosy_scorecard: alerting failed (non-fatal)", exc_info=True)
+            else:
+                row = build_scorecard(d)
+                if not row["payload"].get("has_telemetry"):
+                    continue
+                persist_scorecard(row)
             done.append(d.isoformat())
         except Exception:  # noqa: BLE001
             logger.warning("cosy_scorecard backfill %s failed", d, exc_info=True)

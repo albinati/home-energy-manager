@@ -794,11 +794,13 @@ def register_cosy_scorecard_jobs(scheduler: Any, tz: ZoneInfo) -> bool:
         cosy_scorecard_job,
         CronTrigger(hour=config.COSY_SCORECARD_HOUR_LOCAL, minute=config.COSY_SCORECARD_MINUTE, timezone=tz),
         id="cosy_scorecard",
+        misfire_grace_time=600,
     )
     scheduler.add_job(
         cosy_scorecard_boot_backfill_job,
         DateTrigger(run_date=datetime.now(UTC) + timedelta(seconds=120)),
         id="cosy_scorecard_boot",
+        misfire_grace_time=600,
     )
     logger.info("Cosy scorecard cron: %02d:%02d (%s)",
                 config.COSY_SCORECARD_HOUR_LOCAL, config.COSY_SCORECARD_MINUTE, tz)
