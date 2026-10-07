@@ -615,6 +615,16 @@ def w3_trajectory_plausible(plan: LpPlan) -> tuple[bool, str]:
     traj = plan.indoor_temp_c or []
     if not traj or not plan.lwt_offset_c:
         return False, "no_trajectory"
+    # Primary signal (review 2): the comfort slack. The LP pays 15 p/°C-slot
+    # for it, so it is non-zero ONLY where the pump cannot hold the per-slot
+    # floor — an unfitted UA shows up here in ordinary UK weather long before
+    # the absolute band below would trip.
+    slack = plan.comfort_slack_c or []
+    s_tol = float(getattr(config, "LP_W3_SLACK_TOL_C", 0.1))
+    max_slack_slots = int(getattr(config, "LP_W3_MAX_SLACK_SLOTS", 4))
+    n_slack = sum(1 for s in slack if float(s) > s_tol)
+    if n_slack > max_slack_slots:
+        return False, f"comfort_slack:{n_slack}_slots>{max_slack_slots}"
     floor = float(getattr(config, "LP_W3_NIGHT_FLOOR_C", 17.5))
     setpoint = float(config.INDOOR_SETPOINT_C)
     tol = float(getattr(config, "LP_W3_IMPLAUSIBLE_BELOW_FLOOR_C", 2.0))
@@ -721,10 +731,13 @@ def smooth_lp_offsets(offsets: list[int | None], min_block: int) -> list[int | N
     """Block-ify the LP's per-slot offsets by SIGN before the length filter
     (#808 review): the LP signal is the rounded inverse of a continuous ramp
     (``3,5,5,4,5``), so the value-run smoother shredded every boost into
-    fragments and inserted restore-to-0 writes. Each run of same-sign non-zero
-    slots becomes one block at its most common value (ties → the smaller
-    magnitude), then ``smooth_lwt_offsets`` drops blocks shorter than
-    ``min_block``."""
+    fragments and inserted restore-to-0 writes. A run of same-sign non-zero
+    slots is split where neighbours differ by ≥ 3 (a +5 pre-heat followed by
+    a +1 top-up stays two blocks) and each block takes its energy-preserving
+    MEAN (rounded half-up toward +∞); then ``smooth_lwt_offsets`` drops blocks
+    shorter than ``min_block``. ``min_block <= 1`` returns the input as-is."""
+    if min_block <= 1:
+        return list(offsets)
     n = len(offsets)
     out: list[int | None] = list(offsets)
     i = 0
@@ -735,15 +748,15 @@ def smooth_lp_offsets(offsets: list[int | None], min_block: int) -> list[int | N
             continue
         sign = 1 if v > 0 else -1
         j = i
-        while j + 1 < n and out[j + 1] and (out[j + 1] > 0) == (sign > 0):
+        while (
+            j + 1 < n and out[j + 1] and (out[j + 1] > 0) == (sign > 0)
+            and abs(int(out[j + 1]) - int(out[j])) < 3
+        ):
             j += 1
         block = [int(out[k]) for k in range(i, j + 1)]
-        counts: dict[int, int] = {}
-        for b in block:
-            counts[b] = counts.get(b, 0) + 1
-        mode = sorted(counts.items(), key=lambda kv: (-kv[1], abs(kv[0])))[0][0]
+        mean_v = int(math.floor(sum(block) / len(block) + 0.5))
         for k in range(i, j + 1):
-            out[k] = mode
+            out[k] = mean_v
         i = j + 1
     return smooth_lwt_offsets(out, min_block)
 

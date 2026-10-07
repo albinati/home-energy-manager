@@ -392,10 +392,13 @@ disagreeing `windows`); **`DAIKIN_LWT_SOURCE`** (runtime-tunable, `PUT
 - When `DAIKIN_LWT_SOURCE=lp` the LP's `e_space` ceiling is capped at the ±5
   clamp so the plan never assumes more lift than the device will get.
 - **Plausibility gate** (`w3_trajectory_plausible`): the LP source is
-  unavailable (diff row `lp_available=false`, `lp_reason`) when any predicted
-  indoor value is more than `LP_W3_IMPLAUSIBLE_BELOW_FLOOR_C` (2.0) under the
-  night floor or 2× that above the setpoint — the signature of an RC model
-  that cannot hold the house (unfitted UA/k). The predicted trajectory is
+  unavailable (diff row `lp_available=false`, `lp_reason`) when the plan
+  carries comfort SLACK (`plan.comfort_slack_c` > `LP_W3_SLACK_TOL_C` 0.1 °C)
+  in more than `LP_W3_MAX_SLACK_SLOTS` (4) slots — slack is only ever used
+  when the pump cannot hold the per-slot floor, i.e. the RC model cannot hold
+  the house (unfitted UA/k) — or when any predicted value is more than
+  `LP_W3_IMPLAUSIBLE_BELOW_FLOOR_C` (2.0) under the night floor / 2× that
+  above the setpoint. The predicted trajectory is
   NEVER used to veto the plan's own offsets (that was circular); the only guard
   on LP offsets is the LIVE reading, on slots near now, boost side. The `tier`
   rule never reads the trajectory, so `DAIKIN_LWT_SOURCE=tier` is a true kill
@@ -406,9 +409,13 @@ disagreeing `windows`); **`DAIKIN_LWT_SOURCE`** (runtime-tunable, `PUT
   outdoor it can hold the house only up to UA ≈ 200 W/K. The env default
   `BUILDING_UA_W_PER_K=600` (and C = τ·UA ≈ 50 kWh/K) makes the trajectory
   fall monotonically and the comfort slack dominate the objective. Prod pins
-  `BUILDING_UA_W_PER_K=200` (provisional; C = 82.7 h × 200 ≈ 16.5 kWh/K) until
-  `fit_ua_hdd` learns from ≥ 20 heating days; the gate above refuses garbage
-  regardless.
+  `BUILDING_UA_W_PER_K=200` (provisional; C = 82.7 h × 200 ≈ 16.5 kWh/K). NB
+  `get_building_ua_w_per_k()` PREFERS a learned value in (100, 1500): once
+  `fit_ua_hdd` converges (≥ 20 heating days; last winter's HDD regression gave
+  520–730 W/K, which the pump model cannot hold) it silently overrides the pin
+  — the slack gate is what keeps a non-holdable model off the hardware. Kill
+  switches: `LP_W3_TIN_ENABLED=false` (the model), `DAIKIN_LWT_SOURCE=tier`
+  (the hardware path).
 - Rollout: deploy with `tier` → read `lwt_source_diff` + `plan.indoor_temp_c`
   for a day (`lp_available=true`, boosts only in cheap bands, setbacks only in
   the peak, trajectory within 17–23 °C) → `PUT /api/v1/settings`

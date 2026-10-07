@@ -87,6 +87,17 @@ def test_lp_source_falls_back_to_tier_without_indoor_trajectory():
     assert offs == [-2, 3]  # the tier rule's cheap boost + peak setback
 
 
+def test_comfort_slack_makes_lp_unavailable():
+    """UA=600 in ordinary UK weather keeps the trajectory inside the absolute
+    band but the pump cannot hold the floor → slack in many slots → refused."""
+    plan = _plan(lwt=[5.0] * 8, indoor=[20.4] * 9, bands=["standard"] * 8)
+    plan.comfort_slack_c = [0.0, 0.0, 0.3, 0.6, 0.8, 0.9, 1.0, 1.1]  # 6 slots > 0.1
+    ok, reason = w3_trajectory_plausible(plan)
+    assert not ok and reason.startswith("comfort_slack:6_slots")
+    plan.comfort_slack_c = [0.0] * 6 + [0.2, 0.3]  # 2 slots: a real cold-snap dip is tolerated
+    assert w3_trajectory_plausible(plan)[0]
+
+
 def test_implausible_trajectory_makes_lp_unavailable_and_tier_unchanged():
     """UA unfitted → the RC model cannot hold the house → predicted indoor
     falls far below the night floor. The LP source must be unavailable and the
@@ -146,7 +157,8 @@ def test_w3_on_tier_equals_w3_off_tier_for_same_live_reading():
     exactly the pairs it yields with the model off."""
     bands = ["cheap"] * 6 + ["standard"] * 4 + ["peak"] * 6
     off_plan = _plan(n=16, bands=bands)
-    on_plan = _plan(n=16, bands=bands, lwt=[5.0] * 16, indoor=[19.0 - 0.3 * i for i in range(17)])
+    on_plan = _plan(n=16, bands=bands, lwt=[5.0] * 16, indoor=[21.0] * 17)  # PLAUSIBLE trajectory
+    assert w3_trajectory_plausible(on_plan)[0]
     for live in (None, 20.0, 22.5):
         assert _lwt_preheat_pairs(on_plan, [], indoor_c=live, source="tier") == \
             _lwt_preheat_pairs(off_plan, [], indoor_c=live, source="tier")
@@ -157,10 +169,16 @@ def test_w3_on_tier_equals_w3_off_tier_for_same_live_reading():
 
 def test_smooth_lp_offsets_blockifies_by_sign():
     """The LP signal ramps (3,5,5,4,5); value-run smoothing shredded it into
-    fragments and restore writes. Sign blocks keep the boost whole."""
+    fragments and restore writes. Sign blocks keep the boost whole, at the
+    block's mean."""
     seq = [3, 5, 5, 4, 5, 0, -2, -3, -2, -2, None, None]
-    assert smooth_lp_offsets(seq, 4) == [5, 5, 5, 5, 5, 0, -2, -2, -2, -2, None, None]
+    assert smooth_lp_offsets(seq, 4) == [4, 4, 4, 4, 4, 0, -2, -2, -2, -2, None, None]
     assert smooth_lp_offsets([3, 4, 0, 0, 5, 5, 5, 5], 4) == [0, 0, 0, 0, 5, 5, 5, 5]
+    # a +5 pre-heat followed by a +1 top-up stays two blocks (split at |Δ| ≥ 2)
+    assert smooth_lp_offsets([5] * 6 + [1] * 8, 4) == [5] * 6 + [1] * 8
+    # a monotone ramp keeps its energy (mean 3), not its smallest value
+    assert smooth_lp_offsets([1, 2, 3, 4, 5], 4) == [3] * 5
+    assert smooth_lp_offsets([1, 2, 3], 1) == [1, 2, 3]  # min_block 1: as-is
 
 
 def test_solved_plan_through_lp_pairs_with_prod_min_block(monkeypatch):
@@ -174,11 +192,16 @@ def test_solved_plan_through_lp_pairs_with_prod_min_block(monkeypatch):
     pairs = _pairs_from_offsets(plan, offs, source="lp")
     assert pairs
     cheap_pm = [plan.slot_starts_utc[i] for i, p in enumerate(prices) if p == COSY_CHEAP and 26 <= i < 32]
+    covering = []
     for _, act in pairs:
         st = datetime.fromisoformat(act["start_time"].replace("Z", "+00:00"))
         en = datetime.fromisoformat(act["end_time"].replace("Z", "+00:00"))
-        if any(st <= s < en for s in cheap_pm):
-            assert act["params"]["lwt_offset"] > 0
+        hits = [s for s in cheap_pm if st <= s < en]
+        if hits:
+            assert act["params"]["lwt_offset"] >= 3, act
+            covering.append((act, hits))
+    # exactly one boost window covers all six 13-16 slots; no setback touches them
+    assert len(covering) == 1 and len(covering[0][1]) == 6
 
 
 # ── source switch + telemetry diff ───────────────────────────────────────────
@@ -343,6 +366,7 @@ def _solve_w3(monkeypatch, *, source: str):
 def test_cosy_plan_heats_in_cheap_bands_and_coasts_in_peak(monkeypatch):
     plan, prices = _solve_w3(monkeypatch, source="tier")
     assert plan.indoor_temp_c and len(plan.indoor_temp_c) == len(prices) + 1
+    assert len(plan.comfort_slack_c) == len(prices) and w3_trajectory_plausible(plan)[0]
     peak = [i for i, p in enumerate(prices) if p == COSY_PEAK]
     cheap_pm = [i for i, p in enumerate(prices) if p == COSY_CHEAP and 26 <= i < 32]  # 13-16 local
     e_peak = sum(plan.space_electric_kwh[i] for i in peak)

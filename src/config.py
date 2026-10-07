@@ -956,6 +956,11 @@ class Config:
     # more than 2× this above the setpoint) means the RC model cannot hold the
     # house (unfitted UA/k) — the LP source is then unavailable for that plan.
     LP_W3_IMPLAUSIBLE_BELOW_FLOOR_C: float = float(os.getenv("LP_W3_IMPLAUSIBLE_BELOW_FLOOR_C", "2.0"))
+    # Comfort-slack gate: the LP uses slack only when the pump cannot hold the
+    # floor. More than MAX_SLACK_SLOTS slots with slack > SLACK_TOL_C → the
+    # model cannot hold the house → LP source unavailable for that plan.
+    LP_W3_SLACK_TOL_C: float = float(os.getenv("LP_W3_SLACK_TOL_C", "0.1"))
+    LP_W3_MAX_SLACK_SLOTS: int = int(os.getenv("LP_W3_MAX_SLACK_SLOTS", "4"))
     # LWT pre-heat demand gate: drop phantom single-quantum onecta_cache
     # buckets (the #760 learner guard) before summing trailing heating (#749/#807).
     DAIKIN_LWT_PREHEAT_DEMAND_GATE_PHANTOM_FILTER: bool = os.getenv(

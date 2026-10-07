@@ -84,6 +84,11 @@ class LpPlan:
     tank_temp_c: list[float] = field(default_factory=list)   # len N+1
     soc_kwh: list[float] = field(default_factory=list)       # len N+1
     indoor_temp_c: list[float] = field(default_factory=list)  # len N+1; W3 (#540), empty when off
+    comfort_slack_c: list[float] = field(default_factory=list)
+    """W3 per-slot comfort-floor shortfall (°C, len N). Non-zero ONLY when the
+    pump physically cannot hold the floor — the precise signature of an RC
+    model that cannot hold the house (unfitted UA/k), used by the dispatch
+    plausibility gate (#808)."""
     temp_outdoor_c: list[float] = field(default_factory=list)
     dhw_lp_owned: bool = False
     """True when the LP timed the tank itself (#714) rather than following the K1
@@ -1796,6 +1801,8 @@ def solve_lp(
         )
         if w3:
             plan.indoor_temp_c.append(_v(t_in[i]))
+            if i < n:
+                plan.comfort_slack_c.append(_v(s_lo[i]))
 
     plan.dhw_lp_owned = _lp_owned
     if peak_import_idx:
