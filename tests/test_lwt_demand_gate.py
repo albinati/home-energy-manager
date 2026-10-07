@@ -450,3 +450,46 @@ def test_phantom_filter_kill_switch(monkeypatch):
     y = _yesterday_local()
     _seed_2h_src(y.date().isoformat(), 11, 1.0, "onecta_cache")
     assert _space_heating_demand_present() is True  # pre-#807 behaviour
+
+
+def test_phantom_filter_fails_open_without_outdoor_series(monkeypatch):
+    """No meteo rows → the guard cannot judge → rows kept → gate opens (the
+    documented fail-open; a summer meteo outage re-enables #749)."""
+    from src.scheduler.lp_dispatch import _space_heating_demand_present
+
+    monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_DEMAND_GATE_PHANTOM_FILTER", True, raising=False)
+    monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_MIN_TRAILING_HEATING_KWH", 0.5, raising=False)
+    _patch_curve_kw(monkeypatch, 0.0)
+    y = _yesterday_local()
+    _seed_2h_src(y.date().isoformat(), 11, 1.0, "onecta_cache")
+    assert _space_heating_demand_present() is True
+
+
+def test_real_curve_keeps_mild_autumn_bucket_and_zeroes_warm_one(monkeypatch):
+    """Unpatched weather curve (18→22 / −5→45 LWT): a 1.0 kWh onecta_cache
+    bucket is kept at 14 °C (plausible ≈ 0.5 kWh) and zeroed at 19 °C (curve
+    cutoff 18 °C → compressor off)."""
+    from src.scheduler.lp_dispatch import _space_heating_demand_present
+
+    monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_DEMAND_GATE_PHANTOM_FILTER", True, raising=False)
+    monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_MIN_TRAILING_HEATING_KWH", 0.5, raising=False)
+    monkeypatch.setattr(app_config, "DAIKIN_WEATHER_CURVE_HIGH_C", 18.0, raising=False)
+    y = _yesterday_local()
+    _seed_outdoor(14.0)
+    _seed_2h_src(y.date().isoformat(), 11, 1.0, "onecta_cache")
+    assert _space_heating_demand_present() is True
+    _seed_outdoor(19.0)
+    assert _space_heating_demand_present() is False
+
+
+def test_non_candidate_rows_untouched_by_gate_filter(monkeypatch):
+    """A 2.0 kWh claim and a telemetry_integral row are never zeroed."""
+    from src.scheduler.lp_dispatch import _space_heating_demand_present
+
+    monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_DEMAND_GATE_PHANTOM_FILTER", True, raising=False)
+    monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_MIN_TRAILING_HEATING_KWH", 0.5, raising=False)
+    _patch_curve_kw(monkeypatch, 0.0)
+    _seed_outdoor(19.0)
+    y = _yesterday_local()
+    _seed_2h_src(y.date().isoformat(), 11, 1.0, "telemetry_integral")
+    assert _space_heating_demand_present() is True

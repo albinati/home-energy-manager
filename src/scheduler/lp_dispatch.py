@@ -1123,8 +1123,9 @@ def _demand_gate_rows_filter(lookback_hours: int):
     radiator boosts in July. The thermal learner already drops exactly those
     claims when the site's weather curve says the compressor was essentially
     OFF (``thermal_learning.sanitize_phantom_heating``, #760); the gate now
-    applies the same guard. Returns ``None`` (no filtering) when disabled or
-    when the outdoor series cannot be built — fail-open, as before.
+    applies the same guard. Returns ``None`` (no filtering) when disabled.
+    An empty outdoor series (meteo outage) keeps every row — fail-open, as
+    before, which means a summer meteo outage re-enables the #749 failure.
     """
     if not bool(getattr(config, "DAIKIN_LWT_PREHEAT_DEMAND_GATE_PHANTOM_FILTER", True)):
         return None
@@ -1140,12 +1141,15 @@ def _demand_gate_rows_filter(lookback_hours: int):
     def _filter(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         try:
             outdoor = _outdoor_series(start_day, end_day)
-            cleaned, n_phantom = sanitize_phantom_heating(rows, outdoor, tz)
+            cleaned, n_phantom = sanitize_phantom_heating(
+                rows, outdoor, tz,
+                max_plausible_kwh=float(getattr(config, "THERMAL_PHANTOM_MAX_PLAUSIBLE_KWH", 0.15)),
+            )
         except Exception:  # pragma: no cover — filter must never break the gate
             logger.debug("demand-gate phantom filter failed; using raw rows", exc_info=True)
             return rows
         if n_phantom:
-            logger.info("LWT demand gate: dropped %d phantom onecta_cache 1.0 kWh bucket(s) (#749)", n_phantom)
+            logger.debug("LWT demand gate: zeroed %d phantom onecta_cache 1.0 kWh bucket(s) (#749)", n_phantom)
         return cleaned
 
     return _filter

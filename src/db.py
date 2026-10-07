@@ -4531,11 +4531,6 @@ def measured_space_heating_kwh_excluding_offset_windows(
     end_date = now_local.date().isoformat()
 
     rows = get_daikin_consumption_2hourly_range(start_date, end_date)
-    if rows and rows_filter is not None:
-        # #749/#807: let the caller drop phantom single-quantum onecta_cache
-        # buckets (the #760 learner guard) BEFORE the sum — the gate used to
-        # count them as demand and arm summer boosts off counter blips.
-        rows = rows_filter(rows)
     if not rows:
         # No 2-hourly split cached. The daily totals CANNOT be decontaminated
         # (no intra-day resolution), so falling back to them while offset
@@ -4559,6 +4554,13 @@ def measured_space_heating_kwh_excluding_offset_windows(
         daily = get_daikin_consumption_daily_range(start_date, end_date)
         return float(sum(r.get("kwh_heating") or 0.0 for r in daily))
 
+    if rows_filter is not None:
+        # #749/#807: let the caller ZERO phantom single-quantum onecta_cache
+        # buckets (the #760 learner guard) before the sum — the gate used to
+        # count them as demand and arm summer boosts off counter blips. Applied
+        # AFTER the empty-check above so a filter can never flip the gate onto
+        # the unfiltered daily totals.
+        rows = rows_filter(rows) or rows
     # Thermal-lag tail: HEM-induced heat bleeds into the 2-h bucket(s) AFTER an
     # offset window closes (the live June self-loop counted those as natural
     # demand and latched the gate open). Exclude this many trailing buckets too.
