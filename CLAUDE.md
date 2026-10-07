@@ -360,6 +360,41 @@ and the 16–19 peak band is never bought from the grid.**
   window (`warning_key=peak_import_<date>_<HHMM>`) + `action_log`
   `peak_import_guard` + `PEAK_IMPORT_GUARD_ACTION=replan` (MPC re-solve,
   `trigger_reason=peak_import`, runs the scenario stack). `none` = alert only.
+## Thermal control on Cosy — band rule, W3 thermal model, LP-owned LWT (#808)
+
+Space heating is shaped by the Daikin **LWT offset** rows (`lwt_preheat` +
+`restore` in `action_schedule`), written by `_write_lwt_preheat_actions` at
+every dispatch. Two sources are computed EVERY time and diffed into
+`action_log` (`lwt_source_diff`: `source_used`, `n_differ`, `mean_abs_diff`,
+disagreeing `windows`); **`DAIKIN_LWT_SOURCE`** (runtime-tunable, `PUT
+/api/v1/settings`, no restart) picks which one reaches the device:
+
+- `tier` — the price-band rule: `cheap` → `+DAIKIN_LWT_PREHEAT_BOOST_C` (3),
+  `peak` → `DAIKIN_LWT_PREHEAT_PEAK_SETBACK_C` (−2), `standard` → 0, negative
+  → `+DAIKIN_LWT_PREHEAT_NEGATIVE_BOOST_C`. On a banded tariff the band comes
+  from `plan.price_band` (no threshold comparisons). This is the kill switch.
+- `lp` — the LP's own W3 thermal plan (`LP_W3_TIN_ENABLED=true`, RC model
+  with learned τ / UA / C, soft 3-level comfort floor: night 17.5 °C 22–07,
+  **peak band = `INDOOR_SETPOINT_C − LP_W3_PEAK_COAST_DELTA_C` (1.0)** to
+  coast on stored heat, setpoint otherwise). `plan.lwt_offset_c` is
+  TRANSLATED, never written raw: a slot the LP left without space heat while
+  the weather curve would run the compressor is a deliberate coast → the
+  setback (the inverse physics returns `OPTIMIZATION_LWT_OFFSET_MIN` = −10
+  there); outdoor ≥ cutoff → no write; clamp `DAIKIN_LWT_LP_OFFSET_MIN/MAX`
+  (±5); then the same smoothing / restore / quota cap / pre-fire idempotency
+  / drift backstop as the tier rule. Falls back to `tier` when the LP had no
+  indoor trajectory (stale sensor, passive mode, flag off) — the diff row
+  says `lp_available=false`.
+- **Per-slot comfort guard** (`_indoor_for_slot_fn`): the live reading for
+  slots within `INDOOR_SENSOR_STALE_MINUTES` of now, the W3 predicted
+  trajectory for the rest (the old single-reading guard let a warm afternoon
+  suppress tomorrow's 04–07 boost). No trajectory → live reading everywhere.
+- When `DAIKIN_LWT_SOURCE=lp` the LP's `e_space` ceiling is capped at the ±5
+  clamp so the plan never assumes more lift than the device will get.
+- Rollout: deploy with `tier` → read `lwt_source_diff` + `plan.indoor_temp_c`
+  for a day (boosts only in cheap bands, setbacks only in the peak, trajectory
+  within 17–23 °C) → `PUT /api/v1/settings` `DAIKIN_LWT_SOURCE=lp`.
+  Status: `space_heating_gate_state()` → `lwt_source`, `lwt_source_last_diff`.
 
 ## Key `.env` settings to know
 

@@ -940,6 +940,17 @@ class Config:
     # Agile scheduler (Daikin ASHP by price)
     SCHEDULER_ENABLED: bool = os.getenv("SCHEDULER_ENABLED", "false").lower() in ("true", "1", "yes")
     OCTOPUS_TARIFF_CODE: str = (os.getenv("OCTOPUS_TARIFF_CODE") or "").strip()
+    # --- LP-owned LWT offsets (#808) ----------------------------------------
+    # DAIKIN_LWT_SOURCE is RUNTIME-tunable (runtime_settings: "tier" | "lp") —
+    # not a class attribute, so config.DAIKIN_LWT_SOURCE resolves through the DB.
+    # Clamp applied to the LP-derived offset before it reaches the device (the
+    # tier rule keeps OPTIMIZATION_LWT_OFFSET_MIN/MAX). ±5 initially: the W3
+    # thermal model has never driven hardware and UA is unfitted.
+    DAIKIN_LWT_LP_OFFSET_MIN: float = float(os.getenv("DAIKIN_LWT_LP_OFFSET_MIN", "-5"))
+    DAIKIN_LWT_LP_OFFSET_MAX: float = float(os.getenv("DAIKIN_LWT_LP_OFFSET_MAX", "5"))
+    # W3 comfort floor inside the PEAK band = INDOOR_SETPOINT_C − this (coast
+    # through the peak on stored heat; τ ≈ 80 h → ~0.5 °C over 3 h).
+    LP_W3_PEAK_COAST_DELTA_C: float = float(os.getenv("LP_W3_PEAK_COAST_DELTA_C", "1.0"))
     # LWT pre-heat demand gate: drop phantom single-quantum onecta_cache
     # buckets (the #760 learner guard) before summing trailing heating (#749/#807).
     DAIKIN_LWT_PREHEAT_DEMAND_GATE_PHANTOM_FILTER: bool = os.getenv(
@@ -2453,6 +2464,15 @@ class Config:
     @DAIKIN_CONTROL_MODE.setter
     def DAIKIN_CONTROL_MODE(self, value: str) -> None:
         self._rt_set("DAIKIN_CONTROL_MODE", str(value).strip().lower())
+
+    @property
+    def DAIKIN_LWT_SOURCE(self) -> str:
+        """#808 — "tier" | "lp": which signal drives the Daikin LWT offset rows."""
+        return str(self._rt_get("DAIKIN_LWT_SOURCE"))
+
+    @DAIKIN_LWT_SOURCE.setter
+    def DAIKIN_LWT_SOURCE(self, value: str) -> None:
+        self._rt_set("DAIKIN_LWT_SOURCE", str(value).strip().lower())
 
     @property
     def LP_SOC_FINAL_KWH(self) -> float:

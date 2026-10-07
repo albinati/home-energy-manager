@@ -411,6 +411,10 @@ def solve_lp(
     slot_h = 0.5  # 30-minute slots
     max_hp_kwh_per_slot = float(getattr(config, "DAIKIN_MAX_HP_KW", 2.0)) * slot_h
     lwt_offset_max = float(getattr(config, "OPTIMIZATION_LWT_OFFSET_MAX", 10.0))
+    # #808: when the LP's own offsets drive the device, the plan must not
+    # assume more lift than the hardware clamp lets it apply.
+    if str(getattr(config, "DAIKIN_LWT_SOURCE", "tier") or "tier").lower() == "lp":
+        lwt_offset_max = min(lwt_offset_max, float(getattr(config, "DAIKIN_LWT_LP_OFFSET_MAX", 5.0)))
 
     # Per-slot physics-consistent bounds for e_space from the climate curve.
     # floor: compressor draw at zero offset (natural curve point).
@@ -540,11 +544,20 @@ def solve_lp(
         w3_ne = int(getattr(config, "LP_W3_NIGHT_END_HOUR_LOCAL", 7))
         w3_recov = float(getattr(config, "LP_W3_MAX_RECOVERY_C_PER_SLOT", 0.5))
         w3_pen = float(getattr(config, "LP_W3_COMFORT_PEN_PENCE_PER_DEGC_SLOT", 15.0))
+        w3_peak_delta = float(getattr(config, "LP_W3_PEAK_COAST_DELTA_C", 1.0))
 
-        def _w3_floor(st: datetime) -> float:
+        def _w3_floor(i: int) -> float:
+            """Three-level comfort floor (#808): night floor 22–07, setpoint
+            minus LP_W3_PEAK_COAST_DELTA_C inside the PEAK band of a banded
+            tariff (coast on stored heat), setpoint otherwise."""
+            st = slot_starts_utc[i]
             h = (st + timedelta(minutes=15)).astimezone(tz).hour
             night = (h >= w3_ns or h < w3_ne) if w3_ns > w3_ne else (w3_ns <= h < w3_ne)
-            return w3_night_floor if night else w3_day_sp
+            if night:
+                return w3_night_floor
+            if price_band and i < len(price_band) and price_band[i] == "peak":
+                return w3_day_sp - w3_peak_delta
+            return w3_day_sp
 
     # Minimum HP ON duration (anti short-cycling)
     hp_min_on = int(getattr(config, "LP_HP_MIN_ON_SLOTS", 2))
@@ -1044,7 +1057,7 @@ def solve_lp(
             loss_bld_j = ua_bld * (t_in[i] - t_out[i]) * dt_s
             prob += t_in[i + 1] == t_in[i] + (q_heat_space - loss_bld_j) / c_bld
             # Soft comfort floor — slack-penalised, so the LP is NEVER Infeasible.
-            prob += t_in[i + 1] + s_lo[i] >= _w3_floor(slot_starts_utc[i])
+            prob += t_in[i + 1] + s_lo[i] >= _w3_floor(i)
             # Gentle-recovery cap — bound the HEATING-driven rise (the pump's own
             # contribution), NOT the net delta. Capping the net delta conflicts
             # with the RC equality on a warm slot where passive conductive GAIN

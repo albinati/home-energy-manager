@@ -460,6 +460,20 @@ SCHEMA: dict[str, SettingSpec] = {
             "treated as fixed thermal load by LP). active = legacy v9 control."
         ),
     ),
+    "DAIKIN_LWT_SOURCE": SettingSpec(
+        key="DAIKIN_LWT_SOURCE",
+        type_name="str",
+        env_default=_str_env("DAIKIN_LWT_SOURCE", "tier"),
+        enum=("tier", "lp"),
+        description=(
+            "Which signal drives the Daikin LWT offset rows (#808). tier = the "
+            "price-band rule (boost in cheap bands, setback in the peak band); "
+            "lp = the LP's own W3 thermal plan (plan.lwt_offset_c, clamped to "
+            "DAIKIN_LWT_LP_OFFSET_MIN/MAX, falls back to tier when W3 did not "
+            "engage). Both are computed every dispatch and diffed into "
+            "action_log `lwt_source_diff`; switching is instant (no restart)."
+        ),
+    ),
     "REQUIRE_SIMULATION_ID": SettingSpec(
         key="REQUIRE_SIMULATION_ID",
         type_name="str",  # "true" / "false" — kept as str so PUT payloads stay simple
