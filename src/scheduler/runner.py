@@ -1995,15 +1995,15 @@ def bulletproof_heartbeat_tick() -> None:
     if get_scheduler_paused():
         return
 
-    # PR Phase A — heartbeat NEVER calls Daikin API (#306 follow-up).
-    # The Onecta 200-call/day quota is too tight to spend any of it on the
-    # heartbeat's monitoring path. Token prefetch removed (auth.py refreshes
-    # lazily on next 401). Device cache refresh forced off (allow_refresh=False).
-    # Cache stays warm via:
-    #   - Plan dispatch (LP → Daikin write events)
-    #   - Twice-daily briefs (08:00, 22:00 local — read Daikin state)
-    #   - Slot-boundary reconciliation below (cache-only diff check)
-    #   - Manual MCP calls
+    # PR Phase A (#306 follow-up) took the heartbeat off the Daikin API
+    # entirely (allow_refresh=False) — the reconciler and the user-override
+    # detector then compared against a cache up to 30+ min old. #809 allows a
+    # BOUNDED refresh: at most one read per DAIKIN_HEARTBEAT_REFRESH_SECONDS
+    # (default 1800 → ≤ 48/day), only while quota headroom is comfortable, and
+    # still subject to the service's 90 s floor + should_block. Off by default
+    # (DAIKIN_HEARTBEAT_REFRESH_ENABLED=false keeps Phase A); prod pins true.
+    # Cache also stays warm via plan dispatch, post-write verification (#809),
+    # the twice-daily briefs, and manual MCP calls.
     tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
     now_local = datetime.now(tz)
     now_utc = datetime.now(UTC)
@@ -2016,8 +2016,10 @@ def bulletproof_heartbeat_tick() -> None:
     devices = []
     if config.DAIKIN_CLIENT_ID and config.DAIKIN_CLIENT_SECRET and config.DAIKIN_TOKEN_FILE.exists():
         try:
+            _hb_refresh = _heartbeat_daikin_refresh_allowed()
             daikin_result = daikin_service.get_cached_devices(
-                allow_refresh=False,
+                allow_refresh=_hb_refresh,
+                max_age_seconds=(int(config.DAIKIN_HEARTBEAT_REFRESH_SECONDS) if _hb_refresh else None),
                 actor="heartbeat",
             )
             devices = daikin_result.devices
@@ -2586,6 +2588,26 @@ def _peak_import_guard_tick(
     except Exception as exc:
         logger.debug("peak_import_guard notify failed: %s", exc)
     return out
+
+
+def _heartbeat_daikin_refresh_allowed() -> bool:
+    """#809 — may this heartbeat tick refresh the Daikin device cache?
+
+    True only when ``DAIKIN_HEARTBEAT_REFRESH_ENABLED`` and the rolling quota
+    still has ``DAIKIN_RESERVE_FOR_HEARTBEAT + DAIKIN_HEARTBEAT_REFRESH_MIN_HEADROOM``
+    calls left. The service layer still applies its TTL (we pass
+    ``DAIKIN_HEARTBEAT_REFRESH_SECONDS``), the 90 s floor and ``should_block``.
+    """
+    if not bool(getattr(config, "DAIKIN_HEARTBEAT_REFRESH_ENABLED", False)):
+        return False
+    try:
+        from ..api_quota import quota_remaining
+        reserve = int(getattr(config, "DAIKIN_RESERVE_FOR_HEARTBEAT", 30))
+        headroom = int(getattr(config, "DAIKIN_HEARTBEAT_REFRESH_MIN_HEADROOM", 40))
+        return quota_remaining("daikin") > reserve + headroom
+    except Exception as exc:  # pragma: no cover — quota read must never break the tick
+        logger.debug("heartbeat refresh gate: quota read failed (%s) — no refresh", exc)
+        return False
 
 
 def _peak_alert_threshold_p(plan_date) -> float:

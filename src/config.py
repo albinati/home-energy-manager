@@ -2720,6 +2720,24 @@ class Config:
     # current prod). Lower if Daikin call volume drops; raise if heartbeat
     # reconciles are starving for headroom.
     DAIKIN_RESERVE_FOR_HEARTBEAT: int = int(os.getenv("DAIKIN_RESERVE_FOR_HEARTBEAT", "30"))
+    # --- Heartbeat refresh + post-write verification (#803/#809) ------------
+    # Phase A (#306) took the heartbeat off the Daikin API entirely, so the
+    # reconciler and the user-override detector compared against a cache up
+    # to 30+ min old. With the Cosy band schedule writing ~20 offsets/tank
+    # commands a day, a bounded refresh fits the 180/day budget: heartbeat
+    # ≈ 48 (every 1800 s) + post-write verify ≈ 10 + rollups 4 + LP-init ≈ 2
+    # + viewer boost ≤ 10 + writes ≈ 20 ≈ 95-100, leaving ~80 for 429s/MCP.
+    # Code default off (preserves Phase A); prod pins true.
+    DAIKIN_HEARTBEAT_REFRESH_ENABLED: bool = os.getenv("DAIKIN_HEARTBEAT_REFRESH_ENABLED", "false").lower() in ("true", "1", "yes")
+    DAIKIN_HEARTBEAT_REFRESH_SECONDS: int = int(os.getenv("DAIKIN_HEARTBEAT_REFRESH_SECONDS", "1800"))
+    # The heartbeat only refreshes while quota_remaining exceeds the reserve by
+    # this headroom, so heavy write days self-throttle the monitoring reads.
+    DAIKIN_HEARTBEAT_REFRESH_MIN_HEADROOM: int = int(os.getenv("DAIKIN_HEARTBEAT_REFRESH_MIN_HEADROOM", "40"))
+    # After a successful write batch, schedule ONE read N seconds later and log
+    # `daikin_write_verify` (expected vs actual); a mismatch raises one risk
+    # alert per write. The read also refreshes the cache for the next heartbeat.
+    DAIKIN_POST_WRITE_VERIFY_ENABLED: bool = os.getenv("DAIKIN_POST_WRITE_VERIFY_ENABLED", "true").lower() in ("true", "1", "yes")
+    DAIKIN_POST_WRITE_VERIFY_SECONDS: int = int(os.getenv("DAIKIN_POST_WRITE_VERIFY_SECONDS", "120"))
     # Circuit breaker: pause Daikin writes after N consecutive failures within W minutes,
     # cooldown for C minutes, reset on next successful write. Defends against an Onecta
     # outage burning quota with retries. 0 fails = breaker disabled.

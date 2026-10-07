@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from . import db
@@ -299,7 +299,91 @@ def apply_scheduled_daikin_params(
         result="success",
         trigger=trigger,
     )
+    schedule_post_write_verify(p, trigger=trigger)
     return True
+
+
+# --- Post-write verification (#809) ------------------------------------------
+_VERIFY_ALERTED: set[str] = set()
+
+
+def schedule_post_write_verify(params: dict[str, Any], *, trigger: str) -> str | None:
+    """After a successful write batch, schedule ONE device read
+    ``DAIKIN_POST_WRITE_VERIFY_SECONDS`` later that compares live state with
+    ``params`` (``daikin_device_matches_params``) and logs
+    ``daikin_write_verify``. The read also refreshes the device cache, so the
+    next heartbeat/override check sees post-write truth instead of the
+    invalidated snapshot. Returns the job id, or ``None`` when disabled / no
+    scheduler (tests, CLI). Never raises.
+    """
+    if not bool(getattr(config, "DAIKIN_POST_WRITE_VERIFY_ENABLED", True)):
+        return None
+    try:
+        from apscheduler.triggers.date import DateTrigger
+
+        from .scheduler.runner import get_background_scheduler
+
+        sched = get_background_scheduler()
+        if sched is None:
+            return None
+        delay = max(30, int(getattr(config, "DAIKIN_POST_WRITE_VERIFY_SECONDS", 120)))
+        written_at = datetime.now(UTC)
+        fire_at = written_at + timedelta(seconds=delay)
+        job_id = f"daikin_verify_{int(written_at.timestamp())}"
+        sched.add_job(
+            post_write_verify_job,
+            DateTrigger(run_date=fire_at),
+            id=job_id,
+            replace_existing=True,
+            kwargs={"expected": dict(params), "trigger": trigger,
+                    "written_at": written_at.isoformat().replace("+00:00", "Z")},
+        )
+        return job_id
+    except Exception as exc:  # pragma: no cover — verification is best-effort
+        logger.debug("post-write verify not scheduled: %s", exc)
+        return None
+
+
+def post_write_verify_job(*, expected: dict[str, Any], trigger: str, written_at: str) -> dict[str, Any]:
+    """One-shot: read the device (fresh if the service allows), compare with
+    the params written, log + alert on mismatch (once per write)."""
+    from .daikin import service as daikin_service
+
+    out: dict[str, Any] = {"matched": None, "expected": expected, "written_at": written_at, "trigger": trigger}
+    try:
+        res = daikin_service.get_cached_devices(allow_refresh=True, max_age_seconds=0, actor="post_write_verify")
+        dev = res.devices[0] if res.devices else None
+        out["cache_source"] = res.source
+        out["cache_age_s"] = round(float(res.age_seconds), 1)
+    except Exception as exc:
+        out["error"] = str(exc)
+        dev = None
+    if dev is not None:
+        out["actual"] = {
+            "lwt_offset": dev.lwt_offset, "tank_target": dev.tank_target,
+            "tank_on": dev.tank_on, "tank_powerful": dev.tank_powerful, "climate_on": dev.is_on,
+        }
+        out["matched"] = bool(daikin_device_matches_params(dev, expected))
+    try:
+        db.log_action(
+            device="daikin", action="daikin_write_verify", params=out,
+            result="success" if out["matched"] else "failure", trigger="post_write_verify",
+        )
+    except Exception:  # pragma: no cover
+        logger.debug("daikin_write_verify log failed", exc_info=True)
+    if out["matched"] is False and written_at not in _VERIFY_ALERTED:
+        _VERIFY_ALERTED.add(written_at)
+        try:
+            from .notifier import notify_risk
+
+            notify_risk(
+                f"Daikin write not reflected after verification: expected {expected}, "
+                f"device {out.get('actual')} (written {written_at}, trigger {trigger})",
+                extra={"warning_key": f"daikin_write_verify_{written_at}"},
+            )
+        except Exception:  # pragma: no cover
+            logger.debug("daikin_write_verify notify failed", exc_info=True)
+    return out
 
 
 def apply_comfort_restore(

@@ -103,6 +103,27 @@ print("has refresh_token:", bool(d.get("refresh_token")))
 EOF
 ```
 
+### Daikin cadence — bounded heartbeat refresh + post-write verification (#809)
+
+Phase A (#306) took the heartbeat off the Daikin API, so the reconciler and
+the user-override detector compared against a cache up to 30+ min old. Now:
+
+- **Heartbeat refresh** (`DAIKIN_HEARTBEAT_REFRESH_ENABLED`, code default
+  false, **prod true**): at most one read per `DAIKIN_HEARTBEAT_REFRESH_SECONDS`
+  (1800 → ≤ 48/day), only while `quota_remaining > DAIKIN_RESERVE_FOR_HEARTBEAT
+  + DAIKIN_HEARTBEAT_REFRESH_MIN_HEADROOM` (30 + 40), still under the service's
+  90 s floor and `should_block`. Gate: `runner._heartbeat_daikin_refresh_allowed`.
+- **Post-write verify** (`DAIKIN_POST_WRITE_VERIFY_ENABLED`, default true): every
+  successful `apply_scheduled_daikin_params` schedules ONE read
+  `DAIKIN_POST_WRITE_VERIFY_SECONDS` (120) later; `action_log`
+  `daikin_write_verify` carries `expected` / `actual` / `matched` /
+  `cache_source`; a mismatch raises one `notify_risk` per write
+  (`warning_key=daikin_write_verify_<written_at>`). The read also refreshes the
+  cache for the next heartbeat.
+- Budget arithmetic (180/day rolling): heartbeat ≈ 48 + verify ≈ 10 + rollups 4
+  + LP-init ≈ 2 + viewer boost ≤ 10 + writes ≈ 20 ≈ 95–100, leaving ~80 for
+  429 retries and manual MCP use. Watch `GET /api/v1/daikin/quota`.
+
 ### Daikin API daily rate limit
 
 - **Limit:** 200 requests/day, resets ~midnight UTC.
