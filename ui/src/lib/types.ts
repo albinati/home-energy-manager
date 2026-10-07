@@ -582,16 +582,6 @@ export interface DaikinDevice {
 }
 
 // Today's deterministic DHW tank plan — GET /api/v1/daikin/dhw-schedule.
-export interface DhwScheduleRow {
-  action_type?: string | null;   // tank_warmup | tank_setback | tank_negative_boost | legionella_cycle
-  start_utc?: string | null;
-  end_utc?: string | null;
-  tank_temp_c?: number | null;
-}
-export interface DhwScheduleResponse {
-  mode: string;
-  rows: DhwScheduleRow[];
-}
 
 // GET /daikin/heating-plan — deterministic per-slot heating timeline across
 // yesterday/today/tomorrow (#481 follow-up): outdoor temp + price tier + LWT

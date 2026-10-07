@@ -32,7 +32,10 @@ export function BatteryPlanCard({ data, nowUtc, loading }: { data: PlanFrontsBat
   }
   if (data.error) return <p class="muted">Battery plan unavailable ({data.error}).</p>;
 
-  const rows = data.windows.map((w) => ({ w, st: windowStatus(w.start_utc, w.end_utc, nowUtc) }));
+  const windows = data.windows ?? [];
+  const byBand = data.by_band ?? [];
+  const foxGroups = data.fox_groups ?? [];
+  const rows = windows.map((w) => ({ w, st: windowStatus(w.start_utc, w.end_utc, nowUtc) }));
   // Next action: the ongoing or next upcoming non-idle window.
   const next = rows.find((r) => r.st !== "done" && r.w.kind !== "idle" && r.w.kind !== "self_use")
     ?? rows.find((r) => r.st !== "done" && r.w.kind !== "idle");
@@ -51,7 +54,7 @@ export function BatteryPlanCard({ data, nowUtc, loading }: { data: PlanFrontsBat
       {rows.length > 0 && (
         <ul class="pf-list" aria-label="Battery windows">
           {rows.map(({ w, st }) => {
-            const k = KIND[w.kind];
+            const k = KIND[w.kind] ?? { icon: "battery" as IconName, label: w.kind };
             const kwh = w.kind === "grid_charge" ? w.grid_kwh : w.kind === "self_use" || w.kind === "export" ? w.discharge_kwh : w.charge_kwh;
             return (
               <li key={`${w.start_utc}-${w.kind}`} class={`pf-row pf-row--${st}`}>
@@ -66,16 +69,16 @@ export function BatteryPlanCard({ data, nowUtc, loading }: { data: PlanFrontsBat
         </ul>
       )}
 
-      {data.by_band.length > 0 && (
+      {byBand.length > 0 && (
         <div class="pf-next">
           <span class="pf-eyebrow">Grid import by band</span>
-          {data.by_band.map((b) => {
+          {byBand.map((b) => {
             const peakBreach = b.key === "band_peak" && (b.planned_import_kwh ?? 0) > 0.05;
             const isPeak = b.key === "band_peak" || b.label === "peak";
             return (
               <div key={`${b.key}-${b.start_local}`} class="pf-band-row">
                 <span><span class="pf-band-name">{b.label}</span> {range(b.start_local, b.end_local)}
-                  {b.floored && <span class="pf-dot" title="Charge floor active: SoC at entry is protected by the pessimistic plan" aria-label="floored" />}
+                  {b.floored && <span class="pf-dot" title="Charge floor active: SoC at entry is protected by the pessimistic plan" role="img" aria-label="Charge floor active" />}
                 </span>
                 <span>
                   plan <b>{num(b.planned_import_kwh)}</b> kWh
@@ -89,15 +92,15 @@ export function BatteryPlanCard({ data, nowUtc, loading }: { data: PlanFrontsBat
               </div>
             );
           })}
-          {peakPlanned != null && data.by_band.every((b) => b.key !== "band_peak") && (
+          {peakPlanned != null && byBand.every((b) => b.key !== "band_peak") && (
             <span class={`pf-note ${peakPlanned > 0.05 ? "pf-note--warn" : ""}`}>peak import planned {num(peakPlanned)} kWh (target 0)</span>
           )}
         </div>
       )}
 
-      {data.fox_groups.length > 0 && (
+      {foxGroups.length > 0 && (
         <span class="pf-note">
-          Fox: {data.fox_groups.map((g) => `${g.mode ?? "?"} ${g.start_local ?? ""}–${g.end_local ?? ""}`).join(" · ")}
+          Fox: {foxGroups.map((g) => `${g.mode ?? "?"} ${g.start_local ?? ""}–${g.end_local ?? ""}`).join(" · ")}
         </span>
       )}
     </div>

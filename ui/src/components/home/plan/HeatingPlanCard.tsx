@@ -27,7 +27,8 @@ export function HeatingPlanCard({ data, nowUtc, loading }: { data: PlanFrontsHea
   }
   if (data.error) return <p class="muted">Heating plan unavailable ({data.error}).</p>;
 
-  const rows = data.windows.map((w) => ({ w, st: windowStatus(w.start_utc, w.end_utc, nowUtc) }));
+  const byBand = data.by_band ?? [];
+  const rows = (data.windows ?? []).map((w) => ({ w, st: windowStatus(w.start_utc, w.end_utc, nowUtc) }));
   const next = rows.find((r) => r.st !== "done" && r.w.kind !== "restore");
   const rooms = Object.entries(data.indoor_rooms_c ?? {}).sort(([a], [b]) => a.localeCompare(b));
   const agg = data.indoor_aggregate ?? "";
@@ -90,10 +91,10 @@ export function HeatingPlanCard({ data, nowUtc, loading }: { data: PlanFrontsHea
         </span>
       )}
 
-      {data.by_band.length > 0 && (
+      {byBand.length > 0 && (
         <div class="pf-next">
           <span class="pf-eyebrow">By band</span>
-          {data.by_band.map((b) => (
+          {byBand.map((b) => (
             <div key={`${b.key}-${b.start_local}`} class="pf-band-row">
               <span><span class="pf-band-name">{b.label}</span> {range(b.start_local, b.end_local)}</span>
               <span>

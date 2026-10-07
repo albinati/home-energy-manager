@@ -1,6 +1,6 @@
 /* Live-power tile (redesign): the animated power-flow IS the surface, with a
  * quiet rates row beneath (Import / Export read-outs + compact battery SoC)
- * and the PlanMini "Planned dispatch" foot composed by the route. Domain
+ * and the Plan today cards composed by the route. Domain
  * colour only on the flow, the rate values (band/domain) and the SoC mode. */
 
 .livepower {

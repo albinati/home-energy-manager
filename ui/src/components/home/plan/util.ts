@@ -15,7 +15,7 @@ export const num = (v: number | null | undefined, dp = 1): string =>
   v == null || !Number.isFinite(v) ? "—" : v.toFixed(dp);
 
 export const signed = (v: number | null | undefined, dp = 0): string =>
-  v == null ? "—" : `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toFixed(dp)}`;
+  v == null || !Number.isFinite(v) ? "—" : `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toFixed(dp)}`;
 
 export const range = (a: string, b: string): string => `${a}–${b}`;
 

@@ -17,8 +17,8 @@ interface LivePowerWidgetProps {
 // Redesign form: the animated power-flow IS the surface (no separate focal
 // number — the node field carries the watts), with a quiet rates row beneath
 // it (Import / Export p + today's kWh·£) and the compact battery SoC block on
-// the right. The committed plan renders as the PlanMini foot (composed by the
-// landing route inside the same card).
+// the right. The committed plan renders in the Plan today band (composed by the
+// landing route).
 export function LivePowerWidget({ state, cockpit, agile, metrics, todayCumulative }: LivePowerWidgetProps) {
   const socPct = state.soc_pct ?? 0;
   const charging = state.battery_kw > 0.05;

@@ -11,7 +11,7 @@
 }
 .why-now-dot {
   flex: none;
-  width: 7px;   /* matches the sibling plan-mini .cdot in the same card */
+  width: 7px;   /* 7px status dot */
   height: 7px;
   border-radius: var(--radius-pill);
   transition: background var(--dur-fast) ease;

@@ -21,6 +21,8 @@ export function TankPlanCard({ data, nowUtc, loading }: { data: PlanFrontsTank |
   }
   if (data.error) return <p class="muted">Hot water plan unavailable ({data.error}).</p>;
 
+  const windows = data.windows ?? [];
+  const showers = data.showers ?? [];
   const na = data.next_action;
   const d = data.decision;
   const m = data.model;
@@ -45,13 +47,13 @@ export function TankPlanCard({ data, nowUtc, loading }: { data: PlanFrontsTank |
         )}
       </div>
 
-      {data.windows.length > 0 && (
+      {windows.length > 0 && (
         <ul class="pf-list" aria-label="Tank windows">
-          {data.windows.map((w) => (
+          {windows.map((w) => (
             <li key={`${w.start_utc}-${w.kind}`} class={`pf-row pf-row--${windowStatus(w.start_utc, w.end_utc, nowUtc)}`}>
               <span class="pf-ico pf-tone-heat"><Icon name="droplet" size={13} /></span>
               <span class="pf-when">{range(w.start_local, w.end_local)}</span>
-              <span class="pf-what">{LABEL[w.kind]}</span>
+              <span class="pf-what">{LABEL[w.kind] ?? w.kind}</span>
               <span class="pf-val">{w.tank_target_c != null ? `${num(w.tank_target_c, 0)} °C` : ""}</span>
               <span class="pf-val2" />
             </li>
@@ -59,10 +61,10 @@ export function TankPlanCard({ data, nowUtc, loading }: { data: PlanFrontsTank |
         </ul>
       )}
 
-      {data.showers.length > 0 && (
+      {showers.length > 0 && (
         <div class="pf-next">
           <span class="pf-eyebrow">Showers</span>
-          {data.showers.map((s) => {
+          {showers.map((s) => {
             const low = s.predicted_tank_c != null && s.predicted_tank_c < s.floor_c;
             return (
               <span key={`${s.start_local}-${s.end_local}`} class={`pf-sub ${low ? "pf-warn" : ""}`}>

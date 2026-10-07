@@ -23,7 +23,6 @@ import type {
   FairCompareResponse,
   PeriodInsightsResponse,
   DaikinConsumptionResponse,
-  DhwScheduleResponse,
   HeatingPlanResponse,
   PvTodayResponse,
   GridTodayResponse,
@@ -79,8 +78,6 @@ export const getDaikinStatus = () => getJson<DaikinDevice[]>("/daikin/status");
 export const forceRefreshDaikin = () => getJson<DaikinDevice[]>("/daikin/status?refresh=true");
 export const getDaikinQuota = () => getJson<ApiQuotaResponse>("/daikin/quota");
 export const getFoxQuota = () => getJson<ApiQuotaResponse>("/foxess/quota");
-// Today's deterministic DHW tank plan (times + targets). Zero Daikin quota.
-export const getDhwSchedule = () => getJson<DhwScheduleResponse>("/daikin/dhw-schedule");
 // Per-slot heating-plan timeline (D-1/D/D+1): outdoor temp + LWT offset + tank
 // + heating-on, deterministically recomputed. Zero Daikin quota.
 export const getHeatingPlan = () => getJson<HeatingPlanResponse>("/daikin/heating-plan");

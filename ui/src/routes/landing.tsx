@@ -16,7 +16,6 @@ import {
   getHeatingPlan,
   getEnergyTodayCumulative,
   getExportOpportunity,
-  getApplianceSuggestions,
   getApplianceJobs,
   getAppliances,
   getIndoorReadings,
@@ -35,7 +34,8 @@ import { BatteryPlanCard } from "../components/home/plan/BatteryPlanCard";
 import { TankPlanCard } from "../components/home/plan/TankPlanCard";
 import { HeatingPlanCard } from "../components/home/plan/HeatingPlanCard";
 import { ConsumptionStrip } from "../components/home/plan/ConsumptionStrip";
-import { MOCK_PLAN_FRONTS } from "../lib/mock/planFronts";
+import { HemApiError } from "../lib/api";
+import { Pill } from "../components/common/Pill";
 import { WhyNowLine } from "../components/home/WhyNowLine";
 import { FeedbackPanel } from "../components/home/FeedbackPanel";
 import { OperateCard } from "../components/home/OperateCard";
@@ -43,6 +43,11 @@ import { LifetimeStrip } from "../components/home/LifetimeStrip";
 import { publishFreshness, publishCockpitConn } from "../lib/freshness";
 import { role } from "../lib/auth";
 import "../components/home/home.css";
+
+// Dev-only fixture switch (`?mock=1`). `import.meta.env.DEV` is a build-time
+// constant, so the flag, the dynamic import and the fixture are all eliminated
+// from the production bundle.
+const MOCK = import.meta.env.DEV && new URLSearchParams(location.search).get("mock") === "1";
 
 // The four timeline widgets (Solar / Grid / Load / Heating) each own echarts
 // (~193 KB gzip, shared chunk). Lazy-load so the hero + live band paint first
@@ -113,7 +118,6 @@ export default function Landing() {
   // unconfigured → the widget shows an empty/register hint).
   const appliances = usePoll(getAppliances, 5 * 60_000);
   const applianceJobs = usePoll(() => getApplianceJobs({ limit: 20 }), 5 * 60_000);
-  const applianceSug = usePoll(getApplianceSuggestions, 5 * 60_000);
   // The shared period navigator drives the Hero headline + cost breakdown +
   // energy chart + tariff comparison. Re-fetch whenever the selection changes.
   const period = usePeriod();
@@ -121,11 +125,21 @@ export default function Landing() {
   // that day (the API only plans ≤ today); a future/other period falls back to
   // today. `?mock=1` serves a fixture so the UI can be developed without the API.
   const todayIso = todayISO();
-  const fronts = usePoll(() => {
-    if (new URLSearchParams(window.location.search).get("mock") === "1") return Promise.resolve(MOCK_PLAN_FRONTS);
-    const d = period.gran === "day" && period.anchor <= todayIso ? period.anchor : undefined;
-    return getPlanFronts(d);
-  }, 60_000, [period.gran, period.anchor]);
+  const frontsDate = period.gran === "day" && period.anchor <= todayIso ? period.anchor : todayIso;
+  const fronts = useFetch(async () => {
+    if (import.meta.env.DEV && MOCK) return (await import("../lib/mock/planFronts")).MOCK_PLAN_FRONTS;
+    return getPlanFronts(frontsDate === todayIso ? undefined : frontsDate);
+  }, [frontsDate]);
+  // useFetch is generation-guarded against date switches; add the 60 s refresh.
+  useEffect(() => {
+    const id = setInterval(() => { if (!document.hidden) void fronts.refresh(); }, 60_000);
+    return () => clearInterval(id);
+  }, [frontsDate]);
+  // Never show another day's payload under this date's heading.
+  const frontsData = fronts.data && (MOCK || fronts.data.date === frontsDate || frontsDate === todayIso) ? fronts.data : null;
+  // API not deployed yet (404) -> hide the whole band instead of "unavailable" tiles.
+  const frontsMissing = fronts.error instanceof HemApiError && fronts.error.status === 404 && !frontsData;
+  const frontsFailed = !!fronts.error && !frontsData && !frontsMissing;
   const periodInsights = useFetch(
     () => getEnergyPeriod(period.gran, periodFetchOpts(period)),
     [period.gran, period.anchor],
@@ -193,28 +207,31 @@ export default function Landing() {
             period={periodInsights.data} periodState={period}
             periodLoading={periodInsights.loading} todayCum={todayCum.data}
             weather={weather.data} pv={pvToday.data}
-            spend={fronts.data?.spend ?? null} compare={fronts.data?.compare ?? null} />
+            spend={frontsData?.spend ?? null} compare={frontsData?.compare ?? null} />
 
       {/* ── PLAN per front — what each system will do today, next action first. */}
+      {!frontsMissing && <>
       <h2 class="scope scope--period">
         <span class="scope-dot" aria-hidden="true" />
-        Plan {fronts.data?.date && fronts.data.date !== todayIso ? fronts.data.date : "today"}
+        Plan {frontsDate === todayIso ? "today" : frontsDate}{MOCK && <> <Pill tone="warn">MOCK</Pill></>}
         <span class="scope-when">battery · hot water · heating</span>
       </h2>
-      <div class="widget-grid widget-band">
+      {frontsFailed && <p class="muted">Couldn't load plan for {frontsDate}.</p>}
+      {!frontsFailed && <div class="widget-grid widget-band">
         <Widget title="Battery plan" icon={<Icon name="battery" size={14} />} tone="power" size="medium">
-          <BatteryPlanCard data={fronts.data?.battery ?? null} nowUtc={fronts.data?.now_utc ?? new Date().toISOString()} loading={fronts.loading} />
+          <BatteryPlanCard data={frontsData?.battery ?? null} nowUtc={frontsData?.now_utc ?? new Date().toISOString()} loading={fronts.loading} />
         </Widget>
         <Widget title="Hot water plan" icon={<Icon name="droplet" size={14} />} tone="thermal" size="medium">
-          <TankPlanCard data={fronts.data?.tank ?? null} nowUtc={fronts.data?.now_utc ?? new Date().toISOString()} loading={fronts.loading} />
+          <TankPlanCard data={frontsData?.tank ?? null} nowUtc={frontsData?.now_utc ?? new Date().toISOString()} loading={fronts.loading} />
         </Widget>
         <Widget title="Heating plan" icon={<Icon name="heating" size={14} />} tone="thermal" size="medium">
-          <HeatingPlanCard data={fronts.data?.heating ?? null} nowUtc={fronts.data?.now_utc ?? new Date().toISOString()} loading={fronts.loading} />
+          <HeatingPlanCard data={frontsData?.heating ?? null} nowUtc={frontsData?.now_utc ?? new Date().toISOString()} loading={fronts.loading} />
         </Widget>
         <Widget title="Consumption outlook" icon={<Icon name="chart-bars" size={14} />} tone="tariff" size="wide">
-          <ConsumptionStrip data={fronts.data?.consumption ?? null} loading={fronts.loading} />
+          <ConsumptionStrip data={frontsData?.consumption ?? null} loading={fronts.loading} />
         </Widget>
-      </div>
+      </div>}
+      </>}
 
       {/* ── LIVE scope + band (redesign) — the always-now, self-driving surface
           that ignores the period selector above. The status row splits 50/50:
@@ -244,7 +261,6 @@ export default function Landing() {
             void timeline.refresh();
             void heatingPlan.refresh();
             void applianceJobs.refresh();
-            void applianceSug.refresh();
             void now.refresh();
           }}
         />}

@@ -8,6 +8,7 @@ import { useAnimatedNumber } from "../../lib/useAnimatedNumber";
 import { isCurrentPeriod, periodLabel, type PeriodState } from "../../lib/period";
 import { Icon } from "../common/Icon";
 import { Pill } from "../common/Pill";
+import { WidgetBoundary } from "../common/WidgetBoundary";
 import "./plan/plan.css";
 import { ForecastStrip } from "./ForecastStrip";
 import { Link } from "wouter-preact";
@@ -94,8 +95,10 @@ export function Hero({ metrics, cockpit, period, periodState, periodLoading, tod
             </div>
           )}
 
-          {isTodayView && spend && !spend.error && spend.score && <SpendScoreLine spend={spend} />}
-          {compare && !compare.error && compare.rows.length > 0 && <CompareLine compare={compare} />}
+          <WidgetBoundary label="Spend">
+            {isTodayView && spend && !spend.error && spend.score && <SpendScoreLine spend={spend} />}
+            {(isTodayView || periodState.gran === "month") && compare && !compare.error && (compare.rows?.length ?? 0) > 0 && <CompareLine compare={compare} />}
+          </WidgetBoundary>
 
           {grid != null && (
             <div class="statline">
@@ -170,7 +173,8 @@ const SCORE: Record<SpendScore, { label: string; tone: "ok" | "neutral" | "warn"
 };
 
 function SpendScoreLine({ spend }: { spend: PlanFrontsSpend }) {
-  const sc = SCORE[spend.score as SpendScore];
+  const sc = SCORE[spend.score as SpendScore] ?? null;
+  if (!sc) return null;
   const forecast = spend.score_basis === "forecast";
   const avg = forecast ? spend.forecast_avg_import_p : spend.realised_avg_import_p;
   const f1 = (v: number | null | undefined) => (v == null ? "—" : v.toFixed(1));
@@ -195,19 +199,19 @@ function SpendScoreLine({ spend }: { spend: PlanFrontsSpend }) {
 }
 
 function CompareLine({ compare }: { compare: PlanFrontsCompare }) {
-  const rows = [...compare.rows].sort((a, b) => Number(b.is_current) - Number(a.is_current));
+  const rows = [...(compare.rows ?? [])].sort((a, b) => Number(b.is_current) - Number(a.is_current));
   return (
     <div class="compare-line">
       <div class="compare-row">
         {rows.map((r) => (
           <span key={r.product_code} class={`compare-pair ${r.is_current ? "is-current" : ""}`}
                 title={r.approximate ? "approximate — no Agile shadow prices fetched" : undefined}>
-            <span class="compare-k">{r.display_name.replace(/ \(current\)$/, "")}</span>
-            <span class="compare-v">{r.approximate ? "≈ " : ""}{r.net_gbp == null ? "—" : gbp(r.net_gbp)}</span>
+            <span class="compare-k">{(r.display_name ?? r.product_code ?? "").replace(/ \(current\)$/, "")}</span>
+            <span class="compare-v">{r.approximate && <span role="img" aria-label="approximate — no Agile shadow prices">≈ </span>}{r.net_gbp == null ? "—" : gbp(r.net_gbp)}</span>
           </span>
         ))}
       </div>
-      <span class="compare-framing">this {compare.period}{compare.framing ? ` · ${compare.framing}` : ""}</span>
+      <span class="compare-framing">this {compare.period}{compare.rows.some((r) => r.approximate) ? " · ≈ approximate" : ""}{compare.framing ? ` · ${compare.framing}` : ""}</span>
     </div>
   );
 }

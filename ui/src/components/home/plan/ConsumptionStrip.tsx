@@ -7,17 +7,19 @@ export function ConsumptionStrip({ data, loading }: { data: PlanFrontsConsumptio
     return loading ? <div class="cs"><span class="skel-text" style={{ width: "100%", height: "6em" }} /></div>
       : <p class="muted">Consumption outlook unavailable.</p>;
   }
-  if (data.error || !data.bands.length) return <p class="muted">Consumption outlook unavailable{data.error ? ` (${data.error})` : ""}.</p>;
+  const bands = data.bands ?? [];
+  if (data.error || !bands.length) return <p class="muted">Consumption outlook unavailable{data.error ? ` (${data.error})` : ""}.</p>;
 
-  const scale = Math.max(0.1, ...data.bands.flatMap((b) => [
-    b.expected_kwh.p90 ?? 0, b.committed_kwh ?? 0, b.realised_kwh ?? 0,
+  const scale = Math.max(0.1, ...bands.flatMap((b) => [
+    b.expected_kwh?.p90 ?? 0, b.committed_kwh ?? 0, b.realised_kwh ?? 0,
   ]));
   const pct = (v: number | null | undefined) => `${Math.min(100, Math.max(0, ((v ?? 0) / scale) * 100))}%`;
   const day = data.day;
+  const dayExp = day?.expected_kwh;
   return (
     <div class="cs">
-      {data.bands.map((b) => {
-        const e = b.expected_kwh;
+      {bands.map((b) => {
+        const e = b.expected_kwh ?? { p50: null, p75: null, p90: null, n_days: 0 };
         const peak = b.key === "band_peak" || b.label === "peak";
         return (
           <div key={`${b.key}-${b.start_local}`} class={`cs-row cs-row--${b.status}`}>
@@ -40,9 +42,9 @@ export function ConsumptionStrip({ data, loading }: { data: PlanFrontsConsumptio
                 <span>p90 <b>{num(e.p90)}</b> kWh</span>
                 {b.committed_kwh != null && <span>plan <b>{num(b.committed_kwh)}</b></span>}
                 {b.realised_kwh != null && <span>so far <b>{num(b.realised_kwh)}</b></span>}
-                {peak && b.forecast_error_kwh.n_days > 0 && (
+                {peak && (b.forecast_error_kwh?.n_days ?? 0) > 0 && (
                   <span title="Days the realised band load exceeded the committed forecast">
-                    under-forecast <b>{b.forecast_error_kwh.under_forecast_days}/{b.forecast_error_kwh.n_days}</b>
+                    under-forecast <b>{b.forecast_error_kwh?.under_forecast_days}/{b.forecast_error_kwh?.n_days}</b>
                   </span>
                 )}
               </div>
@@ -51,13 +53,13 @@ export function ConsumptionStrip({ data, loading }: { data: PlanFrontsConsumptio
         );
       })}
       <div class="cs-legend">
-        <span><span class="cs-sw" style={{ background: "var(--bg-card-3)" }} />p90</span>
+        <span><span class="cs-sw" style={{ background: "color-mix(in srgb, var(--house) 14%, var(--bg-card-3))" }} />p90</span>
         <span><span class="cs-sw" style={{ background: "var(--house)" }} />realised</span>
-        <span>| committed</span>
-        {day.expected_kwh.p50 != null && (
-          <span>day p50 {num(day.expected_kwh.p50)} · p90 {num(day.expected_kwh.p90)} kWh
-            {day.realised_kwh != null && <> · so far {num(day.realised_kwh)}</>}
-            {" "}· {data.history_days} days of history</span>
+        <span><span class="cs-sw cs-sw--tick" />committed</span>
+        {dayExp?.p50 != null && (
+          <span>day p50 {num(dayExp.p50)} · p90 {num(dayExp.p90)} kWh
+            {day?.realised_kwh != null && <> · so far {num(day.realised_kwh)}</>}
+            {" "}· {dayExp.n_days} same-day-type days</span>
         )}
       </div>
     </div>
