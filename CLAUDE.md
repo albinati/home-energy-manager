@@ -156,6 +156,41 @@ DHW_LEGIONELLA_STANDOFF_DURATION_MINUTES=120     # ramp + ~1 h hold; tune from `
 
 Helper: `src/state_machine.py:in_legionella_standoff(now_utc)`. The guard sits in `_reconcile_daikin_actions` before the pending→active transition. If a `shutdown`/`max_heat` action overlaps the cycle window outside the guard, Onecta firmware still arbitrates.
 
+### Tank model — the ambient is the HOUSE (#819, 2026-10-07)
+
+Owner: "agora demora mais pra esquentar e é mais rápido pra esfriar". Measured
+overnight coast (live `daikin_telemetry`, 23–07 local, Oct 2026): **0.34–0.37
+°C/h** at ~45 °C vs 0.24 in the July heatwave. The joint UA+ambient fit
+(`dhw/calibration.fit_ua_and_ambient`) is unidentifiable on real data (constant
+ambient → −11 °C, linear-in-outdoor → slope 2.4; both rejected, #772) so the
+tank ran on the databook pair (2.44 W/K, 22.4 °C effective) — which predicts
+0.25 °C/h in every season.
+
+- **`fit_ua_indoor_ambient`**: UA alone, each coast episode's ambient FIXED to
+  the measured house indoor (`room_temperature_history`, ≥ 3 readings in the
+  episode). Prod copy: **UA 3.2–3.3 W/K, τ ≈ 69 h, R² 0.70, 18–24 episodes**,
+  `ambient_model="indoor_measured"`. Preferred by `refresh_dhw_calibration`;
+  the joint fit (with its linear rescue) is the fallback and is stored under
+  `alternative` / `indoor_fit` for audit.
+- **`resolve_tank_params(ambient_c=live)`** honours a live indoor reading ONLY
+  for an indoor-fitted UA (`source="measured_indoor"`, UA cap 6 W/K); the
+  joint fit keeps its effective ambient and the databook ignores it — pairing
+  a UA with an ambient it was not fitted against just moves the error.
+  `live_indoor_ambient_c()` is the one reader (stale > `INDOOR_SENSOR_STALE_MINUTES`
+  → None → the fit's mean indoor). Consumers: LP block ambient per slot
+  (`lp_optimizer` seeds from `initial.indoor_c`), dynamic window
+  (`resolve_window_decision_local`), boost-lift budget, deadband warmup force
+  (`state_machine._warmup_deadband_force_reason`), shadow baseline.
+- **Coast check telemetry**: nightly `dhw_calibration` component `coast_check`
+  (+ `action_log` `tank_coast_check`): last episode's measured vs model °C/h at
+  the episode's indoor, and `ratio_median_recent` over the last 7 episodes
+  (one night is ±30 % with 1 °C quantisation). Surfaced in
+  `/api/v1/status/feedback` → `dhw.tank_model`.
+- NOT done here (decision 2026-10-07): `DHW_LP_OWNED_ENABLED` stays off — the
+  shadow gate read median **−6.4 p/day** (LP-owned dearer) over 20 days with
+  the mis-specified coast on both arms. Re-read `evaluate_gate()` after ≥ 7
+  days on the indoor-fitted tank.
+
 ### User-override propagation (Epic 14, #386 — 2026-05-21)
 
 When the user manually changes tank state (Onecta app / physical button),

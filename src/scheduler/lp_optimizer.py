@@ -693,10 +693,16 @@ def solve_lp(
     if _lp_owned:
         from ..dhw import comfort as _dhw_comfort
         from ..dhw.lp import DhwLpConfig, build_dhw_block
-        from ..dhw.params import resolve_tank_params
+        from ..dhw.params import live_indoor_ambient_c, resolve_tank_params
 
         _preset_str = (config.OPTIMIZATION_PRESET or "normal").strip().lower()
-        _tank_p = resolve_tank_params()
+        # #819 — the tank coasts toward the HOUSE temperature: seed the ambient
+        # from the LP's own indoor initial state (the sensor), else the live
+        # reading. Only an indoor-fitted UA honours it (see resolve_tank_params).
+        _indoor_amb = getattr(initial, "indoor_c", None)
+        if _indoor_amb is None:
+            _indoor_amb = live_indoor_ambient_c()
+        _tank_p = resolve_tank_params(ambient_c=_indoor_amb)
         _dhw_floors = _dhw_comfort.comfort_floors_for_slots(
             list(slot_starts_utc), tz, preset=_preset_str,
             guest_count=int(getattr(config, "DHW_GUEST_COUNT", 2)),
@@ -705,9 +711,9 @@ def solve_lp(
             list(slot_starts_utc), tz, preset=_preset_str,
             guest_count=int(getattr(config, "DHW_GUEST_COUNT", 2)),
         )
-        # Ambient is a per-slot PARAMETER. Constant for now (the measured effective
-        # cupboard ambient); the indoor-sensor coupling is a later refinement and its
-        # absence just means winter losses are modelled flat, not wrongly.
+        # Ambient is a per-slot PARAMETER: the house indoor (#819) when the UA
+        # was fitted against it, else the effective cupboard ambient. Constant
+        # over the horizon (the indoor trajectory is itself an LP variable).
         _dhw_ambient = [float(_tank_p.ambient_c)] * n
         _dhw_days = [st.astimezone(tz).date().toordinal() for st in slot_starts_utc]
 
