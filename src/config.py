@@ -935,6 +935,24 @@ class Config:
     # Agile scheduler (Daikin ASHP by price)
     SCHEDULER_ENABLED: bool = os.getenv("SCHEDULER_ENABLED", "false").lower() in ("true", "1", "yes")
     OCTOPUS_TARIFF_CODE: str = (os.getenv("OCTOPUS_TARIFF_CODE") or "").strip()
+    # --- Tariff structure (#803/#804, Cosy switch 2026-10) -----------------
+    # "auto" detects a BANDED tariff (≤ TARIFF_BANDED_MAX_LEVELS distinct price
+    # levels in the horizon, e.g. Cosy's 3) and derives cheap/peak thresholds as
+    # the MIDPOINTS between bands, so every percentile-era consumer classifies
+    # the bands correctly. "dynamic" = kill switch: the pre-#804 percentile
+    # formulas everywhere (Agile path is bit-identical under auto anyway).
+    OCTOPUS_TARIFF_STRUCTURE: str = (os.getenv("OCTOPUS_TARIFF_STRUCTURE") or "auto").strip().lower()
+    TARIFF_BANDED_MAX_LEVELS: int = int(os.getenv("TARIFF_BANDED_MAX_LEVELS", "4"))
+    TARIFF_BANDED_MIN_SLOTS: int = int(os.getenv("TARIFF_BANDED_MIN_SLOTS", "12"))
+    # A top level counts as "peak" only if ≥ ratio × the middle level(s); the
+    # bottom level counts as "cheap" only if ≤ middle / ratio. Guards a 2-level
+    # -plus-noise day from inventing a peak to avoid.
+    TARIFF_BAND_CONTRAST_RATIO: float = float(os.getenv("TARIFF_BAND_CONTRAST_RATIO", "1.25"))
+    # Stored-row window used to build the local-clock band profile that fills
+    # the LP horizon tail on a banded tariff (replaces the UTC-keyed Agile priors).
+    TARIFF_BAND_PRIOR_WINDOW_DAYS: int = int(os.getenv("TARIFF_BAND_PRIOR_WINDOW_DAYS", "7"))
+    # Optional human name for titles/labels ("Cosy"); derived from the code if empty.
+    TARIFF_DISPLAY_NAME: str = (os.getenv("TARIFF_DISPLAY_NAME") or "").strip()
     # Optional: Octopus Agile Export tariff code for SEG export rate fetch.
     # E.g. E-1R-AGILE-OUTGOING-24-10-01-C. Leave blank if not on export tariff.
     OCTOPUS_EXPORT_TARIFF_CODE: str = (os.getenv("OCTOPUS_EXPORT_TARIFF_CODE") or "").strip()

@@ -1898,6 +1898,20 @@ async def daikin_heating_plan():
     high_c = float(getattr(config, "DAIKIN_WEATHER_CURVE_HIGH_C", 18.0))
     cheap_thr = float(getattr(config, "OPTIMIZATION_CHEAP_THRESHOLD_PENCE", 12.0))
     peak_thr = float(getattr(config, "OPTIMIZATION_PEAK_THRESHOLD_PENCE", 25.0))
+    # #804: prefer the LP's own thresholds for today (band midpoints on Cosy,
+    # q25/q75 on Agile) over the static pence cut-offs — the static 12p/25p
+    # put Cosy's cheap band (12.49p) in "standard" and its day band (25.45p)
+    # in "peak".
+    # Gated to banded tariffs so the Agile heating-plan view keeps its static
+    # 12p/25p tiers bit-for-bit (review H2).
+    from ..energy.tariff_structure import prefer_plan_thresholds as _prefer_plan_thr
+    try:
+        _tgt = db.get_daily_target(today_local.isoformat()) if _prefer_plan_thr() else None
+        if _tgt and _tgt.get("cheap_threshold") is not None and _tgt.get("peak_threshold") is not None:
+            cheap_thr = float(_tgt["cheap_threshold"])
+            peak_thr = float(_tgt["peak_threshold"])
+    except Exception:
+        pass
 
     # 3-day window: D-1 00:00 local → D+2 00:00 local (144 half-hour slots).
     day_dates = [today_local + _td(days=d) for d in (-1, 0, 1)]
@@ -4942,23 +4956,11 @@ def _classify_tariff_kinds(slots: list[dict]) -> None:
     """
     if not slots:
         return
-    prices = sorted(float(s["p"]) for s in slots)
-    n = len(prices)
-    q25 = prices[max(0, n // 4 - 1)]
-    q75 = prices[min(n - 1, (3 * n) // 4)]
-    mean_p = sum(prices) / n
-    cheap_thr = min(mean_p * 0.85, q25)
-    peak_thr = max(q75, float(config.OPTIMIZATION_PEAK_THRESHOLD_PENCE))
-    for s in slots:
-        p = float(s["p"])
-        if p <= 0:
-            s["kind"] = "negative"
-        elif p < cheap_thr:
-            s["kind"] = "cheap"
-        elif p > peak_thr:
-            s["kind"] = "peak"
-        else:
-            s["kind"] = "standard"
+    from ..energy.tariff_structure import classify as _classify_bands
+    # #804: band-aware on Cosy (midpoint thresholds), the historical
+    # ``min(mean×0.85, q25)`` / ``max(q75, 25p)`` percentile rule on Agile.
+    for s, band in zip(slots, _classify_bands([float(s["p"]) for s in slots], dynamic_rule="legacy")):
+        s["kind"] = band
 
 
 @app.get("/api/v1/agile/day")

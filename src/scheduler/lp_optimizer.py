@@ -91,6 +91,13 @@ class LpPlan:
     be mistaken for a committed one and the snapshot records which regime ran."""
     peak_threshold_pence: float = 0.0
     cheap_threshold_pence: float = 0.0
+    tariff_structure_kind: str = "dynamic"
+    """``banded`` (Cosy-like: ≤4 price levels, midpoint thresholds) or
+    ``dynamic`` (Agile-like percentiles). See ``energy.tariff_structure`` (#804)."""
+    price_band: list[str] = field(default_factory=list)
+    """Per-slot band on a BANDED tariff (``cheap`` / ``standard`` / ``peak`` /
+    ``negative``); empty on a dynamic tariff so consumers fall back to the
+    threshold comparisons."""
     pre_negative_export_slots: list[int] = field(default_factory=list)
     """Slot indices where the pre-negative drain relaxation allowed battery→grid
     export (1B). The labeller marks committed drains here ``pre_negative_export``
@@ -423,9 +430,14 @@ def solve_lp(
         ]
     else:
         price_line = list(price_pence)
-    sorted_p = sorted(price_line)
-    cheap_thr = sorted_p[max(0, n // 4 - 1)] if n else 0.0
-    peak_thr = sorted_p[min(n - 1, (3 * n) // 4)] if n else 0.0
+    # Band-aware thresholds (#804): on a banded tariff (Cosy) these are the
+    # midpoints between price levels; on Agile they are exactly the q25/q75
+    # slot values this line always used (``dynamic_rule="lp"``).
+    from ..energy.tariff_structure import detect as _detect_structure
+    _structure = _detect_structure(price_line, dynamic_rule="lp")
+    cheap_thr = _structure.cheap_thr if n else 0.0
+    peak_thr = _structure.peak_thr if n else 0.0
+    price_band = [_structure.band_of(p) for p in price_line] if _structure.is_banded else []
 
     # Physical constants
     dt_s = 1800.0
@@ -1671,6 +1683,8 @@ def solve_lp(
         objective_pence=0.0,
         peak_threshold_pence=peak_thr,
         cheap_threshold_pence=cheap_thr,
+        tariff_structure_kind=_structure.kind,
+        price_band=list(price_band),
         pre_negative_export_slots=[i for i in range(n) if pre_neg_export[i]],
         pv_sufficiency_guard=pv_guard_diag,
         soc_floor_applied=soc_floor_kwh is not None,

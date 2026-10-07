@@ -838,11 +838,24 @@ def _evening_peak_entry_hour(
     prices = sorted(p for _, p in slots)
     q75 = prices[int(len(prices) * 0.75)]
     median = prices[len(prices) // 2]
-    peak_thr = max(q75, float(getattr(config, "OPTIMIZATION_PEAK_THRESHOLD_PENCE", 27.0)))
-    if peak_thr <= median + 1e-9:
-        # No contrast between the threshold and the middle of the day — a
-        # flat day (cheap OR uniformly expensive) has no "peak" to avoid.
-        return None
+    # #804: on a BANDED tariff (Cosy) q75 == median == the day band, so the
+    # contrast guard below would return None and the DHW window would fall to
+    # the static fallback every day. The band structure already knows which
+    # level is the peak — use its midpoint threshold instead.
+    from .energy.tariff_structure import detect as _detect_structure
+    _structure = _detect_structure(prices, dynamic_rule="lp")
+    if _structure.is_banded:
+        if not _structure.has_peak:
+            return None
+        # Keep the absolute floor: a mild 2-level evening (e.g. 25p on a 12p
+        # day) is still nothing worth re-timing the tank around.
+        peak_thr = max(_structure.peak_thr, float(getattr(config, "OPTIMIZATION_PEAK_THRESHOLD_PENCE", 27.0)))
+    else:
+        peak_thr = max(q75, float(getattr(config, "OPTIMIZATION_PEAK_THRESHOLD_PENCE", 27.0)))
+        if peak_thr <= median + 1e-9:
+            # No contrast between the threshold and the middle of the day — a
+            # flat day (cheap OR uniformly expensive) has no "peak" to avoid.
+            return None
     # >= (not >): the q75 of a day whose expensive block spans ≥25% of the
     # slots IS the block's price; the contrast guard above rejects flat days.
     above = [(s, p >= peak_thr) for s, p in slots]

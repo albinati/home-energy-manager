@@ -139,23 +139,10 @@ def cheap_peak_slot_frequency(
     while cur <= end:
         slots = db.get_agile_rates_slots_for_local_day(tariff_code, cur, tz_name=tz.key)
         if slots:
-            prices = sorted(float(s["value_inc_vat"]) for s in slots)
-            n = len(prices)
-            q25 = prices[max(0, n // 4 - 1)]
-            q75 = prices[min(n - 1, (3 * n) // 4)]
-            mean_p = sum(prices) / n
-            cheap_thr = min(mean_p * 0.85, q25)
-            peak_thr = max(q75, float(config.OPTIMIZATION_PEAK_THRESHOLD_PENCE))
-            for s in slots:
-                p = float(s["value_inc_vat"])
-                if p <= 0:
-                    k = "negative"
-                elif p < cheap_thr:
-                    k = "cheap"
-                elif p > peak_thr:
-                    k = "peak"
-                else:
-                    k = "standard"
+            from ..energy.tariff_structure import classify as _classify_bands
+            day_prices = [float(s["value_inc_vat"]) for s in slots]
+            # #804: band-aware on Cosy, historical percentile rule on Agile.
+            for p, k in zip(day_prices, _classify_bands(day_prices, dynamic_rule="legacy")):
                 counts[k] += 1
                 sums_p[k] += p
                 total += 1

@@ -279,9 +279,36 @@ Full deploy (token mint + smoke test) + ESPHome YAML skeleton: `deploy/README.md
 
 ---
 
+## Tariff structure — Cosy (banded) vs Agile (dynamic), #803/#804
+
+The household moved from Agile to **Cosy Octopus** (`E-1R-COSY-22-12-08-H`,
+effective 2026-10-06): three flat bands on the LOCAL clock — cheap 12.49p
+(04–07, 13–16, 22–24), day 25.45p, peak 38.17p (16–19). Every price classifier
+was percentile-based and misread a 3-level day (the q75 of a Cosy day IS the
+day band, so 13 h of day band read as "peak"; the strict `< cheap_thr` heartbeat
+never saw the cheap band). `src/energy/tariff_structure.py` is now the ONE
+place that decides `banded` vs `dynamic` and derives thresholds:
+
+- **banded** (≤ `TARIFF_BANDED_MAX_LEVELS` distinct levels) → `cheap_thr` /
+  `peak_thr` are the **midpoints between bands** (Cosy: 18.97 / 31.81), so every
+  existing `<`/`<=`/`>`/`>=` consumer classifies the bands correctly. The LP
+  plan carries `tariff_structure_kind` + per-slot `price_band`.
+- **dynamic** (Agile) → bit-for-bit the historical formulas (`dynamic_rule="lp"`
+  = q25/q75 in `solve_lp`; `"legacy"` = `min(mean×0.85,q25)` / `max(q75,25p)`
+  in `_classify_slots`, `/api/v1/agile/day`, `analytics.patterns`).
+- Horizon filler: on a TOU-family code the tail of the 48 h window is filled
+  from the stored rows bucketed by LOCAL (hour, minute)
+  (`band_profile_local`, DST-safe); Agile keeps the UTC-keyed 28-day priors.
+  Synthetic rows keep `fetched_at="prior"` (dhw_policy treats anything else as
+  REAL) and add `prior_source="prior_band"|"prior"`.
+- Consumers with an ABSOLUTE pence floor keep it on top of the band threshold
+  (`dhw_policy._evening_peak_entry_hour`, brief `_tariff_peak_windows_summary`).
+- Kill switch: `OCTOPUS_TARIFF_STRUCTURE=dynamic` → pre-#804 behaviour everywhere.
+
 ## Key `.env` settings to know
 
 ```
+OCTOPUS_TARIFF_STRUCTURE=auto                   # #804 — auto|banded|dynamic (dynamic = kill switch)
 FOX_SCHEDULER_WRITE_VERSION=v2                  # Open API version for the scheduler WRITE (#777).
                                                  # On 2026-08-06 Fox broke `/op/v3/device/scheduler/enable`
                                                  # for this device: it returns `41200 Failed to load data`

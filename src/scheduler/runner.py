@@ -461,9 +461,18 @@ def get_scheduler_status() -> dict:
         return out
 
     rates = fetch_agile_rates()
+    cheap_thr_status = float(config.SCHEDULER_CHEAP_THRESHOLD_PENCE)
+    # #804: on a banded tariff the static 12p cut-off sits just under Cosy's
+    # 12.49p cheap band, so next_cheap was always None — use the band threshold.
+    from ..energy.tariff_structure import detect as _detect_structure
+    from ..energy.tariff_structure import prefer_plan_thresholds
+    if rates and prefer_plan_thresholds():
+        _structure = _detect_structure([float(r.get("value_inc_vat") or 0.0) for r in rates], dynamic_rule="lp")
+        if _structure.is_banded and _structure.has_cheap:
+            cheap_thr_status = max(cheap_thr_status, float(_structure.cheap_thr))
     current, next_cheap, current_price = get_current_and_next_slots(
         rates,
-        cheap_threshold_pence=config.SCHEDULER_CHEAP_THRESHOLD_PENCE,
+        cheap_threshold_pence=cheap_thr_status,
         peak_start=config.SCHEDULER_PEAK_START,
         peak_end=config.SCHEDULER_PEAK_END,
     )
@@ -2428,7 +2437,7 @@ def bulletproof_heartbeat_tick() -> None:
         soc is not None
         and soc < float(config.FOXESS_ALERT_LOW_SOC)
         and price is not None
-        and float(price) > float(config.OPTIMIZATION_PEAK_THRESHOLD_PENCE)
+        and float(price) > _peak_alert_threshold_p(plan_date)
     ):
         key = f"low_soc_peak_{plan_date}"
         if not db.is_warning_acknowledged(key):
@@ -2438,7 +2447,7 @@ def bulletproof_heartbeat_tick() -> None:
         soc is not None
         and soc < float(config.MIN_SOC_RESERVE_PERCENT)
         and price is not None
-        and float(price) > float(config.OPTIMIZATION_PEAK_THRESHOLD_PENCE)
+        and float(price) > _peak_alert_threshold_p(plan_date)
     ):
         key = f"soc_reserve_floor_peak_{plan_date}"
         if not db.is_warning_acknowledged(key):
@@ -2447,6 +2456,26 @@ def bulletproof_heartbeat_tick() -> None:
                 f"during high price {price}p/kWh",
                 extra={"warning_key": key},
             )
+
+
+def _peak_alert_threshold_p(plan_date) -> float:
+    """Peak price threshold for the low-SoC heartbeat alerts: the LP's own
+    classification for the day (band midpoint on Cosy, q75 on Agile — #804),
+    falling back to the static ``OPTIMIZATION_PEAK_THRESHOLD_PENCE`` when no
+    daily target exists yet. Without this the Cosy DAY band (25.45p) cleared the
+    static 25p and paged on every afternoon."""
+    from ..energy.tariff_structure import prefer_plan_thresholds
+
+    if not prefer_plan_thresholds():
+        return float(config.OPTIMIZATION_PEAK_THRESHOLD_PENCE)  # Agile: unchanged
+    try:
+        tgt = db.get_daily_target(plan_date) or {}
+        v = tgt.get("peak_threshold")
+        if v is not None and float(v) > 0:
+            return float(v)
+    except Exception:
+        pass
+    return float(config.OPTIMIZATION_PEAK_THRESHOLD_PENCE)
 
 
 def _heartbeat_loop() -> None:
