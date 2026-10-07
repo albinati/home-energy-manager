@@ -928,6 +928,22 @@ def _coerce(spec: SettingSpec, raw: str) -> Any:
     raise SettingValidationError(f"unknown type {spec.type_name!r}")
 
 
+def _validate_comfort_aggregate(v: Any) -> None:
+    s = str(v)
+    if s in ("mean", "min", "max"):
+        return
+    if s.startswith("room:") and s.split(":", 1)[1].strip():
+        return
+    raise SettingValidationError(
+        f"INDOOR_COMFORT_AGGREGATE: {v!r} must be mean|min|max or room:<name>"
+    )
+
+
+_CUSTOM_VALIDATORS: dict[str, Callable[[Any], None]] = {
+    "INDOOR_COMFORT_AGGREGATE": _validate_comfort_aggregate,
+}
+
+
 def _validate(spec: SettingSpec, value: Any) -> Any:
     """Coerce and range/enum-check. Returns the canonical in-memory value.
 
@@ -967,6 +983,9 @@ def _validate(spec: SettingSpec, value: Any) -> Any:
             raise SettingValidationError(
                 f"{spec.key}: {v} > max {spec.max_value}"
             )
+    custom = _CUSTOM_VALIDATORS.get(spec.key)
+    if custom is not None:
+        custom(v)
     return v
 
 

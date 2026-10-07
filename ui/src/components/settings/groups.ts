@@ -37,7 +37,13 @@ export const SETTINGS_GROUPS: GroupSpec[] = [
     subtitle: "Room setpoint and whether HEM writes to Daikin (passive = read-only, active = HEM drives setpoints).",
     expanded: false,
     advanced: false,
-    keys: ["INDOOR_SETPOINT_C", "DAIKIN_CONTROL_MODE"],
+    keys: [
+      "INDOOR_SETPOINT_C",
+      "DAIKIN_CONTROL_MODE",
+      "INDOOR_COMFORT_AGGREGATE",
+      "LP_W3_NIGHT_FLOOR_C",
+      "LP_W3_PEAK_COAST_DELTA_C",
+    ],
   },
   {
     id: "dhw-demand",
@@ -112,6 +118,9 @@ export const SETTINGS_GROUPS: GroupSpec[] = [
 
 // Friendly labels — keep short; full descriptions come from the backend `description` field.
 export const KEY_LABELS: Record<string, string> = {
+  INDOOR_COMFORT_AGGREGATE: "Comfort temperature (mean | min | max | room:<name>)",
+  LP_W3_NIGHT_FLOOR_C: "Night comfort floor (°C)",
+  LP_W3_PEAK_COAST_DELTA_C: "Peak-band coast drop (°C)",
   OPTIMIZATION_PRESET: "Household mode",
   DHW_TEMP_NORMAL_C: "Normal tank target",
   DHW_TEMP_COMFORT_C: "Comfort tank target (plunge fill)",

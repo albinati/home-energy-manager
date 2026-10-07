@@ -625,8 +625,12 @@ def w3_trajectory_plausible(plan: LpPlan) -> tuple[bool, str]:
     n_slack = sum(1 for s in slack if float(s) > s_tol)
     if n_slack > max_slack_slots:
         return False, f"comfort_slack:{n_slack}_slots>{max_slack_slots}"
-    floor = float(getattr(config, "LP_W3_NIGHT_FLOOR_C", 17.5))
-    setpoint = float(config.INDOOR_SETPOINT_C)
+    # Judge the trajectory against the floor/setpoint the plan was SOLVED with;
+    # live config only for older plans that did not record them.
+    floor = float(plan.w3_night_floor_c if plan.w3_night_floor_c is not None
+                  else getattr(config, "LP_W3_NIGHT_FLOOR_C", 17.5))
+    setpoint = float(plan.w3_setpoint_c if plan.w3_setpoint_c is not None
+                     else config.INDOOR_SETPOINT_C)
     tol = float(getattr(config, "LP_W3_IMPLAUSIBLE_BELOW_FLOOR_C", 2.0))
     lo, hi = min(traj), max(traj)
     if lo < floor - tol:

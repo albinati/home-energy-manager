@@ -1020,8 +1020,11 @@ async def cockpit_now():
         if summ.get("n_rooms", 0) > 0:
             indoor_block = summ
             # Give the existing state.indoor_c a real value from the sensor mean.
-            if summ.get("mean_c") is not None:
-                dk_block["indoor_c"] = summ["mean_c"]
+            _comfort = summ.get("comfort_c")
+            if _comfort is None:
+                _comfort = summ.get("mean_c")
+            if _comfort is not None:
+                dk_block["indoor_c"] = _comfort
             newest = summ.get("newest_received_at")
             indoor_fresh = {
                 "fetched_at_utc": newest,

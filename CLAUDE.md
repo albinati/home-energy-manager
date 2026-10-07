@@ -492,6 +492,10 @@ disagreeing `windows`); **`DAIKIN_LWT_SOURCE`** (runtime-tunable, `PUT
   (`db.get_latest_indoor_reading` → `aggregate_indoor_c`). The owner accepts
   the kitchen colder than the corridor; `room:corredor` plans comfort on the
   living space while `rooms_c` / `spread_c` keep the cold room visible.
+  The W2 learner fits on the room MEAN while W3 seeds from the aggregate, so a
+  `min` with a large spread biases the RC seed; keep `mean` or `room:` of a
+  representative room. The plausibility gate judges the trajectory against the
+  floor/setpoint recorded ON the plan (`plan.w3_night_floor_c`), not live config.
 - **UA must be model-consistent before W3 drives hardware.** The LP's pump
   model is `k × (LWT − 18)` with the learned `k` (prod 0.063 kW/°C) — at 5 °C
   outdoor it can hold the house only up to UA ≈ 200 W/K. The env default

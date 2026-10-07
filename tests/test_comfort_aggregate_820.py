@@ -70,7 +70,12 @@ def test_indoor_summary_carries_the_comfort_temperature(monkeypatch):
     assert summ["comfort_c"] == pytest.approx(18.0) and summ["comfort_aggregate"] == "min"
 
 
-def test_w3_comfort_knobs_are_runtime_settings():
+def test_w3_comfort_knobs_are_runtime_settings(monkeypatch):
+    from src import runtime_settings
+    for k in ("LP_W3_NIGHT_FLOOR_C", "LP_W3_PEAK_COAST_DELTA_C", "INDOOR_COMFORT_AGGREGATE"):
+        monkeypatch.delenv(k, raising=False)
+        config._overrides.pop(k, None)
+    runtime_settings.clear_cache()
     for key, lo, hi in (("LP_W3_NIGHT_FLOOR_C", 14.0, 22.0), ("LP_W3_PEAK_COAST_DELTA_C", 0.0, 4.0)):
         spec = _SPECS[key]
         assert spec.type_name == "float" and spec.min_value == lo and spec.max_value == hi
@@ -81,12 +86,53 @@ def test_w3_comfort_knobs_are_runtime_settings():
     assert config.INDOOR_COMFORT_AGGREGATE == "mean"
 
 
-def test_runtime_override_reaches_the_w3_floor(monkeypatch):
-    """The LP's W3 floor reads the runtime value, not a frozen env default."""
-    from src.scheduler import lp_optimizer
+def _solve(monkeypatch, floor: float):
+    from tests.test_lwt_source_lp import _solve_w3
+    monkeypatch.setitem(config._overrides, "LP_W3_NIGHT_FLOOR_C", floor)
+    plan, _ = _solve_w3(monkeypatch, source="tier")
+    return plan
 
-    monkeypatch.setitem(config._overrides, "LP_W3_NIGHT_FLOOR_C", 16.0)
-    monkeypatch.setitem(config._overrides, "LP_W3_PEAK_COAST_DELTA_C", 2.0)
-    assert float(getattr(config, "LP_W3_NIGHT_FLOOR_C", 17.5)) == 16.0
-    assert float(getattr(config, "LP_W3_PEAK_COAST_DELTA_C", 1.0)) == 2.0
-    assert hasattr(lp_optimizer, "solve_lp")
+
+def test_runtime_override_reaches_the_w3_solve(monkeypatch):
+    """A real W3 solve: the night floor in force shapes the trajectory and is
+    recorded on the plan."""
+    lo = _solve(monkeypatch, 16.0)
+    hi = _solve(monkeypatch, 22.0)
+    assert lo.w3_night_floor_c == pytest.approx(16.0)
+    assert hi.w3_night_floor_c == pytest.approx(22.0)
+    assert (min(lo.indoor_temp_c) != pytest.approx(min(hi.indoor_temp_c))
+            or sum(lo.comfort_slack_c) != pytest.approx(sum(hi.comfort_slack_c))
+            or sum(lo.space_electric_kwh) != pytest.approx(sum(hi.space_electric_kwh)))
+
+
+def test_plausibility_gate_uses_the_plans_recorded_floor(monkeypatch):
+    from src.scheduler.lp_dispatch import w3_trajectory_plausible
+    plan = _solve(monkeypatch, 17.5)
+    assert plan.w3_night_floor_c == pytest.approx(17.5)
+    assert w3_trajectory_plausible(plan)[0]
+    # live config raised afterwards must not retroactively condemn the plan
+    monkeypatch.setitem(config._overrides, "LP_W3_NIGHT_FLOOR_C", 20.0)
+    monkeypatch.setattr(config, "LP_W3_IMPLAUSIBLE_BELOW_FLOOR_C", 0.1, raising=False)
+    plan.w3_night_floor_c = 17.5
+    plan.indoor_temp_c = [18.0] * len(plan.indoor_temp_c)
+    plan.comfort_slack_c = [0.0] * len(plan.comfort_slack_c)
+    assert w3_trajectory_plausible(plan)[0]  # 18 >= 17.5-0.1 though live floor is 20
+    plan.w3_night_floor_c = None  # older plan → live config (20) applies
+    assert not w3_trajectory_plausible(plan)[0]
+
+
+@pytest.mark.parametrize(("val", "code"), [
+    ("rom:corredor", 400), ("room:", 400), ("median", 400),
+    ("room:Corredor", 200), ("min", 200),
+])
+def test_put_validates_comfort_aggregate(monkeypatch, val, code):
+    from fastapi.testclient import TestClient
+
+    from src.api.main import app
+    monkeypatch.setattr(config, "HEM_UI_AUTH_REQUIRED", False, raising=False)
+    monkeypatch.setenv("REQUIRE_SIMULATION_ID", "false")
+    r = TestClient(app).put("/api/v1/settings/INDOOR_COMFORT_AGGREGATE", json={"value": val})
+    assert r.status_code == code, r.text
+    from src import runtime_settings
+    config._overrides.pop("INDOOR_COMFORT_AGGREGATE", None)
+    runtime_settings.clear_cache()

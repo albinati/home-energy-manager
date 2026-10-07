@@ -192,7 +192,7 @@ Original spec, for the record:
 
 **Phase W3 — LP re-gains a thermal state (the real prize) — ✅ SHIPPED (#657),
 but DEFAULT-OFF behind `LP_W3_TIN_ENABLED=false`.** Items 7–10 are implemented
-(`t_in[i]` RC dynamics, night comfort floor `LP_W3_NIGHT_FLOOR_C=17.5`,
+(`t_in[i]` RC dynamics, night comfort floor `LP_W3_NIGHT_FLOOR_C=17.5` (a runtime setting since #820, `PUT /api/v1/settings`),
 gentle-recovery cap `LP_W3_MAX_RECOVERY_C_PER_SLOT=0.5`, comfort penalty
 `LP_W3_COMFORT_PEN_PENCE_PER_DEGC_SLOT=15`). Flip the flag on before the heating
 season and validate with W4.

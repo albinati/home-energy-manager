@@ -954,9 +954,8 @@ class Config:
     # thermal model has never driven hardware and UA is unfitted.
     DAIKIN_LWT_LP_OFFSET_MIN: float = float(os.getenv("DAIKIN_LWT_LP_OFFSET_MIN", "-5"))
     DAIKIN_LWT_LP_OFFSET_MAX: float = float(os.getenv("DAIKIN_LWT_LP_OFFSET_MAX", "5"))
-    # W3 comfort floor inside the PEAK band = INDOOR_SETPOINT_C − this (coast
-    # through the peak on stored heat; τ ≈ 80 h → ~0.5 °C over 3 h).
-    # LP_W3_PEAK_COAST_DELTA_C is a RUNTIME setting since #820 (property below).
+    # LP_W3_PEAK_COAST_DELTA_C is a RUNTIME setting since #820 (property below):
+    # the W3 comfort floor inside the PEAK band = INDOOR_SETPOINT_C − this.
     # Plausibility gate on the W3 trajectory before it may drive hardware: a
     # predicted indoor temperature more than this below the night floor (or
     # more than 2× this above the setpoint) means the RC model cannot hold the

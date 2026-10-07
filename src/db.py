@@ -5060,6 +5060,9 @@ def get_latest_indoor_reading(max_age_minutes: int = 30) -> dict[str, Any] | Non
     }
 
 
+_WARNED_MISSING_ROOMS: set[str] = set()
+
+
 def aggregate_indoor_c(rooms_c: dict[str, float]) -> tuple[str, float]:
     """#820 — collapse the fresh per-room readings into THE house temperature
     per ``INDOOR_COMFORT_AGGREGATE`` (runtime setting): ``mean`` (default),
@@ -5073,7 +5076,10 @@ def aggregate_indoor_c(rooms_c: dict[str, float]) -> tuple[str, float]:
     if not vals:
         raise ValueError("no rooms")
     mean = sum(vals) / len(vals)
-    mode = str(getattr(config, "INDOOR_COMFORT_AGGREGATE", "mean") or "mean").strip().lower()
+    try:
+        mode = str(getattr(config, "INDOOR_COMFORT_AGGREGATE", "mean") or "mean").strip().lower()
+    except Exception:
+        mode = "mean"
     if mode == "min":
         return "min", min(vals)
     if mode == "max":
@@ -5083,6 +5089,12 @@ def aggregate_indoor_c(rooms_c: dict[str, float]) -> tuple[str, float]:
         for room, v in rooms_c.items():
             if str(room).strip().lower() == want:
                 return mode, float(v)
+        if mode not in _WARNED_MISSING_ROOMS:
+            _WARNED_MISSING_ROOMS.add(mode)
+            logger.warning(
+                "INDOOR_COMFORT_AGGREGATE=%s but that room is not among the fresh rooms %s; using mean",
+                mode, sorted(rooms_c),
+            )
         return "mean", mean  # the named room is stale/absent → honest fallback
     return "mean", mean
 
@@ -5368,9 +5380,14 @@ def get_indoor_summary(stale_minutes: int = 30, lookback_hours: int = 24) -> dic
     # INDOOR_COMFORT_AGGREGATE, next to the plain mean the chart shows.
     comfort_mode: str | None = None
     comfort_c: float | None = None
-    fresh_rooms = {str(x["room"]): float(x["temp_c"]) for x in rooms
-                   if not x["stale"] and x.get("temp_c") is not None}
+    _by_room: dict[str, list[float]] = {}
+    for x in rooms:
+        if not x["stale"] and x.get("temp_c") is not None:
+            _by_room.setdefault(str(x["room"]), []).append(float(x["temp_c"]))
+    # one value per ROOM (two devices in a room must not shadow each other)
+    fresh_rooms = {k: sum(v) / len(v) for k, v in _by_room.items()}
     if fresh_rooms:
+        mean_c = sum(fresh_rooms.values()) / len(fresh_rooms)
         try:
             comfort_mode, comfort_c = aggregate_indoor_c(fresh_rooms)
         except Exception:  # noqa: BLE001 — a bad setting must not break the cockpit read
