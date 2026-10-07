@@ -1615,20 +1615,41 @@ def _peak_entry_floor_indices(
     # band is NOT in this set — before #805 it read as "expensive", so the
     # floor insured the battery full at 00:00 and 07:00 for nothing.
     peak_keys = ("expensive", "severe_peak", "band_peak")
+    # #818 — on a banded tariff a cheap→day transition (Cosy 07:00, after the
+    # 04–07 band) is ALSO a charge-decision boundary: whatever the battery does
+    # not hold at 07:00 is bought at 25.45p instead of 12.49p through 07–13.
+    # Only the exit FROM the cheap band counts — the 19:00 peak→day entry has
+    # no cheap window before it, and flooring it would make the nominal plan
+    # hold charge through the peak (= import at 38p) to satisfy it.
+    # The 22–24 cheap band runs into the 00–04 day band of the NEXT local day,
+    # so the previous window is carried across contiguous days (midnight is a
+    # cheap exit too: 2.2–2.5 kWh at 25.45p that the 22–24 charge should hold).
+    band_exits = bool(getattr(config, "LP_PESS_CHARGE_FLOOR_BAND_EXITS", True))
     out: set[int] = set()
+    prev_key: str | None = None
+    prev_end: datetime | None = None
     for _, slots in sorted(by_day.items()):
         prev_peak_end = None
         for w in classify_day(slots):
-            if w.tier.key not in peak_keys:
-                continue
-            # A severe_peak window butted against an expensive one is the SAME
-            # peak for charging purposes — only the entry from a non-peak tier
-            # counts, or the boundary would fragment into several floors.
-            if prev_peak_end != w.start_utc:
+            contiguous = prev_end is not None and prev_end == w.start_utc
+            if w.tier.key in peak_keys:
+                # A severe_peak window butted against an expensive one is the SAME
+                # peak for charging purposes — only the entry from a non-peak tier
+                # counts, or the boundary would fragment into several floors.
+                if prev_peak_end != w.start_utc:
+                    j = start_to_idx.get(w.start_utc)
+                    if j is not None:
+                        out.add(j)
+                prev_peak_end = w.end_utc
+            elif (
+                band_exits and w.tier.key == "band_day"
+                and contiguous and prev_key == "band_cheap"
+            ):
                 j = start_to_idx.get(w.start_utc)
                 if j is not None:
                     out.add(j)
-            prev_peak_end = w.end_utc
+            prev_key = w.tier.key
+            prev_end = w.end_utc
     return sorted(out)
 
 
@@ -1775,6 +1796,38 @@ def _soc_reserve_recovery_snapshot(
     }
 
 
+def _expensive_band_quantile(prices: list[float]) -> tuple[str, Any]:
+    """#818 — ``(quantile_name, structure_or_None)`` for the pessimistic
+    scenario's residual-load spread. The structure is only detected (and only
+    kept) when the operator asked for a non-default quantile AND the horizon is
+    banded; dynamic tariffs and the default `p75` short-circuit to ``None`` so
+    Agile solves never touch the detector."""
+    q = str(getattr(config, "LP_LOAD_EXPENSIVE_BAND_QUANTILE", "p75") or "p75").strip().lower()
+    if q not in ("p75", "p90"):
+        q = "p75"
+    if q == "p75":
+        return q, None
+    try:
+        from ..energy.tariff_structure import detect as _detect_structure
+
+        struct = _detect_structure(list(prices))
+    except Exception:  # noqa: BLE001 — structure detection must never break the solve
+        return q, None
+    return q, (struct if struct.is_banded else None)
+
+
+def _spread_quantile_for_slot(struct: Any, price_p: float, expensive_q: str) -> str:
+    """Quantile name for one slot's scenario spread: ``expensive_q`` inside the
+    day/peak bands of a banded structure, ``p75`` everywhere else."""
+    if struct is None:
+        return "p75"
+    try:
+        band = struct.band_of(float(price_p))
+    except Exception:  # noqa: BLE001
+        return "p75"
+    return expensive_q if band in ("standard", "peak") else "p75"
+
+
 def _run_optimizer_lp(
     fox: FoxESSClient | None,
     daikin: Any | None = None,
@@ -1890,6 +1943,12 @@ def _run_optimizer_lp(
             _load_bias = db.get_load_recent_bias()
         except Exception:
             _load_bias = {}
+    # #818 — on a BANDED tariff the pessimistic scenario protects the expensive
+    # blocks (day + peak bands) with the upper-tail quantile
+    # (LP_LOAD_EXPENSIVE_BAND_QUANTILE, default p90); cheap bands and dynamic
+    # tariffs keep the legacy p75 so Agile plans are bit-identical.
+    _expensive_q, _band_struct = _expensive_band_quantile([s.price_pence for s in slots])
+    _n_hi_quantile = 0
     base_load = []
     base_load_spread = []
     for s in slots:
@@ -1901,8 +1960,16 @@ def _run_optimizer_lp(
         if _load_bias:
             _b = max(0.0, _b + _load_bias.get(_h, 0.0))
         base_load.append(_b)
+        _q = _spread_quantile_for_slot(_band_struct, s.price_pence, _expensive_q)
+        if _q != "p75":
+            _n_hi_quantile += 1
         base_load_spread.append(
-            db.lookup_residual_spread_kwh(_prof, _dow, _h, _m) * _load_scale * _guests_scale
+            db.lookup_residual_quantile_kwh(_prof, _dow, _h, _m, _q) * _load_scale * _guests_scale
+        )
+    if _n_hi_quantile:
+        logger.info(
+            "LP base_load: banded tariff — pessimistic spread uses %s on %d expensive-band slot(s)",
+            _expensive_q, _n_hi_quantile,
         )
     if _load_scale != 1.0:
         logger.info("LP base_load: operator load scale %.2f applied to residual profile", _load_scale)
