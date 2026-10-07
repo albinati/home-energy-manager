@@ -540,6 +540,31 @@ disagreeing `windows`); **`DAIKIN_LWT_SOURCE`** (runtime-tunable, `PUT
   `DAIKIN_LWT_SOURCE=lp`. Status: `space_heating_gate_state()` →
   `lwt_source`, `lwt_source_last_diff`.
 
+### Comfort feedback loop (#833)
+
+The owner's "how does the house feel?" closes the loop. Three inputs, one table
+(`comfort_feedback`: verdict cold|ok|hot, optional room/note, plus the context at
+that instant — aggregate + per-room indoor, outdoor, active LWT offset, price
+band, `DAIKIN_LWT_SOURCE`):
+
+- **API**: `POST /api/v1/comfort/feedback` (admin; `{verdict, room?, note?}`),
+  `GET /api/v1/comfort/feedback?days=30` (viewer; rows + per-room counts + weekly summary).
+- **Home**: admin-only Cold / OK / Hot buttons (+ room select) in the Heating card.
+- **Telegram** (`TELEGRAM_INBOUND_ENABLED=true`, short-poll `getUpdates` every
+  `TELEGRAM_INBOUND_POLL_SECONDS`=60 — own job `telegram_inbound_poll`, offset
+  persisted in `kv_state.telegram_update_offset`, ONLY `TELEGRAM_CHAT_ID` is
+  accepted): `/conforto frio|ok|quente [cômodo] [nota]` or `/comfort cold|ok|hot
+  [room] [note]`; `/conforto` alone = usage + current rooms. The room token is only
+  taken when it matches a fresh sensor room, otherwise it is part of the note.
+- **Weekly** (`src/analytics/comfort_feedback.py`, Sunday 08:45 local): summary to
+  `action_log` (device `comfort`, action `weekly_summary`). Proposal rules: >=2 cold
+  at night at/below floor+0.3 -> `LP_W3_NIGHT_FLOOR_C` +0.5 (cap 22); >=2 cold in
+  the peak band -> `LP_W3_PEAK_COAST_DELTA_C` -0.5 (min 0); >=3 hot and no cold ->
+  the inverse. `external_comfort_signal(week_start)` exposes it to the suggestions
+  story. **Nothing is applied** unless `COMFORT_FEEDBACK_AUTO_TUNE=true` (default
+  false); then only that one bounded +-0.5 change per week via
+  `runtime_settings.set_setting` (action_log `auto_tune`).
+
 ## Key `.env` settings to know
 
 ```

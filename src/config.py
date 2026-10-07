@@ -150,6 +150,11 @@ class Config:
         os.getenv("TELEGRAM_API_BASE_URL") or "https://api.telegram.org"
     ).strip().rstrip("/")
     TELEGRAM_TIMEOUT_SECONDS: int = int(os.getenv("TELEGRAM_TIMEOUT_SECONDS", "10"))
+    # #833 — inbound owner commands (/conforto ...) via getUpdates short-poll.
+    TELEGRAM_INBOUND_ENABLED: bool = os.getenv("TELEGRAM_INBOUND_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+    TELEGRAM_INBOUND_POLL_SECONDS: int = int(os.getenv("TELEGRAM_INBOUND_POLL_SECONDS", "60"))
+    # #833 — weekly comfort proposals are NEVER applied unless this is true.
+    COMFORT_FEEDBACK_AUTO_TUNE: bool = os.getenv("COMFORT_FEEDBACK_AUTO_TUNE", "false").strip().lower() in ("1", "true", "yes", "on")
     # Extra Telegram chat IDs (CSV) that receive a copy of every appliance
     # lifecycle notification (armed / starting / finished / cancelled). The
     # primary chat at TELEGRAM_CHAT_ID always gets the message; entries here

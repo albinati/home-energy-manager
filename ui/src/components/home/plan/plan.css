@@ -110,3 +110,13 @@
 .compare-framing { color: var(--text-mute); }
 
 .cs-sw--tick { width: 2px; height: var(--space-3); background: var(--text); border-radius: 0; }
+
+.pf-feel { display: flex; flex-direction: column; gap: var(--space-1); }
+.pf-feel-btns { display: flex; flex-wrap: wrap; gap: var(--space-1); align-items: center; }
+.pf-feel-btn, .pf-feel-room {
+  font: inherit; font-size: var(--font-xs); color: var(--text);
+  background: var(--surface-2, var(--surface)); border: 0; border-radius: var(--radius-sm, 6px);
+  padding: var(--space-1) var(--space-2); cursor: pointer; font-variant-numeric: tabular-nums;
+}
+.pf-feel-btn:hover:not(:disabled) { background: var(--surface-3, var(--surface-2)); }
+.pf-feel-btn:disabled { opacity: .5; cursor: default; }

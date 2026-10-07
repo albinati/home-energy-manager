@@ -1,3 +1,6 @@
+import { useState } from "preact/hooks";
+import { role } from "../../../lib/auth";
+import { postComfortFeedback, type ComfortVerdict } from "../../../lib/endpoints";
 import type { PlanFrontsHeating, HeatingPlanWindow } from "../../../lib/types";
 import { Icon } from "../../common/Icon";
 import { Pill } from "../../common/Pill";
@@ -18,6 +21,42 @@ function gateLine(g: NonNullable<PlanFrontsHeating["gate"]>): string {
     parts.push(`outdoor ${num(g.current_outdoor_c)} °C vs cutoff ${num(g.outdoor_cutoff_c, 0)} °C${g.positive_offset_suppressed_by_outdoor ? " (boost off)" : ""}`);
   }
   return parts.join(" · ");
+}
+
+function FeelRow({ rooms }: { rooms: string[] }) {
+  const [room, setRoom] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [ack, setAck] = useState("");
+  const send = async (v: ComfortVerdict) => {
+    setBusy(true);
+    try {
+      const r = await postComfortFeedback(v, room);
+      setAck(`Logged ${v}${r.room ? ` · ${r.room}` : ""}${r.indoor_c != null ? ` · ${r.indoor_c.toFixed(1)} °C` : ""}${r.band ? ` · ${r.band}` : ""}`);
+    } catch {
+      setAck("Could not save feedback");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div class="pf-feel">
+      <span class="pf-eyebrow">How does it feel?</span>
+      <div class="pf-feel-btns">
+        {(["cold", "ok", "hot"] as ComfortVerdict[]).map((v) => (
+          <button key={v} type="button" class="pf-feel-btn" disabled={busy} onClick={() => send(v)}>
+            {v === "cold" ? "Cold" : v === "ok" ? "OK" : "Hot"}
+          </button>
+        ))}
+        {rooms.length > 0 && (
+          <select class="pf-feel-room" aria-label="Room" value={room} onChange={(e) => setRoom((e.target as HTMLSelectElement).value)}>
+            <option value="">whole house</option>
+            {rooms.map((r) => <option key={r} value={r}>{r.replace(/_/g, " ")}</option>)}
+          </select>
+        )}
+      </div>
+      {ack && <span class="pf-note" role="status">{ack}</span>}
+    </div>
+  );
 }
 
 export function HeatingPlanCard({ data, nowUtc, loading }: { data: PlanFrontsHeating | null; nowUtc: string; loading: boolean }) {
@@ -105,6 +144,7 @@ export function HeatingPlanCard({ data, nowUtc, loading }: { data: PlanFrontsHea
           ))}
         </div>
       )}
+      {role.value === "admin" && <FeelRow rooms={rooms.map(([r]) => r)} />}
     </div>
   );
 }

@@ -1016,6 +1016,36 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         )"""
     )
 
+    # #833 — owner comfort feedback (cold/ok/hot) with the context at that moment,
+    # plus a tiny kv table (Telegram getUpdates offset must survive restarts).
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS comfort_feedback (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            at_utc         TEXT NOT NULL,
+            source         TEXT NOT NULL,
+            verdict        TEXT NOT NULL,
+            room           TEXT,
+            note           TEXT,
+            indoor_c       REAL,
+            rooms_json     TEXT,
+            outdoor_c      REAL,
+            lwt_offset_c   REAL,
+            band           TEXT,
+            lwt_source     TEXT,
+            created_at_utc TEXT NOT NULL
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_comfort_feedback_at ON comfort_feedback(at_utc)"
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS kv_state (
+            key        TEXT PRIMARY KEY,
+            value      TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )"""
+    )
+
     # #540 W1c — full per-device sensor log. room_temperature_history keeps ONLY
     # temp_c (what the LP/thermal model needs); this table is the lossless audit
     # of EVERYTHING a device sends (humidity, pressure, a 2nd temperature, MAC,
@@ -9263,3 +9293,157 @@ def refresh_daikin_lwt_kw_calibration(*, log_min_delta_pct: float = 1.0) -> dict
                 result.get("bias_kwh") or 0.0,
             )
     return result
+
+
+# ---------------------------------------------------------------------------
+# #833 — comfort feedback + kv_state
+# ---------------------------------------------------------------------------
+
+COMFORT_VERDICTS = ("cold", "ok", "hot")
+COMFORT_SOURCES = ("telegram", "api", "ui")
+
+
+def get_kv(key: str, default: str | None = None) -> str | None:
+    with _lock:
+        conn = get_connection()
+        try:
+            r = conn.execute("SELECT value FROM kv_state WHERE key = ?", (key,)).fetchone()
+            return str(r[0]) if r else default
+        except sqlite3.OperationalError:
+            return default
+        finally:
+            conn.close()
+
+
+def set_kv(key: str, value: str) -> None:
+    ts = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    with _lock:
+        conn = get_connection()
+        try:
+            conn.execute(
+                """INSERT INTO kv_state (key, value, updated_at) VALUES (?, ?, ?)
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at""",
+                (key, str(value), ts),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def _comfort_context(now: datetime) -> dict[str, Any]:
+    """Best-effort snapshot of the house at feedback time. Every field is
+    independently guarded: a missing source leaves its field None."""
+    from .config import config
+
+    ctx: dict[str, Any] = {"indoor_c": None, "rooms_json": None, "outdoor_c": None,
+                           "lwt_offset_c": None, "band": None,
+                           "lwt_source": str(getattr(config, "DAIKIN_LWT_SOURCE", "") or "") or None}
+    try:
+        ind = get_latest_indoor_reading(max_age_minutes=int(getattr(config, "INDOOR_SENSOR_STALE_MINUTES", 30) or 30))
+        if ind:
+            ctx["indoor_c"] = ind.get("temp_c")
+            ctx["rooms_json"] = json.dumps(ind.get("rooms_c") or {})
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        t = get_latest_daikin_telemetry(source="live")
+        if t and t.get("outdoor_temp_c") is not None:
+            ctx["outdoor_c"] = float(t["outdoor_temp_c"])
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from zoneinfo import ZoneInfo
+
+        from .analytics.load_expected import band_windows_for_day
+
+        tz = ZoneInfo(str(getattr(config, "BULLETPROOF_TIMEZONE", "Europe/London") or "Europe/London"))
+        day = now.astimezone(tz).date()
+        wins, _kind = band_windows_for_day(day, tz)
+        for w in wins:
+            if w.start_utc <= now < w.end_utc:
+                k = str(w.key or w.label or "")
+                ctx["band"] = (k[5:] if k.startswith("band_") else k) or None
+                break
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo(str(getattr(config, "BULLETPROOF_TIMEZONE", "Europe/London") or "Europe/London"))
+        local = now.astimezone(tz).date()
+        for d in (local, local + timedelta(days=1), local - timedelta(days=1)):
+            for r in get_actions_for_plan_date(d.isoformat(), device="daikin"):
+                if r.get("action_type") != "lwt_preheat" or r.get("status") != "active":
+                    continue
+                st = datetime.fromisoformat(str(r["start_time"]).replace("Z", "+00:00"))
+                en = datetime.fromisoformat(str(r["end_time"]).replace("Z", "+00:00"))
+                if st <= now < en and isinstance(r.get("params"), dict) and "lwt_offset" in r["params"]:
+                    ctx["lwt_offset_c"] = float(r["params"]["lwt_offset"])
+                    raise StopIteration
+    except StopIteration:
+        pass
+    except Exception:  # noqa: BLE001
+        pass
+    return ctx
+
+
+def insert_comfort_feedback(
+    *, verdict: str, source: str = "api", room: str | None = None,
+    note: str | None = None, now: datetime | None = None,
+) -> dict[str, Any]:
+    """Store one comfort verdict, enriched with the house context at ``now``."""
+    verdict = str(verdict).strip().lower()
+    if verdict not in COMFORT_VERDICTS:
+        raise ValueError(f"verdict must be one of {COMFORT_VERDICTS}")
+    if source not in COMFORT_SOURCES:
+        raise ValueError(f"source must be one of {COMFORT_SOURCES}")
+    now = (now or datetime.now(UTC)).astimezone(UTC)
+    room = (str(room).strip().lower() or None) if room else None
+    note = (str(note).strip()[:500] or None) if note else None
+    ctx = _comfort_context(now)
+    at = now.isoformat().replace("+00:00", "Z")
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                """INSERT INTO comfort_feedback
+                   (at_utc, source, verdict, room, note, indoor_c, rooms_json, outdoor_c,
+                    lwt_offset_c, band, lwt_source, created_at_utc)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (at, source, verdict, room, note, ctx["indoor_c"], ctx["rooms_json"],
+                 ctx["outdoor_c"], ctx["lwt_offset_c"], ctx["band"], ctx["lwt_source"],
+                 datetime.now(UTC).isoformat().replace("+00:00", "Z")),
+            )
+            conn.commit()
+            rid = cur.lastrowid
+            r = conn.execute("SELECT * FROM comfort_feedback WHERE id = ?", (rid,)).fetchone()
+        finally:
+            conn.close()
+    return _comfort_row(r)
+
+
+def _comfort_row(r: sqlite3.Row) -> dict[str, Any]:
+    d = dict(r)
+    try:
+        d["rooms_c"] = json.loads(d.get("rooms_json") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        d["rooms_c"] = {}
+    return d
+
+
+def get_comfort_feedback(days: int = 30, *, since_utc: str | None = None,
+                         until_utc: str | None = None) -> list[dict[str, Any]]:
+    """Feedback rows, oldest first, for the last ``days`` (or an explicit window)."""
+    start = since_utc or (datetime.now(UTC) - timedelta(days=int(days))).isoformat().replace("+00:00", "Z")
+    q = "SELECT * FROM comfort_feedback WHERE at_utc >= ?"
+    args: list[Any] = [start]
+    if until_utc:
+        q += " AND at_utc < ?"
+        args.append(until_utc)
+    q += " ORDER BY at_utc, id"
+    with _lock:
+        conn = get_connection()
+        try:
+            return [_comfort_row(r) for r in conn.execute(q, args).fetchall()]
+        finally:
+            conn.close()

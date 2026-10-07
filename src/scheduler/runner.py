@@ -1880,6 +1880,27 @@ def _maybe_log_comfort_morning_check(
             )
 
 
+def _telegram_inbound_poll_job() -> None:
+    """#833 — short-poll Telegram getUpdates for owner /conforto commands.
+    Own job, never raises, never touches the heartbeat."""
+    try:
+        from ..analytics.comfort_feedback import poll_telegram_once
+
+        poll_telegram_once()
+    except Exception:
+        logger.warning("telegram inbound poll job failed", exc_info=True)
+
+
+def _comfort_weekly_job() -> None:
+    """#833 — Sunday 08:45 local: weekly comfort summary (+ bounded auto-tune if enabled)."""
+    try:
+        from ..analytics.comfort_feedback import weekly_job
+
+        weekly_job()
+    except Exception:
+        logger.warning("comfort weekly job failed", exc_info=True)
+
+
 def _daily_history_prune_job() -> None:
     """Run the retention policy for append-only history tables.
 
@@ -2984,6 +3005,26 @@ def start_background_scheduler() -> None:
                 CronTrigger(hour=3, minute=15, timezone=ZoneInfo("UTC")),
                 id="daily_history_prune",
             )
+
+            # #833 — comfort feedback: weekly summary + Telegram inbound short-poll.
+            _background_scheduler.add_job(
+                _comfort_weekly_job,
+                CronTrigger(day_of_week="sun", hour=8, minute=45, timezone=tz),
+                id="comfort_weekly_summary",
+            )
+            if (
+                getattr(config, "TELEGRAM_INBOUND_ENABLED", True)
+                and config.TELEGRAM_BOT_TOKEN
+                and config.TELEGRAM_CHAT_ID
+            ):
+                _background_scheduler.add_job(
+                    _telegram_inbound_poll_job,
+                    "interval",
+                    seconds=max(10, int(getattr(config, "TELEGRAM_INBOUND_POLL_SECONDS", 60))),
+                    id="telegram_inbound_poll",
+                    max_instances=1,
+                    coalesce=True,
+                )
 
             # Google Calendar publisher — separate APScheduler job so a bug
             # here cannot affect octopus_fetch, MPC, dispatch, or LP. Three
