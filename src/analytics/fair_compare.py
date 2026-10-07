@@ -455,3 +455,27 @@ def compute_fair_comparison(
             "uplift_if_switch_pence": round(export_agile_pence - export_seg_pence, 2),
         },
     }
+
+
+# 900 s in-process cache shared by GET /api/v1/tariffs/fair-compare and the
+# plan-fronts read (#821): each uncached call does live Octopus HTTP + a
+# per-day rollup over the whole period, so it must never be reachable
+# uncached from a viewer-open endpoint.
+_fair_compare_cache: dict[tuple, tuple[float, dict[str, Any]]] = {}
+
+
+def cached_fair_comparison(start_day: date, end_day: date, max_tariffs: int = 14) -> dict[str, Any]:
+    import time as _t
+
+    ttl = int(getattr(config, "FAIR_COMPARE_CACHE_TTL_SECONDS", 900))
+    key = (str(config.DB_PATH), str(start_day), str(end_day), int(max_tariffs))
+    if ttl > 0:
+        hit = _fair_compare_cache.get(key)
+        if hit and (_t.monotonic() - hit[0]) < ttl:
+            return hit[1]
+    data = compute_fair_comparison(start_day, end_day, max_tariffs=max_tariffs)
+    if ttl > 0 and data is not None:
+        if len(_fair_compare_cache) > 64:
+            _fair_compare_cache.clear()
+        _fair_compare_cache[key] = (_t.monotonic(), data)
+    return data

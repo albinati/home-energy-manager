@@ -156,7 +156,7 @@ def battery_slot_kind(slot: dict[str, Any], fox_mode: str | None) -> str:
 
 def battery_windows(slots: list[dict[str, Any]], groups: list[dict[str, Any]],
                     cap_kwh: float, tz: ZoneInfo) -> list[dict[str, Any]]:
-    """Contiguous runs of the same (kind, fox_mode) over the day's LP slots."""
+    """Contiguous runs of the same ``kind`` over the day's LP slots; ``fox_mode`` is the Fox mode at the window start."""
     def pct(v: Any) -> float | None:
         return None if v is None or cap_kwh <= 0 else round(float(v) / cap_kwh * 100.0, 1)
 
@@ -166,7 +166,7 @@ def battery_windows(slots: list[dict[str, Any]], groups: list[dict[str, Any]],
         mode = fox_mode_at(groups, st.astimezone(tz))
         kind = battery_slot_kind(s, mode)
         end = st + timedelta(minutes=30)
-        if runs and runs[-1]["kind"] == kind and runs[-1]["fox_mode"] == mode and runs[-1]["_end"] == st:
+        if runs and runs[-1]["kind"] == kind and runs[-1]["_end"] == st:
             cur = runs[-1]
             cur["_end"] = end
             cur["grid_kwh"] += float(s.get("import_kwh") or 0.0)
@@ -213,8 +213,9 @@ def battery_by_band(windows: list[Any], planned_by_slot: dict[datetime, float],
         has_planned = any(w.start_utc <= t < w.end_utc for t in planned_by_slot)
         realised = None
         if now_utc > w.start_utc:
-            realised = sum(v for t, v in realised_by_start.items()
-                           if w.start_utc <= t < w.end_utc and t + timedelta(minutes=30) <= now_utc)
+            seen = [v for t, v in realised_by_start.items()
+                    if w.start_utc <= t < w.end_utc and t + timedelta(minutes=30) <= now_utc]
+            realised = sum(seen) if seen else None  # no telemetry != 0 kWh
         entry = next((s for s in lp_slots if s["_start"] == w.start_utc), None)
         soc_entry = None
         if entry is not None and entry.get("soc_kwh") is not None and cap_kwh > 0:
@@ -228,17 +229,6 @@ def battery_by_band(windows: list[Any], planned_by_slot: dict[datetime, float],
             "soc_entry_pct": soc_entry, "floored": floored,
         })
     return out
-
-
-def _latest_soc_pct() -> float | None:
-    conn = db.get_connection()
-    try:
-        r = conn.execute(
-            "SELECT soc_pct FROM pv_realtime_history WHERE soc_pct IS NOT NULL "
-            "ORDER BY captured_at DESC LIMIT 1").fetchone()
-    finally:
-        conn.close()
-    return None if r is None else float(r["soc_pct"])
 
 
 def _committed_by_start(day: date, field: str, tz: ZoneInfo | None = None) -> dict[datetime, float]:
@@ -261,11 +251,11 @@ def battery_section(day: date, windows: list[Any], now_utc: datetime, tz: ZoneIn
         "reserve_pct": _r(getattr(config, "MIN_SOC_RESERVE_PERCENT", None), 1),
         "soc_now_pct": None, "soc_now_kwh": None,
         "plan_run_id": None, "plan_run_at": None,
-        "windows": [], "by_band": [], "fox_groups": [],
+        "windows": [], "by_band": [], "fox_groups": [], "floor_binding_slots": None,
         "peak_import_planned_kwh": None, "peak_import_realised_kwh": None,
     }
     try:
-        soc = _latest_soc_pct()
+        soc = db.get_latest_soc_pct()
         if soc is not None:
             out["soc_now_pct"] = round(soc, 1)
             out["soc_now_kwh"] = round(soc / 100.0 * cap, 2)
@@ -289,7 +279,10 @@ def battery_section(day: date, windows: list[Any], now_utc: datetime, tz: ZoneIn
         out["plan_run_at"] = inputs.get("run_at_utc")
         try:
             exo = json.loads(inputs.get("exogenous_snapshot_json") or "{}")
-            entry_idx = {int(i) for i in ((exo.get("pess_charge_floor") or {}).get("entry_slots") or [])}
+            pcf = exo.get("pess_charge_floor") or {}
+            entry_idx = {int(i) for i in (pcf.get("entry_slots") or [])}
+            if pcf.get("binding_slots") is not None:
+                out["floor_binding_slots"] = int(pcf["binding_slots"])
         except (ValueError, TypeError):
             entry_idx = set()
         lp_slots = lp_slots_for_day(db.get_lp_solution_slots(run_id), day, tz)
@@ -300,7 +293,7 @@ def battery_section(day: date, windows: list[Any], now_utc: datetime, tz: ZoneIn
     realised = db.half_hourly_kwh_for_utc_range(a, b, "grid_import_kw")
     out["by_band"] = battery_by_band(windows, planned, realised, lp_slots, entry_idx, cap, now_utc, tz)
     peaks = [w for w in windows if str(w.key) == "band_peak" or str(w.label).lower() == "peak"]
-    if peaks:
+    if peaks and (lp_slots or planned):
         pk = [x for x in out["by_band"] if x["key"] in {p.key for p in peaks}]
         out["peak_import_planned_kwh"] = round(sum(x["planned_import_kwh"] or 0.0 for x in pk), 3)
         if any(x["realised_import_kwh"] is not None for x in pk):
@@ -324,7 +317,7 @@ def tank_windows(day: date, tz: ZoneInfo) -> list[dict[str, Any]]:
     seen: set[tuple[Any, Any]] = set()
     out = []
     for anchor in (day - timedelta(days=1), day):
-        for r in dhw_policy.dhw_schedule_rows_for_day(anchor, tz=tz):
+        for r in dhw_policy.dhw_schedule_rows_for_day(anchor, tz=tz, allow_past=True):
             st, en = _parse(r.get("start_utc")), _parse(r.get("end_utc"))
             if st is None:
                 continue
@@ -346,8 +339,9 @@ def tank_windows(day: date, tz: ZoneInfo) -> list[dict[str, Any]]:
     return out
 
 
-def next_tank_action(windows: list[dict[str, Any]], now_utc: datetime) -> dict[str, Any] | None:
-    for w in windows:
+def next_tank_action(windows: list[dict[str, Any]], now_utc: datetime,
+                     later_windows: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
+    for w in list(windows) + list(later_windows or []):
         st = _parse(w["start_utc"])
         if st is not None and st > now_utc:
             return {"kind": w["kind"], "start_local": w["start_local"], "tank_target_c": w["tank_target_c"]}
@@ -365,6 +359,47 @@ def predicted_tank_at(lp_slots: list[dict[str, Any]], hour: float, tz: ZoneInfo)
         if lt.hour + lt.minute / 60.0 == float(hour):
             return _r(s.get("tank_temp_c"), 1)
     return None
+
+
+def coast_prediction(t0_c: float, hours: float, params: Any, setback_c: float) -> float:
+    from ..dhw.model import coast_to
+
+    return max(float(setback_c), float(coast_to(t0_c, max(0.0, hours), params)))
+
+
+def predicted_shower_tank(sw: Any, day: date, preset: str, params: Any, tz: ZoneInfo,
+                          lp_slots: list[dict[str, Any]]) -> dict[str, Any]:
+    """Honest tank temperature at the START of a shower window: coast from the
+    warmup target through the setback (the LP slot ``tank_temp_c`` is the phase
+    TARGET under the DHW pin — 37 during setback — not a physical prediction).
+    Falls back to that LP value only when the decision / params are missing."""
+    from .. import dhw_policy
+
+    fallback = {"predicted_tank_c": predicted_tank_at(lp_slots, sw.start_hour, tz),
+                "predicted_basis": "lp_slot_target"}
+    normal_c = float(config.DHW_TEMP_NORMAL_C)
+    setback_c = float(getattr(config, "DHW_TEMP_SETBACK_C", 37.0))
+    mode = str(preset or "normal").strip().lower()
+    if mode == "guests":  # tank held at normal all day, no coast
+        return {"predicted_tank_c": _r(normal_c, 1), "predicted_basis": "guests_held_at_normal"}
+    try:
+        warm_h = dhw_policy.read_warmup_hour(day)
+        evening = float(sw.start_hour) >= warm_h
+        d = day if evening else day - timedelta(days=1)
+        if mode == "normal" and evening and dhw_policy._legionella_standoff_window_utc(d) is not None:
+            return {"predicted_tank_c": 60.0, "predicted_basis": "legionella_cycle"}
+        dec = dhw_policy.read_window_decision(d)
+        t0 = float(dec.warmup_target_c) if dec.arm == "boost" else normal_c
+        hours = float(sw.start_hour) - float(dec.setback_hour_local)
+        if not evening and hours < 0:
+            hours += 24.0
+        if params is None:
+            return fallback
+        return {"predicted_tank_c": _r(coast_prediction(t0, hours, params, setback_c), 1),
+                "predicted_basis": "coast_from_warmup_target"}
+    except Exception:  # noqa: BLE001
+        logger.debug("plan_fronts: coast prediction failed", exc_info=True)
+        return fallback
 
 
 def tank_section(day: date, now_utc: datetime, tz: ZoneInfo, lp_slots: list[dict[str, Any]]) -> dict[str, Any]:
@@ -391,31 +426,26 @@ def tank_section(day: date, now_utc: datetime, tz: ZoneInfo, lp_slots: list[dict
     except Exception:  # noqa: BLE001
         logger.debug("plan_fronts: tank power read failed", exc_info=True)
 
-    model: dict[str, Any] = {"source": None, "ua_w_per_k": None, "ambient_c": None, "tau_hours": None,
-                             "coast_measured_c_per_h": None, "coast_model_c_per_h": None, "coast_ratio": None}
+    st = dhw_policy._tank_model_state()
+    out["model"] = {
+        "source": st.get("source"), "ua_w_per_k": st.get("ua_w_per_k"), "ambient_c": st.get("ambient_c"),
+        "tau_hours": st.get("tau_hours"),
+        "coast_measured_c_per_h": _r(st.get("coast_measured_c_per_h"), 3),
+        "coast_model_c_per_h": _r(st.get("coast_model_c_per_h"), 3),
+        "coast_ratio": _r(st.get("coast_ratio"), 2),
+    }
     params = None
     try:
-        params = resolve_tank_params()
-        model.update(source=params.source, ua_w_per_k=_r(params.ua_w_per_k, 2),
-                     ambient_c=_r(params.ambient_c, 1))
-        if params.ua_w_per_k:
-            model["tau_hours"] = _r(params.litres * params.cp_j_per_kg_k / params.ua_w_per_k / 3600.0, 1)
+        from ..dhw.params import live_indoor_ambient_c
+
+        params = resolve_tank_params(ambient_c=live_indoor_ambient_c())
     except Exception:  # noqa: BLE001
         logger.debug("plan_fronts: tank params failed", exc_info=True)
-    try:
-        cc = db.get_dhw_calibration("coast_check")
-        pl = (cc or {}).get("payload") or {}
-        model["coast_measured_c_per_h"] = _r(pl.get("measured_c_per_h"), 3)
-        model["coast_model_c_per_h"] = _r(pl.get("model_c_per_h"), 3)
-        model["coast_ratio"] = _r(pl.get("ratio_median_recent"), 2)
-    except Exception:  # noqa: BLE001
-        logger.debug("plan_fronts: coast_check read failed", exc_info=True)
-    out["model"] = model
 
     try:
         d = dhw_policy.read_window_decision(day)
         out["decision"] = {
-            "arm": d.arm, "warmup_hour": dhw_policy._read_warmup_hour(day),
+            "arm": d.arm, "warmup_hour": dhw_policy.read_warmup_hour(day),
             "setback_hour": d.setback_hour_local, "warmup_target_c": _r(d.warmup_target_c, 1),
             "peak_entry_hour": d.peak_entry_hour_local,
             "cost_hold_p": _r(d.cost_hold_p, 2), "cost_boost_p": _r(d.cost_boost_p, 2),
@@ -424,15 +454,20 @@ def tank_section(day: date, now_utc: datetime, tz: ZoneInfo, lp_slots: list[dict
         out["decision"] = {"error": f"{type(exc).__name__}: {exc}"}
 
     out["windows"] = tank_windows(day, tz)
-    out["next_action"] = next_tank_action(out["windows"], now_utc)
+    later: list[dict[str, Any]] = []
+    if next_tank_action(out["windows"], now_utc) is None:
+        try:
+            later = tank_windows(day + timedelta(days=1), tz)
+        except Exception:  # noqa: BLE001
+            later = []
+    out["next_action"] = next_tank_action(out["windows"], now_utc, later)
     try:
         preset = str(getattr(config, "OPTIMIZATION_PRESET", "normal") or "normal")
         for sw in shower_windows(preset=preset, p=params):
             out["showers"].append({
                 "start_local": _fmt_hour(sw.start_hour), "end_local": _fmt_hour(sw.end_hour),
                 "floor_c": _r(sw.floor_c, 1), "label": sw.label,
-                "predicted_tank_c": predicted_tank_at(lp_slots, sw.start_hour, tz),
-            })
+            } | predicted_shower_tank(sw, day, preset, params, tz, lp_slots))
     except Exception as exc:  # noqa: BLE001
         out["showers_error"] = f"{type(exc).__name__}: {exc}"
     return out
@@ -549,7 +584,14 @@ def heating_section(day: date, windows: list[Any], tz: ZoneInfo, lp_slots: list[
         }
     except Exception as exc:  # noqa: BLE001
         out["gate"] = {"error": f"{type(exc).__name__}: {exc}"}
-    hw = heating_windows(db.get_actions_for_plan_date(day.isoformat(), device="daikin"), tz)
+    a, b = _local_day_bounds(day, tz)
+    rows: dict[Any, dict[str, Any]] = {}
+    for pd in (day - timedelta(days=1), day):  # rows are keyed by the run's plan_date
+        for r in db.get_actions_for_plan_date(pd.isoformat(), device="daikin"):
+            st, en = _parse(r.get("start_time")), _parse(r.get("end_time"))
+            if st is not None and st < b and (en or st) >= a:
+                rows[r.get("id") or (pd, r.get("start_time"), r.get("action_type"))] = r
+    hw = heating_windows(list(rows.values()), tz)
     out["windows"] = hw
     out["by_band"] = heating_by_band(windows, lp_slots, hw, tz)
     return out
@@ -571,16 +613,23 @@ def spend_score(avg_p: float | None, peak_kwh: float | None, ideal_p: float | No
     return "above"
 
 
-def _q(vs: list[float], p: float) -> float:
-    s = sorted(vs)
-    if len(s) == 1:
-        return s[0]
-    k = (len(s) - 1) * p
-    lo, hi = int(k), min(int(k) + 1, len(s) - 1)
-    return s[lo] + (s[hi] - s[lo]) * (k - lo)
+_period_cache: dict[tuple, tuple[float, dict[str, Any]]] = {}
+_PERIOD_TTL_S = 600.0
 
 
 def _period(start: date, end: date) -> dict[str, Any]:
+    key = (str(config.DB_PATH), start.isoformat(), end.isoformat())
+    hit = _period_cache.get(key)
+    if hit is not None and time.monotonic() - hit[0] < _PERIOD_TTL_S:
+        return hit[1]
+    res = _period_uncached(start, end)
+    if len(_period_cache) > 64:
+        _period_cache.clear()
+    _period_cache[key] = (time.monotonic(), res)
+    return res
+
+
+def _period_uncached(start: date, end: date) -> dict[str, Any]:
     from . import pnl
 
     p = pnl.compute_period_pnl(start, end)
@@ -644,7 +693,8 @@ def spend_section(day: date, windows: list[Any], now_utc: datetime, tz: ZoneInfo
     # Forecast (committed stitch × per-slot prices).
     fc = _committed_by_start(day, "import_kwh", tz)
     fk = sum(fc.values())
-    fcost = sum(v * price_by_start.get(t, 0.0) for t, v in fc.items())
+    mean_price = (sum(price_by_start.values()) / len(price_by_start)) if price_by_start else 0.0
+    fcost = sum(v * price_by_start.get(t, mean_price) for t, v in fc.items())  # never price a slot at 0
     if fc:
         out["forecast_import_kwh"] = round(fk, 3)
         out["forecast_avg_import_p"] = round(fcost / fk, 2) if fk > 0 else None
@@ -653,7 +703,9 @@ def spend_section(day: date, windows: list[Any], now_utc: datetime, tz: ZoneInfo
     out["score_basis"] = basis if (out["realised_avg_import_p"] is not None or out["forecast_avg_import_p"] is not None) else None
     avg_p = out["realised_avg_import_p"] if basis == "realised" else out["forecast_avg_import_p"]
 
-    # Peak import under the chosen basis.
+    # Peak import under the chosen basis. NB realised peak import is the Fox
+    # telemetry roll-up while realised_import_kwh is meter-preferring, so the two
+    # can differ slightly.
     banded = bool(struct and struct.is_banded)
     if struct is not None and price_by_start:
         peak_starts = {t for t, p in price_by_start.items() if p >= struct.peak_thr and struct.peak_thr > 0}
@@ -666,8 +718,9 @@ def spend_section(day: date, windows: list[Any], now_utc: datetime, tz: ZoneInfo
         if banded and struct.cheap_level is not None:
             ideal, above = float(struct.cheap_level), float(struct.cheap_thr)
         else:
-            vs = list(price_by_start.values())
-            ideal, above = _q(vs, 0.25), _q(vs, 0.5)
+            ideal = float(struct.cheap_thr)  # index q25 (same rule as the LP)
+            vs = sorted(price_by_start.values())
+            above = vs[len(vs) // 2]  # index median, not interpolated
         ratio = float(getattr(config, "SPEND_SCORE_IDEAL_RATIO", 1.15))
         out["ideal_avg_import_p"] = round(ideal, 2)
         out["score_thresholds"] = {"ideal_max_p": round(ideal * ratio, 2), "above_min_p": round(above, 2)}
@@ -707,11 +760,13 @@ def compare_section(day: date) -> dict[str, Any]:
     from ..energy.tariff_structure import display_name
 
     start = day.replace(day=1)
-    res = fair_compare.compute_fair_comparison(start, day, max_tariffs=4)
+    res = fair_compare.cached_fair_comparison(start, day, 4)
     current, rows = compare_rows(res)
     return {
-        "period": "month", "period_start": start.isoformat(), "period_end": day.isoformat(),
-        "n_days": int((day - start).days + 1),
+        "period": "month",
+        "period_start": str(res.get("period_start") or start.isoformat()),
+        "period_end": str(res.get("period_end") or day.isoformat()),
+        "n_days": int(res.get("n_days") or ((day - start).days + 1)),
         "current": current, "rows": rows,
         "framing": f"Staying on {display_name()} for the contract — comparison is informational",
     }
@@ -755,7 +810,8 @@ def plan_fronts(day: date | None = None, *, now_utc: datetime | None = None,
         "battery": _guard(battery_section, day, windows, now_utc, tz),
         "tank": _guard(tank_section, day, now_utc, tz, lp_slots),
         "heating": _guard(heating_section, day, windows, tz, lp_slots),
-        "consumption": _guard(expected_load_by_band, day, now_utc=now_utc, use_cache=use_cache),
+        "consumption": _guard(expected_load_by_band, day, now_utc=now_utc if explicit_now else None,
+                               use_cache=use_cache),
         "spend": _guard(spend_section, day, windows, now_utc, tz),
         "compare": _guard(compare_section, day),
     }

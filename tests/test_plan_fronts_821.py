@@ -195,7 +195,7 @@ def test_heating_windows_and_by_band():
 def test_tank_windows_next_action_and_predicted(monkeypatch):
     from src import dhw_policy
 
-    def rows(day, tz=None):
+    def rows(day, tz=None, allow_past=False):
         if day != DAY:
             return []
         return [
@@ -223,7 +223,7 @@ def test_tank_windows_next_action_and_predicted(monkeypatch):
 def test_tank_section_reads_decision_and_model(monkeypatch):
     from src import dhw_policy
 
-    monkeypatch.setattr(dhw_policy, "dhw_schedule_rows_for_day", lambda d, tz=None: [])
+    monkeypatch.setattr(dhw_policy, "dhw_schedule_rows_for_day", lambda d, tz=None, allow_past=False: [])
     t = pf.tank_section(DAY, NOW, LON, [])
     assert set(t) >= {"tank_now_c", "model", "decision", "windows", "showers", "next_action"}
     assert t["decision"]["arm"] in ("hold", "boost", "static")
@@ -277,3 +277,133 @@ def test_cache_bypassed_with_explicit_now(monkeypatch):
     pf.plan_fronts(DAY, now_utc=NOW)
     pf.plan_fronts(DAY, now_utc=NOW)
     assert len(calls) == 2
+
+
+# ------------------------------------------------- review follow-ups (#828)
+def test_shower_prediction_is_a_coast_not_the_lp_target(monkeypatch):
+    from src import dhw_policy
+    from src.dhw.model import TankParams, coast_to
+
+    p = TankParams(ua_w_per_k=2.44, ambient_c=22.0)
+    dec = dhw_policy.WindowDecision(arm="boost", setback_hour_local=15, warmup_target_c=47.3,
+                                    peak_entry_hour_local=16)
+    monkeypatch.setattr(dhw_policy, "read_window_decision", lambda d: dec)
+    monkeypatch.setattr(dhw_policy, "read_warmup_hour", lambda d: 13)
+    monkeypatch.setattr(dhw_policy, "_legionella_standoff_window_utc", lambda d: None)
+    from src.dhw.comfort import ShowerComfortWindow
+
+    ev = ShowerComfortWindow(20.0, 21.0, 43.0, "evening_showers")
+    lp = [_slot(20, 0, tank_temp_c=37.0)]  # the pinned phase target
+    r = pf.predicted_shower_tank(ev, DAY, "normal", p, LON, lp)
+    assert r["predicted_basis"] == "coast_from_warmup_target"
+    assert r["predicted_tank_c"] == round(coast_to(47.3, 5.0, p), 1) > 40.0
+    mo = ShowerComfortWindow(7.0, 9.0, 40.0, "morning_reserve")
+    r = pf.predicted_shower_tank(mo, DAY, "normal", p, LON, [])
+    assert r["predicted_tank_c"] == round(max(37.0, coast_to(47.3, 16.0, p)), 1)  # 07:00 - 15:00 + 24
+    assert pf.predicted_shower_tank(ev, DAY, "guests", p, LON, lp)["predicted_tank_c"] == 45.0
+    monkeypatch.setattr(dhw_policy, "_legionella_standoff_window_utc",
+                        lambda d: (NOW, NOW + timedelta(hours=2)))
+    assert pf.predicted_shower_tank(ev, DAY, "normal", p, LON, lp)["predicted_tank_c"] == 60.0
+    # no params -> LP fallback, labelled
+    monkeypatch.setattr(dhw_policy, "_legionella_standoff_window_utc", lambda d: None)
+    assert pf.predicted_shower_tank(ev, DAY, "normal", None, LON, lp)["predicted_basis"] == "lp_slot_target"
+
+
+def test_tank_windows_use_real_generator_and_past_days():
+    _seed_cosy_rates(DAY - timedelta(days=1))
+    _seed_cosy_rates(DAY)
+    w = pf.tank_windows(DAY - timedelta(days=3), LON)  # a past day: guard must not blank it
+    assert w and "setback" in {x["kind"] for x in w}
+    w = pf.tank_windows(DAY, LON)
+    # the overnight setback anchored on the previous day's cycle overlaps today's morning
+    assert any(x["kind"] == "setback" and x["start_utc"] < "2026-10-06T23:00:00Z" for x in w)
+
+
+def test_heating_rows_keyed_by_plan_date_of_previous_day():
+    db.upsert_action(plan_date="2026-10-06", start_time="2026-10-07T03:00:00Z", end_time="2026-10-07T06:00:00Z",
+                     device="daikin", action_type="lwt_preheat", params={"lwt_offset": 3, "lp_optimizer": True})
+    db.upsert_action(plan_date="2026-10-06", start_time="2026-10-06T03:00:00Z", end_time="2026-10-06T06:00:00Z",
+                     device="daikin", action_type="lwt_preheat", params={"lwt_offset": 3})
+    _seed_cosy_rates(DAY)
+    windows = __import__("src.analytics.load_expected", fromlist=["x"]).band_windows_for_day(DAY, LON)[0]
+    h = pf.heating_section(DAY, windows, LON, [])
+    assert [(w["kind"], w["source"]) for w in h["windows"]] == [("boost", "lp")]
+
+
+def test_battery_section_with_real_fox_groups(monkeypatch):
+    _seed_cosy_rates(DAY)
+    db.save_fox_schedule_state([
+        {"startHour": 22, "startMinute": 0, "endHour": 23, "endMinute": 59, "workMode": "Backup",
+         "extraParam": {"minSocOnGrid": 10, "maxSoc": 10}},
+        {"startHour": 4, "startMinute": 0, "endHour": 6, "endMinute": 59, "workMode": "ForceCharge",
+         "extraParam": {"minSocOnGrid": 10, "fdSoc": 56, "fdPwr": 1400}},
+    ])
+    monkeypatch.setattr(config, "BATTERY_CAPACITY_KWH", 10.0, raising=False)
+    slots = [{k: v for k, v in _slot(22, 0, import_kwh=0.2).items() if k != "_start"},
+             {k: v for k, v in _slot(22, 30, import_kwh=0.2).items() if k != "_start"}]
+    monkeypatch.setattr(db, "find_latest_optimizer_run_id", lambda: 7)
+    monkeypatch.setattr(db, "get_lp_solution_slots", lambda rid: slots)
+    monkeypatch.setattr(db, "get_lp_inputs", lambda rid: {
+        "run_at_utc": "x", "exogenous_snapshot_json": '{"pess_charge_floor": {"entry_slots": [0], "binding_slots": 2}}'})
+    from src.analytics.load_expected import band_windows_for_day
+
+    b = pf.battery_section(DAY, band_windows_for_day(DAY, LON)[0], NOW, LON)
+    assert [g["mode"] for g in b["fox_groups"]] == ["Backup", "ForceCharge"]
+    assert b["windows"][0]["kind"] == "hold" and b["windows"][0]["fox_mode"] == "Backup"
+    assert b["floor_binding_slots"] == 2
+    assert b["peak_import_planned_kwh"] is not None
+
+
+def test_spend_dynamic_tariff_path(monkeypatch):
+    from src.analytics import pnl
+    from src.analytics.load_expected import band_windows_for_day
+
+    code = "E-1R-AGILE-24-10-01-C"
+    monkeypatch.setattr(config, "OCTOPUS_TARIFF_CODE", code)
+    rows = []
+    for i in range(48):
+        t = datetime(2026, 10, 7, 0, 0, tzinfo=LON).astimezone(UTC) + timedelta(minutes=30 * i)
+        rows.append({"valid_from": _z(t), "valid_to": _z(t + timedelta(minutes=30)),
+                     "value_inc_vat": 10.0 + i * 0.5})
+    db.save_agile_rates(rows, code)
+    prices = sorted(r["value_inc_vat"] for r in rows)
+    monkeypatch.setattr(db, "committed_lp_field_by_slot", lambda d, f: {})
+    monkeypatch.setattr(pnl, "compute_daily_pnl", lambda d: {"import_kwh": 5.0, "import_cost_gbp": 0.7})
+    monkeypatch.setattr(pnl, "compute_period_pnl", lambda a, b, **k: {"n_days": 1})
+    out = pf.spend_section(DAY, band_windows_for_day(DAY, LON)[0], NOW, LON)
+    assert out["ideal_avg_import_p"] == pytest.approx(prices[48 // 4 - 1], abs=0.01)  # index q25
+    assert out["score_thresholds"]["above_min_p"] == pytest.approx(prices[24], abs=0.01)
+    assert out["score"] in ("ideal", "below", "above") and out["realised_avg_import_p"] == 14.0
+
+
+def test_dst_fall_back_day_has_50_slots_and_25h_bounds():
+    day = date(2026, 10, 25)
+    a, b = pf._local_day_bounds(day, LON)
+    assert b - a == timedelta(hours=25)
+    t = a
+    rows = []
+    while t < b:
+        rows.append({"slot_time_utc": _z(t)})
+        t += timedelta(minutes=30)
+    assert len(pf.lp_slots_for_day(rows, day, LON)) == 50
+
+
+def test_date_clamp_and_cached_compare(monkeypatch):
+    from src.analytics import fair_compare
+    from src.api.main import app
+
+    c = TestClient(app)
+    assert c.get("/api/v1/plan/fronts?date=2020-01-01").status_code == 400
+    fair_compare._fair_compare_cache.clear()
+    n = []
+    monkeypatch.setattr(fair_compare, "compute_fair_comparison",
+                        lambda s, e, max_tariffs=14: n.append(1) or {"tariffs": []})
+    fair_compare.cached_fair_comparison(DAY, DAY, 4)
+    fair_compare.cached_fair_comparison(DAY, DAY, 4)
+    assert len(n) == 1
+
+
+def test_battery_by_band_null_realised_when_no_telemetry():
+    cheap = _win("band_cheap", "cheap", 4, 7, 12.49)
+    r = pf.battery_by_band([cheap], {}, {}, [], set(), 10.0, NOW, LON)
+    assert r[0]["realised_import_kwh"] is None and r[0]["planned_import_kwh"] is None

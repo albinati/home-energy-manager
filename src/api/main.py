@@ -4314,7 +4314,6 @@ def _resolve_period_range(period: str, anchor: str):
 # the Insights page paid on EVERY visit. Same in-process TTL pattern as
 # _period_insights_cache; the anchor key keeps a stale "today" view bounded
 # by the TTL while past periods are effectively immutable anyway.
-_fair_compare_cache: dict[tuple, tuple[float, dict]] = {}
 
 
 @app.get("/api/v1/tariffs/fair-compare", response_model=FairCompareResponse)
@@ -4329,21 +4328,9 @@ async def tariffs_fair_compare(period: str = "month", anchor: str = "", max_tari
         raise HTTPException(status_code=400, detail="period must be day|week|month|year")
     start, end = _resolve_period_range(period, anchor)
 
-    import time as _t
-    ttl = int(getattr(config, "FAIR_COMPARE_CACHE_TTL_SECONDS", 900))
-    key = (period, str(start), str(end), int(max_tariffs))
-    if ttl > 0:
-        hit = _fair_compare_cache.get(key)
-        if hit and (_t.monotonic() - hit[0]) < ttl:
-            return FairCompareResponse(**hit[1])
+    from ..analytics import fair_compare as _fc
 
-    from ..analytics.fair_compare import compute_fair_comparison
-
-    data = await asyncio.to_thread(
-        compute_fair_comparison, start, end, max_tariffs=max_tariffs
-    )
-    if ttl > 0 and data is not None:
-        _fair_compare_cache[key] = (_t.monotonic(), data)
+    data = await asyncio.to_thread(_fc.cached_fair_comparison, start, end, max_tariffs)
     return FairCompareResponse(**data)
 
 

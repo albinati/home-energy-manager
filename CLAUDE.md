@@ -441,19 +441,19 @@ over same-day-type history** (weekday/weekend, `LOAD_EXPECTED_HISTORY_DAYS`
 error history in that block. Feeds the Home consumption card.
 ### Plan per front — `GET /api/v1/plan/fronts` (#821)
 
-One viewer-safe read (`?date=YYYY-MM-DD`, default today local; 400 on a bad date)
+One viewer-safe read (`?date=YYYY-MM-DD`, default today local; 400 on a bad date or outside [today-7, today+1])
 for the Home page, composed by `src/analytics/plan_fronts.py`: `tariff` windows
 (`band_windows_for_day`), `battery` (contiguous same-kind windows from the latest
 LP run's slots — grid_charge / pv_charge / export / hold (Fox Backup group) /
 self_use / idle — plus per-tariff-window planned vs realised grid import, SoC at
 entry and `floored` = window entry slot in the pessimistic floor's
-`entry_slots`), `tank` (telemetry, `resolve_tank_params` + `coast_check`
+`entry_slots` — a CANDIDATE boundary persisted only when a re-solve ran, so read it as "candidate boundary in a run where the floor bound"; `floor_binding_slots` gives the count), `tank` (telemetry, `resolve_tank_params` + `coast_check`
 calibration, `read_window_decision`, windows from the shared
 `dhw_policy.dhw_schedule_rows_for_day` that `/daikin/dhw-schedule` also uses,
-shower floors with the LP-predicted tank temp), `heating` (LWT rows from
+shower floors with an honest coast prediction from the warmup target — the LP slot `tank_temp_c` is the pinned phase target, not a physical temperature), `heating` (LWT rows from
 `action_schedule`: boost/setback/restore with source lp|tier, gate state,
 predicted indoor), `consumption` (exactly `expected_load_by_band`), `spend` and
-`compare` (`compute_fair_comparison`, month-to-date, 4 tariffs).
+`compare` (`cached_fair_comparison`, 900 s cache shared with `/tariffs/fair-compare`, month-to-date, 4 tariffs; week/month PnL rollups cached 600 s).
 Every section is guarded on its own (`{"error": ...}`); the response is cached
 60 s per `(DB_PATH, date)` (the comparison takes seconds), bypassed when
 `now_utc` is passed.

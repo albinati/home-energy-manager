@@ -434,6 +434,11 @@ def build_early_setback_row(
     )
 
 
+def read_warmup_hour(d: date) -> int:
+    """Public read-only warmup hour for local date *d* (persisted-or-static)."""
+    return _read_warmup_hour(d)
+
+
 def _read_warmup_hour(d: date) -> int:
     """Read-only warmup hour for local date *d*: persisted-or-static.
 
@@ -2129,7 +2134,8 @@ def write_daily_tank_schedule(
     return n_written
 
 
-def dhw_schedule_rows_for_day(day: date, *, tz: ZoneInfo | None = None) -> list[dict[str, Any]]:
+def dhw_schedule_rows_for_day(day: date, *, tz: ZoneInfo | None = None,
+                              allow_past: bool = False) -> list[dict[str, Any]]:
     """The programmed tank rows for ONE local day, in the shape of
     ``GET /api/v1/daikin/dhw-schedule`` (``action_type`` / ``start_utc`` /
     ``end_utc`` / ``tank_temp_c``). Shared by that endpoint and the plan-fronts
@@ -2173,7 +2179,7 @@ def dhw_schedule_rows_for_day(day: date, *, tz: ZoneInfo | None = None) -> list[
             "tank_temp_c": 60,
         })
     try:
-        for r in generate_daily_tank_schedule(day, agile_rates=agile):
+        for r in generate_daily_tank_schedule(day, agile_rates=agile, allow_past=allow_past):
             if leg_window is not None and r.get("action_type") in ("tank_warmup", "tank_setback"):
                 continue
             params = r.get("params") or {}
