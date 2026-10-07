@@ -149,11 +149,16 @@ def detect(
     *,
     quantum: float = 0.01,
     dynamic_rule: DynamicRule = "lp",
+    short_ok: bool = False,
 ) -> TariffStructure:
     """Decide banded vs dynamic for a price series and derive thresholds.
 
     Pure: no I/O. Negative/zero prices are ignored for level counting (a
     plunge on Agile is still dynamic; a banded tariff never goes negative).
+    ``short_ok`` skips the minimum-slot gates — for callers that already know
+    the tariff family is banded (calendar/floor on a TOU code) and classify a
+    PARTIAL local day; without it an 8-slot Cosy tail fell back to the
+    day-relative tiers and read the day band as "expensive" (#805 review).
     """
     px = [float(p) for p in prices if p is not None and math.isfinite(float(p))]
     n = len(px)
@@ -167,11 +172,11 @@ def detect(
     configured = str(getattr(config, "OCTOPUS_TARIFF_CODE", "") or "").strip()
     if mode != "banded" and configured and not is_tou_family(configured):
         return _dynamic(px, "family:not_tou", dynamic_rule)
-    if n < _min_slots() and mode != "banded":
+    if n < _min_slots() and mode != "banded" and not short_ok:
         return _dynamic(px, f"short:{n}<{_min_slots()}", dynamic_rule)
 
     positive_prices = [p for p in px if p > 0.0]
-    if len(positive_prices) < _min_slots() and mode != "banded":
+    if len(positive_prices) < _min_slots() and mode != "banded" and not short_ok:
         # An Agile plunge day with a handful of positive prices must not read
         # as "banded" just because the positives happen to be few (review M3).
         return _dynamic(px, f"short_positive:{len(positive_prices)}<{_min_slots()}", dynamic_rule)
@@ -188,7 +193,7 @@ def detect(
     # Density guard (review F1): a band is a level that REPEATS — require ≥ 3
     # slots per distinct level on average (Cosy 3/48, reprice 6/96 pass; a
     # 12-slot Agile window with 6 paired prices fails).
-    if len(positive) * 3 > len(positive_prices) and mode != "banded":
+    if len(positive) * 3 > len(positive_prices) and mode != "banded" and not short_ok:
         return _dynamic(px, f"sparse_levels:{len(positive)}/{len(positive_prices)}", dynamic_rule)
     ratio = _contrast_ratio()
     # NB the span clustering assumes any reprice moves a band by LESS than the

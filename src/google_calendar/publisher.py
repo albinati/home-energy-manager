@@ -137,6 +137,13 @@ def _publish_day(service, local_date: date, tz: ZoneInfo) -> _DayResult:
     if not rows:
         result.skipped_reason = "no_rates"
         return result
+    # Banded tariff: a partially published day (< TARIFF_BANDED_MIN_SLOTS rows)
+    # has no complete band picture — skip it and let the next retry publish
+    # the full day, rather than paint a fragment (#805 review).
+    from ..energy.tariff_structure import prefer_plan_thresholds
+    if prefer_plan_thresholds() and len(rows) < int(getattr(config, "TARIFF_BANDED_MIN_SLOTS", 12)):
+        result.skipped_reason = "partial_rates"
+        return result
 
     slots = [
         Slot(

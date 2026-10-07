@@ -306,7 +306,10 @@ def classify_day(slots: list[Slot]) -> list[Window]:
     from ..energy.tariff_structure import detect, prefer_plan_thresholds
 
     if prefer_plan_thresholds():
-        structure = detect([s.price_p for s in slots])
+        # short_ok: a partial local day (mid-day replan tail, rates not yet
+        # complete) must still classify by band, never fall back to the
+        # day-relative tiers that read the day band as "expensive".
+        structure = detect([s.price_p for s in slots], short_ok=True)
         if structure.is_banded:
             return classify_day_banded(slots, structure)
 

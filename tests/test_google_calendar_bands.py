@@ -93,10 +93,11 @@ def test_band_event_title_shows_range_across_a_reprice():
     assert format_event(w)[0] == "🟢 Cosy cheap 12.5p - 13.0p"
 
 
-def test_agile_day_classification_unchanged():
+def test_agile_day_classification_unchanged(monkeypatch):
     """Dynamic path untouched: an Agile-shaped day still yields the median tiers."""
     import random
 
+    monkeypatch.setattr(config, "OCTOPUS_TARIFF_CODE", "E-1R-AGILE-24-10-01-H")
     rnd = random.Random(3)
     d = date(2026, 9, 10)
     slots = []
@@ -201,3 +202,34 @@ def test_cosy_floor_index_is_1600_only():
     idx = _peak_entry_floor_indices(starts, prices)
     hours = [starts[i].astimezone(TZ).hour for i in idx]
     assert hours == [16, 16]
+
+
+def test_cosy_floor_partial_tail_day_has_no_midnight_floor():
+    """A 48 h horizon starting 02:00 local ends 02:00 two days later: the
+    8-slot tail day must not fall back to the Agile tiers (day band read as
+    'expensive' → a floor at 00:00)."""
+    from src.scheduler.optimizer import _peak_entry_floor_indices
+
+    slots = _cosy_slots(DAY) + _cosy_slots(DAY + timedelta(days=1)) + _cosy_slots(DAY + timedelta(days=2))
+    slots = slots[4:4 + 96]  # 02:00 local day 1 → 02:00 local day 3
+    starts = [s.start_utc for s in slots]
+    prices = [s.price_p for s in slots]
+    idx = _peak_entry_floor_indices(starts, prices)
+    assert [starts[i].astimezone(TZ).hour for i in idx] == [16, 16]
+
+
+def test_partial_cosy_day_is_classified_by_band_not_expensive():
+    wins = classify_day(_cosy_slots(DAY)[:8])  # 00:00-04:00 local, all day band
+    assert [w.tier.key for w in wins] == ["band_day"]
+
+
+def test_publisher_skips_partial_day(monkeypatch):
+    from src import db
+    from src.google_calendar import publisher
+
+    db.init_db()
+    monkeypatch.setattr(config, "GOOGLE_CALENDAR_ID", "cal")
+    monkeypatch.setattr(publisher.db, "get_agile_rates_slots_for_local_day", lambda *a, **k: _cosy_rows(DAY)[:8])
+    svc = _service_with_events([])
+    r = publisher._publish_day(svc, DAY, TZ)
+    assert r.skipped_reason == "partial_rates" and r.created == 0
