@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from . import db
@@ -148,6 +148,7 @@ def apply_scheduled_daikin_params(
 ) -> bool:
     """Apply params; return True if any write was attempted (and not skipped)."""
     p = dict(params)
+    written: dict[str, Any] = {}  # keys actually PATCHed (post-write verify compares only these)
     if "climate_on" in p and not bool(p["climate_on"]):
         p.pop("lwt_offset", None)
 
@@ -199,6 +200,7 @@ def apply_scheduled_daikin_params(
         if climate_going_on:
             client.set_power(dev, True)
             dev.is_on = True
+            written["climate_on"] = True
             if has_dhw_cmds and settle:
                 time.sleep(settle)
 
@@ -219,6 +221,7 @@ def apply_scheduled_daikin_params(
                     _lwt = int(round(float(p["lwt_offset"])))
                     client.set_lwt_offset(dev, _lwt)
                     dev.lwt_offset = float(_lwt)
+                    written["lwt_offset"] = _lwt
                 except DaikinError as exc:
                     if "[read_only]" in str(exc):
                         # Non-fatal: caught only when our pre-check above
@@ -234,6 +237,7 @@ def apply_scheduled_daikin_params(
         if climate_going_off:
             client.set_power(dev, False)
             dev.is_on = False
+            written["climate_on"] = False
             if has_dhw_cmds and settle:
                 time.sleep(settle)
 
@@ -250,6 +254,7 @@ def apply_scheduled_daikin_params(
         if tank_turning_on:
             client.set_tank_power(dev, True)
             dev.tank_on = True
+            written["tank_power"] = True
             if "tank_temp" in p and settle:
                 time.sleep(settle)  # onOffMode must settle before temperatureControl is writable
 
@@ -266,6 +271,7 @@ def apply_scheduled_daikin_params(
                 else:
                     client.set_tank_temperature(dev, _tt)
                     dev.tank_target = float(_tt)
+                    written["tank_temp"] = _tt
             except DaikinError as exc:
                 if "[read_only]" in str(exc) and tank_turning_on:
                     # Cloud hasn't propagated tank-on yet; heartbeat will retry next tick
@@ -277,11 +283,13 @@ def apply_scheduled_daikin_params(
             if dev.tank_on is None or bool(dev.tank_on) != _want_power:
                 client.set_tank_power(dev, _want_power)
                 dev.tank_on = _want_power
+                written["tank_power"] = _want_power
         if "tank_powerful" in p:
             _want_pf = bool(p["tank_powerful"])
             if dev.tank_powerful is None or bool(dev.tank_powerful) != _want_pf:
                 client.set_tank_powerful(dev, _want_pf)
                 dev.tank_powerful = _want_pf
+                written["tank_powerful"] = _want_pf
     except (DaikinError, ValueError) as e:
         db.log_action(
             device="daikin",
@@ -299,7 +307,136 @@ def apply_scheduled_daikin_params(
         result="success",
         trigger=trigger,
     )
+    # tank_powerful is re-asserted every ≥15 min BECAUSE the unit arbitrates it
+    # away silently (state_machine Powerful auto-clear) — verifying it would
+    # alert on every such tick. Verify the other keys only.
+    verify_keys = {k: v for k, v in written.items() if k != "tank_powerful"}
+    if verify_keys:
+        schedule_post_write_verify(verify_keys, trigger=trigger)
     return True
+
+
+# --- Post-write verification (#809) ------------------------------------------
+_VERIFY_JOB_ID = "daikin_verify_pending"
+
+
+def schedule_post_write_verify(
+    written: dict[str, Any], *, trigger: str, attempt: int = 1, delay_s: int | None = None,
+) -> str | None:
+    """After a successful write batch, schedule ONE device read later that
+    compares live state with the keys actually PATCHed (``written`` — never the
+    whole params dict: keys the apply skipped on purpose, e.g. ``lwt_offset``
+    with the zone off, must not be "verified"). One pending job per process:
+    a second write before it fires MERGES its keys in and pushes the fire time
+    out, so a tick that writes a tank row and an LWT row costs one read. The
+    delay is floored above the service's anti-burst interval so the read is a
+    real one, not the in-place-mutated cache. Returns the job id, or ``None``
+    when disabled / no scheduler (tests, CLI). Never raises.
+    """
+    if not written or not bool(getattr(config, "DAIKIN_POST_WRITE_VERIFY_ENABLED", True)):
+        return None
+    try:
+        from apscheduler.triggers.date import DateTrigger
+
+        from .scheduler.runner import get_background_scheduler
+
+        sched = get_background_scheduler()
+        if sched is None:
+            return None
+        floor = int(getattr(config, "DAIKIN_REFRESH_MIN_INTERVAL_SECONDS", 90)) + 30
+        delay = max(floor, int(delay_s if delay_s is not None else getattr(config, "DAIKIN_POST_WRITE_VERIFY_SECONDS", 120)))
+        now = datetime.now(UTC)
+        expected = dict(written)
+        try:
+            pending = sched.get_job(_VERIFY_JOB_ID)
+            if pending is not None and isinstance(getattr(pending, "kwargs", None), dict):
+                merged = dict(pending.kwargs.get("expected") or {})
+                merged.update(expected)  # later keys override
+                expected = merged
+        except Exception:  # pragma: no cover — merge is best-effort
+            pass
+        sched.add_job(
+            post_write_verify_job,
+            DateTrigger(run_date=now + timedelta(seconds=delay)),
+            id=_VERIFY_JOB_ID,
+            replace_existing=True,
+            misfire_grace_time=120,
+            kwargs={"expected": expected, "trigger": trigger,
+                    "written_at": now.isoformat().replace("+00:00", "Z"), "attempt": attempt},
+        )
+        return _VERIFY_JOB_ID
+    except Exception as exc:  # pragma: no cover — verification is best-effort
+        logger.debug("post-write verify not scheduled: %s", exc)
+        return None
+
+
+def post_write_verify_job(
+    *, expected: dict[str, Any], trigger: str, written_at: str, attempt: int = 1,
+) -> dict[str, Any]:
+    """One-shot: read the device FRESH (a read the service throttled or served
+    from cache is ``matched=None`` / "unverified", never "success"), compare
+    with the keys written, and on a mismatch retry ONCE (+180 s — Onecta
+    propagation lag is real) before alerting. Alerts are deduped per write
+    through ``db.acknowledge_warning``."""
+    from .daikin import service as daikin_service
+
+    out: dict[str, Any] = {"matched": None, "expected": expected, "written_at": written_at,
+                           "trigger": trigger, "attempt": attempt, "fresh": False}
+    try:
+        before = daikin_service.get_cached_devices(allow_refresh=False, actor="post_write_verify").fetched_at_wall
+        res = daikin_service.get_cached_devices(allow_refresh=True, max_age_seconds=0, actor="post_write_verify")
+        dev = res.devices[0] if res.devices else None
+        out["cache_source"] = res.source
+        out["fresh"] = bool(
+            res.source == "fresh" and (before is None or (res.fetched_at_wall or 0) > (before or 0))
+        )
+    except Exception as exc:
+        out["error"] = str(exc)
+        dev = None
+    if dev is not None and out["fresh"]:
+        out["actual"] = {
+            "lwt_offset": dev.lwt_offset, "tank_target": dev.tank_target,
+            "tank_on": dev.tank_on, "tank_powerful": dev.tank_powerful, "climate_on": dev.is_on,
+        }
+        live = {"lwt_offset": dev.lwt_offset, "tank_temp": dev.tank_target,
+                "tank_power": dev.tank_on, "tank_powerful": dev.tank_powerful, "climate_on": dev.is_on}
+        if any(live.get(k) is None for k in expected):
+            # the snapshot lacks the field: cannot judge → unverified, not failure
+            out["matched"] = None
+            out["unverified_reason"] = "live_value_missing"
+        else:
+            out["matched"] = bool(daikin_device_matches_params(dev, expected))
+    result = "success" if out["matched"] else ("failure" if out["matched"] is False else "unverified")
+    try:
+        db.log_action(device="daikin", action="daikin_write_verify", params=out, result=result,
+                      trigger="post_write_verify")
+    except Exception:  # pragma: no cover
+        logger.debug("daikin_write_verify log failed", exc_info=True)
+    if out["matched"] is False:
+        if attempt < 2:
+            schedule_post_write_verify(expected, trigger=trigger, attempt=2, delay_s=180)
+            return out
+        key = f"daikin_write_verify_{written_at}"
+        try:
+            already = db.is_warning_acknowledged(key)
+        except Exception:
+            already = False
+        if not already:
+            try:
+                db.acknowledge_warning(key)
+            except Exception:  # pragma: no cover
+                pass
+            try:
+                from .notifier import notify_risk
+
+                notify_risk(
+                    f"Daikin write not reflected after two reads: expected {expected}, "
+                    f"device {out.get('actual')} (written {written_at}, trigger {trigger})",
+                    extra={"warning_key": key},
+                )
+            except Exception:  # pragma: no cover
+                logger.debug("daikin_write_verify notify failed", exc_info=True)
+    return out
 
 
 def apply_comfort_restore(

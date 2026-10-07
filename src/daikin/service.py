@@ -325,13 +325,18 @@ def get_cached_devices(
 
         # Quota OK — do the refresh
         try:
+            wall_before = _devices_fetched_wall
             devices = _do_refresh(actor)
+            refreshed = _devices_fetched_wall is not None and _devices_fetched_wall != wall_before
+            # #809: _do_refresh may have been throttled by the anti-burst floor
+            # and returned the existing cache — report that honestly instead of
+            # labelling pre-existing data "fresh, age 0".
             return CachedDevices(
                 devices=devices,
                 fetched_at_wall=_devices_fetched_wall,
-                age_seconds=0.0,
-                stale=False,
-                source="fresh",
+                age_seconds=0.0 if refreshed else _cache_age_seconds(),
+                stale=(not refreshed) and bool(_devices_stale),
+                source="fresh" if refreshed else "cache_throttled",
             )
         except Exception as e:
             logger.warning("Daikin refresh failed (actor=%s): %s — returning stale cache", actor, e)

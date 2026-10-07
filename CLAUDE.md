@@ -103,6 +103,35 @@ print("has refresh_token:", bool(d.get("refresh_token")))
 EOF
 ```
 
+### Daikin cadence — bounded heartbeat refresh + post-write verification (#809)
+
+Phase A (#306) took the heartbeat off the Daikin API, so the reconciler and
+the user-override detector compared against a cache up to 30+ min old. Now:
+
+- **Heartbeat refresh** (`DAIKIN_HEARTBEAT_REFRESH_ENABLED`, code default
+  false, **prod true**): at most one read per `DAIKIN_HEARTBEAT_REFRESH_SECONDS`
+  (1800 → ≤ 48/day), only while `quota_remaining > DAIKIN_RESERVE_FOR_HEARTBEAT
+  + DAIKIN_HEARTBEAT_REFRESH_MIN_HEADROOM` (30 + 40), still under the service's
+  90 s floor and `should_block`. Gate: `runner._heartbeat_daikin_refresh_allowed`.
+- **Post-write verify** (`DAIKIN_POST_WRITE_VERIFY_ENABLED`, default true): a
+  successful `apply_scheduled_daikin_params` schedules ONE read (job id
+  `daikin_verify_pending`; a second write before it fires MERGES its keys and
+  pushes the fire time out) at `max(DAIKIN_POST_WRITE_VERIFY_SECONDS,
+  DAIKIN_REFRESH_MIN_INTERVAL_SECONDS + 30)` — above the service's anti-burst
+  floor, so the read is a real one. It compares ONLY the keys actually PATCHed
+  (`written`), never the whole params dict (an `lwt_offset` skipped because the
+  zone is off is not "unverified"). A read the service throttled/served from
+  cache is logged `unverified`, never `success` (`source=cache_throttled`). On a
+  mismatch it retries once (+180 s, Onecta propagation lag) and only then raises
+  one `notify_risk` per write (deduped via `db.acknowledge_warning`). `action_log`
+  `daikin_write_verify` carries `expected` / `actual` / `matched` / `fresh` /
+  `cache_source` / `attempt`. The read also refreshes the cache for the next
+  heartbeat. During the active-mode soak budget (100/day) the heartbeat refresh
+  self-throttles off; verification reads are not headroom-gated (~20/day).
+- Budget arithmetic (180/day rolling): heartbeat ≈ 48 + verify ≈ 10 + rollups 4
+  + LP-init ≈ 2 + viewer boost ≤ 10 + writes ≈ 20 ≈ 95–100, leaving ~80 for
+  429 retries and manual MCP use. Watch `GET /api/v1/daikin/quota`.
+
 ### Daikin API daily rate limit
 
 - **Limit:** 200 requests/day, resets ~midnight UTC.
