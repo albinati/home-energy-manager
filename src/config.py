@@ -1160,6 +1160,9 @@ class Config:
     LP_LOAD_EXPENSIVE_BAND_QUANTILE: str = (
         os.getenv("LP_LOAD_EXPENSIVE_BAND_QUANTILE", "p75") or "p75"
     ).strip().lower()
+    # #818 — history window (calendar days scanned for same-day-type days) for
+    # GET /api/v1/load/expected band-sum quantiles.
+    LOAD_EXPECTED_HISTORY_DAYS: int = int(os.getenv("LOAD_EXPECTED_HISTORY_DAYS", "60"))
     # PR D (2026-07-02 audit) — adjacent ForceCharge Fox rows merge only within
     # the same intent class: HOLD (fdSoc <= this threshold, i.e. "hold at
     # reserve, don't fill") vs FILL (higher targets). A negative_hold merged

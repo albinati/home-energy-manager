@@ -98,15 +98,17 @@ def band_windows_for_day(day: date, tz: ZoneInfo | None = None) -> tuple[list[Ba
     if len(slots) < 40 and is_tou_family(code):
         prof = band_profile_local(code, tz_name=str(tz.key))
         if prof:
+            # Step in UTC and look the LOCAL (h, m) up per instant — wall-clock
+            # stepping on a tz-aware local datetime collapses/skips the DST hour
+            # (46 or 50 real slots on the change days).
             slots = []
-            t = local_midnight
-            end = local_midnight + timedelta(days=1)
+            t = local_midnight.astimezone(UTC)
+            end = (local_midnight + timedelta(days=1)).astimezone(UTC)
             while t < end:
-                p = prof.get((t.hour, 30 if t.minute >= 30 else 0))
+                lt = t.astimezone(tz)
+                p = prof.get((lt.hour, 30 if lt.minute >= 30 else 0))
                 if p is not None:
-                    slots.append(Slot(start_utc=t.astimezone(UTC),
-                                      end_utc=(t + timedelta(minutes=30)).astimezone(UTC),
-                                      price_p=float(p)))
+                    slots.append(Slot(start_utc=t, end_utc=t + timedelta(minutes=30), price_p=float(p)))
                 t += timedelta(minutes=30)
     if not slots:
         return [], "unknown"
@@ -125,11 +127,14 @@ def band_windows_for_day(day: date, tz: ZoneInfo | None = None) -> tuple[list[Ba
 
 
 def _same_group_history_days(day: date, n_days: int) -> list[date]:
+    """The most recent ``n_days`` days of the same type (weekday/weekend)
+    before ``day``, scanning at most 4·n calendar days back (a weekend needs
+    3.5× the calendar span of a weekday for the same sample count)."""
     group_we = day.weekday() >= 5
     out: list[date] = []
     d = day - timedelta(days=1)
     scanned = 0
-    while scanned < n_days:
+    while len(out) < n_days and scanned < 4 * n_days:
         if (d.weekday() >= 5) == group_we:
             out.append(d)
         d -= timedelta(days=1)
@@ -170,11 +175,15 @@ def expected_load_by_band(
     history), committed plan, realised-so-far and committed-forecast error
     history for ``day`` (local, default today)."""
     tz = _tz()
+    explicit_now = now_utc is not None
     now_utc = now_utc or datetime.now(UTC)
     day = day or now_utc.astimezone(tz).date()
     history_days = int(history_days or getattr(config, "LOAD_EXPECTED_HISTORY_DAYS", 60) or 60)
     ckey = f"{config.DB_PATH}:{day.isoformat()}:{history_days}"
     mono = time.monotonic()
+    # An explicit `now_utc` (tests / replays) must not read another instant's
+    # status/progress/realised from the cache.
+    use_cache = use_cache and not explicit_now
     if use_cache:
         hit = _cache.get(ckey)
         if hit is not None and mono - hit[0] < _CACHE_TTL_S:
@@ -184,31 +193,47 @@ def expected_load_by_band(
     group = "weekend" if day.weekday() >= 5 else "weekday"
     hist_days = _same_group_history_days(day, history_days)
 
-    # Per-history-day half-hourly load (one query per day, trapezoid-integrated).
-    hist_slots: dict[date, dict[str, float]] = {}
-    for d in hist_days:
-        try:
-            hist_slots[d] = db._half_hourly_grid_kwh_for_day(d, "load_power_kw")
-        except Exception:  # noqa: BLE001 — one bad day must not kill the read
-            hist_slots[d] = {}
+    def _local_midnight_utc(d: date) -> datetime:
+        return datetime(d.year, d.month, d.day, tzinfo=tz).astimezone(UTC)
 
+    # ONE indexed range fetch over the whole span (earliest history day → end of
+    # `day`, in LOCAL days), bucketed per LOCAL date in Python. The per-UTC-day
+    # helper lost the first local hour of every BST day (00:00–01:00 local is
+    # 23:00Z of the previous day) and scanned the whole index once per day.
+    span_start = _local_midnight_utc(min(hist_days) if hist_days else day)
+    span_end = _local_midnight_utc(day + timedelta(days=1))
+    all_slots: dict[str, float] = {}
+    try:
+        all_slots = db.half_hourly_kwh_for_utc_range(span_start, span_end, "load_power_kw")
+    except Exception:  # noqa: BLE001 — a telemetry read failure yields an empty view
+        all_slots = {}
+    hist_slots: dict[date, dict[str, float]] = {d: {} for d in hist_days}
     today_slots: dict[str, float] = {}
-    try:
-        today_slots = db._half_hourly_grid_kwh_for_day(day, "load_power_kw")
-    except Exception:  # noqa: BLE001
-        today_slots = {}
+    for iso, kwh in all_slots.items():
+        k = _slot_local_key(iso, tz)
+        if k is None:
+            continue
+        if k[0] == day:
+            today_slots[iso] = kwh
+        elif k[0] in hist_slots:
+            hist_slots[k[0]][iso] = kwh
+
+    # Committed plan: the stitch is keyed by UTC day, so the local day's first
+    # hour (BST) lives in the previous UTC day's stitch — read both and let the
+    # local-date filter in _window_sum pick.
     committed: dict[str, float] = {}
-    try:
-        for iso, (tot, _base) in db.committed_load_forecast_by_slot(day).items():
-            committed[iso] = float(tot)
-    except Exception:  # noqa: BLE001
-        committed = {}
+    for d in (day - timedelta(days=1), day):
+        try:
+            for iso, (tot, _base) in db.committed_load_forecast_by_slot(d).items():
+                committed[iso] = float(tot)
+        except Exception:  # noqa: BLE001
+            continue
 
     # Committed-forecast error history (actual − forecast) per history day.
     err_rows_by_day: dict[date, dict[str, float]] = {}
     try:
-        start = (min(hist_days) if hist_days else day).isoformat() + "T00:00:00Z"
-        end = (day + timedelta(days=1)).isoformat() + "T00:00:00Z"
+        start = span_start.isoformat().replace("+00:00", "Z")
+        end = span_end.isoformat().replace("+00:00", "Z")
         for r in db.get_load_error_log_range(start, end):
             k = _slot_local_key(str(r["slot_time_utc"]), tz)
             if k is None:
@@ -277,8 +302,7 @@ def expected_load_by_band(
         sl = hist_slots.get(d, {})
         if len(sl) >= 40:
             day_sums.append(sum(float(v) for v in sl.values()))
-    realised_today = sum(float(v) for iso, v in today_slots.items()
-                         if (lambda k: k is not None and k[0] == day)(_slot_local_key(iso, tz)))
+    realised_today = sum(float(v) for v in today_slots.values())
     result = {
         "date": day.isoformat(),
         "now_utc": now_utc.isoformat().replace("+00:00", "Z"),
@@ -294,7 +318,11 @@ def expected_load_by_band(
                 "p90": None if not day_sums else round(_q(day_sums, 0.9) or 0.0, 2),
                 "n_days": len(day_sums),
             },
-            "committed_kwh": round(sum(committed.values()), 2) if committed else None,
+            "committed_kwh": (
+                round(sum(v for iso, v in committed.items()
+                          if (lambda k: k is not None and k[0] == day)(_slot_local_key(iso, tz))), 2)
+                if committed else None
+            ),
             "realised_kwh": round(realised_today, 2) if today_slots else None,
         },
     }

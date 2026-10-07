@@ -2680,14 +2680,17 @@ def residual_load_profile_v2(
             return vs[0] if vs else 0.0
         return _quantiles(vs, n=4)[2]
 
-    def _p90(vs: list[float]) -> float:
+    def _p90(vs: list[float]) -> float | None:
         """#818 — the upper tail the newsvendor charge floor wants on a banded
         tariff (under-charging for the 16–19 peak costs 25.7p/kWh vs ~2p for
         over-charging → critical ratio ≈ 0.93). Needs ≥ 8 samples or it is just
-        the max of a handful of days; below that it degrades to the p75."""
+        the max of a handful of days — None then, so the lookup falls through
+        to the richer (group,h,m) / (h,m) tiers instead of a p75 in disguise.
+        Clamped to the observed max: the exclusive quantile EXTRAPOLATES on
+        8–9 samples (review: [0.3×7, 1.0] → 1.07 > max)."""
         if len(vs) < 8:
-            return _p75(vs)
-        return _quantiles(vs, n=10)[8]
+            return None
+        return min(max(vs), _quantiles(vs, n=10)[8])
 
     retained = [r for (_l, d, r, _hp, _hd, _hs) in residual_samples if d not in away_days]
     flat = _median(retained) if retained else (
@@ -2701,7 +2704,9 @@ def residual_load_profile_v2(
         if len(vs) >= min_samples_per_bucket:
             profile[key] = _median(vs)
             spread[key] = _p75(vs)
-            spread_p90[key] = _p90(vs)
+            _q90 = _p90(vs)
+            if _q90 is not None:
+                spread_p90[key] = _q90
 
     # Heat-pump profile — same tier structure, median per bucket. Unfilled buckets
     # mean "no heat-pump signal learned there" → the lookup falls back to 0, which
@@ -4216,6 +4221,82 @@ def compute_fox_energy_daily_from_realtime(
             "discharge_kwh": round(b["discharge"], 3),
         })
     return out
+
+
+def half_hourly_kwh_for_utc_range(
+    start_utc: datetime,
+    end_utc: datetime,
+    column: str,
+    *,
+    max_gap_seconds: int = 1800,
+) -> dict[str, float]:
+    """Trapezoidal integration of ``pv_realtime_history.<column>`` over an
+    arbitrary UTC range, keyed by ISO half-hour slot start (UTC) — the
+    multi-day sibling of :func:`_half_hourly_grid_kwh_for_day` (#818).
+
+    ONE indexed range SEARCH on ``captured_at`` (the per-day helper's
+    ``substr(captured_at, 1, 10)`` filter is a whole-index SCAN per call, and
+    the table has no retention), bucketed in Python. Pairs are assigned to the
+    bucket of the EARLIER sample; only pairs whose earlier sample is inside
+    ``[start_utc, end_utc)`` are emitted, so a caller may slice LOCAL days out
+    of the result without the UTC-day keying that loses the first local hour
+    in BST. Slots with no telemetry get no key.
+    """
+    from collections import defaultdict
+    from datetime import datetime as _dt
+
+    if column not in ("grid_export_kw", "grid_import_kw", "solar_power_kw", "battery_discharge_kw", "load_power_kw"):
+        raise ValueError(f"unsupported column: {column}")
+    s_utc = start_utc.astimezone(UTC)
+    e_utc = end_utc.astimezone(UTC)
+    if e_utc <= s_utc:
+        return {}
+    # One sample before the start and after the end for boundary integration.
+    # Stored forms are ``...Z`` and ``...+00:00``; both sort correctly against a
+    # second-precision prefix.
+    lo = (s_utc - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
+    hi = (e_utc + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                f"""SELECT captured_at, {column}
+                   FROM pv_realtime_history
+                   WHERE captured_at >= ? AND captured_at < ?
+                   ORDER BY captured_at""",
+                (lo, hi),
+            )
+            rows_raw = cur.fetchall()
+        finally:
+            conn.close()
+    if len(rows_raw) < 2:
+        return {}
+
+    def _parse(ts_raw: str) -> _dt | None:
+        try:
+            ts = _dt.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+            return ts if ts.tzinfo else ts.replace(tzinfo=UTC)
+        except (ValueError, TypeError):
+            return None
+
+    buckets: dict[str, float] = defaultdict(float)
+    prev_ts: _dt | None = None
+    prev_val = 0.0
+    for row in rows_raw:
+        ts = _parse(row[0])
+        if ts is None:
+            continue
+        cur_val = float(row[1]) if row[1] is not None else 0.0
+        if prev_ts is not None:
+            dt_s = min((ts - prev_ts).total_seconds(), max_gap_seconds)
+            if dt_s > 0 and s_utc <= prev_ts < e_utc:
+                slot = prev_ts.astimezone(UTC).replace(
+                    minute=(prev_ts.minute // 30) * 30, second=0, microsecond=0
+                )
+                buckets[slot.isoformat().replace("+00:00", "Z")] += (prev_val + cur_val) / 2.0 * dt_s / 3600.0
+        prev_ts = ts
+        prev_val = cur_val
+    return dict(buckets)
 
 
 def _half_hourly_grid_kwh_for_day(

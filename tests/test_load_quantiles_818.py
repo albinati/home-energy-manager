@@ -117,12 +117,20 @@ def test_p90_tier_sits_above_p75_and_quantile_lookup_falls_back():
     # A profile without the p90 tier (older cache / thin bucket) degrades to p75.
     legacy = {"profile": prof["profile"], "spread": prof["spread"], "flat": prof["flat"]}
     assert db.lookup_residual_quantile_kwh(legacy, 1, 18, 0, "p90") == pytest.approx(p75)
-    # Thin bucket (< 8 samples) → p90 == p75 by construction.
+    # Thin (dow,h,m) bucket (< 8 samples) carries NO p90 so the lookup falls
+    # through to the richer weekday tier instead of a p75 in disguise.
     wed = _recent_days(2, 5)
     for d in wed:
         _seed_day_loads(d, {18: 1.0}, outdoor_via="meteo")
     prof2 = db.residual_load_profile_v2(window_days=120, use_cache=False)
-    assert prof2["spread_p90"][(2, 18, 0)] == pytest.approx(prof2["spread"][(2, 18, 0)])
+    assert (2, 18, 0) not in prof2["spread_p90"]
+    assert ("weekday", 18, 0) in prof2["spread_p90"]
+    assert db.lookup_residual_quantile_kwh(prof2, 2, 18, 0, "p90") == pytest.approx(
+        prof2["spread_p90"][("weekday", 18, 0)])
+    # The p90 never extrapolates above the observed maximum (exclusive quantiles
+    # on 8–9 samples do: [0.3×7, 1.0] → 1.07).
+    for key, vs_max in ((1, 18, 0), 1.5), :
+        assert prof2["spread_p90"][key] <= vs_max + 1e-9
 
 
 # ── optimizer: band-aware scenario quantile ─────────────────────────────────
@@ -250,3 +258,58 @@ def test_expected_load_endpoint_shape(monkeypatch):
     assert "day" in body and "expected_kwh" in body["day"]
     r2 = client.get("/api/v1/load/expected?date=2026-13-40")
     assert r2.status_code in (400, 422)
+
+
+# ── review follow-ups: BST first hour, DST band fill, p90 clamp ─────────────
+
+
+def test_expected_load_counts_the_first_local_hour_of_a_bst_day():
+    """In BST, local 00:00–01:00 is 23:00Z of the previous day. The old per-UTC-day
+    bucketing dropped it: the 00–04 band failed the coverage gate on every
+    history day (n_days=0) and 'realised so far' was one hour short."""
+    from src.analytics.load_expected import expected_load_by_band
+
+    today = date(2026, 9, 29)  # Tuesday, BST
+    _seed_cosy_rates(today)
+    tuesdays = [today - timedelta(days=7 * k) for k in range(1, 9)]
+    for d in tuesdays:
+        _seed_day_loads(d, {h: 1.0 for h in range(0, 4)}, outdoor_via="meteo")
+    now = datetime(2026, 9, 29, 3, 30, tzinfo=LON).astimezone(UTC)
+    for h, m in ((0, 0), (0, 30), (1, 0), (1, 30), (2, 0), (2, 30), (3, 0)):
+        t = datetime(2026, 9, 29, h, m, tzinfo=LON).astimezone(UTC)
+        db.save_pv_realtime_sample(_z(t), load_power_kw=1.0)
+    db.save_pv_realtime_sample(_z(now), load_power_kw=1.0)
+    r = expected_load_by_band(today, history_days=90, now_utc=now, use_cache=False)
+    night = r["bands"][0]
+    assert (night["label"], night["start_local"]) == ("day", "00:00")
+    assert night["expected_kwh"]["n_days"] == 8
+    assert night["expected_kwh"]["p50"] == pytest.approx(4.0, abs=0.3)
+    assert night["status"] == "ongoing"
+    # 00:00 → 03:30 completed = 7 half-hours at 1 kW = 3.5 kWh (first hour INCLUDED).
+    assert night["realised_kwh"] == pytest.approx(3.5, abs=0.1)
+    assert r["day"]["realised_kwh"] == pytest.approx(3.5, abs=0.1)
+
+
+@pytest.mark.parametrize(("day", "n_slots"), [(date(2027, 3, 28), 46), (date(2026, 10, 25), 50)])
+def test_band_fill_for_unpublished_dst_day_has_the_real_slot_count(day, n_slots):
+    from src.analytics.load_expected import band_windows_for_day
+
+    _seed_cosy_rates(datetime.now(LON).date())  # the profile source; `day` itself has no rates
+    windows, kind = band_windows_for_day(day, LON)
+    assert kind == "banded"
+    total = sum(int((w.end_utc - w.start_utc).total_seconds() // 1800) for w in windows)
+    assert total == n_slots
+    # Contiguous in UTC: no collapsed or duplicated hour.
+    for a, b in zip(windows, windows[1:]):
+        assert a.end_utc == b.start_utc
+    assert windows[0].start_utc == datetime(day.year, day.month, day.day, tzinfo=LON).astimezone(UTC)
+
+
+def test_history_scan_finds_n_same_type_days_for_a_weekend():
+    from src.analytics.load_expected import _same_group_history_days
+
+    sat = date(2026, 10, 10)
+    days = _same_group_history_days(sat, 20)
+    assert len(days) == 20 and all(d.weekday() >= 5 for d in days)
+    wd = _same_group_history_days(date(2026, 10, 6), 20)
+    assert len(wd) == 20 and all(d.weekday() < 5 for d in wd)

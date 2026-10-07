@@ -1720,6 +1720,8 @@ def _apply_pessimistic_charge_floor(
             # boundary to floor (initial SoC is fixed).
             candidates = [j - 1 for j in entry_slots if j >= 1]
         else:
+            # #818 — the cheap-exit floors live INSIDE the peak_entry scope; under
+            # `trajectory` every slot is floored anyway, so that flag is inert.
             candidates = list(range(min(n, max_slots)))
         floor = [0.0] * n
         binding = 0
@@ -1943,10 +1945,11 @@ def _run_optimizer_lp(
             _load_bias = db.get_load_recent_bias()
         except Exception:
             _load_bias = {}
-    # #818 — on a BANDED tariff the pessimistic scenario protects the expensive
-    # blocks (day + peak bands) with the upper-tail quantile
-    # (LP_LOAD_EXPENSIVE_BAND_QUANTILE, default p90); cheap bands and dynamic
-    # tariffs keep the legacy p75 so Agile plans are bit-identical.
+    # #818 — on a BANDED tariff the pessimistic scenario may protect the
+    # expensive blocks (day + peak bands) with the upper-tail quantile
+    # (LP_LOAD_EXPENSIVE_BAND_QUANTILE: p75 default = legacy, p90 opt-in);
+    # cheap bands and dynamic tariffs always keep the p75 so Agile plans are
+    # bit-identical.
     _expensive_q, _band_struct = _expensive_band_quantile([s.price_pence for s in slots])
     _n_hi_quantile = 0
     base_load = []

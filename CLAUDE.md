@@ -382,9 +382,10 @@ drive the design:
   (30/60/120-day backtests within 0.1 kWh); the recent-bias corrector
   (`LOAD_RECENT_BIAS_ENABLED`) is **−6.7 % MAE out-of-sample** — keep it off.
 - **Every cheap→non-cheap boundary is a charge-decision boundary.**
-  `LP_PESS_CHARGE_FLOOR_BAND_EXITS=true` (default; banded tariffs only) adds
-  the 07:00 (after 04–07) and the midnight (22–24 → next day's 00–04) cheap
-  exits to the `peak_entry` floor set — buying 07–13 at 25.45p instead of
+  `LP_PESS_CHARGE_FLOOR_BAND_EXITS=true` (default; banded tariffs only; lives
+  INSIDE `LP_PESS_CHARGE_FLOOR_SCOPE=peak_entry` — prod — and is inert under
+  `trajectory`, which floors every slot anyway) adds the 07:00 (after 04–07)
+  and the midnight (22–24 → next day's 00–04) cheap exits to the floor set — buying 07–13 at 25.45p instead of
   12.49p costs 13p/kWh on 4.6 (weekday) – 8.1 (weekend) kWh. Entries INTO
   cheap (13:00, 22:00) and the 19:00 peak→day entry are never floored (the
   latter would make the nominal plan hold charge through the peak).
