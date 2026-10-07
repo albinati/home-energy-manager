@@ -160,6 +160,13 @@ def detect(
     mode = _mode()
     if mode == "dynamic":
         return _dynamic(px, "forced:dynamic", dynamic_rule)
+    # Family gate (review F1): when a tariff code IS configured and it is not a
+    # time-of-use product, never band — a short Agile window with repeated
+    # prices (12-23 slots, ≥ n-8 duplicates) could otherwise pass the level
+    # gate. An empty code (pure/library use) stays data-driven.
+    configured = str(getattr(config, "OCTOPUS_TARIFF_CODE", "") or "").strip()
+    if mode != "banded" and configured and not is_tou_family(configured):
+        return _dynamic(px, "family:not_tou", dynamic_rule)
     if n < _min_slots() and mode != "banded":
         return _dynamic(px, f"short:{n}<{_min_slots()}", dynamic_rule)
 
@@ -178,7 +185,15 @@ def detect(
     max_raw = _max_levels() * 2
     if len(positive) > max_raw and mode != "banded":
         return _dynamic(px, f"levels:{len(positive)}>{max_raw}", dynamic_rule)
+    # Density guard (review F1): a band is a level that REPEATS — require ≥ 3
+    # slots per distinct level on average (Cosy 3/48, reprice 6/96 pass; a
+    # 12-slot Agile window with 6 paired prices fails).
+    if len(positive) * 3 > len(positive_prices) and mode != "banded":
+        return _dynamic(px, f"sparse_levels:{len(positive)}/{len(positive_prices)}", dynamic_rule)
     ratio = _contrast_ratio()
+    # NB the span clustering assumes any reprice moves a band by LESS than the
+    # contrast ratio (25 %). Octopus Cosy reprices have been < 10 % (review F2);
+    # a ≥ 25 % jump of one band would split it into two for the overlap window.
     # Then cluster quantised levels whose whole SPAN stays within the contrast
     # ratio into ONE band (review M1): a horizon spanning an Octopus reprice
     # (Cosy 12.49→12.99, 25.45→26.5, 38.17→39.7) is six raw levels but three
@@ -363,8 +378,12 @@ def band_profile_local(
         # the horizon, and the stored price is used as-is (no quantisation).
         if key not in latest or vf > latest[key][0]:
             latest[key] = (vf, p)
-    s = detect(prices)
+    # Detect on the 48 latest-per-bucket values, not every stored row: a window
+    # spanning two reprices (9 raw levels) would otherwise read as dynamic and
+    # silently hand the local-clock tariff to the UTC-keyed Agile priors (F3).
+    s = detect([p for (_, p) in latest.values()])
     if not s.is_banded:
+        logger.info("band_profile_local(%s): stored series not banded (%s) — Agile prior path", code, s.reason)
         return {}
     return {key: p for key, (_, p) in latest.items()}
 

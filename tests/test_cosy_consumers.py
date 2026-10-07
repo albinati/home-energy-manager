@@ -122,7 +122,6 @@ def test_heartbeat_slot_kind_cheap_on_cosy_cheap_band():
     from src.energy.tariff_structure import detect
     from src.scheduler.runner import _peak_alert_threshold_p
 
-    app_config.OCTOPUS_TARIFF_CODE = "E-1R-COSY-22-12-08-H"  # restored by the autouse fixture
     _, prices = _cosy_day(DAY)
     s = detect(prices)
     db.save_daily_target({
@@ -290,9 +289,7 @@ def test_patterns_cheap_peak_frequency_on_cosy_days(monkeypatch):
     for d in (DAY, DAY + timedelta(days=1)):
         _save_cosy_rows(code, d)
     out = patterns.cheap_peak_slot_frequency(code, DAY.isoformat(), (DAY + timedelta(days=1)).isoformat())
-    assert out["kinds"]["cheap"]["count"] == 32 if isinstance(out["kinds"].get("cheap"), dict) else True
-    counts = {k: (v["count"] if isinstance(v, dict) else v) for k, v in out["kinds"].items()}
-    assert counts.get("cheap") == 32 and counts.get("peak") == 12
+    assert out["kinds"]["cheap"]["count"] == 32 and out["kinds"]["peak"]["count"] == 12
 
 
 def test_plan_window_fills_tail_from_band_profile_across_dst(monkeypatch):

@@ -221,3 +221,49 @@ def test_display_name_from_code(monkeypatch):
     assert ts.display_name("E-2R-VAR-22-11-01-H") == "Flexible"
     monkeypatch.setattr(config, "TARIFF_DISPLAY_NAME", "Casa", raising=False)
     assert ts.display_name("E-1R-COSY-22-12-08-H") == "Casa"
+
+
+# ── review F1: short Agile windows with repeated prices ─────────────────────
+
+
+def test_configured_agile_code_never_bands(monkeypatch):
+    """With an Agile code configured, even a Cosy-shaped series is dynamic."""
+    monkeypatch.setattr(config, "OCTOPUS_TARIFF_CODE", "E-1R-AGILE-24-10-01-H")
+    assert ts.detect(_cosy_day_prices()).kind == "dynamic"
+    monkeypatch.setattr(config, "OCTOPUS_TARIFF_CODE", "E-1R-COSY-22-12-08-H")
+    assert ts.detect(_cosy_day_prices()).is_banded
+
+
+def test_sparse_levels_short_agile_window_stays_dynamic(monkeypatch):
+    """16 slots of 8 hourly-paired Agile prices passed the raw-level gate;
+    the density guard (≥ 3 slots per level) keeps it dynamic."""
+    monkeypatch.setattr(config, "OCTOPUS_TARIFF_CODE", "")
+    paired = [19.0, 19.0, 21.5, 21.5, 24.0, 24.0, 27.0, 27.0, 30.0, 30.0, 32.0, 32.0, 34.0, 34.0, 36.0, 36.0]
+    assert ts.detect(paired).kind == "dynamic"
+    overnight = [13.1, 13.1, 13.4, 13.4, 13.6, 13.6, 13.9, 13.9, 14.0, 14.0, 14.2, 14.2]
+    assert ts.detect(overnight).kind == "dynamic"
+
+
+def test_band_profile_survives_two_reprices_in_window():
+    """Three price sets in the stored window: the profile is detected on the
+    48 latest-per-bucket values, so it stays banded and uses the newest set."""
+    db.init_db()
+    code = "E-1R-COSY-22-12-08-H"
+    rows = []
+    for k, d in enumerate([date(2026, 12, 29), date(2026, 12, 31), date(2027, 1, 2)]):
+        f = 1.0 + 0.03 * k
+        for h in range(24):
+            for m in (0, 30):
+                s_loc = datetime(d.year, d.month, d.day, h, m, tzinfo=TZ)
+                s_utc = s_loc.astimezone(UTC)
+                p = (COSY_CHEAP if (4 <= h < 7 or 13 <= h < 16 or h >= 22) else COSY_PEAK if 16 <= h < 19 else COSY_DAY) * f
+                rows.append({
+                    "valid_from": s_utc.isoformat().replace("+00:00", "Z"),
+                    "valid_to": (s_utc + timedelta(minutes=30)).isoformat().replace("+00:00", "Z"),
+                    "value_inc_vat": round(p, 4),
+                })
+    db.save_agile_rates(rows, code)
+    prof = ts.band_profile_local(code, now_utc=datetime(2027, 1, 2, 12, tzinfo=UTC), window_days=7)
+    assert len(prof) == 48
+    assert prof[(4, 0)] == pytest.approx(COSY_CHEAP * 1.06, abs=0.01)
+    assert prof[(16, 0)] == pytest.approx(COSY_PEAK * 1.06, abs=0.01)
