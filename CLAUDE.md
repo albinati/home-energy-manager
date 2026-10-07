@@ -439,6 +439,32 @@ household-level view: per tariff window of the day, **band-sum p50/p75/p90
 over same-day-type history** (weekday/weekend, `LOAD_EXPECTED_HISTORY_DAYS`
 60), the committed plan's kWh, realised so far, and the committed forecast's
 error history in that block. Feeds the Home consumption card.
+### Plan per front — `GET /api/v1/plan/fronts` (#821)
+
+One viewer-safe read (`?date=YYYY-MM-DD`, default today local; 400 on a bad date)
+for the Home page, composed by `src/analytics/plan_fronts.py`: `tariff` windows
+(`band_windows_for_day`), `battery` (contiguous same-kind windows from the latest
+LP run's slots — grid_charge / pv_charge / export / hold (Fox Backup group) /
+self_use / idle — plus per-tariff-window planned vs realised grid import, SoC at
+entry and `floored` = window entry slot in the pessimistic floor's
+`entry_slots`), `tank` (telemetry, `resolve_tank_params` + `coast_check`
+calibration, `read_window_decision`, windows from the shared
+`dhw_policy.dhw_schedule_rows_for_day` that `/daikin/dhw-schedule` also uses,
+shower floors with the LP-predicted tank temp), `heating` (LWT rows from
+`action_schedule`: boost/setback/restore with source lp|tier, gate state,
+predicted indoor), `consumption` (exactly `expected_load_by_band`), `spend` and
+`compare` (`compute_fair_comparison`, month-to-date, 4 tariffs).
+Every section is guarded on its own (`{"error": ...}`); the response is cached
+60 s per `(DB_PATH, date)` (the comparison takes seconds), bypassed when
+`now_utc` is passed.
+
+**Spend score.** `ideal_avg_import_p` = cheapest band price (banded) or the
+day's q25 (dynamic); `ideal_max_p = ideal × SPEND_SCORE_IDEAL_RATIO` (1.15),
+`above_min_p` = `cheap_thr` (banded) or q50. `ideal` when avg ≤ ideal_max and
+peak import ≤ 0.1 kWh (peak clause skipped on dynamic tariffs), `below` when avg
+≤ above_min, else `above`. Basis is realised once ≥ 1 kWh was imported, else the
+committed-plan forecast.
+
 ## Thermal control on Cosy — band rule, W3 thermal model, LP-owned LWT (#808)
 
 Space heating is shaped by the Daikin **LWT offset** rows (`lwt_preheat` +
