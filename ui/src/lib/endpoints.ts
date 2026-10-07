@@ -1,5 +1,6 @@
 import { postJson, getJson, hemFetch } from "./api";
 import type {
+  PlanFrontsResponse,
   CockpitNow,
   SchedulerTimeline,
   DispatchDecisionsResponse,
@@ -22,7 +23,6 @@ import type {
   FairCompareResponse,
   PeriodInsightsResponse,
   DaikinConsumptionResponse,
-  DhwScheduleResponse,
   HeatingPlanResponse,
   PvTodayResponse,
   GridTodayResponse,
@@ -78,11 +78,14 @@ export const getDaikinStatus = () => getJson<DaikinDevice[]>("/daikin/status");
 export const forceRefreshDaikin = () => getJson<DaikinDevice[]>("/daikin/status?refresh=true");
 export const getDaikinQuota = () => getJson<ApiQuotaResponse>("/daikin/quota");
 export const getFoxQuota = () => getJson<ApiQuotaResponse>("/foxess/quota");
-// Today's deterministic DHW tank plan (times + targets). Zero Daikin quota.
-export const getDhwSchedule = () => getJson<DhwScheduleResponse>("/daikin/dhw-schedule");
 // Per-slot heating-plan timeline (D-1/D/D+1): outdoor temp + LWT offset + tank
 // + heating-on, deterministically recomputed. Zero Daikin quota.
 export const getHeatingPlan = () => getJson<HeatingPlanResponse>("/daikin/heating-plan");
+
+// Plan per front (battery / tank / heating) + consumption bands + spend score
+// + tariff compare for one local day (#822). Cache-only, viewer-safe.
+export const getPlanFronts = (date?: string) =>
+  getJson<PlanFrontsResponse>(`/plan/fronts${date ? `?date=${encodeURIComponent(date)}` : ""}`);
 
 /* ----- Ops status (alert strip + self-check, PR 3) -----
    Both endpoints are server-side TTL-cached (60s / 300s) with sub-caches on

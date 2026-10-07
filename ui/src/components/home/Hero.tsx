@@ -1,12 +1,15 @@
 import type {
   MetricsResponse, CockpitNow, AgileTodayResponse,
   PeriodInsightsResponse, TodayCumulativeResponse, WeatherResponse, PvTodayResponse,
-  IndoorSummary,
+  IndoorSummary, PlanFrontsSpend, PlanFrontsCompare, SpendScore,
 } from "../../lib/types";
 import { gbp, kwh } from "../../lib/format";
 import { useAnimatedNumber } from "../../lib/useAnimatedNumber";
 import { isCurrentPeriod, periodLabel, type PeriodState } from "../../lib/period";
 import { Icon } from "../common/Icon";
+import { Pill } from "../common/Pill";
+import { WidgetBoundary } from "../common/WidgetBoundary";
+import "./plan/plan.css";
 import { ForecastStrip } from "./ForecastStrip";
 import { Link } from "wouter-preact";
 import "./hero.css";
@@ -22,6 +25,8 @@ interface HeroProps {
   todayCum?: TodayCumulativeResponse | null;
   weather?: WeatherResponse | null;
   pv?: PvTodayResponse | null;
+  spend?: PlanFrontsSpend | null;
+  compare?: PlanFrontsCompare | null;
 }
 
 // The redesign hero (Claude Design handoff): the period's net bill + an
@@ -29,7 +34,7 @@ interface HeroProps {
 // the RIGHT. Money figures follow the period navigator; the today-only extras
 // (break-even target, money paid in) show only on "today". The lifetime strip
 // moved to the foot of the cockpit (LifetimeStrip) — the hero is today-first.
-export function Hero({ metrics, cockpit, period, periodState, periodLoading, todayCum, weather, pv, agile }: HeroProps) {
+export function Hero({ metrics, cockpit, period, periodState, periodLoading, todayCum, weather, pv, agile, spend, compare }: HeroProps) {
   const isNow = isCurrentPeriod(periodState);
   const label = periodLabel(periodState);
   const fixedLabel = todayCum?.fixed_tariff_label || metrics?.fixed_tariff?.label || "British Gas Fixed";
@@ -89,6 +94,11 @@ export function Hero({ metrics, cockpit, period, periodState, periodLoading, tod
               </Link>
             </div>
           )}
+
+          <WidgetBoundary label="Spend">
+            {isTodayView && spend && !spend.error && spend.score && <SpendScoreLine spend={spend} />}
+            {(isTodayView || periodState.gran === "month") && compare && !compare.error && (compare.rows?.length ?? 0) > 0 && <CompareLine compare={compare} />}
+          </WidgetBoundary>
 
           {grid != null && (
             <div class="statline">
@@ -152,6 +162,57 @@ export function Hero({ metrics, cockpit, period, periodState, periodLoading, tod
         <div class="hero-right"><HeroWeather weather={weather} pv={pv} indoor={cockpit?.state?.indoor ?? null} /></div>
       </div>
     </section>
+  );
+}
+
+/* ── Spend score + tariff compare (#822) ─────────────────────────────── */
+const SCORE: Record<SpendScore, { label: string; tone: "ok" | "neutral" | "warn" }> = {
+  ideal: { label: "Ideal", tone: "ok" },
+  below: { label: "Below usual", tone: "neutral" },
+  above: { label: "Above usual", tone: "warn" },
+};
+
+function SpendScoreLine({ spend }: { spend: PlanFrontsSpend }) {
+  const sc = SCORE[spend.score as SpendScore] ?? null;
+  if (!sc) return null;
+  const forecast = spend.score_basis === "forecast";
+  const avg = forecast ? spend.forecast_avg_import_p : spend.realised_avg_import_p;
+  const f1 = (v: number | null | undefined) => (v == null ? "—" : v.toFixed(1));
+  const wk = spend.period?.week ?? null;
+  const mo = spend.period?.month ?? null;
+  const avgParts: string[] = [];
+  if (mo?.per_day_gbp != null) avgParts.push(`Avg ${gbp(mo.per_day_gbp)}/day this month`);
+  if (wk?.per_day_gbp != null) avgParts.push(`${gbp(wk.per_day_gbp)}/day this week`);
+  if (mo?.avg_import_p != null) avgParts.push(`${f1(mo.avg_import_p)}p avg import`);
+  return (
+    <div class="spend-block">
+      <div class="spend-line">
+        <Pill tone={sc.tone} title="Today's average import price vs the ideal (cheapest band) price">{sc.label}</Pill>
+        <span class="spend-detail">
+          {forecast ? "forecast " : ""}avg import {f1(avg)}p · ideal {f1(spend.ideal_avg_import_p)}p · peak {f1(spend.peak_import_kwh)} kWh
+          {" "}· import {f1(spend.realised_import_kwh)} / {f1(spend.forecast_import_kwh)} kWh
+        </span>
+      </div>
+      {avgParts.length > 0 && <div class="spend-detail">{avgParts.join(" · ")}</div>}
+    </div>
+  );
+}
+
+function CompareLine({ compare }: { compare: PlanFrontsCompare }) {
+  const rows = [...(compare.rows ?? [])].sort((a, b) => Number(b.is_current) - Number(a.is_current));
+  return (
+    <div class="compare-line">
+      <div class="compare-row">
+        {rows.map((r) => (
+          <span key={r.product_code} class={`compare-pair ${r.is_current ? "is-current" : ""}`}
+                title={r.approximate ? "approximate — no Agile shadow prices fetched" : undefined}>
+            <span class="compare-k">{(r.display_name ?? r.product_code ?? "").replace(/ \(current\)$/, "")}</span>
+            <span class="compare-v">{r.approximate && <span role="img" aria-label="approximate — no Agile shadow prices">≈ </span>}{r.net_gbp == null ? "—" : gbp(r.net_gbp)}</span>
+          </span>
+        ))}
+      </div>
+      <span class="compare-framing">this {compare.period}{compare.rows.some((r) => r.approximate) ? " · ≈ approximate" : ""}{compare.framing ? ` · ${compare.framing}` : ""}</span>
+    </div>
   );
 }
 

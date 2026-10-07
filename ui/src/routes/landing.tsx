@@ -13,25 +13,29 @@ import {
   getDaikinStatus,
   getDaikinQuota,
   getPvToday,
-  getDhwSchedule,
   getHeatingPlan,
   getEnergyTodayCumulative,
   getExportOpportunity,
-  getApplianceSuggestions,
   getApplianceJobs,
   getAppliances,
   getIndoorReadings,
+  getPlanFronts,
 } from "../lib/endpoints";
 import { Widget } from "../components/common/Widget";
 import { Icon } from "../components/common/Icon";
 import { Spinner } from "../components/common/Spinner";
 import { RefreshCountdown } from "../components/common/RefreshCountdown";
 import { PeriodNavigator } from "../components/shell/PeriodNavigator";
-import { usePeriod, periodFetchOpts, periodScope, isCurrentPeriod } from "../lib/period";
+import { todayISO, usePeriod, periodFetchOpts, periodScope, isCurrentPeriod } from "../lib/period";
 import { LivePowerWidget } from "../components/cockpit/LivePowerWidget";
 import { Hero } from "../components/home/Hero";
 import { HeatingWidget } from "../components/home/HeatingWidget";
-import { PlanMini } from "../components/home/PlanMini";
+import { BatteryPlanCard } from "../components/home/plan/BatteryPlanCard";
+import { TankPlanCard } from "../components/home/plan/TankPlanCard";
+import { HeatingPlanCard } from "../components/home/plan/HeatingPlanCard";
+import { ConsumptionStrip } from "../components/home/plan/ConsumptionStrip";
+import { HemApiError } from "../lib/api";
+import { Pill } from "../components/common/Pill";
 import { WhyNowLine } from "../components/home/WhyNowLine";
 import { FeedbackPanel } from "../components/home/FeedbackPanel";
 import { OperateCard } from "../components/home/OperateCard";
@@ -39,6 +43,11 @@ import { LifetimeStrip } from "../components/home/LifetimeStrip";
 import { publishFreshness, publishCockpitConn } from "../lib/freshness";
 import { role } from "../lib/auth";
 import "../components/home/home.css";
+
+// Dev-only fixture switch (`?mock=1`). `import.meta.env.DEV` is a build-time
+// constant, so the flag, the dynamic import and the fixture are all eliminated
+// from the production bundle.
+const MOCK = import.meta.env.DEV && new URLSearchParams(location.search).get("mock") === "1";
 
 // The four timeline widgets (Solar / Grid / Load / Heating) each own echarts
 // (~193 KB gzip, shared chunk). Lazy-load so the hero + live band paint first
@@ -97,8 +106,6 @@ export default function Landing() {
   const exportOppy = usePoll(() => (deferred ? getExportOpportunity(60) : Promise.resolve(null)), 5 * 60_000, [deferred]);
   const daikin = usePoll(getDaikinStatus, 2 * 60_000);
   const daikinQuota = usePoll(getDaikinQuota, 5 * 60_000);
-  // DHW tank plan (today+tomorrow) — used by the Live-power tank badges.
-  const dhwSched = usePoll(getDhwSchedule, 5 * 60_000);
   // Heating-plan timeline (yesterday/today/tomorrow): outdoor temp + LWT offset
   // + tank + heating-on, recomputed per slot. Cache-only, poll while visible.
   const heatingPlan = usePoll(getHeatingPlan, 5 * 60_000);
@@ -111,10 +118,28 @@ export default function Landing() {
   // unconfigured → the widget shows an empty/register hint).
   const appliances = usePoll(getAppliances, 5 * 60_000);
   const applianceJobs = usePoll(() => getApplianceJobs({ limit: 20 }), 5 * 60_000);
-  const applianceSug = usePoll(getApplianceSuggestions, 5 * 60_000);
   // The shared period navigator drives the Hero headline + cost breakdown +
   // energy chart + tariff comparison. Re-fetch whenever the selection changes.
   const period = usePeriod();
+  // Plan per front (#822) is TODAY-only: a past day in the navigator asks for
+  // that day (the API only plans ≤ today); a future/other period falls back to
+  // today. `?mock=1` serves a fixture so the UI can be developed without the API.
+  const todayIso = todayISO();
+  const frontsDate = period.gran === "day" && period.anchor <= todayIso ? period.anchor : todayIso;
+  const fronts = useFetch(async () => {
+    if (import.meta.env.DEV && MOCK) return (await import("../lib/mock/planFronts")).MOCK_PLAN_FRONTS;
+    return getPlanFronts(frontsDate === todayIso ? undefined : frontsDate);
+  }, [frontsDate]);
+  // useFetch is generation-guarded against date switches; add the 60 s refresh.
+  useEffect(() => {
+    const id = setInterval(() => { if (!document.hidden) void fronts.refresh(); }, 60_000);
+    return () => clearInterval(id);
+  }, [frontsDate]);
+  // Never show another day's payload under this date's heading.
+  const frontsData = fronts.data && (MOCK || fronts.data.date === frontsDate || frontsDate === todayIso) ? fronts.data : null;
+  // API not deployed yet (404) -> hide the whole band instead of "unavailable" tiles.
+  const frontsMissing = fronts.error instanceof HemApiError && fronts.error.status === 404 && !frontsData;
+  const frontsFailed = !!fronts.error && !frontsData && !frontsMissing;
   const periodInsights = useFetch(
     () => getEnergyPeriod(period.gran, periodFetchOpts(period)),
     [period.gran, period.anchor],
@@ -153,7 +178,6 @@ export default function Landing() {
   // Fox inverter mode for the Plan widget — only surface the pill when actively
   // forcing the battery (SelfUse is the resting state).
   const foxMode = data.current_slot?.fox_mode ?? undefined;
-  const foxActive = foxMode ? !["selfuse", "self_use", "idle", "—", ""].includes(foxMode.toLowerCase()) : false;
   const liveTime = data.now_utc
     ? new Date(data.now_utc).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })
     : undefined;
@@ -182,7 +206,32 @@ export default function Landing() {
       <Hero metrics={metrics.data} metricsLoading={metrics.loading} cockpit={data} agile={agile.data}
             period={periodInsights.data} periodState={period}
             periodLoading={periodInsights.loading} todayCum={todayCum.data}
-            weather={weather.data} pv={pvToday.data} />
+            weather={weather.data} pv={pvToday.data}
+            spend={frontsData?.spend ?? null} compare={frontsData?.compare ?? null} />
+
+      {/* ── PLAN per front — what each system will do today, next action first. */}
+      {!frontsMissing && <>
+      <h2 class="scope scope--period">
+        <span class="scope-dot" aria-hidden="true" />
+        Plan {frontsDate === todayIso ? "today" : frontsDate}{MOCK && <> <Pill tone="warn">MOCK</Pill></>}
+        <span class="scope-when">battery · hot water · heating</span>
+      </h2>
+      {frontsFailed && <p class="muted">Couldn't load plan for {frontsDate}.</p>}
+      {!frontsFailed && <div class="widget-grid widget-band">
+        <Widget title="Battery plan" icon={<Icon name="battery" size={14} />} tone="power" size="medium">
+          <BatteryPlanCard data={frontsData?.battery ?? null} nowUtc={frontsData?.now_utc ?? new Date().toISOString()} loading={fronts.loading} />
+        </Widget>
+        <Widget title="Hot water plan" icon={<Icon name="droplet" size={14} />} tone="thermal" size="medium">
+          <TankPlanCard data={frontsData?.tank ?? null} nowUtc={frontsData?.now_utc ?? new Date().toISOString()} loading={fronts.loading} />
+        </Widget>
+        <Widget title="Heating plan" icon={<Icon name="heating" size={14} />} tone="thermal" size="medium">
+          <HeatingPlanCard data={frontsData?.heating ?? null} nowUtc={frontsData?.now_utc ?? new Date().toISOString()} loading={fronts.loading} />
+        </Widget>
+        <Widget title="Consumption outlook" icon={<Icon name="chart-bars" size={14} />} tone="tariff" size="wide">
+          <ConsumptionStrip data={frontsData?.consumption ?? null} loading={fronts.loading} />
+        </Widget>
+      </div>}
+      </>}
 
       {/* ── LIVE scope + band (redesign) — the always-now, self-driving surface
           that ignores the period selector above. The status row splits 50/50:
@@ -212,7 +261,6 @@ export default function Landing() {
             void timeline.refresh();
             void heatingPlan.refresh();
             void applianceJobs.refresh();
-            void applianceSug.refresh();
             void now.refresh();
           }}
         />}
@@ -222,18 +270,11 @@ export default function Landing() {
                   action={<RefreshCountdown lastFetchAt={now.lastFetchAt} intervalMs={now.intervalMs} loading={now.loading} onRefresh={() => void now.refresh()} />}>
             <LivePowerWidget state={s} cockpit={data} agile={agile.data} metrics={metrics.data} todayCumulative={todayCum.data} />
             <WhyNowLine ongoing={timeline.data?.ongoing} foxMode={foxMode} />
-            <PlanMini groups={["battery", "appliances"]} timeline={timeline.data}
-                      appliances={appliances.data?.appliances} applianceJobs={applianceJobs.data?.jobs}
-                      applianceSuggestions={applianceSug.data?.suggestions}
-                      nowUtc={data.now_utc} foxMode={foxMode} foxActive={foxActive} />
           </Widget>
 
           <Widget title="Live heating" icon={<Icon name="heating" size={14} />} tone="thermal" size="half">
             <HeatingWidget state={s} daikin={daikin.data} daikinQuota={daikinQuota.data} report={report.data} weather={weather.data} execution={execution.data}
                            onRefresh={() => { void daikin.refresh(); void daikinQuota.refresh(); }} />
-            <PlanMini groups={["heating", "tank"]} timeline={timeline.data}
-                      dhwSchedule={dhwSched.data?.rows} heatingPlan={heatingPlan.data}
-                      nowUtc={data.now_utc} />
           </Widget>
         </div>
       </div>
