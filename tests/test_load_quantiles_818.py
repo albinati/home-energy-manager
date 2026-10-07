@@ -141,14 +141,14 @@ def _cosy_prices() -> list[float]:
 
 
 def test_default_quantile_is_p75_everywhere(monkeypatch):
-    monkeypatch.setattr(config, "LP_LOAD_EXPENSIVE_BAND_QUANTILE", "p75", raising=False)
+    monkeypatch.setitem(config._overrides, "LP_LOAD_EXPENSIVE_BAND_QUANTILE", "p75")
     q, struct = opt_mod._expensive_band_quantile(_cosy_prices())
     assert (q, struct) == ("p75", None)
     assert opt_mod._spread_quantile_for_slot(struct, 38.17, q) == "p75"
 
 
 def test_p90_applies_to_day_and_peak_bands_only_on_a_banded_tariff(monkeypatch):
-    monkeypatch.setattr(config, "LP_LOAD_EXPENSIVE_BAND_QUANTILE", "p90", raising=False)
+    monkeypatch.setitem(config._overrides, "LP_LOAD_EXPENSIVE_BAND_QUANTILE", "p90")
     q, struct = opt_mod._expensive_band_quantile(_cosy_prices())
     assert q == "p90" and struct is not None and struct.is_banded
     assert opt_mod._spread_quantile_for_slot(struct, 12.49, q) == "p75"   # cheap
@@ -157,7 +157,7 @@ def test_p90_applies_to_day_and_peak_bands_only_on_a_banded_tariff(monkeypatch):
 
 
 def test_p90_never_engages_on_a_dynamic_tariff(monkeypatch):
-    monkeypatch.setattr(config, "LP_LOAD_EXPENSIVE_BAND_QUANTILE", "p90", raising=False)
+    monkeypatch.setitem(config._overrides, "LP_LOAD_EXPENSIVE_BAND_QUANTILE", "p90")
     agile = [5.0 + (i * 7.3) % 31.0 for i in range(48)]  # 48 distinct levels
     assert not detect(agile).is_banded
     q, struct = opt_mod._expensive_band_quantile(agile)
@@ -166,7 +166,7 @@ def test_p90_never_engages_on_a_dynamic_tariff(monkeypatch):
 
 
 def test_unknown_quantile_name_degrades_to_p75(monkeypatch):
-    monkeypatch.setattr(config, "LP_LOAD_EXPENSIVE_BAND_QUANTILE", "p99", raising=False)
+    monkeypatch.setitem(config._overrides, "LP_LOAD_EXPENSIVE_BAND_QUANTILE", "p99")
     assert opt_mod._expensive_band_quantile(_cosy_prices()) == ("p75", None)
 
 

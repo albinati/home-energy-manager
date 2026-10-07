@@ -404,6 +404,9 @@ export interface TuningSuggestion {
     hours_below_current?: number;
     hours_below_suggested?: number;
     comfort_first?: boolean;
+    status?: "complete" | "partial" | string;
+    n_variants_evaluated?: number;
+    context?: { w3_active?: boolean; control_mode?: string; tariff_banded?: boolean; ua_w_per_k?: number | null };
   };
 }
 export interface TuningSuggestionsResponse { weeks: number; suggestions: TuningSuggestion[] }

@@ -47,7 +47,6 @@ logger = logging.getLogger(__name__)
 SLOT_H = 0.5
 COMFORT_TOL_C = 0.1  # predicted-temperature noise below the floor that is not counted
 BUDGET_SECONDS = 540.0  # stop starting new variants after this (whole review < ~10 min)
-LOCK_TTL_SECONDS = 600.0
 
 
 @dataclass(frozen=True)
@@ -66,17 +65,23 @@ KNOBS: tuple[Knob, ...] = (
     Knob("INDOOR_SETPOINT_C", 0.5, 16.0, 26.0),
     Knob("DHW_TEMP_NORMAL_C", 1.0, 40.0, 50.0),
     Knob("LP_LOAD_EXPENSIVE_BAND_QUANTILE", 0, 0, 0, kind="enum", enum=("p75", "p90")),
-    Knob("DHW_DYNAMIC_BOOST_HOLD_HOURS", 1, 1, 4, kind="int"),
+    # DHW_DYNAMIC_BOOST_HOLD_HOURS is deliberately NOT a knob: its only reader is the
+    # persisted nightly window decision (resolve_window_decision_local), which a
+    # replay never re-resolves, so a variant would be Delta=0 by construction.
 )
 
 
 def external_comfort_signal(week_start: str) -> dict | None:
-    """Story-3 plug point: owner/sensor comfort feedback for the week.
-
-    Contract: return ``None`` (no signal) or a JSON-serialisable dict. It is
-    attached verbatim to every suggestion payload as ``external_comfort``; the
-    ranking rules do not branch on it yet. Must never raise (callers guard)."""
-    return None
+    """Owner comfort feedback for the week (#834): the bounded proposal from
+    ``analytics.comfort_feedback.external_comfort_signal`` or None. Attached
+    verbatim to every suggestion as ``payload.external_comfort``; ranking does not
+    branch on it. Never raises."""
+    try:
+        from .analytics.comfort_feedback import external_comfort_signal as _sig
+        return _sig(date.fromisoformat(week_start))
+    except Exception as e:  # noqa: BLE001
+        logger.debug("tuning_review: comfort signal unavailable: %s", e)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +113,24 @@ def candidate_variants(current: dict[str, Any]) -> list[dict[str, Any]]:
                 continue
             out.append({"key": k.key, "value": v})
     return out
+
+
+def review_context() -> dict[str, Any]:
+    """What the forward-mode replay is evaluated WITH (it uses the live process
+    config) — recorded so a zero-delta row is explainable."""
+    try:
+        ua = float(config.BUILDING_UA_W_PER_K)
+    except Exception:  # noqa: BLE001
+        ua = None
+    code = str(getattr(config, "OCTOPUS_TARIFF_CODE", "") or "")
+    return {
+        "w3_active": bool(getattr(config, "LP_W3_TIN_ENABLED", False)),
+        "control_mode": str(getattr(config, "DAIKIN_CONTROL_MODE", "")).strip().lower(),
+        "tariff_banded": "COSY" in code.upper() or str(getattr(config, "OCTOPUS_TARIFF_STRUCTURE", "")) == "banded",
+        "tariff_code": code,
+        "ua_w_per_k": ua,
+        "pess_floor_scope": str(getattr(config, "LP_PESS_CHARGE_FLOOR_SCOPE", "")),
+    }
 
 
 def current_values() -> dict[str, Any]:
@@ -149,6 +172,7 @@ def yardstick() -> dict[str, Any]:
     return {
         "night_floor_c": float(config.LP_W3_NIGHT_FLOOR_C),
         "peak_floor_c": float(config.INDOOR_SETPOINT_C) - float(config.LP_W3_PEAK_COAST_DELTA_C),
+        "setpoint_c": float(config.INDOOR_SETPOINT_C),
         "night_start_h": int(getattr(config, "LP_W3_NIGHT_START_HOUR_LOCAL", 22)),
         "night_end_h": int(getattr(config, "LP_W3_NIGHT_END_HOUR_LOCAL", 7)),
         "shower_floor_c": _shower_floor_at_20(str(getattr(config, "OPTIMIZATION_PRESET", "normal"))),
@@ -189,8 +213,13 @@ def day_comfort(day: Any, yard: dict[str, Any]) -> dict[str, float]:
                 is_night = (h >= ns or h < ne) if ns > ne else (ns <= h < ne)
                 if is_night and t < yard["night_floor_c"] - COMFORT_TOL_C:
                     night_h += SLOT_H
-                is_peak = (band[i] == "peak") if band and i < len(band) else (16 <= h < 19)
-                if is_peak and t < yard["peak_floor_c"] - COMFORT_TOL_C:
+                if band and i < len(band):
+                    floor = yard["peak_floor_c"] if band[i] == "peak" else None
+                else:
+                    # Dynamic tariff (no bands): the LP's daytime floor is the
+                    # setpoint itself, no peak-coast term.
+                    floor = yard["setpoint_c"] if not is_night else None
+                if floor is not None and t < floor - COMFORT_TOL_C:
                     peak_h += SLOT_H
             if loc.hour == 20 and loc.minute == 0 and yard.get("shower_floor_c") is not None and i < len(tank):
                 shower_seen = True
@@ -211,12 +240,15 @@ def evaluate(
     *,
     cadence: str,
     replay: Callable[..., Any],
+    deadline: float | None = None,
 ) -> dict[str, dict[str, float]]:
     """Per-day {date: {cost_p, hours_below, ...}} for one variant (failed days omitted)."""
     from .scheduler.lp_overrides import patched_config
     out: dict[str, dict[str, float]] = {}
     with patched_config(overrides):
         for d in days:
+            if deadline is not None and time.monotonic() > deadline:
+                break  # the caller sees a short result and drops this variant
             try:
                 r = replay(d, cadence=cadence, mode="forward")
             except Exception as e:  # noqa: BLE001
@@ -285,6 +317,10 @@ def rank_variants(
     if float(control["hours_below"]) > 0:
         zero = [s for s in scored if float(s["hours_below"]) <= 1e-9]
         if zero:
+            # Capped: a comfort-first row must not cost more than 2x the saving bar
+            # per week, otherwise "comfort" is a blank cheque.
+            zero = [s for s in zero if s["delta_pence_per_week"] <= 2.0 * min_saving]
+        if zero:
             cf = min(zero, key=lambda s: s["delta_pence_per_week"])
             hit = next((r for r in rows if r["key"] == cf["key"] and r["value"] == cf["value"]), None)
             if hit is not None:
@@ -313,26 +349,28 @@ def put_payload(key: str, value: Any) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 class ReviewBusy(RuntimeError):
-    """A review is already running (single-flight, 10-min TTL)."""
+    """A review is already running (single-flight)."""
 
 
 _state_lock = threading.Lock()
-_running_since: float | None = None
+_running = False
 
 
 def _acquire() -> None:
-    global _running_since
+    """Single-flight with NO expiry: variants share ``config._overrides``, so two
+    overlapping reviews would corrupt each other. Released in ``run_review``'s
+    ``finally``; the per-day budget check bounds the run."""
+    global _running
     with _state_lock:
-        now = time.monotonic()
-        if _running_since is not None and now - _running_since < LOCK_TTL_SECONDS:
+        if _running:
             raise ReviewBusy("a tuning review is already running")
-        _running_since = now
+        _running = True
 
 
 def _release() -> None:
-    global _running_since
+    global _running
     with _state_lock:
-        _running_since = None
+        _running = False
 
 
 def replayable_days(end_day: date, n_days: int, list_runs: Callable[[str], list] | None = None) -> list[str]:
@@ -381,6 +419,13 @@ def _run_review_locked(end_day, dry_run, replay, list_runs, cadence, budget_seco
     if len(days) < int(config.TUNING_REVIEW_MIN_DAYS):
         return {**base, "status": "skipped", "reason": f"only {len(days)} replayable day(s)", "rows": []}
 
+    ctx = review_context()
+    base["context"] = ctx
+    if ctx["control_mode"] == "passive" or not ctx["w3_active"]:
+        why = "DAIKIN_CONTROL_MODE=passive" if ctx["control_mode"] == "passive" else "LP_W3_TIN_ENABLED=false"
+        return {**base, "status": "skipped",
+                "reason": f"{why}: the W3 comfort knobs cannot move a replay", "rows": []}
+
     cur = current_values()
     yard = yardstick()
     control_days = evaluate({}, days, yard, cadence=cadence, replay=replay)
@@ -394,8 +439,11 @@ def _run_review_locked(end_day, dry_run, replay, list_runs, cadence, budget_seco
         if time.monotonic() - t0 > budget_seconds:
             partial = True
             break
-        per_day = evaluate({cand["key"]: cand["value"]}, ok_days, yard, cadence=cadence, replay=replay)
-        if len(per_day) < len(ok_days):  # a failed day would bias the comparison
+        per_day = evaluate({cand["key"]: cand["value"]}, ok_days, yard, cadence=cadence,
+                           replay=replay, deadline=t0 + budget_seconds)
+        if len(per_day) < len(ok_days):  # a failed/timed-out day would bias the comparison
+            if time.monotonic() > t0 + budget_seconds:
+                partial = True
             continue
         variants.append({**cand, "current_value": cur[cand["key"]], **_aggregate(per_day, ok_days)})
 
@@ -428,6 +476,9 @@ def _run_review_locked(end_day, dry_run, replay, list_runs, cadence, budget_seco
                 "shower_days_below_suggested": int(r["shower_day_below"]),
                 "comfort_first": bool(r.get("comfort_first")),
                 "external_comfort": ext,
+                "status": "partial" if partial else "complete",
+                "n_variants_evaluated": len(variants),
+                "context": ctx,
             },
         })
     elapsed = time.monotonic() - t0
@@ -477,6 +528,7 @@ def weekly_review_job() -> None:
         return
     try:
         from .notifier import notify_tuning_review
-        notify_tuning_review(lines, week_start=res["week_start"], n_recommended=len(lines))
+        notify_tuning_review(lines, week_start=res["week_start"], n_recommended=len(lines),
+                             partial=res.get("status") == "partial")
     except Exception as e:  # noqa: BLE001
         logger.warning("tuning_review notify failed (non-fatal): %s", e)

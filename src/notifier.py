@@ -967,11 +967,12 @@ def notify_dhw_bias_enable_ready(
     )
 
 
-def notify_tuning_review(lines: list[str], *, week_start: str, n_recommended: int) -> None:
+def notify_tuning_review(lines: list[str], *, week_start: str, n_recommended: int,
+                         partial: bool = False) -> None:
     """Weekly fine-tuning review summary (#832): top suggestion lines. Never
     applies anything; the user applies in Settings / the Insights card."""
     body = "\n".join(
-        [f"Revisao semanal de ajustes (semana de {week_start}):", *lines,
+        [f"Revisao semanal de ajustes (semana de {week_start})" + (" - PARCIAL" if partial else "") + ":", *lines,
          "Aplique em Ajustes (ou no cartao Insights). Nada foi alterado."]
     )
     _dispatch(

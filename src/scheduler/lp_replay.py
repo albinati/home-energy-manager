@@ -309,6 +309,12 @@ def replay_run(
             tank_temp_c=float(inputs.get("tank_initial_c") or 45.0),
             soc_source=str(inputs.get("soc_source") or "snapshot"),
             tank_source=str(inputs.get("tank_source") or "snapshot"),
+            # W3 (#540) gates on ``initial.indoor_temp_c is not None``: without the
+            # snapshot's indoor seed every W3 comfort knob is inert in a replay.
+            indoor_temp_c=(
+                float(inputs["indoor_initial_c"])
+                if inputs.get("indoor_initial_c") is not None else None
+            ),
         )
 
     # Weather: prefer the exact forecast fetch referenced by the LP snapshot;
@@ -1111,11 +1117,14 @@ def _state_at(plan: LpPlan, when_utc: datetime) -> LpInitialState:
                 break
     soc = plan.soc_kwh[idx] if idx < len(plan.soc_kwh) else (plan.soc_kwh[-1] if plan.soc_kwh else 0.0)
     tank = plan.tank_temp_c[idx] if idx < len(plan.tank_temp_c) else (plan.tank_temp_c[-1] if plan.tank_temp_c else 45.0)
+    ind_arr = list(getattr(plan, "indoor_temp_c", []) or [])
+    indoor = (ind_arr[idx] if idx < len(ind_arr) else ind_arr[-1]) if ind_arr else None
     return LpInitialState(
         soc_kwh=float(soc),
         tank_temp_c=float(tank),
         soc_source="replay_chain",
         tank_source="replay_chain",
+        indoor_temp_c=float(indoor) if indoor is not None else None,
     )
 
 

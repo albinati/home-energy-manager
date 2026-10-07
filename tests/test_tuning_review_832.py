@@ -61,13 +61,11 @@ def test_candidate_variants_bounds_and_enum():
     v = tr.candidate_variants({
         "LP_W3_NIGHT_FLOOR_C": 14.0, "LP_W3_PEAK_COAST_DELTA_C": 1.0, "INDOOR_SETPOINT_C": 21.0,
         "DHW_TEMP_NORMAL_C": 45.0, "LP_LOAD_EXPENSIVE_BAND_QUANTILE": "p75",
-        "DHW_DYNAMIC_BOOST_HOLD_HOURS": 4,
     })
     got = {(x["key"], x["value"]) for x in v}
     assert ("LP_W3_NIGHT_FLOOR_C", 13.5) not in got and ("LP_W3_NIGHT_FLOOR_C", 14.5) in got
     assert ("LP_LOAD_EXPENSIVE_BAND_QUANTILE", "p90") in got
-    assert ("DHW_DYNAMIC_BOOST_HOLD_HOURS", 3) in got and ("DHW_DYNAMIC_BOOST_HOLD_HOURS", 5) not in got
-    assert len(v) == 1 + 2 + 2 + 2 + 1 + 1
+    assert len(v) == 1 + 2 + 2 + 2 + 1
 
 
 def test_payload_shape():
@@ -95,11 +93,11 @@ def _fake_day(plan_date, night_temp):
 
 def test_day_comfort_counts_night_and_peak(monkeypatch):
     monkeypatch.setattr(config, "BULLETPROOF_TIMEZONE", "UTC", raising=False)
-    yard = {"night_floor_c": 17.5, "peak_floor_c": 20.0, "night_start_h": 22, "night_end_h": 7,
-            "shower_floor_c": 45.0}
+    yard = {"night_floor_c": 17.5, "peak_floor_c": 20.0, "setpoint_c": 21.0, "night_start_h": 22,
+            "night_end_h": 7, "shower_floor_c": 45.0}
     c = tr.day_comfort(_fake_day("2026-10-01", 16.0), yard)
     assert c["night_below_h"] == 9.0      # 22-07 UTC
-    assert c["peak_below_h"] == 3.0       # 16-19 fallback window
+    assert c["peak_below_h"] == 15.0      # dynamic tariff: setpoint is the daytime floor (07-22)
     assert c["shower_short_c"] == 0.0
 
 
@@ -110,6 +108,8 @@ def test_replay_loop_never_writes_settings_and_restores(monkeypatch):
     orig_rt_set = type(config)._rt_set
     monkeypatch.setattr(type(config), "_rt_set", lambda self, k, v: (calls.append(("rt", k)), orig_rt_set(self, k, v)))
     seen = []
+    monkeypatch.setattr(config, "DAIKIN_CONTROL_MODE", "active", raising=False)
+    monkeypatch.setattr(config, "LP_W3_TIN_ENABLED", True, raising=False)
 
     def fake_replay(d, cadence, mode):
         seen.append((d, cadence, mode, config.INDOOR_SETPOINT_C, config.LP_W3_NIGHT_FLOOR_C))
@@ -138,7 +138,9 @@ def test_replay_loop_never_writes_settings_and_restores(monkeypatch):
     assert db.list_tuning_suggestions(4) == []
 
 
-def test_skips_with_too_few_days():
+def test_skips_with_too_few_days(monkeypatch):
+    monkeypatch.setattr(config, "DAIKIN_CONTROL_MODE", "active", raising=False)
+    monkeypatch.setattr(config, "LP_W3_TIN_ENABLED", True, raising=False)
     res = tr.run_review(end_day=date(2026, 10, 6), dry_run=True,
                         replay=lambda *a, **k: pytest.fail("must not replay"),
                         list_runs=lambda d: [1] if d.endswith(("-05", "-06")) else [])
@@ -172,9 +174,10 @@ def test_persist_and_api_shape_and_admin_gating(monkeypatch, tmp_path):
         assert c.post("/api/v1/tuning/run", headers={"Authorization": "Bearer adm"}).status_code == 409
 
 
-def test_single_flight_lock():
+def test_single_flight_lock_has_no_ttl():
     tr._acquire()
     try:
+        tr._running  # held: no expiry, a second review is always refused
         with pytest.raises(tr.ReviewBusy):
             tr._acquire()
     finally:
@@ -200,3 +203,91 @@ def test_job_registered_and_muted_when_nothing_recommended(monkeypatch):
          "delta_pence_per_week": -9, "delta_comfort_hours": 0}]})
     tr.weekly_review_job()
     assert len(sent) == 1
+
+
+# --- replay harness: W3 seed (indoor_initial_c) ---------------------------------
+
+def test_replay_seeds_w3_indoor_and_night_floor_binds(monkeypatch):
+    from datetime import UTC, datetime
+    from src import db
+    from src.scheduler import lp_optimizer
+    from src.scheduler.lp_replay import replay_run
+    from tests import test_lp_replay as h
+
+    monkeypatch.setattr(config, "LP_W3_TIN_ENABLED", True, raising=False)
+    monkeypatch.setattr(config, "DAIKIN_CONTROL_MODE", "active", raising=False)
+    monkeypatch.setattr(config, "BUILDING_UA_W_PER_K", 200.0, raising=False)
+    base = datetime(2026, 7, 1, 21, 0, tzinfo=UTC)  # 22:00 BST: whole horizon is night
+    plan, slots, prices, load, initial, forecast = h._solve_baseline(16, base)
+    orig_save = db.save_lp_snapshots
+
+    def save_with_indoor(run_id, inputs_row, rows):
+        inputs_row = {**inputs_row, "indoor_initial_c": 22.0}
+        return orig_save(run_id, inputs_row, rows)
+
+    monkeypatch.setattr(db, "save_lp_snapshots", save_with_indoor)
+    run_id = h._persist_plan_as_run(plan, slots, prices, load, initial, forecast,
+                                    run_at_utc=base, plan_date="2026-07-01")
+    monkeypatch.setattr(db, "save_lp_snapshots", orig_save)
+
+    low = replay_run(run_id, mode="forward")
+    assert low.ok, low.error
+    assert low._replayed_plan.indoor_temp_c, "W3 must engage when the snapshot carries indoor_initial_c"
+
+    from src.scheduler.lp_overrides import patched_config
+    monkeypatch.setattr(config, "LP_W3_NIGHT_FLOOR_C", 17.5, raising=False)
+    with patched_config({"LP_W3_NIGHT_FLOOR_C": 22.0, "INDOOR_SETPOINT_C": 24.0}):
+        hi = replay_run(run_id, mode="forward")
+    assert hi.ok, hi.error
+    assert abs(hi.replayed_objective_pence - low.replayed_objective_pence) > 1e-6
+
+
+def test_replay_without_snapshot_indoor_keeps_legacy_behaviour():
+    from datetime import UTC, datetime
+    from src.scheduler.lp_replay import replay_run
+    from tests import test_lp_replay as h
+    base = datetime(2026, 7, 1, 21, 0, tzinfo=UTC)
+    plan, slots, prices, load, initial, forecast = h._solve_baseline(8, base)
+    run_id = h._persist_plan_as_run(plan, slots, prices, load, initial, forecast,
+                                    run_at_utc=base, plan_date="2026-07-01")
+    r = replay_run(run_id, mode="forward")
+    assert r.ok and not r._replayed_plan.indoor_temp_c
+
+
+def test_state_at_propagates_indoor():
+    from datetime import UTC, datetime
+    from src.scheduler.lp_replay import _state_at
+    st = datetime(2026, 7, 1, tzinfo=UTC)
+    plan = SimpleNamespace(slot_starts_utc=[st + timedelta(minutes=30 * i) for i in range(4)],
+                           soc_kwh=[1, 2, 3, 4, 5], tank_temp_c=[40, 41, 42, 43, 44],
+                           indoor_temp_c=[20.0, 20.5, 21.0, 21.5, 22.0])
+    assert _state_at(plan, st + timedelta(minutes=60)).indoor_temp_c == 21.0
+
+
+def test_skips_when_passive_or_w3_off(monkeypatch):
+    for attr, val in (("DAIKIN_CONTROL_MODE", "passive"), ("LP_W3_TIN_ENABLED", False)):
+        monkeypatch.setattr(config, "DAIKIN_CONTROL_MODE", "active", raising=False)
+        monkeypatch.setattr(config, "LP_W3_TIN_ENABLED", True, raising=False)
+        monkeypatch.setattr(config, attr, val, raising=False)
+        res = tr.run_review(end_day=date(2026, 10, 6), dry_run=True,
+                            replay=lambda *a, **k: pytest.fail("must not replay"),
+                            list_runs=lambda d: [1])
+        assert res["status"] == "skipped" and "W3" in res["reason"]
+        assert "context" in res
+
+
+def test_hold_hours_not_a_knob():
+    assert "DHW_DYNAMIC_BOOST_HOLD_HOURS" not in {k.key for k in tr.KNOBS}
+
+
+def test_comfort_first_is_capped():
+    rows = tr.rank_variants(_ctrl(hours=2.0), [_var("C", 1, 1100, 0.0)], min_saving_p=5)
+    assert rows == []  # +100p/week for zero hours is not offered
+
+
+def test_dynamic_tariff_uses_setpoint_as_daytime_floor(monkeypatch):
+    monkeypatch.setattr(config, "BULLETPROOF_TIMEZONE", "UTC", raising=False)
+    yard = {"night_floor_c": 17.5, "peak_floor_c": 20.0, "setpoint_c": 21.0, "night_start_h": 22,
+            "night_end_h": 7, "shower_floor_c": None}
+    c = tr.day_comfort(_fake_day("2026-10-01", 20.5), yard)  # price_band empty
+    assert c["peak_below_h"] == 15.0  # 07-22 below the 21 setpoint

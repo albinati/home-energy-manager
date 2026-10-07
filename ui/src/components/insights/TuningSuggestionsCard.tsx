@@ -39,6 +39,12 @@ export function TuningSuggestionsCard() {
   const latestWeek = rows[0]?.week_start;
   const latest = rows.filter((r) => r.week_start === latestWeek);
   const older = rows.filter((r) => r.week_start !== latestWeek);
+  const p0 = latest[0]?.payload;
+  const ctx = p0?.context;
+  const ctxLine = ctx
+    ? `evaluated with W3 ${ctx.w3_active ? "on" : "off"} · ${ctx.control_mode || "?"} · ${ctx.tariff_banded ? "banded" : "dynamic"}`
+    : null;
+  const partial = p0?.status === "partial";
 
   const detail = (e: unknown) =>
     e instanceof HemApiError ? (e.body || e.message) : e instanceof Error ? e.message : String(e);
@@ -107,7 +113,7 @@ export function TuningSuggestionsCard() {
               <td>{VERDICT_LABEL[r.verdict] ?? r.verdict}</td>
               {isAdmin && (
                 <td>
-                  <button type="button" class="ih-win" disabled={busy} onClick={() => start(r)}>Apply</button>
+                  <button type="button" class="btn btn--ghost" disabled={busy} onClick={() => start(r)}>Apply</button>
                 </td>
               )}
             </tr>
@@ -135,7 +141,11 @@ export function TuningSuggestionsCard() {
       )}
       {latest.length > 0 && (
         <>
-          <p class="muted">Week of {latestWeek}</p>
+          <p class="muted">
+            Week of {latestWeek}
+            {partial && " · partial (time budget reached, some settings were not evaluated)"}
+            {ctxLine && ` · ${ctxLine}`}
+          </p>
           {table(latest)}
         </>
       )}
@@ -151,8 +161,8 @@ export function TuningSuggestionsCard() {
         title="Apply suggestion"
         footer={
           <>
-            <button type="button" class="ih-win" disabled={busy} onClick={() => setPending(null)}>Cancel</button>
-            <button type="button" class="ih-win is-on" disabled={busy} onClick={confirm}>Apply</button>
+            <button type="button" class="btn btn--ghost" disabled={busy} onClick={() => setPending(null)}>Cancel</button>
+            <button type="button" class="btn btn--primary" disabled={busy} onClick={confirm}>Apply</button>
           </>
         }
       >
