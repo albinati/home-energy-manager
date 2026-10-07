@@ -307,8 +307,12 @@ def apply_scheduled_daikin_params(
         result="success",
         trigger=trigger,
     )
-    if written:
-        schedule_post_write_verify(written, trigger=trigger)
+    # tank_powerful is re-asserted every ≥15 min BECAUSE the unit arbitrates it
+    # away silently (state_machine Powerful auto-clear) — verifying it would
+    # alert on every such tick. Verify the other keys only.
+    verify_keys = {k: v for k, v in written.items() if k != "tank_powerful"}
+    if verify_keys:
+        schedule_post_write_verify(verify_keys, trigger=trigger)
     return True
 
 
@@ -394,7 +398,14 @@ def post_write_verify_job(
             "lwt_offset": dev.lwt_offset, "tank_target": dev.tank_target,
             "tank_on": dev.tank_on, "tank_powerful": dev.tank_powerful, "climate_on": dev.is_on,
         }
-        out["matched"] = bool(daikin_device_matches_params(dev, expected))
+        live = {"lwt_offset": dev.lwt_offset, "tank_temp": dev.tank_target,
+                "tank_power": dev.tank_on, "tank_powerful": dev.tank_powerful, "climate_on": dev.is_on}
+        if any(live.get(k) is None for k in expected):
+            # the snapshot lacks the field: cannot judge → unverified, not failure
+            out["matched"] = None
+            out["unverified_reason"] = "live_value_missing"
+        else:
+            out["matched"] = bool(daikin_device_matches_params(dev, expected))
     result = "success" if out["matched"] else ("failure" if out["matched"] is False else "unverified")
     try:
         db.log_action(device="daikin", action="daikin_write_verify", params=out, result=result,

@@ -232,3 +232,24 @@ def test_service_labels_throttled_refresh_honestly(tmp_path, monkeypatch):
     svc._devices_stale = False
     res = svc.get_cached_devices(allow_refresh=True, max_age_seconds=0, actor="post_write_verify")
     assert res.source == "cache_throttled" and res.age_seconds >= 25
+
+
+def test_tank_powerful_is_never_verified_and_missing_live_value_is_unverified(monkeypatch):
+    from src import daikin_bulletproof as dbp
+
+    monkeypatch.setattr("src.daikin_bulletproof.config.OPENCLAW_READ_ONLY", False)
+    monkeypatch.setattr("src.daikin_bulletproof.config.DAIKIN_CONTROL_MODE", "active")
+    monkeypatch.setattr(dbp.db, "log_action", lambda **kw: None)
+    scheduled: list = []
+    monkeypatch.setattr(dbp, "schedule_post_write_verify", lambda w, *, trigger, **kw: scheduled.append(w))
+    dev = DaikinDevice(id="gw", name="x", lwt_offset=0.0, is_on=True, tank_on=True, tank_powerful=False)
+    dbp.apply_scheduled_daikin_params(dev, MagicMock(), {"tank_powerful": True}, trigger="test")
+    assert scheduled == []  # Powerful is arbitrated away by the unit — never verified
+    # a live snapshot lacking the field → unverified, not failure
+    dev2 = DaikinDevice(id="gw", name="x", lwt_offset=None)
+    _service_reads(monkeypatch, dev2, fresh=True)
+    logged: list[dict] = []
+    monkeypatch.setattr(dbp.db, "log_action", lambda **kw: logged.append(kw))
+    out = dbp.post_write_verify_job(expected={"lwt_offset": 3}, trigger="test", written_at="2026-10-07T14:00:00Z")
+    assert out["matched"] is None and out["unverified_reason"] == "live_value_missing"
+    assert logged[0]["result"] == "unverified"
