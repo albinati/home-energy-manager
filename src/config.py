@@ -183,6 +183,11 @@ class Config:
         os.getenv("GOOGLE_CALENDAR_CLIENT_SECRET_FILE", "data/.google-client-secret.json")
     )
     GOOGLE_CALENDAR_TIMEZONE: str = (os.getenv("GOOGLE_CALENDAR_TIMEZONE") or "Europe/London").strip()
+    # Banded tariffs (#805): which band tiers get a calendar event. Default
+    # cheap + peak — the day band would add three yellow events a day.
+    GOOGLE_CALENDAR_BANDED_TIERS: str = (
+        os.getenv("GOOGLE_CALENDAR_BANDED_TIERS") or "band_cheap,band_peak"
+    ).strip()
     # Local OAuth callback port for the one-shot bootstrap container (mirror of Daikin :8080).
     GOOGLE_CALENDAR_OAUTH_PORT: int = int(os.getenv("GOOGLE_CALENDAR_OAUTH_PORT", "8080"))
     # Daily publish cron in UTC. Octopus releases tomorrow's Agile rates around

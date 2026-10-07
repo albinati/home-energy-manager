@@ -1602,7 +1602,10 @@ def _peak_entry_floor_indices(
             )
         )
     start_to_idx = {slot_starts_utc[i]: i for i in range(n)}
-    peak_keys = ("expensive", "severe_peak")
+    # ``band_peak``: the banded-tariff classifier's peak (Cosy 16-19). The day
+    # band is NOT in this set — before #805 it read as "expensive", so the
+    # floor insured the battery full at 00:00 and 07:00 for nothing.
+    peak_keys = ("expensive", "severe_peak", "band_peak")
     out: set[int] = set()
     for _, slots in sorted(by_day.items()):
         prev_peak_end = None
