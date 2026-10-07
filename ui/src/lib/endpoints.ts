@@ -1,5 +1,6 @@
 import { postJson, getJson, hemFetch } from "./api";
 import type {
+  PlanFrontsResponse,
   CockpitNow,
   SchedulerTimeline,
   DispatchDecisionsResponse,
@@ -83,6 +84,11 @@ export const getDhwSchedule = () => getJson<DhwScheduleResponse>("/daikin/dhw-sc
 // Per-slot heating-plan timeline (D-1/D/D+1): outdoor temp + LWT offset + tank
 // + heating-on, deterministically recomputed. Zero Daikin quota.
 export const getHeatingPlan = () => getJson<HeatingPlanResponse>("/daikin/heating-plan");
+
+// Plan per front (battery / tank / heating) + consumption bands + spend score
+// + tariff compare for one local day (#822). Cache-only, viewer-safe.
+export const getPlanFronts = (date?: string) =>
+  getJson<PlanFrontsResponse>(`/plan/fronts${date ? `?date=${encodeURIComponent(date)}` : ""}`);
 
 /* ----- Ops status (alert strip + self-check, PR 3) -----
    Both endpoints are server-side TTL-cached (60s / 300s) with sub-caches on

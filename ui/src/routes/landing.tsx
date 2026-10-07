@@ -13,7 +13,6 @@ import {
   getDaikinStatus,
   getDaikinQuota,
   getPvToday,
-  getDhwSchedule,
   getHeatingPlan,
   getEnergyTodayCumulative,
   getExportOpportunity,
@@ -21,17 +20,22 @@ import {
   getApplianceJobs,
   getAppliances,
   getIndoorReadings,
+  getPlanFronts,
 } from "../lib/endpoints";
 import { Widget } from "../components/common/Widget";
 import { Icon } from "../components/common/Icon";
 import { Spinner } from "../components/common/Spinner";
 import { RefreshCountdown } from "../components/common/RefreshCountdown";
 import { PeriodNavigator } from "../components/shell/PeriodNavigator";
-import { usePeriod, periodFetchOpts, periodScope, isCurrentPeriod } from "../lib/period";
+import { todayISO, usePeriod, periodFetchOpts, periodScope, isCurrentPeriod } from "../lib/period";
 import { LivePowerWidget } from "../components/cockpit/LivePowerWidget";
 import { Hero } from "../components/home/Hero";
 import { HeatingWidget } from "../components/home/HeatingWidget";
-import { PlanMini } from "../components/home/PlanMini";
+import { BatteryPlanCard } from "../components/home/plan/BatteryPlanCard";
+import { TankPlanCard } from "../components/home/plan/TankPlanCard";
+import { HeatingPlanCard } from "../components/home/plan/HeatingPlanCard";
+import { ConsumptionStrip } from "../components/home/plan/ConsumptionStrip";
+import { MOCK_PLAN_FRONTS } from "../lib/mock/planFronts";
 import { WhyNowLine } from "../components/home/WhyNowLine";
 import { FeedbackPanel } from "../components/home/FeedbackPanel";
 import { OperateCard } from "../components/home/OperateCard";
@@ -97,8 +101,6 @@ export default function Landing() {
   const exportOppy = usePoll(() => (deferred ? getExportOpportunity(60) : Promise.resolve(null)), 5 * 60_000, [deferred]);
   const daikin = usePoll(getDaikinStatus, 2 * 60_000);
   const daikinQuota = usePoll(getDaikinQuota, 5 * 60_000);
-  // DHW tank plan (today+tomorrow) — used by the Live-power tank badges.
-  const dhwSched = usePoll(getDhwSchedule, 5 * 60_000);
   // Heating-plan timeline (yesterday/today/tomorrow): outdoor temp + LWT offset
   // + tank + heating-on, recomputed per slot. Cache-only, poll while visible.
   const heatingPlan = usePoll(getHeatingPlan, 5 * 60_000);
@@ -115,6 +117,15 @@ export default function Landing() {
   // The shared period navigator drives the Hero headline + cost breakdown +
   // energy chart + tariff comparison. Re-fetch whenever the selection changes.
   const period = usePeriod();
+  // Plan per front (#822) is TODAY-only: a past day in the navigator asks for
+  // that day (the API only plans ≤ today); a future/other period falls back to
+  // today. `?mock=1` serves a fixture so the UI can be developed without the API.
+  const todayIso = todayISO();
+  const fronts = usePoll(() => {
+    if (new URLSearchParams(window.location.search).get("mock") === "1") return Promise.resolve(MOCK_PLAN_FRONTS);
+    const d = period.gran === "day" && period.anchor <= todayIso ? period.anchor : undefined;
+    return getPlanFronts(d);
+  }, 60_000, [period.gran, period.anchor]);
   const periodInsights = useFetch(
     () => getEnergyPeriod(period.gran, periodFetchOpts(period)),
     [period.gran, period.anchor],
@@ -153,7 +164,6 @@ export default function Landing() {
   // Fox inverter mode for the Plan widget — only surface the pill when actively
   // forcing the battery (SelfUse is the resting state).
   const foxMode = data.current_slot?.fox_mode ?? undefined;
-  const foxActive = foxMode ? !["selfuse", "self_use", "idle", "—", ""].includes(foxMode.toLowerCase()) : false;
   const liveTime = data.now_utc
     ? new Date(data.now_utc).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })
     : undefined;
@@ -182,7 +192,29 @@ export default function Landing() {
       <Hero metrics={metrics.data} metricsLoading={metrics.loading} cockpit={data} agile={agile.data}
             period={periodInsights.data} periodState={period}
             periodLoading={periodInsights.loading} todayCum={todayCum.data}
-            weather={weather.data} pv={pvToday.data} />
+            weather={weather.data} pv={pvToday.data}
+            spend={fronts.data?.spend ?? null} compare={fronts.data?.compare ?? null} />
+
+      {/* ── PLAN per front — what each system will do today, next action first. */}
+      <h2 class="scope scope--period">
+        <span class="scope-dot" aria-hidden="true" />
+        Plan {fronts.data?.date && fronts.data.date !== todayIso ? fronts.data.date : "today"}
+        <span class="scope-when">battery · hot water · heating · consumption</span>
+      </h2>
+      <div class="widget-grid widget-band">
+        <Widget title="Battery plan" icon={<Icon name="battery" size={14} />} tone="power" size="medium">
+          <BatteryPlanCard data={fronts.data?.battery ?? null} nowUtc={fronts.data?.now_utc ?? new Date().toISOString()} loading={fronts.loading} />
+        </Widget>
+        <Widget title="Hot water plan" icon={<Icon name="droplet" size={14} />} tone="thermal" size="medium">
+          <TankPlanCard data={fronts.data?.tank ?? null} nowUtc={fronts.data?.now_utc ?? new Date().toISOString()} loading={fronts.loading} />
+        </Widget>
+        <Widget title="Heating plan" icon={<Icon name="heating" size={14} />} tone="thermal" size="medium">
+          <HeatingPlanCard data={fronts.data?.heating ?? null} nowUtc={fronts.data?.now_utc ?? new Date().toISOString()} loading={fronts.loading} />
+        </Widget>
+        <Widget title="Consumption outlook" icon={<Icon name="chart-bars" size={14} />} tone="tariff" size="wide">
+          <ConsumptionStrip data={fronts.data?.consumption ?? null} loading={fronts.loading} />
+        </Widget>
+      </div>
 
       {/* ── LIVE scope + band (redesign) — the always-now, self-driving surface
           that ignores the period selector above. The status row splits 50/50:
@@ -222,18 +254,11 @@ export default function Landing() {
                   action={<RefreshCountdown lastFetchAt={now.lastFetchAt} intervalMs={now.intervalMs} loading={now.loading} onRefresh={() => void now.refresh()} />}>
             <LivePowerWidget state={s} cockpit={data} agile={agile.data} metrics={metrics.data} todayCumulative={todayCum.data} />
             <WhyNowLine ongoing={timeline.data?.ongoing} foxMode={foxMode} />
-            <PlanMini groups={["battery", "appliances"]} timeline={timeline.data}
-                      appliances={appliances.data?.appliances} applianceJobs={applianceJobs.data?.jobs}
-                      applianceSuggestions={applianceSug.data?.suggestions}
-                      nowUtc={data.now_utc} foxMode={foxMode} foxActive={foxActive} />
           </Widget>
 
           <Widget title="Live heating" icon={<Icon name="heating" size={14} />} tone="thermal" size="half">
             <HeatingWidget state={s} daikin={daikin.data} daikinQuota={daikinQuota.data} report={report.data} weather={weather.data} execution={execution.data}
                            onRefresh={() => { void daikin.refresh(); void daikinQuota.refresh(); }} />
-            <PlanMini groups={["heating", "tank"]} timeline={timeline.data}
-                      dhwSchedule={dhwSched.data?.rows} heatingPlan={heatingPlan.data}
-                      nowUtc={data.now_utc} />
           </Widget>
         </div>
       </div>

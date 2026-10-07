@@ -18,7 +18,7 @@ export interface PeriodState {
   anchor: string;
 }
 
-function todayISO(): string {
+export function todayISO(): string {
   const d = new Date();
   return isoOf(d);
 }

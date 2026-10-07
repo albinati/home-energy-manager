@@ -1231,3 +1231,276 @@ export interface ThermalCalibration {
   learning_enabled: boolean;
   learned_values_enabled: boolean;
 }
+
+/* ----- GET /api/v1/plan/fronts (#822) — plan per front (battery / tank / heating),
+   consumption probability bands, spend score, tariff compare. Every section is
+   independently guarded server-side: a failing source yields `error` in that
+   section and nulls elsewhere. ----- */
+export type PlanWindowStatus = "done" | "ongoing" | "upcoming";
+
+export interface PlanFrontsTariffWindow {
+  key: string;
+  label: string;
+  start_utc: string;
+  end_utc: string;
+  start_local: string;
+  end_local: string;
+  price_p: number | null;
+  status: PlanWindowStatus;
+}
+export interface PlanFrontsTariff {
+  display_name: string | null;
+  structure: "banded" | "dynamic" | "unknown";
+  windows: PlanFrontsTariffWindow[];
+  error?: string;
+}
+
+export type BatteryWindowKind = "grid_charge" | "pv_charge" | "hold" | "self_use" | "export" | "idle";
+export interface BatteryPlanWindow {
+  kind: BatteryWindowKind;
+  start_utc: string;
+  end_utc: string;
+  start_local: string;
+  end_local: string;
+  grid_kwh: number | null;
+  charge_kwh: number | null;
+  discharge_kwh: number | null;
+  soc_start_pct: number | null;
+  soc_end_pct: number | null;
+  fox_mode: "ForceCharge" | "Backup" | "SelfUse" | "ForceDischarge" | null;
+}
+export interface BatteryBandRow {
+  key: string;
+  label: string;
+  start_local: string;
+  end_local: string;
+  planned_import_kwh: number | null;
+  realised_import_kwh: number | null;
+  soc_entry_pct: number | null;
+  floored: boolean;
+}
+export interface FoxGroupRow {
+  mode: string | null;
+  start_local: string | null;
+  end_local: string | null;
+  min_soc: number | null;
+  fd_soc: number | null;
+  fd_pwr: number | null;
+  max_soc: number | null;
+}
+export interface PlanFrontsBattery {
+  capacity_kwh: number | null;
+  reserve_pct: number | null;
+  soc_now_pct: number | null;
+  soc_now_kwh: number | null;
+  plan_run_id: number | null;
+  plan_run_at: string | null;
+  windows: BatteryPlanWindow[];
+  by_band: BatteryBandRow[];
+  fox_groups: FoxGroupRow[];
+  peak_import_planned_kwh: number | null;
+  peak_import_realised_kwh: number | null;
+  error?: string;
+}
+
+export interface TankModel {
+  source: "databook" | "measured" | "measured_indoor" | null;
+  ua_w_per_k: number | null;
+  ambient_c: number | null;
+  tau_hours: number | null;
+  coast_measured_c_per_h: number | null;
+  coast_model_c_per_h: number | null;
+  coast_ratio: number | null;
+}
+export interface TankDecision {
+  arm: "hold" | "boost" | "static" | null;
+  warmup_hour: number | null;
+  setback_hour: number | null;
+  warmup_target_c: number | null;
+  peak_entry_hour: number | null;
+  cost_hold_p: number | null;
+  cost_boost_p: number | null;
+}
+export interface TankPlanWindow {
+  kind: "warmup" | "setback" | "boost" | "legionella";
+  start_utc: string;
+  end_utc: string;
+  start_local: string;
+  end_local: string;
+  tank_target_c: number | null;
+}
+export interface TankShowerWindow {
+  start_local: string;
+  end_local: string;
+  floor_c: number;
+  label: string | null;
+  predicted_tank_c: number | null;
+}
+export interface TankNextAction {
+  kind: string;
+  start_local: string;
+  tank_target_c: number | null;
+}
+export interface PlanFrontsTank {
+  tank_now_c: number | null;
+  target_now_c: number | null;
+  power_on: boolean | null;
+  telemetry_at_utc: string | null;
+  model: TankModel | null;
+  decision: TankDecision | null;
+  windows: TankPlanWindow[];
+  showers: TankShowerWindow[];
+  next_action: TankNextAction | null;
+  error?: string;
+}
+
+export interface HeatingGate {
+  preheat_enabled: boolean | null;
+  demand_present: boolean | null;
+  measured_window_kwh: number | null;
+  threshold_kwh: number | null;
+  current_outdoor_c: number | null;
+  outdoor_cutoff_c: number | null;
+  positive_offset_suppressed_by_outdoor: boolean | null;
+  preheat_suppressed: boolean | null;
+  lp_available: boolean | null;
+}
+export interface HeatingPlanWindow {
+  kind: "boost" | "setback" | "restore";
+  offset_c: number | null;
+  start_utc: string;
+  end_utc: string;
+  start_local: string;
+  end_local: string;
+  source: "lp" | "tier" | null;
+}
+export interface HeatingPredictedIndoor {
+  min_c: number | null;
+  max_c: number | null;
+  at_07_c: number | null;
+  at_16_c: number | null;
+  at_19_c: number | null;
+  at_22_c: number | null;
+}
+export interface HeatingBandRow {
+  key: string;
+  label: string;
+  start_local: string;
+  end_local: string;
+  indoor_min_c: number | null;
+  indoor_max_c: number | null;
+  offset_mode: "boost" | "setback" | "neutral" | null;
+}
+export interface PlanFrontsHeating {
+  indoor_now_c: number | null;
+  indoor_rooms_c: Record<string, number> | null;
+  indoor_aggregate: string | null;
+  outdoor_now_c: number | null;
+  setpoint_c: number | null;
+  night_floor_c: number | null;
+  peak_coast_delta_c: number | null;
+  lwt_source: "tier" | "lp" | null;
+  gate: HeatingGate | null;
+  windows: HeatingPlanWindow[];
+  predicted_indoor: HeatingPredictedIndoor | null;
+  by_band: HeatingBandRow[];
+  error?: string;
+}
+
+export interface ConsumptionExpected {
+  p50: number | null;
+  p75: number | null;
+  p90: number | null;
+  max?: number | null;
+  n_days: number;
+}
+export interface ConsumptionBand {
+  key: string;
+  label: string;
+  start_utc: string;
+  end_utc: string;
+  start_local: string;
+  end_local: string;
+  hours: number;
+  price_p: number;
+  status: PlanWindowStatus;
+  progress: number;
+  expected_kwh: ConsumptionExpected;
+  committed_kwh: number | null;
+  realised_kwh: number | null;
+  forecast_error_kwh: {
+    mean: number | null;
+    p90: number | null;
+    under_forecast_days: number;
+    n_days: number;
+  };
+}
+export interface PlanFrontsConsumption {
+  date: string;
+  now_utc: string;
+  tariff_display_name: string | null;
+  tariff_structure: string;
+  day_type: string | null;
+  history_days: number;
+  bands: ConsumptionBand[];
+  day: {
+    expected_kwh: ConsumptionExpected;
+    committed_kwh: number | null;
+    realised_kwh: number | null;
+  };
+  error?: string;
+}
+
+export type SpendScore = "ideal" | "below" | "above";
+export interface SpendPeriodRollup {
+  n_days: number;
+  net_cost_gbp: number | null;
+  per_day_gbp: number | null;
+  import_kwh: number | null;
+  avg_import_p: number | null;
+}
+export interface PlanFrontsSpend {
+  realised_import_kwh: number | null;
+  realised_import_cost_gbp: number | null;
+  realised_avg_import_p: number | null;
+  forecast_import_kwh: number | null;
+  forecast_avg_import_p: number | null;
+  peak_import_kwh: number | null;
+  ideal_avg_import_p: number | null;
+  score: SpendScore | null;
+  score_thresholds: { ideal_max_p: number | null; above_min_p: number | null } | null;
+  score_basis: "realised" | "forecast" | null;
+  period: { week: SpendPeriodRollup | null; month: SpendPeriodRollup | null } | null;
+  error?: string;
+}
+
+export interface CompareRow {
+  product_code: string;
+  display_name: string;
+  net_gbp: number | null;
+  approximate: boolean;
+  is_current: boolean;
+  delta_vs_current_gbp: number | null;
+}
+export interface PlanFrontsCompare {
+  period: string;
+  period_start: string;
+  period_end: string;
+  n_days: number;
+  current: { product_code: string; display_name: string; net_gbp: number | null } | null;
+  rows: CompareRow[];
+  framing: string | null;
+  error?: string;
+}
+
+export interface PlanFrontsResponse {
+  date: string;
+  now_utc: string;
+  tariff: PlanFrontsTariff | null;
+  battery: PlanFrontsBattery | null;
+  tank: PlanFrontsTank | null;
+  heating: PlanFrontsHeating | null;
+  consumption: PlanFrontsConsumption | null;
+  spend: PlanFrontsSpend | null;
+  compare: PlanFrontsCompare | null;
+}
