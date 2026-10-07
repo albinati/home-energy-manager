@@ -344,6 +344,8 @@ export interface AgileSlot {
 }
 
 export interface AgileTodayResponse {
+  tariff_display_name?: string;     // "Cosy" | "Agile" | … (#810)
+  tariff_structure?: "banded" | "dynamic";
   tariff_import_code: string;
   tariff_export_code: string;
   import_slots: AgileSlot[];

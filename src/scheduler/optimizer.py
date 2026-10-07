@@ -1253,7 +1253,7 @@ def _run_optimizer_heuristic(
     naive_svt_cost = total_kwh * svt
     naive_agile_cost = total_kwh * actual_mean
     savings_vs_svt_pence = max(0.0, naive_svt_cost - naive_agile_cost)
-    strategy += f"; indicative vs SVT ~{savings_vs_svt_pence / 100:.2f} GBP/day at mean Agile"
+    strategy += f"; indicative vs SVT ~{savings_vs_svt_pence / 100:.2f} GBP/day at mean import"
 
     db.save_daily_target(
         {
@@ -2463,7 +2463,7 @@ def _run_optimizer_lp(
         f"neg={counts.get('negative', 0)} cheap={counts.get('cheap', 0)} "
         f"solar={counts.get('solar_charge', 0)} "
         f"std={counts.get('standard', 0)} peak={counts.get('peak', 0)} "
-        f"peak_export={counts.get('peak_export', 0)}; mean Agile {actual_mean:.1f}p"
+        f"peak_export={counts.get('peak_export', 0)}; mean import {actual_mean:.1f}p"
     )
 
     # #714 — LP-owned economic shadow (AFTER the run is logged: two extra ~30s
@@ -2505,7 +2505,7 @@ def _run_optimizer_lp(
     naive_svt_cost = total_kwh * svt
     naive_agile_cost = total_kwh * actual_mean
     savings_vs_svt_pence = max(0.0, naive_svt_cost - naive_agile_cost)
-    strategy += f"; indicative vs SVT ~{savings_vs_svt_pence / 100:.2f} GBP/day at mean Agile"
+    strategy += f"; indicative vs SVT ~{savings_vs_svt_pence / 100:.2f} GBP/day at mean import"
     if appliance_retry_dropped:
         strategy += (
             f"; appliance load (+{appliance_kwh_total:.2f} kWh) excluded "

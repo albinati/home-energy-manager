@@ -980,7 +980,7 @@ def _day_cost_forecast_line(today: date, tz: ZoneInfo) -> str | None:
         )
     if est_kwh and actual_mean:
         cost = est_kwh * actual_mean / 100.0
-        return f"**Day cost forecast:** ~£{cost:.2f} (mean Agile {actual_mean:.1f}p)"
+        return f"**Day cost forecast:** ~£{cost:.2f} (mean import {actual_mean:.1f}p)"
     return None
 
 

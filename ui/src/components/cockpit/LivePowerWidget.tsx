@@ -36,7 +36,7 @@ export function LivePowerWidget({ state, cockpit, agile, metrics, todayCumulativ
       </div>
 
       <div class="rates">
-        <div class="rate" title="Live Agile import p/kWh + how much you've imported so far today (to now)">
+        <div class="rate" title={`Live ${agile?.tariff_display_name ? agile.tariff_display_name + " " : ""}import p/kWh + how much you've imported so far today (to now)`}>
           <div class="lp-rate-k">Import</div>
           <div class={`lp-rate-v livepower-rate--band-${importBand}`}>{importP != null ? `${importP.toFixed(1)}p` : "—"}</div>
           {todayCumulative && (

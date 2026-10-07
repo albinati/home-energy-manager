@@ -120,7 +120,7 @@ export default function Insights() {
             <span><strong>{kwh(data.basis.import_kwh)}</strong> imported · <strong>{kwh(data.basis.export_kwh)}</strong> exported</span>
             <span class="insights-basis-sep">·</span>
             <span>{data.days_with_data}/{data.n_days} days metered</span>
-            {data.clamped && <span class="insights-basis-warn"> · since {data.period_start} (pre-Agile days excluded)</span>}
+            {data.clamped && <span class="insights-basis-warn"> · since {data.period_start} (pre-smart-tariff days excluded)</span>}
             {data.catalogue_unavailable && <span class="insights-basis-warn"> · live catalogue offline (showing SVT/fixed only)</span>}
           </div>
 

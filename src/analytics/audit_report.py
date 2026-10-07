@@ -327,11 +327,25 @@ def _build_plan_vs_execution_section(
     plan = _operative_plan_for_window(db, window_start, plan_end)
     real = _realised_for_window(db, window_start, plan_end)
 
-    rate_rows = db.execute(
-        "SELECT valid_from, value_inc_vat FROM agile_rates "
-        "WHERE valid_from >= ? AND valid_from < ?",
-        (window_start.isoformat(), plan_end.isoformat()),
-    ).fetchall()
+    from ..config import config as _cfg
+    # #810: the table holds Agile history + Cosy rows — filter on the configured
+    # code when the schema has the column (audit fixtures use a minimal schema).
+    _code = (_cfg.OCTOPUS_TARIFF_CODE or "").strip()
+    _has_code_col = any(
+        str(r[1]) == "tariff_code" for r in db.execute("PRAGMA table_info(agile_rates)").fetchall()
+    )
+    if _code and _has_code_col:
+        rate_rows = db.execute(
+            "SELECT valid_from, value_inc_vat FROM agile_rates "
+            "WHERE valid_from >= ? AND valid_from < ? AND tariff_code = ?",
+            (window_start.isoformat(), plan_end.isoformat(), _code),
+        ).fetchall()
+    else:
+        rate_rows = db.execute(
+            "SELECT valid_from, value_inc_vat FROM agile_rates "
+            "WHERE valid_from >= ? AND valid_from < ?",
+            (window_start.isoformat(), plan_end.isoformat()),
+        ).fetchall()
     import_p_by_slot = {_parse_utc(r["valid_from"]): r["value_inc_vat"] for r in rate_rows}
     exp_rate_rows = db.execute(
         "SELECT valid_from, value_inc_vat FROM agile_export_rates "

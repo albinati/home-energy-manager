@@ -771,10 +771,11 @@ should never suggest tactical Daikin actions ("preheat the tank now!") —
 the heat pump runs on its own weather curve and HEM does not change
 setpoints. Read `_mode_status_line()` in `src/analytics/daily_brief.py`.
 
-### Tariff start clamp (PR #214)
+### Tariff start clamp (PR #214, renamed #810)
 
 ```
-AGILE_TARIFF_START_DATE=2026-04-01    # household joined Octopus Agile on this date
+SMART_TARIFF_START_DATE=2026-04-17    # start of HEM-managed smart-tariff history (Agile then Cosy)
+# AGILE_TARIFF_START_DATE is the back-compat alias (same value); either name works.
 ```
 
 Period aggregations (`compute_period_pnl` and everything that delegates to it

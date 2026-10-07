@@ -1560,12 +1560,19 @@ def save_agile_export_rates(rates: list[dict[str, Any]], tariff_code: str) -> in
 def get_agile_export_rates_in_range(
     period_from_iso: str,
     period_to_iso: str,
+    tariff_code: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return export rate rows whose ``valid_from`` falls in ``[period_from, period_to)``.
 
+    Filtered to ``tariff_code`` (default: the configured
+    ``OCTOPUS_EXPORT_TARIFF_CODE``; empty → no filter) so a second export
+    product's rows can never price the current one (#810).
     Returns ``[]`` when the table is empty (no Outgoing tariff configured / not yet
     fetched). Caller is responsible for the fallback to a flat constant.
     """
+    from .config import config as _config
+
+    code = (tariff_code if tariff_code is not None else (_config.OCTOPUS_EXPORT_TARIFF_CODE or "")).strip()
     with _lock:
         conn = get_connection()
         try:
@@ -1573,8 +1580,9 @@ def get_agile_export_rates_in_range(
                 """SELECT valid_from, valid_to, value_inc_vat, tariff_code
                    FROM agile_export_rates
                    WHERE valid_from >= ? AND valid_from < ?
+                     AND (? = '' OR tariff_code = ?)
                    ORDER BY valid_from""",
-                (period_from_iso, period_to_iso),
+                (period_from_iso, period_to_iso, code, code),
             )
             return [dict(r) for r in cur.fetchall()]
         finally:

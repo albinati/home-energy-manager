@@ -26,7 +26,7 @@ export function LifetimeStrip() {
   const saved = data.saved_vs_fixed_pounds;
 
   return (
-    <div class="lifetime" title={`Sums across ${data.months} active months on Agile`}>
+    <div class="lifetime" title={`Sums across ${data.months} active months on a smart tariff`}>
       <div class="stat"><div class="stat-v">{kwh(data.solar_kwh, 0)}</div><div class="stat-l">Solar produced · {data.months} mo</div></div>
       <div class="stat"><div class="stat-v">{kwh(data.export_kwh, 0)}</div><div class="stat-l">Exported</div></div>
       <div class="stat">
