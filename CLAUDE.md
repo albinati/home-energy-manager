@@ -627,19 +627,25 @@ the Settings simulate->confirm->apply flow). Story-3 plug point:
 
 - **`DAIKIN_LWT_COAST_MODE`** (runtime setting, `PUT /api/v1/settings`; code
   default `setback`): what an LP **coast slot** (planned `e_space ≈ 0` while the
-  weather curve would run) writes when `DAIKIN_LWT_SOURCE=lp`. `setback` = the
-  fixed `DAIKIN_LWT_PREHEAT_PEAK_SETBACK_C` (−2, pre-#838). `lp` = the LP's own
-  `plan.lwt_offset_c[i]`, clamped ONLY by `DAIKIN_LWT_LP_OFFSET_MIN/MAX` (the
-  device range ±10 is the hard bound; the tier-rule `OPTIMIZATION_LWT_OFFSET_*`
-  clamp is bypassed for coast slots, and `lwt_offset_from_space_kw(lo=, hi=)` /
-  the `e_space` ceiling in `lp_optimizer` honour the same range). NB the inverse
-  physics of ZERO draw is the range minimum, so in `lp` mode a pure coast slot
-  writes the minimum (−10 with prod's ±10 clamp), i.e. "run as cold as the
-  device allows" — the safety net is the backstop below. Heating slots, outdoor
-  cutoff, sign-block smoothing, restore rows, quota cap, pre-fire idempotency,
-  live-only boost guard and the plausibility gate are unchanged. `coast_mode`
-  is in `lwt_source_diff`, `space_heating_gate_state()` and the plan-fronts
-  `heating.coast_mode`.
+  weather curve would run) writes when `DAIKIN_LWT_SOURCE=lp`. Three values:
+  - `setback` — the fixed `DAIKIN_LWT_PREHEAT_PEAK_SETBACK_C` (−2, pre-#838).
+  - `lp` — **physics target** (`scheduler/lwt_coast.py:coast_target`): water just
+    above the predicted room temperature cannot add heat, so the compressor stays
+    off. `coast_lwt = indoor_pred[i] + DAIKIN_LWT_COAST_DELTA_C` (default 2.0);
+    `offset = round(coast_lwt − curve_lwt)` (half away from zero), `curve_lwt` =
+    `physics.get_lwt_base_c(forecast outdoor)`; clamped to
+    `[DAIKIN_LWT_LP_OFFSET_MIN, 0]` (a coast slot never boosts). Falls back to the
+    live indoor reading (near-now slots), then to the setback value.
+  - `lp_raw` — the LP's raw `plan.lwt_offset_c[i]`, clamped only by
+    `DAIKIN_LWT_LP_OFFSET_MIN/MAX` (±10 hard bound). The inverse physics of ZERO
+    draw is the range minimum, so every pure coast slot becomes −10: experiments only.
+  Heating (non-coast) slots always keep the LP's inverse-physics offset with the
+  existing clamp. Outdoor cutoff, sign-block smoothing, restore rows, quota cap,
+  pre-fire idempotency, live-only boost guard and the plausibility gate are
+  unchanged. `coast_mode` is in `lwt_source_diff`, `space_heating_gate_state()`
+  and the plan-fronts `heating.coast_mode`. NB sign-block smoothing averages a
+  long coast run into ONE mean offset, so the per-slot forecast shaping is
+  flattened to a block value (a single −5 over a 15 h run in the 4882 replay).
 - **Comfort backstop** (`LWT_COMFORT_BACKSTOP_ENABLED=true`, `_MARGIN_C=0.5`,
   `_TICKS=2`; `scheduler/lwt_coast.py:backstop_tick`, called from the heartbeat
   before the reconciler): an ACTIVE `lwt_preheat` row with a negative offset AND
@@ -655,13 +661,16 @@ the Settings simulate->confirm->apply flow). Story-3 plug point:
 - **Learning log** `lwt_learning_log` (PK `slot_time_utc`): PLANNED fields
   (`run_id, source, coast_mode, offset_lp_raw, offset_written` = after smoothing,
   `indoor_pred_c, floor_c, margin_c` = predicted headroom over the floor,
-  `outdoor_fc_c, e_space_kwh, cop_space, price_band`) are upserted at every
+  `outdoor_fc_c, e_space_kwh, cop_space, price_band`, and for coast slots
+  `curve_lwt_c, coast_target_lwt_c, coast_delta_c`) are upserted at every
   dispatch (latest plan wins, `written_at_utc` kept, filled slots untouched).
   Nightly `lwt_learning_job` (04:40 UTC) fills REALISED fields for yesterday's
   local day (per-room mean + min from `room_temperature_history`, outdoor and
   `lwt_actual` from live `daikin_telemetry`, device offset from `execution_log`,
   `kwh_heating` of `daikin_consumption_2hourly` prorated over its slots) and
-  writes one `lwt_learning_daily` row + `action_log` `lwt_learning_summary`.
+  writes one `lwt_learning_daily` row (payload also carries the realised
+  pump-off delta `lwt_actual − indoor` where heating kWh stayed ≈ 0 vs pump-on,
+  to fit the real `DAIKIN_LWT_COAST_DELTA_C`) + `action_log` `lwt_learning_summary`.
   Pruned after `LWT_LEARNING_RETENTION_DAYS` (120).
 - **Reading the estimates**: `ua_est_w_per_k` fits `T−To ∝ exp(−UA/C·t)` over
   runs of ≥3 consecutive coast slots (device offset < 0 or ~no heating kWh) with

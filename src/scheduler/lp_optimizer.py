@@ -1806,14 +1806,14 @@ def solve_lp(
 
     plan.objective_pence = float(pulp.value(prob.objective) or 0.0)
 
-    # #838: under source=lp + coast_mode=lp the inverse physics must be able to
+    # #838: under source=lp + coast_mode=lp_raw the inverse physics must be able to
     # express the DAIKIN_LWT_LP_OFFSET_MIN/MAX range (OPTIMIZATION_LWT_OFFSET_*
     # is only the tier-rule clamp); otherwise behaviour is bit-for-bit unchanged.
     _lwt_inv_lo: float | None = None
     _lwt_inv_hi: float | None = None
     if (
         str(getattr(config, "DAIKIN_LWT_SOURCE", "tier") or "tier").lower() == "lp"
-        and str(getattr(config, "DAIKIN_LWT_COAST_MODE", "setback") or "setback").lower() == "lp"
+        and str(getattr(config, "DAIKIN_LWT_COAST_MODE", "setback") or "setback").lower() == "lp_raw"
     ):
         _lwt_inv_lo = max(-10.0, float(getattr(config, "DAIKIN_LWT_LP_OFFSET_MIN", -5)))
         _lwt_inv_hi = min(10.0, float(getattr(config, "DAIKIN_LWT_LP_OFFSET_MAX", 5)))

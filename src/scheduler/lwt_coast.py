@@ -58,6 +58,53 @@ def comfort_floor_c(
     return sp
 
 
+# ---------------------------------------------------------------- coast target
+def plan_indoor_at(plan: Any, i: int) -> float | None:
+    """Predicted indoor over slot ``i`` (mean of the slot's start/end states)."""
+    traj = list(getattr(plan, "indoor_temp_c", None) or [])
+    if i + 1 < len(traj):
+        return (float(traj[i]) + float(traj[i + 1])) / 2.0
+    if i < len(traj):
+        return float(traj[i])
+    return None
+
+
+def coast_target(
+    plan: Any, i: int, live_indoor_c: float | None = None,
+) -> dict[str, float | int | None]:
+    """Physics-based coast target for slot ``i`` (#838, ``DAIKIN_LWT_COAST_MODE=lp``).
+
+    Water just above the predicted room temperature cannot add heat, so the
+    compressor stays off: ``coast_lwt = indoor_pred + DAIKIN_LWT_COAST_DELTA_C``;
+    ``offset = round(coast_lwt - curve_lwt)`` (half away from zero) clamped to
+    ``[DAIKIN_LWT_LP_OFFSET_MIN, 0]`` (a coast slot never boosts). Indoor falls
+    back to the live reading; with neither, ``offset`` is ``None`` (caller uses
+    the setback value). ``curve_lwt`` = the weather-curve LWT at the forecast
+    outdoor temperature (``physics.get_lwt_base_c``)."""
+    from ..physics import get_lwt_base_c
+
+    delta = float(getattr(config, "DAIKIN_LWT_COAST_DELTA_C", 2.0))
+    out_c = plan.temp_outdoor_c[i] if i < len(plan.temp_outdoor_c) else None
+    curve = None
+    if out_c is not None and math.isfinite(float(out_c)):
+        curve = float(get_lwt_base_c(float(out_c)))
+    indoor = plan_indoor_at(plan, i)
+    if indoor is None:
+        indoor = live_indoor_c
+    res: dict[str, float | int | None] = {
+        "curve_lwt_c": curve, "coast_target_lwt_c": None, "coast_delta_c": delta, "offset": None,
+    }
+    if curve is None or indoor is None:
+        return res
+    target = float(indoor) + delta
+    res["coast_target_lwt_c"] = round(target, 2)
+    lo = int(max(-10.0, float(getattr(config, "DAIKIN_LWT_LP_OFFSET_MIN", -5))))
+    x = target - curve
+    off = -int(math.floor(-x + 0.5))
+    res["offset"] = max(lo, min(0, off))
+    return res
+
+
 # ---------------------------------------------------------------- planned log
 def record_planned(
     plan: Any,
@@ -109,6 +156,9 @@ def record_planned(
                     cop = round(max(1.0, cop_at_temperature(curve, out_c)), 3)
                 except Exception:
                     cop = None
+            ct = coast_target(plan, i) if (
+                i < len(plan.space_electric_kwh) and float(plan.space_electric_kwh[i]) <= 1e-6
+            ) else {}
             wo = None
             if written_offsets is not None and i < len(written_offsets):
                 wo = written_offsets[i]
@@ -126,6 +176,9 @@ def record_planned(
                 "e_space_kwh": float(plan.space_electric_kwh[i]) if i < len(plan.space_electric_kwh) else None,
                 "cop_space": cop,
                 "price_band": band,
+                "curve_lwt_c": ct.get("curve_lwt_c"),
+                "coast_target_lwt_c": ct.get("coast_target_lwt_c"),
+                "coast_delta_c": ct.get("coast_delta_c"),
             })
         return db.upsert_lwt_learning_planned(rows)
     except Exception:  # telemetry must never break dispatch

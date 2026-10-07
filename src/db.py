@@ -1478,6 +1478,9 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             e_space_kwh     REAL,
             cop_space       REAL,
             price_band      TEXT,
+            curve_lwt_c         REAL,
+            coast_target_lwt_c  REAL,
+            coast_delta_c       REAL,
             indoor_real_c   REAL,
             indoor_rooms_json TEXT,
             indoor_min_c    REAL,
@@ -5173,7 +5176,7 @@ def get_latest_lp_inputs_for_plan_date(plan_date: str) -> dict[str, Any] | None:
 _LWT_PLANNED_COLS = (
     "run_id", "source", "coast_mode", "offset_lp_raw", "offset_written",
     "indoor_pred_c", "floor_c", "margin_c", "outdoor_fc_c", "e_space_kwh",
-    "cop_space", "price_band",
+    "cop_space", "price_band", "curve_lwt_c", "coast_target_lwt_c", "coast_delta_c",
 )
 _LWT_REALISED_COLS = (
     "indoor_real_c", "indoor_rooms_json", "indoor_min_c", "outdoor_real_c",

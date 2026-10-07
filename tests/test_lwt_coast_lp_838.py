@@ -70,6 +70,17 @@ def _plan(n=4, *, lwt=-8.0, space=0.0, start=None, bands=None, indoor=None):
     return p
 
 
+def _curve(t):
+    """Piecewise weather curve stand-in: 0C->35, 10C->27, 14C->24."""
+    pts = [(0.0, 35.0), (10.0, 27.0), (14.0, 24.0)]
+    if t <= pts[0][0]:
+        return pts[0][1]
+    for (a, la), (b, lb) in zip(pts, pts[1:]):
+        if t <= b:
+            return la + (lb - la) * (t - a) / (b - a)
+    return pts[-1][1]
+
+
 # ── coast mode ───────────────────────────────────────────────────────────────
 
 
@@ -77,14 +88,54 @@ def test_setback_mode_writes_minus_two(monkeypatch):
     assert set(_lp_offsets(_plan())) == {-2}
 
 
-def test_lp_mode_uses_lp_value_and_clamps(monkeypatch):
-    monkeypatch.setitem(config._overrides, "DAIKIN_LWT_COAST_MODE", "lp")
+def test_lp_raw_mode_uses_lp_value_and_clamps(monkeypatch):
+    monkeypatch.setitem(config._overrides, "DAIKIN_LWT_COAST_MODE", "lp_raw")
     assert set(_lp_offsets(_plan(lwt=-8.0))) == {-5}  # default clamp +-5
     monkeypatch.setattr(config, "DAIKIN_LWT_LP_OFFSET_MIN", -10.0, raising=False)
     monkeypatch.setattr(config, "DAIKIN_LWT_LP_OFFSET_MAX", 10.0, raising=False)
     assert set(_lp_offsets(_plan(lwt=-8.0))) == {-8}
     assert set(_lp_offsets(_plan(lwt=-14.0))) == {-10}
     # a heating slot keeps the old (tighter) rules, untouched by coast mode
+    assert set(_lp_offsets(_plan(lwt=3.0, space=0.4))) == {3}
+
+
+@pytest.mark.parametrize("outdoor,indoor,expected", [
+    (10.0, 22.5, -3),     # 24.5 - 27 = -2.5 -> -3 (half away from zero)
+    (0.0, 21.0, -10),     # 23 - 35 = -12 -> clamped to the -10 floor
+    (14.0, 23.0, -1),     # 25 - 24 = +1 -> never positive on a coast slot
+])
+def test_lp_mode_physics_target(monkeypatch, outdoor, indoor, expected):
+    monkeypatch.setitem(config._overrides, "DAIKIN_LWT_COAST_MODE", "lp")
+    monkeypatch.setattr("src.physics.get_lwt_base_c", _curve)
+    monkeypatch.setattr(config, "DAIKIN_LWT_LP_OFFSET_MIN", -10.0, raising=False)
+    monkeypatch.setattr(config, "DAIKIN_LWT_COAST_DELTA_C", 2.0, raising=False)
+    p = _plan(lwt=-9.0, indoor=[indoor] * 5)
+    p.temp_outdoor_c = [outdoor] * 4
+    got = set(_lp_offsets(p))
+    if expected == -1:
+        assert got <= {0, -1} and max(got) <= 0
+    else:
+        assert got == {expected}
+
+
+def test_lp_mode_clamp_and_fallbacks(monkeypatch):
+    monkeypatch.setitem(config._overrides, "DAIKIN_LWT_COAST_MODE", "lp")
+    monkeypatch.setattr("src.physics.get_lwt_base_c", _curve)
+    p = _plan(indoor=[21.0] * 5)
+    p.temp_outdoor_c = [0.0] * 4
+    assert set(_lp_offsets(p)) == {-5}      # default LP_OFFSET_MIN -5
+    # no predicted indoor and no live reading -> setback value
+    p2 = _plan(indoor=[21.0] * 5)
+    p2.temp_outdoor_c = [10.0] * 4
+    from src.scheduler import lwt_coast
+    p2.indoor_temp_c = []
+    assert lwt_coast.coast_target(p2, 0)["offset"] is None
+    # live indoor fallback
+    assert lwt_coast.coast_target(p2, 0, 22.5)["offset"] == -3
+
+
+def test_heating_slots_unchanged_in_lp_mode(monkeypatch):
+    monkeypatch.setitem(config._overrides, "DAIKIN_LWT_COAST_MODE", "lp")
     assert set(_lp_offsets(_plan(lwt=3.0, space=0.4))) == {3}
 
 
@@ -108,7 +159,7 @@ def test_physics_inverse_honours_range(monkeypatch):
     assert lwt_offset_from_space_kw(0.0, 5.0, lo=-8) == -8
 
 
-@pytest.mark.parametrize("mode,expected", [("setback", -2), ("lp", -8)])
+@pytest.mark.parametrize("mode,expected", [("setback", -2), ("lp_raw", -8), ("lp", -3)])
 def test_wire_coast_slot_reaches_set_lwt_offset(monkeypatch, tmpdb, mode, expected):
     import src.state_machine as sm
     from src.daikin.models import DaikinDevice
@@ -119,12 +170,14 @@ def test_wire_coast_slot_reaches_set_lwt_offset(monkeypatch, tmpdb, mode, expect
     monkeypatch.setattr(config, "DAIKIN_CONTROL_MODE", "active", raising=False)
     monkeypatch.setattr(config, "OPENCLAW_READ_ONLY", False)
     monkeypatch.setattr("src.daikin_bulletproof.config.OPENCLAW_READ_ONLY", False)
+    monkeypatch.setattr("src.physics.get_lwt_base_c", _curve)
     monkeypatch.setattr(config, "DAIKIN_VALVE_SETTLE_SECONDS", 0, raising=False)
     monkeypatch.setattr(config, "DAIKIN_POST_WRITE_VERIFY_ENABLED", False, raising=False)
     monkeypatch.setattr(config, "PREFIRE_STATE_MATCH_ENABLED", True)
     sm._FIRST_APPLIED_SESSION.clear()
     now = datetime.now(UTC).replace(second=0, microsecond=0)
-    plan = _plan(n=4, start=now - timedelta(minutes=10))
+    plan = _plan(n=4, start=now - timedelta(minutes=10), indoor=[22.5] * 5)
+    plan.temp_outdoor_c = [10.0] * 4
     plan_date = now.date().isoformat()
     monkeypatch.setattr(db, "get_latest_indoor_reading", lambda max_age_minutes=30: None)
     assert _write_lwt_preheat_actions(plan_date, plan, []) >= 1
@@ -261,15 +314,18 @@ def test_backstop_night_floor_used(monkeypatch, bs):
 
 
 def test_planned_rows_upserted_at_dispatch(monkeypatch, tmpdb):
-    monkeypatch.setitem(config._overrides, "DAIKIN_LWT_COAST_MODE", "lp")
+    monkeypatch.setitem(config._overrides, "DAIKIN_LWT_COAST_MODE", "lp_raw")
     monkeypatch.setattr(db, "get_latest_indoor_reading", lambda max_age_minutes=30: None)
+    monkeypatch.setattr("src.physics.get_lwt_base_c", _curve)
     t0 = datetime(2026, 11, 4, 10, 0, tzinfo=UTC)
     plan = _plan(n=4, start=t0, lwt=-4.0)
     _write_lwt_preheat_actions("2026-11-04", plan, [])
     rows = db.get_lwt_learning_rows("2026-11-04T10:00:00Z", "2026-11-04T12:00:00Z")
     assert len(rows) == 4
     r = rows[0]
-    assert r["coast_mode"] == "lp" and r["source"] == "lp"
+    assert r["coast_mode"] == "lp_raw" and r["source"] == "lp"
+    assert r["curve_lwt_c"] == _curve(5.0) and r["coast_delta_c"] == 2.0
+    assert abs(r["coast_target_lwt_c"] - 22.5) < 0.6
     assert r["offset_lp_raw"] == -4.0 and r["offset_written"] == -4.0
     assert r["floor_c"] == 20.0 and r["price_band"] == "peak" and r["cop_space"] > 1
     first_written = r["written_at_utc"]
@@ -327,6 +383,16 @@ def test_nightly_job_fills_and_estimates_ua(monkeypatch, tmpdb):
     daily = db.get_lwt_learning_daily(5)
     assert daily[0]["date"] == "2026-11-03"
     assert db.get_action_logs(device="system", action="lwt_learning_summary")
+
+
+def test_pump_off_delta():
+    from src.analytics.lwt_learning import pump_off_delta
+
+    rows = [{"lwt_actual_c": 24.0, "indoor_real_c": 22.0, "heating_kwh": 0.0}] * 3 + \
+           [{"lwt_actual_c": 33.0, "indoor_real_c": 21.0, "heating_kwh": 0.4}] * 2
+    d = pump_off_delta(rows)
+    assert d["pump_off_delta_median_c"] == 2.0 and d["pump_on_delta_p10_c"] == 12.0
+    assert d["pump_off_n"] == 3 and d["pump_on_n"] == 2
 
 
 def test_k_estimate_from_heating_slots():

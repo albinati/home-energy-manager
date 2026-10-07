@@ -184,6 +184,26 @@ def estimate_k_kw_per_c(rows: list[dict[str, Any]]) -> tuple[float | None, int]:
     return (round(float(median(ks)), 4) if ks else None), len(ks)
 
 
+def pump_off_delta(rows: list[dict[str, Any]]) -> dict[str, float | None]:
+    """Realised ``lwt_actual - indoor`` where heating stayed ~0 (pump off) vs
+    where it ran — the data to fit the real ``DAIKIN_LWT_COAST_DELTA_C``."""
+    off, on = [], []
+    for r in rows:
+        if r.get("lwt_actual_c") is None or r.get("indoor_real_c") is None or r.get("heating_kwh") is None:
+            continue
+        d = float(r["lwt_actual_c"]) - float(r["indoor_real_c"])
+        (off if float(r["heating_kwh"]) <= COAST_HEATING_KWH_EPS else on).append(d)
+
+    def q(v: list[float], p: float) -> float | None:
+        if not v:
+            return None
+        v = sorted(v)
+        return round(v[min(len(v) - 1, max(0, int(math.ceil(p * len(v))) - 1))], 2)
+
+    return {"pump_off_delta_median_c": q(off, 0.5), "pump_off_delta_max_c": q(off, 1.0),
+            "pump_off_n": len(off), "pump_on_delta_p10_c": q(on, 0.1), "pump_on_n": len(on)}
+
+
 def prediction_error(rows: list[dict[str, Any]]) -> tuple[float | None, float | None]:
     errs = [float(r["indoor_pred_c"]) - float(r["indoor_real_c"]) for r in rows
             if r.get("indoor_pred_c") is not None and r.get("indoor_real_c") is not None]
@@ -222,7 +242,9 @@ def run_for_day(day: date, tz: ZoneInfo | None = None) -> dict[str, Any]:
         "ua_est_w_per_k": ua, "k_est_kw_per_c": k,
         "pred_err_mean_c": pm, "pred_err_p90_c": p90,
         "payload": {"c_kwh_per_k": c, "ua_pinned_w_per_k": ua_pin, "k_pinned_kw_per_c": k_pin,
-                    "n_rows": len(rows)},
+                    "n_rows": len(rows),
+                    "coast_delta_configured_c": float(getattr(config, "DAIKIN_LWT_COAST_DELTA_C", 2.0)),
+                    **pump_off_delta(rows)},
     }
     db.upsert_lwt_learning_daily(row)
     try:

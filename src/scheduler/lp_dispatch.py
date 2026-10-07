@@ -677,7 +677,7 @@ def _tier_offsets(
 
 def _coast_mode() -> str:
     m = str(getattr(config, "DAIKIN_LWT_COAST_MODE", "setback") or "setback").strip().lower()
-    return m if m in ("setback", "lp") else "setback"
+    return m if m in ("setback", "lp", "lp_raw") else "setback"
 
 
 def _lp_offsets(
@@ -698,9 +698,11 @@ def _lp_offsets(
     * a slot the LP left with NO space heat is a deliberate coast →
       ``DAIKIN_LWT_PREHEAT_PEAK_SETBACK_C`` — NOT whatever the inverse physics
       returns for zero draw (``OPTIMIZATION_LWT_OFFSET_MIN``) — unless
-      ``DAIKIN_LWT_COAST_MODE=lp`` (#838), where the coast slot takes the LP's
-      own ``plan.lwt_offset_c[i]`` clamped ONLY by ``DAIKIN_LWT_LP_OFFSET_MIN/MAX``
-      (device range ±10 is the hard bound);
+      ``DAIKIN_LWT_COAST_MODE=lp`` (#838): the physics target
+      ``round(indoor_pred + DAIKIN_LWT_COAST_DELTA_C - curve_lwt)`` clamped to
+      ``[DAIKIN_LWT_LP_OFFSET_MIN, 0]`` (``lwt_coast.coast_target``);
+      ``lp_raw``: the LP's own ``plan.lwt_offset_c[i]`` clamped ONLY by
+      ``DAIKIN_LWT_LP_OFFSET_MIN/MAX`` (device range ±10 is the hard bound);
     * otherwise ``round(plan.lwt_offset_c[i])``;
     * clamp to the TIGHTER of ``OPTIMIZATION_LWT_OFFSET_MIN/MAX`` and
       ``DAIKIN_LWT_LP_OFFSET_MIN/MAX`` (prod pins the former at −2);
@@ -729,6 +731,11 @@ def _lp_offsets(
             continue
         es = float(plan.space_electric_kwh[i]) if i < len(plan.space_electric_kwh) else 0.0
         if es <= 1e-6 and cmode == "lp":
+            from .lwt_coast import coast_target
+            ct_off = coast_target(plan, i, live_indoor_c if _slot_is_near_now(plan, i, now_utc) else None)["offset"]
+            out.append(int(ct_off) if ct_off is not None else setback)
+            continue
+        if es <= 1e-6 and cmode == "lp_raw":
             raw = float(plan.lwt_offset_c[i]) if i < len(plan.lwt_offset_c) else float(coast_lo)
             off = max(coast_lo, min(coast_hi, int(math.floor(raw + 0.5))))
             out.append(off)

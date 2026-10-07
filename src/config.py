@@ -976,6 +976,9 @@ class Config:
     # DAIKIN_LWT_COAST_MODE is RUNTIME-tunable (runtime_settings): "setback" =
     # coast slots get DAIKIN_LWT_PREHEAT_PEAK_SETBACK_C (pre-#838); "lp" = the
     # LP's own plan.lwt_offset_c, clamped only by DAIKIN_LWT_LP_OFFSET_MIN/MAX.
+    # lp coast mode target: LWT = predicted indoor + this (water this close to room
+    # temperature cannot add heat, so the compressor stays off).
+    DAIKIN_LWT_COAST_DELTA_C: float = float(os.getenv("DAIKIN_LWT_COAST_DELTA_C", "2.0"))
     LWT_COMFORT_BACKSTOP_ENABLED: bool = os.getenv("LWT_COMFORT_BACKSTOP_ENABLED", "true").lower() in ("true", "1", "yes")
     LWT_COMFORT_BACKSTOP_MARGIN_C: float = float(os.getenv("LWT_COMFORT_BACKSTOP_MARGIN_C", "0.5"))
     LWT_COMFORT_BACKSTOP_TICKS: int = int(os.getenv("LWT_COMFORT_BACKSTOP_TICKS", "2"))
