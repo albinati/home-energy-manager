@@ -507,6 +507,18 @@ SCHEMA: dict[str, SettingSpec] = {
             "action_log `lwt_source_diff`; switching is instant (no restart)."
         ),
     ),
+    "LP_LOAD_EXPENSIVE_BAND_QUANTILE": SettingSpec(
+        key="LP_LOAD_EXPENSIVE_BAND_QUANTILE",
+        type_name="str",
+        env_default=_str_env("LP_LOAD_EXPENSIVE_BAND_QUANTILE", "p75"),
+        enum=("p75", "p90"),
+        description=(
+            "Residual-load quantile the pessimistic scenario uses inside the "
+            "non-cheap bands of a banded tariff (#818). p75 = default; p90 = "
+            "deliberate over-insurance for a cold snap. Made runtime-tunable "
+            "by the weekly tuning review (#832)."
+        ),
+    ),
     "REQUIRE_SIMULATION_ID": SettingSpec(
         key="REQUIRE_SIMULATION_ID",
         type_name="str",  # "true" / "false" — kept as str so PUT payloads stay simple

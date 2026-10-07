@@ -383,3 +383,30 @@ export const getLoadErrorLog = (
 
 export const getCosyScorecard = (days = 14) =>
   getJson<CosyScorecardResponse>(`/scorecard/cosy?days=${days}`);
+
+/* ----- Weekly tuning review (#832) — suggestions only ----- */
+
+export interface TuningSuggestion {
+  id: number;
+  built_at_utc: string;
+  week_start: string;
+  key: string;
+  current_value: string;
+  suggested_value: string;
+  delta_pence_per_week: number | null;
+  delta_comfort_hours: number | null;
+  verdict: "recommended" | "trade-off" | "comfort-first" | string;
+  payload: {
+    body?: { value: unknown };
+    n_days?: number;
+    cost_gbp_current?: number;
+    cost_gbp_suggested?: number;
+    hours_below_current?: number;
+    hours_below_suggested?: number;
+    comfort_first?: boolean;
+  };
+}
+export interface TuningSuggestionsResponse { weeks: number; suggestions: TuningSuggestion[] }
+
+export const getTuningSuggestions = (weeks = 4) =>
+  getJson<TuningSuggestionsResponse>(`/tuning/suggestions?weeks=${weeks}`);

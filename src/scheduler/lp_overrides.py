@@ -95,6 +95,31 @@ WHITELIST: dict[str, OverrideSpec] = {
         description="Room max temp (°C).",
         group="comfort",
     ),
+    # --- Weekly tuning review knobs (#832)
+    "LP_W3_NIGHT_FLOOR_C": OverrideSpec(
+        key="LP_W3_NIGHT_FLOOR_C", config_attr="LP_W3_NIGHT_FLOOR_C",
+        type_name="float", min_value=14.0, max_value=22.0,
+        description="W3 night comfort floor (22-07 local, deg C).",
+        group="comfort", promotable=True,
+    ),
+    "LP_W3_PEAK_COAST_DELTA_C": OverrideSpec(
+        key="LP_W3_PEAK_COAST_DELTA_C", config_attr="LP_W3_PEAK_COAST_DELTA_C",
+        type_name="float", min_value=0.0, max_value=4.0,
+        description="W3 peak-band floor = INDOOR_SETPOINT_C minus this (deg C).",
+        group="comfort", promotable=True,
+    ),
+    "DHW_DYNAMIC_BOOST_HOLD_HOURS": OverrideSpec(
+        key="DHW_DYNAMIC_BOOST_HOLD_HOURS", config_attr="DHW_DYNAMIC_BOOST_HOLD_HOURS",
+        type_name="int", min_value=1, max_value=4,
+        description="Hours between DHW warmup start and the boost arm's setback.",
+        group="comfort", promotable=True,
+    ),
+    "LP_LOAD_EXPENSIVE_BAND_QUANTILE": OverrideSpec(
+        key="LP_LOAD_EXPENSIVE_BAND_QUANTILE", config_attr="LP_LOAD_EXPENSIVE_BAND_QUANTILE",
+        type_name="str", enum=("p75", "p90"),
+        description="Residual-load quantile in expensive bands (p75 | p90).",
+        group="load", promotable=True,
+    ),
     # --- Battery
     "MIN_SOC_RESERVE_PERCENT": OverrideSpec(
         key="MIN_SOC_RESERVE_PERCENT",

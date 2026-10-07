@@ -84,6 +84,8 @@ class AlertType(str, Enum):
     # ACTIONABLE prompt: never auto-enables (the corrected value feeds a hard
     # LP equality — a human flips the env). One-shot (runtime-setting dedup).
     DHW_BIAS_ENABLE_READY = "dhw_bias_enable_ready"
+    # #832 weekly fine-tuning review summary (suggestions only, never applied)
+    TUNING_REVIEW = "tuning_review"
     # 2026-07-28 — the live tank SETPOINT no longer matches the plan row that
     # owns this moment. ACTIONABLE: either the user moved it (fine — but they
     # should know it is still in force) or something else did (not fine).
@@ -115,6 +117,7 @@ _HOOK_PAYLOAD_NAMES: dict[str, str] = {
     "guests_mode_suggested": "EnergyGuestsSuggested",
     "lp_health_regression": "EnergyLPHealthRegression",
     "dhw_bias_enable_ready": "EnergyDhwBiasEnableReady",
+    "tuning_review": "EnergyTuningReview",
     "tank_target_divergence": "EnergyTankTargetDivergence",
     "morning_tank_cold": "EnergyMorningTankCold",
     "actuation_stale": "EnergyActuationStale",
@@ -961,6 +964,20 @@ def notify_dhw_bias_enable_ready(
     _dispatch(
         AlertType.DHW_BIAS_ENABLE_READY, body, urgent=False, extra=extra,
         telegram_header_override="✅ Corretor DHW pronto pra ligar",
+    )
+
+
+def notify_tuning_review(lines: list[str], *, week_start: str, n_recommended: int) -> None:
+    """Weekly fine-tuning review summary (#832): top suggestion lines. Never
+    applies anything; the user applies in Settings / the Insights card."""
+    body = "\n".join(
+        [f"Revisao semanal de ajustes (semana de {week_start}):", *lines,
+         "Aplique em Ajustes (ou no cartao Insights). Nada foi alterado."]
+    )
+    _dispatch(
+        AlertType.TUNING_REVIEW, body, urgent=False,
+        extra={"week_start": week_start, "n_recommended": int(n_recommended)},
+        telegram_header_override="Ajustes sugeridos da semana",
     )
 
 

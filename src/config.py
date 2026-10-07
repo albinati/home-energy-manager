@@ -1174,11 +1174,20 @@ class Config:
     # newsvendor quantile the peak wants (25.7p under vs ~2p over → ≈0.93);
     # `p90` is a deliberate over-insurance knob for a cold snap, not a default.
     # Cheap bands and dynamic tariffs always keep the p75.
-    LP_LOAD_EXPENSIVE_BAND_QUANTILE: str = (
-        os.getenv("LP_LOAD_EXPENSIVE_BAND_QUANTILE", "p75") or "p75"
-    ).strip().lower()
+    # (LP_LOAD_EXPENSIVE_BAND_QUANTILE is a RUNTIME setting since #832 — property below.)
     # #818 — history window (calendar days scanned for same-day-type days) for
     # GET /api/v1/load/expected band-sum quantiles.
+    # #832 — weekly fine-tuning review (SUGGESTIONS ONLY, never applied).
+    TUNING_REVIEW_ENABLED: bool = os.getenv("TUNING_REVIEW_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+    TUNING_REVIEW_DOW: int = int(os.getenv("TUNING_REVIEW_DOW", "6"))  # Mon=0 .. Sun=6
+    TUNING_REVIEW_HOUR_LOCAL: int = int(os.getenv("TUNING_REVIEW_HOUR_LOCAL", "9"))
+    TUNING_REVIEW_DAYS: int = int(os.getenv("TUNING_REVIEW_DAYS", "7"))
+    TUNING_REVIEW_MIN_DAYS: int = int(os.getenv("TUNING_REVIEW_MIN_DAYS", "3"))
+    # replay_day cadence per variant-day (a subset of the day's recalcs keeps the
+    # 13 variants x 7 days run inside ~10 min).
+    TUNING_REVIEW_CADENCE: str = os.getenv("TUNING_REVIEW_CADENCE", "stride:4")
+    TUNING_REVIEW_MIN_SAVING_PENCE: float = float(os.getenv("TUNING_REVIEW_MIN_SAVING_PENCE", "5"))
+    TUNING_REVIEW_COMFORT_TOLERANCE_H: float = float(os.getenv("TUNING_REVIEW_COMFORT_TOLERANCE_H", "0.5"))
     LOAD_EXPECTED_HISTORY_DAYS: int = int(os.getenv("LOAD_EXPECTED_HISTORY_DAYS", "60"))
     # #821 — spend score: "ideal" when the day's average import price is within
     # this ratio of the day's ideal (cheapest band / q25) price.
@@ -2563,6 +2572,15 @@ class Config:
     @DAIKIN_LWT_SOURCE.setter
     def DAIKIN_LWT_SOURCE(self, value: str) -> None:
         self._rt_set("DAIKIN_LWT_SOURCE", str(value).strip().lower())
+
+    @property
+    def LP_LOAD_EXPENSIVE_BAND_QUANTILE(self) -> str:
+        """#818/#832 — ``p75`` | ``p90`` residual-load quantile in expensive bands."""
+        return str(self._rt_get("LP_LOAD_EXPENSIVE_BAND_QUANTILE"))
+
+    @LP_LOAD_EXPENSIVE_BAND_QUANTILE.setter
+    def LP_LOAD_EXPENSIVE_BAND_QUANTILE(self, value: str) -> None:
+        self._rt_set("LP_LOAD_EXPENSIVE_BAND_QUANTILE", str(value).strip().lower())
 
     @property
     def LP_SOC_FINAL_KWH(self) -> float:
