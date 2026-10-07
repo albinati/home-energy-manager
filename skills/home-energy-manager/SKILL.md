@@ -60,6 +60,8 @@ Use these to compare periods, investigate a past decision, or build context befo
 | `get_action_log` | Full audit trail of executed hardware actions. |
 | `get_optimizer_log` | Optimizer run history (per-run summary — pair with `get_lp_solution` for drill-down). |
 | `get_config_audit(key?)` | Runtime-settings change log — explains why a past plan looked the way it did if a knob has moved since. |
+| `record_comfort_feedback(verdict, room?, note?)` | Call when the user says the house feels cold/ok/hot, optionally naming a room (e.g. "tá frio na cozinha" -> `verdict="frio", room="cozinha"`). Stores it with the house context; relay the returned `ack`. Nothing is auto-applied. |
+| `get_comfort_feedback(days=30)` | Past comfort feedback rows + the weekly summary and bounded proposal. |
 | `get_recent_triggers(limit?)` | **What's just fired** — the cockpit's "Recent" strip as JSON. Includes `actor`, `started_at`, `duration_ms`, `result`. Filters out heartbeat + notification noise by default. |
 
 ---

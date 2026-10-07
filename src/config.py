@@ -150,6 +150,17 @@ class Config:
         os.getenv("TELEGRAM_API_BASE_URL") or "https://api.telegram.org"
     ).strip().rstrip("/")
     TELEGRAM_TIMEOUT_SECONDS: int = int(os.getenv("TELEGRAM_TIMEOUT_SECONDS", "10"))
+    # #833 — inbound owner commands (/conforto ...) via getUpdates short-poll.
+    # DEFAULT OFF: Telegram allows ONE getUpdates consumer per bot token and no
+    # webhook; the bot token must be exclusive to HEM. (OpenClaw owns the bot in
+    # this household -> comfort feedback arrives via the MCP tool instead.)
+    # Private chat with the owner only.
+    TELEGRAM_INBOUND_ENABLED: bool = os.getenv("TELEGRAM_INBOUND_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
+    # Optional extra guard: when set, only messages whose from.id matches are accepted.
+    TELEGRAM_OWNER_USER_ID: str = (os.getenv("TELEGRAM_OWNER_USER_ID") or "").strip()
+    TELEGRAM_INBOUND_POLL_SECONDS: int = int(os.getenv("TELEGRAM_INBOUND_POLL_SECONDS", "60"))
+    # #833 — weekly comfort proposals are NEVER applied unless this is true.
+    COMFORT_FEEDBACK_AUTO_TUNE: bool = os.getenv("COMFORT_FEEDBACK_AUTO_TUNE", "false").strip().lower() in ("1", "true", "yes", "on")
     # Extra Telegram chat IDs (CSV) that receive a copy of every appliance
     # lifecycle notification (armed / starting / finished / cancelled). The
     # primary chat at TELEGRAM_CHAT_ID always gets the message; entries here

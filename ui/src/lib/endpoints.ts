@@ -87,6 +87,15 @@ export const getHeatingPlan = () => getJson<HeatingPlanResponse>("/daikin/heatin
 export const getPlanFronts = (date?: string) =>
   getJson<PlanFrontsResponse>(`/plan/fronts${date ? `?date=${encodeURIComponent(date)}` : ""}`);
 
+// Comfort feedback (#833): admin POST; the row echoes back with its context.
+export type ComfortVerdict = "cold" | "ok" | "hot";
+export type ComfortFeedbackRow = {
+  id: number; verdict: ComfortVerdict; room: string | null; indoor_c: number | null;
+  band: string | null; lwt_offset_c: number | null;
+};
+export const postComfortFeedback = (verdict: ComfortVerdict, room?: string) =>
+  postJson<ComfortFeedbackRow>("/comfort/feedback?source=ui", { verdict, room: room || null });
+
 /* ----- Ops status (alert strip + self-check, PR 3) -----
    Both endpoints are server-side TTL-cached (60s / 300s) with sub-caches on
    anything that costs vendor quota — polling them from every open tab can
