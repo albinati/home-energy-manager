@@ -188,6 +188,39 @@ SCHEMA: dict[str, SettingSpec] = {
         max_value=26.0,
         description="Indoor comfort setpoint (°C).",
     ),
+    # #820 — comfort policy knobs (owner: nights may drift, rooms differ).
+    "LP_W3_NIGHT_FLOOR_C": SettingSpec(
+        key="LP_W3_NIGHT_FLOOR_C",
+        type_name="float",
+        env_default=_float_env("LP_W3_NIGHT_FLOOR_C", "17.5"),
+        min_value=14.0,
+        max_value=22.0,
+        description=(
+            "W3 comfort floor at night (local LP_W3_NIGHT_START/END_HOUR, default "
+            "22-07): how cold the house may drift under the blankets (°C)."
+        ),
+    ),
+    "LP_W3_PEAK_COAST_DELTA_C": SettingSpec(
+        key="LP_W3_PEAK_COAST_DELTA_C",
+        type_name="float",
+        env_default=_float_env("LP_W3_PEAK_COAST_DELTA_C", "1.0"),
+        min_value=0.0,
+        max_value=4.0,
+        description=(
+            "W3 comfort floor inside the PEAK band = INDOOR_SETPOINT_C minus this "
+            "(°C): how far the house may coast on stored heat through 16-19."
+        ),
+    ),
+    "INDOOR_COMFORT_AGGREGATE": SettingSpec(
+        key="INDOOR_COMFORT_AGGREGATE",
+        type_name="str",
+        env_default=_str_env("INDOOR_COMFORT_AGGREGATE", "mean"),
+        description=(
+            "Which room reading is THE house temperature for the LP seed and the "
+            "comfort guard: mean (all fresh rooms), min (coldest room), max, or "
+            "room:<name> (e.g. room:corredor). Unknown values fall back to mean."
+        ),
+    ),
     # Strategy switches.
     "OPTIMIZATION_PRESET": SettingSpec(
         key="OPTIMIZATION_PRESET",

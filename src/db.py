@@ -5045,12 +5045,46 @@ def get_latest_indoor_reading(max_age_minutes: int = 30) -> dict[str, Any] | Non
     if not rows:
         return None
     temps = [float(r["temp_c"]) for r in rows]
+    rooms_c = {str(r["room"]): round(float(r["temp_c"]), 2) for r in rows}
+    agg_mode, temp = aggregate_indoor_c(rooms_c)
     return {
-        "temp_c": round(sum(temps) / len(temps), 2),
+        "temp_c": round(temp, 2),
         "captured_at": max(str(r["captured_at"]) for r in rows),
         "rooms": sorted({str(r["room"]) for r in rows}),
         "n_rooms": len(rows),
+        # #820 — the per-room picture behind the single number.
+        "rooms_c": rooms_c,
+        "mean_c": round(sum(temps) / len(temps), 2),
+        "spread_c": round(max(temps) - min(temps), 2),
+        "aggregate": agg_mode,
     }
+
+
+def aggregate_indoor_c(rooms_c: dict[str, float]) -> tuple[str, float]:
+    """#820 — collapse the fresh per-room readings into THE house temperature
+    per ``INDOOR_COMFORT_AGGREGATE`` (runtime setting): ``mean`` (default),
+    ``min`` (the coldest room sets comfort — a cold kitchen is no longer hidden
+    by a warm corridor), ``max``, or ``room:<name>`` (that room, case-insensitive;
+    falls back to the mean when it is not among the fresh rooms). Returns
+    ``(mode_applied, temp_c)`` so the caller can report what was used."""
+    from .config import config
+
+    vals = [float(v) for v in rooms_c.values()]
+    if not vals:
+        raise ValueError("no rooms")
+    mean = sum(vals) / len(vals)
+    mode = str(getattr(config, "INDOOR_COMFORT_AGGREGATE", "mean") or "mean").strip().lower()
+    if mode == "min":
+        return "min", min(vals)
+    if mode == "max":
+        return "max", max(vals)
+    if mode.startswith("room:"):
+        want = mode.split(":", 1)[1].strip()
+        for room, v in rooms_c.items():
+            if str(room).strip().lower() == want:
+                return mode, float(v)
+        return "mean", mean  # the named room is stale/absent → honest fallback
+    return "mean", mean
 
 
 def get_indoor_readings_range(start_utc_iso: str, end_utc_iso: str) -> list[dict[str, Any]]:
@@ -5330,8 +5364,21 @@ def get_indoor_summary(stale_minutes: int = 30, lookback_hours: int = 24) -> dic
     rooms.sort(key=lambda x: (x["room"] or ""))
     mean_c = sum(fresh_temps) / len(fresh_temps) if fresh_temps else None
     hum = sum(fresh_hums) / len(fresh_hums) if fresh_hums else None
+    # #820 — the single comfort temperature the LP/guard use, per
+    # INDOOR_COMFORT_AGGREGATE, next to the plain mean the chart shows.
+    comfort_mode: str | None = None
+    comfort_c: float | None = None
+    fresh_rooms = {str(x["room"]): float(x["temp_c"]) for x in rooms
+                   if not x["stale"] and x.get("temp_c") is not None}
+    if fresh_rooms:
+        try:
+            comfort_mode, comfort_c = aggregate_indoor_c(fresh_rooms)
+        except Exception:  # noqa: BLE001 — a bad setting must not break the cockpit read
+            comfort_mode, comfort_c = "mean", mean_c
     return {
         "mean_c": round(mean_c, 1) if mean_c is not None else None,
+        "comfort_c": round(comfort_c, 1) if comfort_c is not None else None,
+        "comfort_aggregate": comfort_mode,
         "humidity_pct": round(hum, 1) if hum is not None else None,
         "n_rooms": len(rooms),
         "n_fresh": len(fresh_temps),
