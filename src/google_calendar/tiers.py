@@ -71,6 +71,33 @@ ALL_TIERS: list[Tier] = [
     TIER_NEGATIVE, TIER_VERY_CHEAP, TIER_GREEN_LIGHT, TIER_MODERATE,
     TIER_ABOVE_AVG, TIER_EXPENSIVE, TIER_SEVERE_PEAK,
 ]
+
+# ── Banded (time-of-use) tariffs — Cosy / Go / Flux (#803/#805) ──────────────
+# A banded tariff has three flat levels on the local clock; the day-relative
+# median tiers above misread it (the 25.45p Cosy DAY band cleared the 25p
+# "Expensive" floor, so the family saw 13 h of orange). These tiers map one
+# band each. ``title`` is the band word; ``format_event`` prefixes the
+# tariff's display name ("🟢 Cosy cheap 12.5p").
+TIER_BAND_CHEAP = Tier(
+    "band_cheap", "🟢", "cheap", "10",
+    "Cheap band — run heavy appliances now (laundry, dishwasher, oven). The "
+    "battery charges and the house pre-heats in this window.",
+)
+TIER_BAND_DAY = Tier(
+    "band_day", "🟡", "day", "5",
+    "Day rate — normal use; the battery and PV cover what they can.",
+)
+TIER_BAND_PEAK = Tier(
+    "band_peak", "🚨", "peak", "11",
+    "Peak band — avoid heavy appliances. Battery and PV cover the house "
+    "through this window; the heat pump coasts on stored heat.",
+)
+BAND_TIERS: list[Tier] = [TIER_BAND_CHEAP, TIER_BAND_DAY, TIER_BAND_PEAK]
+BAND_TIER_KEYS: frozenset[str] = frozenset(t.key for t in BAND_TIERS)
+_BAND_BY_LABEL: dict[str, Tier] = {
+    "cheap": TIER_BAND_CHEAP, "standard": TIER_BAND_DAY, "peak": TIER_BAND_PEAK,
+    "negative": TIER_NEGATIVE,
+}
 # Threshold constants — exposed as module-level so tests can document the
 # contract and downstream tooling can read them.
 VERY_CHEAP_ABS_CEILING_P = 12.0
@@ -271,6 +298,21 @@ def classify_day(slots: list[Slot]) -> list[Window]:
     if not slots:
         return []
 
+    # Banded tariff (Cosy / Go / Flux): one window per contiguous band, no
+    # median, no smoothing, no short-window folding — the bands ARE the
+    # signal (#805). Dynamic (Agile) keeps the day-relative path below.
+    # Gated on the tariff FAMILY (TOU code or forced), not just the data, so
+    # an unusually flat Agile day keeps its day-relative tiers.
+    from ..energy.tariff_structure import detect, prefer_plan_thresholds
+
+    if prefer_plan_thresholds():
+        # short_ok: a partial local day (mid-day replan tail, rates not yet
+        # complete) must still classify by band, never fall back to the
+        # day-relative tiers that read the day band as "expensive".
+        structure = detect([s.price_p for s in slots], short_ok=True)
+        if structure.is_banded:
+            return classify_day_banded(slots, structure)
+
     prices = sorted(s.price_p for s in slots)
     median = statistics.median(prices)
     p10 = _quantile(prices, VERY_CHEAP_PERCENTILE)
@@ -293,6 +335,19 @@ def classify_day(slots: list[Slot]) -> list[Window]:
     return _fold_short_windows(windows)
 
 
+def classify_day_banded(slots: list[Slot], structure) -> list[Window]:
+    """Merge contiguous same-band slots into windows (banded tariffs)."""
+    windows: list[Window] = []
+    for s in slots:
+        t = _BAND_BY_LABEL[structure.band_of(s.price_p)]
+        if windows and windows[-1].tier.key == t.key and windows[-1].end_utc == s.start_utc:
+            windows[-1].end_utc = s.end_utc
+            windows[-1].prices.append(s.price_p)
+        else:
+            windows.append(Window(start_utc=s.start_utc, end_utc=s.end_utc, tier=t, prices=[s.price_p]))
+    return windows
+
+
 def format_event(window: Window) -> tuple[str, str]:
     """Return ``(summary, description)`` strings for a Google Calendar event.
 
@@ -304,6 +359,19 @@ def format_event(window: Window) -> tuple[str, str]:
     Mid-tiers use a min–max range.
     """
     t = window.tier
+    if t.key in BAND_TIER_KEYS:
+        # Banded tariff: one flat price per window → a single number, never a
+        # "12.5p - 12.5p" range. (A reprice mid-window shows the range.)
+        from ..energy.tariff_structure import display_name
+
+        name = display_name()
+        if abs(window.price_max - window.price_min) < 0.05:
+            summary = f"{t.emoji} {name} {t.title} {window.price_mean:.1f}p"
+            price_line = f"Price: {window.price_mean:.1f}p/kWh for the whole window"
+        else:
+            summary = f"{t.emoji} {name} {t.title} {window.price_min:.1f}p - {window.price_max:.1f}p"
+            price_line = f"Price: {window.price_min:.1f}p - {window.price_max:.1f}p/kWh"
+        return summary, f"{price_line}\n\n{t.advice}"
     if t.key == TIER_NEGATIVE.key:
         # Negative window — emphasise the sign so the family sees a -5.3p
         # number rather than mistaking it for a very-low positive price.

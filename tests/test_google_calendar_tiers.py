@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from src.config import config as _cfg
 from src.google_calendar.tiers import (
     EXPENSIVE_ABS_FLOOR_P,
     SEVERE_PEAK_ABS_FLOOR_P,
@@ -23,6 +24,13 @@ from src.google_calendar.tiers import (
     classify_one,
     format_event,
 )
+
+
+@pytest.fixture(autouse=True)
+def _agile_family(monkeypatch):
+    """These fixtures are Agile-shaped; pin the family so a Cosy code in the
+    developer's env can't flip them onto the band path (#805 review)."""
+    monkeypatch.setattr(_cfg, "OCTOPUS_TARIFF_CODE", "")
 
 
 # ── classify_one boundary semantics ────────────────────────────────────────

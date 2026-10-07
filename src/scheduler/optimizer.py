@@ -1576,7 +1576,8 @@ def _build_export_price_line(slot_starts_utc: list[datetime]) -> list[float] | N
 def _peak_entry_floor_indices(
     slot_starts_utc: list[datetime], prices: list[float]
 ) -> list[int]:
-    """Slot indices where an ``expensive`` / ``severe_peak`` tier window begins.
+    """Slot indices where a peak tier window begins (``expensive`` /
+    ``severe_peak`` on Agile, ``band_peak`` on a banded tariff — #805).
 
     Reuses the calendar/tier classifier per LOCAL day (same smoothing, same
     median) so the "peak" the charge floor protects is word-for-word the one
@@ -1602,7 +1603,10 @@ def _peak_entry_floor_indices(
             )
         )
     start_to_idx = {slot_starts_utc[i]: i for i in range(n)}
-    peak_keys = ("expensive", "severe_peak")
+    # ``band_peak``: the banded-tariff classifier's peak (Cosy 16-19). The day
+    # band is NOT in this set — before #805 it read as "expensive", so the
+    # floor insured the battery full at 00:00 and 07:00 for nothing.
+    peak_keys = ("expensive", "severe_peak", "band_peak")
     out: set[int] = set()
     for _, slots in sorted(by_day.items()):
         prev_peak_end = None

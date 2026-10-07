@@ -30,7 +30,7 @@ from zoneinfo import ZoneInfo
 from .. import db
 from ..config import config
 from .auth import GoogleCalendarAuthError, load_credentials
-from .tiers import Slot, Window, classify_day, format_event
+from .tiers import BAND_TIER_KEYS, Slot, Window, classify_day, format_event
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +137,13 @@ def _publish_day(service, local_date: date, tz: ZoneInfo) -> _DayResult:
     if not rows:
         result.skipped_reason = "no_rates"
         return result
+    # Banded tariff: a partially published day (< TARIFF_BANDED_MIN_SLOTS rows)
+    # has no complete band picture — skip it and let the next retry publish
+    # the full day, rather than paint a fragment (#805 review).
+    from ..energy.tariff_structure import prefer_plan_thresholds
+    if prefer_plan_thresholds() and len(rows) < int(getattr(config, "TARIFF_BANDED_MIN_SLOTS", 12)):
+        result.skipped_reason = "partial_rates"
+        return result
 
     slots = [
         Slot(
@@ -147,6 +154,15 @@ def _publish_day(service, local_date: date, tz: ZoneInfo) -> _DayResult:
         for r in rows
     ]
     windows = classify_day(slots)
+    # Banded tariff (#805): publish only the bands the family needs to act on
+    # (default cheap + peak; the day band would be three more yellow events a
+    # day). Filtered BEFORE the match so already-published Agile-style events
+    # for the day are replaced once and then left alone.
+    allowed = {
+        k.strip() for k in str(getattr(config, "GOOGLE_CALENDAR_BANDED_TIERS", "band_cheap,band_peak")).split(",")
+        if k.strip()
+    }
+    windows = [w for w in windows if w.tier.key not in BAND_TIER_KEYS or w.tier.key in allowed]
     result.windows = len(windows)
 
     existing = _list_existing_for_day(service, cal_id, local_date, tz)
