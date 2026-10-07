@@ -315,12 +315,12 @@ class Config:
     # (the household was on a different tariff back then). ISO date string
     # ``YYYY-MM-DD``; empty disables the clamp (= include all history).
     # #810: the household is no longer on Agile. SMART_TARIFF_START_DATE is the
-    # tariff-neutral name ("start of HEM-managed smart-tariff history");
-    # AGILE_TARIFF_START_DATE stays as the back-compat alias (same value).
-    SMART_TARIFF_START_DATE: str = (
+    # tariff-neutral ENV name ("start of HEM-managed smart-tariff history"); it
+    # seeds AGILE_TARIFF_START_DATE, which stays the single RUNTIME attribute
+    # every reader (pnl, fair-compare, main, runner) and test uses.
+    AGILE_TARIFF_START_DATE: str = (
         os.getenv("SMART_TARIFF_START_DATE") or os.getenv("AGILE_TARIFF_START_DATE", "")
     ).strip()
-    AGILE_TARIFF_START_DATE: str = SMART_TARIFF_START_DATE
 
     # Gas comparison (solar + heat pump vs gas): gas price p/kWh, boiler efficiency (e.g. 0.9)
     GAS_PRICE_PENCE_PER_KWH: float = float(os.getenv("GAS_PRICE_PENCE_PER_KWH", "0"))

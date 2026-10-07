@@ -507,9 +507,10 @@ def compute_peak_ratio(day: date) -> float | None:
 
 
 def _agile_start_date() -> date | None:
-    """Parse ``config.SMART_TARIFF_START_DATE`` (alias ``AGILE_TARIFF_START_DATE``);
-    ``None`` when unset/invalid."""
-    raw = (getattr(config, "SMART_TARIFF_START_DATE", None) or config.AGILE_TARIFF_START_DATE or "").strip()
+    """Parse ``config.AGILE_TARIFF_START_DATE`` — the runtime knob every reader and
+    test uses; ``SMART_TARIFF_START_DATE`` is the tariff-neutral ENV name that
+    seeds it (#810). ``None`` when unset/invalid."""
+    raw = (config.AGILE_TARIFF_START_DATE or "").strip()
     if not raw:
         return None
     try:

@@ -320,15 +320,24 @@ def test_plan_window_fills_tail_from_band_profile_across_dst(monkeypatch):
 # ── #810: tariff-neutral naming / filters ────────────────────────────────────
 
 
-def test_smart_tariff_start_date_alias(monkeypatch):
+def test_smart_tariff_start_date_env_seeds_the_runtime_knob(monkeypatch):
+    """SMART_TARIFF_START_DATE is the env name; AGILE_TARIFF_START_DATE stays the
+    single runtime attribute readers and tests patch."""
+    import subprocess
+    import sys
+
     from src.analytics.pnl import _agile_start_date
 
-    monkeypatch.setattr(app_config, "SMART_TARIFF_START_DATE", "2026-04-17", raising=False)
-    monkeypatch.setattr(app_config, "AGILE_TARIFF_START_DATE", "", raising=False)
-    assert _agile_start_date() == date(2026, 4, 17)
-    monkeypatch.setattr(app_config, "SMART_TARIFF_START_DATE", "", raising=False)
     monkeypatch.setattr(app_config, "AGILE_TARIFF_START_DATE", "2026-04-20", raising=False)
     assert _agile_start_date() == date(2026, 4, 20)
+    # Env seeding checked in a subprocess — never reload src.config in-process
+    # (it forks the singleton and breaks every other test's monkeypatch, #46).
+    out = subprocess.run(
+        [sys.executable, "-c", "from src.config import Config; print(Config.AGILE_TARIFF_START_DATE)"],
+        env={"PATH": "/usr/bin:/bin", "SMART_TARIFF_START_DATE": "2026-04-17", "PYTHONPATH": "."},
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+    assert out.stdout.strip() == "2026-04-17", out.stderr[-500:]
 
 
 def test_fair_compare_current_code_from_cosy_tariff(monkeypatch):

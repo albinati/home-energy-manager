@@ -29,7 +29,7 @@ interface HeroProps {
 // the RIGHT. Money figures follow the period navigator; the today-only extras
 // (break-even target, money paid in) show only on "today". The lifetime strip
 // moved to the foot of the cockpit (LifetimeStrip) — the hero is today-first.
-export function Hero({ metrics, cockpit, period, periodState, periodLoading, todayCum, weather, pv }: HeroProps) {
+export function Hero({ metrics, cockpit, period, periodState, periodLoading, todayCum, weather, pv, agile }: HeroProps) {
   const isNow = isCurrentPeriod(periodState);
   const label = periodLabel(periodState);
   const fixedLabel = todayCum?.fixed_tariff_label || metrics?.fixed_tariff?.label || "British Gas Fixed";
@@ -66,7 +66,7 @@ export function Hero({ metrics, cockpit, period, periodState, periodLoading, tod
   const billA = useAnimatedNumber(bill);
   const max = Math.max(bill ?? 0, fixedShadow ?? 0) * 1.12 || 1;
 
-  const tariffName = agile?.tariff_display_name ?? "Agile";
+  const tariffName = agile?.tariff_display_name ?? "tariff";
   return (
     <section class="hero" aria-label="Selected period energy outcome">
       <div class="hero-grid">

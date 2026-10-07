@@ -4967,6 +4967,9 @@ def _classify_tariff_kinds(slots: list[dict]) -> None:
         s["kind"] = band
 
 
+from ..energy.tariff_structure import display_name as _tariff_display_name  # noqa: E402  (#810)
+
+
 @app.get("/api/v1/agile/day")
 async def agile_day(date: str):
     """Tariff slots for an arbitrary local day (Europe/London) with kind labels.
@@ -4999,7 +5002,7 @@ async def agile_day(date: str):
     return {
         "date": date,
         "tariff_code": tariff,
-        "tariff_display_name": __import__("src.energy.tariff_structure", fromlist=["display_name"]).display_name(tariff),
+        "tariff_display_name": _tariff_display_name(tariff),
         "tz": tz,
         "slots": slots,
     }
