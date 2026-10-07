@@ -100,6 +100,11 @@ class LpPlan:
     tank_temp_c: list[float] = field(default_factory=list)   # len N+1
     soc_kwh: list[float] = field(default_factory=list)       # len N+1
     indoor_temp_c: list[float] = field(default_factory=list)  # len N+1; W3 (#540), empty when off
+    w3_night_floor_c: float | None = None
+    """#820 — the W3 night floor this plan was SOLVED with (the plausibility
+    gate must judge the trajectory against it, not the live config)."""
+    w3_setpoint_c: float | None = None
+    w3_peak_coast_delta_c: float | None = None
     comfort_slack_c: list[float] = field(default_factory=list)
     """W3 per-slot comfort-floor shortfall (°C, len N). Non-zero ONLY when the
     pump physically cannot hold the floor — the precise signature of an RC
@@ -1820,6 +1825,9 @@ def solve_lp(
             _v(_dhw_block.tank[i]) if _lp_owned else _v(tank[i])
         )
         if w3:
+            plan.w3_night_floor_c = w3_night_floor
+            plan.w3_setpoint_c = w3_day_sp
+            plan.w3_peak_coast_delta_c = w3_peak_delta
             plan.indoor_temp_c.append(_v(t_in[i]))
             if i < n:
                 plan.comfort_slack_c.append(_v(s_lo[i]))

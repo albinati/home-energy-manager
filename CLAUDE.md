@@ -483,6 +483,19 @@ disagreeing `windows`); **`DAIKIN_LWT_SOURCE`** (runtime-tunable, `PUT
   rule never reads the trajectory, so `DAIKIN_LWT_SOURCE=tier` is a true kill
   switch even with W3 on. LP offsets are block-ified by SIGN before the
   `DAIKIN_LWT_PREHEAT_MIN_BLOCK_SLOTS` filter (`smooth_lp_offsets`).
+- **Comfort policy knobs (#820, runtime-tunable, `PUT /api/v1/settings`):**
+  `LP_W3_NIGHT_FLOOR_C` (how cold the house may drift 22–07, default 17.5),
+  `LP_W3_PEAK_COAST_DELTA_C` (how far it may coast through the peak, 1.0) and
+  `INDOOR_SETPOINT_C` — plus **`INDOOR_COMFORT_AGGREGATE`** = `mean` (default)
+  | `min` | `max` | `room:<name>`: which reading is THE house temperature that
+  seeds `t_in[0]` and that the comfort guard compares against
+  (`db.get_latest_indoor_reading` → `aggregate_indoor_c`). The owner accepts
+  the kitchen colder than the corridor; `room:corredor` plans comfort on the
+  living space while `rooms_c` / `spread_c` keep the cold room visible.
+  The W2 learner fits on the room MEAN while W3 seeds from the aggregate, so a
+  `min` with a large spread biases the RC seed; keep `mean` or `room:` of a
+  representative room. The plausibility gate judges the trajectory against the
+  floor/setpoint recorded ON the plan (`plan.w3_night_floor_c`), not live config.
 - **UA must be model-consistent before W3 drives hardware.** The LP's pump
   model is `k × (LWT − 18)` with the learned `k` (prod 0.063 kW/°C) — at 5 °C
   outdoor it can hold the house only up to UA ≈ 200 W/K. The env default

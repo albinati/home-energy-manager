@@ -1384,6 +1384,8 @@ def _persist_lp_snapshots(
         "DAIKIN_LWT_SOURCE": str(getattr(config, "DAIKIN_LWT_SOURCE", "tier")),
         "LP_W3_TIN_ENABLED": bool(getattr(config, "LP_W3_TIN_ENABLED", False)),
         "LP_W3_PEAK_COAST_DELTA_C": float(getattr(config, "LP_W3_PEAK_COAST_DELTA_C", 1.0)),
+        "LP_W3_NIGHT_FLOOR_C": float(getattr(config, "LP_W3_NIGHT_FLOOR_C", 17.5)),
+        "INDOOR_COMFORT_AGGREGATE": str(getattr(config, "INDOOR_COMFORT_AGGREGATE", "mean")),
         "DAIKIN_LWT_LP_OFFSET_MIN": float(getattr(config, "DAIKIN_LWT_LP_OFFSET_MIN", -5)),
         "DAIKIN_LWT_LP_OFFSET_MAX": float(getattr(config, "DAIKIN_LWT_LP_OFFSET_MAX", 5)),
         "BUILDING_UA_W_PER_K": float(getattr(config, "BUILDING_UA_W_PER_K", 600)),
@@ -1416,12 +1418,20 @@ def _persist_lp_snapshots(
 
     # #540 W1 — freshest room-sensor reading (None until sensors push / when stale).
     _w1_indoor_initial_c: float | None = None
+    _w1_indoor_agg: str | None = None
+    exogenous_snapshot = dict(exogenous_snapshot or {})
     try:
         _s = db.get_latest_indoor_reading(
             max_age_minutes=int(getattr(config, "INDOOR_SENSOR_STALE_MINUTES", 30))
         )
         if _s is not None:
             _w1_indoor_initial_c = float(_s["temp_c"])
+            _w1_indoor_agg = _s.get("aggregate")
+            exogenous_snapshot["indoor"] = {
+                "aggregate": _w1_indoor_agg,
+                "spread_c": _s.get("spread_c"),
+                "rooms_c": _s.get("rooms_c"),
+            }
     except Exception:  # pragma: no cover — must never break a solve
         _w1_indoor_initial_c = None
 
@@ -1439,7 +1449,10 @@ def _persist_lp_snapshots(
         "indoor_initial_c": _w1_indoor_initial_c,
         "soc_source": getattr(initial, "soc_source", "unknown"),
         "tank_source": getattr(initial, "tank_source", "unknown"),
-        "indoor_source": ("sensor" if _w1_indoor_initial_c is not None else "removed_phase_b"),
+        "indoor_source": (
+            (f"sensor:{_w1_indoor_agg}" if _w1_indoor_agg else "sensor")
+            if _w1_indoor_initial_c is not None else "removed_phase_b"
+        ),
         "base_load_json": json.dumps([round(float(x), 4) for x in base_load]),
         "micro_climate_offset_c": float(micro_climate_offset or 0.0),
         "forecast_fetch_at_utc": forecast_fetch_at_utc,

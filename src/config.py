@@ -954,9 +954,8 @@ class Config:
     # thermal model has never driven hardware and UA is unfitted.
     DAIKIN_LWT_LP_OFFSET_MIN: float = float(os.getenv("DAIKIN_LWT_LP_OFFSET_MIN", "-5"))
     DAIKIN_LWT_LP_OFFSET_MAX: float = float(os.getenv("DAIKIN_LWT_LP_OFFSET_MAX", "5"))
-    # W3 comfort floor inside the PEAK band = INDOOR_SETPOINT_C − this (coast
-    # through the peak on stored heat; τ ≈ 80 h → ~0.5 °C over 3 h).
-    LP_W3_PEAK_COAST_DELTA_C: float = float(os.getenv("LP_W3_PEAK_COAST_DELTA_C", "1.0"))
+    # LP_W3_PEAK_COAST_DELTA_C is a RUNTIME setting since #820 (property below):
+    # the W3 comfort floor inside the PEAK band = INDOOR_SETPOINT_C − this.
     # Plausibility gate on the W3 trajectory before it may drive hardware: a
     # predicted indoor temperature more than this below the night floor (or
     # more than 2× this above the setpoint) means the RC model cannot hold the
@@ -2130,7 +2129,7 @@ class Config:
     LP_W3_TIN_ENABLED: bool = os.getenv("LP_W3_TIN_ENABLED", "false").lower() in ("true", "1", "yes")
     # Comfort floor: night value (blankets OK) vs the day setpoint
     # (INDOOR_SETPOINT_C). Night window is local hours [start, end).
-    LP_W3_NIGHT_FLOOR_C: float = float(os.getenv("LP_W3_NIGHT_FLOOR_C", "17.5"))
+    # LP_W3_NIGHT_FLOOR_C is a RUNTIME setting since #820 (property below).
     LP_W3_NIGHT_START_HOUR_LOCAL: int = int(os.getenv("LP_W3_NIGHT_START_HOUR_LOCAL", "22"))
     LP_W3_NIGHT_END_HOUR_LOCAL: int = int(os.getenv("LP_W3_NIGHT_END_HOUR_LOCAL", "7"))
     # Anti-heat-pump-spike: cap the modelled indoor rise per 30-min slot so the
@@ -2482,6 +2481,36 @@ class Config:
     @INDOOR_SETPOINT_C.setter
     def INDOOR_SETPOINT_C(self, value: float) -> None:
         self._rt_set("INDOOR_SETPOINT_C", float(value))
+
+    # #820 — the owner's comfort policy, tunable without a restart: how cold the
+    # house may drift at night, how far it may coast through the peak band, and
+    # WHICH room temperature stands for "the house".
+    @property
+    def LP_W3_NIGHT_FLOOR_C(self) -> float:
+        return float(self._rt_get("LP_W3_NIGHT_FLOOR_C"))
+
+    @LP_W3_NIGHT_FLOOR_C.setter
+    def LP_W3_NIGHT_FLOOR_C(self, value: float) -> None:
+        self._rt_set("LP_W3_NIGHT_FLOOR_C", float(value))
+
+    @property
+    def LP_W3_PEAK_COAST_DELTA_C(self) -> float:
+        return float(self._rt_get("LP_W3_PEAK_COAST_DELTA_C"))
+
+    @LP_W3_PEAK_COAST_DELTA_C.setter
+    def LP_W3_PEAK_COAST_DELTA_C(self, value: float) -> None:
+        self._rt_set("LP_W3_PEAK_COAST_DELTA_C", float(value))
+
+    @property
+    def INDOOR_COMFORT_AGGREGATE(self) -> str:
+        """``mean`` | ``min`` | ``max`` | ``room:<name>`` — which reading is the
+        one house temperature the LP seeds t_in[0] from and the comfort guard
+        compares against (#820)."""
+        return str(self._rt_get("INDOOR_COMFORT_AGGREGATE"))
+
+    @INDOOR_COMFORT_AGGREGATE.setter
+    def INDOOR_COMFORT_AGGREGATE(self, value: str) -> None:
+        self._rt_set("INDOOR_COMFORT_AGGREGATE", str(value).strip().lower())
 
     @property
     def OPTIMIZATION_PRESET(self) -> str:
