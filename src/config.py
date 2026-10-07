@@ -1139,6 +1139,30 @@ class Config:
     LP_PESS_CHARGE_FLOOR_SCOPE: str = (
         os.getenv("LP_PESS_CHARGE_FLOOR_SCOPE", "trajectory") or "trajectory"
     ).strip().lower()
+    # #818 — on a BANDED tariff (Cosy) the `peak_entry` scope also floors the
+    # SoC at every cheap→non-cheap boundary (07:00 after the 04–07 band, as
+    # well as the 16:00 peak entry): the quantity bought in each cheap window
+    # must cover the following expensive block at the pessimistic quantile net
+    # of PV×0.85. Buying the 07–13 block at 25.45p instead of 12.49p costs
+    # 13p/kWh on 4.6 (weekday) – 8.1 (weekend) kWh. Dynamic tariffs unaffected.
+    LP_PESS_CHARGE_FLOOR_BAND_EXITS: bool = os.getenv(
+        "LP_PESS_CHARGE_FLOOR_BAND_EXITS", "true"
+    ).lower() in ("true", "1", "yes")
+    # #818 — which residual-load quantile the pessimistic scenario uses INSIDE
+    # non-cheap bands of a banded tariff: `p75` (default, = pre-#818 behaviour)
+    # or `p90`. Measured on the prod copy 2026-10-07 (120-day profile, Tuesday
+    # 16–19): slot-sum p75 = 3.85 kWh ≈ the realised BAND p90 (4.0 kWh), while
+    # slot-sum p90 = 6.5 kWh overshoots it by ~60 % (sum of per-slot tails ≫
+    # tail of the sum when cooking is spiky). So p75 already delivers the
+    # newsvendor quantile the peak wants (25.7p under vs ~2p over → ≈0.93);
+    # `p90` is a deliberate over-insurance knob for a cold snap, not a default.
+    # Cheap bands and dynamic tariffs always keep the p75.
+    LP_LOAD_EXPENSIVE_BAND_QUANTILE: str = (
+        os.getenv("LP_LOAD_EXPENSIVE_BAND_QUANTILE", "p75") or "p75"
+    ).strip().lower()
+    # #818 — history window (calendar days scanned for same-day-type days) for
+    # GET /api/v1/load/expected band-sum quantiles.
+    LOAD_EXPECTED_HISTORY_DAYS: int = int(os.getenv("LOAD_EXPECTED_HISTORY_DAYS", "60"))
     # PR D (2026-07-02 audit) — adjacent ForceCharge Fox rows merge only within
     # the same intent class: HOLD (fdSoc <= this threshold, i.e. "hold at
     # reserve, don't fill") vs FILL (higher targets). A negative_hold merged

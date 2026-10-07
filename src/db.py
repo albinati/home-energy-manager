@@ -2346,6 +2346,7 @@ def residual_load_profile_v2(
 
         {"profile": {(dow,h,m)|(group,h,m)|(h,m): median_kwh},
          "spread":  {same keys: p75_kwh},
+         "spread_p90": {same keys: p90_kwh (buckets with >= 8 samples; else p75)},
          "flat": float, "away_days": [iso...],
          "day_counts": {"weekday":N, "weekend":M, "away_excluded":K, "total":T},
          "calibrated_days": int, "physics_only_days": int}
@@ -2433,6 +2434,27 @@ def residual_load_profile_v2(
                 (cutoff_iso, end_iso) if end_iso else (cutoff_iso,),
             )
             rows = cur.fetchall()
+            # #818 — outdoor-temperature FALLBACK from the Daikin unit's own
+            # sensor (execution_log.daikin_outdoor_temp, ~half-hourly since
+            # 2026-01). meteo_forecast_value is pruned at 30 days, so without
+            # this every sample older than the meteo retention was DROPPED and a
+            # 120-day window learned from ~31 days (prod 2026-10-07: 23 wd / 8 we
+            # days). Keyed by UTC hour string, mean over the hour.
+            daikin_outdoor_by_hour: dict[str, float] = {}
+            try:
+                dcur = conn.execute(
+                    """SELECT substr(timestamp, 1, 13) AS hk, AVG(daikin_outdoor_temp) AS t
+                       FROM execution_log
+                       WHERE timestamp > ? AND daikin_outdoor_temp IS NOT NULL"""
+                    + (" AND timestamp < ?" if end_iso else "")
+                    + " GROUP BY hk",
+                    (cutoff_iso, end_iso) if end_iso else (cutoff_iso,),
+                )
+                for dr in dcur.fetchall():
+                    if dr["t"] is not None:
+                        daikin_outdoor_by_hour[str(dr["hk"])] = float(dr["t"])
+            except Exception:  # noqa: BLE001 — fallback source must never break the profile
+                daikin_outdoor_by_hour = {}
             # Negative-price slots over the window (same source the LP priced
             # against: execution_log.agile_price_pence), keyed by half-hour UTC
             # slot start so Pass 1 can drop the deliberately-boosted samples.
@@ -2486,10 +2508,16 @@ def residual_load_profile_v2(
     dropped_no_meteo = 0
     dropped_negative = 0
     dropped_lwt_offset = 0
+    outdoor_from_daikin = 0
     for row in rows:
         outdoor = row["outdoor_history_c"]
         if outdoor is None:
             outdoor = row["outdoor_latest_c"]
+        if outdoor is None:
+            # Beyond the meteo retention → the Daikin's outdoor sensor (#818).
+            outdoor = daikin_outdoor_by_hour.get(str(row["captured_at"])[:13])
+            if outdoor is not None:
+                outdoor_from_daikin += 1
         if outdoor is None:
             dropped_no_meteo += 1
             continue
@@ -2523,7 +2551,9 @@ def residual_load_profile_v2(
         return _finish({
             "profile": {(h, m): flat for h in range(24) for m in (0, 30)},
             "hp_profile": {}, "hp_dhw_profile": {}, "hp_space_profile": {},
-            "spread": {}, "flat": flat, "away_days": [],
+            "spread": {}, "spread_p90": {}, "flat": flat, "away_days": [],
+            "outdoor_from_daikin_samples": outdoor_from_daikin,
+            "no_outdoor_dropped_samples": dropped_no_meteo,
             "day_counts": {"weekday": 0, "weekend": 0, "away_excluded": 0,
                            "negative_excluded": dropped_negative,
                            "lwt_offset_excluded": dropped_lwt_offset, "total": 0},
@@ -2650,6 +2680,18 @@ def residual_load_profile_v2(
             return vs[0] if vs else 0.0
         return _quantiles(vs, n=4)[2]
 
+    def _p90(vs: list[float]) -> float | None:
+        """#818 — the upper tail the newsvendor charge floor wants on a banded
+        tariff (under-charging for the 16–19 peak costs 25.7p/kWh vs ~2p for
+        over-charging → critical ratio ≈ 0.93). Needs ≥ 8 samples or it is just
+        the max of a handful of days — None then, so the lookup falls through
+        to the richer (group,h,m) / (h,m) tiers instead of a p75 in disguise.
+        Clamped to the observed max: the exclusive quantile EXTRAPOLATES on
+        8–9 samples (review: [0.3×7, 1.0] → 1.07 > max)."""
+        if len(vs) < 8:
+            return None
+        return min(max(vs), _quantiles(vs, n=10)[8])
+
     retained = [r for (_l, d, r, _hp, _hd, _hs) in residual_samples if d not in away_days]
     flat = _median(retained) if retained else (
         mean_fox_load_kwh_per_slot(limit=60) or mean_consumption_kwh_from_execution_logs(limit=2016)
@@ -2657,10 +2699,14 @@ def residual_load_profile_v2(
 
     profile: dict[Any, float] = {}
     spread: dict[Any, float] = {}
+    spread_p90: dict[Any, float] = {}
     for key, vs in tiers.items():
         if len(vs) >= min_samples_per_bucket:
             profile[key] = _median(vs)
             spread[key] = _p75(vs)
+            _q90 = _p90(vs)
+            if _q90 is not None:
+                spread_p90[key] = _q90
 
     # Heat-pump profile — same tier structure, median per bucket. Unfilled buckets
     # mean "no heat-pump signal learned there" → the lookup falls back to 0, which
@@ -2701,14 +2747,15 @@ def residual_load_profile_v2(
             if (h, m) not in profile:
                 profile[(h, m)] = _hour_aware(h, m)
                 spread.setdefault((h, m), profile[(h, m)])
+            spread_p90.setdefault((h, m), spread[(h, m)])
 
     calibrated_days = len(calibrated_dates - away_days)
     physics_only_days = len(set(dates) - calibrated_dates - away_days)
     logger.info(
-        "residual_profile_v2: %d samples (%d no-meteo, %d negative-price), window=%dd; "
-        "%d weekday / %d weekend days, %d away excluded; "
+        "residual_profile_v2: %d samples (%d no-meteo, %d outdoor-from-daikin, %d negative-price), "
+        "window=%dd; %d weekday / %d weekend days, %d away excluded; "
         "%d calibrated / %d physics-only days",
-        len(samples), dropped_no_meteo, dropped_negative, window_days,
+        len(samples), dropped_no_meteo, outdoor_from_daikin, dropped_negative, window_days,
         len(weekday_days), len(weekend_days), len(away_days),
         calibrated_days, physics_only_days,
     )
@@ -2718,6 +2765,9 @@ def residual_load_profile_v2(
         "hp_dhw_profile": hp_dhw_profile,
         "hp_space_profile": hp_space_profile,
         "spread": spread,
+        "spread_p90": spread_p90,
+        "outdoor_from_daikin_samples": outdoor_from_daikin,
+        "no_outdoor_dropped_samples": dropped_no_meteo,
         "flat": float(flat),
         "away_days": sorted(away_days),
         "day_counts": {
@@ -2781,6 +2831,27 @@ def lookup_residual_spread_kwh(profile_obj: dict[str, Any], dow: int, h: int, m:
         if v is not None:
             return float(v)
     return 0.0
+
+
+def lookup_residual_quantile_kwh(
+    profile_obj: dict[str, Any], dow: int, h: int, m: int, quantile: str = "p75"
+) -> float:
+    """#818 — a named quantile of the residual load for a slot: ``p50`` (the
+    median the LP plans against), ``p75`` (the legacy scenario spread) or
+    ``p90`` (the upper tail for expensive bands on a banded tariff). Same
+    fallback hierarchy as :func:`lookup_residual_kwh`; ``p90`` falls back to
+    the ``p75`` tier when the profile predates it or the bucket is thin."""
+    q = str(quantile or "p75").lower()
+    if q in ("p50", "median"):
+        return lookup_residual_kwh(profile_obj, dow, h, m)
+    if q == "p90":
+        sp = profile_obj.get("spread_p90") or {}
+        group = "weekend" if dow >= 5 else "weekday"
+        for key in ((dow, h, m), (group, h, m), (h, m)):
+            v = sp.get(key)
+            if v is not None:
+                return float(v)
+    return lookup_residual_spread_kwh(profile_obj, dow, h, m)
 
 
 def half_hourly_load_profile_kwh(
@@ -4150,6 +4221,82 @@ def compute_fox_energy_daily_from_realtime(
             "discharge_kwh": round(b["discharge"], 3),
         })
     return out
+
+
+def half_hourly_kwh_for_utc_range(
+    start_utc: datetime,
+    end_utc: datetime,
+    column: str,
+    *,
+    max_gap_seconds: int = 1800,
+) -> dict[str, float]:
+    """Trapezoidal integration of ``pv_realtime_history.<column>`` over an
+    arbitrary UTC range, keyed by ISO half-hour slot start (UTC) — the
+    multi-day sibling of :func:`_half_hourly_grid_kwh_for_day` (#818).
+
+    ONE indexed range SEARCH on ``captured_at`` (the per-day helper's
+    ``substr(captured_at, 1, 10)`` filter is a whole-index SCAN per call, and
+    the table has no retention), bucketed in Python. Pairs are assigned to the
+    bucket of the EARLIER sample; only pairs whose earlier sample is inside
+    ``[start_utc, end_utc)`` are emitted, so a caller may slice LOCAL days out
+    of the result without the UTC-day keying that loses the first local hour
+    in BST. Slots with no telemetry get no key.
+    """
+    from collections import defaultdict
+    from datetime import datetime as _dt
+
+    if column not in ("grid_export_kw", "grid_import_kw", "solar_power_kw", "battery_discharge_kw", "load_power_kw"):
+        raise ValueError(f"unsupported column: {column}")
+    s_utc = start_utc.astimezone(UTC)
+    e_utc = end_utc.astimezone(UTC)
+    if e_utc <= s_utc:
+        return {}
+    # One sample before the start and after the end for boundary integration.
+    # Stored forms are ``...Z`` and ``...+00:00``; both sort correctly against a
+    # second-precision prefix.
+    lo = (s_utc - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
+    hi = (e_utc + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                f"""SELECT captured_at, {column}
+                   FROM pv_realtime_history
+                   WHERE captured_at >= ? AND captured_at < ?
+                   ORDER BY captured_at""",
+                (lo, hi),
+            )
+            rows_raw = cur.fetchall()
+        finally:
+            conn.close()
+    if len(rows_raw) < 2:
+        return {}
+
+    def _parse(ts_raw: str) -> _dt | None:
+        try:
+            ts = _dt.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+            return ts if ts.tzinfo else ts.replace(tzinfo=UTC)
+        except (ValueError, TypeError):
+            return None
+
+    buckets: dict[str, float] = defaultdict(float)
+    prev_ts: _dt | None = None
+    prev_val = 0.0
+    for row in rows_raw:
+        ts = _parse(row[0])
+        if ts is None:
+            continue
+        cur_val = float(row[1]) if row[1] is not None else 0.0
+        if prev_ts is not None:
+            dt_s = min((ts - prev_ts).total_seconds(), max_gap_seconds)
+            if dt_s > 0 and s_utc <= prev_ts < e_utc:
+                slot = prev_ts.astimezone(UTC).replace(
+                    minute=(prev_ts.minute // 30) * 30, second=0, microsecond=0
+                )
+                buckets[slot.isoformat().replace("+00:00", "Z")] += (prev_val + cur_val) / 2.0 * dt_s / 3600.0
+        prev_ts = ts
+        prev_val = cur_val
+    return dict(buckets)
 
 
 def _half_hourly_grid_kwh_for_day(

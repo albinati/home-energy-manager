@@ -495,6 +495,23 @@ async def get_residual_load_profile(
     }
 
 
+@router.get("/api/v1/load/expected")
+async def get_load_expected(date: str | None = None, history_days: int | None = None) -> dict[str, Any]:
+    """Expected household consumption per tariff band for a local day (#818):
+    band-sum p50/p75/p90 over same-day-type history (weekday/weekend), the
+    committed plan's assumption, realised so far, and the committed forecast's
+    error history in that block. Viewer-safe, cached 10 min."""
+    from ...analytics.load_expected import expected_load_by_band
+
+    try:
+        d = _date_from_iso(date) if date else None
+    except ValueError:
+        raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD") from None
+    if history_days is not None:
+        history_days = max(7, min(int(history_days), 180))
+    return await asyncio.to_thread(expected_load_by_band, d, history_days=history_days)
+
+
 @router.get("/api/v1/forecast/daily")
 async def get_forecast_daily(start_date: str, end_date: str) -> dict[str, Any]:
     """Per-LOCAL-day committed forecast vs actual sums for load AND solar,

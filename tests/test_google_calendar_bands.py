@@ -193,29 +193,52 @@ def test_cosy_registers_seven_boundaries_local_clock(monkeypatch):
     assert {j["tier"] for j in out["scheduled"]} == {"band_cheap", "band_day", "band_peak"}
 
 
-def test_cosy_floor_index_is_1600_only():
+def test_cosy_floor_indices_are_cheap_exits_and_peak_entry(monkeypatch):
+    """#818 — every cheap→non-cheap boundary is a charge-decision boundary on
+    a banded tariff: 07:00 (after 04–07), 16:00 (peak entry) and the midnight
+    carried over from 22–24 into the next day's 00–04 day band. The 13:00 /
+    22:00 entries INTO cheap and the 19:00 peak→day entry are not floored."""
     from src.scheduler.optimizer import _peak_entry_floor_indices
 
+    monkeypatch.setattr(config, "LP_PESS_CHARGE_FLOOR_BAND_EXITS", True, raising=False)
     slots = _cosy_slots(DAY) + _cosy_slots(DAY + timedelta(days=1))
     starts = [s.start_utc for s in slots]
     prices = [s.price_p for s in slots]
     idx = _peak_entry_floor_indices(starts, prices)
     hours = [starts[i].astimezone(TZ).hour for i in idx]
-    assert hours == [16, 16]
+    # day 1 opens at 00:00 with no preceding cheap window → no floor there.
+    assert hours == [7, 16, 0, 7, 16]
 
 
-def test_cosy_floor_partial_tail_day_has_no_midnight_floor():
+def test_cosy_floor_index_is_1600_only_with_band_exits_off(monkeypatch):
+    from src.scheduler.optimizer import _peak_entry_floor_indices
+
+    monkeypatch.setattr(config, "LP_PESS_CHARGE_FLOOR_BAND_EXITS", False, raising=False)
+    slots = _cosy_slots(DAY) + _cosy_slots(DAY + timedelta(days=1))
+    starts = [s.start_utc for s in slots]
+    prices = [s.price_p for s in slots]
+    idx = _peak_entry_floor_indices(starts, prices)
+    assert [starts[i].astimezone(TZ).hour for i in idx] == [16, 16]
+
+
+def test_cosy_floor_partial_tail_day_is_classified_by_band(monkeypatch):
     """A 48 h horizon starting 02:00 local ends 02:00 two days later: the
     8-slot tail day must not fall back to the Agile tiers (day band read as
-    'expensive' → a floor at 00:00)."""
+    'expensive' → a spurious floor). With band exits off the only floors are
+    the two peak entries; with them on, the tail day's 00:00 (after the 22–24
+    cheap band) is a legitimate cheap exit."""
     from src.scheduler.optimizer import _peak_entry_floor_indices
 
     slots = _cosy_slots(DAY) + _cosy_slots(DAY + timedelta(days=1)) + _cosy_slots(DAY + timedelta(days=2))
     slots = slots[4:4 + 96]  # 02:00 local day 1 → 02:00 local day 3
     starts = [s.start_utc for s in slots]
     prices = [s.price_p for s in slots]
+    monkeypatch.setattr(config, "LP_PESS_CHARGE_FLOOR_BAND_EXITS", False, raising=False)
     idx = _peak_entry_floor_indices(starts, prices)
     assert [starts[i].astimezone(TZ).hour for i in idx] == [16, 16]
+    monkeypatch.setattr(config, "LP_PESS_CHARGE_FLOOR_BAND_EXITS", True, raising=False)
+    idx = _peak_entry_floor_indices(starts, prices)
+    assert [starts[i].astimezone(TZ).hour for i in idx] == [7, 16, 0, 7, 16, 0]
 
 
 def test_partial_cosy_day_is_classified_by_band_not_expensive():

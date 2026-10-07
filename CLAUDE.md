@@ -360,6 +360,41 @@ and the 16–19 peak band is never bought from the grid.**
   window (`warning_key=peak_import_<date>_<HHMM>`) + `action_log`
   `peak_import_guard` + `PEAK_IMPORT_GUARD_ACTION=replan` (MPC re-solve,
   `trigger_reason=peak_import`, runs the scenario stack). `none` = alert only.
+
+### How much to buy in each cheap window — probabilistic load (#818)
+
+Prod `load_error_log` (60 d to 2026-10-06) showed the committed load forecast
+under-forecast the 16–19 band on 22/30 days (mean +0.93 kWh/day, p90 +2.2 —
+electric cooking at dinner; weekend lunch 12–13 is 2.6–3.3 kWh/h). Three facts
+drive the design:
+
+- **The LP plans against per-slot medians**; the only uncertainty it carries is
+  the per-slot p75 that the pessimistic scenario uses, and the charge floor is
+  taken from that solve. Slot-sum p75 (Tue 16–19: 3.85 kWh) ≈ the realised
+  BAND p90 (4.0), while slot-sum p90 (6.5) overshoots ~60 % (tails don't add).
+  So `LP_LOAD_EXPENSIVE_BAND_QUANTILE` stays `p75`; `p90` is an over-insurance
+  knob (day+peak bands of a banded tariff only; Agile never touches it).
+- **The profile learns the WHOLE window now.** `residual_load_profile_v2`
+  dropped every sample without a `meteo_forecast_value` outdoor temperature
+  (30-day retention) → a 120-day window learned from 31 days (8 weekends).
+  Fallback: `execution_log.daikin_outdoor_temp` by UTC hour
+  (`outdoor_from_daikin_samples` in the profile). Window length barely matters
+  (30/60/120-day backtests within 0.1 kWh); the recent-bias corrector
+  (`LOAD_RECENT_BIAS_ENABLED`) is **−6.7 % MAE out-of-sample** — keep it off.
+- **Every cheap→non-cheap boundary is a charge-decision boundary.**
+  `LP_PESS_CHARGE_FLOOR_BAND_EXITS=true` (default; banded tariffs only; lives
+  INSIDE `LP_PESS_CHARGE_FLOOR_SCOPE=peak_entry` — prod — and is inert under
+  `trajectory`, which floors every slot anyway) adds the 07:00 (after 04–07)
+  and the midnight (22–24 → next day's 00–04) cheap exits to the floor set — buying 07–13 at 25.45p instead of
+  12.49p costs 13p/kWh on 4.6 (weekday) – 8.1 (weekend) kWh. Entries INTO
+  cheap (13:00, 22:00) and the 19:00 peak→day entry are never floored (the
+  latter would make the nominal plan hold charge through the peak).
+
+`GET /api/v1/load/expected?date=` (`src/analytics/load_expected.py`) is the
+household-level view: per tariff window of the day, **band-sum p50/p75/p90
+over same-day-type history** (weekday/weekend, `LOAD_EXPECTED_HISTORY_DAYS`
+60), the committed plan's kWh, realised so far, and the committed forecast's
+error history in that block. Feeds the Home consumption card.
 ## Thermal control on Cosy — band rule, W3 thermal model, LP-owned LWT (#808)
 
 Space heating is shaped by the Daikin **LWT offset** rows (`lwt_preheat` +
