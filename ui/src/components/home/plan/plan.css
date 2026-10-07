@@ -27,7 +27,7 @@
 .pf-list { display: flex; flex-direction: column; gap: var(--space-1); margin: 0; padding: 0; list-style: none; }
 .pf-row {
   display: grid;
-  grid-template-columns: var(--space-4) minmax(5.5rem, auto) 1fr auto;
+  grid-template-columns: var(--space-4) auto minmax(0, 1fr) auto auto;
   align-items: baseline;
   gap: var(--space-2);
   font-size: var(--font-sm);
@@ -36,7 +36,7 @@
 }
 .pf-row .pf-ico { align-self: center; display: inline-flex; color: var(--text-dim); }
 .pf-row .pf-when { color: var(--text-dim); white-space: nowrap; }
-.pf-row .pf-what { min-width: 0; overflow-wrap: anywhere; }
+.pf-row .pf-what { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pf-row .pf-val { color: var(--text-dim); text-align: right; white-space: nowrap; }
 .pf-row--done { opacity: 0.55; }
 .pf-row--ongoing .pf-when, .pf-row--ongoing .pf-what { color: var(--accent); font-weight: 600; }
@@ -58,10 +58,15 @@
 .pf-band-row .pf-band-name { color: var(--text); font-weight: 600; text-transform: capitalize; }
 .pf-dot { display: inline-block; width: var(--space-2); height: var(--space-2); border-radius: 50%; background: var(--warn); margin-left: var(--space-1); }
 
-@media (max-width: 430px) {
-  .pf-row { grid-template-columns: var(--space-4) auto 1fr; }
-  .pf-row .pf-val { grid-column: 2 / -1; text-align: left; }
+.pf-row .pf-val2 { color: var(--text-dim); text-align: right; white-space: nowrap; }
+@media (max-width: 420px) {
+  .pf-row { grid-template-columns: var(--space-4) auto minmax(0, 1fr) auto; row-gap: 0; }
+  .pf-row .pf-val { grid-column: 3; grid-row: 2; text-align: left; }
+  .pf-row .pf-val2 { grid-column: 4; grid-row: 2; }
 }
+.pf-rooms { display: flex; flex-wrap: wrap; gap: var(--space-1); }
+.pf-room { padding: var(--space-0) var(--space-2); border-radius: var(--radius-pill); background: var(--bg-card-2); font-size: var(--font-xs); color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.pf-room--em { color: var(--text); font-weight: 700; }
 
 /* ── Consumption probability strip ─────────────────────────────────────── */
 .cs { display: flex; flex-direction: column; gap: var(--space-3); }
@@ -94,7 +99,10 @@
 .spend-line { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 .spend-detail { font-size: var(--font-xs); color: var(--text-dim); font-variant-numeric: tabular-nums; }
 .compare-line { display: flex; flex-direction: column; gap: var(--space-1); font-size: var(--font-xs); color: var(--text-dim); font-variant-numeric: tabular-nums; }
-.compare-row { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-3); }
-.compare-row b { color: var(--text); font-weight: 600; }
-.compare-row .is-current b { color: var(--accent); }
+.spend-block { display: flex; flex-direction: column; gap: var(--space-1); }
+.compare-row { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-4); }
+.compare-pair { display: inline-flex; flex-direction: column; gap: var(--space-0); }
+.compare-k { font-size: var(--font-2xs); font-weight: 700; letter-spacing: var(--tracking-eyebrow); text-transform: uppercase; color: var(--text-mute); }
+.compare-v { font-size: var(--font-sm); font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
+.compare-pair.is-current .compare-v { color: var(--accent); font-size: var(--font-md); font-weight: 700; }
 .compare-framing { color: var(--text-mute); }

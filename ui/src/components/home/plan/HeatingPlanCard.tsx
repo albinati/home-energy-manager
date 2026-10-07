@@ -30,6 +30,10 @@ export function HeatingPlanCard({ data, nowUtc, loading }: { data: PlanFrontsHea
   const rows = data.windows.map((w) => ({ w, st: windowStatus(w.start_utc, w.end_utc, nowUtc) }));
   const next = rows.find((r) => r.st !== "done" && r.w.kind !== "restore");
   const rooms = Object.entries(data.indoor_rooms_c ?? {}).sort(([a], [b]) => a.localeCompare(b));
+  const agg = data.indoor_aggregate ?? "";
+  const minRoom = rooms.length ? rooms.reduce((a, b) => (b[1] < a[1] ? b : a))[0] : null;
+  const emphasised = (r: string): boolean =>
+    agg.startsWith("room:") ? agg.slice(5) === r : agg === "min" ? r === minRoom : false;
   const p = data.predicted_indoor;
   const marks: [string, number | null][] = p ? [["07", p.at_07_c], ["16", p.at_16_c], ["19", p.at_19_c], ["22", p.at_22_c]] : [];
   return (
@@ -44,7 +48,11 @@ export function HeatingPlanCard({ data, nowUtc, loading }: { data: PlanFrontsHea
           <span>outdoor <b>{num(data.outdoor_now_c)} °C</b></span>
         </div>
         {rooms.length > 1 && (
-          <span class="pf-note">{rooms.map(([r, t]) => `${r.replace(/_/g, " ")} ${num(t)}`).join(" · ")}</span>
+          <div class="pf-rooms">
+            {rooms.map(([r, t]) => (
+              <span key={r} class={`pf-room ${emphasised(r) ? "pf-room--em" : ""}`}>{r.replace(/_/g, " ")} {num(t)}</span>
+            ))}
+          </div>
         )}
         <div class="pf-kv">
           <span>setpoint <b>{num(data.setpoint_c)}</b></span>
@@ -67,8 +75,9 @@ export function HeatingPlanCard({ data, nowUtc, loading }: { data: PlanFrontsHea
             <li key={`${w.start_utc}-${w.kind}`} class={`pf-row pf-row--${st}`}>
               <span class="pf-ico pf-tone-heat"><Icon name="heating" size={13} /></span>
               <span class="pf-when">{range(w.start_local, w.end_local)}</span>
-              <span class="pf-what">{describe(w)}</span>
-              <span class="pf-val">{w.source === "lp" ? "LP" : w.source === "tier" ? "rule" : ""}</span>
+              <span class="pf-what">{w.kind === "restore" ? "Weather curve" : w.kind === "boost" ? "Boost" : "Setback"}</span>
+              <span class="pf-val">{w.kind === "restore" ? "" : `${signed(w.offset_c)} °C`}</span>
+              <span class="pf-val2">{w.source === "lp" ? "LP" : w.source === "tier" ? "rule" : ""}</span>
             </li>
           ))}
         </ul>

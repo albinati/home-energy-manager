@@ -174,30 +174,40 @@ function SpendScoreLine({ spend }: { spend: PlanFrontsSpend }) {
   const forecast = spend.score_basis === "forecast";
   const avg = forecast ? spend.forecast_avg_import_p : spend.realised_avg_import_p;
   const f1 = (v: number | null | undefined) => (v == null ? "—" : v.toFixed(1));
+  const wk = spend.period?.week ?? null;
+  const mo = spend.period?.month ?? null;
+  const avgParts: string[] = [];
+  if (mo?.per_day_gbp != null) avgParts.push(`Avg ${gbp(mo.per_day_gbp)}/day this month`);
+  if (wk?.per_day_gbp != null) avgParts.push(`${gbp(wk.per_day_gbp)}/day this week`);
+  if (mo?.avg_import_p != null) avgParts.push(`${f1(mo.avg_import_p)}p avg import`);
   return (
-    <div class="spend-line">
-      <Pill tone={sc.tone} title="Today's average import price vs the ideal (cheapest band) price">{sc.label}</Pill>
-      <span class="spend-detail">
-        {forecast ? "forecast " : ""}avg import {f1(avg)}p · ideal {f1(spend.ideal_avg_import_p)}p · peak {f1(spend.peak_import_kwh)} kWh
-      </span>
+    <div class="spend-block">
+      <div class="spend-line">
+        <Pill tone={sc.tone} title="Today's average import price vs the ideal (cheapest band) price">{sc.label}</Pill>
+        <span class="spend-detail">
+          {forecast ? "forecast " : ""}avg import {f1(avg)}p · ideal {f1(spend.ideal_avg_import_p)}p · peak {f1(spend.peak_import_kwh)} kWh
+          {" "}· import {f1(spend.realised_import_kwh)} / {f1(spend.forecast_import_kwh)} kWh
+        </span>
+      </div>
+      {avgParts.length > 0 && <div class="spend-detail">{avgParts.join(" · ")}</div>}
     </div>
   );
 }
 
 function CompareLine({ compare }: { compare: PlanFrontsCompare }) {
+  const rows = [...compare.rows].sort((a, b) => Number(b.is_current) - Number(a.is_current));
   return (
     <div class="compare-line">
       <div class="compare-row">
-        {compare.rows.map((r) => (
-          <span key={r.product_code} class={r.is_current ? "is-current" : ""}
+        {rows.map((r) => (
+          <span key={r.product_code} class={`compare-pair ${r.is_current ? "is-current" : ""}`}
                 title={r.approximate ? "approximate — no Agile shadow prices fetched" : undefined}>
-            {r.display_name.replace(/ \(current\)$/, "")}{" "}
-            <b>{r.approximate ? "≈ " : ""}{r.net_gbp == null ? "—" : gbp(r.net_gbp)}</b>
+            <span class="compare-k">{r.display_name.replace(/ \(current\)$/, "")}</span>
+            <span class="compare-v">{r.approximate ? "≈ " : ""}{r.net_gbp == null ? "—" : gbp(r.net_gbp)}</span>
           </span>
         ))}
-        <span class="compare-framing">this {compare.period}</span>
       </div>
-      {compare.framing && <span class="compare-framing">{compare.framing}</span>}
+      <span class="compare-framing">this {compare.period}{compare.framing ? ` · ${compare.framing}` : ""}</span>
     </div>
   );
 }

@@ -53,6 +53,7 @@ export function TankPlanCard({ data, nowUtc, loading }: { data: PlanFrontsTank |
               <span class="pf-when">{range(w.start_local, w.end_local)}</span>
               <span class="pf-what">{LABEL[w.kind]}</span>
               <span class="pf-val">{w.tank_target_c != null ? `${num(w.tank_target_c, 0)} °C` : ""}</span>
+              <span class="pf-val2" />
             </li>
           ))}
         </ul>

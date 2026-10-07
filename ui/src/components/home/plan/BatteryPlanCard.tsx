@@ -57,8 +57,9 @@ export function BatteryPlanCard({ data, nowUtc, loading }: { data: PlanFrontsBat
               <li key={`${w.start_utc}-${w.kind}`} class={`pf-row pf-row--${st}`}>
                 <span class={`pf-ico ${w.kind === "grid_charge" || w.kind === "pv_charge" ? "pf-tone-charge" : ""}`}><Icon name={k.icon} size={13} /></span>
                 <span class="pf-when">{range(w.start_local, w.end_local)}</span>
-                <span class="pf-what">{k.label}{kwh != null && kwh > 0.005 ? ` · ${num(kwh)} kWh` : ""}</span>
-                <span class="pf-val">{w.soc_start_pct != null && w.soc_end_pct != null ? `${Math.round(w.soc_start_pct)} → ${Math.round(w.soc_end_pct)} %` : ""}</span>
+                <span class="pf-what">{k.label}</span>
+                <span class="pf-val">{kwh != null && kwh > 0.005 ? `${num(kwh)} kWh` : ""}</span>
+                <span class="pf-val2">{w.soc_start_pct != null && w.soc_end_pct != null ? `${Math.round(w.soc_start_pct)} → ${Math.round(w.soc_end_pct)} %` : ""}</span>
               </li>
             );
           })}

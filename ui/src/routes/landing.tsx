@@ -199,7 +199,7 @@ export default function Landing() {
       <h2 class="scope scope--period">
         <span class="scope-dot" aria-hidden="true" />
         Plan {fronts.data?.date && fronts.data.date !== todayIso ? fronts.data.date : "today"}
-        <span class="scope-when">battery · hot water · heating · consumption</span>
+        <span class="scope-when">battery · hot water · heating</span>
       </h2>
       <div class="widget-grid widget-band">
         <Widget title="Battery plan" icon={<Icon name="battery" size={14} />} tone="power" size="medium">
