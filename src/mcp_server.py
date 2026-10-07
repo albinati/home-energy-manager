@@ -518,6 +518,55 @@ def build_mcp() -> FastMCP:
         }
 
     @mcp.tool(
+        name="record_comfort_feedback",
+        description=(
+            "Record the owner's comfort feedback about the house (#833). Call this "
+            "when the user says the house feels cold / ok / hot, optionally naming "
+            "a room — e.g. 'ta frio na cozinha' -> verdict='frio', room='cozinha'. "
+            "verdict: cold|ok|hot (or pt-BR frio|quente). room is matched "
+            "case/accent-insensitively against the rooms with a fresh sensor "
+            "reading; an unknown room is kept in the note. Stores the verdict with "
+            "the house context at that moment (indoor temps, outdoor, price band, "
+            "active LWT offset) and returns the stored row plus a one-line ack to "
+            "relay. Nothing is auto-applied; weekly summaries drive suggestions."
+        ),
+    )
+    def record_comfort_feedback(
+        verdict: str, room: str | None = None, note: str | None = None
+    ) -> dict[str, Any]:
+        from .analytics import comfort_feedback as cf
+
+        try:
+            row, ack = cf.record_feedback(verdict, room, note, source="openclaw")
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        return {"ok": True, "row": row, "ack": ack}
+
+    @mcp.tool(
+        name="get_comfort_feedback",
+        description=(
+            "Read the owner's comfort feedback (#833): rows for the last `days` "
+            "(default 30) with their context, plus the trailing-7-day weekly "
+            "summary (counts by verdict/room/band/hour bucket and the bounded "
+            "night-floor / peak-coast proposal, if any)."
+        ),
+    )
+    def get_comfort_feedback(days: int = 30) -> dict[str, Any]:
+        from datetime import UTC, datetime, timedelta
+
+        from .analytics import comfort_feedback as cf
+
+        try:
+            rows = db.get_comfort_feedback(max(1, min(int(days), 365)))
+            today = datetime.now(UTC).astimezone(cf._tz()).date()
+            return {"ok": True, "rows": rows,
+                    "weekly": cf.weekly_summary(today - timedelta(days=6))}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    @mcp.tool(
         name="save_indoor_temperature",
         description=(
             "Record an indoor room temperature reading (#540 W1). Feeds the LP "

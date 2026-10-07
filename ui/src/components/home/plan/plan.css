@@ -115,8 +115,8 @@
 .pf-feel-btns { display: flex; flex-wrap: wrap; gap: var(--space-1); align-items: center; }
 .pf-feel-btn, .pf-feel-room {
   font: inherit; font-size: var(--font-xs); color: var(--text);
-  background: var(--surface-2, var(--surface)); border: 0; border-radius: var(--radius-sm, 6px);
+  background: var(--bg-card-2); border: 0; border-radius: var(--radius-sm, 6px);
   padding: var(--space-1) var(--space-2); cursor: pointer; font-variant-numeric: tabular-nums;
 }
-.pf-feel-btn:hover:not(:disabled) { background: var(--surface-3, var(--surface-2)); }
+.pf-feel-btn:hover:not(:disabled) { background: var(--bg-card-3); }
 .pf-feel-btn:disabled { opacity: .5; cursor: default; }

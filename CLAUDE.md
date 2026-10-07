@@ -550,12 +550,19 @@ band, `DAIKIN_LWT_SOURCE`):
 - **API**: `POST /api/v1/comfort/feedback` (admin; `{verdict, room?, note?}`),
   `GET /api/v1/comfort/feedback?days=30` (viewer; rows + per-room counts + weekly summary).
 - **Home**: admin-only Cold / OK / Hot buttons (+ room select) in the Heating card.
-- **Telegram** (`TELEGRAM_INBOUND_ENABLED=true`, short-poll `getUpdates` every
-  `TELEGRAM_INBOUND_POLL_SECONDS`=60 — own job `telegram_inbound_poll`, offset
-  persisted in `kv_state.telegram_update_offset`, ONLY `TELEGRAM_CHAT_ID` is
-  accepted): `/conforto frio|ok|quente [cômodo] [nota]` or `/comfort cold|ok|hot
-  [room] [note]`; `/conforto` alone = usage + current rooms. The room token is only
-  taken when it matches a fresh sensor room, otherwise it is part of the note.
+- **OpenClaw / MCP (this household)**: tools `record_comfort_feedback(verdict, room?,
+  note?)` (verdict cold|ok|hot|frio|quente; room matched against fresh sensor rooms;
+  stored with `source="openclaw"`) and `get_comfort_feedback(days)`.
+- **Telegram poller (OFF by default, `TELEGRAM_INBOUND_ENABLED=false`)**. Precondition:
+  the bot token must be EXCLUSIVE to HEM — Telegram allows one `getUpdates` consumer
+  and no webhook; here OpenClaw owns the bot, so the poller stays off (code kept for a
+  future dedicated bot). When on: short-poll every `TELEGRAM_INBOUND_POLL_SECONDS`
+  (own job `telegram_inbound_poll`, offset in `kv_state`), PRIVATE chat with
+  `TELEGRAM_CHAT_ID` only (optional `TELEGRAM_OWNER_USER_ID` also checks `from.id`),
+  stale messages (older than max(300 s, 2x poll)) are ignored, 3 consecutive failures
+  -> one alert + 15 min back-off (429 honours `retry_after`). Commands:
+  `/conforto frio|ok|quente [cômodo] [nota]` / `/comfort cold|ok|hot [room] [note]`;
+  `/conforto` alone = usage + rooms; other slash commands get no reply.
 - **Weekly** (`src/analytics/comfort_feedback.py`, Sunday 08:45 local): summary to
   `action_log` (device `comfort`, action `weekly_summary`). Proposal rules: >=2 cold
   at night at/below floor+0.3 -> `LP_W3_NIGHT_FLOOR_C` +0.5 (cap 22); >=2 cold in

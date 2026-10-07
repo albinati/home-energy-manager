@@ -3011,6 +3011,7 @@ def start_background_scheduler() -> None:
                 _comfort_weekly_job,
                 CronTrigger(day_of_week="sun", hour=8, minute=45, timezone=tz),
                 id="comfort_weekly_summary",
+                misfire_grace_time=3600,
             )
             if (
                 getattr(config, "TELEGRAM_INBOUND_ENABLED", True)
@@ -3024,6 +3025,7 @@ def start_background_scheduler() -> None:
                     id="telegram_inbound_poll",
                     max_instances=1,
                     coalesce=True,
+                    misfire_grace_time=120,
                 )
 
             # Google Calendar publisher — separate APScheduler job so a bug

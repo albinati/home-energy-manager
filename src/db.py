@@ -7980,6 +7980,9 @@ def get_indoor_rollup_15min(start_iso: str, end_iso: str, room: str | None = Non
 def prune_history_tables() -> dict[str, int]:
     """Run all configured retention policies in one pass.
 
+    NB ``comfort_feedback`` (#833) is deliberately NOT pruned: it is a tiny,
+    owner-authored table that the weekly proposals read across months.
+
     Returns per-table deletion counts. Called at app startup (best-effort,
     never fatal) and from a daily cron. Individual failures are logged at
     DEBUG and surface as ``-1`` in the result so the caller can tell which
@@ -9300,7 +9303,7 @@ def refresh_daikin_lwt_kw_calibration(*, log_min_delta_pct: float = 1.0) -> dict
 # ---------------------------------------------------------------------------
 
 COMFORT_VERDICTS = ("cold", "ok", "hot")
-COMFORT_SOURCES = ("telegram", "api", "ui")
+COMFORT_SOURCES = ("telegram", "api", "ui", "openclaw")
 
 
 def get_kv(key: str, default: str | None = None) -> str | None:
@@ -9328,6 +9331,14 @@ def set_kv(key: str, value: str) -> None:
             conn.commit()
         finally:
             conn.close()
+
+
+def normalize_comfort_band(k: str | None) -> str | None:
+    """Agile tier keys that mean 'peak' collapse to ``peak`` (#833)."""
+    k = (k or "").strip().lower()
+    if not k:
+        return None
+    return "peak" if k in ("severe_peak", "expensive") else k
 
 
 def _comfort_context(now: datetime) -> dict[str, Any]:
@@ -9362,7 +9373,8 @@ def _comfort_context(now: datetime) -> dict[str, Any]:
         for w in wins:
             if w.start_utc <= now < w.end_utc:
                 k = str(w.key or w.label or "")
-                ctx["band"] = (k[5:] if k.startswith("band_") else k) or None
+                k = k[5:] if k.startswith("band_") else k
+                ctx["band"] = normalize_comfort_band(k)
                 break
     except Exception:  # noqa: BLE001
         pass

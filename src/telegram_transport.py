@@ -134,11 +134,12 @@ def send_message(
         return False
 
 
-def get_updates(offset: int | None = None, *, timeout_s: int = 0) -> list[dict[str, Any]] | None:
-    """Bot API ``getUpdates`` short-poll (#833). Returns the update list, or
-    ``None`` on any failure (logged, never raised). ``timeout_s=0`` = no long poll."""
+def get_updates(offset: int | None = None, *, timeout_s: int = 0) -> tuple[int, dict[str, Any] | None]:
+    """Bot API ``getUpdates`` short-poll (#833). Returns ``(status, payload)``:
+    ``status`` is the HTTP status (0 = not configured / network error) and
+    ``payload`` the parsed JSON dict (None when unparsable). Never raises."""
     if not is_configured():
-        return None
+        return 0, None
     token = config.TELEGRAM_BOT_TOKEN.strip()
     base = (
         getattr(config, "TELEGRAM_API_BASE_URL", "https://api.telegram.org") or ""
@@ -149,14 +150,13 @@ def get_updates(offset: int | None = None, *, timeout_s: int = 0) -> list[dict[s
     http_timeout = float(getattr(config, "TELEGRAM_TIMEOUT_SECONDS", 10))
     try:
         r = requests.get(f"{base}/bot{token}/getUpdates", params=params, timeout=http_timeout)
-        if not (200 <= r.status_code < 300):
-            logger.warning("telegram getUpdates non-2xx (status=%s)", r.status_code)
-            return None
-        data = r.json()
-        if not data.get("ok"):
-            return None
-        res = data.get("result")
-        return list(res) if isinstance(res, list) else None
-    except (requests.RequestException, ValueError) as exc:
+    except requests.RequestException as exc:
         logger.warning("telegram getUpdates failed: %s", exc)
-        return None
+        return 0, None
+    try:
+        data = r.json()
+    except ValueError:
+        data = None
+    if not (200 <= r.status_code < 300):
+        logger.warning("telegram getUpdates non-2xx (status=%s)", r.status_code)
+    return int(r.status_code), data if isinstance(data, dict) else None
