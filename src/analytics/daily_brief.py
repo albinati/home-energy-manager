@@ -107,6 +107,14 @@ def _appliance_window_suggestion_line(tz: ZoneInfo) -> str | None:
             db.get_rates_for_period(tariff, now, now + timedelta(hours=horizon_h))
             if tariff else None
         )
+        # #804: on a BANDED tariff the "cheap" window is the cheap band (Cosy
+        # 12.49p), which the Agile-era 8p nudge threshold never reaches — use
+        # the band's cheap threshold (midpoint) instead.
+        if rates:
+            from ..energy.tariff_structure import detect as _detect_structure
+            _structure = _detect_structure([float(r["value_inc_vat"]) for r in rates], dynamic_rule="lp")
+            if _structure.is_banded and _structure.has_cheap:
+                thr = float(_structure.cheap_thr)
         sugg = appliance_dispatch.compute_appliance_window_suggestions(
             now, rates, max_price_p=thr, strict=False,
         )
@@ -761,6 +769,15 @@ def _tariff_peak_windows_summary(day: date, tz: ZoneInfo) -> str | None:
         return None
     if not rows:
         return None
+    # #804: on a BANDED tariff (Cosy) the static ≥25p cut-off also caught the
+    # 25.45p DAY band — the brief reported a 13 h "peak". Use the band
+    # structure's own peak level there; Agile keeps the pence cut-off.
+    from ..energy.tariff_structure import detect as _detect_structure
+    _structure = _detect_structure([float(r["value_inc_vat"]) for r in rows], dynamic_rule="lp")
+    if _structure.is_banded:
+        if not _structure.has_peak:
+            return None
+        threshold = max(_structure.peak_thr, threshold)  # keep the configured floor
     peaks = [r for r in rows if float(r["value_inc_vat"]) >= threshold]
     if not peaks:
         return None

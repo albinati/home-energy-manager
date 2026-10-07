@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 from .. import db
 from ..config import config
+from ..energy import tariff_structure
 from ..foxess.client import FoxESSClient
 from ..foxess.models import SchedulerGroup
 from ..physics import build_shower_target_iso, calculate_dhw_setpoint, find_dhw_heat_end_utc
@@ -133,7 +134,13 @@ def _resolve_plan_window(tariff: str) -> PlanWindow | None:
     # D+1 prices the next MPC re-solve picks them up cleanly.
     horizon_end_utc = target_end_utc
     if last_valid_to < target_end_utc:
-        priors = db.get_half_hourly_agile_priors(tariff, window_days=28)
+        # #804: a BANDED tariff (Cosy) follows the LOCAL clock and repeats
+        # daily, so its stored rows bucketed by local (hour, minute) are an
+        # EXACT filler (and survive the BST→GMT change). ``{}`` on a dynamic
+        # tariff → the UTC-keyed 28-day Agile median priors, as before.
+        band_profile = tariff_structure.band_profile_local(tariff)
+        priors = band_profile or db.get_half_hourly_agile_priors(tariff, window_days=28)
+        prior_kind = "prior_band" if band_profile else "prior"
         if priors:
             fallback_p = sum(priors.values()) / len(priors)
             synth: list[dict[str, Any]] = []
@@ -141,22 +148,31 @@ def _resolve_plan_window(tariff: str) -> PlanWindow | None:
             while t < target_end_utc:
                 t_end = t + timedelta(minutes=30)
                 # Half-hour granularity: prior bucket is (hour, minute) per S10.8 (#175)
-                p = priors.get((t.hour, t.minute), fallback_p)
+                if band_profile:
+                    t_loc = t.astimezone(tz)
+                    p = priors.get((t_loc.hour, t_loc.minute), fallback_p)
+                else:
+                    p = priors.get((t.hour, t.minute), fallback_p)
                 synth.append({
                     "valid_from": t.isoformat().replace("+00:00", "Z"),
                     "valid_to": t_end.isoformat().replace("+00:00", "Z"),
                     "value_inc_vat": p,
                     "tariff_code": tariff,
-                    "fetched_at": "prior",  # sentinel: distinguishes synthesised rows
+                    # "prior" sentinel: distinguishes synthesised rows (dhw_policy
+                    # treats anything else as REAL — keep it for both sources).
+                    "fetched_at": "prior",
+                    "prior_source": prior_kind,
                 })
                 t = t_end
             rates = list(rates) + synth
             logger.info(
-                "Plan window: extended horizon with %d prior slots (last_actual=%s, "
-                "target_end=%s) — D+1 priors median over 28 d, mean=%.2fp",
+                "Plan window: extended horizon with %d %s slots (last_actual=%s, "
+                "target_end=%s) — %s, mean=%.2fp",
                 len(synth),
+                prior_kind,
                 last_valid_to.strftime("%Y-%m-%dT%H:%MZ"),
                 target_end_utc.strftime("%Y-%m-%dT%H:%MZ"),
+                "local-clock band profile" if band_profile else "D+1 priors median over 28 d",
                 fallback_p,
             )
         else:
@@ -283,28 +299,22 @@ def _classify_slots(slots: list[HalfHourSlot], forecast: list[HourlyForecast]) -
     if not slots:
         return
     prices = [s.price_pence for s in slots]
-    prices_sorted = sorted(prices)
-    n = len(prices_sorted)
-    q25 = prices_sorted[max(0, n // 4 - 1)]
-    q75 = prices_sorted[min(n - 1, (3 * n) // 4)]
-    cheap_thr = min(mean(prices) * 0.85, q25) if n else 0
-    peak_thr = max(q75, config.OPTIMIZATION_PEAK_THRESHOLD_PENCE)
+    # Band-aware (#804): on a banded tariff the labels come from the band
+    # midpoints; on Agile this is the historical ``min(mean×0.85, q25)`` /
+    # ``max(q75, OPTIMIZATION_PEAK_THRESHOLD_PENCE)`` rule, unchanged.
+    bands = tariff_structure.classify(prices, dynamic_rule="legacy")
 
-    for s in slots:
+    for s, band in zip(slots, bands):
         fc = get_forecast_for_slot(s.start_utc, forecast)
         solar_boost_skip = fc and fc.estimated_pv_kw > 2.0
 
         # "negative" = price is genuinely ≤ 0p (matches the LP path definition).
         # Previously this also caught the bottom-10th-percentile of positive prices,
         # which triggered max_heat and sent false "negative window" alerts to Nikola.
-        if s.price_pence <= 0:
-            s.kind = "negative"
-        elif s.price_pence < cheap_thr:
+        if band == "cheap":
             s.kind = "cheap" if not solar_boost_skip else "standard"
-        elif s.price_pence > peak_thr:
-            s.kind = "peak"
         else:
-            s.kind = "standard"
+            s.kind = band
 
 
 def _extend_standard_to_cheap_before_peak(slots: list[HalfHourSlot], slots_to_convert: int) -> int:
@@ -1224,8 +1234,7 @@ def _run_optimizer_heuristic(
         for f in forecast[:24]
     )
 
-    cheap_thr = sorted(prices)[max(0, len(prices) // 4 - 1)] if prices else 0
-    peak_thr = sorted(prices)[min(len(prices) - 1, (3 * len(prices)) // 4)] if prices else 0
+    cheap_thr, peak_thr = tariff_structure.thresholds(prices, dynamic_rule="lp") if prices else (0, 0)
 
     strategy = (
         f"{plan_date}: neg={counts['negative']} cheap={counts['cheap']} "

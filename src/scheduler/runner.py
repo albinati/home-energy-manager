@@ -2428,7 +2428,7 @@ def bulletproof_heartbeat_tick() -> None:
         soc is not None
         and soc < float(config.FOXESS_ALERT_LOW_SOC)
         and price is not None
-        and float(price) > float(config.OPTIMIZATION_PEAK_THRESHOLD_PENCE)
+        and float(price) > _peak_alert_threshold_p(plan_date)
     ):
         key = f"low_soc_peak_{plan_date}"
         if not db.is_warning_acknowledged(key):
@@ -2438,7 +2438,7 @@ def bulletproof_heartbeat_tick() -> None:
         soc is not None
         and soc < float(config.MIN_SOC_RESERVE_PERCENT)
         and price is not None
-        and float(price) > float(config.OPTIMIZATION_PEAK_THRESHOLD_PENCE)
+        and float(price) > _peak_alert_threshold_p(plan_date)
     ):
         key = f"soc_reserve_floor_peak_{plan_date}"
         if not db.is_warning_acknowledged(key):
@@ -2447,6 +2447,22 @@ def bulletproof_heartbeat_tick() -> None:
                 f"during high price {price}p/kWh",
                 extra={"warning_key": key},
             )
+
+
+def _peak_alert_threshold_p(plan_date) -> float:
+    """Peak price threshold for the low-SoC heartbeat alerts: the LP's own
+    classification for the day (band midpoint on Cosy, q75 on Agile — #804),
+    falling back to the static ``OPTIMIZATION_PEAK_THRESHOLD_PENCE`` when no
+    daily target exists yet. Without this the Cosy DAY band (25.45p) cleared the
+    static 25p and paged on every afternoon."""
+    try:
+        tgt = db.get_daily_target(plan_date) or {}
+        v = tgt.get("peak_threshold")
+        if v is not None and float(v) > 0:
+            return float(v)
+    except Exception:
+        pass
+    return float(config.OPTIMIZATION_PEAK_THRESHOLD_PENCE)
 
 
 def _heartbeat_loop() -> None:
