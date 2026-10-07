@@ -19,11 +19,14 @@ import pytest
 from src import db
 from src.config import config
 from src.scheduler.lp_dispatch import (
-    _indoor_for_slot_fn,
     _lp_offsets,
     _lwt_preheat_pairs,
+    _pairs_from_offsets,
+    _slot_is_near_now,
     _tier_offsets,
     _write_lwt_preheat_actions,
+    smooth_lp_offsets,
+    w3_trajectory_plausible,
 )
 from src.scheduler.lp_optimizer import LpInitialState, LpPlan, solve_lp
 from src.weather import WeatherLpSeries
@@ -51,6 +54,8 @@ def _env(monkeypatch):
     monkeypatch.setattr(config, "DAIKIN_LWT_PREHEAT_MIN_BLOCK_SLOTS", 1)
     monkeypatch.setattr(config, "BULLETPROOF_TIMEZONE", "Europe/London")
     monkeypatch.setattr(config, "OCTOPUS_TARIFF_CODE", "E-1R-COSY-22-12-08-H")
+    monkeypatch.setattr(config, "LP_W3_NIGHT_FLOOR_C", 17.5, raising=False)
+    monkeypatch.setattr(config, "LP_W3_IMPLAUSIBLE_BELOW_FLOOR_C", 2.0, raising=False)
     monkeypatch.setitem(config._overrides, "DAIKIN_LWT_SOURCE", "tier")
 
 
@@ -75,71 +80,115 @@ def _plan(n=8, *, outdoor=5.0, lwt=None, space=None, indoor=None, bands=None, st
 
 def test_lp_source_falls_back_to_tier_without_indoor_trajectory():
     plan = _plan(bands=["cheap"] * 4 + ["peak"] * 4)  # no indoor_temp_c → W3 off
-    assert _lp_offsets(plan, lambda i: None) is None
+    assert _lp_offsets(plan) is None
+    assert w3_trajectory_plausible(plan) == (False, "no_trajectory")
     pairs = _lwt_preheat_pairs(plan, [], source="lp")
     offs = sorted({a["params"]["lwt_offset"] for _, a in pairs})
     assert offs == [-2, 3]  # the tier rule's cheap boost + peak setback
 
 
+def test_implausible_trajectory_makes_lp_unavailable_and_tier_unchanged():
+    """UA unfitted → the RC model cannot hold the house → predicted indoor
+    falls far below the night floor. The LP source must be unavailable and the
+    tier rule must not change (it never reads the trajectory)."""
+    falling = [21.0 - 0.8 * i for i in range(9)]  # down to 14.6 < 17.5 − 2
+    plan = _plan(lwt=[5.0] * 8, indoor=falling, bands=["cheap"] * 4 + ["peak"] * 4)
+    ok, reason = w3_trajectory_plausible(plan)
+    assert not ok and reason.startswith("trajectory_implausible_min")
+    assert _lp_offsets(plan) is None
+    assert _tier_offsets(plan, [], None) == [3] * 4 + [-2] * 4
+    assert _tier_offsets(plan, [], 23.0) == [0] * 4 + [-2] * 4  # live reading still guards boosts
+
+
 def test_zero_heat_slot_maps_to_setback_not_offset_min():
-    """The inverse physics returns OPTIMIZATION_LWT_OFFSET_MIN (−10) for a slot
-    with no space heat; a deliberate coast must write the setback instead."""
+    """The inverse physics returns OPTIMIZATION_LWT_OFFSET_MIN for a slot with
+    no space heat; a deliberate coast must write the setback instead."""
     plan = _plan(lwt=[-10.0] * 8, space=[0.0] * 8, indoor=[21.0] * 9)
-    offs = _lp_offsets(plan, lambda i: None)
-    assert offs == [-2] * 8
+    assert _lp_offsets(plan) == [-2] * 8
 
 
-def test_lp_offsets_clamped_to_pm5():
+def test_lp_offsets_clamped_to_tighter_of_both_ranges(monkeypatch):
     plan = _plan(lwt=[9.4, -8.0, 2.2, 4.6, 7.0, -3.0, 0.4, 5.0], indoor=[21.0] * 9)
-    assert _lp_offsets(plan, lambda i: None) == [5, -5, 2, 5, 5, -3, 0, 5]
+    assert _lp_offsets(plan) == [5, -5, 2, 5, 5, -3, 0, 5]
+    monkeypatch.setattr(config, "OPTIMIZATION_LWT_OFFSET_MIN", -2.0)  # prod pins −2
+    assert _lp_offsets(plan) == [5, -2, 2, 5, 5, -2, 0, 5]
 
 
 def test_warm_outdoor_slots_emit_no_rows():
     plan = _plan(outdoor=16.0, lwt=[4.0] * 8, indoor=[20.0] * 9)
-    assert _lp_offsets(plan, lambda i: None) == [None] * 8
+    assert _lp_offsets(plan) == [None] * 8
     assert _lwt_preheat_pairs(plan, [], source="lp") == []
 
 
-def test_per_slot_comfort_guard_uses_predicted_tin_for_future_slots():
-    """Predicted 22 °C (≥ setpoint + 0.5) in slots 4-7 suppresses the LP's
-    boost there, while slots 0-3 at 20.5 °C keep it."""
-    plan = _plan(lwt=[4.0] * 8, indoor=[20.5] * 4 + [22.0] * 5)
-    f = _indoor_for_slot_fn(plan, live_indoor_c=None, now_utc=datetime(2030, 1, 1, tzinfo=UTC))
-    assert _lp_offsets(plan, f) == [4] * 4 + [0] * 4
-    # tier rule gets the same per-slot guard
-    plan.price_band = ["cheap"] * 8
-    assert _tier_offsets(plan, [], f) == [3] * 4 + [0] * 4
+def test_predicted_trajectory_never_vetoes_the_lp_plan():
+    """A plan that pre-heats to 22 °C before the peak keeps its boosts and a
+    coast to 20.2 °C keeps its setback — the trajectory was computed assuming
+    those offsets, so it must not be used to cancel them."""
+    plan = _plan(lwt=[4.0] * 4 + [-2.0] * 4, indoor=[21.0, 21.4, 21.8, 22.1, 22.0, 21.3, 20.6, 20.2, 20.0])
+    assert _lp_offsets(plan) == [4] * 4 + [-2] * 4
 
 
-def test_live_reading_only_guards_near_slots():
+def test_live_reading_guards_only_near_slots_and_only_boosts():
     now = datetime(2026, 11, 4, 0, 10, tzinfo=UTC)
-    plan = _plan(lwt=[4.0] * 8, indoor=[20.0] * 9)
-    f = _indoor_for_slot_fn(plan, live_indoor_c=23.0, now_utc=now)
-    # slots at 00:00 and 00:30 are within 30 min of 00:10 → live; 01:00+ → predicted
-    assert f(0) == 23.0 and f(1) == 23.0 and f(2) == 20.0 and f(7) == 20.0
-    assert _lp_offsets(plan, f) == [0, 0] + [4] * 6
-
-
-def test_no_trajectory_keeps_live_reading_for_every_slot():
-    plan = _plan(lwt=[4.0] * 8)
-    f = _indoor_for_slot_fn(plan, live_indoor_c=23.0, now_utc=datetime(2030, 1, 1, tzinfo=UTC))
-    assert all(f(i) == 23.0 for i in range(8))
+    plan = _plan(lwt=[4.0] * 4 + [-3.0] * 4, indoor=[20.0] * 9)
+    assert _slot_is_near_now(plan, 1, now) and not _slot_is_near_now(plan, 2, now)
+    assert _lp_offsets(plan, 23.0, now_utc=now) == [0, 0, 4, 4, -3, -3, -3, -3]
+    assert _lp_offsets(plan, 19.0, now_utc=now) == [4, 4, 4, 4, -3, -3, -3, -3]  # cold room: setbacks untouched
 
 
 def test_tier_rule_uses_plan_price_band_on_cosy():
     plan = _plan(bands=["cheap", "cheap", "standard", "standard", "peak", "peak", "standard", "negative"])
-    offs = _tier_offsets(plan, [], lambda i: None)
-    assert offs == [3, 3, 0, 0, -2, -2, 0, 5]
+    assert _tier_offsets(plan, [], None) == [3, 3, 0, 0, -2, -2, 0, 5]
+
+
+def test_w3_on_tier_equals_w3_off_tier_for_same_live_reading():
+    """Kill-switch equivalence: with the thermal model on, source=tier yields
+    exactly the pairs it yields with the model off."""
+    bands = ["cheap"] * 6 + ["standard"] * 4 + ["peak"] * 6
+    off_plan = _plan(n=16, bands=bands)
+    on_plan = _plan(n=16, bands=bands, lwt=[5.0] * 16, indoor=[19.0 - 0.3 * i for i in range(17)])
+    for live in (None, 20.0, 22.5):
+        assert _lwt_preheat_pairs(on_plan, [], indoor_c=live, source="tier") == \
+            _lwt_preheat_pairs(off_plan, [], indoor_c=live, source="tier")
+
+
+# ── smoothing ────────────────────────────────────────────────────────────────
+
+
+def test_smooth_lp_offsets_blockifies_by_sign():
+    """The LP signal ramps (3,5,5,4,5); value-run smoothing shredded it into
+    fragments and restore writes. Sign blocks keep the boost whole."""
+    seq = [3, 5, 5, 4, 5, 0, -2, -3, -2, -2, None, None]
+    assert smooth_lp_offsets(seq, 4) == [5, 5, 5, 5, 5, 0, -2, -2, -2, -2, None, None]
+    assert smooth_lp_offsets([3, 4, 0, 0, 5, 5, 5, 5], 4) == [0, 0, 0, 0, 5, 5, 5, 5]
+
+
+def test_solved_plan_through_lp_pairs_with_prod_min_block(monkeypatch):
+    """A real solve → _lp_offsets → _pairs_from_offsets with the prod
+    DAIKIN_LWT_PREHEAT_MIN_BLOCK_SLOTS=4: the 13-16 cheap-band pre-heat
+    survives as one boost window and no setback lands inside it."""
+    monkeypatch.setattr(config, "DAIKIN_LWT_PREHEAT_MIN_BLOCK_SLOTS", 4)
+    plan, prices = _solve_w3(monkeypatch, source="lp")
+    offs = _lp_offsets(plan)
+    assert offs is not None
+    pairs = _pairs_from_offsets(plan, offs, source="lp")
+    assert pairs
+    cheap_pm = [plan.slot_starts_utc[i] for i, p in enumerate(prices) if p == COSY_CHEAP and 26 <= i < 32]
+    for _, act in pairs:
+        st = datetime.fromisoformat(act["start_time"].replace("Z", "+00:00"))
+        en = datetime.fromisoformat(act["end_time"].replace("Z", "+00:00"))
+        if any(st <= s < en for s in cheap_pm):
+            assert act["params"]["lwt_offset"] > 0
 
 
 # ── source switch + telemetry diff ───────────────────────────────────────────
 
 
-def test_source_switch_is_runtime_tunable():
+def test_source_switch_is_runtime_tunable(monkeypatch):
     plan = _plan(lwt=[4.0] * 8, indoor=[21.0] * 9, bands=["peak"] * 8)
-    config._overrides["DAIKIN_LWT_SOURCE"] = "tier"
+    monkeypatch.setitem(config._overrides, "DAIKIN_LWT_SOURCE", "tier")
     tier_pairs = _lwt_preheat_pairs(plan, [])
-    config._overrides["DAIKIN_LWT_SOURCE"] = "lp"
+    monkeypatch.setitem(config._overrides, "DAIKIN_LWT_SOURCE", "lp")
     lp_pairs = _lwt_preheat_pairs(plan, [])
     assert tier_pairs[0][1]["params"]["lwt_offset"] == -2
     assert lp_pairs[0][1]["params"]["lwt_offset"] == 4
@@ -155,13 +204,13 @@ def test_diff_row_logged_with_both_sources(monkeypatch):
     upserts: list[dict] = []
     monkeypatch.setattr(db, "upsert_action", lambda **kw: upserts.append(kw) or len(upserts))
     plan = _plan(lwt=[4.0] * 4 + [-3.0] * 4, indoor=[21.0] * 9, bands=["cheap"] * 4 + ["peak"] * 4)
-    config._overrides["DAIKIN_LWT_SOURCE"] = "lp"
+    monkeypatch.setitem(config._overrides, "DAIKIN_LWT_SOURCE", "lp")
     n = _write_lwt_preheat_actions(DAY.isoformat(), plan, [])
     assert n >= 2
     diff = [kw for kw in logged if kw["action"] == "lwt_source_diff"]
     assert len(diff) == 1
     p = diff[0]["params"]
-    assert p["source_used"] == "lp" and p["lp_available"] is True and p["n_slots"] == 8
+    assert p["source_used"] == "lp" and p["lp_available"] is True and p["n_slots"] == 8 and p["lp_reason"] == "ok"
     assert p["n_differ"] == 8 and p["windows"][0]["tier"] == 3 and p["windows"][0]["lp"] == 4
     assert {u["params"]["lwt_offset"] for u in upserts if u["action_type"] == "lwt_preheat"} == {4, -3}
 
@@ -175,22 +224,23 @@ def test_diff_row_reports_fallback_when_lp_unavailable(monkeypatch):
     monkeypatch.setattr(db, "log_action", lambda **kw: logged.append(kw))
     monkeypatch.setattr(db, "upsert_action", lambda **kw: 1)
     plan = _plan(bands=["cheap"] * 8)  # no trajectory
-    config._overrides["DAIKIN_LWT_SOURCE"] = "lp"
+    monkeypatch.setitem(config._overrides, "DAIKIN_LWT_SOURCE", "lp")
     _write_lwt_preheat_actions(DAY.isoformat(), plan, [])
     p = [kw for kw in logged if kw["action"] == "lwt_source_diff"][0]["params"]
-    assert p["source_used"] == "tier" and p["lp_available"] is False
+    assert p["source_used"] == "tier" and p["lp_available"] is False and p["lp_reason"] == "no_trajectory"
 
 
 def test_gate_state_exposes_source_and_last_diff(monkeypatch):
     from src.scheduler.lp_dispatch import space_heating_gate_state
 
     db.init_db()
-    config._overrides["DAIKIN_LWT_SOURCE"] = "lp"
+    monkeypatch.setitem(config._overrides, "DAIKIN_LWT_SOURCE", "lp")
     db.log_action(device="daikin", action="lwt_source_diff",
                   params={"source_used": "lp", "n_differ": 3}, result="ok", trigger="dispatch")
     st = space_heating_gate_state()
     assert st["lwt_source"] == "lp"
     assert st["lwt_source_last_diff"]["n_differ"] == 3
+    assert st["lwt_source_last_diff"]["logged_at"]
 
 
 # ── the wire: LP offset → action row → reconciler → apply ────────────────────
@@ -224,7 +274,7 @@ def test_wire_lp_offset_reaches_set_lwt_offset(monkeypatch):
         plan = _plan(n=4, lwt=[-4.0] * 4, indoor=[21.0] * 5, bands=["peak"] * 4, start=start)
         plan_date = now_utc.date().isoformat()
 
-        config._overrides["DAIKIN_LWT_SOURCE"] = "lp"
+        monkeypatch.setitem(config._overrides, "DAIKIN_LWT_SOURCE", "lp")
         assert _write_lwt_preheat_actions(plan_date, plan, []) >= 1
         rows = db.get_actions_for_plan_date(plan_date, device="daikin")
         def _p(r):
@@ -236,7 +286,7 @@ def test_wire_lp_offset_reaches_set_lwt_offset(monkeypatch):
 
         # kill switch: same plan under the tier rule writes the −2 setback
         apply_calls.clear()
-        config._overrides["DAIKIN_LWT_SOURCE"] = "tier"
+        monkeypatch.setitem(config._overrides, "DAIKIN_LWT_SOURCE", "tier")
         monkeypatch.setattr("src.config.config.DB_PATH", str(Path(td) / "t2.db"))  # fresh DB
         db.init_db()
         assert _write_lwt_preheat_actions(plan_date, plan, []) >= 1
@@ -275,7 +325,7 @@ def _solve_w3(monkeypatch, *, source: str):
     monkeypatch.setattr(config, "BUILDING_UA_W_PER_K", 150.0, raising=False)
     monkeypatch.setattr(config, "BUILDING_THERMAL_MASS_KWH_PER_K", 12.0, raising=False)
     monkeypatch.setattr(config, "DAIKIN_CONTROL_MODE", "active")
-    config._overrides["DAIKIN_LWT_SOURCE"] = source
+    monkeypatch.setitem(config._overrides, "DAIKIN_LWT_SOURCE", source)
     starts, prices = _cosy_day(DAY)
     n = len(starts)
     w = WeatherLpSeries(

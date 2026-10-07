@@ -595,44 +595,47 @@ def smooth_lwt_offsets(offsets: list[int | None], min_block: int) -> list[int | 
     return out
 
 
-def _indoor_for_slot_fn(
-    plan: LpPlan,
-    live_indoor_c: float | None,
-    *,
-    now_utc: datetime | None = None,
-):
-    """Per-slot comfort-guard temperature (#808).
-
-    The old guard evaluated ONE live reading against every slot of a 48 h plan
-    — a warm afternoon reading suppressed tomorrow's 04-07 boost. Now: the live
-    reading for slots within ``INDOOR_SENSOR_STALE_MINUTES`` of now, the W3
-    predicted trajectory (``plan.indoor_temp_c[i]`` = temperature at slot
-    start) for the rest. With no trajectory (W3 off) the live reading applies
-    to every slot, as before.
-    """
+def _slot_is_near_now(plan: LpPlan, i: int, now_utc: datetime | None = None) -> bool:
+    """True when slot ``i`` starts within ``INDOOR_SENSOR_STALE_MINUTES`` of
+    now — the only slots a LIVE indoor reading can say anything about."""
     stale = timedelta(minutes=int(getattr(config, "INDOOR_SENSOR_STALE_MINUTES", 30)))
     now = now_utc or datetime.now(UTC)
+    return abs(plan.slot_starts_utc[i] - now) <= stale
+
+
+def w3_trajectory_plausible(plan: LpPlan) -> tuple[bool, str]:
+    """May the LP's W3 indoor trajectory drive hardware? (#808 review)
+
+    With an unfitted UA the RC model cannot hold the house: the predicted
+    temperature falls monotonically, the comfort slack dominates the objective
+    and the "plan" is to heat at the ceiling 24/7. Gate: no trajectory, or any
+    predicted value more than ``LP_W3_IMPLAUSIBLE_BELOW_FLOOR_C`` under the
+    night floor / 2× that above the setpoint → ``(False, reason)``.
+    """
     traj = plan.indoor_temp_c or []
-
-    def _f(i: int) -> float | None:
-        if not traj:
-            return live_indoor_c
-        st = plan.slot_starts_utc[i]
-        if live_indoor_c is not None and abs(st - now) <= stale:
-            return live_indoor_c
-        if i < len(traj):
-            return float(traj[i])
-        return None
-
-    return _f
+    if not traj or not plan.lwt_offset_c:
+        return False, "no_trajectory"
+    floor = float(getattr(config, "LP_W3_NIGHT_FLOOR_C", 17.5))
+    setpoint = float(config.INDOOR_SETPOINT_C)
+    tol = float(getattr(config, "LP_W3_IMPLAUSIBLE_BELOW_FLOOR_C", 2.0))
+    lo, hi = min(traj), max(traj)
+    if lo < floor - tol:
+        return False, f"trajectory_implausible_min:{lo:.1f}"
+    if hi > setpoint + 2 * tol:
+        return False, f"trajectory_implausible_max:{hi:.1f}"
+    return True, "ok"
 
 
 def _tier_offsets(
     plan: LpPlan,
     forecast: list[HourlyForecast],
-    indoor_for_slot,
+    indoor_c: float | None = None,
 ) -> list[int | None]:
-    """Per-slot offsets from the price-band / price-tier rule (#481, #808)."""
+    """Per-slot offsets from the price-band / price-tier rule (#481, #808).
+
+    The comfort guard uses the LIVE reading only (as before #808) — never the
+    W3 predicted trajectory, so ``DAIKIN_LWT_SOURCE=tier`` is a clean kill
+    switch whatever the thermal model says."""
     cheap_thr = plan.cheap_threshold_pence or float(config.OPTIMIZATION_CHEAP_THRESHOLD_PENCE)
     peak_thr = plan.peak_threshold_pence or float(config.OPTIMIZATION_PEAK_THRESHOLD_PENCE)
     bands = plan.price_band or []
@@ -653,34 +656,40 @@ def _tier_offsets(
         price = plan.price_pence[i] if i < len(plan.price_pence) else 0.0
         offsets.append(_preheat_lwt_offset(
             price, outdoor, cheap_thr=cheap_thr, peak_thr=peak_thr,
-            indoor_c=indoor_for_slot(i), price_band=(bands[i] if i < len(bands) else None),
+            indoor_c=indoor_c, price_band=(bands[i] if i < len(bands) else None),
         ))
     return offsets
 
 
-def _lp_offsets(plan: LpPlan, indoor_for_slot) -> list[int | None] | None:
+def _lp_offsets(
+    plan: LpPlan,
+    live_indoor_c: float | None = None,
+    *,
+    now_utc: datetime | None = None,
+) -> list[int | None] | None:
     """Per-slot offsets from the LP's own W3 thermal plan (#808).
 
-    Returns ``None`` when the LP did not run the thermal model (no indoor
-    trajectory: stale sensor, passive mode, flag off) so the caller falls back
-    to the tier rule. Translation rules, in order:
+    Returns ``None`` when the trajectory is absent or implausible
+    (``w3_trajectory_plausible``) so the caller falls back to the tier rule.
+    Translation rules, in order:
 
     * outdoor at/above ``DAIKIN_LWT_PREHEAT_OUTDOOR_CUTOFF_C`` → ``None`` (no
       write; same exogenous anti-phantom guard as the tier rule);
-    * a slot the LP left with NO space heat while the weather curve would run
-      the compressor is a deliberate coast → ``DAIKIN_LWT_PREHEAT_PEAK_SETBACK_C``
-      — NOT the ``OPTIMIZATION_LWT_OFFSET_MIN`` (−10) the inverse physics
-      returns for zero draw;
+    * a slot the LP left with NO space heat is a deliberate coast →
+      ``DAIKIN_LWT_PREHEAT_PEAK_SETBACK_C`` — NOT whatever the inverse physics
+      returns for zero draw (``OPTIMIZATION_LWT_OFFSET_MIN``);
     * otherwise ``round(plan.lwt_offset_c[i])``;
-    * clamp to ``DAIKIN_LWT_LP_OFFSET_MIN/MAX``;
-    * the same per-slot comfort guard as the tier rule (predicted t_in).
+    * clamp to the TIGHTER of ``OPTIMIZATION_LWT_OFFSET_MIN/MAX`` and
+      ``DAIKIN_LWT_LP_OFFSET_MIN/MAX`` (prod pins the former at −2);
+    * comfort guard with the LIVE reading only, on slots near now, boost side
+      only — the plan's own predicted trajectory is NEVER used to veto the plan
+      (it was computed assuming those offsets; vetoing them would invalidate it).
     """
-    if not plan.indoor_temp_c or not plan.lwt_offset_c:
+    ok, _reason = w3_trajectory_plausible(plan)
+    if not ok:
         return None
-    from ..physics import get_daikin_heating_kw
-
-    lo = int(getattr(config, "DAIKIN_LWT_LP_OFFSET_MIN", -5))
-    hi = int(getattr(config, "DAIKIN_LWT_LP_OFFSET_MAX", 5))
+    lo = int(max(float(config.OPTIMIZATION_LWT_OFFSET_MIN), float(getattr(config, "DAIKIN_LWT_LP_OFFSET_MIN", -5))))
+    hi = int(min(float(config.OPTIMIZATION_LWT_OFFSET_MAX), float(getattr(config, "DAIKIN_LWT_LP_OFFSET_MAX", 5))))
     setback = int(config.DAIKIN_LWT_PREHEAT_PEAK_SETBACK_C)
     band = float(config.DAIKIN_LWT_PREHEAT_COMFORT_BAND_C)
     setpoint = float(config.INDOOR_SETPOINT_C)
@@ -694,25 +703,56 @@ def _lp_offsets(plan: LpPlan, indoor_for_slot) -> list[int | None] | None:
             continue
         es = float(plan.space_electric_kwh[i]) if i < len(plan.space_electric_kwh) else 0.0
         if es <= 1e-6:
-            curve_runs = get_daikin_heating_kw(outdoor) * 0.5 > 1e-6
-            off = setback if curve_runs else 0
+            off = setback
         else:
             raw = float(plan.lwt_offset_c[i]) if i < len(plan.lwt_offset_c) else 0.0
-            off = int(round(raw))
+            off = int(math.floor(raw + 0.5))
         off = max(lo, min(hi, off))
-        ind = indoor_for_slot(i)
-        if ind is not None:
-            if off > 0 and ind >= setpoint + band:
-                off = 0
-            if off < 0 and ind <= setpoint - band:
-                off = 0
+        if (
+            off > 0 and live_indoor_c is not None
+            and live_indoor_c >= setpoint + band and _slot_is_near_now(plan, i, now_utc)
+        ):
+            off = 0
         out.append(off)
     return out
+
+
+def smooth_lp_offsets(offsets: list[int | None], min_block: int) -> list[int | None]:
+    """Block-ify the LP's per-slot offsets by SIGN before the length filter
+    (#808 review): the LP signal is the rounded inverse of a continuous ramp
+    (``3,5,5,4,5``), so the value-run smoother shredded every boost into
+    fragments and inserted restore-to-0 writes. Each run of same-sign non-zero
+    slots becomes one block at its most common value (ties → the smaller
+    magnitude), then ``smooth_lwt_offsets`` drops blocks shorter than
+    ``min_block``."""
+    n = len(offsets)
+    out: list[int | None] = list(offsets)
+    i = 0
+    while i < n:
+        v = out[i]
+        if not v:
+            i += 1
+            continue
+        sign = 1 if v > 0 else -1
+        j = i
+        while j + 1 < n and out[j + 1] and (out[j + 1] > 0) == (sign > 0):
+            j += 1
+        block = [int(out[k]) for k in range(i, j + 1)]
+        counts: dict[int, int] = {}
+        for b in block:
+            counts[b] = counts.get(b, 0) + 1
+        mode = sorted(counts.items(), key=lambda kv: (-kv[1], abs(kv[0])))[0][0]
+        for k in range(i, j + 1):
+            out[k] = mode
+        i = j + 1
+    return smooth_lwt_offsets(out, min_block)
 
 
 def _pairs_from_offsets(
     plan: LpPlan,
     offsets: list[int | None],
+    *,
+    source: str = "tier",
 ) -> list[tuple[dict[str, Any] | None, dict[str, Any]]]:
     """Smooth a per-slot offset sequence and emit ``(restore_row, action_row)``
     pairs — one window per sustained non-zero block (#481)."""
@@ -720,7 +760,11 @@ def _pairs_from_offsets(
     # Thermal coherence: collapse per-slot price chatter into sustained blocks
     # so we don't toggle the heat pump for wiggles the thermal mass can't follow
     # (and don't burn Daikin writes doing it). See ``smooth_lwt_offsets``.
-    offsets = smooth_lwt_offsets(list(offsets), int(config.DAIKIN_LWT_PREHEAT_MIN_BLOCK_SLOTS))
+    min_block = int(config.DAIKIN_LWT_PREHEAT_MIN_BLOCK_SLOTS)
+    offsets = (
+        smooth_lp_offsets(list(offsets), min_block) if source == "lp"
+        else smooth_lwt_offsets(list(offsets), min_block)
+    )
 
     restore_window = max(2, int(getattr(config, "LP_RESTORE_WINDOW_MINUTES", 5)))
     out: list[tuple[dict[str, Any] | None, dict[str, Any]]] = []
@@ -802,14 +846,14 @@ def _lwt_preheat_pairs(
         return []
     if not plan.slot_starts_utc or not plan.price_pence:
         return []
-    indoor_for_slot = _indoor_for_slot_fn(plan, indoor_c)
     src = (source or _lwt_source())
     offsets: list[int | None] | None = None
     if src == "lp":
-        offsets = _lp_offsets(plan, indoor_for_slot)
+        offsets = _lp_offsets(plan, indoor_c)
+    used = "lp" if offsets is not None else "tier"
     if offsets is None:
-        offsets = _tier_offsets(plan, forecast, indoor_for_slot)
-    return _pairs_from_offsets(plan, offsets)
+        offsets = _tier_offsets(plan, forecast, indoor_c)
+    return _pairs_from_offsets(plan, offsets, source=used)
 
 
 def _log_lwt_source_diff(
@@ -817,6 +861,8 @@ def _log_lwt_source_diff(
     tier_offsets: list[int | None],
     lp_offsets: list[int | None] | None,
     source_used: str,
+    *,
+    lp_reason: str = "ok",
 ) -> dict[str, Any]:
     """Continuous tier-vs-LP telemetry (#808): one ``action_log`` row per
     dispatch with the per-slot disagreement, so the LP source can be judged
@@ -825,6 +871,7 @@ def _log_lwt_source_diff(
     summary: dict[str, Any] = {
         "source_used": source_used,
         "lp_available": lp_offsets is not None,
+        "lp_reason": lp_reason,
         "n_slots": n,
         "n_differ": 0,
         "mean_abs_diff": 0.0,
@@ -1367,7 +1414,7 @@ def space_heating_gate_state() -> dict[str, Any]:
             raw = rows[0].get("params")
             lwt_source_last_diff = json.loads(raw) if isinstance(raw, str) else raw
             if isinstance(lwt_source_last_diff, dict):
-                lwt_source_last_diff["logged_at"] = rows[0].get("created_at") or rows[0].get("ts")
+                lwt_source_last_diff["logged_at"] = rows[0].get("timestamp")
     except Exception:  # pragma: no cover - status read must not fail
         logger.debug("space_heating_gate_state: lwt_source_diff read failed", exc_info=True)
 
@@ -1464,15 +1511,17 @@ def _write_lwt_preheat_actions(
     # #808: compute BOTH sources every dispatch, diff them into action_log, and
     # drive the device from DAIKIN_LWT_SOURCE (runtime-tunable; lp falls back
     # to tier when the LP produced no W3 trajectory).
-    indoor_for_slot = _indoor_for_slot_fn(plan, indoor_c)
-    tier_offsets = _tier_offsets(plan, forecast, indoor_for_slot)
-    lp_offsets = _lp_offsets(plan, indoor_for_slot)
+    tier_offsets = _tier_offsets(plan, forecast, indoor_c)
+    _plausible, lp_reason = w3_trajectory_plausible(plan)
+    lp_offsets = _lp_offsets(plan, indoor_c)
     source_used = _lwt_source()
     if source_used == "lp" and lp_offsets is None:
-        logger.info("LWT source=lp requested but the LP produced no indoor trajectory — using the tier rule")
+        logger.info("LWT source=lp requested but the LP trajectory is unavailable (%s) — using the tier rule", lp_reason)
         source_used = "tier"
-    _log_lwt_source_diff(plan, tier_offsets, lp_offsets, source_used)
-    pairs = _pairs_from_offsets(plan, lp_offsets if source_used == "lp" else tier_offsets)
+    _log_lwt_source_diff(plan, tier_offsets, lp_offsets, source_used, lp_reason=lp_reason)
+    pairs = _pairs_from_offsets(
+        plan, lp_offsets if source_used == "lp" else tier_offsets, source=source_used,
+    )
     if not pairs:
         return 0
 

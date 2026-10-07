@@ -951,6 +951,11 @@ class Config:
     # W3 comfort floor inside the PEAK band = INDOOR_SETPOINT_C − this (coast
     # through the peak on stored heat; τ ≈ 80 h → ~0.5 °C over 3 h).
     LP_W3_PEAK_COAST_DELTA_C: float = float(os.getenv("LP_W3_PEAK_COAST_DELTA_C", "1.0"))
+    # Plausibility gate on the W3 trajectory before it may drive hardware: a
+    # predicted indoor temperature more than this below the night floor (or
+    # more than 2× this above the setpoint) means the RC model cannot hold the
+    # house (unfitted UA/k) — the LP source is then unavailable for that plan.
+    LP_W3_IMPLAUSIBLE_BELOW_FLOOR_C: float = float(os.getenv("LP_W3_IMPLAUSIBLE_BELOW_FLOOR_C", "2.0"))
     # LWT pre-heat demand gate: drop phantom single-quantum onecta_cache
     # buckets (the #760 learner guard) before summing trailing heating (#749/#807).
     DAIKIN_LWT_PREHEAT_DEMAND_GATE_PHANTOM_FILTER: bool = os.getenv(

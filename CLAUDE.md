@@ -391,10 +391,29 @@ disagreeing `windows`); **`DAIKIN_LWT_SOURCE`** (runtime-tunable, `PUT
   suppress tomorrow's 04–07 boost). No trajectory → live reading everywhere.
 - When `DAIKIN_LWT_SOURCE=lp` the LP's `e_space` ceiling is capped at the ±5
   clamp so the plan never assumes more lift than the device will get.
+- **Plausibility gate** (`w3_trajectory_plausible`): the LP source is
+  unavailable (diff row `lp_available=false`, `lp_reason`) when any predicted
+  indoor value is more than `LP_W3_IMPLAUSIBLE_BELOW_FLOOR_C` (2.0) under the
+  night floor or 2× that above the setpoint — the signature of an RC model
+  that cannot hold the house (unfitted UA/k). The predicted trajectory is
+  NEVER used to veto the plan's own offsets (that was circular); the only guard
+  on LP offsets is the LIVE reading, on slots near now, boost side. The `tier`
+  rule never reads the trajectory, so `DAIKIN_LWT_SOURCE=tier` is a true kill
+  switch even with W3 on. LP offsets are block-ified by SIGN before the
+  `DAIKIN_LWT_PREHEAT_MIN_BLOCK_SLOTS` filter (`smooth_lp_offsets`).
+- **UA must be model-consistent before W3 drives hardware.** The LP's pump
+  model is `k × (LWT − 18)` with the learned `k` (prod 0.063 kW/°C) — at 5 °C
+  outdoor it can hold the house only up to UA ≈ 200 W/K. The env default
+  `BUILDING_UA_W_PER_K=600` (and C = τ·UA ≈ 50 kWh/K) makes the trajectory
+  fall monotonically and the comfort slack dominate the objective. Prod pins
+  `BUILDING_UA_W_PER_K=200` (provisional; C = 82.7 h × 200 ≈ 16.5 kWh/K) until
+  `fit_ua_hdd` learns from ≥ 20 heating days; the gate above refuses garbage
+  regardless.
 - Rollout: deploy with `tier` → read `lwt_source_diff` + `plan.indoor_temp_c`
-  for a day (boosts only in cheap bands, setbacks only in the peak, trajectory
-  within 17–23 °C) → `PUT /api/v1/settings` `DAIKIN_LWT_SOURCE=lp`.
-  Status: `space_heating_gate_state()` → `lwt_source`, `lwt_source_last_diff`.
+  for a day (`lp_available=true`, boosts only in cheap bands, setbacks only in
+  the peak, trajectory within 17–23 °C) → `PUT /api/v1/settings`
+  `DAIKIN_LWT_SOURCE=lp`. Status: `space_heating_gate_state()` →
+  `lwt_source`, `lwt_source_last_diff`.
 
 ## Key `.env` settings to know
 
