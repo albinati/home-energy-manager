@@ -967,6 +967,9 @@ class Config:
     PEAK_IMPORT_GUARD_KW: float = float(os.getenv("PEAK_IMPORT_GUARD_KW", "0.3"))
     PEAK_IMPORT_GUARD_TICKS: int = int(os.getenv("PEAK_IMPORT_GUARD_TICKS", "2"))
     PEAK_IMPORT_GUARD_ACTION: str = (os.getenv("PEAK_IMPORT_GUARD_ACTION") or "replan").strip().lower()
+    # A committed plan that already buys ≥ this in the current peak slot is a
+    # planned shortfall, not a plan failure — the guard stays quiet.
+    PEAK_IMPORT_GUARD_PLANNED_KWH: float = float(os.getenv("PEAK_IMPORT_GUARD_PLANNED_KWH", "0.1"))
     # --- Tariff structure (#803/#804, Cosy switch 2026-10) -----------------
     # "auto" detects a BANDED tariff (≤ TARIFF_BANDED_MAX_LEVELS distinct price
     # levels in the horizon, e.g. Cosy's 3) and derives cheap/peak thresholds as
@@ -1610,7 +1613,7 @@ class Config:
         "LP_SCENARIOS_ON_TRIGGER_REASONS",
         "plan_push,octopus_fetch,tier_boundary,"
         "soc_drift,import_overshoot,pv_upside,pv_downside,load_upside,"
-        "forecast_revision,dynamic_replan,appliance_armed,peak_import",
+        "forecast_revision,dynamic_replan,appliance_armed",
     )
     TARGET_ROOM_TEMP_MIN_C: float = float(os.getenv("TARGET_ROOM_TEMP_MIN_C", "18.0"))
     TARGET_ROOM_TEMP_MAX_C: float = float(os.getenv("TARGET_ROOM_TEMP_MAX_C", "23.0"))

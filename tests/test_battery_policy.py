@@ -54,6 +54,10 @@ def _env(monkeypatch):
     monkeypatch.setattr(app_config, "LP_PEAK_IMPORT_PENALTY_PENCE_PER_KWH", 0.0, raising=False)
     monkeypatch.setattr(app_config, "LP_BATTERY_EXPORT_ENABLED", True, raising=False)
     monkeypatch.setattr(app_config, "DAIKIN_CONTROL_MODE", "passive", raising=False)
+    monkeypatch.setattr(app_config, "OPTIMIZATION_PRESET", "normal", raising=False)
+    monkeypatch.setattr(app_config, "MIN_SOC_RESERVE_PERCENT", 15.0, raising=False)
+    monkeypatch.setattr(app_config, "BATTERY_CAPACITY_KWH", 10.0, raising=False)
+    monkeypatch.setattr(app_config, "LP_PESS_CHARGE_FLOOR_ENABLED", False, raising=False)
     db.init_db()
 
 
@@ -117,7 +121,7 @@ def test_cosy_peak_slots_import_zero_when_battery_sufficient(monkeypatch):
     peak_idx = [i for i, p in enumerate(prices) if p == COSY_PEAK]
     assert all(plan.import_kwh[i] < 1e-6 for i in peak_idx)
     # and the battery covers the peak: it still holds charge entering 16:00
-    assert plan.soc_kwh[peak_idx[0]] > 1.6
+    assert plan.soc_kwh[peak_idx[0]] >= 1.5 + 2.4 / (0.92 ** 0.5)  # reserve + the peak's load
 
 
 def test_penalty_keeps_feasible_when_battery_cannot_cover_peak(monkeypatch):
@@ -182,7 +186,7 @@ def test_no_forcedischarge_group_when_export_disabled(monkeypatch):
     monkeypatch.setattr(db, "log_action", lambda **kw: logged.append(kw))
     groups_off, _ = build_fox_groups_from_lp(plan)
     assert all(g.work_mode != "ForceDischarge" for g in groups_off)
-    assert logged and logged[0]["action"] == "export_slot_suppressed" and logged[0]["params"]["n_slots"] == 2
+    assert len([x for x in logged if x["action"] == "export_slot_suppressed"]) == 2  # one audit row per slot
 
 
 def test_cosy_peak_window_is_selfuse(monkeypatch):
@@ -196,10 +200,17 @@ def test_cosy_peak_window_is_selfuse(monkeypatch):
     for s, p in zip(slots, prices):
         if p == COSY_PEAK:
             assert s.kind in ("standard", "peak", "tank_idle_overnight")
+    assert plan.peak_import_kwh == pytest.approx(0.0, abs=1e-6)
     groups, _ = build_fox_groups_from_lp(plan)
-    assert groups and all(g.work_mode != "ForceDischarge" for g in groups)
-    peak_groups = [g for g in groups if 16 <= g.start_hour < 19 and g.work_mode != "SelfUse"]
-    assert not any(g.work_mode == "ForceCharge" for g in peak_groups)
+    assert all(g.work_mode != "ForceDischarge" for g in groups)
+    # every minute of 16:00-18:59 local is covered by a SelfUse group at the
+    # reserve floor, or by no group at all (= firmware SelfUse)
+    for h in (16, 17, 18):
+        for m in (0, 30):
+            t = h * 60 + m
+            covering = [g for g in groups if g.start_hour * 60 + g.start_minute <= t <= g.end_hour * 60 + g.end_minute]
+            for g in covering:
+                assert g.work_mode == "SelfUse", f"{h:02d}:{m:02d} covered by {g.work_mode}"
 
 
 # ── heartbeat: peak-import guard ─────────────────────────────────────────────
@@ -221,8 +232,9 @@ def guard_env(monkeypatch):
     replans: list[dict] = []
     logged: list[dict] = []
     monkeypatch.setattr(runner, "notify_risk", lambda msg, extra=None: alerts.append((msg, extra or {})))
-    monkeypatch.setattr(runner, "bulletproof_mpc_job", lambda **kw: replans.append(kw))
+    monkeypatch.setattr(runner, "bulletproof_mpc_job", lambda **kw: replans.append(kw) or True)
     monkeypatch.setattr(runner.db, "log_action", lambda **kw: logged.append(kw))
+    monkeypatch.setattr(runner, "_lp_planned_import_kwh_at", lambda slot_start: 0.0)
     return runner, alerts, replans, logged
 
 
@@ -238,8 +250,9 @@ def test_peak_guard_fires_after_n_ticks(guard_env):
     out = _tick(runner, price=COSY_PEAK, grid_kw=0.9, minute=5)
     assert out["fired"] is True and out["ticks"] == 2
     assert len(alerts) == 1 and alerts[0][1]["warning_key"].startswith("peak_import_2026-10-14_1600")
-    assert len(replans) == 1 and replans[0]["trigger_reason"] == "peak_import"
-    assert logged[0]["action"] == "peak_import_guard"
+    assert len(replans) == 1 and replans[0]["trigger_reason"] == "peak_import" and replans[0]["bypass_cooldown"] is True
+    assert logged[0]["action"] == "peak_import_guard" and logged[0]["params"]["replanned"] is True
+    assert "re-planned" in alerts[0][0]
 
 
 def test_peak_guard_notifies_once_per_window(guard_env):
@@ -273,3 +286,71 @@ def test_peak_guard_action_none_alerts_without_replan(guard_env, monkeypatch):
     _tick(runner, price=COSY_PEAK, grid_kw=1.0)
     _tick(runner, price=COSY_PEAK, grid_kw=1.0, minute=5)
     assert len(alerts) == 1 and replans == []
+
+
+# ── review follow-ups ────────────────────────────────────────────────────────
+
+
+def test_peak_guard_inert_on_dynamic_tariff(guard_env, monkeypatch):
+    """F1: on Agile the guard never pages (26-35p evenings with 0.5 kW import
+    are normal)."""
+    runner, alerts, replans, _ = guard_env
+    monkeypatch.setattr(app_config, "OCTOPUS_TARIFF_CODE", "E-1R-AGILE-24-10-01-H")
+    for m in range(0, 30, 5):
+        out = _tick(runner, price=34.0, grid_kw=2.0, minute=m)
+    assert out["in_peak"] is False and alerts == [] and replans == []
+
+
+def test_peak_guard_none_price_keeps_window_state(guard_env):
+    runner, alerts, _, _ = guard_env
+    _tick(runner, price=COSY_PEAK, grid_kw=1.0)
+    _tick(runner, price=COSY_PEAK, grid_kw=1.0, minute=5)
+    assert len(alerts) == 1
+    _tick(runner, price=None, grid_kw=1.0, minute=10)       # transient rates miss
+    _tick(runner, price=COSY_PEAK, grid_kw=1.0, minute=15)
+    _tick(runner, price=COSY_PEAK, grid_kw=1.0, minute=20)
+    assert len(alerts) == 1  # same window, no second alert
+
+
+def test_peak_guard_quiet_when_import_was_planned(guard_env, monkeypatch):
+    """F4: the committed plan already buys this slot → not a plan failure."""
+    runner, alerts, replans, _ = guard_env
+    monkeypatch.setattr(runner, "_lp_planned_import_kwh_at", lambda slot_start: 0.6)
+    _tick(runner, price=COSY_PEAK, grid_kw=1.0)
+    out = _tick(runner, price=COSY_PEAK, grid_kw=1.0, minute=5)
+    assert out.get("planned") is True and alerts == [] and replans == []
+
+
+def test_peak_guard_records_swallowed_replan(guard_env, monkeypatch):
+    """F2: a replan the MPC job declined is recorded honestly."""
+    runner, alerts, _, logged = guard_env
+    monkeypatch.setattr(runner, "bulletproof_mpc_job", lambda **kw: False)
+    _tick(runner, price=COSY_PEAK, grid_kw=1.0)
+    _tick(runner, price=COSY_PEAK, grid_kw=1.0, minute=5)
+    assert logged[0]["params"]["replanned"] is False and logged[0]["result"] == "failure"
+    assert "NOT run" in alerts[0][0]
+
+
+def test_export_suppression_is_a_dispatch_decision(monkeypatch):
+    """F3: the downgrade is decided inside filter_robust_peak_export so the
+    audit trail matches the uploaded groups."""
+    from src.scheduler.lp_dispatch import filter_robust_peak_export
+
+    monkeypatch.setattr(app_config, "OPTIMIZATION_PRESET", "vacation", raising=False)
+    monkeypatch.setattr(app_config, "LP_BATTERY_EXPORT_ENABLED", False, raising=False)
+    plan = _synthetic_plan_with_peak_export()
+    slots, decisions = filter_robust_peak_export(plan, None)
+    assert all(s.kind != "peak_export" for s in slots)
+    sup = [d for d in decisions if d["reason"] == "export_disabled"]
+    assert len(sup) == 2 and all(d["committed"] is False and d["dispatched_kind"] == "standard" for d in sup)
+
+
+def test_objective_reported_net_of_peak_penalty(monkeypatch):
+    """F5: the 100p policy penalty must not leak into the reported economics."""
+    starts, prices = _cosy_day(DAY)
+    base = _solve(starts, prices, soc=1.5, pv=0.0, load=2.0)
+    monkeypatch.setattr(app_config, "LP_PEAK_IMPORT_PENALTY_PENCE_PER_KWH", 100.0, raising=False)
+    pen = _solve(starts, prices, soc=1.5, pv=0.0, load=2.0)
+    assert pen.peak_import_kwh > 0.5 and pen.peak_import_penalty_pence == pytest.approx(100.0 * pen.peak_import_kwh)
+    # net objective is an economic cost of the same order as the unpenalised solve
+    assert pen.objective_pence < base.objective_pence + 150.0

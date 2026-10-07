@@ -103,6 +103,10 @@ class LpPlan:
     0 is the target; > 0 means the battery/PV could not cover the peak and the
     soft penalty let the LP import rather than go Infeasible."""
     peak_import_penalty_applied: bool = False
+    peak_import_penalty_pence: float = 0.0
+    """The soft peak-import term's value in the solved objective (#806).
+    ``objective_pence`` is reported NET of it so briefs / daily targets /
+    shadow comparisons see the economic cost, not the policy penalty."""
     pre_negative_export_slots: list[int] = field(default_factory=list)
     """Slot indices where the pre-negative drain relaxation allowed battery→grid
     export (1B). The labeller marks committed drains here ``pre_negative_export``
@@ -1784,5 +1788,7 @@ def solve_lp(
     if peak_import_idx:
         plan.peak_import_penalty_applied = True
         plan.peak_import_kwh = float(sum(plan.import_kwh[i] for i in peak_import_idx))
+        plan.peak_import_penalty_pence = float(peak_import_pen * plan.peak_import_kwh)
+        plan.objective_pence -= plan.peak_import_penalty_pence
 
     return plan

@@ -2499,7 +2499,19 @@ def _peak_import_guard_tick(
     out: dict[str, Any] = {"in_peak": False, "ticks": 0, "fired": False}
     if not bool(getattr(config, "PEAK_IMPORT_GUARD_ENABLED", True)):
         return out
-    in_peak = price is not None and float(price) > _peak_alert_threshold_p(plan_date)
+    # Banded tariffs only (review F1): on Agile "price > 25p" is an ordinary
+    # evening and importing 0.5 kW there is normal — the guard must not page.
+    from ..energy.tariff_structure import prefer_plan_thresholds
+
+    if not prefer_plan_thresholds():
+        return out
+    if price is None:
+        # Rates read miss: unknown, keep the window state (a transient None
+        # must not reset the once-per-window dedupe and alert twice).
+        out["in_peak"] = _peak_guard_window_key is not None
+        out["ticks"] = _peak_guard_ticks
+        return out
+    in_peak = float(price) > _peak_alert_threshold_p(plan_date)
     if not in_peak:
         _peak_guard_ticks = 0
         _peak_guard_window_key = None
@@ -2519,32 +2531,60 @@ def _peak_import_guard_tick(
         return out
     if _peak_guard_alerted_key == _peak_guard_window_key:
         return out  # already alerted for this window
+    # Review F4: a PLANNED peak import (the committed plan already buys this
+    # slot because the battery cannot cover it) is not a plan failure — the
+    # replan would change nothing. Only act when the plan expected ~0.
+    planned_kwh: float | None = None
+    try:
+        slot_start = now_local.astimezone(UTC).replace(
+            minute=(0 if now_local.minute < 30 else 30), second=0, microsecond=0,
+        )
+        planned_kwh = _lp_planned_import_kwh_at(slot_start)
+    except Exception:
+        planned_kwh = None
+    out["planned_kwh"] = planned_kwh
+    if planned_kwh is not None and planned_kwh >= float(getattr(config, "PEAK_IMPORT_GUARD_PLANNED_KWH", 0.1)):
+        _peak_guard_alerted_key = _peak_guard_window_key  # planned: no alert this window
+        out["planned"] = True
+        return out
     _peak_guard_alerted_key = _peak_guard_window_key
     out["fired"] = True
     action = str(getattr(config, "PEAK_IMPORT_GUARD_ACTION", "replan") or "replan").lower()
+    replanned: bool | None = None
+    if action == "replan":
+        try:
+            # bypass_cooldown: debounced + once per window, cannot thrash; a
+            # soc_drift replan in the same tick would otherwise swallow it.
+            replanned = bool(bulletproof_mpc_job(
+                force_write_devices=True, trigger_reason="peak_import", bypass_cooldown=True,
+            ))
+        except Exception as exc:
+            logger.warning("peak_import_guard replan failed: %s", exc)
+            replanned = False
+    out["replanned"] = replanned
     try:
         db.log_action(
             device="system", action="peak_import_guard",
             params={"grid_kw": grid_kw, "soc": soc, "ticks": _peak_guard_ticks,
-                    "price_p": price, "action": action, "window": _peak_guard_window_key},
-            result="ok", trigger="heartbeat",
+                    "price_p": price, "action": action, "window": _peak_guard_window_key,
+                    "planned_kwh": planned_kwh, "replanned": replanned},
+            result="ok" if replanned is not False else "failure", trigger="heartbeat",
         )
     except Exception as exc:
         logger.debug("peak_import_guard log_action failed: %s", exc)
     try:
+        tail = (
+            "re-planned the rest of the peak." if replanned
+            else "replan was NOT run (busy/failed)." if action == "replan"
+            else "alert only."
+        )
         notify_risk(
             f"Importing {float(grid_kw):.2f} kW from the grid during the PEAK band "
-            f"({price}p/kWh, battery {soc}%) — "
-            + ("re-planning the rest of the peak." if action == "replan" else "alert only."),
+            f"({price}p/kWh, battery {soc}%) — {tail}",
             extra={"warning_key": _peak_guard_window_key},
         )
     except Exception as exc:
         logger.debug("peak_import_guard notify failed: %s", exc)
-    if action == "replan":
-        try:
-            bulletproof_mpc_job(force_write_devices=True, trigger_reason="peak_import")
-        except Exception as exc:
-            logger.warning("peak_import_guard replan failed: %s", exc)
     return out
 
 
