@@ -196,7 +196,11 @@ def _warmup_deadband_force_reason(
     """
     from .dhw.comfort import shower_windows
     from .dhw.model import coast_to
-    from .dhw.params import resolve_reheat_differential_c, resolve_tank_params
+    from .dhw.params import (
+        live_indoor_ambient_c,
+        resolve_reheat_differential_c,
+        resolve_tank_params,
+    )
 
     target = apply_params.get("tank_temp")
     tank = getattr(dev, "tank_temperature", None)
@@ -224,7 +228,7 @@ def _warmup_deadband_force_reason(
     tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
     now_local = now_utc.astimezone(tz)
     preset = (config.OPTIMIZATION_PRESET or "normal").strip().lower()
-    p = resolve_tank_params()
+    p = resolve_tank_params(ambient_c=live_indoor_ambient_c())  # #819
 
     def _at_hour(h: float):
         return now_local.replace(

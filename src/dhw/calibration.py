@@ -68,6 +68,12 @@ class CoastEpisode:
     # July night and a January night share one fit instead of fighting over a
     # single constant. None when no live outdoor telemetry covers the episode.
     t_out_mean_c: float | None = None
+    # MEASURED house indoor mean over the episode (#819). The airing cupboard
+    # sits inside the heated envelope, so the house thermometer IS the ambient
+    # the tank coasts toward — fixing it turns the unidentifiable joint
+    # (UA, ambient) fit into a one-parameter UA fit. None when no indoor
+    # readings cover the episode.
+    indoor_mean_c: float | None = None
 
 
 @dataclass
@@ -114,6 +120,7 @@ def select_coast_episodes(
     *,
     tz: ZoneInfo,
     outdoor_by_utc: list[tuple[datetime, float]] | None = None,
+    indoor_by_utc: list[tuple[datetime, float]] | list[tuple[datetime, str, float]] | None = None,
     night_start_hour_local: int = 22,
     night_end_hour_local: int = 11,
     min_hours: float = 4.0,
@@ -146,10 +153,39 @@ def select_coast_episodes(
         return night_start_hour_local <= h < night_end_hour_local
 
     outdoor = sorted(outdoor_by_utc or [])
+    # Indoor items are (ts, temp) or (ts, room, temp); the room-less form is
+    # one room called "house".
+    indoor: list[tuple[datetime, str, float]] = []
+    for item in indoor_by_utc or []:
+        if len(item) == 3:
+            indoor.append((item[0], str(item[1]), float(item[2])))
+        else:
+            indoor.append((item[0], "house", float(item[1])))
+    indoor.sort(key=lambda x: x[0])
 
     def _outdoor_mean(a: datetime, b: datetime) -> float | None:
         vals = [v for ts, v in outdoor if a <= ts <= b]
         return sum(vals) / len(vals) if vals else None
+
+    def _indoor_mean(a: datetime, b: datetime) -> float | None:
+        """Equal-weight mean across rooms of each room's episode mean — the
+        same definition as the live reader (``get_latest_indoor_reading``), so
+        the UA is fitted against the ambient it is later used with. A room on
+        a 1-min cadence must not out-vote one on 10 min (review). Needs ≥ 3
+        distinct timestamps spanning ≥ 50 % of the episode: a real sample of
+        the night, not three rooms reporting one instant at the edge."""
+        rows = [(ts, room, v) for ts, room, v in indoor if a <= ts <= b]
+        stamps = sorted({ts for ts, _r, _v in rows})
+        if len(stamps) < 3:
+            return None
+        span = (b - a).total_seconds()
+        if span > 0 and (stamps[-1] - stamps[0]).total_seconds() < 0.5 * span:
+            return None
+        per_room: dict[str, list[float]] = {}
+        for _ts, room, v in rows:
+            per_room.setdefault(room, []).append(v)
+        means = [sum(vs) / len(vs) for vs in per_room.values()]
+        return sum(means) / len(means)
 
     segments: list[list[tuple[datetime, float]]] = []
     cur: list[tuple[datetime, float]] = []
@@ -186,8 +222,155 @@ def select_coast_episodes(
             end_utc=end,
             points=[((ts - start).total_seconds() / 3600.0, v) for ts, v in seg],
             t_out_mean_c=_outdoor_mean(start, end),
+            indoor_mean_c=_indoor_mean(start, end),
         ))
     return episodes
+
+
+# ---------------------------------------------------------------------------
+# UA with the ambient MEASURED (#819)
+# ---------------------------------------------------------------------------
+
+
+def fit_ua_indoor_ambient(
+    episodes: list[CoastEpisode],
+    *,
+    c_tank_j_per_k: float,
+    min_episodes: int = 8,
+    min_r2: float = 0.6,
+    ua_bounds: tuple[float, float] = (1.0, 6.0),
+) -> dict[str, Any]:
+    """UA alone, with each episode's ambient FIXED to its measured house indoor.
+
+    The joint fit (:func:`fit_ua_and_ambient`) could not separate UA from the
+    ambient on real data (prod 2026-10: constant ambient −11 °C, linear slope
+    2.4 °C/°C — both rejected, databook fallback). With the indoor sensors
+    (#540 W1) the ambient is no longer unknown: the cupboard is inside the
+    heated envelope, so ``T_room`` is the honest ambient and the only free
+    parameter is ``k = UA/C``. Integral form through the origin::
+
+        T0 − Ti = k · ∫(T − A_ep) ds      ⇒  k = Σ x·y / Σ x²
+
+    Pooled over all episodes (one physical UA). The cross-check that motivated
+    it: 0.24 °C/h at 45 °C in a 30 °C summer house and 0.37 °C/h at 23.7 °C in
+    October are the SAME UA ≈ 3.7 W/K relative to the room, whereas the
+    databook pair (2.44 W/K, 22.4 °C) predicts 0.25 °C/h for both.
+
+    ``status='skipped'`` below the gate (too few episodes WITH indoor coverage,
+    poor R², UA out of bounds); never raises. ``ambient_c`` in the payload is
+    the mean of the episode indoor means — the scalar a consumer without a
+    live reading falls back to.
+    """
+    rows: list[tuple[float, float]] = []  # (x = ∫(T−A) ds, y = T0 − Ti)
+    n_used = 0
+    ambients: list[float] = []
+    for ep in episodes:
+        pts = ep.points
+        if len(pts) < 3 or ep.indoor_mean_c is None:
+            continue
+        a = float(ep.indoor_mean_c)
+        n_used += 1
+        ambients.append(a)
+        t0 = pts[0][1]
+        integral = 0.0
+        for i in range(1, len(pts)):
+            dt = pts[i][0] - pts[i - 1][0]
+            integral += 0.5 * ((pts[i][1] - a) + (pts[i - 1][1] - a)) * dt
+            rows.append((integral, t0 - pts[i][1]))
+
+    def _skip(reason: str, **extra: Any) -> dict[str, Any]:
+        return {"status": "skipped", "ambient_model": "indoor_measured",
+                "reason": reason, "episodes": n_used, **extra}
+
+    if n_used < min_episodes or len(rows) < 3 * min_episodes:
+        return _skip(f"only {n_used} episode(s) with indoor coverage; need >= {min_episodes}")
+    sxx = sum(x * x for x, _ in rows)
+    if sxx <= 1e-9:
+        return _skip("degenerate regression")
+    k = sum(x * y for x, y in rows) / sxx
+    y_mean = sum(y for _, y in rows) / len(rows)
+    ss_tot = sum((y - y_mean) ** 2 for _, y in rows)
+    ss_res = sum((y - k * x) ** 2 for x, y in rows)
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+    ua = k * c_tank_j_per_k / 3600.0
+    fit = {
+        "ambient_model": "indoor_measured",
+        "ua_w_per_k": float(ua),
+        "ambient_c": float(sum(ambients) / len(ambients)),
+        "ambient_min_c": float(min(ambients)),
+        "ambient_max_c": float(max(ambients)),
+        "tau_hours": float(c_tank_j_per_k / (ua * 3600.0)) if ua > 0 else None,
+        "r2": float(r2),
+        "episodes": n_used,
+    }
+    if k <= 0:
+        return _skip("non-positive decay slope", **fit)
+    if r2 < min_r2:
+        return _skip(f"R²={r2:.2f} below {min_r2}", **fit)
+    if not (ua_bounds[0] <= ua <= ua_bounds[1]):
+        return _skip(f"UA {ua:.2f} out of bounds", **fit)
+    return {"status": "ok", **fit}
+
+
+def coast_check(
+    episodes: list[CoastEpisode],
+    p: TankParams,
+) -> dict[str, Any] | None:
+    """Measured vs modelled coast rate (#819 telemetry) for the most recent
+    episode and, as the number to act on, the median ratio over the last 7.
+    Each episode is modelled at ITS OWN measured indoor (the per-episode
+    ambient), falling back to the params' ambient. The caller passes the
+    params that were STEERING before tonight's refit, so this is an
+    out-of-sample check of yesterday's model — not the residual of a fit on
+    the same episodes."""
+    from .model import coast_rate_c_per_h
+
+    eps = sorted((e for e in episodes if len(e.points) >= 3), key=lambda e: e.end_utc)
+    if not eps:
+        return None
+
+    def _rates(e: CoastEpisode) -> tuple[float, float, float] | None:
+        h0, t0 = e.points[0]
+        h1, t1 = e.points[-1]
+        hrs = h1 - h0
+        if hrs <= 0.5:
+            return None
+        a = e.indoor_mean_c if e.indoor_mean_c is not None else p.ambient_c
+        return (t0 - t1) / hrs, coast_rate_c_per_h(0.5 * (t0 + t1), p, ambient_c=a), a
+
+    ep = eps[-1]
+    last = _rates(ep)
+    if last is None:
+        return None
+    measured, model, amb = last
+    h0, t0 = ep.points[0]
+    h1, t1 = ep.points[-1]
+    hours = h1 - h0
+    # One night is ±30 % noisy (1 °C quantisation on a 2 °C fall); the median
+    # ratio over the last 7 episodes is the number to act on.
+    ratios: list[float] = []
+    for e in eps[-7:]:
+        r = _rates(e)
+        if r and r[1] > 1e-6:
+            ratios.append(r[0] / r[1])
+    ratios.sort()
+    median_ratio = ratios[len(ratios) // 2] if ratios else None
+    return {
+        "ratio_median_recent": None if median_ratio is None else round(median_ratio, 2),
+        "n_recent": len(ratios),
+        "episode_start_utc": ep.start_utc.isoformat(),
+        "episode_end_utc": ep.end_utc.isoformat(),
+        "hours": round(hours, 2),
+        "tank_from_c": round(t0, 2),
+        "tank_to_c": round(t1, 2),
+        "measured_c_per_h": round(measured, 3),
+        "model_c_per_h": round(model, 3),
+        "ambient_used_c": round(float(amb), 2),
+        "indoor_mean_c": None if ep.indoor_mean_c is None else round(ep.indoor_mean_c, 2),
+        "ratio_measured_over_model": round(measured / model, 2) if model > 1e-6 else None,
+        "ua_w_per_k": round(p.ua_w_per_k, 3),
+        "params_source": p.source,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -779,16 +962,58 @@ def refresh_dhw_calibration() -> dict[str, Any]:
     # plate; consistency is right either way.
     _p = TankParams()
     c_tank = float(_p.litres) * float(_p.cp_j_per_kg_k)
-    episodes = select_coast_episodes(tank_rows, tz=tz, outdoor_by_utc=outdoor)
-    ua_fit = fit_ua_and_ambient(episodes, c_tank_j_per_k=c_tank)
+    # MEASURED indoor (#819): the house thermometer is the cupboard's ambient.
+    try:
+        indoor = []
+        for r in db.get_indoor_readings_range(
+            start.isoformat().replace("+00:00", "Z"), now.isoformat().replace("+00:00", "Z")
+        ):
+            try:
+                ts = datetime.fromisoformat(str(r["captured_at"]).replace("Z", "+00:00"))
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=UTC)
+                indoor.append((ts.astimezone(UTC), str(r.get("room") or "house"), float(r["temp_c"])))
+            except (KeyError, ValueError, TypeError):
+                continue
+    except Exception:  # noqa: BLE001 — indoor is a refinement, not a dependency
+        indoor = []
+    episodes = select_coast_episodes(tank_rows, tz=tz, outdoor_by_utc=outdoor, indoor_by_utc=indoor)
+
+    from .params import resolve_tank_params
+
+    # The params that steered the planner UP TO this refresh — read BEFORE the
+    # upsert so the coast check below is out-of-sample (review #819).
+    steering_p = resolve_tank_params()
+    # Prefer the identifiable one-parameter fit; fall back to the joint fit
+    # (whose own linear-ambient rescue stays) when the indoor coverage is thin.
+    indoor_fit = fit_ua_indoor_ambient(episodes, c_tank_j_per_k=c_tank)
+    joint_fit = fit_ua_and_ambient(episodes, c_tank_j_per_k=c_tank)
+    if indoor_fit["status"] == "ok":
+        ua_fit = {**indoor_fit, "alternative": {k: v for k, v in joint_fit.items() if k != "linear_ambient"}}
+    else:
+        ua_fit = {**joint_fit, "indoor_fit": indoor_fit}
     db.upsert_dhw_calibration(
         "ua_ambient", status=ua_fit["status"], payload=ua_fit,
         n_samples=ua_fit.get("episodes"), r2=ua_fit.get("r2"), window_days=ua_window,
     )
 
-    from .params import resolve_tank_params
-
     p = resolve_tank_params()
+
+    # Coast check (#819 telemetry): did the tank cool at the rate the model
+    # that was STEERING predicted? Stored as its own component so
+    # /status/feedback can show "measured 0.37 °C/h vs model 0.25".
+    try:
+        chk = coast_check(episodes, steering_p)
+        db.upsert_dhw_calibration(
+            "coast_check", status="ok" if chk else "skipped",
+            payload=chk or {"reason": "no coast episode"},
+            n_samples=len(episodes), window_days=ua_window,
+        )
+        if chk:
+            db.log_action(device="dhw", action="tank_coast_check", params=chk,
+                          result="ok", trigger="dhw_calibration")
+    except Exception:  # noqa: BLE001 — telemetry must never break the nightly job
+        logger.warning("dhw.calibration: coast check failed", exc_info=True)
 
     # Draw events — observability only. Fit params from what we just learned (or the
     # databook), so the standing-loss subtraction uses the best UA available.

@@ -378,7 +378,11 @@ def replay_run(
         from ..dhw.params import resolve_tank_params as _rtp
 
         _tz = _ZI(getattr(config, "BULLETPROOF_TIMEZONE", "Europe/London"))
-        _p = _rtp()
+        # #819 — both arms coast toward the SAME house temperature: the one the
+        # replayed solve seeds its tank block from (initial.indoor_temp_c).
+        from .lp_optimizer import dhw_block_ambient_c as _dhw_amb
+
+        _p = _rtp(ambient_c=_dhw_amb(initial))
         _preset = (config.OPTIMIZATION_PRESET or "normal").strip().lower()
         _draw = _dhw_comfort.declared_draw_kwh_for_slots(
             slot_starts_utc, _tz, preset=_preset,

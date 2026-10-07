@@ -915,7 +915,7 @@ def resolve_window_decision_local(
         return persisted
 
     from .dhw.model import coast_to, electric_kwh_to_raise
-    from .dhw.params import resolve_tank_params
+    from .dhw.params import live_indoor_ambient_c, resolve_tank_params
 
     w = _read_warmup_hour(target_date_local)
     price_map, real_slots = _price_and_real_maps(agile_rates)
@@ -937,7 +937,9 @@ def resolve_window_decision_local(
         _log_window_decision(target_date_local, decision)
         return decision
 
-    p = resolve_tank_params()
+    # #819 — coast toward the measured house temperature (a 20 °C autumn house
+    # cools the tank ~50 % faster than the 22.4 °C summer-fitted constant).
+    p = resolve_tank_params(ambient_c=live_indoor_ambient_c())
     scale = _dhw_autoscale_factor("normal")
     trans_kwh = _WARMUP_TRANSITION_KWH * scale
     maint_kwh = _WARMUP_MAINTENANCE_KWH * scale
@@ -1548,7 +1550,42 @@ def dhw_budget_state(mode: str | None = None) -> dict[str, Any]:
         "bucket_bias_enabled": bool(getattr(config, "DHW_BUCKET_BIAS_ENABLED", False)),
         "bucket_bias_factors": bias_factors,
         "bucket_bias_in_force": bias_in_force,  # {} unless enabled+normal+fresh
+        "tank_model": _tank_model_state(),
     }
+
+
+def _tank_model_state() -> dict[str, Any]:
+    """#819 — which tank the planner is coasting with, and whether last night's
+    measured cooling agrees with it (``coast_check`` component)."""
+    out: dict[str, Any] = {}
+    try:
+        from .dhw.params import live_indoor_ambient_c, resolve_tank_params
+
+        live = live_indoor_ambient_c()
+        p = resolve_tank_params(ambient_c=live)
+        out.update({
+            "source": p.source,
+            "ua_w_per_k": round(float(p.ua_w_per_k), 3),
+            "ambient_c": round(float(p.ambient_c), 2),
+            "ambient_live_indoor_c": None if live is None else round(float(live), 2),
+            "tau_hours": round(float(p.tau_hours), 1),
+        })
+        row = db.get_dhw_calibration("ua_ambient")
+        if row:
+            out["fit_status"] = row.get("status")
+            out["fit_ambient_model"] = (row.get("payload") or {}).get("ambient_model")
+            out["fit_r2"] = row.get("r2")
+            out["fit_episodes"] = row.get("n_samples")
+        chk = db.get_dhw_calibration("coast_check")
+        if chk and chk.get("status") == "ok":
+            pl = chk.get("payload") or {}
+            out["coast_measured_c_per_h"] = pl.get("measured_c_per_h")
+            out["coast_model_c_per_h"] = pl.get("model_c_per_h")
+            out["coast_ratio"] = pl.get("ratio_measured_over_model")
+            out["coast_episode_end_utc"] = pl.get("episode_end_utc")
+    except Exception:  # pragma: no cover - defensive: status read must not fail
+        logger.debug("_tank_model_state failed", exc_info=True)
+    return out
 
 
 def forecast_dhw_load_per_slot(
@@ -1801,8 +1838,8 @@ def forecast_dhw_load_per_slot(
     if mode == "normal":
         try:
             from .dhw.model import electric_kwh_to_raise
-            from .dhw.params import resolve_tank_params
-            _p_params = resolve_tank_params()
+            from .dhw.params import live_indoor_ambient_c, resolve_tank_params
+            _p_params = resolve_tank_params(ambient_c=live_indoor_ambient_c())
             for _d, _dec in _decision_by_date.items():
                 if _dec.arm != "boost" or float(_dec.warmup_target_c) <= normal_c:
                     continue

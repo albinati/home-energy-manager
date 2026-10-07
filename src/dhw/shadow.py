@@ -173,13 +173,13 @@ def record_shadow(*, solve_kwargs: dict, price_pence: list[float],
     try:
         from . import comfort as _comfort
         from .baseline import legionella_budget_by_slot, simulate_fixed_schedule
-        from .params import resolve_reheat_differential_c
+        from .params import live_indoor_ambient_c, resolve_reheat_differential_c
         from .params import resolve_tank_params
 
         starts = list(solve_kwargs["slot_starts_utc"])
         weather = solve_kwargs["weather"]
         preset = (config.OPTIMIZATION_PRESET or "normal").strip().lower()
-        p = resolve_tank_params()
+        p = resolve_tank_params(ambient_c=live_indoor_ambient_c())  # #819
         # The LP arm sees microclimate-calibrated outdoor temps (lp_optimizer applies
         # the offsets and recomputes COPs); the simulator must see the SAME weather or
         # the baseline buys its heat at a different COP in the same sky.
