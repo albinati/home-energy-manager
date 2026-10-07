@@ -1460,6 +1460,47 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             built_at_utc        TEXT NOT NULL
         )"""
     )
+    # #838 — per-slot LWT learning log: PLANNED fields upserted at every
+    # dispatch, REALISED fields filled by the nightly lwt_learning_job.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS lwt_learning_log (
+            slot_time_utc   TEXT PRIMARY KEY,
+            run_id          INTEGER,
+            written_at_utc  TEXT,
+            source          TEXT,
+            coast_mode      TEXT,
+            offset_lp_raw   REAL,
+            offset_written  REAL,
+            indoor_pred_c   REAL,
+            floor_c         REAL,
+            margin_c        REAL,
+            outdoor_fc_c    REAL,
+            e_space_kwh     REAL,
+            cop_space       REAL,
+            price_band      TEXT,
+            indoor_real_c   REAL,
+            indoor_rooms_json TEXT,
+            indoor_min_c    REAL,
+            outdoor_real_c  REAL,
+            lwt_actual_c    REAL,
+            device_offset   REAL,
+            heating_kwh     REAL,
+            filled_at_utc   TEXT
+        )"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS lwt_learning_daily (
+            date            TEXT PRIMARY KEY,
+            n_coast_slots   INTEGER,
+            n_heat_slots    INTEGER,
+            ua_est_w_per_k  REAL,
+            k_est_kw_per_c  REAL,
+            pred_err_mean_c REAL,
+            pred_err_p90_c  REAL,
+            payload_json    TEXT NOT NULL,
+            built_at_utc    TEXT NOT NULL
+        )"""
+    )
     # W2 observability (#540): the learner's LAST run summary — episodes/HDD-days
     # collected + skip reasons — so the UI can show "learning in progress, N/5
     # decay nights" even while the calibration itself is still on env defaults.
@@ -5127,6 +5168,141 @@ def get_latest_lp_inputs_for_plan_date(plan_date: str) -> dict[str, Any] | None:
             conn.close()
 
 
+# ── #838: LWT learning log ────────────────────────────────────────────────
+
+_LWT_PLANNED_COLS = (
+    "run_id", "source", "coast_mode", "offset_lp_raw", "offset_written",
+    "indoor_pred_c", "floor_c", "margin_c", "outdoor_fc_c", "e_space_kwh",
+    "cop_space", "price_band",
+)
+_LWT_REALISED_COLS = (
+    "indoor_real_c", "indoor_rooms_json", "indoor_min_c", "outdoor_real_c",
+    "lwt_actual_c", "device_offset", "heating_kwh",
+)
+
+
+def upsert_lwt_learning_planned(rows: list[dict[str, Any]]) -> int:
+    """Upsert the PLANNED fields per slot (latest plan wins). Keeps the first
+    ``written_at_utc`` and never touches realised fields; slots already filled
+    by the nightly job (``filled_at_utc`` set) are left untouched."""
+    if not rows:
+        return 0
+    now_iso = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    cols = ", ".join(_LWT_PLANNED_COLS)
+    ph = ", ".join(f":{c}" for c in _LWT_PLANNED_COLS)
+    upd = ", ".join(f"{c}=excluded.{c}" for c in _LWT_PLANNED_COLS)
+    n = 0
+    with _lock:
+        conn = get_connection()
+        try:
+            for r in rows:
+                d = {c: r.get(c) for c in _LWT_PLANNED_COLS}
+                d["slot_time_utc"] = r["slot_time_utc"]
+                d["written_at_utc"] = now_iso
+                conn.execute(
+                    f"""INSERT INTO lwt_learning_log (slot_time_utc, written_at_utc, {cols})
+                        VALUES (:slot_time_utc, :written_at_utc, {ph})
+                        ON CONFLICT(slot_time_utc) DO UPDATE SET {upd}
+                        WHERE lwt_learning_log.filled_at_utc IS NULL""",
+                    d,
+                )
+                n += 1
+            conn.commit()
+        finally:
+            conn.close()
+    return n
+
+
+def update_lwt_learning_realised(slot_time_utc: str, fields: dict[str, Any]) -> bool:
+    """Fill the realised fields of an existing slot row (creates a bare row when
+    the slot was never planned, so the estimator still sees the measurements)."""
+    now_iso = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    d = {c: fields.get(c) for c in _LWT_REALISED_COLS}
+    d["slot_time_utc"] = slot_time_utc
+    d["filled_at_utc"] = now_iso
+    sets = ", ".join(f"{c}=:{c}" for c in _LWT_REALISED_COLS)
+    with _lock:
+        conn = get_connection()
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO lwt_learning_log (slot_time_utc) VALUES (?)",
+                (slot_time_utc,),
+            )
+            cur = conn.execute(
+                f"UPDATE lwt_learning_log SET {sets}, filled_at_utc=:filled_at_utc "
+                "WHERE slot_time_utc=:slot_time_utc",
+                d,
+            )
+            conn.commit()
+            return bool(cur.rowcount)
+        finally:
+            conn.close()
+
+
+def get_lwt_learning_rows(start_utc_iso: str, end_utc_iso: str) -> list[dict[str, Any]]:
+    """Slots in ``[start, end)`` (Z-form ISO), oldest first."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM lwt_learning_log WHERE slot_time_utc >= ? AND slot_time_utc < ? "
+                "ORDER BY slot_time_utc",
+                (start_utc_iso, end_utc_iso),
+            )
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
+def upsert_lwt_learning_daily(row: dict[str, Any]) -> None:
+    with _lock:
+        conn = get_connection()
+        try:
+            conn.execute(
+                """INSERT INTO lwt_learning_daily
+                     (date, n_coast_slots, n_heat_slots, ua_est_w_per_k, k_est_kw_per_c,
+                      pred_err_mean_c, pred_err_p90_c, payload_json, built_at_utc)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(date) DO UPDATE SET
+                     n_coast_slots=excluded.n_coast_slots, n_heat_slots=excluded.n_heat_slots,
+                     ua_est_w_per_k=excluded.ua_est_w_per_k, k_est_kw_per_c=excluded.k_est_kw_per_c,
+                     pred_err_mean_c=excluded.pred_err_mean_c, pred_err_p90_c=excluded.pred_err_p90_c,
+                     payload_json=excluded.payload_json, built_at_utc=excluded.built_at_utc""",
+                (
+                    row["date"], row.get("n_coast_slots"), row.get("n_heat_slots"),
+                    row.get("ua_est_w_per_k"), row.get("k_est_kw_per_c"),
+                    row.get("pred_err_mean_c"), row.get("pred_err_p90_c"),
+                    json.dumps(row.get("payload") or {}, default=str),
+                    datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def get_lwt_learning_daily(limit: int = 14) -> list[dict[str, Any]]:
+    """Newest-first daily summaries (payload parsed)."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM lwt_learning_daily ORDER BY date DESC LIMIT ?", (int(limit),)
+            )
+            out = []
+            for r in cur.fetchall():
+                d = dict(r)
+                try:
+                    d["payload"] = json.loads(d.pop("payload_json") or "{}")
+                except (TypeError, ValueError):
+                    d["payload"] = {}
+                out.append(d)
+            return out
+        finally:
+            conn.close()
+
+
+
 def upsert_cosy_scorecard(row: dict[str, Any]) -> None:
     """Idempotent write of one scored day (#831)."""
     with _lock:
@@ -6264,6 +6440,21 @@ def get_tank_temps_since(since_epoch: float) -> list[tuple[float, float]]:
                 (since_epoch,),
             )
             return [(float(r[0]), float(r[1])) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+
+def get_daikin_telemetry_range(start_epoch: float, end_epoch: float, *, source: str = "live") -> list[dict[str, Any]]:
+    """Telemetry rows with ``fetched_at`` in ``[start, end)`` (epoch seconds), oldest first."""
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM daikin_telemetry WHERE source = ? AND fetched_at >= ? AND fetched_at < ? "
+                "ORDER BY fetched_at",
+                (source, float(start_epoch), float(end_epoch)),
+            )
+            return [dict(r) for r in cur.fetchall()]
         finally:
             conn.close()
 
@@ -8139,6 +8330,8 @@ def prune_history_tables() -> dict[str, int]:
         # Per-day-keyed warning acks (e.g. fox_scheduler_disabled_<date>) are
         # useless once the date rolls over; without this they grow unbounded.
         ("acknowledged_warnings", "acknowledged_at", _config.ACKNOWLEDGED_WARNINGS_RETENTION_DAYS, False),
+        # #838 — per-slot LWT learning log (daily summaries are tiny, kept).
+        ("lwt_learning_log", "slot_time_utc", _config.LWT_LEARNING_RETENTION_DAYS, False),
     ]
     results: dict[str, int] = {}
     try:

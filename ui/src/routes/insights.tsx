@@ -12,6 +12,7 @@ import { TuningSuggestionsCard } from "../components/insights/TuningSuggestionsC
 import { LoadForecastAccuracyCard } from "../components/insights/LoadForecastAccuracyCard";
 import { SystemHealthCard } from "../components/insights/SystemHealthCard";
 import { CosyScorecardCard } from "../components/insights/CosyScorecardCard";
+import { LwtLearningCard } from "../components/insights/LwtLearningCard";
 import { IndoorHistoryCard } from "../components/insights/IndoorHistoryCard";
 import { SolarClearnessCard } from "../components/insights/SolarClearnessCard";
 import "./insights.css";
@@ -207,6 +208,7 @@ export default function Insights() {
       <LoadForecastAccuracyCard period={period} />
       <SystemHealthCard period={period} />
       <CosyScorecardCard />
+      <LwtLearningCard />
     </div>
   );
 }

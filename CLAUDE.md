@@ -623,6 +623,56 @@ the Settings simulate->confirm->apply flow). Story-3 plug point:
 `payload.external_comfort`, ranking untouched). Skips when < `TUNING_REVIEW_MIN_DAYS`
 (3) replayable days, or when `DAIKIN_CONTROL_MODE=passive` / `LP_W3_TIN_ENABLED=false` (W3 knobs would be inert; forward mode uses the LIVE process config, recorded as `payload.context`). `DHW_DYNAMIC_BOOST_HOLD_HOURS` is NOT swept (its only reader is the persisted nightly window decision, never re-resolved by a replay). Replays seed W3 from `lp_inputs_snapshot.indoor_initial_c` and chain `plan.indoor_temp_c`. Single-flight has no TTL (variants share `config._overrides`); the per-day budget (~9 min) stops the run (status `partial`, persisted in the payload).
 
+### LWT coast mode, comfort backstop and learning log (#838)
+
+- **`DAIKIN_LWT_COAST_MODE`** (runtime setting, `PUT /api/v1/settings`; code
+  default `setback`): what an LP **coast slot** (planned `e_space ≈ 0` while the
+  weather curve would run) writes when `DAIKIN_LWT_SOURCE=lp`. `setback` = the
+  fixed `DAIKIN_LWT_PREHEAT_PEAK_SETBACK_C` (−2, pre-#838). `lp` = the LP's own
+  `plan.lwt_offset_c[i]`, clamped ONLY by `DAIKIN_LWT_LP_OFFSET_MIN/MAX` (the
+  device range ±10 is the hard bound; the tier-rule `OPTIMIZATION_LWT_OFFSET_*`
+  clamp is bypassed for coast slots, and `lwt_offset_from_space_kw(lo=, hi=)` /
+  the `e_space` ceiling in `lp_optimizer` honour the same range). NB the inverse
+  physics of ZERO draw is the range minimum, so in `lp` mode a pure coast slot
+  writes the minimum (−10 with prod's ±10 clamp), i.e. "run as cold as the
+  device allows" — the safety net is the backstop below. Heating slots, outdoor
+  cutoff, sign-block smoothing, restore rows, quota cap, pre-fire idempotency,
+  live-only boost guard and the plausibility gate are unchanged. `coast_mode`
+  is in `lwt_source_diff`, `space_heating_gate_state()` and the plan-fronts
+  `heating.coast_mode`.
+- **Comfort backstop** (`LWT_COMFORT_BACKSTOP_ENABLED=true`, `_MARGIN_C=0.5`,
+  `_TICKS=2`; `scheduler/lwt_coast.py:backstop_tick`, called from the heartbeat
+  before the reconciler): an ACTIVE `lwt_preheat` row with a negative offset AND
+  the fresh aggregate indoor reading under the CURRENT floor − margin for N
+  consecutive ticks (floor = night `LP_W3_NIGHT_FLOOR_C` in the LP night window,
+  `INDOOR_SETPOINT_C − LP_W3_PEAK_COAST_DELTA_C` in the peak band, else the
+  setpoint) → `apply_scheduled_daikin_params({"lwt_offset": 0})` (post-write verify
+  runs), row set `completed` with `error_msg='comfort_backstop'` (the restore row
+  then state-matches as a no-op), one `notify_risk` per window
+  (`lwt_backstop_<date>_<HHMM>`), `action_log` `lwt_comfort_backstop`, then
+  `bulletproof_mpc_job(bypass_cooldown=True, trigger_reason="lwt_backstop")` (no
+  scenario stack). Needs `DAIKIN_CONTROL_MODE=active`, not `OPENCLAW_READ_ONLY`.
+- **Learning log** `lwt_learning_log` (PK `slot_time_utc`): PLANNED fields
+  (`run_id, source, coast_mode, offset_lp_raw, offset_written` = after smoothing,
+  `indoor_pred_c, floor_c, margin_c` = predicted headroom over the floor,
+  `outdoor_fc_c, e_space_kwh, cop_space, price_band`) are upserted at every
+  dispatch (latest plan wins, `written_at_utc` kept, filled slots untouched).
+  Nightly `lwt_learning_job` (04:40 UTC) fills REALISED fields for yesterday's
+  local day (per-room mean + min from `room_temperature_history`, outdoor and
+  `lwt_actual` from live `daikin_telemetry`, device offset from `execution_log`,
+  `kwh_heating` of `daikin_consumption_2hourly` prorated over its slots) and
+  writes one `lwt_learning_daily` row + `action_log` `lwt_learning_summary`.
+  Pruned after `LWT_LEARNING_RETENTION_DAYS` (120).
+- **Reading the estimates**: `ua_est_w_per_k` fits `T−To ∝ exp(−UA/C·t)` over
+  runs of ≥3 consecutive coast slots (device offset < 0 or ~no heating kWh) with
+  the learned C; `k_est_kw_per_c` = median heating kW ÷ (`lwt_actual − 18`) over
+  heating slots. Compare with the pins (`BUILDING_UA_W_PER_K=200`, learned k
+  0.063): estimates well above/below for several days with a small
+  `pred_err_p90_c` say the pin is wrong; a large `pred_err` with a consistent UA
+  says the trajectory model (gains, C) is. Nothing is auto-applied; read via
+  `GET /api/v1/thermal/lwt-learning?days=14` or the Insights "LWT learning" card.
+  The scorecard `lwt` section carries `lwt_backstops` (count of fired backstops).
+
 ## Key `.env` settings to know
 
 ```

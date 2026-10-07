@@ -280,7 +280,13 @@ def predict_passive_daikin_load(
     return space_kwh, dhw_kwh
 
 
-def lwt_offset_from_space_kw(space_kw: float, temp_outdoor_c: float) -> float:
+def lwt_offset_from_space_kw(
+    space_kw: float,
+    temp_outdoor_c: float,
+    *,
+    lo: float | None = None,
+    hi: float | None = None,
+) -> float:
     """Back-compute the LWT offset that would produce ``space_kw`` electrical draw.
 
     This is the inverse of ``get_daikin_heating_kw``.  Used by the LP dispatch layer
@@ -290,17 +296,17 @@ def lwt_offset_from_space_kw(space_kw: float, temp_outdoor_c: float) -> float:
     """
     from .config import config
 
+    lo_b = float(config.OPTIMIZATION_LWT_OFFSET_MIN) if lo is None else float(lo)
+    hi_b = float(config.OPTIMIZATION_LWT_OFFSET_MAX) if hi is None else float(hi)
     if space_kw <= 0.0:
-        return float(config.OPTIMIZATION_LWT_OFFSET_MIN)
+        return lo_b
 
     # kW = (lwt_actual - 18.0) * k  →  lwt_actual = kW / k + 18
     lwt_actual = space_kw / get_kw_per_degc_lwt() + 18.0
     lwt_base = get_lwt_base_c(temp_outdoor_c)
     offset = lwt_actual - lwt_base
 
-    lo = float(config.OPTIMIZATION_LWT_OFFSET_MIN)
-    hi = float(config.OPTIMIZATION_LWT_OFFSET_MAX)
-    return max(lo, min(hi, offset))
+    return max(lo_b, min(hi_b, offset))
 
 
 # ---------------------------------------------------------------------------

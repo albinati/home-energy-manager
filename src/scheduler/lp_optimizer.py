@@ -1805,6 +1805,18 @@ def solve_lp(
         return float(v) if v is not None else 0.0
 
     plan.objective_pence = float(pulp.value(prob.objective) or 0.0)
+
+    # #838: under source=lp + coast_mode=lp the inverse physics must be able to
+    # express the DAIKIN_LWT_LP_OFFSET_MIN/MAX range (OPTIMIZATION_LWT_OFFSET_*
+    # is only the tier-rule clamp); otherwise behaviour is bit-for-bit unchanged.
+    _lwt_inv_lo: float | None = None
+    _lwt_inv_hi: float | None = None
+    if (
+        str(getattr(config, "DAIKIN_LWT_SOURCE", "tier") or "tier").lower() == "lp"
+        and str(getattr(config, "DAIKIN_LWT_COAST_MODE", "setback") or "setback").lower() == "lp"
+    ):
+        _lwt_inv_lo = max(-10.0, float(getattr(config, "DAIKIN_LWT_LP_OFFSET_MIN", -5)))
+        _lwt_inv_hi = min(10.0, float(getattr(config, "DAIKIN_LWT_LP_OFFSET_MAX", 5)))
     for i in range(n):
         plan.import_kwh.append(_v(imp[i]))
         plan.export_kwh.append(_v(exp[i]))
@@ -1818,7 +1830,9 @@ def solve_lp(
         es_val = _v(e_space[i])
         plan.space_electric_kwh.append(es_val)
         # Back-compute the LWT offset the Daikin must apply to deliver this energy draw.
-        plan.lwt_offset_c.append(lwt_offset_from_space_kw(es_val / slot_h, t_out[i]))
+        plan.lwt_offset_c.append(lwt_offset_from_space_kw(
+            es_val / slot_h, t_out[i], lo=_lwt_inv_lo, hi=_lwt_inv_hi,
+        ))
     for i in range(n + 1):
         plan.soc_kwh.append(_v(soc[i]))
         plan.tank_temp_c.append(

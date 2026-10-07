@@ -308,3 +308,24 @@
 .cosyscore-bar { position: absolute; left: 0; top: 0; bottom: 0; background: var(--accent); border-radius: var(--radius-pill); }
 .cosyscore-ideal { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--ok); }
 .cosyscore-bar-label { margin-left: var(--space-2); color: var(--text-dim); }
+
+/* LWT learning card (#838) */
+.lwtl-scroll { overflow-x: auto; }
+.lwtl-table { width: 100%; border-collapse: collapse; font-size: var(--font-sm); font-variant-numeric: tabular-nums; }
+.lwtl-table th { text-align: left; font-weight: 500; color: var(--text-mute); padding: var(--space-2); white-space: nowrap; }
+.lwtl-table td { padding: var(--space-2); white-space: nowrap; background: transparent; }
+.lwtl-table tbody tr:nth-child(odd) td { background: color-mix(in srgb, var(--text) 3%, transparent); }
+.lwtl-table .num { text-align: right; }
+.lwtl-sub { font-size: var(--font-sm); font-weight: 500; color: var(--text-dim); margin: var(--space-4) 0 var(--space-2); }
+.lwtl-strip { display: flex; gap: 1px; height: 96px; }
+.lwtl-col { position: relative; flex: 1 1 0; min-width: 2px; background: transparent; }
+.lwtl-col--coast { background: color-mix(in srgb, var(--cool) 12%, transparent); }
+.lwtl-pred, .lwtl-real, .lwtl-floor { position: absolute; left: 0; right: 0; height: 2px; }
+.lwtl-pred { background: var(--accent); }
+.lwtl-real { background: var(--thermal); }
+.lwtl-floor { background: color-mix(in srgb, var(--text) 25%, transparent); height: 1px; }
+.lwtl-legend { font-size: var(--font-xs); margin-top: var(--space-2); }
+.lwtl-key { display: inline-block; width: 10px; height: 2px; vertical-align: middle; margin: 0 var(--space-1) 0 var(--space-3); }
+.lwtl-key--pred { background: var(--accent); }
+.lwtl-key--real { background: var(--thermal); }
+.lwtl-key--floor { background: color-mix(in srgb, var(--text) 25%, transparent); }

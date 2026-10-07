@@ -675,11 +675,17 @@ def _tier_offsets(
     return offsets
 
 
+def _coast_mode() -> str:
+    m = str(getattr(config, "DAIKIN_LWT_COAST_MODE", "setback") or "setback").strip().lower()
+    return m if m in ("setback", "lp") else "setback"
+
+
 def _lp_offsets(
     plan: LpPlan,
     live_indoor_c: float | None = None,
     *,
     now_utc: datetime | None = None,
+    coast_mode: str | None = None,
 ) -> list[int | None] | None:
     """Per-slot offsets from the LP's own W3 thermal plan (#808).
 
@@ -691,7 +697,10 @@ def _lp_offsets(
       write; same exogenous anti-phantom guard as the tier rule);
     * a slot the LP left with NO space heat is a deliberate coast →
       ``DAIKIN_LWT_PREHEAT_PEAK_SETBACK_C`` — NOT whatever the inverse physics
-      returns for zero draw (``OPTIMIZATION_LWT_OFFSET_MIN``);
+      returns for zero draw (``OPTIMIZATION_LWT_OFFSET_MIN``) — unless
+      ``DAIKIN_LWT_COAST_MODE=lp`` (#838), where the coast slot takes the LP's
+      own ``plan.lwt_offset_c[i]`` clamped ONLY by ``DAIKIN_LWT_LP_OFFSET_MIN/MAX``
+      (device range ±10 is the hard bound);
     * otherwise ``round(plan.lwt_offset_c[i])``;
     * clamp to the TIGHTER of ``OPTIMIZATION_LWT_OFFSET_MIN/MAX`` and
       ``DAIKIN_LWT_LP_OFFSET_MIN/MAX`` (prod pins the former at −2);
@@ -705,6 +714,9 @@ def _lp_offsets(
     lo = int(max(float(config.OPTIMIZATION_LWT_OFFSET_MIN), float(getattr(config, "DAIKIN_LWT_LP_OFFSET_MIN", -5))))
     hi = int(min(float(config.OPTIMIZATION_LWT_OFFSET_MAX), float(getattr(config, "DAIKIN_LWT_LP_OFFSET_MAX", 5))))
     setback = int(config.DAIKIN_LWT_PREHEAT_PEAK_SETBACK_C)
+    cmode = (coast_mode or _coast_mode())
+    coast_lo = int(max(-10.0, float(getattr(config, "DAIKIN_LWT_LP_OFFSET_MIN", -5))))
+    coast_hi = int(min(10.0, float(getattr(config, "DAIKIN_LWT_LP_OFFSET_MAX", 5))))
     band = float(config.DAIKIN_LWT_PREHEAT_COMFORT_BAND_C)
     setpoint = float(config.INDOOR_SETPOINT_C)
     cutoff = float(getattr(config, "DAIKIN_LWT_PREHEAT_OUTDOOR_CUTOFF_C", 15.0))
@@ -716,6 +728,11 @@ def _lp_offsets(
             out.append(None)
             continue
         es = float(plan.space_electric_kwh[i]) if i < len(plan.space_electric_kwh) else 0.0
+        if es <= 1e-6 and cmode == "lp":
+            raw = float(plan.lwt_offset_c[i]) if i < len(plan.lwt_offset_c) else float(coast_lo)
+            off = max(coast_lo, min(coast_hi, int(math.floor(raw + 0.5))))
+            out.append(off)
+            continue
         if es <= 1e-6:
             off = setback
         else:
@@ -765,6 +782,16 @@ def smooth_lp_offsets(offsets: list[int | None], min_block: int) -> list[int | N
     return smooth_lwt_offsets(out, min_block)
 
 
+def _smoothed_offsets(offsets: list[int | None], source: str) -> list[int | None]:
+    """The per-slot offsets as they will actually be written (sign-block / run
+    smoothing + minimum-block filter)."""
+    min_block = int(config.DAIKIN_LWT_PREHEAT_MIN_BLOCK_SLOTS)
+    return (
+        smooth_lp_offsets(list(offsets), min_block) if source == "lp"
+        else smooth_lwt_offsets(list(offsets), min_block)
+    )
+
+
 def _pairs_from_offsets(
     plan: LpPlan,
     offsets: list[int | None],
@@ -777,11 +804,7 @@ def _pairs_from_offsets(
     # Thermal coherence: collapse per-slot price chatter into sustained blocks
     # so we don't toggle the heat pump for wiggles the thermal mass can't follow
     # (and don't burn Daikin writes doing it). See ``smooth_lwt_offsets``.
-    min_block = int(config.DAIKIN_LWT_PREHEAT_MIN_BLOCK_SLOTS)
-    offsets = (
-        smooth_lp_offsets(list(offsets), min_block) if source == "lp"
-        else smooth_lwt_offsets(list(offsets), min_block)
-    )
+    offsets = _smoothed_offsets(offsets, source)
 
     restore_window = max(2, int(getattr(config, "LP_RESTORE_WINDOW_MINUTES", 5)))
     out: list[tuple[dict[str, Any] | None, dict[str, Any]]] = []
@@ -887,6 +910,7 @@ def _log_lwt_source_diff(
     n = len(plan.slot_starts_utc)
     summary: dict[str, Any] = {
         "source_used": source_used,
+        "coast_mode": _coast_mode(),
         "lp_available": lp_offsets is not None,
         "lp_reason": lp_reason,
         "n_slots": n,
@@ -1451,6 +1475,7 @@ def space_heating_gate_state() -> dict[str, Any]:
     return {
         "preheat_enabled": preheat_enabled,
         "lwt_source": lwt_source,
+        "coast_mode": _coast_mode(),
         "lwt_source_last_diff": lwt_source_last_diff,
         "gate_enabled": floor > 0,
         "demand_present": demand_present,
@@ -1508,6 +1533,8 @@ def _write_lwt_preheat_actions(
             int(getattr(config, "DAIKIN_LWT_PREHEAT_DEMAND_LOOKBACK_HOURS", 48)),
             float(getattr(config, "DAIKIN_LWT_PREHEAT_MIN_TRAILING_HEATING_KWH", 0.5)),
         )
+        from .lwt_coast import record_planned
+        record_planned(plan, source_used=_lwt_source(), coast_mode=_coast_mode(), written_offsets=None)
         return 0
 
     # Indoor temperature for the comfort guard: the house room sensors are the
@@ -1536,9 +1563,14 @@ def _write_lwt_preheat_actions(
         logger.info("LWT source=lp requested but the LP trajectory is unavailable (%s) — using the tier rule", lp_reason)
         source_used = "tier"
     _log_lwt_source_diff(plan, tier_offsets, lp_offsets, source_used, lp_reason=lp_reason)
-    pairs = _pairs_from_offsets(
-        plan, lp_offsets if source_used == "lp" else tier_offsets, source=source_used,
+    chosen = lp_offsets if source_used == "lp" else tier_offsets
+    # #838 learning log: PLANNED fields (offsets as smoothed = what is written).
+    from .lwt_coast import record_planned
+    record_planned(
+        plan, source_used=source_used, coast_mode=_coast_mode(),
+        written_offsets=_smoothed_offsets(list(chosen), source_used),
     )
+    pairs = _pairs_from_offsets(plan, chosen, source=source_used)
     if not pairs:
         return 0
 

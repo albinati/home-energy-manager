@@ -783,6 +783,25 @@ def cosy_scorecard_boot_backfill_job() -> None:
         logger.warning("cosy_scorecard boot backfill failed (non-fatal): %s", e)
 
 
+def lwt_learning_job() -> None:
+    """Nightly (04:40 UTC) fill of yesterday's realised LWT fields + UA/k estimate (#838)."""
+    if not bool(getattr(config, "LWT_LEARNING_ENABLED", True)):
+        return
+    try:
+        from ..analytics import lwt_learning
+
+        tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+        day = datetime.now(tz).date() - timedelta(days=1)
+        row = lwt_learning.run_for_day(day, tz)
+        logger.info(
+            "lwt_learning: %s coast=%s heat=%s ua=%s k=%s err_mean=%s",
+            row["date"], row.get("n_coast_slots"), row.get("n_heat_slots"),
+            row.get("ua_est_w_per_k"), row.get("k_est_kw_per_c"), row.get("pred_err_mean_c"),
+        )
+    except Exception as e:
+        logger.warning("lwt_learning job failed (non-fatal): %s", e, exc_info=True)
+
+
 def register_cosy_scorecard_jobs(scheduler: Any, tz: ZoneInfo) -> bool:
     """Register the nightly scorecard cron + a one-shot boot catch-up (#831)."""
     if not bool(getattr(config, "COSY_SCORECARD_ENABLED", True)):
@@ -1380,7 +1399,7 @@ def bulletproof_mpc_job(
     ``trigger_reason`` (default "manual"): tags the run for observability. Known reasons:
     ``octopus_fetch``, ``tier_boundary``, ``soc_drift``, ``forecast_revision``,
     ``pv_upside``, ``pv_downside``, ``load_upside``, ``dynamic_replan``,
-    ``plan_push``, ``appliance_armed``, ``manual``. The legacy ``cron`` value
+    ``plan_push``, ``appliance_armed``, ``lwt_backstop``, ``manual``. The legacy ``cron`` value
     is gone (V12).
 
     ``bypass_cooldown`` (default False): skip the ``MPC_COOLDOWN_SECONDS``
@@ -2372,6 +2391,9 @@ def bulletproof_heartbeat_tick() -> None:
         # Build a lightweight DaikinClient handle for reconcile (it won't call get_devices again).
         from ..daikin.client import DaikinClient as _DC
         _dc = _DC()
+        _lwt_comfort_backstop_tick(
+            now_utc=now_utc, plan_date=plan_date, dev=dev0, client=_dc, price=price,
+        )
         reconcile_daikin_schedule_for_date(
             plan_date,
             _dc,
@@ -2672,6 +2694,28 @@ def _peak_import_guard_tick(
     return out
 
 
+def _lwt_comfort_backstop_tick(
+    *, now_utc: datetime, plan_date: str, dev: Any, client: Any, price: float | None,
+) -> dict[str, Any]:
+    """#838 — real-time comfort backstop for LWT coast mode (see
+    ``scheduler.lwt_coast.backstop_tick``). Never raises."""
+    try:
+        from ..energy.tariff_structure import prefer_plan_thresholds
+        from .lwt_coast import backstop_tick
+
+        in_peak = bool(
+            price is not None and prefer_plan_thresholds()
+            and float(price) > _peak_alert_threshold_p(plan_date)
+        )
+        return backstop_tick(
+            now_utc=now_utc, plan_date=plan_date, dev=dev, client=client,
+            in_peak=in_peak, replan_fn=bulletproof_mpc_job,
+        )
+    except Exception as exc:
+        logger.debug("lwt comfort backstop error: %s", exc)
+        return {}
+
+
 def _heartbeat_daikin_refresh_allowed() -> bool:
     """#809 — may this heartbeat tick refresh the Daikin device cache?
 
@@ -2820,6 +2864,14 @@ def start_background_scheduler() -> None:
                 tz,
             )
             register_cosy_scorecard_jobs(_background_scheduler, tz)
+            if bool(getattr(config, "LWT_LEARNING_ENABLED", True)):
+                _background_scheduler.add_job(
+                    lwt_learning_job,
+                    CronTrigger(hour=4, minute=40, timezone=ZoneInfo("UTC")),
+                    id="lwt_learning",
+                    misfire_grace_time=600,
+                )
+                logger.info("LWT learning cron scheduled (04:40 UTC daily)")
             _background_scheduler.add_job(
                 bulletproof_forecast_skill_log_job,
                 CronTrigger(hour=4, minute=15, timezone=ZoneInfo("UTC")),
