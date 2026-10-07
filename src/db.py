@@ -1428,6 +1428,22 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             window_days INTEGER
         )"""
     )
+    # #831 — one row per scored local day (daily Cosy scorecard). Indexed
+    # columns for the table/trend; everything else lives in payload_json.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS cosy_scorecard_daily (
+            date                TEXT PRIMARY KEY,
+            score               TEXT,
+            peak_import_kwh     REAL,
+            import_kwh          REAL,
+            import_cost_gbp     REAL,
+            avg_import_p        REAL,
+            ideal_avg_import_p  REAL,
+            net_cost_gbp        REAL,
+            payload_json        TEXT NOT NULL,
+            built_at_utc        TEXT NOT NULL
+        )"""
+    )
     # W2 observability (#540): the learner's LAST run summary — episodes/HDD-days
     # collected + skip reasons — so the UI can show "learning in progress, N/5
     # decay nights" even while the calibration itself is still on env defaults.
@@ -4275,7 +4291,7 @@ def half_hourly_kwh_for_utc_range(
     from collections import defaultdict
     from datetime import datetime as _dt
 
-    if column not in ("grid_export_kw", "grid_import_kw", "solar_power_kw", "battery_discharge_kw", "load_power_kw"):
+    if column not in ("grid_export_kw", "grid_import_kw", "solar_power_kw", "battery_discharge_kw", "battery_charge_kw", "load_power_kw"):
         raise ValueError(f"unsupported column: {column}")
     s_utc = start_utc.astimezone(UTC)
     e_utc = end_utc.astimezone(UTC)
@@ -4349,7 +4365,7 @@ def _half_hourly_grid_kwh_for_day(
     from collections import defaultdict
     from datetime import datetime as _dt
 
-    if column not in ("grid_export_kw", "grid_import_kw", "solar_power_kw", "battery_discharge_kw", "load_power_kw"):
+    if column not in ("grid_export_kw", "grid_import_kw", "solar_power_kw", "battery_discharge_kw", "battery_charge_kw", "load_power_kw"):
         raise ValueError(f"unsupported column: {column}")
 
     day_iso = day.isoformat()
@@ -5048,6 +5064,106 @@ def save_indoor_readings(readings: list[dict[str, Any]]) -> int:
         finally:
             conn.close()
     return written
+
+
+def get_soc_pct_at(ts_utc: datetime, max_gap_minutes: int = 20) -> float | None:
+    """Battery SoC (%) of the ``pv_realtime_history`` sample nearest to
+    ``ts_utc`` within ±``max_gap_minutes``, else None (#831)."""
+    # Stored forms are both ``...Z`` and ``...+00:00``: pad the SQL range by 1 s
+    # (they differ at that character) and apply the exact gap in Python.
+    pad = timedelta(seconds=1)
+    lo = (ts_utc - timedelta(minutes=max_gap_minutes) - pad).astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    hi = (ts_utc + timedelta(minutes=max_gap_minutes) + pad).astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with _lock:
+        conn = get_connection()
+        try:
+            rows = conn.execute(
+                "SELECT captured_at, soc_pct FROM pv_realtime_history "
+                "WHERE soc_pct IS NOT NULL AND captured_at >= ? AND captured_at <= ?",
+                (lo, hi),
+            ).fetchall()
+        finally:
+            conn.close()
+    best: tuple[float, float] | None = None
+    for r in rows:
+        t = _parse_iso_utc(r["captured_at"])
+        if t is None:
+            continue
+        gap = abs((t - ts_utc).total_seconds())
+        if gap > max_gap_minutes * 60:
+            continue
+        if best is None or gap < best[0]:
+            best = (gap, float(r["soc_pct"]))
+    return None if best is None else best[1]
+
+
+def get_latest_lp_inputs_for_plan_date(plan_date: str) -> dict[str, Any] | None:
+    """Newest ``lp_inputs_snapshot`` row anchored on ``plan_date`` (#831)."""
+    with _lock:
+        conn = get_connection()
+        try:
+            r = conn.execute(
+                "SELECT * FROM lp_inputs_snapshot WHERE plan_date = ? ORDER BY run_id DESC LIMIT 1",
+                (plan_date,),
+            ).fetchone()
+            return dict(r) if r else None
+        finally:
+            conn.close()
+
+
+def upsert_cosy_scorecard(row: dict[str, Any]) -> None:
+    """Idempotent write of one scored day (#831)."""
+    with _lock:
+        conn = get_connection()
+        try:
+            conn.execute(
+                """INSERT INTO cosy_scorecard_daily
+                     (date, score, peak_import_kwh, import_kwh, import_cost_gbp, avg_import_p,
+                      ideal_avg_import_p, net_cost_gbp, payload_json, built_at_utc)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(date) DO UPDATE SET
+                     score=excluded.score, peak_import_kwh=excluded.peak_import_kwh,
+                     import_kwh=excluded.import_kwh, import_cost_gbp=excluded.import_cost_gbp,
+                     avg_import_p=excluded.avg_import_p, ideal_avg_import_p=excluded.ideal_avg_import_p,
+                     net_cost_gbp=excluded.net_cost_gbp, payload_json=excluded.payload_json,
+                     built_at_utc=excluded.built_at_utc""",
+                (
+                    row["date"], row.get("score"), row.get("peak_import_kwh"), row.get("import_kwh"),
+                    row.get("import_cost_gbp"), row.get("avg_import_p"), row.get("ideal_avg_import_p"),
+                    row.get("net_cost_gbp"), json.dumps(row.get("payload") or {}, default=str),
+                    row.get("built_at_utc") or datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def get_cosy_scorecards(limit: int = 14, *, up_to: str | None = None) -> list[dict[str, Any]]:
+    """Newest-first scorecard rows (payload parsed), optionally ``date <= up_to``."""
+    with _lock:
+        conn = get_connection()
+        try:
+            if up_to:
+                cur = conn.execute(
+                    "SELECT * FROM cosy_scorecard_daily WHERE date <= ? ORDER BY date DESC LIMIT ?",
+                    (up_to, int(limit)),
+                )
+            else:
+                cur = conn.execute(
+                    "SELECT * FROM cosy_scorecard_daily ORDER BY date DESC LIMIT ?", (int(limit),)
+                )
+            out = []
+            for r in cur.fetchall():
+                d = dict(r)
+                try:
+                    d["payload"] = json.loads(d.pop("payload_json") or "{}")
+                except (TypeError, ValueError):
+                    d["payload"] = {}
+                out.append(d)
+            return out
+        finally:
+            conn.close()
 
 
 def get_latest_soc_pct() -> float | None:

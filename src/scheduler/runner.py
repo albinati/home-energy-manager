@@ -748,6 +748,65 @@ def bulletproof_consumption_backfill_job() -> None:
         logger.warning("Consumption backfill failed (non-fatal): %s", e)
 
 
+def cosy_scorecard_job() -> None:
+    """Score YESTERDAY (local day) and persist one ``cosy_scorecard_daily`` row (#831).
+
+    Read-only — never changes a setting. Guarded: a failure is logged only."""
+    if not bool(getattr(config, "COSY_SCORECARD_ENABLED", True)):
+        return
+    try:
+        from ..analytics import cosy_scorecard
+
+        tz = ZoneInfo(config.BULLETPROOF_TIMEZONE)
+        day = datetime.now(tz).date() - timedelta(days=1)
+        row = cosy_scorecard.run_for_day(day)
+        logger.info(
+            "cosy_scorecard: %s score=%s import=%s kWh peak=%s kWh avg=%sp",
+            row["date"], row.get("score"), row.get("import_kwh"),
+            row.get("peak_import_kwh"), row.get("avg_import_p"),
+        )
+    except Exception as e:
+        logger.warning("cosy_scorecard job failed (non-fatal): %s", e, exc_info=True)
+
+
+def cosy_scorecard_boot_backfill_job() -> None:
+    """Score any missing day of the last 7 (best-effort, after a restart/outage)."""
+    if not bool(getattr(config, "COSY_SCORECARD_ENABLED", True)):
+        return
+    try:
+        from ..analytics import cosy_scorecard
+
+        done = cosy_scorecard.backfill_missing(days=7)
+        if done:
+            logger.info("cosy_scorecard boot backfill: scored %s", ", ".join(done))
+    except Exception as e:
+        logger.warning("cosy_scorecard boot backfill failed (non-fatal): %s", e)
+
+
+def register_cosy_scorecard_jobs(scheduler: Any, tz: ZoneInfo) -> bool:
+    """Register the nightly scorecard cron + a one-shot boot catch-up (#831)."""
+    if not bool(getattr(config, "COSY_SCORECARD_ENABLED", True)):
+        return False
+    from apscheduler.triggers.cron import CronTrigger
+    from apscheduler.triggers.date import DateTrigger
+
+    scheduler.add_job(
+        cosy_scorecard_job,
+        CronTrigger(hour=config.COSY_SCORECARD_HOUR_LOCAL, minute=config.COSY_SCORECARD_MINUTE, timezone=tz),
+        id="cosy_scorecard",
+        misfire_grace_time=600,
+    )
+    scheduler.add_job(
+        cosy_scorecard_boot_backfill_job,
+        DateTrigger(run_date=datetime.now(UTC) + timedelta(seconds=120)),
+        id="cosy_scorecard_boot",
+        misfire_grace_time=600,
+    )
+    logger.info("Cosy scorecard cron: %02d:%02d (%s)",
+                config.COSY_SCORECARD_HOUR_LOCAL, config.COSY_SCORECARD_MINUTE, tz)
+    return True
+
+
 def bulletproof_forecast_skill_log_job() -> None:
     """Rebuild yesterday's UTC forecast-vs-actual skill rows.
 
@@ -2760,6 +2819,7 @@ def start_background_scheduler() -> None:
                 config.CONSUMPTION_BACKFILL_MINUTE,
                 tz,
             )
+            register_cosy_scorecard_jobs(_background_scheduler, tz)
             _background_scheduler.add_job(
                 bulletproof_forecast_skill_log_job,
                 CronTrigger(hour=4, minute=15, timezone=ZoneInfo("UTC")),

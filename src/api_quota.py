@@ -135,6 +135,23 @@ def count_calls_24h(vendor: str) -> int:
             conn.close()
 
 
+def count_calls_between(vendor: str, start_ts: float, end_ts: float) -> int:
+    """Calls for *vendor* in ``[start_ts, end_ts)`` (unix seconds) — #831."""
+    with _lock:
+        conn = _conn()
+        try:
+            cur = conn.execute(
+                "SELECT COUNT(*) FROM api_call_log WHERE vendor = ? AND ts_utc >= ? AND ts_utc < ?",
+                (vendor, start_ts, end_ts),
+            )
+            row = cur.fetchone()
+            return int(row[0]) if row else 0
+        except sqlite3.OperationalError:
+            return 0
+        finally:
+            conn.close()
+
+
 def count_calls_window(vendor: str, since_ts: float, *, only_failed: bool = False) -> int:
     """Return number of calls for *vendor* since *since_ts* (unix seconds).
 

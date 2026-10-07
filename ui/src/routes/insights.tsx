@@ -10,6 +10,7 @@ import type { FairTariffRow } from "../lib/types";
 import { LoadPatternCard } from "../components/insights/LoadPatternCard";
 import { LoadForecastAccuracyCard } from "../components/insights/LoadForecastAccuracyCard";
 import { SystemHealthCard } from "../components/insights/SystemHealthCard";
+import { CosyScorecardCard } from "../components/insights/CosyScorecardCard";
 import { IndoorHistoryCard } from "../components/insights/IndoorHistoryCard";
 import { SolarClearnessCard } from "../components/insights/SolarClearnessCard";
 import "./insights.css";
@@ -203,6 +204,7 @@ export default function Insights() {
       <LoadPatternCard period={period} />
       <LoadForecastAccuracyCard period={period} />
       <SystemHealthCard period={period} />
+      <CosyScorecardCard />
     </div>
   );
 }

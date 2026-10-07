@@ -258,7 +258,7 @@ def _realised_import_pence(day: date) -> tuple[float, float]:
     return cost, total_kwh
 
 
-def compute_daily_pnl(day: date) -> dict[str, Any]:
+def compute_daily_pnl(day: date, *, standing_source: str = "live") -> dict[str, Any]:
     """Daily PnL with apples-to-apples standing-charge accounting.
 
     Two parallel views, both included in every result:
@@ -321,7 +321,12 @@ def compute_daily_pnl(day: date) -> dict[str, Any]:
     # to MANUAL_STANDING_CHARGE when the catalogue is offline.
     from .fair_compare import current_import_standing_pence
 
-    standing_p = current_import_standing_pence()
+    # ``standing_source="manual"`` (#831 scorecard) skips the catalogue lookup
+    # (Octopus HTTP) and uses MANUAL_STANDING_CHARGE_PENCE_PER_DAY — DB-only.
+    if standing_source == "manual":
+        standing_p = float(config.MANUAL_STANDING_CHARGE_PENCE_PER_DAY or 0)
+    else:
+        standing_p = current_import_standing_pence()
     # Per-tariff fairness (matches src/analytics/fair_compare): SVT uses its own
     # standing; non-Agile shadows don't earn the Outgoing Agile export revenue —
     # they'd be on the same flat SEG the household is actually on (EXPORT_SEG_RATE_PENCE).

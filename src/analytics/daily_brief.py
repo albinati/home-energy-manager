@@ -72,6 +72,11 @@ def build_morning_payload() -> str:
         if result:
             lines.append(result)
 
+    # #831 — one pull-first line: yesterday's Cosy scorecard (details live in the UI).
+    cosy = _safe_call("cosy_scorecard", _cosy_scorecard_line)
+    if cosy:
+        lines.append(cosy)
+
     # Charging plan can return [] (no scheduled charges = solar day).
     charges = _safe_call("charging_plan", _charging_plan_today_lines, today, tz)
     if isinstance(charges, list) and charges:
@@ -89,6 +94,12 @@ def build_morning_payload() -> str:
         lines.extend(["", f"**Tomorrow ({today + timedelta(days=1)}):** {tomorrow_peaks}"])
 
     return "\n".join(lines)
+
+
+def _cosy_scorecard_line() -> str | None:
+    from .cosy_scorecard import brief_line
+
+    return brief_line()
 
 
 def _appliance_window_suggestion_line(tz: ZoneInfo) -> str | None:

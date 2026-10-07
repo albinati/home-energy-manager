@@ -1,5 +1,6 @@
 import { postJson, getJson, hemFetch } from "./api";
 import type {
+  CosyScorecardResponse,
   PlanFrontsResponse,
   CockpitNow,
   SchedulerTimeline,
@@ -379,3 +380,6 @@ export const getLoadErrorLog = (
   const q = new URLSearchParams({ start_date: arg.startDate, end_date: arg.endDate });
   return getJson<LoadErrorLog>(`/load/error-log?${q.toString()}`);
 };
+
+export const getCosyScorecard = (days = 14) =>
+  getJson<CosyScorecardResponse>(`/scorecard/cosy?days=${days}`);
