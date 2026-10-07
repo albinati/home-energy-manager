@@ -5020,6 +5020,20 @@ def save_indoor_readings(readings: list[dict[str, Any]]) -> int:
     return written
 
 
+def get_latest_soc_pct() -> float | None:
+    """Newest non-null battery SoC (%) in ``pv_realtime_history`` (#821)."""
+    with _lock:
+        conn = get_connection()
+        try:
+            r = conn.execute(
+                "SELECT soc_pct FROM pv_realtime_history WHERE soc_pct IS NOT NULL "
+                "ORDER BY captured_at DESC LIMIT 1"
+            ).fetchone()
+        finally:
+            conn.close()
+    return None if r is None else float(r["soc_pct"])
+
+
 def get_latest_indoor_reading(max_age_minutes: int = 30) -> dict[str, Any] | None:
     """Freshest house indoor temperature (#540 W1), or None when no reading is
     within ``max_age_minutes`` (→ caller falls back to the estimator).

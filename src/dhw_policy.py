@@ -434,6 +434,11 @@ def build_early_setback_row(
     )
 
 
+def read_warmup_hour(d: date) -> int:
+    """Public read-only warmup hour for local date *d* (persisted-or-static)."""
+    return _read_warmup_hour(d)
+
+
 def _read_warmup_hour(d: date) -> int:
     """Read-only warmup hour for local date *d*: persisted-or-static.
 
@@ -2127,3 +2132,63 @@ def write_daily_tank_schedule(
         sum(1 for r in rows if r["action_type"] == "tank_negative_boost"),
     )
     return n_written
+
+
+def dhw_schedule_rows_for_day(day: date, *, tz: ZoneInfo | None = None,
+                              allow_past: bool = False) -> list[dict[str, Any]]:
+    """The programmed tank rows for ONE local day, in the shape of
+    ``GET /api/v1/daikin/dhw-schedule`` (``action_type`` / ``start_utc`` /
+    ``end_utc`` / ``tank_temp_c``). Shared by that endpoint and the plan-fronts
+    read (#821). Pure schedule generation — zero Daikin quota.
+
+    Fetches import rates over the warmup→next-warmup horizon (mirrors the
+    dispatch writer) so negative-price boost rows appear. On a legionella
+    stand-off day (normal mode) the cycle row replaces that day's
+    warmup/setback chips; boost rows stay.
+    """
+    if tz is None:
+        try:
+            tz = ZoneInfo(getattr(config, "BULLETPROOF_TIMEZONE", "Europe/London"))
+        except Exception:  # noqa: BLE001
+            tz = ZoneInfo("UTC")
+    mode = (getattr(config, "OPTIMIZATION_PRESET", "normal") or "normal").strip().lower()
+    warmup_hour = int(getattr(config, "DHW_WARMUP_START_HOUR_LOCAL", 13))
+    import_tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
+    out: list[dict[str, Any]] = []
+    agile = None
+    if import_tariff:
+        try:
+            ds = datetime(day.year, day.month, day.day, warmup_hour, 0, tzinfo=tz)
+            de = ds + timedelta(days=1)
+            # Negative boost fires on negative IMPORT price (the plunge),
+            # matching the LP forecast — see lp_dispatch writer.
+            agile = db.get_rates_for_period(import_tariff, ds.astimezone(UTC), de.astimezone(UTC))
+        except Exception as e:  # noqa: BLE001
+            logger.debug("dhw-schedule: import rates unavailable for %s: %s", day, e)
+    leg_window = None
+    if mode == "normal":
+        try:
+            leg_window = _legionella_standoff_window_utc(day)
+        except Exception:  # noqa: BLE001
+            leg_window = None
+    if leg_window is not None:
+        out.append({
+            "action_type": "legionella_cycle",
+            "start_utc": leg_window[0].isoformat().replace("+00:00", "Z"),
+            "end_utc": leg_window[1].isoformat().replace("+00:00", "Z"),
+            "tank_temp_c": 60,
+        })
+    try:
+        for r in generate_daily_tank_schedule(day, agile_rates=agile, allow_past=allow_past):
+            if leg_window is not None and r.get("action_type") in ("tank_warmup", "tank_setback"):
+                continue
+            params = r.get("params") or {}
+            out.append({
+                "action_type": r.get("action_type"),
+                "start_utc": r.get("start_time"),
+                "end_utc": r.get("end_time"),
+                "tank_temp_c": params.get("tank_temp"),
+            })
+    except Exception as e:  # noqa: BLE001
+        logger.warning("dhw-schedule: generation failed for %s (%s)", day, e)
+    return out

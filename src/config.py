@@ -1162,6 +1162,9 @@ class Config:
     # #818 — history window (calendar days scanned for same-day-type days) for
     # GET /api/v1/load/expected band-sum quantiles.
     LOAD_EXPECTED_HISTORY_DAYS: int = int(os.getenv("LOAD_EXPECTED_HISTORY_DAYS", "60"))
+    # #821 — spend score: "ideal" when the day's average import price is within
+    # this ratio of the day's ideal (cheapest band / q25) price.
+    SPEND_SCORE_IDEAL_RATIO: float = float(os.getenv("SPEND_SCORE_IDEAL_RATIO", "1.15"))
     # PR D (2026-07-02 audit) — adjacent ForceCharge Fox rows merge only within
     # the same intent class: HOLD (fdSoc <= this threshold, i.e. "hold at
     # reserve, don't fill") vs FILL (higher targets). A negative_hold merged

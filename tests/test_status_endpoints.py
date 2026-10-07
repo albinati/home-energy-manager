@@ -266,8 +266,9 @@ def test_feedback_surfaces_warmup_shadow(monkeypatch):
 # ── fair-compare TTL cache ───────────────────────────────────────────────────
 
 def test_fair_compare_cached_within_ttl(monkeypatch):
-    import src.api.main as api_main
-    api_main._fair_compare_cache.clear()
+    import src.api.main as api_main  # noqa: F401
+    import src.analytics.fair_compare as _fcm
+    _fcm._fair_compare_cache.clear()
     calls = {"n": 0}
 
     def fake_compute(start, end, max_tariffs=14):

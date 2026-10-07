@@ -121,6 +121,7 @@ from .models import (
 from .routers import appliances as appliances_router
 from .routers import dispatch as dispatch_router
 from .routers import energy_providers as energy_providers_router
+from .routers import plan as plan_router
 from .routers import pv as pv_router
 from .routers import sensors as sensors_router
 from .routers import status as status_router
@@ -356,6 +357,7 @@ app.include_router(workbench_router.router)
 app.include_router(dispatch_router.router)
 app.include_router(appliances_router.router)
 app.include_router(pv_router.router)
+app.include_router(plan_router.router)
 app.include_router(sensors_router.router)
 app.include_router(status_router.router)
 
@@ -1803,7 +1805,6 @@ async def daikin_dhw_schedule():
     from datetime import datetime as _dt, timedelta as _td
     from zoneinfo import ZoneInfo
     from .. import dhw_policy
-    from .. import db as _db
 
     try:
         tz = ZoneInfo(getattr(config, "BULLETPROOF_TIMEZONE", "Europe/London"))
@@ -1811,56 +1812,9 @@ async def daikin_dhw_schedule():
         tz = UTC
     today_local = _dt.now(tz).date()
     mode = (getattr(config, "OPTIMIZATION_PRESET", "normal") or "normal").strip().lower()
-    warmup_hour = int(getattr(config, "DHW_WARMUP_START_HOUR_LOCAL", 13))
     rows_out: list[dict] = []
-    import_tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
     for offset in (0, 1):
-        day = today_local + _td(days=offset)
-        agile = None
-        if import_tariff:
-            try:
-                ds = _dt(day.year, day.month, day.day, warmup_hour, 0, tzinfo=tz)
-                de = ds + _td(days=1)
-                # Negative boost fires on negative IMPORT (Agile) price (the
-                # plunge), matching the LP forecast — see lp_dispatch writer.
-                agile = _db.get_rates_for_period(import_tariff, ds.astimezone(UTC), de.astimezone(UTC))
-            except Exception as e:
-                logger.debug("dhw-schedule: import rates unavailable for %s: %s", day, e)
-        # Legionella stand-off day (owner directive 2026-07-19): the cycle is
-        # the ONLY thing that actuates — the deferred warmup no-ops against a
-        # 60 °C tank and the setback is a target-only write. Show the cycle
-        # (start AND end) and omit that day's warmup/setback chips; boost
-        # rows (real paid windows) stay. Normal mode only — a guests 24 h
-        # warmup genuinely actuates around the cycle.
-        leg_window = None
-        if mode == "normal":
-            try:
-                leg_window = dhw_policy._legionella_standoff_window_utc(day)
-            except Exception:
-                leg_window = None
-        if leg_window is not None:
-            rows_out.append({
-                "action_type": "legionella_cycle",
-                "start_utc": leg_window[0].isoformat().replace("+00:00", "Z"),
-                "end_utc": leg_window[1].isoformat().replace("+00:00", "Z"),
-                "tank_temp_c": 60,
-            })
-        try:
-            rows = dhw_policy.generate_daily_tank_schedule(day, agile_rates=agile)
-            for r in rows:
-                if leg_window is not None and r.get("action_type") in (
-                    "tank_warmup", "tank_setback",
-                ):
-                    continue
-                params = r.get("params") or {}
-                rows_out.append({
-                    "action_type": r.get("action_type"),
-                    "start_utc": r.get("start_time"),
-                    "end_utc": r.get("end_time"),
-                    "tank_temp_c": params.get("tank_temp"),
-                })
-        except Exception as e:
-            logger.warning("dhw-schedule: generation failed for %s (%s)", day, e)
+        rows_out.extend(dhw_policy.dhw_schedule_rows_for_day(today_local + _td(days=offset), tz=tz))
     rows_out.sort(key=lambda r: str(r.get("start_utc") or ""))
     return {"mode": mode, "rows": rows_out}
 
@@ -4360,7 +4314,6 @@ def _resolve_period_range(period: str, anchor: str):
 # the Insights page paid on EVERY visit. Same in-process TTL pattern as
 # _period_insights_cache; the anchor key keeps a stale "today" view bounded
 # by the TTL while past periods are effectively immutable anyway.
-_fair_compare_cache: dict[tuple, tuple[float, dict]] = {}
 
 
 @app.get("/api/v1/tariffs/fair-compare", response_model=FairCompareResponse)
@@ -4375,21 +4328,9 @@ async def tariffs_fair_compare(period: str = "month", anchor: str = "", max_tari
         raise HTTPException(status_code=400, detail="period must be day|week|month|year")
     start, end = _resolve_period_range(period, anchor)
 
-    import time as _t
-    ttl = int(getattr(config, "FAIR_COMPARE_CACHE_TTL_SECONDS", 900))
-    key = (period, str(start), str(end), int(max_tariffs))
-    if ttl > 0:
-        hit = _fair_compare_cache.get(key)
-        if hit and (_t.monotonic() - hit[0]) < ttl:
-            return FairCompareResponse(**hit[1])
+    from ..analytics import fair_compare as _fc
 
-    from ..analytics.fair_compare import compute_fair_comparison
-
-    data = await asyncio.to_thread(
-        compute_fair_comparison, start, end, max_tariffs=max_tariffs
-    )
-    if ttl > 0 and data is not None:
-        _fair_compare_cache[key] = (_t.monotonic(), data)
+    data = await asyncio.to_thread(_fc.cached_fair_comparison, start, end, max_tariffs)
     return FairCompareResponse(**data)
 
 
