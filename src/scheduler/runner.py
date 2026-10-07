@@ -2029,12 +2029,14 @@ def bulletproof_heartbeat_tick() -> None:
     fox_mode = None
     rt_solar_kw: float | None = None
     rt_load_kw: float | None = None
+    rt_grid_kw: float | None = None
     try:
         rt = get_cached_realtime()
         soc = rt.soc
         fox_mode = rt.work_mode
         rt_solar_kw = float(rt.solar_power) if rt.solar_power is not None else None
         rt_load_kw = float(rt.load_power) if rt.load_power is not None else None
+        rt_grid_kw = float(rt.grid_power) if rt.grid_power is not None else None  # + = importing
     except Exception:
         pass
     if not fox_mode or fox_mode == "unknown":
@@ -2456,6 +2458,134 @@ def bulletproof_heartbeat_tick() -> None:
                 f"during high price {price}p/kWh",
                 extra={"warning_key": key},
             )
+
+    try:
+        _peak_import_guard_tick(
+            now_local=now_local, plan_date=plan_date, price=price,
+            grid_kw=rt_grid_kw, soc=soc,
+        )
+    except Exception as exc:  # the guard must never break the heartbeat
+        logger.debug("peak import guard error: %s", exc)
+
+
+# --- Peak-import guard (#806) -------------------------------------------------
+# State for the real-time "we are importing during the peak band" check: a
+# tick counter (debounce) and the window key already alerted, so one peak
+# window produces at most ONE risk alert (cf. #800 risk_alert spam).
+_peak_guard_ticks: int = 0
+_peak_guard_window_key: str | None = None
+_peak_guard_alerted_key: str | None = None
+
+
+def _peak_import_guard_tick(
+    *,
+    now_local: datetime,
+    plan_date: str,
+    price: float | None,
+    grid_kw: float | None,
+    soc: float | None,
+) -> dict[str, Any]:
+    """During the PEAK band, grid import ≥ ``PEAK_IMPORT_GUARD_KW`` for
+    ``PEAK_IMPORT_GUARD_TICKS`` consecutive heartbeats → one ``notify_risk``
+    per peak window + ``PEAK_IMPORT_GUARD_ACTION`` (``replan`` = an
+    event-driven MPC re-solve so the LP re-plans the rest of the peak from the
+    live SoC; ``none`` = alert only). Household policy: the peak band is never
+    bought from the grid — the LP plans it that way (soft penalty), this is
+    the live backstop when load outruns the plan or the battery hit the reserve.
+
+    Returns a small status dict for tests/telemetry. Never raises.
+    """
+    global _peak_guard_ticks, _peak_guard_window_key, _peak_guard_alerted_key
+    out: dict[str, Any] = {"in_peak": False, "ticks": 0, "fired": False}
+    if not bool(getattr(config, "PEAK_IMPORT_GUARD_ENABLED", True)):
+        return out
+    # Banded tariffs only (review F1): on Agile "price > 25p" is an ordinary
+    # evening and importing 0.5 kW there is normal — the guard must not page.
+    from ..energy.tariff_structure import prefer_plan_thresholds
+
+    if not prefer_plan_thresholds():
+        return out
+    if price is None:
+        # Rates read miss: unknown, keep the window state (a transient None
+        # must not reset the once-per-window dedupe and alert twice).
+        out["in_peak"] = _peak_guard_window_key is not None
+        out["ticks"] = _peak_guard_ticks
+        return out
+    in_peak = float(price) > _peak_alert_threshold_p(plan_date)
+    if not in_peak:
+        _peak_guard_ticks = 0
+        _peak_guard_window_key = None
+        return out
+    out["in_peak"] = True
+    if _peak_guard_window_key is None:
+        # entering the peak band: the window key is the local date + entry HH:MM
+        _peak_guard_window_key = f"peak_import_{plan_date}_{now_local:%H%M}"
+    kw_thr = float(getattr(config, "PEAK_IMPORT_GUARD_KW", 0.3))
+    if grid_kw is not None and float(grid_kw) >= kw_thr:
+        _peak_guard_ticks += 1
+    else:
+        _peak_guard_ticks = 0
+    out["ticks"] = _peak_guard_ticks
+    need = int(getattr(config, "PEAK_IMPORT_GUARD_TICKS", 2))
+    if _peak_guard_ticks < max(1, need):
+        return out
+    if _peak_guard_alerted_key == _peak_guard_window_key:
+        return out  # already alerted for this window
+    # Review F4: a PLANNED peak import (the committed plan already buys this
+    # slot because the battery cannot cover it) is not a plan failure — the
+    # replan would change nothing. Only act when the plan expected ~0.
+    planned_kwh: float | None = None
+    try:
+        slot_start = now_local.astimezone(UTC).replace(
+            minute=(0 if now_local.minute < 30 else 30), second=0, microsecond=0,
+        )
+        planned_kwh = _lp_planned_import_kwh_at(slot_start)
+    except Exception:
+        planned_kwh = None
+    out["planned_kwh"] = planned_kwh
+    if planned_kwh is not None and planned_kwh >= float(getattr(config, "PEAK_IMPORT_GUARD_PLANNED_KWH", 0.1)):
+        _peak_guard_alerted_key = _peak_guard_window_key  # planned: no alert this window
+        out["planned"] = True
+        return out
+    _peak_guard_alerted_key = _peak_guard_window_key
+    out["fired"] = True
+    action = str(getattr(config, "PEAK_IMPORT_GUARD_ACTION", "replan") or "replan").lower()
+    replanned: bool | None = None
+    if action == "replan":
+        try:
+            # bypass_cooldown: debounced + once per window, cannot thrash; a
+            # soc_drift replan in the same tick would otherwise swallow it.
+            replanned = bool(bulletproof_mpc_job(
+                force_write_devices=True, trigger_reason="peak_import", bypass_cooldown=True,
+            ))
+        except Exception as exc:
+            logger.warning("peak_import_guard replan failed: %s", exc)
+            replanned = False
+    out["replanned"] = replanned
+    try:
+        db.log_action(
+            device="system", action="peak_import_guard",
+            params={"grid_kw": grid_kw, "soc": soc, "ticks": _peak_guard_ticks,
+                    "price_p": price, "action": action, "window": _peak_guard_window_key,
+                    "planned_kwh": planned_kwh, "replanned": replanned},
+            result="ok" if replanned is not False else "failure", trigger="heartbeat",
+        )
+    except Exception as exc:
+        logger.debug("peak_import_guard log_action failed: %s", exc)
+    try:
+        tail = (
+            "re-planned the rest of the peak." if replanned
+            else "replan was NOT run (busy/failed)." if action == "replan"
+            else "alert only."
+        )
+        notify_risk(
+            f"Importing {float(grid_kw):.2f} kW from the grid during the PEAK band "
+            f"({price}p/kWh, battery {soc}%) — {tail}",
+            extra={"warning_key": _peak_guard_window_key},
+        )
+    except Exception as exc:
+        logger.debug("peak_import_guard notify failed: %s", exc)
+    return out
 
 
 def _peak_alert_threshold_p(plan_date) -> float:

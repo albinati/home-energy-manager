@@ -98,6 +98,15 @@ class LpPlan:
     """Per-slot band on a BANDED tariff (``cheap`` / ``standard`` / ``peak`` /
     ``negative``); empty on a dynamic tariff so consumers fall back to the
     threshold comparisons."""
+    peak_import_kwh: float = 0.0
+    """Grid import the committed plan still places inside the PEAK band (#806).
+    0 is the target; > 0 means the battery/PV could not cover the peak and the
+    soft penalty let the LP import rather than go Infeasible."""
+    peak_import_penalty_applied: bool = False
+    peak_import_penalty_pence: float = 0.0
+    """The soft peak-import term's value in the solved objective (#806).
+    ``objective_pence`` is reported NET of it so briefs / daily targets /
+    shadow comparisons see the economic cost, not the policy penalty."""
     pre_negative_export_slots: list[int] = field(default_factory=list)
     """Slot indices where the pre-negative drain relaxation allowed battery→grid
     export (1B). The labeller marks committed drains here ``pre_negative_export``
@@ -888,7 +897,9 @@ def solve_lp(
     # drain when it isn't worth it, and the ``export_rate < 0`` safety below
     # forces ``exp == 0`` so we never pay to export.
     pre_neg_export = [False] * n
-    if getattr(config, "LP_PRE_NEGATIVE_PREP_ENABLED", True) and not _vacation_mode:
+    # #806: household policy — the battery never discharges to the grid.
+    _battery_export_enabled = bool(getattr(config, "LP_BATTERY_EXPORT_ENABLED", True))
+    if getattr(config, "LP_PRE_NEGATIVE_PREP_ENABLED", True) and not _vacation_mode and _battery_export_enabled:
         _prep_slots = int(max(0, int(getattr(config, "LP_PLUNGE_PREP_HOURS", 12))) * 2)
         if _prep_slots > 0:
             for i in range(n):
@@ -931,7 +942,12 @@ def solve_lp(
         # vacation o LP planeja arbitragem normalmente; em normal/guests, o LP
         # não tem solução viável que envolve descarga pro grid.
         if _vacation_mode:
-            prob += exp[i] <= pv_use[i] + dis[i]
+            # #806: with battery export disabled, vacation keeps PV-only
+            # charging but the battery still never feeds the grid.
+            if _battery_export_enabled:
+                prob += exp[i] <= pv_use[i] + dis[i]
+            else:
+                prob += exp[i] <= pv_use[i]
             # Vacation: bateria carrega só de PV (sem grid charging)
             prob += chg[i] <= pv_use[i]
         elif pre_neg_export[i]:
@@ -1501,7 +1517,7 @@ def solve_lp(
     # distribution. The bonus is a tie-breaker — it must be small enough
     # never to cause curtailment when prices are uniformly low.
     rank_bonus_p = float(getattr(config, "LP_PEAK_EXPORT_RANK_BONUS_PENCE_PER_KWH", 0.0))
-    if rank_bonus_p > 0 and export_price_pence is not None:
+    if rank_bonus_p > 0 and export_price_pence is not None and _battery_export_enabled:
         positive_rates = [r for r in export_rate_line if r is not None and r > 0]
         if len(positive_rates) >= 4:
             pct = max(0.0, min(100.0, float(getattr(config, "LP_PEAK_EXPORT_TOP_QUARTILE_PERCENT", 25.0))))
@@ -1512,6 +1528,22 @@ def solve_lp(
             top_q_indices = [i for i in range(n) if export_rate_line[i] >= top_q_threshold]
             if top_q_indices:
                 obj_grid -= rank_bonus_p * pulp.lpSum(exp[i] for i in top_q_indices)
+    # #806: soft "no grid import in the peak band" term. On a banded tariff
+    # the peak slots are known exactly (``price_band``); the penalty is a cost,
+    # never a constraint, so a genuine shortfall still imports rather than
+    # going Infeasible. The scenario solves share this code, so the pessimistic
+    # SoC trajectory (and the peak-entry charge floor built on it) already
+    # sizes the pre-peak charge for the whole peak.
+    peak_import_pen = float(getattr(config, "LP_PEAK_IMPORT_PENALTY_PENCE_PER_KWH", 0.0))
+    if peak_import_pen > 0 and price_band:
+        peak_import_idx = [i for i in range(n) if price_band[i] == "peak"]
+    elif peak_import_pen > 0 and getattr(config, "LP_PEAK_IMPORT_PENALTY_APPLY_DYNAMIC", False):
+        peak_import_idx = [i for i in range(n) if price_line[i] >= peak_thr]
+    else:
+        peak_import_idx = []
+    obj_peak_import = (
+        peak_import_pen * pulp.lpSum(imp[i] for i in peak_import_idx) if peak_import_idx else 0.0
+    )
     obj_cycle = cycle_pen * pulp.lpSum(chg[i] + dis[i] for i in range(n))
     # W3 (#540): comfort-floor slack penalty (0 when W3 off → objective unchanged).
     obj_comfort = (w3_pen * pulp.lpSum(s_lo[i] for i in range(n))) if w3 else 0.0
@@ -1618,7 +1650,7 @@ def solve_lp(
         obj_pv_curt = 0
     objective = (
         obj_grid + obj_cycle + obj_comfort + obj_tank_hi
-        + obj_pv_curt + obj_pv_abundance_dhw + obj_shower_lo
+        + obj_pv_curt + obj_pv_abundance_dhw + obj_shower_lo + obj_peak_import
     )
 
     if use_stress and stress_aux:
@@ -1753,5 +1785,10 @@ def solve_lp(
             plan.indoor_temp_c.append(_v(t_in[i]))
 
     plan.dhw_lp_owned = _lp_owned
+    if peak_import_idx:
+        plan.peak_import_penalty_applied = True
+        plan.peak_import_kwh = float(sum(plan.import_kwh[i] for i in peak_import_idx))
+        plan.peak_import_penalty_pence = float(peak_import_pen * plan.peak_import_kwh)
+        plan.objective_pence -= plan.peak_import_penalty_pence
 
     return plan

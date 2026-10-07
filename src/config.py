@@ -945,6 +945,31 @@ class Config:
     DAIKIN_LWT_PREHEAT_DEMAND_GATE_PHANTOM_FILTER: bool = os.getenv(
         "DAIKIN_LWT_PREHEAT_DEMAND_GATE_PHANTOM_FILTER", "true"
     ).lower() in ("true", "1", "yes")
+    # --- Battery policy (#803/#806) -----------------------------------------
+    # false = the battery NEVER discharges to the grid (no peak_export, no
+    # pre-negative drain, no ForceDischarge group) in ANY preset — household
+    # policy for autumn/winter (arbitrage with the battery only). Incidental PV
+    # surplus export is still allowed (curtailing it earns nothing). Code
+    # default true keeps the Agile/vacation behaviour; prod pins false.
+    LP_BATTERY_EXPORT_ENABLED: bool = os.getenv("LP_BATTERY_EXPORT_ENABLED", "true").lower() in ("true", "1", "yes")
+    # Soft penalty (p/kWh) on grid import inside the PEAK band of a banded
+    # tariff. Soft by construction (a cost, never a constraint) so a genuine
+    # shortfall still imports instead of going Infeasible; set far above any
+    # price spread (prod 100) and the LP sizes the pre-peak charge to cover the
+    # whole peak. 0 = off. Dynamic (Agile) tariffs are untouched unless
+    # LP_PEAK_IMPORT_PENALTY_APPLY_DYNAMIC is true (then: price >= peak_thr).
+    LP_PEAK_IMPORT_PENALTY_PENCE_PER_KWH: float = float(os.getenv("LP_PEAK_IMPORT_PENALTY_PENCE_PER_KWH", "0"))
+    LP_PEAK_IMPORT_PENALTY_APPLY_DYNAMIC: bool = os.getenv("LP_PEAK_IMPORT_PENALTY_APPLY_DYNAMIC", "false").lower() in ("true", "1", "yes")
+    # Heartbeat peak-import guard: during the PEAK band, grid import >= KW for
+    # TICKS consecutive heartbeats → one risk alert per peak window + the
+    # configured action ("replan" = event-driven MPC re-solve, "none").
+    PEAK_IMPORT_GUARD_ENABLED: bool = os.getenv("PEAK_IMPORT_GUARD_ENABLED", "true").lower() in ("true", "1", "yes")
+    PEAK_IMPORT_GUARD_KW: float = float(os.getenv("PEAK_IMPORT_GUARD_KW", "0.3"))
+    PEAK_IMPORT_GUARD_TICKS: int = int(os.getenv("PEAK_IMPORT_GUARD_TICKS", "2"))
+    PEAK_IMPORT_GUARD_ACTION: str = (os.getenv("PEAK_IMPORT_GUARD_ACTION") or "replan").strip().lower()
+    # A committed plan that already buys ≥ this in the current peak slot is a
+    # planned shortfall, not a plan failure — the guard stays quiet.
+    PEAK_IMPORT_GUARD_PLANNED_KWH: float = float(os.getenv("PEAK_IMPORT_GUARD_PLANNED_KWH", "0.1"))
     # --- Tariff structure (#803/#804, Cosy switch 2026-10) -----------------
     # "auto" detects a BANDED tariff (≤ TARIFF_BANDED_MAX_LEVELS distinct price
     # levels in the horizon, e.g. Cosy's 3) and derives cheap/peak thresholds as

@@ -1832,7 +1832,27 @@ def filter_robust_peak_export(
             "outgoing_rate_percentile": rate_percentiles[i] if i < len(rate_percentiles) else None,
         }
 
-        if s.kind == "peak_export":
+        if s.kind in ("peak_export", "pre_negative_export") and not bool(
+            getattr(config, "LP_BATTERY_EXPORT_ENABLED", True)
+        ):
+            # #806 household policy: the battery never discharges to the grid.
+            # Decided HERE so dispatch_decisions, the coherence audit and the
+            # MCP explainers all see the same outcome as the uploaded groups.
+            # Unreachable from a fresh solve (the LP caps exp <= pv_use) — this
+            # catches a stale / replayed plan.
+            s = dataclasses.replace(s, kind="standard", lp_grid_import_w=None)
+            decision["dispatched_kind"] = "standard"
+            decision["committed"] = False
+            decision["reason"] = "export_disabled"
+            try:
+                db.log_action(
+                    device="fox", action="export_slot_suppressed",
+                    params={"slot_time_utc": slot_iso, "lp_kind": decision["lp_kind"]},
+                    result="ok", trigger="dispatch",
+                )
+            except Exception:  # pragma: no cover — audit only
+                logger.debug("export_slot_suppressed log failed", exc_info=True)
+        elif s.kind == "peak_export":
             margin_p, export_price_p, refill_shadow_p = _economic_margin_p_kwh(i)
             decision["export_price_p_kwh"] = export_price_p
             decision["refill_price_p_kwh"] = refill_shadow_p
@@ -2052,6 +2072,9 @@ def build_fox_groups_from_lp(
     should call ``filter_robust_peak_export`` directly to capture decisions
     alongside the run_id.
     """
+    # #806: with battery export disabled, filter_robust_peak_export downgrades
+    # every peak_export / pre_negative_export slot (reason=export_disabled), so
+    # no ForceDischarge group can be built from here.
     slots, _decisions = filter_robust_peak_export(plan, scenarios, export_price_pence=export_price_pence)
     if slots:
         # < 24 h — the daily-cyclic collision fix (2026-07-04, the TRUE root
