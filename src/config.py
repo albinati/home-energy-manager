@@ -410,6 +410,13 @@ class Config:
     # yesterday's actual half-hourly consumption from Octopus and rewrites
     # ``execution_log`` rows. Fires in BULLETPROOF_TIMEZONE local. Octopus
     # consumption data lands ~24 h after the slot; 04:00 local is safe.
+    # #831 — daily Cosy scorecard (scores YESTERDAY, local day; read-only, never
+    # changes a setting). Fires at HOUR:MINUTE in BULLETPROOF_TIMEZONE, before
+    # the 08:00 morning brief that quotes one line from it.
+    COSY_SCORECARD_ENABLED: bool = os.getenv("COSY_SCORECARD_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+    COSY_SCORECARD_HOUR_LOCAL: int = int(os.getenv("COSY_SCORECARD_HOUR_LOCAL", "7"))
+    COSY_SCORECARD_MINUTE: int = int(os.getenv("COSY_SCORECARD_MINUTE", "30"))
+    COSY_SCORECARD_QUOTA_ALERT: int = int(os.getenv("COSY_SCORECARD_QUOTA_ALERT", "150"))
     CONSUMPTION_BACKFILL_HOUR: int = int(os.getenv("CONSUMPTION_BACKFILL_HOUR", "4"))
     CONSUMPTION_BACKFILL_MINUTE: int = int(os.getenv("CONSUMPTION_BACKFILL_MINUTE", "0"))
 

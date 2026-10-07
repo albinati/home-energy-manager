@@ -572,6 +572,31 @@ band, `DAIKIN_LWT_SOURCE`):
   false); then only that one bounded +-0.5 change per week via
   `runtime_settings.set_setting` (action_log `auto_tune`).
 
+### Cosy daily scorecard (#831)
+
+`src/analytics/cosy_scorecard.py` scores YESTERDAY (local day) once a day:
+job `cosy_scorecard` at `COSY_SCORECARD_HOUR_LOCAL:MINUTE` (07:30
+`BULLETPROOF_TIMEZONE`, before the 08:00 brief; a one-shot 120 s after boot
+back-fills any missing day of the last 7) persists one row in
+`cosy_scorecard_daily` (indexed: score, peak/import kWh, import £, avg vs ideal
+p, net £; everything else in `payload_json`). Read-only — it NEVER changes a
+setting. Payload sections, each guarded on its own: `spend` (the SAME
+`plan_fronts.spend_section` the Home uses, so the score agrees), `bands` (per
+tariff window: import kWh/£, load, PV, battery discharge, forecast-vs-actual load
+error + `under_forecast`), `battery` (planned vs realised SoC at 07:00 / 16:00 /
+00:00, pessimistic-floor binding slots, cycles), `comfort` (per room min/max/mean,
+hours below the night floor and below the peak-coast floor, using
+`INDOOR_COMFORT_AGGREGATE`), `tank` (°C at each shower-window entry vs floor,
+window decision, `coast_check` ratio), `lwt` (preheat/restore rows, `daikin_write_verify`
+success/unverified/mismatch, last `lwt_source_diff`), `ops` (Daikin calls, Fox
+failures), `money` (net £, delta vs fixed, rolling-7 mean). Surfaces:
+`GET /api/v1/scorecard/cosy?days=14` (viewer, clamp 1..90, newest first), the
+Insights "Cosy scorecard" card, ONE line in the morning brief. One `notify_risk`
+per condition per date (dedupe via `acknowledge_warning`, keys `cosy_*_<date>`):
+3 consecutive days of peak-band load under-forecast, tank below a shower floor at
+entry, any write-verify mismatch, Daikin calls > `COSY_SCORECARD_QUOTA_ALERT` (150).
+`COSY_SCORECARD_ENABLED=false` switches the job off.
+
 ## Key `.env` settings to know
 
 ```

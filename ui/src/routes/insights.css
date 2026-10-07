@@ -288,3 +288,23 @@
 @media (prefers-reduced-motion: reduce) {
   .insights-updating-bar::after { animation: none; left: 0; width: 100%; opacity: 0.5; }
 }
+
+/* ---- Cosy scorecard (#831) ---- */
+.cosyscore { margin-top: var(--space-5); }
+.cosyscore-head { display: flex; align-items: baseline; gap: var(--space-2); }
+.cosyscore-head h2 { font-size: var(--font-lg); margin: 0; }
+.cosyscore-scroll { overflow-x: auto; }
+.cosyscore-table { width: 100%; border-collapse: collapse; font-size: var(--font-sm); font-variant-numeric: tabular-nums; }
+.cosyscore-table th { text-align: left; font-weight: 500; color: var(--text-mute); padding: var(--space-2); white-space: nowrap; }
+.cosyscore-table td { padding: var(--space-2); white-space: nowrap; background: transparent; }
+.cosyscore-table tbody tr:nth-child(odd) td { background: color-mix(in srgb, var(--text) 3%, transparent); }
+.cosyscore-table .num { text-align: right; }
+.cosyscore-warn { color: var(--warn); }
+.cosyscore-pill { padding: 0 var(--space-3); border-radius: var(--radius-pill); font-size: var(--font-xs); font-weight: 600; }
+.cosyscore-pill--ideal { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
+.cosyscore-pill--below { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.cosyscore-pill--above { color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); }
+.cosyscore-bars { position: relative; width: 120px; height: 6px; background: color-mix(in srgb, var(--text) 8%, transparent); border-radius: var(--radius-pill); display: inline-block; vertical-align: middle; }
+.cosyscore-bar { position: absolute; left: 0; top: 0; bottom: 0; background: var(--accent); border-radius: var(--radius-pill); }
+.cosyscore-ideal { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--ok); }
+.cosyscore-bar-label { margin-left: var(--space-2); color: var(--text-dim); }

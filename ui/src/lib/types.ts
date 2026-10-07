@@ -1494,3 +1494,45 @@ export interface PlanFrontsResponse {
   spend: PlanFrontsSpend | null;
   compare: PlanFrontsCompare | null;
 }
+
+// ---- Cosy daily scorecard (#831) — GET /api/v1/scorecard/cosy ----
+export interface CosyScoreBand {
+  key: string;
+  label: string;
+  is_peak: boolean;
+  start_local: string;
+  end_local: string;
+  price_p: number | null;
+  import_kwh: number | null;
+  import_cost_gbp: number | null;
+  load_error_kwh: number | null;
+  under_forecast: boolean | null;
+}
+
+export interface CosyScoreRow {
+  date: string;
+  score: "ideal" | "below" | "above" | null;
+  peak_import_kwh: number | null;
+  import_kwh: number | null;
+  import_cost_gbp: number | null;
+  avg_import_p: number | null;
+  ideal_avg_import_p: number | null;
+  net_cost_gbp: number | null;
+  built_at_utc: string;
+  bands?: CosyScoreBand[] | null;
+  peak_under_forecast?: boolean | null;
+  battery?: { cycles?: number | null; pess_floor?: { floor_binding_slots?: number | null } } | null;
+  comfort?: {
+    hours_below_night_floor?: number | null;
+    hours_below_peak_floor?: number | null;
+    aggregate?: string;
+  } | null;
+  tank?: { any_below_floor?: boolean | null } | null;
+  lwt?: { write_verify?: { success: number; unverified: number; mismatch: number } } | null;
+  ops?: { daikin_calls?: number | null; fox_failures?: number | null } | null;
+}
+
+export interface CosyScorecardResponse {
+  days: number;
+  rows: CosyScoreRow[];
+}

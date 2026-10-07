@@ -123,6 +123,7 @@ from .routers import dispatch as dispatch_router
 from .routers import energy_providers as energy_providers_router
 from .routers import comfort as comfort_router
 from .routers import plan as plan_router
+from .routers import scorecard as scorecard_router
 from .routers import pv as pv_router
 from .routers import sensors as sensors_router
 from .routers import status as status_router
@@ -360,6 +361,8 @@ app.include_router(appliances_router.router)
 app.include_router(pv_router.router)
 app.include_router(plan_router.router)
 app.include_router(comfort_router.router)
+
+app.include_router(scorecard_router.router)
 app.include_router(sensors_router.router)
 app.include_router(status_router.router)
 
