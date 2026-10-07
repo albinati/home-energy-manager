@@ -161,7 +161,8 @@ def sanitize_phantom_heating(
       energy (defrost, recovery ramps) out of existence;
     * the site's own weather curve says the compressor was essentially OFF:
       ``get_daikin_heating_kw(bucket outdoor mean) × 2 h < max_plausible_kwh``
-      (default 0.15 — under the prod curve that means outdoor ≳ 14.5 °C).
+      (default 0.15 — under the configured curve the compressor-off cutoff
+      ``DAIKIN_WEATHER_CURVE_HIGH_C`` = 18 °C is where this holds).
       In shoulder/winter conditions the curve yields ≥ 0.35 kWh/bucket, so a
       1.0 claim there keeps blocking — the honest conservative outcome.
 

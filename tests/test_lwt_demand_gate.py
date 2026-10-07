@@ -10,7 +10,6 @@ heating the offsets caused (k 0.033 → 0.067). These tests pin:
 """
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -375,3 +374,122 @@ def test_gate_state_preheat_suppressed_when_demand_absent(monkeypatch):
     st = lp_dispatch.space_heating_gate_state()
     assert st["demand_present"] is False
     assert st["preheat_suppressed"] is True
+
+
+# ---------------------------------------------------------------------------
+# #749 → #807: phantom onecta_cache 1.0 kWh buckets must not open the gate
+# ---------------------------------------------------------------------------
+
+
+def _seed_2h_src(date_str: str, bucket: int, kwh_heating: float, source: str) -> None:
+    from src import db
+    db.upsert_daikin_consumption_2hourly(
+        date=date_str, bucket_idx=bucket, kwh_total=kwh_heating,
+        kwh_heating=kwh_heating, kwh_dhw=0.0, source=source,
+    )
+
+
+def _seed_outdoor(temp_c: float) -> None:
+    """Hourly meteo_forecast_value rows for the last 3 days at a flat temp."""
+    import sqlite3
+
+    from src.config import config as _cfg
+    conn = sqlite3.connect(_cfg.DB_PATH)
+    ts = (datetime.now(UTC) - timedelta(days=3)).replace(minute=0, second=0, microsecond=0)
+    while ts < datetime.now(UTC) + timedelta(hours=2):
+        conn.execute(
+            "INSERT OR REPLACE INTO meteo_forecast_value"
+            " (slot_time, forecast_fetch_at_utc, temp_c) VALUES (?, ?, ?)",
+            (ts.strftime("%Y-%m-%dT%H:%M:%SZ"), "2026-01-01T00:00:00Z", temp_c),
+        )
+        ts += timedelta(hours=1)
+    conn.commit()
+    conn.close()
+
+
+def _patch_curve_kw(monkeypatch, kw: float) -> None:
+    import src.physics as physics
+    monkeypatch.setattr(physics, "get_daikin_heating_kw", lambda t, lwt_offset_delta=0.0: kw)
+
+
+def test_single_quantum_onecta_bucket_on_warm_night_is_ignored(monkeypatch):
+    """Six of these opened the gate in July (#749): a 1.0 kWh onecta_cache claim
+    when the weather curve says the compressor was off is NOT demand."""
+    from src.scheduler.lp_dispatch import _space_heating_demand_present, space_heating_gate_state
+
+    monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_DEMAND_GATE_PHANTOM_FILTER", True, raising=False)
+    monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_MIN_TRAILING_HEATING_KWH", 0.5, raising=False)
+    _patch_curve_kw(monkeypatch, 0.0)
+    _seed_outdoor(19.0)
+    y = _yesterday_local()
+    _seed_2h_src(y.date().isoformat(), 11, 1.0, "onecta_cache")   # 22-24 last night
+    _seed_2h_src(y.date().isoformat(), 9, 1.0, "onecta_cache")    # 18-20 last night
+    assert _space_heating_demand_present() is False
+    assert float(space_heating_gate_state()["measured_window_kwh"]) < 0.5
+
+
+def test_real_cold_heating_still_opens_gate(monkeypatch):
+    from src.scheduler.lp_dispatch import _space_heating_demand_present
+
+    monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_DEMAND_GATE_PHANTOM_FILTER", True, raising=False)
+    monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_MIN_TRAILING_HEATING_KWH", 0.5, raising=False)
+    _patch_curve_kw(monkeypatch, 0.8)   # cold: 1.6 kWh/bucket plausible → claims kept
+    _seed_outdoor(2.0)
+    y = _yesterday_local()
+    _seed_2h_src(y.date().isoformat(), 11, 1.0, "onecta_cache")
+    assert _space_heating_demand_present() is True
+
+
+def test_phantom_filter_kill_switch(monkeypatch):
+    from src.scheduler.lp_dispatch import _space_heating_demand_present
+
+    monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_DEMAND_GATE_PHANTOM_FILTER", False, raising=False)
+    monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_MIN_TRAILING_HEATING_KWH", 0.5, raising=False)
+    _patch_curve_kw(monkeypatch, 0.0)
+    _seed_outdoor(19.0)
+    y = _yesterday_local()
+    _seed_2h_src(y.date().isoformat(), 11, 1.0, "onecta_cache")
+    assert _space_heating_demand_present() is True  # pre-#807 behaviour
+
+
+def test_phantom_filter_fails_open_without_outdoor_series(monkeypatch):
+    """No meteo rows → the guard cannot judge → rows kept → gate opens (the
+    documented fail-open; a summer meteo outage re-enables #749)."""
+    from src.scheduler.lp_dispatch import _space_heating_demand_present
+
+    monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_DEMAND_GATE_PHANTOM_FILTER", True, raising=False)
+    monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_MIN_TRAILING_HEATING_KWH", 0.5, raising=False)
+    _patch_curve_kw(monkeypatch, 0.0)
+    y = _yesterday_local()
+    _seed_2h_src(y.date().isoformat(), 11, 1.0, "onecta_cache")
+    assert _space_heating_demand_present() is True
+
+
+def test_real_curve_keeps_mild_autumn_bucket_and_zeroes_warm_one(monkeypatch):
+    """Unpatched weather curve (18→22 / −5→45 LWT): a 1.0 kWh onecta_cache
+    bucket is kept at 14 °C (plausible ≈ 0.5 kWh) and zeroed at 19 °C (curve
+    cutoff 18 °C → compressor off)."""
+    from src.scheduler.lp_dispatch import _space_heating_demand_present
+
+    monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_DEMAND_GATE_PHANTOM_FILTER", True, raising=False)
+    monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_MIN_TRAILING_HEATING_KWH", 0.5, raising=False)
+    monkeypatch.setattr(app_config, "DAIKIN_WEATHER_CURVE_HIGH_C", 18.0, raising=False)
+    y = _yesterday_local()
+    _seed_outdoor(14.0)
+    _seed_2h_src(y.date().isoformat(), 11, 1.0, "onecta_cache")
+    assert _space_heating_demand_present() is True
+    _seed_outdoor(19.0)
+    assert _space_heating_demand_present() is False
+
+
+def test_non_candidate_rows_untouched_by_gate_filter(monkeypatch):
+    """A 2.0 kWh claim and a telemetry_integral row are never zeroed."""
+    from src.scheduler.lp_dispatch import _space_heating_demand_present
+
+    monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_DEMAND_GATE_PHANTOM_FILTER", True, raising=False)
+    monkeypatch.setattr(app_config, "DAIKIN_LWT_PREHEAT_MIN_TRAILING_HEATING_KWH", 0.5, raising=False)
+    _patch_curve_kw(monkeypatch, 0.0)
+    _seed_outdoor(19.0)
+    y = _yesterday_local()
+    _seed_2h_src(y.date().isoformat(), 11, 1.0, "telemetry_integral")
+    assert _space_heating_demand_present() is True

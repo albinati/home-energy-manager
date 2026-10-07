@@ -11,6 +11,7 @@ import math
 import sqlite3
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -4511,6 +4512,8 @@ def get_dhw_boost_windows(start_date: str, end_date: str) -> list[tuple[str, str
 
 def measured_space_heating_kwh_excluding_offset_windows(
     lookback_hours: int = 48,
+    *,
+    rows_filter: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = None,
 ) -> float:
     """Trailing measured space-heating kWh from ``daikin_consumption_2hourly``,
     EXCLUDING 2-hour buckets overlapped by a HEM ``lwt_preheat`` window.
@@ -4551,6 +4554,13 @@ def measured_space_heating_kwh_excluding_offset_windows(
         daily = get_daikin_consumption_daily_range(start_date, end_date)
         return float(sum(r.get("kwh_heating") or 0.0 for r in daily))
 
+    if rows_filter is not None:
+        # #749/#807: let the caller ZERO phantom single-quantum onecta_cache
+        # buckets (the #760 learner guard) before the sum — the gate used to
+        # count them as demand and arm summer boosts off counter blips. Applied
+        # AFTER the empty-check above so a filter can never flip the gate onto
+        # the unfiltered daily totals.
+        rows = rows_filter(rows) or rows
     # Thermal-lag tail: HEM-induced heat bleeds into the 2-h bucket(s) AFTER an
     # offset window closes (the live June self-loop counted those as natural
     # demand and latched the gate open). Exclude this many trailing buckets too.
