@@ -31,6 +31,8 @@ from ..energy.tariff_models import (
     RateSchedule,
     TariffProduct,
 )
+from ..energy.tariff_structure import display_name as _display_name
+from ..energy.tariff_structure import is_tou_family as _is_tou_family
 from . import pnl
 from .shadow_pricing import svt_rate_pence
 
@@ -79,6 +81,9 @@ def _is_export_only(product_code: str) -> bool:
 
 
 def _current_product_code() -> str:
+    """Product code of the configured import tariff (``E-1R-COSY-22-12-08-H`` →
+    ``COSY-22-12-08``). With no code configured (dev/sim) the legacy ``AGILE``
+    placeholder keeps the catalogue lookup meaningful."""
     code = (config.OCTOPUS_TARIFF_CODE or "").strip()
     m = re.match(r"^E-\d+R-(.+)-[A-Z]$", code)
     return m.group(1) if m else (code or "AGILE")
@@ -171,7 +176,7 @@ def _empty(requested_start: date, end_day: date, agile_start: date) -> dict[str,
         "period_end": end_day.isoformat(),
         "requested_start": requested_start.isoformat(),
         "clamped": True,
-        "clamp_reason": f"Entire range predates AGILE_TARIFF_START_DATE={agile_start.isoformat()}",
+        "clamp_reason": f"Entire range predates SMART_TARIFF_START_DATE={agile_start.isoformat()}",
         "n_days": 0,
         "days_with_data": 0,
         "basis": {"import_kwh": 0.0, "export_kwh": 0.0},
@@ -273,7 +278,7 @@ def compute_fair_comparison(
         start_day = agile_start
         clamped = True
         clamp_reason = (
-            f"Clamped to AGILE_TARIFF_START_DATE={agile_start.isoformat()} "
+            f"Clamped to SMART_TARIFF_START_DATE={agile_start.isoformat()} "
             "(before that the household was on a different tariff)"
         )
 
@@ -382,8 +387,10 @@ def compute_fair_comparison(
     cur_product = next((t for t in candidates if t.product_code == current_code), None)
     rows.append({
         "product_code": current_code,
-        "display_name": f"{cur_product.display_name if cur_product else 'Octopus Agile'} (your tariff)",
-        "pricing": cur_product.pricing.value if cur_product else "half_hourly",
+        "display_name": f"{cur_product.display_name if cur_product else 'Octopus ' + _display_name()} (your tariff)",
+        "pricing": cur_product.pricing.value if cur_product else (
+            "time_of_use" if _is_tou_family(config.OCTOPUS_TARIFF_CODE) else "half_hourly"
+        ),
         "is_current": True,
         "approximate": False,
         "import_cost_pence": round(cur["import_cost"], 2),

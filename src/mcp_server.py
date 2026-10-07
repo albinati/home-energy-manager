@@ -2200,7 +2200,7 @@ def build_mcp() -> FastMCP:
             "  * realised_net_cost_gbp — what we actually paid net of exports "
             "(includes standing charge)\n"
             "  * import_kwh + import_cost_gbp — energy-import side only\n"
-            "  * mean_import_rate_p_per_kwh — import-weighted mean Agile rate "
+            "  * mean_import_rate_p_per_kwh — import-weighted mean import rate "
             "today (NOT 24h-time-average — what we actually paid per kWh)\n"
             "  * mtd: {n_days, avg_per_day_gbp, mean_import_rate_p_per_kwh} — "
             "month-to-date context (EXCLUDES today)\n"

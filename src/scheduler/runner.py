@@ -1054,12 +1054,14 @@ def bulletproof_lp_health_monitor_job() -> None:
                 (since,),
             ).fetchone()[0]
             yday = (now.date() - timedelta(days=1)).isoformat()
+            _wd_code = (config.OCTOPUS_TARIFF_CODE or "").strip()
             neg_slots = {
                 str(r[0])[11:16]
                 for r in conn.execute(
                     "SELECT valid_from FROM agile_rates "
-                    "WHERE substr(valid_from,1,10)=? AND value_inc_vat < 0",
-                    (yday,),
+                    "WHERE substr(valid_from,1,10)=? AND value_inc_vat < 0 "
+                    "AND (? = '' OR tariff_code = ?)",
+                    (yday, _wd_code, _wd_code),
                 ).fetchall()
             }
             # PR B (pessimistic charge floor) observability: worst per-solve

@@ -507,15 +507,16 @@ def compute_peak_ratio(day: date) -> float | None:
 
 
 def _agile_start_date() -> date | None:
-    """Parse ``config.AGILE_TARIFF_START_DATE``; ``None`` when unset/invalid."""
-    raw = (config.AGILE_TARIFF_START_DATE or "").strip()
+    """Parse ``config.SMART_TARIFF_START_DATE`` (alias ``AGILE_TARIFF_START_DATE``);
+    ``None`` when unset/invalid."""
+    raw = (getattr(config, "SMART_TARIFF_START_DATE", None) or config.AGILE_TARIFF_START_DATE or "").strip()
     if not raw:
         return None
     try:
         return date.fromisoformat(raw)
     except ValueError:
         logger.warning(
-            "AGILE_TARIFF_START_DATE=%r is not a valid ISO date — ignoring clamp", raw,
+            "SMART_TARIFF_START_DATE (alias AGILE_TARIFF_START_DATE)=%r is not a valid ISO date — ignoring clamp", raw,
         )
         return None
 

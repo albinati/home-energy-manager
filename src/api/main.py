@@ -4922,7 +4922,11 @@ async def agile_today():
                 return float(r["value_inc_vat"])
         return None
 
+    from ..energy.tariff_structure import display_name as _tariff_display_name
+    from ..energy.tariff_structure import is_tou_family as _is_tou_family
     return {
+        "tariff_display_name": _tariff_display_name(config.OCTOPUS_TARIFF_CODE),
+        "tariff_structure": "banded" if _is_tou_family(config.OCTOPUS_TARIFF_CODE) else "dynamic",
         "tariff_import_code": tariff or None,
         "tariff_export_code": export_tariff or None,
         "import_slots": [
@@ -4980,7 +4984,7 @@ async def agile_day(date: str):
     from .. import db as _db
     tariff = (config.OCTOPUS_TARIFF_CODE or "").strip()
     if not tariff:
-        return {"date": date, "tariff_code": None, "slots": []}
+        return {"date": date, "tariff_code": None, "tariff_display_name": None, "slots": []}
     tz = config.BULLETPROOF_TIMEZONE or "Europe/London"
     rows = _db.get_agile_rates_slots_for_local_day(tariff, d, tz_name=tz)
     slots = [
@@ -4995,6 +4999,7 @@ async def agile_day(date: str):
     return {
         "date": date,
         "tariff_code": tariff,
+        "tariff_display_name": __import__("src.energy.tariff_structure", fromlist=["display_name"]).display_name(tariff),
         "tz": tz,
         "slots": slots,
     }

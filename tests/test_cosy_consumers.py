@@ -315,3 +315,61 @@ def test_plan_window_fills_tail_from_band_profile_across_dst(monkeypatch):
     assert by_start["2026-10-26T16:00:00Z"] == pytest.approx(COSY_PEAK, abs=0.01)    # 16:00 GMT local
     assert by_start["2026-10-26T08:00:00Z"] == pytest.approx(COSY_DAY, abs=0.01)
     assert w.horizon_end == now + timedelta(hours=48, minutes=30)
+
+
+# ── #810: tariff-neutral naming / filters ────────────────────────────────────
+
+
+def test_smart_tariff_start_date_alias(monkeypatch):
+    from src.analytics.pnl import _agile_start_date
+
+    monkeypatch.setattr(app_config, "SMART_TARIFF_START_DATE", "2026-04-17", raising=False)
+    monkeypatch.setattr(app_config, "AGILE_TARIFF_START_DATE", "", raising=False)
+    assert _agile_start_date() == date(2026, 4, 17)
+    monkeypatch.setattr(app_config, "SMART_TARIFF_START_DATE", "", raising=False)
+    monkeypatch.setattr(app_config, "AGILE_TARIFF_START_DATE", "2026-04-20", raising=False)
+    assert _agile_start_date() == date(2026, 4, 20)
+
+
+def test_fair_compare_current_code_from_cosy_tariff(monkeypatch):
+    from src.analytics.fair_compare import _current_product_code
+
+    monkeypatch.setattr(app_config, "OCTOPUS_TARIFF_CODE", "E-1R-COSY-22-12-08-H")
+    assert _current_product_code() == "COSY-22-12-08"
+
+
+def test_agile_today_exposes_tariff_name_and_structure(monkeypatch):
+    import asyncio
+
+    from src.api.main import agile_today
+
+    monkeypatch.setattr(app_config, "OCTOPUS_TARIFF_CODE", "E-1R-COSY-22-12-08-H")
+    out = asyncio.run(agile_today())
+    assert out["tariff_display_name"] == "Cosy" and out["tariff_structure"] == "banded"
+
+
+def test_strategy_summary_and_brief_use_tariff_neutral_wording():
+    import inspect
+
+    from src.analytics import daily_brief
+    from src.scheduler import optimizer
+
+    assert "mean Agile" not in inspect.getsource(optimizer)
+    assert "mean Agile" not in inspect.getsource(daily_brief._day_cost_forecast_line) if hasattr(daily_brief, "_day_cost_forecast_line") else True
+    assert "mean import" in inspect.getsource(optimizer)
+
+
+def test_export_rates_in_range_filters_by_tariff_code(monkeypatch):
+    code_a, code_b = "E-1R-AGILE-OUTGOING-19-05-13-H", "E-1R-OUTGOING-FIX-12M-H"
+    rows = []
+    base = datetime(2026, 10, 14, 0, 0, tzinfo=UTC)
+    for i in range(4):
+        vf = (base + timedelta(minutes=30 * i)).isoformat().replace("+00:00", "Z")
+        vt = (base + timedelta(minutes=30 * (i + 1))).isoformat().replace("+00:00", "Z")
+        rows.append({"valid_from": vf, "valid_to": vt, "value_inc_vat": 10.0 + i})
+    db.save_agile_export_rates(rows, code_a)
+    db.save_agile_export_rates([dict(r, value_inc_vat=99.0) for r in rows], code_b)
+    monkeypatch.setattr(app_config, "OCTOPUS_EXPORT_TARIFF_CODE", code_a)
+    got = db.get_agile_export_rates_in_range(rows[0]["valid_from"], rows[-1]["valid_to"])
+    assert len(got) == 4 and all(r["tariff_code"] == code_a for r in got)
+    assert len(db.get_agile_export_rates_in_range(rows[0]["valid_from"], rows[-1]["valid_to"], tariff_code="")) == 8

@@ -66,12 +66,13 @@ export function Hero({ metrics, cockpit, period, periodState, periodLoading, tod
   const billA = useAnimatedNumber(bill);
   const max = Math.max(bill ?? 0, fixedShadow ?? 0) * 1.12 || 1;
 
+  const tariffName = agile?.tariff_display_name ?? "Agile";
   return (
     <section class="hero" aria-label="Selected period energy outcome">
       <div class="hero-grid">
         {/* ── LEFT: the money story ─────────────────────────────────── */}
         <div class="hero-left">
-          <div class="eyebrow"><Icon name="cost" size={13} />{label} on Agile · net bill{isNow ? " so far" : ""}</div>
+          <div class="eyebrow"><Icon name="cost" size={13} />{label} on {tariffName} · net bill{isNow ? " so far" : ""}</div>
           <div class="hero-number">
             {billA == null ? (periodLoading ? <span class="skel-text" style={{ width: "7rem", height: "0.8em" }} /> : "—") : gbp(billA)}
           </div>
@@ -107,7 +108,7 @@ export function Hero({ metrics, cockpit, period, periodState, periodLoading, tod
               </div>
               <div class="vf-bars">
                 <div class="vf-row">
-                  <span class="vf-k">Agile</span>
+                  <span class="vf-k">{tariffName}</span>
                   <div class="vf-track"><div class="vf-fill" style={{ width: `${Math.min(100, bill / max * 100)}%`, background: win ? "var(--ok)" : "var(--bad)" }} /></div>
                   <span class="vf-v">{gbp(bill)}</span>
                 </div>
@@ -126,7 +127,7 @@ export function Hero({ metrics, cockpit, period, periodState, periodLoading, tod
 
           {/* today-only quiet notes (kept from earlier asks) */}
           {breakevenP != null && (
-            <div class="hero-note" title={`To beat ${fixedLabel}, keep the average import price ≤ ${breakevenP.toFixed(1)}p/kWh — Agile's higher standing must be won back on the unit rate.`}>
+            <div class="hero-note" title={`To beat ${fixedLabel}, keep the average import price ≤ ${breakevenP.toFixed(1)}p/kWh — ${tariffName}'s higher standing must be won back on the unit rate.`}>
               <span class="hero-note-pair">Target: import avg ≤ <strong>{breakevenP.toFixed(1)}p</strong></span>
               {realisedAvgP != null && (
                 <span class="hero-note-pair"> · now{" "}

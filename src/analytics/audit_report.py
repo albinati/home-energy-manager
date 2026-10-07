@@ -327,10 +327,12 @@ def _build_plan_vs_execution_section(
     plan = _operative_plan_for_window(db, window_start, plan_end)
     real = _realised_for_window(db, window_start, plan_end)
 
+    from ..config import config as _cfg
+    _code = (_cfg.OCTOPUS_TARIFF_CODE or "").strip()
     rate_rows = db.execute(
         "SELECT valid_from, value_inc_vat FROM agile_rates "
-        "WHERE valid_from >= ? AND valid_from < ?",
-        (window_start.isoformat(), plan_end.isoformat()),
+        "WHERE valid_from >= ? AND valid_from < ? AND (? = '' OR tariff_code = ?)",
+        (window_start.isoformat(), plan_end.isoformat(), _code, _code),
     ).fetchall()
     import_p_by_slot = {_parse_utc(r["valid_from"]): r["value_inc_vat"] for r in rate_rows}
     exp_rate_rows = db.execute(
