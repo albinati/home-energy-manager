@@ -10,7 +10,6 @@ heating the offsets caused (k 0.033 → 0.067). These tests pin:
 """
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
